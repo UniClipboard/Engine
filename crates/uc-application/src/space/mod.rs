@@ -55,7 +55,8 @@ pub use membership::{
 pub use membership::{MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult};
 pub use membership::{
     MembershipConflictBranchView, MembershipConflictStatus, MembershipConflictView,
-    MembershipConflictsView, QueryMembershipConflictsError, ResolveMembershipConflictError,
+    MembershipConflictsView, MembershipDiagnosticsView, QueryMembershipConflictsError,
+    QueryMembershipDiagnosticsError, ResolveMembershipConflictError,
     ResolveMembershipConflictInput, ResolveMembershipConflictResult,
 };
 

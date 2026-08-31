@@ -234,6 +234,12 @@ enum TopologyAction<'a> {
         active_members: usize,
         pending_choices: usize,
     },
+    AssertDiagnostics {
+        node: &'a str,
+        effective_members: u32,
+        pending_conflicts: u32,
+        pending_effects: u32,
+    },
 }
 
 struct MembershipTopology {
@@ -266,6 +272,20 @@ impl MembershipTopology {
                 } => {
                     self.assert_snapshot(node, active_members, pending_choices)
                         .await
+                }
+                TopologyAction::AssertDiagnostics {
+                    node,
+                    effective_members,
+                    pending_conflicts,
+                    pending_effects,
+                } => {
+                    self.assert_diagnostics(
+                        node,
+                        effective_members,
+                        pending_conflicts,
+                        pending_effects,
+                    )
+                    .await
                 }
             }
         }
@@ -331,6 +351,31 @@ impl MembershipTopology {
         }
     }
 
+    async fn assert_diagnostics(
+        &self,
+        node: &str,
+        expected_effective_members: u32,
+        expected_pending_conflicts: u32,
+        expected_pending_effects: u32,
+    ) {
+        let result = self
+            .engine(node)
+            .execute(Operation::QueryMembershipDiagnostics)
+            .await
+            .unwrap_or_else(|error| panic!("node {node} diagnostics failed: {error}"));
+        let OperationResult::MembershipDiagnostics(summary) = result else {
+            panic!("node {node} returned an unexpected diagnostics result");
+        };
+
+        assert_eq!(summary.branch_id.len(), 64);
+        assert_eq!(summary.head_event_id.len(), 64);
+        assert!(summary.group_epoch > 0);
+        assert_eq!(summary.effective_member_count, expected_effective_members);
+        assert_eq!(summary.pending_conflict_count, expected_pending_conflicts);
+        assert_eq!(summary.pending_effect_count, expected_pending_effects);
+        assert!(summary.transition_phases.is_empty());
+    }
+
     fn engine(&self, node: &str) -> &Engine {
         self.engines
             .get(node)
@@ -367,6 +412,12 @@ async fn topology_script_builds_a_two_node_space_through_public_operations() {
                 node: "B",
                 active_members: 2,
                 pending_choices: 0,
+            },
+            TopologyAction::AssertDiagnostics {
+                node: "B",
+                effective_members: 2,
+                pending_conflicts: 0,
+                pending_effects: 0,
             },
         ])
         .await;

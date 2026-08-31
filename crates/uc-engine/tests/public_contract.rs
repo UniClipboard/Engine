@@ -1383,6 +1383,15 @@ fn device_group_operations_expose_one_query_and_one_choice() {
     assert_eq!(decide.kind().to_string(), "choose_device_group");
 }
 
+#[cfg(feature = "dev-tools")]
+#[test]
+fn membership_diagnostics_is_available_only_to_dev_tools() {
+    let query = Operation::QueryMembershipDiagnostics;
+
+    assert_eq!(query.kind(), OperationKind::QueryMembershipDiagnostics);
+    assert_eq!(query.kind().to_string(), "query_membership_diagnostics");
+}
+
 #[test]
 fn device_trust_debug_output_redacts_device_facts_and_change_ids() {
     let mut snapshot = DeviceTrustSnapshotSummary::empty_unavailable("private-local-id".into());

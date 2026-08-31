@@ -446,6 +446,15 @@ impl AppFacade {
         })
     }
 
+    pub async fn query_membership_diagnostics(
+        &self,
+    ) -> Result<
+        crate::facade::MembershipDiagnosticsView,
+        crate::facade::QueryMembershipDiagnosticsError,
+    > {
+        self.space.query_membership_diagnostics().await
+    }
+
     /// 校验查询版本后，把统一选择路由到内部对应流程。
     pub async fn choose_device_group(
         &self,

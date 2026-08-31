@@ -183,3 +183,11 @@
 - 红测先引用不存在的 `MembershipTopology` / `TopologyAction`，编译失败固定了声明式驱动器接缝。
 - 绿色实现支持 `Start`、`Create`、`Join` 和 `AssertSnapshot`，所有推进和断言只调用公开 `Engine::execute(Operation)`。
 - 两节点脚本真实完成 Space 创建与准入，并从统一 `QueryDeviceGroupChoices` 快照观察两个 Active member、零待定选择。
+
+## 2026-08-31 · Phase 6 dev-tools membership diagnostics
+
+- 先以 Engine contract 红测固定仅 `dev-tools` 可见的 `QueryMembershipDiagnostics` operation 和稳定名称。
+- Application 单一查询返回 branch/head、group epoch、有效成员数、待处理 conflict/effect 数及 transition 阶段；ledger/security 失败保持稳定分类和 source chain。
+- Engine 仅执行脱敏字符串与计数映射，不记录诊断标识，也不把入口接入移动绑定。
+- 声明式双节点拓扑测试通过公开 operation 断言 64 字符 branch/head、非零 epoch、两个有效成员及零待处理恢复状态。
+- 定向 Application 错误测试、Engine contract 测试和真实双节点拓扑测试均通过。

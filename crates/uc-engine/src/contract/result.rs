@@ -500,6 +500,8 @@ pub enum OperationResult {
     DeviceTrust(DeviceTrustSnapshotSummary),
     DeviceGroupChoices(DeviceGroupChoicesSummary),
     DeviceGroupChosen(DeviceGroupChoiceResultSummary),
+    #[cfg(feature = "dev-tools")]
+    MembershipDiagnostics(MembershipDiagnosticsSummary),
     SpaceProtection(SpaceProtectionSummary),
     SearchPage(SearchPageSummary),
     SearchTags(Vec<SearchTagSummary>),
@@ -576,6 +578,35 @@ pub enum DeviceGroupChoiceOutcomeSummary {
 pub struct DeviceGroupChoiceResultSummary {
     pub outcome: DeviceGroupChoiceOutcomeSummary,
     pub current_revision: Option<u64>,
+}
+
+#[cfg(feature = "dev-tools")]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipDiagnosticsSummary {
+    pub revision: u64,
+    pub branch_id: String,
+    pub head_event_id: String,
+    pub group_epoch: u64,
+    pub effective_member_count: u32,
+    pub pending_conflict_count: u32,
+    pub pending_effect_count: u32,
+    pub transition_phases: Vec<String>,
+}
+
+#[cfg(feature = "dev-tools")]
+impl fmt::Debug for MembershipDiagnosticsSummary {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MembershipDiagnosticsSummary")
+            .field("identifiers", &"[REDACTED]")
+            .field("revision", &self.revision)
+            .field("group_epoch", &self.group_epoch)
+            .field("effective_member_count", &self.effective_member_count)
+            .field("pending_conflict_count", &self.pending_conflict_count)
+            .field("pending_effect_count", &self.pending_effect_count)
+            .field("transition_phases", &self.transition_phases)
+            .finish()
+    }
 }
 
 impl fmt::Debug for OperationResult {
@@ -733,6 +764,10 @@ impl fmt::Debug for OperationResult {
             Self::DeviceGroupChosen(summary) => debug
                 .field("kind", &"device_group_chosen")
                 .field("outcome", &summary.outcome),
+            #[cfg(feature = "dev-tools")]
+            Self::MembershipDiagnostics(summary) => debug
+                .field("kind", &"membership_diagnostics")
+                .field("summary", summary),
             Self::SpaceProtection(summary) => debug
                 .field("kind", &"space_protection")
                 .field("summary", summary),

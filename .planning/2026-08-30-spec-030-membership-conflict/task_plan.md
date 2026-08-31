@@ -28,7 +28,7 @@ Phase 6：Desktop F0-F13、20 个固定 chaos seed 与 Spec 029 回归（Phase 5
 
 ## Next Step
 
-先为 `dev-tools` 增加只读成员诊断 Operation（branch/head 等价、group epoch、pending conflict/effect），再扩展受控 Partition 能力并写 F0 红测。
+扩展只在测试启用的受控 Partition/Heal 能力，并先写 F0 红测，固定两侧分区期间形成 sibling branch、恢复联网后暴露单一设备组选择的行为。
 
 ## Constraints
 

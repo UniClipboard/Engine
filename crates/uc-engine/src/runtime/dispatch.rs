@@ -61,6 +61,8 @@ use crate::operations::space::device_group_choice::{
 use crate::operations::space::factory_reset::execute_factory_reset_space;
 use crate::operations::space::invitation::execute_issue_invitation;
 use crate::operations::space::join_space::execute_join_space;
+#[cfg(feature = "dev-tools")]
+use crate::operations::space::membership_diagnostics::execute_query_membership_diagnostics;
 use crate::operations::space::session_recovery::execute_recover_session;
 use crate::operations::space::setup_state::execute_query_setup_state;
 use crate::operations::space::unlock::execute_unlock_space;
@@ -83,6 +85,11 @@ impl EngineRuntime for ProductionRuntime {
             }
             Operation::ChooseDeviceGroup(input) => {
                 return execute_choose_device_group(self.current_facade().await?.as_ref(), input)
+                    .await;
+            }
+            #[cfg(feature = "dev-tools")]
+            Operation::QueryMembershipDiagnostics => {
+                return execute_query_membership_diagnostics(self.current_facade().await?.as_ref())
                     .await;
             }
             Operation::CancelJoinSpace(input) => {
@@ -328,6 +335,8 @@ impl EngineRuntime for ProductionRuntime {
                 | Operation::CancelJoinSpace(_)
                 | Operation::FactoryResetSpace => Err(super::operation_unavailable_error()),
                 Operation::ChooseDeviceGroup(_) => Err(super::operation_unavailable_error()),
+                #[cfg(feature = "dev-tools")]
+                Operation::QueryMembershipDiagnostics => Err(super::operation_unavailable_error()),
                 Operation::QueryMemberSyncPreferences(input) => {
                     execute_query_member_sync_preferences(
                         self.current_facade().await?.as_ref(),

@@ -74,6 +74,8 @@ pub enum OperationKind {
     RemoveMember,
     QueryDeviceGroupChoices,
     ChooseDeviceGroup,
+    #[cfg(feature = "dev-tools")]
+    QueryMembershipDiagnostics,
     QuerySpaceProtection,
     SearchEntries,
     QuerySearchTags,
@@ -167,6 +169,8 @@ impl fmt::Display for OperationKind {
             Self::RemoveMember => "remove_member",
             Self::QueryDeviceGroupChoices => "query_device_group_choices",
             Self::ChooseDeviceGroup => "choose_device_group",
+            #[cfg(feature = "dev-tools")]
+            Self::QueryMembershipDiagnostics => "query_membership_diagnostics",
             Self::QuerySpaceProtection => "query_space_protection",
             Self::SearchEntries => "search_entries",
             Self::QuerySearchTags => "query_search_tags",
@@ -302,6 +306,8 @@ pub enum Operation {
     RemoveMember(RemoveMemberInput),
     QueryDeviceGroupChoices,
     ChooseDeviceGroup(ChooseDeviceGroupInput),
+    #[cfg(feature = "dev-tools")]
+    QueryMembershipDiagnostics,
     QuerySpaceProtection,
     SearchEntries(SearchEntriesInput),
     QuerySearchTags,
@@ -395,6 +401,8 @@ impl Operation {
             Self::RemoveMember(_) => OperationKind::RemoveMember,
             Self::QueryDeviceGroupChoices => OperationKind::QueryDeviceGroupChoices,
             Self::ChooseDeviceGroup(_) => OperationKind::ChooseDeviceGroup,
+            #[cfg(feature = "dev-tools")]
+            Self::QueryMembershipDiagnostics => OperationKind::QueryMembershipDiagnostics,
             Self::QuerySpaceProtection => OperationKind::QuerySpaceProtection,
             Self::SearchEntries(_) => OperationKind::SearchEntries,
             Self::QuerySearchTags => OperationKind::QuerySearchTags,

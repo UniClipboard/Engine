@@ -528,6 +528,26 @@ impl SpaceFacade {
         query.query().await
     }
 
+    pub async fn query_membership_diagnostics(
+        &self,
+    ) -> Result<
+        crate::space::membership::MembershipDiagnosticsView,
+        crate::space::membership::QueryMembershipDiagnosticsError,
+    > {
+        let query = self
+            .application
+            .lock()
+            .await
+            .as_ref()
+            .map(SpaceApplication::query_membership_diagnostics)
+            .ok_or_else(|| {
+                crate::space::membership::QueryMembershipDiagnosticsError::InvalidState {
+                    source: anyhow::anyhow!("space application is closed"),
+                }
+            })?;
+        query.execute().await
+    }
+
     pub async fn cancel_space_join(
         &self,
         join_id: [u8; 16],

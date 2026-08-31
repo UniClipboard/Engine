@@ -5,6 +5,7 @@ mod ledger;
 mod maintenance;
 mod query_admission;
 mod query_device_trust;
+mod query_diagnostics;
 mod re_pairing;
 mod recover_conflict;
 mod remove_space_member;
@@ -38,6 +39,8 @@ pub use query_device_trust::{
     DeviceTrustStatus, DeviceTrustSyncState, LoadCurrentJoinStatusPort,
     LoadDeviceTrustObservationsPort, PendingDeviceTrustChange, QueryDeviceTrustError,
 };
+pub(super) use query_diagnostics::QueryMembershipDiagnosticsUseCase;
+pub use query_diagnostics::{MembershipDiagnosticsView, QueryMembershipDiagnosticsError};
 pub use re_pairing::{RePairingStateError, RePairingStateStorePort};
 pub use recover_conflict::{
     AdvanceMembershipBranchTransitionError, AdvanceMembershipBranchTransitionInput,

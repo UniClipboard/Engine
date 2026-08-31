@@ -30,6 +30,7 @@ use crate::space::membership::MembershipHistoryAntiEntropy;
 use crate::space::membership::PreparedSpaceMembershipMaintenanceRuntime;
 use crate::space::membership::QueryMembershipAdmissionUseCase;
 use crate::space::membership::QueryMembershipConflictStatusPort;
+use crate::space::membership::QueryMembershipDiagnosticsUseCase;
 use crate::space::membership::RecoverMembershipConflictUseCase;
 use crate::space::membership::RemoveSpaceMemberUseCase;
 use crate::space::membership::ResolveMembershipConflictUseCase;
@@ -141,6 +142,7 @@ pub(crate) struct SpaceApplication {
     remove_space_member: Arc<RemoveSpaceMemberUseCase>,
     decide_device_trust_change: Arc<DecideDeviceTrustChangeUseCase>,
     resolve_membership_conflict: Arc<ResolveMembershipConflictUseCase>,
+    query_membership_diagnostics: Arc<QueryMembershipDiagnosticsUseCase>,
     issue_membership_branch_recovery: Arc<IssueMembershipBranchRecoveryUseCase>,
     space_admission: Arc<SpaceAdmissionProtocol>,
     membership_history_endpoint: Arc<MembershipHistoryAntiEntropy>,
@@ -158,6 +160,7 @@ impl SpaceApplication {
     ) -> Self {
         let historical_membership_signatures = Arc::clone(&deps.historical_membership_signatures);
         let branch_recovery_signatures = Arc::clone(&deps.current_member_signatures);
+        let diagnostics_signatures = Arc::clone(&deps.current_member_signatures);
         let ledger = Arc::new(MembershipLedger::new(
             deps.load_membership_ledger,
             deps.commit_membership_ledger,
@@ -293,6 +296,10 @@ impl SpaceApplication {
             Arc::clone(&ledger),
             Arc::clone(&query_device_trust) as Arc<dyn QueryMembershipConflictStatusPort>,
         ));
+        let query_membership_diagnostics = Arc::new(QueryMembershipDiagnosticsUseCase::new(
+            Arc::clone(&ledger),
+            diagnostics_signatures,
+        ));
         Self {
             ledger,
             current_scope,
@@ -301,6 +308,7 @@ impl SpaceApplication {
             remove_space_member,
             decide_device_trust_change,
             resolve_membership_conflict,
+            query_membership_diagnostics,
             issue_membership_branch_recovery,
             space_admission,
             membership_history_endpoint,
@@ -353,6 +361,10 @@ impl SpaceApplication {
 
     pub(crate) fn resolve_membership_conflict(&self) -> Arc<ResolveMembershipConflictUseCase> {
         Arc::clone(&self.resolve_membership_conflict)
+    }
+
+    pub(crate) fn query_membership_diagnostics(&self) -> Arc<QueryMembershipDiagnosticsUseCase> {
+        Arc::clone(&self.query_membership_diagnostics)
     }
 
     pub(crate) fn membership_branch_recovery_endpoint(
