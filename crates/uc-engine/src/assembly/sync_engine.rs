@@ -149,28 +149,6 @@ impl ContentExchangeGatePort for CurrentMemberContentGate {
     }
 }
 
-/// recipient MLS preparation 将在恢复安全材料 adapter 接入前保持显式不可用。
-struct DeferredMembershipBranchRecoveryRecipient;
-
-#[async_trait::async_trait]
-impl uc_application::deps::PrepareMembershipBranchRecoveryRecipientPort
-    for DeferredMembershipBranchRecoveryRecipient
-{
-    async fn prepare_membership_branch_recovery_recipient(
-        &self,
-        _group_info: Vec<u8>,
-    ) -> Result<
-        uc_application::deps::PreparedMembershipBranchRecoveryRecipient,
-        uc_application::deps::PrepareMembershipBranchRecoveryRecipientError,
-    > {
-        Err(
-            uc_application::deps::PrepareMembershipBranchRecoveryRecipientError::Unavailable {
-                source: anyhow::anyhow!("membership branch recovery recipient is unavailable"),
-            },
-        )
-    }
-}
-
 struct DeferredMembershipBranchRecoveryMaterial;
 
 #[async_trait::async_trait]
@@ -978,8 +956,11 @@ pub async fn build_sync_engine_assembly(
                 as Arc<dyn uc_application::deps::LoadCurrentJoinStatusPort>,
             membership_history_transport: membership_history_transport.clone(),
             membership_branch_recovery_channel,
-            membership_branch_recovery_recipient: Arc::new(
-                DeferredMembershipBranchRecoveryRecipient,
+            membership_branch_recovery_recipient: Arc::clone(
+                &deps
+                    .security
+                    .space_access_ports
+                    .prepare_membership_branch_recovery_recipient,
             ),
             membership_branch_transition: Arc::new(
                 DefaultMembershipBranchTransitionPreparation::new(Arc::clone(

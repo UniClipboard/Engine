@@ -28,7 +28,9 @@ use uc_application::deps::{
     ActivateCompletionHelperAdmissionSecurityRequest, ActivateSponsorAdmissionSecurityPort,
     ActivateSponsorAdmissionSecurityRequest, AdmissionSecurityTransitionError,
     AdmissionSecurityTransitionInput, CurrentMemberSignatureError, CurrentMemberSignaturePort,
-    PrepareSponsorAdmissionSecurityPort, PreparedMemberSecurityDelivery, ProfileKeyAccessProbe,
+    PrepareMembershipBranchRecoveryRecipientError, PrepareMembershipBranchRecoveryRecipientPort,
+    PrepareSponsorAdmissionSecurityPort, PreparedMemberSecurityDelivery,
+    PreparedMembershipBranchRecoveryRecipient, ProfileKeyAccessProbe,
     ProfileKeyAccessProbePortError, SponsorAdmissionSecurityRequest,
     SponsorPreparedAdmissionSecurity,
 };
@@ -62,6 +64,14 @@ use super::scope_identifier::scope_identifier;
 use super::session::InMemorySession;
 
 const MAX_STALLED_REVOCATION_ITERATIONS: usize = 3;
+
+#[derive(Serialize, Deserialize)]
+struct StagedMembershipBranchRecoveryRecipientV1 {
+    version: u8,
+    mls_state: Vec<u8>,
+    wrapping_key: Vec<u8>,
+    epoch: u64,
+}
 
 /// `SpaceAccessStore` 默认实现(同时提供全部窄意图 port)。
 pub struct DefaultSpaceAccessAdapter {
@@ -3031,6 +3041,67 @@ fn admission_bundle_digest(
 fn append_digest_field(hasher: &mut Sha256, value: &[u8]) {
     hasher.update((value.len() as u64).to_be_bytes());
     hasher.update(value);
+}
+
+#[async_trait]
+impl PrepareMembershipBranchRecoveryRecipientPort for DefaultSpaceAccessAdapter {
+    async fn prepare_membership_branch_recovery_recipient(
+        &self,
+        group_info: Vec<u8>,
+    ) -> Result<
+        PreparedMembershipBranchRecoveryRecipient,
+        PrepareMembershipBranchRecoveryRecipientError,
+    > {
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|source| recovery_recipient_unavailable(anyhow::Error::new(source)))?;
+        let repository = self.key_epoch_repository.as_ref().ok_or_else(|| {
+            recovery_recipient_unavailable(anyhow::anyhow!("space security repository unavailable"))
+        })?;
+        let material = repository
+            .load_space_material(&space_id)
+            .await
+            .map_err(|source| recovery_recipient_unavailable(anyhow::Error::new(source)))?
+            .ok_or_else(|| {
+                recovery_recipient_unavailable(anyhow::anyhow!("space security state unavailable"))
+            })?;
+        if material.state().mode() != SpaceSecurityMode::Ready || material.group_state().is_empty()
+        {
+            return Err(recovery_recipient_invalid(anyhow::anyhow!(
+                "space security state is invalid"
+            )));
+        }
+        let prepared = MlsGroupEngine::prepare_external_recovery(
+            &MlsClientState::from_bytes(material.group_state().to_vec()),
+            &group_info,
+        )
+        .map_err(|source| recovery_recipient_invalid(anyhow::Error::new(source)))?;
+        let staged = StagedMembershipBranchRecoveryRecipientV1 {
+            version: 1,
+            mls_state: prepared.recipient_state.into_bytes(),
+            wrapping_key: prepared.wrapping_key.as_bytes().to_vec(),
+            epoch: prepared.epoch,
+        };
+        let staged_mls_state = postcard::to_stdvec(&staged)
+            .map_err(|source| recovery_recipient_invalid(anyhow::Error::new(source)))?;
+        Ok(PreparedMembershipBranchRecoveryRecipient {
+            external_commit: prepared.commit,
+            staged_mls_state,
+        })
+    }
+}
+
+fn recovery_recipient_unavailable(
+    source: anyhow::Error,
+) -> PrepareMembershipBranchRecoveryRecipientError {
+    PrepareMembershipBranchRecoveryRecipientError::Unavailable { source }
+}
+
+fn recovery_recipient_invalid(
+    source: anyhow::Error,
+) -> PrepareMembershipBranchRecoveryRecipientError {
+    PrepareMembershipBranchRecoveryRecipientError::Invalid { source }
 }
 
 impl DefaultSpaceAccessAdapter {

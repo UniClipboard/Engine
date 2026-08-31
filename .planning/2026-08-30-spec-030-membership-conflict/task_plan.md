@@ -24,11 +24,11 @@
 
 ## Current Slice
 
-Phase 4：两阶段 client coordinator 已接管 peer 选择、加密 staged checkpoint 和恢复包提交；下一切片接入真实 recipient/target MLS 与内容密钥 adapter。
+Phase 4：真实 recipient MLS adapter 已接入；下一切片实现 target 侧无副作用准备、幂等提交与内容密钥密封事务。
 
 ## Next Step
 
-实现真实 recovery material adapter：从当前 generation 安全状态准备 recipient external commit，并在 target 应用 commit 后密封内容密钥目录。
+重构 target recovery material port：先生成无副作用 staged 安全材料与恢复包，再由 issuer 持久化 TargetPrepared、提交安全状态并标记 TargetCommitted。
 
 ## Constraints
 

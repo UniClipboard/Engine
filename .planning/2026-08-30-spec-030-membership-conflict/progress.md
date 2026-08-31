@@ -109,3 +109,10 @@
 - recovery package 验证后先进入加密 session，再由最终 CAS 消费 nonce、创建 Prepared generation transition 并推进 conflict。
 - 删除旧的一步式 fetch port；Engine 组装真实 Iroh channel，recipient MLS preparation 在真实 adapter 接入前显式 Deferred，不做 LAN 回退。
 - nonce 已被其他 conflict 消费时不覆盖 nonce、不创建 transition；此前已完成的必要 staged checkpoints 保留供诊断/安全恢复，因此契约不再错误宣称零次 ledger commit。
+
+## 2026-08-31 · Real recipient MLS recovery adapter
+
+- `DefaultSpaceAccessAdapter` 从当前 generation 的安全仓库加载 Ready MLS state，并调用既有 OpenMLS external recovery primitive。
+- staged payload 同时保存 recipient MLS snapshot、共享 exporter wrapping key 和 epoch；该 payload 只返回 Application，并在 external commit 发送前进入 MasterKey AEAD ledger。
+- Engine 的 recipient deferred adapter 已删除，组装根复用同一个 space access adapter 的窄 recovery port。
+- 复核 target 侧发现直接 apply commit 后再构造/保存响应存在崩溃窗口，因此没有接入不安全实现；下一切片必须使用现有 TargetPrepared/TargetCommitted session 完成 prepare/commit 分离。

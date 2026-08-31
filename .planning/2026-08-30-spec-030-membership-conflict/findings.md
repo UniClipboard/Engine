@@ -63,3 +63,9 @@
 - recipient external commit 属于不可安全重建的密码学结果，必须先把它和 staged MLS state 加密提交，再允许网络发送。
 - 最终恢复包可以在单独 checkpoint 验证并保存；之后 generation transition preparation 即使失败或重启，也不必再次触发目标端 external commit。
 - nonce 冲突只能在取得最终包后确定，因此此时 staged checkpoint 已合法存在；安全保证应表述为不覆盖 nonce、不创建 transition，而不是零 ledger commit。
+
+# 2026-08-31 · Target apply-and-reply 崩溃窗口
+
+- target 若在 material port 内直接持久化 external commit，然后由 issuer 才签包，会在“MLS 已前进、幂等包未保存”之间留下崩溃窗口；重试同一 commit 将无法可靠恢复。
+- 正确顺序必须是：对当前 material 无副作用计算 staged target state 与 wrapping key，构造并签署 package，原子保存 TargetPrepared，提交 staged security state，标记 TargetCommitted，最后返回缓存 package。
+- 因此 target material port 需要拆成 prepare/commit 两个窄动作，issuer 是该事务的唯一负责人；不能把整个事务藏进 Infra adapter。
