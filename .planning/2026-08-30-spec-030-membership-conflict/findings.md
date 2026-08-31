@@ -109,3 +109,9 @@
 - 根因是 restricted-event handler 直接调用 `verify_and_receive_event`：它把 `known_head` 推进到远端 RemoveDevice 并立即投影两成员；普通 history merge 则会在同一场景恢复父 head 以等待本机决定。两个接收入口没有共用“面向本机成员接收远端事件”的 Core 规则。
 - F3 修复进一步发现分页 suffix 是第三条远端事件入口；它既要验证发送方声明的 target position，又不能强迫本机应用待决定移除。Core 因此用 sender projection 验证完整传输，再用唯一的 local-member 接收规则更新本机 projection。
 - Engine 的选择操作返回 `retryable unavailable` 时，Desktop 驱动必须在统一 deadline 内重试；短暂安全会话不可用不是选择失败，非重试错误与超时仍立即失败。
+
+## 2026-08-31 · F4 single-bridge topology
+
+- F4 使用同 lineage 的六节点共同基线，再把网络分成两个三节点区域；A 与 D 各自在自己的合法链依次移除对侧三节点，形成两个各三成员的 sibling histories。区域内其他副本不需要为 bridge 不变量额外完成用户决定。
+- 单 bridge 只开放 A-D 一条跨区连接，其余跨区连接继续由认证 endpoint gate 阻断。验收只观察公开 branch/member/choice 与正文结果，不读内部 ledger。
+- A 与 D 必须在两条分支中都保持 Active，才能构成真正可认证的 bridge；若双方互相移除，成员认证会在业务协议前关闭连接。桥接后两端应各记录同一 sibling conflict，但不得应用或联合远端成员集合。

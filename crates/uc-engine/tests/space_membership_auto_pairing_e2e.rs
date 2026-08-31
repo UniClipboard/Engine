@@ -255,6 +255,12 @@ enum TopologyAction<'a> {
         left: &'a [&'a str],
         right: &'a [&'a str],
     },
+    Bridge {
+        left: &'a str,
+        right: &'a str,
+        left_group: &'a [&'a str],
+        right_group: &'a [&'a str],
+    },
     Heal {
         nodes: &'a [&'a str],
     },
@@ -268,6 +274,120 @@ enum TopologyAction<'a> {
 enum PendingChangeChoice {
     Apply,
     Keep,
+}
+
+// F4：两个三节点 sibling 分支只开放一条 bridge 后，不得被拼成六节点联合历史。
+#[tokio::test(flavor = "multi_thread", worker_threads = 12)]
+async fn f4_single_bridge_cannot_splice_sibling_histories_into_a_union() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let mut topology = MembershipTopology::new(rendezvous.uri());
+    topology
+        .run(&[
+            TopologyAction::Start { node: "A" },
+            TopologyAction::Start { node: "B" },
+            TopologyAction::Start { node: "C" },
+            TopologyAction::Start { node: "D" },
+            TopologyAction::Start { node: "E" },
+            TopologyAction::Start { node: "F" },
+            TopologyAction::Create { node: "A" },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "B",
+            },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "C",
+            },
+        ])
+        .await;
+    topology
+        .wait_for_equivalent_branch(&["A", "B", "C"], 3)
+        .await;
+    let epoch_three = topology.diagnostics("A").await.group_epoch;
+    topology
+        .wait_for_group_epoch(&["B", "C"], epoch_three)
+        .await;
+    for (joiner, established) in [
+        ("D", &["A", "B", "C", "D"][..]),
+        ("E", &["A", "B", "C", "D", "E"][..]),
+        ("F", &["A", "B", "C", "D", "E", "F"][..]),
+    ] {
+        topology
+            .run(&[TopologyAction::Join {
+                sponsor: "A",
+                joiner,
+            }])
+            .await;
+        topology
+            .wait_for_equivalent_branch(established, established.len() as u32)
+            .await;
+        let epoch = topology.diagnostics("A").await.group_epoch;
+        topology
+            .wait_for_group_epoch(&established[1..], epoch)
+            .await;
+    }
+    topology
+        .wait_for_equivalent_branch(&["A", "B", "C", "D", "E", "F"], 6)
+        .await;
+    let baseline_epoch = topology.diagnostics("A").await.group_epoch;
+    topology
+        .wait_for_group_epoch(&["B", "C", "D", "E", "F"], baseline_epoch)
+        .await;
+    topology
+        .run(&[TopologyAction::Partition {
+            left: &["A", "B", "C"],
+            right: &["D", "E", "F"],
+        }])
+        .await;
+
+    for target in ["C", "E", "F"] {
+        topology
+            .run(&[TopologyAction::Remove {
+                sponsor: "A",
+                target,
+            }])
+            .await;
+    }
+    for target in ["B", "C", "F"] {
+        topology
+            .run(&[TopologyAction::Remove {
+                sponsor: "D",
+                target,
+            }])
+            .await;
+    }
+
+    topology.assert_snapshot("A", 3, 0).await;
+    topology.assert_snapshot("D", 3, 0).await;
+    let left_before = topology.diagnostics("A").await;
+    let right_before = topology.diagnostics("D").await;
+    assert_ne!(left_before.branch_id, right_before.branch_id);
+
+    topology
+        .run(&[TopologyAction::Bridge {
+            left: "A",
+            right: "D",
+            left_group: &["A", "B", "C"],
+            right_group: &["D", "E", "F"],
+        }])
+        .await;
+    topology.wait_for_branch_conflict(&["A", "D"]).await;
+
+    topology.assert_snapshot("A", 3, 1).await;
+    topology.assert_snapshot("D", 3, 1).await;
+    assert_eq!(
+        topology.diagnostics("A").await.branch_id,
+        left_before.branch_id
+    );
+    assert_eq!(
+        topology.diagnostics("D").await.branch_id,
+        right_before.branch_id
+    );
+    let bridge_text = "F4 sibling bridge must not carry content";
+    assert_eq!(topology.send("A", "D", bridge_text).await.total_accepted, 0);
+    assert!(!receiver_has_exact_text(topology.engine("D"), bridge_text).await);
+    topology.shutdown().await;
 }
 
 // F3：同一远端移除被不同设备接受和拒绝后，决定必须跨重启持久并保持内容隔离。
@@ -633,6 +753,14 @@ impl MembershipTopology {
                     .await
                 }
                 TopologyAction::Partition { left, right } => self.partition(left, right).await,
+                TopologyAction::Bridge {
+                    left,
+                    right,
+                    left_group,
+                    right_group,
+                } => {
+                    self.bridge(left, right, left_group, right_group).await;
+                }
                 TopologyAction::Heal { nodes } => self.heal(nodes).await,
                 TopologyAction::ResolveConflict { node, branch_from } => {
                     self.resolve_conflict(node, branch_from).await
@@ -754,6 +882,25 @@ impl MembershipTopology {
         for node in right {
             self.set_partition(node, left_ids.clone()).await;
         }
+    }
+
+    async fn bridge(&self, left: &str, right: &str, left_group: &[&str], right_group: &[&str]) {
+        assert!(left_group.contains(&left));
+        assert!(right_group.contains(&right));
+        let left_blocked = right_group
+            .iter()
+            .copied()
+            .filter(|node| *node != right)
+            .collect::<Vec<_>>();
+        let right_blocked = left_group
+            .iter()
+            .copied()
+            .filter(|node| *node != left)
+            .collect::<Vec<_>>();
+        self.set_partition(left, self.endpoint_ids(&left_blocked).await)
+            .await;
+        self.set_partition(right, self.endpoint_ids(&right_blocked).await)
+            .await;
     }
 
     async fn heal(&self, nodes: &[&str]) {
@@ -914,6 +1061,32 @@ impl MembershipTopology {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "pending removal did not reach every decision node"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn wait_for_branch_conflict(&self, nodes: &[&str]) {
+        let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+        loop {
+            let mut ready = true;
+            for node in nodes {
+                if !self
+                    .device_group_choices(node)
+                    .await
+                    .issues
+                    .iter()
+                    .any(|issue| issue.issue_id.starts_with("c:"))
+                {
+                    ready = false;
+                }
+            }
+            if ready {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "branch conflict did not reach every bridge endpoint"
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }

@@ -28,7 +28,7 @@ Phase 6：Desktop F0-F13、20 个固定 chaos seed 与 Spec 029 回归（Phase 5
 
 ## Next Step
 
-F0–F3 已完成；提交 F3 切片后进入 F4：两个三节点分区只经单 bridge 短暂相遇，验证不能拼接出六节点假历史。
+F0–F4 已完成；提交 F4 切片后进入 F5：环 A-B-C-D-A 从相反方向传播同一冲突，验证只提示一次且无消息环或重复 effects。
 
 ## Constraints
 
@@ -60,3 +60,6 @@ F0–F3 已完成；提交 F3 切片后进入 F4：两个三节点分区只经�
 | F2 选择目标分支后未收敛 | 1 | 冲突与选择入口已成功，待检查恢复包请求、ACK 与 generation transition 的首个未推进阶段。 |
 | F2 GroupInfo 响应被截断 | 1 | 服务端 `finish()` 后等待 `stopped()`，确认对端完整读取响应后再结束 handler。 |
 | F2 transition 超过测试窗口 | 1 | Application 单轮连续推进所有成功阶段并逐步持久化，只有真实不可用才返回 Deferred。 |
+| F4 连续准入第六节点超时 | 1 | 六节点基线改为每次扩容后等待 branch/member 与 MLS epoch 收敛，再签发下一次邀请，避免把异步安全传播当成同步完成。 |
+| F4 区域内十二次决定导致 pending 传播超时 | 1 | 收窄到 F4 真正 seam：只要求 A/D 两个 bridge 端点各自形成三成员 sibling；不为单桥不变量强制其他区域副本完成无关用户决定。 |
+| F4 双向互删的 bridge 无法认证 | 1 | 调整分支成员集合，让 A/D 在两条 sibling 中都保持 Active；bridge 通过普通认证历史交换形成 conflict，而不是依赖 Removed↔Removed 受限投递。 |

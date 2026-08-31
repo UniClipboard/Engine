@@ -242,3 +242,15 @@
 - suffix 使用独立 sender projection 校验传输 target position，本机 projection 可合法停在父 head。
 - Application restricted 回归确认 `RestrictedApplied`、事件落盘、零提前 effect；maintenance 与 Removed 投影套件通过。
 - Desktop F3 通过：B Accept、C Reject，分支内正文成功，跨分支正文关闭式失败，B/C 重启后各自 branch/head 保持。
+
+## 2026-08-31 · F4 single bridge red test
+
+- 已确认继续使用 Engine 公开 operation 与既有 dev-tools endpoint gate 作为测试 seam。
+- 场景将从六节点共同历史构造两个各三成员的合法 sibling 分支，再仅开放一条跨区 bridge，锁定“不得联合为六成员假历史”。
+
+## 2026-08-31 · F4 single bridge complete
+
+- 声明式拓扑新增 `Bridge`：只解除 A-D 的相互阻断，A 仍阻断 E/F、D 仍阻断 B/C，其他节点保持原分区。
+- 六节点准入改为每次扩容后等待 branch/member 与 MLS epoch 收敛，避免下一次邀请抢跑安全传播。
+- 两条分支各保留 A/D 作为共同 Active bridge 端点，并分别形成不同的三成员集合；Removed↔Removed 不能通过普通成员认证，不再被误作 bridge。
+- F4 Desktop E2E 通过：A/D 各记录一个 sibling conflict，成员数保持 3、branch id 不变、跨桥正文零 accepted，未形成联合历史。
