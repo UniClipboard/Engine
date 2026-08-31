@@ -118,6 +118,18 @@ impl MembershipBranchRecoveryPackageV1 {
         self.recipient_member
     }
 
+    pub fn target_membership_history(&self) -> &[u8] {
+        &self.target_membership_history
+    }
+
+    pub fn sealed_mls_recovery_material(&self) -> &[u8] {
+        &self.sealed_mls_recovery_material
+    }
+
+    pub fn encrypted_content_key_catalog(&self) -> &[u8] {
+        &self.encrypted_content_key_catalog
+    }
+
     pub fn validate(
         &self,
         expected_conflict_id: MembershipConflictId,

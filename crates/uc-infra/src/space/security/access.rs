@@ -297,6 +297,29 @@ fn seal_membership_branch_recovery_confirmation(
     postcard::to_stdvec(&encrypted).map_err(|_| EncryptionError::KeyMaterialCorrupt)
 }
 
+fn open_membership_branch_recovery_confirmation(
+    wrapping_key: &MasterKey,
+    space_id: &SpaceId,
+    epoch: u64,
+    ciphertext: &[u8],
+) -> Result<MembershipBranchRecoveryConfirmationV1, EncryptionError> {
+    let encrypted: EncryptedBlob =
+        postcard::from_bytes(ciphertext).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+    let plaintext = v1_aead::decrypt_blob_xchacha(
+        wrapping_key,
+        &encrypted.nonce,
+        &encrypted.ciphertext,
+        &membership_branch_recovery_confirmation_aad(space_id, epoch),
+    )
+    .map_err(map_group_aead_error)?;
+    let confirmation: MembershipBranchRecoveryConfirmationV1 =
+        postcard::from_bytes(&plaintext).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+    if confirmation.version != 1 || confirmation.epoch != epoch {
+        return Err(EncryptionError::KeyMaterialCorrupt);
+    }
+    Ok(confirmation)
+}
+
 fn map_group_aead_error(error: v1_aead::AeadError) -> EncryptionError {
     match error {
         v1_aead::AeadError::DecryptFailed => EncryptionError::KeyMaterialCorrupt,
@@ -598,7 +621,7 @@ impl DefaultSpaceAccessAdapter {
             .map_err(map_encryption_error)
     }
 
-    pub(super) async fn prepare_group_join(
+    pub(crate) async fn prepare_group_join(
         &self,
         device_id: &DeviceId,
     ) -> Result<PreparedGroupJoin, SpaceAccessError> {
@@ -730,7 +753,7 @@ impl DefaultSpaceAccessAdapter {
         Ok((group_admission, replay_admission))
     }
 
-    async fn admit_group_member(
+    pub(crate) async fn admit_group_member(
         &self,
         space_id: &SpaceId,
         sponsor_device_id: &DeviceId,
@@ -750,7 +773,7 @@ impl DefaultSpaceAccessAdapter {
         .map(|(admission, _)| admission)
     }
 
-    async fn install_group_join(
+    pub(crate) async fn install_group_join(
         &self,
         space_id: &SpaceId,
         passphrase: &DomainPassphrase,
@@ -3257,6 +3280,47 @@ impl PrepareMembershipBranchRecoveryMaterialPort for DefaultSpaceAccessAdapter {
 }
 
 impl DefaultSpaceAccessAdapter {
+    pub(crate) fn prepare_recovered_membership_branch_material(
+        &self,
+        recipient_staged_mls_state: &[u8],
+        sealed_mls_recovery_material: &[u8],
+        encrypted_content_key_catalog: &[u8],
+    ) -> Result<SpaceKeyMaterial, EncryptionError> {
+        let staged: StagedMembershipBranchRecoveryRecipientV1 =
+            postcard::from_bytes(recipient_staged_mls_state)
+                .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        if staged.version != 1 || staged.epoch == 0 {
+            return Err(EncryptionError::KeyMaterialCorrupt);
+        }
+        let space_id = self.session.current_space_id()?;
+        let wrapping_key = MasterKey::from_bytes(&staged.wrapping_key)?;
+        open_membership_branch_recovery_confirmation(
+            &wrapping_key,
+            &space_id,
+            staged.epoch,
+            sealed_mls_recovery_material,
+        )?;
+        let portable = open_group_catalog(
+            &wrapping_key,
+            &space_id,
+            staged.epoch,
+            encrypted_content_key_catalog,
+        )?;
+        let material = SpaceKeyMaterial::new(
+            portable.state,
+            staged.mls_state,
+            portable.key_catalog,
+            chrono::Utc::now().timestamp_millis(),
+        );
+        MlsGroupEngine::validate_state(
+            &MlsClientState::from_bytes(material.group_state().to_vec()),
+            space_id.as_ref().as_bytes(),
+        )
+        .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        InMemorySession::export_admission_content_key_catalog(&material)?;
+        Ok(material)
+    }
+
     async fn load_membership_branch_recovery_material(
         &self,
     ) -> Result<(SpaceId, SpaceKeyMaterial), PrepareMembershipBranchRecoveryMaterialError> {
@@ -5745,6 +5809,18 @@ mod admission_tests {
         );
         assert!(!prepared.sealed_mls_recovery_material.is_empty());
         assert!(!prepared.encrypted_content_key_catalog.is_empty());
+        let recovered = recipient
+            .prepare_recovered_membership_branch_material(
+                &recipient_recovery.staged_mls_state,
+                &prepared.sealed_mls_recovery_material,
+                &prepared.encrypted_content_key_catalog,
+            )
+            .unwrap();
+        assert_eq!(
+            recovered.state().epoch(),
+            before.state().epoch().next().unwrap()
+        );
+        assert_ne!(recovered.group_state(), before.group_state());
 
         sponsor
             .commit_membership_branch_recovery_material(

@@ -40,15 +40,17 @@ pub use query_device_trust::{
 };
 pub use re_pairing::{RePairingStateError, RePairingStateStorePort};
 pub use recover_conflict::{
-    BeginMembershipBranchRecoveryInput, IssueMembershipBranchRecoveryError,
-    IssueMembershipBranchRecoveryInput, IssueMembershipBranchRecoveryPort,
-    MembershipBranchRecoveryChannelError, MembershipBranchRecoveryChannelPort,
-    MembershipBranchRecoveryCommit, MembershipBranchRecoveryRequest,
-    PrepareMembershipBranchRecoveryMaterialError, PrepareMembershipBranchRecoveryMaterialInput,
-    PrepareMembershipBranchRecoveryMaterialPort, PrepareMembershipBranchRecoveryRecipientError,
-    PrepareMembershipBranchRecoveryRecipientPort, PrepareMembershipBranchTransitionError,
-    PrepareMembershipBranchTransitionInput, PrepareMembershipBranchTransitionPort,
-    PreparedMembershipBranchRecoveryMaterial, PreparedMembershipBranchRecoveryRecipient,
+    AdvanceMembershipBranchTransitionError, AdvanceMembershipBranchTransitionInput,
+    AdvanceMembershipBranchTransitionPort, BeginMembershipBranchRecoveryInput,
+    IssueMembershipBranchRecoveryError, IssueMembershipBranchRecoveryInput,
+    IssueMembershipBranchRecoveryPort, MembershipBranchRecoveryChannelError,
+    MembershipBranchRecoveryChannelPort, MembershipBranchRecoveryCommit,
+    MembershipBranchRecoveryRequest, PrepareMembershipBranchRecoveryMaterialError,
+    PrepareMembershipBranchRecoveryMaterialInput, PrepareMembershipBranchRecoveryMaterialPort,
+    PrepareMembershipBranchRecoveryRecipientError, PrepareMembershipBranchRecoveryRecipientPort,
+    PrepareMembershipBranchTransitionError, PrepareMembershipBranchTransitionInput,
+    PrepareMembershipBranchTransitionPort, PreparedMembershipBranchRecoveryMaterial,
+    PreparedMembershipBranchRecoveryRecipient,
 };
 pub use remove_space_member::{
     MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult,

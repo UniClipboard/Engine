@@ -8,19 +8,21 @@ use sha2::{Digest, Sha256};
 use uc_application::deps::{
     AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
     AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionStepV2,
-    CommitMembershipLedgerPort, CurrentSpaceIdentityError, DeviceManagementResetDataPort,
-    InitialSpaceActivationPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
-    MembershipLedgerMutation, PeerReconciliationRecord,
+    AdvanceMembershipBranchTransitionError, AdvanceMembershipBranchTransitionInput,
+    AdvanceMembershipBranchTransitionPort, CommitMembershipLedgerPort, CurrentSpaceIdentityError,
+    DeviceManagementResetDataPort, InitialSpaceActivationPort, LoadMembershipLedgerPort,
+    LoadedMembershipLedger, MembershipLedgerMutation, PeerReconciliationRecord,
 };
 use uc_core::blob::ports::BlobReaderPort;
 use uc_core::crypto::aad;
 use uc_core::crypto::domain::{Aad, ActiveSpace, Ciphertext};
 use uc_core::ids::{BlobId, DeviceId, EntryId, EventId, RepresentationId, SpaceId};
 use uc_core::membership::{
-    ActiveSpaceGenerationManifestV2, AdmissionContentKeyCatalogV1,
+    ActiveSpaceGenerationManifestV2, AdmissionChangeFacts, AdmissionContentKeyCatalogV1,
     AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2, ContentKeyId,
     CrossSpaceTransitionPhaseV2, CrossSpaceTransitionResultV2, CrossSpaceTransitionV2,
-    FreshSpaceTransitionPhaseV1, FreshSpaceTransitionV1, GroupEpoch, ProtectionGroupId,
+    FreshSpaceTransitionPhaseV1, FreshSpaceTransitionV1, GroupEpoch,
+    MembershipBranchTransitionPhaseV1, MembershipBranchTransitionV1, ProtectionGroupId,
     RevocationRepositoryPort, SameSpaceTransitionPhaseV1, SameSpaceTransitionV1, SpaceKeyMaterial,
     SpaceKeyState, CROSS_SPACE_TRANSITION_FORMAT_V2, FRESH_SPACE_TRANSITION_FORMAT_V1,
     SAME_SPACE_TRANSITION_FORMAT_V1,
@@ -1306,6 +1308,468 @@ fn map_initial_activation_error(error: AdmissionSpaceTransitionError) -> Current
     match error {
         AdmissionSpaceTransitionError::Inconsistent => CurrentSpaceIdentityError::Inconsistent,
         _ => CurrentSpaceIdentityError::Unavailable,
+    }
+}
+
+#[async_trait]
+impl AdvanceMembershipBranchTransitionPort for DurableAdmissionSpaceTransition {
+    async fn advance_membership_branch_transition(
+        &self,
+        input: AdvanceMembershipBranchTransitionInput,
+    ) -> Result<MembershipBranchTransitionV1, AdvanceMembershipBranchTransitionError> {
+        let transition = &input.transition;
+        if !transition.validate()
+            || input.recovery_package.conflict_id() != transition.conflict_id()
+            || input.recovery_package.target_branch_id() != transition.target_branch_id()
+        {
+            return Err(branch_transition_invalid(
+                "branch transition binding is invalid",
+            ));
+        }
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|source| branch_transition_unavailable(anyhow::Error::new(source)))?;
+        let manifest = self
+            .generation_manifest_store
+            .load()
+            .await
+            .map_err(map_branch_manifest_error)?
+            .ok_or_else(|| branch_transition_invalid("active generation manifest is missing"))?;
+        let target_directory =
+            self.target_generation_directory(space_id.as_ref(), transition.target_generation());
+        let advance = |phase| {
+            transition
+                .advance(phase)
+                .ok_or_else(|| branch_transition_invalid("branch transition cannot advance"))
+        };
+
+        match transition.phase() {
+            MembershipBranchTransitionPhaseV1::Prepared => {
+                if manifest.database_generation != *transition.source_generation() {
+                    return Err(branch_transition_invalid(
+                        "active source generation changed before backup",
+                    ));
+                }
+                std::fs::create_dir_all(&target_directory)
+                    .map_err(|source| branch_transition_unavailable(anyhow::Error::new(source)))?;
+                let scratch = target_directory.join("source-backup.snapshot.tmp");
+                let backup = db_snapshot::snapshot_to_bytes(&self.source_pool, &scratch)
+                    .map_err(|source| branch_transition_unavailable(anyhow::Error::new(source)))?;
+                write_membership_branch_generation_file(
+                    &target_directory.join("source-backup.sqlite"),
+                    &backup,
+                )
+                .map_err(|source| branch_transition_unavailable(anyhow::Error::new(source)))?;
+                advance(MembershipBranchTransitionPhaseV1::SourceBackedUp)
+            }
+            MembershipBranchTransitionPhaseV1::SourceBackedUp => {
+                if manifest.database_generation != *transition.source_generation()
+                    || !target_directory.join("source-backup.sqlite").is_file()
+                {
+                    return Err(branch_transition_invalid(
+                        "source backup checkpoint is unavailable",
+                    ));
+                }
+                self.space_access
+                    .prepare_recovered_membership_branch_material(
+                        &input.recipient_staged_mls_state,
+                        input.recovery_package.sealed_mls_recovery_material(),
+                        input.recovery_package.encrypted_content_key_catalog(),
+                    )
+                    .map_err(|source| {
+                        branch_transition_invalid_with_source(anyhow::Error::new(source))
+                    })?;
+                advance(MembershipBranchTransitionPhaseV1::TargetVerified)
+            }
+            MembershipBranchTransitionPhaseV1::TargetVerified => {
+                if manifest.database_generation != *transition.source_generation() {
+                    return Err(branch_transition_invalid(
+                        "active source generation changed before target staging",
+                    ));
+                }
+                let material = self
+                    .space_access
+                    .prepare_recovered_membership_branch_material(
+                        &input.recipient_staged_mls_state,
+                        input.recovery_package.sealed_mls_recovery_material(),
+                        input.recovery_package.encrypted_content_key_catalog(),
+                    )
+                    .map_err(|source| {
+                        branch_transition_invalid_with_source(anyhow::Error::new(source))
+                    })?;
+                let scratch = target_directory.join("target.snapshot.tmp");
+                let snapshot = db_snapshot::snapshot_to_bytes(&self.source_pool, &scratch)
+                    .map_err(|source| branch_transition_unavailable(anyhow::Error::new(source)))?;
+                let target_database = target_directory.join("target.sqlite");
+                write_membership_branch_generation_file(&target_database, &snapshot)
+                    .map_err(|source| branch_transition_unavailable(anyhow::Error::new(source)))?;
+                let target_session = InMemorySession::new();
+                target_session.set_master_key_for_space(
+                    space_id.clone(),
+                    self.session.get_master_key().map_err(|source| {
+                        branch_transition_unavailable(anyhow::Error::new(source))
+                    })?,
+                );
+                self.install_and_reopen_security_material(
+                    &target_database,
+                    &material,
+                    &target_session,
+                )
+                .await
+                .map_err(map_branch_transition_error)?;
+                let relationships = input
+                    .target_history
+                    .active_members()
+                    .into_iter()
+                    .map(|member| {
+                        input
+                            .target_history
+                            .admission_facts_for(member)
+                            .cloned()
+                            .ok_or_else(|| {
+                                branch_transition_invalid(
+                                    "target history has missing active member facts",
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let local_device_id = input
+                    .target_history
+                    .admission_facts_for(input.recovery_package.recipient_member())
+                    .map(|facts| facts.device_id.clone())
+                    .ok_or_else(|| {
+                        branch_transition_invalid("recipient is absent from target history")
+                    })?;
+                self.install_membership_branch_target_relationships(
+                    &target_database,
+                    &target_session,
+                    &local_device_id,
+                    &relationships,
+                )
+                .await?;
+                copy_directory_contents(
+                    &self.generations.source_blob_root,
+                    &target_directory.join("blobs"),
+                )
+                .map_err(map_branch_transition_error)?;
+                advance(MembershipBranchTransitionPhaseV1::TargetStaged)
+            }
+            MembershipBranchTransitionPhaseV1::TargetStaged => {
+                if manifest.database_generation == *transition.source_generation() {
+                    let target_database = target_directory.join("target.sqlite");
+                    self.prepare_membership_branch_target_ledger(
+                        &target_database,
+                        transition,
+                        &input.target_history,
+                        input.recovery_package.recipient_member(),
+                    )
+                    .await?;
+                    let target_manifest = ActiveSpaceGenerationManifestV2::new(
+                        manifest.space_id.clone(),
+                        manifest.keyslot_generation,
+                        *transition.target_generation(),
+                        *transition.target_generation(),
+                    )
+                    .ok_or_else(|| branch_transition_invalid("target manifest is invalid"))?;
+                    self.generation_manifest_store
+                        .promote(&target_manifest)
+                        .await
+                        .map_err(map_branch_manifest_error)?;
+                    self.source_pool
+                        .replace_database(target_database.to_str().ok_or_else(|| {
+                            branch_transition_unavailable(anyhow::anyhow!(
+                                "target database location is unavailable"
+                            ))
+                        })?)
+                        .map_err(branch_transition_recovery_required)?;
+                    self.blob_store.replace_root(target_directory.join("blobs"));
+                } else if manifest.database_generation != *transition.target_generation() {
+                    return Err(branch_transition_invalid(
+                        "active generation does not match branch transition",
+                    ));
+                }
+                advance(MembershipBranchTransitionPhaseV1::Promoted)
+            }
+            MembershipBranchTransitionPhaseV1::Promoted => {
+                if manifest.database_generation != *transition.target_generation() {
+                    return Err(branch_transition_recovery_required(anyhow::anyhow!(
+                        "promoted generation is not active"
+                    )));
+                }
+                let target_database = target_directory.join("target.sqlite");
+                self.source_pool
+                    .replace_database(target_database.to_str().ok_or_else(|| {
+                        branch_transition_unavailable(anyhow::anyhow!(
+                            "target database location is unavailable"
+                        ))
+                    })?)
+                    .map_err(branch_transition_recovery_required)?;
+                self.blob_store.replace_root(target_directory.join("blobs"));
+                self.reopen_active_target_security(space_id.as_ref())
+                    .await
+                    .map_err(map_branch_transition_error)?;
+                advance(MembershipBranchTransitionPhaseV1::RuntimeRestored)
+            }
+            MembershipBranchTransitionPhaseV1::RuntimeRestored => {
+                remove_membership_branch_temporary_file(
+                    &target_directory.join("source-backup.sqlite"),
+                )
+                .map_err(|source| branch_transition_unavailable(anyhow::Error::new(source)))?;
+                remove_membership_branch_temporary_file(
+                    &target_directory.join("source-backup.snapshot.tmp"),
+                )
+                .map_err(|source| branch_transition_unavailable(anyhow::Error::new(source)))?;
+                remove_membership_branch_temporary_file(
+                    &target_directory.join("target.snapshot.tmp"),
+                )
+                .map_err(|source| branch_transition_unavailable(anyhow::Error::new(source)))?;
+                let source_directory = self
+                    .target_generation_directory(space_id.as_ref(), transition.source_generation());
+                if source_directory != target_directory {
+                    remove_membership_branch_generation_directory(&source_directory).map_err(
+                        |source| branch_transition_unavailable(anyhow::Error::new(source)),
+                    )?;
+                }
+                advance(MembershipBranchTransitionPhaseV1::Completed)
+            }
+            MembershipBranchTransitionPhaseV1::Completed => Err(branch_transition_invalid(
+                "branch transition is already complete",
+            )),
+        }
+    }
+}
+
+impl DurableAdmissionSpaceTransition {
+    async fn prepare_membership_branch_target_ledger(
+        &self,
+        target_database: &Path,
+        transition: &MembershipBranchTransitionV1,
+        target_history: &uc_core::membership::VersionedMembershipHistory,
+        local_member_instance: uc_core::membership::MemberInstanceId,
+    ) -> Result<(), AdvanceMembershipBranchTransitionError> {
+        let target_pool = init_db_pool(target_database.to_str().ok_or_else(|| {
+            branch_transition_unavailable(anyhow::anyhow!(
+                "target database location is unavailable"
+            ))
+        })?)
+        .map_err(branch_transition_unavailable)?;
+        let ledger = SqliteMembershipLedger::new(
+            Arc::new(DieselSqliteExecutor::new(target_pool)),
+            Arc::clone(&self.admission_keys),
+        );
+        let current = ledger
+            .load()
+            .await
+            .map_err(|source| branch_transition_unavailable(anyhow::Error::new(source)))?;
+        let mut replacement = current.clone();
+        let stored = replacement
+            .membership_branch_transitions
+            .get_mut(transition.transition_id())
+            .ok_or_else(|| branch_transition_invalid("target transition checkpoint is missing"))?;
+        if stored != transition {
+            if stored
+                .advance(MembershipBranchTransitionPhaseV1::TargetStaged)
+                .as_ref()
+                != Some(transition)
+            {
+                return Err(branch_transition_invalid(
+                    "target transition checkpoint changed",
+                ));
+            }
+            *stored = transition.clone();
+        }
+        let local_facts = target_history
+            .admission_facts_for(local_member_instance)
+            .ok_or_else(|| branch_transition_invalid("recipient facts are unavailable"))?;
+        replacement.membership_history =
+            Some(target_history.encode_persisted_v2().map_err(|source| {
+                branch_transition_invalid_with_source(anyhow::Error::new(source))
+            })?);
+        replacement.local_device_id = Some(local_facts.device_id.clone());
+        replacement.local_member_instance = Some(local_member_instance);
+        replacement.local_join_active = true;
+        replacement.peer_reconciliation = target_history
+            .active_members()
+            .into_iter()
+            .filter(|member| member != &local_member_instance)
+            .map(|member| {
+                let facts = target_history.admission_facts_for(member).ok_or_else(|| {
+                    branch_transition_invalid("target member facts are unavailable")
+                })?;
+                Ok((
+                    facts.device_id.clone(),
+                    PeerReconciliationRecord {
+                        peer_device_id: facts.device_id.clone(),
+                        relationship:
+                            uc_core::membership::MembershipHistoryRelationship::Consistent,
+                        confirmed_position: None,
+                        sync_state: Default::default(),
+                        restricted_delivery: Vec::new(),
+                        updated_at_ms: 0,
+                    },
+                ))
+            })
+            .collect::<Result<_, AdvanceMembershipBranchTransitionError>>()?;
+        replacement.revision = current
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| branch_transition_invalid("target ledger revision overflow"))?;
+        ledger
+            .compare_and_commit(MembershipLedgerMutation {
+                expected_revision: current.revision,
+                expected_history_digest: current
+                    .membership_history
+                    .as_deref()
+                    .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes))),
+                replacement,
+            })
+            .await
+            .map_err(|source| branch_transition_unavailable(anyhow::Error::new(source)))?;
+        Ok(())
+    }
+
+    async fn install_membership_branch_target_relationships(
+        &self,
+        target_database: &Path,
+        target_session: &InMemorySession,
+        local_device_id: &DeviceId,
+        relationships: &[AdmissionChangeFacts],
+    ) -> Result<(), AdvanceMembershipBranchTransitionError> {
+        let target_pool = init_db_pool(target_database.to_str().ok_or_else(|| {
+            branch_transition_unavailable(anyhow::anyhow!(
+                "target database location is unavailable"
+            ))
+        })?)
+        .map_err(branch_transition_unavailable)?;
+        let store = EncryptedRelationshipStore::new(
+            Arc::new(DieselSqliteExecutor::new(target_pool)),
+            Arc::new(TargetSessionSubkeyDeriver(target_session.clone())),
+            Arc::clone(&self.current_profile),
+        );
+        let timestamp = Utc
+            .timestamp_millis_opt(0)
+            .single()
+            .ok_or_else(|| branch_transition_invalid("target relationship timestamp is invalid"))?;
+        for facts in relationships {
+            store
+                .save_member(&SpaceMember {
+                    device_id: facts.device_id.clone(),
+                    device_name: facts.device_name.clone(),
+                    identity_fingerprint: facts.identity_fingerprint.clone(),
+                    joined_at: timestamp,
+                    sync_preferences: MemberSyncPreferences::default(),
+                })
+                .await
+                .map_err(|source| branch_transition_unavailable(anyhow::Error::new(source)))?;
+            if &facts.device_id != local_device_id {
+                store
+                    .save_trusted_peer(&TrustedPeer {
+                        local_device_id: local_device_id.clone(),
+                        peer_device_id: facts.device_id.clone(),
+                        peer_fingerprint: facts.identity_fingerprint.clone(),
+                        trusted_at: timestamp,
+                    })
+                    .await
+                    .map_err(|source| branch_transition_unavailable(anyhow::Error::new(source)))?;
+                store
+                    .save_peer_address(&PeerAddressRecord {
+                        device_id: facts.device_id.clone(),
+                        addr_blob: facts.transport_address_blob.clone(),
+                        observed_at: timestamp,
+                    })
+                    .await
+                    .map_err(|source| branch_transition_unavailable(anyhow::Error::new(source)))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn map_branch_manifest_error(
+    source: super::ActiveSpaceGenerationManifestStoreError,
+) -> AdvanceMembershipBranchTransitionError {
+    match source {
+        super::ActiveSpaceGenerationManifestStoreError::Storage => {
+            branch_transition_unavailable(anyhow::Error::new(source))
+        }
+        super::ActiveSpaceGenerationManifestStoreError::Corrupt => {
+            branch_transition_invalid_with_source(anyhow::Error::new(source))
+        }
+    }
+}
+
+fn map_branch_transition_error(
+    source: AdmissionSpaceTransitionError,
+) -> AdvanceMembershipBranchTransitionError {
+    match source {
+        AdmissionSpaceTransitionError::RecoveryRequired => {
+            branch_transition_recovery_required(anyhow::Error::new(source))
+        }
+        AdmissionSpaceTransitionError::Inconsistent => {
+            branch_transition_invalid_with_source(anyhow::Error::new(source))
+        }
+        _ => branch_transition_unavailable(anyhow::Error::new(source)),
+    }
+}
+
+fn branch_transition_unavailable(source: anyhow::Error) -> AdvanceMembershipBranchTransitionError {
+    AdvanceMembershipBranchTransitionError::Unavailable { source }
+}
+
+fn branch_transition_invalid(context: &'static str) -> AdvanceMembershipBranchTransitionError {
+    branch_transition_invalid_with_source(anyhow::anyhow!(context))
+}
+
+fn branch_transition_invalid_with_source(
+    source: anyhow::Error,
+) -> AdvanceMembershipBranchTransitionError {
+    AdvanceMembershipBranchTransitionError::Invalid { source }
+}
+
+fn branch_transition_recovery_required(
+    source: anyhow::Error,
+) -> AdvanceMembershipBranchTransitionError {
+    AdvanceMembershipBranchTransitionError::RecoveryRequired { source }
+}
+
+fn write_membership_branch_generation_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if path.exists() && std::fs::read(path)? == bytes {
+        return Ok(());
+    }
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "generation parent is missing",
+        )
+    })?;
+    std::fs::create_dir_all(parent)?;
+    let temporary = path.with_extension("branch-transition.tmp");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary)?;
+    std::io::Write::write_all(&mut file, bytes)?;
+    file.sync_all()?;
+    drop(file);
+    replace_file_atomically(&temporary, path)?;
+    std::fs::File::open(parent)?.sync_all()
+}
+
+fn remove_membership_branch_temporary_file(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(source),
+    }
+}
+
+fn remove_membership_branch_generation_directory(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(source),
     }
 }
 
@@ -2848,11 +3312,16 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use diesel::{Connection, RunQueryDsl, SqliteConnection};
+    use sha2::{Digest, Sha256};
     use tempfile::tempdir;
     use uc_application::deps::AdmissionSpaceTransitionPort;
     use uc_application::deps::{
         AdmissionSpaceTransitionError, AdmissionSpaceTransitionPreparationV2,
-        AdmissionSpaceTransitionStepV2, DeviceManagementResetDataPort,
+        AdmissionSpaceTransitionStepV2, AdvanceMembershipBranchTransitionInput,
+        AdvanceMembershipBranchTransitionPort, CommitMembershipLedgerPort,
+        DeviceManagementResetDataPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
+        MembershipLedgerMutation, PrepareMembershipBranchRecoveryMaterialInput,
+        PrepareMembershipBranchRecoveryMaterialPort, PrepareMembershipBranchRecoveryRecipientPort,
     };
     use uc_core::blob::ports::BlobReaderPort;
     use uc_core::clipboard::MobileConsumableRef;
@@ -2861,12 +3330,14 @@ mod tests {
     use uc_core::file_transfer::FileTransferEvent;
     use uc_core::ids::{BlobId, DeviceId, EntryId, EventId, RepresentationId, SpaceId};
     use uc_core::membership::{
-        AdmissionChangeFacts, AdmissionContentKeyCatalogV1, AdmissionContentKeyEntryV1,
-        AdmissionSecurityCommitmentV1, AdmissionSpaceTransitionResultV2,
-        AdmissionSpaceTransitionV2, BaseMembershipHistoryPosition, ContentKeyPurpose,
-        CrossSpaceTransitionPhaseV2, MembershipCredential, PendingGroupUpdate,
-        RevocationRepositoryPort, SpaceAdmissionId, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
-        ED25519_SIGNATURE_ALGORITHM_V1,
+        ActiveSpaceGenerationManifestV2, AdmissionChangeFacts, AdmissionContentKeyCatalogV1,
+        AdmissionContentKeyEntryV1, AdmissionSecurityCommitmentV1,
+        AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2,
+        BaseMembershipHistoryPosition, ContentKeyPurpose, CrossSpaceTransitionPhaseV2,
+        MembershipBranchId, MembershipBranchRecoveryPackageV1, MembershipBranchTransitionPhaseV1,
+        MembershipBranchTransitionV1, MembershipConflictId, MembershipCredential,
+        PendingGroupUpdate, RevocationRepositoryPort, SpaceAdmissionId, VersionedMembershipHistory,
+        ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
     };
     use uc_core::ports::security::current_profile::CurrentProfilePort;
     use uc_core::ports::security::BlobCipherPort;
@@ -2897,10 +3368,12 @@ mod tests {
     };
     use crate::space::{
         prepare_registration, DefaultSpaceAccessAdapter, InMemorySession, KeyMaterialStore,
+        SqliteMembershipLedger,
     };
 
     use super::{
-        ensure_reset_capacity, DurableAdmissionSpaceTransition, SqliteSpaceGenerationStore,
+        ensure_reset_capacity, map_branch_transition_error, DurableAdmissionSpaceTransition,
+        SqliteSpaceGenerationStore,
     };
 
     #[derive(diesel::QueryableByName)]
@@ -2916,6 +3389,294 @@ mod tests {
             Err(AdmissionSpaceTransitionError::InsufficientStorage)
         );
         assert_eq!(ensure_reset_capacity(100, 100), Ok(()));
+    }
+
+    #[test]
+    fn branch_transition_error_mapping_preserves_classification_and_source() {
+        use std::error::Error as _;
+
+        let error = map_branch_transition_error(AdmissionSpaceTransitionError::Inconsistent);
+
+        assert!(matches!(
+            error,
+            uc_application::deps::AdvanceMembershipBranchTransitionError::Invalid { .. }
+        ));
+        assert!(error.source().is_some());
+        assert!(!format!("{error:?}").contains("space transition state is inconsistent"));
+    }
+
+    #[tokio::test]
+    async fn membership_branch_transition_promotes_a_complete_recovered_generation() {
+        let directory = tempdir().unwrap();
+        let source_path = directory.path().join("recipient.sqlite");
+        let source_blob_root = directory.path().join("recipient-blobs");
+        let generation_root = directory.path().join("space-generations");
+        let vault = directory.path().join("vault");
+        let pool = init_db_pool(source_path.to_str().unwrap()).unwrap();
+        let secure_storage: Arc<dyn SecureStoragePort> = Arc::new(MemorySecureStorage::default());
+        let admission_keys = Arc::new(AdmissionKeyManager::new(
+            Arc::clone(&secure_storage),
+            [0x31; 16],
+        ));
+        let recipient_session = Arc::new(InMemorySession::new());
+        let recipient_repository: Arc<dyn RevocationRepositoryPort> =
+            Arc::new(DieselSpaceSecurityStore::new(
+                Arc::new(DieselSqliteExecutor::new(pool.clone())),
+                recipient_session.as_ref().clone(),
+            ));
+        let recipient_access = Arc::new(DefaultSpaceAccessAdapter::new_with_key_epoch_repository(
+            Arc::new(KeyMaterialStore::new(
+                Arc::clone(&secure_storage),
+                Arc::new(JsonKeySlotStore::new(vault.join("recipient-keys"))),
+            )),
+            Arc::new(DefaultCurrentProfile::new()),
+            Arc::clone(&recipient_session),
+            recipient_repository,
+        ));
+        let space_id = SpaceId::from_str("branch-transition-space");
+
+        let sponsor_path = directory.path().join("sponsor.sqlite");
+        let sponsor_pool = init_db_pool(sponsor_path.to_str().unwrap()).unwrap();
+        let sponsor_storage: Arc<dyn SecureStoragePort> = Arc::new(MemorySecureStorage::default());
+        let sponsor_session = Arc::new(InMemorySession::new());
+        let sponsor_repository = Arc::new(DieselSpaceSecurityStore::new(
+            Arc::new(DieselSqliteExecutor::new(sponsor_pool)),
+            sponsor_session.as_ref().clone(),
+        ));
+        let sponsor_access = DefaultSpaceAccessAdapter::new_with_security_repositories(
+            Arc::new(KeyMaterialStore::new(
+                Arc::clone(&sponsor_storage),
+                Arc::new(JsonKeySlotStore::new(vault.join("sponsor-keys"))),
+            )),
+            Arc::new(DefaultCurrentProfile::new()),
+            Arc::clone(&sponsor_session),
+            sponsor_repository.clone() as Arc<dyn RevocationRepositoryPort>,
+            sponsor_repository as Arc<dyn uc_core::membership::LegacyBootstrapRepositoryPort>,
+        );
+        SpaceAccessStore::initialize(
+            &sponsor_access,
+            &space_id,
+            &Passphrase::new("sponsor transition passphrase"),
+        )
+        .await
+        .unwrap();
+        uc_core::membership::GroupBootstrapPort::bootstrap_legacy_space(
+            &sponsor_access,
+            &DeviceId::new("target-member"),
+            &[],
+            1,
+        )
+        .await
+        .unwrap();
+
+        let recipient_device = DeviceId::new("recipient-member");
+        let pending = recipient_access
+            .prepare_group_join(&recipient_device)
+            .await
+            .unwrap();
+        let admission = sponsor_access
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("target-member"),
+                &recipient_device,
+                &[],
+                &pending.key_package,
+            )
+            .await
+            .unwrap();
+        recipient_access
+            .install_group_join(
+                &space_id,
+                &Passphrase::new("recipient transition passphrase"),
+                pending,
+                &admission.welcome,
+                &admission.encrypted_key_catalog,
+                admission.group_epoch,
+            )
+            .await
+            .unwrap();
+        let group_info = sponsor_access
+            .export_membership_branch_recovery_group_info()
+            .await
+            .unwrap();
+        let recipient_recovery = recipient_access
+            .prepare_membership_branch_recovery_recipient(group_info)
+            .await
+            .unwrap();
+
+        let credential = MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x51; 32]);
+        let recipient_member = credential.member_instance_id(&recipient_device);
+        let facts = AdmissionChangeFacts {
+            member_instance: recipient_member,
+            device_id: recipient_device.clone(),
+            device_name: "recipient member".to_owned(),
+            identity_fingerprint: uc_core::security::IdentityFingerprint::from_display_string(
+                "ABCD-EFGH-IJKL-MNOP",
+            )
+            .unwrap(),
+            transport_public_key: vec![0x52],
+            transport_address_blob: vec![0x53],
+            identity_signature: vec![0x54],
+        };
+        let history = VersionedMembershipHistory::new_single_member_root(
+            space_id.as_ref().to_owned(),
+            facts,
+            credential,
+        )
+        .unwrap();
+        let target_history = history.encode_persisted_v2().unwrap();
+        let conflict_id = MembershipConflictId::from_bytes([0x61; 32]);
+        let target_branch_id = MembershipBranchId::from_bytes([0x62; 32]);
+        let transition_id = MembershipBranchTransitionV1::derive_id(conflict_id, target_branch_id);
+        let prepared_target = sponsor_access
+            .prepare_membership_branch_recovery_material(
+                PrepareMembershipBranchRecoveryMaterialInput {
+                    conflict_id,
+                    target_branch_id,
+                    recipient_member,
+                    target_history: history.clone(),
+                    external_commit: recipient_recovery.external_commit,
+                },
+            )
+            .await
+            .unwrap();
+        let package = MembershipBranchRecoveryPackageV1::new_unsigned(
+            conflict_id,
+            target_branch_id,
+            recipient_member,
+            recipient_member,
+            10_000,
+            [0x63; 32],
+            target_history.clone(),
+            prepared_target.sealed_mls_recovery_material,
+            prepared_target.encrypted_content_key_catalog,
+        )
+        .unwrap();
+
+        let source_generation = [0x71; 16];
+        let target_generation = [0x72; 16];
+        let manifest = ActiveSpaceGenerationManifestV2::new(
+            space_id.as_ref().to_owned(),
+            [0x70; 16],
+            source_generation,
+            source_generation,
+        )
+        .unwrap();
+        let manifest_store = Arc::new(ActiveSpaceGenerationManifestStore::new(
+            vault,
+            Arc::clone(&admission_keys),
+        ));
+        manifest_store.promote(&manifest).await.unwrap();
+        let transition = MembershipBranchTransitionV1::new(
+            transition_id,
+            conflict_id,
+            target_branch_id,
+            source_generation,
+            target_generation,
+        )
+        .unwrap();
+        let executor = Arc::new(DieselSqliteExecutor::new(pool.clone()));
+        let ledger =
+            SqliteMembershipLedger::new(Arc::clone(&executor), Arc::clone(&admission_keys));
+        ledger
+            .compare_and_commit(MembershipLedgerMutation {
+                expected_revision: 0,
+                expected_history_digest: None,
+                replacement: LoadedMembershipLedger {
+                    revision: 1,
+                    lineage_id: Some(space_id.as_ref().to_owned()),
+                    membership_history: Some(target_history.clone()),
+                    local_device_id: Some(recipient_device),
+                    local_member_instance: Some(recipient_member),
+                    local_join_active: true,
+                    peer_reconciliation: Default::default(),
+                    history_sync_cursor: None,
+                    inbound_transfers: Default::default(),
+                    completed_inbound_transfers: Default::default(),
+                    pending_effects: Default::default(),
+                    membership_conflicts: Default::default(),
+                    membership_branch_transitions: [(transition_id, transition.clone())]
+                        .into_iter()
+                        .collect(),
+                    consumed_membership_recovery_nonces: Default::default(),
+                    membership_branch_recovery_sessions: Default::default(),
+                },
+            })
+            .await
+            .unwrap();
+        let blob_store = Arc::new(SwitchableFilesystemBlobStore::new(source_blob_root.clone()));
+        let transitioner = DurableAdmissionSpaceTransition::new(
+            pool,
+            source_blob_root,
+            generation_root,
+            b"default".to_vec(),
+            blob_store,
+            Arc::clone(&manifest_store),
+            Arc::clone(&recipient_access),
+            Arc::clone(&recipient_session),
+            Arc::new(DefaultCurrentProfile::new()),
+            admission_keys,
+        );
+
+        let mut current = transition;
+        for expected_phase in [
+            MembershipBranchTransitionPhaseV1::SourceBackedUp,
+            MembershipBranchTransitionPhaseV1::TargetVerified,
+            MembershipBranchTransitionPhaseV1::TargetStaged,
+            MembershipBranchTransitionPhaseV1::Promoted,
+            MembershipBranchTransitionPhaseV1::RuntimeRestored,
+            MembershipBranchTransitionPhaseV1::Completed,
+        ] {
+            let next = transitioner
+                .advance_membership_branch_transition(AdvanceMembershipBranchTransitionInput {
+                    transition: current.clone(),
+                    recipient_staged_mls_state: recipient_recovery.staged_mls_state.clone(),
+                    recovery_package: package.clone(),
+                    target_history: history.clone(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(next.phase(), expected_phase);
+            let loaded = ledger.load().await.unwrap();
+            let mut replacement = loaded.clone();
+            replacement.revision += 1;
+            replacement
+                .membership_branch_transitions
+                .insert(transition_id, next.clone());
+            ledger
+                .compare_and_commit(MembershipLedgerMutation {
+                    expected_revision: loaded.revision,
+                    expected_history_digest: loaded
+                        .membership_history
+                        .as_deref()
+                        .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes))),
+                    replacement,
+                })
+                .await
+                .unwrap();
+            current = next;
+        }
+
+        assert_eq!(
+            manifest_store
+                .load()
+                .await
+                .unwrap()
+                .unwrap()
+                .database_generation,
+            target_generation
+        );
+        assert_eq!(
+            ledger.load().await.unwrap().membership_history,
+            Some(target_history)
+        );
+        assert_eq!(
+            recipient_session
+                .current_content_key(&space_id, ContentKeyPurpose::Content)
+                .unwrap()
+                .epoch(),
+            uc_core::membership::GroupEpoch::new(admission.group_epoch + 1)
+        );
     }
 
     #[derive(Default)]

@@ -136,6 +136,56 @@ pub trait PrepareMembershipBranchTransitionPort: Send + Sync {
 }
 
 #[derive(Clone)]
+pub struct AdvanceMembershipBranchTransitionInput {
+    pub transition: MembershipBranchTransitionV1,
+    pub recipient_staged_mls_state: Vec<u8>,
+    pub recovery_package: uc_core::membership::MembershipBranchRecoveryPackageV1,
+    pub target_history: VersionedMembershipHistory,
+}
+
+#[derive(thiserror::Error)]
+pub enum AdvanceMembershipBranchTransitionError {
+    #[error("membership branch transition is temporarily unavailable")]
+    Unavailable {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("membership branch transition state is invalid")]
+    Invalid {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("membership branch transition requires recovery")]
+    RecoveryRequired {
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+impl std::fmt::Debug for AdvanceMembershipBranchTransitionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let classification = match self {
+            Self::Unavailable { .. } => "Unavailable",
+            Self::Invalid { .. } => "Invalid",
+            Self::RecoveryRequired { .. } => "RecoveryRequired",
+        };
+        formatter
+            .debug_struct("AdvanceMembershipBranchTransitionError")
+            .field("classification", &classification)
+            .field("source", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[async_trait]
+pub trait AdvanceMembershipBranchTransitionPort: Send + Sync {
+    async fn advance_membership_branch_transition(
+        &self,
+        input: AdvanceMembershipBranchTransitionInput,
+    ) -> Result<MembershipBranchTransitionV1, AdvanceMembershipBranchTransitionError>;
+}
+
+#[derive(Clone)]
 pub struct PrepareMembershipBranchRecoveryMaterialInput {
     pub conflict_id: MembershipConflictId,
     pub target_branch_id: MembershipBranchId,

@@ -344,6 +344,12 @@ Space 已锁定、V2 历史缺失、身份映射矛盾或观察资料不完整�
 MasterKey AEAD 加密，并在同一事务比较修订号和历史摘要；不得恢复旧成员仓储、旧准入仓储或第二份产品
 修订。所有新加入、跨 Space 切换、分页接收、效果推进和关系确认都经过同一提交能力。
 
+成员分支恢复由 `RecoverMembershipConflictUseCase` 完整负责。恢复包验证并建立 transition 后，维护轮次每次
+只调用一次 generation transition 能力并提交一个直接后继阶段。Infra 在 `Promoted` 前先完成来源备份、
+recipient MLS 与内容密钥解封验证、目标数据库快照、安全材料和目标成员投影；随后原子提升 active manifest，
+重绑数据库、blob root 与内存安全会话，最后清理来源 generation。任何阶段失败都从加密 ledger checkpoint
+重试；manifest 提升前不得修改活动数据库，提升后不得回退来源 generation。
+
 旧 profile 不恢复成员资格。重建流程只保留允许的本机资料，清空旧关系和未完成成员工作，再建立新的
 单设备 V2 根。任何旧成员表、可信关系、地址、在线状态或安全组资料都不能让旧设备重新进入普通范围。
 
@@ -823,6 +829,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-31 | Application 依赖表面审计 | 扫描 `deps.rs` 的 port 定义、实现、装配、生产调用、测试与历史后，确认小 port 原则本身仍成立，复杂度主要由 Application 对象图外移到 Engine、宽 bundle 分发及步骤级编排造成；形成规格 031 的 clean-cutover 收敛计划，并识别旧 admission/pairing、receive projection 与 wiring-only 字段的删除候选。本轮只更新计划，无生产架构行为变化。 |
 | 2026-08-31 | Target 恢复提交事务 | Application issuer 将 target material 能力拆成无副作用 prepare 与幂等 commit：先签署 package 并连同 external commit digest、staged security material 保存为 TargetPrepared，随后提交安全状态并标记 TargetCommitted。重试按同一事务键和 commit digest 返回缓存 package；TargetPrepared 重启只续做 commit，不重复计算或签发。 |
 | 2026-08-31 | Target 恢复材料 adapter | `DefaultSpaceAccessAdapter` 唯一负责在当前 MLS 快照上应用 recipient external commit、派生下一 epoch 内容密钥、以共享 exporter wrapping key 密封目录与恢复确认，并以无副作用 prepare/幂等 commit 暴露给 Application。staged `SpaceKeyMaterial` 只进入现有 MasterKey AEAD recovery session；commit 重新验证 Space、MLS、目录和单步 epoch 后才持久化安装。Engine 已删除 target deferred adapter，只负责注入该窄端口。 |
+| 2026-08-31 | 成员分支 generation 切换 | Application recovery coordinator 继续负责七阶段 transition，每轮只推进并 CAS 保存一个后继；Infra 复用 durable Space transition 组件完成来源备份、recipient 材料解封、目标 SQLite/安全状态/成员投影 staging、manifest 提升、运行期重绑与旧 generation 清理。真实 MLS + SQLite 测试验证目标 manifest、历史和内容密钥 epoch 同时切换，Phase 4 完成。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |

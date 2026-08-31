@@ -235,6 +235,45 @@ impl PrepareMembershipBranchTransitionPort for TransitionPreparer {
     }
 }
 
+#[async_trait]
+impl AdvanceMembershipBranchTransitionPort for TransitionPreparer {
+    async fn advance_membership_branch_transition(
+        &self,
+        input: AdvanceMembershipBranchTransitionInput,
+    ) -> Result<MembershipBranchTransitionV1, AdvanceMembershipBranchTransitionError> {
+        let next_phase = match input.transition.phase() {
+            uc_core::membership::MembershipBranchTransitionPhaseV1::Prepared => {
+                uc_core::membership::MembershipBranchTransitionPhaseV1::SourceBackedUp
+            }
+            uc_core::membership::MembershipBranchTransitionPhaseV1::SourceBackedUp => {
+                uc_core::membership::MembershipBranchTransitionPhaseV1::TargetVerified
+            }
+            uc_core::membership::MembershipBranchTransitionPhaseV1::TargetVerified => {
+                uc_core::membership::MembershipBranchTransitionPhaseV1::TargetStaged
+            }
+            uc_core::membership::MembershipBranchTransitionPhaseV1::TargetStaged => {
+                uc_core::membership::MembershipBranchTransitionPhaseV1::Promoted
+            }
+            uc_core::membership::MembershipBranchTransitionPhaseV1::Promoted => {
+                uc_core::membership::MembershipBranchTransitionPhaseV1::RuntimeRestored
+            }
+            uc_core::membership::MembershipBranchTransitionPhaseV1::RuntimeRestored => {
+                uc_core::membership::MembershipBranchTransitionPhaseV1::Completed
+            }
+            uc_core::membership::MembershipBranchTransitionPhaseV1::Completed => {
+                return Err(AdvanceMembershipBranchTransitionError::Invalid {
+                    source: anyhow::anyhow!("test transition is already complete"),
+                });
+            }
+        };
+        input.transition.advance(next_phase).ok_or_else(|| {
+            AdvanceMembershipBranchTransitionError::Invalid {
+                source: anyhow::anyhow!("invalid test transition advance"),
+            }
+        })
+    }
+}
+
 struct Fixture {
     repository: Arc<MemoryLedger>,
     recovery: Arc<RecoverySource>,
@@ -333,6 +372,7 @@ fn fixture() -> Fixture {
         recovery.clone(),
         recipient.clone(),
         transition.clone(),
+        transition.clone(),
         verifier,
         Arc::new(FixedClock),
     );
@@ -372,7 +412,7 @@ async fn valid_package_consumes_nonce_and_saves_prepared_transition_atomically()
 }
 
 #[tokio::test]
-async fn retry_after_commit_does_not_fetch_or_prepare_again() {
+async fn retry_after_commit_advances_without_fetching_or_preparing_again() {
     let fixture = fixture();
     assert_eq!(
         fixture.use_case.execute().await,
@@ -380,10 +420,10 @@ async fn retry_after_commit_does_not_fetch_or_prepare_again() {
     );
     assert_eq!(
         fixture.use_case.execute().await,
-        RecoverMembershipConflictOutcome::Completed
+        RecoverMembershipConflictOutcome::Deferred
     );
 
-    assert_eq!(fixture.repository.commits.load(Ordering::SeqCst), 3);
+    assert_eq!(fixture.repository.commits.load(Ordering::SeqCst), 4);
     assert_eq!(fixture.recovery.group_info_calls.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.recovery.submit_calls.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.recipient.calls.load(Ordering::SeqCst), 1);
@@ -699,6 +739,45 @@ async fn target_recovery_resumes_from_prepared_after_commit_interruption() {
     assert_eq!(resumed, cached);
     assert_eq!(material.calls.load(Ordering::SeqCst), 1);
     assert_eq!(material.commit_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn prepared_transition_resumes_one_phase_per_round_and_completes_the_conflict() {
+    let fixture = fixture();
+
+    assert_eq!(
+        fixture.use_case.execute().await,
+        RecoverMembershipConflictOutcome::Completed
+    );
+    for _ in 0..5 {
+        assert_eq!(
+            fixture.use_case.execute().await,
+            RecoverMembershipConflictOutcome::Deferred
+        );
+    }
+    assert_eq!(
+        fixture.use_case.execute().await,
+        RecoverMembershipConflictOutcome::Completed
+    );
+
+    let persisted = fixture.repository.load().await.unwrap();
+    assert_eq!(
+        persisted
+            .membership_conflicts
+            .get(&fixture.conflict_id)
+            .unwrap()
+            .status,
+        MembershipConflictStatus::Completed
+    );
+    assert!(persisted.membership_branch_recovery_sessions.is_empty());
+    assert_eq!(
+        persisted
+            .membership_branch_transitions
+            .get(&fixture.transition_id)
+            .unwrap()
+            .phase(),
+        uc_core::membership::MembershipBranchTransitionPhaseV1::Completed
+    );
 }
 
 #[tokio::test]

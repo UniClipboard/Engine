@@ -136,3 +136,12 @@
 - `DefaultSpaceAccessAdapter` 在 MLS 快照上应用 recipient external commit，生成下一 epoch 内容密钥并使用双方共享 wrapping key 密封内容密钥目录和恢复确认。
 - staged `SpaceKeyMaterial` 只进入 Application 已有 MasterKey AEAD recovery session；commit 重新验证 space、MLS state、key catalog 与单步 epoch，再持久化和安装。
 - Engine 已直接注入真实 target material port，并删除 `DeferredMembershipBranchRecoveryMaterial`。
+
+## 2026-08-31 · Phase 4 generation transition completion
+
+- Application coordinator 在已有 transition 时不再提前返回 Completed，而是每轮调用一次粗粒度 execution port，并只接受 Core 状态机的直接后继。
+- recipient 使用已加密 checkpoint 中自己的 MLS snapshot 和 wrapping key，解封并验证目标恢复确认与内容密钥目录；目标 MLS 私有 snapshot 不跨设备传输。
+- durable transition 依次完成来源 SQLite 备份、目标 SQLite/blob staging、安全材料与目标成员投影写入、active manifest 提升、数据库/blob/session 重绑和来源 generation 清理。
+- manifest 提升前活动数据库不变；提升后的 ledger 从目标数据库继续 CAS，最终把 conflict 标记 Completed 并删除 recovery session。
+- 新增真实 MLS + SQLite generation 全流程测试，以及 Application 六次重启式阶段续跑测试；错误转换验证稳定分类、source chain 与脱敏 Debug。
+- Phase 4 完成，下一阶段进入 Engine 与三端 contract。

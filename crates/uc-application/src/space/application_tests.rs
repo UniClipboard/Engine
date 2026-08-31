@@ -687,6 +687,21 @@ impl PrepareMembershipBranchTransitionPort for PassivePorts {
 }
 
 #[async_trait]
+impl AdvanceMembershipBranchTransitionPort for PassivePorts {
+    async fn advance_membership_branch_transition(
+        &self,
+        _input: AdvanceMembershipBranchTransitionInput,
+    ) -> Result<
+        uc_core::membership::MembershipBranchTransitionV1,
+        AdvanceMembershipBranchTransitionError,
+    > {
+        Err(AdvanceMembershipBranchTransitionError::Unavailable {
+            source: anyhow::anyhow!("passive transition execution"),
+        })
+    }
+}
+
+#[async_trait]
 impl PrepareMembershipBranchRecoveryMaterialPort for PassivePorts {
     async fn export_membership_branch_recovery_group_info(
         &self,
@@ -779,6 +794,7 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
             membership_branch_recovery_channel: passive.clone(),
             membership_branch_recovery_recipient: passive.clone(),
             membership_branch_transition: passive.clone(),
+            membership_branch_transition_executor: passive.clone(),
             membership_branch_recovery_material: passive.clone(),
             apply_membership_member_facts: passive.clone(),
             apply_membership_security: passive.clone(),

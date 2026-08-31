@@ -119,6 +119,8 @@ pub struct SpaceApplicationDeps {
         Arc<dyn crate::space::membership::PrepareMembershipBranchRecoveryRecipientPort>,
     pub membership_branch_transition:
         Arc<dyn crate::space::membership::PrepareMembershipBranchTransitionPort>,
+    pub membership_branch_transition_executor:
+        Arc<dyn crate::space::membership::AdvanceMembershipBranchTransitionPort>,
     pub membership_branch_recovery_material:
         Arc<dyn crate::space::membership::PrepareMembershipBranchRecoveryMaterialPort>,
     pub apply_membership_member_facts: Arc<dyn ApplyMembershipMemberFactsPort>,
@@ -242,6 +244,7 @@ impl SpaceApplication {
             deps.membership_branch_recovery_channel,
             deps.membership_branch_recovery_recipient,
             deps.membership_branch_transition,
+            deps.membership_branch_transition_executor,
             historical_membership_signatures,
             Arc::clone(&deps.clock),
         ));

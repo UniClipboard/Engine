@@ -358,6 +358,9 @@ pub fn wire_dependencies_from_inputs(
         durable_space_transition.clone();
     let device_management_reset_data: Arc<dyn uc_application::deps::DeviceManagementResetDataPort> =
         durable_space_transition.clone();
+    let membership_branch_transition_executor: Arc<
+        dyn uc_application::deps::AdvanceMembershipBranchTransitionPort,
+    > = durable_space_transition.clone();
     let initial_space_activation: Arc<dyn InitialSpaceActivationPort> = durable_space_transition;
     let peer_admission =
         build_peer_admission_port(Arc::clone(&membership_ledger)
@@ -740,6 +743,7 @@ pub fn wire_dependencies_from_inputs(
             admission_state,
             admission_credentials,
             admission_space_transition,
+            membership_branch_transition_executor,
             active_generation_manifest_store,
             device_management_reset_data,
             blob_reference_repo: Arc::clone(&infra.blob_reference_repo),

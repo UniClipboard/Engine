@@ -44,8 +44,9 @@ pub use lifecycle::{
     UnlockSpaceError,
 };
 pub use membership::{
-    DecideDeviceTrustChange, DecideDeviceTrustChangeError, DecideDeviceTrustChangeResult,
-    DeviceTrustChangeChoice,
+    AdvanceMembershipBranchTransitionError, AdvanceMembershipBranchTransitionInput,
+    AdvanceMembershipBranchTransitionPort, DecideDeviceTrustChange, DecideDeviceTrustChangeError,
+    DecideDeviceTrustChangeResult, DeviceTrustChangeChoice,
 };
 pub use membership::{
     DeviceTrustDevice, DeviceTrustMembership, DeviceTrustObservation, DeviceTrustRelationship,

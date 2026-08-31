@@ -936,6 +936,9 @@ pub async fn build_sync_engine_assembly(
                     &space_setup.active_generation_manifest_store,
                 )),
             ),
+            membership_branch_transition_executor: Arc::clone(
+                &space_setup.membership_branch_transition_executor,
+            ),
             membership_branch_recovery_material: Arc::clone(
                 &deps
                     .security

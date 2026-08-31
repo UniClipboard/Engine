@@ -152,6 +152,7 @@ flowchart LR
 | `membership/remove_space_member/` | `use_case.rs`, `model.rs`, `ports.rs`, `error.rs` | 本机发起正式成员移除 |
 | `membership/decide_device_trust_change/` | `use_case.rs`, `model.rs`, `error.rs` | 接受或拒绝远端移除变化 |
 | `membership/handle_history_message/` | `use_case.rs`, `model.rs`, `error.rs` | 入站成员历史分页和 ACK |
+| `membership/recover_conflict/` | `use_case.rs`, `issuer.rs`, `ports.rs`, `tests.rs` | 两阶段恢复握手、恢复包验证与七阶段 generation transition 的唯一编排 |
 | `membership/synchronize_history/` | `target_use_case.rs`, `model.rs`, `error.rs` | 出站成员历史同步 |
 | `membership/maintenance/` | `use_case.rs`, `runtime.rs`, `ports.rs`, `model.rs` | 固定恢复顺序与唯一后台生命周期 |
 

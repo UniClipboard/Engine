@@ -11,11 +11,12 @@ use crate::space::membership::{
 };
 
 use super::{
-    MembershipBranchRecoveryChannelError, MembershipBranchRecoveryChannelPort,
-    MembershipBranchRecoveryCommit, MembershipBranchRecoveryRequest,
-    PrepareMembershipBranchRecoveryRecipientError, PrepareMembershipBranchRecoveryRecipientPort,
-    PrepareMembershipBranchTransitionError, PrepareMembershipBranchTransitionInput,
-    PrepareMembershipBranchTransitionPort,
+    AdvanceMembershipBranchTransitionError, AdvanceMembershipBranchTransitionInput,
+    AdvanceMembershipBranchTransitionPort, MembershipBranchRecoveryChannelError,
+    MembershipBranchRecoveryChannelPort, MembershipBranchRecoveryCommit,
+    MembershipBranchRecoveryRequest, PrepareMembershipBranchRecoveryRecipientError,
+    PrepareMembershipBranchRecoveryRecipientPort, PrepareMembershipBranchTransitionError,
+    PrepareMembershipBranchTransitionInput, PrepareMembershipBranchTransitionPort,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +32,7 @@ pub(crate) struct RecoverMembershipConflictUseCase {
     recovery_channel: Arc<dyn MembershipBranchRecoveryChannelPort>,
     recipient_preparer: Arc<dyn PrepareMembershipBranchRecoveryRecipientPort>,
     transition: Arc<dyn PrepareMembershipBranchTransitionPort>,
+    transition_executor: Arc<dyn AdvanceMembershipBranchTransitionPort>,
     verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
     clock: Arc<dyn ClockPort>,
     execution_lock: tokio::sync::Mutex<()>,
@@ -60,6 +62,7 @@ impl RecoverMembershipConflictUseCase {
         recovery_channel: Arc<dyn MembershipBranchRecoveryChannelPort>,
         recipient_preparer: Arc<dyn PrepareMembershipBranchRecoveryRecipientPort>,
         transition: Arc<dyn PrepareMembershipBranchTransitionPort>,
+        transition_executor: Arc<dyn AdvanceMembershipBranchTransitionPort>,
         verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
         clock: Arc<dyn ClockPort>,
     ) -> Self {
@@ -68,6 +71,7 @@ impl RecoverMembershipConflictUseCase {
             recovery_channel,
             recipient_preparer,
             transition,
+            transition_executor,
             verifier,
             clock,
             execution_lock: tokio::sync::Mutex::new(()),
@@ -98,17 +102,38 @@ impl RecoverMembershipConflictUseCase {
         ) else {
             return RecoverMembershipConflictOutcome::Corrupt;
         };
-        if snapshot
+        let conflict_id = conflict.conflict_id;
+        if let Some(transition) = snapshot
             .record()
             .membership_branch_transitions
-            .contains_key(&transition_id)
+            .get(&transition_id)
+            .cloned()
         {
-            return RecoverMembershipConflictOutcome::Completed;
+            let Some(session) = snapshot
+                .record()
+                .membership_branch_recovery_sessions
+                .get(&transition_id)
+            else {
+                return RecoverMembershipConflictOutcome::Corrupt;
+            };
+            let Some((recipient_staged_mls_state, recovery_package)) =
+                session.recipient_completion()
+            else {
+                return RecoverMembershipConflictOutcome::Corrupt;
+            };
+            return self
+                .advance_existing_transition(
+                    conflict_id,
+                    transition_id,
+                    transition,
+                    recipient_staged_mls_state.to_vec(),
+                    recovery_package.clone(),
+                )
+                .await;
         }
         let Some(peer_device_id) = conflict.evidence_peer_device_ids.iter().next().cloned() else {
             return RecoverMembershipConflictOutcome::Corrupt;
         };
-        let conflict_id = conflict.conflict_id;
         let request = MembershipBranchRecoveryRequest {
             peer_device_id,
             conflict_id,
@@ -285,6 +310,86 @@ impl RecoverMembershipConflictUseCase {
             .await
         {
             Ok(_) => RecoverMembershipConflictOutcome::Completed,
+            Err(MembershipLedgerError::Conflict) => RecoverMembershipConflictOutcome::StableFailure,
+            Err(error) => map_ledger_error(error),
+        }
+    }
+
+    async fn advance_existing_transition(
+        &self,
+        conflict_id: uc_core::membership::MembershipConflictId,
+        transition_id: [u8; 32],
+        transition: uc_core::membership::MembershipBranchTransitionV1,
+        recipient_staged_mls_state: Vec<u8>,
+        recovery_package: uc_core::membership::MembershipBranchRecoveryPackageV1,
+    ) -> RecoverMembershipConflictOutcome {
+        let target_history =
+            match uc_core::membership::VersionedMembershipHistory::decode_persisted_v2(
+                recovery_package.target_membership_history(),
+                self.verifier.as_ref(),
+            ) {
+                Ok(history) => history,
+                Err(_) => return RecoverMembershipConflictOutcome::StableFailure,
+            };
+        let next = match self
+            .transition_executor
+            .advance_membership_branch_transition(AdvanceMembershipBranchTransitionInput {
+                transition: transition.clone(),
+                recipient_staged_mls_state,
+                recovery_package,
+                target_history,
+            })
+            .await
+        {
+            Ok(next) => next,
+            Err(AdvanceMembershipBranchTransitionError::Unavailable { .. }) => {
+                return RecoverMembershipConflictOutcome::Deferred;
+            }
+            Err(AdvanceMembershipBranchTransitionError::Invalid { .. }) => {
+                return RecoverMembershipConflictOutcome::StableFailure;
+            }
+            Err(AdvanceMembershipBranchTransitionError::RecoveryRequired { .. }) => {
+                return RecoverMembershipConflictOutcome::Corrupt;
+            }
+        };
+        if transition.advance(next.phase()).as_ref() != Some(&next) {
+            return RecoverMembershipConflictOutcome::StableFailure;
+        }
+        if let Err(error) = self.ledger.load_verified().await {
+            return map_ledger_error(error);
+        }
+        let completed = next.phase() == MembershipBranchTransitionPhaseV1::Completed;
+        match self
+            .ledger
+            .compare_and_commit(move |record| {
+                let current = record
+                    .membership_branch_transitions
+                    .get_mut(&transition_id)
+                    .ok_or(MembershipLedgerError::Conflict)?;
+                if current != &transition {
+                    return Err(MembershipLedgerError::Conflict);
+                }
+                *current = next;
+                if completed {
+                    let conflict = record
+                        .membership_conflicts
+                        .get_mut(&conflict_id)
+                        .ok_or(MembershipLedgerError::Conflict)?;
+                    if conflict.transition_id != Some(transition_id) {
+                        return Err(MembershipLedgerError::Conflict);
+                    }
+                    conflict.status = MembershipConflictStatus::Completed;
+                    record
+                        .membership_branch_recovery_sessions
+                        .remove(&transition_id)
+                        .ok_or(MembershipLedgerError::Conflict)?;
+                }
+                Ok(())
+            })
+            .await
+        {
+            Ok(_) if completed => RecoverMembershipConflictOutcome::Completed,
+            Ok(_) => RecoverMembershipConflictOutcome::Deferred,
             Err(MembershipLedgerError::Conflict) => RecoverMembershipConflictOutcome::StableFailure,
             Err(error) => map_ledger_error(error),
         }

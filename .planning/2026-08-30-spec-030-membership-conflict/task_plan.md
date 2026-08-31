@@ -17,18 +17,18 @@
 - [x] Phase 1：Core 稳定 conflict/branch id、选择资格与转换矩阵。
 - [x] Phase 2：Ledger 加密 conflict record 与 Diverged 同 commit。
 - [x] Phase 3：Application 唯一 resolve use case、幂等选择与恢复调度。
-- [ ] Phase 4：同 lineage branch generation transition 与恢复包 adapter。
+- [x] Phase 4：同 lineage branch generation transition 与恢复包 adapter。
 - [ ] Phase 5：Engine、iOS、Android、HarmonyOS 同版本 contract。
 - [ ] Phase 6：Desktop F0-F13、20 个固定 chaos seed 与 Spec 029 回归。
 - [ ] Phase 7：架构文档、代码审查、全量门禁与原子提交。
 
 ## Current Slice
 
-Phase 4：target Infra recovery material adapter 已替换 Engine deferred 实现；下一切片在 recipient 侧消费已验证恢复包和已加密保存的 staged MLS state，并接入 generation transition。
+Phase 5：为 Engine、iOS、Android 与 HarmonyOS 增加同版本的冲突查询和选择 contract。
 
 ## Next Step
 
-实现 recipient 恢复材料安装：解封目标内容密钥目录，安装 recipient 自己的 staged MLS snapshot，并把结果交给唯一 generation transition 流程推进。
+先写 Engine 稳定 operation/result/error 的 contract 红测，再接入三个移动绑定的同版本薄映射。
 
 ## Constraints
 
@@ -49,3 +49,4 @@ Phase 4：target Infra recovery material adapter 已替换 Engine deferred 实�
 | workspace 全量测试的 3 个既有 clipboard/search host-adapter 用例失败 | 1 | 成员套件与 all-target check 均通过；单独重跑首项仍返回 QueryHistory unavailable 1243，记录为本切片外既有失败，不误报全量通过。 |
 | `VerifiableGroupInfo` 无法从 OpenMLS prelude 解析 | 1 | 使用公开的 `openmls::messages::group_info::VerifiableGroupInfo` 显式导入。 |
 | 新增两阶段端口后测试替身缺少 GroupInfo 方法和 external commit | 1 | 补齐显式 begin/complete 输入与所有 passive/test adapter，实现阶段边界。 |
+| generation executor 首次真实测试缺少 legacy bootstrap repository | 1 | 复用同一 SQLite security store 同时实现 revocation 与 legacy bootstrap repository，建立真实 sponsor MLS。 |

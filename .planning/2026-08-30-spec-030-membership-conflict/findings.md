@@ -69,3 +69,9 @@
 - target 若在 material port 内直接持久化 external commit，然后由 issuer 才签包，会在“MLS 已前进、幂等包未保存”之间留下崩溃窗口；重试同一 commit 将无法可靠恢复。
 - 正确顺序必须是：对当前 material 无副作用计算 staged target state 与 wrapping key，构造并签署 package，原子保存 TargetPrepared，提交 staged security state，标记 TargetCommitted，最后返回缓存 package。
 - 因此 target material port 需要拆成 prepare/commit 两个窄动作，issuer 是该事务的唯一负责人；不能把整个事务藏进 Infra adapter。
+
+# 2026-08-31 · Generation promote checkpoint
+
+- target database 必须在 manifest 提升前包含 target history、安全材料、成员投影以及当前 `TargetStaged` transition checkpoint；否则动态连接切到目标库后 Application 无法继续 CAS。
+- Infra 在提升并替换动态数据库后返回，Application 必须重新从当前数据库加载 ledger，再提交 `Promoted`；不能继续使用切换前的 history digest。
+- package 过期只约束首次接受。nonce 已消费并建立 transition 后，重启续跑只重新验签目标历史，不因长时间文件迁移导致已经接受的事务过期。
