@@ -28,7 +28,7 @@ Phase 6：Desktop F0-F13、20 个固定 chaos seed 与 Spec 029 回归（Phase 5
 
 ## Next Step
 
-F0 已完成；下一切片按规格进入 F1，先写确定性红测，再实现对应故障语义。
+F0、F1 已完成；正在执行 F1 全量交付门禁，之后进入 F2。
 
 ## Constraints
 
@@ -54,3 +54,6 @@ F0 已完成；下一切片按规格进入 F1，先写确定性红测，再实�
 | workspace check 发现移动 probe host 对新 `OperationResult` 未穷举 | 1 | probe host 同步增加查询/选择命令和完整结果映射，使真实移动验收入口覆盖 Phase 5 contract。 |
 | F0 首次运行在共同基线断言失败 | 1 | A 准入 C 后 B 的反熵尚未完成；在 Partition 前有界等待 A/B/C 的 branch、head 与三成员视图完全一致。 |
 | F0 Heal 后只有一侧出现冲突 | 2 | 将单向证据 ACK 改成同一次往返双向交换完整签名证据，双方独立验证并原子保存冲突后同时隔离。 |
+| F1 移除历史生效但 MLS epoch 未前进 | 1 | 在新本机移除 effect payload 中保存事件与保留接收者，由可重启 SecurityApplied 阶段幂等调用可靠 MLS revocation。 |
+| F1 统一设备组查询持续 unavailable | 1 | Removed 成员事实已删除且 observation 缺失；查询仅为非 Active 历史设备合成 Offline，Active 缺失继续失败。 |
+| F1 保留成员 epoch 不收敛 | 1 | 统一 group-update 维护入口聚合 Space outbox 与撤销 stage outbox；确认按原 revocation 事务推进，避免双份状态。 |

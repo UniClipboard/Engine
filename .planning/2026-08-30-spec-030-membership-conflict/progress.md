@@ -210,3 +210,11 @@
 - 修复 transport 后第二轮只由先收到完整证据的一侧记录冲突，暴露先隔离的一端会阻断另一端依赖后续反向调度的非确定性。
 - 最终协议在同一次摘要往返中双向交换有界完整签名历史；双方各自验证 sibling 关系和发送者，并各自在一次 ledger CAS 中同时写入唯一冲突和 `Diverged` peer 关系，远端历史从不应用到当前分支。
 - 五节点 F0 已通过：两个分支各四名有效成员且 MLS epoch 前进，分支内精确正文成功，分区期间和 Heal 后跨分支正文均失败，A/B 各公开一个统一设备组选择且没有自动 winner。
+
+## 2026-08-31 · F1 remove/add sibling
+
+- 声明式驱动新增只调用 Engine `RemoveMember` 的 `Remove` 动作；首轮真实红测发现成员历史已移除 D，但本地 MLS epoch 未前进。
+- 本地移除现在把已签名事件和保留接收者封装进新 effect payload，由可重启 effect executor 调用已有可靠 MLS revocation；没有改变既有 ledger struct 的 postcard 布局。
+- 第二个红点是可靠撤销删除当前成员事实后，QueryDeviceTrust 把 Removed 设备缺少 observation 误判为整体 unavailable；现仅为非 Active 设备合成 Offline，Active 缺失仍失败。
+- 第三个红点是撤销更新只存在于 `RevocationStage`，后台维护只读取通用 Space outbox；统一待投递查询现聚合两类持久欠账，确认时回写原撤销事务，不复制确认状态。
+- F1 最终五节点测试已通过：保留成员 epoch 精确收敛，两分支成员视图分别保持移除/新增语义，分支内正文成功，Removed 目标与 Heal 后跨分支正文关闭式失败，且没有自动 winner。

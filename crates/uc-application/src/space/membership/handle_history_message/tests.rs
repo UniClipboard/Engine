@@ -29,6 +29,7 @@ struct MemoryLedgerRepository {
 async fn sibling_summary_requests_verified_evidence_and_records_one_conflict() {
     let (local, local_credential) = member_facts("device-a", 0x41);
     let (peer, peer_credential) = member_facts("device-b", 0x42);
+    let (removed, removed_credential) = member_facts("device-c", 0x43);
     let base = VersionedMembershipHistory::from_activation_baseline(
         MembershipActivationBaselineV2::Established {
             lineage_id: "space-a".to_owned(),
@@ -37,6 +38,7 @@ async fn sibling_summary_requests_verified_evidence_and_records_one_conflict() {
             current_members: vec![
                 (local.clone(), local_credential.clone()),
                 (peer.clone(), peer_credential.clone()),
+                (removed.clone(), removed_credential),
             ],
         },
     )
@@ -56,12 +58,7 @@ async fn sibling_summary_requests_verified_evidence_and_records_one_conflict() {
     let mut local_history = base.clone();
     local_history
         .verify_and_receive_event(
-            add_event(
-                &local_history,
-                &local_author,
-                admission("device-c", MembershipCredential::new(1, vec![0x43; 32])),
-                0x51,
-            ),
+            remove_event(&local_history, &local_author, removed.member_instance, 0x51),
             &AcceptingVerifier,
         )
         .unwrap();
@@ -259,6 +256,38 @@ fn add_event(
         [marker.wrapping_add(1); 32],
         vec![marker],
         Some([marker.wrapping_add(2); 32]),
+        vec![marker],
+    );
+    event.signature = vec![marker];
+    event
+}
+
+fn remove_event(
+    history: &VersionedMembershipHistory,
+    author: &MembershipAdmissionV2,
+    removed_member: uc_core::membership::MemberInstanceId,
+    marker: u8,
+) -> MembershipEventV2 {
+    let parent = history.current_head();
+    let operation = MembershipOperationV2::RemoveDevice {
+        member: removed_member,
+    };
+    let mut event = MembershipEventV2::new(
+        MEMBERSHIP_EVENT_FORMAT_V2,
+        history.lineage_id().to_owned(),
+        parent,
+        parent.map(|id| history.depth(id).unwrap() + 1).unwrap_or(0),
+        [marker; 16],
+        author.facts.member_instance,
+        author.membership_credential.credential_id,
+        author.membership_credential.signature_algorithm_version,
+        operation.clone(),
+        history
+            .expected_resulting_members_digest(parent, &operation)
+            .unwrap(),
+        [marker.wrapping_add(1); 32],
+        Vec::new(),
+        None,
         vec![marker],
     );
     event.signature = vec![marker];

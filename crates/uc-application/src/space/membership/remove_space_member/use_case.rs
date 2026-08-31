@@ -9,8 +9,8 @@ use crate::space::membership::RecoverMembershipEffectsPort;
 use crate::space::membership::WakeSpaceMembershipMaintenancePort;
 use crate::space::membership::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
 use crate::space::membership::{
-    MembershipEffectKind, MembershipEffectPhase, MembershipLedger, MembershipLedgerError,
-    PendingMembershipEffect, RestrictedMembershipDelivery,
+    InitiatedMembershipRemovalEffect, MembershipEffectKind, MembershipEffectPhase,
+    MembershipLedger, MembershipLedgerError, PendingMembershipEffect, RestrictedMembershipDelivery,
 };
 
 use super::{MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult};
@@ -111,8 +111,7 @@ impl RemoveSpaceMemberUseCase {
         let change_id = event.event_id();
         let event_for_commit = event.clone();
         let target_for_commit = target_device_id.clone();
-        let event_payload =
-            postcard::to_stdvec(&event).map_err(|_| RemoveSpaceMemberError::RecoveryRequired)?;
+        let local_device_for_commit = local_device_id.clone();
         let expected_revision = record.revision;
         let expected_history_digest = snapshot.history_digest();
         let (committed, ()) = self
@@ -128,6 +127,20 @@ impl RemoveSpaceMemberUseCase {
                     {
                         return Err(MembershipLedgerError::Corrupt);
                     }
+                    let retained_device_ids = history
+                        .effective_members()
+                        .into_iter()
+                        .filter_map(|member| history.admission_facts_for(member))
+                        .map(|facts| facts.device_id.clone())
+                        .filter(|device_id| {
+                            device_id != &target_for_commit && device_id != &local_device_for_commit
+                        })
+                        .collect::<Vec<_>>();
+                    let effect_payload = postcard::to_stdvec(&InitiatedMembershipRemovalEffect {
+                        event: event_for_commit.clone(),
+                        retained_device_ids,
+                    })
+                    .map_err(|_| MembershipLedgerError::Corrupt)?;
                     record.pending_effects.insert(
                         *change_id.as_bytes(),
                         PendingMembershipEffect {
@@ -135,7 +148,7 @@ impl RemoveSpaceMemberUseCase {
                             kind: MembershipEffectKind::RemoveDevice,
                             phase: MembershipEffectPhase::Prepared,
                             affected_device_ids: vec![target_for_commit.clone()],
-                            payload: event_payload,
+                            payload: effect_payload,
                         },
                     );
                     record

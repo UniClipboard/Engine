@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use uc_core::membership::{MembershipDecisionV2, MembershipEventV2, VersionedMembershipHistory};
+use uc_core::membership::{MembershipDecisionV2, VersionedMembershipHistory};
 
 use crate::space::membership::{
     MembershipMaintenanceReport, MembershipMaintenanceStepOutcome, RecoverMembershipEffectsPort,
@@ -219,7 +219,7 @@ fn effect_history_depth(
     effect: &PendingMembershipEffect,
     history: &VersionedMembershipHistory,
 ) -> Option<u64> {
-    if let Ok(event) = postcard::from_bytes::<MembershipEventV2>(&effect.payload) {
+    if let Some(event) = effect.membership_event() {
         return (event.event_id().as_bytes() == &effect.event_id).then_some(event.parent_depth);
     }
     let decision = postcard::from_bytes::<MembershipDecisionV2>(&effect.payload).ok()?;

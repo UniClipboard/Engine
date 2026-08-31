@@ -21,9 +21,10 @@ pub(crate) use initializer::InitializeSpaceMembershipUseCase;
 #[cfg(test)]
 pub use model::MembershipConflictRecord;
 pub use model::{
-    InboundMembershipTransfer, LoadedMembershipLedger, MembershipBranchRecoverySession,
-    MembershipBranchRecoverySessionState, MembershipConflictStatus, MembershipEffectKind,
-    MembershipEffectPhase, MembershipLedgerMutation, PeerHistorySyncOutcome, PeerHistorySyncState,
+    InboundMembershipTransfer, InitiatedMembershipRemovalEffect, LoadedMembershipLedger,
+    MembershipBranchRecoverySession, MembershipBranchRecoverySessionState,
+    MembershipConflictStatus, MembershipEffectKind, MembershipEffectPhase,
+    MembershipLedgerMutation, PeerHistorySyncOutcome, PeerHistorySyncState,
     PeerReconciliationRecord, PendingMembershipEffect, RestrictedMembershipDelivery,
 };
 pub use repository::{CommitMembershipLedgerPort, LoadMembershipLedgerPort};

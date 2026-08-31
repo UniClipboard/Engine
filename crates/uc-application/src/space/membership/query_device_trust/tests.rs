@@ -169,6 +169,22 @@ struct StaticObservations {
 
 struct StaticCurrentJoin(Option<CurrentJoinStatus>);
 
+struct LocalOnlyObservations;
+
+#[async_trait]
+impl LoadDeviceTrustObservationsPort for LocalOnlyObservations {
+    async fn load(
+        &self,
+        _device_ids: &[DeviceId],
+    ) -> Result<Vec<DeviceTrustObservation>, QueryDeviceTrustError> {
+        Ok(vec![DeviceTrustObservation {
+            device_id: DeviceId::new("device-a"),
+            display_name: Some("Local A".to_owned()),
+            reachability: ReachabilityState::Online,
+        }])
+    }
+}
+
 #[async_trait]
 impl LoadCurrentJoinStatusPort for StaticCurrentJoin {
     async fn load_current_join(&self) -> Result<Option<CurrentJoinStatus>, QueryDeviceTrustError> {
@@ -224,6 +240,65 @@ async fn profile_without_a_space_returns_an_explicit_empty_status() {
     assert!(status.local_device_id.is_none());
     assert!(status.devices.is_empty());
     assert!(status.current_change.is_none());
+}
+
+#[tokio::test]
+async fn removed_device_without_current_observation_is_reported_offline() {
+    let mut loaded = active_ledger();
+    let mut history = VersionedMembershipHistory::decode_persisted_v2(
+        loaded.membership_history.as_deref().unwrap(),
+        &AcceptingVerifier,
+    )
+    .unwrap();
+    let local_device_id = DeviceId::new("device-a");
+    let local_member = history
+        .effective_member_for_device(&local_device_id)
+        .unwrap();
+    let local_credential = history.credential_for(local_member).unwrap().clone();
+    let peer_device_id = DeviceId::new("device-b");
+    let peer_member = history
+        .effective_member_for_device(&peer_device_id)
+        .unwrap();
+    let mut removal = history
+        .create_unsigned_local_removal_event(
+            local_member,
+            &local_credential,
+            peer_member,
+            [0x41; 16],
+            [0x42; 32],
+        )
+        .unwrap();
+    removal.signature = vec![0x43];
+    history
+        .verify_and_receive_event(removal, &AcceptingVerifier)
+        .unwrap();
+    loaded.membership_history = Some(history.encode_persisted_v2().unwrap());
+    loaded
+        .peer_reconciliation
+        .get_mut(&peer_device_id)
+        .unwrap()
+        .relationship = MembershipHistoryRelationship::PendingRemovalDecision;
+    let repository = Arc::new(MemoryLedgerRepository { loaded });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let query = QueryDeviceTrustUseCase::new(
+        ledger,
+        Arc::new(LocalOnlyObservations),
+        Arc::new(StaticCurrentJoin(None)),
+    );
+
+    let status = query.execute().await.unwrap();
+
+    let removed = status
+        .devices
+        .iter()
+        .find(|device| device.device_id == peer_device_id)
+        .unwrap();
+    assert_eq!(removed.membership, DeviceTrustMembership::Removed);
+    assert_eq!(removed.reachability, ReachabilityState::Offline);
 }
 
 #[tokio::test]

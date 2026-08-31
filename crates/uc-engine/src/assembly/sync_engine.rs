@@ -787,6 +787,7 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&space_setup.membership_session),
         Arc::clone(&space_setup.current_member_signatures),
         Arc::clone(&deps.security.space_access_ports.group_revocation),
+        Arc::clone(&deps.system.clock),
     ));
     let local_device_id = deps.device.device_identity.current_device_id();
     let local_identity: Arc<dyn LocalIdentityPort> = identity_store;

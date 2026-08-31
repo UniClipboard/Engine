@@ -22,11 +22,11 @@ pub use ledger::MembershipConflictRecord;
 pub use ledger::{
     ActivateMembershipEffectPort, ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort,
     CommitMembershipLedgerPort, CurrentSpaceMemberScope, CurrentSpaceMemberScopeError,
-    CurrentSpaceMemberScopePort, InboundMembershipTransfer, LoadMembershipLedgerPort,
-    LoadedMembershipLedger, MembershipBranchRecoverySession, MembershipBranchRecoverySessionState,
-    MembershipConflictStatus, MembershipEffectExecutionError, MembershipEffectKind,
-    MembershipEffectPhase, MembershipLedgerError, MembershipLedgerMutation, PausedSpaceMember,
-    PeerHistorySyncOutcome, PeerHistorySyncState, PeerReconciliationRecord,
+    CurrentSpaceMemberScopePort, InboundMembershipTransfer, InitiatedMembershipRemovalEffect,
+    LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipBranchRecoverySession,
+    MembershipBranchRecoverySessionState, MembershipConflictStatus, MembershipEffectExecutionError,
+    MembershipEffectKind, MembershipEffectPhase, MembershipLedgerError, MembershipLedgerMutation,
+    PausedSpaceMember, PeerHistorySyncOutcome, PeerHistorySyncState, PeerReconciliationRecord,
     PendingMembershipEffect, RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
     RestrictedMembershipDeliveryPort, SpaceMemberPauseReason,
 };

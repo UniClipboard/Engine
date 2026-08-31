@@ -1477,11 +1477,17 @@ impl DefaultSpaceAccessAdapter {
             .session
             .current_space_id()
             .map_err(|error| KeyEpochError::Repository(error.to_string()))?;
-        Ok(repository
+        let mut pending = repository
             .load_space_material(&space_id)
             .await?
             .map(|material| material.pending_group_updates().to_vec())
-            .unwrap_or_default())
+            .unwrap_or_default();
+        for record in repository.list_incomplete_revocations().await? {
+            if record.space_id() == &space_id {
+                pending.extend(self.pending_group_updates(record.revocation_id()).await?);
+            }
+        }
+        Ok(pending)
     }
 
     async fn acknowledge_space_group_update(
@@ -1500,11 +1506,27 @@ impl DefaultSpaceAccessAdapter {
         let Some(mut material) = repository.load_space_material(&space_id).await? else {
             return Ok(false);
         };
-        if !material.acknowledge_group_update(update_id, now_ms) {
-            return Ok(false);
+        if material.acknowledge_group_update(update_id, now_ms) {
+            repository.save_space_material(&material).await?;
+            return Ok(true);
         }
-        repository.save_space_material(&material).await?;
-        Ok(true)
+        for record in repository.list_incomplete_revocations().await? {
+            if record.space_id() != &space_id {
+                continue;
+            }
+            let Some(update) = self
+                .pending_group_updates(record.revocation_id())
+                .await?
+                .into_iter()
+                .find(|update| update.update_id() == update_id)
+            else {
+                continue;
+            };
+            self.acknowledge_group_update(record.revocation_id(), update.recipient(), now_ms)
+                .await?;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     async fn defer_space_group_update(
@@ -1523,11 +1545,22 @@ impl DefaultSpaceAccessAdapter {
         let Some(mut material) = repository.load_space_material(&space_id).await? else {
             return Ok(false);
         };
-        if !material.defer_group_update(update_id, now_ms) {
-            return Ok(false);
+        if material.defer_group_update(update_id, now_ms) {
+            repository.save_space_material(&material).await?;
+            return Ok(true);
         }
-        repository.save_space_material(&material).await?;
-        Ok(true)
+        for record in repository.list_incomplete_revocations().await? {
+            if record.space_id() == &space_id
+                && self
+                    .pending_group_updates(record.revocation_id())
+                    .await?
+                    .iter()
+                    .any(|update| update.update_id() == update_id)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     async fn group_revocation_result(
@@ -5545,6 +5578,10 @@ mod admission_tests {
             .revoke_group_member(&DeviceId::new("charlie"), &[DeviceId::new("bob")], 200)
             .await
             .unwrap();
+        let pending_updates = sponsor.pending_space_group_updates().await.unwrap();
+        assert_eq!(pending_updates.len(), 1);
+        assert_eq!(pending_updates[0].recipient(), &DeviceId::new("bob"));
+        assert_eq!(pending_updates[0].revocation_id(), result.revocation_id());
         let stage = repository
             .load_staged_revocation(result.revocation_id().unwrap())
             .await

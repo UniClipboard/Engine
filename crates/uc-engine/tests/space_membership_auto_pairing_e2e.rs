@@ -10,7 +10,7 @@ use uc_engine::{
     HostCapabilityError, HostCapabilityErrorCategory, HostClipboard, HostClipboardSnapshot,
     HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage,
     JoinSpaceInput, JoinSpaceStatusSummary, ListHistoryEntriesInput, Operation, OperationResult,
-    SecretString, SendTextInput,
+    RemoveMemberInput, SecretString, SendTextInput,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -229,6 +229,10 @@ enum TopologyAction<'a> {
         sponsor: &'a str,
         joiner: &'a str,
     },
+    Remove {
+        sponsor: &'a str,
+        target: &'a str,
+    },
     AssertSnapshot {
         node: &'a str,
         active_members: usize,
@@ -247,6 +251,139 @@ enum TopologyAction<'a> {
     Heal {
         nodes: &'a [&'a str],
     },
+}
+
+// F1：共同父 head 上并发移除与新增，两个合法分支必须保持各自成员语义。
+#[tokio::test(flavor = "multi_thread", worker_threads = 10)]
+async fn f1_remove_and_add_from_parent_head_preserve_branch_membership() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let mut topology = MembershipTopology::new(rendezvous.uri());
+    topology
+        .run(&[
+            TopologyAction::Start { node: "A" },
+            TopologyAction::Start { node: "B" },
+            TopologyAction::Start { node: "C" },
+            TopologyAction::Start { node: "D" },
+            TopologyAction::Start { node: "E" },
+            TopologyAction::Create { node: "A" },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "B",
+            },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "C",
+            },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "D",
+            },
+        ])
+        .await;
+    topology
+        .wait_for_equivalent_branch(&["A", "B", "C", "D"], 4)
+        .await;
+    let baseline = topology.diagnostics("A").await;
+
+    topology
+        .run(&[
+            TopologyAction::Partition {
+                left: &["A", "C", "D"],
+                right: &["B", "E"],
+            },
+            TopologyAction::Remove {
+                sponsor: "A",
+                target: "D",
+            },
+            TopologyAction::Join {
+                sponsor: "B",
+                joiner: "E",
+            },
+        ])
+        .await;
+
+    let removed_branch = topology.diagnostics("A").await;
+    let added_branch = topology.diagnostics("B").await;
+    assert_ne!(removed_branch.branch_id, added_branch.branch_id);
+    assert_ne!(removed_branch.head_event_id, added_branch.head_event_id);
+    assert_eq!(removed_branch.effective_member_count, 3);
+    assert_eq!(added_branch.effective_member_count, 5);
+    assert!(removed_branch.group_epoch > baseline.group_epoch);
+    assert!(added_branch.group_epoch > baseline.group_epoch);
+    topology
+        .wait_for_group_epoch(&["C"], removed_branch.group_epoch)
+        .await;
+    topology
+        .wait_for_group_epoch(&["E"], added_branch.group_epoch)
+        .await;
+
+    let left_text = "F1 removal branch transfer";
+    assert_eq!(topology.send("A", "C", left_text).await.total_accepted, 1);
+    wait_for_received_text(topology.engine("C"), left_text).await;
+    let right_text = "F1 addition branch transfer";
+    assert_eq!(topology.send("B", "E", right_text).await.total_accepted, 1);
+    wait_for_received_text(topology.engine("E"), right_text).await;
+    let removed_text = "F1 removed member must not receive";
+    assert_eq!(
+        topology.send("A", "D", removed_text).await.total_accepted,
+        0
+    );
+    assert!(!receiver_has_exact_text(topology.engine("D"), removed_text).await);
+
+    topology
+        .run(&[TopologyAction::Heal {
+            nodes: &["A", "B", "C", "D", "E"],
+        }])
+        .await;
+    for node in ["A", "B", "C", "D", "E"] {
+        wait_for_peer_refresh(topology.engine(node), node).await;
+    }
+    topology.assert_snapshot("A", 3, 1).await;
+    topology.assert_snapshot("B", 5, 1).await;
+    let choices_a = topology.device_group_choices("A").await;
+    let choices_b = topology.device_group_choices("B").await;
+    let d_device_id = topology.device_ids.get("D").unwrap();
+    let e_device_id = topology.device_ids.get("E").unwrap();
+    assert_eq!(
+        choices_a
+            .device_trust
+            .devices
+            .iter()
+            .find(|device| &device.device_id == d_device_id)
+            .map(|device| device.membership),
+        Some(uc_engine::DeviceMembershipSummary::Removed)
+    );
+    assert_eq!(
+        choices_b
+            .device_trust
+            .devices
+            .iter()
+            .find(|device| &device.device_id == d_device_id)
+            .map(|device| device.membership),
+        Some(uc_engine::DeviceMembershipSummary::Active)
+    );
+    assert_eq!(
+        choices_b
+            .device_trust
+            .devices
+            .iter()
+            .find(|device| &device.device_id == e_device_id)
+            .map(|device| device.membership),
+        Some(uc_engine::DeviceMembershipSummary::Active)
+    );
+    let healed_a = topology.diagnostics("A").await;
+    let healed_b = topology.diagnostics("B").await;
+    assert_eq!(healed_a.pending_conflict_count, 1);
+    assert_eq!(healed_b.pending_conflict_count, 1);
+    assert_ne!(healed_a.branch_id, healed_b.branch_id);
+    let isolated_text = "F1 healed sibling branches remain isolated";
+    assert_eq!(
+        topology.send("A", "E", isolated_text).await.total_accepted,
+        0
+    );
+    assert!(!receiver_has_exact_text(topology.engine("E"), isolated_text).await);
+    topology.shutdown().await;
 }
 
 struct MembershipTopology {
@@ -274,6 +411,7 @@ impl MembershipTopology {
                 TopologyAction::Start { node } => self.start(node).await,
                 TopologyAction::Create { node } => self.create(node).await,
                 TopologyAction::Join { sponsor, joiner } => self.join(sponsor, joiner).await,
+                TopologyAction::Remove { sponsor, target } => self.remove(sponsor, target).await,
                 TopologyAction::AssertSnapshot {
                     node,
                     active_members,
@@ -331,6 +469,22 @@ impl MembershipTopology {
         self.space_ids.insert(joiner.to_owned(), space_id);
         self.device_ids
             .insert(joiner.to_owned(), joined.self_device_id);
+    }
+
+    async fn remove(&self, sponsor: &str, target: &str) {
+        let target_device_id = self
+            .device_ids
+            .get(target)
+            .unwrap_or_else(|| panic!("target {target} has no device id"))
+            .clone();
+        let result = self
+            .engine(sponsor)
+            .execute(Operation::RemoveMember(RemoveMemberInput {
+                device_id: target_device_id,
+            }))
+            .await
+            .unwrap_or_else(|error| panic!("node {sponsor} remove failed: {error}"));
+        assert!(matches!(result, OperationResult::DeviceTrust(_)));
     }
 
     async fn partition(&self, left: &[&str], right: &[&str]) {
@@ -414,6 +568,18 @@ impl MembershipTopology {
         summary
     }
 
+    async fn device_group_choices(&self, node: &str) -> uc_engine::DeviceGroupChoicesSummary {
+        let result = self
+            .engine(node)
+            .execute(Operation::QueryDeviceGroupChoices)
+            .await
+            .unwrap_or_else(|error| panic!("node {node} device group query failed: {error}"));
+        let OperationResult::DeviceGroupChoices(summary) = result else {
+            panic!("node {node} returned an unexpected device group result");
+        };
+        summary
+    }
+
     async fn wait_for_equivalent_branch(&self, nodes: &[&str], effective_members: u32) {
         let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
         loop {
@@ -439,6 +605,26 @@ impl MembershipTopology {
         }
     }
 
+    async fn wait_for_group_epoch(&self, nodes: &[&str], expected_epoch: u64) {
+        let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+        loop {
+            let mut all_match = true;
+            for node in nodes {
+                if self.diagnostics(node).await.group_epoch != expected_epoch {
+                    all_match = false;
+                }
+            }
+            if all_match {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "nodes did not reach the expected group epoch"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     async fn assert_snapshot(
         &self,
         node: &str,
@@ -447,28 +633,38 @@ impl MembershipTopology {
     ) {
         let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
         loop {
-            if let Ok(OperationResult::DeviceGroupChoices(summary)) = self
+            let observation = match self
                 .engine(node)
                 .execute(Operation::QueryDeviceGroupChoices)
                 .await
             {
-                let active_members = summary
-                    .device_trust
-                    .devices
-                    .iter()
-                    .filter(|device| {
-                        device.membership == uc_engine::DeviceMembershipSummary::Active
-                    })
-                    .count();
-                if active_members == expected_active_members
-                    && summary.issues.len() == expected_pending_choices
-                {
-                    return;
+                Ok(OperationResult::DeviceGroupChoices(summary)) => {
+                    let active_members = summary
+                        .device_trust
+                        .devices
+                        .iter()
+                        .filter(|device| {
+                            device.membership == uc_engine::DeviceMembershipSummary::Active
+                        })
+                        .count();
+                    let observation = format!(
+                        "active={active_members}, issues={}, revision={}",
+                        summary.issues.len(),
+                        summary.revision
+                    );
+                    if active_members == expected_active_members
+                        && summary.issues.len() == expected_pending_choices
+                    {
+                        return;
+                    }
+                    observation
                 }
-            }
+                Ok(_) => "unexpected result".to_owned(),
+                Err(error) => format!("error={error}"),
+            };
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "node {node} did not reach the expected public snapshot"
+                "node {node} did not reach the expected public snapshot; last observation: {observation}"
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }

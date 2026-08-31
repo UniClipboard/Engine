@@ -314,6 +314,9 @@ async fn removal_commits_all_local_facts_once_before_returning_success() {
         .unwrap();
     assert_eq!(effect.kind, MembershipEffectKind::RemoveDevice);
     assert_eq!(effect.phase, MembershipEffectPhase::Prepared);
+    let initiated = effect.initiated_removal().unwrap();
+    assert_eq!(initiated.event.event_id(), result.change_id);
+    assert!(initiated.retained_device_ids.is_empty());
     let relationship = persisted
         .peer_reconciliation
         .get(&DeviceId::new("device-b"))

@@ -5,13 +5,14 @@ use uc_core::membership::{
     MemberInstanceId, MembershipHistoryRelationship, MembershipOperationV2,
     VersionedMembershipHistory,
 };
+use uc_core::ports::ReachabilityState;
 
 use crate::space::membership::MembershipLedger;
 
 use super::{
-    DeviceTrustDevice, DeviceTrustMembership, DeviceTrustRelationship, DeviceTrustStatus,
-    DeviceTrustSyncState, LoadCurrentJoinStatusPort, LoadDeviceTrustObservationsPort,
-    PendingDeviceTrustChange, QueryDeviceTrustError,
+    DeviceTrustDevice, DeviceTrustMembership, DeviceTrustObservation, DeviceTrustRelationship,
+    DeviceTrustStatus, DeviceTrustSyncState, LoadCurrentJoinStatusPort,
+    LoadDeviceTrustObservationsPort, PendingDeviceTrustChange, QueryDeviceTrustError,
 };
 
 pub(crate) struct QueryDeviceTrustUseCase {
@@ -85,10 +86,6 @@ impl QueryDeviceTrustUseCase {
                 return Err(QueryDeviceTrustError::RecoveryRequired);
             }
         }
-        if observations_by_device.len() != device_ids.len() {
-            return Err(QueryDeviceTrustError::Unavailable);
-        }
-
         let mut paused_by_device = scope
             .paused_peer_devices
             .iter()
@@ -103,9 +100,17 @@ impl QueryDeviceTrustUseCase {
                 history.member_for_device(device_id, &device_ids)
             };
             let facts = member.and_then(|member| history.admission_facts_for(member));
-            let observation = observations_by_device
-                .remove(device_id)
-                .ok_or(QueryDeviceTrustError::Unavailable)?;
+            let observation = match observations_by_device.remove(device_id) {
+                Some(observation) => observation,
+                None if member.is_none_or(|member| !history.active_members().contains(&member)) => {
+                    DeviceTrustObservation {
+                        device_id: device_id.clone(),
+                        display_name: None,
+                        reachability: ReachabilityState::Offline,
+                    }
+                }
+                None => return Err(QueryDeviceTrustError::Unavailable),
+            };
             let membership = if is_local {
                 if scope.local_member_active {
                     DeviceTrustMembership::Active

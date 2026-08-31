@@ -119,6 +119,26 @@ pub struct PendingMembershipEffect {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InitiatedMembershipRemovalEffect {
+    pub event: uc_core::membership::MembershipEventV2,
+    pub retained_device_ids: Vec<DeviceId>,
+}
+
+impl PendingMembershipEffect {
+    pub fn membership_event(&self) -> Option<uc_core::membership::MembershipEventV2> {
+        postcard::from_bytes(&self.payload).ok().or_else(|| {
+            postcard::from_bytes::<InitiatedMembershipRemovalEffect>(&self.payload)
+                .ok()
+                .map(|effect| effect.event)
+        })
+    }
+
+    pub fn initiated_removal(&self) -> Option<InitiatedMembershipRemovalEffect> {
+        postcard::from_bytes(&self.payload).ok()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MembershipBranchRecoverySessionState {
     RecipientPrepared {
         external_commit: Vec<u8>,
