@@ -54,15 +54,11 @@ enum ProbeCommand {
     },
     IssueInvitation,
     ListDevices,
-    QueryDeviceTrust,
-    QueryMembershipConflicts,
-    ResolveMembershipConflict {
-        conflict_id: String,
-        target_branch_id: String,
-    },
-    DecideDeviceTrustChange {
-        change_id: String,
-        choice: uc_engine::DeviceTrustChoiceSummary,
+    QueryDeviceGroupChoices,
+    ChooseDeviceGroup {
+        issue_id: String,
+        choice_id: String,
+        expected_revision: u64,
         #[serde(default)]
         confirm_local_removal: bool,
     },
@@ -437,35 +433,21 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
         }
         ProbeCommand::IssueInvitation => execute_operation(state, Operation::IssueInvitation).await,
         ProbeCommand::ListDevices => execute_operation(state, Operation::ListDevices).await,
-        ProbeCommand::QueryDeviceTrust => {
-            execute_operation(state, Operation::QueryDeviceTrust).await
+        ProbeCommand::QueryDeviceGroupChoices => {
+            execute_operation(state, Operation::QueryDeviceGroupChoices).await
         }
-        ProbeCommand::QueryMembershipConflicts => {
-            execute_operation(state, Operation::QueryMembershipConflicts).await
-        }
-        ProbeCommand::ResolveMembershipConflict {
-            conflict_id,
-            target_branch_id,
-        } => {
-            execute_operation(
-                state,
-                Operation::ResolveMembershipConflict(uc_engine::ResolveMembershipConflictInput {
-                    conflict_id,
-                    target_branch_id,
-                }),
-            )
-            .await
-        }
-        ProbeCommand::DecideDeviceTrustChange {
-            change_id,
-            choice,
+        ProbeCommand::ChooseDeviceGroup {
+            issue_id,
+            choice_id,
+            expected_revision,
             confirm_local_removal,
         } => {
             execute_operation(
                 state,
-                Operation::DecideDeviceTrustChange(uc_engine::DecideDeviceTrustChangeInput {
-                    change_id,
-                    choice,
+                Operation::ChooseDeviceGroup(uc_engine::ChooseDeviceGroupInput {
+                    issue_id,
+                    choice_id,
+                    expected_revision,
                     confirm_local_removal,
                 }),
             )
@@ -1091,19 +1073,14 @@ fn operation_response(result: OperationResult) -> Value {
             "kind": "device_trust",
             "snapshot": snapshot,
         }),
-        OperationResult::DeviceTrustDecision(result) => json!({
+        OperationResult::DeviceGroupChoices(summary) => json!({
             "ok": true,
-            "kind": "device_trust_decision",
-            "result": result,
-        }),
-        OperationResult::MembershipConflicts(summary) => json!({
-            "ok": true,
-            "kind": "membership_conflicts",
+            "kind": "device_group_choices",
             "result": summary,
         }),
-        OperationResult::MembershipConflictResolved(summary) => json!({
+        OperationResult::DeviceGroupChosen(summary) => json!({
             "ok": true,
-            "kind": "membership_conflict_resolved",
+            "kind": "device_group_chosen",
             "result": summary,
         }),
         OperationResult::MemberSyncPreferences(preferences) => json!({
@@ -1562,9 +1539,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_device_trust_command_reaches_the_engine_boundary() {
-        let command: ProbeCommand = serde_json::from_str(r#"{"command":"query_device_trust"}"#)
-            .expect("device trust command must deserialize");
+    async fn query_device_group_choices_command_reaches_the_engine_boundary() {
+        let command: ProbeCommand =
+            serde_json::from_str(r#"{"command":"query_device_group_choices"}"#)
+                .expect("device group choices command must deserialize");
         let mut state = ProbeState {
             engine: None,
             files: ProbeFiles::default(),

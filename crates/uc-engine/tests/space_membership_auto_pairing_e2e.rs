@@ -408,8 +408,8 @@ async fn wait_for_completed_join(
             "space admission timed out"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let snapshot = match engine.execute(Operation::QueryDeviceTrust).await {
-            Ok(OperationResult::DeviceTrust(snapshot)) => snapshot,
+        let snapshot = match engine.execute(Operation::QueryDeviceGroupChoices).await {
+            Ok(OperationResult::DeviceGroupChoices(summary)) => summary.device_trust,
             Ok(_) => panic!("unexpected device trust result"),
             Err(_) => continue,
         };

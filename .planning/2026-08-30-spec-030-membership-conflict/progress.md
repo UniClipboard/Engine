@@ -165,3 +165,10 @@
 - `cargo test -p uc-ohos-napi --lib --locked`：10 passed。
 - `cargo check -p uc-engine-uniffi -p uc-ohos-napi --all-targets --locked`：通过（仅既有 warning）。
 - workspace all-target check、fmt、architecture preflight 与 `git diff --check`：通过（仅既有 warning）。
+
+## 2026-08-31 · Phase 5 unified device-group choice replacement
+
+- 先以 Engine contract 红测删除四个旧 Operation，确认 dispatch、绑定、probe 与 E2E 都依赖旧名字。
+- 新公开入口收敛为 `QueryDeviceGroupChoices` / `ChooseDeviceGroup`；Application facade 统一读取两类内部状态、校验一致 revision，并负责选择路由。
+- 查询保留完整 device-trust snapshot；候选分支成员未知时显式返回 `members_complete = false`。
+- UniFFI、HarmonyOS、移动 probe 与 Engine E2E 已替换为统一入口；旧 Engine operation mapping 文件已删除。

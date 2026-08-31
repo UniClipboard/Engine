@@ -1,21 +1,18 @@
 use uc_engine::{
-    CancelJoinSpaceInput, ContentTypesPatch, ContentTypesSummary, CreateSpaceInput, DeviceSummary,
-    EncryptionStateSummary, EngineConfig, EngineError, EngineErrorCategory, EngineEvent,
-    EngineState, EntrySummary, ExportEntryInput, HostFileHandle, InvitationAvailability,
-    JoinSpaceInput, LocalDeviceSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesSummary,
-    Operation, OperationKind, OperationResult, QueryHistoryInput, QueryMemberSyncPreferencesInput,
-    RecoverSessionInput, RefreshReason, RemoveMemberInput, ResendEntryInput, SearchEntriesInput,
-    SearchPageSummary, SearchResultSummary, SecretString, SendFilesInput, SendImageInput,
-    SendTextInput, SetupInvitationSummary, SetupStateSummary, SpaceProtectionModeSummary,
-    SpaceProtectionSummary, StorageStatsSummary, UnlockSpaceInput,
+    CancelJoinSpaceInput, ChooseDeviceGroupInput, ContentTypesPatch, ContentTypesSummary,
+    CreateSpaceInput, DeviceSummary, EncryptionStateSummary, EngineConfig, EngineError,
+    EngineErrorCategory, EngineEvent, EngineState, EntrySummary, ExportEntryInput, HostFileHandle,
+    InvitationAvailability, JoinSpaceInput, LocalDeviceSummary, MemberSyncPreferencesPatch,
+    MemberSyncPreferencesSummary, Operation, OperationKind, OperationResult, QueryHistoryInput,
+    QueryMemberSyncPreferencesInput, RecoverSessionInput, RefreshReason, RemoveMemberInput,
+    ResendEntryInput, SearchEntriesInput, SearchPageSummary, SearchResultSummary, SecretString,
+    SendFilesInput, SendImageInput, SendTextInput, SetupInvitationSummary, SetupStateSummary,
+    SpaceProtectionModeSummary, SpaceProtectionSummary, StorageStatsSummary, UnlockSpaceInput,
     UpdateMemberSyncPreferencesInput, WorkspaceConvergencePhaseSummary,
     WorkspaceConvergenceSummary,
 };
 
-use uc_engine::{
-    DecideDeviceTrustChangeInput, DeviceTrustChoiceSummary, DeviceTrustDecisionSummary,
-    DeviceTrustSnapshotSummary,
-};
+use uc_engine::DeviceTrustSnapshotSummary;
 
 #[test]
 fn engine_config_has_stable_profile_and_version_inputs() {
@@ -111,7 +108,10 @@ fn every_public_operation_has_a_stable_kind() {
             OperationKind::VerifySecureStorageAccess,
         ),
         (Operation::ListDevices, OperationKind::ListDevices),
-        (Operation::QueryDeviceTrust, OperationKind::QueryDeviceTrust),
+        (
+            Operation::QueryDeviceGroupChoices,
+            OperationKind::QueryDeviceGroupChoices,
+        ),
         (
             Operation::QueryMemberSyncPreferences(QueryMemberSyncPreferencesInput {
                 device_id: "member-1".into(),
@@ -1368,34 +1368,19 @@ fn workspace_convergence_exposes_only_stable_facts() {
 }
 
 #[test]
-fn device_trust_operations_expose_one_complete_query_and_one_result_oriented_decision() {
-    let query = Operation::QueryDeviceTrust;
-    let decide = Operation::DecideDeviceTrustChange(DecideDeviceTrustChangeInput {
-        change_id: "01".repeat(32),
-        choice: DeviceTrustChoiceSummary::KeepCurrentDeviceGroup,
+fn device_group_operations_expose_one_query_and_one_choice() {
+    let query = Operation::QueryDeviceGroupChoices;
+    let decide = Operation::ChooseDeviceGroup(ChooseDeviceGroupInput {
+        issue_id: "p:01".to_owned(),
+        choice_id: "keep".to_owned(),
+        expected_revision: 1,
         confirm_local_removal: false,
     });
 
-    assert_eq!(query.kind(), OperationKind::QueryDeviceTrust);
-    assert_eq!(query.kind().to_string(), "query_device_trust");
-    assert_eq!(decide.kind(), OperationKind::DecideDeviceTrustChange);
-    assert_eq!(decide.kind().to_string(), "decide_device_trust_change");
-}
-
-#[test]
-fn device_trust_results_have_distinct_snapshot_and_decision_shapes() {
-    let snapshot = DeviceTrustSnapshotSummary::empty_unavailable("device-local".into());
-    assert!(matches!(
-        OperationResult::DeviceTrust(snapshot.clone()),
-        OperationResult::DeviceTrust(_)
-    ));
-    assert!(matches!(
-        OperationResult::DeviceTrustDecision(DeviceTrustDecisionSummary::StateChanged {
-            current_change_id: None,
-            snapshot: Box::new(snapshot),
-        }),
-        OperationResult::DeviceTrustDecision(DeviceTrustDecisionSummary::StateChanged { .. })
-    ));
+    assert_eq!(query.kind(), OperationKind::QueryDeviceGroupChoices);
+    assert_eq!(query.kind().to_string(), "query_device_group_choices");
+    assert_eq!(decide.kind(), OperationKind::ChooseDeviceGroup);
+    assert_eq!(decide.kind().to_string(), "choose_device_group");
 }
 
 #[test]

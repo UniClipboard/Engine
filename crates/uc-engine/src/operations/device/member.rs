@@ -5,30 +5,26 @@ use crate::error_codes::*;
 use base64::Engine as _;
 use tracing::{error, info};
 use uc_application::facade::{
-    AppFacade, ContentTypesPatch as AppContentTypesPatch, CurrentJoinStatus,
-    DecideDeviceTrustChange, DecideDeviceTrustChangeError, DecideDeviceTrustChangeResult,
-    DeviceTrustChangeChoice, DeviceTrustMembership, DeviceTrustRelationship, DeviceTrustStatus,
-    DeviceTrustSyncState, MemberProtectionStatusView,
+    AppFacade, ContentTypesPatch as AppContentTypesPatch, CurrentJoinStatus, DeviceTrustMembership,
+    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, MemberProtectionStatusView,
     MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch, MemberSyncPreferencesView,
-    QueryDeviceTrustError, RemoveSpaceMemberError, RosterError, SpaceProtectionModeView,
-    SpaceProtectionView,
+    RemoveSpaceMemberError, RosterError, SpaceProtectionModeView, SpaceProtectionView,
 };
 #[cfg(any(test, feature = "dev-tools"))]
 use uc_core::membership::WorkspaceSnapshot;
 use uc_core::ports::ReachabilityState;
 
 use crate::{
-    ContentTypesPatch, ContentTypesSummary, DecideDeviceTrustChangeInput,
-    DeviceCompatibilitySummary, DeviceGroupRelationshipSummary, DeviceMembershipSummary,
-    DeviceReachabilitySummary, DeviceSummary, DeviceSyncRelationshipSummary,
-    DeviceTrustChangeSummary, DeviceTrustChoiceSummary, DeviceTrustDecisionSummary,
-    DeviceTrustImpactSummary, DeviceTrustRecoverySummary, DeviceTrustRelationshipSummary,
-    DeviceTrustSnapshotSummary, EngineError, EngineErrorCategory, JoinSpaceRejectionReasonSummary,
-    JoinSpaceStatusSummary, JoinedSpaceSummary, MemberProtectionStatusSummary,
-    MemberProtectionSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesSummary,
-    OperationResult, PendingInboundMemberSummary, QueryMemberSyncPreferencesInput,
-    RemoveMemberInput, SpaceProtectionModeSummary, SpaceProtectionSummary,
-    UpdateMemberSyncPreferencesInput,
+    ContentTypesPatch, ContentTypesSummary, DeviceCompatibilitySummary,
+    DeviceGroupRelationshipSummary, DeviceMembershipSummary, DeviceReachabilitySummary,
+    DeviceSummary, DeviceSyncRelationshipSummary, DeviceTrustChangeSummary,
+    DeviceTrustChoiceSummary, DeviceTrustImpactSummary, DeviceTrustRecoverySummary,
+    DeviceTrustRelationshipSummary, DeviceTrustSnapshotSummary, EngineError, EngineErrorCategory,
+    JoinSpaceRejectionReasonSummary, JoinSpaceStatusSummary, JoinedSpaceSummary,
+    MemberProtectionStatusSummary, MemberProtectionSummary, MemberSyncPreferencesPatch,
+    MemberSyncPreferencesSummary, OperationResult, PendingInboundMemberSummary,
+    QueryMemberSyncPreferencesInput, RemoveMemberInput, SpaceProtectionModeSummary,
+    SpaceProtectionSummary, UpdateMemberSyncPreferencesInput,
 };
 #[cfg(any(test, feature = "dev-tools"))]
 use crate::{
@@ -81,88 +77,6 @@ pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult,
         "device list query completed"
     );
     Ok(OperationResult::Devices(devices))
-}
-
-pub async fn execute_query_space_membership_status(
-    facade: &AppFacade,
-) -> Result<OperationResult, EngineError> {
-    let snapshot = facade
-        .query_device_trust()
-        .await
-        .map_err(map_query_device_trust_error)?;
-    Ok(OperationResult::DeviceTrust(device_trust_snapshot(
-        snapshot,
-    )))
-}
-
-pub async fn execute_decide_device_trust_change(
-    facade: &AppFacade,
-    input: DecideDeviceTrustChangeInput,
-) -> Result<OperationResult, EngineError> {
-    let change_id =
-        uc_core::membership::MembershipEventId::from_hex(&input.change_id).ok_or_else(|| {
-            EngineError::new(
-                MEMBER_INVALID_INPUT_CODE,
-                EngineErrorCategory::InvalidInput,
-                false,
-            )
-        })?;
-    let decision = match input.choice {
-        DeviceTrustChoiceSummary::ApplyChange => DeviceTrustChangeChoice::ApplyChange,
-        DeviceTrustChoiceSummary::KeepCurrentDeviceGroup => {
-            DeviceTrustChangeChoice::KeepCurrentDeviceGroup
-        }
-    };
-    let result = facade
-        .decide_device_trust_change(DecideDeviceTrustChange {
-            change_id,
-            choice: decision,
-            confirm_local_removal: input.confirm_local_removal,
-        })
-        .await
-        .map_err(map_decide_device_trust_change_error)?;
-    Ok(OperationResult::DeviceTrustDecision(device_trust_decision(
-        result,
-    )))
-}
-
-fn device_trust_decision(result: DecideDeviceTrustChangeResult) -> DeviceTrustDecisionSummary {
-    match result {
-        DecideDeviceTrustChangeResult::Applied { change_id, status } => {
-            DeviceTrustDecisionSummary::Applied {
-                change_id: change_id.to_hex(),
-                snapshot: Box::new(device_trust_snapshot(status)),
-            }
-        }
-        DecideDeviceTrustChangeResult::KeptCurrentDeviceGroup { change_id, status } => {
-            DeviceTrustDecisionSummary::KeptCurrentDeviceGroup {
-                change_id: change_id.to_hex(),
-                snapshot: Box::new(device_trust_snapshot(status)),
-            }
-        }
-        DecideDeviceTrustChangeResult::AlreadyCompleted {
-            change_id,
-            choice,
-            status,
-        } => DeviceTrustDecisionSummary::AlreadyCompleted {
-            change_id: change_id.to_hex(),
-            completed_choice: device_trust_choice(choice),
-            snapshot: Box::new(device_trust_snapshot(status)),
-        },
-        DecideDeviceTrustChangeResult::StateChanged {
-            current_change_id,
-            status,
-        } => DeviceTrustDecisionSummary::StateChanged {
-            current_change_id: current_change_id.map(|change_id| change_id.to_hex()),
-            snapshot: Box::new(device_trust_snapshot(status)),
-        },
-        DecideDeviceTrustChangeResult::LocalConfirmationRequired { change_id, status } => {
-            DeviceTrustDecisionSummary::LocalDeviceConfirmationRequired {
-                change_id: change_id.to_hex(),
-                snapshot: Box::new(device_trust_snapshot(status)),
-            }
-        }
-    }
 }
 
 pub async fn execute_query_member_sync_preferences(
@@ -533,15 +447,6 @@ fn device_membership(membership: DeviceTrustMembership) -> DeviceMembershipSumma
     }
 }
 
-fn device_trust_choice(choice: DeviceTrustChangeChoice) -> DeviceTrustChoiceSummary {
-    match choice {
-        DeviceTrustChangeChoice::ApplyChange => DeviceTrustChoiceSummary::ApplyChange,
-        DeviceTrustChangeChoice::KeepCurrentDeviceGroup => {
-            DeviceTrustChoiceSummary::KeepCurrentDeviceGroup
-        }
-    }
-}
-
 fn validate_device_id(device_id: &str) -> Result<(), EngineError> {
     if device_id.trim().is_empty() {
         return Err(EngineError::new(
@@ -682,49 +587,6 @@ fn map_roster_error(error: RosterError) -> EngineError {
         "member roster operation failed"
     );
     EngineError::new(code, category, retryable)
-}
-
-fn map_query_device_trust_error(error: QueryDeviceTrustError) -> EngineError {
-    match error {
-        QueryDeviceTrustError::Locked | QueryDeviceTrustError::Unavailable => EngineError::new(
-            QUERY_WORKSPACE_CONVERGENCE_UNAVAILABLE_CODE,
-            EngineErrorCategory::Unavailable,
-            false,
-        ),
-        QueryDeviceTrustError::RecoveryRequired => EngineError::new(
-            QUERY_WORKSPACE_CONVERGENCE_CORRUPT_CODE,
-            EngineErrorCategory::InvalidState,
-            false,
-        ),
-        QueryDeviceTrustError::Dependency { .. } => EngineError::new(
-            QUERY_WORKSPACE_CONVERGENCE_FAILED_CODE,
-            EngineErrorCategory::InvalidState,
-            false,
-        ),
-    }
-}
-
-fn map_decide_device_trust_change_error(error: DecideDeviceTrustChangeError) -> EngineError {
-    match error {
-        DecideDeviceTrustChangeError::Locked | DecideDeviceTrustChangeError::Unavailable => {
-            EngineError::new(
-                QUERY_WORKSPACE_CONVERGENCE_UNAVAILABLE_CODE,
-                EngineErrorCategory::Unavailable,
-                false,
-            )
-        }
-        DecideDeviceTrustChangeError::RecoveryRequired
-        | DecideDeviceTrustChangeError::StateChanged => EngineError::new(
-            QUERY_WORKSPACE_CONVERGENCE_CORRUPT_CODE,
-            EngineErrorCategory::InvalidState,
-            false,
-        ),
-        DecideDeviceTrustChangeError::CommittedButPending => EngineError::new(
-            QUERY_WORKSPACE_CONVERGENCE_FAILED_CODE,
-            EngineErrorCategory::InvalidState,
-            true,
-        ),
-    }
 }
 
 fn map_remove_space_member_error(error: RemoveSpaceMemberError) -> EngineError {

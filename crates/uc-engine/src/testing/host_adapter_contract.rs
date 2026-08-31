@@ -758,7 +758,7 @@ async fn membership_convergence_is_queryable_through_the_public_engine() {
         .unwrap();
 
     let status = engine
-        .execute(crate::Operation::QueryDeviceTrust)
+        .execute(crate::Operation::QueryDeviceGroupChoices)
         .await
         .unwrap();
 

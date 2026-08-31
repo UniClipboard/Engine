@@ -81,7 +81,7 @@ final class ProbeModel {
     }
 
     func queryDeviceTrust() async {
-        _ = await run(["command": "query_device_trust"])
+        _ = await run(["command": "query_device_group_choices"])
     }
 
     func sendText() async {

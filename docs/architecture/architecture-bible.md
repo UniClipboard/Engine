@@ -671,7 +671,7 @@ reconciliation: Idle -> Comparing -> FetchingHistory -> Consistent -> Idle
 - 进程被系统终止后重新 `start`，不能复用旧内存实例。
 - 事件必须持续消费；收到 `RefreshRequired` 后重新查询真实状态。
 - iOS、Android 和 HarmonyOS 必须为成员移除公开相同的完整状态、稳定错误、提交入口、当前查询和变化事件。
-- 成员分支冲突只通过 Engine 的 `QueryMembershipConflicts` 与 `ResolveMembershipConflict` 两个稳定动作开放。查询返回 ledger revision、候选分支、逐分支资格、本机选择状态和 generation transition phase；结果使用 `local_resolution_completed`，不得暗示其他设备已经全局收敛。iOS/Android 共用 UniFFI 薄映射，HarmonyOS 使用同一版本的 N-API JSON 映射；绑定不解析或编排恢复步骤。
+- 产品只通过 Engine 的 `QueryDeviceGroupChoices` 与 `ChooseDeviceGroup` 处理设备组选择。Application `AppFacade` 是完整流程的唯一协调入口：它把待定成员变更与 sibling branch 冲突投影为同一批选择，并以 ledger revision 拒绝过期操作，再路由至内部决定或分支恢复用例。查询同时保留完整设备信任快照；远端分支成员在恢复前不可证明时以 `members_complete = false` 表达，不伪造名单。iOS/Android 共用 UniFFI 薄映射，HarmonyOS 使用同版本 N-API JSON 映射；绑定不解析问题类型或编排恢复步骤。
 - iOS 和 Android 的绑定将一次新增、修改或删除中继节点及其访问令牌交给 Engine 的原子设置操作；绑定先读取当前节点列表并只合并该次变更，令牌只经宿主安全存储使用，绑定不得将其持久化或返回给产品界面。
 - 文件必须通过不透明句柄分块读写，不能把路径伪装成句柄。
 - 平台限制不构成自动切换 LAN 的理由。
@@ -832,6 +832,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-31 | Target 恢复提交事务 | Application issuer 将 target material 能力拆成无副作用 prepare 与幂等 commit：先签署 package 并连同 external commit digest、staged security material 保存为 TargetPrepared，随后提交安全状态并标记 TargetCommitted。重试按同一事务键和 commit digest 返回缓存 package；TargetPrepared 重启只续做 commit，不重复计算或签发。 |
 | 2026-08-31 | Target 恢复材料 adapter | `DefaultSpaceAccessAdapter` 唯一负责在当前 MLS 快照上应用 recipient external commit、派生下一 epoch 内容密钥、以共享 exporter wrapping key 密封目录与恢复确认，并以无副作用 prepare/幂等 commit 暴露给 Application。staged `SpaceKeyMaterial` 只进入现有 MasterKey AEAD recovery session；commit 重新验证 Space、MLS、目录和单步 epoch 后才持久化安装。Engine 已删除 target deferred adapter，只负责注入该窄端口。 |
 | 2026-08-31 | 成员分支 generation 切换 | Application recovery coordinator 继续负责七阶段 transition，每轮只推进并 CAS 保存一个后继；Infra 复用 durable Space transition 组件完成来源备份、recipient 材料解封、目标 SQLite/安全状态/成员投影 staging、manifest 提升、运行期重绑与旧 generation 清理。真实 MLS + SQLite 测试验证目标 manifest、历史和内容密钥 epoch 同时切换，Phase 4 完成。 |
+| 2026-08-31 | 统一设备组选择入口 | 将待定成员变更与 sibling branch 冲突合并为 `QueryDeviceGroupChoices` / `ChooseDeviceGroup`；Application 负责一致 revision 校验和内部路由，Engine、UniFFI、HarmonyOS 与移动 probe 删除四个旧操作入口并只保留薄映射。 |
 | 2026-08-31 | 成员冲突跨端 contract | Engine 新增完整冲突查询与单次选择两个稳定 operation，统一映射 result/error；iOS、Android 和 HarmonyOS 绑定只转发同版本 Engine contract，并明确结果仅代表本机选择完成。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |

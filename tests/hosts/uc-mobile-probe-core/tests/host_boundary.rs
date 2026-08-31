@@ -138,15 +138,15 @@ fn ios_and_android_probe_member_removal_through_the_shared_contract() {
 
     for command in [
         "RemoveMember",
-        "QueryDeviceTrust",
-        "DecideDeviceTrustChange",
+        "QueryDeviceGroupChoices",
+        "ChooseDeviceGroup",
     ] {
         assert!(source.contains(command), "missing command: {command}");
     }
-    assert!(source.contains("OperationResult::DeviceTrust"));
-    assert!(source.contains("OperationResult::DeviceTrustDecision"));
-    assert!(ios_model.contains("query_device_trust"));
-    assert!(ios_view.contains("Device trust"));
+    assert!(source.contains("OperationResult::DeviceGroupChoices"));
+    assert!(source.contains("OperationResult::DeviceGroupChosen"));
+    assert!(ios_model.contains("query_device_group_choices"));
+    assert!(ios_view.contains("Device group choices"));
 }
 
 #[test]

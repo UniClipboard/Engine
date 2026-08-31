@@ -578,11 +578,11 @@ fn space_management_preserves_state_devices_resend_outcomes_and_local_history() 
     let remove = engine.remove_member("missing-device".to_owned());
     assert!(matches!(remove, Err(BindingError::Engine { .. })));
     let trust = engine
-        .query_device_trust()
-        .expect("binding must query current device trust");
+        .query_device_group_choices()
+        .expect("binding must query current device group choices");
     let trust: serde_json::Value =
         serde_json::from_str(&trust).expect("device trust must be valid JSON");
-    assert_eq!(trust["local_membership"], "active");
+    assert_eq!(trust["device_trust"]["local_membership"], "active");
 
     engine
         .leave_space()
@@ -685,11 +685,11 @@ fn mobile_binding_exposes_membership_convergence() {
         .expect("binding must create a space");
 
     let status = engine
-        .query_device_trust()
-        .expect("binding must expose device trust");
+        .query_device_group_choices()
+        .expect("binding must expose device group choices");
     let status: serde_json::Value =
         serde_json::from_str(&status).expect("device trust must be valid JSON");
-    assert_eq!(status["local_membership"], "active");
+    assert_eq!(status["device_trust"]["local_membership"], "active");
     engine
         .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("binding engine must shut down within the deadline");

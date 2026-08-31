@@ -9,9 +9,8 @@ use crate::operations::clipboard::query_active::execute_query_active_clipboard;
 use crate::operations::clipboard::restore::execute_restore_clipboard;
 use crate::operations::device::device::execute_query_local_device;
 use crate::operations::device::member::{
-    execute_decide_device_trust_change, execute_list_devices,
-    execute_query_member_sync_preferences, execute_query_space_membership_status,
-    execute_query_space_protection, execute_remove_member, execute_update_member_sync_preferences,
+    execute_list_devices, execute_query_member_sync_preferences, execute_query_space_protection,
+    execute_remove_member, execute_update_member_sync_preferences,
 };
 use crate::operations::device::peer_connections::{
     execute_query_peer_connections, execute_refresh_peer_connections,
@@ -56,12 +55,12 @@ use crate::operations::settings::upgrade::{
 use crate::operations::space::cancel_invitation::execute_cancel_invitation;
 use crate::operations::space::cancel_join_space::execute_cancel_join_space;
 use crate::operations::space::create_space::execute_create_space;
+use crate::operations::space::device_group_choice::{
+    execute_choose_device_group, execute_query_device_group_choices,
+};
 use crate::operations::space::factory_reset::execute_factory_reset_space;
 use crate::operations::space::invitation::execute_issue_invitation;
 use crate::operations::space::join_space::execute_join_space;
-use crate::operations::space::membership_conflict::{
-    execute_query_membership_conflicts, execute_resolve_membership_conflict,
-};
 use crate::operations::space::session_recovery::execute_recover_session;
 use crate::operations::space::setup_state::execute_query_setup_state;
 use crate::operations::space::unlock::execute_unlock_space;
@@ -78,29 +77,13 @@ impl EngineRuntime for ProductionRuntime {
         cancellation: CancellationToken,
     ) -> Result<OperationResult, EngineError> {
         match operation {
-            Operation::QueryDeviceTrust => {
-                return execute_query_space_membership_status(
-                    self.current_facade().await?.as_ref(),
-                )
-                .await;
-            }
-            Operation::DecideDeviceTrustChange(input) => {
-                return execute_decide_device_trust_change(
-                    self.current_facade().await?.as_ref(),
-                    input,
-                )
-                .await;
-            }
-            Operation::QueryMembershipConflicts => {
-                return execute_query_membership_conflicts(self.current_facade().await?.as_ref())
+            Operation::QueryDeviceGroupChoices => {
+                return execute_query_device_group_choices(self.current_facade().await?.as_ref())
                     .await;
             }
-            Operation::ResolveMembershipConflict(input) => {
-                return execute_resolve_membership_conflict(
-                    self.current_facade().await?.as_ref(),
-                    input,
-                )
-                .await;
+            Operation::ChooseDeviceGroup(input) => {
+                return execute_choose_device_group(self.current_facade().await?.as_ref(), input)
+                    .await;
             }
             Operation::CancelJoinSpace(input) => {
                 return execute_cancel_join_space(self.current_facade().await?.as_ref(), input)
@@ -341,13 +324,10 @@ impl EngineRuntime for ProductionRuntime {
                 Operation::ListDevices => {
                     execute_list_devices(self.current_facade().await?.as_ref()).await
                 }
-                Operation::QueryDeviceTrust
-                | Operation::QueryMembershipConflicts
+                Operation::QueryDeviceGroupChoices
                 | Operation::CancelJoinSpace(_)
                 | Operation::FactoryResetSpace => Err(super::operation_unavailable_error()),
-                Operation::DecideDeviceTrustChange(_) | Operation::ResolveMembershipConflict(_) => {
-                    Err(super::operation_unavailable_error())
-                }
+                Operation::ChooseDeviceGroup(_) => Err(super::operation_unavailable_error()),
                 Operation::QueryMemberSyncPreferences(input) => {
                     execute_query_member_sync_preferences(
                         self.current_facade().await?.as_ref(),

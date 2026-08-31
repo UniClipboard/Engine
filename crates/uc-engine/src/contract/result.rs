@@ -498,9 +498,8 @@ pub enum OperationResult {
     MemberSyncPreferences(MemberSyncPreferencesSummary),
     WorkspaceMembership(WorkspaceConvergenceSummary),
     DeviceTrust(DeviceTrustSnapshotSummary),
-    DeviceTrustDecision(DeviceTrustDecisionSummary),
-    MembershipConflicts(MembershipConflictsSummary),
-    MembershipConflictResolved(MembershipConflictResolutionSummary),
+    DeviceGroupChoices(DeviceGroupChoicesSummary),
+    DeviceGroupChosen(DeviceGroupChoiceResultSummary),
     SpaceProtection(SpaceProtectionSummary),
     SearchPage(SearchPageSummary),
     SearchTags(Vec<SearchTagSummary>),
@@ -540,118 +539,43 @@ pub enum OperationResult {
     EntryResent(ResendEntryOutcome),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MembershipConflictStatusSummary {
-    Unresolved,
-    Selected,
-    Transitioning,
-    Completed,
-    RePairingRequired,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MembershipConflictChoiceSummary {
-    ActiveMemberRecovery,
-    RePairingRequired,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MembershipBranchTransitionPhaseSummary {
-    Prepared,
-    SourceBackedUp,
-    TargetVerified,
-    TargetStaged,
-    Promoted,
-    RuntimeRestored,
-    Completed,
-}
-
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MembershipConflictBranchSummary {
-    pub branch_id: String,
-    pub is_local: bool,
-    pub choice: MembershipConflictChoiceSummary,
-}
-
-impl fmt::Debug for MembershipConflictBranchSummary {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("MembershipConflictBranchSummary")
-            .field("branch_id", &"[REDACTED]")
-            .field("is_local", &self.is_local)
-            .field("choice", &self.choice)
-            .finish()
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MembershipConflictSummary {
-    pub conflict_id: String,
-    pub status: MembershipConflictStatusSummary,
-    pub selected_branch_id: Option<String>,
-    pub transition_phase: Option<MembershipBranchTransitionPhaseSummary>,
-    pub detected_at_revision: u64,
-    pub evidence_peer_count: u32,
-    pub branches: Vec<MembershipConflictBranchSummary>,
-    pub local_resolution_completed: bool,
-}
-
-impl fmt::Debug for MembershipConflictSummary {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("MembershipConflictSummary")
-            .field("identifiers", &"[REDACTED]")
-            .field("status", &self.status)
-            .field("transition_phase", &self.transition_phase)
-            .field("detected_at_revision", &self.detected_at_revision)
-            .field("evidence_peer_count", &self.evidence_peer_count)
-            .field("branch_count", &self.branches.len())
-            .field(
-                "local_resolution_completed",
-                &self.local_resolution_completed,
-            )
-            .finish()
-    }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceGroupChoicesSummary {
+    pub revision: u64,
+    pub device_trust: DeviceTrustSnapshotSummary,
+    pub issues: Vec<DeviceGroupChoiceIssueSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MembershipConflictsSummary {
-    pub revision: u64,
-    pub conflicts: Vec<MembershipConflictSummary>,
+pub struct DeviceGroupChoiceIssueSummary {
+    pub issue_id: String,
+    pub choices: Vec<DeviceGroupChoiceOptionSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceGroupChoiceOptionSummary {
+    pub choice_id: String,
+    pub is_current_group: bool,
+    pub requires_re_pairing: bool,
+    pub member_device_ids: Vec<String>,
+    pub members_complete: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MembershipConflictResolutionOutcomeSummary {
+pub enum DeviceGroupChoiceOutcomeSummary {
     Completed,
     Pending,
     RePairingRequired,
     AlreadyCompleted,
     StateChanged,
+    LocalDeviceConfirmationRequired,
 }
 
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MembershipConflictResolutionSummary {
-    pub outcome: MembershipConflictResolutionOutcomeSummary,
-    pub conflict_id: Option<String>,
-    pub local_resolution_completed: bool,
-}
-
-impl fmt::Debug for MembershipConflictResolutionSummary {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("MembershipConflictResolutionSummary")
-            .field("outcome", &self.outcome)
-            .field("has_conflict_id", &self.conflict_id.is_some())
-            .field(
-                "local_resolution_completed",
-                &self.local_resolution_completed,
-            )
-            .finish()
-    }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceGroupChoiceResultSummary {
+    pub outcome: DeviceGroupChoiceOutcomeSummary,
+    pub current_revision: Option<u64>,
 }
 
 impl fmt::Debug for OperationResult {
@@ -803,33 +727,12 @@ impl fmt::Debug for OperationResult {
                 .field("revision", &summary.revision)
                 .field("device_count", &summary.devices.len())
                 .field("has_current_change", &summary.current_change.is_some()),
-            Self::DeviceTrustDecision(result) => {
-                debug.field("kind", &"device_trust_decision").field(
-                    "outcome",
-                    &match result {
-                        DeviceTrustDecisionSummary::Applied { .. } => "applied",
-                        DeviceTrustDecisionSummary::KeptCurrentDeviceGroup { .. } => {
-                            "kept_current_device_group"
-                        }
-                        DeviceTrustDecisionSummary::AlreadyCompleted { .. } => "already_completed",
-                        DeviceTrustDecisionSummary::StateChanged { .. } => "state_changed",
-                        DeviceTrustDecisionSummary::LocalDeviceConfirmationRequired { .. } => {
-                            "local_device_confirmation_required"
-                        }
-                    },
-                )
-            }
-            Self::MembershipConflicts(summary) => debug
-                .field("kind", &"membership_conflicts")
-                .field("revision", &summary.revision)
-                .field("conflict_count", &summary.conflicts.len()),
-            Self::MembershipConflictResolved(summary) => debug
-                .field("kind", &"membership_conflict_resolved")
-                .field("outcome", &summary.outcome)
-                .field(
-                    "local_resolution_completed",
-                    &summary.local_resolution_completed,
-                ),
+            Self::DeviceGroupChoices(summary) => debug
+                .field("kind", &"device_group_choices")
+                .field("issue_count", &summary.issues.len()),
+            Self::DeviceGroupChosen(summary) => debug
+                .field("kind", &"device_group_chosen")
+                .field("outcome", &summary.outcome),
             Self::SpaceProtection(summary) => debug
                 .field("kind", &"space_protection")
                 .field("summary", summary),
@@ -1184,32 +1087,6 @@ impl DeviceTrustSnapshotSummary {
             updated_at_ms: 0,
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum DeviceTrustDecisionSummary {
-    Applied {
-        change_id: String,
-        snapshot: Box<DeviceTrustSnapshotSummary>,
-    },
-    KeptCurrentDeviceGroup {
-        change_id: String,
-        snapshot: Box<DeviceTrustSnapshotSummary>,
-    },
-    AlreadyCompleted {
-        change_id: String,
-        completed_choice: crate::DeviceTrustChoiceSummary,
-        snapshot: Box<DeviceTrustSnapshotSummary>,
-    },
-    StateChanged {
-        current_change_id: Option<String>,
-        snapshot: Box<DeviceTrustSnapshotSummary>,
-    },
-    LocalDeviceConfirmationRequired {
-        change_id: String,
-        snapshot: Box<DeviceTrustSnapshotSummary>,
-    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -72,10 +72,8 @@ pub enum OperationKind {
     QueryMemberSyncPreferences,
     UpdateMemberSyncPreferences,
     RemoveMember,
-    QueryDeviceTrust,
-    DecideDeviceTrustChange,
-    QueryMembershipConflicts,
-    ResolveMembershipConflict,
+    QueryDeviceGroupChoices,
+    ChooseDeviceGroup,
     QuerySpaceProtection,
     SearchEntries,
     QuerySearchTags,
@@ -167,10 +165,8 @@ impl fmt::Display for OperationKind {
             Self::QueryMemberSyncPreferences => "query_member_sync_preferences",
             Self::UpdateMemberSyncPreferences => "update_member_sync_preferences",
             Self::RemoveMember => "remove_member",
-            Self::QueryDeviceTrust => "query_device_trust",
-            Self::DecideDeviceTrustChange => "decide_device_trust_change",
-            Self::QueryMembershipConflicts => "query_membership_conflicts",
-            Self::ResolveMembershipConflict => "resolve_membership_conflict",
+            Self::QueryDeviceGroupChoices => "query_device_group_choices",
+            Self::ChooseDeviceGroup => "choose_device_group",
             Self::QuerySpaceProtection => "query_space_protection",
             Self::SearchEntries => "search_entries",
             Self::QuerySearchTags => "query_search_tags",
@@ -226,21 +222,23 @@ mod tests {
 }
 
 #[cfg(test)]
-mod membership_conflict_contract_tests {
-    use super::{Operation, OperationKind, ResolveMembershipConflictInput};
+mod device_group_choice_contract_tests {
+    use super::{ChooseDeviceGroupInput, Operation, OperationKind};
 
     #[test]
-    fn membership_conflict_operations_have_stable_kinds_and_inputs() {
-        let query = Operation::QueryMembershipConflicts;
-        let resolve = Operation::ResolveMembershipConflict(ResolveMembershipConflictInput {
-            conflict_id: "11".repeat(32),
-            target_branch_id: "22".repeat(32),
+    fn device_group_choice_operations_have_stable_kinds_and_inputs() {
+        let query = Operation::QueryDeviceGroupChoices;
+        let choose = Operation::ChooseDeviceGroup(ChooseDeviceGroupInput {
+            issue_id: "issue".to_owned(),
+            choice_id: "choice".to_owned(),
+            expected_revision: 7,
+            confirm_local_removal: false,
         });
 
-        assert_eq!(query.kind(), OperationKind::QueryMembershipConflicts);
-        assert_eq!(query.kind().to_string(), "query_membership_conflicts");
-        assert_eq!(resolve.kind(), OperationKind::ResolveMembershipConflict);
-        assert_eq!(resolve.kind().to_string(), "resolve_membership_conflict");
+        assert_eq!(query.kind(), OperationKind::QueryDeviceGroupChoices);
+        assert_eq!(query.kind().to_string(), "query_device_group_choices");
+        assert_eq!(choose.kind(), OperationKind::ChooseDeviceGroup);
+        assert_eq!(choose.kind().to_string(), "choose_device_group");
     }
 }
 
@@ -302,10 +300,8 @@ pub enum Operation {
     QueryMemberSyncPreferences(QueryMemberSyncPreferencesInput),
     UpdateMemberSyncPreferences(UpdateMemberSyncPreferencesInput),
     RemoveMember(RemoveMemberInput),
-    QueryDeviceTrust,
-    DecideDeviceTrustChange(DecideDeviceTrustChangeInput),
-    QueryMembershipConflicts,
-    ResolveMembershipConflict(ResolveMembershipConflictInput),
+    QueryDeviceGroupChoices,
+    ChooseDeviceGroup(ChooseDeviceGroupInput),
     QuerySpaceProtection,
     SearchEntries(SearchEntriesInput),
     QuerySearchTags,
@@ -397,10 +393,8 @@ impl Operation {
             Self::QueryMemberSyncPreferences(_) => OperationKind::QueryMemberSyncPreferences,
             Self::UpdateMemberSyncPreferences(_) => OperationKind::UpdateMemberSyncPreferences,
             Self::RemoveMember(_) => OperationKind::RemoveMember,
-            Self::QueryDeviceTrust => OperationKind::QueryDeviceTrust,
-            Self::DecideDeviceTrustChange(_) => OperationKind::DecideDeviceTrustChange,
-            Self::QueryMembershipConflicts => OperationKind::QueryMembershipConflicts,
-            Self::ResolveMembershipConflict(_) => OperationKind::ResolveMembershipConflict,
+            Self::QueryDeviceGroupChoices => OperationKind::QueryDeviceGroupChoices,
+            Self::ChooseDeviceGroup(_) => OperationKind::ChooseDeviceGroup,
             Self::QuerySpaceProtection => OperationKind::QuerySpaceProtection,
             Self::SearchEntries(_) => OperationKind::SearchEntries,
             Self::QuerySearchTags => OperationKind::QuerySearchTags,
@@ -525,33 +519,20 @@ pub struct RemoveMemberInput {
     pub device_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ChooseDeviceGroupInput {
+    pub issue_id: String,
+    pub choice_id: String,
+    pub expected_revision: u64,
+    pub confirm_local_removal: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceTrustChoiceSummary {
     ApplyChange,
     KeepCurrentDeviceGroup,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DecideDeviceTrustChangeInput {
-    pub change_id: String,
-    pub choice: DeviceTrustChoiceSummary,
-    pub confirm_local_removal: bool,
-}
-
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResolveMembershipConflictInput {
-    pub conflict_id: String,
-    pub target_branch_id: String,
-}
-
-impl fmt::Debug for ResolveMembershipConflictInput {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ResolveMembershipConflictInput")
-            .field("identifiers", &"[REDACTED]")
-            .finish()
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

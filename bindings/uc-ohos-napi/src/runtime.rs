@@ -5,11 +5,10 @@ use napi::bindgen_prelude::Buffer;
 use napi::Status;
 use napi_derive::napi;
 use uc_engine::{
-    CancelJoinSpaceInput, ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput,
-    DecideDeviceTrustChangeInput, DeviceTrustChoiceSummary, Engine, EngineConfig, EngineError,
-    EngineEvent, EngineState, EventStream, ExportEntryInput, HostFileHandle,
-    InvitationAvailability, JoinSpaceInput, Operation, OperationResult, OperationTerminal,
-    RecoverSessionInput, RefreshReason, RemoveMemberInput, ResolveMembershipConflictInput,
+    CancelJoinSpaceInput, ChooseDeviceGroupInput, ClipboardRestoreMode, ClipboardRestoreOutcome,
+    CreateSpaceInput, Engine, EngineConfig, EngineError, EngineEvent, EngineState, EventStream,
+    ExportEntryInput, HostFileHandle, InvitationAvailability, JoinSpaceInput, Operation,
+    OperationResult, OperationTerminal, RecoverSessionInput, RefreshReason, RemoveMemberInput,
     RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput, SendReportSummary,
     SendTextInput,
 };
@@ -140,85 +139,42 @@ impl OhEngine {
     }
 
     #[napi]
-    pub async fn query_device_trust(&self) -> napi::Result<String> {
+    pub async fn query_device_group_choices(&self) -> napi::Result<String> {
         match self
             .engine
-            .execute(Operation::QueryDeviceTrust)
+            .execute(Operation::QueryDeviceGroupChoices)
             .await
             .map_err(engine_error)?
         {
-            OperationResult::DeviceTrust(snapshot) => device_trust_json(snapshot),
-            _ => Err(unexpected_result()),
-        }
-    }
-
-    #[napi]
-    pub async fn query_membership_conflicts(&self) -> napi::Result<String> {
-        match self
-            .engine
-            .execute(Operation::QueryMembershipConflicts)
-            .await
-            .map_err(engine_error)?
-        {
-            OperationResult::MembershipConflicts(summary) => membership_conflicts_json(summary),
-            _ => Err(unexpected_result()),
-        }
-    }
-
-    #[napi]
-    pub async fn resolve_membership_conflict(
-        &self,
-        conflict_id: String,
-        target_branch_id: String,
-    ) -> napi::Result<String> {
-        match self
-            .engine
-            .execute(Operation::ResolveMembershipConflict(
-                ResolveMembershipConflictInput {
-                    conflict_id,
-                    target_branch_id,
-                },
-            ))
-            .await
-            .map_err(engine_error)?
-        {
-            OperationResult::MembershipConflictResolved(summary) => {
-                membership_conflict_resolution_json(summary)
+            OperationResult::DeviceGroupChoices(summary) => {
+                serde_json::to_string(&summary).map_err(|_| unexpected_result())
             }
             _ => Err(unexpected_result()),
         }
     }
 
     #[napi]
-    pub async fn decide_device_trust_change(
+    pub async fn choose_device_group(
         &self,
-        change_id: String,
-        choice: String,
+        issue_id: String,
+        choice_id: String,
+        expected_revision: i64,
         confirm_local_removal: bool,
     ) -> napi::Result<String> {
-        let choice = match choice.as_str() {
-            "apply_change" => DeviceTrustChoiceSummary::ApplyChange,
-            "keep_current_device_group" => DeviceTrustChoiceSummary::KeepCurrentDeviceGroup,
-            _ => {
-                return Err(napi::Error::new(
-                    Status::InvalidArg,
-                    "invalid device trust choice",
-                ))
-            }
-        };
+        let expected_revision = u64::try_from(expected_revision)
+            .map_err(|_| napi::Error::new(Status::InvalidArg, "invalid revision"))?;
         match self
             .engine
-            .execute(Operation::DecideDeviceTrustChange(
-                DecideDeviceTrustChangeInput {
-                    change_id,
-                    choice,
-                    confirm_local_removal,
-                },
-            ))
+            .execute(Operation::ChooseDeviceGroup(ChooseDeviceGroupInput {
+                issue_id,
+                choice_id,
+                expected_revision,
+                confirm_local_removal,
+            }))
             .await
             .map_err(engine_error)?
         {
-            OperationResult::DeviceTrustDecision(result) => {
+            OperationResult::DeviceGroupChosen(result) => {
                 serde_json::to_string(&result).map_err(|_| unexpected_result())
             }
             _ => Err(unexpected_result()),
@@ -532,18 +488,6 @@ fn device_trust_json(summary: uc_engine::DeviceTrustSnapshotSummary) -> napi::Re
     serde_json::to_string(&summary).map_err(|_| unexpected_result())
 }
 
-fn membership_conflicts_json(
-    summary: uc_engine::MembershipConflictsSummary,
-) -> napi::Result<String> {
-    serde_json::to_string(&summary).map_err(|_| unexpected_result())
-}
-
-fn membership_conflict_resolution_json(
-    summary: uc_engine::MembershipConflictResolutionSummary,
-) -> napi::Result<String> {
-    serde_json::to_string(&summary).map_err(|_| unexpected_result())
-}
-
 fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus> {
     let OperationResult::JoinSpace(status) = result else {
         return Err(unexpected_result());
@@ -785,10 +729,7 @@ fn invalid_restore_mode() -> napi::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        count, device_trust_json, engine_error, map_event, membership_conflict_resolution_json,
-        workspace_convergence,
-    };
+    use super::{count, device_trust_json, engine_error, map_event, workspace_convergence};
     use uc_engine::{
         EngineError, EngineErrorCategory, EngineEvent, OperationTerminal, RefreshReason,
     };
@@ -884,20 +825,6 @@ mod tests {
     #[test]
     fn oversized_delivery_counts_are_rejected() {
         assert!(count(usize::MAX).is_err());
-    }
-
-    #[test]
-    fn membership_conflict_json_preserves_local_completion_semantics() {
-        let json =
-            membership_conflict_resolution_json(uc_engine::MembershipConflictResolutionSummary {
-                outcome: uc_engine::MembershipConflictResolutionOutcomeSummary::Completed,
-                conflict_id: None,
-                local_resolution_completed: true,
-            })
-            .expect("membership conflict result must map");
-
-        assert!(json.contains("local_resolution_completed"));
-        assert!(!json.contains("global"));
     }
 
     #[test]

@@ -81,3 +81,9 @@
 - `SpaceFacade`/`AppFacade` 已经拥有唯一 `resolve_membership_conflict` 动作，但 Engine dispatch 尚未映射；不应在 Engine 重做选择规则。
 - 当前 `query_device_trust` 不包含 conflict 的候选 branch、选择资格、选择状态和 transition phase，不能作为规格要求的完整查询结果。
 - 公开结果必须表达 `local_resolution_completed`，不得用全局 `resolved` 命名暗示所有设备已经收敛。
+
+# 2026-08-31 · 统一设备组选择边界
+
+- 对产品而言，待定成员变更和 sibling branch 冲突都是“选择继续使用哪个设备组”；分别暴露会泄漏协议原因并要求调用方维护两套页面和并发处理。
+- 统一查询必须携带 revision，选择动作必须回传该 revision；Application 在执行前重新查询并拒绝过期选择。
+- 远端 branch 在恢复包验证前没有可信完整成员名单，契约必须表达未知，不能仅为 UI 对称而推测设备列表。

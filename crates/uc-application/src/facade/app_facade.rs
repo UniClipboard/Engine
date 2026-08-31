@@ -29,10 +29,102 @@ use std::sync::Arc;
 
 use thiserror::Error;
 use tokio::sync::broadcast;
+use uc_core::membership::{MembershipBranchId, MembershipConflictId, MembershipEventId};
 
 use crate::clipboard::sync::V3BlobRef;
 use crate::facade::config_migration::ConfigMigrationFacade;
 use crate::facade::roster::{MemberSummary, PeerSnapshotView, RosterError};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceGroupChoicesView {
+    pub revision: u64,
+    pub device_trust: crate::facade::DeviceTrustStatus,
+    pub conflicts: crate::facade::MembershipConflictsView,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceGroupIssue {
+    PendingChange(MembershipEventId),
+    BranchConflict(MembershipConflictId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceGroupChoice {
+    ApplyPendingChange,
+    KeepCurrentGroup,
+    Branch(MembershipBranchId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChooseDeviceGroup {
+    pub issue: DeviceGroupIssue,
+    pub choice: DeviceGroupChoice,
+    pub expected_revision: u64,
+    pub confirm_local_removal: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChooseDeviceGroupResult {
+    PendingChange(crate::facade::DecideDeviceTrustChangeResult),
+    BranchConflict(crate::facade::ResolveMembershipConflictResult),
+    StateChanged { current_revision: u64 },
+    InvalidChoice,
+}
+
+#[derive(Debug, Error)]
+pub enum QueryDeviceGroupChoicesError {
+    #[error("查询设备信任状态失败")]
+    DeviceTrust {
+        #[source]
+        source: crate::facade::QueryDeviceTrustError,
+    },
+    #[error("查询成员分支冲突失败")]
+    MembershipConflict {
+        #[source]
+        source: crate::facade::QueryMembershipConflictsError,
+    },
+    #[error("读取期间成员状态发生变化")]
+    StateChanged,
+}
+
+#[derive(Debug, Error)]
+pub enum ChooseDeviceGroupError {
+    #[error("处理待定成员变更失败")]
+    PendingChange {
+        #[source]
+        source: crate::facade::DecideDeviceTrustChangeError,
+    },
+    #[error("处理成员分支冲突失败")]
+    BranchConflict {
+        #[source]
+        source: crate::facade::ResolveMembershipConflictError,
+    },
+    #[error("查询当前设备组选择失败")]
+    Query {
+        #[source]
+        source: QueryDeviceGroupChoicesError,
+    },
+}
+
+#[cfg(test)]
+mod device_group_choice_error_tests {
+    use std::error::Error as _;
+
+    use super::{ChooseDeviceGroupError, QueryDeviceGroupChoicesError};
+
+    #[test]
+    fn dependency_error_keeps_stable_classification_and_source() {
+        let error = ChooseDeviceGroupError::Query {
+            source: QueryDeviceGroupChoicesError::DeviceTrust {
+                source: crate::facade::QueryDeviceTrustError::Unavailable,
+            },
+        };
+
+        assert!(matches!(error, ChooseDeviceGroupError::Query { .. }));
+        assert!(error.source().is_some());
+        assert!(error.source().and_then(std::error::Error::source).is_some());
+    }
+}
 use crate::facade::settings::{GeneralSettingsPatch, SettingsPatch};
 use crate::facade::space_setup::{
     InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
@@ -328,6 +420,83 @@ impl AppFacade {
         crate::facade::ResolveMembershipConflictError,
     > {
         self.space.resolve_membership_conflict(input).await
+    }
+
+    /// 向产品层提供唯一的设备组选择查询；内部差异不会要求调用方分别编排。
+    pub async fn query_device_group_choices(
+        &self,
+    ) -> Result<DeviceGroupChoicesView, QueryDeviceGroupChoicesError> {
+        let device_trust = self
+            .space
+            .query_device_trust()
+            .await
+            .map_err(|source| QueryDeviceGroupChoicesError::DeviceTrust { source })?;
+        let conflicts = self
+            .space
+            .query_membership_conflicts()
+            .await
+            .map_err(|source| QueryDeviceGroupChoicesError::MembershipConflict { source })?;
+        if device_trust.revision != conflicts.revision {
+            return Err(QueryDeviceGroupChoicesError::StateChanged);
+        }
+        Ok(DeviceGroupChoicesView {
+            revision: device_trust.revision,
+            device_trust,
+            conflicts,
+        })
+    }
+
+    /// 校验查询版本后，把统一选择路由到内部对应流程。
+    pub async fn choose_device_group(
+        &self,
+        input: ChooseDeviceGroup,
+    ) -> Result<ChooseDeviceGroupResult, ChooseDeviceGroupError> {
+        let current = self
+            .query_device_group_choices()
+            .await
+            .map_err(|source| ChooseDeviceGroupError::Query { source })?;
+        if current.revision != input.expected_revision {
+            return Ok(ChooseDeviceGroupResult::StateChanged {
+                current_revision: current.revision,
+            });
+        }
+        match (input.issue, input.choice) {
+            (DeviceGroupIssue::PendingChange(change_id), DeviceGroupChoice::ApplyPendingChange) => {
+                self.space
+                    .decide_device_trust_change(crate::facade::DecideDeviceTrustChange {
+                        change_id,
+                        choice: crate::facade::DeviceTrustChangeChoice::ApplyChange,
+                        confirm_local_removal: input.confirm_local_removal,
+                    })
+                    .await
+                    .map(ChooseDeviceGroupResult::PendingChange)
+                    .map_err(|source| ChooseDeviceGroupError::PendingChange { source })
+            }
+            (DeviceGroupIssue::PendingChange(change_id), DeviceGroupChoice::KeepCurrentGroup) => {
+                self.space
+                    .decide_device_trust_change(crate::facade::DecideDeviceTrustChange {
+                        change_id,
+                        choice: crate::facade::DeviceTrustChangeChoice::KeepCurrentDeviceGroup,
+                        confirm_local_removal: input.confirm_local_removal,
+                    })
+                    .await
+                    .map(ChooseDeviceGroupResult::PendingChange)
+                    .map_err(|source| ChooseDeviceGroupError::PendingChange { source })
+            }
+            (
+                DeviceGroupIssue::BranchConflict(conflict_id),
+                DeviceGroupChoice::Branch(target_branch_id),
+            ) => self
+                .space
+                .resolve_membership_conflict(crate::facade::ResolveMembershipConflictInput {
+                    conflict_id,
+                    target_branch_id,
+                })
+                .await
+                .map(ChooseDeviceGroupResult::BranchConflict)
+                .map_err(|source| ChooseDeviceGroupError::BranchConflict { source }),
+            _ => Ok(ChooseDeviceGroupResult::InvalidChoice),
+        }
     }
 
     pub async fn cancel_space_join(

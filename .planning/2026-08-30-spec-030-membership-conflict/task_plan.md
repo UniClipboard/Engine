@@ -18,13 +18,13 @@
 - [x] Phase 2：Ledger 加密 conflict record 与 Diverged 同 commit。
 - [x] Phase 3：Application 唯一 resolve use case、幂等选择与恢复调度。
 - [x] Phase 4：同 lineage branch generation transition 与恢复包 adapter。
-- [x] Phase 5：Engine、iOS、Android、HarmonyOS 同版本 contract。
+- [x] Phase 5：Engine、iOS、Android、HarmonyOS 统一设备组选择 contract，并清理旧四入口。
 - [ ] Phase 6：Desktop F0-F13、20 个固定 chaos seed 与 Spec 029 回归。
 - [ ] Phase 7：架构文档、代码审查、全量门禁与原子提交。
 
 ## Current Slice
 
-Phase 6：Desktop F0-F13、20 个固定 chaos seed 与 Spec 029 回归。
+Phase 6：Desktop F0-F13、20 个固定 chaos seed 与 Spec 029 回归（Phase 5 合并入口后的重新验证）。
 
 ## Next Step
 

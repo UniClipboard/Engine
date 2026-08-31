@@ -53,7 +53,9 @@ pub use crate::clipboard::active::{
 };
 pub use app_facade::{
     AppFacade, AppFacadeParts, AppPresenceEvent, AppPresenceSubscription,
-    AppPresenceSubscriptionError, ClipboardRestoreMode,
+    AppPresenceSubscriptionError, ChooseDeviceGroup, ChooseDeviceGroupError,
+    ChooseDeviceGroupResult, ClipboardRestoreMode, DeviceGroupChoice, DeviceGroupChoicesView,
+    DeviceGroupIssue, QueryDeviceGroupChoicesError,
 };
 pub use app_paths::AppPaths;
 pub use blob_transfer::{

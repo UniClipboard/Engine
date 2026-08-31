@@ -360,20 +360,13 @@ enum WorkerCommand {
     ListDevices {
         response: mpsc::Sender<Result<Vec<Device>, BindingError>>,
     },
-    QueryDeviceTrust {
+    QueryDeviceGroupChoices {
         response: mpsc::Sender<Result<String, BindingError>>,
     },
-    QueryMembershipConflicts {
-        response: mpsc::Sender<Result<String, BindingError>>,
-    },
-    ResolveMembershipConflict {
-        conflict_id: String,
-        target_branch_id: String,
-        response: mpsc::Sender<Result<String, BindingError>>,
-    },
-    DecideDeviceTrustChange {
-        change_id: String,
-        choice: DeviceTrustChoice,
+    ChooseDeviceGroup {
+        issue_id: String,
+        choice_id: String,
+        expected_revision: u64,
         confirm_local_removal: bool,
         response: mpsc::Sender<Result<String, BindingError>>,
     },
@@ -832,35 +825,21 @@ impl MobileEngine {
         self.request(|response| WorkerCommand::ListDevices { response })
     }
 
-    pub fn query_device_trust(&self) -> Result<String, BindingError> {
-        self.request(|response| WorkerCommand::QueryDeviceTrust { response })
+    pub fn query_device_group_choices(&self) -> Result<String, BindingError> {
+        self.request(|response| WorkerCommand::QueryDeviceGroupChoices { response })
     }
 
-    pub fn query_membership_conflicts(&self) -> Result<String, BindingError> {
-        self.request(|response| WorkerCommand::QueryMembershipConflicts { response })
-    }
-
-    pub fn resolve_membership_conflict(
+    pub fn choose_device_group(
         &self,
-        conflict_id: String,
-        target_branch_id: String,
-    ) -> Result<String, BindingError> {
-        self.request(|response| WorkerCommand::ResolveMembershipConflict {
-            conflict_id,
-            target_branch_id,
-            response,
-        })
-    }
-
-    pub fn decide_device_trust_change(
-        &self,
-        change_id: String,
-        choice: DeviceTrustChoice,
+        issue_id: String,
+        choice_id: String,
+        expected_revision: u64,
         confirm_local_removal: bool,
     ) -> Result<String, BindingError> {
-        self.request(|response| WorkerCommand::DecideDeviceTrustChange {
-            change_id,
-            choice,
+        self.request(|response| WorkerCommand::ChooseDeviceGroup {
+            issue_id,
+            choice_id,
+            expected_revision,
             confirm_local_removal,
             response,
         })
@@ -1450,64 +1429,33 @@ async fn run_worker_loop(
                 }
                 let _ = response.send(result);
             }
-            WorkerCommand::QueryDeviceTrust { response } => {
+            WorkerCommand::QueryDeviceGroupChoices { response } => {
                 let result = engine
-                    .execute(Operation::QueryDeviceTrust)
+                    .execute(Operation::QueryDeviceGroupChoices)
                     .await
                     .map_err(BindingError::from)
-                    .and_then(map_device_trust);
+                    .and_then(map_device_group_choices);
                 let _ = response.send(result);
             }
-            WorkerCommand::QueryMembershipConflicts { response } => {
-                let result = engine
-                    .execute(Operation::QueryMembershipConflicts)
-                    .await
-                    .map_err(BindingError::from)
-                    .and_then(map_membership_conflicts);
-                let _ = response.send(result);
-            }
-            WorkerCommand::ResolveMembershipConflict {
-                conflict_id,
-                target_branch_id,
-                response,
-            } => {
-                let result = engine
-                    .execute(Operation::ResolveMembershipConflict(
-                        uc_engine::ResolveMembershipConflictInput {
-                            conflict_id,
-                            target_branch_id,
-                        },
-                    ))
-                    .await
-                    .map_err(BindingError::from)
-                    .and_then(map_membership_conflict_resolution);
-                let _ = response.send(result);
-            }
-            WorkerCommand::DecideDeviceTrustChange {
-                change_id,
-                choice,
+            WorkerCommand::ChooseDeviceGroup {
+                issue_id,
+                choice_id,
+                expected_revision,
                 confirm_local_removal,
                 response,
             } => {
-                let choice = match choice {
-                    DeviceTrustChoice::ApplyChange => {
-                        uc_engine::DeviceTrustChoiceSummary::ApplyChange
-                    }
-                    DeviceTrustChoice::KeepCurrentDeviceGroup => {
-                        uc_engine::DeviceTrustChoiceSummary::KeepCurrentDeviceGroup
-                    }
-                };
                 let result = engine
-                    .execute(Operation::DecideDeviceTrustChange(
-                        uc_engine::DecideDeviceTrustChangeInput {
-                            change_id,
-                            choice,
+                    .execute(Operation::ChooseDeviceGroup(
+                        uc_engine::ChooseDeviceGroupInput {
+                            issue_id,
+                            choice_id,
+                            expected_revision,
                             confirm_local_removal,
                         },
                     ))
                     .await
                     .map_err(BindingError::from)
-                    .and_then(map_device_trust_decision);
+                    .and_then(map_device_group_choice_result);
                 let _ = response.send(result);
             }
             WorkerCommand::RemoveMember {
@@ -2001,10 +1949,19 @@ fn map_device_trust(result: uc_engine::OperationResult) -> Result<String, Bindin
     }
 }
 
-fn map_device_trust_decision(result: uc_engine::OperationResult) -> Result<String, BindingError> {
+fn map_device_group_choices(result: OperationResult) -> Result<String, BindingError> {
     match result {
-        uc_engine::OperationResult::DeviceTrustDecision(decision) => {
-            serde_json::to_string(&decision).map_err(|_| BindingError::UnexpectedResult)
+        OperationResult::DeviceGroupChoices(summary) => {
+            serde_json::to_string(&summary).map_err(|_| BindingError::UnexpectedResult)
+        }
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_device_group_choice_result(result: OperationResult) -> Result<String, BindingError> {
+    match result {
+        OperationResult::DeviceGroupChosen(summary) => {
+            serde_json::to_string(&summary).map_err(|_| BindingError::UnexpectedResult)
         }
         _ => Err(BindingError::UnexpectedResult),
     }
@@ -2014,24 +1971,6 @@ fn map_device_trust_snapshot(
     snapshot: uc_engine::DeviceTrustSnapshotSummary,
 ) -> Result<String, BindingError> {
     serde_json::to_string(&snapshot).map_err(|_| BindingError::UnexpectedResult)
-}
-
-fn map_membership_conflicts(result: OperationResult) -> Result<String, BindingError> {
-    match result {
-        OperationResult::MembershipConflicts(summary) => {
-            serde_json::to_string(&summary).map_err(|_| BindingError::UnexpectedResult)
-        }
-        _ => Err(BindingError::UnexpectedResult),
-    }
-}
-
-fn map_membership_conflict_resolution(result: OperationResult) -> Result<String, BindingError> {
-    match result {
-        OperationResult::MembershipConflictResolved(summary) => {
-            serde_json::to_string(&summary).map_err(|_| BindingError::UnexpectedResult)
-        }
-        _ => Err(BindingError::UnexpectedResult),
-    }
 }
 
 fn map_resend_outcome(result: OperationResult) -> Result<ResendEntryOutcome, BindingError> {
@@ -2627,21 +2566,6 @@ mod tests {
         assert!(json.contains("recovery"));
         assert!(json.contains("allowed_actions"));
         assert!(json.contains("blocked_reason"));
-    }
-
-    #[test]
-    fn membership_conflict_json_preserves_local_completion_semantics() {
-        let json = map_membership_conflict_resolution(OperationResult::MembershipConflictResolved(
-            uc_engine::MembershipConflictResolutionSummary {
-                outcome: uc_engine::MembershipConflictResolutionOutcomeSummary::Completed,
-                conflict_id: None,
-                local_resolution_completed: true,
-            },
-        ))
-        .expect("membership conflict result must map");
-
-        assert!(json.contains("local_resolution_completed"));
-        assert!(!json.contains("global"));
     }
 
     #[test]
