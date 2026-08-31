@@ -649,6 +649,8 @@ reconciliation: Idle -> Comparing -> FetchingHistory -> Consistent -> Idle
 待决定移除可以让已知事件头领先已应用事件头；后继事件不能越过它应用。接受后可回到
 `Consistent`；拒绝后进入 `Diverged`，只隔离相关设备关系，不停止整个 Space。
 
+摘要发现双方处于同一 lineage 的 sibling 分支时，普通后缀反熵不会尝试合并或应用远端历史。Application 改用一次有界的双向冲突取证往返：双方分别发送完整分页签名历史，只在本机验证分支关系和证据发送者，不把远端历史应用到当前分支；每一端都在同一次加密 ledger CAS 中写入唯一冲突记录并把对应 peer 标记为 `Diverged`。取证完成后普通反熵隔离该 peer，用户只能通过统一设备组选择入口推进恢复。Core 负责历史验证和 sibling 规则，Application 的 ledger 事务负责完整结果，Iroh 只传输追加在既有判别值之后的 typed message。
+
 ### 空间切换与重置
 
 跨 Space 加入和 Reset 都先在独立目标世代准备并验证完整状态，活动 Space manifest 的原子替换是唯一生效点。替换前失败继续使用旧 Space；替换后只能恢复并完成同一目标世代。旧世代清理由可重试后台工作负责，不参与授权判断。
@@ -837,6 +839,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-31 | Phase 6 成员诊断接缝 | `dev-tools` 增加只读成员诊断 operation，由 Application 一次性返回 branch/head、group epoch、有效成员数及待处理 conflict/effect/transition 阶段；Engine 只做脱敏映射。该入口不进入默认构建和移动绑定，声明式拓扑测试用它验证密码学与恢复状态，不直接读取内部 ledger。 |
 | 2026-08-31 | Phase 6 受控 P2P 分区 | 共享 Iroh endpoint 可选安装按认证 EndpointId 工作的测试 gate；它在握手前拒绝新出站连接、握手后拒绝双向连接，并在分区建立时主动关闭已存在连接，因此所有业务 ALPN 使用同一 Partition/Heal 边界。控制入口仅存在于 Engine `dev-tools`，生产组装不安装 gate，诊断输出不暴露 EndpointId。 |
 | 2026-08-31 | 成员冲突跨端 contract | Engine 新增完整冲突查询与单次选择两个稳定 operation，统一映射 result/error；iOS、Android 和 HarmonyOS 绑定只转发同版本 Engine contract，并明确结果仅代表本机选择完成。 |
+| 2026-08-31 | F0 sibling 冲突发现 | Desktop 五节点确定性拓扑验证共同 head 分区后双 Sponsor 形成两个四成员 sibling 分支；Heal 后 Application 通过一次双向完整签名证据往返让双方各自原子保存唯一冲突并进入 `Diverged`，不应用远端分支、不自动选主，分支间正文继续关闭式失败。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |

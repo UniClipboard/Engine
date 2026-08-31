@@ -17,14 +17,16 @@ pub use decide_device_trust_change::{
     DecideDeviceTrustChange, DecideDeviceTrustChangeError, DecideDeviceTrustChangeResult,
     DeviceTrustChangeChoice,
 };
+#[cfg(test)]
+pub use ledger::MembershipConflictRecord;
 pub use ledger::{
     ActivateMembershipEffectPort, ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort,
     CommitMembershipLedgerPort, CurrentSpaceMemberScope, CurrentSpaceMemberScopeError,
     CurrentSpaceMemberScopePort, InboundMembershipTransfer, LoadMembershipLedgerPort,
     LoadedMembershipLedger, MembershipBranchRecoverySession, MembershipBranchRecoverySessionState,
-    MembershipConflictRecord, MembershipConflictStatus, MembershipEffectExecutionError,
-    MembershipEffectKind, MembershipEffectPhase, MembershipLedgerError, MembershipLedgerMutation,
-    PausedSpaceMember, PeerHistorySyncOutcome, PeerHistorySyncState, PeerReconciliationRecord,
+    MembershipConflictStatus, MembershipEffectExecutionError, MembershipEffectKind,
+    MembershipEffectPhase, MembershipLedgerError, MembershipLedgerMutation, PausedSpaceMember,
+    PeerHistorySyncOutcome, PeerHistorySyncState, PeerReconciliationRecord,
     PendingMembershipEffect, RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
     RestrictedMembershipDeliveryPort, SpaceMemberPauseReason,
 };

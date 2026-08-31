@@ -5,9 +5,9 @@ use std::time::Duration;
 use futures::{stream, StreamExt};
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    ack_confirms_membership_history_target, MembershipHistoryExchangeError,
-    MembershipHistoryExchangePort, MembershipHistoryMessage, MembershipHistorySuffixRequestV3,
-    MembershipHistorySummaryV3,
+    ack_confirms_membership_history_target, MembershipConflictEvidenceV3,
+    MembershipHistoryExchangeError, MembershipHistoryExchangePort, MembershipHistoryMessage,
+    MembershipHistorySuffixRequestV3, MembershipHistorySummaryV3,
 };
 use uc_core::ports::ClockPort;
 
@@ -374,6 +374,37 @@ impl SynchronizeMembershipHistoryUseCase {
                 tracing::debug!(page_count = pages.len(), "成员历史后缀已导出");
                 return self.send_suffix_pages(peer, pages, position).await;
             }
+            MembershipHistoryMessage::RequestConflictEvidenceV3(request)
+                if request.transfer_id == summary_transfer_id =>
+            {
+                let pages = history
+                    .export_conflict_evidence_pages_v2((*sender).clone())
+                    .map_err(|_| PeerSyncError::Stable)?;
+                let reply = self
+                    .transport
+                    .exchange_membership_history(
+                        peer,
+                        MembershipHistoryMessage::ConflictEvidenceV3(
+                            MembershipConflictEvidenceV3 {
+                                transfer_id: summary_transfer_id,
+                                pages,
+                            },
+                        ),
+                    )
+                    .await
+                    .map_err(map_exchange_error)?;
+                if let MembershipHistoryMessage::ConflictEvidenceV3(remote_evidence) = reply {
+                    let recorded = self
+                        .ledger
+                        .exchange_conflict_evidence(peer, &remote_evidence)
+                        .await
+                        .map_err(|_| PeerSyncError::Stable)?;
+                    if recorded.is_none() {
+                        return Err(PeerSyncError::Stable);
+                    }
+                }
+                return Err(PeerSyncError::Stable);
+            }
             _ => {
                 tracing::debug!("成员历史摘要收到不匹配的稳定回复");
                 return Err(PeerSyncError::Stable);
@@ -519,6 +550,8 @@ fn membership_message_kind(message: &MembershipHistoryMessage) -> &'static str {
         MembershipHistoryMessage::SummaryV3(_) => "summary",
         MembershipHistoryMessage::RequestSuffixV3(_) => "request_suffix",
         MembershipHistoryMessage::SuffixPageV3(_) => "suffix_page",
+        MembershipHistoryMessage::RequestConflictEvidenceV3(_) => "request_conflict_evidence",
+        MembershipHistoryMessage::ConflictEvidenceV3(_) => "conflict_evidence",
         MembershipHistoryMessage::AckV3(ack) => membership_ack_kind(ack),
         MembershipHistoryMessage::RestrictedEventV3(_) => "restricted_event",
         MembershipHistoryMessage::RestrictedDecisionV3(_) => "restricted_decision",

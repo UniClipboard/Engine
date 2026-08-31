@@ -198,3 +198,15 @@
 - Infra 在唯一共享 Iroh endpoint 安装可选 gate；出站连接在发包前拒绝，入站与出站握手后再次拒绝，建立分区时同时关闭匹配的存量连接。
 - Engine `dev-tools` 持有跨 session 重建稳定的 gate，拓扑驱动器以节点 EndpointId 双向设置 `Partition`，以空集合执行 `Heal`；默认/生产组装传 `None`。
 - 真实双节点测试确认已完成准入的连接在 Partition 后正文零 accepted 且接收端无内容，Heal 后同一 Engine 恢复发送并精确收到正文。
+
+## 2026-08-31 · F0 red test
+
+- 新增五节点公开 Engine 脚本：A-B-C 先达到相同 branch/head，随后 `[A,C,D]` 与 `[B,E]` 分区，并由 A/B 分别准入 D/E。
+- 红测要求两侧形成不同 branch/head、各自四名有效成员、分支内正文成功、跨分支正文失败；Heal 后 A/B 都只出现一个统一设备组选择且不自动选主。
+
+## 2026-08-31 · F0 sibling conflict discovery
+
+- 第一轮绿色尝试证明摘要已稳定判定 `diverged`，但 Iroh wire 白名单遗漏新增证据消息，双方都无法落成冲突。
+- 修复 transport 后第二轮只由先收到完整证据的一侧记录冲突，暴露先隔离的一端会阻断另一端依赖后续反向调度的非确定性。
+- 最终协议在同一次摘要往返中双向交换有界完整签名历史；双方各自验证 sibling 关系和发送者，并各自在一次 ledger CAS 中同时写入唯一冲突和 `Diverged` peer 关系，远端历史从不应用到当前分支。
+- 五节点 F0 已通过：两个分支各四名有效成员且 MLS epoch 前进，分支内精确正文成功，分区期间和 Heal 后跨分支正文均失败，A/B 各公开一个统一设备组选择且没有自动 winner。

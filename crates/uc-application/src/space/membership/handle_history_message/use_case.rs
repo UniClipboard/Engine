@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use uc_core::membership::{
-    plan_membership_history_reconciliation, MembershipDecisionV2, MembershipEventV2,
-    MembershipHistoryAckV3, MembershipHistoryMessage, MembershipHistoryReconciliationPlan,
-    MembershipHistoryRelationship, MembershipHistorySuffixRequestV3, MembershipOperationV2,
-    VersionedMembershipHistory, MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
+    plan_membership_history_reconciliation, MembershipConflictEvidenceRequestV3,
+    MembershipDecisionV2, MembershipEventV2, MembershipHistoryAckV3, MembershipHistoryMessage,
+    MembershipHistoryReconciliationPlan, MembershipHistoryRelationship,
+    MembershipHistorySuffixRequestV3, MembershipOperationV2, VersionedMembershipHistory,
+    MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
 };
 
 use crate::space::membership::{
@@ -116,20 +117,31 @@ impl HandleMembershipHistoryMessageUseCase {
                             },
                         ))
                     }
-                    MembershipHistoryReconciliationPlan::Diverged
-                    | MembershipHistoryReconciliationPlan::Invalid => Ok(
+                    MembershipHistoryReconciliationPlan::Diverged => {
+                        Ok(MembershipHistoryMessage::RequestConflictEvidenceV3(
+                            MembershipConflictEvidenceRequestV3 {
+                                transfer_id: summary.transfer_id,
+                            },
+                        ))
+                    }
+                    MembershipHistoryReconciliationPlan::Invalid => Ok(
                         MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid),
                     ),
                 };
             }
             MembershipHistoryMessage::SuffixPageV3(page) => page,
+            MembershipHistoryMessage::ConflictEvidenceV3(evidence) => {
+                return self.receive_conflict_evidence(source, evidence).await;
+            }
             MembershipHistoryMessage::RestrictedEventV3(event) => {
                 return self.receive_restricted_event(source, event).await;
             }
             MembershipHistoryMessage::RestrictedDecisionV3(decision) => {
                 return self.receive_restricted_decision(source, decision).await;
             }
-            MembershipHistoryMessage::RequestSuffixV3(_) | MembershipHistoryMessage::AckV3(_) => {
+            MembershipHistoryMessage::RequestSuffixV3(_)
+            | MembershipHistoryMessage::RequestConflictEvidenceV3(_)
+            | MembershipHistoryMessage::AckV3(_) => {
                 return Err(HandleMembershipHistoryMessageError::Rejected);
             }
         };
@@ -352,6 +364,48 @@ impl HandleMembershipHistoryMessageUseCase {
         );
         self.wake_after_history_change(matches!(ack, MembershipHistoryAckV3::Confirmed { .. }));
         Ok(MembershipHistoryMessage::AckV3(ack))
+    }
+
+    async fn receive_conflict_evidence(
+        &self,
+        source: &AuthenticatedMember,
+        evidence: uc_core::membership::MembershipConflictEvidenceV3,
+    ) -> Result<MembershipHistoryMessage, HandleMembershipHistoryMessageError> {
+        if evidence.pages.is_empty()
+            || postcard::to_stdvec(&MembershipHistoryMessage::ConflictEvidenceV3(
+                evidence.clone(),
+            ))
+            .map(|bytes| bytes.len() > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE)
+            .unwrap_or(true)
+        {
+            return Ok(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::Invalid,
+            ));
+        }
+        let _guard = self.execution_lock.lock().await;
+        let Some(pages) = self
+            .ledger
+            .exchange_conflict_evidence(source.device_id(), &evidence)
+            .await
+            .map_err(map_ledger_error)?
+        else {
+            return Ok(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::Invalid,
+            ));
+        };
+        let transfer_id = self
+            .ledger
+            .load_verified()
+            .await
+            .map_err(map_ledger_error)?
+            .history()
+            .ok_or(HandleMembershipHistoryMessageError::RecoveryRequired)?
+            .current_position()
+            .map_err(|_| HandleMembershipHistoryMessageError::RecoveryRequired)?
+            .history_digest;
+        Ok(MembershipHistoryMessage::ConflictEvidenceV3(
+            uc_core::membership::MembershipConflictEvidenceV3 { transfer_id, pages },
+        ))
     }
 
     async fn receive_restricted_event(

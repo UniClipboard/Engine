@@ -28,7 +28,7 @@ Phase 6：Desktop F0-F13、20 个固定 chaos seed 与 Spec 029 回归（Phase 5
 
 ## Next Step
 
-用已验证的 Partition/Heal 动作编写 F0 红测：A-B-C 共同基线分区后分别准入 D/E，断言 sibling branch 隔离、分支内正文成功、跨分支正文失败，并在 Heal 后只暴露单一设备组选择。
+F0 已完成；下一切片按规格进入 F1，先写确定性红测，再实现对应故障语义。
 
 ## Constraints
 
@@ -52,3 +52,5 @@ Phase 6：Desktop F0-F13、20 个固定 chaos seed 与 Spec 029 回归（Phase 5
 | generation executor 首次真实测试缺少 legacy bootstrap repository | 1 | 复用同一 SQLite security store 同时实现 revocation 与 legacy bootstrap repository，建立真实 sponsor MLS。 |
 | Engine contract 红测启用 `dev-tools` 时同时编译到既有退役 membership removal / SpaceJoined 测试 | 1 | 新 contract 后续使用默认 feature 定向测试；既有 dev-tools 漂移作为独立问题记录，不误归因于 Phase 5。 |
 | workspace check 发现移动 probe host 对新 `OperationResult` 未穷举 | 1 | probe host 同步增加查询/选择命令和完整结果映射，使真实移动验收入口覆盖 Phase 5 contract。 |
+| F0 首次运行在共同基线断言失败 | 1 | A 准入 C 后 B 的反熵尚未完成；在 Partition 前有界等待 A/B/C 的 branch、head 与三成员视图完全一致。 |
+| F0 Heal 后只有一侧出现冲突 | 2 | 将单向证据 ACK 改成同一次往返双向交换完整签名证据，双方独立验证并原子保存冲突后同时隔离。 |

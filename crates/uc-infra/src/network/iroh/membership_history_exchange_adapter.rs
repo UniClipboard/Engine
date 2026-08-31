@@ -133,6 +133,8 @@ impl RestrictedMembershipDeliveryPort for IrohMembershipHistoryExchangeAdapter {
             | Ok(MembershipHistoryMessage::SuffixPageV3(_))
             | Ok(MembershipHistoryMessage::SummaryV3(_))
             | Ok(MembershipHistoryMessage::RequestSuffixV3(_))
+            | Ok(MembershipHistoryMessage::RequestConflictEvidenceV3(_))
+            | Ok(MembershipHistoryMessage::ConflictEvidenceV3(_))
             | Ok(MembershipHistoryMessage::AckV3(
                 MembershipHistoryAckV3::Continue { .. } | MembershipHistoryAckV3::Confirmed { .. },
             ))
@@ -253,6 +255,8 @@ fn decode_message(
             | MembershipHistoryMessage::SuffixPageV3(_)
             | MembershipHistoryMessage::RestrictedEventV3(_)
             | MembershipHistoryMessage::RestrictedDecisionV3(_)
+            | MembershipHistoryMessage::RequestConflictEvidenceV3(_)
+            | MembershipHistoryMessage::ConflictEvidenceV3(_)
     ) {
         Ok(message)
     } else {
@@ -302,6 +306,8 @@ fn introduced_device(
         MembershipHistoryMessage::SummaryV3(summary) => &summary.sender_admission,
         MembershipHistoryMessage::SuffixPageV3(page) => page.sender_admission(),
         MembershipHistoryMessage::RequestSuffixV3(_)
+        | MembershipHistoryMessage::RequestConflictEvidenceV3(_)
+        | MembershipHistoryMessage::ConflictEvidenceV3(_)
         | MembershipHistoryMessage::AckV3(_)
         | MembershipHistoryMessage::RestrictedEventV3(_)
         | MembershipHistoryMessage::RestrictedDecisionV3(_) => return None,

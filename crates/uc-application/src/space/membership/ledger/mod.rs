@@ -18,12 +18,13 @@ pub use effect_executor::{
 };
 pub use error::MembershipLedgerError;
 pub(crate) use initializer::InitializeSpaceMembershipUseCase;
+#[cfg(test)]
+pub use model::MembershipConflictRecord;
 pub use model::{
     InboundMembershipTransfer, LoadedMembershipLedger, MembershipBranchRecoverySession,
-    MembershipBranchRecoverySessionState, MembershipConflictRecord, MembershipConflictStatus,
-    MembershipEffectKind, MembershipEffectPhase, MembershipLedgerMutation, PeerHistorySyncOutcome,
-    PeerHistorySyncState, PeerReconciliationRecord, PendingMembershipEffect,
-    RestrictedMembershipDelivery,
+    MembershipBranchRecoverySessionState, MembershipConflictStatus, MembershipEffectKind,
+    MembershipEffectPhase, MembershipLedgerMutation, PeerHistorySyncOutcome, PeerHistorySyncState,
+    PeerReconciliationRecord, PendingMembershipEffect, RestrictedMembershipDelivery,
 };
 pub use repository::{CommitMembershipLedgerPort, LoadMembershipLedgerPort};
 pub(crate) use repository::{MembershipLedger, VerifiedMembershipLedger};

@@ -324,9 +324,11 @@ impl MembershipTopology {
         let space_id = self
             .space_ids
             .get(sponsor)
-            .unwrap_or_else(|| panic!("sponsor {sponsor} has no space"));
+            .unwrap_or_else(|| panic!("sponsor {sponsor} has no space"))
+            .clone();
         let joined =
-            join_through(self.engine(sponsor), self.engine(joiner), joiner, space_id).await;
+            join_through(self.engine(sponsor), self.engine(joiner), joiner, &space_id).await;
+        self.space_ids.insert(joiner.to_owned(), space_id);
         self.device_ids
             .insert(joiner.to_owned(), joined.self_device_id);
     }
@@ -398,6 +400,43 @@ impl MembershipTopology {
             panic!("node {sender} returned an unexpected send result");
         };
         report
+    }
+
+    async fn diagnostics(&self, node: &str) -> uc_engine::MembershipDiagnosticsSummary {
+        let result = self
+            .engine(node)
+            .execute(Operation::QueryMembershipDiagnostics)
+            .await
+            .unwrap_or_else(|error| panic!("node {node} diagnostics failed: {error}"));
+        let OperationResult::MembershipDiagnostics(summary) = result else {
+            panic!("node {node} returned an unexpected diagnostics result");
+        };
+        summary
+    }
+
+    async fn wait_for_equivalent_branch(&self, nodes: &[&str], effective_members: u32) {
+        let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+        loop {
+            let mut snapshots = Vec::with_capacity(nodes.len());
+            for node in nodes {
+                snapshots.push(self.diagnostics(node).await);
+            }
+            let first = snapshots
+                .first()
+                .unwrap_or_else(|| panic!("branch equivalence requires at least one node"));
+            if snapshots.iter().all(|snapshot| {
+                snapshot.branch_id == first.branch_id
+                    && snapshot.head_event_id == first.head_event_id
+                    && snapshot.effective_member_count == effective_members
+            }) {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "nodes did not converge to the expected branch"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     async fn assert_snapshot(
@@ -513,6 +552,112 @@ async fn topology_partition_blocks_all_iroh_channels_until_healed() {
     let healed = topology.send("A", "B", healed_text).await;
     assert_eq!(healed.total_accepted, 1);
     wait_for_received_text(topology.engine("B"), healed_text).await;
+    topology.shutdown().await;
+}
+
+// F0：共同 head 分区后由两个 Sponsor 分别准入新设备，必须形成隔离的 sibling 分支。
+#[tokio::test(flavor = "multi_thread", worker_threads = 10)]
+async fn f0_partitioned_sponsors_create_isolated_sibling_branches() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let mut topology = MembershipTopology::new(rendezvous.uri());
+    topology
+        .run(&[
+            TopologyAction::Start { node: "A" },
+            TopologyAction::Start { node: "B" },
+            TopologyAction::Start { node: "C" },
+            TopologyAction::Start { node: "D" },
+            TopologyAction::Start { node: "E" },
+            TopologyAction::Create { node: "A" },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "B",
+            },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "C",
+            },
+        ])
+        .await;
+    topology
+        .wait_for_equivalent_branch(&["A", "B", "C"], 3)
+        .await;
+    let baseline_a = topology.diagnostics("A").await;
+    let baseline_b = topology.diagnostics("B").await;
+    assert_eq!(baseline_a.branch_id, baseline_b.branch_id);
+    assert_eq!(baseline_a.head_event_id, baseline_b.head_event_id);
+
+    topology
+        .run(&[
+            TopologyAction::Partition {
+                left: &["A", "C", "D"],
+                right: &["B", "E"],
+            },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "D",
+            },
+            TopologyAction::Join {
+                sponsor: "B",
+                joiner: "E",
+            },
+        ])
+        .await;
+
+    let branch_a = topology.diagnostics("A").await;
+    let branch_b = topology.diagnostics("B").await;
+    assert_ne!(branch_a.branch_id, branch_b.branch_id);
+    assert_ne!(branch_a.head_event_id, branch_b.head_event_id);
+    assert_eq!(branch_a.effective_member_count, 4);
+    assert_eq!(branch_b.effective_member_count, 4);
+    assert!(branch_a.group_epoch > baseline_a.group_epoch);
+    assert!(branch_b.group_epoch > baseline_b.group_epoch);
+    assert_eq!(
+        branch_a.group_epoch,
+        topology.diagnostics("D").await.group_epoch
+    );
+    assert_eq!(
+        branch_b.group_epoch,
+        topology.diagnostics("E").await.group_epoch
+    );
+
+    let left_text = "F0 left branch transfer";
+    assert_eq!(topology.send("A", "D", left_text).await.total_accepted, 1);
+    wait_for_received_text(topology.engine("D"), left_text).await;
+    let right_text = "F0 right branch transfer";
+    assert_eq!(topology.send("B", "E", right_text).await.total_accepted, 1);
+    wait_for_received_text(topology.engine("E"), right_text).await;
+    let isolated_text = "F0 cross branch transfer must fail";
+    assert_eq!(
+        topology.send("A", "E", isolated_text).await.total_accepted,
+        0
+    );
+    assert!(!receiver_has_exact_text(topology.engine("E"), isolated_text).await);
+
+    topology
+        .run(&[TopologyAction::Heal {
+            nodes: &["A", "B", "C", "D", "E"],
+        }])
+        .await;
+    for node in ["A", "B", "C", "D", "E"] {
+        wait_for_peer_refresh(topology.engine(node), node).await;
+    }
+    topology.assert_snapshot("A", 4, 1).await;
+    topology.assert_snapshot("B", 4, 1).await;
+    let healed_a = topology.diagnostics("A").await;
+    let healed_b = topology.diagnostics("B").await;
+    assert_ne!(healed_a.branch_id, healed_b.branch_id);
+    assert_eq!(healed_a.pending_conflict_count, 1);
+    assert_eq!(healed_b.pending_conflict_count, 1);
+    let healed_isolated_text = "F0 healed sibling branches remain isolated";
+    assert_eq!(
+        topology
+            .send("A", "E", healed_isolated_text)
+            .await
+            .total_accepted,
+        0
+    );
+    assert!(!receiver_has_exact_text(topology.engine("E"), healed_isolated_text).await);
     topology.shutdown().await;
 }
 

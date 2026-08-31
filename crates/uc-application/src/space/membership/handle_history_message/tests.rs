@@ -7,9 +7,10 @@ use uc_core::ids::DeviceId;
 use uc_core::membership::{
     AdmissionChangeFacts, HistoricalMembershipSignatureError,
     HistoricalMembershipSignatureVerifier, MembershipActivationBaselineV2, MembershipAdmissionV2,
-    MembershipCredential, MembershipEventId, MembershipEventV2, MembershipHistoryAckV3,
-    MembershipHistoryMessage, MembershipHistoryRelationship, MembershipOperationV2,
-    VersionedMembershipHistory, ED25519_SIGNATURE_ALGORITHM_V1, MEMBERSHIP_EVENT_FORMAT_V2,
+    MembershipConflictEvidenceV3, MembershipCredential, MembershipEventId, MembershipEventV2,
+    MembershipHistoryAckV3, MembershipHistoryMessage, MembershipHistoryRelationship,
+    MembershipHistorySummaryV3, MembershipOperationV2, VersionedMembershipHistory,
+    ED25519_SIGNATURE_ALGORITHM_V1, MEMBERSHIP_EVENT_FORMAT_V2,
 };
 
 use super::*;
@@ -22,6 +23,137 @@ use crate::space::membership::{
 struct MemoryLedgerRepository {
     loaded: Mutex<LoadedMembershipLedger>,
     commits: AtomicUsize,
+}
+
+#[tokio::test]
+async fn sibling_summary_requests_verified_evidence_and_records_one_conflict() {
+    let (local, local_credential) = member_facts("device-a", 0x41);
+    let (peer, peer_credential) = member_facts("device-b", 0x42);
+    let base = VersionedMembershipHistory::from_activation_baseline(
+        MembershipActivationBaselineV2::Established {
+            lineage_id: "space-a".to_owned(),
+            head_event_id: MembershipEventId::from_hex(&"11".repeat(32)).unwrap(),
+            head_depth: 0,
+            current_members: vec![
+                (local.clone(), local_credential.clone()),
+                (peer.clone(), peer_credential.clone()),
+            ],
+        },
+    )
+    .unwrap();
+    let local_author = MembershipAdmissionV2 {
+        facts: local.clone(),
+        membership_credential: local_credential,
+        resume_public_key_digest: [7; 32],
+        security_commitment_id: [8; 32],
+    };
+    let peer_author = MembershipAdmissionV2 {
+        facts: peer.clone(),
+        membership_credential: peer_credential,
+        resume_public_key_digest: [7; 32],
+        security_commitment_id: [8; 32],
+    };
+    let mut local_history = base.clone();
+    local_history
+        .verify_and_receive_event(
+            add_event(
+                &local_history,
+                &local_author,
+                admission("device-c", MembershipCredential::new(1, vec![0x43; 32])),
+                0x51,
+            ),
+            &AcceptingVerifier,
+        )
+        .unwrap();
+    let mut remote_history = base;
+    remote_history
+        .verify_and_receive_event(
+            add_event(
+                &remote_history,
+                &peer_author,
+                admission("device-d", MembershipCredential::new(1, vec![0x44; 32])),
+                0x61,
+            ),
+            &AcceptingVerifier,
+        )
+        .unwrap();
+    let remote_position = remote_history.current_position().unwrap();
+    let pages = remote_history
+        .export_conflict_evidence_pages_v2(peer.clone())
+        .unwrap();
+    let mut loaded = LoadedMembershipLedger::no_current_space();
+    loaded.revision = 5;
+    loaded.lineage_id = Some("space-a".to_owned());
+    loaded.membership_history = Some(local_history.encode_persisted_v2().unwrap());
+    loaded.local_device_id = Some(local.device_id);
+    loaded.local_member_instance = Some(local.member_instance);
+    loaded.local_join_active = true;
+    loaded.peer_reconciliation.insert(
+        peer.device_id.clone(),
+        PeerReconciliationRecord {
+            peer_device_id: peer.device_id.clone(),
+            relationship: MembershipHistoryRelationship::Consistent,
+            confirmed_position: None,
+            sync_state: Default::default(),
+            restricted_delivery: Vec::new(),
+            updated_at_ms: 1,
+        },
+    );
+    let repository = Arc::new(MemoryLedgerRepository {
+        loaded: Mutex::new(loaded),
+        commits: AtomicUsize::new(0),
+    });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    ));
+    let handler = HandleMembershipHistoryMessageUseCase::new(ledger);
+    let source = AuthenticatedMember::new(peer.device_id.clone());
+
+    let request = handler
+        .execute(
+            &source,
+            MembershipHistoryMessage::SummaryV3(MembershipHistorySummaryV3 {
+                lineage_id: "space-a".to_owned(),
+                current_position: remote_position.clone(),
+                transfer_id: remote_position.history_digest,
+                sender_admission: peer.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        request,
+        MembershipHistoryMessage::RequestConflictEvidenceV3(_)
+    ));
+    assert_eq!(repository.commits.load(Ordering::SeqCst), 0);
+
+    let response = handler
+        .execute(
+            &source,
+            MembershipHistoryMessage::ConflictEvidenceV3(MembershipConflictEvidenceV3 {
+                transfer_id: remote_position.history_digest,
+                pages,
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        response,
+        MembershipHistoryMessage::ConflictEvidenceV3(_)
+    ));
+    assert_eq!(repository.commits.load(Ordering::SeqCst), 1);
+    let persisted = repository.load().await.unwrap();
+    assert_eq!(persisted.membership_conflicts.len(), 1);
+    assert_eq!(
+        persisted
+            .peer_reconciliation
+            .get(&peer.device_id)
+            .map(|record| record.relationship),
+        Some(MembershipHistoryRelationship::Diverged)
+    );
 }
 
 #[async_trait]

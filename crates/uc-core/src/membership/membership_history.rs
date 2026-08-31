@@ -9,7 +9,7 @@ use crate::ids::DeviceId;
 
 use super::versioned_membership_history::{
     BaseMembershipHistoryPosition, MembershipDecisionV2, MembershipEventV2,
-    MembershipHistorySuffixPageV3,
+    MembershipHistoryPageV2, MembershipHistorySuffixPageV3,
 };
 use super::{AdmissionChangeFacts, MemberInstanceId};
 
@@ -122,6 +122,9 @@ pub enum MembershipHistoryMessage {
     RestrictedEventV3(MembershipEventV2),
     /// 仅向被普通成员 scope 排除的对端交付指定成员决定。
     RestrictedDecisionV3(MembershipDecisionV2),
+    /// 追加在既有 wire variant 之后，避免改变已发布消息的 postcard 判别值。
+    RequestConflictEvidenceV3(MembershipConflictEvidenceRequestV3),
+    ConflictEvidenceV3(MembershipConflictEvidenceV3),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +140,35 @@ pub struct MembershipHistorySummaryV3 {
 pub struct MembershipHistorySuffixRequestV3 {
     pub transfer_id: [u8; 32],
     pub known_position: BaseMembershipHistoryPosition,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipConflictEvidenceRequestV3 {
+    pub transfer_id: [u8; 32],
+}
+
+/// 只用于验证 sibling 分支并建立冲突记录；接收方不得把该历史应用到当前分支。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipConflictEvidenceV3 {
+    pub transfer_id: [u8; 32],
+    pub pages: Vec<MembershipHistoryPageV2>,
+}
+
+impl std::fmt::Debug for MembershipConflictEvidenceRequestV3 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MembershipConflictEvidenceRequestV3")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for MembershipConflictEvidenceV3 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MembershipConflictEvidenceV3")
+            .field("page_count", &self.pages.len())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

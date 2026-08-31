@@ -1070,6 +1070,13 @@ impl VersionedMembershipHistory {
         exchange_history.export_pages_v2(sender_admission)
     }
 
+    pub fn export_conflict_evidence_pages_v2(
+        &self,
+        sender_admission: AdmissionChangeFacts,
+    ) -> Result<Vec<MembershipHistoryPageV2>, MembershipHistoryV2Error> {
+        self.export_pages_v2(sender_admission)
+    }
+
     pub fn export_suffix_pages_v3(
         &self,
         sender_admission: AdmissionChangeFacts,

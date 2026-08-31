@@ -72,7 +72,8 @@ pub use membership_conflict_policy::{
 };
 pub use membership_history::{
     ack_confirms_membership_history_target, plan_membership_history_reconciliation,
-    MembershipDecisionId, MembershipEventId, MembershipHistoryAckV3, MembershipHistoryMessage,
+    MembershipConflictEvidenceRequestV3, MembershipConflictEvidenceV3, MembershipDecisionId,
+    MembershipEventId, MembershipHistoryAckV3, MembershipHistoryMessage,
     MembershipHistoryReconciliationPlan, MembershipHistoryRelationship,
     MembershipHistorySuffixRequestV3, MembershipHistorySummaryV3, PendingRemovalFacts,
     RemovalDecision,
