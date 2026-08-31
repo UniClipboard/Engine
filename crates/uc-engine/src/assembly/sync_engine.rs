@@ -178,6 +178,17 @@ impl uc_application::deps::PrepareMembershipBranchRecoveryMaterialPort
             },
         )
     }
+
+    async fn commit_membership_branch_recovery_material(
+        &self,
+        _target_staged_space_material: Vec<u8>,
+    ) -> Result<(), uc_application::deps::PrepareMembershipBranchRecoveryMaterialError> {
+        Err(
+            uc_application::deps::PrepareMembershipBranchRecoveryMaterialError::Unavailable {
+                source: anyhow::anyhow!("membership branch recovery material is unavailable"),
+            },
+        )
+    }
 }
 
 #[cfg(not(feature = "lan-compat"))]

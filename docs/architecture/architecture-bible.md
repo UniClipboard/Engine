@@ -820,6 +820,8 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-31 | 分支恢复客户端编排 | Application conflict recovery coordinator 唯一负责选择确定性 evidence peer、请求 GroupInfo、调用无副作用 recipient MLS preparation、在 external commit 发出前加密提交 staged session、验证并保存恢复包，再原子消费 nonce 和建立 generation transition。重启从已保存阶段续跑，不重新生成 external commit；旧一步式 fetch port 已删除。Engine 已接入真实 Iroh channel，recipient MLS adapter 接入前保持显式 Deferred。 |
 | 2026-08-31 | Recipient MLS 恢复 adapter | 现有 `DefaultSpaceAccessAdapter` 实现窄 recipient recovery port：从当前 generation 的加密安全仓库加载 MLS state，使用目标 GroupInfo 生成 external commit，并把 recipient MLS snapshot、共享 wrapping key 与 epoch 编码为单一 staged payload，交由 Application 在发送 commit 前随 ledger 加密保存。Engine 不再注入 recipient deferred adapter。Target 侧禁止直接 apply-and-reply，必须先实现 TargetPrepared/TargetCommitted 持久事务。 |
 | 2026-08-31 | 分支恢复事务键 | Core `MembershipBranchTransitionV1::derive_id` 是 conflict 与目标 branch 推导 transition id 的唯一规则；选择方与目标方无需共享额外随机事务标识即可得到相同加密 session 键。Application 不再复制哈希域与字段顺序。 |
+| 2026-08-31 | Application 依赖表面审计 | 扫描 `deps.rs` 的 port 定义、实现、装配、生产调用、测试与历史后，确认小 port 原则本身仍成立，复杂度主要由 Application 对象图外移到 Engine、宽 bundle 分发及步骤级编排造成；形成规格 031 的 clean-cutover 收敛计划，并识别旧 admission/pairing、receive projection 与 wiring-only 字段的删除候选。本轮只更新计划，无生产架构行为变化。 |
+| 2026-08-31 | Target 恢复提交事务 | Application issuer 将 target material 能力拆成无副作用 prepare 与幂等 commit：先签署 package 并连同 external commit digest、staged security material 保存为 TargetPrepared，随后提交安全状态并标记 TargetCommitted。重试按同一事务键和 commit digest 返回缓存 package；TargetPrepared 重启只续做 commit，不重复计算或签发。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |
@@ -859,3 +861,4 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 - `docs/specs/027-application-space-membership-one-shot-rewrite.md`：Application Space 成员关系目标对象、接口、流程、删除清单和验收标准。
 - `docs/specs/028-single-space-admission-protocol.md`：全新单一 Space 准入协议、跨层接入、删除清单和完整验收标准。
 - `docs/specs/029-durable-membership-history-anti-entropy.md`：逐 peer 确认水位、持久传播欠账、公平重试和复杂拓扑验收。
+- `docs/specs/031-application-dependency-surface-deepening.md`：Application port 来源审计、死能力清单、对象图归属和分阶段收敛计划。

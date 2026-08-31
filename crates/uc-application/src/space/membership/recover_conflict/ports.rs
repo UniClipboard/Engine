@@ -145,6 +145,7 @@ pub struct PrepareMembershipBranchRecoveryMaterialInput {
 }
 
 pub struct PreparedMembershipBranchRecoveryMaterial {
+    pub target_staged_space_material: Vec<u8>,
     pub sealed_mls_recovery_material: Vec<u8>,
     pub encrypted_content_key_catalog: Vec<u8>,
 }
@@ -176,6 +177,11 @@ pub trait PrepareMembershipBranchRecoveryMaterialPort: Send + Sync {
         PreparedMembershipBranchRecoveryMaterial,
         PrepareMembershipBranchRecoveryMaterialError,
     >;
+
+    async fn commit_membership_branch_recovery_material(
+        &self,
+        target_staged_space_material: Vec<u8>,
+    ) -> Result<(), PrepareMembershipBranchRecoveryMaterialError>;
 }
 
 #[derive(Clone)]

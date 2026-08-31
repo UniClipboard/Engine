@@ -122,3 +122,10 @@
 - transition id 推导从 Application resolve use case 移入 Core `MembershipBranchTransitionV1::derive_id`。
 - recipient 与 target 现在可仅凭 conflict/target branch 得到同一稳定事务键，无需扩展 wire 携带另一份可错配标识。
 - Core 测试覆盖重复推导稳定、非零和不同目标分支隔离。
+
+## 2026-08-31 · TDD target recovery transaction
+
+- 第一轮红测确认旧 issuer 会返回 package 但不保存 target session、也不提交安全材料；绿色实现增加 prepare payload、TargetPrepared checkpoint、material commit 和 TargetCommitted checkpoint。
+- 第二轮红测确认重复请求会重新 prepare 并因 session 冲突被拒绝；绿色实现改为在材料计算前读取 target session，并按 external commit digest 返回缓存 package。
+- 故障注入测试确认 material commit 首次中断后，重试从 TargetPrepared 续跑，prepare/签发只发生一次，commit 可安全重试。
+- Application port 已明确 prepare 返回 staged target material，commit 接受该 opaque payload；真实 Infra 实现属于下一切片。

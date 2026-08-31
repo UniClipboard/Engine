@@ -217,6 +217,33 @@ impl MembershipBranchRecoverySession {
         }
     }
 
+    pub fn target_preparation(
+        &self,
+    ) -> Option<([u8; 32], &[u8], &MembershipBranchRecoveryPackageV1)> {
+        match &self.state {
+            MembershipBranchRecoverySessionState::TargetPrepared {
+                external_commit_digest,
+                target_staged_space_material,
+                recovery_package,
+            } => Some((
+                *external_commit_digest,
+                target_staged_space_material,
+                recovery_package,
+            )),
+            _ => None,
+        }
+    }
+
+    pub fn target_completion(&self) -> Option<([u8; 32], &MembershipBranchRecoveryPackageV1)> {
+        match &self.state {
+            MembershipBranchRecoverySessionState::TargetCommitted {
+                external_commit_digest,
+                recovery_package,
+            } => Some((*external_commit_digest, recovery_package)),
+            _ => None,
+        }
+    }
+
     pub fn complete_recipient(
         &mut self,
         recovery_package: MembershipBranchRecoveryPackageV1,

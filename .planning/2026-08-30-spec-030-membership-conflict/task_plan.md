@@ -24,11 +24,11 @@
 
 ## Current Slice
 
-Phase 4：真实 recipient MLS adapter 已接入；下一切片实现 target 侧无副作用准备、幂等提交与内容密钥密封事务。
+Phase 4：target Application prepare/commit 事务已由红绿测试建立；下一切片实现 Infra 的真实 staged material 计算、内容密钥密封和幂等安全提交。
 
 ## Next Step
 
-重构 target recovery material port：先生成无副作用 staged 安全材料与恢复包，再由 issuer 持久化 TargetPrepared、提交安全状态并标记 TargetCommitted。
+实现 `DefaultSpaceAccessAdapter` 的 target prepare/commit：prepare 只计算 staged `SpaceKeyMaterial`，commit 才持久化并安装，重复提交相同 material 幂等。
 
 ## Constraints
 

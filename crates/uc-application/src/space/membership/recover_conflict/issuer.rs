@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
 use rand::RngCore;
-use uc_core::membership::MembershipConflictPolicy;
+use sha2::{Digest, Sha256};
+use uc_core::membership::{MembershipBranchTransitionV1, MembershipConflictPolicy};
 use uc_core::ports::ClockPort;
 
 use crate::space::membership::{
-    CurrentMemberSignaturePort, MembershipLedger, MembershipLedgerError,
+    CurrentMemberSignaturePort, MembershipBranchRecoverySession, MembershipLedger,
+    MembershipLedgerError,
 };
 
 use super::{
@@ -139,6 +141,35 @@ impl IssueMembershipBranchRecoveryPort for IssueMembershipBranchRecoveryUseCase 
                 input.recipient_member,
             )
             .await?;
+        let external_commit_digest = Sha256::digest(&input.external_commit).into();
+        let transition_id =
+            MembershipBranchTransitionV1::derive_id(input.conflict_id, input.target_branch_id);
+        let snapshot = self
+            .ledger
+            .load_verified()
+            .await
+            .map_err(map_ledger_error)?;
+        if let Some(session) = snapshot
+            .record()
+            .membership_branch_recovery_sessions
+            .get(&transition_id)
+        {
+            if let Some((digest, package)) = session.target_completion() {
+                return (digest == external_commit_digest)
+                    .then(|| package.clone())
+                    .ok_or_else(rejected);
+            }
+            if let Some((digest, staged, package)) = session.target_preparation() {
+                if digest != external_commit_digest {
+                    return Err(rejected());
+                }
+                let staged = staged.to_vec();
+                let package = package.clone();
+                self.commit_target_material(transition_id, staged).await?;
+                return Ok(package);
+            }
+            return Err(corrupt());
+        }
         let prepared = self
             .material
             .prepare_membership_branch_recovery_material(
@@ -191,7 +222,60 @@ impl IssueMembershipBranchRecoveryPort for IssueMembershipBranchRecoveryUseCase 
             .map_err(|error| IssueMembershipBranchRecoveryError::Unavailable {
                 source: anyhow::Error::new(error),
             })?;
-        Ok(unsigned.with_authorization_signature(signature))
+        let package = unsigned.with_authorization_signature(signature);
+        let target_staged_space_material = prepared.target_staged_space_material;
+        let session = MembershipBranchRecoverySession::new_target_prepared(
+            transition_id,
+            input.conflict_id,
+            input.target_branch_id,
+            input.recipient_member,
+            external_commit_digest,
+            target_staged_space_material.clone(),
+            package.clone(),
+        )
+        .ok_or_else(corrupt)?;
+        self.ledger
+            .compare_and_commit(move |record| {
+                if record
+                    .membership_branch_recovery_sessions
+                    .insert(transition_id, session)
+                    .is_some()
+                {
+                    return Err(MembershipLedgerError::Conflict);
+                }
+                Ok(())
+            })
+            .await
+            .map_err(map_ledger_error)?;
+        self.commit_target_material(transition_id, target_staged_space_material)
+            .await?;
+        Ok(package)
+    }
+}
+
+impl IssueMembershipBranchRecoveryUseCase {
+    async fn commit_target_material(
+        &self,
+        transition_id: [u8; 32],
+        target_staged_space_material: Vec<u8>,
+    ) -> Result<(), IssueMembershipBranchRecoveryError> {
+        self.material
+            .commit_membership_branch_recovery_material(target_staged_space_material)
+            .await
+            .map_err(map_material_error)?;
+        self.ledger
+            .compare_and_commit(move |record| {
+                record
+                    .membership_branch_recovery_sessions
+                    .get_mut(&transition_id)
+                    .ok_or(MembershipLedgerError::Conflict)?
+                    .commit_target()
+                    .then_some(())
+                    .ok_or(MembershipLedgerError::Conflict)
+            })
+            .await
+            .map_err(map_ledger_error)?;
+        Ok(())
     }
 }
 

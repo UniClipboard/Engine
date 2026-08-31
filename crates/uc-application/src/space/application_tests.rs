@@ -707,6 +707,15 @@ impl PrepareMembershipBranchRecoveryMaterialPort for PassivePorts {
             source: anyhow::anyhow!("passive recovery material"),
         })
     }
+
+    async fn commit_membership_branch_recovery_material(
+        &self,
+        _target_staged_space_material: Vec<u8>,
+    ) -> Result<(), PrepareMembershipBranchRecoveryMaterialError> {
+        Err(PrepareMembershipBranchRecoveryMaterialError::Unavailable {
+            source: anyhow::anyhow!("passive recovery material"),
+        })
+    }
 }
 
 #[async_trait]

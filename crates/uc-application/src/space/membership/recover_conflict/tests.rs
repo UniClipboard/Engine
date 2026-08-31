@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -136,6 +136,8 @@ struct TransitionPreparer {
 struct RecoveryMaterialSource {
     calls: AtomicUsize,
     group_info_calls: AtomicUsize,
+    commit_calls: AtomicUsize,
+    fail_first_commit: AtomicBool,
 }
 
 #[async_trait]
@@ -156,9 +158,23 @@ impl PrepareMembershipBranchRecoveryMaterialPort for RecoveryMaterialSource {
     > {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(PreparedMembershipBranchRecoveryMaterial {
+            target_staged_space_material: vec![0x70],
             sealed_mls_recovery_material: vec![0x71],
             encrypted_content_key_catalog: vec![0x72],
         })
+    }
+
+    async fn commit_membership_branch_recovery_material(
+        &self,
+        _target_staged_space_material: Vec<u8>,
+    ) -> Result<(), PrepareMembershipBranchRecoveryMaterialError> {
+        self.commit_calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_first_commit.swap(false, Ordering::SeqCst) {
+            return Err(PrepareMembershipBranchRecoveryMaterialError::Unavailable {
+                source: anyhow::anyhow!("injected target commit interruption"),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -477,6 +493,8 @@ async fn issuer_authenticates_recipient_before_preparing_and_signing_material() 
     let material = Arc::new(RecoveryMaterialSource {
         calls: AtomicUsize::new(0),
         group_info_calls: AtomicUsize::new(0),
+        commit_calls: AtomicUsize::new(0),
+        fail_first_commit: AtomicBool::new(false),
     });
     let issuer = IssueMembershipBranchRecoveryUseCase::new(
         ledger,
@@ -546,4 +564,198 @@ async fn issuer_authenticates_recipient_before_preparing_and_signing_material() 
         )
         .unwrap();
     assert_eq!(material.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn target_recovery_commits_only_after_caching_an_idempotent_package() {
+    let fixture = fixture();
+    let (local_device_id, recipient_member, target_branch_id) = {
+        let mut record = fixture.repository.record.lock().unwrap();
+        let local_device_id = record.local_device_id.clone().unwrap();
+        let recipient_member = record.local_member_instance.unwrap();
+        let history = VersionedMembershipHistory::decode_persisted_v2(
+            record.membership_history.as_deref().unwrap(),
+            &AcceptingVerifier,
+        )
+        .unwrap();
+        let target_branch_id = MembershipConflictPolicy::branch_id(&history).unwrap();
+        record
+            .membership_conflicts
+            .get_mut(&fixture.conflict_id)
+            .unwrap()
+            .local_branch_id = target_branch_id;
+        (local_device_id, recipient_member, target_branch_id)
+    };
+    let ledger = Arc::new(MembershipLedger::new(
+        fixture.repository.clone(),
+        fixture.repository.clone(),
+        Arc::new(AcceptingVerifier),
+    ));
+    let material = Arc::new(RecoveryMaterialSource {
+        calls: AtomicUsize::new(0),
+        group_info_calls: AtomicUsize::new(0),
+        commit_calls: AtomicUsize::new(0),
+        fail_first_commit: AtomicBool::new(false),
+    });
+    let issuer = IssueMembershipBranchRecoveryUseCase::new(
+        ledger,
+        material.clone(),
+        Arc::new(RecoverySigner),
+        Arc::new(FixedClock),
+    );
+
+    let package = issuer
+        .issue_membership_branch_recovery(IssueMembershipBranchRecoveryInput {
+            source_device_id: local_device_id,
+            conflict_id: fixture.conflict_id,
+            target_branch_id,
+            recipient_member,
+            external_commit: vec![0x73],
+        })
+        .await
+        .unwrap();
+
+    let transition_id =
+        MembershipBranchTransitionV1::derive_id(fixture.conflict_id, target_branch_id);
+    let persisted = fixture.repository.load().await.unwrap();
+    let session = persisted
+        .membership_branch_recovery_sessions
+        .get(&transition_id)
+        .unwrap();
+    assert_eq!(material.commit_calls.load(Ordering::SeqCst), 1);
+    assert!(format!("{session:?}").contains("TargetCommitted"));
+    assert_eq!(session.recipient_completion().map(|(_, value)| value), None);
+    assert_eq!(package.conflict_id(), fixture.conflict_id);
+}
+
+#[tokio::test]
+async fn target_recovery_resumes_from_prepared_after_commit_interruption() {
+    let fixture = fixture();
+    let (local_device_id, recipient_member, target_branch_id) = {
+        let mut record = fixture.repository.record.lock().unwrap();
+        let local_device_id = record.local_device_id.clone().unwrap();
+        let recipient_member = record.local_member_instance.unwrap();
+        let history = VersionedMembershipHistory::decode_persisted_v2(
+            record.membership_history.as_deref().unwrap(),
+            &AcceptingVerifier,
+        )
+        .unwrap();
+        let target_branch_id = MembershipConflictPolicy::branch_id(&history).unwrap();
+        record
+            .membership_conflicts
+            .get_mut(&fixture.conflict_id)
+            .unwrap()
+            .local_branch_id = target_branch_id;
+        (local_device_id, recipient_member, target_branch_id)
+    };
+    let ledger = Arc::new(MembershipLedger::new(
+        fixture.repository.clone(),
+        fixture.repository.clone(),
+        Arc::new(AcceptingVerifier),
+    ));
+    let material = Arc::new(RecoveryMaterialSource {
+        calls: AtomicUsize::new(0),
+        group_info_calls: AtomicUsize::new(0),
+        commit_calls: AtomicUsize::new(0),
+        fail_first_commit: AtomicBool::new(true),
+    });
+    let issuer = IssueMembershipBranchRecoveryUseCase::new(
+        ledger,
+        material.clone(),
+        Arc::new(RecoverySigner),
+        Arc::new(FixedClock),
+    );
+    let request = IssueMembershipBranchRecoveryInput {
+        source_device_id: local_device_id,
+        conflict_id: fixture.conflict_id,
+        target_branch_id,
+        recipient_member,
+        external_commit: vec![0x73],
+    };
+
+    assert!(matches!(
+        issuer
+            .issue_membership_branch_recovery(request.clone())
+            .await,
+        Err(IssueMembershipBranchRecoveryError::Unavailable { .. })
+    ));
+    let transition_id =
+        MembershipBranchTransitionV1::derive_id(fixture.conflict_id, target_branch_id);
+    let cached = fixture
+        .repository
+        .load()
+        .await
+        .unwrap()
+        .membership_branch_recovery_sessions[&transition_id]
+        .target_preparation()
+        .map(|(_, _, package)| package.clone())
+        .unwrap();
+
+    let resumed = issuer
+        .issue_membership_branch_recovery(request)
+        .await
+        .unwrap();
+
+    assert_eq!(resumed, cached);
+    assert_eq!(material.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(material.commit_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn target_recovery_retry_returns_the_cached_package_without_reapplying_commit() {
+    let fixture = fixture();
+    let (local_device_id, recipient_member, target_branch_id) = {
+        let mut record = fixture.repository.record.lock().unwrap();
+        let local_device_id = record.local_device_id.clone().unwrap();
+        let recipient_member = record.local_member_instance.unwrap();
+        let history = VersionedMembershipHistory::decode_persisted_v2(
+            record.membership_history.as_deref().unwrap(),
+            &AcceptingVerifier,
+        )
+        .unwrap();
+        let target_branch_id = MembershipConflictPolicy::branch_id(&history).unwrap();
+        record
+            .membership_conflicts
+            .get_mut(&fixture.conflict_id)
+            .unwrap()
+            .local_branch_id = target_branch_id;
+        (local_device_id, recipient_member, target_branch_id)
+    };
+    let ledger = Arc::new(MembershipLedger::new(
+        fixture.repository.clone(),
+        fixture.repository.clone(),
+        Arc::new(AcceptingVerifier),
+    ));
+    let material = Arc::new(RecoveryMaterialSource {
+        calls: AtomicUsize::new(0),
+        group_info_calls: AtomicUsize::new(0),
+        commit_calls: AtomicUsize::new(0),
+        fail_first_commit: AtomicBool::new(false),
+    });
+    let issuer = IssueMembershipBranchRecoveryUseCase::new(
+        ledger,
+        material.clone(),
+        Arc::new(RecoverySigner),
+        Arc::new(FixedClock),
+    );
+    let request = IssueMembershipBranchRecoveryInput {
+        source_device_id: local_device_id,
+        conflict_id: fixture.conflict_id,
+        target_branch_id,
+        recipient_member,
+        external_commit: vec![0x73],
+    };
+
+    let first = issuer
+        .issue_membership_branch_recovery(request.clone())
+        .await
+        .unwrap();
+    let retried = issuer
+        .issue_membership_branch_recovery(request)
+        .await
+        .unwrap();
+
+    assert_eq!(first, retried);
+    assert_eq!(material.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(material.commit_calls.load(Ordering::SeqCst), 1);
 }
