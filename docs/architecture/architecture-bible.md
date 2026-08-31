@@ -811,6 +811,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-30 | 成员冲突恢复协调 | Application coordinator 是恢复包获取、完整验证和无副作用 `Prepared` transition 计划的唯一流程入口；接受包时在一次加密 ledger CAS 中同时消费 nonce、保存 transition 并推进 conflict。重复执行不再获取包，跨 conflict nonce 重放不产生持久化副作用。 |
 | 2026-08-30 | 成员冲突维护接线 | membership maintenance 在 effects 恢复后、group update 和受限交付前统一驱动 conflict recovery，且 peer 上线也会触发；损坏状态阻断后续权限扩展。真实 Iroh recovery 与 generation adapter 接入前，Engine 明确保持 Pending，不借普通反熵或 LAN 兼容线降级。 |
 | 2026-08-31 | 分支切换准备 adapter | Infra 从 MasterKey AEAD 保护的 active generation manifest 读取真实 source database generation，并为目标分支生成独立随机 generation；该 adapter 只返回 `Prepared` 计划，不创建目录、不覆盖来源、不提升 manifest。Engine 不再使用 transition deferred adapter。 |
+| 2026-08-31 | 分支恢复包签发入口 | Application issuer 从加密 ledger 重新验证目标是本机当前完整分支、认证请求设备对应 Active recipient、签发者仍为 Active；Infra 只能提供已对 recipient 密封的 MLS 与内容密钥材料。issuer 生成短期 nonce 包并使用当前成员凭据授权签名，认证或资格失败时不调用材料能力。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |

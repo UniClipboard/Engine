@@ -24,11 +24,11 @@
 
 ## Current Slice
 
-Phase 4：真实 transition preparation adapter 已接入 Engine；下一切片实现恢复包安全签发与 Iroh exchange。
+Phase 4：真实 transition preparation 与 Application recovery package issuer 已完成；下一切片实现密封材料 adapter 和 Iroh exchange。
 
 ## Next Step
 
-实现当前有效成员的 recovery package 签发 capability，再以认证 Iroh exchange 替换 recovery deferred adapter。
+实现 recipient-bound MLS/content-key 恢复材料 adapter，再以认证 Iroh exchange 替换 recovery deferred adapter。
 
 ## Constraints
 

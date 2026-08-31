@@ -41,8 +41,12 @@ pub use query_device_trust::{
 pub use re_pairing::{RePairingStateError, RePairingStateStorePort};
 pub use recover_conflict::{
     FetchMembershipBranchRecoveryError, FetchMembershipBranchRecoveryInput,
-    FetchMembershipBranchRecoveryPort, PrepareMembershipBranchTransitionError,
+    FetchMembershipBranchRecoveryPort, IssueMembershipBranchRecoveryError,
+    IssueMembershipBranchRecoveryInput, IssueMembershipBranchRecoveryPort,
+    PrepareMembershipBranchRecoveryMaterialError, PrepareMembershipBranchRecoveryMaterialInput,
+    PrepareMembershipBranchRecoveryMaterialPort, PrepareMembershipBranchTransitionError,
     PrepareMembershipBranchTransitionInput, PrepareMembershipBranchTransitionPort,
+    PreparedMembershipBranchRecoveryMaterial,
 };
 pub use remove_space_member::{
     MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult,
@@ -72,6 +76,7 @@ pub(super) use query_admission::{MembershipAdmissionSnapshot, QueryMembershipAdm
 pub(super) use query_admission::{QueryMembershipAdmissionPort, QueryMembershipAdmissionUseCase};
 pub(super) use query_device_trust::QueryDeviceTrustUseCase;
 pub(super) use re_pairing::{RePairingState, ResolveRePairingPort};
+pub(super) use recover_conflict::IssueMembershipBranchRecoveryUseCase;
 pub(super) use recover_conflict::RecoverMembershipConflictUseCase;
 pub(super) use remove_space_member::RemoveSpaceMemberUseCase;
 pub(crate) use resolve_conflict::QueryMembershipConflictStatusPort;

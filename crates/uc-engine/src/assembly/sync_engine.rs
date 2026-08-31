@@ -170,6 +170,27 @@ impl uc_application::deps::FetchMembershipBranchRecoveryPort for DeferredMembers
     }
 }
 
+struct DeferredMembershipBranchRecoveryMaterial;
+
+#[async_trait::async_trait]
+impl uc_application::deps::PrepareMembershipBranchRecoveryMaterialPort
+    for DeferredMembershipBranchRecoveryMaterial
+{
+    async fn prepare_membership_branch_recovery_material(
+        &self,
+        _input: uc_application::deps::PrepareMembershipBranchRecoveryMaterialInput,
+    ) -> Result<
+        uc_application::deps::PreparedMembershipBranchRecoveryMaterial,
+        uc_application::deps::PrepareMembershipBranchRecoveryMaterialError,
+    > {
+        Err(
+            uc_application::deps::PrepareMembershipBranchRecoveryMaterialError::Unavailable {
+                source: anyhow::anyhow!("membership branch recovery material is unavailable"),
+            },
+        )
+    }
+}
+
 #[cfg(not(feature = "lan-compat"))]
 struct UnavailableMobileDeviceLookup;
 
@@ -942,6 +963,7 @@ pub async fn build_sync_engine_assembly(
                     &space_setup.active_generation_manifest_store,
                 )),
             ),
+            membership_branch_recovery_material: Arc::new(DeferredMembershipBranchRecoveryMaterial),
             apply_membership_member_facts: Arc::new(MembershipMemberFactsAdapter::new(
                 Arc::clone(&deps.device.member_repo),
                 Arc::clone(&shared.trusted_peer_repo),

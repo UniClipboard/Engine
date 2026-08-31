@@ -130,10 +130,14 @@ pub use membership::{
 pub use membership::{
     CleanupLegacyMembershipDataPort, DeliverRestrictedMembershipPort,
     FetchMembershipBranchRecoveryError, FetchMembershipBranchRecoveryInput,
-    FetchMembershipBranchRecoveryPort, MembershipMaintenanceStepOutcome,
-    MembershipNetworkActivityPort, PrepareMembershipBranchTransitionError,
+    FetchMembershipBranchRecoveryPort, IssueMembershipBranchRecoveryError,
+    IssueMembershipBranchRecoveryInput, IssueMembershipBranchRecoveryPort,
+    MembershipMaintenanceStepOutcome, MembershipNetworkActivityPort,
+    PrepareMembershipBranchRecoveryMaterialError, PrepareMembershipBranchRecoveryMaterialInput,
+    PrepareMembershipBranchRecoveryMaterialPort, PrepareMembershipBranchTransitionError,
     PrepareMembershipBranchTransitionInput, PrepareMembershipBranchTransitionPort,
-    RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
+    PreparedMembershipBranchRecoveryMaterial, RecoverMembershipEffectsPort,
+    RecoverSpaceAdmissionsPort,
 };
 pub use membership::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
 pub use membership::{

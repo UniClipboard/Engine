@@ -103,6 +103,64 @@ struct TransitionPreparer {
     calls: AtomicUsize,
 }
 
+struct RecoveryMaterialSource {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl PrepareMembershipBranchRecoveryMaterialPort for RecoveryMaterialSource {
+    async fn prepare_membership_branch_recovery_material(
+        &self,
+        _input: PrepareMembershipBranchRecoveryMaterialInput,
+    ) -> Result<
+        PreparedMembershipBranchRecoveryMaterial,
+        PrepareMembershipBranchRecoveryMaterialError,
+    > {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(PreparedMembershipBranchRecoveryMaterial {
+            sealed_mls_recovery_material: vec![0x71],
+            encrypted_content_key_catalog: vec![0x72],
+        })
+    }
+}
+
+struct RecoverySigner;
+
+#[async_trait]
+impl crate::space::membership::CurrentMemberSignaturePort for RecoverySigner {
+    async fn current_member_epoch(
+        &self,
+    ) -> Result<u64, crate::space::membership::CurrentMemberSignatureError> {
+        Ok(1)
+    }
+
+    async fn current_member_instance(
+        &self,
+        _device_id: &DeviceId,
+    ) -> Result<
+        uc_core::membership::MemberInstanceId,
+        crate::space::membership::CurrentMemberSignatureError,
+    > {
+        Err(crate::space::membership::CurrentMemberSignatureError::InvalidState)
+    }
+
+    async fn sign_current_member_payload(
+        &self,
+        _payload: &[u8],
+    ) -> Result<Vec<u8>, crate::space::membership::CurrentMemberSignatureError> {
+        Ok(vec![0x73])
+    }
+
+    async fn verify_current_member_payload(
+        &self,
+        _member: &DeviceId,
+        _payload: &[u8],
+        _signature: &[u8],
+    ) -> Result<bool, crate::space::membership::CurrentMemberSignatureError> {
+        Ok(true)
+    }
+}
+
 #[async_trait]
 impl PrepareMembershipBranchTransitionPort for TransitionPreparer {
     async fn prepare_membership_branch_transition(
@@ -289,4 +347,75 @@ async fn nonce_consumed_by_another_conflict_has_zero_ledger_side_effects() {
     assert_eq!(fixture.repository.commits.load(Ordering::SeqCst), 0);
     assert_eq!(fixture.repository.load().await.unwrap(), expected);
     assert_eq!(before.revision, expected.revision);
+}
+
+#[tokio::test]
+async fn issuer_authenticates_recipient_before_preparing_and_signing_material() {
+    let fixture = fixture();
+    let (local_device_id, recipient_member, target_branch_id) = {
+        let mut record = fixture.repository.record.lock().unwrap();
+        let local_device_id = record.local_device_id.clone().unwrap();
+        let recipient_member = record.local_member_instance.unwrap();
+        let history = VersionedMembershipHistory::decode_persisted_v2(
+            record.membership_history.as_deref().unwrap(),
+            &AcceptingVerifier,
+        )
+        .unwrap();
+        let target_branch_id = MembershipConflictPolicy::branch_id(&history).unwrap();
+        record
+            .membership_conflicts
+            .get_mut(&fixture.conflict_id)
+            .unwrap()
+            .local_branch_id = target_branch_id;
+        (local_device_id, recipient_member, target_branch_id)
+    };
+    let verifier: Arc<dyn HistoricalMembershipSignatureVerifier> = Arc::new(AcceptingVerifier);
+    let ledger = Arc::new(MembershipLedger::new(
+        fixture.repository.clone(),
+        fixture.repository.clone(),
+        verifier.clone(),
+    ));
+    let material = Arc::new(RecoveryMaterialSource {
+        calls: AtomicUsize::new(0),
+    });
+    let issuer = IssueMembershipBranchRecoveryUseCase::new(
+        ledger,
+        material.clone(),
+        Arc::new(RecoverySigner),
+        Arc::new(FixedClock),
+    );
+    let request = IssueMembershipBranchRecoveryInput {
+        source_device_id: DeviceId::new("wrong-device"),
+        conflict_id: fixture.conflict_id,
+        target_branch_id,
+        recipient_member,
+    };
+
+    let rejected = issuer
+        .issue_membership_branch_recovery(request.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        rejected,
+        IssueMembershipBranchRecoveryError::Rejected { .. }
+    ));
+    assert_eq!(material.calls.load(Ordering::SeqCst), 0);
+
+    let package = issuer
+        .issue_membership_branch_recovery(IssueMembershipBranchRecoveryInput {
+            source_device_id: local_device_id,
+            ..request
+        })
+        .await
+        .unwrap();
+    package
+        .validate(
+            fixture.conflict_id,
+            target_branch_id,
+            recipient_member,
+            100,
+            verifier.as_ref(),
+        )
+        .unwrap();
+    assert_eq!(material.calls.load(Ordering::SeqCst), 1);
 }

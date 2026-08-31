@@ -56,3 +56,10 @@
 - target generation 使用非零随机 128-bit 标识，并保证不同于 source；准备阶段无目录、数据库或 manifest 写入。
 - Engine 已替换 transition deferred adapter；recovery transport 仍显式 Deferred。
 - Infra 定向测试 2 项通过，Engine all-target check 通过。
+
+## 2026-08-31 · Recovery package issuer
+
+- Application 新增唯一 recovery package issuer 与材料 preparation port。
+- issuer 从 ledger 验证本机目标 branch、认证 source device 与 Active recipient instance、Active 本机签发者。
+- 生成五分钟有效期与随机 nonce，绑定完整持久历史，并用当前成员签名能力授权。
+- 测试确认错误认证设备在材料 preparation 前被拒绝，合法请求产出的包可通过 Core 完整验证。

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     MemberInstanceId, MembershipBranchId, MembershipBranchRecoveryPackageV1,
-    MembershipBranchTransitionV1, MembershipConflictId,
+    MembershipBranchTransitionV1, MembershipConflictId, VersionedMembershipHistory,
 };
 
 #[derive(Clone)]
@@ -66,4 +66,77 @@ pub trait PrepareMembershipBranchTransitionPort: Send + Sync {
         &self,
         input: PrepareMembershipBranchTransitionInput,
     ) -> Result<MembershipBranchTransitionV1, PrepareMembershipBranchTransitionError>;
+}
+
+#[derive(Clone)]
+pub struct PrepareMembershipBranchRecoveryMaterialInput {
+    pub conflict_id: MembershipConflictId,
+    pub target_branch_id: MembershipBranchId,
+    pub recipient_member: MemberInstanceId,
+    pub target_history: VersionedMembershipHistory,
+}
+
+pub struct PreparedMembershipBranchRecoveryMaterial {
+    pub sealed_mls_recovery_material: Vec<u8>,
+    pub encrypted_content_key_catalog: Vec<u8>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PrepareMembershipBranchRecoveryMaterialError {
+    #[error("membership branch recovery material is temporarily unavailable")]
+    Unavailable {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("membership branch recovery material is invalid")]
+    Invalid {
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+#[async_trait]
+pub trait PrepareMembershipBranchRecoveryMaterialPort: Send + Sync {
+    async fn prepare_membership_branch_recovery_material(
+        &self,
+        input: PrepareMembershipBranchRecoveryMaterialInput,
+    ) -> Result<
+        PreparedMembershipBranchRecoveryMaterial,
+        PrepareMembershipBranchRecoveryMaterialError,
+    >;
+}
+
+#[derive(Clone)]
+pub struct IssueMembershipBranchRecoveryInput {
+    pub source_device_id: DeviceId,
+    pub conflict_id: MembershipConflictId,
+    pub target_branch_id: MembershipBranchId,
+    pub recipient_member: MemberInstanceId,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum IssueMembershipBranchRecoveryError {
+    #[error("membership branch recovery request is rejected")]
+    Rejected {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("membership branch recovery issuer is temporarily unavailable")]
+    Unavailable {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("membership branch recovery issuer state is corrupt")]
+    Corrupt {
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+#[async_trait]
+pub trait IssueMembershipBranchRecoveryPort: Send + Sync {
+    async fn issue_membership_branch_recovery(
+        &self,
+        input: IssueMembershipBranchRecoveryInput,
+    ) -> Result<MembershipBranchRecoveryPackageV1, IssueMembershipBranchRecoveryError>;
 }

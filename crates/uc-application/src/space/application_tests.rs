@@ -663,6 +663,21 @@ impl PrepareMembershipBranchTransitionPort for PassivePorts {
 }
 
 #[async_trait]
+impl PrepareMembershipBranchRecoveryMaterialPort for PassivePorts {
+    async fn prepare_membership_branch_recovery_material(
+        &self,
+        _input: PrepareMembershipBranchRecoveryMaterialInput,
+    ) -> Result<
+        PreparedMembershipBranchRecoveryMaterial,
+        PrepareMembershipBranchRecoveryMaterialError,
+    > {
+        Err(PrepareMembershipBranchRecoveryMaterialError::Unavailable {
+            source: anyhow::anyhow!("passive recovery material"),
+        })
+    }
+}
+
+#[async_trait]
 impl ActivateSponsorAdmissionPort for PassivePorts {
     async fn activate(
         &self,
@@ -722,6 +737,7 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
             membership_history_transport: passive.clone(),
             membership_branch_recovery: passive.clone(),
             membership_branch_transition: passive.clone(),
+            membership_branch_recovery_material: passive.clone(),
             apply_membership_member_facts: passive.clone(),
             apply_membership_security: passive.clone(),
             activate_membership_effect: passive.clone(),

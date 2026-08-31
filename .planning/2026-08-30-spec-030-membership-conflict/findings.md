@@ -39,3 +39,5 @@
 - peer-online 是恢复包重新获取的直接触发条件，不能像 admissions/effects 一样跳过。
 - active manifest 的 `database_generation` 是当前完整数据库 generation 的真实来源；transition preparation 不应从 ledger revision 或随机 source 推断。
 - recovery package 的安全签发能力尚不存在；在它能绑定当前有效成员签名、MLS 恢复密文和内容密钥目录前，不应只安装一个会稳定拒绝的 Iroh 协议外壳并宣称 transport 已完成。
+- Iroh endpoint 只负责把认证连接映射成 source device；recipient instance 与 source device 的对应关系必须由 Application 使用目标完整历史重新验证。
+- 恢复材料密封方式归 Infra capability，Application 只接受两个非空 opaque ciphertext，并负责 package 绑定、时效、nonce 与成员授权签名。
