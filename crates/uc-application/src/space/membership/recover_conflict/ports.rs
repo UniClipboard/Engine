@@ -1,41 +1,9 @@
-use std::collections::BTreeSet;
-
 use async_trait::async_trait;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     MemberInstanceId, MembershipBranchId, MembershipBranchRecoveryPackageV1,
     MembershipBranchTransitionV1, MembershipConflictId, VersionedMembershipHistory,
 };
-
-#[derive(Clone)]
-pub struct FetchMembershipBranchRecoveryInput {
-    pub conflict_id: MembershipConflictId,
-    pub target_branch_id: MembershipBranchId,
-    pub recipient_member: MemberInstanceId,
-    pub evidence_peer_device_ids: BTreeSet<DeviceId>,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum FetchMembershipBranchRecoveryError {
-    #[error("membership branch recovery is temporarily unavailable")]
-    Unavailable {
-        #[source]
-        source: anyhow::Error,
-    },
-    #[error("membership branch recovery was rejected")]
-    Rejected {
-        #[source]
-        source: anyhow::Error,
-    },
-}
-
-#[async_trait]
-pub trait FetchMembershipBranchRecoveryPort: Send + Sync {
-    async fn fetch_membership_branch_recovery(
-        &self,
-        input: FetchMembershipBranchRecoveryInput,
-    ) -> Result<MembershipBranchRecoveryPackageV1, FetchMembershipBranchRecoveryError>;
-}
 
 #[derive(Clone)]
 pub struct MembershipBranchRecoveryRequest {
@@ -92,6 +60,48 @@ pub trait MembershipBranchRecoveryChannelPort: Send + Sync {
         &self,
         request: MembershipBranchRecoveryCommit,
     ) -> Result<MembershipBranchRecoveryPackageV1, MembershipBranchRecoveryChannelError>;
+}
+
+pub struct PreparedMembershipBranchRecoveryRecipient {
+    pub external_commit: Vec<u8>,
+    pub staged_mls_state: Vec<u8>,
+}
+
+#[derive(thiserror::Error)]
+pub enum PrepareMembershipBranchRecoveryRecipientError {
+    #[error("membership branch recovery recipient is temporarily unavailable")]
+    Unavailable {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("membership branch recovery recipient material is invalid")]
+    Invalid {
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+impl std::fmt::Debug for PrepareMembershipBranchRecoveryRecipientError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Unavailable { .. } => {
+                "PrepareMembershipBranchRecoveryRecipientError::Unavailable"
+            }
+            Self::Invalid { .. } => "PrepareMembershipBranchRecoveryRecipientError::Invalid",
+        })
+    }
+}
+
+/// 只从目标 GroupInfo 生成 recipient staged MLS state；不进行网络或持久化。
+#[async_trait]
+pub trait PrepareMembershipBranchRecoveryRecipientPort: Send + Sync {
+    async fn prepare_membership_branch_recovery_recipient(
+        &self,
+        group_info: Vec<u8>,
+    ) -> Result<
+        PreparedMembershipBranchRecoveryRecipient,
+        PrepareMembershipBranchRecoveryRecipientError,
+    >;
 }
 
 #[derive(Clone)]

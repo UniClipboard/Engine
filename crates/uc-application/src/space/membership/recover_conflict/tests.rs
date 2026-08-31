@@ -17,8 +17,8 @@ use uc_core::ports::ClockPort;
 use super::*;
 use crate::space::membership::{
     CommitMembershipLedgerPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
-    MembershipConflictRecord, MembershipConflictStatus, MembershipLedger, MembershipLedgerError,
-    MembershipLedgerMutation,
+    MembershipBranchRecoverySession, MembershipConflictRecord, MembershipConflictStatus,
+    MembershipLedger, MembershipLedgerError, MembershipLedgerMutation,
 };
 
 struct AcceptingVerifier;
@@ -85,17 +85,47 @@ impl CommitMembershipLedgerPort for MemoryLedger {
 
 struct RecoverySource {
     package: MembershipBranchRecoveryPackageV1,
+    group_info_calls: AtomicUsize,
+    submit_calls: AtomicUsize,
+}
+
+#[async_trait]
+impl MembershipBranchRecoveryChannelPort for RecoverySource {
+    async fn request_membership_branch_group_info(
+        &self,
+        _request: MembershipBranchRecoveryRequest,
+    ) -> Result<Vec<u8>, MembershipBranchRecoveryChannelError> {
+        self.group_info_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![0x60])
+    }
+
+    async fn submit_membership_branch_external_commit(
+        &self,
+        _request: MembershipBranchRecoveryCommit,
+    ) -> Result<MembershipBranchRecoveryPackageV1, MembershipBranchRecoveryChannelError> {
+        self.submit_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self.package.clone())
+    }
+}
+
+struct RecipientPreparer {
     calls: AtomicUsize,
 }
 
 #[async_trait]
-impl FetchMembershipBranchRecoveryPort for RecoverySource {
-    async fn fetch_membership_branch_recovery(
+impl PrepareMembershipBranchRecoveryRecipientPort for RecipientPreparer {
+    async fn prepare_membership_branch_recovery_recipient(
         &self,
-        _input: FetchMembershipBranchRecoveryInput,
-    ) -> Result<MembershipBranchRecoveryPackageV1, FetchMembershipBranchRecoveryError> {
+        _group_info: Vec<u8>,
+    ) -> Result<
+        PreparedMembershipBranchRecoveryRecipient,
+        PrepareMembershipBranchRecoveryRecipientError,
+    > {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(self.package.clone())
+        Ok(PreparedMembershipBranchRecoveryRecipient {
+            external_commit: vec![0x61],
+            staged_mls_state: vec![0x62],
+        })
     }
 }
 
@@ -192,6 +222,7 @@ impl PrepareMembershipBranchTransitionPort for TransitionPreparer {
 struct Fixture {
     repository: Arc<MemoryLedger>,
     recovery: Arc<RecoverySource>,
+    recipient: Arc<RecipientPreparer>,
     transition: Arc<TransitionPreparer>,
     use_case: RecoverMembershipConflictUseCase,
     conflict_id: MembershipConflictId,
@@ -272,6 +303,10 @@ fn fixture() -> Fixture {
     ));
     let recovery = Arc::new(RecoverySource {
         package,
+        group_info_calls: AtomicUsize::new(0),
+        submit_calls: AtomicUsize::new(0),
+    });
+    let recipient = Arc::new(RecipientPreparer {
         calls: AtomicUsize::new(0),
     });
     let transition = Arc::new(TransitionPreparer {
@@ -280,6 +315,7 @@ fn fixture() -> Fixture {
     let use_case = RecoverMembershipConflictUseCase::new(
         ledger,
         recovery.clone(),
+        recipient.clone(),
         transition.clone(),
         verifier,
         Arc::new(FixedClock),
@@ -287,6 +323,7 @@ fn fixture() -> Fixture {
     Fixture {
         repository,
         recovery,
+        recipient,
         transition,
         use_case,
         conflict_id,
@@ -304,7 +341,7 @@ async fn valid_package_consumes_nonce_and_saves_prepared_transition_atomically()
         RecoverMembershipConflictOutcome::Completed
     );
     let persisted = fixture.repository.load().await.unwrap();
-    assert_eq!(fixture.repository.commits.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.repository.commits.load(Ordering::SeqCst), 3);
     assert_eq!(
         persisted.consumed_membership_recovery_nonces[&fixture.nonce],
         fixture.conflict_id
@@ -330,13 +367,15 @@ async fn retry_after_commit_does_not_fetch_or_prepare_again() {
         RecoverMembershipConflictOutcome::Completed
     );
 
-    assert_eq!(fixture.repository.commits.load(Ordering::SeqCst), 1);
-    assert_eq!(fixture.recovery.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.repository.commits.load(Ordering::SeqCst), 3);
+    assert_eq!(fixture.recovery.group_info_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.recovery.submit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.recipient.calls.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.transition.calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
-async fn nonce_consumed_by_another_conflict_has_zero_ledger_side_effects() {
+async fn nonce_consumed_by_another_conflict_never_creates_a_transition() {
     let fixture = fixture();
     let before = fixture.repository.load().await.unwrap();
     fixture
@@ -352,9 +391,61 @@ async fn nonce_consumed_by_another_conflict_has_zero_ledger_side_effects() {
         fixture.use_case.execute().await,
         RecoverMembershipConflictOutcome::StableFailure
     );
-    assert_eq!(fixture.repository.commits.load(Ordering::SeqCst), 0);
-    assert_eq!(fixture.repository.load().await.unwrap(), expected);
+    let persisted = fixture.repository.load().await.unwrap();
+    assert_eq!(fixture.repository.commits.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        persisted.consumed_membership_recovery_nonces,
+        expected.consumed_membership_recovery_nonces
+    );
+    assert!(persisted.membership_branch_transitions.is_empty());
     assert_eq!(before.revision, expected.revision);
+}
+
+#[tokio::test]
+async fn retry_from_recipient_prepared_reuses_staged_state_without_group_info() {
+    let fixture = fixture();
+    let recipient_member = fixture
+        .repository
+        .record
+        .lock()
+        .unwrap()
+        .local_member_instance
+        .unwrap();
+    let target_branch_id = fixture
+        .repository
+        .record
+        .lock()
+        .unwrap()
+        .membership_conflicts[&fixture.conflict_id]
+        .selected_branch_id
+        .unwrap();
+    fixture
+        .repository
+        .record
+        .lock()
+        .unwrap()
+        .membership_branch_recovery_sessions
+        .insert(
+            fixture.transition_id,
+            MembershipBranchRecoverySession::new_recipient_prepared(
+                fixture.transition_id,
+                fixture.conflict_id,
+                target_branch_id,
+                recipient_member,
+                vec![0x61],
+                vec![0x62],
+            )
+            .unwrap(),
+        );
+
+    assert_eq!(
+        fixture.use_case.execute().await,
+        RecoverMembershipConflictOutcome::Completed
+    );
+    assert_eq!(fixture.recovery.group_info_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.recipient.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.recovery.submit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.repository.commits.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

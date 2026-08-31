@@ -1066,6 +1066,16 @@ impl IrohNodeBuilder {
         ))
     }
 
+    pub fn build_membership_branch_recovery_channel(
+        &self,
+        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    ) -> Arc<super::IrohMembershipBranchRecoveryChannel> {
+        Arc::new(super::IrohMembershipBranchRecoveryChannel::new(
+            Arc::clone(&self.endpoint),
+            peer_addr_repo,
+        ))
+    }
+
     pub fn build_membership_gossip_transport(
         &self,
         session: Arc<InMemorySession>,

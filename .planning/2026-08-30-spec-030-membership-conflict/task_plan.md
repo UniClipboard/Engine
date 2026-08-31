@@ -24,11 +24,11 @@
 
 ## Current Slice
 
-Phase 4：MLS external recovery 原语、wire/server、加密 session 和窄 Iroh client channel 已完成；下一切片由 Application coordinator 编排两阶段流程。
+Phase 4：两阶段 client coordinator 已接管 peer 选择、加密 staged checkpoint 和恢复包提交；下一切片接入真实 recipient/target MLS 与内容密钥 adapter。
 
 ## Next Step
 
-扩展 Application coordinator：选择 evidence peer，调用 channel 与 MLS preparation，并在每个外部副作用前后提交 recovery session。
+实现真实 recovery material adapter：从当前 generation 安全状态准备 recipient external commit，并在 target 应用 commit 后密封内容密钥目录。
 
 ## Constraints
 

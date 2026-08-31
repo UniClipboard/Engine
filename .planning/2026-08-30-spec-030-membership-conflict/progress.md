@@ -101,3 +101,11 @@
 - Infra `IrohMembershipBranchRecoveryChannel` 只负责解析已保存 Iroh 地址、认证连接、有界请求响应和超时，不选择 peer、不运行 MLS、不接触 ledger。
 - GroupInfo 与 recovery package 响应方向严格校验；拒绝、不可用和畸形响应保留 source 并稳定分类，Debug 不输出底层详情。
 - 保留旧的一步 fetch adapter 作为尚未切换的 coordinator 接口；下一切片完成 Application 编排后删除该浅接口，避免长期双实现。
+
+## 2026-08-31 · Restart-safe recovery client coordinator
+
+- Application coordinator 现在确定性选择 evidence peer，依次驱动 GroupInfo、recipient MLS preparation、external commit 和 recovery package 验证。
+- external commit 发出前，recipient staged MLS state 与 commit 已通过 membership ledger CAS 加密保存；重启直接复用该状态，不再请求 GroupInfo 或重新生成 commit。
+- recovery package 验证后先进入加密 session，再由最终 CAS 消费 nonce、创建 Prepared generation transition 并推进 conflict。
+- 删除旧的一步式 fetch port；Engine 组装真实 Iroh channel，recipient MLS preparation 在真实 adapter 接入前显式 Deferred，不做 LAN 回退。
+- nonce 已被其他 conflict 消费时不覆盖 nonce、不创建 transition；此前已完成的必要 staged checkpoints 保留供诊断/安全恢复，因此契约不再错误宣称零次 ledger commit。

@@ -197,6 +197,26 @@ impl MembershipBranchRecoverySession {
         &self.transition_id
     }
 
+    pub fn recipient_preparation(&self) -> Option<(&[u8], &[u8])> {
+        match &self.state {
+            MembershipBranchRecoverySessionState::RecipientPrepared {
+                external_commit,
+                recipient_staged_mls_state,
+            } => Some((external_commit, recipient_staged_mls_state)),
+            _ => None,
+        }
+    }
+
+    pub fn recipient_completion(&self) -> Option<(&[u8], &MembershipBranchRecoveryPackageV1)> {
+        match &self.state {
+            MembershipBranchRecoverySessionState::RecipientCompleted {
+                recipient_staged_mls_state,
+                recovery_package,
+            } => Some((recipient_staged_mls_state, recovery_package)),
+            _ => None,
+        }
+    }
+
     pub fn complete_recipient(
         &mut self,
         recovery_package: MembershipBranchRecoveryPackageV1,

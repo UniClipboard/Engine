@@ -113,8 +113,10 @@ pub struct SpaceApplicationDeps {
     pub device_trust_observations: Arc<dyn LoadDeviceTrustObservationsPort>,
     pub current_join_status: Arc<dyn LoadCurrentJoinStatusPort>,
     pub membership_history_transport: Arc<dyn MembershipHistoryExchangePort>,
-    pub membership_branch_recovery:
-        Arc<dyn crate::space::membership::FetchMembershipBranchRecoveryPort>,
+    pub membership_branch_recovery_channel:
+        Arc<dyn crate::space::membership::MembershipBranchRecoveryChannelPort>,
+    pub membership_branch_recovery_recipient:
+        Arc<dyn crate::space::membership::PrepareMembershipBranchRecoveryRecipientPort>,
     pub membership_branch_transition:
         Arc<dyn crate::space::membership::PrepareMembershipBranchTransitionPort>,
     pub membership_branch_recovery_material:
@@ -237,7 +239,8 @@ impl SpaceApplication {
         ));
         let recover_membership_conflicts = Arc::new(RecoverMembershipConflictUseCase::new(
             Arc::clone(&ledger),
-            deps.membership_branch_recovery,
+            deps.membership_branch_recovery_channel,
+            deps.membership_branch_recovery_recipient,
             deps.membership_branch_transition,
             historical_membership_signatures,
             Arc::clone(&deps.clock),

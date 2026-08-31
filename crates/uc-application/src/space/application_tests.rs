@@ -633,16 +633,40 @@ impl MembershipNetworkActivityPort for PassivePorts {
 }
 
 #[async_trait]
-impl FetchMembershipBranchRecoveryPort for PassivePorts {
-    async fn fetch_membership_branch_recovery(
+impl MembershipBranchRecoveryChannelPort for PassivePorts {
+    async fn request_membership_branch_group_info(
         &self,
-        _input: FetchMembershipBranchRecoveryInput,
+        _request: MembershipBranchRecoveryRequest,
+    ) -> Result<Vec<u8>, MembershipBranchRecoveryChannelError> {
+        Err(MembershipBranchRecoveryChannelError::Unavailable {
+            source: anyhow::anyhow!("passive recovery source"),
+        })
+    }
+
+    async fn submit_membership_branch_external_commit(
+        &self,
+        _request: MembershipBranchRecoveryCommit,
     ) -> Result<
         uc_core::membership::MembershipBranchRecoveryPackageV1,
-        FetchMembershipBranchRecoveryError,
+        MembershipBranchRecoveryChannelError,
     > {
-        Err(FetchMembershipBranchRecoveryError::Unavailable {
+        Err(MembershipBranchRecoveryChannelError::Unavailable {
             source: anyhow::anyhow!("passive recovery source"),
+        })
+    }
+}
+
+#[async_trait]
+impl PrepareMembershipBranchRecoveryRecipientPort for PassivePorts {
+    async fn prepare_membership_branch_recovery_recipient(
+        &self,
+        _group_info: Vec<u8>,
+    ) -> Result<
+        PreparedMembershipBranchRecoveryRecipient,
+        PrepareMembershipBranchRecoveryRecipientError,
+    > {
+        Err(PrepareMembershipBranchRecoveryRecipientError::Unavailable {
+            source: anyhow::anyhow!("passive recovery recipient"),
         })
     }
 }
@@ -743,7 +767,8 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
             device_trust_observations: passive.clone(),
             current_join_status: passive.clone(),
             membership_history_transport: passive.clone(),
-            membership_branch_recovery: passive.clone(),
+            membership_branch_recovery_channel: passive.clone(),
+            membership_branch_recovery_recipient: passive.clone(),
             membership_branch_transition: passive.clone(),
             membership_branch_recovery_material: passive.clone(),
             apply_membership_member_facts: passive.clone(),

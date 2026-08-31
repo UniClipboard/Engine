@@ -57,3 +57,9 @@
 - 现有一步 `FetchMembershipBranchRecoveryPort` 无法表达 GroupInfo 与 external commit 之间必须持久化的 recipient staged state，不能直接由 Infra 实现而不破坏重启安全。
 - Iroh client 应是窄 channel：只对一个由 Application 指定的 peer 做一次认证请求。peer 选择、MLS preparation、ledger CAS 和重试属于 Application coordinator。
 - 下一切片完成 coordinator 切换后应删除旧 fetch port；否则两套抽象会让 Infra/Application 边界继续含混。
+
+# 2026-08-31 · Recovery coordinator checkpoint 顺序
+
+- recipient external commit 属于不可安全重建的密码学结果，必须先把它和 staged MLS state 加密提交，再允许网络发送。
+- 最终恢复包可以在单独 checkpoint 验证并保存；之后 generation transition preparation 即使失败或重启，也不必再次触发目标端 external commit。
+- nonce 冲突只能在取得最终包后确定，因此此时 staged checkpoint 已合法存在；安全保证应表述为不覆盖 nonce、不创建 transition，而不是零 ledger commit。

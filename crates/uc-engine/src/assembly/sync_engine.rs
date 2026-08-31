@@ -149,22 +149,23 @@ impl ContentExchangeGatePort for CurrentMemberContentGate {
     }
 }
 
-/// 分支恢复 transport 将在 Spec 030 后续切片安装。
-/// 在此之前，已选择冲突保持持久 Pending，不回退其他 transport，也不修改 generation。
-struct DeferredMembershipBranchRecovery;
+/// recipient MLS preparation 将在恢复安全材料 adapter 接入前保持显式不可用。
+struct DeferredMembershipBranchRecoveryRecipient;
 
 #[async_trait::async_trait]
-impl uc_application::deps::FetchMembershipBranchRecoveryPort for DeferredMembershipBranchRecovery {
-    async fn fetch_membership_branch_recovery(
+impl uc_application::deps::PrepareMembershipBranchRecoveryRecipientPort
+    for DeferredMembershipBranchRecoveryRecipient
+{
+    async fn prepare_membership_branch_recovery_recipient(
         &self,
-        _input: uc_application::deps::FetchMembershipBranchRecoveryInput,
+        _group_info: Vec<u8>,
     ) -> Result<
-        uc_core::membership::MembershipBranchRecoveryPackageV1,
-        uc_application::deps::FetchMembershipBranchRecoveryError,
+        uc_application::deps::PreparedMembershipBranchRecoveryRecipient,
+        uc_application::deps::PrepareMembershipBranchRecoveryRecipientError,
     > {
         Err(
-            uc_application::deps::FetchMembershipBranchRecoveryError::Unavailable {
-                source: anyhow::anyhow!("membership branch recovery transport is unavailable"),
+            uc_application::deps::PrepareMembershipBranchRecoveryRecipientError::Unavailable {
+                source: anyhow::anyhow!("membership branch recovery recipient is unavailable"),
             },
         )
     }
@@ -701,6 +702,8 @@ pub async fn build_sync_engine_assembly(
     );
     let membership_history_exchange_adapter =
         builder.build_membership_history_exchange_adapter(Arc::clone(&space_setup.peer_addr_repo));
+    let membership_branch_recovery_channel =
+        builder.build_membership_branch_recovery_channel(Arc::clone(&space_setup.peer_addr_repo));
     let membership_transport = builder.build_membership_gossip_transport(
         Arc::clone(&space_setup.membership_session),
         Arc::clone(&deps.device.device_identity),
@@ -974,7 +977,10 @@ pub async fn build_sync_engine_assembly(
             current_join_status: space_setup.admission_state.clone()
                 as Arc<dyn uc_application::deps::LoadCurrentJoinStatusPort>,
             membership_history_transport: membership_history_transport.clone(),
-            membership_branch_recovery: Arc::new(DeferredMembershipBranchRecovery),
+            membership_branch_recovery_channel,
+            membership_branch_recovery_recipient: Arc::new(
+                DeferredMembershipBranchRecoveryRecipient,
+            ),
             membership_branch_transition: Arc::new(
                 DefaultMembershipBranchTransitionPreparation::new(Arc::clone(
                     &space_setup.active_generation_manifest_store,

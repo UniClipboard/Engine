@@ -129,16 +129,16 @@ pub use membership::{
 };
 pub use membership::{
     BeginMembershipBranchRecoveryInput, CleanupLegacyMembershipDataPort,
-    DeliverRestrictedMembershipPort, FetchMembershipBranchRecoveryError,
-    FetchMembershipBranchRecoveryInput, FetchMembershipBranchRecoveryPort,
-    IssueMembershipBranchRecoveryError, IssueMembershipBranchRecoveryInput,
-    IssueMembershipBranchRecoveryPort, MembershipBranchRecoveryChannelError,
-    MembershipBranchRecoveryChannelPort, MembershipBranchRecoveryCommit,
-    MembershipBranchRecoveryRequest, MembershipMaintenanceStepOutcome,
-    MembershipNetworkActivityPort, PrepareMembershipBranchRecoveryMaterialError,
-    PrepareMembershipBranchRecoveryMaterialInput, PrepareMembershipBranchRecoveryMaterialPort,
-    PrepareMembershipBranchTransitionError, PrepareMembershipBranchTransitionInput,
-    PrepareMembershipBranchTransitionPort, PreparedMembershipBranchRecoveryMaterial,
+    DeliverRestrictedMembershipPort, IssueMembershipBranchRecoveryError,
+    IssueMembershipBranchRecoveryInput, IssueMembershipBranchRecoveryPort,
+    MembershipBranchRecoveryChannelError, MembershipBranchRecoveryChannelPort,
+    MembershipBranchRecoveryCommit, MembershipBranchRecoveryRequest,
+    MembershipMaintenanceStepOutcome, MembershipNetworkActivityPort,
+    PrepareMembershipBranchRecoveryMaterialError, PrepareMembershipBranchRecoveryMaterialInput,
+    PrepareMembershipBranchRecoveryMaterialPort, PrepareMembershipBranchRecoveryRecipientError,
+    PrepareMembershipBranchRecoveryRecipientPort, PrepareMembershipBranchTransitionError,
+    PrepareMembershipBranchTransitionInput, PrepareMembershipBranchTransitionPort,
+    PreparedMembershipBranchRecoveryMaterial, PreparedMembershipBranchRecoveryRecipient,
     RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
 };
 pub use membership::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
