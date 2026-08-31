@@ -319,79 +319,93 @@ impl RecoverMembershipConflictUseCase {
         &self,
         conflict_id: uc_core::membership::MembershipConflictId,
         transition_id: [u8; 32],
-        transition: uc_core::membership::MembershipBranchTransitionV1,
+        mut transition: uc_core::membership::MembershipBranchTransitionV1,
         recipient_staged_mls_state: Vec<u8>,
         recovery_package: uc_core::membership::MembershipBranchRecoveryPackageV1,
     ) -> RecoverMembershipConflictOutcome {
-        let target_history =
-            match uc_core::membership::VersionedMembershipHistory::decode_persisted_v2(
-                recovery_package.target_membership_history(),
-                self.verifier.as_ref(),
-            ) {
-                Ok(history) => history,
-                Err(_) => return RecoverMembershipConflictOutcome::StableFailure,
+        loop {
+            let target_history =
+                match uc_core::membership::VersionedMembershipHistory::decode_persisted_v2(
+                    recovery_package.target_membership_history(),
+                    self.verifier.as_ref(),
+                ) {
+                    Ok(history) => history,
+                    Err(_) => return RecoverMembershipConflictOutcome::StableFailure,
+                };
+            let next = match self
+                .transition_executor
+                .advance_membership_branch_transition(AdvanceMembershipBranchTransitionInput {
+                    transition: transition.clone(),
+                    recipient_staged_mls_state: recipient_staged_mls_state.clone(),
+                    recovery_package: recovery_package.clone(),
+                    target_history,
+                })
+                .await
+            {
+                Ok(next) => next,
+                Err(AdvanceMembershipBranchTransitionError::Unavailable { .. }) => {
+                    return RecoverMembershipConflictOutcome::Deferred;
+                }
+                Err(AdvanceMembershipBranchTransitionError::Invalid { .. }) => {
+                    return RecoverMembershipConflictOutcome::StableFailure;
+                }
+                Err(AdvanceMembershipBranchTransitionError::RecoveryRequired { .. }) => {
+                    return RecoverMembershipConflictOutcome::Corrupt;
+                }
             };
-        let next = match self
-            .transition_executor
-            .advance_membership_branch_transition(AdvanceMembershipBranchTransitionInput {
-                transition: transition.clone(),
-                recipient_staged_mls_state,
-                recovery_package,
-                target_history,
-            })
-            .await
-        {
-            Ok(next) => next,
-            Err(AdvanceMembershipBranchTransitionError::Unavailable { .. }) => {
-                return RecoverMembershipConflictOutcome::Deferred;
-            }
-            Err(AdvanceMembershipBranchTransitionError::Invalid { .. }) => {
+            if transition.advance(next.phase()).as_ref() != Some(&next) {
                 return RecoverMembershipConflictOutcome::StableFailure;
             }
-            Err(AdvanceMembershipBranchTransitionError::RecoveryRequired { .. }) => {
-                return RecoverMembershipConflictOutcome::Corrupt;
+            if let Err(error) = self.ledger.load_verified().await {
+                return map_ledger_error(error);
             }
-        };
-        if transition.advance(next.phase()).as_ref() != Some(&next) {
-            return RecoverMembershipConflictOutcome::StableFailure;
-        }
-        if let Err(error) = self.ledger.load_verified().await {
-            return map_ledger_error(error);
-        }
-        let completed = next.phase() == MembershipBranchTransitionPhaseV1::Completed;
-        match self
-            .ledger
-            .compare_and_commit(move |record| {
-                let current = record
-                    .membership_branch_transitions
-                    .get_mut(&transition_id)
-                    .ok_or(MembershipLedgerError::Conflict)?;
-                if current != &transition {
-                    return Err(MembershipLedgerError::Conflict);
-                }
-                *current = next;
-                if completed {
-                    let conflict = record
-                        .membership_conflicts
-                        .get_mut(&conflict_id)
+            let completed = next.phase() == MembershipBranchTransitionPhaseV1::Completed;
+            let previous_phase = transition.phase();
+            let next_phase = next.phase();
+            let persisted_transition = transition.clone();
+            let persisted_next = next.clone();
+            match self
+                .ledger
+                .compare_and_commit(move |record| {
+                    let current = record
+                        .membership_branch_transitions
+                        .get_mut(&transition_id)
                         .ok_or(MembershipLedgerError::Conflict)?;
-                    if conflict.transition_id != Some(transition_id) {
+                    if current != &persisted_transition {
                         return Err(MembershipLedgerError::Conflict);
                     }
-                    conflict.status = MembershipConflictStatus::Completed;
-                    record
-                        .membership_branch_recovery_sessions
-                        .remove(&transition_id)
-                        .ok_or(MembershipLedgerError::Conflict)?;
+                    *current = persisted_next;
+                    if completed {
+                        let conflict = record
+                            .membership_conflicts
+                            .get_mut(&conflict_id)
+                            .ok_or(MembershipLedgerError::Conflict)?;
+                        if conflict.transition_id != Some(transition_id) {
+                            return Err(MembershipLedgerError::Conflict);
+                        }
+                        conflict.status = MembershipConflictStatus::Completed;
+                        record
+                            .membership_branch_recovery_sessions
+                            .remove(&transition_id)
+                            .ok_or(MembershipLedgerError::Conflict)?;
+                    }
+                    Ok(())
+                })
+                .await
+            {
+                Ok(_) if completed => {
+                    tracing::debug!(?previous_phase, ?next_phase, "成员分支转换阶段已持久化");
+                    return RecoverMembershipConflictOutcome::Completed;
                 }
-                Ok(())
-            })
-            .await
-        {
-            Ok(_) if completed => RecoverMembershipConflictOutcome::Completed,
-            Ok(_) => RecoverMembershipConflictOutcome::Deferred,
-            Err(MembershipLedgerError::Conflict) => RecoverMembershipConflictOutcome::StableFailure,
-            Err(error) => map_ledger_error(error),
+                Ok(_) => {
+                    tracing::debug!(?previous_phase, ?next_phase, "成员分支转换阶段已持久化");
+                    transition = next;
+                }
+                Err(MembershipLedgerError::Conflict) => {
+                    return RecoverMembershipConflictOutcome::StableFailure;
+                }
+                Err(error) => return map_ledger_error(error),
+            }
         }
     }
 

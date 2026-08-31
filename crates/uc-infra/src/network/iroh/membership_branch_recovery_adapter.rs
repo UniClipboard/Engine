@@ -306,8 +306,15 @@ async fn write_response(
     let Ok(length) = u32::try_from(bytes.len()) else {
         return;
     };
-    if send.write_u32(length).await.is_ok() {
-        let _ = send.write_all(&bytes).await;
-        let _ = send.finish();
+    if send.write_u32(length).await.is_ok()
+        && send.write_all(&bytes).await.is_ok()
+        && send.finish().is_ok()
+    {
+        if !matches!(
+            tokio::time::timeout(IO_TIMEOUT, send.stopped()).await,
+            Ok(Ok(None))
+        ) {
+            tracing::debug!(stage = "response_confirmation", "成员分支恢复响应未获确认");
+        }
     }
 }

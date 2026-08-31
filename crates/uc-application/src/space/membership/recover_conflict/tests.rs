@@ -420,10 +420,10 @@ async fn retry_after_commit_advances_without_fetching_or_preparing_again() {
     );
     assert_eq!(
         fixture.use_case.execute().await,
-        RecoverMembershipConflictOutcome::Deferred
+        RecoverMembershipConflictOutcome::Completed
     );
 
-    assert_eq!(fixture.repository.commits.load(Ordering::SeqCst), 4);
+    assert_eq!(fixture.repository.commits.load(Ordering::SeqCst), 9);
     assert_eq!(fixture.recovery.group_info_calls.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.recovery.submit_calls.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.recipient.calls.load(Ordering::SeqCst), 1);
@@ -742,19 +742,13 @@ async fn target_recovery_resumes_from_prepared_after_commit_interruption() {
 }
 
 #[tokio::test]
-async fn prepared_transition_resumes_one_phase_per_round_and_completes_the_conflict() {
+async fn prepared_transition_resumes_all_durable_phases_in_one_round() {
     let fixture = fixture();
 
     assert_eq!(
         fixture.use_case.execute().await,
         RecoverMembershipConflictOutcome::Completed
     );
-    for _ in 0..5 {
-        assert_eq!(
-            fixture.use_case.execute().await,
-            RecoverMembershipConflictOutcome::Deferred
-        );
-    }
     assert_eq!(
         fixture.use_case.execute().await,
         RecoverMembershipConflictOutcome::Completed

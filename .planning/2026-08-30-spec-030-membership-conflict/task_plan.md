@@ -28,7 +28,7 @@ Phase 6：Desktop F0-F13、20 个固定 chaos seed 与 Spec 029 回归（Phase 5
 
 ## Next Step
 
-F0、F1 已完成；正在执行 F1 全量交付门禁，之后进入 F2。
+F0、F1 已完成并提交；F2 根因已修复，五节点测试、定向测试与交付门禁均通过，待提交后进入 F3。
 
 ## Constraints
 
@@ -57,3 +57,6 @@ F0、F1 已完成；正在执行 F1 全量交付门禁，之后进入 F2。
 | F1 移除历史生效但 MLS epoch 未前进 | 1 | 在新本机移除 effect payload 中保存事件与保留接收者，由可重启 SecurityApplied 阶段幂等调用可靠 MLS revocation。 |
 | F1 统一设备组查询持续 unavailable | 1 | Removed 成员事实已删除且 observation 缺失；查询仅为非 Active 历史设备合成 Offline，Active 缺失继续失败。 |
 | F1 保留成员 epoch 不收敛 | 1 | 统一 group-update 维护入口聚合 Space outbox 与撤销 stage outbox；确认按原 revocation 事务推进，避免双份状态。 |
+| F2 选择目标分支后未收敛 | 1 | 冲突与选择入口已成功，待检查恢复包请求、ACK 与 generation transition 的首个未推进阶段。 |
+| F2 GroupInfo 响应被截断 | 1 | 服务端 `finish()` 后等待 `stopped()`，确认对端完整读取响应后再结束 handler。 |
+| F2 transition 超过测试窗口 | 1 | Application 单轮连续推进所有成功阶段并逐步持久化，只有真实不可用才返回 Deferred。 |

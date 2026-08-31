@@ -6,11 +6,11 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use uc_engine::{
-    CreateSpaceInput, Engine, EngineConfig, HistoryEntryInput, HostCapabilities,
-    HostCapabilityError, HostCapabilityErrorCategory, HostClipboard, HostClipboardSnapshot,
-    HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage,
-    JoinSpaceInput, JoinSpaceStatusSummary, ListHistoryEntriesInput, Operation, OperationResult,
-    RemoveMemberInput, SecretString, SendTextInput,
+    ChooseDeviceGroupInput, CreateSpaceInput, Engine, EngineConfig, HistoryEntryInput,
+    HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory, HostClipboard,
+    HostClipboardSnapshot, HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata,
+    HostSecureStorage, JoinSpaceInput, JoinSpaceStatusSummary, ListHistoryEntriesInput, Operation,
+    OperationResult, RemoveMemberInput, SecretString, SendTextInput,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -251,6 +251,90 @@ enum TopologyAction<'a> {
     Heal {
         nodes: &'a [&'a str],
     },
+    ResolveConflict {
+        node: &'a str,
+        branch_from: &'a str,
+    },
+}
+
+// F2：不同 Sponsor 从共同父 head 移除不同叶子，明确选择后必须精确切换到目标分支。
+#[tokio::test(flavor = "multi_thread", worker_threads = 10)]
+async fn f2_concurrent_leaf_removals_resolve_to_selected_branch() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let mut topology = MembershipTopology::new(rendezvous.uri());
+    topology
+        .run(&[
+            TopologyAction::Start { node: "A" },
+            TopologyAction::Start { node: "B" },
+            TopologyAction::Start { node: "C" },
+            TopologyAction::Start { node: "D" },
+            TopologyAction::Start { node: "E" },
+            TopologyAction::Create { node: "A" },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "B",
+            },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "C",
+            },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "D",
+            },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "E",
+            },
+        ])
+        .await;
+    topology
+        .wait_for_equivalent_branch(&["A", "B", "C", "D", "E"], 5)
+        .await;
+    let baseline_epoch = topology.diagnostics("A").await.group_epoch;
+    topology
+        .wait_for_group_epoch(&["B", "C", "D", "E"], baseline_epoch)
+        .await;
+    topology
+        .run(&[
+            TopologyAction::Partition {
+                left: &["A", "B", "D"],
+                right: &["C", "E"],
+            },
+            TopologyAction::Remove {
+                sponsor: "B",
+                target: "D",
+            },
+            TopologyAction::Remove {
+                sponsor: "C",
+                target: "E",
+            },
+            TopologyAction::Heal {
+                nodes: &["A", "B", "C", "D", "E"],
+            },
+        ])
+        .await;
+    topology.assert_snapshot("B", 4, 1).await;
+    topology.assert_snapshot("C", 4, 1).await;
+    let selected = topology.diagnostics("B").await;
+    topology
+        .run(&[TopologyAction::ResolveConflict {
+            node: "C",
+            branch_from: "B",
+        }])
+        .await;
+    topology.wait_for_equivalent_branch(&["B", "C"], 4).await;
+    topology.assert_snapshot("C", 4, 0).await;
+    let selected_after_recovery = topology.diagnostics("B").await;
+    topology
+        .wait_for_group_epoch(&["C"], selected_after_recovery.group_epoch)
+        .await;
+    let resolved = topology.diagnostics("C").await;
+    assert_eq!(resolved.branch_id, selected.branch_id);
+    assert_eq!(resolved.head_event_id, selected.head_event_id);
+    assert_eq!(resolved.group_epoch, selected_after_recovery.group_epoch);
+    topology.shutdown().await;
 }
 
 // F1：共同父 head 上并发移除与新增，两个合法分支必须保持各自成员语义。
@@ -436,6 +520,9 @@ impl MembershipTopology {
                 }
                 TopologyAction::Partition { left, right } => self.partition(left, right).await,
                 TopologyAction::Heal { nodes } => self.heal(nodes).await,
+                TopologyAction::ResolveConflict { node, branch_from } => {
+                    self.resolve_conflict(node, branch_from).await
+                }
             }
         }
     }
@@ -477,14 +564,30 @@ impl MembershipTopology {
             .get(target)
             .unwrap_or_else(|| panic!("target {target} has no device id"))
             .clone();
-        let result = self
-            .engine(sponsor)
-            .execute(Operation::RemoveMember(RemoveMemberInput {
-                device_id: target_device_id,
-            }))
-            .await
-            .unwrap_or_else(|error| panic!("node {sponsor} remove failed: {error}"));
-        assert!(matches!(result, OperationResult::DeviceTrust(_)));
+        let initial_members = self.diagnostics(sponsor).await.effective_member_count;
+        let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+        loop {
+            let result = self
+                .engine(sponsor)
+                .execute(Operation::RemoveMember(RemoveMemberInput {
+                    device_id: target_device_id.clone(),
+                }))
+                .await;
+            if matches!(&result, Err(error) if error.code() == 1393 && error.is_retryable()) {
+                return;
+            }
+            if matches!(&result, Err(error) if error.code() == 1394)
+                && self.diagnostics(sponsor).await.effective_member_count == initial_members
+                && tokio::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+            let result =
+                result.unwrap_or_else(|error| panic!("node {sponsor} remove failed: {error}"));
+            assert!(matches!(result, OperationResult::DeviceTrust(_)));
+            return;
+        }
     }
 
     async fn partition(&self, left: &[&str], right: &[&str]) {
@@ -578,6 +681,49 @@ impl MembershipTopology {
             panic!("node {node} returned an unexpected device group result");
         };
         summary
+    }
+
+    async fn resolve_conflict(&self, node: &str, branch_from: &str) {
+        let target = self.diagnostics(branch_from).await.branch_id;
+        let choice_id = format!("b:{target}");
+        let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+        loop {
+            let choices = self.device_group_choices(node).await;
+            let issue = choices
+                .issues
+                .iter()
+                .find(|issue| issue.issue_id.starts_with("c:"))
+                .unwrap_or_else(|| panic!("node {node} has no branch conflict"));
+            assert!(issue
+                .choices
+                .iter()
+                .any(|choice| choice.choice_id == choice_id));
+            let result = self
+                .engine(node)
+                .execute(Operation::ChooseDeviceGroup(ChooseDeviceGroupInput {
+                    issue_id: issue.issue_id.clone(),
+                    choice_id: choice_id.clone(),
+                    expected_revision: choices.revision,
+                    confirm_local_removal: false,
+                }))
+                .await
+                .unwrap_or_else(|error| panic!("node {node} conflict resolution failed: {error}"));
+            let OperationResult::DeviceGroupChosen(result) = result else {
+                panic!("node {node} returned an unexpected conflict resolution result");
+            };
+            match result.outcome {
+                uc_engine::DeviceGroupChoiceOutcomeSummary::Pending
+                | uc_engine::DeviceGroupChoiceOutcomeSummary::Completed
+                | uc_engine::DeviceGroupChoiceOutcomeSummary::AlreadyCompleted => return,
+                uc_engine::DeviceGroupChoiceOutcomeSummary::StateChanged => {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "node {node} conflict selection revision did not stabilize"
+                    );
+                }
+                outcome => panic!("node {node} conflict selection returned {outcome:?}"),
+            }
+        }
     }
 
     async fn wait_for_equivalent_branch(&self, nodes: &[&str], effective_members: u32) {

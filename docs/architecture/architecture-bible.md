@@ -651,6 +651,8 @@ reconciliation: Idle -> Comparing -> FetchingHistory -> Consistent -> Idle
 
 本机发起移除时，Application 在同一个加密 membership effect payload 中保存已签名移除事件和当时的保留接收者集合；可重启 effect executor 是成员事实、可靠 MLS revocation、激活三阶段的唯一推进者。Infra 只在该显式本机发起 payload 上创建撤销并推进 epoch，远端收到普通移除事件时不得重复发起撤销。统一 group-update 维护入口聚合 Space 普通欠账与 revocation stage 欠账，投递成功后直接确认原撤销事务，不复制确认状态。可靠 group update 到达前，保留成员继续因旧 epoch 关闭式拒绝正文；到达后其 epoch 必须与发起分支精确一致。已移除设备不再要求当前成员 observation 存在，Application 将缺省观测投影为 `Offline`；Active 设备缺少观测仍返回失败。
 
+成员分支恢复的 Iroh 服务端写完响应并 `finish()` 后，必须等待对端确认完整接收再结束 handler，避免较大的 GroupInfo 或恢复包随连接生命周期被截断。Application 的冲突恢复用例负责完整 transition：单轮内按顺序推进所有可成功执行的阶段，每一步先独立持久化；只有依赖暂不可用时才交回后台重试，固定维护周期不参与内部流程编排。
+
 摘要发现双方处于同一 lineage 的 sibling 分支时，普通后缀反熵不会尝试合并或应用远端历史。Application 改用一次有界的双向冲突取证往返：双方分别发送完整分页签名历史，只在本机验证分支关系和证据发送者，不把远端历史应用到当前分支；每一端都在同一次加密 ledger CAS 中写入唯一冲突记录并把对应 peer 标记为 `Diverged`。取证完成后普通反熵隔离该 peer，用户只能通过统一设备组选择入口推进恢复。Core 负责历史验证和 sibling 规则，Application 的 ledger 事务负责完整结果，Iroh 只传输追加在既有判别值之后的 typed message。
 
 ### 空间切换与重置
@@ -843,6 +845,8 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-31 | 成员冲突跨端 contract | Engine 新增完整冲突查询与单次选择两个稳定 operation，统一映射 result/error；iOS、Android 和 HarmonyOS 绑定只转发同版本 Engine contract，并明确结果仅代表本机选择完成。 |
 | 2026-08-31 | F0 sibling 冲突发现 | Desktop 五节点确定性拓扑验证共同 head 分区后双 Sponsor 形成两个四成员 sibling 分支；Heal 后 Application 通过一次双向完整签名证据往返让双方各自原子保存唯一冲突并进入 `Diverged`，不应用远端分支、不自动选主，分支间正文继续关闭式失败。 |
 | 2026-08-31 | F1 移除与新增 sibling | 本机移除通过可重启 membership effect 调用可靠 MLS revocation，保存保留接收者并推进安全 epoch；Removed 设备缺少当前 observation 时稳定投影为 Offline。Desktop 五节点验证移除/新增 sibling 各自成员语义、epoch、分支内通信和 Heal 后隔离。 |
+| 2026-08-31 | F2 双移除验收起点 | Desktop 声明式拓扑增加统一 `ResolveConflict` 动作，只调用 Engine 设备组选择入口；五节点红测从共同 head 并发移除不同叶子，并要求 chooser 的 branch、head、成员数与安全 epoch 精确切换到用户所选分支。 |
+| 2026-08-31 | F2 分支恢复闭环 | 修复恢复响应在 handler 结束时被截断，并由 Application 单轮连续推进逐阶段持久化的 generation transition；五节点双移除后明确选择目标分支，最终 branch、head、成员视图与 MLS epoch 精确一致。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |

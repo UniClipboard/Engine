@@ -218,3 +218,11 @@
 - 第二个红点是可靠撤销删除当前成员事实后，QueryDeviceTrust 把 Removed 设备缺少 observation 误判为整体 unavailable；现仅为非 Active 设备合成 Offline，Active 缺失仍失败。
 - 第三个红点是撤销更新只存在于 `RevocationStage`，后台维护只读取通用 Space outbox；统一待投递查询现聚合两类持久欠账，确认时回写原撤销事务，不复制确认状态。
 - F1 最终五节点测试已通过：保留成员 epoch 精确收敛，两分支成员视图分别保持移除/新增语义，分支内正文成功，Removed 目标与 Heal 后跨分支正文关闭式失败，且没有自动 winner。
+
+## 2026-08-31 · F2 concurrent removals
+
+- 已新增声明式 `ResolveConflict` 动作与五节点双移除选择红测；首次运行发现成员 branch 收敛早于 MLS epoch，B 尚不能安全发起移除，测试基线现同时等待五端安全 epoch 一致。
+- 基线补齐后冲突形成与 Engine 选择请求均成功，但 chooser 在 60 秒内未切换到目标 branch/head；真实红点已收窄到选择后的恢复包或 generation transition 推进链路。
+- 脱敏阶段日志定位到 Iroh 服务端完成 `finish()` 后立即结束 handler，客户端在读取响应长度前收到 stream error；服务端现等待 `stopped()` 确认对端完整接收。
+- transition 原本每个固定维护周期只推进一个阶段；Application 完整流程负责人现于单轮内连续推进并逐阶段持久化，仅在真实依赖不可用时 Deferred。
+- F2 五节点测试已转绿：C 明确选择 B 的移除分支后，branch/head、四成员视图和 external commit 后的最终 MLS epoch 精确一致。
