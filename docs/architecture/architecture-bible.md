@@ -270,7 +270,7 @@ Core 保存完整 admission aggregate 和状态转换规则。Application 内部
 - 空间锁定前必须暂停并等待搜索后台工作退出，解锁或恢复后由空间会话统一恢复；进程关闭后不得再次开启搜索后台工作。
 - 无后台能力的场景必须使用明确的只读搜索模式，不能先创建半成品再运行中补装。
 
-V3 搜索密码边界由 Infra `V3SearchProtection` 独占。profile 搜索根从 `ProfileContentVaultKey` 域分离派生；索引调用只提交规范词项，模块从活动 session 固定保护组并生成 opaque group ref 与组隔离 term tags。查询只接收索引中实际存在的 group refs，经 vault 验证后为每个查询词生成一组跨保护组 alternatives；AND 语义按查询词集合判断命中，禁止把全部组 tags 扁平后按总数计数。搜索 render 保留所属模块的 JSON schema 与实体 AAD，但 V3 AEAD、purpose 和历史 key resolution 委托 `ContentProtection`。当前该目标模块不接 production v11 索引；schema/version 与装配只允许在一次性 profile upgrade 和 clean cutover 时共同切换，不能提前触发用旧 key 的普通重建。
+V3 搜索密码边界由 Infra `V3SearchProtection` 独占。profile 搜索根从 `ProfileContentVaultKey` 域分离派生；索引调用只提交规范词项，模块从活动 session 固定保护组并生成 opaque group ref 与组隔离 term tags。查询只接收索引中实际存在的 group refs，经 vault 验证后为每个查询词生成一组跨保护组 alternatives；AND 语义按查询词集合判断命中，禁止把全部组 tags 扁平后按总数计数。搜索 render 保留所属模块的 JSON schema 与实体 AAD，但 V3 AEAD、purpose 和历史 key resolution 委托 `ContentProtection`。`SqliteSearchIndex` 是 V11/V12 共用的唯一仓储实现：策略只在 SQLite 边界外准备或打开 render 密文与 query tags，事务、过滤、分页和重建切换保持单实现；V12 持久化每份文档的 group ref，拒绝 posting context 与落库时活动 context 不一致，并以 `search-v12` 独立版本失败关闭。Engine 只可在 V3 manifest clean cutover 后选择 V12 构造，当前尚未接入 production 装配。
 
 ### 持久化安全边界
 
@@ -904,6 +904,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-09-02 | 033 transfer event transaction boundary 第二十切片 | event store 与 receiver projection 共用唯一 transfer protection strategy；密文读取与 seal/open 在 SQLite 外完成，联合 append 以 event sequence、projection status 和旧 metadata 密文为 CAS，在一个事务中同时提交或回滚。owner 内部有界重试并保持调用方单一动作；V3 真实数据库 contract 与 legacy transfer 回归通过，无平行 store 或双 reader。 |
 | 2026-09-02 | 033 search V12 schema 第二十一切片 | production migration 为 `search_document` 增加 nullable opaque protection-group ref 与 profile/group 索引，Diesel row 显式区分 V11/blocked 空值；当前版本仍为 V11，未提前启用 V12 writer/query。升级器优先复用正式 schema，仅兼容旧 fixture 缺列，避免平行 migration 事实来源；V3 search strategy 留待下一切片整体切换。 |
 | 2026-09-02 | 033 search key context 第二十二切片 | Core search port 以不可拆分 `SearchKeyContext` 传递 key 与 opaque protection ref，pipeline 将 ref 附在内存 posting 上；V11 context 无 ref。V3 使用 group-specific tagging key，使 Application posting 与 Infra 多组查询共享同一 tag 算法，并消除 key 派生与落库间切换 Space 时 group 归属不可证明的竞态；SQLite V12 writer 尚未启用。 |
+| 2026-09-02 | 033 SQLite search V12 strategy 第二十三切片 | `SqliteSearchIndex` 在同一仓储内选择 V11/V12 protection strategy，共享 SQL 事务、过滤、分页和重建切换；V3 render 密码操作全部在 SQLite closure 外完成，文档携带 opaque group ref，多保护组查询按查询词 alternatives 保持 AND 语义，posting context 与落库活动 context 不一致时拒绝写入。真实 SQLite contract 覆盖跨 Space 查询、重建、密文探针与切换竞态；Engine 尚未选择 V12 构造。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |
