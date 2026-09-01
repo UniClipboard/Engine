@@ -441,6 +441,8 @@ Change: 第十六子切片新增显式 `ActiveRuntimeManifest` 版本和及 `Pro
 
 Change: 第十七子切片由 Engine `RuntimeStorageSelection` 把一个已认证 manifest 原子解析为 profile database、control database、blob root 与 payload format。V2/无 manifest 继续让两个 executor 共享原 pool；V3 打开独立双 pool，并把 clipboard/history/search/transfer 仓储只接到 profile executor，把 membership、relationship、credential、Space security 与 LAN device 仓储只接到 control executor，同时选择完整 V3 payload runtime。`CurrentSpaceResolver` 可从 V3 manifest 读取当前 Space identity；旧 `DurableAdmissionSpaceTransition` 不得拿双库运行，V3 admission/reset/branch transition 暂由同一 fail-closed adapter 拒绝，等待 Step 8 的 `SpaceControlGeneration` owner 替换。启动升级 gate、promotion journal 和 control credential V3 scope 仍未完成。
 
+Change: 第十八子切片让 `ProfileStorageUpgrade` 从 `Verified` 真正执行 V2 source compare-and-promote，并把目标 profile/control generations 与原 keyslot 组装成唯一 V3 manifest。promotion 成功或幂等发现同一 target 后才把加密 journal 推进到 `Promoted`；若进程在 manifest 替换后、journal 保存前崩溃，重启通过 target generation/keyslot 反向匹配已活动 V3，重新验证双库和 payload 后补写 `Promoted`。下一次调用单调进入 `CleanupPending`，之后返回 `UpToDate`；不同 V3 target、提前 promotion 或后来 source 均失败关闭。无活动 Space 的空 profile 不伪造 manifest，继续等待首次 activation。Engine 启动/解锁 gate 与旧 source 清理仍属后续子切片。
+
 Risk: 磁盘不足、移动端短进程和崩溃会留下 staging；每个 phase 先耐久记录再执行可重复动作，promotion 前绝不改 source。
 
 Step 8:

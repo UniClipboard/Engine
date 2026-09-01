@@ -21,9 +21,10 @@ use tokio::sync::Mutex;
 use uc_core::ids::ProfileId;
 
 use super::{
-    ActiveSpaceGenerationManifestStore, ActiveSpaceGenerationManifestStoreError,
-    AdmissionKeyManager, ProfileContentKeyVault,
+    ActiveRuntimeManifest, ActiveSpaceGenerationManifestStore, AdmissionKeyManager,
+    ProfileContentKeyVault,
 };
+use crate::security::active_space_generation_manifest_store::V3ManifestPromotionOutcome;
 use crate::space::InMemorySession;
 use derived_payloads::DerivedPayloadConverter;
 use journal::{UpgradeJournalV1, UpgradePhaseV1};
@@ -126,11 +127,8 @@ impl ProfileStorageUpgrade {
             UpgradeLeaseResult::Busy => return Ok(ProfileStorageUpgradeOutcome::Busy),
         };
 
-        let source = match self.manifests.load_sync() {
+        let runtime_manifest = match self.manifests.load_runtime_sync() {
             Ok(source) => source,
-            Err(ActiveSpaceGenerationManifestStoreError::UnsupportedVersion) => {
-                return Ok(ProfileStorageUpgradeOutcome::UpToDate);
-            }
             Err(source) => {
                 return Err(ProfileStorageUpgradeError::Manifest {
                     source: anyhow::Error::new(source)
@@ -138,7 +136,45 @@ impl ProfileStorageUpgrade {
                 });
             }
         };
-        let mut journal = match self.persistence.load_journal().await? {
+        let persisted_journal = self.persistence.load_journal().await?;
+        if let Some(ActiveRuntimeManifest::V3(target)) = runtime_manifest.as_ref() {
+            let Some(mut journal) = persisted_journal else {
+                return Ok(ProfileStorageUpgradeOutcome::UpToDate);
+            };
+            if !journal.matches_target(target) {
+                return Err(ProfileStorageUpgradeError::SourceChanged);
+            }
+            return match journal.phase() {
+                UpgradePhaseV1::Verified => {
+                    self.derived_payloads.verify(&journal, &self.target).await?;
+                    self.validator.verify(&journal, &self.target)?;
+                    journal.mark_promoted()?;
+                    self.persistence.save_journal(&journal).await?;
+                    Ok(ProfileStorageUpgradeOutcome::Upgraded)
+                }
+                UpgradePhaseV1::Promoted => {
+                    journal.mark_cleanup_pending()?;
+                    self.persistence.save_journal(&journal).await?;
+                    Ok(ProfileStorageUpgradeOutcome::Pending)
+                }
+                UpgradePhaseV1::CleanupPending => Ok(ProfileStorageUpgradeOutcome::UpToDate),
+                _ => Err(ProfileStorageUpgradeError::Corrupt {
+                    source: anyhow::anyhow!(
+                        "active V3 manifest precedes the verified upgrade boundary"
+                    ),
+                }),
+            };
+        }
+        let source = match runtime_manifest {
+            Some(ActiveRuntimeManifest::V2(source)) => Some(source),
+            Some(ActiveRuntimeManifest::V3(_)) => {
+                return Err(ProfileStorageUpgradeError::Corrupt {
+                    source: anyhow::anyhow!("profile upgrade runtime version changed while held"),
+                });
+            }
+            None => None,
+        };
+        let mut journal = match persisted_journal {
             Some(journal) => {
                 if !journal.matches_source(source.as_ref()) {
                     return Err(ProfileStorageUpgradeError::SourceChanged);
@@ -208,8 +244,32 @@ impl ProfileStorageUpgrade {
             UpgradePhaseV1::Verified => {
                 self.derived_payloads.verify(&journal, &self.target).await?;
                 self.validator.verify(&journal, &self.target)?;
+                let Some(source) = source.as_ref() else {
+                    return Ok(ProfileStorageUpgradeOutcome::Pending);
+                };
+                let target = journal.target_manifest(source)?;
+                let promotion = self
+                    .manifests
+                    .promote_v3_from_v2(source, &target)
+                    .await
+                    .map_err(|source| ProfileStorageUpgradeError::Manifest {
+                        source: anyhow::Error::new(source)
+                            .context("promote verified profile runtime manifest"),
+                    })?;
+                match promotion {
+                    V3ManifestPromotionOutcome::Promoted
+                    | V3ManifestPromotionOutcome::AlreadyActive => {}
+                    V3ManifestPromotionOutcome::SourceChanged => {
+                        return Err(ProfileStorageUpgradeError::SourceChanged);
+                    }
+                }
+                journal.mark_promoted()?;
+                self.persistence.save_journal(&journal).await?;
+                return Ok(ProfileStorageUpgradeOutcome::Upgraded);
             }
-            UpgradePhaseV1::Promoted | UpgradePhaseV1::CleanupPending => {}
+            UpgradePhaseV1::Promoted | UpgradePhaseV1::CleanupPending => {
+                return Err(ProfileStorageUpgradeError::SourceChanged);
+            }
         }
 
         Ok(ProfileStorageUpgradeOutcome::Pending)

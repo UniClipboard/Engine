@@ -147,6 +147,11 @@ async fn v2_upgrade_coordination_is_durable_idempotent_and_encrypted() {
         upgrade.ensure_v3().await.unwrap(),
         ProfileStorageUpgradeOutcome::Pending
     );
+    assert_eq!(
+        upgrade.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Upgraded
+    );
+    assert!(manifests.load_v3_sync().unwrap().is_some());
     let first_files = regular_files(&vault);
     assert!(first_files.len() >= 3);
     for (_, bytes) in &first_files {
@@ -166,7 +171,12 @@ async fn v2_upgrade_coordination_is_durable_idempotent_and_encrypted() {
         reopened.ensure_v3().await.unwrap(),
         ProfileStorageUpgradeOutcome::Pending
     );
-    assert_eq!(regular_files(&vault), first_files);
+    let cleanup_pending_files = regular_files(&vault);
+    assert_eq!(
+        reopened.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::UpToDate
+    );
+    assert_eq!(regular_files(&vault), cleanup_pending_files);
 }
 
 #[tokio::test]

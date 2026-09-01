@@ -1,8 +1,10 @@
 use rand::RngCore;
-use uc_core::membership::ActiveSpaceGenerationManifestV2;
+use uc_core::ids::SpaceId;
+use uc_core::membership::{ActiveRuntimeLayout, ActiveSpaceGenerationManifestV2};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::ProfileStorageUpgradeError;
+use crate::security::ActiveRuntimeManifestV3;
 
 pub(super) const JOURNAL_FORMAT_V1: u16 = 1;
 
@@ -265,6 +267,40 @@ impl UpgradeJournalV1 {
         self.verified_control_schema_digest
     }
 
+    pub(super) fn target_manifest(
+        &self,
+        source: &ActiveSpaceGenerationManifestV2,
+    ) -> Result<ActiveRuntimeManifestV3, ProfileStorageUpgradeError> {
+        if self.phase != UpgradePhaseV1::Verified || !self.matches_source(Some(source)) {
+            return Err(ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::anyhow!("profile upgrade promotion binding is invalid"),
+            });
+        }
+        let layout = ActiveRuntimeLayout::new(
+            SpaceId::from_string(source.space_id.clone()),
+            self.target_profile_data_generation,
+            self.target_space_control_generation,
+        )
+        .map_err(|source| ProfileStorageUpgradeError::Corrupt {
+            source: anyhow::Error::new(source)
+                .context("construct profile upgrade target runtime layout"),
+        })?;
+        ActiveRuntimeManifestV3::new(layout, source.keyslot_generation).ok_or_else(|| {
+            ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::anyhow!("profile upgrade target keyslot generation is invalid"),
+            }
+        })
+    }
+
+    pub(super) fn matches_target(&self, target: &ActiveRuntimeManifestV3) -> bool {
+        self.source.as_ref().is_some_and(|source| {
+            source.keyslot_generation == *target.keyslot_generation()
+                && self.target_profile_data_generation == *target.layout().profile_data_generation()
+                && self.target_space_control_generation
+                    == *target.layout().space_control_generation()
+        })
+    }
+
     pub(super) fn mark_target_staged(
         &mut self,
         source_snapshot_digest: [u8; 32],
@@ -362,6 +398,26 @@ impl UpgradeJournalV1 {
         self.verified_profile_schema_digest = Some(profile_schema_digest);
         self.verified_control_schema_digest = Some(control_schema_digest);
         self.phase = UpgradePhaseV1::Verified;
+        self.validate()
+    }
+
+    pub(super) fn mark_promoted(&mut self) -> Result<(), ProfileStorageUpgradeError> {
+        if self.phase != UpgradePhaseV1::Verified {
+            return Err(ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::anyhow!("profile upgrade promotion transition is invalid"),
+            });
+        }
+        self.phase = UpgradePhaseV1::Promoted;
+        self.validate()
+    }
+
+    pub(super) fn mark_cleanup_pending(&mut self) -> Result<(), ProfileStorageUpgradeError> {
+        if self.phase != UpgradePhaseV1::Promoted {
+            return Err(ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::anyhow!("profile upgrade cleanup transition is invalid"),
+            });
+        }
+        self.phase = UpgradePhaseV1::CleanupPending;
         self.validate()
     }
 }
