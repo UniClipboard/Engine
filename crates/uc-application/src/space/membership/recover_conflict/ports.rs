@@ -212,6 +212,11 @@ pub enum PrepareMembershipBranchRecoveryMaterialError {
         #[source]
         source: anyhow::Error,
     },
+    #[error("membership branch recovery security state could not be installed")]
+    SecurityState {
+        #[source]
+        source: anyhow::Error,
+    },
 }
 
 #[async_trait]

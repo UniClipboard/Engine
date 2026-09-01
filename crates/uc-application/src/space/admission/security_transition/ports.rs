@@ -24,12 +24,17 @@ impl std::fmt::Debug for PreparedMemberSecurityDelivery {
     }
 }
 
-#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error)]
 pub enum AdmissionSecurityTransitionError {
     #[error("admission security state is invalid")]
     InvalidState,
     #[error("admission security commitment does not match")]
     CommitmentMismatch,
+    #[error("admission security state could not be installed")]
+    SecurityState {
+        #[source]
+        source: anyhow::Error,
+    },
 }
 
 #[derive(Clone, PartialEq, Eq)]

@@ -347,6 +347,11 @@ fn map_material_error(
                 source: anyhow::Error::new(error),
             }
         }
+        PrepareMembershipBranchRecoveryMaterialError::SecurityState { .. } => {
+            IssueMembershipBranchRecoveryError::Unavailable {
+                source: anyhow::Error::new(error),
+            }
+        }
     }
 }
 
@@ -363,5 +368,27 @@ fn rejected_with(error: MembershipLedgerError) -> IssueMembershipBranchRecoveryE
 fn corrupt() -> IssueMembershipBranchRecoveryError {
     IssueMembershipBranchRecoveryError::Corrupt {
         source: anyhow::Error::new(MembershipLedgerError::Corrupt),
+    }
+}
+
+#[cfg(test)]
+mod error_mapping_tests {
+    use std::error::Error;
+
+    use super::*;
+
+    #[test]
+    fn security_state_failure_stays_unavailable_and_preserves_source() {
+        let error = map_material_error(
+            PrepareMembershipBranchRecoveryMaterialError::SecurityState {
+                source: anyhow::anyhow!("injected security state failure"),
+            },
+        );
+
+        assert!(matches!(
+            error,
+            IssueMembershipBranchRecoveryError::Unavailable { .. }
+        ));
+        assert!(error.source().is_some());
     }
 }

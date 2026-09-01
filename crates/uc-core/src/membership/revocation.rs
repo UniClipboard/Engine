@@ -1310,7 +1310,7 @@ impl TryFrom<RawRevocationRecord> for RevocationRecord {
     }
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum KeyEpochError {
     #[error("group epoch overflow")]
     EpochOverflow,
@@ -1344,6 +1344,12 @@ pub enum KeyEpochError {
 
     #[error("persisted security state failed integrity validation")]
     PersistedStateIntegrityFailed,
+
+    #[error("current space security state could not be installed")]
+    SecurityState {
+        #[source]
+        source: anyhow::Error,
+    },
 
     #[error("removed member cannot receive the staged revocation")]
     RemovedMemberInOutbox,

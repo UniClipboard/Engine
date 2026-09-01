@@ -80,6 +80,48 @@ fn ready_material(space_id: &str, group_id: &str, key_id: &str) -> SpaceKeyMater
     )
 }
 
+fn advanced_material(
+    space_id: &str,
+    group_id: &str,
+    previous_key_id: &str,
+    current_key_id: &str,
+) -> SpaceKeyMaterial {
+    let epoch = GroupEpoch::new(8);
+    let state = SpaceKeyState::ready_for_admission(
+        SpaceId::from(space_id),
+        epoch,
+        ContentKeyId::from_string(current_key_id).unwrap(),
+        ProtectionGroupId::from_string(group_id).unwrap(),
+    )
+    .unwrap();
+    let catalog = CatalogFixture {
+        version: 2,
+        entries: vec![
+            CatalogEntryFixture {
+                content_key_id: "legacy-v1".to_owned(),
+                epoch: 0,
+                key: vec![0x20; 32],
+            },
+            CatalogEntryFixture {
+                content_key_id: previous_key_id.to_owned(),
+                epoch: 7,
+                key: vec![0x31; 32],
+            },
+            CatalogEntryFixture {
+                content_key_id: current_key_id.to_owned(),
+                epoch: epoch.value(),
+                key: vec![0x32; 32],
+            },
+        ],
+    };
+    SpaceKeyMaterial::new(
+        state,
+        b"advanced-group-state".to_vec(),
+        serde_json::to_vec(&catalog).unwrap(),
+        2,
+    )
+}
+
 fn active_fixture() -> (
     tempfile::TempDir,
     Arc<InMemorySession>,
@@ -200,4 +242,67 @@ async fn legacy_activation_switches_session_without_creating_a_catalog() {
         )
         .await
         .is_err());
+}
+
+#[tokio::test]
+async fn current_material_update_installs_catalog_before_advancing_the_session() {
+    let (_directory, session, vault, active) = active_fixture();
+    active
+        .activate(
+            &SpaceId::from("space-a"),
+            MasterKey::from_bytes(&[0x41; 32]).unwrap(),
+            Some(&ready_material("space-a", "group-a", "key-a")),
+        )
+        .await
+        .unwrap();
+
+    let advanced = advanced_material("space-a", "group-a", "key-a", "key-b");
+    active.install_current_material(&advanced).await.unwrap();
+
+    let current = session.current_content_protection_key().unwrap();
+    assert_eq!(current.content_key_id().as_str(), "key-b");
+    assert_eq!(current.epoch(), GroupEpoch::new(8));
+    assert!(vault
+        .resolve(
+            &ContentKeyId::from_string("key-b").unwrap(),
+            GroupEpoch::new(8),
+        )
+        .await
+        .is_ok());
+}
+
+#[tokio::test]
+async fn current_material_vault_failure_preserves_the_previous_session_and_source() {
+    let (_directory, session, vault, active) = active_fixture();
+    active
+        .activate(
+            &SpaceId::from("space-a"),
+            MasterKey::from_bytes(&[0x41; 32]).unwrap(),
+            Some(&ready_material("space-a", "group-a", "key-a")),
+        )
+        .await
+        .unwrap();
+    vault
+        .install_verified_space_material(&ready_material("space-b", "group-b", "conflicting-key"))
+        .await
+        .unwrap();
+
+    let error = active
+        .install_current_material(&advanced_material(
+            "space-a",
+            "group-a",
+            "key-a",
+            "conflicting-key",
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        super::ActiveSpaceSecuritySessionError::Vault { .. }
+    ));
+    assert!(std::error::Error::source(&error).is_some());
+    let current = session.current_content_protection_key().unwrap();
+    assert_eq!(current.content_key_id().as_str(), "key-a");
+    assert_eq!(current.epoch(), GroupEpoch::new(7));
 }

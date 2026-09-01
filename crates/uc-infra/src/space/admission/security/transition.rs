@@ -214,10 +214,10 @@ mod tests {
             &prepared.public_commitment,
             &mismatched_input,
         );
-        assert_eq!(
+        assert!(matches!(
             mismatch,
             Err(AdmissionSecurityTransitionError::CommitmentMismatch)
-        );
+        ));
         let active = AdmissionSecurityTransitionAdapter::activate(
             staged.staged_state,
             &prepared.commit,

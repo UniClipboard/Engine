@@ -167,10 +167,48 @@ impl DefaultSpaceAccessAdapter {
             kek_observed: AtomicBool::new(false),
         }
     }
+
+    fn active_security_session(
+        &self,
+    ) -> Result<&ActiveSpaceSecuritySession, ActiveSpaceSecuritySessionError> {
+        self.active_security_session.as_ref().ok_or_else(|| {
+            ActiveSpaceSecuritySessionError::Session {
+                source: anyhow::anyhow!("active security session is unavailable"),
+            }
+        })
+    }
 }
 
 fn map_active_security_session_error(source: ActiveSpaceSecuritySessionError) -> SpaceAccessError {
     SpaceAccessError::SecurityState {
+        source: anyhow::Error::new(source),
+    }
+}
+
+fn map_key_epoch_security_session_error(source: ActiveSpaceSecuritySessionError) -> KeyEpochError {
+    KeyEpochError::SecurityState {
+        source: anyhow::Error::new(source),
+    }
+}
+
+fn map_bootstrap_security_session_error(source: ActiveSpaceSecuritySessionError) -> BootstrapError {
+    BootstrapError::SecurityState {
+        source: anyhow::Error::new(source),
+    }
+}
+
+fn map_admission_security_session_error(
+    source: ActiveSpaceSecuritySessionError,
+) -> AdmissionSecurityTransitionError {
+    AdmissionSecurityTransitionError::SecurityState {
+        source: anyhow::Error::new(source),
+    }
+}
+
+fn map_recovery_security_session_error(
+    source: ActiveSpaceSecuritySessionError,
+) -> PrepareMembershipBranchRecoveryMaterialError {
+    PrepareMembershipBranchRecoveryMaterialError::SecurityState {
         source: anyhow::Error::new(source),
     }
 }
@@ -771,9 +809,11 @@ impl DefaultSpaceAccessAdapter {
             .save_space_material(&next)
             .await
             .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
-        self.session
-            .install_space_material(&next)
-            .map_err(map_encryption_error)?;
+        self.active_security_session()
+            .map_err(map_active_security_session_error)?
+            .install_current_material(&next)
+            .await
+            .map_err(map_active_security_session_error)?;
         Ok((group_admission, replay_admission))
     }
 
@@ -1107,9 +1147,11 @@ impl DefaultSpaceAccessAdapter {
                         .ok_or_else(|| {
                             KeyEpochError::Repository("activated key material unavailable".into())
                         })?;
-                    self.session
-                        .install_space_material(&activated)
-                        .map_err(|error| KeyEpochError::Repository(error.to_string()))?;
+                    self.active_security_session()
+                        .map_err(map_key_epoch_security_session_error)?
+                        .install_current_material(&activated)
+                        .await
+                        .map_err(map_key_epoch_security_session_error)?;
                 }
                 RevocationStatus::Activated => {
                     let activated = repository
@@ -1118,9 +1160,11 @@ impl DefaultSpaceAccessAdapter {
                         .ok_or_else(|| {
                             KeyEpochError::Repository("activated key material unavailable".into())
                         })?;
-                    self.session
-                        .install_space_material(&activated)
-                        .map_err(|error| KeyEpochError::Repository(error.to_string()))?;
+                    self.active_security_session()
+                        .map_err(map_key_epoch_security_session_error)?
+                        .install_current_material(&activated)
+                        .await
+                        .map_err(map_key_epoch_security_session_error)?;
                     record = repository
                         .start_distribution(record.revocation_id(), now_ms)
                         .await?;
@@ -1236,9 +1280,11 @@ impl DefaultSpaceAccessAdapter {
             .install_space_material(&material)
             .map_err(|error| KeyEpochError::Repository(error.to_string()))?;
         repository.save_space_material(&material).await?;
-        self.session
-            .install_space_material(&material)
-            .map_err(|error| KeyEpochError::Repository(error.to_string()))?;
+        self.active_security_session()
+            .map_err(map_key_epoch_security_session_error)?
+            .install_current_material(&material)
+            .await
+            .map_err(map_key_epoch_security_session_error)?;
         Ok(update_epoch)
     }
 
@@ -1434,9 +1480,11 @@ impl DefaultSpaceAccessAdapter {
             .commit_revocation_recovery(&stage, &material)
             .await?;
         if record.status() != RevocationStatus::RecoveryRequired {
-            self.session
-                .install_space_material(&material)
-                .map_err(|error| KeyEpochError::Repository(error.to_string()))?;
+            self.active_security_session()
+                .map_err(map_key_epoch_security_session_error)?
+                .install_current_material(&material)
+                .await
+                .map_err(map_key_epoch_security_session_error)?;
         }
         Self::group_revocation_result(repository.as_ref(), &record).await
     }
@@ -1658,42 +1706,20 @@ impl DefaultSpaceAccessAdapter {
                 .set_master_key_for_space(space_id.clone(), master_key);
             return Ok(());
         };
-
-        let material = match repository.load_space_material(space_id).await {
-            Ok(Some(material)) => {
-                info!(
-                    group_epoch = material.state().epoch().value(),
-                    pending_group_update_count = material.pending_group_updates().len(),
-                    "空间会话恢复已读取安全材料"
-                );
-                Some(material)
-            }
-            // A missing record is an existing Legacy space, not evidence that
-            // a group and new content key catalog have been safely created.
-            Ok(None) => {
-                info!("空间会话恢复未发现群组安全材料");
-                None
-            }
-            Err(error) => {
-                return Err(SpaceAccessError::SecurityState {
-                    source: anyhow::Error::new(error),
-                });
-            }
-        };
         let active_security_session = self.active_security_session.as_ref().ok_or_else(|| {
             SpaceAccessError::SecurityState {
                 source: anyhow::anyhow!("active security session is unavailable"),
             }
         })?;
-        active_security_session
-            .activate(space_id, master_key, material.as_ref())
+        let restored_epoch = active_security_session
+            .restore_from_repository(space_id, master_key, repository.as_ref())
             .await
             .map_err(map_active_security_session_error)?;
-        if let Some(material) = material {
-            info!(
-                group_epoch = material.state().epoch().value(),
-                "空间会话安全材料已安装"
-            );
+        if let Some(group_epoch) = restored_epoch {
+            info!(group_epoch = group_epoch.value(), "空间会话安全材料已安装");
+        } else {
+            // 缺少记录表示既有 Legacy Space，不代表已经安全创建群组与 catalog。
+            info!("空间会话恢复未发现群组安全材料");
         }
         Ok(())
     }
@@ -2542,9 +2568,11 @@ impl GroupBootstrapPort for DefaultSpaceAccessAdapter {
         let activated = repository
             .activate_legacy_bootstrap(&bootstrap_id, now_ms)
             .await?;
-        self.session
-            .install_space_material(&material)
-            .map_err(|_| BootstrapError::SessionMaterial)?;
+        self.active_security_session()
+            .map_err(map_bootstrap_security_session_error)?
+            .install_current_material(&material)
+            .await
+            .map_err(map_bootstrap_security_session_error)?;
         bootstrap_result(activated)
     }
 
@@ -2994,9 +3022,11 @@ impl ActivateSponsorAdmissionSecurityPort for DefaultSpaceAccessAdapter {
                 pending_group_update_count = staged.pending_group_updates().len(),
                 "Sponsor 安全状态激活命中幂等持久状态"
             );
-            self.session
-                .install_space_material(&staged)
-                .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            self.active_security_session()
+                .map_err(map_admission_security_session_error)?
+                .install_current_material(&staged)
+                .await
+                .map_err(map_admission_security_session_error)?;
             return Ok(());
         }
         repository
@@ -3008,9 +3038,11 @@ impl ActivateSponsorAdmissionSecurityPort for DefaultSpaceAccessAdapter {
             pending_group_update_count = staged.pending_group_updates().len(),
             "Sponsor 安全状态已持久化"
         );
-        self.session
-            .install_space_material(&staged)
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        self.active_security_session()
+            .map_err(map_admission_security_session_error)?
+            .install_current_material(&staged)
+            .await
+            .map_err(map_admission_security_session_error)?;
         info!(
             group_epoch = staged.state().epoch().value(),
             "Sponsor 安全状态已安装到活动会话"
@@ -3143,9 +3175,11 @@ impl ActivateCompletionHelperAdmissionSecurityPort for DefaultSpaceAccessAdapter
             .save_space_material(&material)
             .await
             .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
-        self.session
-            .install_space_material(&material)
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)
+        self.active_security_session()
+            .map_err(map_admission_security_session_error)?
+            .install_current_material(&material)
+            .await
+            .map_err(map_admission_security_session_error)
     }
 }
 
@@ -3355,9 +3389,11 @@ impl PrepareMembershipBranchRecoveryMaterialPort for DefaultSpaceAccessAdapter {
                 recovery_material_unavailable(anyhow::anyhow!("space security state unavailable"))
             })?;
         if current == staged {
-            self.session
-                .install_space_material(&staged)
-                .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+            self.active_security_session()
+                .map_err(map_recovery_security_session_error)?
+                .install_current_material(&staged)
+                .await
+                .map_err(map_recovery_security_session_error)?;
             return Ok(());
         }
         let expected_epoch = current
@@ -3384,9 +3420,11 @@ impl PrepareMembershipBranchRecoveryMaterialPort for DefaultSpaceAccessAdapter {
             .save_space_material(&staged)
             .await
             .map_err(|source| recovery_material_unavailable(anyhow::Error::new(source)))?;
-        self.session
-            .install_space_material(&staged)
-            .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))
+        self.active_security_session()
+            .map_err(map_recovery_security_session_error)?
+            .install_current_material(&staged)
+            .await
+            .map_err(map_recovery_security_session_error)
     }
 }
 
@@ -3524,6 +3562,7 @@ impl DefaultSpaceAccessAdapter {
 #[cfg(test)]
 mod admission_tests {
     use std::collections::HashMap;
+    use std::error::Error as _;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -3555,6 +3594,44 @@ mod admission_tests {
             fn set(&self, key: &str, value: &[u8]) -> Result<(), SecureStorageError>;
             fn delete(&self, key: &str) -> Result<(), SecureStorageError>;
         }
+    }
+
+    fn security_session_failure() -> ActiveSpaceSecuritySessionError {
+        ActiveSpaceSecuritySessionError::Session {
+            source: anyhow::anyhow!("injected security session failure"),
+        }
+    }
+
+    #[test]
+    fn security_session_error_mappings_preserve_classification_and_source() {
+        let space_access = map_active_security_session_error(security_session_failure());
+        assert!(matches!(
+            space_access,
+            SpaceAccessError::SecurityState { .. }
+        ));
+        assert!(space_access.source().is_some());
+
+        let key_epoch = map_key_epoch_security_session_error(security_session_failure());
+        assert!(matches!(key_epoch, KeyEpochError::SecurityState { .. }));
+        assert!(key_epoch.source().is_some());
+
+        let bootstrap = map_bootstrap_security_session_error(security_session_failure());
+        assert!(matches!(bootstrap, BootstrapError::SecurityState { .. }));
+        assert!(bootstrap.source().is_some());
+
+        let admission = map_admission_security_session_error(security_session_failure());
+        assert!(matches!(
+            admission,
+            AdmissionSecurityTransitionError::SecurityState { .. }
+        ));
+        assert!(admission.source().is_some());
+
+        let recovery = map_recovery_security_session_error(security_session_failure());
+        assert!(matches!(
+            recovery,
+            PrepareMembershipBranchRecoveryMaterialError::SecurityState { .. }
+        ));
+        assert!(recovery.source().is_some());
     }
 
     struct MemoryLegacyBootstrapRepository {
@@ -5072,6 +5149,42 @@ mod admission_tests {
     }
 
     #[tokio::test]
+    async fn activate_session_repository_failure_restores_old_session_and_source() {
+        use std::error::Error as _;
+
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let old_space = SpaceId::from("old-space");
+        session.set_master_key_for_space(
+            old_space.clone(),
+            MasterKey::from_bytes(&[0x21; 32]).unwrap(),
+        );
+        let mut repository = MockRevocationRepository::new();
+        repository
+            .expect_load_space_material()
+            .times(1)
+            .returning(|_| Err(KeyEpochError::Repository("injected failure".into())));
+        let adapter = adapter(
+            &directory,
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::clone(&session),
+            Arc::new(repository),
+        );
+
+        let error = adapter
+            .activate_session(
+                &SpaceId::from("target-space"),
+                MasterKey::from_bytes(&[0x41; 32]).unwrap(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, SpaceAccessError::SecurityState { .. }));
+        assert!(error.source().is_some());
+        assert_eq!(session.current_space_id().unwrap(), old_space);
+    }
+
+    #[tokio::test]
     async fn activate_session_installs_catalog_and_preserves_old_session_on_vault_conflict() {
         use std::error::Error as _;
 
@@ -5538,12 +5651,12 @@ mod admission_tests {
             .unwrap()
             .epoch();
 
-        assert_eq!(
+        assert!(matches!(
             sponsor
                 .continue_group_revocation(&revocation_id, &[DeviceId::new("alice")], 120,)
                 .await,
             Err(KeyEpochError::PermanentLossRecipientNotPending)
-        );
+        ));
         let recovered = sponsor
             .continue_group_revocation(&revocation_id, &[DeviceId::new("bob")], 130)
             .await

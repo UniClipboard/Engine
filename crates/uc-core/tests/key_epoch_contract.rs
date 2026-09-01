@@ -10,10 +10,10 @@ fn group_epoch_only_advances() {
     let epoch = GroupEpoch::new(7);
     assert_eq!(epoch.value(), 7);
     assert_eq!(epoch.next().unwrap().value(), 8);
-    assert_eq!(
+    assert!(matches!(
         GroupEpoch::new(u64::MAX).next(),
         Err(KeyEpochError::EpochOverflow)
-    );
+    ));
 }
 
 #[test]
@@ -100,13 +100,13 @@ fn activated_revocation_cannot_move_backwards() {
         .transition_to(RevocationStatus::Activated, 120)
         .unwrap();
 
-    assert_eq!(
+    assert!(matches!(
         record.transition_to(RevocationStatus::Staged, 130),
         Err(KeyEpochError::InvalidRevocationTransition {
             from: RevocationStatus::Activated,
             to: RevocationStatus::Staged,
         })
-    );
+    ));
     assert_eq!(record.status(), RevocationStatus::Activated);
 }
 
@@ -144,14 +144,17 @@ fn ready_space_cannot_return_to_migration_or_reuse_a_key_id() {
         .mark_ready(current.clone(), ProtectionGroupId::generate())
         .unwrap();
 
-    assert_eq!(
+    assert!(matches!(
         state.mark_migrating(),
         Err(KeyEpochError::InvalidSpaceSecurityTransition {
             from: SpaceSecurityMode::Ready,
             to: SpaceSecurityMode::Migrating,
         })
-    );
-    assert_eq!(state.rotate(current), Err(KeyEpochError::ContentKeyReuse));
+    ));
+    assert!(matches!(
+        state.rotate(current),
+        Err(KeyEpochError::ContentKeyReuse)
+    ));
 }
 
 #[test]
@@ -202,7 +205,7 @@ fn staged_revocation_redacts_payloads_and_excludes_removed_member() {
         vec![2],
         vec![RevocationOutboxMessage::new(target, vec![3])],
     );
-    assert_eq!(invalid, Err(KeyEpochError::RemovedMemberInOutbox));
+    assert!(matches!(invalid, Err(KeyEpochError::RemovedMemberInOutbox)));
 }
 
 #[test]
@@ -316,10 +319,10 @@ fn revocation_stage_tracks_each_recipient_once_and_rejects_unknown_ack() {
     .unwrap();
 
     assert!(!stage.all_recipients_confirmed());
-    assert_eq!(
+    assert!(matches!(
         stage.acknowledge_recipient(&DeviceId::new("unknown"), 102),
         Err(KeyEpochError::RevocationRecipientNotFound)
-    );
+    ));
     stage
         .acknowledge_recipient(&DeviceId::new("alice"), 103)
         .unwrap();
@@ -374,7 +377,7 @@ fn permanent_loss_recovery_only_excludes_waiting_devices_and_appends_a_generatio
         .acknowledge_recipient(&DeviceId::new("bob"), 104)
         .unwrap();
     let before_invalid_recovery = stage.clone();
-    assert_eq!(
+    assert!(matches!(
         stage.append_recovery_generation(
             &DeviceId::new("alice"),
             first_state.clone(),
@@ -384,7 +387,7 @@ fn permanent_loss_recovery_only_excludes_waiting_devices_and_appends_a_generatio
             105,
         ),
         Err(KeyEpochError::InvalidRevocationStage)
-    );
+    ));
     assert_eq!(stage.record(), before_invalid_recovery.record());
     assert_eq!(
         stage.generation_count(),
@@ -399,7 +402,7 @@ fn permanent_loss_recovery_only_excludes_waiting_devices_and_appends_a_generatio
         .rotate(ContentKeyId::from_string("current-3").unwrap())
         .unwrap();
 
-    assert_eq!(
+    assert!(matches!(
         stage.append_recovery_generation(
             &DeviceId::new("bob"),
             second_state.clone(),
@@ -409,7 +412,7 @@ fn permanent_loss_recovery_only_excludes_waiting_devices_and_appends_a_generatio
             106,
         ),
         Err(KeyEpochError::PermanentLossRecipientNotPending)
-    );
+    ));
     stage
         .append_recovery_generation(
             &DeviceId::new("alice"),
@@ -518,18 +521,18 @@ fn space_material_pending_updates_are_acknowledged_by_id() {
 
 #[test]
 fn content_key_id_rejects_invalid_strings() {
-    assert_eq!(
+    assert!(matches!(
         ContentKeyId::from_string(""),
         Err(KeyEpochError::InvalidContentKeyId)
-    );
-    assert_eq!(
+    ));
+    assert!(matches!(
         ContentKeyId::from_string("a".repeat(129)),
         Err(KeyEpochError::InvalidContentKeyId)
-    );
-    assert_eq!(
+    ));
+    assert!(matches!(
         ContentKeyId::from_string("non-ascii-key-密钥"),
         Err(KeyEpochError::InvalidContentKeyId)
-    );
+    ));
 }
 
 #[test]
