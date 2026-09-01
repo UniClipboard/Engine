@@ -5,6 +5,7 @@ pub(crate) mod facade;
 pub(crate) mod file_transfer;
 pub(crate) mod host;
 pub(crate) mod lifecycle;
+pub(crate) mod maintenance_space_transition;
 #[cfg(feature = "lan-compat")]
 pub(crate) mod mobile_lan;
 pub(crate) mod network;

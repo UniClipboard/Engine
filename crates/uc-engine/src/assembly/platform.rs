@@ -96,8 +96,6 @@ pub struct PlatformLayer {
     /// 所有 profile persistence adapter 共用的唯一版本选择。
     pub(crate) payload_runtime: ProfilePayloadRuntime,
 
-    pub blob_generation_store: Arc<SwitchableFilesystemBlobStore>,
-
     // 进程内会话——uc-infra 内部 adapter (SpaceAccessAdapter / BlobCipherAdapter /
     // TransferCipherAdapter / EncryptedBlobStore) 共享同一份 Arc。具体类型,
     // 不再走 EncryptionSessionPort trait dyn 间接层。
@@ -263,7 +261,6 @@ pub fn create_platform_layer(
         blob_store: blob_store_reader,
         blob_cipher,
         payload_runtime,
-        blob_generation_store,
         session,
         current_profile,
     })

@@ -91,6 +91,7 @@ use crate::assembly::deps::{
     BackgroundRuntimeDeps, ProfileResetDeps, SharedRuntimeDeps, SyncEngineDeps, WiredDependencies,
     WiringError, WiringResult,
 };
+use crate::assembly::maintenance_space_transition::MaintenanceOnlySpaceTransitionPorts;
 use crate::assembly::platform::{create_platform_layer, ProfilePayloadMode, SystemClipboardLayer};
 use crate::assembly::runtime_storage::RuntimeStorageSelection;
 use infra::*;
@@ -293,7 +294,6 @@ pub async fn wire_dependencies_from_inputs(
     let vault_path = paths.vault_dir;
     let settings_path = paths.settings_path;
     let app_data_root = paths.app_data_root_dir.clone();
-    let generation_root = app_data_root.join("space-generations");
     let profile_lifecycle_repository: Arc<dyn ProfileLifecycleRepositoryPort> =
         Arc::new(ProfileLifecycleRepository::new(Arc::clone(&secure_storage)));
     let profile_lifecycle =
@@ -370,7 +370,6 @@ pub async fn wire_dependencies_from_inputs(
         create_db_pool(&control_db_path)?
     };
     let db_pool_for_profile_reset = db_pool.clone();
-    let db_pool_for_space_transition = db_pool.clone();
     let control_db_pool_for_space_transition = control_db_pool.clone();
     // Clone pool before infra layer consumes it — search bundle needs the same pool.
     let db_pool_for_search = db_pool.clone();
@@ -387,7 +386,6 @@ pub async fn wire_dependencies_from_inputs(
         secure_storage.clone(),
     )?;
     let storage_config = Arc::new(ClipboardStorageConfig::defaults());
-    let source_blob_root = blob_store_dir.clone();
     let profile_salt = profile_id.inner().as_bytes().to_vec();
     let platform = create_platform_layer(
         secure_storage,
@@ -511,18 +509,7 @@ pub async fn wire_dependencies_from_inputs(
             initial_space_activation,
         )
     } else {
-        let transition = Arc::new(uc_infra::security::DurableAdmissionSpaceTransition::new(
-            db_pool_for_space_transition,
-            source_blob_root,
-            generation_root,
-            profile_salt,
-            Arc::clone(&platform.blob_generation_store),
-            Arc::clone(&active_generation_manifest_store),
-            space_access_adapter,
-            Arc::clone(&platform.session),
-            Arc::clone(&platform.current_profile),
-            Arc::clone(&admission_keys),
-        ));
+        let transition = Arc::new(MaintenanceOnlySpaceTransitionPorts);
         (
             transition.clone(),
             transition.clone(),

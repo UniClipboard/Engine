@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use tempfile::tempdir;
 use uc_application::deps::{
-    AdmissionSpaceTransitionPort, AdmissionSpaceTransitionPreparationV2,
-    AdmissionSpaceTransitionStepV2,
+    AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
+    AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionStepV2,
 };
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::{DeviceId, SpaceId};
@@ -12,8 +12,10 @@ use uc_core::membership::{
     ActiveRuntimeLayout, ActiveSpaceGenerationManifestV2, AdmissionChangeFacts,
     AdmissionContentKeyCatalogV1, AdmissionContentKeyEntryV1, AdmissionSecurityCommitmentV1,
     AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2, BaseMembershipHistoryPosition,
-    CrossSpaceControlTransitionPhaseV3, MembershipCredential, PendingGroupUpdate, SpaceAdmissionId,
+    CrossSpaceControlTransitionPhaseV3, FreshSpaceTransitionPhaseV1, FreshSpaceTransitionV1,
+    MembershipCredential, PendingGroupUpdate, SpaceAdmissionId,
     ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
+    FRESH_SPACE_TRANSITION_FORMAT_V1,
 };
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::PrepareAdmissionTargetAccessPort;
@@ -145,6 +147,43 @@ async fn v3_cross_space_switches_only_the_control_generation() {
         Arc::clone(&manifests),
         Arc::clone(&generations),
         Arc::clone(&activation),
+    );
+    let legacy_checkpoint = AdmissionSpaceTransitionV2::Fresh(FreshSpaceTransitionV1 {
+        transition_format_version: FRESH_SPACE_TRANSITION_FORMAT_V1,
+        attempt_id: SpaceAdmissionId::from_bytes([0x39; 32]).unwrap(),
+        target_space_id: "legacy-target".to_owned(),
+        target_generation: [0x3a; 16],
+        target_keyslot_ref: vec![0x3b],
+        target_workspace_ref: vec![0x3c],
+        phase: FreshSpaceTransitionPhaseV1::TargetStaged,
+    });
+    let manifest_before_legacy_rejection = manifests.load_runtime().await.unwrap();
+    let profile_before_legacy_rejection = std::fs::read(source_layout.profile_database()).unwrap();
+    let blob_before_legacy_rejection =
+        std::fs::read(source_layout.blob_root().join("history.ucbl")).unwrap();
+    assert_eq!(
+        transitions.advance(&legacy_checkpoint).await.unwrap_err(),
+        AdmissionSpaceTransitionError::Inconsistent
+    );
+    assert_eq!(
+        manifests.load_runtime().await.unwrap(),
+        manifest_before_legacy_rejection
+    );
+    assert_eq!(
+        std::fs::read(source_layout.profile_database()).unwrap(),
+        profile_before_legacy_rejection
+    );
+    assert_eq!(
+        std::fs::read(source_layout.blob_root().join("history.ucbl")).unwrap(),
+        blob_before_legacy_rejection
+    );
+    assert_no_forbidden_paths(
+        &root,
+        &[
+            "source-backup.sqlite",
+            "target.sqlite",
+            "workspace-state.bin",
+        ],
     );
     let target_space = SpaceId::from_str("target-space");
     let target_access = PrepareAdmissionTargetAccessPort::prepare_target_access(

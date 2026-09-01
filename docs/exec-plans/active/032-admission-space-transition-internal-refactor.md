@@ -1,6 +1,6 @@
 # 032 退役 Legacy Space Transition
 
-状态：待实施；已按完成后的规格 033 重新基线化
+状态：实施中；Slice 1 已完成
 
 关联事实来源：
 
@@ -225,6 +225,13 @@ InitialSpaceActivationPort
 每个切片独立提交；禁止在第一切片复制或移动 legacy 实现。
 
 ## Slice 1：断开 legacy production reachability
+
+实施结果（2026-09-02）：
+
+- Engine 新增无存储/密码依赖的 `MaintenanceOnlySpaceTransitionPorts`，四类既有 port 在 I/O 前按 `Locked`/`Unavailable` 失败关闭；membership branch 保留具体 source。
+- maintenance-only wiring 不再构造 `DurableAdmissionSpaceTransition`；因此删除了只为旧 transition 泄漏到 `PlatformLayer` 的 `blob_generation_store` 字段，底层 blob port 行为不变。
+- V3 CrossSpace 真实介质 tracer 增加 legacy Fresh checkpoint：返回 `Inconsistent`，manifest、profile SQLite 和 blob 字节不变，也不创建 source backup、target 或 workspace 路径。
+- 本切片未修改 Core、Application interface、持久格式或 V3 正常切换行为；legacy Infra 文件留给 Slice 2 整体删除。
 
 File: `crates/uc-engine/src/assembly/` 下新增私有 maintenance transition adapter
 Change: 先通过现有四个 port 写 fail-closed contract tests，再实现 `MaintenanceOnlySpaceTransitionPorts`；所有方法在无 I/O 前返回规定分类，branch error 保留 source。
