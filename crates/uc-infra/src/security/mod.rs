@@ -20,13 +20,14 @@ mod profile_content_key_vault;
 mod profile_lifecycle;
 mod profile_payload_adapters;
 mod profile_reset;
+mod profile_runtime_layout;
 mod profile_storage_upgrade;
 mod secrets;
 mod space_admission_auth;
 pub(crate) mod v1_aead;
 
 pub use active_space_generation_manifest_store::{
-    ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore,
+    ActiveRuntimeManifest, ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore,
     ActiveSpaceGenerationManifestStoreError,
 };
 pub use admission_key_manager::{
@@ -62,6 +63,7 @@ pub use profile_content_key_vault::{
 pub use profile_lifecycle::ProfileLifecycleRepository;
 pub use profile_payload_adapters::ProfilePayloadAdapters;
 pub use profile_reset::{ProfileKeyWiper, ProfileStateCleaner};
+pub use profile_runtime_layout::ProfileRuntimeLayout;
 pub use profile_storage_upgrade::{
     ProfileStorageUpgrade, ProfileStorageUpgradeError, ProfileStorageUpgradeOutcome,
 };

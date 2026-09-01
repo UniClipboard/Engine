@@ -437,6 +437,8 @@ Change: 第十四子切片在唯一 `SqliteSearchIndex` 内引入 V11/V12 protec
 
 Change: 第十五子切片新增 `ProfilePayloadAdapters` 与 Engine `ProfilePayloadRuntime`，把 inline 与 UCBL 组成不可拆分的 primary adapter family，并以同一 runtime 选择 active register、file-set、transfer/receive、directory records 和 search 的 legacy/V3 strategy。调用方不能单独选择某个 payload adapter 的格式，避免 V3 manifest 下出现混合 writer；网络 `TransferCipherPort` 仍独立使用活动 Space session，不属于历史 at-rest family。production 当前仍显式选择 legacy，下一子切片必须由启动 manifest/gate 构造 V3 runtime，不能在普通 wire 中猜测格式。
 
+Change: 第十六子切片新增显式 `ActiveRuntimeManifest` 版本和及 `ProfileRuntimeLayout` 路径深模块。旧 V2 loader 面对 V3 继续返回 `UnsupportedVersion`，只有 V3-aware 启动入口可取得已认证 V2/V3 选择；profile database、blob root 与 control database 只由两个 opaque generation 派生，路径不编码 SpaceId。升级 target staging 改为复用同一 generation directory、文件名与 payload output 规则，消除升级器和 production 各自计算路径的双事实来源。本子切片尚未让 Engine 打开双 pool，下一子切片负责对象图路由。
+
 Risk: 磁盘不足、移动端短进程和崩溃会留下 staging；每个 phase 先耐久记录再执行可重复动作，promotion 前绝不改 source。
 
 Step 8:

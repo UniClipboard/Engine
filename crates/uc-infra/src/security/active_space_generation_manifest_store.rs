@@ -116,6 +116,32 @@ impl std::fmt::Debug for ActiveRuntimeManifestV3 {
     }
 }
 
+/// 已认证 manifest 的完整版本选择。
+///
+/// 旧的 `load`/`load_sync` 继续只接受 V2，供尚未 clean cutover 的旧流程
+/// 失败关闭；启动 gate 与 V3-aware runtime 只能使用这个显式版本和。
+#[derive(Clone, PartialEq, Eq)]
+pub enum ActiveRuntimeManifest {
+    V2(ActiveSpaceGenerationManifestV2),
+    V3(ActiveRuntimeManifestV3),
+}
+
+impl std::fmt::Debug for ActiveRuntimeManifest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ActiveRuntimeManifest")
+            .field(
+                "format",
+                &match self {
+                    Self::V2(_) => "V2",
+                    Self::V3(_) => "V3",
+                },
+            )
+            .field("identifiers", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// 从 V2 source 提升 V3 manifest 的稳定比较结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum V3ManifestPromotionOutcome {
@@ -180,6 +206,18 @@ impl ActiveSpaceGenerationManifestStore {
         self.decode(&ciphertext).map(Some)
     }
 
+    /// 读取并认证任一受支持的活动 runtime manifest。
+    pub async fn load_runtime(
+        &self,
+    ) -> Result<Option<ActiveRuntimeManifest>, ActiveSpaceGenerationManifestStoreError> {
+        let ciphertext = match tokio::fs::read(&self.path).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
+        };
+        self.decode_runtime(&ciphertext).map(Some)
+    }
+
     pub fn load_sync(
         &self,
     ) -> Result<Option<ActiveSpaceGenerationManifestV2>, ActiveSpaceGenerationManifestStoreError>
@@ -190,6 +228,18 @@ impl ActiveSpaceGenerationManifestStore {
             Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
         };
         self.decode(&ciphertext).map(Some)
+    }
+
+    /// `load_runtime` 的同步启动版本；不会把 V3 降级解释成 V2。
+    pub fn load_runtime_sync(
+        &self,
+    ) -> Result<Option<ActiveRuntimeManifest>, ActiveSpaceGenerationManifestStoreError> {
+        let ciphertext = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
+        };
+        self.decode_runtime(&ciphertext).map(Some)
     }
 
     /// 只读取已提升的 V3 runtime manifest；V2 保持显式不支持。
@@ -213,6 +263,18 @@ impl ActiveSpaceGenerationManifestStore {
         &self,
         ciphertext: &[u8],
     ) -> Result<ActiveSpaceGenerationManifestV2, ActiveSpaceGenerationManifestStoreError> {
+        match self.decode_runtime(ciphertext)? {
+            ActiveRuntimeManifest::V2(manifest) => Ok(manifest),
+            ActiveRuntimeManifest::V3(_) => {
+                Err(ActiveSpaceGenerationManifestStoreError::UnsupportedVersion)
+            }
+        }
+    }
+
+    fn decode_runtime(
+        &self,
+        ciphertext: &[u8],
+    ) -> Result<ActiveRuntimeManifest, ActiveSpaceGenerationManifestStoreError> {
         let plaintext = self.open_manifest(ciphertext)?;
         let format_version = manifest_format_version(&plaintext)?;
         match format_version {
@@ -221,12 +283,11 @@ impl ActiveSpaceGenerationManifestStore {
                     .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
                 manifest
                     .validate()
-                    .then_some(manifest)
+                    .then_some(ActiveRuntimeManifest::V2(manifest))
                     .ok_or(ActiveSpaceGenerationManifestStoreError::Corrupt)
             }
             ACTIVE_RUNTIME_MANIFEST_FORMAT_V3 => {
-                decode_v3_manifest(&plaintext)?;
-                Err(ActiveSpaceGenerationManifestStoreError::UnsupportedVersion)
+                decode_v3_manifest(&plaintext).map(ActiveRuntimeManifest::V3)
             }
             _ => Err(ActiveSpaceGenerationManifestStoreError::Corrupt),
         }
@@ -573,6 +634,10 @@ mod tests {
         .unwrap();
         store.promote(&first).await.unwrap();
         assert_eq!(store.load().await.unwrap(), Some(first));
+        assert!(matches!(
+            store.load_runtime().await.unwrap(),
+            Some(ActiveRuntimeManifest::V2(_))
+        ));
         let bytes = tokio::fs::read(directory.path().join(ACTIVE_GENERATION_MANIFEST_FILE))
             .await
             .unwrap();
@@ -655,6 +720,10 @@ mod tests {
             store.load_sync(),
             Err(ActiveSpaceGenerationManifestStoreError::UnsupportedVersion)
         ));
+        assert_eq!(
+            store.load_runtime_sync().unwrap(),
+            Some(ActiveRuntimeManifest::V3(manifest))
+        );
     }
 
     #[tokio::test]
