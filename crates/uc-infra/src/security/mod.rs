@@ -18,6 +18,7 @@ pub(crate) mod key_epoch_aad;
 mod key_migration_adapter;
 mod profile_content_key_vault;
 mod profile_lifecycle;
+mod profile_payload_adapters;
 mod profile_reset;
 mod profile_storage_upgrade;
 mod secrets;
@@ -59,6 +60,7 @@ pub use profile_content_key_vault::{
     ResolvedProfileContentKey,
 };
 pub use profile_lifecycle::ProfileLifecycleRepository;
+pub use profile_payload_adapters::ProfilePayloadAdapters;
 pub use profile_reset::{ProfileKeyWiper, ProfileStateCleaner};
 pub use profile_storage_upgrade::{
     ProfileStorageUpgrade, ProfileStorageUpgradeError, ProfileStorageUpgradeOutcome,

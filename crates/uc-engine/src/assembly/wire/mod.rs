@@ -65,7 +65,9 @@ use uc_infra::db::repositories::{
 use uc_infra::fs::key_slot_store::JsonKeySlotStore;
 use uc_infra::fs::VaultLayout;
 use uc_infra::network::iroh::IrohIdentityStore;
-use uc_infra::search::{HkdfSearchKeyDerivation, SearchPipeline, SqliteSearchIndex};
+use uc_infra::search::{
+    HkdfSearchKeyDerivation, SearchPipeline, SqliteSearchIndex, V3SearchKeyDerivation,
+};
 use uc_infra::security::{
     space_generation_directory, ActiveSpaceGenerationManifestStore, AdmissionKeyManager,
     Argon2PinHasher, Blake3Hasher, DecryptingClipboardRepresentationRepository,
@@ -86,7 +88,7 @@ use crate::assembly::deps::{
     BackgroundRuntimeDeps, ProfileResetDeps, SharedRuntimeDeps, SyncEngineDeps, WiredDependencies,
     WiringError, WiringResult,
 };
-use crate::assembly::platform::{create_platform_layer, SystemClipboardLayer};
+use crate::assembly::platform::{create_platform_layer, ProfilePayloadMode, SystemClipboardLayer};
 use infra::*;
 
 /// Infrastructure layer implementations
@@ -316,6 +318,7 @@ pub fn wire_dependencies_from_inputs(
         infra.clock.clone(),
         storage_config.clone(),
         system_clipboard,
+        ProfilePayloadMode::legacy(),
     )?;
 
     // Space access — single session/key access entry. See
@@ -388,15 +391,21 @@ pub fn wire_dependencies_from_inputs(
     );
     let relationship_reset: Arc<dyn uc_core::membership::RelationshipStateResetPort> =
         relationship_store;
+    let v3_content_protection = platform.payload_runtime.content().cloned();
 
     // Transfer metadata and event payloads are encrypted with two independent
     // profile-scoped subkeys, so their adapters are assembled only after space
     // access and the active profile are available.
-    let file_transfer_adapter = Arc::new(DieselFileTransferRepository::new(
-        infra.db_executor.clone(),
-        space_access_ports.derive_subkey.clone(),
-        platform.current_profile.clone(),
-    ));
+    let file_transfer_adapter = Arc::new(match &v3_content_protection {
+        Some(protection) => {
+            DieselFileTransferRepository::new_v3(infra.db_executor.clone(), Arc::clone(protection))
+        }
+        None => DieselFileTransferRepository::new(
+            infra.db_executor.clone(),
+            space_access_ports.derive_subkey.clone(),
+            platform.current_profile.clone(),
+        ),
+    });
     let file_transfer_privacy_maintenance = Arc::new(
         uc_infra::file_transfer::SqliteFileTransferPrivacyMaintenance::new(
             infra.db_executor.clone(),
@@ -416,49 +425,75 @@ pub fn wire_dependencies_from_inputs(
         fail_inflight: Arc::clone(&file_transfer_adapter) as _,
         cancel_attempt: Arc::clone(&file_transfer_adapter) as _,
     };
-    let file_transfer_store_arc = Arc::new(
-        uc_infra::file_transfer::SqliteReceiverFileTransferStore::new(
+    let file_transfer_store_arc = Arc::new(match &v3_content_protection {
+        Some(protection) => uc_infra::file_transfer::SqliteReceiverFileTransferStore::new_v3(
+            infra.db_executor.clone(),
+            Arc::clone(protection),
+        ),
+        None => uc_infra::file_transfer::SqliteReceiverFileTransferStore::new(
             infra.db_executor.clone(),
             space_access_ports.derive_subkey.clone(),
             platform.current_profile.clone(),
         ),
-    );
+    });
 
     // File-class entry line-level manifest. Its path columns are sealed with a
     // per-session subkey derived from space access, so it is constructed here
     // (after space access + profile exist) rather than in `create_infra_layer`,
     // reusing the shared executor.
     let entry_file_set_repo: Arc<dyn uc_core::ports::clipboard::EntryFileSetRepositoryPort> =
-        Arc::new(
-            uc_infra::db::repositories::DieselEntryFileSetRepository::new(
+        Arc::new(match &v3_content_protection {
+            Some(protection) => uc_infra::db::repositories::DieselEntryFileSetRepository::new_v3(
+                infra.db_executor.clone(),
+                Arc::clone(protection),
+            ),
+            None => uc_infra::db::repositories::DieselEntryFileSetRepository::new(
                 infra.db_executor.clone(),
                 space_access_ports.derive_subkey.clone(),
                 platform.current_profile.clone(),
             ),
-        );
+        });
 
     let directory_attempt_impl = Arc::new(
         uc_infra::db::repositories::DieselEntryReceiveAttemptRepository::new(
             infra.db_executor.clone(),
         ),
     );
-    let directory_publish_impl = Arc::new(
-        uc_infra::db::repositories::DieselDirectoryPublishLogRepository::new(
+    let directory_publish_impl = Arc::new(match &v3_content_protection {
+        Some(protection) => {
+            uc_infra::db::repositories::DieselDirectoryPublishLogRepository::new_v3(
+                infra.db_executor.clone(),
+                Arc::clone(protection),
+            )
+        }
+        None => uc_infra::db::repositories::DieselDirectoryPublishLogRepository::new(
             infra.db_executor.clone(),
             space_access_ports.derive_subkey.clone(),
             platform.current_profile.clone(),
         ),
-    );
-    let receive_artifact_impl = Arc::new(DieselReceiveArtifactLogRepository::new(
-        infra.db_executor.clone(),
-        space_access_ports.derive_subkey.clone(),
-        platform.current_profile.clone(),
-    ));
-    let inbound_commit_impl = Arc::new(DieselInboundReceiveCommitRepository::new(
-        infra.db_executor.clone(),
-        space_access_ports.derive_subkey.clone(),
-        platform.current_profile.clone(),
-    ));
+    });
+    let receive_artifact_impl = Arc::new(match &v3_content_protection {
+        Some(protection) => DieselReceiveArtifactLogRepository::new_v3(
+            infra.db_executor.clone(),
+            Arc::clone(protection),
+        ),
+        None => DieselReceiveArtifactLogRepository::new(
+            infra.db_executor.clone(),
+            space_access_ports.derive_subkey.clone(),
+            platform.current_profile.clone(),
+        ),
+    });
+    let inbound_commit_impl = Arc::new(match &v3_content_protection {
+        Some(protection) => DieselInboundReceiveCommitRepository::new_v3(
+            infra.db_executor.clone(),
+            Arc::clone(protection),
+        ),
+        None => DieselInboundReceiveCommitRepository::new(
+            infra.db_executor.clone(),
+            space_access_ports.derive_subkey.clone(),
+            platform.current_profile.clone(),
+        ),
+    });
     let mut directory_receive = DirectoryReceivePorts {
         get_attempt: directory_attempt_impl.clone(),
         list_attempts: directory_attempt_impl.clone(),
@@ -481,13 +516,19 @@ pub fn wire_dependencies_from_inputs(
     // subkey, so this register adapter must be assembled after space access and
     // the active profile exist. One concrete adapter is exposed through narrow
     // write, current-read, mobile-read, backfill, and reset ports.
-    let active_clipboard_register_impl = Arc::new(
-        uc_infra::db::repositories::DieselActiveClipboardRegisterRepository::new(
+    let active_clipboard_register_impl = Arc::new(match &v3_content_protection {
+        Some(protection) => {
+            uc_infra::db::repositories::DieselActiveClipboardRegisterRepository::new_v3(
+                infra.db_executor.clone(),
+                Arc::clone(protection),
+            )
+        }
+        None => uc_infra::db::repositories::DieselActiveClipboardRegisterRepository::new(
             infra.db_executor.clone(),
             space_access_ports.derive_subkey.clone(),
             platform.current_profile.clone(),
         ),
-    );
+    });
     const ACTIVE_CLIPBOARD_SSE_CAPACITY: usize = 64;
     let (active_clipboard_sse_source, _) = tokio::sync::broadcast::channel::<
         uc_core::clipboard::ActiveClipboardState,
@@ -537,6 +578,7 @@ pub fn wire_dependencies_from_inputs(
         db_pool_for_search,
         &space_access_ports,
         &platform.current_profile,
+        &platform.payload_runtime,
     );
 
     // Encryption decorators over the clipboard event/representation repos, plus
@@ -549,6 +591,7 @@ pub fn wire_dependencies_from_inputs(
         representation_ports: clipboard_representation_ports,
     } = build_cipher_decorators(
         &platform.session,
+        &platform.blob_cipher,
         &infra.clipboard_event_repo,
         &infra.representation_repo,
     );

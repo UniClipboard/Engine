@@ -1,6 +1,6 @@
 # 033 不可变内容保护上下文与一次性密文升级
 
-状态：实施中；前三个基础切片、第四步的安全会话切片、第五步的持久密码接口收窄与 V3 payload 目标格式、第六步的多保护组搜索目标模块，以及第七步的协调、target staging、store ownership split 与 primary payload conversion 已完成，032 在本规格完成前暂停实施
+状态：实施中；前三个基础切片、第四步的安全会话切片、第五步的持久密码接口收窄与 V3 payload 目标格式、第六步的多保护组搜索目标模块，以及第七步截至 production profile payload adapter family 原子选择已完成；启动 gate、双 generation 运行期、真实 promotion 与 CrossSpace clean cutover 尚未完成，032 在本规格完成前暂停实施
 
 本规格取代规格 023 中“CrossSpace 必须把本机历史重封装到目标 MasterKey”的规则，以及规格 028 中“切换前普通本机内容沿用 CrossSpace rebuild/rewrap”的规则。规格 023/028 的准入提交、门禁、恢复和 MLS 成员语义继续有效。
 
@@ -432,6 +432,11 @@ Change: 第十一子切片完成 file-transfer event log 与 receiver projection
 Change: 第十二子切片只建立 production search schema 的 V12 前置边界：`search_document` 新增 nullable 32-byte opaque `protection_group_ref` 与 profile/group 索引，Diesel row 明确 V11 行和升级 blocked 行可为空；`CURRENT_INDEX_VERSION` 仍为 V11，不提前开放 V12 查询或 writer。升级器复用正式 migration 后存在的列，仅为历史 fixture 缺列时补齐，避免把 schema 迁移复制成第二事实来源。真实 migration、V11 search 21/21 与 derived payload conversion contract 通过；下一子切片必须一次完成 V3 posting/render/query strategy 后才能提升版本。
 
 Change: 第十三子切片修正 search pipeline 丢失保护组的 interface 反模式：`SearchKeyDerivationPort` 返回不可拆分的 `SearchKeyContext`，其中 V3 key 与 32-byte opaque `SearchProtectionRef` 同生共灭；`SearchPipeline` 把同一 ref 附在每个内存 posting 上，V11 context 明确为无 ref。V3 term tag 改为 group-specific tagging key 后再对规范词项 HMAC，使 Application 现有纯 CPU pipeline 与 `V3SearchProtection::query_terms` 使用完全同一算法；测试证明 context key 生成的 tag/ref 与 owner 深模块输出逐字节一致。此 ref 尚未由 SQLite V12 writer 接收，版本仍不提升。
+
+Change: 第十四子切片在唯一 `SqliteSearchIndex` 内引入 V11/V12 protection strategy，不建立平行 repository。V12 writer 把 pipeline 生成的 opaque group ref 与 render seal 的活动保护组再次比对后才落库，render 密码操作在 SQLite closure 外完成；查询按每个规范词项生成跨实际索引保护组的 alternatives，保留 AND 语义。重建沿用同一临时 schema 与原子 cutover，真实 SQLite contract 覆盖多组查询、重建、明文探针和切换竞态。Engine 此时尚未选择 V12 构造。
+
+Change: 第十五子切片新增 `ProfilePayloadAdapters` 与 Engine `ProfilePayloadRuntime`，把 inline 与 UCBL 组成不可拆分的 primary adapter family，并以同一 runtime 选择 active register、file-set、transfer/receive、directory records 和 search 的 legacy/V3 strategy。调用方不能单独选择某个 payload adapter 的格式，避免 V3 manifest 下出现混合 writer；网络 `TransferCipherPort` 仍独立使用活动 Space session，不属于历史 at-rest family。production 当前仍显式选择 legacy，下一子切片必须由启动 manifest/gate 构造 V3 runtime，不能在普通 wire 中猜测格式。
+
 Risk: 磁盘不足、移动端短进程和崩溃会留下 staging；每个 phase 先耐久记录再执行可重复动作，promotion 前绝不改 source。
 
 Step 8:

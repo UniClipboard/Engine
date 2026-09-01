@@ -18,8 +18,49 @@ use uc_infra::blob::{
 use uc_infra::clipboard::ClipboardRepresentationNormalizer;
 use uc_infra::config::ClipboardStorageConfig;
 use uc_infra::device::LocalDeviceIdentity;
-use uc_infra::security::EncryptedBlobStore;
+use uc_infra::search::V3SearchProtection;
+use uc_infra::security::{ContentProtection, ProfileContentKeyVault, ProfilePayloadAdapters};
 use uc_infra::space::InMemorySession;
+
+/// 已由启动 manifest/gate 选择的 profile primary payload 格式。
+///
+/// 当前 production 仍只提交 `Legacy`；V3 manifest 路由完成后必须把同一枚
+/// 选择交给这里，inline 与 UCBL 才会一起 clean cutover。
+pub(crate) struct ProfilePayloadMode(Option<Arc<ProfileContentKeyVault>>);
+
+impl ProfilePayloadMode {
+    pub const fn legacy() -> Self {
+        Self(None)
+    }
+
+    pub fn v3(vault: Arc<ProfileContentKeyVault>) -> Self {
+        Self(Some(vault))
+    }
+}
+
+pub(crate) enum ProfilePayloadRuntime {
+    Legacy,
+    V3 {
+        content: Arc<ContentProtection>,
+        search: Arc<V3SearchProtection>,
+    },
+}
+
+impl ProfilePayloadRuntime {
+    pub fn content(&self) -> Option<&Arc<ContentProtection>> {
+        match self {
+            Self::Legacy => None,
+            Self::V3 { content, .. } => Some(content),
+        }
+    }
+
+    pub fn search(&self) -> Option<&Arc<V3SearchProtection>> {
+        match self {
+            Self::Legacy => None,
+            Self::V3 { search, .. } => Some(search),
+        }
+    }
+}
 
 /// Platform layer implementations
 pub struct PlatformLayer {
@@ -44,6 +85,12 @@ pub struct PlatformLayer {
 
     // Blob store (encrypted) — exposed to use cases as a read-only port.
     pub blob_store: Arc<dyn BlobReaderPort>,
+
+    /// inline persistence 与 UCBL 使用的同一 adapter family 输出。
+    pub blob_cipher: Arc<dyn uc_core::ports::security::BlobCipherPort>,
+
+    /// 所有 profile persistence adapter 共用的唯一版本选择。
+    pub(crate) payload_runtime: ProfilePayloadRuntime,
 
     pub blob_generation_store: Arc<SwitchableFilesystemBlobStore>,
 
@@ -82,6 +129,7 @@ pub fn create_platform_layer(
     clock: Arc<dyn ClockPort>,
     storage_config: Arc<ClipboardStorageConfig>,
     system_clipboard: SystemClipboardLayer,
+    payload_mode: ProfilePayloadMode,
 ) -> WiringResult<PlatformLayer> {
     let device_identity = LocalDeviceIdentity::load_or_create(config_dir.clone()).map_err(|e| {
         WiringError::SettingsInit(format!("Failed to create device identity: {}", e))
@@ -160,13 +208,31 @@ pub fn create_platform_layer(
     // InMemoryEncryptionSessionPort + EncryptionSessionPort trait dyn 间接层。
     let session = Arc::new(InMemorySession::new());
 
-    let encrypted_blob_store =
-        Arc::new(EncryptedBlobStore::new(blob_store.clone(), session.clone()));
+    let (payload_adapters, payload_runtime) = match payload_mode.0 {
+        None => (
+            ProfilePayloadAdapters::legacy(blob_store, Arc::clone(&session)),
+            ProfilePayloadRuntime::Legacy,
+        ),
+        Some(vault) => {
+            let protection = Arc::new(ContentProtection::for_content(
+                Arc::clone(&session),
+                Arc::clone(&vault),
+            ));
+            let search = Arc::new(V3SearchProtection::new(Arc::clone(&session), vault));
+            (
+                ProfilePayloadAdapters::v3(blob_store, Arc::clone(&protection)),
+                ProfilePayloadRuntime::V3 {
+                    content: protection,
+                    search,
+                },
+            )
+        }
+    };
 
     // BlobWriter needs the put-side (BlobStorePort); use cases need only the
     // read-side (BlobReaderPort). Both views point at the same concrete
     // EncryptedBlobStore instance.
-    let encrypted_blob_store_for_writer: Arc<dyn BlobStorePort> = encrypted_blob_store.clone();
+    let encrypted_blob_store_for_writer = payload_adapters.blob_store();
     // One concrete BlobWriter, surfaced as both the write-side port and the
     // content-ingest port (capture needs the content hash; other writers need
     // only the BlobId). Both views point at the same instance.
@@ -177,7 +243,8 @@ pub fn create_platform_layer(
     ));
     let blob_writer: Arc<dyn BlobWriterPort> = blob_writer_concrete.clone();
     let blob_content_ingest: Arc<dyn BlobContentIngestPort> = blob_writer_concrete;
-    let blob_store_reader: Arc<dyn BlobReaderPort> = encrypted_blob_store;
+    let blob_store_reader = payload_adapters.blob_reader();
+    let blob_cipher = payload_adapters.inline_cipher();
 
     let current_profile = current_profile_for(profile_id);
 
@@ -190,6 +257,8 @@ pub fn create_platform_layer(
         blob_writer,
         blob_content_ingest,
         blob_store: blob_store_reader,
+        blob_cipher,
+        payload_runtime,
         blob_generation_store,
         session,
         current_profile,
