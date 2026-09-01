@@ -1321,7 +1321,7 @@ impl SearchIndexPort for SqliteSearchIndex {
             let search_key = self.search_key_derivation.derive_search_key().await?;
             terms
                 .iter()
-                .map(|t| term_tag(&search_key, t))
+                .map(|t| term_tag(search_key.key(), t))
                 .collect::<Result<_, _>>()
                 .map_err(|e| SearchError::Internal(format!("term_tag computation failed: {e}")))?
         } else {
@@ -2003,7 +2003,7 @@ mod tests {
     use tempfile::{tempdir, TempDir};
     use uc_core::ports::security::current_profile::CurrentProfileError;
     use uc_core::search::document::ContentType;
-    use uc_core::search::key::{RenderKey, SearchKey};
+    use uc_core::search::key::{RenderKey, SearchKey, SearchKeyContext};
     use uc_core::search::tag::TagId;
 
     const TEST_PROFILE: &str = "default";
@@ -2029,8 +2029,8 @@ mod tests {
     struct FixedKey;
     #[async_trait]
     impl SearchKeyDerivationPort for FixedKey {
-        async fn derive_search_key(&self) -> Result<SearchKey, SearchError> {
-            Ok(SearchKey([7u8; 32]))
+        async fn derive_search_key(&self) -> Result<SearchKeyContext, SearchError> {
+            Ok(SearchKeyContext::legacy(SearchKey([7u8; 32])))
         }
         async fn derive_render_key(&self) -> Result<RenderKey, SearchError> {
             Ok(RenderKey(TEST_RENDER_KEY))
@@ -2042,7 +2042,7 @@ mod tests {
     struct LockedKey;
     #[async_trait]
     impl SearchKeyDerivationPort for LockedKey {
-        async fn derive_search_key(&self) -> Result<SearchKey, SearchError> {
+        async fn derive_search_key(&self) -> Result<SearchKeyContext, SearchError> {
             Err(SearchError::SessionLocked)
         }
         async fn derive_render_key(&self) -> Result<RenderKey, SearchError> {

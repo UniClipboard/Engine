@@ -430,6 +430,8 @@ Change: 第十子切片把 file-transfer projection metadata 收口为 owner-pri
 Change: 第十一子切片完成 file-transfer event log 与 receiver projection 的同一 protection strategy。读取先取密文 rows、再在数据库外异步 open；append 先在一致 snapshot 上取得下一 sequence 与 projection 状态，在内存完成 event/metadata seal，最后单一 SQLite 事务重新验证 sequence、status 与旧 metadata 密文并同时提交 event 和 projection。CAS 冲突由 owner 有界重取 snapshot，调用方仍只执行一次 `append(event)`；发送侧无 projection 与终止态 no-op 语义保持不变。V3 联合真实数据库 contract 覆盖 event round trip、projection 更新与明文探针；未增加平行 event store 或逐 envelope 双 reader。
 
 Change: 第十二子切片只建立 production search schema 的 V12 前置边界：`search_document` 新增 nullable 32-byte opaque `protection_group_ref` 与 profile/group 索引，Diesel row 明确 V11 行和升级 blocked 行可为空；`CURRENT_INDEX_VERSION` 仍为 V11，不提前开放 V12 查询或 writer。升级器复用正式 migration 后存在的列，仅为历史 fixture 缺列时补齐，避免把 schema 迁移复制成第二事实来源。真实 migration、V11 search 21/21 与 derived payload conversion contract 通过；下一子切片必须一次完成 V3 posting/render/query strategy 后才能提升版本。
+
+Change: 第十三子切片修正 search pipeline 丢失保护组的 interface 反模式：`SearchKeyDerivationPort` 返回不可拆分的 `SearchKeyContext`，其中 V3 key 与 32-byte opaque `SearchProtectionRef` 同生共灭；`SearchPipeline` 把同一 ref 附在每个内存 posting 上，V11 context 明确为无 ref。V3 term tag 改为 group-specific tagging key 后再对规范词项 HMAC，使 Application 现有纯 CPU pipeline 与 `V3SearchProtection::query_terms` 使用完全同一算法；测试证明 context key 生成的 tag/ref 与 owner 深模块输出逐字节一致。此 ref 尚未由 SQLite V12 writer 接收，版本仍不提升。
 Risk: 磁盘不足、移动端短进程和崩溃会留下 staging；每个 phase 先耐久记录再执行可重复动作，promotion 前绝不改 source。
 
 Step 8:

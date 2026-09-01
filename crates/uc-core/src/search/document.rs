@@ -5,6 +5,7 @@
 
 use crate::ids::{EntryId, EventId};
 use crate::search::tag::TagId;
+use crate::search::SearchProtectionRef;
 use serde::{Deserialize, Serialize};
 
 /// Physical content-type classification used for search filtering — the
@@ -94,6 +95,8 @@ pub struct SearchPosting {
     pub field_mask: u8,
     /// Number of times this term appears in the document.
     pub term_freq: u32,
+    /// 与生成 term tag 的 key 不可拆分的保护组引用；V11 为 `None`。
+    pub protection_ref: Option<SearchProtectionRef>,
 }
 
 /// Read-only projection of the `search_index_meta` row.

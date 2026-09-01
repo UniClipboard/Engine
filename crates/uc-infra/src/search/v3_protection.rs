@@ -7,6 +7,7 @@ use uc_core::crypto::aad;
 use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
 use uc_core::ids::EntryId;
 use uc_core::membership::ProtectionGroupId;
+use uc_core::search::{SearchKey, SearchKeyContext, SearchProtectionRef};
 
 use super::render_payload::{RenderFields, RENDER_PAYLOAD_V};
 use crate::security::{ContentProtection, ProfileContentKeyVault};
@@ -194,6 +195,46 @@ impl V3SearchProtection {
         })
     }
 
+    pub async fn active_key_context(&self) -> Result<SearchKeyContext, V3SearchProtectionError> {
+        let active = self
+            .session
+            .current_content_protection_key()
+            .map_err(|source| V3SearchProtectionError::NotActive {
+                source: anyhow::Error::new(source)
+                    .context("resolve active search protection group"),
+            })?;
+        let catalog = self.vault.search_catalog().await.map_err(|source| {
+            V3SearchProtectionError::CatalogUnavailable {
+                source: anyhow::Error::new(source).context("load profile search catalog"),
+            }
+        })?;
+        if !catalog
+            .protection_groups()
+            .contains(active.protection_group_id())
+        {
+            return Err(V3SearchProtectionError::CatalogUnavailable {
+                source: anyhow::anyhow!(
+                    "active protection group is absent from the search catalog"
+                ),
+            });
+        }
+        let group_ref = derive_group_ref(catalog.root_key(), active.protection_group_id())?;
+        let tagging_key = derive_tagging_key(catalog.root_key(), active.protection_group_id())?;
+        let key = SearchKey::from_bytes(&tagging_key).map_err(|source| {
+            V3SearchProtectionError::Cryptography {
+                source: anyhow::Error::new(source).context("construct active search key"),
+            }
+        })?;
+        let protection_ref =
+            SearchProtectionRef::from_bytes(group_ref.as_bytes()).map_err(|source| {
+                V3SearchProtectionError::Cryptography {
+                    source: anyhow::Error::new(source)
+                        .context("construct search protection reference"),
+                }
+            })?;
+        Ok(SearchKeyContext::protected(key, protection_ref))
+    }
+
     pub async fn query_terms(
         &self,
         indexed_group_refs: &[SearchGroupRef],
@@ -324,11 +365,24 @@ fn derive_term_tag(
     protection_group_id: &ProtectionGroupId,
     normalized_term: &str,
 ) -> Result<Vec<u8>, V3SearchProtectionError> {
+    let tagging_key = derive_tagging_key(root_key, protection_group_id)?;
+    let mut mac = HmacSha256::new_from_slice(&tagging_key).map_err(|source| {
+        V3SearchProtectionError::Cryptography {
+            source: anyhow::Error::new(source).context("initialize group search HMAC"),
+        }
+    })?;
+    mac.update(normalized_term.as_bytes());
+    Ok(mac.finalize().into_bytes().to_vec())
+}
+
+fn derive_tagging_key(
+    root_key: &crate::security::MasterKey,
+    protection_group_id: &ProtectionGroupId,
+) -> Result<[u8; 32], V3SearchProtectionError> {
     let mut mac = new_hmac(root_key)?;
     append_field(&mut mac, TERM_TAG_DOMAIN)?;
     append_field(&mut mac, protection_group_id.as_str().as_bytes())?;
-    append_field(&mut mac, normalized_term.as_bytes())?;
-    Ok(mac.finalize().into_bytes().to_vec())
+    Ok(mac.finalize().into_bytes().into())
 }
 
 fn new_hmac(root_key: &crate::security::MasterKey) -> Result<HmacSha256, V3SearchProtectionError> {

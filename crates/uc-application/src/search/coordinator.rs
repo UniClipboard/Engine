@@ -979,7 +979,7 @@ mod tests {
     };
     use uc_core::ids::{DeviceId, EntryId, EventId, FormatId, RepresentationId};
     use uc_core::search::document::{ContentType, SearchDocument, SearchIndexMeta, SearchPosting};
-    use uc_core::search::key::SearchKey;
+    use uc_core::search::key::{SearchKey, SearchKeyContext};
     use uc_core::search::query::SearchQuery;
     use uc_core::search::tag::TagId;
     use uc_core::ClipboardEntryContentCategory;
@@ -1328,8 +1328,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SearchKeyDerivationPort for FakeKeyDerivation {
-        async fn derive_search_key(&self) -> Result<SearchKey, SearchError> {
-            Ok(SearchKey([0u8; 32]))
+        async fn derive_search_key(&self) -> Result<SearchKeyContext, SearchError> {
+            Ok(SearchKeyContext::legacy(SearchKey([0u8; 32])))
         }
         async fn derive_render_key(&self) -> Result<uc_core::search::RenderKey, SearchError> {
             Ok(uc_core::search::RenderKey([0u8; 32]))
@@ -1374,7 +1374,7 @@ mod tests {
         fn build_postings(
             &self,
             _input: &SearchPipelineInput,
-            _search_key: &SearchKey,
+            _search_key: &SearchKeyContext,
         ) -> anyhow::Result<Vec<SearchPosting>> {
             unreachable!("no entries projected in this test")
         }
@@ -1382,7 +1382,7 @@ mod tests {
         fn build(
             &self,
             _input: &SearchPipelineInput,
-            _search_key: &SearchKey,
+            _search_key: &SearchKeyContext,
         ) -> anyhow::Result<(SearchDocument, Vec<SearchPosting>)> {
             unreachable!("no entries projected in this test")
         }

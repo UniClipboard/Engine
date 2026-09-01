@@ -13,7 +13,7 @@ use unicode_normalization::UnicodeNormalization;
 
 use uc_core::ports::search::search_pipeline::SearchPipelinePort;
 use uc_core::search::document::{SearchDocument, SearchPosting};
-use uc_core::search::key::SearchKey;
+use uc_core::search::key::SearchKeyContext;
 
 use crate::search::constants::{
     CURRENT_INDEX_VERSION, SEARCH_FIELD_BODY, SEARCH_FIELD_FILE_NAME, SEARCH_FIELD_FILE_PATH,
@@ -93,7 +93,7 @@ impl SearchPipelinePort for SearchPipeline {
     fn build_postings(
         &self,
         input: &SearchPipelineInput,
-        search_key: &SearchKey,
+        search_key: &SearchKeyContext,
     ) -> Result<Vec<SearchPosting>> {
         let extracted = self.extractor.extract(input);
         let entry_id = input.entry_id.clone();
@@ -121,7 +121,7 @@ impl SearchPipelinePort for SearchPipeline {
                 let raw_token_counts =
                     count_raw_tokens(&self.tokenizer.tokenize_segment(segment), segment);
                 for (token, freq) in raw_token_counts {
-                    let tag = term_tag(search_key, &token)?;
+                    let tag = term_tag(search_key.key(), &token)?;
                     let entry = aggregated.entry(tag).or_insert((0u8, 0u32));
                     entry.0 |= *field_bit;
                     entry.1 += freq;
@@ -137,6 +137,7 @@ impl SearchPipelinePort for SearchPipeline {
                 entry_id: entry_id.clone(),
                 field_mask,
                 term_freq,
+                protection_ref: search_key.protection_ref().cloned(),
             })
             .collect();
 
@@ -154,7 +155,7 @@ impl SearchPipelinePort for SearchPipeline {
     fn build(
         &self,
         input: &SearchPipelineInput,
-        search_key: &SearchKey,
+        search_key: &SearchKeyContext,
     ) -> Result<(SearchDocument, Vec<SearchPosting>)> {
         let document = self.build_document(input);
         let postings = self.build_postings(input, search_key)?;
