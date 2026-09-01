@@ -1,0 +1,4 @@
+interface:
+  display_name: "Uni 可观测性审查"
+  short_description: "独立审查日志、tracing、指标、关联上下文与诊断缺口"
+  default_prompt: "使用 $uni-observability-audit 独立审查当前仓库的可观测性，并按共享 finding contract 输出报告。"

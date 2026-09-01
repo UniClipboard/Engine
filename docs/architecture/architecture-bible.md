@@ -791,7 +791,9 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 | 日期 | 主题 | 长期结论 |
 | --- | --- | --- |
+| 2026-09-02 | 定时维护审查 Action | GitHub Actions 每周并行启动五个互不调用的全仓审查 session，再由独立 session 汇总标准 JSON artifact；开发者通过 Actions Summary 阅读去重报告，并可下载各 lane 与汇总产物追溯证据。审查只报告问题，不自动修复、建 Issue 或改变运行时架构。 |
 | 2026-09-01 | 文档记录系统重组 | 根与局部 `AGENTS.md` 收敛为短维护地图；长期设计、ADR、产品规格、active/completed 执行计划、生成资料和参考资料分别进入结构化 `docs/` 目录。根 `ARCHITECTURE.md` 成为当前架构入口，架构圣经继续保存详细事实；旧 `docs/adr`、`docs/specs`、`docs/prd`、`docs/diagrams` 和 `docs/migration` 路径不再作为并行入口。 |
+| 2026-09-01 | 并行维护审查 Skills | 仓库维护审查拆为五个互不调用的只读专项 skill，由独立 session 并行运行；第六个独立 skill 只汇总标准化 artifact。该机制以现有架构、安全、可靠性和设计文档为规则来源，不改变运行时架构。 |
 | 2026-08-29 | 文档压缩 | 圣经只保留当前架构事实、稳定边界和维护规则；移除逐切片流水账与已经失效的实现细节。 |
 | 2026-08-29 | Space 成员关系与准入 | Application 是成员关系、设备信任和单一 Space 准入完整流程的唯一负责人；Infra 提供加密存储、密码能力和 Iroh 认证传输，Engine 只组装并控制生命周期。 |
 | 2026-08-29 | 设备信任观察适配 | 增加只读 Infra 适配器，为 Application 已验证的设备范围补充成员名称和可达性；依赖失败保留 source chain，不改变成员资格来源。 |

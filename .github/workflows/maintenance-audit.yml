@@ -1,0 +1,187 @@
+name: Maintenance Audit
+
+on:
+  schedule:
+    # 每周一 09:00（Asia/Shanghai）。GitHub Actions cron 使用 UTC。
+    - cron: "0 1 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maintenance-audit-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Audit / ${{ matrix.lane }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: module_depth
+            skill: uni-module-depth-audit
+          - lane: failure_recovery
+            skill: uni-failure-recovery-audit
+          - lane: runtime_resilience
+            skill: uni-runtime-resilience-audit
+          - lane: observability
+            skill: uni-observability-audit
+          - lane: security_contract
+            skill: uni-security-contract-audit
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare artifact directory
+        run: mkdir -p audit-artifacts
+
+      - name: Run ${{ matrix.skill }}
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          sandbox: workspace-write
+          prompt: |
+            运行仓库 skill `${{ matrix.skill }}`，并且本 session 只运行这一个 skill。
+
+            这是定时全仓维护审查。请严格遵循 skill 及其共享 finding contract：
+            - scope.mode 必须是 `full`；
+            - run_id 必须是 `${{ github.run_id }}-${{ github.run_attempt }}`；
+            - head_ref 必须是 `${{ github.sha }}`，base_ref 为 null；
+            - 将 UTF-8 JSON artifact 写入 `audit-artifacts/${{ matrix.lane }}.json`；
+            - lane 必须是 `${{ matrix.lane }}`；
+            - 如实记录 completed、partial 或 blocked，以及所有 skipped 检查；
+            - 不实现修复，不修改其他仓库文件，不创建 Issue 或 PR，不访问远端业务系统；
+            - 最终回复只简短确认 artifact 路径和执行状态，不在回复中复制完整报告。
+
+      - name: Validate lane artifact
+        env:
+          ARTIFACT: audit-artifacts/${{ matrix.lane }}.json
+          EXPECTED_LANE: ${{ matrix.lane }}
+          EXPECTED_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+          EXPECTED_HEAD_REF: ${{ github.sha }}
+        run: |
+          jq -e \
+            --arg lane "$EXPECTED_LANE" \
+            --arg run_id "$EXPECTED_RUN_ID" \
+            --arg head_ref "$EXPECTED_HEAD_REF" \
+            '
+              .schema_version == 1 and
+              .run_id == $run_id and
+              .lane == $lane and
+              (.status == "completed" or .status == "partial" or .status == "blocked") and
+              .scope.mode == "full" and
+              (.scope | has("base_ref")) and
+              .scope.base_ref == null and
+              .scope.head_ref == $head_ref and
+              (.scope.paths_reviewed | type == "array") and
+              (.scope.excluded | type == "array") and
+              (.sources_of_truth | type == "array") and
+              (.checks | type == "array") and
+              (.findings | type == "array") and
+              (.handoff | type == "array") and
+              .redaction.reviewed == true
+            ' "$ARTIFACT" > /dev/null
+
+      - name: Require complete lane coverage
+        env:
+          ARTIFACT: audit-artifacts/${{ matrix.lane }}.json
+        run: jq -e '.status == "completed"' "$ARTIFACT" > /dev/null
+
+      - name: Upload lane artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: uni-maintenance-audit-lane-${{ matrix.lane }}
+          path: audit-artifacts/${{ matrix.lane }}.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  report:
+    name: Aggregate developer report
+    if: ${{ always() }}
+    needs: audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prepare report directories
+        run: mkdir -p audit-input audit-output
+
+      - name: Download lane artifacts
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: uni-maintenance-audit-lane-*
+          path: audit-input
+          merge-multiple: true
+
+      - name: Run uni-audit-report
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          sandbox: workspace-write
+          prompt: |
+            运行仓库 skill `uni-audit-report`，并且本 session 只运行这一个 skill。
+
+            只汇总 `audit-input/` 中已有的专项 JSON artifacts，不读取源码重新审查，
+            不补做缺失 lane，不执行 cargo、测试或架构检查。参数如下：
+            - run_id：`${{ github.run_id }}-${{ github.run_attempt }}`；
+            - 预期 lane：`module_depth`、`failure_recovery`、`runtime_resilience`、`observability`、`security_contract`；
+            - 机器可读输出：`audit-output/maintenance-audit.json`；
+            - 开发者 Markdown 输出：`audit-output/maintenance-audit.md`；
+            - 专项 matrix job 结果：`${{ needs.audit.result }}`；
+            - artifact 下载步骤结果：`${{ steps.download.outcome }}`。
+
+            报告必须优先展示覆盖状态与最高风险，区分“lane 执行状态”和“finding 风险等级”，
+            保留原始 lane、finding id、证据、skipped 项与冲突结论的可追溯性。缺失或无效
+            artifact 必须标为 coverage 问题，不得当作通过。除上述两个输出文件外不要修改仓库。
+
+      - name: Validate aggregate outputs
+        run: |
+          test -s audit-output/maintenance-audit.md
+          jq -e '.' audit-output/maintenance-audit.json > /dev/null
+
+      - name: Publish developer summary
+        if: ${{ always() }}
+        env:
+          LANE_JOB_RESULT: ${{ needs.audit.result }}
+          DOWNLOAD_OUTCOME: ${{ steps.download.outcome }}
+        run: |
+          {
+            echo "# Uni 定时维护审查"
+            echo
+            echo "- 专项 jobs：\`$LANE_JOB_RESULT\`"
+            echo "- Artifact 下载：\`$DOWNLOAD_OUTCOME\`"
+            echo "- Run ID：\`${{ github.run_id }}-${{ github.run_attempt }}\`"
+            echo "- Commit：\`${{ github.sha }}\`"
+            echo
+            if [[ -s audit-output/maintenance-audit.md ]]; then
+              cat audit-output/maintenance-audit.md
+            else
+              echo "> 汇总报告未生成。请查看本 job 与各专项 job 日志，并下载仍然可用的原始 artifacts。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload aggregate report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: uni-maintenance-audit-report
+          path: audit-output/
+          if-no-files-found: warn
+          retention-days: 90

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Uni 运行期韧性审查"
+  short_description: "独立审查任务生命周期、取消、背压、关闭与并发竞态"
+  default_prompt: "使用 $uni-runtime-resilience-audit 独立审查当前仓库的运行期韧性，并按共享 finding contract 输出报告。"

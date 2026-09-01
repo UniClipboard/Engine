@@ -1,0 +1,4 @@
+interface:
+  display_name: "Uni 失败恢复审查"
+  short_description: "独立审查错误 source chain、转换语义、重试与恢复责任"
+  default_prompt: "使用 $uni-failure-recovery-audit 独立审查当前仓库的失败与恢复语义，并按共享 finding contract 输出报告。"

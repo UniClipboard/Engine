@@ -1,0 +1,4 @@
+interface:
+  display_name: "Uni 审查结果汇总"
+  short_description: "汇总并行审查 artifacts，校验覆盖并去重生成统一报告"
+  default_prompt: "使用 $uni-audit-report 汇总调用方提供的独立审查 artifacts，并输出统一覆盖与 finding 报告。"
