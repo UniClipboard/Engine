@@ -103,9 +103,9 @@ impl ProfileStorageUpgrade {
         );
         let derived_payloads = DerivedPayloadConverter::new(profile_id, source_session, vault);
         Self {
-            persistence: UpgradePersistence::new(profile_root.clone(), keys),
+            persistence: UpgradePersistence::new(profile_root.clone(), Arc::clone(&keys)),
             manifests,
-            target: TargetGenerationStager::new(profile_root, source_pool),
+            target: TargetGenerationStager::new(profile_root, source_pool, keys),
             primary_payloads,
             derived_payloads,
             validator: RuntimeGenerationValidator::new(),
@@ -198,7 +198,7 @@ impl ProfileStorageUpgrade {
                 self.persistence.save_journal(&journal).await?;
             }
             UpgradePhaseV1::TargetStaged => {
-                let separated = self.target.separate(&journal)?;
+                let separated = self.target.separate(&journal, source.as_ref())?;
                 journal.mark_stores_separated(
                     separated.profile_database_digest,
                     separated.control_database_digest,

@@ -8,7 +8,9 @@ mod repository;
 mod security;
 mod sponsor;
 
-pub(crate) use credentials::{install_prepared_registration, prepare_registration};
+pub(crate) use credentials::{
+    install_prepared_registration, prepare_registration, upgrade_registration_to_control_generation,
+};
 pub use credentials::{SpaceAdmissionCredentialStoreError, SqliteSpaceAdmissionCredentials};
 pub(crate) use full_invitation::{
     decode_full_invitation, decode_invitation_entry, encode_full_invitation, DecodedFullInvitation,

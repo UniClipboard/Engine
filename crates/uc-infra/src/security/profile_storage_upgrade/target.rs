@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use diesel::connection::SimpleConnection as _;
 use diesel::{Connection as _, RunQueryDsl as _};
@@ -9,6 +10,9 @@ use crate::security::profile_runtime_layout::{
     control_generation_directory, profile_generation_directory, CONTROL_DATABASE_FILE,
     PAYLOAD_OUTPUT_DIRECTORY, PROFILE_DATABASE_FILE,
 };
+use crate::security::{AdmissionKeyError, AdmissionKeyManager};
+use crate::space::upgrade_registration_to_control_generation;
+use uc_core::membership::ActiveSpaceGenerationManifestV2;
 
 use super::journal::UpgradeJournalV1;
 use super::ProfileStorageUpgradeError;
@@ -19,6 +23,7 @@ pub(super) const PRIMARY_OUTPUT_DIRECTORY: &str = "v3-primary";
 pub(super) struct TargetGenerationStager {
     root: PathBuf,
     source_pool: DbPool,
+    keys: Arc<AdmissionKeyManager>,
 }
 
 pub(super) struct StagedTarget {
@@ -81,8 +86,12 @@ const PROFILE_COORDINATION_TABLES: &[&str] = &[
 const TECHNICAL_TABLES: &[&str] = &["__diesel_schema_migrations", "uc_database_revision"];
 
 impl TargetGenerationStager {
-    pub(super) fn new(root: PathBuf, source_pool: DbPool) -> Self {
-        Self { root, source_pool }
+    pub(super) fn new(root: PathBuf, source_pool: DbPool, keys: Arc<AdmissionKeyManager>) -> Self {
+        Self {
+            root,
+            source_pool,
+            keys,
+        }
     }
 
     pub(super) fn stage(
@@ -133,7 +142,11 @@ impl TargetGenerationStager {
     pub(super) fn separate(
         &self,
         journal: &UpgradeJournalV1,
+        source: Option<&ActiveSpaceGenerationManifestV2>,
     ) -> Result<SeparatedStores, ProfileStorageUpgradeError> {
+        if !journal.matches_source(source) {
+            return Err(ProfileStorageUpgradeError::SourceChanged);
+        }
         self.verify(journal)?;
         let paths = self.paths(journal);
         separate_database(&paths.profile_database, SPACE_CONTROL_TABLES)?;
@@ -142,6 +155,16 @@ impl TargetGenerationStager {
         control_excluded.extend_from_slice(PROFILE_DATA_TABLES);
         control_excluded.extend_from_slice(PROFILE_COORDINATION_TABLES);
         separate_database(&paths.control_database, &control_excluded)?;
+        match source {
+            Some(source) => upgrade_registration_to_control_generation(
+                &paths.control_database,
+                &self.keys,
+                source,
+                *journal.target_space_control_generation(),
+            )
+            .map_err(map_credential_upgrade_error)?,
+            None => ensure_tables_empty(&paths.control_database, &["space_admission_credentials"])?,
+        }
         let profile_database_digest = file_digest(&paths.profile_database)?;
         let control_database_digest = file_digest(&paths.control_database)?;
         let source_revision = journal.source_database_revision().ok_or_else(|| {
@@ -406,6 +429,24 @@ pub(super) fn file_digest(path: &Path) -> Result<[u8; 32], ProfileStorageUpgrade
 fn database_error(source: diesel::result::Error) -> ProfileStorageUpgradeError {
     ProfileStorageUpgradeError::Storage {
         source: anyhow::Error::new(source).context("separate profile upgrade target stores"),
+    }
+}
+
+fn map_credential_upgrade_error(source: anyhow::Error) -> ProfileStorageUpgradeError {
+    if source.downcast_ref::<AdmissionKeyError>().is_some() {
+        ProfileStorageUpgradeError::Security {
+            source: source.context("convert admission credential control-generation scope"),
+        }
+    } else if source.downcast_ref::<diesel::result::Error>().is_some()
+        || source.downcast_ref::<diesel::ConnectionError>().is_some()
+    {
+        ProfileStorageUpgradeError::Storage {
+            source: source.context("convert admission credential control-generation scope"),
+        }
+    } else {
+        ProfileStorageUpgradeError::Corrupt {
+            source: source.context("validate admission credential control-generation scope"),
+        }
     }
 }
 

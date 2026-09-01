@@ -240,7 +240,7 @@ Core 保存完整 admission aggregate 和状态转换规则。Application 内部
 
 - `SqliteMembershipLedger` 是成员历史、关系、待执行影响和 revision 的唯一提交边界。
 - admission repository 保存完整可恢复协议状态，使用版本凭证防止旧读取覆盖新状态。
-- `SqliteSpaceAdmissionCredentials` 保存绑定当前 Space 存储作用域的 OPAQUE setup 与 registration：当前版本首次建 Space 必须在初始化提交阶段整体提升为 active generation，并绑定完整 generation；legacy 作用域只用于识别升级前已经完成设置的旧资料，不能由新初始化继续产生。
+- `SqliteSpaceAdmissionCredentials` 保存绑定当前 Space 存储作用域的 OPAQUE setup 与 registration：V2 精确绑定 keyslot/database/security generation；V3 精确绑定 keyslot 与完整 `space_control_generation`，不依赖 profile data generation。一次性 profile upgrade 只调用 credential owner 的完整转换操作，在 control target 内验证并重新封装旧 registration 后才允许记录 target digest；普通 V3 运行路径不读取 V2 scope。
 - 口令、私密 MLS 状态、continuation credential、文件路径和协议载荷不得进入日志或明文字段。
 
 生产网络只使用 `/uniclipboard/space-admission/1`。完整邀请携带 Sponsor admission route 和随机邀请身份；短码只用于一次性解析同一完整邀请。Iroh handler 完成认证后，每条业务消息只调用一次 Application endpoint。
@@ -909,6 +909,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-09-02 | 033 runtime generation layout 第二十五切片 | Active manifest store 新增显式 V2/V3 版本和，旧 V2 loader 对 V3 仍失败关闭；`ProfileRuntimeLayout` 成为 profile SQLite、blob root 与 control SQLite 的唯一 generation 路径事实来源，路径只含 opaque generation token、不编码 SpaceId。升级 target staging 复用同一模块，避免 promotion 后 production 与升级器解释出不同目录；Engine 双 pool 尚未接入。 |
 | 2026-09-02 | 033 profile/control 双 pool 第二十六切片 | Engine 把已认证 manifest 一次解析为 profile/control SQLite、blob root 与 payload family；V3 对象图让 history/search/transfer 只持有 profile executor，让 membership/relationship/credential/Space security/LAN device 只持有 control executor，V2 仍共享原 pool。当前 Space identity 支持 V3 manifest；旧全库 transition 在 V3 下统一失败关闭，等待完整 `SpaceControlGeneration` owner。 |
 | 2026-09-02 | 033 upgrade promotion 第二十七切片 | `ProfileStorageUpgrade` 在完整 V3 双库验证后执行 V2 compare-and-promote，并耐久推进 `Promoted`/`CleanupPending`。manifest 已替换但 journal 尚未保存的崩溃窗口通过 target generation/keyslot 反向匹配、重新验证和幂等补写恢复；不同 target 或提前 V3 失败关闭。空 profile 不伪造 Space manifest；Engine gate 与旧 source 清理待后续接入。 |
+| 2026-09-02 | 033 control credential scope 第二十八切片 | OPAQUE/admission credential owner 显式区分 V2 完整 generation scope 与 V3 Space control-generation scope；正常 repository 从已认证 runtime manifest 原子选择格式，一次性 profile upgrade 在 control target 内通过 owner 完整转换并回读既有 registration 后才绑定数据库 digest。promotion 后 Sponsor 凭据直接由 control store 读取，升级器不复制 credential schema、purpose 或 OPAQUE codec。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |

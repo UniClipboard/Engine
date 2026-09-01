@@ -4,15 +4,23 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use diesel::RunQueryDsl;
+use uc_application::deps::{
+    LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipLedgerError,
+};
 use uc_core::ids::ProfileId;
-use uc_core::membership::ActiveSpaceGenerationManifestV2;
+use uc_core::membership::{ActiveSpaceGenerationManifestV2, InvitationId, SpaceAdmissionId};
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
+use uc_infra::db::executor::DieselSqliteExecutor;
 use uc_infra::db::pool::init_db_pool;
+use uc_infra::network::iroh::SpaceAdmissionChannelCredentialPort;
 use uc_infra::security::{
     ActiveSpaceGenerationManifestStore, AdmissionKeyManager, ProfileContentKeyVault,
-    ProfileStorageUpgrade, ProfileStorageUpgradeError, ProfileStorageUpgradeOutcome,
+    ProfileRuntimeLayout, ProfileStorageUpgrade, ProfileStorageUpgradeError,
+    ProfileStorageUpgradeOutcome,
 };
-use uc_infra::space::InMemorySession;
+use uc_infra::space::{
+    InMemorySession, SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState,
+};
 
 #[derive(Default)]
 struct MemorySecureStorage(Mutex<BTreeMap<String, Vec<u8>>>);
@@ -33,6 +41,15 @@ impl SecureStoragePort for MemorySecureStorage {
     fn delete(&self, key: &str) -> Result<(), SecureStorageError> {
         self.0.lock().unwrap().remove(key);
         Ok(())
+    }
+}
+
+struct EmptyLedger;
+
+#[async_trait::async_trait]
+impl LoadMembershipLedgerPort for EmptyLedger {
+    async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
+        Ok(LoadedMembershipLedger::no_current_space())
     }
 }
 
@@ -177,6 +194,91 @@ async fn v2_upgrade_coordination_is_durable_idempotent_and_encrypted() {
         ProfileStorageUpgradeOutcome::UpToDate
     );
     assert_eq!(regular_files(&vault), cleanup_pending_files);
+}
+
+#[tokio::test]
+async fn v2_admission_registration_is_readable_from_the_promoted_control_store() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("profile");
+    let vault = root.join("vault");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_database = root.join("source.sqlite");
+    let source_pool = init_db_pool(source_database.to_str().unwrap()).unwrap();
+    let secure_storage = Arc::new(MemorySecureStorage::default());
+    let keys = Arc::new(AdmissionKeyManager::new(secure_storage.clone(), [0x25; 16]));
+    let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+        vault,
+        Arc::clone(&keys),
+    ));
+    let source = ActiveSpaceGenerationManifestV2::new(
+        "source-space".to_owned(),
+        [0x26; 16],
+        [0x27; 16],
+        [0x28; 16],
+    )
+    .unwrap();
+    manifests.promote(&source).await.unwrap();
+
+    let source_executor = Arc::new(DieselSqliteExecutor::new(source_pool.clone()));
+    let source_admissions = Arc::new(SqliteSpaceAdmissionState::new(
+        Arc::clone(&source_executor),
+        Arc::clone(&keys),
+        Arc::clone(&manifests),
+        Arc::new(EmptyLedger),
+    ));
+    let source_credentials = SqliteSpaceAdmissionCredentials::new(
+        source_executor,
+        Arc::clone(&keys),
+        Arc::clone(&manifests),
+        Arc::new(EmptyLedger),
+        source_admissions,
+    );
+    source_credentials
+        .ensure_registration(&uc_core::crypto::domain::Passphrase::new(
+            "upgrade passphrase",
+        ))
+        .await
+        .unwrap();
+
+    let upgrade = new_upgrade_from_pool(
+        &root,
+        source_pool,
+        secure_storage,
+        Arc::clone(&keys),
+        Arc::clone(&manifests),
+    );
+    loop {
+        match upgrade.ensure_v3().await.unwrap() {
+            ProfileStorageUpgradeOutcome::Pending => {}
+            ProfileStorageUpgradeOutcome::Upgraded => break,
+            outcome => panic!("unexpected upgrade outcome: {outcome:?}"),
+        }
+    }
+    let active = manifests.load_v3_sync().unwrap().unwrap();
+    let layout = ProfileRuntimeLayout::v3(&root, &active);
+    let control_pool = init_db_pool(layout.control_database().to_str().unwrap()).unwrap();
+    let control_executor = Arc::new(DieselSqliteExecutor::new(control_pool));
+    let control_admissions = Arc::new(SqliteSpaceAdmissionState::new(
+        Arc::clone(&control_executor),
+        Arc::clone(&keys),
+        Arc::clone(&manifests),
+        Arc::new(EmptyLedger),
+    ));
+    let control_credentials = SqliteSpaceAdmissionCredentials::new(
+        control_executor,
+        keys,
+        manifests,
+        Arc::new(EmptyLedger),
+        control_admissions,
+    );
+
+    control_credentials
+        .resolve_initial(
+            InvitationId::from_bytes([0x29; 32]).unwrap(),
+            SpaceAdmissionId::from_bytes([0x2a; 32]).unwrap(),
+        )
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

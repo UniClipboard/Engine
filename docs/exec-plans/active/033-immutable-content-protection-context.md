@@ -1,6 +1,6 @@
 # 033 不可变内容保护上下文与一次性密文升级
 
-状态：实施中；前三个基础切片、第四步的安全会话切片、第五步的持久密码接口收窄与 V3 payload 目标格式、第六步的多保护组搜索目标模块，以及第七步截至 production profile payload adapter family 原子选择已完成；启动 gate、双 generation 运行期、真实 promotion 与 CrossSpace clean cutover 尚未完成，032 在本规格完成前暂停实施
+状态：实施中；V3 内容保护、profile vault、完整 payload/search 转换、双 generation production repository 路由、真实 manifest promotion 与 control-generation credential scope 已完成；启动/解锁 gate、旧 source 清理、`SpaceControlGeneration` 与 CrossSpace clean cutover 尚未完成，032 在本规格完成前暂停实施
 
 本规格取代规格 023 中“CrossSpace 必须把本机历史重封装到目标 MasterKey”的规则，以及规格 028 中“切换前普通本机内容沿用 CrossSpace rebuild/rewrap”的规则。规格 023/028 的准入提交、门禁、恢复和 MLS 成员语义继续有效。
 
@@ -439,9 +439,11 @@ Change: 第十五子切片新增 `ProfilePayloadAdapters` 与 Engine `ProfilePay
 
 Change: 第十六子切片新增显式 `ActiveRuntimeManifest` 版本和及 `ProfileRuntimeLayout` 路径深模块。旧 V2 loader 面对 V3 继续返回 `UnsupportedVersion`，只有 V3-aware 启动入口可取得已认证 V2/V3 选择；profile database、blob root 与 control database 只由两个 opaque generation 派生，路径不编码 SpaceId。升级 target staging 改为复用同一 generation directory、文件名与 payload output 规则，消除升级器和 production 各自计算路径的双事实来源。本子切片尚未让 Engine 打开双 pool，下一子切片负责对象图路由。
 
-Change: 第十七子切片由 Engine `RuntimeStorageSelection` 把一个已认证 manifest 原子解析为 profile database、control database、blob root 与 payload format。V2/无 manifest 继续让两个 executor 共享原 pool；V3 打开独立双 pool，并把 clipboard/history/search/transfer 仓储只接到 profile executor，把 membership、relationship、credential、Space security 与 LAN device 仓储只接到 control executor，同时选择完整 V3 payload runtime。`CurrentSpaceResolver` 可从 V3 manifest 读取当前 Space identity；旧 `DurableAdmissionSpaceTransition` 不得拿双库运行，V3 admission/reset/branch transition 暂由同一 fail-closed adapter 拒绝，等待 Step 8 的 `SpaceControlGeneration` owner 替换。启动升级 gate、promotion journal 和 control credential V3 scope 仍未完成。
+Change: 第十七子切片由 Engine `RuntimeStorageSelection` 把一个已认证 manifest 原子解析为 profile database、control database、blob root 与 payload format。V2/无 manifest 继续让两个 executor 共享原 pool；V3 打开独立双 pool，并把 clipboard/history/search/transfer 仓储只接到 profile executor，把 membership、relationship/credential、Space security 与 LAN device 仓储只接到 control executor，同时选择完整 V3 payload runtime。`CurrentSpaceResolver` 可从 V3 manifest 读取当前 Space identity；旧 `DurableAdmissionSpaceTransition` 不得拿双库运行，V3 admission/reset/branch transition 暂由同一 fail-closed adapter 拒绝，等待 Step 8 的 `SpaceControlGeneration` owner 替换。启动升级 gate 与 control-generation transition 仍未完成。
 
 Change: 第十八子切片让 `ProfileStorageUpgrade` 从 `Verified` 真正执行 V2 source compare-and-promote，并把目标 profile/control generations 与原 keyslot 组装成唯一 V3 manifest。promotion 成功或幂等发现同一 target 后才把加密 journal 推进到 `Promoted`；若进程在 manifest 替换后、journal 保存前崩溃，重启通过 target generation/keyslot 反向匹配已活动 V3，重新验证双库和 payload 后补写 `Promoted`。下一次调用单调进入 `CleanupPending`，之后返回 `UpToDate`；不同 V3 target、提前 promotion 或后来 source 均失败关闭。无活动 Space 的空 profile 不伪造 manifest，继续等待首次 activation。Engine 启动/解锁 gate 与旧 source 清理仍属后续子切片。
+
+Change: 第十九子切片把 OPAQUE/admission credential 的持久 scope 从单一 V2 `database_generation + security_generation` 扩展为显式版本和：V2 reader/writer 继续精确绑定旧完整 generation，V3 只绑定 Space、keyslot 与 `space_control_generation`。`SqliteSpaceAdmissionCredentials` 通过 V3-aware manifest loader 原子选择一种 scope；一次性 profile upgrade 在 `StoresSeparated` 内只调用 credential owner 的完整转换操作，在内存校验旧 OPAQUE 材料、重新以 target control scope 封装并回读后才记录 control database digest。升级器不复制 credential DTO、purpose 或 SQL schema，promotion 后 production control repository 可直接读取既有 Sponsor registration。
 
 Risk: 磁盘不足、移动端短进程和崩溃会留下 staging；每个 phase 先耐久记录再执行可重复动作，promotion 前绝不改 source。
 
