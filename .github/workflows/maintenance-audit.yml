@@ -46,7 +46,8 @@ jobs:
       - name: Run ${{ matrix.skill }}
         uses: openai/codex-action@v1
         with:
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          responses-api-endpoint: ${{ secrets.CODEX_API_ENDPOINT || 'https://api.openai.com/v1/responses' }}
+          openai-api-key: ${{ secrets.CODEX_API_KEY }}
           sandbox: workspace-write
           prompt: |
             运行仓库 skill `${{ matrix.skill }}`，并且本 session 只运行这一个 skill。
@@ -133,7 +134,8 @@ jobs:
       - name: Run uni-audit-report
         uses: openai/codex-action@v1
         with:
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          responses-api-endpoint: ${{ secrets.CODEX_API_ENDPOINT || 'https://api.openai.com/v1/responses' }}
+          openai-api-key: ${{ secrets.CODEX_API_KEY }}
           sandbox: workspace-write
           prompt: |
             运行仓库 skill `uni-audit-report`，并且本 session 只运行这一个 skill。
