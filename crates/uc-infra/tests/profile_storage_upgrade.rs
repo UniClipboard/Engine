@@ -99,6 +99,10 @@ async fn v2_upgrade_coordination_is_durable_idempotent_and_encrypted() {
         upgrade.ensure_v3().await.unwrap(),
         ProfileStorageUpgradeOutcome::Pending
     );
+    assert_eq!(
+        upgrade.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Pending
+    );
     let first_files = regular_files(&vault);
     assert!(first_files.len() >= 3);
     for (_, bytes) in &first_files {
@@ -133,6 +137,10 @@ async fn empty_profile_uses_the_same_durable_recovery_path() {
     ));
 
     let upgrade = new_upgrade(&vault, Arc::clone(&keys), Arc::clone(&manifests));
+    assert_eq!(
+        upgrade.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Pending
+    );
     assert_eq!(
         upgrade.ensure_v3().await.unwrap(),
         ProfileStorageUpgradeOutcome::Pending
@@ -315,4 +323,103 @@ async fn source_snapshot_stages_one_durable_profile_and_control_target() {
         upgrade.ensure_v3().await.unwrap_err(),
         ProfileStorageUpgradeError::SourceChanged
     ));
+}
+
+#[derive(diesel::QueryableByName)]
+struct CountRow {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    count: i64,
+}
+
+fn table_count(database: &Path, table: &str) -> i64 {
+    use diesel::Connection as _;
+    let mut connection =
+        diesel::sqlite::SqliteConnection::establish(database.to_str().unwrap()).unwrap();
+    diesel::sql_query(format!("SELECT COUNT(*) AS count FROM \"{table}\""))
+        .get_result::<CountRow>(&mut connection)
+        .unwrap()
+        .count
+}
+
+#[tokio::test]
+async fn target_stores_keep_only_their_declared_rows() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("profile");
+    let vault = root.join("vault");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_database = root.join("source.sqlite");
+    let source_pool = init_db_pool(source_database.to_str().unwrap()).unwrap();
+    diesel::sql_query(
+        "INSERT INTO clipboard_event \
+         (event_id, captured_at_ms, source_device, snapshot_hash) \
+         VALUES ('event-a', 1, 'device-a', 'snapshot-a')",
+    )
+    .execute(&mut source_pool.get().unwrap())
+    .unwrap();
+    diesel::sql_query(
+        "INSERT INTO membership_ledger_state (singleton_id, encrypted_payload) \
+         VALUES (1, X'010203')",
+    )
+    .execute(&mut source_pool.get().unwrap())
+    .unwrap();
+    let secure_storage = Arc::new(MemorySecureStorage::default());
+    let keys = Arc::new(AdmissionKeyManager::new(secure_storage, [0x91; 16]));
+    let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+        vault,
+        Arc::clone(&keys),
+    ));
+    let source = ActiveSpaceGenerationManifestV2::new(
+        "source-space".to_owned(),
+        [0x92; 16],
+        [0x93; 16],
+        [0x94; 16],
+    )
+    .unwrap();
+    manifests.promote(&source).await.unwrap();
+    let upgrade = ProfileStorageUpgrade::new(root.clone(), source_pool, keys, manifests);
+
+    for _ in 0..3 {
+        assert_eq!(
+            upgrade.ensure_v3().await.unwrap(),
+            ProfileStorageUpgradeOutcome::Pending
+        );
+    }
+
+    let profile_target = named_file(&root, "profile.sqlite");
+    let control_target = named_file(&root, "control.sqlite");
+    assert_eq!(table_count(&profile_target, "clipboard_event"), 1);
+    assert_eq!(table_count(&profile_target, "membership_ledger_state"), 0);
+    assert_eq!(table_count(&control_target, "clipboard_event"), 0);
+    assert_eq!(table_count(&control_target, "membership_ledger_state"), 1);
+}
+
+#[tokio::test]
+async fn an_unowned_source_table_blocks_store_separation() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("profile");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_database = root.join("source.sqlite");
+    let source_pool = init_db_pool(source_database.to_str().unwrap()).unwrap();
+    diesel::sql_query("CREATE TABLE unowned_future_table (id INTEGER PRIMARY KEY)")
+        .execute(&mut source_pool.get().unwrap())
+        .unwrap();
+    let secure_storage = Arc::new(MemorySecureStorage::default());
+    let keys = Arc::new(AdmissionKeyManager::new(secure_storage, [0xA1; 16]));
+    let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+        root.join("vault"),
+        Arc::clone(&keys),
+    ));
+    let upgrade = ProfileStorageUpgrade::new(root, source_pool, keys, manifests);
+
+    assert_eq!(
+        upgrade.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Pending
+    );
+    assert_eq!(
+        upgrade.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Pending
+    );
+    let error = upgrade.ensure_v3().await.unwrap_err();
+    assert!(matches!(error, ProfileStorageUpgradeError::Corrupt { .. }));
+    assert!(std::error::Error::source(&error).is_some());
 }

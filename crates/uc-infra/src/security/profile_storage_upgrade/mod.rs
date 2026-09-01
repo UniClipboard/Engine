@@ -133,7 +133,15 @@ impl ProfileStorageUpgrade {
                 )?;
                 self.persistence.save_journal(&journal).await?;
             }
-            UpgradePhaseV1::TargetStaged => self.target.verify(&journal)?,
+            UpgradePhaseV1::TargetStaged => {
+                let separated = self.target.separate(&journal)?;
+                journal.mark_stores_separated(
+                    separated.profile_database_digest,
+                    separated.control_database_digest,
+                )?;
+                self.persistence.save_journal(&journal).await?;
+            }
+            UpgradePhaseV1::StoresSeparated => self.target.verify_separated(&journal)?,
             UpgradePhaseV1::PayloadsConverted
             | UpgradePhaseV1::Verified
             | UpgradePhaseV1::Promoted

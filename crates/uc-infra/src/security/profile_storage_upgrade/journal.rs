@@ -10,6 +10,7 @@ pub(super) const JOURNAL_FORMAT_V1: u16 = 1;
 pub(super) enum UpgradePhaseV1 {
     Detected,
     TargetStaged,
+    StoresSeparated,
     PayloadsConverted,
     Verified,
     Promoted,
@@ -33,6 +34,8 @@ pub(super) struct UpgradeJournalV1 {
     target_space_control_generation: [u8; 16],
     source_snapshot_digest: Option<[u8; 32]>,
     source_database_revision: Option<u64>,
+    profile_database_digest: Option<[u8; 32]>,
+    control_database_digest: Option<[u8; 32]>,
 }
 
 impl UpgradeJournalV1 {
@@ -61,6 +64,8 @@ impl UpgradeJournalV1 {
             target_space_control_generation,
             source_snapshot_digest: None,
             source_database_revision: None,
+            profile_database_digest: None,
+            control_database_digest: None,
         }
     }
 
@@ -89,6 +94,16 @@ impl UpgradeJournalV1 {
             || (self.phase != UpgradePhaseV1::Detected
                 && (self.source_snapshot_digest.is_none()
                     || self.source_database_revision.is_none()))
+            || (matches!(
+                self.phase,
+                UpgradePhaseV1::Detected | UpgradePhaseV1::TargetStaged
+            ) && (self.profile_database_digest.is_some()
+                || self.control_database_digest.is_some()))
+            || (!matches!(
+                self.phase,
+                UpgradePhaseV1::Detected | UpgradePhaseV1::TargetStaged
+            ) && (self.profile_database_digest.is_none()
+                || self.control_database_digest.is_none()))
         {
             return Err(ProfileStorageUpgradeError::Corrupt {
                 source: anyhow::anyhow!("profile storage upgrade journal invariants are invalid"),
@@ -125,6 +140,14 @@ impl UpgradeJournalV1 {
         self.source_database_revision
     }
 
+    pub(super) const fn profile_database_digest(&self) -> Option<[u8; 32]> {
+        self.profile_database_digest
+    }
+
+    pub(super) const fn control_database_digest(&self) -> Option<[u8; 32]> {
+        self.control_database_digest
+    }
+
     pub(super) fn mark_target_staged(
         &mut self,
         source_snapshot_digest: [u8; 32],
@@ -138,6 +161,25 @@ impl UpgradeJournalV1 {
         self.source_snapshot_digest = Some(source_snapshot_digest);
         self.source_database_revision = Some(source_database_revision);
         self.phase = UpgradePhaseV1::TargetStaged;
+        self.validate()
+    }
+
+    pub(super) fn mark_stores_separated(
+        &mut self,
+        profile_database_digest: [u8; 32],
+        control_database_digest: [u8; 32],
+    ) -> Result<(), ProfileStorageUpgradeError> {
+        if self.phase != UpgradePhaseV1::TargetStaged
+            || profile_database_digest == [0; 32]
+            || control_database_digest == [0; 32]
+        {
+            return Err(ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::anyhow!("profile upgrade store separation transition is invalid"),
+            });
+        }
+        self.profile_database_digest = Some(profile_database_digest);
+        self.control_database_digest = Some(control_database_digest);
+        self.phase = UpgradePhaseV1::StoresSeparated;
         self.validate()
     }
 }

@@ -1,5 +1,8 @@
 use std::path::{Path, PathBuf};
 
+use diesel::connection::SimpleConnection as _;
+use diesel::{Connection as _, RunQueryDsl as _};
+
 use crate::config_migration::db_snapshot;
 use crate::db::pool::DbPool;
 
@@ -22,6 +25,60 @@ pub(super) struct StagedTarget {
     pub(super) source_snapshot_digest: [u8; 32],
     pub(super) source_database_revision: u64,
 }
+
+pub(super) struct SeparatedStores {
+    pub(super) profile_database_digest: [u8; 32],
+    pub(super) control_database_digest: [u8; 32],
+}
+
+const PROFILE_DATA_TABLES: &[&str] = &[
+    "active_clipboard_register",
+    "blob",
+    "blob_reference",
+    "clipboard_entry",
+    "clipboard_entry_delivery",
+    "clipboard_event",
+    "clipboard_migration_backup",
+    "clipboard_representation_thumbnail",
+    "clipboard_selection",
+    "clipboard_snapshot_representation",
+    "directory_publish_log",
+    "entry_file_set",
+    "entry_receive_attempt",
+    "file_transfer",
+    "file_transfer_events",
+    "file_transfer_privacy_maintenance",
+    "receive_artifact_log",
+    "search_document",
+    "search_entry_tag",
+    "search_index_meta",
+    "search_posting",
+];
+
+const SPACE_CONTROL_TABLES: &[&str] = &[
+    "encrypted_relationship",
+    "legacy_space_bootstrap_log",
+    "member_revocation_log",
+    "membership_ledger_state",
+    "mobile_device",
+    "relationship_legacy_peer_address",
+    "relationship_legacy_space_member",
+    "relationship_legacy_trusted_peer",
+    "relationship_privacy_maintenance",
+    "space_admission_credentials",
+    "space_key_epoch_state",
+];
+
+const PROFILE_COORDINATION_TABLES: &[&str] = &[
+    "admission_repository_state",
+    "legacy_upgrade_pending_join",
+    "workspace_convergence_state",
+    "workspace_convergence_v3_active",
+    "workspace_convergence_v3_migrations",
+    "workspace_convergence_v3_slots",
+];
+
+const TECHNICAL_TABLES: &[&str] = &["__diesel_schema_migrations", "uc_database_revision"];
 
 impl TargetGenerationStager {
     pub(super) fn new(root: PathBuf, source_pool: DbPool) -> Self {
@@ -71,6 +128,67 @@ impl TargetGenerationStager {
             return Err(ProfileStorageUpgradeError::SourceChanged);
         }
         self.verify_with_digest(journal, digest)
+    }
+
+    pub(super) fn separate(
+        &self,
+        journal: &UpgradeJournalV1,
+    ) -> Result<SeparatedStores, ProfileStorageUpgradeError> {
+        self.verify(journal)?;
+        let paths = self.paths(journal);
+        separate_database(&paths.profile_database, SPACE_CONTROL_TABLES)?;
+        let mut control_excluded =
+            Vec::with_capacity(PROFILE_DATA_TABLES.len() + PROFILE_COORDINATION_TABLES.len());
+        control_excluded.extend_from_slice(PROFILE_DATA_TABLES);
+        control_excluded.extend_from_slice(PROFILE_COORDINATION_TABLES);
+        separate_database(&paths.control_database, &control_excluded)?;
+        let profile_database_digest = file_digest(&paths.profile_database)?;
+        let control_database_digest = file_digest(&paths.control_database)?;
+        let source_revision = journal.source_database_revision().ok_or_else(|| {
+            ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::anyhow!("profile upgrade source revision is missing"),
+            }
+        })?;
+        if self.source_revision()? != source_revision {
+            return Err(ProfileStorageUpgradeError::SourceChanged);
+        }
+        Ok(SeparatedStores {
+            profile_database_digest,
+            control_database_digest,
+        })
+    }
+
+    pub(super) fn verify_separated(
+        &self,
+        journal: &UpgradeJournalV1,
+    ) -> Result<(), ProfileStorageUpgradeError> {
+        let paths = self.paths(journal);
+        let expected_profile = journal.profile_database_digest().ok_or_else(|| {
+            ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::anyhow!("profile data target digest is missing"),
+            }
+        })?;
+        let expected_control = journal.control_database_digest().ok_or_else(|| {
+            ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::anyhow!("space control target digest is missing"),
+            }
+        })?;
+        if file_digest(&paths.profile_database)? != expected_profile
+            || file_digest(&paths.control_database)? != expected_control
+        {
+            return Err(ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::anyhow!("profile upgrade separated store digest mismatch"),
+            });
+        }
+        let revision = journal.source_database_revision().ok_or_else(|| {
+            ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::anyhow!("profile upgrade source revision is missing"),
+            }
+        })?;
+        if self.source_revision()? != revision {
+            return Err(ProfileStorageUpgradeError::SourceChanged);
+        }
+        Ok(())
     }
 
     fn source_revision(&self) -> Result<u64, ProfileStorageUpgradeError> {
@@ -129,6 +247,104 @@ fn generation_token(generation: &[u8; 16]) -> String {
     hasher.update(GENERATION_PATH_DOMAIN);
     hasher.update(generation);
     hasher.finalize().to_hex().to_string()
+}
+
+#[derive(diesel::QueryableByName)]
+struct TableNameRow {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    name: String,
+}
+
+fn separate_database(
+    path: &Path,
+    excluded_tables: &[&str],
+) -> Result<(), ProfileStorageUpgradeError> {
+    let database = path
+        .to_str()
+        .ok_or_else(|| ProfileStorageUpgradeError::Storage {
+            source: anyhow::anyhow!("profile upgrade target path is invalid"),
+        })?;
+    let mut connection =
+        diesel::sqlite::SqliteConnection::establish(database).map_err(|source| {
+            ProfileStorageUpgradeError::Storage {
+                source: anyhow::Error::new(source).context("open profile upgrade target database"),
+            }
+        })?;
+    connection
+        .batch_execute("PRAGMA journal_mode = DELETE; PRAGMA foreign_keys = OFF;")
+        .map_err(database_error)?;
+    validate_table_ownership(&mut connection)?;
+    connection
+        .transaction::<_, diesel::result::Error, _>(|connection| {
+            for table in excluded_tables {
+                diesel::sql_query(format!("DELETE FROM \"{table}\"")).execute(connection)?;
+            }
+            Ok(())
+        })
+        .map_err(database_error)?;
+    connection
+        .batch_execute("VACUUM; PRAGMA foreign_keys = ON;")
+        .map_err(database_error)?;
+    std::fs::File::open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(storage_error)?;
+    Ok(())
+}
+
+fn validate_table_ownership(
+    connection: &mut diesel::sqlite::SqliteConnection,
+) -> Result<(), ProfileStorageUpgradeError> {
+    let rows =
+        diesel::sql_query("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .load::<TableNameRow>(connection)
+            .map_err(database_error)?;
+    let mut declared = std::collections::BTreeSet::new();
+    for table in PROFILE_DATA_TABLES
+        .iter()
+        .chain(SPACE_CONTROL_TABLES)
+        .chain(PROFILE_COORDINATION_TABLES)
+        .chain(TECHNICAL_TABLES)
+    {
+        if !declared.insert(*table) {
+            return Err(ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::anyhow!("profile upgrade table ownership is duplicated"),
+            });
+        }
+    }
+    let actual = rows
+        .into_iter()
+        .map(|row| row.name)
+        .filter(|name| !name.starts_with("sqlite_"))
+        .collect::<std::collections::BTreeSet<_>>();
+    let unknown = actual
+        .iter()
+        .filter(|name| !declared.contains(name.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let missing = declared
+        .iter()
+        .filter(|name| !actual.contains(**name))
+        .copied()
+        .collect::<Vec<_>>();
+    if !unknown.is_empty() || !missing.is_empty() {
+        return Err(ProfileStorageUpgradeError::Corrupt {
+            source: anyhow::anyhow!(
+                "profile upgrade table ownership is incomplete; unknown={unknown:?}; missing={missing:?}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn file_digest(path: &Path) -> Result<[u8; 32], ProfileStorageUpgradeError> {
+    let bytes = std::fs::read(path).map_err(storage_error)?;
+    Ok(*blake3::hash(&bytes).as_bytes())
+}
+
+fn database_error(source: diesel::result::Error) -> ProfileStorageUpgradeError {
+    ProfileStorageUpgradeError::Storage {
+        source: anyhow::Error::new(source).context("separate profile upgrade target stores"),
+    }
 }
 
 fn write_target(path: &Path, bytes: &[u8]) -> Result<(), ProfileStorageUpgradeError> {
