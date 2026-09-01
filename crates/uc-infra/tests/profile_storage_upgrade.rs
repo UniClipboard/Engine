@@ -1,0 +1,230 @@
+use std::collections::BTreeMap;
+use std::fs::OpenOptions;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use uc_core::membership::ActiveSpaceGenerationManifestV2;
+use uc_core::ports::{SecureStorageError, SecureStoragePort};
+use uc_infra::security::{
+    ActiveSpaceGenerationManifestStore, AdmissionKeyManager, ProfileStorageUpgrade,
+    ProfileStorageUpgradeError, ProfileStorageUpgradeOutcome,
+};
+
+#[derive(Default)]
+struct MemorySecureStorage(Mutex<BTreeMap<String, Vec<u8>>>);
+
+impl SecureStoragePort for MemorySecureStorage {
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
+        Ok(self.0.lock().unwrap().get(key).cloned())
+    }
+
+    fn set(&self, key: &str, value: &[u8]) -> Result<(), SecureStorageError> {
+        self.0
+            .lock()
+            .unwrap()
+            .insert(key.to_owned(), value.to_vec());
+        Ok(())
+    }
+
+    fn delete(&self, key: &str) -> Result<(), SecureStorageError> {
+        self.0.lock().unwrap().remove(key);
+        Ok(())
+    }
+}
+
+fn regular_files(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut files = Vec::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                directories.push(entry.path());
+            } else if entry.file_type().unwrap().is_file() {
+                files.push((entry.path(), std::fs::read(entry.path()).unwrap()));
+            }
+        }
+    }
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    files
+}
+
+fn named_file(root: &Path, name: &str) -> PathBuf {
+    regular_files(root)
+        .into_iter()
+        .find_map(|(path, _)| {
+            (path.file_name().and_then(|value| value.to_str()) == Some(name)).then_some(path)
+        })
+        .unwrap()
+}
+
+#[tokio::test]
+async fn v2_upgrade_coordination_is_durable_idempotent_and_encrypted() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = directory.path().join("vault");
+    let secure_storage = Arc::new(MemorySecureStorage::default());
+    let keys = Arc::new(AdmissionKeyManager::new(secure_storage, [0x11; 16]));
+    let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+        vault.clone(),
+        Arc::clone(&keys),
+    ));
+    let source = ActiveSpaceGenerationManifestV2::new(
+        "source-space".to_owned(),
+        [0x21; 16],
+        [0x22; 16],
+        [0x23; 16],
+    )
+    .unwrap();
+    manifests.promote(&source).await.unwrap();
+
+    let upgrade =
+        ProfileStorageUpgrade::new(vault.clone(), Arc::clone(&keys), Arc::clone(&manifests));
+    assert_eq!(
+        upgrade.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Pending
+    );
+    let first_files = regular_files(&vault);
+    assert!(first_files.len() >= 3);
+    for (_, bytes) in &first_files {
+        for secret in [
+            b"source-space".as_slice(),
+            &[0x11; 16],
+            &[0x21; 16],
+            &[0x22; 16],
+            &[0x23; 16],
+        ] {
+            assert!(!bytes.windows(secret.len()).any(|window| window == secret));
+        }
+    }
+
+    let reopened = ProfileStorageUpgrade::new(vault.clone(), keys, manifests);
+    assert_eq!(
+        reopened.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Pending
+    );
+    assert_eq!(regular_files(&vault), first_files);
+}
+
+#[tokio::test]
+async fn empty_profile_uses_the_same_durable_recovery_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = directory.path().join("vault");
+    let secure_storage = Arc::new(MemorySecureStorage::default());
+    let keys = Arc::new(AdmissionKeyManager::new(secure_storage, [0x31; 16]));
+    let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+        vault.clone(),
+        Arc::clone(&keys),
+    ));
+
+    let upgrade =
+        ProfileStorageUpgrade::new(vault.clone(), Arc::clone(&keys), Arc::clone(&manifests));
+    assert_eq!(
+        upgrade.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Pending
+    );
+    let first_files = regular_files(&vault);
+
+    let reopened = ProfileStorageUpgrade::new(vault.clone(), keys, manifests);
+    assert_eq!(
+        reopened.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Pending
+    );
+    assert_eq!(regular_files(&vault), first_files);
+}
+
+#[tokio::test]
+async fn held_profile_lease_returns_busy_without_creating_a_journal() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = directory.path().join("vault");
+    let upgrade_directory = vault.join("profile-storage-upgrade");
+    std::fs::create_dir_all(&upgrade_directory).unwrap();
+    let lease = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(upgrade_directory.join(".lease"))
+        .unwrap();
+    lease.try_lock().unwrap();
+
+    let secure_storage = Arc::new(MemorySecureStorage::default());
+    let keys = Arc::new(AdmissionKeyManager::new(secure_storage, [0x41; 16]));
+    let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+        vault.clone(),
+        Arc::clone(&keys),
+    ));
+    let upgrade = ProfileStorageUpgrade::new(vault.clone(), keys, manifests);
+
+    assert_eq!(
+        upgrade.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Busy
+    );
+    assert!(!upgrade_directory.join(".journal-v1").exists());
+}
+
+#[tokio::test]
+async fn tampered_journal_fails_closed_with_a_source_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = directory.path().join("vault");
+    let secure_storage = Arc::new(MemorySecureStorage::default());
+    let keys = Arc::new(AdmissionKeyManager::new(secure_storage, [0x51; 16]));
+    let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+        vault.clone(),
+        Arc::clone(&keys),
+    ));
+    let upgrade =
+        ProfileStorageUpgrade::new(vault.clone(), Arc::clone(&keys), Arc::clone(&manifests));
+    assert_eq!(
+        upgrade.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Pending
+    );
+    std::fs::write(named_file(&vault, ".journal-v1"), b"tampered-journal").unwrap();
+
+    let reopened = ProfileStorageUpgrade::new(vault, keys, manifests);
+    let error = reopened.ensure_v3().await.unwrap_err();
+    assert!(matches!(error, ProfileStorageUpgradeError::Security { .. }));
+    assert!(std::error::Error::source(&error).is_some());
+}
+
+#[tokio::test]
+async fn changed_v2_source_is_rejected_without_replacing_the_journal() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = directory.path().join("vault");
+    let secure_storage = Arc::new(MemorySecureStorage::default());
+    let keys = Arc::new(AdmissionKeyManager::new(secure_storage, [0x61; 16]));
+    let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+        vault.clone(),
+        Arc::clone(&keys),
+    ));
+    let source = ActiveSpaceGenerationManifestV2::new(
+        "source-space".to_owned(),
+        [0x62; 16],
+        [0x63; 16],
+        [0x64; 16],
+    )
+    .unwrap();
+    manifests.promote(&source).await.unwrap();
+    let upgrade =
+        ProfileStorageUpgrade::new(vault.clone(), Arc::clone(&keys), Arc::clone(&manifests));
+    assert_eq!(
+        upgrade.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Pending
+    );
+    let journal_path = named_file(&vault, ".journal-v1");
+    let first_journal = std::fs::read(&journal_path).unwrap();
+
+    let changed = ActiveSpaceGenerationManifestV2::new(
+        "changed-space".to_owned(),
+        [0x72; 16],
+        [0x73; 16],
+        [0x74; 16],
+    )
+    .unwrap();
+    manifests.promote(&changed).await.unwrap();
+
+    let reopened = ProfileStorageUpgrade::new(vault, keys, manifests);
+    assert!(matches!(
+        reopened.ensure_v3().await.unwrap_err(),
+        ProfileStorageUpgradeError::SourceChanged
+    ));
+    assert_eq!(std::fs::read(journal_path).unwrap(), first_journal);
+}

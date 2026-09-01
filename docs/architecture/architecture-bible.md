@@ -286,6 +286,8 @@ Core 保存完整 admission aggregate 和状态转换规则。Application 内部
 
 V1/V2 到 V3 的转换只在软件升级时通过独立、原子、可恢复的 profile storage upgrade 执行一次。升级同时把本机历史/搜索/文件数据与 membership、credential、MLS 等 Space 控制面表拆入独立 generation。完成后，切换 Space 复用同一 profile SQLite/blob generation，只替换完整 Space control generation，不得扫描、复制或重加密历史业务负载。旧格式 reader 只能存在于升级模块，正常路径只写 V3。
 
+`ProfileStorageUpgrade` 是该软件升级的唯一 Infra 协调边界；未来 Engine 只调用一次 `ensure_v3()`，不能编排逐表步骤。模块已经拥有 profile 级进程内串行化、跨进程非阻塞租约和使用 profile 稳定密钥 AEAD 保存的恢复 journal。Journal 显式绑定 V2 source manifest 及其 keyslot/database/security generation，并一次生成互不相同的目标 profile data/control generation；重启复用同一状态，source 变化、密文篡改或缺钥时失败关闭。当前该入口对 V2 与空 profile 只返回 `Pending`，尚未接入 Engine 启动，也不会创建 staging、转换 payload 或提升 V3 manifest。
+
 `uc-core` 的 `ActiveRuntimeLayout` 只表达当前 Space、profile data generation 与 Space control generation 的合法组合，不拥有 keyslot、序列化、digest 或密码实现。V3 manifest 的技术格式和校验属于 `uc-infra`；在完整升级路径接线前，生产 store 仍只提升 V2，读取到经过完整校验的 V3 时明确失败关闭，不得把半完成格式激活为运行期。
 
 允许明文保存的例外只有：
@@ -880,6 +882,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-09-01 | 033 活动安全会话第四切片 | Infra 新增 `ActiveSpaceSecuritySession` 深模块，统一负责目标 material 的归属验证、profile vault 先行耐久安装、session 后切换及失败恢复；Fresh group join 与普通恢复共用入口，Vault 失败保持旧 session，稳定 `SecurityState` 分类保留下层 source。Engine 组装 profile 级唯一 vault；本轮不启用 V3 payload、不删除 V2 reader 历史 catalog，也不机械改造旧 CrossSpace。 |
 | 2026-09-01 | 033 当前 material 推进第五切片 | `ActiveSpaceSecuritySession` 新增完整 `install_current_material` 操作，将成员加入、epoch/revocation、legacy bootstrap、Sponsor/Helper 准入和 membership branch recovery 的真实安全状态统一收口为 vault-first、session-second 安装；加密 repository 恢复也收口为带临时密钥访问和完整 snapshot 回滚的单一操作。临时 validator 与待删旧 CrossSpace target session 不写 vault；新增安装错误转换保留稳定 `SecurityState` 分类和完整 source。本轮不启用 production V3 payload 或 V3 manifest。 |
 | 2026-09-01 | 033 持久密码 interface 第六切片 | `BlobCipherPort` 删除 encrypt/decrypt 的 `ActiveSpace` 参数，调用方只提供 payload 与业务实体 AAD；四类 inline decorator、旧 migration recovery 和待删 CrossSpace 不再伪造占位 Space。当前 V1/V2 adapter、UCBL、搜索和专用 repository 格式保持不变，不启用 V3 writer 或 production 双 reader。 |
+| 2026-09-01 | 033 升级协调第七切片 | Infra 新增 `ProfileStorageUpgrade::ensure_v3()` 单一协调入口，隐藏进程内串行化、跨进程非阻塞租约、source identity 校验和 profile AEAD 加密 journal。V2 与空 profile 首次调用耐久生成唯一目标 data/control generations，重启复用相同字节；锁竞争返回 `Busy`，source 变化、journal 篡改或缺钥失败关闭。本轮不接 Engine、不转换 payload、不提升 V3 manifest。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |

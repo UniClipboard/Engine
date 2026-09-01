@@ -19,6 +19,7 @@ mod key_migration_adapter;
 mod profile_content_key_vault;
 mod profile_lifecycle;
 mod profile_reset;
+mod profile_storage_upgrade;
 mod secrets;
 mod space_admission_auth;
 pub(crate) mod v1_aead;
@@ -56,6 +57,9 @@ pub use profile_content_key_vault::{
 };
 pub use profile_lifecycle::ProfileLifecycleRepository;
 pub use profile_reset::{ProfileKeyWiper, ProfileStateCleaner};
+pub use profile_storage_upgrade::{
+    ProfileStorageUpgrade, ProfileStorageUpgradeError, ProfileStorageUpgradeOutcome,
+};
 pub(crate) use secrets::{Kek, MasterKey};
 pub use space_admission_auth::{
     SpaceAdmissionAuth, SpaceAdmissionAuthContext, SpaceAdmissionAuthError,

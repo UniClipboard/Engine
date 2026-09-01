@@ -405,9 +405,11 @@ File: 搜索 key derivation、search repository/runtime 与索引版本
 Change: 引入 profile 稳定且按 protection group 域分离的 SearchKey，提升索引版本；查询对实际存在文档的保护组生成 token，渲染字段委托 V3 `ContentProtection`。
 Risk: 多历史保护组增加查询 token 数；对 group 数和 token 批次设明确上限，并以性能测试固定预算。
 
-Step 7:
+Step 7（进行中；升级协调基础子切片已完成）:
 File: 新增 `crates/uc-infra/src/security/profile_storage_upgrade/`、profile lifecycle/startup assembly
 Change: 实现 journal、独占锁、source snapshot、数据面/控制面表拆分、全量转换、两类 V3 production-reader 验证、manifest promotion 与清理；将 V1/V2 reader 和旧 rewrap 常量移动为 upgrade-private 实现。升级是一个深模块，Engine 只调用 `ensure_v3`。
+
+Change: 第一子切片新增 `ProfileStorageUpgrade::ensure_v3()` 唯一外部 seam，并在模块内部实现 profile 级进程内串行化、标准库跨进程非阻塞文件租约、独立 purpose 的 profile AEAD journal 和 source identity 恢复校验。Journal 使用规范 phase 集合，显式绑定 V2 manifest digest 与 keyslot/database/security generation，并一次生成非零、互异且不复用 source 的目标 profile data/control generation；重复启动必须复用相同密文 journal。V2 与零行/空 profile 统一返回 `Pending`，锁竞争返回 `Busy`，source 变化、journal 篡改、缺钥和持久化失败均失败关闭并保留下层 source。本子切片不接 Engine 启动，不创建 source snapshot 或 staging，不转换 payload，也不提升 V3 manifest；这些动作继续由同一深模块的后续子切片完成。
 Risk: 磁盘不足、移动端短进程和崩溃会留下 staging；每个 phase 先耐久记录再执行可重复动作，promotion 前绝不改 source。
 
 Step 8:
