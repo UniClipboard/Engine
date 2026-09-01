@@ -3,8 +3,10 @@ use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use diesel::RunQueryDsl;
 use uc_core::membership::ActiveSpaceGenerationManifestV2;
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
+use uc_infra::db::pool::init_db_pool;
 use uc_infra::security::{
     ActiveSpaceGenerationManifestStore, AdmissionKeyManager, ProfileStorageUpgrade,
     ProfileStorageUpgradeError, ProfileStorageUpgradeOutcome,
@@ -58,6 +60,17 @@ fn named_file(root: &Path, name: &str) -> PathBuf {
         .unwrap()
 }
 
+fn new_upgrade(
+    root: &Path,
+    keys: Arc<AdmissionKeyManager>,
+    manifests: Arc<ActiveSpaceGenerationManifestStore>,
+) -> ProfileStorageUpgrade {
+    std::fs::create_dir_all(root).unwrap();
+    let database = root.join("source.sqlite");
+    let source_pool = init_db_pool(database.to_str().unwrap()).unwrap();
+    ProfileStorageUpgrade::new(root.to_path_buf(), source_pool, keys, manifests)
+}
+
 #[tokio::test]
 async fn v2_upgrade_coordination_is_durable_idempotent_and_encrypted() {
     let directory = tempfile::tempdir().unwrap();
@@ -77,8 +90,11 @@ async fn v2_upgrade_coordination_is_durable_idempotent_and_encrypted() {
     .unwrap();
     manifests.promote(&source).await.unwrap();
 
-    let upgrade =
-        ProfileStorageUpgrade::new(vault.clone(), Arc::clone(&keys), Arc::clone(&manifests));
+    let upgrade = new_upgrade(&vault, Arc::clone(&keys), Arc::clone(&manifests));
+    assert_eq!(
+        upgrade.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Pending
+    );
     assert_eq!(
         upgrade.ensure_v3().await.unwrap(),
         ProfileStorageUpgradeOutcome::Pending
@@ -97,7 +113,7 @@ async fn v2_upgrade_coordination_is_durable_idempotent_and_encrypted() {
         }
     }
 
-    let reopened = ProfileStorageUpgrade::new(vault.clone(), keys, manifests);
+    let reopened = new_upgrade(&vault, keys, manifests);
     assert_eq!(
         reopened.ensure_v3().await.unwrap(),
         ProfileStorageUpgradeOutcome::Pending
@@ -116,15 +132,18 @@ async fn empty_profile_uses_the_same_durable_recovery_path() {
         Arc::clone(&keys),
     ));
 
-    let upgrade =
-        ProfileStorageUpgrade::new(vault.clone(), Arc::clone(&keys), Arc::clone(&manifests));
+    let upgrade = new_upgrade(&vault, Arc::clone(&keys), Arc::clone(&manifests));
+    assert_eq!(
+        upgrade.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Pending
+    );
     assert_eq!(
         upgrade.ensure_v3().await.unwrap(),
         ProfileStorageUpgradeOutcome::Pending
     );
     let first_files = regular_files(&vault);
 
-    let reopened = ProfileStorageUpgrade::new(vault.clone(), keys, manifests);
+    let reopened = new_upgrade(&vault, keys, manifests);
     assert_eq!(
         reopened.ensure_v3().await.unwrap(),
         ProfileStorageUpgradeOutcome::Pending
@@ -152,7 +171,7 @@ async fn held_profile_lease_returns_busy_without_creating_a_journal() {
         vault.clone(),
         Arc::clone(&keys),
     ));
-    let upgrade = ProfileStorageUpgrade::new(vault.clone(), keys, manifests);
+    let upgrade = new_upgrade(&vault, keys, manifests);
 
     assert_eq!(
         upgrade.ensure_v3().await.unwrap(),
@@ -171,15 +190,14 @@ async fn tampered_journal_fails_closed_with_a_source_error() {
         vault.clone(),
         Arc::clone(&keys),
     ));
-    let upgrade =
-        ProfileStorageUpgrade::new(vault.clone(), Arc::clone(&keys), Arc::clone(&manifests));
+    let upgrade = new_upgrade(&vault, Arc::clone(&keys), Arc::clone(&manifests));
     assert_eq!(
         upgrade.ensure_v3().await.unwrap(),
         ProfileStorageUpgradeOutcome::Pending
     );
     std::fs::write(named_file(&vault, ".journal-v1"), b"tampered-journal").unwrap();
 
-    let reopened = ProfileStorageUpgrade::new(vault, keys, manifests);
+    let reopened = new_upgrade(&vault, keys, manifests);
     let error = reopened.ensure_v3().await.unwrap_err();
     assert!(matches!(error, ProfileStorageUpgradeError::Security { .. }));
     assert!(std::error::Error::source(&error).is_some());
@@ -203,8 +221,7 @@ async fn changed_v2_source_is_rejected_without_replacing_the_journal() {
     )
     .unwrap();
     manifests.promote(&source).await.unwrap();
-    let upgrade =
-        ProfileStorageUpgrade::new(vault.clone(), Arc::clone(&keys), Arc::clone(&manifests));
+    let upgrade = new_upgrade(&vault, Arc::clone(&keys), Arc::clone(&manifests));
     assert_eq!(
         upgrade.ensure_v3().await.unwrap(),
         ProfileStorageUpgradeOutcome::Pending
@@ -221,10 +238,81 @@ async fn changed_v2_source_is_rejected_without_replacing_the_journal() {
     .unwrap();
     manifests.promote(&changed).await.unwrap();
 
-    let reopened = ProfileStorageUpgrade::new(vault, keys, manifests);
+    let reopened = new_upgrade(&vault, keys, manifests);
     assert!(matches!(
         reopened.ensure_v3().await.unwrap_err(),
         ProfileStorageUpgradeError::SourceChanged
     ));
     assert_eq!(std::fs::read(journal_path).unwrap(), first_journal);
+}
+
+#[tokio::test]
+async fn source_snapshot_stages_one_durable_profile_and_control_target() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("profile");
+    let vault = root.join("vault");
+    let source_database = root.join("source.sqlite");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_pool = init_db_pool(source_database.to_str().unwrap()).unwrap();
+    diesel::sql_query(
+        "INSERT INTO clipboard_event \
+         (event_id, captured_at_ms, source_device, snapshot_hash) \
+         VALUES ('event-a', 1, 'device-a', 'snapshot-a')",
+    )
+    .execute(&mut source_pool.get().unwrap())
+    .unwrap();
+    let source_before = std::fs::read(&source_database).unwrap();
+    let secure_storage = Arc::new(MemorySecureStorage::default());
+    let keys = Arc::new(AdmissionKeyManager::new(secure_storage, [0x81; 16]));
+    let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+        vault,
+        Arc::clone(&keys),
+    ));
+    let source = ActiveSpaceGenerationManifestV2::new(
+        "source-space".to_owned(),
+        [0x82; 16],
+        [0x83; 16],
+        [0x84; 16],
+    )
+    .unwrap();
+    manifests.promote(&source).await.unwrap();
+    let upgrade = ProfileStorageUpgrade::new(
+        root.clone(),
+        source_pool,
+        Arc::clone(&keys),
+        Arc::clone(&manifests),
+    );
+
+    assert_eq!(
+        upgrade.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Pending
+    );
+    assert_eq!(
+        upgrade.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Pending
+    );
+
+    let profile_target = named_file(&root, "profile.sqlite");
+    let control_target = named_file(&root, "control.sqlite");
+    assert!(std::fs::read(profile_target)
+        .unwrap()
+        .starts_with(b"SQLite format 3\0"));
+    assert!(std::fs::read(control_target)
+        .unwrap()
+        .starts_with(b"SQLite format 3\0"));
+    assert_eq!(std::fs::read(&source_database).unwrap(), source_before);
+    assert_eq!(manifests.load().await.unwrap(), Some(source));
+
+    let changed_source = init_db_pool(source_database.to_str().unwrap()).unwrap();
+    diesel::sql_query(
+        "INSERT INTO clipboard_event \
+         (event_id, captured_at_ms, source_device, snapshot_hash) \
+         VALUES ('event-b', 2, 'device-b', 'snapshot-b')",
+    )
+    .execute(&mut changed_source.get().unwrap())
+    .unwrap();
+    assert!(matches!(
+        upgrade.ensure_v3().await.unwrap_err(),
+        ProfileStorageUpgradeError::SourceChanged
+    ));
 }

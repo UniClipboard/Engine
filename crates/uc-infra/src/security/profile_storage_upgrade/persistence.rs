@@ -117,6 +117,24 @@ impl UpgradePersistence {
             .map_err(security_error)?;
         write_atomically(&self.journal_path, &ciphertext).await
     }
+
+    pub(super) async fn save_journal(
+        &self,
+        journal: &UpgradeJournalV1,
+    ) -> Result<(), ProfileStorageUpgradeError> {
+        journal.validate()?;
+        let plaintext = Zeroizing::new(postcard::to_stdvec(journal).map_err(|source| {
+            ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::Error::new(source)
+                    .context("encode profile storage upgrade journal"),
+            }
+        })?);
+        let ciphertext = self
+            .keys
+            .seal_profile_payload(UPGRADE_JOURNAL_PURPOSE, &plaintext)
+            .map_err(security_error)?;
+        write_atomically(&self.journal_path, &ciphertext).await
+    }
 }
 
 async fn write_atomically(

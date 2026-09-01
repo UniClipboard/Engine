@@ -7,7 +7,7 @@ use super::ProfileStorageUpgradeError;
 pub(super) const JOURNAL_FORMAT_V1: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Zeroize)]
-enum UpgradePhaseV1 {
+pub(super) enum UpgradePhaseV1 {
     Detected,
     TargetStaged,
     PayloadsConverted,
@@ -31,6 +31,8 @@ pub(super) struct UpgradeJournalV1 {
     source: Option<UpgradeSourceV1>,
     target_profile_data_generation: [u8; 16],
     target_space_control_generation: [u8; 16],
+    source_snapshot_digest: Option<[u8; 32]>,
+    source_database_revision: Option<u64>,
 }
 
 impl UpgradeJournalV1 {
@@ -57,6 +59,8 @@ impl UpgradeJournalV1 {
             source: source.map(UpgradeSourceV1::from),
             target_profile_data_generation,
             target_space_control_generation,
+            source_snapshot_digest: None,
+            source_database_revision: None,
         }
     }
 
@@ -79,6 +83,12 @@ impl UpgradeJournalV1 {
                     ]
                     .contains(&self.target_space_control_generation)
             })
+            || (self.phase == UpgradePhaseV1::Detected
+                && (self.source_snapshot_digest.is_some()
+                    || self.source_database_revision.is_some()))
+            || (self.phase != UpgradePhaseV1::Detected
+                && (self.source_snapshot_digest.is_none()
+                    || self.source_database_revision.is_none()))
         {
             return Err(ProfileStorageUpgradeError::Corrupt {
                 source: anyhow::anyhow!("profile storage upgrade journal invariants are invalid"),
@@ -93,6 +103,42 @@ impl UpgradeJournalV1 {
             (Some(persisted), Some(current)) => persisted.matches(current),
             _ => false,
         }
+    }
+
+    pub(super) const fn phase(&self) -> UpgradePhaseV1 {
+        self.phase
+    }
+
+    pub(super) const fn target_profile_data_generation(&self) -> &[u8; 16] {
+        &self.target_profile_data_generation
+    }
+
+    pub(super) const fn target_space_control_generation(&self) -> &[u8; 16] {
+        &self.target_space_control_generation
+    }
+
+    pub(super) const fn source_snapshot_digest(&self) -> Option<[u8; 32]> {
+        self.source_snapshot_digest
+    }
+
+    pub(super) const fn source_database_revision(&self) -> Option<u64> {
+        self.source_database_revision
+    }
+
+    pub(super) fn mark_target_staged(
+        &mut self,
+        source_snapshot_digest: [u8; 32],
+        source_database_revision: u64,
+    ) -> Result<(), ProfileStorageUpgradeError> {
+        if self.phase != UpgradePhaseV1::Detected || source_snapshot_digest == [0; 32] {
+            return Err(ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::anyhow!("profile upgrade target staging transition is invalid"),
+            });
+        }
+        self.source_snapshot_digest = Some(source_snapshot_digest);
+        self.source_database_revision = Some(source_database_revision);
+        self.phase = UpgradePhaseV1::TargetStaged;
+        self.validate()
     }
 }
 

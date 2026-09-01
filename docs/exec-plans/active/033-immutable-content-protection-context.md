@@ -1,6 +1,6 @@
 # 033 不可变内容保护上下文与一次性密文升级
 
-状态：实施中；前三个基础切片、第四步的安全会话切片、第五步的持久密码接口收窄与 V3 payload 目标格式、第六步的多保护组搜索目标模块已完成，032 在本规格完成前暂停实施
+状态：实施中；前三个基础切片、第四步的安全会话切片、第五步的持久密码接口收窄与 V3 payload 目标格式、第六步的多保护组搜索目标模块，以及第七步的协调与 target staging 已完成，032 在本规格完成前暂停实施
 
 本规格取代规格 023 中“CrossSpace 必须把本机历史重封装到目标 MasterKey”的规则，以及规格 028 中“切换前普通本机内容沿用 CrossSpace rebuild/rewrap”的规则。规格 023/028 的准入提交、门禁、恢复和 MLS 成员语义继续有效。
 
@@ -414,6 +414,7 @@ File: 新增 `crates/uc-infra/src/security/profile_storage_upgrade/`、profile l
 Change: 实现 journal、独占锁、source snapshot、数据面/控制面表拆分、全量转换、两类 V3 production-reader 验证、manifest promotion 与清理；将 V1/V2 reader 和旧 rewrap 常量移动为 upgrade-private 实现。升级是一个深模块，Engine 只调用 `ensure_v3`。
 
 Change: 第一子切片新增 `ProfileStorageUpgrade::ensure_v3()` 唯一外部 seam，并在模块内部实现 profile 级进程内串行化、标准库跨进程非阻塞文件租约、独立 purpose 的 profile AEAD journal 和 source identity 恢复校验。Journal 使用规范 phase 集合，显式绑定 V2 manifest digest 与 keyslot/database/security generation，并一次生成非零、互异且不复用 source 的目标 profile data/control generation；重复启动必须复用相同密文 journal。V2 与零行/空 profile 统一返回 `Pending`，锁竞争返回 `Busy`，source 变化、journal 篡改、缺钥和持久化失败均失败关闭并保留下层 source。本子切片不接 Engine 启动，不创建 source snapshot 或 staging，不转换 payload，也不提升 V3 manifest；这些动作继续由同一深模块的后续子切片完成。
+Change: 第二子切片让同一 `ensure_v3()` 在下一次单调推进时执行 SQLite `VACUUM INTO` 一致性快照，并按 journal 中唯一 data/control generation 创建不含 Space 明文的 `profile.sqlite` 与 `control.sqlite` target。Journal 在两个文件均原子落盘且 digest 相等后才进入 `TargetStaged`，同时绑定 source database revision；恢复会验证 target digest 与 source revision，任何升级期间写入、target 缺失或篡改均失败关闭，V2 source 与 active manifest 不变。此阶段的两个 target 仍是同一 snapshot，尚未宣称完成表归属拆分或 V3 密文转换；下一子切片必须在这些 target 内按领域所有者分离并转换，不能把“复制两份整库”当作最终架构。
 Risk: 磁盘不足、移动端短进程和崩溃会留下 staging；每个 phase 先耐久记录再执行可重复动作，promotion 前绝不改 source。
 
 Step 8:
