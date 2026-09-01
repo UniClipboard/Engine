@@ -31,6 +31,7 @@ use super::content_key_catalog::{
 struct State {
     master_key: Option<MasterKey>,
     space_id: Option<SpaceId>,
+    protection_group_id: Option<ProtectionGroupId>,
     current_content_key_id: Option<ContentKeyId>,
     current_epoch: Option<GroupEpoch>,
     content_keys: HashMap<ContentKeyId, ContentKeyEntry>,
@@ -46,6 +47,35 @@ pub(crate) struct ResolvedContentKey {
     content_key_id: ContentKeyId,
     epoch: GroupEpoch,
     key: MasterKey,
+}
+
+/// V3 持久内容新写入所需的完整原始密钥上下文。
+///
+/// 该值只在 Infra 内部跨越 session 与 `ContentProtection` 边界；调用方不能
+/// 选择保护组、key id 或 epoch，也不能取得密钥字节。
+pub(crate) struct ActiveContentProtectionKey {
+    protection_group_id: ProtectionGroupId,
+    content_key_id: ContentKeyId,
+    epoch: GroupEpoch,
+    key: MasterKey,
+}
+
+impl ActiveContentProtectionKey {
+    pub(crate) fn protection_group_id(&self) -> &ProtectionGroupId {
+        &self.protection_group_id
+    }
+
+    pub(crate) fn content_key_id(&self) -> &ContentKeyId {
+        &self.content_key_id
+    }
+
+    pub(crate) const fn epoch(&self) -> GroupEpoch {
+        self.epoch
+    }
+
+    pub(crate) fn key(&self) -> &MasterKey {
+        &self.key
+    }
 }
 
 impl ResolvedContentKey {
@@ -82,6 +112,7 @@ impl InMemorySession {
             state: Arc::new(Mutex::new(State {
                 master_key: None,
                 space_id: None,
+                protection_group_id: None,
                 current_content_key_id: None,
                 current_epoch: None,
                 content_keys: HashMap::new(),
@@ -128,6 +159,7 @@ impl InMemorySession {
             let mut state = self.lock_state();
             state.master_key = Some(master_key);
             state.space_id = None;
+            state.protection_group_id = None;
             state.current_content_key_id = None;
             state.current_epoch = None;
             state.content_keys.clear();
@@ -140,6 +172,7 @@ impl InMemorySession {
         let mut state = self.lock_state();
         state.master_key = Some(master_key.clone());
         state.space_id = Some(space_id);
+        state.protection_group_id = None;
         state.current_content_key_id = Some(ContentKeyId::legacy_v1());
         state.current_epoch = Some(GroupEpoch::new(0));
         state.content_keys.clear();
@@ -260,6 +293,7 @@ impl InMemorySession {
         {
             return Err(EncryptionError::KeyMaterialCorrupt);
         }
+        let protection_group_id = material.state().protection_group_id().cloned();
         let catalog = decode_content_key_catalog(material.key_catalog())?;
         if catalog.version != 1 && catalog.version != 2 {
             return Err(EncryptionError::UnsupportedVersion);
@@ -316,6 +350,7 @@ impl InMemorySession {
             return Err(EncryptionError::KeyMaterialCorrupt);
         }
         state.content_keys = keys;
+        state.protection_group_id = protection_group_id;
         state.current_content_key_id = Some(current_id.clone());
         state.current_epoch = Some(material.state().epoch());
         Ok(())
@@ -410,6 +445,35 @@ impl InMemorySession {
         Self::resolve_from_state(&state, content_key_id, purpose)
     }
 
+    pub(crate) fn current_content_protection_key(
+        &self,
+    ) -> Result<ActiveContentProtectionKey, EncryptionError> {
+        let state = self.lock_state();
+        let protection_group_id = state
+            .protection_group_id
+            .as_ref()
+            .cloned()
+            .ok_or(EncryptionError::NotInitialized)?;
+        let content_key_id = state
+            .current_content_key_id
+            .as_ref()
+            .cloned()
+            .ok_or(EncryptionError::NotInitialized)?;
+        let entry = state
+            .content_keys
+            .get(&content_key_id)
+            .ok_or(EncryptionError::KeyNotFound)?;
+        if entry.epoch != state.current_epoch.ok_or(EncryptionError::NotInitialized)? {
+            return Err(EncryptionError::KeyMaterialCorrupt);
+        }
+        Ok(ActiveContentProtectionKey {
+            protection_group_id,
+            content_key_id,
+            epoch: entry.epoch,
+            key: entry.key.clone(),
+        })
+    }
+
     pub(crate) fn current_space_id(&self) -> Result<SpaceId, EncryptionError> {
         self.lock_state()
             .space_id
@@ -493,6 +557,7 @@ impl InMemorySession {
             let mut state = self.lock_state();
             state.master_key = None;
             state.space_id = None;
+            state.protection_group_id = None;
             state.current_content_key_id = None;
             state.current_epoch = None;
             state.content_keys.clear();

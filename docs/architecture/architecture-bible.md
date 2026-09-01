@@ -276,7 +276,9 @@ Core 保存完整 admission aggregate 和状态转换规则。Application 内部
 
 持久内容使用不可变保护上下文，而不是当前活动 Space 作为解密上下文。V3 密文以随机且全 profile 唯一的 content key id 作为不透明引用，由 profile 加密 key vault 解析 `ProtectionGroupId`，purpose 由所属持久化 adapter 固定，并认证 protection group、content key id、group epoch、purpose 和业务 AAD；`ProtectionGroupId`、`SpaceId` 与 purpose 不作为新增明文密文头或索引字段落盘。活动 Space session 只决定新写入和网络传输使用的保护组，历史读取从密文引用选择保护组。目标 Space 和 peer 不因本机保存历史 catalog 而获得旧内容或旧网络权限。
 
-`ProfileContentKeyVault` 在 Infra 内是一个自有目录的深模块：调用方只安装完整且已验证的 `SpaceKeyMaterial`，或按 content key identity 与精确 epoch 解析；catalog 规范化、跨组冲突、独立 secure-storage key、AEAD framing、资源上限和崩溃安全原子替换全部隐藏在模块内部。Space security 的 V2 content-key catalog codec 是 session 与 vault 的单一事实来源。Vault 文件只保存整体 AEAD 密文，已有文件缺少独立 key、未知 framing、digest/epoch 冲突或密文损坏都失败关闭；Factory Reset 同时擦除 vault key 和 profile 数据目录。当前第二切片尚未接入 production session 或 V3 manifest promotion。
+`ProfileContentKeyVault` 在 Infra 内是一个自有目录的深模块：调用方只安装完整且已验证的 `SpaceKeyMaterial`，或按 content key identity 与精确 epoch 解析；catalog 规范化、跨组冲突、独立 secure-storage key、AEAD framing、资源上限和崩溃安全原子替换全部隐藏在模块内部。Space security 的 V2 content-key catalog codec 是 session 与 vault 的单一事实来源。Vault 文件只保存整体 AEAD 密文，已有文件缺少独立 key、未知 framing、digest/epoch 冲突或密文损坏都失败关闭；Factory Reset 同时擦除 vault key 和 profile 数据目录。
+
+`ContentProtection` 是 Infra 内 V3 持久业务负载的唯一密码深模块：所属 adapter 在构造时固定 purpose，调用方只能执行 `seal_for_active` 或 `open`。新写入上下文来自活动 session；历史读取严格从密文的 key identity 与 epoch 经 profile vault 解析所属保护组，不读取当前 Space。purpose HKDF、完整上下文 AAD、V3 envelope 校验和错误分类都由该模块隐藏。当前基础切片尚未接入 production repository、Engine 或 V3 manifest promotion，V2 正常路径及 session 历史 catalog 保持不变，直至全部 at-rest adapter 能一次性 clean cutover。
 
 V1/V2 到 V3 的转换只在软件升级时通过独立、原子、可恢复的 profile storage upgrade 执行一次。升级同时把本机历史/搜索/文件数据与 membership、credential、MLS 等 Space 控制面表拆入独立 generation。完成后，切换 Space 复用同一 profile SQLite/blob generation，只替换完整 Space control generation，不得扫描、复制或重加密历史业务负载。旧格式 reader 只能存在于升级模块，正常路径只写 V3。
 
@@ -869,6 +871,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-09-01 | 配对性能日志语言统一 | `admission.performance` decorator 与性能验收日志使用英文消息和固定结构化字段；本轮不改变准入流程、持久化语义或生产超时。 |
 | 2026-09-01 | 033 活动 generation 第一切片 | Core 新增 `ActiveRuntimeLayout`，只固定当前 Space、profile data generation 与 Space control generation 的合法组合；Infra 新增 V3 manifest 的规范 digest、领域映射和只读版本识别。生产 promotion 与运行路径仍保持 V2，合法 V3 在完整升级接线前以不支持版本失败关闭；未修改内容密码 port，也未改变 CrossSpace 行为。 |
 | 2026-09-01 | 033 profile content key vault 第二切片 | Infra 新增自有目录的 `ProfileContentKeyVault` 深模块，以独立 secure-storage key 整体 AEAD 保存多个历史保护组目录，完整安装负责规范合并、全 profile key identity 冲突拒绝和原子替换，精确解析不依赖当前 Space。session 与 vault 共用单一 V2 content-key catalog codec；缺钥、未知 framing、篡改均失败关闭，Factory Reset 同时擦除独立 key。当前未接入 production session、V3 manifest promotion 或 CrossSpace。 |
+| 2026-09-01 | 033 V3 内容保护第三切片 | Infra 新增未接 production 的 `ContentProtection` 深模块，构造时固定 purpose，并集中拥有 purpose HKDF、规范 AAD、严格 V3 envelope、活动写入和 vault 历史解析。切换活动 Space 后旧密文不读取当前 session，仍按 key identity 打开；session 只新增当前保护组写入 seam，既有 V2 reader 与历史 catalog 暂不删除。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |

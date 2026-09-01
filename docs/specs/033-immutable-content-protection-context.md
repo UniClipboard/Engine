@@ -1,6 +1,6 @@
 # 033 不可变内容保护上下文与一次性密文升级
 
-状态：实施中；第一切片已完成，032 在本规格完成前暂停实施
+状态：实施中；前三个基础切片已完成，032 在本规格完成前暂停实施
 
 本规格取代规格 023 中“CrossSpace 必须把本机历史重封装到目标 MasterKey”的规则，以及规格 028 中“切换前普通本机内容沿用 CrossSpace rebuild/rewrap”的规则。规格 023/028 的准入提交、门禁、恢复和 MLS 成员语义继续有效。
 
@@ -116,9 +116,9 @@ Relationship: 证明仓库已有 profile 稳定密钥范式，但内容 key vaul
 
 ### `ProfileContentKeyVault`
 
-- 职责：耐久、加密、原子地保存多个保护组的 content key catalog，并按完整 `ProtectionContextV1` 解析 purpose 派生密钥。
-- 输入：已通过 MLS/admission 验证的 `SpaceKeyMaterial`，或密文携带的保护上下文。
-- 输出：catalog 安装摘要或进程内零化 `ResolvedContentKey`。
+- 职责：耐久、加密、原子地保存多个保护组的 content key catalog，并按全 profile 唯一 key identity 与精确 epoch 解析原始 content key 及所属保护组。
+- 输入：已通过 MLS/admission 验证的 `SpaceKeyMaterial`，或密文携带的 `ContentKeyId + GroupEpoch`。
+- 输出：catalog 安装摘要，或包含所属 `ProtectionGroupId` 与原始 key 的进程内零化 `ResolvedContentKey`。
 - 关系：vault 文件由独立 `ProfileContentVaultKey` 使用 MasterKey AEAD 保护；该 key 存于 `SecureStoragePort`，生命周期属于 profile，只由 Factory Reset 删除。vault 不保存 OpenMLS 私有 group state，不决定哪个 Space 活动，也不向 peer 导出历史 catalog。
 
 ### `ActiveSpaceSecuritySession`
@@ -308,13 +308,14 @@ impl ProfileContentKeyVault {
 
     fn resolve(
         &self,
-        context: &ProtectionContextV1,
+        content_key_id: &ContentKeyId,
+        epoch: GroupEpoch,
     ) -> Result<ResolvedContentKey, ContentKeyVaultError>;
 }
 ```
 
 - `install_verified_space_material` 是完整原子动作；调用方不能逐 entry 写入。
-- `resolve` 验证 group、key id、epoch 和 purpose 后返回零化进程内 key，错误不暴露密钥、Space 或业务字段。
+- `resolve` 精确验证 key id 与 epoch 并返回所属保护组和零化原始 key；purpose 派生及完整 `ProtectionContextV1` 认证只由 `ContentProtection` 负责，不能散落到 vault 或调用方。
 - vault 的持久化 adapter 不进入 Core，不增加公开 `uc-engine` operation。
 
 ```rust
@@ -380,32 +381,37 @@ File: `crates/uc-infra/src/security/profile_content_key_vault/`、`crates/uc-inf
 Change: 新增使用独立 secure-storage key 的 profile 加密 vault 深模块。外部 interface 只暴露完整 material 安装和 `ContentKeyId + exact GroupEpoch` 解析；内部按规范 catalog 与加密 persistence 两类知识组织，统一复用 Space security 的 V2 catalog codec，完成多保护组合并、全 profile key identity 冲突拒绝、未知 framing/缺钥/篡改失败关闭、耐久原子替换和 Factory Reset 擦除。解析结果同时返回所属 `ProtectionGroupId`，后续 `ContentProtection` 必须据此认证 V3 context。本切片不接入 production session、不提升 V3 manifest，也不改变 CrossSpace。
 Risk: vault 丢失会使历史永久不可读；存在历史时绝不能自动再生缺失 key。
 
-Step 3:
+Step 3（已完成）:
+File: `crates/uc-infra/src/security/content_protection/`、`crates/uc-infra/src/space/security/session.rs`
+Change: 新增未接 production repository 的 V3 `ContentProtection` 深模块。构造时固定 at-rest purpose；`seal_for_active` 只从 session 取得当前保护组、非 legacy key id、精确 epoch 与原始 key，`open` 只从 V3 header 和 profile vault 重建历史上下文，不读取当前 Space。模块内部独占 purpose HKDF、规范长度编码 AAD、严格 V3 envelope 和稳定 source-preserving 错误；明文头不保存保护组、Space 或 purpose。session 本切片只增加当前写入保护组 seam，仍保留 V2 reader 所需历史 catalog，生产写入继续为 V2。
+Risk: 在 V2 reader 尚未 clean cutover 前删除 session 历史 catalog 会破坏现有读取；必须先让所有 at-rest adapter 统一委托 `ContentProtection`，再完成职责拆除。
+
+Step 4:
 File: `crates/uc-infra/src/space/security/session.rs`、`crates/uc-infra/src/space/security/access.rs`、Engine assembly
 Change: 把当前 MLS/security 与历史 content key resolver 拆开；`InMemorySession` 不再以单个 catalog 作为所有持久密文读取来源。目标 material 激活前先安装 vault，session 只保留当前写入和 transport 所需状态。
 Risk: transport 与 at-rest purpose 混用会扩大旧组网络权限；使用不同具体模块，不创建万能 session trait。
 
-Step 4:
+Step 5:
 File: `crates/uc-core/src/ports/security/blob_cipher.rs`、相关 Application port/错误模块、`crates/uc-infra/src/security/blob_cipher_adapter.rs`、`key_epoch_aad.rs`、`encrypted_blob_store.rs`、各加密 repository adapter
 Change: 定义共享 V3 protection context/AAD，更新 inline 和 UCBL 格式；将持久内容解密 interface 一次性改为不接收 `ActiveSpace`，所有持久化新写只产生 V3，open 自描述选择 key。把派生字段的 context、常量、读写和验证收口到所属 repository/module，并以 contract 测试证明调用方不能选择 protection context。
 Risk: 任一字段遗漏都会在切换后不可读；建立持久负载清单测试，不用一个字符串驱动的万能 rewrapper 隐藏差异。
 
-Step 5:
+Step 6:
 File: 搜索 key derivation、search repository/runtime 与索引版本
 Change: 引入 profile 稳定且按 protection group 域分离的 SearchKey，提升索引版本；查询对实际存在文档的保护组生成 token，渲染字段委托 V3 `ContentProtection`。
 Risk: 多历史保护组增加查询 token 数；对 group 数和 token 批次设明确上限，并以性能测试固定预算。
 
-Step 6:
+Step 7:
 File: 新增 `crates/uc-infra/src/security/profile_storage_upgrade/`、profile lifecycle/startup assembly
 Change: 实现 journal、独占锁、source snapshot、数据面/控制面表拆分、全量转换、两类 V3 production-reader 验证、manifest promotion 与清理；将 V1/V2 reader 和旧 rewrap 常量移动为 upgrade-private 实现。升级是一个深模块，Engine 只调用 `ensure_v3`。
 Risk: 磁盘不足、移动端短进程和崩溃会留下 staging；每个 phase 先耐久记录再执行可重复动作，promotion 前绝不改 source。
 
-Step 7:
+Step 8:
 File: `crates/uc-infra/src/security/admission_space_transition.rs`、Application transition tests、active manifest store
 Change: 新增完整 `SpaceControlGeneration` store；将 CrossSpace 改为复用 profile data generation，只安装 target catalog、提升 target control manifest 和重绑 control repositories/session；删除正常 CrossSpace 的 `rewrap_finalized_source`、source backup、payload rewrap 和 profile DB/blob replace 路径。Reset/branch 必须按各自语义单独验证，不能机械套用 CrossSpace。
 Risk: 旧 transition checkpoint 可能跨版本存在；启动时先由升级器识别并完成或稳定拒绝，不能用新状态机误读旧 phase。
 
-Step 8:
+Step 9:
 File: `docs/specs/023-durable-membership-proof-and-admission-activation.md`、`docs/specs/028-single-space-admission-protocol.md`、`docs/specs/032-admission-space-transition-internal-refactor.md`、安全文档与架构检查脚本
 Change: 完成实现后删除被 033 取代的旧行为正文，按最终代码重新撰写 032 的 transition 深模块边界；增加负向架构检查，禁止 CrossSpace 引用 payload upgrade/rewrap、旧 reader 或 source/target cipher pair。
 Risk: 只改代码不移除旧规范会导致后续 Agent 恢复错误实现；文档和检查必须与 clean cutover 同提交完成。

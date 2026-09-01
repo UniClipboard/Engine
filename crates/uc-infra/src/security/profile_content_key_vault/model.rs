@@ -71,8 +71,6 @@ pub struct ResolvedProfileContentKey {
     pub(super) protection_group_id: ProtectionGroupId,
     pub(super) content_key_id: ContentKeyId,
     pub(super) epoch: GroupEpoch,
-    // 下一切片由 ContentProtection 消费；本切片先固定零化返回值与解析 seam。
-    #[allow(dead_code)]
     pub(super) key: MasterKey,
 }
 
@@ -89,7 +87,6 @@ impl ResolvedProfileContentKey {
         self.epoch
     }
 
-    #[allow(dead_code)]
     pub(crate) fn key(&self) -> &MasterKey {
         &self.key
     }

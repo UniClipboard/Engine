@@ -3,6 +3,7 @@ mod admission_key_manager;
 mod admission_proof;
 mod admission_space_transition;
 mod blob_cipher_adapter;
+mod content_protection;
 pub mod crypto_model;
 mod decrypting_clipboard_event_repo;
 mod decrypting_representation_repo;
@@ -31,6 +32,7 @@ pub use admission_key_manager::{
 pub use admission_proof::HmacProofAdapter;
 pub use admission_space_transition::{space_generation_directory, DurableAdmissionSpaceTransition};
 pub use blob_cipher_adapter::BlobCipherAdapter;
+pub use content_protection::{ContentProtection, ContentProtectionError};
 pub use crypto_model::{
     EncryptedBlob, KdfParams, KdfParamsV1, KeyScope, KeySlot, KeySlotConvertError, KeySlotFile,
     WrappedMasterKey,
