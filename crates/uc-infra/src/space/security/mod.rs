@@ -1,4 +1,5 @@
 mod access;
+mod active_space_security_session;
 mod content_key_catalog;
 mod history_signature;
 mod key_material;

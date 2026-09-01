@@ -1,6 +1,6 @@
 # 033 不可变内容保护上下文与一次性密文升级
 
-状态：实施中；前三个基础切片已完成，032 在本规格完成前暂停实施
+状态：实施中；前三个基础切片及第四步的激活事务子切片已完成，032 在本规格完成前暂停实施
 
 本规格取代规格 023 中“CrossSpace 必须把本机历史重封装到目标 MasterKey”的规则，以及规格 028 中“切换前普通本机内容沿用 CrossSpace rebuild/rewrap”的规则。规格 023/028 的准入提交、门禁、恢复和 MLS 成员语义继续有效。
 
@@ -386,9 +386,9 @@ File: `crates/uc-infra/src/security/content_protection/`、`crates/uc-infra/src/
 Change: 新增未接 production repository 的 V3 `ContentProtection` 深模块。构造时固定 at-rest purpose；`seal_for_active` 只从 session 取得当前保护组、非 legacy key id、精确 epoch 与原始 key，`open` 只从 V3 header 和 profile vault 重建历史上下文，不读取当前 Space。模块内部独占 purpose HKDF、规范长度编码 AAD、严格 V3 envelope 和稳定 source-preserving 错误；明文头不保存保护组、Space 或 purpose。session 本切片只增加当前写入保护组 seam，仍保留 V2 reader 所需历史 catalog，生产写入继续为 V2。
 Risk: 在 V2 reader 尚未 clean cutover 前删除 session 历史 catalog 会破坏现有读取；必须先让所有 at-rest adapter 统一委托 `ContentProtection`，再完成职责拆除。
 
-Step 4:
+Step 4（进行中；激活事务子切片已完成）:
 File: `crates/uc-infra/src/space/security/session.rs`、`crates/uc-infra/src/space/security/access.rs`、Engine assembly
-Change: 把当前 MLS/security 与历史 content key resolver 拆开；`InMemorySession` 不再以单个 catalog 作为所有持久密文读取来源。目标 material 激活前先安装 vault，session 只保留当前写入和 transport 所需状态。
+Change: 第一子切片新增 `ActiveSpaceSecuritySession` 深模块，并由 Engine 为正常 Space security runtime 组装唯一 profile vault。恢复或安装目标 material 时，该模块在互斥事务中先验证归属并耐久安装完整 catalog，成功后才切换 `InMemorySession`；vault 冲突、缺钥或持久化失败保持旧活动 session，session 安装失败恢复旧 snapshot，已成功追加但尚未被 session 引用的 catalog 保留并供幂等重试。Fresh group join 与普通 session 恢复共用该入口，Legacy 无 material 激活不伪造 catalog；新增 `SpaceAccessError::SecurityState` 保留完整 source chain。后续子切片仍需让当前 epoch/material 更新共用 vault 安装边界，并在 Step 5 的 V3 reader clean cutover 后，从 `InMemorySession` 删除持久历史解析职责。本子切片不接 production V3 payload、不删除 V2 历史 catalog，也不改变 V2 manifest 或旧 CrossSpace transition。
 Risk: transport 与 at-rest purpose 混用会扩大旧组网络权限；使用不同具体模块，不创建万能 session trait。
 
 Step 5:

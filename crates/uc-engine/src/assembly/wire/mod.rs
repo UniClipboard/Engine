@@ -69,8 +69,8 @@ use uc_infra::search::{HkdfSearchKeyDerivation, SearchPipeline, SqliteSearchInde
 use uc_infra::security::{
     space_generation_directory, ActiveSpaceGenerationManifestStore, AdmissionKeyManager,
     Argon2PinHasher, Blake3Hasher, DecryptingClipboardRepresentationRepository,
-    EncryptingClipboardEventWriter, EncryptingInboundReceiveCommit, ProfileLifecycleRepository,
-    Sha256IdentityFingerprintFactory, Sha256ShortCodeGenerator,
+    EncryptingClipboardEventWriter, EncryptingInboundReceiveCommit, ProfileContentKeyVault,
+    ProfileLifecycleRepository, Sha256IdentityFingerprintFactory, Sha256ShortCodeGenerator,
 };
 use uc_infra::settings::repository::FileSettingsRepository;
 use uc_infra::space::{
@@ -232,6 +232,11 @@ pub fn wire_dependencies_from_inputs(
         Arc::clone(&secure_storage),
         profile_lifecycle.generation().into_bytes(),
     ));
+    let profile_content_key_vault = Arc::new(ProfileContentKeyVault::new(
+        vault_path.clone(),
+        Arc::clone(&secure_storage),
+        profile_lifecycle.generation().into_bytes(),
+    ));
     let active_generation_manifest_store = Arc::new(ActiveSpaceGenerationManifestStore::new(
         vault_path.clone(),
         Arc::clone(&admission_keys),
@@ -321,6 +326,7 @@ pub fn wire_dependencies_from_inputs(
             &platform.current_profile,
             &platform.session,
             &infra.db_executor,
+            &profile_content_key_vault,
         );
     let profile_key_access_probe = space_access_adapter.clone();
     let membership_session = Arc::clone(&platform.session);

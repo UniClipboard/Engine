@@ -40,7 +40,7 @@ use uc_core::crypto::domain::{ActiveSpace, Passphrase as DomainPassphrase};
 use uc_core::crypto::model::{EncryptionError, Passphrase as LegacyPassphrase};
 
 use crate::security::crypto_model::{EncryptedBlob, KeyScope, KeySlot, WrappedMasterKey};
-use crate::security::{v1_aead, Kek, MasterKey};
+use crate::security::{v1_aead, Kek, MasterKey, ProfileContentKeyVault};
 use uc_core::ids::{DeviceId, ProfileId, SessionId, SpaceId};
 use uc_core::membership::{
     AdmissionReplayId, BeginRevocationOutcome, BootstrapError, BootstrapId, GroupBootstrapPort,
@@ -60,6 +60,9 @@ use uc_core::space_access::{
     PreparedAdmissionTargetAccess, PreparedGroupJoin, ProofDerivedKey,
 };
 
+use super::active_space_security_session::{
+    ActiveSpaceSecuritySession, ActiveSpaceSecuritySessionError,
+};
 use super::key_material::KeyMaterialStore;
 use super::mls_group::{MlsClientState, MlsGroupEngine, PendingMlsJoin};
 use super::scope_identifier::scope_identifier;
@@ -87,6 +90,9 @@ pub struct DefaultSpaceAccessAdapter {
     key_material: Arc<KeyMaterialStore>,
     current_profile: Arc<dyn CurrentProfilePort>,
     pub(super) session: Arc<InMemorySession>,
+    /// 只有不配置安全材料 repository 的 legacy/config-migration 构造路径为空；
+    /// 正常 runtime 构造器必须同时注入 profile vault。
+    active_security_session: Option<ActiveSpaceSecuritySession>,
     pub(super) key_epoch_repository: Option<Arc<dyn RevocationRepositoryPort>>,
     legacy_bootstrap_repository: Option<Arc<dyn LegacyBootstrapRepositoryPort>>,
     /// 本进程内是否已经确认 keychain 中存在与本机 keyslot 匹配的 KEK。
@@ -102,6 +108,9 @@ pub struct DefaultSpaceAccessAdapter {
 }
 
 impl DefaultSpaceAccessAdapter {
+    /// 构造不读取 Ready `SpaceKeyMaterial` 的 legacy 访问器。
+    ///
+    /// 正常 Engine runtime 必须使用带 security repository 与 profile vault 的构造器。
     pub fn new(
         key_material: Arc<KeyMaterialStore>,
         current_profile: Arc<dyn CurrentProfilePort>,
@@ -111,6 +120,7 @@ impl DefaultSpaceAccessAdapter {
             key_material,
             current_profile,
             session,
+            active_security_session: None,
             key_epoch_repository: None,
             legacy_bootstrap_repository: None,
             kek_observed: AtomicBool::new(false),
@@ -122,11 +132,15 @@ impl DefaultSpaceAccessAdapter {
         current_profile: Arc<dyn CurrentProfilePort>,
         session: Arc<InMemorySession>,
         key_epoch_repository: Arc<dyn RevocationRepositoryPort>,
+        profile_content_key_vault: Arc<ProfileContentKeyVault>,
     ) -> Self {
+        let active_security_session =
+            ActiveSpaceSecuritySession::new(Arc::clone(&session), profile_content_key_vault);
         Self {
             key_material,
             current_profile,
             session,
+            active_security_session: Some(active_security_session),
             key_epoch_repository: Some(key_epoch_repository),
             legacy_bootstrap_repository: None,
             kek_observed: AtomicBool::new(false),
@@ -139,15 +153,25 @@ impl DefaultSpaceAccessAdapter {
         session: Arc<InMemorySession>,
         key_epoch_repository: Arc<dyn RevocationRepositoryPort>,
         legacy_bootstrap_repository: Arc<dyn LegacyBootstrapRepositoryPort>,
+        profile_content_key_vault: Arc<ProfileContentKeyVault>,
     ) -> Self {
+        let active_security_session =
+            ActiveSpaceSecuritySession::new(Arc::clone(&session), profile_content_key_vault);
         Self {
             key_material,
             current_profile,
             session,
+            active_security_session: Some(active_security_session),
             key_epoch_repository: Some(key_epoch_repository),
             legacy_bootstrap_repository: Some(legacy_bootstrap_repository),
             kek_observed: AtomicBool::new(false),
         }
+    }
+}
+
+fn map_active_security_session_error(source: ActiveSpaceSecuritySessionError) -> SpaceAccessError {
+    SpaceAccessError::SecurityState {
+        source: anyhow::Error::new(source),
     }
 }
 
@@ -854,17 +878,25 @@ impl DefaultSpaceAccessAdapter {
                 .await;
             return Err(map_encryption_error(error));
         }
-        self.session
-            .set_master_key_for_space(space_id.clone(), local_root);
-        if let Err(error) = self.session.install_space_material(&material) {
+        let active_security_session = self.active_security_session.as_ref().ok_or_else(|| {
+            SpaceAccessError::SecurityState {
+                source: anyhow::anyhow!("active security session is unavailable"),
+            }
+        })?;
+        if let Err(error) = active_security_session
+            .activate(space_id, local_root, Some(&material))
+            .await
+        {
             self.restore_join_install(&scope, previous, previous_session)
                 .await;
-            return Err(map_encryption_error(error));
+            return Err(map_active_security_session_error(error));
         }
         if let Err(error) = repository.save_space_material(&material).await {
             self.restore_join_install(&scope, previous, previous_session)
                 .await;
-            return Err(SpaceAccessError::Internal(error.to_string()));
+            return Err(SpaceAccessError::SecurityState {
+                source: anyhow::Error::new(error),
+            });
         }
         self.kek_observed.store(true, Ordering::Release);
         Ok(())
@@ -1621,9 +1653,9 @@ impl DefaultSpaceAccessAdapter {
         space_id: &SpaceId,
         master_key: MasterKey,
     ) -> Result<(), SpaceAccessError> {
-        self.session
-            .set_master_key_for_space(space_id.clone(), master_key);
         let Some(repository) = &self.key_epoch_repository else {
+            self.session
+                .set_master_key_for_space(space_id.clone(), master_key);
             return Ok(());
         };
 
@@ -1634,27 +1666,35 @@ impl DefaultSpaceAccessAdapter {
                     pending_group_update_count = material.pending_group_updates().len(),
                     "空间会话恢复已读取安全材料"
                 );
-                material
+                Some(material)
             }
             // A missing record is an existing Legacy space, not evidence that
             // a group and new content key catalog have been safely created.
             Ok(None) => {
                 info!("空间会话恢复未发现群组安全材料");
-                return Ok(());
+                None
             }
             Err(error) => {
-                self.session.clear();
-                return Err(SpaceAccessError::Internal(error.to_string()));
+                return Err(SpaceAccessError::SecurityState {
+                    source: anyhow::Error::new(error),
+                });
             }
         };
-        if let Err(error) = self.session.install_space_material(&material) {
-            self.session.clear();
-            return Err(map_encryption_error(error));
+        let active_security_session = self.active_security_session.as_ref().ok_or_else(|| {
+            SpaceAccessError::SecurityState {
+                source: anyhow::anyhow!("active security session is unavailable"),
+            }
+        })?;
+        active_security_session
+            .activate(space_id, master_key, material.as_ref())
+            .await
+            .map_err(map_active_security_session_error)?;
+        if let Some(material) = material {
+            info!(
+                group_epoch = material.state().epoch().value(),
+                "空间会话安全材料已安装"
+            );
         }
-        info!(
-            group_epoch = material.state().epoch().value(),
-            "空间会话安全材料已安装"
-        );
         Ok(())
     }
 
@@ -3972,17 +4012,48 @@ mod admission_tests {
         ))
     }
 
+    fn profile_content_key_vault(directory: &TempDir) -> Arc<ProfileContentKeyVault> {
+        Arc::new(ProfileContentKeyVault::new(
+            directory.path().join("profile-content-vault"),
+            memory_secure_storage(),
+            [0x61; 16],
+        ))
+    }
+
     fn adapter(
+        directory: &TempDir,
         key_material: Arc<KeyMaterialStore>,
         session: Arc<InMemorySession>,
         repository: Arc<MockRevocationRepository>,
     ) -> DefaultSpaceAccessAdapter {
-        DefaultSpaceAccessAdapter::new_with_key_epoch_repository(
+        adapter_with_vault(directory, key_material, session, repository).0
+    }
+
+    fn adapter_with_vault(
+        directory: &TempDir,
+        key_material: Arc<KeyMaterialStore>,
+        session: Arc<InMemorySession>,
+        repository: Arc<MockRevocationRepository>,
+    ) -> (DefaultSpaceAccessAdapter, Arc<ProfileContentKeyVault>) {
+        let vault = profile_content_key_vault(directory);
+        let adapter = adapter_with_existing_vault(key_material, session, repository, &vault);
+        (adapter, vault)
+    }
+
+    fn adapter_with_existing_vault(
+        key_material: Arc<KeyMaterialStore>,
+        session: Arc<InMemorySession>,
+        repository: Arc<MockRevocationRepository>,
+        vault: &Arc<ProfileContentKeyVault>,
+    ) -> DefaultSpaceAccessAdapter {
+        let adapter = DefaultSpaceAccessAdapter::new_with_key_epoch_repository(
             key_material,
             Arc::new(DefaultCurrentProfile::new()),
             session,
             repository,
-        )
+            Arc::clone(vault),
+        );
+        adapter
     }
 
     #[tokio::test]
@@ -4003,6 +4074,7 @@ mod admission_tests {
             Arc::clone(&session),
             key_epoch_repository,
             bootstrap_repository.clone(),
+            profile_content_key_vault(&directory),
         );
         let sponsor = DeviceId::new("sponsor-device");
         let retained = DeviceId::new("retained-device");
@@ -4076,6 +4148,7 @@ mod admission_tests {
             Arc::clone(&session),
             key_epoch_repository,
             bootstrap_repository.clone(),
+            profile_content_key_vault(&directory),
         );
         let sponsor = DeviceId::new("sponsor-device");
         let removed = DeviceId::new("legacy-device");
@@ -4120,6 +4193,7 @@ mod admission_tests {
             Arc::clone(&session),
             key_epoch_port,
             bootstrap_repository,
+            profile_content_key_vault(&directory),
         );
         let sponsor = DeviceId::new("device-b");
         let retained = DeviceId::new("device-c");
@@ -4184,7 +4258,12 @@ mod admission_tests {
             memory_revocation_repository_with_stage_persistence(Some(material), persist_stage);
         let key_material = local_key_material(&directory, memory_secure_storage());
         (
-            adapter(key_material, session.clone(), repository.clone()),
+            adapter(
+                &directory,
+                key_material,
+                session.clone(),
+                repository.clone(),
+            ),
             session,
             repository,
             space_id,
@@ -4399,6 +4478,7 @@ mod admission_tests {
         .unwrap();
         repository.begin_revocation(&prepared).await.unwrap();
         let adapter = adapter(
+            &directory,
             local_key_material(&directory, memory_secure_storage()),
             session,
             repository,
@@ -4463,6 +4543,7 @@ mod admission_tests {
             .times(1)
             .return_once(|_| Ok(None));
         let adapter = adapter(
+            &directory,
             local_key_material(&directory, memory_secure_storage()),
             session,
             Arc::new(repository),
@@ -4498,6 +4579,7 @@ mod admission_tests {
             .times(1)
             .return_once(move || Ok(vec![other_space_record]));
         let adapter = adapter(
+            &directory,
             local_key_material(&directory, memory_secure_storage()),
             session,
             Arc::new(repository),
@@ -4542,6 +4624,7 @@ mod admission_tests {
             });
         repository.expect_resolve_prepared_revocation().never();
         let adapter = adapter(
+            &directory,
             local_key_material(&directory, memory_secure_storage()),
             session,
             Arc::new(repository),
@@ -4589,6 +4672,7 @@ mod admission_tests {
             Arc::new(DefaultCurrentProfile::new()),
             session,
             reopened,
+            profile_content_key_vault(&directory),
         );
 
         let current = restarted.current_group_revocation().await.unwrap().unwrap();
@@ -4834,6 +4918,7 @@ mod admission_tests {
         session.set_master_key_for_space(space_id, MasterKey::from_bytes(&[0x31; 32]).unwrap());
         let (repository, _) = memory_revocation_repository(None);
         let adapter = adapter(
+            &directory,
             local_key_material(&directory, memory_secure_storage()),
             session,
             repository,
@@ -4864,6 +4949,7 @@ mod admission_tests {
         let material = SpaceKeyMaterial::new(state, Vec::new(), vec![0x01], 100);
         let (repository, _) = memory_revocation_repository(Some(material));
         let adapter = adapter(
+            &directory,
             local_key_material(&directory, memory_secure_storage()),
             session,
             repository,
@@ -4891,6 +4977,7 @@ mod admission_tests {
         );
         let (repository, _) = memory_revocation_repository(None);
         let adapter = adapter(
+            &directory,
             local_key_material(&directory, memory_secure_storage()),
             Arc::clone(&session),
             Arc::clone(&repository),
@@ -4930,6 +5017,7 @@ mod admission_tests {
         );
         let (repository, _) = memory_revocation_repository(None);
         let adapter = adapter(
+            &directory,
             local_key_material(&directory, memory_secure_storage()),
             session,
             repository,
@@ -4965,6 +5053,7 @@ mod admission_tests {
             .returning(|_| Ok(None));
         repository.expect_save_space_material().never();
         let adapter = adapter(
+            &directory,
             local_key_material(&directory, memory_secure_storage()),
             Arc::clone(&session),
             Arc::new(repository),
@@ -4980,6 +5069,69 @@ mod admission_tests {
             .unwrap();
         assert_eq!(current.content_key_id(), &ContentKeyId::legacy_v1());
         assert_eq!(current.epoch(), GroupEpoch::new(0));
+    }
+
+    #[tokio::test]
+    async fn activate_session_installs_catalog_and_preserves_old_session_on_vault_conflict() {
+        use std::error::Error as _;
+
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let old_space = SpaceId::from("old-space");
+        session.set_master_key_for_space(
+            old_space.clone(),
+            MasterKey::from_bytes(&[0x21; 32]).unwrap(),
+        );
+        let target_space = SpaceId::from("target-space");
+        let material_builder = InMemorySession::new();
+        material_builder.set_master_key_for_space(
+            target_space.clone(),
+            MasterKey::from_bytes(&[0x31; 32]).unwrap(),
+        );
+        let target_material = material_builder
+            .create_migrated_space_material(&target_space, 100)
+            .unwrap();
+        let conflicting_state = SpaceKeyState::ready_for_admission(
+            SpaceId::from("historical-space"),
+            target_material.state().epoch(),
+            target_material.state().current_content_key_id().clone(),
+            ProtectionGroupId::generate(),
+        )
+        .unwrap();
+        let conflicting_material = SpaceKeyMaterial::new(
+            conflicting_state,
+            target_material.group_state().to_vec(),
+            target_material.key_catalog().to_vec(),
+            99,
+        );
+        let mut repository = MockRevocationRepository::new();
+        repository
+            .expect_load_space_material()
+            .withf(move |space_id| space_id == &target_space)
+            .times(1)
+            .return_once(move |_| Ok(Some(target_material)));
+        let (adapter, vault) = adapter_with_vault(
+            &directory,
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::clone(&session),
+            Arc::new(repository),
+        );
+        vault
+            .install_verified_space_material(&conflicting_material)
+            .await
+            .unwrap();
+
+        let error = adapter
+            .activate_session(
+                &SpaceId::from("target-space"),
+                MasterKey::from_bytes(&[0x41; 32]).unwrap(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, SpaceAccessError::SecurityState { .. }));
+        assert!(error.source().is_some());
+        assert_eq!(session.current_space_id().unwrap(), old_space);
     }
 
     #[test]
@@ -5043,7 +5195,8 @@ mod admission_tests {
         let joiner_key_material = local_key_material(&joiner_dir, joiner_storage);
         let joiner_session = Arc::new(InMemorySession::new());
         let (joiner_repository, _) = memory_revocation_repository(None);
-        let joiner = adapter(
+        let (joiner, joiner_vault) = adapter_with_vault(
+            &joiner_dir,
             joiner_key_material.clone(),
             joiner_session.clone(),
             joiner_repository.clone(),
@@ -5092,10 +5245,11 @@ mod admission_tests {
         assert_eq!(sponsor_current.key(), joiner_current.key());
 
         let restored_session = Arc::new(InMemorySession::new());
-        let restored = adapter(
+        let restored = adapter_with_existing_vault(
             joiner_key_material,
             restored_session.clone(),
             joiner_repository,
+            &joiner_vault,
         );
         SpaceAccessStore::unlock(
             &restored,
@@ -5112,6 +5266,8 @@ mod admission_tests {
 
     #[tokio::test]
     async fn failed_group_install_restores_previous_local_state() {
+        use std::error::Error as _;
+
         let (sponsor, _, _, target_space, _sponsor_dir) = sponsor_fixture();
         let joiner_dir = tempdir().unwrap();
         let joiner_storage = memory_secure_storage();
@@ -5119,6 +5275,7 @@ mod admission_tests {
         let joiner_session = Arc::new(InMemorySession::new());
         let (joiner_repository, fail_saves) = memory_revocation_repository(None);
         let joiner = adapter(
+            &joiner_dir,
             joiner_key_material.clone(),
             joiner_session.clone(),
             joiner_repository.clone(),
@@ -5154,7 +5311,7 @@ mod admission_tests {
             .await
             .unwrap();
         fail_saves.store(true, Ordering::Release);
-        assert!(joiner
+        let error = joiner
             .install_group_join(
                 &target_space,
                 &Passphrase::new("new passphrase is not committed"),
@@ -5164,7 +5321,10 @@ mod admission_tests {
                 admission.group_epoch,
             )
             .await
-            .is_err());
+            .unwrap_err();
+
+        assert!(matches!(error, SpaceAccessError::SecurityState { .. }));
+        assert!(error.source().is_some());
 
         assert_eq!(joiner_session.current_space_id().unwrap(), old_space);
         assert_eq!(joiner_session.get_master_key().unwrap(), old_root);
@@ -5188,7 +5348,12 @@ mod admission_tests {
         let key_material = local_key_material(&directory, secure_storage);
         let session = Arc::new(InMemorySession::new());
         let (repository, _) = memory_revocation_repository(None);
-        let adapter = adapter(key_material.clone(), session.clone(), repository);
+        let adapter = adapter(
+            &directory,
+            key_material.clone(),
+            session.clone(),
+            repository,
+        );
         let source_space = SpaceId::from("source-space");
         SpaceAccessStore::initialize(
             &adapter,
@@ -5231,7 +5396,12 @@ mod admission_tests {
         let key_material = local_key_material(&directory, secure_storage);
         let session = Arc::new(InMemorySession::new());
         let (repository, _) = memory_revocation_repository(None);
-        let adapter = adapter(key_material.clone(), session.clone(), repository);
+        let adapter = adapter(
+            &directory,
+            key_material.clone(),
+            session.clone(),
+            repository,
+        );
         let source_space = SpaceId::from("source-space");
         let target_space = SpaceId::from("target-space");
         SpaceAccessStore::initialize(
@@ -5488,6 +5658,7 @@ mod admission_tests {
             .withf(|stage, _| stage.record().status() == RevocationStatus::RecoveryRequired)
             .returning(|stage, _| Ok(stage.record().clone()));
         let adapter = adapter(
+            &directory,
             local_key_material(&directory, memory_secure_storage()),
             Arc::new(InMemorySession::new()),
             Arc::new(repository),
@@ -5540,6 +5711,7 @@ mod admission_tests {
         let bob_session = Arc::new(InMemorySession::new());
         let (bob_repository, _) = memory_revocation_repository(None);
         let bob = adapter(
+            &bob_dir,
             local_key_material(&bob_dir, memory_secure_storage()),
             bob_session.clone(),
             bob_repository.clone(),
@@ -5647,6 +5819,7 @@ mod admission_tests {
         let device_a_session = Arc::new(InMemorySession::new());
         let (device_a_repository, _) = memory_revocation_repository(None);
         let device_a = adapter(
+            &device_a_dir,
             local_key_material(&device_a_dir, memory_secure_storage()),
             Arc::clone(&device_a_session),
             Arc::clone(&device_a_repository),
@@ -5679,6 +5852,7 @@ mod admission_tests {
         let device_c_session = Arc::new(InMemorySession::new());
         let (device_c_repository, _) = memory_revocation_repository(None);
         let device_c = adapter(
+            &device_c_dir,
             local_key_material(&device_c_dir, memory_secure_storage()),
             device_c_session,
             device_c_repository,
@@ -5738,6 +5912,7 @@ mod admission_tests {
         let recipient_session = Arc::new(InMemorySession::new());
         let (recipient_repository, _) = memory_revocation_repository(None);
         let recipient = adapter(
+            &recipient_dir,
             local_key_material(&recipient_dir, memory_secure_storage()),
             recipient_session,
             Arc::clone(&recipient_repository),
@@ -5773,6 +5948,7 @@ mod admission_tests {
         let contender_session = Arc::new(InMemorySession::new());
         let (contender_repository, _) = memory_revocation_repository(None);
         let contender = adapter(
+            &contender_dir,
             local_key_material(&contender_dir, memory_secure_storage()),
             contender_session,
             Arc::clone(&contender_repository),

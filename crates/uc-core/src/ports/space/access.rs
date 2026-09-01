@@ -50,6 +50,13 @@ pub enum SpaceAccessError {
     #[error("space key material corrupted or unsupported")]
     CorruptedKeyMaterial,
 
+    /// 已验证的 Space 安全状态无法完成耐久 catalog 与活动会话安装。
+    #[error("space security state could not be activated")]
+    SecurityState {
+        #[source]
+        source: anyhow::Error,
+    },
+
     /// 其它内部故障（底层 IO / 算法实现异常等）。
     #[error("space access internal error: {0}")]
     Internal(String),

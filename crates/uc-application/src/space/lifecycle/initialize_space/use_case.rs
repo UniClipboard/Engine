@@ -303,6 +303,9 @@ fn map_initialize_space_access_err(err: SpaceAccessError) -> InitializeSpaceErro
         SpaceAccessError::Internal(message) => {
             InitializeSpaceError::internal(anyhow::anyhow!(message))
         }
+        SpaceAccessError::SecurityState { source } => {
+            InitializeSpaceError::internal(source.context("activate initialized space security"))
+        }
         // `initialize` should not raise these — map to Internal so we
         // surface bugs rather than silently miscategorising.
         other => InitializeSpaceError::internal(anyhow::anyhow!(
@@ -315,6 +318,7 @@ fn map_initialize_space_access_err(err: SpaceAccessError) -> InitializeSpaceErro
 mod tests {
     use super::*;
 
+    use std::error::Error as _;
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
@@ -328,6 +332,16 @@ mod tests {
     use uc_core::settings::model::Settings;
 
     // ---------- Fakes ----------
+
+    #[test]
+    fn security_state_failure_maps_to_internal_with_its_source() {
+        let error = map_initialize_space_access_err(SpaceAccessError::SecurityState {
+            source: anyhow::anyhow!("classified lower failure"),
+        });
+
+        assert!(matches!(error, InitializeSpaceError::Internal { .. }));
+        assert!(error.source().is_some());
+    }
 
     #[derive(Default)]
     struct FakeSpaceAccess {

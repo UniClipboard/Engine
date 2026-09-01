@@ -38,6 +38,7 @@ pub(super) fn build_space_access_ports(
     current_profile: &Arc<dyn uc_core::ports::security::current_profile::CurrentProfilePort>,
     session: &Arc<InMemorySession>,
     db_executor: &Arc<DieselSqliteExecutor>,
+    profile_content_key_vault: &Arc<ProfileContentKeyVault>,
 ) -> (
     SpaceAccessPorts,
     Arc<uc_infra::space::DefaultSpaceAccessAdapter>,
@@ -61,6 +62,7 @@ pub(super) fn build_space_access_ports(
             session.clone(),
             key_epoch_repository,
             legacy_bootstrap_repository,
+            Arc::clone(profile_content_key_vault),
         ),
     );
     let current_member_signatures: Arc<dyn uc_application::deps::CurrentMemberSignaturePort> =

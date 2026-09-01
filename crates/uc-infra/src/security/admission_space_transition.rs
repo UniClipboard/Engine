@@ -3365,7 +3365,7 @@ mod tests {
     use crate::search::render_payload::{RenderFields, RenderPayloadCodec};
     use crate::security::{
         ActiveSpaceGenerationManifestStore, AdmissionKeyManager, BlobCipherAdapter,
-        DefaultCurrentProfile, EncryptedBlobStore, MasterKey,
+        DefaultCurrentProfile, EncryptedBlobStore, MasterKey, ProfileContentKeyVault,
     };
     use crate::space::{
         prepare_registration, DefaultSpaceAccessAdapter, InMemorySession, KeyMaterialStore,
@@ -3433,6 +3433,11 @@ mod tests {
             Arc::new(DefaultCurrentProfile::new()),
             Arc::clone(&recipient_session),
             recipient_repository,
+            Arc::new(ProfileContentKeyVault::new(
+                vault.join("recipient-content-vault"),
+                Arc::clone(&secure_storage),
+                [0x32; 16],
+            )),
         ));
         let space_id = SpaceId::from_str("branch-transition-space");
 
@@ -3453,6 +3458,11 @@ mod tests {
             Arc::clone(&sponsor_session),
             sponsor_repository.clone() as Arc<dyn RevocationRepositoryPort>,
             sponsor_repository as Arc<dyn uc_core::membership::LegacyBootstrapRepositoryPort>,
+            Arc::new(ProfileContentKeyVault::new(
+                vault.join("sponsor-content-vault"),
+                Arc::clone(&sponsor_storage),
+                [0x33; 16],
+            )),
         );
         SpaceAccessStore::initialize(
             &sponsor_access,
@@ -3866,6 +3876,11 @@ mod tests {
             Arc::new(DefaultCurrentProfile::new()),
             Arc::clone(&session),
             key_epoch_repository,
+            Arc::new(ProfileContentKeyVault::new(
+                vault.join("profile-content-vault"),
+                Arc::clone(&secure_storage),
+                [0x42; 16],
+            )),
         ));
         SpaceAccessStore::initialize(
             access.as_ref(),
@@ -3985,6 +4000,11 @@ mod tests {
             Arc::new(DefaultCurrentProfile::new()),
             Arc::clone(&session),
             key_epoch_repository,
+            Arc::new(ProfileContentKeyVault::new(
+                vault.join("profile-content-vault"),
+                Arc::clone(&secure_storage),
+                [0x52; 16],
+            )),
         ));
         let source_space = SpaceId::from_str("source-space");
         let target_space = SpaceId::from_str("target-space");
@@ -4239,6 +4259,11 @@ mod tests {
             Arc::clone(&current_profile),
             Arc::clone(&session),
             key_epoch_repository,
+            Arc::new(ProfileContentKeyVault::new(
+                vault.join("profile-content-vault"),
+                Arc::clone(&secure_storage),
+                [0x92; 16],
+            )),
         ));
         let target_space = SpaceId::from_str("fresh-target-space");
         let target_access = PrepareAdmissionTargetAccessPort::prepare_target_access(
@@ -4373,6 +4398,11 @@ mod tests {
             Arc::new(DefaultCurrentProfile::new()),
             Arc::clone(&session),
             key_epoch_repository,
+            Arc::new(ProfileContentKeyVault::new(
+                vault.join("profile-content-vault"),
+                Arc::clone(&secure_storage),
+                [0xa2; 16],
+            )),
         ));
         let target_space = SpaceId::from_str("same-space");
         SpaceAccessStore::initialize(
