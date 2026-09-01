@@ -400,6 +400,8 @@ Change: 定义共享 V3 protection context/AAD，更新 inline 和 UCBL 格式�
 Change: 第一子切片先从 `BlobCipherPort::encrypt/decrypt` 同时删除 `ActiveSpace` 参数，清除四类 inline decorator、旧 migration recovery 和待删 CrossSpace 中伪造的占位 Space。调用方现在只提交 payload 与业务实体 AAD；当前 V1/V2 兼容 adapter 仍从共享 session 内部选取上下文，wire format 和生产行为不变。此切片不启用 V3 writer、不增加 production 双 reader，也不修改 UCBL、搜索或专用 repository codec；profile upgrade gate 就绪后，inline production clean cutover 只替换 adapter 内部实现，不再改调用方 interface。
 
 Change: 第二子切片把原 JSON `Vec<u8>` V3 envelope 收紧为共享的紧凑二进制格式，避免大 UCBL payload 被 JSON 数字数组放大；新增只读写 V3 的 inline `BlobCipherPort` adapter 与 UCBL store。两者均把 key resolution、purpose HKDF、完整 context AAD 与 AEAD framing 委托给同一个 `ContentProtection`，UCBL 只拥有压缩和外层 framing。跨 Space tracer 证明切换活动 session 后 inline 与 blob 历史仍从 vault 打开，密文不出现 payload、Space、保护组或 purpose，错误转换保留稳定分类与 source。本子切片仍不接 production，也不增加 V1/V2 正常 reader；搜索留给 Step 6。active register、file-set path、transfer/receive 与 directory publish 等专用字段不复制第二套密码 header，其业务序列化和 AAD 继续由所属模块拥有，并在 Step 7 全量转换与 clean cutover 时统一委托 `ContentProtection`。
+
+Change: 第三子切片在 active register、file-set path、file transfer metadata/event、directory publish root map 与 receive artifact 所属模块内分别增加 V3 codec。各 owner 继续独占私有 payload schema、路径编码和实体 AAD，V3 codec 只把序列化后的内存字节交给共享 `ContentProtection`，没有在升级器内复制业务格式或另造密码 header。跨字段 contract 覆盖 round trip 与错列、错 transfer、错 attempt 的认证失败。当前 codec 仅供下一升级子切片编排，production repository 仍使用 V1/V2，不能提前形成双 reader。
 Risk: 任一字段遗漏都会在切换后不可读；建立持久负载清单测试，不用一个字符串驱动的万能 rewrapper 隐藏差异。
 
 Step 6（进行中；多保护组搜索目标模块子切片已完成）:

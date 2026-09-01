@@ -2,11 +2,13 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use uc_core::crypto::aad;
+use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
 use uc_core::file_transfer::FileTransferEvent;
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::{DeriveSpaceSubkeyPort, SpaceAccessError};
 
 use crate::security::v1_aead::{decrypt_xchacha_raw, encrypt_xchacha_raw};
+use crate::security::ContentProtection;
 
 const METADATA_MAGIC: [u8; 4] = *b"UCTM";
 const EVENT_MAGIC: [u8; 4] = *b"UCTE";
@@ -27,6 +29,98 @@ pub(crate) struct TransferMetadata {
 pub(crate) struct TransferPersistenceCipher {
     metadata_key: [u8; 32],
     event_key: [u8; 32],
+}
+
+pub(crate) struct V3TransferPersistenceCipher {
+    protection: Arc<ContentProtection>,
+}
+
+impl V3TransferPersistenceCipher {
+    pub(crate) fn new(protection: Arc<ContentProtection>) -> Self {
+        Self { protection }
+    }
+
+    pub(crate) async fn seal_metadata(
+        &self,
+        transfer_id: &str,
+        metadata: &TransferMetadata,
+    ) -> Result<Vec<u8>, TransferPersistenceCipherError> {
+        let plaintext =
+            postcard::to_stdvec(metadata).map_err(|_| TransferPersistenceCipherError::Serialize)?;
+        self.seal(plaintext, aad::for_file_transfer_metadata(transfer_id))
+            .await
+    }
+
+    pub(crate) async fn open_metadata(
+        &self,
+        transfer_id: &str,
+        ciphertext: &[u8],
+    ) -> Result<TransferMetadata, TransferPersistenceCipherError> {
+        let plaintext = self
+            .open(ciphertext, aad::for_file_transfer_metadata(transfer_id))
+            .await?;
+        postcard::from_bytes(&plaintext).map_err(|_| TransferPersistenceCipherError::Deserialize)
+    }
+
+    pub(crate) async fn seal_event(
+        &self,
+        transfer_id: &str,
+        sequence: i32,
+        event_type: &str,
+        event: &FileTransferEvent,
+    ) -> Result<Vec<u8>, TransferPersistenceCipherError> {
+        let plaintext =
+            serde_json::to_vec(event).map_err(|_| TransferPersistenceCipherError::Serialize)?;
+        self.seal(
+            plaintext,
+            aad::for_file_transfer_event(transfer_id, sequence, event_type),
+        )
+        .await
+    }
+
+    pub(crate) async fn open_event(
+        &self,
+        transfer_id: &str,
+        sequence: i32,
+        event_type: &str,
+        ciphertext: &[u8],
+    ) -> Result<FileTransferEvent, TransferPersistenceCipherError> {
+        let plaintext = self
+            .open(
+                ciphertext,
+                aad::for_file_transfer_event(transfer_id, sequence, event_type),
+            )
+            .await?;
+        serde_json::from_slice(&plaintext).map_err(|_| TransferPersistenceCipherError::Deserialize)
+    }
+
+    async fn seal(
+        &self,
+        plaintext: Vec<u8>,
+        aad: Vec<u8>,
+    ) -> Result<Vec<u8>, TransferPersistenceCipherError> {
+        self.protection
+            .seal_for_active(&Plaintext::new(plaintext), &Aad::new(aad))
+            .await
+            .map(|ciphertext| ciphertext.into_bytes())
+            .map_err(|source| TransferPersistenceCipherError::V3 {
+                source: anyhow::Error::new(source).context("seal V3 transfer payload"),
+            })
+    }
+
+    async fn open(
+        &self,
+        ciphertext: &[u8],
+        aad: Vec<u8>,
+    ) -> Result<Vec<u8>, TransferPersistenceCipherError> {
+        self.protection
+            .open(&Ciphertext::new(ciphertext.to_vec()), &Aad::new(aad))
+            .await
+            .map(|plaintext| plaintext.into_bytes())
+            .map_err(|source| TransferPersistenceCipherError::V3 {
+                source: anyhow::Error::new(source).context("open V3 transfer payload"),
+            })
+    }
 }
 
 impl TransferPersistenceCipher {
@@ -144,6 +238,11 @@ pub(crate) enum TransferPersistenceCipherError {
     Serialize,
     #[error("transfer persistence deserialization failed")]
     Deserialize,
+    #[error("V3 transfer persistence protection failed")]
+    V3 {
+        #[source]
+        source: anyhow::Error,
+    },
 }
 
 fn seal(

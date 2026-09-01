@@ -10,6 +10,9 @@ mod persistence;
 mod primary_payloads;
 mod target;
 
+#[cfg(test)]
+mod field_codec_tests;
+
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
