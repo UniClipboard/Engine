@@ -27,6 +27,7 @@ pub use admission::{
 };
 pub use membership_branch_transition::DefaultMembershipBranchTransitionPreparation;
 pub use membership_ledger::SqliteMembershipLedger;
+pub(crate) use security::export_admission_content_key_catalog;
 pub use security::{
     DefaultMembershipSecurityUpdateAdapter, DefaultSpaceAccessAdapter, InMemorySession,
     KeyMaterialStore, MlsPeerAdmissionAdapter, OpenMlsHistoricalSignatureVerifier,

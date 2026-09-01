@@ -15,6 +15,7 @@ use crate::db::pool::DbPool;
 
 use super::admission_key_manager::AdmissionKeyManager;
 use super::key_migration_adapter::DefaultKeyMigrationAdapter;
+use super::profile_content_key_vault::PROFILE_CONTENT_VAULT_KEY_NAME;
 
 pub struct ProfileKeyWiper {
     admission_keys: AdmissionKeyManager,
@@ -88,6 +89,21 @@ impl ProfileKeyWiper {
         }
         Ok(())
     }
+
+    fn wipe_profile_content_vault_key(&self) -> Result<(), ProfileFactoryResetCapabilityError> {
+        self.secure_storage
+            .delete(PROFILE_CONTENT_VAULT_KEY_NAME)
+            .map_err(|_| capability_error())?;
+        if self
+            .secure_storage
+            .get(PROFILE_CONTENT_VAULT_KEY_NAME)
+            .map_err(|_| capability_error())?
+            .is_some()
+        {
+            return Err(capability_error());
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -101,6 +117,7 @@ impl WipeProfileKeysPort for ProfileKeyWiper {
         }
         self.wipe_active_space_keys()?;
         self.wipe_migration_key().await?;
+        self.wipe_profile_content_vault_key()?;
         remove_path_if_present(&self.network_identity_dir)?;
         if self.network_identity_dir.exists() {
             return Err(capability_error());
@@ -316,6 +333,9 @@ mod tests {
         storage
             .set("profile_admission_master_key:v1", &[0x55; 32])
             .unwrap();
+        storage
+            .set("profile_content_vault_key:v1", &[0x56; 32])
+            .unwrap();
         let run_id = MigrationRunId::new("reset-migration");
         let migration_key_name = format!("migration_key:v1:{}", run_id.as_str());
         storage.set(&migration_key_name, &[0x66; 32]).unwrap();
@@ -347,6 +367,10 @@ mod tests {
         assert!(!keyslot_path.exists());
         assert!(storage
             .get("profile_admission_master_key:v1")
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .get("profile_content_vault_key:v1")
             .unwrap()
             .is_none());
         assert!(storage.get(&migration_key_name).unwrap().is_none());

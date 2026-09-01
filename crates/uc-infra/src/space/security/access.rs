@@ -2836,7 +2836,7 @@ impl PrepareSponsorAdmissionSecurityPort for DefaultSpaceAccessAdapter {
                 chrono::Utc::now().timestamp_millis(),
             )
             .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
-        let target_key_catalog = InMemorySession::export_admission_content_key_catalog(&next)
+        let target_key_catalog = super::export_admission_content_key_catalog(&next)
             .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
         let encrypted_key_catalog = seal_group_catalog(&admission.wrapping_key, &next)
             .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
@@ -2926,7 +2926,7 @@ impl ActivateSponsorAdmissionSecurityPort for DefaultSpaceAccessAdapter {
         {
             return Err(AdmissionSecurityTransitionError::InvalidState);
         }
-        let catalog = InMemorySession::export_admission_content_key_catalog(&staged)
+        let catalog = super::export_admission_content_key_catalog(&staged)
             .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
         let expected = &request.expected_commitment;
         let rederived = MlsGroupEngine::derive_public_admission_commitment(
@@ -3066,7 +3066,7 @@ impl ActivateCompletionHelperAdmissionSecurityPort for DefaultSpaceAccessAdapter
             .with_pending_group_updates_from(&current)
         };
 
-        let catalog = InMemorySession::export_admission_content_key_catalog(&material)
+        let catalog = super::export_admission_content_key_catalog(&material)
             .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
         if catalog
             .encode()
@@ -3388,7 +3388,7 @@ impl DefaultSpaceAccessAdapter {
             space_id.as_ref().as_bytes(),
         )
         .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
-        InMemorySession::export_admission_content_key_catalog(&material)?;
+        super::export_admission_content_key_catalog(&material)?;
         Ok(material)
     }
 
@@ -3427,7 +3427,7 @@ fn validate_membership_branch_recovery_material(
         material.state().space_id().as_ref().as_bytes(),
     )
     .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
-    InMemorySession::export_admission_content_key_catalog(material)
+    super::export_admission_content_key_catalog(material)
         .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
     Ok(())
 }

@@ -15,6 +15,7 @@ mod hashing;
 mod identity_fingerprint;
 pub(crate) mod key_epoch_aad;
 mod key_migration_adapter;
+mod profile_content_key_vault;
 mod profile_lifecycle;
 mod profile_reset;
 mod secrets;
@@ -47,6 +48,10 @@ pub use identity_fingerprint::{
     ShortCodeGenerator,
 };
 pub use key_migration_adapter::DefaultKeyMigrationAdapter;
+pub use profile_content_key_vault::{
+    InstalledProfileCatalog, ProfileContentKeyVault, ProfileContentKeyVaultError,
+    ResolvedProfileContentKey,
+};
 pub use profile_lifecycle::ProfileLifecycleRepository;
 pub use profile_reset::{ProfileKeyWiper, ProfileStateCleaner};
 pub(crate) use secrets::{Kek, MasterKey};

@@ -10,18 +10,22 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use hkdf::Hkdf;
-use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tokio::sync::Notify;
 use tracing::{debug, debug_span};
 use uc_core::crypto::model::EncryptionError;
 use uc_core::ids::SpaceId;
 use uc_core::membership::{
-    AdmissionContentKeyCatalogV1, AdmissionContentKeyEntryV1, ContentKeyId, ContentKeyPurpose,
-    GroupEpoch, ProtectionGroupId, SpaceKeyMaterial, SpaceSecurityMode,
+    ContentKeyId, ContentKeyPurpose, GroupEpoch, ProtectionGroupId, SpaceKeyMaterial,
+    SpaceSecurityMode,
 };
 
 use crate::security::MasterKey;
+
+use super::content_key_catalog::{
+    decode as decode_content_key_catalog, encode as encode_content_key_catalog,
+    PersistedContentKeyCatalog, PersistedContentKeyEntry,
+};
 
 #[derive(Clone, Debug)]
 struct State {
@@ -36,19 +40,6 @@ struct State {
 struct ContentKeyEntry {
     epoch: GroupEpoch,
     key: MasterKey,
-}
-
-#[derive(Serialize, Deserialize)]
-struct PersistedContentKeyCatalog {
-    version: u8,
-    entries: Vec<PersistedContentKeyEntry>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct PersistedContentKeyEntry {
-    content_key_id: String,
-    epoch: u64,
-    key: Vec<u8>,
 }
 
 pub(crate) struct ResolvedContentKey {
@@ -198,8 +189,7 @@ impl InMemorySession {
                 },
             ],
         };
-        let key_catalog =
-            serde_json::to_vec(&catalog).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        let key_catalog = encode_content_key_catalog(&catalog)?;
         let mut key_state = uc_core::membership::SpaceKeyState::legacy(space_id.clone());
         key_state
             .mark_migrating()
@@ -270,8 +260,7 @@ impl InMemorySession {
         {
             return Err(EncryptionError::KeyMaterialCorrupt);
         }
-        let catalog: PersistedContentKeyCatalog = serde_json::from_slice(material.key_catalog())
-            .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        let catalog = decode_content_key_catalog(material.key_catalog())?;
         if catalog.version != 1 && catalog.version != 2 {
             return Err(EncryptionError::UnsupportedVersion);
         }
@@ -297,8 +286,8 @@ impl InMemorySession {
                 },
             );
         }
-        for persisted in catalog.entries {
-            let content_key_id = ContentKeyId::from_string(persisted.content_key_id)
+        for persisted in &catalog.entries {
+            let content_key_id = ContentKeyId::from_string(persisted.content_key_id.clone())
                 .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
             if keys.contains_key(&content_key_id)
                 || (content_key_id == ContentKeyId::legacy_v1()
@@ -337,16 +326,12 @@ impl InMemorySession {
         previous: &SpaceKeyMaterial,
         incoming: SpaceKeyMaterial,
     ) -> Result<SpaceKeyMaterial, EncryptionError> {
-        let previous_catalog: PersistedContentKeyCatalog =
-            serde_json::from_slice(previous.key_catalog())
-                .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
-        let mut incoming_catalog: PersistedContentKeyCatalog =
-            serde_json::from_slice(incoming.key_catalog())
-                .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        let previous_catalog = decode_content_key_catalog(previous.key_catalog())?;
+        let mut incoming_catalog = decode_content_key_catalog(incoming.key_catalog())?;
         if previous_catalog.version != 2 || incoming_catalog.version != 2 {
             return Err(EncryptionError::UnsupportedVersion);
         }
-        for entry in previous_catalog.entries {
+        for entry in &previous_catalog.entries {
             match incoming_catalog
                 .entries
                 .iter()
@@ -356,11 +341,10 @@ impl InMemorySession {
                     return Err(EncryptionError::KeyMaterialCorrupt);
                 }
                 Some(_) => {}
-                None => incoming_catalog.entries.push(entry),
+                None => incoming_catalog.entries.push(entry.clone()),
             }
         }
-        let key_catalog = serde_json::to_vec(&incoming_catalog)
-            .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        let key_catalog = encode_content_key_catalog(&incoming_catalog)?;
         Ok(SpaceKeyMaterial::new(
             incoming.state().clone(),
             incoming.group_state().to_vec(),
@@ -377,9 +361,7 @@ impl InMemorySession {
         expected_epoch: GroupEpoch,
         updated_at_ms: i64,
     ) -> Result<SpaceKeyMaterial, EncryptionError> {
-        let mut catalog: PersistedContentKeyCatalog =
-            serde_json::from_slice(material.key_catalog())
-                .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        let mut catalog = decode_content_key_catalog(material.key_catalog())?;
         if catalog.version != 2 || material.state().mode() != SpaceSecurityMode::Ready {
             return Err(EncryptionError::KeyMaterialCorrupt);
         }
@@ -397,36 +379,11 @@ impl InMemorySession {
             epoch: expected_epoch.value(),
             key: content_key.as_bytes().to_vec(),
         });
-        let key_catalog =
-            serde_json::to_vec(&catalog).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        let key_catalog = encode_content_key_catalog(&catalog)?;
         Ok(
             SpaceKeyMaterial::new(state, group_state, key_catalog, updated_at_ms)
                 .with_pending_group_updates_from(material),
         )
-    }
-
-    pub(crate) fn export_admission_content_key_catalog(
-        material: &SpaceKeyMaterial,
-    ) -> Result<AdmissionContentKeyCatalogV1, EncryptionError> {
-        let catalog: PersistedContentKeyCatalog = serde_json::from_slice(material.key_catalog())
-            .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
-        if catalog.version != 2 {
-            return Err(EncryptionError::UnsupportedVersion);
-        }
-        let entries = catalog
-            .entries
-            .into_iter()
-            .map(|entry| {
-                AdmissionContentKeyEntryV1::new(entry.content_key_id, entry.epoch, entry.key)
-                    .map_err(|_| EncryptionError::KeyMaterialCorrupt)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        AdmissionContentKeyCatalogV1::new(
-            material.state().current_content_key_id().as_str(),
-            material.state().epoch().value(),
-            entries,
-        )
-        .map_err(|_| EncryptionError::KeyMaterialCorrupt)
     }
 
     pub(crate) fn snapshot(&self) -> SessionSnapshot {

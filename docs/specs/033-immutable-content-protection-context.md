@@ -375,9 +375,9 @@ File: `crates/uc-core/src/membership/active_runtime_layout.rs`、`crates/uc-infr
 Change: Core 定义不携带持久格式的 `ActiveRuntimeLayout`，固定 profile 数据世代与 Space 控制世代的独立所有权和合法组合；Infra 定义 V3 持久 manifest、规范 digest、领域映射和只读版本识别。生产 store 继续只提升 V2，识别到合法 V3 时失败关闭为 `UnsupportedVersion`，不提前激活半完成运行期。
 Risk: 此切片只建立模型与格式边界，不宣称 V3 可运行；任何 V3 写入和 promotion 必须等 vault、控制面 store、升级器与 production reader 一起完成。
 
-Step 2:
-File: `crates/uc-infra/src/security/secrets.rs`、新增 `crates/uc-infra/src/security/profile_content_key_vault.rs`、`crates/uc-infra/src/security/profile_reset.rs`
-Change: 新增独立 secure-storage key 与加密 vault 格式，实现规范合并、精确解析、耐久原子替换和 Factory Reset 擦除；测试 key bytes 零化、冲突 catalog 拒绝和 source chain。
+Step 2（已完成）:
+File: `crates/uc-infra/src/security/profile_content_key_vault/`、`crates/uc-infra/src/space/security/content_key_catalog.rs`、`crates/uc-infra/src/security/profile_reset.rs`
+Change: 新增使用独立 secure-storage key 的 profile 加密 vault 深模块。外部 interface 只暴露完整 material 安装和 `ContentKeyId + exact GroupEpoch` 解析；内部按规范 catalog 与加密 persistence 两类知识组织，统一复用 Space security 的 V2 catalog codec，完成多保护组合并、全 profile key identity 冲突拒绝、未知 framing/缺钥/篡改失败关闭、耐久原子替换和 Factory Reset 擦除。解析结果同时返回所属 `ProtectionGroupId`，后续 `ContentProtection` 必须据此认证 V3 context。本切片不接入 production session、不提升 V3 manifest，也不改变 CrossSpace。
 Risk: vault 丢失会使历史永久不可读；存在历史时绝不能自动再生缺失 key。
 
 Step 3:
@@ -524,7 +524,7 @@ Implementation: upgrade module 零网络依赖；transition 只在现有 Complet
 # 9. Acceptance Criteria
 
 * [ ] V3 持久密文通过不透明且全 profile 唯一的 `ContentKeyId` 解析并认证完整 `ProtectionGroupId + ContentKeyId + GroupEpoch + Purpose`，purpose 由所属 adapter 固定，解密不读取当前 `ActiveSpace`，密文头不明文保存 `ProtectionGroupId`、`SpaceId` 或 purpose。
-* [ ] `ProfileContentKeyVault` 使用独立 profile 稳定密钥 AEAD 保存多个历史保护组 catalog，冲突安装失败关闭，Factory Reset 完整擦除。
+* [x] `ProfileContentKeyVault` 使用独立 profile 稳定密钥 AEAD 保存多个历史保护组 catalog，冲突安装失败关闭，Factory Reset 完整擦除。
 * [ ] profile 数据 generation 的路径和生命周期不再由活动 SpaceId 决定；membership/credential/MLS 等 Space-scoped 表已迁入独立 control store，V3 active manifest 可在切换 Space 时复用同一 `profile_data_generation`。
 * [ ] V1/V2 正常读取只存在于一次性 upgrade module；升级后所有新写只产生 V3，没有 lazy migration 或双写。
 * [ ] 完整 V2 fixture 一次升级后，SQLite、blob、搜索和派生负载均可由 production V3 入口读取，磁盘无受保护明文。
