@@ -428,6 +428,8 @@ Change: 第九子切片将 entry file-set 的路径保护提取为 owner-private
 Change: 第十子切片把 file-transfer projection metadata 收口为 owner-private `TransferPersistenceProtection` 完整策略。普通构造器固定 legacy，V3 构造器只接收共享 `ContentProtection`；SQL 查询、领域投影和 port 实现保持单份。所有 metadata open/seal 均移出 Diesel closure；provisional path、单行失败与 bulk fail 以旧密文为 compare-and-swap 条件，bulk 任一行并发变化则同事务整体回滚。真实 SQLite contract 覆盖 V3 provisional metadata 写读与明文探针，既有 transfer 测试保持通过；event sequence append 与 receiver projection 联合事务由下一子切片负责。
 
 Change: 第十一子切片完成 file-transfer event log 与 receiver projection 的同一 protection strategy。读取先取密文 rows、再在数据库外异步 open；append 先在一致 snapshot 上取得下一 sequence 与 projection 状态，在内存完成 event/metadata seal，最后单一 SQLite 事务重新验证 sequence、status 与旧 metadata 密文并同时提交 event 和 projection。CAS 冲突由 owner 有界重取 snapshot，调用方仍只执行一次 `append(event)`；发送侧无 projection 与终止态 no-op 语义保持不变。V3 联合真实数据库 contract 覆盖 event round trip、projection 更新与明文探针；未增加平行 event store 或逐 envelope 双 reader。
+
+Change: 第十二子切片只建立 production search schema 的 V12 前置边界：`search_document` 新增 nullable 32-byte opaque `protection_group_ref` 与 profile/group 索引，Diesel row 明确 V11 行和升级 blocked 行可为空；`CURRENT_INDEX_VERSION` 仍为 V11，不提前开放 V12 查询或 writer。升级器复用正式 migration 后存在的列，仅为历史 fixture 缺列时补齐，避免把 schema 迁移复制成第二事实来源。真实 migration、V11 search 21/21 与 derived payload conversion contract 通过；下一子切片必须一次完成 V3 posting/render/query strategy 后才能提升版本。
 Risk: 磁盘不足、移动端短进程和崩溃会留下 staging；每个 phase 先耐久记录再执行可重复动作，promotion 前绝不改 source。
 
 Step 8:

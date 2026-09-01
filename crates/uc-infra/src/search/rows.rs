@@ -54,6 +54,8 @@ pub struct SearchDocumentRow {
     /// `NULL` only appears transiently during migration; a `NULL` on the current
     /// index version is treated as a corrupted row (see [`SearchDocumentRow::to_domain`]).
     pub render_payload: Option<Vec<u8>>,
+    /// V12 保护组的不透明引用；V11 行为与升级中的 blocked 行允许为空。
+    pub protection_group_ref: Option<Vec<u8>>,
 }
 
 /// Insertable row for `search_document`.
@@ -73,6 +75,7 @@ pub struct NewSearchDocumentRow {
     pub source_device: Option<String>,
     pub payload_state: Option<String>,
     pub render_payload: Option<Vec<u8>>,
+    pub protection_group_ref: Option<Vec<u8>>,
 }
 
 /// A stored row decoded back into the domain, tracking whether its render payload
@@ -126,6 +129,7 @@ impl NewSearchDocumentRow {
             source_device: document.source_device.clone(),
             payload_state: document.payload_state.clone(),
             render_payload: Some(render_payload),
+            protection_group_ref: None,
         })
     }
 }

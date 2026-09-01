@@ -2567,6 +2567,7 @@ mod tests {
                     source_device: None,
                     payload_state: None,
                     render_payload: Some(render_payload),
+                    protection_group_ref: None,
                 }
             })
             .collect();
