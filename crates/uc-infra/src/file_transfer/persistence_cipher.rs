@@ -4,11 +4,13 @@ use serde::{Deserialize, Serialize};
 use uc_core::crypto::aad;
 use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
 use uc_core::file_transfer::FileTransferEvent;
+use uc_core::ids::ProfileId;
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::{DeriveSpaceSubkeyPort, SpaceAccessError};
 
 use crate::security::v1_aead::{decrypt_xchacha_raw, encrypt_xchacha_raw};
 use crate::security::ContentProtection;
+use crate::space::InMemorySession;
 
 const METADATA_MAGIC: [u8; 4] = *b"UCTM";
 const EVENT_MAGIC: [u8; 4] = *b"UCTE";
@@ -129,6 +131,24 @@ impl TransferPersistenceCipher {
             metadata_key,
             event_key,
         }
+    }
+
+    pub(crate) fn legacy_for_upgrade(
+        session: &InMemorySession,
+        profile_id: &ProfileId,
+    ) -> anyhow::Result<Self> {
+        let salt = profile_id.as_ref().as_bytes();
+        let metadata_key = session
+            .derive_stable_subkey(salt, METADATA_KEY_INFO)
+            .map_err(|source| {
+                anyhow::Error::new(source).context("derive legacy transfer metadata key")
+            })?;
+        let event_key = session
+            .derive_stable_subkey(salt, EVENT_KEY_INFO)
+            .map_err(|source| {
+                anyhow::Error::new(source).context("derive legacy transfer event key")
+            })?;
+        Ok(Self::new(metadata_key, event_key))
     }
 
     pub(crate) fn seal_metadata(

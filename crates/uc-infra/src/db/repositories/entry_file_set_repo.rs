@@ -28,7 +28,7 @@ use uc_core::ports::clipboard::EntryFileSetRepositoryPort;
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::{DeriveSpaceSubkeyPort, SpaceAccessError};
 
-use super::entry_file_set_cipher::EntryFileSetPathCipher;
+use super::entry_file_set_cipher::{EntryFileSetPathCipher, FILE_SET_KEY_INFO};
 use crate::db::models::entry_file_set::{EntryFileSetRow, NewEntryFileSetRow};
 use crate::db::ports::DbExecutor;
 use crate::db::schema::entry_file_set;
@@ -41,8 +41,6 @@ const ENTRY_FILE_SET_INSERT_CHUNK: usize = 80;
 
 /// HKDF `info` label for the entry-file-set path-column AEAD subkey. Distinct
 /// from every other subkey label so this key never doubles for another purpose.
-const FILE_SET_KEY_INFO: &[u8] = b"uniclipboard-file-set/v1";
-
 pub struct DieselEntryFileSetRepository<E> {
     executor: E,
     /// Derives the per-session subkey that seals the path columns. Held rather

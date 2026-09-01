@@ -5,15 +5,17 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use uc_core::crypto::aad;
 use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
-use uc_core::ids::EntryId;
+use uc_core::ids::{EntryId, ProfileId};
 
 use crate::security::v1_aead::{decrypt_xchacha_raw, encrypt_xchacha_raw};
 use crate::security::ContentProtection;
+use crate::space::InMemorySession;
 
 const MAGIC: [u8; 4] = *b"UCDP";
 const FORMAT_VERSION: u8 = 1;
 const NONCE_LEN: usize = 24;
 const HEADER_LEN: usize = MAGIC.len() + 1 + NONCE_LEN;
+pub(super) const PUBLISH_LOG_KEY_INFO: &[u8] = b"uniclipboard-directory-publish-log/v1";
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PublishLogCipherError {
@@ -120,6 +122,18 @@ impl V3DirectoryPublishLogCipher {
 impl DirectoryPublishLogCipher {
     pub(crate) fn new(key: [u8; 32]) -> Self {
         Self { key }
+    }
+
+    pub(crate) fn legacy_for_upgrade(
+        session: &InMemorySession,
+        profile_id: &ProfileId,
+    ) -> anyhow::Result<Self> {
+        session
+            .derive_stable_subkey(profile_id.as_ref().as_bytes(), PUBLISH_LOG_KEY_INFO)
+            .map(Self::new)
+            .map_err(|source| {
+                anyhow::Error::new(source).context("derive legacy directory-publish key")
+            })
     }
 
     pub(crate) fn seal(

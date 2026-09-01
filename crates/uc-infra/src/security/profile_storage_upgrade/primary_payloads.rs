@@ -397,7 +397,7 @@ fn open_connection(
     Ok(connection)
 }
 
-fn compact_database(path: &Path) -> Result<(), ProfileStorageUpgradeError> {
+pub(super) fn compact_database(path: &Path) -> Result<(), ProfileStorageUpgradeError> {
     let database = path
         .to_str()
         .ok_or_else(|| storage(anyhow::anyhow!("primary database path is invalid")))?;
@@ -413,7 +413,7 @@ fn compact_database(path: &Path) -> Result<(), ProfileStorageUpgradeError> {
         .map_err(io_storage)
 }
 
-fn blob_tree_digest(root: &Path) -> Result<[u8; 32], ProfileStorageUpgradeError> {
+pub(super) fn blob_tree_digest(root: &Path) -> Result<[u8; 32], ProfileStorageUpgradeError> {
     let mut names = Vec::new();
     if root.is_dir() {
         for entry in std::fs::read_dir(root).map_err(io_storage)? {
@@ -443,12 +443,12 @@ fn blob_tree_digest(root: &Path) -> Result<[u8; 32], ProfileStorageUpgradeError>
 }
 
 #[cfg(not(windows))]
-fn sync_directory(path: &Path) -> std::io::Result<()> {
+pub(super) fn sync_directory(path: &Path) -> std::io::Result<()> {
     std::fs::File::open(path)?.sync_all()
 }
 
 #[cfg(windows)]
-fn sync_directory(_path: &Path) -> std::io::Result<()> {
+pub(super) fn sync_directory(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 

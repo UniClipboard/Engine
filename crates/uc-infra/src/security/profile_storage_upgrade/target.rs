@@ -14,6 +14,7 @@ const SPACE_CONTROL_DIRECTORY: &str = "space-control-generations";
 const TARGET_PROFILE_DATABASE: &str = "profile.sqlite";
 const TARGET_CONTROL_DATABASE: &str = "control.sqlite";
 pub(super) const PRIMARY_OUTPUT_DIRECTORY: &str = "v3-primary";
+pub(super) const PAYLOAD_OUTPUT_DIRECTORY: &str = "v3-payloads";
 const GENERATION_PATH_DOMAIN: &[u8] = b"uniclipboard/profile-upgrade-generation-path/v1\0";
 
 /// 升级器内部唯一拥有 source snapshot 与 target generation 物理布局的组件。
@@ -248,6 +249,7 @@ impl TargetGenerationStager {
                 .join("source.snapshot.tmp"),
             profile_database: profile_directory.join(TARGET_PROFILE_DATABASE),
             primary_output: profile_directory.join(PRIMARY_OUTPUT_DIRECTORY),
+            payload_output: profile_directory.join(PAYLOAD_OUTPUT_DIRECTORY),
             control_database: control_directory.join(TARGET_CONTROL_DATABASE),
         }
     }
@@ -257,6 +259,7 @@ pub(super) struct TargetPaths {
     pub(super) scratch: PathBuf,
     pub(super) profile_database: PathBuf,
     pub(super) primary_output: PathBuf,
+    pub(super) payload_output: PathBuf,
     pub(super) control_database: PathBuf,
 }
 

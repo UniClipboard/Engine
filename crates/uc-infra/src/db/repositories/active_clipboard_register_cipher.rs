@@ -3,10 +3,11 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use uc_core::clipboard::MobileConsumableRef;
 use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
-use uc_core::ids::EntryId;
+use uc_core::ids::{EntryId, ProfileId};
 
 use crate::security::v1_aead::{decrypt_xchacha_raw, encrypt_xchacha_raw};
 use crate::security::ContentProtection;
+use crate::space::InMemorySession;
 
 const MAGIC: [u8; 4] = *b"UCAR";
 const FORMAT_VERSION: u8 = 1;
@@ -113,6 +114,18 @@ pub struct ActiveClipboardRegisterCipher {
 impl ActiveClipboardRegisterCipher {
     pub fn new(key: [u8; 32]) -> Self {
         Self { key }
+    }
+
+    pub(crate) fn legacy_for_upgrade(
+        session: &InMemorySession,
+        profile_id: &ProfileId,
+    ) -> anyhow::Result<Self> {
+        session
+            .derive_stable_subkey(profile_id.as_ref().as_bytes(), CONSUMABLE_HKDF_INFO)
+            .map(Self::new)
+            .map_err(|source| {
+                anyhow::Error::new(source).context("derive legacy active-register key")
+            })
     }
 
     pub fn seal(

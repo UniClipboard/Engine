@@ -25,7 +25,7 @@ const SEARCH_KEY_INFO: &[u8] = b"uniclipboard-search-index/v1";
 /// HKDF `info` label for the render-payload AEAD key. Deliberately distinct from
 /// [`SEARCH_KEY_INFO`] so the render key is a separate subkey and never doubles
 /// as the HMAC term-tag key.
-const RENDER_KEY_INFO: &[u8] = b"uniclipboard-search-render/v1";
+pub(super) const RENDER_KEY_INFO: &[u8] = b"uniclipboard-search-render/v1";
 
 /// Type alias for HMAC-SHA256 — used for term-tag computation.
 type HmacSha256 = Hmac<Sha256>;

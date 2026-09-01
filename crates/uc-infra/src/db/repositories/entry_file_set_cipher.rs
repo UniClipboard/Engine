@@ -21,10 +21,11 @@ use std::sync::Arc;
 
 use uc_core::crypto::aad;
 use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
-use uc_core::ids::EntryId;
+use uc_core::ids::{EntryId, ProfileId};
 
 use crate::security::v1_aead::{decrypt_xchacha_raw, encrypt_xchacha_raw};
 use crate::security::ContentProtection;
+use crate::space::InMemorySession;
 
 /// UCFS envelope magic — "UCFS" (UniClipboard File Set).
 const FILE_SET_MAGIC: [u8; 4] = [0x55, 0x43, 0x46, 0x53];
@@ -41,6 +42,7 @@ const ORIGINAL_TEXT_AAD_SUFFIX: &[u8] = b"|original-text";
 const RELATIVE_PATH_AAD_SUFFIX: &[u8] = b"|relative-path";
 /// AAD suffix for the `root_name` column.
 const ROOT_NAME_AAD_SUFFIX: &[u8] = b"|root-name";
+pub(super) const FILE_SET_KEY_INFO: &[u8] = b"uniclipboard-file-set/v1";
 
 /// Bind an AAD to `(entry_id, line_index)` and one column, so a ciphertext
 /// sealed for one column of a row can never be opened as another column of
@@ -201,6 +203,16 @@ pub struct EntryFileSetPathCipher {
 impl EntryFileSetPathCipher {
     pub fn new(key: [u8; 32]) -> Self {
         Self { key }
+    }
+
+    pub(crate) fn legacy_for_upgrade(
+        session: &InMemorySession,
+        profile_id: &ProfileId,
+    ) -> anyhow::Result<Self> {
+        session
+            .derive_stable_subkey(profile_id.as_ref().as_bytes(), FILE_SET_KEY_INFO)
+            .map(Self::new)
+            .map_err(|source| anyhow::Error::new(source).context("derive legacy file-set key"))
     }
 
     /// Seal `original_text` bound to `(entry_id, line_index)` and its column.

@@ -5,6 +5,7 @@
 //! payload 转换与重启复用都由本模块隐藏；后续切片会在同一 interface 内填入
 //! 专用字段/搜索转换、验证、promotion 和清理。
 
+mod derived_payloads;
 mod journal;
 mod persistence;
 mod primary_payloads;
@@ -16,12 +17,14 @@ mod field_codec_tests;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
+use uc_core::ids::ProfileId;
 
 use super::{
     ActiveSpaceGenerationManifestStore, ActiveSpaceGenerationManifestStoreError,
     AdmissionKeyManager, ProfileContentKeyVault,
 };
 use crate::space::InMemorySession;
+use derived_payloads::DerivedPayloadConverter;
 use journal::{UpgradeJournalV1, UpgradePhaseV1};
 use persistence::{UpgradeLeaseResult, UpgradePersistence};
 use primary_payloads::PrimaryPayloadConverter;
@@ -73,6 +76,7 @@ pub struct ProfileStorageUpgrade {
     manifests: Arc<ActiveSpaceGenerationManifestStore>,
     target: TargetGenerationStager,
     primary_payloads: PrimaryPayloadConverter,
+    derived_payloads: DerivedPayloadConverter,
     in_process: Mutex<()>,
 }
 
@@ -82,18 +86,24 @@ impl ProfileStorageUpgrade {
         profile_root: std::path::PathBuf,
         source_pool: crate::db::pool::DbPool,
         source_blob_root: std::path::PathBuf,
+        profile_id: ProfileId,
         source_session: Arc<InMemorySession>,
         vault: Arc<ProfileContentKeyVault>,
         keys: Arc<AdmissionKeyManager>,
         manifests: Arc<ActiveSpaceGenerationManifestStore>,
     ) -> Self {
-        let primary_payloads =
-            PrimaryPayloadConverter::new(source_blob_root, source_session, vault);
+        let primary_payloads = PrimaryPayloadConverter::new(
+            source_blob_root,
+            Arc::clone(&source_session),
+            Arc::clone(&vault),
+        );
+        let derived_payloads = DerivedPayloadConverter::new(profile_id, source_session, vault);
         Self {
             persistence: UpgradePersistence::new(profile_root.clone(), keys),
             manifests,
             target: TargetGenerationStager::new(profile_root, source_pool),
             primary_payloads,
+            derived_payloads,
             in_process: Mutex::new(()),
         }
     }
@@ -170,9 +180,22 @@ impl ProfileStorageUpgrade {
             }
             UpgradePhaseV1::PrimaryPayloadsConverted => {
                 self.primary_payloads.verify(&journal, &self.target).await?;
+                let converted = self
+                    .derived_payloads
+                    .convert(&journal, &self.target)
+                    .await?;
+                journal.mark_payloads_converted(
+                    converted.profile_database_digest,
+                    converted.blob_tree_digest,
+                    converted.derived_count,
+                    converted.search_document_count,
+                )?;
+                self.persistence.save_journal(&journal).await?;
             }
-            UpgradePhaseV1::PayloadsConverted
-            | UpgradePhaseV1::Verified
+            UpgradePhaseV1::PayloadsConverted => {
+                self.derived_payloads.verify(&journal, &self.target).await?;
+            }
+            UpgradePhaseV1::Verified
             | UpgradePhaseV1::Promoted
             | UpgradePhaseV1::CleanupPending => {}
         }

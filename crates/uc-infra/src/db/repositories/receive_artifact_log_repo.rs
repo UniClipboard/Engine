@@ -11,12 +11,10 @@ use uc_core::ports::{
     RecordReceiveArtifactsPort,
 };
 
-use super::receive_artifact_cipher::ReceiveArtifactCipher;
+use super::receive_artifact_cipher::{ReceiveArtifactCipher, ARTIFACT_KEY_INFO};
 use crate::db::models::{NewReceiveArtifactLogRow, ReceiveArtifactLogRow};
 use crate::db::ports::DbExecutor;
 use crate::db::schema::receive_artifact_log;
-
-const ARTIFACT_KEY_INFO: &[u8] = b"uniclipboard-receive-artifact-log/v1";
 
 pub struct DieselReceiveArtifactLogRepository<E> {
     executor: E,

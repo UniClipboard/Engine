@@ -13,12 +13,10 @@ use uc_core::ports::directory_publish_log::{
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::{DeriveSpaceSubkeyPort, SpaceAccessError};
 
-use super::directory_publish_log_cipher::DirectoryPublishLogCipher;
+use super::directory_publish_log_cipher::{DirectoryPublishLogCipher, PUBLISH_LOG_KEY_INFO};
 use crate::db::models::{DirectoryPublishLogRow, NewDirectoryPublishLogRow};
 use crate::db::ports::DbExecutor;
 use crate::db::schema::directory_publish_log;
-
-const PUBLISH_LOG_KEY_INFO: &[u8] = b"uniclipboard-directory-publish-log/v1";
 
 /// SQLite adapter for encrypted directory publication recovery metadata.
 pub struct DieselDirectoryPublishLogRepository<E> {

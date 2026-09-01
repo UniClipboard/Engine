@@ -18,10 +18,13 @@
 use serde::{Deserialize, Serialize};
 
 use uc_core::crypto::aad;
-use uc_core::ids::EntryId;
+use uc_core::ids::{EntryId, ProfileId};
 use uc_core::search::RenderKey;
 
 use crate::security::v1_aead::{decrypt_xchacha_raw, encrypt_xchacha_raw};
+use crate::space::InMemorySession;
+
+use super::search_key_derivation::RENDER_KEY_INFO;
 
 /// UCSR envelope magic — "UCSR" (UniClipboard Search Render).
 const RENDER_MAGIC: [u8; 4] = [0x55, 0x43, 0x53, 0x52];
@@ -124,6 +127,20 @@ pub struct RenderPayloadCodec {
 impl RenderPayloadCodec {
     pub fn new(render_key: RenderKey) -> Self {
         Self { render_key }
+    }
+
+    pub(crate) fn legacy_for_upgrade(
+        session: &InMemorySession,
+        profile_id: &ProfileId,
+    ) -> anyhow::Result<Self> {
+        let key = session
+            .derive_stable_subkey(profile_id.as_ref().as_bytes(), RENDER_KEY_INFO)
+            .map_err(|source| {
+                anyhow::Error::new(source).context("derive legacy search render key")
+            })?;
+        RenderKey::from_bytes(&key)
+            .map(Self::new)
+            .map_err(|source| anyhow::Error::new(source).context("construct legacy render key"))
     }
 
     /// Seal `fields` into a UCSR envelope bound to `entry_id`.

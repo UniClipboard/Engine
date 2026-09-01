@@ -41,6 +41,10 @@ pub(super) struct UpgradeJournalV1 {
     primary_blob_tree_digest: Option<[u8; 32]>,
     converted_inline_count: Option<u64>,
     converted_blob_count: Option<u64>,
+    payload_profile_database_digest: Option<[u8; 32]>,
+    payload_blob_tree_digest: Option<[u8; 32]>,
+    converted_derived_count: Option<u64>,
+    converted_search_document_count: Option<u64>,
 }
 
 impl UpgradeJournalV1 {
@@ -75,6 +79,10 @@ impl UpgradeJournalV1 {
             primary_blob_tree_digest: None,
             converted_inline_count: None,
             converted_blob_count: None,
+            payload_profile_database_digest: None,
+            payload_blob_tree_digest: None,
+            converted_derived_count: None,
+            converted_search_document_count: None,
         }
     }
 
@@ -131,6 +139,26 @@ impl UpgradeJournalV1 {
                 || self.primary_blob_tree_digest.is_none()
                 || self.converted_inline_count.is_none()
                 || self.converted_blob_count.is_none()))
+            || (matches!(
+                self.phase,
+                UpgradePhaseV1::Detected
+                    | UpgradePhaseV1::TargetStaged
+                    | UpgradePhaseV1::StoresSeparated
+                    | UpgradePhaseV1::PrimaryPayloadsConverted
+            ) && (self.payload_profile_database_digest.is_some()
+                || self.payload_blob_tree_digest.is_some()
+                || self.converted_derived_count.is_some()
+                || self.converted_search_document_count.is_some()))
+            || (!matches!(
+                self.phase,
+                UpgradePhaseV1::Detected
+                    | UpgradePhaseV1::TargetStaged
+                    | UpgradePhaseV1::StoresSeparated
+                    | UpgradePhaseV1::PrimaryPayloadsConverted
+            ) && (self.payload_profile_database_digest.is_none()
+                || self.payload_blob_tree_digest.is_none()
+                || self.converted_derived_count.is_none()
+                || self.converted_search_document_count.is_none()))
         {
             return Err(ProfileStorageUpgradeError::Corrupt {
                 source: anyhow::anyhow!("profile storage upgrade journal invariants are invalid"),
@@ -191,6 +219,22 @@ impl UpgradeJournalV1 {
         self.converted_blob_count
     }
 
+    pub(super) const fn payload_profile_database_digest(&self) -> Option<[u8; 32]> {
+        self.payload_profile_database_digest
+    }
+
+    pub(super) const fn payload_blob_tree_digest(&self) -> Option<[u8; 32]> {
+        self.payload_blob_tree_digest
+    }
+
+    pub(super) const fn converted_derived_count(&self) -> Option<u64> {
+        self.converted_derived_count
+    }
+
+    pub(super) const fn converted_search_document_count(&self) -> Option<u64> {
+        self.converted_search_document_count
+    }
+
     pub(super) fn mark_target_staged(
         &mut self,
         source_snapshot_digest: [u8; 32],
@@ -246,6 +290,29 @@ impl UpgradeJournalV1 {
         self.converted_inline_count = Some(inline_count);
         self.converted_blob_count = Some(blob_count);
         self.phase = UpgradePhaseV1::PrimaryPayloadsConverted;
+        self.validate()
+    }
+
+    pub(super) fn mark_payloads_converted(
+        &mut self,
+        profile_database_digest: [u8; 32],
+        blob_tree_digest: [u8; 32],
+        derived_count: u64,
+        search_document_count: u64,
+    ) -> Result<(), ProfileStorageUpgradeError> {
+        if self.phase != UpgradePhaseV1::PrimaryPayloadsConverted
+            || profile_database_digest == [0; 32]
+            || blob_tree_digest == [0; 32]
+        {
+            return Err(ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::anyhow!("profile upgrade payload conversion transition is invalid"),
+            });
+        }
+        self.payload_profile_database_digest = Some(profile_database_digest);
+        self.payload_blob_tree_digest = Some(blob_tree_digest);
+        self.converted_derived_count = Some(derived_count);
+        self.converted_search_document_count = Some(search_document_count);
+        self.phase = UpgradePhaseV1::PayloadsConverted;
         self.validate()
     }
 }

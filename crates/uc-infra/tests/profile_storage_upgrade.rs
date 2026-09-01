@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use diesel::RunQueryDsl;
+use uc_core::ids::ProfileId;
 use uc_core::membership::ActiveSpaceGenerationManifestV2;
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use uc_infra::db::pool::init_db_pool;
@@ -89,6 +90,7 @@ fn new_upgrade_from_pool(
         root.to_path_buf(),
         source_pool,
         root.join("blobs"),
+        ProfileId::from("default"),
         Arc::new(InMemorySession::new()),
         vault,
         keys,
@@ -120,6 +122,10 @@ async fn v2_upgrade_coordination_is_durable_idempotent_and_encrypted() {
         secure_storage.clone(),
         Arc::clone(&keys),
         Arc::clone(&manifests),
+    );
+    assert_eq!(
+        upgrade.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Pending
     );
     assert_eq!(
         upgrade.ensure_v3().await.unwrap(),
@@ -175,6 +181,10 @@ async fn empty_profile_uses_the_same_durable_recovery_path() {
         secure_storage.clone(),
         Arc::clone(&keys),
         Arc::clone(&manifests),
+    );
+    assert_eq!(
+        upgrade.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Pending
     );
     assert_eq!(
         upgrade.ensure_v3().await.unwrap(),

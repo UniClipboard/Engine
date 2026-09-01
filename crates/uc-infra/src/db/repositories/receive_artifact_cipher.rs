@@ -5,16 +5,18 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use uc_core::crypto::aad;
 use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
-use uc_core::ids::EntryId;
+use uc_core::ids::{EntryId, ProfileId};
 use uc_core::ports::{ReceiveArtifact, ReceiveArtifactOwnership};
 
 use crate::security::v1_aead::{decrypt_xchacha_raw, encrypt_xchacha_raw};
 use crate::security::ContentProtection;
+use crate::space::InMemorySession;
 
 const MAGIC: [u8; 4] = *b"UCAR";
 const FORMAT_VERSION: u8 = 1;
 const NONCE_LEN: usize = 24;
 const HEADER_LEN: usize = MAGIC.len() + 1 + NONCE_LEN;
+pub(super) const ARTIFACT_KEY_INFO: &[u8] = b"uniclipboard-receive-artifact-log/v1";
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ReceiveArtifactCipherError {
@@ -138,6 +140,18 @@ impl V3ReceiveArtifactCipher {
 impl ReceiveArtifactCipher {
     pub(crate) fn new(key: [u8; 32]) -> Self {
         Self { key }
+    }
+
+    pub(crate) fn legacy_for_upgrade(
+        session: &InMemorySession,
+        profile_id: &ProfileId,
+    ) -> anyhow::Result<Self> {
+        session
+            .derive_stable_subkey(profile_id.as_ref().as_bytes(), ARTIFACT_KEY_INFO)
+            .map(Self::new)
+            .map_err(|source| {
+                anyhow::Error::new(source).context("derive legacy receive-artifact key")
+            })
     }
 
     pub(crate) fn seal(
