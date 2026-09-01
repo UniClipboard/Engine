@@ -63,16 +63,23 @@ impl BlobCipherPort for BlobCipherAdapter {
         aad: &Aad,
     ) -> Result<Ciphertext, BlobCipherError> {
         if !self.session.is_ready() {
-            return Err(BlobCipherError::NotUnlocked);
+            return Err(BlobCipherError::not_unlocked(anyhow::anyhow!(
+                "V1/V2 content session is not ready"
+            )));
         }
-        let space_id = self
-            .session
-            .current_space_id()
-            .map_err(|e| BlobCipherError::Internal(e.to_string()))?;
+        let space_id = self.session.current_space_id().map_err(|source| {
+            BlobCipherError::internal(
+                anyhow::Error::new(source).context("resolve V1/V2 active space"),
+            )
+        })?;
         let resolved = self
             .session
             .current_content_key(&space_id, ContentKeyPurpose::Content)
-            .map_err(|e| BlobCipherError::Internal(e.to_string()))?;
+            .map_err(|source| {
+                BlobCipherError::internal(
+                    anyhow::Error::new(source).context("resolve V1/V2 active content key"),
+                )
+            })?;
         let bound_aad = key_epoch_aad::bind(
             b"blob-json-v2",
             &space_id,
@@ -83,7 +90,11 @@ impl BlobCipherPort for BlobCipherAdapter {
         );
 
         let blob = v1_aead::encrypt_blob_xchacha(resolved.key(), plaintext.as_bytes(), &bound_aad)
-            .map_err(|e| BlobCipherError::Internal(e.to_string()))?;
+            .map_err(|source| {
+                BlobCipherError::internal(
+                    anyhow::Error::new(source).context("encrypt V1/V2 inline payload"),
+                )
+            })?;
         let keyed = KeyedEncryptedBlob {
             version: "V2".to_owned(),
             aead: blob.aead,
@@ -94,8 +105,11 @@ impl BlobCipherPort for BlobCipherAdapter {
             aad_fingerprint: blob.aad_fingerprint,
         };
 
-        let bytes = serde_json::to_vec(&keyed)
-            .map_err(|e| BlobCipherError::Internal(format!("serialize keyed blob: {e}")))?;
+        let bytes = serde_json::to_vec(&keyed).map_err(|source| {
+            BlobCipherError::internal(
+                anyhow::Error::new(source).context("encode V2 inline payload"),
+            )
+        })?;
         Ok(Ciphertext::new(bytes))
     }
 
@@ -105,43 +119,73 @@ impl BlobCipherPort for BlobCipherAdapter {
         aad: &Aad,
     ) -> Result<Plaintext, BlobCipherError> {
         if !self.session.is_ready() {
-            return Err(BlobCipherError::NotUnlocked);
+            return Err(BlobCipherError::not_unlocked(anyhow::anyhow!(
+                "V1/V2 content session is not ready"
+            )));
         }
 
-        let version: BlobVersion = serde_json::from_slice(ciphertext.as_bytes())
-            .map_err(|_| BlobCipherError::InvalidCiphertext)?;
-        let space_id = self
-            .session
-            .current_space_id()
-            .map_err(|_| BlobCipherError::NotUnlocked)?;
+        let version: BlobVersion =
+            serde_json::from_slice(ciphertext.as_bytes()).map_err(|source| {
+                BlobCipherError::invalid_ciphertext(
+                    anyhow::Error::new(source).context("decode V1/V2 inline version"),
+                )
+            })?;
+        let space_id = self.session.current_space_id().map_err(|source| {
+            BlobCipherError::not_unlocked(
+                anyhow::Error::new(source).context("resolve V1/V2 active space"),
+            )
+        })?;
         let plain = match version.version.as_str() {
             "V1" => {
-                let blob: EncryptedBlob = serde_json::from_slice(ciphertext.as_bytes())
-                    .map_err(|_| BlobCipherError::InvalidCiphertext)?;
+                let blob: EncryptedBlob =
+                    serde_json::from_slice(ciphertext.as_bytes()).map_err(|source| {
+                        BlobCipherError::invalid_ciphertext(
+                            anyhow::Error::new(source).context("decode V1 inline payload"),
+                        )
+                    })?;
                 if blob.aead != "XChaCha20Poly1305" {
-                    return Err(BlobCipherError::InvalidCiphertext);
+                    return Err(BlobCipherError::invalid_ciphertext(anyhow::anyhow!(
+                        "unsupported V1 inline algorithm"
+                    )));
                 }
-                let master_key = self
-                    .session
-                    .legacy_content_key()
-                    .map_err(|e| BlobCipherError::Internal(e.to_string()))?;
+                let master_key = self.session.legacy_content_key().map_err(|source| {
+                    BlobCipherError::internal(
+                        anyhow::Error::new(source).context("resolve V1 content key"),
+                    )
+                })?;
                 decrypt(&master_key, &blob.nonce, &blob.ciphertext, aad.as_bytes())?
             }
             "V2" => {
                 let blob: KeyedEncryptedBlob = serde_json::from_slice(ciphertext.as_bytes())
-                    .map_err(|_| BlobCipherError::InvalidCiphertext)?;
+                    .map_err(|source| {
+                        BlobCipherError::invalid_ciphertext(
+                            anyhow::Error::new(source).context("decode V2 inline payload"),
+                        )
+                    })?;
                 if blob.aead != "XChaCha20Poly1305" || blob.nonce.len() != 24 {
-                    return Err(BlobCipherError::InvalidCiphertext);
+                    return Err(BlobCipherError::invalid_ciphertext(anyhow::anyhow!(
+                        "invalid V2 inline framing"
+                    )));
                 }
-                let content_key_id = ContentKeyId::from_string(blob.content_key_id)
-                    .map_err(|_| BlobCipherError::InvalidCiphertext)?;
+                let content_key_id =
+                    ContentKeyId::from_string(blob.content_key_id).map_err(|source| {
+                        BlobCipherError::invalid_ciphertext(
+                            anyhow::Error::new(source).context("validate V2 content key id"),
+                        )
+                    })?;
                 let epoch = GroupEpoch::new(blob.group_epoch);
                 let resolved = self
                     .session
                     .content_key(&space_id, &content_key_id, ContentKeyPurpose::Content)
-                    .map_err(|_| BlobCipherError::InvalidCiphertext)?;
+                    .map_err(|source| {
+                        BlobCipherError::invalid_ciphertext(
+                            anyhow::Error::new(source).context("resolve V2 content key"),
+                        )
+                    })?;
                 if resolved.epoch() != epoch {
-                    return Err(BlobCipherError::InvalidCiphertext);
+                    return Err(BlobCipherError::invalid_ciphertext(anyhow::anyhow!(
+                        "V2 content key epoch mismatch"
+                    )));
                 }
                 let bound_aad = key_epoch_aad::bind(
                     b"blob-json-v2",
@@ -153,7 +197,11 @@ impl BlobCipherPort for BlobCipherAdapter {
                 );
                 decrypt(resolved.key(), &blob.nonce, &blob.ciphertext, &bound_aad)?
             }
-            _ => return Err(BlobCipherError::InvalidCiphertext),
+            _ => {
+                return Err(BlobCipherError::invalid_ciphertext(anyhow::anyhow!(
+                    "unsupported inline payload version"
+                )));
+            }
         };
         Ok(Plaintext::new(plain))
     }
@@ -166,9 +214,14 @@ fn decrypt(
     aad: &[u8],
 ) -> Result<Vec<u8>, BlobCipherError> {
     v1_aead::decrypt_blob_xchacha(key, nonce, ciphertext, aad).map_err(|error| match error {
-        v1_aead::AeadError::InvalidKey => BlobCipherError::Internal(error.to_string()),
-        v1_aead::AeadError::DecryptFailed => BlobCipherError::InvalidCiphertext,
-        v1_aead::AeadError::EncryptFailed => BlobCipherError::Internal(error.to_string()),
+        v1_aead::AeadError::DecryptFailed => BlobCipherError::invalid_ciphertext(
+            anyhow::Error::new(error).context("V1/V2 inline authentication failed"),
+        ),
+        v1_aead::AeadError::InvalidKey | v1_aead::AeadError::EncryptFailed => {
+            BlobCipherError::internal(
+                anyhow::Error::new(error).context("V1/V2 inline cryptography failed"),
+            )
+        }
     })
 }
 
@@ -274,7 +327,7 @@ mod tests {
 
         assert!(matches!(
             reader.decrypt(&ciphertext, &aad).await,
-            Err(BlobCipherError::InvalidCiphertext)
+            Err(BlobCipherError::InvalidCiphertext { .. })
         ));
     }
 }

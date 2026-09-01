@@ -167,7 +167,7 @@ impl FileLegacyMigrationRecovery {
                 .await
             {
                 Ok(_) => {}
-                Err(BlobCipherError::InvalidCiphertext) => unreadable += 1,
+                Err(BlobCipherError::InvalidCiphertext { .. }) => unreadable += 1,
                 Err(_) => return Err(LegacyMigrationRecoveryError::RecoveryRequired),
             }
         }
@@ -463,7 +463,9 @@ mod tests {
             _aad: &Aad,
         ) -> Result<Plaintext, BlobCipherError> {
             if ciphertext.as_bytes() == b"unreadable" {
-                return Err(BlobCipherError::InvalidCiphertext);
+                return Err(BlobCipherError::invalid_ciphertext(anyhow::anyhow!(
+                    "test recovery ciphertext is unreadable"
+                )));
             }
             Ok(Plaintext::new(ciphertext.as_bytes().to_vec()))
         }

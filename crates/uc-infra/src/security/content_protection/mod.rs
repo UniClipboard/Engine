@@ -1,5 +1,10 @@
+mod blob_store;
 mod context;
 mod envelope;
+mod inline;
+
+pub use blob_store::V3EncryptedBlobStore;
+pub use inline::V3InlinePayloadCipher;
 
 use std::sync::Arc;
 

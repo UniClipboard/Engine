@@ -1,6 +1,6 @@
 # 033 不可变内容保护上下文与一次性密文升级
 
-状态：实施中；前三个基础切片、第四步的安全会话切片及第五步的持久密码接口收窄切片已完成，032 在本规格完成前暂停实施
+状态：实施中；前三个基础切片、第四步的安全会话切片、第五步的持久密码接口收窄与 V3 inline/UCBL 目标格式切片已完成，032 在本规格完成前暂停实施
 
 本规格取代规格 023 中“CrossSpace 必须把本机历史重封装到目标 MasterKey”的规则，以及规格 028 中“切换前普通本机内容沿用 CrossSpace rebuild/rewrap”的规则。规格 023/028 的准入提交、门禁、恢复和 MLS 成员语义继续有效。
 
@@ -193,7 +193,7 @@ struct PersistedCiphertextV3 {
 
 V3 open 先用 `content_key_id` 在加密 vault 中唯一解析保护组与 key，再结合所属 adapter 的固定 purpose 重建完整 `ProtectionContextV1`。AAD 必须由固定 domain tag、完整 context、持久头中的 key id/epoch、业务实体 AAD 和明确长度编码组成。`ProtectionGroupId` 与 purpose 参与认证但不在密文头明文保存；`SpaceId` 若作为业务实体字段出现，只能位于已加密 payload 或由上层已批准的业务 AAD 中，密码模块不得用当前活动 SpaceId 覆盖 vault 解析出的保护组。V3 不保存明文文件名、路径、设备名或其他业务负载。
 
-JSON inline 密文与 UCBL blob 头可以使用不同编码，但必须共享同一个规范 `ProtectionContextV1` 和 AAD 构造器。未知 version、algorithm、purpose、保护组、key id 或 epoch 一律失败关闭。
+inline 密文与 UCBL blob 共享紧凑二进制 `PersistedCiphertextV3` envelope；UCBL 只在该 envelope 外增加 magic/version 并负责 zstd 压缩。各 adapter 仍使用自己的业务 AAD，但完整 `ProtectionContextV1`、purpose 派生和规范 AAD 组合只能由 `ContentProtection` 构造。未知 version、algorithm、purpose、保护组、key id 或 epoch 一律失败关闭。
 
 ### `ProfileContentKeyVaultV1`
 
@@ -393,11 +393,13 @@ Change: 第一子切片新增 `ActiveSpaceSecuritySession` 深模块，并由 En
 Change: 第二子切片把当前 Space 的 material 推进收口为 `install_current_material`；成员加入、epoch/revocation、legacy bootstrap、Sponsor/Helper 准入和 membership branch recovery 在已持久真实安全状态后，统一先幂等安装 vault catalog，再推进活动 session。安装失败通过各业务边界的稳定 `SecurityState` 分类保留 source，原恢复流程重试已提交 material；不回滚或删除已安全写入的 catalog。仅校验候选 material 的临时 `InMemorySession` 不得写 vault；旧 `admission_space_transition` 的 CrossSpace target session 留给 Step 8 整体删除，不在此处制造过渡接线。Step 5 的 V3 reader clean cutover 后仍需从 `InMemorySession` 删除持久历史解析职责。本步仍不接 production V3 payload、不删除 V2 历史 catalog，也不改变 V2 manifest 或旧 CrossSpace transition。
 Risk: transport 与 at-rest purpose 混用会扩大旧组网络权限；使用不同具体模块，不创建万能 session trait。
 
-Step 5（进行中；持久密码 interface 收窄子切片已完成）:
+Step 5（进行中；持久密码 interface 收窄与 V3 inline/UCBL 目标格式子切片已完成）:
 File: `crates/uc-core/src/ports/security/blob_cipher.rs`、相关 Application port/错误模块、`crates/uc-infra/src/security/blob_cipher_adapter.rs`、`key_epoch_aad.rs`、`encrypted_blob_store.rs`、各加密 repository adapter
 Change: 定义共享 V3 protection context/AAD，更新 inline 和 UCBL 格式；将持久内容解密 interface 一次性改为不接收 `ActiveSpace`，所有持久化新写只产生 V3，open 自描述选择 key。把派生字段的 context、常量、读写和验证收口到所属 repository/module，并以 contract 测试证明调用方不能选择 protection context。
 
 Change: 第一子切片先从 `BlobCipherPort::encrypt/decrypt` 同时删除 `ActiveSpace` 参数，清除四类 inline decorator、旧 migration recovery 和待删 CrossSpace 中伪造的占位 Space。调用方现在只提交 payload 与业务实体 AAD；当前 V1/V2 兼容 adapter 仍从共享 session 内部选取上下文，wire format 和生产行为不变。此切片不启用 V3 writer、不增加 production 双 reader，也不修改 UCBL、搜索或专用 repository codec；profile upgrade gate 就绪后，inline production clean cutover 只替换 adapter 内部实现，不再改调用方 interface。
+
+Change: 第二子切片把原 JSON `Vec<u8>` V3 envelope 收紧为共享的紧凑二进制格式，避免大 UCBL payload 被 JSON 数字数组放大；新增只读写 V3 的 inline `BlobCipherPort` adapter 与 UCBL store。两者均把 key resolution、purpose HKDF、完整 context AAD 与 AEAD framing 委托给同一个 `ContentProtection`，UCBL 只拥有压缩和外层 framing。跨 Space tracer 证明切换活动 session 后 inline 与 blob 历史仍从 vault 打开，密文不出现 payload、Space、保护组或 purpose，错误转换保留稳定分类与 source。本子切片仍不接 production，也不增加 V1/V2 正常 reader；搜索留给 Step 6。active register、file-set path、transfer/receive 与 directory publish 等专用字段不复制第二套密码 header，其业务序列化和 AAD 继续由所属模块拥有，并在 Step 7 全量转换与 clean cutover 时统一委托 `ContentProtection`。
 Risk: 任一字段遗漏都会在切换后不可读；建立持久负载清单测试，不用一个字符串驱动的万能 rewrapper 隐藏差异。
 
 Step 6:

@@ -33,7 +33,9 @@ pub use admission_key_manager::{
 pub use admission_proof::HmacProofAdapter;
 pub use admission_space_transition::{space_generation_directory, DurableAdmissionSpaceTransition};
 pub use blob_cipher_adapter::BlobCipherAdapter;
-pub use content_protection::{ContentProtection, ContentProtectionError};
+pub use content_protection::{
+    ContentProtection, ContentProtectionError, V3EncryptedBlobStore, V3InlinePayloadCipher,
+};
 pub use crypto_model::{
     EncryptedBlob, KdfParams, KdfParamsV1, KeyScope, KeySlot, KeySlotConvertError, KeySlotFile,
     WrappedMasterKey,

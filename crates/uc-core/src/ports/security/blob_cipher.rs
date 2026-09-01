@@ -22,15 +22,44 @@ use crate::crypto::domain::{Aad, Ciphertext, Plaintext};
 pub enum BlobCipherError {
     /// 当前持久内容保护上下文不可用，例如会话已经被锁定。
     #[error("space session is no longer unlocked")]
-    NotUnlocked,
+    NotUnlocked {
+        #[source]
+        source: anyhow::Error,
+    },
 
     /// 密文本身损坏 / AAD 不匹配 / 解包失败——数据层故障。
     #[error("invalid ciphertext or aad mismatch")]
-    InvalidCiphertext,
+    InvalidCiphertext {
+        #[source]
+        source: anyhow::Error,
+    },
 
     /// 其它内部失败（底层算法库、IO 等）。
-    #[error("blob cipher internal error: {0}")]
-    Internal(String),
+    #[error("blob cipher internal error")]
+    Internal {
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+impl BlobCipherError {
+    pub fn not_unlocked(source: impl Into<anyhow::Error>) -> Self {
+        Self::NotUnlocked {
+            source: source.into(),
+        }
+    }
+
+    pub fn invalid_ciphertext(source: impl Into<anyhow::Error>) -> Self {
+        Self::InvalidCiphertext {
+            source: source.into(),
+        }
+    }
+
+    pub fn internal(source: impl Into<anyhow::Error>) -> Self {
+        Self::Internal {
+            source: source.into(),
+        }
+    }
 }
 
 /// 业务 blob 加解密 port。
@@ -53,4 +82,22 @@ pub trait BlobCipherPort: Send + Sync {
         ciphertext: &Ciphertext,
         aad: &Aad,
     ) -> Result<Plaintext, BlobCipherError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+
+    use super::*;
+
+    #[test]
+    fn stable_error_variants_preserve_their_source() {
+        for error in [
+            BlobCipherError::not_unlocked(anyhow::anyhow!("locked")),
+            BlobCipherError::invalid_ciphertext(anyhow::anyhow!("invalid")),
+            BlobCipherError::internal(anyhow::anyhow!("internal")),
+        ] {
+            assert!(error.source().is_some());
+        }
+    }
 }

@@ -2534,7 +2534,7 @@ impl SqliteSpaceGenerationStore {
                 .await
             {
                 Ok(plaintext) => plaintext,
-                Err(uc_core::ports::security::BlobCipherError::InvalidCiphertext)
+                Err(uc_core::ports::security::BlobCipherError::InvalidCiphertext { .. })
                     if preserve_unreadable_history =>
                 {
                     preserved.push(row.id);
@@ -3123,12 +3123,12 @@ async fn preflight_source_inline_history(
             .await
         {
             Ok(_) => {}
-            Err(uc_core::ports::security::BlobCipherError::InvalidCiphertext)
+            Err(uc_core::ports::security::BlobCipherError::InvalidCiphertext { .. })
                 if !preserve_unreadable_history =>
             {
                 return Err(AdmissionSpaceTransitionError::UnreadableHistoryRequiresConfirmation);
             }
-            Err(uc_core::ports::security::BlobCipherError::InvalidCiphertext) => {}
+            Err(uc_core::ports::security::BlobCipherError::InvalidCiphertext { .. }) => {}
             Err(_) => return Err(AdmissionSpaceTransitionError::Storage),
         }
     }
