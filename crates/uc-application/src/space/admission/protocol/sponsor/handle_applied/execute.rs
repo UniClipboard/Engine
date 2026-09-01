@@ -11,14 +11,7 @@ impl SponsorAdmissionService {
         &self,
         message: AuthenticatedSpaceAdmissionMessage,
     ) -> Result<SpaceAdmissionMessageReply, HandleAuthenticatedSpaceAdmissionMessageError> {
-        let load_started = std::time::Instant::now();
-        let loaded_result = self.state.load(&message).await;
-        super::super::super::record_performance_phase(
-            "sponsor_state_load",
-            load_started,
-            loaded_result.is_ok(),
-        );
-        let loaded = loaded_result?;
+        let loaded = self.state.load(&message).await?;
         let (peer_binding, applied, canonical_digest, _) = message.into_parts();
         let evidence = applied.evidence(canonical_digest).ok_or_else(|| {
             HandleAuthenticatedSpaceAdmissionMessageError::invalid(anyhow::anyhow!(
@@ -56,43 +49,24 @@ impl SponsorAdmissionService {
                 "the Sponsor Committed state has no Complete preparation"
             ))
         })?;
-        let prepare_started = std::time::Instant::now();
-        let material_result = self
+        let material = self
             .prepare_complete
             .prepare(aggregate.admission_id(), preparation, &applied)
-            .await;
-        super::super::super::record_performance_phase(
-            "sponsor_prepare_complete",
-            prepare_started,
-            material_result.is_ok(),
-        );
-        let material = material_result?;
+            .await?;
         let (activated_security, complete_reply) = material.into_parts();
-        let activation_started = std::time::Instant::now();
-        let activation_result = self.activate_admission.activate(&activated_security).await;
-        super::super::super::record_performance_phase(
-            "sponsor_activate_admission",
-            activation_started,
-            activation_result.is_ok(),
-        );
-        activation_result?;
+        self.activate_admission
+            .activate(&activated_security)
+            .await?;
         let transition = aggregate.complete_applied(
             applied,
             canonical_digest,
             activated_security,
             complete_reply,
         )?;
-        let commit_started = std::time::Instant::now();
-        let committed_result = self
+        let committed = self
             .state
             .commit(commit_token, SponsorAdmissionMutation::new(transition))
-            .await;
-        super::super::super::record_performance_phase(
-            "sponsor_state_commit",
-            commit_started,
-            committed_result.is_ok(),
-        );
-        let committed = committed_result?;
+            .await?;
         let (aggregate, _) = committed.into_parts();
         SpaceAdmissionMessageReply::new(aggregate).ok_or_else(|| {
             HandleAuthenticatedSpaceAdmissionMessageError::recovery_required(anyhow::anyhow!(

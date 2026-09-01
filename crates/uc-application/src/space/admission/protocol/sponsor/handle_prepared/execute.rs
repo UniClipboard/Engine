@@ -11,14 +11,7 @@ impl SponsorAdmissionService {
         &self,
         message: AuthenticatedSpaceAdmissionMessage,
     ) -> Result<SpaceAdmissionMessageReply, HandleAuthenticatedSpaceAdmissionMessageError> {
-        let load_started = std::time::Instant::now();
-        let loaded_result = self.state.load(&message).await;
-        super::super::super::record_performance_phase(
-            "sponsor_state_load",
-            load_started,
-            loaded_result.is_ok(),
-        );
-        let loaded = loaded_result?;
+        let loaded = self.state.load(&message).await?;
         let (peer_binding, prepared, canonical_digest, _) = message.into_parts();
         let evidence = prepared.evidence(canonical_digest).ok_or_else(|| {
             HandleAuthenticatedSpaceAdmissionMessageError::invalid(anyhow::anyhow!(
@@ -56,17 +49,10 @@ impl SponsorAdmissionService {
                 "the Sponsor Candidate state has no Commit preparation"
             ))
         })?;
-        let prepare_started = std::time::Instant::now();
-        let material_result = self
+        let material = self
             .prepare_commit
             .prepare(aggregate.admission_id(), preparation, &prepared)
-            .await;
-        super::super::super::record_performance_phase(
-            "sponsor_prepare_commit",
-            prepare_started,
-            material_result.is_ok(),
-        );
-        let material = material_result?;
+            .await?;
         let (committed_history, sealed_security, commit_reply) = material.into_parts();
         let transition = aggregate.commit_prepared(
             prepared,
@@ -75,17 +61,10 @@ impl SponsorAdmissionService {
             sealed_security,
             commit_reply,
         )?;
-        let commit_started = std::time::Instant::now();
-        let committed_result = self
+        let committed = self
             .state
             .commit(commit_token, SponsorAdmissionMutation::new(transition))
-            .await;
-        super::super::super::record_performance_phase(
-            "sponsor_state_commit",
-            commit_started,
-            committed_result.is_ok(),
-        );
-        let committed = committed_result?;
+            .await?;
         let (aggregate, _) = committed.into_parts();
         SpaceAdmissionMessageReply::new(aggregate).ok_or_else(|| {
             HandleAuthenticatedSpaceAdmissionMessageError::recovery_required(anyhow::anyhow!(

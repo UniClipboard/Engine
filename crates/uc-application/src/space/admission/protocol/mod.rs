@@ -7,16 +7,6 @@ mod test_support;
 #[cfg(test)]
 mod tests;
 
-fn record_performance_phase(phase: &'static str, started: std::time::Instant, success: bool) {
-    tracing::info!(
-        target: "admission.performance",
-        phase,
-        elapsed_ms = started.elapsed().as_millis() as u64,
-        outcome = if success { "ok" } else { "error" },
-        "pairing subphase completed"
-    );
-}
-
 pub(crate) use joiner::JoinerAdmissionService;
 pub use joiner::{
     CompletedJoinerActivation, CurrentJoinAdmissionStatePort, ExecuteJoinerActivationError,

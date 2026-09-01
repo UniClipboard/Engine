@@ -24,17 +24,11 @@ impl JoinerAdmissionService {
                 return;
             }
         };
-        let prepare_started = std::time::Instant::now();
-        let activation_result = self
+        let activation = match self
             .prepare_activation
             .prepare(aggregate.admission_id(), preparation, &reply)
-            .await;
-        crate::space::admission::protocol::record_performance_phase(
-            "joiner_prepare_activation",
-            prepare_started,
-            activation_result.is_ok(),
-        );
-        let activation = match activation_result {
+            .await
+        {
             Ok(activation) => activation,
             Err(PrepareJoinerActivationError::Invalid { .. }) => {
                 report.recovery_required_count += 1;

@@ -23,14 +23,7 @@ impl JoinerAdmissionService {
                 return;
             }
         };
-        let prepare_started = std::time::Instant::now();
-        let prepared_result = self.prepare_candidate.prepare(preparation, &reply).await;
-        crate::space::admission::protocol::record_performance_phase(
-            "joiner_prepare_candidate",
-            prepare_started,
-            prepared_result.is_ok(),
-        );
-        let prepared = match prepared_result {
+        let prepared = match self.prepare_candidate.prepare(preparation, &reply).await {
             Ok(prepared) => prepared,
             Err(PrepareJoinerCandidateError::Unavailable { .. }) => {
                 report.deferred_count += 1;

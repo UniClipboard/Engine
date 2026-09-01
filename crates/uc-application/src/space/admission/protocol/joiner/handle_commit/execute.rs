@@ -40,17 +40,11 @@ impl JoinerAdmissionService {
                 return;
             }
         };
-        let prepare_started = std::time::Instant::now();
-        let material_result = self
+        let material = match self
             .prepare_applied
             .prepare(aggregate.admission_id(), preparation)
-            .await;
-        crate::space::admission::protocol::record_performance_phase(
-            "joiner_prepare_applied",
-            prepare_started,
-            material_result.is_ok(),
-        );
-        let material = match material_result {
+            .await
+        {
             Ok(material) => material,
             Err(PrepareJoinerAppliedError::Invalid { .. }) => {
                 report.recovery_required_count += 1;

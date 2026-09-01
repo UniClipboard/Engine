@@ -11,14 +11,7 @@ impl SponsorAdmissionService {
         &self,
         message: AuthenticatedSpaceAdmissionMessage,
     ) -> Result<SpaceAdmissionMessageReply, HandleAuthenticatedSpaceAdmissionMessageError> {
-        let load_started = std::time::Instant::now();
-        let loaded_result = self.state.load(&message).await;
-        super::super::super::record_performance_phase(
-            "sponsor_state_load",
-            load_started,
-            loaded_result.is_ok(),
-        );
-        let loaded = loaded_result?;
+        let loaded = self.state.load(&message).await?;
         let (peer_binding, complete_ack, canonical_digest, _) = message.into_parts();
         let evidence = complete_ack.evidence(canonical_digest).ok_or_else(|| {
             HandleAuthenticatedSpaceAdmissionMessageError::invalid(anyhow::anyhow!(
@@ -56,30 +49,16 @@ impl SponsorAdmissionService {
                 "the Sponsor Applied state has no settlement preparation"
             ))
         })?;
-        let prepare_started = std::time::Instant::now();
-        let settled_result = self
+        let settled = self
             .prepare_settled
             .prepare(aggregate.admission_id(), preparation, &complete_ack)
-            .await;
-        super::super::super::record_performance_phase(
-            "sponsor_prepare_settled",
-            prepare_started,
-            settled_result.is_ok(),
-        );
-        let settled = settled_result?;
+            .await?;
         let transition =
             aggregate.settle_complete_ack(complete_ack, canonical_digest, settled.into_reply())?;
-        let commit_started = std::time::Instant::now();
-        let committed_result = self
+        let committed = self
             .state
             .commit(commit_token, SponsorAdmissionMutation::new(transition))
-            .await;
-        super::super::super::record_performance_phase(
-            "sponsor_state_commit",
-            commit_started,
-            committed_result.is_ok(),
-        );
-        let committed = committed_result?;
+            .await?;
         let (aggregate, _) = committed.into_parts();
         SpaceAdmissionMessageReply::new(aggregate).ok_or_else(|| {
             HandleAuthenticatedSpaceAdmissionMessageError::recovery_required(anyhow::anyhow!(
