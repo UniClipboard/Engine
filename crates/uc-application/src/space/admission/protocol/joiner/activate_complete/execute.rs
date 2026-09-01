@@ -33,11 +33,17 @@ impl JoinerAdmissionService {
                 return (report, None);
             }
         };
-        let completed = match self
+        let execute_started = Instant::now();
+        let completed_result = self
             .execute_activation
             .execute(aggregate.admission_id(), preparation)
-            .await
-        {
+            .await;
+        crate::space::admission::protocol::record_performance_phase(
+            "joiner_execute_activation",
+            execute_started,
+            completed_result.is_ok(),
+        );
+        let completed = match completed_result {
             Ok(completed) => completed,
             Err(ExecuteJoinerActivationError::Invalid { .. }) => {
                 report.recovery_required_count += 1;

@@ -41,7 +41,19 @@ impl AdmissionRecoveryService {
     ) -> AdmissionRecoveryReport {
         let round_started = Instant::now();
         let mut report = AdmissionRecoveryReport::default();
-        let loaded = match self.state.load(trigger).await {
+        let load_started = Instant::now();
+        let loaded_result = self.state.load(trigger).await;
+        if match &loaded_result {
+            Ok(loaded) => !loaded.is_empty(),
+            Err(_) => true,
+        } {
+            crate::space::admission::protocol::record_performance_phase(
+                "joiner_state_load",
+                load_started,
+                loaded_result.is_ok(),
+            );
+        }
+        let loaded = match loaded_result {
             Ok(loaded) => loaded,
             Err(error) => {
                 self.record_state_error(&mut report, error);

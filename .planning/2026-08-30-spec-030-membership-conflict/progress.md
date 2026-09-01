@@ -298,3 +298,9 @@
 - 红测连续得到 7.56 秒与 7.53 秒，确认当前实现不满足目标；用例标记为显式 `--ignored` 性能门禁，避免共享 CI 机器把性能结果混入功能正确性。
 - 正式脱敏 tracing 显示首次信道建立约 157ms，后续恢复信道约 3–4ms；主要耗时是串行 JoinRequest、Prepared、Applied、激活与 CompleteAck 阶段，而非地址发现或 30 秒维护兜底周期。
 - 2 秒和 10 秒维护周期实验分别在 332.05 秒与 372.62 秒令 F7 同分支正文矩阵失败；实验代码已撤回。维护 runtime 本来就立即执行 Startup round，并由 StateChanged 主动唤醒，缩短持续周期只增加 Iroh/SQLite 竞争。
+
+## 2026-09-01 · release pairing performance breakdown
+
+- 正式 tracing 细分 Joiner/Sponsor 状态 load/commit、安全材料准备与激活执行，并抑制没有待处理准入的空 load 日志。
+- 首次 `--release` 构建耗时 4 分 23 秒，不计入配对；优化构建中的双设备热路径为 3.77 秒，相比 debug 7.53 秒降低约 50%，仍未达到 1 秒预算。
+- Release 明确热点：Joiner Candidate 准备 378ms；已拆出的 Joiner durable commits 合计约 458ms；三个主要 recovery rounds 分别约 747ms、673ms、876ms；Applied 完成到本机 activation 开始前仍有约 0.87 秒调度空洞。

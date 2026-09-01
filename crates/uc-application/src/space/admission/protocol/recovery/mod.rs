@@ -29,7 +29,10 @@ impl AdmissionRecoveryService {
         token: AdmissionRecoveryCommitToken,
         transition: JoinerAdmissionTransition,
     ) -> Result<LoadedPendingAdmission, PendingAdmissionRecoveryStateError> {
-        self.state.commit(token, transition).await
+        let started = std::time::Instant::now();
+        let result = self.state.commit(token, transition).await;
+        super::record_performance_phase("joiner_state_commit", started, result.is_ok());
+        result
     }
 
     pub(super) fn record_state_error(
