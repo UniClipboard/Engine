@@ -13,8 +13,8 @@ use tracing::trace;
 use uc_core::{
     clipboard::ObservedClipboardRepresentation,
     crypto::aad,
-    crypto::domain::{Aad, ActiveSpace, Ciphertext},
-    ids::{EventId, RepresentationId, SpaceId},
+    crypto::domain::{Aad, Ciphertext},
+    ids::{EventId, RepresentationId},
     ports::{security::BlobCipherPort, ClipboardEventRepositoryPort},
 };
 
@@ -53,12 +53,10 @@ impl ClipboardEventRepositoryPort for DecryptingClipboardEventRepository {
             // 字节布局 (serde_json::to_vec(&EncryptedBlob)) 一致——既有数据可
             // 直接被新 port 解开,不需要数据迁移。
             let aad = aad::for_inline(event_id, &RepresentationId::from(representation_id));
-            // 单空间模型下用占位 ActiveSpace,adapter 当前不按 SpaceId 路由。
-            let active = ActiveSpace::new(SpaceId::from("space"));
             let ciphertext = Ciphertext::new(observed.expect_inline_bytes().to_vec());
             let plaintext = self
                 .blob_cipher
-                .decrypt(&active, &ciphertext, &Aad::from(aad.as_slice()))
+                .decrypt(&ciphertext, &Aad::from(aad.as_slice()))
                 .await
                 .context("failed to decrypt representation bytes")?;
 

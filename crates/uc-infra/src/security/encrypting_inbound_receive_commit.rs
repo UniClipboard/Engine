@@ -9,8 +9,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use uc_core::clipboard::PersistedClipboardRepresentation;
 use uc_core::crypto::aad;
-use uc_core::crypto::domain::{Aad, ActiveSpace, Plaintext};
-use uc_core::ids::{EventId, SpaceId};
+use uc_core::crypto::domain::{Aad, Plaintext};
+use uc_core::ids::EventId;
 use uc_core::ports::security::BlobCipherPort;
 use uc_core::ports::{
     CommitInboundReceivePort, InboundReceiveCommitError, InboundReceiveRecord,
@@ -73,7 +73,6 @@ impl EncryptingInboundReceiveCommit {
         event_id: &EventId,
         representations: &[PersistedClipboardRepresentation],
     ) -> Result<Vec<PersistedClipboardRepresentation>, InboundReceiveCommitError> {
-        let active = ActiveSpace::new(SpaceId::from("space"));
         let mut encrypted = Vec::with_capacity(representations.len());
         for representation in representations {
             let inline_data = match representation.inline_data.as_ref() {
@@ -82,7 +81,6 @@ impl EncryptingInboundReceiveCommit {
                     let ciphertext = self
                         .blob_cipher
                         .encrypt(
-                            &active,
                             &Plaintext::new(bytes.clone()),
                             &Aad::from(associated_data.as_slice()),
                         )

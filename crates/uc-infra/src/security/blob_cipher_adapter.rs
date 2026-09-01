@@ -1,8 +1,7 @@
-//! `BlobCipherPort` 的基础设施适配器（V1 加密：XChaCha20-Poly1305）。
+//! `BlobCipherPort` 的 V1/V2 兼容基础设施适配器。
 //!
-//! 端到端会话管理：内部持有 `EncryptionSessionPort`，自己完成
-//! "会话就绪检查 + 取出 MasterKey + AEAD 加解密 + EncryptedBlob 序列化"。
-//! 调用方只看到 `Plaintext` / `Ciphertext` / `Aad` 的进出。
+//! adapter 从共享 session 内部取得当前写入或历史读取上下文；调用方只看到
+//! `Plaintext` / `Ciphertext` / `Aad`，不能提供 Space、key id 或 epoch。
 //!
 //! # Wire format
 //!
@@ -20,7 +19,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use uc_core::crypto::domain::{Aad, ActiveSpace, Ciphertext, Plaintext};
+use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
 use uc_core::membership::{ContentKeyId, ContentKeyPurpose, GroupEpoch};
 use uc_core::ports::security::blob_cipher::{BlobCipherError, BlobCipherPort};
 
@@ -60,7 +59,6 @@ impl BlobCipherAdapter {
 impl BlobCipherPort for BlobCipherAdapter {
     async fn encrypt(
         &self,
-        _space: &ActiveSpace,
         plaintext: &Plaintext,
         aad: &Aad,
     ) -> Result<Ciphertext, BlobCipherError> {
@@ -103,7 +101,6 @@ impl BlobCipherPort for BlobCipherAdapter {
 
     async fn decrypt(
         &self,
-        _space: &ActiveSpace,
         ciphertext: &Ciphertext,
         aad: &Aad,
     ) -> Result<Plaintext, BlobCipherError> {
@@ -182,7 +179,7 @@ mod tests {
     use super::*;
     use crate::security::secrets::MasterKey;
 
-    fn ready_session() -> (Arc<InMemorySession>, ActiveSpace, MasterKey) {
+    fn ready_session() -> (Arc<InMemorySession>, SpaceId, MasterKey) {
         let root = MasterKey::from_bytes(&[9u8; 32]).unwrap();
         let space_id = SpaceId::from_str("space-v2");
         let session = Arc::new(InMemorySession::new());
@@ -191,46 +188,38 @@ mod tests {
             .create_migrated_space_material(&space_id, 100)
             .unwrap();
         session.install_space_material(&material).unwrap();
-        (session, ActiveSpace::new(space_id), root)
+        (session, space_id, root)
     }
 
     #[tokio::test]
     async fn new_ciphertext_is_v2_and_round_trips() {
-        let (session, space, _root) = ready_session();
+        let (session, _space_id, _root) = ready_session();
         let adapter = BlobCipherAdapter::new(session);
         let aad = Aad::new(b"entry-aad".to_vec());
         let plaintext = Plaintext::new(b"secret".to_vec());
 
-        let ciphertext = adapter.encrypt(&space, &plaintext, &aad).await.unwrap();
+        let ciphertext = adapter.encrypt(&plaintext, &aad).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(ciphertext.as_bytes()).unwrap();
 
         assert_eq!(value["version"], "V2");
         assert_eq!(value["group_epoch"], 1);
         assert_ne!(value["content_key_id"], "legacy-v1");
         assert_eq!(
-            adapter
-                .decrypt(&space, &ciphertext, &aad)
-                .await
-                .unwrap()
-                .as_bytes(),
+            adapter.decrypt(&ciphertext, &aad).await.unwrap().as_bytes(),
             b"secret"
         );
     }
 
     #[tokio::test]
     async fn legacy_v1_ciphertext_remains_readable() {
-        let (session, space, root) = ready_session();
+        let (session, _space_id, root) = ready_session();
         let adapter = BlobCipherAdapter::new(session);
         let aad = Aad::new(b"legacy-aad".to_vec());
         let legacy = v1_aead::encrypt_blob_xchacha(&root, b"legacy", aad.as_bytes()).unwrap();
         let ciphertext = Ciphertext::new(serde_json::to_vec(&legacy).unwrap());
 
         assert_eq!(
-            adapter
-                .decrypt(&space, &ciphertext, &aad)
-                .await
-                .unwrap()
-                .as_bytes(),
+            adapter.decrypt(&ciphertext, &aad).await.unwrap().as_bytes(),
             b"legacy"
         );
     }
@@ -264,31 +253,27 @@ mod tests {
         let reader = BlobCipherAdapter::new(joiner_session);
 
         assert_eq!(
-            reader
-                .decrypt(&ActiveSpace::new(space_id), &ciphertext, &aad)
-                .await
-                .unwrap()
-                .as_bytes(),
+            reader.decrypt(&ciphertext, &aad).await.unwrap().as_bytes(),
             b"shared history"
         );
     }
 
     #[tokio::test]
     async fn missing_v2_key_does_not_fall_back_to_legacy() {
-        let (writer_session, space, root) = ready_session();
+        let (writer_session, space_id, root) = ready_session();
         let writer = BlobCipherAdapter::new(writer_session);
         let aad = Aad::new(b"entry-aad".to_vec());
         let ciphertext = writer
-            .encrypt(&space, &Plaintext::new(b"secret".to_vec()), &aad)
+            .encrypt(&Plaintext::new(b"secret".to_vec()), &aad)
             .await
             .unwrap();
 
         let reader_session = Arc::new(InMemorySession::new());
-        reader_session.set_master_key_for_space(space.space_id().clone(), root);
+        reader_session.set_master_key_for_space(space_id, root);
         let reader = BlobCipherAdapter::new(reader_session);
 
         assert!(matches!(
-            reader.decrypt(&space, &ciphertext, &aad).await,
+            reader.decrypt(&ciphertext, &aad).await,
             Err(BlobCipherError::InvalidCiphertext)
         ));
     }

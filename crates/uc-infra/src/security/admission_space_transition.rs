@@ -15,7 +15,7 @@ use uc_application::deps::{
 };
 use uc_core::blob::ports::BlobReaderPort;
 use uc_core::crypto::aad;
-use uc_core::crypto::domain::{Aad, ActiveSpace, Ciphertext};
+use uc_core::crypto::domain::{Aad, Ciphertext};
 use uc_core::ids::{BlobId, DeviceId, EntryId, EventId, RepresentationId, SpaceId};
 use uc_core::membership::{
     ActiveSpaceGenerationManifestV2, AdmissionChangeFacts, AdmissionContentKeyCatalogV1,
@@ -101,7 +101,6 @@ struct DeviceResetSource {
     target_space_id: SpaceId,
     reset_id: [u8; 32],
     target_generation: [u8; 16],
-    source_space_id: SpaceId,
     source_session: Arc<InMemorySession>,
     prepared: PreparedSpaceGeneration,
 }
@@ -1049,8 +1048,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
             available_space_bytes(&self.generations.generation_root)?,
             required_space,
         )?;
-        let source_space_id = self
-            .session
+        self.session
             .current_space_id()
             .map_err(|_| AdmissionSpaceTransitionError::Locked)?;
         let reset_id = Self::device_reset_id(target_space_id);
@@ -1098,7 +1096,6 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
             target_space_id: target_space_id.clone(),
             reset_id,
             target_generation,
-            source_space_id,
             source_session: self.session.detached_clone(),
             prepared,
         });
@@ -1188,7 +1185,6 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
             .generations
             .rewrap_finalized_source(
                 final_source,
-                &prepared.source_space_id,
                 Arc::clone(&prepared.source_session),
                 target_space_id,
                 Arc::clone(&self.session),
@@ -1780,12 +1776,11 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
         &self,
         preserve_unreadable_history: bool,
     ) -> Result<(), AdmissionSpaceTransitionError> {
-        let Some(source_space) = self.session.current_space_id().ok() else {
+        if self.session.current_space_id().is_err() {
             return Ok(());
-        };
+        }
         preflight_source_inline_history(
             &self.source_pool,
-            &source_space,
             Arc::clone(&self.session),
             preserve_unreadable_history,
         )
@@ -1964,7 +1959,6 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
                     .generations
                     .rewrap_finalized_source(
                         self.final_source(transition)?,
-                        &SpaceId::from_str(&transition.source_space_id),
                         Arc::clone(&self.session),
                         &SpaceId::from_str(&transition.target_space_id),
                         target_session,
@@ -2461,7 +2455,6 @@ impl SqliteSpaceGenerationStore {
     pub(crate) async fn finalize_and_rewrap(
         &self,
         prepared: PreparedSpaceGeneration,
-        source_space: &SpaceId,
         source_session: Arc<InMemorySession>,
         target_space: &SpaceId,
         target_session: Arc<InMemorySession>,
@@ -2470,7 +2463,6 @@ impl SqliteSpaceGenerationStore {
         let finalized_source = self.finalize_source(prepared, target_space, target_generation)?;
         self.rewrap_finalized_source(
             finalized_source,
-            source_space,
             source_session,
             target_space,
             target_session,
@@ -2506,7 +2498,6 @@ impl SqliteSpaceGenerationStore {
     pub(crate) async fn rewrap_finalized_source(
         &self,
         finalized_source: FinalSourceGeneration,
-        source_space: &SpaceId,
         source_session: Arc<InMemorySession>,
         target_space: &SpaceId,
         target_session: Arc<InMemorySession>,
@@ -2539,11 +2530,7 @@ impl SqliteSpaceGenerationStore {
             let representation_id = RepresentationId::from(row.id.clone());
             let associated_data = Aad::from(aad::for_inline(&event_id, &representation_id));
             let plaintext = match source_cipher
-                .decrypt(
-                    &ActiveSpace::new(source_space.clone()),
-                    &Ciphertext::new(row.inline_data),
-                    &associated_data,
-                )
+                .decrypt(&Ciphertext::new(row.inline_data), &associated_data)
                 .await
             {
                 Ok(plaintext) => plaintext,
@@ -2556,11 +2543,7 @@ impl SqliteSpaceGenerationStore {
                 Err(_) => return Err("decrypt source representation".to_owned()),
             };
             let ciphertext = target_cipher
-                .encrypt(
-                    &ActiveSpace::new(target_space.clone()),
-                    &plaintext,
-                    &associated_data,
-                )
+                .encrypt(&plaintext, &associated_data)
                 .await
                 .map_err(|_| "encrypt target representation".to_owned())?;
             rewrapped.push((row.id, ciphertext.into_bytes()));
@@ -2581,8 +2564,7 @@ impl SqliteSpaceGenerationStore {
                 Arc::clone(&target_session),
             )
             .await?;
-        verify_rewrapped_inline_rows(&target_pool, target_space, target_session, &preserved)
-            .await?;
+        verify_rewrapped_inline_rows(&target_pool, target_session, &preserved).await?;
         drop(target_pool);
         let target_bytes = std::fs::read(&target_path)
             .map_err(|_| "read verified target generation".to_owned())?;
@@ -3127,7 +3109,6 @@ fn load_inline_rows(pool: &DbPool) -> Result<Vec<InlineGenerationRow>, String> {
 
 async fn preflight_source_inline_history(
     pool: &DbPool,
-    source_space: &SpaceId,
     source_session: Arc<InMemorySession>,
     preserve_unreadable_history: bool,
 ) -> Result<(), AdmissionSpaceTransitionError> {
@@ -3138,11 +3119,7 @@ async fn preflight_source_inline_history(
         let representation_id = RepresentationId::from(row.id);
         let associated_data = Aad::from(aad::for_inline(&event_id, &representation_id));
         match source_cipher
-            .decrypt(
-                &ActiveSpace::new(source_space.clone()),
-                &Ciphertext::new(row.inline_data),
-                &associated_data,
-            )
+            .decrypt(&Ciphertext::new(row.inline_data), &associated_data)
             .await
         {
             Ok(_) => {}
@@ -3200,7 +3177,6 @@ fn mark_preserved_inline_rows(pool: &DbPool, ids: &[String]) -> Result<(), Strin
 
 async fn verify_rewrapped_inline_rows(
     pool: &DbPool,
-    target_space: &SpaceId,
     target_session: Arc<InMemorySession>,
     preserved_ids: &[String],
 ) -> Result<(), String> {
@@ -3213,7 +3189,6 @@ async fn verify_rewrapped_inline_rows(
         let representation_id = RepresentationId::from(row.id);
         cipher
             .decrypt(
-                &ActiveSpace::new(target_space.clone()),
                 &Ciphertext::new(row.inline_data),
                 &Aad::from(aad::for_inline(&event_id, &representation_id)),
             )
@@ -3327,7 +3302,7 @@ mod tests {
     use uc_core::blob::ports::BlobReaderPort;
     use uc_core::clipboard::MobileConsumableRef;
     use uc_core::crypto::aad;
-    use uc_core::crypto::domain::{Aad, ActiveSpace, Ciphertext, Passphrase, Plaintext};
+    use uc_core::crypto::domain::{Aad, Ciphertext, Passphrase, Plaintext};
     use uc_core::file_transfer::FileTransferEvent;
     use uc_core::ids::{BlobId, DeviceId, EntryId, EventId, RepresentationId, SpaceId};
     use uc_core::membership::{
@@ -3794,14 +3769,12 @@ mod tests {
 
     async fn encrypted_inline(
         session: Arc<InMemorySession>,
-        space: &SpaceId,
         event_id: &EventId,
         representation_id: &RepresentationId,
         plaintext: &[u8],
     ) -> Vec<u8> {
         BlobCipherAdapter::new(session)
             .encrypt(
-                &ActiveSpace::new(space.clone()),
                 &Plaintext::new(plaintext.to_vec()),
                 &Aad::from(aad::for_inline(event_id, representation_id)),
             )
@@ -4026,7 +3999,6 @@ mod tests {
         let representation_id = RepresentationId::from("representation-transition");
         let ciphertext = encrypted_inline(
             Arc::clone(&session),
-            &source_space,
             &event_id,
             &representation_id,
             b"survives transition",
@@ -4216,7 +4188,6 @@ mod tests {
         .unwrap();
         let plaintext = BlobCipherAdapter::new(session)
             .decrypt(
-                &ActiveSpace::new(target_space),
                 &uc_core::crypto::domain::Ciphertext::new(row.inline_data),
                 &Aad::from(aad::for_inline(&event_id, &representation_id)),
             )
@@ -4437,7 +4408,6 @@ mod tests {
         let representation_id = RepresentationId::from("same-space-representation");
         let ciphertext = encrypted_inline(
             Arc::clone(&session),
-            &target_space,
             &event_id,
             &representation_id,
             b"same-space content remains readable",
@@ -4535,7 +4505,6 @@ mod tests {
         .unwrap();
         let plaintext = BlobCipherAdapter::new(session)
             .decrypt(
-                &ActiveSpace::new(target_space.clone()),
                 &Ciphertext::new(row.inline_data),
                 &Aad::from(aad::for_inline(&event_id, &representation_id)),
             )
@@ -4572,7 +4541,6 @@ mod tests {
         assert!(matches!(
             super::preflight_source_inline_history(
                 &pool,
-                &source_space,
                 Arc::clone(&source_session),
                 false,
             )
@@ -4581,7 +4549,7 @@ mod tests {
                 uc_application::deps::AdmissionSpaceTransitionError::UnreadableHistoryRequiresConfirmation
             )
         ));
-        super::preflight_source_inline_history(&pool, &source_space, source_session, true)
+        super::preflight_source_inline_history(&pool, source_session, true)
             .await
             .unwrap();
     }
@@ -4628,7 +4596,6 @@ mod tests {
         let finalized = store
             .rewrap_finalized_source(
                 finalized_source,
-                &source_space,
                 source_session,
                 &target_space,
                 target_session,
@@ -4671,7 +4638,6 @@ mod tests {
         let old_representation = RepresentationId::from("representation-before-backup");
         let old_ciphertext = encrypted_inline(
             Arc::clone(&source_session),
-            &source_space,
             &old_event,
             &old_representation,
             b"deleted after J1",
@@ -4700,7 +4666,6 @@ mod tests {
         let new_representation = RepresentationId::from("representation-after-backup");
         let new_ciphertext = encrypted_inline(
             Arc::clone(&source_session),
-            &source_space,
             &new_event,
             &new_representation,
             b"created after J1",
@@ -4716,7 +4681,6 @@ mod tests {
         let finalized = store
             .finalize_and_rewrap(
                 prepared,
-                &source_space,
                 Arc::clone(&source_session),
                 &target_space,
                 Arc::clone(&target_session),
@@ -4739,12 +4703,12 @@ mod tests {
         let target_cipher = uc_core::crypto::domain::Ciphertext::new(rows[0].inline_data.clone());
         let target_aad = Aad::from(aad::for_inline(&new_event, &new_representation));
         let plaintext = BlobCipherAdapter::new(target_session)
-            .decrypt(&ActiveSpace::new(target_space), &target_cipher, &target_aad)
+            .decrypt(&target_cipher, &target_aad)
             .await
             .unwrap();
         assert_eq!(plaintext.as_bytes(), b"created after J1");
         assert!(BlobCipherAdapter::new(source_session)
-            .decrypt(&ActiveSpace::new(source_space), &target_cipher, &target_aad,)
+            .decrypt(&target_cipher, &target_aad,)
             .await
             .is_err());
     }
@@ -4987,7 +4951,6 @@ mod tests {
         let finalized = store
             .finalize_and_rewrap(
                 prepared,
-                &source_space,
                 source_session,
                 &target_space,
                 Arc::clone(&target_session),

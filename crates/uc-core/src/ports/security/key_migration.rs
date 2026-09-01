@@ -5,12 +5,14 @@
 //! 新准入流程不会创建新的迁移密钥。
 //!
 //! 与 [`super::blob_cipher::BlobCipherPort`] 的边界：
-//! * `BlobCipherPort` 用"已解锁空间"的 master_key 加解密，是数据面常态路径。
+//! * `BlobCipherPort` 从运行期内部取得持久内容保护上下文，是数据面常态路径；
+//!   调用方不能传入 Space 或密钥选择上下文。
 //! * `KeyMigrationPort` 用一次性 migration_key 加解密，仅在 switch-space
 //!   过渡期使用，结束就销毁。两者算法可以一致（都是 V1 XChaCha20-Poly1305），
 //!   但密钥来源、生命周期、调用方完全不同，所以分两个 port。
 //!
-//! AAD 由调用方提供，与 `BlobCipherPort` 一样原样喂进 AEAD。
+//! 两者都接收业务实体 AAD；`BlobCipherPort` 还会在 adapter 内部绑定持久
+//! 保护上下文，临时迁移 port 则只使用 migration key 的独立格式。
 
 use async_trait::async_trait;
 

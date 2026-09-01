@@ -1,6 +1,6 @@
 # 033 不可变内容保护上下文与一次性密文升级
 
-状态：实施中；前三个基础切片及第四步的激活与当前 material 推进子切片已完成，032 在本规格完成前暂停实施
+状态：实施中；前三个基础切片、第四步的安全会话切片及第五步的持久密码接口收窄切片已完成，032 在本规格完成前暂停实施
 
 本规格取代规格 023 中“CrossSpace 必须把本机历史重封装到目标 MasterKey”的规则，以及规格 028 中“切换前普通本机内容沿用 CrossSpace rebuild/rewrap”的规则。规格 023/028 的准入提交、门禁、恢复和 MLS 成员语义继续有效。
 
@@ -393,9 +393,11 @@ Change: 第一子切片新增 `ActiveSpaceSecuritySession` 深模块，并由 En
 Change: 第二子切片把当前 Space 的 material 推进收口为 `install_current_material`；成员加入、epoch/revocation、legacy bootstrap、Sponsor/Helper 准入和 membership branch recovery 在已持久真实安全状态后，统一先幂等安装 vault catalog，再推进活动 session。安装失败通过各业务边界的稳定 `SecurityState` 分类保留 source，原恢复流程重试已提交 material；不回滚或删除已安全写入的 catalog。仅校验候选 material 的临时 `InMemorySession` 不得写 vault；旧 `admission_space_transition` 的 CrossSpace target session 留给 Step 8 整体删除，不在此处制造过渡接线。Step 5 的 V3 reader clean cutover 后仍需从 `InMemorySession` 删除持久历史解析职责。本步仍不接 production V3 payload、不删除 V2 历史 catalog，也不改变 V2 manifest 或旧 CrossSpace transition。
 Risk: transport 与 at-rest purpose 混用会扩大旧组网络权限；使用不同具体模块，不创建万能 session trait。
 
-Step 5:
+Step 5（进行中；持久密码 interface 收窄子切片已完成）:
 File: `crates/uc-core/src/ports/security/blob_cipher.rs`、相关 Application port/错误模块、`crates/uc-infra/src/security/blob_cipher_adapter.rs`、`key_epoch_aad.rs`、`encrypted_blob_store.rs`、各加密 repository adapter
 Change: 定义共享 V3 protection context/AAD，更新 inline 和 UCBL 格式；将持久内容解密 interface 一次性改为不接收 `ActiveSpace`，所有持久化新写只产生 V3，open 自描述选择 key。把派生字段的 context、常量、读写和验证收口到所属 repository/module，并以 contract 测试证明调用方不能选择 protection context。
+
+Change: 第一子切片先从 `BlobCipherPort::encrypt/decrypt` 同时删除 `ActiveSpace` 参数，清除四类 inline decorator、旧 migration recovery 和待删 CrossSpace 中伪造的占位 Space。调用方现在只提交 payload 与业务实体 AAD；当前 V1/V2 兼容 adapter 仍从共享 session 内部选取上下文，wire format 和生产行为不变。此切片不启用 V3 writer、不增加 production 双 reader，也不修改 UCBL、搜索或专用 repository codec；profile upgrade gate 就绪后，inline production clean cutover 只替换 adapter 内部实现，不再改调用方 interface。
 Risk: 任一字段遗漏都会在切换后不可读；建立持久负载清单测试，不用一个字符串驱动的万能 rewrapper 隐藏差异。
 
 Step 6:

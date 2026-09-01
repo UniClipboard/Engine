@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
 
-use uc_core::crypto::domain::{Aad, ActiveSpace, Ciphertext};
+use uc_core::crypto::domain::{Aad, Ciphertext};
 use uc_core::ids::SpaceId;
 use uc_core::ports::clipboard::BlobMigrationRepoPort;
 use uc_core::ports::security::{BlobCipherError, BlobCipherPort, KeyMigrationPort, MigrationRunId};
@@ -142,7 +142,6 @@ impl FileLegacyMigrationRecovery {
         &self,
         expected_unreadable: u64,
     ) -> Result<(), LegacyMigrationRecoveryError> {
-        let active = ActiveSpace::new(SpaceId::from_str("space"));
         let mut unreadable = 0_u64;
         for (event_id, representation_id) in self
             .blob_migration_repo
@@ -164,7 +163,7 @@ impl FileLegacyMigrationRecovery {
             ));
             match self
                 .blob_cipher
-                .decrypt(&active, &Ciphertext::new(bytes), &aad)
+                .decrypt(&Ciphertext::new(bytes), &aad)
                 .await
             {
                 Ok(_) => {}
@@ -182,7 +181,6 @@ impl FileLegacyMigrationRecovery {
         &self,
         run_id: &MigrationRunId,
     ) -> Result<(), LegacyMigrationRecoveryError> {
-        let active = ActiveSpace::new(SpaceId::from_str("space"));
         for record in self
             .blob_migration_repo
             .list_records()
@@ -204,7 +202,7 @@ impl FileLegacyMigrationRecovery {
                 .map_err(|_| LegacyMigrationRecoveryError::RecoveryRequired)?;
             let ciphertext = self
                 .blob_cipher
-                .encrypt(&active, &plaintext, &aad)
+                .encrypt(&plaintext, &aad)
                 .await
                 .map_err(|_| LegacyMigrationRecoveryError::RecoveryRequired)?;
             self.blob_migration_repo
@@ -453,7 +451,6 @@ mod tests {
     impl BlobCipherPort for RecoveryBlobCipher {
         async fn encrypt(
             &self,
-            _space: &ActiveSpace,
             plaintext: &Plaintext,
             _aad: &Aad,
         ) -> Result<Ciphertext, BlobCipherError> {
@@ -462,7 +459,6 @@ mod tests {
 
         async fn decrypt(
             &self,
-            _space: &ActiveSpace,
             ciphertext: &Ciphertext,
             _aad: &Aad,
         ) -> Result<Plaintext, BlobCipherError> {

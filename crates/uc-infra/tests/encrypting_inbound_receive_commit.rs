@@ -5,7 +5,7 @@ use uc_core::clipboard::{
     ClipboardEntry, ClipboardEvent, ClipboardSelection, ClipboardSelectionDecision, MimeType,
     PersistedClipboardRepresentation, SelectionPolicyVersion,
 };
-use uc_core::crypto::domain::{Aad, ActiveSpace, Ciphertext, Plaintext};
+use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
 use uc_core::ids::{DeviceId, EntryId, EventId, FormatId, RepresentationId};
 use uc_core::ports::security::{BlobCipherError, BlobCipherPort};
 use uc_core::ports::{
@@ -23,7 +23,6 @@ struct RecordingCipher {
 impl BlobCipherPort for RecordingCipher {
     async fn encrypt(
         &self,
-        _space: &ActiveSpace,
         plaintext: &Plaintext,
         aad: &Aad,
     ) -> Result<Ciphertext, BlobCipherError> {
@@ -35,7 +34,6 @@ impl BlobCipherPort for RecordingCipher {
 
     async fn decrypt(
         &self,
-        _space: &ActiveSpace,
         _ciphertext: &Ciphertext,
         _aad: &Aad,
     ) -> Result<Plaintext, BlobCipherError> {
