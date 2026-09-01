@@ -394,6 +394,68 @@ pub(crate) fn upgrade_registration_to_control_generation(
     })
 }
 
+/// 在两个 V3 control generation 之间重绑定既有 OPAQUE registration。
+///
+/// Reset 与 membership branch 只提供已认证 source/target manifest；credential
+/// DTO、profile AEAD、SQL 单例、OPAQUE 校验和幂等恢复仍由本 owner 独占。
+pub(crate) fn rebind_registration_to_control_generation(
+    database: &Path,
+    keys: &AdmissionKeyManager,
+    source: &crate::security::ActiveRuntimeManifestV3,
+    target: &crate::security::ActiveRuntimeManifestV3,
+) -> anyhow::Result<()> {
+    if source.layout().profile_data_generation() != target.layout().profile_data_generation()
+        || source.layout().space_control_generation() == target.layout().space_control_generation()
+    {
+        anyhow::bail!("credential control scope transition is invalid");
+    }
+    let source_scope = CredentialScope::Control {
+        space_id: source.layout().space_id().as_ref().to_owned(),
+        keyslot_generation: *source.keyslot_generation(),
+        space_control_generation: *source.layout().space_control_generation(),
+    };
+    let target_scope = CredentialScope::Control {
+        space_id: target.layout().space_id().as_ref().to_owned(),
+        keyslot_generation: *target.keyslot_generation(),
+        space_control_generation: *target.layout().space_control_generation(),
+    };
+    let database = database
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("credential control database path is invalid"))?;
+    let mut connection = SqliteConnection::establish(database)?;
+    connection.immediate_transaction::<_, anyhow::Error, _>(|connection| {
+        let Some(row) = load_encrypted_row(connection)? else {
+            return Ok(());
+        };
+        let decoded = open_credentials(keys, &row.encrypted_payload)?;
+        if decoded.scope == target_scope {
+            return Ok(());
+        }
+        if decoded.scope != source_scope {
+            anyhow::bail!("credential source control scope is inconsistent");
+        }
+        validate_material(&decoded.server_setup, &decoded.registration)?;
+        let encrypted = seal_credentials(
+            keys,
+            &target_scope,
+            decoded.server_setup.clone(),
+            decoded.registration.clone(),
+        )?;
+        sql_query(
+            "UPDATE space_admission_credentials SET encrypted_payload = ? WHERE singleton_id = 1",
+        )
+        .bind::<Binary, _>(encrypted)
+        .execute(connection)?;
+        let persisted = load_encrypted_row(connection)?
+            .ok_or_else(|| anyhow::anyhow!("credential control scope was not durable"))?;
+        let verified = open_credentials(keys, &persisted.encrypted_payload)?;
+        if verified.scope != target_scope {
+            anyhow::bail!("credential control scope verification failed");
+        }
+        validate_material(&verified.server_setup, &verified.registration)
+    })
+}
+
 impl<E> SqliteSpaceAdmissionCredentials<E> {
     pub fn new(
         executor: E,

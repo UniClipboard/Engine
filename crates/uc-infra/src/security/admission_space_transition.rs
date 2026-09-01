@@ -1905,7 +1905,9 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
                 return self.advance_same_space(transition).await;
             }
             AdmissionSpaceTransitionV2::CrossSpace(transition) => transition,
-            AdmissionSpaceTransitionV2::CrossSpaceControl(_) => {
+            AdmissionSpaceTransitionV2::CrossSpaceControl(_)
+            | AdmissionSpaceTransitionV2::SameSpaceControl(_)
+            | AdmissionSpaceTransitionV2::FreshControl(_) => {
                 return Err(AdmissionSpaceTransitionError::Inconsistent)
             }
         };

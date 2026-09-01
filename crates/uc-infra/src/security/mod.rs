@@ -11,7 +11,6 @@ mod default_current_profile;
 mod encrypted_blob_store;
 mod encrypting_clipboard_event_writer;
 mod encrypting_inbound_receive_commit;
-mod fail_closed_admission_space_transition;
 mod hashing;
 mod identity_fingerprint;
 pub(crate) mod key_epoch_aad;
@@ -28,6 +27,8 @@ mod space_control_generation;
 mod space_transition_activation;
 pub(crate) mod v1_aead;
 mod v3_admission_space_transition;
+mod v3_device_management_reset;
+mod v3_membership_branch_transition;
 
 pub use active_space_generation_manifest_store::{
     ActiveRuntimeManifest, ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore,
@@ -52,7 +53,6 @@ pub use default_current_profile::DefaultCurrentProfile;
 pub use encrypted_blob_store::EncryptedBlobStore;
 pub use encrypting_clipboard_event_writer::EncryptingClipboardEventWriter;
 pub use encrypting_inbound_receive_commit::EncryptingInboundReceiveCommit;
-pub use fail_closed_admission_space_transition::FailClosedAdmissionSpaceTransition;
 pub use hashing::{hash_pin, verify_pin, Argon2PinHasher, Blake3Hasher};
 pub use identity_fingerprint::{
     FingerprintDerivationError, Sha256IdentityFingerprintFactory, Sha256ShortCodeGenerator,
@@ -85,3 +85,5 @@ pub use space_transition_activation::{
     SpaceTransitionActivation, SpaceTransitionActivationError, SpaceTransitionActivationOutcome,
 };
 pub use v3_admission_space_transition::V3AdmissionSpaceTransition;
+pub use v3_device_management_reset::V3DeviceManagementReset;
+pub use v3_membership_branch_transition::V3MembershipBranchTransition;

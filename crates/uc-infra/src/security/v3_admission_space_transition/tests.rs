@@ -27,8 +27,8 @@ use crate::fs::key_slot_store::JsonKeySlotStore;
 use crate::security::active_space_generation_manifest_store::V3ManifestPromotionOutcome;
 use crate::security::{
     ActiveRuntimeManifest, ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore,
-    AdmissionKeyManager, DefaultCurrentProfile, ProfileContentKeyVault, ProfileRuntimeLayout,
-    SpaceControlGeneration, SpaceTransitionActivation,
+    AdmissionKeyManager, DefaultCurrentProfile, MasterKey, ProfileContentKeyVault,
+    ProfileRuntimeLayout, SpaceControlGeneration, SpaceTransitionActivation,
 };
 use crate::space::{
     prepare_registration, DefaultSpaceAccessAdapter, InMemorySession, KeyMaterialStore,
@@ -257,6 +257,246 @@ async fn v3_cross_space_switches_only_the_control_generation() {
         "workspace-state.bin",
     ];
     assert_no_forbidden_paths(&root, &forbidden);
+}
+
+#[tokio::test]
+async fn v3_same_space_retains_profile_data_and_keyslot() {
+    let directory = tempdir().unwrap();
+    let root = directory.path().join("profile");
+    let secure_storage: Arc<dyn SecureStoragePort> = Arc::new(MemorySecureStorage::default());
+    let current_profile: Arc<dyn CurrentProfilePort> = Arc::new(DefaultCurrentProfile::new());
+    let admission_keys = Arc::new(AdmissionKeyManager::new(
+        Arc::clone(&secure_storage),
+        [0x61; 16],
+    ));
+    let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+        root.join("vault"),
+        Arc::clone(&admission_keys),
+    ));
+    let space = SpaceId::from_str("same-space");
+    let source = ActiveRuntimeManifestV3::new(
+        ActiveRuntimeLayout::new(space.clone(), [0x62; 16], [0x63; 16]).unwrap(),
+        [0x64; 16],
+    )
+    .unwrap();
+    let legacy = ActiveSpaceGenerationManifestV2::new(
+        space.as_ref().to_owned(),
+        [0x64; 16],
+        [0x65; 16],
+        [0x66; 16],
+    )
+    .unwrap();
+    manifests.promote(&legacy).await.unwrap();
+    manifests
+        .promote_v3_from_v2(&legacy, &source)
+        .await
+        .unwrap();
+
+    let source_layout = ProfileRuntimeLayout::v3(&root, &source);
+    std::fs::create_dir_all(source_layout.profile_database().parent().unwrap()).unwrap();
+    std::fs::write(source_layout.profile_database(), b"retained profile data").unwrap();
+    std::fs::create_dir_all(source_layout.blob_root()).unwrap();
+    std::fs::write(
+        source_layout.blob_root().join("history.ucbl"),
+        b"retained blob",
+    )
+    .unwrap();
+    std::fs::create_dir_all(source_layout.control_database().parent().unwrap()).unwrap();
+    let control_pool = init_db_pool(source_layout.control_database().to_str().unwrap()).unwrap();
+    let session = Arc::new(InMemorySession::new());
+    session.set_master_key_for_space(space.clone(), MasterKey::from_bytes(&[0x67; 32]).unwrap());
+    let repository = Arc::new(DieselSpaceSecurityStore::new(
+        Arc::new(DieselSqliteExecutor::new(control_pool.clone())),
+        session.as_ref().clone(),
+    ));
+    let vault = Arc::new(ProfileContentKeyVault::new(
+        root.join("vault"),
+        Arc::clone(&secure_storage),
+        [0x61; 16],
+    ));
+    let access = Arc::new(DefaultSpaceAccessAdapter::new_with_key_epoch_repository(
+        Arc::new(KeyMaterialStore::new(
+            Arc::clone(&secure_storage),
+            Arc::new(JsonKeySlotStore::new(root.join("keys"))),
+        )),
+        Arc::clone(&current_profile),
+        Arc::clone(&session),
+        repository,
+        vault,
+    ));
+    let generations = Arc::new(SpaceControlGeneration::new(
+        root.clone(),
+        Arc::clone(&access),
+        current_profile,
+        Arc::clone(&admission_keys),
+    ));
+    let activation = Arc::new(SpaceTransitionActivation::new(
+        root.clone(),
+        control_pool,
+        Arc::clone(&manifests),
+        Arc::clone(&generations),
+        access,
+    ));
+    let transitions = V3AdmissionSpaceTransition::new(
+        b"same-profile-salt".to_vec(),
+        Arc::clone(&manifests),
+        generations,
+        activation,
+    );
+    let input = preparation(&space, b"same-space-does-not-replace-keyslot".to_vec());
+
+    let mut transition = transitions.prepare_if_needed(&input).await.unwrap();
+    let AdmissionSpaceTransitionV2::SameSpaceControl(prepared) = &transition else {
+        panic!("expected same-space control transition");
+    };
+    assert_eq!(prepared.profile_data_generation, [0x62; 16]);
+    assert_eq!(prepared.retained_keyslot_generation, [0x64; 16]);
+    assert_eq!(prepared.source_control_generation, [0x63; 16]);
+
+    loop {
+        match transitions.advance(&transition).await.unwrap() {
+            AdmissionSpaceTransitionStepV2::Advanced(next) => transition = next,
+            AdmissionSpaceTransitionStepV2::Finished(result) => {
+                assert!(matches!(
+                    result,
+                    AdmissionSpaceTransitionResultV2::SameSpaceControl(_)
+                ));
+                break;
+            }
+        }
+    }
+
+    let Some(ActiveRuntimeManifest::V3(active)) = manifests.load_runtime().await.unwrap() else {
+        panic!("same-space target manifest is not active");
+    };
+    assert_eq!(active.layout().space_id(), &space);
+    assert_eq!(active.layout().profile_data_generation(), &[0x62; 16]);
+    assert_eq!(active.keyslot_generation(), &[0x64; 16]);
+    assert_ne!(active.layout().space_control_generation(), &[0x63; 16]);
+    assert_eq!(
+        std::fs::read(source_layout.profile_database()).unwrap(),
+        b"retained profile data"
+    );
+    assert_eq!(
+        std::fs::read(source_layout.blob_root().join("history.ucbl")).unwrap(),
+        b"retained blob"
+    );
+    assert_eq!(session.current_space_id().unwrap(), space);
+    assert_no_forbidden_paths(&root, &["source-backup.sqlite", "target.sqlite"]);
+}
+
+#[tokio::test]
+async fn v3_fresh_promotes_the_first_manifest_without_a_source() {
+    let directory = tempdir().unwrap();
+    let root = directory.path().join("profile");
+    let secure_storage: Arc<dyn SecureStoragePort> = Arc::new(MemorySecureStorage::default());
+    let current_profile: Arc<dyn CurrentProfilePort> = Arc::new(DefaultCurrentProfile::new());
+    let admission_keys = Arc::new(AdmissionKeyManager::new(
+        Arc::clone(&secure_storage),
+        [0x71; 16],
+    ));
+    let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+        root.join("vault"),
+        Arc::clone(&admission_keys),
+    ));
+    let profile_data_generation = [0x72; 16];
+    let profile_layout =
+        ProfileRuntimeLayout::from_generations(&root, &profile_data_generation, &[0x73; 16]);
+    std::fs::create_dir_all(profile_layout.profile_database().parent().unwrap()).unwrap();
+    std::fs::write(profile_layout.profile_database(), b"fresh profile data").unwrap();
+    std::fs::create_dir_all(profile_layout.blob_root()).unwrap();
+    std::fs::write(
+        profile_layout.blob_root().join("history.ucbl"),
+        b"fresh blob",
+    )
+    .unwrap();
+
+    let bootstrap_database = root.join("bootstrap-control.sqlite");
+    let control_pool = init_db_pool(bootstrap_database.to_str().unwrap()).unwrap();
+    let session = Arc::new(InMemorySession::new());
+    let repository = Arc::new(DieselSpaceSecurityStore::new(
+        Arc::new(DieselSqliteExecutor::new(control_pool.clone())),
+        session.as_ref().clone(),
+    ));
+    let vault = Arc::new(ProfileContentKeyVault::new(
+        root.join("vault"),
+        Arc::clone(&secure_storage),
+        [0x71; 16],
+    ));
+    let access = Arc::new(DefaultSpaceAccessAdapter::new_with_key_epoch_repository(
+        Arc::new(KeyMaterialStore::new(
+            Arc::clone(&secure_storage),
+            Arc::new(JsonKeySlotStore::new(root.join("keys"))),
+        )),
+        Arc::clone(&current_profile),
+        Arc::clone(&session),
+        repository,
+        vault,
+    ));
+    let generations = Arc::new(SpaceControlGeneration::new(
+        root.clone(),
+        Arc::clone(&access),
+        current_profile,
+        Arc::clone(&admission_keys),
+    ));
+    let activation = Arc::new(SpaceTransitionActivation::new(
+        root.clone(),
+        control_pool,
+        Arc::clone(&manifests),
+        Arc::clone(&generations),
+        Arc::clone(&access),
+    ));
+    let transitions = V3AdmissionSpaceTransition::new_with_fresh_profile_generation(
+        b"fresh-profile-salt".to_vec(),
+        profile_data_generation,
+        Arc::clone(&manifests),
+        generations,
+        activation,
+    );
+    let target_space = SpaceId::from_str("fresh-space");
+    let target_access = PrepareAdmissionTargetAccessPort::prepare_target_access(
+        access.as_ref(),
+        &target_space,
+        &Passphrase::new("fresh passphrase"),
+    )
+    .await
+    .unwrap();
+    let input = preparation(&target_space, target_access.into_bytes());
+
+    let mut transition = transitions.prepare_if_needed(&input).await.unwrap();
+    let AdmissionSpaceTransitionV2::FreshControl(prepared) = &transition else {
+        panic!("expected fresh control transition");
+    };
+    assert_eq!(prepared.profile_data_generation, profile_data_generation);
+    while let AdmissionSpaceTransitionStepV2::Advanced(next) =
+        transitions.advance(&transition).await.unwrap()
+    {
+        transition = next;
+    }
+    let result = transitions.advance(&transition).await.unwrap();
+    assert!(matches!(
+        result,
+        AdmissionSpaceTransitionStepV2::Finished(AdmissionSpaceTransitionResultV2::FreshControl(_))
+    ));
+
+    let Some(ActiveRuntimeManifest::V3(active)) = manifests.load_runtime().await.unwrap() else {
+        panic!("fresh target manifest is not active");
+    };
+    assert_eq!(active.layout().space_id(), &target_space);
+    assert_eq!(
+        active.layout().profile_data_generation(),
+        &profile_data_generation
+    );
+    assert_eq!(session.current_space_id().unwrap(), target_space);
+    assert_eq!(
+        std::fs::read(profile_layout.profile_database()).unwrap(),
+        b"fresh profile data"
+    );
+    assert_eq!(
+        std::fs::read(profile_layout.blob_root().join("history.ucbl")).unwrap(),
+        b"fresh blob"
+    );
+    assert_no_forbidden_paths(&root, &["source-backup.sqlite", "target.sqlite"]);
 }
 
 async fn advance_to(

@@ -527,6 +527,20 @@ impl DefaultSpaceAccessAdapter {
         Ok(session)
     }
 
+    /// 为 SameSpace control generation 构造保留当前 MasterKey/keyslot 的隔离会话。
+    pub(crate) fn retained_control_session(
+        &self,
+        space_id: &SpaceId,
+    ) -> Result<Arc<InMemorySession>, SpaceAccessError> {
+        if self.session.current_space_id().ok().as_ref() != Some(space_id) {
+            return Err(SpaceAccessError::CorruptedKeyMaterial);
+        }
+        self.session
+            .get_master_key()
+            .map_err(map_encryption_error)?;
+        Ok(self.session.detached_clone())
+    }
+
     pub(crate) async fn resume_source_for_transition(
         &self,
         source_space_id: &SpaceId,
@@ -637,6 +651,42 @@ impl DefaultSpaceAccessAdapter {
             });
         }
         self.kek_observed.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// 在 SameSpace manifest 已提升后保留现有 keyslot，只从新 control pool
+    /// 恢复目标安全状态、vault catalog 与活动 session。
+    pub(crate) async fn activate_retained_control_generation(
+        &self,
+        space_id: &SpaceId,
+    ) -> Result<(), SpaceAccessError> {
+        if self.session.current_space_id().ok().as_ref() != Some(space_id) {
+            return Err(SpaceAccessError::CorruptedKeyMaterial);
+        }
+        let master_key = self
+            .session
+            .get_master_key()
+            .map_err(map_encryption_error)?;
+        let repository =
+            self.key_epoch_repository
+                .as_ref()
+                .ok_or_else(|| SpaceAccessError::SecurityState {
+                    source: anyhow::anyhow!("control security repository is unavailable"),
+                })?;
+        let active_security_session = self.active_security_session.as_ref().ok_or_else(|| {
+            SpaceAccessError::SecurityState {
+                source: anyhow::anyhow!("active security session is unavailable"),
+            }
+        })?;
+        let epoch = active_security_session
+            .restore_from_repository(space_id, master_key, repository.as_ref())
+            .await
+            .map_err(map_active_security_session_error)?;
+        if epoch.is_none() {
+            return Err(SpaceAccessError::SecurityState {
+                source: anyhow::anyhow!("retained control security material is missing"),
+            });
+        }
         Ok(())
     }
 
@@ -3510,7 +3560,8 @@ impl DefaultSpaceAccessAdapter {
             portable.state,
             staged.mls_state,
             portable.key_catalog,
-            chrono::Utc::now().timestamp_millis(),
+            // 恢复材料必须由密封包确定性地产生，重试时才能证明目标世代保存的是同一值。
+            0,
         );
         MlsGroupEngine::validate_state(
             &MlsClientState::from_bytes(material.group_state().to_vec()),

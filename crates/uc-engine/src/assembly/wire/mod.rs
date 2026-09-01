@@ -73,7 +73,8 @@ use uc_infra::security::{
     DecryptingClipboardRepresentationRepository, EncryptingClipboardEventWriter,
     EncryptingInboundReceiveCommit, ProfileContentKeyVault, ProfileLifecycleRepository,
     Sha256IdentityFingerprintFactory, Sha256ShortCodeGenerator, SpaceControlGeneration,
-    SpaceTransitionActivation, V3AdmissionSpaceTransition,
+    SpaceTransitionActivation, V3AdmissionSpaceTransition, V3DeviceManagementReset,
+    V3MembershipBranchTransition,
 };
 use uc_infra::settings::repository::FileSettingsRepository;
 use uc_infra::space::{
@@ -378,7 +379,7 @@ pub fn wire_dependencies_from_inputs(
         ));
         let activation = Arc::new(SpaceTransitionActivation::new(
             app_data_root.clone(),
-            control_db_pool_for_space_transition,
+            control_db_pool_for_space_transition.clone(),
             Arc::clone(&active_generation_manifest_store),
             Arc::clone(&control_generations),
             Arc::clone(&space_access_adapter),
@@ -386,15 +387,27 @@ pub fn wire_dependencies_from_inputs(
         let admission_transition = Arc::new(V3AdmissionSpaceTransition::new(
             profile_salt.clone(),
             Arc::clone(&active_generation_manifest_store),
+            Arc::clone(&control_generations),
+            Arc::clone(&activation),
+        ));
+        let device_reset = Arc::new(V3DeviceManagementReset::new(
+            app_data_root.clone(),
+            control_db_pool_for_space_transition.clone(),
+            Arc::clone(&active_generation_manifest_store),
+            Arc::clone(&control_generations),
+            Arc::clone(&activation),
+        ));
+        let membership_branch = Arc::new(V3MembershipBranchTransition::new(
+            control_db_pool_for_space_transition,
+            Arc::clone(&active_generation_manifest_store),
             control_generations,
             activation,
         ));
-        let unsupported = Arc::new(uc_infra::security::FailClosedAdmissionSpaceTransition);
         (
             admission_transition,
-            unsupported.clone(),
-            unsupported.clone(),
-            unsupported,
+            device_reset,
+            membership_branch,
+            current_space_resolver.clone(),
         )
     } else {
         let transition = Arc::new(uc_infra::security::DurableAdmissionSpaceTransition::new(

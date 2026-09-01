@@ -4,6 +4,8 @@ use super::SpaceAdmissionId;
 
 pub const CROSS_SPACE_TRANSITION_FORMAT_V2: u16 = 2;
 pub const CROSS_SPACE_CONTROL_TRANSITION_FORMAT_V3: u16 = 3;
+pub const FRESH_SPACE_CONTROL_TRANSITION_FORMAT_V3: u16 = 3;
+pub const SAME_SPACE_CONTROL_TRANSITION_FORMAT_V3: u16 = 3;
 pub const FRESH_SPACE_TRANSITION_FORMAT_V1: u16 = 1;
 pub const SAME_SPACE_TRANSITION_FORMAT_V1: u16 = 1;
 
@@ -77,6 +79,113 @@ impl FreshSpaceTransitionV1 {
     }
 }
 
+/// V3 Fresh 从无活动 manifest 建立首个控制世代。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FreshSpaceControlTransitionPhaseV3 {
+    TargetPrepared,
+    ActivationStarted,
+    TargetPromoted,
+    CleanupPending,
+}
+
+impl FreshSpaceControlTransitionPhaseV3 {
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::TargetPrepared => 0,
+            Self::ActivationStarted => 1,
+            Self::TargetPromoted => 2,
+            Self::CleanupPending => 3,
+        }
+    }
+
+    const fn successor(self) -> Option<Self> {
+        match self {
+            Self::TargetPrepared => Some(Self::ActivationStarted),
+            Self::ActivationStarted => Some(Self::TargetPromoted),
+            Self::TargetPromoted => Some(Self::CleanupPending),
+            Self::CleanupPending => None,
+        }
+    }
+}
+
+/// 已认证 admission state 内的 Fresh control-only 恢复状态。
+///
+/// profile data generation 已由 profile 初始化负责人准备；这里没有伪造的
+/// source generation、source backup 或 V2 workspace ref。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FreshSpaceControlTransitionV3 {
+    pub transition_format_version: u16,
+    pub attempt_id: SpaceAdmissionId,
+    pub target_space_id: String,
+    pub target_keyslot_generation: [u8; 16],
+    pub profile_data_generation: [u8; 16],
+    pub target_control_generation: [u8; 16],
+    pub target_access_state: Vec<u8>,
+    pub prepared_database_digest: [u8; 32],
+    pub phase: FreshSpaceControlTransitionPhaseV3,
+}
+
+impl std::fmt::Debug for FreshSpaceControlTransitionV3 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FreshSpaceControlTransitionV3")
+            .field("attempt_id", &self.attempt_id)
+            .field("phase", &self.phase)
+            .field("identifiers", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl FreshSpaceControlTransitionV3 {
+    pub fn validate(&self) -> bool {
+        self.transition_format_version == FRESH_SPACE_CONTROL_TRANSITION_FORMAT_V3
+            && !self.target_space_id.is_empty()
+            && self.target_keyslot_generation != [0; 16]
+            && self.profile_data_generation != [0; 16]
+            && self.target_control_generation != [0; 16]
+            && self.profile_data_generation != self.target_control_generation
+            && !self.target_access_state.is_empty()
+            && self.prepared_database_digest != [0; 32]
+    }
+
+    pub fn can_advance_to(&self, next: &Self) -> bool {
+        self.validate()
+            && next.validate()
+            && self.phase.successor() == Some(next.phase)
+            && self.attempt_id == next.attempt_id
+            && self.target_space_id == next.target_space_id
+            && self.target_keyslot_generation == next.target_keyslot_generation
+            && self.profile_data_generation == next.profile_data_generation
+            && self.target_control_generation == next.target_control_generation
+            && self.target_access_state == next.target_access_state
+            && self.prepared_database_digest == next.prepared_database_digest
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FreshSpaceControlTransitionResultV3 {
+    pub target_space_id: String,
+    pub profile_data_generation: [u8; 16],
+    pub target_control_generation: [u8; 16],
+}
+
+impl FreshSpaceControlTransitionResultV3 {
+    pub fn from_cleanup_pending(transition: &FreshSpaceControlTransitionV3) -> Option<Self> {
+        (transition.phase == FreshSpaceControlTransitionPhaseV3::CleanupPending
+            && transition.validate())
+        .then(|| Self {
+            target_space_id: transition.target_space_id.clone(),
+            profile_data_generation: transition.profile_data_generation,
+            target_control_generation: transition.target_control_generation,
+        })
+    }
+
+    pub fn matches_cleanup_pending(&self, transition: &FreshSpaceControlTransitionV3) -> bool {
+        Self::from_cleanup_pending(transition).as_ref() == Some(self)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SameSpaceTransitionPhaseV1 {
@@ -147,6 +256,115 @@ impl SameSpaceTransitionV1 {
             && self.target_generation == next.target_generation
             && self.target_keyslot_ref == next.target_keyslot_ref
             && self.target_workspace_ref == next.target_workspace_ref
+    }
+}
+
+/// V3 SameSpace 只提升同一 Space 的控制世代。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SameSpaceControlTransitionPhaseV3 {
+    TargetPrepared,
+    ActivationStarted,
+    TargetPromoted,
+    CleanupPending,
+}
+
+impl SameSpaceControlTransitionPhaseV3 {
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::TargetPrepared => 0,
+            Self::ActivationStarted => 1,
+            Self::TargetPromoted => 2,
+            Self::CleanupPending => 3,
+        }
+    }
+
+    const fn successor(self) -> Option<Self> {
+        match self {
+            Self::TargetPrepared => Some(Self::ActivationStarted),
+            Self::ActivationStarted => Some(Self::TargetPromoted),
+            Self::TargetPromoted => Some(Self::CleanupPending),
+            Self::CleanupPending => None,
+        }
+    }
+}
+
+/// 已认证 admission state 内的 SameSpace control-only 恢复状态。
+///
+/// Space、profile data generation 与 keyslot 在整个状态机中不可变；只有
+/// control generation 被完整替换。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SameSpaceControlTransitionV3 {
+    pub transition_format_version: u16,
+    pub attempt_id: SpaceAdmissionId,
+    pub space_id: String,
+    pub retained_keyslot_generation: [u8; 16],
+    pub profile_data_generation: [u8; 16],
+    pub source_control_generation: [u8; 16],
+    pub target_control_generation: [u8; 16],
+    pub prepared_database_digest: [u8; 32],
+    pub phase: SameSpaceControlTransitionPhaseV3,
+}
+
+impl std::fmt::Debug for SameSpaceControlTransitionV3 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SameSpaceControlTransitionV3")
+            .field("attempt_id", &self.attempt_id)
+            .field("phase", &self.phase)
+            .field("identifiers", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl SameSpaceControlTransitionV3 {
+    pub fn validate(&self) -> bool {
+        self.transition_format_version == SAME_SPACE_CONTROL_TRANSITION_FORMAT_V3
+            && !self.space_id.is_empty()
+            && self.retained_keyslot_generation != [0; 16]
+            && self.profile_data_generation != [0; 16]
+            && self.source_control_generation != [0; 16]
+            && self.target_control_generation != [0; 16]
+            && self.source_control_generation != self.target_control_generation
+            && self.profile_data_generation != self.source_control_generation
+            && self.profile_data_generation != self.target_control_generation
+            && self.prepared_database_digest != [0; 32]
+    }
+
+    pub fn can_advance_to(&self, next: &Self) -> bool {
+        self.validate()
+            && next.validate()
+            && self.phase.successor() == Some(next.phase)
+            && self.attempt_id == next.attempt_id
+            && self.space_id == next.space_id
+            && self.retained_keyslot_generation == next.retained_keyslot_generation
+            && self.profile_data_generation == next.profile_data_generation
+            && self.source_control_generation == next.source_control_generation
+            && self.target_control_generation == next.target_control_generation
+            && self.prepared_database_digest == next.prepared_database_digest
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SameSpaceControlTransitionResultV3 {
+    pub space_id: String,
+    pub profile_data_generation: [u8; 16],
+    pub target_control_generation: [u8; 16],
+}
+
+impl SameSpaceControlTransitionResultV3 {
+    pub fn from_cleanup_pending(transition: &SameSpaceControlTransitionV3) -> Option<Self> {
+        (transition.phase == SameSpaceControlTransitionPhaseV3::CleanupPending
+            && transition.validate())
+        .then(|| Self {
+            space_id: transition.space_id.clone(),
+            profile_data_generation: transition.profile_data_generation,
+            target_control_generation: transition.target_control_generation,
+        })
+    }
+
+    pub fn matches_cleanup_pending(&self, transition: &SameSpaceControlTransitionV3) -> bool {
+        Self::from_cleanup_pending(transition).as_ref() == Some(self)
     }
 }
 
@@ -450,6 +668,8 @@ pub enum AdmissionSpaceTransitionV2 {
     SameSpace(SameSpaceTransitionV1),
     CrossSpace(CrossSpaceTransitionV2),
     CrossSpaceControl(CrossSpaceControlTransitionV3),
+    SameSpaceControl(SameSpaceControlTransitionV3),
+    FreshControl(FreshSpaceControlTransitionV3),
 }
 
 impl AdmissionSpaceTransitionV2 {
@@ -470,6 +690,8 @@ impl AdmissionSpaceTransitionV2 {
             Self::SameSpace(transition) => transition.validate(),
             Self::CrossSpace(transition) => transition.validate(),
             Self::CrossSpaceControl(transition) => transition.validate(),
+            Self::SameSpaceControl(transition) => transition.validate(),
+            Self::FreshControl(transition) => transition.validate(),
         }
     }
 
@@ -479,6 +701,8 @@ impl AdmissionSpaceTransitionV2 {
             Self::SameSpace(transition) => transition.attempt_id,
             Self::CrossSpace(transition) => transition.attempt_id,
             Self::CrossSpaceControl(transition) => transition.attempt_id,
+            Self::SameSpaceControl(transition) => transition.attempt_id,
+            Self::FreshControl(transition) => transition.attempt_id,
         }
     }
 
@@ -488,6 +712,8 @@ impl AdmissionSpaceTransitionV2 {
             Self::SameSpace(transition) => &transition.target_space_id,
             Self::CrossSpace(transition) => &transition.target_space_id,
             Self::CrossSpaceControl(transition) => &transition.target_space_id,
+            Self::SameSpaceControl(transition) => &transition.space_id,
+            Self::FreshControl(transition) => &transition.target_space_id,
         }
     }
 
@@ -497,6 +723,8 @@ impl AdmissionSpaceTransitionV2 {
             Self::SameSpace(transition) => transition.phase.rank(),
             Self::CrossSpace(transition) => transition.phase.rank(),
             Self::CrossSpaceControl(transition) => transition.phase.rank(),
+            Self::SameSpaceControl(transition) => transition.phase.rank(),
+            Self::FreshControl(transition) => transition.phase.rank(),
         }
     }
 
@@ -508,6 +736,10 @@ impl AdmissionSpaceTransitionV2 {
             Self::CrossSpaceControl(_) => {
                 CrossSpaceControlTransitionPhaseV3::ActivationStarted.rank()
             }
+            Self::SameSpaceControl(_) => {
+                SameSpaceControlTransitionPhaseV3::ActivationStarted.rank()
+            }
+            Self::FreshControl(_) => FreshSpaceControlTransitionPhaseV3::ActivationStarted.rank(),
         }
     }
 
@@ -525,6 +757,12 @@ impl AdmissionSpaceTransitionV2 {
             Self::CrossSpaceControl(transition) => {
                 transition.phase == CrossSpaceControlTransitionPhaseV3::TargetPrepared
             }
+            Self::SameSpaceControl(transition) => {
+                transition.phase == SameSpaceControlTransitionPhaseV3::TargetPrepared
+            }
+            Self::FreshControl(transition) => {
+                transition.phase == FreshSpaceControlTransitionPhaseV3::TargetPrepared
+            }
         }
     }
 
@@ -536,6 +774,10 @@ impl AdmissionSpaceTransitionV2 {
             (Self::CrossSpaceControl(current), Self::CrossSpaceControl(next)) => {
                 current.can_advance_to(next)
             }
+            (Self::SameSpaceControl(current), Self::SameSpaceControl(next)) => {
+                current.can_advance_to(next)
+            }
+            (Self::FreshControl(current), Self::FreshControl(next)) => current.can_advance_to(next),
             _ => false,
         }
     }
@@ -547,6 +789,8 @@ pub enum AdmissionSpaceTransitionResultV2 {
     SameSpace { target_space_id: String },
     CrossSpace(CrossSpaceTransitionResultV2),
     CrossSpaceControl(CrossSpaceControlTransitionResultV3),
+    SameSpaceControl(SameSpaceControlTransitionResultV3),
+    FreshControl(FreshSpaceControlTransitionResultV3),
 }
 
 impl AdmissionSpaceTransitionResultV2 {
@@ -572,6 +816,13 @@ impl AdmissionSpaceTransitionResultV2 {
                 Self::CrossSpaceControl(result),
                 AdmissionSpaceTransitionV2::CrossSpaceControl(cross),
             ) => result.matches_cleanup_pending(cross),
+            (
+                Self::SameSpaceControl(result),
+                AdmissionSpaceTransitionV2::SameSpaceControl(same),
+            ) => result.matches_cleanup_pending(same),
+            (Self::FreshControl(result), AdmissionSpaceTransitionV2::FreshControl(fresh)) => {
+                result.matches_cleanup_pending(fresh)
+            }
             (Self::SameSpace { target_space_id }, AdmissionSpaceTransitionV2::SameSpace(same)) => {
                 same.validate()
                     && same.phase == SameSpaceTransitionPhaseV1::CleanupPending
@@ -692,6 +943,58 @@ mod tests {
         assert_eq!(
             AdmissionSpaceTransitionV2::decode(&encoded),
             Some(AdmissionSpaceTransitionV2::CrossSpaceControl(current))
+        );
+    }
+
+    #[test]
+    fn same_space_control_v3_retains_space_profile_and_keyslot() {
+        let current = SameSpaceControlTransitionV3 {
+            transition_format_version: SAME_SPACE_CONTROL_TRANSITION_FORMAT_V3,
+            attempt_id: SpaceAdmissionId::from_bytes([0x31; 32]).expect("valid admission id"),
+            space_id: "same-space".to_owned(),
+            retained_keyslot_generation: [0x32; 16],
+            profile_data_generation: [0x33; 16],
+            source_control_generation: [0x34; 16],
+            target_control_generation: [0x35; 16],
+            prepared_database_digest: [0x36; 32],
+            phase: SameSpaceControlTransitionPhaseV3::TargetPrepared,
+        };
+        let mut next = current.clone();
+        next.phase = SameSpaceControlTransitionPhaseV3::ActivationStarted;
+
+        assert!(current.can_advance_to(&next));
+        let encoded = AdmissionSpaceTransitionV2::SameSpaceControl(current.clone())
+            .encode()
+            .expect("same-space control transition encodes");
+        assert_eq!(
+            AdmissionSpaceTransitionV2::decode(&encoded),
+            Some(AdmissionSpaceTransitionV2::SameSpaceControl(current))
+        );
+    }
+
+    #[test]
+    fn fresh_control_v3_has_no_source_generation() {
+        let current = FreshSpaceControlTransitionV3 {
+            transition_format_version: FRESH_SPACE_CONTROL_TRANSITION_FORMAT_V3,
+            attempt_id: SpaceAdmissionId::from_bytes([0x41; 32]).expect("valid admission id"),
+            target_space_id: "fresh-space".to_owned(),
+            target_keyslot_generation: [0x42; 16],
+            profile_data_generation: [0x43; 16],
+            target_control_generation: [0x44; 16],
+            target_access_state: b"sealed target access".to_vec(),
+            prepared_database_digest: [0x45; 32],
+            phase: FreshSpaceControlTransitionPhaseV3::TargetPrepared,
+        };
+        let mut next = current.clone();
+        next.phase = FreshSpaceControlTransitionPhaseV3::ActivationStarted;
+
+        assert!(current.can_advance_to(&next));
+        let encoded = AdmissionSpaceTransitionV2::FreshControl(current.clone())
+            .encode()
+            .expect("fresh control transition encodes");
+        assert_eq!(
+            AdmissionSpaceTransitionV2::decode(&encoded),
+            Some(AdmissionSpaceTransitionV2::FreshControl(current))
         );
     }
 }

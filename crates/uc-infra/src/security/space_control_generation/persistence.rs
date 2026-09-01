@@ -1,4 +1,5 @@
 use std::fs::{File, OpenOptions, TryLockError};
+use std::io::Write as _;
 use std::path::Path;
 
 use async_trait::async_trait;
@@ -84,6 +85,30 @@ pub(super) fn compact_database(database: &Path) -> Result<(), SpaceControlGenera
     sync_directory(parent)
 }
 
+/// 对仍由运行期 pool 持有的 mutable target 排空 WAL，不切换 journal mode，
+/// 也不执行会与池中连接竞争的 VACUUM。
+pub(super) fn checkpoint_database(
+    pool: &DbPool,
+    database: &Path,
+) -> Result<(), SpaceControlGenerationError> {
+    let mut connection = pool
+        .get()
+        .map_err(|source| storage(anyhow::Error::new(source)))?;
+    connection
+        .batch_execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        .map_err(|source| {
+            storage(anyhow::Error::new(source).context("checkpoint mutable control database"))
+        })?;
+    drop(connection);
+    std::fs::File::open(database)
+        .and_then(|file| file.sync_all())
+        .map_err(|source| storage(anyhow::Error::new(source)))?;
+    let parent = database
+        .parent()
+        .ok_or_else(|| storage(anyhow::anyhow!("control database parent is missing")))?;
+    sync_directory(parent)
+}
+
 #[derive(diesel::QueryableByName)]
 struct IntegrityRow {
     #[diesel(sql_type = diesel::sql_types::Text)]
@@ -124,6 +149,20 @@ pub(super) fn verify_sqlite(database: &Path) -> Result<(), SpaceControlGeneratio
 pub(super) fn database_digest(database: &Path) -> Result<[u8; 32], SpaceControlGenerationError> {
     let bytes = std::fs::read(database).map_err(|source| storage(anyhow::Error::new(source)))?;
     Ok(*blake3::hash(&bytes).as_bytes())
+}
+
+pub(super) fn write_new_database(
+    database: &Path,
+    bytes: &[u8],
+) -> Result<(), SpaceControlGenerationError> {
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(database)
+        .map_err(|source| storage(anyhow::Error::new(source)))?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|source| storage(anyhow::Error::new(source)))
 }
 
 pub(super) fn sync_directory(directory: &Path) -> Result<(), SpaceControlGenerationError> {

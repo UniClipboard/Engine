@@ -125,7 +125,233 @@ impl SpaceTransitionActivation {
         Ok(SpaceTransitionActivationOutcome::Recovered)
     }
 
-    pub async fn discard_cross_space(
+    pub async fn activate_same_space(
+        &self,
+        expected_source: &ActiveRuntimeManifestV3,
+        prepared: &PreparedSpaceControlGeneration,
+    ) -> Result<SpaceTransitionActivationOutcome, SpaceTransitionActivationError> {
+        self.activate_same_space_retained_control(expected_source, prepared)
+            .await
+    }
+
+    pub async fn activate_membership_branch(
+        &self,
+        expected_source: &ActiveRuntimeManifestV3,
+        prepared: &PreparedSpaceControlGeneration,
+    ) -> Result<SpaceTransitionActivationOutcome, SpaceTransitionActivationError> {
+        self.activate_same_space_retained_control(expected_source, prepared)
+            .await
+    }
+
+    async fn activate_same_space_retained_control(
+        &self,
+        expected_source: &ActiveRuntimeManifestV3,
+        prepared: &PreparedSpaceControlGeneration,
+    ) -> Result<SpaceTransitionActivationOutcome, SpaceTransitionActivationError> {
+        let _guard = self.activation_lock.lock().await;
+        let _lease = acquire_activation_lease(&self.profile_root)?;
+        let target = prepared.manifest();
+        if expected_source.layout().space_id() != target.layout().space_id()
+            || expected_source.keyslot_generation() != target.keyslot_generation()
+            || expected_source.layout().profile_data_generation()
+                != target.layout().profile_data_generation()
+            || expected_source.layout().space_control_generation()
+                == target.layout().space_control_generation()
+        {
+            return Err(inconsistent(anyhow::anyhow!(
+                "same-space retained control activation input is inconsistent"
+            )));
+        }
+        self.control_generations
+            .reopen_prepared(target, prepared.database_digest())
+            .await
+            .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
+        let promotion = self
+            .manifests
+            .promote_v3_control_generation(expected_source, target)
+            .await
+            .map_err(map_manifest_error)?;
+        if promotion == V3ManifestPromotionOutcome::SourceChanged {
+            return Err(inconsistent(anyhow::anyhow!(
+                "active runtime manifest changed before retained control activation"
+            )));
+        }
+        self.rebind_retained_target(target).await?;
+        Ok(match promotion {
+            V3ManifestPromotionOutcome::Promoted => SpaceTransitionActivationOutcome::Promoted,
+            V3ManifestPromotionOutcome::AlreadyActive => {
+                SpaceTransitionActivationOutcome::Recovered
+            }
+            V3ManifestPromotionOutcome::SourceChanged => {
+                return Err(inconsistent(anyhow::anyhow!(
+                    "active runtime manifest changed during retained control activation"
+                )))
+            }
+        })
+    }
+
+    pub async fn activate_fresh(
+        &self,
+        prepared: &PreparedSpaceControlGeneration,
+        target_access_state: &[u8],
+    ) -> Result<SpaceTransitionActivationOutcome, SpaceTransitionActivationError> {
+        let _guard = self.activation_lock.lock().await;
+        let _lease = acquire_activation_lease(&self.profile_root)?;
+        let target = prepared.manifest();
+        if target_access_state.is_empty() {
+            return Err(inconsistent(anyhow::anyhow!(
+                "fresh control activation access state is missing"
+            )));
+        }
+        self.validate_fresh_profile_layout(target)?;
+        self.control_generations
+            .reopen_prepared(target, prepared.database_digest())
+            .await
+            .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
+        let promotion = self
+            .manifests
+            .promote_initial_v3(target)
+            .await
+            .map_err(map_manifest_error)?;
+        if promotion == V3ManifestPromotionOutcome::SourceChanged {
+            return Err(inconsistent(anyhow::anyhow!(
+                "an active runtime appeared before fresh activation"
+            )));
+        }
+        self.rebind_target(target, target_access_state).await?;
+        Ok(match promotion {
+            V3ManifestPromotionOutcome::Promoted => SpaceTransitionActivationOutcome::Promoted,
+            V3ManifestPromotionOutcome::AlreadyActive => {
+                SpaceTransitionActivationOutcome::Recovered
+            }
+            V3ManifestPromotionOutcome::SourceChanged => {
+                return Err(inconsistent(anyhow::anyhow!(
+                    "active runtime changed during fresh activation"
+                )))
+            }
+        })
+    }
+
+    /// Fresh manifest 已写入后的运行期恢复只接受同一 target。
+    pub async fn recover_fresh(
+        &self,
+        target: &ActiveRuntimeManifestV3,
+        target_access_state: &[u8],
+    ) -> Result<SpaceTransitionActivationOutcome, SpaceTransitionActivationError> {
+        let _guard = self.activation_lock.lock().await;
+        let _lease = acquire_activation_lease(&self.profile_root)?;
+        if target_access_state.is_empty() {
+            return Err(inconsistent(anyhow::anyhow!(
+                "fresh recovery access state is missing"
+            )));
+        }
+        self.validate_fresh_profile_layout(target)?;
+        let active = self
+            .manifests
+            .load_runtime()
+            .await
+            .map_err(map_manifest_error)?;
+        if active.as_ref() != Some(&ActiveRuntimeManifest::V3(target.clone())) {
+            return Err(inconsistent(anyhow::anyhow!(
+                "fresh recovery target is not active"
+            )));
+        }
+        self.rebind_target(target, target_access_state).await?;
+        Ok(SpaceTransitionActivationOutcome::Recovered)
+    }
+
+    /// SameSpace manifest 已指向 target 后，只向前恢复 control pool 与安全 session。
+    pub async fn recover_same_space(
+        &self,
+        target: &ActiveRuntimeManifestV3,
+    ) -> Result<SpaceTransitionActivationOutcome, SpaceTransitionActivationError> {
+        self.recover_retained_control(target).await
+    }
+
+    pub async fn recover_membership_branch(
+        &self,
+        target: &ActiveRuntimeManifestV3,
+    ) -> Result<SpaceTransitionActivationOutcome, SpaceTransitionActivationError> {
+        self.recover_retained_control(target).await
+    }
+
+    async fn recover_retained_control(
+        &self,
+        target: &ActiveRuntimeManifestV3,
+    ) -> Result<SpaceTransitionActivationOutcome, SpaceTransitionActivationError> {
+        let _guard = self.activation_lock.lock().await;
+        let _lease = acquire_activation_lease(&self.profile_root)?;
+        let active = self
+            .manifests
+            .load_runtime()
+            .await
+            .map_err(map_manifest_error)?;
+        if active.as_ref() != Some(&ActiveRuntimeManifest::V3(target.clone())) {
+            return Err(inconsistent(anyhow::anyhow!(
+                "retained control recovery target is not active"
+            )));
+        }
+        self.rebind_retained_target(target).await?;
+        Ok(SpaceTransitionActivationOutcome::Recovered)
+    }
+
+    /// Device Reset 保留 profile data、MasterKey 与 keyslot，但更换 Space 和
+    /// control generation。manifest 是唯一线性化点；之后只向 target 前向恢复。
+    pub async fn activate_device_reset(
+        &self,
+        expected_source: &ActiveRuntimeManifestV3,
+        prepared: &PreparedSpaceControlGeneration,
+    ) -> Result<SpaceTransitionActivationOutcome, SpaceTransitionActivationError> {
+        let _guard = self.activation_lock.lock().await;
+        let _lease = acquire_activation_lease(&self.profile_root)?;
+        let target = prepared.manifest();
+        if expected_source.layout().space_id() == target.layout().space_id()
+            || expected_source.keyslot_generation() != target.keyslot_generation()
+            || expected_source.layout().profile_data_generation()
+                != target.layout().profile_data_generation()
+            || expected_source.layout().space_control_generation()
+                == target.layout().space_control_generation()
+        {
+            return Err(inconsistent(anyhow::anyhow!(
+                "device reset control activation input is inconsistent"
+            )));
+        }
+        self.control_generations
+            .reopen_prepared(target, prepared.database_digest())
+            .await
+            .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
+        let promotion = self
+            .manifests
+            .promote_v3_control_generation(expected_source, target)
+            .await
+            .map_err(map_manifest_error)?;
+        if promotion == V3ManifestPromotionOutcome::SourceChanged {
+            return Err(inconsistent(anyhow::anyhow!(
+                "active runtime changed before device reset activation"
+            )));
+        }
+        self.rebind_retained_target(target).await?;
+        Ok(match promotion {
+            V3ManifestPromotionOutcome::Promoted => SpaceTransitionActivationOutcome::Promoted,
+            V3ManifestPromotionOutcome::AlreadyActive => {
+                SpaceTransitionActivationOutcome::Recovered
+            }
+            V3ManifestPromotionOutcome::SourceChanged => {
+                return Err(inconsistent(anyhow::anyhow!(
+                    "active runtime changed during device reset activation"
+                )))
+            }
+        })
+    }
+
+    pub async fn recover_device_reset(
+        &self,
+        target: &ActiveRuntimeManifestV3,
+    ) -> Result<SpaceTransitionActivationOutcome, SpaceTransitionActivationError> {
+        self.recover_retained_control(target).await
+    }
+
+    pub async fn discard_prepared_control(
         &self,
         expected_source: &ActiveRuntimeManifestV3,
         prepared: &PreparedSpaceControlGeneration,
@@ -140,6 +366,28 @@ impl SpaceTransitionActivation {
         if active.as_ref() != Some(&ActiveRuntimeManifest::V3(expected_source.clone())) {
             return Err(inconsistent(anyhow::anyhow!(
                 "prepared control generation is no longer pre-activation"
+            )));
+        }
+        self.control_generations
+            .discard_prepared(prepared)
+            .map_err(|source| storage(anyhow::Error::new(source)))
+    }
+
+    pub async fn discard_fresh(
+        &self,
+        prepared: &PreparedSpaceControlGeneration,
+    ) -> Result<(), SpaceTransitionActivationError> {
+        let _guard = self.activation_lock.lock().await;
+        let _lease = acquire_activation_lease(&self.profile_root)?;
+        if self
+            .manifests
+            .load_runtime()
+            .await
+            .map_err(map_manifest_error)?
+            .is_some()
+        {
+            return Err(inconsistent(anyhow::anyhow!(
+                "fresh control generation is no longer pre-activation"
             )));
         }
         self.control_generations
@@ -173,6 +421,48 @@ impl SpaceTransitionActivation {
         if active.as_ref() != Some(&ActiveRuntimeManifest::V3(target.clone())) {
             return Err(recovery(anyhow::anyhow!(
                 "target runtime manifest is not active after rebind"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn rebind_retained_target(
+        &self,
+        target: &ActiveRuntimeManifestV3,
+    ) -> Result<(), SpaceTransitionActivationError> {
+        let layout = ProfileRuntimeLayout::v3(&self.profile_root, target);
+        let database = layout
+            .control_database()
+            .to_str()
+            .ok_or_else(|| recovery(anyhow::anyhow!("control database path is invalid")))?;
+        self.control_pool
+            .replace_database(database)
+            .map_err(recovery)?;
+        self.space_access
+            .activate_retained_control_generation(target.layout().space_id())
+            .await
+            .map_err(|source| recovery(anyhow::Error::new(source)))?;
+        let active = self
+            .manifests
+            .load_runtime()
+            .await
+            .map_err(map_manifest_error)?;
+        if active.as_ref() != Some(&ActiveRuntimeManifest::V3(target.clone())) {
+            return Err(recovery(anyhow::anyhow!(
+                "retained control target is not active after rebind"
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_fresh_profile_layout(
+        &self,
+        target: &ActiveRuntimeManifestV3,
+    ) -> Result<(), SpaceTransitionActivationError> {
+        let layout = ProfileRuntimeLayout::v3(&self.profile_root, target);
+        if !layout.profile_database().is_file() || !layout.blob_root().is_dir() {
+            return Err(inconsistent(anyhow::anyhow!(
+                "fresh profile data generation is not prepared"
             )));
         }
         Ok(())

@@ -362,6 +362,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn initial_activation_cannot_replace_an_active_v3_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let (resolver, generation_manifest) = resolver(&directory);
+        let source = ActiveSpaceGenerationManifestV2::new(
+            "active-space".to_owned(),
+            [0x72; 16],
+            [0x73; 16],
+            [0x74; 16],
+        )
+        .unwrap();
+        generation_manifest.promote(&source).await.unwrap();
+        let target = crate::security::ActiveRuntimeManifestV3::new(
+            ActiveRuntimeLayout::new(SpaceId::from_str("active-space"), [0x75; 16], [0x76; 16])
+                .unwrap(),
+            [0x72; 16],
+        )
+        .unwrap();
+        generation_manifest
+            .promote_v3_from_v2(&source, &target)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resolver
+                .activate_initial_space(&SpaceId::from_str("replacement-space"))
+                .await
+                .unwrap_err(),
+            CurrentSpaceIdentityError::Inconsistent
+        );
+        assert_eq!(
+            resolver.current_space_id().await.unwrap(),
+            Some(SpaceId::from_str("active-space"))
+        );
+    }
+
+    #[tokio::test]
     async fn corrupt_generation_manifest_never_falls_back_to_legacy_identity() {
         let directory = tempfile::tempdir().unwrap();
         let (resolver, _) = resolver(&directory);

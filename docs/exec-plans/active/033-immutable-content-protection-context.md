@@ -1,6 +1,6 @@
 # 033 不可变内容保护上下文与一次性密文升级
 
-状态：实施中；V3 内容保护、profile vault、完整 payload/search 转换、双 generation production repository 路由、真实 manifest promotion、control-generation credential scope、`SpaceControlGeneration` 与 CrossSpace control-only clean cutover 已完成；Fresh/SameSpace/Reset/branch、启动/解锁 gate 与旧升级 source 清理尚未完成，032 在本规格完成前暂停实施
+状态：实施中；V3 内容保护、profile vault、完整 payload/search 转换、双 generation production repository 路由、真实 manifest promotion、control-generation credential scope，以及 Fresh/SameSpace/CrossSpace/Reset/branch 的 control-only clean cutover 已完成；启动/解锁 gate、旧升级 source 清理与最终验收尚未完成，032 在本规格完成前暂停实施
 
 本规格取代规格 023 中“CrossSpace 必须把本机历史重封装到目标 MasterKey”的规则，以及规格 028 中“切换前普通本机内容沿用 CrossSpace rebuild/rewrap”的规则。规格 023/028 的准入提交、门禁、恢复和 MLS 成员语义继续有效。
 
@@ -449,11 +449,13 @@ Change: 第二十子切片新增 `SpaceControlGeneration::prepare_admission` 完
 
 Change: 第二十一子切片以新的 `CrossSpaceControlTransitionV3` 取代 V3 正常运行中的旧 rewrap 状态机。状态只保存 source/target control generation、固定 profile data generation、目标 access state 与 prepared database digest，不再包含 source backup、final source revision、payload 迁移 phase 或迁移计数。`SpaceTransitionActivation` 在 profile 级跨进程租约内重新验证 prepared proof，以 active manifest compare-and-promote 作为唯一线性化点，随后只重绑 control pool、目标 keyslot、vault catalog 与活动 session；提升后失败只能按同一 target 前向恢复。prepared 数据库成为可写 active store 后不再错误比较提升前介质摘要，而以已认证 target manifest 恢复。Engine 的 V3 admission 只装配该 control-only adapter，Fresh/SameSpace/Reset/branch 继续显式失败关闭直到各自切片完成。真实 SQLite tracer 覆盖取消后重建、manifest 写入后 phase 未保存的崩溃窗口、来源 control 清理、profile SQLite/blob 字节不变及零 rewrap/source-backup 路径。
 
+Change: 第二十二子切片按各自保留语义完成其余 V3 control 流程。Fresh 使用无伪 source 的专属状态，只在 profile 初始化负责人提供已落盘 data generation 时执行 none-to-target manifest CAS；SameSpace 固定 Space、profile data generation、MasterKey/keyslot，只替换 control generation。Device Reset 由独立加密 journal 驱动 control snapshot、可写 staging、最终 proof、promotion 与 source cleanup，Application 既有四步接口不接触 SQLite 细节；membership branch 则由独立 owner 验证 recovery material、清除旧关系后按目标历史重建 security/relationships/ledger，并在 target ledger 预存可恢复 checkpoint。Engine 为 V3 装配真实 admission、Reset 与 branch adapter，并删除临时 fail-closed 类型；已有 V3 manifest 下的首次激活仍由 current-space owner 拒绝覆盖。五类真实 tracer 均证明 profile SQLite/blob 与 keyslot 按语义保留、无 payload rewrap 或 source backup。恢复材料改为由密封包确定性产生，严格回读与重复执行不会因 wall-clock 字段漂移。
+
 Risk: 磁盘不足、移动端短进程和崩溃会留下 staging；每个 phase 先耐久记录再执行可重复动作，promotion 前绝不改 source。
 
-Step 8:
+Step 8（已完成）:
 File: `crates/uc-infra/src/security/admission_space_transition.rs`、Application transition tests、active manifest store
-Change: 新增完整 `SpaceControlGeneration` store；将 CrossSpace 改为复用 profile data generation，只安装 target catalog、提升 target control manifest 和重绑 control repositories/session；删除正常 CrossSpace 的 `rewrap_finalized_source`、source backup、payload rewrap 和 profile DB/blob replace 路径。Reset/branch 必须按各自语义单独验证，不能机械套用 CrossSpace。
+Change: 新增完整 `SpaceControlGeneration` store；CrossSpace 复用 profile data generation，只安装 target catalog、提升 target control manifest 和重绑 control repositories/session，并删除正常路径的 `rewrap_finalized_source`、source backup、payload rewrap 和 profile DB/blob replace。Fresh、SameSpace、Reset 与 branch 使用各自持久状态和独立流程 owner；它们只共享完整的 generation preparation/activation 能力，不共享业务 phase 或数据保留决策。
 Risk: 旧 transition checkpoint 可能跨版本存在；启动时先由升级器识别并完成或稳定拒绝，不能用新状态机误读旧 phase。
 
 Step 9:

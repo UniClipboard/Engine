@@ -167,6 +167,53 @@ impl DeviceManagementResetJournalV1 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum DeviceManagementResetPhaseV3 {
+    Allocated,
+    Prepared,
+    Staged,
+    Promoted,
+    CleanupPending,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DeviceManagementResetJournalV3 {
+    pub(crate) format_version: u16,
+    pub(crate) phase: DeviceManagementResetPhaseV3,
+    pub(crate) source_space_id: String,
+    pub(crate) source_keyslot_generation: [u8; 16],
+    pub(crate) profile_data_generation: [u8; 16],
+    pub(crate) source_control_generation: [u8; 16],
+    pub(crate) target_space_id: String,
+    pub(crate) target_control_generation: [u8; 16],
+    pub(crate) prepared_database_digest: [u8; 32],
+}
+
+impl DeviceManagementResetJournalV3 {
+    pub(crate) fn validate(&self) -> bool {
+        self.format_version == 3
+            && !self.source_space_id.is_empty()
+            && !self.target_space_id.is_empty()
+            && self.source_space_id != self.target_space_id
+            && self.source_keyslot_generation != [0; 16]
+            && self.profile_data_generation != [0; 16]
+            && self.source_control_generation != [0; 16]
+            && self.target_control_generation != [0; 16]
+            && self.source_control_generation != self.target_control_generation
+            && self.profile_data_generation != self.source_control_generation
+            && self.profile_data_generation != self.target_control_generation
+            && match self.phase {
+                DeviceManagementResetPhaseV3::Allocated => self.prepared_database_digest == [0; 32],
+                DeviceManagementResetPhaseV3::Prepared
+                | DeviceManagementResetPhaseV3::Staged
+                | DeviceManagementResetPhaseV3::Promoted
+                | DeviceManagementResetPhaseV3::CleanupPending => {
+                    self.prepared_database_digest != [0; 32]
+                }
+            }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ActiveSpaceGenerationManifestStoreError {
     #[error("active space generation manifest storage is unavailable")]
@@ -401,6 +448,37 @@ impl ActiveSpaceGenerationManifestStore {
         Ok(V3ManifestPromotionOutcome::Promoted)
     }
 
+    /// 只在尚无活动 manifest 时建立首个 V3 runtime。
+    ///
+    /// 同一 target 可从 manifest 已写入、运行期尚未恢复的崩溃窗口继续；任何
+    /// 既有 V2 或其他 V3 manifest 都视为来源已经变化，绝不覆盖。
+    pub(crate) async fn promote_initial_v3(
+        &self,
+        target: &ActiveRuntimeManifestV3,
+    ) -> Result<V3ManifestPromotionOutcome, ActiveSpaceGenerationManifestStoreError> {
+        let _guard = self.write_lock.lock().await;
+        match tokio::fs::read(&self.path).await {
+            Ok(ciphertext) => {
+                let current = self.decode_runtime(&ciphertext)?;
+                return Ok(match current {
+                    ActiveRuntimeManifest::V3(current) if current == *target => {
+                        V3ManifestPromotionOutcome::AlreadyActive
+                    }
+                    ActiveRuntimeManifest::V2(_) | ActiveRuntimeManifest::V3(_) => {
+                        V3ManifestPromotionOutcome::SourceChanged
+                    }
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
+        }
+        let persisted = PersistedActiveRuntimeManifestV3::from_manifest(target);
+        let plaintext = postcard::to_stdvec(&persisted)
+            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
+        self.persist_manifest(&plaintext).await?;
+        Ok(V3ManifestPromotionOutcome::Promoted)
+    }
+
     fn open_manifest(
         &self,
         ciphertext: &[u8],
@@ -481,6 +559,64 @@ impl ActiveSpaceGenerationManifestStore {
     pub(crate) async fn save_device_reset_journal(
         &self,
         journal: &DeviceManagementResetJournalV1,
+    ) -> Result<(), ActiveSpaceGenerationManifestStoreError> {
+        if !journal.validate() {
+            return Err(ActiveSpaceGenerationManifestStoreError::Corrupt);
+        }
+        let _guard = self.write_lock.lock().await;
+        let parent = self
+            .reset_journal_path
+            .parent()
+            .ok_or(ActiveSpaceGenerationManifestStoreError::Storage)?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+        let plaintext = postcard::to_stdvec(journal)
+            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
+        let ciphertext = self
+            .keys
+            .seal_profile_payload(DEVICE_RESET_JOURNAL_PURPOSE, &plaintext)
+            .map_err(map_key_error)?;
+        let temporary = self.reset_journal_path.with_extension("tmp");
+        let mut file = tokio::fs::File::create(&temporary)
+            .await
+            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+        file.write_all(&ciphertext)
+            .await
+            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+        file.sync_all()
+            .await
+            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+        drop(file);
+        replace_file_atomically(&temporary, &self.reset_journal_path)
+            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+        sync_parent_directory(parent).map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)
+    }
+
+    pub(crate) async fn load_device_reset_journal_v3(
+        &self,
+    ) -> Result<Option<DeviceManagementResetJournalV3>, ActiveSpaceGenerationManifestStoreError>
+    {
+        let ciphertext = match tokio::fs::read(&self.reset_journal_path).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
+        };
+        let plaintext = self
+            .keys
+            .open_profile_payload(DEVICE_RESET_JOURNAL_PURPOSE, &ciphertext)
+            .map_err(map_key_error)?;
+        let journal: DeviceManagementResetJournalV3 = postcard::from_bytes(&plaintext)
+            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
+        journal
+            .validate()
+            .then_some(Some(journal))
+            .ok_or(ActiveSpaceGenerationManifestStoreError::Corrupt)
+    }
+
+    pub(crate) async fn save_device_reset_journal_v3(
+        &self,
+        journal: &DeviceManagementResetJournalV3,
     ) -> Result<(), ActiveSpaceGenerationManifestStoreError> {
         if !journal.validate() {
             return Err(ActiveSpaceGenerationManifestStoreError::Corrupt);
