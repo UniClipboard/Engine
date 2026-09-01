@@ -179,6 +179,69 @@ impl SpaceControlGeneration {
         result
     }
 
+    /// 从已认证 transition state 中的 manifest 与介质摘要恢复 prepared proof。
+    ///
+    /// 初次构造已经通过完整 production repository 回读；重启恢复不再需要把
+    /// admission material 复制进 transition schema，而是以认证摘要重新验证同一
+    /// 不可变 SQLite generation。
+    pub async fn reopen_prepared(
+        &self,
+        manifest: &ActiveRuntimeManifestV3,
+        expected_database_digest: &[u8; 32],
+    ) -> Result<PreparedSpaceControlGeneration, SpaceControlGenerationError> {
+        if expected_database_digest == &[0; 32] {
+            return Err(inconsistent(anyhow::anyhow!(
+                "prepared control database digest is invalid"
+            )));
+        }
+        let layout = ProfileRuntimeLayout::v3(&self.profile_root, manifest);
+        let database = layout.control_database();
+        if !database.is_file() {
+            return Err(inconsistent(anyhow::anyhow!(
+                "prepared control database is missing"
+            )));
+        }
+        verify_sqlite(database)?;
+        let actual = database_digest(database)?;
+        if &actual != expected_database_digest {
+            return Err(inconsistent(anyhow::anyhow!(
+                "prepared control database digest does not match"
+            )));
+        }
+        Ok(PreparedSpaceControlGeneration {
+            manifest: manifest.clone(),
+            database_digest: actual,
+        })
+    }
+
+    /// 删除仍未被 active manifest 引用的 prepared control generation。
+    /// 调用方必须先在 transition activation 的同一租约下证明它未生效。
+    pub(crate) fn discard_prepared(
+        &self,
+        prepared: &PreparedSpaceControlGeneration,
+    ) -> Result<(), SpaceControlGenerationError> {
+        let layout = ProfileRuntimeLayout::v3(&self.profile_root, prepared.manifest());
+        let database = layout.control_database();
+        if !database.exists() {
+            return Ok(());
+        }
+        verify_sqlite(database)?;
+        if database_digest(database)? != *prepared.database_digest() {
+            return Err(inconsistent(anyhow::anyhow!(
+                "discarded control database digest does not match"
+            )));
+        }
+        let directory = database
+            .parent()
+            .ok_or_else(|| storage(anyhow::anyhow!("control generation directory is missing")))?;
+        let parent = directory
+            .parent()
+            .ok_or_else(|| storage(anyhow::anyhow!("control generation parent is missing")))?;
+        let _lease = acquire_lease(parent)?;
+        remove_directory_if_present(directory)?;
+        sync_directory(parent)
+    }
+
     async fn build_database(
         &self,
         database: &Path,

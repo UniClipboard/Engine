@@ -1,6 +1,6 @@
 # 033 不可变内容保护上下文与一次性密文升级
 
-状态：实施中；V3 内容保护、profile vault、完整 payload/search 转换、双 generation production repository 路由、真实 manifest promotion、control-generation credential scope 与 `SpaceControlGeneration` 已完成；启动/解锁 gate、旧 source 清理与 CrossSpace clean cutover 尚未完成，032 在本规格完成前暂停实施
+状态：实施中；V3 内容保护、profile vault、完整 payload/search 转换、双 generation production repository 路由、真实 manifest promotion、control-generation credential scope、`SpaceControlGeneration` 与 CrossSpace control-only clean cutover 已完成；Fresh/SameSpace/Reset/branch、启动/解锁 gate 与旧升级 source 清理尚未完成，032 在本规格完成前暂停实施
 
 本规格取代规格 023 中“CrossSpace 必须把本机历史重封装到目标 MasterKey”的规则，以及规格 028 中“切换前普通本机内容沿用 CrossSpace rebuild/rewrap”的规则。规格 023/028 的准入提交、门禁、恢复和 MLS 成员语义继续有效。
 
@@ -446,6 +446,8 @@ Change: 第十八子切片让 `ProfileStorageUpgrade` 从 `Verified` 真正执�
 Change: 第十九子切片把 OPAQUE/admission credential 的持久 scope 从单一 V2 `database_generation + security_generation` 扩展为显式版本和：V2 reader/writer 继续精确绑定旧完整 generation，V3 只绑定 Space、keyslot 与 `space_control_generation`。`SqliteSpaceAdmissionCredentials` 通过 V3-aware manifest loader 原子选择一种 scope；一次性 profile upgrade 在 `StoresSeparated` 内只调用 credential owner 的完整转换操作，在内存校验旧 OPAQUE 材料、重新以 target control scope 封装并回读后才记录 control database digest。升级器不复制 credential DTO、purpose 或 SQL schema，promotion 后 production control repository 可直接读取既有 Sponsor registration。
 
 Change: 第二十子切片新增 `SpaceControlGeneration::prepare_admission` 完整入口。调用方只提交已验证的 admission preparation 与目标 V3 manifest；模块内部验证 commitment、catalog、关系与 group update 的一致性，从目标 access state 建立隔离 session，并通过正式 membership、relationship、credential 与 Space security repository 构造和回读完整 `control.sqlite`。候选 generation 使用 profile 级跨进程租约、同父目录随机 staging、SQLite integrity/foreign-key gate、稳定介质摘要和原子目录发布；重复调用只验证并复用同一不可变结果，损坏目标失败关闭。本子切片不提升 active manifest、不重绑运行期、不创建 source backup，也不接触 profile database、blob 或历史 payload；这些只由下一 `SpaceTransitionActivation` 消费其不可伪造的 prepared proof。
+
+Change: 第二十一子切片以新的 `CrossSpaceControlTransitionV3` 取代 V3 正常运行中的旧 rewrap 状态机。状态只保存 source/target control generation、固定 profile data generation、目标 access state 与 prepared database digest，不再包含 source backup、final source revision、payload 迁移 phase 或迁移计数。`SpaceTransitionActivation` 在 profile 级跨进程租约内重新验证 prepared proof，以 active manifest compare-and-promote 作为唯一线性化点，随后只重绑 control pool、目标 keyslot、vault catalog 与活动 session；提升后失败只能按同一 target 前向恢复。prepared 数据库成为可写 active store 后不再错误比较提升前介质摘要，而以已认证 target manifest 恢复。Engine 的 V3 admission 只装配该 control-only adapter，Fresh/SameSpace/Reset/branch 继续显式失败关闭直到各自切片完成。真实 SQLite tracer 覆盖取消后重建、manifest 写入后 phase 未保存的崩溃窗口、来源 control 清理、profile SQLite/blob 字节不变及零 rewrap/source-backup 路径。
 
 Risk: 磁盘不足、移动端短进程和崩溃会留下 staging；每个 phase 先耐久记录再执行可重复动作，promotion 前绝不改 source。
 

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::SpaceAdmissionId;
 
 pub const CROSS_SPACE_TRANSITION_FORMAT_V2: u16 = 2;
+pub const CROSS_SPACE_CONTROL_TRANSITION_FORMAT_V3: u16 = 3;
 pub const FRESH_SPACE_TRANSITION_FORMAT_V1: u16 = 1;
 pub const SAME_SPACE_TRANSITION_FORMAT_V1: u16 = 1;
 
@@ -322,11 +323,133 @@ impl CrossSpaceTransitionResultV2 {
     }
 }
 
+/// V3 CrossSpace 只切换 Space 控制世代，不迁移 profile payload。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CrossSpaceControlTransitionPhaseV3 {
+    TargetPrepared,
+    ActivationStarted,
+    TargetPromoted,
+    CleanupPending,
+}
+
+impl CrossSpaceControlTransitionPhaseV3 {
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::TargetPrepared => 0,
+            Self::ActivationStarted => 1,
+            Self::TargetPromoted => 2,
+            Self::CleanupPending => 3,
+        }
+    }
+
+    const fn successor(self) -> Option<Self> {
+        match self {
+            Self::TargetPrepared => Some(Self::ActivationStarted),
+            Self::ActivationStarted => Some(Self::TargetPromoted),
+            Self::TargetPromoted => Some(Self::CleanupPending),
+            Self::CleanupPending => None,
+        }
+    }
+}
+
+/// 已认证 admission state 内的 control-only CrossSpace 恢复状态。
+///
+/// `profile_data_generation` 在整个状态机中不可变；这里没有 source backup、
+/// payload cipher、rewrap phase 或迁移计数。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrossSpaceControlTransitionV3 {
+    pub transition_format_version: u16,
+    pub attempt_id: SpaceAdmissionId,
+    pub source_space_id: String,
+    pub source_keyslot_generation: [u8; 16],
+    pub profile_data_generation: [u8; 16],
+    pub source_control_generation: [u8; 16],
+    pub target_space_id: String,
+    pub target_keyslot_generation: [u8; 16],
+    pub target_control_generation: [u8; 16],
+    pub target_access_state: Vec<u8>,
+    pub prepared_database_digest: [u8; 32],
+    pub phase: CrossSpaceControlTransitionPhaseV3,
+}
+
+impl std::fmt::Debug for CrossSpaceControlTransitionV3 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CrossSpaceControlTransitionV3")
+            .field("attempt_id", &self.attempt_id)
+            .field("phase", &self.phase)
+            .field("identifiers", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl CrossSpaceControlTransitionV3 {
+    pub fn validate(&self) -> bool {
+        self.transition_format_version == CROSS_SPACE_CONTROL_TRANSITION_FORMAT_V3
+            && !self.source_space_id.is_empty()
+            && !self.target_space_id.is_empty()
+            && self.source_space_id != self.target_space_id
+            && self.source_keyslot_generation != [0; 16]
+            && self.profile_data_generation != [0; 16]
+            && self.source_control_generation != [0; 16]
+            && self.target_keyslot_generation != [0; 16]
+            && self.target_control_generation != [0; 16]
+            && self.source_control_generation != self.target_control_generation
+            && self.profile_data_generation != self.source_control_generation
+            && self.profile_data_generation != self.target_control_generation
+            && !self.target_access_state.is_empty()
+            && self.prepared_database_digest != [0; 32]
+    }
+
+    pub fn can_advance_to(&self, next: &Self) -> bool {
+        self.validate()
+            && next.validate()
+            && self.phase.successor() == Some(next.phase)
+            && self.attempt_id == next.attempt_id
+            && self.source_space_id == next.source_space_id
+            && self.source_keyslot_generation == next.source_keyslot_generation
+            && self.profile_data_generation == next.profile_data_generation
+            && self.source_control_generation == next.source_control_generation
+            && self.target_space_id == next.target_space_id
+            && self.target_keyslot_generation == next.target_keyslot_generation
+            && self.target_control_generation == next.target_control_generation
+            && self.target_access_state == next.target_access_state
+            && self.prepared_database_digest == next.prepared_database_digest
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrossSpaceControlTransitionResultV3 {
+    pub source_space_id: String,
+    pub target_space_id: String,
+    pub profile_data_generation: [u8; 16],
+    pub target_control_generation: [u8; 16],
+}
+
+impl CrossSpaceControlTransitionResultV3 {
+    pub fn from_cleanup_pending(transition: &CrossSpaceControlTransitionV3) -> Option<Self> {
+        (transition.phase == CrossSpaceControlTransitionPhaseV3::CleanupPending
+            && transition.validate())
+        .then(|| Self {
+            source_space_id: transition.source_space_id.clone(),
+            target_space_id: transition.target_space_id.clone(),
+            profile_data_generation: transition.profile_data_generation,
+            target_control_generation: transition.target_control_generation,
+        })
+    }
+
+    pub fn matches_cleanup_pending(&self, transition: &CrossSpaceControlTransitionV3) -> bool {
+        Self::from_cleanup_pending(transition).as_ref() == Some(self)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AdmissionSpaceTransitionV2 {
     Fresh(FreshSpaceTransitionV1),
     SameSpace(SameSpaceTransitionV1),
     CrossSpace(CrossSpaceTransitionV2),
+    CrossSpaceControl(CrossSpaceControlTransitionV3),
 }
 
 impl AdmissionSpaceTransitionV2 {
@@ -346,6 +469,7 @@ impl AdmissionSpaceTransitionV2 {
             Self::Fresh(transition) => transition.validate(),
             Self::SameSpace(transition) => transition.validate(),
             Self::CrossSpace(transition) => transition.validate(),
+            Self::CrossSpaceControl(transition) => transition.validate(),
         }
     }
 
@@ -354,6 +478,7 @@ impl AdmissionSpaceTransitionV2 {
             Self::Fresh(transition) => transition.attempt_id,
             Self::SameSpace(transition) => transition.attempt_id,
             Self::CrossSpace(transition) => transition.attempt_id,
+            Self::CrossSpaceControl(transition) => transition.attempt_id,
         }
     }
 
@@ -362,6 +487,7 @@ impl AdmissionSpaceTransitionV2 {
             Self::Fresh(transition) => &transition.target_space_id,
             Self::SameSpace(transition) => &transition.target_space_id,
             Self::CrossSpace(transition) => &transition.target_space_id,
+            Self::CrossSpaceControl(transition) => &transition.target_space_id,
         }
     }
 
@@ -370,6 +496,7 @@ impl AdmissionSpaceTransitionV2 {
             Self::Fresh(transition) => transition.phase.rank(),
             Self::SameSpace(transition) => transition.phase.rank(),
             Self::CrossSpace(transition) => transition.phase.rank(),
+            Self::CrossSpaceControl(transition) => transition.phase.rank(),
         }
     }
 
@@ -378,6 +505,9 @@ impl AdmissionSpaceTransitionV2 {
             Self::Fresh(_) => FreshSpaceTransitionPhaseV1::ActivationStarted.rank(),
             Self::SameSpace(_) => SameSpaceTransitionPhaseV1::ActivationStarted.rank(),
             Self::CrossSpace(_) => CrossSpaceTransitionPhaseV2::ActivationStarted.rank(),
+            Self::CrossSpaceControl(_) => {
+                CrossSpaceControlTransitionPhaseV3::ActivationStarted.rank()
+            }
         }
     }
 
@@ -392,6 +522,9 @@ impl AdmissionSpaceTransitionV2 {
             Self::CrossSpace(transition) => {
                 transition.phase == CrossSpaceTransitionPhaseV2::TargetStaged
             }
+            Self::CrossSpaceControl(transition) => {
+                transition.phase == CrossSpaceControlTransitionPhaseV3::TargetPrepared
+            }
         }
     }
 
@@ -400,6 +533,9 @@ impl AdmissionSpaceTransitionV2 {
             (Self::Fresh(current), Self::Fresh(next)) => current.can_advance_to(next),
             (Self::SameSpace(current), Self::SameSpace(next)) => current.can_advance_to(next),
             (Self::CrossSpace(current), Self::CrossSpace(next)) => current.can_advance_to(next),
+            (Self::CrossSpaceControl(current), Self::CrossSpaceControl(next)) => {
+                current.can_advance_to(next)
+            }
             _ => false,
         }
     }
@@ -410,6 +546,7 @@ pub enum AdmissionSpaceTransitionResultV2 {
     Fresh { target_space_id: String },
     SameSpace { target_space_id: String },
     CrossSpace(CrossSpaceTransitionResultV2),
+    CrossSpaceControl(CrossSpaceControlTransitionResultV3),
 }
 
 impl AdmissionSpaceTransitionResultV2 {
@@ -431,6 +568,10 @@ impl AdmissionSpaceTransitionResultV2 {
             (Self::CrossSpace(result), AdmissionSpaceTransitionV2::CrossSpace(cross)) => {
                 result.matches_cleanup_pending(cross)
             }
+            (
+                Self::CrossSpaceControl(result),
+                AdmissionSpaceTransitionV2::CrossSpaceControl(cross),
+            ) => result.matches_cleanup_pending(cross),
             (Self::SameSpace { target_space_id }, AdmissionSpaceTransitionV2::SameSpace(same)) => {
                 same.validate()
                     && same.phase == SameSpaceTransitionPhaseV1::CleanupPending
@@ -523,5 +664,34 @@ mod tests {
         .unwrap();
         assert_eq!(result.final_source_revision, 9);
         assert_eq!(result.migrated_records, 3);
+    }
+
+    #[test]
+    fn control_only_v3_transition_keeps_profile_generation_and_has_no_rewrap_phase() {
+        let current = CrossSpaceControlTransitionV3 {
+            transition_format_version: CROSS_SPACE_CONTROL_TRANSITION_FORMAT_V3,
+            attempt_id: SpaceAdmissionId::from_bytes([0x21; 32]).expect("valid admission id"),
+            source_space_id: "source".to_owned(),
+            source_keyslot_generation: [0x22; 16],
+            profile_data_generation: [0x23; 16],
+            source_control_generation: [0x24; 16],
+            target_space_id: "target".to_owned(),
+            target_keyslot_generation: [0x25; 16],
+            target_control_generation: [0x26; 16],
+            target_access_state: b"sealed target access".to_vec(),
+            prepared_database_digest: [0x27; 32],
+            phase: CrossSpaceControlTransitionPhaseV3::TargetPrepared,
+        };
+        let mut next = current.clone();
+        next.phase = CrossSpaceControlTransitionPhaseV3::ActivationStarted;
+        assert!(current.can_advance_to(&next));
+
+        let encoded = AdmissionSpaceTransitionV2::CrossSpaceControl(current.clone())
+            .encode()
+            .expect("control transition encodes");
+        assert_eq!(
+            AdmissionSpaceTransitionV2::decode(&encoded),
+            Some(AdmissionSpaceTransitionV2::CrossSpaceControl(current))
+        );
     }
 }

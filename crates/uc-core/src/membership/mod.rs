@@ -34,9 +34,11 @@ pub use bootstrap::{
     LegacyBootstrapRepositoryPort, LegacyBootstrapStage, LegacyBootstrapStatus,
 };
 pub use cross_space_transition::{
-    AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2, CrossSpaceTransitionPhaseV2,
-    CrossSpaceTransitionResultV2, CrossSpaceTransitionV2, FreshSpaceTransitionPhaseV1,
-    FreshSpaceTransitionV1, SameSpaceTransitionPhaseV1, SameSpaceTransitionV1,
+    AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2,
+    CrossSpaceControlTransitionPhaseV3, CrossSpaceControlTransitionResultV3,
+    CrossSpaceControlTransitionV3, CrossSpaceTransitionPhaseV2, CrossSpaceTransitionResultV2,
+    CrossSpaceTransitionV2, FreshSpaceTransitionPhaseV1, FreshSpaceTransitionV1,
+    SameSpaceTransitionPhaseV1, SameSpaceTransitionV1, CROSS_SPACE_CONTROL_TRANSITION_FORMAT_V3,
     CROSS_SPACE_TRANSITION_FORMAT_V2, FRESH_SPACE_TRANSITION_FORMAT_V1,
     SAME_SPACE_TRANSITION_FORMAT_V1,
 };

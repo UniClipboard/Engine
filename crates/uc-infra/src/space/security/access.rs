@@ -589,6 +589,57 @@ impl DefaultSpaceAccessAdapter {
         Ok(())
     }
 
+    /// 在 V3 manifest 已提升后安装目标 keyslot，并从当前 control pool 完整恢复
+    /// 目标安全状态、vault catalog 与活动 session。
+    ///
+    /// 该操作只用于 promoted 后的前向恢复：任一步失败都由同一 transition
+    /// 以相同 target access state 重试，不回滚到已失去 manifest 所有权的来源。
+    pub(crate) async fn activate_prepared_control_generation(
+        &self,
+        target_space_id: &SpaceId,
+        encoded: &[u8],
+    ) -> Result<(), SpaceAccessError> {
+        let profile = self
+            .current_profile
+            .current_profile()
+            .await
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let scope = key_scope_from_profile(&profile);
+        let (keyslot, kek, master_key) =
+            Self::decode_prepared_target_access(target_space_id, &scope, encoded)?;
+        self.key_material
+            .store_kek(&scope, &kek)
+            .await
+            .map_err(map_encryption_error)?;
+        self.key_material
+            .store_keyslot(&keyslot)
+            .await
+            .map_err(map_encryption_error)?;
+
+        let repository =
+            self.key_epoch_repository
+                .as_ref()
+                .ok_or_else(|| SpaceAccessError::SecurityState {
+                    source: anyhow::anyhow!("control security repository is unavailable"),
+                })?;
+        let active_security_session = self.active_security_session.as_ref().ok_or_else(|| {
+            SpaceAccessError::SecurityState {
+                source: anyhow::anyhow!("active security session is unavailable"),
+            }
+        })?;
+        let epoch = active_security_session
+            .restore_from_repository(target_space_id, master_key, repository.as_ref())
+            .await
+            .map_err(map_active_security_session_error)?;
+        if epoch.is_none() {
+            return Err(SpaceAccessError::SecurityState {
+                source: anyhow::anyhow!("prepared control security material is missing"),
+            });
+        }
+        self.kek_observed.store(true, Ordering::Release);
+        Ok(())
+    }
+
     async fn prepare_target_access(
         &self,
         target_space_id: &SpaceId,

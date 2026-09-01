@@ -72,7 +72,8 @@ use uc_infra::security::{
     ActiveSpaceGenerationManifestStore, AdmissionKeyManager, Argon2PinHasher, Blake3Hasher,
     DecryptingClipboardRepresentationRepository, EncryptingClipboardEventWriter,
     EncryptingInboundReceiveCommit, ProfileContentKeyVault, ProfileLifecycleRepository,
-    Sha256IdentityFingerprintFactory, Sha256ShortCodeGenerator,
+    Sha256IdentityFingerprintFactory, Sha256ShortCodeGenerator, SpaceControlGeneration,
+    SpaceTransitionActivation, V3AdmissionSpaceTransition,
 };
 use uc_infra::settings::repository::FileSettingsRepository;
 use uc_infra::space::{
@@ -295,6 +296,7 @@ pub fn wire_dependencies_from_inputs(
     };
     let db_pool_for_profile_reset = db_pool.clone();
     let db_pool_for_space_transition = db_pool.clone();
+    let control_db_pool_for_space_transition = control_db_pool.clone();
     // Clone pool before infra layer consumes it — search bundle needs the same pool.
     let db_pool_for_search = db_pool.clone();
     // Config-migration export produces a consistent db snapshot via `VACUUM INTO`
@@ -368,12 +370,31 @@ pub fn wire_dependencies_from_inputs(
         Arc<dyn uc_application::deps::AdvanceMembershipBranchTransitionPort>,
         Arc<dyn InitialSpaceActivationPort>,
     ) = if storage.is_v3() {
-        let transition = Arc::new(uc_infra::security::FailClosedAdmissionSpaceTransition);
+        let control_generations = Arc::new(SpaceControlGeneration::new(
+            app_data_root.clone(),
+            Arc::clone(&space_access_adapter),
+            Arc::clone(&platform.current_profile),
+            Arc::clone(&admission_keys),
+        ));
+        let activation = Arc::new(SpaceTransitionActivation::new(
+            app_data_root.clone(),
+            control_db_pool_for_space_transition,
+            Arc::clone(&active_generation_manifest_store),
+            Arc::clone(&control_generations),
+            Arc::clone(&space_access_adapter),
+        ));
+        let admission_transition = Arc::new(V3AdmissionSpaceTransition::new(
+            profile_salt.clone(),
+            Arc::clone(&active_generation_manifest_store),
+            control_generations,
+            activation,
+        ));
+        let unsupported = Arc::new(uc_infra::security::FailClosedAdmissionSpaceTransition);
         (
-            transition.clone(),
-            transition.clone(),
-            transition.clone(),
-            transition,
+            admission_transition,
+            unsupported.clone(),
+            unsupported.clone(),
+            unsupported,
         )
     } else {
         let transition = Arc::new(uc_infra::security::DurableAdmissionSpaceTransition::new(

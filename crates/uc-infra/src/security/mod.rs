@@ -25,7 +25,9 @@ mod profile_storage_upgrade;
 mod secrets;
 mod space_admission_auth;
 mod space_control_generation;
+mod space_transition_activation;
 pub(crate) mod v1_aead;
+mod v3_admission_space_transition;
 
 pub use active_space_generation_manifest_store::{
     ActiveRuntimeManifest, ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore,
@@ -79,3 +81,7 @@ pub use space_admission_auth::{
 pub use space_control_generation::{
     PreparedSpaceControlGeneration, SpaceControlGeneration, SpaceControlGenerationError,
 };
+pub use space_transition_activation::{
+    SpaceTransitionActivation, SpaceTransitionActivationError, SpaceTransitionActivationOutcome,
+};
+pub use v3_admission_space_transition::V3AdmissionSpaceTransition;
