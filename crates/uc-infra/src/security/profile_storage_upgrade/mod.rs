@@ -1,12 +1,13 @@
 //! Profile V1/V2 到 V3 的唯一存储升级协调入口。
 //!
 //! 调用方只执行 [`ProfileStorageUpgrade::ensure_v3`]。跨进程互斥、source
-//! identity 绑定、耐久 journal、一致性 snapshot、target generation 与重启
-//! 复用都由本模块隐藏；后续切片会在同一 interface 内填入表拆分、转换、
-//! 验证、promotion 和清理。
+//! identity 绑定、耐久 journal、一致性 snapshot、target generation、primary
+//! payload 转换与重启复用都由本模块隐藏；后续切片会在同一 interface 内填入
+//! 专用字段/搜索转换、验证、promotion 和清理。
 
 mod journal;
 mod persistence;
+mod primary_payloads;
 mod target;
 
 use std::sync::Arc;
@@ -15,10 +16,12 @@ use tokio::sync::Mutex;
 
 use super::{
     ActiveSpaceGenerationManifestStore, ActiveSpaceGenerationManifestStoreError,
-    AdmissionKeyManager,
+    AdmissionKeyManager, ProfileContentKeyVault,
 };
+use crate::space::InMemorySession;
 use journal::{UpgradeJournalV1, UpgradePhaseV1};
 use persistence::{UpgradeLeaseResult, UpgradePersistence};
+use primary_payloads::PrimaryPayloadConverter;
 use target::TargetGenerationStager;
 
 /// 一次完整存储升级检查的稳定结果。
@@ -66,29 +69,37 @@ pub struct ProfileStorageUpgrade {
     persistence: UpgradePersistence,
     manifests: Arc<ActiveSpaceGenerationManifestStore>,
     target: TargetGenerationStager,
+    primary_payloads: PrimaryPayloadConverter,
     in_process: Mutex<()>,
 }
 
 impl ProfileStorageUpgrade {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         profile_root: std::path::PathBuf,
         source_pool: crate::db::pool::DbPool,
+        source_blob_root: std::path::PathBuf,
+        source_session: Arc<InMemorySession>,
+        vault: Arc<ProfileContentKeyVault>,
         keys: Arc<AdmissionKeyManager>,
         manifests: Arc<ActiveSpaceGenerationManifestStore>,
     ) -> Self {
+        let primary_payloads =
+            PrimaryPayloadConverter::new(source_blob_root, source_session, vault);
         Self {
             persistence: UpgradePersistence::new(profile_root.clone(), keys),
             manifests,
             target: TargetGenerationStager::new(profile_root, source_pool),
+            primary_payloads,
             in_process: Mutex::new(()),
         }
     }
 
     /// 确保当前 profile 使用完整 V3 存储布局。
     ///
-    /// V2 或空 profile 先创建加密 journal，下一次调用形成一致性 snapshot 并
-    /// 耐久进入 `TargetStaged`。每次调用最多推进一个 phase；不会修改 source、
-    /// 写 V3 payload 或提升 manifest。
+    /// 每次调用最多推进一个 phase。`StoresSeparated` 后会在独立原子目录中转换
+    /// inline/UCBL；所有阶段都保持 source 只读，完整专用字段转换前不会提升
+    /// manifest。
     pub async fn ensure_v3(
         &self,
     ) -> Result<ProfileStorageUpgradeOutcome, ProfileStorageUpgradeError> {
@@ -141,7 +152,22 @@ impl ProfileStorageUpgrade {
                 )?;
                 self.persistence.save_journal(&journal).await?;
             }
-            UpgradePhaseV1::StoresSeparated => self.target.verify_separated(&journal)?,
+            UpgradePhaseV1::StoresSeparated => {
+                let converted = self
+                    .primary_payloads
+                    .convert(&journal, &self.target)
+                    .await?;
+                journal.mark_primary_payloads_converted(
+                    converted.profile_database_digest,
+                    converted.blob_tree_digest,
+                    converted.inline_count,
+                    converted.blob_count,
+                )?;
+                self.persistence.save_journal(&journal).await?;
+            }
+            UpgradePhaseV1::PrimaryPayloadsConverted => {
+                self.primary_payloads.verify(&journal, &self.target).await?;
+            }
             UpgradePhaseV1::PayloadsConverted
             | UpgradePhaseV1::Verified
             | UpgradePhaseV1::Promoted

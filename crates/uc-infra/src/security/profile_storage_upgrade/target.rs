@@ -13,6 +13,7 @@ const PROFILE_DATA_DIRECTORY: &str = "profile-data-generations";
 const SPACE_CONTROL_DIRECTORY: &str = "space-control-generations";
 const TARGET_PROFILE_DATABASE: &str = "profile.sqlite";
 const TARGET_CONTROL_DATABASE: &str = "control.sqlite";
+pub(super) const PRIMARY_OUTPUT_DIRECTORY: &str = "v3-primary";
 const GENERATION_PATH_DOMAIN: &[u8] = b"uniclipboard/profile-upgrade-generation-path/v1\0";
 
 /// 升级器内部唯一拥有 source snapshot 与 target generation 物理布局的组件。
@@ -191,6 +192,21 @@ impl TargetGenerationStager {
         Ok(())
     }
 
+    pub(super) fn verify_source_revision(
+        &self,
+        journal: &UpgradeJournalV1,
+    ) -> Result<(), ProfileStorageUpgradeError> {
+        let revision = journal.source_database_revision().ok_or_else(|| {
+            ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::anyhow!("profile upgrade source revision is missing"),
+            }
+        })?;
+        if self.source_revision()? != revision {
+            return Err(ProfileStorageUpgradeError::SourceChanged);
+        }
+        Ok(())
+    }
+
     fn source_revision(&self) -> Result<u64, ProfileStorageUpgradeError> {
         self.source_pool.persistent_revision().map_err(|source| {
             ProfileStorageUpgradeError::Storage {
@@ -216,7 +232,7 @@ impl TargetGenerationStager {
         Ok(())
     }
 
-    fn paths(&self, journal: &UpgradeJournalV1) -> TargetPaths {
+    pub(super) fn paths(&self, journal: &UpgradeJournalV1) -> TargetPaths {
         let profile_directory = self
             .root
             .join(PROFILE_DATA_DIRECTORY)
@@ -231,15 +247,17 @@ impl TargetGenerationStager {
                 .join("profile-storage-upgrade")
                 .join("source.snapshot.tmp"),
             profile_database: profile_directory.join(TARGET_PROFILE_DATABASE),
+            primary_output: profile_directory.join(PRIMARY_OUTPUT_DIRECTORY),
             control_database: control_directory.join(TARGET_CONTROL_DATABASE),
         }
     }
 }
 
-struct TargetPaths {
-    scratch: PathBuf,
-    profile_database: PathBuf,
-    control_database: PathBuf,
+pub(super) struct TargetPaths {
+    pub(super) scratch: PathBuf,
+    pub(super) profile_database: PathBuf,
+    pub(super) primary_output: PathBuf,
+    pub(super) control_database: PathBuf,
 }
 
 fn generation_token(generation: &[u8; 16]) -> String {
@@ -336,7 +354,7 @@ fn validate_table_ownership(
     Ok(())
 }
 
-fn file_digest(path: &Path) -> Result<[u8; 32], ProfileStorageUpgradeError> {
+pub(super) fn file_digest(path: &Path) -> Result<[u8; 32], ProfileStorageUpgradeError> {
     let bytes = std::fs::read(path).map_err(storage_error)?;
     Ok(*blake3::hash(&bytes).as_bytes())
 }

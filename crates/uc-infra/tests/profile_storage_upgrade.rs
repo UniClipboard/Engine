@@ -8,9 +8,10 @@ use uc_core::membership::ActiveSpaceGenerationManifestV2;
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use uc_infra::db::pool::init_db_pool;
 use uc_infra::security::{
-    ActiveSpaceGenerationManifestStore, AdmissionKeyManager, ProfileStorageUpgrade,
-    ProfileStorageUpgradeError, ProfileStorageUpgradeOutcome,
+    ActiveSpaceGenerationManifestStore, AdmissionKeyManager, ProfileContentKeyVault,
+    ProfileStorageUpgrade, ProfileStorageUpgradeError, ProfileStorageUpgradeOutcome,
 };
+use uc_infra::space::InMemorySession;
 
 #[derive(Default)]
 struct MemorySecureStorage(Mutex<BTreeMap<String, Vec<u8>>>);
@@ -62,13 +63,37 @@ fn named_file(root: &Path, name: &str) -> PathBuf {
 
 fn new_upgrade(
     root: &Path,
+    secure_storage: Arc<dyn SecureStoragePort>,
     keys: Arc<AdmissionKeyManager>,
     manifests: Arc<ActiveSpaceGenerationManifestStore>,
 ) -> ProfileStorageUpgrade {
     std::fs::create_dir_all(root).unwrap();
     let database = root.join("source.sqlite");
     let source_pool = init_db_pool(database.to_str().unwrap()).unwrap();
-    ProfileStorageUpgrade::new(root.to_path_buf(), source_pool, keys, manifests)
+    new_upgrade_from_pool(root, source_pool, secure_storage, keys, manifests)
+}
+
+fn new_upgrade_from_pool(
+    root: &Path,
+    source_pool: uc_infra::db::pool::DbPool,
+    secure_storage: Arc<dyn SecureStoragePort>,
+    keys: Arc<AdmissionKeyManager>,
+    manifests: Arc<ActiveSpaceGenerationManifestStore>,
+) -> ProfileStorageUpgrade {
+    let vault = Arc::new(ProfileContentKeyVault::new(
+        root.to_path_buf(),
+        secure_storage,
+        [0xF1; 16],
+    ));
+    ProfileStorageUpgrade::new(
+        root.to_path_buf(),
+        source_pool,
+        root.join("blobs"),
+        Arc::new(InMemorySession::new()),
+        vault,
+        keys,
+        manifests,
+    )
 }
 
 #[tokio::test]
@@ -76,7 +101,7 @@ async fn v2_upgrade_coordination_is_durable_idempotent_and_encrypted() {
     let directory = tempfile::tempdir().unwrap();
     let vault = directory.path().join("vault");
     let secure_storage = Arc::new(MemorySecureStorage::default());
-    let keys = Arc::new(AdmissionKeyManager::new(secure_storage, [0x11; 16]));
+    let keys = Arc::new(AdmissionKeyManager::new(secure_storage.clone(), [0x11; 16]));
     let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
         vault.clone(),
         Arc::clone(&keys),
@@ -90,7 +115,16 @@ async fn v2_upgrade_coordination_is_durable_idempotent_and_encrypted() {
     .unwrap();
     manifests.promote(&source).await.unwrap();
 
-    let upgrade = new_upgrade(&vault, Arc::clone(&keys), Arc::clone(&manifests));
+    let upgrade = new_upgrade(
+        &vault,
+        secure_storage.clone(),
+        Arc::clone(&keys),
+        Arc::clone(&manifests),
+    );
+    assert_eq!(
+        upgrade.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Pending
+    );
     assert_eq!(
         upgrade.ensure_v3().await.unwrap(),
         ProfileStorageUpgradeOutcome::Pending
@@ -117,7 +151,7 @@ async fn v2_upgrade_coordination_is_durable_idempotent_and_encrypted() {
         }
     }
 
-    let reopened = new_upgrade(&vault, keys, manifests);
+    let reopened = new_upgrade(&vault, secure_storage, keys, manifests);
     assert_eq!(
         reopened.ensure_v3().await.unwrap(),
         ProfileStorageUpgradeOutcome::Pending
@@ -130,13 +164,22 @@ async fn empty_profile_uses_the_same_durable_recovery_path() {
     let directory = tempfile::tempdir().unwrap();
     let vault = directory.path().join("vault");
     let secure_storage = Arc::new(MemorySecureStorage::default());
-    let keys = Arc::new(AdmissionKeyManager::new(secure_storage, [0x31; 16]));
+    let keys = Arc::new(AdmissionKeyManager::new(secure_storage.clone(), [0x31; 16]));
     let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
         vault.clone(),
         Arc::clone(&keys),
     ));
 
-    let upgrade = new_upgrade(&vault, Arc::clone(&keys), Arc::clone(&manifests));
+    let upgrade = new_upgrade(
+        &vault,
+        secure_storage.clone(),
+        Arc::clone(&keys),
+        Arc::clone(&manifests),
+    );
+    assert_eq!(
+        upgrade.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Pending
+    );
     assert_eq!(
         upgrade.ensure_v3().await.unwrap(),
         ProfileStorageUpgradeOutcome::Pending
@@ -151,7 +194,7 @@ async fn empty_profile_uses_the_same_durable_recovery_path() {
     );
     let first_files = regular_files(&vault);
 
-    let reopened = new_upgrade(&vault, keys, manifests);
+    let reopened = new_upgrade(&vault, secure_storage, keys, manifests);
     assert_eq!(
         reopened.ensure_v3().await.unwrap(),
         ProfileStorageUpgradeOutcome::Pending
@@ -174,12 +217,12 @@ async fn held_profile_lease_returns_busy_without_creating_a_journal() {
     lease.try_lock().unwrap();
 
     let secure_storage = Arc::new(MemorySecureStorage::default());
-    let keys = Arc::new(AdmissionKeyManager::new(secure_storage, [0x41; 16]));
+    let keys = Arc::new(AdmissionKeyManager::new(secure_storage.clone(), [0x41; 16]));
     let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
         vault.clone(),
         Arc::clone(&keys),
     ));
-    let upgrade = new_upgrade(&vault, keys, manifests);
+    let upgrade = new_upgrade(&vault, secure_storage, keys, manifests);
 
     assert_eq!(
         upgrade.ensure_v3().await.unwrap(),
@@ -193,19 +236,24 @@ async fn tampered_journal_fails_closed_with_a_source_error() {
     let directory = tempfile::tempdir().unwrap();
     let vault = directory.path().join("vault");
     let secure_storage = Arc::new(MemorySecureStorage::default());
-    let keys = Arc::new(AdmissionKeyManager::new(secure_storage, [0x51; 16]));
+    let keys = Arc::new(AdmissionKeyManager::new(secure_storage.clone(), [0x51; 16]));
     let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
         vault.clone(),
         Arc::clone(&keys),
     ));
-    let upgrade = new_upgrade(&vault, Arc::clone(&keys), Arc::clone(&manifests));
+    let upgrade = new_upgrade(
+        &vault,
+        secure_storage.clone(),
+        Arc::clone(&keys),
+        Arc::clone(&manifests),
+    );
     assert_eq!(
         upgrade.ensure_v3().await.unwrap(),
         ProfileStorageUpgradeOutcome::Pending
     );
     std::fs::write(named_file(&vault, ".journal-v1"), b"tampered-journal").unwrap();
 
-    let reopened = new_upgrade(&vault, keys, manifests);
+    let reopened = new_upgrade(&vault, secure_storage, keys, manifests);
     let error = reopened.ensure_v3().await.unwrap_err();
     assert!(matches!(error, ProfileStorageUpgradeError::Security { .. }));
     assert!(std::error::Error::source(&error).is_some());
@@ -216,7 +264,7 @@ async fn changed_v2_source_is_rejected_without_replacing_the_journal() {
     let directory = tempfile::tempdir().unwrap();
     let vault = directory.path().join("vault");
     let secure_storage = Arc::new(MemorySecureStorage::default());
-    let keys = Arc::new(AdmissionKeyManager::new(secure_storage, [0x61; 16]));
+    let keys = Arc::new(AdmissionKeyManager::new(secure_storage.clone(), [0x61; 16]));
     let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
         vault.clone(),
         Arc::clone(&keys),
@@ -229,7 +277,12 @@ async fn changed_v2_source_is_rejected_without_replacing_the_journal() {
     )
     .unwrap();
     manifests.promote(&source).await.unwrap();
-    let upgrade = new_upgrade(&vault, Arc::clone(&keys), Arc::clone(&manifests));
+    let upgrade = new_upgrade(
+        &vault,
+        secure_storage.clone(),
+        Arc::clone(&keys),
+        Arc::clone(&manifests),
+    );
     assert_eq!(
         upgrade.ensure_v3().await.unwrap(),
         ProfileStorageUpgradeOutcome::Pending
@@ -246,7 +299,7 @@ async fn changed_v2_source_is_rejected_without_replacing_the_journal() {
     .unwrap();
     manifests.promote(&changed).await.unwrap();
 
-    let reopened = new_upgrade(&vault, keys, manifests);
+    let reopened = new_upgrade(&vault, secure_storage, keys, manifests);
     assert!(matches!(
         reopened.ensure_v3().await.unwrap_err(),
         ProfileStorageUpgradeError::SourceChanged
@@ -271,7 +324,7 @@ async fn source_snapshot_stages_one_durable_profile_and_control_target() {
     .unwrap();
     let source_before = std::fs::read(&source_database).unwrap();
     let secure_storage = Arc::new(MemorySecureStorage::default());
-    let keys = Arc::new(AdmissionKeyManager::new(secure_storage, [0x81; 16]));
+    let keys = Arc::new(AdmissionKeyManager::new(secure_storage.clone(), [0x81; 16]));
     let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
         vault,
         Arc::clone(&keys),
@@ -284,9 +337,10 @@ async fn source_snapshot_stages_one_durable_profile_and_control_target() {
     )
     .unwrap();
     manifests.promote(&source).await.unwrap();
-    let upgrade = ProfileStorageUpgrade::new(
-        root.clone(),
+    let upgrade = new_upgrade_from_pool(
+        &root,
         source_pool,
+        secure_storage,
         Arc::clone(&keys),
         Arc::clone(&manifests),
     );
@@ -363,7 +417,7 @@ async fn target_stores_keep_only_their_declared_rows() {
     .execute(&mut source_pool.get().unwrap())
     .unwrap();
     let secure_storage = Arc::new(MemorySecureStorage::default());
-    let keys = Arc::new(AdmissionKeyManager::new(secure_storage, [0x91; 16]));
+    let keys = Arc::new(AdmissionKeyManager::new(secure_storage.clone(), [0x91; 16]));
     let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
         vault,
         Arc::clone(&keys),
@@ -376,7 +430,7 @@ async fn target_stores_keep_only_their_declared_rows() {
     )
     .unwrap();
     manifests.promote(&source).await.unwrap();
-    let upgrade = ProfileStorageUpgrade::new(root.clone(), source_pool, keys, manifests);
+    let upgrade = new_upgrade_from_pool(&root, source_pool, secure_storage, keys, manifests);
 
     for _ in 0..3 {
         assert_eq!(
@@ -404,12 +458,12 @@ async fn an_unowned_source_table_blocks_store_separation() {
         .execute(&mut source_pool.get().unwrap())
         .unwrap();
     let secure_storage = Arc::new(MemorySecureStorage::default());
-    let keys = Arc::new(AdmissionKeyManager::new(secure_storage, [0xA1; 16]));
+    let keys = Arc::new(AdmissionKeyManager::new(secure_storage.clone(), [0xA1; 16]));
     let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
         root.join("vault"),
         Arc::clone(&keys),
     ));
-    let upgrade = ProfileStorageUpgrade::new(root, source_pool, keys, manifests);
+    let upgrade = new_upgrade_from_pool(&root, source_pool, secure_storage, keys, manifests);
 
     assert_eq!(
         upgrade.ensure_v3().await.unwrap(),
