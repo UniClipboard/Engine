@@ -2,8 +2,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use diesel::RunQueryDsl as _;
 use uc_core::file_transfer::FileTransferEvent;
 use uc_core::ids::{DeviceId, EntryId, SpaceId};
+use uc_core::ports::clipboard::EntryFileSetRepositoryPort;
 use uc_core::ports::{
     AdvanceActiveClipboardPort, GetDirectoryPublishRecordPort, GetReceiveArtifactRecordPort,
     LoadMobileConsumableClipboardPort, PublishPhase, ReceiveArtifact, ReceiveArtifactOwnership,
@@ -17,9 +19,15 @@ use crate::db::repositories::entry_file_set_cipher::V3EntryFileSetPathCipher;
 use crate::db::repositories::receive_artifact_cipher::V3ReceiveArtifactCipher;
 use crate::db::repositories::{
     DieselActiveClipboardRegisterRepository, DieselDirectoryPublishLogRepository,
-    DieselReceiveArtifactLogRepository,
+    DieselEntryFileSetRepository, DieselReceiveArtifactLogRepository,
 };
-use crate::db::{executor::DieselSqliteExecutor, pool::init_db_pool};
+use crate::db::{
+    executor::DieselSqliteExecutor,
+    models::{NewClipboardEntryRow, NewClipboardEventRow},
+    pool::init_db_pool,
+    ports::DbExecutor,
+    schema::{clipboard_entry, clipboard_event},
+};
 use crate::file_transfer::persistence_cipher::{TransferMetadata, V3TransferPersistenceCipher};
 use crate::security::{ContentProtection, MasterKey, ProfileContentKeyVault};
 use crate::space::InMemorySession;
@@ -210,6 +218,58 @@ async fn specialized_repositories_use_only_the_selected_v3_strategy() {
         ))
     );
 
+    let seed = DieselSqliteExecutor::new(pool.clone());
+    seed.run(|connection| {
+        diesel::insert_into(clipboard_event::table)
+            .values(&NewClipboardEventRow {
+                event_id: "event-v3".to_owned(),
+                captured_at_ms: 10,
+                source_device: "device-v3".to_owned(),
+                snapshot_hash: "snapshot-v3".to_owned(),
+            })
+            .execute(connection)?;
+        diesel::insert_into(clipboard_entry::table)
+            .values(&NewClipboardEntryRow {
+                entry_id: "entry-v3".to_owned(),
+                event_id: "event-v3".to_owned(),
+                created_at_ms: 10,
+                active_time_ms: 10,
+                total_size: 0,
+                pinned: false,
+                delivery_tracked: true,
+                is_favorited: false,
+                content_category: "file".to_owned(),
+            })
+            .execute(connection)?;
+        Ok(())
+    })
+    .unwrap();
+    let file_set = DieselEntryFileSetRepository::new_v3(
+        DieselSqliteExecutor::new(pool.clone()),
+        Arc::clone(&protection),
+    );
+    let file_set_value = uc_core::clipboard::EntryFileSet {
+        lines: vec![uc_core::clipboard::EntryFileSetLine {
+            line_index: 0,
+            original_text: "private-file-set-original".to_owned(),
+            member_location: Some(uc_core::clipboard::FileSetMemberLocation {
+                root_index: 0,
+                root_name: "private-root-name".to_owned(),
+                relative_path: "private-relative-path".to_owned(),
+                kind: uc_core::clipboard::FileSetMemberKind::File,
+            }),
+            kind: uc_core::clipboard::EntryFileSetLineKind::NonFile,
+        }],
+    };
+    file_set
+        .save(&EntryId::from("entry-v3"), &file_set_value)
+        .await
+        .unwrap();
+    assert_eq!(
+        file_set.load(&EntryId::from("entry-v3")).await.unwrap(),
+        Some(file_set_value)
+    );
+
     let publish = DieselDirectoryPublishLogRepository::new_v3(
         DieselSqliteExecutor::new(pool.clone()),
         Arc::clone(&protection),
@@ -257,6 +317,7 @@ async fn specialized_repositories_use_only_the_selected_v3_strategy() {
     );
 
     drop(active);
+    drop(file_set);
     drop(publish);
     drop(receive);
     let bytes = std::fs::read(database).unwrap();
@@ -265,6 +326,9 @@ async fn specialized_repositories_use_only_the_selected_v3_strategy() {
         b"private-final",
         b"private-receive-stage",
         b"private-receive-final",
+        b"private-file-set-original",
+        b"private-root-name",
+        b"private-relative-path",
     ] {
         assert!(!bytes
             .windows(plaintext.len())

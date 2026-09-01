@@ -28,10 +28,13 @@ use uc_core::ports::clipboard::EntryFileSetRepositoryPort;
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::{DeriveSpaceSubkeyPort, SpaceAccessError};
 
-use super::entry_file_set_cipher::{EntryFileSetPathCipher, FILE_SET_KEY_INFO};
+use super::entry_file_set_cipher::{
+    EntryFileSetPathCipher, V3EntryFileSetPathCipher, FILE_SET_KEY_INFO,
+};
 use crate::db::models::entry_file_set::{EntryFileSetRow, NewEntryFileSetRow};
 use crate::db::ports::DbExecutor;
 use crate::db::schema::entry_file_set;
+use crate::security::ContentProtection;
 
 /// Rows per multi-row INSERT statement. `NewEntryFileSetRow` binds 12 columns,
 /// so 80 rows = 960 bound params — safely under SQLite's historical
@@ -43,12 +46,15 @@ const ENTRY_FILE_SET_INSERT_CHUNK: usize = 80;
 /// from every other subkey label so this key never doubles for another purpose.
 pub struct DieselEntryFileSetRepository<E> {
     executor: E,
-    /// Derives the per-session subkey that seals the path columns. Held rather
-    /// than a fixed key so a lock/unlock or profile switch always re-derives.
-    derive_subkey: Arc<dyn DeriveSpaceSubkeyPort>,
-    /// Salts the subkey by the active profile (defense-in-depth alongside the
-    /// per-profile database file).
-    current_profile: Arc<dyn CurrentProfilePort>,
+    protection: EntryFileSetProtection,
+}
+
+pub(super) enum EntryFileSetProtection {
+    Legacy {
+        derive_subkey: Arc<dyn DeriveSpaceSubkeyPort>,
+        current_profile: Arc<dyn CurrentProfilePort>,
+    },
+    V3(V3EntryFileSetPathCipher),
 }
 
 impl<E> DieselEntryFileSetRepository<E> {
@@ -59,19 +65,77 @@ impl<E> DieselEntryFileSetRepository<E> {
     ) -> Self {
         Self {
             executor,
+            protection: EntryFileSetProtection::legacy(derive_subkey, current_profile),
+        }
+    }
+
+    pub fn new_v3(executor: E, protection: Arc<ContentProtection>) -> Self {
+        Self {
+            executor,
+            protection: EntryFileSetProtection::v3(protection),
+        }
+    }
+}
+
+impl EntryFileSetProtection {
+    pub(super) fn legacy(
+        derive_subkey: Arc<dyn DeriveSpaceSubkeyPort>,
+        current_profile: Arc<dyn CurrentProfilePort>,
+    ) -> Self {
+        Self::Legacy {
             derive_subkey,
             current_profile,
         }
     }
 
-    /// Derive the path-column cipher for the currently unlocked session.
-    ///
-    /// Returns `EntryFileSetError::Storage` when the session is locked or the
-    /// profile is unavailable — the manifest is only read/written while
-    /// unlocked, and the dispatch reader treats a load error as "no manifest"
-    /// and falls back to snapshot re-parse.
-    async fn cipher(&self) -> Result<EntryFileSetPathCipher, EntryFileSetError> {
-        derive_file_set_cipher(self.derive_subkey.as_ref(), self.current_profile.as_ref()).await
+    pub(super) fn v3(protection: Arc<ContentProtection>) -> Self {
+        Self::V3(V3EntryFileSetPathCipher::new(protection))
+    }
+
+    pub(super) async fn encode_rows(
+        &self,
+        entry_id: &EntryId,
+        file_set: &EntryFileSet,
+    ) -> Result<Vec<NewEntryFileSetRow>, EntryFileSetError> {
+        match self {
+            Self::Legacy {
+                derive_subkey,
+                current_profile,
+            } => {
+                let cipher =
+                    derive_file_set_cipher(derive_subkey.as_ref(), current_profile.as_ref())
+                        .await?;
+                encode_file_set_rows(&cipher, entry_id, file_set)
+            }
+            Self::V3(cipher) => encode_v3_file_set_rows(cipher, entry_id, file_set).await,
+        }
+    }
+
+    async fn decode_rows(
+        &self,
+        entry_id: &EntryId,
+        rows: Vec<EntryFileSetRow>,
+    ) -> Result<Vec<EntryFileSetLine>, EntryFileSetError> {
+        match self {
+            Self::Legacy {
+                derive_subkey,
+                current_profile,
+            } => {
+                let cipher =
+                    derive_file_set_cipher(derive_subkey.as_ref(), current_profile.as_ref())
+                        .await?;
+                rows.into_iter()
+                    .map(|row| decode_row(&cipher, entry_id, row))
+                    .collect()
+            }
+            Self::V3(cipher) => {
+                let mut decoded = Vec::with_capacity(rows.len());
+                for row in rows {
+                    decoded.push(decode_v3_row(cipher, entry_id, row).await?);
+                }
+                Ok(decoded)
+            }
+        }
     }
 }
 
@@ -125,6 +189,72 @@ fn encode_line(
     entry_id: &EntryId,
     line: &EntryFileSetLine,
 ) -> Result<NewEntryFileSetRow, EntryFileSetError> {
+    let original_text_ct = cipher
+        .seal_original_text(entry_id, line.line_index, &line.original_text)
+        .map_err(|e| EntryFileSetError::Storage(format!("seal original_text: {e}")))?;
+    let encrypted_location = match &line.member_location {
+        Some(location) => Some((
+            location.root_index,
+            location.kind.as_tag().to_string(),
+            cipher
+                .seal_relative_path(entry_id, line.line_index, &location.relative_path)
+                .map_err(|e| EntryFileSetError::Storage(format!("seal relative_path: {e}")))?,
+            cipher
+                .seal_root_name(entry_id, line.line_index, &location.root_name)
+                .map_err(|e| EntryFileSetError::Storage(format!("seal root_name: {e}")))?,
+        )),
+        None => None,
+    };
+    Ok(assemble_encoded_line(
+        entry_id,
+        line,
+        original_text_ct,
+        encrypted_location,
+    ))
+}
+
+async fn encode_v3_file_set_rows(
+    cipher: &V3EntryFileSetPathCipher,
+    entry_id: &EntryId,
+    file_set: &EntryFileSet,
+) -> Result<Vec<NewEntryFileSetRow>, EntryFileSetError> {
+    let mut rows = Vec::with_capacity(file_set.lines.len());
+    for line in &file_set.lines {
+        let original_text_ct = cipher
+            .seal_original_text(entry_id, line.line_index, &line.original_text)
+            .await
+            .map_err(|e| EntryFileSetError::Storage(format!("seal original_text: {e}")))?;
+        let encrypted_location = match &line.member_location {
+            Some(location) => Some((
+                location.root_index,
+                location.kind.as_tag().to_string(),
+                cipher
+                    .seal_relative_path(entry_id, line.line_index, &location.relative_path)
+                    .await
+                    .map_err(|e| EntryFileSetError::Storage(format!("seal relative_path: {e}")))?,
+                cipher
+                    .seal_root_name(entry_id, line.line_index, &location.root_name)
+                    .await
+                    .map_err(|e| EntryFileSetError::Storage(format!("seal root_name: {e}")))?,
+            )),
+            None => None,
+        };
+        rows.push(assemble_encoded_line(
+            entry_id,
+            line,
+            original_text_ct,
+            encrypted_location,
+        ));
+    }
+    Ok(rows)
+}
+
+fn assemble_encoded_line(
+    entry_id: &EntryId,
+    line: &EntryFileSetLine,
+    original_text_ct: Vec<u8>,
+    encrypted_location: Option<(i64, String, Vec<u8>, Vec<u8>)>,
+) -> NewEntryFileSetRow {
     let (kind, content_hash, blob_id, size_bytes, exclude_reason) = match &line.kind {
         EntryFileSetLineKind::File {
             content_hash,
@@ -152,28 +282,17 @@ fn encode_line(
         }
     };
 
-    let original_text_ct = cipher
-        .seal_original_text(entry_id, line.line_index, &line.original_text)
-        .map_err(|e| EntryFileSetError::Storage(format!("seal original_text: {e}")))?;
-    let (root_index, relative_path_ct, kind_tag, root_name_ct) = match &line.member_location {
-        Some(location) => {
-            let relative_path_ct = cipher
-                .seal_relative_path(entry_id, line.line_index, &location.relative_path)
-                .map_err(|e| EntryFileSetError::Storage(format!("seal relative_path: {e}")))?;
-            let root_name_ct = cipher
-                .seal_root_name(entry_id, line.line_index, &location.root_name)
-                .map_err(|e| EntryFileSetError::Storage(format!("seal root_name: {e}")))?;
-            (
-                Some(location.root_index),
-                Some(relative_path_ct),
-                Some(location.kind.as_tag().to_string()),
-                Some(root_name_ct),
-            )
-        }
+    let (root_index, relative_path_ct, kind_tag, root_name_ct) = match encrypted_location {
+        Some((root_index, kind_tag, relative_path_ct, root_name_ct)) => (
+            Some(root_index),
+            Some(relative_path_ct),
+            Some(kind_tag),
+            Some(root_name_ct),
+        ),
         None => (None, None, None, None),
     };
 
-    Ok(NewEntryFileSetRow {
+    NewEntryFileSetRow {
         entry_id: entry_id.to_string(),
         line_index: line.line_index,
         original_text_ct: Some(original_text_ct),
@@ -186,15 +305,15 @@ fn encode_line(
         relative_path_ct,
         kind_tag,
         root_name_ct,
-    })
+    }
 }
 
 fn decode_row(
     cipher: &EntryFileSetPathCipher,
     entry_id: &EntryId,
-    row: EntryFileSetRow,
+    mut row: EntryFileSetRow,
 ) -> Result<EntryFileSetLine, EntryFileSetError> {
-    let original_text_ct = row.original_text_ct.ok_or_else(|| {
+    let original_text_ct = row.original_text_ct.take().ok_or_else(|| {
         EntryFileSetError::Storage("file-set row missing sealed original_text".into())
     })?;
     let original_text = cipher
@@ -202,9 +321,9 @@ fn decode_row(
         .map_err(|e| EntryFileSetError::Storage(format!("open original_text: {e}")))?;
     let member_location = match (
         row.root_index,
-        row.relative_path_ct,
-        row.kind_tag,
-        row.root_name_ct,
+        row.relative_path_ct.take(),
+        row.kind_tag.take(),
+        row.root_name_ct.take(),
     ) {
         (None, None, None, None) => None,
         (Some(root_index), Some(relative_path_ct), Some(kind_tag), Some(root_name_ct)) => {
@@ -231,6 +350,62 @@ fn decode_row(
         }
     };
 
+    finish_decoded_row(row, original_text, member_location)
+}
+
+async fn decode_v3_row(
+    cipher: &V3EntryFileSetPathCipher,
+    entry_id: &EntryId,
+    mut row: EntryFileSetRow,
+) -> Result<EntryFileSetLine, EntryFileSetError> {
+    let original_text_ct = row.original_text_ct.take().ok_or_else(|| {
+        EntryFileSetError::Storage("file-set row missing sealed original_text".into())
+    })?;
+    let original_text = cipher
+        .open_original_text(entry_id, row.line_index, &original_text_ct)
+        .await
+        .map_err(|e| EntryFileSetError::Storage(format!("open original_text: {e}")))?;
+    let member_location = match (
+        row.root_index,
+        row.relative_path_ct.take(),
+        row.kind_tag.take(),
+        row.root_name_ct.take(),
+    ) {
+        (None, None, None, None) => None,
+        (Some(root_index), Some(relative_path_ct), Some(kind_tag), Some(root_name_ct)) => {
+            let relative_path = cipher
+                .open_relative_path(entry_id, row.line_index, &relative_path_ct)
+                .await
+                .map_err(|e| EntryFileSetError::Storage(format!("open relative_path: {e}")))?;
+            let kind = FileSetMemberKind::from_tag(&kind_tag).ok_or_else(|| {
+                EntryFileSetError::Storage(format!("unknown member kind tag: {kind_tag}"))
+            })?;
+            let root_name = cipher
+                .open_root_name(entry_id, row.line_index, &root_name_ct)
+                .await
+                .map_err(|e| EntryFileSetError::Storage(format!("open root_name: {e}")))?;
+            Some(FileSetMemberLocation {
+                root_index,
+                root_name,
+                relative_path,
+                kind,
+            })
+        }
+        _ => {
+            return Err(EntryFileSetError::Storage(
+                "file-set row has incomplete member location".into(),
+            ));
+        }
+    };
+
+    finish_decoded_row(row, original_text, member_location)
+}
+
+fn finish_decoded_row(
+    row: EntryFileSetRow,
+    original_text: String,
+    member_location: Option<FileSetMemberLocation>,
+) -> Result<EntryFileSetLine, EntryFileSetError> {
     let kind = match row.kind.as_str() {
         kind_codec::FILE => {
             let content_hash = row.content_hash.ok_or_else(|| {
@@ -319,8 +494,7 @@ where
         let new_rows: Vec<NewEntryFileSetRow> = if file_set.lines.is_empty() {
             Vec::new()
         } else {
-            let cipher = self.cipher().await?;
-            encode_file_set_rows(&cipher, entry_id, file_set)?
+            self.protection.encode_rows(entry_id, file_set).await?
         };
 
         let entry_id_str = entry_id.to_string();
@@ -358,11 +532,7 @@ where
             return Ok(None);
         }
 
-        let cipher = self.cipher().await?;
-        let lines = rows
-            .into_iter()
-            .map(|row| decode_row(&cipher, entry_id, row))
-            .collect::<Result<Vec<_>, _>>()?;
+        let lines = self.protection.decode_rows(entry_id, rows).await?;
         Ok(Some(EntryFileSet { lines }))
     }
 }
