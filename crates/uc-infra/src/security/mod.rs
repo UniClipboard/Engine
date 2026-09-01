@@ -25,7 +25,8 @@ mod space_admission_auth;
 pub(crate) mod v1_aead;
 
 pub use active_space_generation_manifest_store::{
-    ActiveSpaceGenerationManifestStore, ActiveSpaceGenerationManifestStoreError,
+    ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore,
+    ActiveSpaceGenerationManifestStoreError,
 };
 pub use admission_key_manager::{
     AdmissionKeyError, AdmissionKeyManager, WrappedSpaceAdmissionDataKey,
