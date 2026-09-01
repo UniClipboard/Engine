@@ -250,6 +250,40 @@ async fn v3_cross_space_switches_only_the_control_generation() {
     assert!(!source_layout.control_database().exists());
     assert_eq!(session.current_space_id().unwrap(), target_space);
 
+    let return_access = PrepareAdmissionTargetAccessPort::prepare_target_access(
+        access.as_ref(),
+        &source_space,
+        &Passphrase::new("return passphrase"),
+    )
+    .await
+    .unwrap();
+    let return_input = preparation_with_seed(&source_space, return_access.into_bytes(), 0x81);
+    let return_transition = transitions.prepare_if_needed(&return_input).await.unwrap();
+    let AdmissionSpaceTransitionV2::CrossSpaceControl(return_prepared) = &return_transition else {
+        panic!("expected the B to A transition to remain control-only");
+    };
+    assert_eq!(return_prepared.profile_data_generation, [0x32; 16]);
+    let return_result = finish_transition(&transitions, return_transition).await;
+    assert!(matches!(
+        return_result,
+        AdmissionSpaceTransitionResultV2::CrossSpaceControl(_)
+    ));
+
+    let Some(ActiveRuntimeManifest::V3(returned)) = manifests.load_runtime().await.unwrap() else {
+        panic!("the returned manifest is not V3");
+    };
+    assert_eq!(returned.layout().space_id(), &source_space);
+    assert_eq!(returned.layout().profile_data_generation(), &[0x32; 16]);
+    assert_eq!(session.current_space_id().unwrap(), source_space);
+    assert_eq!(
+        std::fs::read(source_layout.profile_database()).unwrap(),
+        b"unchanged profile database"
+    );
+    assert_eq!(
+        std::fs::read(source_layout.blob_root().join("history.ucbl")).unwrap(),
+        b"unchanged encrypted history"
+    );
+
     let forbidden = [
         "source-final.sqlite",
         "source-backup.sqlite",
@@ -520,6 +554,18 @@ async fn advance_to(
     next
 }
 
+async fn finish_transition(
+    transitions: &V3AdmissionSpaceTransition,
+    mut transition: AdmissionSpaceTransitionV2,
+) -> AdmissionSpaceTransitionResultV2 {
+    loop {
+        match transitions.advance(&transition).await.unwrap() {
+            AdmissionSpaceTransitionStepV2::Advanced(next) => transition = next,
+            AdmissionSpaceTransitionStepV2::Finished(result) => return result,
+        }
+    }
+}
+
 fn assert_no_forbidden_paths(root: &std::path::Path, forbidden: &[&str]) {
     for entry in std::fs::read_dir(root).unwrap().filter_map(Result::ok) {
         assert!(!forbidden.contains(&entry.file_name().to_string_lossy().as_ref()));
@@ -533,13 +579,22 @@ fn preparation(
     space: &SpaceId,
     target_access_state: Vec<u8>,
 ) -> AdmissionSpaceTransitionPreparationV2 {
-    let attempt = [0x41; 32];
+    preparation_with_seed(space, target_access_state, 0x41)
+}
+
+fn preparation_with_seed(
+    space: &SpaceId,
+    target_access_state: Vec<u8>,
+    seed: u8,
+) -> AdmissionSpaceTransitionPreparationV2 {
+    let attempt = [seed; 32];
+    let content_key_id = format!("target-content-key-{seed:02x}");
     let catalog = AdmissionContentKeyCatalogV1::new(
-        "target-content-key",
+        content_key_id.clone(),
         1,
         vec![
             AdmissionContentKeyEntryV1::new("legacy-v1", 0, vec![0x42; 32]).unwrap(),
-            AdmissionContentKeyEntryV1::new("target-content-key", 1, vec![0x43; 32]).unwrap(),
+            AdmissionContentKeyEntryV1::new(content_key_id, 1, vec![seed; 32]).unwrap(),
         ],
     )
     .unwrap();
@@ -569,7 +624,7 @@ fn preparation(
         .unwrap(),
         target_membership_history: b"verified membership history".to_vec(),
         target_security_state: b"verified MLS security state".to_vec(),
-        target_protection_group_id: "target-protection-group".to_owned(),
+        target_protection_group_id: format!("target-protection-group-{seed:02x}"),
         target_key_catalog: catalog.encode().unwrap(),
         local_device_id: DeviceId::new("target-local"),
         target_relationships: relationships(),

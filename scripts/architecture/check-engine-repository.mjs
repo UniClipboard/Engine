@@ -387,6 +387,76 @@ function checkPlaintextScanner() {
   return problems
 }
 
+function checkProfileStorageGenerationOwnership(sources) {
+  const problems = []
+  const v3TransitionPath =
+    'crates/uc-infra/src/security/v3_admission_space_transition.rs'
+  const forbiddenV3Dependencies = [
+    'ProfileStorageUpgrade',
+    'profile_storage_upgrade',
+    'LegacyPayloadProtection',
+    'BlobCipherAdapter',
+    'EncryptedBlobStore',
+    'source_cipher',
+    'target_cipher',
+    'payload_rewrap',
+    'rewrap_finalized_source',
+    'ProfileContentKeyVault',
+    'ClipboardDispatch',
+    'EntryDelivery',
+    'Outbox',
+  ]
+  for (const marker of forbiddenV3Dependencies) {
+    if (sources.v3AdmissionTransition.includes(marker)) {
+      addProblem(
+        problems,
+        'profile storage generation ownership',
+        `${v3TransitionPath} depends on forbidden payload-upgrade knowledge: ${marker}`
+      )
+    }
+  }
+
+  const forbiddenCoordinatorDetails = [
+    'UpgradePhaseV1',
+    'TargetGenerationStager',
+    'PrimaryPayloadConverter',
+    'DerivedPayloadConverter',
+    'profile_storage_upgrade::',
+  ]
+  for (const [owner, source] of [
+    ['uc-application', sources.application],
+    ['uc-engine', sources.engineRuntime],
+  ]) {
+    for (const marker of forbiddenCoordinatorDetails) {
+      if (source.includes(marker)) {
+        addProblem(
+          problems,
+          'profile storage generation ownership',
+          `${owner} combines private profile-upgrade steps through ${marker}`
+        )
+      }
+    }
+  }
+
+  if (!sources.engineWiring.includes('.ensure_v3()')) {
+    addProblem(
+      problems,
+      'profile storage generation ownership',
+      'uc-engine must enter profile storage upgrade through the complete ensure_v3 operation'
+    )
+  }
+  for (const marker of ['ProfileContentKeyVault', 'profile_content_key_vault']) {
+    if (sources.network.includes(marker)) {
+      addProblem(
+        problems,
+        'profile storage generation ownership',
+        `network adapters depend on historical profile vault authority through ${marker}`
+      )
+    }
+  }
+  return problems
+}
+
 function checkCurrentPeerScopeOwnership() {
   const problems = []
   const scopedConsumers = [
@@ -1257,6 +1327,13 @@ function checkInfraSpaceSecurityOwnership() {
 function repositorySources() {
   return {
     engine: read('crates/uc-engine/src/lib.rs'),
+    engineRuntime: readSourceTree('crates/uc-engine/src'),
+    engineWiring: read('crates/uc-engine/src/assembly/wire/mod.rs'),
+    application: readSourceTree('crates/uc-application/src'),
+    network: readSourceTree('crates/uc-infra/src/network'),
+    v3AdmissionTransition: read(
+      'crates/uc-infra/src/security/v3_admission_space_transition.rs'
+    ),
     uniffi: read('bindings/uc-engine-uniffi/src/lib.rs'),
     ohos: read('bindings/uc-ohos-napi/src/lib.rs'),
     iosPackaging: read('bindings/uc-engine-uniffi/scripts/build-ios-xcframework.sh'),
@@ -1278,6 +1355,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkPublicSurface(metadata, sources),
     ...checkBindingProvenance(metadata, sources),
     ...checkLanIsolation(metadata, sources),
+    ...checkProfileStorageGenerationOwnership(sources),
     ...checkCurrentPeerScopeOwnership(),
     ...checkApplicationMembershipCutover(),
     ...checkSpaceModuleInterface(),
@@ -1328,6 +1406,15 @@ function runNegativeFixtures(metadata, sources) {
   expectRejected('missing OpenMLS validation target', changed => {
     const validation = packageByName(changed, 'openmls-validation')
     validation.targets = validation.targets.filter(target => !target.kind.includes('test'))
+  }, metadata, sources)
+  expectRejected('V3 CrossSpace payload rewrap dependency', (_changed, changedSources) => {
+    changedSources.v3AdmissionTransition += '\nuse crate::security::ProfileStorageUpgrade;\nfn payload_rewrap() {}\n'
+  }, metadata, sources)
+  expectRejected('Engine profile-upgrade phase orchestration', (_changed, changedSources) => {
+    changedSources.engineRuntime += '\nfn combine_upgrade_steps(_: TargetGenerationStager) {}\n'
+  }, metadata, sources)
+  expectRejected('historical vault used as network authority', (_changed, changedSources) => {
+    changedSources.network += '\nfn authorize_from_history(_: ProfileContentKeyVault) {}\n'
   }, metadata, sources)
 }
 

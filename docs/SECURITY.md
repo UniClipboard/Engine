@@ -15,7 +15,7 @@
 
 - [密文持久化规则](security/encrypted-persistence.md)
 - [发布完整性](security/release-integrity.md)
-- [不可变内容保护上下文执行计划](exec-plans/active/033-immutable-content-protection-context.md)
+- [不可变内容保护上下文实施记录](exec-plans/completed/033-immutable-content-protection-context.md)
 - [错误处理与安全上下文](design-docs/error-handling.md)
 
 ## 交付检查

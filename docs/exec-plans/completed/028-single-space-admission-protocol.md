@@ -9,6 +9,11 @@
 - **不兼容决定**：不读取、翻译、发送或回退到任何旧准入协议、旧 ALPN、旧消息、旧准入记录或旧邀请
 - **相关决策**：`docs/design-docs/decisions/017-pairing-as-workspace-admission.md`、`docs/design-docs/decisions/022-user-initiated-join-supersession.md`、`docs/design-docs/decisions/025-application-space-membership-one-shot-rewrite.md`
 
+> **033 clean cutover**：本文所有把普通 CrossSpace 描述为 rebuild、source snapshot、目标 MasterKey
+> 重封装或 profile database/blob generation 替换的引用只保留为历史记录，不再是当前实现依据。
+> 当前 CrossSpace 只提升完整目标 control generation 并复用 profile data generation；准入 wire、
+> Complete/J3 门禁、恢复与成员语义仍以本文为准。
+
 # 1. Overview
 
 当前分支在提交 `098d806` 中删除了 sponsor 侧 `PairingInboundOrchestrator`，同时新增

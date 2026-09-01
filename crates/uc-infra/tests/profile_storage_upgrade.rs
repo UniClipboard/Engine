@@ -389,6 +389,20 @@ async fn v2_upgrade_coordination_is_durable_idempotent_and_encrypted() {
     .unwrap();
     manifests.promote(&source).await.unwrap();
 
+    // 每个 Pending 都模拟在持久边界后进程终止；下一次启动只依赖已认证
+    // journal 和 source/target 介质继续推进，不能依赖内存中的 phase。
+    for _ in 0..6 {
+        let upgrade = new_upgrade(
+            &vault,
+            secure_storage.clone(),
+            Arc::clone(&keys),
+            Arc::clone(&manifests),
+        );
+        assert_eq!(
+            upgrade.ensure_v3().await.unwrap(),
+            ProfileStorageUpgradeOutcome::Pending
+        );
+    }
     let upgrade = new_upgrade(
         &vault,
         secure_storage.clone(),
@@ -397,32 +411,9 @@ async fn v2_upgrade_coordination_is_durable_idempotent_and_encrypted() {
     );
     assert_eq!(
         upgrade.ensure_v3().await.unwrap(),
-        ProfileStorageUpgradeOutcome::Pending
-    );
-    assert_eq!(
-        upgrade.ensure_v3().await.unwrap(),
-        ProfileStorageUpgradeOutcome::Pending
-    );
-    assert_eq!(
-        upgrade.ensure_v3().await.unwrap(),
-        ProfileStorageUpgradeOutcome::Pending
-    );
-    assert_eq!(
-        upgrade.ensure_v3().await.unwrap(),
-        ProfileStorageUpgradeOutcome::Pending
-    );
-    assert_eq!(
-        upgrade.ensure_v3().await.unwrap(),
-        ProfileStorageUpgradeOutcome::Pending
-    );
-    assert_eq!(
-        upgrade.ensure_v3().await.unwrap(),
-        ProfileStorageUpgradeOutcome::Pending
-    );
-    assert_eq!(
-        upgrade.ensure_v3().await.unwrap(),
         ProfileStorageUpgradeOutcome::Upgraded
     );
+    drop(upgrade);
     assert!(manifests.load_v3_sync().unwrap().is_some());
     let first_files = regular_files(&vault);
     assert!(first_files.len() >= 3);
@@ -438,13 +429,20 @@ async fn v2_upgrade_coordination_is_durable_idempotent_and_encrypted() {
         }
     }
 
-    let reopened = new_upgrade(&vault, secure_storage, keys, Arc::clone(&manifests));
+    let reopened = new_upgrade(
+        &vault,
+        secure_storage.clone(),
+        Arc::clone(&keys),
+        Arc::clone(&manifests),
+    );
     assert_eq!(
         reopened.ensure_v3().await.unwrap(),
         ProfileStorageUpgradeOutcome::Pending
     );
+    drop(reopened);
+    let cleanup = new_upgrade(&vault, secure_storage, keys, Arc::clone(&manifests));
     assert_eq!(
-        reopened.ensure_v3().await.unwrap(),
+        cleanup.ensure_v3().await.unwrap(),
         ProfileStorageUpgradeOutcome::UpToDate
     );
     assert!(!vault

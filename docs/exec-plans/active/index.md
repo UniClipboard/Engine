@@ -5,7 +5,6 @@
 - [018 Application 按业务领域收口](018-domain-oriented-application-layout.md)
 - [029 持久化成员历史反熵](029-durable-membership-history-anti-entropy.md)
 - [030 成员分叉选择与复杂拓扑验证](030-membership-conflict-resolution-and-chaos-validation.md)
-- [033 不可变内容保护上下文](033-immutable-content-protection-context.md)
 - [本地产物准备](local-artifacts-preparation.md)
 - [移动端日志文件层](mobile-log-file-layer.md)
 

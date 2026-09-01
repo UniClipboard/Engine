@@ -18,6 +18,11 @@
 
 > **后续修订**：ADR-024 已取代本文关于普通 `ResetSpace` 的静止门禁、投影水位推进和轻量清理规则。
 > 本文其余准入、防重放、加入取代和 `FactoryResetSpace` 规则继续有效。
+>
+> **033 clean cutover**：本文所有把普通 CrossSpace 描述为 source final snapshot、目标 MasterKey
+> 重封装、profile database/blob generation 替换或逐条 payload rewrap 的段落只保留为 V1/V2 历史设计，
+> 不再是当前实现依据。当前规则见规格 033 的完成记录与架构圣经“切换空间”；023 的成员历史、
+> 准入提交、J3 门禁和向前恢复语义继续有效。
 
 本文是以下两项行为的唯一实现与验收依据：
 
