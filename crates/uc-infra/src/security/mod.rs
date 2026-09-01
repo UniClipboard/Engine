@@ -28,6 +28,7 @@ mod space_transition_activation;
 pub(crate) mod v1_aead;
 mod v3_admission_space_transition;
 mod v3_device_management_reset;
+mod v3_initial_space_activation;
 mod v3_membership_branch_transition;
 
 pub use active_space_generation_manifest_store::{
@@ -86,4 +87,5 @@ pub use space_transition_activation::{
 };
 pub use v3_admission_space_transition::V3AdmissionSpaceTransition;
 pub use v3_device_management_reset::V3DeviceManagementReset;
+pub use v3_initial_space_activation::V3InitialSpaceActivation;
 pub use v3_membership_branch_transition::V3MembershipBranchTransition;

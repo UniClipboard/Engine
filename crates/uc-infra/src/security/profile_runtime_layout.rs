@@ -30,6 +30,19 @@ impl ProfileRuntimeLayout {
         )
     }
 
+    /// 尚无活动 Space 时，由 profile upgrade gate 准备的首个 V3 布局。
+    pub fn prepared(
+        profile_root: &Path,
+        profile_data_generation: &[u8; 16],
+        space_control_generation: &[u8; 16],
+    ) -> Self {
+        Self::from_generations(
+            profile_root,
+            profile_data_generation,
+            space_control_generation,
+        )
+    }
+
     pub(crate) fn from_generations(
         profile_root: &Path,
         profile_data_generation: &[u8; 16],

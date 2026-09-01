@@ -268,6 +268,7 @@ impl ProductionRuntime {
             files,
             clipboard_changes,
         } = wire_host_capabilities_with_emitter(&config, host, emitter)
+            .await
             .map_err(|error| startup_error("dependency wiring", error))?;
 
         let session = Arc::new(Mutex::new(None));

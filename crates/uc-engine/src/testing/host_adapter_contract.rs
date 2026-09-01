@@ -593,6 +593,7 @@ async fn host_analytics_reaches_application_and_identity_wiring() {
     .with_analytics(sink.clone(), identity.clone());
 
     let wiring = crate::assembly::host::wire_host_capabilities(&EngineConfig::new("1.2.3"), host)
+        .await
         .expect("host wiring");
     wiring.wired.deps.analytics.capture(Event::AppFirstOpen);
     let person_id = Uuid::now_v7();
@@ -1365,6 +1366,7 @@ async fn new_engine_does_not_inherit_previous_engine_clipboard_attribution() {
             Box::new(EmptyHostFiles),
         ),
     )
+    .await
     .unwrap();
     first
         .wired
@@ -1398,6 +1400,7 @@ async fn new_engine_does_not_inherit_previous_engine_clipboard_attribution() {
             Box::new(EmptyHostFiles),
         ),
     )
+    .await
     .unwrap();
     let origin = second
         .wired
@@ -1649,6 +1652,7 @@ async fn host_capabilities_wire_real_core_dependencies() {
         &EngineConfig::new("1.2.3").with_profile_id("mobile-primary"),
         host,
     )
+    .await
     .unwrap();
 
     assert_eq!(wiring.paths.app_data_root_dir, private);
@@ -3575,7 +3579,13 @@ async fn engine_mobile_upload_progress_failure_cleans_up_and_invalidates_handle(
         panic!("expected upload handle");
     };
 
-    let database_path = private.join("uniclipboard.db");
+    let profile_generations = private.join("profile-data-generations");
+    let generation = std::fs::read_dir(&profile_generations)
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .find(|entry| entry.file_type().unwrap().is_dir())
+        .expect("fresh runtime must create one profile data generation");
+    let database_path = generation.path().join("v3-payloads/profile.sqlite");
     let mut connection = diesel::sqlite::SqliteConnection::establish(
         database_path.to_str().expect("database path must be UTF-8"),
     )

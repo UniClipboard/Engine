@@ -22,7 +22,7 @@ pub(super) const PRIMARY_OUTPUT_DIRECTORY: &str = "v3-primary";
 /// 升级器内部唯一拥有 source snapshot 与 target generation 物理布局的组件。
 pub(super) struct TargetGenerationStager {
     root: PathBuf,
-    source_pool: DbPool,
+    source_pool: Option<DbPool>,
     keys: Arc<AdmissionKeyManager>,
 }
 
@@ -89,7 +89,15 @@ impl TargetGenerationStager {
     pub(super) fn new(root: PathBuf, source_pool: DbPool, keys: Arc<AdmissionKeyManager>) -> Self {
         Self {
             root,
-            source_pool,
+            source_pool: Some(source_pool),
+            keys,
+        }
+    }
+
+    pub(super) fn cleanup_only(root: PathBuf, keys: Arc<AdmissionKeyManager>) -> Self {
+        Self {
+            root,
+            source_pool: None,
             keys,
         }
     }
@@ -100,12 +108,21 @@ impl TargetGenerationStager {
     ) -> Result<StagedTarget, ProfileStorageUpgradeError> {
         let paths = self.paths(journal);
         let source_database_revision = self.source_revision()?;
-        let snapshot = db_snapshot::snapshot_to_bytes(&self.source_pool, &paths.scratch).map_err(
-            |source| ProfileStorageUpgradeError::Storage {
-                source: anyhow::Error::new(source)
-                    .context("snapshot source profile database for V3 staging"),
-            },
-        )?;
+        let source_pool =
+            self.source_pool
+                .as_ref()
+                .ok_or_else(|| ProfileStorageUpgradeError::Corrupt {
+                    source: anyhow::anyhow!(
+                        "profile upgrade source was requested from cleanup-only recovery"
+                    ),
+                })?;
+        let snapshot =
+            db_snapshot::snapshot_to_bytes(source_pool, &paths.scratch).map_err(|source| {
+                ProfileStorageUpgradeError::Storage {
+                    source: anyhow::Error::new(source)
+                        .context("snapshot source profile database for V3 staging"),
+                }
+            })?;
         if self.source_revision()? != source_database_revision {
             return Err(ProfileStorageUpgradeError::SourceChanged);
         }
@@ -247,11 +264,19 @@ impl TargetGenerationStager {
     }
 
     fn source_revision(&self) -> Result<u64, ProfileStorageUpgradeError> {
-        self.source_pool.persistent_revision().map_err(|source| {
-            ProfileStorageUpgradeError::Storage {
+        let source_pool =
+            self.source_pool
+                .as_ref()
+                .ok_or_else(|| ProfileStorageUpgradeError::Corrupt {
+                    source: anyhow::anyhow!(
+                        "profile upgrade source was requested from cleanup-only recovery"
+                    ),
+                })?;
+        source_pool
+            .persistent_revision()
+            .map_err(|source| ProfileStorageUpgradeError::Storage {
                 source: source.context("read source profile database revision for V3 staging"),
-            }
-        })
+            })
     }
 
     fn verify_with_digest(

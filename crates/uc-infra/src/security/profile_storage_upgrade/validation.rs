@@ -56,6 +56,34 @@ impl RuntimeGenerationValidator {
         }
         Ok(())
     }
+
+    /// promotion 后只验证活动 V3 读面，不再接触已经失去权威性的 source。
+    ///
+    /// `require_original_schema` 只用于 V2 manifest 已提升、journal 尚未保存的
+    /// 崩溃窗口；一旦 target 已开放为运行库，合法 migration/search rebuild 可
+    /// 改变 schema，cleanup 不能再拿 promotion 前 fingerprint 判定损坏。
+    pub(super) fn verify_promoted(
+        &self,
+        journal: &UpgradeJournalV1,
+        target: &TargetGenerationStager,
+        require_original_schema: bool,
+    ) -> Result<(), ProfileStorageUpgradeError> {
+        let paths = target.paths(journal);
+        let profile = paths.payload_output.join("profile.sqlite");
+        validate_database(&profile)?;
+        validate_database(&paths.control_database)?;
+        target.verify_runtime_row_ownership(journal)?;
+        if require_original_schema
+            && (journal.verified_profile_schema_digest() != Some(schema_digest(&profile)?)
+                || journal.verified_control_schema_digest()
+                    != Some(schema_digest(&paths.control_database)?))
+        {
+            return Err(corrupt(anyhow::anyhow!(
+                "promoted runtime schema fingerprint mismatch"
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(diesel::QueryableByName)]

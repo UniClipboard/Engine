@@ -36,6 +36,10 @@ impl ProfilePayloadMode {
     pub fn v3(vault: Arc<ProfileContentKeyVault>) -> Self {
         Self(Some(vault))
     }
+
+    const fn is_v3(&self) -> bool {
+        self.0.is_some()
+    }
 }
 
 pub(crate) enum ProfilePayloadRuntime {
@@ -139,7 +143,7 @@ pub fn create_platform_layer(
     // Purge old blob files after V2 migration (old JSON format files are incompatible
     // with the new UCBL binary format). Uses a sentinel file so this only runs once.
     let sentinel = blob_store_dir.join(".v2_migrated");
-    if blob_store_dir.exists() && !sentinel.exists() {
+    if !payload_mode.is_v3() && blob_store_dir.exists() && !sentinel.exists() {
         match std::fs::read_dir(&blob_store_dir) {
             Ok(entries) => {
                 let mut purged = 0u64;

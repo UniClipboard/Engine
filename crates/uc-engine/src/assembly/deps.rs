@@ -41,6 +41,21 @@ pub enum WiringError {
 
     #[error("Thumbnail generator initialization failed: {0}")]
     ThumbnailInit(String),
+
+    #[error("profile storage upgrade did not reach a runnable state")]
+    StorageUpgradePending,
+
+    #[error("profile storage upgrade failed")]
+    StorageUpgrade {
+        #[source]
+        source: uc_infra::security::ProfileStorageUpgradeError,
+    },
+
+    #[error("profile storage upgrade prerequisite failed")]
+    StorageUpgradePrerequisite {
+        #[source]
+        source: anyhow::Error,
+    },
 }
 
 /// Background runtime components that must be started after async runtime is ready.

@@ -22,6 +22,7 @@ pub(super) enum UpgradePhaseV1 {
 
 #[derive(serde::Serialize, serde::Deserialize, Zeroize, ZeroizeOnDrop)]
 struct UpgradeSourceV1 {
+    space_id: String,
     manifest_digest: [u8; 32],
     keyslot_generation: [u8; 16],
     database_generation: [u8; 16],
@@ -98,12 +99,13 @@ impl UpgradeJournalV1 {
             || self.target_space_control_generation == [0; 16]
             || self.target_profile_data_generation == self.target_space_control_generation
             || self.source.as_ref().is_some_and(|source| {
-                [
-                    source.keyslot_generation,
-                    source.database_generation,
-                    source.security_generation,
-                ]
-                .contains(&self.target_profile_data_generation)
+                source.space_id.is_empty()
+                    || [
+                        source.keyslot_generation,
+                        source.database_generation,
+                        source.security_generation,
+                    ]
+                    .contains(&self.target_profile_data_generation)
                     || [
                         source.keyslot_generation,
                         source.database_generation,
@@ -211,6 +213,16 @@ impl UpgradeJournalV1 {
         &self.target_space_control_generation
     }
 
+    pub(super) fn source_space_id(&self) -> Option<&str> {
+        self.source.as_ref().map(|source| source.space_id.as_str())
+    }
+
+    pub(super) fn source_database_generation(&self) -> Option<&[u8; 16]> {
+        self.source
+            .as_ref()
+            .map(|source| &source.database_generation)
+    }
+
     pub(super) const fn source_snapshot_digest(&self) -> Option<[u8; 32]> {
         self.source_snapshot_digest
     }
@@ -293,12 +305,12 @@ impl UpgradeJournalV1 {
     }
 
     pub(super) fn matches_target(&self, target: &ActiveRuntimeManifestV3) -> bool {
-        self.source.as_ref().is_some_and(|source| {
-            source.keyslot_generation == *target.keyslot_generation()
-                && self.target_profile_data_generation == *target.layout().profile_data_generation()
-                && self.target_space_control_generation
-                    == *target.layout().space_control_generation()
-        })
+        self.target_profile_data_generation == *target.layout().profile_data_generation()
+            && self.target_space_control_generation == *target.layout().space_control_generation()
+            && self.source.as_ref().is_none_or(|source| {
+                source.space_id == target.layout().space_id().as_ref()
+                    && source.keyslot_generation == *target.keyslot_generation()
+            })
     }
 
     pub(super) fn mark_target_staged(
@@ -425,6 +437,7 @@ impl UpgradeJournalV1 {
 impl From<&ActiveSpaceGenerationManifestV2> for UpgradeSourceV1 {
     fn from(manifest: &ActiveSpaceGenerationManifestV2) -> Self {
         Self {
+            space_id: manifest.space_id.clone(),
             manifest_digest: manifest.manifest_digest,
             keyslot_generation: manifest.keyslot_generation,
             database_generation: manifest.database_generation,
@@ -435,7 +448,8 @@ impl From<&ActiveSpaceGenerationManifestV2> for UpgradeSourceV1 {
 
 impl UpgradeSourceV1 {
     fn matches(&self, manifest: &ActiveSpaceGenerationManifestV2) -> bool {
-        self.manifest_digest == manifest.manifest_digest
+        self.space_id == manifest.space_id
+            && self.manifest_digest == manifest.manifest_digest
             && self.keyslot_generation == manifest.keyslot_generation
             && self.database_generation == manifest.database_generation
             && self.security_generation == manifest.security_generation

@@ -72,8 +72,9 @@ use uc_infra::security::{
     ActiveSpaceGenerationManifestStore, AdmissionKeyManager, Argon2PinHasher, Blake3Hasher,
     DecryptingClipboardRepresentationRepository, EncryptingClipboardEventWriter,
     EncryptingInboundReceiveCommit, ProfileContentKeyVault, ProfileLifecycleRepository,
-    Sha256IdentityFingerprintFactory, Sha256ShortCodeGenerator, SpaceControlGeneration,
-    SpaceTransitionActivation, V3AdmissionSpaceTransition, V3DeviceManagementReset,
+    ProfileStorageUpgrade, ProfileStorageUpgradeOutcome, Sha256IdentityFingerprintFactory,
+    Sha256ShortCodeGenerator, SpaceControlGeneration, SpaceTransitionActivation,
+    V3AdmissionSpaceTransition, V3DeviceManagementReset, V3InitialSpaceActivation,
     V3MembershipBranchTransition,
 };
 use uc_infra::settings::repository::FileSettingsRepository;
@@ -174,6 +175,69 @@ pub struct CoreWiringInputs {
     pub host_event_emitter: Arc<dyn HostEventEmitterPort>,
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn ensure_profile_storage_v3(
+    profile_root: &std::path::Path,
+    legacy_database: PathBuf,
+    legacy_blob_root: PathBuf,
+    profile_id: ProfileId,
+    secure_storage: Arc<dyn SecureStoragePort>,
+    vault_path: &std::path::Path,
+    profile_content_key_vault: Arc<ProfileContentKeyVault>,
+    admission_keys: Arc<AdmissionKeyManager>,
+    manifests: Arc<ActiveSpaceGenerationManifestStore>,
+) -> WiringResult<RuntimeStorageSelection> {
+    let upgrade = ProfileStorageUpgrade::for_runtime(
+        profile_root.to_path_buf(),
+        legacy_database.clone(),
+        legacy_blob_root.clone(),
+        profile_id,
+        secure_storage,
+        vault_path.to_path_buf(),
+        profile_content_key_vault,
+        admission_keys,
+        Arc::clone(&manifests),
+    );
+    match upgrade
+        .ensure_v3()
+        .await
+        .map_err(|source| WiringError::StorageUpgrade { source })?
+    {
+        ProfileStorageUpgradeOutcome::Upgraded | ProfileStorageUpgradeOutcome::UpToDate => {
+            drop(upgrade);
+            let active = manifests.load_runtime_sync().map_err(|source| {
+                WiringError::StorageUpgradePrerequisite {
+                    source: anyhow::Error::new(source)
+                        .context("reload promoted V3 runtime manifest"),
+                }
+            })?;
+            RuntimeStorageSelection::resolve(
+                profile_root,
+                legacy_database,
+                legacy_blob_root,
+                active.as_ref(),
+            )
+            .map_err(|source| WiringError::StorageUpgradePrerequisite {
+                source: anyhow::Error::new(source).context("open promoted V3 runtime layout"),
+            })
+        }
+        ProfileStorageUpgradeOutcome::FreshReady {
+            profile_data_generation,
+            space_control_generation,
+        } => RuntimeStorageSelection::fresh_v3(
+            profile_root,
+            profile_data_generation,
+            space_control_generation,
+        )
+        .map_err(|source| WiringError::StorageUpgradePrerequisite {
+            source: anyhow::Error::new(source).context("open prepared Fresh V3 runtime layout"),
+        }),
+        ProfileStorageUpgradeOutcome::Pending | ProfileStorageUpgradeOutcome::Busy => {
+            Err(WiringError::StorageUpgradePending)
+        }
+    }
+}
+
 /// Search bundle (Phase 92): subkey-derivation port, sqlite index, tokenization
 /// pipeline. `search_pipeline` is kept as the concrete `Arc<SearchPipeline>`; it
 /// coerces to `Arc<dyn SearchPipelinePort>` at the `SearchPorts` literal.
@@ -205,7 +269,7 @@ struct BlobProcessingAssembly {
     clipboard_change_origin: Arc<dyn SelfWriteLedgerPort>,
 }
 
-pub fn wire_dependencies_from_inputs(
+pub async fn wire_dependencies_from_inputs(
     inputs: CoreWiringInputs,
 ) -> WiringResult<(WiredDependencies, BackgroundRuntimeDeps)> {
     let CoreWiringInputs {
@@ -262,25 +326,35 @@ pub fn wire_dependencies_from_inputs(
             VaultLayout::new(vault_path.clone()).re_pairing_state_path(),
             Arc::clone(&admission_keys),
         ));
-    let active_generation_manifest = if profile_lifecycle.state() == ProfileLifecycleState::Ready {
-        active_generation_manifest_store
-            .load_runtime_sync()
-            .map_err(|error| WiringError::DatabaseInit(error.to_string()))?
-    } else {
-        None
-    };
     tracing::info!(
         profile_ready = profile_lifecycle.state() == ProfileLifecycleState::Ready,
-        active_generation_present = active_generation_manifest.is_some(),
-        "空间存储启动选择已解析"
+        "profile storage 启动 gate 开始"
     );
-    let storage = RuntimeStorageSelection::resolve(
-        &app_data_root,
-        legacy_db_path,
-        vault_path.join("blobs"),
-        active_generation_manifest.as_ref(),
-    )
-    .map_err(|error| WiringError::DatabaseInit(error.to_string()))?;
+    let storage = if profile_lifecycle.state() == ProfileLifecycleState::Ready {
+        ensure_profile_storage_v3(
+            &app_data_root,
+            legacy_db_path,
+            vault_path.join("blobs"),
+            profile_id.clone(),
+            Arc::clone(&secure_storage),
+            &vault_path,
+            Arc::clone(&profile_content_key_vault),
+            Arc::clone(&admission_keys),
+            Arc::clone(&active_generation_manifest_store),
+        )
+        .await?
+    } else {
+        RuntimeStorageSelection::resolve(
+            &app_data_root,
+            legacy_db_path,
+            vault_path.join("blobs"),
+            None,
+        )
+        .map_err(|source| WiringError::StorageUpgradePrerequisite {
+            source: anyhow::Error::new(source)
+                .context("open maintenance-only profile runtime layout"),
+        })?
+    };
     tracing::info!(
         storage_generation = if storage.is_v3() { "v3" } else { "legacy" },
         "空间存储 generation 已选择"
@@ -384,12 +458,23 @@ pub fn wire_dependencies_from_inputs(
             Arc::clone(&control_generations),
             Arc::clone(&space_access_adapter),
         ));
-        let admission_transition = Arc::new(V3AdmissionSpaceTransition::new(
-            profile_salt.clone(),
-            Arc::clone(&active_generation_manifest_store),
-            Arc::clone(&control_generations),
-            Arc::clone(&activation),
-        ));
+        let admission_transition = Arc::new(match storage.fresh_generations() {
+            Some((profile_data_generation, _)) => {
+                V3AdmissionSpaceTransition::new_with_fresh_profile_generation(
+                    profile_salt.clone(),
+                    profile_data_generation,
+                    Arc::clone(&active_generation_manifest_store),
+                    Arc::clone(&control_generations),
+                    Arc::clone(&activation),
+                )
+            }
+            None => V3AdmissionSpaceTransition::new(
+                profile_salt.clone(),
+                Arc::clone(&active_generation_manifest_store),
+                Arc::clone(&control_generations),
+                Arc::clone(&activation),
+            ),
+        });
         let device_reset = Arc::new(V3DeviceManagementReset::new(
             app_data_root.clone(),
             control_db_pool_for_space_transition.clone(),
@@ -403,11 +488,27 @@ pub fn wire_dependencies_from_inputs(
             control_generations,
             activation,
         ));
+        let initial_space_activation: Arc<dyn InitialSpaceActivationPort> =
+            match storage.fresh_generations() {
+                Some((profile_data_generation, space_control_generation)) => Arc::new(
+                    V3InitialSpaceActivation::new(
+                        profile_data_generation,
+                        space_control_generation,
+                        Arc::clone(&active_generation_manifest_store),
+                    )
+                    .ok_or_else(|| {
+                        WiringError::DatabaseInit(
+                            "fresh V3 runtime generations are invalid".to_string(),
+                        )
+                    })?,
+                ),
+                None => current_space_resolver.clone(),
+            };
         (
             admission_transition,
             device_reset,
             membership_branch,
-            current_space_resolver.clone(),
+            initial_space_activation,
         )
     } else {
         let transition = Arc::new(uc_infra::security::DurableAdmissionSpaceTransition::new(
