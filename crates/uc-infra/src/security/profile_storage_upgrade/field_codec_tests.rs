@@ -3,15 +3,23 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use uc_core::file_transfer::FileTransferEvent;
-use uc_core::ids::{EntryId, SpaceId};
+use uc_core::ids::{DeviceId, EntryId, SpaceId};
 use uc_core::ports::{
-    ReceiveArtifact, ReceiveArtifactOwnership, SecureStorageError, SecureStoragePort,
+    AdvanceActiveClipboardPort, GetDirectoryPublishRecordPort, GetReceiveArtifactRecordPort,
+    LoadMobileConsumableClipboardPort, PublishPhase, ReceiveArtifact, ReceiveArtifactOwnership,
+    ReceiveArtifactPhase, ReceiveArtifactRecord, ReceiveArtifactResolution,
+    RecordDirectoryPublishPort, RecordReceiveArtifactsPort, SecureStorageError, SecureStoragePort,
 };
 
 use crate::db::repositories::active_clipboard_register_cipher::V3ActiveClipboardRegisterCipher;
 use crate::db::repositories::directory_publish_log_cipher::V3DirectoryPublishLogCipher;
 use crate::db::repositories::entry_file_set_cipher::V3EntryFileSetPathCipher;
 use crate::db::repositories::receive_artifact_cipher::V3ReceiveArtifactCipher;
+use crate::db::repositories::{
+    DieselActiveClipboardRegisterRepository, DieselDirectoryPublishLogRepository,
+    DieselReceiveArtifactLogRepository,
+};
+use crate::db::{executor::DieselSqliteExecutor, pool::init_db_pool};
 use crate::file_transfer::persistence_cipher::{TransferMetadata, V3TransferPersistenceCipher};
 use crate::security::{ContentProtection, MasterKey, ProfileContentKeyVault};
 use crate::space::InMemorySession;
@@ -175,4 +183,91 @@ async fn specialized_v3_codecs_keep_owner_serialization_and_entity_aad() {
         .open(entry_id.as_ref(), "attempt-b", &sealed_artifacts)
         .await
         .is_err());
+}
+
+#[tokio::test]
+async fn specialized_repositories_use_only_the_selected_v3_strategy() {
+    let (directory, protection) = protection().await;
+    let database = directory.path().join("v3-repositories.sqlite");
+    let pool = init_db_pool(database.to_str().unwrap()).unwrap();
+
+    let active = DieselActiveClipboardRegisterRepository::new_v3(
+        DieselSqliteExecutor::new(pool.clone()),
+        Arc::clone(&protection),
+    );
+    let state = uc_core::clipboard::ActiveClipboardState::new(
+        "private-v3-snapshot",
+        EntryId::from("entry-v3"),
+        10,
+        DeviceId::new("device-v3"),
+    );
+    active.advance(&state, true).await.unwrap();
+    assert_eq!(
+        active.load_mobile_consumable().await.unwrap(),
+        Some(uc_core::clipboard::MobileConsumableRef::new(
+            "private-v3-snapshot",
+            EntryId::from("entry-v3"),
+        ))
+    );
+
+    let publish = DieselDirectoryPublishLogRepository::new_v3(
+        DieselSqliteExecutor::new(pool.clone()),
+        Arc::clone(&protection),
+    );
+    let roots = vec![(
+        PathBuf::from("private-stage"),
+        PathBuf::from("private-final"),
+    )];
+    publish
+        .record_phase("entry-v3", "attempt-v3", PublishPhase::Staging, &roots, 11)
+        .await
+        .unwrap();
+    assert_eq!(
+        publish
+            .get_publish_record("entry-v3", "attempt-v3")
+            .await
+            .unwrap()
+            .unwrap()
+            .root_map,
+        roots
+    );
+
+    let receive =
+        DieselReceiveArtifactLogRepository::new_v3(DieselSqliteExecutor::new(pool), protection);
+    let record = ReceiveArtifactRecord {
+        entry_id: "entry-v3".to_owned(),
+        attempt_id: "attempt-v3".to_owned(),
+        phase: ReceiveArtifactPhase::Preparing,
+        resolution: ReceiveArtifactResolution::Pending,
+        artifacts: vec![ReceiveArtifact {
+            item_id: "item-v3".to_owned(),
+            staged_path: PathBuf::from("private-receive-stage"),
+            final_path: PathBuf::from("private-receive-final"),
+            ownership: ReceiveArtifactOwnership::ManagedStaging,
+        }],
+        updated_at_ms: 12,
+    };
+    receive.record_receive_artifacts(&record).await.unwrap();
+    assert_eq!(
+        receive
+            .get_receive_artifact_record("entry-v3", "attempt-v3")
+            .await
+            .unwrap(),
+        Some(record)
+    );
+
+    drop(active);
+    drop(publish);
+    drop(receive);
+    let bytes = std::fs::read(database).unwrap();
+    for plaintext in [
+        b"private-stage".as_slice(),
+        b"private-final",
+        b"private-receive-stage",
+        b"private-receive-final",
+    ] {
+        assert!(!bytes
+            .windows(plaintext.len())
+            .any(|window| window == plaintext));
+    }
 }

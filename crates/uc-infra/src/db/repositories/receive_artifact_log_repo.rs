@@ -11,15 +11,25 @@ use uc_core::ports::{
     RecordReceiveArtifactsPort,
 };
 
-use super::receive_artifact_cipher::{ReceiveArtifactCipher, ARTIFACT_KEY_INFO};
+use super::receive_artifact_cipher::{
+    ReceiveArtifactCipher, V3ReceiveArtifactCipher, ARTIFACT_KEY_INFO,
+};
 use crate::db::models::{NewReceiveArtifactLogRow, ReceiveArtifactLogRow};
 use crate::db::ports::DbExecutor;
 use crate::db::schema::receive_artifact_log;
+use crate::security::ContentProtection;
 
 pub struct DieselReceiveArtifactLogRepository<E> {
     executor: E,
-    derive_subkey: Arc<dyn DeriveSpaceSubkeyPort>,
-    current_profile: Arc<dyn CurrentProfilePort>,
+    protection: ReceiveArtifactProtection,
+}
+
+enum ReceiveArtifactProtection {
+    Legacy {
+        derive_subkey: Arc<dyn DeriveSpaceSubkeyPort>,
+        current_profile: Arc<dyn CurrentProfilePort>,
+    },
+    V3(V3ReceiveArtifactCipher),
 }
 
 impl<E> DieselReceiveArtifactLogRepository<E> {
@@ -30,23 +40,32 @@ impl<E> DieselReceiveArtifactLogRepository<E> {
     ) -> Self {
         Self {
             executor,
-            derive_subkey,
-            current_profile,
+            protection: ReceiveArtifactProtection::Legacy {
+                derive_subkey,
+                current_profile,
+            },
         }
     }
 
-    async fn cipher(&self) -> Result<ReceiveArtifactCipher, ReceiveArtifactLogError> {
-        let profile = self
-            .current_profile
-            .current_profile()
-            .await
-            .map_err(|error| {
-                ReceiveArtifactLogError::EncryptionUnavailable(format!(
-                    "current profile unavailable: {error}"
-                ))
-            })?;
-        let key = self
-            .derive_subkey
+    pub fn new_v3(executor: E, protection: Arc<ContentProtection>) -> Self {
+        Self {
+            executor,
+            protection: ReceiveArtifactProtection::V3(V3ReceiveArtifactCipher::new(protection)),
+        }
+    }
+}
+
+impl ReceiveArtifactProtection {
+    async fn legacy_cipher(
+        derive_subkey: &dyn DeriveSpaceSubkeyPort,
+        current_profile: &dyn CurrentProfilePort,
+    ) -> Result<ReceiveArtifactCipher, ReceiveArtifactLogError> {
+        let profile = current_profile.current_profile().await.map_err(|error| {
+            ReceiveArtifactLogError::EncryptionUnavailable(format!(
+                "current profile unavailable: {error}"
+            ))
+        })?;
+        let key = derive_subkey
             .derive_subkey(profile.as_ref().as_bytes(), ARTIFACT_KEY_INFO)
             .await
             .map_err(|error| match error {
@@ -59,21 +78,57 @@ impl<E> DieselReceiveArtifactLogRepository<E> {
             })?;
         Ok(ReceiveArtifactCipher::new(key))
     }
+
+    async fn seal(
+        &self,
+        entry_id: &str,
+        attempt_id: &str,
+        artifacts: &[uc_core::ports::ReceiveArtifact],
+    ) -> Result<Vec<u8>, ReceiveArtifactLogError> {
+        match self {
+            Self::Legacy {
+                derive_subkey,
+                current_profile,
+            } => Self::legacy_cipher(derive_subkey.as_ref(), current_profile.as_ref())
+                .await?
+                .seal(entry_id, attempt_id, artifacts),
+            Self::V3(cipher) => cipher.seal(entry_id, attempt_id, artifacts).await,
+        }
+        .map_err(|error| ReceiveArtifactLogError::Backend(error.to_string()))
+    }
+
+    async fn open(
+        &self,
+        entry_id: &str,
+        attempt_id: &str,
+        ciphertext: &[u8],
+    ) -> Result<Vec<uc_core::ports::ReceiveArtifact>, ReceiveArtifactLogError> {
+        match self {
+            Self::Legacy {
+                derive_subkey,
+                current_profile,
+            } => Self::legacy_cipher(derive_subkey.as_ref(), current_profile.as_ref())
+                .await?
+                .open(entry_id, attempt_id, ciphertext),
+            Self::V3(cipher) => cipher.open(entry_id, attempt_id, ciphertext).await,
+        }
+        .map_err(|error| ReceiveArtifactLogError::Backend(error.to_string()))
+    }
 }
 
 fn backend(error: anyhow::Error) -> ReceiveArtifactLogError {
     ReceiveArtifactLogError::Backend(error.to_string())
 }
 
-fn decode_row(
-    cipher: &ReceiveArtifactCipher,
+async fn decode_row(
+    protection: &ReceiveArtifactProtection,
     row: ReceiveArtifactLogRow,
 ) -> Result<ReceiveArtifactRecord, ReceiveArtifactLogError> {
     let phase = ReceiveArtifactPhase::parse(&row.phase)?;
     let resolution = ReceiveArtifactResolution::parse(&row.resolution)?;
-    let artifacts = cipher
+    let artifacts = protection
         .open(&row.entry_id, &row.attempt_id, &row.artifact_ciphertext)
-        .map_err(|error| ReceiveArtifactLogError::Backend(error.to_string()))?;
+        .await?;
     Ok(ReceiveArtifactRecord {
         entry_id: row.entry_id,
         attempt_id: row.attempt_id,
@@ -91,10 +146,9 @@ impl<E: DbExecutor> RecordReceiveArtifactsPort for DieselReceiveArtifactLogRepos
         record: &ReceiveArtifactRecord,
     ) -> Result<(), ReceiveArtifactLogError> {
         let ciphertext = self
-            .cipher()
-            .await?
+            .protection
             .seal(&record.entry_id, &record.attempt_id, &record.artifacts)
-            .map_err(|error| ReceiveArtifactLogError::Backend(error.to_string()))?;
+            .await?;
         let row = NewReceiveArtifactLogRow {
             entry_id: record.entry_id.clone(),
             attempt_id: record.attempt_id.clone(),
@@ -137,7 +191,6 @@ impl<E: DbExecutor> GetReceiveArtifactRecordPort for DieselReceiveArtifactLogRep
     ) -> Result<Option<ReceiveArtifactRecord>, ReceiveArtifactLogError> {
         let entry_id = entry_id.to_owned();
         let attempt_id = attempt_id.to_owned();
-        let cipher = self.cipher().await?;
         let row = self
             .executor
             .run(move |conn| {
@@ -150,7 +203,10 @@ impl<E: DbExecutor> GetReceiveArtifactRecordPort for DieselReceiveArtifactLogRep
                     .map_err(anyhow::Error::from)
             })
             .map_err(backend)?;
-        row.map(|row| decode_row(&cipher, row)).transpose()
+        match row {
+            Some(row) => decode_row(&self.protection, row).await.map(Some),
+            None => Ok(None),
+        }
     }
 }
 
@@ -159,7 +215,6 @@ impl<E: DbExecutor> ListUnsettledReceiveArtifactsPort for DieselReceiveArtifactL
     async fn list_unsettled_receive_artifacts(
         &self,
     ) -> Result<Vec<ReceiveArtifactRecord>, ReceiveArtifactLogError> {
-        let cipher = self.cipher().await?;
         let rows = self
             .executor
             .run(move |conn| {
@@ -174,8 +229,10 @@ impl<E: DbExecutor> ListUnsettledReceiveArtifactsPort for DieselReceiveArtifactL
                     .map_err(anyhow::Error::from)
             })
             .map_err(backend)?;
-        rows.into_iter()
-            .map(|row| decode_row(&cipher, row))
-            .collect()
+        let mut decoded = Vec::with_capacity(rows.len());
+        for row in rows {
+            decoded.push(decode_row(&self.protection, row).await?);
+        }
+        Ok(decoded)
     }
 }

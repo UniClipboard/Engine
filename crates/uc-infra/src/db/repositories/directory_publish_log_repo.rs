@@ -13,16 +13,26 @@ use uc_core::ports::directory_publish_log::{
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::{DeriveSpaceSubkeyPort, SpaceAccessError};
 
-use super::directory_publish_log_cipher::{DirectoryPublishLogCipher, PUBLISH_LOG_KEY_INFO};
+use super::directory_publish_log_cipher::{
+    DirectoryPublishLogCipher, V3DirectoryPublishLogCipher, PUBLISH_LOG_KEY_INFO,
+};
 use crate::db::models::{DirectoryPublishLogRow, NewDirectoryPublishLogRow};
 use crate::db::ports::DbExecutor;
 use crate::db::schema::directory_publish_log;
+use crate::security::ContentProtection;
 
 /// SQLite adapter for encrypted directory publication recovery metadata.
 pub struct DieselDirectoryPublishLogRepository<E> {
     executor: E,
-    derive_subkey: Arc<dyn DeriveSpaceSubkeyPort>,
-    current_profile: Arc<dyn CurrentProfilePort>,
+    protection: DirectoryPublishProtection,
+}
+
+enum DirectoryPublishProtection {
+    Legacy {
+        derive_subkey: Arc<dyn DeriveSpaceSubkeyPort>,
+        current_profile: Arc<dyn CurrentProfilePort>,
+    },
+    V3(V3DirectoryPublishLogCipher),
 }
 
 impl<E> DieselDirectoryPublishLogRepository<E> {
@@ -33,23 +43,32 @@ impl<E> DieselDirectoryPublishLogRepository<E> {
     ) -> Self {
         Self {
             executor,
-            derive_subkey,
-            current_profile,
+            protection: DirectoryPublishProtection::Legacy {
+                derive_subkey,
+                current_profile,
+            },
         }
     }
 
-    async fn cipher(&self) -> Result<DirectoryPublishLogCipher, PublishLogError> {
-        let profile = self
-            .current_profile
-            .current_profile()
-            .await
-            .map_err(|error| {
-                PublishLogError::EncryptionUnavailable(format!(
-                    "current profile unavailable: {error}"
-                ))
-            })?;
-        let key = self
-            .derive_subkey
+    pub fn new_v3(executor: E, protection: Arc<ContentProtection>) -> Self {
+        Self {
+            executor,
+            protection: DirectoryPublishProtection::V3(V3DirectoryPublishLogCipher::new(
+                protection,
+            )),
+        }
+    }
+}
+
+impl DirectoryPublishProtection {
+    async fn legacy_cipher(
+        derive_subkey: &dyn DeriveSpaceSubkeyPort,
+        current_profile: &dyn CurrentProfilePort,
+    ) -> Result<DirectoryPublishLogCipher, PublishLogError> {
+        let profile = current_profile.current_profile().await.map_err(|error| {
+            PublishLogError::EncryptionUnavailable(format!("current profile unavailable: {error}"))
+        })?;
+        let key = derive_subkey
             .derive_subkey(profile.as_ref().as_bytes(), PUBLISH_LOG_KEY_INFO)
             .await
             .map_err(|error| match error {
@@ -61,6 +80,42 @@ impl<E> DieselDirectoryPublishLogRepository<E> {
                 )),
             })?;
         Ok(DirectoryPublishLogCipher::new(key))
+    }
+
+    async fn seal(
+        &self,
+        entry_id: &EntryId,
+        attempt_id: &str,
+        root_map: &[(PathBuf, PathBuf)],
+    ) -> Result<Vec<u8>, PublishLogError> {
+        match self {
+            Self::Legacy {
+                derive_subkey,
+                current_profile,
+            } => Self::legacy_cipher(derive_subkey.as_ref(), current_profile.as_ref())
+                .await?
+                .seal(entry_id, attempt_id, root_map),
+            Self::V3(cipher) => cipher.seal(entry_id, attempt_id, root_map).await,
+        }
+        .map_err(|error| PublishLogError::Backend(error.to_string()))
+    }
+
+    async fn open(
+        &self,
+        entry_id: &EntryId,
+        attempt_id: &str,
+        ciphertext: &[u8],
+    ) -> Result<Vec<(PathBuf, PathBuf)>, PublishLogError> {
+        match self {
+            Self::Legacy {
+                derive_subkey,
+                current_profile,
+            } => Self::legacy_cipher(derive_subkey.as_ref(), current_profile.as_ref())
+                .await?
+                .open(entry_id, attempt_id, ciphertext),
+            Self::V3(cipher) => cipher.open(entry_id, attempt_id, ciphertext).await,
+        }
+        .map_err(|_| PublishLogError::InvalidCiphertext)
     }
 }
 
@@ -84,10 +139,9 @@ impl<E: DbExecutor> RecordDirectoryPublishPort for DieselDirectoryPublishLogRepo
             ));
         }
         let ciphertext = self
-            .cipher()
-            .await?
+            .protection
             .seal(&EntryId::from(entry_id), attempt_id, root_map)
-            .map_err(|error| PublishLogError::Backend(error.to_string()))?;
+            .await?;
         let row = NewDirectoryPublishLogRow {
             entry_id: entry_id.to_owned(),
             attempt_id: attempt_id.to_owned(),
@@ -179,15 +233,15 @@ impl<E: DbExecutor> GetDirectoryPublishRecordPort for DieselDirectoryPublishLogR
         };
         let phase = PublishPhase::from_str(&row.phase)?;
         let root_map = match row.root_map_ciphertext {
-            Some(ciphertext) => self
-                .cipher()
-                .await?
-                .open(
-                    &EntryId::from(row.entry_id.as_str()),
-                    &row.attempt_id,
-                    &ciphertext,
-                )
-                .map_err(|_| PublishLogError::InvalidCiphertext)?,
+            Some(ciphertext) => {
+                self.protection
+                    .open(
+                        &EntryId::from(row.entry_id.as_str()),
+                        &row.attempt_id,
+                        &ciphertext,
+                    )
+                    .await?
+            }
             None => Vec::new(),
         };
         let partial_visible_roots = if row.partial_publication {
