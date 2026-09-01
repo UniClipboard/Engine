@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 use uc_core::membership::{ContentKeyId, GroupEpoch, SpaceKeyMaterial};
 use uc_core::ports::SecureStoragePort;
 
+pub(crate) use model::ProfileSearchCatalog;
 pub use model::{InstalledProfileCatalog, ProfileContentKeyVaultError, ResolvedProfileContentKey};
 pub(in crate::security) use persistence::VAULT_KEY_NAME as PROFILE_CONTENT_VAULT_KEY_NAME;
 
@@ -68,6 +69,18 @@ impl ProfileContentKeyVault {
     ) -> Result<ResolvedProfileContentKey, ProfileContentKeyVaultError> {
         let vault = self.persistence.load().await?;
         catalog::resolve(&vault, content_key_id, epoch)
+    }
+
+    /// 为搜索深模块取得 profile 稳定根能力与规范保护组快照。
+    ///
+    /// 不返回 vault 外层 key，也不允许调用方逐组读取 catalog；group ref 与 term
+    /// tag 的具体构造仍由搜索模块独占。
+    pub(crate) async fn search_catalog(
+        &self,
+    ) -> Result<ProfileSearchCatalog, ProfileContentKeyVaultError> {
+        let vault = self.persistence.load().await?;
+        let root_key = self.persistence.derive_profile_search_root()?;
+        catalog::search_catalog(&vault, root_key)
     }
 
     #[cfg(test)]

@@ -32,7 +32,7 @@ const NONCE_LEN: usize = 24;
 /// Header = magic(4) + version(1) + nonce(24).
 const HEADER_LEN: usize = 4 + 1 + NONCE_LEN;
 /// Current render-payload JSON schema version.
-const RENDER_PAYLOAD_V: u8 = 1;
+pub(crate) const RENDER_PAYLOAD_V: u8 = 1;
 
 /// Plaintext render fields packed into the encrypted payload.
 ///

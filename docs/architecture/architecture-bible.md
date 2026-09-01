@@ -270,6 +270,8 @@ Core 保存完整 admission aggregate 和状态转换规则。Application 内部
 - 空间锁定前必须暂停并等待搜索后台工作退出，解锁或恢复后由空间会话统一恢复；进程关闭后不得再次开启搜索后台工作。
 - 无后台能力的场景必须使用明确的只读搜索模式，不能先创建半成品再运行中补装。
 
+V3 搜索密码边界由 Infra `V3SearchProtection` 独占。profile 搜索根从 `ProfileContentVaultKey` 域分离派生；索引调用只提交规范词项，模块从活动 session 固定保护组并生成 opaque group ref 与组隔离 term tags。查询只接收索引中实际存在的 group refs，经 vault 验证后为每个查询词生成一组跨保护组 alternatives；AND 语义按查询词集合判断命中，禁止把全部组 tags 扁平后按总数计数。搜索 render 保留所属模块的 JSON schema 与实体 AAD，但 V3 AEAD、purpose 和历史 key resolution 委托 `ContentProtection`。当前该目标模块不接 production v11 索引；schema/version 与装配只允许在一次性 profile upgrade 和 clean cutover 时共同切换，不能提前触发用旧 key 的普通重建。
+
 ### 持久化安全边界
 
 默认规则是：任何写入 SQLite、磁盘缓存或搜索索引的业务负载都先经 MasterKey AEAD 加密，并通过附加认证数据绑定到所属实体。
@@ -886,6 +888,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-09-01 | 033 持久密码 interface 第六切片 | `BlobCipherPort` 删除 encrypt/decrypt 的 `ActiveSpace` 参数，调用方只提供 payload 与业务实体 AAD；四类 inline decorator、旧 migration recovery 和待删 CrossSpace 不再伪造占位 Space。当前 V1/V2 adapter、UCBL、搜索和专用 repository 格式保持不变，不启用 V3 writer 或 production 双 reader。 |
 | 2026-09-01 | 033 升级协调第七切片 | Infra 新增 `ProfileStorageUpgrade::ensure_v3()` 单一协调入口，隐藏进程内串行化、跨进程非阻塞租约、source identity 校验和 profile AEAD 加密 journal。V2 与空 profile 首次调用耐久生成唯一目标 data/control generations，重启复用相同字节；锁竞争返回 `Busy`，source 变化、journal 篡改或缺钥失败关闭。本轮不接 Engine、不转换 payload、不提升 V3 manifest。 |
 | 2026-09-01 | 033 V3 payload 格式第八切片 | `ContentProtection` 的 V3 envelope 从 JSON 数字数组收紧为紧凑二进制格式，并新增共享该深模块的 V3 inline adapter 与 UCBL store；UCBL 只负责 zstd 与外层 framing。跨 Space 测试证明历史读取不依赖当前 session，AAD transplant、截断、篡改和未知格式失败关闭，错误保留 source。本轮不接 production、不引入双 reader；专用字段在全量升级与 clean cutover 时保留领域序列化/AAD 所有权并统一委托该 envelope。 |
+| 2026-09-01 | 033 多保护组搜索第九切片 | Infra 新增未接 production 的 `V3SearchProtection` 深模块，从 profile content vault 稳定 key 域分离生成搜索根，索引结果携带 opaque group ref 与组隔离 tags；查询只为索引实际组生成按词分组的 alternatives，保持正确 AND 语义。搜索 render 的 schema/AAD 留在搜索模块，V3 AEAD 与历史解析委托 `ContentProtection`。重启、Space 切换、未知 ref 与明文探针契约通过；production v11 schema/port/装配留待升级 target 与 clean cutover 同时替换。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |

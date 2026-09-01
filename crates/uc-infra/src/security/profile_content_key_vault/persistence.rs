@@ -1,6 +1,9 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use hkdf::Hkdf;
+use sha2::Sha256;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use zeroize::Zeroizing;
@@ -13,6 +16,7 @@ use super::model::{PersistedVault, ProfileContentKeyVaultError, MAX_VAULT_PLAINT
 const VAULT_FILE: &str = "profile-content-key-vault-v1.json";
 pub(in crate::security) const VAULT_KEY_NAME: &str = "profile_content_vault_key:v1";
 const VAULT_PURPOSE: &[u8] = b"uniclipboard/profile-content-key-vault/v1\0";
+const PROFILE_SEARCH_ROOT_INFO: &[u8] = b"uniclipboard/profile-search-root/v1\0";
 const MAX_ENCRYPTED_VAULT_BYTES: usize = 8 * 1024 * 1024;
 
 pub(super) struct VaultPersistence {
@@ -116,6 +120,24 @@ impl VaultPersistence {
         write_atomically(&self.path, &ciphertext).await
     }
 
+    pub(super) fn derive_profile_search_root(
+        &self,
+    ) -> Result<MasterKey, ProfileContentKeyVaultError> {
+        let vault_key = self.load_existing_key()?;
+        let hkdf = Hkdf::<Sha256>::new(Some(&self.profile_generation), vault_key.as_bytes());
+        let mut output = Zeroizing::new([0u8; MasterKey::LEN]);
+        hkdf.expand(PROFILE_SEARCH_ROOT_INFO, output.as_mut())
+            .map_err(|source| ProfileContentKeyVaultError::Corrupt {
+                source: anyhow::Error::new(HkdfExpandError(source))
+                    .context("derive profile search root"),
+            })?;
+        MasterKey::from_bytes(output.as_ref()).map_err(|source| {
+            ProfileContentKeyVaultError::Corrupt {
+                source: anyhow::Error::new(source).context("decode profile search root"),
+            }
+        })
+    }
+
     #[cfg(test)]
     pub(super) fn path(&self) -> &Path {
         &self.path
@@ -165,6 +187,17 @@ impl VaultPersistence {
         aad
     }
 }
+
+#[derive(Debug)]
+struct HkdfExpandError(hkdf::InvalidLength);
+
+impl fmt::Display for HkdfExpandError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("HKDF output length is invalid")
+    }
+}
+
+impl std::error::Error for HkdfExpandError {}
 
 fn validate_framing(
     encrypted: &EncryptedBlob,

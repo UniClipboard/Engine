@@ -74,6 +74,35 @@ pub struct ResolvedProfileContentKey {
     pub(super) key: MasterKey,
 }
 
+/// 搜索模块可使用的 profile 稳定根能力与已安装保护组快照。
+///
+/// 该类型只在 Infra 内流转，不暴露 vault 外层 AEAD key；搜索模块必须再按
+/// 固定 domain 和保护组构造 group ref 与 term tag。
+pub(crate) struct ProfileSearchCatalog {
+    pub(super) root_key: MasterKey,
+    pub(super) protection_groups: Vec<ProtectionGroupId>,
+}
+
+impl ProfileSearchCatalog {
+    pub(crate) fn root_key(&self) -> &MasterKey {
+        &self.root_key
+    }
+
+    pub(crate) fn protection_groups(&self) -> &[ProtectionGroupId] {
+        &self.protection_groups
+    }
+}
+
+impl std::fmt::Debug for ProfileSearchCatalog {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProfileSearchCatalog")
+            .field("root_key", &"[REDACTED]")
+            .field("protection_groups", &"[REDACTED]")
+            .finish()
+    }
+}
+
 impl ResolvedProfileContentKey {
     pub fn protection_group_id(&self) -> &ProtectionGroupId {
         &self.protection_group_id

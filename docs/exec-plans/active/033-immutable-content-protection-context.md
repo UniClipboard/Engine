@@ -1,6 +1,6 @@
 # 033 不可变内容保护上下文与一次性密文升级
 
-状态：实施中；前三个基础切片、第四步的安全会话切片、第五步的持久密码接口收窄与 V3 inline/UCBL 目标格式切片已完成，032 在本规格完成前暂停实施
+状态：实施中；前三个基础切片、第四步的安全会话切片、第五步的持久密码接口收窄与 V3 payload 目标格式、第六步的多保护组搜索目标模块已完成，032 在本规格完成前暂停实施
 
 本规格取代规格 023 中“CrossSpace 必须把本机历史重封装到目标 MasterKey”的规则，以及规格 028 中“切换前普通本机内容沿用 CrossSpace rebuild/rewrap”的规则。规格 023/028 的准入提交、门禁、恢复和 MLS 成员语义继续有效。
 
@@ -402,9 +402,11 @@ Change: 第一子切片先从 `BlobCipherPort::encrypt/decrypt` 同时删除 `Ac
 Change: 第二子切片把原 JSON `Vec<u8>` V3 envelope 收紧为共享的紧凑二进制格式，避免大 UCBL payload 被 JSON 数字数组放大；新增只读写 V3 的 inline `BlobCipherPort` adapter 与 UCBL store。两者均把 key resolution、purpose HKDF、完整 context AAD 与 AEAD framing 委托给同一个 `ContentProtection`，UCBL 只拥有压缩和外层 framing。跨 Space tracer 证明切换活动 session 后 inline 与 blob 历史仍从 vault 打开，密文不出现 payload、Space、保护组或 purpose，错误转换保留稳定分类与 source。本子切片仍不接 production，也不增加 V1/V2 正常 reader；搜索留给 Step 6。active register、file-set path、transfer/receive 与 directory publish 等专用字段不复制第二套密码 header，其业务序列化和 AAD 继续由所属模块拥有，并在 Step 7 全量转换与 clean cutover 时统一委托 `ContentProtection`。
 Risk: 任一字段遗漏都会在切换后不可读；建立持久负载清单测试，不用一个字符串驱动的万能 rewrapper 隐藏差异。
 
-Step 6:
+Step 6（进行中；多保护组搜索目标模块子切片已完成）:
 File: 搜索 key derivation、search repository/runtime 与索引版本
 Change: 引入 profile 稳定且按 protection group 域分离的 SearchKey，提升索引版本；查询对实际存在文档的保护组生成 token，渲染字段委托 V3 `ContentProtection`。
+
+Change: 第一子切片新增未接 production 的 `V3SearchProtection` 深模块。它从 `ProfileContentVaultKey` 域分离派生 profile 稳定搜索根；索引调用只提交规范词项，活动保护组由 session 固定，输出 opaque group ref 与组隔离 term tags。查询调用只提交索引 `DISTINCT` 得到的 group refs，模块在 vault 已安装组中验证并按“每个查询词一组跨保护组 alternatives”返回 tags，AND 语义不得把所有 tags 扁平后按 `词数 × 组数` 计数。render JSON 与实体 AAD 仍由搜索模块拥有，AEAD、purpose 和历史 key resolution 委托 Search purpose 的 V3 `ContentProtection`。测试证明同词跨组不等、重启/Space 切换稳定、只派生实际索引组、未知 ref 失败关闭且旧组 render 可读。本子切片不修改 v11 production schema/port/装配，也不触发普通重建；group-ref 列、索引版本提升和生产切换必须与 Step 7 target conversion 及最终 clean cutover 同时生效。
 Risk: 多历史保护组增加查询 token 数；对 group 数和 token 批次设明确上限，并以性能测试固定预算。
 
 Step 7（进行中；升级协调基础子切片已完成）:

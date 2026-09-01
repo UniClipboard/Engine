@@ -11,8 +11,8 @@ use crate::space::export_admission_content_key_catalog;
 use super::super::MasterKey;
 use super::model::{
     corrupt, invalid_material, InstalledProfileCatalog, PersistedEntry, PersistedGroup,
-    PersistedVault, ProfileContentKeyVaultError, ResolvedProfileContentKey, FORMAT_VERSION_V1,
-    MAX_ENTRIES_PER_GROUP, MAX_GROUPS, MAX_TOTAL_ENTRIES,
+    PersistedVault, ProfileContentKeyVaultError, ProfileSearchCatalog, ResolvedProfileContentKey,
+    FORMAT_VERSION_V1, MAX_ENTRIES_PER_GROUP, MAX_GROUPS, MAX_TOTAL_ENTRIES,
 };
 
 const GROUP_DIGEST_DOMAIN_V1: &[u8] = b"uniclipboard/protected-group-catalog/v1\0";
@@ -229,6 +229,28 @@ pub(super) fn summary(vault: &PersistedVault, changed: bool) -> InstalledProfile
         entry_count: vault.groups.iter().map(|group| group.entries.len()).sum(),
         changed,
     }
+}
+
+pub(super) fn search_catalog(
+    vault: &PersistedVault,
+    root_key: MasterKey,
+) -> Result<ProfileSearchCatalog, ProfileContentKeyVaultError> {
+    let protection_groups = vault
+        .groups
+        .iter()
+        .map(|group| {
+            ProtectionGroupId::from_string(group.protection_group_id.clone()).map_err(|source| {
+                ProfileContentKeyVaultError::Corrupt {
+                    source: anyhow::Error::new(source)
+                        .context("decode profile search protection group"),
+                }
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ProfileSearchCatalog {
+        root_key,
+        protection_groups,
+    })
 }
 
 fn compare_entries(left: &PersistedEntry, right: &PersistedEntry) -> std::cmp::Ordering {
