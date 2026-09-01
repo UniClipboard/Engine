@@ -8,11 +8,14 @@ use std::sync::Arc;
 use crate::db::ports::DbExecutor;
 use crate::db::schema::file_transfer_events;
 use crate::file_transfer::persistence_cipher::{
-    derive_transfer_persistence_cipher, TransferPersistenceCipher,
+    ResolvedTransferPersistenceProtection, TransferPersistenceProtection,
 };
+use crate::security::ContentProtection;
 use uc_core::file_transfer::{FileTransferEvent, FileTransferEventStorePort};
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::DeriveSpaceSubkeyPort;
+
+const MAX_COMMIT_ATTEMPTS: usize = 4;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Queryable, Selectable)]
@@ -40,8 +43,7 @@ pub(crate) struct NewFileTransferEventRow {
 /// SQLite-backed event store for file transfer lifecycle events.
 pub struct SqliteFileTransferEventStore<E> {
     executor: E,
-    derive_subkey: Arc<dyn DeriveSpaceSubkeyPort>,
-    current_profile: Arc<dyn CurrentProfilePort>,
+    protection: TransferPersistenceProtection,
 }
 
 impl<E> SqliteFileTransferEventStore<E> {
@@ -52,8 +54,14 @@ impl<E> SqliteFileTransferEventStore<E> {
     ) -> Self {
         Self {
             executor,
-            derive_subkey,
-            current_profile,
+            protection: TransferPersistenceProtection::legacy(derive_subkey, current_profile),
+        }
+    }
+
+    pub fn new_v3(executor: E, protection: Arc<ContentProtection>) -> Self {
+        Self {
+            executor,
+            protection: TransferPersistenceProtection::v3(protection),
         }
     }
 }
@@ -62,95 +70,134 @@ impl<E> SqliteFileTransferEventStore<E> {
 impl<E: DbExecutor> FileTransferEventStorePort for SqliteFileTransferEventStore<E> {
     async fn load(&self, transfer_id: &str) -> Result<Vec<FileTransferEvent>> {
         let transfer_id = transfer_id.to_string();
-        let cipher =
-            derive_transfer_persistence_cipher(&self.derive_subkey, &self.current_profile).await?;
-
-        self.executor
-            .run(move |conn| load_events(conn, &transfer_id, &cipher))
+        let rows = self
+            .executor
+            .run(move |conn| load_event_rows(conn, &transfer_id))?;
+        let protection = self.protection.resolve().await?;
+        decode_event_rows(rows, &protection).await
     }
 
     async fn append(&self, event: FileTransferEvent) -> Result<()> {
-        let cipher =
-            derive_transfer_persistence_cipher(&self.derive_subkey, &self.current_profile).await?;
-        self.executor
-            .run(move |conn| append_event(conn, event, &cipher))
+        let protection = self.protection.resolve().await?;
+        for attempt in 0..MAX_COMMIT_ATTEMPTS {
+            let transfer_id = transfer_id_of(&event).to_owned();
+            let sequence = self
+                .executor
+                .run(move |conn| read_next_sequence(conn, &transfer_id))?;
+            let row = prepare_event_row(event.clone(), sequence, &protection).await?;
+            let result = self.executor.run(move |conn| {
+                conn.transaction::<_, anyhow::Error, _>(|conn| append_prepared_event(conn, &row))
+            });
+            match result {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if error.downcast_ref::<TransferCommitConflict>().is_some()
+                        && attempt + 1 < MAX_COMMIT_ATTEMPTS => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(anyhow::anyhow!(
+            "file transfer event append exhausted commit retries"
+        ))
     }
 }
 
-pub(crate) fn load_events(
+pub(crate) fn load_event_rows(
     conn: &mut SqliteConnection,
     transfer_id: &str,
-    cipher: &TransferPersistenceCipher,
-) -> Result<Vec<FileTransferEvent>> {
-    let rows = file_transfer_events::table
+) -> Result<Vec<FileTransferEventRow>> {
+    file_transfer_events::table
         .filter(file_transfer_events::transfer_id.eq(transfer_id))
         .order(file_transfer_events::sequence.asc())
         .load::<FileTransferEventRow>(conn)
-        .with_context(|| format!("failed to load file transfer events for `{transfer_id}`"))?;
-
-    rows.into_iter()
-        .map(|row| {
-            cipher
-                .open_event(
-                    &row.transfer_id,
-                    row.sequence,
-                    &row.event_type,
-                    &row.payload_ciphertext,
-                )
-                .with_context(|| {
-                    format!(
-                        "failed to deserialize file transfer event `{}` for `{}` at sequence {}",
-                        row.event_type, row.transfer_id, row.sequence
-                    )
-                })
-        })
-        .collect()
+        .context("failed to load file transfer events")
 }
 
-pub(crate) fn append_event(
-    conn: &mut SqliteConnection,
-    event: FileTransferEvent,
-    cipher: &TransferPersistenceCipher,
-) -> Result<()> {
-    let transfer_id = transfer_id_of(&event).to_string();
-    let event_type = event_type_of(&event).to_string();
-    let occurred_at_ms = Utc::now().timestamp_millis();
+pub(crate) async fn decode_event_rows(
+    rows: Vec<FileTransferEventRow>,
+    protection: &ResolvedTransferPersistenceProtection,
+) -> Result<Vec<FileTransferEvent>> {
+    let mut events = Vec::with_capacity(rows.len());
+    for row in rows {
+        let event = protection
+            .open_event(
+                &row.transfer_id,
+                row.sequence,
+                &row.event_type,
+                &row.payload_ciphertext,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to deserialize file transfer event `{}` at sequence {}",
+                    row.event_type, row.sequence
+                )
+            })?;
+        events.push(event);
+    }
+    Ok(events)
+}
 
+pub(crate) fn read_next_sequence(conn: &mut SqliteConnection, transfer_id: &str) -> Result<i32> {
     let current_max: Option<i32> = file_transfer_events::table
-        .filter(file_transfer_events::transfer_id.eq(&transfer_id))
+        .filter(file_transfer_events::transfer_id.eq(transfer_id))
         .select(diesel::dsl::max(file_transfer_events::sequence))
         .first(conn)
-        .with_context(|| {
-            format!("failed to read event sequence for file transfer `{transfer_id}`")
-        })?;
+        .context("failed to read file transfer event sequence")?;
 
-    let sequence = current_max.unwrap_or(0) + 1;
-    let payload_ciphertext = cipher
+    current_max
+        .unwrap_or(0)
+        .checked_add(1)
+        .context("file transfer event sequence overflow")
+}
+
+pub(crate) async fn prepare_event_row(
+    event: FileTransferEvent,
+    sequence: i32,
+    protection: &ResolvedTransferPersistenceProtection,
+) -> Result<NewFileTransferEventRow> {
+    let transfer_id = transfer_id_of(&event).to_string();
+    let event_type = event_type_of(&event).to_string();
+    let payload_ciphertext = protection
         .seal_event(&transfer_id, sequence, &event_type, &event)
+        .await
         .with_context(|| format!("failed to seal file transfer event `{event_type}`"))?;
-
-    let row = NewFileTransferEventRow {
+    Ok(NewFileTransferEventRow {
         transfer_id: transfer_id.clone(),
         sequence,
         event_type,
         payload_ciphertext,
-        occurred_at_ms,
-    };
+        occurred_at_ms: Utc::now().timestamp_millis(),
+    })
+}
+
+pub(crate) fn append_prepared_event(
+    conn: &mut SqliteConnection,
+    row: &NewFileTransferEventRow,
+) -> Result<()> {
+    let expected_sequence = read_next_sequence(conn, &row.transfer_id)?;
+    if expected_sequence != row.sequence {
+        return Err(TransferCommitConflict.into());
+    }
 
     diesel::insert_into(file_transfer_events::table)
-        .values(&row)
+        .values(row)
         .execute(conn)
         .with_context(|| {
             format!(
-                "failed to append file transfer event for `{}` at sequence {}",
-                transfer_id, sequence
+                "failed to append file transfer event at sequence {}",
+                row.sequence
             )
         })?;
 
     Ok(())
 }
 
-fn transfer_id_of(event: &FileTransferEvent) -> &str {
+#[derive(Debug, thiserror::Error)]
+#[error("file transfer persistence changed concurrently")]
+pub(crate) struct TransferCommitConflict;
+
+pub(crate) fn transfer_id_of(event: &FileTransferEvent) -> &str {
     match event {
         FileTransferEvent::Started { transfer_id, .. }
         | FileTransferEvent::Progress { transfer_id, .. }

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use diesel::RunQueryDsl as _;
-use uc_core::file_transfer::FileTransferEvent;
+use uc_core::file_transfer::{FileTransferEvent, FileTransferEventStorePort};
 use uc_core::ids::{DeviceId, EntryId, SpaceId};
 use uc_core::ports::clipboard::EntryFileSetRepositoryPort;
 use uc_core::ports::{
@@ -11,7 +11,7 @@ use uc_core::ports::{
     ListProvisionalReceivesPort, LoadMobileConsumableClipboardPort, PublishPhase, ReceiveArtifact,
     ReceiveArtifactOwnership, ReceiveArtifactPhase, ReceiveArtifactRecord,
     ReceiveArtifactResolution, RecordDirectoryPublishPort, RecordReceiveArtifactsPort,
-    SecureStorageError, SecureStoragePort, SeedProvisionalReceivePort,
+    RecordReceiverTransferPort, SecureStorageError, SecureStoragePort, SeedProvisionalReceivePort,
     UpdateProvisionalReceivePathPort,
 };
 
@@ -31,6 +31,7 @@ use crate::db::{
     schema::{clipboard_entry, clipboard_event},
 };
 use crate::file_transfer::persistence_cipher::{TransferMetadata, V3TransferPersistenceCipher};
+use crate::file_transfer::SqliteReceiverFileTransferStore;
 use crate::security::{ContentProtection, MasterKey, ProfileContentKeyVault};
 use crate::space::InMemorySession;
 
@@ -321,7 +322,7 @@ async fn specialized_repositories_use_only_the_selected_v3_strategy() {
     );
 
     let transfers = DieselFileTransferRepository::new_v3(
-        DieselSqliteExecutor::new(pool),
+        DieselSqliteExecutor::new(pool.clone()),
         Arc::clone(&protection),
     );
     transfers
@@ -345,12 +346,41 @@ async fn specialized_repositories_use_only_the_selected_v3_strategy() {
             cached_path: Some("private-transfer-path".to_owned()),
         }]
     );
+    transfers
+        .upsert_pending_transfer(&uc_core::ports::file_transfer::PendingInboundTransfer {
+            transfer_id: "event-transfer-v3".to_owned(),
+            entry_id: "entry-v3".to_owned(),
+            attempt_id: None,
+            origin_device_id: "device-v3".to_owned(),
+            filename: "private-event-original-name".to_owned(),
+            file_size: None,
+            cached_path: "private-event-path".to_owned(),
+            created_at_ms: 15,
+        })
+        .await
+        .unwrap();
+    let receiver = SqliteReceiverFileTransferStore::new_v3(
+        DieselSqliteExecutor::new(pool),
+        Arc::clone(&protection),
+    );
+    let started = FileTransferEvent::started(
+        "event-transfer-v3",
+        "peer-v3",
+        "private-event-updated-name",
+        Some(31),
+    );
+    receiver.append(started.clone()).await.unwrap();
+    assert_eq!(
+        receiver.load("event-transfer-v3").await.unwrap(),
+        vec![started]
+    );
 
     drop(active);
     drop(file_set);
     drop(publish);
     drop(receive);
     drop(transfers);
+    drop(receiver);
     let bytes = std::fs::read(database).unwrap();
     for plaintext in [
         b"private-stage".as_slice(),
@@ -362,6 +392,9 @@ async fn specialized_repositories_use_only_the_selected_v3_strategy() {
         b"private-relative-path",
         b"private-transfer-name",
         b"private-transfer-path",
+        b"private-event-original-name",
+        b"private-event-updated-name",
+        b"private-event-path",
     ] {
         assert!(!bytes
             .windows(plaintext.len())

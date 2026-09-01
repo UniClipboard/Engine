@@ -4,146 +4,212 @@ use diesel::prelude::*;
 use tracing::debug;
 
 use crate::db::schema::file_transfer;
-use crate::file_transfer::persistence_cipher::{TransferMetadata, TransferPersistenceCipher};
+use crate::file_transfer::event_store::sqlite::TransferCommitConflict;
+use crate::file_transfer::persistence_cipher::ResolvedTransferPersistenceProtection;
 use uc_core::file_transfer::{
     FileTransferCancellationReason, FileTransferEvent, FileTransferFailureReason,
 };
 use uc_core::ports::file_transfer::TrackedFileTransferStatus;
 
-pub(crate) fn apply_event(
-    conn: &mut diesel::sqlite::SqliteConnection,
-    event: &FileTransferEvent,
-    cipher: &TransferPersistenceCipher,
-) -> Result<()> {
-    let now_ms = Utc::now().timestamp_millis();
-    let transfer_id = transfer_id_of(event).to_string();
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectionSnapshot {
+    status: String,
+    metadata_ciphertext: Vec<u8>,
+}
 
-    let affected = match event {
-        FileTransferEvent::Started {
-            transfer_id,
-            filename,
-            file_size,
-            ..
-        } => {
-            let Some(mut metadata) = load_metadata(conn, transfer_id, cipher)? else {
-                return Ok(());
-            };
-            metadata.filename = filename.clone();
-            let metadata_ciphertext = cipher.seal_metadata(transfer_id, &metadata)?;
-            diesel::update(
-                file_transfer::table
-                    .filter(file_transfer::transfer_id.eq(transfer_id))
-                    .filter(file_transfer::status.eq_any([
-                        TrackedFileTransferStatus::Pending.as_str(),
-                        TrackedFileTransferStatus::Transferring.as_str(),
-                    ])),
-            )
-            .set((
-                file_transfer::status.eq(TrackedFileTransferStatus::Transferring.as_str()),
-                file_transfer::file_size.eq(file_size.map(u64_to_i64)),
-                file_transfer::metadata_ciphertext.eq(metadata_ciphertext),
-                file_transfer::updated_at_ms.eq(now_ms),
-            ))
-            .execute(conn)?
+pub(crate) struct PreparedProjection {
+    transfer_id: String,
+    expected: Option<ProjectionSnapshot>,
+    mutation: Option<ProjectionMutation>,
+    now_ms: i64,
+}
+
+enum ProjectionMutation {
+    Started {
+        file_size: Option<i64>,
+        metadata_ciphertext: Vec<u8>,
+    },
+    Progress,
+    Completed,
+    Failed(&'static str),
+    Cancelled(&'static str),
+}
+
+pub(crate) fn load_projection_snapshot(
+    conn: &mut diesel::sqlite::SqliteConnection,
+    transfer_id: &str,
+) -> Result<Option<ProjectionSnapshot>> {
+    file_transfer::table
+        .filter(file_transfer::transfer_id.eq(transfer_id))
+        .select((file_transfer::status, file_transfer::metadata_ciphertext))
+        .first::<(String, Vec<u8>)>(conn)
+        .optional()
+        .map(|snapshot| {
+            snapshot.map(|(status, metadata_ciphertext)| ProjectionSnapshot {
+                status,
+                metadata_ciphertext,
+            })
+        })
+        .map_err(Into::into)
+}
+
+pub(crate) async fn prepare_projection(
+    event: &FileTransferEvent,
+    expected: Option<ProjectionSnapshot>,
+    protection: &ResolvedTransferPersistenceProtection,
+) -> Result<PreparedProjection> {
+    let transfer_id = transfer_id_of(event).to_owned();
+    let mutation = match (event, expected.as_ref()) {
+        (_, None) => None,
+        (
+            FileTransferEvent::Started {
+                filename,
+                file_size,
+                ..
+            },
+            Some(snapshot),
+        ) => {
+            let mut metadata = protection
+                .open_metadata(&transfer_id, &snapshot.metadata_ciphertext)
+                .await?;
+            if accepts_event(&snapshot.status, event) {
+                metadata.filename = filename.clone();
+                let metadata_ciphertext = protection.seal_metadata(&transfer_id, &metadata).await?;
+                Some(ProjectionMutation::Started {
+                    file_size: file_size.map(u64_to_i64),
+                    metadata_ciphertext,
+                })
+            } else {
+                None
+            }
         }
-        FileTransferEvent::Progress { transfer_id, .. } => diesel::update(
-            file_transfer::table
-                .filter(file_transfer::transfer_id.eq(transfer_id))
-                .filter(file_transfer::status.eq_any([
-                    TrackedFileTransferStatus::Pending.as_str(),
-                    TrackedFileTransferStatus::Transferring.as_str(),
-                ])),
-        )
-        .set((
-            file_transfer::status.eq(TrackedFileTransferStatus::Transferring.as_str()),
-            file_transfer::updated_at_ms.eq(now_ms),
-        ))
-        .execute(conn)?,
-        FileTransferEvent::Completed { transfer_id, .. } => diesel::update(
-            file_transfer::table
-                .filter(file_transfer::transfer_id.eq(transfer_id))
-                .filter(file_transfer::status.eq_any([
-                    TrackedFileTransferStatus::Pending.as_str(),
-                    TrackedFileTransferStatus::Transferring.as_str(),
-                    TrackedFileTransferStatus::Completed.as_str(),
-                ])),
-        )
-        .set((
-            file_transfer::status.eq(TrackedFileTransferStatus::Completed.as_str()),
-            file_transfer::updated_at_ms.eq(now_ms),
-        ))
-        .execute(conn)?,
-        FileTransferEvent::Failed {
-            transfer_id,
-            reason,
-            ..
-        } => diesel::update(
-            file_transfer::table
-                .filter(file_transfer::transfer_id.eq(transfer_id))
-                .filter(file_transfer::status.eq_any([
-                    TrackedFileTransferStatus::Pending.as_str(),
-                    TrackedFileTransferStatus::Transferring.as_str(),
-                    TrackedFileTransferStatus::Failed.as_str(),
-                ])),
-        )
-        .set((
-            file_transfer::status.eq(TrackedFileTransferStatus::Failed.as_str()),
-            file_transfer::failure_code.eq(Some(failure_reason_of(*reason))),
-            file_transfer::updated_at_ms.eq(now_ms),
-        ))
-        .execute(conn)?,
-        FileTransferEvent::Cancelled {
-            transfer_id,
-            reason,
-            ..
-        } => diesel::update(
-            file_transfer::table
-                .filter(file_transfer::transfer_id.eq(transfer_id))
-                .filter(file_transfer::status.eq_any([
-                    TrackedFileTransferStatus::Pending.as_str(),
-                    TrackedFileTransferStatus::Transferring.as_str(),
-                    TrackedFileTransferStatus::Cancelled.as_str(),
-                ])),
-        )
-        .set((
-            file_transfer::status.eq(TrackedFileTransferStatus::Cancelled.as_str()),
-            file_transfer::failure_code.eq(Some(cancellation_reason_of(*reason))),
-            file_transfer::updated_at_ms.eq(now_ms),
-        ))
-        .execute(conn)?,
+        (FileTransferEvent::Progress { .. }, Some(snapshot))
+            if accepts_event(&snapshot.status, event) =>
+        {
+            Some(ProjectionMutation::Progress)
+        }
+        (FileTransferEvent::Completed { .. }, Some(snapshot))
+            if accepts_event(&snapshot.status, event) =>
+        {
+            Some(ProjectionMutation::Completed)
+        }
+        (FileTransferEvent::Failed { reason, .. }, Some(snapshot))
+            if accepts_event(&snapshot.status, event) =>
+        {
+            Some(ProjectionMutation::Failed(failure_reason_of(*reason)))
+        }
+        (FileTransferEvent::Cancelled { reason, .. }, Some(snapshot))
+            if accepts_event(&snapshot.status, event) =>
+        {
+            Some(ProjectionMutation::Cancelled(cancellation_reason_of(
+                *reason,
+            )))
+        }
+        _ => None,
     };
 
-    if affected == 0 {
-        // No projection row — expected for sender-side transfers, which do not
-        // seed a receiver context. The event is still recorded in the event log
-        // (the transaction wrapping this call handles both); only the
-        // receiver-specific projection update is a no-op.
-        debug!(
-            transfer_id,
-            "no receiver projection row for event; skipping projection update (sender-side or pre-seed)"
-        );
+    Ok(PreparedProjection {
+        transfer_id,
+        expected,
+        mutation,
+        now_ms: Utc::now().timestamp_millis(),
+    })
+}
+
+pub(crate) fn apply_prepared_projection(
+    conn: &mut diesel::sqlite::SqliteConnection,
+    prepared: &PreparedProjection,
+) -> Result<()> {
+    let current = load_projection_snapshot(conn, &prepared.transfer_id)?;
+    if current != prepared.expected {
+        return Err(TransferCommitConflict.into());
+    }
+
+    let Some(expected) = prepared.expected.as_ref() else {
+        debug!("no receiver projection row for event; skipping projection update");
+        return Ok(());
+    };
+    let Some(mutation) = prepared.mutation.as_ref() else {
+        return Ok(());
+    };
+
+    let target = file_transfer::table
+        .filter(file_transfer::transfer_id.eq(&prepared.transfer_id))
+        .filter(file_transfer::status.eq(&expected.status))
+        .filter(file_transfer::metadata_ciphertext.eq(&expected.metadata_ciphertext));
+    let affected = match mutation {
+        ProjectionMutation::Started {
+            file_size,
+            metadata_ciphertext,
+        } => diesel::update(target)
+            .set((
+                file_transfer::status.eq(TrackedFileTransferStatus::Transferring.as_str()),
+                file_transfer::file_size.eq(file_size),
+                file_transfer::metadata_ciphertext.eq(metadata_ciphertext),
+                file_transfer::updated_at_ms.eq(prepared.now_ms),
+            ))
+            .execute(conn)?,
+        ProjectionMutation::Progress => diesel::update(target)
+            .set((
+                file_transfer::status.eq(TrackedFileTransferStatus::Transferring.as_str()),
+                file_transfer::updated_at_ms.eq(prepared.now_ms),
+            ))
+            .execute(conn)?,
+        ProjectionMutation::Completed => diesel::update(target)
+            .set((
+                file_transfer::status.eq(TrackedFileTransferStatus::Completed.as_str()),
+                file_transfer::updated_at_ms.eq(prepared.now_ms),
+            ))
+            .execute(conn)?,
+        ProjectionMutation::Failed(reason) => diesel::update(target)
+            .set((
+                file_transfer::status.eq(TrackedFileTransferStatus::Failed.as_str()),
+                file_transfer::failure_code.eq(Some(*reason)),
+                file_transfer::updated_at_ms.eq(prepared.now_ms),
+            ))
+            .execute(conn)?,
+        ProjectionMutation::Cancelled(reason) => diesel::update(target)
+            .set((
+                file_transfer::status.eq(TrackedFileTransferStatus::Cancelled.as_str()),
+                file_transfer::failure_code.eq(Some(*reason)),
+                file_transfer::updated_at_ms.eq(prepared.now_ms),
+            ))
+            .execute(conn)?,
+    };
+
+    if affected != 1 {
+        return Err(TransferCommitConflict.into());
     }
 
     Ok(())
 }
 
-fn load_metadata(
-    conn: &mut diesel::sqlite::SqliteConnection,
-    transfer_id: &str,
-    cipher: &TransferPersistenceCipher,
-) -> Result<Option<TransferMetadata>> {
-    let ciphertext = file_transfer::table
-        .filter(file_transfer::transfer_id.eq(transfer_id))
-        .select(file_transfer::metadata_ciphertext)
-        .first::<Vec<u8>>(conn)
-        .optional()?;
-    ciphertext
-        .map(|ciphertext| {
-            cipher
-                .open_metadata(transfer_id, &ciphertext)
-                .map_err(Into::into)
-        })
-        .transpose()
+fn accepts_event(status: &str, event: &FileTransferEvent) -> bool {
+    match event {
+        FileTransferEvent::Started { .. } | FileTransferEvent::Progress { .. } => matches!(
+            status,
+            value if value == TrackedFileTransferStatus::Pending.as_str()
+                || value == TrackedFileTransferStatus::Transferring.as_str()
+        ),
+        FileTransferEvent::Completed { .. } => matches!(
+            status,
+            value if value == TrackedFileTransferStatus::Pending.as_str()
+                || value == TrackedFileTransferStatus::Transferring.as_str()
+                || value == TrackedFileTransferStatus::Completed.as_str()
+        ),
+        FileTransferEvent::Failed { .. } => matches!(
+            status,
+            value if value == TrackedFileTransferStatus::Pending.as_str()
+                || value == TrackedFileTransferStatus::Transferring.as_str()
+                || value == TrackedFileTransferStatus::Failed.as_str()
+        ),
+        FileTransferEvent::Cancelled { .. } => matches!(
+            status,
+            value if value == TrackedFileTransferStatus::Pending.as_str()
+                || value == TrackedFileTransferStatus::Transferring.as_str()
+                || value == TrackedFileTransferStatus::Cancelled.as_str()
+        ),
+    }
 }
 
 fn transfer_id_of(event: &FileTransferEvent) -> &str {
