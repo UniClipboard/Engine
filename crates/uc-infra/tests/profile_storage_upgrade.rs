@@ -143,6 +143,10 @@ async fn v2_upgrade_coordination_is_durable_idempotent_and_encrypted() {
         upgrade.ensure_v3().await.unwrap(),
         ProfileStorageUpgradeOutcome::Pending
     );
+    assert_eq!(
+        upgrade.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Pending
+    );
     let first_files = regular_files(&vault);
     assert!(first_files.len() >= 3);
     for (_, bytes) in &first_files {
@@ -181,6 +185,10 @@ async fn empty_profile_uses_the_same_durable_recovery_path() {
         secure_storage.clone(),
         Arc::clone(&keys),
         Arc::clone(&manifests),
+    );
+    assert_eq!(
+        upgrade.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Pending
     );
     assert_eq!(
         upgrade.ensure_v3().await.unwrap(),

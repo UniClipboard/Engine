@@ -208,6 +208,23 @@ impl TargetGenerationStager {
         Ok(())
     }
 
+    /// 按最终双库布局验证所有业务 row 仍由唯一 store 拥有。
+    pub(super) fn verify_runtime_row_ownership(
+        &self,
+        journal: &UpgradeJournalV1,
+    ) -> Result<(), ProfileStorageUpgradeError> {
+        let paths = self.paths(journal);
+        ensure_tables_empty(
+            &paths.payload_output.join(TARGET_PROFILE_DATABASE),
+            SPACE_CONTROL_TABLES,
+        )?;
+        let mut control_forbidden =
+            Vec::with_capacity(PROFILE_DATA_TABLES.len() + PROFILE_COORDINATION_TABLES.len());
+        control_forbidden.extend_from_slice(PROFILE_DATA_TABLES);
+        control_forbidden.extend_from_slice(PROFILE_COORDINATION_TABLES);
+        ensure_tables_empty(&paths.control_database, &control_forbidden)
+    }
+
     fn source_revision(&self) -> Result<u64, ProfileStorageUpgradeError> {
         self.source_pool.persistent_revision().map_err(|source| {
             ProfileStorageUpgradeError::Storage {
@@ -274,6 +291,43 @@ fn generation_token(generation: &[u8; 16]) -> String {
 struct TableNameRow {
     #[diesel(sql_type = diesel::sql_types::Text)]
     name: String,
+}
+
+#[derive(diesel::QueryableByName)]
+struct CountRow {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    count: i64,
+}
+
+fn ensure_tables_empty(path: &Path, tables: &[&str]) -> Result<(), ProfileStorageUpgradeError> {
+    let database = path
+        .to_str()
+        .ok_or_else(|| ProfileStorageUpgradeError::Corrupt {
+            source: anyhow::anyhow!("runtime generation path is invalid"),
+        })?;
+    let mut connection =
+        diesel::sqlite::SqliteConnection::establish(database).map_err(|source| {
+            ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::Error::new(source)
+                    .context("open runtime generation for ownership validation"),
+            }
+        })?;
+    for table in tables {
+        let row = diesel::sql_query(format!("SELECT COUNT(*) AS count FROM \"{table}\""))
+            .get_result::<CountRow>(&mut connection)
+            .map_err(|source| ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::Error::new(source)
+                    .context("validate runtime generation row ownership"),
+            })?;
+        if row.count != 0 {
+            return Err(ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::anyhow!(
+                    "runtime generation contains rows owned by the other store"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn separate_database(
@@ -444,5 +498,28 @@ fn sync_parent_directory(_parent: &Path) -> std::io::Result<()> {
 fn storage_error(source: std::io::Error) -> ProfileStorageUpgradeError {
     ProfileStorageUpgradeError::Storage {
         source: anyhow::Error::new(source).context("persist profile upgrade target generation"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use diesel::RunQueryDsl as _;
+
+    use super::{ensure_tables_empty, SPACE_CONTROL_TABLES};
+    use crate::db::pool::init_db_pool;
+
+    #[test]
+    fn final_profile_ownership_rejects_space_control_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("profile.sqlite");
+        let pool = init_db_pool(database.to_str().unwrap()).unwrap();
+        diesel::sql_query(
+            "INSERT INTO membership_ledger_state (singleton_id, encrypted_payload) \
+             VALUES (1, X'010203')",
+        )
+        .execute(&mut pool.get().unwrap())
+        .unwrap();
+
+        assert!(ensure_tables_empty(&database, SPACE_CONTROL_TABLES).is_err());
     }
 }

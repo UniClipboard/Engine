@@ -10,6 +10,7 @@ mod journal;
 mod persistence;
 mod primary_payloads;
 mod target;
+mod validation;
 
 #[cfg(test)]
 mod field_codec_tests;
@@ -29,6 +30,7 @@ use journal::{UpgradeJournalV1, UpgradePhaseV1};
 use persistence::{UpgradeLeaseResult, UpgradePersistence};
 use primary_payloads::PrimaryPayloadConverter;
 use target::TargetGenerationStager;
+use validation::RuntimeGenerationValidator;
 
 /// 一次完整存储升级检查的稳定结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +79,7 @@ pub struct ProfileStorageUpgrade {
     target: TargetGenerationStager,
     primary_payloads: PrimaryPayloadConverter,
     derived_payloads: DerivedPayloadConverter,
+    validator: RuntimeGenerationValidator,
     in_process: Mutex<()>,
 }
 
@@ -104,6 +107,7 @@ impl ProfileStorageUpgrade {
             target: TargetGenerationStager::new(profile_root, source_pool),
             primary_payloads,
             derived_payloads,
+            validator: RuntimeGenerationValidator::new(),
             in_process: Mutex::new(()),
         }
     }
@@ -194,10 +198,18 @@ impl ProfileStorageUpgrade {
             }
             UpgradePhaseV1::PayloadsConverted => {
                 self.derived_payloads.verify(&journal, &self.target).await?;
+                let verified = self.validator.validate(&journal, &self.target)?;
+                journal.mark_verified(
+                    verified.profile_schema_digest,
+                    verified.control_schema_digest,
+                )?;
+                self.persistence.save_journal(&journal).await?;
             }
-            UpgradePhaseV1::Verified
-            | UpgradePhaseV1::Promoted
-            | UpgradePhaseV1::CleanupPending => {}
+            UpgradePhaseV1::Verified => {
+                self.derived_payloads.verify(&journal, &self.target).await?;
+                self.validator.verify(&journal, &self.target)?;
+            }
+            UpgradePhaseV1::Promoted | UpgradePhaseV1::CleanupPending => {}
         }
 
         Ok(ProfileStorageUpgradeOutcome::Pending)

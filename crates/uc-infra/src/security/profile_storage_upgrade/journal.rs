@@ -45,6 +45,8 @@ pub(super) struct UpgradeJournalV1 {
     payload_blob_tree_digest: Option<[u8; 32]>,
     converted_derived_count: Option<u64>,
     converted_search_document_count: Option<u64>,
+    verified_profile_schema_digest: Option<[u8; 32]>,
+    verified_control_schema_digest: Option<[u8; 32]>,
 }
 
 impl UpgradeJournalV1 {
@@ -83,6 +85,8 @@ impl UpgradeJournalV1 {
             payload_blob_tree_digest: None,
             converted_derived_count: None,
             converted_search_document_count: None,
+            verified_profile_schema_digest: None,
+            verified_control_schema_digest: None,
         }
     }
 
@@ -159,6 +163,24 @@ impl UpgradeJournalV1 {
                 || self.payload_blob_tree_digest.is_none()
                 || self.converted_derived_count.is_none()
                 || self.converted_search_document_count.is_none()))
+            || (matches!(
+                self.phase,
+                UpgradePhaseV1::Detected
+                    | UpgradePhaseV1::TargetStaged
+                    | UpgradePhaseV1::StoresSeparated
+                    | UpgradePhaseV1::PrimaryPayloadsConverted
+                    | UpgradePhaseV1::PayloadsConverted
+            ) && (self.verified_profile_schema_digest.is_some()
+                || self.verified_control_schema_digest.is_some()))
+            || (!matches!(
+                self.phase,
+                UpgradePhaseV1::Detected
+                    | UpgradePhaseV1::TargetStaged
+                    | UpgradePhaseV1::StoresSeparated
+                    | UpgradePhaseV1::PrimaryPayloadsConverted
+                    | UpgradePhaseV1::PayloadsConverted
+            ) && (self.verified_profile_schema_digest.is_none()
+                || self.verified_control_schema_digest.is_none()))
         {
             return Err(ProfileStorageUpgradeError::Corrupt {
                 source: anyhow::anyhow!("profile storage upgrade journal invariants are invalid"),
@@ -233,6 +255,14 @@ impl UpgradeJournalV1 {
 
     pub(super) const fn converted_search_document_count(&self) -> Option<u64> {
         self.converted_search_document_count
+    }
+
+    pub(super) const fn verified_profile_schema_digest(&self) -> Option<[u8; 32]> {
+        self.verified_profile_schema_digest
+    }
+
+    pub(super) const fn verified_control_schema_digest(&self) -> Option<[u8; 32]> {
+        self.verified_control_schema_digest
     }
 
     pub(super) fn mark_target_staged(
@@ -313,6 +343,25 @@ impl UpgradeJournalV1 {
         self.converted_derived_count = Some(derived_count);
         self.converted_search_document_count = Some(search_document_count);
         self.phase = UpgradePhaseV1::PayloadsConverted;
+        self.validate()
+    }
+
+    pub(super) fn mark_verified(
+        &mut self,
+        profile_schema_digest: [u8; 32],
+        control_schema_digest: [u8; 32],
+    ) -> Result<(), ProfileStorageUpgradeError> {
+        if self.phase != UpgradePhaseV1::PayloadsConverted
+            || profile_schema_digest == [0; 32]
+            || control_schema_digest == [0; 32]
+        {
+            return Err(ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::anyhow!("profile upgrade verification transition is invalid"),
+            });
+        }
+        self.verified_profile_schema_digest = Some(profile_schema_digest);
+        self.verified_control_schema_digest = Some(control_schema_digest);
+        self.phase = UpgradePhaseV1::Verified;
         self.validate()
     }
 }
