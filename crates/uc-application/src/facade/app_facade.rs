@@ -1,6 +1,6 @@
 //! `AppFacade` — Slice 1 cross-domain aggregator.
 //!
-//! Per `uc-application/AGENTS.md` §11.4 external consumers reach the
+//! Per `docs/design-docs/layers/application.md` external consumers reach the
 //! application layer exclusively through a facade. `AppFacade` is the
 //! single outward-facing type; internally it just groups sub-facades,
 //! each constructed from its own `*Deps` bundle, so adding a new

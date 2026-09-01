@@ -1,5 +1,5 @@
 //! Application-layer clipboard restore use cases. `pub(crate)` per
-//! `uc-application/AGENTS.md` §11.4 — external callers go through
+//! `docs/design-docs/layers/application.md` — external callers go through
 //! `ClipboardRestoreFacade`.
 
 pub(crate) mod file_snapshot;

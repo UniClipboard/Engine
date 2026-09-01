@@ -6,7 +6,7 @@
 //! shim until Slice 5 / `uc-app` retirement, so the 18+ existing consumers
 //! continue to compile unchanged.
 //!
-//! Per `uc-application/AGENTS.md` §11.4 this use case is a valid public
+//! Per `docs/design-docs/layers/application.md` this use case is a valid public
 //! export (UseCase types are one of the four permitted public exports from
 //! an application-layer module).
 

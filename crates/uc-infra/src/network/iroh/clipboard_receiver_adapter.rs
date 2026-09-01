@@ -3,7 +3,7 @@
 //! The adapter publishes an [`InboundClipboard`] broadcast stream that the
 //! application inbound runtime subscribes to. Actual connections are handled by
 //! [`IrohClipboardReceiverHandler`] — the same `ProtocolHandler` split
-//! pattern we use for pairing / presence (see `uc-infra/AGENTS.md` §4.3):
+//! pattern we use for pairing / presence (see `docs/design-docs/layers/infrastructure.md` §4.3):
 //! adapter owns the broadcast `Sender` and the domain dependencies, the
 //! handler is a cheap `Clone` that iroh's `Router` registers under
 //! [`CLIPBOARD_ALPN`](super::clipboard_dispatch_adapter::CLIPBOARD_ALPN).

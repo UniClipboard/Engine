@@ -3,7 +3,7 @@
 //!
 //! Registered under [`ACTIVE_CLIPBOARD_PULL_ALPN`] as an independent sibling
 //! of the bulk clipboard / presence / pairing / active-clipboard-state ALPNs
-//! (see `uc-infra/AGENTS.md` §4.3). Each inbound connection runs one
+//! (see `docs/design-docs/layers/infrastructure.md` §4.3). Each inbound connection runs one
 //! request → response exchange: the requester sends a content hash, the
 //! handler resolves it through the application-layer
 //! [`ActiveClipboardPullServePort`], and writes back the transfer envelope (or

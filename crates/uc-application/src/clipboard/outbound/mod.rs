@@ -502,7 +502,7 @@ impl ClipboardOutboundFacade {
     /// [`ClipboardOutboundDeps`] once and the facade builds both the
     /// dispatcher (for `dispatch_capture`) and the resend use case (for
     /// `resend_entry`) internally. Keeps the use-case types
-    /// `pub(crate)` per `uc-application/AGENTS.md` §11.4 — bootstrap
+    /// `pub(crate)` per `docs/design-docs/layers/application.md` — bootstrap
     /// never sees the concrete [`ResendEntryUseCase`] / dispatcher
     /// types.
     pub fn new(deps: ClipboardOutboundDeps) -> Self {

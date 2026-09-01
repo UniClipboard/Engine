@@ -2,7 +2,7 @@
 //!
 //! V3-only wire format with zstd compression for payloads exceeding `COMPRESSION_THRESHOLD`.
 //!
-//! # Memory Contract (LOCKED -- from CONTEXT.md)
+//! # Memory Contract
 //! Memory usage is bounded by CHUNK_SIZE x 2 regardless of total payload size:
 //! - Encoder: one plaintext chunk slice (no copy) + one ciphertext Vec<u8> per iteration.
 //! - Decoder: one ciphertext Vec<u8> + one plaintext Vec<u8> per chunk, appended to output.

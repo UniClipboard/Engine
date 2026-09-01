@@ -22,7 +22,7 @@
 //!
 //! ## 协议字段映射
 //!
-//! [`SyncClipboardMeta`] 是**应用层模型**(按 `uc-application/AGENTS.md` §12.2
+//! [`SyncClipboardMeta`] 是**应用层模型**(按 `docs/design-docs/layers/application.md`
 //! 与 wire DTO 区分);webserver 拿到它后再翻译成 SyncClipboard 协议的 wire
 //! JSON:
 //!

@@ -106,7 +106,7 @@
 
 ## 2026-08-30 Spec 029
 
-- 完成 `docs/specs/029-durable-membership-history-anti-entropy.md`，固定逐 peer ACK 水位、加密持久欠账、摘要与缺失 suffix、入站 fan-out 和有界公平调度。
+- 完成 `docs/exec-plans/active/029-durable-membership-history-anti-entropy.md`，固定逐 peer ACK 水位、加密持久欠账、摘要与缺失 suffix、入站 fan-out 和有界公平调度。
 - 验收覆盖链式、树型、交错在线、预算耗尽、ACK 丢失、重启和合法分叉；本轮仅完成设计，生产语义尚未切换。
 - 开始按 Spec 029 实施；确认 TDD seam 为 Core planner、Application 反熵入口、Infra typed transport 和 Desktop E2E。
 

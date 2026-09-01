@@ -5,7 +5,7 @@
 //! stack) so the new Slice 1 invitation flow doesn't pollute the legacy
 //! namespace on the way to its eventual removal (Slice 5).
 //!
-//! All types here are `pub(crate)` per `uc-application/AGENTS.md` §11.4:
+//! All types here are `pub(crate)` per `docs/design-docs/layers/application.md`:
 //! the holder is a cross-use-case flow-state component, not an external
 //! boundary. External callers interact with invitations exclusively
 //! through [`crate::space::SpaceFacade`].

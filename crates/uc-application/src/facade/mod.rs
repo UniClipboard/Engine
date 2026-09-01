@@ -1,6 +1,6 @@
 //! Slice 1 application facade tree.
 //!
-//! Per `uc-application/AGENTS.md` §11.4 external consumers only see the
+//! Per `docs/design-docs/layers/application.md` external consumers only see the
 //! top-level `AppFacade` and the per-domain sub-facades it aggregates.
 //! Use cases live under `crate::usecases::<domain>` and stay `pub(crate)`;
 //! sub-facades expose them through domain-scoped methods.

@@ -1,6 +1,7 @@
 # Space Admission Protocol 维护规则
 
 本目录只向调用方提供单一 `SpaceAdmissionProtocol`。它负责一次 Space 加入从开始、恢复、消息处理到最终结果的完整流程，内部按 Joiner、Sponsor 和 Recovery 三个角色集中各自知识。
+Space 全局入口和事实所有权见 [`docs/design-docs/space-application.md`](../../../../../../docs/design-docs/space-application.md)。
 
 ## 内部负责人
 

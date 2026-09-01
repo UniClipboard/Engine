@@ -1,6 +1,6 @@
 //! [`MobileSyncFacade`] —— 移动端同步功能的应用层入口(P5a.6 起接真实现)。
 //!
-//! 按 `uc-application/AGENTS.md` §11.4, 外部 crate(bootstrap / daemon /
+//! 按 `docs/design-docs/layers/application.md`, 外部 crate(bootstrap / daemon /
 //! tauri / cli)只能通过本目录下的 [`MobileSyncFacade`] 访问 mobile sync
 //! 用例;所有底层 `*UseCase` 类型保持 `pub(crate)`, 不向外暴露。
 //!
@@ -122,7 +122,7 @@ pub use crate::usecases::update_settings::{
 /// error type is declared here. It still translates the core-layer
 /// [`MobileDeviceError`](uc_core::mobile_sync::MobileDeviceError) into an
 /// application-level type instead of leaking it across the crate boundary
-/// (per `uc-application/AGENTS.md` §13.1/§13.2, and mirroring
+/// (per `docs/design-docs/layers/application.md`, and mirroring
 /// [`AuthenticateBasicAuthError`] et al.).
 #[derive(Debug, thiserror::Error)]
 pub enum IsDeviceCredentialCurrentError {

@@ -4,7 +4,7 @@
 //! that the application layer subscribes to. Inbound connections are handled
 //! by [`IrohActiveClipboardReceiverHandler`] — the same `ProtocolHandler`
 //! split pattern used for the bulk clipboard / presence / pairing transports
-//! (see `uc-infra/AGENTS.md` §4.3): the adapter owns the broadcast `Sender`
+//! (see `docs/design-docs/layers/infrastructure.md` §4.3): the adapter owns the broadcast `Sender`
 //! and the domain dependencies, and the handler is a cheap `Clone` that
 //! iroh's `Router` registers under [`ACTIVE_CLIPBOARD_ALPN`].
 //!

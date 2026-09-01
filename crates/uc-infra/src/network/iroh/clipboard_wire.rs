@@ -111,7 +111,7 @@ pub struct InvalidAckByte(pub u8);
 /// Postcard-serialized header — infra-local mirror of
 /// [`ClipboardHeader`](uc_core::ports::ClipboardHeader). Kept separate from
 /// the core type so `uc-core` stays free of `serde` derives on port
-/// structs (see `uc-infra/AGENTS.md` §4.2).
+/// structs (see `docs/design-docs/layers/infrastructure.md` §4.2).
 ///
 /// **Versioning.** Postcard is positional/non-tagged, so a new field cannot
 /// be added in-place without breaking the wire. We keep two concrete wire

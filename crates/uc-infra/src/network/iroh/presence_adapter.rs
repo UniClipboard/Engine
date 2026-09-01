@@ -790,7 +790,7 @@ impl IrohPresenceAdapter {
                 Ok(ReachabilityState::Online)
             }
             Err(err) => {
-                // No iroh error type leaks upward — per `uc-infra/AGENTS.md`
+                // No iroh error type leaks upward — per `docs/design-docs/layers/infrastructure.md`
                 // §9.1 the failure is summarised into `last_state` + an
                 // event. The member stays in the repo; the next dial
                 // attempt is how recovery happens.

@@ -137,7 +137,7 @@ pub(crate) trait MobileActivationAnnouncePort: Send + Sync {
     async fn announce_new(&self, entry_id: EntryId, snapshot: SystemClipboardSnapshot);
 }
 
-// ─── Public types (pub(crate) per AGENTS.md §11.4) ──────────────────────
+// ─── Public types（可见性规则见 docs/design-docs/layers/application.md） ───
 
 /// Input to [`ApplyIncomingMobileClipUseCase::execute`].
 #[derive(Debug, Clone)]

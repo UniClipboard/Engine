@@ -160,7 +160,7 @@ impl MdnsPairingResolver {
                 // Take the sender exactly once. Subsequent matches
                 // become no-ops. Wrapped in `spawn_supervised` so a panic
                 // surfaces as a WARN rather than vanishing (see
-                // `uc-infra/AGENTS.md §13.3.1`).
+                // `docs/design-docs/layers/infrastructure.md §13.3.1`).
                 let tx_for_cb = Arc::clone(&tx_for_cb);
                 uc_observability_contract::spawn_supervised(
                     "pairing.mdns_forward_ticket",

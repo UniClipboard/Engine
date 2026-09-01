@@ -106,7 +106,7 @@ Rust API       UniFFI 绑定          N-API 绑定
 协调器、会话、内部适配、事件总线、缓存和投影构建不得留在 `facade/`；它们分别归入所属领域或
 无业务所有权的 `support/`。稳定事件类型可以由门面公开，事件投递实现不在门面目录。
 
-完整的路径迁移表、Engine 收口规则、删除清单和验收矩阵见[规格 018](../specs/018-domain-oriented-application-layout.md)。
+完整的路径迁移表、Engine 收口规则、删除清单和验收矩阵见[规格 018](../exec-plans/active/018-domain-oriented-application-layout.md)。
 
 ### 领域模块
 
@@ -785,6 +785,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 | 日期 | 主题 | 长期结论 |
 | --- | --- | --- |
+| 2026-09-01 | 文档记录系统重组 | 根与局部 `AGENTS.md` 收敛为短维护地图；长期设计、ADR、产品规格、active/completed 执行计划、生成资料和参考资料分别进入结构化 `docs/` 目录。根 `ARCHITECTURE.md` 成为当前架构入口，架构圣经继续保存详细事实；旧 `docs/adr`、`docs/specs`、`docs/prd`、`docs/diagrams` 和 `docs/migration` 路径不再作为并行入口。 |
 | 2026-08-29 | 文档压缩 | 圣经只保留当前架构事实、稳定边界和维护规则；移除逐切片流水账与已经失效的实现细节。 |
 | 2026-08-29 | Space 成员关系与准入 | Application 是成员关系、设备信任和单一 Space 准入完整流程的唯一负责人；Infra 提供加密存储、密码能力和 Iroh 认证传输，Engine 只组装并控制生命周期。 |
 | 2026-08-29 | 设备信任观察适配 | 增加只读 Infra 适配器，为 Application 已验证的设备范围补充成员名称和可达性；依赖失败保留 source chain，不改变成员资格来源。 |
@@ -888,35 +889,40 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 ## 相关文档
 
 - `AGENTS.md`：仓库不可破坏规则和交付要求。
-- `CONTEXT.md`：统一领域词表。
-- `VISION.md`：长期目标和边界。
-- `docs/README.md`：需求、技术说明和决策记录索引。
-- `docs/specs/uc-engine-interface.md`：稳定操作、结果、事件和宿主能力。
-- `docs/specs/ports.md`：内部能力接口和边界。
+- `ARCHITECTURE.md`：当前架构的根级入口与模块地图。
+- `docs/references/domain-glossary.md`：统一领域词表。
+- `docs/PRODUCT_SENSE.md`：长期目标和边界。
+- `docs/README.md`：文档记录系统总索引。
+- `docs/design-docs/index.md`：长期设计、稳定契约与 ADR 索引。
+- `docs/PLANS.md`：active/completed 执行计划与技术债入口。
+- `docs/SECURITY.md`：工程安全知识入口。
+- `docs/RELIABILITY.md`：恢复、后台任务与验证层次。
+- `docs/design-docs/uc-engine-interface.md`：稳定操作、结果、事件和宿主能力。
+- `docs/design-docs/ports.md`：内部能力接口和边界。
 - `docs/security/encrypted-persistence.md`：密文持久化规则。
 - `docs/security/release-integrity.md`：发布来源和校验规则。
-- `docs/adr/011-reliable-member-revocation.md`：可靠成员移除和密钥世代。
-- `docs/adr/015-offline-first-member-removal.md`：已由 ADR-020 取代的成员移除决策记录。
-- `docs/adr/016-workspace-wide-convergence.md`：已由 ADR-020 取代的工作空间收敛决策记录。
-- `docs/adr/017-pairing-as-workspace-admission.md`：配对作为工作空间内部准入通道的责任边界。
-- `docs/adr/018-domain-oriented-application-layout.md`：应用层按业务领域收口的所有权和目录边界。
-- `docs/adr/019-device-specific-convergence-waiting-status.md`：已由 ADR-020 取代的等待设备状态记录。
-- `docs/adr/020-membership-reconciliation-and-user-decisions.md`：设备上线成员核对、未确认移除决定和分叉关系隔离规则。
-- `docs/adr/021-workspace-convergence-internal-boundaries.md`：已由 ADR-025 取代的旧渐进整理决定。
-- `docs/adr/022-user-initiated-join-supersession.md`：用户明确加入、后台恢复和旧加入安全取代规则。
-- `docs/adr/023-legacy-profile-isolation-and-re-pairing.md`：旧资料升级后本机独立化和全部重新配对规则。
-- `docs/adr/024-reset-space-as-device-management-reset.md`：用户明确重置全部设备关系并建立单设备空间的决策。
-- `docs/adr/025-application-space-membership-one-shot-rewrite.md`：停止渐进迁移并一次性替换旧成员关系的决策。
-- `docs/specs/015-offline-first-member-removal.md`：已由 ADR-020 取代的成员移除说明记录。
-- `docs/specs/016-workspace-wide-convergence.md`：已由 ADR-020 取代的工作空间收敛说明记录。
-- `docs/specs/021-device-trust-reconciliation-product-contract.md`：设备信任完整查询、决定和产品动作边界。
-- `docs/specs/022-current-member-runtime-scope.md`：当前成员运行范围、历史身份与普通授权的一致性规则。
-- `docs/specs/023-durable-membership-proof-and-admission-activation.md`：历史验证材料、准入正式提交、激活门禁、恢复和旧数据迁移规则。
-- `docs/specs/024-workspace-convergence-internal-boundaries.md`：已由规格 027 取代的旧渐进实施记录。
-- `docs/specs/025-user-initiated-join-supersession.md`：用户再次明确加入时安全取代旧本机加入的分阶段实施规格。
-- `docs/specs/026-legacy-profile-isolation-and-re-pairing.md`：旧资料独立化、关系清理和产品提醒的实施规格。
-- `docs/specs/027-application-space-membership-one-shot-rewrite.md`：Application Space 成员关系目标对象、接口、流程、删除清单和验收标准。
-- `docs/specs/028-single-space-admission-protocol.md`：全新单一 Space 准入协议、跨层接入、删除清单和完整验收标准。
-- `docs/specs/029-durable-membership-history-anti-entropy.md`：逐 peer 确认水位、持久传播欠账、公平重试和复杂拓扑验收。
-- `docs/specs/031-application-dependency-surface-deepening.md`：Application port 来源审计、死能力清单、对象图归属和分阶段收敛计划。
-- `docs/specs/033-immutable-content-protection-context.md`：不可变保护上下文、profile 历史 content key vault、一次性 V3 密文升级及无历史重包 CrossSpace 方案。
+- `docs/design-docs/decisions/011-reliable-member-revocation.md`：可靠成员移除和密钥世代。
+- `docs/design-docs/decisions/015-offline-first-member-removal.md`：已由 ADR-020 取代的成员移除决策记录。
+- `docs/design-docs/decisions/016-workspace-wide-convergence.md`：已由 ADR-020 取代的工作空间收敛决策记录。
+- `docs/design-docs/decisions/017-pairing-as-workspace-admission.md`：配对作为工作空间内部准入通道的责任边界。
+- `docs/design-docs/decisions/018-domain-oriented-application-layout.md`：应用层按业务领域收口的所有权和目录边界。
+- `docs/design-docs/decisions/019-device-specific-convergence-waiting-status.md`：已由 ADR-020 取代的等待设备状态记录。
+- `docs/design-docs/decisions/020-membership-reconciliation-and-user-decisions.md`：设备上线成员核对、未确认移除决定和分叉关系隔离规则。
+- `docs/design-docs/decisions/021-workspace-convergence-internal-boundaries.md`：已由 ADR-025 取代的旧渐进整理决定。
+- `docs/design-docs/decisions/022-user-initiated-join-supersession.md`：用户明确加入、后台恢复和旧加入安全取代规则。
+- `docs/design-docs/decisions/023-legacy-profile-isolation-and-re-pairing.md`：旧资料升级后本机独立化和全部重新配对规则。
+- `docs/design-docs/decisions/024-reset-space-as-device-management-reset.md`：用户明确重置全部设备关系并建立单设备空间的决策。
+- `docs/design-docs/decisions/025-application-space-membership-one-shot-rewrite.md`：停止渐进迁移并一次性替换旧成员关系的决策。
+- `docs/exec-plans/completed/015-offline-first-member-removal.md`：已由 ADR-020 取代的成员移除说明记录。
+- `docs/exec-plans/completed/016-workspace-wide-convergence.md`：已由 ADR-020 取代的工作空间收敛说明记录。
+- `docs/product-specs/021-device-trust-reconciliation.md`：设备信任完整查询、决定和产品动作边界。
+- `docs/design-docs/current-member-runtime-scope.md`：当前成员运行范围、历史身份与普通授权的一致性规则。
+- `docs/exec-plans/completed/023-durable-membership-proof-and-admission-activation.md`：历史验证材料、准入正式提交、激活门禁、恢复和旧数据迁移规则。
+- `docs/exec-plans/completed/024-workspace-convergence-internal-boundaries.md`：已由规格 027 取代的旧渐进实施记录。
+- `docs/exec-plans/completed/025-user-initiated-join-supersession.md`：用户再次明确加入时安全取代旧本机加入的分阶段实施规格。
+- `docs/exec-plans/completed/026-legacy-profile-isolation-and-re-pairing.md`：旧资料独立化、关系清理和产品提醒的实施规格。
+- `docs/exec-plans/completed/027-application-space-membership-one-shot-rewrite.md`：Application Space 成员关系目标对象、接口、流程、删除清单和验收标准。
+- `docs/exec-plans/completed/028-single-space-admission-protocol.md`：全新单一 Space 准入协议、跨层接入、删除清单和完整验收标准。
+- `docs/exec-plans/active/029-durable-membership-history-anti-entropy.md`：逐 peer 确认水位、持久传播欠账、公平重试和复杂拓扑验收。
+- `docs/exec-plans/active/030-membership-conflict-resolution-and-chaos-validation.md`：成员分叉选择、恢复与确定性复杂拓扑验收。
+- `docs/exec-plans/active/033-immutable-content-protection-context.md`：不可变保护上下文、profile 历史 content key vault、一次性 V3 密文升级及无历史重包 CrossSpace 方案。

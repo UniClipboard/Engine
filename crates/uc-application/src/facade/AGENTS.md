@@ -1,6 +1,7 @@
 # `facade/` 目录规则
 
 本目录是应用层的对外编排入口，不是业务规则、协议处理或后台实现的存放处。
+跨层与深模块原则见 [`docs/design-docs/engineering-principles.md`](../../../../docs/design-docs/engineering-principles.md)。
 
 ## 门面职责
 

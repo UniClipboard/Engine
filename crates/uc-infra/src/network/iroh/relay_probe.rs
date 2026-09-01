@@ -7,7 +7,7 @@
 //!
 //! 本模块只提供 inherent 方法 —— **不实现任何 application 层 trait**。
 //! application/bootstrap 负责把 [`IrohRelayProbeAdapter::probe`] 包装为
-//! 上层依赖的 port,这条边界由 `uc-infra/AGENTS.md` §4.2 与 `uc-core/AGENTS.md`
+//! 上层依赖的 port,这条边界由 `docs/design-docs/layers/infrastructure.md` §4.2 与 `docs/design-docs/layers/core.md`
 //! §6.2 共同要求(iroh-relay 是 transport-layer 实现,不允许沿端口契约
 //! 泄露到 core)。
 

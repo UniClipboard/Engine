@@ -21,7 +21,7 @@
 //! 只断"bind 不 panic"这一条**弱**不等式；具体 Relay 候选行为留给 Tier C
 //! 抓包验证。
 //!
-//! 见：`.planning/research/PITFALLS.md` Pitfall 8 + 094-CONTEXT.md D-C1。
+//! 见：`.planning/research/PITFALLS.md` Pitfall 8 + `094-CONTEXT.md` D-C1。
 
 use std::time::Duration;
 

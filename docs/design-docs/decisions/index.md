@@ -1,0 +1,25 @@
+# 架构决策记录
+
+ADR 记录重要取舍的背景、备选方案和后果。编号保持历史稳定；被取代的 ADR 不删除，也不重新编号。
+
+- [ADR-002：剪贴板详情资源协议](002-clipboard-resource-protocol.md)
+- [ADR-003：缩略图资源协议](003-thumbnail-resource-protocol.md)
+- [ADR-004：剪贴板恢复单一表示](004-restore-single-representation.md)
+- [ADR-005：抽取 uc-engine](005-uc-engine-extraction.md)
+- [ADR-009：文件传输 Port 拆分](009-file-transfer-port-split.md)
+- [ADR-010：目录同步文件集清单](010-directory-sync-as-file-set-manifest.md)
+- [ADR-011：可靠成员撤销](011-reliable-member-revocation.md)
+- [ADR-012：主动刷新共享设备](012-automatic-shared-device-refresh.md)
+- [ADR-013：本地加密索引](013-local-encrypted-search-index.md)
+- [ADR-014：应用层使用动态 Port](014-dynamic-ports-in-use-cases.md)
+- [ADR-015：离线优先成员移除](015-offline-first-member-removal.md)
+- [ADR-016：工作空间全局收敛](016-workspace-wide-convergence.md)
+- [ADR-017：配对作为工作空间准入](017-pairing-as-workspace-admission.md)
+- [ADR-018：Application 按业务领域收口](018-domain-oriented-application-layout.md)
+- [ADR-019：按设备公开等待状态](019-device-specific-convergence-waiting-status.md)
+- [ADR-020：成员历史核对与用户决定](020-membership-reconciliation-and-user-decisions.md)
+- [ADR-021：成员收敛内部边界](021-workspace-convergence-internal-boundaries.md)
+- [ADR-022：用户加入取代](022-user-initiated-join-supersession.md)
+- [ADR-023：旧资料独立化](023-legacy-profile-isolation-and-re-pairing.md)
+- [ADR-024：设备管理重置](024-reset-space-as-device-management-reset.md)
+- [ADR-025：Application Space 一次性重写](025-application-space-membership-one-shot-rewrite.md)

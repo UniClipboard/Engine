@@ -8,7 +8,7 @@
 //! surface as a `WARN` log line (`event = "task.panicked"`) instead of
 //! disappearing silently.
 //!
-//! This is the "log the panic" layer referenced by `uc-infra/AGENTS.md
+//! This is the "log the panic" layer referenced by `docs/design-docs/layers/infrastructure.md
 //! §13.3.1` ("失败可见 / 不允许悄悄死掉"). Long-lived looping tasks should
 //! instead retain their `JoinHandle` and abort+join it on shutdown (see
 //! `crates/uc-infra/src/network/iroh/net_recovery.rs` +

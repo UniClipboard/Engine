@@ -2,7 +2,7 @@
 
 ## Goal
 
-按 `docs/specs/029-durable-membership-history-anti-entropy.md` 一次性实现逐 peer 认证水位、
+按 `docs/exec-plans/active/029-durable-membership-history-anti-entropy.md` 一次性实现逐 peer 认证水位、
 MasterKey AEAD 持久欠账、摘要/suffix 交换、有界公平重试和入站多跳 fan-out，并恢复
 Desktop 多节点复杂拓扑收敛。
 

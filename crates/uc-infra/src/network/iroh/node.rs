@@ -4,7 +4,7 @@
 //! UDP socket, and the NAT-traversal / relay state. Every business
 //! transport (Space admission, clipboard sync, blob transfer) registers its own
 //! ALPN on the same [`iroh::protocol::Router`] instead of binding a new
-//! endpoint — see `uc-infra/AGENTS.md` §4.2 (technical detail stays
+//! endpoint — see `docs/design-docs/layers/infrastructure.md` §4.2 (technical detail stays
 //! contained) and the Slice 1 decision log on shared endpoint ownership.
 //!
 //! The builder pattern is deliberate: each `install_*` method is where a
@@ -867,7 +867,7 @@ impl IrohNodeBuilder {
     ///   [`PeerAddressRepositoryPort`] for stored NodeAddr bytes, and
     ///   [`ClockPort`] for event timestamps. Returns it as
     ///   `Arc<dyn PresencePort>` so callers depend on the port, not the
-    ///   concrete adapter (`uc-infra/AGENTS.md` §4.3).
+    ///   concrete adapter (`docs/design-docs/layers/infrastructure.md` §4.3).
     ///
     /// Must be called before [`spawn`](Self::spawn). Safe to call alongside
     /// 邀请 discovery 不注册 ALPN；成员与准入 handler 使用互不重叠的 ALPN
@@ -1410,7 +1410,7 @@ impl IrohNodeBuilder {
 
 /// Bootstrap-time failures binding the iroh endpoint. Kept small on
 /// purpose — deeper iroh errors are summarised into a string rather than
-/// threaded as typed variants per `uc-infra/AGENTS.md` §9.1 (infra error
+/// threaded as typed variants per `docs/design-docs/layers/infrastructure.md` §9.1 (infra error
 /// types don't leak third-party error types upward).
 #[derive(Debug, thiserror::Error)]
 pub enum IrohNodeError {

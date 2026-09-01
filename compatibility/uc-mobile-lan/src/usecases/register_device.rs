@@ -18,7 +18,7 @@
 //! [`RegisterMobileShortcutDeviceError`] 的对应变体。
 //!
 //! 失败一律走 [`RegisterMobileShortcutDeviceError`] —— 把底层 port 错误
-//! 翻译为用户/调用方能理解的语义(`uc-application/AGENTS.md` §13)。
+//! 翻译为用户/调用方能理解的语义(`docs/design-docs/layers/application.md`)。
 
 use std::sync::Arc;
 

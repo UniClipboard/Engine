@@ -13,7 +13,7 @@
 //!
 //! The aggregate's `InvitationEvent::Issued` is intentionally **not**
 //! surfaced through an event bus in this slice — no subscriber needs it
-//! yet, and §14.3 of `uc-application/AGENTS.md` forbids emitting events
+//! yet, and §14.3 of `docs/design-docs/layers/application.md` forbids emitting events
 //! with no consumer.
 //!
 //! [`InMemoryPairingInvitationHolder`]:

@@ -15,7 +15,7 @@
 //!
 //! ## 模块导出
 //!
-//! 按 `uc-application/AGENTS.md` §11.4,只暴露 Facade + Query/Result/Error +
+//! 按 `docs/design-docs/layers/application.md`,只暴露 Facade + Query/Result/Error +
 //! 订阅事件类型。`PeerReachabilityChanged` 从 `uc-core` 透出以便上层 crate 订阅
 //! `subscribe_presence_events()` 时不用直接依赖 `uc-core::ports`。
 
