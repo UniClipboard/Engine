@@ -69,7 +69,7 @@ impl JoinerAdmissionService {
                     phase = "joiner_activation_committed",
                     elapsed_ms = started.elapsed().as_millis() as u64,
                     outcome = "ok",
-                    "配对阶段完成"
+                    "pairing phase completed"
                 );
                 return (report, Some(outcome));
             }

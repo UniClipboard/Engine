@@ -97,7 +97,7 @@ impl AdmissionRecoveryService {
                 channel = channel_kind.as_str(),
                 elapsed_ms = connection_started.elapsed().as_millis() as u64,
                 outcome = if established.is_ok() { "ok" } else { "error" },
-                "配对阶段完成"
+                "pairing phase completed"
             );
 
             let mut exchange = match established {
@@ -165,7 +165,7 @@ impl AdmissionRecoveryService {
                 message_kind = ?pending_exchange.request_envelope().kind(),
                 elapsed_ms = exchange_started.elapsed().as_millis() as u64,
                 outcome = if exchanged.is_ok() { "ok" } else { "error" },
-                "配对阶段完成"
+                "pairing phase completed"
             );
             match exchanged {
                 Ok(reply) => {
@@ -189,7 +189,7 @@ impl AdmissionRecoveryService {
                 deferred_count = report.deferred_count,
                 rejected_count = report.rejected_count,
                 recovery_required_count = report.recovery_required_count,
-                "配对恢复轮次完成"
+                "pairing recovery round completed"
             );
         }
 

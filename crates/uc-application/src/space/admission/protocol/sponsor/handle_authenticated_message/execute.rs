@@ -41,7 +41,7 @@ impl SponsorAdmissionService {
             message_kind = ?kind,
             elapsed_ms = started.elapsed().as_millis() as u64,
             outcome = if result.is_ok() { "ok" } else { "error" },
-            "配对阶段完成"
+            "pairing phase completed"
         );
         result
     }

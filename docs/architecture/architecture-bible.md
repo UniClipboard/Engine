@@ -858,6 +858,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-31 | F6 深链离线 Sponsor 恢复 | Desktop 从 A→B→C→D→E→F 深链形成两条七成员 sibling，真实停止 B/D 后由 F 选择 E 分支。Target 恢复 prepare 将 external commit 作为持久 group-update 欠账扇出给其他 Active 目标成员；TargetCommitted 在同一加密 ledger 流程中完成 conflict、恢复 recipient 关系，并使旧 sibling evidence 幂等。A/C/E/F 最终 branch、head、MLS epoch 与相邻正文均收敛，恢复不依赖原 Sponsor 在线。 |
 | 2026-08-31 | F7 三分支公平反熵 | Desktop 十节点从链式七成员基线并发形成三条八成员 sibling；分组分区只保留组内连接，并在 A–B 单冲突边存在时让落后合法 peer D 重连。D 仍在有界窗口内补齐 A/G/H 分支的 branch、head 与 MLS epoch，证明冲突 peer 不饿死合法反熵。十节点完整有向正文矩阵同时验证分支内通信与跨分支关闭式隔离。 |
 | 2026-09-01 | 双设备配对性能观测 | Application admission protocol 以 `admission.performance` 目标记录 Joiner 状态落盘、认证信道建立、每类消息交换、Sponsor 处理、激活提交和恢复轮次耗时；字段仅含固定阶段、稳定消息类型、结果分类、计数与毫秒值，不记录邀请、设备、地址、凭据或密钥。Engine `dev-tools` 增加显式运行的双设备一秒热路径门禁，继续只从公开 operation 与成员诊断观察完成。该切片不改变准入状态机或生产超时。 |
+| 2026-09-01 | 配对性能日志语言统一 | 保留 `admission.performance` 正式脱敏 tracing 及全部结构化字段，将事件消息统一为英文；本轮仅调整日志文本，不改变准入流程、性能门禁或架构语义。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |

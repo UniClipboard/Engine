@@ -2063,7 +2063,7 @@ async fn two_device_hot_path_pairing_completes_within_one_second() {
         phase = "public_pairing_active",
         elapsed_ms = elapsed.as_millis() as u64,
         budget_ms = PAIRING_HOT_PATH_BUDGET.as_millis() as u64,
-        "双设备热路径配对验收完成"
+        "two-device hot-path pairing acceptance completed"
     );
 
     assert!(

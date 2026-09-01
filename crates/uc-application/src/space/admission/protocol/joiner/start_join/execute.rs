@@ -97,7 +97,7 @@ impl JoinerAdmissionService {
             target: "admission.performance",
             phase = "joiner_start_persisted",
             elapsed_ms = started.elapsed().as_millis() as u64,
-            "配对阶段完成"
+            "pairing phase completed"
         );
 
         Ok(JoinSpaceResult {
