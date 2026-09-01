@@ -50,6 +50,16 @@
 - 评审跨层改动时必须做“删除检查”：设想删除负责该功能的模块；如果复杂度只是重新散落到多个调用方，说明模块真正隐藏了复杂度；如果删除后几乎没有变化，说明它只是转发层，应当合并或重新划分职责。
 - 文件多不是问题，知识分散才是问题。一个行为即使需要修改多个层，也必须能从负责模块的入口和测试读懂；不得要求维护者同时追踪多个文件才能还原基本流程。
 
+### 运行期观测装配范式
+
+- 跨层业务链路的持续计时、结果分类和阶段诊断必须通过 `uc-engine` 组装层的 port decorator 实现；不得在 `uc-application` 业务调用点散布 `Instant`、`tracing` 或手工阶段记录函数。
+- Engine 私有 decorator 统一放在 `crates/uc-engine/src/assembly/observability/<domain>.rs`，领域规模增长后可拆为同名子目录；每个业务领域拥有自己的具体 `ObservedX`、私有操作枚举、明确 observation policy 和结构化事件 schema。
+- 每个领域必须提供一个主要装配入口，将真实 port 集中包装后交给 Application。返回另一个 port 的能力也必须继续包装返回值，例如 transport 建链成功后包装 authenticated exchange，不能只观察外层调用。
+- 允许复用的是“在 Engine 组装边界装饰 port”的结构，不得创建跨领域的 `Observed<T>`、万能 `record_performance_phase()`、字符串驱动 phase 注册表，或由调用方传入开始时间、成功布尔值和可选字段的通用埋点接口。
+- decorator 只能观察依赖调用，不得改变业务结果、错误 source、重试、持久化或通信顺序；观测失败不得影响业务结果。
+- operation、outcome 和分类字段必须来自固定枚举或固定映射。日志只能包含经批准的稳定分类、计数和耗时；错误文本、业务负载、邀请、设备名、地址、凭据、密钥、令牌、文件名和路径不得进入观测事件。
+- 新增或修改 decorator 时，测试至少覆盖成功与失败的 policy 决策、适用的空结果降噪策略，以及返回 port 的继续包装；同时验证 Application 调用点未重新引入计时或 tracing。
+
 ## 交付前检查
 
 不涉及行为改动时，至少运行：

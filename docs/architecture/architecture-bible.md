@@ -533,6 +533,10 @@ Application 可以把依赖失败转换为稳定类别，但转换不能删除�
 
 日志不得包含剪贴板内容、密码、密钥、完整令牌、文件名、文件路径、设备备注或可恢复这些内容的派生值。需要排障时记录稳定编号、阶段、计数、耗时和脱敏身份。
 
+跨层业务链路的持续性能观测归 Engine 组装层所有。`crates/uc-engine/src/assembly/observability/` 按业务领域保存实现 Application port 的具体 decorator；Application 继续只编排流程，不接触 `Instant`、tracing target 或观测字段。每个领域通过一个主要装配入口集中选择 observation policy 并包装真实能力；port 返回的后续能力也由同一领域继续包装，例如准入 transport 返回的 authenticated exchange。
+
+该范式只复用“在组装边界装饰 port”的结构，不建立跨领域万能观测框架。每个领域分别拥有固定操作枚举、明确降噪策略和稳定事件 schema；禁止 `Observed<T>`、通用 phase 字符串注册表，以及要求业务调用方传入开始时间、成功布尔值或可选字段的记录函数。Decorator 不得改变业务结果、错误 source、重试或调用顺序，字段仍服从本节隐私边界。
+
 成员资料交接日志记录排队、发送开始、接收确认和重试四个阶段；每条只包含脱敏目标身份、资料数量、批次数、单批大小、单批上限、尝试次数和稳定失败类别。重试还记录下一次尝试时间。设备名、地址原文、安全资料和它们的摘要都不得写入日志。
 
 移动绑定在系统日志（OSLog / logcat）之外叠加按天滚动的文件层，写入宿主 cache 目录的 `logs/` 子目录，文件名为 `engine.YYYY-MM-DD.txt`，只接收 `info` 及以上级别；系统日志层不加过滤。日志目录由宿主能力提供，创建失败时降级为仅系统层，不影响启动。
@@ -857,7 +861,8 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-31 | F5 环形冲突幂等传播 | Application ledger 对已记录的同来源 conflict evidence 返回现有响应而不重复提交；Desktop 六节点从共同历史形成 E/F 两条 sibling 分支，再把共同成员 A-B-C-D 接成单环。冲突沿 B-C 与 D-A 两个方向传播后，每端只公开一个设备组选择，重复刷新不增加 membership effects。peer 重试账务 revision 可独立推进，不作为 conflict 消息环判据。 |
 | 2026-08-31 | F6 深链离线 Sponsor 恢复 | Desktop 从 A→B→C→D→E→F 深链形成两条七成员 sibling，真实停止 B/D 后由 F 选择 E 分支。Target 恢复 prepare 将 external commit 作为持久 group-update 欠账扇出给其他 Active 目标成员；TargetCommitted 在同一加密 ledger 流程中完成 conflict、恢复 recipient 关系，并使旧 sibling evidence 幂等。A/C/E/F 最终 branch、head、MLS epoch 与相邻正文均收敛，恢复不依赖原 Sponsor 在线。 |
 | 2026-08-31 | F7 三分支公平反熵 | Desktop 十节点从链式七成员基线并发形成三条八成员 sibling；分组分区只保留组内连接，并在 A–B 单冲突边存在时让落后合法 peer D 重连。D 仍在有界窗口内补齐 A/G/H 分支的 branch、head 与 MLS epoch，证明冲突 peer 不饿死合法反熵。十节点完整有向正文矩阵同时验证分支内通信与跨分支关闭式隔离。 |
-| 2026-09-01 | 双设备配对性能观测 | Engine 组装以 `ObservedAdmissionRecoveryState` 装饰真实恢复状态 port，集中记录类型化 load/commit 操作的耗时、结果与可选加载计数；Application 恢复流程不接触时钟、日志 target 或观测字段。显式 `ObservationPolicy` 抑制成功空 load，日志不包含邀请、设备、地址、凭据或密钥。Engine `dev-tools` 的一秒热路径门禁继续只从公开 operation 与成员诊断观察完成。 |
+| 2026-09-01 | 双设备配对性能观测 | Engine 在 `assembly/observability/admission.rs` 通过 `ObservedAdmissionPorts` 集中装饰恢复状态、认证建链与消息交换、Sponsor 状态、Joiner Candidate、Joiner activation 和 Space session transition port；Application 调用点不接触时钟、日志 target 或观测字段。各 decorator 使用类型化操作与显式 policy，抑制成功空恢复/激活 load，日志不包含邀请、设备、地址、凭据或密钥。Engine `dev-tools` 的一秒热路径门禁继续只从公开 operation 与成员诊断观察完成。 |
+| 2026-09-01 | Engine port decorator 观测范式 | 持续跨层观测统一归 `crates/uc-engine/src/assembly/observability/<domain>.rs`（规模增长后可拆同名子目录）：具体 decorator 实现 Application port，领域装配入口集中选择 policy，返回 port 的能力继续包装。禁止跨领域万能 `Observed<T>`、字符串 phase 注册表及业务调用点手工计时；该范式可扩展到剪贴板、成员和其他领域而不共享业务事件 schema。 |
 | 2026-09-01 | 配对性能日志语言统一 | `admission.performance` decorator 与性能验收日志使用英文消息和固定结构化字段；本轮不改变准入流程、持久化语义或生产超时。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |

@@ -1,4 +1,3 @@
-pub(crate) mod admission_observability;
 pub(crate) mod blob_tasks;
 pub(crate) mod clipboard_runtime;
 pub(crate) mod deps;
@@ -9,6 +8,7 @@ pub(crate) mod lifecycle;
 #[cfg(feature = "lan-compat")]
 pub(crate) mod mobile_lan;
 pub(crate) mod network;
+pub(crate) mod observability;
 pub(crate) mod platform;
 pub(crate) mod search;
 pub(crate) mod sync_engine;
