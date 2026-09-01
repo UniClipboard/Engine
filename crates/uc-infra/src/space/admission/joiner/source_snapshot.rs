@@ -38,6 +38,9 @@ fn map_manifest_error(
         ActiveSpaceGenerationManifestStoreError::Storage => {
             SpaceAdmissionStateStoreError::Unavailable
         }
-        ActiveSpaceGenerationManifestStoreError::Corrupt => SpaceAdmissionStateStoreError::Corrupt,
+        ActiveSpaceGenerationManifestStoreError::Corrupt
+        | ActiveSpaceGenerationManifestStoreError::UnsupportedVersion => {
+            SpaceAdmissionStateStoreError::Corrupt
+        }
     }
 }

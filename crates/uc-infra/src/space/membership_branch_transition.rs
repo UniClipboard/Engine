@@ -81,7 +81,8 @@ fn map_manifest_error(
                 source: anyhow::Error::new(error),
             }
         }
-        ActiveSpaceGenerationManifestStoreError::Corrupt => {
+        ActiveSpaceGenerationManifestStoreError::Corrupt
+        | ActiveSpaceGenerationManifestStoreError::UnsupportedVersion => {
             PrepareMembershipBranchTransitionError::Invalid {
                 source: anyhow::Error::new(error),
             }

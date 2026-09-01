@@ -1693,7 +1693,8 @@ fn map_branch_manifest_error(
         super::ActiveSpaceGenerationManifestStoreError::Storage => {
             branch_transition_unavailable(anyhow::Error::new(source))
         }
-        super::ActiveSpaceGenerationManifestStoreError::Corrupt => {
+        super::ActiveSpaceGenerationManifestStoreError::Corrupt
+        | super::ActiveSpaceGenerationManifestStoreError::UnsupportedVersion => {
             branch_transition_invalid_with_source(anyhow::Error::new(source))
         }
     }

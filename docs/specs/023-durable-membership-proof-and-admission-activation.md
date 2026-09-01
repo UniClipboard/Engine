@@ -1134,34 +1134,32 @@ S2 封存的 `completion_recovery_deliveries`；每份只绑定一个父历史 m
 
 ## Space transition within J3
 
+> 后续规格 033 取代本节中 CrossSpace 对本机历史执行 source final snapshot、目标 MasterKey 重封装和数据库/blob generation 替换的规则。完成一次 V3 profile 存储升级后，CrossSpace 复用 profile data generation，只切换目标 Space control generation 与新写入保护上下文；本节其余准入门禁、持久 phase 和失败恢复语义继续有效。
+
 J3 是准入负责人的内部子事务，不是新的产品流程。三类本机状态固定如下：
 
 | 类型 | J3 行为 |
 | --- | --- |
 | `Fresh` | 验证目标暂存世代，创建首个 `ActiveSpaceGenerationManifestV2`，从 manifest 加载 session 和运行入口 |
 | `SameSpace` | 不备份或重封装本地历史；在当前 Space 内提升同一 AddDevice、证明和目标安全世代，仍遵守 Complete 前门禁 |
-| `CrossSpace` | 恢复 `CrossSpaceTransitionV2`，排空来源写入、补齐最终备份、重封装、提升目标 manifest，再恢复目标运行入口 |
+| `CrossSpace` | 恢复 transition、排空来源运行期、安装目标 catalog，复用 profile data generation 提升目标 control manifest，再恢复目标运行入口；不重封装本机历史 |
 
 Cross-Space 的固定执行顺序：
 
 1. 在保存 Complete 后把 phase 推进为 `ActivationStarted`，取得唯一 Space 切换租约；新的本地操作返回
    Pending/InvalidState，后台网络和全部来源写入暂停并排空。崩溃重启默认没有运行入口，先从该 phase 恢复。
-2. 读取来源当前 revision，把 J1 后新增、修改和删除的全部 MasterKey 业务负载补进加密备份，保存
-   `final_source_revision`、规范清单和摘要后进入 `SourceFinalized`。无法证明备份覆盖最终 revision 时失败
-   关闭，不能继续使用旧快照。
-3. 从稳定迁移备份逐条用目标 MasterKey 重封装到 `target_generation`；每条按记录标识、来源 revision 和
-   目标摘要幂等。全部条目、不可读保留项和最终清单核对成功后进入 `DataRewrapped`。中途主表或暂存表
-   混合不可见，因为活动 manifest 尚未改变且运行入口关闭。
-4. 使用生产读取入口重开并验证目标 keyslot、V3 工作空间状态、关系、安全状态、内容和搜索投影。把来源
-   清理意图、目标世代引用和 manifest 摘要写入同一激活日志，再原子替换 `ActiveSpaceGenerationManifestV2`，进入
-   `TargetPromoted`。setup 状态由新 manifest 同事务投影；任何独立 setup JSON 不得先行切换。
-5. 从新 manifest 加载内存 session，验证 SpaceId、MasterKey/keyslot、OpenMLS group/epoch、安全承诺和
-   WorkspaceConvergence 摘要一致。确认本机取消已在 Commit 时稳定归类为 `TooLateCommitted` 后，恢复目标
-   接收、成员、搜索和内容活动，并在同一恢复边界保存 Active、Ack 重建材料和 `CleanupPending`；这之前不能
-   向产品或网络暴露可运行状态。
-6. 终态已经重封装到 profile key 后，幂等删除来源关系/安全恢复状态、迁移备份、退役世代和 wrapped
-   attempt data key。清理失败不回滚 manifest 或 Active，
-   后台继续；扫描必须证明普通入口只从目标 manifest 解析，不会被残留来源记录重新带回。
+2. 验证 profile 已完成规格 033 的 V3 storage upgrade，读取并固定当前 `profile_data_generation`。若仍是
+   V1/V2 profile，先退出 J3 并由启动升级负责人完成升级；CrossSpace 自身不得调用旧 reader 或 payload rewrap。
+3. 验证目标 keyslot、Space control generation、MLS group/epoch、安全承诺、成员关系和完整 content key catalog；把目标 catalog 原子安装到
+   profile 加密 key vault。重复安装必须按保护组与 catalog 摘要幂等，冲突失败关闭。
+4. 结束、取消或隔离来源 Space 的在途发送、接收和目录发布，构造复用同一 `profile_data_generation`、只替换
+   SpaceId/keyslot/control generation 的 V3 manifest。验证完成后原子提升 manifest，进入 `TargetPromoted`；
+   SQLite、blob 和搜索历史在该过程中不复制、不扫描、不重加密。
+5. 从新 manifest 加载目标 MLS/security session，把目标 protection group 设置为新写入上下文。确认本机取消已在
+   Commit 时稳定归类为 `TooLateCommitted` 后，恢复目标接收、成员、搜索和内容活动，并在同一恢复边界保存
+   Active、Ack 重建材料和 `CleanupPending`；这之前不能向产品或网络暴露可运行状态。
+6. 幂等删除退役 Space control generation、transition 暂存和 wrapped attempt data key。
+   清理失败不回滚 manifest 或 Active，后台继续；不得删除仍用于本机历史读取的来源 protection group catalog。
 
 profile 级 `WorkspaceConvergence::scan_recoverable()` 是新状态的唯一启动恢复入口，即使没有活动 Space
 也必须先构造。启动顺序固定为：解锁 ProfileAdmissionMasterKey 和其他恢复所需安全存储引用，导入一次

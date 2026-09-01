@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
-use uc_core::membership::ActiveSpaceGenerationManifestV2;
+use uc_core::ids::SpaceId;
+use uc_core::membership::{ActiveRuntimeLayout, ActiveSpaceGenerationManifestV2};
 
 use super::{AdmissionKeyError, AdmissionKeyManager};
 
@@ -11,6 +13,67 @@ const ACTIVE_GENERATION_MANIFEST_FILE: &str = ".active-space-manifest-v2";
 const ACTIVE_GENERATION_MANIFEST_PURPOSE: &[u8] = b"active-space-manifest-v2";
 const DEVICE_RESET_JOURNAL_FILE: &str = ".device-management-reset-v1";
 const DEVICE_RESET_JOURNAL_PURPOSE: &[u8] = b"device-management-reset-v1";
+const ACTIVE_RUNTIME_MANIFEST_FORMAT_V3: u16 = 3;
+const ACTIVE_RUNTIME_MANIFEST_DIGEST_DOMAIN_V3: &[u8] =
+    b"uniclipboard/active-runtime-manifest/v3\0";
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct PersistedActiveRuntimeManifestV3 {
+    format_version: u16,
+    space_id: String,
+    keyslot_generation: [u8; 16],
+    profile_data_generation: [u8; 16],
+    space_control_generation: [u8; 16],
+    manifest_digest: [u8; 32],
+}
+
+impl PersistedActiveRuntimeManifestV3 {
+    #[cfg(test)]
+    fn from_layout(layout: &ActiveRuntimeLayout, keyslot_generation: [u8; 16]) -> Self {
+        let mut persisted = Self {
+            format_version: ACTIVE_RUNTIME_MANIFEST_FORMAT_V3,
+            space_id: layout.space_id().as_ref().to_owned(),
+            keyslot_generation,
+            profile_data_generation: *layout.profile_data_generation(),
+            space_control_generation: *layout.space_control_generation(),
+            manifest_digest: [0; 32],
+        };
+        persisted.manifest_digest = persisted.expected_digest();
+        persisted
+    }
+
+    fn expected_digest(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(ACTIVE_RUNTIME_MANIFEST_DIGEST_DOMAIN_V3);
+        hasher.update(self.format_version.to_be_bytes());
+        hasher.update((self.space_id.len() as u64).to_be_bytes());
+        hasher.update(self.space_id.as_bytes());
+        hasher.update(self.keyslot_generation);
+        hasher.update(self.profile_data_generation);
+        hasher.update(self.space_control_generation);
+        hasher.finalize().into()
+    }
+}
+
+fn decode_v3_manifest(
+    plaintext: &[u8],
+) -> Result<(ActiveRuntimeLayout, [u8; 16]), ActiveSpaceGenerationManifestStoreError> {
+    let persisted: PersistedActiveRuntimeManifestV3 = postcard::from_bytes(plaintext)
+        .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
+    if persisted.format_version != ACTIVE_RUNTIME_MANIFEST_FORMAT_V3
+        || persisted.keyslot_generation == [0; 16]
+        || persisted.manifest_digest != persisted.expected_digest()
+    {
+        return Err(ActiveSpaceGenerationManifestStoreError::Corrupt);
+    }
+    let layout = ActiveRuntimeLayout::new(
+        SpaceId::from_string(persisted.space_id),
+        persisted.profile_data_generation,
+        persisted.space_control_generation,
+    )
+    .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
+    Ok((layout, persisted.keyslot_generation))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DeviceManagementResetJournalV1 {
@@ -35,6 +98,8 @@ pub enum ActiveSpaceGenerationManifestStoreError {
     Storage,
     #[error("active space generation manifest is corrupt")]
     Corrupt,
+    #[error("active space generation manifest version is not active yet")]
+    UnsupportedVersion,
 }
 
 pub struct ActiveSpaceGenerationManifestStore {
@@ -63,16 +128,7 @@ impl ActiveSpaceGenerationManifestStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
         };
-        let plaintext = self
-            .keys
-            .open_profile_payload(ACTIVE_GENERATION_MANIFEST_PURPOSE, &ciphertext)
-            .map_err(map_key_error)?;
-        let manifest: ActiveSpaceGenerationManifestV2 = postcard::from_bytes(&plaintext)
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
-        manifest
-            .validate()
-            .then_some(Some(manifest))
-            .ok_or(ActiveSpaceGenerationManifestStoreError::Corrupt)
+        self.decode(&ciphertext).map(Some)
     }
 
     pub fn load_sync(
@@ -95,12 +151,23 @@ impl ActiveSpaceGenerationManifestStore {
             .keys
             .open_profile_payload(ACTIVE_GENERATION_MANIFEST_PURPOSE, ciphertext)
             .map_err(map_key_error)?;
-        let manifest: ActiveSpaceGenerationManifestV2 = postcard::from_bytes(&plaintext)
+        let (format_version, _) = postcard::take_from_bytes::<u16>(&plaintext)
             .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
-        manifest
-            .validate()
-            .then_some(manifest)
-            .ok_or(ActiveSpaceGenerationManifestStoreError::Corrupt)
+        match format_version {
+            uc_core::membership::ACTIVE_SPACE_GENERATION_MANIFEST_FORMAT_V2 => {
+                let manifest: ActiveSpaceGenerationManifestV2 = postcard::from_bytes(&plaintext)
+                    .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
+                manifest
+                    .validate()
+                    .then_some(manifest)
+                    .ok_or(ActiveSpaceGenerationManifestStoreError::Corrupt)
+            }
+            ACTIVE_RUNTIME_MANIFEST_FORMAT_V3 => {
+                decode_v3_manifest(&plaintext)?;
+                Err(ActiveSpaceGenerationManifestStoreError::UnsupportedVersion)
+            }
+            _ => Err(ActiveSpaceGenerationManifestStoreError::Corrupt),
+        }
     }
 
     pub async fn promote(
@@ -393,5 +460,104 @@ mod tests {
         store.promote(&second).await.unwrap();
         assert_eq!(store.load().await.unwrap(), Some(second));
         assert_eq!(store.load_sync().unwrap(), store.load().await.unwrap());
+    }
+
+    #[test]
+    fn v3_manifest_codec_matches_canonical_digest_and_round_trips_layout() {
+        let layout = uc_core::membership::ActiveRuntimeLayout::new(
+            uc_core::ids::SpaceId::from_str("space-a"),
+            [0x22; 16],
+            [0x33; 16],
+        )
+        .unwrap();
+        let persisted = PersistedActiveRuntimeManifestV3::from_layout(&layout, [0x11; 16]);
+
+        assert_eq!(
+            hex::encode(persisted.manifest_digest),
+            "c312dedfa771d511759acd84474db8ee823c775e1f64aa36d514d17fec6abb24"
+        );
+
+        let encoded = postcard::to_stdvec(&persisted).unwrap();
+        let (decoded_layout, decoded_keyslot_generation) = decode_v3_manifest(&encoded).unwrap();
+        assert_eq!(decoded_layout, layout);
+        assert_eq!(decoded_keyslot_generation, [0x11; 16]);
+    }
+
+    #[tokio::test]
+    async fn production_loader_recognizes_v3_without_activating_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let keys = Arc::new(AdmissionKeyManager::new(
+            Arc::new(MemorySecureStorage::default()),
+            [0x41; 16],
+        ));
+        let store = ActiveSpaceGenerationManifestStore::new(
+            directory.path().to_path_buf(),
+            Arc::clone(&keys),
+        );
+        let layout = uc_core::membership::ActiveRuntimeLayout::new(
+            uc_core::ids::SpaceId::from_str("space-v3"),
+            [0x42; 16],
+            [0x43; 16],
+        )
+        .unwrap();
+        let persisted = PersistedActiveRuntimeManifestV3::from_layout(&layout, [0x44; 16]);
+        let plaintext = postcard::to_stdvec(&persisted).unwrap();
+        let ciphertext = keys
+            .seal_profile_payload(ACTIVE_GENERATION_MANIFEST_PURPOSE, &plaintext)
+            .unwrap();
+        tokio::fs::write(
+            directory.path().join(ACTIVE_GENERATION_MANIFEST_FILE),
+            &ciphertext,
+        )
+        .await
+        .unwrap();
+        assert!(!ciphertext
+            .windows(b"space-v3".len())
+            .any(|window| window == b"space-v3"));
+
+        assert!(matches!(
+            store.load().await,
+            Err(ActiveSpaceGenerationManifestStoreError::UnsupportedVersion)
+        ));
+        assert!(matches!(
+            store.load_sync(),
+            Err(ActiveSpaceGenerationManifestStoreError::UnsupportedVersion)
+        ));
+    }
+
+    #[test]
+    fn v3_manifest_codec_rejects_authenticated_field_tampering() {
+        let layout = uc_core::membership::ActiveRuntimeLayout::new(
+            uc_core::ids::SpaceId::from_str("space-v3"),
+            [0x52; 16],
+            [0x53; 16],
+        )
+        .unwrap();
+        let original = PersistedActiveRuntimeManifestV3::from_layout(&layout, [0x51; 16]);
+
+        let mut candidates = Vec::new();
+        let mut changed = original.clone();
+        changed.space_id = "space-other".to_owned();
+        candidates.push(changed);
+        let mut changed = original.clone();
+        changed.keyslot_generation = [0x61; 16];
+        candidates.push(changed);
+        let mut changed = original.clone();
+        changed.profile_data_generation = [0x62; 16];
+        candidates.push(changed);
+        let mut changed = original.clone();
+        changed.space_control_generation = [0x63; 16];
+        candidates.push(changed);
+        let mut changed = original;
+        changed.manifest_digest = [0x64; 32];
+        candidates.push(changed);
+
+        for candidate in candidates {
+            let encoded = postcard::to_stdvec(&candidate).unwrap();
+            assert!(matches!(
+                decode_v3_manifest(&encoded),
+                Err(ActiveSpaceGenerationManifestStoreError::Corrupt)
+            ));
+        }
     }
 }

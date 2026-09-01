@@ -667,11 +667,13 @@ SpaceAdmissionAggregate::replay_or_reject(evidence)
 
 ### Clean cutover
 
+> 后续规格 033 取代本节第 5 项引用的普通内容 CrossSpace rebuild/rewrap 规则：V1/V2 内容只在软件升级时一次性转换为自描述 V3；升级后的 Space 切换不得重写本机历史。旧历史保持本机可读，但不自动进入目标 Space 的同步范围。
+
 1. 升级检测到旧 profile/Space format 时执行现有 rebuild 流程，建立新的单设备 root、Space generation 和 OPAQUE registration。
 2. 迁移不读取旧 admission payload 内容，不映射旧 stage，不重发旧 outbox，不保留旧 invitation。
 3. migration 删除旧 admission repository、pairing session 持久引用和旧表；用户重新邀请并配对所有设备。
 4. 旧 ALPN 不注册。旧 binary 打开新 schema 时在写入前明确失败，不生成旧表或清空新状态。
-5. 切换前已有普通本机内容按现有 rebuild/rewrap 规则处理；本规格不以删除本机内容代替 Space rebuild。
+5. V1/V2 普通本机内容按规格 033 在软件升级时一次性转换为 V3；之后切换 Space 复用 profile data generation，不重写历史，也不以删除本机内容代替升级或恢复。
 
 # 6. Implementation Plan
 

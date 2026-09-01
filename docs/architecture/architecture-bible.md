@@ -274,6 +274,12 @@ Core 保存完整 admission aggregate 和状态转换规则。Application 内部
 
 默认规则是：任何写入 SQLite、磁盘缓存或搜索索引的业务负载都先经 MasterKey AEAD 加密，并通过附加认证数据绑定到所属实体。
 
+持久内容使用不可变保护上下文，而不是当前活动 Space 作为解密上下文。V3 密文以随机且全 profile 唯一的 content key id 作为不透明引用，由 profile 加密 key vault 解析 `ProtectionGroupId`，purpose 由所属持久化 adapter 固定，并认证 protection group、content key id、group epoch、purpose 和业务 AAD；`ProtectionGroupId`、`SpaceId` 与 purpose 不作为新增明文密文头或索引字段落盘。活动 Space session 只决定新写入和网络传输使用的保护组，历史读取从密文引用选择保护组。目标 Space 和 peer 不因本机保存历史 catalog 而获得旧内容或旧网络权限。
+
+V1/V2 到 V3 的转换只在软件升级时通过独立、原子、可恢复的 profile storage upgrade 执行一次。升级同时把本机历史/搜索/文件数据与 membership、credential、MLS 等 Space 控制面表拆入独立 generation。完成后，切换 Space 复用同一 profile SQLite/blob generation，只替换完整 Space control generation，不得扫描、复制或重加密历史业务负载。旧格式 reader 只能存在于升级模块，正常路径只写 V3。
+
+`uc-core` 的 `ActiveRuntimeLayout` 只表达当前 Space、profile data generation 与 Space control generation 的合法组合，不拥有 keyslot、序列化、digest 或密码实现。V3 manifest 的技术格式和校验属于 `uc-infra`；在完整升级路径接线前，生产 store 仍只提升 V2，读取到经过完整校验的 V3 时明确失败关闭，不得把半完成格式激活为运行期。
+
 允许明文保存的例外只有：
 
 - 内容类型分类枚举；
@@ -456,20 +462,15 @@ effect executor 按历史因果深度依次恢复成员事实与安全状态，�
 
 ### 切换空间
 
-已完成设置的设备加入另一个空间时，历史必须从旧 MasterKey 安全迁移到新 MasterKey：
+完成 V3 profile storage upgrade 后，已设置设备加入另一个 Space 只切换活动 Space control generation 与后续新写入的保护上下文。目标 catalog 必须先原子安装到 profile content key vault，active manifest 再复用同一 profile data generation 提升包含成员、凭据、MLS 与安全状态的完整目标控制面；切换不得建立来源最终数据快照、复制 profile SQLite/blob 或重加密历史业务负载。
 
-1. 用临时迁移密钥加密备份现有表示。
-2. 完成新空间握手并切换会话与安全存储中的密钥。
-3. 用新 MasterKey 重写主数据。
-4. 写入新成员关系并删除备份与临时密钥。
-
-每个阶段都持久化。进程中断后按阶段继续；不能以删除历史作为恢复手段。
+旧历史继续按自身不可变 `ProtectionGroupId` 在本机读取，不自动加入目标 Space 的 outbox、重发或成员可见范围。用户明确再次分享时创建使用目标保护组的新事件，原记录与原密文不变。来源 Space 的在途发送、接收和目录发布在切换前结束、取消或隔离，不能改挂到目标 Space。
 
 同一空间沿革的邀请必须在进入上述迁移前完成成员核对：相同事件幂等，连续新增只补齐，未确认
-移除等待用户，不可比较历史标记相关设备分叉。任何同空间情况都不得准备跨 Space 备份、替换
-MasterKey 或清理成员关系；分叉本身不强制整个 Space 切换。
+移除等待用户，不可比较历史标记相关设备分叉。任何同空间情况都不得准备跨 Space 数据备份或清理
+历史 catalog；分叉本身不强制整个 Space 切换。
 
-迁移预检如果发现当前密钥无法读取的历史，必须在联系新空间之前停止并要求用户明确确认。确认后保留原始密文，将该记录标记为内容不可用，并继续迁移其余可读历史；不得自动删除、改写或向正常读取路径暴露异常密文。
+软件升级如果发现旧密钥无法读取历史，必须在 V3 manifest promotion 前整体失败关闭，保留旧 generation，不得自动删除、跳过、改写或把异常旧密文带入正常 V3 读取路径。普通 Space 切换不遍历历史，因此历史损坏不应被伪装成目标准入失败；读取时按稳定损坏/缺钥分类报告。
 
 ## 7. 错误处理
 
@@ -662,7 +663,7 @@ reconciliation: Idle -> Comparing -> FetchingHistory -> Consistent -> Idle
 
 ### 空间切换与重置
 
-跨 Space 加入和 Reset 都先在独立目标世代准备并验证完整状态，活动 Space manifest 的原子替换是唯一生效点。替换前失败继续使用旧 Space；替换后只能恢复并完成同一目标世代。旧世代清理由可重试后台工作负责，不参与授权判断。
+跨 Space 加入先准备并验证包含成员、凭据、MLS、安全与恢复状态的独立目标 Space control generation，原子提升 active manifest 时复用当前 profile data generation；替换前失败继续使用旧 Space，替换后只能恢复并完成同一目标控制世代。Reset 必须按自身数据保留语义单独设计，不能借 CrossSpace 恢复已删除的 payload rewrap。旧 control generation 清理由可重试后台工作负责，不参与授权判断；历史 content key catalog 在没有引用证明时不得自动清理。
 
 ## 9. 跨平台差异
 
@@ -864,6 +865,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-09-01 | 双设备配对性能观测 | Engine 在 `assembly/observability/admission.rs` 通过 `ObservedAdmissionPorts` 集中装饰恢复状态、认证建链与消息交换、Sponsor 状态、Joiner Candidate、Joiner activation 和 Space session transition port；Application 调用点不接触时钟、日志 target 或观测字段。各 decorator 使用类型化操作与显式 policy，抑制成功空恢复/激活 load，日志不包含邀请、设备、地址、凭据或密钥。Engine `dev-tools` 的一秒热路径门禁继续只从公开 operation 与成员诊断观察完成。 |
 | 2026-09-01 | Engine port decorator 观测范式 | 持续跨层观测统一归 `crates/uc-engine/src/assembly/observability/<domain>.rs`（规模增长后可拆同名子目录）：具体 decorator 实现 Application port，领域装配入口集中选择 policy，返回 port 的能力继续包装。禁止跨领域万能 `Observed<T>`、字符串 phase 注册表及业务调用点手工计时；该范式可扩展到剪贴板、成员和其他领域而不共享业务事件 schema。 |
 | 2026-09-01 | 配对性能日志语言统一 | `admission.performance` decorator 与性能验收日志使用英文消息和固定结构化字段；本轮不改变准入流程、持久化语义或生产超时。 |
+| 2026-09-01 | 033 活动 generation 第一切片 | Core 新增 `ActiveRuntimeLayout`，只固定当前 Space、profile data generation 与 Space control generation 的合法组合；Infra 新增 V3 manifest 的规范 digest、领域映射和只读版本识别。生产 promotion 与运行路径仍保持 V2，合法 V3 在完整升级接线前以不支持版本失败关闭；未修改内容密码 port，也未改变 CrossSpace 行为。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |
@@ -904,3 +906,4 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 - `docs/specs/028-single-space-admission-protocol.md`：全新单一 Space 准入协议、跨层接入、删除清单和完整验收标准。
 - `docs/specs/029-durable-membership-history-anti-entropy.md`：逐 peer 确认水位、持久传播欠账、公平重试和复杂拓扑验收。
 - `docs/specs/031-application-dependency-surface-deepening.md`：Application port 来源审计、死能力清单、对象图归属和分阶段收敛计划。
+- `docs/specs/033-immutable-content-protection-context.md`：不可变保护上下文、profile 历史 content key vault、一次性 V3 密文升级及无历史重包 CrossSpace 方案。

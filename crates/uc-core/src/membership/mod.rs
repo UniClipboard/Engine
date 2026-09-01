@@ -1,3 +1,4 @@
+mod active_runtime_layout;
 mod active_space_generation_manifest;
 mod admission;
 mod admission_content_key_catalog;
@@ -19,6 +20,7 @@ mod space_admission;
 mod versioned_membership_history;
 mod workspace_convergence;
 
+pub use active_runtime_layout::{ActiveRuntimeLayout, ActiveRuntimeLayoutError};
 pub use active_space_generation_manifest::{
     ActiveSpaceGenerationManifestV2, ACTIVE_SPACE_GENERATION_MANIFEST_FORMAT_V2,
 };

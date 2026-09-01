@@ -215,7 +215,10 @@ fn map_generation_manifest_error(
 ) -> CurrentSpaceIdentityError {
     match error {
         ActiveSpaceGenerationManifestStoreError::Storage => CurrentSpaceIdentityError::Unavailable,
-        ActiveSpaceGenerationManifestStoreError::Corrupt => CurrentSpaceIdentityError::Inconsistent,
+        ActiveSpaceGenerationManifestStoreError::Corrupt
+        | ActiveSpaceGenerationManifestStoreError::UnsupportedVersion => {
+            CurrentSpaceIdentityError::Inconsistent
+        }
     }
 }
 
