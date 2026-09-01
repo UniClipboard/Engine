@@ -12,8 +12,8 @@ use uc_application::deps::{
 use uc_core::ids::SpaceId;
 
 use crate::security::{
-    ActiveSpaceGenerationManifestStore, ActiveSpaceGenerationManifestStoreError, AdmissionKeyError,
-    AdmissionKeyManager,
+    ActiveRuntimeManifest, ActiveSpaceGenerationManifestStore,
+    ActiveSpaceGenerationManifestStoreError, AdmissionKeyError, AdmissionKeyManager,
 };
 
 const LEGACY_ID_PURPOSE: &[u8] = b"legacy-current-space-id-v1";
@@ -147,11 +147,16 @@ impl CurrentSpaceIdentityPort for CurrentSpaceResolver {
     async fn current_space_id(&self) -> Result<Option<SpaceId>, CurrentSpaceIdentityError> {
         match self
             .generation_manifest
-            .load()
+            .load_runtime()
             .await
             .map_err(map_generation_manifest_error)?
         {
-            Some(manifest) => Ok(Some(SpaceId::from_str(&manifest.space_id))),
+            Some(ActiveRuntimeManifest::V2(manifest)) => {
+                Ok(Some(SpaceId::from_str(&manifest.space_id)))
+            }
+            Some(ActiveRuntimeManifest::V3(manifest)) => {
+                Ok(Some(manifest.layout().space_id().clone()))
+            }
             None => self.legacy_id.load().await,
         }
     }
@@ -159,7 +164,7 @@ impl CurrentSpaceIdentityPort for CurrentSpaceResolver {
     async fn requires_legacy_profile_isolation(&self) -> Result<bool, CurrentSpaceIdentityError> {
         if self
             .generation_manifest
-            .load()
+            .load_runtime()
             .await
             .map_err(map_generation_manifest_error)?
             .is_some()
@@ -178,7 +183,7 @@ impl InitialSpaceActivationPort for CurrentSpaceResolver {
     ) -> Result<(), CurrentSpaceIdentityError> {
         if self
             .generation_manifest
-            .load()
+            .load_runtime()
             .await
             .map_err(map_generation_manifest_error)?
             .is_some()
@@ -236,7 +241,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
 
-    use uc_core::membership::ActiveSpaceGenerationManifestV2;
+    use uc_core::membership::{ActiveRuntimeLayout, ActiveSpaceGenerationManifestV2};
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
     use super::*;
@@ -324,6 +329,36 @@ mod tests {
             resolver.current_space_id().await.unwrap(),
             Some(SpaceId::from_str("generated-space"))
         );
+    }
+
+    #[tokio::test]
+    async fn v3_generation_manifest_remains_the_current_space_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let (resolver, generation_manifest) = resolver(&directory);
+        let source = ActiveSpaceGenerationManifestV2::new(
+            "generated-space".to_owned(),
+            [0x72; 16],
+            [0x73; 16],
+            [0x74; 16],
+        )
+        .unwrap();
+        generation_manifest.promote(&source).await.unwrap();
+        let target = crate::security::ActiveRuntimeManifestV3::new(
+            ActiveRuntimeLayout::new(SpaceId::from_str("generated-space"), [0x75; 16], [0x76; 16])
+                .unwrap(),
+            [0x72; 16],
+        )
+        .unwrap();
+        generation_manifest
+            .promote_v3_from_v2(&source, &target)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resolver.current_space_id().await.unwrap(),
+            Some(SpaceId::from_str("generated-space"))
+        );
+        assert!(!resolver.requires_legacy_profile_isolation().await.unwrap());
     }
 
     #[tokio::test]

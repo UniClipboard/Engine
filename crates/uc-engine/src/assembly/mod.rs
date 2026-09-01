@@ -10,6 +10,7 @@ pub(crate) mod mobile_lan;
 pub(crate) mod network;
 pub(crate) mod observability;
 pub(crate) mod platform;
+pub(crate) mod runtime_storage;
 pub(crate) mod search;
 pub(crate) mod sync_engine;
 pub(crate) mod wire;

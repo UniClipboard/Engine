@@ -297,12 +297,14 @@ pub(super) fn build_config_migration_facade(
 
 pub(super) fn create_infra_layer(
     db_pool: DbPool,
+    control_db_pool: DbPool,
     vault_path: &PathBuf,
     settings_path: &PathBuf,
     app_data_root: &PathBuf,
     secure_storage: Arc<dyn SecureStoragePort>,
 ) -> WiringResult<InfraLayer> {
     let db_executor = Arc::new(DieselSqliteExecutor::new(db_pool));
+    let control_db_executor = Arc::new(DieselSqliteExecutor::new(control_db_pool));
 
     let entry_row_mapper = ClipboardEntryRowMapper;
     let selection_row_mapper = ClipboardSelectionRowMapper;
@@ -430,7 +432,7 @@ pub(super) fn create_infra_layer(
     // ports are exposed upward.
     #[cfg(feature = "lan-compat")]
     let mobile_device_repo_arc = Arc::new(DieselMobileDeviceRepository::new(
-        Arc::clone(&db_executor),
+        Arc::clone(&control_db_executor),
         MobileDeviceRowMapper,
     ));
     #[cfg(feature = "lan-compat")]
@@ -456,6 +458,7 @@ pub(super) fn create_infra_layer(
         clipboard_event_reader_repo,
         entry_delivery_repo,
         db_executor,
+        control_db_executor,
         representation_repo,
         selection_repo,
         blob_reference_repo,

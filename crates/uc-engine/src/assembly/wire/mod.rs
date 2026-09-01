@@ -69,10 +69,10 @@ use uc_infra::search::{
     HkdfSearchKeyDerivation, SearchPipeline, SqliteSearchIndex, V3SearchKeyDerivation,
 };
 use uc_infra::security::{
-    space_generation_directory, ActiveSpaceGenerationManifestStore, AdmissionKeyManager,
-    Argon2PinHasher, Blake3Hasher, DecryptingClipboardRepresentationRepository,
-    EncryptingClipboardEventWriter, EncryptingInboundReceiveCommit, ProfileContentKeyVault,
-    ProfileLifecycleRepository, Sha256IdentityFingerprintFactory, Sha256ShortCodeGenerator,
+    ActiveSpaceGenerationManifestStore, AdmissionKeyManager, Argon2PinHasher, Blake3Hasher,
+    DecryptingClipboardRepresentationRepository, EncryptingClipboardEventWriter,
+    EncryptingInboundReceiveCommit, ProfileContentKeyVault, ProfileLifecycleRepository,
+    Sha256IdentityFingerprintFactory, Sha256ShortCodeGenerator,
 };
 use uc_infra::settings::repository::FileSettingsRepository;
 use uc_infra::space::{
@@ -89,6 +89,7 @@ use crate::assembly::deps::{
     WiringError, WiringResult,
 };
 use crate::assembly::platform::{create_platform_layer, ProfilePayloadMode, SystemClipboardLayer};
+use crate::assembly::runtime_storage::RuntimeStorageSelection;
 use infra::*;
 
 /// Infrastructure layer implementations
@@ -107,6 +108,9 @@ struct InfraLayer {
     /// dependency (e.g. the entry-file-set repo's per-session path cipher) can be
     /// constructed after space access is wired, over the same connection pool.
     db_executor: Arc<DieselSqliteExecutor>,
+    /// Space control 表的唯一 executor；V2 与 profile executor 共享 pool，
+    /// V3 指向独立 control generation。
+    control_db_executor: Arc<DieselSqliteExecutor>,
     representation_repo: Arc<dyn ClipboardRepresentationStore>,
     selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
 
@@ -258,7 +262,7 @@ pub fn wire_dependencies_from_inputs(
         ));
     let active_generation_manifest = if profile_lifecycle.state() == ProfileLifecycleState::Ready {
         active_generation_manifest_store
-            .load_sync()
+            .load_runtime_sync()
             .map_err(|error| WiringError::DatabaseInit(error.to_string()))?
     } else {
         None
@@ -268,29 +272,27 @@ pub fn wire_dependencies_from_inputs(
         active_generation_present = active_generation_manifest.is_some(),
         "空间存储启动选择已解析"
     );
-    let (db_path, blob_store_dir) = match active_generation_manifest.as_ref() {
-        Some(manifest) => {
-            let directory = space_generation_directory(
-                &generation_root,
-                &manifest.space_id,
-                &manifest.database_generation,
-            );
-            let database = directory.join("target.sqlite");
-            if !database.is_file() {
-                return Err(WiringError::DatabaseInit(
-                    "Active space database generation is unavailable".to_owned(),
-                ));
-            }
-            tracing::info!(storage_generation = "active", "空间活动 generation 已选择");
-            (database, directory.join("blobs"))
-        }
-        None => {
-            tracing::info!(storage_generation = "legacy", "空间 legacy 存储已选择");
-            (legacy_db_path, vault_path.join("blobs"))
-        }
-    };
+    let storage = RuntimeStorageSelection::resolve(
+        &app_data_root,
+        legacy_db_path,
+        vault_path.join("blobs"),
+        active_generation_manifest.as_ref(),
+    )
+    .map_err(|error| WiringError::DatabaseInit(error.to_string()))?;
+    tracing::info!(
+        storage_generation = if storage.is_v3() { "v3" } else { "legacy" },
+        "空间存储 generation 已选择"
+    );
+    let db_path = storage.profile_database().to_path_buf();
+    let control_db_path = storage.control_database().to_path_buf();
+    let blob_store_dir = storage.blob_root().to_path_buf();
 
     let db_pool = create_db_pool(&db_path)?;
+    let control_db_pool = if control_db_path == db_path {
+        db_pool.clone()
+    } else {
+        create_db_pool(&control_db_path)?
+    };
     let db_pool_for_profile_reset = db_pool.clone();
     let db_pool_for_space_transition = db_pool.clone();
     // Clone pool before infra layer consumes it — search bundle needs the same pool.
@@ -301,6 +303,7 @@ pub fn wire_dependencies_from_inputs(
 
     let infra = create_infra_layer(
         db_pool,
+        control_db_pool,
         &vault_path,
         &settings_path,
         &app_data_root,
@@ -318,7 +321,11 @@ pub fn wire_dependencies_from_inputs(
         infra.clock.clone(),
         storage_config.clone(),
         system_clipboard,
-        ProfilePayloadMode::legacy(),
+        if storage.is_v3() {
+            ProfilePayloadMode::v3(Arc::clone(&profile_content_key_vault))
+        } else {
+            ProfilePayloadMode::legacy()
+        },
     )?;
 
     // Space access — single session/key access entry. See
@@ -328,13 +335,13 @@ pub fn wire_dependencies_from_inputs(
             &infra.key_material,
             &platform.current_profile,
             &platform.session,
-            &infra.db_executor,
+            &infra.control_db_executor,
             &profile_content_key_vault,
         );
     let profile_key_access_probe = space_access_adapter.clone();
     let membership_session = Arc::clone(&platform.session);
     let membership_ledger = Arc::new(SqliteMembershipLedger::new(
-        Arc::clone(&infra.db_executor),
+        Arc::clone(&infra.control_db_executor),
         Arc::clone(&admission_keys),
     ));
     let admission_state = Arc::new(SqliteSpaceAdmissionState::new(
@@ -344,14 +351,32 @@ pub fn wire_dependencies_from_inputs(
         Arc::clone(&membership_ledger) as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
     ));
     let admission_credentials = Arc::new(SqliteSpaceAdmissionCredentials::new(
-        Arc::clone(&infra.db_executor),
+        Arc::clone(&infra.control_db_executor),
         Arc::clone(&admission_keys),
         Arc::clone(&active_generation_manifest_store),
         Arc::clone(&membership_ledger) as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
         Arc::clone(&admission_state),
     ));
-    let durable_space_transition =
-        Arc::new(uc_infra::security::DurableAdmissionSpaceTransition::new(
+    let (
+        admission_space_transition,
+        device_management_reset_data,
+        membership_branch_transition_executor,
+        initial_space_activation,
+    ): (
+        Arc<dyn uc_application::deps::AdmissionSpaceTransitionPort>,
+        Arc<dyn uc_application::deps::DeviceManagementResetDataPort>,
+        Arc<dyn uc_application::deps::AdvanceMembershipBranchTransitionPort>,
+        Arc<dyn InitialSpaceActivationPort>,
+    ) = if storage.is_v3() {
+        let transition = Arc::new(uc_infra::security::FailClosedAdmissionSpaceTransition);
+        (
+            transition.clone(),
+            transition.clone(),
+            transition.clone(),
+            transition,
+        )
+    } else {
+        let transition = Arc::new(uc_infra::security::DurableAdmissionSpaceTransition::new(
             db_pool_for_space_transition,
             source_blob_root,
             generation_root,
@@ -363,20 +388,19 @@ pub fn wire_dependencies_from_inputs(
             Arc::clone(&platform.current_profile),
             Arc::clone(&admission_keys),
         ));
-    let admission_space_transition: Arc<dyn uc_application::deps::AdmissionSpaceTransitionPort> =
-        durable_space_transition.clone();
-    let device_management_reset_data: Arc<dyn uc_application::deps::DeviceManagementResetDataPort> =
-        durable_space_transition.clone();
-    let membership_branch_transition_executor: Arc<
-        dyn uc_application::deps::AdvanceMembershipBranchTransitionPort,
-    > = durable_space_transition.clone();
-    let initial_space_activation: Arc<dyn InitialSpaceActivationPort> = durable_space_transition;
+        (
+            transition.clone(),
+            transition.clone(),
+            transition.clone(),
+            transition,
+        )
+    };
     let peer_admission =
         build_peer_admission_port(Arc::clone(&membership_ledger)
             as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>);
 
     let relationship_store = Arc::new(EncryptedRelationshipStore::new(
-        Arc::clone(&infra.db_executor),
+        Arc::clone(&infra.control_db_executor),
         Arc::clone(&space_access_ports.derive_subkey),
         Arc::clone(&platform.current_profile),
     ));

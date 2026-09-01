@@ -439,6 +439,8 @@ Change: 第十五子切片新增 `ProfilePayloadAdapters` 与 Engine `ProfilePay
 
 Change: 第十六子切片新增显式 `ActiveRuntimeManifest` 版本和及 `ProfileRuntimeLayout` 路径深模块。旧 V2 loader 面对 V3 继续返回 `UnsupportedVersion`，只有 V3-aware 启动入口可取得已认证 V2/V3 选择；profile database、blob root 与 control database 只由两个 opaque generation 派生，路径不编码 SpaceId。升级 target staging 改为复用同一 generation directory、文件名与 payload output 规则，消除升级器和 production 各自计算路径的双事实来源。本子切片尚未让 Engine 打开双 pool，下一子切片负责对象图路由。
 
+Change: 第十七子切片由 Engine `RuntimeStorageSelection` 把一个已认证 manifest 原子解析为 profile database、control database、blob root 与 payload format。V2/无 manifest 继续让两个 executor 共享原 pool；V3 打开独立双 pool，并把 clipboard/history/search/transfer 仓储只接到 profile executor，把 membership、relationship、credential、Space security 与 LAN device 仓储只接到 control executor，同时选择完整 V3 payload runtime。`CurrentSpaceResolver` 可从 V3 manifest 读取当前 Space identity；旧 `DurableAdmissionSpaceTransition` 不得拿双库运行，V3 admission/reset/branch transition 暂由同一 fail-closed adapter 拒绝，等待 Step 8 的 `SpaceControlGeneration` owner 替换。启动升级 gate、promotion journal 和 control credential V3 scope 仍未完成。
+
 Risk: 磁盘不足、移动端短进程和崩溃会留下 staging；每个 phase 先耐久记录再执行可重复动作，promotion 前绝不改 source。
 
 Step 8:
