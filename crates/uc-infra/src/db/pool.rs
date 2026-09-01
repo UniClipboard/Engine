@@ -173,6 +173,21 @@ pub fn init_db_pool(database_url: &str) -> Result<DbPool> {
     })
 }
 
+/// 只为已经完成 migration 的候选 generation 建立 production 连接池。
+///
+/// 该入口不重跑 migration，也不删除/重建 revision trigger，避免只读回验改变
+/// 候选数据库的 schema cookie。调用方必须先通过自己的完整 schema/integrity gate。
+pub(crate) fn open_existing_db_pool(database_url: &str) -> Result<DbPool> {
+    let manager = ConnectionManager::<SqliteConnection>::new(database_url);
+    let pool = Pool::builder()
+        .connection_customizer(Box::new(SqlitePragmaCustomizer))
+        .build(manager)
+        .map_err(|error| anyhow::anyhow!("Failed to open existing database pool: {error}"))?;
+    Ok(DbPool {
+        inner: Arc::new(RwLock::new(pool)),
+    })
+}
+
 fn install_revision_triggers_raw(pool: &RawDbPool) -> Result<()> {
     let mut connection = pool.get()?;
     connection.batch_execute(

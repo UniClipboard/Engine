@@ -140,19 +140,36 @@ pub(crate) fn install_prepared_registration(
     manifest: &ActiveSpaceGenerationManifestV2,
     prepared: &[u8],
 ) -> anyhow::Result<()> {
-    let prepared = Zeroizing::new(postcard::from_bytes::<PreparedCredentialsV1>(prepared)?);
-    if prepared.format_version != PREPARED_CREDENTIAL_FORMAT_V1 {
-        anyhow::bail!("prepared credential format is unsupported");
-    }
-    // 提升目标 generation 前先解码校验，避免把损坏的 OPAQUE 材料写入新空间。
-    SpaceAdmissionAuth::decode_server_setup_after_decryption(&prepared.server_setup)
-        .map_err(anyhow::Error::new)?;
-    SpaceAdmissionAuth::decode_registration_after_decryption(&prepared.registration)
-        .map_err(anyhow::Error::new)?;
     let scope = CredentialScope::from(manifest.clone());
+    install_prepared_registration_for_scope(pool, keys, &scope, prepared)
+}
+
+/// 把一次 admission 已准备的 OPAQUE registration 直接安装到目标 V3
+/// control-generation scope。调用方不能接触 credential DTO、purpose 或 SQL。
+pub(crate) fn install_prepared_registration_for_control_generation(
+    pool: &DbPool,
+    keys: &AdmissionKeyManager,
+    manifest: &crate::security::ActiveRuntimeManifestV3,
+    prepared: &[u8],
+) -> anyhow::Result<()> {
+    let scope = CredentialScope::Control {
+        space_id: manifest.layout().space_id().as_ref().to_owned(),
+        keyslot_generation: *manifest.keyslot_generation(),
+        space_control_generation: *manifest.layout().space_control_generation(),
+    };
+    install_prepared_registration_for_scope(pool, keys, &scope, prepared)
+}
+
+fn install_prepared_registration_for_scope(
+    pool: &DbPool,
+    keys: &AdmissionKeyManager,
+    scope: &CredentialScope,
+    prepared: &[u8],
+) -> anyhow::Result<()> {
+    let prepared = decode_prepared_registration(prepared)?;
     let encrypted = seal_credentials(
         keys,
-        &scope,
+        scope,
         prepared.server_setup.clone(),
         prepared.registration.clone(),
     )?;
@@ -167,6 +184,48 @@ pub(crate) fn install_prepared_registration(
         .execute(conn)?;
         Ok(())
     })
+}
+
+fn decode_prepared_registration(
+    prepared: &[u8],
+) -> anyhow::Result<Zeroizing<PreparedCredentialsV1>> {
+    let prepared = Zeroizing::new(postcard::from_bytes::<PreparedCredentialsV1>(prepared)?);
+    if prepared.format_version != PREPARED_CREDENTIAL_FORMAT_V1 {
+        anyhow::bail!("prepared credential format is unsupported");
+    }
+    // 提升目标 generation 前先解码校验，避免把损坏的 OPAQUE 材料写入新空间。
+    validate_material(&prepared.server_setup, &prepared.registration)?;
+    Ok(prepared)
+}
+
+/// 以 credential owner 的正式 codec 回读并比对目标 control scope 与原始
+/// prepared material，供不可变 control generation 在发布前完整验证。
+pub(crate) fn verify_prepared_registration_for_control_generation(
+    database: &Path,
+    keys: &AdmissionKeyManager,
+    manifest: &crate::security::ActiveRuntimeManifestV3,
+    prepared: &[u8],
+) -> anyhow::Result<()> {
+    let expected = decode_prepared_registration(prepared)?;
+    let expected_scope = CredentialScope::Control {
+        space_id: manifest.layout().space_id().as_ref().to_owned(),
+        keyslot_generation: *manifest.keyslot_generation(),
+        space_control_generation: *manifest.layout().space_control_generation(),
+    };
+    let database = database
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("credential control database path is invalid"))?;
+    let mut connection = SqliteConnection::establish(database)?;
+    let row = load_encrypted_row(&mut connection)?
+        .ok_or_else(|| anyhow::anyhow!("credential registration is missing"))?;
+    let actual = open_credentials(keys, &row.encrypted_payload)?;
+    if actual.scope != expected_scope
+        || actual.server_setup != expected.server_setup
+        || actual.registration != expected.registration
+    {
+        anyhow::bail!("credential registration verification failed");
+    }
+    validate_material(&actual.server_setup, &actual.registration)
 }
 
 fn load_encrypted_row(

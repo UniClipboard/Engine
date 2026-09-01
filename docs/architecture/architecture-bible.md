@@ -679,6 +679,8 @@ reconciliation: Idle -> Comparing -> FetchingHistory -> Consistent -> Idle
 
 跨 Space 加入先准备并验证包含成员、凭据、MLS、安全与恢复状态的独立目标 Space control generation，原子提升 active manifest 时复用当前 profile data generation；替换前失败继续使用旧 Space，替换后只能恢复并完成同一目标控制世代。Reset 必须按自身数据保留语义单独设计，不能借 CrossSpace 恢复已删除的 payload rewrap。旧 control generation 清理由可重试后台工作负责，不参与授权判断；历史 content key catalog 在没有引用证明时不得自动清理。
 
+`SpaceControlGeneration::prepare_admission` 是 admission 目标控制面的唯一完整构造入口：调用方只提交完整 preparation 和目标 V3 manifest，模块内部独占 commitment/catalog/关系一致性验证、隔离目标 session、membership/relationship/credential/MLS-security 正式仓储写入与回读、SQLite 完整性检查、跨进程租约和原子发布。返回的 prepared proof 只能由该模块构造；生成阶段不得提升 active manifest、重绑运行期或读取、复制、重封装 profile payload。重复执行必须验证并复用同一不可变 control generation，已发布目标损坏时失败关闭。
+
 ## 9. 跨平台差异
 
 平台差异只能影响宿主能力、运行时限制和语言边界，不能改变空间、身份、配对、加密、协议和数据语义。
@@ -910,6 +912,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-09-02 | 033 profile/control 双 pool 第二十六切片 | Engine 把已认证 manifest 一次解析为 profile/control SQLite、blob root 与 payload family；V3 对象图让 history/search/transfer 只持有 profile executor，让 membership/relationship/credential/Space security/LAN device 只持有 control executor，V2 仍共享原 pool。当前 Space identity 支持 V3 manifest；旧全库 transition 在 V3 下统一失败关闭，等待完整 `SpaceControlGeneration` owner。 |
 | 2026-09-02 | 033 upgrade promotion 第二十七切片 | `ProfileStorageUpgrade` 在完整 V3 双库验证后执行 V2 compare-and-promote，并耐久推进 `Promoted`/`CleanupPending`。manifest 已替换但 journal 尚未保存的崩溃窗口通过 target generation/keyslot 反向匹配、重新验证和幂等补写恢复；不同 target 或提前 V3 失败关闭。空 profile 不伪造 Space manifest；Engine gate 与旧 source 清理待后续接入。 |
 | 2026-09-02 | 033 control credential scope 第二十八切片 | OPAQUE/admission credential owner 显式区分 V2 完整 generation scope 与 V3 Space control-generation scope；正常 repository 从已认证 runtime manifest 原子选择格式，一次性 profile upgrade 在 control target 内通过 owner 完整转换并回读既有 registration 后才绑定数据库 digest。promotion 后 Sponsor 凭据直接由 control store 读取，升级器不复制 credential schema、purpose 或 OPAQUE codec。 |
+| 2026-09-02 | 033 Space control generation 第二十九切片 | 新增 `SpaceControlGeneration::prepare_admission` 深模块，以完整 admission preparation 构造并通过正式仓储回读成员账本、关系、OPAQUE credential 与 MLS/security 状态；profile 级跨进程租约、随机 staging、SQLite 完整性 gate、介质摘要和原子目录发布保证结果不可变且可幂等复用。该切片只产生不可伪造的 prepared proof，不提升 manifest、不重绑运行期，也不触碰 profile payload。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |

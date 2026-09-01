@@ -24,6 +24,7 @@ mod profile_runtime_layout;
 mod profile_storage_upgrade;
 mod secrets;
 mod space_admission_auth;
+mod space_control_generation;
 pub(crate) mod v1_aead;
 
 pub use active_space_generation_manifest_store::{
@@ -74,4 +75,7 @@ pub use space_admission_auth::{
     SpaceAdmissionKe2, SpaceAdmissionKe3, SpaceAdmissionPasswordEquivalent,
     SpaceAdmissionRegistration, SpaceAdmissionRegistrationEncoding, SpaceAdmissionServerSetup,
     SpaceAdmissionServerSetupEncoding, SpaceAdmissionServerState,
+};
+pub use space_control_generation::{
+    PreparedSpaceControlGeneration, SpaceControlGeneration, SpaceControlGenerationError,
 };
