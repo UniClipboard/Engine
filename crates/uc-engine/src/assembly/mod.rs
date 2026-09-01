@@ -1,3 +1,4 @@
+pub(crate) mod admission_observability;
 pub(crate) mod blob_tasks;
 pub(crate) mod clipboard_runtime;
 pub(crate) mod deps;

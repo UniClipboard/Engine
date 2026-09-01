@@ -9,13 +9,11 @@ use crate::space::admission::{
 };
 
 use super::model::JoinerActivationMutation;
-use std::time::Instant;
 
 impl JoinerAdmissionService {
     pub(in crate::space::admission::protocol) async fn recover_activation(
         &self,
     ) -> (AdmissionRecoveryReport, Option<JoinerActivationOutcome>) {
-        let started = Instant::now();
         let mut report = AdmissionRecoveryReport::default();
         let loaded = match self.activation_state.load().await {
             Ok(Some(loaded)) => loaded,
@@ -64,13 +62,6 @@ impl JoinerAdmissionService {
             Ok(()) => {
                 report.advanced_count += 1;
                 self.maintenance_wake.wake();
-                tracing::info!(
-                    target: "admission.performance",
-                    phase = "joiner_activation_committed",
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    outcome = "ok",
-                    "pairing phase completed"
-                );
                 return (report, Some(outcome));
             }
             Err(error) => record_state_error(&mut report, error),

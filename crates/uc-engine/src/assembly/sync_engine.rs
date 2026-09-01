@@ -791,6 +791,13 @@ pub async fn build_sync_engine_assembly(
     ));
     let local_device_id = deps.device.device_identity.current_device_id();
     let local_identity: Arc<dyn LocalIdentityPort> = identity_store;
+    let observed_admission_recovery_state = Arc::new(
+        crate::assembly::admission_observability::ObservedAdmissionRecoveryState::new(
+            space_setup.admission_state.clone()
+                as Arc<dyn uc_application::deps::PendingAdmissionRecoveryStatePort>,
+            crate::assembly::admission_observability::AdmissionRecoveryObservationPolicy::suppress_successful_empty_loads(),
+        ),
+    );
     let facade = Arc::new(SpaceFacade::new_dormant(SpaceFacadeDeps {
         session: SpaceSessionDeps {
             space_access: deps.security.space_access_ports.clone(),
@@ -850,8 +857,7 @@ pub async fn build_sync_engine_assembly(
             current_join_admission_state: space_setup.admission_state.clone()
                 as Arc<dyn uc_application::deps::CurrentJoinAdmissionStatePort>,
             prepare_joiner_cancellation: Arc::new(DefaultJoinerCancellationPreparation),
-            pending_admission_recovery_state: space_setup.admission_state.clone()
-                as Arc<dyn uc_application::deps::PendingAdmissionRecoveryStatePort>,
+            pending_admission_recovery_state: observed_admission_recovery_state,
             space_admission_transport: admission_transport,
             sponsor_admission_state: space_setup.admission_state.clone()
                 as Arc<dyn uc_application::deps::SponsorAdmissionStatePort>,

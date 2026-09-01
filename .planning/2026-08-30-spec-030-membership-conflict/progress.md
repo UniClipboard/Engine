@@ -296,5 +296,5 @@
 
 - 在稳定 Engine operation seam 新增显式性能门禁：邀请签发不计时，从 Joiner 提交完整邀请开始，到 Sponsor/Joiner 均公开两名有效成员结束，预算为 1 秒。
 - 红测连续得到 7.56 秒与 7.53 秒，确认当前实现不满足目标；用例标记为显式 `--ignored` 性能门禁，避免共享 CI 机器把性能结果混入功能正确性。
-- 正式脱敏 tracing 显示首次信道建立约 157ms，后续恢复信道约 3–4ms；主要耗时是串行 JoinRequest、Prepared、Applied、激活与 CompleteAck 阶段，而非地址发现或 30 秒维护兜底周期。
+- 诊断运行曾显示首次信道建立约 157ms，后续恢复信道约 3–4ms；调用点探针随后删除，正式观测改由 Engine 组装的恢复状态 port decorator 承担。
 - 2 秒和 10 秒维护周期实验分别在 332.05 秒与 372.62 秒令 F7 同分支正文矩阵失败；实验代码已撤回。维护 runtime 本来就立即执行 Startup round，并由 StateChanged 主动唤醒，缩短持续周期只增加 Iroh/SQLite 竞争。

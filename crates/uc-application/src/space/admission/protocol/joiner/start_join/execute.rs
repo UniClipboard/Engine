@@ -2,7 +2,6 @@ use super::super::JoinerAdmissionService;
 use super::{JoinerStartMutation, PreparedJoinerInvitation};
 use crate::space::admission::protocol::SpaceAdmissionProtocol;
 use crate::space::admission::{CurrentJoinStatus, JoinSpaceError, JoinSpaceInput, JoinSpaceResult};
-use std::time::Instant;
 use uc_core::membership::{
     AdmissionRetryState, JoinerAdmission, PendingAdmissionExchange, SpaceAdmissionMessageKind,
 };
@@ -19,7 +18,6 @@ impl SpaceAdmissionProtocol {
 
 impl JoinerAdmissionService {
     async fn start(&self, input: JoinSpaceInput) -> Result<JoinSpaceResult, JoinSpaceError> {
-        let started = Instant::now();
         persist_device_name(self.settings.as_ref(), input.device_name.as_deref()).await?;
         let loaded = self.start_state.load().await?;
         let (
@@ -92,13 +90,6 @@ impl JoinerAdmissionService {
             )
             .await?;
         self.maintenance_wake.wake();
-
-        tracing::info!(
-            target: "admission.performance",
-            phase = "joiner_start_persisted",
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "pairing phase completed"
-        );
 
         Ok(JoinSpaceResult {
             status: CurrentJoinStatus::Pending {
