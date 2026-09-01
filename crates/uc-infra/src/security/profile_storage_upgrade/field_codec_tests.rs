@@ -8,9 +8,11 @@ use uc_core::ids::{DeviceId, EntryId, SpaceId};
 use uc_core::ports::clipboard::EntryFileSetRepositoryPort;
 use uc_core::ports::{
     AdvanceActiveClipboardPort, GetDirectoryPublishRecordPort, GetReceiveArtifactRecordPort,
-    LoadMobileConsumableClipboardPort, PublishPhase, ReceiveArtifact, ReceiveArtifactOwnership,
-    ReceiveArtifactPhase, ReceiveArtifactRecord, ReceiveArtifactResolution,
-    RecordDirectoryPublishPort, RecordReceiveArtifactsPort, SecureStorageError, SecureStoragePort,
+    ListProvisionalReceivesPort, LoadMobileConsumableClipboardPort, PublishPhase, ReceiveArtifact,
+    ReceiveArtifactOwnership, ReceiveArtifactPhase, ReceiveArtifactRecord,
+    ReceiveArtifactResolution, RecordDirectoryPublishPort, RecordReceiveArtifactsPort,
+    SecureStorageError, SecureStoragePort, SeedProvisionalReceivePort,
+    UpdateProvisionalReceivePathPort,
 };
 
 use crate::db::repositories::active_clipboard_register_cipher::V3ActiveClipboardRegisterCipher;
@@ -19,7 +21,7 @@ use crate::db::repositories::entry_file_set_cipher::V3EntryFileSetPathCipher;
 use crate::db::repositories::receive_artifact_cipher::V3ReceiveArtifactCipher;
 use crate::db::repositories::{
     DieselActiveClipboardRegisterRepository, DieselDirectoryPublishLogRepository,
-    DieselEntryFileSetRepository, DieselReceiveArtifactLogRepository,
+    DieselEntryFileSetRepository, DieselFileTransferRepository, DieselReceiveArtifactLogRepository,
 };
 use crate::db::{
     executor::DieselSqliteExecutor,
@@ -292,8 +294,10 @@ async fn specialized_repositories_use_only_the_selected_v3_strategy() {
         roots
     );
 
-    let receive =
-        DieselReceiveArtifactLogRepository::new_v3(DieselSqliteExecutor::new(pool), protection);
+    let receive = DieselReceiveArtifactLogRepository::new_v3(
+        DieselSqliteExecutor::new(pool.clone()),
+        Arc::clone(&protection),
+    );
     let record = ReceiveArtifactRecord {
         entry_id: "entry-v3".to_owned(),
         attempt_id: "attempt-v3".to_owned(),
@@ -316,10 +320,37 @@ async fn specialized_repositories_use_only_the_selected_v3_strategy() {
         Some(record)
     );
 
+    let transfers = DieselFileTransferRepository::new_v3(
+        DieselSqliteExecutor::new(pool),
+        Arc::clone(&protection),
+    );
+    transfers
+        .seed_provisional_receive(&uc_core::ports::file_transfer::ProvisionalInboundTransfer {
+            transfer_id: "transfer-v3".to_owned(),
+            origin_device_id: "device-v3".to_owned(),
+            filename: "private-transfer-name".to_owned(),
+            file_size: Some(23),
+            created_at_ms: 13,
+        })
+        .await
+        .unwrap();
+    transfers
+        .update_provisional_receive_path("transfer-v3", "private-transfer-path", 14)
+        .await
+        .unwrap();
+    assert_eq!(
+        transfers.list_provisional_receives().await.unwrap(),
+        vec![uc_core::ports::file_transfer::ProvisionalReceiveRecovery {
+            transfer_id: "transfer-v3".to_owned(),
+            cached_path: Some("private-transfer-path".to_owned()),
+        }]
+    );
+
     drop(active);
     drop(file_set);
     drop(publish);
     drop(receive);
+    drop(transfers);
     let bytes = std::fs::read(database).unwrap();
     for plaintext in [
         b"private-stage".as_slice(),
@@ -329,6 +360,8 @@ async fn specialized_repositories_use_only_the_selected_v3_strategy() {
         b"private-file-set-original",
         b"private-root-name",
         b"private-relative-path",
+        b"private-transfer-name",
+        b"private-transfer-path",
     ] {
         assert!(!bytes
             .windows(plaintext.len())

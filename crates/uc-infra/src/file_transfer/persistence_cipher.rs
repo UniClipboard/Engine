@@ -33,8 +33,111 @@ pub(crate) struct TransferPersistenceCipher {
     event_key: [u8; 32],
 }
 
+#[derive(Clone)]
 pub(crate) struct V3TransferPersistenceCipher {
     protection: Arc<ContentProtection>,
+}
+
+#[derive(Clone)]
+pub(crate) enum TransferPersistenceProtection {
+    Legacy {
+        derive_subkey: Arc<dyn DeriveSpaceSubkeyPort>,
+        current_profile: Arc<dyn CurrentProfilePort>,
+    },
+    V3(V3TransferPersistenceCipher),
+}
+
+pub(crate) enum ResolvedTransferPersistenceProtection {
+    Legacy(TransferPersistenceCipher),
+    V3(V3TransferPersistenceCipher),
+}
+
+impl TransferPersistenceProtection {
+    pub(crate) fn legacy(
+        derive_subkey: Arc<dyn DeriveSpaceSubkeyPort>,
+        current_profile: Arc<dyn CurrentProfilePort>,
+    ) -> Self {
+        Self::Legacy {
+            derive_subkey,
+            current_profile,
+        }
+    }
+
+    pub(crate) fn v3(protection: Arc<ContentProtection>) -> Self {
+        Self::V3(V3TransferPersistenceCipher::new(protection))
+    }
+
+    pub(crate) async fn resolve(&self) -> anyhow::Result<ResolvedTransferPersistenceProtection> {
+        match self {
+            Self::Legacy {
+                derive_subkey,
+                current_profile,
+            } => derive_transfer_persistence_cipher(derive_subkey, current_profile)
+                .await
+                .map(ResolvedTransferPersistenceProtection::Legacy),
+            Self::V3(cipher) => Ok(ResolvedTransferPersistenceProtection::V3(cipher.clone())),
+        }
+    }
+}
+
+impl ResolvedTransferPersistenceProtection {
+    pub(crate) async fn seal_metadata(
+        &self,
+        transfer_id: &str,
+        metadata: &TransferMetadata,
+    ) -> Result<Vec<u8>, TransferPersistenceCipherError> {
+        match self {
+            Self::Legacy(cipher) => cipher.seal_metadata(transfer_id, metadata),
+            Self::V3(cipher) => cipher.seal_metadata(transfer_id, metadata).await,
+        }
+    }
+
+    pub(crate) async fn open_metadata(
+        &self,
+        transfer_id: &str,
+        ciphertext: &[u8],
+    ) -> Result<TransferMetadata, TransferPersistenceCipherError> {
+        match self {
+            Self::Legacy(cipher) => cipher.open_metadata(transfer_id, ciphertext),
+            Self::V3(cipher) => cipher.open_metadata(transfer_id, ciphertext).await,
+        }
+    }
+
+    pub(crate) async fn seal_event(
+        &self,
+        transfer_id: &str,
+        sequence: i32,
+        event_type: &str,
+        event: &FileTransferEvent,
+    ) -> Result<Vec<u8>, TransferPersistenceCipherError> {
+        match self {
+            Self::Legacy(cipher) => cipher.seal_event(transfer_id, sequence, event_type, event),
+            Self::V3(cipher) => {
+                cipher
+                    .seal_event(transfer_id, sequence, event_type, event)
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn open_event(
+        &self,
+        transfer_id: &str,
+        sequence: i32,
+        event_type: &str,
+        ciphertext: &[u8],
+    ) -> Result<FileTransferEvent, TransferPersistenceCipherError> {
+        match self {
+            Self::Legacy(cipher) => {
+                cipher.open_event(transfer_id, sequence, event_type, ciphertext)
+            }
+            Self::V3(cipher) => {
+                cipher
+                    .open_event(transfer_id, sequence, event_type, ciphertext)
+                    .await
+            }
+        }
+    }
 }
 
 impl V3TransferPersistenceCipher {

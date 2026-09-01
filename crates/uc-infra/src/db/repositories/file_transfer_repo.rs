@@ -10,8 +10,9 @@ use crate::db::models::{EntryReceiveAttemptRow, FileTransferRow, NewFileTransfer
 use crate::db::ports::DbExecutor;
 use crate::db::schema::{entry_receive_attempt, file_transfer};
 use crate::file_transfer::persistence_cipher::{
-    derive_transfer_persistence_cipher, TransferMetadata, TransferPersistenceCipher,
+    ResolvedTransferPersistenceProtection, TransferMetadata, TransferPersistenceProtection,
 };
+use crate::security::ContentProtection;
 use uc_core::file_transfer::FileTransferCancellationReason;
 use uc_core::ports::entry_receive_attempt::AttemptState;
 use uc_core::ports::file_transfer::{
@@ -30,8 +31,7 @@ use uc_core::ports::space::DeriveSpaceSubkeyPort;
 /// SQLite adapter for the receiver-side file-transfer projection ports.
 pub struct DieselFileTransferRepository<E> {
     executor: E,
-    derive_subkey: Arc<dyn DeriveSpaceSubkeyPort>,
-    current_profile: Arc<dyn CurrentProfilePort>,
+    protection: TransferPersistenceProtection,
 }
 
 impl<E> DieselFileTransferRepository<E> {
@@ -42,19 +42,27 @@ impl<E> DieselFileTransferRepository<E> {
     ) -> Self {
         Self {
             executor,
-            derive_subkey,
-            current_profile,
+            protection: TransferPersistenceProtection::legacy(derive_subkey, current_profile),
+        }
+    }
+
+    pub fn new_v3(executor: E, protection: Arc<ContentProtection>) -> Self {
+        Self {
+            executor,
+            protection: TransferPersistenceProtection::v3(protection),
         }
     }
 }
 
-fn row_to_expired(
+async fn row_to_expired(
     row: &FileTransferRow,
-    cipher: &TransferPersistenceCipher,
+    protection: &ResolvedTransferPersistenceProtection,
 ) -> anyhow::Result<ExpiredInflightTransfer> {
     let status = TrackedFileTransferStatus::from_str_value(&row.status)
         .unwrap_or(TrackedFileTransferStatus::Pending);
-    let metadata = cipher.open_metadata(&row.transfer_id, &row.metadata_ciphertext)?;
+    let metadata = protection
+        .open_metadata(&row.transfer_id, &row.metadata_ciphertext)
+        .await?;
     Ok(ExpiredInflightTransfer {
         transfer_id: row.transfer_id.clone(),
         entry_id: row.entry_id.clone().unwrap_or_default(),
@@ -74,14 +82,12 @@ impl<E: DbExecutor> RecordReceiverTransferPort for DieselFileTransferRepository<
         &self,
         transfer: &PendingInboundTransfer,
     ) -> Result<(), FileTransferProjectionError> {
-        let cipher = derive_transfer_persistence_cipher(&self.derive_subkey, &self.current_profile)
-            .await
-            .map_err(backend)?;
+        let protection = self.protection.resolve().await.map_err(backend)?;
         let span = debug_span!(
             "infra.sqlite.upsert_pending_transfer",
             transfer_id = %transfer.transfer_id
         );
-        let metadata_ciphertext = cipher
+        let metadata_ciphertext = protection
             .seal_metadata(
                 &transfer.transfer_id,
                 &TransferMetadata {
@@ -90,6 +96,7 @@ impl<E: DbExecutor> RecordReceiverTransferPort for DieselFileTransferRepository<
                     failure_detail: None,
                 },
             )
+            .await
             .map_err(|error| backend(error.into()))?;
         let row = NewFileTransferRow {
             transfer_id: transfer.transfer_id.clone(),
@@ -178,10 +185,12 @@ impl<E: DbExecutor> SeedProvisionalReceivePort for DieselFileTransferRepository<
         &self,
         transfer: &ProvisionalInboundTransfer,
     ) -> Result<(), ProvisionalReceiveError> {
-        let cipher = derive_transfer_persistence_cipher(&self.derive_subkey, &self.current_profile)
+        let protection = self
+            .protection
+            .resolve()
             .await
             .map_err(|error| ProvisionalReceiveError::Backend(error.to_string()))?;
-        let metadata_ciphertext = cipher
+        let metadata_ciphertext = protection
             .seal_metadata(
                 &transfer.transfer_id,
                 &TransferMetadata {
@@ -190,6 +199,7 @@ impl<E: DbExecutor> SeedProvisionalReceivePort for DieselFileTransferRepository<
                     failure_detail: None,
                 },
             )
+            .await
             .map_err(|error| ProvisionalReceiveError::Backend(error.to_string()))?;
         let row = NewFileTransferRow {
             transfer_id: transfer.transfer_id.clone(),
@@ -239,40 +249,55 @@ impl<E: DbExecutor> UpdateProvisionalReceivePathPort for DieselFileTransferRepos
         cached_path: &str,
         now_ms: i64,
     ) -> Result<(), ProvisionalReceiveError> {
-        let cipher = derive_transfer_persistence_cipher(&self.derive_subkey, &self.current_profile)
+        let protection = self
+            .protection
+            .resolve()
             .await
             .map_err(|error| ProvisionalReceiveError::Backend(error.to_string()))?;
         let transfer_id = provisional_transfer_id.to_owned();
         let cached_path = cached_path.to_owned();
+        let read_transfer_id = transfer_id.clone();
+        let previous_ciphertext = self
+            .executor
+            .run(move |conn| {
+                file_transfer::table
+                    .filter(file_transfer::transfer_id.eq(&read_transfer_id))
+                    .filter(file_transfer::binding_state.eq("provisional"))
+                    .select(file_transfer::metadata_ciphertext)
+                    .first::<Vec<u8>>(conn)
+                    .optional()
+                    .map_err(Into::into)
+            })
+            .map_err(provisional_error)?
+            .ok_or(ProvisionalReceiveError::NotFound)?;
+        let mut metadata = protection
+            .open_metadata(&transfer_id, &previous_ciphertext)
+            .await
+            .map_err(|error| ProvisionalReceiveError::Backend(error.to_string()))?;
+        metadata.cached_path = Some(cached_path);
+        let replacement_ciphertext = protection
+            .seal_metadata(&transfer_id, &metadata)
+            .await
+            .map_err(|error| ProvisionalReceiveError::Backend(error.to_string()))?;
+
         self.executor
             .run(move |conn| {
-                conn.transaction::<_, anyhow::Error, _>(|conn| {
-                    let ciphertext = file_transfer::table
+                let affected = diesel::update(
+                    file_transfer::table
                         .filter(file_transfer::transfer_id.eq(&transfer_id))
                         .filter(file_transfer::binding_state.eq("provisional"))
-                        .select(file_transfer::metadata_ciphertext)
-                        .first::<Vec<u8>>(conn)
-                        .optional()?
-                        .ok_or(ProvisionalInvariantError::NotFound)?;
-                    let mut metadata = cipher.open_metadata(&transfer_id, &ciphertext)?;
-                    metadata.cached_path = Some(cached_path);
-                    let ciphertext = cipher.seal_metadata(&transfer_id, &metadata)?;
-                    let affected = diesel::update(
-                        file_transfer::table
-                            .filter(file_transfer::transfer_id.eq(&transfer_id))
-                            .filter(file_transfer::binding_state.eq("provisional")),
-                    )
-                    .set((
-                        file_transfer::metadata_ciphertext.eq(ciphertext),
-                        file_transfer::updated_at_ms.eq(now_ms),
-                    ))
-                    .execute(conn)?;
-                    if affected == 1 {
-                        Ok(())
-                    } else {
-                        Err(ProvisionalInvariantError::Conflict.into())
-                    }
-                })
+                        .filter(file_transfer::metadata_ciphertext.eq(previous_ciphertext)),
+                )
+                .set((
+                    file_transfer::metadata_ciphertext.eq(replacement_ciphertext),
+                    file_transfer::updated_at_ms.eq(now_ms),
+                ))
+                .execute(conn)?;
+                if affected == 1 {
+                    Ok(())
+                } else {
+                    Err(ProvisionalInvariantError::Conflict.into())
+                }
             })
             .map_err(provisional_error)
     }
@@ -283,29 +308,36 @@ impl<E: DbExecutor> ListProvisionalReceivesPort for DieselFileTransferRepository
     async fn list_provisional_receives(
         &self,
     ) -> Result<Vec<ProvisionalReceiveRecovery>, ProvisionalReceiveError> {
-        let cipher = derive_transfer_persistence_cipher(&self.derive_subkey, &self.current_profile)
+        let protection = self
+            .protection
+            .resolve()
             .await
             .map_err(|error| ProvisionalReceiveError::Backend(error.to_string()))?;
-        self.executor
+        let rows = self
+            .executor
             .run(move |conn| {
-                let rows = file_transfer::table
+                file_transfer::table
                     .filter(file_transfer::binding_state.eq("provisional"))
                     .select((
                         file_transfer::transfer_id,
                         file_transfer::metadata_ciphertext,
                     ))
-                    .load::<(String, Vec<u8>)>(conn)?;
-                rows.into_iter()
-                    .map(|(transfer_id, ciphertext)| {
-                        let metadata = cipher.open_metadata(&transfer_id, &ciphertext)?;
-                        Ok(ProvisionalReceiveRecovery {
-                            transfer_id,
-                            cached_path: metadata.cached_path,
-                        })
-                    })
-                    .collect::<anyhow::Result<Vec<_>>>()
+                    .load::<(String, Vec<u8>)>(conn)
+                    .map_err(Into::into)
             })
-            .map_err(|error| ProvisionalReceiveError::Backend(error.to_string()))
+            .map_err(|error| ProvisionalReceiveError::Backend(error.to_string()))?;
+        let mut recoveries = Vec::with_capacity(rows.len());
+        for (transfer_id, ciphertext) in rows {
+            let metadata = protection
+                .open_metadata(&transfer_id, &ciphertext)
+                .await
+                .map_err(|error| ProvisionalReceiveError::Backend(error.to_string()))?;
+            recoveries.push(ProvisionalReceiveRecovery {
+                transfer_id,
+                cached_path: metadata.cached_path,
+            });
+        }
+        Ok(recoveries)
     }
 }
 
@@ -435,61 +467,59 @@ impl<E: DbExecutor> GetEntryTransferSummaryPort for DieselFileTransferRepository
         entry_id: &str,
     ) -> Result<Option<EntryTransferSummary>, FileTransferProjectionError> {
         let eid = entry_id.to_string();
-        let cipher = derive_transfer_persistence_cipher(&self.derive_subkey, &self.current_profile)
-            .await
-            .map_err(backend)?;
-        self.executor
+        let query_entry_id = eid.clone();
+        let rows = self
+            .executor
             .run(move |conn| {
-                let rows = file_transfer::table
-                    .filter(file_transfer::entry_id.eq(&eid))
-                    .load::<FileTransferRow>(conn)?;
-
-                if rows.is_empty() {
-                    return Ok(None);
-                }
-
-                let statuses: Vec<TrackedFileTransferStatus> = rows
-                    .iter()
-                    .map(|r| {
-                        TrackedFileTransferStatus::from_str_value(&r.status)
-                            .unwrap_or(TrackedFileTransferStatus::Pending)
-                    })
-                    .collect();
-
-                let aggregate_status = match compute_aggregate_status(&statuses) {
-                    Some(s) => s,
-                    None => return Ok(None),
-                };
-
-                // Pick the encrypted detail, falling back to the stable code.
-                let failure_reason = if aggregate_status == TrackedFileTransferStatus::Failed {
-                    rows.iter()
-                        .find(|r| r.status == TrackedFileTransferStatus::Failed.as_str())
-                        .map(|row| {
-                            cipher
-                                .open_metadata(&row.transfer_id, &row.metadata_ciphertext)
-                                .map(|metadata| {
-                                    metadata.failure_detail.or_else(|| row.failure_code.clone())
-                                })
-                        })
-                        .transpose()?
-                        .flatten()
-                } else {
-                    None
-                };
-
-                let mut transfer_ids: Vec<String> =
-                    rows.iter().map(|row| row.transfer_id.clone()).collect();
-                transfer_ids.sort();
-
-                Ok(Some(EntryTransferSummary {
-                    entry_id: eid,
-                    aggregate_status,
-                    failure_reason,
-                    transfer_ids,
-                }))
+                file_transfer::table
+                    .filter(file_transfer::entry_id.eq(&query_entry_id))
+                    .load::<FileTransferRow>(conn)
+                    .map_err(Into::into)
             })
-            .map_err(backend)
+            .map_err(backend)?;
+
+        if rows.is_empty() {
+            return Ok(None);
+        }
+
+        let statuses: Vec<TrackedFileTransferStatus> = rows
+            .iter()
+            .map(|row| {
+                TrackedFileTransferStatus::from_str_value(&row.status)
+                    .unwrap_or(TrackedFileTransferStatus::Pending)
+            })
+            .collect();
+        let Some(aggregate_status) = compute_aggregate_status(&statuses) else {
+            return Ok(None);
+        };
+
+        let failure_reason = if aggregate_status == TrackedFileTransferStatus::Failed {
+            let Some(row) = rows
+                .iter()
+                .find(|row| row.status == TrackedFileTransferStatus::Failed.as_str())
+            else {
+                return Ok(None);
+            };
+            let protection = self.protection.resolve().await.map_err(backend)?;
+            let metadata = protection
+                .open_metadata(&row.transfer_id, &row.metadata_ciphertext)
+                .await
+                .map_err(|error| backend(error.into()))?;
+            metadata.failure_detail.or_else(|| row.failure_code.clone())
+        } else {
+            None
+        };
+
+        let mut transfer_ids: Vec<String> =
+            rows.iter().map(|row| row.transfer_id.clone()).collect();
+        transfer_ids.sort();
+
+        Ok(Some(EntryTransferSummary {
+            entry_id: eid,
+            aggregate_status,
+            failure_reason,
+            transfer_ids,
+        }))
     }
 }
 
@@ -624,12 +654,10 @@ impl<E: DbExecutor> ListExpiredInflightTransfersPort for DieselFileTransferRepos
         pending_cutoff_ms: i64,
         transferring_cutoff_ms: i64,
     ) -> Result<Vec<ExpiredInflightTransfer>, FileTransferProjectionError> {
-        let cipher = derive_transfer_persistence_cipher(&self.derive_subkey, &self.current_profile)
-            .await
-            .map_err(backend)?;
-        self.executor
+        let rows = self
+            .executor
             .run(move |conn| {
-                let rows = file_transfer::table
+                file_transfer::table
                     .filter(file_transfer::binding_state.eq("legacy"))
                     .filter(
                         file_transfer::status
@@ -639,12 +667,16 @@ impl<E: DbExecutor> ListExpiredInflightTransfersPort for DieselFileTransferRepos
                                 .eq(TrackedFileTransferStatus::Transferring.as_str())
                                 .and(file_transfer::updated_at_ms.lt(transferring_cutoff_ms))),
                     )
-                    .load::<FileTransferRow>(conn)?;
-                rows.iter()
-                    .map(|row| row_to_expired(row, &cipher))
-                    .collect::<anyhow::Result<Vec<_>>>()
+                    .load::<FileTransferRow>(conn)
+                    .map_err(Into::into)
             })
-            .map_err(backend)
+            .map_err(backend)?;
+        let protection = self.protection.resolve().await.map_err(backend)?;
+        let mut expired = Vec::with_capacity(rows.len());
+        for row in &rows {
+            expired.push(row_to_expired(row, &protection).await.map_err(backend)?);
+        }
+        Ok(expired)
     }
 }
 
@@ -658,25 +690,45 @@ impl<E: DbExecutor> FailInflightTransfersPort for DieselFileTransferRepository<E
     ) -> Result<(), FileTransferProjectionError> {
         let tid = transfer_id.to_string();
         let reason = reason.to_string();
-        let cipher = derive_transfer_persistence_cipher(&self.derive_subkey, &self.current_profile)
-            .await
+        let query_tid = tid.clone();
+        let previous_ciphertext = self
+            .executor
+            .run(move |conn| load_transfer_metadata_ciphertext(conn, &query_tid))
             .map_err(backend)?;
+        let Some(previous_ciphertext) = previous_ciphertext else {
+            return Ok(());
+        };
+        let protection = self.protection.resolve().await.map_err(backend)?;
+        let mut metadata = protection
+            .open_metadata(&tid, &previous_ciphertext)
+            .await
+            .map_err(|error| backend(error.into()))?;
+        metadata.failure_detail = Some(reason);
+        let metadata_ciphertext = protection
+            .seal_metadata(&tid, &metadata)
+            .await
+            .map_err(|error| backend(error.into()))?;
         self.executor
             .run(move |conn| {
-                let Some(mut metadata) = load_transfer_metadata(conn, &tid, &cipher)? else {
-                    return Ok(());
-                };
-                metadata.failure_detail = Some(reason);
-                let metadata_ciphertext = cipher.seal_metadata(&tid, &metadata)?;
-                diesel::update(file_transfer::table.filter(file_transfer::transfer_id.eq(&tid)))
-                    .set((
-                        file_transfer::status.eq(TrackedFileTransferStatus::Failed.as_str()),
-                        file_transfer::failure_code.eq(Some("interrupted")),
-                        file_transfer::metadata_ciphertext.eq(metadata_ciphertext),
-                        file_transfer::updated_at_ms.eq(now_ms),
+                let affected = diesel::update(
+                    file_transfer::table
+                        .filter(file_transfer::transfer_id.eq(&tid))
+                        .filter(file_transfer::metadata_ciphertext.eq(previous_ciphertext)),
+                )
+                .set((
+                    file_transfer::status.eq(TrackedFileTransferStatus::Failed.as_str()),
+                    file_transfer::failure_code.eq(Some("interrupted")),
+                    file_transfer::metadata_ciphertext.eq(metadata_ciphertext),
+                    file_transfer::updated_at_ms.eq(now_ms),
+                ))
+                .execute(conn)?;
+                if affected == 1 {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "file transfer projection changed during metadata update"
                     ))
-                    .execute(conn)?;
-                Ok(())
+                }
             })
             .map_err(backend)
     }
@@ -687,14 +739,12 @@ impl<E: DbExecutor> FailInflightTransfersPort for DieselFileTransferRepository<E
         now_ms: i64,
     ) -> Result<Vec<ExpiredInflightTransfer>, FileTransferProjectionError> {
         let reason = reason.to_string();
-        let cipher = derive_transfer_persistence_cipher(&self.derive_subkey, &self.current_profile)
-            .await
-            .map_err(backend)?;
-        self.executor
+        let rows = self
+            .executor
             .run(move |conn| {
                 // Legacy rows have no attempt authority. Attempt-bound and
                 // provisional rows are reconciled by their owning workflows.
-                let rows = file_transfer::table
+                file_transfer::table
                     .filter(file_transfer::binding_state.eq("legacy"))
                     .filter(
                         file_transfer::status
@@ -702,54 +752,76 @@ impl<E: DbExecutor> FailInflightTransfersPort for DieselFileTransferRepository<E
                             .or(file_transfer::status
                                 .eq(TrackedFileTransferStatus::Transferring.as_str())),
                     )
-                    .load::<FileTransferRow>(conn)?;
-
-                let targets = rows
-                    .iter()
-                    .map(|row| row_to_expired(row, &cipher))
-                    .collect::<anyhow::Result<Vec<_>>>()?;
-
-                for row in &rows {
-                    let mut metadata =
-                        cipher.open_metadata(&row.transfer_id, &row.metadata_ciphertext)?;
-                    metadata.failure_detail = Some(reason.clone());
-                    let metadata_ciphertext = cipher.seal_metadata(&row.transfer_id, &metadata)?;
-                    diesel::update(
-                        file_transfer::table
-                            .filter(file_transfer::transfer_id.eq(&row.transfer_id)),
-                    )
-                    .set((
-                        file_transfer::status.eq(TrackedFileTransferStatus::Failed.as_str()),
-                        file_transfer::failure_code.eq(Some("interrupted")),
-                        file_transfer::metadata_ciphertext.eq(metadata_ciphertext),
-                        file_transfer::updated_at_ms.eq(now_ms),
-                    ))
-                    .execute(conn)?;
-                }
-
-                Ok(targets)
+                    .load::<FileTransferRow>(conn)
+                    .map_err(Into::into)
             })
-            .map_err(backend)
+            .map_err(backend)?;
+        let protection = self.protection.resolve().await.map_err(backend)?;
+        let mut targets = Vec::with_capacity(rows.len());
+        let mut replacements = Vec::with_capacity(rows.len());
+        for row in &rows {
+            targets.push(row_to_expired(row, &protection).await.map_err(backend)?);
+            let mut metadata = protection
+                .open_metadata(&row.transfer_id, &row.metadata_ciphertext)
+                .await
+                .map_err(|error| backend(error.into()))?;
+            metadata.failure_detail = Some(reason.clone());
+            let ciphertext = protection
+                .seal_metadata(&row.transfer_id, &metadata)
+                .await
+                .map_err(|error| backend(error.into()))?;
+            replacements.push((
+                row.transfer_id.clone(),
+                row.metadata_ciphertext.clone(),
+                ciphertext,
+            ));
+        }
+
+        self.executor
+            .run(move |conn| {
+                conn.transaction::<_, anyhow::Error, _>(|conn| {
+                    for (transfer_id, previous_ciphertext, replacement_ciphertext) in replacements {
+                        let affected = diesel::update(
+                            file_transfer::table
+                                .filter(file_transfer::transfer_id.eq(&transfer_id))
+                                .filter(file_transfer::binding_state.eq("legacy"))
+                                .filter(file_transfer::status.eq_any([
+                                    TrackedFileTransferStatus::Pending.as_str(),
+                                    TrackedFileTransferStatus::Transferring.as_str(),
+                                ]))
+                                .filter(file_transfer::metadata_ciphertext.eq(previous_ciphertext)),
+                        )
+                        .set((
+                            file_transfer::status.eq(TrackedFileTransferStatus::Failed.as_str()),
+                            file_transfer::failure_code.eq(Some("interrupted")),
+                            file_transfer::metadata_ciphertext.eq(replacement_ciphertext),
+                            file_transfer::updated_at_ms.eq(now_ms),
+                        ))
+                        .execute(conn)?;
+                        if affected != 1 {
+                            return Err(anyhow::anyhow!(
+                                "file transfer projection changed during bulk metadata update"
+                            ));
+                        }
+                    }
+                    Ok(())
+                })
+            })
+            .map_err(backend)?;
+        Ok(targets)
     }
 }
 
-fn load_transfer_metadata(
+fn load_transfer_metadata_ciphertext(
     conn: &mut diesel::sqlite::SqliteConnection,
     transfer_id: &str,
-    cipher: &TransferPersistenceCipher,
-) -> anyhow::Result<Option<TransferMetadata>> {
-    let ciphertext = file_transfer::table
+) -> anyhow::Result<Option<Vec<u8>>> {
+    file_transfer::table
         .filter(file_transfer::transfer_id.eq(transfer_id))
         .select(file_transfer::metadata_ciphertext)
         .first::<Vec<u8>>(conn)
-        .optional()?;
-    ciphertext
-        .map(|ciphertext| {
-            cipher
-                .open_metadata(transfer_id, &ciphertext)
-                .map_err(Into::into)
-        })
-        .transpose()
+        .optional()
+        .map_err(Into::into)
 }
 
 #[cfg(test)]
