@@ -791,7 +791,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 | 日期 | 主题 | 长期结论 |
 | --- | --- | --- |
-| 2026-09-02 | 定时维护审查 Action | GitHub Actions 每周先以脱敏预检验证自定义 Responses API 的 HTTP 与 SSE 完成事件契约，再顺序启动五个互不调用的全仓审查 session，避免共享接入发生并发容量争抢，最后由独立 session 汇总标准 JSON artifact；Codex 与产品仓发布流程统一从 `CODEX_API_ENDPOINT` 和 `CODEX_API_KEY` 读取接入配置。开发者通过 Actions Summary 阅读去重报告，并可下载各 lane 与汇总产物追溯证据。审查只报告问题，不自动修复、建 Issue 或改变运行时架构。 |
+| 2026-09-02 | 定时维护审查 Action | GitHub Actions 每周先以脱敏预检验证自定义 Responses API 的 HTTP 与 SSE 完成事件契约；预检失败时不启动审查或汇总。预检通过后顺序启动五个互不调用的全仓审查 session，避免共享接入发生并发容量争抢，最后由独立 session 汇总标准 JSON artifact；Codex 与产品仓发布流程统一从 `CODEX_API_ENDPOINT` 和 `CODEX_API_KEY` 读取接入配置。开发者通过 Actions Summary 阅读去重报告，并可下载各 lane 与汇总产物追溯证据。审查只报告问题，不自动修复、建 Issue 或改变运行时架构。 |
 | 2026-09-01 | 文档记录系统重组 | 根与局部 `AGENTS.md` 收敛为短维护地图；长期设计、ADR、产品规格、active/completed 执行计划、生成资料和参考资料分别进入结构化 `docs/` 目录。根 `ARCHITECTURE.md` 成为当前架构入口，架构圣经继续保存详细事实；旧 `docs/adr`、`docs/specs`、`docs/prd`、`docs/diagrams` 和 `docs/migration` 路径不再作为并行入口。 |
 | 2026-09-01 | 并行维护审查 Skills | 仓库维护审查拆为五个互不调用的只读专项 skill，由独立 session 并行运行；第六个独立 skill 只汇总标准化 artifact。该机制以现有架构、安全、可靠性和设计文档为规则来源，不改变运行时架构。 |
 | 2026-08-29 | 文档压缩 | 圣经只保留当前架构事实、稳定边界和维护规则；移除逐切片流水账与已经失效的实现细节。 |

@@ -158,8 +158,10 @@ jobs:
 
   report:
     name: Aggregate developer report
-    if: ${{ always() }}
-    needs: audit
+    if: ${{ always() && needs.responses_api_preflight.result == 'success' }}
+    needs:
+      - responses_api_preflight
+      - audit
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
