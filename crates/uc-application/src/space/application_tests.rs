@@ -7,7 +7,7 @@ use uc_core::membership::*;
 use uc_core::security::IdentityFingerprint;
 
 use super::admission::*;
-use super::application::{SpaceApplication, SpaceApplicationDeps};
+use super::application::{SpaceApplication, SpaceRuntimeAdapters};
 use super::membership::*;
 
 struct MemoryLedger(Mutex<LoadedMembershipLedger>);
@@ -757,18 +757,14 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
     )));
     let passive = Arc::new(PassivePorts::default());
     let (_presence_tx, presence_rx) = tokio::sync::broadcast::channel(4);
-    let mut application = SpaceApplication::build(
-        SpaceApplicationDeps {
+    let mut application = SpaceApplication::build_for_test(
+        SpaceRuntimeAdapters {
             load_membership_ledger: repository.clone(),
             commit_membership_ledger: repository,
             historical_membership_signatures: passive.clone(),
             current_member_signatures: passive.clone(),
             membership_identity: passive.clone(),
             membership_announcement: passive.clone(),
-            device_identity: passive.clone(),
-            group_bootstrap: passive.clone(),
-            clock: passive.clone(),
-            settings: passive.clone(),
             prepare_joiner_invitation: passive.clone(),
             resolve_joiner_invitation: passive.clone(),
             joiner_start_material: passive.clone(),
@@ -805,6 +801,10 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
             cleanup_legacy_membership_data: passive.clone(),
             membership_network_activity: passive.clone(),
         },
+        passive.clone(),
+        passive.clone(),
+        passive.clone(),
+        passive.clone(),
         presence_rx,
         passive.clone(),
     );

@@ -511,6 +511,24 @@ fn engine_does_not_assemble_clipboard_internals() {
 }
 
 #[test]
+fn engine_does_not_assemble_space_internals() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engine = read_rs_sources(&workspace_root.join("crates/uc-engine/src"));
+
+    for forbidden in [
+        "SpaceApplicationDeps",
+        "SpaceSessionActivityDeps",
+        "DeferredSpaceSessionActivity",
+        "build_space_session_activity",
+    ] {
+        assert!(
+            !engine.contains(forbidden),
+            "Application Space assembly must own {forbidden} instead of uc-engine"
+        );
+    }
+}
+
+#[test]
 fn engine_does_not_restore_unrelated_search_or_membership_activity_steps() {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let runtime = read_rs_sources(&workspace_root.join("crates/uc-engine/src/runtime"));

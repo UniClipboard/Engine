@@ -13,6 +13,7 @@ use super::commands::{
 use super::deps::{SpaceAdmissionDeps, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps};
 use super::errors::IssuePairingInvitationError;
 use crate::facade::roster::{MemberRosterDeps, MemberRosterFacade};
+use crate::facade::search::SearchFacade;
 use crate::space::admission::{
     CancelInvitationError, CancelPairingInvitationUseCase, CompletePendingSpaceTransitionError,
     InMemoryPairingInvitationHolder, IssuePairingInvitationForAddressUseCase,
@@ -22,8 +23,10 @@ use crate::space::admission::{
     QueryPendingSpaceTransitionError, SpaceAdmissionProtocol,
 };
 use crate::space::application::SpaceApplication;
-use crate::space::lifecycle::combine_space_session_activity;
 use crate::space::lifecycle::UpgradeSpaceUseCase;
+use crate::space::lifecycle::{
+    build_space_session_activity, combine_space_session_activity, DeferredSpaceSessionActivity,
+};
 use crate::space::lifecycle::{
     InitializeSpaceError, InitializeSpaceRequest, InitializeSpaceResult, InitializeSpaceUseCase,
 };
@@ -43,6 +46,7 @@ use crate::space::lifecycle::{
     RecoverSpaceSessionError, RecoverSpaceSessionResult, RecoverSpaceSessionUseCase,
 };
 use crate::space::membership::RePairingState;
+use crate::transfer::receive::reconciliation::EnsureReceiveReadyPort;
 use uc_core::ids::DeviceId;
 
 /// Space-lifecycle facade (A1 initialise, A2 unlock, B1 issue invitation,
@@ -57,6 +61,7 @@ pub struct SpaceFacade {
     issue_pairing_invitation_for_address: Arc<IssuePairingInvitationForAddressUseCase>,
     query_pairing_invitation_addresses: Arc<QueryPairingInvitationAddressesUseCase>,
     space_admission: Arc<SpaceAdmissionProtocol>,
+    application_activity: Arc<DeferredSpaceSessionActivity>,
     session_activity: Arc<dyn crate::space::lifecycle::SpaceSessionActivityPort>,
     membership_maintenance: Arc<dyn crate::space::membership::WakeSpaceMembershipMaintenancePort>,
     lock_space_session: Arc<LockSpaceSessionUseCase>,
@@ -87,10 +92,11 @@ impl SpaceFacade {
 
     fn new_internal(deps: SpaceFacadeDeps, start_runtime: bool) -> Self {
         let SpaceFacadeDeps {
+            application: app_deps,
             session,
             admission,
             transition,
-            application,
+            runtime_adapters,
             peer_reachability_changed_events,
         } = deps;
         let SpaceTransitionDeps {
@@ -103,7 +109,8 @@ impl SpaceFacade {
         let re_pairing_state = Arc::new(RePairingState::new(re_pairing_state_store));
         let invitation_holder = Arc::new(InMemoryPairingInvitationHolder::new());
         let mut application = SpaceApplication::build(
-            application,
+            &app_deps,
+            runtime_adapters,
             peer_reachability_changed_events,
             Arc::clone(&re_pairing_state)
                 as Arc<dyn crate::space::membership::ResolveRePairingPort>,
@@ -121,6 +128,7 @@ impl SpaceFacade {
         let space_admission_endpoint = application.space_admission_endpoint();
         let membership_session_activity = application.membership_session_activity();
         let membership_maintenance = application.membership_maintenance_wake();
+        let application_activity = Arc::new(DeferredSpaceSessionActivity::new());
         let SpaceSessionDeps {
             space_access,
             mobile_consumable_backfill,
@@ -129,10 +137,12 @@ impl SpaceFacade {
             current_space_identity,
             initial_space_activation,
             admission_credentials,
-            activity: application_activity,
         } = session;
-        let activity =
-            combine_space_session_activity(membership_session_activity, application_activity);
+        let activity = combine_space_session_activity(
+            membership_session_activity,
+            Arc::clone(&application_activity)
+                as Arc<dyn crate::space::lifecycle::SpaceSessionActivityPort>,
+        );
         let SpaceAdmissionDeps {
             local_identity,
             device_identity,
@@ -279,6 +289,7 @@ impl SpaceFacade {
             issue_pairing_invitation_for_address,
             query_pairing_invitation_addresses,
             space_admission,
+            application_activity,
             session_activity: activity,
             membership_maintenance,
             lock_space_session,
@@ -330,6 +341,19 @@ impl SpaceFacade {
         application
             .as_mut()
             .is_some_and(SpaceApplication::start_runtime)
+    }
+
+    /// 绑定 Search 与 receive 的完整 Space session activity。
+    ///
+    /// Engine 只提交跨领域能力；具体 activity、顺序和失败恢复由
+    /// Application 内部构造并持有。
+    pub fn bind_session_activity(
+        &self,
+        search: Arc<SearchFacade>,
+        receive: Arc<dyn EnsureReceiveReadyPort>,
+    ) -> bool {
+        self.application_activity
+            .bind(build_space_session_activity(search, receive))
     }
 
     pub async fn lock_space_session(&self) -> Result<(), LockSpaceSessionError> {

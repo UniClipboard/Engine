@@ -797,6 +797,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 | 日期 | 主题 | 长期结论 |
 | --- | --- | --- |
+| 2026-09-02 | 031 Space assembly 深化 | `SpaceFacade` 从通用 Application 依赖与 Engine 选择的最终 Space adapters 内部构造私有成员对象图，并在 Application 内持有成员、搜索和接收的 session activity 组合及恢复顺序。Engine 继续选择 Iroh、V3 transition/recovery、宿主能力与观测 decorator，但不再构造或导入 Space 内部 deps、use case、runtime 或 activity；跨领域 Search/receive 能力只在启动装配期一次绑定。 |
 | 2026-09-02 | Engine 关闭期限所有权 | Engine shutdown 从用户总期限预留 100ms 给外层完成通知，runtime task registry 使用较早期限收口，避免 registry 到点 abort 与外层 timeout 同刻竞争；外层仍严格受原总期限约束。 |
 | 2026-09-02 | 030 分支选择与故障矩阵验收 | sibling 分支只由逐设备明确选择推进；相反并发选择以 ledger CAS 只保存一个不可变 intent，后续不同 conflict 可独立选择。V3 branch transition 六个副作用阶段均验证“副作用完成、phase 提交前崩溃”后的新 owner 幂等重放，profile data generation、SQLite/blob 与 keyslot 不变；F0-F7 真实 Engine/Iroh、F8-F13 分层矩阵、20 个固定 seed 及 029 C0-C5 回归全部通过。实体设备和 Release bundle 本阶段跳过。 |
 | 2026-09-02 | 031 wiring inventory 删除 | `AppDeps` 不再保存只在 Engine 组装期消费的 portable current-space identity，`SecurityPorts` 不再保存 current profile 与 blob cipher；真实 adapter 继续在 composition root 局部注入其消费者。仓库检查禁止这三个 wiring-only 字段回流。 |

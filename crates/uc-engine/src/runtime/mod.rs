@@ -19,11 +19,10 @@ use tracing::{error, warn};
 use uc_application::deps::{ProfileFactoryResetCapabilityError, StopProfileRuntimePort};
 use uc_application::facade::clipboard_write::LocalActiveRegisterAdvancer;
 use uc_application::facade::{
-    build_space_session_activity, AppFacade, ClipboardInboundAdapters, ClipboardInboundEvent,
-    ClipboardInboundEventAction, ClipboardInboundEventPort, ClipboardSession, ClipboardSessionDeps,
-    HistoryMaintenanceRuntime, NetworkRecoveryEvent, ProfileFactoryResetOutcome,
-    ProfileFactoryResetRequest, ProfileFactoryResetUseCase, SpaceSessionActivityDeps,
-    SpaceSessionActivityPort,
+    AppFacade, ClipboardInboundAdapters, ClipboardInboundEvent, ClipboardInboundEventAction,
+    ClipboardInboundEventPort, ClipboardSession, ClipboardSessionDeps, HistoryMaintenanceRuntime,
+    NetworkRecoveryEvent, ProfileFactoryResetOutcome, ProfileFactoryResetRequest,
+    ProfileFactoryResetUseCase,
 };
 use uc_core::ports::ClockPort;
 use uc_core::TaskRegistry;
@@ -411,16 +410,11 @@ impl ProductionRuntime {
         let (restore_tx, restore_rx) = tokio::sync::mpsc::unbounded_channel();
         sync_engine.attach_restore_broadcast(restore_rx);
         let search = uc_application::facade::SearchAssembly::start(&wired.deps);
-        let session_activity = build_space_session_activity(
+        if !sync_engine.facade.bind_session_activity(
             search.facade(),
-            SpaceSessionActivityDeps {
-                receive: wired.shared.file_transfer.facade()
-                    as Arc<dyn uc_application::facade::EnsureReceiveReadyPort>,
-            },
-        );
-        if !sync_engine
-            .bind_space_session_activity(session_activity as Arc<dyn SpaceSessionActivityPort>)
-        {
+            wired.shared.file_transfer.facade()
+                as Arc<dyn uc_application::facade::EnsureReceiveReadyPort>,
+        ) {
             return Err(startup_error(
                 "Space session activity",
                 "Space session activity was already bound",

@@ -13,12 +13,12 @@ use uc_core::ports::{
 use uc_observability_contract::analytics::AnalyticsFacade;
 
 use crate::clipboard::write::MobileConsumableBackfill;
-use crate::deps::DeviceManagementResetDataPort;
+use crate::deps::{AppDeps, DeviceManagementResetDataPort};
 use crate::deps::{
     CurrentSpaceIdentityPort, InitialSpaceActivationPort, RePairingStateStorePort,
     SpaceAccessPorts, SpaceRebuildProgressPort,
 };
-use crate::space::application::SpaceApplicationDeps;
+use crate::space::application::SpaceRuntimeAdapters;
 
 pub struct SpaceSessionDeps {
     pub space_access: SpaceAccessPorts,
@@ -28,7 +28,6 @@ pub struct SpaceSessionDeps {
     pub current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
     pub initial_space_activation: Arc<dyn InitialSpaceActivationPort>,
     pub admission_credentials: Arc<dyn crate::deps::PrepareSpaceAdmissionCredentialsPort>,
-    pub activity: Arc<dyn crate::space::lifecycle::SpaceSessionActivityPort>,
 }
 
 pub struct SpaceAdmissionDeps {
@@ -54,10 +53,11 @@ pub struct SpaceTransitionDeps {
 }
 
 pub struct SpaceFacadeDeps {
+    pub application: AppDeps,
     pub session: SpaceSessionDeps,
     pub admission: SpaceAdmissionDeps,
     pub transition: SpaceTransitionDeps,
-    pub application: SpaceApplicationDeps,
+    pub runtime_adapters: SpaceRuntimeAdapters,
     pub peer_reachability_changed_events:
         broadcast::Receiver<uc_core::ports::PeerReachabilityChanged>,
 }

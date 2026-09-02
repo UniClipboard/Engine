@@ -173,15 +173,14 @@ pub use settings::{
 };
 
 pub use space_setup::{
-    build_space_session_activity, CancelInvitationError, CompletePendingSpaceTransitionError,
-    CurrentInvitation, InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult,
-    IssuePairingInvitationError, IssuePairingInvitationResult, MembershipConflictBranchView,
-    MembershipConflictView, MembershipConflictsView, PairingInvitationAddressCandidate,
-    QueryMembershipConflictsError, QueryPairingInvitationAddressesError,
-    QueryPendingSpaceTransitionError, QuerySetupStateError, RedeemPairingInvitationError,
-    ResetSpaceError, ResolveMembershipConflictError, ResolveMembershipConflictInput,
-    ResolveMembershipConflictResult, SetupStateView, SpaceActivityError, SpaceAdmissionDeps,
-    SpaceFacade, SpaceFacadeDeps, SpaceSessionActivityDeps, SpaceSessionActivityPort,
+    CancelInvitationError, CompletePendingSpaceTransitionError, CurrentInvitation,
+    InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
+    IssuePairingInvitationResult, MembershipConflictBranchView, MembershipConflictView,
+    MembershipConflictsView, PairingInvitationAddressCandidate, QueryMembershipConflictsError,
+    QueryPairingInvitationAddressesError, QueryPendingSpaceTransitionError, QuerySetupStateError,
+    RedeemPairingInvitationError, ResetSpaceError, ResolveMembershipConflictError,
+    ResolveMembershipConflictInput, ResolveMembershipConflictResult, SetupStateView,
+    SpaceActivityError, SpaceAdmissionDeps, SpaceFacade, SpaceFacadeDeps, SpaceRuntimeAdapters,
     SpaceSessionDeps, SpaceTransitionDeps, UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
 };
 pub use storage::{

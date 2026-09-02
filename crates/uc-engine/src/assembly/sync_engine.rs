@@ -19,7 +19,7 @@
 //! timeouts.
 
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tracing::{info, instrument, warn};
@@ -43,14 +43,14 @@ use tracing::debug;
 /// 最终状态,不会因为正好落在 cooldown 窗口里被丢掉。
 const TRANSLATOR_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(200);
 
-use uc_application::deps::{CurrentSpaceMemberScopePort, SpaceApplicationDeps};
+use uc_application::deps::CurrentSpaceMemberScopePort;
 use uc_application::facade::{
     ActiveClipboardFacade, ActiveClipboardSession, ActiveClipboardSessionDeps, BlobTransferDeps,
     BlobTransferFacade, ClipboardInboundAdapters, ClipboardSyncDeps, ClipboardSyncFacade,
     HostEvent, HostEventBus, ReceiveCancellationDeps, SpaceAdmissionDeps, SpaceFacade,
-    SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps, TransferHostEvent, UpgradeFacade,
+    SpaceFacadeDeps, SpaceRuntimeAdapters, SpaceSessionDeps, SpaceTransitionDeps,
+    TransferHostEvent, UpgradeFacade,
 };
-use uc_application::facade::{SpaceActivityError, SpaceSessionActivityPort};
 use uc_core::file_transfer::{
     FileTransferCancellationReason, FileTransferDirection, OutboundProgressStatus,
 };
@@ -87,40 +87,6 @@ use uc_infra::space::{
     MembershipActivationAdapter, MembershipMemberFactsAdapter, MembershipNetworkGate,
     MembershipProjectionCleanupAdapter, OpenMlsHistoricalSignatureVerifier,
 };
-
-#[derive(Default)]
-struct DeferredSpaceSessionActivity {
-    delegate: OnceLock<Arc<dyn SpaceSessionActivityPort>>,
-}
-
-impl DeferredSpaceSessionActivity {
-    fn bind(&self, delegate: Arc<dyn SpaceSessionActivityPort>) -> bool {
-        self.delegate.set(delegate).is_ok()
-    }
-
-    fn delegate(&self) -> Result<Arc<dyn SpaceSessionActivityPort>, SpaceActivityError> {
-        self.delegate
-            .get()
-            .cloned()
-            .ok_or(SpaceActivityError::Unavailable)
-    }
-}
-
-#[async_trait::async_trait]
-impl SpaceSessionActivityPort for DeferredSpaceSessionActivity {
-    async fn resume_after_session_ready(&self) -> Result<(), SpaceActivityError> {
-        self.delegate()?.resume_after_session_ready().await
-    }
-
-    async fn pause_for_lock(&self) -> Result<(), SpaceActivityError> {
-        self.delegate()?.pause_for_lock().await
-    }
-
-    async fn restore_after_failed_lock(&self) -> Result<(), String> {
-        let delegate = self.delegate().map_err(|error| error.to_string())?;
-        delegate.restore_after_failed_lock().await
-    }
-}
 
 struct CurrentMemberContentGate {
     scope: Arc<dyn CurrentSpaceMemberScopePort>,
@@ -163,7 +129,6 @@ impl uc_core::ports::FindMobileDeviceByIdPort for UnavailableMobileDeviceLookup 
 /// run [`Self::shutdown`] once on exit.
 pub struct SyncEngineAssembly {
     pub facade: Arc<SpaceFacade>,
-    session_activity: Arc<DeferredSpaceSessionActivity>,
     /// Slice 2 Phase 2 · T10:剪切板同步门面。CLI `send` 通过这里走。
     /// 与 `roster` 同样共享 `peer_addr_repo` / `presence`,所以 F1 hook
     /// 喂好的 presence 缓存,`dispatch_entry` 能直接读到。
@@ -215,14 +180,6 @@ pub struct SyncEngineAssembly {
 }
 
 impl SyncEngineAssembly {
-    /// 在搜索与接收 facade 都已构造后一次性接通 Space 生命周期活动。
-    pub(crate) fn bind_space_session_activity(
-        &self,
-        activity: Arc<dyn SpaceSessionActivityPort>,
-    ) -> bool {
-        self.session_activity.bind(activity)
-    }
-
     pub(crate) fn current_peer_scope(&self) -> Arc<dyn CurrentSpaceMemberScopePort> {
         self.facade.current_member_scope()
     }
@@ -749,7 +706,6 @@ pub async fn build_sync_engine_assembly(
 
     // Space application must exist before its authenticated handlers can be
     // installed, but its maintenance runtime stays dormant until Router ready.
-    let session_activity = Arc::new(DeferredSpaceSessionActivity::default());
     let endpoint_addr = builder.local_endpoint_addr();
     let endpoint_addr_blob = builder.local_endpoint_addr_blob()?;
     let continuation_route =
@@ -818,6 +774,7 @@ pub async fn build_sync_engine_assembly(
             },
         );
     let facade = Arc::new(SpaceFacade::new_dormant(SpaceFacadeDeps {
+        application: deps.clone(),
         session: SpaceSessionDeps {
             space_access: deps.security.space_access_ports.clone(),
             mobile_consumable_backfill: Arc::clone(&deps.clipboard.mobile_consumable_backfill),
@@ -827,7 +784,6 @@ pub async fn build_sync_engine_assembly(
             initial_space_activation: Arc::clone(&deps.initial_space_activation),
             admission_credentials: space_setup.admission_credentials.clone()
                 as Arc<dyn uc_application::deps::PrepareSpaceAdmissionCredentialsPort>,
-            activity: Arc::clone(&session_activity) as Arc<dyn SpaceSessionActivityPort>,
         },
         admission: SpaceAdmissionDeps {
             local_identity: Arc::clone(&local_identity),
@@ -849,7 +805,7 @@ pub async fn build_sync_engine_assembly(
             space_rebuild_progress: Arc::clone(&deps.space_rebuild_progress),
             re_pairing_state_store: Arc::clone(&deps.re_pairing_state_store),
         },
-        application: SpaceApplicationDeps {
+        runtime_adapters: SpaceRuntimeAdapters {
             load_membership_ledger: space_setup.membership_ledger.clone()
                 as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
             commit_membership_ledger: space_setup.membership_ledger.clone()
@@ -858,10 +814,6 @@ pub async fn build_sync_engine_assembly(
             current_member_signatures: Arc::clone(&space_setup.current_member_signatures),
             membership_identity: removal_identity,
             membership_announcement: membership_transport,
-            device_identity: Arc::clone(&deps.device.device_identity),
-            group_bootstrap: Arc::clone(&deps.security.space_access_ports.group_bootstrap),
-            clock: Arc::clone(&deps.system.clock),
-            settings: Arc::clone(&deps.settings),
             prepare_joiner_invitation: Arc::new(DefaultJoinerInvitationPreparation),
             resolve_joiner_invitation: handlers.joiner_invitation_resolver,
             joiner_start_material: Arc::new(DefaultJoinerStartMaterial::new(
@@ -1103,7 +1055,6 @@ pub async fn build_sync_engine_assembly(
     info!("Slice 2/3 SpaceFacade + MemberRosterFacade + ClipboardSyncFacade + BlobTransferFacade assembled");
     Ok(SyncEngineAssembly {
         facade,
-        session_activity,
         clipboard_sync,
         presence,
         blob,

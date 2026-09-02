@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use async_trait::async_trait;
 
@@ -24,6 +25,45 @@ pub trait SpaceSessionActivityPort: Send + Sync {
     async fn restore_after_failed_lock(&self) -> Result<(), String>;
 }
 
+pub(crate) struct DeferredSpaceSessionActivity {
+    delegate: OnceLock<Arc<dyn SpaceSessionActivityPort>>,
+}
+
+impl DeferredSpaceSessionActivity {
+    pub(crate) fn new() -> Self {
+        Self {
+            delegate: OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn bind(&self, delegate: Arc<dyn SpaceSessionActivityPort>) -> bool {
+        self.delegate.set(delegate).is_ok()
+    }
+
+    fn delegate(&self) -> Result<Arc<dyn SpaceSessionActivityPort>, SpaceActivityError> {
+        self.delegate
+            .get()
+            .cloned()
+            .ok_or(SpaceActivityError::Unavailable)
+    }
+}
+
+#[async_trait]
+impl SpaceSessionActivityPort for DeferredSpaceSessionActivity {
+    async fn resume_after_session_ready(&self) -> Result<(), SpaceActivityError> {
+        self.delegate()?.resume_after_session_ready().await
+    }
+
+    async fn pause_for_lock(&self) -> Result<(), SpaceActivityError> {
+        self.delegate()?.pause_for_lock().await
+    }
+
+    async fn restore_after_failed_lock(&self) -> Result<(), String> {
+        let delegate = self.delegate().map_err(|error| error.to_string())?;
+        delegate.restore_after_failed_lock().await
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SpaceActivityError {
     #[error("space session activity is unavailable")]
@@ -41,15 +81,11 @@ pub struct SpaceSessionActivity {
     search: Arc<dyn SearchSessionActivityPort>,
 }
 
-pub struct SpaceSessionActivityDeps {
-    pub receive: Arc<dyn EnsureReceiveReadyPort>,
-}
-
-pub fn build_space_session_activity(
+pub(crate) fn build_space_session_activity(
     search: Arc<SearchFacade>,
-    deps: SpaceSessionActivityDeps,
+    receive: Arc<dyn EnsureReceiveReadyPort>,
 ) -> Arc<SpaceSessionActivity> {
-    Arc::new(SpaceSessionActivity::new(deps.receive, search))
+    Arc::new(SpaceSessionActivity::new(receive, search))
 }
 
 impl SpaceSessionActivity {
@@ -230,5 +266,26 @@ mod tests {
         assert_eq!(membership.pauses.load(Ordering::SeqCst), 1);
         assert_eq!(membership.resumes.load(Ordering::SeqCst), 1);
         assert_eq!(application.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn deferred_activity_binds_once_and_delegates_inside_application() {
+        let activity = DeferredSpaceSessionActivity::new();
+        assert!(matches!(
+            activity.resume_after_session_ready().await,
+            Err(SpaceActivityError::Unavailable)
+        ));
+
+        let delegate = Arc::new(FailingApplicationActivity(AtomicUsize::new(0)));
+        assert!(activity.bind(delegate.clone()));
+        assert!(!activity.bind(delegate));
+        assert!(matches!(
+            activity.pause_for_lock().await,
+            Err(SpaceActivityError::Search(error)) if error == "pause failed"
+        ));
+        activity
+            .restore_after_failed_lock()
+            .await
+            .expect("bound activity should delegate failed-lock restoration");
     }
 }
