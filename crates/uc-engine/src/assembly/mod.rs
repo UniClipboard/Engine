@@ -2,7 +2,6 @@ pub(crate) mod blob_tasks;
 pub(crate) mod clipboard_runtime;
 pub(crate) mod deps;
 pub(crate) mod facade;
-pub(crate) mod file_transfer;
 pub(crate) mod host;
 pub(crate) mod lifecycle;
 pub(crate) mod maintenance_space_transition;

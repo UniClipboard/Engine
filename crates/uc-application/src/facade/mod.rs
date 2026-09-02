@@ -77,7 +77,7 @@ pub use crate::clipboard::inbound::{
     ClipboardInboundEvent, ClipboardInboundEventAction, ClipboardInboundEventPort,
     ClipboardInboundRepresentationSummary, ClipboardInboundRuntime, ClipboardInboundRuntimeDeps,
     ClipboardInboundRuntimeError, InboundClipboardApplyError, InboundClipboardApplyInput,
-    InboundClipboardApplyOutcome, InboundClipboardApplyPort,
+    InboundClipboardApplyOutcome, InboundClipboardApplyPort, InboundProvisionalReceive,
 };
 pub use crate::clipboard::outbound::{
     ClipboardOutboundDeps, ClipboardOutboundDispatcher, ClipboardOutboundError,
@@ -87,9 +87,8 @@ pub use crate::clipboard::outbound::{
 };
 pub use crate::clipboard::sync::apply_inbound::{
     ApplyInboundClipboardUseCase, ApplyInboundError, ApplyInboundInput, ApplyOutcome,
-    FileCacheBlobMaterializer, InboundApplyCommonDeps, InboundBlobFetcher, InboundCapture,
-    InboundReceiveAttemptDeps, InboundSnapshotRebuild, InboundWrite, InteractiveReceiveDeps,
-    StoreOnlyPullDeps,
+    FileCacheBlobMaterializer, InboundBlobFetcher, InboundCapture, InboundSnapshotRebuild,
+    InboundWrite,
 };
 pub use crate::clipboard::sync::payload_codec::{self, encode_snapshot_to_v3_bytes};
 pub use crate::clipboard::sync::sync_runtime::{ClipboardSyncRuntime, ClipboardSyncRuntimeDeps};
@@ -125,9 +124,11 @@ pub use diagnostics::{
     LogExportView, UpdateDebugModeView,
 };
 pub use file_transfer::{
-    BeginReceiverTransfer, FileTransferApplicationError, FileTransferFacade,
-    FileTransferFacadeDeps, FileTransferLifecycleDeps, FileTransferSession,
-    ReceiverTransferRegistration,
+    BeginReceiverTransfer, FileTransferApplicationError, FileTransferAssembly,
+    FileTransferAssemblyDeps, FileTransferFacade, FileTransferFacadeDeps,
+    FileTransferLifecycleDeps, FileTransferSession, InboundMaterializerDeps,
+    InboundReceiveIntentDeps, InteractiveReceiveIntentDeps, ReceiveCancellationDeps,
+    ReceiverTransferRegistration, StoreOnlyPullIntentDeps,
 };
 pub use host_event::{
     ClipboardHostEvent, ClipboardOriginKind, DeliveryHostEvent, EmitError,

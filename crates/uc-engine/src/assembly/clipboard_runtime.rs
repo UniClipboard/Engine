@@ -1,17 +1,17 @@
 use std::sync::Arc;
 
 use uc_application::facade::clipboard_capture::CaptureClipboardUseCase;
-use uc_application::facade::{
-    ApplyInboundClipboardUseCase, FileCacheBlobMaterializer, InboundApplyCommonDeps,
-    InboundCapture as ApplyInboundCapture, InboundReceiveAttemptDeps,
-    InboundWrite as ApplyInboundWrite, InteractiveReceiveDeps,
-};
+#[cfg(feature = "lan-compat")]
+use uc_application::facade::InboundClipboardApplyPort;
 use uc_application::facade::{
     ClipboardCaptureFacade, ClipboardInboundEvent, ClipboardInboundEventAction,
     ClipboardInboundEventPort, ClipboardInboundRuntime, ClipboardInboundRuntimeDeps,
     ClipboardLiveIndexDeps, ClipboardLiveIndexFacade, ClipboardLiveIndexPort, ClipboardLiveIndexer,
     ClipboardOutboundDeps, ClipboardOutboundFacade, ClipboardSyncRuntime, ClipboardSyncRuntimeDeps,
-    InboundClipboardApplyPort,
+};
+use uc_application::facade::{
+    InboundCapture as ApplyInboundCapture, InboundMaterializerDeps, InboundReceiveIntentDeps,
+    InboundWrite as ApplyInboundWrite, InteractiveReceiveIntentDeps,
 };
 use uc_infra::fs::{FsAtomicPublisher, FsHiddenPathMarker, FsInboundFileTarget};
 
@@ -28,7 +28,7 @@ pub(crate) struct ClipboardRuntime {
     pub outbound: Arc<ClipboardOutboundFacade>,
     pub sync: Arc<ClipboardSyncRuntime>,
     #[cfg(feature = "lan-compat")]
-    pub apply_inbound: Arc<ApplyInboundClipboardUseCase>,
+    pub apply_inbound: Arc<dyn InboundClipboardApplyPort>,
 }
 
 pub(crate) fn build_clipboard_runtime(
@@ -88,66 +88,45 @@ pub(crate) fn build_clipboard_runtime(
         device_identity: deps.device.device_identity.clone(),
         entry_file_set_repo: deps.storage.entry_file_set_repo.clone(),
     }));
-    let blob_materializer = Arc::new(
-        FileCacheBlobMaterializer::new(
-            sync_engine.blob.clone(),
-            wired.shared.file_cache_dir.clone(),
-            FsAtomicPublisher::new(),
-        )
-        .with_directory_receive_attempt_ports(
-            deps.storage.directory_receive.get_attempt.clone(),
-            deps.storage.directory_receive.claim_commit.clone(),
-            deps.storage.directory_receive.record_publish.clone(),
-            deps.system.clock.clone(),
-        )
-        .with_receive_artifact_log(deps.storage.directory_receive.record_artifacts.clone())
-        .with_target_reserver(FsInboundFileTarget::new(deps.settings.clone()))
-        .with_save_dir_resolver(FsInboundFileTarget::new(deps.settings.clone()))
-        .with_hidden_marker(FsHiddenPathMarker::new()),
-    );
-    let apply_inbound = Arc::new(ApplyInboundClipboardUseCase::interactive_receive(
-        InteractiveReceiveDeps {
-            common: InboundApplyCommonDeps {
-                entry_repo: deps.clipboard.entry_ports.find_by_snapshot_hash.clone(),
-                capture: Arc::clone(&capture) as Arc<dyn ApplyInboundCapture>,
-                blob_materializer,
-                receive_attempts: InboundReceiveAttemptDeps {
-                    get: deps.storage.directory_receive.get_attempt.clone(),
-                    begin: deps.storage.directory_receive.begin_receive.clone(),
-                    claim_commit: deps.storage.directory_receive.claim_commit.clone(),
-                    request_cancel: deps.storage.directory_receive.request_cancel.clone(),
-                    begin_failure: deps.storage.directory_receive.begin_failure.clone(),
-                    commit: deps.storage.directory_receive.commit_inbound.clone(),
-                    clock: deps.system.clock.clone(),
+    let apply_inbound =
+        wired
+            .shared
+            .file_transfer
+            .interactive_receive(InteractiveReceiveIntentDeps {
+                common: InboundReceiveIntentDeps {
+                    entry_repo: deps.clipboard.entry_ports.find_by_snapshot_hash.clone(),
+                    capture: Arc::clone(&capture) as Arc<dyn ApplyInboundCapture>,
+                    materializer: InboundMaterializerDeps {
+                        fetcher: sync_engine.blob.clone(),
+                        publisher: FsAtomicPublisher::new(),
+                        target_reserver: FsInboundFileTarget::new(deps.settings.clone()),
+                        hidden_marker: FsHiddenPathMarker::new(),
+                    },
+                    host_event_emitter: wired.shared.host_event_bus.clone(),
+                    search_live_index: Arc::clone(&search_live_indexer),
+                    availability: deps.clipboard.entry_ports.availability.clone(),
+                    entry_identity_coordinator: deps.clipboard.entry_identity_coordinator.clone(),
                 },
-                receive_artifact_cleanup: Arc::new(uc_infra::fs::FsReceiveArtifactCleaner),
-                receive_readiness: wired.shared.receive_readiness.clone(),
-                host_event_emitter: wired.shared.host_event_bus.clone(),
-                search_live_index: Arc::clone(&search_live_indexer),
-                availability: deps.clipboard.entry_ports.availability.clone(),
-                entry_identity_coordinator: deps.clipboard.entry_identity_coordinator.clone(),
-            },
-            write: Arc::clone(&wired.shared.clipboard_write_coordinator)
-                as Arc<dyn ApplyInboundWrite>,
-            provisional_receive: deps.storage.file_transfer.finalize_provisional.clone(),
-            outbound_progress_reporter: Arc::clone(&sync_engine.outbound_progress_reporter),
-            active_register: deps.clipboard.active_register.clone(),
-            mobile_consumability: deps.clipboard.mobile_consumability.clone(),
-            snapshot_deps: uc_application::facade::ClipboardSnapshotDeps {
-                entry_repo: deps.clipboard.entry_ports.get.clone(),
-                selection_repo: deps.clipboard.selection_repo.clone(),
-                representation_repo: deps.clipboard.representation_ports.get.clone(),
-                rep_processing_repo: deps
-                    .clipboard
-                    .representation_ports
-                    .update_processing_result
-                    .clone(),
-                payload_resolver: deps.clipboard.payload_resolver.clone(),
-                blob_store: deps.storage.blob_store.clone(),
-            },
-            touch_entry: deps.clipboard.entry_ports.touch.clone(),
-        },
-    ));
+                write: Arc::clone(&wired.shared.clipboard_write_coordinator)
+                    as Arc<dyn ApplyInboundWrite>,
+                provisional_receive: deps.storage.file_transfer.finalize_provisional.clone(),
+                outbound_progress_reporter: Arc::clone(&sync_engine.outbound_progress_reporter),
+                active_register: deps.clipboard.active_register.clone(),
+                mobile_consumability: deps.clipboard.mobile_consumability.clone(),
+                snapshot_deps: uc_application::facade::ClipboardSnapshotDeps {
+                    entry_repo: deps.clipboard.entry_ports.get.clone(),
+                    selection_repo: deps.clipboard.selection_repo.clone(),
+                    representation_repo: deps.clipboard.representation_ports.get.clone(),
+                    rep_processing_repo: deps
+                        .clipboard
+                        .representation_ports
+                        .update_processing_result
+                        .clone(),
+                    payload_resolver: deps.clipboard.payload_resolver.clone(),
+                    blob_store: deps.storage.blob_store.clone(),
+                },
+                touch_entry: deps.clipboard.entry_ports.touch.clone(),
+            });
     let inbound_runtime = ClipboardInboundRuntime::start(ClipboardInboundRuntimeDeps {
         receiver: sync_engine.clipboard_receiver(),
         member_repo: deps.device.member_repo.clone(),
@@ -155,7 +134,7 @@ pub(crate) fn build_clipboard_runtime(
         transfer_cipher: deps.security.transfer_cipher.clone(),
         settings: deps.settings.clone(),
         clock: deps.system.clock.clone(),
-        apply: apply_inbound.clone() as Arc<dyn InboundClipboardApplyPort>,
+        apply: apply_inbound.clone(),
         events: Arc::new(EngineClipboardInboundEvents { events }),
     });
     let sync = Arc::new(ClipboardSyncRuntime::start(ClipboardSyncRuntimeDeps {

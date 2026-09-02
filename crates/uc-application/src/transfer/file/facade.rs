@@ -137,12 +137,12 @@ impl FileTransferFacade {
         self.store
             .append(started.clone())
             .await
-            .map_err(|error| FileTransferApplicationError::Store(error.to_string()))?;
+            .map_err(FileTransferApplicationError::Store)?;
         self.sessions.insert(Arc::clone(&session)).await;
         self.publisher
             .publish(started)
             .await
-            .map_err(|error| FileTransferApplicationError::Publish(error.to_string()))?;
+            .map_err(FileTransferApplicationError::Publish)?;
         Ok(session)
     }
 
@@ -192,9 +192,9 @@ impl FileTransferFacade {
             .map(i64::try_from)
             .transpose()
             .map_err(|_| {
-                FileTransferApplicationError::Repository(
-                    "inbound file size exceeds the receiver projection range".to_owned(),
-                )
+                FileTransferApplicationError::Repository(anyhow::anyhow!(
+                    "inbound file size exceeds the receiver projection range"
+                ))
             })?;
         match &input.registration {
             ReceiverTransferRegistration::Entry {
@@ -214,7 +214,9 @@ impl FileTransferFacade {
                     created_at_ms: self.clock.now_ms(),
                 })
                 .await
-                .map_err(|error| FileTransferApplicationError::Repository(error.to_string())),
+                .map_err(|error| {
+                    FileTransferApplicationError::Repository(anyhow::Error::new(error))
+                }),
             ReceiverTransferRegistration::Provisional => self
                 .provisional_seed
                 .seed_provisional_receive(&ProvisionalInboundTransfer {
@@ -225,7 +227,9 @@ impl FileTransferFacade {
                     created_at_ms: self.clock.now_ms(),
                 })
                 .await
-                .map_err(|error| FileTransferApplicationError::Repository(error.to_string())),
+                .map_err(|error| {
+                    FileTransferApplicationError::Repository(anyhow::Error::new(error))
+                }),
         }
     }
 

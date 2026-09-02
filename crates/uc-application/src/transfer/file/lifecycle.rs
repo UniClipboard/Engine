@@ -146,7 +146,7 @@ impl FileTransferLifecycle {
                 self.privacy_maintenance
                     .ensure_file_transfer_privacy_maintenance()
                     .await
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
                 self.receive_reconcile.execute().await?;
                 self.reconcile_on_startup().await?;
                 sweep_inbound_staging(Arc::clone(&self.save_dir_resolver), &self.file_cache_dir)
@@ -154,7 +154,7 @@ impl FileTransferLifecycle {
                 Ok(())
             })
             .await
-            .map_err(|error| ReceiveReadinessError::Recovery(error.to_string()))
+            .map_err(ReceiveReadinessError::Recovery)
     }
 
     /// Spawn a periodic timeout sweep.
@@ -285,7 +285,7 @@ impl FileTransferLifecycle {
             Ok(targets) => targets,
             Err(err) => {
                 warn!(error = %err, "Startup reconciliation failed");
-                return Err(anyhow::anyhow!(err.to_string()));
+                return Err(anyhow::Error::new(err));
             }
         };
 

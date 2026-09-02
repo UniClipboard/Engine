@@ -1,5 +1,10 @@
 //! 文件传输门面对外再导出(ADR-018 阶段 5)。
 
+pub use crate::transfer::file::assembly::{
+    FileTransferAssembly, FileTransferAssemblyDeps, InboundMaterializerDeps,
+    InboundReceiveIntentDeps, InteractiveReceiveIntentDeps, ReceiveCancellationDeps,
+    StoreOnlyPullIntentDeps,
+};
 pub use crate::transfer::file::facade::{
     BeginReceiverTransfer, FileTransferFacade, FileTransferFacadeDeps, ReceiverTransferRegistration,
 };

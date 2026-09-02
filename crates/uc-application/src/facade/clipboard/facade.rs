@@ -238,7 +238,7 @@ impl ClipboardSyncFacade {
         }
     }
 
-    pub fn with_entry_receive_cancellation(
+    pub(crate) fn with_entry_receive_cancellation(
         mut self,
         get_attempt: Arc<dyn GetEntryAttemptPort>,
         request_cancel: Arc<dyn RequestReceiveCancellationPort>,

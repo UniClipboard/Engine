@@ -27,7 +27,10 @@ use uc_application::deps::{
     ProfileLifecycleRepositoryPort, ProfileLifecycleState, RePairingStateStorePort, SearchPorts,
     SecurityPorts, SpaceAccessPorts, SpaceRebuildProgressPort, StoragePorts, SystemPorts,
 };
-use uc_application::facade::{ConfigMigrationDeps, ConfigMigrationFacade, HostEventEmitterPort};
+use uc_application::facade::{
+    ConfigMigrationDeps, ConfigMigrationFacade, FileTransferAssembly, FileTransferAssemblyDeps,
+    HostEventEmitterPort,
+};
 use uc_core::app_dirs::AppPaths;
 use uc_core::clipboard::SelectRepresentationPolicyV1;
 use uc_core::ids::{ProfileId, RepresentationId};
@@ -893,21 +896,16 @@ pub async fn wire_dependencies_from_inputs(
         Arc::new(uc_application::facade::HostEventBus::new());
     host_event_bus.register("logging", host_event_emitter);
 
-    let receive_readiness: Arc<uc_application::facade::ReceiveReadinessCoordinator> =
-        Arc::new(uc_application::facade::ReceiveReadinessCoordinator::new());
-
-    let crate::assembly::file_transfer::FileTransferAssembly {
-        facade: file_transfer_facade,
-    } = crate::assembly::file_transfer::build_file_transfer_assembly(
-        Arc::clone(&file_transfer_store_arc),
-        Arc::clone(&host_event_bus),
-        deps.storage.file_transfer.clone(),
-        deps.storage.directory_receive.clone(),
-        deps.system.clock.clone(),
-        Arc::clone(&receive_readiness),
-        uc_infra::fs::FsInboundFileTarget::new(deps.settings.clone()),
-        paths.file_cache_dir.clone(),
-    );
+    let file_transfer = Arc::new(FileTransferAssembly::build(FileTransferAssemblyDeps {
+        event_store: file_transfer_store_arc,
+        host_event_bus: Arc::clone(&host_event_bus),
+        file_transfer: deps.storage.file_transfer.clone(),
+        directory_receive: deps.storage.directory_receive.clone(),
+        clock: deps.system.clock.clone(),
+        artifact_cleanup: Arc::new(uc_infra::fs::FsReceiveArtifactCleaner),
+        save_dir_resolver: uc_infra::fs::FsInboundFileTarget::new(deps.settings.clone()),
+        file_cache_dir: paths.file_cache_dir.clone(),
+    }));
 
     let clipboard_write_coordinator = build_clipboard_write_coordinator(
         deps.clipboard.system_clipboard.clone(),
@@ -954,13 +952,11 @@ pub async fn wire_dependencies_from_inputs(
                 as Arc<dyn uc_core::ports::mobile_sync::MobileSyncEndpointInfoPort>,
         },
         shared: SharedRuntimeDeps {
-            receive_readiness,
             host_event_bus,
             entry_delivery_repo: Arc::clone(&infra.entry_delivery_repo),
             clipboard_event_reader_repo: Arc::clone(&infra.clipboard_event_reader_repo),
-            file_transfer_facade,
+            file_transfer,
             clipboard_write_coordinator: Arc::clone(&clipboard_write_coordinator),
-            file_cache_dir: paths.file_cache_dir.clone(),
             trusted_peer_repo: Arc::clone(&trusted_peer_repo),
             active_clipboard_sse_source,
         },

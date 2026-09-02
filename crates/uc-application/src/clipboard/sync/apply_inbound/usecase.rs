@@ -111,7 +111,7 @@ enum InboundApplyMode {
     },
 }
 
-pub struct InboundReceiveAttemptDeps {
+pub(crate) struct InboundReceiveAttemptDeps {
     pub get: Arc<dyn GetEntryAttemptPort>,
     pub begin: Arc<dyn BeginReceiveAttemptPort>,
     pub claim_commit: Arc<dyn ClaimReceiveCommitPort>,
@@ -121,7 +121,7 @@ pub struct InboundReceiveAttemptDeps {
     pub clock: Arc<dyn ClockPort>,
 }
 
-pub struct InboundApplyCommonDeps {
+pub(crate) struct InboundApplyCommonDeps {
     pub entry_repo: Arc<dyn FindEntryIdBySnapshotHashPort>,
     pub capture: Arc<dyn InboundCapture>,
     pub blob_materializer: Arc<dyn InboundBlobMaterializer>,
@@ -134,7 +134,7 @@ pub struct InboundApplyCommonDeps {
     pub entry_identity_coordinator: Arc<EntryIdentityCoordinator>,
 }
 
-pub struct InteractiveReceiveDeps {
+pub(crate) struct InteractiveReceiveDeps {
     pub common: InboundApplyCommonDeps,
     pub write: Arc<dyn InboundWrite>,
     pub provisional_receive: Arc<dyn FinalizeProvisionalReceivePort>,
@@ -145,7 +145,7 @@ pub struct InteractiveReceiveDeps {
     pub touch_entry: Arc<dyn TouchClipboardEntryPort>,
 }
 
-pub struct StoreOnlyPullDeps {
+pub(crate) struct StoreOnlyPullDeps {
     pub common: InboundApplyCommonDeps,
 }
 
@@ -217,7 +217,7 @@ impl ApplyInboundClipboardUseCase {
         }
     }
 
-    pub fn interactive_receive(deps: InteractiveReceiveDeps) -> Self {
+    pub(crate) fn interactive_receive(deps: InteractiveReceiveDeps) -> Self {
         let resurface = ResurfacePorts {
             rebuild: Arc::new(deps.snapshot_deps.into_reconstructor()),
             touch_entry: deps.touch_entry,
@@ -235,7 +235,7 @@ impl ApplyInboundClipboardUseCase {
         )
     }
 
-    pub fn store_only_pull(deps: StoreOnlyPullDeps) -> Self {
+    pub(crate) fn store_only_pull(deps: StoreOnlyPullDeps) -> Self {
         Self::from_common(deps.common, InboundApplyMode::StoreOnlyPull, None, None)
     }
 

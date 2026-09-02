@@ -45,17 +45,16 @@ const TRANSLATOR_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(200);
 
 use uc_application::deps::{CurrentSpaceMemberScopePort, SpaceApplicationDeps};
 use uc_application::facade::clipboard_capture::CaptureClipboardUseCase;
+use uc_application::facade::InboundCapture as ApplyInboundCapture;
 use uc_application::facade::{
     build_active_clipboard_pull_serve_port, ActiveClipboardDeps, ActiveClipboardFacade,
     ActiveClipboardLifecycle, ActiveClipboardPullServeFacadeDeps, BlobTransferDeps,
     BlobTransferFacade, ClipboardLiveIndexDeps, ClipboardLiveIndexPort, ClipboardLiveIndexer,
     ClipboardSnapshotDeps, ClipboardSyncDeps, ClipboardSyncFacade, HostEvent, HostEventBus,
-    InboundClipboardApplyPort, SpaceAdmissionDeps, SpaceFacade, SpaceFacadeDeps, SpaceSessionDeps,
-    SpaceTransitionDeps, TransferHostEvent, UpgradeFacade, UpgradeFacadeDeps,
-};
-use uc_application::facade::{
-    ApplyInboundClipboardUseCase, FileCacheBlobMaterializer, InboundApplyCommonDeps,
-    InboundCapture as ApplyInboundCapture, InboundReceiveAttemptDeps, StoreOnlyPullDeps,
+    InboundClipboardApplyPort, InboundMaterializerDeps, InboundReceiveIntentDeps,
+    ReceiveCancellationDeps, SpaceAdmissionDeps, SpaceFacade, SpaceFacadeDeps, SpaceSessionDeps,
+    SpaceTransitionDeps, StoreOnlyPullIntentDeps, TransferHostEvent, UpgradeFacade,
+    UpgradeFacadeDeps,
 };
 use uc_application::facade::{SpaceActivityError, SpaceSessionActivityPort};
 use uc_core::file_transfer::{
@@ -754,7 +753,7 @@ pub async fn build_sync_engine_assembly(
         // file_transfer lifecycle facade —— iroh 路径每次 fetch 通过它落
         // `Started` / `Completed` / `Failed` 事件,让 file_transfer 表的
         // 状态投影与 sweep / reconcile workers 真正发挥作用。
-        file_transfer: Some(Arc::clone(&shared.file_transfer_facade)),
+        file_transfer: Some(shared.file_transfer.facade()),
     }));
 
     // Space application must exist before its authenticated handlers can be
@@ -1064,7 +1063,7 @@ pub async fn build_sync_engine_assembly(
     let mobile_device_repo: Arc<dyn uc_core::ports::FindMobileDeviceByIdPort> =
         Arc::new(UnavailableMobileDeviceLookup);
 
-    let clipboard_sync = Arc::new(
+    let clipboard_sync = Arc::new(shared.file_transfer.with_receive_cancellation(
         ClipboardSyncFacade::new(ClipboardSyncDeps {
             peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
             member_repo: Arc::clone(&deps.device.member_repo),
@@ -1091,20 +1090,12 @@ pub async fn build_sync_engine_assembly(
             // StatusChanged`,bus 把事件 fan-out 给所有已注册下游;CLI 装配
             // 走同一 bus,只挂着默认 logging emitter,emit 无副作用。
             host_event_bus: Arc::clone(&shared.host_event_bus),
-        })
-        .with_entry_receive_cancellation(
-            Arc::clone(&deps.storage.directory_receive.get_attempt),
-            Arc::clone(&deps.storage.directory_receive.request_cancel),
-            Arc::clone(&deps.storage.directory_receive.entry_progress),
-            Arc::clone(&deps.storage.directory_receive.list_attempts),
-            Arc::clone(&deps.storage.directory_receive.commit_inbound),
-            Arc::clone(&deps.storage.directory_receive.get_publish),
-            FsDirectoryStagingCleaner::new(),
-            Arc::clone(&deps.storage.file_transfer.cancel_attempt),
-            Arc::clone(&blob),
-            Arc::clone(&deps.system.clock),
-        ),
-    );
+        }),
+        ReceiveCancellationDeps {
+            staging_cleanup: FsDirectoryStagingCleaner::new(),
+            blob_transfer: Arc::clone(&blob),
+        },
+    ));
     // Store-only inbound apply path for pulled content (issue #1017 PR8). It
     // reuses the same inbound pipeline the bulk 0xC1 path uses (decode V3 →
     // materialize blobs → capture) through the named store-only mode. That mode
@@ -1131,23 +1122,6 @@ pub async fn build_sync_engine_assembly(
         .with_inbound_receive_commit(Arc::clone(&deps.storage.directory_receive.commit_inbound))
         .with_entry_identity_coordinator(Arc::clone(&deps.clipboard.entry_identity_coordinator)),
     );
-    let pull_store_materializer = Arc::new(
-        FileCacheBlobMaterializer::new(
-            blob.clone() as Arc<dyn uc_application::facade::InboundBlobFetcher>,
-            shared.file_cache_dir.clone(),
-            FsAtomicPublisher::new(),
-        )
-        .with_directory_receive_attempt_ports(
-            Arc::clone(&deps.storage.directory_receive.get_attempt),
-            Arc::clone(&deps.storage.directory_receive.claim_commit),
-            Arc::clone(&deps.storage.directory_receive.record_publish),
-            Arc::clone(&deps.system.clock),
-        )
-        .with_receive_artifact_log(Arc::clone(&deps.storage.directory_receive.record_artifacts))
-        .with_target_reserver(FsInboundFileTarget::new(Arc::clone(&deps.settings)))
-        .with_save_dir_resolver(FsInboundFileTarget::new(Arc::clone(&deps.settings)))
-        .with_hidden_marker(FsHiddenPathMarker::new()),
-    );
     // Index pull-store entries for search too (same rationale as the main
     // inbound path): content materialized via the 0xC2 pull should be findable.
     let pull_store_indexer: Arc<dyn ClipboardLiveIndexPort> =
@@ -1160,30 +1134,24 @@ pub async fn build_sync_engine_assembly(
             event_repo: Arc::clone(&shared.clipboard_event_reader_repo),
             entry_file_set_repo: Arc::clone(&deps.storage.entry_file_set_repo),
         }));
-    let pull_store_apply: Arc<dyn InboundClipboardApplyPort> = Arc::new(
-        ApplyInboundClipboardUseCase::store_only_pull(StoreOnlyPullDeps {
-            common: InboundApplyCommonDeps {
+    let pull_store_apply: Arc<dyn InboundClipboardApplyPort> = shared
+        .file_transfer
+        .store_only_pull(StoreOnlyPullIntentDeps {
+            common: InboundReceiveIntentDeps {
                 entry_repo: Arc::clone(&deps.clipboard.entry_ports.find_by_snapshot_hash),
                 capture: pull_store_capture as Arc<dyn ApplyInboundCapture>,
-                blob_materializer: pull_store_materializer,
-                receive_attempts: InboundReceiveAttemptDeps {
-                    get: Arc::clone(&deps.storage.directory_receive.get_attempt),
-                    begin: Arc::clone(&deps.storage.directory_receive.begin_receive),
-                    claim_commit: Arc::clone(&deps.storage.directory_receive.claim_commit),
-                    request_cancel: Arc::clone(&deps.storage.directory_receive.request_cancel),
-                    begin_failure: Arc::clone(&deps.storage.directory_receive.begin_failure),
-                    commit: Arc::clone(&deps.storage.directory_receive.commit_inbound),
-                    clock: Arc::clone(&deps.system.clock),
+                materializer: InboundMaterializerDeps {
+                    fetcher: blob.clone(),
+                    publisher: FsAtomicPublisher::new(),
+                    target_reserver: FsInboundFileTarget::new(Arc::clone(&deps.settings)),
+                    hidden_marker: FsHiddenPathMarker::new(),
                 },
-                receive_artifact_cleanup: Arc::new(uc_infra::fs::FsReceiveArtifactCleaner),
-                receive_readiness: Arc::clone(&shared.receive_readiness),
                 host_event_emitter: Arc::clone(&shared.host_event_bus),
                 search_live_index: pull_store_indexer,
                 availability: Arc::clone(&deps.clipboard.entry_ports.availability),
                 entry_identity_coordinator: Arc::clone(&deps.clipboard.entry_identity_coordinator),
             },
-        }),
-    );
+        });
 
     // Active-clipboard register convergence (issue #1017). The module owns
     // its inbound convergence, peer-online resync, restore broadcast, and

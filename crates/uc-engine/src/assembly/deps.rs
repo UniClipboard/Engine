@@ -142,11 +142,6 @@ pub struct DaemonRuntimeDeps {
 /// meaningful boundary; mirrors the [`BackgroundRuntimeDeps`] precedent.
 #[derive(Clone)]
 pub struct SharedRuntimeDeps {
-    /// Shared receive-readiness gate: the same coordinator is injected into
-    /// the file-transfer lifecycle (which opens it) and the clipboard
-    /// inbound apply path (which waits on it), so one open gate unblocks
-    /// every receiver.
-    pub receive_readiness: Arc<uc_application::facade::ReceiveReadinessCoordinator>,
     /// Shared host-event bus created at wire time with the "logging" emitter
     /// already registered (event type names → `tracing::debug`), so non-GUI /
     /// CLI processes have a sensible default transport. Callers register their
@@ -160,19 +155,15 @@ pub struct SharedRuntimeDeps {
     /// `AppDeps.clipboard.clipboard_event_repo`; the view layer resolves the
     /// source device through it.
     pub clipboard_event_reader_repo: Arc<dyn uc_core::ports::ClipboardEventRepositoryPort>,
-    /// Application entry point for the file-transfer lifecycle actions + seed +
-    /// link. Shared by daemon runtime, `MobileSyncFacade` assembly, and the iroh
-    /// blob path in `build_sync_engine_assembly`.
-    pub file_transfer_facade: Arc<uc_application::facade::FileTransferFacade>,
+    /// Application-owned file-transfer object graph. Engine consumers request
+    /// complete intents or the stable facade instead of projecting step ports.
+    pub file_transfer: Arc<uc_application::facade::FileTransferAssembly>,
     /// Single write boundary for all programmatic clipboard writes (guard
     /// registration + write + cleanup-on-error). Shared so the active-clipboard
     /// inbound worker and the restore/capture path keep one circuit-breaker +
     /// origin-guard state.
     pub clipboard_write_coordinator:
         Arc<uc_application::facade::clipboard_write::ClipboardWriteCoordinator>,
-    /// Local cache dir for inbound blob materialization
-    /// (`<file_cache_dir>/iroh-blobs/<entry_id>/`).
-    pub file_cache_dir: PathBuf,
     /// Trusted-peer repository — pairing persist boundary (D19), roster trust
     /// checks, dispatch target filtering, CLI resend source lookup. Read by
     /// space-setup, daemon runtime, and the CLI AppFacade path, hence shared.

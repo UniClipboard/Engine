@@ -151,12 +151,12 @@ impl FileTransferSession {
         self.store
             .append(event.clone())
             .await
-            .map_err(|error| FileTransferApplicationError::Store(error.to_string()))?;
+            .map_err(FileTransferApplicationError::Store)?;
         state.last_progress_bytes = Some(bytes_transferred);
         self.publisher
             .publish(event.clone())
             .await
-            .map_err(|error| FileTransferApplicationError::Publish(error.to_string()))?;
+            .map_err(FileTransferApplicationError::Publish)?;
         Ok(event)
     }
 
@@ -212,13 +212,13 @@ impl FileTransferSession {
         self.store
             .append(event.clone())
             .await
-            .map_err(|error| FileTransferApplicationError::Store(error.to_string()))?;
+            .map_err(FileTransferApplicationError::Store)?;
         state.terminal_event = Some(event.clone());
         let publish_result = self
             .publisher
             .publish(event.clone())
             .await
-            .map_err(|error| FileTransferApplicationError::Publish(error.to_string()));
+            .map_err(FileTransferApplicationError::Publish);
         drop(state);
 
         if let Some(registry) = self.registry.upgrade() {

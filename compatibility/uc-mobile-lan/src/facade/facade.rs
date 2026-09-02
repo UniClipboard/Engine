@@ -74,8 +74,10 @@ use crate::usecases::{
 };
 use uc_application::facade::file_transfer::FileTransferFacade;
 use uc_application::facade::ActiveClipboardFacade;
+#[cfg(test)]
 use uc_application::facade::ApplyInboundClipboardUseCase;
 use uc_application::facade::ClipboardOutboundFacade;
+use uc_application::facade::InboundClipboardApplyPort;
 
 // ── 对外类型 re-export ─────────────────────────────────────────────────
 
@@ -193,7 +195,7 @@ pub struct MobileSyncFacadeDeps {
     pub endpoint_info: Arc<dyn MobileSyncEndpointInfoPort>,
     pub lan_interface_probe: Arc<dyn LanInterfaceProbePort>,
     pub settings: Arc<dyn SettingsPort>,
-    pub apply_inbound: Arc<ApplyInboundClipboardUseCase>,
+    pub apply_inbound: Arc<dyn InboundClipboardApplyPort>,
     pub incoming_buffer: Arc<IncomingMobileBuffer>,
     /// `MobileFileStagingPort` 实例(P5a.3.5):File 类型入站时把裸字节物
     /// 化到 cache_dir,产出可拼 file-list rep 的 `file:///...` URI。

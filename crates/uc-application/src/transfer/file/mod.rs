@@ -1,3 +1,4 @@
+pub(crate) mod assembly;
 mod errors;
 pub(crate) mod facade;
 pub(crate) mod lifecycle;

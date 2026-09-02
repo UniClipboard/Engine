@@ -5,7 +5,7 @@ use uc_core::ids::DeviceId;
 use uc_observability_contract::FlowId;
 
 use crate::clipboard::sync::apply_inbound::{
-    ApplyInboundClipboardUseCase, ApplyInboundInput, ApplyOutcome,
+    ApplyInboundClipboardUseCase, ApplyInboundError, ApplyInboundInput, ApplyOutcome,
 };
 use crate::clipboard::write::ClipboardWriteIntent;
 
@@ -40,8 +40,8 @@ pub enum InboundClipboardApplyOutcome {
 
 #[derive(Debug, Error)]
 pub enum InboundClipboardApplyError {
-    #[error("inbound clipboard apply failed: {0}")]
-    Internal(String),
+    #[error("inbound clipboard apply failed")]
+    Internal(#[source] ApplyInboundError),
 }
 
 #[async_trait]
@@ -58,9 +58,18 @@ pub struct InboundClipboardApplyInput {
     pub snapshot_hash: String,
     pub plaintext: Bytes,
     pub flow_id: Option<FlowId>,
+    /// 可选的 LAN provisional receive 认领上下文；由同一完整 intent 在
+    /// 成功或失败尾部完成结算，调用方不接触 receive attempt 步骤。
+    pub provisional: Option<InboundProvisionalReceive>,
     /// See [`ApplyInboundInput::resurface_intent`] — only consulted when the
     /// delivery resolves to an already-held entry.
     pub resurface_intent: ClipboardWriteIntent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundProvisionalReceive {
+    pub transfer_id: String,
+    pub role: uc_core::ports::ReceiveItemRole,
 }
 
 #[async_trait]
@@ -69,16 +78,22 @@ impl InboundClipboardApplyPort for ApplyInboundClipboardUseCase {
         &self,
         input: InboundClipboardApplyInput,
     ) -> Result<InboundClipboardApplyOutcome, InboundClipboardApplyError> {
-        let outcome = self
-            .execute(ApplyInboundInput {
-                from_device: DeviceId::new(input.from_device),
-                snapshot_hash: input.snapshot_hash,
-                plaintext: input.plaintext,
-                flow_id: input.flow_id,
-                resurface_intent: input.resurface_intent,
-            })
-            .await
-            .map_err(|err| InboundClipboardApplyError::Internal(err.to_string()))?;
+        let provisional = input.provisional;
+        let input = ApplyInboundInput {
+            from_device: DeviceId::new(input.from_device),
+            snapshot_hash: input.snapshot_hash,
+            plaintext: input.plaintext,
+            flow_id: input.flow_id,
+            resurface_intent: input.resurface_intent,
+        };
+        let outcome = match provisional {
+            Some(provisional) => {
+                self.execute_with_provisional(input, provisional.transfer_id, provisional.role)
+                    .await
+            }
+            None => self.execute(input).await,
+        }
+        .map_err(InboundClipboardApplyError::Internal)?;
         Ok(apply_outcome_to_view(outcome))
     }
 }

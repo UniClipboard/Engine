@@ -13,9 +13,9 @@ use uc_application::facade::settings::{
 };
 use uc_application::facade::space_setup::SpaceFacade;
 #[cfg(feature = "lan-compat")]
-use uc_application::facade::ApplyInboundClipboardUseCase;
-#[cfg(feature = "lan-compat")]
-use uc_application::facade::{ActiveClipboardFacade, FileTransferFacade};
+use uc_application::facade::{
+    ActiveClipboardFacade, FileTransferFacade, InboundClipboardApplyPort,
+};
 use uc_application::facade::{
     AppFacade, AppFacadeParts, AppPaths, BlobTransferFacade, ClipboardCaptureFacade,
     ClipboardHistoryFacade, ClipboardHistoryFacadeDeps, ClipboardOutboundFacade,
@@ -140,7 +140,7 @@ pub fn build_mobile_sync_facade(
     deps: &AppDeps,
     storage_paths: &AppPaths,
     mobile_ports: uc_mobile_lan::MobileSyncPorts,
-    apply_inbound: Arc<ApplyInboundClipboardUseCase>,
+    apply_inbound: Arc<dyn InboundClipboardApplyPort>,
     file_transfer: Option<Arc<FileTransferFacade>>,
     // GUI daemon 装配传 `Some(controller)` —— update_settings 写盘后即时
     // start/stop/rebind listener。CLI fallback 传 `None`,settings 只写盘,

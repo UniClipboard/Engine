@@ -198,6 +198,7 @@ impl InboundProcessor {
                 snapshot_hash: prepared.snapshot_hash.clone(),
                 plaintext: prepared.plaintext.clone(),
                 flow_id: prepared.flow.application_flow_id.clone(),
+                provisional: None,
                 resurface_intent: ClipboardWriteIntent::RemotePush,
             })
             .await;
@@ -1004,7 +1005,9 @@ mod tests {
                     reason: "invalid envelope".to_owned(),
                 }),
                 Err(InboundClipboardApplyError::Internal(
-                    "storage unavailable".to_owned(),
+                    crate::clipboard::sync::apply_inbound::ApplyInboundError::Internal(
+                        "storage unavailable".to_owned(),
+                    ),
                 )),
             ])),
         });

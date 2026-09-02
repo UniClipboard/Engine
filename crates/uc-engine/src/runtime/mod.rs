@@ -274,7 +274,7 @@ impl ProductionRuntime {
         let session = Arc::new(Mutex::new(None));
         let session_supervisor = Arc::new(SessionSupervisor::new(
             Arc::clone(&session),
-            Arc::clone(&wired.shared.file_transfer_facade),
+            wired.shared.file_transfer.facade(),
         ));
         let task_registry = Arc::new(TaskRegistry::new());
         let profile_runtime: Arc<dyn StopProfileRuntimePort> =
@@ -406,7 +406,7 @@ impl ProductionRuntime {
         let session_activity = build_space_session_activity(
             search_runtime.facade(),
             SpaceSessionActivityDeps {
-                receive: Arc::clone(&wired.shared.file_transfer_facade)
+                receive: wired.shared.file_transfer.facade()
                     as Arc<dyn uc_application::facade::EnsureReceiveReadyPort>,
             },
         );
@@ -425,7 +425,7 @@ impl ProductionRuntime {
             paths,
             wired.mobile_sync_ports.clone(),
             Arc::clone(&clipboard.apply_inbound),
-            Some(Arc::clone(&wired.shared.file_transfer_facade)),
+            Some(wired.shared.file_transfer.facade()),
             None,
             Some(Arc::clone(&clipboard.outbound)),
             Some(Arc::clone(&sync_engine.active_clipboard)),
@@ -460,7 +460,7 @@ impl ProductionRuntime {
                 clipboard_sync: Arc::clone(&sync_engine.clipboard_sync),
                 blob_transfer: Arc::clone(&sync_engine.blob),
                 blob_transfer_port: Arc::clone(&sync_engine.blob_transfer),
-                file_transfer: Arc::clone(&wired.shared.file_transfer_facade),
+                file_transfer: wired.shared.file_transfer.facade(),
                 clipboard_restore: ClipboardRestoreAssembly {
                     write_coordinator: Arc::clone(&wired.shared.clipboard_write_coordinator),
                     integration_mode: uc_core::clipboard::ClipboardIntegrationMode::Full,
@@ -485,7 +485,7 @@ impl ProductionRuntime {
         let history_maintenance = facade.start_history_maintenance().await;
         spawn_peer_presence_event_task(Arc::clone(&facade), &tasks, events.clone()).await;
         let blob_transfer = Arc::clone(&sync_engine.blob);
-        let file_transfer_facade = Arc::clone(&wired.shared.file_transfer_facade);
+        let file_transfer_facade = wired.shared.file_transfer.facade();
         tasks
             .spawn("file_transfer_timeout_sweep", move |cancel| async move {
                 let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);

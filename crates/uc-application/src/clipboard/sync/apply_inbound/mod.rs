@@ -84,9 +84,9 @@ pub use materializer::{
     FileCacheBlobMaterializer, InboundBlobFetcher, InboundFileSetManifest, InboundFileSetMember,
 };
 pub use ports::{InboundCapture, InboundWrite};
-pub use usecase::{
-    ApplyInboundClipboardUseCase, InboundApplyCommonDeps, InboundReceiveAttemptDeps,
-    InteractiveReceiveDeps, StoreOnlyPullDeps,
+pub use usecase::ApplyInboundClipboardUseCase;
+pub(crate) use usecase::{
+    InboundApplyCommonDeps, InboundReceiveAttemptDeps, InteractiveReceiveDeps, StoreOnlyPullDeps,
 };
 
 /// Caller-supplied input mapped from the facade's public `InboundNotice`.
