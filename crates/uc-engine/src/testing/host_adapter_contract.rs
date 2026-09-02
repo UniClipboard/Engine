@@ -766,15 +766,18 @@ async fn membership_convergence_is_queryable_through_the_public_engine() {
     assert!(
         matches!(
             &status,
-            crate::OperationResult::DeviceTrust(summary)
+            crate::OperationResult::DeviceGroupChoices(summary)
                 if summary.revision == 1
-                    && summary.current_change.is_none()
-                    && !summary.local_device_id.is_empty()
-                    && summary.devices.len() == 1
-                    && summary.devices[0].is_local
-                    && summary.devices[0].device_id == summary.local_device_id
+                    && summary.issues.is_empty()
+                    && summary.device_trust.revision == 1
+                    && summary.device_trust.current_change.is_none()
+                    && !summary.device_trust.local_device_id.is_empty()
+                    && summary.device_trust.devices.len() == 1
+                    && summary.device_trust.devices[0].is_local
+                    && summary.device_trust.devices[0].device_id
+                        == summary.device_trust.local_device_id
         ),
-        "unexpected device trust snapshot: {status:?}"
+        "unexpected device group choices: {status:?}"
     );
     engine
         .shutdown(std::time::Duration::from_secs(15))
