@@ -298,6 +298,21 @@ jobs:
       - audit
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      REPORT_PROMPT: |
+        运行仓库 skill `uni-audit-report`，并且本 session 只运行这一个 skill。
+
+        只汇总 `audit-input/` 中已有的专项 JSON artifacts，不读取源码重新审查，
+        不补做缺失 lane，不执行 cargo、测试或架构检查。参数如下：
+        - run_id：`${{ github.run_id }}-${{ github.run_attempt }}`；
+        - 预期 lane：`module_depth`、`failure_recovery`、`runtime_resilience`、`observability`、`security_contract`；
+        - 机器可读输出：`audit-output/maintenance-audit.json`；
+        - 开发者 Markdown 输出：`audit-output/maintenance-audit.md`；
+        - 专项 matrix job 结果：`${{ needs.audit.result }}`。
+
+        报告必须优先展示覆盖状态与最高风险，区分“lane 执行状态”和“finding 风险等级”，
+        保留原始 lane、finding id、证据、skipped 项与冲突结论的可追溯性。缺失或无效
+        artifact 必须标为 coverage 问题，不得当作通过。除上述两个输出文件外不要修改仓库。
 
     steps:
       - name: Create unprivileged audit user
@@ -331,29 +346,109 @@ jobs:
           sudo chmod -R g+rwX audit-output
           sudo find audit-output -type d -exec chmod g+s {} +
 
-      - name: Run uni-audit-report
+      - name: Run uni-audit-report (attempt 1)
+        id: report_attempt_1
+        continue-on-error: true
         uses: openai/codex-action@v1
         with:
           responses-api-endpoint: ${{ secrets.CODEX_API_ENDPOINT || 'https://api.openai.com/v1/responses' }}
           openai-api-key: ${{ secrets.CODEX_API_KEY }}
           safety-strategy: unprivileged-user
           codex-user: uni-auditor
+          model: gpt-5.6-sol
           sandbox: danger-full-access
-          prompt: |
-            运行仓库 skill `uni-audit-report`，并且本 session 只运行这一个 skill。
+          prompt: ${{ env.REPORT_PROMPT }}
 
-            只汇总 `audit-input/` 中已有的专项 JSON artifacts，不读取源码重新审查，
-            不补做缺失 lane，不执行 cargo、测试或架构检查。参数如下：
-            - run_id：`${{ github.run_id }}-${{ github.run_attempt }}`；
-            - 预期 lane：`module_depth`、`failure_recovery`、`runtime_resilience`、`observability`、`security_contract`；
-            - 机器可读输出：`audit-output/maintenance-audit.json`；
-            - 开发者 Markdown 输出：`audit-output/maintenance-audit.md`；
-            - 专项 matrix job 结果：`${{ needs.audit.result }}`；
-            - artifact 下载步骤结果：`${{ steps.download.outcome }}`。
+      - name: Verify report attempt 1 output
+        id: report_output_1
+        if: ${{ always() }}
+        continue-on-error: true
+        env:
+          ACTION_OUTCOME: ${{ steps.report_attempt_1.outcome }}
+        run: |
+          if [[ "$ACTION_OUTCOME" != "success" || ! -s audit-output/maintenance-audit.md ]]; then
+            echo "::error::Codex report attempt 1 did not produce usable outputs."
+            exit 1
+          fi
+          jq -e '.' audit-output/maintenance-audit.json > /dev/null
 
-            报告必须优先展示覆盖状态与最高风险，区分“lane 执行状态”和“finding 风险等级”，
-            保留原始 lane、finding id、证据、skipped 项与冲突结论的可追溯性。缺失或无效
-            artifact 必须标为 coverage 问题，不得当作通过。除上述两个输出文件外不要修改仓库。
+      - name: Back off before report attempt 2
+        if: ${{ steps.report_output_1.outcome == 'failure' }}
+        run: |
+          rm -f audit-output/maintenance-audit.json audit-output/maintenance-audit.md
+          sleep 60
+
+      - name: Run uni-audit-report (attempt 2)
+        id: report_attempt_2
+        if: ${{ steps.report_output_1.outcome == 'failure' }}
+        continue-on-error: true
+        uses: openai/codex-action@v1
+        with:
+          responses-api-endpoint: ${{ secrets.CODEX_API_ENDPOINT || 'https://api.openai.com/v1/responses' }}
+          openai-api-key: ${{ secrets.CODEX_API_KEY }}
+          safety-strategy: unprivileged-user
+          codex-user: uni-auditor
+          model: gpt-5.6-terra
+          sandbox: danger-full-access
+          prompt: ${{ env.REPORT_PROMPT }}
+
+      - name: Verify report attempt 2 output
+        id: report_output_2
+        if: ${{ always() && steps.report_output_1.outcome == 'failure' }}
+        continue-on-error: true
+        env:
+          ACTION_OUTCOME: ${{ steps.report_attempt_2.outcome }}
+        run: |
+          if [[ "$ACTION_OUTCOME" != "success" || ! -s audit-output/maintenance-audit.md ]]; then
+            echo "::error::Codex report attempt 2 did not produce usable outputs."
+            exit 1
+          fi
+          jq -e '.' audit-output/maintenance-audit.json > /dev/null
+
+      - name: Back off before report attempt 3
+        if: ${{ steps.report_output_2.outcome == 'failure' }}
+        run: |
+          rm -f audit-output/maintenance-audit.json audit-output/maintenance-audit.md
+          sleep 60
+
+      - name: Run uni-audit-report (attempt 3)
+        id: report_attempt_3
+        if: ${{ steps.report_output_2.outcome == 'failure' }}
+        continue-on-error: true
+        uses: openai/codex-action@v1
+        with:
+          responses-api-endpoint: ${{ secrets.CODEX_API_ENDPOINT || 'https://api.openai.com/v1/responses' }}
+          openai-api-key: ${{ secrets.CODEX_API_KEY }}
+          safety-strategy: unprivileged-user
+          codex-user: uni-auditor
+          model: gpt-5.6-luna
+          sandbox: danger-full-access
+          prompt: ${{ env.REPORT_PROMPT }}
+
+      - name: Verify report attempt 3 output
+        id: report_output_3
+        if: ${{ always() && steps.report_output_2.outcome == 'failure' }}
+        continue-on-error: true
+        env:
+          ACTION_OUTCOME: ${{ steps.report_attempt_3.outcome }}
+        run: |
+          if [[ "$ACTION_OUTCOME" != "success" || ! -s audit-output/maintenance-audit.md ]]; then
+            echo "::error::Codex report attempt 3 did not produce usable outputs."
+            exit 1
+          fi
+          jq -e '.' audit-output/maintenance-audit.json > /dev/null
+
+      - name: Require usable aggregate outputs
+        if: ${{ always() }}
+        env:
+          ATTEMPT_1: ${{ steps.report_output_1.outcome }}
+          ATTEMPT_2: ${{ steps.report_output_2.outcome }}
+          ATTEMPT_3: ${{ steps.report_output_3.outcome }}
+        run: |
+          if [[ "$ATTEMPT_1" != "success" && "$ATTEMPT_2" != "success" && "$ATTEMPT_3" != "success" ]]; then
+            echo "::error::All Codex report attempts failed to produce outputs (attempts: $ATTEMPT_1, $ATTEMPT_2, $ATTEMPT_3)."
+            exit 1
+          fi
 
       - name: Validate aggregate outputs
         run: |
