@@ -40,7 +40,6 @@ use crate::assembly::host::{
 use crate::assembly::lifecycle::build_daemon_lifecycle;
 #[cfg(feature = "lan-compat")]
 use crate::assembly::mobile_lan::MobileLanEndpointUpdater;
-use crate::assembly::search::build_search_runtime;
 use crate::assembly::sync_engine::SyncEngineAssembly;
 use crate::engine::event_stream::EventSender;
 use crate::subsystems::peer_keepalive::spawn_peer_presence_event_task;
@@ -86,7 +85,7 @@ struct SessionFactory {
 struct ProductionSession {
     facade: Arc<AppFacade>,
     history_maintenance: HistoryMaintenanceRuntime,
-    search_runtime: uc_application::facade::SearchRuntime,
+    search: uc_application::facade::SearchAssembly,
     #[cfg(feature = "lan-compat")]
     mobile_sync: Arc<uc_mobile_lan::MobileSyncFacade>,
     clipboard: ClipboardRuntime,
@@ -127,7 +126,7 @@ impl ProductionSession {
             warn!(error = %error, "history maintenance stopped with an error");
         }
         self.tasks.shutdown(Duration::from_millis(500)).await;
-        if let Err(error) = self.search_runtime.shutdown().await {
+        if let Err(error) = self.search.shutdown().await {
             error!(error = %error, "search runtime stopped with error");
         }
         self.clipboard.shutdown().await;
@@ -402,9 +401,9 @@ impl ProductionRuntime {
         let sync_engine = lifecycle.sync_engine_assembly;
         let (restore_tx, restore_rx) = tokio::sync::mpsc::unbounded_channel();
         sync_engine.attach_restore_broadcast(restore_rx);
-        let search_runtime = build_search_runtime(&wired.deps);
+        let search = uc_application::facade::SearchAssembly::start(&wired.deps);
         let session_activity = build_space_session_activity(
-            search_runtime.facade(),
+            search.facade(),
             SpaceSessionActivityDeps {
                 receive: wired.shared.file_transfer.facade()
                     as Arc<dyn uc_application::facade::EnsureReceiveReadyPort>,
@@ -470,7 +469,7 @@ impl ProductionRuntime {
                         ),
                     ),
                 },
-                search: search_runtime.facade(),
+                search: search.facade(),
                 clipboard_outbound: Arc::clone(&clipboard.outbound),
                 network_recovery: Arc::clone(&factory.network_recovery),
             },
@@ -504,7 +503,7 @@ impl ProductionRuntime {
         Ok(ProductionSession {
             facade,
             history_maintenance,
-            search_runtime,
+            search,
             #[cfg(feature = "lan-compat")]
             mobile_sync,
             clipboard,

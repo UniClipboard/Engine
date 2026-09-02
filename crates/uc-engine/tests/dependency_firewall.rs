@@ -428,6 +428,30 @@ fn engine_does_not_own_mobile_upload_state() {
 }
 
 #[test]
+fn engine_does_not_assemble_search_internals() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engine = read_rs_sources(&workspace_root.join("crates/uc-engine/src"));
+
+    for forbidden in [
+        "SearchRuntimeDeps",
+        "SearchCoordinatorDeps",
+        "build_search_runtime",
+        "CURRENT_INDEX_VERSION",
+    ] {
+        assert!(
+            !engine.contains(forbidden),
+            "Application Search assembly must own {forbidden} instead of uc-engine"
+        );
+    }
+    assert!(
+        !workspace_root
+            .join("crates/uc-engine/src/assembly/search.rs")
+            .exists(),
+        "Search assembly must live in uc-application"
+    );
+}
+
+#[test]
 fn engine_does_not_restore_unrelated_search_or_membership_activity_steps() {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let runtime = read_rs_sources(&workspace_root.join("crates/uc-engine/src/runtime"));

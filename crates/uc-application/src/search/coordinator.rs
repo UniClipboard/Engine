@@ -94,7 +94,6 @@ pub struct SearchCoordinatorDeps {
     pub event_repo: Arc<dyn ClipboardEventRepositoryPort>,
     /// Loads the persisted file manifest used by the directory tag rule.
     pub entry_file_set_repo: Arc<dyn EntryFileSetRepositoryPort>,
-    pub current_index_version: String,
 }
 
 impl SearchCoordinatorDeps {
@@ -110,7 +109,6 @@ impl SearchCoordinatorDeps {
         selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
         event_repo: Arc<dyn ClipboardEventRepositoryPort>,
         entry_file_set_repo: Arc<dyn EntryFileSetRepositoryPort>,
-        current_index_version: impl Into<String>,
     ) -> Self {
         Self {
             search_index,
@@ -123,7 +121,6 @@ impl SearchCoordinatorDeps {
             selection_repo,
             event_repo,
             entry_file_set_repo,
-            current_index_version: current_index_version.into(),
         }
     }
 }
@@ -384,10 +381,10 @@ impl SearchCoordinator {
             }
         };
 
-        if meta.index_version != self.deps.current_index_version {
+        if meta.index_version != self.deps.search_maintenance.current_index_version() {
             info!(
                 current = %meta.index_version,
-                expected = %self.deps.current_index_version,
+                expected = %self.deps.search_maintenance.current_index_version(),
                 "search coordinator: index version mismatch, triggering rebuild"
             );
             self.trigger_rebuild_locked(REASON_VERSION_MISMATCH).await;
@@ -870,7 +867,7 @@ async fn purge_plaintext_residue_if_needed(deps: &SearchCoordinatorDeps) {
             return;
         }
     };
-    if meta.index_version != deps.current_index_version {
+    if meta.index_version != deps.search_maintenance.current_index_version() {
         // Not on the target version yet — a rebuild will run the purge on success.
         return;
     }
@@ -1306,7 +1303,6 @@ mod tests {
             Arc::new(FakeSelectionRepo { rep_id }),
             Arc::new(FakeEventRepo),
             Arc::new(FakeFileSetRepo),
-            CURRENT_INDEX_VERSION,
         );
         (deps, rebuild_started, rebuild_dropped)
     }
@@ -1341,6 +1337,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SearchIndexMaintenancePort for FakeMaintenance {
+        fn current_index_version(&self) -> &'static str {
+            CURRENT_INDEX_VERSION
+        }
+
         async fn purge_plaintext_residue(&self) -> Result<(), SearchError> {
             Ok(())
         }
@@ -1425,7 +1425,6 @@ mod tests {
             Arc::new(FakeSelectionRepo { rep_id }),
             Arc::new(FakeEventRepo),
             Arc::new(FakeFileSetRepo),
-            CURRENT_INDEX_VERSION,
         );
         let coordinator = SearchCoordinator::new(deps);
 
@@ -1649,7 +1648,6 @@ mod tests {
             Arc::new(FakeSelectionRepo { rep_id }),
             Arc::new(FakeEventRepo),
             Arc::new(FakeFileSetRepo),
-            CURRENT_INDEX_VERSION,
         );
         let coordinator = SearchCoordinator::new(deps);
 

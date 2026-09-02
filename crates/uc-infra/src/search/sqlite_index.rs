@@ -2034,6 +2034,10 @@ impl SearchIndexPort for SqliteSearchIndex {
 
 #[async_trait]
 impl SearchIndexMaintenancePort for SqliteSearchIndex {
+    fn current_index_version(&self) -> &'static str {
+        CURRENT_INDEX_VERSION
+    }
+
     #[instrument(
         name = "search_index.purge_plaintext_residue",
         level = "info",
