@@ -792,6 +792,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 日期 | 主题 | 长期结论 |
 | --- | --- | --- |
 | 2026-09-02 | 定时维护审查 Action | GitHub Actions 每周先以脱敏预检验证自定义 Responses API 的 HTTP 与 SSE 完成事件契约；预检失败时不启动审查或汇总。预检通过后，Codex 使用独立低权限账户读取仓库且只写指定 artifact 目录，Unix 文件权限是实际写入边界，不依赖低权限账户内无法稳定启动的嵌套 bubblewrap；工作流顺序启动五个互不调用的全仓审查 session，专项与汇总 session 遇到上游瞬时失败或缺少 artifact 时最多按 `sol`、`terra`、`luna` 三个容量层级执行带退避的尝试，最终产出标准 JSON artifact 与开发者 Markdown 报告。手动运行可选择单一 lane 作诊断且不启动汇总。Codex 与产品仓发布流程统一从 `CODEX_API_ENDPOINT` 和 `CODEX_API_KEY` 读取接入配置。开发者通过 Actions Summary 阅读去重报告，并可下载各 lane 与汇总产物追溯证据。审查只报告问题，不自动修复、建 Issue 或改变运行时架构。 |
+| 2026-09-02 | 定时维护审查工具链与覆盖语义 | 低权限审查账户通过只读的 runner Rust toolchain 执行 `cargo metadata` 等仓库静态契约检查，并使用独立可写 Cargo home；定时 runner 固有缺少的设备、运行时 profile 与 Release bundle 检查继续如实记为 `skipped`，但不单独把已完成的全仓静态审查降为 `partial`。 |
 | 2026-09-01 | 文档记录系统重组 | 根与局部 `AGENTS.md` 收敛为短维护地图；长期设计、ADR、产品规格、active/completed 执行计划、生成资料和参考资料分别进入结构化 `docs/` 目录。根 `ARCHITECTURE.md` 成为当前架构入口，架构圣经继续保存详细事实；旧 `docs/adr`、`docs/specs`、`docs/prd`、`docs/diagrams` 和 `docs/migration` 路径不再作为并行入口。 |
 | 2026-09-01 | 并行维护审查 Skills | 仓库维护审查拆为五个互不调用的只读专项 skill，由独立 session 并行运行；第六个独立 skill 只汇总标准化 artifact。该机制以现有架构、安全、可靠性和设计文档为规则来源，不改变运行时架构。 |
 | 2026-08-29 | 文档压缩 | 圣经只保留当前架构事实、稳定边界和维护规则；移除逐切片流水账与已经失效的实现细节。 |

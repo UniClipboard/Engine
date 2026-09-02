@@ -91,6 +91,9 @@ jobs:
         - 将 UTF-8 JSON artifact 写入 `audit-artifacts/${{ matrix.lane }}.json`；
         - lane 必须是 `${{ matrix.lane }}`；
         - 如实记录 completed、partial 或 blocked，以及所有 skipped 检查；
+        - 定时 runner 未提供设备、运行时 profile 或 Release bundle 时，将对应检查记为 skipped；
+          这些预期环境缺口本身不阻止 status=completed；只有适用于本次仓库静态审查的检查
+          未能完成时才使用 partial；
         - 不实现修复，不修改其他仓库文件，不创建 Issue 或 PR，不访问远端业务系统；
         - 最终回复只简短确认 artifact 路径和执行状态，不在回复中复制完整报告。
     strategy:
@@ -133,6 +136,18 @@ jobs:
           sudo chmod -R g+rX "$GITHUB_WORKSPACE"
           sudo chmod -R g+rwX audit-artifacts
           sudo find audit-artifacts -type d -exec chmod g+s {} +
+
+          # sudo 为低权限用户使用受限 PATH。仅暴露 runner 预装 Rust 工具链的
+          # 只读执行面，并让该用户使用自己的可写 Cargo home。
+          sudo install -d -o uni-auditor -g uni-auditor /home/uni-auditor/.cargo
+          sudo chmod g+rx /home/runner /home/runner/.cargo /home/runner/.cargo/bin /home/runner/.rustup
+          sudo chmod -R g+rX /home/runner/.rustup
+          sudo ln -s /home/runner/.rustup /home/uni-auditor/.rustup
+          sudo chown -h uni-auditor:uni-auditor /home/uni-auditor/.rustup
+          for tool in cargo rustc rustdoc rustfmt clippy-driver; do
+            sudo ln -sf "/home/runner/.cargo/bin/$tool" "/usr/local/bin/$tool"
+          done
+          sudo -u uni-auditor -- cargo --version
 
       - name: Run ${{ matrix.skill }} (attempt 1)
         id: audit_attempt_1
