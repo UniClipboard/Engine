@@ -313,6 +313,12 @@ impl UpgradeJournalV1 {
             })
     }
 
+    pub(super) fn matches_activated_fresh_profile(&self, target: &ActiveRuntimeManifestV3) -> bool {
+        self.phase == UpgradePhaseV1::Verified
+            && self.source.is_none()
+            && self.target_profile_data_generation == *target.layout().profile_data_generation()
+    }
+
     pub(super) fn mark_target_staged(
         &mut self,
         source_snapshot_digest: [u8; 32],
@@ -453,6 +459,49 @@ impl UpgradeSourceV1 {
             && self.keyslot_generation == manifest.keyslot_generation
             && self.database_generation == manifest.database_generation
             && self.security_generation == manifest.security_generation
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use uc_core::ids::SpaceId;
+    use uc_core::membership::ActiveRuntimeLayout;
+
+    use super::UpgradeJournalV1;
+    use crate::security::ActiveRuntimeManifestV3;
+
+    fn verified_fresh_journal() -> UpgradeJournalV1 {
+        let mut journal = UpgradeJournalV1::detected(None);
+        journal.mark_target_staged([0x11; 32], 1).unwrap();
+        journal
+            .mark_stores_separated([0x12; 32], [0x13; 32])
+            .unwrap();
+        journal
+            .mark_primary_payloads_converted([0x14; 32], [0x15; 32], 0, 0)
+            .unwrap();
+        journal
+            .mark_payloads_converted([0x16; 32], [0x17; 32], 0, 0)
+            .unwrap();
+        journal.mark_verified([0x18; 32], [0x19; 32]).unwrap();
+        journal
+    }
+
+    fn manifest(profile: [u8; 16], control: [u8; 16]) -> ActiveRuntimeManifestV3 {
+        ActiveRuntimeManifestV3::new(
+            ActiveRuntimeLayout::new(SpaceId::from_str("space-a"), profile, control).unwrap(),
+            [0x31; 16],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn verified_fresh_journal_follows_the_profile_across_control_generation_changes() {
+        let journal = verified_fresh_journal();
+        let changed_control = manifest(*journal.target_profile_data_generation(), [0x41; 16]);
+        let changed_profile = manifest([0x42; 16], [0x43; 16]);
+
+        assert!(journal.matches_activated_fresh_profile(&changed_control));
+        assert!(!journal.matches_activated_fresh_profile(&changed_profile));
     }
 }
 

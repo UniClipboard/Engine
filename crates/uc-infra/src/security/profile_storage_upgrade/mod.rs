@@ -468,6 +468,11 @@ impl ProfileStorageUpgrade {
                 return Ok(ProfileStorageUpgradeOutcome::UpToDate);
             };
             if !journal.matches_target(target) {
+                if journal.matches_activated_fresh_profile(target) {
+                    self.cleanup(&journal, &components.target)?;
+                    self.persistence.clear_journal().await?;
+                    return Ok(ProfileStorageUpgradeOutcome::UpToDate);
+                }
                 return Err(ProfileStorageUpgradeError::SourceChanged);
             }
             return match journal.phase() {

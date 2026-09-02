@@ -542,6 +542,37 @@ function checkCurrentPeerScopeOwnership() {
   return problems
 }
 
+function checkMembershipConfirmationWatermarkOwnership(sources) {
+  const problems = []
+  const positiveAssignment = /\.confirmed_position\s*=\s*(?!None\b)[A-Za-z_]/g
+  const applicationAssignments = sources.application.match(positiveAssignment) ?? []
+  const authenticatedExchangeOwners = [
+    read('crates/uc-application/src/space/membership/synchronize_history/target_use_case.rs'),
+    read('crates/uc-application/src/space/membership/handle_history_message/use_case.rs'),
+  ].join('\n')
+  const ownerAssignments = authenticatedExchangeOwners.match(positiveAssignment) ?? []
+  if (applicationAssignments.length !== 2 || ownerAssignments.length !== 2) {
+    addProblem(
+      problems,
+      'membership confirmation watermark',
+      'positive confirmed_position assignment must remain exclusive to authenticated ACK/suffix owners'
+    )
+  }
+
+  const sponsorActivation = read('crates/uc-infra/src/space/admission/sponsor/complete.rs')
+  if (
+    !sponsorActivation.includes('confirmed_position: None') ||
+    /confirmed_position\s*:\s*Some\b/.test(sponsorActivation)
+  ) {
+    addProblem(
+      problems,
+      'membership confirmation watermark',
+      'Sponsor activation must create propagation debt instead of inferring peer confirmation'
+    )
+  }
+  return problems
+}
+
 function checkRetiredLegacyPairingRecovery() {
   const problems = []
   const retiredPaths = [
@@ -1440,6 +1471,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkLanIsolation(metadata, sources),
     ...checkProfileStorageGenerationOwnership(sources),
     ...checkCurrentPeerScopeOwnership(),
+    ...checkMembershipConfirmationWatermarkOwnership(sources),
     ...checkApplicationMembershipCutover(),
     ...checkSpaceModuleInterface(),
     ...checkSpaceAdmissionProtocolOwnership(),
@@ -1502,6 +1534,10 @@ function runNegativeFixtures(metadata, sources) {
   }, metadata, sources)
   expectRejected('historical vault used as network authority', (_changed, changedSources) => {
     changedSources.network += '\nfn authorize_from_history(_: ProfileContentKeyVault) {}\n'
+  }, metadata, sources)
+  expectRejected('forged membership confirmation watermark', (_changed, changedSources) => {
+    changedSources.application +=
+      '\nfn infer_peer_confirmation(peer: &mut PeerReconciliationRecord, position: BaseMembershipHistoryPosition) { peer.confirmed_position = Some(position); }\n'
   }, metadata, sources)
   expectRejected('retired legacy Space transition module', (_changed, changedSources) => {
     changedSources.legacySpaceTransitionPathPresent = true

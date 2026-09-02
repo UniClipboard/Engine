@@ -4,7 +4,7 @@
 
 - **状态**：设计中
 - **日期**：2026-08-30
-- **前置规格**：`docs/exec-plans/active/029-durable-membership-history-anti-entropy.md`
+- **前置规格**：`docs/exec-plans/completed/029-durable-membership-history-anti-entropy.md`
 - **相关决策**：`docs/design-docs/decisions/020-membership-reconciliation-and-user-decisions.md`、`docs/design-docs/decisions/021-workspace-convergence-internal-boundaries.md`
 
 # 1. Overview

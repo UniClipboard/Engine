@@ -2,8 +2,9 @@
 
 ## 状态
 
-- **状态**：实施中（Core/Application/Infra 主路径已切换，Desktop 三节点、四节点离线链和五节点树型已通过；实体设备矩阵待验收）
+- **状态**：已完成（Core/Application/Infra/Engine 主路径、Desktop C0-C5 多进程矩阵与完整 workspace 验证通过；实体设备矩阵按未执行记为跳过）
 - **日期**：2026-08-30
+- **完成日期**：2026-09-02
 - **实施方式**：Core、Application、Infra、Engine 与 Desktop E2E 一次性切换；不得长期保留旧调度语义
 - **修正范围**：修正规格 020、021、023、027、028 中“成员上线后核对即可最终传播”的不完整实现；成员历史、移除决定、分叉隔离和准入完成边界保持不变
 - **相关决策**：`docs/design-docs/decisions/020-membership-reconciliation-and-user-decisions.md`、`docs/design-docs/decisions/025-application-space-membership-one-shot-rewrite.md`
@@ -430,25 +431,35 @@ Implementation: migration 清空旧确认水位并保存 pending revision。
 
 # 9. Acceptance Criteria
 
-* [ ] Sponsor 激活不再为未 ACK 的旧成员写入最新 `confirmed_position`。
-* [ ] 任一本机新历史与 peer 传播欠账在同一 encrypted ledger mutation 保存。
-* [ ] 任一入站新历史与 effects、来源关系、fan-out 欠账在同一 mutation 保存。
-* [ ] `confirmed_position` 只有认证 ACK 路径可以推进，并有架构测试禁止其他写入。
-* [ ] 周期维护根据到期欠账运行，不依赖 paused UI 状态或易失 trigger。
-* [ ] 网络失败、预算耗尽和重启后欠账仍存在并最终重试。
-* [ ] 有界并发与持久公平 cursor 在 200-peer 确定测试中无饥饿。
-* [ ] 摘要相同时零历史页；落后时只发送缺失 suffix；所有 frame/page/transfer 有固定上限。
+* [x] Sponsor 激活不再为未 ACK 的旧成员写入最新 `confirmed_position`。
+* [x] 任一本机新历史与 peer 传播欠账在同一 encrypted ledger mutation 保存。
+* [x] 任一入站新历史与 effects、来源关系、fan-out 欠账在同一 mutation 保存。
+* [x] `confirmed_position` 只有认证 ACK 路径可以推进，并有架构测试禁止其他写入。
+* [x] 周期维护根据到期欠账运行，不依赖 paused UI 状态或易失 trigger。
+* [x] 网络失败、预算耗尽和重启后欠账仍存在并最终重试。
+* [x] 有界并发与持久公平 cursor 在 200-peer 确定测试中无饥饿。
+* [x] 摘要相同时零历史页；落后时只发送缺失 suffix；所有 frame/page/transfer 有固定上限。
 * [x] 链式 A-B-C-D 的中间 Sponsor 无需在线；A/D 恢复后通过签名历史直接收敛。
 * [x] 五节点树型和交错上线集成测试最终收敛。
-* [ ] 分叉只隔离相关 peer，各分支内部继续传播。
-* [ ] 未确认移除不被反熵自动应用。
-* [ ] SQLite fault injection 证明无“历史已提交但传播责任丢失”窗口。
+* [x] 分叉只隔离相关 peer，各分支内部继续传播。
+* [x] 未确认移除不被反熵自动应用。
+* [x] SQLite fault injection 证明无“历史已提交但传播责任丢失”窗口。
 * [x] Desktop 三节点加入、重启、Sponsor 离线恢复和 A↔C exact transfer 通过。
 * [x] Desktop 四节点离线链通过。
 * [x] Desktop 五节点树型通过。
-* [ ] Engine workspace tests、真实 Iroh、真实 SQLite、fmt、architecture 和 diff gates 通过。
-* [ ] 实体设备未执行项目明确为“跳过”。
-* [ ] `docs/architecture/architecture-bible.md` 与相关规格状态同步。
+* [x] Engine workspace tests、真实 Iroh、真实 SQLite、fmt、architecture 和 diff gates 通过。
+* [x] 实体设备未执行项目明确为“跳过”。
+* [x] `docs/architecture/architecture-bible.md` 与相关规格状态同步。
+
+## 验证记录（2026-09-02）
+
+- `cargo test --workspace --all-targets --locked` 完整通过：Application 728 项、Engine 131 项、Infra 769 项通过且 4 项按既有标记忽略，其余 workspace suites 全绿。
+- 029 聚焦验证通过：反熵调度 11 项、入站 handler 8 项、真实 SQLite membership ledger 2 项，以及 `completed_admission_survives_restart_and_allows_transfer` 重启后传输回归。
+- Desktop 使用真实 daemon、CLI 与 Iroh 从空目录执行 C0-C5，共 8 项全部通过，耗时 678.47 秒；覆盖 fresh/restart、三节点在线链、离线 Sponsor、二次重启幂等、四节点离线链与五节点树型。
+- Desktop `uc-webserver` 153 项通过、1 项既有负载 benchmark 忽略；准备 debug daemon sidecar 后，Desktop workspace check、fmt 与 diff gate 通过。
+- 根仓 `cargo metadata --locked --format-version 1`、`cargo check --workspace --all-targets --locked`、`cargo fmt --all -- --check`、`node scripts/architecture/check-engine-repository.mjs` 与 `git diff --check` 全部通过。
+- 架构检查包含伪造确认水位的负 fixture；真实 SQLite 故障注入证明 history、fan-out 欠账、公平游标和 effects 只会整体保持旧状态或整体提交新状态。
+- 实体设备矩阵：**跳过**。本阶段环境未提供实体设备与 Release bundle，未以同机多进程结果冒充实体设备通过，也未执行发布 bundle 核验。
 
 # 10. Risks and Trade-offs
 
@@ -479,12 +490,11 @@ Implementation: migration 清空旧确认水位并保存 pending revision。
 
 # 11. Open Questions
 
-没有阻止实施的产品问题。以下技术参数在 Step 6 开始前通过 benchmark 固定到常量并写入测试，不得成为运行时无限配置：
+没有遗留的产品或实施问题。技术参数已经固定为常量并由边界测试约束：
 
-- 单轮最大 peer 数；
-- 最大并发交换数；
-- retry 初始延迟、倍率、抖动和上限；
-- completed inbound transfer 的有界保留数量；
-- summary/suffix 单页及单次 transfer 上限。
+- 单轮最多选择 8 个 peer，最多并发交换 4 个；200-peer 测试固定公平游标无饥饿。
+- retry 从 1 秒开始按 2 倍指数增长，不加抖动，最大 5 分钟；持久 deadline 显示 wall clock 倒退时立即到期。
+- completed inbound transfer 最多保留 256 个 ACK；每次新完成的 transfer 必须留在有界集合中。
+- 单页最多 256 条记录、64 页 suffix；单 frame 最大 4 MiB，单次入站 transfer 最大 16 MiB。
 
 参数选择不能改变本规格的不变量：预算只限制单轮，不能删除欠账；任何有限设备集合在持续获得运行机会且网络最终可用时都必须无饥饿地收敛。

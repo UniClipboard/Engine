@@ -17,6 +17,7 @@ use crate::space::membership::{
 use super::{AuthenticatedMember, HandleMembershipHistoryMessageError};
 
 const MAX_MEMBERSHIP_TRANSFER_SIZE: usize = MAX_MEMBERSHIP_HISTORY_FRAME_SIZE * 4;
+pub(super) const MAX_COMPLETED_INBOUND_TRANSFERS: usize = 256;
 
 pub(crate) struct HandleMembershipHistoryMessageUseCase {
     ledger: Arc<MembershipLedger>,
@@ -321,9 +322,12 @@ impl HandleMembershipHistoryMessageUseCase {
                         _ => MembershipHistoryRelationship::Invalid,
                     };
                     record.inbound_transfers.remove(&source_device_id);
-                    record
-                        .completed_inbound_transfers
-                        .insert((source_device_id.clone(), transfer_id), ack.clone());
+                    remember_completed_inbound_transfer(
+                        record,
+                        source_device_id.clone(),
+                        transfer_id,
+                        ack.clone(),
+                    );
                     let peer = record
                         .peer_reconciliation
                         .entry(source_device_id.clone())
@@ -581,12 +585,37 @@ fn mark_invalid(
     transfer_id: [u8; 32],
 ) {
     record.inbound_transfers.remove(source_device_id);
-    record.completed_inbound_transfers.insert(
-        (source_device_id.clone(), transfer_id),
+    remember_completed_inbound_transfer(
+        record,
+        source_device_id.clone(),
+        transfer_id,
         MembershipHistoryAckV3::Invalid,
     );
     if let Some(peer) = record.peer_reconciliation.get_mut(source_device_id) {
         peer.relationship = MembershipHistoryRelationship::Invalid;
+    }
+}
+
+pub(super) fn remember_completed_inbound_transfer(
+    record: &mut LoadedMembershipLedger,
+    source_device_id: uc_core::ids::DeviceId,
+    transfer_id: [u8; 32],
+    ack: MembershipHistoryAckV3,
+) {
+    let latest_key = (source_device_id, transfer_id);
+    record
+        .completed_inbound_transfers
+        .insert(latest_key.clone(), ack);
+    while record.completed_inbound_transfers.len() > MAX_COMPLETED_INBOUND_TRANSFERS {
+        let Some(evicted_key) = record
+            .completed_inbound_transfers
+            .keys()
+            .find(|key| *key != &latest_key)
+            .cloned()
+        else {
+            break;
+        };
+        record.completed_inbound_transfers.remove(&evicted_key);
     }
 }
 

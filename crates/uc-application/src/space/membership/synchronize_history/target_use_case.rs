@@ -103,7 +103,7 @@ impl SynchronizeMembershipHistoryUseCase {
                 already_confirmed_count += 1;
                 return false;
             }
-            if record.sync_state.next_attempt_at_ms > now_ms {
+            if !retry_is_due(record, now_ms) {
                 retry_delayed_count += 1;
                 return false;
             }
@@ -298,15 +298,7 @@ impl SynchronizeMembershipHistoryUseCase {
                     .retry_attempt
                     .checked_add(1)
                     .ok_or(MembershipLedgerError::Corrupt)?;
-                let shift = peer_record
-                    .sync_state
-                    .retry_attempt
-                    .saturating_sub(1)
-                    .min(18);
-                let delay = INITIAL_RETRY_DELAY_MS
-                    .checked_shl(shift)
-                    .unwrap_or(MAX_RETRY_DELAY_MS)
-                    .min(MAX_RETRY_DELAY_MS);
+                let delay = retry_delay_ms(peer_record.sync_state.retry_attempt);
                 peer_record.sync_state.next_attempt_at_ms = now_ms.saturating_add(delay);
                 peer_record.sync_state.last_attempt_outcome =
                     crate::space::membership::PeerHistorySyncOutcome::Deferred;
@@ -574,6 +566,28 @@ fn membership_ack_kind(ack: &uc_core::membership::MembershipHistoryAckV3) -> &'s
 enum PeerSyncError {
     Deferred,
     Stable,
+}
+
+fn retry_delay_ms(retry_attempt: u32) -> i64 {
+    let shift = retry_attempt.saturating_sub(1).min(18);
+    INITIAL_RETRY_DELAY_MS
+        .checked_shl(shift)
+        .unwrap_or(MAX_RETRY_DELAY_MS)
+        .min(MAX_RETRY_DELAY_MS)
+}
+
+fn retry_is_due(record: &PeerReconciliationRecord, now_ms: i64) -> bool {
+    if record.sync_state.next_attempt_at_ms <= now_ms {
+        return true;
+    }
+    if record.sync_state.retry_attempt == 0 {
+        return false;
+    }
+
+    // 持久 deadline 与当前 clock 的距离不应超过本次退避窗口；超过说明
+    // 系统时间已倒退，欠账必须立即重试，不能等待 wall clock 追上旧值。
+    record.sync_state.next_attempt_at_ms.saturating_sub(now_ms)
+        > retry_delay_ms(record.sync_state.retry_attempt)
 }
 
 fn map_exchange_error(error: MembershipHistoryExchangeError) -> PeerSyncError {

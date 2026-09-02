@@ -13,16 +13,54 @@ use uc_core::membership::{
     ED25519_SIGNATURE_ALGORITHM_V1, MEMBERSHIP_EVENT_FORMAT_V2,
 };
 
+use super::use_case::{remember_completed_inbound_transfer, MAX_COMPLETED_INBOUND_TRANSFERS};
 use super::*;
 use crate::space::membership::{
     CommitMembershipLedgerPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
     MembershipEffectKind, MembershipEffectPhase, MembershipLedger, MembershipLedgerError,
-    MembershipLedgerMutation, PeerReconciliationRecord,
+    MembershipLedgerMutation, PeerReconciliationRecord, WakeSpaceMembershipMaintenancePort,
 };
 
 struct MemoryLedgerRepository {
     loaded: Mutex<LoadedMembershipLedger>,
     commits: AtomicUsize,
+    fail_on_commit: Option<usize>,
+}
+
+struct WakeCounter(AtomicUsize);
+
+impl WakeSpaceMembershipMaintenancePort for WakeCounter {
+    fn wake(&self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn completed_inbound_transfer_retention_is_bounded_and_keeps_the_latest_ack() {
+    let mut record = LoadedMembershipLedger::no_current_space();
+    let source = DeviceId::new("device-b");
+
+    for marker in 0..=MAX_COMPLETED_INBOUND_TRANSFERS {
+        let mut transfer_id = [0u8; 32];
+        transfer_id[..8].copy_from_slice(&(marker as u64).to_be_bytes());
+        remember_completed_inbound_transfer(
+            &mut record,
+            source.clone(),
+            transfer_id,
+            MembershipHistoryAckV3::Invalid,
+        );
+    }
+
+    let mut latest_transfer_id = [0u8; 32];
+    latest_transfer_id[..8]
+        .copy_from_slice(&(MAX_COMPLETED_INBOUND_TRANSFERS as u64).to_be_bytes());
+    assert_eq!(
+        record.completed_inbound_transfers.len(),
+        MAX_COMPLETED_INBOUND_TRANSFERS
+    );
+    assert!(record
+        .completed_inbound_transfers
+        .contains_key(&(source, latest_transfer_id)));
 }
 
 #[tokio::test]
@@ -99,6 +137,7 @@ async fn sibling_summary_requests_verified_evidence_and_records_one_conflict() {
     let repository = Arc::new(MemoryLedgerRepository {
         loaded: Mutex::new(loaded),
         commits: AtomicUsize::new(0),
+        fail_on_commit: None,
     });
     let ledger = Arc::new(MembershipLedger::new(
         repository.clone(),
@@ -193,6 +232,9 @@ impl CommitMembershipLedgerPort for MemoryLedgerRepository {
             || digest != mutation.expected_history_digest
         {
             return Err(MembershipLedgerError::Conflict);
+        }
+        if self.fail_on_commit == Some(self.commits.load(Ordering::SeqCst) + 1) {
+            return Err(MembershipLedgerError::Unavailable);
         }
         self.commits.fetch_add(1, Ordering::SeqCst);
         *loaded = mutation.replacement;
@@ -319,6 +361,7 @@ fn two_page_extension() -> (
 ) {
     let (local, local_credential) = member_facts("device-a", 0x41);
     let (peer, peer_credential) = member_facts("device-b", 0x42);
+    let (observer, observer_credential) = member_facts("device-observer", 0x45);
     let base = VersionedMembershipHistory::from_activation_baseline(
         MembershipActivationBaselineV2::Established {
             lineage_id: "space-a".to_owned(),
@@ -327,6 +370,7 @@ fn two_page_extension() -> (
             current_members: vec![
                 (local.clone(), local_credential),
                 (peer.clone(), peer_credential.clone()),
+                (observer.clone(), observer_credential),
             ],
         },
     )
@@ -380,6 +424,17 @@ fn two_page_extension() -> (
             peer_device_id: peer_device_id.clone(),
             relationship: MembershipHistoryRelationship::Consistent,
             confirmed_position: None,
+            sync_state: Default::default(),
+            restricted_delivery: Vec::new(),
+            updated_at_ms: 1,
+        },
+    );
+    loaded.peer_reconciliation.insert(
+        observer.device_id.clone(),
+        PeerReconciliationRecord {
+            peer_device_id: observer.device_id,
+            relationship: MembershipHistoryRelationship::Consistent,
+            confirmed_position: base.current_position().ok(),
             sync_state: Default::default(),
             restricted_delivery: Vec::new(),
             updated_at_ms: 1,
@@ -448,6 +503,7 @@ async fn restricted_event_applies_only_the_authenticated_signed_event() {
     let repository = Arc::new(MemoryLedgerRepository {
         loaded: Mutex::new(loaded),
         commits: AtomicUsize::new(0),
+        fail_on_commit: None,
     });
     let ledger = Arc::new(MembershipLedger::new(
         repository.clone(),
@@ -528,6 +584,7 @@ async fn restricted_remote_removal_is_persisted_without_advancing_the_local_bran
     let repository = Arc::new(MemoryLedgerRepository {
         loaded: Mutex::new(loaded),
         commits: AtomicUsize::new(0),
+        fail_on_commit: None,
     });
     let ledger = Arc::new(MembershipLedger::new(
         repository.clone(),
@@ -575,6 +632,7 @@ async fn two_page_transfer_persists_each_page_and_applies_only_when_complete() {
     let repository = Arc::new(MemoryLedgerRepository {
         loaded: Mutex::new(loaded),
         commits: AtomicUsize::new(0),
+        fail_on_commit: None,
     });
     let ledger = Arc::new(MembershipLedger::new(
         repository.clone(),
@@ -618,6 +676,27 @@ async fn two_page_transfer_persists_each_page_and_applies_only_when_complete() {
     let persisted = repository.load().await.unwrap();
     assert!(persisted.inbound_transfers.is_empty());
     assert_ne!(persisted.membership_history, base_history);
+    let current_position = VersionedMembershipHistory::decode_persisted_v2(
+        persisted.membership_history.as_deref().unwrap(),
+        &AcceptingVerifier,
+    )
+    .unwrap()
+    .current_position()
+    .unwrap();
+    assert_eq!(
+        persisted
+            .peer_reconciliation
+            .get(&peer_device_id)
+            .and_then(|peer| peer.confirmed_position.as_ref()),
+        Some(&current_position)
+    );
+    assert_ne!(
+        persisted
+            .peer_reconciliation
+            .get(&DeviceId::new("device-observer"))
+            .and_then(|peer| peer.confirmed_position.as_ref()),
+        Some(&current_position)
+    );
     let prepared_add_devices = persisted
         .pending_effects
         .values()
@@ -632,11 +711,45 @@ async fn two_page_transfer_persists_each_page_and_applies_only_when_complete() {
 }
 
 #[tokio::test]
+async fn final_page_commit_failure_preserves_staged_state_and_does_not_wake_maintenance() {
+    let (loaded, peer_device_id, pages) = two_page_extension();
+    let repository = Arc::new(MemoryLedgerRepository {
+        loaded: Mutex::new(loaded),
+        commits: AtomicUsize::new(0),
+        fail_on_commit: Some(2),
+    });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    ));
+    let wake = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let handler = HandleMembershipHistoryMessageUseCase::new_with_wake(ledger, wake.clone());
+    let source = AuthenticatedMember::new(peer_device_id.clone());
+
+    handler.execute(&source, pages[0].clone()).await.unwrap();
+    let staged = repository.load().await.unwrap();
+    let error = handler
+        .execute(&source, pages[1].clone())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        HandleMembershipHistoryMessageError::Unavailable
+    ));
+    assert_eq!(repository.commits.load(Ordering::SeqCst), 1);
+    assert_eq!(wake.0.load(Ordering::SeqCst), 0);
+    assert_eq!(repository.load().await.unwrap(), staged);
+}
+
+#[tokio::test]
 async fn out_of_order_page_requests_the_missing_page_without_persisting() {
     let (loaded, peer_device_id, pages) = two_page_extension();
     let repository = Arc::new(MemoryLedgerRepository {
         loaded: Mutex::new(loaded),
         commits: AtomicUsize::new(0),
+        fail_on_commit: None,
     });
     let ledger = Arc::new(MembershipLedger::new(
         repository.clone(),
@@ -684,6 +797,7 @@ async fn unknown_sender_can_stage_a_bounded_page_but_cannot_commit_unrelated_his
     let repository = Arc::new(MemoryLedgerRepository {
         loaded: Mutex::new(loaded),
         commits: AtomicUsize::new(0),
+        fail_on_commit: None,
     });
     let ledger = Arc::new(MembershipLedger::new(
         repository.clone(),

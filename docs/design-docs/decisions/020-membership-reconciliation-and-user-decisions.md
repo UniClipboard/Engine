@@ -18,6 +18,7 @@
   `docs/exec-plans/completed/017-pairing-as-workspace-admission.md`、
   `docs/design-docs/features/019-device-specific-convergence-waiting-status.md`、
   `docs/exec-plans/completed/023-durable-membership-proof-and-admission-activation.md`、
+  `docs/exec-plans/completed/029-durable-membership-history-anti-entropy.md`、
   `docs/architecture/architecture-bible.md`
 
 ## 1. Overview
@@ -576,6 +577,8 @@ Relationship: 不保存第二份成员状态，不逐消息编排核对协议。
 - [x] 分区、重启、乱序、重复、同时决定和永久离线矩阵均有实际验证证据。
 
 ### 当前验证记录
+
+- 2026-09-02 完成规格 029 的持久反熵验收：确认水位只由认证 ACK 或完整 suffix 的来源提交推进，逐 peer 欠账、retry 与公平游标随 membership ledger 整体 AEAD 持久化；入站历史、effects、来源关系与 fan-out 欠账同事务提交。Desktop C0-C5 真实 daemon/CLI/Iroh 多进程矩阵 8 项通过，完整 workspace 测试及真实 SQLite 故障注入通过；实体设备和 Release bundle 因本阶段未提供而明确记为跳过。
 
 - 主动联系统一先发送轻量确认；双方摘要一致时不发送完整历史，发现差异后才按请求补齐有界记录。
 - 同一对端的版本识别和当前核对共用一个逐设备串行入口；连续上线不会产生并行流程。
