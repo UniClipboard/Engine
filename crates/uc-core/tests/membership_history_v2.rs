@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use sha2::{Digest, Sha256};
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
@@ -8,8 +10,8 @@ use uc_core::membership::{
     MembershipBranchRecoveryError, MembershipBranchRecoveryPackageV1,
     MembershipBranchTransitionPhaseV1, MembershipBranchTransitionV1, MembershipConflictChoice,
     MembershipConflictId, MembershipConflictPolicy, MembershipCredential, MembershipDecisionV2,
-    MembershipEventId, MembershipEventV2, MembershipHistoryMessage, MembershipOperationV2,
-    RemovalDecision, VersionedMembershipHistory, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
+    MembershipEventId, MembershipEventV2, MembershipOperationV2, RemovalDecision,
+    VersionedMembershipHistory, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
     ED25519_SIGNATURE_ALGORITHM_V1, MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
     MEMBERSHIP_DECISION_FORMAT_V2, MEMBERSHIP_EVENT_FORMAT_V2,
 };
@@ -358,6 +360,156 @@ fn sibling_histories_produce_order_independent_conflict_and_branch_ids() {
 }
 
 #[test]
+fn twenty_fixed_conflict_chaos_seeds_preserve_model_invariants() {
+    let verifier = DeterministicSignatureVerifier;
+    let (base, a, _, _, add_b) = history_with_a_and_b(true);
+    let mut left = base.clone();
+    let mut right = base;
+    let left_admission = admission("device-chaos-left", credential(0x31));
+    let right_admission = admission("device-chaos-right", credential(0x32));
+    let left_event = event(
+        &left,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::AddDevice {
+            admission: left_admission.clone(),
+        },
+        0x31,
+        &verifier,
+    );
+    let right_event = event(
+        &right,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::AddDevice {
+            admission: right_admission.clone(),
+        },
+        0x32,
+        &verifier,
+    );
+    left.verify_and_receive_event(left_event.clone(), &verifier)
+        .expect("left chaos branch verifies");
+    left.verify_and_record_activation_receipt(
+        activation_receipt(&left_event, &left_admission, &verifier),
+        &verifier,
+    )
+    .expect("left chaos activation verifies");
+    right
+        .verify_and_receive_event(right_event.clone(), &verifier)
+        .expect("right chaos branch verifies");
+    right
+        .verify_and_record_activation_receipt(
+            activation_receipt(&right_event, &right_admission, &verifier),
+            &verifier,
+        )
+        .expect("right chaos activation verifies");
+
+    for seed in [
+        0x0000_0000_0000_0001,
+        0x0000_0000_0000_0002,
+        0x0000_0000_0000_0003,
+        0x0000_0000_0000_0005,
+        0x0000_0000_0000_0008,
+        0x0000_0000_0000_000d,
+        0x0000_0000_0000_0015,
+        0x0000_0000_0000_0022,
+        0x0000_0000_0000_0037,
+        0x0000_0000_0000_0059,
+        0x9e37_79b9_7f4a_7c15,
+        0xbf58_476d_1ce4_e5b9,
+        0x94d0_49bb_1331_11eb,
+        0xd1b5_4a32_d192_ed03,
+        0x8538_eb54_0f1c_6f43,
+        0xda94_2042_e4dd_58b5,
+        0xa24b_aed4_963e_e407,
+        0x9fb2_1c65_1e98_df25,
+        0xc13f_a9a9_02a6_328f,
+        0x91e1_0da5_c79e_7b1d,
+    ] {
+        run_conflict_chaos_seed(seed, &left, &right, a.facts.member_instance);
+    }
+}
+
+fn run_conflict_chaos_seed(
+    seed: u64,
+    left: &VersionedMembershipHistory,
+    right: &VersionedMembershipHistory,
+    local_member: uc_core::membership::MemberInstanceId,
+) {
+    let expected = MembershipConflictPolicy::describe(left, right, local_member)
+        .expect("chaos fixture contains one selectable conflict");
+    let expected_branches = expected.branch_ids();
+    assert_ne!(left.active_members(), right.active_members());
+    assert_eq!(left.active_members().len(), right.active_members().len());
+
+    let mut deliveries = [false, true, false, true, true, false, true, false];
+    let mut state = seed;
+    for index in (1..deliveries.len()).rev() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let selected = (state as usize) % (index + 1);
+        deliveries.swap(index, selected);
+    }
+
+    let mut observed = BTreeMap::new();
+    for remote_first in deliveries {
+        let description = if remote_first {
+            MembershipConflictPolicy::describe(right, left, local_member)
+        } else {
+            MembershipConflictPolicy::describe(left, right, local_member)
+        }
+        .expect("every delivery order describes the same conflict");
+        assert_eq!(description.conflict_id, expected.conflict_id);
+        assert_eq!(description.branch_ids(), expected_branches);
+        observed
+            .entry(description.conflict_id)
+            .or_insert_with(|| description.branch_ids());
+    }
+    assert_eq!(observed.len(), 1, "duplicates never create another issue");
+
+    let target_branch = expected_branches[(seed as usize) & 1];
+    assert_eq!(
+        expected.choice_for(target_branch),
+        Some(MembershipConflictChoice::ActiveMemberRecovery)
+    );
+    let transition_id =
+        MembershipBranchTransitionV1::derive_id(expected.conflict_id, target_branch);
+    assert_eq!(
+        transition_id,
+        MembershipBranchTransitionV1::derive_id(expected.conflict_id, target_branch)
+    );
+    let mut source_generation = [0u8; 16];
+    source_generation[..8].copy_from_slice(&seed.to_be_bytes());
+    source_generation[15] = 1;
+    let mut target_generation = source_generation;
+    target_generation[15] = 2;
+    let mut transition = MembershipBranchTransitionV1::new(
+        transition_id,
+        expected.conflict_id,
+        target_branch,
+        source_generation,
+        target_generation,
+    )
+    .expect("seed produces a valid control-generation transition");
+    for phase in [
+        MembershipBranchTransitionPhaseV1::SourceBackedUp,
+        MembershipBranchTransitionPhaseV1::TargetVerified,
+        MembershipBranchTransitionPhaseV1::TargetStaged,
+        MembershipBranchTransitionPhaseV1::Promoted,
+        MembershipBranchTransitionPhaseV1::RuntimeRestored,
+        MembershipBranchTransitionPhaseV1::Completed,
+    ] {
+        transition = transition
+            .advance(phase)
+            .expect("chaos scheduling cannot skip a durable phase");
+    }
+    assert!(transition
+        .advance(MembershipBranchTransitionPhaseV1::Prepared)
+        .is_none());
+}
+
+#[test]
 fn conflict_choice_distinguishes_active_removed_and_absent_member_instances() {
     let verifier = DeterministicSignatureVerifier;
     let (base, a, b, _, add_b) = history_with_a_and_b(true);
@@ -540,6 +692,26 @@ fn branch_recovery_package_binds_recipient_branch_expiry_and_authorization() {
             &verifier,
         ),
         Err(MembershipBranchRecoveryError::WrongRecipient)
+    );
+    assert_eq!(
+        package.validate(
+            MembershipConflictId::from_bytes([0xb1; 32]),
+            branch_id,
+            recipient.facts.member_instance,
+            1_000,
+            &verifier,
+        ),
+        Err(MembershipBranchRecoveryError::WrongConflict)
+    );
+    assert_eq!(
+        package.validate(
+            conflict_id,
+            MembershipBranchId::from_bytes([0xb2; 32]),
+            recipient.facts.member_instance,
+            1_000,
+            &verifier,
+        ),
+        Err(MembershipBranchRecoveryError::WrongBranch)
     );
     assert_eq!(
         package.validate(

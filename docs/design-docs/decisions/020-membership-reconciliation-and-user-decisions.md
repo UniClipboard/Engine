@@ -575,10 +575,21 @@ Relationship: 不保存第二份成员状态，不逐消息编排核对协议。
   `UpgradeRequired`，也不会改变现有成员事实。
 - [x] 双方确认 `1.1` 后，当前成员历史核对流程是唯一主动流程，低于 `1.1` 的资料仍保留到单独结束兼容支持为止。
 - [x] 分区、重启、乱序、重复、同时决定和永久离线矩阵均有实际验证证据。
+- [x] sibling 分支只接受逐设备明确选择；冲突、分支和 transition 标识与证据到达顺序无关，竞争相反选择只有一个
+  不可变 intent 成功。
+- [x] Active chooser 只切换完整 Space control generation，profile data generation、历史密文、profile SQLite/blob
+  与 keyslot generation 保持不变；Removed chooser 只能经新邀请获得新成员实例。
+- [x] 分支恢复包精确绑定 conflict、branch、recipient、五分钟期限、签名和一次性 nonce；失败不安装成员、安全
+  或 generation 状态。
 
 ### 当前验证记录
 
 - 2026-09-02 完成规格 029 的持久反熵验收：确认水位只由认证 ACK 或完整 suffix 的来源提交推进，逐 peer 欠账、retry 与公平游标随 membership ledger 整体 AEAD 持久化；入站历史、effects、来源关系与 fan-out 欠账同事务提交。Desktop C0-C5 真实 daemon/CLI/Iroh 多进程矩阵 8 项通过，完整 workspace 测试及真实 SQLite 故障注入通过；实体设备和 Release bundle 因本阶段未提供而明确记为跳过。
+
+- 2026-09-02 完成规格 030 的分支选择与复杂拓扑验收：F0-F7 真实 Engine/Iroh 场景、F8-F13 分层故障矩阵及
+  20 个固定 chaos seed 全部通过；真实 V3 control transition 在每个阶段的副作用完成后、ledger phase 提交前
+  模拟崩溃并由新 owner 幂等重放，profile 数据面和 keyslot 保持不变。最终 Engine 源码重建 Desktop 宿主后，
+  029 C0-C5 串行回归 8/8 通过；完整 workspace 与交付门禁通过。实体设备和 Release bundle 明确记为跳过。
 
 - 主动联系统一先发送轻量确认；双方摘要一致时不发送完整历史，发现差异后才按请求补齐有界记录。
 - 同一对端的版本识别和当前核对共用一个逐设备串行入口；连续上线不会产生并行流程。
@@ -645,6 +656,10 @@ Relationship: 不保存第二份成员状态，不逐消息编排核对协议。
    不授予普通资格；共同保护状态和已应用历史都覆盖保留成员后才结束提升，不从旧成员表补造历史。
 6. 历史作者验证材料的长期保存，以及新 AddDevice 从候选到普通权限的完成边界，由待实施的规格 023
    细化；本 ADR 的离线分支、移除决定和分叉规则保持不变。
+7. sibling 冲突不合并也不自动选主；产品只提交 issue 与目标分支一次，Application 保存不可变选择并独立恢复。
+8. 采用远端分支只切换完整 control generation，不复制或重封装 profile payload；历史保护组继续由 profile vault
+   按稳定 key identity 解析。
+9. 目标分支已移除本机成员实例时返回 `RePairingRequired`，不安装目标安全材料；后续 Join 必须创建新成员实例。
 
 产品如何呈现移除发起方、目标设备和影响仍属于界面设计，不改变本 ADR 已实施的事实、动作和安全边界。
 

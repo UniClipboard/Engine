@@ -390,10 +390,11 @@ Application 内部构造 query/index/projection/maintenance runtime；删除 Eng
 
 ## Slice 8：Space assembly（有门禁）
 
-**前置条件**： [029](029-durable-membership-history-anti-entropy.md) 完成并记录设备矩阵；
-[030](030-membership-conflict-resolution-and-chaos-validation.md) 删除旧 payload rewrap/content-key-directory
-假设，按 [033](../completed/033-immutable-content-protection-context.md) 的稳定 profile data generation 与
-control-only Space generation 重基线。
+**前置条件**： [029](../completed/029-durable-membership-history-anti-entropy.md) 与
+[030](../completed/030-membership-conflict-resolution-and-chaos-validation.md) 已完成并记录验证矩阵；030 已删除旧
+payload rewrap/content-key-directory 假设，并按
+[033](../completed/033-immutable-content-protection-context.md) 的稳定 profile data generation 与 control-only
+Space generation 完成重基线。
 
 1. Application factory 内部构造 `SpaceApplicationDeps` 与 `SpaceSessionActivityDeps`。
 2. `SpaceApplication` 继续唯一负责 admission、membership、anti-entropy 和 recovery。
@@ -531,6 +532,6 @@ receive/clipboard/space 行为追加真实 SQLite、Iroh loopback 和 Engine 双
 - [Application 分层规则](../../design-docs/layers/application.md)
 - [错误处理与转换](../../design-docs/error-handling.md)
 - [文件传输 port 拆分 ADR](../../design-docs/decisions/009-file-transfer-port-split.md)
-- [029 持久化成员历史反熵](029-durable-membership-history-anti-entropy.md)
-- [030 成员分叉选择与复杂拓扑验证](030-membership-conflict-resolution-and-chaos-validation.md)
+- [029 持久化成员历史反熵](../completed/029-durable-membership-history-anti-entropy.md)
+- [030 成员分叉选择与复杂拓扑验证](../completed/030-membership-conflict-resolution-and-chaos-validation.md)
 - [033 不可变内容保护上下文](../completed/033-immutable-content-protection-context.md)

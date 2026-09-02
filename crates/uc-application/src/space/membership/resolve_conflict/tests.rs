@@ -322,3 +322,100 @@ async fn recoverable_remote_choice_persists_one_stable_transition_intent() {
     );
     assert_eq!(repeated.revision, first.revision);
 }
+
+#[tokio::test]
+async fn concurrent_opposite_choices_commit_exactly_one_immutable_intent() {
+    let (repository, use_case, conflict_id, local_branch_id, remote_branch_id) =
+        fixture(MembershipConflictChoice::ActiveMemberRecovery);
+    let use_case = Arc::new(use_case);
+
+    let (local_result, remote_result) = tokio::join!(
+        use_case.execute(ResolveMembershipConflictInput {
+            conflict_id,
+            target_branch_id: local_branch_id,
+        }),
+        use_case.execute(ResolveMembershipConflictInput {
+            conflict_id,
+            target_branch_id: remote_branch_id,
+        }),
+    );
+    let local_result = local_result.unwrap();
+    let remote_result = remote_result.unwrap();
+    assert!(matches!(
+        (&local_result, &remote_result),
+        (
+            ResolveMembershipConflictResult::Completed { .. },
+            ResolveMembershipConflictResult::StateChanged { .. }
+        ) | (
+            ResolveMembershipConflictResult::StateChanged { .. },
+            ResolveMembershipConflictResult::Pending { .. }
+        )
+    ));
+    let persisted = repository.load().await.unwrap();
+    let conflict = &persisted.membership_conflicts[&conflict_id];
+    assert!(matches!(
+        conflict.selected_branch_id,
+        Some(selected) if selected == local_branch_id || selected == remote_branch_id
+    ));
+    assert_eq!(persisted.revision, 12);
+}
+
+#[tokio::test]
+async fn a_later_distinct_conflict_allows_another_explicit_branch_choice() {
+    let (repository, use_case, first_conflict_id, local_branch_id, _) =
+        fixture(MembershipConflictChoice::ActiveMemberRecovery);
+    assert!(matches!(
+        use_case
+            .execute(ResolveMembershipConflictInput {
+                conflict_id: first_conflict_id,
+                target_branch_id: local_branch_id,
+            })
+            .await
+            .unwrap(),
+        ResolveMembershipConflictResult::Completed { .. }
+    ));
+
+    let second_conflict_id = MembershipConflictId::from_bytes([0x91; 32]);
+    let second_remote_branch_id = MembershipBranchId::from_bytes([0x92; 32]);
+    {
+        let mut record = repository.0.lock().unwrap();
+        let detected_at_revision = record.revision;
+        record.membership_conflicts.insert(
+            second_conflict_id,
+            MembershipConflictRecord {
+                conflict_id: second_conflict_id,
+                local_branch_id,
+                remote_branch_id: second_remote_branch_id,
+                local_choice: MembershipConflictChoice::ActiveMemberRecovery,
+                remote_choice: MembershipConflictChoice::ActiveMemberRecovery,
+                evidence_peer_device_ids: BTreeSet::from([DeviceId::new("later-peer")]),
+                detected_at_revision,
+                status: MembershipConflictStatus::Unresolved,
+                selected_branch_id: None,
+                transition_id: None,
+            },
+        );
+    }
+
+    assert_eq!(
+        use_case
+            .execute(ResolveMembershipConflictInput {
+                conflict_id: second_conflict_id,
+                target_branch_id: second_remote_branch_id,
+            })
+            .await
+            .unwrap(),
+        ResolveMembershipConflictResult::Pending {
+            conflict_id: second_conflict_id,
+        }
+    );
+    let persisted = repository.load().await.unwrap();
+    assert_eq!(
+        persisted.membership_conflicts[&first_conflict_id].status,
+        MembershipConflictStatus::Completed
+    );
+    assert_eq!(
+        persisted.membership_conflicts[&second_conflict_id].selected_branch_id,
+        Some(second_remote_branch_id)
+    );
+}

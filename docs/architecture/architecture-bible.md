@@ -365,11 +365,12 @@ Space 已锁定、V2 历史缺失、身份映射矛盾或观察资料不完整�
 MasterKey AEAD 加密，并在同一事务比较修订号和历史摘要；不得恢复旧成员仓储、旧准入仓储或第二份产品
 修订。所有新加入、跨 Space 切换、分页接收、效果推进和关系确认都经过同一提交能力。
 
-成员分支恢复由 `RecoverMembershipConflictUseCase` 完整负责。恢复包验证并建立 transition 后，维护轮次每次
-只调用一次 generation transition 能力并提交一个直接后继阶段。Infra 在 `Promoted` 前先完成来源备份、
-recipient MLS 与内容密钥解封验证、目标数据库快照、安全材料和目标成员投影；随后原子提升 active manifest，
-重绑数据库、blob root 与内存安全会话，最后清理来源 generation。任何阶段失败都从加密 ledger checkpoint
-重试；manifest 提升前不得修改活动数据库，提升后不得回退来源 generation。
+成员分支恢复由 `RecoverMembershipConflictUseCase` 完整负责。恢复包验证并建立 transition 后，Application 在
+单轮内顺序推进所有当前可完成的直接后继阶段，并在每一步后提交加密 ledger checkpoint。Infra 在 `Promoted`
+前从一致性来源 control snapshot 准备并验证完整目标 control generation，恢复 recipient MLS、成员关系与目标
+protection group catalog；随后原子提升 active manifest，只重绑 control pool 与内存安全会话，最后清理来源
+control generation。profile data generation、profile SQLite/blob、历史密文与 keyslot generation 全程不变。
+任何阶段失败都只向前幂等重试；manifest 提升前不得修改活动 control generation，提升后不得回退来源。
 
 旧 profile 不恢复成员资格。重建流程只保留允许的本机资料，清空旧关系和未完成成员工作，再建立新的
 单设备 V2 根。任何旧成员表、可信关系、地址、在线状态或安全组资料都不能让旧设备重新进入普通范围。
@@ -797,6 +798,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 日期 | 主题 | 长期结论 |
 | --- | --- | --- |
 | 2026-09-02 | Engine 关闭期限所有权 | Engine shutdown 从用户总期限预留 100ms 给外层完成通知，runtime task registry 使用较早期限收口，避免 registry 到点 abort 与外层 timeout 同刻竞争；外层仍严格受原总期限约束。 |
+| 2026-09-02 | 030 分支选择与故障矩阵验收 | sibling 分支只由逐设备明确选择推进；相反并发选择以 ledger CAS 只保存一个不可变 intent，后续不同 conflict 可独立选择。V3 branch transition 六个副作用阶段均验证“副作用完成、phase 提交前崩溃”后的新 owner 幂等重放，profile data generation、SQLite/blob 与 keyslot 不变；F0-F7 真实 Engine/Iroh、F8-F13 分层矩阵、20 个固定 seed 及 029 C0-C5 回归全部通过。实体设备和 Release bundle 本阶段跳过。 |
 | 2026-09-02 | 031 wiring inventory 删除 | `AppDeps` 不再保存只在 Engine 组装期消费的 portable current-space identity，`SecurityPorts` 不再保存 current profile 与 blob cipher；真实 adapter 继续在 composition root 局部注入其消费者。仓库检查禁止这三个 wiring-only 字段回流。 |
 | 2026-09-02 | 031 实施基线恢复 | Slice 1 只修正两处已被现有稳定合同取代的陈旧测试期望：已移除设备继续不可同步，统一设备组查询继续返回 `DeviceGroupChoices`。本轮无生产行为或架构变化。 |
 | 2026-09-02 | Application 依赖表面深化重基线 | ADR-018 继续定义五个 Application 领域归属，规格 031 取代旧 018 的剩余实施计划。重构以唯一 Application assembly 和具体 `ApplicationRuntime` 隐藏对象图、启动回滚与关闭顺序；Engine 继续选择 Iroh/Infra adapter 和观测 decorator。Search 与 Space 分离，Clipboard reconcile 成为 worker 前置门禁，Space 等待 029 完成及 030 按 033 control-only generation 重基线。本轮只更新计划，无生产行为变化。 |
@@ -847,17 +849,17 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-30 | Admission 重启诊断覆盖 | 为存储 generation 选择、会话安全材料恢复、Sponsor 安全与成员 ledger 提交、runtime Space transition 重装增加长期结构化 tracing；仅记录阶段、epoch、revision 和数量，不记录身份、路径或业务负载。 |
 | 2026-08-30 | 四节点离线历史收敛 | Sponsor 把既有成员群组更新绑定进签名新增事件；effect executor 按历史因果深度恢复成员事实与安全状态。Roster 展示有效但关系待确认的成员，通信门仍失败关闭。Desktop A-B-C-D 中间节点离线场景已通过成员名单、重启和 A/D 双向正文验证。 |
 | 2026-08-30 | 五节点树型历史收敛 | Desktop A→B、A→C、B→D、C→E 验证不同 Sponsor 支路保持同一单父历史；中间节点离线时 D/E 可先收敛五成员与安全状态并双向传输，全部恢复后五端名单一致。 |
-| 2026-08-30 | 成员分叉选择规格 | 新增规格 030：分叉历史禁止直接合并或自动选主；用户选择一个完整目标分支，Application 通过可恢复 generation transition 切换本机。目标分支已移除本机时必须重新配对。复杂拓扑采用确定性通信矩阵、阶段故障与可重放 chaos seed 验收。当前仅完成设计，生产入口尚未实现。 |
+| 2026-08-30 | 成员分叉选择规格 | 规格 030 固定：分叉历史禁止直接合并或自动选主；用户选择一个完整目标分支，Application 通过可恢复 control-generation transition 切换本机。目标分支已移除本机时必须重新配对。复杂拓扑采用确定性通信矩阵、阶段故障与可重放 chaos seed 验收；生产入口与完整矩阵已于 2026-09-02 验收完成。 |
 | 2026-08-30 | 成员分叉稳定标识规则 | Core `MembershipConflictPolicy` 从两条已验证且共享激活基线的 sibling 历史生成与到达顺序、transport peer 无关的 conflict/branch id，并只按目标完整历史中的同一成员实例状态返回可恢复或需要重新配对；Same、ancestor 与缺席实例均不可选择。 |
 | 2026-08-30 | 成员冲突加密账本 | 冲突记录、多个证据来源、不可变用户选择和 transition id 进入现有 MembershipLedger 整体 MasterKey AEAD 载荷，与 peer `Diverged` 关系共用同一 revision/CAS 提交；诊断只暴露阶段和计数。 |
 | 2026-08-30 | 成员冲突选择入口 | Application `ResolveMembershipConflictUseCase` 串行并以 ledger CAS 保存一次用户选择；保留本机分支直接完成，目标已移除本机时只返回重新配对，远端可恢复分支保存 Pending 等待后台 transition。重复相同选择幂等，相反或竞争选择返回 `StateChanged`。 |
-| 2026-08-30 | 成员分支切换状态机 | Core `MembershipBranchTransitionV1` 固定七个只前进的持久阶段并绑定 conflict、目标分支及不同 source/target generation；远端 Active 选择以 conflict/target 摘要产生唯一 transition id，随加密 ledger 保存，重复调用不创建第二个 intent。 |
-| 2026-08-30 | 成员分支恢复包验证 | Core 恢复包验证重新解码并验签目标完整历史，重算目标 branch，并要求 recipient 与授权者均为目标 Active 成员；包精确绑定 conflict、branch、recipient、expiry 和 nonce，验证失败不返回 MLS 或内容密钥材料。nonce 消费状态由后续 Application ledger CAS 持久管理。 |
+| 2026-08-30 | 成员分支切换状态机 | Core `MembershipBranchTransitionV1` 固定七个只前进的持久阶段并绑定 conflict、目标分支及不同 source/target control generation；远端 Active 选择以 conflict/target 摘要产生唯一 transition id，随加密 ledger 保存，重复调用不创建第二个 intent。V1 的 `SourceBackedUp` 只保留稳定 phase 名称，V3 实际不备份 profile payload。 |
+| 2026-08-30 | 成员分支恢复包验证 | Core 恢复包验证重新解码并验签目标完整历史，重算目标 branch，并要求 recipient 与授权者均为目标 Active 成员；包精确绑定 conflict、branch、recipient、五分钟 expiry 和 nonce，验证失败不返回 MLS 或目标 protection group catalog material。nonce 消费状态由 Application ledger CAS 持久管理。 |
 | 2026-08-30 | 成员冲突恢复协调 | Application coordinator 是恢复包获取、完整验证和无副作用 `Prepared` transition 计划的唯一流程入口；接受包时在一次加密 ledger CAS 中同时消费 nonce、保存 transition 并推进 conflict。重复执行不再获取包，跨 conflict nonce 重放不产生持久化副作用。 |
-| 2026-08-30 | 成员冲突维护接线 | membership maintenance 在 effects 恢复后、group update 和受限交付前统一驱动 conflict recovery，且 peer 上线也会触发；损坏状态阻断后续权限扩展。真实 Iroh recovery 与 generation adapter 接入前，Engine 明确保持 Pending，不借普通反熵或 LAN 兼容线降级。 |
-| 2026-08-31 | 分支切换准备 adapter | Infra 从 MasterKey AEAD 保护的 active generation manifest 读取真实 source database generation，并为目标分支生成独立随机 generation；该 adapter 只返回 `Prepared` 计划，不创建目录、不覆盖来源、不提升 manifest。Engine 不再使用 transition deferred adapter。 |
+| 2026-08-30 | 成员冲突维护接线 | membership maintenance 在 effects 恢复后、group update 和受限交付前统一驱动 conflict recovery，且 peer 上线也会触发；损坏状态阻断后续权限扩展。Engine 使用真实 Iroh recovery 与 V3 control-generation adapter；Pending 只表示依赖暂不可用，不借普通反熵或 LAN 兼容线降级。 |
+| 2026-08-31 | 分支切换准备 adapter | Infra 从 MasterKey AEAD 保护的 V3 active manifest 读取来源 control generation，并为目标分支生成独立随机 control generation；该 adapter 只返回 `Prepared` 计划，不创建目录、不覆盖来源、不提升 manifest。profile data generation 与 keyslot generation 保持不变。 |
 | 2026-08-31 | 分支恢复包签发入口 | Application issuer 从加密 ledger 重新验证目标是本机当前完整分支、认证请求设备对应 Active recipient、签发者仍为 Active；Infra 只能提供已对 recipient 密封的 MLS 与内容密钥材料。issuer 生成短期 nonce 包并使用当前成员凭据授权签名，认证或资格失败时不调用材料能力。 |
-| 2026-08-31 | MLS 分支恢复密码学边界 | Active recipient 不接收目标设备的 MLS 私有 snapshot；目标端只导出带 ratchet tree 的签名 GroupInfo，recipient 使用自身既有签名私钥发起 external commit 并替换相同凭据旧 leaf。目标端应用 commit 后双方才共享新 epoch exporter wrapping key，内容密钥目录必须在该阶段密封，因此恢复传输采用认证的两阶段握手；新增恢复错误保留底层 source，同时以脱敏 `Debug` 隐藏协议内部信息。 |
+| 2026-08-31 | MLS 分支恢复密码学边界 | Active recipient 不接收目标设备的 MLS 私有 snapshot；目标端只导出带 ratchet tree 的签名 GroupInfo，recipient 使用自身既有签名私钥发起 external commit 并替换相同凭据旧 leaf。目标端应用 commit 后双方才共享新 epoch exporter wrapping key，目标当前 protection group catalog material 必须在该阶段密封，因此恢复传输采用认证的两阶段握手；新增恢复错误保留底层 source，同时以脱敏 `Debug` 隐藏协议内部信息。 |
 | 2026-08-31 | 分支恢复认证服务端 | recovery ALPN 复用进程唯一 Iroh endpoint，并把连接公钥映射为已知 source device；GroupInfo begin 与 external commit submit 都独立进入 Application issuer 重新验证目标分支和 Active recipient。未知连接、畸形帧、错误方向或资格失败统一拒绝，handler 不持有跨往返授权状态。 |
 | 2026-08-31 | 分支恢复 Iroh wire contract | 专用 P2P ALPN 使用有界两阶段帧交换 GroupInfo、recipient external commit 和最终恢复包；两个请求阶段都绑定 conflict、target branch 与 recipient，连接身份仍须由 Application 对目标历史复核。帧和错误 Debug 不输出绑定标识或密码学负载，解码失败保留 source；该协议不允许降级到 LAN 兼容线。 |
 | 2026-08-31 | 分支恢复事务持久化 | Application 将 recipient/target 两侧的 staged 密码学状态、external commit 摘要和幂等恢复包收进单一恢复 session 状态机，并随 membership ledger 整体 MasterKey AEAD 加密。session 以 transition id 建索引、绑定 conflict/branch/recipient，只允许单调且幂等推进；Space 重建原子清除未完成事务。 |
@@ -868,8 +870,8 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-31 | Application 依赖表面审计 | 扫描 `deps.rs` 的 port 定义、实现、装配、生产调用、测试与历史后，确认小 port 原则本身仍成立，复杂度主要由 Application 对象图外移到 Engine、宽 bundle 分发及步骤级编排造成；形成规格 031 的 clean-cutover 收敛计划，并识别旧 admission/pairing、receive projection 与 wiring-only 字段的删除候选。本轮只更新计划，无生产架构行为变化。 |
 | 2026-08-31 | Space transition 内部重构规划 | 规格 032 将超大 Infra transition 文件规划为稳定私有门面、普通准入、目标工作区、generation store、密文重包、Reset、成员分支和耐久文件能力；公开构造、四个 Application port、active manifest 唯一生效点及持久密文格式均保持不变。本轮只形成规划，无生产架构行为变化。 |
 | 2026-08-31 | Target 恢复提交事务 | Application issuer 将 target material 能力拆成无副作用 prepare 与幂等 commit：先签署 package 并连同 external commit digest、staged security material 保存为 TargetPrepared，随后提交安全状态并标记 TargetCommitted。重试按同一事务键和 commit digest 返回缓存 package；TargetPrepared 重启只续做 commit，不重复计算或签发。 |
-| 2026-08-31 | Target 恢复材料 adapter | `DefaultSpaceAccessAdapter` 唯一负责在当前 MLS 快照上应用 recipient external commit、派生下一 epoch 内容密钥、以共享 exporter wrapping key 密封目录与恢复确认，并以无副作用 prepare/幂等 commit 暴露给 Application。staged `SpaceKeyMaterial` 只进入现有 MasterKey AEAD recovery session；commit 重新验证 Space、MLS、目录和单步 epoch 后才持久化安装。Engine 已删除 target deferred adapter，只负责注入该窄端口。 |
-| 2026-08-31 | 成员分支 generation 切换 | Application recovery coordinator 继续负责七阶段 transition，每轮只推进并 CAS 保存一个后继；Infra 复用 durable Space transition 组件完成来源备份、recipient 材料解封、目标 SQLite/安全状态/成员投影 staging、manifest 提升、运行期重绑与旧 generation 清理。真实 MLS + SQLite 测试验证目标 manifest、历史和内容密钥 epoch 同时切换，Phase 4 完成。 |
+| 2026-08-31 | Target 恢复材料 adapter | `DefaultSpaceAccessAdapter` 唯一负责在当前 MLS 快照上应用 recipient external commit、派生下一 epoch 内容密钥、以共享 exporter wrapping key 密封目标 protection group catalog material 与恢复确认，并以无副作用 prepare/幂等 commit 暴露给 Application。staged `SpaceKeyMaterial` 只进入现有 MasterKey AEAD recovery session；commit 重新验证 Space、MLS、catalog 和单步 epoch 后才持久化安装。Engine 已删除 target deferred adapter，只负责注入该窄端口。 |
+| 2026-08-31 | 成员分支 generation 切换 | Application recovery coordinator 负责七阶段 transition，并顺序推进、CAS 保存每个直接后继；Infra 以一致性 control snapshot 构造目标 control generation，完成 recipient 材料解封、目标安全状态/成员投影 staging、manifest 提升、control runtime 重绑与旧 control generation 清理。真实 MLS + SQLite 测试验证目标 manifest、历史和内容密钥 epoch 同时切换，profile SQLite/blob 与 keyslot 不变。 |
 | 2026-08-31 | 统一设备组选择入口 | 将待定成员变更与 sibling branch 冲突合并为 `QueryDeviceGroupChoices` / `ChooseDeviceGroup`；Application 负责一致 revision 校验和内部路由，Engine、UniFFI、HarmonyOS 与移动 probe 删除四个旧操作入口并只保留薄映射。 |
 | 2026-08-31 | Phase 6 拓扑验收驱动器 | Engine 集成测试新增声明式 `Start/Create/Join/AssertSnapshot` tracer bullet；驱动器仅通过稳定 `Engine::execute(Operation)` 推进和观察多节点，不读取内部 ledger。本轮没有生产架构语义变化。 |
 | 2026-08-31 | Phase 6 成员诊断接缝 | `dev-tools` 增加只读成员诊断 operation，由 Application 一次性返回 branch/head、group epoch、有效成员数及待处理 conflict/effect/transition 阶段；Engine 只做脱敏映射。该入口不进入默认构建和移动绑定，声明式拓扑测试用它验证密码学与恢复状态，不直接读取内部 ledger。 |
@@ -983,7 +985,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 - `docs/exec-plans/completed/027-application-space-membership-one-shot-rewrite.md`：Application Space 成员关系目标对象、接口、流程、删除清单和验收标准。
 - `docs/exec-plans/completed/028-single-space-admission-protocol.md`：全新单一 Space 准入协议、跨层接入、删除清单和完整验收标准。
 - `docs/exec-plans/completed/029-durable-membership-history-anti-entropy.md`：逐 peer 确认水位、持久传播欠账、公平重试和复杂拓扑验收。
-- `docs/exec-plans/active/030-membership-conflict-resolution-and-chaos-validation.md`：成员分叉选择、恢复与确定性复杂拓扑验收。
+- `docs/exec-plans/completed/030-membership-conflict-resolution-and-chaos-validation.md`：成员分叉选择、恢复与确定性复杂拓扑验收。
 - `docs/exec-plans/active/031-application-dependency-surface-deepening.md`：Application 对象图深化、生命周期所有权、九切片顺序和实施门禁。
 - `docs/exec-plans/completed/032-admission-space-transition-internal-refactor.md`：断开 maintenance-only legacy 可达性、删除旧 V2 transition executor、私有化 upgrade source layout 并防止 payload rewrap 回流的实施记录。
 - `docs/exec-plans/completed/033-immutable-content-protection-context.md`：不可变保护上下文、profile 历史 content key vault、一次性 V3 密文升级及无历史重包 CrossSpace 实施记录。

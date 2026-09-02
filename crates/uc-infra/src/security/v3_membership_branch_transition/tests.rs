@@ -61,7 +61,7 @@ impl SecureStoragePort for MemorySecureStorage {
 }
 
 #[tokio::test]
-async fn v3_membership_branch_replaces_only_the_control_generation() {
+async fn v3_membership_branch_replays_every_control_phase_after_crash() {
     let directory = tempdir().unwrap();
     let root = directory.path().join("profile");
     let vault_root = root.join("vault");
@@ -297,13 +297,6 @@ async fn v3_membership_branch_replaces_only_the_control_generation() {
         Arc::clone(&generations),
         recipient_access,
     ));
-    let transitioner = V3MembershipBranchTransition::new(
-        control_pool,
-        Arc::clone(&manifests),
-        generations,
-        activation,
-    );
-
     let mut current = transition;
     for expected_phase in [
         MembershipBranchTransitionPhaseV1::SourceBackedUp,
@@ -313,7 +306,13 @@ async fn v3_membership_branch_replaces_only_the_control_generation() {
         MembershipBranchTransitionPhaseV1::RuntimeRestored,
         MembershipBranchTransitionPhaseV1::Completed,
     ] {
-        let next = transitioner
+        let first_transitioner = V3MembershipBranchTransition::new(
+            control_pool.clone(),
+            Arc::clone(&manifests),
+            Arc::clone(&generations),
+            Arc::clone(&activation),
+        );
+        let first = first_transitioner
             .advance_membership_branch_transition(AdvanceMembershipBranchTransitionInput {
                 transition: current.clone(),
                 recipient_staged_mls_state: recipient_recovery.staged_mls_state.clone(),
@@ -321,23 +320,46 @@ async fn v3_membership_branch_replaces_only_the_control_generation() {
                 target_history: history.clone(),
             })
             .await
-            .unwrap_or_else(|error| {
-                match error {
-                uc_application::deps::AdvanceMembershipBranchTransitionError::Unavailable {
-                    source,
-                }
-                | uc_application::deps::AdvanceMembershipBranchTransitionError::Invalid {
-                    source,
-                }
-                | uc_application::deps::AdvanceMembershipBranchTransitionError::RecoveryRequired {
-                    source,
-                } => panic!(
-                    "branch transition failed from {:?} to {expected_phase:?}: {source:#}",
-                    current.phase()
-                ),
-            }
-            });
+            .expect("first phase execution succeeds before the simulated crash");
+        assert_eq!(first.phase(), expected_phase);
+
+        // 故意不保存 first，模拟副作用完成后、ledger phase 提交前崩溃。新的 owner
+        // 必须从旧 phase 幂等重放，profile data generation 与既有密文始终不参与。
+        let restarted_transitioner = V3MembershipBranchTransition::new(
+            control_pool.clone(),
+            Arc::clone(&manifests),
+            Arc::clone(&generations),
+            Arc::clone(&activation),
+        );
+        let next = restarted_transitioner
+            .advance_membership_branch_transition(AdvanceMembershipBranchTransitionInput {
+                transition: current.clone(),
+                recipient_staged_mls_state: recipient_recovery.staged_mls_state.clone(),
+                recovery_package: package.clone(),
+                target_history: history.clone(),
+            })
+            .await
+            .expect("restarted owner replays the same durable phase");
+        assert_eq!(next, first);
         assert_eq!(next.phase(), expected_phase);
+        assert_eq!(
+            std::fs::read(source_layout.profile_database()).unwrap(),
+            b"branch-retained-profile"
+        );
+        assert_eq!(
+            std::fs::read(source_layout.blob_root().join("history.ucbl")).unwrap(),
+            b"branch-retained-blob"
+        );
+        let Some(ActiveRuntimeManifest::V3(active_after_replay)) =
+            manifests.load_runtime().await.unwrap()
+        else {
+            panic!("replayed branch phase must keep one V3 runtime active");
+        };
+        assert_eq!(
+            active_after_replay.layout().profile_data_generation(),
+            &[0x92; 16]
+        );
+        assert_eq!(active_after_replay.keyslot_generation(), &[0x94; 16]);
         let loaded = ledger.load().await.unwrap();
         let mut replacement = loaded.clone();
         replacement.revision += 1;
