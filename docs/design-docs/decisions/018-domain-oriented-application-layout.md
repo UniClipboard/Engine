@@ -1,10 +1,11 @@
 # ADR-018：应用层按业务领域收口
 
-- **状态**：已采纳，实施中
+- **状态**：已采纳
 - **日期**：2026-08-10
 - **相关文档**：`docs/design-docs/layers/application.md`、
   `docs/architecture/architecture-bible.md`、
-  `docs/exec-plans/active/018-domain-oriented-application-layout.md`
+  `docs/exec-plans/completed/018-domain-oriented-application-layout.md`、
+  `docs/exec-plans/active/031-application-dependency-surface-deepening.md`
 
 ## 背景
 

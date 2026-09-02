@@ -4,14 +4,19 @@
 
 ## 状态
 
-已采纳，实施中。
+已由 [规格 031](../active/031-application-dependency-surface-deepening.md) 取代。
 
-本文把 [ADR-018](../../design-docs/decisions/018-domain-oriented-application-layout.md) 的目录和入口决策落实为可执行的迁移规格。它只改变应用层内部组织、可见性和 Engine 的组装边界；`uc-engine` 对宿主暴露的操作、结果、错误和事件语义不在本次迁移中改变。
+本文保留 2026-08-10 确立的目录迁移与 Engine 收口历史。稳定领域归属继续由
+[ADR-018](../../design-docs/decisions/018-domain-oriented-application-layout.md) 负责；未完成的对象图深化、
+生命周期 owner、切片顺序与验收门禁只以规格 031 为准。
+
+本文曾把 ADR-018 的目录和入口决策落实为可执行迁移规格。它只改变应用层内部组织、可见性和 Engine
+组装边界；`uc-engine` 对宿主暴露的操作、结果、错误和事件语义不在迁移中改变。
 
 相关规格：
 
-- [工作空间全局收敛](../completed/016-workspace-wide-convergence.md)
-- [配对作为工作空间准入通道](../completed/017-pairing-as-workspace-admission.md)
+- [工作空间全局收敛](016-workspace-wide-convergence.md)
+- [配对作为工作空间准入通道](017-pairing-as-workspace-admission.md)
 - [uc-engine 跨平台核心接口](../../design-docs/uc-engine-interface.md)
 - [仓库检查](../../design-docs/engine-repository-checks.md)
 

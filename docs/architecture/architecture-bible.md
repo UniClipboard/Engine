@@ -106,7 +106,8 @@ Rust API       UniFFI 绑定          N-API 绑定
 协调器、会话、内部适配、事件总线、缓存和投影构建不得留在 `facade/`；它们分别归入所属领域或
 无业务所有权的 `support/`。稳定事件类型可以由门面公开，事件投递实现不在门面目录。
 
-完整的路径迁移表、Engine 收口规则、删除清单和验收矩阵见[规格 018](../exec-plans/active/018-domain-oriented-application-layout.md)。
+稳定领域归属由 [ADR-018](../design-docs/decisions/018-domain-oriented-application-layout.md) 定义；当前对象图
+深化、Engine 收口顺序、删除清单和验收门禁见[规格 031](../exec-plans/active/031-application-dependency-surface-deepening.md)。
 
 ### 领域模块
 
@@ -795,6 +796,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 | 日期 | 主题 | 长期结论 |
 | --- | --- | --- |
+| 2026-09-02 | Application 依赖表面深化重基线 | ADR-018 继续定义五个 Application 领域归属，规格 031 取代旧 018 的剩余实施计划。重构以唯一 Application assembly 和具体 `ApplicationRuntime` 隐藏对象图、启动回滚与关闭顺序；Engine 继续选择 Iroh/Infra adapter 和观测 decorator。Search 与 Space 分离，Clipboard reconcile 成为 worker 前置门禁，Space 等待 029 完成及 030 按 033 control-only generation 重基线。本轮只更新计划，无生产行为变化。 |
 | 2026-09-02 | 定时维护审查 Action | GitHub Actions 每周并行启动五个互不调用的全仓审查 session，再由独立 session 汇总标准 JSON artifact；Codex 与产品仓发布流程统一从 `CODEX_API_ENDPOINT` 和 `CODEX_API_KEY` 读取 Responses API 接入配置。开发者通过 Actions Summary 阅读去重报告，并可下载各 lane 与汇总产物追溯证据。审查只报告问题，不自动修复、建 Issue 或改变运行时架构。 |
 | 2026-09-01 | 文档记录系统重组 | 根与局部 `AGENTS.md` 收敛为短维护地图；长期设计、ADR、产品规格、active/completed 执行计划、生成资料和参考资料分别进入结构化 `docs/` 目录。根 `ARCHITECTURE.md` 成为当前架构入口，架构圣经继续保存详细事实；旧 `docs/adr`、`docs/specs`、`docs/prd`、`docs/diagrams` 和 `docs/migration` 路径不再作为并行入口。 |
 | 2026-09-01 | 并行维护审查 Skills | 仓库维护审查拆为五个互不调用的只读专项 skill，由独立 session 并行运行；第六个独立 skill 只汇总标准化 artifact。该机制以现有架构、安全、可靠性和设计文档为规则来源，不改变运行时架构。 |
@@ -969,5 +971,6 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 - `docs/exec-plans/completed/028-single-space-admission-protocol.md`：全新单一 Space 准入协议、跨层接入、删除清单和完整验收标准。
 - `docs/exec-plans/active/029-durable-membership-history-anti-entropy.md`：逐 peer 确认水位、持久传播欠账、公平重试和复杂拓扑验收。
 - `docs/exec-plans/active/030-membership-conflict-resolution-and-chaos-validation.md`：成员分叉选择、恢复与确定性复杂拓扑验收。
+- `docs/exec-plans/active/031-application-dependency-surface-deepening.md`：Application 对象图深化、生命周期所有权、九切片顺序和实施门禁。
 - `docs/exec-plans/completed/032-admission-space-transition-internal-refactor.md`：断开 maintenance-only legacy 可达性、删除旧 V2 transition executor、私有化 upgrade source layout 并防止 payload rewrap 回流的实施记录。
 - `docs/exec-plans/completed/033-immutable-content-protection-context.md`：不可变保护上下文、profile 历史 content key vault、一次性 V3 密文升级及无历史重包 CrossSpace 实施记录。

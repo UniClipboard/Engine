@@ -5,6 +5,7 @@
 - [015 离线优先成员移除](015-offline-first-member-removal.md)（部分由 ADR-020 取代）
 - [016 工作空间全局收敛](016-workspace-wide-convergence.md)（部分由 ADR-020 取代）
 - [017 配对作为工作空间准入](017-pairing-as-workspace-admission.md)（wire/runtime 由 028 取代）
+- [018 Application 按业务领域收口](018-domain-oriented-application-layout.md)（剩余实施由 031 取代）
 - [023 可持续验证的成员历史与准入激活](023-durable-membership-proof-and-admission-activation.md)
 - [024 成员收敛内部职责边界](024-workspace-convergence-internal-boundaries.md)（由 027 取代）
 - [025 用户明确加入安全取代](025-user-initiated-join-supersession.md)
