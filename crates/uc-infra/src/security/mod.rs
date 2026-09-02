@@ -1,7 +1,6 @@
 mod active_space_generation_manifest_store;
 mod admission_key_manager;
 mod admission_proof;
-mod admission_space_transition;
 mod blob_cipher_adapter;
 mod content_protection;
 pub mod crypto_model;
@@ -39,7 +38,6 @@ pub use admission_key_manager::{
     AdmissionKeyError, AdmissionKeyManager, WrappedSpaceAdmissionDataKey,
 };
 pub use admission_proof::HmacProofAdapter;
-pub use admission_space_transition::{space_generation_directory, DurableAdmissionSpaceTransition};
 pub use blob_cipher_adapter::BlobCipherAdapter;
 pub use content_protection::{
     ContentProtection, ContentProtectionError, V3EncryptedBlobStore, V3InlinePayloadCipher,

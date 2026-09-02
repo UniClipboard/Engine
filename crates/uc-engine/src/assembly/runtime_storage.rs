@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use uc_infra::security::{space_generation_directory, ActiveRuntimeManifest, ProfileRuntimeLayout};
+use uc_infra::security::{ActiveRuntimeManifest, ProfileRuntimeLayout};
 
 /// 启动 manifest 已认证后解析出的完整存储选择。
 ///
@@ -16,6 +16,8 @@ pub(crate) struct RuntimeStorageSelection {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RuntimeStorageSelectionError {
+    #[error("profile storage must be upgraded before runtime selection")]
+    StorageUpgradeRequired,
     #[error("active profile database generation is unavailable")]
     ProfileDatabaseUnavailable,
     #[error("active control database generation is unavailable")]
@@ -39,23 +41,8 @@ impl RuntimeStorageSelection {
                 v3: false,
                 fresh_generations: None,
             }),
-            Some(ActiveRuntimeManifest::V2(manifest)) => {
-                let directory = space_generation_directory(
-                    &profile_root.join("space-generations"),
-                    &manifest.space_id,
-                    &manifest.database_generation,
-                );
-                let database = directory.join("target.sqlite");
-                if !database.is_file() {
-                    return Err(RuntimeStorageSelectionError::ProfileDatabaseUnavailable);
-                }
-                Ok(Self {
-                    profile_database: database.clone(),
-                    control_database: database,
-                    blob_root: directory.join("blobs"),
-                    v3: false,
-                    fresh_generations: None,
-                })
+            Some(ActiveRuntimeManifest::V2(_)) => {
+                Err(RuntimeStorageSelectionError::StorageUpgradeRequired)
             }
             Some(ActiveRuntimeManifest::V3(manifest)) => {
                 let layout = ProfileRuntimeLayout::v3(profile_root, manifest);
@@ -131,12 +118,36 @@ impl RuntimeStorageSelection {
 #[cfg(test)]
 mod tests {
     use uc_core::ids::SpaceId;
-    use uc_core::membership::ActiveRuntimeLayout;
+    use uc_core::membership::{ActiveRuntimeLayout, ActiveSpaceGenerationManifestV2};
     use uc_infra::security::{
         ActiveRuntimeManifest, ActiveRuntimeManifestV3, ProfileRuntimeLayout,
     };
 
-    use super::RuntimeStorageSelection;
+    use super::{RuntimeStorageSelection, RuntimeStorageSelectionError};
+
+    #[test]
+    fn v2_manifest_requires_upgrade_before_runtime_selection() {
+        let directory = tempfile::tempdir().unwrap();
+        let manifest = ActiveSpaceGenerationManifestV2::new(
+            "legacy-space".to_owned(),
+            [0x31; 16],
+            [0x32; 16],
+            [0x33; 16],
+        )
+        .unwrap();
+
+        let selection = RuntimeStorageSelection::resolve(
+            directory.path(),
+            directory.path().join("legacy.sqlite"),
+            directory.path().join("legacy-blobs"),
+            Some(&ActiveRuntimeManifest::V2(manifest)),
+        );
+
+        assert!(matches!(
+            selection,
+            Err(RuntimeStorageSelectionError::StorageUpgradeRequired)
+        ));
+    }
 
     #[test]
     fn v3_selection_requires_and_preserves_two_independent_databases() {

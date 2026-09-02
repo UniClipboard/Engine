@@ -18,6 +18,7 @@ mod field_codec_tests;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use uc_core::ids::ProfileId;
 use uc_core::ports::space::SpaceAccessStore as _;
@@ -28,7 +29,6 @@ use super::{
     ProfileContentKeyVault,
 };
 use crate::security::active_space_generation_manifest_store::V3ManifestPromotionOutcome;
-use crate::security::space_generation_directory;
 use crate::space::{DefaultSpaceAccessAdapter, InMemorySession, KeyMaterialStore};
 use derived_payloads::DerivedPayloadConverter;
 use journal::{UpgradeJournalV1, UpgradePhaseV1};
@@ -128,7 +128,7 @@ impl RuntimeUpgradeBootstrap {
 
         let (source_database, source_blob_root, source_space_id) = match active.as_ref() {
             Some(ActiveRuntimeManifest::V2(source)) => {
-                let source_root = space_generation_directory(
+                let source_root = legacy_space_generation_directory(
                     &profile_root.join("space-generations"),
                     &source.space_id,
                     &source.database_generation,
@@ -651,7 +651,7 @@ impl ProfileStorageUpgrade {
             journal.source_space_id(),
             journal.source_database_generation(),
         ) {
-            let source = space_generation_directory(
+            let source = legacy_space_generation_directory(
                 &self.profile_root.join("space-generations"),
                 space_id,
                 database_generation,
@@ -689,6 +689,29 @@ fn cleanup_source_unavailable() -> ProfileStorageUpgradeError {
     ProfileStorageUpgradeError::Corrupt {
         source: anyhow::anyhow!("profile upgrade source is unavailable after promotion"),
     }
+}
+
+fn legacy_space_generation_directory(
+    generation_root: &Path,
+    space_id: &str,
+    generation: &[u8; 16],
+) -> PathBuf {
+    let mut hasher = Sha256::new();
+    hasher.update(b"uniclipboard/space-generation-directory/v1\0");
+    hasher.update(space_id.as_bytes());
+    hasher.update(generation);
+    let digest: [u8; 32] = hasher.finalize().into();
+    generation_root.join(legacy_generation_directory_name(&digest))
+}
+
+fn legacy_generation_directory_name(digest: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut value = String::with_capacity(32);
+    for byte in &digest[..16] {
+        value.push(HEX[(byte >> 4) as usize] as char);
+        value.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    value
 }
 
 fn remove_sqlite_if_present(path: &Path) -> Result<(), ProfileStorageUpgradeError> {

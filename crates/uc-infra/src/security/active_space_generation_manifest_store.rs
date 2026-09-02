@@ -150,23 +150,6 @@ pub(crate) enum V3ManifestPromotionOutcome {
     SourceChanged,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct DeviceManagementResetJournalV1 {
-    pub(crate) format_version: u16,
-    pub(crate) target_space_id: String,
-    pub(crate) target_generation: [u8; 16],
-    pub(crate) source_space_id: Option<String>,
-    pub(crate) source_generation: Option<[u8; 16]>,
-}
-
-impl DeviceManagementResetJournalV1 {
-    pub(crate) fn validate(&self) -> bool {
-        self.format_version == 1
-            && !self.target_space_id.is_empty()
-            && self.source_space_id.is_some() == self.source_generation.is_some()
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum DeviceManagementResetPhaseV3 {
     Allocated,
@@ -535,64 +518,6 @@ impl ActiveSpaceGenerationManifestStore {
         }
     }
 
-    pub(crate) async fn load_device_reset_journal(
-        &self,
-    ) -> Result<Option<DeviceManagementResetJournalV1>, ActiveSpaceGenerationManifestStoreError>
-    {
-        let ciphertext = match tokio::fs::read(&self.reset_journal_path).await {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
-        };
-        let plaintext = self
-            .keys
-            .open_profile_payload(DEVICE_RESET_JOURNAL_PURPOSE, &ciphertext)
-            .map_err(map_key_error)?;
-        let journal: DeviceManagementResetJournalV1 = postcard::from_bytes(&plaintext)
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
-        journal
-            .validate()
-            .then_some(Some(journal))
-            .ok_or(ActiveSpaceGenerationManifestStoreError::Corrupt)
-    }
-
-    pub(crate) async fn save_device_reset_journal(
-        &self,
-        journal: &DeviceManagementResetJournalV1,
-    ) -> Result<(), ActiveSpaceGenerationManifestStoreError> {
-        if !journal.validate() {
-            return Err(ActiveSpaceGenerationManifestStoreError::Corrupt);
-        }
-        let _guard = self.write_lock.lock().await;
-        let parent = self
-            .reset_journal_path
-            .parent()
-            .ok_or(ActiveSpaceGenerationManifestStoreError::Storage)?;
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
-        let plaintext = postcard::to_stdvec(journal)
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
-        let ciphertext = self
-            .keys
-            .seal_profile_payload(DEVICE_RESET_JOURNAL_PURPOSE, &plaintext)
-            .map_err(map_key_error)?;
-        let temporary = self.reset_journal_path.with_extension("tmp");
-        let mut file = tokio::fs::File::create(&temporary)
-            .await
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
-        file.write_all(&ciphertext)
-            .await
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
-        file.sync_all()
-            .await
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
-        drop(file);
-        replace_file_atomically(&temporary, &self.reset_journal_path)
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
-        sync_parent_directory(parent).map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)
-    }
-
     pub(crate) async fn load_device_reset_journal_v3(
         &self,
     ) -> Result<Option<DeviceManagementResetJournalV3>, ActiveSpaceGenerationManifestStoreError>
@@ -735,44 +660,6 @@ mod tests {
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
     use super::*;
-
-    #[tokio::test]
-    async fn device_reset_journal_round_trips_encrypted_and_clears_idempotently() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = ActiveSpaceGenerationManifestStore::new(
-            directory.path().to_path_buf(),
-            Arc::new(AdmissionKeyManager::new(
-                Arc::new(MemorySecureStorage::default()),
-                [0x61; 16],
-            )),
-        );
-        let journal = DeviceManagementResetJournalV1 {
-            format_version: 1,
-            target_space_id: "private-reset-target".to_owned(),
-            target_generation: [0x62; 16],
-            source_space_id: Some("private-source-space".to_owned()),
-            source_generation: Some([0x63; 16]),
-        };
-
-        store.save_device_reset_journal(&journal).await.unwrap();
-
-        assert_eq!(
-            store.load_device_reset_journal().await.unwrap(),
-            Some(journal)
-        );
-        let bytes = tokio::fs::read(directory.path().join(DEVICE_RESET_JOURNAL_FILE))
-            .await
-            .unwrap();
-        assert!(!bytes
-            .windows(b"private-reset-target".len())
-            .any(|window| window == b"private-reset-target"));
-        assert!(!bytes
-            .windows(b"private-source-space".len())
-            .any(|window| window == b"private-source-space"));
-        store.clear_device_reset_journal().await.unwrap();
-        store.clear_device_reset_journal().await.unwrap();
-        assert_eq!(store.load_device_reset_journal().await.unwrap(), None);
-    }
 
     #[derive(Default)]
     struct MemorySecureStorage(StdMutex<HashMap<String, Vec<u8>>>);

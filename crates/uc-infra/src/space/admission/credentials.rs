@@ -134,16 +134,6 @@ pub(crate) fn prepare_registration(passphrase: &Passphrase) -> anyhow::Result<Ve
     .map_err(anyhow::Error::new)
 }
 
-pub(crate) fn install_prepared_registration(
-    pool: &DbPool,
-    keys: &AdmissionKeyManager,
-    manifest: &ActiveSpaceGenerationManifestV2,
-    prepared: &[u8],
-) -> anyhow::Result<()> {
-    let scope = CredentialScope::from(manifest.clone());
-    install_prepared_registration_for_scope(pool, keys, &scope, prepared)
-}
-
 /// 把一次 admission 已准备的 OPAQUE registration 直接安装到目标 V3
 /// control-generation scope。调用方不能接触 credential DTO、purpose 或 SQL。
 pub(crate) fn install_prepared_registration_for_control_generation(

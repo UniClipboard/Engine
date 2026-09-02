@@ -541,68 +541,6 @@ impl DefaultSpaceAccessAdapter {
         Ok(self.session.detached_clone())
     }
 
-    pub(crate) async fn resume_source_for_transition(
-        &self,
-        source_space_id: &SpaceId,
-    ) -> Result<(), SpaceAccessError> {
-        if self.session.current_space_id().ok().as_ref() == Some(source_space_id) {
-            return Ok(());
-        }
-        self.session.clear();
-        match SpaceAccessStore::try_resume_session(self, source_space_id).await? {
-            Some(_) => Ok(()),
-            None => Err(SpaceAccessError::NotInitialized),
-        }
-    }
-
-    pub(crate) async fn activate_prepared_target_access(
-        &self,
-        target_space_id: &SpaceId,
-        encoded: &[u8],
-    ) -> Result<(), SpaceAccessError> {
-        let profile = self
-            .current_profile
-            .current_profile()
-            .await
-            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
-        let scope = key_scope_from_profile(&profile);
-        let (keyslot, kek, master_key) =
-            Self::decode_prepared_target_access(target_space_id, &scope, encoded)?;
-        let previous = if self
-            .key_material
-            .keyslot_exists()
-            .await
-            .map_err(map_encryption_error)?
-        {
-            Some((
-                self.key_material
-                    .load_keyslot(&scope)
-                    .await
-                    .map_err(map_encryption_error)?,
-                self.key_material
-                    .load_kek(&scope)
-                    .await
-                    .map_err(map_encryption_error)?,
-            ))
-        } else {
-            None
-        };
-        let previous_session = self.session.snapshot();
-
-        if let Err(error) = self.key_material.store_kek(&scope, &kek).await {
-            return Err(map_encryption_error(error));
-        }
-        if let Err(error) = self.key_material.store_keyslot(&keyslot).await {
-            self.restore_join_install(&scope, previous, previous_session)
-                .await;
-            return Err(map_encryption_error(error));
-        }
-        self.session
-            .set_master_key_for_space(target_space_id.clone(), master_key);
-        self.kek_observed.store(true, Ordering::Release);
-        Ok(())
-    }
-
     /// 在 V3 manifest 已提升后安装目标 keyslot，并从当前 control pool 完整恢复
     /// 目标安全状态、vault catalog 与活动 session。
     ///
@@ -5600,55 +5538,6 @@ mod admission_tests {
             source_slot
         );
         assert_eq!(key_material.load_kek(&scope).await.unwrap(), source_kek);
-    }
-
-    #[tokio::test]
-    async fn prepared_target_access_changes_space_only_when_explicitly_activated() {
-        use uc_core::ports::space::PrepareAdmissionTargetAccessPort;
-
-        let directory = tempdir().unwrap();
-        let secure_storage = memory_secure_storage();
-        let key_material = local_key_material(&directory, secure_storage);
-        let session = Arc::new(InMemorySession::new());
-        let (repository, _) = memory_revocation_repository(None);
-        let adapter = adapter(
-            &directory,
-            key_material.clone(),
-            session.clone(),
-            repository,
-        );
-        let source_space = SpaceId::from("source-space");
-        let target_space = SpaceId::from("target-space");
-        SpaceAccessStore::initialize(
-            &adapter,
-            &source_space,
-            &Passphrase::new("source passphrase"),
-        )
-        .await
-        .unwrap();
-        let prepared = PrepareAdmissionTargetAccessPort::prepare_target_access(
-            &adapter,
-            &target_space,
-            &Passphrase::new("target passphrase"),
-        )
-        .await
-        .unwrap();
-        assert_eq!(session.current_space_id().unwrap(), source_space);
-
-        adapter
-            .activate_prepared_target_access(&target_space, prepared.as_bytes())
-            .await
-            .unwrap();
-        assert_eq!(session.current_space_id().unwrap(), target_space);
-        let target_root = session.get_master_key().unwrap();
-
-        session.clear();
-        SpaceAccessStore::try_resume_session(&adapter, &target_space)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(session.current_space_id().unwrap(), target_space);
-        assert_eq!(session.get_master_key().unwrap(), target_root);
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 # 032 退役 Legacy Space Transition
 
-状态：实施中；Slice 1 已完成
+状态：实施中；Slice 1-2 已完成
 
 关联事实来源：
 
@@ -247,6 +247,13 @@ Risk: maintenance-only runtime 仍构造完整 facade，可能有未预期调用
 Core impact: 无。第一切片不得修改 `uc-core` 或 Application port。
 
 ## Slice 2：删除 legacy executor 并私有化 V2 layout
+
+实施结果（2026-09-02）：
+
+- 整体删除 5,201 行 `admission_space_transition.rs`、module 声明和公开 re-export；同步清除只由旧 executor 使用的 V1 Reset journal、V2 registration 安装包装、旧 session activation 与 material-history merge，不创建替代 executor。
+- V2 source generation 的 SHA-256 目录规则收回 `profile_storage_upgrade` 私有实现；外部 integration fixture 使用两个固定已知目录名，避免 production helper 与测试共享同一算法而自证。
+- `RuntimeStorageSelection` 遇到 V2 manifest 直接返回 `StorageUpgradeRequired`，不再打开 `target.sqlite`；`None` maintenance 与 V3 normal/fresh 选择保持不变。
+- 本切片未删除 `ActiveRuntimeManifest::V2`、Core 旧 checkpoint codec 或 credential/current-space 兼容读取；完整 13 项 upgrade integration 证明 V2 source 的升级、恢复、promotion 与清理继续有效。
 
 File: `crates/uc-infra/src/security/admission_space_transition.rs`
 Change: 整体删除，包括 V2 snapshot/rewrap/store/helper 与自有测试；不创建目录模块替代品。

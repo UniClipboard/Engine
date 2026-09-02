@@ -18,8 +18,8 @@ use uc_infra::db::repositories::DieselSpaceSecurityStore;
 use uc_infra::fs::key_slot_store::JsonKeySlotStore;
 use uc_infra::network::iroh::SpaceAdmissionChannelCredentialPort;
 use uc_infra::security::{
-    space_generation_directory, ActiveSpaceGenerationManifestStore, AdmissionKeyManager,
-    DefaultCurrentProfile, ProfileContentKeyVault, ProfileRuntimeLayout, ProfileStorageUpgrade,
+    ActiveSpaceGenerationManifestStore, AdmissionKeyManager, DefaultCurrentProfile,
+    ProfileContentKeyVault, ProfileRuntimeLayout, ProfileStorageUpgrade,
     ProfileStorageUpgradeError, ProfileStorageUpgradeOutcome,
 };
 use uc_infra::space::{
@@ -199,11 +199,9 @@ async fn runtime_upgrade_resumes_v2_only_after_the_lease_and_promotes_v3() {
         [0x8C; 16],
     )
     .unwrap();
-    let source_root = space_generation_directory(
-        &root.join("space-generations"),
-        &source.space_id,
-        &source.database_generation,
-    );
+    let source_root = root
+        .join("space-generations")
+        .join("b7d79b0ab606d06893ded80236bc914d");
     let source_database = source_root.join("target.sqlite");
     std::fs::create_dir_all(&source_root).unwrap();
     let source_pool = init_db_pool(source_database.to_str().unwrap()).unwrap();
@@ -280,11 +278,9 @@ async fn promoted_upgrade_cleanup_removes_only_the_old_source_and_staging() {
     )
     .unwrap();
     manifests.promote(&source).await.unwrap();
-    let source_root = space_generation_directory(
-        &root.join("space-generations"),
-        &source.space_id,
-        &source.database_generation,
-    );
+    let source_root = root
+        .join("space-generations")
+        .join("0af414868ec02f28ed3973b2aaa9c041");
     let source_database = source_root.join("target.sqlite");
     let source_blobs = source_root.join("blobs");
     std::fs::create_dir_all(&source_blobs).unwrap();

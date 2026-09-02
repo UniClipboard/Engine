@@ -9,9 +9,8 @@ mod security;
 mod sponsor;
 
 pub(crate) use credentials::{
-    install_prepared_registration, install_prepared_registration_for_control_generation,
-    prepare_registration, rebind_registration_to_control_generation,
-    upgrade_registration_to_control_generation,
+    install_prepared_registration_for_control_generation, prepare_registration,
+    rebind_registration_to_control_generation, upgrade_registration_to_control_generation,
     verify_prepared_registration_for_control_generation,
 };
 pub use credentials::{SpaceAdmissionCredentialStoreError, SqliteSpaceAdmissionCredentials};
