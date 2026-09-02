@@ -200,11 +200,11 @@ async fn ensure_profile_storage_v3(
         admission_keys,
         Arc::clone(&manifests),
     );
-    match upgrade
+    let outcome = upgrade
         .ensure_v3()
         .await
-        .map_err(|source| WiringError::StorageUpgrade { source })?
-    {
+        .map_err(|source| WiringError::StorageUpgrade { source })?;
+    match outcome {
         ProfileStorageUpgradeOutcome::Upgraded | ProfileStorageUpgradeOutcome::UpToDate => {
             drop(upgrade);
             let active = manifests.load_runtime_sync().map_err(|source| {
@@ -870,12 +870,12 @@ pub async fn wire_dependencies_from_inputs(
             hash: infra.hash,
             cache_fs: Arc::new(uc_infra::fs::TokioCacheFsAdapter::new()),
         },
-        search: SearchPorts {
+        search: SearchPorts::new(
             search_index,
             search_maintenance,
             search_key_derivation,
             search_pipeline,
-        },
+        ),
         analytics: analytics_sink,
     };
 

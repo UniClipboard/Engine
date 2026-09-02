@@ -27,6 +27,7 @@ use uc_core::search::{
 };
 
 use crate::clipboard::file_set_query::load_has_directory_structure;
+use crate::search::mutation_gate::SearchMutationGate;
 use crate::search::{SearchProjectionBuilder, SearchStatusView};
 
 pub const REASON_INITIAL_BACKFILL: &str = "initial_backfill";
@@ -78,6 +79,8 @@ pub enum SearchCoordinatorEvent {
 
 pub struct SearchCoordinatorDeps {
     pub search_index: Arc<dyn SearchIndexPort>,
+    rebuild_index: Arc<dyn SearchIndexPort>,
+    mutation_gate: Arc<SearchMutationGate>,
     /// One-shot storage maintenance (plaintext-residue purge after the encrypting
     /// rebuild). Separate from `search_index` because it is a background-only,
     /// storage-level concern.
@@ -111,7 +114,9 @@ impl SearchCoordinatorDeps {
         entry_file_set_repo: Arc<dyn EntryFileSetRepositoryPort>,
     ) -> Self {
         Self {
+            rebuild_index: Arc::clone(&search_index),
             search_index,
+            mutation_gate: Arc::new(SearchMutationGate::new()),
             search_maintenance,
             search_key_derivation,
             search_pipeline,
@@ -122,6 +127,16 @@ impl SearchCoordinatorDeps {
             event_repo,
             entry_file_set_repo,
         }
+    }
+
+    pub(crate) fn with_rebuild_coordination(
+        mut self,
+        rebuild_index: Arc<dyn SearchIndexPort>,
+        mutation_gate: Arc<SearchMutationGate>,
+    ) -> Self {
+        self.rebuild_index = rebuild_index;
+        self.mutation_gate = mutation_gate;
+        self
     }
 }
 
@@ -545,6 +560,7 @@ impl SearchCoordinator {
         state: Arc<Mutex<CoordinatorState>>,
         reason: &str,
     ) {
+        let _mutation_guard = deps.mutation_gate.begin_rebuild().await;
         info!(reason, "search coordinator: starting rebuild");
         {
             let mut s = state.lock().await;
@@ -620,7 +636,7 @@ impl SearchCoordinator {
 
         let (progress_tx, mut progress_rx) = mpsc::channel::<RebuildProgress>(64);
         let event_tx_clone = event_tx.clone();
-        let rebuild = deps.search_index.rebuild(all_entries, progress_tx);
+        let rebuild = deps.rebuild_index.rebuild(all_entries, progress_tx);
         let progress_forwarder = async move {
             while let Some(progress) = progress_rx.recv().await {
                 emit_progress(&event_tx_clone, progress);

@@ -5,6 +5,7 @@ use thiserror::Error;
 pub(crate) mod assembly;
 pub(crate) mod coordinator;
 pub(crate) mod live_index;
+pub(crate) mod mutation_gate;
 pub(crate) mod projection;
 pub(crate) mod query;
 pub(crate) mod runtime;

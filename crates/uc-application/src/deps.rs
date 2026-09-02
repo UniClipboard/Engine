@@ -46,6 +46,7 @@ pub use crate::profile::probe_profile_key_access::{
     ProbeProfileKeyAccessPort, ProbeProfileKeyAccessUseCase, ProfileKeyAccessProbe,
     ProfileKeyAccessProbePortError,
 };
+use crate::search::mutation_gate::{CoordinatedSearchIndex, SearchMutationGate};
 pub use crate::space::{
     build_space_session_activity, AdvanceMembershipBranchTransitionError,
     AdvanceMembershipBranchTransitionInput, AdvanceMembershipBranchTransitionPort,
@@ -331,6 +332,40 @@ pub struct SearchPorts {
     pub search_key_derivation: Arc<dyn SearchKeyDerivationPort>,
     /// Tokenization + text extraction pipeline used for building search documents.
     pub search_pipeline: Arc<dyn SearchPipelinePort>,
+    rebuild_index: Arc<dyn SearchIndexPort>,
+    mutation_gate: Arc<SearchMutationGate>,
+}
+
+impl SearchPorts {
+    pub fn new(
+        search_index: Arc<dyn SearchIndexPort>,
+        search_maintenance: Arc<dyn SearchIndexMaintenancePort>,
+        search_key_derivation: Arc<dyn SearchKeyDerivationPort>,
+        search_pipeline: Arc<dyn SearchPipelinePort>,
+    ) -> Self {
+        let mutation_gate = Arc::new(SearchMutationGate::new());
+        let coordinated_index = Arc::new(CoordinatedSearchIndex::new(
+            Arc::clone(&search_index),
+            Arc::clone(&mutation_gate),
+        ));
+        Self {
+            search_index: coordinated_index,
+            search_maintenance,
+            search_key_derivation,
+            search_pipeline,
+            rebuild_index: search_index,
+            mutation_gate,
+        }
+    }
+
+    pub(crate) fn rebuild_coordination(
+        &self,
+    ) -> (Arc<dyn SearchIndexPort>, Arc<SearchMutationGate>) {
+        (
+            Arc::clone(&self.rebuild_index),
+            Arc::clone(&self.mutation_gate),
+        )
+    }
 }
 
 /// System-domain ports bundle (clock, hash, cache filesystem).

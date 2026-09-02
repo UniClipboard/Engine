@@ -18,7 +18,8 @@ pub struct SearchAssembly {
 
 impl SearchAssembly {
     pub fn start(deps: &AppDeps) -> Self {
-        let runtime = SearchRuntime::start(SearchCoordinatorDeps::new(
+        let (rebuild_index, mutation_gate) = deps.search.rebuild_coordination();
+        let coordinator_deps = SearchCoordinatorDeps::new(
             Arc::clone(&deps.search.search_index),
             Arc::clone(&deps.search.search_maintenance),
             Arc::clone(&deps.search.search_key_derivation),
@@ -29,7 +30,9 @@ impl SearchAssembly {
             Arc::clone(&deps.clipboard.selection_repo),
             Arc::clone(&deps.clipboard.clipboard_event_reader_repo),
             Arc::clone(&deps.storage.entry_file_set_repo),
-        ));
+        )
+        .with_rebuild_coordination(rebuild_index, mutation_gate);
+        let runtime = SearchRuntime::start(coordinator_deps);
         Self { runtime }
     }
 
