@@ -11,4 +11,5 @@
 - [026 旧资料独立化与重新配对](026-legacy-profile-isolation-and-re-pairing.md)
 - [027 Application Space 一次性重写](027-application-space-membership-one-shot-rewrite.md)
 - [028 单一 Space 准入协议](028-single-space-admission-protocol.md)
+- [032 退役 Legacy Space Transition](032-admission-space-transition-internal-refactor.md)
 - [033 不可变内容保护上下文与一次性密文升级](033-immutable-content-protection-context.md)

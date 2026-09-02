@@ -1,10 +1,10 @@
-# 032 退役 Legacy Space Transition
+# 032 退役 Legacy Space Transition（已完成）
 
-状态：实施中；Slice 1-2 已完成
+状态：已完成；自动化验收通过，实体设备矩阵跳过
 
 关联事实来源：
 
-- [不可变内容保护上下文实施记录](../completed/033-immutable-content-protection-context.md)
+- [不可变内容保护上下文实施记录](033-immutable-content-protection-context.md)
 - [安全架构](../../SECURITY.md)
 - [工程与模块设计原则](../../design-docs/engineering-principles.md)
 
@@ -12,7 +12,7 @@
 
 规格 033 已经完成 V1/V2 到 V3 的一次性存储升级，并为普通 admission、Device Reset、membership branch、Fresh 和 SameSpace 分别建立了 control-only V3 transition owner。Ready profile 在任何普通运行期对象图构造前必须完成 `ProfileStorageUpgrade::ensure_v3()`；后续切换只替换 Space control generation，不再复制或重包 profile payload。
 
-仓库仍保留 `crates/uc-infra/src/security/admission_space_transition.rs`。该文件约 5,201 行，完整包含已被 033 取代的 V2 source backup、`target.sqlite`、payload rewrap、整库/blob 切换和四个 port implementation。它的唯一生产构造点是 Engine 的 maintenance-only storage 分支；Ready profile 已无法进入该分支。`RuntimeStorageSelection` 同时仍允许普通运行期直接选择 V2 manifest，`space_generation_directory` 也继续从旧 transition 模块公开，虽然该路径知识现在只属于一次性升级器。
+032 重基线时，仓库仍保留 `crates/uc-infra/src/security/admission_space_transition.rs`。该文件约 5,201 行，完整包含已被 033 取代的 V2 source backup、`target.sqlite`、payload rewrap、整库/blob 切换和四个 port implementation。它的唯一生产构造点是 Engine 的 maintenance-only storage 分支；Ready profile 已无法进入该分支。当时 `RuntimeStorageSelection` 仍允许普通运行期直接选择 V2 manifest，`space_generation_directory` 也继续从旧 transition 模块公开，虽然该路径知识已经只属于一次性升级器。
 
 原 032 计划把旧文件机械拆成 `generation_store`、`payload_rewrap`、`generation_activation` 等子模块。这会延长已退休行为的寿命，并与 033 的 clean cutover 形成第二套事实来源。删除检查表明：删除旧模块后，旧 rewrap 复杂度不会散回调用方，而是直接消失；因此正确方案是退役 legacy executor，而不是重构保留它。
 
@@ -39,7 +39,7 @@
 - 不修改 V3 profile data/control schema、密文格式、keyslot、manifest 或升级 journal。
 - 不删除一次性升级器内部为读取 V1/V2 source 所需的旧 codec、AAD 和路径规则。
 
-# 4. Current Architecture Context
+# 4. 实施前架构背景
 
 ```text
 Component: ProfileStorageUpgrade
@@ -100,7 +100,7 @@ Responsibility: 表达 Application 完整流程所需的 Infra 能力，并保�
 Relationship: interface 与 Core codec 继续兼容旧 state；具体运行 adapter 由 Engine 按 profile lifecycle 选择。
 ```
 
-当前 Ready 启动数据流：
+重基线时的 Ready 启动数据流：
 
 1. Engine 读取 profile lifecycle；Ready profile 调用 `ProfileStorageUpgrade::ensure_v3()`。
 2. `Pending` 或 `Busy` 直接阻止普通运行期构造；`Upgraded`、`UpToDate` 或 `FreshReady` 才产生 V3 storage selection。
@@ -274,13 +274,20 @@ Risk: V2 source 路径字节若漂移会导致老 profile 无法升级。必须�
 
 ## Slice 3：删除证明与文档收口
 
+实施结果（2026-09-02）：
+
+- Engine repository preflight 直接读取 legacy 文件是否存在、Infra security module/生产源树与 Engine runtime storage，禁止旧 module/export/concrete type、`rewrap_finalized_source`、`source-backup-v1` 以及普通 runtime 重开 `space-generations/target.sqlite`。
+- 四个可执行负向 fixture 分别恢复旧文件、公开导出、改名后的 concrete implementation 和 Engine V2 storage bypass；每个 fixture 都先取得未拒绝红灯，再由最小规则转绿。
+- 033 已有的 V3 CrossSpace payload rewrap 负向 fixture 保持为唯一该契约检查，032 不复制规则；最终 preflight 同时证明 V3 rewrap 不回流与 legacy executor 不复活。
+- 稳定架构事实继续由安全文档和 033 维护；本计划只记录退役实施证据，并在验收后从 active 与技术债跟踪中关闭。
+
 File: `scripts/architecture/check-engine-repository.mjs`
 Change: 增加 legacy module/type/export、Ready-V2 runtime selection 和 V3 payload rewrap 的正向扫描与可执行负向 fixture。
 
 File: `docs/architecture/architecture-bible.md`
 Change: 记录 legacy executor 已删除、V2 layout 只属于 upgrade、maintenance-only transition 失败关闭；不复制 033 的 V3 密文契约。
 
-File: `docs/exec-plans/active/032-admission-space-transition-internal-refactor.md`
+File: `docs/exec-plans/completed/032-admission-space-transition-internal-refactor.md`
 Change: 验收完成后记录实际结果并移入 `completed/`；同步 active/completed index 和 tech-debt tracker。
 
 Risk: 只删代码不加检查会让后续 Agent 为“兼容”重新引入旧 rewrap。架构 fixture 必须证明违规示例会失败，而不是只依赖字符串注释。
@@ -364,19 +371,28 @@ Implementation: 保留现有有界 codec/validate 测试；本计划不增加 fa
 
 # 9. Acceptance Criteria
 
-* [ ] maintenance-only wiring 不再构造 `DurableAdmissionSpaceTransition`，四类 transition port 在 I/O 前稳定失败关闭。
-* [ ] maintenance branch unavailable error 保留非空 source chain；错误和日志不包含 Space、checkpoint、文件名或路径。
-* [ ] `crates/uc-infra/src/security/admission_space_transition.rs`、legacy concrete type及其全部 rewrap/snapshot 测试已删除，无改名副本。
-* [ ] `space_generation_directory` 不再从 `uc_infra::security` 导出；V2 source path 只存在于 `profile_storage_upgrade` 私有实现和兼容 fixture。
-* [ ] `RuntimeStorageSelection` 不能把 V2 manifest 作为普通 runtime 打开；Ready profile 仍只能在 V3 upgrade 成功后启动。
-* [ ] 真实 V2 profile 升级、崩溃恢复、promotion、清理和明文探针测试全部通过。
-* [ ] 旧 admission checkpoint 可识别但稳定拒绝，拒绝前后 active manifest、profile/control SQLite 和 blob 摘要完全一致。
-* [ ] A→B→A、Device Reset、membership branch、Fresh、SameSpace V3 tracer 全部保持通过，profile payload 不发生 rewrap。
-* [ ] Core 和 Application port/状态机没有改动；032 与 031 可独立实施。
-* [ ] 架构预检能拒绝 legacy transition、Engine Ready-V2 runtime 和 V3 payload rewrap 三类负向 fixture。
-* [ ] architecture bible、计划索引和技术债状态与代码一致；032 完成后移入 completed。
-* [ ] `cargo metadata --locked --format-version 1`、`cargo check --workspace --all-targets --locked`、`cargo fmt --all -- --check`、Engine architecture preflight 和 `git diff --check` 全部通过。
-* [ ] 未执行的实体设备矩阵明确记录为“跳过”，不记为通过。
+* [x] maintenance-only wiring 不再构造 `DurableAdmissionSpaceTransition`，四类 transition port 在 I/O 前稳定失败关闭。
+* [x] maintenance branch unavailable error 保留非空 source chain；错误和日志不包含 Space、checkpoint、文件名或路径。
+* [x] `crates/uc-infra/src/security/admission_space_transition.rs`、legacy concrete type及其全部 rewrap/snapshot 测试已删除，无改名副本。
+* [x] `space_generation_directory` 不再从 `uc_infra::security` 导出；V2 source path 只存在于 `profile_storage_upgrade` 私有实现和兼容 fixture。
+* [x] `RuntimeStorageSelection` 不能把 V2 manifest 作为普通 runtime 打开；Ready profile 仍只能在 V3 upgrade 成功后启动。
+* [x] 真实 V2 profile 升级、崩溃恢复、promotion、清理和明文探针测试全部通过。
+* [x] 旧 admission checkpoint 可识别但稳定拒绝，拒绝前后 active manifest、profile/control SQLite 和 blob 摘要完全一致。
+* [x] A→B→A、Device Reset、membership branch、Fresh、SameSpace V3 tracer 全部保持通过，profile payload 不发生 rewrap。
+* [x] Core 和 Application port/状态机没有改动；032 与 031 可独立实施。
+* [x] 架构预检能拒绝 legacy transition、Engine Ready-V2 runtime 和 V3 payload rewrap 三类负向 fixture。
+* [x] architecture bible、计划索引和技术债状态与代码一致；032 完成后移入 completed。
+* [x] `cargo metadata --locked --format-version 1`、`cargo check --workspace --all-targets --locked`、`cargo fmt --all -- --check`、Engine architecture preflight 和 `git diff --check` 全部通过。
+* [x] 实体设备矩阵未执行，明确记录为“跳过”，不记为通过。
+
+验收证据（2026-09-02）：
+
+- Slice 1 定向 contract：Engine maintenance 四类 port 4/4、Infra V3 admission tracer 3/3 通过。
+- Slice 2 定向 contract：Engine runtime storage 3/3、真实 profile storage upgrade 13/13、V3 Device Reset 1/1 通过；`rg` 只保留 upgrade 私有的 `legacy_space_generation_directory`。
+- Slice 3 architecture preflight：四个 legacy retirement fixture 与既有 V3 CrossSpace payload rewrap fixture 均被拒绝，真实仓库通过。
+- 最终强制门禁五项全部通过；编译只报告仓库既有 unused/dead-code warning。
+- workspace 全目标测试曾完整尝试但不记为全绿：两个与本计划无代码交集的既有稳定失败分别位于 Application 成员移除 pause reason 和 fresh-V3 Engine host 查询断言；另一个并行 search 时序失败精确重跑通过。032 不扩范围修改这些基线问题。
+- 实体 iOS、Android、HarmonyOS 设备矩阵未执行，记为“跳过”。
 
 # 10. Risks and Trade-offs
 

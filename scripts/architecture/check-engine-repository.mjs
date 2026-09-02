@@ -1324,8 +1324,71 @@ function checkInfraSpaceSecurityOwnership() {
   return problems
 }
 
+function checkRetiredLegacySpaceTransition(sources) {
+  const problems = []
+  const legacyPath = 'crates/uc-infra/src/security/admission_space_transition.rs'
+  if (sources.legacySpaceTransitionPathPresent) {
+    addProblem(
+      problems,
+      'retired legacy Space transition',
+      `retired transition module remains: ${legacyPath}`
+    )
+  }
+  for (const marker of [
+    'mod admission_space_transition',
+    'pub use admission_space_transition',
+    'space_generation_directory',
+  ]) {
+    if (sources.infraSecurityModule.includes(marker)) {
+      addProblem(
+        problems,
+        'retired legacy Space transition',
+        `security module exposes retired transition knowledge through ${marker}`
+      )
+    }
+  }
+  for (const marker of [
+    'DurableAdmissionSpaceTransition',
+    'rewrap_finalized_source',
+    'source-backup-v1',
+  ]) {
+    if (sources.infraSecurityRuntime.includes(marker)) {
+      addProblem(
+        problems,
+        'retired legacy Space transition',
+        `Infra security source restores retired transition behavior through ${marker}`
+      )
+    }
+  }
+  for (const marker of ['space_generation_directory', 'space-generations', 'target.sqlite']) {
+    if (sources.runtimeStorage.includes(marker)) {
+      addProblem(
+        problems,
+        'retired legacy Space transition',
+        `Engine runtime storage reopens a retired V2 generation through ${marker}`
+      )
+    }
+  }
+  for (const required of ['ActiveRuntimeManifest::V2(_)', 'StorageUpgradeRequired']) {
+    if (!sources.runtimeStorage.includes(required)) {
+      addProblem(
+        problems,
+        'retired legacy Space transition',
+        `Engine runtime storage is missing the V2 fail-closed marker ${required}`
+      )
+    }
+  }
+  return problems
+}
+
 function repositorySources() {
   return {
+    legacySpaceTransitionPathPresent: existsSync(
+      join(REPOSITORY_ROOT, 'crates/uc-infra/src/security/admission_space_transition.rs')
+    ),
+    infraSecurityModule: read('crates/uc-infra/src/security/mod.rs'),
+    infraSecurityRuntime: readSourceTree('crates/uc-infra/src/security'),
+    runtimeStorage: read('crates/uc-engine/src/assembly/runtime_storage.rs'),
     engine: read('crates/uc-engine/src/lib.rs'),
     engineRuntime: readSourceTree('crates/uc-engine/src'),
     engineWiring: read('crates/uc-engine/src/assembly/wire/mod.rs'),
@@ -1363,6 +1426,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkSpaceAdmissionPersistenceOwnership(),
     ...checkInfraSpaceAdmissionOwnership(),
     ...checkInfraSpaceSecurityOwnership(),
+    ...checkRetiredLegacySpaceTransition(sources),
     ...checkDualInvitationEntry(),
     ...checkSpaceMembershipMaintenanceOwnership(),
     ...checkRetiredLegacyPairingRecovery(),
@@ -1415,6 +1479,27 @@ function runNegativeFixtures(metadata, sources) {
   }, metadata, sources)
   expectRejected('historical vault used as network authority', (_changed, changedSources) => {
     changedSources.network += '\nfn authorize_from_history(_: ProfileContentKeyVault) {}\n'
+  }, metadata, sources)
+  expectRejected('retired legacy Space transition module', (_changed, changedSources) => {
+    changedSources.legacySpaceTransitionPathPresent = true
+  }, metadata, sources)
+  expectRejected('retired legacy Space transition export', (_changed, changedSources) => {
+    changedSources.infraSecurityModule += `
+mod admission_space_transition;
+pub use admission_space_transition::{space_generation_directory, DurableAdmissionSpaceTransition};
+`
+  }, metadata, sources)
+  expectRejected('retired legacy Space transition implementation', (_changed, changedSources) => {
+    changedSources.infraSecurityRuntime += `
+pub struct DurableAdmissionSpaceTransition;
+`
+  }, metadata, sources)
+  expectRejected('Engine V2 runtime storage bypass', (_changed, changedSources) => {
+    changedSources.runtimeStorage += `
+fn open_v2_generation(directory: &Path) {
+  let database = directory.join("space-generations").join("target.sqlite");
+}
+`
   }, metadata, sources)
 }
 

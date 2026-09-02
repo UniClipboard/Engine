@@ -461,7 +461,7 @@ Change: 新增完整 `SpaceControlGeneration` store；CrossSpace 复用 profile 
 Risk: 旧 transition checkpoint 可能跨版本存在；启动时先由升级器识别并完成或稳定拒绝，不能用新状态机误读旧 phase。
 
 Step 9（已完成）:
-File: `docs/exec-plans/completed/023-durable-membership-proof-and-admission-activation.md`、`docs/exec-plans/completed/028-single-space-admission-protocol.md`、`docs/exec-plans/active/032-admission-space-transition-internal-refactor.md`、安全文档与架构检查脚本
+File: `docs/exec-plans/completed/023-durable-membership-proof-and-admission-activation.md`、`docs/exec-plans/completed/028-single-space-admission-protocol.md`、`docs/exec-plans/completed/032-admission-space-transition-internal-refactor.md`、安全文档与架构检查脚本
 Change: 完成实现后删除被 033 取代的旧行为正文，按最终代码重新撰写 032 的 transition 深模块边界；增加负向架构检查，禁止 CrossSpace 引用 payload upgrade/rewrap、旧 reader 或 source/target cipher pair。
 Risk: 只改代码不移除旧规范会导致后续 Agent 恢复错误实现；文档和检查必须与 clean cutover 同提交完成。
 
