@@ -7,9 +7,9 @@ use uc_core::file_transfer::{FileTransferEvent, FileTransferEventStorePort};
 use uc_core::ids::{DeviceId, EntryId, SpaceId};
 use uc_core::ports::clipboard::EntryFileSetRepositoryPort;
 use uc_core::ports::{
-    AdvanceActiveClipboardPort, GetDirectoryPublishRecordPort, GetReceiveArtifactRecordPort,
-    ListProvisionalReceivesPort, LoadMobileConsumableClipboardPort, PublishPhase, ReceiveArtifact,
-    ReceiveArtifactOwnership, ReceiveArtifactPhase, ReceiveArtifactRecord,
+    AdvanceActiveClipboardPort, GetDirectoryPublishRecordPort, ListProvisionalReceivesPort,
+    ListUnsettledReceiveArtifactsPort, LoadMobileConsumableClipboardPort, PublishPhase,
+    ReceiveArtifact, ReceiveArtifactOwnership, ReceiveArtifactPhase, ReceiveArtifactRecord,
     ReceiveArtifactResolution, RecordDirectoryPublishPort, RecordReceiveArtifactsPort,
     RecordReceiverTransferPort, SecureStorageError, SecureStoragePort, SeedProvisionalReceivePort,
     UpdateProvisionalReceivePathPort,
@@ -314,11 +314,8 @@ async fn specialized_repositories_use_only_the_selected_v3_strategy() {
     };
     receive.record_receive_artifacts(&record).await.unwrap();
     assert_eq!(
-        receive
-            .get_receive_artifact_record("entry-v3", "attempt-v3")
-            .await
-            .unwrap(),
-        Some(record)
+        receive.list_unsettled_receive_artifacts().await.unwrap(),
+        vec![record]
     );
 
     let transfers = DieselFileTransferRepository::new_v3(

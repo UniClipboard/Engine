@@ -10,10 +10,9 @@ use uc_core::ports::space::{DeriveSpaceSubkeyPort, SpaceAccessError};
 use uc_core::ports::{
     AttemptError, AttemptState, BeginReceiveAttemptPort, BeginReceiveFailureOutcome,
     BeginReceiveFailurePort, BeginReceiveOutcome, CancelDirectoryAttemptTransfersPort,
-    ClaimReceiveCommitPort, DeleteReceiveStateForEntryPort, FinalizeProvisionalReceivePort,
-    GetEntryAttemptPort, GetEntryReceiveProgressPort, ListNonTerminalAttemptsPort,
-    ListProvisionalReceivesPort, PendingInboundTransfer, ProvisionalInboundTransfer,
-    ProvisionalReceiveAction, PurgeTerminalOrphanAttemptsPort, ReceiveItemRole,
+    ClaimReceiveCommitPort, FinalizeProvisionalReceivePort, GetEntryAttemptPort,
+    GetEntryReceiveProgressPort, ListNonTerminalAttemptsPort, ListProvisionalReceivesPort,
+    PendingInboundTransfer, ProvisionalInboundTransfer, ProvisionalReceiveAction, ReceiveItemRole,
     RecordReceiverTransferPort, RequestReceiveCancellationOutcome, RequestReceiveCancellationPort,
     SeedProvisionalReceivePort, TrackedFileTransferStatus, UpdateProvisionalReceivePathPort,
 };
@@ -23,7 +22,7 @@ use uc_infra::db::ports::DbExecutor;
 use uc_infra::db::repositories::{
     DieselEntryReceiveAttemptRepository, DieselFileTransferRepository,
 };
-use uc_infra::db::schema::{entry_receive_attempt, file_transfer, receive_artifact_log};
+use uc_infra::db::schema::{entry_receive_attempt, file_transfer};
 
 type AttemptRepo = DieselEntryReceiveAttemptRepository<DieselSqliteExecutor>;
 type TransferRepo = DieselFileTransferRepository<DieselSqliteExecutor>;
@@ -551,88 +550,4 @@ async fn legacy_transfer_seed_remains_outside_directory_attempt_projection() {
         .await
         .unwrap()
         .is_none());
-}
-
-#[tokio::test]
-async fn settled_receive_state_cleanup_is_atomic_and_orphans_respect_pending_artifacts() {
-    let (attempts, transfers, writer, _directory) = repos();
-    attempts
-        .begin_first_receive("delete-me", "a1", 1)
-        .await
-        .unwrap();
-    seed_transfer(
-        &transfers,
-        "delete-transfer",
-        "delete-me",
-        Some("a1"),
-        Some(1),
-    )
-    .await;
-    assert!(attempts
-        .delete_receive_state_for_entry("delete-me")
-        .await
-        .unwrap());
-    assert!(attempts
-        .get_entry_attempt("delete-me")
-        .await
-        .unwrap()
-        .is_none());
-    assert!(
-        writer
-            .run(|conn| {
-                Ok(file_transfer::table
-                    .filter(file_transfer::entry_id.eq("delete-me"))
-                    .count()
-                    .get_result::<i64>(conn)?)
-            })
-            .unwrap()
-            == 0
-    );
-
-    for entry_id in ["old-orphan", "pending-artifact", "still-receiving"] {
-        attempts
-            .begin_first_receive(entry_id, &format!("attempt-{entry_id}"), 1)
-            .await
-            .unwrap();
-    }
-    writer
-        .run(|conn| {
-            diesel::update(entry_receive_attempt::table.filter(
-                entry_receive_attempt::entry_id.eq_any(["old-orphan", "pending-artifact"]),
-            ))
-            .set(entry_receive_attempt::attempt_state.eq(AttemptState::Cancelled.to_string()))
-            .execute(conn)?;
-            diesel::insert_into(receive_artifact_log::table)
-                .values((
-                    receive_artifact_log::entry_id.eq("pending-artifact"),
-                    receive_artifact_log::attempt_id.eq("attempt-pending-artifact"),
-                    receive_artifact_log::phase.eq("preparing"),
-                    receive_artifact_log::resolution.eq("pending"),
-                    receive_artifact_log::artifact_ciphertext.eq(vec![1_u8]),
-                    receive_artifact_log::updated_at_ms.eq(1_i64),
-                ))
-                .execute(conn)?;
-            Ok(())
-        })
-        .unwrap();
-
-    assert_eq!(
-        attempts.purge_terminal_orphan_attempts(10).await.unwrap(),
-        1
-    );
-    assert!(attempts
-        .get_entry_attempt("old-orphan")
-        .await
-        .unwrap()
-        .is_none());
-    assert!(attempts
-        .get_entry_attempt("pending-artifact")
-        .await
-        .unwrap()
-        .is_some());
-    assert!(attempts
-        .get_entry_attempt("still-receiving")
-        .await
-        .unwrap()
-        .is_some());
 }

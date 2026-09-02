@@ -649,12 +649,9 @@ pub async fn wire_dependencies_from_inputs(
         request_cancel: directory_attempt_impl.clone(),
         begin_failure: directory_attempt_impl.clone(),
         record_artifacts: receive_artifact_impl.clone(),
-        get_artifacts: receive_artifact_impl.clone(),
         list_unsettled_artifacts: receive_artifact_impl,
         commit_inbound: inbound_commit_impl,
         entry_progress: file_transfer_adapter,
-        delete_state: directory_attempt_impl.clone(),
-        purge_orphans: directory_attempt_impl,
     };
 
     // The mobile-consumable reference is encrypted with a session-derived

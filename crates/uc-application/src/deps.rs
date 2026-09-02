@@ -304,12 +304,9 @@ pub struct DirectoryReceivePorts {
     pub request_cancel: Arc<dyn RequestReceiveCancellationPort>,
     pub begin_failure: Arc<dyn BeginReceiveFailurePort>,
     pub record_artifacts: Arc<dyn RecordReceiveArtifactsPort>,
-    pub get_artifacts: Arc<dyn GetReceiveArtifactRecordPort>,
     pub list_unsettled_artifacts: Arc<dyn ListUnsettledReceiveArtifactsPort>,
     pub commit_inbound: Arc<dyn CommitInboundReceivePort>,
     pub entry_progress: Arc<dyn GetEntryReceiveProgressPort>,
-    pub delete_state: Arc<dyn DeleteReceiveStateForEntryPort>,
-    pub purge_orphans: Arc<dyn PurgeTerminalOrphanAttemptsPort>,
 }
 
 /// Storage-domain ports bundle (blobs, thumbnails, file transfer tracking).

@@ -79,10 +79,9 @@ pub use directory_publish_log::{
 };
 pub use entry_receive_attempt::{
     AttemptError, AttemptState, BeginReceiveAttemptPort, BeginReceiveFailureOutcome,
-    BeginReceiveFailurePort, BeginReceiveOutcome, ClaimReceiveCommitPort,
-    DeleteReceiveStateForEntryPort, EntryReceiveAttempt, GetEntryAttemptPort,
-    ListNonTerminalAttemptsPort, PurgeTerminalOrphanAttemptsPort,
-    RequestReceiveCancellationOutcome, RequestReceiveCancellationPort,
+    BeginReceiveFailurePort, BeginReceiveOutcome, ClaimReceiveCommitPort, EntryReceiveAttempt,
+    GetEntryAttemptPort, ListNonTerminalAttemptsPort, RequestReceiveCancellationOutcome,
+    RequestReceiveCancellationPort,
 };
 pub use errors::AppDirsError;
 pub use file_transfer::{
@@ -126,9 +125,9 @@ pub use presence::{
     PeerReachabilityChanged, PeerReachabilityPort, PresenceError, ReachabilityState,
 };
 pub use receive_artifact_log::{
-    CleanupReceiveArtifactsPort, GetReceiveArtifactRecordPort, ListUnsettledReceiveArtifactsPort,
-    ReceiveArtifact, ReceiveArtifactLogError, ReceiveArtifactOwnership, ReceiveArtifactPhase,
-    ReceiveArtifactRecord, ReceiveArtifactResolution, RecordReceiveArtifactsPort,
+    CleanupReceiveArtifactsPort, ListUnsettledReceiveArtifactsPort, ReceiveArtifact,
+    ReceiveArtifactLogError, ReceiveArtifactOwnership, ReceiveArtifactPhase, ReceiveArtifactRecord,
+    ReceiveArtifactResolution, RecordReceiveArtifactsPort,
 };
 pub use search::maintenance::SearchIndexMaintenancePort;
 pub use search::search_index::SearchIndexPort;

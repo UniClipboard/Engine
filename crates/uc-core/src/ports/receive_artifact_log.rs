@@ -102,15 +102,6 @@ pub trait RecordReceiveArtifactsPort: Send + Sync {
 }
 
 #[async_trait]
-pub trait GetReceiveArtifactRecordPort: Send + Sync {
-    async fn get_receive_artifact_record(
-        &self,
-        entry_id: &str,
-        attempt_id: &str,
-    ) -> Result<Option<ReceiveArtifactRecord>, ReceiveArtifactLogError>;
-}
-
-#[async_trait]
 pub trait ListUnsettledReceiveArtifactsPort: Send + Sync {
     async fn list_unsettled_receive_artifacts(
         &self,
