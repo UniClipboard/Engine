@@ -1304,14 +1304,24 @@ async fn host_clipboard_change_is_processed_by_the_engine_and_stops_on_shutdown(
     change_tx.send(()).unwrap();
     let history_entry = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
-            let result = engine
+            let result = match engine
                 .execute(crate::Operation::QueryHistory(crate::QueryHistoryInput {
                     cursor: None,
                     limit: 10,
                     query: Some(probe.clone()),
                 }))
                 .await
-                .unwrap();
+            {
+                Ok(result) => result,
+                Err(error)
+                    if error.is_retryable()
+                        && error.category() == crate::EngineErrorCategory::Unavailable =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    continue;
+                }
+                Err(error) => panic!("query history failed: {error:?}"),
+            };
             let crate::OperationResult::HistoryPage { entries, .. } = result else {
                 panic!("expected history page");
             };
@@ -4065,21 +4075,19 @@ async fn persisted_engine_text_image_preview_and_logs_do_not_leave_plaintext_on_
         .unwrap();
 
     let history = engine
-        .execute(crate::Operation::QueryHistory(crate::QueryHistoryInput {
-            cursor: None,
-            limit: 25,
-            query: None,
-        }))
+        .execute(crate::Operation::ListHistoryEntries(
+            crate::ListHistoryEntriesInput {
+                offset: 0,
+                limit: 25,
+            },
+        ))
         .await
         .unwrap();
-    let crate::OperationResult::HistoryPage { entries, .. } = history else {
+    let crate::OperationResult::HistoryEntries(entries) = history else {
         panic!("history query returned the wrong result");
     };
     assert!(
-        entries
-            .iter()
-            .filter_map(|entry| entry.preview.as_deref())
-            .any(|preview| preview.contains(&probe)),
+        entries.iter().any(|entry| entry.preview.contains(&probe)),
         "the probe must reach the generated preview before persistence is scanned"
     );
 

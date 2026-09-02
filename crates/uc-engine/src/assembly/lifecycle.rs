@@ -10,6 +10,8 @@
 
 use std::sync::Arc;
 
+use anyhow::Context as _;
+
 use crate::assembly::deps::{SharedRuntimeDeps, SyncEngineDeps};
 use crate::assembly::sync_engine::{build_sync_engine_assembly, SyncEngineAssembly};
 use uc_application::deps::AppDeps;
@@ -89,7 +91,7 @@ pub async fn build_daemon_lifecycle(
     let prepared_network = settings
         .prepare_network()
         .await
-        .map_err(|error| anyhow::anyhow!("network settings preparation failed: {error}"))?;
+        .context("network settings preparation failed")?;
     let allow_relay_fallback =
         relay_fallback_override.unwrap_or(prepared_network.allow_relay_fallback);
     let allow_overlay_network_addrs = prepared_network.allow_overlay_network_addrs;
@@ -145,7 +147,7 @@ pub async fn build_daemon_lifecycle(
         iroh_config,
     )
     .await
-    .map_err(|e| anyhow::anyhow!("Slice 1+ assembly build failed: {e}"))?;
+    .context("Slice 1+ assembly build failed")?;
 
     Ok(DaemonLifecycle {
         sync_engine_assembly,

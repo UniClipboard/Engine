@@ -265,6 +265,17 @@ mod switch_tests {
         count: i64,
     }
 
+    fn revert_through_migration(connection: &mut SqliteConnection, target_version: &str) {
+        while connection
+            .applied_migrations()
+            .unwrap()
+            .iter()
+            .any(|version| version.to_string() == target_version)
+        {
+            connection.revert_last_migration(MIGRATIONS).unwrap();
+        }
+    }
+
     fn seed(path: &std::path::Path, value: &str) {
         let mut connection = SqliteConnection::establish(path.to_str().unwrap()).unwrap();
         diesel::sql_query("CREATE TABLE generation_probe (value TEXT NOT NULL)")
@@ -342,10 +353,7 @@ mod switch_tests {
         let pool = init_db_pool(database.to_str().unwrap()).unwrap();
         let mut connection = pool.get().unwrap();
 
-        // 先越过准入表与旧准入记录清理，再回滚数据库 revision migration。
-        connection.revert_last_migration(MIGRATIONS).unwrap();
-        connection.revert_last_migration(MIGRATIONS).unwrap();
-        connection.revert_last_migration(MIGRATIONS).unwrap();
+        revert_through_migration(&mut connection, "20260816000002");
 
         let remaining = diesel::sql_query(
             "SELECT name FROM sqlite_master WHERE type = 'trigger' \
@@ -366,9 +374,7 @@ mod switch_tests {
         let pool = init_db_pool(database.to_str().unwrap()).unwrap();
         let mut connection = pool.get().unwrap();
 
-        // 先越过准入表，再回滚到旧准入记录清理 migration 之前。
-        connection.revert_last_migration(MIGRATIONS).unwrap();
-        connection.revert_last_migration(MIGRATIONS).unwrap();
+        revert_through_migration(&mut connection, "20260819000001");
         diesel::sql_query(
             "INSERT INTO legacy_upgrade_pending_join \
              (peer_lookup_token, encrypted_payload, updated_at_ms) VALUES ('peer', X'01', 1)",

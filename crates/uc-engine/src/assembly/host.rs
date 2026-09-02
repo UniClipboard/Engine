@@ -561,6 +561,7 @@ mod tests {
         ClipboardHostEvent, ClipboardOriginKind, DeliveryHostEvent, HostEvent,
         HostEventEmitterPort, TransferHostEvent,
     };
+    use uc_core::TaskRegistry;
 
     use crate::engine::event_stream::event_channel;
     use crate::{
@@ -874,6 +875,14 @@ mod tests {
         wiring.wired.deps.settings.save(&settings).await.unwrap();
         let settings_assembly =
             crate::assembly::facade::build_settings_assembly(&wiring.wired.deps, &wiring.paths);
+        let task_registry = Arc::new(TaskRegistry::new());
+        wiring
+            .wired
+            .shared
+            .clipboard
+            .start_background(Arc::clone(&task_registry))
+            .await
+            .unwrap();
 
         let lifecycle = build_daemon_lifecycle(
             &wiring.wired.deps,
@@ -889,7 +898,7 @@ mod tests {
             None,
         )
         .await
-        .unwrap();
+        .unwrap_or_else(|error| panic!("daemon lifecycle assembly failed: {error:#}"));
         let membership_history_reachable = lifecycle
             .sync_engine_assembly
             .membership_history_exchange_is_reachable_for_test()
@@ -909,6 +918,9 @@ mod tests {
         lifecycle
             .sync_engine_assembly
             .shutdown(uc_core::FileTransferCancellationReason::Unknown)
+            .await;
+        task_registry
+            .shutdown(std::time::Duration::from_millis(500))
             .await;
 
         assert!(

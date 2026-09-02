@@ -755,14 +755,16 @@ pub async fn build_sync_engine_assembly(
     let continuation_route =
         encode_space_admission_route(&endpoint_addr, None).map_err(|source| {
             SyncEngineAssemblyError::ApplicationAssembly {
-                source: anyhow::Error::new(source),
+                source: anyhow::Error::new(source).context("failed to encode the admission route"),
             }
         })?;
     let identity_fingerprint = deps
         .security
         .fingerprint
         .from_public_key(endpoint_addr.id.as_bytes())
-        .map_err(|source| SyncEngineAssemblyError::ApplicationAssembly { source })?;
+        .map_err(|source| SyncEngineAssemblyError::ApplicationAssembly {
+            source: source.context("failed to derive the endpoint identity fingerprint"),
+        })?;
     let historical_signatures = Arc::new(OpenMlsHistoricalSignatureVerifier);
     let membership_network_gate = MembershipNetworkGate::active();
     let admission_transport: Arc<dyn uc_application::deps::SpaceAdmissionTransportPort> =
@@ -1093,7 +1095,8 @@ pub async fn build_sync_engine_assembly(
         })
         .await
         .map_err(|source| SyncEngineAssemblyError::ApplicationAssembly {
-            source: anyhow::Error::new(source),
+            source: anyhow::Error::new(source)
+                .context("failed to start the active clipboard session"),
         })?;
     let active_clipboard = active_clipboard_session.facade();
 
