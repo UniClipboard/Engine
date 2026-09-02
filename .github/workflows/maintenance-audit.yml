@@ -80,6 +80,19 @@ jobs:
     needs: responses_api_preflight
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      AUDIT_PROMPT: |
+        运行仓库 skill `${{ matrix.skill }}`，并且本 session 只运行这一个 skill。
+
+        这是定时全仓维护审查。请严格遵循 skill 及其共享 finding contract：
+        - scope.mode 必须是 `full`；
+        - run_id 必须是 `${{ github.run_id }}-${{ github.run_attempt }}`；
+        - head_ref 必须是 `${{ github.sha }}`，base_ref 为 null；
+        - 将 UTF-8 JSON artifact 写入 `audit-artifacts/${{ matrix.lane }}.json`；
+        - lane 必须是 `${{ matrix.lane }}`；
+        - 如实记录 completed、partial 或 blocked，以及所有 skipped 检查；
+        - 不实现修复，不修改其他仓库文件，不创建 Issue 或 PR，不访问远端业务系统；
+        - 最终回复只简短确认 artifact 路径和执行状态，不在回复中复制完整报告。
     strategy:
       fail-fast: false
       # 共享的自定义 Responses API 接入按单路顺序执行，避免审查请求相互争抢容量。
@@ -121,8 +134,10 @@ jobs:
           sudo chmod -R g+rwX audit-artifacts
           sudo find audit-artifacts -type d -exec chmod g+s {} +
 
-      - name: Run ${{ matrix.skill }}
+      - name: Run ${{ matrix.skill }} (attempt 1)
+        id: audit_attempt_1
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane }}
+        continue-on-error: true
         uses: openai/codex-action@v1
         with:
           responses-api-endpoint: ${{ secrets.CODEX_API_ENDPOINT || 'https://api.openai.com/v1/responses' }}
@@ -130,18 +145,53 @@ jobs:
           safety-strategy: unprivileged-user
           codex-user: uni-auditor
           sandbox: workspace-write
-          prompt: |
-            运行仓库 skill `${{ matrix.skill }}`，并且本 session 只运行这一个 skill。
+          prompt: ${{ env.AUDIT_PROMPT }}
 
-            这是定时全仓维护审查。请严格遵循 skill 及其共享 finding contract：
-            - scope.mode 必须是 `full`；
-            - run_id 必须是 `${{ github.run_id }}-${{ github.run_attempt }}`；
-            - head_ref 必须是 `${{ github.sha }}`，base_ref 为 null；
-            - 将 UTF-8 JSON artifact 写入 `audit-artifacts/${{ matrix.lane }}.json`；
-            - lane 必须是 `${{ matrix.lane }}`；
-            - 如实记录 completed、partial 或 blocked，以及所有 skipped 检查；
-            - 不实现修复，不修改其他仓库文件，不创建 Issue 或 PR，不访问远端业务系统；
-            - 最终回复只简短确认 artifact 路径和执行状态，不在回复中复制完整报告。
+      - name: Back off before audit attempt 2
+        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane) && steps.audit_attempt_1.outcome == 'failure' }}
+        run: sleep 60
+
+      - name: Run ${{ matrix.skill }} (attempt 2)
+        id: audit_attempt_2
+        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane) && steps.audit_attempt_1.outcome == 'failure' }}
+        continue-on-error: true
+        uses: openai/codex-action@v1
+        with:
+          responses-api-endpoint: ${{ secrets.CODEX_API_ENDPOINT || 'https://api.openai.com/v1/responses' }}
+          openai-api-key: ${{ secrets.CODEX_API_KEY }}
+          safety-strategy: unprivileged-user
+          codex-user: uni-auditor
+          sandbox: workspace-write
+          prompt: ${{ env.AUDIT_PROMPT }}
+
+      - name: Back off before audit attempt 3
+        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane) && steps.audit_attempt_1.outcome == 'failure' && steps.audit_attempt_2.outcome == 'failure' }}
+        run: sleep 60
+
+      - name: Run ${{ matrix.skill }} (attempt 3)
+        id: audit_attempt_3
+        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane) && steps.audit_attempt_1.outcome == 'failure' && steps.audit_attempt_2.outcome == 'failure' }}
+        continue-on-error: true
+        uses: openai/codex-action@v1
+        with:
+          responses-api-endpoint: ${{ secrets.CODEX_API_ENDPOINT || 'https://api.openai.com/v1/responses' }}
+          openai-api-key: ${{ secrets.CODEX_API_KEY }}
+          safety-strategy: unprivileged-user
+          codex-user: uni-auditor
+          sandbox: workspace-write
+          prompt: ${{ env.AUDIT_PROMPT }}
+
+      - name: Require a successful audit attempt
+        if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane) }}
+        env:
+          ATTEMPT_1: ${{ steps.audit_attempt_1.outcome }}
+          ATTEMPT_2: ${{ steps.audit_attempt_2.outcome }}
+          ATTEMPT_3: ${{ steps.audit_attempt_3.outcome }}
+        run: |
+          if [[ "$ATTEMPT_1" != "success" && "$ATTEMPT_2" != "success" && "$ATTEMPT_3" != "success" ]]; then
+            echo "::error::All Codex audit attempts failed (attempts: $ATTEMPT_1, $ATTEMPT_2, $ATTEMPT_3)."
+            exit 1
+          fi
 
       - name: Validate lane artifact
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane }}
