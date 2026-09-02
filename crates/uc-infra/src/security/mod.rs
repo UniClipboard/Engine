@@ -52,11 +52,8 @@ pub use default_current_profile::DefaultCurrentProfile;
 pub use encrypted_blob_store::EncryptedBlobStore;
 pub use encrypting_clipboard_event_writer::EncryptingClipboardEventWriter;
 pub use encrypting_inbound_receive_commit::EncryptingInboundReceiveCommit;
-pub use hashing::{hash_pin, verify_pin, Argon2PinHasher, Blake3Hasher};
-pub use identity_fingerprint::{
-    FingerprintDerivationError, Sha256IdentityFingerprintFactory, Sha256ShortCodeGenerator,
-    ShortCodeGenerator,
-};
+pub use hashing::Blake3Hasher;
+pub use identity_fingerprint::{FingerprintDerivationError, Sha256IdentityFingerprintFactory};
 pub use key_migration_adapter::DefaultKeyMigrationAdapter;
 pub use profile_content_key_vault::{
     InstalledProfileCatalog, ProfileContentKeyVault, ProfileContentKeyVaultError,

@@ -69,13 +69,12 @@ use uc_infra::search::{
     HkdfSearchKeyDerivation, SearchPipeline, SqliteSearchIndex, V3SearchKeyDerivation,
 };
 use uc_infra::security::{
-    ActiveSpaceGenerationManifestStore, AdmissionKeyManager, Argon2PinHasher, Blake3Hasher,
+    ActiveSpaceGenerationManifestStore, AdmissionKeyManager, Blake3Hasher,
     DecryptingClipboardRepresentationRepository, EncryptingClipboardEventWriter,
     EncryptingInboundReceiveCommit, ProfileContentKeyVault, ProfileLifecycleRepository,
     ProfileStorageUpgrade, ProfileStorageUpgradeOutcome, Sha256IdentityFingerprintFactory,
-    Sha256ShortCodeGenerator, SpaceControlGeneration, SpaceTransitionActivation,
-    V3AdmissionSpaceTransition, V3DeviceManagementReset, V3InitialSpaceActivation,
-    V3MembershipBranchTransition,
+    SpaceControlGeneration, SpaceTransitionActivation, V3AdmissionSpaceTransition,
+    V3DeviceManagementReset, V3InitialSpaceActivation, V3MembershipBranchTransition,
 };
 use uc_infra::settings::repository::FileSettingsRepository;
 use uc_infra::space::{
@@ -848,8 +847,6 @@ pub async fn wire_dependencies_from_inputs(
             profile_key_access_probe,
             space_access_ports,
             transfer_cipher: transfer_cipher.clone(),
-            pin_hasher: Arc::new(Argon2PinHasher),
-            short_code: Arc::new(Sha256ShortCodeGenerator),
             fingerprint: Arc::new(Sha256IdentityFingerprintFactory),
         },
         device: DevicePorts {

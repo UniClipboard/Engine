@@ -258,10 +258,6 @@ pub struct SecurityPorts {
     /// `dispatch_entry` / `ingest_inbound` 通过此 port 加解密 V3 网络字节。
     /// adapter 内部端到端自管会话。
     pub transfer_cipher: Arc<dyn uc_core::ports::security::TransferCipherPort>,
-    /// Argon2 PIN hasher for pairing.
-    pub pin_hasher: Arc<dyn uc_core::ports::security::PinHasherPort>,
-    /// Short pairing-code derivation.
-    pub short_code: Arc<dyn uc_core::ports::security::ShortCodeGeneratorPort>,
     /// Identity-fingerprint factory used by pairing.
     pub fingerprint: Arc<dyn uc_core::ports::security::IdentityFingerprintFactoryPort>,
 }
