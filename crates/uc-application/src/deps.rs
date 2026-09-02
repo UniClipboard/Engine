@@ -30,9 +30,7 @@ use uc_core::ports::search::maintenance::SearchIndexMaintenancePort;
 use uc_core::ports::search::search_index::SearchIndexPort;
 use uc_core::ports::search::search_key::SearchKeyDerivationPort;
 use uc_core::ports::search::search_pipeline::SearchPipelinePort;
-use uc_core::ports::space::{
-    DeriveAdmissionProofKeyPort, DeriveSpaceSubkeyPort, PrepareAdmissionOfferPort,
-};
+use uc_core::ports::space::DeriveSpaceSubkeyPort;
 use uc_core::ports::*;
 use uc_core::MemberRepositoryPort;
 use uc_observability_contract::analytics::AnalyticsPort;
@@ -231,8 +229,6 @@ pub struct SpaceAccessPorts {
     pub lock: Arc<dyn LockSpacePort>,
     pub resume_session: Arc<dyn ResumeSpaceSessionPort>,
     pub derive_subkey: Arc<dyn DeriveSpaceSubkeyPort>,
-    pub prepare_admission_offer: Arc<dyn PrepareAdmissionOfferPort>,
-    pub derive_admission_proof_key: Arc<dyn DeriveAdmissionProofKeyPort>,
     pub prepare_admission_target_access:
         Arc<dyn uc_core::ports::space::PrepareAdmissionTargetAccessPort>,
     pub prepare_sponsor_admission_security: Arc<dyn PrepareSponsorAdmissionSecurityPort>,

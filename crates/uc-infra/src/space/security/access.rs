@@ -16,7 +16,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use hkdf::Hkdf;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -41,7 +40,7 @@ use uc_core::crypto::model::{EncryptionError, Passphrase as LegacyPassphrase};
 
 use crate::security::crypto_model::{EncryptedBlob, KeyScope, KeySlot, WrappedMasterKey};
 use crate::security::{v1_aead, Kek, MasterKey, ProfileContentKeyVault};
-use uc_core::ids::{DeviceId, ProfileId, SessionId, SpaceId};
+use uc_core::ids::{DeviceId, ProfileId, SpaceId};
 use uc_core::membership::{
     AdmissionReplayId, BeginRevocationOutcome, BootstrapError, BootstrapId, GroupBootstrapPort,
     GroupBootstrapResult, GroupEpoch, GroupRevocationPort, GroupRevocationResult, KeyEpochError,
@@ -52,12 +51,10 @@ use uc_core::membership::{
     RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceProtectionError,
     SpaceProtectionMode, SpaceProtectionSnapshot, SpaceProtectionStatusPort, SpaceSecurityMode,
 };
-use uc_core::pairing::InvitationCode;
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::{SpaceAccessError, SpaceAccessStore};
 use uc_core::space_access::{
-    AdmissionOffer, GroupAdmission, JoinOffer, PreparedAdmissionOffer,
-    PreparedAdmissionTargetAccess, PreparedGroupJoin, ProofDerivedKey,
+    GroupAdmission, JoinOffer, PreparedAdmissionTargetAccess, PreparedGroupJoin, ProofDerivedKey,
 };
 
 use super::active_space_security_session::{
@@ -294,13 +291,6 @@ fn map_and_log_local_crypto_error(
     SpaceAccessError::Internal(err)
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct AdmissionKdfOffer {
-    version: String,
-    kdf: crate::security::crypto_model::KdfParams,
-    salt: Vec<u8>,
-}
-
 #[derive(Serialize, Deserialize)]
 struct AdmissionTargetAccessV1 {
     version: u16,
@@ -438,34 +428,6 @@ pub(super) fn open_group_catalog(
         return Err(EncryptionError::KeyMaterialCorrupt);
     }
     Ok(portable)
-}
-
-fn serialize_admission_kdf_offer(keyslot: &KeySlot) -> Result<Vec<u8>, EncryptionError> {
-    serde_json::to_vec(&AdmissionKdfOffer {
-        version: "V1".to_string(),
-        kdf: keyslot.kdf.clone(),
-        salt: keyslot.salt.clone(),
-    })
-    .map_err(|_| EncryptionError::KeyMaterialCorrupt)
-}
-
-fn derive_admission_proof_key(
-    kek: &Kek,
-    invitation: &InvitationCode,
-    session: &SessionId,
-    space_id: &SpaceId,
-) -> Result<ProofDerivedKey, EncryptionError> {
-    let hkdf = Hkdf::<Sha256>::new(Some(invitation.as_str().as_bytes()), kek.as_bytes());
-    let mut info = Vec::with_capacity(session.as_str().len() + space_id.as_ref().len() + 48);
-    info.extend_from_slice(b"uniclipboard-admission-proof/v1");
-    info.extend_from_slice(&(session.as_str().len() as u32).to_be_bytes());
-    info.extend_from_slice(session.as_str().as_bytes());
-    info.extend_from_slice(&(space_id.as_ref().len() as u32).to_be_bytes());
-    info.extend_from_slice(space_id.as_ref().as_bytes());
-    let mut output = [0u8; 32];
-    hkdf.expand(&info, &mut output)
-        .map_err(|_| EncryptionError::CryptoFailure)?;
-    Ok(ProofDerivedKey::from_bytes(output))
 }
 
 impl DefaultSpaceAccessAdapter {
@@ -658,68 +620,6 @@ impl DefaultSpaceAccessAdapter {
         state.kek.zeroize();
         state.master_key.zeroize();
         encoded.map(PreparedAdmissionTargetAccess::from_bytes)
-    }
-
-    async fn prepare_admission_offer(
-        &self,
-        space_id: &SpaceId,
-        invitation: &InvitationCode,
-        pairing_session_id: &SessionId,
-    ) -> Result<PreparedAdmissionOffer, SpaceAccessError> {
-        if self.session.current_space_id().ok().as_ref() != Some(space_id) {
-            return Err(SpaceAccessError::NotUnlocked);
-        }
-        let profile = self
-            .current_profile
-            .current_profile()
-            .await
-            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
-        let scope = key_scope_from_profile(&profile);
-        let keyslot = self
-            .key_material
-            .load_keyslot(&scope)
-            .await
-            .map_err(map_encryption_error)?;
-        let kek = self
-            .key_material
-            .load_kek(&scope)
-            .await
-            .map_err(map_encryption_error)?;
-        let kdf_parameters_blob =
-            serialize_admission_kdf_offer(&keyslot).map_err(map_encryption_error)?;
-        let mut challenge_nonce = [0u8; 32];
-        rand::rng().fill_bytes(&mut challenge_nonce);
-        let verification_key =
-            derive_admission_proof_key(&kek, invitation, pairing_session_id, space_id)
-                .map_err(map_encryption_error)?;
-
-        Ok(PreparedAdmissionOffer {
-            offer: AdmissionOffer {
-                space_id: space_id.clone(),
-                kdf_parameters_blob,
-                challenge_nonce,
-            },
-            verification_key,
-        })
-    }
-
-    async fn derive_admission_proof_key(
-        &self,
-        offer: &AdmissionOffer,
-        passphrase: &DomainPassphrase,
-        invitation: &InvitationCode,
-        pairing_session_id: &SessionId,
-    ) -> Result<ProofDerivedKey, SpaceAccessError> {
-        let parameters: AdmissionKdfOffer = serde_json::from_slice(&offer.kdf_parameters_blob)
-            .map_err(|_| SpaceAccessError::CorruptedKeyMaterial)?;
-        if parameters.version != "V1" {
-            return Err(SpaceAccessError::CorruptedKeyMaterial);
-        }
-        let legacy = LegacyPassphrase(passphrase.expose().to_string());
-        let kek = v1_aead::derive_kek_argon2id(&legacy, &parameters.salt, &parameters.kdf)
-            .map_err(|error| map_and_log_kdf_error(error, "derive_admission_proof_key"))?;
-        derive_admission_proof_key(&kek, invitation, pairing_session_id, &offer.space_id)
-            .map_err(map_encryption_error)
     }
 
     pub(crate) async fn prepare_group_join(
@@ -2296,9 +2196,8 @@ mod intent_ports {
         ResumeSpaceSessionPort,
     };
     use uc_core::ports::space::{
-        CurrentSessionProofKeyPort, DeriveAdmissionProofKeyPort, DeriveProofKeyPort,
-        DeriveSpaceSubkeyPort, PrepareAdmissionOfferPort, PrepareAdmissionTargetAccessPort,
-        PrepareJoinOfferPort,
+        CurrentSessionProofKeyPort, DeriveProofKeyPort, DeriveSpaceSubkeyPort,
+        PrepareAdmissionTargetAccessPort, PrepareJoinOfferPort,
     };
 
     #[async_trait]
@@ -2396,44 +2295,6 @@ mod intent_ports {
             passphrase: &DomainPassphrase,
         ) -> Result<ProofDerivedKey, SpaceAccessError> {
             SpaceAccessStore::derive_master_key_for_proof(self, offer, passphrase).await
-        }
-    }
-
-    #[async_trait]
-    impl PrepareAdmissionOfferPort for DefaultSpaceAccessAdapter {
-        async fn prepare_admission_offer(
-            &self,
-            space_id: &SpaceId,
-            invitation: &InvitationCode,
-            pairing_session_id: &SessionId,
-        ) -> Result<PreparedAdmissionOffer, SpaceAccessError> {
-            DefaultSpaceAccessAdapter::prepare_admission_offer(
-                self,
-                space_id,
-                invitation,
-                pairing_session_id,
-            )
-            .await
-        }
-    }
-
-    #[async_trait]
-    impl DeriveAdmissionProofKeyPort for DefaultSpaceAccessAdapter {
-        async fn derive_admission_proof_key(
-            &self,
-            offer: &AdmissionOffer,
-            passphrase: &DomainPassphrase,
-            invitation: &InvitationCode,
-            pairing_session_id: &SessionId,
-        ) -> Result<ProofDerivedKey, SpaceAccessError> {
-            DefaultSpaceAccessAdapter::derive_admission_proof_key(
-                self,
-                offer,
-                passphrase,
-                invitation,
-                pairing_session_id,
-            )
-            .await
         }
     }
 }
@@ -3616,7 +3477,6 @@ mod admission_tests {
         PreparedRevocationResolution, RevocationId, RevocationRecord, RevocationStage,
         RevocationStatus,
     };
-    use uc_core::pairing::InvitationCode;
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
     use super::*;
@@ -5285,59 +5145,6 @@ mod admission_tests {
         assert!(matches!(error, SpaceAccessError::SecurityState { .. }));
         assert!(error.source().is_some());
         assert_eq!(session.current_space_id().unwrap(), old_space);
-    }
-
-    #[test]
-    fn admission_offer_contains_kdf_parameters_but_not_wrapped_content_key() {
-        let scope = KeyScope {
-            profile_id: "profile-a".to_string(),
-        };
-        let slot = KeySlot::draft_v1(scope)
-            .unwrap()
-            .finalize(WrappedMasterKey {
-                blob: v1_aead::encrypt_blob_xchacha(
-                    &MasterKey::from_bytes(&[7u8; 32]).unwrap(),
-                    &[9u8; 32],
-                    b"wrapped-master-key",
-                )
-                .unwrap(),
-            });
-
-        let encoded = serialize_admission_kdf_offer(&slot).unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-
-        assert_eq!(value["version"], "V1");
-        assert!(value.get("kdf").is_some());
-        assert!(value.get("salt").is_some());
-        assert!(value.get("wrapped_master_key").is_none());
-    }
-
-    #[test]
-    fn admission_proof_key_is_bound_to_invitation_session_and_space() {
-        let kek = Kek::from_bytes(&[3u8; 32]).unwrap();
-        let invitation = InvitationCode::new("invite-a");
-        let session = SessionId::new("session-a".to_string());
-        let space = SpaceId::from("space-a");
-
-        let base = derive_admission_proof_key(&kek, &invitation, &session, &space).unwrap();
-        let other_invitation =
-            derive_admission_proof_key(&kek, &InvitationCode::new("invite-b"), &session, &space)
-                .unwrap();
-        let other_session = derive_admission_proof_key(
-            &kek,
-            &invitation,
-            &SessionId::new("session-b".to_string()),
-            &space,
-        )
-        .unwrap();
-        let other_space =
-            derive_admission_proof_key(&kek, &invitation, &session, &SpaceId::from("space-b"))
-                .unwrap();
-
-        assert_ne!(base.as_bytes(), kek.as_bytes());
-        assert_ne!(base.as_bytes(), other_invitation.as_bytes());
-        assert_ne!(base.as_bytes(), other_session.as_bytes());
-        assert_ne!(base.as_bytes(), other_space.as_bytes());
     }
 
     #[tokio::test]
