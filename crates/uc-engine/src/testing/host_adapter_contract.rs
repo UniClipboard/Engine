@@ -1659,18 +1659,6 @@ async fn host_capabilities_wire_real_core_dependencies() {
     .unwrap();
 
     assert_eq!(wiring.paths.app_data_root_dir, private);
-    assert_eq!(
-        wiring
-            .wired
-            .deps
-            .security
-            .current_profile
-            .current_profile()
-            .await
-            .unwrap()
-            .as_ref(),
-        "mobile-primary"
-    );
 }
 
 #[tokio::test]

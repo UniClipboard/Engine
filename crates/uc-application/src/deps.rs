@@ -252,16 +252,12 @@ pub struct SpaceAccessPorts {
 /// 安全领域端口组。
 #[derive(Clone)]
 pub struct SecurityPorts {
-    pub current_profile: Arc<dyn uc_core::ports::security::current_profile::CurrentProfilePort>,
     pub secure_storage: Arc<dyn SecureStoragePort>,
     pub profile_key_access_probe: Arc<dyn ProbeProfileKeyAccessPort>,
     /// Narrow space-access intent ports (initialize / unlock / lock / resume /
     /// subkey / proof-key, etc.). Each consumer depends on the slice it calls;
     /// nothing holds a catch-all space-access surface.
     pub space_access_ports: SpaceAccessPorts,
-    /// 业务 blob 加解密 port——4 个剪切板 decorator 通过此 port 加解密
-    /// inline_data。adapter 内部端到端自管会话与 V1 AEAD。
-    pub blob_cipher: Arc<dyn uc_core::ports::security::BlobCipherPort>,
     /// 剪切板传输 AEAD port——`uc_application::usecases::clipboard_sync` 的
     /// `dispatch_entry` / `ingest_inbound` 通过此 port 加解密 V3 网络字节。
     /// adapter 内部端到端自管会话。
@@ -410,7 +406,6 @@ pub struct AppDeps {
     pub re_pairing_state_store: Arc<dyn RePairingStateStorePort>,
     pub current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
     pub initial_space_activation: Arc<dyn InitialSpaceActivationPort>,
-    pub portable_current_space_identity: Arc<dyn PortableCurrentSpaceIdentityPort>,
     /// 整机配置迁移 facade（导出 / 导入预览 / 暂存导入）。
     ///
     /// 与其它抽象 port 不同,这里直接携带组装好的 facade:它的依赖

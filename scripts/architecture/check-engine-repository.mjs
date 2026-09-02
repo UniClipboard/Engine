@@ -274,6 +274,24 @@ function checkPublicSurface(metadata, sources) {
   return problems
 }
 
+function checkApplicationDependencyInventory(sources) {
+  const problems = []
+  for (const field of [
+    'pub current_profile:',
+    'pub blob_cipher:',
+    'pub portable_current_space_identity:',
+  ]) {
+    if (sources.applicationDeps.includes(field)) {
+      addProblem(
+        problems,
+        'application dependency inventory',
+        `retired wiring-only field remains in Application dependency bundles: ${field}`
+      )
+    }
+  }
+  return problems
+}
+
 function checkBindingProvenance(metadata, sources) {
   const problems = []
   const engineVersion = packageByName(metadata, 'uc-engine').version
@@ -1392,6 +1410,7 @@ function repositorySources() {
     engine: read('crates/uc-engine/src/lib.rs'),
     engineRuntime: readSourceTree('crates/uc-engine/src'),
     engineWiring: read('crates/uc-engine/src/assembly/wire/mod.rs'),
+    applicationDeps: read('crates/uc-application/src/deps.rs'),
     application: readSourceTree('crates/uc-application/src'),
     network: readSourceTree('crates/uc-infra/src/network'),
     v3AdmissionTransition: read(
@@ -1416,6 +1435,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkOpenMlsValidation(metadata),
     ...checkLocalDependencies(metadata),
     ...checkPublicSurface(metadata, sources),
+    ...checkApplicationDependencyInventory(sources),
     ...checkBindingProvenance(metadata, sources),
     ...checkLanIsolation(metadata, sources),
     ...checkProfileStorageGenerationOwnership(sources),
@@ -1463,6 +1483,9 @@ function runNegativeFixtures(metadata, sources) {
   }, metadata, sources)
   expectRejected('automatic LAN fallback', (_changed, changedSources) => {
     changedSources.runtime += '\nfn fallback_to_lan() {}\n'
+  }, metadata, sources)
+  expectRejected('retired Application dependency inventory', (_changed, changedSources) => {
+    changedSources.applicationDeps += '\npub current_profile: RetiredWiringOnlyPort,\n'
   }, metadata, sources)
   expectRejected('retired pairing transport', (_changed, changedSources) => {
     changedSources.runtime += '\nconst PAIRING_ALPN: &[u8] = b"/uniclipboard/pairing/2";\n'

@@ -796,6 +796,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 | 日期 | 主题 | 长期结论 |
 | --- | --- | --- |
+| 2026-09-02 | 031 wiring inventory 删除 | `AppDeps` 不再保存只在 Engine 组装期消费的 portable current-space identity，`SecurityPorts` 不再保存 current profile 与 blob cipher；真实 adapter 继续在 composition root 局部注入其消费者。仓库检查禁止这三个 wiring-only 字段回流。 |
 | 2026-09-02 | 031 实施基线恢复 | Slice 1 只修正两处已被现有稳定合同取代的陈旧测试期望：已移除设备继续不可同步，统一设备组查询继续返回 `DeviceGroupChoices`。本轮无生产行为或架构变化。 |
 | 2026-09-02 | Application 依赖表面深化重基线 | ADR-018 继续定义五个 Application 领域归属，规格 031 取代旧 018 的剩余实施计划。重构以唯一 Application assembly 和具体 `ApplicationRuntime` 隐藏对象图、启动回滚与关闭顺序；Engine 继续选择 Iroh/Infra adapter 和观测 decorator。Search 与 Space 分离，Clipboard reconcile 成为 worker 前置门禁，Space 等待 029 完成及 030 按 033 control-only generation 重基线。本轮只更新计划，无生产行为变化。 |
 | 2026-09-02 | 定时维护审查 Action | GitHub Actions 每周并行启动五个互不调用的全仓审查 session，再由独立 session 汇总标准 JSON artifact；Codex 与产品仓发布流程统一从 `CODEX_API_ENDPOINT` 和 `CODEX_API_KEY` 读取 Responses API 接入配置。开发者通过 Actions Summary 阅读去重报告，并可下载各 lane 与汇总产物追溯证据。审查只报告问题，不自动修复、建 Issue 或改变运行时架构。 |
