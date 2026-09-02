@@ -5,6 +5,19 @@ on:
     # 每周一 09:00（Asia/Shanghai）。GitHub Actions cron 使用 UTC。
     - cron: "0 1 * * 1"
   workflow_dispatch:
+    inputs:
+      lane:
+        description: 只运行一个专项，或运行全部专项并汇总
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - module_depth
+          - failure_recovery
+          - runtime_resilience
+          - observability
+          - security_contract
 
 permissions:
   contents: read
@@ -85,20 +98,37 @@ jobs:
             skill: uni-security-contract-audit
 
     steps:
+      - name: Create unprivileged audit user
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane }}
+        run: |
+          sudo adduser --system --home /home/uni-auditor --shell /bin/bash --group uni-auditor
+          sudo usermod -a -G uni-auditor runner
+          sudo usermod -a -G runner uni-auditor
+
       - name: Check out repository
-        uses: actions/checkout@v4
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane }}
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prepare artifact directory
-        run: mkdir -p audit-artifacts
+      - name: Prepare restricted audit workspace
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane }}
+        run: |
+          mkdir -p audit-artifacts
+          sudo chown -R runner:uni-auditor "$GITHUB_WORKSPACE"
+          sudo chmod -R g+rX "$GITHUB_WORKSPACE"
+          sudo chmod -R g+rwX audit-artifacts
+          sudo find audit-artifacts -type d -exec chmod g+s {} +
 
       - name: Run ${{ matrix.skill }}
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane }}
         uses: openai/codex-action@v1
         with:
           responses-api-endpoint: ${{ secrets.CODEX_API_ENDPOINT || 'https://api.openai.com/v1/responses' }}
           openai-api-key: ${{ secrets.CODEX_API_KEY }}
+          safety-strategy: unprivileged-user
+          codex-user: uni-auditor
           sandbox: workspace-write
           prompt: |
             运行仓库 skill `${{ matrix.skill }}`，并且本 session 只运行这一个 skill。
@@ -114,6 +144,7 @@ jobs:
             - 最终回复只简短确认 artifact 路径和执行状态，不在回复中复制完整报告。
 
       - name: Validate lane artifact
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane }}
         env:
           ARTIFACT: audit-artifacts/${{ matrix.lane }}.json
           EXPECTED_LANE: ${{ matrix.lane }}
@@ -143,12 +174,13 @@ jobs:
             ' "$ARTIFACT" > /dev/null
 
       - name: Require complete lane coverage
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane }}
         env:
           ARTIFACT: audit-artifacts/${{ matrix.lane }}.json
         run: jq -e '.status == "completed"' "$ARTIFACT" > /dev/null
 
       - name: Upload lane artifact
-        if: ${{ always() }}
+        if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane) }}
         uses: actions/upload-artifact@v4
         with:
           name: uni-maintenance-audit-lane-${{ matrix.lane }}
@@ -158,7 +190,7 @@ jobs:
 
   report:
     name: Aggregate developer report
-    if: ${{ always() && needs.responses_api_preflight.result == 'success' }}
+    if: ${{ always() && needs.responses_api_preflight.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.lane == 'all') }}
     needs:
       - responses_api_preflight
       - audit
@@ -166,8 +198,14 @@ jobs:
     timeout-minutes: 30
 
     steps:
+      - name: Create unprivileged audit user
+        run: |
+          sudo adduser --system --home /home/uni-auditor --shell /bin/bash --group uni-auditor
+          sudo usermod -a -G uni-auditor runner
+          sudo usermod -a -G runner uni-auditor
+
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 1
           persist-credentials: false
@@ -184,11 +222,20 @@ jobs:
           path: audit-input
           merge-multiple: true
 
+      - name: Prepare restricted report workspace
+        run: |
+          sudo chown -R runner:uni-auditor "$GITHUB_WORKSPACE"
+          sudo chmod -R g+rX "$GITHUB_WORKSPACE"
+          sudo chmod -R g+rwX audit-output
+          sudo find audit-output -type d -exec chmod g+s {} +
+
       - name: Run uni-audit-report
         uses: openai/codex-action@v1
         with:
           responses-api-endpoint: ${{ secrets.CODEX_API_ENDPOINT || 'https://api.openai.com/v1/responses' }}
           openai-api-key: ${{ secrets.CODEX_API_KEY }}
+          safety-strategy: unprivileged-user
+          codex-user: uni-auditor
           sandbox: workspace-write
           prompt: |
             运行仓库 skill `uni-audit-report`，并且本 session 只运行这一个 skill。
