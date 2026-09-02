@@ -595,7 +595,11 @@ async fn host_analytics_reaches_application_and_identity_wiring() {
     let wiring = crate::assembly::host::wire_host_capabilities(&EngineConfig::new("1.2.3"), host)
         .await
         .expect("host wiring");
-    wiring.wired.deps.analytics.capture(Event::AppFirstOpen);
+    wiring
+        .wired
+        .sync_engine
+        .analytics
+        .capture(Event::AppFirstOpen);
     let person_id = Uuid::now_v7();
     wiring
         .wired
@@ -1383,9 +1387,9 @@ async fn new_engine_does_not_inherit_previous_engine_clipboard_attribution() {
     .unwrap();
     first
         .wired
-        .deps
-        .clipboard
-        .clipboard_change_origin
+        .application
+        .host_adapters()
+        .change_origin
         .record_self_write(
             uc_core::ports::clipboard::SelfWriteMatch::ByNextChange("old-write".into()),
             uc_core::ports::clipboard::SelfWriteAttribution::Remote,
@@ -1417,9 +1421,9 @@ async fn new_engine_does_not_inherit_previous_engine_clipboard_attribution() {
     .unwrap();
     let origin = second
         .wired
-        .deps
-        .clipboard
-        .clipboard_change_origin
+        .application
+        .host_adapters()
+        .change_origin
         .attribute_observed_change("fresh-local-copy")
         .await;
 

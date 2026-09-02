@@ -964,22 +964,17 @@ mod tests {
 
     #[test]
     fn disabled_global_sync_records_the_rejection_reason() {
-        let writer = CapturedWriter::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .without_time()
-            .with_writer(writer.clone())
-            .finish();
+        // 与 relay timing 测试共用唯一全局 subscriber。并行测试期间临时
+        // default 会与全局 callsite interest cache 竞争，偶发丢失本线程日志。
+        let writer = timing_log_writer();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("build test runtime");
 
-        tracing::subscriber::with_default(subscriber, || {
-            assert!(!runtime.block_on(inbound_sync_enabled(&FixedSettings {
-                sync_enabled: false,
-            })));
-        });
+        assert!(!runtime.block_on(inbound_sync_enabled(&FixedSettings {
+            sync_enabled: false,
+        })));
 
         assert!(
             writer.output().contains("reason=\"sync_disabled\""),

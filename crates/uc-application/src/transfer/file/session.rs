@@ -13,13 +13,13 @@ use crate::transfer::file::FileTransferApplicationError;
 use crate::transfer::file::facade::BeginReceiverTransfer;
 
 #[derive(Default)]
-pub(crate) struct FileTransferSessionRegistry {
+pub(crate) struct ReceiverTransferHandleRegistry {
     create_gate: Mutex<()>,
-    sessions: Mutex<HashMap<String, Arc<FileTransferSession>>>,
+    sessions: Mutex<HashMap<String, Arc<ReceiverTransferHandle>>>,
     closed: Mutex<bool>,
 }
 
-impl FileTransferSessionRegistry {
+impl ReceiverTransferHandleRegistry {
     pub(crate) fn new() -> Self {
         Self::default()
     }
@@ -36,18 +36,18 @@ impl FileTransferSessionRegistry {
         }
     }
 
-    pub(crate) async fn get(&self, transfer_id: &str) -> Option<Arc<FileTransferSession>> {
+    pub(crate) async fn get(&self, transfer_id: &str) -> Option<Arc<ReceiverTransferHandle>> {
         self.sessions.lock().await.get(transfer_id).cloned()
     }
 
-    pub(crate) async fn insert(&self, session: Arc<FileTransferSession>) {
+    pub(crate) async fn insert(&self, session: Arc<ReceiverTransferHandle>) {
         self.sessions
             .lock()
             .await
             .insert(session.transfer_id().to_owned(), session);
     }
 
-    pub(crate) async fn remove(&self, transfer_id: &str, expected: &FileTransferSession) {
+    pub(crate) async fn remove(&self, transfer_id: &str, expected: &ReceiverTransferHandle) {
         let mut sessions = self.sessions.lock().await;
         if sessions
             .get(transfer_id)
@@ -57,12 +57,12 @@ impl FileTransferSessionRegistry {
         }
     }
 
-    pub(crate) async fn close_and_snapshot(&self) -> Vec<Arc<FileTransferSession>> {
+    pub(crate) async fn close_and_snapshot(&self) -> Vec<Arc<ReceiverTransferHandle>> {
         *self.closed.lock().await = true;
         self.sessions.lock().await.values().cloned().collect()
     }
 
-    pub(crate) async fn snapshot(&self) -> Vec<Arc<FileTransferSession>> {
+    pub(crate) async fn snapshot(&self) -> Vec<Arc<ReceiverTransferHandle>> {
         self.sessions.lock().await.values().cloned().collect()
     }
 }
@@ -73,29 +73,29 @@ struct SessionState {
     terminal_event: Option<FileTransferEvent>,
 }
 
-pub struct FileTransferSession {
+pub struct ReceiverTransferHandle {
     descriptor: BeginReceiverTransfer,
     store: Arc<dyn FileTransferEventStorePort>,
     publisher: Arc<dyn FileTransferEventPublisherPort>,
-    registry: Weak<FileTransferSessionRegistry>,
+    registry: Weak<ReceiverTransferHandleRegistry>,
     state: Mutex<SessionState>,
 }
 
-impl std::fmt::Debug for FileTransferSession {
+impl std::fmt::Debug for ReceiverTransferHandle {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("FileTransferSession")
+            .debug_struct("ReceiverTransferHandle")
             .field("transfer_id", &self.transfer_id())
             .finish_non_exhaustive()
     }
 }
 
-impl FileTransferSession {
+impl ReceiverTransferHandle {
     pub(crate) fn new(
         descriptor: BeginReceiverTransfer,
         store: Arc<dyn FileTransferEventStorePort>,
         publisher: Arc<dyn FileTransferEventPublisherPort>,
-        registry: Weak<FileTransferSessionRegistry>,
+        registry: Weak<ReceiverTransferHandleRegistry>,
         last_progress_bytes: Option<u64>,
     ) -> Self {
         Self {

@@ -17,4 +17,4 @@ pub use ports::{
     WipeProfileKeysPort,
 };
 pub use prepare::PrepareProfileLifecycleUseCase;
-pub use use_case::ProfileFactoryResetUseCase;
+pub use use_case::ProfileFactoryResetFacade;

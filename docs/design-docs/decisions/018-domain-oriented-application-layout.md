@@ -5,7 +5,7 @@
 - **相关文档**：`docs/design-docs/layers/application.md`、
   `docs/architecture/architecture-bible.md`、
   `docs/exec-plans/completed/018-domain-oriented-application-layout.md`、
-  `docs/exec-plans/active/031-application-dependency-surface-deepening.md`
+  `docs/exec-plans/completed/031-application-dependency-surface-deepening.md`
 
 ## 背景
 
@@ -70,6 +70,22 @@ src/
 
 `AppFacade` 只聚合少量领域入口。它不再是所有动作的平铺转发清单；调用方通过空间、剪贴板、
 传输、搜索和设置等领域入口理解系统。
+
+### 顶层组装与运行期同样归 Application
+
+`uc-application` 对外只公开 `facade` 与 `deps` 两个根模块。`deps` 保存被动的组装输入；它可以包含
+窄 port、宿主回调和 Engine 已选择的具体能力，但不公开领域 use case、coordinator、runtime deps
+或 session。`facade` 是批准的业务与生命周期合同白名单。
+
+`ApplicationAssembly::build(ApplicationDeps)` 是唯一顶层对象图构造入口。File Transfer、Search、
+Settings、Clipboard 与 Space 的对象图由 Application 内部各自组装；Engine 只负责选择 Iroh、Infra、
+宿主 adapter 与观测 decorator，并把最终能力提交给该入口。Engine 在生产 session 中不得保存领域
+assembly、runtime 或 session handle。
+
+`ApplicationRuntime::start` 是唯一应用启动动作，负责先完成 Active Clipboard reconcile 门禁，再启动
+依赖该状态的持续工作；某阶段失败时，它反向关闭已启动 owner，并保留原始 typed source。正常关闭时，
+Engine 只调用一次 `ApplicationRuntime::shutdown`，Application 内部完成各领域停止、排空和错误汇总。
+稳定 `AppFacade` 与 `ApplicationRuntime` 是 Engine 在启动完成后持有的两个 Application 入口。
 
 ### `facade/` 只保留对外入口
 
@@ -160,3 +176,5 @@ src/
 7. `facade/` 中只剩领域入口和对外类型，不再包含运行期、协调器、会话、内部适配、事件总线、
    缓存、投影构建或业务流程实现；
 8. 每轮迁移通过相关测试、`cargo check --workspace --all-targets --locked`、格式、架构检查和差异检查。
+9. Engine 只调用一次顶层 Application build/start/shutdown，不持有领域运行期或重新构造 Application
+   对象图；crate 根公开面维持 `facade` 与 `deps` 白名单。

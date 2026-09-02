@@ -8,7 +8,7 @@ use std::sync::Arc;
 use uc_core::app_dirs::AppPaths;
 use uc_core::settings::model::CongestionController;
 
-use crate::deps::AppDeps;
+use crate::deps::ApplicationDeps;
 
 use super::config_migration::ConfigMigrationFacade;
 use super::diagnostics::{DiagnosticsFacade, DiagnosticsFacadeDeps};
@@ -34,6 +34,7 @@ pub struct SettingsAssemblyParts {
     pub upgrade: Arc<UpgradeFacade>,
 }
 
+#[derive(Clone)]
 pub struct SettingsAssembly {
     settings: Arc<SettingsFacade>,
     diagnostics: Arc<DiagnosticsFacade>,
@@ -45,7 +46,7 @@ pub struct SettingsAssembly {
 
 impl SettingsAssembly {
     pub fn build(
-        deps: &AppDeps,
+        deps: &ApplicationDeps,
         paths: &AppPaths,
         relay_diagnostic: Option<Arc<dyn RelayDiagnosticPort>>,
     ) -> Self {

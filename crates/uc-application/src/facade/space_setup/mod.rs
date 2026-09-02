@@ -11,8 +11,7 @@ pub use crate::space::{
     QueryMembershipConflictsError, QueryPairingInvitationAddressesError,
     QueryPendingSpaceTransitionError, QuerySetupStateError, RedeemPairingInvitationError,
     ResetSpaceError, ResolveMembershipConflictError, ResolveMembershipConflictInput,
-    ResolveMembershipConflictResult, SetupStateView, SpaceActivityError, SpaceAdmissionDeps,
-    SpaceFacade, SpaceFacadeDeps, SpaceRuntimeAdapters, SpaceSessionDeps, SpaceTransitionDeps,
+    ResolveMembershipConflictResult, SetupStateView, SpaceActivityError, SpaceFacade,
     UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
 };
 pub use uc_observability_contract::analytics::PairingFailureReason;

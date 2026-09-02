@@ -110,7 +110,7 @@ flowchart LR
 | --- | --- | --- |
 | `crates/uc-application/src/space/facade/facade.rs` | 唯一 SpaceFacade 实现，组合 lifecycle 收尾，暴露两个认证网络 endpoint | 上接公开白名单，下接私有 cases；不直接读写存储 |
 | `crates/uc-application/src/facade/space_setup/mod.rs` | 保留既有公开调用路径，只重新导出批准的 Space 调用契约 | 不包含实现，不直接引用 Space 子目录 |
-| `crates/uc-application/src/space/application.rs` | 从通用 `AppDeps` 与 Engine 选择的 `SpaceRuntimeAdapters` 内部形成私有依赖，一次构造 ledger、成员 cases、两个 endpoint 和唯一成员 runtime | 只做 wiring，不放业务分支；不向 Engine 暴露内部 deps/use case/runtime |
+| `crates/uc-application/src/space/application.rs` | 从通用 `ApplicationDeps` 与 Engine 选择的 `SpaceRuntimeAdapters` 内部形成私有依赖，一次构造 ledger、成员 cases、两个 endpoint 和唯一成员 runtime | 只做 wiring，不放业务分支；不向 Engine 暴露内部 deps/use case/runtime |
 | `crates/uc-application/src/space/mod.rs` | Space 唯一出口，子模块全部私有，只逐项导出调用与组装契约 | Space 外部不得使用 `crate::space::<child>::...` |
 | `crates/uc-application/src/deps.rs` | 对 composition root 汇总 application ports | 只从 `crate::space` 根出口取得 Space 能力 |
 

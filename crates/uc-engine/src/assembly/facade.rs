@@ -6,21 +6,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use uc_application::deps::AppDeps;
 use uc_application::facade::settings::{
     RelayAccessToken, RelayDiagnosticPort, RelayProbeError, RelayProbeReport,
 };
-use uc_application::facade::space_setup::SpaceFacade;
 #[cfg(feature = "lan-compat")]
 use uc_application::facade::{
     ActiveClipboardFacade, FileTransferFacade, InboundClipboardApplyPort,
 };
-use uc_application::facade::{
-    AppFacade, AppFacadeParts, AppPaths, BlobTransferFacade, ClipboardAssembly,
-    ClipboardOutboundFacade, ClipboardSyncFacade, ProbeProfileKeyAccessUseCase,
-    QueryLocalDeviceUseCase, SearchFacade, SettingsAssembly,
-};
-use uc_core::clipboard::ClipboardIntegrationMode;
+#[cfg(feature = "lan-compat")]
+use uc_application::facade::{AppPaths, ClipboardOutboundFacade};
 #[cfg(feature = "lan-compat")]
 use uc_infra::fs::FsInboundFileTarget;
 #[cfg(feature = "lan-compat")]
@@ -78,7 +72,7 @@ fn map_relay_probe_error(err: IrohRelayProbeError) -> RelayProbeError {
     }
 }
 
-pub(crate) fn build_settings_assembly(deps: &AppDeps, paths: &AppPaths) -> SettingsAssembly {
+pub(crate) fn build_relay_diagnostic() -> Option<Arc<dyn RelayDiagnosticPort>> {
     let relay_diagnostic = match IrohRelayProbeAdapter::new() {
         Ok(probe) => Some(Arc::new(IrohRelayDiagnosticAdapter {
             inner: Arc::new(probe),
@@ -92,7 +86,7 @@ pub(crate) fn build_settings_assembly(deps: &AppDeps, paths: &AppPaths) -> Setti
             None
         }
     };
-    SettingsAssembly::build(deps, paths, relay_diagnostic)
+    relay_diagnostic
 }
 
 /// `ClipboardRestoreFacade` 的可选装配输入。
@@ -102,13 +96,14 @@ pub(crate) fn build_settings_assembly(deps: &AppDeps, paths: &AppPaths) -> Setti
 /// 构造 [`MobileSyncFacade`] —— 抽出来供 daemon-lifecycle 装配复用。
 ///
 /// `apply_inbound` 由 engine 运行期组装并传入。`endpoint_info`
-/// 由 [`AppDeps`] 携带 (单例,daemon LAN listener 与 facade 共享同一份
+/// 由 [`uc_application::facade::ApplicationAssembly`] 持有的依赖携带
+/// (单例,daemon LAN listener 与 facade 共享同一份
 /// Arc),无需 caller 透传。`file_transfer` 进程级 facade:daemon 装配
 /// 必传,SyncDoc apply 后 link + complete 让 mobile_lan transfer 在
 /// file_transfer 表里闭环。
 #[cfg(feature = "lan-compat")]
 pub fn build_mobile_sync_facade(
-    deps: &AppDeps,
+    application: &crate::assembly::deps::MobileSyncApplicationDeps,
     storage_paths: &AppPaths,
     mobile_ports: uc_mobile_lan::MobileSyncPorts,
     apply_inbound: Arc<dyn InboundClipboardApplyPort>,
@@ -137,7 +132,7 @@ pub fn build_mobile_sync_facade(
     active_clipboard: Option<Arc<ActiveClipboardFacade>>,
 ) -> Arc<MobileSyncFacade> {
     Arc::new(MobileSyncFacade::new(MobileSyncFacadeDeps {
-        clock: deps.system.clock.clone(),
+        clock: Arc::clone(&application.clock),
         // v3 SyncClipboard 兼容: 单一 minter 一次性出 (username, password,
         // password_hash, device_id), Argon2id 作为口令 hash;无状态 ZST,
         // 装配处直接 new 即可。
@@ -146,20 +141,20 @@ pub fn build_mobile_sync_facade(
         devices: mobile_ports.devices.clone(),
         endpoint_info: mobile_ports.endpoint_info.clone(),
         lan_interface_probe: Arc::new(NetworkInterfaceLanProbe::new()),
-        settings: deps.settings.clone(),
+        settings: Arc::clone(&application.settings),
         apply_inbound,
         incoming_buffer: Arc::new(IncomingMobileBuffer::new()),
         file_staging: FilesystemMobileFileStaging::new_with_target_reserver(
             storage_paths.file_cache_dir.clone(),
-            FsInboundFileTarget::new(deps.settings.clone()),
+            FsInboundFileTarget::new(Arc::clone(&application.settings)),
         ),
         snapshot_ports: MobileSyncSnapshotPorts {
-            mobile_consumable_load: deps.clipboard.mobile_consumable_load.clone(),
-            entry_repo: deps.clipboard.entry_ports.get.clone(),
-            selection_repo: deps.clipboard.selection_repo.clone(),
-            representation_repo: deps.clipboard.representation_ports.get.clone(),
-            payload_resolver: deps.clipboard.payload_resolver.clone(),
-            blob_reader: deps.storage.blob_store.clone(),
+            mobile_consumable_load: Arc::clone(&application.mobile_consumable_load),
+            entry_repo: Arc::clone(&application.entry_repo),
+            selection_repo: Arc::clone(&application.selection_repo),
+            representation_repo: Arc::clone(&application.representation_repo),
+            payload_resolver: Arc::clone(&application.payload_resolver),
+            blob_reader: Arc::clone(&application.blob_reader),
         },
         file_transfer,
         clipboard_outbound,
@@ -167,72 +162,9 @@ pub fn build_mobile_sync_facade(
         // schema doc §7.6 / §12.2 P1：mobile_sync 域共用 process-wide analytics
         // sink。bootstrap 已把 GatedAnalyticsSink 包好，runtime 切换 noop / 真
         // 实 sink 是 sink 自身职责，不在此装配。
-        analytics: deps.analytics.clone(),
+        analytics: Arc::clone(&application.analytics),
         active_clipboard,
-        find_entry_by_snapshot_hash: deps.clipboard.entry_ports.find_by_snapshot_hash.clone(),
-        check_entry_availability: deps.clipboard.entry_ports.availability.clone(),
-    }))
-}
-
-/// 生产运行期构造完整 [`AppFacade`] 所需的全部能力。
-pub struct RuntimeAppFacadeAssembly {
-    pub space: Arc<SpaceFacade>,
-    pub clipboard_sync: Arc<ClipboardSyncFacade>,
-    pub blob_transfer: Arc<BlobTransferFacade>,
-    pub file_transfer: Arc<uc_application::facade::FileTransferFacade>,
-    pub clipboard_outbound: Arc<ClipboardOutboundFacade>,
-    /// 底层 `BlobTransferPort`(`IrohBlobTransferAdapter`)直连引用,供
-    /// `ClipboardHistoryFacade` 在 `delete_entry` / `clear_history` 时
-    /// 调 `untag` 释放对应 entry 对 iroh-blobs 的引用。与 `blob_transfer`
-    /// 字段(承载发布/拉取 use case 的 facade)分开装配:facade 用于
-    /// "发布、拉取 blob"业务动作,这个 port 用于"释放 blob 引用"基础
-    /// 设施动作,两者共享同一个底层 adapter 实例。
-    pub blob_transfer_port: Arc<dyn uc_core::ports::blob::BlobTransferPort>,
-    pub clipboard: Arc<ClipboardAssembly>,
-    pub restore_broadcast: Option<uc_application::facade::clipboard_write::RestoreBroadcastTrigger>,
-    pub search: Arc<SearchFacade>,
-    pub settings: SettingsAssembly,
-    pub network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
-}
-
-/// 从已注入的 application deps 构造统一业务入口。
-///
-/// 这是 GUI、daemon、CLI 共享的 application facade 装配点。调用方仍然
-/// 决定运行模式、事件源、HTTP/WS/Tauri 接入和后台任务；本函数只负责把
-/// ports 组合成 `AppFacade`。
-pub fn build_app_facade_from_deps(
-    deps: &AppDeps,
-    _storage_paths: &AppPaths,
-    runtime: RuntimeAppFacadeAssembly,
-) -> Arc<AppFacade> {
-    let settings = runtime.settings.into_parts();
-    let clipboard_restore = runtime
-        .clipboard
-        .restore(ClipboardIntegrationMode::Full, runtime.restore_broadcast);
-
-    Arc::new(AppFacade::new(AppFacadeParts {
-        space: runtime.space,
-        probe_profile_key_access: Arc::new(ProbeProfileKeyAccessUseCase::new(
-            deps.security.profile_key_access_probe.clone(),
-        )),
-        resource: runtime.clipboard.resource(),
-        clipboard_history: runtime.clipboard.history(Some(runtime.blob_transfer_port)),
-        clipboard_capture: runtime.clipboard.capture(),
-        clipboard_sync: runtime.clipboard_sync,
-        blob_transfer: runtime.blob_transfer,
-        file_transfer: runtime.file_transfer,
-        clipboard_outbound: runtime.clipboard_outbound,
-        clipboard_restore,
-        search: runtime.search,
-        settings: settings.settings,
-        diagnostics: settings.diagnostics,
-        query_local_device: Arc::new(QueryLocalDeviceUseCase::new(
-            deps.device.device_identity.clone(),
-            deps.settings.clone(),
-        )),
-        storage: settings.storage,
-        config_migration: settings.config_migration,
-        upgrade: settings.upgrade,
-        network_recovery: runtime.network_recovery,
+        find_entry_by_snapshot_hash: Arc::clone(&application.find_entry_by_snapshot_hash),
+        check_entry_availability: Arc::clone(&application.check_entry_availability),
     }))
 }

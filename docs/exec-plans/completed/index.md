@@ -14,5 +14,6 @@
 - [028 单一 Space 准入协议](028-single-space-admission-protocol.md)
 - [029 持久化成员历史反熵](029-durable-membership-history-anti-entropy.md)
 - [030 成员分叉选择与复杂拓扑验证](030-membership-conflict-resolution-and-chaos-validation.md)
+- [031 Application 依赖表面深化](031-application-dependency-surface-deepening.md)
 - [032 退役 Legacy Space Transition](032-admission-space-transition-internal-refactor.md)
 - [033 不可变内容保护上下文与一次性密文升级](033-immutable-content-protection-context.md)

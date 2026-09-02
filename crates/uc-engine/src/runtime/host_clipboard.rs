@@ -105,7 +105,7 @@ impl HostClipboardChangeRuntime {
         dispatch_mode: DispatchMode,
         source_started_at: Option<Instant>,
     ) -> Result<Option<SendReportSummary>, EngineError> {
-        let (facade, capture, live_index, outbound) = {
+        let (facade, application) = {
             let session_slot = self.session_supervisor.session();
             let session = session_slot.lock().await;
             let Some(session) = session.as_ref() else {
@@ -113,9 +113,7 @@ impl HostClipboardChangeRuntime {
             };
             (
                 Arc::clone(&session.facade),
-                session.clipboard.capture(),
-                session.clipboard.live_index(),
-                session.clipboard.sync(),
+                Arc::clone(&session.application),
             )
         };
         let encryption = facade
@@ -147,8 +145,8 @@ impl HostClipboardChangeRuntime {
         }
 
         let outbound_snapshot = Arc::new(snapshot.clone());
-        let Some(captured) = capture
-            .capture(snapshot, origin, None)
+        let Some(captured) = application
+            .capture_clipboard(snapshot, origin, None)
             .await
             .map_err(|error| observe_error("clipboard capture", error))?
         else {
@@ -167,8 +165,8 @@ impl HostClipboardChangeRuntime {
             }));
 
         if !captured.deduplicated {
-            match live_index
-                .index_capture(ClipboardLiveIndexInput {
+            match application
+                .index_clipboard_capture(ClipboardLiveIndexInput {
                     entry_id: captured.entry_id.clone(),
                     snapshot: Arc::clone(&outbound_snapshot),
                 })
@@ -189,8 +187,8 @@ impl HostClipboardChangeRuntime {
         }
         let entry_id = captured.entry_id;
         let dispatch = move || async move {
-            outbound
-                .dispatch_local_capture(ClipboardOutboundInput {
+            application
+                .dispatch_clipboard_capture(ClipboardOutboundInput {
                     entry_id: entry_id.clone(),
                     snapshot: dispatch_snapshot,
                     origin,

@@ -35,6 +35,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uc-infra = { path = "../../crates/uc-infra" }
+uc-application = { path = "../../crates/uc-application", features = ["test-support"] }
 
 [lints]
 workspace = true

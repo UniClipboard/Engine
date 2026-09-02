@@ -12,6 +12,7 @@ dev-tools = ["dep:tracing-subscriber"]
 lan-compat = [
   "dep:uc-mobile-lan",
   "dep:uc-mobile-proto",
+  "uc-application/lan-compat",
   "uc-infra/lan-compat",
 ]
 

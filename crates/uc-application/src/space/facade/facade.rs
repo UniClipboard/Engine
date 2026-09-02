@@ -80,17 +80,8 @@ pub struct SpaceFacade {
 }
 
 impl SpaceFacade {
-    /// Wire the complete Space application from one passive dependency bundle.
-    pub fn new(deps: SpaceFacadeDeps) -> Self {
-        Self::new_internal(deps, true)
-    }
-
     /// 构造全部 Space 用例和认证消息 endpoint，但不启动任何后台维护任务。
-    pub fn new_dormant(deps: SpaceFacadeDeps) -> Self {
-        Self::new_internal(deps, false)
-    }
-
-    fn new_internal(deps: SpaceFacadeDeps, start_runtime: bool) -> Self {
+    pub(crate) fn new_dormant(deps: SpaceFacadeDeps) -> Self {
         let SpaceFacadeDeps {
             application: app_deps,
             session,
@@ -108,16 +99,13 @@ impl SpaceFacade {
         } = transition;
         let re_pairing_state = Arc::new(RePairingState::new(re_pairing_state_store));
         let invitation_holder = Arc::new(InMemoryPairingInvitationHolder::new());
-        let mut application = SpaceApplication::build(
+        let application = SpaceApplication::build(
             &app_deps,
             runtime_adapters,
             peer_reachability_changed_events,
             Arc::clone(&re_pairing_state)
                 as Arc<dyn crate::space::membership::ResolveRePairingPort>,
         );
-        if start_runtime {
-            let _ = application.start_runtime();
-        }
         let membership_initializer = application.initialize_membership();
         let membership_admission = application.query_membership_admission();
         let peer_scope = application.current_scope();

@@ -2,10 +2,10 @@
 
 ## 状态
 
-已复审，待实施。计划入口已经重基线；任何生产代码切片开始前，Slice 1 仍须恢复绿色测试基线。
+已完成（2026-09-02）。九个切片均已 clean cutover；最终架构、回归证据与明确跳过项记录于本文。
 
 本计划是 [ADR-018](../../design-docs/decisions/018-domain-oriented-application-layout.md) 的当前执行计划，
-取代已关闭的 [规格 018](../completed/018-domain-oriented-application-layout.md) 中尚未完成的迁移步骤。
+取代已关闭的 [规格 018](018-domain-oriented-application-layout.md) 中尚未完成的迁移步骤。
 ADR-018 保存稳定领域归属；031 是剩余实施顺序、门禁和验收的唯一事实来源。
 
 # 1. Overview
@@ -240,27 +240,26 @@ Clipboard 内部自行选择
 
 不新增持久化数据，只调整内存对象图：
 
-```rust
-pub struct ApplicationAssemblyOutput {
-    pub app_facade: Arc<AppFacade>,
-    pub runtime: ApplicationRuntime,
-}
-```
-
-`ApplicationRuntime` 的领域 owner 字段私有，不序列化、不跨进程、不进入宿主合同。若需要启动状态，
-只使用内存单调状态，不新增数据库字段。
+`ApplicationAssembly` 保存尚未绑定网络的进程级领域 assembly；`ApplicationNetworkBinding` 是一次性的
+Router 注册能力，Engine 只能从中取得必须注册的窄 endpoint，完成注册后消费该 binding 并交回
+Application。`ApplicationRuntime` 保存最终 `AppFacade`、入站入口与全部领域 owner。三者都只存在于内存，
+不序列化、不跨进程、不进入宿主合同，也不新增数据库字段。
 
 ## API / Interface
 
 ```rust
 impl ApplicationAssembly {
-    pub fn build(deps: ApplicationDeps)
-        -> Result<ApplicationAssemblyOutput, ApplicationAssemblyError>;
+    pub fn build(deps: ApplicationDeps) -> Self;
+    pub fn assemble_network(&self, adapters: ApplicationNetworkAdapters)
+        -> ApplicationNetworkBinding;
 }
 
 impl ApplicationRuntime {
-    pub async fn start(&mut self) -> Result<(), ApplicationStartError>;
-    pub async fn shutdown(self) -> Result<(), ApplicationShutdownError>;
+    pub async fn start(
+        assembly: &ApplicationAssembly,
+        adapters: ApplicationAdapters,
+    ) -> Result<Self, ApplicationStartError>;
+    pub async fn shutdown(&self) -> ApplicationShutdownReport;
 }
 ```
 
@@ -276,17 +275,18 @@ impl ApplicationRuntime {
 
 1. Engine 构造平台、网络、持久化和安全 adapter。
 2. Engine 在持续观测 port 外安装领域 decorator。
-3. Engine 一次调用 `ApplicationAssembly::build`。
-4. Application 内部构造各领域 owner；Engine 调用一次 `ApplicationRuntime::start`。
+3. Engine 一次调用 `ApplicationAssembly::build`，再一次提交网络 adapters。
+4. Application 返回一次性 `ApplicationNetworkBinding`；Engine 只读取并注册窄 endpoint，随后消费 binding
+   形成最终 adapters，并调用一次 `ApplicationRuntime::start`。
 5. Clipboard 先完成 active-register reconcile，再启动读取或广播该 register 的 worker。
 6. 任一启动失败时反向关闭已启动 owner；回滚失败作为 typed 附加信息，不覆盖原 source。
 
 ### 正常关闭
 
-1. Engine 停止新宿主请求和网络入口。
+1. Engine 停止新宿主请求，并先停止会继续触发 Application 恢复或事件工作的网络观测与 presence 转发任务。
 2. Engine 调用一次 `ApplicationRuntime::shutdown`。
-3. ApplicationRuntime 停止生产新工作，等待 Clipboard/Transfer 排空，再关闭 Search 维护等领域 owner。
-4. Engine 最后释放 host/network/Infra 资源。
+3. ApplicationRuntime 停止生产新工作，等待 Clipboard/Transfer 排空，再关闭 Search、Space 等领域 owner。
+4. Engine 最后关闭 Iroh/Infra 网络资源。
 
 # 6. Implementation Plan
 
@@ -294,7 +294,7 @@ impl ApplicationRuntime {
 
 ## Slice 1：计划权威与绿色基线
 
-**位置**：[规格 018](../completed/018-domain-oriented-application-layout.md)、计划索引、
+**位置**：[规格 018](018-domain-oriented-application-layout.md)、计划索引、
 `crates/uc-application/src/space/membership/remove_space_member.rs`、
 `crates/uc-engine/src/testing/host_adapter_contract.rs`。
 
@@ -390,10 +390,10 @@ Application 内部构造 query/index/projection/maintenance runtime；删除 Eng
 
 ## Slice 8：Space assembly（有门禁）
 
-**前置条件**： [029](../completed/029-durable-membership-history-anti-entropy.md) 与
-[030](../completed/030-membership-conflict-resolution-and-chaos-validation.md) 已完成并记录验证矩阵；030 已删除旧
+**前置条件**： [029](029-durable-membership-history-anti-entropy.md) 与
+[030](030-membership-conflict-resolution-and-chaos-validation.md) 已完成并记录验证矩阵；030 已删除旧
 payload rewrap/content-key-directory 假设，并按
-[033](../completed/033-immutable-content-protection-context.md) 的稳定 profile data generation 与 control-only
+[033](033-immutable-content-protection-context.md) 的稳定 profile data generation 与 control-only
 Space generation 完成重基线。
 
 1. Application factory 内部构造 `SpaceApplicationDeps` 与 `SpaceSessionActivityDeps`。
@@ -493,21 +493,43 @@ receive/clipboard/space 行为追加真实 SQLite、Iroh loopback 和 Engine 双
 
 # 9. Acceptance Criteria
 
-* [ ] 018 已作为被 031 取代的实施历史关闭，ADR-018 与 031 分别是稳定决策和当前执行唯一入口。
-* [ ] 两条稳定红测先恢复绿色，后续切片从绿色 Application/Engine 基线开始。
-* [ ] 三个 wiring-only 字段与七个 capability 已删除，receive state 清理有真实 SQLite contract。
-* [ ] Engine 不再构造五个领域的内部 use case/runtime deps。
-* [ ] Active Clipboard reconcile 先于相关 worker，失败阻止 Application 启动。
-* [ ] Search 与 Space 分开迁移，Space 满足 029/030 门禁。
-* [ ] Engine 继续拥有 Iroh/Infra adapter 和 observability decorator 的选择。
-* [ ] 唯一 assembly 隐藏对象图，唯一具体 runtime 隐藏应用启动、回滚和关闭。
-* [ ] Application 目录达到目标预览；`application.rs` 只协调领域 assembly/lifecycle，不含领域业务规则。
-* [ ] Clipboard 三种模式由领域内部选择，EntryIdentityCoordinator、reconcile、spool 和 workers 不向 Engine 暴露。
-* [ ] Application 白名单不包含内部 use case、coordinator、runtime deps 或 session。
-* [ ] 下层错误不再字符串化丢失 source，公开错误仍脱敏。
-* [ ] 旧路径、过渡 bundle、alias 和只锁定内部顺序的测试同轮删除。
-* [ ] 架构检查阻止 `&AppDeps` 分发、内部导入和 Engine 领域对象图构造。
-* [ ] 所有规定门禁通过；设备矩阵未执行项明确为“跳过”。
+* [x] 018 已作为被 031 取代的实施历史关闭，ADR-018 与 031 分别是稳定决策和完成记录入口。
+* [x] 两条稳定红测先恢复绿色，后续切片从绿色 Application/Engine 基线开始。
+* [x] 三个 wiring-only 字段与七个 capability 已删除，receive state 清理有真实 SQLite contract。
+* [x] Engine 不再构造五个领域的内部 use case/runtime deps。
+* [x] Active Clipboard reconcile 先于相关 worker，失败阻止 Application 启动。
+* [x] Search 与 Space 分开迁移，Space 满足 029/030 门禁。
+* [x] Engine 继续拥有 Iroh/Infra adapter 和 observability decorator 的选择。
+* [x] 唯一 assembly 隐藏对象图，唯一具体 runtime 隐藏应用启动、回滚和关闭。
+* [x] Application 目录达到目标预览；`application.rs` 只协调领域 assembly/lifecycle，不含领域业务规则。
+* [x] Clipboard 三种模式由领域内部选择，EntryIdentityCoordinator、reconcile、spool 和 workers 不向 Engine 暴露。
+* [x] Application 白名单不包含内部 use case、coordinator、runtime deps 或 session。
+* [x] 下层错误不再字符串化丢失 source，公开错误仍脱敏。
+* [x] 旧路径、过渡 bundle、alias 和只锁定内部顺序的测试同轮删除。
+* [x] 架构检查阻止 `&AppDeps` 分发、内部导入和 Engine 领域对象图构造。
+* [x] 031 规定门禁通过；设备、Desktop 与发布矩阵未执行项明确为“跳过”。
+
+## 完成验证记录（2026-09-02）
+
+- `cargo test --workspace --all-targets --locked` 在最终树通过：Application 733、Engine 131、Infra 771
+  项通过且 4 项按既有标记 ignored，三端绑定及其余 workspace suites 同步通过；依赖防火墙 34 项通过，
+  覆盖顶层 owner、composition root、一次性网络 binding 与公开白名单。LAN compatibility 179 项通过，Engine
+  `lan-compat` all-targets feature check 通过。
+- 029/030 的 13 个非忽略 Engine SQLite/Iroh 场景均取得本轮通过证据：029 admission 重启传输、既有设备
+  切换、新设备稳定加入、F0-F7 及两项 topology 场景。F6 首次暴露关闭时网络观测任务晚于 Application
+  停止，以及刷新调用成功不等于目标 peer 已可用；修正关闭顺序并在发送前等待成对可达后独立通过。
+  F7 两次在十节点高负载下并发签发三张邀请时因 admission gate 尚在维护而返回可重试
+  `invalid_state`；按场景语义改为带节点诊断的顺序签发后独立通过（413.27 秒），没有延长等待时间或
+  放宽断言。F4 的一次受污染组合结果同样未作为通过证据，干净独立进程通过。
+- 回归发现 V3 runtime manifest 被 V2-only loader 误判为损坏，导致既有设备第二次加入返回
+  `RecoveryRequired`。Joiner source snapshot 改为识别 V2/V3 runtime；V2/无 manifest 继续使用原 V1
+  字节编码，V3 使用包含 profile data/control generation 的 V2 snapshot，并新增两项真实 manifest 回归。
+- 显式 ignored 的两设备 1 秒热路径性能门禁已按 `--ignored` 在最终树执行，实测 8.016 秒，未达到
+  1 秒目标，明确记为**未通过**；本计划没有放宽阈值或把该结果写成绿色。
+- 当前相邻 Desktop 仓库位于 `v0` checkout，缺少 029/030 的
+  `tests/e2e/tests/membership_convergence.rs` harness，因此本轮 C0-C5 记为**跳过**。029/030 完成计划保存的
+  最终源码历史证据仍为 8/8 通过，但不冒充本轮复验。
+- 实体设备矩阵与 Release bundle 本阶段未提供，均记为**跳过**，未记为“通过”。
 
 # 10. Risks and Trade-offs
 
@@ -527,11 +549,11 @@ receive/clipboard/space 行为追加真实 SQLite、Iroh loopback 和 Engine 双
 ## 相关文档
 
 - [ADR-018](../../design-docs/decisions/018-domain-oriented-application-layout.md)
-- [已被取代的规格 018](../completed/018-domain-oriented-application-layout.md)
+- [已被取代的规格 018](018-domain-oriented-application-layout.md)
 - [端口设计](../../design-docs/ports.md)
 - [Application 分层规则](../../design-docs/layers/application.md)
 - [错误处理与转换](../../design-docs/error-handling.md)
 - [文件传输 port 拆分 ADR](../../design-docs/decisions/009-file-transfer-port-split.md)
-- [029 持久化成员历史反熵](../completed/029-durable-membership-history-anti-entropy.md)
-- [030 成员分叉选择与复杂拓扑验证](../completed/030-membership-conflict-resolution-and-chaos-validation.md)
-- [033 不可变内容保护上下文](../completed/033-immutable-content-protection-context.md)
+- [029 持久化成员历史反熵](029-durable-membership-history-anti-entropy.md)
+- [030 成员分叉选择与复杂拓扑验证](030-membership-conflict-resolution-and-chaos-validation.md)
+- [033 不可变内容保护上下文](033-immutable-content-protection-context.md)

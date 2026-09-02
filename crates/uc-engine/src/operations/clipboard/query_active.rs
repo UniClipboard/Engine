@@ -1,13 +1,13 @@
 use tracing::error;
-use uc_application::facade::ActiveClipboardFacade;
+use uc_application::facade::AppFacade;
 
 use crate::error_codes::QUERY_ACTIVE_CLIPBOARD_FAILED_CODE;
 use crate::{ActiveClipboardSummary, EngineError, EngineErrorCategory, OperationResult};
 
 pub async fn execute_query_active_clipboard(
-    facade: &ActiveClipboardFacade,
+    facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
-    let active = facade.current().await.map_err(|_| {
+    let active = facade.current_active_clipboard().await.map_err(|_| {
         error!("active clipboard query failed");
         EngineError::new(
             QUERY_ACTIVE_CLIPBOARD_FAILED_CODE,

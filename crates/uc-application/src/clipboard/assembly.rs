@@ -35,18 +35,21 @@ use crate::clipboard::inbound::{
     InboundClipboardApplyPort,
 };
 use crate::clipboard::outbound::{ClipboardOutboundDeps, ClipboardOutboundFacade};
+use crate::clipboard::resource::ResourceFacadeDeps;
 use crate::clipboard::sync::apply_inbound::{InboundBlobFetcher, InboundCapture, InboundWrite};
 use crate::clipboard::sync::sync_runtime::{ClipboardSyncRuntime, ClipboardSyncRuntimeDeps};
 use crate::clipboard::write::{ClipboardWriteCoordinator, RestoreBroadcastTrigger};
-use crate::deps::{AppDeps, CurrentSpaceMemberScopePort, IsSpaceUnlockedPort};
+use crate::deps::{ApplicationDeps, CurrentSpaceMemberScopePort, IsSpaceUnlockedPort};
+use crate::facade::clipboard_history::ClipboardHistoryFacadeDeps;
+use crate::facade::clipboard_restore::ClipboardRestoreFacadeDeps;
 use crate::facade::{
-    BlobTransferFacade, ClipboardCaptureFacade, ClipboardHistoryFacade, ClipboardHistoryFacadeDeps,
-    ClipboardRestoreFacade, ClipboardRestoreFacadeDeps, ClipboardSyncFacade, FileTransferAssembly,
-    HostEventBus, ResourceFacade, ResourceFacadeDeps,
+    BlobTransferFacade, ClipboardCaptureFacade, ClipboardHistoryFacade, ClipboardRestoreFacade,
+    ClipboardSyncFacade, HostEventBus, ResourceFacade,
 };
 use crate::search::live_index::{
     ClipboardLiveIndexDeps, ClipboardLiveIndexFacade, ClipboardLiveIndexPort, ClipboardLiveIndexer,
 };
+use crate::transfer::file::assembly::FileTransferAssembly;
 use crate::transfer::file::assembly::StoreOnlyPullIntentDeps;
 use crate::transfer::file::assembly::{
     InboundMaterializerDeps, InboundReceiveIntentDeps, InteractiveReceiveIntentDeps,
@@ -55,7 +58,7 @@ use crate::transfer::file::assembly::{
 /// Clipboard 运行所需的跨领域、被动装配输入。
 #[derive(Clone)]
 pub struct ClipboardAssemblyDeps {
-    pub application: AppDeps,
+    pub application: ApplicationDeps,
     pub file_cache_dir: PathBuf,
     pub file_transfer: Arc<FileTransferAssembly>,
     pub host_event_bus: Arc<HostEventBus>,
@@ -92,7 +95,7 @@ pub enum ClipboardBackgroundStartError {
 
 /// Engine 选择的入站文件系统 adapter；Clipboard 决定它们参与哪种模式。
 #[derive(Clone)]
-pub struct ClipboardInboundAdapters {
+pub(crate) struct ClipboardInboundAdapters {
     pub fetcher: Arc<dyn InboundBlobFetcher>,
     pub publisher: Arc<dyn AtomicPublishPort>,
     pub target_reserver: Arc<dyn ReserveInboundFileTargetPort>,
@@ -100,7 +103,7 @@ pub struct ClipboardInboundAdapters {
 }
 
 /// 单个网络 session 注入 Clipboard 的被动能力。
-pub struct ClipboardSessionDeps {
+pub(crate) struct ClipboardSessionDeps {
     pub clipboard_sync: Arc<ClipboardSyncFacade>,
     pub blob_transfer: Arc<BlobTransferFacade>,
     pub receiver: Arc<dyn ClipboardReceiverPort>,
@@ -115,13 +118,13 @@ pub struct ClipboardSessionDeps {
 }
 
 /// Active Clipboard session 的网络能力；Application 保持 worker 对象图私有。
-pub struct ActiveClipboardSessionDeps {
+pub(crate) struct ActiveClipboardSessionDeps {
     pub receiver: Arc<dyn ActiveClipboardReceiverPort>,
     pub dispatch: Arc<dyn ActiveClipboardDispatchPort>,
     pub is_unlocked: Arc<dyn IsSpaceUnlockedPort>,
     pub peer_addresses: Arc<dyn PeerAddressRepositoryPort>,
     pub member_scope: Arc<dyn CurrentSpaceMemberScopePort>,
-    pub presence: Arc<dyn PeerReachabilityPort>,
+    pub peer_reachability: Arc<dyn PeerReachabilityPort>,
     pub pull_client: Arc<dyn ActiveClipboardPullClientPort>,
     pub pull_adapters: ClipboardInboundAdapters,
 }
@@ -150,7 +153,7 @@ pub struct ClipboardSession {
 /// Clipboard 领域唯一对象图 owner。
 #[derive(Clone)]
 pub struct ClipboardAssembly {
-    deps: AppDeps,
+    deps: ApplicationDeps,
     file_cache_dir: PathBuf,
     entry_identity: Arc<EntryIdentityCoordinator>,
     write_coordinator: Arc<ClipboardWriteCoordinator>,
@@ -360,7 +363,7 @@ impl ClipboardAssembly {
             member_repo: Arc::clone(&self.deps.device.member_repo),
             peer_addr_repo: session.peer_addresses,
             peer_scope: session.member_scope,
-            presence: session.presence,
+            presence: session.peer_reachability,
             entry_lookup: Arc::clone(&self.deps.clipboard.entry_ports.find_by_snapshot_hash),
             availability: Some(Arc::clone(&self.deps.clipboard.entry_ports.availability)),
             coordinator: Arc::clone(&self.write_coordinator),

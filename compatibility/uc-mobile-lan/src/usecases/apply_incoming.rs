@@ -53,10 +53,10 @@ use uc_core::{MimeType, ObservedClipboardRepresentation, SystemClipboardSnapshot
 use uc_observability_contract::analytics::{AnalyticsPort, Direction, Event, PayloadSizeBucket};
 
 use crate::usecases::clipboard_doc::SyncClipboardItemType;
-use uc_application::facade::encode_snapshot_to_v3_bytes;
-use uc_application::facade::file_transfer::{FileTransferFacade, FileTransferSession};
 #[cfg(test)]
-use uc_application::facade::ApplyInboundClipboardUseCase;
+use uc_application::deps::test_support::ApplyInboundClipboardUseCase;
+use uc_application::facade::encode_snapshot_to_v3_bytes;
+use uc_application::facade::file_transfer::{FileTransferFacade, ReceiverTransferHandle};
 use uc_application::facade::{
     InboundClipboardApplyError, InboundClipboardApplyInput, InboundClipboardApplyOutcome,
     InboundClipboardApplyPort, InboundProvisionalReceive,
@@ -761,7 +761,7 @@ impl ApplyIncomingMobileClipUseCase {
         }
     }
 
-    async fn complete_transfer(&self, session: &FileTransferSession) {
+    async fn complete_transfer(&self, session: &ReceiverTransferHandle) {
         if let Err(err) = session.complete().await {
             warn!(
                 transfer_id = session.transfer_id(),
@@ -771,7 +771,7 @@ impl ApplyIncomingMobileClipUseCase {
         }
     }
 
-    async fn fail_transfer(&self, session: &FileTransferSession, detail: String) {
+    async fn fail_transfer(&self, session: &ReceiverTransferHandle, detail: String) {
         if let Err(err) = session
             .fail(FileTransferFailureReason::Unknown, Some(detail))
             .await

@@ -337,11 +337,9 @@ async fn f7_three_sibling_branches_keep_fair_anti_entropy_for_legal_peers() {
             .wait_for_group_epoch_named(&baseline, epoch, "F7 baseline")
             .await;
     }
-    let (invitation_h, invitation_i, invitation_j) = tokio::join!(
-        issue_invitation(topology.engine("A")),
-        issue_invitation(topology.engine("B")),
-        issue_invitation(topology.engine("C")),
-    );
+    let invitation_h = issue_invitation_named(topology.engine("A"), "A").await;
+    let invitation_i = issue_invitation_named(topology.engine("B"), "B").await;
+    let invitation_j = issue_invitation_named(topology.engine("C"), "C").await;
 
     topology
         .run(&[TopologyAction::PartitionGroups {
@@ -563,6 +561,7 @@ async fn f6_deep_chain_recovers_selected_branch_without_online_sponsors() {
     assert_eq!(recovered.head_event_id, target.head_event_id);
 
     for (sender, receiver) in [("A", "C"), ("C", "E"), ("E", "F")] {
+        topology.wait_for_paired_peer(sender, receiver).await;
         let text = format!("F6 converged hop {sender}-{receiver}");
         let report = topology.send(sender, receiver, &text).await;
         assert!(
@@ -2308,6 +2307,10 @@ async fn join_through(
 }
 
 async fn issue_invitation(sponsor: &Engine) -> String {
+    issue_invitation_named(sponsor, "sponsor").await
+}
+
+async fn issue_invitation_named(sponsor: &Engine, sponsor_label: &str) -> String {
     let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
     loop {
         match sponsor.execute(Operation::IssueInvitation).await {
@@ -2318,7 +2321,10 @@ async fn issue_invitation(sponsor: &Engine) -> String {
             Err(error) if error.is_retryable() && tokio::time::Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            Err(error) => panic!("issue admission invitation: {error}"),
+            Err(error) => panic!(
+                "node {sponsor_label} issue admission invitation: {error}; retryable={}",
+                error.is_retryable()
+            ),
         }
     }
 }

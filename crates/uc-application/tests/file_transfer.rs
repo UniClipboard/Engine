@@ -3,11 +3,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use uc_application::deps::{
+    FileTransferFacadeDeps, FileTransferLifecycleDeps, ReceiveReadinessCoordinator,
+};
 use uc_application::facade::file_transfer::FileTransferApplicationError;
 use uc_application::facade::HostEventBus;
 use uc_application::facade::{
-    BeginReceiverTransfer, FileTransferFacade, FileTransferFacadeDeps, FileTransferLifecycleDeps,
-    ReceiverTransferRegistration,
+    BeginReceiverTransfer, FileTransferFacade, ReceiverTransferRegistration,
 };
 use uc_core::file_transfer::{FileTransferEventPublisherPort, FileTransferEventStorePort};
 use uc_core::ports::file_transfer::{
@@ -265,7 +267,7 @@ fn noop_lifecycle_deps() -> FileTransferLifecycleDeps {
         file_cache_dir: std::path::PathBuf::new(),
         clock: Arc::new(FixedClock),
         host_event_bus: Arc::new(HostEventBus::new()),
-        receive_readiness: Arc::new(uc_application::facade::ReceiveReadinessCoordinator::new()),
+        receive_readiness: Arc::new(ReceiveReadinessCoordinator::new()),
     }
 }
 

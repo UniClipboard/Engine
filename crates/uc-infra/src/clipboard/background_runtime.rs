@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 
-use uc_application::facade::{ClipboardBackgroundError, ClipboardBackgroundPort};
+use uc_application::deps::{ClipboardBackgroundError, ClipboardBackgroundPort};
 use uc_core::ids::RepresentationId;
 use uc_core::ports::clipboard::{
     ClipboardRepresentationStore, ThumbnailGeneratorPort, ThumbnailRepositoryPort,

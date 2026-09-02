@@ -103,8 +103,9 @@ enum InboundApplyMode {
         resurface: ResurfacePorts,
     },
     StoreOnlyPull,
-    /// Inert apply path for tests and inert wiring: writes without any
-    /// materializer, live index or receive tracking.
+    /// Inert apply path for focused tests: writes without any materializer,
+    /// live index or receive tracking.
+    #[cfg(any(test, feature = "test-support"))]
     Test {
         write: Arc<dyn InboundWrite>,
         resurface: Option<ResurfacePorts>,
@@ -188,6 +189,7 @@ impl ApplyInboundClipboardUseCase {
         match &self.mode {
             InboundApplyMode::InteractiveReceive { write, .. } => Some(write),
             InboundApplyMode::StoreOnlyPull => None,
+            #[cfg(any(test, feature = "test-support"))]
             InboundApplyMode::Test { write, .. } => Some(write),
         }
     }
@@ -205,6 +207,7 @@ impl ApplyInboundClipboardUseCase {
                 ..
             } => Some((active_register, mobile_consumability)),
             InboundApplyMode::StoreOnlyPull => None,
+            #[cfg(any(test, feature = "test-support"))]
             InboundApplyMode::Test { .. } => None,
         }
     }
@@ -213,6 +216,7 @@ impl ApplyInboundClipboardUseCase {
         match &self.mode {
             InboundApplyMode::InteractiveReceive { resurface, .. } => Some(resurface),
             InboundApplyMode::StoreOnlyPull => None,
+            #[cfg(any(test, feature = "test-support"))]
             InboundApplyMode::Test { resurface, .. } => resurface.as_ref(),
         }
     }
@@ -285,6 +289,7 @@ impl ApplyInboundClipboardUseCase {
     /// Test-only construction for the inert apply-inbound path (no blob
     /// materializer, no live index). `#[doc(hidden)]` because external
     /// production callers must use `interactive_receive` / `store_only_pull`.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn new(
         entry_repo: Arc<dyn FindEntryIdBySnapshotHashPort>,
@@ -398,6 +403,7 @@ impl ApplyInboundClipboardUseCase {
     /// Test-only resurface seam, so focused tests can mock one method instead
     /// of standing up six repository ports. Production modes encode whether
     /// resurfacing exists in their constructors.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn with_resurface_ports(
         mut self,

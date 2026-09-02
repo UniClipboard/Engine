@@ -4,7 +4,7 @@
 
 ## 状态
 
-已由 [规格 031](../active/031-application-dependency-surface-deepening.md) 取代。
+已由 [规格 031](031-application-dependency-surface-deepening.md) 取代。
 
 本文保留 2026-08-10 确立的目录迁移与 Engine 收口历史。稳定领域归属继续由
 [ADR-018](../../design-docs/decisions/018-domain-oriented-application-layout.md) 负责；未完成的对象图深化、

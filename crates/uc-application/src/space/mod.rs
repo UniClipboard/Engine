@@ -35,8 +35,11 @@ pub use connectivity::{
 };
 pub use facade::{
     InitializeSpaceInput, InvitationAvailability, IssuePairingInvitationError,
-    IssuePairingInvitationResult, RedeemPairingInvitationError, SpaceAdmissionDeps, SpaceFacade,
-    SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps, UnlockSpaceInput, UnlockSpaceResult,
+    IssuePairingInvitationResult, RedeemPairingInvitationError, SpaceFacade, UnlockSpaceInput,
+    UnlockSpaceResult,
+};
+pub(crate) use facade::{
+    SpaceAdmissionDeps, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps,
 };
 pub use lifecycle::{CurrentInvitation, QuerySetupStateError, SetupStateView};
 pub use lifecycle::{

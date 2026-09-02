@@ -1,16 +1,15 @@
 use uc_application::deps::{
     CurrentSpaceMemberScopePort, HandleAuthenticatedSpaceAdmissionMessagePort,
     JoinerStartMaterialPort, JoinerStartStatePort, PendingAdmissionRecoveryStatePort,
-    SpaceAdmissionTransportPort, SponsorAdmissionStatePort,
+    SpaceAdmissionTransportPort, SpaceRuntimeAdapters, SponsorAdmissionStatePort,
 };
-use uc_application::facade::space_setup::{SpaceFacade, SpaceFacadeDeps, SpaceRuntimeAdapters};
+use uc_application::facade::space_setup::SpaceFacade;
 use uc_application::facade::{AppFacade, DeviceTrustStatus, JoinSpaceInput, NetworkRecoveryFacade};
 
 #[test]
 fn space_contracts_remain_reachable_only_through_facade_and_deps() {
     let public_types = [
         std::any::type_name::<SpaceFacade>(),
-        std::any::type_name::<SpaceFacadeDeps>(),
         std::any::type_name::<JoinSpaceInput>(),
         std::any::type_name::<DeviceTrustStatus>(),
         std::any::type_name::<NetworkRecoveryFacade>(),

@@ -808,48 +808,6 @@ mod tests {
         assert!(!private.join("space-control-generations").exists());
     }
 
-    #[tokio::test]
-    async fn fresh_wiring_promotes_the_prepared_v3_pair_on_initial_activation() {
-        let root = tempfile::tempdir().unwrap();
-        let private = root.path().join("private");
-        let host = HostCapabilities::new(
-            HostDirectories::new(
-                private.clone(),
-                root.path().join("cache"),
-                root.path().join("temporary"),
-                root.path().join("logs"),
-            ),
-            Box::new(TestSecureStorage::default()),
-            Box::new(EmptyHostClipboard),
-            Box::new(EmptyHostFiles),
-        );
-        let wiring = wire_host_capabilities(&EngineConfig::new("test"), host)
-            .await
-            .unwrap();
-        let space_id = uc_core::ids::SpaceId::from_str("first-space");
-
-        wiring
-            .wired
-            .deps
-            .initial_space_activation
-            .activate_initial_space(&space_id)
-            .await
-            .unwrap();
-
-        let active = wiring
-            .wired
-            .sync_engine
-            .active_generation_manifest_store
-            .load_v3_sync()
-            .unwrap()
-            .unwrap();
-        assert_eq!(active.layout().space_id(), &space_id);
-        let layout = uc_infra::security::ProfileRuntimeLayout::v3(&private, &active);
-        assert!(layout.profile_database().is_file());
-        assert!(layout.control_database().is_file());
-        assert!(layout.blob_root().is_dir());
-    }
-
     // 流程：启动真实生产组装，确认 1.1 成员核对与旧空间升级入口同时存在，
     // 再确认已经废弃的成员移除入口没有被重新带回。
     #[tokio::test]
@@ -870,25 +828,26 @@ mod tests {
         let wiring = wire_host_capabilities(&EngineConfig::new("1.2.3"), host)
             .await
             .unwrap();
-        let mut settings = wiring.wired.deps.settings.load().await.unwrap();
+        let mut settings = wiring.wired.sync_engine.settings.load().await.unwrap();
         settings.network.allow_relay_fallback = false;
-        wiring.wired.deps.settings.save(&settings).await.unwrap();
-        let settings_assembly =
-            crate::assembly::facade::build_settings_assembly(&wiring.wired.deps, &wiring.paths);
+        wiring
+            .wired
+            .sync_engine
+            .settings
+            .save(&settings)
+            .await
+            .unwrap();
         let task_registry = Arc::new(TaskRegistry::new());
         wiring
             .wired
-            .shared
-            .clipboard
-            .start_background(Arc::clone(&task_registry))
+            .application
+            .start_process_runtime(Arc::clone(&task_registry))
             .await
             .unwrap();
 
         let lifecycle = build_daemon_lifecycle(
-            &wiring.wired.deps,
+            &wiring.wired.application,
             &wiring.wired.sync_engine,
-            &wiring.wired.shared,
-            &settings_assembly,
             "1.2.3",
             #[cfg(feature = "lan-compat")]
             wiring.wired.mobile_sync_ports.clone(),

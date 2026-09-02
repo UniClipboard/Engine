@@ -125,6 +125,9 @@ mod device_group_choice_error_tests {
         assert!(error.source().and_then(std::error::Error::source).is_some());
     }
 }
+use crate::clipboard::active::ActiveClipboardFacade;
+use crate::clipboard::history::maintenance_runtime::HistoryMaintenanceRuntime;
+use crate::device::query_local_device::QueryLocalDeviceUseCase;
 use crate::facade::settings::{GeneralSettingsPatch, SettingsPatch};
 use crate::facade::space_setup::{
     InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
@@ -137,14 +140,14 @@ use crate::facade::{
     BlobTransferError, BlobTransferFacade, ClipboardCaptureFacade, ClipboardHistoryFacade,
     ClipboardOutboundFacade, ClipboardRestoreError, ClipboardRestoreFacade, ClipboardSyncError,
     ClipboardSyncFacade, DiagnosticsFacade, DispatchEntryOutcome, FetchBlobCommand,
-    FetchBlobResult, FetchBlobToPathCommand, FetchBlobToPathResult, HistoryMaintenanceRuntime,
-    LocalDeviceInfo, ProbeProfileKeyAccessError, ProbeProfileKeyAccessUseCase, PublishBlobCommand,
-    PublishBlobPathCommand, PublishBlobResult, QueryLocalDeviceUseCase, QuerySpaceAccessStateError,
-    ResendEntryCommand, ResendEntryError, ResendReport, ResourceFacade, SearchFacade,
-    SearchFacadeError, SearchPageView, SearchQueryInput, SearchRebuildAcceptedView,
+    FetchBlobResult, FetchBlobToPathCommand, FetchBlobToPathResult, LocalDeviceInfo,
+    ProbeProfileKeyAccessError, PublishBlobCommand, PublishBlobPathCommand, PublishBlobResult,
+    QuerySpaceAccessStateError, ResendEntryCommand, ResendEntryError, ResendReport, ResourceFacade,
+    SearchFacade, SearchFacadeError, SearchPageView, SearchQueryInput, SearchRebuildAcceptedView,
     SearchStatusView, SettingsFacade, SettingsFacadeError, SpaceAccessState, SpaceFacade,
     StorageFacade,
 };
+use crate::profile::probe_profile_key_access::ProbeProfileKeyAccessUseCase;
 use crate::space::{
     LockSpaceSessionError, NetworkRecoveryFacade, NetworkRecoveryRequestError,
     NetworkRecoveryStatus, RecoverSpaceSessionError, RecoverSpaceSessionResult,
@@ -169,6 +172,7 @@ pub struct AppFacade {
     file_transfer: Arc<crate::facade::file_transfer::FileTransferFacade>,
     clipboard_outbound: Arc<ClipboardOutboundFacade>,
     clipboard_restore: Arc<ClipboardRestoreFacade>,
+    active_clipboard: Arc<ActiveClipboardFacade>,
     search: Arc<SearchFacade>,
     settings: Arc<SettingsFacade>,
     diagnostics: Arc<DiagnosticsFacade>,
@@ -191,7 +195,7 @@ impl AppFacade {
     ///
     /// Bootstrap builds each sub-facade from its own `*Deps` bundle and
     /// hands them here — the aggregator never sees raw ports.
-    pub fn new(parts: AppFacadeParts) -> Self {
+    pub(crate) fn new(parts: AppFacadeParts) -> Self {
         Self {
             space: parts.space,
             probe_profile_key_access: parts.probe_profile_key_access,
@@ -203,6 +207,7 @@ impl AppFacade {
             file_transfer: parts.file_transfer,
             clipboard_outbound: parts.clipboard_outbound,
             clipboard_restore: parts.clipboard_restore,
+            active_clipboard: parts.active_clipboard,
             search: parts.search,
             settings: parts.settings,
             diagnostics: parts.diagnostics,
@@ -668,6 +673,30 @@ impl AppFacade {
         self.clipboard_outbound.resend_entry(cmd).await
     }
 
+    pub async fn current_active_clipboard(
+        &self,
+    ) -> Result<
+        Option<uc_core::clipboard::ActiveClipboardState>,
+        uc_core::ports::clipboard::ActiveClipboardRegisterError,
+    > {
+        self.active_clipboard.current().await
+    }
+
+    #[cfg(feature = "lan-compat")]
+    pub fn active_clipboard_for_lan_compatibility(&self) -> Arc<ActiveClipboardFacade> {
+        Arc::clone(&self.active_clipboard)
+    }
+
+    #[cfg(feature = "lan-compat")]
+    pub fn clipboard_outbound_for_lan_compatibility(&self) -> Arc<ClipboardOutboundFacade> {
+        Arc::clone(&self.clipboard_outbound)
+    }
+
+    #[cfg(feature = "lan-compat")]
+    pub fn file_transfer_for_lan_compatibility(&self) -> Arc<crate::facade::FileTransferFacade> {
+        Arc::clone(&self.file_transfer)
+    }
+
     /// 发布 blob。
     pub async fn publish_blob(
         &self,
@@ -1021,7 +1050,7 @@ fn reachability_state_to_string(state: ReachabilityState) -> String {
     .to_string()
 }
 
-pub struct AppFacadeParts {
+pub(crate) struct AppFacadeParts {
     pub space: Arc<SpaceFacade>,
     pub probe_profile_key_access: Arc<ProbeProfileKeyAccessUseCase>,
     pub resource: Arc<ResourceFacade>,
@@ -1032,6 +1061,7 @@ pub struct AppFacadeParts {
     pub file_transfer: Arc<crate::facade::file_transfer::FileTransferFacade>,
     pub clipboard_outbound: Arc<ClipboardOutboundFacade>,
     pub clipboard_restore: Arc<ClipboardRestoreFacade>,
+    pub active_clipboard: Arc<ActiveClipboardFacade>,
     pub search: Arc<SearchFacade>,
     pub settings: Arc<SettingsFacade>,
     pub diagnostics: Arc<DiagnosticsFacade>,

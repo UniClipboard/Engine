@@ -19,17 +19,17 @@ mod infra;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::assembly::facade::build_relay_diagnostic;
 use tokio::sync::mpsc;
 use uc_application::deps::{
-    AppDeps, ClipboardEntryPorts, ClipboardPorts, ClipboardRepresentationPorts,
-    CurrentSpaceIdentityPort, DevicePorts, DirectoryReceivePorts, FileTransferPorts,
-    InitialSpaceActivationPort, PortableCurrentSpaceIdentityPort, PrepareProfileLifecycleUseCase,
-    ProfileLifecycleRepositoryPort, ProfileLifecycleState, RePairingStateStorePort, SearchPorts,
-    SecurityPorts, SpaceAccessPorts, SpaceRebuildProgressPort, StoragePorts, SystemPorts,
+    ApplicationDeps, ClipboardEntryPorts, ClipboardPorts, ClipboardRepresentationPorts,
+    ConfigMigrationDeps, CurrentSpaceIdentityPort, DevicePorts, DirectoryReceivePorts,
+    FileTransferPorts, InitialSpaceActivationPort, PortableCurrentSpaceIdentityPort,
+    PrepareProfileLifecycleUseCase, ProfileLifecycleRepositoryPort, ProfileLifecycleState,
+    RePairingStateStorePort, SearchPorts, SecurityPorts, SpaceAccessPorts,
+    SpaceRebuildProgressPort, StoragePorts, SystemPorts,
 };
-use uc_application::facade::{
-    ConfigMigrationDeps, FileTransferAssembly, FileTransferAssemblyDeps, HostEventEmitterPort,
-};
+use uc_application::facade::HostEventEmitterPort;
 use uc_core::app_dirs::AppPaths;
 use uc_core::clipboard::SelectRepresentationPolicyV1;
 use uc_core::ids::{ProfileId, RepresentationId};
@@ -158,7 +158,7 @@ struct InfraLayer {
     // Mobile sync LAN 端点状态(单例) — daemon listener 启停时调 inherent
     // `set` / `clear` 写它,facade 通过 `MobileSyncEndpointInfoPort` 只读。
     // 持有具体类型是为了让 daemon 拿到写入面;同一份 Arc 通过 unsizing
-    // coercion 也能 share 给 AppDeps.mobile_sync.endpoint_info。
+    // coercion 也能 share 给 ApplicationDeps.mobile_sync.endpoint_info。
     #[cfg(feature = "lan-compat")]
     mobile_sync_endpoint_info: Arc<uc_infra::mobile_sync::InMemoryMobileSyncEndpointInfoAdapter>,
 }
@@ -291,9 +291,9 @@ pub async fn wire_dependencies_from_inputs(
     let profile_reset_profile_id = profile_id.inner().to_owned();
     let profile_reset_secure_storage = Arc::clone(&secure_storage);
     let profile_reset_identity_dir = iroh_identity_dir.clone();
-    let legacy_db_path = paths.db_path;
-    let vault_path = paths.vault_dir;
-    let settings_path = paths.settings_path;
+    let legacy_db_path = paths.db_path.clone();
+    let vault_path = paths.vault_dir.clone();
+    let settings_path = paths.settings_path.clone();
     let app_data_root = paths.app_data_root_dir.clone();
     let profile_lifecycle_repository: Arc<dyn ProfileLifecycleRepositoryPort> =
         Arc::new(ProfileLifecycleRepository::new(Arc::clone(&secure_storage)));
@@ -746,7 +746,7 @@ pub async fn wire_dependencies_from_inputs(
 
     // Background blob-processing components (cache, spool, durable queue, payload
     // resolver, self-write ledger, worker channel). `worker_rx` is not Clone and
-    // travels by-value to BackgroundRuntimeDeps; the rest fan out to AppDeps.
+    // travels by-value to BackgroundRuntimeDeps; the rest fan out to ApplicationDeps.
     let spool_dir = paths.spool_dir.clone();
     let BlobProcessingAssembly {
         representation_cache,
@@ -790,8 +790,8 @@ pub async fn wire_dependencies_from_inputs(
     // Whole-installation configuration migration (export / import preview /
     // staged import). Assembled in the sync wiring context because its inputs
     // (secure_storage, db pool, local-identity, filesystem layout, profile) are
-    // not reconstructable from the abstract `AppDeps` ports; the composed facade
-    // travels on `AppDeps.config_migration`.
+    // not reconstructable from the abstract `ApplicationDeps` ports; the composed facade
+    // travels on `ApplicationDeps.config_migration`.
     let config_migration = build_config_migration_deps(
         &platform.secure_storage,
         &iroh_identity_storage,
@@ -811,7 +811,38 @@ pub async fn wire_dependencies_from_inputs(
         },
     );
 
-    let deps = AppDeps {
+    // Application 的进程级事件出口与 Clipboard background adapter 在唯一
+    // factory 之前完成选择；领域对象图由 ApplicationAssembly 构造。
+    let host_event_bus: Arc<uc_application::facade::HostEventBus> =
+        Arc::new(uc_application::facade::HostEventBus::new());
+    host_event_bus.register("logging", host_event_emitter);
+    let clipboard_background = Arc::new(uc_infra::clipboard::ClipboardBackgroundRuntime::new(
+        representation_cache,
+        spool_manager,
+        worker_rx,
+        spool_dir,
+        storage_config.spool_ttl_days,
+        storage_config.worker_retry_max_attempts,
+        storage_config.worker_retry_backoff_ms,
+        Arc::clone(&decrypting_rep_repo),
+        worker_tx.clone(),
+        Arc::clone(&platform.blob_writer),
+        Arc::clone(&infra.hash),
+        Arc::clone(&infra.clock),
+        Arc::clone(&infra.thumbnail_repo),
+        Arc::clone(&infra.thumbnail_generator),
+    ));
+
+    let deps = ApplicationDeps {
+        paths: paths.clone(),
+        relay_diagnostic: build_relay_diagnostic(),
+        host_event_bus: Arc::clone(&host_event_bus),
+        file_transfer_event_store: file_transfer_store_arc,
+        receive_artifact_cleanup: Arc::new(uc_infra::fs::FsReceiveArtifactCleaner),
+        receive_save_dir: uc_infra::fs::FsInboundFileTarget::new(Arc::clone(&infra.settings_repo)),
+        clipboard_background,
+        trusted_peer_repo: Arc::clone(&trusted_peer_repo),
+        entry_delivery_repo: Arc::clone(&infra.entry_delivery_repo),
         clipboard: ClipboardPorts {
             clipboard: platform.clipboard,
             system_clipboard: platform.system_clipboard,
@@ -879,57 +910,43 @@ pub async fn wire_dependencies_from_inputs(
         analytics: analytics_sink,
     };
 
-    // Create shared host-event bus at wire time. The bus starts with the
-    // logging emitter pre-registered so non-GUI / CLI processes have a
-    // sensible default (event type names go to tracing::debug). Tauri setup
-    // and daemon startup `register` their own transports on top — register
-    // is additive, never overwrites the logging emitter, and `unregister`
-    // can pull a transport off cleanly (e.g. daemon reload).
-    let host_event_bus: Arc<uc_application::facade::HostEventBus> =
-        Arc::new(uc_application::facade::HostEventBus::new());
-    host_event_bus.register("logging", host_event_emitter);
-
-    let file_transfer = Arc::new(FileTransferAssembly::build(FileTransferAssemblyDeps {
-        event_store: file_transfer_store_arc,
-        host_event_bus: Arc::clone(&host_event_bus),
-        file_transfer: deps.storage.file_transfer.clone(),
-        directory_receive: deps.storage.directory_receive.clone(),
-        clock: deps.system.clock.clone(),
-        artifact_cleanup: Arc::new(uc_infra::fs::FsReceiveArtifactCleaner),
-        save_dir_resolver: uc_infra::fs::FsInboundFileTarget::new(deps.settings.clone()),
-        file_cache_dir: paths.file_cache_dir.clone(),
-    }));
-
-    let clipboard_background = Arc::new(uc_infra::clipboard::ClipboardBackgroundRuntime::new(
-        representation_cache,
-        spool_manager,
-        worker_rx,
-        spool_dir,
-        storage_config.spool_ttl_days,
-        storage_config.worker_retry_max_attempts,
-        storage_config.worker_retry_backoff_ms,
-        Arc::clone(&deps.clipboard.representation_store),
-        deps.clipboard.worker_tx.clone(),
-        Arc::clone(&deps.storage.blob_writer),
-        Arc::clone(&deps.system.hash),
-        Arc::clone(&deps.system.clock),
-        Arc::clone(&deps.storage.thumbnail_repo),
-        Arc::clone(&deps.storage.thumbnail_generator),
-    ));
-    let clipboard = Arc::new(uc_application::facade::ClipboardAssembly::build(
-        uc_application::facade::ClipboardAssemblyDeps {
-            application: deps.clone(),
-            file_cache_dir: paths.file_cache_dir.clone(),
-            file_transfer: Arc::clone(&file_transfer),
-            host_event_bus: Arc::clone(&host_event_bus),
-            background: clipboard_background,
-        },
-    ));
-
+    let sync_device_identity = Arc::clone(&deps.device.device_identity);
+    let sync_settings = Arc::clone(&deps.settings);
+    let sync_member_repo = Arc::clone(&deps.device.member_repo);
+    let sync_trusted_peer_repo = Arc::clone(&deps.trusted_peer_repo);
+    let sync_fingerprint = Arc::clone(&deps.security.fingerprint);
+    let sync_clock = Arc::clone(&deps.system.clock);
+    let sync_space_access = deps.security.space_access_ports.clone();
+    #[cfg(test)]
+    let sync_analytics = Arc::clone(&deps.analytics);
+    #[cfg(feature = "lan-compat")]
+    let mobile_sync_application = crate::assembly::deps::MobileSyncApplicationDeps {
+        clock: Arc::clone(&deps.system.clock),
+        settings: Arc::clone(&deps.settings),
+        mobile_consumable_load: Arc::clone(&deps.clipboard.mobile_consumable_load),
+        entry_repo: Arc::clone(&deps.clipboard.entry_ports.get),
+        selection_repo: Arc::clone(&deps.clipboard.selection_repo),
+        representation_repo: Arc::clone(&deps.clipboard.representation_ports.get),
+        payload_resolver: Arc::clone(&deps.clipboard.payload_resolver),
+        blob_reader: Arc::clone(&deps.storage.blob_store),
+        analytics: Arc::clone(&deps.analytics),
+        find_entry_by_snapshot_hash: Arc::clone(&deps.clipboard.entry_ports.find_by_snapshot_hash),
+        check_entry_availability: Arc::clone(&deps.clipboard.entry_ports.availability),
+    };
+    let application = uc_application::facade::ApplicationAssembly::build(deps);
     let wired = WiredDependencies {
-        deps,
+        application,
         profile_reset,
         sync_engine: SyncEngineDeps {
+            device_identity: sync_device_identity,
+            settings: sync_settings,
+            member_repo: sync_member_repo,
+            trusted_peer_repo: sync_trusted_peer_repo,
+            fingerprint: sync_fingerprint,
+            clock: sync_clock,
+            space_access: sync_space_access,
+            #[cfg(test)]
+            analytics: sync_analytics,
             iroh_identity_storage,
             peer_admission,
             peer_addr_repo: Arc::clone(&peer_addr_repo),
@@ -965,13 +982,9 @@ pub async fn wire_dependencies_from_inputs(
             endpoint_info: Arc::clone(&infra.mobile_sync_endpoint_info)
                 as Arc<dyn uc_core::ports::mobile_sync::MobileSyncEndpointInfoPort>,
         },
+        #[cfg(feature = "lan-compat")]
+        mobile_sync_application,
         shared: SharedRuntimeDeps {
-            host_event_bus,
-            entry_delivery_repo: Arc::clone(&infra.entry_delivery_repo),
-            clipboard_event_reader_repo: Arc::clone(&infra.clipboard_event_reader_repo),
-            file_transfer,
-            clipboard,
-            trusted_peer_repo: Arc::clone(&trusted_peer_repo),
             active_clipboard_sse_source,
         },
     };

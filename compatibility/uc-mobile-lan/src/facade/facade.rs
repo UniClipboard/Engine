@@ -72,10 +72,10 @@ use crate::usecases::{
     register_device::RegisterMobileShortcutDeviceUseCase, revoke_device::RevokeMobileDeviceUseCase,
     update_device::UpdateMobileDeviceUseCase, update_settings::UpdateMobileSyncSettingsUseCase,
 };
+#[cfg(test)]
+use uc_application::deps::test_support::ApplyInboundClipboardUseCase;
 use uc_application::facade::file_transfer::FileTransferFacade;
 use uc_application::facade::ActiveClipboardFacade;
-#[cfg(test)]
-use uc_application::facade::ApplyInboundClipboardUseCase;
 use uc_application::facade::ClipboardOutboundFacade;
 use uc_application::facade::InboundClipboardApplyPort;
 
@@ -241,7 +241,7 @@ pub struct MobileSyncFacadeDeps {
     /// use case，分别 emit `mobile_device_registered` /
     /// `mobile_auth_failed` / `mobile_clipboard_synced`。
     ///
-    /// 装配处直接复用 `AppDeps.analytics`（bootstrap 已包了一层
+    /// 装配处直接复用 `ApplicationDeps.analytics`（bootstrap 已包了一层
     /// `GatedAnalyticsSink`，运行时按用户 `usage_analytics_enabled` 切换
     /// noop / 真实 sink）。测试装配传 `NoopAnalyticsSink`。
     pub analytics: Arc<dyn AnalyticsPort>,

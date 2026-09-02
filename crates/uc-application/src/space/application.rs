@@ -11,7 +11,7 @@ use uc_core::membership::{
 };
 use uc_core::ports::PeerReachabilityChanged;
 
-use crate::deps::AppDeps;
+use crate::deps::ApplicationDeps;
 use crate::space::admission::{
     ActivateSponsorAdmissionPort, AdmissionRecoveryService, CurrentJoinAdmissionStatePort,
     ExecuteJoinerActivationPort, HandleAuthenticatedSpaceAdmissionMessagePort,
@@ -84,7 +84,7 @@ impl crate::space::membership::WakeSpaceMembershipMaintenancePort for DeferredMa
 
 /// Engine 选择的 Space 网络、安全与持久化 adapter。
 ///
-/// 通用 Application 能力从 `AppDeps` 取得；该输入只保留 Space 运行期
+/// 通用 Application 能力从 `ApplicationDeps` 取得；该输入只保留 Space 运行期
 /// 特有的 adapter 选择，不暴露内部 use case 或 runtime 组合。
 pub struct SpaceRuntimeAdapters {
     pub load_membership_ledger: Arc<dyn LoadMembershipLedgerPort>,
@@ -144,7 +144,7 @@ struct SpaceApplicationDeps {
 }
 
 impl SpaceApplicationDeps {
-    fn from_application(application: &AppDeps, adapters: SpaceRuntimeAdapters) -> Self {
+    fn from_application(application: &ApplicationDeps, adapters: SpaceRuntimeAdapters) -> Self {
         Self {
             adapters,
             device_identity: Arc::clone(&application.device.device_identity),
@@ -175,7 +175,7 @@ pub(crate) struct SpaceApplication {
 
 impl SpaceApplication {
     pub(crate) fn build(
-        application: &AppDeps,
+        application: &ApplicationDeps,
         adapters: SpaceRuntimeAdapters,
         peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
         re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,

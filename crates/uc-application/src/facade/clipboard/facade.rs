@@ -43,13 +43,12 @@ use uc_core::ports::clipboard::GetClipboardEntryPort;
 use uc_core::ports::ClipboardEventRepositoryPort;
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 
-/// Construction bundle, mirrors `MemberRosterDeps` pattern so bootstrap
-/// wiring stays consistent across facades.
-pub struct ClipboardSyncDeps {
+/// Clipboard 领域内部构造输入，不进入公开 facade 白名单。
+pub(crate) struct ClipboardSyncDeps {
     pub peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     pub member_repo: Arc<dyn MemberRepositoryPort>,
     pub peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
-    pub presence: Arc<dyn PeerReachabilityPort>,
+    pub peer_reachability: Arc<dyn PeerReachabilityPort>,
     pub transfer_cipher: Arc<dyn TransferCipherPort>,
     pub clipboard_dispatch: Arc<dyn ClipboardDispatchPort>,
     pub device_identity: Arc<dyn DeviceIdentityPort>,
@@ -191,11 +190,11 @@ impl ClipboardSyncFacade {
         crate::clipboard::sync::sweep_inbound_staging(dirs).await
     }
 
-    pub fn new(deps: ClipboardSyncDeps) -> Self {
+    pub(crate) fn new(deps: ClipboardSyncDeps) -> Self {
         let dispatch_uc = Arc::new(DispatchClipboardEntryUseCase::new_with_scope(
             Arc::clone(&deps.peer_addr_repo),
             Arc::clone(&deps.member_repo),
-            Arc::clone(&deps.presence),
+            Arc::clone(&deps.peer_reachability),
             Arc::clone(&deps.transfer_cipher),
             Arc::clone(&deps.clipboard_dispatch),
             Arc::clone(&deps.device_identity),
@@ -948,7 +947,7 @@ mod tests {
             peer_addr_repo: Arc::new(peer_addr_repo),
             member_repo: Arc::new(make_member_repo_all_enabled()),
             peer_scope: Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
-            presence: Arc::new(presence),
+            peer_reachability: Arc::new(presence),
             transfer_cipher: Arc::new(cipher),
             clipboard_dispatch: Arc::new(dispatch),
             device_identity: Arc::new(device_identity),

@@ -107,7 +107,7 @@ Rust API       UniFFI 绑定          N-API 绑定
 无业务所有权的 `support/`。稳定事件类型可以由门面公开，事件投递实现不在门面目录。
 
 稳定领域归属由 [ADR-018](../design-docs/decisions/018-domain-oriented-application-layout.md) 定义；当前对象图
-深化、Engine 收口顺序、删除清单和验收门禁见[规格 031](../exec-plans/active/031-application-dependency-surface-deepening.md)。
+深化结果、Engine 收口边界和验收记录见[规格 031](../exec-plans/completed/031-application-dependency-surface-deepening.md)。
 
 ### 领域模块
 
@@ -797,10 +797,11 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 | 日期 | 主题 | 长期结论 |
 | --- | --- | --- |
+| 2026-09-02 | Application 依赖注释统一 | `crates/uc-application/src/deps.rs` 的模块、端口分组与全部字段统一使用准确的中文 Rust 文档注释；本轮仅改善文档表达，无架构变化。 |
 | 2026-09-02 | 031 Space assembly 深化 | `SpaceFacade` 从通用 Application 依赖与 Engine 选择的最终 Space adapters 内部构造私有成员对象图，并在 Application 内持有成员、搜索和接收的 session activity 组合及恢复顺序。Engine 继续选择 Iroh、V3 transition/recovery、宿主能力与观测 decorator，但不再构造或导入 Space 内部 deps、use case、runtime 或 activity；跨领域 Search/receive 能力只在启动装配期一次绑定。 |
 | 2026-09-02 | Engine 关闭期限所有权 | Engine shutdown 从用户总期限预留 100ms 给外层完成通知，runtime task registry 使用较早期限收口，避免 registry 到点 abort 与外层 timeout 同刻竞争；外层仍严格受原总期限约束。 |
 | 2026-09-02 | 030 分支选择与故障矩阵验收 | sibling 分支只由逐设备明确选择推进；相反并发选择以 ledger CAS 只保存一个不可变 intent，后续不同 conflict 可独立选择。V3 branch transition 六个副作用阶段均验证“副作用完成、phase 提交前崩溃”后的新 owner 幂等重放，profile data generation、SQLite/blob 与 keyslot 不变；F0-F7 真实 Engine/Iroh、F8-F13 分层矩阵、20 个固定 seed 及 029 C0-C5 回归全部通过。实体设备和 Release bundle 本阶段跳过。 |
-| 2026-09-02 | 031 wiring inventory 删除 | `AppDeps` 不再保存只在 Engine 组装期消费的 portable current-space identity，`SecurityPorts` 不再保存 current profile 与 blob cipher；真实 adapter 继续在 composition root 局部注入其消费者。仓库检查禁止这三个 wiring-only 字段回流。 |
+| 2026-09-02 | 031 wiring inventory 删除 | `ApplicationDeps` 不再保存只在 Engine 组装期消费的 portable current-space identity，`SecurityPorts` 不再保存 current profile 与 blob cipher；真实 adapter 继续在 composition root 局部注入其消费者。仓库检查禁止这三个 wiring-only 字段回流。 |
 | 2026-09-02 | 031 实施基线恢复 | Slice 1 只修正两处已被现有稳定合同取代的陈旧测试期望：已移除设备继续不可同步，统一设备组查询继续返回 `DeviceGroupChoices`。本轮无生产行为或架构变化。 |
 | 2026-09-02 | Application 依赖表面深化重基线 | ADR-018 继续定义五个 Application 领域归属，规格 031 取代旧 018 的剩余实施计划。重构以唯一 Application assembly 和具体 `ApplicationRuntime` 隐藏对象图、启动回滚与关闭顺序；Engine 继续选择 Iroh/Infra adapter 和观测 decorator。Search 与 Space 分离，Clipboard reconcile 成为 worker 前置门禁，Space 等待 029 完成及 030 按 033 control-only generation 重基线。本轮只更新计划，无生产行为变化。 |
 | 2026-09-02 | 定时维护审查 Action | GitHub Actions 每周并行启动五个互不调用的全仓审查 session，再由独立 session 汇总标准 JSON artifact；Codex 与产品仓发布流程统一从 `CODEX_API_ENDPOINT` 和 `CODEX_API_KEY` 读取 Responses API 接入配置。开发者通过 Actions Summary 阅读去重报告，并可下载各 lane 与汇总产物追溯证据。审查只报告问题，不自动修复、建 Issue 或改变运行时架构。 |
@@ -905,8 +906,10 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-09-02 | 031 Search assembly 深化 | Application 新增唯一 `SearchAssembly`，内部构造 query、projection、repair、maintenance coordinator 与运行期；Engine 删除 `assembly/search.rs`，只持有领域 owner 和 facade，不再投影 `SearchRuntimeDeps` 或引用索引版本常量。当前索引版本由具体 maintenance adapter 提供，关闭错误保留 typed source；Search 与 Space 会话活动仍保持独立 owner。 |
 | 2026-09-02 | 031 Search 重建写入边界 | `SearchPorts` 内部持有唯一 mutation gate：增量 index/remove/favorite 写共享读门禁，Coordinator 从主库分页快照开始到索引原子替换完成持独占门禁，并以私有 raw rebuild port 避免嵌套锁。新 capture 因而必定进入重建快照或在替换后补写，Engine 只调用 `SearchPorts::new`，不装配并发步骤。 |
 | 2026-09-02 | 全仓验证基线收口 | Engine 装配错误通过 typed context 保留完整 source chain；生产装配合同按真实 Clipboard gate 启动顺序运行，host 查询只重试公开标注的启动期 `Unavailable`。SQLite migration 测试按目标版本回退，不再依赖迁移数量；持久明文探针从主库读取，避免把可重建 Search 投影误作业务持久化证据。生产业务与迁移语义未改变。 |
-| 2026-09-02 | 031 Settings assembly 深化 | Application 新增唯一 `SettingsAssembly`，内部构造 Settings、Diagnostics、Storage、ConfigMigration 与 Upgrade facade，并拥有启动期 relay 配置恢复；`AppDeps` 只携带配置迁移 capability，Engine 不再预构造五个 facade。Engine 继续选择 Iroh relay probe adapter、翻译已恢复的网络偏好并创建具体网络资源。 |
+| 2026-09-02 | 031 Settings assembly 深化 | Application 新增唯一 `SettingsAssembly`，内部构造 Settings、Diagnostics、Storage、ConfigMigration 与 Upgrade facade，并拥有启动期 relay 配置恢复；`ApplicationDeps` 只携带配置迁移 capability，Engine 不再预构造五个 facade。Engine 继续选择 Iroh relay probe adapter、翻译已恢复的网络偏好并创建具体网络资源。 |
 | 2026-09-02 | 031 Clipboard assembly 深化 | Application 新增进程级唯一 `ClipboardAssembly`，内部创建内容身份与系统写入协调器，统一构造 capture、history、restore、resource、live-index、interactive inbound、store-only pull 与 active session；Engine 删除同义 Clipboard/spool runtime，只注入文件系统、网络与持久化 adapter。启动顺序固定为 active register reconcile 成功后恢复 spool，再允许 active/inbound/peer-online workers；register/OS/spool 失败保留 typed source 并阻止启动。 |
+| 2026-09-02 | 031 顶层 Application 收口 | `ApplicationAssembly::build(ApplicationDeps)` 成为唯一进程级对象图入口；网络 adapter 一次提交后只向 Engine 返回必须注册的窄 endpoint binding，注册完成即消费并交回 Application。`ApplicationRuntime` 统一负责 Active Clipboard 前置门禁、应用领域启动失败回滚与关闭；生产 Engine session 只保留 `AppFacade` 和该 runtime，不再保留 Search、Clipboard、File Transfer 或 Active Clipboard 领域 owner。关闭时 Engine 先停止可能继续触发领域工作的观测/presence 任务，再关闭 Application，最后释放 Iroh。`uc-application` crate 根只公开 `facade` 与 `deps`，旧 `AppDeps`、Engine 同义 assembly、内部 use case/runtime deps/session 再导出均已删除；Iroh、Infra、宿主 adapter 与观测 decorator 的选择仍在 Engine。 |
+| 2026-09-02 | 031 完整验证与 V3 admission 回归 | 029/030 Engine SQLite/Iroh 矩阵复验发现 Joiner source snapshot 仍通过 V2-only manifest loader，已改为识别 V2/V3 runtime manifest；V2 与无 manifest 保持原 V1 snapshot 字节编码，V3 snapshot 纳入稳定 profile data generation 与 control-only generation，避免既有设备二次加入被误判为恢复失败。十节点 F7 的三张 sibling 邀请改为带节点诊断的顺序签发，避免测试在仍有成员维护工作时人为并发竞争 admission gate；等待上限与领域断言不变。准入聚合继续位于 profile 加密数据库，不迁移到 control database。 |
 | 2026-09-02 | 029 反熵恢复与原子性验收 | 成员历史反熵从持久 retry attempt 推导本次固定退避窗口；若保存的 deadline 与当前时钟距离超过该窗口，判定 wall clock 已倒退并立即重试。真实 SQLite 故障注入固定完整 AEAD ledger replacement 的单事务边界：history、peer 欠账、公平游标与 effects 在 UPDATE 失败时全部保持旧状态，成功时整体出现。架构 preflight 禁止在认证 ACK/完整 suffix 提交负责人之外正向赋值确认水位，并禁止 Sponsor 推断确认。Fresh profile 的 Verified journal 以不变 profile data generation 识别 admission 后的合法 control-only transition，重启时清理陈旧 journal，其他 generation/source mismatch 继续失败关闭。已完成入站 transfer 的 ACK 固定最多保留 256 个且总是保留最新完成项；正常退避、上限与逐 peer 欠账语义不变，不新增明文状态。 |
 | 2026-09-01 | 033 活动安全会话第四切片 | Infra 新增 `ActiveSpaceSecuritySession` 深模块，统一负责目标 material 的归属验证、profile vault 先行耐久安装、session 后切换及失败恢复；Fresh group join 与普通恢复共用入口，Vault 失败保持旧 session，稳定 `SecurityState` 分类保留下层 source。Engine 组装 profile 级唯一 vault；本轮不启用 V3 payload、不删除 V2 reader 历史 catalog，也不机械改造旧 CrossSpace。 |
 | 2026-09-01 | 033 当前 material 推进第五切片 | `ActiveSpaceSecuritySession` 新增完整 `install_current_material` 操作，将成员加入、epoch/revocation、legacy bootstrap、Sponsor/Helper 准入和 membership branch recovery 的真实安全状态统一收口为 vault-first、session-second 安装；加密 repository 恢复也收口为带临时密钥访问和完整 snapshot 回滚的单一操作。临时 validator 与待删旧 CrossSpace target session 不写 vault；新增安装错误转换保留稳定 `SecurityState` 分类和完整 source。本轮不启用 production V3 payload 或 V3 manifest。 |
@@ -987,6 +990,6 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 - `docs/exec-plans/completed/028-single-space-admission-protocol.md`：全新单一 Space 准入协议、跨层接入、删除清单和完整验收标准。
 - `docs/exec-plans/completed/029-durable-membership-history-anti-entropy.md`：逐 peer 确认水位、持久传播欠账、公平重试和复杂拓扑验收。
 - `docs/exec-plans/completed/030-membership-conflict-resolution-and-chaos-validation.md`：成员分叉选择、恢复与确定性复杂拓扑验收。
-- `docs/exec-plans/active/031-application-dependency-surface-deepening.md`：Application 对象图深化、生命周期所有权、九切片顺序和实施门禁。
+- `docs/exec-plans/completed/031-application-dependency-surface-deepening.md`：Application 对象图深化、生命周期所有权、九切片实施与验收记录。
 - `docs/exec-plans/completed/032-admission-space-transition-internal-refactor.md`：断开 maintenance-only legacy 可达性、删除旧 V2 transition executor、私有化 upgrade source layout 并防止 payload rewrap 回流的实施记录。
 - `docs/exec-plans/completed/033-immutable-content-protection-context.md`：不可变保护上下文、profile 历史 content key vault、一次性 V3 密文升级及无历史重包 CrossSpace 实施记录。

@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use crate::deps::AppDeps;
+use crate::deps::ApplicationDeps;
 
 use super::coordinator::SearchCoordinatorDeps;
 use super::runtime::SearchRuntime;
@@ -17,7 +17,7 @@ pub struct SearchAssembly {
 }
 
 impl SearchAssembly {
-    pub fn start(deps: &AppDeps) -> Self {
+    pub fn start(deps: &ApplicationDeps) -> Self {
         let (rebuild_index, mutation_gate) = deps.search.rebuild_coordination();
         let coordinator_deps = SearchCoordinatorDeps::new(
             Arc::clone(&deps.search.search_index),
