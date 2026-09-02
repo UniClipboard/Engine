@@ -141,7 +141,7 @@ jobs:
           # 只读执行面，并让该用户使用自己的可写 Cargo home。
           sudo install -d -o uni-auditor -g uni-auditor /home/uni-auditor/.cargo
           sudo chmod g+rx /home/runner /home/runner/.rustup
-          for tool in cargo rustc; do
+          for tool in cargo rustc rustdoc rustfmt cargo-fmt clippy-driver cargo-clippy; do
             tool_path="$(rustup which "$tool")"
             sudo chmod g+rX "$tool_path"
             sudo ln -sf "$tool_path" "/usr/local/bin/$tool"
