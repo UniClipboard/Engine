@@ -20,6 +20,8 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
+      # 共享的自定义 Responses API 接入按单路顺序执行，避免审查请求相互争抢容量。
+      max-parallel: 1
       matrix:
         include:
           - lane: module_depth
