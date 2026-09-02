@@ -144,16 +144,35 @@ jobs:
           openai-api-key: ${{ secrets.CODEX_API_KEY }}
           safety-strategy: unprivileged-user
           codex-user: uni-auditor
-          sandbox: workspace-write
+          # 仓库与产物目录的 Unix 权限是写入边界；避免低权限账户再次嵌套
+          # bubblewrap，后者在托管 runner 上会于工具执行前发生挂载失败。
+          sandbox: danger-full-access
           prompt: ${{ env.AUDIT_PROMPT }}
 
+      - name: Verify audit attempt 1 output
+        id: audit_output_1
+        if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane) }}
+        continue-on-error: true
+        env:
+          ACTION_OUTCOME: ${{ steps.audit_attempt_1.outcome }}
+          ARTIFACT: audit-artifacts/${{ matrix.lane }}.json
+        run: |
+          if [[ "$ACTION_OUTCOME" != "success" || ! -s "$ARTIFACT" ]]; then
+            echo "::error::Codex attempt 1 did not produce a usable lane artifact."
+            exit 1
+          fi
+
       - name: Back off before audit attempt 2
-        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane) && steps.audit_attempt_1.outcome == 'failure' }}
-        run: sleep 60
+        if: ${{ steps.audit_output_1.outcome == 'failure' }}
+        env:
+          ARTIFACT: audit-artifacts/${{ matrix.lane }}.json
+        run: |
+          rm -f "$ARTIFACT"
+          sleep 60
 
       - name: Run ${{ matrix.skill }} (attempt 2)
         id: audit_attempt_2
-        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane) && steps.audit_attempt_1.outcome == 'failure' }}
+        if: ${{ steps.audit_output_1.outcome == 'failure' }}
         continue-on-error: true
         uses: openai/codex-action@v1
         with:
@@ -161,16 +180,33 @@ jobs:
           openai-api-key: ${{ secrets.CODEX_API_KEY }}
           safety-strategy: unprivileged-user
           codex-user: uni-auditor
-          sandbox: workspace-write
+          sandbox: danger-full-access
           prompt: ${{ env.AUDIT_PROMPT }}
 
+      - name: Verify audit attempt 2 output
+        id: audit_output_2
+        if: ${{ always() && steps.audit_output_1.outcome == 'failure' }}
+        continue-on-error: true
+        env:
+          ACTION_OUTCOME: ${{ steps.audit_attempt_2.outcome }}
+          ARTIFACT: audit-artifacts/${{ matrix.lane }}.json
+        run: |
+          if [[ "$ACTION_OUTCOME" != "success" || ! -s "$ARTIFACT" ]]; then
+            echo "::error::Codex attempt 2 did not produce a usable lane artifact."
+            exit 1
+          fi
+
       - name: Back off before audit attempt 3
-        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane) && steps.audit_attempt_1.outcome == 'failure' && steps.audit_attempt_2.outcome == 'failure' }}
-        run: sleep 60
+        if: ${{ steps.audit_output_2.outcome == 'failure' }}
+        env:
+          ARTIFACT: audit-artifacts/${{ matrix.lane }}.json
+        run: |
+          rm -f "$ARTIFACT"
+          sleep 60
 
       - name: Run ${{ matrix.skill }} (attempt 3)
         id: audit_attempt_3
-        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane) && steps.audit_attempt_1.outcome == 'failure' && steps.audit_attempt_2.outcome == 'failure' }}
+        if: ${{ steps.audit_output_2.outcome == 'failure' }}
         continue-on-error: true
         uses: openai/codex-action@v1
         with:
@@ -178,18 +214,31 @@ jobs:
           openai-api-key: ${{ secrets.CODEX_API_KEY }}
           safety-strategy: unprivileged-user
           codex-user: uni-auditor
-          sandbox: workspace-write
+          sandbox: danger-full-access
           prompt: ${{ env.AUDIT_PROMPT }}
 
-      - name: Require a successful audit attempt
+      - name: Verify audit attempt 3 output
+        id: audit_output_3
+        if: ${{ always() && steps.audit_output_2.outcome == 'failure' }}
+        continue-on-error: true
+        env:
+          ACTION_OUTCOME: ${{ steps.audit_attempt_3.outcome }}
+          ARTIFACT: audit-artifacts/${{ matrix.lane }}.json
+        run: |
+          if [[ "$ACTION_OUTCOME" != "success" || ! -s "$ARTIFACT" ]]; then
+            echo "::error::Codex attempt 3 did not produce a usable lane artifact."
+            exit 1
+          fi
+
+      - name: Require a usable audit artifact
         if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane) }}
         env:
-          ATTEMPT_1: ${{ steps.audit_attempt_1.outcome }}
-          ATTEMPT_2: ${{ steps.audit_attempt_2.outcome }}
-          ATTEMPT_3: ${{ steps.audit_attempt_3.outcome }}
+          ATTEMPT_1: ${{ steps.audit_output_1.outcome }}
+          ATTEMPT_2: ${{ steps.audit_output_2.outcome }}
+          ATTEMPT_3: ${{ steps.audit_output_3.outcome }}
         run: |
           if [[ "$ATTEMPT_1" != "success" && "$ATTEMPT_2" != "success" && "$ATTEMPT_3" != "success" ]]; then
-            echo "::error::All Codex audit attempts failed (attempts: $ATTEMPT_1, $ATTEMPT_2, $ATTEMPT_3)."
+            echo "::error::All Codex audit attempts failed to produce an artifact (attempts: $ATTEMPT_1, $ATTEMPT_2, $ATTEMPT_3)."
             exit 1
           fi
 
@@ -286,7 +335,7 @@ jobs:
           openai-api-key: ${{ secrets.CODEX_API_KEY }}
           safety-strategy: unprivileged-user
           codex-user: uni-auditor
-          sandbox: workspace-write
+          sandbox: danger-full-access
           prompt: |
             运行仓库 skill `uni-audit-report`，并且本 session 只运行这一个 skill。
 
