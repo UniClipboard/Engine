@@ -140,12 +140,11 @@ jobs:
           # sudo 为低权限用户使用受限 PATH。仅暴露 runner 预装 Rust 工具链的
           # 只读执行面，并让该用户使用自己的可写 Cargo home。
           sudo install -d -o uni-auditor -g uni-auditor /home/uni-auditor/.cargo
-          sudo chmod g+rx /home/runner /home/runner/.cargo /home/runner/.cargo/bin /home/runner/.rustup
-          sudo chmod -R g+rX /home/runner/.rustup
-          sudo ln -s /home/runner/.rustup /home/uni-auditor/.rustup
-          sudo chown -h uni-auditor:uni-auditor /home/uni-auditor/.rustup
-          for tool in cargo rustc rustdoc rustfmt clippy-driver; do
-            sudo ln -sf "/home/runner/.cargo/bin/$tool" "/usr/local/bin/$tool"
+          sudo chmod g+rx /home/runner /home/runner/.rustup
+          for tool in cargo rustc; do
+            tool_path="$(rustup which "$tool")"
+            sudo chmod g+rX "$tool_path"
+            sudo ln -sf "$tool_path" "/usr/local/bin/$tool"
           done
           sudo -u uni-auditor -- cargo --version
 
