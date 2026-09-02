@@ -14,8 +14,57 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  responses_api_preflight:
+    name: Responses API preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate streaming response contract
+        env:
+          CODEX_API_ENDPOINT: ${{ secrets.CODEX_API_ENDPOINT }}
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+        run: |
+          if [ -z "$CODEX_API_ENDPOINT" ] || [ -z "$CODEX_API_KEY" ]; then
+            echo "::error::CODEX_API_ENDPOINT and CODEX_API_KEY must be available to this repository."
+            exit 1
+          fi
+
+          response_body="$(mktemp)"
+          response_headers="$(mktemp)"
+          http_status="$({
+            curl \
+              --silent \
+              --show-error \
+              --max-time 60 \
+              --output "$response_body" \
+              --dump-header "$response_headers" \
+              --write-out "%{http_code}" \
+              --header "Authorization: Bearer $CODEX_API_KEY" \
+              --header "Content-Type: application/json" \
+              --data '{"model":"gpt-5.6-sol","input":"Respond only with OK.","stream":true,"store":false}' \
+              "$CODEX_API_ENDPOINT"
+          } || true)"
+          content_type="$(sed -n 's/^[Cc]ontent-[Tt]ype:[[:space:]]*//p' "$response_headers" | tail -n 1 | tr -d '\r')"
+
+          echo "Responses API HTTP status: ${http_status:-unavailable}"
+          echo "Responses API Content-Type: ${content_type:-unavailable}"
+
+          if [[ ! "$http_status" =~ ^2[0-9][0-9]$ ]]; then
+            error_type="$(jq -r '.error.type // .error.code // .type // "unknown"' "$response_body" 2>/dev/null || true)"
+            echo "::error::Responses API preflight failed with HTTP ${http_status:-unavailable}; error type: ${error_type:-unknown}."
+            exit 1
+          fi
+
+          if ! grep -Eq '(^event:[[:space:]]*response.completed|"type"[[:space:]]*:[[:space:]]*"response.completed")' "$response_body"; then
+            echo "::error::Responses API stream ended without response.completed. Verify that CODEX_API_ENDPOINT is the full Responses API URL and that the upstream supports Responses API SSE."
+            exit 1
+          fi
+
+          echo "Responses API streaming contract verified."
+
   audit:
     name: Audit / ${{ matrix.lane }}
+    needs: responses_api_preflight
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
@@ -50,7 +99,6 @@ jobs:
         with:
           responses-api-endpoint: ${{ secrets.CODEX_API_ENDPOINT || 'https://api.openai.com/v1/responses' }}
           openai-api-key: ${{ secrets.CODEX_API_KEY }}
-          codex-version: 0.151.0
           sandbox: workspace-write
           prompt: |
             运行仓库 skill `${{ matrix.skill }}`，并且本 session 只运行这一个 skill。
@@ -139,7 +187,6 @@ jobs:
         with:
           responses-api-endpoint: ${{ secrets.CODEX_API_ENDPOINT || 'https://api.openai.com/v1/responses' }}
           openai-api-key: ${{ secrets.CODEX_API_KEY }}
-          codex-version: 0.151.0
           sandbox: workspace-write
           prompt: |
             运行仓库 skill `uni-audit-report`，并且本 session 只运行这一个 skill。
