@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use uc_application::deps::AppDeps;
-use uc_application::facade::clipboard_capture::CaptureClipboardUseCase;
 use uc_application::facade::settings::{
     RelayAccessToken, RelayDiagnosticPort, RelayProbeError, RelayProbeReport,
 };
@@ -17,11 +16,9 @@ use uc_application::facade::{
     ActiveClipboardFacade, FileTransferFacade, InboundClipboardApplyPort,
 };
 use uc_application::facade::{
-    AppFacade, AppFacadeParts, AppPaths, BlobTransferFacade, ClipboardCaptureFacade,
-    ClipboardHistoryFacade, ClipboardHistoryFacadeDeps, ClipboardOutboundFacade,
-    ClipboardRestoreFacade, ClipboardRestoreFacadeDeps, ClipboardSyncFacade,
-    ProbeProfileKeyAccessUseCase, QueryLocalDeviceUseCase, ResourceFacade, ResourceFacadeDeps,
-    SearchFacade, SettingsAssembly,
+    AppFacade, AppFacadeParts, AppPaths, BlobTransferFacade, ClipboardAssembly,
+    ClipboardOutboundFacade, ClipboardSyncFacade, ProbeProfileKeyAccessUseCase,
+    QueryLocalDeviceUseCase, SearchFacade, SettingsAssembly,
 };
 use uc_core::clipboard::ClipboardIntegrationMode;
 #[cfg(feature = "lan-compat")]
@@ -102,48 +99,6 @@ pub(crate) fn build_settings_assembly(deps: &AppDeps, paths: &AppPaths) -> Setti
 ///
 /// GUI 和 daemon 需要 restore 能力；部分 CLI 查询入口不需要，因此通过
 /// 显式选项传入，避免各入口各自复制 facade 拼装代码。
-pub struct ClipboardRestoreAssembly {
-    pub write_coordinator: Arc<uc_application::facade::clipboard_write::ClipboardWriteCoordinator>,
-    pub integration_mode: ClipboardIntegrationMode,
-    /// Optional restore-broadcast trigger (issue #1017). When present, a
-    /// successful restore announces the activation to peers (gated). `None`
-    /// for entry points without a network broadcast stack (CLI fallback).
-    pub restore_broadcast: Option<uc_application::facade::clipboard_write::RestoreBroadcastTrigger>,
-}
-
-/// 构造 [`ClipboardCaptureFacade`] —— "立即捕获当前 OS 剪贴板内容"的入口
-/// (issue #1169:启动期恢复上次剪贴板记录前,先把当前可能已经变化的剪贴板
-/// 内容落一条历史,避免被恢复动作覆盖丢失)。
-///
-/// 所有桌面入口(daemon / CLI / GUI shell)都用同一份 `AppDeps` 装得起来,
-/// 不需要额外的 caller 提供的装配选项,因此 `AppFacade.clipboard_capture`
-/// 是非 `Option` 字段。
-fn build_clipboard_capture_facade(deps: &AppDeps) -> Arc<ClipboardCaptureFacade> {
-    let capture_uc = Arc::new(
-        CaptureClipboardUseCase::new(
-            deps.clipboard.entry_ports.save.clone(),
-            deps.clipboard.entry_ports.touch.clone(),
-            deps.clipboard.entry_ports.find_by_snapshot_hash.clone(),
-            deps.clipboard.clipboard_event_repo.clone(),
-            deps.clipboard.representation_policy.clone(),
-            deps.clipboard.representation_normalizer.clone(),
-            deps.device.device_identity.clone(),
-            deps.clipboard.representation_cache.clone(),
-            deps.clipboard.spool_queue.clone(),
-            deps.storage.blob_content_ingest.clone(),
-            deps.storage.entry_file_set_repo.clone(),
-            deps.settings.clone(),
-            deps.clipboard.entry_ports.replace_content.clone(),
-            deps.analytics.clone(),
-        )
-        .with_entry_identity_coordinator(deps.clipboard.entry_identity_coordinator.clone()),
-    );
-    Arc::new(
-        ClipboardCaptureFacade::new(capture_uc, deps.clipboard.clipboard.clone())
-            .with_entry_file_set_repository(deps.storage.entry_file_set_repo.clone()),
-    )
-}
-
 /// 构造 [`MobileSyncFacade`] —— 抽出来供 daemon-lifecycle 装配复用。
 ///
 /// `apply_inbound` 由 engine 运行期组装并传入。`endpoint_info`
@@ -233,7 +188,8 @@ pub struct RuntimeAppFacadeAssembly {
     /// "发布、拉取 blob"业务动作,这个 port 用于"释放 blob 引用"基础
     /// 设施动作,两者共享同一个底层 adapter 实例。
     pub blob_transfer_port: Arc<dyn uc_core::ports::blob::BlobTransferPort>,
-    pub clipboard_restore: ClipboardRestoreAssembly,
+    pub clipboard: Arc<ClipboardAssembly>,
+    pub restore_broadcast: Option<uc_application::facade::clipboard_write::RestoreBroadcastTrigger>,
     pub search: Arc<SearchFacade>,
     pub settings: SettingsAssembly,
     pub network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
@@ -246,56 +202,22 @@ pub struct RuntimeAppFacadeAssembly {
 /// ports 组合成 `AppFacade`。
 pub fn build_app_facade_from_deps(
     deps: &AppDeps,
-    storage_paths: &AppPaths,
+    _storage_paths: &AppPaths,
     runtime: RuntimeAppFacadeAssembly,
 ) -> Arc<AppFacade> {
     let settings = runtime.settings.into_parts();
-    let clipboard_restore = Arc::new(ClipboardRestoreFacade::new(ClipboardRestoreFacadeDeps {
-        selection_repo: deps.clipboard.selection_repo.clone(),
-        entry_ports: deps.clipboard.entry_ports.clone(),
-        representation_ports: deps.clipboard.representation_ports.clone(),
-        payload_resolver: deps.clipboard.payload_resolver.clone(),
-        blob_store: deps.storage.blob_store.clone(),
-        clock: deps.system.clock.clone(),
-        device_identity: deps.device.device_identity.clone(),
-        active_register: deps.clipboard.active_register.clone(),
-        mobile_consumability: deps.clipboard.mobile_consumability.clone(),
-        restore_broadcast: runtime.clipboard_restore.restore_broadcast,
-        write_coordinator: runtime.clipboard_restore.write_coordinator,
-        integration_mode: runtime.clipboard_restore.integration_mode,
-    }));
+    let clipboard_restore = runtime
+        .clipboard
+        .restore(ClipboardIntegrationMode::Full, runtime.restore_broadcast);
 
     Arc::new(AppFacade::new(AppFacadeParts {
         space: runtime.space,
         probe_profile_key_access: Arc::new(ProbeProfileKeyAccessUseCase::new(
             deps.security.profile_key_access_probe.clone(),
         )),
-        resource: Arc::new(ResourceFacade::new(ResourceFacadeDeps {
-            representation_by_blob_id: deps.clipboard.representation_ports.get_by_blob_id.clone(),
-            representations_for_event: deps.clipboard.representation_ports.list_for_event.clone(),
-            thumbnail_repo: deps.storage.thumbnail_repo.clone(),
-            blob_store: deps.storage.blob_store.clone(),
-            entry_repo: deps.clipboard.entry_ports.get.clone(),
-        })),
-        clipboard_history: Arc::new(ClipboardHistoryFacade::new(ClipboardHistoryFacadeDeps {
-            entry_ports: deps.clipboard.entry_ports.clone(),
-            selection_repo: deps.clipboard.selection_repo.clone(),
-            representation_ports: deps.clipboard.representation_ports.clone(),
-            event_writer: deps.clipboard.clipboard_event_repo.clone(),
-            payload_resolver: deps.clipboard.payload_resolver.clone(),
-            blob_store: deps.storage.blob_store.clone(),
-            thumbnail_repo: deps.storage.thumbnail_repo.clone(),
-            file_transfer_repo: deps.storage.file_transfer.entry_summary.clone(),
-            entry_file_set_repo: deps.storage.entry_file_set_repo.clone(),
-            search_index: Some(deps.search.search_index.clone()),
-            file_cache_dir: Some(storage_paths.file_cache_dir.clone()),
-            blob_transfer: Some(runtime.blob_transfer_port),
-            settings: deps.settings.clone(),
-            device_identity: deps.device.device_identity.clone(),
-            clock: deps.system.clock.clone(),
-            cache_fs: deps.system.cache_fs.clone(),
-        })),
-        clipboard_capture: build_clipboard_capture_facade(deps),
+        resource: runtime.clipboard.resource(),
+        clipboard_history: runtime.clipboard.history(Some(runtime.blob_transfer_port)),
+        clipboard_capture: runtime.clipboard.capture(),
         clipboard_sync: runtime.clipboard_sync,
         blob_transfer: runtime.blob_transfer,
         file_transfer: runtime.file_transfer,

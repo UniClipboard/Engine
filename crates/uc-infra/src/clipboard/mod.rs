@@ -1,4 +1,5 @@
 mod background_blob_worker;
+mod background_runtime;
 mod broadcasting_advance;
 mod change_origin;
 pub mod chunked_transfer;
@@ -16,6 +17,7 @@ mod testing;
 mod thumbnail_generator;
 
 pub use background_blob_worker::BackgroundBlobWorker;
+pub use background_runtime::ClipboardBackgroundRuntime;
 pub use broadcasting_advance::BroadcastingAdvance;
 
 /// Builds an engine-owned `InMemorySelfWriteLedger`.

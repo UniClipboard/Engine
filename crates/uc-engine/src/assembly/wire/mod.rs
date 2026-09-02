@@ -89,8 +89,8 @@ use uc_observability_contract::analytics::{AnalyticsFacade, AnalyticsPort};
 #[cfg(feature = "lan-compat")]
 use crate::assembly::deps::DaemonRuntimeDeps;
 use crate::assembly::deps::{
-    BackgroundRuntimeDeps, ProfileResetDeps, SharedRuntimeDeps, SyncEngineDeps, WiredDependencies,
-    WiringError, WiringResult,
+    ProfileResetDeps, SharedRuntimeDeps, SyncEngineDeps, WiredDependencies, WiringError,
+    WiringResult,
 };
 use crate::assembly::maintenance_space_transition::MaintenanceOnlySpaceTransitionPorts;
 use crate::assembly::platform::{create_platform_layer, ProfilePayloadMode, SystemClipboardLayer};
@@ -273,7 +273,7 @@ struct BlobProcessingAssembly {
 
 pub async fn wire_dependencies_from_inputs(
     inputs: CoreWiringInputs,
-) -> WiringResult<(WiredDependencies, BackgroundRuntimeDeps)> {
+) -> WiringResult<WiredDependencies> {
     let CoreWiringInputs {
         paths,
         secure_storage,
@@ -816,12 +816,6 @@ pub async fn wire_dependencies_from_inputs(
             clipboard: platform.clipboard,
             system_clipboard: platform.system_clipboard,
             entry_ports: infra.clipboard_entry_ports,
-            // Single shared per-identity write coordinator: inbound apply and
-            // local capture serialize "find entry by hash → create/replace/skip"
-            // on it so the same content never lands as two entries.
-            entry_identity_coordinator: Arc::new(
-                uc_application::deps::EntryIdentityCoordinator::new(),
-            ),
             clipboard_event_repo: encrypting_event_writer,
             clipboard_event_reader_repo: infra.clipboard_event_reader_repo.clone(),
             representation_store: decrypting_rep_repo,
@@ -906,10 +900,31 @@ pub async fn wire_dependencies_from_inputs(
         file_cache_dir: paths.file_cache_dir.clone(),
     }));
 
-    let clipboard_write_coordinator = build_clipboard_write_coordinator(
-        deps.clipboard.system_clipboard.clone(),
-        deps.clipboard.clipboard_change_origin.clone(),
-    );
+    let clipboard_background = Arc::new(uc_infra::clipboard::ClipboardBackgroundRuntime::new(
+        representation_cache,
+        spool_manager,
+        worker_rx,
+        spool_dir,
+        storage_config.spool_ttl_days,
+        storage_config.worker_retry_max_attempts,
+        storage_config.worker_retry_backoff_ms,
+        Arc::clone(&deps.clipboard.representation_store),
+        deps.clipboard.worker_tx.clone(),
+        Arc::clone(&deps.storage.blob_writer),
+        Arc::clone(&deps.system.hash),
+        Arc::clone(&deps.system.clock),
+        Arc::clone(&deps.storage.thumbnail_repo),
+        Arc::clone(&deps.storage.thumbnail_generator),
+    ));
+    let clipboard = Arc::new(uc_application::facade::ClipboardAssembly::build(
+        uc_application::facade::ClipboardAssemblyDeps {
+            application: deps.clone(),
+            file_cache_dir: paths.file_cache_dir.clone(),
+            file_transfer: Arc::clone(&file_transfer),
+            host_event_bus: Arc::clone(&host_event_bus),
+            background: clipboard_background,
+        },
+    ));
 
     let wired = WiredDependencies {
         deps,
@@ -955,37 +970,10 @@ pub async fn wire_dependencies_from_inputs(
             entry_delivery_repo: Arc::clone(&infra.entry_delivery_repo),
             clipboard_event_reader_repo: Arc::clone(&infra.clipboard_event_reader_repo),
             file_transfer,
-            clipboard_write_coordinator: Arc::clone(&clipboard_write_coordinator),
+            clipboard,
             trusted_peer_repo: Arc::clone(&trusted_peer_repo),
             active_clipboard_sse_source,
         },
     };
-    let background = BackgroundRuntimeDeps {
-        representation_cache,
-        spool_manager,
-        worker_rx,
-        spool_dir,
-        spool_ttl_days: storage_config.spool_ttl_days,
-        worker_retry_max_attempts: storage_config.worker_retry_max_attempts,
-        worker_retry_backoff_ms: storage_config.worker_retry_backoff_ms,
-    };
-    Ok((wired, background))
-}
-
-/// Constructs a `ClipboardWriteCoordinator` — the single write boundary for all
-/// programmatic clipboard writes.
-///
-/// Centralises the guard-registration + write + cleanup-on-error pattern
-/// (previously duplicated across restore_clipboard_selection, copy_file_to_clipboard,
-/// and the now-deleted `sync_inbound` libp2p path).
-fn build_clipboard_write_coordinator(
-    system_clipboard: Arc<dyn uc_core::ports::clipboard::SystemClipboardPort>,
-    clipboard_change_origin: Arc<dyn SelfWriteLedgerPort>,
-) -> Arc<uc_application::facade::clipboard_write::ClipboardWriteCoordinator> {
-    Arc::new(
-        uc_application::facade::clipboard_write::ClipboardWriteCoordinator::new(
-            system_clipboard,
-            clipboard_change_origin,
-        ),
-    )
+    Ok(wired)
 }

@@ -19,21 +19,20 @@ use tracing::{error, warn};
 use uc_application::deps::{ProfileFactoryResetCapabilityError, StopProfileRuntimePort};
 use uc_application::facade::clipboard_write::LocalActiveRegisterAdvancer;
 use uc_application::facade::{
-    build_space_session_activity, AppFacade, HistoryMaintenanceRuntime, NetworkRecoveryEvent,
-    ProfileFactoryResetOutcome, ProfileFactoryResetRequest, ProfileFactoryResetUseCase,
-    SpaceSessionActivityDeps, SpaceSessionActivityPort,
+    build_space_session_activity, AppFacade, ClipboardInboundAdapters, ClipboardInboundEvent,
+    ClipboardInboundEventAction, ClipboardInboundEventPort, ClipboardSession, ClipboardSessionDeps,
+    HistoryMaintenanceRuntime, NetworkRecoveryEvent, ProfileFactoryResetOutcome,
+    ProfileFactoryResetRequest, ProfileFactoryResetUseCase, SpaceSessionActivityDeps,
+    SpaceSessionActivityPort,
 };
 use uc_core::ports::ClockPort;
 use uc_core::TaskRegistry;
 
-use crate::assembly::blob_tasks::{spawn_blob_processing_tasks, BlobProcessingPorts};
-use crate::assembly::clipboard_runtime::{build_clipboard_runtime, ClipboardRuntime};
 use crate::assembly::deps::WiredDependencies;
 #[cfg(feature = "lan-compat")]
 use crate::assembly::facade::build_mobile_sync_facade;
 use crate::assembly::facade::{
-    build_app_facade_from_deps, build_settings_assembly, ClipboardRestoreAssembly,
-    RuntimeAppFacadeAssembly,
+    build_app_facade_from_deps, build_settings_assembly, RuntimeAppFacadeAssembly,
 };
 use crate::assembly::host::{
     wire_host_capabilities_with_emitter, EngineHostEventEmitter, HostWiring,
@@ -45,8 +44,12 @@ use crate::assembly::sync_engine::SyncEngineAssembly;
 use crate::engine::event_stream::EventSender;
 use crate::subsystems::peer_keepalive::spawn_peer_presence_event_task;
 use crate::{EngineConfig, EngineError, EngineErrorCategory, HostCapabilities, HostFileAccess};
+use crate::{
+    EngineEvent, InboundNoticeActionSummary, InboundNoticeEvent, InboundRepresentationSummary,
+};
 use host_clipboard::{spawn_host_clipboard_change_task, HostClipboardChangeRuntime};
 use session_supervisor::SessionSupervisor;
+use uc_infra::fs::{FsAtomicPublisher, FsHiddenPathMarker, FsInboundFileTarget};
 const START_FAILED_CODE: u32 = 1101;
 const OPERATION_UNAVAILABLE_CODE: u32 = 1103;
 
@@ -89,7 +92,7 @@ struct ProductionSession {
     search: uc_application::facade::SearchAssembly,
     #[cfg(feature = "lan-compat")]
     mobile_sync: Arc<uc_mobile_lan::MobileSyncFacade>,
-    clipboard: ClipboardRuntime,
+    clipboard: ClipboardSession,
     sync_engine: SyncEngineAssembly,
     tasks: Arc<TaskRegistry>,
 }
@@ -261,7 +264,6 @@ impl ProductionRuntime {
         let emitter = Arc::new(EngineHostEventEmitter::new(events.clone()));
         let HostWiring {
             wired,
-            background,
             paths,
             temporary_dir,
             clipboard_import_root,
@@ -320,6 +322,12 @@ impl ProductionRuntime {
             recovery_generation: Arc::new(AtomicU64::new(0)),
         });
         session_supervisor.configure_factory(Arc::clone(&session_factory));
+        wired
+            .shared
+            .clipboard
+            .start_background(Arc::clone(&task_registry))
+            .await
+            .map_err(|error| startup_error("clipboard background", error))?;
         session_supervisor.resume().await?;
         spawn_space_transition_watcher(
             Arc::clone(&session_supervisor),
@@ -329,8 +337,6 @@ impl ProductionRuntime {
         .await;
         spawn_network_recovery_events(network_recovery.subscribe(), &task_registry, events.clone())
             .await;
-        let blob_ports = BlobProcessingPorts::from_app_deps(&wired.deps);
-        spawn_blob_processing_tasks(background, blob_ports, &task_registry).await;
         let clipboard_change_runtime = HostClipboardChangeRuntime {
             session_supervisor: Arc::clone(&session_supervisor),
             system_clipboard: Arc::clone(&wired.deps.clipboard.system_clipboard),
@@ -420,16 +426,35 @@ impl ProductionRuntime {
                 "Space session activity was already bound",
             ));
         }
-        let clipboard = build_clipboard_runtime(wired, &sync_engine, events.clone());
+        let clipboard = wired.shared.clipboard.start_session(ClipboardSessionDeps {
+            clipboard_sync: Arc::clone(&sync_engine.clipboard_sync),
+            blob_transfer: Arc::clone(&sync_engine.blob),
+            receiver: sync_engine.clipboard_receiver(),
+            member_scope: sync_engine.current_peer_scope(),
+            presence: Arc::clone(&sync_engine.presence),
+            known_peers: Arc::clone(&wired.sync_engine.peer_addr_repo),
+            deliveries: Arc::clone(&wired.shared.entry_delivery_repo),
+            trusted_peers: Arc::clone(&wired.shared.trusted_peer_repo),
+            outbound_progress_reporter: Arc::clone(&sync_engine.outbound_progress_reporter),
+            inbound_adapters: ClipboardInboundAdapters {
+                fetcher: Arc::clone(&sync_engine.blob) as Arc<_>,
+                publisher: FsAtomicPublisher::new(),
+                target_reserver: FsInboundFileTarget::new(Arc::clone(&wired.deps.settings)),
+                hidden_marker: FsHiddenPathMarker::new(),
+            },
+            inbound_events: Arc::new(EngineClipboardInboundEvents {
+                events: events.clone(),
+            }),
+        });
         #[cfg(feature = "lan-compat")]
         let mobile_sync = build_mobile_sync_facade(
             &wired.deps,
             paths,
             wired.mobile_sync_ports.clone(),
-            Arc::clone(&clipboard.apply_inbound),
+            clipboard.apply_inbound(),
             Some(wired.shared.file_transfer.facade()),
             None,
-            Some(Arc::clone(&clipboard.outbound)),
+            Some(clipboard.outbound()),
             Some(Arc::clone(&sync_engine.active_clipboard)),
         );
         let tasks = Arc::new(TaskRegistry::new());
@@ -463,18 +488,15 @@ impl ProductionRuntime {
                 blob_transfer: Arc::clone(&sync_engine.blob),
                 blob_transfer_port: Arc::clone(&sync_engine.blob_transfer),
                 file_transfer: wired.shared.file_transfer.facade(),
-                clipboard_restore: ClipboardRestoreAssembly {
-                    write_coordinator: Arc::clone(&wired.shared.clipboard_write_coordinator),
-                    integration_mode: uc_core::clipboard::ClipboardIntegrationMode::Full,
-                    restore_broadcast: Some(
-                        uc_application::facade::clipboard_write::RestoreBroadcastTrigger::new(
-                            restore_tx,
-                        ),
+                clipboard: Arc::clone(&wired.shared.clipboard),
+                restore_broadcast: Some(
+                    uc_application::facade::clipboard_write::RestoreBroadcastTrigger::new(
+                        restore_tx,
                     ),
-                },
+                ),
                 search: search.facade(),
                 settings,
-                clipboard_outbound: Arc::clone(&clipboard.outbound),
+                clipboard_outbound: clipboard.outbound(),
                 network_recovery: Arc::clone(&factory.network_recovery),
             },
         );
@@ -545,7 +567,7 @@ impl ProductionRuntime {
     async fn current_clipboard_sync_runtime(
         &self,
     ) -> Result<Arc<uc_application::facade::ClipboardSyncRuntime>, EngineError> {
-        self.current_session_field(|session| Arc::clone(&session.clipboard.sync))
+        self.current_session_field(|session| session.clipboard.sync())
             .await
     }
 
@@ -555,6 +577,36 @@ impl ProductionRuntime {
     ) -> Result<Arc<uc_mobile_lan::MobileSyncFacade>, EngineError> {
         self.current_session_field(|session| Arc::clone(&session.mobile_sync))
             .await
+    }
+}
+
+struct EngineClipboardInboundEvents {
+    events: EventSender,
+}
+
+impl ClipboardInboundEventPort for EngineClipboardInboundEvents {
+    fn emit(&self, event: ClipboardInboundEvent) {
+        self.events
+            .send(EngineEvent::InboundNotice(InboundNoticeEvent {
+                from_device: event.from_device.as_str().to_owned(),
+                snapshot_hash: event.snapshot_hash,
+                text_preview: event.text_preview,
+                representations: event
+                    .representations
+                    .into_iter()
+                    .map(|representation| InboundRepresentationSummary {
+                        mime_type: representation.mime_type,
+                        size_bytes: representation.size_bytes,
+                    })
+                    .collect(),
+                action: match event.action {
+                    ClipboardInboundEventAction::NewEntry => InboundNoticeActionSummary::NewEntry,
+                    ClipboardInboundEventAction::DuplicateIgnored => {
+                        InboundNoticeActionSummary::DuplicateIgnored
+                    }
+                },
+                at_ms: event.at_ms,
+            }));
     }
 }
 

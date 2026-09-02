@@ -52,6 +52,12 @@ pub use crate::clipboard::active::{
     ActiveClipboardReconcileDeps, ActiveClipboardReconcileFacade, ActiveClipboardReconcileOutcome,
     ClipboardSnapshotDeps,
 };
+pub use crate::clipboard::assembly::{
+    ActiveClipboardSession, ActiveClipboardSessionDeps, ActiveClipboardStartError,
+    ClipboardAssembly, ClipboardAssemblyDeps, ClipboardBackgroundError, ClipboardBackgroundPort,
+    ClipboardBackgroundStartError, ClipboardInboundAdapters, ClipboardSession,
+    ClipboardSessionDeps,
+};
 pub use app_facade::{
     AppFacade, AppFacadeParts, AppPresenceEvent, AppPresenceSubscription,
     AppPresenceSubscriptionError, ChooseDeviceGroup, ChooseDeviceGroupError,

@@ -220,9 +220,9 @@ impl ProductionRuntime {
             let session = session_slot.lock().await;
             let session = session.as_ref().ok_or_else(operation_unavailable_error)?;
             (
-                Arc::clone(&session.clipboard.capture),
-                Arc::clone(&session.clipboard.live_index),
-                Arc::clone(&session.clipboard.sync),
+                session.clipboard.capture(),
+                session.clipboard.live_index(),
+                session.clipboard.sync(),
             )
         };
         let captured = capture

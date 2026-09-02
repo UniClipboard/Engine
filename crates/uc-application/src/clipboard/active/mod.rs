@@ -10,7 +10,8 @@
 mod reconcile;
 
 pub use reconcile::{
-    ActiveClipboardReconcileDeps, ActiveClipboardReconcileFacade, ActiveClipboardReconcileOutcome,
+    ActiveClipboardReconcileDeps, ActiveClipboardReconcileError, ActiveClipboardReconcileFacade,
+    ActiveClipboardReconcileOutcome,
 };
 
 use std::{

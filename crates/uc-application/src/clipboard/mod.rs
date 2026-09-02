@@ -14,6 +14,7 @@
 //! - `entry_identity.rs` / `file_set_query.rs` — shared internal owners.
 
 pub(crate) mod active;
+pub(crate) mod assembly;
 pub(crate) mod capture;
 pub(crate) mod entry_identity;
 pub(crate) mod file_set_query;

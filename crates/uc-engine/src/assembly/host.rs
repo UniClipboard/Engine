@@ -18,7 +18,7 @@ use uc_core::ports::{
 };
 use uc_observability_contract::analytics::DefaultAnalyticsFacade;
 
-use crate::assembly::deps::{BackgroundRuntimeDeps, WiredDependencies, WiringError, WiringResult};
+use crate::assembly::deps::{WiredDependencies, WiringError, WiringResult};
 use crate::assembly::platform::SystemClipboardLayer;
 use crate::assembly::wire::{wire_dependencies_from_inputs, CoreWiringInputs};
 use crate::engine::event_stream::EventSender;
@@ -464,7 +464,6 @@ impl HostEventEmitterPort for EngineHostEventEmitter {
 
 pub struct HostWiring {
     pub wired: WiredDependencies,
-    pub background: BackgroundRuntimeDeps,
     pub paths: AppPaths,
     pub temporary_dir: std::path::PathBuf,
     pub clipboard_import_root: std::path::PathBuf,
@@ -515,7 +514,7 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
         WiringError::ClipboardInit("failed to create host clipboard import directory".into())
     })?;
     let files: Arc<dyn HostFileAccess> = Arc::from(files);
-    let (wired, background) = wire_dependencies_from_inputs(CoreWiringInputs {
+    let wired = wire_dependencies_from_inputs(CoreWiringInputs {
         paths: paths.clone(),
         secure_storage,
         profile_id: uc_core::ids::ProfileId::from(config.profile_id()),
@@ -543,7 +542,6 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
 
     Ok(HostWiring {
         wired,
-        background,
         paths,
         temporary_dir,
         clipboard_import_root,

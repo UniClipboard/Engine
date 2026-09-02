@@ -115,15 +115,6 @@ pub use crate::space::{
     SponsorAdmissionState, SponsorAdmissionStateError, SponsorAdmissionStatePort,
     SponsorPreparedAdmissionSecurity, SponsorPreparedSecurityTransition,
 };
-// §11.4.3 — the `entry_identity` module is `pub(crate)`, but its coordinator is
-// held by the `pub` `ClipboardPorts` field below and threaded into `pub` use-case
-// builders. Re-export it from this composition module so it stays reachable for
-// the composition root (`uc_application::deps::EntryIdentityCoordinator`) without
-// leaking the business submodule at the crate root; this also lifts the type's
-// effective visibility back to crate-external, keeping those `pub` signatures off
-// the `private_interfaces` lint (E0446).
-pub use crate::clipboard::entry_identity::EntryIdentityCoordinator;
-
 /// Clipboard entry intent ports.
 ///
 /// The composition root coerces the single Diesel entry adapter into each of
@@ -171,10 +162,6 @@ pub struct ClipboardPorts {
     pub clipboard: Arc<dyn PlatformClipboardPort>,
     pub system_clipboard: Arc<dyn SystemClipboardPort>,
     pub entry_ports: ClipboardEntryPorts,
-    /// Per-identity (snapshot_hash) write coordinator. Shared by inbound apply
-    /// and local capture so "find entry by hash → create / replace / skip"
-    /// serializes across every writer of the same content (no double-create).
-    pub entry_identity_coordinator: Arc<EntryIdentityCoordinator>,
     pub clipboard_event_repo: Arc<dyn ClipboardEventWriterPort>,
     /// Read port over the same clipboard-event store as `clipboard_event_repo`.
     /// Exposes read-only lookups such as the originating device of an event,

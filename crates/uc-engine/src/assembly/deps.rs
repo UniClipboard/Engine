@@ -9,16 +9,14 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 
 use uc_application::deps::{
     AppDeps, ClearProfileStatePort, CurrentMemberSignaturePort, ProfileLifecycleRepositoryPort,
     WipeProfileKeysPort,
 };
 use uc_core::clipboard::ActiveClipboardState;
-use uc_core::ids::RepresentationId;
 use uc_core::ports::blob::BlobReferenceRepositoryPort;
-use uc_infra::clipboard::{RepresentationCache, SpoolManager};
 use uc_observability_contract::analytics::AnalyticsFacade;
 
 /// Result type for wiring operations
@@ -56,17 +54,6 @@ pub enum WiringError {
         #[source]
         source: anyhow::Error,
     },
-}
-
-/// Background runtime components that must be started after async runtime is ready.
-pub struct BackgroundRuntimeDeps {
-    pub representation_cache: Arc<RepresentationCache>,
-    pub spool_manager: Arc<SpoolManager>,
-    pub worker_rx: mpsc::Receiver<RepresentationId>,
-    pub spool_dir: PathBuf,
-    pub spool_ttl_days: u64,
-    pub worker_retry_max_attempts: u32,
-    pub worker_retry_backoff_ms: u64,
 }
 
 /// P2P / iroh sync-engine assembly inputs. Sole consumer:
@@ -158,12 +145,9 @@ pub struct SharedRuntimeDeps {
     /// Application-owned file-transfer object graph. Engine consumers request
     /// complete intents or the stable facade instead of projecting step ports.
     pub file_transfer: Arc<uc_application::facade::FileTransferAssembly>,
-    /// Single write boundary for all programmatic clipboard writes (guard
-    /// registration + write + cleanup-on-error). Shared so the active-clipboard
-    /// inbound worker and the restore/capture path keep one circuit-breaker +
-    /// origin-guard state.
-    pub clipboard_write_coordinator:
-        Arc<uc_application::facade::clipboard_write::ClipboardWriteCoordinator>,
+    /// Application-owned Clipboard object graph. It owns the process-wide
+    /// identity/write coordinators and all domain facade construction.
+    pub clipboard: Arc<uc_application::facade::ClipboardAssembly>,
     /// Trusted-peer repository — pairing persist boundary (D19), roster trust
     /// checks, dispatch target filtering, CLI resend source lookup. Read by
     /// space-setup, daemon runtime, and the CLI AppFacade path, hence shared.

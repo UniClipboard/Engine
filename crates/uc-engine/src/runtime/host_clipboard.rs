@@ -113,9 +113,9 @@ impl HostClipboardChangeRuntime {
             };
             (
                 Arc::clone(&session.facade),
-                Arc::clone(&session.clipboard.capture),
-                Arc::clone(&session.clipboard.live_index),
-                Arc::clone(&session.clipboard.sync),
+                session.clipboard.capture(),
+                session.clipboard.live_index(),
+                session.clipboard.sync(),
             )
         };
         let encryption = facade

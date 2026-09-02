@@ -474,6 +474,43 @@ fn engine_does_not_assemble_settings_internals() {
 }
 
 #[test]
+fn engine_does_not_assemble_clipboard_internals() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engine = read_rs_sources(&workspace_root.join("crates/uc-engine/src"));
+
+    for forbidden in [
+        "CaptureClipboardUseCase::new",
+        "ApplyInboundClipboardUseCase::",
+        "EntryIdentityCoordinator::new",
+        "ActiveClipboardFacade::new",
+        "ActiveClipboardDeps {",
+        "ActiveClipboardReconcileFacade::new",
+        "ClipboardHistoryFacade::new",
+        "ClipboardRestoreFacade::new",
+        "ClipboardInboundRuntime::start",
+        "ClipboardSyncRuntime::start",
+        "spawn_blob_processing_tasks",
+    ] {
+        assert!(
+            !engine.contains(forbidden),
+            "Application Clipboard assembly must own {forbidden} instead of uc-engine"
+        );
+    }
+    assert!(
+        !workspace_root
+            .join("crates/uc-engine/src/assembly/clipboard_runtime.rs")
+            .exists(),
+        "Clipboard assembly/runtime must live in uc-application"
+    );
+    assert!(
+        !workspace_root
+            .join("crates/uc-engine/src/assembly/blob_tasks.rs")
+            .exists(),
+        "Clipboard spool lifecycle must live behind the application Clipboard runtime"
+    );
+}
+
+#[test]
 fn engine_does_not_restore_unrelated_search_or_membership_activity_steps() {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let runtime = read_rs_sources(&workspace_root.join("crates/uc-engine/src/runtime"));

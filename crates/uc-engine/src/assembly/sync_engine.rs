@@ -44,16 +44,11 @@ use tracing::debug;
 const TRANSLATOR_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(200);
 
 use uc_application::deps::{CurrentSpaceMemberScopePort, SpaceApplicationDeps};
-use uc_application::facade::clipboard_capture::CaptureClipboardUseCase;
-use uc_application::facade::InboundCapture as ApplyInboundCapture;
 use uc_application::facade::{
-    build_active_clipboard_pull_serve_port, ActiveClipboardDeps, ActiveClipboardFacade,
-    ActiveClipboardLifecycle, ActiveClipboardPullServeFacadeDeps, BlobTransferDeps,
-    BlobTransferFacade, ClipboardLiveIndexDeps, ClipboardLiveIndexPort, ClipboardLiveIndexer,
-    ClipboardSnapshotDeps, ClipboardSyncDeps, ClipboardSyncFacade, HostEvent, HostEventBus,
-    InboundClipboardApplyPort, InboundMaterializerDeps, InboundReceiveIntentDeps,
-    ReceiveCancellationDeps, SpaceAdmissionDeps, SpaceFacade, SpaceFacadeDeps, SpaceSessionDeps,
-    SpaceTransitionDeps, StoreOnlyPullIntentDeps, TransferHostEvent, UpgradeFacade,
+    ActiveClipboardFacade, ActiveClipboardSession, ActiveClipboardSessionDeps, BlobTransferDeps,
+    BlobTransferFacade, ClipboardInboundAdapters, ClipboardSyncDeps, ClipboardSyncFacade,
+    HostEvent, HostEventBus, ReceiveCancellationDeps, SpaceAdmissionDeps, SpaceFacade,
+    SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps, TransferHostEvent, UpgradeFacade,
 };
 use uc_application::facade::{SpaceActivityError, SpaceSessionActivityPort};
 use uc_core::file_transfer::{
@@ -211,7 +206,7 @@ pub struct SyncEngineAssembly {
     /// Owns the complete Active Clipboard worker topology: inbound
     /// convergence, peer-online resync, restore broadcast, and history
     /// resurface. This is the assembly's sole lifecycle seam for that module.
-    active_clipboard_lifecycle: ActiveClipboardLifecycle,
+    active_clipboard_session: ActiveClipboardSession,
     /// 反向"传输进度"翻译 worker 的 join handle。订阅
     /// `IrohTransferProgressAdapter` 的 inbound 流,将每帧 progress 翻译
     /// 为 `HostEvent::Transfer { direction: Sending, ... }` 并发到 emitter。
@@ -280,7 +275,7 @@ impl SyncEngineAssembly {
             uc_application::facade::clipboard_write::RestoreBroadcastRequest,
         >,
     ) {
-        if let Err(error) = self.active_clipboard_lifecycle.attach_restore_broadcast(rx) {
+        if let Err(error) = self.active_clipboard_session.attach_restore_broadcast(rx) {
             warn!(error = %error, "active clipboard restore source attachment failed");
         }
     }
@@ -299,7 +294,7 @@ impl SyncEngineAssembly {
     ///    `CONNECTION_CLOSE` to any live peer.
     #[instrument(skip_all)]
     pub async fn shutdown(self, transfer_reason: FileTransferCancellationReason) {
-        self.active_clipboard_lifecycle.shutdown().await;
+        self.active_clipboard_session.shutdown().await;
         self.outbound_progress_translator
             .shutdown(transfer_reason)
             .await;
@@ -1006,24 +1001,7 @@ pub async fn build_sync_engine_assembly(
     // resend crypto chain (reconstruct → publish blobs re-signing self-pinned
     // tickets, D3 → encode V3 → encrypt, D4); the returned client port drives
     // the inbound seam's on-demand pull.
-    let active_clipboard_pull_serve =
-        build_active_clipboard_pull_serve_port(ActiveClipboardPullServeFacadeDeps {
-            entry_lookup: Arc::clone(&deps.clipboard.entry_ports.find_by_snapshot_hash),
-            settings: Arc::clone(&deps.settings),
-            transfer_cipher: Arc::clone(&deps.security.transfer_cipher),
-            blob_publisher: Arc::clone(&blob),
-            entry_file_set_repo: Arc::clone(&deps.storage.entry_file_set_repo),
-            snapshot: ClipboardSnapshotDeps {
-                entry_repo: Arc::clone(&deps.clipboard.entry_ports.get),
-                selection_repo: Arc::clone(&deps.clipboard.selection_repo),
-                representation_repo: Arc::clone(&deps.clipboard.representation_ports.get),
-                rep_processing_repo: Arc::clone(
-                    &deps.clipboard.representation_ports.update_processing_result,
-                ),
-                payload_resolver: Arc::clone(&deps.clipboard.payload_resolver),
-                blob_store: Arc::clone(&deps.storage.blob_store),
-            },
-        });
+    let active_clipboard_pull_serve = shared.clipboard.active_pull_serve(Arc::clone(&blob));
     let ActiveClipboardPullHandlers {
         client: active_clipboard_pull_client,
     } = builder.install_active_clipboard_pull(
@@ -1092,105 +1070,32 @@ pub async fn build_sync_engine_assembly(
             blob_transfer: Arc::clone(&blob),
         },
     ));
-    // Store-only inbound apply path for pulled content (issue #1017 PR8). It
-    // reuses the same inbound pipeline the bulk 0xC1 path uses (decode V3 →
-    // materialize blobs → capture) through the named store-only mode. That mode
-    // has no system-clipboard writer or active-register capability: the
-    // active-clipboard convergence tail owns both actions and couples them to
-    // OS-write success.
-    let pull_store_capture = Arc::new(
-        CaptureClipboardUseCase::new(
-            Arc::clone(&deps.clipboard.entry_ports.save),
-            Arc::clone(&deps.clipboard.entry_ports.touch),
-            Arc::clone(&deps.clipboard.entry_ports.find_by_snapshot_hash),
-            Arc::clone(&deps.clipboard.clipboard_event_repo),
-            Arc::clone(&deps.clipboard.representation_policy),
-            Arc::clone(&deps.clipboard.representation_normalizer),
-            Arc::clone(&deps.device.device_identity),
-            Arc::clone(&deps.clipboard.representation_cache),
-            Arc::clone(&deps.clipboard.spool_queue),
-            Arc::clone(&deps.storage.blob_content_ingest),
-            Arc::clone(&deps.storage.entry_file_set_repo),
-            Arc::clone(&deps.settings),
-            Arc::clone(&deps.clipboard.entry_ports.replace_content),
-            Arc::clone(&deps.analytics),
-        )
-        .with_inbound_receive_commit(Arc::clone(&deps.storage.directory_receive.commit_inbound))
-        .with_entry_identity_coordinator(Arc::clone(&deps.clipboard.entry_identity_coordinator)),
-    );
-    // Index pull-store entries for search too (same rationale as the main
-    // inbound path): content materialized via the 0xC2 pull should be findable.
-    let pull_store_indexer: Arc<dyn ClipboardLiveIndexPort> =
-        Arc::new(ClipboardLiveIndexer::new(ClipboardLiveIndexDeps {
-            clipboard_entry_repo: Arc::clone(&deps.clipboard.entry_ports.get),
-            representation_policy: Arc::clone(&deps.clipboard.representation_policy),
-            search_key_derivation: Arc::clone(&deps.search.search_key_derivation),
-            search_pipeline: Arc::clone(&deps.search.search_pipeline),
-            search_index: Arc::clone(&deps.search.search_index),
-            event_repo: Arc::clone(&shared.clipboard_event_reader_repo),
-            entry_file_set_repo: Arc::clone(&deps.storage.entry_file_set_repo),
-        }));
-    let pull_store_apply: Arc<dyn InboundClipboardApplyPort> = shared
-        .file_transfer
-        .store_only_pull(StoreOnlyPullIntentDeps {
-            common: InboundReceiveIntentDeps {
-                entry_repo: Arc::clone(&deps.clipboard.entry_ports.find_by_snapshot_hash),
-                capture: pull_store_capture as Arc<dyn ApplyInboundCapture>,
-                materializer: InboundMaterializerDeps {
-                    fetcher: blob.clone(),
-                    publisher: FsAtomicPublisher::new(),
-                    target_reserver: FsInboundFileTarget::new(Arc::clone(&deps.settings)),
-                    hidden_marker: FsHiddenPathMarker::new(),
-                },
-                host_event_emitter: Arc::clone(&shared.host_event_bus),
-                search_live_index: pull_store_indexer,
-                availability: Arc::clone(&deps.clipboard.entry_ports.availability),
-                entry_identity_coordinator: Arc::clone(&deps.clipboard.entry_identity_coordinator),
-            },
-        });
-
     // Active-clipboard register convergence (issue #1017). The module owns
     // its inbound convergence, peer-online resync, restore broadcast, and
     // history-resurface worker topology behind one lifecycle seam. Assembly
     // only constructs the facade and retains that lifecycle for shutdown.
-    let active_clipboard = Arc::new(ActiveClipboardFacade::new(ActiveClipboardDeps {
-        receiver: Arc::clone(&active_clipboard_receiver),
-        dispatch: active_clipboard_dispatch,
-        is_unlocked: Arc::clone(&deps.security.space_access_ports.is_unlocked),
-        load_register: Arc::clone(&deps.clipboard.active_register_load),
-        advance_register: Arc::clone(&deps.clipboard.active_register),
-        mobile_consumability: deps.clipboard.mobile_consumability.clone(),
-        member_repo: Arc::clone(&deps.device.member_repo),
-        peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
-        peer_scope: facade.current_member_scope(),
-        presence: Arc::clone(&presence),
-        entry_lookup: Arc::clone(&deps.clipboard.entry_ports.find_by_snapshot_hash),
-        availability: Some(Arc::clone(&deps.clipboard.entry_ports.availability)),
-        coordinator: Arc::clone(&shared.clipboard_write_coordinator),
-        clock: Arc::clone(&deps.system.clock),
-        device_identity: Arc::clone(&deps.device.device_identity),
-        settings: Arc::clone(&deps.settings),
-        snapshot: ClipboardSnapshotDeps {
-            entry_repo: Arc::clone(&deps.clipboard.entry_ports.get),
-            selection_repo: Arc::clone(&deps.clipboard.selection_repo),
-            representation_repo: Arc::clone(&deps.clipboard.representation_ports.get),
-            rep_processing_repo: Arc::clone(
-                &deps.clipboard.representation_ports.update_processing_result,
-            ),
-            payload_resolver: Arc::clone(&deps.clipboard.payload_resolver),
-            blob_store: Arc::clone(&deps.storage.blob_store),
-        },
-        // On-demand pull subsystem (PR8): when the observed content is not held
-        // locally, pull it from the reporting peer (10s deadline), decrypt +
-        // store it via the store-only apply path, then converge.
-        transfer_cipher: Arc::clone(&deps.security.transfer_cipher),
-        pull_client: Some(active_clipboard_pull_client),
-        pull_apply: Some(pull_store_apply),
-        touch_entry: Arc::clone(&deps.clipboard.entry_ports.touch),
-        host_event_emitter: Arc::clone(&shared.host_event_bus),
-        resurface_clock: Arc::clone(&deps.system.clock),
-    }));
-    let active_clipboard_lifecycle = active_clipboard.start_background_workers();
+    let active_clipboard_session = shared
+        .clipboard
+        .start_active(ActiveClipboardSessionDeps {
+            receiver: Arc::clone(&active_clipboard_receiver),
+            dispatch: active_clipboard_dispatch,
+            is_unlocked: Arc::clone(&deps.security.space_access_ports.is_unlocked),
+            peer_addresses: Arc::clone(&space_setup.peer_addr_repo),
+            member_scope: facade.current_member_scope(),
+            presence: Arc::clone(&presence),
+            pull_client: active_clipboard_pull_client,
+            pull_adapters: ClipboardInboundAdapters {
+                fetcher: Arc::clone(&blob) as Arc<_>,
+                publisher: FsAtomicPublisher::new(),
+                target_reserver: FsInboundFileTarget::new(Arc::clone(&deps.settings)),
+                hidden_marker: FsHiddenPathMarker::new(),
+            },
+        })
+        .await
+        .map_err(|source| SyncEngineAssemblyError::ApplicationAssembly {
+            source: anyhow::Error::new(source),
+        })?;
+    let active_clipboard = active_clipboard_session.facade();
 
     info!("Slice 2/3 SpaceFacade + MemberRosterFacade + ClipboardSyncFacade + BlobTransferFacade assembled");
     Ok(SyncEngineAssembly {
@@ -1204,7 +1109,7 @@ pub async fn build_sync_engine_assembly(
         active_clipboard,
         iroh_node,
         clipboard_receiver,
-        active_clipboard_lifecycle,
+        active_clipboard_session,
         outbound_progress_translator,
     })
 }
