@@ -452,6 +452,28 @@ fn engine_does_not_assemble_search_internals() {
 }
 
 #[test]
+fn engine_does_not_assemble_settings_internals() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engine = read_rs_sources(&workspace_root.join("crates/uc-engine/src"));
+
+    for forbidden in [
+        "SettingsFacade::new",
+        "DiagnosticsFacade::new",
+        "StorageFacade::new",
+        "ConfigMigrationFacade::new",
+        "UpgradeFacade::new",
+        "DiagnosticsFacadeDeps",
+        "StorageFacadeDeps",
+        "UpgradeFacadeDeps",
+    ] {
+        assert!(
+            !engine.contains(forbidden),
+            "Application Settings assembly must own {forbidden} instead of uc-engine"
+        );
+    }
+}
+
+#[test]
 fn engine_does_not_restore_unrelated_search_or_membership_activity_steps() {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let runtime = read_rs_sources(&workspace_root.join("crates/uc-engine/src/runtime"));

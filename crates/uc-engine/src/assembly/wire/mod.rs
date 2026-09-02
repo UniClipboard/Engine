@@ -28,8 +28,7 @@ use uc_application::deps::{
     SecurityPorts, SpaceAccessPorts, SpaceRebuildProgressPort, StoragePorts, SystemPorts,
 };
 use uc_application::facade::{
-    ConfigMigrationDeps, ConfigMigrationFacade, FileTransferAssembly, FileTransferAssemblyDeps,
-    HostEventEmitterPort,
+    ConfigMigrationDeps, FileTransferAssembly, FileTransferAssemblyDeps, HostEventEmitterPort,
 };
 use uc_core::app_dirs::AppPaths;
 use uc_core::clipboard::SelectRepresentationPolicyV1;
@@ -793,7 +792,7 @@ pub async fn wire_dependencies_from_inputs(
     // (secure_storage, db pool, local-identity, filesystem layout, profile) are
     // not reconstructable from the abstract `AppDeps` ports; the composed facade
     // travels on `AppDeps.config_migration`.
-    let config_migration = build_config_migration_facade(
+    let config_migration = build_config_migration_deps(
         &platform.secure_storage,
         &iroh_identity_storage,
         db_pool_for_config_migration,

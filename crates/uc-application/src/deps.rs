@@ -395,14 +395,8 @@ pub struct AppDeps {
     pub re_pairing_state_store: Arc<dyn RePairingStateStorePort>,
     pub current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
     pub initial_space_activation: Arc<dyn InitialSpaceActivationPort>,
-    /// 整机配置迁移 facade（导出 / 导入预览 / 暂存导入）。
-    ///
-    /// 与其它抽象 port 不同,这里直接携带组装好的 facade:它的依赖
-    /// (db_pool / local_identity / profile_id 等)只在 `wire_dependencies`
-    /// 的同步上下文里齐全,无法仅凭 `AppDeps` 里的抽象 port 在
-    /// `build_app_facade_from_deps` 处重新组装。因此在 wiring 处构造好后随
-    /// `AppDeps` 流转，供外层直接使用。
-    pub config_migration: Arc<crate::facade::ConfigMigrationFacade>,
+    /// 整机配置迁移的被动能力输入；具体 facade 由 Settings assembly 构造。
+    pub config_migration: crate::facade::ConfigMigrationDeps,
     /// 升级游标端口：持久化"上次运行的应用版本"。
     /// 由 `UpgradeFacade::detect_on_startup` 在启动期读取并比较。
     pub app_version_state: Arc<dyn AppVersionStatePort>,

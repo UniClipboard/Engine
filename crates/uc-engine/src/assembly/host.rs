@@ -874,11 +874,14 @@ mod tests {
         let mut settings = wiring.wired.deps.settings.load().await.unwrap();
         settings.network.allow_relay_fallback = false;
         wiring.wired.deps.settings.save(&settings).await.unwrap();
+        let settings_assembly =
+            crate::assembly::facade::build_settings_assembly(&wiring.wired.deps, &wiring.paths);
 
         let lifecycle = build_daemon_lifecycle(
             &wiring.wired.deps,
             &wiring.wired.sync_engine,
             &wiring.wired.shared,
+            &settings_assembly,
             "1.2.3",
             #[cfg(feature = "lan-compat")]
             wiring.wired.mobile_sync_ports.clone(),

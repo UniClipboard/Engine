@@ -32,7 +32,8 @@ use crate::assembly::deps::WiredDependencies;
 #[cfg(feature = "lan-compat")]
 use crate::assembly::facade::build_mobile_sync_facade;
 use crate::assembly::facade::{
-    build_app_facade_from_deps, ClipboardRestoreAssembly, RuntimeAppFacadeAssembly,
+    build_app_facade_from_deps, build_settings_assembly, ClipboardRestoreAssembly,
+    RuntimeAppFacadeAssembly,
 };
 use crate::assembly::host::{
     wire_host_capabilities_with_emitter, EngineHostEventEmitter, HostWiring,
@@ -381,10 +382,12 @@ impl ProductionRuntime {
         let wired = &factory.wired;
         let paths = &factory.paths;
         let events = factory.events.clone();
+        let settings = build_settings_assembly(&wired.deps, paths);
         let lifecycle = build_daemon_lifecycle(
             &wired.deps,
             &wired.sync_engine,
             &wired.shared,
+            &settings,
             &factory.app_version,
             #[cfg(feature = "lan-compat")]
             wired.mobile_sync_ports.clone(),
@@ -470,6 +473,7 @@ impl ProductionRuntime {
                     ),
                 },
                 search: search.facade(),
+                settings,
                 clipboard_outbound: Arc::clone(&clipboard.outbound),
                 network_recovery: Arc::clone(&factory.network_recovery),
             },

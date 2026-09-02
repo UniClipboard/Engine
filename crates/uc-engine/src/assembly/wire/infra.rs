@@ -245,15 +245,12 @@ pub(super) fn build_blob_processing_assembly(
     })
 }
 
-/// Build the whole-installation config-migration facade (export / import preview
-/// / staged import). Assembled in the sync wiring context because its inputs
-/// (secure storage, db pool, local identity, filesystem layout, profile) are not
-/// reconstructable from the abstract `AppDeps` ports; the composed facade travels
-/// on `AppDeps.config_migration`.
+/// Build the passive config-migration capabilities. The Application Settings
+/// assembly owns construction of the facade and its workflow ordering.
 ///
 /// The local-identity port reads the device fingerprint for the export manifest
 /// from the same dedicated identity storage used by the running node. Single-user mode
-pub(super) fn build_config_migration_facade(
+pub(super) fn build_config_migration_deps(
     secure_storage: &Arc<dyn SecureStoragePort>,
     iroh_identity_storage: &Arc<dyn SecureStoragePort>,
     db_pool_for_config_migration: DbPool,
@@ -264,7 +261,7 @@ pub(super) fn build_config_migration_facade(
     app_version: String,
     source_mode: ConfigSourceMode,
     migration_paths: ConfigMigrationPaths,
-) -> Arc<ConfigMigrationFacade> {
+) -> ConfigMigrationDeps {
     let config_migration_profile = ProfileId::from("default");
     let config_migration_local_identity: Arc<dyn LocalIdentityPort> =
         Arc::new(IrohIdentityStore::new(
@@ -283,14 +280,14 @@ pub(super) fn build_config_migration_facade(
         )
         .with_app_version(app_version),
     );
-    Arc::new(ConfigMigrationFacade::new(ConfigMigrationDeps {
+    ConfigMigrationDeps {
         export_bundle: config_migration_adapter.clone(),
         preview_import: config_migration_adapter.clone(),
         stage_import: config_migration_adapter.clone(),
         current_space_identity: current_space_identity.clone(),
         portable_current_space_identity: portable_current_space_identity.clone(),
         is_unlocked: space_access_ports.is_unlocked.clone(),
-    }))
+    }
 }
 
 pub(super) fn create_infra_layer(

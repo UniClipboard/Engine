@@ -54,7 +54,6 @@ use uc_application::facade::{
     InboundClipboardApplyPort, InboundMaterializerDeps, InboundReceiveIntentDeps,
     ReceiveCancellationDeps, SpaceAdmissionDeps, SpaceFacade, SpaceFacadeDeps, SpaceSessionDeps,
     SpaceTransitionDeps, StoreOnlyPullIntentDeps, TransferHostEvent, UpgradeFacade,
-    UpgradeFacadeDeps,
 };
 use uc_application::facade::{SpaceActivityError, SpaceSessionActivityPort};
 use uc_core::file_transfer::{
@@ -605,14 +604,11 @@ pub async fn build_sync_engine_assembly(
     deps: &AppDeps,
     space_setup: &SyncEngineDeps,
     shared: &SharedRuntimeDeps,
+    upgrade: Arc<UpgradeFacade>,
     current_app_version: &str,
     #[cfg(feature = "lan-compat")] mobile_sync_ports: uc_mobile_lan::MobileSyncPorts,
     iroh_config: IrohNodeConfig,
 ) -> Result<SyncEngineAssembly, SyncEngineAssemblyError> {
-    let upgrade = UpgradeFacade::new(UpgradeFacadeDeps {
-        app_version_state: Arc::clone(&deps.app_version_state),
-        current_space_identity: Arc::clone(&deps.current_space_identity),
-    });
     let upgrade_status = upgrade.detect_on_startup(current_app_version).await?;
     if matches!(
         upgrade_status,

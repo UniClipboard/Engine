@@ -158,11 +158,12 @@ pub use search::{
 pub use settings::{
     ContentTypesPatch as SettingsContentTypesPatch, ContentTypesView as SettingsContentTypesView,
     FileSyncSettingsPatch, FileSyncSettingsView, GeneralSettingsPatch, GeneralSettingsView,
-    PairingSettingsPatch, PairingSettingsView, RelayProbeError, RelayProbeReport,
-    RelayProbeReportView, RetentionPolicyPatch, RetentionPolicyView, RetentionRulePatchValue,
-    RetentionRuleView, RuleEvaluationView, SecuritySettingsPatch, SecuritySettingsView,
-    SettingsFacade, SettingsFacadeError, SettingsPatch, SettingsView, ShortcutKeyView,
-    SyncFrequencyView, SyncSettingsPatch, SyncSettingsView, ThemeView, UpdateChannelView,
+    PairingSettingsPatch, PairingSettingsView, PreparedNetworkSettings, RelayProbeError,
+    RelayProbeReport, RelayProbeReportView, RetentionPolicyPatch, RetentionPolicyView,
+    RetentionRulePatchValue, RetentionRuleView, RuleEvaluationView, SecuritySettingsPatch,
+    SecuritySettingsView, SettingsAssembly, SettingsAssemblyParts, SettingsFacade,
+    SettingsFacadeError, SettingsPatch, SettingsView, ShortcutKeyView, SyncFrequencyView,
+    SyncSettingsPatch, SyncSettingsView, ThemeView, UpdateChannelView,
 };
 
 pub use space_setup::{

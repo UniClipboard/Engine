@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use uc_application::deps::AppDeps;
 use uc_application::facade::clipboard_capture::CaptureClipboardUseCase;
 use uc_application::facade::settings::{
-    RelayAccessToken, RelayCredentials, RelayDiagnosticPort, RelayProbeError, RelayProbeReport,
+    RelayAccessToken, RelayDiagnosticPort, RelayProbeError, RelayProbeReport,
 };
 use uc_application::facade::space_setup::SpaceFacade;
 #[cfg(feature = "lan-compat")]
@@ -19,10 +19,9 @@ use uc_application::facade::{
 use uc_application::facade::{
     AppFacade, AppFacadeParts, AppPaths, BlobTransferFacade, ClipboardCaptureFacade,
     ClipboardHistoryFacade, ClipboardHistoryFacadeDeps, ClipboardOutboundFacade,
-    ClipboardRestoreFacade, ClipboardRestoreFacadeDeps, ClipboardSyncFacade, DiagnosticsFacade,
-    DiagnosticsFacadeDeps, ProbeProfileKeyAccessUseCase, QueryLocalDeviceUseCase, ResourceFacade,
-    ResourceFacadeDeps, SearchFacade, SettingsFacade, StorageFacade, StorageFacadeDeps,
-    UpgradeFacade, UpgradeFacadeDeps,
+    ClipboardRestoreFacade, ClipboardRestoreFacadeDeps, ClipboardSyncFacade,
+    ProbeProfileKeyAccessUseCase, QueryLocalDeviceUseCase, ResourceFacade, ResourceFacadeDeps,
+    SearchFacade, SettingsAssembly,
 };
 use uc_core::clipboard::ClipboardIntegrationMode;
 #[cfg(feature = "lan-compat")]
@@ -80,6 +79,23 @@ fn map_relay_probe_error(err: IrohRelayProbeError) -> RelayProbeError {
         IrohRelayProbeError::Timeout => RelayProbeError::Timeout,
         IrohRelayProbeError::Other(msg) => RelayProbeError::Other(msg),
     }
+}
+
+pub(crate) fn build_settings_assembly(deps: &AppDeps, paths: &AppPaths) -> SettingsAssembly {
+    let relay_diagnostic = match IrohRelayProbeAdapter::new() {
+        Ok(probe) => Some(Arc::new(IrohRelayDiagnosticAdapter {
+            inner: Arc::new(probe),
+        }) as Arc<dyn RelayDiagnosticPort>),
+        Err(error) => {
+            tracing::warn!(
+                target: "bootstrap.network",
+                error = %error,
+                "relay probe adapter unavailable; settings.probe_relay_url will reject"
+            );
+            None
+        }
+    };
+    SettingsAssembly::build(deps, paths, relay_diagnostic)
 }
 
 /// `ClipboardRestoreFacade` 的可选装配输入。
@@ -219,6 +235,7 @@ pub struct RuntimeAppFacadeAssembly {
     pub blob_transfer_port: Arc<dyn uc_core::ports::blob::BlobTransferPort>,
     pub clipboard_restore: ClipboardRestoreAssembly,
     pub search: Arc<SearchFacade>,
+    pub settings: SettingsAssembly,
     pub network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
 }
 
@@ -232,6 +249,7 @@ pub fn build_app_facade_from_deps(
     storage_paths: &AppPaths,
     runtime: RuntimeAppFacadeAssembly,
 ) -> Arc<AppFacade> {
+    let settings = runtime.settings.into_parts();
     let clipboard_restore = Arc::new(ClipboardRestoreFacade::new(ClipboardRestoreFacadeDeps {
         selection_repo: deps.clipboard.selection_repo.clone(),
         entry_ports: deps.clipboard.entry_ports.clone(),
@@ -284,54 +302,15 @@ pub fn build_app_facade_from_deps(
         clipboard_outbound: runtime.clipboard_outbound,
         clipboard_restore,
         search: runtime.search,
-        settings: Arc::new({
-            // Relay 诊断 adapter 在 daemon 启动期一次性装配。infra 探测器
-            // 初始化失败(TLS provider 缺失等)不应阻断整个 daemon 启动 ——
-            // 走"探测能力缺失"路径,前端会得到 RelayProbeUnavailable。
-            let mut facade = SettingsFacade::new(deps.settings.clone()).with_relay_credentials(
-                RelayCredentials::new(deps.security.secure_storage.clone()),
-            );
-            match IrohRelayProbeAdapter::new() {
-                Ok(probe) => {
-                    let adapter = IrohRelayDiagnosticAdapter {
-                        inner: Arc::new(probe),
-                    };
-                    facade = facade.with_relay_diagnostic(Arc::new(adapter));
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        target: "bootstrap.network",
-                        error = %err,
-                        "relay probe adapter unavailable; settings.probe_relay_url will reject"
-                    );
-                }
-            }
-            facade
-        }),
-        diagnostics: Arc::new(DiagnosticsFacade::new(DiagnosticsFacadeDeps {
-            settings: deps.settings.clone(),
-            logs_dir: storage_paths.logs_dir.clone(),
-            app_version: env!("CARGO_PKG_VERSION").to_string(),
-        })),
+        settings: settings.settings,
+        diagnostics: settings.diagnostics,
         query_local_device: Arc::new(QueryLocalDeviceUseCase::new(
             deps.device.device_identity.clone(),
             deps.settings.clone(),
         )),
-        storage: Arc::new(StorageFacade::new(StorageFacadeDeps {
-            db_path: storage_paths.db_path.clone(),
-            vault_dir: storage_paths.vault_dir.clone(),
-            cache_dir: storage_paths.cache_dir.clone(),
-            logs_dir: storage_paths.logs_dir.clone(),
-            app_data_root_dir: storage_paths.app_data_root_dir.clone(),
-            cache_fs: deps.system.cache_fs.clone(),
-        })),
-        // Carried through from `wire_dependencies` (its db_pool / local_identity /
-        // profile_id materials are only available there); see `AppDeps`.
-        config_migration: deps.config_migration.clone(),
-        upgrade: Arc::new(UpgradeFacade::new(UpgradeFacadeDeps {
-            app_version_state: deps.app_version_state.clone(),
-            current_space_identity: deps.current_space_identity.clone(),
-        })),
+        storage: settings.storage,
+        config_migration: settings.config_migration,
+        upgrade: settings.upgrade,
         network_recovery: runtime.network_recovery,
     }))
 }
