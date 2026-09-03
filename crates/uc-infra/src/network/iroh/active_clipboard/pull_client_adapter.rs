@@ -32,6 +32,7 @@ use uc_core::ports::clipboard::{ActiveClipboardPullClientError, ActiveClipboardP
 use uc_core::ports::PeerAddressRepositoryPort;
 
 use super::super::connect::connect_with_staggered_retry;
+use super::super::peer_address_resolver::PeerAddressResolver;
 use super::pull_serve_adapter::ACTIVE_CLIPBOARD_PULL_ALPN;
 use super::pull_wire::{self, PullResponse};
 
@@ -46,7 +47,7 @@ const PULL_TIMEOUT: Duration = Duration::from_secs(10);
 /// NAT/relay mapping presence already established.
 pub struct IrohActiveClipboardPullClientAdapter {
     endpoint: Arc<Endpoint>,
-    peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    peer_address_resolver: PeerAddressResolver,
 }
 
 impl IrohActiveClipboardPullClientAdapter {
@@ -56,7 +57,7 @@ impl IrohActiveClipboardPullClientAdapter {
     ) -> Self {
         Self {
             endpoint,
-            peer_addr_repo,
+            peer_address_resolver: PeerAddressResolver::new(peer_addr_repo),
         }
     }
 
@@ -64,25 +65,12 @@ impl IrohActiveClipboardPullClientAdapter {
     /// undecodable blob, or repo error) maps to `Unreachable`. Mirrors the
     /// dispatch adapter's `resolve_addr`.
     async fn resolve_addr(&self, target: &DeviceId) -> Option<EndpointAddr> {
-        match self.peer_addr_repo.get(target).await {
-            Ok(Some(record)) => match postcard::from_bytes::<EndpointAddr>(&record.addr_blob) {
-                Ok(addr) => Some(addr),
-                Err(err) => {
-                    warn!(
-                        device = %target.as_str(),
-                        error = %err,
-                        "active-clipboard pull: peer_addr_repo blob did not postcard-decode; \
-                         treating peer as unreachable"
-                    );
-                    None
-                }
-            },
-            Ok(None) => None,
-            Err(err) => {
+        match self.peer_address_resolver.resolve(target).await {
+            Ok(address) => address,
+            Err(error) => {
                 warn!(
-                    device = %target.as_str(),
-                    error = %err,
-                    "active-clipboard pull: peer_addr_repo.get failed; treating peer as unreachable"
+                    error_kind = error.kind(),
+                    "active-clipboard pull address resolution failed; treating peer as unreachable"
                 );
                 None
             }
@@ -92,7 +80,7 @@ impl IrohActiveClipboardPullClientAdapter {
 
 #[async_trait]
 impl ActiveClipboardPullClientPort for IrohActiveClipboardPullClientAdapter {
-    #[instrument(skip_all, fields(device = %peer.as_str(), snapshot_hash = %snapshot_hash))]
+    #[instrument(skip_all)]
     async fn pull(
         &self,
         peer: &DeviceId,

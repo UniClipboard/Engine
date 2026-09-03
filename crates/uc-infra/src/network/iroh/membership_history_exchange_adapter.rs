@@ -21,6 +21,7 @@ use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::PeerAddressRepositoryPort;
 
 use super::connect_with_staggered_retry;
+use super::peer_address_resolver::PeerAddressResolver;
 
 pub const MEMBERSHIP_HISTORY_EXCHANGE_ALPN: &[u8] = b"uniclipboard/membership-history/3";
 
@@ -31,7 +32,7 @@ const REJECTED: u8 = 2;
 
 pub struct IrohMembershipHistoryExchangeAdapter {
     endpoint: Arc<Endpoint>,
-    peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    peer_address_resolver: PeerAddressResolver,
 }
 
 impl IrohMembershipHistoryExchangeAdapter {
@@ -41,7 +42,7 @@ impl IrohMembershipHistoryExchangeAdapter {
     ) -> Self {
         Self {
             endpoint,
-            peer_addr_repo,
+            peer_address_resolver: PeerAddressResolver::new(peer_addr_repo),
         }
     }
 
@@ -61,12 +62,16 @@ impl IrohMembershipHistoryExchangeAdapter {
     }
 
     async fn resolve_addr(&self, recipient: &DeviceId) -> Option<EndpointAddr> {
-        self.peer_addr_repo
-            .get(recipient)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|record| postcard::from_bytes(&record.addr_blob).ok())
+        match self.peer_address_resolver.resolve(recipient).await {
+            Ok(address) => address,
+            Err(error) => {
+                tracing::warn!(
+                    error_kind = error.kind(),
+                    "membership history address resolution failed"
+                );
+                None
+            }
+        }
     }
 }
 

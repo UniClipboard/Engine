@@ -41,7 +41,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use iroh::{Endpoint, EndpointAddr};
+use iroh::Endpoint;
 use tracing::debug;
 
 use uc_core::ids::DeviceId;
@@ -49,11 +49,12 @@ use uc_core::ports::connection_channel::{ConnectionChannelPort, ConnectionPath};
 use uc_core::ports::peer_address::PeerAddressRepositoryPort;
 
 use super::conn_path::{path_for, OnMissing};
+use super::peer_address_resolver::PeerAddressResolver;
 
 /// Iroh-backed [`ConnectionChannelPort`] implementation.
 pub struct IrohConnectionChannelAdapter {
     endpoint: Arc<Endpoint>,
-    peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    peer_address_resolver: PeerAddressResolver,
 }
 
 impl IrohConnectionChannelAdapter {
@@ -63,7 +64,7 @@ impl IrohConnectionChannelAdapter {
     ) -> Self {
         Self {
             endpoint,
-            peer_addr_repo,
+            peer_address_resolver: PeerAddressResolver::new(peer_addr_repo),
         }
     }
 }
@@ -72,32 +73,16 @@ impl IrohConnectionChannelAdapter {
 impl ConnectionChannelPort for IrohConnectionChannelAdapter {
     async fn path_for(&self, device: &DeviceId) -> ConnectionPath {
         // Step 1: device → addr_blob → EndpointId
-        let record = match self.peer_addr_repo.get(device).await {
-            Ok(Some(r)) => r,
+        let endpoint_addr = match self.peer_address_resolver.resolve(device).await {
+            Ok(Some(address)) => address,
             Ok(None) => {
-                debug!(
-                    device = %device.as_str(),
-                    "channel_for: no peer address record; reporting Unknown"
-                );
+                debug!("channel_for: no peer address record; reporting Unknown");
                 return ConnectionPath::default();
             }
-            Err(err) => {
+            Err(error) => {
                 debug!(
-                    device = %device.as_str(),
-                    error = %err,
-                    "channel_for: peer_addr_repo failure; reporting Unknown"
-                );
-                return ConnectionPath::default();
-            }
-        };
-
-        let endpoint_addr: EndpointAddr = match postcard::from_bytes(&record.addr_blob) {
-            Ok(addr) => addr,
-            Err(err) => {
-                debug!(
-                    device = %device.as_str(),
-                    error = %err,
-                    "channel_for: postcard decode failed; reporting Unknown"
+                    error_kind = error.kind(),
+                    "channel_for: peer address resolution failed; reporting Unknown"
                 );
                 return ConnectionPath::default();
             }

@@ -25,6 +25,7 @@ use uc_core::security::IdentityFingerprint;
 use crate::space::InMemorySession;
 
 use super::connect_with_staggered_retry;
+use super::peer_address_resolver::PeerAddressResolver;
 use super::persistable_addr::to_persistable_addr;
 
 const WIRE_VERSION: u8 = 1;
@@ -162,7 +163,7 @@ pub struct IrohMembershipAttestationAdapter {
 pub struct IrohMembershipGossipTransportAdapter {
     endpoint: Arc<Endpoint>,
     identity: Arc<dyn CurrentMembershipIdentityPort>,
-    peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    peer_address_resolver: PeerAddressResolver,
     handler_state: Arc<MembershipGossipHandlerState>,
 }
 
@@ -186,7 +187,7 @@ impl IrohMembershipGossipTransportAdapter {
         Self {
             endpoint,
             identity,
-            peer_addr_repo,
+            peer_address_resolver: PeerAddressResolver::new(peer_addr_repo),
             handler_state: Arc::new(MembershipGossipHandlerState {
                 session,
                 member_repo,
@@ -200,14 +201,11 @@ impl IrohMembershipGossipTransportAdapter {
         &self,
         recipient: &DeviceId,
     ) -> Result<EndpointAddr, MembershipGossipTransportError> {
-        let record = self
-            .peer_addr_repo
-            .get(recipient)
+        self.peer_address_resolver
+            .resolve(recipient)
             .await
             .map_err(|_| MembershipGossipTransportError::Transport)?
-            .ok_or(MembershipGossipTransportError::Offline)?;
-        postcard::from_bytes(&record.addr_blob)
-            .map_err(|_| MembershipGossipTransportError::Transport)
+            .ok_or(MembershipGossipTransportError::Offline)
     }
 }
 

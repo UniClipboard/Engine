@@ -30,6 +30,7 @@ use uc_core::ports::{
 };
 
 use super::super::connect::connect_with_staggered_retry;
+use super::super::peer_address_resolver::PeerAddressResolver;
 use super::receiver_adapter::ACTIVE_CLIPBOARD_ALPN;
 use super::wire::{self, ActiveClipboardWireMessage};
 
@@ -38,7 +39,7 @@ use super::wire::{self, ActiveClipboardWireMessage};
 /// state send rides the same NAT/relay mapping presence already established.
 pub struct IrohActiveClipboardDispatchAdapter {
     endpoint: Arc<Endpoint>,
-    peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    peer_address_resolver: PeerAddressResolver,
 }
 
 impl IrohActiveClipboardDispatchAdapter {
@@ -48,7 +49,7 @@ impl IrohActiveClipboardDispatchAdapter {
     ) -> Self {
         Self {
             endpoint,
-            peer_addr_repo,
+            peer_address_resolver: PeerAddressResolver::new(peer_addr_repo),
         }
     }
 
@@ -56,25 +57,12 @@ impl IrohActiveClipboardDispatchAdapter {
     /// `None` (no record, undecodable blob, or repo error) maps to
     /// `Offline`. Mirrors the bulk dispatch adapter's `resolve_addr`.
     async fn resolve_addr(&self, target: &DeviceId) -> Option<EndpointAddr> {
-        match self.peer_addr_repo.get(target).await {
-            Ok(Some(record)) => match postcard::from_bytes::<EndpointAddr>(&record.addr_blob) {
-                Ok(addr) => Some(addr),
-                Err(err) => {
-                    warn!(
-                        device = %target.as_str(),
-                        error = %err,
-                        "active-clipboard dispatch: peer_addr_repo blob did not postcard-decode; \
-                         treating peer as offline"
-                    );
-                    None
-                }
-            },
-            Ok(None) => None,
-            Err(err) => {
+        match self.peer_address_resolver.resolve(target).await {
+            Ok(address) => address,
+            Err(error) => {
                 warn!(
-                    device = %target.as_str(),
-                    error = %err,
-                    "active-clipboard dispatch: peer_addr_repo.get failed; treating peer as offline"
+                    error_kind = error.kind(),
+                    "active-clipboard dispatch address resolution failed; treating peer as offline"
                 );
                 None
             }
@@ -84,7 +72,7 @@ impl IrohActiveClipboardDispatchAdapter {
 
 #[async_trait]
 impl ActiveClipboardDispatchPort for IrohActiveClipboardDispatchAdapter {
-    #[instrument(skip_all, fields(device = %target.as_str(), snapshot_hash = %state.snapshot_hash))]
+    #[instrument(skip_all)]
     async fn dispatch(
         &self,
         target: &DeviceId,

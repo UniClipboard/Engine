@@ -22,6 +22,7 @@ pub mod membership_history_exchange_adapter;
 mod net_recovery;
 mod network_partition;
 pub mod node;
+mod peer_address_resolver;
 pub mod persistable_addr;
 pub mod presence_adapter;
 pub mod relay_probe;

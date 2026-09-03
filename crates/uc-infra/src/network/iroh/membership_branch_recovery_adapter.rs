@@ -23,12 +23,13 @@ use super::connect_with_staggered_retry;
 use super::membership_branch_recovery_wire::{
     decode, encode, MembershipBranchRecoveryWireMessage, MAX_RECOVERY_FRAME_SIZE,
 };
+use super::peer_address_resolver::PeerAddressResolver;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct IrohMembershipBranchRecoveryChannel {
     endpoint: Arc<Endpoint>,
-    peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    peer_address_resolver: PeerAddressResolver,
 }
 
 impl IrohMembershipBranchRecoveryChannel {
@@ -38,7 +39,7 @@ impl IrohMembershipBranchRecoveryChannel {
     ) -> Self {
         Self {
             endpoint,
-            peer_addr_repo,
+            peer_address_resolver: PeerAddressResolver::new(peer_addr_repo),
         }
     }
 
@@ -48,11 +49,10 @@ impl IrohMembershipBranchRecoveryChannel {
         request: MembershipBranchRecoveryWireMessage,
     ) -> Result<MembershipBranchRecoveryWireMessage, MembershipBranchRecoveryChannelError> {
         let address: EndpointAddr = self
-            .peer_addr_repo
-            .get(peer_device_id)
+            .peer_address_resolver
+            .resolve(peer_device_id)
             .await
             .map_err(|source| unavailable(anyhow::Error::new(source)))?
-            .and_then(|record| postcard::from_bytes(&record.addr_blob).ok())
             .ok_or_else(|| unavailable(anyhow::anyhow!("recovery peer address is unavailable")))?;
         let connection = connect_with_staggered_retry(
             Arc::clone(&self.endpoint),

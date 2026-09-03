@@ -46,6 +46,7 @@ use uc_core::ports::{
 use super::clipboard_wire::{self, AckCode, WireEncodeError};
 use super::conn_path::{path_for, OnMissing};
 use super::connect::connect_with_staggered_retry;
+use super::peer_address_resolver::PeerAddressResolver;
 
 /// ALPN identifier for the Slice 2 clipboard sync protocol. Independent of
 /// the presence / pairing ALPNs so the Router can multiplex all three
@@ -62,7 +63,7 @@ type DialResult = Result<Connection, String>;
 
 pub struct IrohClipboardDispatchAdapter {
     endpoint: Arc<Endpoint>,
-    peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    peer_address_resolver: PeerAddressResolver,
     /// PresencePort handle the adapter notifies on dial failure. A dial
     /// that we have to fall back to `Offline` is first-hand evidence the
     /// peer is unreachable; feeding that signal back through
@@ -92,7 +93,7 @@ impl IrohClipboardDispatchAdapter {
     ) -> Self {
         Self {
             endpoint,
-            peer_addr_repo,
+            peer_address_resolver: PeerAddressResolver::new(peer_addr_repo),
             presence,
             in_flight_dials: Mutex::new(HashMap::new()),
         }
@@ -181,30 +182,12 @@ impl IrohClipboardDispatchAdapter {
     /// infra) surfaces as `Offline` after logging — a corrupt blob is a
     /// data-integrity issue the next pairing sync will self-heal.
     async fn resolve_addr(&self, target: &DeviceId) -> Option<EndpointAddr> {
-        match self.peer_addr_repo.get(target).await {
-            // Stored blobs are guaranteed to be persistable form (NodeId
-            // + Relay hint, no `Ip(...)` ephemera) — see
-            // `persistable_addr::to_persistable_addr`. Iroh's pkarr
-            // discovery resolves the peer's current direct addrs at
-            // connect time, so we hand the decoded addr through as-is.
-            Ok(Some(record)) => match postcard::from_bytes::<EndpointAddr>(&record.addr_blob) {
-                Ok(addr) => Some(addr),
-                Err(err) => {
-                    warn!(
-                        device = %target.as_str(),
-                        error = %err,
-                        "clipboard dispatch: peer_addr_repo blob did not postcard-decode; \
-                         treating peer as offline"
-                    );
-                    None
-                }
-            },
-            Ok(None) => None,
-            Err(err) => {
+        match self.peer_address_resolver.resolve(target).await {
+            Ok(address) => address,
+            Err(error) => {
                 warn!(
-                    device = %target.as_str(),
-                    error = %err,
-                    "clipboard dispatch: peer_addr_repo.get failed; treating peer as offline"
+                    error_kind = error.kind(),
+                    "clipboard dispatch address resolution failed; treating peer as offline"
                 );
                 None
             }

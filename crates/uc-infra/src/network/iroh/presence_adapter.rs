@@ -58,7 +58,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
-use iroh::{Endpoint, EndpointAddr};
+use iroh::Endpoint;
+#[cfg(test)]
+use iroh::EndpointAddr;
 use tokio::sync::{broadcast, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, instrument, warn};
@@ -76,6 +78,7 @@ use super::connect::connect_with_staggered_retry;
 use super::net_recovery::{
     DemandRecoveryCoordinator, NetworkRecoveryObservation, NetworkRecoveryObservationSource,
 };
+use super::peer_address_resolver::PeerAddressResolver;
 
 /// ALPN identifier for the Slice 2 presence protocol. The accept-side
 /// handler confirms current-space admission before the dial side publishes
@@ -381,7 +384,7 @@ pub struct IrohPresenceAdapter {
     endpoint: Arc<Endpoint>,
     demand_recovery: Option<Arc<DemandRecoveryCoordinator>>,
     network_recovery_observations: Option<Arc<NetworkRecoveryObservationSource>>,
-    peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    peer_address_resolver: PeerAddressResolver,
     clock: Arc<dyn ClockPort>,
     /// Live iroh connections keyed by `DeviceId`. `DeviceId` is `Copy +
     /// Hash` (a 64-byte inline `ArrayString`), so it can be used directly
@@ -516,7 +519,7 @@ impl IrohPresenceAdapter {
             endpoint,
             demand_recovery,
             network_recovery_observations,
-            peer_addr_repo,
+            peer_address_resolver: PeerAddressResolver::new(peer_addr_repo),
             clock,
             peers: Arc::new(Mutex::new(HashMap::new())),
             last_state,
@@ -582,31 +585,18 @@ impl IrohPresenceAdapter {
     ///    "把假装活着的旧连接 close 掉"的清理动作）
     async fn dial_and_track(&self, device: &DeviceId) -> Result<ReachabilityState, PresenceError> {
         // Look up the stored transport address.
-        let record = self
-            .peer_addr_repo
-            .get(device)
+        let endpoint_addr = match self
+            .peer_address_resolver
+            .resolve(device)
             .await
-            .map_err(|err| PresenceError::Internal(format!("peer_addr_repo.get: {err}")))?;
-        let record = match record {
-            Some(r) => r,
+            .map_err(PresenceError::internal)?
+        {
+            Some(address) => address,
             None => {
                 debug!("dial_and_track: no address record; returning NoAddress");
                 return Err(PresenceError::NoAddress(*device));
             }
         };
-
-        // Decode the opaque blob into the adapter-private `EndpointAddr`.
-        // Failure is a data-integrity issue (someone wrote junk into the
-        // repo) — surface it as `Internal` without leaking the postcard
-        // error type upward. The blob is guaranteed to have had its
-        // ephemeral `Ip(...)` direct addresses stripped at pairing-time
-        // write (see `persistable_addr::to_persistable_addr`), so what we
-        // decode here is `id + Relay(...)`. iroh's built-in pkarr
-        // discovery fills in fresh direct addrs at connect time.
-        let endpoint_addr: EndpointAddr =
-            postcard::from_bytes(&record.addr_blob).map_err(|err| {
-                PresenceError::Internal(format!("postcard decode EndpointAddr: {err}"))
-            })?;
         let was_online = self
             .last_state
             .lock()

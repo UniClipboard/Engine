@@ -13,6 +13,7 @@ use uc_core::membership::{
 use uc_core::ports::PeerAddressRepositoryPort;
 
 use super::connect_with_staggered_retry;
+use super::peer_address_resolver::PeerAddressResolver;
 
 pub const GROUP_UPDATE_ALPN: &[u8] = b"uniclipboard/group-update/1";
 const MAX_UPDATE_SIZE: usize = 4 * 1024 * 1024;
@@ -32,7 +33,7 @@ async fn run_outbound_io_phase<T, E>(
 
 pub struct IrohGroupUpdateAdapter {
     endpoint: Arc<Endpoint>,
-    peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    peer_address_resolver: PeerAddressResolver,
     handler_state: Arc<HandlerState>,
 }
 
@@ -48,7 +49,7 @@ impl IrohGroupUpdateAdapter {
     ) -> Self {
         Self {
             endpoint,
-            peer_addr_repo,
+            peer_address_resolver: PeerAddressResolver::new(peer_addr_repo),
             handler_state: Arc::new(HandlerState { group_revocation }),
         }
     }
@@ -60,11 +61,13 @@ impl IrohGroupUpdateAdapter {
     }
 
     async fn resolve_addr(&self, update: &PendingGroupUpdate) -> Option<EndpointAddr> {
-        match self.peer_addr_repo.get(update.recipient()).await {
-            Ok(Some(record)) => postcard::from_bytes(&record.addr_blob).ok(),
-            Ok(None) => None,
+        match self.peer_address_resolver.resolve(update.recipient()).await {
+            Ok(address) => address,
             Err(error) => {
-                warn!(error = %error, "group update address lookup failed");
+                warn!(
+                    error_kind = error.kind(),
+                    "group update address resolution failed"
+                );
                 None
             }
         }

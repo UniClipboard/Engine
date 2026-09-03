@@ -42,8 +42,19 @@ pub enum PresenceError {
     /// "member is offline" rather than a fatal error.
     #[error("no known address for device {0:?}")]
     NoAddress(DeviceId),
-    #[error("internal: {0}")]
-    Internal(String),
+    #[error("internal presence failure")]
+    Internal {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+}
+
+impl PresenceError {
+    pub fn internal(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Internal {
+            source: Box::new(source),
+        }
+    }
 }
 
 #[async_trait]
