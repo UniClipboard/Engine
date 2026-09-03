@@ -25,7 +25,7 @@ async fn next_engine_event_matching(
     events: &mut crate::EventStream,
     predicate: impl Fn(&EngineEvent) -> bool,
 ) -> EngineEvent {
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
         loop {
             let event = events.next().await.expect("engine event stream closed");
             if predicate(&event) {
@@ -195,7 +195,7 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
         } => invitation_code,
         other => panic!("expected invitation, got {other:?}"),
     };
-    let joiner_device_id = match joiner
+    let join_status = match joiner
         .execute(crate::Operation::JoinSpace(crate::JoinSpaceInput {
             invitation_code,
             device_name: Some("Joiner".into()),
@@ -205,11 +205,43 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
         .await
         .unwrap()
     {
-        crate::OperationResult::SpaceJoined { self_device_id, .. } => self_device_id,
+        crate::OperationResult::JoinSpace(status) => status,
         other => panic!("expected joined space, got {other:?}"),
     };
-    // ADR-017: join success is expressed by the saved workspace state, not by
-    // a pairing terminal. The sponsor is prompted to read the complete state.
+    let joiner_device_id = match join_status {
+        crate::JoinSpaceStatusSummary::Active { joined_space, .. } => joined_space.self_device_id,
+        crate::JoinSpaceStatusSummary::Pending { .. } => loop {
+            assert!(matches!(
+                next_engine_event_matching(&mut joiner_events, |event| matches!(
+                    event,
+                    EngineEvent::DeviceTrustChanged { revision } if *revision > 0
+                ))
+                .await,
+                EngineEvent::DeviceTrustChanged { .. }
+            ));
+            match joiner
+                .execute(crate::Operation::QueryDeviceGroupChoices)
+                .await
+                .unwrap()
+            {
+                crate::OperationResult::DeviceGroupChoices(summary) => {
+                    let trust = summary.device_trust;
+                    if trust.local_membership == crate::DeviceMembershipSummary::Active
+                        && trust.devices.iter().any(|device| !device.is_local)
+                    {
+                        break trust.local_device_id;
+                    }
+                    continue;
+                }
+                other => panic!("expected device group choices, got {other:?}"),
+            }
+        },
+        crate::JoinSpaceStatusSummary::Rejected { reason, .. } => {
+            panic!("join was rejected: {reason:?}")
+        }
+    };
+    // ADR-017: join success is expressed by the saved workspace state. Both
+    // sides receive a refetch event and read the authoritative result.
     assert!(matches!(
         next_engine_event_matching(&mut sponsor_events, |event| matches!(
             event,

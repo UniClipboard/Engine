@@ -13,8 +13,8 @@ use uc_core::clipboard::{
 use uc_core::ids::{FormatId, RepresentationId};
 use uc_core::ports::{
     ClipboardHostEvent, ClipboardOriginKind, DeliveryHostEvent, EmitError, HostEvent,
-    HostEventEmitterPort, PlatformClipboardPort, SecureStorageError, SecureStoragePort,
-    SystemClipboardPort, TransferHostEvent,
+    HostEventEmitterPort, MembershipHostEvent, PlatformClipboardPort, SecureStorageError,
+    SecureStoragePort, SystemClipboardPort, TransferHostEvent,
 };
 use uc_observability_contract::analytics::DefaultAnalyticsFacade;
 
@@ -456,6 +456,9 @@ impl HostEventEmitterPort for EngineHostEventEmitter {
                 attempt_id,
                 state,
             }),
+            HostEvent::Membership(MembershipHostEvent::LedgerCommitted { revision }) => {
+                EngineEvent::DeviceTrustChanged { revision }
+            }
         };
         self.events.send(event);
         Ok(())
@@ -559,7 +562,7 @@ mod tests {
     use uc_core::file_transfer::FileTransferDirection;
     use uc_core::ports::{
         ClipboardHostEvent, ClipboardOriginKind, DeliveryHostEvent, HostEvent,
-        HostEventEmitterPort, TransferHostEvent,
+        HostEventEmitterPort, MembershipHostEvent, TransferHostEvent,
     };
     use uc_core::TaskRegistry;
 
@@ -928,6 +931,23 @@ mod tests {
                 completed_bytes: 64,
                 total_bytes: Some(128),
             }))
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_event_emitter_forwards_membership_revision() {
+        let (events, mut stream) = event_channel(8);
+        let emitter = EngineHostEventEmitter::new(events);
+
+        emitter
+            .emit(HostEvent::Membership(
+                MembershipHostEvent::LedgerCommitted { revision: 7 },
+            ))
+            .unwrap();
+
+        assert_eq!(
+            stream.next().await,
+            Some(EngineEvent::DeviceTrustChanged { revision: 7 })
         );
     }
 

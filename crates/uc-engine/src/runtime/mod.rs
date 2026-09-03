@@ -290,12 +290,13 @@ async fn spawn_space_transition_watcher(
                 tokio::select! {
                     _ = cancel.cancelled() => return,
                     _ = interval.tick() => match supervisor.transition_pending_session().await {
-                        Ok(true) => {
+                        Ok(Some(revision)) => {
+                            events.send(crate::EngineEvent::DeviceTrustChanged { revision });
                             events.send(crate::EngineEvent::RefreshRequired {
                                 reason: crate::RefreshReason::StateInvalidated,
                             });
                         }
-                        Ok(false) => {}
+                        Ok(None) => {}
                         Err(error) => warn!(
                             error_code = error.code(),
                             retryable = error.is_retryable(),

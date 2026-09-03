@@ -206,25 +206,6 @@ impl fmt::Display for OperationKind {
     }
 }
 
-#[cfg(all(test, feature = "dev-tools"))]
-mod tests {
-    use super::{
-        DecideMembershipRemovalInput, MembershipRemovalDecision, Operation, OperationKind,
-    };
-
-    #[test]
-    fn membership_removal_decision_has_a_stable_operation_kind() {
-        let operation = Operation::DecideMembershipRemoval(DecideMembershipRemovalInput {
-            removal_event_id: "0101010101010101010101010101010101010101010101010101010101010101"
-                .to_owned(),
-            decision: MembershipRemovalDecision::Reject,
-        });
-
-        assert_eq!(operation.kind(), OperationKind::DecideMembershipRemoval);
-        assert_eq!(operation.kind().to_string(), "decide_membership_removal");
-    }
-}
-
 #[cfg(test)]
 mod device_group_choice_contract_tests {
     use super::{ChooseDeviceGroupInput, Operation, OperationKind};

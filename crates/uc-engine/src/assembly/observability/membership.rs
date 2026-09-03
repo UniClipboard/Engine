@@ -9,12 +9,14 @@ use uc_application::deps::{
     MembershipLedgerMutation, RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
     RestrictedMembershipDeliveryPort, SpaceMembershipAdapters,
 };
+use uc_application::facade::HostEventBus;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     GroupUpdateDispatchError, GroupUpdateDispatchPort, MembershipBranchRecoveryPackageV1,
     MembershipHistoryExchangeError, MembershipHistoryExchangePort, MembershipHistoryMessage,
     PendingGroupUpdate,
 };
+use uc_core::ports::{HostEvent, MembershipHostEvent};
 
 const SLOW_LEDGER_LOAD: Duration = Duration::from_millis(50);
 
@@ -43,14 +45,18 @@ impl MembershipOperation {
     }
 }
 
-pub(crate) fn observe_membership(adapters: SpaceMembershipAdapters) -> SpaceMembershipAdapters {
+pub(crate) fn observe_membership(
+    adapters: SpaceMembershipAdapters,
+    host_events: Arc<HostEventBus>,
+) -> SpaceMembershipAdapters {
     SpaceMembershipAdapters {
         load_membership_ledger: Arc::new(ObservedMembershipLedgerLoad {
             inner: adapters.load_membership_ledger,
         }),
-        commit_membership_ledger: Arc::new(ObservedMembershipLedgerCommit {
-            inner: adapters.commit_membership_ledger,
-        }),
+        commit_membership_ledger: observe_membership_commit(
+            adapters.commit_membership_ledger,
+            host_events,
+        ),
         membership_history_transport: Arc::new(ObservedMembershipHistoryExchange {
             inner: adapters.membership_history_transport,
         }),
@@ -65,6 +71,13 @@ pub(crate) fn observe_membership(adapters: SpaceMembershipAdapters) -> SpaceMemb
         }),
         ..adapters
     }
+}
+
+fn observe_membership_commit(
+    inner: Arc<dyn CommitMembershipLedgerPort>,
+    host_events: Arc<HostEventBus>,
+) -> Arc<dyn CommitMembershipLedgerPort> {
+    Arc::new(ObservedMembershipLedgerCommit { inner, host_events })
 }
 
 struct ObservedMembershipLedgerLoad {
@@ -90,6 +103,7 @@ impl LoadMembershipLedgerPort for ObservedMembershipLedgerLoad {
 
 struct ObservedMembershipLedgerCommit {
     inner: Arc<dyn CommitMembershipLedgerPort>,
+    host_events: Arc<HostEventBus>,
 }
 
 #[async_trait]
@@ -105,6 +119,13 @@ impl CommitMembershipLedgerPort for ObservedMembershipLedgerCommit {
             started.elapsed(),
             result.as_ref().err(),
         );
+        if let Ok(committed) = &result {
+            self.host_events.emit_or_warn(HostEvent::Membership(
+                MembershipHostEvent::LedgerCommitted {
+                    revision: committed.revision,
+                },
+            ));
+        }
         result
     }
 }
@@ -387,22 +408,25 @@ mod tests {
 
     use async_trait::async_trait;
     use uc_application::deps::{
-        LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipBranchRecoveryChannelError,
-        MembershipBranchRecoveryChannelPort, MembershipBranchRecoveryCommit,
-        MembershipBranchRecoveryRequest, MembershipLedgerError, RestrictedMembershipDeliveryError,
+        CommitMembershipLedgerPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
+        MembershipBranchRecoveryChannelError, MembershipBranchRecoveryChannelPort,
+        MembershipBranchRecoveryCommit, MembershipBranchRecoveryRequest, MembershipLedgerError,
+        MembershipLedgerMutation, RestrictedMembershipDeliveryError,
     };
+    use uc_application::facade::HostEventBus;
     use uc_core::ids::DeviceId;
     use uc_core::membership::{
         GroupUpdateDispatchError, MemberInstanceId, MembershipBranchId,
         MembershipBranchRecoveryPackageV1, MembershipConflictId, MembershipHistoryExchangeError,
     };
+    use uc_core::ports::{EmitError, HostEvent, HostEventEmitterPort, MembershipHostEvent};
 
     use super::{
         group_update_dispatch_error_kind, membership_branch_recovery_error_kind,
         membership_history_exchange_error_kind, membership_ledger_error_kind,
-        record_branch_recovery, restricted_membership_delivery_error_kind,
-        should_record_ledger_load, MembershipOperation, ObservedMembershipBranchRecoveryChannel,
-        ObservedMembershipLedgerLoad,
+        observe_membership_commit, record_branch_recovery,
+        restricted_membership_delivery_error_kind, should_record_ledger_load, MembershipOperation,
+        ObservedMembershipBranchRecoveryChannel, ObservedMembershipLedgerLoad,
     };
 
     #[derive(Clone, Default)]
@@ -439,6 +463,42 @@ mod tests {
 
     struct FailingLedgerLoad {
         calls: AtomicUsize,
+    }
+
+    struct SuccessfulLedgerCommit;
+
+    #[async_trait]
+    impl CommitMembershipLedgerPort for SuccessfulLedgerCommit {
+        async fn compare_and_commit(
+            &self,
+            mutation: MembershipLedgerMutation,
+        ) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
+            Ok(mutation.replacement)
+        }
+    }
+
+    struct FailingLedgerCommit;
+
+    #[async_trait]
+    impl CommitMembershipLedgerPort for FailingLedgerCommit {
+        async fn compare_and_commit(
+            &self,
+            _mutation: MembershipLedgerMutation,
+        ) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
+            Err(MembershipLedgerError::Conflict)
+        }
+    }
+
+    #[derive(Default)]
+    struct HostEventRecorder {
+        events: Mutex<Vec<HostEvent>>,
+    }
+
+    impl HostEventEmitterPort for HostEventRecorder {
+        fn emit(&self, event: HostEvent) -> Result<(), EmitError> {
+            self.events.lock().expect("host events lock").push(event);
+            Ok(())
+        }
     }
 
     #[async_trait]
@@ -523,6 +583,54 @@ mod tests {
             Err(MembershipLedgerError::RecoveryRequired)
         ));
         assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn successful_ledger_commit_publishes_device_trust_revision() {
+        let recorder = Arc::new(HostEventRecorder::default());
+        let host_events = Arc::new(HostEventBus::new());
+        host_events.register("test", recorder.clone());
+        let observed = observe_membership_commit(Arc::new(SuccessfulLedgerCommit), host_events);
+        let mut replacement = LoadedMembershipLedger::no_current_space();
+        replacement.revision = 7;
+
+        let committed = observed
+            .compare_and_commit(MembershipLedgerMutation {
+                expected_revision: 6,
+                expected_history_digest: None,
+                replacement,
+            })
+            .await
+            .expect("membership commit should succeed");
+
+        assert_eq!(committed.revision, 7);
+        let events = recorder.events.lock().expect("host events lock");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events.first(),
+            Some(HostEvent::Membership(
+                MembershipHostEvent::LedgerCommitted { revision: 7 }
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn failed_ledger_commit_does_not_publish_device_trust_change() {
+        let recorder = Arc::new(HostEventRecorder::default());
+        let host_events = Arc::new(HostEventBus::new());
+        host_events.register("test", recorder.clone());
+        let observed = observe_membership_commit(Arc::new(FailingLedgerCommit), host_events);
+
+        let result = observed
+            .compare_and_commit(MembershipLedgerMutation {
+                expected_revision: 0,
+                expected_history_digest: None,
+                replacement: LoadedMembershipLedger::no_current_space(),
+            })
+            .await;
+
+        assert!(matches!(result, Err(MembershipLedgerError::Conflict)));
+        assert!(recorder.events.lock().expect("host events lock").is_empty());
     }
 
     #[tokio::test]

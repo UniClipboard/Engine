@@ -76,12 +76,20 @@ pub enum DeliveryHostEvent {
     },
 }
 
+/// Membership subsystem events for the host.
+#[derive(Debug, Clone)]
+pub enum MembershipHostEvent {
+    /// The authoritative membership ledger committed a new revision.
+    LedgerCommitted { revision: u64 },
+}
+
 /// Unified host event envelope.
 #[derive(Debug, Clone)]
 pub enum HostEvent {
     Clipboard(ClipboardHostEvent),
     Transfer(TransferHostEvent),
     Delivery(DeliveryHostEvent),
+    Membership(MembershipHostEvent),
 }
 
 /// Error returned when emitting a host event fails.

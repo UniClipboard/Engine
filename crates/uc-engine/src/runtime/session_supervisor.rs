@@ -192,11 +192,11 @@ impl SessionSupervisor {
         self.install_new_session(false).await
     }
 
-    pub(super) async fn transition_pending_session(&self) -> Result<bool, EngineError> {
+    pub(super) async fn transition_pending_session(&self) -> Result<Option<u64>, EngineError> {
         let _lifecycle = self.lifecycle.lock().await;
         let facade = match self.session.lock().await.as_ref() {
             Some(session) => Arc::clone(&session.facade),
-            None => return Ok(false),
+            None => return Ok(None),
         };
         tracing::debug!("运行时 Space transition 检查开始");
         if !facade
@@ -206,7 +206,7 @@ impl SessionSupervisor {
                 operation_error_with_code(1103, "inspect runtime space transition", error)
             })?
         {
-            return Ok(false);
+            return Ok(None);
         }
         tracing::info!("运行时发现待完成 Space transition");
         self.operations.close_and_wait(None).await?;
@@ -216,7 +216,7 @@ impl SessionSupervisor {
             Ok(false) => {
                 tracing::info!("运行时 Space transition 二次确认已无待处理状态");
                 self.operations.reopen();
-                return Ok(false);
+                return Ok(None);
             }
             Err(error) => {
                 self.operations.reopen();
@@ -244,7 +244,20 @@ impl SessionSupervisor {
                 tracing::info!("运行时 Space transition 持久步骤已完成");
                 self.install_new_session(true).await?;
                 tracing::info!("运行时 Space transition 新 session 已安装");
-                Ok(true)
+                let revision = self
+                    .current_facade()
+                    .await?
+                    .query_device_group_choices()
+                    .await
+                    .map_err(|error| {
+                        operation_error_with_code(
+                            1103,
+                            "query transitioned device trust revision",
+                            error,
+                        )
+                    })?
+                    .revision;
+                Ok(Some(revision))
             }
             Err(error) => {
                 tracing::warn!("运行时 Space transition 持久步骤失败，开始恢复 session");
