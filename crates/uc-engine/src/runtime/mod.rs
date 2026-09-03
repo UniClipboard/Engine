@@ -10,41 +10,27 @@ mod session_supervisor;
 
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{error, warn};
 use uc_application::deps::{ProfileFactoryResetCapabilityError, StopProfileRuntimePort};
-use uc_application::facade::clipboard_write::LocalActiveRegisterAdvancer;
 use uc_application::facade::{
-    AppFacade, ApplicationRuntime, ClipboardInboundEvent, ClipboardInboundEventAction,
-    ClipboardInboundEventPort, NetworkRecoveryEvent, ProfileFactoryResetFacade,
+    AppFacade, ApplicationRuntime, NetworkRecoveryEvent, ProfileFactoryResetFacade,
     ProfileFactoryResetOutcome, ProfileFactoryResetRequest,
 };
 use uc_core::ports::ClockPort;
 use uc_core::TaskRegistry;
 
-use crate::assembly::deps::WiredDependencies;
-#[cfg(feature = "lan-compat")]
-use crate::assembly::facade::build_mobile_sync_facade;
 use crate::assembly::host::{
     wire_host_capabilities_with_emitter, EngineHostEventEmitter, HostWiring,
 };
-use crate::assembly::lifecycle::build_daemon_lifecycle;
 #[cfg(feature = "lan-compat")]
 use crate::assembly::mobile_lan::MobileLanEndpointUpdater;
-use crate::assembly::sync_engine::SyncEngineAssembly;
 use crate::engine::event_stream::EventSender;
-use crate::subsystems::peer_keepalive::spawn_peer_presence_event_task;
 use crate::{EngineConfig, EngineError, EngineErrorCategory, HostCapabilities, HostFileAccess};
-use crate::{
-    EngineEvent, InboundNoticeActionSummary, InboundNoticeEvent, InboundRepresentationSummary,
-};
 use host_clipboard::{spawn_host_clipboard_change_task, HostClipboardChangeRuntime};
 use session_supervisor::SessionSupervisor;
-use uc_infra::fs::{FsAtomicPublisher, FsHiddenPathMarker, FsInboundFileTarget};
 const START_FAILED_CODE: u32 = 1101;
 const OPERATION_UNAVAILABLE_CODE: u32 = 1103;
 
@@ -67,30 +53,6 @@ pub(crate) struct ProductionRuntime {
     network_partition_gate: uc_infra::network::iroh::IrohNetworkPartitionGate,
 }
 
-struct SessionFactory {
-    wired: WiredDependencies,
-    #[cfg(feature = "lan-compat")]
-    paths: uc_application::facade::AppPaths,
-    app_version: String,
-    events: EventSender,
-    rendezvous_base_url: Option<String>,
-    relay_fallback_override: Option<bool>,
-    iroh_bind_port_override: Option<u16>,
-    #[cfg(feature = "dev-tools")]
-    network_partition_gate: uc_infra::network::iroh::IrohNetworkPartitionGate,
-    network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
-    recovery_generation: Arc<AtomicU64>,
-}
-
-struct ProductionSession {
-    facade: Arc<AppFacade>,
-    application: Arc<ApplicationRuntime>,
-    #[cfg(feature = "lan-compat")]
-    mobile_sync: Arc<uc_mobile_lan::MobileSyncFacade>,
-    sync_engine: SyncEngineAssembly,
-    tasks: Arc<TaskRegistry>,
-}
-
 struct ProductionProfileRuntimeStopper {
     session_supervisor: Arc<SessionSupervisor>,
     tasks: Arc<TaskRegistry>,
@@ -107,46 +69,6 @@ impl StopProfileRuntimePort for ProductionProfileRuntimeStopper {
         self.tasks.shutdown(Duration::from_millis(500)).await;
         Ok(())
     }
-}
-
-impl ProductionSession {
-    async fn shutdown(self, transfer_reason: uc_core::FileTransferCancellationReason) {
-        info!("Engine session 开始关闭");
-        #[cfg(feature = "lan-compat")]
-        if self
-            .mobile_sync
-            .shutdown_mobile_file_uploads()
-            .await
-            .is_err()
-        {
-            warn!("mobile file upload shutdown finished with an error");
-        }
-        // 先停止网络观测与 presence 转发，避免它们在 Application 领域
-        // runtime 排空期间继续触发恢复或事件工作。
-        self.tasks.shutdown(Duration::from_millis(500)).await;
-        info!("Engine session 网络观测任务已停止");
-        let application_shutdown = self.application.shutdown().await;
-        info!("Engine session Application runtime 已停止");
-        if let Some(error) = application_shutdown.history {
-            warn!(error = %error, "history maintenance stopped with an error");
-        }
-        if let Some(error) = application_shutdown.search {
-            error!(error = %error, "search runtime stopped with error");
-        }
-        self.sync_engine.shutdown(transfer_reason).await;
-        info!("Engine session Iroh 网络已停止");
-    }
-}
-
-fn engine_event_for_active_clipboard(
-    state: &uc_core::clipboard::ActiveClipboardState,
-) -> crate::EngineEvent {
-    crate::EngineEvent::ActiveClipboardChanged(crate::ActiveClipboardChanged {
-        snapshot_hash: state.snapshot_hash.clone(),
-        entry_id: state.entry_id.as_str().to_string(),
-        activated_at_ms: state.activated_at_ms,
-        activated_by: state.activated_by.as_str().to_string(),
-    })
 }
 
 fn re_pairing_scope_for_setup_state(
@@ -205,39 +127,6 @@ async fn spawn_network_recovery_events(
         .await;
 }
 
-async fn spawn_network_recovery_observation_task(
-    mut observations: tokio::sync::broadcast::Receiver<
-        uc_infra::network::iroh::NetworkRecoveryObservation,
-    >,
-    recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
-    generation: Arc<AtomicU64>,
-    tasks: &Arc<TaskRegistry>,
-) {
-    tasks
-        .spawn("network_recovery_observations", move |cancel| async move {
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => return,
-                    observation = observations.recv() => match observation {
-                        Ok(uc_infra::network::iroh::NetworkRecoveryObservation::LocalRelayRecovered) => {
-                            let current_generation = generation.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-                            recovery.observe_local_network_recovered(current_generation).await;
-                        }
-                        Ok(uc_infra::network::iroh::NetworkRecoveryObservation::PreviouslyOnlinePeerPathExhausted) => {
-                            recovery.observe_previously_online_peer_path_exhausted(generation.load(Ordering::Relaxed)).await;
-                        }
-                        Ok(uc_infra::network::iroh::NetworkRecoveryObservation::FreshPeerDialSucceeded) => {
-                            recovery.observe_fresh_peer_dial_succeeded(generation.load(Ordering::Relaxed)).await;
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                    }
-                }
-            }
-        })
-        .await;
-}
-
 #[cfg(feature = "lan-compat")]
 fn engine_event_for_mobile_settings_update(
     settings: &crate::MobileSyncSettingsUpdateSummary,
@@ -274,11 +163,7 @@ impl ProductionRuntime {
             .map_err(|error| startup_error("dependency wiring", error))?;
 
         let host_adapters = wired.application.host_adapters();
-        let session = Arc::new(Mutex::new(None));
-        let session_supervisor = Arc::new(SessionSupervisor::new(
-            Arc::clone(&session),
-            wired.application.clone(),
-        ));
+        let session_supervisor = Arc::new(SessionSupervisor::new(wired.application.clone()));
         let task_registry = Arc::new(TaskRegistry::new());
         let profile_runtime: Arc<dyn StopProfileRuntimePort> =
             Arc::new(ProductionProfileRuntimeStopper {
@@ -309,21 +194,19 @@ impl ProductionRuntime {
         let network_recovery = Arc::new(uc_application::facade::NetworkRecoveryFacade::new(
             recovery_port,
         ));
-        let session_factory = Arc::new(SessionFactory {
-            wired: wired.clone(),
+        session_supervisor.configure_factory(
+            wired.clone(),
             #[cfg(feature = "lan-compat")]
-            paths: paths.clone(),
-            app_version: app_version.clone(),
-            events: events.clone(),
-            rendezvous_base_url: rendezvous_base_url.clone(),
+            paths.clone(),
+            app_version.clone(),
+            events.clone(),
+            rendezvous_base_url.clone(),
             relay_fallback_override,
             iroh_bind_port_override,
             #[cfg(feature = "dev-tools")]
-            network_partition_gate: network_partition_gate.clone(),
-            network_recovery: Arc::clone(&network_recovery),
-            recovery_generation: Arc::new(AtomicU64::new(0)),
-        });
-        session_supervisor.configure_factory(Arc::clone(&session_factory));
+            network_partition_gate.clone(),
+            Arc::clone(&network_recovery),
+        );
         wired
             .application
             .start_process_runtime(Arc::clone(&task_registry))
@@ -342,13 +225,6 @@ impl ProductionRuntime {
             session_supervisor: Arc::clone(&session_supervisor),
             system_clipboard: Arc::clone(&host_adapters.system_clipboard),
             change_origin: Arc::clone(&host_adapters.change_origin),
-            active_register: LocalActiveRegisterAdvancer::new(
-                Arc::clone(&host_adapters.active_register),
-                Arc::clone(&host_adapters.device_identity),
-                Arc::clone(&host_adapters.clock),
-                host_adapters.mobile_consumability.clone(),
-            ),
-            host_events: Arc::clone(&host_adapters.host_event_bus),
         };
         if let Some(changes) = clipboard_changes {
             spawn_host_clipboard_change_task(
@@ -385,165 +261,19 @@ impl ProductionRuntime {
         })
     }
 
-    async fn build_session(factory: &SessionFactory) -> Result<ProductionSession, EngineError> {
-        let wired = &factory.wired;
-        #[cfg(feature = "lan-compat")]
-        let paths = &factory.paths;
-        let events = factory.events.clone();
-        let application = wired.application.clone();
-        let lifecycle = build_daemon_lifecycle(
-            &application,
-            &wired.sync_engine,
-            &factory.app_version,
-            #[cfg(feature = "lan-compat")]
-            wired.mobile_sync_ports.clone(),
-            factory.rendezvous_base_url.clone(),
-            factory.relay_fallback_override,
-            factory.iroh_bind_port_override,
-            #[cfg(feature = "dev-tools")]
-            Some(factory.network_partition_gate.clone()),
-            #[cfg(not(feature = "dev-tools"))]
-            None,
-        )
-        .await
-        .map_err(|error| startup_error("p2p session", error))?;
-        let sync_engine = lifecycle.sync_engine_assembly;
-        let network_adapters = lifecycle.application_adapters;
-        let application_runtime = match ApplicationRuntime::start(
-            &application,
-            network_adapters.binding.complete(
-                network_adapters.active_pull_client,
-                Arc::clone(&factory.network_recovery),
-                FsAtomicPublisher::new(),
-                FsInboundFileTarget::new(Arc::clone(&wired.sync_engine.settings)),
-                FsHiddenPathMarker::new(),
-                Arc::new(EngineClipboardInboundEvents {
-                    events: events.clone(),
-                }),
-            ),
-        )
-        .await
-        {
-            Ok(runtime) => Arc::new(runtime),
-            Err(error) => {
-                sync_engine
-                    .shutdown(uc_core::FileTransferCancellationReason::Unknown)
-                    .await;
-                return Err(startup_error("application runtime", error));
-            }
-        };
-        let facade = application_runtime.facade();
-        #[cfg(feature = "lan-compat")]
-        let mobile_sync = build_mobile_sync_facade(
-            &wired.mobile_sync_application,
-            paths,
-            wired.mobile_sync_ports.clone(),
-            application_runtime.inbound_clipboard(),
-            Some(facade.file_transfer_for_lan_compatibility()),
-            None,
-            Some(facade.clipboard_outbound_for_lan_compatibility()),
-            Some(facade.active_clipboard_for_lan_compatibility()),
-        );
-        let tasks = Arc::new(TaskRegistry::new());
-        let mut active_clipboard_changes = wired.shared.active_clipboard_sse_source.subscribe();
-        let active_clipboard_events = events.clone();
-        tasks
-            .spawn("active_clipboard_events", move |cancel| async move {
-                loop {
-                    tokio::select! {
-                        _ = cancel.cancelled() => return,
-                        change = active_clipboard_changes.recv() => match change {
-                            Ok(state) => active_clipboard_events
-                                .send(engine_event_for_active_clipboard(&state)),
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                active_clipboard_events.send(crate::EngineEvent::RefreshRequired {
-                                    reason: crate::RefreshReason::ConsumerLagged,
-                                });
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                        }
-                    }
-                }
-            })
-            .await;
-        spawn_network_recovery_observation_task(
-            sync_engine.subscribe_network_recovery_observations(),
-            Arc::clone(&factory.network_recovery),
-            Arc::clone(&factory.recovery_generation),
-            &tasks,
-        )
-        .await;
-        spawn_peer_presence_event_task(Arc::clone(&facade), &tasks, events.clone()).await;
-        Ok(ProductionSession {
-            facade,
-            application: application_runtime,
-            #[cfg(feature = "lan-compat")]
-            mobile_sync,
-            sync_engine,
-            tasks,
-        })
-    }
-
-    async fn current_session_field<T: ?Sized>(
-        &self,
-        project: impl FnOnce(&ProductionSession) -> Arc<T>,
-    ) -> Result<Arc<T>, EngineError> {
-        let session = self.session_supervisor.session();
-        let result = session
-            .lock()
-            .await
-            .as_ref()
-            .map(project)
-            .ok_or_else(operation_unavailable_error);
-        result
-    }
-
     async fn current_facade(&self) -> Result<Arc<AppFacade>, EngineError> {
-        self.current_session_field(|session| Arc::clone(&session.facade))
-            .await
+        self.session_supervisor.current_facade().await
     }
 
     async fn current_application(&self) -> Result<Arc<ApplicationRuntime>, EngineError> {
-        self.current_session_field(|session| Arc::clone(&session.application))
-            .await
+        self.session_supervisor.current_application().await
     }
 
     #[cfg(feature = "lan-compat")]
     async fn current_mobile_sync(
         &self,
     ) -> Result<Arc<uc_mobile_lan::MobileSyncFacade>, EngineError> {
-        self.current_session_field(|session| Arc::clone(&session.mobile_sync))
-            .await
-    }
-}
-
-struct EngineClipboardInboundEvents {
-    events: EventSender,
-}
-
-impl ClipboardInboundEventPort for EngineClipboardInboundEvents {
-    fn emit(&self, event: ClipboardInboundEvent) {
-        self.events
-            .send(EngineEvent::InboundNotice(InboundNoticeEvent {
-                from_device: event.from_device.as_str().to_owned(),
-                snapshot_hash: event.snapshot_hash,
-                text_preview: event.text_preview,
-                representations: event
-                    .representations
-                    .into_iter()
-                    .map(|representation| InboundRepresentationSummary {
-                        mime_type: representation.mime_type,
-                        size_bytes: representation.size_bytes,
-                    })
-                    .collect(),
-                action: match event.action {
-                    ClipboardInboundEventAction::NewEntry => InboundNoticeActionSummary::NewEntry,
-                    ClipboardInboundEventAction::DuplicateIgnored => {
-                        InboundNoticeActionSummary::DuplicateIgnored
-                    }
-                },
-                at_ms: event.at_ms,
-            }));
+        self.session_supervisor.current_mobile_sync().await
     }
 }
 
@@ -620,26 +350,6 @@ mod tests {
     use crate::operations::settings::storage::{map_storage_error, storage_stats_result};
     use crate::runtime::host_operations::send_report_result;
     use crate::{EntrySummary, OperationResult, QueryHistoryInput, StorageStatsSummary};
-
-    #[test]
-    fn active_clipboard_event_preserves_mobile_sse_identity() {
-        let state = uc_core::clipboard::ActiveClipboardState::new(
-            "hash-1",
-            uc_core::ids::EntryId::from("entry-1"),
-            42,
-            DeviceId::new("device-1"),
-        );
-
-        assert_eq!(
-            engine_event_for_active_clipboard(&state),
-            crate::EngineEvent::ActiveClipboardChanged(crate::ActiveClipboardChanged {
-                snapshot_hash: "hash-1".into(),
-                entry_id: "entry-1".into(),
-                activated_at_ms: 42,
-                activated_by: "device-1".into(),
-            })
-        );
-    }
 
     #[test]
     fn network_recovery_events_expose_only_stable_status() {

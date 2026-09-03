@@ -1,13 +1,13 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 use uc_application::facade::{
-    AppFacade, ClipboardHistoryError, ClipboardLiveIndexInput, ClipboardOutboundInput,
-    ClipboardOutboundOutcome, ResourceFacadeError, MAX_INLINE_OUTBOUND_REPRESENTATION_BYTES,
+    AppFacade, ClipboardHistoryError, ClipboardOutboundOutcome, LocalClipboardIntent,
+    LocalClipboardOutcome, LocalClipboardRequest, ResourceFacadeError,
+    MAX_INLINE_OUTBOUND_REPRESENTATION_BYTES,
 };
 use uc_core::ids::{DeviceId, FormatId, RepresentationId};
 use uc_core::{
@@ -216,45 +216,30 @@ impl ProductionRuntime {
         target_devices: Vec<String>,
     ) -> Result<OperationResult, EngineError> {
         let application = self.current_application().await?;
-        let captured = application
-            .capture_clipboard(snapshot.clone(), ClipboardChangeOrigin::LocalCapture, None)
-            .await
-            .map_err(|error| operation_error_with_code(SEND_FAILED_CODE, "capture send", error))?
-            .ok_or_else(|| {
-                EngineError::new(SEND_SKIPPED_CODE, EngineErrorCategory::Conflict, false)
-            })?;
-        if !captured.deduplicated {
-            if let Err(error) = application
-                .index_clipboard_capture(ClipboardLiveIndexInput {
-                    entry_id: captured.entry_id.clone(),
-                    snapshot: Arc::new(snapshot.clone()),
-                })
-                .await
-            {
-                warn!(error = %error, "failed to index engine send");
-            }
-        }
-        let target_filter = (!target_devices.is_empty()).then(|| {
-            target_devices
-                .into_iter()
-                .map(DeviceId::new)
-                .collect::<Vec<_>>()
-        });
         let outcome = application
-            .dispatch_clipboard_capture_to_targets(
-                ClipboardOutboundInput {
-                    entry_id: captured.entry_id.clone(),
-                    snapshot,
-                    origin: ClipboardChangeOrigin::LocalCapture,
-                    source_started_at: None,
+            .process_local_clipboard(LocalClipboardRequest {
+                snapshot,
+                origin: ClipboardChangeOrigin::LocalCapture,
+                intent: LocalClipboardIntent::ExplicitSend {
+                    targets: target_devices.into_iter().map(DeviceId::new).collect(),
                 },
-                target_filter,
-            )
+                source_started_at: None,
+            })
             .await
             .map_err(|error| {
                 operation_error_with_code(SEND_FAILED_CODE, "send clipboard", error)
             })?;
-        send_report_result(captured.entry_id, outcome)
+        let LocalClipboardOutcome::Completed(completion) = outcome else {
+            return Err(EngineError::new(
+                SEND_SKIPPED_CODE,
+                EngineErrorCategory::Conflict,
+                false,
+            ));
+        };
+        let dispatch = completion.dispatch.ok_or_else(|| {
+            EngineError::new(SEND_SKIPPED_CODE, EngineErrorCategory::Conflict, false)
+        })?;
+        send_report_result(completion.entry_id, dispatch)
     }
 }
 

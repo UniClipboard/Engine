@@ -627,17 +627,18 @@ fn engine_cannot_reconstruct_or_borrow_application_domain_owners() {
 #[test]
 fn engine_session_keeps_only_the_stable_application_handles() {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let runtime =
-        std::fs::read_to_string(workspace_root.join("crates/uc-engine/src/runtime/mod.rs"))
-            .expect("engine runtime source must be readable");
-    let start = runtime
+    let supervisor = std::fs::read_to_string(
+        workspace_root.join("crates/uc-engine/src/runtime/session_supervisor.rs"),
+    )
+    .expect("session supervisor source must be readable");
+    let start = supervisor
         .find("struct ProductionSession {")
         .expect("ProductionSession declaration must exist");
-    let end = runtime[start..]
+    let end = supervisor[start..]
         .find("\n}")
         .map(|offset| start + offset)
         .expect("ProductionSession declaration must end");
-    let fields = &runtime[start..end];
+    let fields = &supervisor[start..end];
 
     for required in ["Arc<AppFacade>", "Arc<ApplicationRuntime>"] {
         assert!(

@@ -34,11 +34,16 @@ use crate::clipboard::inbound::{
     ClipboardInboundEventPort, ClipboardInboundRuntime, ClipboardInboundRuntimeDeps,
     InboundClipboardApplyPort,
 };
+use crate::clipboard::local::{
+    LocalClipboardActivationPort, LocalClipboardProcessor, LocalClipboardProcessorDeps,
+};
 use crate::clipboard::outbound::{ClipboardOutboundDeps, ClipboardOutboundFacade};
 use crate::clipboard::resource::ResourceFacadeDeps;
 use crate::clipboard::sync::apply_inbound::{InboundBlobFetcher, InboundCapture, InboundWrite};
 use crate::clipboard::sync::sync_runtime::{ClipboardSyncRuntime, ClipboardSyncRuntimeDeps};
-use crate::clipboard::write::{ClipboardWriteCoordinator, RestoreBroadcastTrigger};
+use crate::clipboard::write::{
+    ClipboardWriteCoordinator, LocalActiveRegisterAdvancer, RestoreBroadcastTrigger,
+};
 use crate::deps::{ApplicationDeps, CurrentSpaceMemberScopePort, IsSpaceUnlockedPort};
 use crate::facade::clipboard_history::ClipboardHistoryFacadeDeps;
 use crate::facade::clipboard_restore::ClipboardRestoreFacadeDeps;
@@ -47,7 +52,7 @@ use crate::facade::{
     ClipboardSyncFacade, HostEventBus, ResourceFacade,
 };
 use crate::search::live_index::{
-    ClipboardLiveIndexDeps, ClipboardLiveIndexFacade, ClipboardLiveIndexPort, ClipboardLiveIndexer,
+    ClipboardLiveIndexDeps, ClipboardLiveIndexPort, ClipboardLiveIndexer,
 };
 use crate::transfer::file::assembly::FileTransferAssembly;
 use crate::transfer::file::assembly::StoreOnlyPullIntentDeps;
@@ -143,10 +148,9 @@ pub struct ActiveClipboardSession {
 
 /// Clipboard session 对外稳定入口与唯一关闭句柄。
 pub struct ClipboardSession {
-    capture: Arc<ClipboardCaptureFacade>,
-    live_index: Arc<ClipboardLiveIndexFacade>,
     outbound: Arc<ClipboardOutboundFacade>,
     sync: Arc<ClipboardSyncRuntime>,
+    local: Arc<LocalClipboardProcessor>,
     apply_inbound: Arc<dyn InboundClipboardApplyPort>,
 }
 
@@ -320,12 +324,25 @@ impl ClipboardAssembly {
             device_identity: Arc::clone(&self.deps.device.device_identity),
             clock: Arc::clone(&self.deps.system.clock),
         }));
+        let activation: Arc<dyn LocalClipboardActivationPort> =
+            Arc::new(LocalActiveRegisterAdvancer::new(
+                Arc::clone(&self.deps.clipboard.active_register),
+                Arc::clone(&self.deps.device.device_identity),
+                Arc::clone(&self.deps.system.clock),
+                self.deps.clipboard.mobile_consumability.clone(),
+            ));
+        let local = Arc::new(LocalClipboardProcessor::new(LocalClipboardProcessorDeps {
+            capture: Arc::clone(&self.capture_use_case) as Arc<_>,
+            live_index: Arc::clone(&self.live_index),
+            activation,
+            dispatch: Arc::clone(&sync) as Arc<_>,
+            host_events: Arc::clone(&self.host_event_bus),
+        }));
 
         ClipboardSession {
-            capture: self.capture(),
-            live_index: self.live_index(),
             outbound,
             sync,
+            local,
             apply_inbound,
         }
     }
@@ -406,10 +423,6 @@ impl ClipboardAssembly {
 
     pub fn capture(&self) -> Arc<ClipboardCaptureFacade> {
         Arc::clone(&self.capture)
-    }
-
-    pub fn live_index(&self) -> Arc<ClipboardLiveIndexFacade> {
-        Arc::new(ClipboardLiveIndexFacade::new(Arc::clone(&self.live_index)))
     }
 
     pub fn resource(&self) -> Arc<ResourceFacade> {
@@ -529,24 +542,16 @@ impl ActiveClipboardSession {
 }
 
 impl ClipboardSession {
-    pub fn capture(&self) -> Arc<ClipboardCaptureFacade> {
-        Arc::clone(&self.capture)
-    }
-
-    pub fn live_index(&self) -> Arc<ClipboardLiveIndexFacade> {
-        Arc::clone(&self.live_index)
-    }
-
     pub fn outbound(&self) -> Arc<ClipboardOutboundFacade> {
         Arc::clone(&self.outbound)
     }
 
-    pub fn sync(&self) -> Arc<ClipboardSyncRuntime> {
-        Arc::clone(&self.sync)
-    }
-
     pub fn apply_inbound(&self) -> Arc<dyn InboundClipboardApplyPort> {
         Arc::clone(&self.apply_inbound)
+    }
+
+    pub(crate) fn local_processor(&self) -> Arc<LocalClipboardProcessor> {
+        Arc::clone(&self.local)
     }
 
     pub async fn shutdown(self) {

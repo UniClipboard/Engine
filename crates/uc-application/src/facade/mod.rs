@@ -75,6 +75,10 @@ pub use crate::clipboard::inbound::{
     InboundClipboardApplyError, InboundClipboardApplyInput, InboundClipboardApplyOutcome,
     InboundClipboardApplyPort, InboundProvisionalReceive,
 };
+pub use crate::clipboard::local::{
+    HostClipboardDispatch, LocalClipboardCompletion, LocalClipboardIndexStatus,
+    LocalClipboardIntent, LocalClipboardOutcome, LocalClipboardProcessError, LocalClipboardRequest,
+};
 pub use crate::clipboard::outbound::{
     ClipboardOutboundError, ClipboardOutboundFacade, ClipboardOutboundInput,
     ClipboardOutboundOutcome, ClipboardOutboundPort, NotResendableReason, ResendEntryCommand,

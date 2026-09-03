@@ -23,6 +23,9 @@ use crate::clipboard::assembly::{
     ClipboardAssembly, ClipboardInboundAdapters, ClipboardSession, ClipboardSessionDeps,
 };
 use crate::clipboard::inbound::{ClipboardInboundEventPort, InboundClipboardApplyPort};
+use crate::clipboard::local::{
+    LocalClipboardOutcome, LocalClipboardProcessError, LocalClipboardRequest,
+};
 use crate::deps::{ApplicationDeps, CurrentSpaceMemberScopePort};
 use crate::device::query_local_device::QueryLocalDeviceUseCase;
 use crate::facade::app_facade::{AppFacade, AppFacadeParts};
@@ -91,11 +94,7 @@ pub struct ApplicationNetworkAdapters {
 pub struct ApplicationHostAdapters {
     pub system_clipboard: Arc<dyn uc_core::ports::clipboard::SystemClipboardPort>,
     pub change_origin: Arc<dyn uc_core::ports::clipboard::SelfWriteLedgerPort>,
-    pub active_register: Arc<dyn uc_core::ports::clipboard::AdvanceActiveClipboardPort>,
-    pub device_identity: Arc<dyn uc_core::ports::DeviceIdentityPort>,
     pub clock: Arc<dyn uc_core::ports::ClockPort>,
-    pub mobile_consumability: crate::clipboard::write::MobileConsumabilityProbe,
-    pub host_event_bus: Arc<crate::facade::HostEventBus>,
 }
 
 /// Application 构造完成、等待 Iroh 注册领域 endpoint 的一次性绑定。
@@ -265,11 +264,7 @@ impl ApplicationAssembly {
         ApplicationHostAdapters {
             system_clipboard: Arc::clone(&self.deps.clipboard.system_clipboard),
             change_origin: Arc::clone(&self.deps.clipboard.clipboard_change_origin),
-            active_register: Arc::clone(&self.deps.clipboard.active_register),
-            device_identity: Arc::clone(&self.deps.device.device_identity),
             clock: Arc::clone(&self.deps.system.clock),
-            mobile_consumability: self.deps.clipboard.mobile_consumability.clone(),
-            host_event_bus: Arc::clone(&self.deps.host_event_bus),
         }
     }
 
@@ -655,65 +650,21 @@ impl ApplicationRuntime {
         Arc::clone(&self.facade)
     }
 
-    pub async fn capture_clipboard(
+    pub async fn process_local_clipboard(
         &self,
-        snapshot: uc_core::SystemClipboardSnapshot,
-        origin: uc_core::ClipboardChangeOrigin,
-        preset_entry_id: Option<uc_core::ids::EntryId>,
-    ) -> Result<Option<crate::facade::CapturedClipboardEntryView>, ApplicationRuntimeError> {
-        let capture = {
+        request: LocalClipboardRequest,
+    ) -> Result<LocalClipboardOutcome, ApplicationRuntimeError> {
+        let clipboard = {
             let owners = self.owners.lock().await;
-            owners.as_ref().map(|owners| owners.clipboard.capture())
+            owners
+                .as_ref()
+                .map(|owners| owners.clipboard.local_processor())
         };
-        let capture = capture.ok_or(ApplicationRuntimeError::Unavailable)?;
-        capture
-            .capture(snapshot, origin, preset_entry_id)
+        let clipboard = clipboard.ok_or(ApplicationRuntimeError::Unavailable)?;
+        clipboard
+            .process(request)
             .await
-            .map_err(|source| ApplicationRuntimeError::Capture { source })
-    }
-
-    pub async fn index_clipboard_capture(
-        &self,
-        input: crate::search::live_index::ClipboardLiveIndexInput,
-    ) -> Result<crate::search::live_index::ClipboardLiveIndexOutcome, ApplicationRuntimeError> {
-        let live_index = {
-            let owners = self.owners.lock().await;
-            owners.as_ref().map(|owners| owners.clipboard.live_index())
-        };
-        let live_index = live_index.ok_or(ApplicationRuntimeError::Unavailable)?;
-        live_index
-            .index_capture(input)
-            .await
-            .map_err(|source| ApplicationRuntimeError::LiveIndex { source })
-    }
-
-    pub async fn dispatch_clipboard_capture(
-        &self,
-        input: crate::clipboard::outbound::ClipboardOutboundInput,
-    ) -> Result<crate::clipboard::outbound::ClipboardOutboundOutcome, ApplicationRuntimeError> {
-        let sync = {
-            let owners = self.owners.lock().await;
-            owners.as_ref().map(|owners| owners.clipboard.sync())
-        };
-        let sync = sync.ok_or(ApplicationRuntimeError::Unavailable)?;
-        sync.dispatch_local_capture(input)
-            .await
-            .map_err(|source| ApplicationRuntimeError::Dispatch { source })
-    }
-
-    pub async fn dispatch_clipboard_capture_to_targets(
-        &self,
-        input: crate::clipboard::outbound::ClipboardOutboundInput,
-        target_filter: Option<Vec<uc_core::ids::DeviceId>>,
-    ) -> Result<crate::clipboard::outbound::ClipboardOutboundOutcome, ApplicationRuntimeError> {
-        let sync = {
-            let owners = self.owners.lock().await;
-            owners.as_ref().map(|owners| owners.clipboard.sync())
-        };
-        let sync = sync.ok_or(ApplicationRuntimeError::Unavailable)?;
-        sync.dispatch_local_capture_to_targets(input, target_filter)
-            .await
-            .map_err(|source| ApplicationRuntimeError::Dispatch { source })
+            .map_err(|source| ApplicationRuntimeError::LocalClipboard { source })
     }
 
     pub fn inbound_clipboard(&self) -> Arc<dyn InboundClipboardApplyPort> {
@@ -741,20 +692,10 @@ impl ApplicationRuntime {
 pub enum ApplicationRuntimeError {
     #[error("application runtime is unavailable")]
     Unavailable,
-    #[error("clipboard capture failed")]
-    Capture {
+    #[error("local clipboard processing failed")]
+    LocalClipboard {
         #[source]
-        source: crate::facade::ClipboardCaptureFacadeError,
-    },
-    #[error("clipboard live index failed")]
-    LiveIndex {
-        #[source]
-        source: crate::search::live_index::ClipboardLiveIndexError,
-    },
-    #[error("clipboard dispatch failed")]
-    Dispatch {
-        #[source]
-        source: crate::clipboard::outbound::ClipboardOutboundError,
+        source: LocalClipboardProcessError,
     },
 }
 
@@ -772,14 +713,16 @@ mod tests {
 
     #[test]
     fn runtime_error_keeps_typed_source_and_redacts_public_text() {
-        let error = ApplicationRuntimeError::Capture {
-            source: crate::facade::ClipboardCaptureFacadeError::Internal(
-                "/private/clipboard.txt".to_owned(),
-            ),
+        let error = ApplicationRuntimeError::LocalClipboard {
+            source: LocalClipboardProcessError::Capture {
+                source: crate::facade::ClipboardCaptureFacadeError::Internal(
+                    "/private/clipboard.txt".to_owned(),
+                ),
+            },
         };
 
         assert!(error.source().is_some());
-        assert_eq!(error.to_string(), "clipboard capture failed");
+        assert_eq!(error.to_string(), "local clipboard processing failed");
         assert!(!error.to_string().contains("clipboard.txt"));
     }
 

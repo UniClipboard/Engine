@@ -75,18 +75,19 @@ impl LocalActiveRegisterAdvancer {
             .await;
         match self.register.advance(&state, mobile_consumable).await {
             Ok(advanced) => {
-                tracing::debug!(
-                    snapshot_hash = %state.snapshot_hash,
-                    entry_id = %state.entry_id,
-                    advanced,
-                    "active register: local advance"
-                );
+                tracing::debug!(advanced, "active register: local advance");
             }
             Err(e) => {
+                let error_kind = match e {
+                    uc_core::ports::clipboard::ActiveClipboardRegisterError::NotUnlocked => {
+                        "not_unlocked"
+                    }
+                    uc_core::ports::clipboard::ActiveClipboardRegisterError::Storage(_) => {
+                        "storage"
+                    }
+                };
                 warn!(
-                    error = %e,
-                    snapshot_hash = %state.snapshot_hash,
-                    entry_id = %state.entry_id,
+                    error_kind,
                     "active register: local advance failed (best-effort, ignored)"
                 );
             }

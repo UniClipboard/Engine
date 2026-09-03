@@ -69,16 +69,6 @@ impl ClipboardSyncRuntime {
         }
     }
 
-    /// Sends a newly captured local clipboard entry only when automatic sync
-    /// is enabled. A disabled capture creates no delivery attempt, so it can
-    /// never become a later recovery candidate.
-    pub async fn dispatch_local_capture(
-        &self,
-        input: ClipboardOutboundInput,
-    ) -> Result<ClipboardOutboundOutcome, ClipboardOutboundError> {
-        self.dispatch_local_capture_to_targets(input, None).await
-    }
-
     /// Sends a local capture through the complete automatic-delivery
     /// lifecycle while allowing an explicit caller to narrow its targets.
     pub async fn dispatch_local_capture_to_targets(
