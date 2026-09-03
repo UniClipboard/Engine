@@ -21,62 +21,12 @@ pub enum MembershipError {
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum MembershipCandidateRepositoryError {
-    #[error("membership candidate storage is locked")]
-    Locked,
-    #[error("membership candidate storage is corrupt")]
-    Corrupt,
-    #[error("membership candidate repository failed: {0}")]
-    Repository(String),
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum VerifiedPeerPromotionError {
-    #[error("verified peer promotion storage is locked")]
-    Locked,
-    #[error("verified peer promotion storage is corrupt")]
-    Corrupt,
-    #[error("verified peer promotion failed: {0}")]
-    Repository(String),
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum MembershipAnnouncementRepositoryError {
-    #[error("membership announcement storage is locked")]
-    Locked,
-    #[error("membership announcement storage is corrupt")]
-    Corrupt,
-    #[error("membership announcement repository failed: {0}")]
-    Repository(String),
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum MembershipOutboxRepositoryError {
-    #[error("membership outbox storage is locked")]
-    Locked,
-    #[error("membership outbox storage is corrupt")]
-    Corrupt,
-    #[error("membership outbox repository failed: {0}")]
-    Repository(String),
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum MembershipSecurityUpdateError {
     #[error("membership security state is unavailable")]
     Unavailable,
     #[error("membership security update is invalid")]
     Invalid,
     #[error("membership security update failed: {0}")]
-    Repository(String),
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum MembershipAppliedSecurityUpdateRepositoryError {
-    #[error("membership applied update storage is locked")]
-    Locked,
-    #[error("membership applied update storage is corrupt")]
-    Corrupt,
-    #[error("membership applied update repository failed: {0}")]
     Repository(String),
 }
 

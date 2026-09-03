@@ -15,10 +15,6 @@ mod entry_receive_attempt_repo;
 mod entry_replace_repo;
 mod file_transfer_repo;
 mod inbound_receive_commit_repo;
-mod membership_announcement_repo;
-mod membership_applied_security_update_repo;
-mod membership_candidate_repo;
-mod membership_outbox_repo;
 mod migration_repo;
 #[cfg(feature = "lan-compat")]
 mod mobile_device_repo;
@@ -46,10 +42,6 @@ pub use entry_receive_attempt_repo::*;
 pub use entry_replace_repo::*;
 pub use file_transfer_repo::*;
 pub use inbound_receive_commit_repo::*;
-pub use membership_announcement_repo::*;
-pub use membership_applied_security_update_repo::*;
-pub use membership_candidate_repo::*;
-pub use membership_outbox_repo::*;
 pub use migration_repo::*;
 #[cfg(feature = "lan-compat")]
 pub use mobile_device_repo::*;

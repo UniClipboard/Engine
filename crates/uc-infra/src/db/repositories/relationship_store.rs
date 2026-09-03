@@ -7,11 +7,7 @@ use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uc_core::ids::DeviceId;
-use uc_core::membership::{
-    CandidateStatus, DeviceAnnouncement, PendingMembershipBatch, RelationshipStateResetError,
-    RelationshipStateResetPort, RelayedSecurityUpdate, SpaceMembershipCandidate,
-    VerifiedPeerPromotionError, VerifiedPeerPromotionPort,
-};
+use uc_core::membership::{RelationshipStateResetError, RelationshipStateResetPort};
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::DeriveSpaceSubkeyPort;
 use uc_core::ports::PeerAddressRecord;
@@ -45,10 +41,6 @@ enum RelationshipKind {
     Member,
     TrustedPeer,
     PeerAddress,
-    Candidate,
-    MembershipAnnouncement,
-    MembershipOutbox,
-    MembershipAppliedSecurityUpdate,
 }
 
 impl RelationshipKind {
@@ -57,10 +49,6 @@ impl RelationshipKind {
             Self::Member => "member",
             Self::TrustedPeer => "trusted_peer",
             Self::PeerAddress => "peer_address",
-            Self::Candidate => "candidate",
-            Self::MembershipAnnouncement => "membership_announcement",
-            Self::MembershipOutbox => "membership_outbox",
-            Self::MembershipAppliedSecurityUpdate => "membership_applied_security_update",
         }
     }
 }
@@ -153,31 +141,6 @@ struct PeerAddressPayloadV1 {
     device_id: String,
     addr_blob: Vec<u8>,
     observed_at: i64,
-}
-
-#[derive(Serialize, Deserialize)]
-struct CandidatePayloadV1 {
-    version: u8,
-    candidate: SpaceMembershipCandidate,
-}
-
-#[derive(Serialize, Deserialize)]
-struct MembershipAnnouncementPayloadV1 {
-    version: u8,
-    announcement: DeviceAnnouncement,
-}
-
-#[derive(Serialize, Deserialize)]
-struct MembershipOutboxPayloadV1 {
-    version: u8,
-    pending: PendingMembershipBatch,
-}
-
-#[derive(Serialize, Deserialize)]
-struct MembershipAppliedSecurityUpdatePayloadV1 {
-    version: u8,
-    space_id: String,
-    update: RelayedSecurityUpdate,
 }
 
 #[derive(QueryableByName)]
@@ -673,302 +636,6 @@ where
         self.remove_payload(RelationshipKind::PeerAddress, device_id.as_str())
             .await
     }
-
-    pub async fn get_candidate(
-        &self,
-        space_id: &uc_core::ids::SpaceId,
-        device_id: &DeviceId,
-    ) -> Result<Option<SpaceMembershipCandidate>, RelationshipStoreError> {
-        let identity = candidate_identity(space_id, device_id);
-        self.get_payload(RelationshipKind::Candidate, &identity)
-            .await?
-            .map(|payload| decode_candidate(&payload))
-            .transpose()
-    }
-
-    pub async fn list_candidates(
-        &self,
-        space_id: &uc_core::ids::SpaceId,
-    ) -> Result<Vec<SpaceMembershipCandidate>, RelationshipStoreError> {
-        self.list_payloads(RelationshipKind::Candidate)
-            .await?
-            .into_iter()
-            .map(|payload| decode_candidate(&payload))
-            .filter_map(|candidate| match candidate {
-                Ok(candidate) if candidate.space_id() == space_id => Some(Ok(candidate)),
-                Ok(_) => None,
-                Err(error) => Some(Err(error)),
-            })
-            .collect()
-    }
-
-    pub async fn save_candidate(
-        &self,
-        candidate: &SpaceMembershipCandidate,
-    ) -> Result<(), RelationshipStoreError> {
-        let identity = candidate_identity(candidate.space_id(), candidate.device_id());
-        let payload = encode_candidate(candidate)?;
-        self.save_payload(RelationshipKind::Candidate, &identity, &payload)
-            .await
-    }
-
-    pub async fn promote_verified_peer(
-        &self,
-        member: &SpaceMember,
-        trusted_peer: &TrustedPeer,
-        peer_address: &PeerAddressRecord,
-        ready_candidate: &SpaceMembershipCandidate,
-    ) -> Result<(), RelationshipStoreError> {
-        if member.device_id != trusted_peer.peer_device_id
-            || member.device_id != peer_address.device_id
-            || &member.device_id != ready_candidate.device_id()
-            || member.identity_fingerprint != trusted_peer.peer_fingerprint
-            || ready_candidate.status() != CandidateStatus::Ready
-        {
-            return Err(RelationshipStoreError::Storage(
-                "verified peer relationship set is inconsistent".to_string(),
-            ));
-        }
-
-        let cipher = self.ready_cipher().await?;
-        let candidate_identity =
-            candidate_identity(ready_candidate.space_id(), ready_candidate.device_id());
-        let payloads = [
-            (
-                RelationshipKind::PeerAddress,
-                member.device_id.as_str().to_owned(),
-                encode_peer_address(peer_address)?,
-            ),
-            (
-                RelationshipKind::TrustedPeer,
-                member.device_id.as_str().to_owned(),
-                encode_trusted_peer(trusted_peer)?,
-            ),
-            (
-                RelationshipKind::Member,
-                member.device_id.as_str().to_owned(),
-                encode_member(member)?,
-            ),
-            (
-                RelationshipKind::Candidate,
-                candidate_identity,
-                encode_candidate(ready_candidate)?,
-            ),
-        ];
-        let sealed = payloads
-            .into_iter()
-            .map(|(kind, identity, plaintext)| {
-                let lookup_key = cipher.lookup_key(kind, &identity);
-                let payload_ciphertext = cipher.seal(kind, &lookup_key, &plaintext)?;
-                Ok((
-                    kind,
-                    plaintext,
-                    NewEncryptedRelationshipRow {
-                        kind: kind.as_str().to_owned(),
-                        lookup_key,
-                        payload_ciphertext,
-                    },
-                ))
-            })
-            .collect::<Result<Vec<_>, RelationshipStoreError>>()?;
-
-        self.executor
-            .run(|conn| {
-                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                    for (_, _, row) in &sealed {
-                        diesel::insert_into(encrypted_relationship::table)
-                            .values(row)
-                            .on_conflict((
-                                encrypted_relationship::kind,
-                                encrypted_relationship::lookup_key,
-                            ))
-                            .do_update()
-                            .set(
-                                encrypted_relationship::payload_ciphertext
-                                    .eq(&row.payload_ciphertext),
-                            )
-                            .execute(conn)?;
-                    }
-                    for (kind, plaintext, row) in &sealed {
-                        let stored = encrypted_relationship::table
-                            .filter(encrypted_relationship::kind.eq(&row.kind))
-                            .filter(encrypted_relationship::lookup_key.eq(&row.lookup_key))
-                            .select(encrypted_relationship::payload_ciphertext)
-                            .first::<Vec<u8>>(conn)?;
-                        let verified = cipher
-                            .open(*kind, &row.lookup_key, &stored)
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                        if &verified != plaintext {
-                            return Err(anyhow::anyhow!(
-                                "verified peer relationship write was not observable"
-                            ));
-                        }
-                    }
-                    Ok(())
-                })
-            })
-            .map_err(|error| RelationshipStoreError::Storage(error.to_string()))
-    }
-
-    pub async fn remove_candidate(
-        &self,
-        space_id: &uc_core::ids::SpaceId,
-        device_id: &DeviceId,
-    ) -> Result<bool, RelationshipStoreError> {
-        let identity = candidate_identity(space_id, device_id);
-        self.remove_payload(RelationshipKind::Candidate, &identity)
-            .await
-    }
-
-    pub async fn get_membership_announcement(
-        &self,
-        space_id: &uc_core::ids::SpaceId,
-        device_id: &DeviceId,
-    ) -> Result<Option<DeviceAnnouncement>, RelationshipStoreError> {
-        let identity = candidate_identity(space_id, device_id);
-        self.get_payload(RelationshipKind::MembershipAnnouncement, &identity)
-            .await?
-            .map(|payload| decode_membership_announcement(&payload))
-            .transpose()
-    }
-
-    pub async fn list_membership_announcements(
-        &self,
-        space_id: &uc_core::ids::SpaceId,
-    ) -> Result<Vec<DeviceAnnouncement>, RelationshipStoreError> {
-        self.list_payloads(RelationshipKind::MembershipAnnouncement)
-            .await?
-            .into_iter()
-            .map(|payload| decode_membership_announcement(&payload))
-            .filter_map(|announcement| match announcement {
-                Ok(announcement) if &announcement.space_id == space_id => Some(Ok(announcement)),
-                Ok(_) => None,
-                Err(error) => Some(Err(error)),
-            })
-            .collect()
-    }
-
-    pub async fn save_membership_announcement(
-        &self,
-        announcement: &DeviceAnnouncement,
-    ) -> Result<(), RelationshipStoreError> {
-        let identity = candidate_identity(&announcement.space_id, &announcement.device_id);
-        let payload = encode_membership_announcement(announcement)?;
-        self.save_payload(
-            RelationshipKind::MembershipAnnouncement,
-            &identity,
-            &payload,
-        )
-        .await
-    }
-
-    pub async fn remove_membership_announcement(
-        &self,
-        space_id: &uc_core::ids::SpaceId,
-        device_id: &DeviceId,
-    ) -> Result<bool, RelationshipStoreError> {
-        let identity = candidate_identity(space_id, device_id);
-        self.remove_payload(RelationshipKind::MembershipAnnouncement, &identity)
-            .await
-    }
-
-    pub async fn get_membership_outbox(
-        &self,
-        space_id: &uc_core::ids::SpaceId,
-        recipient_device_id: &DeviceId,
-        batch_id: &[u8; 32],
-    ) -> Result<Option<PendingMembershipBatch>, RelationshipStoreError> {
-        let identity = membership_outbox_identity(space_id, recipient_device_id, batch_id);
-        self.get_payload(RelationshipKind::MembershipOutbox, &identity)
-            .await?
-            .map(|payload| decode_membership_outbox(&payload))
-            .transpose()
-    }
-
-    pub async fn list_membership_outbox(
-        &self,
-        space_id: &uc_core::ids::SpaceId,
-    ) -> Result<Vec<PendingMembershipBatch>, RelationshipStoreError> {
-        self.list_payloads(RelationshipKind::MembershipOutbox)
-            .await?
-            .into_iter()
-            .map(|payload| decode_membership_outbox(&payload))
-            .filter_map(|pending| match pending {
-                Ok(pending) if &pending.batch().space_id == space_id => Some(Ok(pending)),
-                Ok(_) => None,
-                Err(error) => Some(Err(error)),
-            })
-            .collect()
-    }
-
-    pub async fn save_membership_outbox(
-        &self,
-        pending: &PendingMembershipBatch,
-    ) -> Result<(), RelationshipStoreError> {
-        let identity = membership_outbox_identity(
-            &pending.batch().space_id,
-            pending.recipient_device_id(),
-            &pending.batch().batch_id,
-        );
-        let payload = encode_membership_outbox(pending)?;
-        self.save_payload(RelationshipKind::MembershipOutbox, &identity, &payload)
-            .await
-    }
-
-    pub async fn remove_membership_outbox(
-        &self,
-        space_id: &uc_core::ids::SpaceId,
-        recipient_device_id: &DeviceId,
-        batch_id: &[u8; 32],
-    ) -> Result<bool, RelationshipStoreError> {
-        let identity = membership_outbox_identity(space_id, recipient_device_id, batch_id);
-        self.remove_payload(RelationshipKind::MembershipOutbox, &identity)
-            .await
-    }
-
-    pub async fn get_membership_applied_security_update(
-        &self,
-        space_id: &uc_core::ids::SpaceId,
-        next_epoch: u64,
-    ) -> Result<Option<RelayedSecurityUpdate>, RelationshipStoreError> {
-        let identity = membership_applied_security_update_identity(space_id, next_epoch);
-        self.get_payload(RelationshipKind::MembershipAppliedSecurityUpdate, &identity)
-            .await?
-            .map(|payload| decode_membership_applied_security_update(&payload))
-            .transpose()
-            .map(|decoded| decoded.map(|decoded| decoded.update))
-    }
-
-    pub async fn list_membership_applied_security_updates(
-        &self,
-        space_id: &uc_core::ids::SpaceId,
-    ) -> Result<Vec<RelayedSecurityUpdate>, RelationshipStoreError> {
-        self.list_payloads(RelationshipKind::MembershipAppliedSecurityUpdate)
-            .await?
-            .into_iter()
-            .map(|payload| decode_membership_applied_security_update(&payload))
-            .filter_map(|update| match update {
-                Ok(update) if &update.space_id == space_id.as_ref() => Some(Ok(update.update)),
-                Ok(_) => None,
-                Err(error) => Some(Err(error)),
-            })
-            .collect()
-    }
-
-    pub async fn save_membership_applied_security_update(
-        &self,
-        space_id: &uc_core::ids::SpaceId,
-        update: &RelayedSecurityUpdate,
-    ) -> Result<(), RelationshipStoreError> {
-        let identity = membership_applied_security_update_identity(space_id, update.next_epoch);
-        let payload = encode_membership_applied_security_update(space_id, update)?;
-        self.save_payload(
-            RelationshipKind::MembershipAppliedSecurityUpdate,
-            &identity,
-            &payload,
-        )
-        .await
-    }
 }
 
 #[async_trait]
@@ -986,75 +653,6 @@ where
             })
             .map_err(|error| RelationshipStateResetError::Repository(error.to_string()))
     }
-}
-
-#[async_trait]
-impl<E> VerifiedPeerPromotionPort for EncryptedRelationshipStore<E>
-where
-    E: DbExecutor,
-{
-    async fn promote_verified_peer(
-        &self,
-        member: &SpaceMember,
-        trusted_peer: &TrustedPeer,
-        peer_address: &PeerAddressRecord,
-        ready_candidate: &SpaceMembershipCandidate,
-    ) -> Result<(), VerifiedPeerPromotionError> {
-        EncryptedRelationshipStore::promote_verified_peer(
-            self,
-            member,
-            trusted_peer,
-            peer_address,
-            ready_candidate,
-        )
-        .await
-        .map_err(|error| match error {
-            RelationshipStoreError::Locked => VerifiedPeerPromotionError::Locked,
-            RelationshipStoreError::InvalidCiphertext => VerifiedPeerPromotionError::Corrupt,
-            RelationshipStoreError::Storage(message) => {
-                VerifiedPeerPromotionError::Repository(message)
-            }
-        })
-    }
-}
-
-fn candidate_identity(space_id: &uc_core::ids::SpaceId, device_id: &DeviceId) -> String {
-    format!(
-        "{}:{}{}",
-        space_id.as_ref().len(),
-        space_id.as_ref(),
-        device_id.as_str()
-    )
-}
-
-fn membership_outbox_identity(
-    space_id: &uc_core::ids::SpaceId,
-    recipient_device_id: &DeviceId,
-    batch_id: &[u8; 32],
-) -> String {
-    let batch_id = batch_id
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!(
-        "{}:{}:{}:{}",
-        space_id.as_ref().len(),
-        space_id.as_ref(),
-        recipient_device_id.as_str(),
-        batch_id
-    )
-}
-
-fn membership_applied_security_update_identity(
-    space_id: &uc_core::ids::SpaceId,
-    next_epoch: u64,
-) -> String {
-    format!(
-        "{}:{}:{}",
-        space_id.as_ref().len(),
-        space_id.as_ref(),
-        next_epoch
-    )
 }
 
 fn encode_member(member: &SpaceMember) -> Result<Vec<u8>, RelationshipStoreError> {
@@ -1116,90 +714,6 @@ fn decode_peer_address(payload: &[u8]) -> Result<PeerAddressRecord, Relationship
         addr_blob: decoded.addr_blob,
         observed_at,
     })
-}
-
-fn encode_candidate(
-    candidate: &SpaceMembershipCandidate,
-) -> Result<Vec<u8>, RelationshipStoreError> {
-    serde_json::to_vec(&CandidatePayloadV1 {
-        version: 1,
-        candidate: candidate.clone(),
-    })
-    .map_err(|error| RelationshipStoreError::Storage(error.to_string()))
-}
-
-fn decode_candidate(payload: &[u8]) -> Result<SpaceMembershipCandidate, RelationshipStoreError> {
-    let decoded: CandidatePayloadV1 =
-        serde_json::from_slice(payload).map_err(|_| RelationshipStoreError::InvalidCiphertext)?;
-    if decoded.version != 1 {
-        return Err(RelationshipStoreError::InvalidCiphertext);
-    }
-    Ok(decoded.candidate)
-}
-
-fn encode_membership_announcement(
-    announcement: &DeviceAnnouncement,
-) -> Result<Vec<u8>, RelationshipStoreError> {
-    serde_json::to_vec(&MembershipAnnouncementPayloadV1 {
-        version: 1,
-        announcement: announcement.clone(),
-    })
-    .map_err(|error| RelationshipStoreError::Storage(error.to_string()))
-}
-
-fn decode_membership_announcement(
-    payload: &[u8],
-) -> Result<DeviceAnnouncement, RelationshipStoreError> {
-    let decoded: MembershipAnnouncementPayloadV1 =
-        serde_json::from_slice(payload).map_err(|_| RelationshipStoreError::InvalidCiphertext)?;
-    if decoded.version != 1 {
-        return Err(RelationshipStoreError::InvalidCiphertext);
-    }
-    Ok(decoded.announcement)
-}
-
-fn encode_membership_outbox(
-    pending: &PendingMembershipBatch,
-) -> Result<Vec<u8>, RelationshipStoreError> {
-    serde_json::to_vec(&MembershipOutboxPayloadV1 {
-        version: 1,
-        pending: pending.clone(),
-    })
-    .map_err(|error| RelationshipStoreError::Storage(error.to_string()))
-}
-
-fn decode_membership_outbox(
-    payload: &[u8],
-) -> Result<PendingMembershipBatch, RelationshipStoreError> {
-    let decoded: MembershipOutboxPayloadV1 =
-        serde_json::from_slice(payload).map_err(|_| RelationshipStoreError::InvalidCiphertext)?;
-    if decoded.version != 1 {
-        return Err(RelationshipStoreError::InvalidCiphertext);
-    }
-    Ok(decoded.pending)
-}
-
-fn encode_membership_applied_security_update(
-    space_id: &uc_core::ids::SpaceId,
-    update: &RelayedSecurityUpdate,
-) -> Result<Vec<u8>, RelationshipStoreError> {
-    serde_json::to_vec(&MembershipAppliedSecurityUpdatePayloadV1 {
-        version: 1,
-        space_id: space_id.as_ref().to_owned(),
-        update: update.clone(),
-    })
-    .map_err(|error| RelationshipStoreError::Storage(error.to_string()))
-}
-
-fn decode_membership_applied_security_update(
-    payload: &[u8],
-) -> Result<MembershipAppliedSecurityUpdatePayloadV1, RelationshipStoreError> {
-    let decoded: MembershipAppliedSecurityUpdatePayloadV1 =
-        serde_json::from_slice(payload).map_err(|_| RelationshipStoreError::InvalidCiphertext)?;
-    if decoded.version != 1 {
-        return Err(RelationshipStoreError::InvalidCiphertext);
-    }
-    Ok(decoded)
 }
 
 fn legacy_member_to_domain(row: LegacyMemberRow) -> Result<SpaceMember, RelationshipStoreError> {
@@ -1297,13 +811,7 @@ mod tests {
     use diesel::prelude::*;
     use tempfile::{tempdir, TempDir};
     use uc_core::ids::ProfileId;
-    use uc_core::membership::{
-        CandidateStatus, DeviceAnnouncement, MembershipAnnouncementRepositoryPort,
-        MembershipAppliedSecurityUpdateRepositoryPort, MembershipCandidateRepositoryPort,
-        MembershipEventBatch, MembershipGossipEvent, MembershipOutboxRepositoryPort,
-        PendingMembershipBatch, RelationshipStateResetPort, RelayedSecurityUpdate,
-        SpaceMembershipCandidate, SponsorCandidateSeed,
-    };
+    use uc_core::membership::RelationshipStateResetPort;
     use uc_core::ports::security::current_profile::{CurrentProfileError, CurrentProfilePort};
     use uc_core::ports::space::{DeriveSpaceSubkeyPort, SpaceAccessError};
     use uc_core::ports::{PeerAddressRecord, PeerAddressRepositoryPort};
@@ -1318,10 +826,8 @@ mod tests {
     use crate::db::ports::DbExecutor;
     use crate::db::repositories::{
         DieselPeerAddressRepository, DieselSpaceMemberRepository, DieselTrustedPeerRepository,
-        EncryptedMembershipAnnouncementRepository,
-        EncryptedMembershipAppliedSecurityUpdateRepository, EncryptedMembershipCandidateRepository,
-        EncryptedMembershipOutboxRepository,
     };
+    use crate::db::{models::NewEncryptedRelationshipRow, schema::encrypted_relationship};
 
     use super::EncryptedRelationshipStore;
 
@@ -1501,7 +1007,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn encrypted_repositories_roundtrip_all_relationship_types() {
+    async fn encrypted_repositories_roundtrip_current_relationship_types() {
         let (store, _executor, _tempdir) = store(Arc::new(FixedSubkey));
         let member_repo = DieselSpaceMemberRepository::new(store.clone());
         let trusted_repo = DieselTrustedPeerRepository::new(store.clone());
@@ -1544,114 +1050,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn applied_security_updates_roundtrip_encrypted_and_scoped_per_space() {
-        let (store, _executor, _tempdir) = store(Arc::new(FixedSubkey));
-        let repo = EncryptedMembershipAppliedSecurityUpdateRepository::new(store.clone());
-        let space_a = uc_core::ids::SpaceId::from("space-a");
-        let space_b = uc_core::ids::SpaceId::from("space-b");
-        let update = RelayedSecurityUpdate {
-            previous_epoch: 4,
-            next_epoch: 5,
-            payload: b"epoch-4-to-5".to_vec(),
-            digest: [7; 32],
-        };
-
-        repo.save(&space_a, &update).await.unwrap();
-        repo.save(&space_a, &update).await.unwrap();
-
-        let listed = repo.list(&space_a).await.unwrap();
-        assert_eq!(listed, vec![update.clone()]);
-        assert!(repo.list(&space_b).await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn verified_peer_promotion_rolls_back_every_relationship_when_one_write_fails() {
+    async fn relationship_reset_removes_current_and_opaque_retired_rows() {
         let (store, executor, _tempdir) = store(Arc::new(FixedSubkey));
-        let member = SpaceMember {
-            device_id: DeviceId::new("promoted-peer"),
-            device_name: "promoted peer".to_string(),
-            identity_fingerprint: fingerprint("PROMOTEDPEERFP01"),
-            joined_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-            sync_preferences: MemberSyncPreferences::default(),
-        };
-        let peer = TrustedPeer {
-            local_device_id: DeviceId::new("local-peer"),
-            peer_device_id: member.device_id,
-            peer_fingerprint: member.identity_fingerprint.clone(),
-            trusted_at: member.joined_at,
-        };
-        let address = PeerAddressRecord {
-            device_id: member.device_id,
-            addr_blob: b"promoted-address".to_vec(),
-            observed_at: member.joined_at,
-        };
-        let candidate = SpaceMembershipCandidate::from_sponsor_seed(
-            SponsorCandidateSeed {
-                space_id: uc_core::ids::SpaceId::from("promotion-space"),
-                device_id: member.device_id,
-                device_name_hint: member.device_name.clone(),
-                identity_fingerprint_hint: member.identity_fingerprint.clone(),
-                transport_address_blob: address.addr_blob.clone(),
-                address_observed_at_ms: member.joined_at.timestamp_millis(),
-                source_device_id: DeviceId::new("sponsor-peer"),
-                security_updates: Vec::new(),
-                expires_at_ms: member.joined_at.timestamp_millis() + 60_000,
-            },
-            member.joined_at.timestamp_millis(),
-        )
-        .unwrap();
-        store.save_candidate(&candidate).await.unwrap();
-        let mut ready_candidate = candidate.clone();
-        ready_candidate
-            .apply(
-                uc_core::membership::CandidateEvent::Admitted,
-                member.joined_at.timestamp_millis(),
-            )
-            .unwrap();
-        executor
-            .run(|conn| {
-                diesel::sql_query(
-                    "CREATE TRIGGER fail_verified_member_promotion \
-                     BEFORE INSERT ON encrypted_relationship \
-                     WHEN NEW.kind = 'member' \
-                     BEGIN SELECT RAISE(FAIL, 'forced promotion failure'); END",
-                )
-                .execute(conn)?;
-                Ok(())
-            })
-            .unwrap();
-
-        let result = store
-            .promote_verified_peer(&member, &peer, &address, &ready_candidate)
-            .await;
-
-        assert!(result.is_err());
-        assert!(store.get_member(&member.device_id).await.unwrap().is_none());
-        assert!(store
-            .get_trusted_peer(&member.device_id)
-            .await
-            .unwrap()
-            .is_none());
-        assert!(store
-            .get_peer_address(&member.device_id)
-            .await
-            .unwrap()
-            .is_none());
-        let stored_candidate = store
-            .get_candidate(candidate.space_id(), candidate.device_id())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_ne!(stored_candidate.status(), CandidateStatus::Ready);
-    }
-
-    #[tokio::test]
-    async fn relationship_reset_removes_members_trust_addresses_and_candidates() {
-        let (store, _executor, _tempdir) = store(Arc::new(FixedSubkey));
         let member_repo = DieselSpaceMemberRepository::new(store.clone());
         let trusted_repo = DieselTrustedPeerRepository::new(store.clone());
         let address_repo = DieselPeerAddressRepository::new(store.clone());
-        let candidate_repo = EncryptedMembershipCandidateRepository::new(store.clone());
         let member = SpaceMember {
             device_id: DeviceId::new("old-member"),
             device_name: "old member".to_string(),
@@ -1670,216 +1073,35 @@ mod tests {
             addr_blob: b"old-address".to_vec(),
             observed_at: Utc.timestamp_opt(1_700_000_002, 0).unwrap(),
         };
-        let candidate = SpaceMembershipCandidate::from_sponsor_seed(
-            SponsorCandidateSeed {
-                space_id: uc_core::ids::SpaceId::from("old-space"),
-                device_id: DeviceId::new("old-candidate"),
-                device_name_hint: "old candidate".to_string(),
-                identity_fingerprint_hint: fingerprint("OLDCANDIDATEFP01"),
-                transport_address_blob: b"candidate-address".to_vec(),
-                address_observed_at_ms: 1_000,
-                source_device_id: DeviceId::new("old-sponsor"),
-                security_updates: Vec::new(),
-                expires_at_ms: 50_000,
-            },
-            2_000,
-        )
-        .unwrap();
-
         member_repo.save(&member).await.unwrap();
         trusted_repo.save(&peer).await.unwrap();
         address_repo.upsert(&address).await.unwrap();
-        candidate_repo.save(&candidate).await.unwrap();
+        executor
+            .run(|conn| {
+                diesel::insert_into(encrypted_relationship::table)
+                    .values(NewEncryptedRelationshipRow {
+                        kind: "candidate".to_owned(),
+                        lookup_key: vec![0x45; 32],
+                        payload_ciphertext: vec![0x91; 64],
+                    })
+                    .execute(conn)?;
+                Ok(())
+            })
+            .unwrap();
 
         store.clear_all_relationships().await.unwrap();
 
         assert!(member_repo.list().await.unwrap().is_empty());
         assert!(trusted_repo.list().await.unwrap().is_empty());
         assert!(address_repo.list().await.unwrap().is_empty());
-        assert!(candidate_repo
-            .list(&uc_core::ids::SpaceId::from("old-space"))
-            .await
-            .unwrap()
-            .is_empty());
-    }
-
-    #[tokio::test]
-    async fn encrypted_candidate_survives_repository_restart_without_plaintext() {
-        let (store, executor, tempdir) = store(Arc::new(FixedSubkey));
-        let repo = EncryptedMembershipCandidateRepository::new(store);
-        let candidate = SpaceMembershipCandidate::from_sponsor_seed(
-            SponsorCandidateSeed {
-                space_id: uc_core::ids::SpaceId::from("candidate-space"),
-                device_id: DeviceId::new("candidate-device"),
-                device_name_hint: "candidate-name-plaintext-probe-2c81".to_string(),
-                identity_fingerprint_hint: fingerprint("CANDIDATEFP00001"),
-                transport_address_blob: b"candidate-address-plaintext-probe-6a24".to_vec(),
-                address_observed_at_ms: 1_000,
-                source_device_id: DeviceId::new("candidate-sponsor"),
-                security_updates: vec![RelayedSecurityUpdate {
-                    previous_epoch: 4,
-                    next_epoch: 5,
-                    payload: b"candidate-update-plaintext-probe-9e13".to_vec(),
-                    digest: [9; 32],
-                }],
-                expires_at_ms: 50_000,
-            },
-            2_000,
-        )
-        .unwrap();
-        repo.save(&candidate).await.unwrap();
-        drop(repo);
-
-        let reopened_store = Arc::new(EncryptedRelationshipStore::new(
-            executor,
-            Arc::new(FixedSubkey),
-            Arc::new(TestProfile),
-        ));
-        let reopened = EncryptedMembershipCandidateRepository::new(reopened_store);
-        let loaded = reopened
-            .get(candidate.space_id(), candidate.device_id())
-            .await
-            .unwrap()
+        let remaining: i64 = executor
+            .run(|conn| {
+                encrypted_relationship::table
+                    .count()
+                    .get_result(conn)
+                    .map_err(Into::into)
+            })
             .unwrap();
-        assert_eq!(loaded, candidate);
-        assert_eq!(loaded.status(), CandidateStatus::Pending);
-
-        for entry in std::fs::read_dir(tempdir.path()).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_file() {
-                let bytes = std::fs::read(&path).unwrap();
-                for marker in [
-                    b"candidate-name-plaintext-probe-2c81".as_slice(),
-                    b"candidate-address-plaintext-probe-6a24".as_slice(),
-                    b"candidate-update-plaintext-probe-9e13".as_slice(),
-                ] {
-                    assert!(
-                        !bytes.windows(marker.len()).any(|window| window == marker),
-                        "candidate plaintext leaked into {}",
-                        path.display()
-                    );
-                }
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn encrypted_membership_outbox_survives_restart_without_plaintext() {
-        let (store, executor, tempdir) = store(Arc::new(FixedSubkey));
-        let repo = EncryptedMembershipOutboxRepository::new(store);
-        let pending = PendingMembershipBatch::new(
-            DeviceId::new("outbox-recipient"),
-            MembershipEventBatch {
-                space_id: uc_core::ids::SpaceId::from("outbox-space"),
-                batch_id: [7; 32],
-                events: vec![MembershipGossipEvent::SponsorSeed(SponsorCandidateSeed {
-                    space_id: uc_core::ids::SpaceId::from("outbox-space"),
-                    device_id: DeviceId::new("outbox-device"),
-                    device_name_hint: "outbox-name-plaintext-probe-81f3".to_string(),
-                    identity_fingerprint_hint: fingerprint("OUTBOXMEMBERFP01"),
-                    transport_address_blob: b"outbox-address-plaintext-probe-43ac".to_vec(),
-                    address_observed_at_ms: 1_000,
-                    source_device_id: DeviceId::new("outbox-sponsor"),
-                    security_updates: vec![RelayedSecurityUpdate {
-                        previous_epoch: 4,
-                        next_epoch: 5,
-                        payload: b"outbox-update-plaintext-probe-620d".to_vec(),
-                        digest: [6; 32],
-                    }],
-                    expires_at_ms: 50_000,
-                })],
-            },
-            2_000,
-        )
-        .unwrap();
-        repo.save(&pending).await.unwrap();
-        drop(repo);
-
-        let reopened_store = Arc::new(EncryptedRelationshipStore::new(
-            executor,
-            Arc::new(FixedSubkey),
-            Arc::new(TestProfile),
-        ));
-        let reopened = EncryptedMembershipOutboxRepository::new(reopened_store);
-        let loaded = reopened
-            .get(
-                &pending.batch().space_id,
-                pending.recipient_device_id(),
-                &pending.batch().batch_id,
-            )
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(loaded, pending);
-
-        for entry in std::fs::read_dir(tempdir.path()).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_file() {
-                let bytes = std::fs::read(&path).unwrap();
-                for marker in [
-                    b"outbox-name-plaintext-probe-81f3".as_slice(),
-                    b"outbox-address-plaintext-probe-43ac".as_slice(),
-                    b"outbox-update-plaintext-probe-620d".as_slice(),
-                ] {
-                    assert!(
-                        !bytes.windows(marker.len()).any(|window| window == marker),
-                        "membership outbox plaintext leaked into {}",
-                        path.display()
-                    );
-                }
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn encrypted_membership_announcement_survives_restart_without_plaintext() {
-        let (store, executor, tempdir) = store(Arc::new(FixedSubkey));
-        let repo = EncryptedMembershipAnnouncementRepository::new(store);
-        let announcement = DeviceAnnouncement {
-            space_id: uc_core::ids::SpaceId::from("announcement-space"),
-            device_id: DeviceId::new("announcement-device"),
-            device_name: "announcement-name-plaintext-probe-5b21".to_owned(),
-            identity_fingerprint: fingerprint("ANNOUNCEMENTFP01"),
-            transport_public_key: b"announcement-key-plaintext-probe-f901".to_vec(),
-            transport_address_blob: b"announcement-address-plaintext-probe-29ab".to_vec(),
-            sequence: 7,
-            group_epoch: 5,
-            expires_at_ms: 50_000,
-            content_digest: [8; 32],
-            signature: b"announcement-signature-plaintext-probe-7c12".to_vec(),
-        };
-        repo.save(&announcement).await.unwrap();
-        drop(repo);
-
-        let reopened_store = Arc::new(EncryptedRelationshipStore::new(
-            executor,
-            Arc::new(FixedSubkey),
-            Arc::new(TestProfile),
-        ));
-        let reopened = EncryptedMembershipAnnouncementRepository::new(reopened_store);
-        let loaded = reopened
-            .get(&announcement.space_id, &announcement.device_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(loaded, announcement);
-
-        for entry in std::fs::read_dir(tempdir.path()).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_file() {
-                let bytes = std::fs::read(&path).unwrap();
-                for marker in [
-                    b"announcement-name-plaintext-probe-5b21".as_slice(),
-                    b"announcement-address-plaintext-probe-29ab".as_slice(),
-                    b"announcement-signature-plaintext-probe-7c12".as_slice(),
-                ] {
-                    assert!(
-                        !bytes.windows(marker.len()).any(|window| window == marker),
-                        "membership announcement plaintext leaked into {}",
-                        path.display()
-                    );
-                }
-            }
-        }
+        assert_eq!(remaining, 0);
     }
 }

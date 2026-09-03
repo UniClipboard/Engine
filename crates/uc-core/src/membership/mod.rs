@@ -47,13 +47,10 @@ pub use cross_space_transition::{
     SAME_SPACE_TRANSITION_FORMAT_V1,
 };
 pub use error::{
-    CurrentMembershipIdentityError, GroupUpdateDispatchError,
-    MembershipAnnouncementRepositoryError, MembershipAppliedSecurityUpdateRepositoryError,
-    MembershipAttestationEndpointError, MembershipAttestationError,
-    MembershipCandidateRepositoryError, MembershipError, MembershipGossipEndpointError,
+    CurrentMembershipIdentityError, GroupUpdateDispatchError, MembershipAttestationEndpointError,
+    MembershipAttestationError, MembershipError, MembershipGossipEndpointError,
     MembershipGossipTransportError, MembershipHistoryExchangeError, MembershipInitializationError,
-    MembershipOutboxRepositoryError, MembershipSecurityUpdateError, RelationshipStateResetError,
-    SpaceSecurityStateResetError, VerifiedPeerPromotionError,
+    MembershipSecurityUpdateError, RelationshipStateResetError, SpaceSecurityStateResetError,
 };
 pub use gossip::{
     CandidateEffect, CandidateEvent, CandidateFailure, CandidateMergeError, CandidateMergeOutcome,
@@ -92,13 +89,11 @@ pub use ports::{
     CurrentWorkspaceLocalMembership, CurrentWorkspacePeerScopeError, CurrentWorkspacePeerScopePort,
     CurrentWorkspacePeerScopeSource, CurrentWorkspacePeerSnapshot, GroupRevocationPort,
     GroupUpdateDispatchPort, MemberRepositoryPort, MembershipAdmissionDecision,
-    MembershipAdmissionGatePort, MembershipAnnouncementRepositoryPort,
-    MembershipAppliedSecurityUpdateRepositoryPort, MembershipAttestationEndpointPort,
-    MembershipAttestationPort, MembershipCandidateRepositoryPort, MembershipGossipEndpointPort,
-    MembershipGossipTransportPort, MembershipHistoryExchangeEndpointPort,
-    MembershipHistoryExchangePort, MembershipOutboxRepositoryPort, MembershipSecurityState,
+    MembershipAdmissionGatePort, MembershipAttestationEndpointPort, MembershipAttestationPort,
+    MembershipGossipEndpointPort, MembershipGossipTransportPort,
+    MembershipHistoryExchangeEndpointPort, MembershipHistoryExchangePort, MembershipSecurityState,
     MembershipSecurityUpdatePort, RelationshipStateResetPort, RevocationRepositoryPort,
-    SpaceMembershipInitializerPort, SpaceSecurityStateResetPort, VerifiedPeerPromotionPort,
+    SpaceMembershipInitializerPort, SpaceSecurityStateResetPort,
 };
 pub use preferences::MemberSyncPreferences;
 pub use protection::{

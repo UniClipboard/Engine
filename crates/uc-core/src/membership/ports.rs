@@ -4,18 +4,12 @@ use crate::ids::{DeviceId, SpaceId};
 use crate::membership::error::MembershipInitializationError;
 
 use super::error::{
-    CurrentMembershipIdentityError, GroupUpdateDispatchError,
-    MembershipAnnouncementRepositoryError, MembershipAppliedSecurityUpdateRepositoryError,
-    MembershipAttestationEndpointError, MembershipAttestationError,
-    MembershipCandidateRepositoryError, MembershipError, MembershipGossipEndpointError,
-    MembershipGossipTransportError, MembershipHistoryExchangeError,
-    MembershipOutboxRepositoryError, MembershipSecurityUpdateError, RelationshipStateResetError,
-    SpaceSecurityStateResetError, VerifiedPeerPromotionError,
+    CurrentMembershipIdentityError, GroupUpdateDispatchError, MembershipAttestationEndpointError,
+    MembershipAttestationError, MembershipError, MembershipGossipEndpointError,
+    MembershipGossipTransportError, MembershipHistoryExchangeError, MembershipSecurityUpdateError,
+    RelationshipStateResetError, SpaceSecurityStateResetError,
 };
-use super::gossip::{
-    DeviceAnnouncement, PendingMembershipBatch, RelayedSecurityUpdate, SpaceMembershipCandidate,
-    VerifiedMembershipPeer,
-};
+use super::gossip::{SpaceMembershipCandidate, VerifiedMembershipPeer};
 use super::member::SpaceMember;
 use super::membership_history::MembershipHistoryMessage;
 use super::revocation::{
@@ -23,9 +17,7 @@ use super::revocation::{
     PreparedRevocationResolution, RevocationId, RevocationRecord, RevocationStage,
     SpaceKeyMaterial,
 };
-use crate::ports::PeerAddressRecord;
 use crate::security::IdentityFingerprint;
-use crate::trusted_peer::TrustedPeer;
 
 /// Persistence port for space members.
 ///
@@ -49,100 +41,6 @@ pub trait MemberRepositoryPort: Send + Sync {
     async fn remove(&self, device_id: &DeviceId) -> Result<bool, MembershipError>;
 }
 
-#[async_trait]
-pub trait MembershipCandidateRepositoryPort: Send + Sync {
-    async fn get(
-        &self,
-        space_id: &SpaceId,
-        device_id: &DeviceId,
-    ) -> Result<Option<SpaceMembershipCandidate>, MembershipCandidateRepositoryError>;
-
-    async fn list(
-        &self,
-        space_id: &SpaceId,
-    ) -> Result<Vec<SpaceMembershipCandidate>, MembershipCandidateRepositoryError>;
-
-    async fn save(
-        &self,
-        candidate: &SpaceMembershipCandidate,
-    ) -> Result<(), MembershipCandidateRepositoryError>;
-
-    async fn remove(
-        &self,
-        space_id: &SpaceId,
-        device_id: &DeviceId,
-    ) -> Result<bool, MembershipCandidateRepositoryError>;
-
-    async fn purge_expired(
-        &self,
-        space_id: &SpaceId,
-        now_ms: i64,
-    ) -> Result<usize, MembershipCandidateRepositoryError>;
-}
-
-#[async_trait]
-pub trait VerifiedPeerPromotionPort: Send + Sync {
-    async fn promote_verified_peer(
-        &self,
-        member: &SpaceMember,
-        trusted_peer: &TrustedPeer,
-        peer_address: &PeerAddressRecord,
-        ready_candidate: &SpaceMembershipCandidate,
-    ) -> Result<(), VerifiedPeerPromotionError>;
-}
-
-#[async_trait]
-pub trait MembershipAnnouncementRepositoryPort: Send + Sync {
-    async fn get(
-        &self,
-        space_id: &SpaceId,
-        device_id: &DeviceId,
-    ) -> Result<Option<DeviceAnnouncement>, MembershipAnnouncementRepositoryError>;
-
-    async fn list(
-        &self,
-        space_id: &SpaceId,
-    ) -> Result<Vec<DeviceAnnouncement>, MembershipAnnouncementRepositoryError>;
-
-    async fn save(
-        &self,
-        announcement: &DeviceAnnouncement,
-    ) -> Result<(), MembershipAnnouncementRepositoryError>;
-
-    async fn remove(
-        &self,
-        space_id: &SpaceId,
-        device_id: &DeviceId,
-    ) -> Result<bool, MembershipAnnouncementRepositoryError>;
-}
-
-#[async_trait]
-pub trait MembershipOutboxRepositoryPort: Send + Sync {
-    async fn get(
-        &self,
-        space_id: &SpaceId,
-        recipient_device_id: &DeviceId,
-        batch_id: &[u8; 32],
-    ) -> Result<Option<PendingMembershipBatch>, MembershipOutboxRepositoryError>;
-
-    async fn list_pending(
-        &self,
-        space_id: &SpaceId,
-    ) -> Result<Vec<PendingMembershipBatch>, MembershipOutboxRepositoryError>;
-
-    async fn save(
-        &self,
-        pending: &PendingMembershipBatch,
-    ) -> Result<(), MembershipOutboxRepositoryError>;
-
-    async fn remove(
-        &self,
-        space_id: &SpaceId,
-        recipient_device_id: &DeviceId,
-        batch_id: &[u8; 32],
-    ) -> Result<bool, MembershipOutboxRepositoryError>;
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MembershipSecurityState {
     pub space_id: SpaceId,
@@ -158,26 +56,6 @@ pub trait MembershipSecurityUpdatePort: Send + Sync {
         &self,
         payload: &[u8],
     ) -> Result<u64, MembershipSecurityUpdateError>;
-}
-
-/// Persistence for security updates this device has already applied.
-///
-/// Applied updates stay queryable so the device can relay them to peers
-/// that are still behind on the group epoch, even when the device itself
-/// was never a sponsor-seed candidate. `save` is idempotent per space and
-/// update digest.
-#[async_trait]
-pub trait MembershipAppliedSecurityUpdateRepositoryPort: Send + Sync {
-    async fn list(
-        &self,
-        space_id: &SpaceId,
-    ) -> Result<Vec<RelayedSecurityUpdate>, MembershipAppliedSecurityUpdateRepositoryError>;
-
-    async fn save(
-        &self,
-        space_id: &SpaceId,
-        update: &RelayedSecurityUpdate,
-    ) -> Result<(), MembershipAppliedSecurityUpdateRepositoryError>;
 }
 
 #[async_trait]
