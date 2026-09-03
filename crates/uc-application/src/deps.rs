@@ -48,7 +48,6 @@ pub use crate::profile::probe_profile_key_access::{
     ProfileKeyAccessProbePortError,
 };
 use crate::search::mutation_gate::{CoordinatedSearchIndex, SearchMutationGate};
-pub use crate::space::SpaceRuntimeAdapters;
 pub use crate::space::{
     ActivateCompletionHelperAdmissionSecurityPort,
     ActivateCompletionHelperAdmissionSecurityRequest, ActivateMembershipEffectPort,
@@ -116,6 +115,7 @@ pub use crate::space::{
     SpaceAdmissionCredentialPreparationError, SpaceRebuildProgressError, SpaceRebuildProgressPort,
     SpaceSessionRebindError, UnlockSpacePort,
 };
+pub use crate::space::{SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters};
 pub use crate::transfer::file::assembly::ReceiveCancellationDeps;
 pub use crate::transfer::file::facade::FileTransferFacadeDeps;
 pub use crate::transfer::file::lifecycle::FileTransferLifecycleDeps;

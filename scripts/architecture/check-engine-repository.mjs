@@ -799,6 +799,7 @@ function checkSpaceModuleInterface() {
   const allowedRootEntries = new Set([
     'AGENTS.md',
     'admission',
+    'adapters.rs',
     'application.rs',
     'application_tests.rs',
     'connectivity',
@@ -1430,6 +1431,83 @@ function checkRetiredLegacySpaceTransition(sources) {
   return problems
 }
 
+function checkObservabilityAssemblyInterface(sources) {
+  const problems = []
+  const runtimeAdapters = sources.spaceAdapters.match(
+    /pub struct SpaceRuntimeAdapters\s*\{(?<body>[^}]*)\}/s
+  )
+  if (!runtimeAdapters?.groups?.body) {
+    addProblem(
+      problems,
+      'observability assembly interface',
+      'Application does not own SpaceRuntimeAdapters'
+    )
+  } else {
+    const fields = [...runtimeAdapters.groups.body.matchAll(/pub\s+(\w+)\s*:/g)]
+      .map(match => match[1])
+      .sort()
+    if (JSON.stringify(fields) !== JSON.stringify(['admission', 'membership'])) {
+      addProblem(
+        problems,
+        'observability assembly interface',
+        `SpaceRuntimeAdapters must contain only admission and membership; found ${fields.join(', ')}`
+      )
+    }
+  }
+
+  for (const marker of ['AdmissionPortImplementations', 'ObservedAdmissionPorts']) {
+    if (sources.engineObservability.includes(marker)) {
+      addProblem(
+        problems,
+        'observability assembly interface',
+        `retired mirror bundle remains: ${marker}`
+      )
+    }
+  }
+
+  for (const domain of ['admission', 'membership']) {
+    const reexport = `pub(crate) use ${domain}::observe_${domain};`
+    const domainReexports = sources.observabilityModule.match(
+      new RegExp(`pub\\(crate\\)\\s+use\\s+${domain}::`, 'g')
+    ) ?? []
+    if (
+      sources.observabilityModule.split(reexport).length - 1 !== 1 ||
+      domainReexports.length !== 1
+    ) {
+      addProblem(
+        problems,
+        'observability assembly interface',
+        `observability module must expose exactly one ${domain} entry`
+      )
+    }
+    const call = `observability::observe_${domain}(`
+    if (sources.syncEngine.split(call).length - 1 !== 1) {
+      addProblem(
+        problems,
+        'observability assembly interface',
+        `sync_engine must call ${call} exactly once`
+      )
+    }
+  }
+
+  if (/pub\(crate\)\s+struct\s+(?:Observed\w+|\w+ObservationPolicy)/.test(sources.engineObservability)) {
+    addProblem(
+      problems,
+      'observability assembly interface',
+      'concrete decorator or observation policy is crate-visible'
+    )
+  }
+  if (/Instant::now\(\)|target:\s*"(?:admission|membership)\.performance"/.test(sources.spaceApplication)) {
+    addProblem(
+      problems,
+      'observability assembly interface',
+      'Space Application assembly contains cross-layer performance observation'
+    )
+  }
+
+  return problems
+}
+
 function repositorySources() {
   return {
     legacySpaceTransitionPathPresent: existsSync(
@@ -1438,11 +1516,16 @@ function repositorySources() {
     infraSecurityModule: read('crates/uc-infra/src/security/mod.rs'),
     infraSecurityRuntime: readSourceTree('crates/uc-infra/src/security'),
     runtimeStorage: read('crates/uc-engine/src/assembly/runtime_storage.rs'),
+    observabilityModule: read('crates/uc-engine/src/assembly/observability/mod.rs'),
+    engineObservability: readSourceTree('crates/uc-engine/src/assembly/observability'),
+    syncEngine: read('crates/uc-engine/src/assembly/sync_engine.rs'),
     engine: read('crates/uc-engine/src/lib.rs'),
     engineRuntime: readSourceTree('crates/uc-engine/src'),
     engineWiring: read('crates/uc-engine/src/assembly/wire/mod.rs'),
     applicationDeps: read('crates/uc-application/src/deps.rs'),
     application: readSourceTree('crates/uc-application/src'),
+    spaceAdapters: read('crates/uc-application/src/space/adapters.rs'),
+    spaceApplication: read('crates/uc-application/src/space/application.rs'),
     network: readSourceTree('crates/uc-infra/src/network'),
     v3AdmissionTransition: read(
       'crates/uc-infra/src/security/v3_admission_space_transition.rs'
@@ -1479,6 +1562,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkInfraSpaceAdmissionOwnership(),
     ...checkInfraSpaceSecurityOwnership(),
     ...checkRetiredLegacySpaceTransition(sources),
+    ...checkObservabilityAssemblyInterface(sources),
     ...checkDualInvitationEntry(),
     ...checkSpaceMembershipMaintenanceOwnership(),
     ...checkRetiredLegacyPairingRecovery(),
@@ -1538,6 +1622,16 @@ function runNegativeFixtures(metadata, sources) {
   expectRejected('forged membership confirmation watermark', (_changed, changedSources) => {
     changedSources.application +=
       '\nfn infer_peer_confirmation(peer: &mut PeerReconciliationRecord, position: BaseMembershipHistoryPosition) { peer.confirmed_position = Some(position); }\n'
+  }, metadata, sources)
+  expectRejected('observability mirror bundle', (_changed, changedSources) => {
+    changedSources.engineObservability += '\nstruct ObservedAdmissionPorts;\n'
+  }, metadata, sources)
+  expectRejected('second admission observation entry', (_changed, changedSources) => {
+    changedSources.observabilityModule +=
+      '\npub(crate) use admission::observe_admission_again;\n'
+  }, metadata, sources)
+  expectRejected('public observation decorator', (_changed, changedSources) => {
+    changedSources.engineObservability += '\npub(crate) struct ObservedMembershipLeak;\n'
   }, metadata, sources)
   expectRejected('retired legacy Space transition module', (_changed, changedSources) => {
     changedSources.legacySpaceTransitionPathPresent = true

@@ -14,6 +14,7 @@
 //! modules are private; this root exports only the contracts used through
 //! `crate::facade` and `crate::deps`. See `AGENTS.md` for the code map.
 
+mod adapters;
 mod admission;
 mod application;
 mod connectivity;
@@ -22,13 +23,13 @@ mod lifecycle;
 mod membership;
 
 // Caller-facing facade contract.
+pub use adapters::{SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters};
 pub use admission::{
     CancelInvitationError, CancelSpaceJoinError, CompletePendingSpaceTransitionError,
     CurrentJoinStatus, JoinSpaceError, JoinSpaceInput, JoinSpaceResult, JoinedSpace,
     PairingInvitationAddressCandidate, PendingInboundMember, QueryPairingInvitationAddressesError,
     QueryPendingSpaceTransitionError,
 };
-pub use application::SpaceRuntimeAdapters;
 pub use connectivity::{
     NetworkRecoveryEvent, NetworkRecoveryFacade, NetworkRecoveryPhase, NetworkRecoveryRequestError,
     NetworkRecoveryStatus, RebuildNetworkSessionError, RebuildNetworkSessionPort,

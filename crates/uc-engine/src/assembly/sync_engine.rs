@@ -32,7 +32,8 @@ const TRANSLATOR_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(200);
 
 use uc_application::deps::{
     ApplicationClipboardAdapters, ApplicationNetworkAdapters, ApplicationNetworkBinding,
-    ApplicationSpaceAdapters, CurrentSpaceMemberScopePort, SpaceRuntimeAdapters,
+    ApplicationSpaceAdapters, CurrentSpaceMemberScopePort, SpaceAdmissionAdapters,
+    SpaceMembershipAdapters, SpaceRuntimeAdapters,
 };
 use uc_application::facade::ApplicationAssembly;
 use uc_application::facade::{HostEvent, HostEventBus, TransferHostEvent};
@@ -618,43 +619,7 @@ pub async fn build_sync_engine_assembly(
     ));
     let local_device_id = space_setup.device_identity.current_device_id();
     let local_identity: Arc<dyn LocalIdentityPort> = identity_store;
-    let observed_space_session_transition =
-        crate::assembly::observability::admission::ObservedAdmissionPorts::observe_session_transition(
-            Arc::clone(&space_setup.admission_space_transition),
-        );
-    let observed_admission_ports =
-        crate::assembly::observability::admission::ObservedAdmissionPorts::assemble(
-            crate::assembly::observability::admission::AdmissionPortImplementations {
-                recovery_state: space_setup.admission_state.clone()
-                    as Arc<dyn uc_application::deps::PendingAdmissionRecoveryStatePort>,
-                transport: admission_transport,
-                sponsor_state: space_setup.admission_state.clone()
-                    as Arc<dyn uc_application::deps::SponsorAdmissionStatePort>,
-                candidate_preparation: Arc::new(DefaultJoinerCandidatePreparation::new(
-                    historical_signatures.clone(),
-                    Arc::clone(&space_setup.space_access.prepare_admission_target_access),
-                )),
-                activation_preparation: Arc::new(DefaultJoinerActivationPreparation::new(
-                    historical_signatures.clone(),
-                    Arc::clone(&observed_space_session_transition),
-                )),
-                activation_state: space_setup.admission_state.clone()
-                    as Arc<dyn uc_application::deps::JoinerActivationStatePort>,
-                activation_executor: Arc::new(DefaultJoinerActivationExecutor::new(
-                    Arc::clone(&observed_space_session_transition),
-                    historical_signatures.clone(),
-                )),
-            },
-        );
-    let space_runtime = SpaceRuntimeAdapters {
-        load_membership_ledger: space_setup.membership_ledger.clone()
-            as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
-        commit_membership_ledger: space_setup.membership_ledger.clone()
-            as Arc<dyn uc_application::deps::CommitMembershipLedgerPort>,
-        historical_membership_signatures: historical_signatures.clone(),
-        current_member_signatures: Arc::clone(&space_setup.current_member_signatures),
-        membership_identity: removal_identity,
-        membership_announcement: membership_transport,
+    let admission = crate::assembly::observability::observe_admission(SpaceAdmissionAdapters {
         prepare_joiner_invitation: Arc::new(DefaultJoinerInvitationPreparation),
         resolve_joiner_invitation: handlers.joiner_invitation_resolver,
         joiner_start_material: Arc::new(DefaultJoinerStartMaterial::new(
@@ -669,9 +634,11 @@ pub async fn build_sync_engine_assembly(
         current_join_admission_state: space_setup.admission_state.clone()
             as Arc<dyn uc_application::deps::CurrentJoinAdmissionStatePort>,
         prepare_joiner_cancellation: Arc::new(DefaultJoinerCancellationPreparation),
-        pending_admission_recovery_state: Arc::clone(&observed_admission_ports.recovery_state),
-        space_admission_transport: Arc::clone(&observed_admission_ports.transport),
-        sponsor_admission_state: Arc::clone(&observed_admission_ports.sponsor_state),
+        pending_admission_recovery_state: space_setup.admission_state.clone()
+            as Arc<dyn uc_application::deps::PendingAdmissionRecoveryStatePort>,
+        space_admission_transport: admission_transport,
+        sponsor_admission_state: space_setup.admission_state.clone()
+            as Arc<dyn uc_application::deps::SponsorAdmissionStatePort>,
         prepare_sponsor_candidate: Arc::new(DefaultSponsorCandidatePreparation::new(
             local_device_id.clone(),
             continuation_route,
@@ -683,7 +650,7 @@ pub async fn build_sync_engine_assembly(
             historical_signatures.clone(),
         )),
         prepare_sponsor_complete: Arc::new(DefaultSponsorCompletePreparation::new(
-            local_device_id.clone(),
+            local_device_id,
             Arc::clone(&space_setup.current_member_signatures),
             historical_signatures.clone(),
         )),
@@ -703,19 +670,39 @@ pub async fn build_sync_engine_assembly(
             )),
         )),
         prepare_sponsor_settled: Arc::new(DefaultSponsorSettledPreparation),
-        prepare_joiner_candidate: Arc::clone(&observed_admission_ports.candidate_preparation),
+        prepare_joiner_candidate: Arc::new(DefaultJoinerCandidatePreparation::new(
+            historical_signatures.clone(),
+            Arc::clone(&space_setup.space_access.prepare_admission_target_access),
+        )),
         prepare_joiner_applied: Arc::new(DefaultJoinerAppliedPreparation::new(
             historical_signatures.clone(),
         )),
-        prepare_joiner_activation: Arc::clone(&observed_admission_ports.activation_preparation),
-        joiner_activation_state: Arc::clone(&observed_admission_ports.activation_state),
-        execute_joiner_activation: Arc::clone(&observed_admission_ports.activation_executor),
+        prepare_joiner_activation: Arc::new(DefaultJoinerActivationPreparation::new(
+            historical_signatures.clone(),
+            Arc::clone(&space_setup.admission_space_transition),
+        )),
+        joiner_activation_state: space_setup.admission_state.clone()
+            as Arc<dyn uc_application::deps::JoinerActivationStatePort>,
+        execute_joiner_activation: Arc::new(DefaultJoinerActivationExecutor::new(
+            Arc::clone(&space_setup.admission_space_transition),
+            historical_signatures.clone(),
+        )),
+        current_join_status: space_setup.admission_state.clone()
+            as Arc<dyn uc_application::deps::LoadCurrentJoinStatusPort>,
+    });
+    let membership = crate::assembly::observability::observe_membership(SpaceMembershipAdapters {
+        load_membership_ledger: space_setup.membership_ledger.clone()
+            as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
+        commit_membership_ledger: space_setup.membership_ledger.clone()
+            as Arc<dyn uc_application::deps::CommitMembershipLedgerPort>,
+        historical_membership_signatures: historical_signatures.clone(),
+        current_member_signatures: Arc::clone(&space_setup.current_member_signatures),
+        membership_identity: removal_identity,
+        membership_announcement: membership_transport,
         device_trust_observations: Arc::new(DeviceTrustObservationsAdapter::new(
             Arc::clone(&space_setup.member_repo),
             Arc::clone(&peer_reachability),
         )),
-        current_join_status: space_setup.admission_state.clone()
-            as Arc<dyn uc_application::deps::LoadCurrentJoinStatusPort>,
         membership_history_transport: membership_history_transport.clone(),
         membership_branch_recovery_channel,
         membership_branch_recovery_recipient: Arc::clone(
@@ -755,6 +742,10 @@ pub async fn build_sync_engine_assembly(
             Arc::clone(&space_setup.peer_addr_repo),
         )),
         membership_network_activity: membership_network_gate,
+    });
+    let space_runtime = SpaceRuntimeAdapters {
+        admission,
+        membership,
     };
     #[cfg(feature = "lan-compat")]
     let mobile_device_repo = Arc::clone(&mobile_sync_ports.devices.find_by_id);

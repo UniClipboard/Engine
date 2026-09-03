@@ -18,7 +18,7 @@ use crate::deps::{
     CurrentSpaceIdentityPort, InitialSpaceActivationPort, RePairingStateStorePort,
     SpaceAccessPorts, SpaceRebuildProgressPort,
 };
-use crate::space::application::SpaceRuntimeAdapters;
+use crate::space::SpaceRuntimeAdapters;
 
 pub(crate) struct SpaceSessionDeps {
     pub space_access: SpaceAccessPorts,

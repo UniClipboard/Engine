@@ -1,11 +1,9 @@
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use uc_application::deps::{
-    AdmissionRecoveryCommitToken, AdmissionRecoveryTrigger, AdmissionSpaceTransitionError,
-    AdmissionSpaceTransitionPort, AdmissionSpaceTransitionPreparationV2,
-    AdmissionSpaceTransitionStepV2, AuthenticatedAdmissionExchangePort,
+    AdmissionRecoveryCommitToken, AdmissionRecoveryTrigger, AuthenticatedAdmissionExchangePort,
     AuthenticatedAdmissionReply, AuthenticatedSpaceAdmissionMessage, CommittedSponsorAdmission,
     CompletedJoinerActivation, ExecuteJoinerActivationError, ExecuteJoinerActivationPort,
     JoinerActivationCommitToken, JoinerActivationMutation, JoinerActivationStateError,
@@ -13,81 +11,48 @@ use uc_application::deps::{
     LoadedSponsorAdmission, PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
     PrepareJoinerActivationError, PrepareJoinerActivationPort, PrepareJoinerCandidateError,
     PrepareJoinerCandidatePort, PreparedJoinerActivation, PreparedJoinerCandidateMaterial,
-    SpaceAdmissionTransportError, SpaceAdmissionTransportPort, SponsorAdmissionCommitToken,
-    SponsorAdmissionMutation, SponsorAdmissionStateError, SponsorAdmissionStatePort,
+    SpaceAdmissionAdapters, SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
+    SponsorAdmissionCommitToken, SponsorAdmissionMutation, SponsorAdmissionStateError,
+    SponsorAdmissionStatePort,
 };
 use uc_core::membership::{
     AdmissionContinuationCredential, AdmissionEncryptedPasswordEquivalent, AdmissionPeerBinding,
-    AdmissionSpaceTransitionV2, JoinerActivationPreparation, JoinerAdmissionTransition,
-    JoinerCandidatePreparation, JoinerCompletePreparation, SpaceAdmissionEnvelopeV1,
-    SpaceAdmissionId, SpaceAdmissionRoute,
+    JoinerActivationPreparation, JoinerAdmissionTransition, JoinerCandidatePreparation,
+    JoinerCompletePreparation, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionRoute,
 };
 
-/// Engine 交给准入观测装配的真实能力集合。
-pub(crate) struct AdmissionPortImplementations {
-    pub(crate) recovery_state: Arc<dyn PendingAdmissionRecoveryStatePort>,
-    pub(crate) transport: Arc<dyn SpaceAdmissionTransportPort>,
-    pub(crate) sponsor_state: Arc<dyn SponsorAdmissionStatePort>,
-    pub(crate) candidate_preparation: Arc<dyn PrepareJoinerCandidatePort>,
-    pub(crate) activation_preparation: Arc<dyn PrepareJoinerActivationPort>,
-    pub(crate) activation_state: Arc<dyn JoinerActivationStatePort>,
-    pub(crate) activation_executor: Arc<dyn ExecuteJoinerActivationPort>,
-}
-
-/// 完整准入链路的已观测能力；调用方只负责将这些 port 注入 Application。
-pub(crate) struct ObservedAdmissionPorts {
-    pub(crate) recovery_state: Arc<dyn PendingAdmissionRecoveryStatePort>,
-    pub(crate) transport: Arc<dyn SpaceAdmissionTransportPort>,
-    pub(crate) sponsor_state: Arc<dyn SponsorAdmissionStatePort>,
-    pub(crate) candidate_preparation: Arc<dyn PrepareJoinerCandidatePort>,
-    pub(crate) activation_preparation: Arc<dyn PrepareJoinerActivationPort>,
-    pub(crate) activation_state: Arc<dyn JoinerActivationStatePort>,
-    pub(crate) activation_executor: Arc<dyn ExecuteJoinerActivationPort>,
-}
-
-impl ObservedAdmissionPorts {
-    pub(crate) fn observe_session_transition(
-        inner: Arc<dyn AdmissionSpaceTransitionPort>,
-    ) -> Arc<dyn AdmissionSpaceTransitionPort> {
-        Arc::new(ObservedSpaceSessionTransition::new(
-            inner,
-            SpaceSessionTransitionObservationPolicy::record_all(),
-        ))
-    }
-
-    pub(crate) fn assemble(inner: AdmissionPortImplementations) -> Self {
-        let activation_policy =
-            JoinerActivationObservationPolicy::suppress_successful_empty_loads();
-        Self {
-            recovery_state: Arc::new(ObservedAdmissionRecoveryState::new(
-                inner.recovery_state,
-                AdmissionRecoveryObservationPolicy::suppress_successful_empty_loads(),
-            )),
-            transport: Arc::new(ObservedSpaceAdmissionTransport::new(
-                inner.transport,
-                SpaceAdmissionTransportObservationPolicy::record_safe_message_kind(),
-            )),
-            sponsor_state: Arc::new(ObservedSponsorAdmissionState::new(
-                inner.sponsor_state,
-                SponsorAdmissionStateObservationPolicy::record_all(),
-            )),
-            candidate_preparation: Arc::new(ObservedJoinerCandidatePreparation::new(
-                inner.candidate_preparation,
-                JoinerCandidateObservationPolicy::record_all(),
-            )),
-            activation_preparation: Arc::new(ObservedJoinerActivationPreparation::new(
-                inner.activation_preparation,
-                activation_policy,
-            )),
-            activation_state: Arc::new(ObservedJoinerActivationState::new(
-                inner.activation_state,
-                activation_policy,
-            )),
-            activation_executor: Arc::new(ObservedJoinerActivationExecutor::new(
-                inner.activation_executor,
-                activation_policy,
-            )),
-        }
+pub(crate) fn observe_admission(adapters: SpaceAdmissionAdapters) -> SpaceAdmissionAdapters {
+    let activation_policy = JoinerActivationObservationPolicy::suppress_successful_empty_loads();
+    SpaceAdmissionAdapters {
+        pending_admission_recovery_state: Arc::new(ObservedAdmissionRecoveryState::new(
+            adapters.pending_admission_recovery_state,
+            AdmissionRecoveryObservationPolicy::suppress_successful_empty_loads(),
+        )),
+        space_admission_transport: Arc::new(ObservedSpaceAdmissionTransport::new(
+            adapters.space_admission_transport,
+            SpaceAdmissionTransportObservationPolicy::record_safe_message_kind(),
+        )),
+        sponsor_admission_state: Arc::new(ObservedSponsorAdmissionState::new(
+            adapters.sponsor_admission_state,
+            SponsorAdmissionStateObservationPolicy::record_all(),
+        )),
+        prepare_joiner_candidate: Arc::new(ObservedJoinerCandidatePreparation::new(
+            adapters.prepare_joiner_candidate,
+            JoinerCandidateObservationPolicy::record_all(),
+        )),
+        prepare_joiner_activation: Arc::new(ObservedJoinerActivationPreparation::new(
+            adapters.prepare_joiner_activation,
+            activation_policy,
+        )),
+        joiner_activation_state: Arc::new(ObservedJoinerActivationState::new(
+            adapters.joiner_activation_state,
+            activation_policy,
+        )),
+        execute_joiner_activation: Arc::new(ObservedJoinerActivationExecutor::new(
+            adapters.execute_joiner_activation,
+            activation_policy,
+        )),
+        ..adapters
     }
 }
 
@@ -107,12 +72,12 @@ impl AdmissionRecoveryStateOperation {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct AdmissionRecoveryObservationPolicy {
+struct AdmissionRecoveryObservationPolicy {
     suppress_successful_empty_loads: bool,
 }
 
 impl AdmissionRecoveryObservationPolicy {
-    pub(crate) const fn suppress_successful_empty_loads() -> Self {
+    const fn suppress_successful_empty_loads() -> Self {
         Self {
             suppress_successful_empty_loads: true,
         }
@@ -123,13 +88,13 @@ impl AdmissionRecoveryObservationPolicy {
     }
 }
 
-pub(crate) struct ObservedAdmissionRecoveryState {
+struct ObservedAdmissionRecoveryState {
     inner: Arc<dyn PendingAdmissionRecoveryStatePort>,
     policy: AdmissionRecoveryObservationPolicy,
 }
 
 impl ObservedAdmissionRecoveryState {
-    pub(crate) fn new(
+    fn new(
         inner: Arc<dyn PendingAdmissionRecoveryStatePort>,
         policy: AdmissionRecoveryObservationPolicy,
     ) -> Self {
@@ -140,7 +105,7 @@ impl ObservedAdmissionRecoveryState {
         tracing::info!(
             target: "admission.performance",
             operation = AdmissionRecoveryStateOperation::Load.as_str(),
-            elapsed_ms = started.elapsed().as_millis() as u64,
+            elapsed_ms = duration_ms(started.elapsed()),
             outcome = "ok",
             loaded_count,
             "admission recovery state load completed"
@@ -151,7 +116,7 @@ impl ObservedAdmissionRecoveryState {
         tracing::info!(
             target: "admission.performance",
             operation = AdmissionRecoveryStateOperation::Load.as_str(),
-            elapsed_ms = started.elapsed().as_millis() as u64,
+            elapsed_ms = duration_ms(started.elapsed()),
             outcome = "error",
             "admission recovery state load failed"
         );
@@ -161,7 +126,7 @@ impl ObservedAdmissionRecoveryState {
         tracing::info!(
             target: "admission.performance",
             operation = AdmissionRecoveryStateOperation::Commit.as_str(),
-            elapsed_ms = started.elapsed().as_millis() as u64,
+            elapsed_ms = duration_ms(started.elapsed()),
             outcome = if success { "ok" } else { "error" },
             "admission recovery state commit completed"
         );
@@ -199,7 +164,7 @@ impl PendingAdmissionRecoveryStatePort for ObservedAdmissionRecoveryState {
 }
 
 /// 在 Engine 组装边界观测认证信道；成功结果继续包装消息交换对象，避免只测到建链而丢失往返阶段。
-pub(crate) struct ObservedSpaceAdmissionTransport {
+struct ObservedSpaceAdmissionTransport {
     inner: Arc<dyn SpaceAdmissionTransportPort>,
     policy: SpaceAdmissionTransportObservationPolicy,
 }
@@ -220,7 +185,7 @@ impl SpaceAdmissionTransportOperation {
 }
 
 impl ObservedSpaceAdmissionTransport {
-    pub(crate) fn new(
+    fn new(
         inner: Arc<dyn SpaceAdmissionTransportPort>,
         policy: SpaceAdmissionTransportObservationPolicy,
     ) -> Self {
@@ -232,7 +197,7 @@ impl ObservedSpaceAdmissionTransport {
             target: "admission.performance",
             operation = SpaceAdmissionTransportOperation::Establish.as_str(),
             channel,
-            elapsed_ms = started.elapsed().as_millis() as u64,
+            elapsed_ms = duration_ms(started.elapsed()),
             outcome = if success { "ok" } else { "error" },
             "admission channel establishment completed"
         );
@@ -245,12 +210,12 @@ struct ObservedAuthenticatedAdmissionExchange {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct SpaceAdmissionTransportObservationPolicy {
+struct SpaceAdmissionTransportObservationPolicy {
     record_exchanges: bool,
 }
 
 impl SpaceAdmissionTransportObservationPolicy {
-    pub(crate) const fn record_safe_message_kind() -> Self {
+    const fn record_safe_message_kind() -> Self {
         Self {
             record_exchanges: true,
         }
@@ -282,7 +247,7 @@ impl AuthenticatedAdmissionExchangePort for ObservedAuthenticatedAdmissionExchan
                 target: "admission.performance",
                 operation = SpaceAdmissionTransportOperation::Exchange.as_str(),
                 message_kind = ?request.kind(),
-                elapsed_ms = started.elapsed().as_millis() as u64,
+                elapsed_ms = duration_ms(started.elapsed()),
                 outcome = if result.is_ok() { "ok" } else { "error" },
                 "admission message exchange completed"
             );
@@ -351,10 +316,10 @@ impl SponsorAdmissionStateOperation {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct SponsorAdmissionStateObservationPolicy;
+struct SponsorAdmissionStateObservationPolicy;
 
 impl SponsorAdmissionStateObservationPolicy {
-    pub(crate) const fn record_all() -> Self {
+    const fn record_all() -> Self {
         Self
     }
 
@@ -363,13 +328,13 @@ impl SponsorAdmissionStateObservationPolicy {
     }
 }
 
-pub(crate) struct ObservedSponsorAdmissionState {
+struct ObservedSponsorAdmissionState {
     inner: Arc<dyn SponsorAdmissionStatePort>,
     policy: SponsorAdmissionStateObservationPolicy,
 }
 
 impl ObservedSponsorAdmissionState {
-    pub(crate) fn new(
+    fn new(
         inner: Arc<dyn SponsorAdmissionStatePort>,
         policy: SponsorAdmissionStateObservationPolicy,
     ) -> Self {
@@ -381,7 +346,7 @@ impl ObservedSponsorAdmissionState {
             tracing::info!(
                 target: "admission.performance",
                 operation = operation.as_str(),
-                elapsed_ms = started.elapsed().as_millis() as u64,
+                elapsed_ms = duration_ms(started.elapsed()),
                 outcome = if success { "ok" } else { "error" },
                 "sponsor admission state operation completed"
             );
@@ -435,10 +400,10 @@ impl JoinerCandidateOperation {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct JoinerCandidateObservationPolicy;
+struct JoinerCandidateObservationPolicy;
 
 impl JoinerCandidateObservationPolicy {
-    pub(crate) const fn record_all() -> Self {
+    const fn record_all() -> Self {
         Self
     }
 
@@ -447,13 +412,13 @@ impl JoinerCandidateObservationPolicy {
     }
 }
 
-pub(crate) struct ObservedJoinerCandidatePreparation {
+struct ObservedJoinerCandidatePreparation {
     inner: Arc<dyn PrepareJoinerCandidatePort>,
     policy: JoinerCandidateObservationPolicy,
 }
 
 impl ObservedJoinerCandidatePreparation {
-    pub(crate) fn new(
+    fn new(
         inner: Arc<dyn PrepareJoinerCandidatePort>,
         policy: JoinerCandidateObservationPolicy,
     ) -> Self {
@@ -474,7 +439,7 @@ impl PrepareJoinerCandidatePort for ObservedJoinerCandidatePreparation {
             tracing::info!(
                 target: "admission.performance",
                 operation = JoinerCandidateOperation::Prepare.as_str(),
-                elapsed_ms = started.elapsed().as_millis() as u64,
+                elapsed_ms = duration_ms(started.elapsed()),
                 outcome = if result.is_ok() { "ok" } else { "error" },
                 "joiner candidate preparation completed"
             );
@@ -503,12 +468,12 @@ impl JoinerActivationOperation {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct JoinerActivationObservationPolicy {
+struct JoinerActivationObservationPolicy {
     suppress_successful_empty_loads: bool,
 }
 
 impl JoinerActivationObservationPolicy {
-    pub(crate) const fn suppress_successful_empty_loads() -> Self {
+    const fn suppress_successful_empty_loads() -> Self {
         Self {
             suppress_successful_empty_loads: true,
         }
@@ -523,13 +488,13 @@ impl JoinerActivationObservationPolicy {
     }
 }
 
-pub(crate) struct ObservedJoinerActivationPreparation {
+struct ObservedJoinerActivationPreparation {
     inner: Arc<dyn PrepareJoinerActivationPort>,
     policy: JoinerActivationObservationPolicy,
 }
 
 impl ObservedJoinerActivationPreparation {
-    pub(crate) fn new(
+    fn new(
         inner: Arc<dyn PrepareJoinerActivationPort>,
         policy: JoinerActivationObservationPolicy,
     ) -> Self {
@@ -557,13 +522,13 @@ impl PrepareJoinerActivationPort for ObservedJoinerActivationPreparation {
     }
 }
 
-pub(crate) struct ObservedJoinerActivationState {
+struct ObservedJoinerActivationState {
     inner: Arc<dyn JoinerActivationStatePort>,
     policy: JoinerActivationObservationPolicy,
 }
 
 impl ObservedJoinerActivationState {
-    pub(crate) fn new(
+    fn new(
         inner: Arc<dyn JoinerActivationStatePort>,
         policy: JoinerActivationObservationPolicy,
     ) -> Self {
@@ -607,13 +572,13 @@ impl JoinerActivationStatePort for ObservedJoinerActivationState {
     }
 }
 
-pub(crate) struct ObservedJoinerActivationExecutor {
+struct ObservedJoinerActivationExecutor {
     inner: Arc<dyn ExecuteJoinerActivationPort>,
     policy: JoinerActivationObservationPolicy,
 }
 
 impl ObservedJoinerActivationExecutor {
-    pub(crate) fn new(
+    fn new(
         inner: Arc<dyn ExecuteJoinerActivationPort>,
         policy: JoinerActivationObservationPolicy,
     ) -> Self {
@@ -641,139 +606,99 @@ fn record_joiner_activation(operation: JoinerActivationOperation, started: Insta
     tracing::info!(
         target: "admission.performance",
         operation = operation.as_str(),
-        elapsed_ms = started.elapsed().as_millis() as u64,
+        elapsed_ms = duration_ms(started.elapsed()),
         outcome = if success { "ok" } else { "error" },
         "joiner activation operation completed"
     );
 }
 
-#[derive(Clone, Copy)]
-enum SpaceSessionTransitionOperation {
-    Preflight,
-    Prepare,
-    Advance,
-    Discard,
-}
-
-impl SpaceSessionTransitionOperation {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Preflight => "space_session_transition_preflight",
-            Self::Prepare => "space_session_transition_prepare",
-            Self::Advance => "space_session_transition_advance",
-            Self::Discard => "space_session_transition_discard",
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct SpaceSessionTransitionObservationPolicy;
-
-impl SpaceSessionTransitionObservationPolicy {
-    pub(crate) const fn record_all() -> Self {
-        Self
-    }
-
-    const fn should_record(self) -> bool {
-        true
-    }
-}
-
-pub(crate) struct ObservedSpaceSessionTransition {
-    inner: Arc<dyn AdmissionSpaceTransitionPort>,
-    policy: SpaceSessionTransitionObservationPolicy,
-}
-
-impl ObservedSpaceSessionTransition {
-    pub(crate) fn new(
-        inner: Arc<dyn AdmissionSpaceTransitionPort>,
-        policy: SpaceSessionTransitionObservationPolicy,
-    ) -> Self {
-        Self { inner, policy }
-    }
-
-    fn record(&self, operation: SpaceSessionTransitionOperation, started: Instant, success: bool) {
-        if self.policy.should_record() {
-            tracing::info!(
-                target: "admission.performance",
-                operation = operation.as_str(),
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                outcome = if success { "ok" } else { "error" },
-                "space session transition operation completed"
-            );
-        }
-    }
-}
-
-#[async_trait]
-impl AdmissionSpaceTransitionPort for ObservedSpaceSessionTransition {
-    async fn preflight_source_history(
-        &self,
-        preserve_unreadable_history: bool,
-    ) -> Result<(), AdmissionSpaceTransitionError> {
-        let started = Instant::now();
-        let result = self
-            .inner
-            .preflight_source_history(preserve_unreadable_history)
-            .await;
-        self.record(
-            SpaceSessionTransitionOperation::Preflight,
-            started,
-            result.is_ok(),
-        );
-        result
-    }
-
-    async fn prepare_if_needed(
-        &self,
-        input: &AdmissionSpaceTransitionPreparationV2,
-    ) -> Result<AdmissionSpaceTransitionV2, AdmissionSpaceTransitionError> {
-        let started = Instant::now();
-        let result = self.inner.prepare_if_needed(input).await;
-        self.record(
-            SpaceSessionTransitionOperation::Prepare,
-            started,
-            result.is_ok(),
-        );
-        result
-    }
-
-    async fn advance(
-        &self,
-        transition: &AdmissionSpaceTransitionV2,
-    ) -> Result<AdmissionSpaceTransitionStepV2, AdmissionSpaceTransitionError> {
-        let started = Instant::now();
-        let result = self.inner.advance(transition).await;
-        self.record(
-            SpaceSessionTransitionOperation::Advance,
-            started,
-            result.is_ok(),
-        );
-        result
-    }
-
-    async fn discard_pre_activation(
-        &self,
-        transition: &AdmissionSpaceTransitionV2,
-    ) -> Result<(), AdmissionSpaceTransitionError> {
-        let started = Instant::now();
-        let result = self.inner.discard_pre_activation(transition).await;
-        self.record(
-            SpaceSessionTransitionOperation::Discard,
-            started,
-            result.is_ok(),
-        );
-        result
-    }
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use uc_application::deps::{
+        AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply,
+        SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
+    };
+    use uc_core::membership::{
+        AdmissionChannelPeerId, AdmissionContinuationCredential,
+        AdmissionEncryptedPasswordEquivalent, AdmissionMessageId, AdmissionPeerBinding,
+        AdmissionRole, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
+        SpaceAdmissionRoute,
+    };
+
     use super::{
         AdmissionRecoveryObservationPolicy, JoinerActivationObservationPolicy,
-        JoinerCandidateObservationPolicy, SpaceAdmissionTransportObservationPolicy,
-        SpaceSessionTransitionObservationPolicy, SponsorAdmissionStateObservationPolicy,
+        JoinerCandidateObservationPolicy, ObservedSpaceAdmissionTransport,
+        SpaceAdmissionTransportObservationPolicy, SponsorAdmissionStateObservationPolicy,
     };
+
+    struct CountingAdmissionTransport {
+        establish_calls: Arc<AtomicUsize>,
+        exchange_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl SpaceAdmissionTransportPort for CountingAdmissionTransport {
+        async fn establish_initial(
+            &self,
+            _admission_id: SpaceAdmissionId,
+            _route: &SpaceAdmissionRoute,
+            _encrypted_password_equivalent: &AdmissionEncryptedPasswordEquivalent,
+        ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError>
+        {
+            self.establish_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(CountingAuthenticatedExchange {
+                exchange_calls: Arc::clone(&self.exchange_calls),
+            }))
+        }
+
+        async fn resume(
+            &self,
+            _admission_id: SpaceAdmissionId,
+            _route: &SpaceAdmissionRoute,
+            _peer_binding: AdmissionPeerBinding,
+            _continuation_credential: &AdmissionContinuationCredential,
+        ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError>
+        {
+            Err(SpaceAdmissionTransportError::Deferred)
+        }
+    }
+
+    struct CountingAuthenticatedExchange {
+        exchange_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl AuthenticatedAdmissionExchangePort for CountingAuthenticatedExchange {
+        fn peer_binding(&self) -> AdmissionPeerBinding {
+            AdmissionPeerBinding::new(
+                AdmissionChannelPeerId::from_bytes([1; 32]).expect("valid local peer"),
+                AdmissionChannelPeerId::from_bytes([2; 32]).expect("valid remote peer"),
+            )
+            .expect("distinct peers")
+        }
+
+        fn take_newly_established_continuation(
+            &mut self,
+        ) -> Option<AdmissionContinuationCredential> {
+            None
+        }
+
+        async fn exchange(
+            self: Box<Self>,
+            _request: &SpaceAdmissionEnvelopeV1,
+        ) -> Result<AuthenticatedAdmissionReply, SpaceAdmissionTransportError> {
+            self.exchange_calls.fetch_add(1, Ordering::SeqCst);
+            Err(SpaceAdmissionTransportError::ProtocolRejected)
+        }
+    }
 
     #[test]
     fn recovery_policy_suppresses_only_successful_empty_loads() {
@@ -801,6 +726,48 @@ mod tests {
         );
         assert!(SponsorAdmissionStateObservationPolicy::record_all().should_record());
         assert!(JoinerCandidateObservationPolicy::record_all().should_record());
-        assert!(SpaceSessionTransitionObservationPolicy::record_all().should_record());
+    }
+
+    #[tokio::test]
+    async fn authenticated_exchange_remains_wrapped_and_transparent() {
+        let establish_calls = Arc::new(AtomicUsize::new(0));
+        let exchange_calls = Arc::new(AtomicUsize::new(0));
+        let observed = ObservedSpaceAdmissionTransport::new(
+            Arc::new(CountingAdmissionTransport {
+                establish_calls: Arc::clone(&establish_calls),
+                exchange_calls: Arc::clone(&exchange_calls),
+            }),
+            SpaceAdmissionTransportObservationPolicy::record_safe_message_kind(),
+        );
+        let admission_id =
+            SpaceAdmissionId::from_bytes([3; 32]).expect("valid admission identifier");
+        let route = SpaceAdmissionRoute::from_bytes(vec![4; 32]).expect("valid admission route");
+        let password = AdmissionEncryptedPasswordEquivalent::from_bytes(vec![5; 64])
+            .expect("valid password equivalent");
+
+        let mut exchange = observed
+            .establish_initial(admission_id, &route, &password)
+            .await
+            .expect("test transport establishes");
+        assert_eq!(establish_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(exchange.peer_binding().local_peer_id().as_bytes(), &[1; 32]);
+        assert!(exchange.take_newly_established_continuation().is_none());
+
+        let request = SpaceAdmissionEnvelopeV1::new(
+            admission_id,
+            AdmissionRole::Joiner,
+            1,
+            AdmissionMessageId::from_bytes([6; 32]).expect("valid message identifier"),
+            Some(AdmissionMessageId::from_bytes([7; 32]).expect("valid predecessor")),
+            SpaceAdmissionBodyV1::CancelRequested,
+        )
+        .expect("valid cancellation request");
+        let result = exchange.exchange(&request).await;
+
+        assert!(matches!(
+            result,
+            Err(SpaceAdmissionTransportError::ProtocolRejected)
+        ));
+        assert_eq!(exchange_calls.load(Ordering::SeqCst), 1);
     }
 }

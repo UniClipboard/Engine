@@ -17,3 +17,4 @@
 - [031 Application 依赖表面深化](031-application-dependency-surface-deepening.md)
 - [032 退役 Legacy Space Transition](032-admission-space-transition-internal-refactor.md)
 - [033 不可变内容保护上下文与一次性密文升级](033-immutable-content-protection-context.md)
+- [035 Space 观测装配 interface 收敛与仓库推广准则](035-space-domain-observability-assembly.md)
