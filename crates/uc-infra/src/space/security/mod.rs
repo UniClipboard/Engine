@@ -10,7 +10,7 @@ mod scope_identifier;
 mod session;
 mod session_rebind;
 
-pub use access::DefaultSpaceAccessAdapter;
+pub use access::{MigrationSpaceAccessAdapter, RuntimeSpaceAccessAdapter};
 pub(crate) use content_key_catalog::{
     export_admission_content_key_catalog, import_admission_content_key_catalog,
 };

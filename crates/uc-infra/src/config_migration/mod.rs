@@ -33,7 +33,7 @@ mod tests {
     //! End-to-end adapter tests: export → preview → stage against real ports.
     //!
     //! The source is a *genuinely initialized* installation — a real `KeySlot`
-    //! and matching KEK produced by `DefaultSpaceAccessAdapter::initialize`. The
+    //! and matching KEK produced by `RuntimeSpaceAccessAdapter::initialize`. The
     //! export seals the bundle with that KEK (no export password), so opening it
     //! requires the space passphrase that derives the KEK ([`FIXTURE_PASSPHRASE`]).
 
@@ -45,7 +45,6 @@ mod tests {
         ConfigMigrationError, ConfigSourceMode, ExportConfigBundlePort, PreviewConfigImportPort,
         StageConfigImportPort,
     };
-    use uc_core::ports::space::SpaceAccessStore;
     use uc_core::ports::{ClockPort, LocalIdentityPort, SecureStorageError, SecureStoragePort};
     use uc_core::security::IdentityFingerprint;
 
@@ -57,7 +56,7 @@ mod tests {
     use crate::db::pool::init_db_pool;
     use crate::fs::key_slot_store::JsonKeySlotStore;
     use crate::security::DefaultCurrentProfile;
-    use crate::space::{DefaultSpaceAccessAdapter, InMemorySession, KeyMaterialStore};
+    use crate::space::{InMemorySession, KeyMaterialStore, MigrationSpaceAccessAdapter};
 
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -140,12 +139,12 @@ mod tests {
                 secure_storage.clone(),
                 Arc::new(JsonKeySlotStore::new(vault.clone())),
             ));
-            let space_access = DefaultSpaceAccessAdapter::new(
+            let space_access = MigrationSpaceAccessAdapter::new(
                 key_material,
                 Arc::new(DefaultCurrentProfile::new()),
                 Arc::new(InMemorySession::new()),
             );
-            SpaceAccessStore::initialize(
+            uc_application::deps::InitializeSpacePort::initialize(
                 &space_access,
                 &SpaceId::from("space"),
                 &Passphrase::from(FIXTURE_PASSPHRASE),

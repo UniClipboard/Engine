@@ -33,7 +33,7 @@ use crate::security::{
     ProfileRuntimeLayout, SpaceControlGeneration, SpaceTransitionActivation,
 };
 use crate::space::{
-    prepare_registration, DefaultSpaceAccessAdapter, InMemorySession, KeyMaterialStore,
+    prepare_registration, InMemorySession, KeyMaterialStore, RuntimeSpaceAccessAdapter,
 };
 
 #[derive(Default)]
@@ -119,13 +119,14 @@ async fn v3_cross_space_switches_only_the_control_generation() {
         Arc::clone(&secure_storage),
         [0x31; 16],
     ));
-    let access = Arc::new(DefaultSpaceAccessAdapter::new_with_key_epoch_repository(
+    let access = Arc::new(RuntimeSpaceAccessAdapter::new(
         Arc::new(KeyMaterialStore::new(
             Arc::clone(&secure_storage),
             Arc::new(JsonKeySlotStore::new(root.join("keys"))),
         )),
         Arc::clone(&current_profile),
         session.clone(),
+        repository.clone(),
         repository,
         vault,
     ));
@@ -387,13 +388,14 @@ async fn v3_same_space_retains_profile_data_and_keyslot() {
         Arc::clone(&secure_storage),
         [0x61; 16],
     ));
-    let access = Arc::new(DefaultSpaceAccessAdapter::new_with_key_epoch_repository(
+    let access = Arc::new(RuntimeSpaceAccessAdapter::new(
         Arc::new(KeyMaterialStore::new(
             Arc::clone(&secure_storage),
             Arc::new(JsonKeySlotStore::new(root.join("keys"))),
         )),
         Arc::clone(&current_profile),
         Arc::clone(&session),
+        repository.clone(),
         repository,
         vault,
     ));
@@ -496,13 +498,14 @@ async fn v3_fresh_promotes_the_first_manifest_without_a_source() {
         Arc::clone(&secure_storage),
         [0x71; 16],
     ));
-    let access = Arc::new(DefaultSpaceAccessAdapter::new_with_key_epoch_repository(
+    let access = Arc::new(RuntimeSpaceAccessAdapter::new(
         Arc::new(KeyMaterialStore::new(
             Arc::clone(&secure_storage),
             Arc::new(JsonKeySlotStore::new(root.join("keys"))),
         )),
         Arc::clone(&current_profile),
         Arc::clone(&session),
+        repository.clone(),
         repository,
         vault,
     ));

@@ -34,8 +34,8 @@ use crate::security::{
     SpaceControlGeneration, SpaceTransitionActivation,
 };
 use crate::space::{
-    DefaultMembershipBranchTransitionPreparation, DefaultSpaceAccessAdapter, InMemorySession,
-    KeyMaterialStore, SqliteMembershipLedger,
+    DefaultMembershipBranchTransitionPreparation, InMemorySession, KeyMaterialStore,
+    RuntimeSpaceAccessAdapter, SqliteMembershipLedger,
 };
 
 #[derive(Default)]
@@ -112,7 +112,7 @@ async fn v3_membership_branch_replays_every_control_phase_after_crash() {
         Arc::new(DieselSqliteExecutor::new(control_pool.clone())),
         recipient_session.as_ref().clone(),
     ));
-    let recipient_access = Arc::new(DefaultSpaceAccessAdapter::new_with_key_epoch_repository(
+    let recipient_access = Arc::new(RuntimeSpaceAccessAdapter::new(
         Arc::new(KeyMaterialStore::new(
             Arc::clone(&secure_storage),
             Arc::new(JsonKeySlotStore::new(root.join("recipient-keys"))),
@@ -120,6 +120,7 @@ async fn v3_membership_branch_replays_every_control_phase_after_crash() {
         Arc::clone(&current_profile),
         Arc::clone(&recipient_session),
         recipient_repository.clone() as Arc<dyn RevocationRepositoryPort>,
+        recipient_repository.clone(),
         Arc::new(ProfileContentKeyVault::new(
             vault_root.join("recipient-content"),
             Arc::clone(&secure_storage),
@@ -134,7 +135,7 @@ async fn v3_membership_branch_replays_every_control_phase_after_crash() {
         Arc::new(DieselSqliteExecutor::new(sponsor_pool)),
         sponsor_session.as_ref().clone(),
     ));
-    let sponsor_access = DefaultSpaceAccessAdapter::new_with_security_repositories(
+    let sponsor_access = RuntimeSpaceAccessAdapter::new(
         Arc::new(KeyMaterialStore::new(
             Arc::clone(&sponsor_storage),
             Arc::new(JsonKeySlotStore::new(root.join("sponsor-keys"))),

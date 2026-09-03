@@ -23,7 +23,7 @@ use uc_infra::security::{
     ProfileStorageUpgradeError, ProfileStorageUpgradeOutcome,
 };
 use uc_infra::space::{
-    DefaultSpaceAccessAdapter, InMemorySession, KeyMaterialStore, SqliteSpaceAdmissionCredentials,
+    InMemorySession, KeyMaterialStore, RuntimeSpaceAccessAdapter, SqliteSpaceAdmissionCredentials,
     SqliteSpaceAdmissionState,
 };
 
@@ -224,7 +224,7 @@ async fn runtime_upgrade_resumes_v2_only_after_the_lease_and_promotes_v3() {
         executor,
         source_session.as_ref().clone(),
     ));
-    let access = DefaultSpaceAccessAdapter::new_with_security_repositories(
+    let access = RuntimeSpaceAccessAdapter::new(
         Arc::new(KeyMaterialStore::new(
             secure_storage.clone(),
             Arc::new(JsonKeySlotStore::new(vault_path.clone())),

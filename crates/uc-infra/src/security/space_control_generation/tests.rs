@@ -8,20 +8,25 @@ use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
     ActiveRuntimeLayout, AdmissionChangeFacts, AdmissionContentKeyCatalogV1,
     AdmissionContentKeyEntryV1, AdmissionSecurityCommitmentV1, BaseMembershipHistoryPosition,
-    MembershipCredential, PendingGroupUpdate, SpaceAdmissionId,
-    ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
+    LegacyBootstrapRepositoryPort, MembershipCredential, PendingGroupUpdate,
+    RevocationRepositoryPort, SpaceAdmissionId, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
+    ED25519_SIGNATURE_ALGORITHM_V1,
 };
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::PrepareAdmissionTargetAccessPort;
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
 use super::{acquire_lease, SpaceControlGeneration, SpaceControlGenerationError};
+use crate::db::executor::DieselSqliteExecutor;
+use crate::db::pool::init_db_pool;
+use crate::db::repositories::DieselSpaceSecurityStore;
 use crate::fs::key_slot_store::JsonKeySlotStore;
 use crate::security::{
-    ActiveRuntimeManifestV3, AdmissionKeyManager, DefaultCurrentProfile, ProfileRuntimeLayout,
+    ActiveRuntimeManifestV3, AdmissionKeyManager, DefaultCurrentProfile, ProfileContentKeyVault,
+    ProfileRuntimeLayout,
 };
 use crate::space::{
-    prepare_registration, DefaultSpaceAccessAdapter, InMemorySession, KeyMaterialStore,
+    prepare_registration, InMemorySession, KeyMaterialStore, RuntimeSpaceAccessAdapter,
 };
 
 #[derive(Default)]
@@ -50,15 +55,30 @@ impl SecureStoragePort for MemorySecureStorage {
 async fn complete_admission_generation_is_published_once_and_reused() {
     let directory = tempdir().unwrap();
     let root = directory.path().join("profile");
+    std::fs::create_dir_all(&root).unwrap();
     let secure_storage: Arc<dyn SecureStoragePort> = Arc::new(MemorySecureStorage::default());
     let current_profile: Arc<dyn CurrentProfilePort> = Arc::new(DefaultCurrentProfile::new());
-    let access = Arc::new(DefaultSpaceAccessAdapter::new(
+    let session = Arc::new(InMemorySession::new());
+    let security_pool =
+        init_db_pool(root.join("fixture-security.sqlite").to_str().unwrap()).unwrap();
+    let security_store = Arc::new(DieselSpaceSecurityStore::new(
+        Arc::new(DieselSqliteExecutor::new(security_pool)),
+        session.as_ref().clone(),
+    ));
+    let access = Arc::new(RuntimeSpaceAccessAdapter::new(
         Arc::new(KeyMaterialStore::new(
             Arc::clone(&secure_storage),
             Arc::new(JsonKeySlotStore::new(root.join("keys"))),
         )),
         Arc::clone(&current_profile),
-        Arc::new(InMemorySession::new()),
+        session,
+        security_store.clone() as Arc<dyn RevocationRepositoryPort>,
+        security_store as Arc<dyn LegacyBootstrapRepositoryPort>,
+        Arc::new(ProfileContentKeyVault::new(
+            root.join("profile-content-vault"),
+            Arc::clone(&secure_storage),
+            [0x40; 16],
+        )),
     ));
     let keys = Arc::new(AdmissionKeyManager::new(
         Arc::clone(&secure_storage),

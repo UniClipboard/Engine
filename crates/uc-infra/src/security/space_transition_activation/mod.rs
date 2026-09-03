@@ -9,7 +9,7 @@ use super::{
     SpaceControlGeneration,
 };
 use crate::db::pool::DbPool;
-use crate::space::DefaultSpaceAccessAdapter;
+use crate::space::RuntimeSpaceAccessAdapter;
 
 /// V3 control-generation 的唯一 manifest 生效与进程内重绑入口。
 ///
@@ -21,7 +21,7 @@ pub struct SpaceTransitionActivation {
     control_pool: DbPool,
     manifests: Arc<ActiveSpaceGenerationManifestStore>,
     control_generations: Arc<SpaceControlGeneration>,
-    space_access: Arc<DefaultSpaceAccessAdapter>,
+    space_access: Arc<RuntimeSpaceAccessAdapter>,
     activation_lock: tokio::sync::Mutex<()>,
 }
 
@@ -31,7 +31,7 @@ impl SpaceTransitionActivation {
         control_pool: DbPool,
         manifests: Arc<ActiveSpaceGenerationManifestStore>,
         control_generations: Arc<SpaceControlGeneration>,
-        space_access: Arc<DefaultSpaceAccessAdapter>,
+        space_access: Arc<RuntimeSpaceAccessAdapter>,
     ) -> Self {
         Self {
             profile_root,

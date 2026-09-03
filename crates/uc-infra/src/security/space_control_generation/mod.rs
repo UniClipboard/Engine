@@ -32,7 +32,7 @@ use crate::fs::FsAtomicPublisher;
 use crate::space::{
     install_prepared_registration_for_control_generation,
     rebind_registration_to_control_generation, verify_prepared_registration_for_control_generation,
-    DefaultSpaceAccessAdapter, InMemorySession, SqliteMembershipLedger,
+    InMemorySession, RuntimeSpaceAccessAdapter, SqliteMembershipLedger,
 };
 
 /// 已完整写入、由 production repository 回读且原子发布的控制世代证明。
@@ -90,7 +90,7 @@ pub enum SpaceControlGenerationError {
 /// 原子发布都留在 implementation 内部。
 pub struct SpaceControlGeneration {
     profile_root: PathBuf,
-    space_access: Arc<DefaultSpaceAccessAdapter>,
+    space_access: Arc<RuntimeSpaceAccessAdapter>,
     current_profile: Arc<dyn CurrentProfilePort>,
     admission_keys: Arc<AdmissionKeyManager>,
     prepare_lock: tokio::sync::Mutex<()>,
@@ -99,7 +99,7 @@ pub struct SpaceControlGeneration {
 impl SpaceControlGeneration {
     pub fn new(
         profile_root: PathBuf,
-        space_access: Arc<DefaultSpaceAccessAdapter>,
+        space_access: Arc<RuntimeSpaceAccessAdapter>,
         current_profile: Arc<dyn CurrentProfilePort>,
         admission_keys: Arc<AdmissionKeyManager>,
     ) -> Self {

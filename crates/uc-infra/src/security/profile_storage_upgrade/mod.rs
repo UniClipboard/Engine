@@ -29,7 +29,7 @@ use super::{
     ProfileContentKeyVault,
 };
 use crate::security::active_space_generation_manifest_store::V3ManifestPromotionOutcome;
-use crate::space::{DefaultSpaceAccessAdapter, InMemorySession, KeyMaterialStore};
+use crate::space::{InMemorySession, KeyMaterialStore, RuntimeSpaceAccessAdapter};
 use derived_payloads::DerivedPayloadConverter;
 use journal::{UpgradeJournalV1, UpgradePhaseV1};
 use persistence::{UpgradeLeaseResult, UpgradePersistence};
@@ -199,7 +199,7 @@ impl RuntimeUpgradeBootstrap {
                     executor,
                     source_session.as_ref().clone(),
                 ));
-            let access = DefaultSpaceAccessAdapter::new_with_security_repositories(
+            let access = RuntimeSpaceAccessAdapter::new(
                 key_material,
                 current_profile,
                 Arc::clone(&source_session),

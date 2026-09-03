@@ -1,7 +1,7 @@
 use super::*;
 
 struct ApplicationSpaceUnlockAdapter {
-    inner: Arc<uc_infra::space::DefaultSpaceAccessAdapter>,
+    inner: Arc<uc_infra::space::RuntimeSpaceAccessAdapter>,
 }
 
 #[async_trait::async_trait]
@@ -41,7 +41,7 @@ pub(super) fn build_space_access_ports(
     profile_content_key_vault: &Arc<ProfileContentKeyVault>,
 ) -> (
     SpaceAccessPorts,
-    Arc<uc_infra::space::DefaultSpaceAccessAdapter>,
+    Arc<uc_infra::space::RuntimeSpaceAccessAdapter>,
     Arc<dyn uc_application::deps::CurrentMemberSignaturePort>,
     Arc<dyn uc_core::membership::SpaceSecurityStateResetPort>,
 ) {
@@ -55,16 +55,14 @@ pub(super) fn build_space_access_ports(
         security_repository.clone();
     let space_security_reset: Arc<dyn uc_core::membership::SpaceSecurityStateResetPort> =
         security_repository.clone();
-    let space_access_adapter = Arc::new(
-        uc_infra::space::DefaultSpaceAccessAdapter::new_with_security_repositories(
-            key_material.clone(),
-            current_profile.clone(),
-            session.clone(),
-            key_epoch_repository,
-            legacy_bootstrap_repository,
-            Arc::clone(profile_content_key_vault),
-        ),
-    );
+    let space_access_adapter = Arc::new(uc_infra::space::RuntimeSpaceAccessAdapter::new(
+        key_material.clone(),
+        current_profile.clone(),
+        session.clone(),
+        key_epoch_repository,
+        legacy_bootstrap_repository,
+        Arc::clone(profile_content_key_vault),
+    ));
     let current_member_signatures: Arc<dyn uc_application::deps::CurrentMemberSignaturePort> =
         space_access_adapter.clone();
     let unlock = Arc::new(ApplicationSpaceUnlockAdapter {

@@ -34,7 +34,7 @@ pub use membership_ledger::SqliteMembershipLedger;
 pub(crate) use security::export_admission_content_key_catalog;
 pub(crate) use security::import_admission_content_key_catalog;
 pub use security::{
-    DefaultMembershipSecurityUpdateAdapter, DefaultSpaceAccessAdapter, InMemorySession,
-    KeyMaterialStore, MlsPeerAdmissionAdapter, OpenMlsHistoricalSignatureVerifier,
-    SpaceSessionRebindAdapter,
+    DefaultMembershipSecurityUpdateAdapter, InMemorySession, KeyMaterialStore,
+    MigrationSpaceAccessAdapter, MlsPeerAdmissionAdapter, OpenMlsHistoricalSignatureVerifier,
+    RuntimeSpaceAccessAdapter, SpaceSessionRebindAdapter,
 };

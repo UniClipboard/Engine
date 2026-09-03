@@ -21,7 +21,7 @@ use crate::security::{
     AdmissionKeyManager, DefaultCurrentProfile, MasterKey, ProfileContentKeyVault,
     ProfileRuntimeLayout, SpaceControlGeneration, SpaceTransitionActivation,
 };
-use crate::space::{DefaultSpaceAccessAdapter, InMemorySession, KeyMaterialStore};
+use crate::space::{InMemorySession, KeyMaterialStore, RuntimeSpaceAccessAdapter};
 
 #[derive(Default)]
 struct MemorySecureStorage(Mutex<HashMap<String, Vec<u8>>>);
@@ -111,13 +111,14 @@ async fn v3_device_reset_replaces_only_the_control_generation() {
         Arc::clone(&secure_storage),
         [0x81; 16],
     ));
-    let access = Arc::new(DefaultSpaceAccessAdapter::new_with_key_epoch_repository(
+    let access = Arc::new(RuntimeSpaceAccessAdapter::new(
         Arc::new(KeyMaterialStore::new(
             Arc::clone(&secure_storage),
             Arc::new(JsonKeySlotStore::new(root.join("keys"))),
         )),
         Arc::clone(&current_profile),
         Arc::clone(&session),
+        repository.clone(),
         repository.clone(),
         vault,
     ));

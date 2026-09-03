@@ -83,15 +83,13 @@ struct MembershipBranchRecoveryConfirmationV1 {
 }
 
 /// `SpaceAccessStore` 默认实现(同时提供全部窄意图 port)。
-pub struct DefaultSpaceAccessAdapter {
+pub struct RuntimeSpaceAccessAdapter {
     key_material: Arc<KeyMaterialStore>,
     current_profile: Arc<dyn CurrentProfilePort>,
     pub(super) session: Arc<InMemorySession>,
-    /// 只有不配置安全材料 repository 的 legacy/config-migration 构造路径为空；
-    /// 正常 runtime 构造器必须同时注入 profile vault。
-    active_security_session: Option<ActiveSpaceSecuritySession>,
-    pub(super) key_epoch_repository: Option<Arc<dyn RevocationRepositoryPort>>,
-    legacy_bootstrap_repository: Option<Arc<dyn LegacyBootstrapRepositoryPort>>,
+    active_security_session: ActiveSpaceSecuritySession,
+    key_epoch_repository: Arc<dyn RevocationRepositoryPort>,
+    legacy_bootstrap_repository: Arc<dyn LegacyBootstrapRepositoryPort>,
     /// 本进程内是否已经确认 keychain 中存在与本机 keyslot 匹配的 KEK。
     ///
     /// 一旦置位（`do_first_time_init` / `try_resume_session` /
@@ -104,47 +102,15 @@ pub struct DefaultSpaceAccessAdapter {
     kek_observed: AtomicBool,
 }
 
-impl DefaultSpaceAccessAdapter {
-    /// 构造不读取 Ready `SpaceKeyMaterial` 的 legacy 访问器。
-    ///
-    /// 正常 Engine runtime 必须使用带 security repository 与 profile vault 的构造器。
+/// 只用于旧配置初始化的最小访问器，不具备运行期安全端口。
+pub struct MigrationSpaceAccessAdapter {
+    key_material: Arc<KeyMaterialStore>,
+    current_profile: Arc<dyn CurrentProfilePort>,
+    session: Arc<InMemorySession>,
+}
+
+impl RuntimeSpaceAccessAdapter {
     pub fn new(
-        key_material: Arc<KeyMaterialStore>,
-        current_profile: Arc<dyn CurrentProfilePort>,
-        session: Arc<InMemorySession>,
-    ) -> Self {
-        Self {
-            key_material,
-            current_profile,
-            session,
-            active_security_session: None,
-            key_epoch_repository: None,
-            legacy_bootstrap_repository: None,
-            kek_observed: AtomicBool::new(false),
-        }
-    }
-
-    pub fn new_with_key_epoch_repository(
-        key_material: Arc<KeyMaterialStore>,
-        current_profile: Arc<dyn CurrentProfilePort>,
-        session: Arc<InMemorySession>,
-        key_epoch_repository: Arc<dyn RevocationRepositoryPort>,
-        profile_content_key_vault: Arc<ProfileContentKeyVault>,
-    ) -> Self {
-        let active_security_session =
-            ActiveSpaceSecuritySession::new(Arc::clone(&session), profile_content_key_vault);
-        Self {
-            key_material,
-            current_profile,
-            session,
-            active_security_session: Some(active_security_session),
-            key_epoch_repository: Some(key_epoch_repository),
-            legacy_bootstrap_repository: None,
-            kek_observed: AtomicBool::new(false),
-        }
-    }
-
-    pub fn new_with_security_repositories(
         key_material: Arc<KeyMaterialStore>,
         current_profile: Arc<dyn CurrentProfilePort>,
         session: Arc<InMemorySession>,
@@ -158,21 +124,76 @@ impl DefaultSpaceAccessAdapter {
             key_material,
             current_profile,
             session,
-            active_security_session: Some(active_security_session),
-            key_epoch_repository: Some(key_epoch_repository),
-            legacy_bootstrap_repository: Some(legacy_bootstrap_repository),
+            active_security_session,
+            key_epoch_repository,
+            legacy_bootstrap_repository,
             kek_observed: AtomicBool::new(false),
         }
     }
+}
 
-    fn active_security_session(
+impl MigrationSpaceAccessAdapter {
+    pub fn new(
+        key_material: Arc<KeyMaterialStore>,
+        current_profile: Arc<dyn CurrentProfilePort>,
+        session: Arc<InMemorySession>,
+    ) -> Self {
+        Self {
+            key_material,
+            current_profile,
+            session,
+        }
+    }
+}
+
+#[async_trait]
+impl uc_application::deps::InitializeSpacePort for MigrationSpaceAccessAdapter {
+    async fn initialize(
         &self,
-    ) -> Result<&ActiveSpaceSecuritySession, ActiveSpaceSecuritySessionError> {
-        self.active_security_session.as_ref().ok_or_else(|| {
-            ActiveSpaceSecuritySessionError::Session {
-                source: anyhow::anyhow!("active security session is unavailable"),
-            }
-        })
+        space_id: &SpaceId,
+        passphrase: &DomainPassphrase,
+    ) -> Result<ActiveSpace, SpaceAccessError> {
+        if self
+            .key_material
+            .keyslot_exists()
+            .await
+            .map_err(map_encryption_error)?
+        {
+            return Err(SpaceAccessError::AlreadyInitialized);
+        }
+        let profile = self
+            .current_profile
+            .current_profile()
+            .await
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let scope = key_scope_from_profile(&profile);
+        let draft = KeySlot::draft_v1(scope.clone())
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let legacy = LegacyPassphrase(passphrase.expose().to_owned());
+        let kek = v1_aead::derive_kek_argon2id(&legacy, &draft.salt, &draft.kdf)
+            .map_err(|error| map_and_log_kdf_error(error, "migration_initialize"))?;
+        let master_key = MasterKey::generate().map_err(map_encryption_error)?;
+        let blob = v1_aead::wrap_master_key_xchacha(&kek, &master_key).map_err(|error| {
+            map_and_log_local_crypto_error(
+                error.to_string(),
+                "migration_initialize",
+                "wrap_master_key",
+            )
+        })?;
+        let keyslot = draft.finalize(WrappedMasterKey { blob });
+
+        self.key_material
+            .store_kek(&scope, &kek)
+            .await
+            .map_err(map_encryption_error)?;
+        if let Err(error) = self.key_material.store_keyslot(&keyslot).await {
+            let _ = self.key_material.delete_keyslot(&scope).await;
+            let _ = self.key_material.delete_kek(&scope).await;
+            return Err(map_encryption_error(error));
+        }
+        self.session
+            .set_master_key_for_space(space_id.clone(), master_key);
+        Ok(ActiveSpace::new(space_id.clone()))
     }
 }
 
@@ -430,7 +451,7 @@ pub(super) fn open_group_catalog(
     Ok(portable)
 }
 
-impl DefaultSpaceAccessAdapter {
+impl RuntimeSpaceAccessAdapter {
     // Stage 4 keeps production admission fail-closed until the data generation
     // owner can invoke this only after manifest verification.
     #[allow(dead_code)]
@@ -530,19 +551,10 @@ impl DefaultSpaceAccessAdapter {
             .await
             .map_err(map_encryption_error)?;
 
-        let repository =
-            self.key_epoch_repository
-                .as_ref()
-                .ok_or_else(|| SpaceAccessError::SecurityState {
-                    source: anyhow::anyhow!("control security repository is unavailable"),
-                })?;
-        let active_security_session = self.active_security_session.as_ref().ok_or_else(|| {
-            SpaceAccessError::SecurityState {
-                source: anyhow::anyhow!("active security session is unavailable"),
-            }
-        })?;
+        let repository = self.key_epoch_repository.as_ref();
+        let active_security_session = &self.active_security_session;
         let epoch = active_security_session
-            .restore_from_repository(target_space_id, master_key, repository.as_ref())
+            .restore_from_repository(target_space_id, master_key, repository)
             .await
             .map_err(map_active_security_session_error)?;
         if epoch.is_none() {
@@ -567,19 +579,10 @@ impl DefaultSpaceAccessAdapter {
             .session
             .get_master_key()
             .map_err(map_encryption_error)?;
-        let repository =
-            self.key_epoch_repository
-                .as_ref()
-                .ok_or_else(|| SpaceAccessError::SecurityState {
-                    source: anyhow::anyhow!("control security repository is unavailable"),
-                })?;
-        let active_security_session = self.active_security_session.as_ref().ok_or_else(|| {
-            SpaceAccessError::SecurityState {
-                source: anyhow::anyhow!("active security session is unavailable"),
-            }
-        })?;
+        let repository = self.key_epoch_repository.as_ref();
+        let active_security_session = &self.active_security_session;
         let epoch = active_security_session
-            .restore_from_repository(space_id, master_key, repository.as_ref())
+            .restore_from_repository(space_id, master_key, repository)
             .await
             .map_err(map_active_security_session_error)?;
         if epoch.is_none() {
@@ -645,10 +648,7 @@ impl DefaultSpaceAccessAdapter {
         key_package: &[u8],
         admission_replay: Option<(DeviceId, AdmissionReplayId)>,
     ) -> Result<(GroupAdmission, Option<ProtectionGroupAdmission>), SpaceAccessError> {
-        let repository = self
-            .key_epoch_repository
-            .as_ref()
-            .ok_or_else(|| SpaceAccessError::Internal("key epoch repository unavailable".into()))?;
+        let repository = self.key_epoch_repository.as_ref();
         let current = match repository
             .load_space_material(space_id)
             .await
@@ -748,8 +748,7 @@ impl DefaultSpaceAccessAdapter {
             .save_space_material(&next)
             .await
             .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
-        self.active_security_session()
-            .map_err(map_active_security_session_error)?
+        self.active_security_session
             .install_current_material(&next)
             .await
             .map_err(map_active_security_session_error)?;
@@ -785,10 +784,7 @@ impl DefaultSpaceAccessAdapter {
         encrypted_key_catalog: &[u8],
         group_epoch: u64,
     ) -> Result<(), SpaceAccessError> {
-        let repository = self
-            .key_epoch_repository
-            .as_ref()
-            .ok_or_else(|| SpaceAccessError::Internal("key epoch repository unavailable".into()))?;
+        let repository = self.key_epoch_repository.as_ref();
         let (key_package, private_state) = pending.into_parts();
         let completed = MlsGroupEngine::complete_join(
             PendingMlsJoin::new(key_package, MlsClientState::from_bytes(private_state)),
@@ -857,11 +853,7 @@ impl DefaultSpaceAccessAdapter {
                 .await;
             return Err(map_encryption_error(error));
         }
-        let active_security_session = self.active_security_session.as_ref().ok_or_else(|| {
-            SpaceAccessError::SecurityState {
-                source: anyhow::anyhow!("active security session is unavailable"),
-            }
-        })?;
+        let active_security_session = &self.active_security_session;
         if let Err(error) = active_security_session
             .activate(space_id, local_root, Some(&material))
             .await
@@ -887,10 +879,7 @@ impl DefaultSpaceAccessAdapter {
         retained_recipients: &[DeviceId],
         now_ms: i64,
     ) -> Result<GroupRevocationResult, KeyEpochError> {
-        let repository = self
-            .key_epoch_repository
-            .as_ref()
-            .ok_or_else(|| KeyEpochError::Repository("key epoch repository unavailable".into()))?;
+        let repository = self.key_epoch_repository.as_ref();
         let space_id = self
             .session
             .current_space_id()
@@ -947,8 +936,7 @@ impl DefaultSpaceAccessAdapter {
                                     now_ms,
                                 )
                                 .await?;
-                            return Self::group_revocation_result(repository.as_ref(), &record)
-                                .await;
+                            return Self::group_revocation_result(repository, &record).await;
                         }
                         return Err(KeyEpochError::Repository(
                             "prepared revocation epoch mismatch".into(),
@@ -970,8 +958,7 @@ impl DefaultSpaceAccessAdapter {
                                     now_ms,
                                 )
                                 .await?;
-                            return Self::group_revocation_result(repository.as_ref(), &record)
-                                .await;
+                            return Self::group_revocation_result(repository, &record).await;
                         }
                         Err(error) => {
                             return Err(KeyEpochError::Repository(error.to_string()));
@@ -985,7 +972,7 @@ impl DefaultSpaceAccessAdapter {
                                 now_ms,
                             )
                             .await?;
-                        return Self::group_revocation_result(repository.as_ref(), &record).await;
+                        return Self::group_revocation_result(repository, &record).await;
                     }
                     let removal = MlsGroupEngine::remove_member(
                         &MlsClientState::from_bytes(base.group_state().to_vec()),
@@ -1071,8 +1058,7 @@ impl DefaultSpaceAccessAdapter {
                                     now_ms,
                                 )
                                 .await?;
-                            return Self::group_revocation_result(repository.as_ref(), &record)
-                                .await;
+                            return Self::group_revocation_result(repository, &record).await;
                         }
                     }
                 }
@@ -1086,8 +1072,7 @@ impl DefaultSpaceAccessAdapter {
                         .ok_or_else(|| {
                             KeyEpochError::Repository("activated key material unavailable".into())
                         })?;
-                    self.active_security_session()
-                        .map_err(map_key_epoch_security_session_error)?
+                    self.active_security_session
                         .install_current_material(&activated)
                         .await
                         .map_err(map_key_epoch_security_session_error)?;
@@ -1099,8 +1084,7 @@ impl DefaultSpaceAccessAdapter {
                         .ok_or_else(|| {
                             KeyEpochError::Repository("activated key material unavailable".into())
                         })?;
-                    self.active_security_session()
-                        .map_err(map_key_epoch_security_session_error)?
+                    self.active_security_session
                         .install_current_material(&activated)
                         .await
                         .map_err(map_key_epoch_security_session_error)?;
@@ -1109,7 +1093,7 @@ impl DefaultSpaceAccessAdapter {
                         .await?;
                 }
                 RevocationStatus::Distributing | RevocationStatus::Complete => {
-                    return Self::group_revocation_result(repository.as_ref(), &record).await;
+                    return Self::group_revocation_result(repository, &record).await;
                 }
                 RevocationStatus::RecoveryRequired => {
                     return Err(KeyEpochError::Repository(
@@ -1140,14 +1124,11 @@ impl DefaultSpaceAccessAdapter {
         recipient: &DeviceId,
         now_ms: i64,
     ) -> Result<GroupRevocationResult, KeyEpochError> {
-        let repository = self
-            .key_epoch_repository
-            .as_ref()
-            .ok_or_else(|| KeyEpochError::Repository("key epoch repository unavailable".into()))?;
+        let repository = self.key_epoch_repository.as_ref();
         let record = repository
             .acknowledge_recipient(revocation_id, recipient, now_ms)
             .await?;
-        Self::group_revocation_result(repository.as_ref(), &record).await
+        Self::group_revocation_result(repository, &record).await
     }
 
     async fn apply_group_epoch_update(&self, payload: &[u8]) -> Result<GroupEpoch, KeyEpochError> {
@@ -1158,10 +1139,7 @@ impl DefaultSpaceAccessAdapter {
                 "unsupported group epoch update".into(),
             ));
         }
-        let repository = self
-            .key_epoch_repository
-            .as_ref()
-            .ok_or_else(|| KeyEpochError::Repository("key epoch repository unavailable".into()))?;
+        let repository = self.key_epoch_repository.as_ref();
         let space_id = self
             .session
             .current_space_id()
@@ -1219,8 +1197,7 @@ impl DefaultSpaceAccessAdapter {
             .install_space_material(&material)
             .map_err(|error| KeyEpochError::Repository(error.to_string()))?;
         repository.save_space_material(&material).await?;
-        self.active_security_session()
-            .map_err(map_key_epoch_security_session_error)?
+        self.active_security_session
             .install_current_material(&material)
             .await
             .map_err(map_key_epoch_security_session_error)?;
@@ -1231,10 +1208,7 @@ impl DefaultSpaceAccessAdapter {
         &self,
         revocation_id: &RevocationId,
     ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
-        let repository = self
-            .key_epoch_repository
-            .as_ref()
-            .ok_or_else(|| KeyEpochError::Repository("key epoch repository unavailable".into()))?;
+        let repository = self.key_epoch_repository.as_ref();
         let Some(stage) = repository.load_staged_revocation(revocation_id).await? else {
             return Ok(Vec::new());
         };
@@ -1259,14 +1233,11 @@ impl DefaultSpaceAccessAdapter {
         &self,
         revocation_id: &RevocationId,
     ) -> Result<Option<GroupRevocationResult>, KeyEpochError> {
-        let repository = self
-            .key_epoch_repository
-            .as_ref()
-            .ok_or_else(|| KeyEpochError::Repository("key epoch repository unavailable".into()))?;
+        let repository = self.key_epoch_repository.as_ref();
         let Some(record) = repository.get_revocation(revocation_id).await? else {
             return Ok(None);
         };
-        Self::group_revocation_result(repository.as_ref(), &record)
+        Self::group_revocation_result(repository, &record)
             .await
             .map(Some)
     }
@@ -1274,10 +1245,7 @@ impl DefaultSpaceAccessAdapter {
     async fn current_group_revocation(
         &self,
     ) -> Result<Option<GroupRevocationResult>, KeyEpochError> {
-        let repository = self
-            .key_epoch_repository
-            .as_ref()
-            .ok_or_else(|| KeyEpochError::Repository("key epoch repository unavailable".into()))?;
+        let repository = self.key_epoch_repository.as_ref();
         let space_id = self
             .session
             .current_space_id()
@@ -1288,7 +1256,7 @@ impl DefaultSpaceAccessAdapter {
             .into_iter()
             .find(|record| record.space_id() == &space_id);
         match current {
-            Some(record) => Self::group_revocation_result(repository.as_ref(), &record)
+            Some(record) => Self::group_revocation_result(repository, &record)
                 .await
                 .map(Some),
             None => Ok(None),
@@ -1301,16 +1269,13 @@ impl DefaultSpaceAccessAdapter {
         permanently_lost_device_ids: &[DeviceId],
         now_ms: i64,
     ) -> Result<GroupRevocationResult, KeyEpochError> {
-        let repository = self
-            .key_epoch_repository
-            .as_ref()
-            .ok_or_else(|| KeyEpochError::Repository("key epoch repository unavailable".into()))?;
+        let repository = self.key_epoch_repository.as_ref();
         let record = repository
             .get_revocation(revocation_id)
             .await?
             .ok_or_else(|| KeyEpochError::Repository("revocation not found".into()))?;
         if record.status() == RevocationStatus::Complete {
-            return Self::group_revocation_result(repository.as_ref(), &record).await;
+            return Self::group_revocation_result(repository, &record).await;
         }
         let mut stage = repository
             .load_staged_revocation(revocation_id)
@@ -1343,7 +1308,7 @@ impl DefaultSpaceAccessAdapter {
                     let record = repository
                         .commit_revocation_recovery(&stage, &material)
                         .await?;
-                    return Self::group_revocation_result(repository.as_ref(), &record).await;
+                    return Self::group_revocation_result(repository, &record).await;
                 }
             }
         }
@@ -1419,23 +1384,19 @@ impl DefaultSpaceAccessAdapter {
             .commit_revocation_recovery(&stage, &material)
             .await?;
         if record.status() != RevocationStatus::RecoveryRequired {
-            self.active_security_session()
-                .map_err(map_key_epoch_security_session_error)?
+            self.active_security_session
                 .install_current_material(&material)
                 .await
                 .map_err(map_key_epoch_security_session_error)?;
         }
-        Self::group_revocation_result(repository.as_ref(), &record).await
+        Self::group_revocation_result(repository, &record).await
     }
 
     async fn resume_group_revocations(
         &self,
         now_ms: i64,
     ) -> Result<Vec<GroupRevocationResult>, KeyEpochError> {
-        let repository = self
-            .key_epoch_repository
-            .as_ref()
-            .ok_or_else(|| KeyEpochError::Repository("key epoch repository unavailable".into()))?;
+        let repository = self.key_epoch_repository.as_ref();
         let space_id = self
             .session
             .current_space_id()
@@ -1449,7 +1410,7 @@ impl DefaultSpaceAccessAdapter {
         let mut results = Vec::with_capacity(records.len());
         for mut record in records {
             if record.status() == RevocationStatus::RecoveryRequired {
-                results.push(Self::group_revocation_result(repository.as_ref(), &record).await?);
+                results.push(Self::group_revocation_result(repository, &record).await?);
                 continue;
             }
             if record.status() == RevocationStatus::Prepared {
@@ -1467,9 +1428,7 @@ impl DefaultSpaceAccessAdapter {
                                 now_ms,
                             )
                             .await?;
-                        results.push(
-                            Self::group_revocation_result(repository.as_ref(), &record).await?,
-                        );
+                        results.push(Self::group_revocation_result(repository, &record).await?);
                         continue;
                     }
                     Err(error) => return Err(error),
@@ -1488,10 +1447,7 @@ impl DefaultSpaceAccessAdapter {
     }
 
     async fn pending_space_group_updates(&self) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
-        let repository = self
-            .key_epoch_repository
-            .as_ref()
-            .ok_or_else(|| KeyEpochError::Repository("key epoch repository unavailable".into()))?;
+        let repository = self.key_epoch_repository.as_ref();
         let space_id = self
             .session
             .current_space_id()
@@ -1514,10 +1470,7 @@ impl DefaultSpaceAccessAdapter {
         update_id: &str,
         now_ms: i64,
     ) -> Result<bool, KeyEpochError> {
-        let repository = self
-            .key_epoch_repository
-            .as_ref()
-            .ok_or_else(|| KeyEpochError::Repository("key epoch repository unavailable".into()))?;
+        let repository = self.key_epoch_repository.as_ref();
         let space_id = self
             .session
             .current_space_id()
@@ -1553,10 +1506,7 @@ impl DefaultSpaceAccessAdapter {
         update_id: &str,
         now_ms: i64,
     ) -> Result<bool, KeyEpochError> {
-        let repository = self
-            .key_epoch_repository
-            .as_ref()
-            .ok_or_else(|| KeyEpochError::Repository("key epoch repository unavailable".into()))?;
+        let repository = self.key_epoch_repository.as_ref();
         let space_id = self
             .session
             .current_space_id()
@@ -1640,18 +1590,10 @@ impl DefaultSpaceAccessAdapter {
         space_id: &SpaceId,
         master_key: MasterKey,
     ) -> Result<(), SpaceAccessError> {
-        let Some(repository) = &self.key_epoch_repository else {
-            self.session
-                .set_master_key_for_space(space_id.clone(), master_key);
-            return Ok(());
-        };
-        let active_security_session = self.active_security_session.as_ref().ok_or_else(|| {
-            SpaceAccessError::SecurityState {
-                source: anyhow::anyhow!("active security session is unavailable"),
-            }
-        })?;
+        let repository = self.key_epoch_repository.as_ref();
+        let active_security_session = &self.active_security_session;
         let restored_epoch = active_security_session
-            .restore_from_repository(space_id, master_key, repository.as_ref())
+            .restore_from_repository(space_id, master_key, repository)
             .await
             .map_err(map_active_security_session_error)?;
         if let Some(group_epoch) = restored_epoch {
@@ -1733,7 +1675,7 @@ impl DefaultSpaceAccessAdapter {
 }
 
 #[async_trait]
-impl SpaceAccessStore for DefaultSpaceAccessAdapter {
+impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
     async fn initialize(
         &self,
         space_id: &SpaceId,
@@ -2132,7 +2074,7 @@ impl SpaceAccessStore for DefaultSpaceAccessAdapter {
     }
 }
 
-impl DefaultSpaceAccessAdapter {
+impl RuntimeSpaceAccessAdapter {
     async fn probe_profile_key_access(
         &self,
     ) -> Result<ProfileKeyAccessProbe, ProfileKeyAccessProbePortError> {
@@ -2184,7 +2126,7 @@ impl DefaultSpaceAccessAdapter {
 // The single adapter satisfies every narrow space-access intent port by
 // delegating to its aggregate-store methods (UFCS disambiguates the same-named
 // methods). The composition root coerces one
-// `Arc<DefaultSpaceAccessAdapter>` into each port (see ports.md §8.3).
+// `Arc<RuntimeSpaceAccessAdapter>` into each port (see ports.md §8.3).
 //
 // These impls live in a private submodule so the narrow port traits do not
 // leak into other method-resolution scopes (they share method names with the
@@ -2201,19 +2143,19 @@ mod intent_ports {
     };
 
     #[async_trait]
-    impl PrepareAdmissionTargetAccessPort for DefaultSpaceAccessAdapter {
+    impl PrepareAdmissionTargetAccessPort for RuntimeSpaceAccessAdapter {
         async fn prepare_target_access(
             &self,
             target_space_id: &SpaceId,
             passphrase: &DomainPassphrase,
         ) -> Result<PreparedAdmissionTargetAccess, SpaceAccessError> {
-            DefaultSpaceAccessAdapter::prepare_target_access(self, target_space_id, passphrase)
+            RuntimeSpaceAccessAdapter::prepare_target_access(self, target_space_id, passphrase)
                 .await
         }
     }
 
     #[async_trait]
-    impl InitializeSpacePort for DefaultSpaceAccessAdapter {
+    impl InitializeSpacePort for RuntimeSpaceAccessAdapter {
         async fn initialize(
             &self,
             space_id: &SpaceId,
@@ -2224,21 +2166,21 @@ mod intent_ports {
     }
 
     #[async_trait]
-    impl IsSpaceUnlockedPort for DefaultSpaceAccessAdapter {
+    impl IsSpaceUnlockedPort for RuntimeSpaceAccessAdapter {
         async fn is_unlocked(&self, space_id: &SpaceId) -> bool {
             SpaceAccessStore::is_unlocked(self, space_id).await
         }
     }
 
     #[async_trait]
-    impl LockSpacePort for DefaultSpaceAccessAdapter {
+    impl LockSpacePort for RuntimeSpaceAccessAdapter {
         async fn lock(&self, space_id: &SpaceId) -> Result<(), SpaceAccessError> {
             SpaceAccessStore::lock(self, space_id).await
         }
     }
 
     #[async_trait]
-    impl ResumeSpaceSessionPort for DefaultSpaceAccessAdapter {
+    impl ResumeSpaceSessionPort for RuntimeSpaceAccessAdapter {
         async fn try_resume_session(
             &self,
             space_id: &SpaceId,
@@ -2248,16 +2190,16 @@ mod intent_ports {
     }
 
     #[async_trait]
-    impl ProbeProfileKeyAccessPort for DefaultSpaceAccessAdapter {
+    impl ProbeProfileKeyAccessPort for RuntimeSpaceAccessAdapter {
         async fn probe_profile_key_access(
             &self,
         ) -> Result<ProfileKeyAccessProbe, ProfileKeyAccessProbePortError> {
-            DefaultSpaceAccessAdapter::probe_profile_key_access(self).await
+            RuntimeSpaceAccessAdapter::probe_profile_key_access(self).await
         }
     }
 
     #[async_trait]
-    impl DeriveSpaceSubkeyPort for DefaultSpaceAccessAdapter {
+    impl DeriveSpaceSubkeyPort for RuntimeSpaceAccessAdapter {
         async fn derive_subkey(
             &self,
             salt: &[u8],
@@ -2268,7 +2210,7 @@ mod intent_ports {
     }
 
     #[async_trait]
-    impl CurrentSessionProofKeyPort for DefaultSpaceAccessAdapter {
+    impl CurrentSessionProofKeyPort for RuntimeSpaceAccessAdapter {
         async fn current_session_proof_key(
             &self,
         ) -> Result<Option<ProofDerivedKey>, SpaceAccessError> {
@@ -2277,7 +2219,7 @@ mod intent_ports {
     }
 
     #[async_trait]
-    impl PrepareJoinOfferPort for DefaultSpaceAccessAdapter {
+    impl PrepareJoinOfferPort for RuntimeSpaceAccessAdapter {
         async fn prepare_join_offer(
             &self,
             space_id: &SpaceId,
@@ -2288,7 +2230,7 @@ mod intent_ports {
     }
 
     #[async_trait]
-    impl DeriveProofKeyPort for DefaultSpaceAccessAdapter {
+    impl DeriveProofKeyPort for RuntimeSpaceAccessAdapter {
         async fn derive_master_key_for_proof(
             &self,
             offer: &JoinOffer,
@@ -2300,14 +2242,14 @@ mod intent_ports {
 }
 
 #[async_trait]
-impl GroupRevocationPort for DefaultSpaceAccessAdapter {
+impl GroupRevocationPort for RuntimeSpaceAccessAdapter {
     async fn revoke_group_member(
         &self,
         target: &DeviceId,
         retained_recipients: &[DeviceId],
         now_ms: i64,
     ) -> Result<GroupRevocationResult, KeyEpochError> {
-        DefaultSpaceAccessAdapter::revoke_group_member(self, target, retained_recipients, now_ms)
+        RuntimeSpaceAccessAdapter::revoke_group_member(self, target, retained_recipients, now_ms)
             .await
     }
 
@@ -2317,32 +2259,32 @@ impl GroupRevocationPort for DefaultSpaceAccessAdapter {
         recipient: &DeviceId,
         now_ms: i64,
     ) -> Result<GroupRevocationResult, KeyEpochError> {
-        DefaultSpaceAccessAdapter::acknowledge_group_update(self, revocation_id, recipient, now_ms)
+        RuntimeSpaceAccessAdapter::acknowledge_group_update(self, revocation_id, recipient, now_ms)
             .await
     }
 
     async fn apply_group_epoch_update(&self, payload: &[u8]) -> Result<GroupEpoch, KeyEpochError> {
-        DefaultSpaceAccessAdapter::apply_group_epoch_update(self, payload).await
+        RuntimeSpaceAccessAdapter::apply_group_epoch_update(self, payload).await
     }
 
     async fn pending_group_updates(
         &self,
         revocation_id: &RevocationId,
     ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
-        DefaultSpaceAccessAdapter::pending_group_updates(self, revocation_id).await
+        RuntimeSpaceAccessAdapter::pending_group_updates(self, revocation_id).await
     }
 
     async fn query_group_revocation(
         &self,
         revocation_id: &RevocationId,
     ) -> Result<Option<GroupRevocationResult>, KeyEpochError> {
-        DefaultSpaceAccessAdapter::query_group_revocation(self, revocation_id).await
+        RuntimeSpaceAccessAdapter::query_group_revocation(self, revocation_id).await
     }
 
     async fn current_group_revocation(
         &self,
     ) -> Result<Option<GroupRevocationResult>, KeyEpochError> {
-        DefaultSpaceAccessAdapter::current_group_revocation(self).await
+        RuntimeSpaceAccessAdapter::current_group_revocation(self).await
     }
 
     async fn continue_group_revocation(
@@ -2351,7 +2293,7 @@ impl GroupRevocationPort for DefaultSpaceAccessAdapter {
         permanently_lost_device_ids: &[DeviceId],
         now_ms: i64,
     ) -> Result<GroupRevocationResult, KeyEpochError> {
-        DefaultSpaceAccessAdapter::continue_group_revocation(
+        RuntimeSpaceAccessAdapter::continue_group_revocation(
             self,
             revocation_id,
             permanently_lost_device_ids,
@@ -2364,11 +2306,11 @@ impl GroupRevocationPort for DefaultSpaceAccessAdapter {
         &self,
         now_ms: i64,
     ) -> Result<Vec<GroupRevocationResult>, KeyEpochError> {
-        DefaultSpaceAccessAdapter::resume_group_revocations(self, now_ms).await
+        RuntimeSpaceAccessAdapter::resume_group_revocations(self, now_ms).await
     }
 
     async fn pending_space_group_updates(&self) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
-        DefaultSpaceAccessAdapter::pending_space_group_updates(self).await
+        RuntimeSpaceAccessAdapter::pending_space_group_updates(self).await
     }
 
     async fn acknowledge_space_group_update(
@@ -2376,7 +2318,7 @@ impl GroupRevocationPort for DefaultSpaceAccessAdapter {
         update_id: &str,
         now_ms: i64,
     ) -> Result<bool, KeyEpochError> {
-        DefaultSpaceAccessAdapter::acknowledge_space_group_update(self, update_id, now_ms).await
+        RuntimeSpaceAccessAdapter::acknowledge_space_group_update(self, update_id, now_ms).await
     }
 
     async fn defer_space_group_update(
@@ -2384,7 +2326,7 @@ impl GroupRevocationPort for DefaultSpaceAccessAdapter {
         update_id: &str,
         now_ms: i64,
     ) -> Result<bool, KeyEpochError> {
-        DefaultSpaceAccessAdapter::defer_space_group_update(self, update_id, now_ms).await
+        RuntimeSpaceAccessAdapter::defer_space_group_update(self, update_id, now_ms).await
     }
 }
 
@@ -2409,16 +2351,14 @@ fn bootstrap_result(record: LegacyBootstrapRecord) -> Result<GroupBootstrapResul
 }
 
 #[async_trait]
-impl GroupBootstrapPort for DefaultSpaceAccessAdapter {
+impl GroupBootstrapPort for RuntimeSpaceAccessAdapter {
     async fn bootstrap_legacy_space(
         &self,
         sponsor: &DeviceId,
         retained_members: &[DeviceId],
         now_ms: i64,
     ) -> Result<GroupBootstrapResult, BootstrapError> {
-        let repository = self.legacy_bootstrap_repository.as_ref().ok_or_else(|| {
-            BootstrapError::Repository("legacy bootstrap is not configured".into())
-        })?;
+        let repository = self.legacy_bootstrap_repository.as_ref();
         let space_id = self
             .session
             .current_space_id()
@@ -2468,8 +2408,7 @@ impl GroupBootstrapPort for DefaultSpaceAccessAdapter {
         let activated = repository
             .activate_legacy_bootstrap(&bootstrap_id, now_ms)
             .await?;
-        self.active_security_session()
-            .map_err(map_bootstrap_security_session_error)?
+        self.active_security_session
             .install_current_material(&material)
             .await
             .map_err(map_bootstrap_security_session_error)?;
@@ -2482,9 +2421,7 @@ impl GroupBootstrapPort for DefaultSpaceAccessAdapter {
         member: &DeviceId,
         now_ms: i64,
     ) -> Result<GroupBootstrapResult, BootstrapError> {
-        let repository = self.legacy_bootstrap_repository.as_ref().ok_or_else(|| {
-            BootstrapError::Repository("legacy bootstrap is not configured".into())
-        })?;
+        let repository = self.legacy_bootstrap_repository.as_ref();
         bootstrap_result(
             repository
                 .acknowledge_legacy_readmission(bootstrap_id, member, now_ms)
@@ -2498,9 +2435,7 @@ impl GroupBootstrapPort for DefaultSpaceAccessAdapter {
         member: &DeviceId,
         now_ms: i64,
     ) -> Result<GroupBootstrapResult, BootstrapError> {
-        let repository = self.legacy_bootstrap_repository.as_ref().ok_or_else(|| {
-            BootstrapError::Repository("legacy bootstrap is not configured".into())
-        })?;
+        let repository = self.legacy_bootstrap_repository.as_ref();
         bootstrap_result(
             repository
                 .acknowledge_legacy_readmission(bootstrap_id, member, now_ms)
@@ -2512,9 +2447,7 @@ impl GroupBootstrapPort for DefaultSpaceAccessAdapter {
         &self,
         bootstrap_id: &BootstrapId,
     ) -> Result<Option<GroupBootstrapResult>, BootstrapError> {
-        let repository = self.legacy_bootstrap_repository.as_ref().ok_or_else(|| {
-            BootstrapError::Repository("legacy bootstrap is not configured".into())
-        })?;
+        let repository = self.legacy_bootstrap_repository.as_ref();
         repository
             .get_legacy_bootstrap(bootstrap_id)
             .await?
@@ -2526,9 +2459,7 @@ impl GroupBootstrapPort for DefaultSpaceAccessAdapter {
         &self,
         now_ms: i64,
     ) -> Result<Vec<GroupBootstrapResult>, BootstrapError> {
-        let repository = self.legacy_bootstrap_repository.as_ref().ok_or_else(|| {
-            BootstrapError::Repository("legacy bootstrap is not configured".into())
-        })?;
+        let repository = self.legacy_bootstrap_repository.as_ref();
         let active_space_id = self
             .session
             .current_space_id()
@@ -2538,10 +2469,6 @@ impl GroupBootstrapPort for DefaultSpaceAccessAdapter {
             .await?;
         let active_material = self
             .key_epoch_repository
-            .as_ref()
-            .ok_or_else(|| {
-                BootstrapError::Repository("key epoch repository is not configured".into())
-            })?
             .load_space_material(&active_space_id)
             .await
             .map_err(|error| BootstrapError::Repository(error.to_string()))?;
@@ -2580,7 +2507,7 @@ impl GroupBootstrapPort for DefaultSpaceAccessAdapter {
 }
 
 #[async_trait]
-impl SpaceProtectionStatusPort for DefaultSpaceAccessAdapter {
+impl SpaceProtectionStatusPort for RuntimeSpaceAccessAdapter {
     async fn query_space_protection(
         &self,
         members: &[DeviceId],
@@ -2589,34 +2516,28 @@ impl SpaceProtectionStatusPort for DefaultSpaceAccessAdapter {
             .session
             .current_space_id()
             .map_err(|_| SpaceProtectionError::Unavailable)?;
-        let key_epoch_repository = self
-            .key_epoch_repository
-            .as_ref()
-            .ok_or(SpaceProtectionError::Unavailable)?;
+        let key_epoch_repository = self.key_epoch_repository.as_ref();
         let material = key_epoch_repository
             .load_space_material(&space_id)
             .await
             .map_err(|error| SpaceProtectionError::Repository(error.to_string()))?;
-        let legacy_bootstrap = if let Some(repository) = &self.legacy_bootstrap_repository {
-            repository
-                .list_non_complete_legacy_bootstraps_for_space(&space_id)
-                .await
-                .map_err(|error| SpaceProtectionError::Repository(error.to_string()))?
-                .into_iter()
-                .find(|record| {
-                    material.as_ref().is_none_or(|material| {
-                        material.state().mode() != SpaceSecurityMode::Ready
-                            || material
-                                .state()
-                                .protection_group_id()
-                                .is_none_or(|group_id| {
-                                    group_id.as_str() == record.bootstrap_id().as_str()
-                                })
-                    })
+        let legacy_bootstrap = self
+            .legacy_bootstrap_repository
+            .list_non_complete_legacy_bootstraps_for_space(&space_id)
+            .await
+            .map_err(|error| SpaceProtectionError::Repository(error.to_string()))?
+            .into_iter()
+            .find(|record| {
+                material.as_ref().is_none_or(|material| {
+                    material.state().mode() != SpaceSecurityMode::Ready
+                        || material
+                            .state()
+                            .protection_group_id()
+                            .is_none_or(|group_id| {
+                                group_id.as_str() == record.bootstrap_id().as_str()
+                            })
                 })
-        } else {
-            None
-        };
+            });
         let mode = match (material.as_ref(), legacy_bootstrap.as_ref()) {
             (_, Some(record)) if record.status() == LegacyBootstrapStatus::RecoveryRequired => {
                 SpaceProtectionMode::Migrating
@@ -2679,7 +2600,7 @@ impl SpaceProtectionStatusPort for DefaultSpaceAccessAdapter {
 }
 
 #[async_trait]
-impl CurrentMemberSignaturePort for DefaultSpaceAccessAdapter {
+impl CurrentMemberSignaturePort for RuntimeSpaceAccessAdapter {
     async fn current_member_epoch(&self) -> Result<u64, CurrentMemberSignatureError> {
         let group = self.current_member_group_state().await?;
         MlsGroupEngine::current_epoch(&group).map_err(|_| CurrentMemberSignatureError::InvalidState)
@@ -2759,15 +2680,12 @@ impl CurrentMemberSignaturePort for DefaultSpaceAccessAdapter {
 }
 
 #[async_trait]
-impl PrepareSponsorAdmissionSecurityPort for DefaultSpaceAccessAdapter {
+impl PrepareSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
     async fn prepare_sponsor_admission_security(
         &self,
         mut request: SponsorAdmissionSecurityRequest,
     ) -> Result<SponsorPreparedAdmissionSecurity, AdmissionSecurityTransitionError> {
-        let repository = self
-            .key_epoch_repository
-            .as_ref()
-            .ok_or(AdmissionSecurityTransitionError::InvalidState)?;
+        let repository = self.key_epoch_repository.as_ref();
         let current = repository
             .load_space_material(&request.space_id)
             .await
@@ -2878,15 +2796,12 @@ impl PrepareSponsorAdmissionSecurityPort for DefaultSpaceAccessAdapter {
 }
 
 #[async_trait]
-impl ActivateSponsorAdmissionSecurityPort for DefaultSpaceAccessAdapter {
+impl ActivateSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
     async fn activate_sponsor_admission_security(
         &self,
         request: ActivateSponsorAdmissionSecurityRequest,
     ) -> Result<(), AdmissionSecurityTransitionError> {
-        let repository = self
-            .key_epoch_repository
-            .as_ref()
-            .ok_or(AdmissionSecurityTransitionError::InvalidState)?;
+        let repository = self.key_epoch_repository.as_ref();
         let staged: SpaceKeyMaterial = postcard::from_bytes(&request.staged_state)
             .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
         if staged.state().space_id() != &request.space_id
@@ -2922,8 +2837,7 @@ impl ActivateSponsorAdmissionSecurityPort for DefaultSpaceAccessAdapter {
                 pending_group_update_count = staged.pending_group_updates().len(),
                 "Sponsor 安全状态激活命中幂等持久状态"
             );
-            self.active_security_session()
-                .map_err(map_admission_security_session_error)?
+            self.active_security_session
                 .install_current_material(&staged)
                 .await
                 .map_err(map_admission_security_session_error)?;
@@ -2938,8 +2852,7 @@ impl ActivateSponsorAdmissionSecurityPort for DefaultSpaceAccessAdapter {
             pending_group_update_count = staged.pending_group_updates().len(),
             "Sponsor 安全状态已持久化"
         );
-        self.active_security_session()
-            .map_err(map_admission_security_session_error)?
+        self.active_security_session
             .install_current_material(&staged)
             .await
             .map_err(map_admission_security_session_error)?;
@@ -2952,15 +2865,12 @@ impl ActivateSponsorAdmissionSecurityPort for DefaultSpaceAccessAdapter {
 }
 
 #[async_trait]
-impl ActivateCompletionHelperAdmissionSecurityPort for DefaultSpaceAccessAdapter {
+impl ActivateCompletionHelperAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
     async fn activate_completion_helper_admission_security(
         &self,
         request: ActivateCompletionHelperAdmissionSecurityRequest,
     ) -> Result<(), AdmissionSecurityTransitionError> {
-        let repository = self
-            .key_epoch_repository
-            .as_ref()
-            .ok_or(AdmissionSecurityTransitionError::InvalidState)?;
+        let repository = self.key_epoch_repository.as_ref();
         let delivery = request
             .existing_member_deliveries
             .iter()
@@ -3075,8 +2985,7 @@ impl ActivateCompletionHelperAdmissionSecurityPort for DefaultSpaceAccessAdapter
             .save_space_material(&material)
             .await
             .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
-        self.active_security_session()
-            .map_err(map_admission_security_session_error)?
+        self.active_security_session
             .install_current_material(&material)
             .await
             .map_err(map_admission_security_session_error)
@@ -3108,7 +3017,7 @@ fn append_digest_field(hasher: &mut Sha256, value: &[u8]) {
 }
 
 #[async_trait]
-impl PrepareMembershipBranchRecoveryRecipientPort for DefaultSpaceAccessAdapter {
+impl PrepareMembershipBranchRecoveryRecipientPort for RuntimeSpaceAccessAdapter {
     async fn prepare_membership_branch_recovery_recipient(
         &self,
         group_info: Vec<u8>,
@@ -3120,9 +3029,7 @@ impl PrepareMembershipBranchRecoveryRecipientPort for DefaultSpaceAccessAdapter 
             .session
             .current_space_id()
             .map_err(|source| recovery_recipient_unavailable(anyhow::Error::new(source)))?;
-        let repository = self.key_epoch_repository.as_ref().ok_or_else(|| {
-            recovery_recipient_unavailable(anyhow::anyhow!("space security repository unavailable"))
-        })?;
+        let repository = self.key_epoch_repository.as_ref();
         let material = repository
             .load_space_material(&space_id)
             .await
@@ -3157,7 +3064,7 @@ impl PrepareMembershipBranchRecoveryRecipientPort for DefaultSpaceAccessAdapter 
 }
 
 #[async_trait]
-impl PrepareMembershipBranchRecoveryMaterialPort for DefaultSpaceAccessAdapter {
+impl PrepareMembershipBranchRecoveryMaterialPort for RuntimeSpaceAccessAdapter {
     async fn export_membership_branch_recovery_group_info(
         &self,
     ) -> Result<Vec<u8>, PrepareMembershipBranchRecoveryMaterialError> {
@@ -3278,9 +3185,7 @@ impl PrepareMembershipBranchRecoveryMaterialPort for DefaultSpaceAccessAdapter {
                 "staged recovery material belongs to another space"
             )));
         }
-        let repository = self.key_epoch_repository.as_ref().ok_or_else(|| {
-            recovery_material_unavailable(anyhow::anyhow!("space security repository unavailable"))
-        })?;
+        let repository = self.key_epoch_repository.as_ref();
         let current = repository
             .load_space_material(&space_id)
             .await
@@ -3289,8 +3194,7 @@ impl PrepareMembershipBranchRecoveryMaterialPort for DefaultSpaceAccessAdapter {
                 recovery_material_unavailable(anyhow::anyhow!("space security state unavailable"))
             })?;
         if current == staged {
-            self.active_security_session()
-                .map_err(map_recovery_security_session_error)?
+            self.active_security_session
                 .install_current_material(&staged)
                 .await
                 .map_err(map_recovery_security_session_error)?;
@@ -3320,15 +3224,14 @@ impl PrepareMembershipBranchRecoveryMaterialPort for DefaultSpaceAccessAdapter {
             .save_space_material(&staged)
             .await
             .map_err(|source| recovery_material_unavailable(anyhow::Error::new(source)))?;
-        self.active_security_session()
-            .map_err(map_recovery_security_session_error)?
+        self.active_security_session
             .install_current_material(&staged)
             .await
             .map_err(map_recovery_security_session_error)
     }
 }
 
-impl DefaultSpaceAccessAdapter {
+impl RuntimeSpaceAccessAdapter {
     pub(crate) fn prepare_recovered_membership_branch_material(
         &self,
         recipient_staged_mls_state: &[u8],
@@ -3378,9 +3281,7 @@ impl DefaultSpaceAccessAdapter {
             .session
             .current_space_id()
             .map_err(|source| recovery_material_unavailable(anyhow::Error::new(source)))?;
-        let repository = self.key_epoch_repository.as_ref().ok_or_else(|| {
-            recovery_material_unavailable(anyhow::anyhow!("space security repository unavailable"))
-        })?;
+        let repository = self.key_epoch_repository.as_ref();
         let material = repository
             .load_space_material(&space_id)
             .await
@@ -3435,7 +3336,7 @@ fn recovery_recipient_invalid(
     PrepareMembershipBranchRecoveryRecipientError::Invalid { source }
 }
 
-impl DefaultSpaceAccessAdapter {
+impl RuntimeSpaceAccessAdapter {
     async fn current_member_group_state(
         &self,
     ) -> Result<MlsClientState, CurrentMemberSignatureError> {
@@ -3443,10 +3344,7 @@ impl DefaultSpaceAccessAdapter {
             .session
             .current_space_id()
             .map_err(|_| CurrentMemberSignatureError::Unavailable)?;
-        let repository = self
-            .key_epoch_repository
-            .as_ref()
-            .ok_or(CurrentMemberSignatureError::Unavailable)?;
+        let repository = self.key_epoch_repository.as_ref();
         let material = repository
             .load_space_material(&space_id)
             .await
@@ -4002,7 +3900,7 @@ mod admission_tests {
         key_material: Arc<KeyMaterialStore>,
         session: Arc<InMemorySession>,
         repository: Arc<MockRevocationRepository>,
-    ) -> DefaultSpaceAccessAdapter {
+    ) -> RuntimeSpaceAccessAdapter {
         adapter_with_vault(directory, key_material, session, repository).0
     }
 
@@ -4011,7 +3909,7 @@ mod admission_tests {
         key_material: Arc<KeyMaterialStore>,
         session: Arc<InMemorySession>,
         repository: Arc<MockRevocationRepository>,
-    ) -> (DefaultSpaceAccessAdapter, Arc<ProfileContentKeyVault>) {
+    ) -> (RuntimeSpaceAccessAdapter, Arc<ProfileContentKeyVault>) {
         let vault = profile_content_key_vault(directory);
         let adapter = adapter_with_existing_vault(key_material, session, repository, &vault);
         (adapter, vault)
@@ -4022,12 +3920,13 @@ mod admission_tests {
         session: Arc<InMemorySession>,
         repository: Arc<MockRevocationRepository>,
         vault: &Arc<ProfileContentKeyVault>,
-    ) -> DefaultSpaceAccessAdapter {
-        let adapter = DefaultSpaceAccessAdapter::new_with_key_epoch_repository(
+    ) -> RuntimeSpaceAccessAdapter {
+        let adapter = RuntimeSpaceAccessAdapter::new(
             key_material,
             Arc::new(DefaultCurrentProfile::new()),
             session,
             repository,
+            Arc::new(MemoryLegacyBootstrapRepository::new()),
             Arc::clone(vault),
         );
         adapter
@@ -4045,7 +3944,7 @@ mod admission_tests {
         let bootstrap_repository = Arc::new(MemoryLegacyBootstrapRepository::new());
         let key_epoch_repository: Arc<dyn RevocationRepositoryPort> =
             Arc::new(MockRevocationRepository::new());
-        let adapter = DefaultSpaceAccessAdapter::new_with_security_repositories(
+        let adapter = RuntimeSpaceAccessAdapter::new(
             local_key_material(&directory, memory_secure_storage()),
             Arc::new(DefaultCurrentProfile::new()),
             Arc::clone(&session),
@@ -4119,7 +4018,7 @@ mod admission_tests {
         let bootstrap_repository = Arc::new(MemoryLegacyBootstrapRepository::new());
         let key_epoch_repository: Arc<dyn RevocationRepositoryPort> =
             Arc::new(MockRevocationRepository::new());
-        let adapter = DefaultSpaceAccessAdapter::new_with_security_repositories(
+        let adapter = RuntimeSpaceAccessAdapter::new(
             local_key_material(&directory, memory_secure_storage()),
             Arc::new(DefaultCurrentProfile::new()),
             Arc::clone(&session),
@@ -4164,7 +4063,7 @@ mod admission_tests {
         let bootstrap_repository = Arc::new(MemoryLegacyBootstrapRepository::new());
         let (key_epoch_repository, _) = memory_revocation_repository(None);
         let key_epoch_port: Arc<dyn RevocationRepositoryPort> = key_epoch_repository.clone();
-        let adapter = DefaultSpaceAccessAdapter::new_with_security_repositories(
+        let adapter = RuntimeSpaceAccessAdapter::new(
             local_key_material(&directory, memory_secure_storage()),
             Arc::new(DefaultCurrentProfile::new()),
             Arc::clone(&session),
@@ -4213,7 +4112,7 @@ mod admission_tests {
     fn sponsor_fixture_with_stage_persistence(
         persist_stage: bool,
     ) -> (
-        DefaultSpaceAccessAdapter,
+        RuntimeSpaceAccessAdapter,
         Arc<InMemorySession>,
         Arc<MockRevocationRepository>,
         SpaceId,
@@ -4250,7 +4149,7 @@ mod admission_tests {
     }
 
     fn sponsor_fixture() -> (
-        DefaultSpaceAccessAdapter,
+        RuntimeSpaceAccessAdapter,
         Arc<InMemorySession>,
         Arc<MockRevocationRepository>,
         SpaceId,
@@ -4644,11 +4543,12 @@ mod admission_tests {
             DieselSqliteExecutor::new(pool),
             session.as_ref().clone(),
         ));
-        let restarted = DefaultSpaceAccessAdapter::new_with_key_epoch_repository(
+        let restarted = RuntimeSpaceAccessAdapter::new(
             local_key_material(&directory, memory_secure_storage()),
             Arc::new(DefaultCurrentProfile::new()),
             session,
             reopened,
+            Arc::new(MemoryLegacyBootstrapRepository::new()),
             profile_content_key_vault(&directory),
         );
 

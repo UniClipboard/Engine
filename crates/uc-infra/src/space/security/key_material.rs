@@ -1,7 +1,7 @@
 //! KeyMaterialStore——keyring (KEK) + 磁盘 (KeySlot) 的统一存取入口。
 //!
 //! Slice 3 - C8 起作为 uc-infra 内部具体类型存在(原 `KeyMaterialPort` trait
-//! 已删除)；唯一消费者是 `DefaultSpaceAccessAdapter`,后者通过 Arc 共享。
+//! 已删除)；唯一消费者是 `RuntimeSpaceAccessAdapter`,后者通过 Arc 共享。
 
 use std::sync::Arc;
 use uc_core::{

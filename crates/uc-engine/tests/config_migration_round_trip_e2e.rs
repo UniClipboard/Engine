@@ -6,7 +6,7 @@
 //! own:
 //!
 //! * the source is a genuinely initialized installation — a real `KeySlot` and a
-//!   matching KEK produced by `DefaultSpaceAccessAdapter::initialize`. The bundle
+//!   matching KEK produced by `RuntimeSpaceAccessAdapter::initialize`. The bundle
 //!   is sealed with that KEK (no export password), so opening it requires the
 //!   space passphrase that derives the KEK — the contract this exercises;
 //! * the iroh device identity migrates as 0600 *files* (not a credential-store
@@ -31,7 +31,6 @@ use uc_core::ids::{ProfileId, SpaceId};
 use uc_core::ports::config_migration::{
     ConfigMigrationError, ConfigSourceMode, ExportConfigBundlePort, StageConfigImportPort,
 };
-use uc_core::ports::space::SpaceAccessStore;
 use uc_core::ports::{LocalIdentityPort, SecureStorageError, SecureStoragePort};
 use uc_infra::config_migration::staging::apply_pending_import;
 use uc_infra::config_migration::staging::StagingLayout;
@@ -40,7 +39,7 @@ use uc_infra::db::pool::{init_db_pool, DbPool};
 use uc_infra::fs::key_slot_store::JsonKeySlotStore;
 use uc_infra::network::iroh::IrohIdentityStore;
 use uc_infra::security::{DefaultCurrentProfile, Sha256IdentityFingerprintFactory};
-use uc_infra::space::{DefaultSpaceAccessAdapter, InMemorySession, KeyMaterialStore};
+use uc_infra::space::{InMemorySession, KeyMaterialStore, MigrationSpaceAccessAdapter};
 use uc_infra::SystemClock;
 #[derive(Default)]
 struct TestSecureStorage {
@@ -102,7 +101,7 @@ struct Source {
 }
 
 /// Build the source installation: a real sqlite db with a committed probe row,
-/// a *real* initialized keyslot + KEK (via `DefaultSpaceAccessAdapter`), real
+/// a *real* initialized keyslot + KEK (via `RuntimeSpaceAccessAdapter`), real
 /// vault/settings files, and an iroh identity file. Returns a fully-wired export
 /// adapter. `passphrase` is the space passphrase the KEK is derived from — the
 /// same passphrase later opens the exported bundle.
@@ -142,14 +141,18 @@ async fn build_source(passphrase: &Passphrase) -> Source {
         let keyslot_store = Arc::new(JsonKeySlotStore::new(vault_dir.clone()));
         let key_material = Arc::new(KeyMaterialStore::new(kek_storage.clone(), keyslot_store));
         let session = Arc::new(InMemorySession::new());
-        let space_access = DefaultSpaceAccessAdapter::new(
+        let space_access = MigrationSpaceAccessAdapter::new(
             key_material,
             Arc::new(DefaultCurrentProfile::new()),
             session,
         );
-        SpaceAccessStore::initialize(&space_access, &SpaceId::from("space"), passphrase)
-            .await
-            .unwrap();
+        uc_application::deps::InitializeSpacePort::initialize(
+            &space_access,
+            &SpaceId::from("space"),
+            passphrase,
+        )
+        .await
+        .unwrap();
     }
 
     // Remaining vault + settings + identity files (carried verbatim).
