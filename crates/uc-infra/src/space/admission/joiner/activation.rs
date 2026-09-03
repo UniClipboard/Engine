@@ -339,6 +339,11 @@ fn activation_outcome(
             Some(result.migrated_records),
             Some(result.preserved_unreadable_records),
         ),
+        uc_core::membership::AdmissionSpaceTransitionResultV2::CrossSpaceControl(_)
+        | uc_core::membership::AdmissionSpaceTransitionResultV2::SameSpaceControl(_)
+        | uc_core::membership::AdmissionSpaceTransitionResultV2::FreshControl(_) => {
+            (Some(0), Some(0))
+        }
     };
     Ok(JoinerActivationOutcome {
         join_id: *join_id.as_bytes(),

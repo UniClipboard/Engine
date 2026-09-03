@@ -117,6 +117,15 @@ async fn tags_are_group_separated_and_queries_keep_alternatives_per_term() {
     let protection = V3SearchProtection::new(Arc::clone(&session), Arc::clone(&vault));
     let terms = vec!["shared".to_owned(), "alpha".to_owned()];
     let indexed_a = protection.index_terms(&terms).await.unwrap();
+    let key_context = protection.active_key_context().await.unwrap();
+    assert_eq!(
+        key_context.protection_ref().unwrap().as_bytes(),
+        indexed_a.group_ref().as_bytes()
+    );
+    assert_eq!(
+        crate::search::search_key_derivation::term_tag(key_context.key(), &terms[0]).unwrap(),
+        indexed_a.term_tags()[0]
+    );
     let entry_id = EntryId::from("entry-a");
     let fields = RenderFields::new(
         Some("private preview".to_owned()),

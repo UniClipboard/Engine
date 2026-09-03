@@ -12,7 +12,7 @@ const SESSION_OPERATION_GRACE: Duration = Duration::from_secs(2);
 pub(super) struct SessionSupervisor {
     session: Arc<Mutex<Option<ProductionSession>>>,
     factory: StdMutex<Option<Arc<SessionFactory>>>,
-    file_transfer: Arc<uc_application::facade::FileTransferFacade>,
+    application: uc_application::facade::ApplicationAssembly,
     lifecycle: Mutex<()>,
     operations: SessionOperationGate,
 }
@@ -40,12 +40,12 @@ struct SessionOperationGateState {
 impl SessionSupervisor {
     pub(super) fn new(
         session: Arc<Mutex<Option<ProductionSession>>>,
-        file_transfer: Arc<uc_application::facade::FileTransferFacade>,
+        application: uc_application::facade::ApplicationAssembly,
     ) -> Self {
         Self {
             session,
             factory: StdMutex::new(None),
-            file_transfer,
+            application,
             lifecycle: Mutex::new(()),
             operations: SessionOperationGate::new_open(),
         }
@@ -168,8 +168,10 @@ impl SessionSupervisor {
             .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
             .await;
         let transfer_result = self
-            .file_transfer
-            .cancel_active_sessions(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
+            .application
+            .cancel_active_file_transfers(
+                uc_core::FileTransferCancellationReason::ConnectivityRecovery,
+            )
             .await
             .map_err(|error| {
                 operation_error_with_code(1104, "cancel active file transfers", error)
@@ -220,8 +222,8 @@ impl SessionSupervisor {
     }
 
     pub(super) async fn close_file_transfers(&self) -> Result<(), EngineError> {
-        self.file_transfer
-            .close()
+        self.application
+            .close_file_transfers()
             .await
             .map_err(|error| operation_error_with_code(1104, "close file transfers", error))
     }
@@ -233,8 +235,8 @@ impl SessionSupervisor {
         let session = self.session.lock().await.take();
         if let Some(session) = session {
             session.shutdown(reason).await;
-            self.file_transfer
-                .cancel_active_sessions(reason)
+            self.application
+                .cancel_active_file_transfers(reason)
                 .await
                 .map_err(|error| {
                     operation_error_with_code(1104, "cancel active file transfers", error)

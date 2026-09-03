@@ -27,23 +27,6 @@ pub struct JoinOffer {
     pub challenge_nonce: [u8; 32],
 }
 
-/// Sponsor-to-joiner admission challenge. The opaque KDF payload contains
-/// only password-derivation parameters; content keys and local keyslots are
-/// never carried by this message.
-#[derive(Clone, Debug)]
-pub struct AdmissionOffer {
-    pub space_id: SpaceId,
-    pub kdf_parameters_blob: Vec<u8>,
-    pub challenge_nonce: [u8; 32],
-}
-
-/// Sponsor-side result: the public offer plus the secret used only to verify
-/// this pairing transcript.
-pub struct PreparedAdmissionOffer {
-    pub offer: AdmissionOffer,
-    pub verification_key: ProofDerivedKey,
-}
-
 /// Joiner-side opaque MLS preparation. Only `key_package` is sent to the
 /// sponsor; `private_state` must remain local until the Welcome is installed.
 ///
@@ -132,20 +115,6 @@ pub struct GroupAdmission {
     pub encrypted_key_catalog: Vec<u8>,
     pub existing_member_updates: Vec<PendingGroupUpdate>,
     pub group_epoch: u64,
-}
-
-impl fmt::Debug for PreparedAdmissionOffer {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PreparedAdmissionOffer")
-            .field("space_id", &self.offer.space_id)
-            .field(
-                "kdf_parameters_blob_len",
-                &self.offer.kdf_parameters_blob.len(),
-            )
-            .field("verification_key", &"[REDACTED]")
-            .finish()
-    }
 }
 
 /// Pairing proof 链路上的不透明派生密钥。

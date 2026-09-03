@@ -5,11 +5,15 @@ use std::sync::{Arc, Mutex};
 use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::Binary;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use uc_application::deps::{
     CommitMembershipLedgerPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
-    MembershipLedgerError, MembershipLedgerMutation,
+    MembershipEffectKind, MembershipEffectPhase, MembershipLedgerError, MembershipLedgerMutation,
+    PeerHistorySyncState, PeerReconciliationRecord, PendingMembershipEffect,
 };
+use uc_core::ids::DeviceId;
+use uc_core::membership::MembershipHistoryRelationship;
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use uc_infra::db::executor::DieselSqliteExecutor;
 use uc_infra::db::pool::init_db_pool;
@@ -98,6 +102,17 @@ impl Fixture {
             })
             .unwrap()
     }
+
+    fn execute_sql(&self, statement: &str) {
+        let executor =
+            DieselSqliteExecutor::new(init_db_pool(self.db_path.to_str().unwrap()).unwrap());
+        executor
+            .run(|conn| {
+                sql_query(statement).execute(conn)?;
+                Ok(())
+            })
+            .unwrap();
+    }
 }
 
 #[tokio::test]
@@ -135,4 +150,75 @@ async fn encrypted_ledger_survives_reopen_and_rejects_stale_commit() {
         })
         .await;
     assert_eq!(stale, Err(MembershipLedgerError::Conflict));
+}
+
+#[tokio::test]
+async fn sqlite_failure_keeps_history_fanout_and_effects_in_one_atomic_state() {
+    let fixture = Fixture::new();
+    let mut initial = fixture.ledger.load().await.unwrap();
+    initial.revision = 1;
+    initial.membership_history = Some(b"old-encrypted-history-state".to_vec());
+    fixture
+        .ledger
+        .compare_and_commit(MembershipLedgerMutation {
+            expected_revision: 0,
+            expected_history_digest: None,
+            replacement: initial.clone(),
+        })
+        .await
+        .unwrap();
+
+    let peer = DeviceId::new("fault-injection-peer");
+    let mut replacement = initial.clone();
+    replacement.revision = 2;
+    replacement.membership_history = Some(b"new-encrypted-history-state".to_vec());
+    replacement.peer_reconciliation.insert(
+        peer.clone(),
+        PeerReconciliationRecord {
+            peer_device_id: peer.clone(),
+            relationship: MembershipHistoryRelationship::Consistent,
+            confirmed_position: None,
+            sync_state: PeerHistorySyncState {
+                pending_since_revision: Some(2),
+                ..Default::default()
+            },
+            restricted_delivery: Vec::new(),
+            updated_at_ms: 0,
+        },
+    );
+    replacement.history_sync_cursor = Some(peer.clone());
+    replacement.pending_effects.insert(
+        [0x31; 32],
+        PendingMembershipEffect {
+            event_id: [0x31; 32],
+            kind: MembershipEffectKind::AddDevice,
+            phase: MembershipEffectPhase::Prepared,
+            affected_device_ids: vec![peer],
+            payload: b"encrypted-effect-payload".to_vec(),
+        },
+    );
+    let mutation = MembershipLedgerMutation {
+        expected_revision: 1,
+        expected_history_digest: Some(<[u8; 32]>::from(Sha256::digest(
+            initial.membership_history.as_deref().unwrap(),
+        ))),
+        replacement: replacement.clone(),
+    };
+    fixture.execute_sql(
+        "CREATE TRIGGER fail_membership_ledger_update \
+         BEFORE UPDATE ON membership_ledger_state \
+         BEGIN SELECT RAISE(ABORT, 'injected membership ledger failure'); END",
+    );
+
+    let failed = fixture.ledger.compare_and_commit(mutation.clone()).await;
+
+    assert_eq!(failed, Err(MembershipLedgerError::Unavailable));
+    assert_eq!(fixture.reopen().load().await.unwrap(), initial);
+
+    fixture.execute_sql("DROP TRIGGER fail_membership_ledger_update");
+    assert_eq!(
+        fixture.ledger.compare_and_commit(mutation).await.unwrap(),
+        replacement
+    );
+    assert_eq!(fixture.reopen().load().await.unwrap(), replacement);
 }

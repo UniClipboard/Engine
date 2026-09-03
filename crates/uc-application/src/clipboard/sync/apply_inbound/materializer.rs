@@ -648,7 +648,7 @@ impl FileCacheBlobMaterializer {
         }
     }
 
-    pub fn with_directory_receive_attempt_ports(
+    pub(crate) fn with_directory_receive_attempt_ports(
         mut self,
         get: Arc<dyn GetEntryAttemptPort>,
         claim_commit: Arc<dyn ClaimReceiveCommitPort>,
@@ -664,7 +664,7 @@ impl FileCacheBlobMaterializer {
         self
     }
 
-    pub fn with_receive_artifact_log(
+    pub(crate) fn with_receive_artifact_log(
         mut self,
         artifact_log: Arc<dyn RecordReceiveArtifactsPort>,
     ) -> Self {
@@ -694,7 +694,7 @@ impl FileCacheBlobMaterializer {
             updated_at_ms: ports.clock.now_ms(),
         })
         .await
-        .map_err(|error| anyhow!(error.to_string()))?;
+        .map_err(anyhow::Error::new)?;
         Ok(true)
     }
 
@@ -735,7 +735,7 @@ impl FileCacheBlobMaterializer {
             .get
             .get_entry_attempt(entry_id.as_ref())
             .await
-            .map_err(|error| anyhow!(error.to_string()))?
+            .map_err(anyhow::Error::new)?
             .ok_or(DirectoryAttemptGateError::Superseded)?;
         if current.current_attempt_id != attempt_id {
             return Err(DirectoryAttemptGateError::Superseded.into());
@@ -758,7 +758,7 @@ impl FileCacheBlobMaterializer {
             .get
             .get_entry_attempt(entry_id.as_ref())
             .await
-            .map_err(|error| anyhow!(error.to_string()))?
+            .map_err(anyhow::Error::new)?
             .ok_or(DirectoryAttemptGateError::Superseded)?;
         if current.current_attempt_id != attempt_id {
             return Err(DirectoryAttemptGateError::Superseded.into());
@@ -1692,7 +1692,7 @@ impl FileCacheBlobMaterializer {
                     ports.clock.now_ms(),
                 )
                 .await
-                .map_err(|error| anyhow!(error.to_string()))?;
+                .map_err(anyhow::Error::new)?;
         }
 
         let mut member_digests = BTreeMap::new();
@@ -1822,12 +1822,12 @@ impl FileCacheBlobMaterializer {
                         now_ms,
                     )
                     .await
-                    .map_err(|error| anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
                 if !ports
                     .claim_commit
                     .claim_receive_commit(receiver_entry_id.as_ref(), attempt_id, now_ms)
                     .await
-                    .map_err(|error| anyhow!(error.to_string()))?
+                    .map_err(anyhow::Error::new)?
                 {
                     return Err(DirectoryAttemptGateError::NotActive.into());
                 }
@@ -1960,7 +1960,7 @@ async fn publish_gated_root(
                         ports.clock.now_ms(),
                     )
                     .await
-                    .map_err(|error| anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
             }
             Err(error) => {
                 return Err(anyhow!("directory root publication failed: {error}"));

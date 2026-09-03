@@ -1,15 +1,13 @@
-pub(crate) mod blob_tasks;
-pub(crate) mod clipboard_runtime;
 pub(crate) mod deps;
 pub(crate) mod facade;
-pub(crate) mod file_transfer;
 pub(crate) mod host;
 pub(crate) mod lifecycle;
+pub(crate) mod maintenance_space_transition;
 #[cfg(feature = "lan-compat")]
 pub(crate) mod mobile_lan;
 pub(crate) mod network;
 pub(crate) mod observability;
 pub(crate) mod platform;
-pub(crate) mod search;
+pub(crate) mod runtime_storage;
 pub(crate) mod sync_engine;
 pub(crate) mod wire;

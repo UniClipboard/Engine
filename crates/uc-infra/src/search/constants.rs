@@ -51,6 +51,7 @@
 ///   persisted file manifest contains a copied directory root. The rebuild
 ///   backfills this tag for existing directory entries.
 pub const CURRENT_INDEX_VERSION: &str = "search-v11";
+pub const V3_INDEX_VERSION: &str = "search-v12";
 
 /// Field-mask bit: term was extracted from the plain-text body.
 pub const SEARCH_FIELD_BODY: u8 = 0b0000_0001;

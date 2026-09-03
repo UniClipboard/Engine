@@ -1,8 +1,10 @@
 use rand::RngCore;
-use uc_core::membership::ActiveSpaceGenerationManifestV2;
+use uc_core::ids::SpaceId;
+use uc_core::membership::{ActiveRuntimeLayout, ActiveSpaceGenerationManifestV2};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::ProfileStorageUpgradeError;
+use crate::security::ActiveRuntimeManifestV3;
 
 pub(super) const JOURNAL_FORMAT_V1: u16 = 1;
 
@@ -20,6 +22,7 @@ pub(super) enum UpgradePhaseV1 {
 
 #[derive(serde::Serialize, serde::Deserialize, Zeroize, ZeroizeOnDrop)]
 struct UpgradeSourceV1 {
+    space_id: String,
     manifest_digest: [u8; 32],
     keyslot_generation: [u8; 16],
     database_generation: [u8; 16],
@@ -96,12 +99,13 @@ impl UpgradeJournalV1 {
             || self.target_space_control_generation == [0; 16]
             || self.target_profile_data_generation == self.target_space_control_generation
             || self.source.as_ref().is_some_and(|source| {
-                [
-                    source.keyslot_generation,
-                    source.database_generation,
-                    source.security_generation,
-                ]
-                .contains(&self.target_profile_data_generation)
+                source.space_id.is_empty()
+                    || [
+                        source.keyslot_generation,
+                        source.database_generation,
+                        source.security_generation,
+                    ]
+                    .contains(&self.target_profile_data_generation)
                     || [
                         source.keyslot_generation,
                         source.database_generation,
@@ -209,6 +213,16 @@ impl UpgradeJournalV1 {
         &self.target_space_control_generation
     }
 
+    pub(super) fn source_space_id(&self) -> Option<&str> {
+        self.source.as_ref().map(|source| source.space_id.as_str())
+    }
+
+    pub(super) fn source_database_generation(&self) -> Option<&[u8; 16]> {
+        self.source
+            .as_ref()
+            .map(|source| &source.database_generation)
+    }
+
     pub(super) const fn source_snapshot_digest(&self) -> Option<[u8; 32]> {
         self.source_snapshot_digest
     }
@@ -263,6 +277,46 @@ impl UpgradeJournalV1 {
 
     pub(super) const fn verified_control_schema_digest(&self) -> Option<[u8; 32]> {
         self.verified_control_schema_digest
+    }
+
+    pub(super) fn target_manifest(
+        &self,
+        source: &ActiveSpaceGenerationManifestV2,
+    ) -> Result<ActiveRuntimeManifestV3, ProfileStorageUpgradeError> {
+        if self.phase != UpgradePhaseV1::Verified || !self.matches_source(Some(source)) {
+            return Err(ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::anyhow!("profile upgrade promotion binding is invalid"),
+            });
+        }
+        let layout = ActiveRuntimeLayout::new(
+            SpaceId::from_string(source.space_id.clone()),
+            self.target_profile_data_generation,
+            self.target_space_control_generation,
+        )
+        .map_err(|source| ProfileStorageUpgradeError::Corrupt {
+            source: anyhow::Error::new(source)
+                .context("construct profile upgrade target runtime layout"),
+        })?;
+        ActiveRuntimeManifestV3::new(layout, source.keyslot_generation).ok_or_else(|| {
+            ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::anyhow!("profile upgrade target keyslot generation is invalid"),
+            }
+        })
+    }
+
+    pub(super) fn matches_target(&self, target: &ActiveRuntimeManifestV3) -> bool {
+        self.target_profile_data_generation == *target.layout().profile_data_generation()
+            && self.target_space_control_generation == *target.layout().space_control_generation()
+            && self.source.as_ref().is_none_or(|source| {
+                source.space_id == target.layout().space_id().as_ref()
+                    && source.keyslot_generation == *target.keyslot_generation()
+            })
+    }
+
+    pub(super) fn matches_activated_fresh_profile(&self, target: &ActiveRuntimeManifestV3) -> bool {
+        self.phase == UpgradePhaseV1::Verified
+            && self.source.is_none()
+            && self.target_profile_data_generation == *target.layout().profile_data_generation()
     }
 
     pub(super) fn mark_target_staged(
@@ -364,11 +418,32 @@ impl UpgradeJournalV1 {
         self.phase = UpgradePhaseV1::Verified;
         self.validate()
     }
+
+    pub(super) fn mark_promoted(&mut self) -> Result<(), ProfileStorageUpgradeError> {
+        if self.phase != UpgradePhaseV1::Verified {
+            return Err(ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::anyhow!("profile upgrade promotion transition is invalid"),
+            });
+        }
+        self.phase = UpgradePhaseV1::Promoted;
+        self.validate()
+    }
+
+    pub(super) fn mark_cleanup_pending(&mut self) -> Result<(), ProfileStorageUpgradeError> {
+        if self.phase != UpgradePhaseV1::Promoted {
+            return Err(ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::anyhow!("profile upgrade cleanup transition is invalid"),
+            });
+        }
+        self.phase = UpgradePhaseV1::CleanupPending;
+        self.validate()
+    }
 }
 
 impl From<&ActiveSpaceGenerationManifestV2> for UpgradeSourceV1 {
     fn from(manifest: &ActiveSpaceGenerationManifestV2) -> Self {
         Self {
+            space_id: manifest.space_id.clone(),
             manifest_digest: manifest.manifest_digest,
             keyslot_generation: manifest.keyslot_generation,
             database_generation: manifest.database_generation,
@@ -379,10 +454,54 @@ impl From<&ActiveSpaceGenerationManifestV2> for UpgradeSourceV1 {
 
 impl UpgradeSourceV1 {
     fn matches(&self, manifest: &ActiveSpaceGenerationManifestV2) -> bool {
-        self.manifest_digest == manifest.manifest_digest
+        self.space_id == manifest.space_id
+            && self.manifest_digest == manifest.manifest_digest
             && self.keyslot_generation == manifest.keyslot_generation
             && self.database_generation == manifest.database_generation
             && self.security_generation == manifest.security_generation
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use uc_core::ids::SpaceId;
+    use uc_core::membership::ActiveRuntimeLayout;
+
+    use super::UpgradeJournalV1;
+    use crate::security::ActiveRuntimeManifestV3;
+
+    fn verified_fresh_journal() -> UpgradeJournalV1 {
+        let mut journal = UpgradeJournalV1::detected(None);
+        journal.mark_target_staged([0x11; 32], 1).unwrap();
+        journal
+            .mark_stores_separated([0x12; 32], [0x13; 32])
+            .unwrap();
+        journal
+            .mark_primary_payloads_converted([0x14; 32], [0x15; 32], 0, 0)
+            .unwrap();
+        journal
+            .mark_payloads_converted([0x16; 32], [0x17; 32], 0, 0)
+            .unwrap();
+        journal.mark_verified([0x18; 32], [0x19; 32]).unwrap();
+        journal
+    }
+
+    fn manifest(profile: [u8; 16], control: [u8; 16]) -> ActiveRuntimeManifestV3 {
+        ActiveRuntimeManifestV3::new(
+            ActiveRuntimeLayout::new(SpaceId::from_str("space-a"), profile, control).unwrap(),
+            [0x31; 16],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn verified_fresh_journal_follows_the_profile_across_control_generation_changes() {
+        let journal = verified_fresh_journal();
+        let changed_control = manifest(*journal.target_profile_data_generation(), [0x41; 16]);
+        let changed_profile = manifest([0x42; 16], [0x43; 16]);
+
+        assert!(journal.matches_activated_fresh_profile(&changed_control));
+        assert!(!journal.matches_activated_fresh_profile(&changed_profile));
     }
 }
 

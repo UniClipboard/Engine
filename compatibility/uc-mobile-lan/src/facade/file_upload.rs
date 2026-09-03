@@ -14,7 +14,7 @@ use crate::usecases::apply_incoming::{
     ApplyIncomingMobileClipUseCase, IncomingMobileClipEvent,
 };
 use uc_application::facade::file_transfer::{
-    BeginReceiverTransfer, FileTransferFacade, FileTransferSession, ReceiverTransferRegistration,
+    BeginReceiverTransfer, FileTransferFacade, ReceiverTransferHandle, ReceiverTransferRegistration,
 };
 
 const MOBILE_UPLOAD_PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
@@ -118,7 +118,7 @@ struct ActiveMobileFileUpload {
     total_bytes: Option<u64>,
     bytes_received: u64,
     last_progress_at: Instant,
-    session: Arc<FileTransferSession>,
+    session: Arc<ReceiverTransferHandle>,
 }
 
 type ActiveMobileFileUploadState = Arc<Mutex<Option<ActiveMobileFileUpload>>>;
@@ -449,7 +449,7 @@ impl MobileFileUploadCoordinator {
         Self::fail_session(&upload.session, detail).await;
     }
 
-    async fn fail_session(session: &FileTransferSession, detail: &'static str) {
+    async fn fail_session(session: &ReceiverTransferHandle, detail: &'static str) {
         if session
             .fail(FileTransferFailureReason::Unknown, Some(detail.to_owned()))
             .await
@@ -490,9 +490,10 @@ mod tests {
     use crate::usecases::apply_incoming::{
         ApplyIncomingMobileClipError, ApplyIncomingMobileClipOutcome,
     };
-    use uc_application::facade::file_transfer::{
-        FileTransferFacade, FileTransferFacadeDeps, FileTransferLifecycleDeps,
+    use uc_application::deps::{
+        FileTransferFacadeDeps, FileTransferLifecycleDeps, ReceiveReadinessCoordinator,
     };
+    use uc_application::facade::file_transfer::FileTransferFacade;
     use uc_application::facade::HostEventBus;
 
     #[derive(Default)]
@@ -658,7 +659,7 @@ mod tests {
             file_cache_dir: std::path::PathBuf::new(),
             clock: Arc::new(FixedClock),
             host_event_bus: Arc::new(HostEventBus::new()),
-            receive_readiness: Arc::new(uc_application::facade::ReceiveReadinessCoordinator::new()),
+            receive_readiness: Arc::new(ReceiveReadinessCoordinator::new()),
         }
     }
 

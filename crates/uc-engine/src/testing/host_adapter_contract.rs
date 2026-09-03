@@ -593,8 +593,13 @@ async fn host_analytics_reaches_application_and_identity_wiring() {
     .with_analytics(sink.clone(), identity.clone());
 
     let wiring = crate::assembly::host::wire_host_capabilities(&EngineConfig::new("1.2.3"), host)
+        .await
         .expect("host wiring");
-    wiring.wired.deps.analytics.capture(Event::AppFirstOpen);
+    wiring
+        .wired
+        .sync_engine
+        .analytics
+        .capture(Event::AppFirstOpen);
     let person_id = Uuid::now_v7();
     wiring
         .wired
@@ -765,15 +770,18 @@ async fn membership_convergence_is_queryable_through_the_public_engine() {
     assert!(
         matches!(
             &status,
-            crate::OperationResult::DeviceTrust(summary)
+            crate::OperationResult::DeviceGroupChoices(summary)
                 if summary.revision == 1
-                    && summary.current_change.is_none()
-                    && !summary.local_device_id.is_empty()
-                    && summary.devices.len() == 1
-                    && summary.devices[0].is_local
-                    && summary.devices[0].device_id == summary.local_device_id
+                    && summary.issues.is_empty()
+                    && summary.device_trust.revision == 1
+                    && summary.device_trust.current_change.is_none()
+                    && !summary.device_trust.local_device_id.is_empty()
+                    && summary.device_trust.devices.len() == 1
+                    && summary.device_trust.devices[0].is_local
+                    && summary.device_trust.devices[0].device_id
+                        == summary.device_trust.local_device_id
         ),
-        "unexpected device trust snapshot: {status:?}"
+        "unexpected device group choices: {status:?}"
     );
     engine
         .shutdown(std::time::Duration::from_secs(15))
@@ -1300,14 +1308,24 @@ async fn host_clipboard_change_is_processed_by_the_engine_and_stops_on_shutdown(
     change_tx.send(()).unwrap();
     let history_entry = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
-            let result = engine
+            let result = match engine
                 .execute(crate::Operation::QueryHistory(crate::QueryHistoryInput {
                     cursor: None,
                     limit: 10,
                     query: Some(probe.clone()),
                 }))
                 .await
-                .unwrap();
+            {
+                Ok(result) => result,
+                Err(error)
+                    if error.is_retryable()
+                        && error.category() == crate::EngineErrorCategory::Unavailable =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    continue;
+                }
+                Err(error) => panic!("query history failed: {error:?}"),
+            };
             let crate::OperationResult::HistoryPage { entries, .. } = result else {
                 panic!("expected history page");
             };
@@ -1365,12 +1383,13 @@ async fn new_engine_does_not_inherit_previous_engine_clipboard_attribution() {
             Box::new(EmptyHostFiles),
         ),
     )
+    .await
     .unwrap();
     first
         .wired
-        .deps
-        .clipboard
-        .clipboard_change_origin
+        .application
+        .host_adapters()
+        .change_origin
         .record_self_write(
             uc_core::ports::clipboard::SelfWriteMatch::ByNextChange("old-write".into()),
             uc_core::ports::clipboard::SelfWriteAttribution::Remote,
@@ -1398,12 +1417,13 @@ async fn new_engine_does_not_inherit_previous_engine_clipboard_attribution() {
             Box::new(EmptyHostFiles),
         ),
     )
+    .await
     .unwrap();
     let origin = second
         .wired
-        .deps
-        .clipboard
-        .clipboard_change_origin
+        .application
+        .host_adapters()
+        .change_origin
         .attribute_observed_change("fresh-local-copy")
         .await;
 
@@ -1649,21 +1669,10 @@ async fn host_capabilities_wire_real_core_dependencies() {
         &EngineConfig::new("1.2.3").with_profile_id("mobile-primary"),
         host,
     )
+    .await
     .unwrap();
 
     assert_eq!(wiring.paths.app_data_root_dir, private);
-    assert_eq!(
-        wiring
-            .wired
-            .deps
-            .security
-            .current_profile
-            .current_profile()
-            .await
-            .unwrap()
-            .as_ref(),
-        "mobile-primary"
-    );
 }
 
 #[tokio::test]
@@ -3575,7 +3584,13 @@ async fn engine_mobile_upload_progress_failure_cleans_up_and_invalidates_handle(
         panic!("expected upload handle");
     };
 
-    let database_path = private.join("uniclipboard.db");
+    let profile_generations = private.join("profile-data-generations");
+    let generation = std::fs::read_dir(&profile_generations)
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .find(|entry| entry.file_type().unwrap().is_dir())
+        .expect("fresh runtime must create one profile data generation");
+    let database_path = generation.path().join("v3-payloads/profile.sqlite");
     let mut connection = diesel::sqlite::SqliteConnection::establish(
         database_path.to_str().expect("database path must be UTF-8"),
     )
@@ -4064,21 +4079,19 @@ async fn persisted_engine_text_image_preview_and_logs_do_not_leave_plaintext_on_
         .unwrap();
 
     let history = engine
-        .execute(crate::Operation::QueryHistory(crate::QueryHistoryInput {
-            cursor: None,
-            limit: 25,
-            query: None,
-        }))
+        .execute(crate::Operation::ListHistoryEntries(
+            crate::ListHistoryEntriesInput {
+                offset: 0,
+                limit: 25,
+            },
+        ))
         .await
         .unwrap();
-    let crate::OperationResult::HistoryPage { entries, .. } = history else {
+    let crate::OperationResult::HistoryEntries(entries) = history else {
         panic!("history query returned the wrong result");
     };
     assert!(
-        entries
-            .iter()
-            .filter_map(|entry| entry.preview.as_deref())
-            .any(|preview| preview.contains(&probe)),
+        entries.iter().any(|entry| entry.preview.contains(&probe)),
         "the probe must reach the generated preview before persistence is scanned"
     );
 

@@ -11,6 +11,7 @@
 //! - `file_extensions`: stored as JSON array `TEXT` via `serde_json`.
 
 use crate::db::schema::{search_document, search_entry_tag, search_index_meta, search_posting};
+#[cfg(test)]
 use crate::search::constants::CURRENT_INDEX_VERSION;
 use crate::search::render_payload::{RenderFields, RenderPayloadCodec};
 use anyhow::Result;
@@ -54,6 +55,8 @@ pub struct SearchDocumentRow {
     /// `NULL` only appears transiently during migration; a `NULL` on the current
     /// index version is treated as a corrupted row (see [`SearchDocumentRow::to_domain`]).
     pub render_payload: Option<Vec<u8>>,
+    /// V12 保护组的不透明引用；V11 行为与升级中的 blocked 行允许为空。
+    pub protection_group_ref: Option<Vec<u8>>,
 }
 
 /// Insertable row for `search_document`.
@@ -73,6 +76,7 @@ pub struct NewSearchDocumentRow {
     pub source_device: Option<String>,
     pub payload_state: Option<String>,
     pub render_payload: Option<Vec<u8>>,
+    pub protection_group_ref: Option<Vec<u8>>,
 }
 
 /// A stored row decoded back into the domain, tracking whether its render payload
@@ -96,11 +100,6 @@ impl NewSearchDocumentRow {
         profile_id: &str,
         document: &SearchDocument,
     ) -> Result<Self> {
-        // serde_json::to_string produces `"text"` with surrounding quotes; trim them.
-        let content_type_json = serde_json::to_string(&document.content_type)?;
-        let file_type = content_type_json.trim_matches('"').to_string();
-        let file_extensions = serde_json::to_string(&document.file_extensions)?;
-
         let fields = RenderFields::new(
             document.text_preview.clone(),
             document.file_names.clone(),
@@ -112,6 +111,25 @@ impl NewSearchDocumentRow {
             .encrypt(&document.entry_id, &fields)
             .map_err(|e| anyhow::anyhow!("encrypt render payload: {e}"))?;
 
+        Ok(Self::from_domain_with_render(
+            profile_id,
+            document,
+            render_payload,
+            None,
+            &document.index_version,
+        )?)
+    }
+
+    pub fn from_domain_with_render(
+        profile_id: &str,
+        document: &SearchDocument,
+        render_payload: Vec<u8>,
+        protection_group_ref: Option<Vec<u8>>,
+        index_version: &str,
+    ) -> Result<Self> {
+        let content_type_json = serde_json::to_string(&document.content_type)?;
+        let file_type = content_type_json.trim_matches('"').to_string();
+        let file_extensions = serde_json::to_string(&document.file_extensions)?;
         Ok(Self {
             profile_id: profile_id.to_string(),
             entry_id: document.entry_id.to_string(),
@@ -122,10 +140,11 @@ impl NewSearchDocumentRow {
             file_extensions,
             mime_type: document.mime_type.clone(),
             indexed_at_ms: document.indexed_at_ms,
-            index_version: document.index_version.clone(),
+            index_version: index_version.to_owned(),
             source_device: document.source_device.clone(),
             payload_state: document.payload_state.clone(),
             render_payload: Some(render_payload),
+            protection_group_ref,
         })
     }
 }
@@ -139,11 +158,6 @@ impl SearchDocumentRow {
     /// to decode does NOT fail the whole row: the render fields are blanked and
     /// `render_corrupted` is set so the caller can schedule a repair.
     pub fn to_domain(&self, codec: &RenderPayloadCodec) -> Result<DecodedDocument> {
-        // Re-add surrounding quotes so serde_json can deserialize the string enum.
-        let content_type_json = format!("\"{}\"", self.file_type);
-        let content_type: ContentType = serde_json::from_str(&content_type_json)?;
-        let file_extensions: Vec<String> = serde_json::from_str(&self.file_extensions)?;
-
         let entry_id: EntryId = self.entry_id.clone().into();
         let (fields, render_corrupted) = match &self.render_payload {
             Some(bytes) => match codec.decrypt(&entry_id, bytes) {
@@ -165,6 +179,24 @@ impl SearchDocumentRow {
                 (RenderFields::default(), true)
             }
         };
+
+        self.to_domain_with_render_fields(fields, render_corrupted)
+    }
+
+    /// 使用调用方已解开的 render 字段构造领域对象。
+    ///
+    /// V3 的密钥解析与 AEAD 是异步操作，仓储先在同步 SQLite 边界内读取行，
+    /// 再于边界外解密并调用这里；V11 的同步 codec 也复用同一结构转换。
+    pub fn to_domain_with_render_fields(
+        &self,
+        fields: RenderFields,
+        render_corrupted: bool,
+    ) -> Result<DecodedDocument> {
+        // Re-add surrounding quotes so serde_json can deserialize the string enum.
+        let content_type_json = format!("\"{}\"", self.file_type);
+        let content_type: ContentType = serde_json::from_str(&content_type_json)?;
+        let file_extensions: Vec<String> = serde_json::from_str(&self.file_extensions)?;
+        let entry_id: EntryId = self.entry_id.clone().into();
 
         let document = SearchDocument {
             entry_id,
@@ -288,10 +320,10 @@ impl NewSearchIndexMetaRow {
     /// Seed a fresh meta row for `profile_id` using the current index version.
     ///
     /// `search_blocked = false` and timestamps are `None` for a brand-new profile.
-    pub fn seed(profile_id: &str) -> Self {
+    pub fn seed(profile_id: &str, index_version: &str) -> Self {
         Self {
             profile_id: profile_id.to_string(),
-            index_version: CURRENT_INDEX_VERSION.to_string(),
+            index_version: index_version.to_string(),
             search_blocked: false,
             last_rebuild_started_at_ms: None,
             last_rebuild_completed_at_ms: None,

@@ -296,7 +296,7 @@ async fn removal_commits_all_local_facts_once_before_returning_success() {
     assert_eq!(
         removed.sync_state,
         DeviceTrustSyncState::Paused(
-            crate::space::membership::SpaceMemberPauseReason::PendingLocalDecision
+            crate::space::membership::SpaceMemberPauseReason::LocalMemberInactive
         )
     );
     let persisted = repository.load().await.unwrap();

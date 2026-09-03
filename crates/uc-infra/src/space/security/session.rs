@@ -356,39 +356,6 @@ impl InMemorySession {
         Ok(())
     }
 
-    pub(crate) fn merge_space_material_history(
-        &self,
-        previous: &SpaceKeyMaterial,
-        incoming: SpaceKeyMaterial,
-    ) -> Result<SpaceKeyMaterial, EncryptionError> {
-        let previous_catalog = decode_content_key_catalog(previous.key_catalog())?;
-        let mut incoming_catalog = decode_content_key_catalog(incoming.key_catalog())?;
-        if previous_catalog.version != 2 || incoming_catalog.version != 2 {
-            return Err(EncryptionError::UnsupportedVersion);
-        }
-        for entry in &previous_catalog.entries {
-            match incoming_catalog
-                .entries
-                .iter()
-                .find(|candidate| candidate.content_key_id == entry.content_key_id)
-            {
-                Some(candidate) if candidate.epoch != entry.epoch || candidate.key != entry.key => {
-                    return Err(EncryptionError::KeyMaterialCorrupt);
-                }
-                Some(_) => {}
-                None => incoming_catalog.entries.push(entry.clone()),
-            }
-        }
-        let key_catalog = encode_content_key_catalog(&incoming_catalog)?;
-        Ok(SpaceKeyMaterial::new(
-            incoming.state().clone(),
-            incoming.group_state().to_vec(),
-            key_catalog,
-            incoming.updated_at_ms(),
-        )
-        .with_pending_group_updates_from(&incoming))
-    }
-
     pub(crate) fn rotate_space_material(
         &self,
         material: &SpaceKeyMaterial,
@@ -718,45 +685,5 @@ mod tests {
             .unwrap();
 
         assert_eq!(material.state().protection_group_id(), Some(&group_id));
-    }
-
-    #[test]
-    fn joining_a_winning_group_preserves_local_history_keys() {
-        let space_id = SpaceId::from_str("space-a");
-        let local = InMemorySession::new();
-        local.set_master_key_for_space(space_id.clone(), key(7));
-        let local_material = local
-            .create_legacy_bootstrap_material_in_group(
-                &space_id,
-                ProtectionGroupId::from_string("group-b").unwrap(),
-                vec![1],
-                100,
-            )
-            .unwrap();
-        let local_key_id = local_material.state().current_content_key_id().clone();
-
-        let winner = InMemorySession::new();
-        winner.set_master_key_for_space(space_id.clone(), key(7));
-        let winning_material = winner
-            .create_legacy_bootstrap_material_in_group(
-                &space_id,
-                ProtectionGroupId::from_string("group-a").unwrap(),
-                vec![2],
-                100,
-            )
-            .unwrap();
-
-        let merged = local
-            .merge_space_material_history(&local_material, winning_material)
-            .unwrap();
-        local.install_space_material(&merged).unwrap();
-
-        assert!(local
-            .content_key(&space_id, &local_key_id, ContentKeyPurpose::Content)
-            .is_ok());
-        assert_eq!(
-            merged.state().protection_group_id().unwrap().as_str(),
-            "group-a"
-        );
     }
 }

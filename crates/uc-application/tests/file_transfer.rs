@@ -1,12 +1,15 @@
+use std::error::Error as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use uc_application::deps::{
+    FileTransferFacadeDeps, FileTransferLifecycleDeps, ReceiveReadinessCoordinator,
+};
 use uc_application::facade::file_transfer::FileTransferApplicationError;
 use uc_application::facade::HostEventBus;
 use uc_application::facade::{
-    BeginReceiverTransfer, FileTransferFacade, FileTransferFacadeDeps, FileTransferLifecycleDeps,
-    ReceiverTransferRegistration,
+    BeginReceiverTransfer, FileTransferFacade, ReceiverTransferRegistration,
 };
 use uc_core::file_transfer::{FileTransferEventPublisherPort, FileTransferEventStorePort};
 use uc_core::ports::file_transfer::{
@@ -15,12 +18,12 @@ use uc_core::ports::file_transfer::{
 };
 use uc_core::ports::{
     AttemptError, BeginReceiveFailureOutcome, CleanupReceiveArtifactsPort, ClockPort,
-    CommitInboundReceivePort, EntryReceiveAttempt, FinalizeProvisionalReceivePort,
-    GetDirectoryPublishRecordPort, GetEntryAttemptPort, InboundReceiveSettlement,
-    ListNonTerminalAttemptsPort, ListProvisionalReceivesPort, ListUnsettledReceiveArtifactsPort,
-    ProvisionalReceiveAction, ProvisionalReceiveError, ProvisionalReceiveRecovery, ReceiveArtifact,
-    ReceiveArtifactLogError, ReceiveArtifactRecord, RecordReceiverTransferPort,
-    SeedProvisionalReceivePort,
+    CommitInboundReceivePort, EntryReceiveAttempt, FileTransferPrivacyMaintenanceError,
+    FinalizeProvisionalReceivePort, GetDirectoryPublishRecordPort, GetEntryAttemptPort,
+    InboundReceiveSettlement, ListNonTerminalAttemptsPort, ListProvisionalReceivesPort,
+    ListUnsettledReceiveArtifactsPort, ProvisionalReceiveAction, ProvisionalReceiveError,
+    ProvisionalReceiveRecovery, ReceiveArtifact, ReceiveArtifactLogError, ReceiveArtifactRecord,
+    RecordReceiverTransferPort, SeedProvisionalReceivePort,
 };
 use uc_core::{FileTransferCancellationReason, FileTransferEvent, FileTransferFailureReason};
 #[derive(Default)]
@@ -264,7 +267,7 @@ fn noop_lifecycle_deps() -> FileTransferLifecycleDeps {
         file_cache_dir: std::path::PathBuf::new(),
         clock: Arc::new(FixedClock),
         host_event_bus: Arc::new(HostEventBus::new()),
-        receive_readiness: Arc::new(uc_application::facade::ReceiveReadinessCoordinator::new()),
+        receive_readiness: Arc::new(ReceiveReadinessCoordinator::new()),
     }
 }
 
@@ -360,6 +363,32 @@ impl ClockPort for FixedClock {
 
 struct FailFirstPublisher {
     calls: AtomicUsize,
+}
+
+struct FailingEventStore;
+
+#[async_trait]
+impl FileTransferEventStorePort for FailingEventStore {
+    async fn load(&self, _transfer_id: &str) -> anyhow::Result<Vec<FileTransferEvent>> {
+        Err(anyhow::anyhow!("event history unavailable"))
+    }
+
+    async fn append(&self, _event: FileTransferEvent) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!("event append unavailable"))
+    }
+}
+
+struct FailingPrivacyMaintenance;
+
+#[async_trait]
+impl uc_core::ports::EnsureFileTransferPrivacyMaintenancePort for FailingPrivacyMaintenance {
+    async fn ensure_file_transfer_privacy_maintenance(
+        &self,
+    ) -> Result<(), FileTransferPrivacyMaintenanceError> {
+        Err(FileTransferPrivacyMaintenanceError::Backend(
+            "privacy database unavailable".to_owned(),
+        ))
+    }
 }
 
 #[async_trait]
@@ -477,14 +506,14 @@ async fn progress_is_monotonic_inside_one_session() {
     session.report_progress(64, Some(128)).await.unwrap();
     let error = session.report_progress(32, Some(128)).await.unwrap_err();
 
-    assert_eq!(
+    assert!(matches!(
         error,
         FileTransferApplicationError::ProgressWentBackwards {
-            transfer_id: "transfer-1".into(),
+            ref transfer_id,
             previous_bytes: 64,
             new_bytes: 32,
-        }
-    );
+        } if transfer_id == "transfer-1"
+    ));
     assert_eq!(history(&ctx, "transfer-1").await.len(), 2);
 }
 
@@ -580,13 +609,13 @@ async fn closing_facade_cancels_every_active_session_and_rejects_new_sessions() 
             ]
         ));
     }
-    assert_eq!(
+    assert!(matches!(
         ctx.facade
             .begin_receiver_transfer(entry_transfer("transfer-3"))
             .await
             .unwrap_err(),
-        FileTransferApplicationError::LifecycleClosed,
-    );
+        FileTransferApplicationError::LifecycleClosed
+    ));
 }
 
 #[tokio::test]
@@ -617,6 +646,10 @@ async fn persisted_start_is_not_forgotten_when_publishing_fails() {
         .await
         .unwrap_err();
     assert!(matches!(error, FileTransferApplicationError::Publish(_)));
+    assert_eq!(
+        error.source().map(ToString::to_string).as_deref(),
+        Some("publisher unavailable")
+    );
 
     let persisted_session = facade
         .active_session("transfer-1")
@@ -629,4 +662,63 @@ async fn persisted_start_is_not_forgotten_when_publishing_fails() {
 
     assert!(Arc::ptr_eq(&persisted_session, &retried_session));
     assert_eq!(store.load("transfer-1").await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn event_store_failure_preserves_its_source() {
+    let receiver = Arc::new(ReceiverStore::default());
+    let repo: Arc<dyn RecordReceiverTransferPort> = receiver.clone();
+    let provisional_seed: Arc<dyn SeedProvisionalReceivePort> = receiver.clone();
+    let provisional_path: Arc<dyn UpdateProvisionalReceivePathPort> = receiver.clone();
+    let provisional_finalize: Arc<dyn FinalizeProvisionalReceivePort> = receiver;
+    let facade = FileTransferFacade::new(FileTransferFacadeDeps {
+        store: Arc::new(FailingEventStore),
+        publisher: Arc::new(InMemoryEventPublisher::new()),
+        repo,
+        provisional_seed,
+        provisional_path,
+        provisional_finalize,
+        clock: Arc::new(FixedClock),
+        lifecycle: noop_lifecycle_deps(),
+    });
+
+    let error = facade
+        .begin_receiver_transfer(entry_transfer("transfer-store-error"))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, FileTransferApplicationError::Store(_)));
+    assert_eq!(
+        error.source().map(ToString::to_string).as_deref(),
+        Some("event history unavailable")
+    );
+}
+
+#[tokio::test]
+async fn readiness_recovery_failure_preserves_its_source() {
+    let store = Arc::new(InMemoryEventStore::new());
+    let receiver = Arc::new(ReceiverStore::default());
+    let repo: Arc<dyn RecordReceiverTransferPort> = receiver.clone();
+    let provisional_seed: Arc<dyn SeedProvisionalReceivePort> = receiver.clone();
+    let provisional_path: Arc<dyn UpdateProvisionalReceivePathPort> = receiver.clone();
+    let provisional_finalize: Arc<dyn FinalizeProvisionalReceivePort> = receiver;
+    let mut lifecycle = noop_lifecycle_deps();
+    lifecycle.privacy_maintenance = Arc::new(FailingPrivacyMaintenance);
+    let facade = FileTransferFacade::new(FileTransferFacadeDeps {
+        store,
+        publisher: Arc::new(InMemoryEventPublisher::new()),
+        repo,
+        provisional_seed,
+        provisional_path,
+        provisional_finalize,
+        clock: Arc::new(FixedClock),
+        lifecycle,
+    });
+
+    let error = facade.ensure_receive_ready().await.unwrap_err();
+
+    assert_eq!(
+        error.source().map(ToString::to_string).as_deref(),
+        Some("file transfer privacy maintenance failed: privacy database unavailable")
+    );
 }

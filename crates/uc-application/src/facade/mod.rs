@@ -24,14 +24,17 @@ pub mod space_setup;
 pub mod storage;
 pub mod upgrade;
 
-pub use crate::device::query_local_device::{LocalDeviceInfo, QueryLocalDeviceUseCase};
+pub use crate::application::{
+    ApplicationAssembly, ApplicationRuntime, ApplicationRuntimeError, ApplicationShutdownReport,
+    ApplicationStartError, ApplicationUpgradeError,
+};
+
+pub use crate::device::query_local_device::LocalDeviceInfo;
 pub use crate::profile::factory_reset::{
-    ProfileFactoryResetError, ProfileFactoryResetOutcome, ProfileFactoryResetRequest,
-    ProfileFactoryResetUseCase,
+    ProfileFactoryResetError, ProfileFactoryResetFacade, ProfileFactoryResetOutcome,
+    ProfileFactoryResetRequest,
 };
-pub use crate::profile::probe_profile_key_access::{
-    ProbeProfileKeyAccessError, ProbeProfileKeyAccessUseCase,
-};
+pub use crate::profile::probe_profile_key_access::ProbeProfileKeyAccessError;
 pub use crate::space::{
     CancelSpaceJoinError, CurrentJoinStatus, DecideDeviceTrustChange, DecideDeviceTrustChangeError,
     DecideDeviceTrustChangeResult, DeviceTrustChangeChoice, DeviceTrustDevice,
@@ -46,64 +49,51 @@ pub use crate::space::{
     RemoveSpaceMemberResult, SpaceAccessState,
 };
 
-pub use crate::clipboard::active::{
-    build_active_clipboard_pull_serve_port, ActiveClipboardDeps, ActiveClipboardFacade,
-    ActiveClipboardLifecycle, ActiveClipboardLifecycleError, ActiveClipboardPullServeFacadeDeps,
-    ActiveClipboardReconcileDeps, ActiveClipboardReconcileFacade, ActiveClipboardReconcileOutcome,
-    ClipboardSnapshotDeps,
-};
+pub use crate::clipboard::active::{ActiveClipboardFacade, ActiveClipboardReconcileOutcome};
 pub use app_facade::{
-    AppFacade, AppFacadeParts, AppPresenceEvent, AppPresenceSubscription,
-    AppPresenceSubscriptionError, ChooseDeviceGroup, ChooseDeviceGroupError,
-    ChooseDeviceGroupResult, ClipboardRestoreMode, DeviceGroupChoice, DeviceGroupChoicesView,
-    DeviceGroupIssue, QueryDeviceGroupChoicesError,
+    AppFacade, AppPresenceEvent, AppPresenceSubscription, AppPresenceSubscriptionError,
+    ChooseDeviceGroup, ChooseDeviceGroupError, ChooseDeviceGroupResult, ClipboardRestoreMode,
+    DeviceGroupChoice, DeviceGroupChoicesView, DeviceGroupIssue, QueryDeviceGroupChoicesError,
 };
 pub use app_paths::AppPaths;
 pub use blob_transfer::{
-    BlobTransferDeps, BlobTransferError, BlobTransferFacade, FetchBlobCommand, FetchBlobResult,
+    BlobTransferError, BlobTransferFacade, FetchBlobCommand, FetchBlobResult,
     FetchBlobToPathCommand, FetchBlobToPathResult, FetchTransferContext, InboundCancelOutcome,
     PublishBlobCommand, PublishBlobPathCommand, PublishBlobResult,
 };
 pub use clipboard::{
-    CancelEntryReceiveError, CancelEntryReceiveOutcome, ClipboardSyncDeps, ClipboardSyncError,
-    ClipboardSyncFacade, DispatchEntryInput, DispatchEntryOutcome, DispatchEntryPerTarget,
-    EntryDeliveryStatusView, EntryDeliveryTargetView, EntryDeliveryView, EntrySource,
-    GetEntryDeliveryViewError,
+    CancelEntryReceiveError, CancelEntryReceiveOutcome, ClipboardSyncError, ClipboardSyncFacade,
+    DispatchEntryInput, DispatchEntryOutcome, DispatchEntryPerTarget, EntryDeliveryStatusView,
+    EntryDeliveryTargetView, EntryDeliveryView, EntrySource, GetEntryDeliveryViewError,
 };
 // V3 envelope codec helpers — surfaced through the facade per §11.4.3 so
 // external CLI / test consumers don't reach into `crate::usecases::*`
 // directly. Implementations live in `usecases::clipboard_sync::payload_codec`.
 pub use crate::clipboard::inbound::{
     ClipboardInboundEvent, ClipboardInboundEventAction, ClipboardInboundEventPort,
-    ClipboardInboundRepresentationSummary, ClipboardInboundRuntime, ClipboardInboundRuntimeDeps,
-    ClipboardInboundRuntimeError, InboundClipboardApplyError, InboundClipboardApplyInput,
-    InboundClipboardApplyOutcome, InboundClipboardApplyPort,
+    ClipboardInboundRepresentationSummary, ClipboardInboundRuntimeError,
+    InboundClipboardApplyError, InboundClipboardApplyInput, InboundClipboardApplyOutcome,
+    InboundClipboardApplyPort, InboundProvisionalReceive,
 };
 pub use crate::clipboard::outbound::{
-    ClipboardOutboundDeps, ClipboardOutboundDispatcher, ClipboardOutboundError,
-    ClipboardOutboundFacade, ClipboardOutboundInput, ClipboardOutboundOutcome,
-    ClipboardOutboundPort, NotResendableReason, ResendEntryCommand, ResendEntryError, ResendReport,
-    MAX_INLINE_OUTBOUND_REPRESENTATION_BYTES,
+    ClipboardOutboundError, ClipboardOutboundFacade, ClipboardOutboundInput,
+    ClipboardOutboundOutcome, ClipboardOutboundPort, NotResendableReason, ResendEntryCommand,
+    ResendEntryError, ResendReport, MAX_INLINE_OUTBOUND_REPRESENTATION_BYTES,
 };
 pub use crate::clipboard::sync::apply_inbound::{
-    ApplyInboundClipboardUseCase, ApplyInboundError, ApplyInboundInput, ApplyOutcome,
-    FileCacheBlobMaterializer, InboundApplyCommonDeps, InboundBlobFetcher, InboundCapture,
-    InboundReceiveAttemptDeps, InboundSnapshotRebuild, InboundWrite, InteractiveReceiveDeps,
-    StoreOnlyPullDeps,
+    ApplyInboundError, ApplyInboundInput, ApplyOutcome, FileCacheBlobMaterializer,
+    InboundBlobFetcher, InboundCapture, InboundSnapshotRebuild, InboundWrite,
 };
 pub use crate::clipboard::sync::payload_codec::{self, encode_snapshot_to_v3_bytes};
-pub use crate::clipboard::sync::sync_runtime::{ClipboardSyncRuntime, ClipboardSyncRuntimeDeps};
 pub use crate::clipboard::sync::{
     decode_v3_bytes_to_snapshot, decode_v3_bytes_to_snapshot_and_blob_refs, V3BlobRef,
 };
 pub use crate::search::live_index::{
-    ClipboardLiveIndexDeps, ClipboardLiveIndexError, ClipboardLiveIndexFacade,
-    ClipboardLiveIndexInput, ClipboardLiveIndexOutcome, ClipboardLiveIndexPort,
-    ClipboardLiveIndexer,
+    ClipboardLiveIndexError, ClipboardLiveIndexFacade, ClipboardLiveIndexInput,
+    ClipboardLiveIndexOutcome,
 };
 pub use crate::transfer::receive::reconciliation::{
-    EnsureReceiveReadyPort, ReceiveReadinessCoordinator, ReceiveReadinessError,
-    ReceiveReadinessStatus,
+    EnsureReceiveReadyPort, ReceiveReadinessError, ReceiveReadinessStatus,
 };
 pub use clipboard_capture::{
     CapturedClipboardEntryView, CapturedFileSetLineView, CapturedFileSetView,
@@ -112,22 +102,17 @@ pub use clipboard_capture::{
 pub use clipboard_history::{
     CleanupResultView as ClipboardCleanupResultView,
     ClearHistoryResultView as ClipboardClearHistoryResultView, ClipboardHistoryError,
-    ClipboardHistoryFacade, ClipboardHistoryFacadeDeps, ClipboardListInput, ClipboardStatsView,
-    EntryDetailView, EntryProjectionView, EntryResourceView, HistoryMaintenanceRuntime,
-    HistoryMaintenanceRuntimeError, ReconcileResultView as ClipboardReconcileResultView,
+    ClipboardHistoryFacade, ClipboardListInput, ClipboardStatsView, EntryDetailView,
+    EntryProjectionView, EntryResourceView, ReconcileResultView as ClipboardReconcileResultView,
 };
-pub use clipboard_restore::{
-    ClipboardRestoreError, ClipboardRestoreFacade, ClipboardRestoreFacadeDeps,
-};
-pub use config_migration::{ConfigMigrationDeps, ConfigMigrationFacade};
+pub use clipboard_restore::{ClipboardRestoreError, ClipboardRestoreFacade};
+pub use config_migration::ConfigMigrationFacade;
 pub use diagnostics::{
-    DebugStatusView, DiagnosticsFacade, DiagnosticsFacadeDeps, DiagnosticsFacadeError,
-    LogExportView, UpdateDebugModeView,
+    DebugStatusView, DiagnosticsFacade, DiagnosticsFacadeError, LogExportView, UpdateDebugModeView,
 };
 pub use file_transfer::{
     BeginReceiverTransfer, FileTransferApplicationError, FileTransferFacade,
-    FileTransferFacadeDeps, FileTransferLifecycleDeps, FileTransferSession,
-    ReceiverTransferRegistration,
+    ReceiverTransferHandle, ReceiverTransferRegistration,
 };
 pub use host_event::{
     ClipboardHostEvent, ClipboardOriginKind, DeliveryHostEvent, EmitError,
@@ -136,7 +121,7 @@ pub use host_event::{
 };
 
 pub use crate::clipboard::resource::{
-    BinaryResourceView, FileResourceView, ResourceFacade, ResourceFacadeDeps, ResourceFacadeError,
+    BinaryResourceView, FileResourceView, ResourceFacade, ResourceFacadeError,
 };
 pub use roster::{
     connection_channel_to_wire, ConnectionChannel, ContentTypesPatch, ContentTypesView,
@@ -147,8 +132,7 @@ pub use roster::{
 pub use search::{
     map_search_error, SearchFacade, SearchFacadeError, SearchPageView, SearchProjectionBuilder,
     SearchQueryInput, SearchRebuildAcceptedView, SearchRebuildProgressView, SearchResultView,
-    SearchRuntime, SearchRuntimeDeps, SearchRuntimeError, SearchStatusSnapshot, SearchStatusView,
-    SearchTagView,
+    SearchShutdownError, SearchStatusSnapshot, SearchStatusView, SearchTagView,
 };
 // Note: `RelayDiagnosticPort` is intentionally NOT re-exported here. The port
 // trait stays under `crate::facade::settings::relay_diagnostic` and is reached
@@ -157,28 +141,23 @@ pub use search::{
 pub use settings::{
     ContentTypesPatch as SettingsContentTypesPatch, ContentTypesView as SettingsContentTypesView,
     FileSyncSettingsPatch, FileSyncSettingsView, GeneralSettingsPatch, GeneralSettingsView,
-    PairingSettingsPatch, PairingSettingsView, RelayProbeError, RelayProbeReport,
-    RelayProbeReportView, RetentionPolicyPatch, RetentionPolicyView, RetentionRulePatchValue,
-    RetentionRuleView, RuleEvaluationView, SecuritySettingsPatch, SecuritySettingsView,
-    SettingsFacade, SettingsFacadeError, SettingsPatch, SettingsView, ShortcutKeyView,
-    SyncFrequencyView, SyncSettingsPatch, SyncSettingsView, ThemeView, UpdateChannelView,
+    PairingSettingsPatch, PairingSettingsView, PreparedNetworkSettings, RelayProbeError,
+    RelayProbeReport, RelayProbeReportView, RetentionPolicyPatch, RetentionPolicyView,
+    RetentionRulePatchValue, RetentionRuleView, RuleEvaluationView, SecuritySettingsPatch,
+    SecuritySettingsView, SettingsFacade, SettingsFacadeError, SettingsPatch, SettingsView,
+    ShortcutKeyView, SyncFrequencyView, SyncSettingsPatch, SyncSettingsView, ThemeView,
+    UpdateChannelView,
 };
 
 pub use space_setup::{
-    build_space_session_activity, CancelInvitationError, CompletePendingSpaceTransitionError,
-    CurrentInvitation, InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult,
-    IssuePairingInvitationError, IssuePairingInvitationResult, MembershipConflictBranchView,
-    MembershipConflictView, MembershipConflictsView, PairingInvitationAddressCandidate,
-    QueryMembershipConflictsError, QueryPairingInvitationAddressesError,
-    QueryPendingSpaceTransitionError, QuerySetupStateError, RedeemPairingInvitationError,
-    ResetSpaceError, ResolveMembershipConflictError, ResolveMembershipConflictInput,
-    ResolveMembershipConflictResult, SetupStateView, SpaceActivityError, SpaceAdmissionDeps,
-    SpaceFacade, SpaceFacadeDeps, SpaceSessionActivityDeps, SpaceSessionActivityPort,
-    SpaceSessionDeps, SpaceTransitionDeps, UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
+    CancelInvitationError, CompletePendingSpaceTransitionError, CurrentInvitation,
+    InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
+    IssuePairingInvitationResult, MembershipConflictBranchView, MembershipConflictView,
+    MembershipConflictsView, PairingInvitationAddressCandidate, QueryMembershipConflictsError,
+    QueryPairingInvitationAddressesError, QueryPendingSpaceTransitionError, QuerySetupStateError,
+    RedeemPairingInvitationError, ResetSpaceError, ResolveMembershipConflictError,
+    ResolveMembershipConflictInput, ResolveMembershipConflictResult, SetupStateView,
+    SpaceActivityError, SpaceFacade, UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
 };
-pub use storage::{
-    ClearCacheResultView, StorageFacade, StorageFacadeDeps, StorageFacadeError, StorageStatsView,
-};
-pub use upgrade::{
-    AcknowledgeUpgradeError, DetectUpgradeError, UpgradeFacade, UpgradeFacadeDeps, UpgradeStatus,
-};
+pub use storage::{ClearCacheResultView, StorageFacade, StorageFacadeError, StorageStatsView};
+pub use upgrade::{AcknowledgeUpgradeError, DetectUpgradeError, UpgradeFacade, UpgradeStatus};

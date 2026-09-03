@@ -52,3 +52,25 @@ pub(crate) fn export_admission_content_key_catalog(
     )
     .map_err(|_| EncryptionError::KeyMaterialCorrupt)
 }
+
+/// 把已经通过 admission commitment 验证的目录转换为 session/repository
+/// 唯一接受的 V2 持久格式。控制世代 owner 不复制该私有格式。
+pub(crate) fn import_admission_content_key_catalog(
+    catalog: &AdmissionContentKeyCatalogV1,
+) -> Result<Vec<u8>, EncryptionError> {
+    catalog
+        .validate()
+        .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+    encode(&PersistedContentKeyCatalog {
+        version: 2,
+        entries: catalog
+            .entries
+            .iter()
+            .map(|entry| PersistedContentKeyEntry {
+                content_key_id: entry.content_key_id.clone(),
+                epoch: entry.epoch,
+                key: entry.key.clone(),
+            })
+            .collect(),
+    })
+}

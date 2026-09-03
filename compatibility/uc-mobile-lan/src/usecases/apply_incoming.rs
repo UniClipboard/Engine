@@ -53,10 +53,13 @@ use uc_core::{MimeType, ObservedClipboardRepresentation, SystemClipboardSnapshot
 use uc_observability_contract::analytics::{AnalyticsPort, Direction, Event, PayloadSizeBucket};
 
 use crate::usecases::clipboard_doc::SyncClipboardItemType;
+#[cfg(test)]
+use uc_application::deps::test_support::ApplyInboundClipboardUseCase;
 use uc_application::facade::encode_snapshot_to_v3_bytes;
-use uc_application::facade::file_transfer::{FileTransferFacade, FileTransferSession};
+use uc_application::facade::file_transfer::{FileTransferFacade, ReceiverTransferHandle};
 use uc_application::facade::{
-    ApplyInboundClipboardUseCase, ApplyInboundError, ApplyInboundInput, ApplyOutcome,
+    InboundClipboardApplyError, InboundClipboardApplyInput, InboundClipboardApplyOutcome,
+    InboundClipboardApplyPort, InboundProvisionalReceive,
 };
 
 // ─── Fan-out port (use-case-local) ───────────────────────────────────────
@@ -228,11 +231,11 @@ pub enum ApplyIncomingMobileClipOutcome {
 
 #[derive(Debug, Error)]
 pub enum ApplyIncomingMobileClipError {
-    /// Underlying [`ApplyInboundClipboardUseCase`] failed in a way that
+    /// Underlying inbound intent failed in a way that
     /// is **not** expressible as a domain outcome (DB error, capture
     /// pipeline crash, OS write coord failure).
-    #[error("inbound apply failed: {0}")]
-    Inbound(#[from] ApplyInboundError),
+    #[error("inbound apply failed")]
+    Inbound(#[source] InboundClipboardApplyError),
     /// V3 envelope encode failed.
     #[error("V3 envelope encode failed: {0}")]
     EncodeFailed(String),
@@ -356,7 +359,7 @@ impl Default for IncomingMobileBuffer {
 // ─── Use Case ────────────────────────────────────────────────────────────
 
 pub(crate) struct ApplyIncomingMobileClipUseCase {
-    inbound: Arc<ApplyInboundClipboardUseCase>,
+    inbound: Arc<dyn InboundClipboardApplyPort>,
     buffer: Arc<IncomingMobileBuffer>,
     file_staging: Arc<dyn MobileFileStagingPort>,
     clock: Arc<dyn ClockPort>,
@@ -409,7 +412,7 @@ pub(crate) struct ApplyIncomingMobileClipUseCase {
 
 impl ApplyIncomingMobileClipUseCase {
     pub(crate) fn new(
-        inbound: Arc<ApplyInboundClipboardUseCase>,
+        inbound: Arc<dyn InboundClipboardApplyPort>,
         buffer: Arc<IncomingMobileBuffer>,
         file_staging: Arc<dyn MobileFileStagingPort>,
         clock: Arc<dyn ClockPort>,
@@ -758,7 +761,7 @@ impl ApplyIncomingMobileClipUseCase {
         }
     }
 
-    async fn complete_transfer(&self, session: &FileTransferSession) {
+    async fn complete_transfer(&self, session: &ReceiverTransferHandle) {
         if let Err(err) = session.complete().await {
             warn!(
                 transfer_id = session.transfer_id(),
@@ -768,7 +771,7 @@ impl ApplyIncomingMobileClipUseCase {
         }
     }
 
-    async fn fail_transfer(&self, session: &FileTransferSession, detail: String) {
+    async fn fail_transfer(&self, session: &ReceiverTransferHandle, detail: String) {
         if let Err(err) = session
             .fail(FileTransferFailureReason::Unknown, Some(detail))
             .await
@@ -921,11 +924,13 @@ impl ApplyIncomingMobileClipUseCase {
             "mobile_sync apply_incoming: dispatching to ApplyInbound"
         );
 
-        let input = ApplyInboundInput {
-            from_device: pseudo_from,
+        let input = InboundClipboardApplyInput {
+            from_device: pseudo_from.to_string(),
             snapshot_hash: snapshot_hash.clone(),
             plaintext,
             flow_id: None,
+            provisional: provisional
+                .map(|(transfer_id, role)| InboundProvisionalReceive { transfer_id, role }),
             // The phone reached exactly one desktop, so re-activating held
             // content is *this* device's activation: `LocalRestore` lets the
             // watcher pick the write up and carry it to the other desktops.
@@ -933,24 +938,22 @@ impl ApplyIncomingMobileClipUseCase {
             // through `maybe_fan_out_to_paired_peers`.)
             resurface_intent: ClipboardWriteIntent::LocalRestore,
         };
-        let outcome = match provisional {
-            Some((transfer_id, role)) => {
-                self.inbound
-                    .execute_with_provisional(input, transfer_id, role)
-                    .await?
-            }
-            None => self.inbound.execute(input).await?,
-        };
+        let outcome = self
+            .inbound
+            .apply(input)
+            .await
+            .map_err(ApplyIncomingMobileClipError::Inbound)?;
 
         Ok(match outcome {
-            ApplyOutcome::Applied { entry_id } => {
+            InboundClipboardApplyOutcome::Applied { entry_id } => {
+                let entry_id = EntryId::from(entry_id);
                 info!(entry_id = %entry_id, "mobile_sync apply_incoming: applied");
                 ApplyIncomingMobileClipOutcome::Applied {
                     entry_id,
                     content_id: snapshot_hash,
                 }
             }
-            ApplyOutcome::Resurfaced {
+            InboundClipboardApplyOutcome::Resurfaced {
                 snapshot_hash: hash,
                 existing_entry_id,
                 os_write_succeeded,
@@ -963,11 +966,11 @@ impl ApplyIncomingMobileClipUseCase {
                 );
                 ApplyIncomingMobileClipOutcome::Resurfaced {
                     snapshot_hash: hash,
-                    existing_entry_id,
+                    existing_entry_id: EntryId::from(existing_entry_id),
                     os_write_succeeded,
                 }
             }
-            ApplyOutcome::DuplicateSkipped {
+            InboundClipboardApplyOutcome::DuplicateSkipped {
                 snapshot_hash: hash,
                 existing_entry_id,
             } => {
@@ -978,10 +981,10 @@ impl ApplyIncomingMobileClipUseCase {
                 );
                 ApplyIncomingMobileClipOutcome::DuplicateSkipped {
                     snapshot_hash: hash,
-                    existing_entry_id,
+                    existing_entry_id: EntryId::from(existing_entry_id),
                 }
             }
-            ApplyOutcome::DecodeFailed { reason } => {
+            InboundClipboardApplyOutcome::DecodeFailed { reason } => {
                 // 我们刚 encode 出来的 envelope 又被 inbound decode 失败 ——
                 // 几乎不可能, 但为了类型完备保留这条路径 + warn 日志。
                 warn!(

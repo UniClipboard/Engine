@@ -18,7 +18,9 @@ use uc_core::ports::search::search_key::SearchKeyDerivationPort;
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::{DeriveSpaceSubkeyPort, SpaceAccessError};
 use uc_core::search::error::SearchError;
-use uc_core::search::key::{RenderKey, SearchKey};
+use uc_core::search::key::{RenderKey, SearchKey, SearchKeyContext};
+
+use super::{V3SearchProtection, V3SearchProtectionError};
 
 const SEARCH_KEY_INFO: &[u8] = b"uniclipboard-search-index/v1";
 
@@ -54,7 +56,7 @@ impl HkdfSearchKeyDerivation {
 
 #[async_trait]
 impl SearchKeyDerivationPort for HkdfSearchKeyDerivation {
-    async fn derive_search_key(&self) -> Result<SearchKey, SearchError> {
+    async fn derive_search_key(&self) -> Result<SearchKeyContext, SearchError> {
         let profile =
             self.current_profile.current_profile().await.map_err(|e| {
                 SearchError::Internal(format!("failed to get current profile: {e}"))
@@ -69,7 +71,7 @@ impl SearchKeyDerivationPort for HkdfSearchKeyDerivation {
                 other => SearchError::Internal(format!("derive_subkey: {other}")),
             })?;
 
-        SearchKey::from_bytes(&okm)
+        SearchKey::from_bytes(&okm).map(SearchKeyContext::legacy)
     }
 
     async fn derive_render_key(&self) -> Result<RenderKey, SearchError> {
@@ -88,6 +90,40 @@ impl SearchKeyDerivationPort for HkdfSearchKeyDerivation {
             })?;
 
         RenderKey::from_bytes(&okm)
+    }
+}
+
+/// V3 posting 构建只暴露不可拆分的 key/group-ref context。
+pub struct V3SearchKeyDerivation {
+    protection: Arc<V3SearchProtection>,
+}
+
+impl V3SearchKeyDerivation {
+    pub fn new(protection: Arc<V3SearchProtection>) -> Self {
+        Self { protection }
+    }
+}
+
+#[async_trait]
+impl SearchKeyDerivationPort for V3SearchKeyDerivation {
+    async fn derive_search_key(&self) -> Result<SearchKeyContext, SearchError> {
+        self.protection
+            .active_key_context()
+            .await
+            .map_err(map_v3_search_error)
+    }
+
+    async fn derive_render_key(&self) -> Result<RenderKey, SearchError> {
+        Err(SearchError::Internal(
+            "V3 search render protection is repository-owned".to_owned(),
+        ))
+    }
+}
+
+fn map_v3_search_error(error: V3SearchProtectionError) -> SearchError {
+    match error {
+        V3SearchProtectionError::NotActive { .. } => SearchError::SessionLocked,
+        _ => SearchError::Internal("V3 search protection unavailable".to_owned()),
     }
 }
 

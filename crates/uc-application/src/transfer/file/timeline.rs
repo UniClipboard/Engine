@@ -166,7 +166,7 @@ pub(crate) async fn load_timeline(
     let history = store
         .load(transfer_id)
         .await
-        .map_err(|error| FileTransferApplicationError::Store(error.to_string()))?;
+        .map_err(FileTransferApplicationError::Store)?;
     TransferTimeline::from_history(transfer_id, &history)
 }
 
@@ -208,12 +208,12 @@ mod tests {
 
         for history in histories {
             let timeline = TransferTimeline::from_history("transfer-1", &history).unwrap();
-            assert_eq!(
+            assert!(matches!(
                 timeline.ensure_active("transfer-1", "peer-1"),
                 Err(FileTransferApplicationError::TransferAlreadyFinished {
-                    transfer_id: "transfer-1".into(),
-                })
-            );
+                    ref transfer_id,
+                }) if transfer_id == "transfer-1"
+            ));
         }
     }
 
@@ -230,11 +230,11 @@ mod tests {
             ),
         ];
 
-        assert_eq!(
+        assert!(matches!(
             TransferTimeline::from_history("transfer-1", &history).unwrap_err(),
             FileTransferApplicationError::TransferAlreadyFinished {
-                transfer_id: "transfer-1".into(),
-            }
-        );
+                ref transfer_id,
+            } if transfer_id == "transfer-1"
+        ));
     }
 }

@@ -7,6 +7,6 @@ pub use commands::{
     InitializeSpaceInput, InvitationAvailability, IssuePairingInvitationResult, UnlockSpaceInput,
     UnlockSpaceResult,
 };
-pub use deps::{SpaceAdmissionDeps, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps};
+pub(crate) use deps::{SpaceAdmissionDeps, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps};
 pub use errors::{IssuePairingInvitationError, RedeemPairingInvitationError};
 pub use facade::SpaceFacade;

@@ -18,6 +18,8 @@ pub mod tokenizer;
 mod v3_protection;
 
 #[cfg(test)]
+mod sqlite_v3_tests;
+#[cfg(test)]
 mod v3_protection_tests;
 
 pub use constants::*;

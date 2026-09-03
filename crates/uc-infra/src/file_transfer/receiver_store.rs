@@ -4,18 +4,25 @@ use diesel::Connection;
 use std::sync::Arc;
 
 use crate::db::ports::DbExecutor;
-use crate::file_transfer::event_store::sqlite::{append_event, load_events};
-use crate::file_transfer::persistence_cipher::derive_transfer_persistence_cipher;
-use crate::file_transfer::projection::sqlite::apply_event;
+use crate::file_transfer::event_store::sqlite::{
+    append_prepared_event, decode_event_rows, load_event_rows, prepare_event_row,
+    read_next_sequence, transfer_id_of, TransferCommitConflict,
+};
+use crate::file_transfer::persistence_cipher::TransferPersistenceProtection;
+use crate::file_transfer::projection::sqlite::{
+    apply_prepared_projection, load_projection_snapshot, prepare_projection,
+};
+use crate::security::ContentProtection;
 use uc_core::file_transfer::{FileTransferEvent, FileTransferEventStorePort};
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::DeriveSpaceSubkeyPort;
 
+const MAX_COMMIT_ATTEMPTS: usize = 4;
+
 /// Receiver-side durable store that keeps event log and projection updates in one SQLite transaction.
 pub struct SqliteReceiverFileTransferStore<E> {
     executor: E,
-    derive_subkey: Arc<dyn DeriveSpaceSubkeyPort>,
-    current_profile: Arc<dyn CurrentProfilePort>,
+    protection: TransferPersistenceProtection,
 }
 
 impl<E> SqliteReceiverFileTransferStore<E> {
@@ -26,8 +33,14 @@ impl<E> SqliteReceiverFileTransferStore<E> {
     ) -> Self {
         Self {
             executor,
-            derive_subkey,
-            current_profile,
+            protection: TransferPersistenceProtection::legacy(derive_subkey, current_profile),
+        }
+    }
+
+    pub fn new_v3(executor: E, protection: Arc<ContentProtection>) -> Self {
+        Self {
+            executor,
+            protection: TransferPersistenceProtection::v3(protection),
         }
     }
 }
@@ -36,22 +49,45 @@ impl<E> SqliteReceiverFileTransferStore<E> {
 impl<E: DbExecutor> FileTransferEventStorePort for SqliteReceiverFileTransferStore<E> {
     async fn load(&self, transfer_id: &str) -> Result<Vec<FileTransferEvent>> {
         let transfer_id = transfer_id.to_string();
-        let cipher =
-            derive_transfer_persistence_cipher(&self.derive_subkey, &self.current_profile).await?;
-        self.executor
-            .run(move |conn| load_events(conn, &transfer_id, &cipher))
+        let rows = self
+            .executor
+            .run(move |conn| load_event_rows(conn, &transfer_id))?;
+        let protection = self.protection.resolve().await?;
+        decode_event_rows(rows, &protection).await
     }
 
     async fn append(&self, event: FileTransferEvent) -> Result<()> {
-        let cipher =
-            derive_transfer_persistence_cipher(&self.derive_subkey, &self.current_profile).await?;
-        self.executor.run(move |conn| {
-            conn.transaction::<_, anyhow::Error, _>(|conn| {
-                append_event(conn, event.clone(), &cipher)?;
-                apply_event(conn, &event, &cipher)?;
-                Ok(())
-            })
-        })
+        let protection = self.protection.resolve().await?;
+        for attempt in 0..MAX_COMMIT_ATTEMPTS {
+            let snapshot_transfer_id = transfer_id_of(&event).to_owned();
+            let (sequence, projection_snapshot) = self.executor.run(move |conn| {
+                conn.transaction::<_, anyhow::Error, _>(|conn| {
+                    Ok((
+                        read_next_sequence(conn, &snapshot_transfer_id)?,
+                        load_projection_snapshot(conn, &snapshot_transfer_id)?,
+                    ))
+                })
+            })?;
+            let event_row = prepare_event_row(event.clone(), sequence, &protection).await?;
+            let projection = prepare_projection(&event, projection_snapshot, &protection).await?;
+            let result = self.executor.run(move |conn| {
+                conn.transaction::<_, anyhow::Error, _>(|conn| {
+                    append_prepared_event(conn, &event_row)?;
+                    apply_prepared_projection(conn, &projection)?;
+                    Ok(())
+                })
+            });
+            match result {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if error.downcast_ref::<TransferCommitConflict>().is_some()
+                        && attempt + 1 < MAX_COMMIT_ATTEMPTS => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(anyhow::anyhow!(
+            "file transfer append exhausted commit retries"
+        ))
     }
 }
 

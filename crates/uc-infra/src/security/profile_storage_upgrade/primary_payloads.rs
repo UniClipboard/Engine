@@ -537,7 +537,7 @@ mod tests {
         let secure_storage: Arc<dyn SecureStoragePort> = Arc::new(MemorySecureStorage::default());
         let vault = Arc::new(ProfileContentKeyVault::new(
             root.clone(),
-            secure_storage,
+            Arc::clone(&secure_storage),
             [0xB1; 16],
         ));
         vault
@@ -601,7 +601,11 @@ mod tests {
         )
         .unwrap();
         let mut journal = UpgradeJournalV1::detected(Some(&source_manifest));
-        let target = TargetGenerationStager::new(root, source_pool);
+        let keys = Arc::new(crate::security::AdmissionKeyManager::new(
+            Arc::clone(&secure_storage),
+            [0xB6; 16],
+        ));
+        let target = TargetGenerationStager::new(root, source_pool, keys);
         let staged = target.stage(&journal).unwrap();
         journal
             .mark_target_staged(
@@ -609,7 +613,7 @@ mod tests {
                 staged.source_database_revision,
             )
             .unwrap();
-        let separated = target.separate(&journal).unwrap();
+        let separated = target.separate(&journal, Some(&source_manifest)).unwrap();
         journal
             .mark_stores_separated(
                 separated.profile_database_digest,

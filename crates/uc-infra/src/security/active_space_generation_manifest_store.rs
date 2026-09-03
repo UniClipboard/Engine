@@ -116,6 +116,32 @@ impl std::fmt::Debug for ActiveRuntimeManifestV3 {
     }
 }
 
+/// 已认证 manifest 的完整版本选择。
+///
+/// 旧的 `load`/`load_sync` 继续只接受 V2，供尚未 clean cutover 的旧流程
+/// 失败关闭；启动 gate 与 V3-aware runtime 只能使用这个显式版本和。
+#[derive(Clone, PartialEq, Eq)]
+pub enum ActiveRuntimeManifest {
+    V2(ActiveSpaceGenerationManifestV2),
+    V3(ActiveRuntimeManifestV3),
+}
+
+impl std::fmt::Debug for ActiveRuntimeManifest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ActiveRuntimeManifest")
+            .field(
+                "format",
+                &match self {
+                    Self::V2(_) => "V2",
+                    Self::V3(_) => "V3",
+                },
+            )
+            .field("identifiers", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// 从 V2 source 提升 V3 manifest 的稳定比较结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum V3ManifestPromotionOutcome {
@@ -124,20 +150,50 @@ pub(crate) enum V3ManifestPromotionOutcome {
     SourceChanged,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct DeviceManagementResetJournalV1 {
-    pub(crate) format_version: u16,
-    pub(crate) target_space_id: String,
-    pub(crate) target_generation: [u8; 16],
-    pub(crate) source_space_id: Option<String>,
-    pub(crate) source_generation: Option<[u8; 16]>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum DeviceManagementResetPhaseV3 {
+    Allocated,
+    Prepared,
+    Staged,
+    Promoted,
+    CleanupPending,
 }
 
-impl DeviceManagementResetJournalV1 {
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DeviceManagementResetJournalV3 {
+    pub(crate) format_version: u16,
+    pub(crate) phase: DeviceManagementResetPhaseV3,
+    pub(crate) source_space_id: String,
+    pub(crate) source_keyslot_generation: [u8; 16],
+    pub(crate) profile_data_generation: [u8; 16],
+    pub(crate) source_control_generation: [u8; 16],
+    pub(crate) target_space_id: String,
+    pub(crate) target_control_generation: [u8; 16],
+    pub(crate) prepared_database_digest: [u8; 32],
+}
+
+impl DeviceManagementResetJournalV3 {
     pub(crate) fn validate(&self) -> bool {
-        self.format_version == 1
+        self.format_version == 3
+            && !self.source_space_id.is_empty()
             && !self.target_space_id.is_empty()
-            && self.source_space_id.is_some() == self.source_generation.is_some()
+            && self.source_space_id != self.target_space_id
+            && self.source_keyslot_generation != [0; 16]
+            && self.profile_data_generation != [0; 16]
+            && self.source_control_generation != [0; 16]
+            && self.target_control_generation != [0; 16]
+            && self.source_control_generation != self.target_control_generation
+            && self.profile_data_generation != self.source_control_generation
+            && self.profile_data_generation != self.target_control_generation
+            && match self.phase {
+                DeviceManagementResetPhaseV3::Allocated => self.prepared_database_digest == [0; 32],
+                DeviceManagementResetPhaseV3::Prepared
+                | DeviceManagementResetPhaseV3::Staged
+                | DeviceManagementResetPhaseV3::Promoted
+                | DeviceManagementResetPhaseV3::CleanupPending => {
+                    self.prepared_database_digest != [0; 32]
+                }
+            }
     }
 }
 
@@ -180,6 +236,18 @@ impl ActiveSpaceGenerationManifestStore {
         self.decode(&ciphertext).map(Some)
     }
 
+    /// 读取并认证任一受支持的活动 runtime manifest。
+    pub async fn load_runtime(
+        &self,
+    ) -> Result<Option<ActiveRuntimeManifest>, ActiveSpaceGenerationManifestStoreError> {
+        let ciphertext = match tokio::fs::read(&self.path).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
+        };
+        self.decode_runtime(&ciphertext).map(Some)
+    }
+
     pub fn load_sync(
         &self,
     ) -> Result<Option<ActiveSpaceGenerationManifestV2>, ActiveSpaceGenerationManifestStoreError>
@@ -190,6 +258,18 @@ impl ActiveSpaceGenerationManifestStore {
             Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
         };
         self.decode(&ciphertext).map(Some)
+    }
+
+    /// `load_runtime` 的同步启动版本；不会把 V3 降级解释成 V2。
+    pub fn load_runtime_sync(
+        &self,
+    ) -> Result<Option<ActiveRuntimeManifest>, ActiveSpaceGenerationManifestStoreError> {
+        let ciphertext = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
+        };
+        self.decode_runtime(&ciphertext).map(Some)
     }
 
     /// 只读取已提升的 V3 runtime manifest；V2 保持显式不支持。
@@ -213,6 +293,18 @@ impl ActiveSpaceGenerationManifestStore {
         &self,
         ciphertext: &[u8],
     ) -> Result<ActiveSpaceGenerationManifestV2, ActiveSpaceGenerationManifestStoreError> {
+        match self.decode_runtime(ciphertext)? {
+            ActiveRuntimeManifest::V2(manifest) => Ok(manifest),
+            ActiveRuntimeManifest::V3(_) => {
+                Err(ActiveSpaceGenerationManifestStoreError::UnsupportedVersion)
+            }
+        }
+    }
+
+    fn decode_runtime(
+        &self,
+        ciphertext: &[u8],
+    ) -> Result<ActiveRuntimeManifest, ActiveSpaceGenerationManifestStoreError> {
         let plaintext = self.open_manifest(ciphertext)?;
         let format_version = manifest_format_version(&plaintext)?;
         match format_version {
@@ -221,12 +313,11 @@ impl ActiveSpaceGenerationManifestStore {
                     .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
                 manifest
                     .validate()
-                    .then_some(manifest)
+                    .then_some(ActiveRuntimeManifest::V2(manifest))
                     .ok_or(ActiveSpaceGenerationManifestStoreError::Corrupt)
             }
             ACTIVE_RUNTIME_MANIFEST_FORMAT_V3 => {
-                decode_v3_manifest(&plaintext)?;
-                Err(ActiveSpaceGenerationManifestStoreError::UnsupportedVersion)
+                decode_v3_manifest(&plaintext).map(ActiveRuntimeManifest::V3)
             }
             _ => Err(ActiveSpaceGenerationManifestStoreError::Corrupt),
         }
@@ -297,6 +388,80 @@ impl ActiveSpaceGenerationManifestStore {
         Ok(V3ManifestPromotionOutcome::Promoted)
     }
 
+    /// 只在活动 V3 manifest 仍与 source 完全一致时替换控制世代。
+    ///
+    /// profile data generation 必须保持不变；同一 target 可在 manifest 已写入、
+    /// 运行期尚未重绑的崩溃窗口中幂等恢复。
+    pub(crate) async fn promote_v3_control_generation(
+        &self,
+        expected_source: &ActiveRuntimeManifestV3,
+        target: &ActiveRuntimeManifestV3,
+    ) -> Result<V3ManifestPromotionOutcome, ActiveSpaceGenerationManifestStoreError> {
+        if expected_source.layout.profile_data_generation()
+            != target.layout.profile_data_generation()
+            || expected_source.layout.space_control_generation()
+                == target.layout.space_control_generation()
+            || expected_source == target
+        {
+            return Err(ActiveSpaceGenerationManifestStoreError::Corrupt);
+        }
+        let _guard = self.write_lock.lock().await;
+        let ciphertext = match tokio::fs::read(&self.path).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(V3ManifestPromotionOutcome::SourceChanged);
+            }
+            Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
+        };
+        let plaintext = self.open_manifest(&ciphertext)?;
+        if manifest_format_version(&plaintext)? != ACTIVE_RUNTIME_MANIFEST_FORMAT_V3 {
+            return Ok(V3ManifestPromotionOutcome::SourceChanged);
+        }
+        let current = decode_v3_manifest(&plaintext)?;
+        if current == *target {
+            return Ok(V3ManifestPromotionOutcome::AlreadyActive);
+        }
+        if current != *expected_source {
+            return Ok(V3ManifestPromotionOutcome::SourceChanged);
+        }
+        let persisted = PersistedActiveRuntimeManifestV3::from_manifest(target);
+        let plaintext = postcard::to_stdvec(&persisted)
+            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
+        self.persist_manifest(&plaintext).await?;
+        Ok(V3ManifestPromotionOutcome::Promoted)
+    }
+
+    /// 只在尚无活动 manifest 时建立首个 V3 runtime。
+    ///
+    /// 同一 target 可从 manifest 已写入、运行期尚未恢复的崩溃窗口继续；任何
+    /// 既有 V2 或其他 V3 manifest 都视为来源已经变化，绝不覆盖。
+    pub(crate) async fn promote_initial_v3(
+        &self,
+        target: &ActiveRuntimeManifestV3,
+    ) -> Result<V3ManifestPromotionOutcome, ActiveSpaceGenerationManifestStoreError> {
+        let _guard = self.write_lock.lock().await;
+        match tokio::fs::read(&self.path).await {
+            Ok(ciphertext) => {
+                let current = self.decode_runtime(&ciphertext)?;
+                return Ok(match current {
+                    ActiveRuntimeManifest::V3(current) if current == *target => {
+                        V3ManifestPromotionOutcome::AlreadyActive
+                    }
+                    ActiveRuntimeManifest::V2(_) | ActiveRuntimeManifest::V3(_) => {
+                        V3ManifestPromotionOutcome::SourceChanged
+                    }
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
+        }
+        let persisted = PersistedActiveRuntimeManifestV3::from_manifest(target);
+        let plaintext = postcard::to_stdvec(&persisted)
+            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
+        self.persist_manifest(&plaintext).await?;
+        Ok(V3ManifestPromotionOutcome::Promoted)
+    }
+
     fn open_manifest(
         &self,
         ciphertext: &[u8],
@@ -353,9 +518,9 @@ impl ActiveSpaceGenerationManifestStore {
         }
     }
 
-    pub(crate) async fn load_device_reset_journal(
+    pub(crate) async fn load_device_reset_journal_v3(
         &self,
-    ) -> Result<Option<DeviceManagementResetJournalV1>, ActiveSpaceGenerationManifestStoreError>
+    ) -> Result<Option<DeviceManagementResetJournalV3>, ActiveSpaceGenerationManifestStoreError>
     {
         let ciphertext = match tokio::fs::read(&self.reset_journal_path).await {
             Ok(bytes) => bytes,
@@ -366,7 +531,7 @@ impl ActiveSpaceGenerationManifestStore {
             .keys
             .open_profile_payload(DEVICE_RESET_JOURNAL_PURPOSE, &ciphertext)
             .map_err(map_key_error)?;
-        let journal: DeviceManagementResetJournalV1 = postcard::from_bytes(&plaintext)
+        let journal: DeviceManagementResetJournalV3 = postcard::from_bytes(&plaintext)
             .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
         journal
             .validate()
@@ -374,9 +539,9 @@ impl ActiveSpaceGenerationManifestStore {
             .ok_or(ActiveSpaceGenerationManifestStoreError::Corrupt)
     }
 
-    pub(crate) async fn save_device_reset_journal(
+    pub(crate) async fn save_device_reset_journal_v3(
         &self,
-        journal: &DeviceManagementResetJournalV1,
+        journal: &DeviceManagementResetJournalV3,
     ) -> Result<(), ActiveSpaceGenerationManifestStoreError> {
         if !journal.validate() {
             return Err(ActiveSpaceGenerationManifestStoreError::Corrupt);
@@ -496,44 +661,6 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
-    async fn device_reset_journal_round_trips_encrypted_and_clears_idempotently() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = ActiveSpaceGenerationManifestStore::new(
-            directory.path().to_path_buf(),
-            Arc::new(AdmissionKeyManager::new(
-                Arc::new(MemorySecureStorage::default()),
-                [0x61; 16],
-            )),
-        );
-        let journal = DeviceManagementResetJournalV1 {
-            format_version: 1,
-            target_space_id: "private-reset-target".to_owned(),
-            target_generation: [0x62; 16],
-            source_space_id: Some("private-source-space".to_owned()),
-            source_generation: Some([0x63; 16]),
-        };
-
-        store.save_device_reset_journal(&journal).await.unwrap();
-
-        assert_eq!(
-            store.load_device_reset_journal().await.unwrap(),
-            Some(journal)
-        );
-        let bytes = tokio::fs::read(directory.path().join(DEVICE_RESET_JOURNAL_FILE))
-            .await
-            .unwrap();
-        assert!(!bytes
-            .windows(b"private-reset-target".len())
-            .any(|window| window == b"private-reset-target"));
-        assert!(!bytes
-            .windows(b"private-source-space".len())
-            .any(|window| window == b"private-source-space"));
-        store.clear_device_reset_journal().await.unwrap();
-        store.clear_device_reset_journal().await.unwrap();
-        assert_eq!(store.load_device_reset_journal().await.unwrap(), None);
-    }
-
     #[derive(Default)]
     struct MemorySecureStorage(StdMutex<HashMap<String, Vec<u8>>>);
 
@@ -573,6 +700,10 @@ mod tests {
         .unwrap();
         store.promote(&first).await.unwrap();
         assert_eq!(store.load().await.unwrap(), Some(first));
+        assert!(matches!(
+            store.load_runtime().await.unwrap(),
+            Some(ActiveRuntimeManifest::V2(_))
+        ));
         let bytes = tokio::fs::read(directory.path().join(ACTIVE_GENERATION_MANIFEST_FILE))
             .await
             .unwrap();
@@ -655,6 +786,10 @@ mod tests {
             store.load_sync(),
             Err(ActiveSpaceGenerationManifestStoreError::UnsupportedVersion)
         ));
+        assert_eq!(
+            store.load_runtime_sync().unwrap(),
+            Some(ActiveRuntimeManifest::V3(manifest))
+        );
     }
 
     #[tokio::test]
@@ -701,6 +836,106 @@ mod tests {
         assert!(!ciphertext
             .windows(b"source-space".len())
             .any(|window| window == b"source-space"));
+    }
+
+    #[tokio::test]
+    async fn v3_control_promotion_keeps_profile_generation_and_is_forward_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ActiveSpaceGenerationManifestStore::new(
+            directory.path().to_path_buf(),
+            Arc::new(AdmissionKeyManager::new(
+                Arc::new(MemorySecureStorage::default()),
+                [0xa1; 16],
+            )),
+        );
+        let legacy = ActiveSpaceGenerationManifestV2::new(
+            "source-space".to_owned(),
+            [0xa2; 16],
+            [0xa3; 16],
+            [0xa4; 16],
+        )
+        .unwrap();
+        let source = ActiveRuntimeManifestV3::new(
+            ActiveRuntimeLayout::new(SpaceId::from_str("source-space"), [0xa5; 16], [0xa6; 16])
+                .unwrap(),
+            [0xa2; 16],
+        )
+        .unwrap();
+        store.promote(&legacy).await.unwrap();
+        store.promote_v3_from_v2(&legacy, &source).await.unwrap();
+
+        let target = ActiveRuntimeManifestV3::new(
+            ActiveRuntimeLayout::new(SpaceId::from_str("target-space"), [0xa5; 16], [0xa7; 16])
+                .unwrap(),
+            [0xa8; 16],
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .promote_v3_control_generation(&source, &target)
+                .await
+                .unwrap(),
+            V3ManifestPromotionOutcome::Promoted
+        );
+        assert_eq!(
+            store
+                .promote_v3_control_generation(&source, &target)
+                .await
+                .unwrap(),
+            V3ManifestPromotionOutcome::AlreadyActive
+        );
+        assert_eq!(
+            store.load_runtime().await.unwrap(),
+            Some(ActiveRuntimeManifest::V3(target.clone()))
+        );
+
+        let later = ActiveRuntimeManifestV3::new(
+            ActiveRuntimeLayout::new(SpaceId::from_str("later-space"), [0xa5; 16], [0xa9; 16])
+                .unwrap(),
+            [0xaa; 16],
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .promote_v3_control_generation(&source, &later)
+                .await
+                .unwrap(),
+            V3ManifestPromotionOutcome::SourceChanged
+        );
+        assert_eq!(
+            store.load_runtime().await.unwrap(),
+            Some(ActiveRuntimeManifest::V3(target))
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_control_promotion_rejects_profile_generation_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ActiveSpaceGenerationManifestStore::new(
+            directory.path().to_path_buf(),
+            Arc::new(AdmissionKeyManager::new(
+                Arc::new(MemorySecureStorage::default()),
+                [0xb1; 16],
+            )),
+        );
+        let source = ActiveRuntimeManifestV3::new(
+            ActiveRuntimeLayout::new(SpaceId::from_str("source-space"), [0xb2; 16], [0xb3; 16])
+                .unwrap(),
+            [0xb4; 16],
+        )
+        .unwrap();
+        let target = ActiveRuntimeManifestV3::new(
+            ActiveRuntimeLayout::new(SpaceId::from_str("target-space"), [0xb5; 16], [0xb6; 16])
+                .unwrap(),
+            [0xb7; 16],
+        )
+        .unwrap();
+
+        assert!(matches!(
+            store.promote_v3_control_generation(&source, &target).await,
+            Err(ActiveSpaceGenerationManifestStoreError::Corrupt)
+        ));
+        assert_eq!(store.load_runtime().await.unwrap(), None);
     }
 
     #[tokio::test]

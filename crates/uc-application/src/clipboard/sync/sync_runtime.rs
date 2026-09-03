@@ -18,12 +18,12 @@ use uc_core::ports::{
 use crate::clipboard::inbound::ClipboardInboundRuntime;
 use crate::clipboard::outbound::{
     ClipboardOutboundError, ClipboardOutboundFacade, ClipboardOutboundInput,
-    ClipboardOutboundOutcome, ResendEntryCommand, ResendEntryError, ResendReport,
+    ClipboardOutboundOutcome, ResendEntryError, ResendReport,
 };
 const RECOVERY_PAGE_SIZE: usize = 256;
 
-/// The complete automatic outbound lifecycle. Callers submit local captures
-/// and manual resends here; peer recovery stays internal to this runtime.
+/// 自动出站的完整生命周期。调用方只提交本地捕获；手动重发使用独立
+/// facade，离线恢复保持为本运行期的内部责任。
 pub struct ClipboardSyncRuntime {
     outbound: Arc<ClipboardOutboundFacade>,
     settings: Arc<dyn SettingsPort>,
@@ -113,18 +113,6 @@ impl ClipboardSyncRuntime {
         Ok(outcome)
     }
 
-    /// Manual resend remains independent of the automatic-sync toggle, but it
-    /// still requires the global synchronization permission.
-    pub async fn resend_entry(
-        &self,
-        command: ResendEntryCommand,
-    ) -> Result<ResendReport, ResendEntryError> {
-        if !sync_enabled(self.settings.as_ref()).await {
-            return Err(ResendEntryError::SynchronizationDisabled);
-        }
-        self.outbound.resend_entry(command).await
-    }
-
     pub async fn shutdown(&self) {
         self.recovery.shutdown().await;
         if let Some(inbound) = self.inbound.lock().await.take() {
@@ -134,19 +122,6 @@ impl ClipboardSyncRuntime {
                     "clipboard sync: inbound runtime stopped unexpectedly"
                 );
             }
-        }
-    }
-}
-
-async fn sync_enabled(settings: &dyn SettingsPort) -> bool {
-    match settings.load().await {
-        Ok(settings) => settings.sync.sync_enabled,
-        Err(_) => {
-            warn!(
-                error_kind = "settings_load",
-                "clipboard sync: delivery skipped"
-            );
-            false
         }
     }
 }

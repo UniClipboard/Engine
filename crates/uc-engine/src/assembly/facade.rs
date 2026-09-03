@@ -6,25 +6,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use uc_application::deps::AppDeps;
-use uc_application::facade::clipboard_capture::CaptureClipboardUseCase;
 use uc_application::facade::settings::{
-    RelayAccessToken, RelayCredentials, RelayDiagnosticPort, RelayProbeError, RelayProbeReport,
+    RelayAccessToken, RelayDiagnosticPort, RelayProbeError, RelayProbeReport,
 };
-use uc_application::facade::space_setup::SpaceFacade;
 #[cfg(feature = "lan-compat")]
-use uc_application::facade::ApplyInboundClipboardUseCase;
-#[cfg(feature = "lan-compat")]
-use uc_application::facade::{ActiveClipboardFacade, FileTransferFacade};
 use uc_application::facade::{
-    AppFacade, AppFacadeParts, AppPaths, BlobTransferFacade, ClipboardCaptureFacade,
-    ClipboardHistoryFacade, ClipboardHistoryFacadeDeps, ClipboardOutboundFacade,
-    ClipboardRestoreFacade, ClipboardRestoreFacadeDeps, ClipboardSyncFacade, DiagnosticsFacade,
-    DiagnosticsFacadeDeps, ProbeProfileKeyAccessUseCase, QueryLocalDeviceUseCase, ResourceFacade,
-    ResourceFacadeDeps, SearchFacade, SettingsFacade, StorageFacade, StorageFacadeDeps,
-    UpgradeFacade, UpgradeFacadeDeps,
+    ActiveClipboardFacade, FileTransferFacade, InboundClipboardApplyPort,
 };
-use uc_core::clipboard::ClipboardIntegrationMode;
+#[cfg(feature = "lan-compat")]
+use uc_application::facade::{AppPaths, ClipboardOutboundFacade};
 #[cfg(feature = "lan-compat")]
 use uc_infra::fs::FsInboundFileTarget;
 #[cfg(feature = "lan-compat")]
@@ -82,65 +72,41 @@ fn map_relay_probe_error(err: IrohRelayProbeError) -> RelayProbeError {
     }
 }
 
+pub(crate) fn build_relay_diagnostic() -> Option<Arc<dyn RelayDiagnosticPort>> {
+    let relay_diagnostic = match IrohRelayProbeAdapter::new() {
+        Ok(probe) => Some(Arc::new(IrohRelayDiagnosticAdapter {
+            inner: Arc::new(probe),
+        }) as Arc<dyn RelayDiagnosticPort>),
+        Err(error) => {
+            tracing::warn!(
+                target: "bootstrap.network",
+                error = %error,
+                "relay probe adapter unavailable; settings.probe_relay_url will reject"
+            );
+            None
+        }
+    };
+    relay_diagnostic
+}
+
 /// `ClipboardRestoreFacade` 的可选装配输入。
 ///
 /// GUI 和 daemon 需要 restore 能力；部分 CLI 查询入口不需要，因此通过
 /// 显式选项传入，避免各入口各自复制 facade 拼装代码。
-pub struct ClipboardRestoreAssembly {
-    pub write_coordinator: Arc<uc_application::facade::clipboard_write::ClipboardWriteCoordinator>,
-    pub integration_mode: ClipboardIntegrationMode,
-    /// Optional restore-broadcast trigger (issue #1017). When present, a
-    /// successful restore announces the activation to peers (gated). `None`
-    /// for entry points without a network broadcast stack (CLI fallback).
-    pub restore_broadcast: Option<uc_application::facade::clipboard_write::RestoreBroadcastTrigger>,
-}
-
-/// 构造 [`ClipboardCaptureFacade`] —— "立即捕获当前 OS 剪贴板内容"的入口
-/// (issue #1169:启动期恢复上次剪贴板记录前,先把当前可能已经变化的剪贴板
-/// 内容落一条历史,避免被恢复动作覆盖丢失)。
-///
-/// 所有桌面入口(daemon / CLI / GUI shell)都用同一份 `AppDeps` 装得起来,
-/// 不需要额外的 caller 提供的装配选项,因此 `AppFacade.clipboard_capture`
-/// 是非 `Option` 字段。
-fn build_clipboard_capture_facade(deps: &AppDeps) -> Arc<ClipboardCaptureFacade> {
-    let capture_uc = Arc::new(
-        CaptureClipboardUseCase::new(
-            deps.clipboard.entry_ports.save.clone(),
-            deps.clipboard.entry_ports.touch.clone(),
-            deps.clipboard.entry_ports.find_by_snapshot_hash.clone(),
-            deps.clipboard.clipboard_event_repo.clone(),
-            deps.clipboard.representation_policy.clone(),
-            deps.clipboard.representation_normalizer.clone(),
-            deps.device.device_identity.clone(),
-            deps.clipboard.representation_cache.clone(),
-            deps.clipboard.spool_queue.clone(),
-            deps.storage.blob_content_ingest.clone(),
-            deps.storage.entry_file_set_repo.clone(),
-            deps.settings.clone(),
-            deps.clipboard.entry_ports.replace_content.clone(),
-            deps.analytics.clone(),
-        )
-        .with_entry_identity_coordinator(deps.clipboard.entry_identity_coordinator.clone()),
-    );
-    Arc::new(
-        ClipboardCaptureFacade::new(capture_uc, deps.clipboard.clipboard.clone())
-            .with_entry_file_set_repository(deps.storage.entry_file_set_repo.clone()),
-    )
-}
-
 /// 构造 [`MobileSyncFacade`] —— 抽出来供 daemon-lifecycle 装配复用。
 ///
 /// `apply_inbound` 由 engine 运行期组装并传入。`endpoint_info`
-/// 由 [`AppDeps`] 携带 (单例,daemon LAN listener 与 facade 共享同一份
+/// 由 [`uc_application::facade::ApplicationAssembly`] 持有的依赖携带
+/// (单例,daemon LAN listener 与 facade 共享同一份
 /// Arc),无需 caller 透传。`file_transfer` 进程级 facade:daemon 装配
 /// 必传,SyncDoc apply 后 link + complete 让 mobile_lan transfer 在
 /// file_transfer 表里闭环。
 #[cfg(feature = "lan-compat")]
 pub fn build_mobile_sync_facade(
-    deps: &AppDeps,
+    application: &crate::assembly::deps::MobileSyncApplicationDeps,
     storage_paths: &AppPaths,
     mobile_ports: uc_mobile_lan::MobileSyncPorts,
-    apply_inbound: Arc<ApplyInboundClipboardUseCase>,
+    apply_inbound: Arc<dyn InboundClipboardApplyPort>,
     file_transfer: Option<Arc<FileTransferFacade>>,
     // GUI daemon 装配传 `Some(controller)` —— update_settings 写盘后即时
     // start/stop/rebind listener。CLI fallback 传 `None`,settings 只写盘,
@@ -166,7 +132,7 @@ pub fn build_mobile_sync_facade(
     active_clipboard: Option<Arc<ActiveClipboardFacade>>,
 ) -> Arc<MobileSyncFacade> {
     Arc::new(MobileSyncFacade::new(MobileSyncFacadeDeps {
-        clock: deps.system.clock.clone(),
+        clock: Arc::clone(&application.clock),
         // v3 SyncClipboard 兼容: 单一 minter 一次性出 (username, password,
         // password_hash, device_id), Argon2id 作为口令 hash;无状态 ZST,
         // 装配处直接 new 即可。
@@ -175,20 +141,20 @@ pub fn build_mobile_sync_facade(
         devices: mobile_ports.devices.clone(),
         endpoint_info: mobile_ports.endpoint_info.clone(),
         lan_interface_probe: Arc::new(NetworkInterfaceLanProbe::new()),
-        settings: deps.settings.clone(),
+        settings: Arc::clone(&application.settings),
         apply_inbound,
         incoming_buffer: Arc::new(IncomingMobileBuffer::new()),
         file_staging: FilesystemMobileFileStaging::new_with_target_reserver(
             storage_paths.file_cache_dir.clone(),
-            FsInboundFileTarget::new(deps.settings.clone()),
+            FsInboundFileTarget::new(Arc::clone(&application.settings)),
         ),
         snapshot_ports: MobileSyncSnapshotPorts {
-            mobile_consumable_load: deps.clipboard.mobile_consumable_load.clone(),
-            entry_repo: deps.clipboard.entry_ports.get.clone(),
-            selection_repo: deps.clipboard.selection_repo.clone(),
-            representation_repo: deps.clipboard.representation_ports.get.clone(),
-            payload_resolver: deps.clipboard.payload_resolver.clone(),
-            blob_reader: deps.storage.blob_store.clone(),
+            mobile_consumable_load: Arc::clone(&application.mobile_consumable_load),
+            entry_repo: Arc::clone(&application.entry_repo),
+            selection_repo: Arc::clone(&application.selection_repo),
+            representation_repo: Arc::clone(&application.representation_repo),
+            payload_resolver: Arc::clone(&application.payload_resolver),
+            blob_reader: Arc::clone(&application.blob_reader),
         },
         file_transfer,
         clipboard_outbound,
@@ -196,142 +162,9 @@ pub fn build_mobile_sync_facade(
         // schema doc §7.6 / §12.2 P1：mobile_sync 域共用 process-wide analytics
         // sink。bootstrap 已把 GatedAnalyticsSink 包好，runtime 切换 noop / 真
         // 实 sink 是 sink 自身职责，不在此装配。
-        analytics: deps.analytics.clone(),
+        analytics: Arc::clone(&application.analytics),
         active_clipboard,
-        find_entry_by_snapshot_hash: deps.clipboard.entry_ports.find_by_snapshot_hash.clone(),
-        check_entry_availability: deps.clipboard.entry_ports.availability.clone(),
-    }))
-}
-
-/// 生产运行期构造完整 [`AppFacade`] 所需的全部能力。
-pub struct RuntimeAppFacadeAssembly {
-    pub space: Arc<SpaceFacade>,
-    pub clipboard_sync: Arc<ClipboardSyncFacade>,
-    pub blob_transfer: Arc<BlobTransferFacade>,
-    pub file_transfer: Arc<uc_application::facade::FileTransferFacade>,
-    pub clipboard_outbound: Arc<ClipboardOutboundFacade>,
-    /// 底层 `BlobTransferPort`(`IrohBlobTransferAdapter`)直连引用,供
-    /// `ClipboardHistoryFacade` 在 `delete_entry` / `clear_history` 时
-    /// 调 `untag` 释放对应 entry 对 iroh-blobs 的引用。与 `blob_transfer`
-    /// 字段(承载发布/拉取 use case 的 facade)分开装配:facade 用于
-    /// "发布、拉取 blob"业务动作,这个 port 用于"释放 blob 引用"基础
-    /// 设施动作,两者共享同一个底层 adapter 实例。
-    pub blob_transfer_port: Arc<dyn uc_core::ports::blob::BlobTransferPort>,
-    pub clipboard_restore: ClipboardRestoreAssembly,
-    pub search: Arc<SearchFacade>,
-    pub network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
-}
-
-/// 从已注入的 application deps 构造统一业务入口。
-///
-/// 这是 GUI、daemon、CLI 共享的 application facade 装配点。调用方仍然
-/// 决定运行模式、事件源、HTTP/WS/Tauri 接入和后台任务；本函数只负责把
-/// ports 组合成 `AppFacade`。
-pub fn build_app_facade_from_deps(
-    deps: &AppDeps,
-    storage_paths: &AppPaths,
-    runtime: RuntimeAppFacadeAssembly,
-) -> Arc<AppFacade> {
-    let clipboard_restore = Arc::new(ClipboardRestoreFacade::new(ClipboardRestoreFacadeDeps {
-        selection_repo: deps.clipboard.selection_repo.clone(),
-        entry_ports: deps.clipboard.entry_ports.clone(),
-        representation_ports: deps.clipboard.representation_ports.clone(),
-        payload_resolver: deps.clipboard.payload_resolver.clone(),
-        blob_store: deps.storage.blob_store.clone(),
-        clock: deps.system.clock.clone(),
-        device_identity: deps.device.device_identity.clone(),
-        active_register: deps.clipboard.active_register.clone(),
-        mobile_consumability: deps.clipboard.mobile_consumability.clone(),
-        restore_broadcast: runtime.clipboard_restore.restore_broadcast,
-        write_coordinator: runtime.clipboard_restore.write_coordinator,
-        integration_mode: runtime.clipboard_restore.integration_mode,
-    }));
-
-    Arc::new(AppFacade::new(AppFacadeParts {
-        space: runtime.space,
-        probe_profile_key_access: Arc::new(ProbeProfileKeyAccessUseCase::new(
-            deps.security.profile_key_access_probe.clone(),
-        )),
-        resource: Arc::new(ResourceFacade::new(ResourceFacadeDeps {
-            representation_by_blob_id: deps.clipboard.representation_ports.get_by_blob_id.clone(),
-            representations_for_event: deps.clipboard.representation_ports.list_for_event.clone(),
-            thumbnail_repo: deps.storage.thumbnail_repo.clone(),
-            blob_store: deps.storage.blob_store.clone(),
-            entry_repo: deps.clipboard.entry_ports.get.clone(),
-        })),
-        clipboard_history: Arc::new(ClipboardHistoryFacade::new(ClipboardHistoryFacadeDeps {
-            entry_ports: deps.clipboard.entry_ports.clone(),
-            selection_repo: deps.clipboard.selection_repo.clone(),
-            representation_ports: deps.clipboard.representation_ports.clone(),
-            event_writer: deps.clipboard.clipboard_event_repo.clone(),
-            payload_resolver: deps.clipboard.payload_resolver.clone(),
-            blob_store: deps.storage.blob_store.clone(),
-            thumbnail_repo: deps.storage.thumbnail_repo.clone(),
-            file_transfer_repo: deps.storage.file_transfer.entry_summary.clone(),
-            entry_file_set_repo: deps.storage.entry_file_set_repo.clone(),
-            search_index: Some(deps.search.search_index.clone()),
-            file_cache_dir: Some(storage_paths.file_cache_dir.clone()),
-            blob_transfer: Some(runtime.blob_transfer_port),
-            settings: deps.settings.clone(),
-            device_identity: deps.device.device_identity.clone(),
-            clock: deps.system.clock.clone(),
-            cache_fs: deps.system.cache_fs.clone(),
-        })),
-        clipboard_capture: build_clipboard_capture_facade(deps),
-        clipboard_sync: runtime.clipboard_sync,
-        blob_transfer: runtime.blob_transfer,
-        file_transfer: runtime.file_transfer,
-        clipboard_outbound: runtime.clipboard_outbound,
-        clipboard_restore,
-        search: runtime.search,
-        settings: Arc::new({
-            // Relay 诊断 adapter 在 daemon 启动期一次性装配。infra 探测器
-            // 初始化失败(TLS provider 缺失等)不应阻断整个 daemon 启动 ——
-            // 走"探测能力缺失"路径,前端会得到 RelayProbeUnavailable。
-            let mut facade = SettingsFacade::new(deps.settings.clone()).with_relay_credentials(
-                RelayCredentials::new(deps.security.secure_storage.clone()),
-            );
-            match IrohRelayProbeAdapter::new() {
-                Ok(probe) => {
-                    let adapter = IrohRelayDiagnosticAdapter {
-                        inner: Arc::new(probe),
-                    };
-                    facade = facade.with_relay_diagnostic(Arc::new(adapter));
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        target: "bootstrap.network",
-                        error = %err,
-                        "relay probe adapter unavailable; settings.probe_relay_url will reject"
-                    );
-                }
-            }
-            facade
-        }),
-        diagnostics: Arc::new(DiagnosticsFacade::new(DiagnosticsFacadeDeps {
-            settings: deps.settings.clone(),
-            logs_dir: storage_paths.logs_dir.clone(),
-            app_version: env!("CARGO_PKG_VERSION").to_string(),
-        })),
-        query_local_device: Arc::new(QueryLocalDeviceUseCase::new(
-            deps.device.device_identity.clone(),
-            deps.settings.clone(),
-        )),
-        storage: Arc::new(StorageFacade::new(StorageFacadeDeps {
-            db_path: storage_paths.db_path.clone(),
-            vault_dir: storage_paths.vault_dir.clone(),
-            cache_dir: storage_paths.cache_dir.clone(),
-            logs_dir: storage_paths.logs_dir.clone(),
-            app_data_root_dir: storage_paths.app_data_root_dir.clone(),
-            cache_fs: deps.system.cache_fs.clone(),
-        })),
-        // Carried through from `wire_dependencies` (its db_pool / local_identity /
-        // profile_id materials are only available there); see `AppDeps`.
-        config_migration: deps.config_migration.clone(),
-        upgrade: Arc::new(UpgradeFacade::new(UpgradeFacadeDeps {
-            app_version_state: deps.app_version_state.clone(),
-            current_space_identity: deps.current_space_identity.clone(),
-        })),
-        network_recovery: runtime.network_recovery,
+        find_entry_by_snapshot_hash: Arc::clone(&application.find_entry_by_snapshot_hash),
+        check_entry_availability: Arc::clone(&application.check_entry_availability),
     }))
 }

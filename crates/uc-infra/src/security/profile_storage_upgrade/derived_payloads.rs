@@ -605,9 +605,16 @@ fn load_v3_rows(path: &Path) -> Result<LoadedV3Rows, ProfileStorageUpgradeError>
 
 fn save_rows(path: &Path, rows: &ConvertedRows) -> Result<(), ProfileStorageUpgradeError> {
     let mut connection = open_connection(path)?;
-    connection
-        .batch_execute("ALTER TABLE search_document ADD COLUMN protection_group_ref BLOB;")
-        .map_err(database_storage)?;
+    let group_ref_column = diesel::sql_query(
+        "SELECT COUNT(*) AS count FROM pragma_table_info('search_document') WHERE name = 'protection_group_ref'",
+    )
+    .get_result::<ColumnCount>(&mut connection)
+    .map_err(database_storage)?;
+    if group_ref_column.count == 0 {
+        connection
+            .batch_execute("ALTER TABLE search_document ADD COLUMN protection_group_ref BLOB;")
+            .map_err(database_storage)?;
+    }
     connection.transaction::<_, diesel::result::Error, _>(|connection| {
         for row in &rows.file_sets { diesel::sql_query("UPDATE entry_file_set SET original_text_ct = ?, relative_path_ct = ?, root_name_ct = ? WHERE entry_id = ? AND line_index = ?").bind::<diesel::sql_types::Nullable<diesel::sql_types::Binary>, _>(row.original_text_ct.as_deref()).bind::<diesel::sql_types::Nullable<diesel::sql_types::Binary>, _>(row.relative_path_ct.as_deref()).bind::<diesel::sql_types::Nullable<diesel::sql_types::Binary>, _>(row.root_name_ct.as_deref()).bind::<diesel::sql_types::Text, _>(&row.entry_id).bind::<diesel::sql_types::BigInt, _>(row.line_index).execute(connection)?; }
         for (id, ciphertext) in &rows.transfers { diesel::sql_query("UPDATE file_transfer SET metadata_ciphertext = ? WHERE transfer_id = ?").bind::<diesel::sql_types::Binary, _>(ciphertext).bind::<diesel::sql_types::Text, _>(id).execute(connection)?; }
@@ -621,6 +628,12 @@ fn save_rows(path: &Path, rows: &ConvertedRows) -> Result<(), ProfileStorageUpgr
         diesel::sql_query("UPDATE search_index_meta SET index_version = ?, search_blocked = 1, last_rebuild_started_at_ms = NULL, last_rebuild_completed_at_ms = NULL").bind::<diesel::sql_types::Text, _>(V3_SEARCH_INDEX_VERSION).execute(connection)?;
         Ok(())
     }).map_err(database_storage)
+}
+
+#[derive(diesel::QueryableByName)]
+struct ColumnCount {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    count: i64,
 }
 
 #[derive(diesel::QueryableByName)]

@@ -173,6 +173,21 @@ pub fn init_db_pool(database_url: &str) -> Result<DbPool> {
     })
 }
 
+/// 只为已经完成 migration 的候选 generation 建立 production 连接池。
+///
+/// 该入口不重跑 migration，也不删除/重建 revision trigger，避免只读回验改变
+/// 候选数据库的 schema cookie。调用方必须先通过自己的完整 schema/integrity gate。
+pub(crate) fn open_existing_db_pool(database_url: &str) -> Result<DbPool> {
+    let manager = ConnectionManager::<SqliteConnection>::new(database_url);
+    let pool = Pool::builder()
+        .connection_customizer(Box::new(SqlitePragmaCustomizer))
+        .build(manager)
+        .map_err(|error| anyhow::anyhow!("Failed to open existing database pool: {error}"))?;
+    Ok(DbPool {
+        inner: Arc::new(RwLock::new(pool)),
+    })
+}
+
 fn install_revision_triggers_raw(pool: &RawDbPool) -> Result<()> {
     let mut connection = pool.get()?;
     connection.batch_execute(
@@ -248,6 +263,17 @@ mod switch_tests {
     struct CountRow {
         #[diesel(sql_type = diesel::sql_types::BigInt)]
         count: i64,
+    }
+
+    fn revert_through_migration(connection: &mut SqliteConnection, target_version: &str) {
+        while connection
+            .applied_migrations()
+            .unwrap()
+            .iter()
+            .any(|version| version.to_string() == target_version)
+        {
+            connection.revert_last_migration(MIGRATIONS).unwrap();
+        }
     }
 
     fn seed(path: &std::path::Path, value: &str) {
@@ -327,10 +353,7 @@ mod switch_tests {
         let pool = init_db_pool(database.to_str().unwrap()).unwrap();
         let mut connection = pool.get().unwrap();
 
-        // 先越过准入表与旧准入记录清理，再回滚数据库 revision migration。
-        connection.revert_last_migration(MIGRATIONS).unwrap();
-        connection.revert_last_migration(MIGRATIONS).unwrap();
-        connection.revert_last_migration(MIGRATIONS).unwrap();
+        revert_through_migration(&mut connection, "20260816000002");
 
         let remaining = diesel::sql_query(
             "SELECT name FROM sqlite_master WHERE type = 'trigger' \
@@ -351,9 +374,7 @@ mod switch_tests {
         let pool = init_db_pool(database.to_str().unwrap()).unwrap();
         let mut connection = pool.get().unwrap();
 
-        // 先越过准入表，再回滚到旧准入记录清理 migration 之前。
-        connection.revert_last_migration(MIGRATIONS).unwrap();
-        connection.revert_last_migration(MIGRATIONS).unwrap();
+        revert_through_migration(&mut connection, "20260819000001");
         diesel::sql_query(
             "INSERT INTO legacy_upgrade_pending_join \
              (peer_lookup_token, encrypted_payload, updated_at_ms) VALUES ('peer', X'01', 1)",

@@ -25,10 +25,7 @@ pub use rebuild_space::{
 };
 pub use recover_space_session::{RecoverSpaceSessionError, RecoverSpaceSessionResult};
 pub use reset_space::ResetSpaceError;
-pub use session::{
-    build_space_session_activity, IsSpaceUnlockedPort, MembershipSessionActivityPort,
-    ResumeSpaceSessionPort, SpaceActivityError, SpaceSessionActivityDeps, SpaceSessionActivityPort,
-};
+pub use session::{IsSpaceUnlockedPort, ResumeSpaceSessionPort, SpaceActivityError};
 pub use unlock_space::{UnlockSpaceError, UnlockSpacePort};
 
 pub use admission_credentials::{
@@ -45,6 +42,9 @@ pub(super) use rebuild_space::{
 pub(super) use recover_space_session::RecoverSpaceSessionUseCase;
 pub(super) use reset_space::ports::PendingSpaceInvitationResetPort;
 pub(super) use reset_space::{QueryCommittedDeviceManagementResetUseCase, ResetSpaceUseCase};
-pub(super) use session::combine_space_session_activity;
+pub(super) use session::{
+    build_space_session_activity, combine_space_session_activity, DeferredSpaceSessionActivity,
+    MembershipSessionActivityPort, SpaceSessionActivityPort,
+};
 pub(super) use unlock_space::{PostSessionReadiness, UnlockSpaceUseCase};
 pub(super) use upgrade_space::UpgradeSpaceUseCase;

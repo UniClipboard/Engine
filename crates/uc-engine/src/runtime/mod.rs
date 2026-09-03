@@ -15,45 +15,43 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Mutex;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 use uc_application::deps::{ProfileFactoryResetCapabilityError, StopProfileRuntimePort};
 use uc_application::facade::clipboard_write::LocalActiveRegisterAdvancer;
 use uc_application::facade::{
-    build_space_session_activity, AppFacade, HistoryMaintenanceRuntime, NetworkRecoveryEvent,
-    ProfileFactoryResetOutcome, ProfileFactoryResetRequest, ProfileFactoryResetUseCase,
-    SpaceSessionActivityDeps, SpaceSessionActivityPort,
+    AppFacade, ApplicationRuntime, ClipboardInboundEvent, ClipboardInboundEventAction,
+    ClipboardInboundEventPort, NetworkRecoveryEvent, ProfileFactoryResetFacade,
+    ProfileFactoryResetOutcome, ProfileFactoryResetRequest,
 };
 use uc_core::ports::ClockPort;
 use uc_core::TaskRegistry;
 
-use crate::assembly::blob_tasks::{spawn_blob_processing_tasks, BlobProcessingPorts};
-use crate::assembly::clipboard_runtime::{build_clipboard_runtime, ClipboardRuntime};
 use crate::assembly::deps::WiredDependencies;
 #[cfg(feature = "lan-compat")]
 use crate::assembly::facade::build_mobile_sync_facade;
-use crate::assembly::facade::{
-    build_app_facade_from_deps, ClipboardRestoreAssembly, RuntimeAppFacadeAssembly,
-};
 use crate::assembly::host::{
     wire_host_capabilities_with_emitter, EngineHostEventEmitter, HostWiring,
 };
 use crate::assembly::lifecycle::build_daemon_lifecycle;
 #[cfg(feature = "lan-compat")]
 use crate::assembly::mobile_lan::MobileLanEndpointUpdater;
-use crate::assembly::search::build_search_runtime;
 use crate::assembly::sync_engine::SyncEngineAssembly;
 use crate::engine::event_stream::EventSender;
 use crate::subsystems::peer_keepalive::spawn_peer_presence_event_task;
 use crate::{EngineConfig, EngineError, EngineErrorCategory, HostCapabilities, HostFileAccess};
+use crate::{
+    EngineEvent, InboundNoticeActionSummary, InboundNoticeEvent, InboundRepresentationSummary,
+};
 use host_clipboard::{spawn_host_clipboard_change_task, HostClipboardChangeRuntime};
 use session_supervisor::SessionSupervisor;
+use uc_infra::fs::{FsAtomicPublisher, FsHiddenPathMarker, FsInboundFileTarget};
 const START_FAILED_CODE: u32 = 1101;
 const OPERATION_UNAVAILABLE_CODE: u32 = 1103;
 
 pub(crate) struct ProductionRuntime {
     app_version: String,
     session_supervisor: Arc<SessionSupervisor>,
-    profile_reset: Arc<ProfileFactoryResetUseCase>,
+    profile_reset: Arc<ProfileFactoryResetFacade>,
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
     task_registry: Arc<TaskRegistry>,
     #[cfg(feature = "lan-compat")]
@@ -71,6 +69,7 @@ pub(crate) struct ProductionRuntime {
 
 struct SessionFactory {
     wired: WiredDependencies,
+    #[cfg(feature = "lan-compat")]
     paths: uc_application::facade::AppPaths,
     app_version: String,
     events: EventSender,
@@ -85,11 +84,9 @@ struct SessionFactory {
 
 struct ProductionSession {
     facade: Arc<AppFacade>,
-    history_maintenance: HistoryMaintenanceRuntime,
-    search_runtime: uc_application::facade::SearchRuntime,
+    application: Arc<ApplicationRuntime>,
     #[cfg(feature = "lan-compat")]
     mobile_sync: Arc<uc_mobile_lan::MobileSyncFacade>,
-    clipboard: ClipboardRuntime,
     sync_engine: SyncEngineAssembly,
     tasks: Arc<TaskRegistry>,
 }
@@ -114,6 +111,7 @@ impl StopProfileRuntimePort for ProductionProfileRuntimeStopper {
 
 impl ProductionSession {
     async fn shutdown(self, transfer_reason: uc_core::FileTransferCancellationReason) {
+        info!("Engine session 开始关闭");
         #[cfg(feature = "lan-compat")]
         if self
             .mobile_sync
@@ -123,15 +121,20 @@ impl ProductionSession {
         {
             warn!("mobile file upload shutdown finished with an error");
         }
-        if let Err(error) = self.history_maintenance.shutdown().await {
+        // 先停止网络观测与 presence 转发，避免它们在 Application 领域
+        // runtime 排空期间继续触发恢复或事件工作。
+        self.tasks.shutdown(Duration::from_millis(500)).await;
+        info!("Engine session 网络观测任务已停止");
+        let application_shutdown = self.application.shutdown().await;
+        info!("Engine session Application runtime 已停止");
+        if let Some(error) = application_shutdown.history {
             warn!(error = %error, "history maintenance stopped with an error");
         }
-        self.tasks.shutdown(Duration::from_millis(500)).await;
-        if let Err(error) = self.search_runtime.shutdown().await {
+        if let Some(error) = application_shutdown.search {
             error!(error = %error, "search runtime stopped with error");
         }
-        self.clipboard.shutdown().await;
         self.sync_engine.shutdown(transfer_reason).await;
+        info!("Engine session Iroh 网络已停止");
     }
 }
 
@@ -261,19 +264,20 @@ impl ProductionRuntime {
         let emitter = Arc::new(EngineHostEventEmitter::new(events.clone()));
         let HostWiring {
             wired,
-            background,
             paths,
             temporary_dir,
             clipboard_import_root,
             files,
             clipboard_changes,
         } = wire_host_capabilities_with_emitter(&config, host, emitter)
+            .await
             .map_err(|error| startup_error("dependency wiring", error))?;
 
+        let host_adapters = wired.application.host_adapters();
         let session = Arc::new(Mutex::new(None));
         let session_supervisor = Arc::new(SessionSupervisor::new(
             Arc::clone(&session),
-            Arc::clone(&wired.shared.file_transfer_facade),
+            wired.application.clone(),
         ));
         let task_registry = Arc::new(TaskRegistry::new());
         let profile_runtime: Arc<dyn StopProfileRuntimePort> =
@@ -281,7 +285,7 @@ impl ProductionRuntime {
                 session_supervisor: Arc::clone(&session_supervisor),
                 tasks: Arc::clone(&task_registry),
             });
-        let profile_reset = Arc::new(ProfileFactoryResetUseCase::new(
+        let profile_reset = Arc::new(ProfileFactoryResetFacade::new(
             Arc::clone(&wired.profile_reset.lifecycle_repository),
             profile_runtime,
             Arc::clone(&wired.profile_reset.keys),
@@ -307,6 +311,7 @@ impl ProductionRuntime {
         ));
         let session_factory = Arc::new(SessionFactory {
             wired: wired.clone(),
+            #[cfg(feature = "lan-compat")]
             paths: paths.clone(),
             app_version: app_version.clone(),
             events: events.clone(),
@@ -319,6 +324,11 @@ impl ProductionRuntime {
             recovery_generation: Arc::new(AtomicU64::new(0)),
         });
         session_supervisor.configure_factory(Arc::clone(&session_factory));
+        wired
+            .application
+            .start_process_runtime(Arc::clone(&task_registry))
+            .await
+            .map_err(|error| startup_error("clipboard background", error))?;
         session_supervisor.resume().await?;
         spawn_space_transition_watcher(
             Arc::clone(&session_supervisor),
@@ -328,19 +338,17 @@ impl ProductionRuntime {
         .await;
         spawn_network_recovery_events(network_recovery.subscribe(), &task_registry, events.clone())
             .await;
-        let blob_ports = BlobProcessingPorts::from_app_deps(&wired.deps);
-        spawn_blob_processing_tasks(background, blob_ports, &task_registry).await;
         let clipboard_change_runtime = HostClipboardChangeRuntime {
             session_supervisor: Arc::clone(&session_supervisor),
-            system_clipboard: Arc::clone(&wired.deps.clipboard.system_clipboard),
-            change_origin: Arc::clone(&wired.deps.clipboard.clipboard_change_origin),
+            system_clipboard: Arc::clone(&host_adapters.system_clipboard),
+            change_origin: Arc::clone(&host_adapters.change_origin),
             active_register: LocalActiveRegisterAdvancer::new(
-                Arc::clone(&wired.deps.clipboard.active_register),
-                Arc::clone(&wired.deps.device.device_identity),
-                Arc::clone(&wired.deps.system.clock),
-                wired.deps.clipboard.mobile_consumability.clone(),
+                Arc::clone(&host_adapters.active_register),
+                Arc::clone(&host_adapters.device_identity),
+                Arc::clone(&host_adapters.clock),
+                host_adapters.mobile_consumability.clone(),
             ),
-            host_events: Arc::clone(&wired.shared.host_event_bus),
+            host_events: Arc::clone(&host_adapters.host_event_bus),
         };
         if let Some(changes) = clipboard_changes {
             spawn_host_clipboard_change_task(
@@ -355,7 +363,7 @@ impl ProductionRuntime {
         let mobile_lan_endpoint = MobileLanEndpointUpdater::new(Arc::clone(
             &wired.daemon_runtime.mobile_sync_endpoint_info,
         ));
-        let clock = Arc::clone(&wired.deps.system.clock);
+        let clock = Arc::clone(&host_adapters.clock);
         let file_cache_dir = paths.file_cache_dir.clone();
         Ok(Self {
             app_version,
@@ -379,12 +387,13 @@ impl ProductionRuntime {
 
     async fn build_session(factory: &SessionFactory) -> Result<ProductionSession, EngineError> {
         let wired = &factory.wired;
+        #[cfg(feature = "lan-compat")]
         let paths = &factory.paths;
         let events = factory.events.clone();
+        let application = wired.application.clone();
         let lifecycle = build_daemon_lifecycle(
-            &wired.deps,
+            &application,
             &wired.sync_engine,
-            &wired.shared,
             &factory.app_version,
             #[cfg(feature = "lan-compat")]
             wired.mobile_sync_ports.clone(),
@@ -399,35 +408,41 @@ impl ProductionRuntime {
         .await
         .map_err(|error| startup_error("p2p session", error))?;
         let sync_engine = lifecycle.sync_engine_assembly;
-        let (restore_tx, restore_rx) = tokio::sync::mpsc::unbounded_channel();
-        sync_engine.attach_restore_broadcast(restore_rx);
-        let search_runtime = build_search_runtime(&wired.deps);
-        let session_activity = build_space_session_activity(
-            search_runtime.facade(),
-            SpaceSessionActivityDeps {
-                receive: Arc::clone(&wired.shared.file_transfer_facade)
-                    as Arc<dyn uc_application::facade::EnsureReceiveReadyPort>,
-            },
-        );
-        if !sync_engine
-            .bind_space_session_activity(session_activity as Arc<dyn SpaceSessionActivityPort>)
+        let network_adapters = lifecycle.application_adapters;
+        let application_runtime = match ApplicationRuntime::start(
+            &application,
+            network_adapters.binding.complete(
+                network_adapters.active_pull_client,
+                Arc::clone(&factory.network_recovery),
+                FsAtomicPublisher::new(),
+                FsInboundFileTarget::new(Arc::clone(&wired.sync_engine.settings)),
+                FsHiddenPathMarker::new(),
+                Arc::new(EngineClipboardInboundEvents {
+                    events: events.clone(),
+                }),
+            ),
+        )
+        .await
         {
-            return Err(startup_error(
-                "Space session activity",
-                "Space session activity was already bound",
-            ));
-        }
-        let clipboard = build_clipboard_runtime(wired, &sync_engine, events.clone());
+            Ok(runtime) => Arc::new(runtime),
+            Err(error) => {
+                sync_engine
+                    .shutdown(uc_core::FileTransferCancellationReason::Unknown)
+                    .await;
+                return Err(startup_error("application runtime", error));
+            }
+        };
+        let facade = application_runtime.facade();
         #[cfg(feature = "lan-compat")]
         let mobile_sync = build_mobile_sync_facade(
-            &wired.deps,
+            &wired.mobile_sync_application,
             paths,
             wired.mobile_sync_ports.clone(),
-            Arc::clone(&clipboard.apply_inbound),
-            Some(Arc::clone(&wired.shared.file_transfer_facade)),
+            application_runtime.inbound_clipboard(),
+            Some(facade.file_transfer_for_lan_compatibility()),
             None,
-            Some(Arc::clone(&clipboard.outbound)),
-            Some(Arc::clone(&sync_engine.active_clipboard)),
+            Some(facade.clipboard_outbound_for_lan_compatibility()),
+            Some(facade.active_clipboard_for_lan_compatibility()),
         );
         let tasks = Arc::new(TaskRegistry::new());
         let mut active_clipboard_changes = wired.shared.active_clipboard_sse_source.subscribe();
@@ -451,29 +466,6 @@ impl ProductionRuntime {
                 }
             })
             .await;
-        let facade = build_app_facade_from_deps(
-            &wired.deps,
-            paths,
-            RuntimeAppFacadeAssembly {
-                space: Arc::clone(&sync_engine.facade),
-                clipboard_sync: Arc::clone(&sync_engine.clipboard_sync),
-                blob_transfer: Arc::clone(&sync_engine.blob),
-                blob_transfer_port: Arc::clone(&sync_engine.blob_transfer),
-                file_transfer: Arc::clone(&wired.shared.file_transfer_facade),
-                clipboard_restore: ClipboardRestoreAssembly {
-                    write_coordinator: Arc::clone(&wired.shared.clipboard_write_coordinator),
-                    integration_mode: uc_core::clipboard::ClipboardIntegrationMode::Full,
-                    restore_broadcast: Some(
-                        uc_application::facade::clipboard_write::RestoreBroadcastTrigger::new(
-                            restore_tx,
-                        ),
-                    ),
-                },
-                search: search_runtime.facade(),
-                clipboard_outbound: Arc::clone(&clipboard.outbound),
-                network_recovery: Arc::clone(&factory.network_recovery),
-            },
-        );
         spawn_network_recovery_observation_task(
             sync_engine.subscribe_network_recovery_observations(),
             Arc::clone(&factory.network_recovery),
@@ -481,32 +473,12 @@ impl ProductionRuntime {
             &tasks,
         )
         .await;
-        let history_maintenance = facade.start_history_maintenance().await;
         spawn_peer_presence_event_task(Arc::clone(&facade), &tasks, events.clone()).await;
-        let blob_transfer = Arc::clone(&sync_engine.blob);
-        let file_transfer_facade = Arc::clone(&wired.shared.file_transfer_facade);
-        tasks
-            .spawn("file_transfer_timeout_sweep", move |cancel| async move {
-                let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-                let mut handle = file_transfer_facade.spawn_timeout_sweep(cancel_rx, blob_transfer);
-                cancel.cancelled().await;
-                let _ = cancel_tx.send(true);
-                if tokio::time::timeout(Duration::from_secs(1), &mut handle)
-                    .await
-                    .is_err()
-                {
-                    handle.abort();
-                }
-            })
-            .await;
-
         Ok(ProductionSession {
             facade,
-            history_maintenance,
-            search_runtime,
+            application: application_runtime,
             #[cfg(feature = "lan-compat")]
             mobile_sync,
-            clipboard,
             sync_engine,
             tasks,
         })
@@ -531,17 +503,8 @@ impl ProductionRuntime {
             .await
     }
 
-    async fn current_active_clipboard(
-        &self,
-    ) -> Result<Arc<uc_application::facade::ActiveClipboardFacade>, EngineError> {
-        self.current_session_field(|session| Arc::clone(&session.sync_engine.active_clipboard))
-            .await
-    }
-
-    async fn current_clipboard_sync_runtime(
-        &self,
-    ) -> Result<Arc<uc_application::facade::ClipboardSyncRuntime>, EngineError> {
-        self.current_session_field(|session| Arc::clone(&session.clipboard.sync))
+    async fn current_application(&self) -> Result<Arc<ApplicationRuntime>, EngineError> {
+        self.current_session_field(|session| Arc::clone(&session.application))
             .await
     }
 
@@ -551,6 +514,36 @@ impl ProductionRuntime {
     ) -> Result<Arc<uc_mobile_lan::MobileSyncFacade>, EngineError> {
         self.current_session_field(|session| Arc::clone(&session.mobile_sync))
             .await
+    }
+}
+
+struct EngineClipboardInboundEvents {
+    events: EventSender,
+}
+
+impl ClipboardInboundEventPort for EngineClipboardInboundEvents {
+    fn emit(&self, event: ClipboardInboundEvent) {
+        self.events
+            .send(EngineEvent::InboundNotice(InboundNoticeEvent {
+                from_device: event.from_device.as_str().to_owned(),
+                snapshot_hash: event.snapshot_hash,
+                text_preview: event.text_preview,
+                representations: event
+                    .representations
+                    .into_iter()
+                    .map(|representation| InboundRepresentationSummary {
+                        mime_type: representation.mime_type,
+                        size_bytes: representation.size_bytes,
+                    })
+                    .collect(),
+                action: match event.action {
+                    ClipboardInboundEventAction::NewEntry => InboundNoticeActionSummary::NewEntry,
+                    ClipboardInboundEventAction::DuplicateIgnored => {
+                        InboundNoticeActionSummary::DuplicateIgnored
+                    }
+                },
+                at_ms: event.at_ms,
+            }));
     }
 }
 

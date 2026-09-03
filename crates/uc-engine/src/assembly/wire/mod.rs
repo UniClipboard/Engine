@@ -19,15 +19,17 @@ mod infra;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::assembly::facade::build_relay_diagnostic;
 use tokio::sync::mpsc;
 use uc_application::deps::{
-    AppDeps, ClipboardEntryPorts, ClipboardPorts, ClipboardRepresentationPorts,
-    CurrentSpaceIdentityPort, DevicePorts, DirectoryReceivePorts, FileTransferPorts,
-    InitialSpaceActivationPort, PortableCurrentSpaceIdentityPort, PrepareProfileLifecycleUseCase,
-    ProfileLifecycleRepositoryPort, ProfileLifecycleState, RePairingStateStorePort, SearchPorts,
-    SecurityPorts, SpaceAccessPorts, SpaceRebuildProgressPort, StoragePorts, SystemPorts,
+    ApplicationDeps, ClipboardEntryPorts, ClipboardPorts, ClipboardRepresentationPorts,
+    ConfigMigrationDeps, CurrentSpaceIdentityPort, DevicePorts, DirectoryReceivePorts,
+    FileTransferPorts, InitialSpaceActivationPort, PortableCurrentSpaceIdentityPort,
+    PrepareProfileLifecycleUseCase, ProfileLifecycleRepositoryPort, ProfileLifecycleState,
+    RePairingStateStorePort, SearchPorts, SecurityPorts, SpaceAccessPorts,
+    SpaceRebuildProgressPort, StoragePorts, SystemPorts,
 };
-use uc_application::facade::{ConfigMigrationDeps, ConfigMigrationFacade, HostEventEmitterPort};
+use uc_application::facade::HostEventEmitterPort;
 use uc_core::app_dirs::AppPaths;
 use uc_core::clipboard::SelectRepresentationPolicyV1;
 use uc_core::ids::{ProfileId, RepresentationId};
@@ -65,12 +67,16 @@ use uc_infra::db::repositories::{
 use uc_infra::fs::key_slot_store::JsonKeySlotStore;
 use uc_infra::fs::VaultLayout;
 use uc_infra::network::iroh::IrohIdentityStore;
-use uc_infra::search::{HkdfSearchKeyDerivation, SearchPipeline, SqliteSearchIndex};
+use uc_infra::search::{
+    HkdfSearchKeyDerivation, SearchPipeline, SqliteSearchIndex, V3SearchKeyDerivation,
+};
 use uc_infra::security::{
-    space_generation_directory, ActiveSpaceGenerationManifestStore, AdmissionKeyManager,
-    Argon2PinHasher, Blake3Hasher, DecryptingClipboardRepresentationRepository,
-    EncryptingClipboardEventWriter, EncryptingInboundReceiveCommit, ProfileContentKeyVault,
-    ProfileLifecycleRepository, Sha256IdentityFingerprintFactory, Sha256ShortCodeGenerator,
+    ActiveSpaceGenerationManifestStore, AdmissionKeyManager, Blake3Hasher,
+    DecryptingClipboardRepresentationRepository, EncryptingClipboardEventWriter,
+    EncryptingInboundReceiveCommit, ProfileContentKeyVault, ProfileLifecycleRepository,
+    ProfileStorageUpgrade, ProfileStorageUpgradeOutcome, Sha256IdentityFingerprintFactory,
+    SpaceControlGeneration, SpaceTransitionActivation, V3AdmissionSpaceTransition,
+    V3DeviceManagementReset, V3InitialSpaceActivation, V3MembershipBranchTransition,
 };
 use uc_infra::settings::repository::FileSettingsRepository;
 use uc_infra::space::{
@@ -83,10 +89,12 @@ use uc_observability_contract::analytics::{AnalyticsFacade, AnalyticsPort};
 #[cfg(feature = "lan-compat")]
 use crate::assembly::deps::DaemonRuntimeDeps;
 use crate::assembly::deps::{
-    BackgroundRuntimeDeps, ProfileResetDeps, SharedRuntimeDeps, SyncEngineDeps, WiredDependencies,
-    WiringError, WiringResult,
+    ProfileResetDeps, SharedRuntimeDeps, SyncEngineDeps, WiredDependencies, WiringError,
+    WiringResult,
 };
-use crate::assembly::platform::{create_platform_layer, SystemClipboardLayer};
+use crate::assembly::maintenance_space_transition::MaintenanceOnlySpaceTransitionPorts;
+use crate::assembly::platform::{create_platform_layer, ProfilePayloadMode, SystemClipboardLayer};
+use crate::assembly::runtime_storage::RuntimeStorageSelection;
 use infra::*;
 
 /// Infrastructure layer implementations
@@ -105,6 +113,9 @@ struct InfraLayer {
     /// dependency (e.g. the entry-file-set repo's per-session path cipher) can be
     /// constructed after space access is wired, over the same connection pool.
     db_executor: Arc<DieselSqliteExecutor>,
+    /// Space control 表的唯一 executor；V2 与 profile executor 共享 pool，
+    /// V3 指向独立 control generation。
+    control_db_executor: Arc<DieselSqliteExecutor>,
     representation_repo: Arc<dyn ClipboardRepresentationStore>,
     selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
 
@@ -147,7 +158,7 @@ struct InfraLayer {
     // Mobile sync LAN 端点状态(单例) — daemon listener 启停时调 inherent
     // `set` / `clear` 写它,facade 通过 `MobileSyncEndpointInfoPort` 只读。
     // 持有具体类型是为了让 daemon 拿到写入面;同一份 Arc 通过 unsizing
-    // coercion 也能 share 给 AppDeps.mobile_sync.endpoint_info。
+    // coercion 也能 share 给 ApplicationDeps.mobile_sync.endpoint_info。
     #[cfg(feature = "lan-compat")]
     mobile_sync_endpoint_info: Arc<uc_infra::mobile_sync::InMemoryMobileSyncEndpointInfoAdapter>,
 }
@@ -164,6 +175,69 @@ pub struct CoreWiringInputs {
     pub analytics_sink: Arc<dyn AnalyticsPort>,
     pub analytics_facade: Arc<dyn AnalyticsFacade>,
     pub host_event_emitter: Arc<dyn HostEventEmitterPort>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn ensure_profile_storage_v3(
+    profile_root: &std::path::Path,
+    legacy_database: PathBuf,
+    legacy_blob_root: PathBuf,
+    profile_id: ProfileId,
+    secure_storage: Arc<dyn SecureStoragePort>,
+    vault_path: &std::path::Path,
+    profile_content_key_vault: Arc<ProfileContentKeyVault>,
+    admission_keys: Arc<AdmissionKeyManager>,
+    manifests: Arc<ActiveSpaceGenerationManifestStore>,
+) -> WiringResult<RuntimeStorageSelection> {
+    let upgrade = ProfileStorageUpgrade::for_runtime(
+        profile_root.to_path_buf(),
+        legacy_database.clone(),
+        legacy_blob_root.clone(),
+        profile_id,
+        secure_storage,
+        vault_path.to_path_buf(),
+        profile_content_key_vault,
+        admission_keys,
+        Arc::clone(&manifests),
+    );
+    let outcome = upgrade
+        .ensure_v3()
+        .await
+        .map_err(|source| WiringError::StorageUpgrade { source })?;
+    match outcome {
+        ProfileStorageUpgradeOutcome::Upgraded | ProfileStorageUpgradeOutcome::UpToDate => {
+            drop(upgrade);
+            let active = manifests.load_runtime_sync().map_err(|source| {
+                WiringError::StorageUpgradePrerequisite {
+                    source: anyhow::Error::new(source)
+                        .context("reload promoted V3 runtime manifest"),
+                }
+            })?;
+            RuntimeStorageSelection::resolve(
+                profile_root,
+                legacy_database,
+                legacy_blob_root,
+                active.as_ref(),
+            )
+            .map_err(|source| WiringError::StorageUpgradePrerequisite {
+                source: anyhow::Error::new(source).context("open promoted V3 runtime layout"),
+            })
+        }
+        ProfileStorageUpgradeOutcome::FreshReady {
+            profile_data_generation,
+            space_control_generation,
+        } => RuntimeStorageSelection::fresh_v3(
+            profile_root,
+            profile_data_generation,
+            space_control_generation,
+        )
+        .map_err(|source| WiringError::StorageUpgradePrerequisite {
+            source: anyhow::Error::new(source).context("open prepared Fresh V3 runtime layout"),
+        }),
+        ProfileStorageUpgradeOutcome::Pending | ProfileStorageUpgradeOutcome::Busy => {
+            Err(WiringError::StorageUpgradePending)
+        }
+    }
 }
 
 /// Search bundle (Phase 92): subkey-derivation port, sqlite index, tokenization
@@ -197,9 +271,9 @@ struct BlobProcessingAssembly {
     clipboard_change_origin: Arc<dyn SelfWriteLedgerPort>,
 }
 
-pub fn wire_dependencies_from_inputs(
+pub async fn wire_dependencies_from_inputs(
     inputs: CoreWiringInputs,
-) -> WiringResult<(WiredDependencies, BackgroundRuntimeDeps)> {
+) -> WiringResult<WiredDependencies> {
     let CoreWiringInputs {
         paths,
         secure_storage,
@@ -217,11 +291,10 @@ pub fn wire_dependencies_from_inputs(
     let profile_reset_profile_id = profile_id.inner().to_owned();
     let profile_reset_secure_storage = Arc::clone(&secure_storage);
     let profile_reset_identity_dir = iroh_identity_dir.clone();
-    let legacy_db_path = paths.db_path;
-    let vault_path = paths.vault_dir;
-    let settings_path = paths.settings_path;
+    let legacy_db_path = paths.db_path.clone();
+    let vault_path = paths.vault_dir.clone();
+    let settings_path = paths.settings_path.clone();
     let app_data_root = paths.app_data_root_dir.clone();
-    let generation_root = app_data_root.join("space-generations");
     let profile_lifecycle_repository: Arc<dyn ProfileLifecycleRepositoryPort> =
         Arc::new(ProfileLifecycleRepository::new(Arc::clone(&secure_storage)));
     let profile_lifecycle =
@@ -254,43 +327,51 @@ pub fn wire_dependencies_from_inputs(
             VaultLayout::new(vault_path.clone()).re_pairing_state_path(),
             Arc::clone(&admission_keys),
         ));
-    let active_generation_manifest = if profile_lifecycle.state() == ProfileLifecycleState::Ready {
-        active_generation_manifest_store
-            .load_sync()
-            .map_err(|error| WiringError::DatabaseInit(error.to_string()))?
-    } else {
-        None
-    };
     tracing::info!(
         profile_ready = profile_lifecycle.state() == ProfileLifecycleState::Ready,
-        active_generation_present = active_generation_manifest.is_some(),
-        "空间存储启动选择已解析"
+        "profile storage 启动 gate 开始"
     );
-    let (db_path, blob_store_dir) = match active_generation_manifest.as_ref() {
-        Some(manifest) => {
-            let directory = space_generation_directory(
-                &generation_root,
-                &manifest.space_id,
-                &manifest.database_generation,
-            );
-            let database = directory.join("target.sqlite");
-            if !database.is_file() {
-                return Err(WiringError::DatabaseInit(
-                    "Active space database generation is unavailable".to_owned(),
-                ));
-            }
-            tracing::info!(storage_generation = "active", "空间活动 generation 已选择");
-            (database, directory.join("blobs"))
-        }
-        None => {
-            tracing::info!(storage_generation = "legacy", "空间 legacy 存储已选择");
-            (legacy_db_path, vault_path.join("blobs"))
-        }
+    let storage = if profile_lifecycle.state() == ProfileLifecycleState::Ready {
+        ensure_profile_storage_v3(
+            &app_data_root,
+            legacy_db_path,
+            vault_path.join("blobs"),
+            profile_id.clone(),
+            Arc::clone(&secure_storage),
+            &vault_path,
+            Arc::clone(&profile_content_key_vault),
+            Arc::clone(&admission_keys),
+            Arc::clone(&active_generation_manifest_store),
+        )
+        .await?
+    } else {
+        RuntimeStorageSelection::resolve(
+            &app_data_root,
+            legacy_db_path,
+            vault_path.join("blobs"),
+            None,
+        )
+        .map_err(|source| WiringError::StorageUpgradePrerequisite {
+            source: anyhow::Error::new(source)
+                .context("open maintenance-only profile runtime layout"),
+        })?
     };
+    tracing::info!(
+        storage_generation = if storage.is_v3() { "v3" } else { "legacy" },
+        "空间存储 generation 已选择"
+    );
+    let db_path = storage.profile_database().to_path_buf();
+    let control_db_path = storage.control_database().to_path_buf();
+    let blob_store_dir = storage.blob_root().to_path_buf();
 
     let db_pool = create_db_pool(&db_path)?;
+    let control_db_pool = if control_db_path == db_path {
+        db_pool.clone()
+    } else {
+        create_db_pool(&control_db_path)?
+    };
     let db_pool_for_profile_reset = db_pool.clone();
-    let db_pool_for_space_transition = db_pool.clone();
+    let control_db_pool_for_space_transition = control_db_pool.clone();
     // Clone pool before infra layer consumes it — search bundle needs the same pool.
     let db_pool_for_search = db_pool.clone();
     // Config-migration export produces a consistent db snapshot via `VACUUM INTO`
@@ -299,13 +380,13 @@ pub fn wire_dependencies_from_inputs(
 
     let infra = create_infra_layer(
         db_pool,
+        control_db_pool,
         &vault_path,
         &settings_path,
         &app_data_root,
         secure_storage.clone(),
     )?;
     let storage_config = Arc::new(ClipboardStorageConfig::defaults());
-    let source_blob_root = blob_store_dir.clone();
     let profile_salt = profile_id.inner().as_bytes().to_vec();
     let platform = create_platform_layer(
         secure_storage,
@@ -316,6 +397,11 @@ pub fn wire_dependencies_from_inputs(
         infra.clock.clone(),
         storage_config.clone(),
         system_clipboard,
+        if storage.is_v3() {
+            ProfilePayloadMode::v3(Arc::clone(&profile_content_key_vault))
+        } else {
+            ProfilePayloadMode::legacy()
+        },
     )?;
 
     // Space access — single session/key access entry. See
@@ -325,13 +411,13 @@ pub fn wire_dependencies_from_inputs(
             &infra.key_material,
             &platform.current_profile,
             &platform.session,
-            &infra.db_executor,
+            &infra.control_db_executor,
             &profile_content_key_vault,
         );
     let profile_key_access_probe = space_access_adapter.clone();
     let membership_session = Arc::clone(&platform.session);
     let membership_ledger = Arc::new(SqliteMembershipLedger::new(
-        Arc::clone(&infra.db_executor),
+        Arc::clone(&infra.control_db_executor),
         Arc::clone(&admission_keys),
     ));
     let admission_state = Arc::new(SqliteSpaceAdmissionState::new(
@@ -341,39 +427,103 @@ pub fn wire_dependencies_from_inputs(
         Arc::clone(&membership_ledger) as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
     ));
     let admission_credentials = Arc::new(SqliteSpaceAdmissionCredentials::new(
-        Arc::clone(&infra.db_executor),
+        Arc::clone(&infra.control_db_executor),
         Arc::clone(&admission_keys),
         Arc::clone(&active_generation_manifest_store),
         Arc::clone(&membership_ledger) as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
         Arc::clone(&admission_state),
     ));
-    let durable_space_transition =
-        Arc::new(uc_infra::security::DurableAdmissionSpaceTransition::new(
-            db_pool_for_space_transition,
-            source_blob_root,
-            generation_root,
-            profile_salt,
-            Arc::clone(&platform.blob_generation_store),
-            Arc::clone(&active_generation_manifest_store),
-            space_access_adapter,
-            Arc::clone(&platform.session),
+    let (
+        admission_space_transition,
+        device_management_reset_data,
+        membership_branch_transition_executor,
+        initial_space_activation,
+    ): (
+        Arc<dyn uc_application::deps::AdmissionSpaceTransitionPort>,
+        Arc<dyn uc_application::deps::DeviceManagementResetDataPort>,
+        Arc<dyn uc_application::deps::AdvanceMembershipBranchTransitionPort>,
+        Arc<dyn InitialSpaceActivationPort>,
+    ) = if storage.is_v3() {
+        let control_generations = Arc::new(SpaceControlGeneration::new(
+            app_data_root.clone(),
+            Arc::clone(&space_access_adapter),
             Arc::clone(&platform.current_profile),
             Arc::clone(&admission_keys),
         ));
-    let admission_space_transition: Arc<dyn uc_application::deps::AdmissionSpaceTransitionPort> =
-        durable_space_transition.clone();
-    let device_management_reset_data: Arc<dyn uc_application::deps::DeviceManagementResetDataPort> =
-        durable_space_transition.clone();
-    let membership_branch_transition_executor: Arc<
-        dyn uc_application::deps::AdvanceMembershipBranchTransitionPort,
-    > = durable_space_transition.clone();
-    let initial_space_activation: Arc<dyn InitialSpaceActivationPort> = durable_space_transition;
+        let activation = Arc::new(SpaceTransitionActivation::new(
+            app_data_root.clone(),
+            control_db_pool_for_space_transition.clone(),
+            Arc::clone(&active_generation_manifest_store),
+            Arc::clone(&control_generations),
+            Arc::clone(&space_access_adapter),
+        ));
+        let admission_transition = Arc::new(match storage.fresh_generations() {
+            Some((profile_data_generation, _)) => {
+                V3AdmissionSpaceTransition::new_with_fresh_profile_generation(
+                    profile_salt.clone(),
+                    profile_data_generation,
+                    Arc::clone(&active_generation_manifest_store),
+                    Arc::clone(&control_generations),
+                    Arc::clone(&activation),
+                )
+            }
+            None => V3AdmissionSpaceTransition::new(
+                profile_salt.clone(),
+                Arc::clone(&active_generation_manifest_store),
+                Arc::clone(&control_generations),
+                Arc::clone(&activation),
+            ),
+        });
+        let device_reset = Arc::new(V3DeviceManagementReset::new(
+            app_data_root.clone(),
+            control_db_pool_for_space_transition.clone(),
+            Arc::clone(&active_generation_manifest_store),
+            Arc::clone(&control_generations),
+            Arc::clone(&activation),
+        ));
+        let membership_branch = Arc::new(V3MembershipBranchTransition::new(
+            control_db_pool_for_space_transition,
+            Arc::clone(&active_generation_manifest_store),
+            control_generations,
+            activation,
+        ));
+        let initial_space_activation: Arc<dyn InitialSpaceActivationPort> =
+            match storage.fresh_generations() {
+                Some((profile_data_generation, space_control_generation)) => Arc::new(
+                    V3InitialSpaceActivation::new(
+                        profile_data_generation,
+                        space_control_generation,
+                        Arc::clone(&active_generation_manifest_store),
+                    )
+                    .ok_or_else(|| {
+                        WiringError::DatabaseInit(
+                            "fresh V3 runtime generations are invalid".to_string(),
+                        )
+                    })?,
+                ),
+                None => current_space_resolver.clone(),
+            };
+        (
+            admission_transition,
+            device_reset,
+            membership_branch,
+            initial_space_activation,
+        )
+    } else {
+        let transition = Arc::new(MaintenanceOnlySpaceTransitionPorts);
+        (
+            transition.clone(),
+            transition.clone(),
+            transition.clone(),
+            transition,
+        )
+    };
     let peer_admission =
         build_peer_admission_port(Arc::clone(&membership_ledger)
             as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>);
 
     let relationship_store = Arc::new(EncryptedRelationshipStore::new(
-        Arc::clone(&infra.db_executor),
+        Arc::clone(&infra.control_db_executor),
         Arc::clone(&space_access_ports.derive_subkey),
         Arc::clone(&platform.current_profile),
     ));
@@ -388,15 +538,21 @@ pub fn wire_dependencies_from_inputs(
     );
     let relationship_reset: Arc<dyn uc_core::membership::RelationshipStateResetPort> =
         relationship_store;
+    let v3_content_protection = platform.payload_runtime.content().cloned();
 
     // Transfer metadata and event payloads are encrypted with two independent
     // profile-scoped subkeys, so their adapters are assembled only after space
     // access and the active profile are available.
-    let file_transfer_adapter = Arc::new(DieselFileTransferRepository::new(
-        infra.db_executor.clone(),
-        space_access_ports.derive_subkey.clone(),
-        platform.current_profile.clone(),
-    ));
+    let file_transfer_adapter = Arc::new(match &v3_content_protection {
+        Some(protection) => {
+            DieselFileTransferRepository::new_v3(infra.db_executor.clone(), Arc::clone(protection))
+        }
+        None => DieselFileTransferRepository::new(
+            infra.db_executor.clone(),
+            space_access_ports.derive_subkey.clone(),
+            platform.current_profile.clone(),
+        ),
+    });
     let file_transfer_privacy_maintenance = Arc::new(
         uc_infra::file_transfer::SqliteFileTransferPrivacyMaintenance::new(
             infra.db_executor.clone(),
@@ -416,49 +572,75 @@ pub fn wire_dependencies_from_inputs(
         fail_inflight: Arc::clone(&file_transfer_adapter) as _,
         cancel_attempt: Arc::clone(&file_transfer_adapter) as _,
     };
-    let file_transfer_store_arc = Arc::new(
-        uc_infra::file_transfer::SqliteReceiverFileTransferStore::new(
+    let file_transfer_store_arc = Arc::new(match &v3_content_protection {
+        Some(protection) => uc_infra::file_transfer::SqliteReceiverFileTransferStore::new_v3(
+            infra.db_executor.clone(),
+            Arc::clone(protection),
+        ),
+        None => uc_infra::file_transfer::SqliteReceiverFileTransferStore::new(
             infra.db_executor.clone(),
             space_access_ports.derive_subkey.clone(),
             platform.current_profile.clone(),
         ),
-    );
+    });
 
     // File-class entry line-level manifest. Its path columns are sealed with a
     // per-session subkey derived from space access, so it is constructed here
     // (after space access + profile exist) rather than in `create_infra_layer`,
     // reusing the shared executor.
     let entry_file_set_repo: Arc<dyn uc_core::ports::clipboard::EntryFileSetRepositoryPort> =
-        Arc::new(
-            uc_infra::db::repositories::DieselEntryFileSetRepository::new(
+        Arc::new(match &v3_content_protection {
+            Some(protection) => uc_infra::db::repositories::DieselEntryFileSetRepository::new_v3(
+                infra.db_executor.clone(),
+                Arc::clone(protection),
+            ),
+            None => uc_infra::db::repositories::DieselEntryFileSetRepository::new(
                 infra.db_executor.clone(),
                 space_access_ports.derive_subkey.clone(),
                 platform.current_profile.clone(),
             ),
-        );
+        });
 
     let directory_attempt_impl = Arc::new(
         uc_infra::db::repositories::DieselEntryReceiveAttemptRepository::new(
             infra.db_executor.clone(),
         ),
     );
-    let directory_publish_impl = Arc::new(
-        uc_infra::db::repositories::DieselDirectoryPublishLogRepository::new(
+    let directory_publish_impl = Arc::new(match &v3_content_protection {
+        Some(protection) => {
+            uc_infra::db::repositories::DieselDirectoryPublishLogRepository::new_v3(
+                infra.db_executor.clone(),
+                Arc::clone(protection),
+            )
+        }
+        None => uc_infra::db::repositories::DieselDirectoryPublishLogRepository::new(
             infra.db_executor.clone(),
             space_access_ports.derive_subkey.clone(),
             platform.current_profile.clone(),
         ),
-    );
-    let receive_artifact_impl = Arc::new(DieselReceiveArtifactLogRepository::new(
-        infra.db_executor.clone(),
-        space_access_ports.derive_subkey.clone(),
-        platform.current_profile.clone(),
-    ));
-    let inbound_commit_impl = Arc::new(DieselInboundReceiveCommitRepository::new(
-        infra.db_executor.clone(),
-        space_access_ports.derive_subkey.clone(),
-        platform.current_profile.clone(),
-    ));
+    });
+    let receive_artifact_impl = Arc::new(match &v3_content_protection {
+        Some(protection) => DieselReceiveArtifactLogRepository::new_v3(
+            infra.db_executor.clone(),
+            Arc::clone(protection),
+        ),
+        None => DieselReceiveArtifactLogRepository::new(
+            infra.db_executor.clone(),
+            space_access_ports.derive_subkey.clone(),
+            platform.current_profile.clone(),
+        ),
+    });
+    let inbound_commit_impl = Arc::new(match &v3_content_protection {
+        Some(protection) => DieselInboundReceiveCommitRepository::new_v3(
+            infra.db_executor.clone(),
+            Arc::clone(protection),
+        ),
+        None => DieselInboundReceiveCommitRepository::new(
+            infra.db_executor.clone(),
+            space_access_ports.derive_subkey.clone(),
+            platform.current_profile.clone(),
+        ),
+    });
     let mut directory_receive = DirectoryReceivePorts {
         get_attempt: directory_attempt_impl.clone(),
         list_attempts: directory_attempt_impl.clone(),
@@ -469,25 +651,28 @@ pub fn wire_dependencies_from_inputs(
         request_cancel: directory_attempt_impl.clone(),
         begin_failure: directory_attempt_impl.clone(),
         record_artifacts: receive_artifact_impl.clone(),
-        get_artifacts: receive_artifact_impl.clone(),
         list_unsettled_artifacts: receive_artifact_impl,
         commit_inbound: inbound_commit_impl,
         entry_progress: file_transfer_adapter,
-        delete_state: directory_attempt_impl.clone(),
-        purge_orphans: directory_attempt_impl,
     };
 
     // The mobile-consumable reference is encrypted with a session-derived
     // subkey, so this register adapter must be assembled after space access and
     // the active profile exist. One concrete adapter is exposed through narrow
     // write, current-read, mobile-read, backfill, and reset ports.
-    let active_clipboard_register_impl = Arc::new(
-        uc_infra::db::repositories::DieselActiveClipboardRegisterRepository::new(
+    let active_clipboard_register_impl = Arc::new(match &v3_content_protection {
+        Some(protection) => {
+            uc_infra::db::repositories::DieselActiveClipboardRegisterRepository::new_v3(
+                infra.db_executor.clone(),
+                Arc::clone(protection),
+            )
+        }
+        None => uc_infra::db::repositories::DieselActiveClipboardRegisterRepository::new(
             infra.db_executor.clone(),
             space_access_ports.derive_subkey.clone(),
             platform.current_profile.clone(),
         ),
-    );
+    });
     const ACTIVE_CLIPBOARD_SSE_CAPACITY: usize = 64;
     let (active_clipboard_sse_source, _) = tokio::sync::broadcast::channel::<
         uc_core::clipboard::ActiveClipboardState,
@@ -537,6 +722,7 @@ pub fn wire_dependencies_from_inputs(
         db_pool_for_search,
         &space_access_ports,
         &platform.current_profile,
+        &platform.payload_runtime,
     );
 
     // Encryption decorators over the clipboard event/representation repos, plus
@@ -549,6 +735,7 @@ pub fn wire_dependencies_from_inputs(
         representation_ports: clipboard_representation_ports,
     } = build_cipher_decorators(
         &platform.session,
+        &platform.blob_cipher,
         &infra.clipboard_event_repo,
         &infra.representation_repo,
     );
@@ -559,7 +746,7 @@ pub fn wire_dependencies_from_inputs(
 
     // Background blob-processing components (cache, spool, durable queue, payload
     // resolver, self-write ledger, worker channel). `worker_rx` is not Clone and
-    // travels by-value to BackgroundRuntimeDeps; the rest fan out to AppDeps.
+    // travels by-value to BackgroundRuntimeDeps; the rest fan out to ApplicationDeps.
     let spool_dir = paths.spool_dir.clone();
     let BlobProcessingAssembly {
         representation_cache,
@@ -603,9 +790,9 @@ pub fn wire_dependencies_from_inputs(
     // Whole-installation configuration migration (export / import preview /
     // staged import). Assembled in the sync wiring context because its inputs
     // (secure_storage, db pool, local-identity, filesystem layout, profile) are
-    // not reconstructable from the abstract `AppDeps` ports; the composed facade
-    // travels on `AppDeps.config_migration`.
-    let config_migration = build_config_migration_facade(
+    // not reconstructable from the abstract `ApplicationDeps` ports; the composed facade
+    // travels on `ApplicationDeps.config_migration`.
+    let config_migration = build_config_migration_deps(
         &platform.secure_storage,
         &iroh_identity_storage,
         db_pool_for_config_migration,
@@ -624,17 +811,42 @@ pub fn wire_dependencies_from_inputs(
         },
     );
 
-    let deps = AppDeps {
+    // Application 的进程级事件出口与 Clipboard background adapter 在唯一
+    // factory 之前完成选择；领域对象图由 ApplicationAssembly 构造。
+    let host_event_bus: Arc<uc_application::facade::HostEventBus> =
+        Arc::new(uc_application::facade::HostEventBus::new());
+    host_event_bus.register("logging", host_event_emitter);
+    let clipboard_background = Arc::new(uc_infra::clipboard::ClipboardBackgroundRuntime::new(
+        representation_cache,
+        spool_manager,
+        worker_rx,
+        spool_dir,
+        storage_config.spool_ttl_days,
+        storage_config.worker_retry_max_attempts,
+        storage_config.worker_retry_backoff_ms,
+        Arc::clone(&decrypting_rep_repo),
+        worker_tx.clone(),
+        Arc::clone(&platform.blob_writer),
+        Arc::clone(&infra.hash),
+        Arc::clone(&infra.clock),
+        Arc::clone(&infra.thumbnail_repo),
+        Arc::clone(&infra.thumbnail_generator),
+    ));
+
+    let deps = ApplicationDeps {
+        paths: paths.clone(),
+        relay_diagnostic: build_relay_diagnostic(),
+        host_event_bus: Arc::clone(&host_event_bus),
+        file_transfer_event_store: file_transfer_store_arc,
+        receive_artifact_cleanup: Arc::new(uc_infra::fs::FsReceiveArtifactCleaner),
+        receive_save_dir: uc_infra::fs::FsInboundFileTarget::new(Arc::clone(&infra.settings_repo)),
+        clipboard_background,
+        trusted_peer_repo: Arc::clone(&trusted_peer_repo),
+        entry_delivery_repo: Arc::clone(&infra.entry_delivery_repo),
         clipboard: ClipboardPorts {
             clipboard: platform.clipboard,
             system_clipboard: platform.system_clipboard,
             entry_ports: infra.clipboard_entry_ports,
-            // Single shared per-identity write coordinator: inbound apply and
-            // local capture serialize "find entry by hash → create/replace/skip"
-            // on it so the same content never lands as two entries.
-            entry_identity_coordinator: Arc::new(
-                uc_application::deps::EntryIdentityCoordinator::new(),
-            ),
             clipboard_event_repo: encrypting_event_writer,
             clipboard_event_reader_repo: infra.clipboard_event_reader_repo.clone(),
             representation_store: decrypting_rep_repo,
@@ -655,14 +867,10 @@ pub fn wire_dependencies_from_inputs(
             active_register_reset: active_clipboard_register_reset,
         },
         security: SecurityPorts {
-            current_profile: platform.current_profile,
             secure_storage: platform.secure_storage,
             profile_key_access_probe,
             space_access_ports,
-            blob_cipher: blob_cipher.clone(),
             transfer_cipher: transfer_cipher.clone(),
-            pin_hasher: Arc::new(Argon2PinHasher),
-            short_code: Arc::new(Sha256ShortCodeGenerator),
             fingerprint: Arc::new(Sha256IdentityFingerprintFactory),
         },
         device: DevicePorts {
@@ -673,7 +881,6 @@ pub fn wire_dependencies_from_inputs(
         re_pairing_state_store,
         current_space_identity,
         initial_space_activation,
-        portable_current_space_identity,
         config_migration,
         app_version_state: infra.app_version_state,
         engine_version_state: infra.engine_version_state,
@@ -694,50 +901,52 @@ pub fn wire_dependencies_from_inputs(
             hash: infra.hash,
             cache_fs: Arc::new(uc_infra::fs::TokioCacheFsAdapter::new()),
         },
-        search: SearchPorts {
+        search: SearchPorts::new(
             search_index,
             search_maintenance,
             search_key_derivation,
             search_pipeline,
-        },
+        ),
         analytics: analytics_sink,
     };
 
-    // Create shared host-event bus at wire time. The bus starts with the
-    // logging emitter pre-registered so non-GUI / CLI processes have a
-    // sensible default (event type names go to tracing::debug). Tauri setup
-    // and daemon startup `register` their own transports on top — register
-    // is additive, never overwrites the logging emitter, and `unregister`
-    // can pull a transport off cleanly (e.g. daemon reload).
-    let host_event_bus: Arc<uc_application::facade::HostEventBus> =
-        Arc::new(uc_application::facade::HostEventBus::new());
-    host_event_bus.register("logging", host_event_emitter);
-
-    let receive_readiness: Arc<uc_application::facade::ReceiveReadinessCoordinator> =
-        Arc::new(uc_application::facade::ReceiveReadinessCoordinator::new());
-
-    let crate::assembly::file_transfer::FileTransferAssembly {
-        facade: file_transfer_facade,
-    } = crate::assembly::file_transfer::build_file_transfer_assembly(
-        Arc::clone(&file_transfer_store_arc),
-        Arc::clone(&host_event_bus),
-        deps.storage.file_transfer.clone(),
-        deps.storage.directory_receive.clone(),
-        deps.system.clock.clone(),
-        Arc::clone(&receive_readiness),
-        uc_infra::fs::FsInboundFileTarget::new(deps.settings.clone()),
-        paths.file_cache_dir.clone(),
-    );
-
-    let clipboard_write_coordinator = build_clipboard_write_coordinator(
-        deps.clipboard.system_clipboard.clone(),
-        deps.clipboard.clipboard_change_origin.clone(),
-    );
-
+    let sync_device_identity = Arc::clone(&deps.device.device_identity);
+    let sync_settings = Arc::clone(&deps.settings);
+    let sync_member_repo = Arc::clone(&deps.device.member_repo);
+    let sync_trusted_peer_repo = Arc::clone(&deps.trusted_peer_repo);
+    let sync_fingerprint = Arc::clone(&deps.security.fingerprint);
+    let sync_clock = Arc::clone(&deps.system.clock);
+    let sync_space_access = deps.security.space_access_ports.clone();
+    #[cfg(test)]
+    let sync_analytics = Arc::clone(&deps.analytics);
+    #[cfg(feature = "lan-compat")]
+    let mobile_sync_application = crate::assembly::deps::MobileSyncApplicationDeps {
+        clock: Arc::clone(&deps.system.clock),
+        settings: Arc::clone(&deps.settings),
+        mobile_consumable_load: Arc::clone(&deps.clipboard.mobile_consumable_load),
+        entry_repo: Arc::clone(&deps.clipboard.entry_ports.get),
+        selection_repo: Arc::clone(&deps.clipboard.selection_repo),
+        representation_repo: Arc::clone(&deps.clipboard.representation_ports.get),
+        payload_resolver: Arc::clone(&deps.clipboard.payload_resolver),
+        blob_reader: Arc::clone(&deps.storage.blob_store),
+        analytics: Arc::clone(&deps.analytics),
+        find_entry_by_snapshot_hash: Arc::clone(&deps.clipboard.entry_ports.find_by_snapshot_hash),
+        check_entry_availability: Arc::clone(&deps.clipboard.entry_ports.availability),
+    };
+    let application = uc_application::facade::ApplicationAssembly::build(deps);
     let wired = WiredDependencies {
-        deps,
+        application,
         profile_reset,
         sync_engine: SyncEngineDeps {
+            device_identity: sync_device_identity,
+            settings: sync_settings,
+            member_repo: sync_member_repo,
+            trusted_peer_repo: sync_trusted_peer_repo,
+            fingerprint: sync_fingerprint,
+            clock: sync_clock,
+            space_access: sync_space_access,
+            #[cfg(test)]
+            analytics: sync_analytics,
             iroh_identity_storage,
             peer_admission,
             peer_addr_repo: Arc::clone(&peer_addr_repo),
@@ -773,44 +982,11 @@ pub fn wire_dependencies_from_inputs(
             endpoint_info: Arc::clone(&infra.mobile_sync_endpoint_info)
                 as Arc<dyn uc_core::ports::mobile_sync::MobileSyncEndpointInfoPort>,
         },
+        #[cfg(feature = "lan-compat")]
+        mobile_sync_application,
         shared: SharedRuntimeDeps {
-            receive_readiness,
-            host_event_bus,
-            entry_delivery_repo: Arc::clone(&infra.entry_delivery_repo),
-            clipboard_event_reader_repo: Arc::clone(&infra.clipboard_event_reader_repo),
-            file_transfer_facade,
-            clipboard_write_coordinator: Arc::clone(&clipboard_write_coordinator),
-            file_cache_dir: paths.file_cache_dir.clone(),
-            trusted_peer_repo: Arc::clone(&trusted_peer_repo),
             active_clipboard_sse_source,
         },
     };
-    let background = BackgroundRuntimeDeps {
-        representation_cache,
-        spool_manager,
-        worker_rx,
-        spool_dir,
-        spool_ttl_days: storage_config.spool_ttl_days,
-        worker_retry_max_attempts: storage_config.worker_retry_max_attempts,
-        worker_retry_backoff_ms: storage_config.worker_retry_backoff_ms,
-    };
-    Ok((wired, background))
-}
-
-/// Constructs a `ClipboardWriteCoordinator` — the single write boundary for all
-/// programmatic clipboard writes.
-///
-/// Centralises the guard-registration + write + cleanup-on-error pattern
-/// (previously duplicated across restore_clipboard_selection, copy_file_to_clipboard,
-/// and the now-deleted `sync_inbound` libp2p path).
-fn build_clipboard_write_coordinator(
-    system_clipboard: Arc<dyn uc_core::ports::clipboard::SystemClipboardPort>,
-    clipboard_change_origin: Arc<dyn SelfWriteLedgerPort>,
-) -> Arc<uc_application::facade::clipboard_write::ClipboardWriteCoordinator> {
-    Arc::new(
-        uc_application::facade::clipboard_write::ClipboardWriteCoordinator::new(
-            system_clipboard,
-            clipboard_change_origin,
-        ),
-    )
+    Ok(wired)
 }

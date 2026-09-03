@@ -32,8 +32,8 @@ pub struct ReceiveReadinessStatus {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReceiveReadinessError {
-    #[error("receive recovery failed: {0}")]
-    Recovery(String),
+    #[error("receive recovery failed")]
+    Recovery(#[source] anyhow::Error),
 }
 
 #[async_trait]
@@ -179,7 +179,7 @@ impl ReconcileReceiveAttemptsUseCase {
             .list_provisional
             .list_provisional_receives()
             .await
-            .map_err(|error| anyhow!(error.to_string()))?
+            .map_err(anyhow::Error::new)?
         {
             if let Some(uri) = provisional.cached_path {
                 let path = url::Url::parse(&uri)
@@ -194,7 +194,7 @@ impl ReconcileReceiveAttemptsUseCase {
                         ownership: ReceiveArtifactOwnership::ManagedStaging,
                     }])
                     .await
-                    .map_err(|error| anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
             }
             self.finalize_provisional
                 .finalize_provisional_receive(
@@ -203,7 +203,7 @@ impl ReconcileReceiveAttemptsUseCase {
                     self.clock.now_ms(),
                 )
                 .await
-                .map_err(|error| anyhow!(error.to_string()))?;
+                .map_err(anyhow::Error::new)?;
             reconciled = reconciled.saturating_add(1);
         }
 
@@ -211,7 +211,7 @@ impl ReconcileReceiveAttemptsUseCase {
             .list_artifacts
             .list_unsettled_receive_artifacts()
             .await
-            .map_err(|error| anyhow!(error.to_string()))?
+            .map_err(anyhow::Error::new)?
             .into_iter()
             .map(|record| ((record.entry_id.clone(), record.attempt_id.clone()), record))
             .collect::<HashMap<_, _>>();
@@ -221,7 +221,7 @@ impl ReconcileReceiveAttemptsUseCase {
                 .get_attempt
                 .get_entry_attempt(entry_id)
                 .await
-                .map_err(|error| anyhow!(error.to_string()))?
+                .map_err(anyhow::Error::new)?
                 .ok_or_else(|| anyhow!("unsettled receive artifacts have no attempt authority"))?;
             if current.current_attempt_id != *attempt_id || current.state.is_terminal() {
                 error!(
@@ -239,7 +239,7 @@ impl ReconcileReceiveAttemptsUseCase {
             .list_attempts
             .list_non_terminal_attempts()
             .await
-            .map_err(|error| anyhow!(error.to_string()))?;
+            .map_err(anyhow::Error::new)?;
         for attempt in attempts {
             let terminal = if attempt.state == AttemptState::Cancelling {
                 PartialReceiveTerminal::Cancelled
@@ -256,7 +256,7 @@ impl ReconcileReceiveAttemptsUseCase {
                             self.clock.now_ms(),
                         )
                         .await
-                        .map_err(|error| anyhow!(error.to_string()))?;
+                        .map_err(anyhow::Error::new)?;
                     if outcome != BeginReceiveFailureOutcome::Begun {
                         error!(
                             entry_id = %attempt.entry_id,
@@ -279,7 +279,7 @@ impl ReconcileReceiveAttemptsUseCase {
                 .get_directory_publish
                 .get_publish_record(&attempt.entry_id, &attempt.current_attempt_id)
                 .await
-                .map_err(|error| anyhow!(error.to_string()))?
+                .map_err(anyhow::Error::new)?
             {
                 cleanup.extend(directory.root_map.into_iter().enumerate().map(
                     |(index, (staged_path, final_path))| ReceiveArtifact {
@@ -293,7 +293,7 @@ impl ReconcileReceiveAttemptsUseCase {
             self.cleanup_artifacts
                 .cleanup_receive_artifacts(&cleanup)
                 .await
-                .map_err(|error| anyhow!(error.to_string()))?;
+                .map_err(anyhow::Error::new)?;
 
             self.commit
                 .commit_inbound_receive(&InboundReceiveSettlement::NoEntry {
@@ -308,7 +308,7 @@ impl ReconcileReceiveAttemptsUseCase {
                     now_ms: self.clock.now_ms(),
                 })
                 .await
-                .map_err(|error| anyhow!(error.to_string()))?;
+                .map_err(anyhow::Error::new)?;
             reconciled = reconciled.saturating_add(1);
         }
 

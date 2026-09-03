@@ -4,6 +4,7 @@
 //! acknowledgement, config migration, storage statistics and relay
 //! diagnostics — stays inside this directory.
 
+pub(crate) mod assembly;
 pub(crate) mod config_migration;
 pub(crate) mod diagnostics;
 mod facade;
@@ -14,6 +15,7 @@ pub(crate) mod relay_diagnostic;
 pub(crate) mod storage;
 pub(crate) mod upgrade;
 
+pub use assembly::{PreparedNetworkSettings, SettingsAssembly, SettingsAssemblyParts};
 pub use facade::{
     RelayCredentialStatusView, RelayProbeReportView, RelaySaveView, SettingsFacade,
     SettingsFacadeError,

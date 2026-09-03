@@ -1,4 +1,6 @@
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -69,11 +71,21 @@ struct PausedUnknownScope;
 
 struct EmptyScope;
 
+struct FixedScope(Vec<DeviceId>);
+
 struct FixedClock;
 
 impl uc_core::ports::ClockPort for FixedClock {
     fn now_ms(&self) -> i64 {
         10_000
+    }
+}
+
+struct ClockAt(i64);
+
+impl uc_core::ports::ClockPort for ClockAt {
+    fn now_ms(&self) -> i64 {
+        self.0
     }
 }
 
@@ -120,8 +132,80 @@ impl CurrentSpaceMemberScopePort for EmptyScope {
     }
 }
 
+#[async_trait]
+impl CurrentSpaceMemberScopePort for FixedScope {
+    async fn snapshot(&self) -> Result<CurrentSpaceMemberScope, CurrentSpaceMemberScopeError> {
+        Ok(CurrentSpaceMemberScope {
+            revision: 5,
+            local_member_active: true,
+            usable_peer_device_ids: self.0.clone(),
+            paused_peer_devices: Vec::new(),
+        })
+    }
+}
+
 struct RecordingTransport {
     recipients: Mutex<Vec<DeviceId>>,
+}
+
+struct SwitchableTransport {
+    offline: AtomicBool,
+    recipients: Mutex<Vec<DeviceId>>,
+}
+
+struct ConcurrentTransport {
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+}
+
+#[async_trait]
+impl MembershipHistoryExchangePort for ConcurrentTransport {
+    async fn exchange_membership_history(
+        &self,
+        _recipient: &DeviceId,
+        message: MembershipHistoryMessage,
+    ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(active, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        match message {
+            MembershipHistoryMessage::SummaryV3(summary) => Ok(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::Confirmed {
+                    transfer_id: summary.transfer_id,
+                    confirmed_position: summary.current_position,
+                },
+            )),
+            _ => Ok(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::Invalid,
+            )),
+        }
+    }
+}
+
+#[async_trait]
+impl MembershipHistoryExchangePort for SwitchableTransport {
+    async fn exchange_membership_history(
+        &self,
+        recipient: &DeviceId,
+        message: MembershipHistoryMessage,
+    ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
+        self.recipients.lock().unwrap().push(recipient.clone());
+        if self.offline.load(Ordering::SeqCst) {
+            return Err(MembershipHistoryExchangeError::Offline);
+        }
+        match message {
+            MembershipHistoryMessage::SummaryV3(summary) => Ok(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::Confirmed {
+                    transfer_id: summary.transfer_id,
+                    confirmed_position: summary.current_position,
+                },
+            )),
+            _ => Ok(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::Invalid,
+            )),
+        }
+    }
 }
 
 #[async_trait]
@@ -385,4 +469,280 @@ async fn persistent_cursor_eventually_selects_two_hundred_pending_peers() {
     }
 
     assert_eq!(selected.len(), 200);
+}
+
+#[tokio::test]
+async fn clock_rollback_makes_persisted_retry_due_immediately() {
+    let mut loaded = active_ledger();
+    let peer = DeviceId::new("device-b");
+    let peer_state = &mut loaded
+        .peer_reconciliation
+        .get_mut(&peer)
+        .unwrap()
+        .sync_state;
+    peer_state.retry_attempt = 1;
+    peer_state.next_attempt_at_ms = 11_000;
+    let repository = Arc::new(MemoryLedgerRepository(Mutex::new(loaded)));
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let synchronize = SynchronizeMembershipHistoryUseCase::new(
+        ledger,
+        Arc::new(EmptyScope),
+        Arc::new(RecordingTransport {
+            recipients: Mutex::new(Vec::new()),
+        }),
+        Arc::new(ClockAt(9_000)),
+    );
+
+    let selected = synchronize
+        .select_due_peers(vec![peer.clone()])
+        .await
+        .unwrap();
+
+    assert_eq!(selected, vec![peer]);
+}
+
+#[tokio::test]
+async fn deferred_attempt_survives_restart_and_retries_when_due() {
+    let peer = DeviceId::new("device-c");
+    let repository = Arc::new(MemoryLedgerRepository(Mutex::new(active_ledger())));
+    let transport = Arc::new(SwitchableTransport {
+        offline: AtomicBool::new(true),
+        recipients: Mutex::new(Vec::new()),
+    });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    ));
+    let synchronize = SynchronizeMembershipHistoryUseCase::new(
+        ledger,
+        Arc::new(FixedScope(vec![peer.clone()])),
+        transport.clone(),
+        Arc::new(ClockAt(10_000)),
+    );
+
+    let first = synchronize
+        .execute(MembershipSyncTarget::AllCurrentPeers)
+        .await
+        .unwrap();
+    assert_eq!(first.deferred_peer_count, 1);
+    let persisted = repository.load().await.unwrap();
+    let persisted_peer = persisted.peer_reconciliation.get(&peer).unwrap();
+    assert_eq!(persisted_peer.sync_state.retry_attempt, 1);
+    assert_eq!(persisted_peer.sync_state.next_attempt_at_ms, 11_000);
+    assert!(persisted_peer.confirmed_position.is_none());
+    drop(synchronize);
+
+    transport.offline.store(false, Ordering::SeqCst);
+    let restarted_ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    ));
+    let restarted = SynchronizeMembershipHistoryUseCase::new(
+        restarted_ledger,
+        Arc::new(FixedScope(vec![peer.clone()])),
+        transport.clone(),
+        Arc::new(ClockAt(11_000)),
+    );
+
+    let second = restarted
+        .execute(MembershipSyncTarget::AllCurrentPeers)
+        .await
+        .unwrap();
+    assert_eq!(second.completed_peer_count, 1);
+    let completed = repository.load().await.unwrap();
+    let completed_peer = completed.peer_reconciliation.get(&peer).unwrap();
+    assert!(completed_peer.confirmed_position.is_some());
+    assert_eq!(completed_peer.sync_state.retry_attempt, 0);
+    assert_eq!(completed_peer.sync_state.next_attempt_at_ms, 0);
+    assert_eq!(
+        transport.recipients.lock().unwrap().as_slice(),
+        &[peer.clone(), peer]
+    );
+}
+
+#[tokio::test]
+async fn retry_counter_overflow_fails_closed_without_committing_partial_state() {
+    let peer = DeviceId::new("device-c");
+    let mut loaded = active_ledger();
+    loaded
+        .peer_reconciliation
+        .get_mut(&peer)
+        .unwrap()
+        .sync_state
+        .retry_attempt = u32::MAX;
+    let repository = Arc::new(MemoryLedgerRepository(Mutex::new(loaded)));
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    ));
+    let synchronize = SynchronizeMembershipHistoryUseCase::new(
+        ledger,
+        Arc::new(FixedScope(vec![peer.clone()])),
+        Arc::new(SwitchableTransport {
+            offline: AtomicBool::new(true),
+            recipients: Mutex::new(Vec::new()),
+        }),
+        Arc::new(ClockAt(10_000)),
+    );
+
+    let error = synchronize
+        .execute(MembershipSyncTarget::AllCurrentPeers)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        SynchronizeMembershipHistoryError::RecoveryRequired
+    ));
+    let persisted = repository.load().await.unwrap();
+    let persisted_peer = persisted.peer_reconciliation.get(&peer).unwrap();
+    assert_eq!(persisted_peer.sync_state.retry_attempt, u32::MAX);
+    assert_eq!(persisted_peer.sync_state.next_attempt_at_ms, 0);
+    assert!(persisted_peer.confirmed_position.is_none());
+}
+
+#[tokio::test]
+async fn round_uses_the_fixed_concurrency_bound() {
+    let peers = (0..8)
+        .map(|index| DeviceId::new(format!("peer-{index:02}")))
+        .collect::<Vec<_>>();
+    let mut loaded = active_ledger();
+    for peer in &peers {
+        loaded.peer_reconciliation.insert(
+            peer.clone(),
+            PeerReconciliationRecord {
+                peer_device_id: peer.clone(),
+                relationship: MembershipHistoryRelationship::Consistent,
+                confirmed_position: None,
+                sync_state: Default::default(),
+                restricted_delivery: Vec::new(),
+                updated_at_ms: 0,
+            },
+        );
+    }
+    let repository = Arc::new(MemoryLedgerRepository(Mutex::new(loaded)));
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let transport = Arc::new(ConcurrentTransport {
+        active: AtomicUsize::new(0),
+        max_active: AtomicUsize::new(0),
+    });
+    let synchronize = SynchronizeMembershipHistoryUseCase::new(
+        ledger,
+        Arc::new(FixedScope(peers)),
+        transport.clone(),
+        Arc::new(FixedClock),
+    );
+
+    let report = synchronize
+        .execute(MembershipSyncTarget::AllCurrentPeers)
+        .await
+        .unwrap();
+
+    assert_eq!(report.completed_peer_count, 8);
+    assert_eq!(transport.max_active.load(Ordering::SeqCst), 4);
+}
+
+#[tokio::test]
+async fn equal_summary_completes_without_sending_history_pages() {
+    let peer = DeviceId::new("device-b");
+    let repository = Arc::new(MemoryLedgerRepository(Mutex::new(active_ledger())));
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let transport = Arc::new(SwitchableTransport {
+        offline: AtomicBool::new(false),
+        recipients: Mutex::new(Vec::new()),
+    });
+    let synchronize = SynchronizeMembershipHistoryUseCase::new(
+        ledger,
+        Arc::new(FixedScope(vec![peer.clone()])),
+        transport.clone(),
+        Arc::new(FixedClock),
+    );
+
+    let report = synchronize
+        .execute(MembershipSyncTarget::AllCurrentPeers)
+        .await
+        .unwrap();
+
+    assert_eq!(report.completed_peer_count, 1);
+    assert_eq!(transport.recipients.lock().unwrap().as_slice(), &[peer]);
+}
+
+#[tokio::test]
+async fn round_batch_limit_preserves_unselected_peer_debt_for_the_next_round() {
+    let peers = (0..9)
+        .map(|index| DeviceId::new(format!("peer-{index:02}")))
+        .collect::<Vec<_>>();
+    let mut loaded = active_ledger();
+    for peer in &peers {
+        loaded.peer_reconciliation.insert(
+            peer.clone(),
+            PeerReconciliationRecord {
+                peer_device_id: peer.clone(),
+                relationship: MembershipHistoryRelationship::Consistent,
+                confirmed_position: None,
+                sync_state: Default::default(),
+                restricted_delivery: Vec::new(),
+                updated_at_ms: 0,
+            },
+        );
+    }
+    let repository = Arc::new(MemoryLedgerRepository(Mutex::new(loaded)));
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    ));
+    let transport = Arc::new(SwitchableTransport {
+        offline: AtomicBool::new(false),
+        recipients: Mutex::new(Vec::new()),
+    });
+    let synchronize = SynchronizeMembershipHistoryUseCase::new(
+        ledger,
+        Arc::new(FixedScope(peers.clone())),
+        transport,
+        Arc::new(FixedClock),
+    );
+
+    let first = synchronize
+        .execute(MembershipSyncTarget::AllCurrentPeers)
+        .await
+        .unwrap();
+    assert_eq!(first.completed_peer_count, 8);
+    assert_eq!(
+        repository
+            .load()
+            .await
+            .unwrap()
+            .peer_reconciliation
+            .values()
+            .filter(|record| record.confirmed_position.is_none())
+            .count(),
+        3,
+        "两个 fixture peer 与一个本轮未选择 peer 仍未确认"
+    );
+
+    let second = synchronize
+        .execute(MembershipSyncTarget::AllCurrentPeers)
+        .await
+        .unwrap();
+    assert_eq!(second.completed_peer_count, 1);
+    let persisted = repository.load().await.unwrap();
+    assert!(peers.iter().all(|peer| persisted.peer_reconciliation[peer]
+        .confirmed_position
+        .is_some()));
 }

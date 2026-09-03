@@ -135,6 +135,14 @@ impl UpgradePersistence {
             .map_err(security_error)?;
         write_atomically(&self.journal_path, &ciphertext).await
     }
+
+    pub(super) async fn clear_journal(&self) -> Result<(), ProfileStorageUpgradeError> {
+        match tokio::fs::remove_file(&self.journal_path).await {
+            Ok(()) => sync_parent_directory(&self.directory).map_err(storage_error),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(storage_error(source)),
+        }
+    }
 }
 
 async fn write_atomically(

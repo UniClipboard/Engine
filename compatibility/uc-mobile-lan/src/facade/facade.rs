@@ -72,10 +72,12 @@ use crate::usecases::{
     register_device::RegisterMobileShortcutDeviceUseCase, revoke_device::RevokeMobileDeviceUseCase,
     update_device::UpdateMobileDeviceUseCase, update_settings::UpdateMobileSyncSettingsUseCase,
 };
+#[cfg(test)]
+use uc_application::deps::test_support::ApplyInboundClipboardUseCase;
 use uc_application::facade::file_transfer::FileTransferFacade;
 use uc_application::facade::ActiveClipboardFacade;
-use uc_application::facade::ApplyInboundClipboardUseCase;
 use uc_application::facade::ClipboardOutboundFacade;
+use uc_application::facade::InboundClipboardApplyPort;
 
 // ── 对外类型 re-export ─────────────────────────────────────────────────
 
@@ -193,7 +195,7 @@ pub struct MobileSyncFacadeDeps {
     pub endpoint_info: Arc<dyn MobileSyncEndpointInfoPort>,
     pub lan_interface_probe: Arc<dyn LanInterfaceProbePort>,
     pub settings: Arc<dyn SettingsPort>,
-    pub apply_inbound: Arc<ApplyInboundClipboardUseCase>,
+    pub apply_inbound: Arc<dyn InboundClipboardApplyPort>,
     pub incoming_buffer: Arc<IncomingMobileBuffer>,
     /// `MobileFileStagingPort` 实例(P5a.3.5):File 类型入站时把裸字节物
     /// 化到 cache_dir,产出可拼 file-list rep 的 `file:///...` URI。
@@ -239,7 +241,7 @@ pub struct MobileSyncFacadeDeps {
     /// use case，分别 emit `mobile_device_registered` /
     /// `mobile_auth_failed` / `mobile_clipboard_synced`。
     ///
-    /// 装配处直接复用 `AppDeps.analytics`（bootstrap 已包了一层
+    /// 装配处直接复用 `ApplicationDeps.analytics`（bootstrap 已包了一层
     /// `GatedAnalyticsSink`，运行时按用户 `usage_analytics_enabled` 切换
     /// noop / 真实 sink）。测试装配传 `NoopAnalyticsSink`。
     pub analytics: Arc<dyn AnalyticsPort>,

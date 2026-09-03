@@ -6,9 +6,8 @@ use diesel::upsert::excluded;
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::{DeriveSpaceSubkeyPort, SpaceAccessError};
 use uc_core::ports::{
-    GetReceiveArtifactRecordPort, ListUnsettledReceiveArtifactsPort, ReceiveArtifactLogError,
-    ReceiveArtifactPhase, ReceiveArtifactRecord, ReceiveArtifactResolution,
-    RecordReceiveArtifactsPort,
+    ListUnsettledReceiveArtifactsPort, ReceiveArtifactLogError, ReceiveArtifactPhase,
+    ReceiveArtifactRecord, ReceiveArtifactResolution, RecordReceiveArtifactsPort,
 };
 
 use super::receive_artifact_cipher::{
@@ -179,34 +178,6 @@ impl<E: DbExecutor> RecordReceiveArtifactsPort for DieselReceiveArtifactLogRepos
                 Ok(())
             })
             .map_err(backend)
-    }
-}
-
-#[async_trait]
-impl<E: DbExecutor> GetReceiveArtifactRecordPort for DieselReceiveArtifactLogRepository<E> {
-    async fn get_receive_artifact_record(
-        &self,
-        entry_id: &str,
-        attempt_id: &str,
-    ) -> Result<Option<ReceiveArtifactRecord>, ReceiveArtifactLogError> {
-        let entry_id = entry_id.to_owned();
-        let attempt_id = attempt_id.to_owned();
-        let row = self
-            .executor
-            .run(move |conn| {
-                receive_artifact_log::table
-                    .filter(receive_artifact_log::entry_id.eq(entry_id))
-                    .filter(receive_artifact_log::attempt_id.eq(attempt_id))
-                    .select(ReceiveArtifactLogRow::as_select())
-                    .first(conn)
-                    .optional()
-                    .map_err(anyhow::Error::from)
-            })
-            .map_err(backend)?;
-        match row {
-            Some(row) => decode_row(&self.protection, row).await.map(Some),
-            None => Ok(None),
-        }
     }
 }
 

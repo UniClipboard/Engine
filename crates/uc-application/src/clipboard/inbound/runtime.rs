@@ -198,6 +198,7 @@ impl InboundProcessor {
                 snapshot_hash: prepared.snapshot_hash.clone(),
                 plaintext: prepared.plaintext.clone(),
                 flow_id: prepared.flow.application_flow_id.clone(),
+                provisional: None,
                 resurface_intent: ClipboardWriteIntent::RemotePush,
             })
             .await;
@@ -963,22 +964,17 @@ mod tests {
 
     #[test]
     fn disabled_global_sync_records_the_rejection_reason() {
-        let writer = CapturedWriter::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .without_time()
-            .with_writer(writer.clone())
-            .finish();
+        // 与 relay timing 测试共用唯一全局 subscriber。并行测试期间临时
+        // default 会与全局 callsite interest cache 竞争，偶发丢失本线程日志。
+        let writer = timing_log_writer();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("build test runtime");
 
-        tracing::subscriber::with_default(subscriber, || {
-            assert!(!runtime.block_on(inbound_sync_enabled(&FixedSettings {
-                sync_enabled: false,
-            })));
-        });
+        assert!(!runtime.block_on(inbound_sync_enabled(&FixedSettings {
+            sync_enabled: false,
+        })));
 
         assert!(
             writer.output().contains("reason=\"sync_disabled\""),
@@ -1004,7 +1000,9 @@ mod tests {
                     reason: "invalid envelope".to_owned(),
                 }),
                 Err(InboundClipboardApplyError::Internal(
-                    "storage unavailable".to_owned(),
+                    crate::clipboard::sync::apply_inbound::ApplyInboundError::Internal(
+                        "storage unavailable".to_owned(),
+                    ),
                 )),
             ])),
         });

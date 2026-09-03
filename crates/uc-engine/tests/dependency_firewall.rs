@@ -319,22 +319,31 @@ fn app_facade_does_not_expose_internal_objects_or_half_ready_slots() {
 }
 
 #[test]
-fn app_facade_runtime_assembly_requires_every_production_capability() {
+fn application_runtime_start_requires_every_production_capability() {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let assembly =
-        std::fs::read_to_string(workspace_root.join("crates/uc-engine/src/assembly/facade.rs"))
-            .expect("AppFacade assembly source must be readable");
+    let application =
+        std::fs::read_to_string(workspace_root.join("crates/uc-application/src/application.rs"))
+            .expect("Application runtime source must be readable");
     let runtime =
         std::fs::read_to_string(workspace_root.join("crates/uc-engine/src/runtime/mod.rs"))
             .expect("Engine runtime source must be readable");
 
     assert!(
-        assembly.contains("struct RuntimeAppFacadeAssembly"),
-        "the unique runtime assembly must have an explicit complete input"
+        application.contains("pub struct ApplicationAdapters"),
+        "the unique ApplicationRuntime start must have an explicit complete input"
     );
-    for forbidden in ["AppFacadeAssemblyOptions", "SearchFacadeAssemblyMode"] {
+    assert!(
+        application.contains("pub async fn start(")
+            && application.contains("adapters: ApplicationAdapters"),
+        "ApplicationRuntime must own the one complete start action"
+    );
+    for forbidden in [
+        "RuntimeAppFacadeAssembly",
+        "AppFacadeAssemblyOptions",
+        "SearchFacadeAssemblyMode",
+    ] {
         assert!(
-            !assembly.contains(forbidden),
+            !runtime.contains(forbidden),
             "runtime assembly must not retain optional mode {forbidden}"
         );
     }
@@ -428,6 +437,291 @@ fn engine_does_not_own_mobile_upload_state() {
 }
 
 #[test]
+fn engine_does_not_assemble_search_internals() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engine = read_rs_sources(&workspace_root.join("crates/uc-engine/src"));
+
+    for forbidden in [
+        "SearchRuntimeDeps",
+        "SearchCoordinatorDeps",
+        "build_search_runtime",
+        "CURRENT_INDEX_VERSION",
+    ] {
+        assert!(
+            !engine.contains(forbidden),
+            "Application Search assembly must own {forbidden} instead of uc-engine"
+        );
+    }
+    assert!(
+        !workspace_root
+            .join("crates/uc-engine/src/assembly/search.rs")
+            .exists(),
+        "Search assembly must live in uc-application"
+    );
+}
+
+#[test]
+fn engine_does_not_assemble_settings_internals() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engine = read_rs_sources(&workspace_root.join("crates/uc-engine/src"));
+
+    for forbidden in [
+        "SettingsFacade::new",
+        "DiagnosticsFacade::new",
+        "StorageFacade::new",
+        "ConfigMigrationFacade::new",
+        "UpgradeFacade::new",
+        "DiagnosticsFacadeDeps",
+        "StorageFacadeDeps",
+        "UpgradeFacadeDeps",
+    ] {
+        assert!(
+            !engine.contains(forbidden),
+            "Application Settings assembly must own {forbidden} instead of uc-engine"
+        );
+    }
+}
+
+#[test]
+fn engine_does_not_assemble_clipboard_internals() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engine = read_rs_sources(&workspace_root.join("crates/uc-engine/src"));
+
+    for forbidden in [
+        "CaptureClipboardUseCase::new",
+        "ApplyInboundClipboardUseCase::",
+        "EntryIdentityCoordinator::new",
+        "ActiveClipboardFacade::new",
+        "ActiveClipboardDeps {",
+        "ActiveClipboardReconcileFacade::new",
+        "ClipboardHistoryFacade::new",
+        "ClipboardRestoreFacade::new",
+        "ClipboardInboundRuntime::start",
+        "ClipboardSyncRuntime::start",
+        "spawn_blob_processing_tasks",
+    ] {
+        assert!(
+            !engine.contains(forbidden),
+            "Application Clipboard assembly must own {forbidden} instead of uc-engine"
+        );
+    }
+    assert!(
+        !workspace_root
+            .join("crates/uc-engine/src/assembly/clipboard_runtime.rs")
+            .exists(),
+        "Clipboard assembly/runtime must live in uc-application"
+    );
+    assert!(
+        !workspace_root
+            .join("crates/uc-engine/src/assembly/blob_tasks.rs")
+            .exists(),
+        "Clipboard spool lifecycle must live behind the application Clipboard runtime"
+    );
+}
+
+#[test]
+fn engine_does_not_assemble_space_internals() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engine = read_rs_sources(&workspace_root.join("crates/uc-engine/src"));
+
+    for forbidden in [
+        "SpaceApplicationDeps",
+        "SpaceSessionActivityDeps",
+        "DeferredSpaceSessionActivity",
+        "build_space_session_activity",
+    ] {
+        assert!(
+            !engine.contains(forbidden),
+            "Application Space assembly must own {forbidden} instead of uc-engine"
+        );
+    }
+}
+
+#[test]
+fn application_owns_the_top_level_assembly_and_domain_runtime_handles() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let application =
+        std::fs::read_to_string(workspace_root.join("crates/uc-application/src/application.rs"))
+            .expect("uc-application must have one top-level application assembly");
+    let engine_runtime =
+        std::fs::read_to_string(workspace_root.join("crates/uc-engine/src/runtime/mod.rs"))
+            .expect("engine runtime source must be readable");
+
+    for required in [
+        "pub struct ApplicationAssembly",
+        "pub struct ApplicationRuntime",
+        "pub fn build(deps: ApplicationDeps)",
+    ] {
+        assert!(
+            application.contains(required),
+            "top-level Application owner must define {required}"
+        );
+    }
+    for forbidden in [
+        "RuntimeAppFacadeAssembly",
+        "build_app_facade_from_deps",
+        "build_settings_assembly",
+        "HistoryMaintenanceRuntime",
+        "SearchAssembly",
+        "ClipboardSession",
+        "ClipboardSyncRuntime",
+        "ActiveClipboardSession",
+    ] {
+        assert!(
+            !engine_runtime.contains(forbidden),
+            "ApplicationRuntime must own {forbidden} instead of uc-engine"
+        );
+    }
+}
+
+#[test]
+fn application_composition_has_one_entry_and_no_legacy_bundle() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engine = read_rs_sources(&workspace_root.join("crates/uc-engine/src"));
+    let application_root =
+        std::fs::read_to_string(workspace_root.join("crates/uc-application/src/lib.rs"))
+            .expect("application lib.rs must be readable");
+
+    for forbidden in [
+        "AppDeps",
+        "&ApplicationDeps",
+        "FileTransferAssembly::build(",
+        "ClipboardAssembly::build(",
+    ] {
+        assert!(
+            !engine.contains(forbidden),
+            "Engine must not distribute or reconstruct Application internals: {forbidden}"
+        );
+    }
+    assert!(
+        !application_root.contains("pub use deps::"),
+        "crate root must not retain a compatibility re-export for dependency bundles"
+    );
+}
+
+#[test]
+fn engine_cannot_reconstruct_or_borrow_application_domain_owners() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engine = read_rs_sources(&workspace_root.join("crates/uc-engine/src"));
+    let compact = engine.split_whitespace().collect::<String>();
+
+    for forbidden in [
+        ".application.deps()",
+        ".application.settings()",
+        ".application.file_transfer()",
+        ".application.clipboard()",
+        "SpaceFacade::new",
+        "BlobTransferFacade::new",
+        "ClipboardSyncFacade::new",
+        "ActiveClipboardSessionDeps",
+        "ClipboardSessionDeps",
+        "FileTransferTimeoutRuntime",
+    ] {
+        assert!(
+            !compact.contains(forbidden),
+            "Engine must submit adapters to the top-level Application owner instead of using {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn engine_session_keeps_only_the_stable_application_handles() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let runtime =
+        std::fs::read_to_string(workspace_root.join("crates/uc-engine/src/runtime/mod.rs"))
+            .expect("engine runtime source must be readable");
+    let start = runtime
+        .find("struct ProductionSession {")
+        .expect("ProductionSession declaration must exist");
+    let end = runtime[start..]
+        .find("\n}")
+        .map(|offset| start + offset)
+        .expect("ProductionSession declaration must end");
+    let fields = &runtime[start..end];
+
+    for required in ["Arc<AppFacade>", "Arc<ApplicationRuntime>"] {
+        assert!(
+            fields.contains(required),
+            "ProductionSession must retain stable Application handle {required}"
+        );
+    }
+    for forbidden in [
+        "ClipboardSession",
+        "ActiveClipboardSession",
+        "SearchAssembly",
+        "SpaceFacade",
+        "FileTransferFacade",
+        "HistoryMaintenanceRuntime",
+    ] {
+        assert!(
+            !fields.contains(forbidden),
+            "ProductionSession must not retain Application domain owner {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn application_public_whitelists_hide_domain_construction_bundles() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let application = workspace_root.join("crates/uc-application/src");
+    let facade_whitelists = [
+        "facade/mod.rs",
+        "facade/blob_transfer.rs",
+        "facade/clipboard/mod.rs",
+        "facade/space_setup/mod.rs",
+    ]
+    .into_iter()
+    .map(|path| {
+        std::fs::read_to_string(application.join(path))
+            .unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
+    })
+    .collect::<String>();
+    let deps = std::fs::read_to_string(application.join("deps.rs"))
+        .expect("application deps whitelist must be readable");
+
+    for forbidden in [
+        "BlobTransferDeps",
+        "ClipboardSyncDeps",
+        "SpaceFacadeDeps",
+        "SpaceSessionDeps",
+        "SpaceAdmissionDeps",
+        "SpaceTransitionDeps",
+    ] {
+        assert!(
+            !facade_whitelists.contains(forbidden),
+            "facade whitelist must hide domain construction bundle {forbidden}"
+        );
+    }
+    for forbidden in ["ActiveClipboardSessionDeps", "ClipboardInboundAdapters"] {
+        assert!(
+            !deps.contains(forbidden),
+            "deps whitelist must hide Application-owned session type {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn application_facade_whitelist_excludes_internal_construction_types() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let facade =
+        std::fs::read_to_string(workspace_root.join("crates/uc-application/src/facade/mod.rs"))
+            .expect("application facade whitelist must be readable");
+
+    for forbidden in [
+        "UseCase",
+        "Coordinator",
+        "RuntimeDeps",
+        "SessionDeps",
+        "AssemblyDeps",
+    ] {
+        assert!(
+            !facade.contains(forbidden),
+            "facade whitelist must not export internal construction type {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn engine_does_not_restore_unrelated_search_or_membership_activity_steps() {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let runtime = read_rs_sources(&workspace_root.join("crates/uc-engine/src/runtime"));
@@ -477,9 +771,7 @@ fn application_root_only_exposes_facade_and_deps() {
         let trimmed = line.trim_start();
         if trimmed.starts_with("pub mod ") || trimmed.starts_with("pub use ") {
             assert!(
-                trimmed.starts_with("pub mod deps;")
-                    || trimmed.starts_with("pub mod facade;")
-                    || trimmed.starts_with("pub use deps::"),
+                trimmed.starts_with("pub mod deps;") || trimmed.starts_with("pub mod facade;"),
                 "crate root must only expose facade and deps: {line}"
             );
         }

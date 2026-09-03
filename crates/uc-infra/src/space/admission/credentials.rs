@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -23,12 +24,14 @@ use crate::network::iroh::{
     SponsorOpaqueMaterial,
 };
 use crate::security::{
-    ActiveSpaceGenerationManifestStore, AdmissionKeyError, AdmissionKeyManager, SpaceAdmissionAuth,
+    ActiveRuntimeManifest, ActiveSpaceGenerationManifestStore, AdmissionKeyError,
+    AdmissionKeyManager, SpaceAdmissionAuth,
 };
 
 use super::repository::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissionState};
 
 const CREDENTIAL_FORMAT_V1: u16 = 1;
+const CREDENTIAL_FORMAT_V2: u16 = 2;
 const CREDENTIAL_PURPOSE: &[u8] = b"space-admission-credentials-v1";
 const PREPARED_CREDENTIAL_FORMAT_V1: u16 = 1;
 
@@ -58,7 +61,7 @@ pub enum SpaceAdmissionCredentialStoreError {
     },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct PersistedCredentialsV1 {
     format_version: u16,
     profile_generation: [u8; 16],
@@ -66,6 +69,17 @@ struct PersistedCredentialsV1 {
     keyslot_generation: [u8; 16],
     database_generation: [u8; 16],
     security_generation: [u8; 16],
+    server_setup: Vec<u8>,
+    registration: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+struct PersistedCredentialsV2 {
+    format_version: u16,
+    profile_generation: [u8; 16],
+    space_id: String,
+    keyslot_generation: [u8; 16],
+    space_control_generation: [u8; 16],
     server_setup: Vec<u8>,
     registration: Vec<u8>,
 }
@@ -84,11 +98,26 @@ pub struct SqliteSpaceAdmissionCredentials<E> {
     admissions: Arc<SqliteSpaceAdmissionState<E>>,
 }
 
-struct CredentialScope {
-    space_id: String,
-    keyslot_generation: [u8; 16],
-    database_generation: [u8; 16],
-    security_generation: [u8; 16],
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+enum CredentialScope {
+    Legacy {
+        space_id: String,
+        keyslot_generation: [u8; 16],
+        database_generation: [u8; 16],
+        security_generation: [u8; 16],
+    },
+    Control {
+        space_id: String,
+        keyslot_generation: [u8; 16],
+        space_control_generation: [u8; 16],
+    },
+}
+
+#[derive(Zeroize, ZeroizeOnDrop)]
+struct DecodedCredentials {
+    scope: CredentialScope,
+    server_setup: Vec<u8>,
+    registration: Vec<u8>,
 }
 
 pub(crate) fn prepare_registration(passphrase: &Passphrase) -> anyhow::Result<Vec<u8>> {
@@ -105,34 +134,35 @@ pub(crate) fn prepare_registration(passphrase: &Passphrase) -> anyhow::Result<Ve
     .map_err(anyhow::Error::new)
 }
 
-pub(crate) fn install_prepared_registration(
+/// 把一次 admission 已准备的 OPAQUE registration 直接安装到目标 V3
+/// control-generation scope。调用方不能接触 credential DTO、purpose 或 SQL。
+pub(crate) fn install_prepared_registration_for_control_generation(
     pool: &DbPool,
     keys: &AdmissionKeyManager,
-    manifest: &ActiveSpaceGenerationManifestV2,
+    manifest: &crate::security::ActiveRuntimeManifestV3,
     prepared: &[u8],
 ) -> anyhow::Result<()> {
-    let prepared = Zeroizing::new(postcard::from_bytes::<PreparedCredentialsV1>(prepared)?);
-    if prepared.format_version != PREPARED_CREDENTIAL_FORMAT_V1 {
-        anyhow::bail!("prepared credential format is unsupported");
-    }
-    // 提升目标 generation 前先解码校验，避免把损坏的 OPAQUE 材料写入新空间。
-    SpaceAdmissionAuth::decode_server_setup_after_decryption(&prepared.server_setup)
-        .map_err(anyhow::Error::new)?;
-    SpaceAdmissionAuth::decode_registration_after_decryption(&prepared.registration)
-        .map_err(anyhow::Error::new)?;
-    let plaintext = Zeroizing::new(postcard::to_stdvec(&PersistedCredentialsV1 {
-        format_version: CREDENTIAL_FORMAT_V1,
-        profile_generation: keys.profile_generation(),
-        space_id: manifest.space_id.clone(),
-        keyslot_generation: manifest.keyslot_generation,
-        database_generation: manifest.database_generation,
-        security_generation: manifest.security_generation,
-        server_setup: prepared.server_setup.clone(),
-        registration: prepared.registration.clone(),
-    })?);
-    let encrypted = keys
-        .seal_profile_payload(CREDENTIAL_PURPOSE, &plaintext)
-        .map_err(anyhow::Error::new)?;
+    let scope = CredentialScope::Control {
+        space_id: manifest.layout().space_id().as_ref().to_owned(),
+        keyslot_generation: *manifest.keyslot_generation(),
+        space_control_generation: *manifest.layout().space_control_generation(),
+    };
+    install_prepared_registration_for_scope(pool, keys, &scope, prepared)
+}
+
+fn install_prepared_registration_for_scope(
+    pool: &DbPool,
+    keys: &AdmissionKeyManager,
+    scope: &CredentialScope,
+    prepared: &[u8],
+) -> anyhow::Result<()> {
+    let prepared = decode_prepared_registration(prepared)?;
+    let encrypted = seal_credentials(
+        keys,
+        scope,
+        prepared.server_setup.clone(),
+        prepared.registration.clone(),
+    )?;
     let mut conn = pool.get()?;
     conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
         sql_query(
@@ -143,6 +173,276 @@ pub(crate) fn install_prepared_registration(
         .bind::<Binary, _>(encrypted)
         .execute(conn)?;
         Ok(())
+    })
+}
+
+fn decode_prepared_registration(
+    prepared: &[u8],
+) -> anyhow::Result<Zeroizing<PreparedCredentialsV1>> {
+    let prepared = Zeroizing::new(postcard::from_bytes::<PreparedCredentialsV1>(prepared)?);
+    if prepared.format_version != PREPARED_CREDENTIAL_FORMAT_V1 {
+        anyhow::bail!("prepared credential format is unsupported");
+    }
+    // 提升目标 generation 前先解码校验，避免把损坏的 OPAQUE 材料写入新空间。
+    validate_material(&prepared.server_setup, &prepared.registration)?;
+    Ok(prepared)
+}
+
+/// 以 credential owner 的正式 codec 回读并比对目标 control scope 与原始
+/// prepared material，供不可变 control generation 在发布前完整验证。
+pub(crate) fn verify_prepared_registration_for_control_generation(
+    database: &Path,
+    keys: &AdmissionKeyManager,
+    manifest: &crate::security::ActiveRuntimeManifestV3,
+    prepared: &[u8],
+) -> anyhow::Result<()> {
+    let expected = decode_prepared_registration(prepared)?;
+    let expected_scope = CredentialScope::Control {
+        space_id: manifest.layout().space_id().as_ref().to_owned(),
+        keyslot_generation: *manifest.keyslot_generation(),
+        space_control_generation: *manifest.layout().space_control_generation(),
+    };
+    let database = database
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("credential control database path is invalid"))?;
+    let mut connection = SqliteConnection::establish(database)?;
+    let row = load_encrypted_row(&mut connection)?
+        .ok_or_else(|| anyhow::anyhow!("credential registration is missing"))?;
+    let actual = open_credentials(keys, &row.encrypted_payload)?;
+    if actual.scope != expected_scope
+        || actual.server_setup != expected.server_setup
+        || actual.registration != expected.registration
+    {
+        anyhow::bail!("credential registration verification failed");
+    }
+    validate_material(&actual.server_setup, &actual.registration)
+}
+
+fn load_encrypted_row(
+    connection: &mut SqliteConnection,
+) -> anyhow::Result<Option<EncryptedCredentialRow>> {
+    sql_query("SELECT encrypted_payload FROM space_admission_credentials WHERE singleton_id = 1")
+        .get_result::<EncryptedCredentialRow>(connection)
+        .optional()
+        .map_err(anyhow::Error::new)
+}
+
+fn seal_credentials(
+    keys: &AdmissionKeyManager,
+    scope: &CredentialScope,
+    server_setup: Vec<u8>,
+    registration: Vec<u8>,
+) -> anyhow::Result<Vec<u8>> {
+    let plaintext = match scope {
+        CredentialScope::Legacy {
+            space_id,
+            keyslot_generation,
+            database_generation,
+            security_generation,
+        } => Zeroizing::new(postcard::to_stdvec(&PersistedCredentialsV1 {
+            format_version: CREDENTIAL_FORMAT_V1,
+            profile_generation: keys.profile_generation(),
+            space_id: space_id.clone(),
+            keyslot_generation: *keyslot_generation,
+            database_generation: *database_generation,
+            security_generation: *security_generation,
+            server_setup,
+            registration,
+        })?),
+        CredentialScope::Control {
+            space_id,
+            keyslot_generation,
+            space_control_generation,
+        } => Zeroizing::new(postcard::to_stdvec(&PersistedCredentialsV2 {
+            format_version: CREDENTIAL_FORMAT_V2,
+            profile_generation: keys.profile_generation(),
+            space_id: space_id.clone(),
+            keyslot_generation: *keyslot_generation,
+            space_control_generation: *space_control_generation,
+            server_setup,
+            registration,
+        })?),
+    };
+    keys.seal_profile_payload(CREDENTIAL_PURPOSE, &plaintext)
+        .map_err(anyhow::Error::new)
+}
+
+fn open_credentials(
+    keys: &AdmissionKeyManager,
+    encrypted: &[u8],
+) -> anyhow::Result<DecodedCredentials> {
+    let plaintext = Zeroizing::new(
+        keys.open_profile_payload(CREDENTIAL_PURPOSE, encrypted)
+            .map_err(anyhow::Error::new)?,
+    );
+    let (format_version, _) = postcard::take_from_bytes::<u16>(&plaintext)?;
+    match format_version {
+        CREDENTIAL_FORMAT_V1 => {
+            let persisted =
+                Zeroizing::new(postcard::from_bytes::<PersistedCredentialsV1>(&plaintext)?);
+            if persisted.format_version != CREDENTIAL_FORMAT_V1
+                || persisted.profile_generation != keys.profile_generation()
+            {
+                anyhow::bail!("credential generation is inconsistent");
+            }
+            Ok(DecodedCredentials {
+                scope: CredentialScope::Legacy {
+                    space_id: persisted.space_id.clone(),
+                    keyslot_generation: persisted.keyslot_generation,
+                    database_generation: persisted.database_generation,
+                    security_generation: persisted.security_generation,
+                },
+                server_setup: persisted.server_setup.clone(),
+                registration: persisted.registration.clone(),
+            })
+        }
+        CREDENTIAL_FORMAT_V2 => {
+            let persisted =
+                Zeroizing::new(postcard::from_bytes::<PersistedCredentialsV2>(&plaintext)?);
+            if persisted.format_version != CREDENTIAL_FORMAT_V2
+                || persisted.profile_generation != keys.profile_generation()
+                || persisted.space_control_generation == [0; 16]
+            {
+                anyhow::bail!("credential generation is inconsistent");
+            }
+            Ok(DecodedCredentials {
+                scope: CredentialScope::Control {
+                    space_id: persisted.space_id.clone(),
+                    keyslot_generation: persisted.keyslot_generation,
+                    space_control_generation: persisted.space_control_generation,
+                },
+                server_setup: persisted.server_setup.clone(),
+                registration: persisted.registration.clone(),
+            })
+        }
+        _ => anyhow::bail!("credential format is unsupported"),
+    }
+}
+
+fn validate_material(server_setup: &[u8], registration: &[u8]) -> anyhow::Result<()> {
+    SpaceAdmissionAuth::decode_server_setup_after_decryption(server_setup)
+        .map_err(anyhow::Error::new)?;
+    SpaceAdmissionAuth::decode_registration_after_decryption(registration)
+        .map_err(anyhow::Error::new)?;
+    Ok(())
+}
+
+/// 将 control target 中的既有 V2 credential 完整转换为 V3 control-generation scope。
+///
+/// 调用方只提供已认证 source 与目标 control generation；credential 格式、OPAQUE
+/// 校验、AEAD purpose、SQL 单例和幂等恢复均由 owner 保持私有。
+pub(crate) fn upgrade_registration_to_control_generation(
+    database: &Path,
+    keys: &AdmissionKeyManager,
+    source: &ActiveSpaceGenerationManifestV2,
+    target_control_generation: [u8; 16],
+) -> anyhow::Result<()> {
+    if !source.validate() || target_control_generation == [0; 16] {
+        anyhow::bail!("credential scope upgrade target is invalid");
+    }
+    let database = database
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("credential control database path is invalid"))?;
+    let mut connection = SqliteConnection::establish(database)?;
+    connection.immediate_transaction::<_, anyhow::Error, _>(|connection| {
+        let row = load_encrypted_row(connection)?;
+        let Some(row) = row else {
+            return Ok(());
+        };
+        let source_scope = CredentialScope::from(source.clone());
+        let target_scope = CredentialScope::Control {
+            space_id: source.space_id.clone(),
+            keyslot_generation: source.keyslot_generation,
+            space_control_generation: target_control_generation,
+        };
+        let decoded = open_credentials(keys, &row.encrypted_payload)?;
+        if decoded.scope == target_scope {
+            return Ok(());
+        }
+        if decoded.scope != source_scope {
+            anyhow::bail!("credential source scope is inconsistent");
+        }
+        validate_material(&decoded.server_setup, &decoded.registration)?;
+        let encrypted = seal_credentials(
+            keys,
+            &target_scope,
+            decoded.server_setup.clone(),
+            decoded.registration.clone(),
+        )?;
+        sql_query(
+            "UPDATE space_admission_credentials SET encrypted_payload = ? WHERE singleton_id = 1",
+        )
+        .bind::<Binary, _>(encrypted)
+        .execute(connection)?;
+        let persisted = load_encrypted_row(connection)?
+            .ok_or_else(|| anyhow::anyhow!("credential scope upgrade was not durable"))?;
+        let verified = open_credentials(keys, &persisted.encrypted_payload)?;
+        if verified.scope != target_scope {
+            anyhow::bail!("credential scope upgrade verification failed");
+        }
+        validate_material(&verified.server_setup, &verified.registration)
+    })
+}
+
+/// 在两个 V3 control generation 之间重绑定既有 OPAQUE registration。
+///
+/// Reset 与 membership branch 只提供已认证 source/target manifest；credential
+/// DTO、profile AEAD、SQL 单例、OPAQUE 校验和幂等恢复仍由本 owner 独占。
+pub(crate) fn rebind_registration_to_control_generation(
+    database: &Path,
+    keys: &AdmissionKeyManager,
+    source: &crate::security::ActiveRuntimeManifestV3,
+    target: &crate::security::ActiveRuntimeManifestV3,
+) -> anyhow::Result<()> {
+    if source.layout().profile_data_generation() != target.layout().profile_data_generation()
+        || source.layout().space_control_generation() == target.layout().space_control_generation()
+    {
+        anyhow::bail!("credential control scope transition is invalid");
+    }
+    let source_scope = CredentialScope::Control {
+        space_id: source.layout().space_id().as_ref().to_owned(),
+        keyslot_generation: *source.keyslot_generation(),
+        space_control_generation: *source.layout().space_control_generation(),
+    };
+    let target_scope = CredentialScope::Control {
+        space_id: target.layout().space_id().as_ref().to_owned(),
+        keyslot_generation: *target.keyslot_generation(),
+        space_control_generation: *target.layout().space_control_generation(),
+    };
+    let database = database
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("credential control database path is invalid"))?;
+    let mut connection = SqliteConnection::establish(database)?;
+    connection.immediate_transaction::<_, anyhow::Error, _>(|connection| {
+        let Some(row) = load_encrypted_row(connection)? else {
+            return Ok(());
+        };
+        let decoded = open_credentials(keys, &row.encrypted_payload)?;
+        if decoded.scope == target_scope {
+            return Ok(());
+        }
+        if decoded.scope != source_scope {
+            anyhow::bail!("credential source control scope is inconsistent");
+        }
+        validate_material(&decoded.server_setup, &decoded.registration)?;
+        let encrypted = seal_credentials(
+            keys,
+            &target_scope,
+            decoded.server_setup.clone(),
+            decoded.registration.clone(),
+        )?;
+        sql_query(
+            "UPDATE space_admission_credentials SET encrypted_payload = ? WHERE singleton_id = 1",
+        )
+        .bind::<Binary, _>(encrypted)
+        .execute(connection)?;
+        let persisted = load_encrypted_row(connection)?
+            .ok_or_else(|| anyhow::anyhow!("credential control scope was not durable"))?;
+        let verified = open_credentials(keys, &persisted.encrypted_payload)?;
+        if verified.scope != target_scope {
+            anyhow::bail!("credential control scope verification failed");
+        }
+        validate_material(&verified.server_setup, &verified.registration)
     })
 }
 
@@ -181,20 +481,12 @@ impl<E: DbExecutor> SqliteSpaceAdmissionCredentials<E> {
                         .map_err(anyhow::Error::new)?;
                     let setup = server_setup.encode_for_encryption();
                     let registration = registration.encode_for_encryption();
-                    let plaintext = Zeroizing::new(postcard::to_stdvec(&PersistedCredentialsV1 {
-                        format_version: CREDENTIAL_FORMAT_V1,
-                        profile_generation: self.keys.profile_generation(),
-                        space_id: scope.space_id.clone(),
-                        keyslot_generation: scope.keyslot_generation,
-                        database_generation: scope.database_generation,
-                        security_generation: scope.security_generation,
-                        server_setup: setup.as_bytes().to_vec(),
-                        registration: registration.as_bytes().to_vec(),
-                    })?);
-                    let encrypted = self
-                        .keys
-                        .seal_profile_payload(CREDENTIAL_PURPOSE, &plaintext)
-                        .map_err(anyhow::Error::new)?;
+                    let encrypted = seal_credentials(
+                        &self.keys,
+                        &scope,
+                        setup.as_bytes().to_vec(),
+                        registration.as_bytes().to_vec(),
+                    )?;
                     sql_query(
                         "INSERT INTO space_admission_credentials (singleton_id, encrypted_payload) \
                      VALUES (1, ?) ON CONFLICT(singleton_id) DO UPDATE SET \
@@ -215,30 +507,12 @@ impl<E: DbExecutor> SqliteSpaceAdmissionCredentials<E> {
         conn: &mut SqliteConnection,
         scope: &CredentialScope,
     ) -> anyhow::Result<Option<SponsorOpaqueMaterial>> {
-        let row = sql_query(
-            "SELECT encrypted_payload FROM space_admission_credentials WHERE singleton_id = 1",
-        )
-        .get_result::<EncryptedCredentialRow>(conn)
-        .optional()?;
+        let row = load_encrypted_row(conn)?;
         let Some(row) = row else {
             return Ok(None);
         };
-        let plaintext = Zeroizing::new(
-            self.keys
-                .open_profile_payload(CREDENTIAL_PURPOSE, &row.encrypted_payload)
-                .map_err(anyhow::Error::new)?,
-        );
-        let persisted: PersistedCredentialsV1 = postcard::from_bytes(&plaintext)?;
-        if persisted.format_version != CREDENTIAL_FORMAT_V1
-            || persisted.profile_generation != self.keys.profile_generation()
-        {
-            return Err(anyhow::anyhow!("credential generation is inconsistent"));
-        }
-        if persisted.space_id != scope.space_id
-            || persisted.keyslot_generation != scope.keyslot_generation
-            || persisted.database_generation != scope.database_generation
-            || persisted.security_generation != scope.security_generation
-        {
+        let persisted = open_credentials(&self.keys, &row.encrypted_payload)?;
+        if persisted.scope != *scope {
             return Ok(None);
         }
         let server_setup =
@@ -263,7 +537,12 @@ impl<E: DbExecutor> SqliteSpaceAdmissionCredentials<E> {
     }
 
     async fn active_scope(&self) -> anyhow::Result<CredentialScope> {
-        if let Some(manifest) = self.manifests.load().await.map_err(anyhow::Error::new)? {
+        if let Some(manifest) = self
+            .manifests
+            .load_runtime()
+            .await
+            .map_err(anyhow::Error::new)?
+        {
             return Ok(CredentialScope::from(manifest));
         }
         let ledger = self
@@ -275,7 +554,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionCredentials<E> {
             .lineage_id
             .filter(|value| !value.is_empty())
             .ok_or_else(|| anyhow::anyhow!("current legacy Space identity is missing"))?;
-        Ok(CredentialScope {
+        Ok(CredentialScope::Legacy {
             space_id,
             keyslot_generation: [0; 16],
             database_generation: [0; 16],
@@ -286,11 +565,24 @@ impl<E: DbExecutor> SqliteSpaceAdmissionCredentials<E> {
 
 impl From<ActiveSpaceGenerationManifestV2> for CredentialScope {
     fn from(manifest: ActiveSpaceGenerationManifestV2) -> Self {
-        Self {
+        Self::Legacy {
             space_id: manifest.space_id,
             keyslot_generation: manifest.keyslot_generation,
             database_generation: manifest.database_generation,
             security_generation: manifest.security_generation,
+        }
+    }
+}
+
+impl From<ActiveRuntimeManifest> for CredentialScope {
+    fn from(manifest: ActiveRuntimeManifest) -> Self {
+        match manifest {
+            ActiveRuntimeManifest::V2(manifest) => Self::from(manifest),
+            ActiveRuntimeManifest::V3(manifest) => Self::Control {
+                space_id: manifest.layout().space_id().as_ref().to_owned(),
+                keyslot_generation: *manifest.keyslot_generation(),
+                space_control_generation: *manifest.layout().space_control_generation(),
+            },
         }
     }
 }
@@ -397,13 +689,18 @@ mod tests {
     use uc_application::deps::{
         LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipLedgerError,
     };
-    use uc_core::membership::{AdmissionChannelPeerId, SpaceAdmissionProtocolVersion};
+    use uc_core::ids::SpaceId;
+    use uc_core::membership::{
+        ActiveRuntimeLayout, AdmissionChannelPeerId, SpaceAdmissionProtocolVersion,
+    };
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
     use crate::db::executor::DieselSqliteExecutor;
     use crate::db::pool::init_db_pool;
     use crate::db::ports::DbExecutor;
-    use crate::security::{ActiveSpaceGenerationManifestStore, SpaceAdmissionAuthContext};
+    use crate::security::{
+        ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore, SpaceAdmissionAuthContext,
+    };
 
     #[derive(Default)]
     struct MemorySecureStorage(Mutex<HashMap<String, Vec<u8>>>);
@@ -610,5 +907,68 @@ mod tests {
         let (client_credential, ke3) = client.finish(&context, ke2).unwrap();
         let server_credential = server.finish(&context, ke3).unwrap();
         assert!(client_credential == server_credential);
+    }
+
+    #[tokio::test]
+    async fn v3_registration_binds_to_the_active_control_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("credentials.sqlite");
+        let secure_storage = Arc::new(MemorySecureStorage::default());
+        let keys = Arc::new(AdmissionKeyManager::new(secure_storage, [0xb1; 16]));
+        let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+            temp.path().join("vault"),
+            Arc::clone(&keys),
+        ));
+        let source = ActiveSpaceGenerationManifestV2::new(
+            "space-a".to_owned(),
+            [0xb2; 16],
+            [0xb3; 16],
+            [0xb4; 16],
+        )
+        .unwrap();
+        manifests.promote(&source).await.unwrap();
+        let target = ActiveRuntimeManifestV3::new(
+            ActiveRuntimeLayout::new(
+                SpaceId::from_string("space-a".to_owned()),
+                [0xb5; 16],
+                [0xb6; 16],
+            )
+            .unwrap(),
+            source.keyslot_generation,
+        )
+        .unwrap();
+        let _ = manifests
+            .promote_v3_from_v2(&source, &target)
+            .await
+            .unwrap();
+
+        let executor = Arc::new(DieselSqliteExecutor::new(
+            init_db_pool(db_path.to_str().unwrap()).unwrap(),
+        ));
+        let admissions = Arc::new(SqliteSpaceAdmissionState::new(
+            Arc::clone(&executor),
+            Arc::clone(&keys),
+            Arc::clone(&manifests),
+            Arc::new(EmptyLedger),
+        ));
+        let credentials = SqliteSpaceAdmissionCredentials::new(
+            executor,
+            keys,
+            manifests,
+            Arc::new(EmptyLedger),
+            admissions,
+        );
+
+        credentials
+            .ensure_registration(&Passphrase::new("v3 passphrase"))
+            .await
+            .unwrap();
+        credentials
+            .resolve_initial(
+                InvitationId::from_bytes([0xb7; 32]).unwrap(),
+                SpaceAdmissionId::from_bytes([0xb8; 32]).unwrap(),
+            )
+            .await
+            .unwrap();
     }
 }

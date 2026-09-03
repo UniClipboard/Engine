@@ -4,13 +4,13 @@ use crate::error_codes::*;
 
 use tracing::error;
 use uc_application::facade::{
-    ProfileFactoryResetError, ProfileFactoryResetRequest, ProfileFactoryResetUseCase,
+    ProfileFactoryResetError, ProfileFactoryResetFacade, ProfileFactoryResetRequest,
 };
 
 use crate::{EngineError, EngineErrorCategory, OperationResult};
 
 pub async fn execute_factory_reset_space(
-    reset: &ProfileFactoryResetUseCase,
+    reset: &ProfileFactoryResetFacade,
 ) -> Result<OperationResult, EngineError> {
     reset
         .execute(ProfileFactoryResetRequest::Start)

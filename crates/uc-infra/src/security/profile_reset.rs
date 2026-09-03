@@ -230,6 +230,13 @@ impl ProfileStateCleaner {
             self.paths.file_cache_dir.clone(),
             self.paths.cache_dir.clone(),
             self.paths.app_data_root_dir.join("space-generations"),
+            self.paths
+                .app_data_root_dir
+                .join("profile-data-generations"),
+            self.paths
+                .app_data_root_dir
+                .join("space-control-generations"),
+            self.paths.app_data_root_dir.join("profile-storage-upgrade"),
             self.paths.app_data_root_dir.join("iroh-blobs"),
             self.paths.app_data_root_dir.join("iroh-identity"),
             self.paths.app_data_root_dir.join("import-staging"),
@@ -407,6 +414,15 @@ mod tests {
             b"generation",
         )
         .unwrap();
+        for relative in [
+            "profile-data-generations/p1/profile.sqlite",
+            "space-control-generations/c1/control.sqlite",
+            "profile-storage-upgrade/.journal-v1",
+        ] {
+            let path = paths.app_data_root_dir.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"generation-state").unwrap();
+        }
 
         std::fs::create_dir_all(paths.db_path.parent().unwrap()).unwrap();
         let mut connection = SqliteConnection::establish(paths.db_path.to_str().unwrap()).unwrap();
@@ -430,6 +446,18 @@ mod tests {
         assert!(!paths.cache_dir.exists());
         assert!(!paths.file_cache_dir.exists());
         assert!(!paths.app_data_root_dir.join("space-generations").exists());
+        assert!(!paths
+            .app_data_root_dir
+            .join("profile-data-generations")
+            .exists());
+        assert!(!paths
+            .app_data_root_dir
+            .join("space-control-generations")
+            .exists());
+        assert!(!paths
+            .app_data_root_dir
+            .join("profile-storage-upgrade")
+            .exists());
         assert!(!paths.app_data_root_dir.join("import-staging").exists());
         assert!(!paths.app_data_root_dir.join("pending-import.json").exists());
         let reopened_pool = crate::db::pool::init_db_pool(paths.db_path.to_str().unwrap()).unwrap();

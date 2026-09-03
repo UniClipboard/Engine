@@ -1,6 +1,6 @@
-# 033 不可变内容保护上下文与一次性密文升级
+# 033 不可变内容保护上下文与一次性密文升级（已完成）
 
-状态：实施中；前三个基础切片、第四步的安全会话切片、第五步的持久密码接口收窄与 V3 payload 目标格式、第六步的多保护组搜索目标模块，以及第七步的协调、target staging、store ownership split 与 primary payload conversion 已完成，032 在本规格完成前暂停实施
+状态：实现、clean cutover 与自动化验收完成；实体设备矩阵未执行，记为跳过
 
 本规格取代规格 023 中“CrossSpace 必须把本机历史重封装到目标 MasterKey”的规则，以及规格 028 中“切换前普通本机内容沿用 CrossSpace rebuild/rewrap”的规则。规格 023/028 的准入提交、门禁、恢复和 MLS 成员语义继续有效。
 
@@ -426,17 +426,50 @@ Change: 第八子切片把 active register、directory publish 与 receive artif
 Change: 第九子切片将 entry file-set 的路径保护提取为 owner-private `EntryFileSetProtection` 完整策略，并由普通 repository 与 inbound atomic commit 复用。SQL replace/load、领域行编码和枚举校验仍只有一份；legacy/V3 只分别实现路径列 seal/open，V3 在进入 SQLite 事务前完成异步 vault 解析与密文准备，事务内只原子提交已准备 rows。真实 SQLite contract 覆盖 V3 original/root/relative 路径写读与明文探针，既有 legacy、锁定、FK、批量替换及 inbound 原子提交测试保持通过；没有建立平行 V3 repository 或逐行双 reader。transfer event/projection 的 read-modify-write 事务仍待下一子切片处理。
 
 Change: 第十子切片把 file-transfer projection metadata 收口为 owner-private `TransferPersistenceProtection` 完整策略。普通构造器固定 legacy，V3 构造器只接收共享 `ContentProtection`；SQL 查询、领域投影和 port 实现保持单份。所有 metadata open/seal 均移出 Diesel closure；provisional path、单行失败与 bulk fail 以旧密文为 compare-and-swap 条件，bulk 任一行并发变化则同事务整体回滚。真实 SQLite contract 覆盖 V3 provisional metadata 写读与明文探针，既有 transfer 测试保持通过；event sequence append 与 receiver projection 联合事务由下一子切片负责。
+
+Change: 第十一子切片完成 file-transfer event log 与 receiver projection 的同一 protection strategy。读取先取密文 rows、再在数据库外异步 open；append 先在一致 snapshot 上取得下一 sequence 与 projection 状态，在内存完成 event/metadata seal，最后单一 SQLite 事务重新验证 sequence、status 与旧 metadata 密文并同时提交 event 和 projection。CAS 冲突由 owner 有界重取 snapshot，调用方仍只执行一次 `append(event)`；发送侧无 projection 与终止态 no-op 语义保持不变。V3 联合真实数据库 contract 覆盖 event round trip、projection 更新与明文探针；未增加平行 event store 或逐 envelope 双 reader。
+
+Change: 第十二子切片只建立 production search schema 的 V12 前置边界：`search_document` 新增 nullable 32-byte opaque `protection_group_ref` 与 profile/group 索引，Diesel row 明确 V11 行和升级 blocked 行可为空；`CURRENT_INDEX_VERSION` 仍为 V11，不提前开放 V12 查询或 writer。升级器复用正式 migration 后存在的列，仅为历史 fixture 缺列时补齐，避免把 schema 迁移复制成第二事实来源。真实 migration、V11 search 21/21 与 derived payload conversion contract 通过；下一子切片必须一次完成 V3 posting/render/query strategy 后才能提升版本。
+
+Change: 第十三子切片修正 search pipeline 丢失保护组的 interface 反模式：`SearchKeyDerivationPort` 返回不可拆分的 `SearchKeyContext`，其中 V3 key 与 32-byte opaque `SearchProtectionRef` 同生共灭；`SearchPipeline` 把同一 ref 附在每个内存 posting 上，V11 context 明确为无 ref。V3 term tag 改为 group-specific tagging key 后再对规范词项 HMAC，使 Application 现有纯 CPU pipeline 与 `V3SearchProtection::query_terms` 使用完全同一算法；测试证明 context key 生成的 tag/ref 与 owner 深模块输出逐字节一致。此 ref 尚未由 SQLite V12 writer 接收，版本仍不提升。
+
+Change: 第十四子切片在唯一 `SqliteSearchIndex` 内引入 V11/V12 protection strategy，不建立平行 repository。V12 writer 把 pipeline 生成的 opaque group ref 与 render seal 的活动保护组再次比对后才落库，render 密码操作在 SQLite closure 外完成；查询按每个规范词项生成跨实际索引保护组的 alternatives，保留 AND 语义。重建沿用同一临时 schema 与原子 cutover，真实 SQLite contract 覆盖多组查询、重建、明文探针和切换竞态。Engine 此时尚未选择 V12 构造。
+
+Change: 第十五子切片新增 `ProfilePayloadAdapters` 与 Engine `ProfilePayloadRuntime`，把 inline 与 UCBL 组成不可拆分的 primary adapter family，并以同一 runtime 选择 active register、file-set、transfer/receive、directory records 和 search 的 legacy/V3 strategy。调用方不能单独选择某个 payload adapter 的格式，避免 V3 manifest 下出现混合 writer；网络 `TransferCipherPort` 仍独立使用活动 Space session，不属于历史 at-rest family。production 当前仍显式选择 legacy，下一子切片必须由启动 manifest/gate 构造 V3 runtime，不能在普通 wire 中猜测格式。
+
+Change: 第十六子切片新增显式 `ActiveRuntimeManifest` 版本和及 `ProfileRuntimeLayout` 路径深模块。旧 V2 loader 面对 V3 继续返回 `UnsupportedVersion`，只有 V3-aware 启动入口可取得已认证 V2/V3 选择；profile database、blob root 与 control database 只由两个 opaque generation 派生，路径不编码 SpaceId。升级 target staging 改为复用同一 generation directory、文件名与 payload output 规则，消除升级器和 production 各自计算路径的双事实来源。本子切片尚未让 Engine 打开双 pool，下一子切片负责对象图路由。
+
+Change: 第十七子切片由 Engine `RuntimeStorageSelection` 把一个已认证 manifest 原子解析为 profile database、control database、blob root 与 payload format。V2/无 manifest 继续让两个 executor 共享原 pool；V3 打开独立双 pool，并把 clipboard/history/search/transfer 仓储只接到 profile executor，把 membership、relationship/credential、Space security 与 LAN device 仓储只接到 control executor，同时选择完整 V3 payload runtime。`CurrentSpaceResolver` 可从 V3 manifest 读取当前 Space identity；旧 `DurableAdmissionSpaceTransition` 不得拿双库运行，V3 admission/reset/branch transition 暂由同一 fail-closed adapter 拒绝，等待 Step 8 的 `SpaceControlGeneration` owner 替换。启动升级 gate 与 control-generation transition 仍未完成。
+
+Change: 第十八子切片让 `ProfileStorageUpgrade` 从 `Verified` 真正执行 V2 source compare-and-promote，并把目标 profile/control generations 与原 keyslot 组装成唯一 V3 manifest。promotion 成功或幂等发现同一 target 后才把加密 journal 推进到 `Promoted`；若进程在 manifest 替换后、journal 保存前崩溃，重启通过 target generation/keyslot 反向匹配已活动 V3，重新验证双库和 payload 后补写 `Promoted`。下一次调用单调进入 `CleanupPending`，之后返回 `UpToDate`；不同 V3 target、提前 promotion 或后来 source 均失败关闭。无活动 Space 的空 profile 不伪造 manifest，继续等待首次 activation。Engine 启动/解锁 gate 与旧 source 清理仍属后续子切片。
+
+Change: 第十九子切片把 OPAQUE/admission credential 的持久 scope 从单一 V2 `database_generation + security_generation` 扩展为显式版本和：V2 reader/writer 继续精确绑定旧完整 generation，V3 只绑定 Space、keyslot 与 `space_control_generation`。`SqliteSpaceAdmissionCredentials` 通过 V3-aware manifest loader 原子选择一种 scope；一次性 profile upgrade 在 `StoresSeparated` 内只调用 credential owner 的完整转换操作，在内存校验旧 OPAQUE 材料、重新以 target control scope 封装并回读后才记录 control database digest。升级器不复制 credential DTO、purpose 或 SQL schema，promotion 后 production control repository 可直接读取既有 Sponsor registration。
+
+Change: 第二十子切片新增 `SpaceControlGeneration::prepare_admission` 完整入口。调用方只提交已验证的 admission preparation 与目标 V3 manifest；模块内部验证 commitment、catalog、关系与 group update 的一致性，从目标 access state 建立隔离 session，并通过正式 membership、relationship、credential 与 Space security repository 构造和回读完整 `control.sqlite`。候选 generation 使用 profile 级跨进程租约、同父目录随机 staging、SQLite integrity/foreign-key gate、稳定介质摘要和原子目录发布；重复调用只验证并复用同一不可变结果，损坏目标失败关闭。本子切片不提升 active manifest、不重绑运行期、不创建 source backup，也不接触 profile database、blob 或历史 payload；这些只由下一 `SpaceTransitionActivation` 消费其不可伪造的 prepared proof。
+
+Change: 第二十一子切片以新的 `CrossSpaceControlTransitionV3` 取代 V3 正常运行中的旧 rewrap 状态机。状态只保存 source/target control generation、固定 profile data generation、目标 access state 与 prepared database digest，不再包含 source backup、final source revision、payload 迁移 phase 或迁移计数。`SpaceTransitionActivation` 在 profile 级跨进程租约内重新验证 prepared proof，以 active manifest compare-and-promote 作为唯一线性化点，随后只重绑 control pool、目标 keyslot、vault catalog 与活动 session；提升后失败只能按同一 target 前向恢复。prepared 数据库成为可写 active store 后不再错误比较提升前介质摘要，而以已认证 target manifest 恢复。Engine 的 V3 admission 只装配该 control-only adapter，Fresh/SameSpace/Reset/branch 继续显式失败关闭直到各自切片完成。真实 SQLite tracer 覆盖取消后重建、manifest 写入后 phase 未保存的崩溃窗口、来源 control 清理、profile SQLite/blob 字节不变及零 rewrap/source-backup 路径。
+
+Change: 第二十二子切片按各自保留语义完成其余 V3 control 流程。Fresh 使用无伪 source 的专属状态，只在 profile 初始化负责人提供已落盘 data generation 时执行 none-to-target manifest CAS；SameSpace 固定 Space、profile data generation、MasterKey/keyslot，只替换 control generation。Device Reset 由独立加密 journal 驱动 control snapshot、可写 staging、最终 proof、promotion 与 source cleanup，Application 既有四步接口不接触 SQLite 细节；membership branch 则由独立 owner 验证 recovery material、清除旧关系后按目标历史重建 security/relationships/ledger，并在 target ledger 预存可恢复 checkpoint。Engine 为 V3 装配真实 admission、Reset 与 branch adapter，并删除临时 fail-closed 类型；已有 V3 manifest 下的首次激活仍由 current-space owner 拒绝覆盖。五类真实 tracer 均证明 profile SQLite/blob 与 keyslot 按语义保留、无 payload rewrap 或 source backup。恢复材料改为由密封包确定性产生，严格回读与重复执行不会因 wall-clock 字段漂移。
+
+Change: 第二十三子切片把 `ProfileStorageUpgrade::ensure_v3()` 接到 Engine 普通运行期对象图之前。升级负责人先取得 profile 跨进程租约，随后才认证 manifest、定位并打开 V2 source、静默恢复旧安全 session；未持锁实例返回稳定 Pending，且不创建或迁移旧 SQLite。production 单次调用在同一租约内推进全部 promotion 前 phase，V2 提升后只用已认证 V3 manifest 构造双 pool；Fresh profile 返回唯一已准备 data/control generation pair，由专属首次激活 owner 原子建立首个 V3 manifest。已活动 V3 的后继启动不再打开旧 reader，只回验最终双库并清理旧 generation、legacy SQLite/blob、primary staging、scratch、临时输出和加密 journal；活动 `v3-payloads`、control generation 与 manifest 始终保留。Factory Reset 同步覆盖全部 V3 generation 与升级状态。本切片不把升级内部 phase 泄漏给 Engine，也不修改 Core。
+
 Risk: 磁盘不足、移动端短进程和崩溃会留下 staging；每个 phase 先耐久记录再执行可重复动作，promotion 前绝不改 source。
 
-Step 8:
+Step 8（已完成）:
 File: `crates/uc-infra/src/security/admission_space_transition.rs`、Application transition tests、active manifest store
-Change: 新增完整 `SpaceControlGeneration` store；将 CrossSpace 改为复用 profile data generation，只安装 target catalog、提升 target control manifest 和重绑 control repositories/session；删除正常 CrossSpace 的 `rewrap_finalized_source`、source backup、payload rewrap 和 profile DB/blob replace 路径。Reset/branch 必须按各自语义单独验证，不能机械套用 CrossSpace。
+Change: 新增完整 `SpaceControlGeneration` store；CrossSpace 复用 profile data generation，只安装 target catalog、提升 target control manifest 和重绑 control repositories/session，并删除正常路径的 `rewrap_finalized_source`、source backup、payload rewrap 和 profile DB/blob replace。Fresh、SameSpace、Reset 与 branch 使用各自持久状态和独立流程 owner；它们只共享完整的 generation preparation/activation 能力，不共享业务 phase 或数据保留决策。
 Risk: 旧 transition checkpoint 可能跨版本存在；启动时先由升级器识别并完成或稳定拒绝，不能用新状态机误读旧 phase。
 
-Step 9:
-File: `docs/exec-plans/completed/023-durable-membership-proof-and-admission-activation.md`、`docs/exec-plans/completed/028-single-space-admission-protocol.md`、`docs/exec-plans/active/032-admission-space-transition-internal-refactor.md`、安全文档与架构检查脚本
+Step 9（已完成）:
+File: `docs/exec-plans/completed/023-durable-membership-proof-and-admission-activation.md`、`docs/exec-plans/completed/028-single-space-admission-protocol.md`、`docs/exec-plans/completed/032-admission-space-transition-internal-refactor.md`、安全文档与架构检查脚本
 Change: 完成实现后删除被 033 取代的旧行为正文，按最终代码重新撰写 032 的 transition 深模块边界；增加负向架构检查，禁止 CrossSpace 引用 payload upgrade/rewrap、旧 reader 或 source/target cipher pair。
 Risk: 只改代码不移除旧规范会导致后续 Agent 恢复错误实现；文档和检查必须与 clean cutover 同提交完成。
+
+Change: 023/028 已在文首把旧 CrossSpace rebuild/rewrap 明确降为历史设计；032 工作区草案已把全部旧
+rewrap 前提标为被本规格取代，后续实施只能从 control-only V3 transition 重新基线化。架构圣经成为当前
+稳定事实来源，并删除所有“V3 尚未接 production”的过渡描述。仓库 preflight 新增可执行负向 fixture：
+V3 CrossSpace 不能依赖升级器、旧 reader、source/target cipher、payload rewrap、profile vault 或 clipboard
+dispatch；Application/Engine 不能编排升级内部 phase；网络 adapter 不能把历史 vault 当作发送授权来源。
 
 # 7. Edge Cases
 
@@ -551,19 +584,33 @@ Implementation: upgrade module 零网络依赖；transition 只在现有 Complet
 
 # 9. Acceptance Criteria
 
-* [ ] V3 持久密文通过不透明且全 profile 唯一的 `ContentKeyId` 解析并认证完整 `ProtectionGroupId + ContentKeyId + GroupEpoch + Purpose`，purpose 由所属 adapter 固定，解密不读取当前 `ActiveSpace`，密文头不明文保存 `ProtectionGroupId`、`SpaceId` 或 purpose。
+* [x] V3 持久密文通过不透明且全 profile 唯一的 `ContentKeyId` 解析并认证完整 `ProtectionGroupId + ContentKeyId + GroupEpoch + Purpose`，purpose 由所属 adapter 固定，解密不读取当前 `ActiveSpace`，密文头不明文保存 `ProtectionGroupId`、`SpaceId` 或 purpose。
 * [x] `ProfileContentKeyVault` 使用独立 profile 稳定密钥 AEAD 保存多个历史保护组 catalog，冲突安装失败关闭，Factory Reset 完整擦除。
-* [ ] profile 数据 generation 的路径和生命周期不再由活动 SpaceId 决定；membership/credential/MLS 等 Space-scoped 表已迁入独立 control store，V3 active manifest 可在切换 Space 时复用同一 `profile_data_generation`。
-* [ ] V1/V2 正常读取只存在于一次性 upgrade module；升级后所有新写只产生 V3，没有 lazy migration 或双写。
-* [ ] 完整 V2 fixture 一次升级后，SQLite、blob、搜索和派生负载均可由 production V3 入口读取，磁盘无受保护明文。
-* [ ] 任意升级阶段崩溃都能单调恢复；promotion 前 source 不变，promotion 后不回退，损坏/缺钥/空间不足不删除数据。
-* [ ] CrossSpace 不创建 source final snapshot、不复制数据库/blob、不遍历历史、不执行 payload rewrap，且历史规模扩大不会线性增加切换密码操作数。
-* [ ] A→B→A 多次切换后，既有 ciphertext 字节不变，各保护组历史仍可读可搜，新写入使用精确的活动保护组。
-* [ ] 仅切换 Space 不会把旧历史加入目标 outbox；明确再次分享会创建目标组新事件且不改写原记录。
-* [ ] 活动 MLS/transport 权限只来自 active security session，历史 vault entry 不能恢复旧 Space 的网络发送资格。
-* [ ] 旧 binary 在写入前拒绝 V3 profile；新 binary 不会重新生成 V2 profile 状态。
-* [ ] 新增或修改的错误转换验证稳定分类与非空 `source()`，观测和日志不包含业务负载、密钥、Space/设备标识、文件名或路径。
-* [ ] 规格 023、028、032 和架构圣经在实现完成时删除或标明所有被 033 取代的 rewrap 语义，仓库只保留一个当前事实来源。
+* [x] profile 数据 generation 的路径和生命周期不再由活动 SpaceId 决定；membership/credential/MLS 等 Space-scoped 表已迁入独立 control store，V3 active manifest 可在切换 Space 时复用同一 `profile_data_generation`。
+* [x] V1/V2 正常读取只存在于一次性 upgrade module；升级后所有新写只产生 V3，没有 lazy migration 或双写。
+* [x] 完整 V2 fixture 一次升级后，SQLite、blob、搜索和派生负载均可由 production V3 入口读取，磁盘无受保护明文。
+* [x] 任意升级阶段崩溃都能单调恢复；promotion 前 source 不变，promotion 后不回退，损坏/缺钥/空间不足不删除数据。
+* [x] CrossSpace 不创建 source final snapshot、不复制数据库/blob、不遍历历史、不执行 payload rewrap，且历史规模扩大不会线性增加切换密码操作数。
+* [x] A→B→A 多次切换后，既有 ciphertext 字节不变，各保护组历史仍可读可搜，新写入使用精确的活动保护组。
+* [x] 仅切换 Space 不会把旧历史加入目标 outbox；明确再次分享会创建目标组新事件且不改写原记录。
+* [x] 活动 MLS/transport 权限只来自 active security session，历史 vault entry 不能恢复旧 Space 的网络发送资格。
+* [x] 旧 binary 在写入前拒绝 V3 profile；新 binary 不会重新生成 V2 profile 状态。
+* [x] 新增或修改的错误转换验证稳定分类与非空 `source()`，观测和日志不包含业务负载、密钥、Space/设备标识、文件名或路径。
+* [x] 规格 023、028、032 和架构圣经在实现完成时删除或标明所有被 033 取代的 rewrap 语义，仓库只保留一个当前事实来源。
+
+## 自动化验收证据
+
+- `profile_storage_upgrade` 真实 SQLite suite 在 `Detected` 到 `CleanupPending` 每个持久边界销毁并重建
+  adapter，覆盖 source 变化、journal 篡改、未声明表、Busy、V2 production resume、promotion 和清理。
+- V3 transition tracer 执行真实 A→B→A control generation 提升，断言 `profile_data_generation`、profile
+  database 与 blob 字节保持不变，且不存在 source backup、target payload 或 rewrap 路径。
+- `ContentProtection`、V3 repository、V12 search 与完整 upgrade converter suites 覆盖多保护组读写、重启、
+  production reader、全字段明文探针和错误 source chain；旧 manifest loader 对 V3 返回
+  `UnsupportedVersion`，V3-aware loader 保持介质不变。
+- Application 的手动重发测试证明只有明确动作才生成目标 V3 dispatch/delivery attempt；运行期不会为新
+  Space 或新设备生成历史候选。架构负向 fixture 同时禁止 V3 transition 直接接触 outbox/dispatch，禁止
+  network adapter 直接读取历史 vault 授权。
+- 实体设备与 Release bundle 不属于本次代码行为门禁，均未执行并记为“跳过”，不宣称通过。
 
 # 10. Risks and Trade-offs
 

@@ -5,8 +5,8 @@
 //! 实现。
 
 pub use crate::search::{
-    map_search_error, SearchFacade, SearchFacadeError, SearchPageView, SearchProjectionBuilder,
-    SearchQueryInput, SearchRebuildAcceptedView, SearchRebuildProgressView, SearchResultView,
-    SearchRuntime, SearchRuntimeDeps, SearchRuntimeError, SearchStatusSnapshot, SearchStatusView,
-    SearchTagView,
+    map_search_error, SearchAssembly, SearchFacade, SearchFacadeError, SearchPageView,
+    SearchProjectionBuilder, SearchQueryInput, SearchRebuildAcceptedView,
+    SearchRebuildProgressView, SearchResultView, SearchShutdownError, SearchStatusSnapshot,
+    SearchStatusView, SearchTagView,
 };

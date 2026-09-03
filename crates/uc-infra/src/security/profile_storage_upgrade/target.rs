@@ -1,26 +1,29 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use diesel::connection::SimpleConnection as _;
 use diesel::{Connection as _, RunQueryDsl as _};
 
 use crate::config_migration::db_snapshot;
 use crate::db::pool::DbPool;
+use crate::security::profile_runtime_layout::{
+    control_generation_directory, profile_generation_directory, CONTROL_DATABASE_FILE,
+    PAYLOAD_OUTPUT_DIRECTORY, PROFILE_DATABASE_FILE,
+};
+use crate::security::{AdmissionKeyError, AdmissionKeyManager};
+use crate::space::upgrade_registration_to_control_generation;
+use uc_core::membership::ActiveSpaceGenerationManifestV2;
 
 use super::journal::UpgradeJournalV1;
 use super::ProfileStorageUpgradeError;
 
-const PROFILE_DATA_DIRECTORY: &str = "profile-data-generations";
-const SPACE_CONTROL_DIRECTORY: &str = "space-control-generations";
-const TARGET_PROFILE_DATABASE: &str = "profile.sqlite";
-const TARGET_CONTROL_DATABASE: &str = "control.sqlite";
 pub(super) const PRIMARY_OUTPUT_DIRECTORY: &str = "v3-primary";
-pub(super) const PAYLOAD_OUTPUT_DIRECTORY: &str = "v3-payloads";
-const GENERATION_PATH_DOMAIN: &[u8] = b"uniclipboard/profile-upgrade-generation-path/v1\0";
 
 /// 升级器内部唯一拥有 source snapshot 与 target generation 物理布局的组件。
 pub(super) struct TargetGenerationStager {
     root: PathBuf,
-    source_pool: DbPool,
+    source_pool: Option<DbPool>,
+    keys: Arc<AdmissionKeyManager>,
 }
 
 pub(super) struct StagedTarget {
@@ -83,8 +86,20 @@ const PROFILE_COORDINATION_TABLES: &[&str] = &[
 const TECHNICAL_TABLES: &[&str] = &["__diesel_schema_migrations", "uc_database_revision"];
 
 impl TargetGenerationStager {
-    pub(super) fn new(root: PathBuf, source_pool: DbPool) -> Self {
-        Self { root, source_pool }
+    pub(super) fn new(root: PathBuf, source_pool: DbPool, keys: Arc<AdmissionKeyManager>) -> Self {
+        Self {
+            root,
+            source_pool: Some(source_pool),
+            keys,
+        }
+    }
+
+    pub(super) fn cleanup_only(root: PathBuf, keys: Arc<AdmissionKeyManager>) -> Self {
+        Self {
+            root,
+            source_pool: None,
+            keys,
+        }
     }
 
     pub(super) fn stage(
@@ -93,12 +108,21 @@ impl TargetGenerationStager {
     ) -> Result<StagedTarget, ProfileStorageUpgradeError> {
         let paths = self.paths(journal);
         let source_database_revision = self.source_revision()?;
-        let snapshot = db_snapshot::snapshot_to_bytes(&self.source_pool, &paths.scratch).map_err(
-            |source| ProfileStorageUpgradeError::Storage {
-                source: anyhow::Error::new(source)
-                    .context("snapshot source profile database for V3 staging"),
-            },
-        )?;
+        let source_pool =
+            self.source_pool
+                .as_ref()
+                .ok_or_else(|| ProfileStorageUpgradeError::Corrupt {
+                    source: anyhow::anyhow!(
+                        "profile upgrade source was requested from cleanup-only recovery"
+                    ),
+                })?;
+        let snapshot =
+            db_snapshot::snapshot_to_bytes(source_pool, &paths.scratch).map_err(|source| {
+                ProfileStorageUpgradeError::Storage {
+                    source: anyhow::Error::new(source)
+                        .context("snapshot source profile database for V3 staging"),
+                }
+            })?;
         if self.source_revision()? != source_database_revision {
             return Err(ProfileStorageUpgradeError::SourceChanged);
         }
@@ -135,7 +159,11 @@ impl TargetGenerationStager {
     pub(super) fn separate(
         &self,
         journal: &UpgradeJournalV1,
+        source: Option<&ActiveSpaceGenerationManifestV2>,
     ) -> Result<SeparatedStores, ProfileStorageUpgradeError> {
+        if !journal.matches_source(source) {
+            return Err(ProfileStorageUpgradeError::SourceChanged);
+        }
         self.verify(journal)?;
         let paths = self.paths(journal);
         separate_database(&paths.profile_database, SPACE_CONTROL_TABLES)?;
@@ -144,6 +172,16 @@ impl TargetGenerationStager {
         control_excluded.extend_from_slice(PROFILE_DATA_TABLES);
         control_excluded.extend_from_slice(PROFILE_COORDINATION_TABLES);
         separate_database(&paths.control_database, &control_excluded)?;
+        match source {
+            Some(source) => upgrade_registration_to_control_generation(
+                &paths.control_database,
+                &self.keys,
+                source,
+                *journal.target_space_control_generation(),
+            )
+            .map_err(map_credential_upgrade_error)?,
+            None => ensure_tables_empty(&paths.control_database, &["space_admission_credentials"])?,
+        }
         let profile_database_digest = file_digest(&paths.profile_database)?;
         let control_database_digest = file_digest(&paths.control_database)?;
         let source_revision = journal.source_database_revision().ok_or_else(|| {
@@ -215,7 +253,7 @@ impl TargetGenerationStager {
     ) -> Result<(), ProfileStorageUpgradeError> {
         let paths = self.paths(journal);
         ensure_tables_empty(
-            &paths.payload_output.join(TARGET_PROFILE_DATABASE),
+            &paths.payload_output.join(PROFILE_DATABASE_FILE),
             SPACE_CONTROL_TABLES,
         )?;
         let mut control_forbidden =
@@ -226,11 +264,19 @@ impl TargetGenerationStager {
     }
 
     fn source_revision(&self) -> Result<u64, ProfileStorageUpgradeError> {
-        self.source_pool.persistent_revision().map_err(|source| {
-            ProfileStorageUpgradeError::Storage {
+        let source_pool =
+            self.source_pool
+                .as_ref()
+                .ok_or_else(|| ProfileStorageUpgradeError::Corrupt {
+                    source: anyhow::anyhow!(
+                        "profile upgrade source was requested from cleanup-only recovery"
+                    ),
+                })?;
+        source_pool
+            .persistent_revision()
+            .map_err(|source| ProfileStorageUpgradeError::Storage {
                 source: source.context("read source profile database revision for V3 staging"),
-            }
-        })
+            })
     }
 
     fn verify_with_digest(
@@ -251,23 +297,19 @@ impl TargetGenerationStager {
     }
 
     pub(super) fn paths(&self, journal: &UpgradeJournalV1) -> TargetPaths {
-        let profile_directory = self
-            .root
-            .join(PROFILE_DATA_DIRECTORY)
-            .join(generation_token(journal.target_profile_data_generation()));
-        let control_directory = self
-            .root
-            .join(SPACE_CONTROL_DIRECTORY)
-            .join(generation_token(journal.target_space_control_generation()));
+        let profile_directory =
+            profile_generation_directory(&self.root, journal.target_profile_data_generation());
+        let control_directory =
+            control_generation_directory(&self.root, journal.target_space_control_generation());
         TargetPaths {
             scratch: self
                 .root
                 .join("profile-storage-upgrade")
                 .join("source.snapshot.tmp"),
-            profile_database: profile_directory.join(TARGET_PROFILE_DATABASE),
+            profile_database: profile_directory.join(PROFILE_DATABASE_FILE),
             primary_output: profile_directory.join(PRIMARY_OUTPUT_DIRECTORY),
             payload_output: profile_directory.join(PAYLOAD_OUTPUT_DIRECTORY),
-            control_database: control_directory.join(TARGET_CONTROL_DATABASE),
+            control_database: control_directory.join(CONTROL_DATABASE_FILE),
         }
     }
 }
@@ -278,13 +320,6 @@ pub(super) struct TargetPaths {
     pub(super) primary_output: PathBuf,
     pub(super) payload_output: PathBuf,
     pub(super) control_database: PathBuf,
-}
-
-fn generation_token(generation: &[u8; 16]) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(GENERATION_PATH_DOMAIN);
-    hasher.update(generation);
-    hasher.finalize().to_hex().to_string()
 }
 
 #[derive(diesel::QueryableByName)]
@@ -419,6 +454,24 @@ pub(super) fn file_digest(path: &Path) -> Result<[u8; 32], ProfileStorageUpgrade
 fn database_error(source: diesel::result::Error) -> ProfileStorageUpgradeError {
     ProfileStorageUpgradeError::Storage {
         source: anyhow::Error::new(source).context("separate profile upgrade target stores"),
+    }
+}
+
+fn map_credential_upgrade_error(source: anyhow::Error) -> ProfileStorageUpgradeError {
+    if source.downcast_ref::<AdmissionKeyError>().is_some() {
+        ProfileStorageUpgradeError::Security {
+            source: source.context("convert admission credential control-generation scope"),
+        }
+    } else if source.downcast_ref::<diesel::result::Error>().is_some()
+        || source.downcast_ref::<diesel::ConnectionError>().is_some()
+    {
+        ProfileStorageUpgradeError::Storage {
+            source: source.context("convert admission credential control-generation scope"),
+        }
+    } else {
+        ProfileStorageUpgradeError::Corrupt {
+            source: source.context("validate admission credential control-generation scope"),
+        }
     }
 }
 

@@ -81,8 +81,6 @@ pub(super) fn build_space_access_ports(
         lock: space_access_adapter.clone(),
         resume_session: space_access_adapter.clone(),
         derive_subkey: space_access_adapter.clone(),
-        prepare_admission_offer: space_access_adapter.clone(),
-        derive_admission_proof_key: space_access_adapter.clone(),
         prepare_admission_target_access: space_access_adapter.clone(),
         prepare_sponsor_admission_security: space_access_adapter.clone(),
         activate_sponsor_admission_security: space_access_adapter.clone(),
@@ -112,19 +110,36 @@ pub(super) fn build_search_assembly(
     db_pool_for_search: DbPool,
     space_access_ports: &SpaceAccessPorts,
     current_profile: &Arc<dyn uc_core::ports::security::current_profile::CurrentProfilePort>,
+    payload_runtime: &crate::assembly::platform::ProfilePayloadRuntime,
 ) -> SearchAssembly {
-    let search_key_derivation: Arc<dyn SearchKeyDerivationPort> =
-        Arc::new(HkdfSearchKeyDerivation::new(
-            space_access_ports.derive_subkey.clone(),
-            current_profile.clone(),
-        ));
-    // One concrete adapter, coerced into both the index port and the maintenance
-    // port (ports.md §8.3: one Arc behind several narrow ports).
-    let sqlite_search_index = Arc::new(SqliteSearchIndex::new(
-        db_pool_for_search,
-        current_profile.clone(),
-        search_key_derivation.clone(),
-    ));
+    let (search_key_derivation, sqlite_search_index): (
+        Arc<dyn SearchKeyDerivationPort>,
+        Arc<SqliteSearchIndex>,
+    ) = match payload_runtime.search() {
+        Some(protection) => {
+            let derivation: Arc<dyn SearchKeyDerivationPort> =
+                Arc::new(V3SearchKeyDerivation::new(Arc::clone(protection)));
+            let index = Arc::new(SqliteSearchIndex::new_v3(
+                db_pool_for_search,
+                current_profile.clone(),
+                Arc::clone(protection),
+            ));
+            (derivation, index)
+        }
+        None => {
+            let derivation: Arc<dyn SearchKeyDerivationPort> =
+                Arc::new(HkdfSearchKeyDerivation::new(
+                    space_access_ports.derive_subkey.clone(),
+                    current_profile.clone(),
+                ));
+            let index = Arc::new(SqliteSearchIndex::new(
+                db_pool_for_search,
+                current_profile.clone(),
+                Arc::clone(&derivation),
+            ));
+            (derivation, index)
+        }
+    };
     let search_index: Arc<dyn SearchIndexPort> = sqlite_search_index.clone();
     let search_maintenance: Arc<dyn SearchIndexMaintenancePort> = sqlite_search_index;
     let search_pipeline = Arc::new(SearchPipeline::new());
@@ -140,12 +155,11 @@ pub(super) fn build_search_assembly(
 /// adapter shared by the decorators and the transfer cipher; all share the one
 pub(super) fn build_cipher_decorators(
     session: &Arc<InMemorySession>,
+    blob_cipher: &Arc<dyn uc_core::ports::security::BlobCipherPort>,
     clipboard_event_repo: &Arc<dyn ClipboardEventWriterPort>,
     representation_repo: &Arc<dyn ClipboardRepresentationStore>,
 ) -> CipherDecorators {
-    // BlobCipherPort — business AEAD adapter shared by the decorators.
-    let blob_cipher: Arc<dyn uc_core::ports::security::BlobCipherPort> =
-        Arc::new(uc_infra::security::BlobCipherAdapter::new(session.clone()));
+    let blob_cipher = Arc::clone(blob_cipher);
 
     // TransferCipherPort — uc-application clipboard_sync encrypts/decrypts V3
     // network bytes through this port, sharing the same InMemorySession.
@@ -231,15 +245,12 @@ pub(super) fn build_blob_processing_assembly(
     })
 }
 
-/// Build the whole-installation config-migration facade (export / import preview
-/// / staged import). Assembled in the sync wiring context because its inputs
-/// (secure storage, db pool, local identity, filesystem layout, profile) are not
-/// reconstructable from the abstract `AppDeps` ports; the composed facade travels
-/// on `AppDeps.config_migration`.
+/// Build the passive config-migration capabilities. The Application Settings
+/// assembly owns construction of the facade and its workflow ordering.
 ///
 /// The local-identity port reads the device fingerprint for the export manifest
 /// from the same dedicated identity storage used by the running node. Single-user mode
-pub(super) fn build_config_migration_facade(
+pub(super) fn build_config_migration_deps(
     secure_storage: &Arc<dyn SecureStoragePort>,
     iroh_identity_storage: &Arc<dyn SecureStoragePort>,
     db_pool_for_config_migration: DbPool,
@@ -250,7 +261,7 @@ pub(super) fn build_config_migration_facade(
     app_version: String,
     source_mode: ConfigSourceMode,
     migration_paths: ConfigMigrationPaths,
-) -> Arc<ConfigMigrationFacade> {
+) -> ConfigMigrationDeps {
     let config_migration_profile = ProfileId::from("default");
     let config_migration_local_identity: Arc<dyn LocalIdentityPort> =
         Arc::new(IrohIdentityStore::new(
@@ -269,24 +280,26 @@ pub(super) fn build_config_migration_facade(
         )
         .with_app_version(app_version),
     );
-    Arc::new(ConfigMigrationFacade::new(ConfigMigrationDeps {
+    ConfigMigrationDeps {
         export_bundle: config_migration_adapter.clone(),
         preview_import: config_migration_adapter.clone(),
         stage_import: config_migration_adapter.clone(),
         current_space_identity: current_space_identity.clone(),
         portable_current_space_identity: portable_current_space_identity.clone(),
         is_unlocked: space_access_ports.is_unlocked.clone(),
-    }))
+    }
 }
 
 pub(super) fn create_infra_layer(
     db_pool: DbPool,
+    control_db_pool: DbPool,
     vault_path: &PathBuf,
     settings_path: &PathBuf,
     app_data_root: &PathBuf,
     secure_storage: Arc<dyn SecureStoragePort>,
 ) -> WiringResult<InfraLayer> {
     let db_executor = Arc::new(DieselSqliteExecutor::new(db_pool));
+    let control_db_executor = Arc::new(DieselSqliteExecutor::new(control_db_pool));
 
     let entry_row_mapper = ClipboardEntryRowMapper;
     let selection_row_mapper = ClipboardSelectionRowMapper;
@@ -414,7 +427,7 @@ pub(super) fn create_infra_layer(
     // ports are exposed upward.
     #[cfg(feature = "lan-compat")]
     let mobile_device_repo_arc = Arc::new(DieselMobileDeviceRepository::new(
-        Arc::clone(&db_executor),
+        Arc::clone(&control_db_executor),
         MobileDeviceRowMapper,
     ));
     #[cfg(feature = "lan-compat")]
@@ -440,6 +453,7 @@ pub(super) fn create_infra_layer(
         clipboard_event_reader_repo,
         entry_delivery_repo,
         db_executor,
+        control_db_executor,
         representation_repo,
         selection_repo,
         blob_reference_repo,

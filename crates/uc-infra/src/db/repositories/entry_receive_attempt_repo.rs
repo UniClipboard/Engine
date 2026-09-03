@@ -7,15 +7,13 @@ use crate::db::models::{EntryReceiveAttemptRow, NewEntryReceiveAttemptRow};
 use crate::db::ports::DbExecutor;
 use crate::db::schema::entry_receive_attempt;
 use crate::db::schema::{
-    clipboard_entry, directory_publish_log, file_transfer, file_transfer_events,
-    receive_artifact_log,
+    directory_publish_log, file_transfer, file_transfer_events, receive_artifact_log,
 };
 use uc_core::ports::entry_receive_attempt::{
     AttemptError, AttemptState, BeginReceiveAttemptPort, BeginReceiveFailureOutcome,
-    BeginReceiveFailurePort, BeginReceiveOutcome, ClaimReceiveCommitPort,
-    DeleteReceiveStateForEntryPort, EntryReceiveAttempt, GetEntryAttemptPort,
-    ListNonTerminalAttemptsPort, PurgeTerminalOrphanAttemptsPort,
-    RequestReceiveCancellationOutcome, RequestReceiveCancellationPort,
+    BeginReceiveFailurePort, BeginReceiveOutcome, ClaimReceiveCommitPort, EntryReceiveAttempt,
+    GetEntryAttemptPort, ListNonTerminalAttemptsPort, RequestReceiveCancellationOutcome,
+    RequestReceiveCancellationPort,
 };
 
 /// SQLite adapter for authoritative directory receive attempts.
@@ -317,68 +315,6 @@ fn cas_state<E: DbExecutor>(
         .execute(conn)?;
         Ok(affected == 1)
     })
-}
-
-#[async_trait]
-impl<E: DbExecutor> DeleteReceiveStateForEntryPort for DieselEntryReceiveAttemptRepository<E> {
-    async fn delete_receive_state_for_entry(&self, entry_id: &str) -> Result<bool, AttemptError> {
-        let entry_id = entry_id.to_owned();
-        self.executor
-            .run(move |conn| {
-                conn.transaction::<_, anyhow::Error, _>(|conn| {
-                    delete_receive_state(conn, &entry_id)
-                })
-            })
-            .map_err(backend)
-    }
-}
-
-#[async_trait]
-impl<E: DbExecutor> PurgeTerminalOrphanAttemptsPort for DieselEntryReceiveAttemptRepository<E> {
-    async fn purge_terminal_orphan_attempts(
-        &self,
-        older_than_ms: i64,
-    ) -> Result<u32, AttemptError> {
-        self.executor
-            .run(move |conn| {
-                conn.transaction::<_, anyhow::Error, _>(|conn| {
-                    let terminal_states = [
-                        AttemptState::Completed.to_string(),
-                        AttemptState::Cancelled.to_string(),
-                        AttemptState::Failed.to_string(),
-                    ];
-                    let candidates = entry_receive_attempt::table
-                        .filter(entry_receive_attempt::attempt_state.eq_any(terminal_states))
-                        .filter(entry_receive_attempt::updated_at_ms.lt(older_than_ms))
-                        .select(entry_receive_attempt::entry_id)
-                        .load::<String>(conn)?;
-                    let mut purged = 0_u32;
-                    for entry_id in candidates {
-                        let has_entry = clipboard_entry::table
-                            .filter(clipboard_entry::entry_id.eq(&entry_id))
-                            .select(clipboard_entry::entry_id)
-                            .first::<String>(conn)
-                            .optional()?
-                            .is_some();
-                        let has_pending_artifacts = receive_artifact_log::table
-                            .filter(receive_artifact_log::entry_id.eq(&entry_id))
-                            .filter(receive_artifact_log::resolution.eq("pending"))
-                            .select(receive_artifact_log::entry_id)
-                            .first::<String>(conn)
-                            .optional()?
-                            .is_some();
-                        if !has_entry
-                            && !has_pending_artifacts
-                            && delete_receive_state(conn, &entry_id)?
-                        {
-                            purged = purged.saturating_add(1);
-                        }
-                    }
-                    Ok(purged)
-                })
-            })
-            .map_err(backend)
-    }
 }
 
 pub(crate) fn delete_receive_state(

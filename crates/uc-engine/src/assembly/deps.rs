@@ -9,16 +9,14 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 
 use uc_application::deps::{
-    AppDeps, ClearProfileStatePort, CurrentMemberSignaturePort, ProfileLifecycleRepositoryPort,
+    ClearProfileStatePort, CurrentMemberSignaturePort, ProfileLifecycleRepositoryPort,
     WipeProfileKeysPort,
 };
 use uc_core::clipboard::ActiveClipboardState;
-use uc_core::ids::RepresentationId;
 use uc_core::ports::blob::BlobReferenceRepositoryPort;
-use uc_infra::clipboard::{RepresentationCache, SpoolManager};
 use uc_observability_contract::analytics::AnalyticsFacade;
 
 /// Result type for wiring operations
@@ -41,26 +39,40 @@ pub enum WiringError {
 
     #[error("Thumbnail generator initialization failed: {0}")]
     ThumbnailInit(String),
-}
 
-/// Background runtime components that must be started after async runtime is ready.
-pub struct BackgroundRuntimeDeps {
-    pub representation_cache: Arc<RepresentationCache>,
-    pub spool_manager: Arc<SpoolManager>,
-    pub worker_rx: mpsc::Receiver<RepresentationId>,
-    pub spool_dir: PathBuf,
-    pub spool_ttl_days: u64,
-    pub worker_retry_max_attempts: u32,
-    pub worker_retry_backoff_ms: u64,
+    #[error("profile storage upgrade did not reach a runnable state")]
+    StorageUpgradePending,
+
+    #[error("profile storage upgrade failed")]
+    StorageUpgrade {
+        #[source]
+        source: uc_infra::security::ProfileStorageUpgradeError,
+    },
+
+    #[error("profile storage upgrade prerequisite failed")]
+    StorageUpgradePrerequisite {
+        #[source]
+        source: anyhow::Error,
+    },
 }
 
 /// P2P / iroh sync-engine assembly inputs. Sole consumer:
 /// The internal sync-engine assembly consumes these ports and paths. They never
-/// flow through `AppDeps` — the `SpaceFacade` they assemble lives in
+/// flow through `ApplicationDeps` — the `SpaceFacade` they assemble lives in
 /// uc-application and is injected by this bundle at wire time, not by the
 /// AppFacade path.
 #[derive(Clone)]
 pub struct SyncEngineDeps {
+    /// Engine-owned primitive ports needed to construct concrete Iroh adapters.
+    pub device_identity: Arc<dyn uc_core::ports::DeviceIdentityPort>,
+    pub settings: Arc<dyn uc_core::ports::SettingsPort>,
+    pub member_repo: Arc<dyn uc_core::membership::MemberRepositoryPort>,
+    pub trusted_peer_repo: Arc<dyn uc_core::trusted_peer::TrustedPeerRepositoryPort>,
+    pub fingerprint: Arc<dyn uc_core::ports::security::IdentityFingerprintFactoryPort>,
+    pub clock: Arc<dyn uc_core::ports::ClockPort>,
+    pub space_access: uc_application::deps::SpaceAccessPorts,
+    #[cfg(test)]
+    pub analytics: Arc<dyn uc_observability_contract::analytics::AnalyticsPort>,
     /// Dedicated file-backed storage for the long-lived iroh network identity.
     pub iroh_identity_storage: Arc<dyn uc_core::ports::SecureStoragePort>,
     /// Authoritative authorization check used by every inbound Iroh handler
@@ -114,11 +126,30 @@ pub struct DaemonRuntimeDeps {
     /// Mobile-sync LAN endpoint-state singleton. **Concrete type**, not a trait
     /// object: the daemon LAN listener calls inherent `set` / `clear` on it
     /// (write side), which are not on the read-only `MobileSyncEndpointInfoPort`.
-    /// The same Arc is also coerced into `AppDeps.mobile_sync.endpoint_info`
+    /// The same Arc is also coerced into `ApplicationDeps.mobile_sync.endpoint_info`
     /// (facade read side), sharing one allocation — daemon writes, facade reads
     /// (ports.md §8.3 single-adapter-reuse).
     pub mobile_sync_endpoint_info:
         Arc<uc_infra::mobile_sync::InMemoryMobileSyncEndpointInfoAdapter>,
+}
+
+/// LAN compatibility 组合根所需的 Application 被动端口。
+#[cfg(feature = "lan-compat")]
+#[derive(Clone)]
+pub struct MobileSyncApplicationDeps {
+    pub clock: Arc<dyn uc_core::ports::ClockPort>,
+    pub settings: Arc<dyn uc_core::ports::SettingsPort>,
+    pub mobile_consumable_load:
+        Arc<dyn uc_core::ports::clipboard::LoadMobileConsumableClipboardPort>,
+    pub entry_repo: Arc<dyn uc_core::ports::clipboard::GetClipboardEntryPort>,
+    pub selection_repo: Arc<dyn uc_core::ports::clipboard::ClipboardSelectionRepositoryPort>,
+    pub representation_repo: Arc<dyn uc_core::ports::clipboard::GetRepresentationPort>,
+    pub payload_resolver: Arc<dyn uc_core::ports::clipboard::ClipboardPayloadResolverPort>,
+    pub blob_reader: Arc<dyn uc_core::blob::ports::BlobReaderPort>,
+    pub analytics: Arc<dyn uc_observability_contract::analytics::AnalyticsPort>,
+    pub find_entry_by_snapshot_hash:
+        Arc<dyn uc_core::ports::clipboard::FindEntryIdBySnapshotHashPort>,
+    pub check_entry_availability: Arc<dyn uc_core::ports::clipboard::CheckEntryAvailabilityPort>,
 }
 
 /// Process-level handles shared by ≥2 assembly targets (space-setup,
@@ -127,41 +158,6 @@ pub struct DaemonRuntimeDeps {
 /// meaningful boundary; mirrors the [`BackgroundRuntimeDeps`] precedent.
 #[derive(Clone)]
 pub struct SharedRuntimeDeps {
-    /// Shared receive-readiness gate: the same coordinator is injected into
-    /// the file-transfer lifecycle (which opens it) and the clipboard
-    /// inbound apply path (which waits on it), so one open gate unblocks
-    /// every receiver.
-    pub receive_readiness: Arc<uc_application::facade::ReceiveReadinessCoordinator>,
-    /// Shared host-event bus created at wire time with the "logging" emitter
-    /// already registered (event type names → `tracing::debug`), so non-GUI /
-    /// CLI processes have a sensible default transport. Callers register their
-    /// own transports on top; all consumers fan out into whatever transports
-    /// are currently registered.
-    pub host_event_bus: Arc<uc_application::facade::HostEventBus>,
-    /// Delivery-result repo: `ClipboardSyncFacade` writes on fan-out completion,
-    /// the view side reads.
-    pub entry_delivery_repo: Arc<dyn uc_core::ports::EntryDeliveryRepositoryPort>,
-    /// Read port over the same Diesel impl as
-    /// `AppDeps.clipboard.clipboard_event_repo`; the view layer resolves the
-    /// source device through it.
-    pub clipboard_event_reader_repo: Arc<dyn uc_core::ports::ClipboardEventRepositoryPort>,
-    /// Application entry point for the file-transfer lifecycle actions + seed +
-    /// link. Shared by daemon runtime, `MobileSyncFacade` assembly, and the iroh
-    /// blob path in `build_sync_engine_assembly`.
-    pub file_transfer_facade: Arc<uc_application::facade::FileTransferFacade>,
-    /// Single write boundary for all programmatic clipboard writes (guard
-    /// registration + write + cleanup-on-error). Shared so the active-clipboard
-    /// inbound worker and the restore/capture path keep one circuit-breaker +
-    /// origin-guard state.
-    pub clipboard_write_coordinator:
-        Arc<uc_application::facade::clipboard_write::ClipboardWriteCoordinator>,
-    /// Local cache dir for inbound blob materialization
-    /// (`<file_cache_dir>/iroh-blobs/<entry_id>/`).
-    pub file_cache_dir: PathBuf,
-    /// Trusted-peer repository — pairing persist boundary (D19), roster trust
-    /// checks, dispatch target filtering, CLI resend source lookup. Read by
-    /// space-setup, daemon runtime, and the CLI AppFacade path, hence shared.
-    pub trusted_peer_repo: Arc<dyn uc_core::TrustedPeerRepositoryPort>,
     /// Fan-out source for active-clipboard register advances. `BroadcastingAdvance`
     /// (wired into `active_clipboard_register`) is the sole publisher; the
     /// mobile-sync LAN SSE endpoint is the sole subscriber, cloning a `Receiver`
@@ -193,9 +189,9 @@ pub struct ProfileResetDeps {
 /// bundle,clone 廉价。
 #[derive(Clone)]
 pub struct WiredDependencies {
-    /// 应用层 facade 装配输入(查询/历史/加密/搜索)。喂给
-    /// `build_app_facade_from_deps`;CLI 与 daemon 路径共用。
-    pub deps: AppDeps,
+    /// Application 唯一顶层对象图；Engine 只能读取 adapter 输入或启动
+    /// 一个具体 Application runtime，不再分发领域 deps。
+    pub application: uc_application::facade::ApplicationAssembly,
     /// P2P / iroh sync-engine assembly inputs (see [`SyncEngineDeps`]).
     pub sync_engine: SyncEngineDeps,
     pub profile_reset: ProfileResetDeps,
@@ -207,6 +203,8 @@ pub struct WiredDependencies {
     /// port types.
     #[cfg(feature = "lan-compat")]
     pub mobile_sync_ports: uc_mobile_lan::MobileSyncPorts,
+    #[cfg(feature = "lan-compat")]
+    pub mobile_sync_application: MobileSyncApplicationDeps,
     /// Process-level handles shared by ≥2 assembly targets (see
     /// [`SharedRuntimeDeps`]).
     pub shared: SharedRuntimeDeps,

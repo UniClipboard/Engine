@@ -2,10 +2,7 @@
 
 这里包含设计中、实施中、待实现或暂时阻塞的工作。状态以各文件开头为准。
 
-- [018 Application 按业务领域收口](018-domain-oriented-application-layout.md)
-- [029 持久化成员历史反熵](029-durable-membership-history-anti-entropy.md)
-- [030 成员分叉选择与复杂拓扑验证](030-membership-conflict-resolution-and-chaos-validation.md)
-- [033 不可变内容保护上下文](033-immutable-content-protection-context.md)
+- [034 确定性虚拟 Peer Network 测试套件](034-deterministic-virtual-peer-network-test-suite.md)
 - [本地产物准备](local-artifacts-preparation.md)
 - [移动端日志文件层](mobile-log-file-layer.md)
 

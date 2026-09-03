@@ -17,9 +17,10 @@ use uc_core::ports::clipboard::{
 
 use super::ClipboardSnapshotDeps;
 use crate::clipboard::sync::active_state::reconcile::{
-    ReconcileActiveClipboardStateUseCase, ReconcileOutcome,
+    ReconcileActiveClipboardError, ReconcileActiveClipboardStateUseCase, ReconcileOutcome,
 };
 
+pub use crate::clipboard::sync::active_state::reconcile::ReconcileActiveClipboardError as ActiveClipboardReconcileError;
 pub use crate::clipboard::sync::active_state::reconcile::ReconcileOutcome as ActiveClipboardReconcileOutcome;
 
 /// Dependencies for [`ActiveClipboardReconcileFacade`].
@@ -57,10 +58,11 @@ impl ActiveClipboardReconcileFacade {
     /// Keeps the persisted row when it still matches the OS clipboard, clears
     /// it otherwise (an untrusted/stale row must not act as the active
     /// baseline). Never writes the OS clipboard and never broadcasts;
-    /// best-effort, so it returns the outcome but cannot fail the caller.
+    /// Storage/OS failures stop startup so workers never observe an untrusted
+    /// register.
     /// Drive this once at startup, before any worker reads or broadcasts the
     /// register.
-    pub async fn reconcile(&self) -> ReconcileOutcome {
+    pub async fn reconcile(&self) -> Result<ReconcileOutcome, ReconcileActiveClipboardError> {
         self.uc.run().await
     }
 }

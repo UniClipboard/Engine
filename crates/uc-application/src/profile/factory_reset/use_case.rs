@@ -6,7 +6,7 @@ use super::{
     ProfileLifecycleState, StopProfileRuntimePort, WipeProfileKeysPort,
 };
 
-pub struct ProfileFactoryResetUseCase {
+pub struct ProfileFactoryResetFacade {
     lifecycle_repository: Arc<dyn ProfileLifecycleRepositoryPort>,
     runtime: Arc<dyn StopProfileRuntimePort>,
     keys: Arc<dyn WipeProfileKeysPort>,
@@ -14,7 +14,7 @@ pub struct ProfileFactoryResetUseCase {
     operation_lock: tokio::sync::Mutex<()>,
 }
 
-impl ProfileFactoryResetUseCase {
+impl ProfileFactoryResetFacade {
     pub fn new(
         lifecycle_repository: Arc<dyn ProfileLifecycleRepositoryPort>,
         runtime: Arc<dyn StopProfileRuntimePort>,
@@ -206,7 +206,7 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let generation = ProfileGeneration::from_bytes([1; 16]);
         let lifecycle = Arc::new(LifecycleRepository::ready(generation));
-        let reset = ProfileFactoryResetUseCase::new(
+        let reset = ProfileFactoryResetFacade::new(
             lifecycle.clone(),
             Arc::new(Capability::new("stop", Arc::clone(&calls), 0)),
             Arc::new(Capability::new("wipe", Arc::clone(&calls), 0)),
@@ -229,7 +229,7 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let generation = ProfileGeneration::from_bytes([1; 16]);
         let lifecycle = Arc::new(LifecycleRepository::ready(generation));
-        let reset = ProfileFactoryResetUseCase::new(
+        let reset = ProfileFactoryResetFacade::new(
             lifecycle.clone(),
             Arc::new(Capability::new("stop", Arc::clone(&calls), 0)),
             Arc::new(Capability::new("wipe", Arc::clone(&calls), 1)),

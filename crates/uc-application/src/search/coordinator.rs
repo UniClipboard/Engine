@@ -27,6 +27,7 @@ use uc_core::search::{
 };
 
 use crate::clipboard::file_set_query::load_has_directory_structure;
+use crate::search::mutation_gate::SearchMutationGate;
 use crate::search::{SearchProjectionBuilder, SearchStatusView};
 
 pub const REASON_INITIAL_BACKFILL: &str = "initial_backfill";
@@ -78,6 +79,8 @@ pub enum SearchCoordinatorEvent {
 
 pub struct SearchCoordinatorDeps {
     pub search_index: Arc<dyn SearchIndexPort>,
+    rebuild_index: Arc<dyn SearchIndexPort>,
+    mutation_gate: Arc<SearchMutationGate>,
     /// One-shot storage maintenance (plaintext-residue purge after the encrypting
     /// rebuild). Separate from `search_index` because it is a background-only,
     /// storage-level concern.
@@ -94,7 +97,6 @@ pub struct SearchCoordinatorDeps {
     pub event_repo: Arc<dyn ClipboardEventRepositoryPort>,
     /// Loads the persisted file manifest used by the directory tag rule.
     pub entry_file_set_repo: Arc<dyn EntryFileSetRepositoryPort>,
-    pub current_index_version: String,
 }
 
 impl SearchCoordinatorDeps {
@@ -110,10 +112,11 @@ impl SearchCoordinatorDeps {
         selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
         event_repo: Arc<dyn ClipboardEventRepositoryPort>,
         entry_file_set_repo: Arc<dyn EntryFileSetRepositoryPort>,
-        current_index_version: impl Into<String>,
     ) -> Self {
         Self {
+            rebuild_index: Arc::clone(&search_index),
             search_index,
+            mutation_gate: Arc::new(SearchMutationGate::new()),
             search_maintenance,
             search_key_derivation,
             search_pipeline,
@@ -123,8 +126,17 @@ impl SearchCoordinatorDeps {
             selection_repo,
             event_repo,
             entry_file_set_repo,
-            current_index_version: current_index_version.into(),
         }
+    }
+
+    pub(crate) fn with_rebuild_coordination(
+        mut self,
+        rebuild_index: Arc<dyn SearchIndexPort>,
+        mutation_gate: Arc<SearchMutationGate>,
+    ) -> Self {
+        self.rebuild_index = rebuild_index;
+        self.mutation_gate = mutation_gate;
+        self
     }
 }
 
@@ -384,10 +396,10 @@ impl SearchCoordinator {
             }
         };
 
-        if meta.index_version != self.deps.current_index_version {
+        if meta.index_version != self.deps.search_maintenance.current_index_version() {
             info!(
                 current = %meta.index_version,
-                expected = %self.deps.current_index_version,
+                expected = %self.deps.search_maintenance.current_index_version(),
                 "search coordinator: index version mismatch, triggering rebuild"
             );
             self.trigger_rebuild_locked(REASON_VERSION_MISMATCH).await;
@@ -548,6 +560,7 @@ impl SearchCoordinator {
         state: Arc<Mutex<CoordinatorState>>,
         reason: &str,
     ) {
+        let _mutation_guard = deps.mutation_gate.begin_rebuild().await;
         info!(reason, "search coordinator: starting rebuild");
         {
             let mut s = state.lock().await;
@@ -623,7 +636,7 @@ impl SearchCoordinator {
 
         let (progress_tx, mut progress_rx) = mpsc::channel::<RebuildProgress>(64);
         let event_tx_clone = event_tx.clone();
-        let rebuild = deps.search_index.rebuild(all_entries, progress_tx);
+        let rebuild = deps.rebuild_index.rebuild(all_entries, progress_tx);
         let progress_forwarder = async move {
             while let Some(progress) = progress_rx.recv().await {
                 emit_progress(&event_tx_clone, progress);
@@ -870,7 +883,7 @@ async fn purge_plaintext_residue_if_needed(deps: &SearchCoordinatorDeps) {
             return;
         }
     };
-    if meta.index_version != deps.current_index_version {
+    if meta.index_version != deps.search_maintenance.current_index_version() {
         // Not on the target version yet — a rebuild will run the purge on success.
         return;
     }
@@ -979,7 +992,7 @@ mod tests {
     };
     use uc_core::ids::{DeviceId, EntryId, EventId, FormatId, RepresentationId};
     use uc_core::search::document::{ContentType, SearchDocument, SearchIndexMeta, SearchPosting};
-    use uc_core::search::key::SearchKey;
+    use uc_core::search::key::{SearchKey, SearchKeyContext};
     use uc_core::search::query::SearchQuery;
     use uc_core::search::tag::TagId;
     use uc_core::ClipboardEntryContentCategory;
@@ -1306,7 +1319,6 @@ mod tests {
             Arc::new(FakeSelectionRepo { rep_id }),
             Arc::new(FakeEventRepo),
             Arc::new(FakeFileSetRepo),
-            CURRENT_INDEX_VERSION,
         );
         (deps, rebuild_started, rebuild_dropped)
     }
@@ -1328,8 +1340,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SearchKeyDerivationPort for FakeKeyDerivation {
-        async fn derive_search_key(&self) -> Result<SearchKey, SearchError> {
-            Ok(SearchKey([0u8; 32]))
+        async fn derive_search_key(&self) -> Result<SearchKeyContext, SearchError> {
+            Ok(SearchKeyContext::legacy(SearchKey([0u8; 32])))
         }
         async fn derive_render_key(&self) -> Result<uc_core::search::RenderKey, SearchError> {
             Ok(uc_core::search::RenderKey([0u8; 32]))
@@ -1341,6 +1353,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SearchIndexMaintenancePort for FakeMaintenance {
+        fn current_index_version(&self) -> &'static str {
+            CURRENT_INDEX_VERSION
+        }
+
         async fn purge_plaintext_residue(&self) -> Result<(), SearchError> {
             Ok(())
         }
@@ -1374,7 +1390,7 @@ mod tests {
         fn build_postings(
             &self,
             _input: &SearchPipelineInput,
-            _search_key: &SearchKey,
+            _search_key: &SearchKeyContext,
         ) -> anyhow::Result<Vec<SearchPosting>> {
             unreachable!("no entries projected in this test")
         }
@@ -1382,7 +1398,7 @@ mod tests {
         fn build(
             &self,
             _input: &SearchPipelineInput,
-            _search_key: &SearchKey,
+            _search_key: &SearchKeyContext,
         ) -> anyhow::Result<(SearchDocument, Vec<SearchPosting>)> {
             unreachable!("no entries projected in this test")
         }
@@ -1425,7 +1441,6 @@ mod tests {
             Arc::new(FakeSelectionRepo { rep_id }),
             Arc::new(FakeEventRepo),
             Arc::new(FakeFileSetRepo),
-            CURRENT_INDEX_VERSION,
         );
         let coordinator = SearchCoordinator::new(deps);
 
@@ -1649,7 +1664,6 @@ mod tests {
             Arc::new(FakeSelectionRepo { rep_id }),
             Arc::new(FakeEventRepo),
             Arc::new(FakeFileSetRepo),
-            CURRENT_INDEX_VERSION,
         );
         let coordinator = SearchCoordinator::new(deps);
 

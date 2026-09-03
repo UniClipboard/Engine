@@ -10,9 +10,14 @@
 
 use std::sync::Arc;
 
-use crate::assembly::deps::{SharedRuntimeDeps, SyncEngineDeps};
-use crate::assembly::sync_engine::{build_sync_engine_assembly, SyncEngineAssembly};
-use uc_application::deps::AppDeps;
+use anyhow::Context as _;
+
+use crate::assembly::deps::SyncEngineDeps;
+use crate::assembly::sync_engine::{
+    build_sync_engine_assembly, SyncApplicationAdapters, SyncEngineAssembly,
+    SyncEngineAssemblyOutput,
+};
+use uc_application::facade::ApplicationAssembly;
 
 /// daemon-lifecycle 装配产出。
 ///
@@ -26,6 +31,7 @@ pub struct DaemonLifecycle {
     /// handler、auto-spawned ingest loop。daemon shutdown 调
     /// `sync_engine_assembly.shutdown()` 干净拆 router + abort ingest。
     pub sync_engine_assembly: SyncEngineAssembly,
+    pub(crate) application_adapters: SyncApplicationAdapters,
 }
 
 /// 装 daemon-lifecycle 资源 —— iroh node bind、SyncEngineAssembly、startup
@@ -42,9 +48,8 @@ pub struct DaemonLifecycle {
 /// caller 必须在 tokio runtime 上下文中调用 —— `build_sync_engine_assembly`
 /// 内部 `Endpoint::bind` 会 spawn magicsock / relay / STUN actor。
 pub async fn build_daemon_lifecycle(
-    deps: &AppDeps,
+    application: &ApplicationAssembly,
     space_setup: &SyncEngineDeps,
-    shared: &SharedRuntimeDeps,
     current_app_version: &str,
     #[cfg(feature = "lan-compat")] mobile_sync_ports: uc_mobile_lan::MobileSyncPorts,
     rendezvous_base_url: Option<String>,
@@ -57,7 +62,7 @@ pub async fn build_daemon_lifecycle(
     // `peer_addr ⊆ member`、`trusted_peer ⊆ member`。失败只 log 不阻断
     // 启动 —— reconcile 是治理性的。
     if let Err(err) = crate::subsystems::reconcile::reconcile_peer_addresses(
-        Arc::clone(&deps.device.member_repo),
+        Arc::clone(&space_setup.member_repo),
         Arc::clone(&space_setup.peer_addr_repo),
     )
     .await
@@ -68,8 +73,8 @@ pub async fn build_daemon_lifecycle(
         );
     }
     if let Err(err) = crate::subsystems::reconcile::reconcile_trusted_peers(
-        Arc::clone(&deps.device.member_repo),
-        Arc::clone(&shared.trusted_peer_repo),
+        Arc::clone(&space_setup.member_repo),
+        Arc::clone(&space_setup.trusted_peer_repo),
     )
     .await
     {
@@ -79,32 +84,21 @@ pub async fn build_daemon_lifecycle(
         );
     }
 
-    let relay_credentials = uc_application::facade::settings::RelayCredentials::new(
-        deps.security.secure_storage.clone(),
-    );
-    let relay_configuration =
-        uc_application::facade::settings::RelayConfiguration::new(deps.settings.clone())
-            .with_credentials(relay_credentials.clone());
-    relay_configuration.recover().await.map_err(|error| {
-        anyhow::anyhow!("relay configuration recovery failed at startup: {error}")
-    })?;
-
     // Phase 94 NETSET-03:从 settings 读取 LAN-only Mode 偏好后翻译为
     // `IrohNodeConfig`。`SettingsPort::load` 当前错误返回类型 `anyhow::Result`
     // 不区分 NotFound vs Parse;`FileSettingsRepository::load` 已对 NotFound
     // 兜底返回 `Settings::default()` (即 `allow_relay_fallback: true`)。
     // 故此处只需对剩余 Parse/IO 错误硬失败 —— LAN-only 信任锚点不容许脏
     // settings 撒谎。
-    let settings = deps
-        .settings
-        .load()
+    let prepared_network = application
+        .prepare_network()
         .await
-        .map_err(|err| anyhow::anyhow!("settings load failed at startup: {err}"))?;
+        .context("network settings preparation failed")?;
     let allow_relay_fallback =
-        relay_fallback_override.unwrap_or(settings.network.allow_relay_fallback);
-    let allow_overlay_network_addrs = settings.network.allow_overlay_network_addrs;
-    let custom_relay_urls = settings.network.custom_relay_urls.clone();
-    let congestion_controller = settings.network.congestion_controller;
+        relay_fallback_override.unwrap_or(prepared_network.allow_relay_fallback);
+    let allow_overlay_network_addrs = prepared_network.allow_overlay_network_addrs;
+    let custom_relay_urls = prepared_network.custom_relay_urls;
+    let congestion_controller = prepared_network.congestion_controller;
 
     // 【checker BLOCKER 4 — 单一取反点铁律】
     // `disable_relays` 的值**只能**通过 `relay_policy_to_iroh_config` 取得,
@@ -116,7 +110,10 @@ pub async fn build_daemon_lifecycle(
         congestion_controller,
         rendezvous_base_url,
     );
-    crate::assembly::network::load_relay_access_tokens(&mut iroh_config, &relay_credentials);
+    crate::assembly::network::load_relay_access_tokens(
+        &mut iroh_config,
+        &prepared_network.relay_credentials,
+    );
     // #900：从 env 读取直连可达性（固定 UDP 端口 + 广播公网地址）并写入。
     // 必须在 `build_sync_engine_assembly`（首次 endpoint 快照/配对交换）之前。
     crate::assembly::network::apply_iroh_direct_reachability_from_env(&mut iroh_config);
@@ -141,19 +138,22 @@ pub async fn build_daemon_lifecycle(
         iroh_config.congestion_controller,
     );
 
-    let sync_engine_assembly = build_sync_engine_assembly(
-        deps,
+    let SyncEngineAssemblyOutput {
+        network: sync_engine_assembly,
+        application: application_adapters,
+    } = build_sync_engine_assembly(
+        application,
         space_setup,
-        shared,
         current_app_version,
         #[cfg(feature = "lan-compat")]
         mobile_sync_ports,
         iroh_config,
     )
     .await
-    .map_err(|e| anyhow::anyhow!("Slice 1+ assembly build failed: {e}"))?;
+    .context("Slice 1+ assembly build failed")?;
 
     Ok(DaemonLifecycle {
         sync_engine_assembly,
+        application_adapters,
     })
 }

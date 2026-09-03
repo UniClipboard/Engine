@@ -215,26 +215,17 @@ impl ProductionRuntime {
         snapshot: SystemClipboardSnapshot,
         target_devices: Vec<String>,
     ) -> Result<OperationResult, EngineError> {
-        let (capture, live_index, sync) = {
-            let session_slot = self.session_supervisor.session();
-            let session = session_slot.lock().await;
-            let session = session.as_ref().ok_or_else(operation_unavailable_error)?;
-            (
-                Arc::clone(&session.clipboard.capture),
-                Arc::clone(&session.clipboard.live_index),
-                Arc::clone(&session.clipboard.sync),
-            )
-        };
-        let captured = capture
-            .capture(snapshot.clone(), ClipboardChangeOrigin::LocalCapture, None)
+        let application = self.current_application().await?;
+        let captured = application
+            .capture_clipboard(snapshot.clone(), ClipboardChangeOrigin::LocalCapture, None)
             .await
             .map_err(|error| operation_error_with_code(SEND_FAILED_CODE, "capture send", error))?
             .ok_or_else(|| {
                 EngineError::new(SEND_SKIPPED_CODE, EngineErrorCategory::Conflict, false)
             })?;
         if !captured.deduplicated {
-            if let Err(error) = live_index
-                .index_capture(ClipboardLiveIndexInput {
+            if let Err(error) = application
+                .index_clipboard_capture(ClipboardLiveIndexInput {
                     entry_id: captured.entry_id.clone(),
                     snapshot: Arc::new(snapshot.clone()),
                 })
@@ -249,8 +240,8 @@ impl ProductionRuntime {
                 .map(DeviceId::new)
                 .collect::<Vec<_>>()
         });
-        let outcome = sync
-            .dispatch_local_capture_to_targets(
+        let outcome = application
+            .dispatch_clipboard_capture_to_targets(
                 ClipboardOutboundInput {
                     entry_id: captured.entry_id.clone(),
                     snapshot,

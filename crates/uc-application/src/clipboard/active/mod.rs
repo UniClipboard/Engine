@@ -10,7 +10,8 @@
 mod reconcile;
 
 pub use reconcile::{
-    ActiveClipboardReconcileDeps, ActiveClipboardReconcileFacade, ActiveClipboardReconcileOutcome,
+    ActiveClipboardReconcileDeps, ActiveClipboardReconcileError, ActiveClipboardReconcileFacade,
+    ActiveClipboardReconcileOutcome,
 };
 
 use std::{
@@ -760,6 +761,7 @@ impl InboundPulledContentStore for PulledContentStore {
                 snapshot_hash: snapshot_hash.to_string(),
                 plaintext: plaintext.into(),
                 flow_id: None,
+                provisional: None,
                 // Store-only path: this apply's write port is a no-op (the
                 // convergence tail below owns the authoritative OS write), so
                 // the intent never reaches the clipboard. `RemotePush` states

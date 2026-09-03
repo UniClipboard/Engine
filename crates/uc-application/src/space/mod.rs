@@ -28,14 +28,18 @@ pub use admission::{
     PairingInvitationAddressCandidate, PendingInboundMember, QueryPairingInvitationAddressesError,
     QueryPendingSpaceTransitionError,
 };
+pub use application::SpaceRuntimeAdapters;
 pub use connectivity::{
     NetworkRecoveryEvent, NetworkRecoveryFacade, NetworkRecoveryPhase, NetworkRecoveryRequestError,
     NetworkRecoveryStatus, RebuildNetworkSessionError, RebuildNetworkSessionPort,
 };
 pub use facade::{
     InitializeSpaceInput, InvitationAvailability, IssuePairingInvitationError,
-    IssuePairingInvitationResult, RedeemPairingInvitationError, SpaceAdmissionDeps, SpaceFacade,
-    SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps, UnlockSpaceInput, UnlockSpaceResult,
+    IssuePairingInvitationResult, RedeemPairingInvitationError, SpaceFacade, UnlockSpaceInput,
+    UnlockSpaceResult,
+};
+pub(crate) use facade::{
+    SpaceAdmissionDeps, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps,
 };
 pub use lifecycle::{CurrentInvitation, QuerySetupStateError, SetupStateView};
 pub use lifecycle::{
@@ -103,17 +107,13 @@ pub use admission::{
     AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionStepV2,
     DeviceManagementResetDataPort,
 };
-pub use application::SpaceApplicationDeps;
 pub use lifecycle::UnlockSpacePort;
-pub use lifecycle::{
-    build_space_session_activity, IsSpaceUnlockedPort, MembershipSessionActivityPort,
-    ResumeSpaceSessionPort, SpaceActivityError, SpaceSessionActivityDeps, SpaceSessionActivityPort,
-};
 pub use lifecycle::{
     CurrentSpaceIdentityError, CurrentSpaceIdentityPort, InitialSpaceActivationPort,
     PortableCurrentSpaceIdentityPort,
 };
 pub use lifecycle::{InitializeSpacePort, LockSpacePort};
+pub use lifecycle::{IsSpaceUnlockedPort, ResumeSpaceSessionPort, SpaceActivityError};
 pub use lifecycle::{
     PrepareSpaceAdmissionCredentialsPort, SpaceAdmissionCredentialPreparationError,
 };

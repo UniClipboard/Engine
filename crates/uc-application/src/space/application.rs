@@ -11,6 +11,7 @@ use uc_core::membership::{
 };
 use uc_core::ports::PeerReachabilityChanged;
 
+use crate::deps::ApplicationDeps;
 use crate::space::admission::{
     ActivateSponsorAdmissionPort, AdmissionRecoveryService, CurrentJoinAdmissionStatePort,
     ExecuteJoinerActivationPort, HandleAuthenticatedSpaceAdmissionMessagePort,
@@ -81,17 +82,17 @@ impl crate::space::membership::WakeSpaceMembershipMaintenancePort for DeferredMa
     }
 }
 
-pub struct SpaceApplicationDeps {
+/// Engine 选择的 Space 网络、安全与持久化 adapter。
+///
+/// 通用 Application 能力从 `ApplicationDeps` 取得；该输入只保留 Space 运行期
+/// 特有的 adapter 选择，不暴露内部 use case 或 runtime 组合。
+pub struct SpaceRuntimeAdapters {
     pub load_membership_ledger: Arc<dyn LoadMembershipLedgerPort>,
     pub commit_membership_ledger: Arc<dyn CommitMembershipLedgerPort>,
     pub historical_membership_signatures: Arc<dyn HistoricalMembershipSignatureVerifier>,
     pub current_member_signatures: Arc<dyn CurrentMemberSignaturePort>,
     pub membership_identity: Arc<dyn CurrentMembershipIdentityPort>,
     pub membership_announcement: Arc<dyn CurrentMembershipAnnouncementPort>,
-    pub device_identity: Arc<dyn uc_core::ports::DeviceIdentityPort>,
-    pub group_bootstrap: Arc<dyn GroupBootstrapPort>,
-    pub clock: Arc<dyn uc_core::ports::ClockPort>,
-    pub settings: Arc<dyn uc_core::ports::SettingsPort>,
     pub prepare_joiner_invitation: Arc<dyn PrepareJoinerInvitationPort>,
     pub resolve_joiner_invitation: Arc<dyn ResolveJoinerInvitationPort>,
     pub joiner_start_material: Arc<dyn JoinerStartMaterialPort>,
@@ -134,6 +135,26 @@ pub struct SpaceApplicationDeps {
     pub membership_network_activity: Arc<dyn MembershipNetworkActivityPort>,
 }
 
+struct SpaceApplicationDeps {
+    adapters: SpaceRuntimeAdapters,
+    device_identity: Arc<dyn uc_core::ports::DeviceIdentityPort>,
+    group_bootstrap: Arc<dyn GroupBootstrapPort>,
+    clock: Arc<dyn uc_core::ports::ClockPort>,
+    settings: Arc<dyn uc_core::ports::SettingsPort>,
+}
+
+impl SpaceApplicationDeps {
+    fn from_application(application: &ApplicationDeps, adapters: SpaceRuntimeAdapters) -> Self {
+        Self {
+            adapters,
+            device_identity: Arc::clone(&application.device.device_identity),
+            group_bootstrap: Arc::clone(&application.security.space_access_ports.group_bootstrap),
+            clock: Arc::clone(&application.system.clock),
+            settings: Arc::clone(&application.settings),
+        }
+    }
+}
+
 pub(crate) struct SpaceApplication {
     ledger: Arc<MembershipLedger>,
     current_scope: Arc<dyn CurrentSpaceMemberScopePort>,
@@ -154,10 +175,53 @@ pub(crate) struct SpaceApplication {
 
 impl SpaceApplication {
     pub(crate) fn build(
+        application: &ApplicationDeps,
+        adapters: SpaceRuntimeAdapters,
+        peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
+        re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
+    ) -> Self {
+        Self::build_from_deps(
+            SpaceApplicationDeps::from_application(application, adapters),
+            peer_reachability_changed_events,
+            re_pairing,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn build_for_test(
+        adapters: SpaceRuntimeAdapters,
+        device_identity: Arc<dyn uc_core::ports::DeviceIdentityPort>,
+        group_bootstrap: Arc<dyn GroupBootstrapPort>,
+        clock: Arc<dyn uc_core::ports::ClockPort>,
+        settings: Arc<dyn uc_core::ports::SettingsPort>,
+        peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
+        re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
+    ) -> Self {
+        Self::build_from_deps(
+            SpaceApplicationDeps {
+                adapters,
+                device_identity,
+                group_bootstrap,
+                clock,
+                settings,
+            },
+            peer_reachability_changed_events,
+            re_pairing,
+        )
+    }
+
+    fn build_from_deps(
         deps: SpaceApplicationDeps,
         peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
         re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
     ) -> Self {
+        let SpaceApplicationDeps {
+            adapters: deps,
+            device_identity,
+            group_bootstrap,
+            clock,
+            settings,
+        } = deps;
         let historical_membership_signatures = Arc::clone(&deps.historical_membership_signatures);
         let branch_recovery_signatures = Arc::clone(&deps.current_member_signatures);
         let diagnostics_signatures = Arc::clone(&deps.current_member_signatures);
@@ -176,9 +240,9 @@ impl SpaceApplication {
             deps.membership_identity,
             deps.membership_announcement,
             Arc::clone(&deps.current_member_signatures),
-            deps.device_identity,
-            deps.group_bootstrap,
-            Arc::clone(&deps.clock),
+            device_identity,
+            group_bootstrap,
+            Arc::clone(&clock),
         ));
         let query_membership_admission =
             Arc::new(QueryMembershipAdmissionUseCase::new(Arc::clone(&ledger)));
@@ -188,11 +252,11 @@ impl SpaceApplication {
             Arc::clone(&ledger),
             Arc::clone(&current_scope),
             deps.membership_history_transport,
-            Arc::clone(&deps.clock),
+            Arc::clone(&clock),
             deferred_maintenance_wake.clone(),
         ));
         let joiner_admission = JoinerAdmissionService::new(
-            deps.settings,
+            settings,
             deps.prepare_joiner_invitation,
             deps.resolve_joiner_invitation,
             deps.joiner_start_material,
@@ -240,7 +304,7 @@ impl SpaceApplication {
         let deliver_group_updates = Arc::new(DeliverPendingGroupUpdatesUseCase::new(
             deps.group_update_store,
             deps.group_update_dispatch,
-            Arc::clone(&deps.clock),
+            Arc::clone(&clock),
         ));
         let recover_membership_conflicts = Arc::new(RecoverMembershipConflictUseCase::new(
             Arc::clone(&ledger),
@@ -249,13 +313,13 @@ impl SpaceApplication {
             deps.membership_branch_transition,
             deps.membership_branch_transition_executor,
             historical_membership_signatures,
-            Arc::clone(&deps.clock),
+            Arc::clone(&clock),
         ));
         let issue_membership_branch_recovery = Arc::new(IssueMembershipBranchRecoveryUseCase::new(
             Arc::clone(&ledger),
             deps.membership_branch_recovery_material,
             branch_recovery_signatures,
-            Arc::clone(&deps.clock),
+            Arc::clone(&clock),
         ));
         let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
             MaintainSpaceMembershipDeps {

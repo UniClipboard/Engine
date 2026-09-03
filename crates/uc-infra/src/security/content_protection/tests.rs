@@ -18,7 +18,7 @@ use super::{
     V3InlinePayloadCipher,
 };
 use crate::blob::{BlobStorePort, FilesystemBlobStore};
-use crate::security::{MasterKey, ProfileContentKeyVault};
+use crate::security::{MasterKey, ProfileContentKeyVault, ProfilePayloadAdapters};
 use crate::space::InMemorySession;
 
 #[derive(Default)]
@@ -376,10 +376,12 @@ async fn inline_and_ucbl_v3_remain_readable_after_the_active_space_switches() {
         Arc::clone(&session),
         Arc::clone(&vault),
     ));
-    let inline = V3InlinePayloadCipher::new(Arc::clone(&protection));
     let inner: Arc<dyn BlobStorePort> =
         Arc::new(FilesystemBlobStore::new(directory.path().join("blobs")));
-    let blobs = V3EncryptedBlobStore::new(Arc::clone(&inner), protection);
+    let adapters = ProfilePayloadAdapters::v3(Arc::clone(&inner), protection);
+    let inline = adapters.inline_cipher();
+    let blobs = adapters.blob_store();
+    let blob_reader = adapters.blob_reader();
     let inline_aad = Aad::new(b"inline-entity".to_vec());
     let inline_ciphertext = inline
         .encrypt(&Plaintext::new(b"history-inline".to_vec()), &inline_aad)
@@ -425,12 +427,10 @@ async fn inline_and_ucbl_v3_remain_readable_after_the_active_space_switches() {
         b"history-inline"
     );
     assert_eq!(
-        BlobReaderPort::get(&blobs, &blob_id).await.unwrap(),
+        blob_reader.get(&blob_id).await.unwrap(),
         b"history-blob-payload"
     );
-    assert!(BlobReaderPort::get(&blobs, &transplanted_blob_id)
-        .await
-        .is_err());
+    assert!(blob_reader.get(&transplanted_blob_id).await.is_err());
 }
 
 #[tokio::test]

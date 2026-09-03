@@ -649,7 +649,7 @@ struct RecordingLiveIndex {
 }
 
 #[async_trait]
-impl crate::facade::ClipboardLiveIndexPort for RecordingLiveIndex {
+impl crate::search::live_index::ClipboardLiveIndexPort for RecordingLiveIndex {
     async fn index_capture(
         &self,
         _input: crate::facade::ClipboardLiveIndexInput,

@@ -18,7 +18,7 @@ use uc_core::ports::{
 };
 use uc_observability_contract::analytics::DefaultAnalyticsFacade;
 
-use crate::assembly::deps::{BackgroundRuntimeDeps, WiredDependencies, WiringError, WiringResult};
+use crate::assembly::deps::{WiredDependencies, WiringError, WiringResult};
 use crate::assembly::platform::SystemClipboardLayer;
 use crate::assembly::wire::{wire_dependencies_from_inputs, CoreWiringInputs};
 use crate::engine::event_stream::EventSender;
@@ -464,7 +464,6 @@ impl HostEventEmitterPort for EngineHostEventEmitter {
 
 pub struct HostWiring {
     pub wired: WiredDependencies,
-    pub background: BackgroundRuntimeDeps,
     pub paths: AppPaths,
     pub temporary_dir: std::path::PathBuf,
     pub clipboard_import_root: std::path::PathBuf,
@@ -473,14 +472,14 @@ pub struct HostWiring {
 }
 
 #[cfg(test)]
-pub fn wire_host_capabilities(
+pub async fn wire_host_capabilities(
     config: &EngineConfig,
     host: HostCapabilities,
 ) -> WiringResult<HostWiring> {
-    wire_host_capabilities_with_emitter(config, host, Arc::new(NoopHostEventEmitter))
+    wire_host_capabilities_with_emitter(config, host, Arc::new(NoopHostEventEmitter)).await
 }
 
-pub(crate) fn wire_host_capabilities_with_emitter(
+pub(crate) async fn wire_host_capabilities_with_emitter(
     config: &EngineConfig,
     host: HostCapabilities,
     host_event_emitter: Arc<dyn HostEventEmitterPort>,
@@ -515,7 +514,7 @@ pub(crate) fn wire_host_capabilities_with_emitter(
         WiringError::ClipboardInit("failed to create host clipboard import directory".into())
     })?;
     let files: Arc<dyn HostFileAccess> = Arc::from(files);
-    let (wired, background) = wire_dependencies_from_inputs(CoreWiringInputs {
+    let wired = wire_dependencies_from_inputs(CoreWiringInputs {
         paths: paths.clone(),
         secure_storage,
         profile_id: uc_core::ids::ProfileId::from(config.profile_id()),
@@ -538,11 +537,11 @@ pub(crate) fn wire_host_capabilities_with_emitter(
             analytics.identity,
         )),
         host_event_emitter,
-    })?;
+    })
+    .await?;
 
     Ok(HostWiring {
         wired,
-        background,
         paths,
         temporary_dir,
         clipboard_import_root,
@@ -562,6 +561,7 @@ mod tests {
         ClipboardHostEvent, ClipboardOriginKind, DeliveryHostEvent, HostEvent,
         HostEventEmitterPort, TransferHostEvent,
     };
+    use uc_core::TaskRegistry;
 
     use crate::engine::event_stream::event_channel;
     use crate::{
@@ -573,6 +573,7 @@ mod tests {
     };
 
     use super::{adopt_v019_profile_directories, wire_host_capabilities, EngineHostEventEmitter};
+    use crate::assembly::deps::WiringError;
     use crate::assembly::lifecycle::build_daemon_lifecycle;
 
     #[test]
@@ -758,7 +759,9 @@ mod tests {
             Box::new(EmptyHostFiles),
         );
 
-        let wiring = wire_host_capabilities(&EngineConfig::new("test"), host).unwrap();
+        let wiring = wire_host_capabilities(&EngineConfig::new("test"), host)
+            .await
+            .unwrap();
 
         assert_eq!(
             wiring
@@ -770,6 +773,39 @@ mod tests {
             Err(CurrentMemberSignatureError::Unavailable)
         );
         assert!(!wiring.wired.sync_engine.membership_session.is_ready());
+    }
+
+    #[tokio::test]
+    async fn held_storage_upgrade_lease_blocks_ordinary_runtime_wiring() {
+        let root = tempfile::tempdir().unwrap();
+        let private = root.path().join("private");
+        let upgrade_directory = private.join("profile-storage-upgrade");
+        std::fs::create_dir_all(&upgrade_directory).unwrap();
+        let lease = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(upgrade_directory.join(".lease"))
+            .unwrap();
+        lease.try_lock().unwrap();
+        let host = HostCapabilities::new(
+            HostDirectories::new(
+                private.clone(),
+                root.path().join("cache"),
+                root.path().join("temporary"),
+                root.path().join("logs"),
+            ),
+            Box::new(TestSecureStorage::default()),
+            Box::new(EmptyHostClipboard),
+            Box::new(EmptyHostFiles),
+        );
+
+        let result = wire_host_capabilities(&EngineConfig::new("test"), host).await;
+
+        assert!(matches!(result, Err(WiringError::StorageUpgradePending)));
+        assert!(!private.join("uniclipboard.db").exists());
+        assert!(!private.join("profile-data-generations").exists());
+        assert!(!private.join("space-control-generations").exists());
     }
 
     // 流程：启动真实生产组装，确认 1.1 成员核对与旧空间升级入口同时存在，
@@ -789,15 +825,29 @@ mod tests {
             Box::new(EmptyHostClipboard),
             Box::new(EmptyHostFiles),
         );
-        let wiring = wire_host_capabilities(&EngineConfig::new("1.2.3"), host).unwrap();
-        let mut settings = wiring.wired.deps.settings.load().await.unwrap();
+        let wiring = wire_host_capabilities(&EngineConfig::new("1.2.3"), host)
+            .await
+            .unwrap();
+        let mut settings = wiring.wired.sync_engine.settings.load().await.unwrap();
         settings.network.allow_relay_fallback = false;
-        wiring.wired.deps.settings.save(&settings).await.unwrap();
+        wiring
+            .wired
+            .sync_engine
+            .settings
+            .save(&settings)
+            .await
+            .unwrap();
+        let task_registry = Arc::new(TaskRegistry::new());
+        wiring
+            .wired
+            .application
+            .start_process_runtime(Arc::clone(&task_registry))
+            .await
+            .unwrap();
 
         let lifecycle = build_daemon_lifecycle(
-            &wiring.wired.deps,
+            &wiring.wired.application,
             &wiring.wired.sync_engine,
-            &wiring.wired.shared,
             "1.2.3",
             #[cfg(feature = "lan-compat")]
             wiring.wired.mobile_sync_ports.clone(),
@@ -807,7 +857,7 @@ mod tests {
             None,
         )
         .await
-        .unwrap();
+        .unwrap_or_else(|error| panic!("daemon lifecycle assembly failed: {error:#}"));
         let membership_history_reachable = lifecycle
             .sync_engine_assembly
             .membership_history_exchange_is_reachable_for_test()
@@ -827,6 +877,9 @@ mod tests {
         lifecycle
             .sync_engine_assembly
             .shutdown(uc_core::FileTransferCancellationReason::Unknown)
+            .await;
+        task_registry
+            .shutdown(std::time::Duration::from_millis(500))
             .await;
 
         assert!(

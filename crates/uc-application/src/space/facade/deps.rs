@@ -13,14 +13,14 @@ use uc_core::ports::{
 use uc_observability_contract::analytics::AnalyticsFacade;
 
 use crate::clipboard::write::MobileConsumableBackfill;
-use crate::deps::DeviceManagementResetDataPort;
+use crate::deps::{ApplicationDeps, DeviceManagementResetDataPort};
 use crate::deps::{
     CurrentSpaceIdentityPort, InitialSpaceActivationPort, RePairingStateStorePort,
     SpaceAccessPorts, SpaceRebuildProgressPort,
 };
-use crate::space::application::SpaceApplicationDeps;
+use crate::space::application::SpaceRuntimeAdapters;
 
-pub struct SpaceSessionDeps {
+pub(crate) struct SpaceSessionDeps {
     pub space_access: SpaceAccessPorts,
     pub mobile_consumable_backfill: Arc<dyn MobileConsumableBackfill>,
     pub engine_version_state: Arc<dyn uc_core::ports::EngineVersionStatePort>,
@@ -28,10 +28,9 @@ pub struct SpaceSessionDeps {
     pub current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
     pub initial_space_activation: Arc<dyn InitialSpaceActivationPort>,
     pub admission_credentials: Arc<dyn crate::deps::PrepareSpaceAdmissionCredentialsPort>,
-    pub activity: Arc<dyn crate::space::lifecycle::SpaceSessionActivityPort>,
 }
 
-pub struct SpaceAdmissionDeps {
+pub(crate) struct SpaceAdmissionDeps {
     pub local_identity: Arc<dyn LocalIdentityPort>,
     pub device_identity: Arc<dyn DeviceIdentityPort>,
     pub member_repo: Arc<dyn MemberRepositoryPort>,
@@ -45,7 +44,7 @@ pub struct SpaceAdmissionDeps {
     pub connection_channel: Option<Arc<dyn uc_core::ports::ConnectionChannelPort>>,
 }
 
-pub struct SpaceTransitionDeps {
+pub(crate) struct SpaceTransitionDeps {
     pub device_management_reset_data: Arc<dyn DeviceManagementResetDataPort>,
     pub relationship_reset: Arc<dyn RelationshipStateResetPort>,
     pub space_security_reset: Arc<dyn SpaceSecurityStateResetPort>,
@@ -53,11 +52,12 @@ pub struct SpaceTransitionDeps {
     pub re_pairing_state_store: Arc<dyn RePairingStateStorePort>,
 }
 
-pub struct SpaceFacadeDeps {
+pub(crate) struct SpaceFacadeDeps {
+    pub application: ApplicationDeps,
     pub session: SpaceSessionDeps,
     pub admission: SpaceAdmissionDeps,
     pub transition: SpaceTransitionDeps,
-    pub application: SpaceApplicationDeps,
+    pub runtime_adapters: SpaceRuntimeAdapters,
     pub peer_reachability_changed_events:
         broadcast::Receiver<uc_core::ports::PeerReachabilityChanged>,
 }

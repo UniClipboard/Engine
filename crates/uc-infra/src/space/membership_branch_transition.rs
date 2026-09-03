@@ -6,10 +6,11 @@ use uc_application::deps::{
     PrepareMembershipBranchTransitionError, PrepareMembershipBranchTransitionInput,
     PrepareMembershipBranchTransitionPort,
 };
-use uc_core::membership::{ActiveSpaceGenerationManifestV2, MembershipBranchTransitionV1};
+use uc_core::membership::MembershipBranchTransitionV1;
 
 use crate::security::{
-    ActiveSpaceGenerationManifestStore, ActiveSpaceGenerationManifestStoreError,
+    ActiveRuntimeManifest, ActiveSpaceGenerationManifestStore,
+    ActiveSpaceGenerationManifestStoreError,
 };
 
 /// 从当前加密 manifest 生成无磁盘副作用的分支切换计划。
@@ -36,19 +37,34 @@ impl PrepareMembershipBranchTransitionPort for DefaultMembershipBranchTransition
         }
         let manifest = self
             .manifests
-            .load()
+            .load_runtime()
             .await
             .map_err(map_manifest_error)?
             .ok_or_else(|| invalid("active generation manifest is missing"))?;
-        prepare_transition(input, &manifest, random_target_generation(&manifest))
+        let (source_generation, forbidden_generation) = match &manifest {
+            ActiveRuntimeManifest::V2(manifest) => (manifest.database_generation, None),
+            ActiveRuntimeManifest::V3(manifest) => (
+                *manifest.layout().space_control_generation(),
+                Some(*manifest.layout().profile_data_generation()),
+            ),
+        };
+        let target_generation =
+            random_target_generation(source_generation, forbidden_generation.as_ref());
+        prepare_transition(input, source_generation, target_generation)
     }
 }
 
-fn random_target_generation(manifest: &ActiveSpaceGenerationManifestV2) -> [u8; 16] {
+fn random_target_generation(
+    source_generation: [u8; 16],
+    forbidden_generation: Option<&[u8; 16]>,
+) -> [u8; 16] {
     loop {
         let mut generation = [0; 16];
         rand::rng().fill_bytes(&mut generation);
-        if generation != [0; 16] && generation != manifest.database_generation {
+        if generation != [0; 16]
+            && generation != source_generation
+            && forbidden_generation != Some(&generation)
+        {
             return generation;
         }
     }
@@ -56,17 +72,17 @@ fn random_target_generation(manifest: &ActiveSpaceGenerationManifestV2) -> [u8; 
 
 fn prepare_transition(
     input: PrepareMembershipBranchTransitionInput,
-    manifest: &ActiveSpaceGenerationManifestV2,
+    source_generation: [u8; 16],
     target_generation: [u8; 16],
 ) -> Result<MembershipBranchTransitionV1, PrepareMembershipBranchTransitionError> {
-    if !manifest.validate() || target_generation == [0; 16] {
+    if source_generation == [0; 16] || target_generation == [0; 16] {
         return Err(invalid("generation transition input is invalid"));
     }
     MembershipBranchTransitionV1::new(
         input.transition_id,
         input.conflict_id,
         input.target_branch_id,
-        manifest.database_generation,
+        source_generation,
         target_generation,
     )
     .ok_or_else(|| invalid("generation transition plan is invalid"))
@@ -131,15 +147,7 @@ mod tests {
 
     #[test]
     fn prepared_plan_uses_active_database_generation_and_fresh_target() {
-        let manifest = ActiveSpaceGenerationManifestV2::new(
-            "space-a".to_owned(),
-            [0x21; 16],
-            [0x22; 16],
-            [0x23; 16],
-        )
-        .unwrap();
-
-        let prepared = prepare_transition(input(), &manifest, [0x24; 16]).unwrap();
+        let prepared = prepare_transition(input(), [0x22; 16], [0x24; 16]).unwrap();
 
         assert_eq!(prepared.source_generation(), &[0x22; 16]);
         assert_eq!(prepared.target_generation(), &[0x24; 16]);
@@ -147,15 +155,7 @@ mod tests {
 
     #[test]
     fn invalid_generation_keeps_stable_classification_and_source() {
-        let manifest = ActiveSpaceGenerationManifestV2::new(
-            "space-a".to_owned(),
-            [0x21; 16],
-            [0x22; 16],
-            [0x23; 16],
-        )
-        .unwrap();
-
-        let error = prepare_transition(input(), &manifest, [0; 16]).unwrap_err();
+        let error = prepare_transition(input(), [0x22; 16], [0; 16]).unwrap_err();
 
         assert!(matches!(
             error,

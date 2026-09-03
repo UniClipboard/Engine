@@ -2,9 +2,10 @@
 
 ## 状态
 
-- **状态**：设计中
+- **状态**：已完成
 - **日期**：2026-08-30
-- **前置规格**：`docs/exec-plans/active/029-durable-membership-history-anti-entropy.md`
+- **完成日期**：2026-09-02
+- **前置规格**：`docs/exec-plans/completed/029-durable-membership-history-anti-entropy.md`
 - **相关决策**：`docs/design-docs/decisions/020-membership-reconciliation-and-user-decisions.md`、`docs/design-docs/decisions/021-workspace-convergence-internal-boundaries.md`
 
 # 1. Overview
@@ -20,8 +21,9 @@
 2. Desktop CLI E2E 建立可复现的复杂拓扑与故障脚本，验证冲突隔离、相反选择、最终归队、安全状态和正文
    传输，而不只验证成员数量。
 
-分叉历史禁止合并。用户选择的含义是选择一个完整目标分支；其他分支通过 generation transition 放弃旧运行
-资格并切换到目标状态。系统不得按时间、成员数、在线数、设备标识或消息到达顺序自动选择赢家。
+分叉历史禁止合并。用户选择的含义是选择一个完整目标分支；本机通过 control-generation transition 放弃旧
+Space 控制资格并切换到目标成员历史与安全状态。profile data generation、历史内容密文和历史保护组 vault
+保持不变。系统不得按时间、成员数、在线数、设备标识或消息到达顺序自动选择赢家。
 
 # 2. Goals
 
@@ -35,12 +37,13 @@
 
 # 3. Non-Goals
 
-- 不自动合并 sibling 历史、MLS commits 或内容密钥目录。
+- 不自动合并 sibling 历史、MLS commits 或 protection group catalog。
 - 不实现多数投票、选主、最后写入获胜或云端仲裁。
 - 不让一个设备替其他设备作出分支选择。
 - 不通过 LAN compatibility 绕过 P2P、成员历史或安全门禁。
 - 不把随机压力测试的单次成功当作验收证据。
-- 不在冲突解决中删除剪贴板历史；不可重封装的记录按现有跨 Space 迁移规则保留为不可读密文。
+- 不在冲突解决中删除或重封装剪贴板历史；历史密文继续通过 profile vault 中的 protection group identity 读取，
+  不依赖当前 Space control generation。
 
 # 4. Current Architecture Context
 
@@ -66,10 +69,10 @@ Relationship: 不是通用分叉选择入口；拒绝移除后只建立 Diverged
 ```
 
 ```text
-Component: Cross-Space transition
-Path: crates/uc-application/src/space/admission/space_transition/
-Responsibility: 备份来源、准备目标 generation、重封装资料并原子提升目标。
-Relationship: 新分支切换复用其事务语义，但同 lineage 分叉不能伪装成普通 SameSpace join。
+Component: V3 Membership branch transition
+Path: crates/uc-infra/src/security/v3_membership_branch_transition/
+Responsibility: 从当前 control generation 派生并验证目标 control generation，原子提升 V3 manifest，恢复 runtime 后清理旧 control generation。
+Relationship: profile data generation、profile SQLite/blob 与 keyslot generation 保持不变；禁止复活旧 Cross-Space rewrap/source-layout 实现。
 ```
 
 ```text
@@ -95,7 +98,7 @@ Relationship: Diverged 时继续失败关闭；只有显式 conflict-resolution 
 - **输出**：`Completed`、`Pending`、`RePairingRequired`、`StateChanged` 或稳定错误。
 - **调用方唯一动作**：调用一次 `resolve_membership_conflict`；Pending 后只查询状态，不推进内部步骤。
 
-删除检查：若删除该模块，分支验证、网络交换、来源备份、安全恢复、generation 提升和重启恢复会重新散落到
+删除检查：若删除该模块，分支验证、网络交换、安全恢复、control generation 提升和重启恢复会重新散落到
 Facade、Engine 和产品端，因此该模块必须存在；Engine 只组装和映射结果。
 
 ### `MembershipConflictPolicy`
@@ -116,8 +119,8 @@ Facade、Engine 和产品端，因此该模块必须存在；Engine 只组装和
 ### `MembershipBranchTransitionPort`
 
 - **所有者**：Application `resolve_conflict`。
-- **职责**：复用跨 Space transition 的备份、重封装、manifest 提升和恢复能力，执行同 lineage、不同 branch 的
-  generation 切换。
+- **职责**：执行同 lineage、不同 branch 的 control generation seed、目标验证/stage、manifest 提升、runtime
+  恢复和旧 control generation 清理。
 - **边界**：只能接收 Application 已验证的完整计划，Infra 不重新选择分支。
 
 ## Data Model
@@ -142,18 +145,21 @@ Facade、Engine 和产品端，因此该模块必须存在；Engine 只组装和
 
 ### `MembershipBranchRecoveryPackageV1`
 
-包含目标完整签名历史、目标位置、目标成员签署的恢复授权、接收方成员凭据引用、MLS 恢复材料及内容密钥目录
-密文。包绑定 `conflict_id`、`target_branch_id`、接收设备身份、过期时间和一次性 nonce。任何字段不一致都稳定
-拒绝，不产生 transition 副作用。
+包含目标完整签名历史、目标位置、目标成员签署的恢复授权、接收方成员凭据引用、MLS 恢复材料及目标当前
+protection group 的加密 catalog material。包绑定 `conflict_id`、`target_branch_id`、接收设备身份、五分钟过期
+时间和一次性 nonce。Application/Core 完成身份、分支、历史、期限、签名与 nonce 验证；Infra 将 catalog 合并
+进 profile vault，不替换整个目录。任何字段不一致都稳定拒绝，不产生 transition 副作用。
 
 ### `MembershipBranchTransitionV1`
 
-独立加密保存，阶段为：
+随加密 membership ledger 独立保存，阶段为：
 
 `Prepared -> SourceBackedUp -> TargetVerified -> TargetStaged -> Promoted -> RuntimeRestored -> Completed`
 
-每个阶段幂等且只前进。活动 manifest 在 `Promoted` 前始终指向来源 generation，在 `Promoted` 后始终指向完整目标
-generation；不允许原地覆盖来源数据库或密钥。
+V1 格式中的 `SourceBackedUp` 是既有稳定 phase 名称；在 V3 下只表示目标 control generation 已从一致性来源
+snapshot 生成，不表示 profile data 备份。每个阶段幂等且只前进。活动 manifest 在 `Promoted` 前指向来源
+control generation，在 `Promoted` 后指向目标 control generation；整个过程保持同一 profile data generation 与
+keyslot generation，不复制、重封装或切换 profile payload。
 
 ## API / Interface
 
@@ -198,8 +204,8 @@ pub enum ResolveMembershipConflictResult {
 
 1. 用户选择 `remote_branch_id`，Application 保存不可变 intent。
 2. 通过专用恢复 capability 获取并验证目标包；普通反熵门禁不放宽。
-3. transition 备份来源 generation，验证目标历史包含本机当前成员实例且为 Active。
-4. 顺序恢复目标 MLS 状态和内容密钥目录，重封装需保留的本机数据并 stage 完整目标 generation。
+3. transition 从来源 control database 的一致性 snapshot 派生目标 control generation，验证目标历史包含本机当前成员实例且为 Active。
+4. 顺序恢复目标 MLS 状态、关系和 membership ledger，并把目标 protection group catalog 合并进 profile vault；profile payload 不搬迁。
 5. 原子提升 manifest，重装 session/runtime，重新运行 membership effects 和反熵。
 6. 提升后失败由同一 transition 向前恢复，不回切旧 generation。
 
@@ -207,7 +213,7 @@ pub enum ResolveMembershipConflictResult {
 
 1. Core 返回 `RePairingRequired`，不得安装目标安全材料或把本机伪装为 Active。
 2. 产品展示需要目标分支成员签发新邀请。
-3. 用户执行现有 JoinSpace；来源按 cross-space 语义备份，即使 lineage 相同也使用新 generation。
+3. 用户执行现有 JoinSpace；目标使用新的 control generation，profile data generation 与历史 protection groups 保持不变。
 4. 目标分支产生新的成员实例。旧实例保持 Removed，不复活、不复用旧凭据。
 
 # 6. Implementation Plan
@@ -235,9 +241,9 @@ Risk: 接口若暴露内部阶段会把复杂度泄漏到产品端。
 
 ```text
 Step 4
-Files: crates/uc-application/src/space/admission/space_transition/*, crates/uc-infra/src/space/*
-Change: 增加同 lineage branch transition 计划、恢复包验证及 generation staging adapter。
-Risk: 原地覆盖会造成历史与密钥混合，必须使用新 generation。
+Files: crates/uc-infra/src/security/v3_membership_branch_transition/*, crates/uc-infra/src/security/space_control_generation/*
+Change: 增加同 lineage branch transition 计划、恢复包验证及 V3 control-generation staging adapter。
+Risk: 原地覆盖会造成成员历史与 MLS 状态混合，必须切换新的 control generation；profile payload 禁止参与。
 ```
 
 ```text
@@ -320,12 +326,17 @@ Risk: 只等待最终数量会掩盖短暂越权和错误密钥。
 ## Integration Test
 
 - ledger 同 commit 保存 Diverged 和 conflict record，提交故障不留下半状态。
-- 来源备份、目标 stage、manifest promote 任一点故障均可重启恢复。
-- 目标安全状态从共同祖先按因果顺序恢复，最终 group epoch 与内容密钥目录一致。
+- 目标 control generation seed、stage、manifest promote 任一点故障均可重启恢复。
+- 目标安全状态从共同祖先按因果顺序恢复，最终 group epoch 与 protection group catalog 一致；profile data
+  generation、profile SQLite/blob 和 keyslot generation 保持不变。
 - `RePairingRequired` 不安装任何目标密钥；新邀请产生新成员实例。
 - Engine 与三端绑定对 choice、result、error 做完整映射。
 
-## Deterministic Topology Matrix
+## Deterministic Validation Matrix
+
+F0-F7 在 `uc-engine` `dev-tools` E2E 中使用真实 Iroh endpoint、公开 Engine operation、分区与重启 seam；F8-F13
+按故障责任落在 Core/Application/真实 Infra 层，避免为了故障注入在产品接口暴露内部 phase。任何层级都必须使用
+生产 codec、持久模型与负责人入口，不能用另一套简化状态机代替。
 
 | 编号 | 拓扑与动作 | 关键断言 |
 | --- | --- | --- |
@@ -337,14 +348,14 @@ Risk: 只等待最终数量会掩盖短暂越权和错误密钥。
 | F5 | 环 A-B-C-D-A，两个相反方向传播冲突 | 同一 conflict 只提示一次，无消息环和重复 effects |
 | F6 | 深链 A-B-C-D-E-F，中间 B/D 离线 | 叶子选择共同 branch 后逐跳收敛，无在线中间节点依赖 |
 | F7 | 十节点不平衡树，三个 sibling branches | 每个分支内部公平反熵；冲突 peer 不饿死合法 peer |
-| F8 | 选择目标后 Sponsor 离线、恢复包 ACK 丢失、chooser 重启 | intent 持久、幂等重发、单一 promoted generation |
-| F9 | 五设备分成 3/2 作相反选择，之后 2 侧改选 3 侧 | 首轮保持两分支；第二次明确选择后五端收敛 |
-| F10 | 目标分支已移除 chooser | 返回 RePairingRequired；重新邀请后旧实例不复活 |
-| F11 | transition 各阶段 fault injection | 每个故障点重启后满足来源完整或目标完整 |
-| F12 | 冲突期间注入重复、乱序、分页中断和旧 ACK | revision 单调、无部分历史、无错误水位推进 |
-| F13 | 恶意 peer 提供合法连接但伪造目标包 | Invalid/Rejected，零密钥、成员或 generation 副作用 |
+| F8 | recipient prepared、target prepared/committed 与最终 transition 前后中断重试 | intent、staged state 与 package 持久复用，不重复准备或提交 |
+| F9 | 已完成保留本机分支后出现不同 head 的新 conflict，再明确选择对端 | 旧选择不可改写；新 conflict 可独立保存唯一 target intent |
+| F10 | 目标分支已移除 chooser | 返回 RePairingRequired；相反选择被拒绝，重新邀请必须产生新成员实例 |
+| F11 | control transition 每阶段副作用完成后、ledger phase 提交前崩溃 | 新 owner 从旧 phase 幂等重放；始终只有完整来源或完整目标 control generation |
+| F12 | 冲突期间注入重复、乱序、分页中断、旧 ACK 与提交失败 | revision 单调、无部分历史、无错误水位推进 |
+| F13 | 合法连接提供错 conflict/branch/recipient/期限/签名/nonce 的目标包 | Invalid/Rejected，零密钥、成员或 generation 副作用 |
 
-每个 Desktop 场景必须同时断言：
+每个 F0-F7 Engine Iroh 场景必须同时断言：
 
 1. 所有节点的 branch/head 等价类，而不只检查成员数量。
 2. 分支内和跨分支的完整通信矩阵。
@@ -355,9 +366,13 @@ Risk: 只等待最终数量会掩盖短暂越权和错误密钥。
 
 ## Chaos Driver
 
-Desktop E2E 增加声明式脚本：`Start`、`Stop`、`Restart`、`Partition`、`Heal`、`Join`、`Remove`、`Decide`、
-`ResolveConflict`、`DropNextFrame`、`CrashAtPhase`、`AssertSnapshot`、`AssertTransfer`。脚本和固定 seed 只决定动作
-顺序；验收必须保存失败 seed 并能单独重放。至少运行固定的 20 个审查过的 seed，随机扩展只作为附加证据。
+Engine Iroh E2E 使用声明式脚本：`Start`、`Stop`、`Restart`、`Partition`、`Heal`、`Join`、`Remove`、`Decide`、
+`ResolveConflict`、`AssertSnapshot`、`AssertDiagnostics`、`AssertTransfer`。内部 phase 故障由真实 Infra 测试在
+Application port 以下注入，不能把 `CrashAtPhase` 暴露为稳定 Engine operation。
+
+Core 另运行固定的 20 个审查 seed。每个 seed 只打乱同一对 sibling 的到达方向、重复观察与目标选择，必须证明
+冲突/分支编号顺序无关、重复观察只有一个 issue、没有隐式赢家、transition id 稳定且 phase 不能跳跃或回退。
+seed 列表固定在测试源码，失败输出可直接单独复现；运行时随机扩展只作附加证据，不计入验收。
 
 ## Regression Test
 
@@ -369,30 +384,42 @@ Desktop E2E 增加声明式脚本：`Start`、`Stop`、`Restart`、`Partition`�
 
 # 9. Acceptance Criteria
 
-* [ ] 任意 sibling 历史以不同到达顺序产生相同冲突和分支编号。
-* [ ] 产品只调用一次 `resolve_membership_conflict`，不编排恢复步骤。
-* [ ] 保留本机分支不改变历史、安全状态或其他设备选择。
-* [ ] 采用目标分支使用新 generation，绝不原地覆盖来源。
-* [ ] Active chooser 可恢复；Removed chooser 必须重新配对并获得新成员实例。
-* [ ] 相反选择保持隔离，不出现自动赢家或跨分支内容。
-* [ ] transition 每个持久阶段的崩溃恢复通过真实 SQLite fault injection。
-* [ ] F0-F13 确定性场景全部通过。
-* [ ] 固定 20 个 chaos seeds 可重放且全部满足模型不变量。
-* [ ] 冲突前、中、后通信矩阵与 group epoch 断言通过。
-* [ ] 规格 029 C0-C5 回归通过。
-* [ ] workspace check、fmt、architecture、diff gates 通过。
-* [ ] 实体设备未执行项目明确记录为“跳过”。
-* [ ] `docs/architecture/architecture-bible.md` 与 Engine 接口规格同步。
+* [x] 任意 sibling 历史以不同到达顺序产生相同冲突和分支编号。
+* [x] 产品只调用一次 `resolve_membership_conflict`，不编排恢复步骤。
+* [x] 保留本机分支不改变历史、安全状态或其他设备选择。
+* [x] 采用目标分支使用新 generation，绝不原地覆盖来源。
+* [x] Active chooser 可恢复；Removed chooser 必须重新配对并获得新成员实例。
+* [x] 相反选择保持隔离，不出现自动赢家或跨分支内容。
+* [x] transition 每个持久阶段的崩溃恢复通过真实 SQLite/control-generation fault replay。
+* [x] F0-F13 确定性场景全部通过。
+* [x] 固定 20 个 chaos seeds 可重放且全部满足模型不变量。
+* [x] 冲突前、中、后通信矩阵与 group epoch 断言通过。
+* [x] 规格 029 C0-C5 回归通过。
+* [x] workspace check、fmt、architecture、diff gates 通过。
+* [x] 实体设备未执行项目明确记录为“跳过”。
+* [x] `docs/architecture/architecture-bible.md` 与 Engine 接口规格同步。
+
+## 完成验证记录
+
+- F0-F7 分别通过真实 Engine operation、Iroh endpoint、分区、重启与 exact-text 正文矩阵；F7 十节点三分支
+  场景完整运行 430.46 秒。同分支发送在 membership 已投影为 paired peer 后验证，跨分支仍必须关闭式失败。
+- F8-F13 按责任层完成：Application 恢复会话与不可变选择矩阵、Core Removed/重新邀请和 20 个固定 chaos
+  seed、真实 Infra 六阶段副作用后崩溃重放、029 分页/ACK/SQLite 原子提交回归、恢复包绑定与 nonce 防重放均通过。
+- `cargo test --workspace --all-targets --locked` 在最终树通过：Application 730、Engine 132、Infra 773，三端绑定
+  及其余 workspace suites 同步通过；Infra 的既有 ignored 项保持 ignored，未记为通过。
+- 先以最终 Engine 源码重建 Desktop 默认 CLI 与带 `e2e-rendezvous` 的 daemon，再串行重跑规格 029 C0-C5：
+  8 项全部通过，耗时 693.18 秒。默认并行多拓扑运行产生的资源锁竞争结果已废弃，不作为验收证据。
+- 实体设备矩阵与 Release bundle 本阶段未提供，明确记为“跳过”，未记为“通过”。
 
 # 10. Risks and Trade-offs
 
-- **同 lineage generation 切换复杂**：复用跨 Space transition 的事务语义会增加一种模式，但可避免第二套备份、
-  重封装和 crash recovery 实现。
+- **同 lineage control generation 切换复杂**：它复用 V3 manifest、control generation 与 activation 的单一事务
+  语义；profile data generation 不切换，禁止引入第二套 payload 备份、rewrap 或历史 reader。
 - **恢复包扩大协议面**：它只在明确用户选择后开放，并精确绑定 recipient/conflict/head；普通反熵仍失败关闭。
 - **没有全局完成概念**：每台设备独立选择是去中心化系统的真实边界。UI 必须区分“本机已选择”和“所有已知
   设备已收敛”。
-- **数据保留成本**：切换期间暂存来源备份和目标 generation 会临时增加磁盘占用；完成后按现有 generation
-  清理规则回收。
+- **数据保留成本**：切换期间同时保留来源和目标 control generation，会临时增加控制面磁盘占用；完成后清理
+  来源 control generation。profile SQLite/blob 不复制，因此不会按内容体量放大。
 - **大矩阵耗时**：F0-F13 不应全部进入每次快速单测；Core/Application 矩阵每次运行，Desktop 固定场景进入
   串行验收任务，chaos seeds 可拆为夜间任务。
 
@@ -401,8 +428,10 @@ Desktop E2E 增加声明式脚本：`Start`、`Stop`、`Restart`、`Partition`�
 
 # 11. Open Questions
 
-1. 产品是否允许用户只确认“保留本机分支”并关闭提示，还是必须持续展示仍存在的 Diverged peers？
-2. 同一用户拥有多台设备时，是否需要二维码/短码之外的本地批量选择体验？核心仍按逐设备明确授权实现。
-3. branch recovery package 的有效期沿用邀请时长还是定义更短的专用时长？
-4. Desktop 固定 chaos 场景放入每次 CI、夜间 CI 还是发布门禁，需要结合当前流水线预算确定。
-5. 实体设备首轮选择哪些最小矩阵：建议 Android + Desktop + iOS 三设备覆盖分区、相反选择和重新配对。
+没有阻止完成的开放问题，当前固定答案如下：
+
+1. “保留本机分支”完成当前 issue，但 Diverged peer 事实继续保留在完整设备快照中；不能宣称全局解决。
+2. Core/Application 只接受逐设备明确授权；批量产品体验不在本规格内，不能绕过每台设备的选择。
+3. branch recovery package 使用独立固定五分钟 TTL，不沿用邀请时长。
+4. Core/Application/Infra 确定矩阵进入常规 workspace；耗时的 F0-F7 Engine Iroh 与 029 C0-C5 放在串行验收阶段。
+5. 实体设备与 Release bundle 本阶段未提供时必须记为“跳过”，不得用同机多进程冒充通过。

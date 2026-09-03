@@ -7,6 +7,33 @@ use std::fmt;
 
 use zeroize::Zeroize;
 
+/// 搜索 posting 所属保护组的 32-byte 不透明引用。
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+pub struct SearchProtectionRef([u8; 32]);
+
+impl SearchProtectionRef {
+    pub const LEN: usize = 32;
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, crate::search::error::SearchError> {
+        let value = bytes.try_into().map_err(|_| {
+            crate::search::error::SearchError::Internal(
+                "invalid search protection reference length".to_owned(),
+            )
+        })?;
+        Ok(Self(value))
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SearchProtectionRef {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SearchProtectionRef([REDACTED])")
+    }
+}
+
 /// Opaque 32-byte search key derived from the master key.
 ///
 /// - Do NOT implement Serialize/Deserialize — keys must never appear in JSON.
@@ -49,6 +76,37 @@ impl fmt::Debug for SearchKey {
 impl Drop for SearchKey {
     fn drop(&mut self) {
         self.0.zeroize();
+    }
+}
+
+/// 一次 posting 构建不可拆分的 key 与保护组引用。
+#[derive(Debug)]
+pub struct SearchKeyContext {
+    key: SearchKey,
+    protection_ref: Option<SearchProtectionRef>,
+}
+
+impl SearchKeyContext {
+    pub fn legacy(key: SearchKey) -> Self {
+        Self {
+            key,
+            protection_ref: None,
+        }
+    }
+
+    pub fn protected(key: SearchKey, protection_ref: SearchProtectionRef) -> Self {
+        Self {
+            key,
+            protection_ref: Some(protection_ref),
+        }
+    }
+
+    pub fn key(&self) -> &SearchKey {
+        &self.key
+    }
+
+    pub fn protection_ref(&self) -> Option<&SearchProtectionRef> {
+        self.protection_ref.as_ref()
     }
 }
 

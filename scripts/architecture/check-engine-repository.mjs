@@ -274,6 +274,24 @@ function checkPublicSurface(metadata, sources) {
   return problems
 }
 
+function checkApplicationDependencyInventory(sources) {
+  const problems = []
+  for (const field of [
+    'pub current_profile:',
+    'pub blob_cipher:',
+    'pub portable_current_space_identity:',
+  ]) {
+    if (sources.applicationDeps.includes(field)) {
+      addProblem(
+        problems,
+        'application dependency inventory',
+        `retired wiring-only field remains in Application dependency bundles: ${field}`
+      )
+    }
+  }
+  return problems
+}
+
 function checkBindingProvenance(metadata, sources) {
   const problems = []
   const engineVersion = packageByName(metadata, 'uc-engine').version
@@ -387,6 +405,76 @@ function checkPlaintextScanner() {
   return problems
 }
 
+function checkProfileStorageGenerationOwnership(sources) {
+  const problems = []
+  const v3TransitionPath =
+    'crates/uc-infra/src/security/v3_admission_space_transition.rs'
+  const forbiddenV3Dependencies = [
+    'ProfileStorageUpgrade',
+    'profile_storage_upgrade',
+    'LegacyPayloadProtection',
+    'BlobCipherAdapter',
+    'EncryptedBlobStore',
+    'source_cipher',
+    'target_cipher',
+    'payload_rewrap',
+    'rewrap_finalized_source',
+    'ProfileContentKeyVault',
+    'ClipboardDispatch',
+    'EntryDelivery',
+    'Outbox',
+  ]
+  for (const marker of forbiddenV3Dependencies) {
+    if (sources.v3AdmissionTransition.includes(marker)) {
+      addProblem(
+        problems,
+        'profile storage generation ownership',
+        `${v3TransitionPath} depends on forbidden payload-upgrade knowledge: ${marker}`
+      )
+    }
+  }
+
+  const forbiddenCoordinatorDetails = [
+    'UpgradePhaseV1',
+    'TargetGenerationStager',
+    'PrimaryPayloadConverter',
+    'DerivedPayloadConverter',
+    'profile_storage_upgrade::',
+  ]
+  for (const [owner, source] of [
+    ['uc-application', sources.application],
+    ['uc-engine', sources.engineRuntime],
+  ]) {
+    for (const marker of forbiddenCoordinatorDetails) {
+      if (source.includes(marker)) {
+        addProblem(
+          problems,
+          'profile storage generation ownership',
+          `${owner} combines private profile-upgrade steps through ${marker}`
+        )
+      }
+    }
+  }
+
+  if (!sources.engineWiring.includes('.ensure_v3()')) {
+    addProblem(
+      problems,
+      'profile storage generation ownership',
+      'uc-engine must enter profile storage upgrade through the complete ensure_v3 operation'
+    )
+  }
+  for (const marker of ['ProfileContentKeyVault', 'profile_content_key_vault']) {
+    if (sources.network.includes(marker)) {
+      addProblem(
+        problems,
+        'profile storage generation ownership',
+        `network adapters depend on historical profile vault authority through ${marker}`
+      )
+    }
+  }
+  return problems
+}
+
 function checkCurrentPeerScopeOwnership() {
   const problems = []
   const scopedConsumers = [
@@ -450,6 +538,37 @@ function checkCurrentPeerScopeOwnership() {
         }
       }
     }
+  }
+  return problems
+}
+
+function checkMembershipConfirmationWatermarkOwnership(sources) {
+  const problems = []
+  const positiveAssignment = /\.confirmed_position\s*=\s*(?!None\b)[A-Za-z_]/g
+  const applicationAssignments = sources.application.match(positiveAssignment) ?? []
+  const authenticatedExchangeOwners = [
+    read('crates/uc-application/src/space/membership/synchronize_history/target_use_case.rs'),
+    read('crates/uc-application/src/space/membership/handle_history_message/use_case.rs'),
+  ].join('\n')
+  const ownerAssignments = authenticatedExchangeOwners.match(positiveAssignment) ?? []
+  if (applicationAssignments.length !== 2 || ownerAssignments.length !== 2) {
+    addProblem(
+      problems,
+      'membership confirmation watermark',
+      'positive confirmed_position assignment must remain exclusive to authenticated ACK/suffix owners'
+    )
+  }
+
+  const sponsorActivation = read('crates/uc-infra/src/space/admission/sponsor/complete.rs')
+  if (
+    !sponsorActivation.includes('confirmed_position: None') ||
+    /confirmed_position\s*:\s*Some\b/.test(sponsorActivation)
+  ) {
+    addProblem(
+      problems,
+      'membership confirmation watermark',
+      'Sponsor activation must create propagation debt instead of inferring peer confirmation'
+    )
   }
   return problems
 }
@@ -1254,9 +1373,80 @@ function checkInfraSpaceSecurityOwnership() {
   return problems
 }
 
+function checkRetiredLegacySpaceTransition(sources) {
+  const problems = []
+  const legacyPath = 'crates/uc-infra/src/security/admission_space_transition.rs'
+  if (sources.legacySpaceTransitionPathPresent) {
+    addProblem(
+      problems,
+      'retired legacy Space transition',
+      `retired transition module remains: ${legacyPath}`
+    )
+  }
+  for (const marker of [
+    'mod admission_space_transition',
+    'pub use admission_space_transition',
+    'space_generation_directory',
+  ]) {
+    if (sources.infraSecurityModule.includes(marker)) {
+      addProblem(
+        problems,
+        'retired legacy Space transition',
+        `security module exposes retired transition knowledge through ${marker}`
+      )
+    }
+  }
+  for (const marker of [
+    'DurableAdmissionSpaceTransition',
+    'rewrap_finalized_source',
+    'source-backup-v1',
+  ]) {
+    if (sources.infraSecurityRuntime.includes(marker)) {
+      addProblem(
+        problems,
+        'retired legacy Space transition',
+        `Infra security source restores retired transition behavior through ${marker}`
+      )
+    }
+  }
+  for (const marker of ['space_generation_directory', 'space-generations', 'target.sqlite']) {
+    if (sources.runtimeStorage.includes(marker)) {
+      addProblem(
+        problems,
+        'retired legacy Space transition',
+        `Engine runtime storage reopens a retired V2 generation through ${marker}`
+      )
+    }
+  }
+  for (const required of ['ActiveRuntimeManifest::V2(_)', 'StorageUpgradeRequired']) {
+    if (!sources.runtimeStorage.includes(required)) {
+      addProblem(
+        problems,
+        'retired legacy Space transition',
+        `Engine runtime storage is missing the V2 fail-closed marker ${required}`
+      )
+    }
+  }
+  return problems
+}
+
 function repositorySources() {
   return {
+    legacySpaceTransitionPathPresent: existsSync(
+      join(REPOSITORY_ROOT, 'crates/uc-infra/src/security/admission_space_transition.rs')
+    ),
+    infraSecurityModule: read('crates/uc-infra/src/security/mod.rs'),
+    infraSecurityRuntime: readSourceTree('crates/uc-infra/src/security'),
+    runtimeStorage: read('crates/uc-engine/src/assembly/runtime_storage.rs'),
     engine: read('crates/uc-engine/src/lib.rs'),
+    engineRuntime: readSourceTree('crates/uc-engine/src'),
+    engineWiring: read('crates/uc-engine/src/assembly/wire/mod.rs'),
+    applicationDeps: read('crates/uc-application/src/deps.rs'),
+    application: readSourceTree('crates/uc-application/src'),
+    network: readSourceTree('crates/uc-infra/src/network'),
+    v3AdmissionTransition: read(
+      'crates/uc-infra/src/security/v3_admission_space_transition.rs'
+    ),
     uniffi: read('bindings/uc-engine-uniffi/src/lib.rs'),
     ohos: read('bindings/uc-ohos-napi/src/lib.rs'),
     iosPackaging: read('bindings/uc-engine-uniffi/scripts/build-ios-xcframework.sh'),
@@ -1276,15 +1466,19 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkOpenMlsValidation(metadata),
     ...checkLocalDependencies(metadata),
     ...checkPublicSurface(metadata, sources),
+    ...checkApplicationDependencyInventory(sources),
     ...checkBindingProvenance(metadata, sources),
     ...checkLanIsolation(metadata, sources),
+    ...checkProfileStorageGenerationOwnership(sources),
     ...checkCurrentPeerScopeOwnership(),
+    ...checkMembershipConfirmationWatermarkOwnership(sources),
     ...checkApplicationMembershipCutover(),
     ...checkSpaceModuleInterface(),
     ...checkSpaceAdmissionProtocolOwnership(),
     ...checkSpaceAdmissionPersistenceOwnership(),
     ...checkInfraSpaceAdmissionOwnership(),
     ...checkInfraSpaceSecurityOwnership(),
+    ...checkRetiredLegacySpaceTransition(sources),
     ...checkDualInvitationEntry(),
     ...checkSpaceMembershipMaintenanceOwnership(),
     ...checkRetiredLegacyPairingRecovery(),
@@ -1322,12 +1516,49 @@ function runNegativeFixtures(metadata, sources) {
   expectRejected('automatic LAN fallback', (_changed, changedSources) => {
     changedSources.runtime += '\nfn fallback_to_lan() {}\n'
   }, metadata, sources)
+  expectRejected('retired Application dependency inventory', (_changed, changedSources) => {
+    changedSources.applicationDeps += '\npub current_profile: RetiredWiringOnlyPort,\n'
+  }, metadata, sources)
   expectRejected('retired pairing transport', (_changed, changedSources) => {
     changedSources.runtime += '\nconst PAIRING_ALPN: &[u8] = b"/uniclipboard/pairing/2";\n'
   }, metadata, sources)
   expectRejected('missing OpenMLS validation target', changed => {
     const validation = packageByName(changed, 'openmls-validation')
     validation.targets = validation.targets.filter(target => !target.kind.includes('test'))
+  }, metadata, sources)
+  expectRejected('V3 CrossSpace payload rewrap dependency', (_changed, changedSources) => {
+    changedSources.v3AdmissionTransition += '\nuse crate::security::ProfileStorageUpgrade;\nfn payload_rewrap() {}\n'
+  }, metadata, sources)
+  expectRejected('Engine profile-upgrade phase orchestration', (_changed, changedSources) => {
+    changedSources.engineRuntime += '\nfn combine_upgrade_steps(_: TargetGenerationStager) {}\n'
+  }, metadata, sources)
+  expectRejected('historical vault used as network authority', (_changed, changedSources) => {
+    changedSources.network += '\nfn authorize_from_history(_: ProfileContentKeyVault) {}\n'
+  }, metadata, sources)
+  expectRejected('forged membership confirmation watermark', (_changed, changedSources) => {
+    changedSources.application +=
+      '\nfn infer_peer_confirmation(peer: &mut PeerReconciliationRecord, position: BaseMembershipHistoryPosition) { peer.confirmed_position = Some(position); }\n'
+  }, metadata, sources)
+  expectRejected('retired legacy Space transition module', (_changed, changedSources) => {
+    changedSources.legacySpaceTransitionPathPresent = true
+  }, metadata, sources)
+  expectRejected('retired legacy Space transition export', (_changed, changedSources) => {
+    changedSources.infraSecurityModule += `
+mod admission_space_transition;
+pub use admission_space_transition::{space_generation_directory, DurableAdmissionSpaceTransition};
+`
+  }, metadata, sources)
+  expectRejected('retired legacy Space transition implementation', (_changed, changedSources) => {
+    changedSources.infraSecurityRuntime += `
+pub struct DurableAdmissionSpaceTransition;
+`
+  }, metadata, sources)
+  expectRejected('Engine V2 runtime storage bypass', (_changed, changedSources) => {
+    changedSources.runtimeStorage += `
+fn open_v2_generation(directory: &Path) {
+  let database = directory.join("space-generations").join("target.sqlite");
+}
+`
   }, metadata, sources)
 }
 

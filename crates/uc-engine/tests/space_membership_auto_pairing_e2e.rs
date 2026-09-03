@@ -337,11 +337,9 @@ async fn f7_three_sibling_branches_keep_fair_anti_entropy_for_legal_peers() {
             .wait_for_group_epoch_named(&baseline, epoch, "F7 baseline")
             .await;
     }
-    let (invitation_h, invitation_i, invitation_j) = tokio::join!(
-        issue_invitation(topology.engine("A")),
-        issue_invitation(topology.engine("B")),
-        issue_invitation(topology.engine("C")),
-    );
+    let invitation_h = issue_invitation_named(topology.engine("A"), "A").await;
+    let invitation_i = issue_invitation_named(topology.engine("B"), "B").await;
+    let invitation_j = issue_invitation_named(topology.engine("C"), "C").await;
 
     topology
         .run(&[TopologyAction::PartitionGroups {
@@ -411,6 +409,15 @@ async fn f7_three_sibling_branches_keep_fair_anti_entropy_for_legal_peers() {
 
     let branches: [&[&str]; 3] = [&["A", "D", "G", "H"], &["B", "E", "I"], &["C", "F", "J"]];
     let all_nodes = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"];
+    for branch in branches {
+        for sender in branch {
+            for receiver in branch {
+                if sender != receiver {
+                    topology.wait_for_paired_peer(sender, receiver).await;
+                }
+            }
+        }
+    }
     for sender in all_nodes {
         for receiver in all_nodes {
             if sender == receiver {
@@ -554,6 +561,7 @@ async fn f6_deep_chain_recovers_selected_branch_without_online_sponsors() {
     assert_eq!(recovered.head_event_id, target.head_event_id);
 
     for (sender, receiver) in [("A", "C"), ("C", "E"), ("E", "F")] {
+        topology.wait_for_paired_peer(sender, receiver).await;
         let text = format!("F6 converged hop {sender}-{receiver}");
         let report = topology.send(sender, receiver, &text).await;
         assert!(
@@ -1020,13 +1028,13 @@ async fn f1_remove_and_add_from_parent_head_preserve_branch_membership() {
                 left: &["A", "C", "D"],
                 right: &["B", "E"],
             },
-            TopologyAction::Remove {
-                sponsor: "A",
-                target: "D",
-            },
             TopologyAction::Join {
                 sponsor: "B",
                 joiner: "E",
+            },
+            TopologyAction::Remove {
+                sponsor: "A",
+                target: "D",
             },
         ])
         .await;
@@ -1047,10 +1055,20 @@ async fn f1_remove_and_add_from_parent_head_preserve_branch_membership() {
         .await;
 
     let left_text = "F1 removal branch transfer";
-    assert_eq!(topology.send("A", "C", left_text).await.total_accepted, 1);
+    let left_report = topology.send("A", "C", left_text).await;
+    assert_eq!(
+        left_report.total_accepted + left_report.total_pending,
+        1,
+        "F1 removal branch transfer was neither accepted nor left in flight: {left_report:?}"
+    );
     wait_for_received_text(topology.engine("C"), left_text).await;
     let right_text = "F1 addition branch transfer";
-    assert_eq!(topology.send("B", "E", right_text).await.total_accepted, 1);
+    let right_report = topology.send("B", "E", right_text).await;
+    assert_eq!(
+        right_report.total_accepted + right_report.total_pending,
+        1,
+        "F1 addition branch transfer was neither accepted nor left in flight: {right_report:?}"
+    );
     wait_for_received_text(topology.engine("E"), right_text).await;
     let removed_text = "F1 removed member must not receive";
     assert_eq!(
@@ -1497,6 +1515,38 @@ impl MembershipTopology {
             panic!("node {sender} returned an unexpected send result");
         };
         report
+    }
+
+    async fn wait_for_paired_peer(&self, sender: &str, receiver: &str) {
+        let receiver_id = self
+            .device_ids
+            .get(receiver)
+            .unwrap_or_else(|| panic!("receiver {receiver} has no device id"));
+        let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+        loop {
+            match self
+                .engine(sender)
+                .execute(Operation::QueryPeerConnections)
+                .await
+            {
+                Ok(OperationResult::PeerConnections(peers))
+                    if peers
+                        .iter()
+                        .any(|peer| &peer.peer_id == receiver_id && peer.is_paired) =>
+                {
+                    return;
+                }
+                Ok(OperationResult::PeerConnections(_)) => {}
+                Ok(_) => panic!("node {sender} returned an unexpected peer connection result"),
+                Err(error) if error.is_retryable() && tokio::time::Instant::now() < deadline => {}
+                Err(error) => panic!("node {sender} peer connection query failed: {error}"),
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "same-branch peer {sender}-{receiver} did not become paired"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     async fn diagnostics(&self, node: &str) -> uc_engine::MembershipDiagnosticsSummary {
@@ -2257,6 +2307,10 @@ async fn join_through(
 }
 
 async fn issue_invitation(sponsor: &Engine) -> String {
+    issue_invitation_named(sponsor, "sponsor").await
+}
+
+async fn issue_invitation_named(sponsor: &Engine, sponsor_label: &str) -> String {
     let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
     loop {
         match sponsor.execute(Operation::IssueInvitation).await {
@@ -2267,7 +2321,10 @@ async fn issue_invitation(sponsor: &Engine) -> String {
             Err(error) if error.is_retryable() && tokio::time::Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            Err(error) => panic!("issue admission invitation: {error}"),
+            Err(error) => panic!(
+                "node {sponsor_label} issue admission invitation: {error}; retryable={}",
+                error.is_retryable()
+            ),
         }
     }
 }

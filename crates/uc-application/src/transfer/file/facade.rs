@@ -18,7 +18,7 @@ use crate::transfer::receive::reconciliation::{
     EnsureReceiveReadyPort, ReceiveReadinessError, ReceiveReadinessStatus,
 };
 
-use super::session::{FileTransferSession, FileTransferSessionRegistry};
+use super::session::{ReceiverTransferHandle, ReceiverTransferHandleRegistry};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReceiverTransferRegistration {
@@ -63,7 +63,7 @@ pub struct FileTransferFacade {
     clock: Arc<dyn ClockPort>,
     store: Arc<dyn FileTransferEventStorePort>,
     publisher: Arc<dyn FileTransferEventPublisherPort>,
-    sessions: Arc<FileTransferSessionRegistry>,
+    sessions: Arc<ReceiverTransferHandleRegistry>,
     lifecycle: Arc<FileTransferLifecycle>,
 }
 
@@ -81,7 +81,7 @@ impl FileTransferFacade {
             clock: deps.clock,
             store,
             publisher,
-            sessions: Arc::new(FileTransferSessionRegistry::new()),
+            sessions: Arc::new(ReceiverTransferHandleRegistry::new()),
             lifecycle,
         }
     }
@@ -89,7 +89,7 @@ impl FileTransferFacade {
     pub async fn begin_receiver_transfer(
         &self,
         input: BeginReceiverTransfer,
-    ) -> Result<Arc<FileTransferSession>, FileTransferApplicationError> {
+    ) -> Result<Arc<ReceiverTransferHandle>, FileTransferApplicationError> {
         let _creation = self.sessions.lock_creation().await;
         self.sessions.ensure_open().await?;
         if let Some(existing) = self.sessions.get(&input.transfer_id).await {
@@ -115,7 +115,7 @@ impl FileTransferFacade {
         }
 
         self.register_receiver(&input).await?;
-        let session = Arc::new(FileTransferSession::new(
+        let session = Arc::new(ReceiverTransferHandle::new(
             input.clone(),
             Arc::clone(&self.store),
             Arc::clone(&self.publisher),
@@ -137,16 +137,16 @@ impl FileTransferFacade {
         self.store
             .append(started.clone())
             .await
-            .map_err(|error| FileTransferApplicationError::Store(error.to_string()))?;
+            .map_err(FileTransferApplicationError::Store)?;
         self.sessions.insert(Arc::clone(&session)).await;
         self.publisher
             .publish(started)
             .await
-            .map_err(|error| FileTransferApplicationError::Publish(error.to_string()))?;
+            .map_err(FileTransferApplicationError::Publish)?;
         Ok(session)
     }
 
-    pub async fn active_session(&self, transfer_id: &str) -> Option<Arc<FileTransferSession>> {
+    pub async fn active_session(&self, transfer_id: &str) -> Option<Arc<ReceiverTransferHandle>> {
         self.sessions.get(transfer_id).await
     }
 
@@ -166,7 +166,7 @@ impl FileTransferFacade {
     }
 
     async fn cancel_sessions(
-        sessions: Vec<Arc<FileTransferSession>>,
+        sessions: Vec<Arc<ReceiverTransferHandle>>,
         reason: uc_core::FileTransferCancellationReason,
     ) -> Result<(), FileTransferApplicationError> {
         let mut first_error = None;
@@ -192,9 +192,9 @@ impl FileTransferFacade {
             .map(i64::try_from)
             .transpose()
             .map_err(|_| {
-                FileTransferApplicationError::Repository(
-                    "inbound file size exceeds the receiver projection range".to_owned(),
-                )
+                FileTransferApplicationError::Repository(anyhow::anyhow!(
+                    "inbound file size exceeds the receiver projection range"
+                ))
             })?;
         match &input.registration {
             ReceiverTransferRegistration::Entry {
@@ -214,7 +214,9 @@ impl FileTransferFacade {
                     created_at_ms: self.clock.now_ms(),
                 })
                 .await
-                .map_err(|error| FileTransferApplicationError::Repository(error.to_string())),
+                .map_err(|error| {
+                    FileTransferApplicationError::Repository(anyhow::Error::new(error))
+                }),
             ReceiverTransferRegistration::Provisional => self
                 .provisional_seed
                 .seed_provisional_receive(&ProvisionalInboundTransfer {
@@ -225,7 +227,9 @@ impl FileTransferFacade {
                     created_at_ms: self.clock.now_ms(),
                 })
                 .await
-                .map_err(|error| FileTransferApplicationError::Repository(error.to_string())),
+                .map_err(|error| {
+                    FileTransferApplicationError::Repository(anyhow::Error::new(error))
+                }),
         }
     }
 
