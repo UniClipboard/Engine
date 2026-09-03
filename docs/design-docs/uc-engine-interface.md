@@ -35,7 +35,7 @@ crate 根只保留稳定名称的统一导出，内部按职责分为七层：
 | `StateChanged` | 生命周期状态已经改变 |
 | `IncomingEntry` | 收到一条具有完整摘要的新内容 |
 | `TransferProgress` | 文件传输进度发生变化 |
-| `DeviceTrustChanged { revision }` | 正式设备信任状态已经变化；宿主重新调用 `QueryDeviceTrust` 读取完整事实 |
+| `DeviceTrustChanged { revision }` | 正式设备组状态已经变化；宿主重新调用 `QueryDeviceGroupChoices` 读取完整事实与待处理选择 |
 | `WorkspaceConvergenceChanged` | 仅 `dev-tools` 的内部收敛诊断事件；不进入正式宿主和发布产物 |
 | `NetworkRecoveryChanged` | 网络会话恢复开始、等待下一次尝试、成功或最终失败的稳定状态变化 |
 | `RePairingRequired { scope }` | 旧资料独立化完成，需要产品提示重新配对；`all_devices` 表示全部旧设备关系均须重新建立 |
@@ -113,10 +113,9 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `QueryMemberSyncPreferences` | 查询指定成员的发送、接收和内容类型偏好 |
 | `UpdateMemberSyncPreferences` | 局部更新指定成员的同步偏好，未提供字段保持不变 |
 | `RemoveMember` | 追加一条签名成员历史移除，并立即停止向目标发送新内容 |
-| `QueryDeviceTrust` | 返回当前设备关系、待决定变化、可用动作和稳定阻塞原因的完整正式快照 |
-| `DecideDeviceTrustChange` | 对完整设备信任快照中的当前变化作选择；本机将被移除时要求明确确认 |
-| `DecideMembershipRemoval` | 仅 `dev-tools`：直接对内部成员移除事件选择接受或拒绝 |
-| `QueryWorkspaceConvergence` | 仅 `dev-tools`：返回内部工作空间收敛诊断快照 |
+| `QueryDeviceGroupChoices` | 返回 revision、完整设备信任快照，以及当前所有待处理设备组问题与可选设备组 |
+| `ChooseDeviceGroup` | 按问题编号、选择编号和预期 revision 选择设备组；本机将被移除时要求明确确认 |
+| `QueryMembershipDiagnostics` | 仅 `dev-tools`：返回内部成员分支、epoch、冲突、待执行效果和过渡阶段诊断 |
 | `SearchEntries` | 使用关键词、时间、内容类型、来源设备和标签等条件查询加密搜索索引 |
 | `QuerySearchTags` | 查询当前索引中的标签和条目数量 |
 | `QuerySearchStatus` | 查询索引是否可用及最近重建时间 |
@@ -158,9 +157,11 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 
 规格 023 的稳定产品外形已经接入：`JoinSpace` 返回 Active、Pending、Rejected 三类结果并公开稳定
 `join_id`，`CancelJoinSpace(join_id)` 负责本机取消，待激活候选继续使用现有 `RemoveMember(device_id)`。现有
-`DeviceTrustSnapshot` 增加 `current_join` 和 `pending_inbound_member`；现有 `DeviceTrustChanged { revision }`
+`QueryDeviceGroupChoices` 返回的 `DeviceGroupChoicesSummary.device_trust` 包含 `current_join` 和
+`pending_inbound_member`；现有 `DeviceTrustChanged { revision }`
 继续只提醒重新查询，revision 在同一 profile 内跨 Space 单调递增。不新增按 join id 查询任意历史操作、
-入站取消、待激活专用移除或第二份完整快照；`QueryWorkspaceConvergence` 及其事件继续只用于 dev-tools。
+入站取消、待激活专用移除或独立于设备组选择视图的第二份完整快照；内部成员诊断和
+`WorkspaceConvergenceChanged` 事件继续只用于 dev-tools。
 对端因自己的另一项准入而暂时忙碌时，当前 JoinSpace 保持同一 Pending 并由 Engine 重试，不变成 Rejected。
 取消请求只与发起方正式提交竞争：取消先保存时返回 Rejected 且没有成员新增；正式提交先保存时取消已经
 太晚，同一请求继续保持 Pending 直到 Active，不自动生成成员移除。用户仍要退出时从另一台当前成员设备
@@ -204,16 +205,23 @@ LAN 内容读写复用核心现有的加密历史、系统剪贴板写入、内�
 
 `QueryMemberSyncPreferences` 和 `UpdateMemberSyncPreferences` 只接受稳定设备编号。局部更新中未提供的开关和内容类型必须保持原值。
 
-工作空间收敛由核心完整负责。正式宿主只追加本机移除、通过 `QueryDeviceTrust` 读取完整设备关系、对
-`current_change` 作一次选择并订阅 `DeviceTrustChanged`。`RemoveMember` 保存签名成员历史并立即限制本机
-向目标发送；`DecideDeviceTrustChange` 只接受快照中的当前变化编号。宿主不保存成员历史、不安排消息顺序，
-也不创建重试队列。
+工作空间收敛由核心完整负责。正式宿主只追加本机移除、通过 `QueryDeviceGroupChoices` 读取完整设备关系与
+待处理设备组问题、对当前问题作一次选择并订阅 `DeviceTrustChanged`。`RemoveMember` 保存签名成员历史并
+立即限制本机向目标发送；`ChooseDeviceGroup` 只接受查询结果中的问题编号、选择编号和 revision。宿主不保存
+成员历史、不安排消息顺序，也不创建重试队列。
 
-`DeviceTrustSnapshot` 返回 revision、本机设备及成员状态、当前变化、完整设备关系、恢复可用性、允许动作、
-稳定阻塞原因和更新时间。设备关系包含用于产品展示的 device id 与 display name，但这些字段不得进入日志
-或调试输出。状态保存成功后发送 `DeviceTrustChanged { revision }`；事件消费者收到更新 revision 或
-`RefreshRequired` 后重新查询，相同或更小 revision 不覆盖已查询结果。iOS、Android 和 HarmonyOS 绑定
-必须公开相同字段、结果、错误和提醒。
+`DeviceGroupChoicesSummary` 返回统一 revision、完整 `DeviceTrustSnapshot` 和零个或多个待处理问题。每个
+问题只公开稳定 `issue_id` 及其选择；每个选择公开 `choice_id`、是否为当前设备组、是否要求重新配对、成员
+设备编号和成员列表是否完整。嵌套的 `DeviceTrustSnapshot` 返回本机设备及成员状态、当前变化、加入状态、
+待激活成员、完整设备关系、恢复可用性、允许动作、稳定阻塞原因和更新时间。设备关系包含用于产品展示的
+device id 与 display name，但这些字段不得进入日志或调试输出。
+
+产品调用 `ChooseDeviceGroup` 时必须原样回传同一次查询中的 `issue_id`、`choice_id` 和 `expected_revision`。
+结果明确区分完成、仍在等待、需要重新配对、已经完成、状态已变化和需要确认移除本机；状态已变化时重新
+查询，不得用旧选择覆盖新事实。本机将被移除时，只有在产品取得用户明确确认后才传入
+`confirm_local_removal = true`。状态保存成功后发送 `DeviceTrustChanged { revision }`；事件消费者收到更新
+revision 或 `RefreshRequired` 后重新查询，相同或更小 revision 不覆盖已查询结果。iOS、Android 和
+HarmonyOS 绑定必须公开相同字段、结果、错误和提醒。
 
 以下 `WorkspaceConvergence` 快照和变化事件只在显式 `dev-tools` 构建中用于内部验收：
 
@@ -236,7 +244,7 @@ LAN 内容读写复用核心现有的加密历史、系统剪贴板写入、内�
 `locally_applied` 表示本机已保存当前成员历史状态；`converging` 表示正在核对成员历史。网络发送成功或发起操作返回都不足以代表两台设备关系一致。收到此前未知但合法的成员历史后，状态重新进入 `converging`；连续性、空间、身份或摘要无法验证、发现不可自动解决的分叉或有效成员为空时进入 `recovery_required`，核心停止自动推进。普通离线、超时和重启不改变成员历史。
 
 内部收敛状态在本机保存成员历史或用户决定、收到成员历史、设备上线以及进入需要恢复时更新。它不进入
-正式 iOS、Android 或 HarmonyOS 绑定，也不能代替 `QueryDeviceTrust` 的产品契约。
+正式 iOS、Android 或 HarmonyOS 绑定，也不能代替 `QueryDeviceGroupChoices` 的产品契约。
 
 搜索查询、标签、状态和重建都由核心执行。搜索结果可以正常返回预览、文件名、文件路径、链接和自定义标签，但这些用户内容不得出现在调试输出或日志中。加密会话锁定时，宿主不得读取搜索结果、标签或状态，也不得触发重建。
 

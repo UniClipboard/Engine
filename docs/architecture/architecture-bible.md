@@ -800,6 +800,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 日期 | 主题 | 长期结论 |
 | --- | --- | --- |
 | 2026-09-03 | 关键模块深化规格 | 新增规格 036，规划按五个可独立验收的 clean-cutover 切片收口本机 Clipboard 完整动作、删除退役 membership persistence、集中 Iroh peer-address resolution、深化生产 session 生命周期并让 Space security mode 构造即合法；本轮只形成待实施计划，无生产架构变化。 |
+| 2026-09-03 | Engine Space 产品接口文档校正 | `QueryDeviceGroupChoices` 与 `ChooseDeviceGroup` 是正式宿主读取设备关系、展示待处理设备组问题并提交选择的唯一稳定入口；设备信任快照嵌入统一选择视图，`QueryMembershipDiagnostics` 与 `WorkspaceConvergenceChanged` 继续仅用于 `dev-tools`。本轮只校正文档，无架构变化。 |
 | 2026-09-03 | 虚拟 Peer Network 测试套件规格 | 新增规格 034，规划在现有成员领域 port seam 上建立仅测试可达的确定性 virtual provider 与 F0-F7 快速拓扑矩阵，同时保留真实 Iroh contract、Engine smoke 和 slow lane；本轮只形成待实施计划，无生产架构变化。 |
 | 2026-09-02 | Application 依赖注释统一 | `crates/uc-application/src/deps.rs` 的模块、端口分组与全部字段统一使用准确的中文 Rust 文档注释；本轮仅改善文档表达，无架构变化。 |
 | 2026-09-02 | 031 Space assembly 深化 | `SpaceFacade` 从通用 Application 依赖与 Engine 选择的最终 Space adapters 内部构造私有成员对象图，并在 Application 内持有成员、搜索和接收的 session activity 组合及恢复顺序。Engine 继续选择 Iroh、V3 transition/recovery、宿主能力与观测 decorator，但不再构造或导入 Space 内部 deps、use case、runtime 或 activity；跨领域 Search/receive 能力只在启动装配期一次绑定。 |
