@@ -18,3 +18,4 @@
 - [032 退役 Legacy Space Transition](032-admission-space-transition-internal-refactor.md)
 - [033 不可变内容保护上下文与一次性密文升级](033-immutable-content-protection-context.md)
 - [035 Space 观测装配 interface 收敛与仓库推广准则](035-space-domain-observability-assembly.md)
+- [036 关键模块深化与退役路径 clean cutover](036-architecture-deepening-clean-cutovers.md)

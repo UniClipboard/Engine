@@ -799,6 +799,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 | 日期 | 主题 | 长期结论 |
 | --- | --- | --- |
+| 2026-09-03 | 关键模块深化规格 | 新增规格 036，规划按五个可独立验收的 clean-cutover 切片收口本机 Clipboard 完整动作、删除退役 membership persistence、集中 Iroh peer-address resolution、深化生产 session 生命周期并让 Space security mode 构造即合法；本轮只形成待实施计划，无生产架构变化。 |
 | 2026-09-03 | 虚拟 Peer Network 测试套件规格 | 新增规格 034，规划在现有成员领域 port seam 上建立仅测试可达的确定性 virtual provider 与 F0-F7 快速拓扑矩阵，同时保留真实 Iroh contract、Engine smoke 和 slow lane；本轮只形成待实施计划，无生产架构变化。 |
 | 2026-09-02 | Application 依赖注释统一 | `crates/uc-application/src/deps.rs` 的模块、端口分组与全部字段统一使用准确的中文 Rust 文档注释；本轮仅改善文档表达，无架构变化。 |
 | 2026-09-02 | 031 Space assembly 深化 | `SpaceFacade` 从通用 Application 依赖与 Engine 选择的最终 Space adapters 内部构造私有成员对象图，并在 Application 内持有成员、搜索和接收的 session activity 组合及恢复顺序。Engine 继续选择 Iroh、V3 transition/recovery、宿主能力与观测 decorator，但不再构造或导入 Space 内部 deps、use case、runtime 或 activity；跨领域 Search/receive 能力只在启动装配期一次绑定。 |
@@ -956,6 +957,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |
 | 2026-08-29 | 网络与运行期 | P2P 使用共享 Iroh node；Space application 先以 dormant 状态构造，认证 handler 和 Router ready 后才启动后台恢复。 |
 | 2026-08-29 | 双邀请入口 | 短码和完整邀请指向同一随机邀请身份；完整邀请携带 Space admission 路由，不携带旧配对会话协议。 |
+| 2026-09-03 | 036 关键模块深化 clean cutover | Clipboard 本机处理由 Application 的单一 intent processor 完整拥有；退役 membership repository surface 与 codec 已删除，relationship reset 仍按 profile 整体清理密文行；Iroh 统一通过私有 `PeerAddressResolver` 读取和解码地址；Engine 的生产 session factory/build/install/recovery/shutdown 全部归 `SessionSupervisor`；Space access 分为完整 `RuntimeSpaceAccessAdapter` 与初始化专用 `MigrationSpaceAccessAdapter`，生产构造不再接受缺失的安全依赖。稳定 Engine 操作、持久格式、网络协议和 P2P 显式模式未改变。 |
 
 ## 相关文档
 
@@ -999,3 +1001,4 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 - `docs/exec-plans/completed/031-application-dependency-surface-deepening.md`：Application 对象图深化、生命周期所有权、九切片实施与验收记录。
 - `docs/exec-plans/completed/032-admission-space-transition-internal-refactor.md`：断开 maintenance-only legacy 可达性、删除旧 V2 transition executor、私有化 upgrade source layout 并防止 payload rewrap 回流的实施记录。
 - `docs/exec-plans/completed/033-immutable-content-protection-context.md`：不可变保护上下文、profile 历史 content key vault、一次性 V3 密文升级及无历史重包 CrossSpace 实施记录。
+- `docs/exec-plans/completed/036-architecture-deepening-clean-cutovers.md`：Clipboard、membership persistence、Iroh 地址解析、生产 session 生命周期与 Space security 构造模式的 clean-cutover 实施记录。

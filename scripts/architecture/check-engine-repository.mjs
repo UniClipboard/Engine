@@ -1508,8 +1508,174 @@ function checkObservabilityAssemblyInterface(sources) {
   return problems
 }
 
+function checkRetiredMembershipPersistence(sources) {
+  const problems = []
+  if (sources.retiredMembershipPersistencePathPresent) {
+    addProblem(
+      problems,
+      'retired membership persistence',
+      'retired membership repository adapter file remains'
+    )
+  }
+
+  for (const marker of [
+    'MembershipCandidateRepositoryPort',
+    'VerifiedPeerPromotionPort',
+    'MembershipAnnouncementRepositoryPort',
+    'MembershipOutboxRepositoryPort',
+    'MembershipAppliedSecurityUpdateRepositoryPort',
+    'MembershipCandidateRepositoryError',
+    'VerifiedPeerPromotionError',
+    'MembershipAnnouncementRepositoryError',
+    'MembershipOutboxRepositoryError',
+    'MembershipAppliedSecurityUpdateRepositoryError',
+    'RelationshipKind::Candidate',
+    'RelationshipKind::MembershipAnnouncement',
+    'RelationshipKind::MembershipOutbox',
+    'RelationshipKind::MembershipAppliedSecurityUpdate',
+  ]) {
+    if (sources.membershipPersistence.includes(marker)) {
+      addProblem(
+        problems,
+        'retired membership persistence',
+        `retired persistence marker remains: ${marker}`
+      )
+    }
+  }
+
+  return problems
+}
+
+function checkIrohPeerAddressResolution(sources) {
+  const problems = []
+  if (!sources.irohPeerAddressResolver.includes('struct PeerAddressResolver')) {
+    addProblem(problems, 'Iroh peer address resolution', 'private resolver is missing')
+  }
+  if (
+    /self\.peer_addr_repo\s*\.get\(/.test(sources.irohAddressConsumers) ||
+    /postcard::from_bytes(?:::\s*<EndpointAddr>)?\(&record\.addr_blob\)/.test(
+      sources.irohAddressConsumers
+    ) ||
+    /\.await\.ok\(\)\.flatten\(\)/.test(sources.irohAddressConsumers)
+  ) {
+    addProblem(
+      problems,
+      'Iroh peer address resolution',
+      'adapter bypasses PeerAddressResolver or collapses address failures'
+    )
+  }
+  return problems
+}
+
+function checkSessionSupervisorOwnership(sources) {
+  const problems = []
+  for (const marker of [
+    'struct SessionFactory',
+    'struct ProductionSession',
+    'impl ProductionSession',
+    'fn build_session(',
+  ]) {
+    if (sources.runtimeModule.includes(marker)) {
+      addProblem(
+        problems,
+        'session supervisor ownership',
+        `runtime parent retains session lifecycle implementation: ${marker}`
+      )
+    }
+  }
+  if (/ProductionRuntime::\w+/.test(sources.sessionSupervisor)) {
+    addProblem(
+      problems,
+      'session supervisor ownership',
+      'session supervisor calls back into ProductionRuntime'
+    )
+  }
+  return problems
+}
+
+function checkSpaceAccessConstructionModes(sources) {
+  const problems = []
+  for (const marker of [
+    'DefaultSpaceAccessAdapter',
+    'new_with_key_epoch_repository',
+    'new_with_security_repositories',
+    'RuntimeDependency',
+    'new_for_migration_test',
+  ]) {
+    if (sources.spaceAccess.includes(marker)) {
+      addProblem(
+        problems,
+        'Space access construction modes',
+        `retired Space access surface remains: ${marker}`
+      )
+    }
+  }
+  for (const field of [
+    'active_security_session',
+    'key_epoch_repository',
+    'legacy_bootstrap_repository',
+  ]) {
+    const optionalField = new RegExp(`${field}:\\s*Option<`)
+    if (optionalField.test(sources.spaceAccess)) {
+      addProblem(
+        problems,
+        'Space access construction modes',
+        `runtime dependency remains optional: ${field}`
+      )
+    }
+  }
+  if (!sources.engineSpaceAccessWiring.includes('RuntimeSpaceAccessAdapter::new(')) {
+    addProblem(
+      problems,
+      'Space access construction modes',
+      'Engine runtime does not construct the complete runtime adapter'
+    )
+  }
+  if (!sources.configMigration.includes('MigrationSpaceAccessAdapter::new(')) {
+    addProblem(
+      problems,
+      'Space access construction modes',
+      'config migration does not construct the migration-only adapter'
+    )
+  }
+  return problems
+}
+
 function repositorySources() {
   return {
+    retiredMembershipPersistencePathPresent: [
+      'crates/uc-infra/src/db/repositories/membership_candidate_repo.rs',
+      'crates/uc-infra/src/db/repositories/membership_announcement_repo.rs',
+      'crates/uc-infra/src/db/repositories/membership_outbox_repo.rs',
+      'crates/uc-infra/src/db/repositories/membership_applied_security_update_repo.rs',
+    ].some(path => existsSync(join(REPOSITORY_ROOT, path))),
+    membershipPersistence: [
+      read('crates/uc-core/src/membership/ports.rs'),
+      read('crates/uc-core/src/membership/error.rs'),
+      read('crates/uc-core/src/membership/mod.rs'),
+      read('crates/uc-infra/src/db/repositories/mod.rs'),
+      read('crates/uc-infra/src/db/repositories/relationship_store.rs'),
+    ].join('\n'),
+    irohPeerAddressResolver: read(
+      'crates/uc-infra/src/network/iroh/peer_address_resolver.rs'
+    ),
+    irohAddressConsumers: [
+      'clipboard_dispatch_adapter.rs',
+      'connection_channel_adapter.rs',
+      'group_update_adapter.rs',
+      'membership_attestation_adapter.rs',
+      'membership_branch_recovery_adapter.rs',
+      'membership_history_exchange_adapter.rs',
+      'presence_adapter.rs',
+      'transfer_progress_adapter.rs',
+      'active_clipboard/dispatch_adapter.rs',
+      'active_clipboard/pull_client_adapter.rs',
+    ].map(path => read(`crates/uc-infra/src/network/iroh/${path}`)).join('\n'),
+    runtimeModule: read('crates/uc-engine/src/runtime/mod.rs'),
+    sessionSupervisor: read('crates/uc-engine/src/runtime/session_supervisor.rs'),
+    spaceAccess: read('crates/uc-infra/src/space/security/access.rs'),
+    configMigration: read('crates/uc-infra/src/config_migration/mod.rs'),
+    engineSpaceAccessWiring: read('crates/uc-engine/src/assembly/wire/infra.rs'),
     legacySpaceTransitionPathPresent: existsSync(
       join(REPOSITORY_ROOT, 'crates/uc-infra/src/security/admission_space_transition.rs')
     ),
@@ -1562,6 +1728,10 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkInfraSpaceAdmissionOwnership(),
     ...checkInfraSpaceSecurityOwnership(),
     ...checkRetiredLegacySpaceTransition(sources),
+    ...checkRetiredMembershipPersistence(sources),
+    ...checkIrohPeerAddressResolution(sources),
+    ...checkSessionSupervisorOwnership(sources),
+    ...checkSpaceAccessConstructionModes(sources),
     ...checkObservabilityAssemblyInterface(sources),
     ...checkDualInvitationEntry(),
     ...checkSpaceMembershipMaintenanceOwnership(),
@@ -1602,6 +1772,19 @@ function runNegativeFixtures(metadata, sources) {
   }, metadata, sources)
   expectRejected('retired Application dependency inventory', (_changed, changedSources) => {
     changedSources.applicationDeps += '\npub current_profile: RetiredWiringOnlyPort,\n'
+  }, metadata, sources)
+  expectRejected('retired membership persistence', (_changed, changedSources) => {
+    changedSources.membershipPersistence += '\ntrait MembershipCandidateRepositoryPort {}\n'
+  }, metadata, sources)
+  expectRejected('Iroh peer address resolver bypass', (_changed, changedSources) => {
+    changedSources.irohAddressConsumers +=
+      '\nasync fn bypass(&self, device: DeviceId) { self.peer_addr_repo.get(&device).await.ok().flatten(); }\n'
+  }, metadata, sources)
+  expectRejected('ProductionRuntime session builder', (_changed, changedSources) => {
+    changedSources.runtimeModule += '\nimpl ProductionRuntime { async fn build_session() {} }\n'
+  }, metadata, sources)
+  expectRejected('optional runtime Space access dependency', (_changed, changedSources) => {
+    changedSources.spaceAccess += '\nstruct Broken { active_security_session: Option<Session> }\n'
   }, metadata, sources)
   expectRejected('retired pairing transport', (_changed, changedSources) => {
     changedSources.runtime += '\nconst PAIRING_ALPN: &[u8] = b"/uniclipboard/pairing/2";\n'
