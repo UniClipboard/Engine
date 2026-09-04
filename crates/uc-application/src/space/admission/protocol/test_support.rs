@@ -119,6 +119,15 @@ struct FixedJoinerInvitationResolver {
 
 struct UnusedSponsorPorts;
 
+#[async_trait]
+impl crate::space::membership::ResolveRePairingPort for UnusedSponsorPorts {
+    async fn resolve_after_successful_pairing(
+        &self,
+    ) -> Result<(), crate::space::membership::RePairingStateError> {
+        Ok(())
+    }
+}
+
 struct RecordingSponsorState {
     events: Arc<Mutex<Vec<ProtocolEvent>>>,
     current: Mutex<Option<SponsorAdmission>>,
@@ -1284,8 +1293,10 @@ impl SpaceAdmissionProtocolTestPair {
                     Arc::new(RecordingMaintenanceWake {
                         events: Arc::clone(&events),
                     }),
+                    Arc::new(UnusedSponsorPorts),
                 ),
                 SponsorAdmissionService::new(
+                    Arc::new(UnusedSponsorPorts),
                     Arc::new(UnusedSponsorPorts),
                     Arc::new(UnusedSponsorPorts),
                     Arc::new(UnusedSponsorPorts),
@@ -1323,6 +1334,7 @@ impl SpaceAdmissionProtocolTestPair {
                     Arc::new(RecordingMaintenanceWake {
                         events: Arc::clone(&events),
                     }),
+                    Arc::new(UnusedSponsorPorts),
                 ),
                 SponsorAdmissionService::new(
                     sponsor_state.clone(),
@@ -1331,6 +1343,7 @@ impl SpaceAdmissionProtocolTestPair {
                     Arc::new(FixedSponsorComplete),
                     Arc::new(FixedSponsorComplete),
                     Arc::new(FixedSponsorSettled),
+                    Arc::new(UnusedSponsorPorts),
                 ),
                 AdmissionRecoveryService::new(
                     state.clone(),

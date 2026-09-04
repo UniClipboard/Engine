@@ -53,6 +53,7 @@ pub(crate) struct JoinerAdmissionService {
     pub(super) activation_state: Arc<dyn JoinerActivationStatePort>,
     pub(super) execute_activation: Arc<dyn ExecuteJoinerActivationPort>,
     pub(super) maintenance_wake: Arc<dyn WakeSpaceMembershipMaintenancePort>,
+    pub(super) re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
 }
 
 impl JoinerAdmissionService {
@@ -70,6 +71,7 @@ impl JoinerAdmissionService {
         activation_state: Arc<dyn JoinerActivationStatePort>,
         execute_activation: Arc<dyn ExecuteJoinerActivationPort>,
         maintenance_wake: Arc<dyn WakeSpaceMembershipMaintenancePort>,
+        re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
     ) -> Self {
         Self {
             settings,
@@ -85,6 +87,7 @@ impl JoinerAdmissionService {
             activation_state,
             execute_activation,
             maintenance_wake,
+            re_pairing,
         }
     }
 }

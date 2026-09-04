@@ -250,6 +250,7 @@ impl SpaceApplication {
             joiner_activation_state,
             execute_joiner_activation,
             deferred_maintenance_wake.clone(),
+            Arc::clone(&re_pairing),
         );
         let sponsor_admission = SponsorAdmissionService::new(
             sponsor_admission_state,
@@ -258,6 +259,7 @@ impl SpaceApplication {
             prepare_sponsor_complete,
             activate_sponsor_admission,
             prepare_sponsor_settled,
+            Arc::clone(&re_pairing),
         );
         let admission_recovery = AdmissionRecoveryService::new(
             pending_admission_recovery_state,

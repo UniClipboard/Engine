@@ -23,7 +23,10 @@ impl JoinerAdmissionService {
             }
         };
         match recovery.commit_recovery(token, transition).await {
-            Ok(_) => report.advanced_count += 1,
+            Ok(_) => match self.re_pairing.resolve_after_successful_pairing().await {
+                Ok(()) => report.advanced_count += 1,
+                Err(_) => report.deferred_count += 1,
+            },
             Err(error) => recovery.record_state_error(report, error),
         }
     }

@@ -37,6 +37,7 @@ pub(crate) struct SponsorAdmissionService {
     pub(super) prepare_complete: Arc<dyn PrepareSponsorCompletePort>,
     pub(super) activate_admission: Arc<dyn ActivateSponsorAdmissionPort>,
     pub(super) prepare_settled: Arc<dyn PrepareSponsorSettledPort>,
+    pub(super) re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
 }
 
 impl SponsorAdmissionService {
@@ -47,6 +48,7 @@ impl SponsorAdmissionService {
         prepare_complete: Arc<dyn PrepareSponsorCompletePort>,
         activate_admission: Arc<dyn ActivateSponsorAdmissionPort>,
         prepare_settled: Arc<dyn PrepareSponsorSettledPort>,
+        re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
     ) -> Self {
         Self {
             state,
@@ -55,6 +57,7 @@ impl SponsorAdmissionService {
             prepare_complete,
             activate_admission,
             prepare_settled,
+            re_pairing,
         }
     }
 }

@@ -36,11 +36,13 @@ impl SponsorAdmissionService {
         }
         match aggregate.replay_or_reject(&evidence)? {
             AdmissionReplayDecision::ExactReply(_) => {
-                return SpaceAdmissionMessageReply::new(aggregate).ok_or_else(|| {
+                let reply = SpaceAdmissionMessageReply::new(aggregate).ok_or_else(|| {
                     HandleAuthenticatedSpaceAdmissionMessageError::recovery_required(
                         anyhow::anyhow!("the saved CompleteAck reply is unavailable"),
                     )
-                });
+                })?;
+                self.resolve_re_pairing().await?;
+                return Ok(reply);
             }
             AdmissionReplayDecision::Duplicate | AdmissionReplayDecision::New => {}
         }
@@ -60,10 +62,25 @@ impl SponsorAdmissionService {
             .commit(commit_token, SponsorAdmissionMutation::new(transition))
             .await?;
         let (aggregate, _) = committed.into_parts();
-        SpaceAdmissionMessageReply::new(aggregate).ok_or_else(|| {
+        let reply = SpaceAdmissionMessageReply::new(aggregate).ok_or_else(|| {
             HandleAuthenticatedSpaceAdmissionMessageError::recovery_required(anyhow::anyhow!(
                 "the committed Sponsor Settled reply is unavailable"
             ))
-        })
+        })?;
+        self.resolve_re_pairing().await?;
+        Ok(reply)
+    }
+
+    async fn resolve_re_pairing(
+        &self,
+    ) -> Result<(), HandleAuthenticatedSpaceAdmissionMessageError> {
+        self.re_pairing
+            .resolve_after_successful_pairing()
+            .await
+            .map_err(|source| {
+                HandleAuthenticatedSpaceAdmissionMessageError::unavailable(anyhow::Error::new(
+                    source,
+                ))
+            })
     }
 }
