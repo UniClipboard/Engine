@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use diesel::RunQueryDsl;
 use uc_application::deps::{
-    LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipLedgerError,
+    CurrentSpaceIdentityPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
+    MembershipLedgerError,
 };
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::{ProfileId, SpaceId};
@@ -23,8 +24,8 @@ use uc_infra::security::{
     ProfileStorageUpgradeError, ProfileStorageUpgradeOutcome,
 };
 use uc_infra::space::{
-    InMemorySession, KeyMaterialStore, RuntimeSpaceAccessAdapter, SqliteSpaceAdmissionCredentials,
-    SqliteSpaceAdmissionState,
+    CurrentSpaceResolver, InMemorySession, KeyMaterialStore, RuntimeSpaceAccessAdapter,
+    SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState,
 };
 
 #[derive(Default)]
@@ -241,6 +242,12 @@ async fn runtime_upgrade_resumes_v2_only_after_the_lease_and_promotes_v3() {
         .unwrap();
     drop(access);
 
+    let current_space = Arc::new(CurrentSpaceResolver::new(
+        Arc::clone(&manifests),
+        vault_path.join(".current-space-id-v1"),
+        Arc::clone(&keys),
+    ));
+
     let upgrade = ProfileStorageUpgrade::for_runtime(
         root.clone(),
         root.join("uniclipboard.db"),
@@ -251,6 +258,7 @@ async fn runtime_upgrade_resumes_v2_only_after_the_lease_and_promotes_v3() {
         content_vault,
         keys,
         Arc::clone(&manifests),
+        current_space,
     );
 
     assert_eq!(
@@ -258,6 +266,90 @@ async fn runtime_upgrade_resumes_v2_only_after_the_lease_and_promotes_v3() {
         ProfileStorageUpgradeOutcome::Upgraded
     );
     assert!(manifests.load_v3_sync().unwrap().is_some());
+}
+
+#[tokio::test]
+async fn runtime_upgrade_imports_v019_identity_and_resumes_legacy_session() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("profile");
+    let vault_path = root.join("vault");
+    let profile_id = ProfileId::from("default");
+    let source_space_id = SpaceId::from_string("v019-space".to_owned());
+    let source_database = root.join("uniclipboard.db");
+    std::fs::create_dir_all(&vault_path).unwrap();
+    let source_pool = init_db_pool(source_database.to_str().unwrap()).unwrap();
+    let secure_storage = Arc::new(MemorySecureStorage::default());
+    let keys = Arc::new(AdmissionKeyManager::new(secure_storage.clone(), [0x9A; 16]));
+    let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+        vault_path.clone(),
+        Arc::clone(&keys),
+    ));
+    let content_vault = Arc::new(ProfileContentKeyVault::new(
+        root.join("profile-content-vault"),
+        secure_storage.clone(),
+        [0x9B; 16],
+    ));
+    let source_session = Arc::new(InMemorySession::new());
+    let executor = Arc::new(DieselSqliteExecutor::new(source_pool));
+    let security_repository = Arc::new(DieselSpaceSecurityStore::new(
+        executor,
+        source_session.as_ref().clone(),
+    ));
+    let access = RuntimeSpaceAccessAdapter::new(
+        Arc::new(KeyMaterialStore::new(
+            secure_storage.clone(),
+            Arc::new(JsonKeySlotStore::new(vault_path.clone())),
+        )),
+        Arc::new(DefaultCurrentProfile::for_profile(profile_id.clone())),
+        source_session,
+        security_repository.clone(),
+        security_repository,
+        Arc::clone(&content_vault),
+    );
+    access
+        .initialize(&source_space_id, &Passphrase::new("upgrade-passphrase"))
+        .await
+        .unwrap();
+    drop(access);
+    std::fs::write(
+        vault_path.join(".setup_status"),
+        serde_json::json!({
+            "has_completed": true,
+            "space_id": source_space_id.as_ref(),
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let current_space = Arc::new(CurrentSpaceResolver::new(
+        Arc::clone(&manifests),
+        vault_path.join(".current-space-id-v1"),
+        Arc::clone(&keys),
+    ));
+
+    let upgrade = ProfileStorageUpgrade::for_runtime(
+        root.clone(),
+        source_database,
+        root.join("blobs"),
+        profile_id,
+        secure_storage,
+        vault_path,
+        content_vault,
+        keys,
+        Arc::clone(&manifests),
+        Arc::clone(&current_space),
+    );
+
+    let ProfileStorageUpgradeOutcome::LegacyReady { space_id, .. } =
+        upgrade.ensure_v3().await.unwrap()
+    else {
+        panic!("legacy profile was not prepared as an existing Space");
+    };
+    assert_eq!(space_id, source_space_id);
+    assert_eq!(
+        current_space.current_space_id().await.unwrap(),
+        Some(source_space_id)
+    );
+    assert!(manifests.load_runtime_sync().unwrap().is_none());
 }
 
 #[tokio::test]

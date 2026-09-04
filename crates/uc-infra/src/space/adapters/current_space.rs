@@ -162,16 +162,19 @@ impl CurrentSpaceIdentityPort for CurrentSpaceResolver {
     }
 
     async fn requires_legacy_profile_isolation(&self) -> Result<bool, CurrentSpaceIdentityError> {
-        if self
+        let legacy_space_id = self.legacy_id.load().await?;
+        let active = self
             .generation_manifest
             .load_runtime()
             .await
-            .map_err(map_generation_manifest_error)?
-            .is_some()
-        {
-            return Ok(false);
+            .map_err(map_generation_manifest_error)?;
+        match active {
+            None => Ok(legacy_space_id.is_some()),
+            Some(ActiveRuntimeManifest::V2(_)) => Ok(false),
+            Some(ActiveRuntimeManifest::V3(manifest)) => {
+                Ok(legacy_space_id.is_some_and(|legacy| legacy == *manifest.layout().space_id()))
+            }
         }
-        Ok(self.legacy_id.load().await?.is_some())
     }
 }
 
@@ -358,6 +361,42 @@ mod tests {
             resolver.current_space_id().await.unwrap(),
             Some(SpaceId::from_str("generated-space"))
         );
+        assert!(!resolver.requires_legacy_profile_isolation().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn upgraded_legacy_v3_requires_isolation_until_the_space_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let (resolver, generation_manifest) = resolver(&directory);
+        let legacy_space = SpaceId::from_str("legacy-space");
+        resolver
+            .activate_initial_space(&legacy_space)
+            .await
+            .unwrap();
+        let target = crate::security::ActiveRuntimeManifestV3::new(
+            ActiveRuntimeLayout::new(legacy_space, [0x75; 16], [0x76; 16]).unwrap(),
+            [0x77; 16],
+        )
+        .unwrap();
+        generation_manifest
+            .promote_initial_v3(&target)
+            .await
+            .unwrap();
+
+        assert!(resolver.requires_legacy_profile_isolation().await.unwrap());
+
+        generation_manifest.clear().await.unwrap();
+        let isolated = crate::security::ActiveRuntimeManifestV3::new(
+            ActiveRuntimeLayout::new(SpaceId::from_str("isolated-space"), [0x75; 16], [0x78; 16])
+                .unwrap(),
+            [0x79; 16],
+        )
+        .unwrap();
+        generation_manifest
+            .promote_initial_v3(&isolated)
+            .await
+            .unwrap();
+
         assert!(!resolver.requires_legacy_profile_isolation().await.unwrap());
     }
 

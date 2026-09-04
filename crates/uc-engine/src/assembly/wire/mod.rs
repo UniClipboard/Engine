@@ -188,6 +188,7 @@ async fn ensure_profile_storage_v3(
     profile_content_key_vault: Arc<ProfileContentKeyVault>,
     admission_keys: Arc<AdmissionKeyManager>,
     manifests: Arc<ActiveSpaceGenerationManifestStore>,
+    current_space: Arc<uc_infra::space::CurrentSpaceResolver>,
 ) -> WiringResult<RuntimeStorageSelection> {
     let upgrade = ProfileStorageUpgrade::for_runtime(
         profile_root.to_path_buf(),
@@ -199,6 +200,7 @@ async fn ensure_profile_storage_v3(
         profile_content_key_vault,
         admission_keys,
         Arc::clone(&manifests),
+        current_space,
     );
     let outcome = upgrade
         .ensure_v3()
@@ -234,6 +236,44 @@ async fn ensure_profile_storage_v3(
         .map_err(|source| WiringError::StorageUpgradePrerequisite {
             source: anyhow::Error::new(source).context("open prepared Fresh V3 runtime layout"),
         }),
+        ProfileStorageUpgradeOutcome::LegacyReady {
+            profile_data_generation,
+            space_control_generation,
+            space_id,
+        } => {
+            let activation = V3InitialSpaceActivation::new(
+                profile_data_generation,
+                space_control_generation,
+                Arc::clone(&manifests),
+            )
+            .ok_or_else(|| WiringError::StorageUpgradePrerequisite {
+                source: anyhow::anyhow!("legacy V3 runtime generations are invalid"),
+            })?;
+            activation
+                .activate_initial_space(&space_id)
+                .await
+                .map_err(|source| WiringError::StorageUpgradePrerequisite {
+                    source: anyhow::Error::new(source)
+                        .context("activate upgraded legacy V3 runtime"),
+                })?;
+            drop(upgrade);
+            let active = manifests.load_runtime_sync().map_err(|source| {
+                WiringError::StorageUpgradePrerequisite {
+                    source: anyhow::Error::new(source)
+                        .context("reload upgraded legacy V3 runtime manifest"),
+                }
+            })?;
+            RuntimeStorageSelection::resolve(
+                profile_root,
+                legacy_database,
+                legacy_blob_root,
+                active.as_ref(),
+            )
+            .map_err(|source| WiringError::StorageUpgradePrerequisite {
+                source: anyhow::Error::new(source)
+                    .context("open upgraded legacy V3 runtime layout"),
+            })
+        }
         ProfileStorageUpgradeOutcome::Pending | ProfileStorageUpgradeOutcome::Busy => {
             Err(WiringError::StorageUpgradePending)
         }
@@ -342,6 +382,7 @@ pub async fn wire_dependencies_from_inputs(
             Arc::clone(&profile_content_key_vault),
             Arc::clone(&admission_keys),
             Arc::clone(&active_generation_manifest_store),
+            Arc::clone(&current_space_resolver),
         )
         .await?
     } else {

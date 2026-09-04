@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
+use uc_application::deps::{CurrentSpaceIdentityPort as _, InitialSpaceActivationPort as _};
 use uc_core::ids::ProfileId;
 use uc_core::ports::space::SpaceAccessStore as _;
 use uc_core::ports::SecureStoragePort;
@@ -38,7 +39,7 @@ use target::TargetGenerationStager;
 use validation::RuntimeGenerationValidator;
 
 /// 一次完整存储升级检查的稳定结果。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProfileStorageUpgradeOutcome {
     /// 当前 profile 已使用完整 V3 runtime layout。
     UpToDate,
@@ -48,6 +49,12 @@ pub enum ProfileStorageUpgradeOutcome {
     FreshReady {
         profile_data_generation: [u8; 16],
         space_control_generation: [u8; 16],
+    },
+    /// A legacy profile was converted and is ready to expose under its existing Space.
+    LegacyReady {
+        profile_data_generation: [u8; 16],
+        space_control_generation: [u8; 16],
+        space_id: uc_core::ids::SpaceId,
     },
     /// 已耐久推进一个恢复阶段，尚未完成 promotion。
     Pending,
@@ -86,6 +93,7 @@ struct UpgradeComponents {
     target: TargetGenerationStager,
     primary_payloads: Option<PrimaryPayloadConverter>,
     derived_payloads: Option<DerivedPayloadConverter>,
+    legacy_space_id: Option<uc_core::ids::SpaceId>,
 }
 
 struct RuntimeUpgradeBootstrap {
@@ -94,6 +102,25 @@ struct RuntimeUpgradeBootstrap {
     vault_path: PathBuf,
     vault: Arc<ProfileContentKeyVault>,
     keys: Arc<AdmissionKeyManager>,
+    current_space: Arc<crate::space::CurrentSpaceResolver>,
+}
+
+#[derive(serde::Deserialize)]
+struct LegacySetupStatus {
+    has_completed: bool,
+    #[serde(default)]
+    space_id: Option<String>,
+}
+
+impl LegacySetupStatus {
+    fn completed_space_id(self) -> Option<uc_core::ids::SpaceId> {
+        self.has_completed.then(|| {
+            self.space_id
+                .filter(|space_id| !space_id.is_empty())
+                .map(uc_core::ids::SpaceId::from_string)
+                .unwrap_or_else(uc_core::ids::SpaceId::new)
+        })
+    }
 }
 
 enum UpgradeMode {
@@ -123,6 +150,7 @@ impl RuntimeUpgradeBootstrap {
                 ),
                 primary_payloads: None,
                 derived_payloads: None,
+                legacy_space_id: None,
             });
         }
 
@@ -152,11 +180,14 @@ impl RuntimeUpgradeBootstrap {
                     source: anyhow::anyhow!("profile storage version changed during bootstrap"),
                 });
             }
-            None => (
-                legacy_database.to_path_buf(),
-                legacy_blob_root.to_path_buf(),
-                None,
-            ),
+            None => {
+                let legacy_space_id = self.resolve_legacy_space_id().await?;
+                (
+                    legacy_database.to_path_buf(),
+                    legacy_blob_root.to_path_buf(),
+                    legacy_space_id.map(|space_id| space_id.as_ref().to_owned()),
+                )
+            }
         };
         if let Some(parent) = source_database.parent() {
             std::fs::create_dir_all(parent).map_err(|source| {
@@ -178,7 +209,7 @@ impl RuntimeUpgradeBootstrap {
             }
         })?;
         let source_session = Arc::new(InMemorySession::new());
-        if let Some(source_space_id) = source_space_id {
+        if let Some(source_space_id) = source_space_id.as_ref() {
             let current_profile: Arc<
                 dyn uc_core::ports::security::current_profile::CurrentProfilePort,
             > = Arc::new(super::DefaultCurrentProfile::for_profile(
@@ -208,7 +239,7 @@ impl RuntimeUpgradeBootstrap {
                 Arc::clone(&self.vault),
             );
             let resumed = access
-                .try_resume_session(&uc_core::ids::SpaceId::from_string(source_space_id))
+                .try_resume_session(&uc_core::ids::SpaceId::from_string(source_space_id.clone()))
                 .await
                 .map_err(|source| ProfileStorageUpgradeError::Security {
                     source: anyhow::Error::new(source)
@@ -220,6 +251,29 @@ impl RuntimeUpgradeBootstrap {
                         "profile storage upgrade source security session is locked"
                     ),
                 });
+            }
+            if active.is_none() {
+                let material = source_session
+                    .create_profile_storage_upgrade_material(&uc_core::ids::SpaceId::from_string(
+                        source_space_id.clone(),
+                    ))
+                    .map_err(|source| ProfileStorageUpgradeError::Security {
+                        source: anyhow::Error::new(source)
+                            .context("prepare V3 content protection for legacy profile upgrade"),
+                    })?;
+                source_session
+                    .install_space_material(&material)
+                    .map_err(|source| ProfileStorageUpgradeError::Security {
+                        source: anyhow::Error::new(source)
+                            .context("activate V3 content protection for legacy profile upgrade"),
+                    })?;
+                self.vault
+                    .install_verified_space_material(&material)
+                    .await
+                    .map_err(|source| ProfileStorageUpgradeError::Security {
+                        source: anyhow::Error::new(source)
+                            .context("persist V3 content protection for legacy profile upgrade"),
+                    })?;
             }
         }
 
@@ -239,7 +293,57 @@ impl RuntimeUpgradeBootstrap {
                 source_session,
                 Arc::clone(&self.vault),
             )),
+            legacy_space_id: if active.is_none() {
+                source_space_id.map(uc_core::ids::SpaceId::from_string)
+            } else {
+                None
+            },
         })
+    }
+
+    async fn resolve_legacy_space_id(
+        &self,
+    ) -> Result<Option<uc_core::ids::SpaceId>, ProfileStorageUpgradeError> {
+        if let Some(space_id) = self
+            .current_space
+            .current_space_id()
+            .await
+            .map_err(|source| ProfileStorageUpgradeError::Security {
+                source: anyhow::Error::new(source)
+                    .context("load protected legacy Space identity for profile storage upgrade"),
+            })?
+        {
+            return Ok(Some(space_id));
+        }
+
+        let status_path = self.vault_path.join(".setup_status");
+        let bytes = match std::fs::read(&status_path) {
+            Ok(bytes) => bytes,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(ProfileStorageUpgradeError::Storage {
+                    source: anyhow::Error::new(source)
+                        .context("read legacy setup status for profile storage upgrade"),
+                });
+            }
+        };
+        let status: LegacySetupStatus = serde_json::from_slice(&bytes).map_err(|source| {
+            ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::Error::new(source)
+                    .context("decode legacy setup status for profile storage upgrade"),
+            }
+        })?;
+        let Some(space_id) = status.completed_space_id() else {
+            return Ok(None);
+        };
+        self.current_space
+            .activate_initial_space(&space_id)
+            .await
+            .map_err(|source| ProfileStorageUpgradeError::Security {
+                source: anyhow::Error::new(source)
+                    .context("protect legacy Space identity for profile storage upgrade"),
+            })?;
+        Ok(Some(space_id))
     }
 }
 
@@ -272,6 +376,7 @@ impl ProfileStorageUpgrade {
         vault: Arc<ProfileContentKeyVault>,
         keys: Arc<AdmissionKeyManager>,
         manifests: Arc<ActiveSpaceGenerationManifestStore>,
+        current_space: Arc<crate::space::CurrentSpaceResolver>,
     ) -> Self {
         Self {
             legacy_database,
@@ -284,6 +389,7 @@ impl ProfileStorageUpgrade {
                 vault_path,
                 vault,
                 keys,
+                current_space,
             }),
             profile_root,
             validator: RuntimeGenerationValidator::new(),
@@ -369,6 +475,7 @@ impl ProfileStorageUpgrade {
                 target: TargetGenerationStager::new(profile_root.clone(), source_pool, keys),
                 primary_payloads: Some(primary_payloads),
                 derived_payloads: Some(derived_payloads),
+                legacy_space_id: None,
             }),
             profile_root,
             validator: RuntimeGenerationValidator::new(),
@@ -394,6 +501,7 @@ impl ProfileStorageUpgrade {
                 target: TargetGenerationStager::cleanup_only(profile_root.clone(), keys),
                 primary_payloads: None,
                 derived_payloads: None,
+                legacy_space_id: None,
             }),
             profile_root,
             validator: RuntimeGenerationValidator::new(),
@@ -589,6 +697,13 @@ impl ProfileStorageUpgrade {
             }
             UpgradePhaseV1::Verified => {
                 if source.is_none() {
+                    if let Some(space_id) = components.legacy_space_id.clone() {
+                        return Ok(ProfileStorageUpgradeOutcome::LegacyReady {
+                            profile_data_generation: *journal.target_profile_data_generation(),
+                            space_control_generation: *journal.target_space_control_generation(),
+                            space_id,
+                        });
+                    }
                     return Ok(ProfileStorageUpgradeOutcome::FreshReady {
                         profile_data_generation: *journal.target_profile_data_generation(),
                         space_control_generation: *journal.target_space_control_generation(),
@@ -688,6 +803,33 @@ impl ProfileStorageUpgrade {
         })?)?;
         sync_parent_if_present(paths.profile_database.parent())?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod legacy_setup_status_tests {
+    use super::LegacySetupStatus;
+
+    #[test]
+    fn completed_pre_space_id_status_gets_a_recoverable_identity() {
+        let space_id = LegacySetupStatus {
+            has_completed: true,
+            space_id: None,
+        }
+        .completed_space_id()
+        .expect("completed legacy setup should remain recoverable");
+
+        assert!(!space_id.as_ref().is_empty());
+    }
+
+    #[test]
+    fn incomplete_status_does_not_become_an_existing_profile() {
+        assert!(LegacySetupStatus {
+            has_completed: false,
+            space_id: Some("stale-space".to_owned()),
+        }
+        .completed_space_id()
+        .is_none());
     }
 }
 

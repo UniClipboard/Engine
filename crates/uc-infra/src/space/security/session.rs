@@ -19,6 +19,7 @@ use uc_core::membership::{
     ContentKeyId, ContentKeyPurpose, GroupEpoch, ProtectionGroupId, SpaceKeyMaterial,
     SpaceSecurityMode,
 };
+use zeroize::Zeroizing;
 
 use crate::security::MasterKey;
 
@@ -238,6 +239,64 @@ impl InMemorySession {
             group_state,
             key_catalog,
             updated_at_ms,
+        ))
+    }
+
+    pub(crate) fn create_profile_storage_upgrade_material(
+        &self,
+        space_id: &SpaceId,
+    ) -> Result<SpaceKeyMaterial, EncryptionError> {
+        const CONTENT_KEY_INFO: &[u8] = b"uniclipboard/profile-storage-upgrade/content/v1";
+        const CONTENT_KEY_ID: &str = "legacy-profile-upgrade-v1";
+        const PROTECTION_GROUP_ID: &str = "legacy-profile-upgrade-v1";
+
+        let state = self.lock_state();
+        if state.master_key.is_none() || state.space_id.as_ref() != Some(space_id) {
+            return Err(EncryptionError::NotInitialized);
+        }
+        let legacy_key = state
+            .content_keys
+            .get(&ContentKeyId::legacy_v1())
+            .map(|entry| entry.key.clone())
+            .ok_or(EncryptionError::KeyNotFound)?;
+        drop(state);
+
+        let content_key_id = ContentKeyId::from_string(CONTENT_KEY_ID)
+            .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        let protection_group_id = ProtectionGroupId::from_string(PROTECTION_GROUP_ID)
+            .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        let hkdf = Hkdf::<Sha256>::new(Some(space_id.as_ref().as_bytes()), legacy_key.as_bytes());
+        let mut content_key_bytes = Zeroizing::new([0_u8; MasterKey::LEN]);
+        hkdf.expand(CONTENT_KEY_INFO, content_key_bytes.as_mut())
+            .map_err(|_| EncryptionError::CryptoFailure)?;
+        let content_key = MasterKey::from_bytes(content_key_bytes.as_ref())?;
+        let catalog = PersistedContentKeyCatalog {
+            version: 2,
+            entries: vec![
+                PersistedContentKeyEntry {
+                    content_key_id: ContentKeyId::legacy_v1().as_str().to_owned(),
+                    epoch: 0,
+                    key: legacy_key.as_bytes().to_vec(),
+                },
+                PersistedContentKeyEntry {
+                    content_key_id: content_key_id.as_str().to_owned(),
+                    epoch: 1,
+                    key: content_key.as_bytes().to_vec(),
+                },
+            ],
+        };
+        let mut key_state = uc_core::membership::SpaceKeyState::legacy(space_id.clone());
+        key_state
+            .mark_migrating()
+            .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        key_state
+            .mark_ready(content_key_id, protection_group_id)
+            .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        Ok(SpaceKeyMaterial::new(
+            key_state,
+            CONTENT_KEY_INFO.to_vec(),
+            encode_content_key_catalog(&catalog)?,
+            0,
         ))
     }
 
