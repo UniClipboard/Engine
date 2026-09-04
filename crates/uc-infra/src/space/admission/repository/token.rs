@@ -1,9 +1,9 @@
-use super::persisted::PersistedSpaceAdmissionRepositoryV1;
+use super::persisted::PersistedSpaceAdmissionRepositoryV2;
 use sha2::{Digest, Sha256};
 use uc_core::membership::AdmissionRecordPersistence;
 
 pub(in crate::space::admission) fn joiner_start_token<R: AdmissionRecordPersistence>(
-    state: &PersistedSpaceAdmissionRepositoryV1,
+    state: &PersistedSpaceAdmissionRepositoryV2,
     current: Option<&R>,
     source_snapshot: &[u8],
 ) -> [u8; 32] {
@@ -12,6 +12,7 @@ pub(in crate::space::admission) fn joiner_start_token<R: AdmissionRecordPersiste
     hasher.update(state.profile_generation);
     hasher.update(state.next_local_join_ordinal.to_be_bytes());
     append_optional_id(&mut hasher, state.current_local_join_id);
+    append_optional_id(&mut hasher, state.latest_local_join_id);
     append_optional_version(
         &mut hasher,
         current.map(AdmissionRecordPersistence::record_version),
@@ -58,7 +59,7 @@ pub(in crate::space::admission) fn sponsor_existing_token<R: AdmissionRecordPers
 }
 
 pub(in crate::space::admission) fn sponsor_fresh_token(
-    state: &PersistedSpaceAdmissionRepositoryV1,
+    state: &PersistedSpaceAdmissionRepositoryV2,
     admission_id: [u8; 32],
     invitation_id: [u8; 32],
     base_snapshot: &[u8],

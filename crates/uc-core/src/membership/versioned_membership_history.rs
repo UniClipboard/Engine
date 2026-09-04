@@ -1636,6 +1636,20 @@ impl VersionedMembershipHistory {
             })
     }
 
+    pub fn admission_author_for(&self, member: MemberInstanceId) -> Option<MemberInstanceId> {
+        self.events
+            .values()
+            .find_map(|event| match &event.operation {
+                MembershipOperationV2::AddDevice { admission }
+                    if admission.facts.member_instance == member =>
+                {
+                    Some(event.author_member_instance_id)
+                }
+                MembershipOperationV2::AddDevice { .. }
+                | MembershipOperationV2::RemoveDevice { .. } => None,
+            })
+    }
+
     pub fn current_position(
         &self,
     ) -> Result<BaseMembershipHistoryPosition, MembershipHistoryV2Error> {

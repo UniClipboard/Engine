@@ -170,9 +170,10 @@ impl SpaceFacade {
             Arc::clone(&settings),
             Arc::clone(&re_pairing_state),
         ));
-        let cancel_pairing_invitation = Arc::new(CancelPairingInvitationUseCase::new(Arc::clone(
-            &invitation_holder_for_facade,
-        )));
+        let cancel_pairing_invitation = Arc::new(CancelPairingInvitationUseCase::new(
+            Arc::clone(&invitation_holder_for_facade),
+            Arc::clone(&pairing_invitation),
+        ));
         let rebuild_transition = Arc::new(SpaceRebuildTransition::new(
             device_management_reset_data,
             space_security_reset,
@@ -605,11 +606,9 @@ impl SpaceFacade {
     /// the daemon can surface HTTP 409 and the UI can distinguish
     /// "nothing to cancel" from a transport failure.
     ///
-    /// Does **not** change profile readiness — only Pending invitation
-    /// aggregates are cleared. The rendezvous server is **not**
-    /// notified: stateless v2 model treats invitations as pure local
-    /// state, and any joiner that races a redeem against this cancel
-    /// will simply hit `take_matching → NotFound` on the sponsor side.
+    /// Does **not** change profile readiness. Discovery entries are retired
+    /// before local Pending invitations are cleared, so a reported success
+    /// cannot leave a displayed short code redeemable.
     #[instrument(skip_all)]
     pub async fn cancel_invitation(&self) -> Result<(), CancelInvitationError> {
         self.cancel_pairing_invitation.execute().await

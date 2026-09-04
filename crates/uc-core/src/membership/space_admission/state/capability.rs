@@ -222,6 +222,34 @@ impl JoinerAdmission {
         self.record.is_active_settled()
     }
 
+    pub const fn is_active(&self) -> bool {
+        matches!(
+            self.record.state,
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Active(_))
+        )
+    }
+
+    pub const fn rejection_reason(&self) -> Option<SpaceAdmissionRejectionReason> {
+        match &self.record.state {
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+                SpaceAdmissionRejectedState::LocalJoiner(state),
+            )) => Some(state.reason),
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+                SpaceAdmissionRejectedState::Joiner(state),
+            )) => Some(state.reason),
+            _ => None,
+        }
+    }
+
+    pub const fn active_transition_result(&self) -> Option<&AdmissionSpaceTransitionResult> {
+        match &self.record.state {
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Active(
+                SpaceAdmissionActiveState::PendingSettlement(state),
+            )) => Some(&state.transition_result),
+            _ => None,
+        }
+    }
+
     pub const fn is_cancelling(&self) -> bool {
         matches!(
             self.record.state,

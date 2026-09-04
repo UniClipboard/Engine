@@ -4,8 +4,8 @@ use diesel::sql_types::Binary;
 use uc_core::membership::{AdmissionRecordPersistence, SpaceAdmissionAggregate};
 
 use super::persisted::{
-    PersistedSpaceAdmissionRepositoryV1, StoredSpaceAdmissionV1,
-    SPACE_ADMISSION_REPOSITORY_FORMAT_V1,
+    decode_repository, PersistedSpaceAdmissionRepositoryV2, StoredSpaceAdmissionV1,
+    SPACE_ADMISSION_REPOSITORY_FORMAT_V2,
 };
 use super::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissionState};
 use crate::db::ports::DbExecutor;
@@ -23,7 +23,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
     pub(in crate::space::admission) fn load_state_on(
         &self,
         conn: &mut SqliteConnection,
-    ) -> Result<PersistedSpaceAdmissionRepositoryV1, SpaceAdmissionStateStoreError> {
+    ) -> Result<PersistedSpaceAdmissionRepositoryV2, SpaceAdmissionStateStoreError> {
         let row = sql_query(
             "SELECT encrypted_payload FROM admission_repository_state WHERE singleton_id = 1",
         )
@@ -31,7 +31,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         .optional()
         .map_err(|_| SpaceAdmissionStateStoreError::Unavailable)?;
         let Some(row) = row else {
-            return Ok(PersistedSpaceAdmissionRepositoryV1::fresh(
+            return Ok(PersistedSpaceAdmissionRepositoryV2::fresh(
                 self.keys.profile_generation(),
             ));
         };
@@ -39,12 +39,14 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             .keys
             .open_profile_payload(REPOSITORY_PAYLOAD_PURPOSE, &row.encrypted_payload)
             .map_err(map_key_error)?;
-        let state: PersistedSpaceAdmissionRepositoryV1 =
-            postcard::from_bytes(&plaintext).map_err(|_| SpaceAdmissionStateStoreError::Corrupt)?;
-        if state.format_version != SPACE_ADMISSION_REPOSITORY_FORMAT_V1
+        let state = decode_repository(&plaintext).ok_or(SpaceAdmissionStateStoreError::Corrupt)?;
+        if state.format_version != SPACE_ADMISSION_REPOSITORY_FORMAT_V2
             || state.profile_generation != self.keys.profile_generation()
             || state
                 .current_local_join_id
+                .is_some_and(|id| !state.records.contains_key(&id))
+            || state
+                .latest_local_join_id
                 .is_some_and(|id| !state.records.contains_key(&id))
         {
             return Err(SpaceAdmissionStateStoreError::Corrupt);
@@ -55,7 +57,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
     pub(in crate::space::admission) fn save_state_on(
         &self,
         conn: &mut SqliteConnection,
-        state: &PersistedSpaceAdmissionRepositoryV1,
+        state: &PersistedSpaceAdmissionRepositoryV2,
     ) -> Result<(), SpaceAdmissionStateStoreError> {
         let plaintext =
             postcard::to_stdvec(state).map_err(|_| SpaceAdmissionStateStoreError::Corrupt)?;

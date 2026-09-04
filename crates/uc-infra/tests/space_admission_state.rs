@@ -8,8 +8,8 @@ use diesel::sql_types::Binary;
 use tempfile::TempDir;
 use uc_application::deps::{
     AdmissionRecoveryTrigger, JoinerStartMutation, JoinerStartStateError, JoinerStartStatePort,
-    LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipLedgerError,
-    PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
+    LoadCurrentJoinStatusPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
+    MembershipLedgerError, PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
@@ -21,8 +21,8 @@ use uc_core::membership::{
     AdmissionShortInvitationCode, AdmissionSourceSnapshot, InvitationId, JoinId, JoinerAdmission,
     JoinerAdmissionTransition, JoinerInvitationResolution, MembershipCredential,
     PendingAdmissionExchange, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
-    SpaceAdmissionMessageKind, SpaceAdmissionRoute, SponsorAdmission, SponsorAdmissionTransition,
-    UnreadableHistoryPolicy,
+    SpaceAdmissionMessageKind, SpaceAdmissionRejectionReason, SpaceAdmissionRoute,
+    SponsorAdmission, SponsorAdmissionTransition, UnreadableHistoryPolicy,
 };
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use uc_core::security::IdentityFingerprint;
@@ -186,6 +186,46 @@ async fn committed_joiner_is_reloaded_for_recovery_after_reopen() {
     assert_eq!(pending.len(), 1);
     let (aggregate, _) = pending.into_iter().next().unwrap().into_parts();
     assert_eq!(aggregate.encode_persisted().unwrap(), expected);
+}
+
+#[tokio::test]
+async fn rejected_join_remains_queryable_after_it_becomes_terminal() {
+    let fixture = Fixture::new();
+    let loaded = JoinerStartStatePort::load(&fixture.store).await.unwrap();
+    let (ordinal, snapshot, _, _, token) = loaded.into_parts();
+    JoinerStartStatePort::commit(
+        &fixture.store,
+        token,
+        JoinerStartMutation::new(start_join_transition(0x71, 0x72, ordinal, snapshot), None),
+    )
+    .await
+    .unwrap();
+    let pending = PendingAdmissionRecoveryStatePort::load(
+        &fixture.store,
+        AdmissionRecoveryTrigger::StateChanged,
+    )
+    .await
+    .unwrap();
+    let (joiner, token) = pending.into_iter().next().unwrap().into_parts();
+    let join_id = *joiner.join_id().as_bytes();
+    let rejected = joiner
+        .reject_before_authentication(SpaceAdmissionRejectionReason::InvitationUnavailable)
+        .unwrap();
+    PendingAdmissionRecoveryStatePort::commit(&fixture.store, token, rejected)
+        .await
+        .unwrap();
+
+    let status = LoadCurrentJoinStatusPort::load_current_join(&fixture.reopen())
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        status,
+        Some(uc_application::facade::CurrentJoinStatus::Rejected {
+            join_id: actual_join_id,
+            reason: SpaceAdmissionRejectionReason::InvitationUnavailable,
+        }) if actual_join_id == join_id
+    ));
 }
 
 #[tokio::test]

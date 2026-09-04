@@ -193,6 +193,10 @@ impl InMemoryPairingInvitationHolder {
             .min_by_key(|(_, _, exp)| *exp)
     }
 
+    pub(crate) async fn pending_codes(&self) -> Vec<InvitationCode> {
+        self.state.lock().await.by_code.keys().cloned().collect()
+    }
+
     /// Drop every outstanding invitation, returning the count removed.
     ///
     /// Used by Slice4 P3 T3.2 `SpaceFacade::cancel_invitation` and

@@ -125,6 +125,7 @@ impl<E: DbExecutor + Send + Sync> JoinerStartStatePort for SqliteSpaceAdmissionS
                     let sealed = self.seal_new_record(&created).map_err(into_anyhow)?;
                     state.records.insert(created_id, sealed);
                     state.current_local_join_id = Some(created_id);
+                    state.latest_local_join_id = Some(created_id);
                     state.next_local_join_ordinal = state
                         .next_local_join_ordinal
                         .checked_add(1)
