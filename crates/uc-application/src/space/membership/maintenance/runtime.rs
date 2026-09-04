@@ -111,6 +111,7 @@ impl SpaceMembershipMaintenanceRuntime {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn start(
         maintain: Arc<MaintainSpaceMembershipUseCase>,
         peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
@@ -232,6 +233,7 @@ impl SpaceMembershipMaintenanceRuntime {
         }
     }
 
+    #[cfg(test)]
     pub fn activity(&self) -> SpaceMembershipMaintenanceActivity {
         self.activity.clone()
     }

@@ -10,11 +10,13 @@ use uc_application::deps::{
     SponsorAdmissionSecurityRecipient, SponsorAdmissionSecurityRequest,
 };
 use uc_core::ids::{DeviceId, SpaceId};
+#[cfg(test)]
+use uc_core::membership::MembershipOperationV2;
 use uc_core::membership::{
     AdmissionCandidateV1, AdmissionContinuationRoute, AdmissionMlsCommit, AdmissionMlsWelcome,
     AdmissionRole, AdmissionStagedSecurityState, HistoricalMembershipSignatureVerifier,
-    MembershipOperationV2, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
-    SponsorCandidatePreparation, VersionedMembershipHistory,
+    SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SponsorCandidatePreparation,
+    VersionedMembershipHistory,
 };
 
 use super::base_snapshot::decode_sponsor_base_snapshot;

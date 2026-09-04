@@ -41,27 +41,31 @@ use uc_core::crypto::model::{EncryptionError, Passphrase as LegacyPassphrase};
 use crate::security::crypto_model::{EncryptedBlob, KeyScope, KeySlot, WrappedMasterKey};
 use crate::security::{v1_aead, Kek, MasterKey, ProfileContentKeyVault};
 use uc_core::ids::{DeviceId, ProfileId, SpaceId};
+#[cfg(test)]
+use uc_core::membership::{AdmissionReplayId, ProtectionGroupAdmission};
 use uc_core::membership::{
-    AdmissionReplayId, BeginRevocationOutcome, BootstrapError, BootstrapId, GroupBootstrapPort,
-    GroupBootstrapResult, GroupEpoch, GroupRevocationPort, GroupRevocationResult, KeyEpochError,
-    LegacyBootstrapRecord, LegacyBootstrapRepositoryPort, LegacyBootstrapStage,
-    LegacyBootstrapStatus, MemberProtection, MemberProtectionStatus, MembershipCredential,
-    PendingGroupUpdate, PreparedRevocationResolution, ProtectionGroupAdmission, ProtectionGroupId,
-    RevocationId, RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort,
-    RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceProtectionError,
-    SpaceProtectionMode, SpaceProtectionSnapshot, SpaceProtectionStatusPort, SpaceSecurityMode,
+    BeginRevocationOutcome, BootstrapError, BootstrapId, GroupBootstrapPort, GroupBootstrapResult,
+    GroupEpoch, GroupRevocationPort, GroupRevocationResult, KeyEpochError, LegacyBootstrapRecord,
+    LegacyBootstrapRepositoryPort, LegacyBootstrapStage, LegacyBootstrapStatus, MemberProtection,
+    MemberProtectionStatus, MembershipCredential, PendingGroupUpdate, PreparedRevocationResolution,
+    ProtectionGroupId, RevocationId, RevocationOutboxMessage, RevocationRecord,
+    RevocationRepositoryPort, RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState,
+    SpaceProtectionError, SpaceProtectionMode, SpaceProtectionSnapshot, SpaceProtectionStatusPort,
+    SpaceSecurityMode,
 };
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::{SpaceAccessError, SpaceAccessStore};
-use uc_core::space_access::{
-    GroupAdmission, JoinOffer, PreparedAdmissionTargetAccess, PreparedGroupJoin, ProofDerivedKey,
-};
+#[cfg(test)]
+use uc_core::space_access::{GroupAdmission, PreparedGroupJoin};
+use uc_core::space_access::{JoinOffer, PreparedAdmissionTargetAccess, ProofDerivedKey};
 
 use super::active_space_security_session::{
     ActiveSpaceSecuritySession, ActiveSpaceSecuritySessionError,
 };
 use super::key_material::KeyMaterialStore;
-use super::mls_group::{MlsClientState, MlsGroupEngine, PendingMlsJoin};
+#[cfg(test)]
+use super::mls_group::PendingMlsJoin;
+use super::mls_group::{MlsClientState, MlsGroupEngine};
 use super::scope_identifier::scope_identifier;
 use super::session::InMemorySession;
 
@@ -625,6 +629,7 @@ impl RuntimeSpaceAccessAdapter {
         encoded.map(PreparedAdmissionTargetAccess::from_bytes)
     }
 
+    #[cfg(test)]
     pub(crate) async fn prepare_group_join(
         &self,
         device_id: &DeviceId,
@@ -639,6 +644,7 @@ impl RuntimeSpaceAccessAdapter {
         Ok(prepared)
     }
 
+    #[cfg(test)]
     pub(super) async fn admit_group_member_with_replay(
         &self,
         space_id: &SpaceId,
@@ -755,6 +761,7 @@ impl RuntimeSpaceAccessAdapter {
         Ok((group_admission, replay_admission))
     }
 
+    #[cfg(test)]
     pub(crate) async fn admit_group_member(
         &self,
         space_id: &SpaceId,
@@ -775,6 +782,7 @@ impl RuntimeSpaceAccessAdapter {
         .map(|(admission, _)| admission)
     }
 
+    #[cfg(test)]
     pub(crate) async fn install_group_join(
         &self,
         space_id: &SpaceId,
@@ -1558,6 +1566,7 @@ impl RuntimeSpaceAccessAdapter {
         })
     }
 
+    #[cfg(test)]
     async fn restore_join_install(
         &self,
         scope: &KeyScope,

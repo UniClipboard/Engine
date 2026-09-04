@@ -208,16 +208,6 @@ impl PortableCurrentSpaceIdentityPort for CurrentSpaceResolver {
     }
 }
 
-#[cfg(not(windows))]
-fn sync_parent_directory(parent: &std::path::Path) -> std::io::Result<()> {
-    std::fs::File::open(parent)?.sync_all()
-}
-
-#[cfg(windows)]
-fn sync_parent_directory(_parent: &std::path::Path) -> std::io::Result<()> {
-    Ok(())
-}
-
 fn map_generation_manifest_error(
     error: ActiveSpaceGenerationManifestStoreError,
 ) -> CurrentSpaceIdentityError {

@@ -28,6 +28,7 @@ impl ActiveSpaceSecuritySession {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn activate(
         &self,
         space_id: &SpaceId,

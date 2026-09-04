@@ -24,10 +24,7 @@ use super::exchange::{
     PendingAdmissionExchange, SavedAdmissionReply,
 };
 use super::id::{AdmissionMessageId, JoinId, SpaceAdmissionId};
-use super::message::{
-    AdmissionRole, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionMessageKind,
-    SpaceAdmissionRejectionReason,
-};
+use super::message::{SpaceAdmissionEnvelopeV1, SpaceAdmissionRejectionReason};
 use crate::pairing::invitation::FullInvitation;
 
 pub use aggregate::{

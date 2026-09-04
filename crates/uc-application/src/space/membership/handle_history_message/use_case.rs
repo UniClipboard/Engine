@@ -26,6 +26,7 @@ pub(crate) struct HandleMembershipHistoryMessageUseCase {
 }
 
 impl HandleMembershipHistoryMessageUseCase {
+    #[cfg(test)]
     pub(crate) fn new(ledger: Arc<MembershipLedger>) -> Self {
         Self {
             ledger,

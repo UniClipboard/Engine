@@ -28,7 +28,8 @@ enum LegacyMigrationPhaseV1 {
     },
     HandshakeDone {
         run_id: MigrationRunId,
-        target_space_id: SpaceId,
+        #[serde(rename = "target_space_id")]
+        _target_space_id: SpaceId,
         #[serde(default)]
         sponsor_space_person_id: Option<Uuid>,
         #[serde(default)]
@@ -36,7 +37,8 @@ enum LegacyMigrationPhaseV1 {
     },
     Swapped {
         run_id: MigrationRunId,
-        target_space_id: SpaceId,
+        #[serde(rename = "target_space_id")]
+        _target_space_id: SpaceId,
         #[serde(default)]
         sponsor_space_person_id: Option<Uuid>,
         #[serde(default)]
@@ -277,7 +279,7 @@ impl LegacyMigrationRecoveryPort for FileLegacyMigrationRecovery {
             }
             LegacyMigrationPhaseV1::HandshakeDone {
                 run_id,
-                target_space_id: _,
+                _target_space_id: _,
                 sponsor_space_person_id,
                 preserved_unreadable_records,
             } => {
@@ -291,7 +293,7 @@ impl LegacyMigrationRecoveryPort for FileLegacyMigrationRecovery {
             }
             LegacyMigrationPhaseV1::Swapped {
                 run_id,
-                target_space_id: _,
+                _target_space_id: _,
                 sponsor_space_person_id,
                 preserved_unreadable_records,
             } => {

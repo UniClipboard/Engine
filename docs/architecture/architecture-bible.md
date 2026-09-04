@@ -800,6 +800,8 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 日期 | 主题 | 长期结论 |
 | --- | --- | --- |
 | 2026-09-04 | 升级与重新配对观测补全 | Engine 组装层新增 profile 存储升级、Sponsor settlement 和重新配对状态的耗时与稳定结果记录，并为既有准入失败补齐 `error_kind`；恢复读取只记录固定触发分类，设备上线触发不附带身份。事件继续排除 profile、Space、设备、邀请、凭据、地址、路径与错误文本。 |
+| 2026-09-03 | 无用实现清理 | 删除已退役的邀请消费入口、恢复报告合并函数和冗余读取字段；仅用于内部回归的 MLS 辅助入口明确限定在测试构建内。本轮不改变产品行为或架构。 |
+| 2026-09-03 | Core 准入状态导入清理 | 删除父模块中已由子模块直接导入的三个冗余名称；本轮无行为或架构变化。 |
 | 2026-09-03 | 关键模块深化规格 | 新增规格 036，规划按五个可独立验收的 clean-cutover 切片收口本机 Clipboard 完整动作、删除退役 membership persistence、集中 Iroh peer-address resolution、深化生产 session 生命周期并让 Space security mode 构造即合法；本轮只形成待实施计划，无生产架构变化。 |
 | 2026-09-03 | Engine Space 产品接口文档校正 | `QueryDeviceGroupChoices` 与 `ChooseDeviceGroup` 是正式宿主读取设备关系、展示待处理设备组问题并提交选择的唯一稳定入口；设备信任快照嵌入统一选择视图，`QueryMembershipDiagnostics` 与 `WorkspaceConvergenceChanged` 继续仅用于 `dev-tools`。本轮只校正文档，无架构变化。 |
 | 2026-09-03 | 虚拟 Peer Network 测试套件规格 | 新增规格 034，规划在现有成员领域 port seam 上建立仅测试可达的确定性 virtual provider 与 F0-F7 快速拓扑矩阵，同时保留真实 Iroh contract、Engine smoke 和 slow lane；本轮只形成待实施计划，无生产架构变化。 |

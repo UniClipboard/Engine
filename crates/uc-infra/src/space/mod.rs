@@ -10,12 +10,13 @@ pub use adapters::{
     MembershipActivationAdapter, MembershipMemberFactsAdapter, MembershipNetworkGate,
     MembershipProjectionCleanupAdapter,
 };
+#[cfg(test)]
+pub(crate) use admission::decode_full_invitation;
+#[cfg(test)]
+pub(crate) use admission::prepare_registration;
+pub(crate) use admission::{decode_invitation_entry, encode_full_invitation};
 pub(crate) use admission::{
-    decode_full_invitation, decode_invitation_entry, encode_full_invitation, DecodedFullInvitation,
-    FullInvitationCodecError,
-};
-pub(crate) use admission::{
-    install_prepared_registration_for_control_generation, prepare_registration,
+    install_prepared_registration_for_control_generation,
     rebind_registration_to_control_generation, upgrade_registration_to_control_generation,
     verify_prepared_registration_for_control_generation,
 };

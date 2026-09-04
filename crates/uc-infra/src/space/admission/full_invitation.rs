@@ -30,6 +30,7 @@ struct FullInvitationV1 {
 pub(crate) struct DecodedFullInvitation {
     invitation_id: InvitationId,
     route: Vec<u8>,
+    #[cfg(test)]
     expires_at_ms: i64,
 }
 
@@ -42,6 +43,7 @@ impl DecodedFullInvitation {
         &self.route
     }
 
+    #[cfg(test)]
     pub(crate) const fn expires_at_ms(&self) -> i64 {
         self.expires_at_ms
     }
@@ -92,6 +94,7 @@ pub(crate) fn decode_full_invitation(
     Ok(DecodedFullInvitation {
         invitation_id,
         route: decoded.route,
+        #[cfg(test)]
         expires_at_ms: decoded.expires_at_ms,
     })
 }

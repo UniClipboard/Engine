@@ -300,6 +300,7 @@ impl InMemorySession {
         ))
     }
 
+    #[cfg(test)]
     pub(crate) fn create_legacy_bootstrap_material(
         &self,
         space_id: &SpaceId,
