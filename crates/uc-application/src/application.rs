@@ -352,6 +352,7 @@ impl ApplicationAssembly {
             runtime,
             peer_reachability_changed_events,
         } = space;
+        let re_pairing_state_store = Arc::clone(&runtime.admission.re_pairing_state_store);
         let space = Arc::new(SpaceFacade::new_dormant(SpaceFacadeDeps {
             application: self.deps.clone(),
             session: SpaceSessionDeps {
@@ -383,7 +384,7 @@ impl ApplicationAssembly {
                 relationship_reset,
                 space_security_reset,
                 space_rebuild_progress: Arc::clone(&self.deps.space_rebuild_progress),
-                re_pairing_state_store: Arc::clone(&self.deps.re_pairing_state_store),
+                re_pairing_state_store,
             },
             runtime_adapters: runtime,
             peer_reachability_changed_events,

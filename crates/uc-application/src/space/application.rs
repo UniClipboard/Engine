@@ -160,6 +160,7 @@ impl SpaceApplication {
             settings,
         } = deps;
         let SpaceAdmissionAdapters {
+            re_pairing_state_store: _,
             prepare_joiner_invitation,
             resolve_joiner_invitation,
             joiner_start_material,

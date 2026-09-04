@@ -4,6 +4,8 @@
 
 mod admission;
 mod membership;
+mod storage_upgrade;
 
 pub(crate) use admission::observe_admission;
 pub(crate) use membership::observe_membership;
+pub(crate) use storage_upgrade::record_profile_storage_upgrade;

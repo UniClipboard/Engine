@@ -14,6 +14,7 @@ use super::admission::{
     PrepareSponsorSettledPort, ResolveJoinerInvitationPort, SpaceAdmissionTransportPort,
     SponsorAdmissionStatePort,
 };
+use super::membership::RePairingStateStorePort;
 use super::membership::{
     ActivateMembershipEffectPort, AdvanceMembershipBranchTransitionPort,
     ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort, CleanupLegacyMembershipDataPort,
@@ -28,6 +29,7 @@ use super::membership::{
 ///
 /// 该类型只表达 Application 的真实依赖，不选择具体实现，也不包含观测 policy。
 pub struct SpaceAdmissionAdapters {
+    pub re_pairing_state_store: Arc<dyn RePairingStateStorePort>,
     pub prepare_joiner_invitation: Arc<dyn PrepareJoinerInvitationPort>,
     pub resolve_joiner_invitation: Arc<dyn ResolveJoinerInvitationPort>,
     pub joiner_start_material: Arc<dyn JoinerStartMaterialPort>,

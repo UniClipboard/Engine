@@ -622,6 +622,7 @@ pub async fn build_sync_engine_assembly(
     let build_admission =
         |membership_committer: Arc<dyn uc_application::deps::CommitMembershipLedgerPort>| {
             crate::assembly::observability::observe_admission(SpaceAdmissionAdapters {
+                re_pairing_state_store: Arc::clone(&space_setup.re_pairing_state_store),
                 prepare_joiner_invitation: Arc::new(DefaultJoinerInvitationPreparation),
                 resolve_joiner_invitation: handlers.joiner_invitation_resolver,
                 joiner_start_material: Arc::new(DefaultJoinerStartMaterial::new(

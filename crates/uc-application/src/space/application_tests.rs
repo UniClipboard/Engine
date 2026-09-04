@@ -751,6 +751,17 @@ impl ResolveRePairingPort for PassivePorts {
     }
 }
 
+#[async_trait]
+impl crate::space::membership::RePairingStateStorePort for PassivePorts {
+    async fn is_required(&self) -> Result<bool, RePairingStateError> {
+        Ok(false)
+    }
+
+    async fn set_required(&self, _required: bool) -> Result<(), RePairingStateError> {
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn complete_application_exposes_endpoints_before_runtime_starts() {
     let repository = Arc::new(MemoryLedger(Mutex::new(
@@ -761,6 +772,7 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
     let mut application = SpaceApplication::build_for_test(
         SpaceRuntimeAdapters {
             admission: SpaceAdmissionAdapters {
+                re_pairing_state_store: passive.clone(),
                 prepare_joiner_invitation: passive.clone(),
                 resolve_joiner_invitation: passive.clone(),
                 joiner_start_material: passive.clone(),

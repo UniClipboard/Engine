@@ -202,10 +202,10 @@ async fn ensure_profile_storage_v3(
         Arc::clone(&manifests),
         current_space,
     );
-    let outcome = upgrade
-        .ensure_v3()
-        .await
-        .map_err(|source| WiringError::StorageUpgrade { source })?;
+    let started = std::time::Instant::now();
+    let outcome = upgrade.ensure_v3().await;
+    crate::assembly::observability::record_profile_storage_upgrade(started, &outcome);
+    let outcome = outcome.map_err(|source| WiringError::StorageUpgrade { source })?;
     match outcome {
         ProfileStorageUpgradeOutcome::Upgraded | ProfileStorageUpgradeOutcome::UpToDate => {
             drop(upgrade);
@@ -919,7 +919,6 @@ pub async fn wire_dependencies_from_inputs(
             member_repo: Arc::clone(&member_repo),
         },
         space_rebuild_progress: infra.space_rebuild_progress,
-        re_pairing_state_store,
         current_space_identity,
         initial_space_activation,
         config_migration,
@@ -999,6 +998,7 @@ pub async fn wire_dependencies_from_inputs(
             admission_state,
             admission_credentials,
             admission_space_transition,
+            re_pairing_state_store,
             membership_branch_transition_executor,
             active_generation_manifest_store,
             device_management_reset_data,

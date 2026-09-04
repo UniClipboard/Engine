@@ -10,20 +10,25 @@ use uc_application::deps::{
     JoinerActivationStatePort, LoadedJoinerActivation, LoadedPendingAdmission,
     LoadedSponsorAdmission, PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
     PrepareJoinerActivationError, PrepareJoinerActivationPort, PrepareJoinerCandidateError,
-    PrepareJoinerCandidatePort, PreparedJoinerActivation, PreparedJoinerCandidateMaterial,
-    SpaceAdmissionAdapters, SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
-    SponsorAdmissionCommitToken, SponsorAdmissionMutation, SponsorAdmissionStateError,
-    SponsorAdmissionStatePort,
+    PrepareJoinerCandidatePort, PrepareSponsorSettledError, PrepareSponsorSettledPort,
+    PreparedJoinerActivation, PreparedJoinerCandidateMaterial, PreparedSponsorSettled,
+    RePairingStateError, RePairingStateStorePort, SpaceAdmissionAdapters,
+    SpaceAdmissionTransportError, SpaceAdmissionTransportPort, SponsorAdmissionCommitToken,
+    SponsorAdmissionMutation, SponsorAdmissionStateError, SponsorAdmissionStatePort,
 };
 use uc_core::membership::{
     AdmissionContinuationCredential, AdmissionEncryptedPasswordEquivalent, AdmissionPeerBinding,
     JoinerActivationPreparation, JoinerAdmissionTransition, JoinerCandidatePreparation,
     JoinerCompletePreparation, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionRoute,
+    SponsorSettlementPreparation,
 };
 
 pub(crate) fn observe_admission(adapters: SpaceAdmissionAdapters) -> SpaceAdmissionAdapters {
     let activation_policy = JoinerActivationObservationPolicy::suppress_successful_empty_loads();
     SpaceAdmissionAdapters {
+        re_pairing_state_store: Arc::new(ObservedRePairingStateStore::new(
+            adapters.re_pairing_state_store,
+        )),
         pending_admission_recovery_state: Arc::new(ObservedAdmissionRecoveryState::new(
             adapters.pending_admission_recovery_state,
             AdmissionRecoveryObservationPolicy::suppress_successful_empty_loads(),
@@ -35,6 +40,9 @@ pub(crate) fn observe_admission(adapters: SpaceAdmissionAdapters) -> SpaceAdmiss
         sponsor_admission_state: Arc::new(ObservedSponsorAdmissionState::new(
             adapters.sponsor_admission_state,
             SponsorAdmissionStateObservationPolicy::record_all(),
+        )),
+        prepare_sponsor_settled: Arc::new(ObservedSponsorSettlementPreparation::new(
+            adapters.prepare_sponsor_settled,
         )),
         prepare_joiner_candidate: Arc::new(ObservedJoinerCandidatePreparation::new(
             adapters.prepare_joiner_candidate,
@@ -53,6 +61,65 @@ pub(crate) fn observe_admission(adapters: SpaceAdmissionAdapters) -> SpaceAdmiss
             activation_policy,
         )),
         ..adapters
+    }
+}
+
+struct ObservedRePairingStateStore {
+    inner: Arc<dyn RePairingStateStorePort>,
+}
+
+impl ObservedRePairingStateStore {
+    fn new(inner: Arc<dyn RePairingStateStorePort>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl RePairingStateStorePort for ObservedRePairingStateStore {
+    async fn is_required(&self) -> Result<bool, RePairingStateError> {
+        let started = Instant::now();
+        let result = self.inner.is_required().await;
+        record_re_pairing_state("re_pairing_state_load", started, result.as_ref().copied());
+        result
+    }
+
+    async fn set_required(&self, required: bool) -> Result<(), RePairingStateError> {
+        let started = Instant::now();
+        let result = self.inner.set_required(required).await;
+        record_re_pairing_state(
+            "re_pairing_state_set",
+            started,
+            result.as_ref().map(|()| required),
+        );
+        result
+    }
+}
+
+fn record_re_pairing_state(
+    operation: &'static str,
+    started: Instant,
+    result: Result<bool, &RePairingStateError>,
+) {
+    match result {
+        Ok(required) => tracing::info!(
+            target: "admission.performance",
+            operation,
+            elapsed_ms = duration_ms(started.elapsed()),
+            outcome = "ok",
+            state = if required { "required" } else { "resolved" },
+            "re-pairing state operation completed"
+        ),
+        Err(error) => tracing::info!(
+            target: "admission.performance",
+            operation,
+            elapsed_ms = duration_ms(started.elapsed()),
+            outcome = "error",
+            error_kind = match error {
+                RePairingStateError::Unavailable => "unavailable",
+                RePairingStateError::Inconsistent => "inconsistent",
+            },
+            "re-pairing state operation completed"
+        ),
     }
 }
 
@@ -101,35 +168,52 @@ impl ObservedAdmissionRecoveryState {
         Self { inner, policy }
     }
 
-    fn record_load(started: Instant, loaded_count: usize) {
+    fn record_load(started: Instant, trigger: &'static str, loaded_count: usize) {
         tracing::info!(
             target: "admission.performance",
             operation = AdmissionRecoveryStateOperation::Load.as_str(),
             elapsed_ms = duration_ms(started.elapsed()),
             outcome = "ok",
+            trigger,
             loaded_count,
             "admission recovery state load completed"
         );
     }
 
-    fn record_load_error(started: Instant) {
+    fn record_load_error(
+        started: Instant,
+        trigger: &'static str,
+        error: &PendingAdmissionRecoveryStateError,
+    ) {
         tracing::info!(
             target: "admission.performance",
             operation = AdmissionRecoveryStateOperation::Load.as_str(),
             elapsed_ms = duration_ms(started.elapsed()),
             outcome = "error",
+            trigger,
+            error_kind = admission_recovery_error_kind(error),
             "admission recovery state load failed"
         );
     }
 
-    fn record_commit(started: Instant, success: bool) {
-        tracing::info!(
-            target: "admission.performance",
-            operation = AdmissionRecoveryStateOperation::Commit.as_str(),
-            elapsed_ms = duration_ms(started.elapsed()),
-            outcome = if success { "ok" } else { "error" },
-            "admission recovery state commit completed"
-        );
+    fn record_commit(started: Instant, error: Option<&PendingAdmissionRecoveryStateError>) {
+        match error {
+            Some(error) => tracing::info!(
+                target: "admission.performance",
+                operation = AdmissionRecoveryStateOperation::Commit.as_str(),
+                elapsed_ms = duration_ms(started.elapsed()),
+                outcome = "error",
+                error_kind = admission_recovery_error_kind(error),
+                "admission recovery state commit completed"
+            ),
+            None => tracing::info!(
+                target: "admission.performance",
+                operation = AdmissionRecoveryStateOperation::Commit.as_str(),
+                elapsed_ms = duration_ms(started.elapsed()),
+                outcome = "ok",
+                "admission recovery state commit completed"
+            ),
+        }
     }
 }
 
@@ -140,13 +224,14 @@ impl PendingAdmissionRecoveryStatePort for ObservedAdmissionRecoveryState {
         trigger: AdmissionRecoveryTrigger,
     ) -> Result<Vec<LoadedPendingAdmission>, PendingAdmissionRecoveryStateError> {
         let started = Instant::now();
+        let trigger_kind = admission_recovery_trigger_kind(trigger);
         let result = self.inner.load(trigger).await;
-        let loaded_count = result.as_ref().ok().map(Vec::len);
-        if self.policy.should_record_load(result.is_ok(), loaded_count) {
-            match loaded_count {
-                Some(loaded_count) => Self::record_load(started, loaded_count),
-                None => Self::record_load_error(started),
+        match &result {
+            Ok(loaded) if self.policy.should_record_load(true, Some(loaded.len())) => {
+                Self::record_load(started, trigger_kind, loaded.len());
             }
+            Err(error) => Self::record_load_error(started, trigger_kind, error),
+            Ok(_) => {}
         }
         result
     }
@@ -158,8 +243,27 @@ impl PendingAdmissionRecoveryStatePort for ObservedAdmissionRecoveryState {
     ) -> Result<LoadedPendingAdmission, PendingAdmissionRecoveryStateError> {
         let started = Instant::now();
         let result = self.inner.commit(token, transition).await;
-        Self::record_commit(started, result.is_ok());
+        Self::record_commit(started, result.as_ref().err());
         result
+    }
+}
+
+fn admission_recovery_trigger_kind(trigger: AdmissionRecoveryTrigger) -> &'static str {
+    match trigger {
+        AdmissionRecoveryTrigger::Startup => "startup",
+        AdmissionRecoveryTrigger::Resume => "resume",
+        AdmissionRecoveryTrigger::Periodic => "periodic",
+        AdmissionRecoveryTrigger::StateChanged => "state_changed",
+        AdmissionRecoveryTrigger::PeerOnline(_) => "peer_online",
+    }
+}
+
+fn admission_recovery_error_kind(error: &PendingAdmissionRecoveryStateError) -> &'static str {
+    match error {
+        PendingAdmissionRecoveryStateError::Locked => "locked",
+        PendingAdmissionRecoveryStateError::Unavailable => "unavailable",
+        PendingAdmissionRecoveryStateError::StateChanged => "state_changed",
+        PendingAdmissionRecoveryStateError::RecoveryRequired => "recovery_required",
     }
 }
 
@@ -192,15 +296,30 @@ impl ObservedSpaceAdmissionTransport {
         Self { inner, policy }
     }
 
-    fn record_establish(started: Instant, channel: &'static str, success: bool) {
-        tracing::info!(
-            target: "admission.performance",
-            operation = SpaceAdmissionTransportOperation::Establish.as_str(),
-            channel,
-            elapsed_ms = duration_ms(started.elapsed()),
-            outcome = if success { "ok" } else { "error" },
-            "admission channel establishment completed"
-        );
+    fn record_establish(
+        started: Instant,
+        channel: &'static str,
+        error: Option<&SpaceAdmissionTransportError>,
+    ) {
+        match error {
+            Some(error) => tracing::info!(
+                target: "admission.performance",
+                operation = SpaceAdmissionTransportOperation::Establish.as_str(),
+                channel,
+                elapsed_ms = duration_ms(started.elapsed()),
+                outcome = "error",
+                error_kind = admission_transport_error_kind(error),
+                "admission channel establishment completed"
+            ),
+            None => tracing::info!(
+                target: "admission.performance",
+                operation = SpaceAdmissionTransportOperation::Establish.as_str(),
+                channel,
+                elapsed_ms = duration_ms(started.elapsed()),
+                outcome = "ok",
+                "admission channel establishment completed"
+            ),
+        }
     }
 }
 
@@ -243,14 +362,25 @@ impl AuthenticatedAdmissionExchangePort for ObservedAuthenticatedAdmissionExchan
         let started = Instant::now();
         let result = self.inner.exchange(request).await;
         if self.policy.should_record_exchange() {
-            tracing::info!(
-                target: "admission.performance",
-                operation = SpaceAdmissionTransportOperation::Exchange.as_str(),
-                message_kind = ?request.kind(),
-                elapsed_ms = duration_ms(started.elapsed()),
-                outcome = if result.is_ok() { "ok" } else { "error" },
-                "admission message exchange completed"
-            );
+            match &result {
+                Ok(_) => tracing::info!(
+                    target: "admission.performance",
+                    operation = SpaceAdmissionTransportOperation::Exchange.as_str(),
+                    message_kind = ?request.kind(),
+                    elapsed_ms = duration_ms(started.elapsed()),
+                    outcome = "ok",
+                    "admission message exchange completed"
+                ),
+                Err(error) => tracing::info!(
+                    target: "admission.performance",
+                    operation = SpaceAdmissionTransportOperation::Exchange.as_str(),
+                    message_kind = ?request.kind(),
+                    elapsed_ms = duration_ms(started.elapsed()),
+                    outcome = "error",
+                    error_kind = admission_transport_error_kind(error),
+                    "admission message exchange completed"
+                ),
+            }
         }
         result
     }
@@ -269,7 +399,7 @@ impl SpaceAdmissionTransportPort for ObservedSpaceAdmissionTransport {
             .inner
             .establish_initial(admission_id, route, encrypted_password_equivalent)
             .await;
-        Self::record_establish(started, "initial", result.is_ok());
+        Self::record_establish(started, "initial", result.as_ref().err());
         result.map(|inner| {
             Box::new(ObservedAuthenticatedAdmissionExchange {
                 inner,
@@ -290,13 +420,24 @@ impl SpaceAdmissionTransportPort for ObservedSpaceAdmissionTransport {
             .inner
             .resume(admission_id, route, peer_binding, continuation_credential)
             .await;
-        Self::record_establish(started, "continuation", result.is_ok());
+        Self::record_establish(started, "continuation", result.as_ref().err());
         result.map(|inner| {
             Box::new(ObservedAuthenticatedAdmissionExchange {
                 inner,
                 policy: self.policy,
             }) as _
         })
+    }
+}
+
+fn admission_transport_error_kind(error: &SpaceAdmissionTransportError) -> &'static str {
+    match error {
+        SpaceAdmissionTransportError::Deferred => "deferred",
+        SpaceAdmissionTransportError::InvitationUnavailable => "invitation_unavailable",
+        SpaceAdmissionTransportError::AuthenticationRejected => "authentication_rejected",
+        SpaceAdmissionTransportError::PeerUpgradeRequired => "peer_upgrade_required",
+        SpaceAdmissionTransportError::ProtocolRejected => "protocol_rejected",
+        SpaceAdmissionTransportError::Unavailable => "unavailable",
     }
 }
 
@@ -341,15 +482,30 @@ impl ObservedSponsorAdmissionState {
         Self { inner, policy }
     }
 
-    fn record(&self, operation: SponsorAdmissionStateOperation, started: Instant, success: bool) {
+    fn record(
+        &self,
+        operation: SponsorAdmissionStateOperation,
+        started: Instant,
+        error: Option<&SponsorAdmissionStateError>,
+    ) {
         if self.policy.should_record() {
-            tracing::info!(
-                target: "admission.performance",
-                operation = operation.as_str(),
-                elapsed_ms = duration_ms(started.elapsed()),
-                outcome = if success { "ok" } else { "error" },
-                "sponsor admission state operation completed"
-            );
+            match error {
+                Some(error) => tracing::info!(
+                    target: "admission.performance",
+                    operation = operation.as_str(),
+                    elapsed_ms = duration_ms(started.elapsed()),
+                    outcome = "error",
+                    error_kind = sponsor_admission_state_error_kind(error),
+                    "sponsor admission state operation completed"
+                ),
+                None => tracing::info!(
+                    target: "admission.performance",
+                    operation = operation.as_str(),
+                    elapsed_ms = duration_ms(started.elapsed()),
+                    outcome = "ok",
+                    "sponsor admission state operation completed"
+                ),
+            }
         }
     }
 }
@@ -365,7 +521,7 @@ impl SponsorAdmissionStatePort for ObservedSponsorAdmissionState {
         self.record(
             SponsorAdmissionStateOperation::Load,
             started,
-            result.is_ok(),
+            result.as_ref().err(),
         );
         result
     }
@@ -380,9 +536,82 @@ impl SponsorAdmissionStatePort for ObservedSponsorAdmissionState {
         self.record(
             SponsorAdmissionStateOperation::Commit,
             started,
-            result.is_ok(),
+            result.as_ref().err(),
         );
         result
+    }
+}
+
+fn sponsor_admission_state_error_kind(error: &SponsorAdmissionStateError) -> &'static str {
+    match error {
+        SponsorAdmissionStateError::Locked { .. } => "locked",
+        SponsorAdmissionStateError::StateChanged { .. } => "state_changed",
+        SponsorAdmissionStateError::RecoveryRequired { .. } => "recovery_required",
+        SponsorAdmissionStateError::Unavailable { .. } => "unavailable",
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SponsorSettlementOperation {
+    Prepare,
+}
+
+impl SponsorSettlementOperation {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Prepare => "sponsor_settlement_prepare",
+        }
+    }
+}
+
+struct ObservedSponsorSettlementPreparation {
+    inner: Arc<dyn PrepareSponsorSettledPort>,
+}
+
+impl ObservedSponsorSettlementPreparation {
+    fn new(inner: Arc<dyn PrepareSponsorSettledPort>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl PrepareSponsorSettledPort for ObservedSponsorSettlementPreparation {
+    async fn prepare(
+        &self,
+        admission_id: SpaceAdmissionId,
+        preparation: SponsorSettlementPreparation<'_>,
+        complete_ack: &SpaceAdmissionEnvelopeV1,
+    ) -> Result<PreparedSponsorSettled, PrepareSponsorSettledError> {
+        let started = Instant::now();
+        let result = self
+            .inner
+            .prepare(admission_id, preparation, complete_ack)
+            .await;
+        match &result {
+            Ok(_) => tracing::info!(
+                target: "admission.performance",
+                operation = SponsorSettlementOperation::Prepare.as_str(),
+                elapsed_ms = duration_ms(started.elapsed()),
+                outcome = "ok",
+                "sponsor settlement preparation completed"
+            ),
+            Err(error) => tracing::info!(
+                target: "admission.performance",
+                operation = SponsorSettlementOperation::Prepare.as_str(),
+                elapsed_ms = duration_ms(started.elapsed()),
+                outcome = "error",
+                error_kind = prepare_sponsor_settled_error_kind(error),
+                "sponsor settlement preparation completed"
+            ),
+        }
+        result
+    }
+}
+
+fn prepare_sponsor_settled_error_kind(error: &PrepareSponsorSettledError) -> &'static str {
+    match error {
+        PrepareSponsorSettledError::Invalid { .. } => "invalid",
+        PrepareSponsorSettledError::Unavailable { .. } => "unavailable",
     }
 }
 
@@ -436,15 +665,33 @@ impl PrepareJoinerCandidatePort for ObservedJoinerCandidatePreparation {
         let started = Instant::now();
         let result = self.inner.prepare(preparation, candidate).await;
         if self.policy.should_record() {
-            tracing::info!(
-                target: "admission.performance",
-                operation = JoinerCandidateOperation::Prepare.as_str(),
-                elapsed_ms = duration_ms(started.elapsed()),
-                outcome = if result.is_ok() { "ok" } else { "error" },
-                "joiner candidate preparation completed"
-            );
+            match &result {
+                Ok(_) => tracing::info!(
+                    target: "admission.performance",
+                    operation = JoinerCandidateOperation::Prepare.as_str(),
+                    elapsed_ms = duration_ms(started.elapsed()),
+                    outcome = "ok",
+                    "joiner candidate preparation completed"
+                ),
+                Err(error) => tracing::info!(
+                    target: "admission.performance",
+                    operation = JoinerCandidateOperation::Prepare.as_str(),
+                    elapsed_ms = duration_ms(started.elapsed()),
+                    outcome = "error",
+                    error_kind = prepare_joiner_candidate_error_kind(error),
+                    "joiner candidate preparation completed"
+                ),
+            }
         }
         result
+    }
+}
+
+fn prepare_joiner_candidate_error_kind(error: &PrepareJoinerCandidateError) -> &'static str {
+    match error {
+        PrepareJoinerCandidateError::Invalid
+        | PrepareJoinerCandidateError::InvalidSource { .. } => "invalid",
+        PrepareJoinerCandidateError::Unavailable { .. } => "unavailable",
     }
 }
 
@@ -516,7 +763,14 @@ impl PrepareJoinerActivationPort for ObservedJoinerActivationPreparation {
             .prepare(admission_id, preparation, complete)
             .await;
         if self.policy.should_record() {
-            record_joiner_activation(JoinerActivationOperation::Prepare, started, result.is_ok());
+            record_joiner_activation(
+                JoinerActivationOperation::Prepare,
+                started,
+                result
+                    .as_ref()
+                    .err()
+                    .map(prepare_joiner_activation_error_kind),
+            );
         }
         result
     }
@@ -548,7 +802,10 @@ impl JoinerActivationStatePort for ObservedJoinerActivationState {
             record_joiner_activation(
                 JoinerActivationOperation::StateLoad,
                 started,
-                result.is_ok(),
+                result
+                    .as_ref()
+                    .err()
+                    .map(joiner_activation_state_error_kind),
             );
         }
         result
@@ -565,7 +822,10 @@ impl JoinerActivationStatePort for ObservedJoinerActivationState {
             record_joiner_activation(
                 JoinerActivationOperation::StateCommit,
                 started,
-                result.is_ok(),
+                result
+                    .as_ref()
+                    .err()
+                    .map(joiner_activation_state_error_kind),
             );
         }
         result
@@ -596,20 +856,64 @@ impl ExecuteJoinerActivationPort for ObservedJoinerActivationExecutor {
         let started = Instant::now();
         let result = self.inner.execute(admission_id, preparation).await;
         if self.policy.should_record() {
-            record_joiner_activation(JoinerActivationOperation::Execute, started, result.is_ok());
+            record_joiner_activation(
+                JoinerActivationOperation::Execute,
+                started,
+                result
+                    .as_ref()
+                    .err()
+                    .map(execute_joiner_activation_error_kind),
+            );
         }
         result
     }
 }
 
-fn record_joiner_activation(operation: JoinerActivationOperation, started: Instant, success: bool) {
-    tracing::info!(
-        target: "admission.performance",
-        operation = operation.as_str(),
-        elapsed_ms = duration_ms(started.elapsed()),
-        outcome = if success { "ok" } else { "error" },
-        "joiner activation operation completed"
-    );
+fn record_joiner_activation(
+    operation: JoinerActivationOperation,
+    started: Instant,
+    error_kind: Option<&'static str>,
+) {
+    match error_kind {
+        Some(error_kind) => tracing::info!(
+            target: "admission.performance",
+            operation = operation.as_str(),
+            elapsed_ms = duration_ms(started.elapsed()),
+            outcome = "error",
+            error_kind,
+            "joiner activation operation completed"
+        ),
+        None => tracing::info!(
+            target: "admission.performance",
+            operation = operation.as_str(),
+            elapsed_ms = duration_ms(started.elapsed()),
+            outcome = "ok",
+            "joiner activation operation completed"
+        ),
+    }
+}
+
+fn prepare_joiner_activation_error_kind(error: &PrepareJoinerActivationError) -> &'static str {
+    match error {
+        PrepareJoinerActivationError::Invalid { .. } => "invalid",
+        PrepareJoinerActivationError::Unavailable { .. } => "unavailable",
+    }
+}
+
+fn joiner_activation_state_error_kind(error: &JoinerActivationStateError) -> &'static str {
+    match error {
+        JoinerActivationStateError::Locked { .. } => "locked",
+        JoinerActivationStateError::StateChanged { .. } => "state_changed",
+        JoinerActivationStateError::RecoveryRequired { .. } => "recovery_required",
+        JoinerActivationStateError::Unavailable { .. } => "unavailable",
+    }
+}
+
+fn execute_joiner_activation_error_kind(error: &ExecuteJoinerActivationError) -> &'static str {
+    match error {
+        ExecuteJoinerActivationError::Invalid { .. } => "invalid",
+        ExecuteJoinerActivationError::Unavailable { .. } => "unavailable",
+    }
 }
 
 fn duration_ms(duration: Duration) -> u64 {
@@ -623,8 +927,12 @@ mod tests {
 
     use async_trait::async_trait;
     use uc_application::deps::{
-        AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply,
-        SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
+        AdmissionRecoveryTrigger, AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply,
+        ExecuteJoinerActivationError, JoinerActivationStateError,
+        PendingAdmissionRecoveryStateError, PrepareJoinerActivationError,
+        PrepareJoinerCandidateError, PrepareSponsorSettledError, RePairingStateError,
+        RePairingStateStorePort, SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
+        SponsorAdmissionStateError,
     };
     use uc_core::membership::{
         AdmissionChannelPeerId, AdmissionContinuationCredential,
@@ -634,10 +942,68 @@ mod tests {
     };
 
     use super::{
-        AdmissionRecoveryObservationPolicy, JoinerActivationObservationPolicy,
-        JoinerCandidateObservationPolicy, ObservedSpaceAdmissionTransport,
+        admission_recovery_error_kind, admission_recovery_trigger_kind,
+        admission_transport_error_kind, execute_joiner_activation_error_kind,
+        joiner_activation_state_error_kind, prepare_joiner_activation_error_kind,
+        prepare_joiner_candidate_error_kind, prepare_sponsor_settled_error_kind,
+        sponsor_admission_state_error_kind, AdmissionRecoveryObservationPolicy,
+        JoinerActivationObservationPolicy, JoinerCandidateObservationPolicy,
+        ObservedRePairingStateStore, ObservedSpaceAdmissionTransport,
         SpaceAdmissionTransportObservationPolicy, SponsorAdmissionStateObservationPolicy,
+        SponsorSettlementOperation,
     };
+
+    #[derive(Clone, Default)]
+    struct CapturedWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("captured writer lock")
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedWriter {
+        type Writer = CapturedWriter;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl CapturedWriter {
+        fn output(&self) -> String {
+            String::from_utf8(self.0.lock().expect("captured writer lock").clone())
+                .expect("captured events should be UTF-8")
+        }
+    }
+
+    struct TestRePairingStateStore {
+        required: bool,
+        fail_write: bool,
+    }
+
+    #[async_trait]
+    impl RePairingStateStorePort for TestRePairingStateStore {
+        async fn is_required(&self) -> Result<bool, RePairingStateError> {
+            Ok(self.required)
+        }
+
+        async fn set_required(&self, _required: bool) -> Result<(), RePairingStateError> {
+            if self.fail_write {
+                Err(RePairingStateError::Inconsistent)
+            } else {
+                Ok(())
+            }
+        }
+    }
 
     struct CountingAdmissionTransport {
         establish_calls: Arc<AtomicUsize>,
@@ -728,6 +1094,84 @@ mod tests {
         assert!(JoinerCandidateObservationPolicy::record_all().should_record());
     }
 
+    #[test]
+    fn admission_errors_map_to_stable_safe_kinds() {
+        assert_eq!(
+            admission_recovery_error_kind(&PendingAdmissionRecoveryStateError::StateChanged),
+            "state_changed"
+        );
+        assert_eq!(
+            admission_transport_error_kind(&SpaceAdmissionTransportError::Deferred),
+            "deferred"
+        );
+        assert_eq!(
+            sponsor_admission_state_error_kind(&SponsorAdmissionStateError::recovery_required(
+                anyhow::anyhow!("SECRET_SPONSOR_ERROR")
+            )),
+            "recovery_required"
+        );
+        assert_eq!(
+            prepare_joiner_candidate_error_kind(&PrepareJoinerCandidateError::invalid(
+                anyhow::anyhow!("SECRET_CANDIDATE_ERROR")
+            )),
+            "invalid"
+        );
+        assert_eq!(
+            prepare_joiner_activation_error_kind(&PrepareJoinerActivationError::unavailable(
+                anyhow::anyhow!("SECRET_PREPARE_ERROR")
+            )),
+            "unavailable"
+        );
+        assert_eq!(
+            joiner_activation_state_error_kind(&JoinerActivationStateError::locked(
+                anyhow::anyhow!("SECRET_STATE_ERROR")
+            )),
+            "locked"
+        );
+        assert_eq!(
+            execute_joiner_activation_error_kind(&ExecuteJoinerActivationError::invalid(
+                anyhow::anyhow!("SECRET_EXECUTE_ERROR")
+            )),
+            "invalid"
+        );
+        assert_eq!(
+            prepare_sponsor_settled_error_kind(&PrepareSponsorSettledError::invalid(
+                anyhow::anyhow!("SECRET_SETTLED_ERROR")
+            )),
+            "invalid"
+        );
+    }
+
+    #[test]
+    fn admission_recovery_triggers_map_without_peer_identity() {
+        assert_eq!(
+            admission_recovery_trigger_kind(AdmissionRecoveryTrigger::Startup),
+            "startup"
+        );
+        assert_eq!(
+            admission_recovery_trigger_kind(AdmissionRecoveryTrigger::StateChanged),
+            "state_changed"
+        );
+        assert_eq!(
+            admission_recovery_trigger_kind(AdmissionRecoveryTrigger::Periodic),
+            "periodic"
+        );
+        assert_eq!(
+            admission_recovery_trigger_kind(AdmissionRecoveryTrigger::PeerOnline(
+                uc_core::ids::DeviceId::new("SECRET_DEVICE")
+            )),
+            "peer_online"
+        );
+    }
+
+    #[test]
+    fn sponsor_settlement_operation_name_is_stable() {
+        assert_eq!(
+            SponsorSettlementOperation::Prepare.as_str(),
+            "sponsor_settlement_prepare"
+        );
+    }
+
     #[tokio::test]
     async fn authenticated_exchange_remains_wrapped_and_transparent() {
         let establish_calls = Arc::new(AtomicUsize::new(0));
@@ -769,5 +1213,53 @@ mod tests {
             Err(SpaceAdmissionTransportError::ProtocolRejected)
         ));
         assert_eq!(exchange_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn re_pairing_state_observation_records_safe_results_and_error_kinds() {
+        let writer = CapturedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(writer.clone())
+            .finish();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        tracing::dispatcher::with_default(&dispatch, || {
+            runtime.block_on(async {
+                let successful =
+                    ObservedRePairingStateStore::new(Arc::new(TestRePairingStateStore {
+                        required: true,
+                        fail_write: false,
+                    }));
+                assert!(successful.is_required().await.expect("state load"));
+                successful
+                    .set_required(false)
+                    .await
+                    .expect("state resolution");
+
+                let failing = ObservedRePairingStateStore::new(Arc::new(TestRePairingStateStore {
+                    required: false,
+                    fail_write: true,
+                }));
+                assert_eq!(
+                    failing.set_required(false).await,
+                    Err(RePairingStateError::Inconsistent)
+                );
+            });
+        });
+
+        let output = writer.output();
+        assert!(output.contains("operation=\"re_pairing_state_load\""));
+        assert!(output.contains("state=\"required\""));
+        assert!(output.contains("operation=\"re_pairing_state_set\""));
+        assert!(output.contains("state=\"resolved\""));
+        assert!(output.contains("outcome=\"ok\""));
+        assert!(output.contains("outcome=\"error\""));
+        assert!(output.contains("error_kind=\"inconsistent\""));
     }
 }

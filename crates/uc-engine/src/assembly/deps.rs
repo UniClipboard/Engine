@@ -106,6 +106,7 @@ pub struct SyncEngineDeps {
         >,
     >,
     pub admission_space_transition: Arc<dyn uc_application::deps::AdmissionSpaceTransitionPort>,
+    pub re_pairing_state_store: Arc<dyn uc_application::deps::RePairingStateStorePort>,
     pub membership_branch_transition_executor:
         Arc<dyn uc_application::deps::AdvanceMembershipBranchTransitionPort>,
     pub active_generation_manifest_store:

@@ -501,8 +501,6 @@ pub struct ApplicationDeps {
     pub device: DevicePorts,
     /// 持久化并恢复当前未完成 Space 重建目标的端口。
     pub space_rebuild_progress: Arc<dyn SpaceRebuildProgressPort>,
-    /// 读写 profile 是否需要重新配对的持久状态端口。
-    pub re_pairing_state_store: Arc<dyn RePairingStateStorePort>,
     /// 读取当前 Space 身份及旧 profile 隔离需求的端口。
     pub current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
     /// 在首次初始化完成后激活初始 Space 的端口。

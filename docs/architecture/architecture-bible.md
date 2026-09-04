@@ -554,7 +554,7 @@ Application 可以把依赖失败转换为稳定类别，但转换不能删除�
 
 该范式只复用“在组装边界装饰 port”的结构，不建立跨领域万能观测框架。每个领域分别拥有固定操作枚举、明确降噪策略和稳定事件 schema；禁止 `Observed<T>`、通用 phase 字符串注册表，以及要求业务调用方传入开始时间、成功布尔值或可选字段的记录函数。Decorator 不得改变业务结果、错误 source、重试或调用顺序，字段仍服从本节隐私边界。
 
-Space 运行期依赖按 `SpaceAdmissionAdapters` 与 `SpaceMembershipAdapters` 分组，Engine 分别只调用一次 `observe_admission` 与 `observe_membership`。Admission 只观测 Application 直接调用的 recovery、认证 transport、Sponsor 状态、Joiner candidate 与 activation port，不再嵌套观测 transition adapter 内部阶段。Membership 观测 ledger load/commit、history exchange、restricted delivery、group update dispatch，以及 branch recovery 的 group-info/external-commit；快速成功的 ledger load 在 50ms 以下降噪，任何错误均保留稳定分类事件。两组事件分别固定写入 `admission.performance` 与 `membership.performance`，不记录参数、身份、地址、业务标识或错误文本。
+Space 运行期依赖按 `SpaceAdmissionAdapters` 与 `SpaceMembershipAdapters` 分组，Engine 分别只调用一次 `observe_admission` 与 `observe_membership`。Admission 只观测 Application 直接调用的 recovery、认证 transport、Sponsor 状态与 settlement、Joiner candidate、activation 与重新配对状态 port，不再嵌套观测 transition adapter 内部阶段。Membership 观测 ledger load/commit、history exchange、restricted delivery、group update dispatch，以及 branch recovery 的 group-info/external-commit；快速成功的 ledger load 在 50ms 以下降噪，任何错误均保留稳定分类事件。Profile 启动升级在 Engine 组装层围绕 Infra 深模块的一次完整调用记录到 `storage.performance`。事件只包含固定操作、结果、稳定失败分类、计数与耗时，不记录参数、身份、地址、业务标识、路径或错误文本。
 
 成员资料交接日志记录排队、发送开始、接收确认和重试四个阶段；每条只包含脱敏目标身份、资料数量、批次数、单批大小、单批上限、尝试次数和稳定失败类别。重试还记录下一次尝试时间。设备名、地址原文、安全资料和它们的摘要都不得写入日志。
 
@@ -799,6 +799,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 | 日期 | 主题 | 长期结论 |
 | --- | --- | --- |
+| 2026-09-04 | 升级与重新配对观测补全 | Engine 组装层新增 profile 存储升级、Sponsor settlement 和重新配对状态的耗时与稳定结果记录，并为既有准入失败补齐 `error_kind`；恢复读取只记录固定触发分类，设备上线触发不附带身份。事件继续排除 profile、Space、设备、邀请、凭据、地址、路径与错误文本。 |
 | 2026-09-03 | 关键模块深化规格 | 新增规格 036，规划按五个可独立验收的 clean-cutover 切片收口本机 Clipboard 完整动作、删除退役 membership persistence、集中 Iroh peer-address resolution、深化生产 session 生命周期并让 Space security mode 构造即合法；本轮只形成待实施计划，无生产架构变化。 |
 | 2026-09-03 | Engine Space 产品接口文档校正 | `QueryDeviceGroupChoices` 与 `ChooseDeviceGroup` 是正式宿主读取设备关系、展示待处理设备组问题并提交选择的唯一稳定入口；设备信任快照嵌入统一选择视图，`QueryMembershipDiagnostics` 与 `WorkspaceConvergenceChanged` 继续仅用于 `dev-tools`。本轮只校正文档，无架构变化。 |
 | 2026-09-03 | 虚拟 Peer Network 测试套件规格 | 新增规格 034，规划在现有成员领域 port seam 上建立仅测试可达的确定性 virtual provider 与 F0-F7 快速拓扑矩阵，同时保留真实 Iroh contract、Engine smoke 和 slow lane；本轮只形成待实施计划，无生产架构变化。 |
@@ -902,7 +903,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-09-01 | Engine port decorator 观测范式 | 持续跨层观测统一归 `crates/uc-engine/src/assembly/observability/<domain>.rs`（规模增长后可拆同名子目录）：具体 decorator 实现 Application port，领域装配入口集中选择 policy，返回 port 的能力继续包装。禁止跨领域万能 `Observed<T>`、字符串 phase 注册表及业务调用点手工计时；该范式可扩展到剪贴板、成员和其他领域而不共享业务事件 schema。 |
 | 2026-09-01 | 配对性能日志语言统一 | `admission.performance` decorator 与性能验收日志使用英文消息和固定结构化字段；本轮不改变准入流程、持久化语义或生产超时。 |
 | 2026-09-03 | Space 观测装配收敛与推广准则规划 | 更新规格 035：先把准入观测收敛为“Application-owned adapter bundle → Engine 单一 seam 入口 → 同型 bundle”，再以同一结构覆盖成员账本与认证网络调用。仓库推广规则按真实装配 seam 而非宽泛业务领域划分；Clipboard/Blob 保持现有进程期与 network binding 两阶段装配，后继观测分别收口，不为单个 `observe_<domain>` 制造人工汇合点。规格保留调用级阶段耗时且只观测 Application 直接调用的 port；当前生产架构与事件尚未切换。 |
-| 2026-09-03 | 035 Space 观测装配实施 | `SpaceRuntimeAdapters` 已收敛为 Application-owned admission/membership bundle；Engine 在同一 Space seam 分别一次装饰完整 bundle，删除 raw/observed 镜像准入 bundle与独立 transition 观测入口。Membership 新增七个调用级操作的固定耗时、结果分类和 50ms ledger-load 降噪，架构门禁阻止镜像类型、第二入口、公开 decorator 及 Application 持续计时回流；Clipboard/Blob 的两阶段装配保持不变。 |
+| 2026-09-03 | 035 Space 观测装配实施 | `SpaceRuntimeAdapters` 已收敛为 Application-owned admission/membership bundle；Engine 在同一 Space seam 分别一次装饰完整 bundle，删除 raw/observed 镜像准入 bundle 与独立 transition 观测入口。Membership 新增七个调用级操作的固定耗时、结果分类和 50ms ledger-load 降噪，架构门禁阻止镜像类型、第二入口、公开 decorator 及 Application 持续计时回流；Clipboard/Blob 的两阶段装配保持不变。 |
 | 2026-09-01 | Space transition 旧拆分规划（已取代） | 当时规格 032 计划以私有流程 executor、generation activation、rewrap 与耐久文件模块拆分旧 V2 transition；033 完成后的生产可达性审计证明该方案会保留已退休 rewrap，已由 2026-09-02 的 legacy retirement 重基线取代。本条只保留规划历史，不是实施依据。 |
 | 2026-09-01 | 033 活动 generation 第一切片 | Core 新增 `ActiveRuntimeLayout`，只固定当前 Space、profile data generation 与 Space control generation 的合法组合；Infra 新增 V3 manifest 的规范 digest、领域映射和只读版本识别。生产 promotion 与运行路径仍保持 V2，合法 V3 在完整升级接线前以不支持版本失败关闭；未修改内容密码 port，也未改变 CrossSpace 行为。 |
 | 2026-09-01 | 033 profile content key vault 第二切片 | Infra 新增自有目录的 `ProfileContentKeyVault` 深模块，以独立 secure-storage key 整体 AEAD 保存多个历史保护组目录，完整安装负责规范合并、全 profile key identity 冲突拒绝和原子替换，精确解析不依赖当前 Space。session 与 vault 共用单一 V2 content-key catalog codec；缺钥、未知 framing、篡改均失败关闭，Factory Reset 同时擦除独立 key。当前未接入 production session、V3 manifest promotion 或 CrossSpace。 |
