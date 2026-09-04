@@ -585,6 +585,61 @@ async fn empty_profile_uses_the_same_durable_recovery_path() {
 }
 
 #[tokio::test]
+async fn fresh_profile_restart_reuses_generations_after_runtime_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = directory.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    let secure_storage = Arc::new(MemorySecureStorage::default());
+    let keys = Arc::new(AdmissionKeyManager::new(secure_storage.clone(), [0x32; 16]));
+    let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+        vault.clone(),
+        Arc::clone(&keys),
+    ));
+    let upgrade = new_production_upgrade_from_pool(
+        &vault,
+        init_db_pool(vault.join("source.sqlite").to_str().unwrap()).unwrap(),
+        vault.join("blobs"),
+        secure_storage.clone(),
+        Arc::clone(&keys),
+        Arc::clone(&manifests),
+    );
+
+    let ProfileStorageUpgradeOutcome::FreshReady {
+        profile_data_generation,
+        space_control_generation,
+    } = upgrade.ensure_v3().await.unwrap()
+    else {
+        panic!("fresh profile did not expose its prepared V3 generations");
+    };
+    let layout =
+        ProfileRuntimeLayout::prepared(&vault, &profile_data_generation, &space_control_generation);
+    let profile_pool = init_db_pool(layout.profile_database().to_str().unwrap()).unwrap();
+    diesel::sql_query(
+        "CREATE TABLE runtime_write_probe (id INTEGER PRIMARY KEY NOT NULL, value BLOB NOT NULL)",
+    )
+    .execute(&mut profile_pool.get().unwrap())
+    .unwrap();
+    drop(profile_pool);
+    drop(upgrade);
+
+    let reopened = new_production_upgrade_from_pool(
+        &vault,
+        init_db_pool(vault.join("source.sqlite").to_str().unwrap()).unwrap(),
+        vault.join("blobs"),
+        secure_storage,
+        keys,
+        manifests,
+    );
+    assert_eq!(
+        reopened.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::FreshReady {
+            profile_data_generation,
+            space_control_generation,
+        }
+    );
+}
+
+#[tokio::test]
 async fn held_profile_lease_returns_busy_without_creating_a_journal() {
     let directory = tempfile::tempdir().unwrap();
     let vault = directory.path().join("vault");

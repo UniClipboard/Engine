@@ -588,16 +588,17 @@ impl ProfileStorageUpgrade {
                 self.persistence.save_journal(&journal).await?;
             }
             UpgradePhaseV1::Verified => {
-                self.derived_payloads(components)?
-                    .verify(&journal, &components.target)
-                    .await?;
-                self.validator.verify(&journal, &components.target)?;
-                let Some(source) = source.as_ref() else {
+                if source.is_none() {
                     return Ok(ProfileStorageUpgradeOutcome::FreshReady {
                         profile_data_generation: *journal.target_profile_data_generation(),
                         space_control_generation: *journal.target_space_control_generation(),
                     });
-                };
+                }
+                self.derived_payloads(components)?
+                    .verify(&journal, &components.target)
+                    .await?;
+                self.validator.verify(&journal, &components.target)?;
+                let source = source.as_ref().expect("source checked above");
                 let target = journal.target_manifest(source)?;
                 let promotion = self
                     .manifests
