@@ -7,6 +7,8 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uc_core::membership::{SpaceAdmissionEnvelopeV1, SpaceAdmissionMessageKind};
 
+use super::trace_context::WireTraceContext;
+
 const WIRE_MAGIC: [u8; 4] = *b"UCSA";
 const WIRE_VERSION: u8 = 1;
 const HEADER_LEN: usize = 10;
@@ -76,6 +78,7 @@ pub(super) struct ContinuationHelloV1 {
 pub(super) struct AuthenticatedEnvelopeV1 {
     pub nonce: [u8; 32],
     pub canonical_envelope: Vec<u8>,
+    pub trace_context: Option<WireTraceContext>,
     pub mac: Vec<u8>,
 }
 

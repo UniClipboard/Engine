@@ -1,12 +1,14 @@
 //! Bounded membership-history exchange on authenticated Iroh connections.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr};
+use serde::{Deserialize, Serialize};
+use tracing::Instrument;
 use uc_application::deps::{
     RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
     RestrictedMembershipDeliveryPort,
@@ -19,16 +21,28 @@ use uc_core::membership::{
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::PeerAddressRepositoryPort;
+use uc_observability_contract::diagnostics::{
+    complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
+    DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
+};
 
 use super::connect_with_staggered_retry;
 use super::peer_address_resolver::PeerAddressResolver;
+use super::trace_context::{inject_current, set_remote_parent, WireTraceContext};
 
 pub const MEMBERSHIP_HISTORY_EXCHANGE_ALPN: &[u8] = b"uniclipboard/membership-history/3";
 
 const WIRE_VERSION: u8 = 3;
+const REQUEST_LAYOUT_MARKER: &[u8; 4] = b"UCT1";
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const ACCEPTED: u8 = 1;
 const REJECTED: u8 = 2;
+
+#[derive(Serialize, Deserialize)]
+struct WireMembershipHistoryRequest {
+    trace_context: Option<WireTraceContext>,
+    message: MembershipHistoryMessage,
+}
 
 pub struct IrohMembershipHistoryExchangeAdapter {
     endpoint: Arc<Endpoint>,
@@ -82,7 +96,7 @@ impl MembershipHistoryExchangePort for IrohMembershipHistoryExchangeAdapter {
         recipient: &DeviceId,
         message: MembershipHistoryMessage,
     ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
-        let payload = encode_message(&message)?;
+        let payload = encode_request(message)?;
         let address = self
             .resolve_addr(recipient)
             .await
@@ -185,43 +199,61 @@ impl ProtocolHandler for IrohMembershipHistoryExchangeHandler {
                 return Ok(());
             }
         };
-        let message: MembershipHistoryMessage = match decode_message(&message) {
-            Ok(message) => message,
+        let request = match decode_request(&message) {
+            Ok(request) => request,
             Err(_) => {
                 reject(&mut send).await;
                 return Ok(());
             }
         };
         let Some(source_device) = self
-            .resolve_source_device(connection.remote_id().as_bytes(), &message)
+            .resolve_source_device(connection.remote_id().as_bytes(), &request.message)
             .await
         else {
             reject(&mut send).await;
             return Ok(());
         };
-        let response = match self
-            .state
-            .endpoint
-            .handle_membership_history_exchange(&source_device, message)
-            .await
-        {
-            Ok(response) => response,
-            Err(_) => {
-                reject(&mut send).await;
-                return Ok(());
-            }
-        };
-        let payload = match encode_message(&response) {
-            Ok(payload) => payload,
-            _ => {
-                reject(&mut send).await;
-                return Ok(());
-            }
-        };
-        let _ = send.write_all(&[ACCEPTED]).await;
-        let _ = write_message(&mut send, &payload).await;
+        let span = operation_span(OperationContext {
+            domain: DiagnosticDomain::SpaceMembership,
+            operation: DiagnosticOperation::MembershipHistorySync,
+            role: DiagnosticRole::Member,
+            kind: DiagnosticSpanKind::Server,
+            flow: None,
+        });
+        let _ = set_remote_parent(&span, request.trace_context.as_ref());
+        let started = Instant::now();
+        let result = async {
+            let response = self
+                .state
+                .endpoint
+                .handle_membership_history_exchange(&source_device, request.message)
+                .await
+                .map_err(|error| history_endpoint_error_type(&error))?;
+            let payload =
+                encode_message(&response).map_err(|_| DiagnosticErrorType::DecodeFailed)?;
+            send.write_all(&[ACCEPTED])
+                .await
+                .map_err(|_| DiagnosticErrorType::StreamFailed)?;
+            write_message(&mut send, &payload)
+                .await
+                .map_err(|_| DiagnosticErrorType::StreamFailed)
+        }
+        .instrument(span.clone())
+        .await;
+        span.in_scope(|| record_server_completion(started.elapsed(), result.as_ref().err()));
+        if result.is_err() {
+            reject(&mut send).await;
+        }
         let _ = connection.closed().await;
         Ok(())
+    }
+}
+
+fn history_endpoint_error_type(error: &MembershipHistoryExchangeError) -> DiagnosticErrorType {
+    match error {
+        MembershipHistoryExchangeError::Offline => DiagnosticErrorType::Unavailable,
+        MembershipHistoryExchangeError::Rejected => DiagnosticErrorType::PeerRejected,
+        MembershipHistoryExchangeError::Transport => DiagnosticErrorType::StreamFailed,
     }
 }
 
@@ -236,6 +268,61 @@ fn encode_message(
         return Err(MembershipHistoryExchangeError::Transport);
     }
     Ok(payload)
+}
+
+fn encode_request(
+    message: MembershipHistoryMessage,
+) -> Result<Vec<u8>, MembershipHistoryExchangeError> {
+    let mut payload = vec![WIRE_VERSION];
+    payload.extend_from_slice(REQUEST_LAYOUT_MARKER);
+    payload.extend(
+        postcard::to_stdvec(&WireMembershipHistoryRequest {
+            trace_context: inject_current(),
+            message,
+        })
+        .map_err(|_| MembershipHistoryExchangeError::Transport)?,
+    );
+    if payload.len() > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE {
+        return Err(MembershipHistoryExchangeError::Transport);
+    }
+    Ok(payload)
+}
+
+fn decode_request(
+    payload: &[u8],
+) -> Result<WireMembershipHistoryRequest, MembershipHistoryExchangeError> {
+    let Some((&version, body)) = payload.split_first() else {
+        return Err(MembershipHistoryExchangeError::Transport);
+    };
+    let Some(body) = body.strip_prefix(REQUEST_LAYOUT_MARKER) else {
+        return Err(MembershipHistoryExchangeError::Transport);
+    };
+    if version != WIRE_VERSION
+        || body.is_empty()
+        || payload.len() > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE
+    {
+        return Err(MembershipHistoryExchangeError::Transport);
+    }
+    postcard::from_bytes(body).map_err(|_| MembershipHistoryExchangeError::Transport)
+}
+
+fn record_server_completion(elapsed: Duration, error: Option<&DiagnosticErrorType>) {
+    let completion = match error {
+        Some(error) => OperationCompletion::failed(
+            DiagnosticDomain::SpaceMembership,
+            DiagnosticOperation::MembershipHistorySync,
+            DiagnosticRole::Member,
+            *error,
+            elapsed,
+        ),
+        None => OperationCompletion::succeeded(
+            DiagnosticDomain::SpaceMembership,
+            DiagnosticOperation::MembershipHistorySync,
+            DiagnosticRole::Member,
+            elapsed,
+        ),
+    };
+    complete_operation(completion);
 }
 
 fn decode_message(
@@ -378,6 +465,9 @@ async fn reject(send: &mut iroh::endpoint::SendStream) {
 
 #[cfg(test)]
 mod tests {
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use tracing_subscriber::layer::SubscriberExt;
     use uc_core::ids::DeviceId;
     use uc_core::membership::{
         AdmissionChangeFacts, MembershipCredential, MembershipHistoryAckV3,
@@ -387,8 +477,8 @@ mod tests {
     use uc_core::security::IdentityFingerprint;
 
     use super::{
-        checked_message_length, decode_message, encode_message, introduced_device,
-        MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
+        checked_message_length, decode_message, decode_request, encode_message, encode_request,
+        introduced_device, MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
     };
 
     #[test]
@@ -416,6 +506,79 @@ mod tests {
         let mut old_version_with_invalid_body = vec![1];
         old_version_with_invalid_body.extend([0xff; 32]);
         assert!(decode_message(&old_version_with_invalid_body).is_err());
+    }
+
+    #[test]
+    fn history_request_layout_is_explicit_and_keeps_context_private() {
+        let message = MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid);
+        let encoded = encode_request(message.clone()).expect("request encodes");
+
+        assert_eq!(&encoded[..5], b"\x03UCT1");
+        let decoded = decode_request(&encoded).expect("request decodes");
+        assert_eq!(decoded.message, message);
+        assert!(decoded.trace_context.is_none());
+        assert!(decode_request(&encode_message(&message).expect("response encodes")).is_err());
+    }
+
+    #[test]
+    fn history_request_creates_a_real_server_parent_after_peer_resolution() {
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer()
+                .with_tracer(provider.tracer("membership-history-trace-test"))
+                .with_context_activation(true),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            let client = uc_observability_contract::diagnostics::operation_span(
+                uc_observability_contract::diagnostics::OperationContext {
+                    domain: uc_observability_contract::diagnostics::DiagnosticDomain::SpaceMembership,
+                    operation: uc_observability_contract::diagnostics::DiagnosticOperation::MembershipHistorySync,
+                    role: uc_observability_contract::diagnostics::DiagnosticRole::Member,
+                    kind: uc_observability_contract::diagnostics::DiagnosticSpanKind::Client,
+                    flow: None,
+                },
+            );
+            let _client_entered = client.enter();
+            let encoded = encode_request(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::Invalid,
+            ))
+            .expect("request encodes");
+            let request = decode_request(&encoded).expect("request decodes");
+            let server = uc_observability_contract::diagnostics::operation_span(
+                uc_observability_contract::diagnostics::OperationContext {
+                    domain: uc_observability_contract::diagnostics::DiagnosticDomain::SpaceMembership,
+                    operation: uc_observability_contract::diagnostics::DiagnosticOperation::MembershipHistorySync,
+                    role: uc_observability_contract::diagnostics::DiagnosticRole::Member,
+                    kind: uc_observability_contract::diagnostics::DiagnosticSpanKind::Server,
+                    flow: None,
+                },
+            );
+            assert!(super::set_remote_parent(
+                &server,
+                request.trace_context.as_ref()
+            ));
+            let _server_entered = server.enter();
+        });
+        provider.force_flush().expect("trace flush");
+
+        let spans = exporter.get_finished_spans().expect("finished spans");
+        assert_eq!(spans.len(), 2);
+        let client = spans
+            .iter()
+            .find(|span| span.parent_span_id == opentelemetry::trace::SpanId::INVALID)
+            .expect("client span");
+        let server = spans
+            .iter()
+            .find(|span| span.parent_span_id == client.span_context.span_id())
+            .expect("server span");
+        assert_eq!(
+            server.span_context.trace_id(),
+            client.span_context.trace_id()
+        );
     }
 
     #[test]

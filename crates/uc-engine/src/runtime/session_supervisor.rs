@@ -1,16 +1,21 @@
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{error, info, warn, Instrument};
 use uc_application::facade::{
     AppFacade, ApplicationRuntime, ClipboardInboundEvent, ClipboardInboundEventAction,
     ClipboardInboundEventPort,
 };
 use uc_core::TaskRegistry;
 use uc_infra::fs::{FsAtomicPublisher, FsHiddenPathMarker, FsInboundFileTarget};
+use uc_observability_contract::diagnostics::{
+    complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
+    DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
+};
 
 use crate::assembly::deps::WiredDependencies;
 #[cfg(feature = "lan-compat")]
@@ -78,6 +83,44 @@ struct SessionOperationGateState {
     open: bool,
     active: usize,
     cancellation: CancellationToken,
+}
+
+fn session_lifecycle_span() -> tracing::Span {
+    operation_span(OperationContext {
+        domain: DiagnosticDomain::Runtime,
+        operation: DiagnosticOperation::SessionLifecycle,
+        role: DiagnosticRole::Local,
+        kind: DiagnosticSpanKind::Internal,
+        flow: None,
+    })
+}
+
+async fn observe_session_lifecycle<T>(
+    future: impl Future<Output = Result<T, EngineError>>,
+) -> Result<T, EngineError> {
+    let started = std::time::Instant::now();
+    let span = session_lifecycle_span();
+    let result = future.instrument(span.clone()).await;
+    span.in_scope(|| {
+        let completion = if result.is_ok() {
+            OperationCompletion::succeeded(
+                DiagnosticDomain::Runtime,
+                DiagnosticOperation::SessionLifecycle,
+                DiagnosticRole::Local,
+                started.elapsed(),
+            )
+        } else {
+            OperationCompletion::failed(
+                DiagnosticDomain::Runtime,
+                DiagnosticOperation::SessionLifecycle,
+                DiagnosticRole::Local,
+                DiagnosticErrorType::Internal,
+                started.elapsed(),
+            )
+        };
+        complete_operation(completion);
+    });
+    result
 }
 
 impl SessionSupervisor {
@@ -198,77 +241,72 @@ impl SessionSupervisor {
             Some(session) => Arc::clone(&session.facade),
             None => return Ok(None),
         };
-        tracing::debug!("运行时 Space transition 检查开始");
-        if !facade
-            .has_pending_space_transition()
-            .await
-            .map_err(|error| {
-                operation_error_with_code(1103, "inspect runtime space transition", error)
-            })?
-        {
-            return Ok(None);
-        }
-        tracing::info!("运行时发现待完成 Space transition");
-        self.operations.close_and_wait(None).await?;
-        tracing::info!("运行时 Space transition 已关闭新操作并等待在途操作");
         match facade.has_pending_space_transition().await {
+            Ok(false) => return Ok(None),
             Ok(true) => {}
-            Ok(false) => {
-                tracing::info!("运行时 Space transition 二次确认已无待处理状态");
-                self.operations.reopen();
-                return Ok(None);
-            }
             Err(error) => {
-                self.operations.reopen();
-                return Err(operation_error_with_code(
-                    1103,
-                    "confirm runtime space transition",
-                    error,
-                ));
+                let error =
+                    operation_error_with_code(1103, "inspect runtime space transition", error);
+                return observe_session_lifecycle(async { Err(error) }).await;
             }
         }
-
-        let session = self
-            .session
-            .lock()
-            .await
-            .take()
-            .ok_or_else(super::operation_unavailable_error)?;
-        session
-            .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
-            .await;
-        tracing::info!("运行时 Space transition 已关闭旧 session");
-        let completed = facade.complete_pending_space_transition().await;
-        match completed {
-            Ok(_) => {
-                tracing::info!("运行时 Space transition 持久步骤已完成");
-                self.install_new_session(true).await?;
-                tracing::info!("运行时 Space transition 新 session 已安装");
-                let revision = self
-                    .current_facade()
-                    .await?
-                    .query_device_group_choices()
-                    .await
-                    .map_err(|error| {
-                        operation_error_with_code(
-                            1103,
-                            "query transitioned device trust revision",
-                            error,
-                        )
-                    })?
-                    .revision;
-                Ok(Some(revision))
-            }
-            Err(error) => {
-                tracing::warn!("运行时 Space transition 持久步骤失败，开始恢复 session");
-                let original =
-                    operation_error_with_code(1103, "complete runtime space transition", error);
-                match self.install_new_session(false).await {
-                    Ok(()) => Err(original),
-                    Err(restore_error) => Err(restore_error),
+        observe_session_lifecycle(async {
+            self.operations.close_and_wait(None).await?;
+            match facade.has_pending_space_transition().await {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.operations.reopen();
+                    return Ok(None);
+                }
+                Err(error) => {
+                    self.operations.reopen();
+                    return Err(operation_error_with_code(
+                        1103,
+                        "confirm runtime space transition",
+                        error,
+                    ));
                 }
             }
-        }
+
+            let session = self
+                .session
+                .lock()
+                .await
+                .take()
+                .ok_or_else(super::operation_unavailable_error)?;
+            session
+                .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
+                .await;
+            let completed = facade.complete_pending_space_transition().await;
+            match completed {
+                Ok(_) => {
+                    self.install_new_session(true).await?;
+                    let revision = self
+                        .current_facade()
+                        .await?
+                        .query_device_group_choices()
+                        .await
+                        .map_err(|error| {
+                            operation_error_with_code(
+                                1103,
+                                "query transitioned device trust revision",
+                                error,
+                            )
+                        })?
+                        .revision;
+                    Ok(Some(revision))
+                }
+                Err(error) => {
+                    let original =
+                        operation_error_with_code(1103, "complete runtime space transition", error);
+                    match self.install_new_session(false).await {
+                        Ok(()) => Err(original),
+                        Err(restore_error) => Err(restore_error),
+                    }
+                }
+            }
+        })
+        .await
     }
 
     pub(super) async fn reset_space(
@@ -773,7 +811,64 @@ impl Drop for SessionOperationLease {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
+    use tracing::instrument::WithSubscriber;
+
     use super::*;
+
+    #[derive(Clone, Default)]
+    struct CapturedWriter(Arc<StdMutex<Vec<u8>>>);
+
+    impl Write for CapturedWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedWriter {
+        type Writer = Self;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn session_lifecycle_records_an_early_failure_as_the_total_result() {
+        let writer = CapturedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(writer.clone())
+            .finish();
+
+        let result =
+            observe_session_lifecycle(async { Err::<(), _>(operation_unavailable_error()) })
+                .with_subscriber(subscriber)
+                .await;
+
+        assert!(result.is_err());
+        let output = String::from_utf8(
+            writer
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )
+        .expect("UTF-8 logs");
+        assert!(output.contains("uc.operation=\"session_lifecycle\""));
+        assert!(output.contains("uc.outcome=\"error\""));
+        assert!(output.contains("error.type=\"internal\""));
+    }
 
     #[test]
     fn active_clipboard_event_preserves_mobile_sse_identity() {

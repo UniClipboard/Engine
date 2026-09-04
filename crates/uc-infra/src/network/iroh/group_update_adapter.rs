@@ -1,25 +1,40 @@
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr};
+use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use uc_core::membership::{
-    GroupRevocationPort, GroupUpdateDispatchError, GroupUpdateDispatchPort, PendingGroupUpdate,
+    GroupRevocationPort, GroupUpdateDispatchError, GroupUpdateDispatchPort, KeyEpochError,
+    PendingGroupUpdate,
 };
 use uc_core::ports::PeerAddressRepositoryPort;
+use uc_observability_contract::diagnostics::{
+    complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
+    DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
+};
 
 use super::connect_with_staggered_retry;
 use super::peer_address_resolver::PeerAddressResolver;
+use super::trace_context::{inject_current, set_remote_parent, WireTraceContext};
 
 pub const GROUP_UPDATE_ALPN: &[u8] = b"uniclipboard/group-update/1";
 const MAX_UPDATE_SIZE: usize = 4 * 1024 * 1024;
+const MAX_WIRE_SIZE: usize = MAX_UPDATE_SIZE + 1024;
+const WIRE_LAYOUT_MARKER: &[u8; 4] = b"UCT1";
 const GROUP_UPDATE_IO_TIMEOUT: Duration = Duration::from_secs(10);
 const ACK_ACCEPTED: u8 = 1;
 const ACK_REJECTED: u8 = 2;
+
+#[derive(Serialize, Deserialize)]
+struct WireGroupUpdateRequest {
+    trace_context: Option<WireTraceContext>,
+    payload: Vec<u8>,
+}
 
 async fn run_outbound_io_phase<T, E>(
     timeout: Duration,
@@ -83,6 +98,7 @@ impl GroupUpdateDispatchPort for IrohGroupUpdateAdapter {
         if update.payload().len() > MAX_UPDATE_SIZE {
             return Err(GroupUpdateDispatchError::Transport);
         }
+        let request = encode_request(update.payload())?;
         let addr = self
             .resolve_addr(update)
             .await
@@ -97,14 +113,14 @@ impl GroupUpdateDispatchPort for IrohGroupUpdateAdapter {
         .map_err(|_| GroupUpdateDispatchError::Offline)?;
         let (mut send, mut recv) =
             run_outbound_io_phase(GROUP_UPDATE_IO_TIMEOUT, connection.open_bi()).await?;
-        let length = u32::try_from(update.payload().len())
-            .map_err(|_| GroupUpdateDispatchError::Transport)?;
+        let length =
+            u32::try_from(request.len()).map_err(|_| GroupUpdateDispatchError::Transport)?;
         run_outbound_io_phase(
             GROUP_UPDATE_IO_TIMEOUT,
             send.write_all(&length.to_be_bytes()),
         )
         .await?;
-        run_outbound_io_phase(GROUP_UPDATE_IO_TIMEOUT, send.write_all(update.payload())).await?;
+        run_outbound_io_phase(GROUP_UPDATE_IO_TIMEOUT, send.write_all(&request)).await?;
         send.finish()
             .map_err(|_| GroupUpdateDispatchError::Transport)?;
         let mut ack = [0u8; 1];
@@ -135,8 +151,11 @@ impl ProtocolHandler for IrohGroupUpdateHandler {
         let (mut send, mut recv) =
             match tokio::time::timeout(GROUP_UPDATE_IO_TIMEOUT, connection.accept_bi()).await {
                 Ok(Ok(streams)) => streams,
-                Ok(Err(error)) => {
-                    debug!(error = %error, "group update stream accept failed");
+                Ok(Err(_)) => {
+                    debug!(
+                        error_kind = "stream_accept",
+                        "group update stream accept failed"
+                    );
                     return Ok(());
                 }
                 Err(_) => {
@@ -154,35 +173,125 @@ impl ProtocolHandler for IrohGroupUpdateHandler {
             return Ok(());
         }
         let length = u32::from_be_bytes(length) as usize;
-        if length == 0 || length > MAX_UPDATE_SIZE {
+        if length == 0 || length > MAX_WIRE_SIZE {
             emit_ack(&mut send, ACK_REJECTED).await;
             let _ = connection.closed().await;
             return Ok(());
         }
-        let mut payload = vec![0u8; length];
+        let mut request = vec![0u8; length];
         if !matches!(
-            tokio::time::timeout(GROUP_UPDATE_IO_TIMEOUT, recv.read_exact(&mut payload)).await,
+            tokio::time::timeout(GROUP_UPDATE_IO_TIMEOUT, recv.read_exact(&mut request)).await,
             Ok(Ok(_))
         ) {
             emit_ack(&mut send, ACK_REJECTED).await;
             let _ = connection.closed().await;
             return Ok(());
         }
-        let ack = if self
+        let request = match decode_request(&request) {
+            Ok(request) => request,
+            Err(_) => {
+                emit_ack(&mut send, ACK_REJECTED).await;
+                let _ = connection.closed().await;
+                return Ok(());
+            }
+        };
+        let span = operation_span(OperationContext {
+            domain: DiagnosticDomain::SpaceMembership,
+            operation: DiagnosticOperation::MembershipGroupUpdate,
+            role: DiagnosticRole::Member,
+            kind: DiagnosticSpanKind::Server,
+            flow: None,
+        });
+        let started = Instant::now();
+        let applied = self
             .state
             .group_revocation
-            .apply_group_epoch_update(&payload)
-            .await
-            .is_ok()
-        {
+            .apply_group_epoch_update(&request.payload)
+            .await;
+        if applied.is_ok() {
+            let _ = set_remote_parent(&span, request.trace_context.as_ref());
+        }
+        let ack = if applied.is_ok() {
             ACK_ACCEPTED
         } else {
             ACK_REJECTED
         };
+        span.in_scope(|| {
+            let completion = match &applied {
+                Ok(_) => OperationCompletion::succeeded(
+                    DiagnosticDomain::SpaceMembership,
+                    DiagnosticOperation::MembershipGroupUpdate,
+                    DiagnosticRole::Member,
+                    started.elapsed(),
+                ),
+                Err(error) => OperationCompletion::failed(
+                    DiagnosticDomain::SpaceMembership,
+                    DiagnosticOperation::MembershipGroupUpdate,
+                    DiagnosticRole::Member,
+                    group_update_apply_error_type(error),
+                    started.elapsed(),
+                ),
+            };
+            complete_operation(completion);
+        });
         emit_ack(&mut send, ack).await;
         let _ = connection.closed().await;
         Ok(())
     }
+}
+
+fn group_update_apply_error_type(error: &KeyEpochError) -> DiagnosticErrorType {
+    match error {
+        KeyEpochError::Repository(_) => DiagnosticErrorType::Storage,
+        KeyEpochError::SecurityState { .. }
+        | KeyEpochError::DecryptionFailed
+        | KeyEpochError::PersistedStateIntegrityFailed => DiagnosticErrorType::Security,
+        KeyEpochError::SpaceNotReady => DiagnosticErrorType::Unavailable,
+        KeyEpochError::EpochOverflow => DiagnosticErrorType::Internal,
+        KeyEpochError::InvalidContentKeyId
+        | KeyEpochError::InvalidProtectionGroupId
+        | KeyEpochError::ContentKeyReuse
+        | KeyEpochError::InvalidSpaceSecurityTransition { .. }
+        | KeyEpochError::InvalidRevocationStage
+        | KeyEpochError::InvalidRevocationRecord
+        | KeyEpochError::RemovedMemberInOutbox
+        | KeyEpochError::RevocationRecipientNotFound
+        | KeyEpochError::PermanentLossRecipientNotPending
+        | KeyEpochError::InvalidRevocationId
+        | KeyEpochError::InvalidRevocationTransition { .. } => {
+            DiagnosticErrorType::AuthenticationFailed
+        }
+    }
+}
+
+fn encode_request(payload: &[u8]) -> Result<Vec<u8>, GroupUpdateDispatchError> {
+    if payload.is_empty() || payload.len() > MAX_UPDATE_SIZE {
+        return Err(GroupUpdateDispatchError::Transport);
+    }
+    let mut encoded = WIRE_LAYOUT_MARKER.to_vec();
+    encoded.extend(
+        postcard::to_stdvec(&WireGroupUpdateRequest {
+            trace_context: inject_current(),
+            payload: payload.to_vec(),
+        })
+        .map_err(|_| GroupUpdateDispatchError::Transport)?,
+    );
+    if encoded.len() > MAX_WIRE_SIZE {
+        return Err(GroupUpdateDispatchError::Transport);
+    }
+    Ok(encoded)
+}
+
+fn decode_request(encoded: &[u8]) -> Result<WireGroupUpdateRequest, GroupUpdateDispatchError> {
+    let body = encoded
+        .strip_prefix(WIRE_LAYOUT_MARKER)
+        .ok_or(GroupUpdateDispatchError::Transport)?;
+    let request: WireGroupUpdateRequest =
+        postcard::from_bytes(body).map_err(|_| GroupUpdateDispatchError::Transport)?;
+    if request.payload.is_empty() || request.payload.len() > MAX_UPDATE_SIZE {
+        return Err(GroupUpdateDispatchError::Transport);
+    }
+    Ok(request)
 }
 
 async fn emit_ack(send: &mut iroh::endpoint::SendStream, ack: u8) {
@@ -202,6 +311,9 @@ mod tests {
     use async_trait::async_trait;
     use iroh::{RelayMode, SecretKey};
     use mockall::mock;
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use tracing_subscriber::layer::SubscriberExt;
     use uc_core::ids::DeviceId;
     use uc_core::membership::{GroupEpoch, GroupRevocationResult, KeyEpochError, RevocationId};
     use uc_core::ports::{PeerAddressError, PeerAddressRecord};
@@ -279,6 +391,74 @@ mod tests {
         assert_eq!(error, GroupUpdateDispatchError::Transport);
     }
 
+    #[test]
+    fn group_update_request_has_an_explicit_private_layout() {
+        let encoded = encode_request(b"MLS").expect("request encodes");
+
+        assert!(encoded.starts_with(WIRE_LAYOUT_MARKER));
+        let decoded = decode_request(&encoded).expect("request decodes");
+        assert_eq!(decoded.payload, b"MLS");
+        assert!(decoded.trace_context.is_none());
+        assert!(decode_request(b"MLS").is_err());
+        assert_eq!(
+            group_update_apply_error_type(&KeyEpochError::Repository(
+                "PRIVATE_STORAGE_ERROR".to_owned()
+            )),
+            DiagnosticErrorType::Storage
+        );
+    }
+
+    #[test]
+    fn valid_group_update_context_creates_a_real_server_parent() {
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer()
+                .with_tracer(provider.tracer("group-update-trace-test"))
+                .with_context_activation(true),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            let client = operation_span(OperationContext {
+                domain: DiagnosticDomain::SpaceMembership,
+                operation: DiagnosticOperation::MembershipGroupUpdate,
+                role: DiagnosticRole::Member,
+                kind: DiagnosticSpanKind::Client,
+                flow: None,
+            });
+            let _client_entered = client.enter();
+            let encoded = encode_request(b"MLS").expect("request encodes");
+            let request = decode_request(&encoded).expect("request decodes");
+            let server = operation_span(OperationContext {
+                domain: DiagnosticDomain::SpaceMembership,
+                operation: DiagnosticOperation::MembershipGroupUpdate,
+                role: DiagnosticRole::Member,
+                kind: DiagnosticSpanKind::Server,
+                flow: None,
+            });
+            assert!(set_remote_parent(&server, request.trace_context.as_ref()));
+            let _server_entered = server.enter();
+        });
+        provider.force_flush().expect("trace flush");
+
+        let spans = exporter.get_finished_spans().expect("finished spans");
+        assert_eq!(spans.len(), 2);
+        let client = spans
+            .iter()
+            .find(|span| span.parent_span_id == opentelemetry::trace::SpanId::INVALID)
+            .expect("client span");
+        let server = spans
+            .iter()
+            .find(|span| span.parent_span_id == client.span_context.span_id())
+            .expect("server span");
+        assert_eq!(
+            server.span_context.trace_id(),
+            client.span_context.trace_id()
+        );
+    }
+
     #[tokio::test]
     async fn cryptographically_invalid_recovery_update_is_rejected() {
         let sender_seed = [0x45u8; 32];
@@ -308,10 +488,11 @@ mod tests {
             .await
             .expect("dial receiver");
         let (mut send, mut recv) = connection.open_bi().await.expect("open stream");
-        send.write_all(&(3u32).to_be_bytes())
+        let request = encode_request(b"MLS").expect("encode request");
+        send.write_all(&(request.len() as u32).to_be_bytes())
             .await
             .expect("write length");
-        send.write_all(b"MLS").await.expect("write payload");
+        send.write_all(&request).await.expect("write payload");
         send.finish().expect("finish request");
         let mut ack = [0u8; 1];
         recv.read_exact(&mut ack).await.expect("read rejection ack");
@@ -350,10 +531,11 @@ mod tests {
             .await
             .expect("dial receiver");
         let (mut send, mut recv) = connection.open_bi().await.expect("open stream");
-        send.write_all(&(3u32).to_be_bytes())
+        let request = encode_request(b"MLS").expect("encode request");
+        send.write_all(&(request.len() as u32).to_be_bytes())
             .await
             .expect("write length");
-        send.write_all(b"MLS").await.expect("write payload");
+        send.write_all(&request).await.expect("write payload");
         send.finish().expect("finish request");
         let mut ack = [0u8; 1];
         recv.read_exact(&mut ack).await.expect("read accepted ack");
@@ -392,10 +574,11 @@ mod tests {
             .await
             .expect("dial receiver");
         let (mut send, mut recv) = connection.open_bi().await.expect("open stream");
-        send.write_all(&(3u32).to_be_bytes())
+        let request = encode_request(b"MLS").expect("encode request");
+        send.write_all(&(request.len() as u32).to_be_bytes())
             .await
             .expect("write length");
-        send.write_all(b"MLS").await.expect("write payload");
+        send.write_all(&request).await.expect("write payload");
         send.finish().expect("finish request");
         let mut ack = [0u8; 1];
         recv.read_exact(&mut ack).await.expect("read accepted ack");

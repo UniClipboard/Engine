@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use tracing::Instrument;
 use uc_application::deps::{
     CommitMembershipLedgerPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
     MembershipBranchRecoveryChannelError, MembershipBranchRecoveryChannelPort,
@@ -17,6 +18,10 @@ use uc_core::membership::{
     PendingGroupUpdate,
 };
 use uc_core::ports::{HostEvent, MembershipHostEvent};
+use uc_observability_contract::diagnostics::{
+    complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
+    DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
+};
 
 const SLOW_LEDGER_LOAD: Duration = Duration::from_millis(50);
 
@@ -32,17 +37,94 @@ enum MembershipOperation {
 }
 
 impl MembershipOperation {
-    const fn as_str(self) -> &'static str {
+    const fn diagnostic_operation(self) -> DiagnosticOperation {
         match self {
-            Self::LedgerLoad => "membership_ledger_load",
-            Self::LedgerCommit => "membership_ledger_commit",
-            Self::HistoryExchange => "membership_history_exchange",
-            Self::RestrictedDelivery => "restricted_membership_delivery",
-            Self::GroupUpdateDispatch => "group_update_dispatch",
-            Self::BranchRecoveryGroupInfo => "branch_recovery_group_info",
-            Self::BranchRecoveryExternalCommit => "branch_recovery_external_commit",
+            Self::GroupUpdateDispatch => DiagnosticOperation::MembershipGroupUpdate,
+            Self::LedgerLoad
+            | Self::LedgerCommit
+            | Self::HistoryExchange
+            | Self::RestrictedDelivery
+            | Self::BranchRecoveryGroupInfo
+            | Self::BranchRecoveryExternalCommit => DiagnosticOperation::MembershipHistorySync,
         }
     }
+}
+
+fn membership_span(operation: MembershipOperation, role: DiagnosticRole) -> tracing::Span {
+    operation_span(OperationContext {
+        domain: DiagnosticDomain::SpaceMembership,
+        operation: operation.diagnostic_operation(),
+        role,
+        kind: DiagnosticSpanKind::Client,
+        flow: None,
+    })
+}
+
+fn record_membership_completion(
+    operation: MembershipOperation,
+    role: DiagnosticRole,
+    elapsed: Duration,
+    error_kind: Option<&'static str>,
+) {
+    let diagnostic_operation = operation.diagnostic_operation();
+    let completion = match error_kind {
+        None => OperationCompletion::succeeded(
+            DiagnosticDomain::SpaceMembership,
+            diagnostic_operation,
+            role,
+            elapsed,
+        ),
+        Some("deferred") => OperationCompletion::deferred(
+            DiagnosticDomain::SpaceMembership,
+            diagnostic_operation,
+            role,
+            elapsed,
+        ),
+        Some("rejected") => OperationCompletion::rejected(
+            DiagnosticDomain::SpaceMembership,
+            diagnostic_operation,
+            role,
+            elapsed,
+        ),
+        Some("offline") | Some("unavailable") | Some("locked") => OperationCompletion::failed(
+            DiagnosticDomain::SpaceMembership,
+            diagnostic_operation,
+            role,
+            DiagnosticErrorType::Unavailable,
+            elapsed,
+        ),
+        Some("corrupt") | Some("recovery_required") | Some("conflict") => {
+            OperationCompletion::failed(
+                DiagnosticDomain::SpaceMembership,
+                diagnostic_operation,
+                role,
+                DiagnosticErrorType::Corrupt,
+                elapsed,
+            )
+        }
+        Some("transport") => OperationCompletion::failed(
+            DiagnosticDomain::SpaceMembership,
+            diagnostic_operation,
+            role,
+            DiagnosticErrorType::StreamFailed,
+            elapsed,
+        ),
+        Some("invalid") => OperationCompletion::failed(
+            DiagnosticDomain::SpaceMembership,
+            diagnostic_operation,
+            role,
+            DiagnosticErrorType::DecodeFailed,
+            elapsed,
+        ),
+        Some(_) => OperationCompletion::failed(
+            DiagnosticDomain::SpaceMembership,
+            diagnostic_operation,
+            role,
+            DiagnosticErrorType::Internal,
+            elapsed,
+        ),
+    };
+    complete_operation(completion);
 }
 
 pub(crate) fn observe_membership(
@@ -139,23 +221,12 @@ fn record_ledger(
     elapsed: Duration,
     error: Option<&MembershipLedgerError>,
 ) {
-    match error {
-        Some(error) => tracing::info!(
-            target: "membership.performance",
-            operation = operation.as_str(),
-            elapsed_ms = duration_ms(elapsed),
-            outcome = "error",
-            error_kind = membership_ledger_error_kind(error),
-            "membership ledger operation completed"
-        ),
-        None => tracing::info!(
-            target: "membership.performance",
-            operation = operation.as_str(),
-            elapsed_ms = duration_ms(elapsed),
-            outcome = "ok",
-            "membership ledger operation completed"
-        ),
-    }
+    record_membership_completion(
+        operation,
+        DiagnosticRole::Local,
+        elapsed,
+        error.map(membership_ledger_error_kind),
+    );
 }
 
 fn membership_ledger_error_kind(error: &MembershipLedgerError) -> &'static str {
@@ -179,47 +250,25 @@ impl MembershipHistoryExchangePort for ObservedMembershipHistoryExchange {
         recipient: &DeviceId,
         message: MembershipHistoryMessage,
     ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
-        let request_kind = membership_history_message_kind(&message);
         let started = Instant::now();
+        let span = membership_span(MembershipOperation::HistoryExchange, DiagnosticRole::Member);
         let result = self
             .inner
             .exchange_membership_history(recipient, message)
+            .instrument(span.clone())
             .await;
-        let elapsed_ms = duration_ms(started.elapsed());
-        match &result {
-            Ok(response) => tracing::info!(
-                target: "membership.performance",
-                operation = MembershipOperation::HistoryExchange.as_str(),
-                elapsed_ms,
-                outcome = "ok",
-                request_kind,
-                response_kind = membership_history_message_kind(response),
-                "membership history exchange completed"
-            ),
-            Err(error) => tracing::info!(
-                target: "membership.performance",
-                operation = MembershipOperation::HistoryExchange.as_str(),
-                elapsed_ms,
-                outcome = "error",
-                request_kind,
-                error_kind = membership_history_exchange_error_kind(error),
-                "membership history exchange completed"
-            ),
-        }
+        span.in_scope(|| {
+            record_membership_completion(
+                MembershipOperation::HistoryExchange,
+                DiagnosticRole::Member,
+                started.elapsed(),
+                result
+                    .as_ref()
+                    .err()
+                    .map(membership_history_exchange_error_kind),
+            );
+        });
         result
-    }
-}
-
-fn membership_history_message_kind(message: &MembershipHistoryMessage) -> &'static str {
-    match message {
-        MembershipHistoryMessage::SummaryV3(_) => "summary_v3",
-        MembershipHistoryMessage::RequestSuffixV3(_) => "request_suffix_v3",
-        MembershipHistoryMessage::SuffixPageV3(_) => "suffix_page_v3",
-        MembershipHistoryMessage::AckV3(_) => "ack_v3",
-        MembershipHistoryMessage::RestrictedEventV3(_) => "restricted_event_v3",
-        MembershipHistoryMessage::RestrictedDecisionV3(_) => "restricted_decision_v3",
-        MembershipHistoryMessage::RequestConflictEvidenceV3(_) => "request_conflict_evidence_v3",
-        MembershipHistoryMessage::ConflictEvidenceV3(_) => "conflict_evidence_v3",
     }
 }
 
@@ -243,28 +292,26 @@ impl RestrictedMembershipDeliveryPort for ObservedRestrictedMembershipDelivery {
         delivery: &RestrictedMembershipDelivery,
     ) -> Result<(), RestrictedMembershipDeliveryError> {
         let started = Instant::now();
+        let span = membership_span(
+            MembershipOperation::RestrictedDelivery,
+            DiagnosticRole::Member,
+        );
         let result = self
             .inner
             .deliver_restricted_membership(peer, delivery)
+            .instrument(span.clone())
             .await;
-        let elapsed_ms = duration_ms(started.elapsed());
-        match &result {
-            Ok(()) => tracing::info!(
-                target: "membership.performance",
-                operation = MembershipOperation::RestrictedDelivery.as_str(),
-                elapsed_ms,
-                outcome = "ok",
-                "restricted membership delivery completed"
-            ),
-            Err(error) => tracing::info!(
-                target: "membership.performance",
-                operation = MembershipOperation::RestrictedDelivery.as_str(),
-                elapsed_ms,
-                outcome = "error",
-                error_kind = restricted_membership_delivery_error_kind(error),
-                "restricted membership delivery completed"
-            ),
-        }
+        span.in_scope(|| {
+            record_membership_completion(
+                MembershipOperation::RestrictedDelivery,
+                DiagnosticRole::Member,
+                started.elapsed(),
+                result
+                    .as_ref()
+                    .err()
+                    .map(restricted_membership_delivery_error_kind),
+            );
+        });
         result
     }
 }
@@ -289,25 +336,23 @@ impl GroupUpdateDispatchPort for ObservedGroupUpdateDispatch {
         update: &PendingGroupUpdate,
     ) -> Result<(), GroupUpdateDispatchError> {
         let started = Instant::now();
-        let result = self.inner.dispatch_group_update(update).await;
-        let elapsed_ms = duration_ms(started.elapsed());
-        match &result {
-            Ok(()) => tracing::info!(
-                target: "membership.performance",
-                operation = MembershipOperation::GroupUpdateDispatch.as_str(),
-                elapsed_ms,
-                outcome = "ok",
-                "group update dispatch completed"
-            ),
-            Err(error) => tracing::info!(
-                target: "membership.performance",
-                operation = MembershipOperation::GroupUpdateDispatch.as_str(),
-                elapsed_ms,
-                outcome = "error",
-                error_kind = group_update_dispatch_error_kind(error),
-                "group update dispatch completed"
-            ),
-        }
+        let span = membership_span(
+            MembershipOperation::GroupUpdateDispatch,
+            DiagnosticRole::Member,
+        );
+        let result = self
+            .inner
+            .dispatch_group_update(update)
+            .instrument(span.clone())
+            .await;
+        span.in_scope(|| {
+            record_membership_completion(
+                MembershipOperation::GroupUpdateDispatch,
+                DiagnosticRole::Member,
+                started.elapsed(),
+                result.as_ref().err().map(group_update_dispatch_error_kind),
+            );
+        });
         result
     }
 }
@@ -366,23 +411,12 @@ fn record_branch_recovery(
     elapsed: Duration,
     error: Option<&MembershipBranchRecoveryChannelError>,
 ) {
-    match error {
-        Some(error) => tracing::info!(
-            target: "membership.performance",
-            operation = operation.as_str(),
-            elapsed_ms = duration_ms(elapsed),
-            outcome = "error",
-            error_kind = membership_branch_recovery_error_kind(error),
-            "membership branch recovery channel operation completed"
-        ),
-        None => tracing::info!(
-            target: "membership.performance",
-            operation = operation.as_str(),
-            elapsed_ms = duration_ms(elapsed),
-            outcome = "ok",
-            "membership branch recovery channel operation completed"
-        ),
-    }
+    record_membership_completion(
+        operation,
+        DiagnosticRole::Local,
+        elapsed,
+        error.map(membership_branch_recovery_error_kind),
+    );
 }
 
 fn membership_branch_recovery_error_kind(
@@ -393,10 +427,6 @@ fn membership_branch_recovery_error_kind(
         MembershipBranchRecoveryChannelError::Rejected { .. } => "rejected",
         MembershipBranchRecoveryChannelError::Invalid { .. } => "invalid",
     }
-}
-
-fn duration_ms(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -677,43 +707,12 @@ mod tests {
         });
 
         let output = writer.output();
-        assert!(output.contains("membership.performance"));
-        assert!(output.contains("operation=\"branch_recovery_group_info\""));
-        assert!(output.contains("elapsed_ms=12"));
-        assert!(output.contains("outcome=\"error\""));
-        assert!(output.contains("error_kind=\"invalid\""));
+        assert!(output.contains("uc.domain=\"space_membership\""));
+        assert!(output.contains("uc.operation=\"membership_history_sync\""));
+        assert!(output.contains("duration_ms=12"));
+        assert!(output.contains("uc.outcome=\"error\""));
+        assert!(output.contains("error.type=\"decode_failed\""));
+        assert!(!output.contains("membership.performance"));
         assert!(!output.contains("SECRET_ERROR"));
-    }
-
-    #[test]
-    fn operation_names_are_stable() {
-        assert_eq!(
-            MembershipOperation::LedgerLoad.as_str(),
-            "membership_ledger_load"
-        );
-        assert_eq!(
-            MembershipOperation::LedgerCommit.as_str(),
-            "membership_ledger_commit"
-        );
-        assert_eq!(
-            MembershipOperation::HistoryExchange.as_str(),
-            "membership_history_exchange"
-        );
-        assert_eq!(
-            MembershipOperation::RestrictedDelivery.as_str(),
-            "restricted_membership_delivery"
-        );
-        assert_eq!(
-            MembershipOperation::GroupUpdateDispatch.as_str(),
-            "group_update_dispatch"
-        );
-        assert_eq!(
-            MembershipOperation::BranchRecoveryGroupInfo.as_str(),
-            "branch_recovery_group_info"
-        );
-        assert_eq!(
-            MembershipOperation::BranchRecoveryExternalCommit.as_str(),
-            "branch_recovery_external_commit"
-        );
     }
 }

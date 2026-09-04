@@ -1,7 +1,8 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use async_trait::async_trait;
+use tracing::Instrument;
 use uc_application::deps::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryTrigger, AuthenticatedAdmissionExchangePort,
     AuthenticatedAdmissionReply, AuthenticatedSpaceAdmissionMessage, CommittedSponsorAdmission,
@@ -22,6 +23,100 @@ use uc_core::membership::{
     JoinerCompletePreparation, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionRoute,
     SponsorSettlementPreparation,
 };
+use uc_observability_contract::diagnostics::{
+    complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticFlowId,
+    DiagnosticFlowPurpose, DiagnosticOperation, DiagnosticRole, DiagnosticSpanKind,
+    OperationCompletion, OperationContext,
+};
+
+fn admission_flow(admission_id: SpaceAdmissionId) -> DiagnosticFlowId {
+    DiagnosticFlowId::derive(
+        DiagnosticFlowPurpose::SpaceAdmission,
+        admission_id.as_bytes(),
+    )
+}
+
+fn admission_span(
+    role: DiagnosticRole,
+    kind: DiagnosticSpanKind,
+    flow: &DiagnosticFlowId,
+) -> tracing::Span {
+    operation_span(OperationContext {
+        domain: DiagnosticDomain::SpaceAdmission,
+        operation: DiagnosticOperation::SpaceAdmission,
+        role,
+        kind,
+        flow: Some(flow),
+    })
+}
+
+fn record_admission_completion(
+    role: DiagnosticRole,
+    started: Instant,
+    error_kind: Option<&'static str>,
+) {
+    let completion = match error_kind {
+        None => OperationCompletion::succeeded(
+            DiagnosticDomain::SpaceAdmission,
+            DiagnosticOperation::SpaceAdmission,
+            role,
+            started.elapsed(),
+        ),
+        Some("deferred") => OperationCompletion::deferred(
+            DiagnosticDomain::SpaceAdmission,
+            DiagnosticOperation::SpaceAdmission,
+            role,
+            started.elapsed(),
+        ),
+        Some("authentication_rejected") => OperationCompletion::failed(
+            DiagnosticDomain::SpaceAdmission,
+            DiagnosticOperation::SpaceAdmission,
+            role,
+            DiagnosticErrorType::AuthenticationFailed,
+            started.elapsed(),
+        ),
+        Some("peer_upgrade_required") => OperationCompletion::failed(
+            DiagnosticDomain::SpaceAdmission,
+            DiagnosticOperation::SpaceAdmission,
+            role,
+            DiagnosticErrorType::PeerIncompatible,
+            started.elapsed(),
+        ),
+        Some("protocol_rejected") | Some("invalid") => OperationCompletion::failed(
+            DiagnosticDomain::SpaceAdmission,
+            DiagnosticOperation::SpaceAdmission,
+            role,
+            DiagnosticErrorType::DecodeFailed,
+            started.elapsed(),
+        ),
+        Some("locked") | Some("unavailable") | Some("invitation_unavailable") => {
+            OperationCompletion::failed(
+                DiagnosticDomain::SpaceAdmission,
+                DiagnosticOperation::SpaceAdmission,
+                role,
+                DiagnosticErrorType::Unavailable,
+                started.elapsed(),
+            )
+        }
+        Some("state_changed") | Some("recovery_required") | Some("inconsistent") => {
+            OperationCompletion::failed(
+                DiagnosticDomain::SpaceAdmission,
+                DiagnosticOperation::SpaceAdmission,
+                role,
+                DiagnosticErrorType::Corrupt,
+                started.elapsed(),
+            )
+        }
+        Some(_) => OperationCompletion::failed(
+            DiagnosticDomain::SpaceAdmission,
+            DiagnosticOperation::SpaceAdmission,
+            role,
+            DiagnosticErrorType::Internal,
+            started.elapsed(),
+        ),
+    };
+    complete_operation(completion);
+}
 
 pub(crate) fn observe_admission(adapters: SpaceAdmissionAdapters) -> SpaceAdmissionAdapters {
     let activation_policy = JoinerActivationObservationPolicy::suppress_successful_empty_loads();
@@ -35,7 +130,7 @@ pub(crate) fn observe_admission(adapters: SpaceAdmissionAdapters) -> SpaceAdmiss
         )),
         space_admission_transport: Arc::new(ObservedSpaceAdmissionTransport::new(
             adapters.space_admission_transport,
-            SpaceAdmissionTransportObservationPolicy::record_safe_message_kind(),
+            SpaceAdmissionTransportObservationPolicy::record_authenticated_exchanges(),
         )),
         sponsor_admission_state: Arc::new(ObservedSponsorAdmissionState::new(
             adapters.sponsor_admission_state,
@@ -79,63 +174,24 @@ impl RePairingStateStorePort for ObservedRePairingStateStore {
     async fn is_required(&self) -> Result<bool, RePairingStateError> {
         let started = Instant::now();
         let result = self.inner.is_required().await;
-        record_re_pairing_state("re_pairing_state_load", started, result.as_ref().copied());
+        record_re_pairing_state(started, result.as_ref().err());
         result
     }
 
     async fn set_required(&self, required: bool) -> Result<(), RePairingStateError> {
         let started = Instant::now();
         let result = self.inner.set_required(required).await;
-        record_re_pairing_state(
-            "re_pairing_state_set",
-            started,
-            result.as_ref().map(|()| required),
-        );
+        record_re_pairing_state(started, result.as_ref().err());
         result
     }
 }
 
-fn record_re_pairing_state(
-    operation: &'static str,
-    started: Instant,
-    result: Result<bool, &RePairingStateError>,
-) {
-    match result {
-        Ok(required) => tracing::info!(
-            target: "admission.performance",
-            operation,
-            elapsed_ms = duration_ms(started.elapsed()),
-            outcome = "ok",
-            state = if required { "required" } else { "resolved" },
-            "re-pairing state operation completed"
-        ),
-        Err(error) => tracing::info!(
-            target: "admission.performance",
-            operation,
-            elapsed_ms = duration_ms(started.elapsed()),
-            outcome = "error",
-            error_kind = match error {
-                RePairingStateError::Unavailable => "unavailable",
-                RePairingStateError::Inconsistent => "inconsistent",
-            },
-            "re-pairing state operation completed"
-        ),
-    }
-}
-
-#[derive(Clone, Copy)]
-enum AdmissionRecoveryStateOperation {
-    Load,
-    Commit,
-}
-
-impl AdmissionRecoveryStateOperation {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Load => "recovery_state_load",
-            Self::Commit => "recovery_state_commit",
-        }
-    }
+fn record_re_pairing_state(started: Instant, error: Option<&RePairingStateError>) {
+    let error_kind = error.map(|error| match error {
+        RePairingStateError::Unavailable => "unavailable",
+        RePairingStateError::Inconsistent => "inconsistent",
+    });
+    record_admission_completion(DiagnosticRole::Local, started, error_kind);
 }
 
 #[derive(Clone, Copy)]
@@ -168,52 +224,24 @@ impl ObservedAdmissionRecoveryState {
         Self { inner, policy }
     }
 
-    fn record_load(started: Instant, trigger: &'static str, loaded_count: usize) {
-        tracing::info!(
-            target: "admission.performance",
-            operation = AdmissionRecoveryStateOperation::Load.as_str(),
-            elapsed_ms = duration_ms(started.elapsed()),
-            outcome = "ok",
-            trigger,
-            loaded_count,
-            "admission recovery state load completed"
-        );
+    fn record_load(started: Instant) {
+        record_admission_completion(DiagnosticRole::Local, started, None);
     }
 
-    fn record_load_error(
-        started: Instant,
-        trigger: &'static str,
-        error: &PendingAdmissionRecoveryStateError,
-    ) {
-        tracing::info!(
-            target: "admission.performance",
-            operation = AdmissionRecoveryStateOperation::Load.as_str(),
-            elapsed_ms = duration_ms(started.elapsed()),
-            outcome = "error",
-            trigger,
-            error_kind = admission_recovery_error_kind(error),
-            "admission recovery state load failed"
+    fn record_load_error(started: Instant, error: &PendingAdmissionRecoveryStateError) {
+        record_admission_completion(
+            DiagnosticRole::Local,
+            started,
+            Some(admission_recovery_error_kind(error)),
         );
     }
 
     fn record_commit(started: Instant, error: Option<&PendingAdmissionRecoveryStateError>) {
-        match error {
-            Some(error) => tracing::info!(
-                target: "admission.performance",
-                operation = AdmissionRecoveryStateOperation::Commit.as_str(),
-                elapsed_ms = duration_ms(started.elapsed()),
-                outcome = "error",
-                error_kind = admission_recovery_error_kind(error),
-                "admission recovery state commit completed"
-            ),
-            None => tracing::info!(
-                target: "admission.performance",
-                operation = AdmissionRecoveryStateOperation::Commit.as_str(),
-                elapsed_ms = duration_ms(started.elapsed()),
-                outcome = "ok",
-                "admission recovery state commit completed"
-            ),
-        }
+        record_admission_completion(
+            DiagnosticRole::Local,
+            started,
+            error.map(admission_recovery_error_kind),
+        );
     }
 }
 
@@ -224,13 +252,12 @@ impl PendingAdmissionRecoveryStatePort for ObservedAdmissionRecoveryState {
         trigger: AdmissionRecoveryTrigger,
     ) -> Result<Vec<LoadedPendingAdmission>, PendingAdmissionRecoveryStateError> {
         let started = Instant::now();
-        let trigger_kind = admission_recovery_trigger_kind(trigger);
         let result = self.inner.load(trigger).await;
         match &result {
             Ok(loaded) if self.policy.should_record_load(true, Some(loaded.len())) => {
-                Self::record_load(started, trigger_kind, loaded.len());
+                Self::record_load(started);
             }
-            Err(error) => Self::record_load_error(started, trigger_kind, error),
+            Err(error) => Self::record_load_error(started, error),
             Ok(_) => {}
         }
         result
@@ -245,16 +272,6 @@ impl PendingAdmissionRecoveryStatePort for ObservedAdmissionRecoveryState {
         let result = self.inner.commit(token, transition).await;
         Self::record_commit(started, result.as_ref().err());
         result
-    }
-}
-
-fn admission_recovery_trigger_kind(trigger: AdmissionRecoveryTrigger) -> &'static str {
-    match trigger {
-        AdmissionRecoveryTrigger::Startup => "startup",
-        AdmissionRecoveryTrigger::Resume => "resume",
-        AdmissionRecoveryTrigger::Periodic => "periodic",
-        AdmissionRecoveryTrigger::StateChanged => "state_changed",
-        AdmissionRecoveryTrigger::PeerOnline(_) => "peer_online",
     }
 }
 
@@ -273,21 +290,6 @@ struct ObservedSpaceAdmissionTransport {
     policy: SpaceAdmissionTransportObservationPolicy,
 }
 
-#[derive(Clone, Copy)]
-enum SpaceAdmissionTransportOperation {
-    Establish,
-    Exchange,
-}
-
-impl SpaceAdmissionTransportOperation {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Establish => "admission_channel_establish",
-            Self::Exchange => "admission_message_exchange",
-        }
-    }
-}
-
 impl ObservedSpaceAdmissionTransport {
     fn new(
         inner: Arc<dyn SpaceAdmissionTransportPort>,
@@ -296,36 +298,19 @@ impl ObservedSpaceAdmissionTransport {
         Self { inner, policy }
     }
 
-    fn record_establish(
-        started: Instant,
-        channel: &'static str,
-        error: Option<&SpaceAdmissionTransportError>,
-    ) {
-        match error {
-            Some(error) => tracing::info!(
-                target: "admission.performance",
-                operation = SpaceAdmissionTransportOperation::Establish.as_str(),
-                channel,
-                elapsed_ms = duration_ms(started.elapsed()),
-                outcome = "error",
-                error_kind = admission_transport_error_kind(error),
-                "admission channel establishment completed"
-            ),
-            None => tracing::info!(
-                target: "admission.performance",
-                operation = SpaceAdmissionTransportOperation::Establish.as_str(),
-                channel,
-                elapsed_ms = duration_ms(started.elapsed()),
-                outcome = "ok",
-                "admission channel establishment completed"
-            ),
-        }
+    fn record_establish(started: Instant, error: Option<&SpaceAdmissionTransportError>) {
+        record_admission_completion(
+            DiagnosticRole::Joiner,
+            started,
+            error.map(admission_transport_error_kind),
+        );
     }
 }
 
 struct ObservedAuthenticatedAdmissionExchange {
     inner: Box<dyn AuthenticatedAdmissionExchangePort>,
     policy: SpaceAdmissionTransportObservationPolicy,
+    flow: DiagnosticFlowId,
 }
 
 #[derive(Clone, Copy)]
@@ -334,7 +319,7 @@ struct SpaceAdmissionTransportObservationPolicy {
 }
 
 impl SpaceAdmissionTransportObservationPolicy {
-    const fn record_safe_message_kind() -> Self {
+    const fn record_authenticated_exchanges() -> Self {
         Self {
             record_exchanges: true,
         }
@@ -360,27 +345,20 @@ impl AuthenticatedAdmissionExchangePort for ObservedAuthenticatedAdmissionExchan
         request: &SpaceAdmissionEnvelopeV1,
     ) -> Result<AuthenticatedAdmissionReply, SpaceAdmissionTransportError> {
         let started = Instant::now();
-        let result = self.inner.exchange(request).await;
+        let span = admission_span(
+            DiagnosticRole::Joiner,
+            DiagnosticSpanKind::Client,
+            &self.flow,
+        );
+        let result = self.inner.exchange(request).instrument(span.clone()).await;
         if self.policy.should_record_exchange() {
-            match &result {
-                Ok(_) => tracing::info!(
-                    target: "admission.performance",
-                    operation = SpaceAdmissionTransportOperation::Exchange.as_str(),
-                    message_kind = ?request.kind(),
-                    elapsed_ms = duration_ms(started.elapsed()),
-                    outcome = "ok",
-                    "admission message exchange completed"
-                ),
-                Err(error) => tracing::info!(
-                    target: "admission.performance",
-                    operation = SpaceAdmissionTransportOperation::Exchange.as_str(),
-                    message_kind = ?request.kind(),
-                    elapsed_ms = duration_ms(started.elapsed()),
-                    outcome = "error",
-                    error_kind = admission_transport_error_kind(error),
-                    "admission message exchange completed"
-                ),
-            }
+            span.in_scope(|| {
+                record_admission_completion(
+                    DiagnosticRole::Joiner,
+                    started,
+                    result.as_ref().err().map(admission_transport_error_kind),
+                );
+            });
         }
         result
     }
@@ -395,15 +373,19 @@ impl SpaceAdmissionTransportPort for ObservedSpaceAdmissionTransport {
         encrypted_password_equivalent: &AdmissionEncryptedPasswordEquivalent,
     ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError> {
         let started = Instant::now();
+        let flow = admission_flow(admission_id);
+        let span = admission_span(DiagnosticRole::Joiner, DiagnosticSpanKind::Client, &flow);
         let result = self
             .inner
             .establish_initial(admission_id, route, encrypted_password_equivalent)
+            .instrument(span.clone())
             .await;
-        Self::record_establish(started, "initial", result.as_ref().err());
+        span.in_scope(|| Self::record_establish(started, result.as_ref().err()));
         result.map(|inner| {
             Box::new(ObservedAuthenticatedAdmissionExchange {
                 inner,
                 policy: self.policy,
+                flow,
             }) as _
         })
     }
@@ -416,15 +398,19 @@ impl SpaceAdmissionTransportPort for ObservedSpaceAdmissionTransport {
         continuation_credential: &AdmissionContinuationCredential,
     ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError> {
         let started = Instant::now();
+        let flow = admission_flow(admission_id);
+        let span = admission_span(DiagnosticRole::Joiner, DiagnosticSpanKind::Client, &flow);
         let result = self
             .inner
             .resume(admission_id, route, peer_binding, continuation_credential)
+            .instrument(span.clone())
             .await;
-        Self::record_establish(started, "continuation", result.as_ref().err());
+        span.in_scope(|| Self::record_establish(started, result.as_ref().err()));
         result.map(|inner| {
             Box::new(ObservedAuthenticatedAdmissionExchange {
                 inner,
                 policy: self.policy,
+                flow,
             }) as _
         })
     }
@@ -438,21 +424,6 @@ fn admission_transport_error_kind(error: &SpaceAdmissionTransportError) -> &'sta
         SpaceAdmissionTransportError::PeerUpgradeRequired => "peer_upgrade_required",
         SpaceAdmissionTransportError::ProtocolRejected => "protocol_rejected",
         SpaceAdmissionTransportError::Unavailable => "unavailable",
-    }
-}
-
-#[derive(Clone, Copy)]
-enum SponsorAdmissionStateOperation {
-    Load,
-    Commit,
-}
-
-impl SponsorAdmissionStateOperation {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Load => "sponsor_state_load",
-            Self::Commit => "sponsor_state_commit",
-        }
     }
 }
 
@@ -482,30 +453,13 @@ impl ObservedSponsorAdmissionState {
         Self { inner, policy }
     }
 
-    fn record(
-        &self,
-        operation: SponsorAdmissionStateOperation,
-        started: Instant,
-        error: Option<&SponsorAdmissionStateError>,
-    ) {
+    fn record(&self, started: Instant, error: Option<&SponsorAdmissionStateError>) {
         if self.policy.should_record() {
-            match error {
-                Some(error) => tracing::info!(
-                    target: "admission.performance",
-                    operation = operation.as_str(),
-                    elapsed_ms = duration_ms(started.elapsed()),
-                    outcome = "error",
-                    error_kind = sponsor_admission_state_error_kind(error),
-                    "sponsor admission state operation completed"
-                ),
-                None => tracing::info!(
-                    target: "admission.performance",
-                    operation = operation.as_str(),
-                    elapsed_ms = duration_ms(started.elapsed()),
-                    outcome = "ok",
-                    "sponsor admission state operation completed"
-                ),
-            }
+            record_admission_completion(
+                DiagnosticRole::Sponsor,
+                started,
+                error.map(sponsor_admission_state_error_kind),
+            );
         }
     }
 }
@@ -518,11 +472,7 @@ impl SponsorAdmissionStatePort for ObservedSponsorAdmissionState {
     ) -> Result<LoadedSponsorAdmission, SponsorAdmissionStateError> {
         let started = Instant::now();
         let result = self.inner.load(message).await;
-        self.record(
-            SponsorAdmissionStateOperation::Load,
-            started,
-            result.as_ref().err(),
-        );
+        self.record(started, result.as_ref().err());
         result
     }
 
@@ -533,11 +483,7 @@ impl SponsorAdmissionStatePort for ObservedSponsorAdmissionState {
     ) -> Result<CommittedSponsorAdmission, SponsorAdmissionStateError> {
         let started = Instant::now();
         let result = self.inner.commit(token, mutation).await;
-        self.record(
-            SponsorAdmissionStateOperation::Commit,
-            started,
-            result.as_ref().err(),
-        );
+        self.record(started, result.as_ref().err());
         result
     }
 }
@@ -548,19 +494,6 @@ fn sponsor_admission_state_error_kind(error: &SponsorAdmissionStateError) -> &'s
         SponsorAdmissionStateError::StateChanged { .. } => "state_changed",
         SponsorAdmissionStateError::RecoveryRequired { .. } => "recovery_required",
         SponsorAdmissionStateError::Unavailable { .. } => "unavailable",
-    }
-}
-
-#[derive(Clone, Copy)]
-enum SponsorSettlementOperation {
-    Prepare,
-}
-
-impl SponsorSettlementOperation {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Prepare => "sponsor_settlement_prepare",
-        }
     }
 }
 
@@ -587,23 +520,14 @@ impl PrepareSponsorSettledPort for ObservedSponsorSettlementPreparation {
             .inner
             .prepare(admission_id, preparation, complete_ack)
             .await;
-        match &result {
-            Ok(_) => tracing::info!(
-                target: "admission.performance",
-                operation = SponsorSettlementOperation::Prepare.as_str(),
-                elapsed_ms = duration_ms(started.elapsed()),
-                outcome = "ok",
-                "sponsor settlement preparation completed"
-            ),
-            Err(error) => tracing::info!(
-                target: "admission.performance",
-                operation = SponsorSettlementOperation::Prepare.as_str(),
-                elapsed_ms = duration_ms(started.elapsed()),
-                outcome = "error",
-                error_kind = prepare_sponsor_settled_error_kind(error),
-                "sponsor settlement preparation completed"
-            ),
-        }
+        record_admission_completion(
+            DiagnosticRole::Sponsor,
+            started,
+            result
+                .as_ref()
+                .err()
+                .map(prepare_sponsor_settled_error_kind),
+        );
         result
     }
 }
@@ -612,19 +536,6 @@ fn prepare_sponsor_settled_error_kind(error: &PrepareSponsorSettledError) -> &'s
     match error {
         PrepareSponsorSettledError::Invalid { .. } => "invalid",
         PrepareSponsorSettledError::Unavailable { .. } => "unavailable",
-    }
-}
-
-#[derive(Clone, Copy)]
-enum JoinerCandidateOperation {
-    Prepare,
-}
-
-impl JoinerCandidateOperation {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Prepare => "joiner_candidate_prepare",
-        }
     }
 }
 
@@ -665,23 +576,14 @@ impl PrepareJoinerCandidatePort for ObservedJoinerCandidatePreparation {
         let started = Instant::now();
         let result = self.inner.prepare(preparation, candidate).await;
         if self.policy.should_record() {
-            match &result {
-                Ok(_) => tracing::info!(
-                    target: "admission.performance",
-                    operation = JoinerCandidateOperation::Prepare.as_str(),
-                    elapsed_ms = duration_ms(started.elapsed()),
-                    outcome = "ok",
-                    "joiner candidate preparation completed"
-                ),
-                Err(error) => tracing::info!(
-                    target: "admission.performance",
-                    operation = JoinerCandidateOperation::Prepare.as_str(),
-                    elapsed_ms = duration_ms(started.elapsed()),
-                    outcome = "error",
-                    error_kind = prepare_joiner_candidate_error_kind(error),
-                    "joiner candidate preparation completed"
-                ),
-            }
+            record_admission_completion(
+                DiagnosticRole::Joiner,
+                started,
+                result
+                    .as_ref()
+                    .err()
+                    .map(prepare_joiner_candidate_error_kind),
+            );
         }
         result
     }
@@ -692,25 +594,6 @@ fn prepare_joiner_candidate_error_kind(error: &PrepareJoinerCandidateError) -> &
         PrepareJoinerCandidateError::Invalid
         | PrepareJoinerCandidateError::InvalidSource { .. } => "invalid",
         PrepareJoinerCandidateError::Unavailable { .. } => "unavailable",
-    }
-}
-
-#[derive(Clone, Copy)]
-enum JoinerActivationOperation {
-    Prepare,
-    StateLoad,
-    StateCommit,
-    Execute,
-}
-
-impl JoinerActivationOperation {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Prepare => "joiner_activation_prepare",
-            Self::StateLoad => "joiner_activation_state_load",
-            Self::StateCommit => "joiner_activation_state_commit",
-            Self::Execute => "joiner_activation_execute",
-        }
     }
 }
 
@@ -764,7 +647,6 @@ impl PrepareJoinerActivationPort for ObservedJoinerActivationPreparation {
             .await;
         if self.policy.should_record() {
             record_joiner_activation(
-                JoinerActivationOperation::Prepare,
                 started,
                 result
                     .as_ref()
@@ -800,7 +682,6 @@ impl JoinerActivationStatePort for ObservedJoinerActivationState {
             .should_record_state_load(result.is_ok(), matches!(result, Ok(Some(_))))
         {
             record_joiner_activation(
-                JoinerActivationOperation::StateLoad,
                 started,
                 result
                     .as_ref()
@@ -820,7 +701,6 @@ impl JoinerActivationStatePort for ObservedJoinerActivationState {
         let result = self.inner.commit(token, mutation).await;
         if self.policy.should_record() {
             record_joiner_activation(
-                JoinerActivationOperation::StateCommit,
                 started,
                 result
                     .as_ref()
@@ -857,7 +737,6 @@ impl ExecuteJoinerActivationPort for ObservedJoinerActivationExecutor {
         let result = self.inner.execute(admission_id, preparation).await;
         if self.policy.should_record() {
             record_joiner_activation(
-                JoinerActivationOperation::Execute,
                 started,
                 result
                     .as_ref()
@@ -869,28 +748,8 @@ impl ExecuteJoinerActivationPort for ObservedJoinerActivationExecutor {
     }
 }
 
-fn record_joiner_activation(
-    operation: JoinerActivationOperation,
-    started: Instant,
-    error_kind: Option<&'static str>,
-) {
-    match error_kind {
-        Some(error_kind) => tracing::info!(
-            target: "admission.performance",
-            operation = operation.as_str(),
-            elapsed_ms = duration_ms(started.elapsed()),
-            outcome = "error",
-            error_kind,
-            "joiner activation operation completed"
-        ),
-        None => tracing::info!(
-            target: "admission.performance",
-            operation = operation.as_str(),
-            elapsed_ms = duration_ms(started.elapsed()),
-            outcome = "ok",
-            "joiner activation operation completed"
-        ),
-    }
+fn record_joiner_activation(started: Instant, error_kind: Option<&'static str>) {
+    record_admission_completion(DiagnosticRole::Joiner, started, error_kind);
 }
 
 fn prepare_joiner_activation_error_kind(error: &PrepareJoinerActivationError) -> &'static str {
@@ -916,10 +775,6 @@ fn execute_joiner_activation_error_kind(error: &ExecuteJoinerActivationError) ->
     }
 }
 
-fn duration_ms(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -927,7 +782,7 @@ mod tests {
 
     use async_trait::async_trait;
     use uc_application::deps::{
-        AdmissionRecoveryTrigger, AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply,
+        AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply,
         ExecuteJoinerActivationError, JoinerActivationStateError,
         PendingAdmissionRecoveryStateError, PrepareJoinerActivationError,
         PrepareJoinerCandidateError, PrepareSponsorSettledError, RePairingStateError,
@@ -942,15 +797,14 @@ mod tests {
     };
 
     use super::{
-        admission_recovery_error_kind, admission_recovery_trigger_kind,
-        admission_transport_error_kind, execute_joiner_activation_error_kind,
-        joiner_activation_state_error_kind, prepare_joiner_activation_error_kind,
-        prepare_joiner_candidate_error_kind, prepare_sponsor_settled_error_kind,
-        sponsor_admission_state_error_kind, AdmissionRecoveryObservationPolicy,
-        JoinerActivationObservationPolicy, JoinerCandidateObservationPolicy,
-        ObservedRePairingStateStore, ObservedSpaceAdmissionTransport,
-        SpaceAdmissionTransportObservationPolicy, SponsorAdmissionStateObservationPolicy,
-        SponsorSettlementOperation,
+        admission_recovery_error_kind, admission_transport_error_kind,
+        execute_joiner_activation_error_kind, joiner_activation_state_error_kind,
+        prepare_joiner_activation_error_kind, prepare_joiner_candidate_error_kind,
+        prepare_sponsor_settled_error_kind, sponsor_admission_state_error_kind,
+        AdmissionRecoveryObservationPolicy, JoinerActivationObservationPolicy,
+        JoinerCandidateObservationPolicy, ObservedRePairingStateStore,
+        ObservedSpaceAdmissionTransport, SpaceAdmissionTransportObservationPolicy,
+        SponsorAdmissionStateObservationPolicy,
     };
 
     #[derive(Clone, Default)]
@@ -1087,7 +941,7 @@ mod tests {
     #[test]
     fn record_all_policies_enable_their_operations() {
         assert!(
-            SpaceAdmissionTransportObservationPolicy::record_safe_message_kind()
+            SpaceAdmissionTransportObservationPolicy::record_authenticated_exchanges()
                 .should_record_exchange()
         );
         assert!(SponsorAdmissionStateObservationPolicy::record_all().should_record());
@@ -1142,36 +996,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn admission_recovery_triggers_map_without_peer_identity() {
-        assert_eq!(
-            admission_recovery_trigger_kind(AdmissionRecoveryTrigger::Startup),
-            "startup"
-        );
-        assert_eq!(
-            admission_recovery_trigger_kind(AdmissionRecoveryTrigger::StateChanged),
-            "state_changed"
-        );
-        assert_eq!(
-            admission_recovery_trigger_kind(AdmissionRecoveryTrigger::Periodic),
-            "periodic"
-        );
-        assert_eq!(
-            admission_recovery_trigger_kind(AdmissionRecoveryTrigger::PeerOnline(
-                uc_core::ids::DeviceId::new("SECRET_DEVICE")
-            )),
-            "peer_online"
-        );
-    }
-
-    #[test]
-    fn sponsor_settlement_operation_name_is_stable() {
-        assert_eq!(
-            SponsorSettlementOperation::Prepare.as_str(),
-            "sponsor_settlement_prepare"
-        );
-    }
-
     #[tokio::test]
     async fn authenticated_exchange_remains_wrapped_and_transparent() {
         let establish_calls = Arc::new(AtomicUsize::new(0));
@@ -1181,7 +1005,7 @@ mod tests {
                 establish_calls: Arc::clone(&establish_calls),
                 exchange_calls: Arc::clone(&exchange_calls),
             }),
-            SpaceAdmissionTransportObservationPolicy::record_safe_message_kind(),
+            SpaceAdmissionTransportObservationPolicy::record_authenticated_exchanges(),
         );
         let admission_id =
             SpaceAdmissionId::from_bytes([3; 32]).expect("valid admission identifier");
@@ -1254,12 +1078,13 @@ mod tests {
         });
 
         let output = writer.output();
-        assert!(output.contains("operation=\"re_pairing_state_load\""));
-        assert!(output.contains("state=\"required\""));
-        assert!(output.contains("operation=\"re_pairing_state_set\""));
-        assert!(output.contains("state=\"resolved\""));
-        assert!(output.contains("outcome=\"ok\""));
-        assert!(output.contains("outcome=\"error\""));
-        assert!(output.contains("error_kind=\"inconsistent\""));
+        assert!(output.contains("uc.domain=\"space_admission\""));
+        assert!(output.contains("uc.operation=\"space_admission\""));
+        assert!(output.contains("uc.outcome=\"ok\""));
+        assert!(output.contains("uc.outcome=\"error\""));
+        assert!(output.contains("error.type=\"corrupt\""));
+        assert!(!output.contains("admission.performance"));
+        assert!(!output.contains("required"));
+        assert!(!output.contains("resolved"));
     }
 }
