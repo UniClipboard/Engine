@@ -91,3 +91,38 @@ fn ohos_binding_accepts_standard_typed_arrays_from_the_host() {
     assert!(host.contains("call_host::<_, Uint8Array>"));
     assert!(!host.contains("property::<Buffer>"));
 }
+
+#[test]
+fn ohos_binding_uses_the_shared_process_observability_runtime() {
+    let binding_root = workspace_root().join("bindings/uc-ohos-napi/src");
+    let public_contract = fs::read_to_string(binding_root.join("lib.rs"))
+        .expect("OHOS public contract must be readable");
+    let observability = fs::read_to_string(binding_root.join("observability.rs"))
+        .expect("OHOS observability adapter must be readable");
+    let runtime =
+        fs::read_to_string(binding_root.join("runtime.rs")).expect("OHOS runtime must be readable");
+
+    for required in [
+        "pub struct OhObservabilityConfig",
+        "pub struct OhCollectorConfig",
+        "pub fn install_process_observability",
+        "pub async fn flush_process_observability",
+        "pub async fn shutdown_process_observability",
+    ] {
+        assert!(
+            public_contract.contains(required),
+            "OHOS observability contract missing {required}"
+        );
+    }
+    for required in [
+        "ProcessObservabilityRuntime::install",
+        "LocalLogConfig::new(directories.logs())",
+        "schedule_flush_after_success",
+    ] {
+        assert!(
+            observability.contains(required) || runtime.contains(required),
+            "OHOS observability wiring missing {required}"
+        );
+    }
+    assert!(!runtime.contains("ProcessObservabilityRuntime::install"));
+}

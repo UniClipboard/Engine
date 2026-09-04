@@ -43,6 +43,22 @@ async function main() {
   };
 
   try {
+    fs.mkdirSync(host.cacheDirectory, { recursive: true });
+    fs.writeFileSync(path.join(host.cacheDirectory, 'logs'), 'blocks log directory');
+    const setup = addon.installProcessObservability(
+      {
+        serviceVersion: '1.2.3',
+        environment: 'test',
+        appChannel: 'ohos-host-failure-smoke',
+        remoteDiagnosticsEnabled: false,
+      },
+      {
+        privateDataDirectory: host.privateDataDirectory,
+        cacheDirectory: host.cacheDirectory,
+        temporaryDirectory: host.temporaryDirectory,
+      }
+    );
+    assert.equal(setup.localFile, 'unavailable');
     const preparedHost = addon.prepareHost(host);
     await assert.rejects(
       addon.startEngine(
@@ -52,6 +68,7 @@ async function main() {
       /UC_ENGINE:\d+:unavailable:true/
     );
   } finally {
+    await addon.shutdownProcessObservability(100).catch(() => {});
     fs.rmSync(root, { recursive: true, force: true });
   }
 }

@@ -84,6 +84,34 @@ fn log_mobile_query_failure(operation: &'static str, error: &BindingError) {
                 "mobile query failed"
             )
         }
+        BindingError::ObservabilityConfigInvalid => {
+            warn!(
+                operation,
+                error_kind = "observability_config_invalid",
+                "mobile query failed"
+            )
+        }
+        BindingError::ObservabilityConfigConflict => {
+            warn!(
+                operation,
+                error_kind = "observability_config_conflict",
+                "mobile query failed"
+            )
+        }
+        BindingError::ObservabilityRuntimeUnavailable => {
+            warn!(
+                operation,
+                error_kind = "observability_runtime_unavailable",
+                "mobile query failed"
+            )
+        }
+        BindingError::ObservabilityNotInstalled => {
+            warn!(
+                operation,
+                error_kind = "observability_not_installed",
+                "mobile query failed"
+            )
+        }
         BindingError::UnexpectedResult => {
             warn!(
                 operation,
@@ -692,11 +720,6 @@ impl MobileEngine {
         analytics: Option<(Arc<dyn BindingAnalyticsHost>, BindingAnalyticsContext)>,
     ) -> Result<Arc<Self>, BindingError> {
         let capabilities = host_capabilities(Arc::clone(&host), analytics)?;
-        let logs_dir = capabilities.directories().logs();
-        #[cfg(target_vendor = "apple")]
-        crate::apple::install_apple_tracing(logs_dir);
-        #[cfg(target_os = "android")]
-        crate::android::install_android_tracing(logs_dir);
         let config = EngineConfig::new(config.app_version).with_profile_id(config.profile_id);
         let (commands, requests) = tokio::sync::mpsc::unbounded_channel();
         let (lifecycle_commands, lifecycle_requests) = tokio::sync::mpsc::unbounded_channel();
@@ -1283,6 +1306,7 @@ async fn run_worker_loop(
                                     )
                                     .await
                                     .map(|_| ());
+                                    crate::observability::schedule_flush_after_success(&result);
                                     let suspended = result.is_ok();
                                     if suspended {
                                         let _ = response.send(Ok(SessionRecovery {
@@ -1309,6 +1333,7 @@ async fn run_worker_loop(
                                     )
                                     .await
                                     .map(|_| ());
+                                    crate::observability::schedule_flush_after_success(&result);
                                     let _ = response.send(Err(BindingError::RuntimeUnavailable));
                                     shutdown_response = Some((shutdown, result));
                                     break 'worker;
@@ -1656,6 +1681,7 @@ async fn run_worker_loop(
             }
             WorkerCommand::Suspend { response } => {
                 let result = engine.suspend().await.map_err(BindingError::from);
+                crate::observability::schedule_flush_after_success(&result);
                 let _ = response.send(result);
             }
             WorkerCommand::Resume { response } => {
@@ -1664,6 +1690,7 @@ async fn run_worker_loop(
             }
             WorkerCommand::Shutdown { deadline, response } => {
                 let result = engine.shutdown(deadline).await.map_err(BindingError::from);
+                crate::observability::schedule_flush_after_success(&result);
                 shutdown_response = Some((response, result));
                 break;
             }
@@ -2266,22 +2293,27 @@ fn count_to_u64(value: usize) -> Result<u64, BindingError> {
     u64::try_from(value).map_err(|_| BindingError::UnexpectedResult)
 }
 
-fn host_capabilities(
-    host: Arc<dyn BindingHost>,
-    analytics: Option<(Arc<dyn BindingAnalyticsHost>, BindingAnalyticsContext)>,
-) -> Result<HostCapabilities, BindingError> {
+pub(crate) fn host_directories(
+    host: &Arc<dyn BindingHost>,
+) -> Result<HostDirectories, BindingError> {
     let cache_directory = host_path(host.cache_directory())?;
-    let directories = HostDirectories::new(
+    Ok(HostDirectories::new(
         host_path(host.private_data_directory())?,
         cache_directory.clone(),
         host_path(host.temporary_directory())?,
         cache_directory.join("logs"),
-    );
+    ))
+}
+
+fn host_capabilities(
+    host: Arc<dyn BindingHost>,
+    analytics: Option<(Arc<dyn BindingAnalyticsHost>, BindingAnalyticsContext)>,
+) -> Result<HostCapabilities, BindingError> {
+    let directories = host_directories(&host)?;
     for directory in [
         directories.private_data(),
         directories.cache(),
         directories.temporary(),
-        directories.logs(),
     ] {
         std::fs::create_dir_all(directory).map_err(|_| BindingError::HostIo)?;
     }

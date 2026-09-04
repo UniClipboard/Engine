@@ -1,16 +1,20 @@
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use uc_engine::{EngineError, EngineErrorCategory};
 
 use uc_engine_uniffi::{
-    core_version, BindingAnalyticsContext, BindingAnalyticsDeviceType, BindingAnalyticsEvent,
-    BindingAnalyticsGroupIdentify, BindingAnalyticsHost, BindingAnalyticsHostError,
-    BindingAnalyticsIdentify, BindingAnalyticsIdentityChange, BindingAnalyticsOs,
-    BindingClipboardRepresentation, BindingClipboardRestoreMode, BindingClipboardRestoreOutcome,
-    BindingClipboardSnapshot, BindingConfig, BindingEngineState, BindingError,
-    BindingErrorCategory, BindingEvent, BindingFileMetadata, BindingHost, BindingOperationTerminal,
-    HostBindingError, InvitationIssued, MobileEngine, SendReport,
+    core_version, flush_process_observability, install_process_observability,
+    shutdown_process_observability, BindingAnalyticsContext, BindingAnalyticsDeviceType,
+    BindingAnalyticsEvent, BindingAnalyticsGroupIdentify, BindingAnalyticsHost,
+    BindingAnalyticsHostError, BindingAnalyticsIdentify, BindingAnalyticsIdentityChange,
+    BindingAnalyticsOs, BindingClipboardRepresentation, BindingClipboardRestoreMode,
+    BindingClipboardRestoreOutcome, BindingClipboardSnapshot, BindingCollectorConfig,
+    BindingConfig, BindingDeploymentEnvironment, BindingEngineState, BindingError,
+    BindingErrorCategory, BindingEvent, BindingFileMetadata, BindingHost,
+    BindingObservabilityConfig, BindingObservabilitySetupStatus, BindingObservabilitySignalResult,
+    BindingOperationTerminal, HostBindingError, InvitationIssued, MobileEngine, SendReport,
 };
 
 static ENGINE_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -19,6 +23,94 @@ const ENGINE_SHUTDOWN_DEADLINE_MS: u64 = 30_000;
 #[test]
 fn core_version_uses_the_binding_package_version() {
     assert_eq!(core_version(), format!("v{}", env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
+fn process_observability_is_host_owned_reused_and_lifecycle_safe() {
+    let _guard = lock(&ENGINE_TEST_LOCK);
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let host = Arc::new(MemoryHost::new(directory.path()));
+    fs::create_dir_all(&host.cache).expect("cache directory");
+    fs::write(host.cache.join("logs"), b"blocks log directory").expect("blocking log file");
+    let config = BindingObservabilityConfig {
+        service_version: "1.2.3".to_owned(),
+        environment: BindingDeploymentEnvironment::Test,
+        app_channel: "integration-test".to_owned(),
+        remote_diagnostics_enabled: true,
+        collector: Some(BindingCollectorConfig {
+            trace_endpoint: "http://127.0.0.1:9/v1/traces".to_owned(),
+            log_endpoint: "http://127.0.0.1:9/v1/logs".to_owned(),
+            auth_header_name: Some("authorization".to_owned()),
+            auth_header_value: Some("Bearer binding-private-token".to_owned()),
+        }),
+    };
+
+    let debug = format!("{config:?}");
+    assert!(!debug.contains("127.0.0.1"));
+    assert!(!debug.contains("binding-private-token"));
+
+    let setup =
+        install_process_observability(config.clone(), host.clone()).expect("observability install");
+    assert!(!setup.reused);
+    assert_eq!(setup.remote, BindingObservabilitySetupStatus::Ready);
+    assert_eq!(
+        setup.local_file,
+        BindingObservabilitySetupStatus::Unavailable
+    );
+
+    let engine = MobileEngine::start(
+        BindingConfig {
+            app_version: "1.2.3".to_owned(),
+            profile_id: "observability-lifecycle".to_owned(),
+        },
+        host.clone(),
+    )
+    .expect("log directory failure must not prevent engine startup");
+    engine.suspend().expect("suspend");
+    engine.resume().expect("resume without reinstall");
+    engine.shutdown(30_000).expect("engine shutdown");
+
+    let reused = install_process_observability(config.clone(), host.clone())
+        .expect("same process config must be reused");
+    assert!(reused.reused);
+    let after_engine_shutdown =
+        flush_process_observability(25).expect("engine shutdown must keep process runtime alive");
+    assert_ne!(
+        after_engine_shutdown.traces,
+        BindingObservabilitySignalResult::AlreadyShutdown
+    );
+    assert_ne!(
+        after_engine_shutdown.logs,
+        BindingObservabilitySignalResult::AlreadyShutdown
+    );
+    let restarted = MobileEngine::start(
+        BindingConfig {
+            app_version: "1.2.3".to_owned(),
+            profile_id: "observability-lifecycle".to_owned(),
+        },
+        host.clone(),
+    )
+    .expect("second engine must reuse the process runtime");
+    restarted.shutdown(30_000).expect("second engine shutdown");
+
+    let mut conflicting = config;
+    conflicting.app_channel = "different-channel".to_owned();
+    assert!(matches!(
+        install_process_observability(conflicting, host),
+        Err(BindingError::ObservabilityConfigConflict)
+    ));
+
+    let _ = flush_process_observability(25).expect("bounded flush");
+    let _ = shutdown_process_observability(250).expect("process shutdown");
+    let after_shutdown = flush_process_observability(25).expect("closed runtime summary");
+    assert_eq!(
+        after_shutdown.traces,
+        BindingObservabilitySignalResult::AlreadyShutdown
+    );
+    assert_eq!(
+        after_shutdown.logs,
+        BindingObservabilitySignalResult::AlreadyShutdown
+    );
 }
 
 #[test]

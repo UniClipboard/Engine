@@ -40,6 +40,19 @@ class EngineRuntime {
     try {
       this.version = engine.coreVersion();
       this.storage.verifyAccess();
+      engine.installProcessObservability(
+        {
+          serviceVersion: '1.0.0',
+          environment: 'development',
+          appChannel: 'ohos-system-host-probe',
+          remoteDiagnosticsEnabled: false
+        },
+        {
+          privateDataDirectory: context.filesDir,
+          cacheDirectory: context.cacheDir,
+          temporaryDirectory: context.tempDir
+        }
+      );
       const preparedHost = engine.prepareHost(createEngineHost(context, this.storage, this.files));
       const active = await engine.startEngine(
         { appVersion: '1.0.0', profileId: 'ohos-system-host-probe' },
@@ -75,6 +88,15 @@ class EngineRuntime {
 
   onForeground(): void {
     this.transitionToForeground().catch((error: Object) => this.failLifecycle('resume', error));
+  }
+
+  async shutdown(): Promise<void> {
+    const active = this.activeEngine;
+    this.activeEngine = undefined;
+    if (active !== undefined) {
+      await active.shutdown(5_000);
+    }
+    await engine.shutdownProcessObservability(1_000);
   }
 
   async exportSample(context: common.UIAbilityContext): Promise<EngineRuntimeSnapshot> {

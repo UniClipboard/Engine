@@ -30,4 +30,13 @@ fn android_binding_installs_the_jni_context_before_engine_start() {
     assert!(
         android.contains("Java_expo_modules_ucengine_UcEngineModule_nativeInstallAndroidContext")
     );
+    assert!(android.contains("ensure_android_context_installed"));
+    assert!(observability_installer(&root)
+        .contains("crate::android::ensure_android_context_installed()"));
+    assert!(!android.contains("set_global_default"));
+    assert!(!android.contains("tracing_android::layer"));
+}
+
+fn observability_installer(root: &Path) -> String {
+    read(root.join("bindings/uc-engine-uniffi/src/observability.rs"))
 }

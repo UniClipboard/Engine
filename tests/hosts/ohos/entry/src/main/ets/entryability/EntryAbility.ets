@@ -14,6 +14,12 @@ export default class EntryAbility extends UIAbility {
     engineRuntime.onBackground();
   }
 
+  onDestroy(): void {
+    engineRuntime.shutdown().catch(() => {
+      hilog.error(DOMAIN, 'EngineProbe', 'Failed to shut down the engine');
+    });
+  }
+
   onWindowStageCreate(windowStage: window.WindowStage): void {
     try {
       windowStage.loadContent('pages/Index', (error) => {

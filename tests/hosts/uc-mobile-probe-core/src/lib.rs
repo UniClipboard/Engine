@@ -13,6 +13,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 use uc_engine::{
+    observability::{
+        DeploymentEnvironment, LocalLogConfig, ObservabilityConfig, ObservabilityResource,
+        OperatingSystem, ProcessObservabilityHandle, ProcessObservabilityRuntime,
+    },
     CreateSpaceInput, Engine, EngineConfig, EngineError, EngineEvent, ExportEntryInput,
     HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory, HostClipboard,
     HostClipboardSnapshot, HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata,
@@ -94,6 +98,7 @@ enum ProbeCommand {
     Resume,
     EventSummary,
     Shutdown,
+    ShutdownProcessObservability,
 }
 
 struct ProbeRequest {
@@ -111,14 +116,6 @@ impl ProbeClient {
         std::thread::Builder::new()
             .name("uc-mobile-probe-runtime".into())
             .spawn(move || {
-                let _ = tracing_subscriber::fmt()
-                    .with_ansi(false)
-                    .without_time()
-                    .with_env_filter(
-                        tracing_subscriber::EnvFilter::try_from_default_env()
-                            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("error")),
-                    )
-                    .try_init();
                 let runtime = match tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(2)
                     .enable_all()
@@ -329,6 +326,7 @@ impl HostSecureStorage for UnavailableSecureStorage {
 
 struct ProbeState {
     engine: Option<Arc<Engine>>,
+    observability: Option<ProcessObservabilityHandle>,
     files: ProbeFiles,
     events: Arc<Mutex<EventSummary>>,
 }
@@ -336,6 +334,7 @@ struct ProbeState {
 async fn run_probe(mut requests: mpsc::UnboundedReceiver<ProbeRequest>) {
     let mut state = ProbeState {
         engine: None,
+        observability: None,
         files: ProbeFiles::default(),
         events: Arc::new(Mutex::new(EventSummary::default())),
     };
@@ -366,13 +365,27 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
                     return probe_error("directory_unavailable");
                 }
             }
+            let directories = HostDirectories::new(
+                directories[0].clone(),
+                directories[1].clone(),
+                directories[2].clone(),
+                directories[1].join("logs"),
+            );
+            let observability_config = ObservabilityConfig::new(ObservabilityResource::new(
+                app_version.clone(),
+                DeploymentEnvironment::Test,
+                probe_operating_system(),
+                std::env::consts::ARCH,
+                "mobile-host-probe",
+            ))
+            .with_local_logs(LocalLogConfig::new(directories.logs()));
+            let observability = match ProcessObservabilityRuntime::install(observability_config) {
+                Ok(outcome) => outcome.handle(),
+                Err(_) => return probe_error("observability_install_failed"),
+            };
+            state.observability = Some(observability);
             let host = HostCapabilities::new(
-                HostDirectories::new(
-                    directories[0].clone(),
-                    directories[1].clone(),
-                    directories[2].clone(),
-                    directories[1].join("logs"),
-                ),
+                directories,
                 host_secure_storage(),
                 Box::new(ProbeClipboard),
                 Box::new(state.files.clone()),
@@ -547,7 +560,11 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
             .await
         }
         ProbeCommand::Suspend => match state.engine.as_ref() {
-            Some(engine) => lifecycle_response(engine.suspend().await, "suspended"),
+            Some(engine) => {
+                let result = engine.suspend().await;
+                flush_observability_after_success(state.observability.as_ref(), &result);
+                lifecycle_response(result, "suspended")
+            }
             None => probe_error("not_started"),
         },
         ProbeCommand::Resume => match state.engine.as_ref() {
@@ -573,10 +590,55 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
         }
         ProbeCommand::Shutdown => match state.engine.take() {
             Some(engine) => {
-                lifecycle_response(engine.shutdown(Duration::from_secs(15)).await, "shutdown")
+                let result = engine.shutdown(Duration::from_secs(15)).await;
+                flush_observability_after_success(state.observability.as_ref(), &result);
+                lifecycle_response(result, "shutdown")
             }
             None => probe_error("not_started"),
         },
+        ProbeCommand::ShutdownProcessObservability => match state.observability.as_ref() {
+            Some(observability) => {
+                let summary = observability.shutdown(Duration::from_secs(1));
+                json!({
+                    "ok": true,
+                    "kind": "process_observability_shutdown",
+                    "traces": signal_result(summary.traces),
+                    "logs": signal_result(summary.logs),
+                })
+            }
+            None => probe_error("observability_not_installed"),
+        },
+    }
+}
+
+fn flush_observability_after_success<T>(
+    observability: Option<&ProcessObservabilityHandle>,
+    result: &Result<T, EngineError>,
+) {
+    if result.is_ok() {
+        if let Some(observability) = observability {
+            let _ = observability.force_flush(Duration::from_millis(250));
+        }
+    }
+}
+
+fn probe_operating_system() -> OperatingSystem {
+    match std::env::consts::OS {
+        "ios" => OperatingSystem::Ios,
+        "android" => OperatingSystem::Android,
+        "macos" => OperatingSystem::Macos,
+        "windows" => OperatingSystem::Windows,
+        "linux" => OperatingSystem::Linux,
+        _ => OperatingSystem::Other,
+    }
+}
+
+fn signal_result(result: uc_engine::observability::ObservabilitySignalResult) -> &'static str {
+    match result {
+        uc_engine::observability::ObservabilitySignalResult::Completed => "completed",
+        uc_engine::observability::ObservabilitySignalResult::Failed => "failed",
+        uc_engine::observability::ObservabilitySignalResult::TimedOut => "timed_out",
+        uc_engine::observability::ObservabilitySignalResult::AlreadyShutdown => "already_shutdown",
     }
 }
 
@@ -1529,6 +1591,7 @@ mod tests {
             .expect("query-active command must deserialize");
         let mut state = ProbeState {
             engine: None,
+            observability: None,
             files: ProbeFiles::default(),
             events: Arc::new(Mutex::new(EventSummary::default())),
         };
@@ -1545,6 +1608,7 @@ mod tests {
                 .expect("device group choices command must deserialize");
         let mut state = ProbeState {
             engine: None,
+            observability: None,
             files: ProbeFiles::default(),
             events: Arc::new(Mutex::new(EventSummary::default())),
         };
@@ -1563,6 +1627,7 @@ mod tests {
                 serde_json::from_str(source).expect("member removal command must deserialize");
             let mut state = ProbeState {
                 engine: None,
+                observability: None,
                 files: ProbeFiles::default(),
                 events: Arc::new(Mutex::new(EventSummary::default())),
             };

@@ -150,3 +150,47 @@ fn uniffi_binding_declares_mobile_analytics_host_contract() {
         "mobile binding must offer an analytics-enabled constructor without removing the compatible constructor"
     );
 }
+
+#[test]
+fn uniffi_binding_uses_the_shared_process_observability_runtime() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let binding_root = workspace_root.join("bindings/uc-engine-uniffi/src");
+    let public_contract = fs::read_to_string(binding_root.join("lib.rs"))
+        .expect("binding public contract must be readable");
+    let observability = fs::read_to_string(binding_root.join("observability.rs"))
+        .expect("binding observability adapter must be readable");
+    let runtime = fs::read_to_string(binding_root.join("runtime.rs"))
+        .expect("binding runtime must be readable");
+
+    for required in [
+        "pub struct BindingObservabilityConfig",
+        "pub struct BindingCollectorConfig",
+        "pub fn install_process_observability",
+        "pub fn flush_process_observability",
+        "pub fn shutdown_process_observability",
+    ] {
+        assert!(
+            public_contract.contains(required),
+            "mobile observability contract missing {required}"
+        );
+    }
+    for required in [
+        "ProcessObservabilityRuntime::install",
+        "LocalLogConfig::new(directories.logs())",
+        "schedule_flush_after_success",
+    ] {
+        assert!(
+            observability.contains(required) || runtime.contains(required),
+            "mobile observability wiring missing {required}"
+        );
+    }
+    assert!(!binding_root.join("apple.rs").exists());
+    assert!(!binding_root.join("file_log.rs").exists());
+    let android = fs::read_to_string(binding_root.join("android.rs"))
+        .expect("Android context adapter must be readable");
+    assert!(android.contains("ensure_android_context_installed"));
+    assert!(!android.contains("set_global_default"));
+    assert!(!android.contains("tracing_android::layer"));
+    assert!(!runtime.contains("install_apple_tracing"));
+    assert!(!runtime.contains("install_android_tracing"));
+}

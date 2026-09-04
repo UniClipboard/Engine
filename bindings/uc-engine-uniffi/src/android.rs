@@ -1,34 +1,20 @@
 use std::ffi::c_void;
-use std::path::Path;
 use std::sync::OnceLock;
 
 use jni::objects::{GlobalRef, JClass, JObject};
 use jni::sys::{jboolean, JNI_FALSE, JNI_TRUE};
 use jni::JNIEnv;
-use tracing_subscriber::filter::filter_fn;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::Layer;
 
-use crate::file_log;
+use crate::BindingError;
 
 static ANDROID_CONTEXT: OnceLock<GlobalRef> = OnceLock::new();
-static ANDROID_TRACING_INSTALLED: OnceLock<()> = OnceLock::new();
 
-pub(crate) fn install_android_tracing(logs_dir: &Path) {
-    ANDROID_TRACING_INSTALLED.get_or_init(|| {
-        let Ok(layer) = tracing_android::layer("UcEngine") else {
-            return;
-        };
-        let layer = layer.with_filter(filter_fn(file_log::persistent_sink_enabled));
-        let subscriber: Box<dyn tracing::Subscriber + Send + Sync> =
-            match file_log::file_layer(logs_dir) {
-                Some(file_layer) => {
-                    Box::new(tracing_subscriber::registry().with(layer).with(file_layer))
-                }
-                None => Box::new(tracing_subscriber::registry().with(layer)),
-            };
-        let _ = tracing::subscriber::set_global_default(subscriber);
-    });
+pub(crate) fn ensure_android_context_installed() -> Result<(), BindingError> {
+    if ANDROID_CONTEXT.get().is_some() {
+        Ok(())
+    } else {
+        Err(BindingError::ObservabilityRuntimeUnavailable)
+    }
 }
 
 #[no_mangle]

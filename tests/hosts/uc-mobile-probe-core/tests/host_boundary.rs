@@ -170,3 +170,15 @@ fn android_pairing_keeps_the_probe_alive_with_a_data_sync_service() {
     assert!(service.contains("startForeground"));
     assert!(!service.contains("ProbeBridge"));
 }
+
+#[test]
+fn mobile_probe_uses_the_engine_process_observability_contract() {
+    let root = workspace_root();
+    let source = read(root.join("tests/hosts/uc-mobile-probe-core/src/lib.rs"));
+
+    assert!(source.contains("ProcessObservabilityRuntime::install"));
+    assert!(source.contains("LocalLogConfig::new(directories.logs())"));
+    assert!(source.contains("ProbeCommand::ShutdownProcessObservability"));
+    assert!(!source.contains("tracing_subscriber::fmt()"));
+    assert!(!source.contains("try_init()"));
+}

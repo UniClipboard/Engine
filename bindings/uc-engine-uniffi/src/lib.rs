@@ -2,10 +2,7 @@
 
 #[cfg(target_os = "android")]
 mod android;
-#[cfg(target_vendor = "apple")]
-mod apple;
-#[cfg(any(target_vendor = "apple", target_os = "android"))]
-mod file_log;
+mod observability;
 mod runtime;
 
 pub use runtime::{
@@ -50,6 +47,14 @@ pub enum BindingError {
     RuntimeUnavailable,
     #[error("binding engine already stopped")]
     AlreadyStopped,
+    #[error("observability configuration is invalid")]
+    ObservabilityConfigInvalid,
+    #[error("observability runtime is already installed with a different configuration")]
+    ObservabilityConfigConflict,
+    #[error("observability runtime is unavailable")]
+    ObservabilityRuntimeUnavailable,
+    #[error("observability runtime is not installed")]
+    ObservabilityNotInstalled,
     #[error("engine returned an unexpected result")]
     UnexpectedResult,
 }
@@ -168,6 +173,88 @@ pub struct BindingAnalyticsGroupIdentify {
 pub struct BindingConfig {
     pub app_version: String,
     pub profile_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum BindingDeploymentEnvironment {
+    Development,
+    Test,
+    Staging,
+    Production,
+}
+
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BindingCollectorConfig {
+    pub trace_endpoint: String,
+    pub log_endpoint: String,
+    pub auth_header_name: Option<String>,
+    pub auth_header_value: Option<String>,
+}
+
+impl std::fmt::Debug for BindingCollectorConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("BindingCollectorConfig(REDACTED)")
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BindingObservabilityConfig {
+    pub service_version: String,
+    pub environment: BindingDeploymentEnvironment,
+    pub app_channel: String,
+    pub remote_diagnostics_enabled: bool,
+    pub collector: Option<BindingCollectorConfig>,
+}
+
+impl std::fmt::Debug for BindingObservabilityConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BindingObservabilityConfig")
+            .field("service_version", &self.service_version)
+            .field("environment", &self.environment)
+            .field("app_channel", &self.app_channel)
+            .field(
+                "remote_diagnostics_enabled",
+                &self.remote_diagnostics_enabled,
+            )
+            .field("collector", &self.collector.as_ref().map(|_| "REDACTED"))
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum BindingObservabilitySetupStatus {
+    Disabled,
+    Ready,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BindingObservabilitySetup {
+    pub reused: bool,
+    pub remote: BindingObservabilitySetupStatus,
+    pub local_file: BindingObservabilitySetupStatus,
+    pub dropped_local_records: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum BindingObservabilitySignalResult {
+    Completed,
+    Failed,
+    TimedOut,
+    AlreadyShutdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BindingObservabilityFlushSummary {
+    pub traces: BindingObservabilitySignalResult,
+    pub logs: BindingObservabilitySignalResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BindingObservabilityShutdownSummary {
+    pub traces: BindingObservabilitySignalResult,
+    pub logs: BindingObservabilitySignalResult,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -452,4 +539,27 @@ pub trait BindingAnalyticsHost: Send + Sync {
 #[uniffi::export]
 pub fn core_version() -> String {
     format!("v{}", env!("CARGO_PKG_VERSION"))
+}
+
+#[uniffi::export]
+pub fn install_process_observability(
+    config: BindingObservabilityConfig,
+    host: std::sync::Arc<dyn BindingHost>,
+) -> Result<BindingObservabilitySetup, BindingError> {
+    let directories = runtime::host_directories(&host)?;
+    observability::install(config, &directories)
+}
+
+#[uniffi::export]
+pub fn flush_process_observability(
+    deadline_ms: u64,
+) -> Result<BindingObservabilityFlushSummary, BindingError> {
+    observability::force_flush(std::time::Duration::from_millis(deadline_ms))
+}
+
+#[uniffi::export]
+pub fn shutdown_process_observability(
+    deadline_ms: u64,
+) -> Result<BindingObservabilityShutdownSummary, BindingError> {
+    observability::shutdown(std::time::Duration::from_millis(deadline_ms))
 }

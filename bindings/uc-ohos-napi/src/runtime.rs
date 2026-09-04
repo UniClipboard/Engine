@@ -403,7 +403,9 @@ impl OhEngine {
 
     #[napi]
     pub async fn suspend(&self) -> napi::Result<()> {
-        self.engine.suspend().await.map_err(engine_error)
+        let result = self.engine.suspend().await.map_err(engine_error);
+        crate::observability::schedule_flush_after_success(&result);
+        result
     }
 
     #[napi]
@@ -429,10 +431,13 @@ impl OhEngine {
 
     #[napi]
     pub async fn shutdown(&self, deadline_ms: u32) -> napi::Result<()> {
-        self.engine
+        let result = self
+            .engine
             .shutdown(Duration::from_millis(u64::from(deadline_ms)))
             .await
-            .map_err(engine_error)
+            .map_err(engine_error);
+        crate::observability::schedule_flush_after_success(&result);
+        result
     }
 }
 

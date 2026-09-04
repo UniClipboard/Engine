@@ -42,6 +42,39 @@ export interface OhHostResult<T> {
 
 export type PreparedHost = object
 
+export interface OhHostDirectories {
+  privateDataDirectory: string
+  cacheDirectory: string
+  temporaryDirectory: string
+}
+
+export interface OhCollectorConfig {
+  traceEndpoint: string
+  logEndpoint: string
+  authHeaderName?: string
+  authHeaderValue?: string
+}
+
+export interface OhObservabilityConfig {
+  serviceVersion: string
+  environment: 'development' | 'test' | 'staging' | 'production'
+  appChannel: string
+  remoteDiagnosticsEnabled: boolean
+  collector?: OhCollectorConfig
+}
+
+export interface OhObservabilitySetup {
+  reused: boolean
+  remote: 'disabled' | 'ready' | 'unavailable'
+  localFile: 'disabled' | 'ready' | 'unavailable'
+  droppedLocalRecords: number
+}
+
+export interface OhObservabilitySignalSummary {
+  traces: 'completed' | 'failed' | 'timed_out' | 'already_shutdown'
+  logs: 'completed' | 'failed' | 'timed_out' | 'already_shutdown'
+}
+
 export interface OhSendReport {
   entryId: string
   atMs: number
@@ -171,6 +204,12 @@ export interface OhEngine {
 
 declare const engine: {
   coreVersion(): string
+  installProcessObservability(
+    config: OhObservabilityConfig,
+    directories: OhHostDirectories
+  ): OhObservabilitySetup
+  flushProcessObservability(deadlineMs: number): Promise<OhObservabilitySignalSummary>
+  shutdownProcessObservability(deadlineMs: number): Promise<OhObservabilitySignalSummary>
   prepareHost(host: OhHost): PreparedHost
   startEngine(
     config: { appVersion: string; profileId: string },
