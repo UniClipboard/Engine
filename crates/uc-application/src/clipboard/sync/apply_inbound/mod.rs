@@ -64,7 +64,6 @@
 use bytes::Bytes;
 use thiserror::Error;
 use uc_core::ids::{DeviceId, EntryId};
-use uc_observability_contract::FlowId;
 
 use crate::clipboard::write::ClipboardWriteIntent;
 
@@ -99,7 +98,6 @@ pub struct ApplyInboundInput {
     pub from_device: DeviceId,
     pub snapshot_hash: String,
     pub plaintext: Bytes,
-    pub flow_id: Option<FlowId>,
     /// Write intent for the [`ApplyOutcome::Resurfaced`] branch only — the
     /// fresh-content branch always writes as `RemotePush`.
     ///

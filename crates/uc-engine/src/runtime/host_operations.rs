@@ -223,7 +223,6 @@ impl ProductionRuntime {
                 intent: LocalClipboardIntent::ExplicitSend {
                     targets: target_devices.into_iter().map(DeviceId::new).collect(),
                 },
-                source_started_at: None,
             })
             .await
             .map_err(|error| {

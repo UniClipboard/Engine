@@ -761,6 +761,23 @@ pub async fn build_sync_engine_assembly(
     #[cfg(not(feature = "lan-compat"))]
     let mobile_device_repo: Arc<dyn uc_core::ports::FindMobileDeviceByIdPort> =
         Arc::new(UnavailableMobileDeviceLookup);
+    let clipboard =
+        crate::assembly::observability::observe_clipboard(ApplicationClipboardAdapters {
+            peer_addresses: Arc::clone(&space_setup.peer_addr_repo),
+            peer_reachability: Arc::clone(&peer_reachability),
+            clipboard_dispatch,
+            clipboard_receiver,
+            local_identity: Arc::clone(&local_identity),
+            mobile_device_repo,
+            active_receiver: active_clipboard_receiver,
+            active_dispatch: active_clipboard_dispatch,
+            active_pull_publisher: FsAtomicPublisher::new(),
+            active_pull_target_reserver: FsInboundFileTarget::new(Arc::clone(
+                &space_setup.settings,
+            )),
+            active_pull_hidden_marker: FsHiddenPathMarker::new(),
+            staging_cleanup: FsDirectoryStagingCleaner::new(),
+        });
     let application_network = application.assemble_network(ApplicationNetworkAdapters {
         blob_transfer: Arc::clone(&blob_transfer),
         blob_reference: Arc::clone(&space_setup.blob_reference_repo),
@@ -782,22 +799,7 @@ pub async fn build_sync_engine_assembly(
             runtime: space_runtime,
             peer_reachability_changed_events: peer_reachability.subscribe(),
         },
-        clipboard: ApplicationClipboardAdapters {
-            peer_addresses: Arc::clone(&space_setup.peer_addr_repo),
-            peer_reachability: Arc::clone(&peer_reachability),
-            clipboard_dispatch,
-            clipboard_receiver,
-            local_identity,
-            mobile_device_repo,
-            active_receiver: active_clipboard_receiver,
-            active_dispatch: active_clipboard_dispatch,
-            active_pull_publisher: FsAtomicPublisher::new(),
-            active_pull_target_reserver: FsInboundFileTarget::new(Arc::clone(
-                &space_setup.settings,
-            )),
-            active_pull_hidden_marker: FsHiddenPathMarker::new(),
-            staging_cleanup: FsDirectoryStagingCleaner::new(),
-        },
+        clipboard,
     });
     builder.install_space_admission(
         application_network.space_admission_endpoint(),

@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use thiserror::Error;
@@ -8,21 +7,14 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
-use uc_core::clipboard::{ClipboardContentCategory, ClipboardContentCategorySet};
+use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::DeviceId;
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::{
-    ClipboardReceiverPort, ClockPort, ConnectionChannel, InboundClipboard,
-    InboundClipboardDisposition, InboundClipboardReceipt, SettingsPort,
+    ClipboardReceiverPort, ClockPort, InboundClipboard, InboundClipboardDisposition,
+    InboundClipboardReceipt, SettingsPort,
 };
 use uc_core::MemberRepositoryPort;
-use uc_observability_contract::analytics::{
-    Direction, PayloadSizeBucket, PayloadType, TransportType,
-};
-use uc_observability_contract::otlp::{
-    log_clipboard_sync_stage, ClipboardSyncStage, ClipboardSyncTiming,
-};
-use uc_observability_contract::FlowId;
 
 use crate::clipboard::sync::decode_v3_bytes_to_snapshot;
 use crate::clipboard::sync::receive_gate::MemberReceiveGate;
@@ -89,31 +81,12 @@ struct InboundProcessor {
     events: Arc<dyn ClipboardInboundEventPort>,
 }
 
-struct InboundFlow {
-    application_flow_id: Option<FlowId>,
-    log_flow_id: FlowId,
-    synthetic: bool,
-}
-
 struct PreparedInbound {
     from_device: DeviceId,
     snapshot_hash: String,
     plaintext: Bytes,
-    flow: InboundFlow,
     at_ms: i64,
-    transport: ConnectionChannel,
-    payload_type: PayloadType,
-    payload_size_bucket: PayloadSizeBucket,
-    timing: InboundTiming,
     receipt: InboundClipboardReceipt,
-}
-
-#[derive(Debug, Default)]
-struct InboundTiming {
-    receiver_queue_ms: u32,
-    receiver_policy_ms: u32,
-    receiver_decrypt_ms: u32,
-    receiver_preflight_decode_ms: u32,
 }
 
 impl ClipboardInboundRuntime {
@@ -170,39 +143,22 @@ impl Drop for ClipboardInboundRuntime {
 }
 
 impl InboundProcessor {
-    #[instrument(
-        skip_all,
-        fields(
-            snapshot_hash = %inbound.header.snapshot_hash,
-            flow.id = tracing::field::Empty,
-            flow.kind = "clipboard_sync",
-            flow.synthetic = tracing::field::Empty,
-        ),
-    )]
+    #[instrument(skip_all)]
     async fn handle_one(&self, inbound: InboundClipboard) {
-        let processing_started_at = Instant::now();
-        let Some(mut prepared) = self.prepare(inbound, processing_started_at).await else {
+        let Some(prepared) = self.prepare(inbound).await else {
             return;
         };
-        let receiver_preflight_decode_started_at = Instant::now();
         let (text_preview, representations) = summarize_plaintext(&prepared.plaintext);
-        prepared.timing.receiver_preflight_decode_ms = prepared
-            .timing
-            .receiver_preflight_decode_ms
-            .saturating_add(duration_ms(receiver_preflight_decode_started_at.elapsed()));
-        let receiver_apply_started_at = Instant::now();
         let result = self
             .apply
             .apply(InboundClipboardApplyInput {
                 from_device: prepared.from_device.as_str().to_owned(),
                 snapshot_hash: prepared.snapshot_hash.clone(),
                 plaintext: prepared.plaintext.clone(),
-                flow_id: prepared.flow.application_flow_id.clone(),
                 provisional: None,
                 resurface_intent: ClipboardWriteIntent::RemotePush,
             })
             .await;
-        let receiver_apply_ms = duration_ms(receiver_apply_started_at.elapsed());
         let (action, disposition) = match &result {
             Ok(InboundClipboardApplyOutcome::Applied { entry_id }) => {
                 info!(entry_id = %entry_id, "inbound clipboard applied");
@@ -251,12 +207,6 @@ impl InboundProcessor {
                 )
             }
         };
-        if matches!(
-            disposition,
-            InboundClipboardDisposition::Applied | InboundClipboardDisposition::Duplicate
-        ) {
-            self.capture_completed_stages(&prepared, receiver_apply_ms);
-        }
         self.events.emit(ClipboardInboundEvent {
             from_device: prepared.from_device,
             snapshot_hash: prepared.snapshot_hash,
@@ -269,20 +219,8 @@ impl InboundProcessor {
         prepared.receipt.finish(disposition);
     }
 
-    async fn prepare(
-        &self,
-        inbound: InboundClipboard,
-        processing_started_at: Instant,
-    ) -> Option<PreparedInbound> {
+    async fn prepare(&self, inbound: InboundClipboard) -> Option<PreparedInbound> {
         let receipt = inbound.receipt.clone();
-        let flow = record_flow_id(inbound.header.flow_id.as_deref());
-        let mut timing = InboundTiming {
-            receiver_queue_ms: duration_ms(
-                processing_started_at.saturating_duration_since(inbound.received_at),
-            ),
-            ..InboundTiming::default()
-        };
-        let receiver_policy_started_at = Instant::now();
         if !inbound_sync_enabled(self.settings.as_ref()).await {
             receipt.finish(InboundClipboardDisposition::Rejected);
             return None;
@@ -292,8 +230,6 @@ impl InboundProcessor {
             receipt.finish(InboundClipboardDisposition::Rejected);
             return None;
         };
-        timing.receiver_policy_ms = duration_ms(receiver_policy_started_at.elapsed());
-        let receiver_decrypt_started_at = Instant::now();
         let plaintext = match self.transfer_cipher.decrypt(&inbound.ciphertext).await {
             Ok(bytes) => Bytes::from(bytes),
             Err(_) => {
@@ -306,8 +242,6 @@ impl InboundProcessor {
                 return None;
             }
         };
-        timing.receiver_decrypt_ms = duration_ms(receiver_decrypt_started_at.elapsed());
-        let receiver_preflight_decode_started_at = Instant::now();
         let categories = match decode_v3_bytes_to_snapshot(plaintext.as_ref()) {
             Ok(snapshot) => ClipboardContentCategorySet::from_snapshot(&snapshot),
             Err(_) => {
@@ -319,9 +253,6 @@ impl InboundProcessor {
                 ClipboardContentCategorySet::empty()
             }
         };
-        timing.receiver_preflight_decode_ms =
-            duration_ms(receiver_preflight_decode_started_at.elapsed());
-        let receiver_category_policy_started_at = Instant::now();
         if !self
             .receive_gate
             .is_receive_category_allowed(&receive_permit, &categories)
@@ -329,56 +260,13 @@ impl InboundProcessor {
             receipt.finish(InboundClipboardDisposition::Rejected);
             return None;
         }
-        timing.receiver_policy_ms = timing
-            .receiver_policy_ms
-            .saturating_add(duration_ms(receiver_category_policy_started_at.elapsed()));
-        let payload_size_bucket = PayloadSizeBucket::from_bytes(plaintext.len() as u64);
         Some(PreparedInbound {
             from_device: inbound.peer_device_id,
             snapshot_hash: inbound.header.snapshot_hash,
             plaintext,
-            flow,
             at_ms: self.clock.now_ms(),
-            transport: inbound.transport,
-            payload_type: payload_type_from_categories(&categories),
-            payload_size_bucket,
-            timing,
             receipt,
         })
-    }
-
-    fn capture_completed_stages(&self, prepared: &PreparedInbound, receiver_apply_ms: u32) {
-        let transport_type = transport_type_from_channel(prepared.transport);
-        let log = |stage, duration_ms| {
-            log_clipboard_sync_stage(ClipboardSyncTiming {
-                flow_id: &prepared.flow.log_flow_id,
-                flow_synthetic: prepared.flow.synthetic,
-                direction: Direction::Inbound,
-                payload_type: prepared.payload_type,
-                payload_size_bucket: prepared.payload_size_bucket,
-                transport_type,
-                stage,
-                duration_ms,
-            });
-        };
-
-        log(
-            ClipboardSyncStage::ReceiverQueue,
-            prepared.timing.receiver_queue_ms,
-        );
-        log(
-            ClipboardSyncStage::ReceiverPolicy,
-            prepared.timing.receiver_policy_ms,
-        );
-        log(
-            ClipboardSyncStage::ReceiverDecrypt,
-            prepared.timing.receiver_decrypt_ms,
-        );
-        log(
-            ClipboardSyncStage::ReceiverPreflightDecode,
-            prepared.timing.receiver_preflight_decode_ms,
-        );
-        log(ClipboardSyncStage::ReceiverApply, receiver_apply_ms);
     }
 }
 
@@ -398,73 +286,6 @@ async fn inbound_sync_enabled(settings: &dyn SettingsPort) -> bool {
                 "clipboard inbound: delivery rejected"
             );
             false
-        }
-    }
-}
-
-fn duration_ms(duration: Duration) -> u32 {
-    duration.as_millis().min(u32::MAX as u128) as u32
-}
-
-fn payload_type_from_categories(categories: &ClipboardContentCategorySet) -> PayloadType {
-    if categories
-        .iter()
-        .any(|category| matches!(category, ClipboardContentCategory::File))
-    {
-        PayloadType::File
-    } else if categories
-        .iter()
-        .any(|category| matches!(category, ClipboardContentCategory::Image))
-    {
-        PayloadType::Image
-    } else {
-        PayloadType::Text
-    }
-}
-
-fn transport_type_from_channel(channel: ConnectionChannel) -> TransportType {
-    match channel {
-        ConnectionChannel::Direct => TransportType::P2pDirect,
-        ConnectionChannel::Relay => TransportType::Relay,
-        ConnectionChannel::Offline | ConnectionChannel::Unknown => TransportType::Unknown,
-    }
-}
-
-fn record_flow_id(wire_flow_id: Option<&str>) -> InboundFlow {
-    match wire_flow_id {
-        Some(wire_id) => match FlowId::parse_str(wire_id) {
-            Ok(flow_id) => {
-                tracing::Span::current().record("flow.id", tracing::field::display(&flow_id));
-                InboundFlow {
-                    application_flow_id: Some(flow_id.clone()),
-                    log_flow_id: flow_id,
-                    synthetic: false,
-                }
-            }
-            Err(_) => {
-                let synthetic = FlowId::generate();
-                tracing::Span::current().record("flow.id", tracing::field::display(&synthetic));
-                tracing::Span::current().record("flow.synthetic", true);
-                warn!(
-                    error_kind = "invalid_inbound_flow_id",
-                    "inbound clipboard flow id was invalid; using a synthetic trace id"
-                );
-                InboundFlow {
-                    application_flow_id: None,
-                    log_flow_id: synthetic,
-                    synthetic: true,
-                }
-            }
-        },
-        None => {
-            let synthetic = FlowId::generate();
-            tracing::Span::current().record("flow.id", tracing::field::display(&synthetic));
-            tracing::Span::current().record("flow.synthetic", true);
-            InboundFlow {
-                application_flow_id: None,
-                log_flow_id: synthetic,
-                synthetic: true,
-            }
         }
     }
 }
@@ -506,7 +327,7 @@ mod tests {
     use std::io::{self, Write};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, OnceLock};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use bytes::Bytes;
@@ -534,7 +355,6 @@ mod tests {
         InboundClipboardApplyError, InboundClipboardApplyInput, InboundClipboardApplyOutcome,
         InboundClipboardApplyPort,
     };
-    use uc_observability_contract::FlowId;
 
     struct FakeReceiver {
         tx: broadcast::Sender<InboundClipboard>,
@@ -874,11 +694,9 @@ mod tests {
                     origin_device_id: peer.to_owned(),
                     origin_device_name: "Peer".to_owned(),
                     payload_version: 3,
-                    flow_id: None,
                 },
                 ciphertext,
                 transport: ConnectionChannel::Unknown,
-                received_at: Instant::now(),
                 receipt,
             },
             result,
@@ -1049,54 +867,6 @@ mod tests {
             emitted[3].disposition,
             InboundClipboardDisposition::Rejected
         );
-
-        runtime.shutdown().await.expect("runtime shutdown");
-    }
-
-    #[tokio::test]
-    async fn runtime_writes_relay_stage_timings_to_the_otlp_log_after_receiver_applies() {
-        let receiver = Arc::new(FakeReceiver::new());
-        let writer = timing_log_writer();
-        let runtime = ClipboardInboundRuntime::start(deps(
-            Arc::clone(&receiver),
-            Arc::new(QueueApply {
-                outcomes: Mutex::new(VecDeque::from([Ok(
-                    InboundClipboardApplyOutcome::Applied {
-                        entry_id: "entry-timed".to_owned(),
-                    },
-                )])),
-            }),
-            Arc::new(RecordingEvents::default()),
-        ));
-        let (mut inbound, result) = text_fixture("peer-relay");
-        let flow_id = FlowId::generate();
-        inbound.header.flow_id = Some(flow_id.to_string());
-        inbound.received_at = Instant::now();
-        inbound.transport = ConnectionChannel::Relay;
-
-        receiver.publish(inbound);
-
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), result.wait())
-                .await
-                .expect("receipt settled"),
-            Some(InboundClipboardDisposition::Applied)
-        );
-
-        let output = writer.output();
-        let output = output
-            .lines()
-            .filter(|line| line.contains(&format!("flow_id={flow_id}")))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(output.contains(&format!("flow_id={flow_id}")));
-        assert!(output.contains("sync_direction=\"inbound\""));
-        assert!(output.contains("sync_transport=\"relay\""));
-        assert!(output.contains("sync_stage=\"receiver_queue\""));
-        assert!(output.contains("sync_stage=\"receiver_apply\""));
-        assert!(!output.contains("sync_stage=\"receiver_commit\""));
-        assert!(!output.contains("private text"));
-        assert!(!output.contains("peer-relay"));
 
         runtime.shutdown().await.expect("runtime shutdown");
     }

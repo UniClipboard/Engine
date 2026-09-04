@@ -16,20 +16,13 @@ use bytes::Bytes;
 use crate::ids::DeviceId;
 use crate::ports::ConnectionChannel;
 
-/// Wire-neutral clipboard header carried alongside the ciphertext payload.
+/// 随密文负载传输、但不包含具体传输格式的剪贴板头。
 ///
 /// `version` is **this port's** own wire format, independent of the pairing
 /// `WIRE_VERSION` (Slice 1→2 bumped pairing to v=2 for
 /// `transport_address_blob`; clipboard starts at v=1 because it has no
 /// predecessor on this ALPN).
 ///
-/// **Wire v2** (current) adds `flow_id` —— a cross-device trace correlation
-/// identifier (UUIDv7 string). The sender embeds the id its outbound span
-/// uses; the receiver lifts it onto its inbound span so a single business
-/// action ("A 同步剪贴板给 B") shows up as one joined `flow.id` group in
-/// Sentry. v1 frames decode with `flow_id = None`; the receiver tags those
-/// as `flow.synthetic = true` and falls back to generating a local id so
-/// downstream spans still carry *some* flow identifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClipboardHeader {
     pub version: u8,
@@ -46,18 +39,13 @@ pub struct ClipboardHeader {
     /// `ClipboardBinaryPayload` V3 format. Reserved so a Phase N payload
     /// revision can live alongside V3 without a full ALPN bump.
     pub payload_version: u8,
-    /// Cross-device trace correlation id (wire v2+). UUIDv7 string. `None`
-    /// when received from a v1 peer; the receiver treats `None` as
-    /// "generate a local synthetic id and tag the span accordingly".
-    pub flow_id: Option<String>,
 }
 
 impl ClipboardHeader {
     /// Current clipboard wire version. Bumped only on incompatible changes.
     ///
-    /// History:
-    /// - v1: initial Slice 2 Phase 2 format (no `flow_id`)
-    /// - v2: adds `flow_id` for cross-device trace correlation
+    /// 当前 Engine 尚未发布，Infra 通过前置格式标记明确拒绝旧布局，不在
+    /// Core 业务头中携带 tracing 字段。
     pub const CURRENT_VERSION: u8 = 2;
     /// Frames carrying a directory member manifest require a receiver that
     /// understands the all-or-nothing directory reconstruction contract.
@@ -113,21 +101,6 @@ pub enum ClipboardDispatchError {
     Internal(String),
 }
 
-/// Measured phases of one dispatch attempt.
-///
-/// Durations are local monotonic measurements in milliseconds. A missing
-/// value means the attempt did not reach that phase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct DispatchTiming {
-    pub address_resolution_ms: u32,
-    pub connection_ms: Option<u32>,
-    pub stream_open_ms: Option<u32>,
-    pub frame_write_ms: Option<u32>,
-    /// Time spent after the frame was written until the peer confirmed that
-    /// its inbound processing reached a terminal result.
-    pub receiver_apply_wait_ms: Option<u32>,
-}
-
 /// Outcome of a single dispatch attempt paired with the connection path
 /// actually used to reach the peer and its measured stages.
 ///
@@ -141,7 +114,6 @@ pub struct DispatchTiming {
 #[derive(Debug)]
 pub struct DispatchReport {
     pub transport: ConnectionChannel,
-    pub timing: DispatchTiming,
     pub outcome: Result<DispatchAck, ClipboardDispatchError>,
 }
 

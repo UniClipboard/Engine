@@ -9,7 +9,6 @@
 //! emit-before-write surfaces a stale snapshot to the detail view.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use tokio::task::{JoinError, JoinSet};
 use tracing::{debug, info, warn, Instrument};
@@ -225,7 +224,6 @@ pub(crate) fn spawn_deferred_drain(
     uc_observability_contract::spawn_supervised(
         "clipboard_sync.deferred_drain",
         async move {
-            let started = Instant::now();
             let mut accepted = 0usize;
             let mut duplicate = 0usize;
             let mut offline = 0usize;
@@ -249,7 +247,6 @@ pub(crate) fn spawn_deferred_drain(
                 duplicate,
                 offline,
                 errored,
-                bg_duration_ms = started.elapsed().as_millis() as u64,
                 "dispatch: deferred fan-out completed"
             );
         }

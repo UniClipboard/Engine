@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use thiserror::Error;
 use uc_core::ids::DeviceId;
-use uc_observability_contract::FlowId;
 
 use crate::clipboard::sync::apply_inbound::{
     ApplyInboundClipboardUseCase, ApplyInboundError, ApplyInboundInput, ApplyOutcome,
@@ -57,7 +56,6 @@ pub struct InboundClipboardApplyInput {
     pub from_device: String,
     pub snapshot_hash: String,
     pub plaintext: Bytes,
-    pub flow_id: Option<FlowId>,
     /// 可选的 LAN provisional receive 认领上下文；由同一完整 intent 在
     /// 成功或失败尾部完成结算，调用方不接触 receive attempt 步骤。
     pub provisional: Option<InboundProvisionalReceive>,
@@ -83,7 +81,6 @@ impl InboundClipboardApplyPort for ApplyInboundClipboardUseCase {
             from_device: DeviceId::new(input.from_device),
             snapshot_hash: input.snapshot_hash,
             plaintext: input.plaintext,
-            flow_id: input.flow_id,
             resurface_intent: input.resurface_intent,
         };
         let outcome = match provisional {

@@ -1,14 +1,13 @@
 //! `OutboundHeaderFactory` — builds the [`ClipboardHeader`] stamped on
 //! every fanned-out frame: protocol version, content hash, capture time,
-//! origin device id / name, payload version, and the cross-device
-//! `flow_id` that lets the inbound peer join the same Sentry trace.
+//! origin device id / name and payload version. Transport-only trace context
+//! stays private to Infra and never enters this business header.
 
 use std::sync::Arc;
 
 use tracing::warn;
 use uc_core::ids::DeviceId;
 use uc_core::ports::{ClipboardHeader, ClockPort, LocalIdentityPort, SettingsPort};
-use uc_observability_contract::FlowId;
 
 use super::DispatchClipboardEntryInput;
 
@@ -36,7 +35,6 @@ impl OutboundHeaderFactory {
     pub(crate) async fn build(
         &self,
         input: &DispatchClipboardEntryInput,
-        flow_id: &FlowId,
         local_device: &DeviceId,
     ) -> ClipboardHeader {
         let origin_device_name = self.load_origin_device_name().await;
@@ -47,7 +45,6 @@ impl OutboundHeaderFactory {
             origin_device_id: local_device.as_str().to_string(),
             origin_device_name,
             payload_version: input.payload_version,
-            flow_id: Some(flow_id.to_string()),
         }
     }
 
@@ -104,8 +101,7 @@ mod tests {
 
         let factory = factory(settings, local_identity);
         let input = dispatch_input();
-        let flow = FlowId::generate();
-        let header = factory.build(&input, &flow, &dev("self-device")).await;
+        let header = factory.build(&input, &dev("self-device")).await;
 
         assert_eq!(header.version, ClipboardHeader::CURRENT_VERSION);
         assert_eq!(header.snapshot_hash, input.snapshot_hash);
@@ -113,7 +109,6 @@ mod tests {
         assert_eq!(header.captured_at_ms, 1_700_000_000_000);
         assert_eq!(header.origin_device_id, "self-device");
         assert_eq!(header.origin_device_name, "Alice Laptop");
-        assert_eq!(header.flow_id, Some(flow.to_string()));
     }
 
     #[tokio::test]
@@ -126,9 +121,7 @@ mod tests {
         let mut input = dispatch_input();
         input.wire_version = ClipboardHeader::DIRECTORY_VERSION;
 
-        let header = factory
-            .build(&input, &FlowId::generate(), &dev("self-device"))
-            .await;
+        let header = factory.build(&input, &dev("self-device")).await;
 
         assert_eq!(header.version, ClipboardHeader::DIRECTORY_VERSION);
     }
@@ -145,9 +138,7 @@ mod tests {
             .returning(|| Ok(Some(fp(7))));
 
         let factory = factory(settings, local_identity);
-        let header = factory
-            .build(&dispatch_input(), &FlowId::generate(), &dev("self-device"))
-            .await;
+        let header = factory.build(&dispatch_input(), &dev("self-device")).await;
 
         assert_eq!(header.origin_device_name, fp(7).as_display().to_string());
     }
@@ -166,9 +157,7 @@ mod tests {
             .returning(|| Ok(Some(fp(7))));
 
         let factory = factory(settings, local_identity);
-        let header = factory
-            .build(&dispatch_input(), &FlowId::generate(), &dev("self-device"))
-            .await;
+        let header = factory.build(&dispatch_input(), &dev("self-device")).await;
 
         assert_eq!(header.origin_device_name, fp(7).as_display().to_string());
     }
@@ -187,9 +176,7 @@ mod tests {
             .returning(|| Ok(Some(fp(3))));
 
         let factory = factory(settings, local_identity);
-        let header = factory
-            .build(&dispatch_input(), &FlowId::generate(), &dev("self-device"))
-            .await;
+        let header = factory.build(&dispatch_input(), &dev("self-device")).await;
 
         assert_eq!(header.origin_device_name, fp(3).as_display().to_string());
     }
@@ -206,9 +193,7 @@ mod tests {
             .returning(|| Ok(None));
 
         let factory = factory(settings, local_identity);
-        let header = factory
-            .build(&dispatch_input(), &FlowId::generate(), &dev("self-device"))
-            .await;
+        let header = factory.build(&dispatch_input(), &dev("self-device")).await;
 
         assert_eq!(header.origin_device_name, "unknown-device");
     }

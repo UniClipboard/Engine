@@ -67,6 +67,9 @@ tokio = { version = "1", features = [
 ] }
 
 tracing = "0.1"
+opentelemetry = { version = "=0.32.0", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["trace"] }
+tracing-opentelemetry = { version = "=0.33.0", default-features = false }
 argon2 = { version = "0.5.3", features = ["std"] }
 opaque-ke = { version = "=4.0.1", features = ["argon2", "ristretto255"] }
 base64 = "0.22"
@@ -177,6 +180,9 @@ mockall = "0.13"
 wiremock = "0.6"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 static_assertions = "1"
+opentelemetry = { version = "=0.32.0", default-features = false, features = ["trace", "logs"] }
+opentelemetry-appender-tracing = { version = "=0.32.0", default-features = false }
+opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["trace", "logs", "testing"] }
 
 [lints]
 workspace = true

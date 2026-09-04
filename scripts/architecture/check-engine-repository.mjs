@@ -32,6 +32,7 @@ const EXPECTED_PACKAGES = [
   'uc-mobile-proto',
   'uc-mobile-probe-core',
   'uc-observability-contract',
+  'uc-observability-runtime',
   'uc-ohos-napi',
 ]
 
@@ -44,6 +45,7 @@ const INTERNAL_PACKAGES = new Set([
   'uc-mobile-lan',
   'uc-mobile-proto',
   'uc-observability-contract',
+  'uc-observability-runtime',
 ])
 
 const BINDING_PACKAGES = ['uc-engine-uniffi', 'uc-ohos-napi']
@@ -197,6 +199,22 @@ function runOpenMlsValidation() {
     throw new Error('OpenMLS executable validation target did not pass')
   }
   process.stdout.write(`OK OpenMLS executable validation passed: ${passed[1]} tests\n`)
+}
+
+function runObservabilityPrivacyCheck() {
+  const checker = join(REPOSITORY_ROOT, 'scripts/architecture/check-observability-privacy.mjs')
+  for (const args of [['--self-test'], []]) {
+    const result = spawnSync(process.execPath, [checker, ...args], {
+      cwd: REPOSITORY_ROOT,
+      encoding: 'utf8',
+    })
+    const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
+    if (result.status !== 0) {
+      process.stderr.write(output)
+      throw new Error('observability privacy validation did not pass')
+    }
+    process.stdout.write(output)
+  }
 }
 
 function checkLocalDependencies(metadata) {
@@ -1851,6 +1869,7 @@ function main() {
     process.exitCode = 1
     return
   }
+  runObservabilityPrivacyCheck()
   runOpenMlsValidation()
   runNegativeFixtures(metadata, sources)
   process.stdout.write('Engine repository preflight passed\n')

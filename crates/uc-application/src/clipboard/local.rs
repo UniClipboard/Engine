@@ -4,7 +4,6 @@
 //! best-effort live index 与 dispatch 的顺序由本模块唯一负责。
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -43,7 +42,6 @@ pub struct LocalClipboardRequest {
     pub snapshot: SystemClipboardSnapshot,
     pub origin: ClipboardChangeOrigin,
     pub intent: LocalClipboardIntent,
-    pub source_started_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,7 +148,6 @@ impl LocalClipboardProcessor {
             snapshot,
             origin,
             intent,
-            source_started_at,
         } = request;
         let captured = self
             .capture
@@ -228,7 +225,6 @@ impl LocalClipboardProcessor {
                             entry_id: entry_id.clone(),
                             snapshot,
                             origin,
-                            source_started_at,
                         },
                         target_filter,
                     )
@@ -428,7 +424,6 @@ mod tests {
                 intent: LocalClipboardIntent::ObservedHostChange {
                     dispatch: HostClipboardDispatch::AwaitReport,
                 },
-                source_started_at: None,
             })
             .await
             .unwrap();
@@ -471,7 +466,6 @@ mod tests {
                 intent: LocalClipboardIntent::ExplicitSend {
                     targets: targets.clone(),
                 },
-                source_started_at: None,
             })
             .await
             .unwrap();
@@ -502,7 +496,6 @@ mod tests {
                 intent: LocalClipboardIntent::ObservedHostChange {
                     dispatch: HostClipboardDispatch::Background,
                 },
-                source_started_at: None,
             })
             .await
             .unwrap();
@@ -533,7 +526,6 @@ mod tests {
                 intent: LocalClipboardIntent::ObservedHostChange {
                     dispatch: HostClipboardDispatch::AwaitReport,
                 },
-                source_started_at: None,
             })
             .await
             .unwrap();
@@ -565,7 +557,6 @@ mod tests {
                 intent: LocalClipboardIntent::ObservedHostChange {
                     dispatch: HostClipboardDispatch::Background,
                 },
-                source_started_at: None,
             })
             .await
             .unwrap();
@@ -594,7 +585,6 @@ mod tests {
                 intent: LocalClipboardIntent::ObservedHostChange {
                     dispatch: HostClipboardDispatch::CaptureOnly,
                 },
-                source_started_at: None,
             })
             .await
             .unwrap();
@@ -623,7 +613,6 @@ mod tests {
                 intent: LocalClipboardIntent::ObservedHostChange {
                     dispatch: HostClipboardDispatch::Background,
                 },
-                source_started_at: None,
             })
             .await
             .unwrap_err();

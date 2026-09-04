@@ -34,6 +34,7 @@ uc-infra = { path = "../uc-infra" }
 uc-mobile-lan = { path = "../../compatibility/uc-mobile-lan", optional = true }
 uc-mobile-proto = { path = "../../compatibility/uc-mobile-proto", optional = true }
 uc-observability-contract = { path = "../uc-observability-contract" }
+uc-observability-runtime = { path = "../uc-observability-runtime" }
 zeroize = "1.8"
 
 [dev-dependencies]

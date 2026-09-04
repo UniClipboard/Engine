@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Instant;
 
 use tracing::{error, warn};
 use uc_application::facade::{
@@ -40,7 +39,7 @@ pub(super) async fn spawn_host_clipboard_change_task(
                     change = changes.next() => match change {
                         Ok(HostClipboardChange::Changed) => {
                             if let Err(error) = runtime
-                                .process_change(HostClipboardDispatch::Background, Some(Instant::now()))
+                                .process_change(HostClipboardDispatch::Background)
                                 .await
                             {
                                 warn!(error = %error, "host clipboard change processing failed");
@@ -63,27 +62,23 @@ impl HostClipboardChangeRuntime {
         &self,
         dispatch: bool,
     ) -> Result<Option<SendReportSummary>, EngineError> {
-        self.process_change(
-            if dispatch {
-                HostClipboardDispatch::AwaitReport
-            } else {
-                HostClipboardDispatch::CaptureOnly
-            },
-            None,
-        )
+        self.process_change(if dispatch {
+            HostClipboardDispatch::AwaitReport
+        } else {
+            HostClipboardDispatch::CaptureOnly
+        })
         .await
     }
 
     async fn process_change(
         &self,
         dispatch_mode: HostClipboardDispatch,
-        source_started_at: Option<Instant>,
     ) -> Result<Option<SendReportSummary>, EngineError> {
         let lease = self.session_supervisor.acquire_operation().await?;
         let cancellation = lease.cancellation();
         let result = tokio::select! {
             _ = cancellation.cancelled() => Err(super::operation_unavailable_error()),
-            result = self.process_change_while_leased(dispatch_mode, source_started_at) => result,
+            result = self.process_change_while_leased(dispatch_mode) => result,
         };
         drop(lease);
         result
@@ -92,7 +87,6 @@ impl HostClipboardChangeRuntime {
     async fn process_change_while_leased(
         &self,
         dispatch_mode: HostClipboardDispatch,
-        source_started_at: Option<Instant>,
     ) -> Result<Option<SendReportSummary>, EngineError> {
         let (facade, application) = match self
             .session_supervisor
@@ -137,7 +131,6 @@ impl HostClipboardChangeRuntime {
                 intent: LocalClipboardIntent::ObservedHostChange {
                     dispatch: dispatch_mode,
                 },
-                source_started_at,
             })
             .await
             .map_err(|error| observe_error("local clipboard", error))?;

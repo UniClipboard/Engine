@@ -6,6 +6,7 @@ members = [
   "crates/uc-infra",
   "crates/uc-content-hash",
   "crates/uc-observability-contract",
+  "crates/uc-observability-runtime",
   "bindings/uc-engine-uniffi",
   "bindings/uc-ohos-napi",
   "compatibility/uc-mobile-proto",

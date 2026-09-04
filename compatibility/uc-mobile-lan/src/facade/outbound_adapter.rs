@@ -91,7 +91,6 @@ impl MobileInboundFanOutPort for ClipboardOutboundFanOutAdapter {
                     entry_id: entry_id_str,
                     snapshot,
                     origin: ClipboardChangeOrigin::LocalCapture,
-                    source_started_at: None,
                 })
                 .await
             {

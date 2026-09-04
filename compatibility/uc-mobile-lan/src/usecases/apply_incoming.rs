@@ -928,7 +928,6 @@ impl ApplyIncomingMobileClipUseCase {
             from_device: pseudo_from.to_string(),
             snapshot_hash: snapshot_hash.clone(),
             plaintext,
-            flow_id: None,
             provisional: provisional
                 .map(|(transfer_id, role)| InboundProvisionalReceive { transfer_id, role }),
             // The phone reached exactly one desktop, so re-activating held

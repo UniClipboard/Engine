@@ -86,8 +86,6 @@ pub struct InboundClipboard {
     pub ciphertext: Bytes,
     /// Connection path observed when the receiver accepted this delivery.
     pub transport: ConnectionChannel,
-    /// Local monotonic time at which the delivery became ready for processing.
-    pub received_at: std::time::Instant,
     pub receipt: InboundClipboardReceipt,
 }
 

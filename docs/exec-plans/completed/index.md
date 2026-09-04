@@ -19,3 +19,4 @@
 - [033 不可变内容保护上下文与一次性密文升级](033-immutable-content-protection-context.md)
 - [035 Space 观测装配 interface 收敛与仓库推广准则](035-space-domain-observability-assembly.md)
 - [036 关键模块深化与退役路径 clean cutover](036-architecture-deepening-clean-cutovers.md)
+- [移动端日志文件层与连接中继日志](mobile-log-file-layer.md)（保留、导出和远程发送由 037 取代）

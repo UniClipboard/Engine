@@ -3,7 +3,6 @@
 //! `ClipboardInboundRuntime`.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use bytes::Bytes;
 use tracing::instrument;
@@ -168,7 +167,6 @@ struct DispatchVersions {
 
 pub(crate) struct ClipboardSyncDispatch<'a> {
     facade: &'a ClipboardSyncFacade,
-    source_started_at: Option<Instant>,
 }
 
 impl ClipboardSyncFacade {
@@ -227,14 +225,8 @@ impl ClipboardSyncFacade {
         }
     }
 
-    pub(crate) fn dispatch_context(
-        &self,
-        source_started_at: Option<Instant>,
-    ) -> ClipboardSyncDispatch<'_> {
-        ClipboardSyncDispatch {
-            facade: self,
-            source_started_at,
-        }
+    pub(crate) fn dispatch_context(&self) -> ClipboardSyncDispatch<'_> {
+        ClipboardSyncDispatch { facade: self }
     }
 
     pub(crate) fn with_entry_receive_cancellation(
@@ -353,7 +345,6 @@ impl ClipboardSyncFacade {
                 // raw-bytes 路径不与某条 entry 绑定,跳过 delivery 落盘。
                 entry_id: None,
                 target_filter: input.target_filter,
-                source_started_at: None,
             })
             .await?;
         Ok(lift_outcome(internal))
@@ -371,7 +362,6 @@ impl ClipboardSyncFacade {
         categories: ClipboardContentCategorySet,
         entry_id: Option<EntryId>,
         target_filter: Option<Vec<DeviceId>>,
-        source_started_at: Option<Instant>,
     ) -> Result<DispatchEntryOutcome, ClipboardSyncError> {
         let internal = self
             .dispatch_uc
@@ -383,7 +373,6 @@ impl ClipboardSyncFacade {
                 categories,
                 entry_id,
                 target_filter,
-                source_started_at,
             })
             .await?;
         Ok(lift_outcome(internal))
@@ -408,7 +397,7 @@ impl ClipboardSyncFacade {
         entry_id: Option<EntryId>,
         target_filter: Option<Vec<DeviceId>>,
     ) -> Result<DispatchEntryOutcome, ClipboardSyncError> {
-        self.dispatch_context(None)
+        self.dispatch_context()
             .dispatch_snapshot(snapshot, origin, entry_id, target_filter)
             .await
     }
@@ -426,7 +415,7 @@ impl ClipboardSyncFacade {
         entry_id: Option<EntryId>,
         target_filter: Option<Vec<DeviceId>>,
     ) -> Result<DispatchEntryOutcome, ClipboardSyncError> {
-        self.dispatch_context(None)
+        self.dispatch_context()
             .dispatch_snapshot_with_blob_refs(snapshot, blob_refs, origin, entry_id, target_filter)
             .await
     }
@@ -445,7 +434,7 @@ impl ClipboardSyncFacade {
         entry_id: Option<EntryId>,
         target_filter: Option<Vec<DeviceId>>,
     ) -> Result<DispatchEntryOutcome, ClipboardSyncError> {
-        self.dispatch_context(None)
+        self.dispatch_context()
             .dispatch_snapshot_with_blob_refs_and_file_set(
                 snapshot,
                 blob_refs,
@@ -492,7 +481,6 @@ impl ClipboardSyncDispatch<'_> {
                 categories,
                 entry_id,
                 target_filter,
-                self.source_started_at,
             )
             .await
     }
@@ -521,7 +509,6 @@ impl ClipboardSyncDispatch<'_> {
                 categories,
                 entry_id,
                 target_filter,
-                self.source_started_at,
             )
             .await
     }
@@ -555,7 +542,6 @@ impl ClipboardSyncDispatch<'_> {
                 categories,
                 entry_id,
                 target_filter,
-                self.source_started_at,
             )
             .await
     }
@@ -692,7 +678,6 @@ mod tests {
     fn dispatch_report(outcome: Result<DispatchAck, ClipboardDispatchError>) -> DispatchReport {
         DispatchReport {
             transport: ConnectionChannel::Direct,
-            timing: uc_core::ports::DispatchTiming::default(),
             outcome,
         }
     }

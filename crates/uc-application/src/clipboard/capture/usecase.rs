@@ -23,11 +23,10 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::Result;
-use tracing::{debug, info, info_span, warn, Instrument};
+use tracing::{debug, info, warn};
 use uc_observability_contract::analytics::{
     AnalyticsPort, CaptureOrigin, Event, PayloadSizeBucket, PayloadType,
 };
-use uc_observability_contract::{stages, FlowId};
 use unicode_normalization::UnicodeNormalization;
 
 use uc_core::blob::ports::BlobContentIngestPort;
@@ -326,27 +325,7 @@ impl CaptureClipboardUseCase {
         commit_mode: CommitMode,
         commit_context: Option<CaptureCommitContext>,
     ) -> Result<Option<CaptureOutcome>> {
-        // Root span: all pipeline stages are children of clipboard.flow.
-        // The origin field distinguishes local capture from remote push.
-        //
-        // 跨设备可观测性(PR2):root span 必须携带 `flow.id` + `flow.kind`,这是
-        // Sentry 上把"A 端发送 → B 端接收"两条 trace join 在一起的钩子。PR2
-        // 阶段 flow_id 仅在本机生成,跨设备传播由 PR3 在协议层落地(届时
-        // inbound 路径会用 wire 上带过来的 flow_id 替换本地生成的)。`peer.device_id`
-        // 和 `clipboard.entry_id` 在 capture 入口尚未确定,声明为
-        // `tracing::field::Empty` 占位,后续 stage 用 `Span::current().record(...)`
-        // 回填。
-        let flow_id = FlowId::generate();
-        let root = info_span!(
-            "clipboard.flow",
-            flow.id = %flow_id,
-            flow.kind = "clipboard_capture",
-            origin = ?origin,
-            peer.device_id = tracing::field::Empty,
-            clipboard.entry_id = tracing::field::Empty,
-        );
-
-        async move {
+        {
             if origin == ClipboardChangeOrigin::LocalRestore {
                 info!(origin = ?origin, "Skipping clipboard capture");
                 return Ok(None);
@@ -431,14 +410,7 @@ impl CaptureClipboardUseCase {
                 // Inbound: persist the sender's wire identity verbatim (F-4).
                 Some(wire_hash) => wire_hash,
                 // Local capture: the snapshot is authoritative for its own hash.
-                None => {
-                    let _guard = info_span!(
-                        "clipboard.snapshot_hash",
-                        representation_count = snapshot.representations.len(),
-                    )
-                    .entered();
-                    snapshot.snapshot_hash()
-                }
+                None => snapshot.snapshot_hash(),
             };
             // Keep the canonical hash string before `snapshot_hash` is moved
             // into the event below, so the outcome can carry the exact identity
@@ -547,7 +519,6 @@ impl CaptureClipboardUseCase {
                 }
                 Ok::<Vec<PersistedClipboardRepresentation>, anyhow::Error>(out)
             }
-            .instrument(info_span!(stages::NORMALIZE))
             .await?;
 
             // Aggregated summary per capture (per-representation details at trace level)
@@ -590,7 +561,6 @@ impl CaptureClipboardUseCase {
                         .insert_event(&new_event, &normalized_reps)
                         .await
                 }
-                .instrument(info_span!(stages::PERSIST_EVENT))
                 .await?;
             }
 
@@ -614,24 +584,15 @@ impl CaptureClipboardUseCase {
                 }
                 Ok::<(), anyhow::Error>(())
             }
-            .instrument(info_span!(stages::CACHE_REPRESENTATIONS))
             .await?;
 
             // 4. policy.select(snapshot) — purely sync, .entered() is safe (no .await inside)
             let (entry_id, new_selection) = {
-                let _guard = info_span!(stages::SELECT_POLICY).entered();
                 let entry_id = preset_entry_id.unwrap_or_default();
                 let selection = self.representation_policy.select(&snapshot)?;
                 let new_selection = ClipboardSelectionDecision::new(entry_id.clone(), selection);
                 (entry_id, new_selection)
             };
-
-            // 回填 root span 的 `clipboard.entry_id` 占位 —— 让后续所有
-            // child span / event 都能在 Sentry trace 视图上 join 到同一个
-            // 业务实体。`Span::current()` 在 `.instrument(root)` 的 async
-            // 上下文里 == root span,record 直接生效。
-            tracing::Span::current()
-                .record("clipboard.entry_id", tracing::field::display(&entry_id));
 
             // 5. Spool large representations to disk BEFORE creating the entry.
             //
@@ -681,7 +642,6 @@ impl CaptureClipboardUseCase {
                     }
                     Ok::<(), anyhow::Error>(())
                 }
-                .instrument(info_span!(stages::SPOOL_BLOBS))
                 .await?;
             }
 
@@ -724,9 +684,10 @@ impl CaptureClipboardUseCase {
                     };
                     return match commit_context {
                         CaptureCommitContext::Inbound(commit_context) => {
-                            let commit_port = self.inbound_receive_commit.as_ref().ok_or_else(|| {
-                                anyhow::anyhow!("inbound receive commit port is not wired")
-                            })?;
+                            let commit_port =
+                                self.inbound_receive_commit.as_ref().ok_or_else(|| {
+                                    anyhow::anyhow!("inbound receive commit port is not wired")
+                                })?;
                             let settlement = match commit_context {
                                 InboundCaptureCommitContext::Complete {
                                     attempt_id,
@@ -789,7 +750,6 @@ impl CaptureClipboardUseCase {
                         .map_err(anyhow::Error::from),
                 }
             }
-            .instrument(info_span!(stages::PERSIST_ENTRY))
             .await?;
 
             // Persist the file-set manifest built above, now that `entry_id`
@@ -838,8 +798,6 @@ impl CaptureClipboardUseCase {
                 snapshot_hash: snapshot_hash_str,
             }))
         }
-        .instrument(root)
-        .await
     }
 
     fn has_supported_representation(snapshot: &SystemClipboardSnapshot) -> bool {

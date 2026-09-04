@@ -248,7 +248,6 @@ pub(crate) fn dispatch_input() -> DispatchClipboardEntryInput {
         categories: ClipboardContentCategorySet::empty(),
         entry_id: None,
         target_filter: None,
-        source_started_at: None,
     }
 }
 
@@ -262,7 +261,6 @@ pub(crate) fn test_header() -> ClipboardHeader {
         origin_device_id: "self-device".to_string(),
         origin_device_name: "Self".to_string(),
         payload_version: 3,
-        flow_id: None,
     }
 }
 

@@ -29,6 +29,7 @@ pub mod relay_probe;
 pub(crate) mod runtime_consts;
 pub mod space_admission;
 mod space_admission_wire;
+mod trace_context;
 pub mod transfer_progress_adapter;
 
 #[cfg(test)]

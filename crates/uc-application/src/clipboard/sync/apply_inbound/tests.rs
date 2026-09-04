@@ -34,7 +34,6 @@ use uc_core::{
     FileDisplayMetadata, FileDisplayMetadataEntry, MimeType, ObservedClipboardRepresentation,
     SystemClipboardSnapshot, FILE_DISPLAY_METADATA_FORMAT, FILE_DISPLAY_METADATA_MIME,
 };
-use uc_observability_contract::FlowId;
 
 use crate::clipboard::sync::payload_codec::{
     encode_snapshot_to_v3_bytes, encode_snapshot_with_blob_refs_and_file_set_to_v3_bytes,
@@ -457,11 +456,6 @@ fn visible_names(dir: &Path) -> Vec<String> {
 
 // ── mockall: the 3 collaborator surfaces ────────────────────────────
 
-#[derive(Clone)]
-struct FlowIdRecordLayer {
-    records: Arc<Mutex<Vec<String>>>,
-}
-
 #[derive(Clone, Default)]
 struct EventFieldRecordLayer {
     records: Arc<Mutex<Vec<String>>>,
@@ -496,38 +490,6 @@ impl Visit for EventFieldVisitor {
             .lock()
             .unwrap()
             .push(format!("{}={value}", field.name()));
-    }
-}
-
-impl<S> Layer<S> for FlowIdRecordLayer
-where
-    S: Subscriber,
-    S: for<'lookup> LookupSpan<'lookup>,
-{
-    fn on_record(
-        &self,
-        _span: &tracing::Id,
-        values: &tracing::span::Record<'_>,
-        _ctx: Context<'_, S>,
-    ) {
-        let mut visitor = FlowIdVisitor::default();
-        values.record(&mut visitor);
-        if let Some(flow_id) = visitor.flow_id {
-            self.records.lock().unwrap().push(flow_id);
-        }
-    }
-}
-
-#[derive(Default)]
-struct FlowIdVisitor {
-    flow_id: Option<String>,
-}
-
-impl Visit for FlowIdVisitor {
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "flow.id" {
-            self.flow_id = Some(format!("{value:?}"));
-        }
     }
 }
 
@@ -735,7 +697,6 @@ fn fixture_input(text: &str) -> (ApplyInboundInput, String) {
             from_device: DeviceId::new("peer-x"),
             snapshot_hash: snapshot_hash.clone(),
             plaintext,
-            flow_id: None,
             resurface_intent: ClipboardWriteIntent::RemotePush,
         },
         snapshot_hash,
@@ -763,7 +724,6 @@ fn fixture_input_from_snapshot(snapshot: SystemClipboardSnapshot) -> (ApplyInbou
             from_device: DeviceId::new("peer-x"),
             snapshot_hash: snapshot_hash.clone(),
             plaintext,
-            flow_id: None,
             resurface_intent: ClipboardWriteIntent::RemotePush,
         },
         snapshot_hash,
@@ -1330,7 +1290,6 @@ async fn decode_failed_on_truncated_envelope() {
         from_device: DeviceId::new("peer-broken"),
         snapshot_hash: "blake3v1:00".to_string(),
         plaintext: Bytes::from_static(b"not a valid V3 envelope"),
-        flow_id: None,
         resurface_intent: ClipboardWriteIntent::RemotePush,
     };
 
@@ -1354,43 +1313,6 @@ async fn decode_failed_on_truncated_envelope() {
         }
         other => panic!("expected DecodeFailed, got {other:?}"),
     }
-}
-
-#[tokio::test]
-async fn execute_records_incoming_flow_id_on_span() {
-    let incoming_flow_id = FlowId::generate();
-    let input = ApplyInboundInput {
-        from_device: DeviceId::new("peer-flow"),
-        snapshot_hash: "blake3v1:11".to_string(),
-        plaintext: Bytes::from_static(b"not a valid V3 envelope"),
-        flow_id: Some(incoming_flow_id.clone()),
-        resurface_intent: ClipboardWriteIntent::RemotePush,
-    };
-
-    let mut repo = MockEntryRepo::new();
-    // flow_id is recorded on the span before decode; the frame is undecodable,
-    // so the dedup query is never reached.
-    repo.expect_find_entry_id_by_snapshot_hash()
-        .times(0)
-        .returning(|_| Ok(None));
-    let capture = MockCapture::new();
-    let write = MockWrite::new();
-    let uc = build(repo, capture, write);
-
-    let records = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::registry().with(FlowIdRecordLayer {
-        records: Arc::clone(&records),
-    });
-    let _guard = tracing::subscriber::set_default(subscriber);
-    let _ = uc.execute(input).await;
-
-    let recorded = records.lock().unwrap();
-    assert!(
-        recorded
-            .iter()
-            .any(|value| value == &incoming_flow_id.to_string()),
-        "apply_inbound 应该记录入站 header 传来的 flow_id"
-    );
 }
 
 /// Verdict 4 — capture returns Ok(None) (shouldn't happen for
@@ -1536,7 +1458,6 @@ async fn materializes_blob_refs_before_capture_and_write() {
         from_device: DeviceId::new("peer-x"),
         snapshot_hash: snapshot_hash.clone(),
         plaintext,
-        flow_id: None,
         resurface_intent: ClipboardWriteIntent::RemotePush,
     };
 
@@ -1634,7 +1555,6 @@ async fn partial_materialize_persists_entry_but_skips_os_write() {
         from_device: DeviceId::new("peer-sender"),
         snapshot_hash,
         plaintext,
-        flow_id: None,
         resurface_intent: ClipboardWriteIntent::RemotePush,
     };
 
@@ -1726,14 +1646,12 @@ async fn partial_materialize_does_not_register_dedup_entry() {
         from_device: DeviceId::new("peer-sender"),
         snapshot_hash: snapshot_hash.clone(),
         plaintext: plaintext.clone(),
-        flow_id: None,
         resurface_intent: ClipboardWriteIntent::RemotePush,
     };
     let input2 = ApplyInboundInput {
         from_device: DeviceId::new("peer-sender"),
         snapshot_hash,
         plaintext,
-        flow_id: None,
         resurface_intent: ClipboardWriteIntent::RemotePush,
     };
 
@@ -2340,7 +2258,6 @@ async fn apply_inbound_materializes_and_commits_mixed_directory_payload() {
             from_device: DeviceId::new("peer-full-flow"),
             snapshot_hash,
             plaintext,
-            flow_id: None,
             resurface_intent: ClipboardWriteIntent::RemotePush,
         })
         .await
@@ -3327,7 +3244,6 @@ fn file_blob_input() -> ApplyInboundInput {
         from_device: DeviceId::new("peer-up"),
         snapshot_hash,
         plaintext,
-        flow_id: None,
         resurface_intent: ClipboardWriteIntent::RemotePush,
     }
 }
@@ -4657,7 +4573,6 @@ async fn apply_inbound_does_not_replace_an_existing_nonterminal_attempt() {
             from_device: DeviceId::new("peer-retry"),
             snapshot_hash,
             plaintext,
-            flow_id: None,
             resurface_intent: ClipboardWriteIntent::RemotePush,
         })
         .await
@@ -4705,7 +4620,6 @@ async fn explicit_directory_cancellation_emits_cancelled_not_failed() {
             from_device: DeviceId::new("peer-cancel"),
             snapshot_hash,
             plaintext,
-            flow_id: None,
             resurface_intent: ClipboardWriteIntent::RemotePush,
         })
         .await;
@@ -4774,7 +4688,6 @@ async fn apply_inbound_rejects_identity_mismatch_before_publication() {
             from_device: DeviceId::new("peer-verify-fail"),
             snapshot_hash,
             plaintext,
-            flow_id: None,
             resurface_intent: ClipboardWriteIntent::RemotePush,
         })
         .await
@@ -4825,7 +4738,6 @@ async fn apply_inbound_withdraws_published_roots_when_persistence_fails() {
             from_device: DeviceId::new("peer-persist-fail"),
             snapshot_hash,
             plaintext,
-            flow_id: None,
             resurface_intent: ClipboardWriteIntent::RemotePush,
         })
         .await

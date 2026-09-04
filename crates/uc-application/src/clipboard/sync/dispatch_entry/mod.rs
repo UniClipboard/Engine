@@ -54,12 +54,11 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::task::JoinSet;
-use tracing::{info, info_span, instrument, Instrument};
-use uc_observability_contract::FlowId;
+use tracing::info;
 
 /// 主流程等 fan-out join 的硬上限。超过此时长后,剩余仍在跑的 peer task 会被
 /// move 到后台 spawn 继续 join,delivery 写盘与 host event emit 都在后台完成
@@ -221,9 +220,6 @@ pub(crate) struct DispatchClipboardEntryInput {
     ///
     /// `Some(vec![])` 是合法的"无目标"语义,与差集派生空集等价,不报错。
     pub target_filter: Option<Vec<DeviceId>>,
-    /// Monotonic time at which the source clipboard change was observed.
-    /// Manual resends have no new source observation and leave this empty.
-    pub source_started_at: Option<Instant>,
 }
 
 /// One target's dispatch result. `Ok` + `DispatchAck` when the peer
@@ -460,21 +456,10 @@ impl DispatchClipboardEntryUseCase {
     //   - 每个目标 peer 进 child span(见下 `peer.dispatch`)而不是把
     //     `peer.device_id` 钉在 root —— 扇出 N 个 peer 时 root 只有一个,
     //     钉上会丢失末次写入以外的信息。
-    #[instrument(
-        skip_all,
-        fields(
-            snapshot_hash = %input.snapshot_hash,
-            flow.id = tracing::field::Empty,
-            flow.kind = "clipboard_sync",
-            fanout.candidates = tracing::field::Empty,
-        ),
-    )]
     pub(crate) async fn execute(
         &self,
         input: DispatchClipboardEntryInput,
     ) -> Result<DispatchOutcome, DispatchSyncError> {
-        let flow_id = FlowId::generate();
-        tracing::Span::current().record("flow.id", tracing::field::display(&flow_id));
         // 1. Encrypt once. A locked session surfaces here — let it
         //    short-circuit so we don't spam the dispatch wire with retries.
         let ciphertext = match self.cipher.encrypt(&input.plaintext).await {
@@ -496,10 +481,7 @@ impl DispatchClipboardEntryUseCase {
         //    fan-out (see `PerPeerDispatcher`).
         let local_device = self.device_identity.current_device_id();
         let candidates = self.selector.select(&input, &local_device).await?;
-        let header = self
-            .header_factory
-            .build(&input, &flow_id, &local_device)
-            .await;
+        let header = self.header_factory.build(&input, &local_device).await;
 
         if candidates.is_empty() {
             info!("dispatch: no paired peers; skipping fan-out");
@@ -516,15 +498,12 @@ impl DispatchClipboardEntryUseCase {
             });
         }
 
-        tracing::Span::current().record("fanout.candidates", candidates.len());
-
         // 4. Fan out: one task per target, each driving `dispatch_one`
         //    (presence preflight + dispatch + per-peer telemetry) inside its
         //    own `peer.dispatch` child span carrying `flow.id`, so Sentry
         //    can join the outbound dispatch with the inbound ingest.
         let payload_type = payload_type_from_categories(&input.categories);
         let payload_size_bucket = PayloadSizeBucket::from_bytes(input.plaintext.len() as u64);
-        let source_started_at = input.source_started_at;
         let header = Arc::new(header);
         let mut set: JoinSet<PeerDispatchResult> = JoinSet::new();
         for device_id in &candidates {
@@ -534,26 +513,17 @@ impl DispatchClipboardEntryUseCase {
                 ciphertext: ciphertext.clone(),
             };
             let device_id = *device_id;
-            let child_span = info_span!(
-                "peer.dispatch",
-                flow.id = %flow_id,
-                flow.kind = "clipboard_sync",
-            );
-            set.spawn(
-                async move {
-                    dispatcher
-                        .dispatch_one(
-                            device_id,
-                            header,
-                            payload,
-                            payload_type,
-                            payload_size_bucket,
-                            source_started_at,
-                        )
-                        .await
-                }
-                .instrument(child_span),
-            );
+            set.spawn(async move {
+                dispatcher
+                    .dispatch_one(
+                        device_id,
+                        header,
+                        payload,
+                        payload_type,
+                        payload_size_bucket,
+                    )
+                    .await
+            });
         }
 
         // 5. Drain within the fan-out deadline; classify + fold each
@@ -665,10 +635,10 @@ mod tests {
     use uc_core::clipboard::{DeliveryFailureReason, EntryDeliveryStatus};
     use uc_core::ports::security::{TransferCipherError, TransferCipherPort};
     use uc_core::ports::{
-        ClipboardHeader, ClockPort, DeviceIdentityPort, DispatchReport, DispatchTiming,
-        FirstSyncStateError, LocalIdentityError, LocalIdentityPort, PeerAddressError,
-        PeerAddressRecord, PeerAddressRepositoryPort, PeerReachabilityChanged,
-        PeerReachabilityPort, PresenceError, ReachabilityState, SettingsPort,
+        ClipboardHeader, ClockPort, DeviceIdentityPort, DispatchReport, FirstSyncStateError,
+        LocalIdentityError, LocalIdentityPort, PeerAddressError, PeerAddressRecord,
+        PeerAddressRepositoryPort, PeerReachabilityChanged, PeerReachabilityPort, PresenceError,
+        ReachabilityState, SettingsPort,
     };
     use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
@@ -736,7 +706,6 @@ mod tests {
     fn dispatch_report(outcome: Result<DispatchAck, ClipboardDispatchError>) -> DispatchReport {
         DispatchReport {
             transport: ConnectionChannel::Direct,
-            timing: DispatchTiming::default(),
             outcome,
         }
     }
@@ -1128,7 +1097,6 @@ mod tests {
             // 默认无 filter:历史 verdict 都是"对 peer_addr_repo 全 fan-out"
             // 语义。专门验证 ADR-005 §2.5 resend 路径的 verdict 自行构造 Some。
             target_filter: None,
-            source_started_at: None,
         }
     }
 
@@ -1660,7 +1628,6 @@ mod tests {
             categories,
             entry_id: None,
             target_filter: None,
-            source_started_at: None,
         };
 
         let outcome = uc.execute(text_input).await.expect("dispatch ok");
@@ -1993,7 +1960,6 @@ mod tests {
             categories,
             entry_id: None,
             target_filter: None,
-            source_started_at: None,
         };
 
         uc.execute(file_input).await.expect("dispatch ok");

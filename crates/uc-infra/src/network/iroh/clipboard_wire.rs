@@ -46,6 +46,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use uc_core::ports::ClipboardHeader;
 
+use super::trace_context::{inject_current, WireTraceContext};
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -54,6 +56,7 @@ use uc_core::ports::ClipboardHeader;
 /// stream. Distinct from the pairing codec (no magic byte) so a
 /// mis-routed connection fails fast instead of drifting into postcard.
 pub const CLIPBOARD_MAGIC: u8 = 0xC1;
+const WIRE_SCHEMA_MARKER: &[u8; 4] = b"UCT1";
 
 /// Hard ceiling on the postcard-encoded header size. A typical header is
 /// ~200 bytes; 4 KiB leaves headroom for future optional fields without
@@ -77,6 +80,8 @@ pub const MAX_PAYLOAD_SIZE: u32 = 2 * 1024 * 1024;
 pub enum AckCode {
     Accepted = 0x01,
     DuplicateIgnored = 0x02,
+    /// 对端使用当前 Engine 之前的消息布局，需要明确升级后重试。
+    Incompatible = 0x03,
     /// Adapter-level rejection — e.g. unknown peer, bad header, oversized
     /// payload. Application-level dedupe uses [`AckCode::DuplicateIgnored`].
     Rejected = 0xFF,
@@ -94,6 +99,7 @@ impl TryFrom<u8> for AckCode {
         match byte {
             0x01 => Ok(AckCode::Accepted),
             0x02 => Ok(AckCode::DuplicateIgnored),
+            0x03 => Ok(AckCode::Incompatible),
             0xFF => Ok(AckCode::Rejected),
             other => Err(InvalidAckByte(other)),
         }
@@ -108,47 +114,17 @@ pub struct InvalidAckByte(pub u8);
 // Wire types
 // ============================================================================
 
-/// Postcard-serialized header — infra-local mirror of
-/// [`ClipboardHeader`](uc_core::ports::ClipboardHeader). Kept separate from
-/// the core type so `uc-core` stays free of `serde` derives on port
-/// structs (see `docs/design-docs/layers/infrastructure.md` §4.2).
-///
-/// **Versioning.** Postcard is positional/non-tagged, so a new field cannot
-/// be added in-place without breaking the wire. We keep two concrete wire
-/// structs (`WireHeaderV1` + `WireHeaderV2`) and dispatch decode on the
-/// `version` byte (postcard encodes `u8 < 128` as a single byte, so peeking
-/// `bytes[0]` is sufficient). Encode always emits v2; this is the
-/// one-way break we accept in the alpha-stage rollout:
-///
-///   - **new sender → old receiver**: rejected with `UnsupportedVersion`.
-///   - **old sender → new receiver**: decoded via `WireHeaderV1`, receiver
-///     fills `flow_id = None`; downstream span is tagged `flow.synthetic`.
+/// Infra 私有的当前消息头。前置固定标记先破坏旧 postcard 布局，新旧两端
+/// 都会明确拒绝而不会忽略尾随字段后继续处理。
 #[derive(Serialize, Deserialize, Debug)]
-struct WireHeaderV1 {
+struct CurrentWireHeader {
     version: u8,
     snapshot_hash: String,
     captured_at_ms: i64,
     origin_device_id: String,
     origin_device_name: String,
     payload_version: u8,
-}
-
-/// Postcard schema shared by wire versions v2 and v3. The two versions are
-/// byte-identical; the leading `version` byte alone gates receiver
-/// compatibility — v3 signals that a directory member manifest travels in the
-/// payload trailer and must only be sent to peers that can rebuild the tree.
-#[derive(Serialize, Deserialize, Debug)]
-struct WireHeaderV2 {
-    version: u8,
-    snapshot_hash: String,
-    captured_at_ms: i64,
-    origin_device_id: String,
-    origin_device_name: String,
-    payload_version: u8,
-    /// Cross-device trace correlation id (UUIDv7 as string). `None` only
-    /// during construction from older in-memory paths; encoded as the
-    /// postcard `Option` discriminant (single byte `0x00` when None).
-    flow_id: Option<String>,
+    trace_context: Option<WireTraceContext>,
 }
 
 // ============================================================================
@@ -175,6 +151,10 @@ pub enum WireDecodeError {
     Postcard(#[from] postcard::Error),
     #[error("unsupported clipboard wire version {got} (this build understands {expected})")]
     UnsupportedVersion { got: u8, expected: u8 },
+    #[error("clipboard peer uses an incompatible message layout")]
+    IncompatibleLayout,
+    #[error("clipboard header contains trailing bytes")]
+    TrailingHeaderBytes,
     #[error("bad magic byte: got 0x{got:02X} (expected 0x{expected:02X})")]
     BadMagic { got: u8, expected: u8 },
     #[error("header size {size} exceeds maximum {max}")]
@@ -196,21 +176,31 @@ pub enum WireDecodeError {
 /// v2 与 v3 共用同一份 postcard schema([`WireHeaderV2`]),仅版本号不同;
 /// v1 仅作为兼容老对端的*解码*入口存在(见 [`decode_header`])。
 pub fn encode_header(header: &ClipboardHeader) -> Result<Vec<u8>, WireEncodeError> {
+    encode_header_with_context(header, inject_current())
+}
+
+fn encode_header_with_context(
+    header: &ClipboardHeader,
+    trace_context: Option<WireTraceContext>,
+) -> Result<Vec<u8>, WireEncodeError> {
     if !matches!(
         header.version,
         ClipboardHeader::CURRENT_VERSION | ClipboardHeader::DIRECTORY_VERSION
     ) {
         return Err(WireEncodeError::UnsupportedVersion(header.version));
     }
-    let bytes = postcard::to_allocvec(&WireHeaderV2 {
+    let encoded = postcard::to_allocvec(&CurrentWireHeader {
         version: header.version,
         snapshot_hash: header.snapshot_hash.clone(),
         captured_at_ms: header.captured_at_ms,
         origin_device_id: header.origin_device_id.clone(),
         origin_device_name: header.origin_device_name.clone(),
         payload_version: header.payload_version,
-        flow_id: header.flow_id.clone(),
+        trace_context,
     })?;
+    let mut bytes = Vec::with_capacity(WIRE_SCHEMA_MARKER.len() + encoded.len());
+    bytes.extend_from_slice(WIRE_SCHEMA_MARKER);
+    bytes.extend_from_slice(&encoded);
     if bytes.len() > MAX_HEADER_SIZE as usize {
         return Err(WireEncodeError::HeaderTooLarge {
             size: bytes.len(),
@@ -220,49 +210,45 @@ pub fn encode_header(header: &ClipboardHeader) -> Result<Vec<u8>, WireEncodeErro
     Ok(bytes)
 }
 
-/// Deserialize a header from its postcard byte form. Dispatches on the
-/// leading version byte so old v1 senders are decoded with `flow_id =
-/// None`; anything outside the supported set (`{1, 2}`) is rejected with
-/// `UnsupportedVersion`.
+/// 从带前置格式标记的 postcard 字节解码业务头。旧布局和尾随字段都会
+/// 明确拒绝，不做隐式兼容或补默认值。
 pub fn decode_header(bytes: &[u8]) -> Result<ClipboardHeader, WireDecodeError> {
-    // postcard 把 u8(<128) 编码成 1 字节,直接 peek 首字节就拿到 version。
-    // 走 `Option<u8>::ok_or` 把"空 bytes"映射到 postcard 的 short-read 错误,
-    // 沿用现有错误分支,不引入新变体。
-    let version = bytes.first().copied().ok_or(WireDecodeError::Postcard(
-        postcard::Error::DeserializeUnexpectedEnd,
-    ))?;
-    match version {
-        1 => {
-            let wire: WireHeaderV1 = postcard::from_bytes(bytes)?;
-            Ok(ClipboardHeader {
-                version: wire.version,
-                snapshot_hash: wire.snapshot_hash,
-                captured_at_ms: wire.captured_at_ms,
-                origin_device_id: wire.origin_device_id,
-                origin_device_name: wire.origin_device_name,
-                payload_version: wire.payload_version,
-                flow_id: None,
-            })
-        }
-        // v2 and v3 share the same schema; the version byte gates the payload
-        // trailer, not the header layout.
-        2 | 3 => {
-            let wire: WireHeaderV2 = postcard::from_bytes(bytes)?;
-            Ok(ClipboardHeader {
-                version: wire.version,
-                snapshot_hash: wire.snapshot_hash,
-                captured_at_ms: wire.captured_at_ms,
-                origin_device_id: wire.origin_device_id,
-                origin_device_name: wire.origin_device_name,
-                payload_version: wire.payload_version,
-                flow_id: wire.flow_id,
-            })
-        }
-        other => Err(WireDecodeError::UnsupportedVersion {
-            got: other,
-            expected: ClipboardHeader::DIRECTORY_VERSION,
-        }),
+    decode_wire_header(bytes).map(|decoded| decoded.header)
+}
+
+struct DecodedWireHeader {
+    header: ClipboardHeader,
+    trace_context: Option<WireTraceContext>,
+}
+
+fn decode_wire_header(bytes: &[u8]) -> Result<DecodedWireHeader, WireDecodeError> {
+    let encoded = bytes
+        .strip_prefix(WIRE_SCHEMA_MARKER)
+        .ok_or(WireDecodeError::IncompatibleLayout)?;
+    let (wire, remaining) = postcard::take_from_bytes::<CurrentWireHeader>(encoded)?;
+    if !remaining.is_empty() {
+        return Err(WireDecodeError::TrailingHeaderBytes);
     }
+    if !matches!(
+        wire.version,
+        ClipboardHeader::CURRENT_VERSION | ClipboardHeader::DIRECTORY_VERSION
+    ) {
+        return Err(WireDecodeError::UnsupportedVersion {
+            got: wire.version,
+            expected: ClipboardHeader::DIRECTORY_VERSION,
+        });
+    }
+    Ok(DecodedWireHeader {
+        header: ClipboardHeader {
+            version: wire.version,
+            snapshot_hash: wire.snapshot_hash,
+            captured_at_ms: wire.captured_at_ms,
+            origin_device_id: wire.origin_device_id,
+            origin_device_name: wire.origin_device_name,
+            payload_version: wire.payload_version,
+        },
+        trace_context: wire.trace_context.filter(WireTraceContext::is_bounded),
+    })
 }
 
 // ============================================================================
@@ -310,9 +296,32 @@ pub struct ReadFrame {
     pub ciphertext: Bytes,
 }
 
+pub(super) struct ReadFrameHeader {
+    pub(super) header: ClipboardHeader,
+    pub(super) trace_context: Option<WireTraceContext>,
+    payload_len: u32,
+}
+
+impl ReadFrameHeader {
+    pub(super) fn payload_len(&self) -> u32 {
+        self.payload_len
+    }
+}
+
 /// Read one clipboard frame from a stream, validating magic + size caps
 /// **before** allocating the header / payload buffers.
 pub async fn read_frame<R: AsyncRead + Unpin>(recv: &mut R) -> Result<ReadFrame, WireDecodeError> {
+    let decoded = read_frame_header(recv).await?;
+    let ciphertext = read_frame_payload(recv, decoded.payload_len).await?;
+    Ok(ReadFrame {
+        header: decoded.header,
+        ciphertext,
+    })
+}
+
+pub(super) async fn read_frame_header<R: AsyncRead + Unpin>(
+    recv: &mut R,
+) -> Result<ReadFrameHeader, WireDecodeError> {
     let mut magic_buf = [0u8; 1];
     recv.read_exact(&mut magic_buf)
         .await
@@ -339,7 +348,7 @@ pub async fn read_frame<R: AsyncRead + Unpin>(recv: &mut R) -> Result<ReadFrame,
     recv.read_exact(&mut header_bytes)
         .await
         .map_err(WireDecodeError::Io)?;
-    let header = decode_header(&header_bytes)?;
+    let decoded = decode_wire_header(&header_bytes)?;
 
     recv.read_exact(&mut len_buf)
         .await
@@ -351,15 +360,22 @@ pub async fn read_frame<R: AsyncRead + Unpin>(recv: &mut R) -> Result<ReadFrame,
             max: MAX_PAYLOAD_SIZE,
         });
     }
+    Ok(ReadFrameHeader {
+        header: decoded.header,
+        trace_context: decoded.trace_context,
+        payload_len,
+    })
+}
+
+pub(super) async fn read_frame_payload<R: AsyncRead + Unpin>(
+    recv: &mut R,
+    payload_len: u32,
+) -> Result<Bytes, WireDecodeError> {
     let mut payload = vec![0u8; payload_len as usize];
     recv.read_exact(&mut payload)
         .await
         .map_err(WireDecodeError::Io)?;
-
-    Ok(ReadFrame {
-        header,
-        ciphertext: Bytes::from(payload),
-    })
+    Ok(Bytes::from(payload))
 }
 
 // ============================================================================
@@ -379,7 +395,6 @@ mod tests {
             origin_device_id: "dev-alpha".to_string(),
             origin_device_name: "Alpha Laptop".to_string(),
             payload_version: 3,
-            flow_id: Some("01941b00-0000-7000-8000-000000000001".to_string()),
         }
     }
 
@@ -521,16 +536,17 @@ mod tests {
     /// as the current schema.
     #[tokio::test]
     async fn decode_rejects_future_header_version() {
-        let future = WireHeaderV2 {
+        let future = CurrentWireHeader {
             version: ClipboardHeader::DIRECTORY_VERSION + 1,
             snapshot_hash: "stub".to_string(),
             captured_at_ms: 0,
             origin_device_id: "d".to_string(),
             origin_device_name: "n".to_string(),
             payload_version: 3,
-            flow_id: None,
+            trace_context: None,
         };
-        let bytes = postcard::to_allocvec(&future).unwrap();
+        let mut bytes = WIRE_SCHEMA_MARKER.to_vec();
+        bytes.extend(postcard::to_allocvec(&future).unwrap());
 
         match decode_header(&bytes) {
             Err(WireDecodeError::UnsupportedVersion { got, expected }) => {
@@ -541,44 +557,50 @@ mod tests {
         }
     }
 
-    /// 7. Backward compatibility — a v1-shaped wire header (without
-    /// `flow_id`) decodes successfully into a `ClipboardHeader` whose
-    /// `flow_id` is `None`. This is the path that lets older peers keep
-    /// talking to a v2 receiver during the rollout window; the receiver
-    /// tags the resulting span with `flow.synthetic = true` and generates
-    /// its own local flow id.
-    #[tokio::test]
-    async fn decode_v1_yields_none_flow_id() {
-        let v1 = WireHeaderV1 {
-            version: 1,
-            snapshot_hash: "old".to_string(),
-            captured_at_ms: 17,
-            origin_device_id: "legacy-peer".to_string(),
-            origin_device_name: "Legacy".to_string(),
-            payload_version: 3,
-        };
-        let bytes = postcard::to_allocvec(&v1).unwrap();
+    #[derive(Serialize, Deserialize)]
+    struct LegacyWireHeader(u8, String, i64, String, String, u8, Option<String>);
 
-        let decoded = decode_header(&bytes).expect("v1 frame must decode on v2 receiver");
-        assert_eq!(decoded.version, 1);
-        assert_eq!(decoded.snapshot_hash, "old");
-        assert_eq!(decoded.origin_device_id, "legacy-peer");
+    #[test]
+    fn old_and_new_header_layouts_reject_each_other_explicitly() {
+        let legacy = LegacyWireHeader(
+            ClipboardHeader::CURRENT_VERSION,
+            "old".to_owned(),
+            17,
+            "legacy-peer".to_owned(),
+            "Legacy".to_owned(),
+            3,
+            None,
+        );
+        let legacy_bytes = postcard::to_allocvec(&legacy).unwrap();
+        assert!(matches!(
+            decode_header(&legacy_bytes),
+            Err(WireDecodeError::IncompatibleLayout)
+        ));
+
+        let current_bytes = encode_header(&sample_header()).unwrap();
         assert!(
-            decoded.flow_id.is_none(),
-            "v1 frames have no flow_id; receiver must fall back to synthetic"
+            current_bytes.first().copied() != Some(ClipboardHeader::CURRENT_VERSION),
+            "旧 decoder 必须在读取 postcard 前按首字节拒绝当前布局"
         );
     }
 
-    /// 8. v2 round-trip — encode a header with a flow_id and confirm it
-    /// survives the decode boundary intact (i.e. cross-device correlation
-    /// can rely on the field).
-    #[tokio::test]
-    async fn v2_round_trip_preserves_flow_id() {
+    #[test]
+    fn current_header_preserves_bounded_trace_context_and_rejects_trailing_bytes() {
         let header = sample_header();
-        let bytes = encode_header(&header).unwrap();
-        let decoded = decode_header(&bytes).unwrap();
-        assert_eq!(decoded.flow_id, header.flow_id);
-        assert_eq!(decoded.version, ClipboardHeader::CURRENT_VERSION);
+        let context = WireTraceContext {
+            traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_owned(),
+            tracestate: Some("vendor=value".to_owned()),
+        };
+        let mut bytes = encode_header_with_context(&header, Some(context.clone())).unwrap();
+        let decoded = decode_wire_header(&bytes).unwrap();
+        assert_eq!(decoded.header, header);
+        assert_eq!(decoded.trace_context, Some(context));
+
+        bytes.push(0);
+        assert!(matches!(
+            decode_header(&bytes),
+            Err(WireDecodeError::TrailingHeaderBytes)
+        ));
     }
 
     #[tokio::test]
@@ -590,7 +612,6 @@ mod tests {
         let decoded = decode_header(&bytes).unwrap();
 
         assert_eq!(decoded.version, ClipboardHeader::DIRECTORY_VERSION);
-        assert_eq!(decoded.flow_id, header.flow_id);
         assert_eq!(ClipboardHeader::CURRENT_VERSION, 2);
     }
 
@@ -602,6 +623,7 @@ mod tests {
         for code in [
             AckCode::Accepted,
             AckCode::DuplicateIgnored,
+            AckCode::Incompatible,
             AckCode::Rejected,
         ] {
             let byte = code.as_byte();

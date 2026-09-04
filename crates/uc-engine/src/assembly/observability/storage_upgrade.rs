@@ -1,50 +1,49 @@
 use std::time::Instant;
 
 use uc_infra::security::{ProfileStorageUpgradeError, ProfileStorageUpgradeOutcome};
+use uc_observability_contract::diagnostics::{
+    complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
+    DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
+};
+
+pub(crate) fn profile_storage_upgrade_span() -> tracing::Span {
+    operation_span(OperationContext {
+        domain: DiagnosticDomain::Storage,
+        operation: DiagnosticOperation::ProfileStorageUpgrade,
+        role: DiagnosticRole::Local,
+        kind: DiagnosticSpanKind::Internal,
+        flow: None,
+    })
+}
 
 pub(crate) fn record_profile_storage_upgrade(
     started: Instant,
     result: &Result<ProfileStorageUpgradeOutcome, ProfileStorageUpgradeError>,
 ) {
-    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     match result {
-        Ok(outcome) => tracing::info!(
-            target: "storage.performance",
-            operation = "profile_storage_upgrade",
-            elapsed_ms,
-            outcome = "ok",
-            result = outcome_kind(outcome),
-            "profile storage upgrade completed"
-        ),
-        Err(error) => tracing::info!(
-            target: "storage.performance",
-            operation = "profile_storage_upgrade",
-            elapsed_ms,
-            outcome = "error",
-            error_kind = error_kind(error),
-            "profile storage upgrade completed"
-        ),
+        Ok(_) => complete_operation(OperationCompletion::succeeded(
+            DiagnosticDomain::Storage,
+            DiagnosticOperation::ProfileStorageUpgrade,
+            DiagnosticRole::Local,
+            started.elapsed(),
+        )),
+        Err(error) => complete_operation(OperationCompletion::failed(
+            DiagnosticDomain::Storage,
+            DiagnosticOperation::ProfileStorageUpgrade,
+            DiagnosticRole::Local,
+            error_type(error),
+            started.elapsed(),
+        )),
     }
 }
 
-fn outcome_kind(outcome: &ProfileStorageUpgradeOutcome) -> &'static str {
-    match outcome {
-        ProfileStorageUpgradeOutcome::UpToDate => "up_to_date",
-        ProfileStorageUpgradeOutcome::Upgraded => "upgraded",
-        ProfileStorageUpgradeOutcome::FreshReady { .. } => "fresh_ready",
-        ProfileStorageUpgradeOutcome::LegacyReady { .. } => "legacy_ready",
-        ProfileStorageUpgradeOutcome::Pending => "pending",
-        ProfileStorageUpgradeOutcome::Busy => "busy",
-    }
-}
-
-fn error_kind(error: &ProfileStorageUpgradeError) -> &'static str {
+fn error_type(error: &ProfileStorageUpgradeError) -> DiagnosticErrorType {
     match error {
-        ProfileStorageUpgradeError::Storage { .. } => "storage",
-        ProfileStorageUpgradeError::Security { .. } => "security",
-        ProfileStorageUpgradeError::Corrupt { .. } => "corrupt",
-        ProfileStorageUpgradeError::SourceChanged => "source_changed",
-        ProfileStorageUpgradeError::Manifest { .. } => "manifest",
+        ProfileStorageUpgradeError::Storage { .. } => DiagnosticErrorType::Storage,
+        ProfileStorageUpgradeError::Security { .. } => DiagnosticErrorType::Security,
+        ProfileStorageUpgradeError::Corrupt { .. } => DiagnosticErrorType::Corrupt,
+        ProfileStorageUpgradeError::SourceChanged => DiagnosticErrorType::SourceChanged,
+        ProfileStorageUpgradeError::Manifest { .. } => DiagnosticErrorType::Manifest,
     }
 }
 
@@ -56,7 +55,7 @@ mod tests {
 
     use uc_infra::security::{ProfileStorageUpgradeError, ProfileStorageUpgradeOutcome};
 
-    use super::record_profile_storage_upgrade;
+    use super::{profile_storage_upgrade_span, record_profile_storage_upgrade};
 
     #[derive(Clone, Default)]
     struct CapturedWriter(Arc<Mutex<Vec<u8>>>);
@@ -102,6 +101,8 @@ mod tests {
         let secret = "SECRET_UPGRADE_SOURCE";
 
         tracing::dispatcher::with_default(&dispatch, || {
+            let span = profile_storage_upgrade_span();
+            let _entered = span.enter();
             record_profile_storage_upgrade(
                 Instant::now() - Duration::from_millis(12),
                 &Ok(ProfileStorageUpgradeOutcome::Upgraded),
@@ -115,11 +116,11 @@ mod tests {
         });
 
         let output = writer.output();
+        assert!(output.contains("uc.operation"));
         assert!(output.contains("profile_storage_upgrade"));
-        assert!(output.contains("result=\"upgraded\""));
         assert!(output.contains("outcome=\"ok\""));
         assert!(output.contains("outcome=\"error\""));
-        assert!(output.contains("error_kind=\"security\""));
+        assert!(output.contains("error.type=\"security\""));
         assert!(!output.contains(secret));
     }
 }

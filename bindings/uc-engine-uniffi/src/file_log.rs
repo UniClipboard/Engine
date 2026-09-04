@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
-use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::Layer;
 
 /// 文件层 writer 与其 worker guard 常驻进程生命周期。guard 被释放时滚动
@@ -25,8 +25,28 @@ where
         tracing_subscriber::fmt::layer()
             .with_writer(writer)
             .with_ansi(false)
-            .with_filter(LevelFilter::INFO),
+            .with_filter(filter_fn(persistent_sink_enabled)),
     ))
+}
+
+/// 持久与平台系统输出默认拒绝普通模块记录，只允许已经逐字段审核的
+/// 稳定目标。远程输出还会在共同运行时中进一步收窄到 `uc.telemetry`。
+pub(crate) fn persistent_sink_enabled(metadata: &tracing::Metadata<'_>) -> bool {
+    matches!(
+        *metadata.level(),
+        tracing::Level::ERROR | tracing::Level::WARN | tracing::Level::INFO
+    ) && audited_persistent_target(metadata.target())
+}
+
+fn audited_persistent_target(target: &str) -> bool {
+    matches!(
+        target,
+        "uc.telemetry"
+            | "observability.health"
+            | "admission.performance"
+            | "membership.performance"
+            | "storage.performance"
+    )
 }
 
 fn file_layer_writer(logs_dir: &Path) -> Option<NonBlocking> {
@@ -59,6 +79,13 @@ mod tests {
     use tracing_subscriber::layer::SubscriberExt;
 
     use super::*;
+
+    #[test]
+    fn persistent_sinks_accept_only_audited_targets() {
+        assert!(audited_persistent_target("uc.telemetry"));
+        assert!(audited_persistent_target("admission.performance"));
+        assert!(!audited_persistent_target("uc_application::clipboard"));
+    }
 
     fn read_written_log(directory: &Path, expected: &str) -> String {
         for _ in 0..200 {
@@ -95,7 +122,12 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(layer);
         let _default_guard = tracing::subscriber::set_default(subscriber);
 
-        tracing::info!(field = "value", "mobile file log line");
+        tracing::info!(target: "uc.telemetry", outcome = "ok", "mobile file log line");
+        tracing::warn!(
+            target: "uc_application::clipboard",
+            path = "/private/sensitive.txt",
+            "must not reach a persistent sink"
+        );
         tracing::debug!("must not reach the file");
 
         let content = read_written_log(directory.path(), "mobile file log line");
@@ -104,8 +136,12 @@ mod tests {
             "info log must be written to the daily file"
         );
         assert!(
-            content.contains("field=\"value\""),
+            content.contains("outcome=\"ok\""),
             "structured field must be written"
+        );
+        assert!(
+            !content.contains("/private/sensitive.txt"),
+            "unapproved targets must not reach the file"
         );
         assert!(
             !content.contains("must not reach the file"),

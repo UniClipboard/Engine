@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use moka::sync::Cache;
 use tracing::{debug, error, info, instrument, warn, Instrument};
-use uc_observability_contract::FlowId;
 
 use uc_core::clipboard::ActiveClipboardState;
 use uc_core::file_transfer::{OutboundProgressReporterPort, OutboundProgressStatus};
@@ -889,13 +888,6 @@ impl ApplyInboundClipboardUseCase {
         }
     }
 
-    // 跨设备可观测性(PR2):
-    //   - `peer.device_id` 是 PR2 起的标准字段名,把发送方 device 摆到一级
-    //     span field;`from_device` 暂时保留兼容现有日志查询,Sentry tag
-    //     索引完全切换后会下线。
-    //   - `flow.id` 优先沿用 wire header 上带过来的对端 flow_id,实现
-    //     A 端 root flow.id == B 端 root flow.id;旧版 peer 没带时才本地生成。
-    //   - `flow.kind` 静态 `clipboard_sync`,方便按业务流过滤。
     pub async fn execute(
         &self,
         input: ApplyInboundInput,
@@ -919,8 +911,6 @@ impl ApplyInboundClipboardUseCase {
         fields(
             snapshot_hash = %input.snapshot_hash,
             plaintext_len = input.plaintext.len(),
-            flow.id = tracing::field::Empty,
-            flow.kind = "clipboard_sync",
         )
     )]
     async fn execute_internal(
@@ -931,8 +921,6 @@ impl ApplyInboundClipboardUseCase {
         if let Some(readiness) = &self.receive_readiness {
             readiness.wait_ready().await;
         }
-        let flow_id = input.flow_id.clone().unwrap_or_else(FlowId::generate);
-        tracing::Span::current().record("flow.id", tracing::field::display(&flow_id));
         // 1. Decode V3 envelope. Decode failure is non-fatal — drop the
         // frame, keep the loop alive (peer may be on a newer wire).
         let (snapshot, blob_refs, file_set_manifest) =

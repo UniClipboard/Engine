@@ -799,6 +799,11 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 | 日期 | 主题 | 长期结论 |
 | --- | --- | --- |
+| 2026-09-04 | 037 第二切片：Clipboard 跨设备调用链 | Clipboard 发送只由 Engine 在既有完整 dispatch port 上建立 client span；地址与连接子 span、W3C 注入和认证后 server span 全归 Infra 私有实现，Application/Core 不携带 trace context、flow 或 timing。旧 UUID flow、`DispatchTiming`、Application 阶段 span 与 `uc_otlp` 已删除。消息头增加前置格式标记而不增加业务版本号，新旧布局双向明确不兼容；真实双 Iroh endpoint 已证明 client/server 同 TraceId、正确 parent、完成日志关联 server SpanId，未知 peer 不接受 remote parent。 |
+| 2026-09-04 | 037 单进程真实 OTLP | 新增内部 `uc-observability-runtime`，宿主进程唯一拥有共享 Resource、真实 OTLP/HTTP trace/log exporters、目标过滤、有界 batch、JSONL 与 provider 生命周期；`uc-engine` 只重导稳定 bootstrap。诊断合同以类型限制 domain/operation/role/outcome/error/duration，可选 flow 只从完整 owner 的随机 attempt 单向派生。可解码 receiver 和本地 Collector+Jaeger 已证明 trace/log 实际到达且 TraceId/SpanId 一致；Rust 1.95 下 iOS、Android、HarmonyOS 目标编译通过。 |
+| 2026-09-04 | 037 第一切片：观测输出隐私基线 | Apple/Android 系统日志与移动文件日志改为默认拒绝普通模块记录，只允许逐字段审核的稳定目标；历史调用点保留为可再生 inventory，不以批量机械改写扩大风险。独立隐私门禁覆盖全部生产 Rust 源并接入仓库 preflight，运行时文件哨兵证明未经审核的路径字段不会落盘。旧移动日志计划按已完成部分和由 037 取代部分归档；本轮尚未接入远程 exporter。 |
+| 2026-09-04 | 037 OpenTelemetry 与结构化日志规划 | 新增 active 规格 037：保留 035 的 Engine capability decorator，先阻断现有敏感日志，再建立宿主进程级真实 OTLP traces/logs、Infra 认证后 W3C context propagation、有界 JSONL 与 Collector 验收；Core 不感知观测，Application 不承担持续计时，Engine 不查询业务步骤。本地使用 Jaeger 验证 trace，生产 Collector 优先输出到 PostHog，远程诊断许可只归宿主，本地日志保留 7 天且总量不超过 100 MB。规格以 Clipboard 为跨设备 tracer bullet，契约冻结后允许 Space 配对与平台输出双 Agent 按独占文件并行，最终串行删除 `uc_otlp`、旧 timing/flow 和临时关联原型。本轮只形成计划，无生产行为变化。 |
+| 2026-09-04 | 观测不得泄露业务步骤 | 为配对日志关联尝试新增待切换步骤查询会把 Application 内部状态泄露给 Engine，已撤回。后续观测只能装饰既有完整能力；不得为日志、tracing 或关联号扩大 facade、port/result 接口，跨步骤关联由完整流程负责人提供不透明观测上下文，Engine 不据此编排步骤。 |
 | 2026-09-04 | 升级与重新配对观测补全 | Engine 组装层新增 profile 存储升级、Sponsor settlement 和重新配对状态的耗时与稳定结果记录，并为既有准入失败补齐 `error_kind`；恢复读取只记录固定触发分类，设备上线触发不附带身份。事件继续排除 profile、Space、设备、邀请、凭据、地址、路径与错误文本。 |
 | 2026-09-03 | 无用实现清理 | 删除已退役的邀请消费入口、恢复报告合并函数和冗余读取字段；仅用于内部回归的 MLS 辅助入口明确限定在测试构建内。本轮不改变产品行为或架构。 |
 | 2026-09-03 | Core 准入状态导入清理 | 删除父模块中已由子模块直接导入的三个冗余名称；本轮无行为或架构变化。 |

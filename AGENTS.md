@@ -49,6 +49,7 @@
 - Application 下层失败保留完整 source chain；禁止字符串化或吞错。详细规则见错误处理文档。
 - 跨层功能必须有唯一完整负责人；Core 保存规则、Application 负责流程、Infra 提供能力、Engine 只组装。
 - 跨层持续计时与结果分类只通过 Engine 组装层的领域 port decorator 实现。
+- 为日志、tracing 或流程关联增加观测时，不得向 Engine 新增暴露 Application/Core 内部阶段、状态对象、业务标识或步骤查询，也不得为观测扩大 facade、port 或结果接口。Engine 只能装饰既有完整能力的输入与输出；跨步骤关联必须由完整流程负责人通过不透明观测上下文提供，且不得让 Engine 据此编排业务步骤。
 - 新功能开工前写清完整负责人、调用方唯一动作、成功/失败结果及重启/重试责任。
 - 任何 Agent 修改仓库内容时，同步检查并更新 `docs/architecture/architecture-bible.md`；无架构变化也在“文档维护记录”增加记录。
 

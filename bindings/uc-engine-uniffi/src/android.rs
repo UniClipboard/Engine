@@ -5,7 +5,9 @@ use std::sync::OnceLock;
 use jni::objects::{GlobalRef, JClass, JObject};
 use jni::sys::{jboolean, JNI_FALSE, JNI_TRUE};
 use jni::JNIEnv;
+use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::Layer;
 
 use crate::file_log;
 
@@ -17,6 +19,7 @@ pub(crate) fn install_android_tracing(logs_dir: &Path) {
         let Ok(layer) = tracing_android::layer("UcEngine") else {
             return;
         };
+        let layer = layer.with_filter(filter_fn(file_log::persistent_sink_enabled));
         let subscriber: Box<dyn tracing::Subscriber + Send + Sync> =
             match file_log::file_layer(logs_dir) {
                 Some(file_layer) => {

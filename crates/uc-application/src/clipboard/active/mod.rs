@@ -760,7 +760,6 @@ impl InboundPulledContentStore for PulledContentStore {
                 from_device: from_device.as_str().to_string(),
                 snapshot_hash: snapshot_hash.to_string(),
                 plaintext: plaintext.into(),
-                flow_id: None,
                 provisional: None,
                 // Store-only path: this apply's write port is a no-op (the
                 // convergence tail below owns the authoritative OS write), so
