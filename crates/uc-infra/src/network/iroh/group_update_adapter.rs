@@ -200,7 +200,6 @@ impl ProtocolHandler for IrohGroupUpdateHandler {
             operation: DiagnosticOperation::MembershipGroupUpdate,
             role: DiagnosticRole::Member,
             kind: DiagnosticSpanKind::Server,
-            flow: None,
         });
         let started = Instant::now();
         let applied = self
@@ -216,6 +215,7 @@ impl ProtocolHandler for IrohGroupUpdateHandler {
         } else {
             ACK_REJECTED
         };
+        emit_ack(&mut send, ack).await;
         span.in_scope(|| {
             let completion = match &applied {
                 Ok(_) => OperationCompletion::succeeded(
@@ -234,7 +234,7 @@ impl ProtocolHandler for IrohGroupUpdateHandler {
             };
             complete_operation(completion);
         });
-        emit_ack(&mut send, ack).await;
+        drop(span);
         let _ = connection.closed().await;
         Ok(())
     }
@@ -426,7 +426,6 @@ mod tests {
                 operation: DiagnosticOperation::MembershipGroupUpdate,
                 role: DiagnosticRole::Member,
                 kind: DiagnosticSpanKind::Client,
-                flow: None,
             });
             let _client_entered = client.enter();
             let encoded = encode_request(b"MLS").expect("request encodes");
@@ -436,7 +435,6 @@ mod tests {
                 operation: DiagnosticOperation::MembershipGroupUpdate,
                 role: DiagnosticRole::Member,
                 kind: DiagnosticSpanKind::Server,
-                flow: None,
             });
             assert!(set_remote_parent(&server, request.trace_context.as_ref()));
             let _server_entered = server.enter();

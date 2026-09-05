@@ -341,7 +341,6 @@ fn network_span(operation: DiagnosticOperation) -> tracing::Span {
         operation,
         role: DiagnosticRole::Client,
         kind: DiagnosticSpanKind::Internal,
-        flow: None,
     })
 }
 

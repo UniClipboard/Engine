@@ -213,6 +213,7 @@ struct PersistedPendingExchangeV1 {
     expected_reply_kind: u8,
     retry_attempt_count: u32,
     retry_next_attempt_at_ms: i64,
+    block_reason: Option<u8>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -222,6 +223,7 @@ struct PersistedPreparedPendingExchangeV1 {
     expected_reply_kind: u8,
     retry_attempt_count: u32,
     retry_next_attempt_at_ms: i64,
+    block_reason: Option<u8>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -461,6 +463,7 @@ struct PersistedAnyPendingExchangeV1 {
     expected_reply_kind: u8,
     retry_attempt_count: u32,
     retry_next_attempt_at_ms: i64,
+    block_reason: Option<u8>,
 }
 
 #[derive(Serialize, Deserialize)]

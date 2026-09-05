@@ -1605,12 +1605,14 @@ fn join_space_contract_returns_a_tagged_active_result_with_both_identities() {
             migrated_records: Some(42),
             preserved_unreadable_records: Some(3),
         },
+        peer_upgrade_required: true,
     });
     assert!(matches!(
         result,
         OperationResult::JoinSpace(uc_engine::JoinSpaceStatusSummary::Active {
             ref join_id,
             ref joined_space,
+            peer_upgrade_required: true,
         }) if join_id == "join-id"
             && joined_space.sponsor_device_id == "sponsor-1"
             && joined_space.sponsor_identity_fingerprint == "sponsor-fingerprint"

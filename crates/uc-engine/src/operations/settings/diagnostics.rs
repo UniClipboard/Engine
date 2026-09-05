@@ -1,6 +1,7 @@
 use crate::error_codes::*;
 
 use std::path::Path;
+use std::time::Duration;
 
 use uc_application::facade::{AppFacade, DiagnosticsFacadeError};
 use uc_core::ids::RepresentationId;
@@ -48,6 +49,12 @@ pub(crate) async fn execute_export_diagnostic_logs(
     temporary_root: &Path,
     input: ExportDiagnosticLogsInput,
 ) -> Result<OperationResult, EngineError> {
+    if !matches!(
+        crate::observability::ProcessObservabilityRuntime::flush_local_logs(Duration::from_secs(1)),
+        crate::observability::ObservabilitySignalResult::Completed
+    ) {
+        return Err(internal_error(EXPORT_DIAGNOSTIC_LOGS_FAILED_CODE));
+    }
     let export_dir = temporary_root.join(format!("diagnostic-export-{}", RepresentationId::new()));
     std::fs::create_dir_all(&export_dir)
         .map_err(|_| internal_error(EXPORT_DIAGNOSTIC_LOGS_FAILED_CODE))?;

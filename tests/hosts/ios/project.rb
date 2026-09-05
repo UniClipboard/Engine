@@ -8,15 +8,17 @@ unless %w[device simulator].include?(platform)
 end
 rust_target = platform == "simulator" ? "aarch64-apple-ios-sim" : "aarch64-apple-ios"
 supported_platform = platform == "simulator" ? "iphonesimulator" : "iphoneos"
-archive = "$(SRCROOT)/../../target/ios-probe-cargo/#{rust_target}/release/libuc_mobile_probe_core.a"
+workspace_root = File.expand_path("../../..", __dir__)
+source_directory = File.join(workspace_root, "tests/hosts/ios/EngineProbe")
+archive = File.join(
+  workspace_root,
+  "target/ios-probe-cargo/#{rust_target}/release/libuc_mobile_probe_core.a"
+)
 FileUtils.rm_rf(output)
 project = Xcodeproj::Project.new(output)
 target = project.new_target(:application, "EngineProbe", :ios, "17.0")
 
-source_group = project.main_group.new_group(
-  "EngineProbe",
-  "../../tests/hosts/ios/EngineProbe"
-)
+source_group = project.main_group.new_group("EngineProbe", source_directory, :absolute)
 %w[
   EngineProbeApp.swift
   ProbeBridge.swift
@@ -35,8 +37,11 @@ target.build_configurations.each do |config|
   settings["DEVELOPMENT_TEAM"] = "8XG39X5CL8"
   settings["CODE_SIGN_STYLE"] = "Automatic"
   settings["SWIFT_VERSION"] = "5.0"
-  settings["INFOPLIST_FILE"] = "../../tests/hosts/ios/EngineProbe/Info.plist"
-  settings["SWIFT_OBJC_BRIDGING_HEADER"] = "../../tests/hosts/ios/EngineProbe/EngineProbe-Bridging-Header.h"
+  settings["INFOPLIST_FILE"] = File.join(source_directory, "Info.plist")
+  settings["SWIFT_OBJC_BRIDGING_HEADER"] = File.join(
+    source_directory,
+    "EngineProbe-Bridging-Header.h"
+  )
   settings["LIBRARY_SEARCH_PATHS"] = ["$(inherited)", File.dirname(archive)]
   settings["OTHER_LDFLAGS"] = [
     "$(inherited)", "-force_load",

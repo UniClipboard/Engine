@@ -14,14 +14,20 @@ pub use recover_pending::{
 pub(crate) struct AdmissionRecoveryService {
     pub(super) state: Arc<dyn PendingAdmissionRecoveryStatePort>,
     pub(super) transport: Arc<dyn SpaceAdmissionTransportPort>,
+    host_events: Arc<crate::facade::HostEventBus>,
 }
 
 impl AdmissionRecoveryService {
     pub(crate) fn new(
         state: Arc<dyn PendingAdmissionRecoveryStatePort>,
         transport: Arc<dyn SpaceAdmissionTransportPort>,
+        host_events: Arc<crate::facade::HostEventBus>,
     ) -> Self {
-        Self { state, transport }
+        Self {
+            state,
+            transport,
+            host_events,
+        }
     }
 
     pub(super) async fn commit_recovery(
@@ -30,6 +36,35 @@ impl AdmissionRecoveryService {
         transition: JoinerAdmissionTransition,
     ) -> Result<LoadedPendingAdmission, PendingAdmissionRecoveryStateError> {
         self.state.commit(token, transition).await
+    }
+
+    pub(super) async fn commit_recovery_and_notify(
+        &self,
+        token: AdmissionRecoveryCommitToken,
+        transition: JoinerAdmissionTransition,
+    ) -> Result<LoadedPendingAdmission, PendingAdmissionRecoveryStateError> {
+        let loaded = self.commit_recovery(token, transition).await?;
+        self.host_events
+            .emit_or_warn(uc_core::ports::HostEvent::Membership(
+                uc_core::ports::MembershipHostEvent::AdmissionChanged,
+            ));
+        Ok(loaded)
+    }
+
+    pub(super) async fn commit_recovery_with_optional_notification(
+        &self,
+        token: AdmissionRecoveryCommitToken,
+        transition: JoinerAdmissionTransition,
+        notify: bool,
+    ) -> Result<LoadedPendingAdmission, PendingAdmissionRecoveryStateError> {
+        let loaded = self.commit_recovery(token, transition).await?;
+        if notify {
+            self.host_events
+                .emit_or_warn(uc_core::ports::HostEvent::Membership(
+                    uc_core::ports::MembershipHostEvent::AdmissionChanged,
+                ));
+        }
+        Ok(loaded)
     }
 
     pub(super) fn record_state_error(

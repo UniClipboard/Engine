@@ -6,13 +6,13 @@ use uc_engine::{EngineError, EngineErrorCategory};
 
 use uc_engine_uniffi::{
     core_version, flush_process_observability, install_process_observability,
-    shutdown_process_observability, BindingAnalyticsContext, BindingAnalyticsDeviceType,
-    BindingAnalyticsEvent, BindingAnalyticsGroupIdentify, BindingAnalyticsHost,
-    BindingAnalyticsHostError, BindingAnalyticsIdentify, BindingAnalyticsIdentityChange,
-    BindingAnalyticsOs, BindingClipboardRepresentation, BindingClipboardRestoreMode,
-    BindingClipboardRestoreOutcome, BindingClipboardSnapshot, BindingCollectorConfig,
-    BindingConfig, BindingDeploymentEnvironment, BindingEngineState, BindingError,
-    BindingErrorCategory, BindingEvent, BindingFileMetadata, BindingHost,
+    query_process_observability_health, shutdown_process_observability, BindingAnalyticsContext,
+    BindingAnalyticsDeviceType, BindingAnalyticsEvent, BindingAnalyticsGroupIdentify,
+    BindingAnalyticsHost, BindingAnalyticsHostError, BindingAnalyticsIdentify,
+    BindingAnalyticsIdentityChange, BindingAnalyticsOs, BindingClipboardRepresentation,
+    BindingClipboardRestoreMode, BindingClipboardRestoreOutcome, BindingClipboardSnapshot,
+    BindingCollectorConfig, BindingConfig, BindingDeploymentEnvironment, BindingEngineState,
+    BindingError, BindingErrorCategory, BindingEvent, BindingFileMetadata, BindingHost,
     BindingObservabilityConfig, BindingObservabilitySetupStatus, BindingObservabilitySignalResult,
     BindingOperationTerminal, HostBindingError, InvitationIssued, MobileEngine, SendReport,
 };
@@ -35,11 +35,11 @@ fn process_observability_is_host_owned_reused_and_lifecycle_safe() {
     let config = BindingObservabilityConfig {
         service_version: "1.2.3".to_owned(),
         environment: BindingDeploymentEnvironment::Test,
-        app_channel: "integration-test".to_owned(),
+        app_channel: "test".to_owned(),
         remote_diagnostics_enabled: true,
         collector: Some(BindingCollectorConfig {
-            trace_endpoint: "http://127.0.0.1:9/v1/traces".to_owned(),
-            log_endpoint: "http://127.0.0.1:9/v1/logs".to_owned(),
+            trace_endpoint: "https://127.0.0.1:9/v1/traces".to_owned(),
+            log_endpoint: "https://127.0.0.1:9/v1/logs".to_owned(),
             auth_header_name: Some("authorization".to_owned()),
             auth_header_value: Some("Bearer binding-private-token".to_owned()),
         }),
@@ -48,6 +48,7 @@ fn process_observability_is_host_owned_reused_and_lifecycle_safe() {
     let debug = format!("{config:?}");
     assert!(!debug.contains("127.0.0.1"));
     assert!(!debug.contains("binding-private-token"));
+    assert!(!debug.contains("1.2.3"));
 
     let setup =
         install_process_observability(config.clone(), host.clone()).expect("observability install");
@@ -94,13 +95,15 @@ fn process_observability_is_host_owned_reused_and_lifecycle_safe() {
     restarted.shutdown(30_000).expect("second engine shutdown");
 
     let mut conflicting = config;
-    conflicting.app_channel = "different-channel".to_owned();
+    conflicting.app_channel = "development".to_owned();
     assert!(matches!(
         install_process_observability(conflicting, host),
         Err(BindingError::ObservabilityConfigConflict)
     ));
 
     let _ = flush_process_observability(25).expect("bounded flush");
+    let health = query_process_observability_health().expect("observable process health");
+    assert!(health.failed_remote_span_batches > 0 || health.failed_remote_log_batches > 0);
     let _ = shutdown_process_observability(250).expect("process shutdown");
     let after_shutdown = flush_process_observability(25).expect("closed runtime summary");
     assert_eq!(

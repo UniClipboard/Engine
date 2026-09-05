@@ -27,6 +27,7 @@ impl JoinerAdmissionService {
             .map_err(CancelSpaceJoinError::state)?
             .ok_or(CancelSpaceJoinError::NotFound)?;
         let (admission, token) = loaded.into_parts();
+        let peer_upgrade_required = admission.peer_upgrade_required();
         let material = self
             .prepare_cancellation
             .prepare()
@@ -36,7 +37,7 @@ impl JoinerAdmissionService {
         let transition = match admission.request_cancel(message_id, retry_state) {
             Ok(transition) => transition,
             Err(SpaceAdmissionAggregateError::TooLateCommitted) => {
-                return Ok(pending_status(join_id, false));
+                return Ok(pending_status(join_id, false, peer_upgrade_required));
             }
             Err(error) => return Err(CancelSpaceJoinError::state(error)),
         };
@@ -45,16 +46,21 @@ impl JoinerAdmissionService {
             .await
             .map_err(CancelSpaceJoinError::state)?;
         self.maintenance_wake.wake();
-        Ok(pending_status(join_id, true))
+        Ok(pending_status(join_id, true, peer_upgrade_required))
     }
 }
 
-fn pending_status(join_id: JoinId, cancel_requested: bool) -> CurrentJoinStatus {
+fn pending_status(
+    join_id: JoinId,
+    cancel_requested: bool,
+    peer_upgrade_required: bool,
+) -> CurrentJoinStatus {
     CurrentJoinStatus::Pending {
         join_id: *join_id.as_bytes(),
         target_space_id: None,
         sponsor_device_id: None,
         sponsor_identity_fingerprint: None,
         cancel_requested,
+        peer_upgrade_required,
     }
 }

@@ -67,6 +67,7 @@ async fn short_code_resolution_is_marked_started_once_and_saves_the_full_invitat
 
     assert_eq!(report.advanced_count, 2);
     assert_eq!(report.deferred_count, 1);
+    assert_eq!(pair.admission_status_invalidation_count(), 0);
     assert_eq!(
         pair.events(),
         &[
@@ -105,6 +106,7 @@ async fn restarted_in_flight_short_code_is_rejected_without_a_second_resolution(
         .await;
 
     assert_eq!(report.rejected_count, 1);
+    assert_eq!(pair.admission_status_invalidation_count(), 1);
     assert_eq!(
         pair.events(),
         &[ProtocolEvent::JoinerRejectedConsumedInvitation]
@@ -126,6 +128,7 @@ async fn ambiguous_short_code_resolution_failure_is_rejected_without_retry() {
         .await;
 
     assert_eq!(report.rejected_count, 1);
+    assert_eq!(pair.admission_status_invalidation_count(), 1);
     assert_eq!(
         pair.events(),
         &[
@@ -164,6 +167,252 @@ async fn initial_authentication_is_saved_before_the_original_join_request_is_exc
             ProtocolEvent::JoinerJoinRequestExchanged,
         ]
     );
+}
+
+#[tokio::test]
+async fn authenticated_old_layout_is_persisted_as_an_explicit_upgrade_rejection() {
+    let pair = SpaceAdmissionProtocolTestPair::peer_upgrade_required().await;
+    pair.joiner()
+        .start_join(join_input("upgrade-required"))
+        .await
+        .expect("the join request should be saved before recovery");
+
+    let report = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    assert_eq!(report.rejected_count, 1);
+    assert_eq!(report.peer_upgrade_required_count, 1);
+    assert_eq!(report.deferred_count, 0);
+    assert_eq!(pair.admission_status_invalidation_count(), 1);
+    assert_eq!(
+        pair.take_created_join().rejection_reason(),
+        Some(uc_core::membership::SpaceAdmissionRejectionReason::PeerUpgradeRequired)
+    );
+    assert_eq!(
+        pair.events(),
+        &[
+            ProtocolEvent::DeviceNameSaved,
+            ProtocolEvent::JoinerSavedJoinRequest,
+            ProtocolEvent::AdmissionRecoveryWoken,
+            ProtocolEvent::JoinerInitialChannelRequested,
+            ProtocolEvent::JoinerAuthenticatedChannelSaved,
+            ProtocolEvent::JoinerJoinRequestExchanged,
+            ProtocolEvent::JoinerRejectedPeerUpgrade,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn prepared_join_keeps_its_exact_request_until_the_upgraded_peer_recovers() {
+    let pair = SpaceAdmissionProtocolTestPair::upgrade_once_on_prepared().await;
+    pair.joiner()
+        .start_join(join_input("upgrade-prepared"))
+        .await
+        .expect("join request should be saved");
+    pair.joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+    let before_block = pair.admission_status_invalidation_count();
+    assert_eq!(before_block, 0);
+
+    let blocked = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    assert_eq!(
+        blocked.peer_upgrade_required_count,
+        1,
+        "blocked report: {blocked:?}, events: {:?}",
+        pair.events()
+    );
+    assert_eq!(blocked.recovery_required_count, 0);
+    assert_eq!(blocked.rejected_count, 0);
+    let after_block = pair.admission_status_invalidation_count();
+    assert_eq!(after_block, 1);
+    let saved = pair.saved_join();
+    assert!(saved.peer_upgrade_required());
+    assert_eq!(
+        saved
+            .pending_exchange()
+            .expect("Prepared request remains pending")
+            .request_envelope()
+            .kind(),
+        uc_core::membership::SpaceAdmissionMessageKind::Prepared
+    );
+
+    pair.require_upgrade_once_more();
+    let repeated = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::PeerOnline(
+            uc_core::DeviceId::new("still-old-peer"),
+        ))
+        .await;
+    assert_eq!(repeated.peer_upgrade_required_count, 1);
+    assert_eq!(repeated.recovery_required_count, 0);
+    assert_eq!(pair.admission_status_invalidation_count(), after_block);
+
+    let resumed = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::PeerOnline(
+            uc_core::DeviceId::new("upgraded-peer"),
+        ))
+        .await;
+
+    assert_eq!(resumed.peer_upgrade_required_count, 0);
+    assert_eq!(resumed.recovery_required_count, 0);
+    assert_eq!(pair.admission_status_invalidation_count(), after_block + 1);
+    assert!(!pair.saved_join().peer_upgrade_required());
+}
+
+#[tokio::test]
+async fn applied_join_stays_pending_until_the_upgraded_peer_can_complete_it() {
+    let pair = SpaceAdmissionProtocolTestPair::upgrade_once_on_applied().await;
+    pair.joiner()
+        .start_join(join_input("upgrade-applied"))
+        .await
+        .expect("join request should be saved");
+    for _ in 0..2 {
+        pair.joiner()
+            .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+            .await;
+    }
+
+    let blocked = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    assert_eq!(blocked.peer_upgrade_required_count, 1);
+    assert_eq!(blocked.recovery_required_count, 0);
+    let saved = pair.saved_join();
+    assert!(saved.peer_upgrade_required());
+    assert_eq!(
+        saved
+            .pending_exchange()
+            .expect("Applied request remains pending")
+            .request_envelope()
+            .kind(),
+        uc_core::membership::SpaceAdmissionMessageKind::Applied
+    );
+
+    let resumed = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::PeerOnline(
+            uc_core::DeviceId::new("upgraded-peer"),
+        ))
+        .await;
+
+    assert_eq!(resumed.peer_upgrade_required_count, 0);
+    assert_eq!(resumed.recovery_required_count, 0);
+    assert!(!pair.saved_join().peer_upgrade_required());
+}
+
+#[tokio::test]
+async fn cancelling_join_preserves_the_cancel_request_until_the_peer_can_confirm_it() {
+    let pair = SpaceAdmissionProtocolTestPair::upgrade_once_on_cancel().await;
+    let started = pair
+        .joiner()
+        .start_join(join_input("upgrade-cancel"))
+        .await
+        .expect("join request should be saved");
+    pair.joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+    let crate::space::admission::CurrentJoinStatus::Pending { join_id, .. } = started.status else {
+        panic!("new join should be pending");
+    };
+    pair.joiner()
+        .cancel_join(join_id)
+        .await
+        .expect("prepared join should save cancellation");
+
+    let blocked = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    assert_eq!(blocked.peer_upgrade_required_count, 1);
+    assert_eq!(blocked.recovery_required_count, 0);
+    let saved = pair.saved_join();
+    assert!(saved.peer_upgrade_required());
+    assert!(saved.is_cancelling());
+    assert_eq!(
+        saved
+            .pending_exchange()
+            .expect("CancelRequested remains pending")
+            .request_envelope()
+            .kind(),
+        uc_core::membership::SpaceAdmissionMessageKind::CancelRequested
+    );
+
+    let resumed = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::PeerOnline(
+            uc_core::DeviceId::new("upgraded-peer"),
+        ))
+        .await;
+
+    assert_eq!(resumed.peer_upgrade_required_count, 0);
+    assert_eq!(resumed.recovery_required_count, 0);
+    let saved = pair.saved_join();
+    assert!(!saved.peer_upgrade_required());
+    assert_eq!(
+        saved.rejection_reason(),
+        Some(uc_core::membership::SpaceAdmissionRejectionReason::Cancelled)
+    );
+}
+
+#[tokio::test]
+async fn active_join_remains_active_while_final_settlement_waits_for_a_peer_upgrade() {
+    let pair = SpaceAdmissionProtocolTestPair::upgrade_once_on_settlement().await;
+    pair.joiner()
+        .start_join(join_input("upgrade-settlement"))
+        .await
+        .expect("join request should be saved");
+    for _ in 0..3 {
+        pair.joiner()
+            .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+            .await;
+    }
+    pair.joiner()
+        .complete_pending_space_transition()
+        .await
+        .expect("saved activation should complete");
+
+    let blocked = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    assert_eq!(blocked.peer_upgrade_required_count, 1);
+    assert_eq!(blocked.recovery_required_count, 0);
+    let saved = pair.saved_join();
+    assert!(saved.is_active());
+    assert!(saved.peer_upgrade_required());
+    assert_eq!(
+        saved
+            .pending_exchange()
+            .expect("CompleteAck remains pending")
+            .request_envelope()
+            .kind(),
+        uc_core::membership::SpaceAdmissionMessageKind::CompleteAck
+    );
+
+    let resumed = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::PeerOnline(
+            uc_core::DeviceId::new("upgraded-peer"),
+        ))
+        .await;
+
+    assert_eq!(resumed.peer_upgrade_required_count, 0);
+    assert_eq!(resumed.recovery_required_count, 0);
+    let saved = pair.saved_join();
+    assert!(saved.is_active_settled());
+    assert!(!saved.peer_upgrade_required());
 }
 
 #[tokio::test]

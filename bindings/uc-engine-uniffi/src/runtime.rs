@@ -202,6 +202,7 @@ pub enum JoinSpaceStatus {
     Active {
         join_id: String,
         joined_space: JoinedSpace,
+        peer_upgrade_required: bool,
     },
     Pending {
         join_id: String,
@@ -209,6 +210,7 @@ pub enum JoinSpaceStatus {
         sponsor_device_id: Option<String>,
         sponsor_identity_fingerprint: Option<String>,
         cancel_requested: bool,
+        peer_upgrade_required: bool,
     },
     Rejected {
         join_id: String,
@@ -2068,6 +2070,7 @@ fn map_join_space_status(result: OperationResult) -> Result<JoinSpaceStatus, Bin
         uc_engine::JoinSpaceStatusSummary::Active {
             join_id,
             joined_space,
+            peer_upgrade_required,
         } => JoinSpaceStatus::Active {
             join_id,
             joined_space: JoinedSpace {
@@ -2079,6 +2082,7 @@ fn map_join_space_status(result: OperationResult) -> Result<JoinSpaceStatus, Bin
                 migrated_records: joined_space.migrated_records,
                 preserved_unreadable_records: joined_space.preserved_unreadable_records,
             },
+            peer_upgrade_required,
         },
         uc_engine::JoinSpaceStatusSummary::Pending {
             join_id,
@@ -2086,12 +2090,14 @@ fn map_join_space_status(result: OperationResult) -> Result<JoinSpaceStatus, Bin
             sponsor_device_id,
             sponsor_identity_fingerprint,
             cancel_requested,
+            peer_upgrade_required,
         } => JoinSpaceStatus::Pending {
             join_id,
             target_space_id,
             sponsor_device_id,
             sponsor_identity_fingerprint,
             cancel_requested,
+            peer_upgrade_required,
         },
         uc_engine::JoinSpaceStatusSummary::Rejected { join_id, reason } => {
             JoinSpaceStatus::Rejected {
@@ -2601,7 +2607,7 @@ mod tests {
     }
 
     #[test]
-    fn join_space_mapping_preserves_history_counts() {
+    fn join_space_mapping_preserves_history_counts_and_upgrade_prompt() {
         let joined = map_join_space_status(OperationResult::JoinSpace(
             uc_engine::JoinSpaceStatusSummary::Active {
                 join_id: "join-id".into(),
@@ -2614,13 +2620,18 @@ mod tests {
                     migrated_records: Some(4),
                     preserved_unreadable_records: Some(2),
                 },
+                peer_upgrade_required: true,
             },
         ))
         .expect("join-space result must map");
 
         assert!(matches!(
             joined,
-            JoinSpaceStatus::Active { joined_space, .. }
+            JoinSpaceStatus::Active {
+                joined_space,
+                peer_upgrade_required: true,
+                ..
+            }
                 if joined_space.migrated_records == Some(4)
                     && joined_space.preserved_unreadable_records == Some(2)
         ));

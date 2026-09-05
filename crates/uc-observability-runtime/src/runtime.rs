@@ -1,27 +1,19 @@
-use std::collections::HashMap;
 use std::fmt;
-use std::io::Write;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
-use opentelemetry::trace::TracerProvider as _;
-use opentelemetry::KeyValue;
-use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
-use opentelemetry_otlp::{Protocol, WithExportConfig, WithHttpConfig};
-use opentelemetry_sdk::logs::SdkLoggerProvider;
-use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
-use opentelemetry_sdk::Resource;
-use tracing_subscriber::filter::filter_fn;
+use tracing_subscriber::filter::dynamic_filter_fn;
 use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::registry::Registry;
-use tracing_subscriber::Layer;
-use uc_observability_contract::diagnostics::{TELEMETRY_SCHEMA_VERSION, TELEMETRY_TARGET};
 
-use crate::config::{ObservabilityConfig, OtlpHttpConfig};
-use crate::local_file::BoundedDailyMakeWriter;
-
-type RuntimeLayer = Box<dyn Layer<Registry> + Send + Sync>;
+use crate::config::ObservabilityConfig;
+use crate::filter::local_sink_enabled;
+use crate::local_file::LocalFileRuntime;
+use crate::status::{
+    FlushSummary, ObservabilityHealth, SetupStatus, ShutdownSummary, SignalResult,
+};
+use crate::subscriber::{local_file_layer, system_layer};
+use crate::telemetry::TelemetryRuntime;
 
 static INSTALL_GUARD: Mutex<()> = Mutex::new(());
 static INSTALLED: OnceLock<Arc<RuntimeState>> = OnceLock::new();
@@ -52,6 +44,24 @@ impl ProcessObservabilityRuntime {
         Ok(InstallOutcome::Installed(ProcessObservabilityHandle {
             state,
         }))
+    }
+
+    pub fn flush_local_logs(deadline: Duration) -> SignalResult {
+        let Some(state) = INSTALLED.get() else {
+            return SignalResult::Completed;
+        };
+        if state.shutdown.is_started() {
+            return SignalResult::AlreadyShutdown;
+        }
+        if state
+            .local_file
+            .as_ref()
+            .is_none_or(|local_file| local_file.flush(deadline))
+        {
+            SignalResult::Completed
+        } else {
+            SignalResult::Failed
+        }
     }
 }
 
@@ -99,428 +109,724 @@ impl fmt::Debug for ProcessObservabilityHandle {
 impl ProcessObservabilityHandle {
     pub fn health(&self) -> ObservabilityHealth {
         let mut health = self.state.health;
-        health.dropped_local_records = self.state.dropped_local_records.load(Ordering::Relaxed);
+        health.dropped_local_records = self
+            .state
+            .local_file
+            .as_ref()
+            .map_or(0, |local_file| local_file.dropped_records());
+        let remote = self.state.telemetry.health();
+        health.dropped_remote_spans = remote.dropped_spans;
+        health.dropped_remote_logs = remote.dropped_logs;
+        health.failed_remote_span_batches = remote.failed_span_batches;
+        health.failed_remote_log_batches = remote.failed_log_batches;
         health
     }
 
     pub fn force_flush(&self, deadline: Duration) -> FlushSummary {
-        if self.state.shutdown_started.load(Ordering::Acquire) {
+        if self.state.shutdown.is_started() {
             return FlushSummary::already_shutdown();
         }
-        let providers = self.state.providers.clone();
-        let file_writer = self.state.file_writer.clone();
-        run_with_deadline(deadline, move || FlushSummary {
-            traces: signal_result(providers.traces.force_flush()),
-            logs: flush_logs(&providers.logs, file_writer),
-        })
-        .unwrap_or_else(FlushSummary::timed_out)
+        if !self.state.lifecycle.try_reserve() {
+            return FlushSummary::timed_out();
+        }
+        let telemetry = self.state.telemetry.clone();
+        let local_file = self.state.local_file.clone();
+        match run_reserved_with_deadline(deadline, Arc::clone(&self.state.lifecycle), move || {
+            let signals = telemetry.force_flush();
+            FlushSummary {
+                traces: signals.traces,
+                logs: combine_local_result(
+                    signals.logs,
+                    local_file.is_none_or(|local_file| local_file.flush(deadline)),
+                ),
+            }
+        }) {
+            DeadlineOutcome::Completed(summary) => summary,
+            DeadlineOutcome::TimedOut => FlushSummary::timed_out(),
+            DeadlineOutcome::Failed => FlushSummary::failed(),
+        }
     }
 
     pub fn shutdown(&self, deadline: Duration) -> ShutdownSummary {
-        if self.state.shutdown_started.swap(true, Ordering::AcqRel) {
-            return ShutdownSummary::already_shutdown();
+        match self.state.shutdown.begin() {
+            ShutdownStart::Completed(summary) => return summary,
+            ShutdownStart::Waiting => {
+                return self
+                    .state
+                    .shutdown
+                    .wait(deadline)
+                    .unwrap_or_else(ShutdownSummary::timed_out);
+            }
+            ShutdownStart::Started => {}
         }
-        let providers = self.state.providers.clone();
-        let file_writer = self.state.file_writer.clone();
-        run_with_deadline(deadline, move || ShutdownSummary {
-            traces: signal_result(providers.traces.shutdown_with_timeout(deadline)),
-            logs: shutdown_logs(&providers.logs, file_writer, deadline),
-        })
-        .unwrap_or_else(ShutdownSummary::timed_out)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SetupStatus {
-    Disabled,
-    Ready,
-    Unavailable,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ObservabilityHealth {
-    pub remote: SetupStatus,
-    pub local_file: SetupStatus,
-    pub dropped_local_records: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SignalResult {
-    Completed,
-    Failed,
-    TimedOut,
-    AlreadyShutdown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FlushSummary {
-    pub traces: SignalResult,
-    pub logs: SignalResult,
-}
-
-impl FlushSummary {
-    fn timed_out() -> Self {
-        Self {
-            traces: SignalResult::TimedOut,
-            logs: SignalResult::TimedOut,
-        }
-    }
-
-    fn already_shutdown() -> Self {
-        Self {
-            traces: SignalResult::AlreadyShutdown,
-            logs: SignalResult::AlreadyShutdown,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ShutdownSummary {
-    pub traces: SignalResult,
-    pub logs: SignalResult,
-}
-
-impl ShutdownSummary {
-    fn timed_out() -> Self {
-        Self {
-            traces: SignalResult::TimedOut,
-            logs: SignalResult::TimedOut,
-        }
-    }
-
-    fn already_shutdown() -> Self {
-        Self {
-            traces: SignalResult::AlreadyShutdown,
-            logs: SignalResult::AlreadyShutdown,
-        }
+        self.state.health_accepting.store(true, Ordering::Release);
+        self.state.telemetry.seal();
+        let telemetry = self.state.telemetry.clone();
+        let local_file = self.state.local_file.clone();
+        let health_accepting = Arc::clone(&self.state.health_accepting);
+        spawn_shutdown(
+            Arc::clone(&self.state.shutdown),
+            Arc::clone(&self.state.lifecycle),
+            move || {
+                let _health_guard = HealthAcceptanceGuard(health_accepting);
+                let signals = telemetry.shutdown(deadline);
+                let local_completed = local_file
+                    .as_ref()
+                    .is_none_or(|local_file| local_file.shutdown(deadline));
+                let summary = ShutdownSummary {
+                    traces: signals.traces,
+                    logs: combine_local_result(signals.logs, local_completed),
+                };
+                let retryable = local_file
+                    .as_ref()
+                    .is_some_and(|local_file| local_file.shutdown_cleanup_incomplete());
+                let terminal_failures = TerminalShutdownFailures {
+                    traces: terminal_signal_failure(signals.traces),
+                    logs: if !local_completed && !retryable {
+                        Some(SignalResult::Failed)
+                    } else {
+                        terminal_signal_failure(signals.logs)
+                    },
+                };
+                ShutdownAttempt {
+                    summary,
+                    retryable,
+                    terminal_failures,
+                }
+            },
+        );
+        self.state
+            .shutdown
+            .wait(deadline)
+            .unwrap_or_else(ShutdownSummary::timed_out)
     }
 }
 
 struct RuntimeState {
     config: ObservabilityConfig,
-    providers: ProviderPair,
+    telemetry: TelemetryRuntime,
     health: ObservabilityHealth,
-    dropped_local_records: Arc<AtomicU64>,
-    file_writer: Option<tracing_appender::non_blocking::NonBlocking>,
-    _file_guard: Option<tracing_appender::non_blocking::WorkerGuard>,
-    shutdown_started: AtomicBool,
-}
-
-#[derive(Clone)]
-struct ProviderPair {
-    traces: SdkTracerProvider,
-    logs: SdkLoggerProvider,
+    local_file: Option<Arc<LocalFileRuntime>>,
+    shutdown: Arc<ShutdownCoordinator>,
+    lifecycle: Arc<LifecycleGate>,
+    health_accepting: Arc<AtomicBool>,
 }
 
 fn build_runtime(
     config: ObservabilityConfig,
 ) -> (Arc<RuntimeState>, impl tracing::Subscriber + Send + Sync) {
-    let resource = resource(&config);
-    let (providers, remote) = match config
-        .remote
-        .as_ref()
-        .and_then(|remote| remote_providers(resource.clone(), remote).ok())
-    {
-        Some(providers) => (providers, SetupStatus::Ready),
-        None if config.remote.is_some() => (local_providers(resource), SetupStatus::Unavailable),
-        None => (local_providers(resource), SetupStatus::Disabled),
+    let (telemetry, remote) = TelemetryRuntime::new(&config);
+    let telemetry_accepting = telemetry.accepting();
+    let health_accepting = Arc::new(AtomicBool::new(true));
+    let mut layers = telemetry.layers();
+    layers.push(system_layer());
+    let (local_file_status, local_file) = match config.local_logs.as_ref() {
+        Some(local) => match local_file_layer(
+            &local.directory,
+            Arc::clone(&telemetry_accepting),
+            Arc::clone(&health_accepting),
+        ) {
+            Ok((layer, local_file)) => {
+                layers.push(layer);
+                (SetupStatus::Ready, Some(local_file))
+            }
+            Err(()) => (SetupStatus::Unavailable, None),
+        },
+        None => (SetupStatus::Disabled, None),
     };
 
-    let mut layers = telemetry_layers(&providers);
-    layers.push(system_layer());
-    let dropped_local_records = Arc::new(AtomicU64::new(0));
-    let (local_file, file_writer, file_guard, dropped_local_records) =
-        match config.local_logs.as_ref() {
-            Some(local) => match local_file_layer(&local.directory) {
-                Ok((layer, writer, guard, dropped)) => {
-                    layers.push(layer);
-                    (SetupStatus::Ready, Some(writer), Some(guard), dropped)
-                }
-                Err(()) => (SetupStatus::Unavailable, None, None, dropped_local_records),
-            },
-            None => (SetupStatus::Disabled, None, None, dropped_local_records),
-        };
-
-    let subscriber = tracing_subscriber::registry().with(layers);
+    let global_telemetry_accepting = Arc::clone(&telemetry_accepting);
+    let global_health_accepting = Arc::clone(&health_accepting);
+    let subscriber = tracing_subscriber::registry()
+        .with(layers)
+        .with(dynamic_filter_fn(move |metadata, _| {
+            let accepting =
+                if metadata.target() == uc_observability_contract::diagnostics::HEALTH_TARGET {
+                    &global_health_accepting
+                } else {
+                    &global_telemetry_accepting
+                };
+            accepting.load(Ordering::Acquire) && local_sink_enabled(metadata)
+        }));
     let state = Arc::new(RuntimeState {
         config,
-        providers,
+        telemetry,
         health: ObservabilityHealth {
             remote,
-            local_file,
+            local_file: local_file_status,
             dropped_local_records: 0,
+            dropped_remote_spans: 0,
+            dropped_remote_logs: 0,
+            failed_remote_span_batches: 0,
+            failed_remote_log_batches: 0,
         },
-        dropped_local_records,
-        file_writer,
-        _file_guard: file_guard,
-        shutdown_started: AtomicBool::new(false),
+        local_file,
+        shutdown: Arc::new(ShutdownCoordinator::default()),
+        lifecycle: Arc::new(LifecycleGate::default()),
+        health_accepting,
     });
     (state, subscriber)
 }
 
-fn resource(config: &ObservabilityConfig) -> Resource {
-    Resource::builder_empty()
-        .with_service_name("uc-engine")
-        .with_attributes([
-            KeyValue::new("service.namespace", "uniclipboard"),
-            KeyValue::new("service.version", config.resource.service_version.clone()),
-            KeyValue::new("service.instance.id", uuid::Uuid::new_v4().to_string()),
-            KeyValue::new(
-                "deployment.environment.name",
-                config.resource.environment.as_str(),
-            ),
-            KeyValue::new("os.type", config.resource.os.as_str()),
-            KeyValue::new("host.arch", config.resource.arch.clone()),
-            KeyValue::new("uc.app.channel", config.resource.app_channel.clone()),
-            KeyValue::new(
-                "uc.telemetry.schema.version",
-                i64::from(TELEMETRY_SCHEMA_VERSION),
-            ),
-        ])
-        .build()
-}
+struct HealthAcceptanceGuard(Arc<AtomicBool>);
 
-fn local_providers(resource: Resource) -> ProviderPair {
-    ProviderPair {
-        traces: SdkTracerProvider::builder()
-            .with_resource(resource.clone())
-            .build(),
-        logs: SdkLoggerProvider::builder().with_resource(resource).build(),
+impl Drop for HealthAcceptanceGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
-fn remote_providers(resource: Resource, config: &OtlpHttpConfig) -> Result<ProviderPair, ()> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let headers = config
-        .headers()
-        .iter()
-        .map(|(name, value)| (name.clone(), value.expose().to_owned()))
-        .collect::<HashMap<_, _>>();
-    let client = reqwest::blocking::Client::builder()
-        .timeout(config.timeout())
-        .build()
-        .map_err(|_| ())?;
-    let span_exporter = opentelemetry_otlp::SpanExporter::builder()
-        .with_http()
-        .with_http_client(client.clone())
-        .with_endpoint(config.trace_endpoint())
-        .with_timeout(config.timeout())
-        .with_protocol(Protocol::HttpBinary)
-        .with_headers(headers.clone())
-        .build()
-        .map_err(|_| ())?;
-    let log_exporter = opentelemetry_otlp::LogExporter::builder()
-        .with_http()
-        .with_http_client(client)
-        .with_endpoint(config.log_endpoint())
-        .with_timeout(config.timeout())
-        .with_protocol(Protocol::HttpBinary)
-        .with_headers(headers)
-        .build()
-        .map_err(|_| ())?;
-    Ok(ProviderPair {
-        traces: SdkTracerProvider::builder()
-            .with_sampler(Sampler::ParentBased(Box::new(Sampler::AlwaysOn)))
-            .with_batch_exporter(span_exporter)
-            .with_resource(resource.clone())
-            .build(),
-        logs: SdkLoggerProvider::builder()
-            .with_batch_exporter(log_exporter)
-            .with_resource(resource)
-            .build(),
+fn combine_local_result(remote: SignalResult, local_completed: bool) -> SignalResult {
+    if !local_completed {
+        SignalResult::Failed
+    } else {
+        remote
+    }
+}
+
+#[derive(Default)]
+struct LifecycleGate {
+    active: Mutex<bool>,
+    idle: Condvar,
+}
+
+impl LifecycleGate {
+    fn try_reserve(&self) -> bool {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *active {
+            return false;
+        }
+        *active = true;
+        true
+    }
+
+    fn reserve_when_idle(&self) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *active {
+            active = self
+                .idle
+                .wait(active)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        *active = true;
+    }
+
+    fn release(&self) {
+        *self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+        self.idle.notify_all();
+    }
+}
+
+fn run_reserved_with_deadline<T: Send + 'static>(
+    deadline: Duration,
+    gate: Arc<LifecycleGate>,
+    operation: impl FnOnce() -> T + Send + 'static,
+) -> DeadlineOutcome<T> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let worker_gate = Arc::clone(&gate);
+    if std::thread::Builder::new()
+        .name("uc-observability-lifecycle".to_owned())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
+            worker_gate.release();
+            let _ = sender.send(result.map_err(|_| ()));
+        })
+        .is_err()
+    {
+        gate.release();
+        return DeadlineOutcome::Failed;
+    }
+    match receiver.recv_timeout(deadline) {
+        Ok(Ok(result)) => DeadlineOutcome::Completed(result),
+        Ok(Err(())) | Err(mpsc::RecvTimeoutError::Disconnected) => DeadlineOutcome::Failed,
+        Err(mpsc::RecvTimeoutError::Timeout) => DeadlineOutcome::TimedOut,
+    }
+}
+
+enum DeadlineOutcome<T> {
+    Completed(T),
+    TimedOut,
+    Failed,
+}
+
+#[derive(Clone, Copy)]
+enum ShutdownPhase {
+    Running,
+    InProgress {
+        terminal_failures: TerminalShutdownFailures,
+    },
+    Completed {
+        summary: ShutdownSummary,
+        retryable: bool,
+        terminal_failures: TerminalShutdownFailures,
+    },
+}
+
+struct ShutdownCoordinator {
+    phase: Mutex<ShutdownPhase>,
+    changed: Condvar,
+}
+
+impl Default for ShutdownCoordinator {
+    fn default() -> Self {
+        Self {
+            phase: Mutex::new(ShutdownPhase::Running),
+            changed: Condvar::new(),
+        }
+    }
+}
+
+enum ShutdownStart {
+    Started,
+    Waiting,
+    Completed(ShutdownSummary),
+}
+
+impl ShutdownCoordinator {
+    fn begin(&self) -> ShutdownStart {
+        let mut phase = self
+            .phase
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match *phase {
+            ShutdownPhase::Running => {
+                *phase = ShutdownPhase::InProgress {
+                    terminal_failures: TerminalShutdownFailures::default(),
+                };
+                ShutdownStart::Started
+            }
+            ShutdownPhase::InProgress { .. } => ShutdownStart::Waiting,
+            ShutdownPhase::Completed {
+                retryable: true,
+                terminal_failures,
+                ..
+            } => {
+                *phase = ShutdownPhase::InProgress { terminal_failures };
+                ShutdownStart::Started
+            }
+            ShutdownPhase::Completed { summary, .. }
+                if shutdown_completed_successfully(summary) =>
+            {
+                ShutdownStart::Completed(ShutdownSummary::already_shutdown())
+            }
+            ShutdownPhase::Completed { summary, .. } => ShutdownStart::Completed(summary),
+        }
+    }
+
+    fn is_started(&self) -> bool {
+        !matches!(
+            *self
+                .phase
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ShutdownPhase::Running
+        )
+    }
+
+    fn complete(&self, attempt: ShutdownAttempt) {
+        let mut phase = self
+            .phase
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous_failures = match *phase {
+            ShutdownPhase::InProgress { terminal_failures } => terminal_failures,
+            ShutdownPhase::Running | ShutdownPhase::Completed { .. } => {
+                TerminalShutdownFailures::default()
+            }
+        };
+        let terminal_failures = previous_failures.merge(attempt.terminal_failures);
+        *phase = ShutdownPhase::Completed {
+            summary: terminal_failures.apply(attempt.summary),
+            retryable: attempt.retryable,
+            terminal_failures,
+        };
+        self.changed.notify_all();
+    }
+
+    fn wait(&self, deadline: Duration) -> Option<ShutdownSummary> {
+        let started = Instant::now();
+        let mut phase = self
+            .phase
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if let ShutdownPhase::Completed { summary, .. } = *phase {
+                return Some(summary);
+            }
+            let remaining = deadline.checked_sub(started.elapsed())?;
+            let (next, timeout) = self
+                .changed
+                .wait_timeout(phase, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            phase = next;
+            if timeout.timed_out() && !matches!(*phase, ShutdownPhase::Completed { .. }) {
+                return None;
+            }
+        }
+    }
+}
+
+fn shutdown_completed_successfully(summary: ShutdownSummary) -> bool {
+    [summary.traces, summary.logs].into_iter().all(|result| {
+        matches!(
+            result,
+            SignalResult::Completed | SignalResult::AlreadyShutdown
+        )
     })
 }
 
-fn telemetry_layers(providers: &ProviderPair) -> Vec<RuntimeLayer> {
-    let tracer = providers.traces.tracer("uc-observability-runtime");
-    let trace_layer = tracing_opentelemetry::layer()
-        .with_tracer(tracer)
-        .with_context_activation(true)
-        .with_filter(filter_fn(|metadata| {
-            metadata.is_span() && metadata.target() == TELEMETRY_TARGET
-        }));
-    let log_layer =
-        OpenTelemetryTracingBridge::new(&providers.logs).with_filter(filter_fn(|metadata| {
-            metadata.is_event() && metadata.target() == TELEMETRY_TARGET
-        }));
-    vec![Box::new(trace_layer), Box::new(log_layer)]
+#[derive(Clone, Copy, Default)]
+struct TerminalShutdownFailures {
+    traces: Option<SignalResult>,
+    logs: Option<SignalResult>,
 }
 
-fn local_file_layer(
-    directory: &std::path::Path,
-) -> Result<
-    (
-        RuntimeLayer,
-        tracing_appender::non_blocking::NonBlocking,
-        tracing_appender::non_blocking::WorkerGuard,
-        Arc<AtomicU64>,
-    ),
-    (),
-> {
-    let (writer, dropped) = BoundedDailyMakeWriter::new(directory).map_err(|_| ())?;
-    let (writer, guard) = tracing_appender::non_blocking(writer);
-    let layer = tracing_subscriber::fmt::layer()
-        .json()
-        .with_ansi(false)
-        .with_writer(writer.clone())
-        .with_filter(filter_fn(local_sink_enabled));
-    Ok((Box::new(layer), writer, guard, dropped))
-}
-
-#[cfg(target_vendor = "apple")]
-fn system_layer() -> RuntimeLayer {
-    Box::new(
-        tracing_oslog::OsLogger::new("app.uniclipboard", "engine")
-            .with_filter(filter_fn(local_sink_enabled)),
-    )
-}
-
-#[cfg(target_os = "android")]
-fn system_layer() -> RuntimeLayer {
-    match tracing_android::layer("UcEngine") {
-        Ok(layer) => Box::new(layer.with_filter(filter_fn(local_sink_enabled))),
-        Err(_) => Box::new(tracing_subscriber::layer::Identity::new()),
-    }
-}
-
-#[cfg(not(any(target_vendor = "apple", target_os = "android")))]
-fn system_layer() -> RuntimeLayer {
-    Box::new(
-        tracing_subscriber::fmt::layer()
-            .with_ansi(false)
-            .with_filter(filter_fn(local_sink_enabled)),
-    )
-}
-
-fn local_sink_enabled(metadata: &tracing::Metadata<'_>) -> bool {
-    matches!(
-        *metadata.level(),
-        tracing::Level::ERROR | tracing::Level::WARN | tracing::Level::INFO
-    ) && matches!(
-        metadata.target(),
-        "uc.telemetry"
-            | "observability.health"
-            | "admission.performance"
-            | "membership.performance"
-            | "storage.performance"
-    )
-}
-
-fn signal_result<T>(result: Result<T, opentelemetry_sdk::error::OTelSdkError>) -> SignalResult {
-    match result {
-        Ok(_) => SignalResult::Completed,
-        Err(opentelemetry_sdk::error::OTelSdkError::AlreadyShutdown) => {
-            SignalResult::AlreadyShutdown
+impl TerminalShutdownFailures {
+    fn merge(self, current: Self) -> Self {
+        Self {
+            traces: self.traces.or(current.traces),
+            logs: self.logs.or(current.logs),
         }
-        Err(_) => SignalResult::Failed,
+    }
+
+    fn apply(self, mut summary: ShutdownSummary) -> ShutdownSummary {
+        if let Some(traces) = self.traces {
+            summary.traces = traces;
+        }
+        if let Some(logs) = self.logs {
+            summary.logs = logs;
+        }
+        summary
     }
 }
 
-fn flush_logs(
-    provider: &SdkLoggerProvider,
-    file_writer: Option<tracing_appender::non_blocking::NonBlocking>,
-) -> SignalResult {
-    let provider_result = signal_result(provider.force_flush());
-    let file_result = file_writer.map_or(Ok(()), |mut writer| writer.flush());
-    if file_result.is_err() && provider_result == SignalResult::Completed {
-        SignalResult::Failed
-    } else {
-        provider_result
+fn terminal_signal_failure(result: SignalResult) -> Option<SignalResult> {
+    match result {
+        SignalResult::Failed | SignalResult::TimedOut => Some(result),
+        SignalResult::Completed | SignalResult::AlreadyShutdown => None,
     }
 }
 
-fn shutdown_logs(
-    provider: &SdkLoggerProvider,
-    file_writer: Option<tracing_appender::non_blocking::NonBlocking>,
-    deadline: Duration,
-) -> SignalResult {
-    let file_result = file_writer.map_or(Ok(()), |mut writer| writer.flush());
-    let provider_result = signal_result(provider.shutdown_with_timeout(deadline));
-    if file_result.is_err() && provider_result == SignalResult::Completed {
-        SignalResult::Failed
-    } else {
-        provider_result
-    }
+struct ShutdownAttempt {
+    summary: ShutdownSummary,
+    retryable: bool,
+    terminal_failures: TerminalShutdownFailures,
 }
 
-fn run_with_deadline<T: Send + 'static>(
-    deadline: Duration,
-    operation: impl FnOnce() -> T + Send + 'static,
-) -> Option<T> {
-    let (sender, receiver) = mpsc::sync_channel(1);
-    let _ = std::thread::Builder::new()
-        .name("uc-observability-lifecycle".to_owned())
+fn spawn_shutdown(
+    shutdown: Arc<ShutdownCoordinator>,
+    gate: Arc<LifecycleGate>,
+    operation: impl FnOnce() -> ShutdownAttempt + Send + 'static,
+) {
+    let worker_gate = Arc::clone(&gate);
+    let worker_shutdown = Arc::clone(&shutdown);
+    if std::thread::Builder::new()
+        .name("uc-observability-shutdown".to_owned())
         .spawn(move || {
-            let _ = sender.send(operation());
+            worker_gate.reserve_when_idle();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))
+                .unwrap_or_else(|_| ShutdownAttempt {
+                    summary: ShutdownSummary::failed(),
+                    retryable: true,
+                    terminal_failures: TerminalShutdownFailures {
+                        traces: Some(SignalResult::Failed),
+                        logs: Some(SignalResult::Failed),
+                    },
+                });
+            worker_gate.release();
+            worker_shutdown.complete(result);
+        })
+        .is_err()
+    {
+        shutdown.complete(ShutdownAttempt {
+            summary: ShutdownSummary::failed(),
+            retryable: true,
+            terminal_failures: TerminalShutdownFailures::default(),
         });
-    receiver.recv_timeout(deadline).ok()
+    }
 }
 
 #[cfg(test)]
-pub(crate) struct CapturedSpan {
-    pub(crate) trace_id: String,
-    pub(crate) span_id: String,
-    pub(crate) event_count: usize,
-}
+mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Barrier;
 
-#[cfg(test)]
-pub(crate) struct CapturedLog {
-    pub(crate) trace_id: String,
-    pub(crate) span_id: String,
-}
+    use super::*;
 
-#[cfg(test)]
-pub(crate) struct CapturedTelemetry {
-    pub(crate) spans: Vec<CapturedSpan>,
-    pub(crate) logs: Vec<CapturedLog>,
-}
+    #[test]
+    fn timed_out_lifecycle_work_keeps_later_flushes_out_until_it_finishes() {
+        let gate = Arc::new(LifecycleGate::default());
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
 
-#[cfg(test)]
-pub(crate) fn capture_telemetry(operation: impl FnOnce()) -> CapturedTelemetry {
-    use opentelemetry_sdk::logs::InMemoryLogExporter;
-    use opentelemetry_sdk::trace::InMemorySpanExporter;
+        assert!(gate.try_reserve());
+        let worker_gate = Arc::clone(&gate);
+        let worker_entered = Arc::clone(&entered);
+        let worker_release = Arc::clone(&release);
+        let worker_active = Arc::clone(&active);
+        let worker_max = Arc::clone(&max_active);
+        let timed_out =
+            run_reserved_with_deadline(Duration::from_millis(1), worker_gate, move || {
+                let now = worker_active.fetch_add(1, Ordering::AcqRel) + 1;
+                worker_max.fetch_max(now, Ordering::AcqRel);
+                worker_entered.wait();
+                worker_release.wait();
+                worker_active.fetch_sub(1, Ordering::AcqRel);
+            });
+        assert!(matches!(timed_out, DeadlineOutcome::TimedOut));
+        entered.wait();
+        assert!(!gate.try_reserve());
+        release.wait();
 
-    let span_exporter = InMemorySpanExporter::default();
-    let log_exporter = InMemoryLogExporter::default();
-    let resource = Resource::builder_empty()
-        .with_service_name("uc-engine-test")
-        .build();
-    let providers = ProviderPair {
-        traces: SdkTracerProvider::builder()
-            .with_simple_exporter(span_exporter.clone())
-            .with_resource(resource.clone())
-            .build(),
-        logs: SdkLoggerProvider::builder()
-            .with_simple_exporter(log_exporter.clone())
-            .with_resource(resource)
-            .build(),
-    };
-    let layers = telemetry_layers(&providers);
-    let subscriber = tracing_subscriber::registry().with(layers);
-    tracing::subscriber::with_default(subscriber, operation);
-    let _ = providers.traces.force_flush();
-    let _ = providers.logs.force_flush();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !gate.try_reserve() && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(max_active.load(Ordering::Acquire), 1);
+        gate.release();
+    }
 
-    let spans = span_exporter
-        .get_finished_spans()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|span| CapturedSpan {
-            trace_id: span.span_context.trace_id().to_string(),
-            span_id: span.span_context.span_id().to_string(),
-            event_count: span.events.len(),
-        })
-        .collect();
-    let logs = log_exporter
-        .get_emitted_logs()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|log| {
-            log.record.trace_context().map(|context| CapturedLog {
-                trace_id: context.trace_id.to_string(),
-                span_id: context.span_id.to_string(),
+    #[test]
+    fn shutdown_waits_for_a_timed_out_flush_without_overlapping_it() {
+        let gate = Arc::new(LifecycleGate::default());
+        let flush_entered = Arc::new(Barrier::new(2));
+        let release_flush = Arc::new(Barrier::new(2));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let shutdown_completed = Arc::new(AtomicBool::new(false));
+
+        assert!(gate.try_reserve());
+        let flush_gate = Arc::clone(&gate);
+        let flush_active = Arc::clone(&active);
+        let flush_max = Arc::clone(&max_active);
+        let worker_entered = Arc::clone(&flush_entered);
+        let worker_release = Arc::clone(&release_flush);
+        assert!(matches!(
+            run_reserved_with_deadline(Duration::from_millis(1), flush_gate, move || {
+                let now = flush_active.fetch_add(1, Ordering::AcqRel) + 1;
+                flush_max.fetch_max(now, Ordering::AcqRel);
+                worker_entered.wait();
+                worker_release.wait();
+                flush_active.fetch_sub(1, Ordering::AcqRel);
+            },),
+            DeadlineOutcome::TimedOut
+        ));
+        flush_entered.wait();
+
+        let shutdown_active = Arc::clone(&active);
+        let shutdown_max = Arc::clone(&max_active);
+        let completed = Arc::clone(&shutdown_completed);
+        let shutdown = Arc::new(ShutdownCoordinator::default());
+        assert!(matches!(shutdown.begin(), ShutdownStart::Started));
+        spawn_shutdown(Arc::clone(&shutdown), Arc::clone(&gate), move || {
+            let now = shutdown_active.fetch_add(1, Ordering::AcqRel) + 1;
+            shutdown_max.fetch_max(now, Ordering::AcqRel);
+            shutdown_active.fetch_sub(1, Ordering::AcqRel);
+            completed.store(true, Ordering::Release);
+            ShutdownAttempt {
+                summary: ShutdownSummary {
+                    traces: SignalResult::Completed,
+                    logs: SignalResult::Completed,
+                },
+                retryable: false,
+                terminal_failures: TerminalShutdownFailures::default(),
+            }
+        });
+        assert!(shutdown.wait(Duration::from_millis(1)).is_none());
+        assert!(matches!(shutdown.begin(), ShutdownStart::Waiting));
+        assert!(!shutdown_completed.load(Ordering::Acquire));
+
+        release_flush.wait();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let summary = shutdown
+            .wait(deadline.saturating_duration_since(std::time::Instant::now()))
+            .expect("shutdown eventually completes");
+        assert!(shutdown_completed.load(Ordering::Acquire));
+        assert_eq!(max_active.load(Ordering::Acquire), 1);
+        assert_eq!(summary.traces, SignalResult::Completed);
+        assert!(matches!(
+            shutdown.begin(),
+            ShutdownStart::Completed(ShutdownSummary {
+                traces: SignalResult::AlreadyShutdown,
+                logs: SignalResult::AlreadyShutdown,
             })
-        })
-        .collect();
-    CapturedTelemetry { spans, logs }
+        ));
+    }
+
+    #[test]
+    fn panicked_lifecycle_work_is_failed_instead_of_reported_as_a_timeout() {
+        let gate = Arc::new(LifecycleGate::default());
+        assert!(gate.try_reserve());
+
+        let outcome = run_reserved_with_deadline(Duration::from_secs(1), gate, || {
+            panic!("test lifecycle panic")
+        });
+
+        assert!(matches!(outcome, DeadlineOutcome::Failed));
+    }
+
+    #[test]
+    fn completed_failed_or_timed_out_shutdown_remains_visible() {
+        for summary in [ShutdownSummary::failed(), ShutdownSummary::timed_out()] {
+            let shutdown = ShutdownCoordinator::default();
+            assert!(matches!(shutdown.begin(), ShutdownStart::Started));
+            shutdown.complete(ShutdownAttempt {
+                summary,
+                retryable: false,
+                terminal_failures: TerminalShutdownFailures {
+                    traces: terminal_signal_failure(summary.traces),
+                    logs: terminal_signal_failure(summary.logs),
+                },
+            });
+            assert!(matches!(
+                shutdown.begin(),
+                ShutdownStart::Completed(stored) if stored == summary
+            ));
+        }
+    }
+
+    #[test]
+    fn incomplete_local_cleanup_can_be_retried_without_inventing_a_terminal_failure() {
+        let shutdown = ShutdownCoordinator::default();
+        assert!(matches!(shutdown.begin(), ShutdownStart::Started));
+        shutdown.complete(ShutdownAttempt {
+            summary: ShutdownSummary::failed(),
+            retryable: true,
+            terminal_failures: TerminalShutdownFailures::default(),
+        });
+        assert!(matches!(shutdown.begin(), ShutdownStart::Started));
+        shutdown.complete(ShutdownAttempt {
+            summary: ShutdownSummary {
+                traces: SignalResult::Completed,
+                logs: SignalResult::Completed,
+            },
+            retryable: false,
+            terminal_failures: TerminalShutdownFailures::default(),
+        });
+        assert!(matches!(
+            shutdown.begin(),
+            ShutdownStart::Completed(ShutdownSummary {
+                traces: SignalResult::AlreadyShutdown,
+                logs: SignalResult::AlreadyShutdown,
+            })
+        ));
+    }
+
+    #[test]
+    fn remote_failure_remains_visible_while_incomplete_local_cleanup_retries() {
+        let shutdown = ShutdownCoordinator::default();
+        assert!(matches!(shutdown.begin(), ShutdownStart::Started));
+        shutdown.complete(ShutdownAttempt {
+            summary: ShutdownSummary {
+                traces: SignalResult::Failed,
+                logs: SignalResult::Failed,
+            },
+            retryable: true,
+            terminal_failures: TerminalShutdownFailures {
+                traces: Some(SignalResult::Failed),
+                logs: Some(SignalResult::TimedOut),
+            },
+        });
+        assert!(matches!(shutdown.begin(), ShutdownStart::Started));
+        shutdown.complete(ShutdownAttempt {
+            summary: ShutdownSummary {
+                traces: SignalResult::AlreadyShutdown,
+                logs: SignalResult::Completed,
+            },
+            retryable: false,
+            terminal_failures: TerminalShutdownFailures::default(),
+        });
+
+        let summary = shutdown
+            .wait(Duration::ZERO)
+            .expect("stored shutdown result");
+        assert_eq!(summary.traces, SignalResult::Failed);
+        assert_eq!(summary.logs, SignalResult::TimedOut);
+        assert!(matches!(
+            shutdown.begin(),
+            ShutdownStart::Completed(stored) if stored == summary
+        ));
+    }
+
+    #[test]
+    fn successful_shutdown_is_reported_as_already_shutdown_when_repeated() {
+        let shutdown = ShutdownCoordinator::default();
+        assert!(matches!(shutdown.begin(), ShutdownStart::Started));
+        shutdown.complete(ShutdownAttempt {
+            summary: ShutdownSummary {
+                traces: SignalResult::Completed,
+                logs: SignalResult::Completed,
+            },
+            retryable: false,
+            terminal_failures: TerminalShutdownFailures::default(),
+        });
+        assert!(matches!(
+            shutdown.begin(),
+            ShutdownStart::Completed(ShutdownSummary {
+                traces: SignalResult::AlreadyShutdown,
+                logs: SignalResult::AlreadyShutdown,
+            })
+        ));
+    }
+
+    #[test]
+    fn mixed_terminal_shutdown_result_remains_visible() {
+        let shutdown = ShutdownCoordinator::default();
+        let summary = ShutdownSummary {
+            traces: SignalResult::Completed,
+            logs: SignalResult::Failed,
+        };
+        assert!(matches!(shutdown.begin(), ShutdownStart::Started));
+        shutdown.complete(ShutdownAttempt {
+            summary,
+            retryable: false,
+            terminal_failures: TerminalShutdownFailures {
+                traces: terminal_signal_failure(summary.traces),
+                logs: terminal_signal_failure(summary.logs),
+            },
+        });
+        assert!(matches!(
+            shutdown.begin(),
+            ShutdownStart::Completed(stored) if stored == summary
+        ));
+    }
+
+    #[test]
+    fn panicked_shutdown_worker_reports_failure_and_allows_cleanup_retry() {
+        let shutdown = Arc::new(ShutdownCoordinator::default());
+        let gate = Arc::new(LifecycleGate::default());
+        assert!(matches!(shutdown.begin(), ShutdownStart::Started));
+        spawn_shutdown(Arc::clone(&shutdown), gate, || {
+            panic!("test shutdown panic")
+        });
+
+        let summary = shutdown
+            .wait(Duration::from_secs(1))
+            .expect("failed shutdown result");
+        assert_eq!(summary, ShutdownSummary::failed());
+        assert!(matches!(shutdown.begin(), ShutdownStart::Started));
+        shutdown.complete(ShutdownAttempt {
+            summary: ShutdownSummary {
+                traces: SignalResult::Completed,
+                logs: SignalResult::Completed,
+            },
+            retryable: false,
+            terminal_failures: TerminalShutdownFailures::default(),
+        });
+        assert_eq!(
+            shutdown.wait(Duration::ZERO),
+            Some(ShutdownSummary::failed())
+        );
+    }
 }

@@ -9,7 +9,7 @@
 - [核心信念](core-beliefs.md)：设计判断的共同前提。
 - [工程原则](engineering-principles.md)：深模块、单一负责人、依赖方向与删除检查。
 - [错误处理](error-handling.md)：稳定分类、source chain 与安全上下文。
-- [运行期观测](observability.md)：Engine 组装边界的 port decorator 范式。
+- [运行期观测](observability.md)：分层责任、进程运行时、跨设备传播、输出隐私和生命周期。
 - [文档记录系统](documentation-system.md)：文档类型、生命周期和写作规则。
 
 ## 架构与契约

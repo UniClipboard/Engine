@@ -391,6 +391,7 @@ pub enum JoinSpaceStatusSummary {
     Active {
         join_id: String,
         joined_space: JoinedSpaceSummary,
+        peer_upgrade_required: bool,
     },
     Pending {
         join_id: String,
@@ -398,6 +399,7 @@ pub enum JoinSpaceStatusSummary {
         sponsor_device_id: Option<String>,
         sponsor_identity_fingerprint: Option<String>,
         cancel_requested: bool,
+        peer_upgrade_required: bool,
     },
     Rejected {
         join_id: String,

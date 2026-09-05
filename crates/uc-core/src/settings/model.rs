@@ -89,14 +89,9 @@ pub struct GeneralSettings {
     /// Update channel preference. `None` means auto-detect from version string;
     /// `Some(channel)` means the user has overridden the channel.
     pub update_channel: Option<UpdateChannel>,
-    /// Whether anonymous diagnostic telemetry is enabled.
-    /// When `true` and a Sentry DSN is configured, the app forwards
-    /// errors / warnings / structured logs (never clipboard content).
-    pub telemetry_enabled: bool,
     /// Whether anonymous product usage analytics is enabled.
-    /// 与 `telemetry_enabled` 拆开（schema doc §6.4）：前者控制 Sentry
-    /// 错误上报，本字段控制产品 telemetry（漏斗 / 留存 / 同步可靠性事件）。
-    /// 二者由用户独立勾选——GDPR 友好实践。
+    /// 该字段只控制产品漏斗、留存和同步可靠性事件；运行诊断许可由宿主
+    /// 进程独立拥有，不属于 Engine settings。
     pub usage_analytics_enabled: bool,
     /// Enables a persistent local diagnostic logging profile on the next process start.
     ///

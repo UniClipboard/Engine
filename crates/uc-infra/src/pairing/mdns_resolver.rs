@@ -16,6 +16,7 @@
 //!   corrupted or missing TXT field is treated as "not a match" and we
 //!   keep listening for the next announcement until timeout.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -24,6 +25,7 @@ use thiserror::Error;
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
+use uc_observability_contract::diagnostics::{record_task_join_failure, DiagnosticTaskKind};
 
 use super::discovery_constants::{
     compute_code_hash, ticket_from_txt_attributes, PAIR_SERVICE_NAME, TXT_CODE_HASH,
@@ -157,20 +159,15 @@ impl MdnsPairingResolver {
                     return;
                 };
 
-                // Take the sender exactly once. Subsequent matches
-                // become no-ops. Wrapped in `spawn_supervised` so a panic
-                // surfaces as a WARN rather than vanishing (see
-                // `docs/design-docs/layers/infrastructure.md §13.3.1`).
+                // sender 只取一次，后续命中保持 no-op；本 owner 自行监督
+                // 一次性转发任务，panic 只记录固定失败类别。
                 let tx_for_cb = Arc::clone(&tx_for_cb);
-                uc_observability_contract::spawn_supervised(
-                    "pairing.mdns_forward_ticket",
-                    async move {
-                        let mut slot = tx_for_cb.lock().await;
-                        if let Some(sender) = slot.take() {
-                            let _ = sender.send(saw_ticket).await;
-                        }
-                    },
-                );
+                spawn_resolver_task(async move {
+                    let mut slot = tx_for_cb.lock().await;
+                    if let Some(sender) = slot.take() {
+                        let _ = sender.send(saw_ticket).await;
+                    }
+                });
             });
 
         // Hold the guard until we either match, timeout, or error.
@@ -194,6 +191,20 @@ impl MdnsPairingResolver {
             }
         }
     }
+}
+
+fn spawn_resolver_task<F>(future: F) -> tokio::task::JoinHandle<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let work = tokio::spawn(future);
+    tokio::spawn(async move {
+        match work.await {
+            Ok(()) => {}
+            Err(error) if error.is_cancelled() => {}
+            Err(_) => record_task_join_failure(DiagnosticTaskKind::PairingMdnsForward),
+        }
+    })
 }
 
 #[cfg(test)]

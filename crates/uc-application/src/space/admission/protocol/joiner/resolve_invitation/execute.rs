@@ -59,7 +59,14 @@ impl JoinerAdmissionService {
                         return;
                     }
                 };
-                match recovery.commit_recovery(token, transition).await {
+                match recovery
+                    .commit_recovery_with_optional_notification(
+                        token,
+                        transition,
+                        !resolution_succeeded,
+                    )
+                    .await
+                {
                     Ok(_) if resolution_succeeded => {
                         report.advanced_count += 1;
                         report.deferred_count += 1;
@@ -77,7 +84,7 @@ impl JoinerAdmissionService {
                         return;
                     }
                 };
-                match recovery.commit_recovery(token, transition).await {
+                match recovery.commit_recovery_and_notify(token, transition).await {
                     Ok(_) => report.rejected_count += 1,
                     Err(error) => recovery.record_state_error(report, error),
                 }

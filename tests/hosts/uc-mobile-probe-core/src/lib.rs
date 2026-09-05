@@ -371,14 +371,16 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
                 directories[2].clone(),
                 directories[1].join("logs"),
             );
-            let observability_config = ObservabilityConfig::new(ObservabilityResource::new(
+            let Ok(resource) = ObservabilityResource::new(
                 app_version.clone(),
                 DeploymentEnvironment::Test,
                 probe_operating_system(),
-                std::env::consts::ARCH,
-                "mobile-host-probe",
-            ))
-            .with_local_logs(LocalLogConfig::new(directories.logs()));
+                "test",
+            ) else {
+                return probe_error("observability_config_invalid");
+            };
+            let observability_config = ObservabilityConfig::new(resource)
+                .with_local_logs(LocalLogConfig::new(directories.logs()));
             let observability = match ProcessObservabilityRuntime::install(observability_config) {
                 Ok(outcome) => outcome.handle(),
                 Err(_) => return probe_error("observability_install_failed"),
@@ -652,6 +654,7 @@ async fn execute_operation(state: &ProbeState, operation: Operation) -> Value {
     }
 }
 
+#[allow(unreachable_patterns)]
 fn operation_response(result: OperationResult) -> Value {
     match result {
         OperationResult::SpaceCreated { space_id, .. } => {
@@ -1418,6 +1421,8 @@ fn operation_response(result: OperationResult) -> Value {
                 "outcome": "no_eligible_targets",
             }),
         },
+        // 全工作区检查会合并 uc-engine 的 dev-tools；移动宿主不消费开发结果。
+        _ => probe_error("unsupported_development_result"),
     }
 }
 
@@ -1462,6 +1467,7 @@ fn lifecycle_response(result: Result<(), EngineError>, kind: &str) -> Value {
     }
 }
 
+#[allow(unreachable_patterns)]
 fn record_event(summary: &Arc<Mutex<EventSummary>>, event: EngineEvent) {
     let mut summary = lock_unpoisoned(summary);
     match event {
@@ -1494,6 +1500,8 @@ fn record_event(summary: &Arc<Mutex<EventSummary>>, event: EngineEvent) {
         EngineEvent::OperationFinished { .. } => summary.completed_operations += 1,
         EngineEvent::LifecycleFailed { .. } => summary.lifecycle_failures += 1,
         EngineEvent::Fatal { .. } => summary.fatal_errors += 1,
+        // 全工作区检查会合并 uc-engine 的 dev-tools；移动宿主忽略开发事件。
+        _ => {}
     }
 }
 
@@ -1710,6 +1718,7 @@ mod tests {
                     migrated_records: None,
                     preserved_unreadable_records: None,
                 },
+                peer_upgrade_required: true,
             },
         ));
 
@@ -1729,7 +1738,8 @@ mod tests {
                         "self_identity_fingerprint": "self-fingerprint",
                         "migrated_records": null,
                         "preserved_unreadable_records": null
-                    }
+                    },
+                    "peer_upgrade_required": true
                 }
             })
         );

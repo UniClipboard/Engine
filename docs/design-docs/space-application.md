@@ -345,6 +345,10 @@ flowchart TD
 - **职责/作用**：在 profile 级串行边界内驱动 Core aggregate，原子保存加密状态，并通过认证 transport 继续可恢复交换。
 - **关系**：facade 只调用协议动作；Infra 只提供密码材料、密文仓库、认证传输和最终激活能力。
 - **重点关注**：用户动作才可创建新尝试；恢复只能推进已保存状态；membership ledger 不参与准入协议状态推进。
+- **版本阻塞**：首次认证交换确认旧布局时稳定拒绝并提示升级；Prepared、Applied、Cancelling 或本机已激活但未结清时只在原待交换
+  状态上保存升级阻塞，不丢请求、业务材料或正式结果。产品只看到 Pending/Active 的固定升级提示，不看到内部阶段；兼容后继续
+  原请求，成功推进自然清除提示。旧 V1 待交换记录按严格无尾随字节规则兼容读取；提示出现、清除或进入明确拒绝后只发一次通用
+  刷新，普通内部推进和重复旧端错误不发。已确认对端上线会立即重放对应加入，不等待 30 秒周期轮。
 
 ### 成员与历史 Cases
 
@@ -397,7 +401,8 @@ flowchart TD
 - **入口**：`MembershipMaintenanceTrigger -> MembershipMaintenanceReport`。
 - **职责/作用**：隐藏完整恢复顺序：admission -> effects -> pending group update delivery -> restricted delivery -> conditional history sync -> cleanup。
 - **关系**：唯一由 `SpaceMembershipMaintenanceRuntime` 调度；各步骤只通过窄 maintenance port 暴露。
-- **重点关注**：Deferred/StableFailure 按依赖关系继续；Corrupt 立即停止会扩大权限的后续步骤；PeerOnline 也要驱动持久密钥欠账。
+- **重点关注**：Deferred/StableFailure 按依赖关系继续；Corrupt 立即停止会扩大权限的后续步骤；PeerOnline 先恢复对应准入，再驱动
+  持久密钥欠账、关系恢复和历史核对，多个上线事件不得互相覆盖。
 
 #### `DeliverPendingGroupUpdatesUseCase`
 

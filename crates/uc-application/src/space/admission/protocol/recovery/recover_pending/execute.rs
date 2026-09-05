@@ -13,6 +13,7 @@ use uc_core::membership::{
     AdmissionPendingRecovery, AdmissionRecoveryCategory, JoinerAdmission,
     SpaceAdmissionMessageKind, SpaceAdmissionRejectionReason,
 };
+use uc_observability_contract::diagnostics::scope_space_admission_observation;
 
 #[derive(Clone, Copy)]
 enum RecoveryChannel {
@@ -25,9 +26,9 @@ impl SpaceAdmissionProtocol {
         &self,
         trigger: AdmissionRecoveryTrigger,
     ) -> AdmissionRecoveryReport {
-        self.execute_exclusively(async {
+        self.execute_exclusively(Box::pin(async {
             self.recovery.recover_pending(&self.joiner, trigger).await
-        })
+        }))
         .await
     }
 }
@@ -58,36 +59,41 @@ impl AdmissionRecoveryService {
             let Some(recovery) = aggregate.pending_recovery() else {
                 continue;
             };
-            let (channel_kind, established) = match recovery {
-                AdmissionPendingRecovery::Initial {
-                    encrypted_password_equivalent,
-                    pending_exchange,
-                } => (
-                    RecoveryChannel::Initial,
-                    self.transport
-                        .establish_initial(
-                            aggregate.admission_id(),
-                            pending_exchange.route(),
+            let observation_material = *aggregate.admission_id().as_bytes();
+            let (channel_kind, established) =
+                scope_space_admission_observation(&observation_material, async {
+                    match recovery {
+                        AdmissionPendingRecovery::Initial {
                             encrypted_password_equivalent,
-                        )
-                        .await,
-                ),
-                AdmissionPendingRecovery::Continuation {
-                    peer_binding,
-                    continuation_credential,
-                    pending_exchange,
-                } => (
-                    RecoveryChannel::Continuation,
-                    self.transport
-                        .resume(
-                            aggregate.admission_id(),
-                            pending_exchange.route(),
+                            pending_exchange,
+                        } => (
+                            RecoveryChannel::Initial,
+                            self.transport
+                                .establish_initial(
+                                    aggregate.admission_id(),
+                                    pending_exchange.route(),
+                                    encrypted_password_equivalent,
+                                )
+                                .await,
+                        ),
+                        AdmissionPendingRecovery::Continuation {
                             peer_binding,
                             continuation_credential,
-                        )
-                        .await,
-                ),
-            };
+                            pending_exchange,
+                        } => (
+                            RecoveryChannel::Continuation,
+                            self.transport
+                                .resume(
+                                    aggregate.admission_id(),
+                                    pending_exchange.route(),
+                                    peer_binding,
+                                    continuation_credential,
+                                )
+                                .await,
+                        ),
+                    }
+                })
+                .await;
 
             let mut exchange = match established {
                 Ok(exchange) => exchange,
@@ -146,9 +152,19 @@ impl AdmissionRecoveryService {
                 report.recovery_required_count += 1;
                 continue;
             };
-            match exchange.exchange(pending_exchange.request_envelope()).await {
+            let observation_material = *aggregate.admission_id().as_bytes();
+            let exchanged = scope_space_admission_observation(
+                &observation_material,
+                exchange.exchange(pending_exchange.request_envelope()),
+            )
+            .await;
+            match exchanged {
                 Ok(reply) => {
                     self.commit_joiner_reply(joiner, &mut report, aggregate, commit_token, reply)
+                        .await;
+                }
+                Err(SpaceAdmissionTransportError::PeerUpgradeRequired) => {
+                    self.save_peer_upgrade_result(&mut report, aggregate, commit_token)
                         .await;
                 }
                 Err(_) => report.deferred_count += 1,
@@ -186,13 +202,8 @@ impl AdmissionRecoveryService {
                 .await;
             }
             (RecoveryChannel::Initial, SpaceAdmissionTransportError::PeerUpgradeRequired) => {
-                self.save_initial_rejection(
-                    report,
-                    aggregate,
-                    token,
-                    SpaceAdmissionRejectionReason::PeerUpgradeRequired,
-                )
-                .await;
+                self.save_peer_upgrade_result(report, aggregate, token)
+                    .await;
             }
             (_, SpaceAdmissionTransportError::ProtocolRejected) => {
                 self.save_recovery_required(
@@ -233,8 +244,43 @@ impl AdmissionRecoveryService {
                 return;
             }
         };
-        match self.commit_recovery(token, transition).await {
+        match self.commit_recovery_and_notify(token, transition).await {
             Ok(_) => report.rejected_count += 1,
+            Err(error) => self.record_state_error(report, error),
+        }
+    }
+
+    async fn save_peer_upgrade_result(
+        &self,
+        report: &mut AdmissionRecoveryReport,
+        aggregate: JoinerAdmission,
+        token: AdmissionRecoveryCommitToken,
+    ) {
+        if aggregate.peer_upgrade_required() {
+            report.peer_upgrade_required_count += 1;
+            return;
+        }
+        let is_initial_request = aggregate.pending_exchange().is_some_and(|exchange| {
+            exchange.request_envelope().kind() == SpaceAdmissionMessageKind::JoinRequest
+        });
+        let transition = match if is_initial_request {
+            aggregate.reject_peer_upgrade()
+        } else {
+            aggregate.mark_peer_upgrade_required()
+        } {
+            Ok(transition) => transition,
+            Err(_) => {
+                report.recovery_required_count += 1;
+                return;
+            }
+        };
+        match self.commit_recovery_and_notify(token, transition).await {
+            Ok(_) => {
+                report.peer_upgrade_required_count += 1;
+                if is_initial_request {
+                    report.rejected_count += 1;
+                }
+            }
             Err(error) => self.record_state_error(report, error),
         }
     }
@@ -277,7 +323,7 @@ impl AdmissionRecoveryService {
                         return;
                     }
                 };
-                match self.commit_recovery(token, transition).await {
+                match self.commit_recovery_and_notify(token, transition).await {
                     Ok(_) => report.rejected_count += 1,
                     Err(error) => self.record_state_error(report, error),
                 }
@@ -288,18 +334,45 @@ impl AdmissionRecoveryService {
                     .await;
             }
             SpaceAdmissionMessageKind::Commit => {
+                let notify_upgrade_cleared = aggregate.peer_upgrade_required();
                 joiner
-                    .handle_commit(self, report, aggregate, token, reply, canonical_digest)
+                    .handle_commit(
+                        self,
+                        report,
+                        aggregate,
+                        token,
+                        reply,
+                        canonical_digest,
+                        notify_upgrade_cleared,
+                    )
                     .await;
             }
             SpaceAdmissionMessageKind::Complete => {
+                let notify_upgrade_cleared = aggregate.peer_upgrade_required();
                 joiner
-                    .handle_complete(self, report, aggregate, token, reply, canonical_digest)
+                    .handle_complete(
+                        self,
+                        report,
+                        aggregate,
+                        token,
+                        reply,
+                        canonical_digest,
+                        notify_upgrade_cleared,
+                    )
                     .await;
             }
             SpaceAdmissionMessageKind::Settled => {
+                let notify_upgrade_cleared = aggregate.peer_upgrade_required();
                 joiner
-                    .handle_settled(self, report, aggregate, token, reply, canonical_digest)
+                    .handle_settled(
+                        self,
+                        report,
+                        aggregate,
+                        token,
+                        reply,
+                        canonical_digest,
+                        notify_upgrade_cleared,
+                    )
                     .await;
             }
             _ => {
@@ -333,7 +406,7 @@ impl RecoverSpaceAdmissionsPort for SpaceAdmissionProtocol {
         let report = self.recover_pending(trigger).await;
         if report.recovery_required_count > 0 {
             MembershipMaintenanceStepOutcome::Corrupt
-        } else if report.rejected_count > 0 {
+        } else if report.peer_upgrade_required_count > 0 || report.rejected_count > 0 {
             MembershipMaintenanceStepOutcome::StableFailure
         } else if report.deferred_count > 0 {
             MembershipMaintenanceStepOutcome::Deferred

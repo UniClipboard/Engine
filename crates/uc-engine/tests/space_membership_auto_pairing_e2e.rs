@@ -1,9 +1,13 @@
 #![cfg(feature = "dev-tools")]
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
+use prost::Message;
 use tempfile::TempDir;
 use uc_engine::{
     ChooseDeviceGroupInput, CreateSpaceInput, Engine, EngineConfig, HistoryEntryInput,
@@ -2087,13 +2091,156 @@ async fn topology_script_builds_a_two_node_space_through_public_operations() {
         ])
         .await;
     topology.shutdown().await;
+    uc_engine::flush_test_tracing();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore = "显式重启链路验收：独占进程级 OTLP receiver，使用 --ignored 精确运行"]
+async fn in_flight_admission_restart_uses_new_traces_and_one_flow() {
+    let telemetry = MockServer::start().await;
+    for endpoint in ["/v1/traces", "/v1/logs"] {
+        Mock::given(method("POST"))
+            .and(path(endpoint))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&telemetry)
+            .await;
+    }
+    assert!(uc_engine::init_test_tracing_with_otlp(
+        &format!("{}/v1/traces", telemetry.uri()),
+        &format!("{}/v1/logs", telemetry.uri()),
+    ));
+
+    let rendezvous = mount_rendezvous().await;
+    let sponsor_harness = DeviceHarness::new(rendezvous.uri());
+    let joiner_harness = DeviceHarness::new(rendezvous.uri());
+    let sponsor = sponsor_harness.start().await;
+    let joiner = joiner_harness.start().await;
+    let space_id = create_space(&sponsor, "Sponsor").await.0;
+    let invitation = issue_invitation(&sponsor).await;
+    let OperationResult::JoinSpace(status) = joiner
+        .execute(Operation::JoinSpace(JoinSpaceInput {
+            invitation_code: invitation,
+            device_name: Some("Restarted Joiner".to_owned()),
+            passphrase: SecretString::new(PASSPHRASE),
+            preserve_unreadable_history: false,
+        }))
+        .await
+        .expect("start restartable admission")
+    else {
+        panic!("unexpected join result");
+    };
+    assert!(matches!(&status, JoinSpaceStatusSummary::Pending { .. }));
+
+    let evidence_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let (flow_id, before_restart_traces) = loop {
+        uc_engine::flush_test_tracing();
+        let requests = telemetry
+            .received_requests()
+            .await
+            .expect("pre-restart OTLP requests");
+        let flows = complete_admission_flow_traces(&requests);
+        if flows.len() == 1 {
+            let (flow_id, traces) = flows.into_iter().next().expect("one admission flow");
+            if !traces.is_empty() {
+                break (
+                    flow_id,
+                    traces
+                        .into_iter()
+                        .map(|trace| trace.trace_id)
+                        .collect::<BTreeSet<_>>(),
+                );
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < evidence_deadline,
+            "admission emitted no pre-restart trace"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    let OperationResult::DeviceGroupChoices(before_restart) = joiner
+        .execute(Operation::QueryDeviceGroupChoices)
+        .await
+        .expect("query in-flight admission")
+    else {
+        panic!("unexpected device trust result");
+    };
+    assert!(matches!(
+        before_restart.device_trust.current_join,
+        Some(JoinSpaceStatusSummary::Pending { .. })
+    ));
+
+    joiner
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("stop in-flight joiner");
+    let restarted_at_ns = unix_time_ns(SystemTime::now());
+    let restarted_joiner = joiner_harness.start().await;
+    wait_for_completed_join(&restarted_joiner, "Restarted Joiner", status, &space_id).await;
+    wait_for_active_member_count(&sponsor, 2).await;
+    wait_for_active_member_count(&restarted_joiner, 2).await;
+    sponsor
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("stop sponsor");
+    restarted_joiner
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("stop restarted joiner");
+    uc_engine::flush_test_tracing();
+
+    let requests = telemetry
+        .received_requests()
+        .await
+        .expect("post-restart OTLP requests");
+    let flows = complete_admission_flow_traces(&requests);
+    assert_eq!(flows.len(), 1);
+    let after_restart_traces = flows.get(&flow_id).expect("same flow after restart");
+    assert!(
+        after_restart_traces
+            .iter()
+            .any(|trace| trace.started_at_ns >= restarted_at_ns
+                && !before_restart_traces.contains(&trace.trace_id)),
+        "restart produced no new complete online trace"
+    );
 }
 
 // 新设备只经过稳定 JoinSpace 入口，并最终形成可查询的活动 Space。
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 #[ignore = "显式性能门禁：需要空闲的本机真实网络栈，使用 --ignored 运行"]
 async fn two_device_hot_path_pairing_completes_within_one_second() {
-    uc_engine::init_test_tracing();
+    let benchmark_mode = std::env::var("UC_PAIRING_OBSERVABILITY_BENCHMARK").ok();
+    let telemetry = if matches!(
+        benchmark_mode.as_deref(),
+        Some("none" | "disabled" | "unavailable")
+    ) {
+        None
+    } else {
+        let telemetry = MockServer::start().await;
+        for endpoint in ["/v1/traces", "/v1/logs"] {
+            Mock::given(method("POST"))
+                .and(path(endpoint))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&telemetry)
+                .await;
+        }
+        Some(telemetry)
+    };
+    match benchmark_mode.as_deref() {
+        Some("none") => {}
+        Some("disabled") => assert!(uc_engine::init_test_tracing_without_remote()),
+        Some("unavailable") => assert!(uc_engine::init_test_tracing_with_otlp(
+            "http://127.0.0.1:1/v1/traces",
+            "http://127.0.0.1:1/v1/logs",
+        )),
+        Some("healthy") | None => {
+            let telemetry = telemetry.as_ref().expect("healthy OTLP receiver");
+            assert!(uc_engine::init_test_tracing_with_otlp(
+                &format!("{}/v1/traces", telemetry.uri()),
+                &format!("{}/v1/logs", telemetry.uri()),
+            ));
+        }
+        Some(other) => panic!("unknown observability benchmark mode: {other}"),
+    }
     let rendezvous = mount_rendezvous().await;
     let sponsor_harness = DeviceHarness::new(rendezvous.uri());
     let joiner_harness = DeviceHarness::new(rendezvous.uri());
@@ -2102,24 +2249,13 @@ async fn two_device_hot_path_pairing_completes_within_one_second() {
     let space_id = create_space(&sponsor, "Sponsor").await.0;
     let invitation = issue_invitation(&sponsor).await;
 
+    let started_at = SystemTime::now();
     let started = Instant::now();
     join_with_invitation(&joiner, "Joiner", &space_id, invitation).await;
     wait_for_active_member_count(&sponsor, 2).await;
     wait_for_active_member_count(&joiner, 2).await;
     let elapsed = started.elapsed();
 
-    tracing::info!(
-        target: "admission.performance",
-        phase = "public_pairing_active",
-        elapsed_ms = elapsed.as_millis() as u64,
-        budget_ms = PAIRING_HOT_PATH_BUDGET.as_millis() as u64,
-        "two-device hot-path pairing acceptance completed"
-    );
-
-    assert!(
-        elapsed < PAIRING_HOT_PATH_BUDGET,
-        "two-device hot-path pairing took {elapsed:?}, budget is {PAIRING_HOT_PATH_BUDGET:?}"
-    );
     sponsor
         .shutdown(SHUTDOWN_TIMEOUT)
         .await
@@ -2128,6 +2264,377 @@ async fn two_device_hot_path_pairing_completes_within_one_second() {
         .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("shut down joiner");
+    uc_engine::flush_test_tracing();
+    if let Some(mode) = benchmark_mode {
+        eprintln!(
+            "UC_PAIRING_OBSERVABILITY_RESULT mode={mode} elapsed_us={}",
+            elapsed.as_micros()
+        );
+        assert!(elapsed < Duration::from_secs(30));
+        return;
+    }
+    let telemetry = telemetry.expect("performance gate OTLP receiver");
+    let evidence_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let trace_evidence = loop {
+        uc_engine::flush_test_tracing();
+        let requests = telemetry
+            .received_requests()
+            .await
+            .expect("OTLP request capture");
+        let evidence = pairing_trace_evidence(&requests, started_at, elapsed);
+        if evidence.client_count >= 4
+            && evidence.paired_server_count >= 4
+            && evidence.paired_admission_endpoint_count >= evidence.client_count
+            && evidence.invalid_completion_log_count == 0
+        {
+            break evidence;
+        }
+        assert!(
+            tokio::time::Instant::now() < evidence_deadline,
+            "OTLP receiver did not collect four complete admission exchanges"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    assert!(trace_evidence.client_count >= 4);
+    assert!(trace_evidence.paired_server_count >= 4);
+    assert_eq!(
+        trace_evidence.paired_admission_endpoint_count,
+        trace_evidence.client_count
+    );
+    assert_eq!(trace_evidence.invalid_pair_count, 0);
+    assert_eq!(trace_evidence.invalid_completion_log_count, 0);
+    assert_eq!(trace_evidence.flow_ids.len(), 1);
+    assert!(trace_evidence.admission_trace_ids.len() >= 4);
+    assert!(
+        trace_evidence.local_elapsed < PAIRING_HOT_PATH_BUDGET,
+        "two-device local pairing work took {:?}, network-related time {:?}, end-to-end {:?}, local budget {:?}",
+        trace_evidence.local_elapsed,
+        trace_evidence.network_elapsed,
+        elapsed,
+        PAIRING_HOT_PATH_BUDGET,
+    );
+}
+
+struct PairingTraceEvidence {
+    local_elapsed: Duration,
+    network_elapsed: Duration,
+    client_count: usize,
+    paired_server_count: usize,
+    paired_admission_endpoint_count: usize,
+    invalid_pair_count: usize,
+    invalid_completion_log_count: usize,
+    flow_ids: BTreeSet<String>,
+    admission_trace_ids: BTreeSet<Vec<u8>>,
+}
+
+fn pairing_trace_evidence(
+    requests: &[Request],
+    started_at: SystemTime,
+    elapsed: Duration,
+) -> PairingTraceEvidence {
+    let started_ns = u64::try_from(
+        started_at
+            .duration_since(UNIX_EPOCH)
+            .expect("wall clock after epoch")
+            .as_nanos(),
+    )
+    .unwrap_or(u64::MAX);
+    let finished_ns =
+        started_ns.saturating_add(u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX));
+    let mut spans = Vec::new();
+    for request in requests
+        .iter()
+        .filter(|request| request.url.path() == "/v1/traces")
+    {
+        let batch = ExportTraceServiceRequest::decode(request.body.as_slice())
+            .expect("decode pairing trace batch");
+        spans.extend(
+            batch
+                .resource_spans
+                .into_iter()
+                .flat_map(|resource| resource.scope_spans)
+                .flat_map(|scope| scope.spans),
+        );
+    }
+    let mut completion_logs = HashMap::<(Vec<u8>, Vec<u8>), usize>::new();
+    let mut log_flow_violation_count = 0;
+    for request in requests
+        .iter()
+        .filter(|request| request.url.path() == "/v1/logs")
+    {
+        let batch = ExportLogsServiceRequest::decode(request.body.as_slice())
+            .expect("decode pairing log batch");
+        for log in batch
+            .resource_logs
+            .into_iter()
+            .flat_map(|resource| resource.scope_logs)
+            .flat_map(|scope| scope.log_records)
+        {
+            if otlp_string_attribute(&log.attributes, "event.name")
+                != Some("uc.operation.completed")
+                || otlp_string_attribute(&log.attributes, "uc.domain") != Some("space_admission")
+            {
+                continue;
+            }
+            if otlp_string_attribute(&log.attributes, "uc.flow.id").is_some() {
+                log_flow_violation_count += 1;
+            }
+            *completion_logs
+                .entry((log.trace_id, log.span_id))
+                .or_default() += 1;
+        }
+    }
+
+    let relevant = spans
+        .iter()
+        .filter(|span| {
+            otlp_string_attribute(&span.attributes, "uc.domain") == Some("space_admission")
+                && otlp_string_attribute(&span.attributes, "uc.operation")
+                    == Some("network_transport")
+        })
+        .collect::<Vec<_>>();
+    let client_kind = opentelemetry_proto::tonic::trace::v1::span::SpanKind::Client as i32;
+    let server_kind = opentelemetry_proto::tonic::trace::v1::span::SpanKind::Server as i32;
+    let internal_kind = opentelemetry_proto::tonic::trace::v1::span::SpanKind::Internal as i32;
+    let clients = relevant
+        .iter()
+        .copied()
+        .filter(|span| span.kind == client_kind)
+        .collect::<Vec<_>>();
+    let client_ids = clients
+        .iter()
+        .map(|span| ((span.trace_id.clone(), span.span_id.clone()), *span))
+        .collect::<HashMap<_, _>>();
+    let paired_servers = relevant
+        .iter()
+        .filter_map(|span| {
+            (span.kind == server_kind)
+                .then(|| {
+                    client_ids
+                        .get(&(span.trace_id.clone(), span.parent_span_id.clone()))
+                        .map(|client| (*client, *span))
+                })
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    let server_ids = paired_servers
+        .iter()
+        .map(|(_, server)| ((server.trace_id.clone(), server.span_id.clone()), *server))
+        .collect::<HashMap<_, _>>();
+    let paired_admission_endpoints = spans
+        .iter()
+        .filter(|span| {
+            span.name == "space_admission"
+                && span.kind == internal_kind
+                && otlp_string_attribute(&span.attributes, "uc.role") == Some("sponsor")
+                && otlp_string_attribute(&span.attributes, "uc.flow.id").is_none()
+                && server_ids.contains_key(&(span.trace_id.clone(), span.parent_span_id.clone()))
+        })
+        .collect::<Vec<_>>();
+    let paired_admission_endpoint_count = paired_admission_endpoints.len();
+    let invalid_completion_log_count = clients
+        .iter()
+        .copied()
+        .chain(paired_servers.iter().map(|(_, server)| *server))
+        .chain(paired_admission_endpoints.iter().copied())
+        .filter(|span| {
+            completion_logs
+                .get(&(span.trace_id.clone(), span.span_id.clone()))
+                .copied()
+                != Some(1)
+        })
+        .count()
+        + log_flow_violation_count;
+    let flow_ids = relevant
+        .iter()
+        .filter_map(|span| otlp_string_attribute(&span.attributes, "uc.flow.id"))
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    let admission_trace_ids = clients
+        .iter()
+        .map(|span| span.trace_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut invalid_pair_count = clients
+        .iter()
+        .filter(|client| {
+            !client.parent_span_id.is_empty()
+                || otlp_string_attribute(&client.attributes, "uc.flow.id").is_none()
+                || !otlp_span_succeeded(client)
+        })
+        .count()
+        + paired_servers
+            .iter()
+            .filter(|(_, server)| {
+                otlp_string_attribute(&server.attributes, "uc.flow.id").is_some()
+                    || !otlp_span_succeeded(server)
+            })
+            .count()
+        + spans
+            .iter()
+            .filter(|span| {
+                span.name == "space_admission"
+                    && span.kind == internal_kind
+                    && otlp_string_attribute(&span.attributes, "uc.role") == Some("sponsor")
+                    && server_ids
+                        .contains_key(&(span.trace_id.clone(), span.parent_span_id.clone()))
+                    && !otlp_span_succeeded(span)
+            })
+            .count();
+    let mut network_intervals = paired_servers
+        .iter()
+        .flat_map(|(client, server)| {
+            if client.start_time_unix_nano > server.start_time_unix_nano
+                || server.end_time_unix_nano > client.end_time_unix_nano
+            {
+                invalid_pair_count += 1;
+                return Vec::new();
+            }
+            [
+                (client.start_time_unix_nano, server.start_time_unix_nano),
+                (server.end_time_unix_nano, client.end_time_unix_nano),
+            ]
+            .into_iter()
+            .filter_map(|(start, end)| {
+                let start = start.max(started_ns);
+                let end = end.min(finished_ns);
+                (start < end).then_some((start, end))
+            })
+            .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    network_intervals.sort_unstable();
+    let mut network_ns = 0_u64;
+    let mut merged: Option<(u64, u64)> = None;
+    for (start, end) in network_intervals {
+        match merged {
+            Some((current_start, current_end)) if start <= current_end => {
+                merged = Some((current_start, current_end.max(end)));
+            }
+            Some((current_start, current_end)) => {
+                network_ns = network_ns.saturating_add(current_end - current_start);
+                merged = Some((start, end));
+            }
+            None => merged = Some((start, end)),
+        }
+    }
+    if let Some((start, end)) = merged {
+        network_ns = network_ns.saturating_add(end - start);
+    }
+    let network_elapsed = Duration::from_nanos(network_ns);
+    PairingTraceEvidence {
+        local_elapsed: elapsed.saturating_sub(network_elapsed),
+        network_elapsed,
+        client_count: clients.len(),
+        paired_server_count: paired_servers.len(),
+        paired_admission_endpoint_count,
+        invalid_pair_count,
+        invalid_completion_log_count,
+        flow_ids,
+        admission_trace_ids,
+    }
+}
+
+struct CompleteAdmissionTrace {
+    trace_id: Vec<u8>,
+    started_at_ns: u64,
+}
+
+fn complete_admission_flow_traces(
+    requests: &[Request],
+) -> HashMap<String, Vec<CompleteAdmissionTrace>> {
+    let mut spans = Vec::new();
+    for request in requests
+        .iter()
+        .filter(|request| request.url.path() == "/v1/traces")
+    {
+        let batch = ExportTraceServiceRequest::decode(request.body.as_slice())
+            .expect("decode admission trace batch");
+        spans.extend(
+            batch
+                .resource_spans
+                .into_iter()
+                .flat_map(|resource| resource.scope_spans)
+                .flat_map(|scope| scope.spans),
+        );
+    }
+    let client_kind = opentelemetry_proto::tonic::trace::v1::span::SpanKind::Client as i32;
+    let server_kind = opentelemetry_proto::tonic::trace::v1::span::SpanKind::Server as i32;
+    let internal_kind = opentelemetry_proto::tonic::trace::v1::span::SpanKind::Internal as i32;
+    let mut flows = HashMap::<String, Vec<CompleteAdmissionTrace>>::new();
+    for client in spans.iter().filter(|span| {
+        span.kind == client_kind
+            && span.parent_span_id.is_empty()
+            && otlp_span_succeeded(span)
+            && otlp_string_attribute(&span.attributes, "uc.domain") == Some("space_admission")
+            && otlp_string_attribute(&span.attributes, "uc.operation") == Some("network_transport")
+            && otlp_string_attribute(&span.attributes, "uc.role") == Some("joiner")
+    }) {
+        let Some(flow_id) = otlp_string_attribute(&client.attributes, "uc.flow.id") else {
+            continue;
+        };
+        let Some(server) = spans.iter().find(|span| {
+            span.trace_id == client.trace_id
+                && span.parent_span_id == client.span_id
+                && span.kind == server_kind
+                && otlp_string_attribute(&span.attributes, "uc.domain") == Some("space_admission")
+                && otlp_string_attribute(&span.attributes, "uc.operation")
+                    == Some("network_transport")
+                && otlp_string_attribute(&span.attributes, "uc.role") == Some("sponsor")
+                && otlp_string_attribute(&span.attributes, "uc.flow.id").is_none()
+                && otlp_span_succeeded(span)
+        }) else {
+            continue;
+        };
+        let endpoint_exists = spans.iter().any(|span| {
+            span.trace_id == server.trace_id
+                && span.parent_span_id == server.span_id
+                && span.kind == internal_kind
+                && span.name == "space_admission"
+                && otlp_string_attribute(&span.attributes, "uc.role") == Some("sponsor")
+                && otlp_string_attribute(&span.attributes, "uc.flow.id").is_none()
+                && otlp_span_succeeded(span)
+        });
+        if endpoint_exists {
+            flows
+                .entry(flow_id.to_owned())
+                .or_default()
+                .push(CompleteAdmissionTrace {
+                    trace_id: client.trace_id.clone(),
+                    started_at_ns: client.start_time_unix_nano,
+                });
+        }
+    }
+    flows
+}
+
+fn unix_time_ns(time: SystemTime) -> u64 {
+    u64::try_from(
+        time.duration_since(UNIX_EPOCH)
+            .expect("wall clock after epoch")
+            .as_nanos(),
+    )
+    .unwrap_or(u64::MAX)
+}
+
+fn otlp_span_succeeded(span: &opentelemetry_proto::tonic::trace::v1::Span) -> bool {
+    span.status.as_ref().is_some_and(|status| {
+        status.code == opentelemetry_proto::tonic::trace::v1::status::StatusCode::Ok as i32
+    })
+}
+
+fn otlp_string_attribute<'a>(
+    attributes: &'a [opentelemetry_proto::tonic::common::v1::KeyValue],
+    key: &str,
+) -> Option<&'a str> {
+    attributes
+        .iter()
+        .find(|attribute| attribute.key == key)
+        .and_then(|attribute| attribute.value.as_ref())
+        .and_then(|value| value.value.as_ref())
+        .and_then(|value| match value {
+            OtlpValue::StringValue(value) => Some(value.as_str()),
+            _ => None,
+        })
 }
 
 async fn wait_for_active_member_count(engine: &Engine, expected: u32) {
@@ -2167,6 +2674,64 @@ async fn fresh_device_join_completes_through_stable_operations() {
             .await
             .expect("shut down join routing engine");
     }
+}
+
+// 新成员加入后，已经在 Space 中的成员也必须收到同一更新并能联系新成员。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn existing_member_receives_the_new_member_update() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let sponsor_harness = DeviceHarness::new(rendezvous.uri());
+    let existing_harness = DeviceHarness::new(rendezvous.uri());
+    let newcomer_harness = DeviceHarness::new(rendezvous.uri());
+    let sponsor = sponsor_harness.start().await;
+    let existing = existing_harness.start().await;
+    let newcomer = newcomer_harness.start().await;
+    let space_id = create_space(&sponsor, "Sponsor").await.0;
+
+    join_through(&sponsor, &existing, "Existing Member", &space_id).await;
+    wait_for_active_member_count(&sponsor, 2).await;
+    wait_for_active_member_count(&existing, 2).await;
+    let newcomer_id = join_through(&sponsor, &newcomer, "New Member", &space_id)
+        .await
+        .self_device_id;
+
+    for engine in [&sponsor, &existing, &newcomer] {
+        wait_for_active_member_count(engine, 3).await;
+    }
+    wait_for_peer_refresh(&existing, "existing member").await;
+    wait_for_peer_refresh(&newcomer, "new member").await;
+    let text = "existing member sees newcomer";
+    let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+    loop {
+        let sent = existing
+            .execute(Operation::SendText(SendTextInput {
+                text: text.to_owned(),
+                target_devices: vec![newcomer_id.clone()],
+            }))
+            .await
+            .expect("existing member sends to newcomer");
+        let OperationResult::EntrySent(report) = sent else {
+            panic!("unexpected send result");
+        };
+        if report.total_accepted == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "existing member did not establish delivery to the newcomer"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    wait_for_received_text(&newcomer, text).await;
+
+    for engine in [&sponsor, &existing, &newcomer] {
+        engine
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .await
+            .expect("shut down three-member engine");
+    }
+    uc_engine::flush_test_tracing();
 }
 
 // 已完成设置的设备通过同一 JoinSpace 入口切换到另一个 Space。

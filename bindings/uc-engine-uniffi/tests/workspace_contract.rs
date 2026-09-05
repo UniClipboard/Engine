@@ -52,10 +52,6 @@ fn uniffi_binding_is_a_workspace_member_with_a_public_engine_boundary() {
             "thiserror",
             "tokio",
             "tracing",
-            "tracing-android",
-            "tracing-appender",
-            "tracing-oslog",
-            "tracing-subscriber",
             "uc-engine",
             "uniffi",
             "uuid",
@@ -166,6 +162,7 @@ fn uniffi_binding_uses_the_shared_process_observability_runtime() {
         "pub struct BindingObservabilityConfig",
         "pub struct BindingCollectorConfig",
         "pub fn install_process_observability",
+        "pub fn query_process_observability_health",
         "pub fn flush_process_observability",
         "pub fn shutdown_process_observability",
     ] {

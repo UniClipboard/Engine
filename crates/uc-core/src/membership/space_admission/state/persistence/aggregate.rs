@@ -118,8 +118,7 @@ impl SpaceAdmissionAggregate {
 
     /// Reconstructs a validated aggregate from a decrypted persisted payload.
     pub fn decode_persisted(bytes: &[u8]) -> Result<Self, SpaceAdmissionPersistenceError> {
-        let persisted: PersistedSpaceAdmissionRecordV1 = postcard::from_bytes(bytes)
-            .map_err(|_| SpaceAdmissionPersistenceError::InvalidEncoding)?;
+        let persisted = decode_record_with_legacy_pending_exchange(bytes)?;
         if persisted.format_version != SPACE_ADMISSION_RECORD_FORMAT_V1 {
             return Err(SpaceAdmissionPersistenceError::UnsupportedVersion);
         }
@@ -239,4 +238,58 @@ impl SpaceAdmissionAggregate {
             state,
         })
     }
+}
+
+fn decode_record_with_legacy_pending_exchange(
+    bytes: &[u8],
+) -> Result<PersistedSpaceAdmissionRecordV1, SpaceAdmissionPersistenceError> {
+    if let Ok(persisted) = decode_exact_record(bytes) {
+        return Ok(persisted);
+    }
+
+    let (format_version, _) = postcard::take_from_bytes::<u16>(bytes)
+        .map_err(|_| SpaceAdmissionPersistenceError::InvalidEncoding)?;
+    if format_version != SPACE_ADMISSION_RECORD_FORMAT_V1 {
+        return Err(SpaceAdmissionPersistenceError::UnsupportedVersion);
+    }
+
+    // 未发布的旧 V1 布局在 pending_exchange.retry_state 后直接结束；补一个
+    // Option::None 正好还原新增的尾部 block_reason 字段。
+    let mut compatible = Vec::with_capacity(bytes.len().saturating_add(1));
+    compatible.extend_from_slice(bytes);
+    compatible.push(0);
+    let persisted = decode_exact_record(&compatible)?;
+    let is_legacy_pending = match &persisted.state {
+        PersistedSpaceAdmissionStateV1::JoinerInitiated(state) => {
+            state.pending_exchange.block_reason.is_none()
+        }
+        PersistedSpaceAdmissionStateV1::JoinerPrepared(state) => {
+            state.pending_exchange.block_reason.is_none()
+        }
+        PersistedSpaceAdmissionStateV1::JoinerApplied(state) => {
+            state.pending_exchange.block_reason.is_none()
+        }
+        PersistedSpaceAdmissionStateV1::JoinerCancelling(state) => {
+            state.pending_exchange.block_reason.is_none()
+        }
+        PersistedSpaceAdmissionStateV1::ActivePendingSettlement(state) => {
+            state.pending_exchange.block_reason.is_none()
+        }
+        _ => false,
+    };
+    if !is_legacy_pending {
+        return Err(SpaceAdmissionPersistenceError::InvalidEncoding);
+    }
+    Ok(persisted)
+}
+
+fn decode_exact_record(
+    bytes: &[u8],
+) -> Result<PersistedSpaceAdmissionRecordV1, SpaceAdmissionPersistenceError> {
+    let (persisted, remaining) = postcard::take_from_bytes(bytes)
+        .map_err(|_| SpaceAdmissionPersistenceError::InvalidEncoding)?;
+    if !remaining.is_empty() {
+        return Err(SpaceAdmissionPersistenceError::InvalidEncoding);
+    }
+    Ok(persisted)
 }

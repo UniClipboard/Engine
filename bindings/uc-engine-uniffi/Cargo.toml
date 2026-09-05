@@ -22,7 +22,6 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["net", "rt", "sync", "time"] }
 tracing = "0.1"
-tracing-appender = "0.2"
 uc-engine = { path = "../../crates/uc-engine" }
 uniffi = "=0.31.1"
 uuid = "1"
@@ -31,16 +30,11 @@ zeroize = "1.8"
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
 ndk-context = "0.1"
-tracing-android = "0.2"
-tracing-subscriber = { version = "0.3", features = ["registry"] }
-
-[target.'cfg(target_vendor = "apple")'.dependencies]
-tracing-oslog = "0.3"
-tracing-subscriber = { version = "0.3", features = ["registry"] }
 
 [dev-dependencies]
 cargo_metadata = "0.19.2"
 tempfile = "3"
+uc-engine = { path = "../../crates/uc-engine", features = ["dev-tools"] }
 
 [lints]
 workspace = true

@@ -53,8 +53,6 @@ uuid = { version = "1", features = ["v4", "fast-rng", "serde"] }
 # `ids/device_id.rs`)。
 arrayvec = { version = "0.7", features = ["serde"] }
 
-# Optional: domain layer only records events (facts)
-tracing = { version = "0.1", optional = true }
 zeroize = "1.8.2"
 
 [dev-dependencies]
@@ -62,8 +60,7 @@ tokio = { version = "1", features = ["full"] }
 mockall = "0.14.0"
 
 [features]
-default = ["tracing"]
-logging = ["tracing"]
+default = []
 # Enables the `task_registry` module (adds tokio rt+time + tokio-util).
 # Consumers that need TaskRegistry opt in; keeps the default dep footprint slim.
 task-registry = ["dep:tokio-util", "tokio/rt", "tokio/time", "tokio/macros"]

@@ -70,7 +70,6 @@ impl Default for GeneralSettings {
             device_name: None,
             language: None,
             update_channel: None,
-            telemetry_enabled: true,
             usage_analytics_enabled: true,
             debug_mode: false,
         }
@@ -590,24 +589,6 @@ mod tests {
         );
     }
 
-    /// `general` 段缺 `telemetry_enabled` 字段,必须回退默认 true。
-    #[test]
-    fn general_missing_telemetry_enabled_falls_back_to_default() {
-        let json = r#"{
-            "general": {
-                "auto_start": false,
-                "silent_start": false,
-                "auto_check_update": true,
-                "theme": "system",
-                "theme_color": null,
-                "language": null,
-                "device_name": null
-            }
-        }"#;
-        let s: Settings = serde_json::from_str(json).expect("missing telemetry must parse");
-        assert!(s.general.telemetry_enabled);
-    }
-
     /// `general` 段缺多个字段时仍能解析,缺失字段全部回退。
     #[test]
     fn general_partial_object_fills_missing_fields() {
@@ -619,7 +600,7 @@ mod tests {
         assert_eq!(s.general.startup_mode, StartupMode::Normal);
         assert!(s.general.auto_check_update);
         assert_eq!(s.general.theme, Theme::System);
-        assert!(s.general.telemetry_enabled);
+        assert!(s.general.usage_analytics_enabled);
     }
 
     /// `sync` 段缺开关与 `content_types` 时均回退默认。

@@ -81,6 +81,8 @@ pub enum DeliveryHostEvent {
 pub enum MembershipHostEvent {
     /// The authoritative membership ledger committed a new revision.
     LedgerCommitted { revision: u64 },
+    /// 当前加入结果已经变化，宿主必须重新读取完整快照。
+    AdmissionChanged,
 }
 
 /// Unified host event envelope.

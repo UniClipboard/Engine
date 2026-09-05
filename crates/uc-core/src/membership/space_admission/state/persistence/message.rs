@@ -242,6 +242,7 @@ impl TryFrom<&PendingAdmissionExchange> for PersistedAnyPendingExchangeV1 {
             expected_reply_kind: encode_message_kind(exchange.exact_expected_reply_kind()),
             retry_attempt_count: exchange.retry_state().attempt_count(),
             retry_next_attempt_at_ms: exchange.retry_state().next_attempt_at_ms(),
+            block_reason: encode_exchange_block_reason(exchange.block_reason()),
         })
     }
 }
@@ -255,7 +256,7 @@ impl PersistedAnyPendingExchangeV1 {
         if request.header().admission_id() != admission_id {
             return Err(SpaceAdmissionPersistenceError::InvalidState);
         }
-        PendingAdmissionExchange::new(
+        let exchange = PendingAdmissionExchange::new(
             SpaceAdmissionRoute::from_bytes(self.route)
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             request,
@@ -263,7 +264,8 @@ impl PersistedAnyPendingExchangeV1 {
             AdmissionRetryState::new(self.retry_attempt_count, self.retry_next_attempt_at_ms)
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
         )
-        .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)
+        .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?;
+        restore_exchange_block_reason(exchange, self.block_reason)
     }
 }
 
@@ -402,6 +404,7 @@ impl TryFrom<&PendingAdmissionExchange> for PersistedPreparedPendingExchangeV1 {
             expected_reply_kind: encode_message_kind(exchange.exact_expected_reply_kind()),
             retry_attempt_count: exchange.retry_state().attempt_count(),
             retry_next_attempt_at_ms: exchange.retry_state().next_attempt_at_ms(),
+            block_reason: encode_exchange_block_reason(exchange.block_reason()),
         })
     }
 }
@@ -431,6 +434,7 @@ impl PersistedPreparedPendingExchangeV1 {
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
         )
         .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?;
+        let exchange = restore_exchange_block_reason(exchange, self.block_reason)?;
         if exchange.exact_expected_reply_kind() != SpaceAdmissionMessageKind::Commit
             || exchange.exact_reply_for(candidate_evidence).is_none()
         {
@@ -474,6 +478,7 @@ impl TryFrom<&PendingAdmissionExchange> for PersistedPendingExchangeV1 {
             expected_reply_kind: encode_message_kind(exchange.exact_expected_reply_kind()),
             retry_attempt_count: exchange.retry_state().attempt_count(),
             retry_next_attempt_at_ms: exchange.retry_state().next_attempt_at_ms(),
+            block_reason: encode_exchange_block_reason(exchange.block_reason()),
         })
     }
 }
@@ -487,7 +492,7 @@ impl PersistedPendingExchangeV1 {
         if request.header().admission_id() != admission_id {
             return Err(SpaceAdmissionPersistenceError::InvalidState);
         }
-        PendingAdmissionExchange::new(
+        let exchange = PendingAdmissionExchange::new(
             SpaceAdmissionRoute::from_bytes(self.route)
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             request,
@@ -495,8 +500,27 @@ impl PersistedPendingExchangeV1 {
             AdmissionRetryState::new(self.retry_attempt_count, self.retry_next_attempt_at_ms)
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
         )
-        .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)
+        .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?;
+        restore_exchange_block_reason(exchange, self.block_reason)
     }
+}
+
+fn encode_exchange_block_reason(reason: Option<AdmissionExchangeBlockReason>) -> Option<u8> {
+    reason.map(|reason| match reason {
+        AdmissionExchangeBlockReason::PeerUpgradeRequired => 1,
+    })
+}
+
+fn restore_exchange_block_reason(
+    mut exchange: PendingAdmissionExchange,
+    value: Option<u8>,
+) -> Result<PendingAdmissionExchange, SpaceAdmissionPersistenceError> {
+    match value {
+        None => {}
+        Some(1) => exchange.mark_peer_upgrade_required(),
+        Some(_) => return Err(SpaceAdmissionPersistenceError::InvalidState),
+    }
+    Ok(exchange)
 }
 
 impl TryFrom<&SpaceAdmissionEnvelopeV1> for PersistedJoinRequestEnvelopeV1 {

@@ -24,6 +24,8 @@ pub struct AdmissionRecoveryReport {
     pub deferred_count: usize,
     /// 已经得到稳定拒绝结果的数量
     pub rejected_count: usize,
+    /// 对端版本无法继续当前交换，等待明确升级处理的数量
+    pub peer_upgrade_required_count: usize,
     /// 状态损坏或违反规则，必须进入恢复处理的数量
     pub recovery_required_count: usize,
 }

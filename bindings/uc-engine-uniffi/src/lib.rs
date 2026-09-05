@@ -208,17 +208,7 @@ pub struct BindingObservabilityConfig {
 
 impl std::fmt::Debug for BindingObservabilityConfig {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("BindingObservabilityConfig")
-            .field("service_version", &self.service_version)
-            .field("environment", &self.environment)
-            .field("app_channel", &self.app_channel)
-            .field(
-                "remote_diagnostics_enabled",
-                &self.remote_diagnostics_enabled,
-            )
-            .field("collector", &self.collector.as_ref().map(|_| "REDACTED"))
-            .finish()
+        formatter.write_str("BindingObservabilityConfig(REDACTED)")
     }
 }
 
@@ -235,6 +225,17 @@ pub struct BindingObservabilitySetup {
     pub remote: BindingObservabilitySetupStatus,
     pub local_file: BindingObservabilitySetupStatus,
     pub dropped_local_records: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BindingObservabilityHealth {
+    pub remote: BindingObservabilitySetupStatus,
+    pub local_file: BindingObservabilitySetupStatus,
+    pub dropped_local_records: u64,
+    pub dropped_remote_spans: u64,
+    pub dropped_remote_logs: u64,
+    pub failed_remote_span_batches: u64,
+    pub failed_remote_log_batches: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -555,6 +556,11 @@ pub fn flush_process_observability(
     deadline_ms: u64,
 ) -> Result<BindingObservabilityFlushSummary, BindingError> {
     observability::force_flush(std::time::Duration::from_millis(deadline_ms))
+}
+
+#[uniffi::export]
+pub fn query_process_observability_health() -> Result<BindingObservabilityHealth, BindingError> {
+    observability::health()
 }
 
 #[uniffi::export]

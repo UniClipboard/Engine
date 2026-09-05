@@ -51,6 +51,16 @@ fn ios_probe_supports_device_and_simulator_archives() {
 }
 
 #[test]
+fn ios_project_paths_do_not_depend_on_the_generated_target_directory() {
+    let root = workspace_root();
+    let project = read(root.join("tests/hosts/ios/project.rb"));
+
+    assert!(project.contains("workspace_root = File.expand_path(\"../../..\", __dir__)"));
+    assert!(project.contains("new_group(\"EngineProbe\", source_directory, :absolute)"));
+    assert!(!project.contains("$(SRCROOT)/../../"));
+}
+
+#[test]
 fn ios_simulator_commands_publish_pollable_redacted_evidence() {
     let root = workspace_root();
     let model = read(root.join("tests/hosts/ios/EngineProbe/ProbeModel.swift"));
@@ -69,6 +79,7 @@ fn ios_simulator_commands_publish_pollable_redacted_evidence() {
     assert!(command.contains("probe-result.json"));
     assert!(command.contains("uuidgen"));
     assert!(command.contains("request_id"));
+    assert!(model.contains("\"traces\", \"logs\""));
     assert!(!model.contains("invitation_code\", \"device_ids"));
 }
 

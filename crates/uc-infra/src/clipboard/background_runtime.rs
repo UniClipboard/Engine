@@ -135,8 +135,8 @@ impl ClipboardBackgroundPort for ClipboardBackgroundRuntime {
             self.worker_retry_max_attempts,
             self.worker_retry_backoff,
         );
-        task_registry
-            .spawn("blob_worker", |cancel| async move {
+        let _ = task_registry
+            .spawn(|cancel| async move {
                 tokio::select! {
                     _ = cancel.cancelled() => info!("background clipboard blob worker stopped"),
                     _ = worker.run() => info!("background clipboard blob worker completed"),
@@ -150,8 +150,8 @@ impl ClipboardBackgroundPort for ClipboardBackgroundRuntime {
             Arc::clone(&self.clock),
             self.spool_ttl_days,
         );
-        task_registry
-            .spawn("spool_janitor", |cancel| async move {
+        let _ = task_registry
+            .spawn(|cancel| async move {
                 let mut interval = tokio::time::interval(SPOOL_JANITOR_INTERVAL);
                 loop {
                     tokio::select! {

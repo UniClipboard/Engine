@@ -91,6 +91,7 @@ Rust API       UniFFI 绑定          N-API 绑定
 | `crates/uc-infra/` | SQLite 仓储、MasterKey AEAD、安全状态、blob、搜索索引、文件缓存和 Iroh P2P |
 | `crates/uc-content-hash/` | 跨平台一致的内容身份摘要算法，不依赖其他业务模块 |
 | `crates/uc-observability-contract/` | 宿主与核心共享的脱敏观测约定 |
+| `crates/uc-observability-runtime/` | 宿主进程唯一的系统、JSONL 与远程诊断输出及生命周期 owner |
 | `bindings/uc-engine-uniffi/` | iOS 和 Android 绑定及 XCFramework、AAR 打包 |
 | `bindings/uc-ohos-napi/` | HarmonyOS N-API、ArkTS 声明和 HAR 打包 |
 | `compatibility/` | 用户显式选择的 LAN HTTP 兼容线，独立版本和发布 |
@@ -244,7 +245,7 @@ Core 保存完整 admission aggregate 和状态转换规则。Application 内部
 - `SqliteSpaceAdmissionCredentials` 保存绑定当前 Space 存储作用域的 OPAQUE setup 与 registration：V2 精确绑定 keyslot/database/security generation；V3 精确绑定 keyslot 与完整 `space_control_generation`，不依赖 profile data generation。一次性 profile upgrade 只调用 credential owner 的完整转换操作，在 control target 内验证并重新封装旧 registration 后才允许记录 target digest；普通 V3 运行路径不读取 V2 scope。
 - 口令、私密 MLS 状态、continuation credential、文件路径和协议载荷不得进入日志或明文字段。
 
-生产网络只使用 `/uniclipboard/space-admission/1`。完整邀请携带 Sponsor admission route 和随机邀请身份；短码只用于一次性解析同一完整邀请。Iroh handler 完成认证后，每条业务消息只调用一次 Application endpoint。
+生产网络只使用 `/uniclipboard/space-admission/1`。完整邀请携带 Sponsor admission route 和随机邀请身份；短码只用于一次性解析同一完整邀请。Iroh handler 完成认证后，每条业务消息只调用一次 Application endpoint。OPAQUE 或 continuation 身份认证完成后，认证消息的互斥 frame kind 才用于判断新旧布局；旧布局明确返回需要升级，身份认证失败和普通协议错误使用不同结果与关闭码，不能冒充版本不兼容。首次请求不兼容可稳定拒绝；Prepared、Applied、Cancelling 和已激活待结清状态只在原待交换上保存升级阻塞，不能回滚正式提交或本机激活，也不能丢失精确重放请求。旧 V1 待交换记录只按五种合法状态兼容缺失的尾部空标记，当前/旧记录有尾随内容及其他终态截断仍失败关闭。Pending/Active 产品结果公开固定升级提示；提示出现、清除或明确拒绝落盘后只发送通用刷新，普通内部推进和重复旧端错误不泄露通知次数。对端上线立即重放对应请求并清除提示。
 
 启动顺序固定为：
 
@@ -548,25 +549,17 @@ Application 可以把依赖失败转换为稳定类别，但转换不能删除�
 
 ### 日志与隐私
 
-日志不得包含剪贴板内容、密码、密钥、完整令牌、文件名、文件路径、设备备注或可恢复这些内容的派生值。需要排障时记录稳定编号、阶段、计数、耗时和脱敏身份。
+日志不得包含剪贴板内容、密码、密钥、完整令牌、邀请、设备名、地址、文件名、路径、业务原始标识、摘要、错误正文或可恢复这些内容的派生值。运行诊断只允许固定枚举、匿名关联号、计数和耗时；产品分析继续使用独立合同、身份与发送许可。
 
-跨层业务链路的持续性能观测归 Engine 组装层所有。`crates/uc-engine/src/assembly/observability/` 按观测 seam 保存实现 Application port 的具体 decorator；Application 继续只编排流程，不接触 `Instant`、tracing target 或观测字段。Application 拥有真实消费者的 adapter bundle，Engine 在每个真实装配 seam 通过一个主要入口按值接收并返回同一 bundle，集中选择 observation policy 并包装真实能力；port 返回的后续能力也由同一 seam 继续包装，例如准入 transport 返回的 authenticated exchange。宽泛领域跨多个装配时点时允许多个 seam-specific 入口，不为一次调用延迟 Application 构造、保留 raw clone 或建立跨阶段 registry。
+宿主进程在创建 Engine 前安装唯一 `ProcessObservabilityRuntime`。它统一拥有系统输出、有界 JSONL、远程 trace/log、过滤、排队、刷新、关闭与健康计数；相同配置复用，不同配置明确失败。单个 Engine 关闭和移动暂停只刷新，最终进程退出才关闭运行时。刷新和关闭不得重叠；最终关闭先停止普通记录，排空期间保留固定健康记录，最后关闭所有输出。只有关闭线程未启动或本地清理仍未结束时才允许重试；已经完成的失败结果不能被后续调用掩盖。远程不可达、拒绝、证书失败、队列满或超时都不得阻塞业务，丢弃和发送失败通过固定本地健康记录与只读计数暴露。
 
-该范式只复用“在组装边界装饰 port”的结构，不建立跨领域万能观测框架。每个领域分别拥有固定操作枚举、明确降噪策略和稳定事件 schema；禁止 `Observed<T>`、通用 phase 字符串注册表，以及要求业务调用方传入开始时间、成功布尔值或可选字段的记录函数。Decorator 不得改变业务结果、错误 source、重试或调用顺序，字段仍服从本节隐私边界。
+跨层完整能力的持续计时只允许 Engine 组装层装饰既有完整 Application port，不能包装状态加载、提交、材料准备或恢复子步骤。Application 不为观测增加接口、阶段查询或手工持续计时；完整准入恢复 owner 只用已有 32-byte 随机 attempt 材料开启不可读取、不可返回的不透明关联作用域，Core 不依赖观测。接收端只有在 Infra 完成既有身份与消息认证后才接受远端父关系；`traceparent` 只存在于受认证的在线协议中，不持久化，也不传播 `tracestate` 或 baggage。Space 调用树固定为 client transport、server transport、完整 sponsor endpoint；不得把 JoinRequest、Prepared、Applied 等业务步骤暴露给 Engine。
 
-Space 运行期依赖按 `SpaceAdmissionAdapters` 与 `SpaceMembershipAdapters` 分组，Engine 分别只调用一次 `observe_admission` 与 `observe_membership`。Admission 只观测 Application 直接调用的 recovery、认证 transport、Sponsor 状态与 settlement、Joiner candidate、activation 与重新配对状态 port，不再嵌套观测 transition adapter 内部阶段。Membership 观测 ledger load/commit、history exchange、restricted delivery、group update dispatch，以及 branch recovery 的 group-info/external-commit；快速成功的 ledger load 在 50ms 以下降噪，任何错误均保留稳定分类事件。Profile 启动升级在 Engine 组装层围绕 Infra 深模块的一次完整调用记录到 `storage.performance`。事件只包含固定操作、结果、稳定失败分类、计数与耗时，不记录参数、身份、地址、业务标识、路径或错误文本。
+系统、文件与远程输出均默认拒绝普通模块记录，只接受类型化诊断合同的固定字段。设备侧在编码前删除源码位置、线程、忙闲时间和正文，Collector 再做第二次字段收窄并设置稳定事件名。远程 trace 和 log 共用进程资源信息；在线往返使用同一 TraceId。schema v1 只允许 Space 准入作用域为 Joiner client span 自动附加匿名 `uc.flow.id`；server、endpoint、log 和其他领域必须省略。Engine、Infra、Core 和公开接口均没有关联号构造或读取入口。
 
-成员资料交接日志记录排队、发送开始、接收确认和重试四个阶段；每条只包含脱敏目标身份、资料数量、批次数、单批大小、单批上限、尝试次数和稳定失败类别。重试还记录下一次尝试时间。设备名、地址原文、安全资料和它们的摘要都不得写入日志。
+本地日志固定写入宿主日志目录的 `engine.YYYY-MM-DD.jsonl`，保留 7 天，总量不超过十进制 100,000,000 bytes；只管理这一严格命名，不删除相似或嵌套文件。诊断导出先刷新当前队列，再按同一文件名合同收集文件。目录不可写时降级到其余输出，不影响 Engine 启动。
 
-移动绑定在系统日志（OSLog / logcat）之外叠加按天滚动的文件层，写入宿主 cache 目录的 `logs/` 子目录，文件名为 `engine.YYYY-MM-DD.txt`，只接收 `info` 及以上级别；系统日志层不加过滤。日志目录由宿主能力提供，创建失败时降级为仅系统层，不影响启动。
-
-连接刷新成功（每次拨号或恢复）后，核心记录仍在线且经中继连接的对端本次最终选择的中继地址；每条只包含稳定设备标识与中继地址，快照查询失败只记录脱敏失败类别，不改变刷新结果。中继地址是用户配置的连接端点，不包含访问令牌。
-
-### 剪贴板同步诊断
-
-同步阶段可以写入脱敏结构化延迟日志，用于区分本机准备、连接、传输、接收处理和远端提交耗时。日志不得包含内容、设备名、文件名、路径或可还原它们的字段；未知网络路径必须明确标记未知。
-
-Engine 不初始化或依赖外部遥测发送器。宿主自行决定是否保留或转发诊断日志，逐阶段延迟不进入产品分析事件。
+本地 Collector 将全量 trace 送往 Jaeger 并以可解码形式显示日志；生产 Collector 优先送往 PostHog，错误 trace 全部保留，其他 trace 固定保留 10%，日志不采样。客户端只认识 Collector，不依赖 PostHog，也不保存后端凭据。Apple、Android 与 HarmonyOS 绑定只负责把宿主许可、地址、认证、环境和发布渠道交给共同运行时；Android 在首次远程发送前初始化系统证书校验组件并将其 Java 部分装入 AAR。
 
 ## 8. 状态机
 
@@ -714,7 +707,7 @@ reconciliation: Idle -> Comparing -> FetchingHistory -> Consistent -> Idle
 
 iOS 和 Android 绑定提供两个启动方式：原启动方式不启用产品分析；宿主明确选择带产品分析的启动方式后，才向核心提供事件发送、分析身份保存能力和一份启动时固定的平台信息。核心负责事件名称、脱敏属性、固定平台字段和身份切换顺序，移动宿主负责用户许可、供应商发送、失败重试，以及匿名身份和空间成员身份的持久保存。
 
-公共观测约定定义 `$os`、`os`、`os_version`、`$device_type`、`arch` 和 `app_channel` 六个固定字段。移动端和桌面端都使用同一份定义；宿主在启动时提供实际值，发送层将它们加到每条事件，业务事件不能覆盖。移动宿主收到事件后应快速放入自己的发送队列，不能让第三方网络请求阻塞核心流程。事件属性只允许来自核心定义的脱敏字段，不得追加剪贴板正文、设备名、密码、密钥、令牌、文件名或路径。事件发送失败只影响观测；身份保存失败必须明确返回失败，由核心现有流程决定本次业务操作是否继续。Engine 和绑定不依赖 PostHog、Sentry 或任何 OTLP 发送器，具体供应商由产品宿主选择；剪贴板逐阶段延迟仅作为本地结构化诊断日志保留，不进入产品分析事件。
+公共观测约定定义 `$os`、`os`、`os_version`、`$device_type`、`arch` 和 `app_channel` 六个固定字段。移动端和桌面端都使用同一份定义；宿主在启动时提供实际值，发送层将它们加到每条事件，业务事件不能覆盖。移动宿主收到事件后应快速放入自己的发送队列，不能让第三方网络请求阻塞核心流程。事件属性只允许来自核心定义的脱敏字段，不得追加剪贴板正文、设备名、密码、密钥、令牌、文件名或路径。事件发送失败只影响观测；身份保存失败必须明确返回失败，由核心现有流程决定本次业务操作是否继续。产品分析路径不依赖 PostHog、Sentry 或运行诊断发送器，具体供应商由产品宿主选择；运行诊断另按“日志与隐私”的共同运行时和 Collector 合同执行，只记录完整能力，不保留剪贴板逐阶段延迟。
 
 ### iOS 多进程约束
 
@@ -799,12 +792,15 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 | 日期 | 主题 | 长期结论 |
 | --- | --- | --- |
+| 2026-09-05 | 037 运行诊断完整落地 | 宿主进程唯一拥有共同观测运行时；Apple、Android、HarmonyOS 与直接 Rust 宿主共享系统、JSONL 和远程输出及有界生命周期。在线网络调用只在认证后建立跨设备父子关系；Space 准入关联号只由 Application 完整恢复 owner 的不透明作用域提供且只附在 Joiner client，Engine 只装饰完整 sponsor endpoint，Infra 只记录真实网络边界，会话生命周期独立记录。设备与 Collector 双重字段收窄并拒绝外层 schema URL，生产 trace 有固定采样，日志无正文且无关联号；刷新与关闭串行，远程终态失败不会被本地清理重试掩盖。Sponsor 收到对端确认后才记录成功，整条入站交换共用一个截止时间；认证前失败只写真实耗时的无关联日志，认证后每个三层节点恰有一条完成日志。认证后的新旧消息布局明确提示升级；后半程阻塞保留原状态并在 Pending/Active 公开提示，不回滚已提交结果；公开变化发通用刷新，对端上线立即恢复。旧伪 OTLP、Engine 诊断开关、Core tracing 和观测专用 timing/flow 接口已删除，架构门禁阻止回流。 |
+| 2026-09-05 | 037 交付前结果校准 | HarmonyOS 宿主资源字段改用合同内固定发布渠道值，并以正常启动和依赖失败两条 N-API smoke 运行验证。SDK 已明确报告的超时保持为超时，可重试的准入传输延期保持为延期；两者都不再污染普通失败统计。 |
+| 2026-09-04 | 037 运行诊断内部所有权收口 | `uc-observability-runtime` 保持宿主 bootstrap 不变，内部按进程生命周期、远程管道、输出装配、字段筛选与本地文件 owner 分工。本地文件 owner 完整持有异步队列、容量、丢弃统计、flush 与 shutdown；统一字段白名单同时约束系统、JSONL 与远程输出，旧 Space 性能 target 只作为待删除迁移项保留。 |
 | 2026-09-04 | 037 第二切片：Clipboard 跨设备调用链 | Clipboard 发送只由 Engine 在既有完整 dispatch port 上建立 client span；地址与连接子 span、W3C 注入和认证后 server span 全归 Infra 私有实现，Application/Core 不携带 trace context、flow 或 timing。旧 UUID flow、`DispatchTiming`、Application 阶段 span 与 `uc_otlp` 已删除。消息头增加前置格式标记而不增加业务版本号，新旧布局双向明确不兼容；真实双 Iroh endpoint 已证明 client/server 同 TraceId、正确 parent、完成日志关联 server SpanId，未知 peer 不接受 remote parent。 |
 | 2026-09-04 | 037 单进程真实 OTLP | 新增内部 `uc-observability-runtime`，宿主进程唯一拥有共享 Resource、真实 OTLP/HTTP trace/log exporters、目标过滤、有界 batch、JSONL 与 provider 生命周期；`uc-engine` 只重导稳定 bootstrap。诊断合同以类型限制 domain/operation/role/outcome/error/duration，可选 flow 只从完整 owner 的随机 attempt 单向派生。可解码 receiver 和本地 Collector+Jaeger 已证明 trace/log 实际到达且 TraceId/SpanId 一致；Rust 1.95 下 iOS、Android、HarmonyOS 目标编译通过。 |
 | 2026-09-04 | 037 第一切片：观测输出隐私基线 | Apple/Android 系统日志与移动文件日志改为默认拒绝普通模块记录，只允许逐字段审核的稳定目标；历史调用点保留为可再生 inventory，不以批量机械改写扩大风险。独立隐私门禁覆盖全部生产 Rust 源并接入仓库 preflight，运行时文件哨兵证明未经审核的路径字段不会落盘。旧移动日志计划按已完成部分和由 037 取代部分归档；本轮尚未接入远程 exporter。 |
 | 2026-09-04 | 037 OpenTelemetry 与结构化日志规划 | 新增 active 规格 037：保留 035 的 Engine capability decorator，先阻断现有敏感日志，再建立宿主进程级真实 OTLP traces/logs、Infra 认证后 W3C context propagation、有界 JSONL 与 Collector 验收；Core 不感知观测，Application 不承担持续计时，Engine 不查询业务步骤。本地使用 Jaeger 验证 trace，生产 Collector 优先输出到 PostHog，远程诊断许可只归宿主，本地日志保留 7 天且总量不超过 100 MB。规格以 Clipboard 为跨设备 tracer bullet，契约冻结后允许 Space 配对与平台输出双 Agent 按独占文件并行，最终串行删除 `uc_otlp`、旧 timing/flow 和临时关联原型。本轮只形成计划，无生产行为变化。 |
 | 2026-09-04 | 观测不得泄露业务步骤 | 为配对日志关联尝试新增待切换步骤查询会把 Application 内部状态泄露给 Engine，已撤回。后续观测只能装饰既有完整能力；不得为日志、tracing 或关联号扩大 facade、port/result 接口，跨步骤关联由完整流程负责人提供不透明观测上下文，Engine 不据此编排步骤。 |
-| 2026-09-04 | 升级与重新配对观测补全 | Engine 组装层新增 profile 存储升级、Sponsor settlement 和重新配对状态的耗时与稳定结果记录，并为既有准入失败补齐 `error_kind`；恢复读取只记录固定触发分类，设备上线触发不附带身份。事件继续排除 profile、Space、设备、邀请、凭据、地址、路径与错误文本。 |
+| 2026-09-04 | 升级与重新配对观测补全（已由 037 取代） | 当时 Engine 曾记录 Sponsor settlement 和重新配对内部状态。037 已删除这些步骤级包装；当前只观测完整认证 endpoint、真实网络边界和独立 profile 升级能力，事件继续排除 profile、Space、设备、邀请、凭据、地址、路径与错误文本。 |
 | 2026-09-03 | 无用实现清理 | 删除已退役的邀请消费入口、恢复报告合并函数和冗余读取字段；仅用于内部回归的 MLS 辅助入口明确限定在测试构建内。本轮不改变产品行为或架构。 |
 | 2026-09-03 | Core 准入状态导入清理 | 删除父模块中已由子模块直接导入的三个冗余名称；本轮无行为或架构变化。 |
 | 2026-09-03 | 关键模块深化规格 | 新增规格 036，规划按五个可独立验收的 clean-cutover 切片收口本机 Clipboard 完整动作、删除退役 membership persistence、集中 Iroh peer-address resolution、深化生产 session 生命周期并让 Space security mode 构造即合法；本轮只形成待实施计划，无生产架构变化。 |
@@ -906,11 +902,11 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-31 | F5 环形冲突幂等传播 | Application ledger 对已记录的同来源 conflict evidence 返回现有响应而不重复提交；Desktop 六节点从共同历史形成 E/F 两条 sibling 分支，再把共同成员 A-B-C-D 接成单环。冲突沿 B-C 与 D-A 两个方向传播后，每端只公开一个设备组选择，重复刷新不增加 membership effects。peer 重试账务 revision 可独立推进，不作为 conflict 消息环判据。 |
 | 2026-08-31 | F6 深链离线 Sponsor 恢复 | Desktop 从 A→B→C→D→E→F 深链形成两条七成员 sibling，真实停止 B/D 后由 F 选择 E 分支。Target 恢复 prepare 将 external commit 作为持久 group-update 欠账扇出给其他 Active 目标成员；TargetCommitted 在同一加密 ledger 流程中完成 conflict、恢复 recipient 关系，并使旧 sibling evidence 幂等。A/C/E/F 最终 branch、head、MLS epoch 与相邻正文均收敛，恢复不依赖原 Sponsor 在线。 |
 | 2026-08-31 | F7 三分支公平反熵 | Desktop 十节点从链式七成员基线并发形成三条八成员 sibling；分组分区只保留组内连接，并在 A–B 单冲突边存在时让落后合法 peer D 重连。D 仍在有界窗口内补齐 A/G/H 分支的 branch、head 与 MLS epoch，证明冲突 peer 不饿死合法反熵。十节点完整有向正文矩阵同时验证分支内通信与跨分支关闭式隔离。 |
-| 2026-09-01 | 双设备配对性能观测 | Engine 在 `assembly/observability/admission.rs` 通过 `ObservedAdmissionPorts` 集中装饰恢复状态、认证建链与消息交换、Sponsor 状态、Joiner Candidate、Joiner activation 和 Space session transition port；Application 调用点不接触时钟、日志 target 或观测字段。各 decorator 使用类型化操作与显式 policy，抑制成功空恢复/激活 load，日志不包含邀请、设备、地址、凭据或密钥。Engine `dev-tools` 的一秒热路径门禁继续只从公开 operation 与成员诊断观察完成。 |
-| 2026-09-01 | Engine port decorator 观测范式 | 持续跨层观测统一归 `crates/uc-engine/src/assembly/observability/<domain>.rs`（规模增长后可拆同名子目录）：具体 decorator 实现 Application port，领域装配入口集中选择 policy，返回 port 的能力继续包装。禁止跨领域万能 `Observed<T>`、字符串 phase 注册表及业务调用点手工计时；该范式可扩展到剪贴板、成员和其他领域而不共享业务事件 schema。 |
+| 2026-09-01 | 双设备配对性能观测（已由 037 收口） | 当时 Engine 装饰了恢复状态、认证交换、材料准备和激活等调用级 port。037 按“不得向 Engine 泄露步骤”规则删除这些包装；当前只保留完整认证 endpoint，关联号由 Application 不透明作用域提供，网络边界归 Infra。 |
+| 2026-09-01 | Engine port decorator 观测范式（由 037 限定） | Engine decorator 只允许包装既有完整能力，禁止状态加载、提交、材料准备和恢复子步骤，禁止跨领域万能包装、字符串阶段表及业务调用点手工计时。返回 port 只有本身仍是完整能力时才可继续包装。 |
 | 2026-09-01 | 配对性能日志语言统一 | `admission.performance` decorator 与性能验收日志使用英文消息和固定结构化字段；本轮不改变准入流程、持久化语义或生产超时。 |
 | 2026-09-03 | Space 观测装配收敛与推广准则规划 | 更新规格 035：先把准入观测收敛为“Application-owned adapter bundle → Engine 单一 seam 入口 → 同型 bundle”，再以同一结构覆盖成员账本与认证网络调用。仓库推广规则按真实装配 seam 而非宽泛业务领域划分；Clipboard/Blob 保持现有进程期与 network binding 两阶段装配，后继观测分别收口，不为单个 `observe_<domain>` 制造人工汇合点。规格保留调用级阶段耗时且只观测 Application 直接调用的 port；当前生产架构与事件尚未切换。 |
-| 2026-09-03 | 035 Space 观测装配实施 | `SpaceRuntimeAdapters` 已收敛为 Application-owned admission/membership bundle；Engine 在同一 Space seam 分别一次装饰完整 bundle，删除 raw/observed 镜像准入 bundle 与独立 transition 观测入口。Membership 新增七个调用级操作的固定耗时、结果分类和 50ms ledger-load 降噪，架构门禁阻止镜像类型、第二入口、公开 decorator 及 Application 持续计时回流；Clipboard/Blob 的两阶段装配保持不变。 |
+| 2026-09-03 | 035 Space 观测装配实施（由 037 限定） | `SpaceRuntimeAdapters` 继续由 Application 拥有并一次交给组装层，但 037 已删除 Engine 对准入状态、准备、激活、成员账本和分支恢复子步骤的观测。当前 Engine 只装饰完整认证 endpoint 与完整网络能力；Clipboard/Blob 的两阶段装配保持不变。 |
 | 2026-09-01 | Space transition 旧拆分规划（已取代） | 当时规格 032 计划以私有流程 executor、generation activation、rewrap 与耐久文件模块拆分旧 V2 transition；033 完成后的生产可达性审计证明该方案会保留已退休 rewrap，已由 2026-09-02 的 legacy retirement 重基线取代。本条只保留规划历史，不是实施依据。 |
 | 2026-09-01 | 033 活动 generation 第一切片 | Core 新增 `ActiveRuntimeLayout`，只固定当前 Space、profile data generation 与 Space control generation 的合法组合；Infra 新增 V3 manifest 的规范 digest、领域映射和只读版本识别。生产 promotion 与运行路径仍保持 V2，合法 V3 在完整升级接线前以不支持版本失败关闭；未修改内容密码 port，也未改变 CrossSpace 行为。 |
 | 2026-09-01 | 033 profile content key vault 第二切片 | Infra 新增自有目录的 `ProfileContentKeyVault` 深模块，以独立 secure-storage key 整体 AEAD 保存多个历史保护组目录，完整安装负责规范合并、全 profile key identity 冲突拒绝和原子替换，精确解析不依赖当前 Space。session 与 vault 共用单一 V2 content-key catalog codec；缺钥、未知 framing、篡改均失败关闭，Factory Reset 同时擦除独立 key。当前未接入 production session、V3 manifest promotion 或 CrossSpace。 |

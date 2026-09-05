@@ -459,6 +459,11 @@ impl HostEventEmitterPort for EngineHostEventEmitter {
             HostEvent::Membership(MembershipHostEvent::LedgerCommitted { revision }) => {
                 EngineEvent::DeviceTrustChanged { revision }
             }
+            HostEvent::Membership(MembershipHostEvent::AdmissionChanged) => {
+                EngineEvent::RefreshRequired {
+                    reason: crate::RefreshReason::StateInvalidated,
+                }
+            }
         };
         self.events.send(event);
         Ok(())
@@ -948,6 +953,23 @@ mod tests {
         assert_eq!(
             stream.next().await,
             Some(EngineEvent::DeviceTrustChanged { revision: 7 })
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_event_emitter_turns_admission_changes_into_a_refresh() {
+        let (events, mut stream) = event_channel(8);
+        let emitter = EngineHostEventEmitter::new(events);
+
+        emitter
+            .emit(HostEvent::Membership(MembershipHostEvent::AdmissionChanged))
+            .unwrap();
+
+        assert_eq!(
+            stream.next().await,
+            Some(EngineEvent::RefreshRequired {
+                reason: crate::RefreshReason::StateInvalidated,
+            })
         );
     }
 

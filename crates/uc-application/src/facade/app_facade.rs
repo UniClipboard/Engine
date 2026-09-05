@@ -967,7 +967,6 @@ impl AppFacade {
                     theme_overrides_dark: None,
                     language: None,
                     update_channel: None,
-                    telemetry_enabled: None,
                     usage_analytics_enabled: None,
                     debug_mode: None,
                 }),

@@ -70,6 +70,16 @@ export interface OhObservabilitySetup {
   droppedLocalRecords: number
 }
 
+export interface OhObservabilityHealth {
+  remote: 'disabled' | 'ready' | 'unavailable'
+  localFile: 'disabled' | 'ready' | 'unavailable'
+  droppedLocalRecords: number
+  droppedRemoteSpans: number
+  droppedRemoteLogs: number
+  failedRemoteSpanBatches: number
+  failedRemoteLogBatches: number
+}
+
 export interface OhObservabilitySignalSummary {
   traces: 'completed' | 'failed' | 'timed_out' | 'already_shutdown'
   logs: 'completed' | 'failed' | 'timed_out' | 'already_shutdown'
@@ -99,6 +109,35 @@ export interface OhNetworkRecoveryStatus {
 export interface OhLocalDevice {
   deviceId: string
   displayName: string
+}
+
+export interface OhInvitationIssued {
+  invitationCode: string
+  fullInvitation: string
+  expiresAtMs: number
+  availability: string
+}
+
+export interface OhJoinedSpace {
+  sponsorDeviceId: string
+  sponsorIdentityFingerprint: string
+  spaceId: string
+  selfDeviceId: string
+  selfIdentityFingerprint: string
+  migratedRecords?: string
+  preservedUnreadableRecords?: string
+}
+
+export interface OhJoinSpaceStatus {
+  status: 'active' | 'pending' | 'rejected'
+  joinId: string
+  joinedSpace?: OhJoinedSpace
+  targetSpaceId?: string
+  sponsorDeviceId?: string
+  sponsorIdentityFingerprint?: string
+  cancelRequested?: boolean
+  peerUpgradeRequired: boolean
+  rejectionReason?: string
 }
 
 export interface OhMembershipConvergence {
@@ -187,7 +226,16 @@ export interface OhEngine {
   recoverNetwork(): Promise<void>
   queryNetworkRecoveryStatus(): Promise<OhNetworkRecoveryStatus>
   queryLocalDevice(): Promise<OhLocalDevice>
+  queryDeviceGroupChoices(): Promise<string>
   queryMembershipConvergence(): Promise<OhMembershipConvergence>
+  issueInvitation(): Promise<OhInvitationIssued>
+  joinSpace(
+    invitationCode: string,
+    deviceName: string | null,
+    passphrase: string,
+    preserveUnreadableHistory: boolean
+  ): Promise<OhJoinSpaceStatus>
+  cancelJoinSpace(joinId: string): Promise<OhJoinSpaceStatus>
   refreshSharedDevices(): Promise<OhSharedDeviceRefreshStarted>
   querySharedDeviceRefresh(requestId: string): Promise<OhSharedDeviceRefresh | null>
   removeMember(deviceId: string): Promise<OhMemberRemoval>
@@ -208,6 +256,7 @@ declare const engine: {
     config: OhObservabilityConfig,
     directories: OhHostDirectories
   ): OhObservabilitySetup
+  queryProcessObservabilityHealth(): OhObservabilityHealth
   flushProcessObservability(deadlineMs: number): Promise<OhObservabilitySignalSummary>
   shutdownProcessObservability(deadlineMs: number): Promise<OhObservabilitySignalSummary>
   prepareHost(host: OhHost): PreparedHost

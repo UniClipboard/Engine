@@ -105,7 +105,9 @@ fn ohos_binding_uses_the_shared_process_observability_runtime() {
     for required in [
         "pub struct OhObservabilityConfig",
         "pub struct OhCollectorConfig",
+        "pub struct OhObservabilityHealth",
         "pub fn install_process_observability",
+        "pub fn query_process_observability_health",
         "pub async fn flush_process_observability",
         "pub async fn shutdown_process_observability",
     ] {
@@ -116,6 +118,7 @@ fn ohos_binding_uses_the_shared_process_observability_runtime() {
     }
     for required in [
         "ProcessObservabilityRuntime::install",
+        "pub(crate) fn health",
         "LocalLogConfig::new(directories.logs())",
         "schedule_flush_after_success",
     ] {

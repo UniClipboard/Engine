@@ -24,9 +24,11 @@ pub(super) enum FrameKind {
     OpaqueResponse = 2,
     OpaqueFinish = 3,
     ContinuationHello = 4,
-    Request = 5,
-    Reply = 6,
+    LegacyRequest = 5,
+    LegacyReply = 6,
     Ack = 7,
+    Request = 8,
+    Reply = 9,
 }
 
 impl FrameKind {
@@ -36,9 +38,11 @@ impl FrameKind {
             2 => Ok(Self::OpaqueResponse),
             3 => Ok(Self::OpaqueFinish),
             4 => Ok(Self::ContinuationHello),
-            5 => Ok(Self::Request),
-            6 => Ok(Self::Reply),
+            5 => Ok(Self::LegacyRequest),
+            6 => Ok(Self::LegacyReply),
             7 => Ok(Self::Ack),
+            8 => Ok(Self::Request),
+            9 => Ok(Self::Reply),
             _ => Err(WireError::UnknownFrame),
         }
     }
@@ -96,6 +100,8 @@ pub(super) enum WireError {
     InvalidLength,
     #[error("space admission wire payload is invalid")]
     InvalidPayload,
+    #[error("space admission authenticated message layout requires a peer upgrade")]
+    UnsupportedLayout,
 }
 
 pub(super) async fn write_typed<W, T>(
@@ -122,7 +128,7 @@ where
     T: DeserializeOwned,
 {
     let payload = read_raw(reader, expected, limit).await?;
-    postcard::from_bytes(&payload).map_err(|_| WireError::InvalidPayload)
+    decode_exact(&payload)
 }
 
 pub(super) async fn write_envelope<W: AsyncWrite + Unpin>(
@@ -140,11 +146,16 @@ pub(super) async fn read_envelope<R: AsyncRead + Unpin>(
     kind: FrameKind,
 ) -> Result<(AuthenticatedEnvelopeV1, SpaceAdmissionEnvelopeV1, [u8; 32]), WireError> {
     let (actual_kind, payload) = read_raw_with_limit(reader, LARGE_MESSAGE_LIMIT).await?;
+    if matches!(
+        (actual_kind, kind),
+        (FrameKind::LegacyRequest, FrameKind::Request) | (FrameKind::LegacyReply, FrameKind::Reply)
+    ) {
+        return Err(WireError::UnsupportedLayout);
+    }
     if actual_kind != kind {
         return Err(WireError::UnknownFrame);
     }
-    let wire: AuthenticatedEnvelopeV1 =
-        postcard::from_bytes(&payload).map_err(|_| WireError::InvalidPayload)?;
+    let wire: AuthenticatedEnvelopeV1 = decode_exact(&payload)?;
     let envelope = SpaceAdmissionEnvelopeV1::decode_canonical_v1(&wire.canonical_envelope)
         .map_err(|_| WireError::InvalidPayload)?;
     if payload.len() > envelope_limit(envelope.kind()) {
@@ -212,6 +223,15 @@ async fn run_io<T>(future: impl Future<Output = io::Result<T>>) -> Result<T, Wir
         .await
         .map_err(|_| WireError::Timeout)?
         .map_err(WireError::Io)
+}
+
+fn decode_exact<T: DeserializeOwned>(payload: &[u8]) -> Result<T, WireError> {
+    let (value, remaining) =
+        postcard::take_from_bytes(payload).map_err(|_| WireError::InvalidPayload)?;
+    if !remaining.is_empty() {
+        return Err(WireError::InvalidPayload);
+    }
+    Ok(value)
 }
 
 fn envelope_limit(kind: SpaceAdmissionMessageKind) -> usize {
@@ -287,5 +307,34 @@ mod tests {
             read_raw(&mut reader, FrameKind::InitialHello, AUTH_FRAME_LIMIT).await,
             Err(WireError::Io(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn authenticated_envelope_rejects_the_legacy_frame_kind_as_upgrade_required() {
+        let legacy = postcard::to_stdvec(&AuthenticatedEnvelopeV1 {
+            nonce: [1; 32],
+            canonical_envelope: vec![2; 16],
+            trace_context: None,
+            mac: vec![3; 64],
+        })
+        .expect("legacy-shaped envelope");
+        let (mut writer, mut reader) = tokio::io::duplex(512);
+        let task = tokio::spawn(async move {
+            write_raw(
+                &mut writer,
+                FrameKind::LegacyRequest,
+                &legacy,
+                DURABLE_MESSAGE_LIMIT,
+            )
+            .await
+        });
+
+        assert!(matches!(
+            read_envelope(&mut reader, FrameKind::Request).await,
+            Err(WireError::UnsupportedLayout)
+        ));
+        task.await
+            .expect("legacy writer task")
+            .expect("legacy frame write");
     }
 }

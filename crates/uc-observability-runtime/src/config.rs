@@ -54,11 +54,11 @@ impl OperatingSystem {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservabilityResource {
-    pub service_version: String,
-    pub environment: DeploymentEnvironment,
-    pub os: OperatingSystem,
-    pub arch: String,
-    pub app_channel: String,
+    pub(crate) service_version: String,
+    pub(crate) environment: DeploymentEnvironment,
+    pub(crate) os: OperatingSystem,
+    pub(crate) arch: String,
+    pub(crate) app_channel: String,
 }
 
 impl ObservabilityResource {
@@ -66,16 +66,72 @@ impl ObservabilityResource {
         service_version: impl Into<String>,
         environment: DeploymentEnvironment,
         os: OperatingSystem,
-        arch: impl Into<String>,
         app_channel: impl Into<String>,
-    ) -> Self {
-        Self {
-            service_version: service_version.into(),
+    ) -> Result<Self, ConfigError> {
+        Ok(Self {
+            service_version: validated_service_version(&service_version.into())?,
             environment,
             os,
-            arch: arch.into(),
-            app_channel: app_channel.into(),
+            arch: current_architecture().to_owned(),
+            app_channel: validated_app_channel(&app_channel.into())?.to_owned(),
+        })
+    }
+}
+
+fn validated_service_version(value: &str) -> Result<String, ConfigError> {
+    let version = semver::Version::parse(value).map_err(|_| ConfigError::InvalidServiceVersion)?;
+    if version.major > 99_999 || version.minor > 99_999 || version.patch > 99_999 {
+        return Err(ConfigError::InvalidServiceVersion);
+    }
+    let prerelease = version.pre.as_str();
+    if !prerelease.is_empty() {
+        let mut identifiers = prerelease.split('.');
+        let recognized = matches!(identifiers.next(), Some("alpha" | "beta" | "rc"));
+        let number = identifiers.next();
+        let number_is_valid = number.is_none_or(|identifier| {
+            !identifier.is_empty()
+                && identifier.len() <= 5
+                && identifier.bytes().all(|byte| byte.is_ascii_digit())
+        });
+        if !recognized || !number_is_valid || identifiers.next().is_some() {
+            return Err(ConfigError::InvalidServiceVersion);
         }
+    }
+    let mut normalized = format!("{}.{}.{}", version.major, version.minor, version.patch);
+    if !prerelease.is_empty() {
+        normalized.push('-');
+        normalized.push_str(prerelease);
+    }
+    if normalized.len() > 32 {
+        return Err(ConfigError::InvalidServiceVersion);
+    }
+    Ok(normalized)
+}
+
+fn validated_app_channel(value: &str) -> Result<&'static str, ConfigError> {
+    match value {
+        "development" => Ok("development"),
+        "test" => Ok("test"),
+        "alpha" => Ok("alpha"),
+        "beta" => Ok("beta"),
+        "stable" => Ok("stable"),
+        "production" => Ok("production"),
+        _ => Err(ConfigError::InvalidAppChannel),
+    }
+}
+
+fn current_architecture() -> &'static str {
+    match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "arm" => "arm",
+        "x86" => "x86",
+        "x86_64" => "x86_64",
+        "riscv64" => "riscv64",
+        "s390x" => "s390x",
+        "powerpc" => "powerpc",
+        "powerpc64" => "powerpc64",
+        "wasm32" => "wasm32",
+        _ => "other",
     }
 }
 
@@ -114,8 +170,20 @@ pub struct OtlpHttpConfig {
 
 impl OtlpHttpConfig {
     pub fn new(trace_endpoint: &str, log_endpoint: &str) -> Result<Self, ConfigError> {
-        let trace_endpoint = parse_endpoint(trace_endpoint)?;
-        let log_endpoint = parse_endpoint(log_endpoint)?;
+        let trace_endpoint = parse_endpoint(trace_endpoint, false)?;
+        let log_endpoint = parse_endpoint(log_endpoint, false)?;
+        Ok(Self {
+            trace_endpoint,
+            log_endpoint,
+            headers: Vec::new(),
+            timeout: Duration::from_secs(5),
+        })
+    }
+
+    /// 只供本机 Collector、测试 receiver 和 Jaeger 使用的明文入口。
+    pub fn new_loopback(trace_endpoint: &str, log_endpoint: &str) -> Result<Self, ConfigError> {
+        let trace_endpoint = parse_endpoint(trace_endpoint, true)?;
+        let log_endpoint = parse_endpoint(log_endpoint, true)?;
         Ok(Self {
             trace_endpoint,
             log_endpoint,
@@ -180,9 +248,17 @@ impl fmt::Debug for OtlpHttpConfig {
     }
 }
 
-fn parse_endpoint(value: &str) -> Result<Url, ConfigError> {
+fn parse_endpoint(value: &str, allow_loopback_http: bool) -> Result<Url, ConfigError> {
     let endpoint = Url::parse(value).map_err(|_| ConfigError::InvalidEndpoint)?;
-    if !matches!(endpoint.scheme(), "http" | "https")
+    let secure = endpoint.scheme() == "https";
+    let local_http = allow_loopback_http
+        && endpoint.scheme() == "http"
+        && endpoint.host().is_some_and(|host| match host {
+            url::Host::Domain(name) => name.eq_ignore_ascii_case("localhost"),
+            url::Host::Ipv4(address) => address.is_loopback(),
+            url::Host::Ipv6(address) => address.is_loopback(),
+        });
+    if (!secure && !local_http)
         || endpoint.host().is_none()
         || !endpoint.username().is_empty()
         || endpoint.password().is_some()
@@ -256,6 +332,10 @@ impl fmt::Debug for ObservabilityConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
+    #[error("invalid service version")]
+    InvalidServiceVersion,
+    #[error("invalid application channel")]
+    InvalidAppChannel,
     #[error("invalid OTLP endpoint")]
     InvalidEndpoint,
     #[error("invalid OTLP header name")]
@@ -296,6 +376,25 @@ mod tests {
         ));
         assert!(matches!(
             OtlpHttpConfig::new(
+                "http://collector.example/v1/traces",
+                "https://collector.example/v1/logs"
+            ),
+            Err(ConfigError::InvalidEndpoint)
+        ));
+        assert!(OtlpHttpConfig::new_loopback(
+            "http://127.0.0.1:4318/v1/traces",
+            "http://localhost:4318/v1/logs"
+        )
+        .is_ok());
+        assert!(matches!(
+            OtlpHttpConfig::new(
+                "https://collector.example/v1/traces?token=private",
+                "https://collector.example/v1/logs"
+            ),
+            Err(ConfigError::InvalidEndpoint)
+        ));
+        assert!(matches!(
+            OtlpHttpConfig::new(
                 "https://collector.example/v1/traces",
                 "https://collector.example/v1/logs"
             )
@@ -303,5 +402,59 @@ mod tests {
             .with_timeout(Duration::ZERO),
             Err(ConfigError::ZeroTimeout)
         ));
+        assert!(matches!(
+            OtlpHttpConfig::new(
+                "https://collector.example/v1/traces",
+                "https://collector.example/v1/logs"
+            )
+            .expect("valid endpoint")
+            .with_header("authorization", SecretHeaderValue::new("bad\nvalue")),
+            Err(ConfigError::InvalidHeaderValue)
+        ));
+    }
+
+    #[test]
+    fn resource_values_use_closed_low_cardinality_domains() {
+        for version in [
+            "MyPhone123",
+            "phc_abcdef",
+            "deadbeef",
+            "1.2.3-private",
+            "1.2.3-alpha.1.2",
+            "100000.2.3",
+        ] {
+            assert!(matches!(
+                ObservabilityResource::new(
+                    version,
+                    DeploymentEnvironment::Test,
+                    OperatingSystem::Other,
+                    "test",
+                ),
+                Err(ConfigError::InvalidServiceVersion)
+            ));
+        }
+        for channel in ["MyPhone123", "phc_abcdef", "deadbeef", "integration-test"] {
+            assert!(matches!(
+                ObservabilityResource::new(
+                    "1.2.3",
+                    DeploymentEnvironment::Test,
+                    OperatingSystem::Other,
+                    channel,
+                ),
+                Err(ConfigError::InvalidAppChannel)
+            ));
+        }
+
+        let resource = ObservabilityResource::new(
+            "1.2.3-rc.5+MyPhone123",
+            DeploymentEnvironment::Test,
+            OperatingSystem::Other,
+            "beta",
+        )
+        .expect("approved resource values");
+        assert_eq!(resource.service_version, "1.2.3-rc.5");
+        assert_eq!(resource.arch, current_architecture());
+        assert_eq!(resource.app_channel, "beta");
+        assert!(!format!("{resource:?}").contains("MyPhone123"));
     }
 }

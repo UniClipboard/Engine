@@ -167,6 +167,55 @@ impl SpaceAdmissionAggregate {
         Ok(AdmissionTransition::new(self, &[]))
     }
 
+    pub(crate) fn reject_peer_upgrade(
+        mut self,
+    ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        let record_version = self
+            .record_version
+            .checked_add(1)
+            .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
+        let SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(state)) =
+            self.state
+        else {
+            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        };
+        self.record_version = record_version;
+        self.state = SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+            SpaceAdmissionRejectedState::LocalJoiner(SpaceAdmissionLocalJoinerRejected {
+                join_id: state.join_id,
+                reason: SpaceAdmissionRejectionReason::PeerUpgradeRequired,
+            }),
+        ));
+        Ok(AdmissionTransition::new(self, &[]))
+    }
+
+    pub(crate) fn mark_peer_upgrade_required(
+        mut self,
+    ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        let pending_exchange = match &mut self.state {
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Prepared(state)) => {
+                &mut state.pending_exchange
+            }
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Applied(state)) => {
+                &mut state.pending_exchange
+            }
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Cancelling(state)) => {
+                &mut state.pending_exchange
+            }
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Active(
+                SpaceAdmissionActiveState::PendingSettlement(state),
+            )) => &mut state.pending_exchange,
+            _ => return Err(SpaceAdmissionAggregateError::InvalidTransition),
+        };
+        let record_version = self
+            .record_version
+            .checked_add(1)
+            .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
+        pending_exchange.mark_peer_upgrade_required();
+        self.record_version = record_version;
+        Ok(AdmissionTransition::new(self, &[]))
+    }
+
     pub(crate) fn cancel_before_authentication(
         mut self,
     ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
@@ -623,6 +672,7 @@ impl SpaceAdmissionAggregate {
         message_id: AdmissionMessageId,
         retry_state: AdmissionRetryState,
     ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        let peer_upgrade_required = self.peer_upgrade_required();
         let (route, predecessor, sender_sequence) = match &self.state {
             SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Candidate(state)) => {
                 let SpaceAdmissionBodyV1::Candidate(candidate) = state.candidate.body() else {
@@ -662,13 +712,16 @@ impl SpaceAdmissionAggregate {
             SpaceAdmissionBodyV1::CancelRequested,
         )
         .map_err(|_| SpaceAdmissionAggregateError::InvalidCancellationRequest)?;
-        let pending_exchange = PendingAdmissionExchange::new(
+        let mut pending_exchange = PendingAdmissionExchange::new(
             route,
             request,
             SpaceAdmissionMessageKind::Rejected,
             retry_state,
         )
         .map_err(|_| SpaceAdmissionAggregateError::InvalidCancellationRequest)?;
+        if peer_upgrade_required {
+            pending_exchange.mark_peer_upgrade_required();
+        }
         self.cancel(pending_exchange)
     }
 

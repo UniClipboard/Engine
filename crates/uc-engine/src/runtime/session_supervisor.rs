@@ -91,7 +91,6 @@ fn session_lifecycle_span() -> tracing::Span {
         operation: DiagnosticOperation::SessionLifecycle,
         role: DiagnosticRole::Local,
         kind: DiagnosticSpanKind::Internal,
-        flow: None,
     })
 }
 
@@ -102,25 +101,39 @@ async fn observe_session_lifecycle<T>(
     let span = session_lifecycle_span();
     let result = future.instrument(span.clone()).await;
     span.in_scope(|| {
-        let completion = if result.is_ok() {
-            OperationCompletion::succeeded(
+        let completion = match &result {
+            Ok(_) => OperationCompletion::succeeded(
                 DiagnosticDomain::Runtime,
                 DiagnosticOperation::SessionLifecycle,
                 DiagnosticRole::Local,
                 started.elapsed(),
-            )
-        } else {
-            OperationCompletion::failed(
+            ),
+            Err(error) => OperationCompletion::failed(
                 DiagnosticDomain::Runtime,
                 DiagnosticOperation::SessionLifecycle,
                 DiagnosticRole::Local,
-                DiagnosticErrorType::Internal,
+                session_lifecycle_error_type(error),
                 started.elapsed(),
-            )
+            ),
         };
         complete_operation(completion);
     });
     result
+}
+
+fn session_lifecycle_error_type(error: &EngineError) -> DiagnosticErrorType {
+    match error.category() {
+        crate::EngineErrorCategory::Unauthorized => DiagnosticErrorType::AuthenticationFailed,
+        crate::EngineErrorCategory::Unavailable | crate::EngineErrorCategory::NotFound => {
+            DiagnosticErrorType::Unavailable
+        }
+        crate::EngineErrorCategory::DeadlineExceeded => DiagnosticErrorType::Timeout,
+        crate::EngineErrorCategory::InvalidInput => DiagnosticErrorType::DecodeFailed,
+        crate::EngineErrorCategory::InvalidState | crate::EngineErrorCategory::Conflict => {
+            DiagnosticErrorType::Corrupt
+        }
+        crate::EngineErrorCategory::Internal => DiagnosticErrorType::Internal,
+    }
 }
 
 impl SessionSupervisor {
@@ -523,8 +536,8 @@ impl ProductionSessionFactory {
         let tasks = Arc::new(TaskRegistry::new());
         let mut active_clipboard_changes = wired.shared.active_clipboard_sse_source.subscribe();
         let active_clipboard_events = events.clone();
-        tasks
-            .spawn("active_clipboard_events", move |cancel| async move {
+        let _ = tasks
+            .spawn(move |cancel| async move {
                 loop {
                     tokio::select! {
                         _ = cancel.cancelled() => return,
@@ -573,7 +586,7 @@ impl ProductionSession {
         {
             warn!("mobile file upload shutdown finished with an error");
         }
-        self.tasks.shutdown(Duration::from_millis(500)).await;
+        super::task_shutdown::shutdown_tasks(&self.tasks, Duration::from_millis(500)).await;
         info!("Engine session 网络观测任务已停止");
         let application_shutdown = self.application.shutdown().await;
         info!("Engine session Application runtime 已停止");
@@ -640,8 +653,8 @@ async fn spawn_network_recovery_observation_task(
     generation: Arc<AtomicU64>,
     tasks: &Arc<TaskRegistry>,
 ) {
-    tasks
-        .spawn("network_recovery_observations", move |cancel| async move {
+    let _ = tasks
+        .spawn(move |cancel| async move {
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => return,
@@ -867,7 +880,7 @@ mod tests {
         .expect("UTF-8 logs");
         assert!(output.contains("uc.operation=\"session_lifecycle\""));
         assert!(output.contains("uc.outcome=\"error\""));
-        assert!(output.contains("error.type=\"internal\""));
+        assert!(output.contains("error.type=\"unavailable\""));
     }
 
     #[test]

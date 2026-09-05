@@ -4,6 +4,8 @@
 
 - **状态**：已完成
 - **日期**：2026-09-03
+- **后续收口**：[037](037-opentelemetry-tracing-and-structured-logs.md) 已删除 Engine 对准入状态、准备、激活、成员账本和分支恢复
+  子步骤的观测；本文件保留当时决策过程，不代表当前可新增这些包装
 - **前置规格**：[029 持久化成员历史反熵](../completed/029-durable-membership-history-anti-entropy.md)、[030 成员分叉选择与复杂拓扑验证](../completed/030-membership-conflict-resolution-and-chaos-validation.md)、[031 Application 依赖表面深化](../completed/031-application-dependency-surface-deepening.md)
 - **完整负责人**：`uc-engine::assembly::observability` 唯一负责跨层依赖调用的持续计时、结果分类、降噪 policy 与安全事件 schema；`uc-application` 只拥有并消费领域 adapter bundle
 - **调用方唯一动作**：Engine 在每个真实装配 seam 构造一个 Application 定义的 adapter bundle，并调用一次该 seam 的主要观测入口；不得逐 port 取回观测结果或自行选择 policy，也不得为了凑成宽泛业务领域的单次调用而改变启动顺序

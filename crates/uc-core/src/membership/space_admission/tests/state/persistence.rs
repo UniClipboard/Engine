@@ -1,3 +1,51 @@
+#[test]
+fn pending_exchanges_decode_real_bytes_from_the_previous_v1_layout() {
+    for (name, aggregate) in [
+        ("initiated", initiated_joiner_aggregate_fixture()),
+        ("prepared", joiner_prepared_aggregate_fixture()),
+        ("applied", joiner_applied_aggregate_fixture()),
+        ("cancelling", cancelling_joiner_aggregate_fixture()),
+        (
+            "active pending settlement",
+            active_pending_settlement_aggregate_fixture(),
+        ),
+    ] {
+        let mut legacy = aggregate
+            .encode_persisted()
+            .unwrap_or_else(|error| panic!("{name} current bytes must encode: {error}"));
+        assert_eq!(legacy.pop(), Some(0), "{name} must end in Option::None");
+        let decoded = SpaceAdmissionAggregate::decode_persisted(&legacy)
+            .unwrap_or_else(|error| panic!("{name} legacy bytes must decode: {error}"));
+        assert_eq!(decoded, aggregate, "{name}");
+    }
+
+    let aggregate = initiated_joiner_aggregate_fixture();
+    let current = aggregate.encode_persisted().expect("current bytes encode");
+    let mut current_with_junk = current.clone();
+    current_with_junk.push(0xaa);
+    assert_eq!(
+        SpaceAdmissionAggregate::decode_persisted(&current_with_junk),
+        Err(crate::membership::SpaceAdmissionPersistenceError::InvalidEncoding)
+    );
+
+    let mut legacy_with_junk = current;
+    assert_eq!(legacy_with_junk.pop(), Some(0));
+    legacy_with_junk.extend_from_slice(&[0, 0xaa]);
+    assert_eq!(
+        SpaceAdmissionAggregate::decode_persisted(&legacy_with_junk),
+        Err(crate::membership::SpaceAdmissionPersistenceError::InvalidEncoding)
+    );
+
+    let mut truncated_terminal = active_settled_aggregate_fixture()
+        .encode_persisted()
+        .expect("terminal bytes encode");
+    truncated_terminal.pop().expect("terminal bytes are non-empty");
+    assert_eq!(
+        SpaceAdmissionAggregate::decode_persisted(&truncated_terminal),
+        Err(crate::membership::SpaceAdmissionPersistenceError::InvalidEncoding)
+    );
+}
+
 fn assert_admission_persistence_round_trip(aggregate: SpaceAdmissionAggregate) {
     let encoded = aggregate
         .encode_persisted()

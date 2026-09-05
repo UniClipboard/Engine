@@ -16,6 +16,7 @@ impl JoinerAdmissionService {
         token: AdmissionRecoveryCommitToken,
         reply: SpaceAdmissionEnvelopeV1,
         canonical_digest: [u8; 32],
+        notify_upgrade_cleared: bool,
     ) {
         let transition = match aggregate.accept_commit(reply, canonical_digest) {
             Ok(transition) => transition,
@@ -24,7 +25,10 @@ impl JoinerAdmissionService {
                 return;
             }
         };
-        let committed = match recovery.commit_recovery(token, transition).await {
+        let commit_result = recovery
+            .commit_recovery_with_optional_notification(token, transition, notify_upgrade_cleared)
+            .await;
+        let committed = match commit_result {
             Ok(committed) => committed,
             Err(error) => {
                 recovery.record_state_error(report, error);

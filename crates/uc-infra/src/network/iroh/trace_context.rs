@@ -7,23 +7,16 @@ use serde::{Deserialize, Serialize};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 const TRACEPARENT_MAX_BYTES: usize = 256;
-const TRACESTATE_MAX_BYTES: usize = 512;
 
 /// 只在 Iroh 协议内部流转的有界 W3C 上下文。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct WireTraceContext {
     pub(super) traceparent: String,
-    pub(super) tracestate: Option<String>,
 }
 
 impl WireTraceContext {
     pub(super) fn is_bounded(&self) -> bool {
-        !self.traceparent.is_empty()
-            && self.traceparent.len() <= TRACEPARENT_MAX_BYTES
-            && self
-                .tracestate
-                .as_ref()
-                .is_none_or(|value| value.len() <= TRACESTATE_MAX_BYTES)
+        !self.traceparent.is_empty() && self.traceparent.len() <= TRACEPARENT_MAX_BYTES
     }
 }
 
@@ -32,7 +25,6 @@ pub(super) fn inject_current() -> Option<WireTraceContext> {
     TraceContextPropagator::new().inject_context(&tracing::Span::current().context(), &mut carrier);
     let context = WireTraceContext {
         traceparent: carrier.0.remove("traceparent")?,
-        tracestate: carrier.0.remove("tracestate"),
     };
     context.is_bounded().then_some(context)
 }
@@ -42,13 +34,10 @@ pub(super) fn set_remote_parent(span: &tracing::Span, wire: Option<&WireTraceCon
     let Some(wire) = wire.filter(|value| value.is_bounded()) else {
         return false;
     };
-    let carrier = TraceCarrier(HashMap::from_iter([
-        ("traceparent".to_owned(), wire.traceparent.clone()),
-        (
-            "tracestate".to_owned(),
-            wire.tracestate.clone().unwrap_or_default(),
-        ),
-    ]));
+    let carrier = TraceCarrier(HashMap::from([(
+        "traceparent".to_owned(),
+        wire.traceparent.clone(),
+    )]));
     let context = TraceContextPropagator::new()
         .extract_with_context(&opentelemetry::Context::new(), &carrier);
     if !context.span().span_context().is_valid() || !context.span().span_context().is_remote() {
@@ -127,11 +116,9 @@ mod tests {
     fn malformed_and_oversized_contexts_are_ignored() {
         let malformed = WireTraceContext {
             traceparent: "not-a-traceparent".to_owned(),
-            tracestate: None,
         };
         let oversized = WireTraceContext {
             traceparent: "x".repeat(TRACEPARENT_MAX_BYTES + 1),
-            tracestate: None,
         };
         assert!(!set_remote_parent(
             &tracing::info_span!("malformed"),

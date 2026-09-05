@@ -218,7 +218,6 @@ impl ProtocolHandler for IrohMembershipHistoryExchangeHandler {
             operation: DiagnosticOperation::MembershipHistorySync,
             role: DiagnosticRole::Member,
             kind: DiagnosticSpanKind::Server,
-            flow: None,
         });
         let _ = set_remote_parent(&span, request.trace_context.as_ref());
         let started = Instant::now();
@@ -240,10 +239,11 @@ impl ProtocolHandler for IrohMembershipHistoryExchangeHandler {
         }
         .instrument(span.clone())
         .await;
-        span.in_scope(|| record_server_completion(started.elapsed(), result.as_ref().err()));
         if result.is_err() {
             reject(&mut send).await;
         }
+        span.in_scope(|| record_server_completion(started.elapsed(), result.as_ref().err()));
+        drop(span);
         let _ = connection.closed().await;
         Ok(())
     }
@@ -539,7 +539,6 @@ mod tests {
                     operation: uc_observability_contract::diagnostics::DiagnosticOperation::MembershipHistorySync,
                     role: uc_observability_contract::diagnostics::DiagnosticRole::Member,
                     kind: uc_observability_contract::diagnostics::DiagnosticSpanKind::Client,
-                    flow: None,
                 },
             );
             let _client_entered = client.enter();
@@ -554,7 +553,6 @@ mod tests {
                     operation: uc_observability_contract::diagnostics::DiagnosticOperation::MembershipHistorySync,
                     role: uc_observability_contract::diagnostics::DiagnosticRole::Member,
                     kind: uc_observability_contract::diagnostics::DiagnosticSpanKind::Server,
-                    flow: None,
                 },
             );
             assert!(super::set_remote_parent(

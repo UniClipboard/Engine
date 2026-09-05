@@ -12,7 +12,6 @@ pub(crate) fn profile_storage_upgrade_span() -> tracing::Span {
         operation: DiagnosticOperation::ProfileStorageUpgrade,
         role: DiagnosticRole::Local,
         kind: DiagnosticSpanKind::Internal,
-        flow: None,
     })
 }
 

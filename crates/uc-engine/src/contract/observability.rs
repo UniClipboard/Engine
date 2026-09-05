@@ -1,5 +1,8 @@
 //! 跨平台宿主可用的稳定观测入口。
 
+#[cfg(target_os = "android")]
+pub use uc_observability_runtime::{initialize_android_tls, AndroidTlsInitError};
+
 pub use uc_observability_contract::analytics::{
     AdoptOutcome, AnalyticsEventContext, AnalyticsIdentityError, AnalyticsIdentityPort,
     AnalyticsPort, DeviceType, Event, GroupIdentifyPayload, IdentifyPayload, Os, ReleaseOutcome,

@@ -175,9 +175,11 @@ impl FileTransferLifecycle {
 
         tokio::spawn(
             async move {
-                readiness.wait_ready().await;
-                let mut interval = tokio::time::interval(SWEEP_INTERVAL);
                 let mut cancel = cancel;
+                if !wait_until_ready_or_cancel(readiness.as_ref(), &mut cancel).await {
+                    return;
+                }
+                let mut interval = tokio::time::interval(SWEEP_INTERVAL);
 
                 loop {
                     tokio::select! {
@@ -316,6 +318,28 @@ impl FileTransferLifecycle {
     }
 }
 
+async fn wait_until_ready_or_cancel(
+    readiness: &ReceiveReadinessCoordinator,
+    cancel: &mut tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    loop {
+        if *cancel.borrow() {
+            return false;
+        }
+        if readiness.is_ready() {
+            return true;
+        }
+        tokio::select! {
+            _ = readiness.wait_ready() => return true,
+            changed = cancel.changed() => {
+                if changed.is_err() || *cancel.borrow() {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl EnsureReceiveReadyPort for FileTransferLifecycle {
     async fn ensure_receive_ready(&self) -> Result<(), ReceiveReadinessError> {
@@ -434,5 +458,26 @@ async fn cleanup_cached_path(cached_path: &str) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn timeout_sweep_can_stop_before_receive_becomes_ready() {
+        let readiness = Arc::new(ReceiveReadinessCoordinator::new());
+        let (cancel, mut receiver) = tokio::sync::watch::channel(false);
+        cancel.send(true).expect("cancellation receiver is alive");
+
+        let stopped = tokio::time::timeout(
+            Duration::from_millis(100),
+            wait_until_ready_or_cancel(readiness.as_ref(), &mut receiver),
+        )
+        .await
+        .expect("cancellation must not wait for receive readiness");
+
+        assert!(!stopped);
     }
 }

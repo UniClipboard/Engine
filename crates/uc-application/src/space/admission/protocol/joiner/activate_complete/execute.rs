@@ -114,6 +114,7 @@ impl SpaceAdmissionProtocol {
                     migrated_records: outcome.migrated_records,
                     preserved_unreadable_records: outcome.preserved_unreadable_records,
                 },
+                peer_upgrade_required: false,
             })
         })
         .await

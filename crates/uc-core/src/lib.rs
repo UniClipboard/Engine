@@ -28,7 +28,7 @@ pub mod trusted_peer;
 pub use membership::{MemberRepositoryPort, MemberSyncPreferences, MembershipError, SpaceMember};
 pub use security::{FingerprintError, IdentityFingerprint};
 #[cfg(feature = "task-registry")]
-pub use task_registry::TaskRegistry;
+pub use task_registry::{TaskRegistry, TaskShutdownReport};
 pub use trusted_peer::{
     TrustAbortReason, TrustedPeer, TrustedPeerError, TrustedPeerEvent, TrustedPeerRepositoryPort,
 };

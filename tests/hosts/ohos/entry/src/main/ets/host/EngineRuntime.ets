@@ -44,7 +44,7 @@ class EngineRuntime {
         {
           serviceVersion: '1.0.0',
           environment: 'development',
-          appChannel: 'ohos-system-host-probe',
+          appChannel: 'development',
           remoteDiagnosticsEnabled: false
         },
         {

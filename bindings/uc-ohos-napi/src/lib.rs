@@ -49,17 +49,7 @@ pub struct OhObservabilityConfig {
 
 impl std::fmt::Debug for OhObservabilityConfig {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("OhObservabilityConfig")
-            .field("service_version", &self.service_version)
-            .field("environment", &self.environment)
-            .field("app_channel", &self.app_channel)
-            .field(
-                "remote_diagnostics_enabled",
-                &self.remote_diagnostics_enabled,
-            )
-            .field("collector", &self.collector.as_ref().map(|_| "REDACTED"))
-            .finish()
+        formatter.write_str("OhObservabilityConfig(REDACTED)")
     }
 }
 
@@ -69,6 +59,17 @@ pub struct OhObservabilitySetup {
     pub remote: String,
     pub local_file: String,
     pub dropped_local_records: f64,
+}
+
+#[napi(object)]
+pub struct OhObservabilityHealth {
+    pub remote: String,
+    pub local_file: String,
+    pub dropped_local_records: f64,
+    pub dropped_remote_spans: f64,
+    pub dropped_remote_logs: f64,
+    pub failed_remote_span_batches: f64,
+    pub failed_remote_log_batches: f64,
 }
 
 #[napi(object)]
@@ -186,6 +187,7 @@ pub struct OhJoinSpaceStatus {
     pub sponsor_device_id: Option<String>,
     pub sponsor_identity_fingerprint: Option<String>,
     pub cancel_requested: Option<bool>,
+    pub peer_upgrade_required: bool,
     pub rejection_reason: Option<String>,
 }
 
@@ -233,6 +235,11 @@ pub fn install_process_observability(
     directories: OhHostDirectories,
 ) -> napi::Result<OhObservabilitySetup> {
     observability::install(config, directories)
+}
+
+#[napi]
+pub fn query_process_observability_health() -> napi::Result<OhObservabilityHealth> {
+    observability::health()
 }
 
 #[napi]

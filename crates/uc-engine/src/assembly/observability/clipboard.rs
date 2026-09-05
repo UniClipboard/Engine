@@ -40,7 +40,6 @@ impl ClipboardDispatchPort for ObservedClipboardDispatch {
             operation: DiagnosticOperation::ClipboardDispatch,
             role: DiagnosticRole::Client,
             kind: DiagnosticSpanKind::Client,
-            flow: None,
         });
         let report = self
             .inner

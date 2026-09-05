@@ -204,7 +204,6 @@ fn map_settings(settings: app::SettingsView) -> SettingsSummary {
             language: settings.general.language,
             device_name: settings.general.device_name,
             update_channel: settings.general.update_channel.map(map_update_channel),
-            telemetry_enabled: settings.general.telemetry_enabled,
             usage_analytics_enabled: settings.general.usage_analytics_enabled,
             debug_mode: settings.general.debug_mode,
         },
@@ -289,7 +288,6 @@ fn map_patch(patch: SettingsPatch) -> Result<app::SettingsPatch, String> {
             update_channel: value
                 .update_channel
                 .map(|channel| channel.map(unmap_update_channel)),
-            telemetry_enabled: value.telemetry_enabled,
             usage_analytics_enabled: value.usage_analytics_enabled,
             debug_mode: value.debug_mode,
         }),

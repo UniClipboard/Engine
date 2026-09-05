@@ -3,6 +3,7 @@ pub(crate) mod facade;
 pub(crate) mod host;
 pub(crate) mod lifecycle;
 pub(crate) mod maintenance_space_transition;
+pub(crate) mod membership_events;
 #[cfg(feature = "lan-compat")]
 pub(crate) mod mobile_lan;
 pub(crate) mod network;

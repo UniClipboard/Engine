@@ -410,6 +410,7 @@ async fn status_uses_the_current_join_projection_from_admission_state() {
             sponsor_device_id: None,
             sponsor_identity_fingerprint: None,
             cancel_requested: false,
+            peer_upgrade_required: false,
         }))),
     );
 

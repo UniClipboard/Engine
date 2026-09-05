@@ -10,6 +10,7 @@ STAGE_DIR="$TARGET_DIR/uc-engine-uniffi-android-package"
 BINDINGS_DIR="$STAGE_DIR/kotlin"
 JNI_DIR="$STAGE_DIR/jni"
 GRADLE_BUILD_DIR="$STAGE_DIR/gradle-build"
+RUSTLS_VERIFIER_JAR="$STAGE_DIR/rustls-platform-verifier-classes.jar"
 ANDROID_PROJECT="$REPO_ROOT/bindings/uc-engine-uniffi/android"
 GRADLEW="$REPO_ROOT/tests/hosts/android/gradlew"
 AAR_OUT="$DIST_DIR/UniClipboardEngine.aar"
@@ -49,13 +50,45 @@ cp "$TARGET_DIR/x86_64-linux-android/release/libuc_engine_uniffi.so" \
 cp "$JNI_DIR/arm64-v8a/libuc_engine_uniffi.so" "$DEBUG_DIR/arm64-v8a.so"
 cp "$JNI_DIR/x86_64/libuc_engine_uniffi.so" "$DEBUG_DIR/x86_64.so"
 
+RUSTLS_ANDROID_MANIFEST="$(cargo metadata --locked --format-version 1 --filter-platform aarch64-linux-android \
+  --manifest-path crates/uc-observability-runtime/Cargo.toml \
+  | jq -r '.packages[] | select(.name == "rustls-platform-verifier-android") | .manifest_path')"
+RUSTLS_ANDROID_VERSION="$(cargo metadata --locked --format-version 1 --filter-platform aarch64-linux-android \
+  --manifest-path crates/uc-observability-runtime/Cargo.toml \
+  | jq -r '.packages[] | select(.name == "rustls-platform-verifier-android") | .version')"
+if [[ -z "$RUSTLS_ANDROID_MANIFEST" || -z "$RUSTLS_ANDROID_VERSION" ]]; then
+  echo "rustls-platform-verifier-android metadata is unavailable" >&2
+  exit 1
+fi
+RUSTLS_ANDROID_ROOT="$(dirname "$RUSTLS_ANDROID_MANIFEST")"
+RUSTLS_ANDROID_AAR="$RUSTLS_ANDROID_ROOT/maven/rustls/rustls-platform-verifier/$RUSTLS_ANDROID_VERSION/rustls-platform-verifier-$RUSTLS_ANDROID_VERSION.aar"
+if [[ ! -f "$RUSTLS_ANDROID_AAR" ]]; then
+  echo "rustls-platform-verifier Android archive is unavailable" >&2
+  exit 1
+fi
+unzip -p "$RUSTLS_ANDROID_AAR" classes.jar > "$RUSTLS_VERIFIER_JAR"
+if [[ ! -s "$RUSTLS_VERIFIER_JAR" ]]; then
+  echo "rustls-platform-verifier classes are unavailable" >&2
+  exit 1
+fi
+
 echo "==> Compile Kotlin bindings and assembleRelease"
 UC_ENGINE_UNIFFI_KOTLIN_DIR="$BINDINGS_DIR" \
 UC_ENGINE_UNIFFI_JNI_DIR="$JNI_DIR" \
 UC_ENGINE_UNIFFI_GRADLE_BUILD_DIR="$GRADLE_BUILD_DIR" \
+UC_ENGINE_UNIFFI_RUSTLS_VERIFIER_JAR="$RUSTLS_VERIFIER_JAR" \
   "$GRADLEW" --no-daemon -p "$ANDROID_PROJECT" assembleRelease
 
 cp "$GRADLE_BUILD_DIR/outputs/aar/UniClipboardEngine-release.aar" "$AAR_OUT"
+# 必须读完整个清单；grep 提前退出会在 pipefail 下把上游 SIGPIPE 误判为缺失。
+if ! unzip -Z1 "$AAR_OUT" | grep -Fx 'libs/rustls-platform-verifier-classes.jar' >/dev/null; then
+  echo "Android archive does not contain rustls-platform-verifier classes" >&2
+  exit 1
+fi
+if ! jar tf "$RUSTLS_VERIFIER_JAR" | grep -Fx 'org/rustls/platformverifier/CertificateVerifier.class' >/dev/null; then
+  echo "rustls-platform-verifier CertificateVerifier class is unavailable" >&2
+  exit 1
+fi
 cp "$BINDINGS_DIR/uniffi/uc_engine_uniffi/uc_engine_uniffi.kt" "$DIST_DIR/"
 shasum -a 256 "$AAR_OUT" | awk '{print $1}' > "$CHECKSUM_FILE"
 

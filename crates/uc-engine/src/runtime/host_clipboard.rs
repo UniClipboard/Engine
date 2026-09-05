@@ -26,8 +26,8 @@ pub(super) async fn spawn_host_clipboard_change_task(
     runtime: HostClipboardChangeRuntime,
     tasks: Arc<TaskRegistry>,
 ) {
-    tasks
-        .spawn("host_clipboard_changes", move |cancel| async move {
+    let _ = tasks
+        .spawn(move |cancel| async move {
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => {

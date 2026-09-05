@@ -70,6 +70,165 @@ fn authenticated_joiner_exposes_continuation_recovery_for_the_same_request() {
 }
 
 #[test]
+fn authenticated_initial_join_can_persist_an_explicit_peer_upgrade_rejection() {
+    let authenticated = initiated_joiner_aggregate_fixture()
+        .with_authenticated_channel(
+            AdmissionPeerBinding::new(
+                AdmissionChannelPeerId::from_bytes([0x35; 32]).expect("valid local peer"),
+                AdmissionChannelPeerId::from_bytes([0x36; 32]).expect("valid remote peer"),
+            )
+            .expect("distinct peers"),
+            AdmissionContinuationCredential::from_bytes(vec![0x37; 64])
+                .expect("valid continuation credential"),
+        )
+        .expect("initial authentication transition")
+        .into_replacement();
+
+    let rejected = authenticated
+        .reject_peer_upgrade()
+        .expect("authenticated initial join can report an incompatible peer")
+        .into_replacement();
+
+    assert!(rejected.is_terminal());
+    let SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+        SpaceAdmissionRejectedState::LocalJoiner(rejected),
+    )) = rejected.state()
+    else {
+        panic!("peer upgrade must become a local Joiner rejection");
+    };
+    assert_eq!(
+        rejected.reason(),
+        SpaceAdmissionRejectionReason::PeerUpgradeRequired
+    );
+}
+
+#[test]
+fn later_joiner_recovery_states_preserve_the_exact_exchange_when_peer_upgrade_is_required() {
+    for (name, aggregate, request_kind) in [
+        (
+            "prepared",
+            joiner_prepared_aggregate_fixture(),
+            SpaceAdmissionMessageKind::Prepared,
+        ),
+        (
+            "applied",
+            joiner_applied_aggregate_fixture(),
+            SpaceAdmissionMessageKind::Applied,
+        ),
+        (
+            "cancelling",
+            cancelling_joiner_aggregate_fixture(),
+            SpaceAdmissionMessageKind::CancelRequested,
+        ),
+        (
+            "active pending settlement",
+            active_pending_settlement_aggregate_fixture(),
+            SpaceAdmissionMessageKind::CompleteAck,
+        ),
+    ] {
+        let original_version = aggregate.record_version();
+        let original_exchange = aggregate
+            .pending_exchange()
+            .expect("fixture must contain a pending exchange");
+        let original_route = original_exchange.route().as_bytes().to_vec();
+        let original_request = original_exchange
+            .request_envelope()
+            .encode_canonical_v1()
+            .expect("fixture request must encode");
+        let original_retry = *original_exchange.retry_state();
+
+        let transition = aggregate
+            .mark_peer_upgrade_required()
+            .unwrap_or_else(|error| panic!("{name} must preserve a peer-upgrade block: {error}"));
+
+        assert!(transition.effects().is_empty(), "{name}");
+        let blocked = transition.into_replacement();
+        assert_eq!(blocked.record_version(), original_version + 1, "{name}");
+        assert!(blocked.peer_upgrade_required(), "{name}");
+        let blocked_exchange = blocked
+            .pending_exchange()
+            .expect("blocked state must retain its pending exchange");
+        assert_eq!(
+            blocked_exchange.request_envelope().kind(),
+            request_kind,
+            "{name}"
+        );
+        assert_eq!(blocked_exchange.route().as_bytes(), original_route, "{name}");
+        assert_eq!(
+            blocked_exchange
+                .request_envelope()
+                .encode_canonical_v1()
+                .expect("blocked request must encode"),
+            original_request,
+            "{name}"
+        );
+        assert_eq!(*blocked_exchange.retry_state(), original_retry, "{name}");
+        assert_eq!(
+            blocked_exchange.block_reason(),
+            Some(AdmissionExchangeBlockReason::PeerUpgradeRequired),
+            "{name}"
+        );
+        assert_admission_persistence_round_trip(blocked);
+    }
+}
+
+#[test]
+fn successful_settlement_clears_the_saved_peer_upgrade_block() {
+    let blocked = active_pending_settlement_aggregate_fixture()
+        .mark_peer_upgrade_required()
+        .expect("active settlement may wait for a peer upgrade")
+        .into_replacement();
+    let complete_ack_id = blocked
+        .pending_exchange()
+        .expect("active settlement keeps CompleteAck")
+        .request_envelope()
+        .header()
+        .message_id();
+    let settled = SpaceAdmissionEnvelopeV1::new(
+        blocked.admission_id(),
+        AdmissionRole::Sponsor,
+        3,
+        AdmissionMessageId::from_bytes([0xd8; 32]).expect("non-zero settled message id"),
+        Some(complete_ack_id),
+        SpaceAdmissionBodyV1::Settled(
+            AdmissionSettledV1::new([0xd9; 32]).expect("non-zero acknowledgement digest"),
+        ),
+    )
+    .expect("valid Settled reply");
+
+    let completed = blocked
+        .accept_settled(settled, [0xda; 32])
+        .expect("the exact reply must resume a blocked settlement")
+        .into_replacement();
+
+    assert!(completed.is_active_settled());
+    assert!(!completed.peer_upgrade_required());
+    assert!(completed.pending_exchange().is_none());
+}
+
+#[test]
+fn cancelling_a_blocked_prepared_join_keeps_the_upgrade_prompt() {
+    let blocked = joiner_prepared_aggregate_fixture()
+        .mark_peer_upgrade_required()
+        .expect("prepared join may wait for a peer upgrade")
+        .into_replacement();
+    let cancelling = blocked
+        .request_cancel(
+            AdmissionMessageId::from_bytes([0xdb; 32]).expect("non-zero cancel message id"),
+            AdmissionRetryState::new(0, 0).expect("initial retry state"),
+        )
+        .expect("blocked prepared join may still be cancelled")
+        .into_replacement();
+
+    assert!(matches!(
+        cancelling.state(),
+        SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Cancelling(_))
+    ));
+    assert!(cancelling.peer_upgrade_required());
+    assert_admission_persistence_round_trip(cancelling);
+}
+
+#[test]
 fn recovery_required_terminal_blocks_further_protocol_progress() {
     let recovery = joiner_candidate_aggregate_fixture()
         .require_recovery(AdmissionRecoveryCategory::ProtocolConflict)

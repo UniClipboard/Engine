@@ -108,6 +108,11 @@ pub struct AdmissionRetryState {
     next_attempt_at_ms: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdmissionExchangeBlockReason {
+    PeerUpgradeRequired,
+}
+
 impl AdmissionRetryState {
     /// 建立一份合法的重试进度；时间不能早于准入计时起点。
     pub fn new(
@@ -162,6 +167,7 @@ pub struct PendingAdmissionExchange {
     request_envelope: SpaceAdmissionEnvelopeV1,
     exact_expected_reply_kind: SpaceAdmissionMessageKind,
     retry_state: AdmissionRetryState,
+    block_reason: Option<AdmissionExchangeBlockReason>,
 }
 
 impl PendingAdmissionExchange {
@@ -180,6 +186,7 @@ impl PendingAdmissionExchange {
             request_envelope,
             exact_expected_reply_kind,
             retry_state,
+            block_reason: None,
         })
     }
 
@@ -197,6 +204,14 @@ impl PendingAdmissionExchange {
 
     pub const fn retry_state(&self) -> &AdmissionRetryState {
         &self.retry_state
+    }
+
+    pub(crate) const fn block_reason(&self) -> Option<AdmissionExchangeBlockReason> {
+        self.block_reason
+    }
+
+    pub(crate) fn mark_peer_upgrade_required(&mut self) {
+        self.block_reason = Some(AdmissionExchangeBlockReason::PeerUpgradeRequired);
     }
 
     /// 判断当前保存的请求能否作为某条入站消息的精确后继回复。
@@ -221,6 +236,7 @@ impl std::fmt::Debug for PendingAdmissionExchange {
             .field("request_kind", &self.request_envelope.kind())
             .field("exact_expected_reply_kind", &self.exact_expected_reply_kind)
             .field("retry_state", &self.retry_state)
+            .field("block_reason", &self.block_reason)
             .finish()
     }
 }

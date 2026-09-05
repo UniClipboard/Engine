@@ -51,7 +51,21 @@ crate 根只保留稳定名称的统一导出，内部按职责分为七层：
 
 移动绑定保留默认关闭产品分析的启动方式，并提供一个需要宿主明确传入产品分析能力的启动方式。启用后，核心统一产生脱敏事件并安排匿名身份、空间成员身份和分组身份的切换；Swift 或 Kotlin 宿主只实现一个接收入口，不需要了解核心内部流程。
 
-宿主负责用户许可、第三方服务接入、发送队列和分析身份的持久保存。事件接收应快速完成，网络发送和重试不能阻塞核心。发送失败不会改变业务结果；身份保存失败会作为明确失败返回。绑定传出的属性是核心生成的 JSON 对象，只能用于供应商转发，不得混入剪贴板内容、设备名、文件名、路径、密码、密钥或令牌。Engine 不直接依赖 PostHog、Sentry 或 OTLP。
+宿主负责用户许可、第三方服务接入、发送队列和分析身份的持久保存。事件接收应快速完成，网络发送和重试不能阻塞核心。发送失败不会改变业务结果；身份保存失败会作为明确失败返回。绑定传出的属性是核心生成的 JSON 对象，只能用于供应商转发，不得混入剪贴板内容、设备名、文件名、路径、密码、密钥或令牌。产品分析路径不依赖 PostHog、Sentry 或运行诊断发送器；运行诊断使用下面独立的进程级合同。
+
+### 运行诊断
+
+直接 Rust 宿主通过 `uc_engine::observability` 使用稳定入口；iOS、Android 和 HarmonyOS 绑定提供对等入口。宿主必须在创建第一个
+Engine 前构造 `ObservabilityResource` 和 `ObservabilityConfig`，再调用 `ProcessObservabilityRuntime::install`。相同配置重复安装
+复用同一进程运行时，不同配置明确失败；远程诊断许可、Collector 地址和认证只归宿主，不属于 Engine 设置。
+
+`ProcessObservabilityHandle::health` 返回当前本地和远程状态、丢弃数量及失败批次；初始安装结果不能代替运行后的健康查询。
+移动暂停和单个 Engine 关闭只调用有界 `force_flush`，恢复继续复用同一运行时。只有宿主确认进程最终退出时才调用 `shutdown`；
+完成后不得在同一进程复活。刷新、关闭或远程发送失败不改变业务结果，已完成的关闭失败也不能被重复调用掩盖。
+
+本地受管日志固定为 7 天且总量不超过 100,000,000 bytes，可通过 `managed_log_files` 与现有诊断导出读取。远程只连接宿主提供的
+Collector；客户端不直接依赖 PostHog。所有输出默认拒绝普通模块记录，只接受固定字段，不能包含内容、身份、地址、路径、凭据或
+错误正文。
 
 ## 生命周期
 
@@ -156,7 +170,11 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 清理并返回可重试的 unavailable，宿主随后再次创建 Engine。`QuerySetupState` 不返回内部服务状态。
 
 规格 023 的稳定产品外形已经接入：`JoinSpace` 返回 Active、Pending、Rejected 三类结果并公开稳定
-`join_id`，`CancelJoinSpace(join_id)` 负责本机取消，待激活候选继续使用现有 `RemoveMember(device_id)`。现有
+`join_id`，Pending/Active 的 `peer_upgrade_required` 表示这次加入仍需对端升级，首次请求不兼容则以 Rejected 的稳定原因明确返回。
+提示不会把已经正式提交或本机已激活的加入回滚成失败；对端升级上线后立即继续同一请求并在成功推进时清除。提示出现、清除或
+明确拒绝保存成功后发送 `RefreshRequired { StateInvalidated }`，宿主随后通过 `QueryDeviceGroupChoices` 重新读取完整事实；普通内部推进
+和重复旧端错误不发送。`CancelJoinSpace(join_id)`
+负责本机取消，待激活候选继续使用现有 `RemoveMember(device_id)`。现有
 `QueryDeviceGroupChoices` 返回的 `DeviceGroupChoicesSummary.device_trust` 包含 `current_join` 和
 `pending_inbound_member`；现有 `DeviceTrustChanged { revision }`
 继续只提醒重新查询，revision 在同一 profile 内跨 Space 单调递增。不新增按 join id 查询任意历史操作、

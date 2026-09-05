@@ -143,7 +143,6 @@ pub struct GeneralSettingsSummary {
     pub language: Option<String>,
     pub device_name: Option<String>,
     pub update_channel: Option<UpdateChannelSummary>,
-    pub telemetry_enabled: bool,
     pub usage_analytics_enabled: bool,
     pub debug_mode: bool,
 }
@@ -164,7 +163,6 @@ pub struct GeneralSettingsPatch {
     pub language: Option<Option<String>>,
     pub device_name: Option<Option<String>>,
     pub update_channel: Option<Option<UpdateChannelSummary>>,
-    pub telemetry_enabled: Option<bool>,
     pub usage_analytics_enabled: Option<bool>,
     pub debug_mode: Option<bool>,
 }

@@ -45,15 +45,13 @@ impl MaintainSpaceMembershipUseCase {
         let peer_online = matches!(trigger, MembershipMaintenanceTrigger::PeerOnline(_));
         let periodic = matches!(trigger, MembershipMaintenanceTrigger::Periodic);
 
-        if !peer_online
-            && !record(
-                &mut report,
-                self.deps
-                    .admissions
-                    .recover_space_admissions(&trigger)
-                    .await,
-            )
-        {
+        if !record(
+            &mut report,
+            self.deps
+                .admissions
+                .recover_space_admissions(&trigger)
+                .await,
+        ) {
             return report;
         }
         if !peer_online

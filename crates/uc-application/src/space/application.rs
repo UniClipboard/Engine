@@ -74,6 +74,7 @@ struct SpaceApplicationDeps {
     group_bootstrap: Arc<dyn GroupBootstrapPort>,
     clock: Arc<dyn uc_core::ports::ClockPort>,
     settings: Arc<dyn uc_core::ports::SettingsPort>,
+    host_event_bus: Arc<crate::facade::HostEventBus>,
 }
 
 impl SpaceApplicationDeps {
@@ -84,6 +85,7 @@ impl SpaceApplicationDeps {
             group_bootstrap: Arc::clone(&application.security.space_access_ports.group_bootstrap),
             clock: Arc::clone(&application.system.clock),
             settings: Arc::clone(&application.settings),
+            host_event_bus: Arc::clone(&application.host_event_bus),
         }
     }
 }
@@ -127,6 +129,7 @@ impl SpaceApplication {
         group_bootstrap: Arc<dyn GroupBootstrapPort>,
         clock: Arc<dyn uc_core::ports::ClockPort>,
         settings: Arc<dyn uc_core::ports::SettingsPort>,
+        host_event_bus: Arc<crate::facade::HostEventBus>,
         peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
         re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
     ) -> Self {
@@ -137,6 +140,7 @@ impl SpaceApplication {
                 group_bootstrap,
                 clock,
                 settings,
+                host_event_bus,
             },
             peer_reachability_changed_events,
             re_pairing,
@@ -158,6 +162,7 @@ impl SpaceApplication {
             group_bootstrap,
             clock,
             settings,
+            host_event_bus,
         } = deps;
         let SpaceAdmissionAdapters {
             re_pairing_state_store: _,
@@ -265,6 +270,7 @@ impl SpaceApplication {
         let admission_recovery = AdmissionRecoveryService::new(
             pending_admission_recovery_state,
             space_admission_transport,
+            host_event_bus,
         );
         let space_admission = Arc::new(SpaceAdmissionProtocol::new(
             joiner_admission,

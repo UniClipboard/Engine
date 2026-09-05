@@ -360,6 +360,7 @@ pub(crate) fn join_space_status(status: CurrentJoinStatus) -> JoinSpaceStatusSum
         CurrentJoinStatus::Active {
             join_id,
             joined_space,
+            peer_upgrade_required,
         } => JoinSpaceStatusSummary::Active {
             join_id: encode_join_id(join_id),
             joined_space: JoinedSpaceSummary {
@@ -377,6 +378,7 @@ pub(crate) fn join_space_status(status: CurrentJoinStatus) -> JoinSpaceStatusSum
                 migrated_records: joined_space.migrated_records,
                 preserved_unreadable_records: joined_space.preserved_unreadable_records,
             },
+            peer_upgrade_required,
         },
         CurrentJoinStatus::Pending {
             join_id,
@@ -384,6 +386,7 @@ pub(crate) fn join_space_status(status: CurrentJoinStatus) -> JoinSpaceStatusSum
             sponsor_device_id,
             sponsor_identity_fingerprint,
             cancel_requested,
+            peer_upgrade_required,
         } => JoinSpaceStatusSummary::Pending {
             join_id: encode_join_id(join_id),
             target_space_id,
@@ -391,6 +394,7 @@ pub(crate) fn join_space_status(status: CurrentJoinStatus) -> JoinSpaceStatusSum
             sponsor_identity_fingerprint: sponsor_identity_fingerprint
                 .map(|fingerprint| fingerprint.as_display().to_string()),
             cancel_requested,
+            peer_upgrade_required,
         },
         CurrentJoinStatus::Rejected { join_id, reason } => JoinSpaceStatusSummary::Rejected {
             join_id: encode_join_id(join_id),
@@ -628,6 +632,26 @@ fn map_remove_space_member_error(error: RemoveSpaceMemberError) -> EngineError {
 mod tests {
     use super::*;
     use uc_core::membership::{WorkspaceFailureCategory, WorkspacePhase};
+
+    #[test]
+    fn join_status_preserves_the_peer_upgrade_prompt() {
+        let summary = join_space_status(CurrentJoinStatus::Pending {
+            join_id: [0x31; 16],
+            target_space_id: None,
+            sponsor_device_id: None,
+            sponsor_identity_fingerprint: None,
+            cancel_requested: false,
+            peer_upgrade_required: true,
+        });
+
+        assert!(matches!(
+            summary,
+            JoinSpaceStatusSummary::Pending {
+                peer_upgrade_required: true,
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn roster_failures_keep_stable_categories_and_distinct_codes() {

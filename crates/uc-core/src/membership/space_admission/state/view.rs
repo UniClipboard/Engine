@@ -515,4 +515,13 @@ impl SpaceAdmissionAggregate {
             _ => None,
         }
     }
+
+    pub fn peer_upgrade_required(&self) -> bool {
+        self.pending_exchange().is_some_and(|exchange| {
+            matches!(
+                exchange.block_reason(),
+                Some(super::super::exchange::AdmissionExchangeBlockReason::PeerUpgradeRequired)
+            )
+        })
+    }
 }

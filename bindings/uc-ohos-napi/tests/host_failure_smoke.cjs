@@ -49,7 +49,7 @@ async function main() {
       {
         serviceVersion: '1.2.3',
         environment: 'test',
-        appChannel: 'ohos-host-failure-smoke',
+        appChannel: 'test',
         remoteDiagnosticsEnabled: false,
       },
       {

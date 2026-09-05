@@ -208,7 +208,6 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
             operation: DiagnosticOperation::ClipboardReceive,
             role: DiagnosticRole::Server,
             kind: DiagnosticSpanKind::Server,
-            flow: None,
         });
         let _ = set_remote_parent(&span, decoded.trace_context.as_ref());
         async move {
@@ -680,7 +679,6 @@ mod tests {
             operation: DiagnosticOperation::ClipboardDispatch,
             role: DiagnosticRole::Client,
             kind: DiagnosticSpanKind::Client,
-            flow: None,
         });
         let mut dispatch_task = tokio::spawn(
             async move {
@@ -835,7 +833,6 @@ mod tests {
             operation: DiagnosticOperation::ClipboardDispatch,
             role: DiagnosticRole::Client,
             kind: DiagnosticSpanKind::Client,
-            flow: None,
         });
         let client_trace_id = client_span.context().span().span_context().trace_id();
         let result = dispatch

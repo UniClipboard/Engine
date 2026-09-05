@@ -167,6 +167,7 @@ impl<E: DbExecutor + Send + Sync> SqliteSpaceAdmissionState<E> {
         admission: JoinerAdmission,
     ) -> Result<CurrentJoinStatus, QueryDeviceTrustError> {
         let join_id = *admission.join_id().as_bytes();
+        let peer_upgrade_required = admission.peer_upgrade_required();
         if let Some(reason) = admission.rejection_reason() {
             return Ok(CurrentJoinStatus::Rejected { join_id, reason });
         }
@@ -177,6 +178,7 @@ impl<E: DbExecutor + Send + Sync> SqliteSpaceAdmissionState<E> {
                 sponsor_device_id: None,
                 sponsor_identity_fingerprint: None,
                 cancel_requested: admission.is_cancelling(),
+                peer_upgrade_required,
             });
         }
 
@@ -228,6 +230,7 @@ impl<E: DbExecutor + Send + Sync> SqliteSpaceAdmissionState<E> {
                 migrated_records,
                 preserved_unreadable_records,
             },
+            peer_upgrade_required,
         })
     }
 }

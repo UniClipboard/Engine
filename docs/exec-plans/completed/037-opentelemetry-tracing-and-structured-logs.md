@@ -2,15 +2,15 @@
 
 ## 状态
 
-- **状态**：实施中（Slices 0-2 已完成）
-- **日期**：2026-09-04
+- **状态**：已完成
+- **日期**：2026-09-05
 - **前置规格**：[035 Space 观测装配 interface 收敛](../completed/035-space-domain-observability-assembly.md)、[036 关键模块深化与退役路径 clean cutover](../completed/036-architecture-deepening-clean-cutovers.md)
 - **取代计划**：[移动端日志文件层](../completed/mobile-log-file-layer.md)中已经实施的文件日志部分已在 Slice 0 校准归档；未完成的保留、导出和远程发送由本规格取代
 - **完整负责人**：宿主进程拥有唯一 `ProcessObservabilityRuntime`，负责 subscriber、OpenTelemetry providers、系统/文件/远程 sinks、过滤、批处理、刷新与关闭；`uc-engine::assembly::observability` 继续只负责跨层完整 capability 的稳定耗时与结果分类；Application 只负责业务流程，Infra 只负责具体能力与受认证网络上下文传播，Core 不感知观测
 - **调用方唯一动作**：宿主在创建任意 Engine 前用一份宿主配置安装进程级观测运行时，并在平台生命周期节点调用其完整 `flush` 或最终 `shutdown`；业务调用方继续只调用现有 Engine operation，不提交阶段、计时或日志字段
-- **成功结果**：系统日志、本地有界 JSONL、OTLP traces 与 OTLP logs 使用同一资源信息；本地以 Jaeger 验证 trace、以 Collector 可解码 sink 验证 logs，生产 Collector 优先输出到 PostHog；在线跨设备调用通过 W3C Trace Context 形成父子 trace，重试/重启通过匿名 `uc.flow.id` 聚合；产品 analytics 保持独立
-- **失败结果**：安装、编码、排队、上传、刷新或关闭失败只产生限频本地健康结果，不改变 Engine 启动、配对、同步、持久化或生命周期结果；队列满时丢观测数据，不反压业务
-- **重试与重启责任**：OTLP batch processor 只负责进程内有界批量与重试；移动进后台执行有时限的 `force_flush`，恢复后复用同一 provider；第一版不持久化远程队列，进程终止时未发送数据允许丢失；业务恢复仍由原 Application/Infra owner 负责
+- **成功结果**：系统日志与本地有界 JSONL 使用同一安全记录合同，OTLP traces 与 OTLP logs 另共用同一 Resource；本地以 Jaeger 验证 trace、以 Collector 可解码 sink 验证 logs，生产 Collector 优先输出到 PostHog；在线跨设备调用通过 W3C Trace Context 形成父子 trace，Space 准入重试/重启通过匿名 `uc.flow.id` 聚合；产品 analytics 保持独立
+- **失败结果**：配置冲突或进程已有其他 subscriber 时安装明确失败；运行时安装完成后，编码、排队、上传、刷新或关闭失败只产生限频本地健康结果，不改变配对、同步、持久化或生命周期结果；队列满时丢观测数据，不反压业务
+- **重试与重启责任**：OTLP batch processor 只负责进程内有界批量；HTTP client 提供单次有界发送，移动进后台执行有时限的 `force_flush`，恢复后复用同一 provider；第一版不持久化或重放远程队列，进程终止时未发送数据允许丢失；业务恢复仍由原 Application/Infra owner 负责
 
 ## 研究依据
 
@@ -22,7 +22,8 @@
 - [tracing-opentelemetry](https://github.com/tokio-rs/tracing-opentelemetry)
 - [Collector Gateway deployment](https://opentelemetry.io/docs/collector/deploy/gateway/)
 - [Sensitive data handling](https://opentelemetry.io/docs/security/handling-sensitive-data/)
-- [PostHog](https://posthog.com/)
+- [PostHog 官方 Collector 路由](https://github.com/PostHog/posthog/blob/master/docker-compose.base.yml)
+- [PostHog 官方认证说明](https://github.com/PostHog/posthog.com/blob/master/contents/docs/metrics/index.mdx)
 
 # 1. Overview
 
@@ -32,9 +33,10 @@ OpenTelemetry SDK、logs bridge、trace layer 或 OTLP exporter。`crates/uc-obs
 subscriber，但安装失败被忽略；HarmonyOS 和直接 Rust 宿主没有对等安装。文件层按天滚动但没有保留上限，诊断导出又不识别
 移动文件名。
 
-当前职责也不一致。规格 035 已把 Space 的持续依赖计时收口到 Engine decorator，这是正确基础；但 Application 与 Infra
-仍有大量直接 span、手工 `Instant` 和日志。部分现有 info 记录包含 Space、设备、摘要、地址或真实路径，会进入系统日志和
-明文本地文件。现有架构检查没有覆盖全部 Infra、错误正文和真实 sink 输出。直接接远程 exporter 会扩大泄露面。
+当前职责也不一致。规格 035 曾把 Space 的调用级依赖计时收口到 Engine decorator，但这仍让 Engine 理解准入状态、准备和激活
+子步骤；本规格最终只保留完整能力和认证 endpoint，跨步骤关联改由 Application 完整 owner 提供不透明作用域。Application 与
+Infra 仍有大量直接 span、手工 `Instant` 和日志，部分 info 记录包含 Space、设备、摘要、地址或真实路径，会进入系统日志和明文
+本地文件。现有架构检查没有覆盖全部 Infra、错误正文和真实 sink 输出。直接接远程 exporter 会扩大泄露面。
 
 本规格建立一个最小而完整的长期架构：先固定安全 schema 和真实进程级输出运行时，再用 Clipboard 建立第一个跨设备
 tracer bullet；之后可并行迁移 Space 配对和补齐移动平台输出，最后一次性删除伪 OTLP、旧阶段计时和临时关联代码。
@@ -44,7 +46,7 @@ tracer bullet；之后可并行迁移 Space 配对和补齐移动平台输出，
 
 - 建立真实 OTLP traces 与 OTLP logs 管道，并用本地 Collector 或可解码 OTLP 接收端证明数据实际到达。
 - 保留 `tracing` 作为 Rust 统一埋点入口，分别用官方 trace layer 和 logs bridge 输出两个 signal。
-- 让一次在线跨设备请求使用 W3C Trace Context 形成真实父子 trace；让断网、重试和重启使用独立匿名 `uc.flow.id` 聚合。
+- 让一次在线跨设备请求使用 W3C Trace Context 形成真实父子 trace；让 Space 准入的断网、重试和重启使用独立匿名 `uc.flow.id` 聚合。
 - 固定 Core、Application、Infra、Engine、Binding/Host 与 Collector 的唯一责任，不为观测新增业务步骤查询或 Engine 编排。
 - traces 与 logs 共用同一 Resource，日志在 span 内自动获得 TraceId/SpanId；字段名称、类型和失败分类单一。
 - 产品 analytics 保持独立身份、事件和供应商语义，不进入运行诊断 trace/log，也不共享 flow id。
@@ -165,22 +167,24 @@ AnalyticsPort      -> 原产品分析供应商（完全独立）
 
 - **位置**：`crates/uc-observability-contract/src/diagnostics/`；现有 `analytics/` 保持独立。
 - **职责**：固定 `TelemetrySchemaVersion`、`FlowId`、资源字段、领域/操作/结果/失败枚举、字段 allowlist 与隐私分类。
-- **输入**：Engine/Infra 已持有的稳定枚举、计数、时长和不透明流程材料。
+- **输入**：Engine/Infra 已持有的稳定枚举、计数和时长；Application 完整准入 owner 已有的固定长度随机 attempt 材料。
 - **输出**：只含批准字段的 trace/log attribute 值；不发送、不安装 subscriber、不持有 provider。
-- **关系**：Core 不依赖 diagnostics；Application 不调用 raw tracing/OTel；Engine decorator 和 Infra wire adapter 消费契约。
+- **关系**：Core 不依赖 diagnostics；Application 不调用 raw tracing/OTel，只开启不可读取的不透明准入作用域；Engine decorator
+  和 Infra wire adapter 消费固定记录合同。
 
-`FlowId` 的长期语义是“跨重试/重启聚合同一业务尝试”，不是 TraceId。需要从已有随机业务 attempt 派生时，使用
-domain-separated SHA-256 并截取 128 bit；不记录原始业务 ID。派生函数按领域固定 purpose，调用方不能传任意 purpose
-字符串。所有 Debug 输出只显示是否存在，不显示值。
+`FlowId` 的长期语义是“跨重试/重启聚合同一业务尝试”，不是 TraceId。schema v1 只有 Application 完整准入恢复 owner 能用已有
+32-byte 随机 attempt 材料开启异步作用域；合同内部以 domain-separated SHA-256 截取 128 bit。作用域不返回 FlowId，Engine、Infra、
+Core 和公开接口均没有构造或读取入口。
 
 ### ProcessObservabilityRuntime
 
 - **位置**：新增内部 crate `crates/uc-observability-runtime/`；`uc-engine` 只重导出宿主需要的稳定 bootstrap facade，绑定仍只
   依赖 `uc-engine`。
-- **职责**：构造 Trace/Logs providers、OTLP/HTTP exporters、batch processors、filters、Resource、本地 JSONL 与 provider
-  生命周期；安装进程级唯一 subscriber。
+- **职责**：构造 Trace/Logs providers、OTLP/HTTP exporters、batch processors、容量与失败计数、filters、Resource、本地 JSONL
+  与 provider 生命周期；安装进程级唯一 subscriber。
 - **输入**：宿主拥有的 `ObservabilityConfig`：是否远程发送、Collector endpoint、脱敏认证、环境、发布渠道、本地日志目录。
-- **输出**：`ProcessObservabilityHandle`：`force_flush(deadline)`、`shutdown(deadline)`、只读 health summary。
+- **输出**：`ProcessObservabilityHandle`：`force_flush(deadline)`、`shutdown(deadline)`、只读 health summary；health 分别给出远程
+  trace/log 发送前丢弃总数、发送失败批次和本地文件丢弃数。发送前丢弃的首个原因区分格式拒绝、锁争用、队列满和已关闭。
 - **关系**：Engine 实例不持有 provider；一个进程内多个 Engine 复用同一 handle。安装已存在且配置一致返回 `Reused`，配置
   不一致返回稳定 `AlreadyInstalled`，不得静默成功。
 
@@ -192,7 +196,8 @@ endpoint、header 或 token。
 
 - **Apple**：保留 OSLog；使用共同 JSONL 与远程 layers。
 - **Android**：保留 Logcat；使用共同 JSONL 与远程 layers。
-- **HarmonyOS**：新增进程级安装入口；系统日志能力由 N-API host adapter 提供，共同 JSONL 与远程 layers 不复制。
+- **HarmonyOS**：新增进程级安装入口；共同 JSONL 与远程 layers 不复制。当前系统输出使用通用 JSON fallback，HiLog/实体设备输出
+  未实现，不把 N-API host adapter 写成既有能力。
 - **Direct Rust host**：通过 `uc-engine` 稳定 bootstrap facade 安装 generic/system layer；同一进程不得再安装第二 subscriber。
 
 本地文件固定 `engine.YYYY-MM-DD.jsonl`，只记录 info+，保留 7 天且总量上限 100 MB；启动与每日切换时按最旧优先清理。
@@ -203,29 +208,30 @@ endpoint、header 或 token。
 - **位置**：保留 `crates/uc-engine/src/assembly/observability/<domain>.rs`。
 - **职责**：完整 capability 的 client/internal span、调用耗时、稳定 outcome/error type、slow-success policy；只有既有完整 port
   调用才在此装饰。
-- **接口**：继续按真实装配 seam 接收并返回同一 Application-owned bundle；具体 decorator/policy 私有。
-- **限制**：不查询 Application 状态，不解析业务持久字符串，不添加第二步骤接口，不保留 raw adapter 绕过包装。
+- **接口**：Clipboard 和成员网络按真实完整 port 装饰；Space 准入只装饰现有完整认证 endpoint，不包装 adapter bundle 内部步骤。
+- **限制**：不观测状态加载、提交、材料准备或恢复子步骤，不解析业务标识，不添加步骤接口，不保留 raw adapter 绕过包装。
 
 远程可用 span/event 的 target 统一为 `uc.telemetry`。原 `admission.performance`、`membership.performance`、
-`storage.performance`、`uc_otlp` 在迁移结束后删除。普通模块 target 只进入经过隐私清理的本地系统/JSONL层，不默认远程发送。
+`storage.performance`、`uc_otlp` 在迁移结束后删除。普通模块 target 默认不进入系统、JSONL 或远程受管输出。
 
 ### Core task lifecycle result
 
 `uc-core::TaskRegistry` 删除 tracing 依赖和直接日志，`shutdown` 改为返回不含名称、路径或错误正文的纯
-`TaskShutdownReport { completed_count, aborted_count, join_error_count }`。Engine/Application 中实际拥有对应 runtime 的调用者
+`TaskShutdownReport { completed_count, timed_out_count, join_error_count }`。Engine/Application 中实际拥有对应 runtime 的调用者
 决定是否记录完整关闭结果。`uc-observability-contract::spawn_supervised` 不迁入 Core 或新 exporter runtime；Slice 4 按现有调用者
 归属收回 Application 私有 support，Infra/compatibility 调用改由各自已有生命周期 owner 监督，不建立新的跨层通用 helper crate。
 
 ### Infra trace propagation
 
 - **位置**：`crates/uc-infra/src/network/iroh/trace_context.rs` 与各协议私有 wire codec。
-- **职责**：用官方 W3C propagator 注入/提取 `traceparent` 和可选 `tracestate`；限制字段数量与长度；创建 remote parent。
+- **职责**：用官方 W3C propagator 注入/提取唯一 `traceparent`；限制长度；创建 remote parent。当前没有厂商状态需求，不传播
+  `tracestate` 或 baggage。
 - **认证**：接收方完成现有对端/消息认证后才使用 context。Clipboard context 由既有端到端认证 QUIC request 完整性保护；已有
   独立消息 MAC 的协议把 context 纳入该 MAC。不得为了观测修改 Application/Core 的内容加密 AAD。context 永不参与授权、
   消息摘要、幂等或业务结果。
 - **失败**：缺失、损坏、超限、未知或未认证 context 全部忽略并创建本地 root span，业务消息按原结果继续。
-- **生命周期**：trace context 只随一次在线请求传播，不持久化；重试/重启创建新 trace。只有完整业务 owner 已有随机、持久 attempt
-  时才派生 `uc.flow.id`；没有合法来源时省略，禁止从内容摘要、设备、密文或 TraceId 伪造。
+- **生命周期**：trace context 只随一次在线请求传播，不持久化；重试/重启创建新 trace。只有 Application 完整准入 owner 的不透明
+  作用域会让 client span 自动携带 `uc.flow.id`；Infra 与 Engine 不自行派生。没有合法作用域时省略。
 
 不使用 baggage。Infra 不向 Application/Core 暴露 OpenTelemetry 类型；Application 看到的业务 message、result 和 error 不增加
 trace 字段。
@@ -236,8 +242,9 @@ trace 字段。
 - **职责**：后端路由、二次 allowlist、限流、tail sampling 和多目标输出。本地开发把 trace 输出到 Jaeger，并把 logs 输出到
   可解码测试 sink；生产优先输出到 PostHog Logs/Traces，客户端始终只连接 Collector。
 - **限制**：设备侧必须先脱敏；Collector 不修复设备已经发送的敏感数据。
-- **兼容策略**：Slice 1 必须用真实 PostHog 项目验证当时可用的 OTLP signal、endpoint 与认证。若 PostHog 暂不接收 trace 或
-  log 中任一种，Collector 将该 signal 输出到第二个标准后端；不得修改客户端 schema、wire context 或增加 PostHog 专用发送器。
+- **兼容策略**：生产部署在取得真实 PostHog 项目凭据后验证当时可用的 OTLP signal、endpoint 与认证；若暂不接收 trace 或 log
+  中任一种，Collector 将该 signal 输出到第二个标准后端。037 所在环境无项目凭据，只验证无秘密模板和 Collector 合同并明确跳过
+  真实投递；不得修改客户端 schema、wire context 或增加 PostHog 专用发送器。
 
 ## Data Model
 
@@ -249,29 +256,28 @@ traces 与 logs 共用：
 | --- | --- | --- |
 | `service.namespace` | `uniclipboard` | 固定 |
 | `service.name` | `uc-engine` | 固定 |
-| `service.version` | Engine 构建版本 | 低基数 |
+| `service.version` | 去除 build metadata 的受限 SemVer | 只允许 stable/alpha/beta/rc |
 | `service.instance.id` | 每进程随机 UUID | 不跨进程稳定 |
 | `deployment.environment.name` | development/test/staging/production | 固定枚举 |
-| `os.type` | ios/android/macos/windows/linux/ohos | 固定枚举 |
-| `host.arch` | 规范化架构 | 低基数 |
-| `uc.app.channel` | 发布渠道 | 低基数 |
+| `os.type` | ios/android/macos/windows/linux/ohos/other | 固定枚举 |
+| `host.arch` | 运行时从固定架构集合取得 | 不接受宿主自由字符串 |
+| `uc.app.channel` | development/test/alpha/beta/stable/production | 固定枚举 |
 | `uc.telemetry.schema.version` | 初始 `1` | 固定 |
 
 禁止 `device.id`、设备名、profile、Space、用户身份或稳定硬件标识。
 
 ### Span and log attributes
 
-| Attribute | Meaning |
-| --- | --- |
-| `uc.flow.id` | 匿名 durable flow；可选，永不作为授权 |
-| `uc.domain` | 固定领域枚举 |
-| `uc.operation` | 固定完整能力枚举 |
-| `uc.role` | local/client/server/joiner/sponsor 等固定枚举 |
-| `uc.message.kind` | 固定 wire message kind，不含 payload |
-| `uc.outcome` | ok/error/deferred/rejected/cancelled |
-| `error.type` | 稳定错误类别，不是错误正文 |
-| `duration_ms` | 完成事件的整数耗时；trace 自身也保存开始/结束时间 |
-| `item.count` / `peer.count` | 经批准的非负计数 |
+| Signal | Attribute | Meaning |
+| --- | --- | --- |
+| span/log | `uc.domain` | 固定领域枚举 |
+| span/log | `uc.operation` | 固定完整能力枚举 |
+| span/log | `uc.role` | local/client/server/joiner/sponsor 等固定枚举 |
+| span | `uc.flow.id` | 仅 Space 准入 Joiner client 可用的匿名 durable flow；可选，永不作为授权 |
+| log | `event.name` | 固定事件名 |
+| log | `uc.outcome` | ok/error/deferred/rejected/cancelled |
+| log | `error.type` | 稳定错误类别，不是错误正文 |
+| log | `duration_ms` | 完成事件的整数耗时；trace 自身保存开始/结束时间 |
 
 字段一律使用点分层命名，不再同时维护 `flow_id` 与 `flow.id`。缺失字段直接省略，不写 `none`、`unknown-id` 或空字符串。
 
@@ -279,11 +285,11 @@ traces 与 logs 共用：
 
 - **Trace**：表示一次在线因果执行；client/server/internal span 使用真实父子关系。
 - **Log**：表示离散完成、失败和恢复事实；当前 span 存在时自动附加 TraceId/SpanId。
-- **Flow**：只作为 trace/log attribute 聚合跨重试、断网和重启，不冒充 TraceId。
+- **Flow**：只作为 Joiner client span attribute 聚合跨重试、断网和重启，不冒充 TraceId；log 通过 TraceId/SpanId 关联当前 span。
 - **Analytics**：产品使用与漏斗；拥有独立身份和事件 schema，不携带运行诊断 TraceId/FlowId。
 
-同一个 tracing event 的完整远程副本只进入 OTel LogRecord。Trace layer 只保留 span、status、错误和少量批准事件；普通
-event 通过官方 counting filter 从 span event 中排除，避免日志与 trace 双份存储。
+同一个 tracing event 的完整远程副本只进入 OTel LogRecord。Trace layer 只接收通过元数据检查的 span，不记录任何 span event；
+log layer 独立检查并接收固定事件，避免日志与 trace 双份存储。
 
 ## API / Interface
 
@@ -321,13 +327,12 @@ Engine revision 时把原 UI 偏好迁移到宿主配置。`usage_analytics_enab
 
 ### Cross-device request
 
-1. Engine decorator 建立完整能力的 client span，并在合法来源存在时附带匿名 `uc.flow.id`。
-2. Infra 从当前 span 注入 W3C context 到受限 wire metadata，并由既有认证传输保护。
-3. 对端 Infra 完成业务认证后提取 remote context。
-4. 对端 Infra 的完整认证 endpoint handler 建立 server transport span并设置 remote parent；Engine 不读取 transport metadata，
-   Application/Core message 不增加 context 字段。
-5. server span 内的完成/失败日志自动获得同一 TraceId 与本地 SpanId。
-6. response 后两个 span 正常结束；下一次后台重试可以建立新 trace，但保留同一 flow id。
+1. Application 完整准入恢复 owner 用既有随机 attempt 材料开启不可读取的异步关联作用域。
+2. Infra 建立 client transport span，作用域自动附加匿名 `uc.flow.id`，再把 W3C context 注入受认证 wire metadata。
+3. 对端 Infra 完成业务认证后提取 remote context并建立 server transport span。
+4. Engine 在既有完整认证 endpoint 上建立 `space_admission` internal 子节点，原样转发消息与结果，不读取内容、编号或步骤。
+5. 调用树形成 `network_transport client -> network_transport server -> space_admission sponsor endpoint`；完成日志自动关联当前 span。
+6. 下一次后台重试建立新 TraceId，但同一持久 attempt 的 client root 保留同一 flow；server 与 endpoint 不重复携带 flow。
 
 ### Mobile lifecycle
 
@@ -346,17 +351,17 @@ target 从远程层排除，避免递归观测；本地只保留固定 `exporter
 
 ### Sampling
 
-- Admission、membership、storage upgrade 第一版 `ParentBased(root=AlwaysOn)`，因低频且承担可靠性验收。
-- Clipboard 跨设备 tracer bullet 初始 AlwaysOn，仅在正确性验收期间启用；推广后改为 `ParentBased(root=ratio)` 固定 policy。
-- 错误日志不依赖 trace sampling；需要“错误 trace 全保留”时由 Collector tail sampling，设备不实现结果感知 sampler。
+- 设备使用 `ParentBased(root=AlwaysOn)`，保证跨设备父子关系完整且不在设备实现结果感知 sampler。
+- 本地 Collector 保留全量 trace，便于开发和端到端验收。
+- 生产 Collector 使用 tail sampling：错误 trace 全部保留，其他 trace 固定保留 10%；日志不依赖 trace sampling。
 - 本地系统/JSONL与远程采样独立，远程关闭不删除本地诊断。
 
 ### Performance and overload
 
 - 使用官方 BatchSpanProcessor 与 BatchLogProcessor，不使用生产 SimpleProcessor。
-- 第一版沿用官方默认有界队列/批次，再通过压力测试确认；不预先发明动态配置。
+- 官方 processor 使用固定 2,048 条队列和 512 条批次；容量门使用相同上限并通过压力测试确认。
 - 队列满只丢观测数据；业务线程不得等待 exporter 网络。
-- disabled 远程层对配对/同步 p95 增量不超过 2%；启用且 Collector 健康或不可达时增量不超过 5%，以同机 A/B 测量。
+- 本轮以双设备配对作为量化门禁：disabled 远程层的 p95 增量不超过 2%；启用且 Collector 健康或不可达时增量不超过 5%，以同机 A/B 测量。同步只做功能回归，不用未采集的性能样本扩大量化结论。
 - 每次交付记录二进制体积和常驻内存差值；没有数据前不设伪精确上限。
 
 ## Clean-cutover deletion inventory
@@ -415,8 +420,8 @@ reset/checkout 整个工作树。
 
 **Change**：锁定官方兼容版本组；实现 ProcessObservabilityRuntime、共享 Resource、trace/log 双 bridge、remote allowlist、batch
 processors、health、flush/shutdown；用 `profile_storage_upgrade` 作为单机完整 span+log 样例。CI 使用 in-memory exporter 和本地
-可解码 OTLP/HTTP fixture；人工验收使用 Collector + Jaeger 查看 trace，并用 Collector 可解码 sink 验证 logs。使用真实 PostHog
-项目验证生产 signal、endpoint 与认证，再把结果固定到 Collector 配置合同。
+可解码 OTLP/HTTP fixture；人工验收使用 Collector + Jaeger 查看 trace，并用 Collector 可解码 sink 验证 logs。生产路由以
+无秘密 PostHog 模板固定，真实项目投递只在具备项目凭据的部署环境验收。
 
 **Exit gate**：接收端实际收到一条 trace 和一条 LogRecord；日志 TraceId/SpanId 与 span 一致；provider 可重复 flush、一次
 shutdown；Collector 不可达和队列满不改变 upgrade 结果；远程 payload 隐私扫描通过；Rust 1.95 与各 target 依赖编译通过。
@@ -451,9 +456,9 @@ bullet 先省略 `uc.flow.id`，只使用真实 W3C 因果关系；不得为满�
 **禁止修改**：bindings、根 Cargo/Cargo.lock、contract diagnostics schema、`observability/mod.rs` 非 Space 区段、架构脚本、计划与
 architecture bible。发现共享接口缺口时停止该片并交回整合 owner，不得私自扩接口。
 
-**Change**：迁移现有 admission/membership decorators 到统一 target/schema；在线每轮使用真实 client/server trace；重试/重启
-创建新 trace 并用同一匿名 flow 聚合；session transition 只记录 Engine 完整生命周期，不查询 Application 阶段；group update
-使用结构化业务 origin，不解析持久 update-id 字符串。
+**Change**：准入和成员完整网络能力迁移到统一 target/schema；删除 Engine 对准入状态、准备、激活、成员账本和分支恢复子步骤的
+观测。在线每轮使用真实 client/server/endpoint trace；重试/重启由 Application 不透明作用域提供同一匿名 flow；session transition
+只记录 Engine 完整生命周期；group update 不解析持久 update-id 字符串。
 
 **Exit gate**：双设备配对在线调用树、失败分类、跨重启 flow 聚合和旧成员 group update 可查询；原始 admission/member/device/
 update id 不出现；session transition 作为独立 Engine 生命周期 trace 在同一时间窗口展示，不伪造 admission parent/flow；其所有
@@ -564,8 +569,8 @@ Implementation: owner 只枚举固定 `engine.YYYY-MM-DD.jsonl`，路径必须�
 
 ```text
 Scenario: trace layer 和 logs bridge 同时接收一个 tracing event。
-Expected behavior: 完整事件只形成一条 LogRecord，不再作为普通 span event 重复存储。
-Implementation: trace layer counting event filter；错误与明确关键事件单独允许进入 trace。
+Expected behavior: 完整事件只形成一条 LogRecord，不再作为 span event 重复存储。
+Implementation: trace layer 禁止记录 event；允许的完成与健康事件只由 logs bridge 输出。
 ```
 
 # 8. Testing Strategy
@@ -595,8 +600,11 @@ Implementation: trace layer counting event filter；错误与明确关键事件�
 - Engine stable operation/result/event 与各 binding generated contract 不增加业务步骤或 OTel 类型。
 - P2P 默认、LAN 不自动降级、持久密文、release source 与 architecture preflight 全部通过。
 - 比较观测关闭、Collector 健康、Collector 不可达三组双设备性能，确认不阻塞和预算。
+- 同步路径只做功能回归，本轮没有单独采集同步 A/B 性能样本。
 
 ## Platform matrix
+
+以下是实施要求；本轮没有运行的系统和设备项目在“明确跳过”中逐项记录，不能用目标编译代替运行验收。
 
 | Check | macOS direct/Apple | iOS | Android | HarmonyOS | Linux/Windows |
 | --- | --- | --- | --- | --- | --- |
@@ -615,7 +623,8 @@ cargo test -p uc-observability-runtime --locked
 cargo test -p uc-engine assembly::observability --locked
 cargo test -p uc-application --locked
 cargo test -p uc-infra --locked
-cargo test -p uc-engine --features dev-tools --test space_membership_auto_pairing_e2e --locked -- --ignored --nocapture
+cargo test -p uc-engine --features dev-tools --test space_membership_auto_pairing_e2e \
+  in_flight_admission_restart_uses_new_traces_and_one_flow --locked -- --ignored --exact --nocapture
 cargo metadata --locked --format-version 1
 cargo check --workspace --all-targets --locked
 cargo fmt --all -- --check
@@ -623,38 +632,42 @@ node scripts/architecture/check-engine-repository.mjs
 git diff --check
 ```
 
-任何 filter 必须确认执行非零目标测试；设备构建使用仓库 host scripts，未执行只记“跳过”。
+一秒性能项另以指定的 ignored 诊断测试
+`two_device_hot_path_pairing_completes_within_one_second` 运行；结构断言先执行，耗时门槛预期如实失败，直到 038 完成。它不属于
+037 的绿色自动检查。任何 filter 必须确认执行非零目标测试；设备构建使用仓库 host scripts，未执行只记“跳过”。
 
 # 9. Acceptance Criteria
 
-* [ ] `uc_otlp` 不再存在；一条真实 trace 和一条真实 LogRecord 到达可解码 OTLP receiver。
-* [ ] traces/logs 共用 Resource，日志自动带正确 TraceId/SpanId。
-* [ ] 在线跨设备 client/server span 属于同一 trace，parent 关系正确。
-* [ ] 重试/重启使用新 trace；只有已有合法持久 attempt 的流程携带同一匿名 `uc.flow.id`，其余流程不伪造。
-* [ ] Core/Application 公共接口不包含 OTel、trace context、timing 或观测步骤。
-* [ ] Core 默认依赖不含 tracing；TaskRegistry 只返回纯关闭报告，调用层保留可观察的完整结果。
-* [ ] Engine 没有新增 Application/Core 阶段查询，也不解析业务持久字符串取得关联号。
-* [ ] Infra 只在认证后接受 bounded W3C context；异常 context 不改变业务结果。
-* [ ] Apple、Android、HarmonyOS 和直接 Rust host 都有唯一进程级安装与明确生命周期。
-* [ ] remote disabled、Collector down 和队列满均不阻塞业务，性能增量满足预算。
-* [ ] JSONL 文件有 7 天/100 MB 上限并能被诊断导出完整发现。
-* [ ] 本地 Jaeger 能显示 tracer bullet 调用树，Collector 可解码 sink 能读取对应日志。
-* [ ] 生产 Collector 已用真实项目验证并优先输出到 PostHog；客户端没有 PostHog 专用依赖或发送路径。
-* [ ] 原始 OTLP、系统 writer 和 JSONL 隐私扫描均无禁止字段。
-* [ ] exporter 自身日志不会递归进入远程 exporter。
-* [ ] 产品 analytics schema、身份和发送行为不变，且不携带 TraceId/FlowId。
-* [ ] 当前未提交 flow/update-id 原型、旧 DispatchTiming/stages/TraceMetadata 和伪 OTLP 已删除。
-* [ ] 架构门禁能拒绝双 subscriber、Application timing、业务步骤泄露、敏感字段和 retired 路径回流。
-* [ ] Slice 3 多 Agent 文件所有权、schema hash 和汇合验证有实际记录。
-* [ ] 所有自动检查通过；未执行设备明确标为“跳过”。
+* [x] `uc_otlp` 不再存在；一条真实 trace 和一条真实 LogRecord 到达可解码 OTLP receiver。
+* [x] traces/logs 共用 Resource，日志自动带正确 TraceId/SpanId。
+* [x] 在线跨设备 client/server span 属于同一 trace，parent 关系正确。
+* [x] 重试/重启使用新 trace；只有已有合法持久 attempt 的 Joiner client span 携带同一匿名 `uc.flow.id`，其余 span 与 log 不伪造。
+* [x] Core/Application 公共接口不包含 OTel、trace context、timing 或观测步骤。
+* [x] Core 默认依赖不含 tracing；TaskRegistry 只返回纯关闭报告，调用层保留可观察的完整结果。
+* [x] Engine 没有新增 Application/Core 阶段查询，也不解析业务持久字符串取得关联号。
+* [x] Infra 只在认证后接受 bounded W3C context；异常 context 不改变业务结果。
+* [x] Apple、Android、HarmonyOS 和直接 Rust host 都有唯一进程级安装与明确生命周期。
+* [x] remote disabled、Collector down 和队列满均不阻塞业务；本轮双设备配对性能增量满足预算，未把同步功能回归写成量化结果。
+* [x] JSONL 文件有 7 天/100 MB 上限并能被诊断导出完整发现。
+* [x] 本地 Jaeger 能显示 tracer bullet 调用树，Collector 可解码 sink 能读取对应日志。
+* [ ] 生产 Collector 已用真实项目验证并优先输出到 PostHog；客户端没有 PostHog 专用依赖或发送路径。（无项目凭据，真实投递跳过；模板已验证）
+* [x] 原始 OTLP、macOS 实时系统消息和 JSONL 隐私扫描均无禁止字段。
+* [ ] iOS、Android 与 HarmonyOS 实体设备系统输出隐私扫描。（无实体设备，跳过）
+* [ ] Android 与 HarmonyOS 模拟器或实体设备上的系统输出、JSONL、OTLP 和后台生命周期。（无可用运行设备，跳过）
+* [x] exporter 自身日志不会递归进入远程 exporter。
+* [x] 产品 analytics schema、身份和发送行为不变，且不携带 TraceId/FlowId。
+* [x] 当前未提交 flow/update-id 原型、旧 DispatchTiming/stages/TraceMetadata 和伪 OTLP 已删除。
+* [x] 架构门禁能拒绝双 subscriber、Application timing、业务步骤泄露、敏感字段和 retired 路径回流。
+* [x] Slice 3 多 Agent 文件所有权、schema hash 和汇合验证有实际记录。
+* [x] 所有自动检查通过；未执行设备明确标为“跳过”。
 
 # 10. Risks and Trade-offs
 
 - **官方 Rust traces/exporter 尚非全部 Stable**：采用官方兼容版本组并锁定 Cargo.lock；升级必须整组验证，不分包漂移。
-- **二进制与内存增加**：OTel SDK、protobuf 和 HTTP client 会增加移动产物；每片记录实际差值，不在无数据时预设数字。
+- **二进制与内存增加**：OTel SDK、protobuf 和 HTTP client 会增加移动产物；最终交付已记录同设置动态库差值和三轮进程峰值
+  中位数，不在数据之外预设上限。
 - **远程尽力发送会丢数据**：这是不阻塞业务和移动生命周期的明确取舍；可靠磁盘队列涉及密文、配额和清理，另立规格。
-- **全采样成本**：Admission/membership 低频可全采样；Clipboard 高频必须在 tracer bullet 后使用 parent-based ratio 或 Collector
-  tail sampling。
+- **采样成本**：设备全采样保证父子关系完整；生产 Collector 对错误全保留、其他 trace 保留 10%，后续只在部署侧按真实量调整比例。
 - **本地日志仍是威胁面**：远程 allowlist 不能代替本地清理；系统和 JSONL 必须通过同一隐私测试。
 - **移除 Engine telemetry setting 影响产品仓**：换来单一宿主许可 owner 和无跨层控制 port；所有产品必须随同一 Engine revision
   迁移，不能长期保留双开关。
@@ -667,15 +680,84 @@ git diff --check
 - **替代方案：把业务 flow 放 baggage**：传播方便但可能被自动转发且无完整性保证，明确拒绝。
 - **替代方案：设备直连厂商后端**：减少 Collector，但把 PostHog 认证、过滤和采样耦合到客户端，明确拒绝。
 
-# 11. Open Questions
+# 11. 外部与后续状态
 
-以下问题不阻塞 Slice 0；必须在 Slice 1 依赖冻结前记录最终选择：
-
-1. PostHog 生产项目的 OTLP endpoint、认证和 traces/logs 可用范围；Slice 1 用真实项目验证，本仓不保存秘密。
-2. 生产 Collector endpoint、证书策略和部署仓；客户端只接 Collector，不直连 PostHog。
-3. HarmonyOS 的系统日志 adapter 使用现有宿主回调还是引入维护中的 HiLog Rust adapter；必须先验证 SDK、许可证和目标编译。
-4. 直接 Rust desktop host 当前是否已安装 Sentry/global subscriber；若存在，迁移必须由同一个 bootstrap owner 合并，不能竞相安装。
-5. Clipboard 生产 root sampling 比例；tracer bullet 阶段固定 AlwaysOn，正式比例需基于实测量和费用确定。
+1. 本仓不保存 PostHog 秘密；生产项目的真实投递因无凭据明确跳过，部署方在上线前验证项目地址和 token。
+2. 客户端只接受宿主提供的 HTTPS Collector；实际 endpoint、证书和部署归产品部署仓，不改变本仓合同。
+3. HarmonyOS 本轮明确选择通用 JSON 系统输出 fallback；原生 HiLog 只有在宿主提出需求并完成 SDK、许可证和实体设备验证后另行设计。
+4. 已安装其他全局 subscriber 的直接 Rust 宿主会得到明确冲突结果，必须由该宿主的 bootstrap owner 合并，不能竞相安装。
+5. 生产采样由 Collector 负责：错误全保留，其他 trace 先保留 10%；后续比例调整不改变客户端。
 
 已确认决策：本地使用 Jaeger，生产优先使用 PostHog；远程诊断许可只归宿主；本地日志保留 7 天且总量不超过
-100,000,000 bytes。其余问题不得由并行 Agent 各自决定。Slice 1 owner 固定选择后写入本规格“实施记录”，后续分片只消费结果。
+100,000,000 bytes。
+
+# 12. 实施记录
+
+## 已完成结果
+
+- 进程运行时、trace/log 双信号、系统输出、有界 JSONL、远程健康计数、串行 flush/shutdown 和诊断导出已使用同一合同。
+- Clipboard、Space 准入、成员历史、成员组更新和 session lifecycle 已迁移到类型化记录；Core/Application 公共接口没有 trace、timing
+  或业务步骤字段。Application 准入 owner 只开启不透明关联作用域；Engine 不构造关联号，也不装饰准入状态、准备、激活、成员账本
+  或分支恢复子步骤。
+- Space 认证消息把 `traceparent` 纳入现有 MAC；Infra 在认证后建立 server parent。通用 `network_transport` 不暴露业务消息阶段。
+- Sponsor 只有收到 Joiner 对 reply 的确认后才记录成功；整条入站交换共用一个绝对截止时间，缺少确认、错误确认或超时都只记录
+  一次明确失败。认证前失败只产生一条带真实耗时的无关联日志；认证成功后每个三层节点恰有一条关联完成日志。
+- Space 的认证握手保持原布局，认证后的新旧 Request/Reply 使用互斥 frame kind；真实旧 Sponsor 测试会在密码认证后得到明确升级
+  结果，当前普通协议错误使用独立关闭码。Engine 尚未发布，因此未增加版本号或保留双 reader。
+- 首次交换不兼容稳定拒绝；Prepared、Applied、Cancelling 和 ActivePendingSettlement 保留原待交换与正式结果，只增加持久升级阻塞。
+  Pending/Active 对外携带固定升级提示；提示出现、清除或明确拒绝后只发一次通用刷新，重复错误不发。对端上线立即重放同一请求并
+  自动清除，不把阻塞误记为资料损坏；未发布旧 V1 待交换记录可严格读取，尾随内容与其他截断状态仍失败关闭。
+- Apple、Android、HarmonyOS 与直接 Rust host 使用同一进程安装入口。Android 使用系统证书校验，并在 AAR 中携带其 Java 组件和
+  消费者混淆规则。
+- 宿主资源字段只接受固定值，HarmonyOS probe 与 smoke 已使用合法发布渠道；SDK 明确返回的超时保持为 `timed_out`，可重试的准入
+  传输延期保持为 `deferred`，不会混入普通失败或生产错误采样。
+- 设备编码前和 Collector 各有一道精确字段收窄；Collector 同时拒绝 resource/scope schema URL。日志正文为空且不携带 flow，事件名
+  和 span 名来自固定枚举，源码位置、线程与 busy/idle 不发送。
+- 最终可再生清单包含 1,247 个生产调用点：8 个稳定远程、6 个本地健康、1,231 个默认拒绝的历史调试点和 2 个产品分析调用点。
+- 删除 `uc_otlp`、旧 stages、`DispatchTiming`、`TraceMetadata`、旧 flow、Engine `telemetry_enabled` 和跨层 task supervision helper；
+  `usage_analytics_enabled` 与产品分析合同保持不变。
+
+## 本地真实证据
+
+- 最终代码按匿名 flow 查询得到 8 条 trace：四条连接建立记录，以及四棵
+  `network_transport client -> network_transport server -> space_admission sponsor endpoint` 三层消息交换树；只有 client root 携带
+  flow，每棵树的 TraceId、parent 和三层成功结果均正确。完整页面共有 17 条 trace、27 个 span；Jaeger 搜索页和三层调用树已通过
+  实际页面截图检查。
+- Collector 解码日志显示稳定事件名、空正文、正确 TraceId/SpanId；三层树每个节点恰有一条完成日志，日志均无 flow。原始 OTLP 的
+  Resource、span 与 log 字段集合逐项等于白名单。
+- macOS Unified Logging 实时捕获只出现类型化完成/健康记录；伪造同 target 的设备名、路径、正文和错误字段组合均未出现。JSONL
+  与原始 OTLP 使用同一组哨兵也通过。
+- 三设备测试证明新成员加入后，旧成员最终看到三成员状态并可向新成员发送内容。
+- 中途关闭 Joiner 并从同一持久资料重启的真实双设备测试通过：重启前后只有一个匿名 flow，重启后产生新的在线 TraceId 并完成配对。
+- Collector 不可达、HTTP 401、TLS 握手失败、慢响应、队列满、flush 超时、并发 flush/shutdown 和重复 shutdown 均有独立测试；
+  业务提交不等待远程网络。
+- 无观测、本地记录、健康远程、不可达远程四组先各预热 1 次，再轮换起始顺序交错运行 5 个正式样本，四组均 5/5 完成业务。
+  p50 分别为 5.330650、5.462975、5.516288、5.429277 秒；五样本 p95 即各组最大值，分别为 5.744097、5.833397、5.601388、
+  5.599411 秒。后三组 p95 相对无观测基线分别为 +1.5546%、-2.4844%、-2.5189%，满足 2%/5% 预算；样本只证明观测没有造成
+  当前五秒瓶颈。
+- 相同 release 设置下，UniFFI 动态库由 16,952,560 bytes 增至 17,157,488 bytes，增加 204,928 bytes（1.2088%）。同一双设备
+  测试二进制交错运行三轮，最大常驻内存中位数为：无观测 311,623,680 bytes、本地记录 314,769,408 bytes、健康远程
+  313,671,680 bytes；相对基线分别增加 3,145,728 bytes（1.0095%）和 2,048,000 bytes（0.6572%）。三样本只作诊断，不设正式上限。
+- 最新一秒诊断报告端到端 5.338917 秒、当前传输外壳粗估 0.405162 秒、相减值 4.933755 秒。该粗估既包含部分本机工作，也漏掉部分初始
+  网络等待，既不是严格上界也不是下界，不能据此在一秒附近判定通过；精确门禁和性能改造已进入规格 038。
+- 最终全量回归通过：诊断合同 49 项、运行时 38 项、Core 360 项、Application 750 项、Infra 896 项、Engine 225 项、UniFFI 51 项、
+  HarmonyOS 44 项；Infra 另有 7 项明确跳过的测试或文档示例。
+
+## 明确跳过
+
+- 当前环境没有 PostHog 项目 token 或项目地址。生产 Collector 模板已由 Collector 0.160.0 校验，但真实 PostHog 项目投递记为
+  “跳过”，不得写成“通过”。客户端合同不因此改变。
+- macOS 直接运行、iOS device/simulator、Android、HarmonyOS、Linux 和 Windows 目标编译均通过。Linux 在 macOS 上使用临时
+  Zig 交叉编译适配；iOS 模拟器应用已完成构建、安装、启动、暂停、恢复和两路关闭；Android AAR 已验证 arm64/x86_64 与系统证书
+  组件；HarmonyOS HAP 已签名校验，HAR 已检查包内容，N-API 正常启动与依赖失败两条本机宿主 smoke 均实际运行通过。iOS 工程生成器
+  也已验证不受外置构建目录路径影响。
+- iOS、Android 与 HarmonyOS 实体设备上的系统日志和真实 HTTPS 投递因无设备记为“跳过”；HarmonyOS 原生 HiLog 尚未实现，
+  使用通用 JSON fallback。Android 与 HarmonyOS 本轮没有可用模拟器或实体设备，因此系统输出、JSONL、OTLP 及暂停/恢复/关闭运行验收
+  均记为“跳过”，AAR、HAP/HAR 通过不能代替这些运行结果。Windows/Linux 本轮完成目标编译，未在对应实体系统运行系统输出、JSONL
+  和 OTLP，记为“跳过”。
+
+## 后续性能边界
+
+1 秒目标不是本规格通过删除持久检查或放宽门禁解决的事项。代码审计识别出准入加密状态的重复读取/提交、维护轮重新加载与
+session 切换等优先候选，但当前证据不能证明它们的占比或排序。规格 038 先完成可信分项测量，再决定实施顺序；后续仍须保留逐提交
+重启恢复、密文损坏关闭式失败、唯一成员和旧成员更新验收。

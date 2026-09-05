@@ -1529,8 +1529,8 @@ impl ApplyInboundClipboardUseCase {
                 let origin_guard_key_for_write = snapshot_for_write.origin_guard_key();
                 // `.in_current_span()` keeps the spawned task under `apply_inbound.execute`
                 // so trace_id / from_device / snapshot_hash propagate into the failure event.
-                uc_observability_contract::spawn_supervised(
-                    "clipboard_sync.inbound_os_write",
+                crate::support::task_supervision::spawn_supervised(
+                    uc_observability_contract::diagnostics::DiagnosticTaskKind::ClipboardInboundOsWrite,
                     async move {
                         let snapshot_for_write = Arc::try_unwrap(snapshot_for_write)
                             .unwrap_or_else(|shared| (*shared).clone());

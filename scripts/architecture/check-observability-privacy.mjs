@@ -24,28 +24,39 @@ const AUDITED_TARGETS = new Set([
   'admission.performance',
   'membership.performance',
   'storage.performance',
+  'uc_otlp',
+])
+const RETIRED_TARGETS = new Set([
+  'admission.performance',
+  'membership.performance',
+  'storage.performance',
+  'uc_otlp',
 ])
 const REMOTE_ALLOWED_PREFIXES = [
   'crates/uc-observability-contract/src/diagnostics/',
-  'crates/uc-engine/src/assembly/observability/',
 ]
+const HEALTH_ALLOWED_PATHS = new Set([
+  'crates/uc-observability-contract/src/diagnostics/mod.rs',
+  'crates/uc-observability-runtime/src/remote_health.rs',
+])
 const REMOTE_ALLOWED_FIELDS = new Set([
   'target',
   'name',
   'parent',
-  'message',
   'event.name',
   'uc.flow.id',
   'uc.domain',
   'uc.operation',
   'uc.role',
-  'uc.message.kind',
   'uc.outcome',
   'error.type',
   'duration_ms',
-  'item.count',
-  'peer.count',
   'otel.kind',
+  'otel.name',
+  'otel.status_code',
+  'task.completed.count',
+  'task.timed_out.count',
+  'task.join_error.count',
 ])
 const SENSITIVE_FIELD = /^(?:.*\.)?(?:device(?:_id)?|from_device|peer(?:_id)?|target_device_id|address|public_addr|selected_ip|relay_url|path|target_path|file(?:name)?|space_id|profile(?:_id)?|member(?:_id)?|entry_id|event_id|attempt_id|transfer_id|snapshot_hash|code_hash|invitation(?:_id)?|token|password|secret|payload|digest|hash)$/i
 const ERROR_FIELD = /^(?:error|err|source)$/i
@@ -61,7 +72,12 @@ function rustFiles(root) {
       const stat = statSync(child)
       if (stat.isDirectory()) {
         if (!['tests', 'test_support', 'testing'].includes(name)) visit(child)
-      } else if (name.endsWith('.rs') && !name.endsWith('_tests.rs') && name !== 'test_support.rs') {
+      } else if (
+        name.endsWith('.rs') &&
+        name !== 'tests.rs' &&
+        !name.endsWith('_tests.rs') &&
+        name !== 'test_support.rs'
+      ) {
         files.push(child)
       }
     }
@@ -73,7 +89,7 @@ function rustFiles(root) {
 // 注释必须在扫描前移除，否则文档中的坏样例会被当作生产埋点。字符串与
 // 换行原位保留，使 target、格式占位符和行号仍可准确检查。
 function maskComments(source) {
-  const chars = [...source]
+  const chars = source.split('')
   let state = 'code'
   let blockDepth = 0
   let rawHashes = ''
@@ -145,13 +161,57 @@ function balancedEnd(source, start, open, close) {
   return source.length
 }
 
+function maskStrings(source) {
+  const chars = source.split('')
+  let state = 'code'
+  let rawHashes = ''
+  for (let index = 0; index < chars.length; index += 1) {
+    const char = chars[index]
+    if (state === 'string') {
+      if (char === '\\') {
+        chars[index] = ' '
+        if (chars[index + 1] !== '\n') chars[index + 1] = ' '
+        index += 1
+      } else {
+        if (char === '"') state = 'code'
+        if (char !== '\n') chars[index] = ' '
+      }
+      continue
+    }
+    if (state === 'raw') {
+      const closes = char === '"' && source.startsWith(rawHashes, index + 1)
+      if (char !== '\n') chars[index] = ' '
+      if (closes) {
+        for (let offset = 0; offset < rawHashes.length; offset += 1) chars[index + 1 + offset] = ' '
+        index += rawHashes.length
+        state = 'code'
+      }
+      continue
+    }
+    if (char === '"') {
+      chars[index] = ' '
+      state = 'string'
+    } else if (char === 'r' || (char === 'b' && source[index + 1] === 'r')) {
+      const raw = source.slice(index).match(/^b?r(#{0,16})"/)
+      if (raw) {
+        rawHashes = raw[1]
+        for (let offset = 0; offset < raw[0].length; offset += 1) chars[index + offset] = ' '
+        index += raw[0].length - 1
+        state = 'raw'
+      }
+    }
+  }
+  return chars.join('')
+}
+
 function productionSource(source) {
   const masked = maskComments(source)
-  const chars = [...source]
+  const structural = maskStrings(masked)
+  const chars = source.split('')
   const cfgTestModule = /#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+[a-zA-Z_]\w*\s*\{/g
   for (const match of masked.matchAll(cfgTestModule)) {
     const open = masked.indexOf('{', match.index)
-    const end = balancedEnd(masked, open, '{', '}')
+    const end = balancedEnd(structural, open, '{', '}')
     for (let index = match.index; index < end; index += 1) {
       if (chars[index] !== '\n') chars[index] = ' '
     }
@@ -162,23 +222,25 @@ function productionSource(source) {
 function tracingBlocks(source) {
   const production = productionSource(source)
   const masked = maskComments(production)
+  const structural = maskStrings(masked)
   const blocks = []
-  const macro = /(?:tracing::)?(trace|debug|info|warn|error|event|span|trace_span|debug_span|info_span|warn_span|error_span)!\s*\(/g
+  const macro = /(?:tracing::)?(trace|debug|info|warn|error|event|span|trace_span|debug_span|info_span|warn_span|error_span)!\s*([({[])/g
   for (const match of masked.matchAll(macro)) {
-    const open = masked.indexOf('(', match.index)
-    const end = balancedEnd(masked, open, '(', ')')
+    const open = match.index + match[0].lastIndexOf(match[2])
+    const close = { '(': ')', '{': '}', '[': ']' }[match[2]]
+    const end = balancedEnd(structural, open, match[2], close)
     blocks.push({ index: match.index, kind: match[1], text: production.slice(open, end) })
   }
   const instrument = /#\s*\[\s*(?:tracing::)?instrument\b/g
   for (const match of masked.matchAll(instrument)) {
     const open = masked.indexOf('[', match.index)
-    const end = balancedEnd(masked, open, '[', ']')
+    const end = balancedEnd(structural, open, '[', ']')
     blocks.push({ index: match.index, kind: 'instrument', text: production.slice(open, end) })
   }
   const record = /\.record\s*\(/g
   for (const match of masked.matchAll(record)) {
     const open = masked.indexOf('(', match.index)
-    const end = balancedEnd(masked, open, '(', ')')
+    const end = balancedEnd(structural, open, '(', ')')
     blocks.push({ index: match.index, kind: 'record', text: production.slice(open, end) })
   }
   return blocks
@@ -189,18 +251,54 @@ function lineNumber(source, index) {
 }
 
 function targetOf(block) {
-  return block.match(/\btarget\s*:\s*"([^"]+)"/)?.[1] ?? '<module>'
+  const target = block.match(/\btarget\s*:\s*(?:"([^"]+)"|(TELEMETRY_TARGET|HEALTH_TARGET))/)
+  if (target?.[1]) return target[1]
+  if (target?.[2] === 'TELEMETRY_TARGET') return 'uc.telemetry'
+  if (target?.[2] === 'HEALTH_TARGET') return 'observability.health'
+  return '<module>'
 }
 
 function fieldNames(block) {
   const fields = new Set()
-  for (const match of block.matchAll(/(?:^|[,({\s])([a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*)\s*=/g)) {
-    fields.add(match[1])
-  }
-  for (const match of block.matchAll(/(?:^|[,({\s])[%?]\s*([a-zA-Z_]\w*)/g)) {
-    fields.add(match[1])
+  for (const segment of topLevelSegments(block)) {
+    const assignment = segment.match(/^([a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*)\s*=/)
+    if (assignment) {
+      fields.add(assignment[1])
+      continue
+    }
+    const shorthand = segment.match(/^[%?]\s*([a-zA-Z_]\w*)$/)
+    if (shorthand) {
+      fields.add(shorthand[1])
+      continue
+    }
+    if (/^[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*$/.test(segment)) fields.add(segment)
   }
   return [...fields]
+}
+
+function topLevelSegments(block) {
+  const structural = maskStrings(maskComments(block))
+  const pairs = { '(': ')', '{': '}', '[': ']' }
+  const stack = [pairs[structural[0]]]
+  const segments = []
+  let start = 1
+  for (let index = 1; index < structural.length - 1; index += 1) {
+    const char = structural[index]
+    if (pairs[char]) stack.push(pairs[char])
+    else if (char === stack.at(-1)) stack.pop()
+    else if (char === ',' && stack.length === 1) {
+      segments.push(block.slice(start, index).trim())
+      start = index + 1
+    }
+  }
+  const tail = block.slice(start, -1).trim()
+  if (tail) segments.push(tail)
+  return segments
+}
+
+function hasMessageBody(block) {
+  if (!['trace', 'debug', 'info', 'warn', 'error', 'event'].includes(block.kind)) return false
+  return topLevelSegments(block.text).some(segment => /^(?:b?"|b?r#*")/.test(segment) || /^message\s*=/.test(segment))
 }
 
 function flagsFor(block) {
@@ -213,16 +311,17 @@ function flagsFor(block) {
     (block.kind === 'instrument' && /\berr\b/.test(block.text))
   ) flags.push('raw-error')
   if (block.kind === 'instrument' && !/\bskip_all\b/.test(block.text)) flags.push('implicit-arguments')
+  if (hasMessageBody(block)) flags.push('message-body')
   return flags
 }
 
 function categoryFor(path, block) {
   const target = targetOf(block.text)
   if (target === 'uc.telemetry') return 'stable remote'
-  if (['admission.performance', 'membership.performance', 'storage.performance', 'observability.health'].includes(target)) {
+  if (target === 'observability.health') {
     return 'local operational'
   }
-  if (target === 'uc_otlp' || /uc-observability-contract\/src\/(?:otlp|stages)\.rs$/.test(path)) return 'delete'
+  if (RETIRED_TARGETS.has(target) || /uc-observability-contract\/src\/(?:otlp|stages)\.rs$/.test(path)) return 'delete'
   if (path.includes('/analytics/')) return 'product analytics'
   return 'local debug'
 }
@@ -257,11 +356,20 @@ function strictProblems(entries) {
   const problems = []
   for (const entry of entries.filter(item => AUDITED_TARGETS.has(item.target))) {
     const callsite = `${entry.path}:${entry.line}`
+    if (RETIRED_TARGETS.has(entry.target)) {
+      problems.push(`${callsite}: retired observability target must not return: ${entry.target}`)
+    }
     if (entry.flags.includes('sensitive-field')) {
       problems.push(`${callsite}: audited output contains a sensitive field`)
     }
     if (entry.flags.includes('raw-error')) {
       problems.push(`${callsite}: audited output contains raw error text`)
+    }
+    if (
+      ['uc.telemetry', 'observability.health'].includes(entry.target) &&
+      entry.flags.includes('message-body')
+    ) {
+      problems.push(`${callsite}: audited output must not contain a log body`)
     }
     if (entry.target === 'uc.telemetry') {
       if (!REMOTE_ALLOWED_PREFIXES.some(prefix => entry.path.startsWith(prefix))) {
@@ -273,17 +381,24 @@ function strictProblems(entries) {
         }
       }
     }
-  }
-
-  for (const path of ['bindings/uc-engine-uniffi/src/apple.rs', 'bindings/uc-engine-uniffi/src/android.rs']) {
-    const source = readFileSync(join(ROOT, path), 'utf8')
-    if (!source.includes('persistent_sink_enabled')) {
-      problems.push(`${path}: platform system sink lacks the audited target filter`)
+    if (entry.target === 'observability.health') {
+      if (!HEALTH_ALLOWED_PATHS.has(entry.path)) {
+        problems.push(`${callsite}: health telemetry must be emitted by a fixed runtime owner`)
+      }
+      for (const field of entry.fields) {
+        if (!['target', 'event.name', 'task.kind', 'error.type', 'task.completed.count', 'task.timed_out.count', 'task.join_error.count'].includes(field)) {
+          problems.push(`${callsite}: health field is not allowlisted: ${field}`)
+        }
+      }
     }
   }
-  const fileLog = readFileSync(join(ROOT, 'bindings/uc-engine-uniffi/src/file_log.rs'), 'utf8')
-  if (!fileLog.includes('.with_filter(filter_fn(persistent_sink_enabled))')) {
-    problems.push('bindings/uc-engine-uniffi/src/file_log.rs: persistent file sink lacks the audited target filter')
+
+  const filterPath = 'crates/uc-observability-runtime/src/filter.rs'
+  const runtimeFilter = readFileSync(join(ROOT, filterPath), 'utf8')
+  for (const marker of ['remote_span_enabled', 'remote_log_enabled', 'health_log_enabled', 'local_sink_enabled']) {
+    if (!runtimeFilter.includes(marker)) {
+      problems.push(`${filterPath}: process runtime lacks ${marker}`)
+    }
   }
   return problems
 }
@@ -294,7 +409,7 @@ function inventoryMarkdown(entries) {
     '# 运行期观测清单',
     '',
     '> 由 `scripts/architecture/check-observability-privacy.mjs --write-inventory` 从生产 Rust 源生成。',
-    '> 生成日期：2026-09-04。该文件只描述生成时的代码事实，不是新增埋点的授权清单。',
+    '> 该文件只描述最后一次运行生成命令时的代码事实，不是新增埋点的授权清单。',
     '',
   ]
   for (const category of categories) {
@@ -321,11 +436,16 @@ function inventoryMarkdown(entries) {
 
 function selfTest() {
   const source = `
+    // 中文🙂不得改变后续源码位置
     // tracing::info!(target: "uc.telemetry", path = %path, "comment");
     #[cfg(test)] mod tests { fn ignored() { tracing::info!(target: "uc.telemetry", %device_id); } }
     fn bad() {
       tracing::debug!(%transfer_id, "debug");
-      tracing::event!(target: "uc.telemetry", tracing::Level::INFO, uc.operation = "pair", path = %path);
+      tracing::event!{target: "uc.telemetry", tracing::Level::INFO, uc.operation = "pair", path = %path};
+      tracing::info![target: "uc.telemetry", uc.operation = "pair", "private ) body"];
+      tracing::warn!(target: "observability.health", event.name = "bad", secret,);
+      tracing::event!(target: TELEMETRY_TARGET, tracing::Level::INFO, path = %path);
+      tracing::event!(target: HEALTH_TARGET, tracing::Level::WARN, secret,);
       tracing::info_span!(target: "uc.telemetry", "pair", error = %error);
       tracing::warn!("failed: {e}");
     }
@@ -334,7 +454,30 @@ function selfTest() {
   const blocks = tracingBlocks(source)
   const remote = blocks.filter(block => targetOf(block.text) === 'uc.telemetry')
   const flags = blocks.flatMap(flagsFor)
-  if (blocks.length !== 5 || remote.length !== 2 || !flags.includes('sensitive-field') || !flags.includes('raw-error')) {
+  const health = blocks.find(block => targetOf(block.text) === 'observability.health')
+  const constantRemote = blocks.find(block => block.text.includes('TELEMETRY_TARGET'))
+  const constantHealth = blocks.find(block => block.text.includes('HEALTH_TARGET'))
+  const retiredProblems = strictProblems([{
+    category: 'delete',
+    target: 'admission.performance',
+    path: 'crates/uc-engine/src/retired.rs',
+    line: 1,
+    kind: 'event',
+    flags: [],
+    fields: [],
+  }])
+  if (
+    blocks.length !== 9 ||
+    remote.length !== 4 ||
+    !flags.includes('sensitive-field') ||
+    !flags.includes('raw-error') ||
+    !flags.includes('message-body') ||
+    !health ||
+    !fieldNames(health.text).includes('secret') ||
+    targetOf(constantRemote?.text ?? '') !== 'uc.telemetry' ||
+    targetOf(constantHealth?.text ?? '') !== 'observability.health' ||
+    !retiredProblems.some(problem => problem.includes('retired observability target'))
+  ) {
     throw new Error(`privacy checker self-test failed: blocks=${blocks.length} remote=${remote.length} flags=${flags.join(',')}`)
   }
   process.stdout.write('Observability privacy checker self-test passed\n')

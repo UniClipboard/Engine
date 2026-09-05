@@ -7,7 +7,7 @@ mod clipboard;
 mod membership;
 mod storage_upgrade;
 
-pub(crate) use admission::observe_admission;
+pub(crate) use admission::observe_admission_endpoint;
 pub(crate) use clipboard::observe_clipboard;
 pub(crate) use membership::observe_membership;
 pub(crate) use storage_upgrade::{profile_storage_upgrade_span, record_profile_storage_upgrade};

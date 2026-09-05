@@ -221,8 +221,8 @@ pub(crate) fn spawn_deferred_drain(
     snapshot_hash: String,
 ) {
     let deferred_count = set.len();
-    uc_observability_contract::spawn_supervised(
-        "clipboard_sync.deferred_drain",
+    crate::support::task_supervision::spawn_supervised(
+        uc_observability_contract::diagnostics::DiagnosticTaskKind::ClipboardDeferredDrain,
         async move {
             let mut accepted = 0usize;
             let mut duplicate = 0usize;

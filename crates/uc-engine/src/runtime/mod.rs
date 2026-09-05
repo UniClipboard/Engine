@@ -7,6 +7,7 @@ mod lan_compatibility;
 #[cfg(feature = "lan-compat")]
 mod mobile_upload;
 mod session_supervisor;
+mod task_shutdown;
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -66,7 +67,7 @@ impl StopProfileRuntimePort for ProductionProfileRuntimeStopper {
             .await
             .map_err(|_| ProfileFactoryResetCapabilityError)?;
         self.session_supervisor.clear_factory();
-        self.tasks.shutdown(Duration::from_millis(500)).await;
+        task_shutdown::shutdown_tasks(&self.tasks, Duration::from_millis(500)).await;
         Ok(())
     }
 }
@@ -109,8 +110,8 @@ async fn spawn_network_recovery_events(
     tasks: &Arc<TaskRegistry>,
     events: EventSender,
 ) {
-    tasks
-        .spawn("network_recovery_events", move |cancel| async move {
+    let _ = tasks
+        .spawn(move |cancel| async move {
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => return,
@@ -282,8 +283,8 @@ async fn spawn_space_transition_watcher(
     tasks: &Arc<TaskRegistry>,
     events: EventSender,
 ) {
-    tasks
-        .spawn("space_transition_watcher", move |cancel| async move {
+    let _ = tasks
+        .spawn(move |cancel| async move {
             let mut interval = tokio::time::interval(Duration::from_millis(100));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {

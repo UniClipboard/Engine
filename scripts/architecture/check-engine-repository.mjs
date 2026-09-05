@@ -217,6 +217,22 @@ function runObservabilityPrivacyCheck() {
   }
 }
 
+function runCollectorPrivacyContract() {
+  const contract = join(
+    REPOSITORY_ROOT,
+    'tests/observability/collector/collector-privacy.test.mjs'
+  )
+  const result = spawnSync(process.execPath, ['--test', contract], {
+    cwd: REPOSITORY_ROOT,
+    encoding: 'utf8',
+  })
+  if (result.status !== 0) {
+    process.stderr.write(`${result.stdout ?? ''}${result.stderr ?? ''}`)
+    throw new Error('Collector privacy contract did not pass')
+  }
+  process.stdout.write('Collector privacy contract passed\n')
+}
+
 function checkLocalDependencies(metadata) {
   const problems = []
   for (const packageMetadata of metadata.packages) {
@@ -1483,29 +1499,36 @@ function checkObservabilityAssemblyInterface(sources) {
     }
   }
 
-  for (const domain of ['admission', 'membership']) {
-    const reexport = `pub(crate) use ${domain}::observe_${domain};`
-    const domainReexports = sources.observabilityModule.match(
-      new RegExp(`pub\\(crate\\)\\s+use\\s+${domain}::`, 'g')
-    ) ?? []
-    if (
-      sources.observabilityModule.split(reexport).length - 1 !== 1 ||
-      domainReexports.length !== 1
-    ) {
-      addProblem(
-        problems,
-        'observability assembly interface',
-        `observability module must expose exactly one ${domain} entry`
-      )
-    }
-    const call = `observability::observe_${domain}(`
-    if (sources.syncEngine.split(call).length - 1 !== 1) {
-      addProblem(
-        problems,
-        'observability assembly interface',
-        `sync_engine must call ${call} exactly once`
-      )
-    }
+  const admissionReexport = 'pub(crate) use admission::observe_admission_endpoint;'
+  const admissionReexports = sources.observabilityModule.match(
+    /pub\(crate\)\s+use\s+admission::/g
+  ) ?? []
+  if (
+    sources.observabilityModule.split(admissionReexport).length - 1 !== 1 ||
+    admissionReexports.length !== 1 ||
+    sources.syncEngine.split('observability::observe_admission_endpoint(').length - 1 !== 1
+  ) {
+    addProblem(
+      problems,
+      'observability assembly interface',
+      'Engine must decorate exactly one complete authenticated admission endpoint'
+    )
+  }
+
+  const membershipReexport = 'pub(crate) use membership::observe_membership;'
+  const membershipReexports = sources.observabilityModule.match(
+    /pub\(crate\)\s+use\s+membership::/g
+  ) ?? []
+  if (
+    sources.observabilityModule.split(membershipReexport).length - 1 !== 1 ||
+    membershipReexports.length !== 1 ||
+    sources.syncEngine.split('observability::observe_membership(').length - 1 !== 1
+  ) {
+    addProblem(
+      problems,
+      'observability assembly interface',
+      'Engine must expose and call exactly one membership observation entry'
+    )
   }
 
   if (/pub\(crate\)\s+struct\s+(?:Observed\w+|\w+ObservationPolicy)/.test(sources.engineObservability)) {
@@ -1523,6 +1546,127 @@ function checkObservabilityAssemblyInterface(sources) {
     )
   }
 
+  return problems
+}
+
+function checkObservabilityCutover(sources) {
+  const problems = []
+  const admissionObservability = sources.engineAdmissionObservability.split('#[cfg(test)]')[0]
+  const membershipObservability = sources.engineMembershipObservability.split('#[cfg(test)]')[0]
+  const installCount = sources.observabilityRuntime.split('set_global_default').length - 1
+  if (installCount !== 1) {
+    addProblem(
+      problems,
+      'observability process ownership',
+      `process runtime must contain exactly one global subscriber install; found ${installCount}`
+    )
+  }
+  for (const [owner, source] of [
+    ['UniFFI binding', sources.uniffiRuntime],
+    ['HarmonyOS binding', sources.ohosRuntime],
+  ]) {
+    if (/set_global_default|\.try_init\(\)/.test(source)) {
+      addProblem(
+        problems,
+        'observability process ownership',
+        `${owner} installs a second tracing subscriber`
+      )
+    }
+  }
+
+  const retiredSurface = [
+    sources.core,
+    sources.application,
+    sources.network,
+    sources.engineRuntime,
+    sources.observabilityContract,
+    sources.observabilityRuntime,
+    sources.uniffiRuntime,
+    sources.ohosRuntime,
+  ].join('\n')
+  for (const marker of [
+    'uc_otlp',
+    'DispatchTiming',
+    'TraceMetadata',
+    'telemetry_enabled',
+    'admission_flow_id',
+    'admission_update_flow_id',
+  ]) {
+    if (retiredSurface.includes(marker)) {
+      addProblem(
+        problems,
+        'observability clean cutover',
+        `retired observability surface remains: ${marker}`
+      )
+    }
+  }
+
+  if (/operation_span|complete_operation|DiagnosticFlowId|target:\s*"uc\.telemetry"/.test(sources.application)) {
+    addProblem(
+      problems,
+      'observability application boundary',
+      'Application creates cross-layer diagnostic spans, timing completions, or flow identifiers'
+    )
+  }
+  if (/DiagnosticFlowId::derive|DiagnosticFlowPurpose/.test(admissionObservability)) {
+    addProblem(
+      problems,
+      'observability flow ownership',
+      'Engine derives a cross-step diagnostic flow from a business identifier'
+    )
+  }
+  const admissionScope = 'scope_space_admission_observation'
+  const applicationScopeCount = sources.application.split(admissionScope).length - 1
+  const ownerScopeCount = sources.admissionRecovery.split(admissionScope).length - 1
+  if (
+    ownerScopeCount === 0 ||
+    applicationScopeCount !== ownerScopeCount ||
+    sources.engineRuntime.includes(admissionScope) ||
+    sources.network.includes(admissionScope)
+  ) {
+    addProblem(
+      problems,
+      'observability flow ownership',
+      'only the complete Application admission recovery owner may open the opaque flow scope'
+    )
+  }
+  for (const marker of [
+    'AdmissionRecoveryCommitToken',
+    'PendingAdmissionRecoveryStatePort',
+    'PrepareJoinerActivationPort',
+    'SpaceAdmissionTransportPort',
+    'SponsorAdmissionStatePort',
+    'SpaceAdmissionId',
+  ]) {
+    if (admissionObservability.includes(marker)) {
+      addProblem(
+        problems,
+        'observability admission boundary',
+        `Engine observability depends on an internal admission step through ${marker}`
+      )
+    }
+  }
+  for (const marker of [
+    'CommitMembershipLedgerPort',
+    'LoadMembershipLedgerPort',
+    'MembershipBranchRecoveryChannelPort',
+    'MembershipLedgerMutation',
+  ]) {
+    if (membershipObservability.includes(marker)) {
+      addProblem(
+        problems,
+        'observability membership boundary',
+        `Engine observability depends on an internal membership step through ${marker}`
+      )
+    }
+  }
+  if (/AdmissionStage|MembershipStage|query_\w*stage|PendingGroupUpdate\s*\.\s*update_id/.test(sources.engineRuntime)) {
+    addProblem(
+      problems,
+      'observability step boundary',
+      'Engine observes or reconstructs an Application or Core internal step'
+    )
+  }
   return problems
 }
 
@@ -1702,12 +1846,24 @@ function repositorySources() {
     runtimeStorage: read('crates/uc-engine/src/assembly/runtime_storage.rs'),
     observabilityModule: read('crates/uc-engine/src/assembly/observability/mod.rs'),
     engineObservability: readSourceTree('crates/uc-engine/src/assembly/observability'),
+    engineAdmissionObservability: read(
+      'crates/uc-engine/src/assembly/observability/admission.rs'
+    ),
+    engineMembershipObservability: read(
+      'crates/uc-engine/src/assembly/observability/membership.rs'
+    ),
+    observabilityContract: readSourceTree('crates/uc-observability-contract/src'),
+    observabilityRuntime: readSourceTree('crates/uc-observability-runtime/src'),
+    core: readSourceTree('crates/uc-core/src'),
     syncEngine: read('crates/uc-engine/src/assembly/sync_engine.rs'),
     engine: read('crates/uc-engine/src/lib.rs'),
     engineRuntime: readSourceTree('crates/uc-engine/src'),
     engineWiring: read('crates/uc-engine/src/assembly/wire/mod.rs'),
     applicationDeps: read('crates/uc-application/src/deps.rs'),
     application: readSourceTree('crates/uc-application/src'),
+    admissionRecovery: read(
+      'crates/uc-application/src/space/admission/protocol/recovery/recover_pending/execute.rs'
+    ),
     spaceAdapters: read('crates/uc-application/src/space/adapters.rs'),
     spaceApplication: read('crates/uc-application/src/space/application.rs'),
     network: readSourceTree('crates/uc-infra/src/network'),
@@ -1716,6 +1872,8 @@ function repositorySources() {
     ),
     uniffi: read('bindings/uc-engine-uniffi/src/lib.rs'),
     ohos: read('bindings/uc-ohos-napi/src/lib.rs'),
+    uniffiRuntime: readSourceTree('bindings/uc-engine-uniffi/src'),
+    ohosRuntime: readSourceTree('bindings/uc-ohos-napi/src'),
     iosPackaging: read('bindings/uc-engine-uniffi/scripts/build-ios-xcframework.sh'),
     androidPackaging: read('bindings/uc-engine-uniffi/scripts/build-android-aar.sh'),
     ohosPackaging: read('tests/hosts/ohos/build-emulator.sh'),
@@ -1751,6 +1909,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkSessionSupervisorOwnership(sources),
     ...checkSpaceAccessConstructionModes(sources),
     ...checkObservabilityAssemblyInterface(sources),
+    ...checkObservabilityCutover(sources),
     ...checkDualInvitationEntry(),
     ...checkSpaceMembershipMaintenanceOwnership(),
     ...checkRetiredLegacyPairingRecovery(),
@@ -1834,6 +1993,24 @@ function runNegativeFixtures(metadata, sources) {
   expectRejected('public observation decorator', (_changed, changedSources) => {
     changedSources.engineObservability += '\npub(crate) struct ObservedMembershipLeak;\n'
   }, metadata, sources)
+  expectRejected('second binding subscriber', (_changed, changedSources) => {
+    changedSources.uniffiRuntime += '\nfn install_again() { tracing_subscriber::fmt().try_init(); }\n'
+  }, metadata, sources)
+  expectRejected('retired observability timing result', (_changed, changedSources) => {
+    changedSources.core += '\npub struct DispatchTiming;\n'
+  }, metadata, sources)
+  expectRejected('Application cross-layer trace completion', (_changed, changedSources) => {
+    changedSources.application += '\nfn observe() { complete_operation(result); }\n'
+  }, metadata, sources)
+  expectRejected('Engine Application-step observation', (_changed, changedSources) => {
+    changedSources.engineRuntime += '\nfn observe_step(_: AdmissionStage) {}\n'
+  }, metadata, sources)
+  expectRejected('Engine business identifier flow derivation', (_changed, changedSources) => {
+    changedSources.engineAdmissionObservability = changedSources.engineAdmissionObservability.replace(
+      '#[cfg(test)]',
+      'fn flow(id: &[u8]) { DiagnosticFlowId::derive(DiagnosticFlowPurpose::SpaceAdmission, id); }\n\n#[cfg(test)]'
+    )
+  }, metadata, sources)
   expectRejected('retired legacy Space transition module', (_changed, changedSources) => {
     changedSources.legacySpaceTransitionPathPresent = true
   }, metadata, sources)
@@ -1870,6 +2047,7 @@ function main() {
     return
   }
   runObservabilityPrivacyCheck()
+  runCollectorPrivacyContract()
   runOpenMlsValidation()
   runNegativeFixtures(metadata, sources)
   process.stdout.write('Engine repository preflight passed\n')

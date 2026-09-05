@@ -20,6 +20,7 @@ pub enum CurrentJoinStatus {
     Active {
         join_id: [u8; 16],
         joined_space: JoinedSpace,
+        peer_upgrade_required: bool,
     },
     Pending {
         join_id: [u8; 16],
@@ -27,6 +28,7 @@ pub enum CurrentJoinStatus {
         sponsor_device_id: Option<uc_core::DeviceId>,
         sponsor_identity_fingerprint: Option<uc_core::security::IdentityFingerprint>,
         cancel_requested: bool,
+        peer_upgrade_required: bool,
     },
     Rejected {
         join_id: [u8; 16],

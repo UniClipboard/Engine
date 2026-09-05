@@ -45,9 +45,11 @@
 //! [`MobileInboundFanOutPort`]: crate::usecases::apply_incoming::MobileInboundFanOutPort
 //! [`ClipboardOutboundFacade`]: uc_application::facade::ClipboardOutboundFacade
 
+use std::future::Future;
 use std::sync::Arc;
 
 use tracing::{info, warn};
+use uc_observability_contract::diagnostics::{record_task_join_failure, DiagnosticTaskKind};
 
 use uc_core::ids::EntryId;
 use uc_core::mobile_sync::MobileDeviceId;
@@ -85,7 +87,7 @@ impl MobileInboundFanOutPort for ClipboardOutboundFanOutAdapter {
         // - 触发 file 路径提取 + blob 发布(`RemotePush` 会被 dispatcher
         //   显式 short-circuit 成 Skipped, 不走 publish);
         // - 经由 `OutboundSyncPlanner` 与本机复制走同一条策略链路。
-        uc_observability_contract::spawn_supervised("mobile_sync.outbound_dispatch", async move {
+        spawn_outbound_task(async move {
             match outbound
                 .dispatch_capture(ClipboardOutboundInput {
                     entry_id: entry_id_str,
@@ -128,4 +130,18 @@ impl MobileInboundFanOutPort for ClipboardOutboundFanOutAdapter {
             }
         });
     }
+}
+
+fn spawn_outbound_task<F>(future: F) -> tokio::task::JoinHandle<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let work = tokio::spawn(future);
+    tokio::spawn(async move {
+        match work.await {
+            Ok(()) => {}
+            Err(error) if error.is_cancelled() => {}
+            Err(_) => record_task_join_failure(DiagnosticTaskKind::MobileOutboundDispatch),
+        }
+    })
 }

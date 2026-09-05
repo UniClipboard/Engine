@@ -822,6 +822,7 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
         passive.clone(),
         passive.clone(),
         passive.clone(),
+        Arc::new(crate::facade::HostEventBus::new()),
         presence_rx,
         passive.clone(),
     );

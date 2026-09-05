@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use uc_core::membership::{
     AdmissionActivatedSecurityState, AdmissionActivationReceipt, AdmissionAppliedV1,
@@ -23,7 +23,9 @@ use uc_core::membership::{
     MEMBERSHIP_EVENT_FORMAT_V2,
 };
 use uc_core::pairing::invitation::FullInvitation;
-use uc_core::ports::SettingsPort;
+use uc_core::ports::{
+    EmitError, HostEvent, HostEventEmitterPort, MembershipHostEvent, SettingsPort,
+};
 use uc_core::security::IdentityFingerprint;
 
 fn join_request_identity_facts(
@@ -81,6 +83,9 @@ pub(super) enum ProtocolEvent {
     JoinerSavedResolvedInvitation,
     JoinerRejectedConsumedInvitation,
     JoinerSavedJoinRequest,
+    JoinerRejectedPeerUpgrade,
+    JoinerPeerUpgradeBlocked,
+    JoinerSavedRejected,
     AdmissionRecoveryWoken,
     JoinerInitialChannelRequested,
     JoinerAuthenticatedChannelSaved,
@@ -109,6 +114,22 @@ pub(super) struct SpaceAdmissionProtocolTestPair {
     sponsor: SpaceAdmissionProtocol,
     state: Arc<RecordingJoinerStartState>,
     sponsor_state: Arc<RecordingSponsorState>,
+    admission_status_invalidations: Arc<AtomicUsize>,
+    upgrade_pending: Arc<AtomicBool>,
+}
+
+struct AdmissionStatusEventRecorder(Arc<AtomicUsize>);
+
+impl HostEventEmitterPort for AdmissionStatusEventRecorder {
+    fn emit(&self, event: HostEvent) -> Result<(), EmitError> {
+        if matches!(
+            event,
+            HostEvent::Membership(MembershipHostEvent::AdmissionChanged)
+        ) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
 }
 
 struct FixedJoinerStartMaterial;
@@ -155,9 +176,38 @@ struct FixedJoinerActivation {
 enum TransportMode {
     DeferInitial,
     AuthenticateThenDefer,
+    AuthenticateThenUpgradeRequired,
     AuthenticateThenCandidate,
     AuthenticateThenCandidateAndCommit,
     AuthenticateThenCandidateCommitAndComplete,
+    UpgradeOnceOnPrepared,
+    UpgradeOnceOnApplied,
+    UpgradeOnceOnCancel,
+    UpgradeOnceOnSettlement,
+}
+
+impl TransportMode {
+    fn upgrade_on(self) -> Option<SpaceAdmissionMessageKind> {
+        match self {
+            Self::AuthenticateThenUpgradeRequired => Some(SpaceAdmissionMessageKind::JoinRequest),
+            Self::UpgradeOnceOnPrepared => Some(SpaceAdmissionMessageKind::Prepared),
+            Self::UpgradeOnceOnApplied => Some(SpaceAdmissionMessageKind::Applied),
+            Self::UpgradeOnceOnCancel => Some(SpaceAdmissionMessageKind::CancelRequested),
+            Self::UpgradeOnceOnSettlement => Some(SpaceAdmissionMessageKind::CompleteAck),
+            _ => None,
+        }
+    }
+
+    fn supports_complete_protocol(self) -> bool {
+        matches!(
+            self,
+            Self::AuthenticateThenCandidateCommitAndComplete
+                | Self::UpgradeOnceOnPrepared
+                | Self::UpgradeOnceOnApplied
+                | Self::UpgradeOnceOnCancel
+                | Self::UpgradeOnceOnSettlement
+        )
+    }
 }
 
 struct RecordingMaintenanceWake {
@@ -167,6 +217,7 @@ struct RecordingMaintenanceWake {
 struct RecordingSpaceAdmissionTransport {
     events: Arc<Mutex<Vec<ProtocolEvent>>>,
     mode: TransportMode,
+    upgrade_pending: Arc<AtomicBool>,
 }
 
 struct ExchangeThenDeferred {
@@ -176,6 +227,14 @@ struct ExchangeThenDeferred {
     commit_reply: bool,
     complete_reply: bool,
     settled_reply: bool,
+    upgrade_on: Option<SpaceAdmissionMessageKind>,
+    upgrade_pending: Arc<AtomicBool>,
+}
+
+impl ExchangeThenDeferred {
+    fn take_upgrade_failure(&self, request_kind: SpaceAdmissionMessageKind) -> bool {
+        self.upgrade_on == Some(request_kind) && self.upgrade_pending.swap(false, Ordering::SeqCst)
+    }
 }
 
 struct RecordingJoinerStartState {
@@ -472,52 +531,85 @@ impl PendingAdmissionRecoveryStatePort for RecordingJoinerStartState {
             }
             _ => None,
         };
+        let peer_upgrade_rejection = (aggregate.rejection_reason()
+            == Some(uc_core::membership::SpaceAdmissionRejectionReason::PeerUpgradeRequired))
+        .then_some((ProtocolEvent::JoinerRejectedPeerUpgrade, 0x28));
+        let peer_upgrade_block = aggregate
+            .peer_upgrade_required()
+            .then_some((ProtocolEvent::JoinerPeerUpgradeBlocked, 0x2f));
+        let other_rejection = aggregate
+            .rejection_reason()
+            .is_some()
+            .then_some((ProtocolEvent::JoinerSavedRejected, 0x30));
         let terminal_resolution_event = (aggregate.is_terminal()
             && aggregate.record_version() == 2)
             .then_some((ProtocolEvent::JoinerRejectedConsumedInvitation, 0x28));
-        let (event, next_token_byte) =
-            if let Some(event) = resolution_event.or(terminal_resolution_event) {
-                assert!(effects.is_empty());
-                event
-            } else {
-                match aggregate.record_version() {
-                    1 => {
-                        assert!(effects.is_empty());
-                        (ProtocolEvent::JoinerAuthenticatedChannelSaved, 0x27)
-                    }
-                    2 => {
-                        assert!(effects.is_empty());
-                        (ProtocolEvent::JoinerSavedCandidate, 0x28)
-                    }
-                    3 => {
-                        assert!(effects.is_empty());
-                        (ProtocolEvent::JoinerSavedPrepared, 0x29)
-                    }
-                    4 => {
-                        assert!(effects.is_empty());
-                        (ProtocolEvent::JoinerSavedCommitted, 0x2a)
-                    }
-                    5 => {
-                        assert_eq!(
-                            effects,
-                            &[uc_core::membership::AdmissionEffect::ApplyMembership]
-                        );
-                        (ProtocolEvent::JoinerSavedApplied, 0x2b)
-                    }
-                    6 => {
-                        assert_eq!(
-                            effects,
-                            &[uc_core::membership::AdmissionEffect::ActivateSpace]
-                        );
-                        (ProtocolEvent::JoinerSavedActivating, 0x2c)
-                    }
-                    8 if aggregate.is_active_settled() => {
-                        assert!(effects.is_empty());
-                        (ProtocolEvent::JoinerSavedActiveSettled, 0x2e)
-                    }
-                    _ => return Err(PendingAdmissionRecoveryStateError::RecoveryRequired),
+        let (event, next_token_byte) = if let Some(event) = resolution_event
+            .or(peer_upgrade_rejection)
+            .or(terminal_resolution_event)
+            .or(peer_upgrade_block)
+            .or(other_rejection)
+        {
+            assert!(effects.is_empty());
+            event
+        } else {
+            match aggregate.pending_recovery() {
+                Some(uc_core::membership::AdmissionPendingRecovery::Initial { .. }) => {
+                    assert!(effects.is_empty());
+                    (ProtocolEvent::JoinerSavedJoinRequest, 0x27)
                 }
-            };
+                Some(uc_core::membership::AdmissionPendingRecovery::Continuation {
+                    pending_exchange,
+                    ..
+                }) if pending_exchange.request_envelope().kind()
+                    == SpaceAdmissionMessageKind::JoinRequest =>
+                {
+                    assert!(effects.is_empty());
+                    (ProtocolEvent::JoinerAuthenticatedChannelSaved, 0x27)
+                }
+                Some(uc_core::membership::AdmissionPendingRecovery::Continuation {
+                    pending_exchange,
+                    ..
+                }) if pending_exchange.request_envelope().kind()
+                    == SpaceAdmissionMessageKind::Prepared =>
+                {
+                    assert!(effects.is_empty());
+                    (ProtocolEvent::JoinerSavedPrepared, 0x29)
+                }
+                Some(uc_core::membership::AdmissionPendingRecovery::Continuation {
+                    pending_exchange,
+                    ..
+                }) if pending_exchange.request_envelope().kind()
+                    == SpaceAdmissionMessageKind::Applied =>
+                {
+                    assert_eq!(
+                        effects,
+                        &[uc_core::membership::AdmissionEffect::ApplyMembership]
+                    );
+                    (ProtocolEvent::JoinerSavedApplied, 0x2b)
+                }
+                None if aggregate.record_version() == 2 => {
+                    assert!(effects.is_empty());
+                    (ProtocolEvent::JoinerSavedCandidate, 0x28)
+                }
+                None if aggregate.joiner_applied_preparation().is_some() => {
+                    assert!(effects.is_empty());
+                    (ProtocolEvent::JoinerSavedCommitted, 0x2a)
+                }
+                None if aggregate.joiner_activation_preparation().is_some() => {
+                    assert_eq!(
+                        effects,
+                        &[uc_core::membership::AdmissionEffect::ActivateSpace]
+                    );
+                    (ProtocolEvent::JoinerSavedActivating, 0x2c)
+                }
+                None if aggregate.is_active_settled() => {
+                    assert!(effects.is_empty());
+                    (ProtocolEvent::JoinerSavedActiveSettled, 0x2e)
+                }
+                _ => return Err(PendingAdmissionRecoveryStateError::RecoveryRequired),
+            }
+        };
         let persisted = aggregate
             .encode_persisted()
             .expect("test aggregate can be persisted");
@@ -623,10 +715,12 @@ impl SpaceAdmissionTransportPort for RecordingSpaceAdmissionTransport {
                 TransportMode::AuthenticateThenCandidate
                     | TransportMode::AuthenticateThenCandidateAndCommit
                     | TransportMode::AuthenticateThenCandidateCommitAndComplete
-            ),
+            ) || self.mode.upgrade_on().is_some(),
             commit_reply: false,
             complete_reply: false,
             settled_reply: false,
+            upgrade_on: self.mode.upgrade_on(),
+            upgrade_pending: Arc::clone(&self.upgrade_pending),
         }))
     }
 
@@ -641,7 +735,8 @@ impl SpaceAdmissionTransportPort for RecordingSpaceAdmissionTransport {
             self.mode,
             TransportMode::AuthenticateThenCandidateAndCommit
                 | TransportMode::AuthenticateThenCandidateCommitAndComplete
-        ) {
+        ) && self.mode.upgrade_on().is_none()
+        {
             return Err(SpaceAdmissionTransportError::Deferred);
         }
         self.events
@@ -653,14 +748,10 @@ impl SpaceAdmissionTransportPort for RecordingSpaceAdmissionTransport {
             continuation: None,
             candidate_reply: false,
             commit_reply: true,
-            complete_reply: matches!(
-                self.mode,
-                TransportMode::AuthenticateThenCandidateCommitAndComplete
-            ),
-            settled_reply: matches!(
-                self.mode,
-                TransportMode::AuthenticateThenCandidateCommitAndComplete
-            ),
+            complete_reply: self.mode.supports_complete_protocol(),
+            settled_reply: self.mode.supports_complete_protocol(),
+            upgrade_on: self.mode.upgrade_on(),
+            upgrade_pending: Arc::clone(&self.upgrade_pending),
         }))
     }
 }
@@ -690,6 +781,9 @@ impl AuthenticatedAdmissionExchangePort for ExchangeThenDeferred {
                 .lock()
                 .expect("event recorder is available")
                 .push(ProtocolEvent::JoinerJoinRequestExchanged);
+            if self.take_upgrade_failure(request.kind()) {
+                return Err(SpaceAdmissionTransportError::PeerUpgradeRequired);
+            }
             if !self.candidate_reply {
                 return Err(SpaceAdmissionTransportError::Deferred);
             }
@@ -710,6 +804,9 @@ impl AuthenticatedAdmissionExchangePort for ExchangeThenDeferred {
                 .lock()
                 .expect("event recorder is available")
                 .push(ProtocolEvent::JoinerPreparedExchanged);
+            if self.take_upgrade_failure(request.kind()) {
+                return Err(SpaceAdmissionTransportError::PeerUpgradeRequired);
+            }
             let commit = SpaceAdmissionEnvelopeV1::new(
                 request.header().admission_id(),
                 AdmissionRole::Sponsor,
@@ -733,6 +830,9 @@ impl AuthenticatedAdmissionExchangePort for ExchangeThenDeferred {
                 .lock()
                 .expect("event recorder is available")
                 .push(ProtocolEvent::JoinerAppliedExchanged);
+            if self.take_upgrade_failure(request.kind()) {
+                return Err(SpaceAdmissionTransportError::PeerUpgradeRequired);
+            }
             let SpaceAdmissionBodyV1::Applied(applied_body) = request.body() else {
                 return Err(SpaceAdmissionTransportError::ProtocolRejected);
             };
@@ -768,6 +868,9 @@ impl AuthenticatedAdmissionExchangePort for ExchangeThenDeferred {
                 .lock()
                 .expect("event recorder is available")
                 .push(ProtocolEvent::JoinerCompleteAckExchanged);
+            if self.take_upgrade_failure(request.kind()) {
+                return Err(SpaceAdmissionTransportError::PeerUpgradeRequired);
+            }
             let settled = SpaceAdmissionEnvelopeV1::new(
                 request.header().admission_id(),
                 AdmissionRole::Sponsor,
@@ -781,6 +884,25 @@ impl AuthenticatedAdmissionExchangePort for ExchangeThenDeferred {
             .expect("valid Settled reply");
             return Ok(AuthenticatedAdmissionReply::new(settled, [0xc7; 32])
                 .expect("valid authenticated Settled"));
+        }
+        if request.kind() == SpaceAdmissionMessageKind::CancelRequested {
+            if self.take_upgrade_failure(request.kind()) {
+                return Err(SpaceAdmissionTransportError::PeerUpgradeRequired);
+            }
+            let rejected = SpaceAdmissionEnvelopeV1::new(
+                request.header().admission_id(),
+                AdmissionRole::Sponsor,
+                1,
+                AdmissionMessageId::from_bytes([0xc8; 32])
+                    .expect("valid cancellation reply message id"),
+                Some(request.header().message_id()),
+                SpaceAdmissionBodyV1::Rejected {
+                    reason: uc_core::membership::SpaceAdmissionRejectionReason::Cancelled,
+                },
+            )
+            .expect("valid cancellation reply");
+            return Ok(AuthenticatedAdmissionReply::new(rejected, [0xc9; 32])
+                .expect("valid authenticated cancellation reply"));
         }
         Err(SpaceAdmissionTransportError::Deferred)
     }
@@ -1234,6 +1356,10 @@ impl SpaceAdmissionProtocolTestPair {
         Self::with_mode(None, TransportMode::AuthenticateThenDefer).await
     }
 
+    pub(super) async fn peer_upgrade_required() -> Self {
+        Self::with_mode(None, TransportMode::AuthenticateThenUpgradeRequired).await
+    }
+
     pub(super) async fn receiving_candidate() -> Self {
         Self::with_mode(None, TransportMode::AuthenticateThenCandidate).await
     }
@@ -1250,12 +1376,37 @@ impl SpaceAdmissionProtocolTestPair {
         .await
     }
 
+    pub(super) async fn upgrade_once_on_prepared() -> Self {
+        Self::with_mode(None, TransportMode::UpgradeOnceOnPrepared).await
+    }
+
+    pub(super) async fn upgrade_once_on_applied() -> Self {
+        Self::with_mode(None, TransportMode::UpgradeOnceOnApplied).await
+    }
+
+    pub(super) async fn upgrade_once_on_cancel() -> Self {
+        Self::with_mode(None, TransportMode::UpgradeOnceOnCancel).await
+    }
+
+    pub(super) async fn upgrade_once_on_settlement() -> Self {
+        Self::with_mode(None, TransportMode::UpgradeOnceOnSettlement).await
+    }
+
     pub(super) async fn with_current_join(current_join: Option<JoinerAdmission>) -> Self {
         Self::with_mode(current_join, TransportMode::DeferInitial).await
     }
 
     async fn with_mode(current_join: Option<JoinerAdmission>, mode: TransportMode) -> Self {
         let events = Arc::new(Mutex::new(Vec::new()));
+        let upgrade_pending = Arc::new(AtomicBool::new(mode.upgrade_on().is_some()));
+        let admission_status_invalidations = Arc::new(AtomicUsize::new(0));
+        let host_events = Arc::new(crate::facade::HostEventBus::new());
+        host_events.register(
+            "space-admission-test",
+            Arc::new(AdmissionStatusEventRecorder(Arc::clone(
+                &admission_status_invalidations,
+            ))),
+        );
         let state = Arc::new(RecordingJoinerStartState {
             events: Arc::clone(&events),
             current_join: Mutex::new(current_join),
@@ -1309,7 +1460,9 @@ impl SpaceAdmissionProtocolTestPair {
                     Arc::new(RecordingSpaceAdmissionTransport {
                         events: Arc::clone(&events),
                         mode,
+                        upgrade_pending: Arc::clone(&upgrade_pending),
                     }),
+                    Arc::clone(&host_events),
                 ),
             ),
             sponsor: SpaceAdmissionProtocol::new(
@@ -1350,11 +1503,15 @@ impl SpaceAdmissionProtocolTestPair {
                     Arc::new(RecordingSpaceAdmissionTransport {
                         events: Arc::clone(&events),
                         mode: TransportMode::DeferInitial,
+                        upgrade_pending: Arc::new(AtomicBool::new(false)),
                     }),
+                    host_events,
                 ),
             ),
             state,
             sponsor_state,
+            admission_status_invalidations,
+            upgrade_pending,
         }
     }
 
@@ -1378,6 +1535,14 @@ impl SpaceAdmissionProtocolTestPair {
         self.state.events.lock().unwrap().clone()
     }
 
+    pub(super) fn admission_status_invalidation_count(&self) -> usize {
+        self.admission_status_invalidations.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn require_upgrade_once_more(&self) {
+        self.upgrade_pending.store(true, Ordering::SeqCst);
+    }
+
     pub(super) fn take_created_join(&self) -> JoinerAdmission {
         self.state
             .created_join
@@ -1385,6 +1550,20 @@ impl SpaceAdmissionProtocolTestPair {
             .expect("created join is available")
             .take()
             .expect("one join was committed")
+    }
+
+    pub(super) fn saved_join(&self) -> JoinerAdmission {
+        let stored = self
+            .state
+            .created_join
+            .lock()
+            .expect("created join is available");
+        let persisted = stored
+            .as_ref()
+            .expect("one join was committed")
+            .encode_persisted()
+            .expect("saved join can be persisted");
+        JoinerAdmission::decode_persisted(&persisted).expect("saved join can be reopened")
     }
 
     pub(super) fn fail_next_activation_commit(&self) {

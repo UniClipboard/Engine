@@ -621,7 +621,7 @@ pub async fn build_sync_engine_assembly(
     let local_identity: Arc<dyn LocalIdentityPort> = identity_store;
     let build_admission =
         |membership_committer: Arc<dyn uc_application::deps::CommitMembershipLedgerPort>| {
-            crate::assembly::observability::observe_admission(SpaceAdmissionAdapters {
+            SpaceAdmissionAdapters {
                 re_pairing_state_store: Arc::clone(&space_setup.re_pairing_state_store),
                 prepare_joiner_invitation: Arc::new(DefaultJoinerInvitationPreparation),
                 resolve_joiner_invitation: handlers.joiner_invitation_resolver,
@@ -691,66 +691,65 @@ pub async fn build_sync_engine_assembly(
                 )),
                 current_join_status: space_setup.admission_state.clone()
                     as Arc<dyn uc_application::deps::LoadCurrentJoinStatusPort>,
-            })
+            }
         };
-    let membership = crate::assembly::observability::observe_membership(
-        SpaceMembershipAdapters {
-            load_membership_ledger: space_setup.membership_ledger.clone()
-                as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
-            commit_membership_ledger: space_setup.membership_ledger.clone()
-                as Arc<dyn uc_application::deps::CommitMembershipLedgerPort>,
-            historical_membership_signatures: historical_signatures.clone(),
-            current_member_signatures: Arc::clone(&space_setup.current_member_signatures),
-            membership_identity: removal_identity,
-            membership_announcement: membership_transport,
-            device_trust_observations: Arc::new(DeviceTrustObservationsAdapter::new(
-                Arc::clone(&space_setup.member_repo),
-                Arc::clone(&peer_reachability),
-            )),
-            membership_history_transport: membership_history_transport.clone(),
-            membership_branch_recovery_channel,
-            membership_branch_recovery_recipient: Arc::clone(
-                &space_setup
-                    .space_access
-                    .prepare_membership_branch_recovery_recipient,
-            ),
-            membership_branch_transition: Arc::new(
-                DefaultMembershipBranchTransitionPreparation::new(Arc::clone(
-                    &space_setup.active_generation_manifest_store,
-                )),
-            ),
-            membership_branch_transition_executor: Arc::clone(
-                &space_setup.membership_branch_transition_executor,
-            ),
-            membership_branch_recovery_material: Arc::clone(
-                &space_setup
-                    .space_access
-                    .prepare_membership_branch_recovery_material,
-            ),
-            apply_membership_member_facts: Arc::new(MembershipMemberFactsAdapter::new(
-                Arc::clone(&space_setup.member_repo),
-                Arc::clone(&space_setup.trusted_peer_repo),
-                Arc::clone(&space_setup.peer_addr_repo),
-                Arc::clone(&space_setup.device_identity),
-                Arc::clone(&space_setup.clock),
-            )),
-            apply_membership_security: membership_security,
-            activate_membership_effect: Arc::new(MembershipActivationAdapter::new(Arc::clone(
-                &peer_reachability,
-            ))),
-            restricted_membership_delivery: membership_history_transport,
-            group_update_store: Arc::clone(&space_setup.space_access.group_revocation),
-            group_update_dispatch,
-            cleanup_legacy_membership_data: Arc::new(MembershipProjectionCleanupAdapter::new(
-                space_setup.membership_ledger.clone()
-                    as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
-                Arc::clone(&space_setup.member_repo),
-                Arc::clone(&space_setup.peer_addr_repo),
-            )),
-            membership_network_activity: membership_network_gate,
-        },
+    let membership_commit = crate::assembly::membership_events::publish_membership_commit_events(
+        space_setup.membership_ledger.clone()
+            as Arc<dyn uc_application::deps::CommitMembershipLedgerPort>,
         application.host_event_bus(),
     );
+    let membership = crate::assembly::observability::observe_membership(SpaceMembershipAdapters {
+        load_membership_ledger: space_setup.membership_ledger.clone()
+            as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
+        commit_membership_ledger: membership_commit,
+        historical_membership_signatures: historical_signatures.clone(),
+        current_member_signatures: Arc::clone(&space_setup.current_member_signatures),
+        membership_identity: removal_identity,
+        membership_announcement: membership_transport,
+        device_trust_observations: Arc::new(DeviceTrustObservationsAdapter::new(
+            Arc::clone(&space_setup.member_repo),
+            Arc::clone(&peer_reachability),
+        )),
+        membership_history_transport: membership_history_transport.clone(),
+        membership_branch_recovery_channel,
+        membership_branch_recovery_recipient: Arc::clone(
+            &space_setup
+                .space_access
+                .prepare_membership_branch_recovery_recipient,
+        ),
+        membership_branch_transition: Arc::new(DefaultMembershipBranchTransitionPreparation::new(
+            Arc::clone(&space_setup.active_generation_manifest_store),
+        )),
+        membership_branch_transition_executor: Arc::clone(
+            &space_setup.membership_branch_transition_executor,
+        ),
+        membership_branch_recovery_material: Arc::clone(
+            &space_setup
+                .space_access
+                .prepare_membership_branch_recovery_material,
+        ),
+        apply_membership_member_facts: Arc::new(MembershipMemberFactsAdapter::new(
+            Arc::clone(&space_setup.member_repo),
+            Arc::clone(&space_setup.trusted_peer_repo),
+            Arc::clone(&space_setup.peer_addr_repo),
+            Arc::clone(&space_setup.device_identity),
+            Arc::clone(&space_setup.clock),
+        )),
+        apply_membership_security: membership_security,
+        activate_membership_effect: Arc::new(MembershipActivationAdapter::new(Arc::clone(
+            &peer_reachability,
+        ))),
+        restricted_membership_delivery: membership_history_transport,
+        group_update_store: Arc::clone(&space_setup.space_access.group_revocation),
+        group_update_dispatch,
+        cleanup_legacy_membership_data: Arc::new(MembershipProjectionCleanupAdapter::new(
+            space_setup.membership_ledger.clone()
+                as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
+            Arc::clone(&space_setup.member_repo),
+            Arc::clone(&space_setup.peer_addr_repo),
+        )),
+        membership_network_activity: membership_network_gate,
+    });
     let admission = build_admission(Arc::clone(&membership.commit_membership_ledger));
     let space_runtime = SpaceRuntimeAdapters {
         admission,
@@ -802,7 +801,9 @@ pub async fn build_sync_engine_assembly(
         clipboard,
     });
     builder.install_space_admission(
-        application_network.space_admission_endpoint(),
+        crate::assembly::observability::observe_admission_endpoint(
+            application_network.space_admission_endpoint(),
+        ),
         space_setup.admission_credentials.clone()
             as Arc<dyn uc_infra::network::iroh::SpaceAdmissionChannelCredentialPort>,
     )?;

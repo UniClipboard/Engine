@@ -16,13 +16,13 @@ pub use artifact::{
     AdmissionStagedSecurityState, AdmissionStagedTarget, AdmissionStagedTargetInput,
     SpaceAdmissionRoute,
 };
-#[cfg(test)]
-pub(crate) use exchange::SavedAdmissionReply;
 pub use exchange::{
     AdmissionErrorCategory, AdmissionEvidenceRelation, AdmissionInboundDecision,
     AdmissionInboundExpectation, AdmissionMessageEvidence, AdmissionPendingExchangeError,
     AdmissionReplayDecision, AdmissionReplayError, AdmissionRetryState, PendingAdmissionExchange,
 };
+#[cfg(test)]
+pub(crate) use exchange::{AdmissionExchangeBlockReason, SavedAdmissionReply};
 pub use id::{AdmissionChannelPeerId, AdmissionMessageId, InvitationId, JoinId, SpaceAdmissionId};
 pub use message::{
     AdmissionAppliedV1, AdmissionCandidateError, AdmissionCandidateV1, AdmissionCommitV1,

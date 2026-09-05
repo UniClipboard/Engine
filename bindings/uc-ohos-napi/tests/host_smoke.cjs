@@ -8,8 +8,9 @@ async function main() {
   assert.ok(addonPath, 'UC_OHOS_NAPI_NODE must point to the built N-API module');
 
   const addon = require(addonPath);
-  assert.equal(addon.coreVersion(), 'v0.20.0-rc.11');
+  assert.equal(addon.coreVersion(), 'v1.1.0-rc.5');
   assert.equal(typeof addon.installProcessObservability, 'function');
+  assert.equal(typeof addon.queryProcessObservabilityHealth, 'function');
   assert.equal(typeof addon.flushProcessObservability, 'function');
   assert.equal(typeof addon.shutdownProcessObservability, 'function');
   assert.equal(typeof addon.prepareHost, 'function');
@@ -117,7 +118,7 @@ async function main() {
     const observabilityConfig = {
       serviceVersion: '1.2.3',
       environment: 'test',
-      appChannel: 'ohos-host-smoke',
+      appChannel: 'test',
       remoteDiagnosticsEnabled: false,
     };
     const hostDirectories = {
@@ -129,6 +130,19 @@ async function main() {
     assert.equal(setup.reused, false);
     assert.equal(setup.remote, 'disabled');
     assert.equal(setup.localFile, 'ready');
+    const health = addon.queryProcessObservabilityHealth();
+    assert.equal(health.remote, setup.remote);
+    assert.equal(health.localFile, setup.localFile);
+    for (const counter of [
+      health.droppedLocalRecords,
+      health.droppedRemoteSpans,
+      health.droppedRemoteLogs,
+      health.failedRemoteSpanBatches,
+      health.failedRemoteLogBatches,
+    ]) {
+      assert.equal(Number.isSafeInteger(counter), true);
+      assert.ok(counter >= 0);
+    }
 
     const preparedHost = addon.prepareHost(host);
     const engine = await addon.startEngine(
@@ -150,7 +164,7 @@ async function main() {
     assert.match(invitation.availability, /^(cross_network|same_local_network)$/);
 
     await assert.rejects(
-      engine.joinSpace(invitation.invitationCode, '  ', 'correct horse battery staple'),
+      engine.joinSpace(invitation.invitationCode, '  ', 'correct horse battery staple', false),
       /UC_ENGINE:\d+:invalid_input:false/
     );
 
@@ -207,7 +221,7 @@ async function main() {
     assert.equal(reusedSetup.reused, true);
     assert.throws(
       () => addon.installProcessObservability(
-        { ...observabilityConfig, appChannel: 'conflicting-channel' },
+        { ...observabilityConfig, appChannel: 'development' },
         hostDirectories
       ),
       /OHOS_OBSERVABILITY_CONFIG_CONFLICT/

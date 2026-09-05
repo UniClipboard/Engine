@@ -501,6 +501,7 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
         uc_engine::JoinSpaceStatusSummary::Active {
             join_id,
             joined_space,
+            peer_upgrade_required,
         } => OhJoinSpaceStatus {
             status: "active".to_owned(),
             join_id,
@@ -519,6 +520,7 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
             sponsor_device_id: None,
             sponsor_identity_fingerprint: None,
             cancel_requested: None,
+            peer_upgrade_required,
             rejection_reason: None,
         },
         uc_engine::JoinSpaceStatusSummary::Pending {
@@ -527,6 +529,7 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
             sponsor_device_id,
             sponsor_identity_fingerprint,
             cancel_requested,
+            peer_upgrade_required,
         } => OhJoinSpaceStatus {
             status: "pending".to_owned(),
             join_id,
@@ -535,6 +538,7 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
             sponsor_device_id,
             sponsor_identity_fingerprint,
             cancel_requested: Some(cancel_requested),
+            peer_upgrade_required,
             rejection_reason: None,
         },
         uc_engine::JoinSpaceStatusSummary::Rejected { join_id, reason } => OhJoinSpaceStatus {
@@ -545,6 +549,7 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
             sponsor_device_id: None,
             sponsor_identity_fingerprint: None,
             cancel_requested: None,
+            peer_upgrade_required: false,
             rejection_reason: Some(
                 match reason {
                     uc_engine::JoinSpaceRejectionReasonSummary::InvitationUnavailable => {
@@ -734,9 +739,12 @@ fn invalid_restore_mode() -> napi::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{count, device_trust_json, engine_error, map_event, workspace_convergence};
+    use super::{
+        count, device_trust_json, engine_error, join_space_status, map_event, workspace_convergence,
+    };
     use uc_engine::{
-        EngineError, EngineErrorCategory, EngineEvent, OperationTerminal, RefreshReason,
+        EngineError, EngineErrorCategory, EngineEvent, OperationResult, OperationTerminal,
+        RefreshReason,
     };
 
     #[test]
@@ -825,6 +833,23 @@ mod tests {
         assert_eq!(event.error_code, Some(1214));
         assert_eq!(event.error_category.as_deref(), Some("unavailable"));
         assert_eq!(event.retryable, Some(true));
+    }
+
+    #[test]
+    fn join_status_preserves_the_peer_upgrade_prompt() {
+        let status = join_space_status(OperationResult::JoinSpace(
+            uc_engine::JoinSpaceStatusSummary::Pending {
+                join_id: "join-id".to_owned(),
+                target_space_id: None,
+                sponsor_device_id: None,
+                sponsor_identity_fingerprint: None,
+                cancel_requested: false,
+                peer_upgrade_required: true,
+            },
+        ))
+        .expect("join status must map");
+
+        assert!(status.peer_upgrade_required);
     }
 
     #[test]

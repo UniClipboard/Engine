@@ -20,8 +20,8 @@ use super::artifact::{
     AdmissionStagedTargetInput, SpaceAdmissionRoute,
 };
 use super::exchange::{
-    AdmissionErrorCategory, AdmissionMessageEvidence, AdmissionRetryState,
-    PendingAdmissionExchange, SavedAdmissionReply,
+    AdmissionErrorCategory, AdmissionExchangeBlockReason, AdmissionMessageEvidence,
+    AdmissionRetryState, PendingAdmissionExchange, SavedAdmissionReply,
 };
 use super::id::{AdmissionMessageId, JoinId, SpaceAdmissionId};
 use super::message::{SpaceAdmissionEnvelopeV1, SpaceAdmissionRejectionReason};

@@ -528,8 +528,8 @@ impl ApplyInboundActiveClipboardStateUseCase {
         let send_gate = self.send_gate.clone();
         let converged_tx = self.converged_tx.clone();
 
-        uc_observability_contract::spawn_supervised(
-            "clipboard_sync.active_write_then_converge",
+        crate::support::task_supervision::spawn_supervised(
+            uc_observability_contract::diagnostics::DiagnosticTaskKind::ActiveClipboardConverge,
             async move {
                 // The active-clipboard write is a remote-originated push: use the
                 // RemotePush intent so the OS-write origin guard matches the bulk

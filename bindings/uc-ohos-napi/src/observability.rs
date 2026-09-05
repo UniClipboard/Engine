@@ -12,8 +12,8 @@ use uc_engine::observability::{
 use uc_engine::HostDirectories;
 
 use crate::{
-    OhCollectorConfig, OhHostDirectories, OhObservabilityConfig, OhObservabilitySetup,
-    OhObservabilitySignalSummary,
+    OhCollectorConfig, OhHostDirectories, OhObservabilityConfig, OhObservabilityHealth,
+    OhObservabilitySetup, OhObservabilitySignalSummary,
 };
 
 const ENGINE_FLUSH_DEADLINE: Duration = Duration::from_millis(250);
@@ -35,6 +35,19 @@ pub(crate) fn install(
         remote: setup_status(health.remote).to_owned(),
         local_file: setup_status(health.local_file).to_owned(),
         dropped_local_records: health.dropped_local_records as f64,
+    })
+}
+
+pub(crate) fn health() -> napi::Result<OhObservabilityHealth> {
+    let health = PROCESS_HANDLE.get().ok_or_else(not_installed)?.health();
+    Ok(OhObservabilityHealth {
+        remote: setup_status(health.remote).to_owned(),
+        local_file: setup_status(health.local_file).to_owned(),
+        dropped_local_records: health.dropped_local_records as f64,
+        dropped_remote_spans: health.dropped_remote_spans as f64,
+        dropped_remote_logs: health.dropped_remote_logs as f64,
+        failed_remote_span_batches: health.failed_remote_span_batches as f64,
+        failed_remote_log_batches: health.failed_remote_log_batches as f64,
     })
 }
 
@@ -95,9 +108,9 @@ fn runtime_config(
         config.service_version,
         environment(&config.environment)?,
         OperatingSystem::Ohos,
-        std::env::consts::ARCH,
         config.app_channel,
-    );
+    )
+    .map_err(|_| config_invalid())?;
     let runtime =
         ObservabilityConfig::new(resource).with_local_logs(LocalLogConfig::new(directories.logs()));
     if !config.remote_diagnostics_enabled {
@@ -202,6 +215,8 @@ mod tests {
         let output = format!("{:?}", config(true));
         assert!(!output.contains("collector.example"));
         assert!(!output.contains("private-token"));
+        assert!(!output.contains("1.2.3"));
+        assert!(!output.contains("test"));
         assert!(output.contains("REDACTED"));
     }
 
@@ -225,5 +240,17 @@ mod tests {
         let directories = host_directories(directories());
         let error = runtime_config(config, &directories).expect_err("invalid environment");
         assert_eq!(error.reason, "OHOS_OBSERVABILITY_CONFIG_INVALID");
+    }
+
+    #[test]
+    fn resource_metadata_rejects_arbitrary_host_strings() {
+        for (version, channel) in [("MyPhone123", "test"), ("1.2.3", "phc_private-token")] {
+            let mut config = config(false);
+            config.service_version = version.to_owned();
+            config.app_channel = channel.to_owned();
+            let directories = host_directories(directories());
+            let error = runtime_config(config, &directories).expect_err("invalid resource");
+            assert_eq!(error.reason, "OHOS_OBSERVABILITY_CONFIG_INVALID");
+        }
     }
 }

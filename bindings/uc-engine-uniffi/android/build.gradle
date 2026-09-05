@@ -15,6 +15,11 @@ apply plugin: "org.jetbrains.kotlin.android"
 
 layout.buildDirectory = file(System.getenv("UC_ENGINE_UNIFFI_GRADLE_BUILD_DIR") ?: "build")
 
+def rustlsVerifierJar = System.getenv("UC_ENGINE_UNIFFI_RUSTLS_VERIFIER_JAR")
+if (rustlsVerifierJar == null || !file(rustlsVerifierJar).isFile()) {
+    throw new GradleException("UC_ENGINE_UNIFFI_RUSTLS_VERIFIER_JAR must name the extracted verifier classes")
+}
+
 android {
     namespace "app.uniclipboard.engine"
     compileSdk 36
@@ -43,4 +48,5 @@ android {
 
 dependencies {
     api "net.java.dev.jna:jna:5.14.0@aar"
+    implementation files(rustlsVerifierJar)
 }

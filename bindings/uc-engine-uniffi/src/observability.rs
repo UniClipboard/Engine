@@ -11,8 +11,9 @@ use uc_engine::HostDirectories;
 
 use crate::{
     BindingCollectorConfig, BindingDeploymentEnvironment, BindingError, BindingObservabilityConfig,
-    BindingObservabilityFlushSummary, BindingObservabilitySetup, BindingObservabilitySetupStatus,
-    BindingObservabilityShutdownSummary, BindingObservabilitySignalResult,
+    BindingObservabilityFlushSummary, BindingObservabilityHealth, BindingObservabilitySetup,
+    BindingObservabilitySetupStatus, BindingObservabilityShutdownSummary,
+    BindingObservabilitySignalResult,
 };
 
 const ENGINE_FLUSH_DEADLINE: Duration = Duration::from_millis(250);
@@ -33,6 +34,22 @@ pub(crate) fn install(
         remote: map_setup_status(health.remote),
         local_file: map_setup_status(health.local_file),
         dropped_local_records: health.dropped_local_records,
+    })
+}
+
+pub(crate) fn health() -> Result<BindingObservabilityHealth, BindingError> {
+    let health = PROCESS_HANDLE
+        .get()
+        .ok_or(BindingError::ObservabilityNotInstalled)?
+        .health();
+    Ok(BindingObservabilityHealth {
+        remote: map_setup_status(health.remote),
+        local_file: map_setup_status(health.local_file),
+        dropped_local_records: health.dropped_local_records,
+        dropped_remote_spans: health.dropped_remote_spans,
+        dropped_remote_logs: health.dropped_remote_logs,
+        failed_remote_span_batches: health.failed_remote_span_batches,
+        failed_remote_log_batches: health.failed_remote_log_batches,
     })
 }
 
@@ -84,9 +101,9 @@ fn runtime_config(
         config.service_version,
         map_environment(config.environment),
         operating_system(),
-        std::env::consts::ARCH,
         config.app_channel,
-    );
+    )
+    .map_err(|_| BindingError::ObservabilityConfigInvalid)?;
     let runtime =
         ObservabilityConfig::new(resource).with_local_logs(LocalLogConfig::new(directories.logs()));
     if !config.remote_diagnostics_enabled {
@@ -166,6 +183,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+    use uc_engine::{emit_test_diagnostic_completion, TestDiagnosticCompletion};
 
     fn directories() -> HostDirectories {
         HostDirectories::new(
@@ -196,6 +214,8 @@ mod tests {
         let output = format!("{:?}", config(true));
         assert!(!output.contains("collector.example"));
         assert!(!output.contains("private-token"));
+        assert!(!output.contains("1.2.3"));
+        assert!(!output.contains("test"));
         assert!(output.contains("REDACTED"));
     }
 
@@ -226,6 +246,19 @@ mod tests {
     }
 
     #[test]
+    fn resource_metadata_rejects_arbitrary_host_strings() {
+        for (version, channel) in [("MyPhone123", "test"), ("1.2.3", "phc_private-token")] {
+            let mut config = config(false);
+            config.service_version = version.to_owned();
+            config.app_channel = channel.to_owned();
+            assert!(matches!(
+                runtime_config(config, &directories()),
+                Err(BindingError::ObservabilityConfigInvalid)
+            ));
+        }
+    }
+
+    #[test]
     fn scheduled_flush_keeps_one_host_log_across_suspend_and_resume() {
         let root = tempfile::tempdir().expect("temporary directory");
         let directories = HostDirectories::new(
@@ -240,12 +273,12 @@ mod tests {
         assert_eq!(setup.remote, BindingObservabilitySetupStatus::Disabled);
         assert_eq!(setup.local_file, BindingObservabilitySetupStatus::Ready);
 
-        emit_test_completion("storage", "profile_storage_upgrade");
+        emit_test_diagnostic_completion(TestDiagnosticCompletion::ProfileStorageUpgrade);
         schedule_flush_after_success(&Ok::<(), ()>(()));
         let first = wait_for_log(&directories, "profile_storage_upgrade");
         assert!(first.contains("profile_storage_upgrade"));
 
-        emit_test_completion("runtime", "session_lifecycle");
+        emit_test_diagnostic_completion(TestDiagnosticCompletion::SessionLifecycle);
         schedule_flush_after_success(&Ok::<(), ()>(()));
         let resumed = wait_for_log(&directories, "session_lifecycle");
         assert!(resumed.contains("profile_storage_upgrade"));
@@ -261,19 +294,6 @@ mod tests {
         assert_eq!(
             closed.logs,
             BindingObservabilitySignalResult::AlreadyShutdown
-        );
-    }
-
-    fn emit_test_completion(domain: &'static str, operation: &'static str) {
-        tracing::event!(
-            target: "uc.telemetry",
-            tracing::Level::INFO,
-            event.name = "uc.operation.completed",
-            uc.domain = domain,
-            uc.operation = operation,
-            uc.role = "local",
-            uc.outcome = "ok",
-            duration_ms = 1_u64,
         );
     }
 

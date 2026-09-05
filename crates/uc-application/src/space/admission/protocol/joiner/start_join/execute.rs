@@ -98,6 +98,7 @@ impl JoinerAdmissionService {
                 sponsor_device_id: None,
                 sponsor_identity_fingerprint: None,
                 cancel_requested: false,
+                peer_upgrade_required: false,
             },
             requires_session_transition,
         })

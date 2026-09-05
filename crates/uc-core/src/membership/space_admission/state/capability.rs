@@ -265,6 +265,10 @@ impl JoinerAdmission {
         self.record.pending_exchange()
     }
 
+    pub fn peer_upgrade_required(&self) -> bool {
+        self.record.peer_upgrade_required()
+    }
+
     pub fn current_exact_reply(&self) -> Option<&SpaceAdmissionEnvelopeV1> {
         self.record.current_exact_reply()
     }
@@ -340,6 +344,22 @@ impl JoinerAdmission {
     ) -> Result<JoinerAdmissionTransition, SpaceAdmissionAggregateError> {
         self.record
             .reject_before_authentication(reason)
+            .map(JoinerAdmissionTransition::from_transition)
+    }
+
+    pub fn reject_peer_upgrade(
+        self,
+    ) -> Result<JoinerAdmissionTransition, SpaceAdmissionAggregateError> {
+        self.record
+            .reject_peer_upgrade()
+            .map(JoinerAdmissionTransition::from_transition)
+    }
+
+    pub fn mark_peer_upgrade_required(
+        self,
+    ) -> Result<JoinerAdmissionTransition, SpaceAdmissionAggregateError> {
+        self.record
+            .mark_peer_upgrade_required()
             .map(JoinerAdmissionTransition::from_transition)
     }
 

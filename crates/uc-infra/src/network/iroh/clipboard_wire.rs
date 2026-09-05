@@ -589,7 +589,6 @@ mod tests {
         let header = sample_header();
         let context = WireTraceContext {
             traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_owned(),
-            tracestate: Some("vendor=value".to_owned()),
         };
         let mut bytes = encode_header_with_context(&header, Some(context.clone())).unwrap();
         let decoded = decode_wire_header(&bytes).unwrap();

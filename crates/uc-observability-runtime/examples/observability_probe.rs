@@ -19,17 +19,18 @@ fn main() -> ExitCode {
     let Some(log_endpoint) = arguments.next() else {
         return ExitCode::from(2);
     };
-    let Ok(remote) = OtlpHttpConfig::new(&trace_endpoint, &log_endpoint) else {
+    let Ok(remote) = OtlpHttpConfig::new_loopback(&trace_endpoint, &log_endpoint) else {
         return ExitCode::from(2);
     };
-    let config = ObservabilityConfig::new(ObservabilityResource::new(
+    let Ok(resource) = ObservabilityResource::new(
         env!("CARGO_PKG_VERSION"),
         DeploymentEnvironment::Development,
         current_os(),
-        std::env::consts::ARCH,
-        "local-probe",
-    ))
-    .with_remote(remote);
+        "development",
+    ) else {
+        return ExitCode::from(2);
+    };
+    let config = ObservabilityConfig::new(resource).with_remote(remote);
     let Ok(installed) = ProcessObservabilityRuntime::install(config) else {
         return ExitCode::FAILURE;
     };
@@ -40,7 +41,6 @@ fn main() -> ExitCode {
         operation: DiagnosticOperation::ProfileStorageUpgrade,
         role: DiagnosticRole::Local,
         kind: DiagnosticSpanKind::Internal,
-        flow: None,
     });
     {
         let _entered = span.enter();

@@ -14,8 +14,8 @@ pub(crate) async fn spawn_peer_presence_event_task(
     let Ok(mut presence) = facade.subscribe_peer_presence_events() else {
         return;
     };
-    tasks
-        .spawn("peer_presence_events", move |cancel| async move {
+    let _ = tasks
+        .spawn(move |cancel| async move {
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => return,

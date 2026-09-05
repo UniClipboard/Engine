@@ -27,6 +27,16 @@ pub extern "system" fn Java_expo_modules_ucengine_UcEngineModule_nativeInstallAn
         Ok(vm) => vm,
         Err(_) => return JNI_FALSE,
     };
+    if unsafe {
+        uc_engine::observability::initialize_android_tls(
+            env.get_raw().cast::<c_void>(),
+            context.as_raw().cast::<c_void>(),
+        )
+    }
+    .is_err()
+    {
+        return JNI_FALSE;
+    }
     let context = match env.new_global_ref(context) {
         Ok(context) => context,
         Err(_) => return JNI_FALSE,

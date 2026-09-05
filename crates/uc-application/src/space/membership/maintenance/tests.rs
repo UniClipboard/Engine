@@ -92,6 +92,28 @@ struct BlockingAdmission {
     release: Arc<tokio::sync::Notify>,
 }
 
+struct BlockingFirstRecordingAdmission {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    calls: Arc<Mutex<Vec<&'static str>>>,
+    first: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl RecoverSpaceAdmissionsPort for BlockingFirstRecordingAdmission {
+    async fn recover_space_admissions(
+        &self,
+        _trigger: &MembershipMaintenanceTrigger,
+    ) -> MembershipMaintenanceStepOutcome {
+        self.calls.lock().unwrap().push("admissions");
+        if self.first.swap(false, Ordering::SeqCst) {
+            self.started.notify_one();
+            self.release.notified().await;
+        }
+        MembershipMaintenanceStepOutcome::Completed
+    }
+}
+
 struct NonCooperativeAdmission {
     started: Arc<tokio::sync::Notify>,
 }
@@ -234,9 +256,15 @@ async fn peer_online_runs_only_exact_peer_capabilities() {
 
     assert_eq!(
         calls.lock().unwrap().as_slice(),
-        &["conflicts", "group_updates", "restricted", "synchronize"]
+        &[
+            "admissions",
+            "conflicts",
+            "group_updates",
+            "restricted",
+            "synchronize"
+        ]
     );
-    assert_eq!(report.completed_count, 4);
+    assert_eq!(report.completed_count, 5);
 }
 
 #[tokio::test]
@@ -334,7 +362,7 @@ async fn runtime_pause_resume_presence_and_shutdown_share_one_lifecycle() {
         state: uc_core::ports::ReachabilityState::Online,
         at: chrono::Utc::now(),
     });
-    wait_for_call_count(&calls, 18).await;
+    wait_for_call_count(&calls, 19).await;
 
     runtime.shutdown().await;
 }
@@ -458,9 +486,11 @@ async fn online_events_for_different_peers_are_not_overwritten_during_a_round() 
     let release = Arc::new(tokio::sync::Notify::new());
     let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
         MaintainSpaceMembershipDeps {
-            admissions: Arc::new(BlockingAdmission {
+            admissions: Arc::new(BlockingFirstRecordingAdmission {
                 started: Arc::clone(&started),
                 release: Arc::clone(&release),
+                calls: Arc::clone(&calls),
+                first: std::sync::atomic::AtomicBool::new(true),
             }),
             effects: step("effects"),
             conflicts: step("conflicts"),
@@ -487,21 +517,24 @@ async fn online_events_for_different_peers_are_not_overwritten_during_a_round() 
     }
     release.notify_one();
 
-    wait_for_call_count(&calls, 14).await;
+    wait_for_call_count(&calls, 17).await;
 
     assert_eq!(
         calls.lock().unwrap().as_slice(),
         &[
+            "admissions",
             "restricted",
             "effects",
             "conflicts",
             "group_updates",
             "synchronize",
             "cleanup",
+            "admissions",
             "conflicts",
             "group_updates",
             "restricted",
             "synchronize",
+            "admissions",
             "conflicts",
             "group_updates",
             "restricted",

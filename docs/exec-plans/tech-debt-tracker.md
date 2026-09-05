@@ -5,6 +5,7 @@
 | 项目 | 状态 | 依赖/退出条件 | 计划 |
 | --- | --- | --- | --- |
 | 本地产物统一准备 | 待实现 | 脚本、清单和三目标验证完成 | [计划](active/local-artifacts-preparation.md) |
-| 移动端日志保留、统一导出与远程发送 | 由 037 取代 | JSONL 7 天/100 MB、诊断导出和远程发送完成 | [计划](active/037-opentelemetry-tracing-and-structured-logs.md) |
+| 双设备配对本机耗时仍约 5 秒 | 等待用户决定 | 可信纯网络扣除门禁通过，预热后不少于 20 次的本机耗时 p95 小于 1 秒 | [计划](active/038-pairing-local-latency-budget.md) |
+| 历史本地调试调用点尚未逐项分类 | 待实现，当前默认拒绝输出 | 每个生成清单项完成删除、安全本地化或明确保留，真实 sink 隐私检查通过 | [计划](active/039-local-debug-inventory-cleanup.md) |
 
 关闭项目时记录验证证据，更新稳定文档，并将对应计划移入 `completed/`。
