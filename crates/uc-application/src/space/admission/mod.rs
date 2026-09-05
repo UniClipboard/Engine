@@ -18,6 +18,7 @@ mod complete_pending_space_transition;
 mod invitation;
 mod join_space;
 mod model;
+mod observation;
 mod protocol;
 mod query_pending_space_transition;
 mod security_transition;
@@ -30,6 +31,7 @@ pub use invitation::{
 };
 pub use join_space::{JoinSpaceError, JoinSpaceInput, JoinSpaceResult};
 pub use model::{CurrentJoinStatus, JoinedSpace, PendingInboundMember};
+pub(crate) use observation::SpaceAdmissionObservationRegistry;
 pub use protocol::{
     ActivateSponsorAdmissionError, ActivateSponsorAdmissionPort, AdmissionRecoveryCommitToken,
     AdmissionRecoveryReport, AdmissionRecoveryTrigger, AuthenticatedAdmissionExchangePort,

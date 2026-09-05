@@ -24,6 +24,7 @@ mod membership;
 
 // Caller-facing facade contract.
 pub use adapters::{SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters};
+pub(crate) use admission::SpaceAdmissionObservationRegistry;
 pub use admission::{
     CancelInvitationError, CancelSpaceJoinError, CompletePendingSpaceTransitionError,
     CurrentJoinStatus, JoinSpaceError, JoinSpaceInput, JoinSpaceResult, JoinedSpace,

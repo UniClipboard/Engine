@@ -4,9 +4,13 @@
 
 use std::fmt;
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use sha2::{Digest, Sha256};
+use tracing::Instrument;
 
 pub const TELEMETRY_SCHEMA_VERSION: u16 = 1;
 pub const TELEMETRY_TARGET: &str = "uc.telemetry";
@@ -52,19 +56,213 @@ impl fmt::Display for FlowAttribute<'_> {
 
 tokio::task_local! {
     static SPACE_ADMISSION_FLOW: DiagnosticFlowId;
+    static ADMISSION_ACTION: AdmissionObservationAction;
 }
 
-/// 在完整 Space 准入 owner 内提供不可读取的跨重试关联作用域。
-pub async fn scope_space_admission_observation<T>(
-    attempt_material: &[u8; 32],
+/// 完整流程负责人提供的固定动作含义，不含状态对象或业务标识。
+#[derive(Clone, Copy)]
+pub enum AdmissionObservationAction {
+    RequestJoin,
+    ConfirmPrepared,
+    ConfirmApplied,
+    Settle,
+    Cancel,
+}
+
+impl AdmissionObservationAction {
+    fn send_name(self) -> &'static str {
+        match self {
+            Self::RequestJoin => "pairing.request_join.send",
+            Self::ConfirmPrepared => "pairing.confirm_prepared.send",
+            Self::ConfirmApplied => "pairing.confirm_applied.send",
+            Self::Settle => "pairing.settle.send",
+            Self::Cancel => "pairing.cancel.send",
+        }
+    }
+
+    fn process_name(self) -> &'static str {
+        match self {
+            Self::RequestJoin => "pairing.request_join.process",
+            Self::ConfirmPrepared => "pairing.confirm_prepared.process",
+            Self::ConfirmApplied => "pairing.confirm_applied.process",
+            Self::Settle => "pairing.settle.process",
+            Self::Cancel => "pairing.cancel.process",
+        }
+    }
+}
+
+pub async fn scope_admission_action<T>(
+    action: Option<AdmissionObservationAction>,
     future: impl Future<Output = T>,
 ) -> T {
-    SPACE_ADMISSION_FLOW
-        .scope(
-            DiagnosticFlowId::derive_space_admission(attempt_material),
-            future,
-        )
-        .await
+    match action {
+        Some(action) => ADMISSION_ACTION.scope(action, future).await,
+        None => future.await,
+    }
+}
+
+/// 由已认证请求的完整处理负责人命名当前请求，不新增步骤或计时。
+pub fn describe_admission_request(action: AdmissionObservationAction) {
+    tracing::Span::current().record("uc.display.name", action.process_name());
+}
+
+pub fn describe_admission_connection(span: &tracing::Span, resumed: bool) {
+    span.record(
+        "otel.name",
+        if resumed {
+            "pairing.reconnect"
+        } else {
+            "pairing.authenticate"
+        },
+    );
+}
+
+/// 展示名称与筛选分类分别校验，只接受固定的动作、角色组合。
+pub fn approved_operation_name(operation: &str, role: &str, name: &str) -> bool {
+    match (operation, role) {
+        ("space_admission", "local") => name == "pairing.lifecycle",
+        ("space_admission", "joiner") => {
+            matches!(name, "pairing.authenticate" | "pairing.reconnect")
+        }
+        ("space_admission", "sponsor") => {
+            name == "pairing.process_request"
+                || [
+                    AdmissionObservationAction::RequestJoin,
+                    AdmissionObservationAction::ConfirmPrepared,
+                    AdmissionObservationAction::ConfirmApplied,
+                    AdmissionObservationAction::Settle,
+                    AdmissionObservationAction::Cancel,
+                ]
+                .iter()
+                .any(|action| name == action.process_name())
+        }
+        ("network_transport", "joiner") => {
+            name == "pairing.send_request"
+                || [
+                    AdmissionObservationAction::RequestJoin,
+                    AdmissionObservationAction::ConfirmPrepared,
+                    AdmissionObservationAction::ConfirmApplied,
+                    AdmissionObservationAction::Settle,
+                    AdmissionObservationAction::Cancel,
+                ]
+                .iter()
+                .any(|action| name == action.send_name())
+        }
+        ("network_transport", "sponsor") => name == "pairing.receive_request",
+        _ => name == operation,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum SpaceAdmissionObservationOutcome {
+    Succeeded,
+    Deferred,
+    Rejected,
+    Cancelled,
+    Failed(DiagnosticErrorType),
+}
+
+#[derive(Clone)]
+pub struct SpaceAdmissionObservation {
+    inner: Arc<SpaceAdmissionObservationInner>,
+}
+
+struct SpaceAdmissionObservationInner {
+    flow: DiagnosticFlowId,
+    root: tracing::Span,
+    started: Instant,
+    finished: AtomicBool,
+}
+
+impl SpaceAdmissionObservation {
+    pub fn begin(attempt_material: &[u8; 32]) -> Self {
+        let flow = DiagnosticFlowId::derive_space_admission(attempt_material);
+        let root = tracing::span!(
+            target: "uc.telemetry",
+            parent: None,
+            tracing::Level::INFO,
+            "uc.operation",
+            otel.name = "pairing.lifecycle",
+            uc.domain = "space_admission",
+            uc.operation = "space_admission",
+            uc.role = "local",
+            uc.flow.id = %FlowAttribute(&flow),
+            otel.kind = "internal",
+            otel.status_code = tracing::field::Empty,
+        );
+        Self {
+            inner: Arc::new(SpaceAdmissionObservationInner {
+                flow,
+                root,
+                started: Instant::now(),
+                finished: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    pub async fn scope<T>(&self, future: impl Future<Output = T>) -> T {
+        SPACE_ADMISSION_FLOW
+            .scope(
+                self.inner.flow.clone(),
+                future.instrument(self.inner.root.clone()),
+            )
+            .await
+    }
+
+    pub fn finish(&self, outcome: SpaceAdmissionObservationOutcome) {
+        self.inner.finish(outcome);
+    }
+}
+
+impl SpaceAdmissionObservationInner {
+    fn finish(&self, outcome: SpaceAdmissionObservationOutcome) {
+        if self.finished.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let duration = self.started.elapsed();
+        self.root.in_scope(|| {
+            let completion = match outcome {
+                SpaceAdmissionObservationOutcome::Succeeded => OperationCompletion::succeeded(
+                    DiagnosticDomain::SpaceAdmission,
+                    DiagnosticOperation::SpaceAdmission,
+                    DiagnosticRole::Local,
+                    duration,
+                ),
+                SpaceAdmissionObservationOutcome::Deferred => OperationCompletion::deferred(
+                    DiagnosticDomain::SpaceAdmission,
+                    DiagnosticOperation::SpaceAdmission,
+                    DiagnosticRole::Local,
+                    duration,
+                ),
+                SpaceAdmissionObservationOutcome::Rejected => OperationCompletion::rejected(
+                    DiagnosticDomain::SpaceAdmission,
+                    DiagnosticOperation::SpaceAdmission,
+                    DiagnosticRole::Local,
+                    duration,
+                ),
+                SpaceAdmissionObservationOutcome::Cancelled => OperationCompletion::cancelled(
+                    DiagnosticDomain::SpaceAdmission,
+                    DiagnosticOperation::SpaceAdmission,
+                    DiagnosticRole::Local,
+                    duration,
+                ),
+                SpaceAdmissionObservationOutcome::Failed(error) => OperationCompletion::failed(
+                    DiagnosticDomain::SpaceAdmission,
+                    DiagnosticOperation::SpaceAdmission,
+                    DiagnosticRole::Local,
+                    error,
+                    duration,
+                ),
+            };
+            complete_operation(completion);
+        });
+    }
+}
+
+impl Drop for SpaceAdmissionObservationInner {
+    fn drop(&mut self) {
+        self.finish(SpaceAdmissionObservationOutcome::Deferred);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,6 +463,18 @@ pub struct OperationContext {
 }
 
 pub fn operation_span(context: OperationContext) -> tracing::Span {
+    let name = match (context.operation, context.role) {
+        (DiagnosticOperation::SpaceAdmission, DiagnosticRole::Local) => "pairing.lifecycle",
+        (DiagnosticOperation::SpaceAdmission, DiagnosticRole::Joiner) => "pairing.authenticate",
+        (DiagnosticOperation::SpaceAdmission, DiagnosticRole::Sponsor) => "pairing.process_request",
+        (DiagnosticOperation::NetworkTransport, DiagnosticRole::Joiner) => ADMISSION_ACTION
+            .try_with(|action| action.send_name())
+            .unwrap_or("pairing.send_request"),
+        (DiagnosticOperation::NetworkTransport, DiagnosticRole::Sponsor) => {
+            "pairing.receive_request"
+        }
+        _ => context.operation.as_str(),
+    };
     let flow = matches!(
         (
             context.domain,
@@ -286,7 +496,8 @@ pub fn operation_span(context: OperationContext) -> tracing::Span {
             target: "uc.telemetry",
             tracing::Level::INFO,
             "uc.operation",
-            otel.name = context.operation.as_str(),
+            otel.name = name,
+            uc.display.name = tracing::field::Empty,
             uc.domain = context.domain.as_str(),
             uc.operation = context.operation.as_str(),
             uc.role = context.role.as_str(),
@@ -298,7 +509,8 @@ pub fn operation_span(context: OperationContext) -> tracing::Span {
             target: "uc.telemetry",
             tracing::Level::INFO,
             "uc.operation",
-            otel.name = context.operation.as_str(),
+            otel.name = name,
+            uc.display.name = tracing::field::Empty,
             uc.domain = context.domain.as_str(),
             uc.operation = context.operation.as_str(),
             uc.role = context.role.as_str(),

@@ -41,6 +41,7 @@ async fn pending_join_recovery_requests_an_initial_channel_after_the_join_was_sa
         .await;
 
     assert_eq!(report.deferred_count, 1);
+    assert_eq!(pair.active_joiner_observation_count(), 0);
     assert_eq!(
         pair.events(),
         &[
@@ -106,6 +107,7 @@ async fn restarted_in_flight_short_code_is_rejected_without_a_second_resolution(
         .await;
 
     assert_eq!(report.rejected_count, 1);
+    assert_eq!(pair.active_joiner_observation_count(), 0);
     assert_eq!(pair.admission_status_invalidation_count(), 1);
     assert_eq!(
         pair.events(),
@@ -128,6 +130,7 @@ async fn ambiguous_short_code_resolution_failure_is_rejected_without_retry() {
         .await;
 
     assert_eq!(report.rejected_count, 1);
+    assert_eq!(pair.active_joiner_observation_count(), 0);
     assert_eq!(pair.admission_status_invalidation_count(), 1);
     assert_eq!(
         pair.events(),
@@ -185,6 +188,7 @@ async fn authenticated_old_layout_is_persisted_as_an_explicit_upgrade_rejection(
     assert_eq!(report.rejected_count, 1);
     assert_eq!(report.peer_upgrade_required_count, 1);
     assert_eq!(report.deferred_count, 0);
+    assert_eq!(pair.active_joiner_observation_count(), 0);
     assert_eq!(pair.admission_status_invalidation_count(), 1);
     assert_eq!(
         pair.take_created_join().rejection_reason(),
@@ -232,6 +236,7 @@ async fn prepared_join_keeps_its_exact_request_until_the_upgraded_peer_recovers(
     assert_eq!(blocked.rejected_count, 0);
     let after_block = pair.admission_status_invalidation_count();
     assert_eq!(after_block, 1);
+    assert_eq!(pair.active_joiner_observation_count(), 0);
     let saved = pair.saved_join();
     assert!(saved.peer_upgrade_required());
     assert_eq!(
@@ -252,6 +257,7 @@ async fn prepared_join_keeps_its_exact_request_until_the_upgraded_peer_recovers(
         .await;
     assert_eq!(repeated.peer_upgrade_required_count, 1);
     assert_eq!(repeated.recovery_required_count, 0);
+    assert_eq!(pair.active_joiner_observation_count(), 0);
     assert_eq!(pair.admission_status_invalidation_count(), after_block);
 
     let resumed = pair
@@ -263,6 +269,7 @@ async fn prepared_join_keeps_its_exact_request_until_the_upgraded_peer_recovers(
 
     assert_eq!(resumed.peer_upgrade_required_count, 0);
     assert_eq!(resumed.recovery_required_count, 0);
+    assert_eq!(pair.active_joiner_observation_count(), 1);
     assert_eq!(pair.admission_status_invalidation_count(), after_block + 1);
     assert!(!pair.saved_join().peer_upgrade_required());
 }
@@ -363,6 +370,7 @@ async fn cancelling_join_preserves_the_cancel_request_until_the_peer_can_confirm
         saved.rejection_reason(),
         Some(uc_core::membership::SpaceAdmissionRejectionReason::Cancelled)
     );
+    assert_eq!(pair.active_joiner_observation_count(), 0);
 }
 
 #[tokio::test]
@@ -640,6 +648,7 @@ async fn settled_is_saved_and_finishes_joiner_recovery() {
         ProtocolEvent::JoinerSavedActiveSettled,
     ]));
     assert!(pair.take_created_join().is_active_settled());
+    assert_eq!(pair.active_joiner_observation_count(), 0);
 }
 
 fn join_input(code: &str) -> JoinSpaceInput {

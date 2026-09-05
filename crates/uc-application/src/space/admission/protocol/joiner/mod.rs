@@ -12,6 +12,8 @@ mod handle_settled;
 mod resolve_invitation;
 mod start_join;
 
+use crate::space::SpaceAdmissionObservationRegistry;
+
 pub use activate_complete::{
     CompletedJoinerActivation, ExecuteJoinerActivationError, ExecuteJoinerActivationPort,
     JoinerActivationCommitToken, JoinerActivationMutation, JoinerActivationOutcome,
@@ -54,6 +56,7 @@ pub(crate) struct JoinerAdmissionService {
     pub(super) execute_activation: Arc<dyn ExecuteJoinerActivationPort>,
     pub(super) maintenance_wake: Arc<dyn WakeSpaceMembershipMaintenancePort>,
     pub(super) re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
+    pub(super) observations: Arc<SpaceAdmissionObservationRegistry>,
 }
 
 impl JoinerAdmissionService {
@@ -72,6 +75,7 @@ impl JoinerAdmissionService {
         execute_activation: Arc<dyn ExecuteJoinerActivationPort>,
         maintenance_wake: Arc<dyn WakeSpaceMembershipMaintenancePort>,
         re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
+        observations: Arc<SpaceAdmissionObservationRegistry>,
     ) -> Self {
         Self {
             settings,
@@ -88,6 +92,7 @@ impl JoinerAdmissionService {
             execute_activation,
             maintenance_wake,
             re_pairing,
+            observations,
         }
     }
 }

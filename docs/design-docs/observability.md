@@ -61,19 +61,22 @@ log 允许 `uc.domain`、`uc.operation`、`uc.role`，并只额外允许：
 - `error.type`
 - `duration_ms`
 
-span 还可使用 OpenTelemetry 自身的 name/kind/status 控制字段，名称只来自固定 operation 枚举。日志事件名取 `event.name`，正文
+span 还可使用 OpenTelemetry 自身的 name/kind/status 控制字段，名称只来自固定能力与动作词表。日志事件名取 `event.name`，正文
 固定为空；源码位置、线程和 busy/idle 元数据在设备编码前关闭。错误只记录固定类别，不记录 source 正文。缺失值直接省略，不写
 空字符串、占位身份或 `unknown-id`。设备编码前不仅检查字段名，还逐项检查 operation、domain、role、outcome、error type、flow 格式
-及其组合；span name 必须等于 operation，附加 body、event、link、tracestate、scope 属性或任意合法字段名下的自由字符串都会整条丢弃。
+及其组合；非准入领域的 span name 等于 operation，准入显示名独立校验固定能力、角色与动作组合，禁止任意文本。附加 body、event、link、tracestate、scope 属性或任意合法字段名下的自由字符串都会整条丢弃。
 
-`TraceId` 表示一次在线因果执行。`uc.flow.id` 只用于聚合同一业务 owner 已经拥有的随机、持久 attempt，可跨重试生成新的 trace；
-schema v1 只允许 Space 准入的 Joiner client span 携带 flow，server、endpoint、log 和其他领域必须省略。Application 的完整准入恢复
-owner 只能用 32-byte attempt 材料开启异步不透明作用域，不能读取或返回 flow；Engine、Infra、Core 和公开接口均没有 flow 构造
-入口。禁止从内容摘要、设备、密文、路径或 TraceId 伪造。产品 analytics 不携带两者。
+`TraceId` 表示一次未中断的在线因果执行。Space 准入在 Application 的完整 owner 中创建一个 `local/internal` 生命周期 root；同一次
+连续配对的建链、Joiner client、Sponsor server 与完整 endpoint 都挂在该 root 下。`uc.flow.id` 只用于聚合同一业务 owner 已经拥有的
+随机、持久 attempt；schema v1 只允许该生命周期 root 和 Space 准入 Joiner client span 携带 flow，server、endpoint、log 和其他
+领域必须省略。延期、拒绝、取消、升级阻塞或 Engine 关闭会结束当前 trace；重试或重启建立新 TraceId，但同一 attempt 继续得到同一
+flow。Application 不能读取或返回 flow；Engine、Infra、Core 和公开接口均没有 flow 构造入口。禁止从内容摘要、设备、密文、路径或
+TraceId 伪造。产品 analytics 不携带两者。
 
 ## 跨设备传播
 
-Application 的完整准入恢复 owner 在调用现有 transport 前开启不透明 flow 作用域，不增加 facade、port、result 或 Core 字段。
+Application assembly 为每个 Engine 实例创建一个中性 Space admission registry，并在 Space Session 重建时复用。完整准入 owner 用既有
+32-byte attempt 材料创建或进入不可读取的生命周期 root，不增加 facade、port、result 或 Core 字段；registry 不跨 Engine 实例重启。
 Infra 当前只传播 W3C `traceparent`，不传播 `tracestate` 或 baggage。发送时从当前 client span 注入；接收时先完成既有业务身份和
 消息认证，再从空 Context 提取并在 span 第一次进入前设置 parent。缺失、损坏、超长或未认证 context 全部忽略，业务消息继续按
 原规则处理。
@@ -82,19 +85,28 @@ context 由既有认证传输保护。Clipboard 使用端到端认证 QUIC reque
 观测修改 Application/Core 的内容加密 AAD，也不得让 context 参与授权、去重或业务摘要。
 
 Space 准入的认证消息往返由 Infra 记录为通用 `network_transport` client/server span；Engine 只在既有认证消息 endpoint 上记录
-一个完整 `space_admission` 子节点，原样转发输入输出，不读取消息、编号、状态或步骤。真实调用树固定为 client transport ->
-server transport -> sponsor endpoint，不包含 JoinRequest、Prepared、Applied 等 Application 内部业务步骤。连接建立的完整
-`space_admission` client span也归 Infra，不由 Engine 从业务编号构造。成员观测同样只保留完整网络交换；账本读取、提交和分支恢复
-子步骤不进入 Engine 观测。
+一个完整 `space_admission` 子节点，原样转发输入输出，不读取消息、编号、状态或步骤。一次连续配对的真实调用树以
+`space_admission local root` 为根；每轮连接建立是直接 client 子节点，每轮认证消息是 `client transport -> server transport ->
+sponsor endpoint` 子树，不包含 JoinRequest、Prepared、Applied 等 Application 内部业务步骤。成员观测同样只保留完整网络交换；
+账本读取、提交和分支恢复子步骤不进入 Engine 观测。
 
 Space 的 OPAQUE 认证握手保持原布局；认证后的 Request/Reply 使用新的固定 frame kind，旧 kind 只映射为
 `PeerUpgradeRequired`。当前普通协议错误使用独立关闭码，不能被误报成升级；新旧判断发生在密码证明之后。当前 Engine 尚未发布，
 因此该 clean cutover 不增加 Engine 或协议版本号，也不保留双 reader。Sponsor 只有收到 Joiner 对 reply 的确认后才记录成功；认证、
 业务处理、reply 和确认共用一个总截止时间，缺少确认、错误确认或超时都只记录一次明确失败。认证前没有可信父关系：失败只写一条
-带真实耗时、无 TraceId/SpanId 的完成日志，不制造接近零耗时的 root span；认证成功后才建立三层 trace。每个三层节点恰好对应一条
-完成日志，日志只通过 TraceId/SpanId 关联，不复制 flow。
+带真实耗时、无 TraceId/SpanId 的完成日志，不制造伪造的远端父关系；认证成功后才建立三层子树。每个三层节点和最终生命周期 root
+各自恰好对应一条完成日志，日志只通过 TraceId/SpanId 关联，不复制 flow。
 
 ## 输出与隐私
+
+准入可读名称固定为 `pairing.lifecycle`、`pairing.authenticate`、`pairing.reconnect`、`pairing.receive_request`，以及
+`pairing.{request_join|confirm_prepared|confirm_applied|settle|cancel}.{send|process}`。未知请求使用固定的 `pairing.send_request` 或
+`pairing.process_request`。动作由 Application 在既有发送与认证请求处理位置提供，Engine 不解析消息或阶段。日志通过 TraceId/SpanId
+关联到这些节点，分类字段仍保持原值。Infra 在调用 Iroh 建链时隔离底层 tracing dispatch，避免 noq ConnectionDriver 长期持有短期
+认证 span；这段底层调用不输出库内调试日志，外层认证耗时、结果与后续认证业务交换均正常记录。
+
+当前 tracing-opentelemetry 版本不更新已启动节点的名称；Sponsor 完整请求负责人通过固定的 `uc.display.name` 内部字段描述动作，
+共同运行时在结束编码时转换为 name 并移除该字段，再执行严格名称与角色校验。Collector 不接受该内部字段；禁止借此传入任意文本。
 
 设备侧系统日志、JSONL 和远程层均默认拒绝普通模块 target。历史 local debug 调用点保留在
 `docs/generated/observability-inventory.md`，但不因此获得输出许可。
@@ -132,6 +144,7 @@ transfer 原始 ID、摘要、原始错误正文或可恢复派生值。
 8. 原始 OTLP、系统输出和 JSONL 的敏感哨兵扫描；
 9. Apple、Android、HarmonyOS 与直接 Rust host 的构建和生命周期；
 10. 本地 Jaeger 页面和 Collector 解码输出中的真实调用树与关联日志。
+11. 未中断双设备配对只有一个 TraceId；延期或 Engine 重启后使用新 TraceId、同一 flow。
 
 性能门禁必须同时报告端到端总时长和本机时长。现有同 TraceId 且 server parent 精确指向 client 的 `network_transport` 外壳只能
 作为诊断粗估：发送端外壳仍含部分编码、认证与回包校验，初始连接又未完整覆盖，两种偏差方向相反，因此既不是严格上界也不是

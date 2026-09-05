@@ -172,9 +172,10 @@ AnalyticsPort      -> 原产品分析供应商（完全独立）
 - **关系**：Core 不依赖 diagnostics；Application 不调用 raw tracing/OTel，只开启不可读取的不透明准入作用域；Engine decorator
   和 Infra wire adapter 消费固定记录合同。
 
-`FlowId` 的长期语义是“跨重试/重启聚合同一业务尝试”，不是 TraceId。schema v1 只有 Application 完整准入恢复 owner 能用已有
-32-byte 随机 attempt 材料开启异步作用域；合同内部以 domain-separated SHA-256 截取 128 bit。作用域不返回 FlowId，Engine、Infra、
-Core 和公开接口均没有构造或读取入口。
+`FlowId` 的长期语义是“跨重试/重启聚合同一业务尝试”，不是 TraceId。Application assembly 为每个 Engine 实例持有中性 Space
+admission registry；完整准入 owner 用已有 32-byte 随机 attempt 材料创建或进入不可读取的本机 lifecycle root，合同内部以
+domain-separated SHA-256 截取 128 bit。registry 跨 Space Session 重建复用但不跨 Engine 重启；Engine、Infra、Core 和公开接口均没有
+FlowId 构造或读取入口。
 
 ### ProcessObservabilityRuntime
 
@@ -230,8 +231,9 @@ endpoint、header 或 token。
   独立消息 MAC 的协议把 context 纳入该 MAC。不得为了观测修改 Application/Core 的内容加密 AAD。context 永不参与授权、
   消息摘要、幂等或业务结果。
 - **失败**：缺失、损坏、超限、未知或未认证 context 全部忽略并创建本地 root span，业务消息按原结果继续。
-- **生命周期**：trace context 只随一次在线请求传播，不持久化；重试/重启创建新 trace。只有 Application 完整准入 owner 的不透明
-  作用域会让 client span 自动携带 `uc.flow.id`；Infra 与 Engine 不自行派生。没有合法作用域时省略。
+- **生命周期**：trace context 只随在线请求传播，不持久化。未中断 Space 准入的连接和四轮交换共享一个本机 lifecycle root；延期、
+  拒绝、取消、升级阻塞或 Engine 关闭会结束当前 trace，重试/重启创建新 trace。只有 lifecycle root 和 Application 不透明作用域内的
+  Joiner client span 自动携带 `uc.flow.id`；Infra 与 Engine 不自行派生。没有合法作用域时省略。
 
 不使用 baggage。Infra 不向 Application/Core 暴露 OpenTelemetry 类型；Application 看到的业务 message、result 和 error 不增加
 trace 字段。
@@ -273,7 +275,7 @@ traces 与 logs 共用：
 | span/log | `uc.domain` | 固定领域枚举 |
 | span/log | `uc.operation` | 固定完整能力枚举 |
 | span/log | `uc.role` | local/client/server/joiner/sponsor 等固定枚举 |
-| span | `uc.flow.id` | 仅 Space 准入 Joiner client 可用的匿名 durable flow；可选，永不作为授权 |
+| span | `uc.flow.id` | 仅 Space 准入本机 lifecycle root 与 Joiner client 可用的匿名 durable flow；可选，永不作为授权 |
 | log | `event.name` | 固定事件名 |
 | log | `uc.outcome` | ok/error/deferred/rejected/cancelled |
 | log | `error.type` | 稳定错误类别，不是错误正文 |
@@ -283,9 +285,10 @@ traces 与 logs 共用：
 
 ### Signals
 
-- **Trace**：表示一次在线因果执行；client/server/internal span 使用真实父子关系。
+- **Trace**：表示一次未中断的在线因果执行；Space 准入用中性本机 root 统一承载建链、client、server 与 endpoint。
 - **Log**：表示离散完成、失败和恢复事实；当前 span 存在时自动附加 TraceId/SpanId。
-- **Flow**：只作为 Joiner client span attribute 聚合跨重试、断网和重启，不冒充 TraceId；log 通过 TraceId/SpanId 关联当前 span。
+- **Flow**：只作为 Space 准入 lifecycle root 与 Joiner client span attribute 聚合跨重试、断网和重启，不冒充 TraceId；log 通过
+  TraceId/SpanId 关联当前 span。
 - **Analytics**：产品使用与漏斗；拥有独立身份和事件 schema，不携带运行诊断 TraceId/FlowId。
 
 同一个 tracing event 的完整远程副本只进入 OTel LogRecord。Trace layer 只接收通过元数据检查的 span，不记录任何 span event；
@@ -327,12 +330,12 @@ Engine revision 时把原 UI 偏好迁移到宿主配置。`usage_analytics_enab
 
 ### Cross-device request
 
-1. Application 完整准入恢复 owner 用既有随机 attempt 材料开启不可读取的异步关联作用域。
-2. Infra 建立 client transport span，作用域自动附加匿名 `uc.flow.id`，再把 W3C context 注入受认证 wire metadata。
+1. Application assembly 为一个 Engine 实例持有中性 admission registry；完整 owner 用既有随机 attempt 材料创建本机 internal root。
+2. Infra 的连接建立与 client transport span 进入该 root，Joiner client 自动附加匿名 `uc.flow.id`，并把 W3C context 注入受认证 wire metadata。
 3. 对端 Infra 完成业务认证后提取 remote context并建立 server transport span。
 4. Engine 在既有完整认证 endpoint 上建立 `space_admission` internal 子节点，原样转发消息与结果，不读取内容、编号或步骤。
-5. 调用树形成 `network_transport client -> network_transport server -> space_admission sponsor endpoint`；完成日志自动关联当前 span。
-6. 下一次后台重试建立新 TraceId，但同一持久 attempt 的 client root 保留同一 flow；server 与 endpoint 不重复携带 flow。
+5. 一次正常配对形成一个 root、四次连接建立和四棵 `client transport -> server transport -> sponsor endpoint` 子树；完成日志自动关联当前 span。
+6. 延期、拒绝、取消、升级阻塞或 Engine 关闭结束当前 trace；下一次重试/重启建立新 TraceId，但同一持久 attempt 保留同一 flow。
 
 ### Mobile lifecycle
 
@@ -550,8 +553,10 @@ Implementation: 当前 clean cutover 原地更新全部绑定与 fixtures，不�
 
 ```text
 Scenario: 配对或同步在重试、断网或进程重启后继续。
-Expected behavior: 新在线尝试使用新 TraceId；有合法持久 attempt 的流程保留 `uc.flow.id`，其余流程省略；不持久化旧 traceparent。
-Implementation: flow 只从完整 owner 已有随机 attempt 经固定用途单向派生，trace context 只存在于在线 wire。
+Expected behavior: 未中断配对共用一个 TraceId；延期或重启后的新尝试使用新 TraceId，有合法持久 attempt 的流程保留 `uc.flow.id`；
+不持久化旧 traceparent。
+Implementation: 本机 lifecycle root 跨 Space Session 重建复用但不跨 Engine；flow 只从完整 owner 已有随机 attempt 经固定用途单向派生，
+trace context 只存在于在线 wire。
 ```
 
 ```text
@@ -641,7 +646,8 @@ git diff --check
 * [x] `uc_otlp` 不再存在；一条真实 trace 和一条真实 LogRecord 到达可解码 OTLP receiver。
 * [x] traces/logs 共用 Resource，日志自动带正确 TraceId/SpanId。
 * [x] 在线跨设备 client/server span 属于同一 trace，parent 关系正确。
-* [x] 重试/重启使用新 trace；只有已有合法持久 attempt 的 Joiner client span 携带同一匿名 `uc.flow.id`，其余 span 与 log 不伪造。
+* [x] 未中断配对使用一个 trace；重试/重启使用新 trace；只有本机 lifecycle root 和已有合法持久 attempt 的 Joiner client span
+  携带同一匿名 `uc.flow.id`，其余 span 与 log 不伪造。
 * [x] Core/Application 公共接口不包含 OTel、trace context、timing 或观测步骤。
 * [x] Core 默认依赖不含 tracing；TaskRegistry 只返回纯关闭报告，调用层保留可观察的完整结果。
 * [x] Engine 没有新增 Application/Core 阶段查询，也不解析业务持久字符串取得关联号。
@@ -713,17 +719,23 @@ git diff --check
   传输延期保持为 `deferred`，不会混入普通失败或生产错误采样。
 - 设备编码前和 Collector 各有一道精确字段收窄；Collector 同时拒绝 resource/scope schema URL。日志正文为空且不携带 flow，事件名
   和 span 名来自固定枚举，源码位置、线程与 busy/idle 不发送。
-- 最终可再生清单包含 1,247 个生产调用点：8 个稳定远程、6 个本地健康、1,231 个默认拒绝的历史调试点和 2 个产品分析调用点。
+- 最终可再生清单包含 1,250 个生产调用点：9 个稳定远程、6 个本地健康、1,233 个内部调试或字段更新调用点和 2 个产品分析调用点。固定显示名更新在编码前转换为 span name，内部字段不发送。
 - 删除 `uc_otlp`、旧 stages、`DispatchTiming`、`TraceMetadata`、旧 flow、Engine `telemetry_enabled` 和跨层 task supervision helper；
   `usage_analytics_enabled` 与产品分析合同保持不变。
 
 ## 本地真实证据
 
-- 最终代码按匿名 flow 查询得到 8 条 trace：四条连接建立记录，以及四棵
-  `network_transport client -> network_transport server -> space_admission sponsor endpoint` 三层消息交换树；只有 client root 携带
-  flow，每棵树的 TraceId、parent 和三层成功结果均正确。完整页面共有 17 条 trace、27 个 span；Jaeger 搜索页和三层调用树已通过
-  实际页面截图检查。
-- Collector 解码日志显示稳定事件名、空正文、正确 TraceId/SpanId；三层树每个节点恰有一条完成日志，日志均无 flow。原始 OTLP 的
+可读性与计时修复后的最新验收：一棵 17 节点配对树以 `pairing.lifecycle` 展示，四轮发送/处理分别带有
+`request_join`、`confirm_prepared`、`confirm_applied`、`settle` 固定动作名，接收侧为 `pairing.receive_request`。
+首次认证 79.580ms、后续连接 3.237/4.454/3.655ms，与完成日志 79/3/4/3ms 一致。此前建链日志 90ms 而时间条为 3.47s，
+原因是 noq ConnectionDriver 继承并反复进入短期认证 span；Infra 已隔离该底层驱动的 tracing 上下文。实际页面截图已检查。
+本轮回归：合同 50 项、运行模块 42 项、Application 750 项、准入网络 13 项，以及正常配对、重启配对的独立 E2E 均通过。
+
+- 最终代码的一次未中断公开双设备配对只产生一个 admission trace：一个 `local/internal space_admission` root 下包含四次连接建立和
+  四棵 `network_transport client -> network_transport server -> space_admission sponsor endpoint` 三层子树，共 17 个 span、深度 4。
+  root 与 Joiner client 携带同一 flow，Sponsor server/endpoint 省略；Jaeger 实际页面已一屏展开检查。清空旧数据后的完整页面共有
+  10 条 trace、28 个 span，其中其余记录属于 session 与 membership 完整能力。
+- Collector 解码日志显示稳定事件名、空正文、正确 TraceId/SpanId；lifecycle root 与四棵三层树的 17 个节点各有一条完成日志，日志均无 flow。原始 OTLP 的
   Resource、span 与 log 字段集合逐项等于白名单。
 - macOS Unified Logging 实时捕获只出现类型化完成/健康记录；伪造同 target 的设备名、路径、正文和错误字段组合均未出现。JSONL
   与原始 OTLP 使用同一组哨兵也通过。
@@ -740,7 +752,7 @@ git diff --check
   313,671,680 bytes；相对基线分别增加 3,145,728 bytes（1.0095%）和 2,048,000 bytes（0.6572%）。三样本只作诊断，不设正式上限。
 - 最新一秒诊断报告端到端 5.338917 秒、当前传输外壳粗估 0.405162 秒、相减值 4.933755 秒。该粗估既包含部分本机工作，也漏掉部分初始
   网络等待，既不是严格上界也不是下界，不能据此在一秒附近判定通过；精确门禁和性能改造已进入规格 038。
-- 最终全量回归通过：诊断合同 49 项、运行时 38 项、Core 360 项、Application 750 项、Infra 896 项、Engine 225 项、UniFFI 51 项、
+- 最终全量回归通过：诊断合同 49 项、运行时 40 项、Core 360 项、Application 750 项、Infra 896 项、Engine 225 项、UniFFI 51 项、
   HarmonyOS 44 项；Infra 另有 7 项明确跳过的测试或文档示例。
 
 ## 明确跳过

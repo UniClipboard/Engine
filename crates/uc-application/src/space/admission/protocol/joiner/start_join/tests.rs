@@ -146,8 +146,11 @@ async fn a_replaceable_current_join_is_superseded_with_the_new_join_in_one_commi
         .await
         .expect("the first join should be saved");
     let current_join = first.take_created_join();
+    let current_observation_material = *current_join.admission_id().as_bytes();
 
     let replacement = SpaceAdmissionProtocolTestPair::with_current_join(Some(current_join)).await;
+    replacement.begin_joiner_observation(current_observation_material);
+    assert_eq!(replacement.active_joiner_observation_count(), 1);
     replacement
         .joiner()
         .start_join(join_input("replacement-join"))
@@ -155,6 +158,7 @@ async fn a_replaceable_current_join_is_superseded_with_the_new_join_in_one_commi
         .expect("an Initiated join can be superseded");
 
     assert!(replacement.superseded_previous_join());
+    assert_eq!(replacement.active_joiner_observation_count(), 1);
 }
 
 fn join_input(code: &str) -> JoinSpaceInput {

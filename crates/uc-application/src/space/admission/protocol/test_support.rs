@@ -73,6 +73,7 @@ use super::{
     SponsorAdmissionService, SponsorAdmissionState, SponsorAdmissionStateError,
     SponsorAdmissionStatePort,
 };
+use crate::space::SpaceAdmissionObservationRegistry;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ProtocolEvent {
@@ -132,7 +133,9 @@ impl HostEventEmitterPort for AdmissionStatusEventRecorder {
     }
 }
 
-struct FixedJoinerStartMaterial;
+struct FixedJoinerStartMaterial {
+    admission_id_byte: u8,
+}
 struct FixedJoinerInvitationPreparation;
 struct FixedJoinerInvitationResolver {
     events: Arc<Mutex<Vec<ProtocolEvent>>>,
@@ -1393,10 +1396,18 @@ impl SpaceAdmissionProtocolTestPair {
     }
 
     pub(super) async fn with_current_join(current_join: Option<JoinerAdmission>) -> Self {
-        Self::with_mode(current_join, TransportMode::DeferInitial).await
+        Self::with_mode_and_start_material(current_join, TransportMode::DeferInitial, 0x21).await
     }
 
     async fn with_mode(current_join: Option<JoinerAdmission>, mode: TransportMode) -> Self {
+        Self::with_mode_and_start_material(current_join, mode, 0x11).await
+    }
+
+    async fn with_mode_and_start_material(
+        current_join: Option<JoinerAdmission>,
+        mode: TransportMode,
+        admission_id_byte: u8,
+    ) -> Self {
         let events = Arc::new(Mutex::new(Vec::new()));
         let upgrade_pending = Arc::new(AtomicBool::new(mode.upgrade_on().is_some()));
         let admission_status_invalidations = Arc::new(AtomicUsize::new(0));
@@ -1432,7 +1443,7 @@ impl SpaceAdmissionProtocolTestPair {
                     Arc::new(FixedJoinerInvitationResolver {
                         events: Arc::clone(&events),
                     }),
-                    Arc::new(FixedJoinerStartMaterial),
+                    Arc::new(FixedJoinerStartMaterial { admission_id_byte }),
                     state.clone(),
                     state.clone(),
                     Arc::new(FixedJoinerCancellation),
@@ -1445,6 +1456,7 @@ impl SpaceAdmissionProtocolTestPair {
                         events: Arc::clone(&events),
                     }),
                     Arc::new(UnusedSponsorPorts),
+                    Arc::new(SpaceAdmissionObservationRegistry::default()),
                 ),
                 SponsorAdmissionService::new(
                     Arc::new(UnusedSponsorPorts),
@@ -1475,7 +1487,7 @@ impl SpaceAdmissionProtocolTestPair {
                     Arc::new(FixedJoinerInvitationResolver {
                         events: Arc::clone(&events),
                     }),
-                    Arc::new(FixedJoinerStartMaterial),
+                    Arc::new(FixedJoinerStartMaterial { admission_id_byte }),
                     state.clone(),
                     state.clone(),
                     Arc::new(FixedJoinerCancellation),
@@ -1488,6 +1500,7 @@ impl SpaceAdmissionProtocolTestPair {
                         events: Arc::clone(&events),
                     }),
                     Arc::new(UnusedSponsorPorts),
+                    Arc::new(SpaceAdmissionObservationRegistry::default()),
                 ),
                 SponsorAdmissionService::new(
                     sponsor_state.clone(),
@@ -1537,6 +1550,14 @@ impl SpaceAdmissionProtocolTestPair {
 
     pub(super) fn admission_status_invalidation_count(&self) -> usize {
         self.admission_status_invalidations.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn active_joiner_observation_count(&self) -> usize {
+        self.joiner.joiner.observations.active_count()
+    }
+
+    pub(super) fn begin_joiner_observation(&self, material: [u8; 32]) {
+        self.joiner.joiner.observations.begin(material);
     }
 
     pub(super) fn require_upgrade_once_more(&self) {
@@ -1889,7 +1910,8 @@ impl JoinerStartMaterialPort for FixedJoinerStartMaterial {
         &self,
         input: &crate::space::admission::JoinSpaceInput,
     ) -> Result<JoinerStartMaterial, JoinerStartMaterialError> {
-        let admission_id = SpaceAdmissionId::from_bytes([0x11; 32]).expect("valid admission id");
+        let admission_id =
+            SpaceAdmissionId::from_bytes([self.admission_id_byte; 32]).expect("valid admission id");
         let join_id = JoinId::from_bytes([0x12; 16]).expect("valid join id");
         fixed_joiner_start_material(admission_id, join_id, input.preserve_unreadable_history)
     }

@@ -35,6 +35,7 @@ use crate::space::membership::{
 use crate::space::membership::{
     MaintainSpaceMembershipDeps, MaintainSpaceMembershipUseCase, SpaceMembershipMaintenanceRuntime,
 };
+use crate::space::SpaceAdmissionObservationRegistry;
 
 struct DeferredMaintenanceWake {
     target: OnceLock<Arc<dyn crate::space::membership::WakeSpaceMembershipMaintenancePort>>,
@@ -75,10 +76,15 @@ struct SpaceApplicationDeps {
     clock: Arc<dyn uc_core::ports::ClockPort>,
     settings: Arc<dyn uc_core::ports::SettingsPort>,
     host_event_bus: Arc<crate::facade::HostEventBus>,
+    admission_observations: Arc<SpaceAdmissionObservationRegistry>,
 }
 
 impl SpaceApplicationDeps {
-    fn from_application(application: &ApplicationDeps, adapters: SpaceRuntimeAdapters) -> Self {
+    fn from_application(
+        application: &ApplicationDeps,
+        adapters: SpaceRuntimeAdapters,
+        admission_observations: Arc<SpaceAdmissionObservationRegistry>,
+    ) -> Self {
         Self {
             adapters,
             device_identity: Arc::clone(&application.device.device_identity),
@@ -86,6 +92,7 @@ impl SpaceApplicationDeps {
             clock: Arc::clone(&application.system.clock),
             settings: Arc::clone(&application.settings),
             host_event_bus: Arc::clone(&application.host_event_bus),
+            admission_observations,
         }
     }
 }
@@ -114,9 +121,10 @@ impl SpaceApplication {
         adapters: SpaceRuntimeAdapters,
         peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
         re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
+        admission_observations: Arc<SpaceAdmissionObservationRegistry>,
     ) -> Self {
         Self::build_from_deps(
-            SpaceApplicationDeps::from_application(application, adapters),
+            SpaceApplicationDeps::from_application(application, adapters, admission_observations),
             peer_reachability_changed_events,
             re_pairing,
         )
@@ -141,6 +149,7 @@ impl SpaceApplication {
                 clock,
                 settings,
                 host_event_bus,
+                admission_observations: Arc::new(SpaceAdmissionObservationRegistry::default()),
             },
             peer_reachability_changed_events,
             re_pairing,
@@ -163,6 +172,7 @@ impl SpaceApplication {
             clock,
             settings,
             host_event_bus,
+            admission_observations,
         } = deps;
         let SpaceAdmissionAdapters {
             re_pairing_state_store: _,
@@ -257,6 +267,7 @@ impl SpaceApplication {
             execute_joiner_activation,
             deferred_maintenance_wake.clone(),
             Arc::clone(&re_pairing),
+            admission_observations,
         );
         let sponsor_admission = SponsorAdmissionService::new(
             sponsor_admission_state,

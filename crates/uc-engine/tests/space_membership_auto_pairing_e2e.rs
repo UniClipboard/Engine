@@ -1,6 +1,6 @@
 #![cfg(feature = "dev-tools")]
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -2095,6 +2095,86 @@ async fn topology_script_builds_a_two_node_space_through_public_operations() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore = "显式完整配对 trace 验收：独占进程级 OTLP receiver，使用 --ignored 精确运行"]
+async fn uninterrupted_admission_uses_one_trace() {
+    let telemetry = MockServer::start().await;
+    for endpoint in ["/v1/traces", "/v1/logs"] {
+        Mock::given(method("POST"))
+            .and(path(endpoint))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&telemetry)
+            .await;
+    }
+    assert!(uc_engine::init_test_tracing_with_otlp(
+        &format!("{}/v1/traces", telemetry.uri()),
+        &format!("{}/v1/logs", telemetry.uri()),
+    ));
+
+    let rendezvous = mount_rendezvous().await;
+    let sponsor_harness = DeviceHarness::new(rendezvous.uri());
+    let joiner_harness = DeviceHarness::new(rendezvous.uri());
+    let sponsor = sponsor_harness.start().await;
+    let joiner = joiner_harness.start().await;
+    let space_id = create_space(&sponsor, "Sponsor").await.0;
+    let invitation = issue_invitation(&sponsor).await;
+    let started_at = SystemTime::now();
+    let started = Instant::now();
+
+    join_with_invitation(&joiner, "Joiner", &space_id, invitation).await;
+    wait_for_active_member_count(&sponsor, 2).await;
+    wait_for_active_member_count(&joiner, 2).await;
+    let elapsed = started.elapsed();
+    sponsor
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("stop sponsor");
+    joiner
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("stop joiner");
+    uc_engine::flush_test_tracing();
+
+    let evidence_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let trace_evidence = loop {
+        uc_engine::flush_test_tracing();
+        let requests = telemetry
+            .received_requests()
+            .await
+            .expect("OTLP request capture");
+        let evidence = pairing_trace_evidence(&requests, started_at, elapsed);
+        if evidence.client_count >= 4
+            && evidence.paired_server_count >= 4
+            && evidence.paired_admission_endpoint_count >= evidence.client_count
+            && evidence.lifecycle_root_count == 1
+            && evidence.invalid_completion_log_count == 0
+        {
+            break evidence;
+        }
+        assert!(
+            tokio::time::Instant::now() < evidence_deadline,
+            "OTLP receiver did not collect four complete admission exchanges"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+
+    assert_eq!(trace_evidence.flow_ids.len(), 1);
+    assert_eq!(trace_evidence.lifecycle_root_count, 1);
+    assert_eq!(trace_evidence.invalid_pair_count, 0);
+    assert_eq!(trace_evidence.invalid_completion_log_count, 0);
+    let requests = telemetry
+        .received_requests()
+        .await
+        .expect("captured requests");
+    assert_readable_admission_actions(&requests);
+    assert_eq!(
+        trace_evidence.admission_trace_ids.len(),
+        1,
+        "one uninterrupted admission must be visible as one trace: {:?}",
+        trace_evidence.admission_trace_counts,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 #[ignore = "显式重启链路验收：独占进程级 OTLP receiver，使用 --ignored 精确运行"]
 async fn in_flight_admission_restart_uses_new_traces_and_one_flow() {
     let telemetry = MockServer::start().await;
@@ -2285,6 +2365,7 @@ async fn two_device_hot_path_pairing_completes_within_one_second() {
         if evidence.client_count >= 4
             && evidence.paired_server_count >= 4
             && evidence.paired_admission_endpoint_count >= evidence.client_count
+            && evidence.lifecycle_root_count == 1
             && evidence.invalid_completion_log_count == 0
         {
             break evidence;
@@ -2304,7 +2385,8 @@ async fn two_device_hot_path_pairing_completes_within_one_second() {
     assert_eq!(trace_evidence.invalid_pair_count, 0);
     assert_eq!(trace_evidence.invalid_completion_log_count, 0);
     assert_eq!(trace_evidence.flow_ids.len(), 1);
-    assert!(trace_evidence.admission_trace_ids.len() >= 4);
+    assert_eq!(trace_evidence.lifecycle_root_count, 1);
+    assert_eq!(trace_evidence.admission_trace_ids.len(), 1);
     assert!(
         trace_evidence.local_elapsed < PAIRING_HOT_PATH_BUDGET,
         "two-device local pairing work took {:?}, network-related time {:?}, end-to-end {:?}, local budget {:?}",
@@ -2321,10 +2403,79 @@ struct PairingTraceEvidence {
     client_count: usize,
     paired_server_count: usize,
     paired_admission_endpoint_count: usize,
+    lifecycle_root_count: usize,
     invalid_pair_count: usize,
     invalid_completion_log_count: usize,
     flow_ids: BTreeSet<String>,
     admission_trace_ids: BTreeSet<Vec<u8>>,
+    admission_trace_counts: BTreeMap<Vec<u8>, usize>,
+}
+
+fn assert_readable_admission_actions(requests: &[Request]) {
+    let spans = requests
+        .iter()
+        .filter(|request| request.url.path() == "/v1/traces")
+        .flat_map(|request| {
+            ExportTraceServiceRequest::decode(request.body.as_slice())
+                .expect("trace batch")
+                .resource_spans
+        })
+        .flat_map(|resource| resource.scope_spans)
+        .flat_map(|scope| scope.spans)
+        .collect::<Vec<_>>();
+    for action in [
+        "request_join",
+        "confirm_prepared",
+        "confirm_applied",
+        "settle",
+    ] {
+        let send_name = format!("pairing.{action}.send");
+        let sends = spans
+            .iter()
+            .filter(|span| span.name == send_name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sends.len(),
+            1,
+            "each protocol purpose must be visible: {send_name}"
+        );
+        let send = sends[0];
+        let receive = spans
+            .iter()
+            .find(|span| {
+                span.trace_id == send.trace_id
+                    && span.parent_span_id == send.span_id
+                    && span.name == "pairing.receive_request"
+            })
+            .expect("Sponsor receive under send");
+        assert!(
+            spans.iter().any(|span| span.trace_id == receive.trace_id
+                && span.parent_span_id == receive.span_id
+                && span.name == format!("pairing.{action}.process")),
+            "Sponsor must describe the same request purpose"
+        );
+    }
+    assert_eq!(
+        spans
+            .iter()
+            .filter(|span| span.name == "pairing.lifecycle")
+            .count(),
+        1
+    );
+    assert_eq!(
+        spans
+            .iter()
+            .filter(|span| span.name == "pairing.authenticate")
+            .count(),
+        1
+    );
+    assert_eq!(
+        spans
+            .iter()
+            .filter(|span| span.name == "pairing.reconnect")
+            .count(),
+        3
+    );
 }
 
 fn pairing_trace_evidence(
@@ -2357,6 +2508,7 @@ fn pairing_trace_evidence(
         );
     }
     let mut completion_logs = HashMap::<(Vec<u8>, Vec<u8>), usize>::new();
+    let mut completion_durations = HashMap::new();
     let mut log_flow_violation_count = 0;
     for request in requests
         .iter()
@@ -2378,6 +2530,17 @@ fn pairing_trace_evidence(
             }
             if otlp_string_attribute(&log.attributes, "uc.flow.id").is_some() {
                 log_flow_violation_count += 1;
+            }
+            if let Some(ms) = log.attributes.iter().find_map(|field| {
+                if field.key != "duration_ms" {
+                    return None;
+                }
+                match field.value.as_ref()?.value.as_ref()? {
+                    OtlpValue::IntValue(value) => Some(*value),
+                    _ => None,
+                }
+            }) {
+                completion_durations.insert((log.trace_id.clone(), log.span_id.clone()), ms);
             }
             *completion_logs
                 .entry((log.trace_id, log.span_id))
@@ -2401,6 +2564,22 @@ fn pairing_trace_evidence(
         .copied()
         .filter(|span| span.kind == client_kind)
         .collect::<Vec<_>>();
+    let lifecycle_roots = spans
+        .iter()
+        .filter(|span| {
+            span.kind == internal_kind
+                && span.parent_span_id.is_empty()
+                && otlp_string_attribute(&span.attributes, "uc.domain") == Some("space_admission")
+                && otlp_string_attribute(&span.attributes, "uc.operation")
+                    == Some("space_admission")
+                && otlp_string_attribute(&span.attributes, "uc.role") == Some("local")
+                && otlp_string_attribute(&span.attributes, "uc.flow.id").is_some()
+        })
+        .collect::<Vec<_>>();
+    let lifecycle_root_ids = lifecycle_roots
+        .iter()
+        .map(|span| ((span.trace_id.clone(), span.span_id.clone()), *span))
+        .collect::<HashMap<_, _>>();
     let client_ids = clients
         .iter()
         .map(|span| ((span.trace_id.clone(), span.span_id.clone()), *span))
@@ -2424,7 +2603,7 @@ fn pairing_trace_evidence(
     let paired_admission_endpoints = spans
         .iter()
         .filter(|span| {
-            span.name == "space_admission"
+            otlp_string_attribute(&span.attributes, "uc.operation") == Some("space_admission")
                 && span.kind == internal_kind
                 && otlp_string_attribute(&span.attributes, "uc.role") == Some("sponsor")
                 && otlp_string_attribute(&span.attributes, "uc.flow.id").is_none()
@@ -2437,6 +2616,7 @@ fn pairing_trace_evidence(
         .copied()
         .chain(paired_servers.iter().map(|(_, server)| *server))
         .chain(paired_admission_endpoints.iter().copied())
+        .chain(lifecycle_roots.iter().copied())
         .filter(|span| {
             completion_logs
                 .get(&(span.trace_id.clone(), span.span_id.clone()))
@@ -2454,10 +2634,21 @@ fn pairing_trace_evidence(
         .iter()
         .map(|span| span.trace_id.clone())
         .collect::<BTreeSet<_>>();
+    let mut admission_trace_counts = BTreeMap::new();
+    for client in &clients {
+        *admission_trace_counts
+            .entry(client.trace_id.clone())
+            .or_insert(0) += 1;
+    }
     let mut invalid_pair_count = clients
         .iter()
         .filter(|client| {
-            !client.parent_span_id.is_empty()
+            let root =
+                lifecycle_root_ids.get(&(client.trace_id.clone(), client.parent_span_id.clone()));
+            client.parent_span_id.is_empty()
+                || root.is_none()
+                || root.and_then(|span| otlp_string_attribute(&span.attributes, "uc.flow.id"))
+                    != otlp_string_attribute(&client.attributes, "uc.flow.id")
                 || otlp_string_attribute(&client.attributes, "uc.flow.id").is_none()
                 || !otlp_span_succeeded(client)
         })
@@ -2472,7 +2663,7 @@ fn pairing_trace_evidence(
         + spans
             .iter()
             .filter(|span| {
-                span.name == "space_admission"
+                otlp_string_attribute(&span.attributes, "uc.operation") == Some("space_admission")
                     && span.kind == internal_kind
                     && otlp_string_attribute(&span.attributes, "uc.role") == Some("sponsor")
                     && server_ids
@@ -2480,6 +2671,23 @@ fn pairing_trace_evidence(
                     && !otlp_span_succeeded(span)
             })
             .count();
+    for connection in spans.iter().filter(|span| {
+        span.kind == client_kind
+            && otlp_string_attribute(&span.attributes, "uc.operation") == Some("space_admission")
+            && otlp_string_attribute(&span.attributes, "uc.role") == Some("joiner")
+    }) {
+        let duration_ms = connection
+            .end_time_unix_nano
+            .saturating_sub(connection.start_time_unix_nano)
+            / 1_000_000;
+        assert!(
+            completion_durations
+                .get(&(connection.trace_id.clone(), connection.span_id.clone()))
+                .is_some_and(|ms| duration_ms.abs_diff(*ms as u64) <= 20),
+            "connection span outlives its completed operation: {} ms",
+            duration_ms
+        );
+    }
     let mut network_intervals = paired_servers
         .iter()
         .flat_map(|(client, server)| {
@@ -2527,10 +2735,12 @@ fn pairing_trace_evidence(
         client_count: clients.len(),
         paired_server_count: paired_servers.len(),
         paired_admission_endpoint_count,
+        lifecycle_root_count: lifecycle_roots.len(),
         invalid_pair_count,
         invalid_completion_log_count,
         flow_ids,
         admission_trace_ids,
+        admission_trace_counts,
     }
 }
 
@@ -2563,7 +2773,7 @@ fn complete_admission_flow_traces(
     let mut flows = HashMap::<String, Vec<CompleteAdmissionTrace>>::new();
     for client in spans.iter().filter(|span| {
         span.kind == client_kind
-            && span.parent_span_id.is_empty()
+            && !span.parent_span_id.is_empty()
             && otlp_span_succeeded(span)
             && otlp_string_attribute(&span.attributes, "uc.domain") == Some("space_admission")
             && otlp_string_attribute(&span.attributes, "uc.operation") == Some("network_transport")
@@ -2589,19 +2799,20 @@ fn complete_admission_flow_traces(
             span.trace_id == server.trace_id
                 && span.parent_span_id == server.span_id
                 && span.kind == internal_kind
-                && span.name == "space_admission"
+                && otlp_string_attribute(&span.attributes, "uc.operation")
+                    == Some("space_admission")
                 && otlp_string_attribute(&span.attributes, "uc.role") == Some("sponsor")
                 && otlp_string_attribute(&span.attributes, "uc.flow.id").is_none()
                 && otlp_span_succeeded(span)
         });
         if endpoint_exists {
-            flows
-                .entry(flow_id.to_owned())
-                .or_default()
-                .push(CompleteAdmissionTrace {
+            let traces = flows.entry(flow_id.to_owned()).or_default();
+            if !traces.iter().any(|trace| trace.trace_id == client.trace_id) {
+                traces.push(CompleteAdmissionTrace {
                     trace_id: client.trace_id.clone(),
                     started_at_ns: client.start_time_unix_nano,
                 });
+            }
         }
     }
     flows

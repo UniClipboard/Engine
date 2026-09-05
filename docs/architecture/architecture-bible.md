@@ -555,7 +555,7 @@ Application 可以把依赖失败转换为稳定类别，但转换不能删除�
 
 跨层完整能力的持续计时只允许 Engine 组装层装饰既有完整 Application port，不能包装状态加载、提交、材料准备或恢复子步骤。Application 不为观测增加接口、阶段查询或手工持续计时；完整准入恢复 owner 只用已有 32-byte 随机 attempt 材料开启不可读取、不可返回的不透明关联作用域，Core 不依赖观测。接收端只有在 Infra 完成既有身份与消息认证后才接受远端父关系；`traceparent` 只存在于受认证的在线协议中，不持久化，也不传播 `tracestate` 或 baggage。Space 调用树固定为 client transport、server transport、完整 sponsor endpoint；不得把 JoinRequest、Prepared、Applied 等业务步骤暴露给 Engine。
 
-系统、文件与远程输出均默认拒绝普通模块记录，只接受类型化诊断合同的固定字段。设备侧在编码前删除源码位置、线程、忙闲时间和正文，Collector 再做第二次字段收窄并设置稳定事件名。远程 trace 和 log 共用进程资源信息；在线往返使用同一 TraceId。schema v1 只允许 Space 准入作用域为 Joiner client span 自动附加匿名 `uc.flow.id`；server、endpoint、log 和其他领域必须省略。Engine、Infra、Core 和公开接口均没有关联号构造或读取入口。
+系统、文件与远程输出均默认拒绝普通模块记录，只接受类型化诊断合同的固定字段。设备侧在编码前删除源码位置、线程、忙闲时间和正文，Collector 再做第二次字段收窄并设置稳定事件名。远程 trace 和 log 共用进程资源信息；一次未中断的 Space 准入由 Application 完整 owner 的本机 internal root 统一持有一个 TraceId，建链、Joiner client、Sponsor server 与完整 endpoint 都挂在其下。schema v1 只允许该 root 与 Joiner client span 附加匿名 `uc.flow.id`；server、endpoint、log 和其他领域必须省略。延期、拒绝、取消、升级阻塞或 Engine 关闭结束当前 trace；重试或重启使用新 TraceId、同一 flow。Engine、Infra、Core 和公开接口均没有关联号构造或读取入口。
 
 本地日志固定写入宿主日志目录的 `engine.YYYY-MM-DD.jsonl`，保留 7 天，总量不超过十进制 100,000,000 bytes；只管理这一严格命名，不删除相似或嵌套文件。诊断导出先刷新当前队列，再按同一文件名合同收集文件。目录不可写时降级到其余输出，不影响 Engine 启动。
 
@@ -792,8 +792,10 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 | 日期 | 主题 | 长期结论 |
 | --- | --- | --- |
-| 2026-09-05 | 037 运行诊断完整落地 | 宿主进程唯一拥有共同观测运行时；Apple、Android、HarmonyOS 与直接 Rust 宿主共享系统、JSONL 和远程输出及有界生命周期。在线网络调用只在认证后建立跨设备父子关系；Space 准入关联号只由 Application 完整恢复 owner 的不透明作用域提供且只附在 Joiner client，Engine 只装饰完整 sponsor endpoint，Infra 只记录真实网络边界，会话生命周期独立记录。设备与 Collector 双重字段收窄并拒绝外层 schema URL，生产 trace 有固定采样，日志无正文且无关联号；刷新与关闭串行，远程终态失败不会被本地清理重试掩盖。Sponsor 收到对端确认后才记录成功，整条入站交换共用一个截止时间；认证前失败只写真实耗时的无关联日志，认证后每个三层节点恰有一条完成日志。认证后的新旧消息布局明确提示升级；后半程阻塞保留原状态并在 Pending/Active 公开提示，不回滚已提交结果；公开变化发通用刷新，对端上线立即恢复。旧伪 OTLP、Engine 诊断开关、Core tracing 和观测专用 timing/flow 接口已删除，架构门禁阻止回流。 |
+| 2026-09-05 | 配对动作名称与时间条修复 | 展示名称与能力分类分开，动作含义由 Application 既有认证消息负责人提供，不向 Engine 增加步骤接口。Infra 建链隔离 noq 长期 ConnectionDriver 的 tracing 上下文，防止后台轮询延长认证 span；业务交换继续记录认证后父关系。验收逐轮动作名及 span 与完成日志耗时一致性。 |
+| 2026-09-05 | 037 运行诊断完整落地 | 宿主进程唯一拥有共同观测运行时；Apple、Android、HarmonyOS 与直接 Rust 宿主共享系统、JSONL 和远程输出及有界生命周期。在线网络调用只在认证后建立跨设备父子关系；Space 准入关联号只由 Application 完整恢复 owner 的不透明作用域提供，并只附在本机生命周期 root 与 Joiner client，Engine 只装饰完整 sponsor endpoint，Infra 只记录真实网络边界，会话生命周期独立记录。设备与 Collector 双重字段收窄并拒绝外层 schema URL，生产 trace 有固定采样，日志无正文且无关联号；刷新与关闭串行，远程终态失败不会被本地清理重试掩盖。Sponsor 收到对端确认后才记录成功，整条入站交换共用一个截止时间；认证前失败只写真实耗时的无关联日志，认证后每个三层节点恰有一条完成日志。认证后的新旧消息布局明确提示升级；后半程阻塞保留原状态并在 Pending/Active 公开提示，不回滚已提交结果；公开变化发通用刷新，对端上线立即恢复。旧伪 OTLP、Engine 诊断开关、Core tracing 和观测专用 timing/flow 接口已删除，架构门禁阻止回流。 |
 | 2026-09-05 | 037 交付前结果校准 | HarmonyOS 宿主资源字段改用合同内固定发布渠道值，并以正常启动和依赖失败两条 N-API smoke 运行验证。SDK 已明确报告的超时保持为超时，可重试的准入传输延期保持为延期；两者都不再污染普通失败统计。 |
+| 2026-09-05 | 配对生命周期 root 归属校正 | root 语义归 Application 的完整 Space Admission，而不是 Joiner 或 Sponsor；发起设备创建本机 internal root，Joiner 网络能力和认证后的 Sponsor server/完整 endpoint 统一挂载。稳定 registry 随 Application assembly 跨 Space Session 重建复用，但不跨 Engine 实例重启；Engine 不读取业务标识、内部步骤或结束条件。 |
 | 2026-09-04 | 037 运行诊断内部所有权收口 | `uc-observability-runtime` 保持宿主 bootstrap 不变，内部按进程生命周期、远程管道、输出装配、字段筛选与本地文件 owner 分工。本地文件 owner 完整持有异步队列、容量、丢弃统计、flush 与 shutdown；统一字段白名单同时约束系统、JSONL 与远程输出，旧 Space 性能 target 只作为待删除迁移项保留。 |
 | 2026-09-04 | 037 第二切片：Clipboard 跨设备调用链 | Clipboard 发送只由 Engine 在既有完整 dispatch port 上建立 client span；地址与连接子 span、W3C 注入和认证后 server span 全归 Infra 私有实现，Application/Core 不携带 trace context、flow 或 timing。旧 UUID flow、`DispatchTiming`、Application 阶段 span 与 `uc_otlp` 已删除。消息头增加前置格式标记而不增加业务版本号，新旧布局双向明确不兼容；真实双 Iroh endpoint 已证明 client/server 同 TraceId、正确 parent、完成日志关联 server SpanId，未知 peer 不接受 remote parent。 |
 | 2026-09-04 | 037 单进程真实 OTLP | 新增内部 `uc-observability-runtime`，宿主进程唯一拥有共享 Resource、真实 OTLP/HTTP trace/log exporters、目标过滤、有界 batch、JSONL 与 provider 生命周期；`uc-engine` 只重导稳定 bootstrap。诊断合同以类型限制 domain/operation/role/outcome/error/duration，可选 flow 只从完整 owner 的随机 attempt 单向派生。可解码 receiver 和本地 Collector+Jaeger 已证明 trace/log 实际到达且 TraceId/SpanId 一致；Rust 1.95 下 iOS、Android、HarmonyOS 目标编译通过。 |

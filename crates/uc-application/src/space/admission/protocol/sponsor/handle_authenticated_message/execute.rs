@@ -23,6 +23,11 @@ impl SponsorAdmissionService {
         &self,
         message: AuthenticatedSpaceAdmissionMessage,
     ) -> Result<SpaceAdmissionMessageReply, HandleAuthenticatedSpaceAdmissionMessageError> {
+        if let Some(action) =
+            crate::space::admission::observation::message_action(message.envelope().kind())
+        {
+            uc_observability_contract::diagnostics::describe_admission_request(action);
+        }
         match message.envelope().kind() {
             SpaceAdmissionMessageKind::JoinRequest => self.handle_join_request(message).await,
             SpaceAdmissionMessageKind::Prepared => self.handle_prepared(message).await,

@@ -1,4 +1,5 @@
 use uc_core::membership::{JoinerAdmission, SpaceAdmissionEnvelopeV1};
+use uc_observability_contract::diagnostics::SpaceAdmissionObservationOutcome;
 
 use crate::space::admission::protocol::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryReport, AdmissionRecoveryService,
@@ -16,6 +17,7 @@ impl JoinerAdmissionService {
         canonical_digest: [u8; 32],
         notify_upgrade_cleared: bool,
     ) {
+        let observation_material = *aggregate.admission_id().as_bytes();
         let transition = match aggregate.accept_settled(reply, canonical_digest) {
             Ok(transition) => transition,
             Err(_) => {
@@ -27,10 +29,16 @@ impl JoinerAdmissionService {
             .commit_recovery_with_optional_notification(token, transition, notify_upgrade_cleared)
             .await;
         match commit_result {
-            Ok(_) => match self.re_pairing.resolve_after_successful_pairing().await {
-                Ok(()) => report.advanced_count += 1,
-                Err(_) => report.deferred_count += 1,
-            },
+            Ok(_) => {
+                self.observations.finish(
+                    observation_material,
+                    SpaceAdmissionObservationOutcome::Succeeded,
+                );
+                match self.re_pairing.resolve_after_successful_pairing().await {
+                    Ok(()) => report.advanced_count += 1,
+                    Err(_) => report.deferred_count += 1,
+                }
+            }
             Err(error) => recovery.record_state_error(report, error),
         }
     }

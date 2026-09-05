@@ -1,7 +1,7 @@
 use super::model::AdmissionRecoveryReport;
 use super::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryTrigger, AuthenticatedAdmissionReply,
-    LoadedPendingAdmission, SpaceAdmissionTransportError,
+    LoadedPendingAdmission, PendingAdmissionRecoveryStateError, SpaceAdmissionTransportError,
 };
 use crate::space::admission::protocol::{
     AdmissionRecoveryService, JoinerAdmissionService, SpaceAdmissionProtocol,
@@ -13,7 +13,9 @@ use uc_core::membership::{
     AdmissionPendingRecovery, AdmissionRecoveryCategory, JoinerAdmission,
     SpaceAdmissionMessageKind, SpaceAdmissionRejectionReason,
 };
-use uc_observability_contract::diagnostics::scope_space_admission_observation;
+use uc_observability_contract::diagnostics::{
+    DiagnosticErrorType, SpaceAdmissionObservationOutcome,
+};
 
 #[derive(Clone, Copy)]
 enum RecoveryChannel {
@@ -43,6 +45,17 @@ impl AdmissionRecoveryService {
         let loaded = match self.state.load(trigger).await {
             Ok(loaded) => loaded,
             Err(error) => {
+                let outcome = match &error {
+                    PendingAdmissionRecoveryStateError::RecoveryRequired => {
+                        SpaceAdmissionObservationOutcome::Failed(DiagnosticErrorType::Corrupt)
+                    }
+                    PendingAdmissionRecoveryStateError::Locked
+                    | PendingAdmissionRecoveryStateError::Unavailable
+                    | PendingAdmissionRecoveryStateError::StateChanged => {
+                        SpaceAdmissionObservationOutcome::Deferred
+                    }
+                };
+                joiner.observations.finish_all(outcome);
                 self.record_state_error(&mut report, error);
                 return report;
             }
@@ -50,18 +63,31 @@ impl AdmissionRecoveryService {
 
         for loaded_admission in loaded {
             let (aggregate, commit_token) = loaded_admission.into_parts();
+            let observation_before = report;
+            let observation_material = *aggregate.admission_id().as_bytes();
+            let was_cancelling = aggregate.is_cancelling();
+            let finish_observation = |after| {
+                finish_observation_after_recovery(
+                    joiner,
+                    observation_material,
+                    was_cancelling,
+                    observation_before,
+                    after,
+                );
+            };
             if aggregate.invitation_resolution().is_some() {
                 joiner
                     .recover_invitation_resolution(self, &mut report, aggregate, commit_token)
                     .await;
+                finish_observation(report);
                 continue;
             }
             let Some(recovery) = aggregate.pending_recovery() else {
                 continue;
             };
-            let observation_material = *aggregate.admission_id().as_bytes();
-            let (channel_kind, established) =
-                scope_space_admission_observation(&observation_material, async {
+            let (channel_kind, established) = joiner
+                .observations
+                .scope(observation_material, async {
                     match recovery {
                         AdmissionPendingRecovery::Initial {
                             encrypted_password_equivalent,
@@ -106,6 +132,7 @@ impl AdmissionRecoveryService {
                         error,
                     )
                     .await;
+                    finish_observation(report);
                     continue;
                 }
             };
@@ -121,6 +148,7 @@ impl AdmissionRecoveryService {
                             AdmissionRecoveryCategory::MissingKey,
                         )
                         .await;
+                        finish_observation(report);
                         continue;
                     };
                     let transition =
@@ -128,6 +156,7 @@ impl AdmissionRecoveryService {
                             Ok(transition) => transition,
                             Err(_) => {
                                 report.recovery_required_count += 1;
+                                finish_observation(report);
                                 continue;
                             }
                         };
@@ -138,6 +167,7 @@ impl AdmissionRecoveryService {
                         }
                         Err(error) => {
                             self.record_state_error(&mut report, error);
+                            finish_observation(report);
                             continue;
                         }
                     }
@@ -150,14 +180,21 @@ impl AdmissionRecoveryService {
             let (aggregate, commit_token) = loaded.into_parts();
             let Some(pending_exchange) = aggregate.pending_exchange() else {
                 report.recovery_required_count += 1;
+                finish_observation(report);
                 continue;
             };
-            let observation_material = *aggregate.admission_id().as_bytes();
-            let exchanged = scope_space_admission_observation(
-                &observation_material,
-                exchange.exchange(pending_exchange.request_envelope()),
-            )
-            .await;
+            let exchanged = joiner
+                .observations
+                .scope(
+                    observation_material,
+                    uc_observability_contract::diagnostics::scope_admission_action(
+                        crate::space::admission::observation::message_action(
+                            pending_exchange.request_envelope().kind(),
+                        ),
+                        exchange.exchange(pending_exchange.request_envelope()),
+                    ),
+                )
+                .await;
             match exchanged {
                 Ok(reply) => {
                     self.commit_joiner_reply(joiner, &mut report, aggregate, commit_token, reply)
@@ -169,6 +206,7 @@ impl AdmissionRecoveryService {
                 }
                 Err(_) => report.deferred_count += 1,
             }
+            finish_observation(report);
         }
 
         report
@@ -385,6 +423,35 @@ impl AdmissionRecoveryService {
                 .await;
             }
         }
+    }
+}
+
+fn finish_observation_after_recovery(
+    joiner: &JoinerAdmissionService,
+    material: [u8; 32],
+    was_cancelling: bool,
+    before: AdmissionRecoveryReport,
+    after: AdmissionRecoveryReport,
+) {
+    let outcome = if after.recovery_required_count > before.recovery_required_count {
+        Some(SpaceAdmissionObservationOutcome::Failed(
+            DiagnosticErrorType::Corrupt,
+        ))
+    } else if after.peer_upgrade_required_count > before.peer_upgrade_required_count {
+        Some(SpaceAdmissionObservationOutcome::Rejected)
+    } else if after.rejected_count > before.rejected_count {
+        Some(if was_cancelling {
+            SpaceAdmissionObservationOutcome::Cancelled
+        } else {
+            SpaceAdmissionObservationOutcome::Rejected
+        })
+    } else if after.deferred_count > before.deferred_count {
+        Some(SpaceAdmissionObservationOutcome::Deferred)
+    } else {
+        None
+    };
+    if let Some(outcome) = outcome {
+        joiner.observations.finish(material, outcome);
     }
 }
 

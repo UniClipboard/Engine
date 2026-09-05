@@ -1615,19 +1615,24 @@ function checkObservabilityCutover(sources) {
       'Engine derives a cross-step diagnostic flow from a business identifier'
     )
   }
-  const admissionScope = 'scope_space_admission_observation'
-  const applicationScopeCount = sources.application.split(admissionScope).length - 1
-  const ownerScopeCount = sources.admissionRecovery.split(admissionScope).length - 1
+  const admissionRegistry = 'SpaceAdmissionObservationRegistry'
   if (
-    ownerScopeCount === 0 ||
-    applicationScopeCount !== ownerScopeCount ||
-    sources.engineRuntime.includes(admissionScope) ||
-    sources.network.includes(admissionScope)
+    !sources.admissionObservation.includes(`pub(crate) struct ${admissionRegistry}`) ||
+    !sources.applicationAssembly.includes(
+      `admission_observations: Arc<${admissionRegistry}>`
+    ) ||
+    !sources.admissionRecovery.includes('.observations') ||
+    sources.engineRuntime.includes(admissionRegistry) ||
+    sources.engineRuntime.includes('SpaceAdmissionObservationOutcome') ||
+    sources.engineRuntime.includes('AdmissionObservationAction') ||
+    sources.engineRuntime.includes('describe_admission_request') ||
+    sources.engineRuntime.includes('scope_admission_action') ||
+    sources.network.includes(admissionRegistry)
   ) {
     addProblem(
       problems,
       'observability flow ownership',
-      'only the complete Application admission recovery owner may open the opaque flow scope'
+      'only the complete Application Space admission owner may hold and use the opaque lifecycle registry'
     )
   }
   for (const marker of [
@@ -1861,6 +1866,10 @@ function repositorySources() {
     engineWiring: read('crates/uc-engine/src/assembly/wire/mod.rs'),
     applicationDeps: read('crates/uc-application/src/deps.rs'),
     application: readSourceTree('crates/uc-application/src'),
+    applicationAssembly: read('crates/uc-application/src/application.rs'),
+    admissionObservation: read(
+      'crates/uc-application/src/space/admission/observation.rs'
+    ),
     admissionRecovery: read(
       'crates/uc-application/src/space/admission/protocol/recovery/recover_pending/execute.rs'
     ),
@@ -2010,6 +2019,13 @@ function runNegativeFixtures(metadata, sources) {
       '#[cfg(test)]',
       'fn flow(id: &[u8]) { DiagnosticFlowId::derive(DiagnosticFlowPurpose::SpaceAdmission, id); }\n\n#[cfg(test)]'
     )
+  }, metadata, sources)
+  expectRejected('Engine admission lifecycle registry', (_changed, changedSources) => {
+    changedSources.engineRuntime +=
+      '\nfn leak_admission_lifecycle(_: SpaceAdmissionObservationRegistry) {}\n'
+  }, metadata, sources)
+  expectRejected('Engine admission action semantics', (_changed, changedSources) => {
+    changedSources.engineRuntime += '\nfn leak_action(_: AdmissionObservationAction) {}\n'
   }, metadata, sources)
   expectRejected('retired legacy Space transition module', (_changed, changedSources) => {
     changedSources.legacySpaceTransitionPathPresent = true

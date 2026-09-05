@@ -5,18 +5,19 @@
 
 ## stable remote
 
-共 8 个调用点。
+共 9 个调用点。
 
 | Target | 调用点 | 类型 | 风险标记 |
 | --- | --- | --- | --- |
-| `uc.telemetry` | `crates/uc-observability-contract/src/diagnostics/mod.rs:285` | `span` | - |
-| `uc.telemetry` | `crates/uc-observability-contract/src/diagnostics/mod.rs:297` | `span` | - |
-| `uc.telemetry` | `crates/uc-observability-contract/src/diagnostics/mod.rs:422` | `event` | - |
-| `uc.telemetry` | `crates/uc-observability-contract/src/diagnostics/mod.rs:432` | `event` | - |
-| `uc.telemetry` | `crates/uc-observability-contract/src/diagnostics/mod.rs:461` | `event` | - |
-| `uc.telemetry` | `crates/uc-observability-contract/src/diagnostics/mod.rs:472` | `event` | - |
-| `uc.telemetry` | `crates/uc-observability-contract/src/diagnostics/mod.rs:515` | `event` | - |
-| `uc.telemetry` | `crates/uc-observability-contract/src/diagnostics/mod.rs:534` | `event` | - |
+| `uc.telemetry` | `crates/uc-observability-contract/src/diagnostics/mod.rs:180` | `span` | - |
+| `uc.telemetry` | `crates/uc-observability-contract/src/diagnostics/mod.rs:495` | `span` | - |
+| `uc.telemetry` | `crates/uc-observability-contract/src/diagnostics/mod.rs:508` | `span` | - |
+| `uc.telemetry` | `crates/uc-observability-contract/src/diagnostics/mod.rs:634` | `event` | - |
+| `uc.telemetry` | `crates/uc-observability-contract/src/diagnostics/mod.rs:644` | `event` | - |
+| `uc.telemetry` | `crates/uc-observability-contract/src/diagnostics/mod.rs:673` | `event` | - |
+| `uc.telemetry` | `crates/uc-observability-contract/src/diagnostics/mod.rs:684` | `event` | - |
+| `uc.telemetry` | `crates/uc-observability-contract/src/diagnostics/mod.rs:727` | `event` | - |
+| `uc.telemetry` | `crates/uc-observability-contract/src/diagnostics/mod.rs:746` | `event` | - |
 
 ## local operational
 
@@ -24,8 +25,8 @@
 
 | Target | 调用点 | 类型 | 风险标记 |
 | --- | --- | --- | --- |
-| `observability.health` | `crates/uc-observability-contract/src/diagnostics/mod.rs:207` | `event` | - |
-| `observability.health` | `crates/uc-observability-contract/src/diagnostics/mod.rs:222` | `event` | - |
+| `observability.health` | `crates/uc-observability-contract/src/diagnostics/mod.rs:405` | `event` | - |
+| `observability.health` | `crates/uc-observability-contract/src/diagnostics/mod.rs:420` | `event` | - |
 | `observability.health` | `crates/uc-observability-runtime/src/remote_health.rs:73` | `event` | - |
 | `observability.health` | `crates/uc-observability-runtime/src/remote_health.rs:85` | `event` | - |
 | `observability.health` | `crates/uc-observability-runtime/src/remote_health.rs:102` | `event` | - |
@@ -33,7 +34,7 @@
 
 ## local debug
 
-共 1231 个调用点。
+共 1233 个调用点。
 
 | Target | 调用点 | 类型 | 风险标记 |
 | --- | --- | --- | --- |
@@ -474,16 +475,16 @@
 | `<module>` | `crates/uc-application/src/space/admission/invitation/issuer.rs:110` | `warn` | message-body |
 | `<module>` | `crates/uc-application/src/space/admission/invitation/query_addresses/use_case.rs:19` | `instrument` | - |
 | `<module>` | `crates/uc-application/src/space/admission/invitation/query_addresses/use_case.rs:28` | `record` | - |
-| `<module>` | `crates/uc-application/src/space/facade/facade.rs:370` | `instrument` | - |
-| `<module>` | `crates/uc-application/src/space/facade/facade.rs:391` | `instrument` | - |
-| `<module>` | `crates/uc-application/src/space/facade/facade.rs:411` | `instrument` | - |
-| `<module>` | `crates/uc-application/src/space/facade/facade.rs:419` | `instrument` | - |
-| `<module>` | `crates/uc-application/src/space/facade/facade.rs:430` | `instrument` | - |
-| `<module>` | `crates/uc-application/src/space/facade/facade.rs:438` | `instrument` | - |
-| `<module>` | `crates/uc-application/src/space/facade/facade.rs:612` | `instrument` | - |
-| `<module>` | `crates/uc-application/src/space/facade/facade.rs:619` | `instrument` | - |
-| `<module>` | `crates/uc-application/src/space/facade/facade.rs:641` | `instrument` | - |
-| `<module>` | `crates/uc-application/src/space/facade/facade.rs:709` | `instrument` | - |
+| `<module>` | `crates/uc-application/src/space/facade/facade.rs:372` | `instrument` | - |
+| `<module>` | `crates/uc-application/src/space/facade/facade.rs:393` | `instrument` | - |
+| `<module>` | `crates/uc-application/src/space/facade/facade.rs:413` | `instrument` | - |
+| `<module>` | `crates/uc-application/src/space/facade/facade.rs:421` | `instrument` | - |
+| `<module>` | `crates/uc-application/src/space/facade/facade.rs:432` | `instrument` | - |
+| `<module>` | `crates/uc-application/src/space/facade/facade.rs:440` | `instrument` | - |
+| `<module>` | `crates/uc-application/src/space/facade/facade.rs:614` | `instrument` | - |
+| `<module>` | `crates/uc-application/src/space/facade/facade.rs:621` | `instrument` | - |
+| `<module>` | `crates/uc-application/src/space/facade/facade.rs:643` | `instrument` | - |
+| `<module>` | `crates/uc-application/src/space/facade/facade.rs:711` | `instrument` | - |
 | `<module>` | `crates/uc-application/src/space/lifecycle/initialize_space/use_case.rs:105` | `instrument` | implicit-arguments |
 | `<module>` | `crates/uc-application/src/space/lifecycle/initialize_space/use_case.rs:152` | `debug` | message-body |
 | `<module>` | `crates/uc-application/src/space/lifecycle/initialize_space/use_case.rs:170` | `debug` | message-body |
@@ -1055,11 +1056,11 @@
 | `<module>` | `crates/uc-infra/src/network/iroh/runtime_consts.rs:22` | `warn` | message-body |
 | `<module>` | `crates/uc-infra/src/network/iroh/runtime_consts.rs:40` | `warn` | message-body |
 | `<module>` | `crates/uc-infra/src/network/iroh/runtime_consts.rs:53` | `warn` | message-body |
-| `<module>` | `crates/uc-infra/src/network/iroh/space_admission.rs:447` | `debug` | raw-error, message-body |
-| `<module>` | `crates/uc-infra/src/network/iroh/space_admission.rs:451` | `debug` | raw-error, message-body |
-| `<module>` | `crates/uc-infra/src/network/iroh/space_admission.rs:455` | `debug` | raw-error, message-body |
-| `<module>` | `crates/uc-infra/src/network/iroh/space_admission.rs:461` | `debug` | raw-error, message-body |
-| `<module>` | `crates/uc-infra/src/network/iroh/space_admission.rs:465` | `debug` | raw-error, message-body |
+| `<module>` | `crates/uc-infra/src/network/iroh/space_admission.rs:448` | `debug` | raw-error, message-body |
+| `<module>` | `crates/uc-infra/src/network/iroh/space_admission.rs:452` | `debug` | raw-error, message-body |
+| `<module>` | `crates/uc-infra/src/network/iroh/space_admission.rs:456` | `debug` | raw-error, message-body |
+| `<module>` | `crates/uc-infra/src/network/iroh/space_admission.rs:462` | `debug` | raw-error, message-body |
+| `<module>` | `crates/uc-infra/src/network/iroh/space_admission.rs:466` | `debug` | raw-error, message-body |
 | `<module>` | `crates/uc-infra/src/network/iroh/transfer_progress_adapter.rs:166` | `debug` | message-body |
 | `<module>` | `crates/uc-infra/src/network/iroh/transfer_progress_adapter.rs:172` | `warn` | sensitive-field, message-body |
 | `<module>` | `crates/uc-infra/src/network/iroh/transfer_progress_adapter.rs:179` | `debug` | sensitive-field, message-body |
@@ -1266,8 +1267,10 @@
 | `<module>` | `crates/uc-infra/src/space/security/session.rs:591` | `debug` | message-body |
 | `<module>` | `crates/uc-infra/src/time/timer.rs:45` | `debug` | message-body |
 | `<module>` | `crates/uc-infra/src/time/timer.rs:53` | `debug` | message-body |
-| `<module>` | `crates/uc-observability-contract/src/diagnostics/mod.rs:414` | `record` | - |
-| `<module>` | `crates/uc-observability-contract/src/diagnostics/mod.rs:417` | `record` | - |
+| `<module>` | `crates/uc-observability-contract/src/diagnostics/mod.rs:106` | `record` | - |
+| `<module>` | `crates/uc-observability-contract/src/diagnostics/mod.rs:110` | `record` | - |
+| `<module>` | `crates/uc-observability-contract/src/diagnostics/mod.rs:626` | `record` | - |
+| `<module>` | `crates/uc-observability-contract/src/diagnostics/mod.rs:629` | `record` | - |
 
 ## product analytics
 

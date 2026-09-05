@@ -6,6 +6,7 @@ use uc_core::membership::{
     AdmissionRetryState, JoinerAdmission, PendingAdmissionExchange, SpaceAdmissionMessageKind,
 };
 use uc_core::ports::SettingsPort;
+use uc_observability_contract::diagnostics::SpaceAdmissionObservationOutcome;
 
 impl SpaceAdmissionProtocol {
     pub(crate) async fn start_join(
@@ -27,13 +28,16 @@ impl JoinerAdmissionService {
             requires_session_transition,
             commit_token,
         ) = loaded.into_parts();
+        let superseded_observation_material = current_join
+            .as_ref()
+            .map(|admission| *admission.admission_id().as_bytes());
         let superseded = current_join
             .map(JoinerAdmission::supersede)
             .transpose()
             .map_err(|_| JoinSpaceError::PreviousJoinCannotBeSuperseded)?;
 
         let prepared_invitation = self.prepare_invitation.prepare(&input).await?;
-        let (join_id, transition) = match prepared_invitation {
+        let (admission_id, join_id, transition) = match prepared_invitation {
             PreparedJoinerInvitation::Full => {
                 let material = self.start_material.create(&input).await?;
                 let (
@@ -62,7 +66,7 @@ impl JoinerAdmissionService {
                     pending_exchange,
                 )
                 .map_err(|_| JoinSpaceError::InvalidStartMaterial)?;
-                (join_id, transition)
+                (admission_id, join_id, transition)
             }
             PreparedJoinerInvitation::Short {
                 admission_id,
@@ -79,7 +83,7 @@ impl JoinerAdmissionService {
                     short_code,
                 )
                 .map_err(|_| JoinSpaceError::InvalidStartMaterial)?;
-                (join_id, transition)
+                (admission_id, join_id, transition)
             }
         };
 
@@ -89,6 +93,11 @@ impl JoinerAdmissionService {
                 JoinerStartMutation::new(transition, superseded),
             )
             .await?;
+        if let Some(material) = superseded_observation_material {
+            self.observations
+                .finish(material, SpaceAdmissionObservationOutcome::Cancelled);
+        }
+        self.observations.begin(*admission_id.as_bytes());
         self.maintenance_wake.wake();
 
         Ok(JoinSpaceResult {

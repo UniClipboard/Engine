@@ -1,3 +1,4 @@
+use opentelemetry::logs::AnyValue;
 use opentelemetry_sdk::logs::{InMemoryLogExporter, SdkLoggerProvider};
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
@@ -6,16 +7,21 @@ use tracing_subscriber::layer::SubscriberExt;
 use crate::telemetry::TelemetryRuntime;
 
 pub(crate) struct CapturedSpan {
+    pub(crate) name: String,
     pub(crate) trace_id: String,
     pub(crate) span_id: String,
+    pub(crate) parent_span_id: String,
     pub(crate) event_count: usize,
     pub(crate) flow_id: Option<String>,
+    pub(crate) operation: Option<String>,
+    pub(crate) role: Option<String>,
     pub(crate) rejection_reason: Option<&'static str>,
 }
 
 pub(crate) struct CapturedLog {
     pub(crate) trace_id: String,
     pub(crate) span_id: String,
+    pub(crate) outcome: Option<String>,
 }
 
 pub(crate) struct CapturedTelemetry {
@@ -48,14 +54,26 @@ pub(crate) fn capture_telemetry(operation: impl FnOnce()) -> CapturedTelemetry {
         .unwrap_or_default()
         .into_iter()
         .map(|span| CapturedSpan {
+            name: span.name.to_string(),
             rejection_reason: crate::remote_health::span_rejection_reason_for_test(&span),
             trace_id: span.span_context.trace_id().to_string(),
             span_id: span.span_context.span_id().to_string(),
+            parent_span_id: span.parent_span_id.to_string(),
             event_count: span.events.len(),
             flow_id: span
                 .attributes
                 .iter()
                 .find(|attribute| attribute.key.as_str() == "uc.flow.id")
+                .map(|attribute| attribute.value.as_str().into_owned()),
+            operation: span
+                .attributes
+                .iter()
+                .find(|attribute| attribute.key.as_str() == "uc.operation")
+                .map(|attribute| attribute.value.as_str().into_owned()),
+            role: span
+                .attributes
+                .iter()
+                .find(|attribute| attribute.key.as_str() == "uc.role")
                 .map(|attribute| attribute.value.as_str().into_owned()),
         })
         .collect();
@@ -69,7 +87,19 @@ pub(crate) fn capture_telemetry(operation: impl FnOnce()) -> CapturedTelemetry {
                 .trace_context()
                 .map(|context| (context.trace_id.to_string(), context.span_id.to_string()))
                 .unwrap_or_default();
-            CapturedLog { trace_id, span_id }
+            let outcome = log
+                .record
+                .attributes_iter()
+                .find(|(key, _)| key.as_str() == "uc.outcome")
+                .and_then(|(_, value)| match value {
+                    AnyValue::String(value) => Some(value.to_string()),
+                    _ => None,
+                });
+            CapturedLog {
+                trace_id,
+                span_id,
+                outcome,
+            }
         })
         .collect();
     CapturedTelemetry { spans, logs }

@@ -45,6 +45,7 @@ const REMOTE_ALLOWED_FIELDS = new Set([
   'parent',
   'event.name',
   'uc.flow.id',
+  'uc.display.name',
   'uc.domain',
   'uc.operation',
   'uc.role',

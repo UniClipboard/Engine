@@ -4,6 +4,7 @@ const DIAGNOSTIC_OWNER: &str = "uc_observability_contract::diagnostics";
 const RUNTIME_HEALTH_OWNER: &str = "uc_observability_runtime::remote_health";
 
 const SPAN_FIELDS: &[&str] = &[
+    "uc.display.name",
     "uc.flow.id",
     "uc.domain",
     "uc.operation",

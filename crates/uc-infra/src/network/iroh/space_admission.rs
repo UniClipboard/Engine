@@ -11,6 +11,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 use tokio::sync::Semaphore;
+use tracing::instrument::WithSubscriber;
 use tracing::{debug, Instrument};
 use uc_application::deps::{
     AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply,
@@ -696,6 +697,7 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
             role: DiagnosticRole::Joiner,
             kind: DiagnosticSpanKind::Client,
         });
+        uc_observability_contract::diagnostics::describe_admission_connection(&span, true);
         let result = async {
             let route = decode_route(route, false)?;
             let local = peer_id(self.endpoint.id().as_bytes())?;
@@ -795,7 +797,14 @@ async fn connect(
     endpoint: &Endpoint,
     addr: EndpointAddr,
 ) -> Result<Connection, SpaceAdmissionTransportError> {
-    tokio::time::timeout(IO_DEADLINE, endpoint.connect(addr, SPACE_ADMISSION_ALPN))
+    // noq 的连接驱动会长期持有当前 span。只在建链底层隔离 tracing 上下文，
+    // 外层认证调用继续计时，后续业务消息仍由正常 subscriber 记录和传播。
+    let connection = endpoint
+        .connect(addr, SPACE_ADMISSION_ALPN)
+        .with_subscriber(tracing::Dispatch::new(
+            tracing::subscriber::NoSubscriber::default(),
+        ));
+    tokio::time::timeout(IO_DEADLINE, connection)
         .await
         .map_err(|_| SpaceAdmissionTransportError::Deferred)?
         .map_err(|_| SpaceAdmissionTransportError::Deferred)

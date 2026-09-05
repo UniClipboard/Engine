@@ -36,6 +36,7 @@ use crate::facade::clipboard_history::{HistoryMaintenanceRuntime, HistoryMainten
 use crate::facade::clipboard_write::RestoreBroadcastTrigger;
 use crate::search::{SearchAssembly, SearchShutdownError};
 use crate::settings::SettingsAssembly;
+use crate::space::SpaceAdmissionObservationRegistry;
 use crate::space::SpaceFacade;
 use crate::space::{
     SpaceAdmissionDeps, SpaceFacadeDeps, SpaceRuntimeAdapters, SpaceSessionDeps,
@@ -224,6 +225,7 @@ pub struct ApplicationAssembly {
     settings: SettingsAssembly,
     file_transfer: Arc<FileTransferAssembly>,
     clipboard: Arc<ClipboardAssembly>,
+    admission_observations: Arc<SpaceAdmissionObservationRegistry>,
 }
 
 impl ApplicationAssembly {
@@ -253,6 +255,7 @@ impl ApplicationAssembly {
             settings,
             file_transfer,
             clipboard,
+            admission_observations: Arc::new(SpaceAdmissionObservationRegistry::default()),
         }
     }
 
@@ -388,6 +391,7 @@ impl ApplicationAssembly {
             },
             runtime_adapters: runtime,
             peer_reachability_changed_events,
+            admission_observations: Arc::clone(&self.admission_observations),
         }));
         let member_scope = space.current_member_scope();
         let ApplicationClipboardAdapters {

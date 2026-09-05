@@ -60,4 +60,5 @@ pub(crate) struct SpaceFacadeDeps {
     pub runtime_adapters: SpaceRuntimeAdapters,
     pub peer_reachability_changed_events:
         broadcast::Receiver<uc_core::ports::PeerReachabilityChanged>,
+    pub admission_observations: Arc<crate::space::SpaceAdmissionObservationRegistry>,
 }

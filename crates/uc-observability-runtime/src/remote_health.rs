@@ -273,6 +273,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn late_request_names_are_validated_and_removed_before_export() {
+        use opentelemetry::trace::{Span as _, Tracer as _, TracerProvider as _};
+        use opentelemetry::KeyValue;
+        use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+
+        let exporter = InMemorySpanExporter::default();
+        let counters = RemoteHealthCounters::default();
+        let provider = SdkTracerProvider::builder()
+            .with_span_processor(TrackedSpanProcessor::new(
+                exporter.clone(),
+                CapacityGate::new(counters.clone(), Signal::Spans),
+            ))
+            .build();
+        let tracer = provider.tracer("uc-observability-runtime");
+        for display in [
+            "pairing.request_join.process",
+            "pairing.request_join.send",
+            "PRIVATE_DEVICE_NAME",
+        ] {
+            let mut span = tracer
+                .span_builder("pairing.process_request")
+                .with_kind(SpanKind::Internal)
+                .with_attributes([
+                    KeyValue::new("target", "uc.telemetry"),
+                    KeyValue::new("uc.domain", "space_admission"),
+                    KeyValue::new("uc.operation", "space_admission"),
+                    KeyValue::new("uc.role", "sponsor"),
+                ])
+                .start(&tracer);
+            span.set_attribute(KeyValue::new("uc.display.name", display));
+            span.end();
+        }
+        provider.force_flush().expect("flush");
+        let spans = exporter.get_finished_spans().expect("exported spans");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].name, "pairing.request_join.process");
+        assert!(spans[0]
+            .attributes
+            .iter()
+            .all(|field| field.key.as_str() != "uc.display.name"));
+        assert_eq!(counters.snapshot().dropped_spans, 2);
+    }
+
+    #[test]
     fn contended_submission_is_dropped_without_waiting() {
         let counters = RemoteHealthCounters::default();
         let gate = CapacityGate::new(counters.clone(), Signal::Spans);
@@ -396,6 +440,25 @@ impl SpanProcessor for TrackedSpanProcessor {
     }
 
     fn on_end(&self, mut span: SpanData) {
+        // tracing-opentelemetry 已启动的 span 忽略 otel.name 更新。
+        // 流程负责人只提供固定显示名，编码前转换并移除内部字段。
+        let mut display_names = span
+            .attributes
+            .iter()
+            .filter(|field| field.key.as_str() == "uc.display.name");
+        if let Some(field) = display_names.next() {
+            if display_names.next().is_some() {
+                self.gate.record_rejection();
+                return;
+            }
+            let Value::String(name) = &field.value else {
+                self.gate.record_rejection();
+                return;
+            };
+            span.name = name.as_str().to_owned().into();
+            span.attributes
+                .retain(|field| field.key.as_str() != "uc.display.name");
+        }
         if !span_is_approved(&span) {
             self.gate.record_rejection();
             return;
@@ -589,20 +652,32 @@ fn span_rejection_reason(span: &SpanData) -> Option<&'static str> {
     if !role.is_some_and(valid_role) {
         return Some("role");
     }
-    if !operation.is_some_and(|operation| operation == span.name.as_ref()) {
+    if !matches!((operation, role), (Some(operation), Some(role)) if uc_observability_contract::diagnostics::approved_operation_name(operation, role, span.name.as_ref()))
+    {
         return Some("name");
     }
     if !matches!((domain, operation), (Some(domain), Some(operation)) if operation_matches_domain(domain, operation))
     {
         return Some("domain operation");
     }
-    if flow.is_some()
-        && !(domain == Some("space_admission")
-            && matches!(operation, Some("space_admission" | "network_transport"))
-            && role == Some("joiner")
-            && span.span_kind == SpanKind::Client)
-    {
+    let joiner_client_flow = domain == Some("space_admission")
+        && matches!(operation, Some("space_admission" | "network_transport"))
+        && role == Some("joiner")
+        && span.span_kind == SpanKind::Client;
+    let admission_lifecycle_root = domain == Some("space_admission")
+        && operation == Some("space_admission")
+        && role == Some("local")
+        && span.span_kind == SpanKind::Internal
+        && span.parent_span_id == opentelemetry::trace::SpanId::INVALID;
+    if flow.is_some() && !(joiner_client_flow || admission_lifecycle_root) {
         return Some("flow scope");
+    }
+    if span.span_kind == SpanKind::Internal
+        && role == Some("local")
+        && operation == Some("space_admission")
+        && (!admission_lifecycle_root || flow.is_none())
+    {
+        return Some("lifecycle root");
     }
     if !matches!((operation, role), (Some(operation), Some(role)) if span_role_matches(operation, role, &span.span_kind))
     {
@@ -767,6 +842,7 @@ fn span_role_matches(operation: &str, role: &str, kind: &SpanKind) -> bool {
         }
         "space_admission" => {
             (role == "joiner" && kind == &SpanKind::Client)
+                || (role == "local" && kind == &SpanKind::Internal)
                 || (role == "sponsor" && kind == &SpanKind::Internal)
         }
         "network_transport" => {
