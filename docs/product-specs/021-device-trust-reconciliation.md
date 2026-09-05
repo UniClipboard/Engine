@@ -206,7 +206,7 @@ DeviceTrustRelationship
 
 - `reachability`：`Online`、`Offline`、`Unknown`；
 - `membership`：`Active`、`Removed`、`Unknown`；
-- `group_relationship`：`Consistent`、`PendingLocalDecision`、`Diverged`、`Unverifiable`、`Unknown`；
+- `group_relationship`：`Consistent`、`ConfirmationPending`、`PendingLocalDecision`、`Diverged`、`Unverifiable`、`Unknown`；其中 `ConfirmationPending` 表示该设备尚未确认本机最新成员结果，不能显示为设备组正常，也不能冒充已经拿到双边证据的分叉；
 - `compatibility`：`Compatible`、`UpgradeRequired`、`Unknown`。
 
 `sync_relationship` 是负责人基于上述事实和内容门禁给出的直接产品结果，至少包含：
@@ -418,6 +418,7 @@ iOS、Android、HarmonyOS 同版本完整透传查询、决定和提醒。任一
 | DTR-10 | 提醒丢失 | 状态变化时停止消费事件，随后重新订阅。一次完整查询恢复全部事实，不需要本地决定队列或增量回放。 | 通过：提醒仅使完整结果失效，积压发出刷新要求；完整查询和三端透传测试覆盖恢复所需全部字段。 |
 | DTR-11 | 普通离线 | 一致设备短暂离线再上线。只改变在线事实，不出现决定、分歧、需升级或无法验证；上线后双向内容恢复。 | 通过：产品测试证明离线不改变一致、兼容和可用关系；既有真实离线恢复场景验证接收端内容到达。 |
 | DTR-12 | 恢复共同设备组 | 方案获批后执行预览、中断、重启和重新加入。设备处置与预览一致；新组实际互传；未加入设备无新内容；分歧内容未自动合并。 | 依赖产品决定，当前不可执行 |
+| DTR-13 | 重新加入后的交叉移除 | A、B、C 各自建组后依次合并；C 移除 A，B 与 A 接受；B 重新邀请 A；随后 C 移除 B，三秒后 A 移除 C。 | 通过：三台成员结果不一致时，至少一台返回 `ConfirmationPending` 或明确分叉；不能全部显示正常。 |
 
 # 10. Testing Strategy
 

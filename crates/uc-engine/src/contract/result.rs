@@ -591,6 +591,7 @@ pub struct MembershipDiagnosticsSummary {
     pub group_epoch: u64,
     pub effective_member_count: u32,
     pub pending_conflict_count: u32,
+    pub pending_confirmation_count: u32,
     pub pending_effect_count: u32,
     pub transition_phases: Vec<String>,
 }
@@ -605,6 +606,10 @@ impl fmt::Debug for MembershipDiagnosticsSummary {
             .field("group_epoch", &self.group_epoch)
             .field("effective_member_count", &self.effective_member_count)
             .field("pending_conflict_count", &self.pending_conflict_count)
+            .field(
+                "pending_confirmation_count",
+                &self.pending_confirmation_count,
+            )
             .field("pending_effect_count", &self.pending_effect_count)
             .field("transition_phases", &self.transition_phases)
             .finish()
@@ -997,6 +1002,7 @@ pub enum DeviceReachabilitySummary {
 #[serde(rename_all = "snake_case")]
 pub enum DeviceGroupRelationshipSummary {
     Consistent,
+    ConfirmationPending,
     PendingLocalDecision,
     Diverged,
     Unverifiable,
@@ -1334,5 +1340,18 @@ impl fmt::Debug for SearchStatusSummary {
                 &self.last_rebuild_completed_at_ms,
             )
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DeviceGroupRelationshipSummary;
+
+    #[test]
+    fn confirmation_pending_relationship_has_a_stable_wire_value() {
+        let encoded = serde_json::to_string(&DeviceGroupRelationshipSummary::ConfirmationPending)
+            .expect("serialize relationship");
+
+        assert_eq!(encoded, "\"confirmation_pending\"");
     }
 }

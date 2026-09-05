@@ -17,6 +17,7 @@ pub enum DeviceTrustMembership {
 pub enum DeviceTrustRelationship {
     Local,
     Consistent,
+    ConfirmationPending,
     PendingLocalDecision,
     Diverged,
     Invalid,

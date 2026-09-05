@@ -16,6 +16,7 @@ pub struct MembershipDiagnosticsView {
     pub group_epoch: u64,
     pub effective_member_count: usize,
     pub pending_conflict_count: usize,
+    pub pending_confirmation_count: usize,
     pub pending_effect_count: usize,
     pub transition_phases: Vec<MembershipBranchTransitionPhaseV1>,
 }
@@ -98,6 +99,16 @@ impl QueryMembershipDiagnosticsUseCase {
                 .membership_conflicts
                 .values()
                 .filter(|conflict| conflict.status != MembershipConflictStatus::Completed)
+                .count(),
+            pending_confirmation_count: record
+                .peer_reconciliation
+                .values()
+                .filter(|peer| {
+                    history
+                        .effective_member_for_device(&peer.peer_device_id)
+                        .is_some()
+                        && peer.awaits_confirmation(&position)
+                })
                 .count(),
             pending_effect_count: record.pending_effects.len(),
             transition_phases: record

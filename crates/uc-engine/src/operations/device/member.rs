@@ -294,6 +294,9 @@ pub(crate) fn device_trust_snapshot(snapshot: DeviceTrustStatus) -> DeviceTrustS
                     DeviceTrustRelationship::Local | DeviceTrustRelationship::Consistent => {
                         DeviceGroupRelationshipSummary::Consistent
                     }
+                    DeviceTrustRelationship::ConfirmationPending => {
+                        DeviceGroupRelationshipSummary::ConfirmationPending
+                    }
                     DeviceTrustRelationship::PendingLocalDecision => {
                         DeviceGroupRelationshipSummary::PendingLocalDecision
                     }

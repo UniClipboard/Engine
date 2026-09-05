@@ -62,6 +62,16 @@ pub struct PeerReconciliationRecord {
     pub updated_at_ms: i64,
 }
 
+impl PeerReconciliationRecord {
+    pub(crate) fn awaits_confirmation(
+        &self,
+        desired_position: &BaseMembershipHistoryPosition,
+    ) -> bool {
+        self.relationship == MembershipHistoryRelationship::Consistent
+            && self.confirmed_position.as_ref() != Some(desired_position)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PeerHistorySyncOutcome {
     #[default]

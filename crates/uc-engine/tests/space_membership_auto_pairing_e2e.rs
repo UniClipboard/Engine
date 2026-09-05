@@ -301,6 +301,103 @@ enum PendingChangeChoice {
     Keep,
 }
 
+// 三台设备依次加入、移除、重新加入后发生交叉移除时，至少一台设备必须报告设备组分歧。
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn cross_removals_after_rejoin_must_keep_divergence_visible() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let mut topology = MembershipTopology::new(rendezvous.uri());
+    topology
+        .run(&[
+            TopologyAction::Start { node: "A" },
+            TopologyAction::Start { node: "B" },
+            TopologyAction::Start { node: "C" },
+            TopologyAction::Create { node: "A" },
+            TopologyAction::Create { node: "B" },
+            TopologyAction::Create { node: "C" },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "B",
+            },
+            TopologyAction::Join {
+                sponsor: "B",
+                joiner: "C",
+            },
+        ])
+        .await;
+    topology
+        .wait_for_equivalent_branch_named(&["A", "B", "C"], 3, "initial A-B-C group")
+        .await;
+
+    topology
+        .run(&[TopologyAction::Remove {
+            sponsor: "C",
+            target: "A",
+        }])
+        .await;
+    topology.wait_for_pending_change(&["B"]).await;
+    topology
+        .run(&[TopologyAction::Decide {
+            node: "B",
+            choice: PendingChangeChoice::Apply,
+        }])
+        .await;
+    topology.wait_for_pending_change(&["A"]).await;
+    topology.apply_local_removal_with_confirmation("A").await;
+    topology
+        .wait_for_equivalent_branch_named(&["B", "C"], 2, "A removed from the first group")
+        .await;
+
+    topology
+        .run(&[TopologyAction::Join {
+            sponsor: "B",
+            joiner: "A",
+        }])
+        .await;
+    wait_for_active_member_count(topology.engine("A"), 3).await;
+
+    topology
+        .run(&[TopologyAction::Remove {
+            sponsor: "C",
+            target: "B",
+        }])
+        .await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    topology
+        .run(&[TopologyAction::Remove {
+            sponsor: "A",
+            target: "C",
+        }])
+        .await;
+    topology
+        .wait_for_stable_pending_effects(&["A", "B", "C"])
+        .await;
+
+    let final_diagnostics = [
+        topology.diagnostics("A").await,
+        topology.diagnostics("B").await,
+        topology.diagnostics("C").await,
+    ];
+    let effective_members = final_diagnostics
+        .each_ref()
+        .map(|diagnostics| diagnostics.effective_member_count);
+    let pending_conflicts = final_diagnostics
+        .each_ref()
+        .map(|diagnostics| diagnostics.pending_conflict_count);
+    let pending_confirmations = final_diagnostics
+        .each_ref()
+        .map(|diagnostics| diagnostics.pending_confirmation_count);
+    assert!(
+        pending_conflicts
+            .iter()
+            .chain(pending_confirmations.iter())
+            .any(|count| *count > 0),
+        "cross-removal split must remain visible instead of reporting every device group as healthy; effective members: {effective_members:?}; pending conflicts: {pending_conflicts:?}; pending confirmations: {pending_confirmations:?}"
+    );
+
+    topology.shutdown().await;
+}
+
 // F7：十节点不平衡树形成三个 sibling 后，冲突 peer 不得饿死合法 peer 的反熵。
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 async fn f7_three_sibling_branches_keep_fair_anti_entropy_for_legal_peers() {
@@ -1761,6 +1858,57 @@ impl MembershipTopology {
                     );
                 }
                 outcome => panic!("node {node} pending decision returned {outcome:?}"),
+            }
+        }
+    }
+
+    async fn apply_local_removal_with_confirmation(&self, node: &str) {
+        let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+        loop {
+            let choices = self.device_group_choices(node).await;
+            let issue = choices
+                .issues
+                .iter()
+                .find(|issue| issue.issue_id.starts_with("p:"))
+                .unwrap_or_else(|| panic!("node {node} has no pending local removal"));
+            let submit = |confirm_local_removal| {
+                self.engine(node)
+                    .execute(Operation::ChooseDeviceGroup(ChooseDeviceGroupInput {
+                        issue_id: issue.issue_id.clone(),
+                        choice_id: "apply".to_owned(),
+                        expected_revision: choices.revision,
+                        confirm_local_removal,
+                    }))
+            };
+
+            let first = submit(false)
+                .await
+                .unwrap_or_else(|error| panic!("node {node} local removal prompt failed: {error}"));
+            let OperationResult::DeviceGroupChosen(first) = first else {
+                panic!("node {node} returned an unexpected local removal prompt result");
+            };
+            if first.outcome == uc_engine::DeviceGroupChoiceOutcomeSummary::StateChanged
+                && tokio::time::Instant::now() < deadline
+            {
+                continue;
+            }
+            assert_eq!(
+                first.outcome,
+                uc_engine::DeviceGroupChoiceOutcomeSummary::LocalDeviceConfirmationRequired
+            );
+
+            let confirmed = submit(true).await.unwrap_or_else(|error| {
+                panic!("node {node} local removal confirmation failed: {error}")
+            });
+            let OperationResult::DeviceGroupChosen(confirmed) = confirmed else {
+                panic!("node {node} returned an unexpected local removal confirmation result");
+            };
+            match confirmed.outcome {
+                uc_engine::DeviceGroupChoiceOutcomeSummary::Completed
+                | uc_engine::DeviceGroupChoiceOutcomeSummary::AlreadyCompleted => return,
+                uc_engine::DeviceGroupChoiceOutcomeSummary::StateChanged
+                    if tokio::time::Instant::now() < deadline => {}
+                outcome => panic!("node {node} local removal confirmation returned {outcome:?}"),
             }
         }
     }

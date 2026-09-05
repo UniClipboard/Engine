@@ -346,9 +346,52 @@ async fn active_status_combines_verified_members_with_one_observation_read() {
     assert_eq!(status.devices[1].display_name, "Peer B");
     assert_eq!(
         status.devices[1].relationship,
-        DeviceTrustRelationship::Consistent
+        DeviceTrustRelationship::ConfirmationPending
     );
     assert_eq!(status.devices[1].sync_state, DeviceTrustSyncState::Usable);
+}
+
+#[tokio::test]
+async fn peer_that_confirmed_the_current_position_is_reported_consistent() {
+    let mut loaded = active_ledger();
+    let history = VersionedMembershipHistory::decode_persisted_v2(
+        loaded.membership_history.as_deref().unwrap(),
+        &AcceptingVerifier,
+    )
+    .unwrap();
+    let peer_device_id = DeviceId::new("device-b");
+    let peer = loaded
+        .peer_reconciliation
+        .get(&peer_device_id)
+        .cloned()
+        .unwrap();
+    loaded.peer_reconciliation.insert(
+        peer_device_id,
+        crate::space::membership::PeerReconciliationRecord {
+            confirmed_position: history.current_position().ok(),
+            ..peer
+        },
+    );
+    let repository = Arc::new(MemoryLedgerRepository { loaded });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let query = QueryDeviceTrustUseCase::new(
+        ledger,
+        Arc::new(StaticObservations {
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }),
+        Arc::new(StaticCurrentJoin(None)),
+    );
+
+    let status = query.execute().await.unwrap();
+
+    assert_eq!(
+        status.devices[1].relationship,
+        DeviceTrustRelationship::Consistent
+    );
 }
 
 #[tokio::test]

@@ -58,6 +58,9 @@ impl QueryDeviceTrustUseCase {
             .record()
             .local_member_instance
             .ok_or(QueryDeviceTrustError::RecoveryRequired)?;
+        let current_position = history
+            .current_position()
+            .map_err(|_| QueryDeviceTrustError::RecoveryRequired)?;
 
         let mut device_ids = history
             .active_members()
@@ -132,7 +135,15 @@ impl QueryDeviceTrustUseCase {
                     .record()
                     .peer_reconciliation
                     .get(device_id)
-                    .map(|record| map_relationship(record.relationship))
+                    .map(|record| {
+                        if membership == DeviceTrustMembership::Active
+                            && record.awaits_confirmation(&current_position)
+                        {
+                            DeviceTrustRelationship::ConfirmationPending
+                        } else {
+                            map_relationship(record.relationship)
+                        }
+                    })
                     .unwrap_or(DeviceTrustRelationship::Unknown)
             };
             let sync_state = if membership == DeviceTrustMembership::Removed {

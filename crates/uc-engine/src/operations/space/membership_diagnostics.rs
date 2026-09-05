@@ -18,6 +18,7 @@ pub async fn execute_query_membership_diagnostics(
             group_epoch: view.group_epoch,
             effective_member_count: count(view.effective_member_count),
             pending_conflict_count: count(view.pending_conflict_count),
+            pending_confirmation_count: count(view.pending_confirmation_count),
             pending_effect_count: count(view.pending_effect_count),
             transition_phases: view
                 .transition_phases
