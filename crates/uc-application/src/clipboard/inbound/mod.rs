@@ -8,7 +8,9 @@ use crate::clipboard::sync::apply_inbound::{
 };
 use crate::clipboard::write::ClipboardWriteIntent;
 
+mod delivery;
 mod runtime;
+pub use delivery::{ClipboardDelivery, ClipboardReceiverPort};
 
 pub use runtime::{
     ClipboardInboundEvent, ClipboardInboundEventAction, ClipboardInboundEventPort,

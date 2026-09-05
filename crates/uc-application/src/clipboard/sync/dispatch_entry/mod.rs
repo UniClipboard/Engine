@@ -513,7 +513,8 @@ impl DispatchClipboardEntryUseCase {
                 ciphertext: ciphertext.clone(),
             };
             let device_id = *device_id;
-            set.spawn(async move {
+            let observation = uc_observability_contract::diagnostics::ObservationContext::capture();
+            set.spawn(observation.scope(async move {
                 dispatcher
                     .dispatch_one(
                         device_id,
@@ -523,7 +524,7 @@ impl DispatchClipboardEntryUseCase {
                         payload_size_bucket,
                     )
                     .await
-            });
+            }));
         }
 
         // 5. Drain within the fan-out deadline; classify + fold each

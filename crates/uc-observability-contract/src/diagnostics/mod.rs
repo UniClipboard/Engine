@@ -9,8 +9,37 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use opentelemetry::trace::TraceContextExt;
 use sha2::{Digest, Sha256};
 use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+tokio::task_local! {
+    static CONTINUATION: opentelemetry::Context;
+}
+
+/// 只延续在线父关系，不持有原 span，不提供身份或字段读取接口。
+#[derive(Clone)]
+pub struct ObservationContext(opentelemetry::Context);
+
+impl ObservationContext {
+    pub fn capture() -> Self {
+        let current = tracing::Span::current().context();
+        if current.span().span_context().is_valid() {
+            // 只保留不可记录的父身份，避免延长原操作的生命周期。
+            Self(
+                opentelemetry::Context::new()
+                    .with_remote_span_context(current.span().span_context().clone()),
+            )
+        } else {
+            Self(CONTINUATION.try_with(Clone::clone).unwrap_or_default())
+        }
+    }
+
+    pub async fn scope<F: Future>(self, future: F) -> F::Output {
+        CONTINUATION.scope(self.0, future).await
+    }
+}
 
 pub const TELEMETRY_SCHEMA_VERSION: u16 = 1;
 pub const TELEMETRY_TARGET: &str = "uc.telemetry";
@@ -288,6 +317,9 @@ impl DiagnosticDomain {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticOperation {
+    ClipboardCopyAndSync,
+    ClipboardPersist,
+    ClipboardWriteSystem,
     ClipboardDispatch,
     ClipboardReceive,
     ClipboardAddressResolve,
@@ -303,6 +335,9 @@ pub enum DiagnosticOperation {
 impl DiagnosticOperation {
     fn as_str(self) -> &'static str {
         match self {
+            Self::ClipboardCopyAndSync => "clipboard.copy_and_sync",
+            Self::ClipboardPersist => "clipboard.persist",
+            Self::ClipboardWriteSystem => "clipboard.write_system",
             Self::ClipboardDispatch => "clipboard_dispatch",
             Self::ClipboardReceive => "clipboard_receive",
             Self::ClipboardAddressResolve => "clipboard_address_resolve",
@@ -491,7 +526,7 @@ pub fn operation_span(context: OperationContext) -> tracing::Span {
     )
     .then(|| SPACE_ADMISSION_FLOW.try_with(Clone::clone).ok())
     .flatten();
-    match flow.as_ref() {
+    let span = match flow.as_ref() {
         Some(flow) => tracing::span!(
             target: "uc.telemetry",
             tracing::Level::INFO,
@@ -517,7 +552,18 @@ pub fn operation_span(context: OperationContext) -> tracing::Span {
             otel.kind = context.kind.as_str(),
             otel.status_code = tracing::field::Empty,
         ),
+    };
+    if !tracing::Span::current()
+        .context()
+        .span()
+        .span_context()
+        .is_valid()
+    {
+        if let Ok(parent) = CONTINUATION.try_with(Clone::clone) {
+            let _ = span.set_parent(parent);
+        }
     }
+    span
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

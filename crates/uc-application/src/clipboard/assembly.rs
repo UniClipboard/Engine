@@ -4,6 +4,7 @@
 //! capture、history、restore、resource 与 live-index 入口。Engine 只选择
 //! 平台/存储 adapter，不再逐项拼装 Clipboard use case。
 
+use crate::clipboard::inbound::ClipboardReceiverPort;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -16,8 +17,8 @@ use uc_core::ports::hidden_path::MarkHiddenPort;
 use uc_core::ports::inbound_file_target::ReserveInboundFileTargetPort;
 use uc_core::ports::{
     ActiveClipboardDispatchPort, ActiveClipboardPullClientPort, ActiveClipboardPullServePort,
-    ActiveClipboardReceiverPort, ClipboardReceiverPort, EntryDeliveryRepositoryPort,
-    PeerAddressRepositoryPort, PeerReachabilityPort,
+    ActiveClipboardReceiverPort, EntryDeliveryRepositoryPort, PeerAddressRepositoryPort,
+    PeerReachabilityPort,
 };
 use uc_core::TaskRegistry;
 use uc_core::TrustedPeerRepositoryPort;

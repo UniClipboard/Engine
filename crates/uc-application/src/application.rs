@@ -3,6 +3,7 @@
 //! Engine 只选择具体 adapter；本模块统一构造稳定 facade，并持有 Search、
 //! Clipboard 与历史维护的启动、关闭顺序。
 
+use crate::clipboard::inbound::ClipboardReceiverPort;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,9 +13,9 @@ use uc_core::ports::blob::{BlobReferenceRepositoryPort, BlobTransferPort};
 use uc_core::ports::{
     ActiveClipboardDispatchPort, ActiveClipboardPullClientPort, ActiveClipboardPullServePort,
     ActiveClipboardReceiverPort, CleanupDirectoryStagingPort, ClipboardDispatchPort,
-    ClipboardReceiverPort, ConnectionChannelPort, LocalIdentityPort,
-    PairingInvitationAddressQueryPort, PairingInvitationByAddressPort, PairingInvitationPort,
-    PeerAddressRepositoryPort, PeerReachabilityPort,
+    ConnectionChannelPort, LocalIdentityPort, PairingInvitationAddressQueryPort,
+    PairingInvitationByAddressPort, PairingInvitationPort, PeerAddressRepositoryPort,
+    PeerReachabilityPort,
 };
 
 use crate::clipboard::active::ActiveClipboardLifecycleError;

@@ -35,6 +35,7 @@
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use uc_application::deps::{ClipboardDelivery, ClipboardReceiverPort};
 
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
@@ -46,9 +47,7 @@ use tracing::{debug, instrument, warn, Instrument};
 use uc_core::ids::DeviceId;
 use uc_core::membership::{MemberRepositoryPort, PeerAdmissionPort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
-use uc_core::ports::{
-    ClipboardReceiverPort, InboundClipboard, InboundClipboardDisposition, InboundClipboardReceipt,
-};
+use uc_core::ports::{InboundClipboard, InboundClipboardDisposition, InboundClipboardReceipt};
 use uc_core::security::IdentityFingerprint;
 use uc_observability_contract::diagnostics::{
     complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
@@ -71,7 +70,7 @@ const APPLICATION_SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(60);
 /// [`IrohClipboardReceiverAdapter::handler`] for the paired
 /// `ProtocolHandler`.
 pub struct IrohClipboardReceiverAdapter {
-    event_tx: broadcast::Sender<InboundClipboard>,
+    event_tx: broadcast::Sender<ClipboardDelivery>,
     handler_state: Arc<HandlerState>,
 }
 
@@ -80,7 +79,7 @@ struct HandlerState {
     member_repo: Arc<dyn MemberRepositoryPort>,
     peer_admission: Arc<dyn PeerAdmissionPort>,
     fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
-    event_tx: broadcast::Sender<InboundClipboard>,
+    event_tx: broadcast::Sender<ClipboardDelivery>,
 }
 
 impl IrohClipboardReceiverAdapter {
@@ -116,7 +115,7 @@ impl IrohClipboardReceiverAdapter {
 
 #[async_trait]
 impl ClipboardReceiverPort for IrohClipboardReceiverAdapter {
-    fn subscribe(&self) -> broadcast::Receiver<InboundClipboard> {
+    fn subscribe(&self) -> broadcast::Receiver<ClipboardDelivery> {
         self.event_tx.subscribe()
     }
 }
@@ -210,7 +209,8 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
             kind: DiagnosticSpanKind::Server,
         });
         let _ = set_remote_parent(&span, decoded.trace_context.as_ref());
-        async move {
+        let closed = connection.clone();
+        let result = async move {
             let started = Instant::now();
             let ciphertext = match clipboard_wire::read_frame_payload(&mut recv, decoded.payload_len()).await {
                 Ok(ciphertext) => ciphertext,
@@ -224,16 +224,11 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
                     ));
                     warn!(error = %error, "clipboard receiver: payload read failed; sending Rejected ack");
                     emit_ack(&mut send, AckCode::Rejected).await;
-                    let _ = connection.closed().await;
                     return Ok(());
                 }
             };
 
-        // 4. Broadcast to subscribers. A `SendError` here means no
-        //    subscriber is attached; dropping the frame is acceptable per
-        //    the port contract (section header above). We still send
-        //    `Accepted` because the sender side did its job; application
-        //    consumer responsibility is to subscribe before F1 completes.
+        // 认证后的任务通过原有广播交接；没有消费者时拒绝，绝不伪报保存成功。
         let (receipt, result) = InboundClipboardReceipt::pending();
         let transport = path_for(&self.state.endpoint, remote, OnMissing::Unknown)
             .await
@@ -245,7 +240,7 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
             transport,
             receipt,
         };
-        if self.state.event_tx.send(inbound).is_err() {
+        if self.state.event_tx.send(ClipboardDelivery::new(inbound)).is_err() {
             debug!(
                 peer = %peer_device_id.as_str(),
                 "clipboard receiver: no subscribers attached; inbound frame dropped"
@@ -258,7 +253,6 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
                 DiagnosticErrorType::Unavailable,
                 started.elapsed(),
             ));
-            let _ = connection.closed().await;
             return Ok(());
         }
 
@@ -294,11 +288,13 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
         //    the connection after reading the ack, which resolves
         //    `Connection::closed()` here and lets the handler return.
         emit_ack(&mut send, ack).await;
-        let _ = connection.closed().await;
         Ok(())
         }
         .instrument(span)
-        .await
+        .await;
+        // 回复后的连接清理不计入业务接收耗时。
+        let _ = closed.closed().await;
+        result
     }
 }
 
@@ -602,7 +598,7 @@ mod tests {
     struct ReceiverHarness {
         receiver_endpoint: Arc<Endpoint>,
         receiver_router: Router,
-        inbound_rx: broadcast::Receiver<InboundClipboard>,
+        inbound_rx: broadcast::Receiver<ClipboardDelivery>,
     }
 
     async fn spawn_receiver(
@@ -703,9 +699,9 @@ mod tests {
             .expect("broadcast arrives within timeout")
             .expect("subscriber sees the frame");
 
-        assert_eq!(inbound.peer_device_id.as_str(), "sender-a");
-        assert_eq!(inbound.header, sample_header());
-        assert_eq!(inbound.ciphertext, payload);
+        assert_eq!(inbound.message.peer_device_id.as_str(), "sender-a");
+        assert_eq!(inbound.message.header, sample_header());
+        assert_eq!(inbound.message.ciphertext, payload);
 
         assert!(
             tokio::time::timeout(Duration::from_millis(100), &mut dispatch_task)
@@ -713,7 +709,10 @@ mod tests {
                 .is_err(),
             "sender must wait for application settlement"
         );
-        assert!(inbound.receipt.finish(InboundClipboardDisposition::Applied));
+        assert!(inbound
+            .message
+            .receipt
+            .finish(InboundClipboardDisposition::Applied));
         let ack = dispatch_task.await.expect("dispatch task joins");
         assert_eq!(ack, uc_core::ports::DispatchAck::Accepted);
 
@@ -1046,8 +1045,11 @@ mod tests {
                 .await
                 .expect("broadcast arrives in time")
                 .expect("subscriber sees frame");
-            seen.push(inbound.peer_device_id.as_str().to_string());
-            assert!(inbound.receipt.finish(InboundClipboardDisposition::Applied));
+            seen.push(inbound.message.peer_device_id.as_str().to_string());
+            assert!(inbound
+                .message
+                .receipt
+                .finish(InboundClipboardDisposition::Applied));
         }
         for task in tasks {
             task.await.expect("sender task");

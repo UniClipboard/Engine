@@ -124,16 +124,17 @@ impl HostClipboardChangeRuntime {
             return Ok(None);
         }
 
-        let outcome = application
-            .process_local_clipboard(LocalClipboardRequest {
+        let outcome = crate::assembly::observability::observe_local_copy(
+            application.process_local_clipboard(LocalClipboardRequest {
                 snapshot,
                 origin,
                 intent: LocalClipboardIntent::ObservedHostChange {
                     dispatch: dispatch_mode,
                 },
-            })
-            .await
-            .map_err(|error| observe_error("local clipboard", error))?;
+            }),
+        )
+        .await
+        .map_err(|error| observe_error("local clipboard", error))?;
         let LocalClipboardOutcome::Completed(completion) = outcome else {
             return Ok(None);
         };

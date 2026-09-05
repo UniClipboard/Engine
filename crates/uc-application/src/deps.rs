@@ -35,6 +35,7 @@ pub use crate::application::{
 pub use crate::clipboard::assembly::{
     ClipboardBackgroundError, ClipboardBackgroundPort, ClipboardBackgroundStartError,
 };
+pub use crate::clipboard::inbound::{ClipboardDelivery, ClipboardReceiverPort};
 use crate::clipboard::write::{MobileConsumabilityProbe, MobileConsumableBackfill};
 pub use crate::facade::config_migration::ConfigMigrationDeps;
 pub use crate::profile::factory_reset::{

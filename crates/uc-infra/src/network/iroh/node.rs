@@ -22,6 +22,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 #[cfg(not(any(test, feature = "test-util")))]
 use std::sync::Mutex;
 use std::{path::PathBuf, sync::Arc, time::Duration};
+use uc_application::deps::ClipboardReceiverPort;
 
 use iroh::address_lookup::AddrFilter;
 use iroh::endpoint::{presets, QuicTransportConfig, VarInt};
@@ -52,9 +53,9 @@ use uc_core::ports::pairing_invitation::{
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{
     ActiveClipboardDispatchPort, ActiveClipboardPullClientPort, ActiveClipboardPullServePort,
-    ActiveClipboardReceiverPort, ClipboardDispatchPort, ClipboardReceiverPort, ClockPort,
-    ConnectionChannelPort, DeviceIdentityPort, LocalIdentityError, PeerAddressRepositoryPort,
-    PeerReachabilityPort, SettingsPort,
+    ActiveClipboardReceiverPort, ClipboardDispatchPort, ClockPort, ConnectionChannelPort,
+    DeviceIdentityPort, LocalIdentityError, PeerAddressRepositoryPort, PeerReachabilityPort,
+    SettingsPort,
 };
 
 use crate::pairing::PairingInvitationResolverAdapter;

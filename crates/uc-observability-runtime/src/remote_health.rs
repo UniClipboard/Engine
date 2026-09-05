@@ -762,7 +762,10 @@ fn valid_domain(value: &str) -> bool {
 fn valid_operation(value: &str) -> bool {
     matches!(
         value,
-        "clipboard_dispatch"
+        "clipboard.copy_and_sync"
+            | "clipboard.persist"
+            | "clipboard.write_system"
+            | "clipboard_dispatch"
             | "clipboard_receive"
             | "clipboard_address_resolve"
             | "clipboard_connect"
@@ -819,7 +822,10 @@ fn operation_matches_domain(domain: &str, operation: &str) -> bool {
         (domain, operation),
         (
             "clipboard",
-            "clipboard_dispatch"
+            "clipboard.copy_and_sync"
+                | "clipboard.persist"
+                | "clipboard.write_system"
+                | "clipboard_dispatch"
                 | "clipboard_receive"
                 | "clipboard_address_resolve"
                 | "clipboard_connect"
@@ -835,6 +841,9 @@ fn operation_matches_domain(domain: &str, operation: &str) -> bool {
 
 fn span_role_matches(operation: &str, role: &str, kind: &SpanKind) -> bool {
     match operation {
+        "clipboard.copy_and_sync" | "clipboard.persist" | "clipboard.write_system" => {
+            role == "local" && kind == &SpanKind::Internal
+        }
         "clipboard_dispatch" => role == "client" && kind == &SpanKind::Client,
         "clipboard_receive" => role == "server" && kind == &SpanKind::Server,
         "clipboard_address_resolve" | "clipboard_connect" => {
@@ -861,6 +870,9 @@ fn span_role_matches(operation: &str, role: &str, kind: &SpanKind) -> bool {
 
 fn log_role_matches(operation: &str, role: &str) -> bool {
     match operation {
+        "clipboard.copy_and_sync" | "clipboard.persist" | "clipboard.write_system" => {
+            role == "local"
+        }
         "clipboard_dispatch" | "clipboard_address_resolve" | "clipboard_connect" => {
             role == "client"
         }

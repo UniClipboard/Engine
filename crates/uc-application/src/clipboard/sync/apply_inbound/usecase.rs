@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use moka::sync::Cache;
-use tracing::{debug, error, info, instrument, warn, Instrument};
+use tracing::{debug, error, info, instrument, warn};
 
 use uc_core::clipboard::ActiveClipboardState;
 use uc_core::file_transfer::{OutboundProgressReporterPort, OutboundProgressStatus};
@@ -1527,11 +1527,12 @@ impl ApplyInboundClipboardUseCase {
                 let entry_id_for_write = entry_id.clone();
                 let snapshot_hash_for_write = input.snapshot_hash.clone();
                 let origin_guard_key_for_write = snapshot_for_write.origin_guard_key();
-                // `.in_current_span()` keeps the spawned task under `apply_inbound.execute`
-                // so trace_id / from_device / snapshot_hash propagate into the failure event.
+                // 只延续在线关联，后台写入不延长原接收 span。
+                let observation =
+                    uc_observability_contract::diagnostics::ObservationContext::capture();
                 crate::support::task_supervision::spawn_supervised(
                     uc_observability_contract::diagnostics::DiagnosticTaskKind::ClipboardInboundOsWrite,
-                    async move {
+                    observation.scope(async move {
                         let snapshot_for_write = Arc::try_unwrap(snapshot_for_write)
                             .unwrap_or_else(|shared| (*shared).clone());
                         if let Err(e) = write_port
@@ -1548,8 +1549,7 @@ impl ApplyInboundClipboardUseCase {
                                 "inbound: OS clipboard background write failed after capture"
                             );
                         }
-                    }
-                    .in_current_span(),
+                    }),
                 );
             } else {
                 debug!(entry_id = %entry_id, "inbound: store-only mode persisted entry without writing the system clipboard");

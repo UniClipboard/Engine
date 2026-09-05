@@ -75,6 +75,16 @@ TraceId 伪造。产品 analytics 不携带两者。
 
 ## 跨设备传播
 
+Clipboard 的宿主复制在既有完整调用处创建 `clipboard.copy_and_sync`；Engine 在既有保存与系统剪贴板能力上记录
+`clipboard.persist`、`clipboard.write_system`，不读取业务标识或编排内部步骤。发送端每个目标任务、接收广播交接和后台系统写入
+都由 Application 延续不可读取的 `ObservationContext`。它只保存不可记录的在线父身份，不持有原 span，不持久化，不参与业务判断。
+Application 专用的 `ClipboardReceiverPort` 从 Core 移回接收模块，仍只有原订阅方法；广播容量、串行消费、回执、超时和关闭语义不变。
+`ClipboardDelivery` 是队列任务信封，Core `InboundClipboard` 原样放在其中，Core 仍无观测字段或依赖。
+
+接收回执只表示保存结果，系统剪贴板写入仍是异步尾部；失败独立记录，不能反写已完成的保存结果。后台写入沿原接收父关系建子节点，
+但不反复进入或延长已结束的网络 span。Infra 接收回复后的连接清理也不计入业务接收耗时。地址解析与建链各自有一条固定分类完成日志。
+自动恢复重发不持久化旧上下文；它开始新的在线执行，不凭业务摘要重新拼接旧 trace。
+
 Application assembly 为每个 Engine 实例创建一个中性 Space admission registry，并在 Space Session 重建时复用。完整准入 owner 用既有
 32-byte attempt 材料创建或进入不可读取的生命周期 root，不增加 facade、port、result 或 Core 字段；registry 不跨 Engine 实例重启。
 Infra 当前只传播 W3C `traceparent`，不传播 `tracestate` 或 baggage。发送时从当前 client span 注入；接收时先完成既有业务身份和

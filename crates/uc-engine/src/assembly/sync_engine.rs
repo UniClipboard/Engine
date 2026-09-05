@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use uc_application::deps::ClipboardReceiverPort;
 
 use tracing::{info, instrument};
 
@@ -43,7 +44,7 @@ use uc_core::file_transfer::{
 use uc_core::membership::ContentExchangeGatePort;
 use uc_core::ports::{
     ActiveClipboardDispatchPort, ActiveClipboardReceiverPort, ClipboardDispatchPort,
-    ClipboardReceiverPort, ConnectionChannelPort, LocalIdentityPort, PeerReachabilityPort,
+    ConnectionChannelPort, LocalIdentityPort, PeerReachabilityPort,
 };
 use uc_infra::network::iroh::transfer_progress_adapter::InboundProgressEvent;
 use uc_infra::network::iroh::{

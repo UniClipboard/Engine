@@ -29,11 +29,13 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr};
 use tokio::sync::{broadcast, Mutex};
+use tracing::instrument::WithSubscriber;
 use tracing::{debug, instrument, warn, Instrument};
 
 use uc_core::ids::DeviceId;
@@ -42,8 +44,8 @@ use uc_core::ports::{
     DispatchReport, PeerAddressRepositoryPort, PeerReachabilityPort, SyncPayload,
 };
 use uc_observability_contract::diagnostics::{
-    operation_span, DiagnosticDomain, DiagnosticOperation, DiagnosticRole, DiagnosticSpanKind,
-    OperationContext,
+    complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
+    DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
 };
 
 use super::clipboard_wire::{self, AckCode, WireEncodeError};
@@ -146,6 +148,10 @@ impl IrohClipboardDispatchAdapter {
                     CLIPBOARD_ALPN,
                     "clipboard",
                 )
+                // 底层连接驱动不持有短期建链 span；外层仍记录真实结果和耗时。
+                .with_subscriber(tracing::Dispatch::new(
+                    tracing::subscriber::NoSubscriber::default(),
+                ))
                 .await;
 
                 // First-hand dial verdict — fold mark_offline into the
@@ -271,10 +277,18 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
 
         // 2. Resolve address; missing / bad record = offline. No dial, so
         //    no path established → transport Unknown.
-        let addr = self
-            .resolve_addr(target)
-            .instrument(network_span(DiagnosticOperation::ClipboardAddressResolve))
-            .await;
+        let started = Instant::now();
+        let span = network_span(DiagnosticOperation::ClipboardAddressResolve);
+        let addr = self.resolve_addr(target).instrument(span.clone()).await;
+        span.in_scope(|| {
+            network_completion(
+                DiagnosticOperation::ClipboardAddressResolve,
+                DiagnosticErrorType::AddressUnavailable,
+                started,
+                addr.is_some(),
+            )
+        });
+        drop(span);
         let addr = match addr {
             Some(a) => a,
             None => {
@@ -295,10 +309,21 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
         //    already fed the verdict to PresencePort so this branch only
         //    has to surface the public error. No path established →
         //    transport Unknown.
+        let started = Instant::now();
+        let span = network_span(DiagnosticOperation::ClipboardConnect);
         let connection = self
             .dial_single_flight(target, addr)
-            .instrument(network_span(DiagnosticOperation::ClipboardConnect))
+            .instrument(span.clone())
             .await;
+        span.in_scope(|| {
+            network_completion(
+                DiagnosticOperation::ClipboardConnect,
+                DiagnosticErrorType::ConnectFailed,
+                started,
+                connection.is_ok(),
+            )
+        });
+        drop(span);
         let connection = match connection {
             Ok(connection) => connection,
             Err(err) => {
@@ -342,6 +367,30 @@ fn network_span(operation: DiagnosticOperation) -> tracing::Span {
         role: DiagnosticRole::Client,
         kind: DiagnosticSpanKind::Internal,
     })
+}
+
+fn network_completion(
+    operation: DiagnosticOperation,
+    error: DiagnosticErrorType,
+    started: Instant,
+    succeeded: bool,
+) {
+    complete_operation(if succeeded {
+        OperationCompletion::succeeded(
+            DiagnosticDomain::Clipboard,
+            operation,
+            DiagnosticRole::Client,
+            started.elapsed(),
+        )
+    } else {
+        OperationCompletion::failed(
+            DiagnosticDomain::Clipboard,
+            operation,
+            DiagnosticRole::Client,
+            error,
+            started.elapsed(),
+        )
+    });
 }
 
 /// Map wire-encoding failures into the public error type without leaking

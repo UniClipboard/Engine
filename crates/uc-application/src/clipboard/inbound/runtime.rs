@@ -1,3 +1,4 @@
+use crate::clipboard::inbound::ClipboardReceiverPort;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -11,8 +12,7 @@ use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::DeviceId;
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::{
-    ClipboardReceiverPort, ClockPort, InboundClipboard, InboundClipboardDisposition,
-    InboundClipboardReceipt, SettingsPort,
+    ClockPort, InboundClipboard, InboundClipboardDisposition, InboundClipboardReceipt, SettingsPort,
 };
 use uc_core::MemberRepositoryPort;
 
@@ -108,7 +108,7 @@ impl ClipboardInboundRuntime {
                     biased;
                     _ = task_cancel.cancelled() => return,
                     inbound = receiver.recv() => match inbound {
-                        Ok(inbound) => processor.handle_one(inbound).await,
+                        Ok(inbound) => inbound.observation.scope(processor.handle_one(inbound.message)).await,
                         Err(broadcast::error::RecvError::Lagged(missed)) => {
                             warn!(missed, "clipboard inbound receiver lagged; dropped frames");
                         }
@@ -323,6 +323,7 @@ fn summarize_plaintext(
 
 #[cfg(test)]
 mod tests {
+    use super::super::ClipboardDelivery;
     use std::collections::VecDeque;
     use std::io::{self, Write};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -337,7 +338,7 @@ mod tests {
     use uc_core::ids::{DeviceId, FormatId, RepresentationId};
     use uc_core::ports::security::{TransferCipherError, TransferCipherPort};
     use uc_core::ports::{
-        ClipboardHeader, ClipboardReceiverPort, ClockPort, ConnectionChannel, InboundClipboard,
+        ClipboardHeader, ClockPort, ConnectionChannel, InboundClipboard,
         InboundClipboardDisposition, InboundClipboardReceipt, InboundClipboardResult, SettingsPort,
     };
     use uc_core::security::IdentityFingerprint;
@@ -357,7 +358,7 @@ mod tests {
     };
 
     struct FakeReceiver {
-        tx: broadcast::Sender<InboundClipboard>,
+        tx: broadcast::Sender<ClipboardDelivery>,
     }
 
     struct FixedSettings {
@@ -384,13 +385,15 @@ mod tests {
         }
 
         fn publish(&self, inbound: InboundClipboard) {
-            self.tx.send(inbound).expect("runtime subscribed");
+            self.tx
+                .send(ClipboardDelivery::new(inbound))
+                .expect("runtime subscribed");
         }
     }
 
     #[async_trait]
     impl ClipboardReceiverPort for FakeReceiver {
-        fn subscribe(&self) -> broadcast::Receiver<InboundClipboard> {
+        fn subscribe(&self) -> broadcast::Receiver<ClipboardDelivery> {
             self.tx.subscribe()
         }
     }

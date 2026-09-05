@@ -1,18 +1,8 @@
-//! Clipboard receiver port (Slice 2 Phase 2).
-//!
-//! Complement to [`ClipboardDispatchPort`](super::sync_dispatch) — exposes
-//! inbound payloads from peers on the clipboard ALPN as a broadcast event
-//! stream. The application inbound runtime subscribes once and owns
-//! decryption, policy checks, persistence, receipts, and shutdown.
-//!
-//! `peer_device_id` is resolved by the adapter from the iroh connection's
-//! remote endpoint id; unresolvable peers are rejected at the ALPN boundary
-//! before reaching this stream.
+//! 入站剪贴板负载与一次性结算回执，不携带观测信息。
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use std::sync::{Arc, Mutex};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::oneshot;
 
 use super::sync_dispatch::ClipboardHeader;
 use crate::ids::DeviceId;
@@ -87,17 +77,6 @@ pub struct InboundClipboard {
     /// Connection path observed when the receiver accepted this delivery.
     pub transport: ConnectionChannel,
     pub receipt: InboundClipboardReceipt,
-}
-
-/// Multi-consumer subscription to the inbound clipboard event stream.
-///
-/// Lagging receivers drop messages per `broadcast` contract. That is
-/// acceptable: the next content-hash comparison in the ingest use case
-/// will still surface missed entries the next time the peer dispatches
-/// them.
-#[async_trait]
-pub trait ClipboardReceiverPort: Send + Sync {
-    fn subscribe(&self) -> broadcast::Receiver<InboundClipboard>;
 }
 
 #[cfg(test)]

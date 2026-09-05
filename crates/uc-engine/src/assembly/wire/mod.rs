@@ -878,7 +878,7 @@ pub async fn wire_dependencies_from_inputs(
         Arc::clone(&infra.thumbnail_generator),
     ));
 
-    let deps = ApplicationDeps {
+    let mut deps = ApplicationDeps {
         paths: paths.clone(),
         relay_diagnostic: build_relay_diagnostic(),
         host_event_bus: Arc::clone(&host_event_bus),
@@ -954,6 +954,7 @@ pub async fn wire_dependencies_from_inputs(
         analytics: analytics_sink,
     };
 
+    crate::assembly::observability::observe_clipboard_dependencies(&mut deps);
     let sync_device_identity = Arc::clone(&deps.device.device_identity);
     let sync_settings = Arc::clone(&deps.settings);
     let sync_member_repo = Arc::clone(&deps.device.member_repo);
