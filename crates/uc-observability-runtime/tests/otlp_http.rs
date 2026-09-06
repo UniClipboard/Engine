@@ -100,6 +100,14 @@ async fn real_otlp_http_carries_correlated_trace_and_log_with_one_resource() {
             DiagnosticRole::Local,
             Duration::from_millis(9),
         ));
+        uc_observability_contract::diagnostics::complete_unassociated_operation(
+            OperationCompletion::succeeded(
+                DiagnosticDomain::Runtime,
+                DiagnosticOperation::TaskShutdown,
+                DiagnosticRole::Local,
+                Duration::ZERO,
+            ),
+        );
         tracing::event!(
             target: "uc.telemetry",
             tracing::Level::INFO,
@@ -119,6 +127,26 @@ async fn real_otlp_http_carries_correlated_trace_and_log_with_one_resource() {
         );
     }
     drop(span);
+    let forged_business = tracing::span!(target: "uc.telemetry", tracing::Level::INFO,
+        "uc.operation", otel.name = "runtime.shutdown_tasks", otel.kind = "internal",
+        uc.domain = "runtime", uc.operation = "runtime.shutdown_tasks", uc.role = "local",
+        uc.outcome = "error", error.type = "shutdown_timeout", uc.record.kind = "business");
+    drop(forged_business);
+    // 新准入字段仍拒绝自由文本、缺失分类及互相矛盾的结果。
+    for (outcome, error) in [
+        ("PRIVATE_SPAN_RESULT", "decode_failed"),
+        ("error", "PRIVATE_SPAN_ERROR"),
+        ("ok", "decode_failed"),
+    ] {
+        let invalid = operation_span(OperationContext {
+            domain: DiagnosticDomain::Storage,
+            operation: DiagnosticOperation::ProfileStorageUpgrade,
+            role: DiagnosticRole::Local,
+            kind: DiagnosticSpanKind::Internal,
+        });
+        invalid.record("uc.outcome", outcome);
+        invalid.record("error.type", error);
+    }
     let private_value_span = tracing::span!(
         target: "uc.telemetry",
         tracing::Level::INFO,
@@ -261,13 +289,39 @@ async fn real_otlp_http_carries_correlated_trace_and_log_with_one_resource() {
         .flat_map(|scope| &scope.log_records)
         .collect::<Vec<_>>();
     assert_eq!(spans.len(), 1);
-    assert_eq!(records.len(), 1);
+    assert_eq!(records.len(), 2);
+    let unassociated = records.iter().find(|record| record.attributes.iter().any(|field| field.key == "uc.operation" && matches!(field.value.as_ref().and_then(|value| value.value.as_ref()), Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(value)) if value == "runtime.shutdown_tasks"))).expect("unassociated log");
+    assert!(
+        unassociated.trace_id.is_empty() && unassociated.span_id.is_empty(),
+        "unassociated logs must not borrow the active outer operation"
+    );
     assert_eq!(spans[0].name, "profile_storage_upgrade");
+    assert!(
+        spans[0]
+            .attributes
+            .iter()
+            .any(|field| field.key == "uc.record.kind"),
+        "business and runtime records must be independently searchable"
+    );
+    assert!(
+        spans[0]
+            .attributes
+            .iter()
+            .any(|field| field.key == "uc.outcome"),
+        "trace page must show the operation result without a separate log backend"
+    );
     assert!(spans[0].events.is_empty());
     assert_eq!(spans[0].status.as_ref().map(|status| status.code), Some(1));
     assert_eq!(
         attribute_keys(&spans[0].attributes),
-        ["target", "uc.domain", "uc.operation", "uc.role",]
+        [
+            "target",
+            "uc.domain",
+            "uc.operation",
+            "uc.outcome",
+            "uc.record.kind",
+            "uc.role",
+        ]
     );
     assert_eq!(
         attribute_keys(&records[0].attributes),

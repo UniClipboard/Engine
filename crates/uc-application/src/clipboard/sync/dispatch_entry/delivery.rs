@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use tokio::task::{JoinError, JoinSet};
-use tracing::{debug, info, warn, Instrument};
+use tracing::{debug, info, warn};
 
 use uc_core::clipboard::{DeliveryFailureReason, EntryDeliveryRecord, EntryDeliveryStatus};
 use uc_core::ids::EntryId;
@@ -221,9 +221,10 @@ pub(crate) fn spawn_deferred_drain(
     snapshot_hash: String,
 ) {
     let deferred_count = set.len();
+    let observation = uc_observability_contract::diagnostics::ObservationContext::capture();
     crate::support::task_supervision::spawn_supervised(
         uc_observability_contract::diagnostics::DiagnosticTaskKind::ClipboardDeferredDrain,
-        async move {
+        observation.scope(async move {
             let mut accepted = 0usize;
             let mut duplicate = 0usize;
             let mut offline = 0usize;
@@ -249,14 +250,87 @@ pub(crate) fn spawn_deferred_drain(
                 errored,
                 "dispatch: deferred fan-out completed"
             );
-        }
-        .in_current_span(),
+        }),
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn deferred_delivery_does_not_keep_the_returned_operation_open() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tracing_subscriber::{layer::SubscriberExt, registry::LookupSpan, Layer};
+        struct Closed(Arc<AtomicBool>);
+        impl<S: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Closed {
+            fn on_close(
+                &self,
+                id: tracing::Id,
+                context: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if context
+                    .span(&id)
+                    .is_some_and(|span| span.name() == "foreground")
+                {
+                    self.0.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+        struct Repo(Arc<tokio::sync::Notify>);
+        #[async_trait::async_trait]
+        impl EntryDeliveryRepositoryPort for Repo {
+            async fn record_attempt(
+                &self,
+                _: &EntryDeliveryRecord,
+            ) -> Result<(), uc_core::clipboard::EntryDeliveryError> {
+                self.0.notify_one();
+                Ok(())
+            }
+            async fn list_by_entry(
+                &self,
+                _: &EntryId,
+            ) -> Result<Vec<EntryDeliveryRecord>, uc_core::clipboard::EntryDeliveryError>
+            {
+                Ok(vec![])
+            }
+        }
+        let closed = Arc::new(AtomicBool::new(false));
+        let _subscriber = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(Closed(closed.clone())),
+        );
+        let settled = Arc::new(tokio::sync::Notify::new());
+        let recorder = Arc::new(DeliveryRecorder::new(
+            Arc::new(Repo(settled.clone())),
+            Arc::new(crate::facade::HostEventBus::new()),
+        ));
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async move {
+            let _ = wait.await;
+            (dev("peer"), Ok(DispatchAck::Accepted))
+        });
+        let root = tracing::info_span!("foreground");
+        root.in_scope(|| {
+            spawn_deferred_drain(
+                tasks,
+                Some(eid()),
+                Arc::new(super::super::test_support::FixedClock(0)),
+                recorder,
+                "test".into(),
+            )
+        });
+        drop(root);
+        let closed_before_settlement = closed.load(Ordering::SeqCst);
+        release.send(()).expect("release delivery");
+        tokio::time::timeout(std::time::Duration::from_secs(1), settled.notified())
+            .await
+            .expect("delivery is still recorded");
+        assert!(
+            closed_before_settlement,
+            "background settlement must not extend the returned operation"
+        );
+    }
     use uc_core::ids::DeviceId;
 
     fn dev(id: &str) -> DeviceId {

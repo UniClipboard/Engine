@@ -113,24 +113,27 @@ impl MembershipHistoryExchangePort for ObservedMembershipHistoryExchange {
         recipient: &DeviceId,
         message: MembershipHistoryMessage,
     ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
-        let started = Instant::now();
-        let span = membership_span(MembershipOperation::HistoryExchange);
-        let result = self
-            .inner
-            .exchange_membership_history(recipient, message)
-            .instrument(span.clone())
-            .await;
-        span.in_scope(|| {
-            record_membership_completion(
-                MembershipOperation::HistoryExchange,
-                started.elapsed(),
-                result
-                    .as_ref()
-                    .map(|_| ())
-                    .map_err(history_exchange_completion),
-            )
-        });
-        result
+        uc_observability_contract::diagnostics::scope_operation_diagnostics(async {
+            let started = Instant::now();
+            let span = membership_span(MembershipOperation::HistoryExchange);
+            let result = self
+                .inner
+                .exchange_membership_history(recipient, message)
+                .instrument(span.clone())
+                .await;
+            span.in_scope(|| {
+                record_membership_completion(
+                    MembershipOperation::HistoryExchange,
+                    started.elapsed(),
+                    result
+                        .as_ref()
+                        .map(|_| ())
+                        .map_err(history_exchange_completion),
+                )
+            });
+            result
+        })
+        .await
     }
 }
 
@@ -157,28 +160,31 @@ impl RestrictedMembershipDeliveryPort for ObservedRestrictedMembershipDelivery {
         peer: &DeviceId,
         delivery: &RestrictedMembershipDelivery,
     ) -> Result<(), RestrictedMembershipDeliveryError> {
-        let started = Instant::now();
-        let span = membership_span(MembershipOperation::RestrictedDelivery);
-        let result = self
-            .inner
-            .deliver_restricted_membership(peer, delivery)
-            .instrument(span.clone())
-            .await;
-        span.in_scope(|| {
-            record_membership_completion(
-                MembershipOperation::RestrictedDelivery,
-                started.elapsed(),
-                result.as_ref().copied().map_err(|error| match error {
-                    RestrictedMembershipDeliveryError::Deferred => {
-                        MembershipCompletionKind::Deferred
-                    }
-                    RestrictedMembershipDeliveryError::Rejected => {
-                        MembershipCompletionKind::Rejected
-                    }
-                }),
-            )
-        });
-        result
+        uc_observability_contract::diagnostics::scope_operation_diagnostics(async {
+            let started = Instant::now();
+            let span = membership_span(MembershipOperation::RestrictedDelivery);
+            let result = self
+                .inner
+                .deliver_restricted_membership(peer, delivery)
+                .instrument(span.clone())
+                .await;
+            span.in_scope(|| {
+                record_membership_completion(
+                    MembershipOperation::RestrictedDelivery,
+                    started.elapsed(),
+                    result.as_ref().copied().map_err(|error| match error {
+                        RestrictedMembershipDeliveryError::Deferred => {
+                            MembershipCompletionKind::Deferred
+                        }
+                        RestrictedMembershipDeliveryError::Rejected => {
+                            MembershipCompletionKind::Rejected
+                        }
+                    }),
+                )
+            });
+            result
+        })
+        .await
     }
 }
 
@@ -192,29 +198,32 @@ impl GroupUpdateDispatchPort for ObservedGroupUpdateDispatch {
         &self,
         update: &PendingGroupUpdate,
     ) -> Result<(), GroupUpdateDispatchError> {
-        let started = Instant::now();
-        let span = membership_span(MembershipOperation::GroupUpdateDispatch);
-        let result = self
-            .inner
-            .dispatch_group_update(update)
-            .instrument(span.clone())
-            .await;
-        span.in_scope(|| {
-            record_membership_completion(
-                MembershipOperation::GroupUpdateDispatch,
-                started.elapsed(),
-                result.as_ref().copied().map_err(|error| match error {
-                    GroupUpdateDispatchError::Offline => {
-                        MembershipCompletionKind::Failed(DiagnosticErrorType::Unavailable)
-                    }
-                    GroupUpdateDispatchError::Rejected => MembershipCompletionKind::Rejected,
-                    GroupUpdateDispatchError::Transport => {
-                        MembershipCompletionKind::Failed(DiagnosticErrorType::StreamFailed)
-                    }
-                }),
-            )
-        });
-        result
+        uc_observability_contract::diagnostics::scope_operation_diagnostics(async {
+            let started = Instant::now();
+            let span = membership_span(MembershipOperation::GroupUpdateDispatch);
+            let result = self
+                .inner
+                .dispatch_group_update(update)
+                .instrument(span.clone())
+                .await;
+            span.in_scope(|| {
+                record_membership_completion(
+                    MembershipOperation::GroupUpdateDispatch,
+                    started.elapsed(),
+                    result.as_ref().copied().map_err(|error| match error {
+                        GroupUpdateDispatchError::Offline => {
+                            MembershipCompletionKind::Failed(DiagnosticErrorType::Unavailable)
+                        }
+                        GroupUpdateDispatchError::Rejected => MembershipCompletionKind::Rejected,
+                        GroupUpdateDispatchError::Transport => {
+                            MembershipCompletionKind::Failed(DiagnosticErrorType::StreamFailed)
+                        }
+                    }),
+                )
+            });
+            result
+        })
+        .await
     }
 }
 

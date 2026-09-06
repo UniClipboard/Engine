@@ -21,6 +21,7 @@
 - Active plan 完成后回写稳定结论，再移入 `completed/`。
 - Generated 内容必须标明来源与时效，不手工宣称它比代码更新。
 - 不确定的历史原因必须明确标成推断，不能编造。
+- 修改观测设计、计划或验收时，遵守[业务记录组织标准](design-docs/observability.md#业务记录组织标准)；正文只在该处维护，区分已确认标准与尚未完成的实现，不把节点数量或成功导出当作业务验收通过。
 - 修改仓库内容时同步更新 `architecture/architecture-bible.md` 的正文或“文档维护记录”。
 
 交付前检查 Markdown 相对链接、孤儿文档、旧路径残留和 `git diff --check`。

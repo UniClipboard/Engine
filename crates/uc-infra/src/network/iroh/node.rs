@@ -30,6 +30,7 @@ use iroh::protocol::{Router, RouterBuilder};
 use iroh::{Endpoint, EndpointAddr, RelayConfig, RelayMode, RelayUrl, TransportAddr};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use noq_proto::congestion::{Bbr3Config, CubicConfig};
+use tracing::instrument::WithSubscriber;
 use tracing::{debug, info, instrument, warn};
 use uc_application::deps::{CurrentMemberSignaturePort, IssueMembershipBranchRecoveryPort};
 use uc_core::settings::model::CongestionController;
@@ -787,6 +788,10 @@ impl IrohNodeBuilder {
             // even if magicsock surfaces it locally.
             .address_lookup(MdnsAddressLookup::builder())
             .bind()
+            // Endpoint 的长期驱动不能持有启动/恢复操作的 span。
+            .with_subscriber(tracing::Dispatch::new(
+                tracing::subscriber::NoSubscriber::default(),
+            ))
             .await
             .map_err(|err| IrohNodeError::Bind(err.to_string()))?;
         let endpoint = Arc::new(endpoint);
@@ -1381,10 +1386,14 @@ impl IrohNodeBuilder {
     /// Finalize the builder: spawn the [`Router`]. After this point no more
     /// `install_*` calls are allowed.
     pub fn spawn(self) -> IrohNode {
-        let router = self
+        let builder = self
             .router_builder
-            .expect("router_builder missing — spawn called twice")
-            .spawn();
+            .expect("router_builder missing — spawn called twice");
+        // Router 只捕获空 span；后续协议处理仍使用进程 subscriber 和已认证远端父关系。
+        let router = tracing::dispatcher::with_default(
+            &tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()),
+            || builder.spawn(),
+        );
         log_publish_addrs(&self.endpoint, "post-spawn");
 
         // Relay self-healing watchdog (see `net_recovery`). Only meaningful

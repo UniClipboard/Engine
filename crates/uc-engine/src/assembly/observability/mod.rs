@@ -10,5 +10,6 @@ mod storage_upgrade;
 pub(crate) use admission::observe_admission_endpoint;
 pub(crate) use clipboard::observe_clipboard;
 pub(crate) use clipboard::{observe_clipboard_dependencies, observe_local_copy};
+pub(crate) use clipboard::{observe_explicit_send, observe_resend};
 pub(crate) use membership::observe_membership;
-pub(crate) use storage_upgrade::{profile_storage_upgrade_span, record_profile_storage_upgrade};
+pub(crate) use storage_upgrade::observe_profile_storage_upgrade;

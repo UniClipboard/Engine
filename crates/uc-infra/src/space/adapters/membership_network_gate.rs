@@ -13,6 +13,10 @@ use uc_core::membership::{
     MembershipHistoryExchangeError, MembershipHistoryExchangePort, MembershipHistoryMessage,
     SpaceAdmissionId, SpaceAdmissionRoute,
 };
+use uc_observability_contract::diagnostics::{
+    describe_membership_exchange, describe_operation_failure, DiagnosticErrorType,
+    MembershipExchangePurpose,
+};
 
 /// 控制 Space 成员维护是否可以发起新的网络请求。
 pub struct MembershipNetworkGate {
@@ -114,6 +118,13 @@ impl MembershipHistoryExchangePort for GatedMembershipHistoryExchange {
         message: MembershipHistoryMessage,
     ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
         if !self.gate.permits_network_work() {
+            describe_membership_exchange(
+                crate::network::iroh::membership_history_exchange_adapter::request_purpose(
+                    &message,
+                ),
+                false,
+            );
+            describe_operation_failure(DiagnosticErrorType::NetworkPaused);
             return Err(MembershipHistoryExchangeError::Offline);
         }
         self.inner
@@ -130,6 +141,17 @@ impl RestrictedMembershipDeliveryPort for GatedMembershipHistoryExchange {
         delivery: &RestrictedMembershipDelivery,
     ) -> Result<(), RestrictedMembershipDeliveryError> {
         if !self.gate.permits_network_work() {
+            describe_membership_exchange(
+                match delivery {
+                    RestrictedMembershipDelivery::Event(_) => {
+                        MembershipExchangePurpose::DeliverRestrictedEvent
+                    }
+                    RestrictedMembershipDelivery::Decision(_) => {
+                        MembershipExchangePurpose::DeliverRestrictedDecision
+                    }
+                },
+                false,
+            );
             return Err(RestrictedMembershipDeliveryError::Deferred);
         }
         self.restricted

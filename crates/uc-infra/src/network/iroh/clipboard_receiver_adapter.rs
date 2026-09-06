@@ -676,6 +676,7 @@ mod tests {
             role: DiagnosticRole::Client,
             kind: DiagnosticSpanKind::Client,
         });
+        let expected_context = client_span.context().span().span_context().clone();
         let mut dispatch_task = tokio::spawn(
             async move {
                 dispatch
@@ -727,20 +728,24 @@ mod tests {
             .iter()
             .rev()
             .find(|span| {
-                span.attributes.iter().any(|attribute| {
-                    attribute.key.as_str() == "uc.operation"
-                        && attribute.value.as_str() == "clipboard_dispatch"
-                })
+                span.span_context.trace_id() == expected_context.trace_id()
+                    && span.span_context.span_id() == expected_context.span_id()
+                    && span.attributes.iter().any(|attribute| {
+                        attribute.key.as_str() == "uc.operation"
+                            && attribute.value.as_str() == "clipboard_dispatch"
+                    })
             })
             .expect("client span");
         let server = spans
             .iter()
             .rev()
             .find(|span| {
-                span.attributes.iter().any(|attribute| {
-                    attribute.key.as_str() == "uc.operation"
-                        && attribute.value.as_str() == "clipboard_receive"
-                })
+                span.span_context.trace_id() == expected_context.trace_id()
+                    && span.parent_span_id == expected_context.span_id()
+                    && span.attributes.iter().any(|attribute| {
+                        attribute.key.as_str() == "uc.operation"
+                            && attribute.value.as_str() == "clipboard_receive"
+                    })
             })
             .expect("server span");
         assert_eq!(

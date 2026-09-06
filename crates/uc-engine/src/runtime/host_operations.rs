@@ -216,18 +216,17 @@ impl ProductionRuntime {
         target_devices: Vec<String>,
     ) -> Result<OperationResult, EngineError> {
         let application = self.current_application().await?;
-        let outcome = application
-            .process_local_clipboard(LocalClipboardRequest {
+        let outcome = crate::assembly::observability::observe_explicit_send(
+            application.process_local_clipboard(LocalClipboardRequest {
                 snapshot,
                 origin: ClipboardChangeOrigin::LocalCapture,
                 intent: LocalClipboardIntent::ExplicitSend {
                     targets: target_devices.into_iter().map(DeviceId::new).collect(),
                 },
-            })
-            .await
-            .map_err(|error| {
-                operation_error_with_code(SEND_FAILED_CODE, "send clipboard", error)
-            })?;
+            }),
+        )
+        .await
+        .map_err(|error| operation_error_with_code(SEND_FAILED_CODE, "send clipboard", error))?;
         let LocalClipboardOutcome::Completed(completion) = outcome else {
             return Err(EngineError::new(
                 SEND_SKIPPED_CODE,

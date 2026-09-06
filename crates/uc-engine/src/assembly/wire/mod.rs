@@ -21,7 +21,6 @@ use std::sync::Arc;
 
 use crate::assembly::facade::build_relay_diagnostic;
 use tokio::sync::mpsc;
-use tracing::Instrument;
 use uc_application::deps::{
     ApplicationDeps, ClipboardEntryPorts, ClipboardPorts, ClipboardRepresentationPorts,
     ConfigMigrationDeps, CurrentSpaceIdentityPort, DevicePorts, DirectoryReceivePorts,
@@ -203,12 +202,8 @@ async fn ensure_profile_storage_v3(
         Arc::clone(&manifests),
         current_space,
     );
-    let started = std::time::Instant::now();
-    let outcome = upgrade
-        .ensure_v3()
-        .instrument(crate::assembly::observability::profile_storage_upgrade_span())
-        .await;
-    crate::assembly::observability::record_profile_storage_upgrade(started, &outcome);
+    let outcome =
+        crate::assembly::observability::observe_profile_storage_upgrade(upgrade.ensure_v3()).await;
     let outcome = outcome.map_err(|source| WiringError::StorageUpgrade { source })?;
     match outcome {
         ProfileStorageUpgradeOutcome::Upgraded | ProfileStorageUpgradeOutcome::UpToDate => {

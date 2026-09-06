@@ -10,6 +10,10 @@ use uc_core::membership::{
     MembershipHistorySuffixRequestV3, MembershipHistorySummaryV3,
 };
 use uc_core::ports::ClockPort;
+use uc_observability_contract::diagnostics::{
+    describe_membership_conflict, scope_membership_recovery_trigger, MembershipRecoveryObservation,
+    MembershipRecoveryOutcome, MembershipRecoveryTrigger,
+};
 
 use crate::space::membership::{
     CurrentSpaceMemberScopePort, MembershipLedger, MembershipLedgerError, PeerReconciliationRecord,
@@ -57,6 +61,29 @@ impl SynchronizeMembershipHistoryUseCase {
     }
 
     pub(crate) async fn execute(
+        &self,
+        target: MembershipSyncTarget,
+    ) -> Result<MembershipSyncReport, SynchronizeMembershipHistoryError> {
+        let observation = MembershipRecoveryObservation::begin();
+        let result = observation.scope(self.execute_inner(target)).await;
+        let outcome = match &result {
+            Ok(report) if report.stable_failure_count > 0 => MembershipRecoveryOutcome::Failed,
+            Ok(report) if report.deferred_peer_count > 0 && report.completed_peer_count > 0 => {
+                MembershipRecoveryOutcome::Partial
+            }
+            Ok(report) if report.deferred_peer_count > 0 => MembershipRecoveryOutcome::Deferred,
+            Ok(report) if report.completed_peer_count > 0 => MembershipRecoveryOutcome::Completed,
+            Ok(_) => MembershipRecoveryOutcome::NoWork,
+            Err(SynchronizeMembershipHistoryError::RecoveryRequired) => {
+                MembershipRecoveryOutcome::Corrupt
+            }
+            Err(_) => MembershipRecoveryOutcome::Deferred,
+        };
+        observation.finish(outcome);
+        result
+    }
+
+    async fn execute_inner(
         &self,
         target: MembershipSyncTarget,
     ) -> Result<MembershipSyncReport, SynchronizeMembershipHistoryError> {
@@ -394,6 +421,7 @@ impl SynchronizeMembershipHistoryUseCase {
                     if recorded.is_none() {
                         return Err(PeerSyncError::Stable);
                     }
+                    describe_membership_conflict();
                 }
                 return Err(PeerSyncError::Stable);
             }
@@ -467,6 +495,7 @@ impl SynchronizeMembershipHistoryUseCase {
                         None,
                     )
                     .await?;
+                    describe_membership_conflict();
                     return Err(PeerSyncError::Stable);
                 }
                 uc_core::membership::MembershipHistoryAckV3::Invalid => {
@@ -688,7 +717,14 @@ impl SynchronizeMembershipMaintenancePort for SynchronizeMembershipHistoryUseCas
             | MembershipMaintenanceTrigger::Periodic
             | MembershipMaintenanceTrigger::StateChanged => MembershipSyncTarget::AllCurrentPeers,
         };
-        match self.execute(target).await {
+        let observation_trigger = match trigger {
+            MembershipMaintenanceTrigger::Startup => MembershipRecoveryTrigger::Startup,
+            MembershipMaintenanceTrigger::Resume => MembershipRecoveryTrigger::Resume,
+            MembershipMaintenanceTrigger::Periodic => MembershipRecoveryTrigger::Retry,
+            MembershipMaintenanceTrigger::StateChanged => MembershipRecoveryTrigger::StateChanged,
+            MembershipMaintenanceTrigger::PeerOnline(_) => MembershipRecoveryTrigger::PeerOnline,
+        };
+        match scope_membership_recovery_trigger(observation_trigger, self.execute(target)).await {
             Ok(report) if report.stable_failure_count > 0 => {
                 MembershipMaintenanceStepOutcome::StableFailure
             }

@@ -9,6 +9,7 @@
 - [工程与模块设计原则](docs/design-docs/engineering-principles.md)
 - [错误处理与转换](docs/design-docs/error-handling.md)
 - [运行期观测装配](docs/design-docs/observability.md)
+  - 修改日志、tracing、采样或观测验收前，必须阅读其中的[业务记录组织标准](docs/design-docs/observability.md#业务记录组织标准)。
 - [安全架构](docs/SECURITY.md)
 - [执行计划与技术债](docs/PLANS.md)
 
@@ -49,6 +50,7 @@
 - Application 下层失败保留完整 source chain；禁止字符串化或吞错。详细规则见错误处理文档。
 - 跨层功能必须有唯一完整负责人；Core 保存规则、Application 负责流程、Infra 提供能力、Engine 只组装。
 - 跨层持续计时与结果分类只通过 Engine 组装层的领域 port decorator 实现。
+- 独立业务记录必须说明触发原因、完整动作和最终结果；不得把底层调用或正常清理自动提升为业务入口。业务动作与运行诊断分开，测试与产品记录隔离；关联、结束和验收细则只在[业务记录组织标准](docs/design-docs/observability.md#业务记录组织标准)维护。
 - 为日志、tracing 或流程关联增加观测时，不得向 Engine 新增暴露 Application/Core 内部阶段、状态对象、业务标识或步骤查询，也不得为观测扩大 facade、port 或结果接口。Engine 只能装饰既有完整能力的输入与输出；跨步骤关联必须由完整流程负责人通过不透明观测上下文提供，且不得让 Engine 据此编排业务步骤。
 - 新功能开工前写清完整负责人、调用方唯一动作、成功/失败结果及重启/重试责任。
 - 任何 Agent 修改仓库内容时，同步检查并更新 `docs/architecture/architecture-bible.md`；无架构变化也在“文档维护记录”增加记录。

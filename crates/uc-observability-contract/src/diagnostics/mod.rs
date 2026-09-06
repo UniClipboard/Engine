@@ -13,9 +13,71 @@ use opentelemetry::trace::TraceContextExt;
 use sha2::{Digest, Sha256};
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+mod membership_recovery;
+pub use membership_recovery::{
+    describe_membership_conflict, scope_membership_recovery_trigger, MembershipRecoveryObservation,
+    MembershipRecoveryOutcome, MembershipRecoveryTrigger,
+};
 
 tokio::task_local! {
     static CONTINUATION: opentelemetry::Context;
+    static OPERATION_FAILURE: std::cell::Cell<Option<DiagnosticErrorType>>;
+}
+
+/// 完整能力调用的诊断作用域；不改变业务错误或接口。
+pub async fn scope_operation_diagnostics<F: Future>(future: F) -> F::Output {
+    OPERATION_FAILURE
+        .scope(std::cell::Cell::new(None), future)
+        .await
+}
+
+/// 能力实现提供第一次失败的固定分类，不携带原始错误。
+pub fn describe_operation_failure(error: DiagnosticErrorType) {
+    let _ = OPERATION_FAILURE.try_with(|slot| {
+        if slot.get().is_none() {
+            slot.set(Some(error));
+        }
+    });
+}
+
+/// 协议边界已知的完整请求用途，不能由 Engine 从消息中解析。
+#[derive(Clone, Copy)]
+pub enum MembershipExchangePurpose {
+    CompareSummary,
+    RequestHistory,
+    SendHistory,
+    RequestConflictEvidence,
+    SendConflictEvidence,
+    Acknowledge,
+    DeliverRestrictedEvent,
+    DeliverRestrictedDecision,
+}
+
+impl MembershipExchangePurpose {
+    fn name(self) -> &'static str {
+        match self {
+            Self::CompareSummary => "compare_summary",
+            Self::RequestHistory => "request_history",
+            Self::SendHistory => "send_history",
+            Self::RequestConflictEvidence => "request_conflict_evidence",
+            Self::SendConflictEvidence => "send_conflict_evidence",
+            Self::Acknowledge => "acknowledge",
+            Self::DeliverRestrictedEvent => "deliver_restricted_event",
+            Self::DeliverRestrictedDecision => "deliver_restricted_decision",
+        }
+    }
+}
+
+pub fn describe_membership_exchange(purpose: MembershipExchangePurpose, server: bool) {
+    let suffix = if server {
+        "handle_and_reply"
+    } else {
+        "exchange"
+    };
+    tracing::Span::current().record(
+        "uc.display.name",
+        format!("membership.{}.{suffix}", purpose.name()),
+    );
 }
 
 /// 只延续在线父关系，不持有原 span，不提供身份或字段读取接口。
@@ -149,6 +211,20 @@ pub fn describe_admission_connection(span: &tracing::Span, resumed: bool) {
 /// 展示名称与筛选分类分别校验，只接受固定的动作、角色组合。
 pub fn approved_operation_name(operation: &str, role: &str, name: &str) -> bool {
     match (operation, role) {
+        ("session_lifecycle", "local") => name == "runtime.transition_session",
+        ("membership_recovery", "local") => matches!(
+            name,
+            "membership.recover.startup"
+                | "membership.recover.resume"
+                | "membership.recover.peer_online"
+                | "membership.recover.retry"
+                | "membership.recover.state_changed"
+                | "membership.recover.requested"
+        ),
+        ("profile_storage_upgrade", "local") => matches!(
+            name,
+            "profile_storage_upgrade" | "storage.initialize_profile"
+        ),
         ("space_admission", "local") => name == "pairing.lifecycle",
         ("space_admission", "joiner") => {
             matches!(name, "pairing.authenticate" | "pairing.reconnect")
@@ -178,6 +254,27 @@ pub fn approved_operation_name(operation: &str, role: &str, name: &str) -> bool 
                 .any(|action| name == action.send_name())
         }
         ("network_transport", "sponsor") => name == "pairing.receive_request",
+        ("membership_history_sync", "member") => {
+            name == operation
+                || name.strip_prefix("membership.").is_some_and(|name| {
+                    let purpose = name
+                        .strip_suffix(".exchange")
+                        .or_else(|| name.strip_suffix(".handle_and_reply"));
+                    matches!(
+                        purpose,
+                        Some(
+                            "compare_summary"
+                                | "request_history"
+                                | "send_history"
+                                | "request_conflict_evidence"
+                                | "send_conflict_evidence"
+                                | "acknowledge"
+                                | "deliver_restricted_event"
+                                | "deliver_restricted_decision"
+                        )
+                    )
+                })
+        }
         _ => name == operation,
     }
 }
@@ -218,6 +315,8 @@ impl SpaceAdmissionObservation {
             uc.flow.id = %FlowAttribute(&flow),
             otel.kind = "internal",
             otel.status_code = tracing::field::Empty,
+            uc.outcome = tracing::field::Empty,
+            error.type = tracing::field::Empty,
         );
         Self {
             inner: Arc::new(SpaceAdmissionObservationInner {
@@ -317,6 +416,11 @@ impl DiagnosticDomain {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticOperation {
+    TaskShutdown,
+    SessionRecovery,
+    MembershipRecovery,
+    ClipboardSend,
+    ClipboardResend,
     ClipboardCopyAndSync,
     ClipboardPersist,
     ClipboardWriteSystem,
@@ -336,6 +440,8 @@ impl DiagnosticOperation {
     fn as_str(self) -> &'static str {
         match self {
             Self::ClipboardCopyAndSync => "clipboard.copy_and_sync",
+            Self::ClipboardSend => "clipboard.send",
+            Self::ClipboardResend => "clipboard.resend",
             Self::ClipboardPersist => "clipboard.persist",
             Self::ClipboardWriteSystem => "clipboard.write_system",
             Self::ClipboardDispatch => "clipboard_dispatch",
@@ -344,10 +450,13 @@ impl DiagnosticOperation {
             Self::ClipboardConnect => "clipboard_connect",
             Self::SpaceAdmission => "space_admission",
             Self::MembershipHistorySync => "membership_history_sync",
+            Self::MembershipRecovery => "membership_recovery",
             Self::MembershipGroupUpdate => "membership_group_update",
             Self::NetworkTransport => "network_transport",
             Self::ProfileStorageUpgrade => "profile_storage_upgrade",
             Self::SessionLifecycle => "session_lifecycle",
+            Self::TaskShutdown => "runtime.shutdown_tasks",
+            Self::SessionRecovery => "runtime.recover_session",
         }
     }
 }
@@ -394,6 +503,9 @@ impl DiagnosticSpanKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticErrorType {
+    MembershipRecoveryFailed,
+    DeliveryFailed,
+    NetworkPaused,
     AuthenticationFailed,
     AddressUnavailable,
     ConnectFailed,
@@ -481,6 +593,9 @@ impl DiagnosticErrorType {
             Self::JoinFailed => "join_failed",
             Self::ShutdownTimeout => "shutdown_timeout",
             Self::Unavailable => "unavailable",
+            Self::NetworkPaused => "network_paused",
+            Self::DeliveryFailed => "delivery_failed",
+            Self::MembershipRecoveryFailed => "membership_recovery_failed",
             Self::PeerRejected => "peer_rejected",
             Self::PeerIncompatible => "peer_incompatible",
             Self::LocalPolicyExceeded => "local_policy_exceeded",
@@ -499,6 +614,12 @@ pub struct OperationContext {
 
 pub fn operation_span(context: OperationContext) -> tracing::Span {
     let name = match (context.operation, context.role) {
+        (DiagnosticOperation::SessionLifecycle, DiagnosticRole::Local) => {
+            "runtime.transition_session"
+        }
+        (DiagnosticOperation::MembershipRecovery, DiagnosticRole::Local) => {
+            membership_recovery::recovery_name()
+        }
         (DiagnosticOperation::SpaceAdmission, DiagnosticRole::Local) => "pairing.lifecycle",
         (DiagnosticOperation::SpaceAdmission, DiagnosticRole::Joiner) => "pairing.authenticate",
         (DiagnosticOperation::SpaceAdmission, DiagnosticRole::Sponsor) => "pairing.process_request",
@@ -539,6 +660,8 @@ pub fn operation_span(context: OperationContext) -> tracing::Span {
             uc.flow.id = %FlowAttribute(flow),
             otel.kind = context.kind.as_str(),
             otel.status_code = tracing::field::Empty,
+            uc.outcome = tracing::field::Empty,
+            error.type = tracing::field::Empty,
         ),
         None => tracing::span!(
             target: "uc.telemetry",
@@ -551,6 +674,8 @@ pub fn operation_span(context: OperationContext) -> tracing::Span {
             uc.role = context.role.as_str(),
             otel.kind = context.kind.as_str(),
             otel.status_code = tracing::field::Empty,
+            uc.outcome = tracing::field::Empty,
+            error.type = tracing::field::Empty,
         ),
     };
     if !tracing::Span::current()
@@ -568,6 +693,9 @@ pub fn operation_span(context: OperationContext) -> tracing::Span {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CompletionResult {
+    Conflict,
+    Partial,
+    Skipped,
     Succeeded,
     Failed(DiagnosticErrorType),
     Deferred,
@@ -585,6 +713,49 @@ pub struct OperationCompletion {
 }
 
 impl OperationCompletion {
+    pub fn conflict(
+        domain: DiagnosticDomain,
+        operation: DiagnosticOperation,
+        role: DiagnosticRole,
+        duration: Duration,
+    ) -> Self {
+        Self {
+            domain,
+            operation,
+            role,
+            duration,
+            result: CompletionResult::Conflict,
+        }
+    }
+    pub fn partial(
+        domain: DiagnosticDomain,
+        operation: DiagnosticOperation,
+        role: DiagnosticRole,
+        duration: Duration,
+    ) -> Self {
+        Self {
+            domain,
+            operation,
+            role,
+            duration,
+            result: CompletionResult::Partial,
+        }
+    }
+
+    pub fn skipped(
+        domain: DiagnosticDomain,
+        operation: DiagnosticOperation,
+        role: DiagnosticRole,
+        duration: Duration,
+    ) -> Self {
+        Self {
+            domain,
+            operation,
+            role,
+            duration,
+            result: CompletionResult::Skipped,
+        }
+    }
     pub fn succeeded(
         domain: DiagnosticDomain,
         operation: DiagnosticOperation,
@@ -662,7 +833,27 @@ impl OperationCompletion {
     }
 }
 
-pub fn complete_operation(completion: OperationCompletion) {
+pub fn complete_operation(mut completion: OperationCompletion) {
+    if matches!(completion.result, CompletionResult::Failed(_)) {
+        if let Ok(Some(error)) = OPERATION_FAILURE.try_with(std::cell::Cell::get) {
+            completion.result = CompletionResult::Failed(error);
+        }
+    }
+    let span = tracing::Span::current();
+    let outcome = match completion.result {
+        CompletionResult::Conflict => "conflict",
+        CompletionResult::Partial => "partial",
+        CompletionResult::Skipped => "skipped",
+        CompletionResult::Succeeded => "ok",
+        CompletionResult::Failed(error) => {
+            span.record("error.type", error.as_str());
+            "error"
+        }
+        CompletionResult::Deferred => "deferred",
+        CompletionResult::Rejected => "rejected",
+        CompletionResult::Cancelled => "cancelled",
+    };
+    span.record("uc.outcome", outcome);
     let duration_ms = u64::try_from(completion.duration.as_millis()).unwrap_or(u64::MAX);
     let domain = completion.domain.as_str();
     let operation = completion.operation.as_str();
@@ -674,9 +865,23 @@ pub fn complete_operation(completion: OperationCompletion) {
         CompletionResult::Failed(_) => {
             tracing::Span::current().record("otel.status_code", "ERROR");
         }
-        CompletionResult::Deferred | CompletionResult::Rejected | CompletionResult::Cancelled => {}
+        CompletionResult::Conflict
+        | CompletionResult::Partial
+        | CompletionResult::Skipped
+        | CompletionResult::Deferred
+        | CompletionResult::Rejected
+        | CompletionResult::Cancelled => {}
     }
     match completion.result {
+        CompletionResult::Conflict => {
+            record_non_error_completion(domain, operation, role, "conflict", duration_ms)
+        }
+        CompletionResult::Partial => {
+            record_non_error_completion(domain, operation, role, "partial", duration_ms)
+        }
+        CompletionResult::Skipped => {
+            record_non_error_completion(domain, operation, role, "skipped", duration_ms)
+        }
         CompletionResult::Succeeded => tracing::event!(
             target: "uc.telemetry",
             tracing::Level::INFO,
@@ -711,11 +916,34 @@ pub fn complete_operation(completion: OperationCompletion) {
 }
 
 pub fn complete_unassociated_operation(completion: OperationCompletion) {
+    // 日志 SDK 从 OpenTelemetry 当前上下文补充关联；仅 parent: None 不足以清除外层上下文。
+    let _unassociated = opentelemetry::Context::new().attach();
     let duration_ms = u64::try_from(completion.duration.as_millis()).unwrap_or(u64::MAX);
     let domain = completion.domain.as_str();
     let operation = completion.operation.as_str();
     let role = completion.role.as_str();
     match completion.result {
+        CompletionResult::Conflict => record_unassociated_non_error_completion(
+            domain,
+            operation,
+            role,
+            "conflict",
+            duration_ms,
+        ),
+        CompletionResult::Partial => record_unassociated_non_error_completion(
+            domain,
+            operation,
+            role,
+            "partial",
+            duration_ms,
+        ),
+        CompletionResult::Skipped => record_unassociated_non_error_completion(
+            domain,
+            operation,
+            role,
+            "skipped",
+            duration_ms,
+        ),
         CompletionResult::Succeeded => tracing::event!(
             target: "uc.telemetry",
             parent: None,

@@ -23,11 +23,11 @@ pub async fn execute_resend_entry(
             .map(uc_core::ids::DeviceId::new)
             .collect()
     });
-    let result = facade
-        .resend_entry(ResendEntryCommand {
+    let result =
+        crate::assembly::observability::observe_resend(facade.resend_entry(ResendEntryCommand {
             entry_id: uc_core::ids::EntryId::from(input.entry_id.as_str()),
             target_filter,
-        })
+        }))
         .await;
     map_resend_result(result)
 }

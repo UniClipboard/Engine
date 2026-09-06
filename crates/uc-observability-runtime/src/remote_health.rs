@@ -30,6 +30,9 @@ const LOG_FIELDS: &[&str] = &[
     "duration_ms",
 ];
 const SPAN_FIELDS: &[&str] = &[
+    "uc.record.kind",
+    "uc.outcome",
+    "error.type",
     "target",
     "uc.flow.id",
     "uc.domain",
@@ -463,6 +466,39 @@ impl SpanProcessor for TrackedSpanProcessor {
             self.gate.record_rejection();
             return;
         }
+        if span.attributes.iter().any(|field| {
+            field.key.as_str() == "uc.operation" && field.value.as_str() == "runtime.shutdown_tasks"
+        }) && span
+            .attributes
+            .iter()
+            .any(|field| field.key.as_str() == "uc.outcome" && field.value.as_str() == "ok")
+        {
+            return;
+        }
+        // 已知无工作量的升级检查不进入业务列表；合法省略不属于丢弃故障。
+        if span.attributes.iter().any(|field| {
+            field.key.as_str() == "uc.operation"
+                && matches!(
+                    field.value.as_str().as_ref(),
+                    "profile_storage_upgrade" | "membership_recovery"
+                )
+        }) && span
+            .attributes
+            .iter()
+            .any(|field| field.key.as_str() == "uc.outcome" && field.value.as_str() == "skipped")
+        {
+            return;
+        }
+        if let Some(kind) = span_record_kind(&span) {
+            if !span
+                .attributes
+                .iter()
+                .any(|field| field.key.as_str() == "uc.record.kind")
+            {
+                span.attributes
+                    .push(opentelemetry::KeyValue::new("uc.record.kind", kind));
+            }
+        }
         span.attributes
             .retain(|attribute| SPAN_FIELDS.contains(&attribute.key.as_str()));
         let _ = self.gate.submit(|| self.inner.on_end(span));
@@ -598,6 +634,39 @@ fn span_is_approved(span: &SpanData) -> bool {
     span_rejection_reason(span).is_none()
 }
 
+/// 只由合法的完整动作与父关系派生类别，不让调用方自报业务身份。
+fn span_record_kind(span: &SpanData) -> Option<&'static str> {
+    let value = |key: &str| {
+        span.attributes
+            .iter()
+            .find(|field| field.key.as_str() == key)
+            .and_then(|field| match &field.value {
+                Value::String(value) => Some(value.as_str()),
+                _ => None,
+            })
+    };
+    if value("uc.role") == Some("local")
+        && matches!(
+            value("uc.operation"),
+            Some(
+                "space_admission"
+                    | "clipboard.copy_and_sync"
+                    | "clipboard.send"
+                    | "clipboard.resend"
+                    | "membership_recovery"
+                    | "profile_storage_upgrade"
+                    | "runtime.recover_session"
+            )
+        )
+    {
+        Some("business")
+    } else if span.parent_span_id == opentelemetry::trace::SpanId::INVALID {
+        Some("diagnostic")
+    } else {
+        None
+    }
+}
+
 fn span_rejection_reason(span: &SpanData) -> Option<&'static str> {
     if !span.events.is_empty()
         || !span.links.is_empty()
@@ -615,6 +684,9 @@ fn span_rejection_reason(span: &SpanData) -> Option<&'static str> {
     let mut domain = None;
     let mut operation = None;
     let mut role = None;
+    let mut outcome = None;
+    let mut error_type = None;
+    let mut record_kind = None;
     for attribute in &span.attributes {
         let key = attribute.key.as_str();
         if !SPAN_FIELDS.contains(&key) {
@@ -630,6 +702,9 @@ fn span_rejection_reason(span: &SpanData) -> Option<&'static str> {
             "uc.domain" => &mut domain,
             "uc.operation" => &mut operation,
             "uc.role" => &mut role,
+            "uc.outcome" => &mut outcome,
+            "error.type" => &mut error_type,
+            "uc.record.kind" => &mut record_kind,
             _ => return Some("attribute routing"),
         };
         if slot.replace(value).is_some() {
@@ -639,6 +714,25 @@ fn span_rejection_reason(span: &SpanData) -> Option<&'static str> {
 
     if target != Some("uc.telemetry") {
         return Some("target");
+    }
+    if record_kind.is_some() && record_kind != span_record_kind(span) {
+        return Some("record kind");
+    }
+    if !outcome.is_none_or(valid_outcome)
+        || !error_type.is_none_or(valid_error_type)
+        || (error_type.is_some() && outcome != Some("error"))
+        || (outcome == Some("error") && error_type.is_none())
+    {
+        return Some("completion fields");
+    }
+    if matches!(outcome, Some("ok")) && span.status != Status::Ok
+        || matches!(outcome, Some("error")) && !matches!(span.status, Status::Error { .. })
+        || matches!(
+            outcome,
+            Some("conflict" | "partial" | "skipped" | "deferred" | "rejected" | "cancelled")
+        ) && span.status != Status::Unset
+    {
+        return Some("completion status");
     }
     if !flow.is_none_or(valid_flow_id) {
         return Some("flow");
@@ -655,6 +749,13 @@ fn span_rejection_reason(span: &SpanData) -> Option<&'static str> {
     if !matches!((operation, role), (Some(operation), Some(role)) if uc_observability_contract::diagnostics::approved_operation_name(operation, role, span.name.as_ref()))
     {
         return Some("name");
+    }
+    if operation == Some("membership_history_sync")
+        && span.name.starts_with("membership.")
+        && !((span.span_kind == SpanKind::Client && span.name.ends_with(".exchange"))
+            || (span.span_kind == SpanKind::Server && span.name.ends_with(".handle_and_reply")))
+    {
+        return Some("membership name kind");
     }
     if !matches!((domain, operation), (Some(domain), Some(operation)) if operation_matches_domain(domain, operation))
     {
@@ -762,7 +863,9 @@ fn valid_domain(value: &str) -> bool {
 fn valid_operation(value: &str) -> bool {
     matches!(
         value,
-        "clipboard.copy_and_sync"
+        "clipboard.send"
+            | "clipboard.resend"
+            | "clipboard.copy_and_sync"
             | "clipboard.persist"
             | "clipboard.write_system"
             | "clipboard_dispatch"
@@ -771,10 +874,13 @@ fn valid_operation(value: &str) -> bool {
             | "clipboard_connect"
             | "space_admission"
             | "membership_history_sync"
+            | "membership_recovery"
             | "membership_group_update"
             | "network_transport"
             | "profile_storage_upgrade"
             | "session_lifecycle"
+            | "runtime.shutdown_tasks"
+            | "runtime.recover_session"
     )
 }
 
@@ -788,7 +894,7 @@ fn valid_role(value: &str) -> bool {
 fn valid_outcome(value: &str) -> bool {
     matches!(
         value,
-        "ok" | "error" | "deferred" | "rejected" | "cancelled"
+        "ok" | "error" | "conflict" | "partial" | "skipped" | "deferred" | "rejected" | "cancelled"
     )
 }
 
@@ -796,6 +902,9 @@ fn valid_error_type(value: &str) -> bool {
     matches!(
         value,
         "authentication_failed"
+            | "network_paused"
+            | "delivery_failed"
+            | "membership_recovery_failed"
             | "address_unavailable"
             | "connect_failed"
             | "stream_failed"
@@ -822,7 +931,9 @@ fn operation_matches_domain(domain: &str, operation: &str) -> bool {
         (domain, operation),
         (
             "clipboard",
-            "clipboard.copy_and_sync"
+            "clipboard.send"
+                | "clipboard.resend"
+                | "clipboard.copy_and_sync"
                 | "clipboard.persist"
                 | "clipboard.write_system"
                 | "clipboard_dispatch"
@@ -832,18 +943,24 @@ fn operation_matches_domain(domain: &str, operation: &str) -> bool {
         ) | ("space_admission", "space_admission" | "network_transport")
             | (
                 "space_membership",
-                "membership_history_sync" | "membership_group_update"
+                "membership_history_sync" | "membership_group_update" | "membership_recovery"
             )
             | ("storage", "profile_storage_upgrade")
-            | ("runtime", "session_lifecycle")
+            | (
+                "runtime",
+                "session_lifecycle" | "runtime.shutdown_tasks" | "runtime.recover_session"
+            )
     )
 }
 
 fn span_role_matches(operation: &str, role: &str, kind: &SpanKind) -> bool {
     match operation {
-        "clipboard.copy_and_sync" | "clipboard.persist" | "clipboard.write_system" => {
-            role == "local" && kind == &SpanKind::Internal
-        }
+        "membership_recovery" => role == "local" && kind == &SpanKind::Internal,
+        "clipboard.send"
+        | "clipboard.resend"
+        | "clipboard.copy_and_sync"
+        | "clipboard.persist"
+        | "clipboard.write_system" => role == "local" && kind == &SpanKind::Internal,
         "clipboard_dispatch" => role == "client" && kind == &SpanKind::Client,
         "clipboard_receive" => role == "server" && kind == &SpanKind::Server,
         "clipboard_address_resolve" | "clipboard_connect" => {
@@ -861,18 +978,22 @@ fn span_role_matches(operation: &str, role: &str, kind: &SpanKind) -> bool {
         "membership_history_sync" | "membership_group_update" => {
             role == "member" && matches!(kind, SpanKind::Client | SpanKind::Server)
         }
-        "profile_storage_upgrade" | "session_lifecycle" => {
-            role == "local" && kind == &SpanKind::Internal
-        }
+        "profile_storage_upgrade"
+        | "session_lifecycle"
+        | "runtime.shutdown_tasks"
+        | "runtime.recover_session" => role == "local" && kind == &SpanKind::Internal,
         _ => false,
     }
 }
 
 fn log_role_matches(operation: &str, role: &str) -> bool {
     match operation {
-        "clipboard.copy_and_sync" | "clipboard.persist" | "clipboard.write_system" => {
-            role == "local"
-        }
+        "membership_recovery" => role == "local",
+        "clipboard.send"
+        | "clipboard.resend"
+        | "clipboard.copy_and_sync"
+        | "clipboard.persist"
+        | "clipboard.write_system" => role == "local",
         "clipboard_dispatch" | "clipboard_address_resolve" | "clipboard_connect" => {
             role == "client"
         }
@@ -882,7 +1003,10 @@ fn log_role_matches(operation: &str, role: &str) -> bool {
         "membership_history_sync" | "membership_group_update" => {
             matches!(role, "local" | "member")
         }
-        "profile_storage_upgrade" | "session_lifecycle" => role == "local",
+        "profile_storage_upgrade"
+        | "session_lifecycle"
+        | "runtime.shutdown_tasks"
+        | "runtime.recover_session" => role == "local",
         _ => false,
     }
 }

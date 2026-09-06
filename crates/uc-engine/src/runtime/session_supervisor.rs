@@ -85,10 +85,10 @@ struct SessionOperationGateState {
     cancellation: CancellationToken,
 }
 
-fn session_lifecycle_span() -> tracing::Span {
+fn session_lifecycle_span(operation: DiagnosticOperation) -> tracing::Span {
     operation_span(OperationContext {
         domain: DiagnosticDomain::Runtime,
-        operation: DiagnosticOperation::SessionLifecycle,
+        operation,
         role: DiagnosticRole::Local,
         kind: DiagnosticSpanKind::Internal,
     })
@@ -97,20 +97,27 @@ fn session_lifecycle_span() -> tracing::Span {
 async fn observe_session_lifecycle<T>(
     future: impl Future<Output = Result<T, EngineError>>,
 ) -> Result<T, EngineError> {
+    observe_runtime_operation(DiagnosticOperation::SessionLifecycle, future).await
+}
+
+async fn observe_runtime_operation<T>(
+    operation: DiagnosticOperation,
+    future: impl Future<Output = Result<T, EngineError>>,
+) -> Result<T, EngineError> {
     let started = std::time::Instant::now();
-    let span = session_lifecycle_span();
+    let span = session_lifecycle_span(operation);
     let result = future.instrument(span.clone()).await;
     span.in_scope(|| {
         let completion = match &result {
             Ok(_) => OperationCompletion::succeeded(
                 DiagnosticDomain::Runtime,
-                DiagnosticOperation::SessionLifecycle,
+                operation,
                 DiagnosticRole::Local,
                 started.elapsed(),
             ),
             Err(error) => OperationCompletion::failed(
                 DiagnosticDomain::Runtime,
-                DiagnosticOperation::SessionLifecycle,
+                operation,
                 DiagnosticRole::Local,
                 session_lifecycle_error_type(error),
                 started.elapsed(),
@@ -241,11 +248,16 @@ impl SessionSupervisor {
     }
 
     pub(super) async fn rebuild_session(&self) -> Result<(), EngineError> {
-        let _lifecycle = self.lifecycle.lock().await;
-        self.operations.close_and_wait(None).await?;
-        self.stop_current_session(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
+        observe_runtime_operation(DiagnosticOperation::SessionRecovery, async {
+            let _lifecycle = self.lifecycle.lock().await;
+            self.operations.close_and_wait(None).await?;
+            self.stop_current_session(
+                uc_core::FileTransferCancellationReason::ConnectivityRecovery,
+            )
             .await?;
-        self.install_new_session(false).await
+            self.install_new_session(false).await
+        })
+        .await
     }
 
     pub(super) async fn transition_pending_session(&self) -> Result<Option<u64>, EngineError> {
@@ -391,7 +403,11 @@ impl SessionSupervisor {
         if self.session.lock().await.is_some() {
             return Ok(());
         }
-        self.install_new_session(false).await
+        observe_runtime_operation(
+            DiagnosticOperation::SessionLifecycle,
+            self.install_new_session(false),
+        )
+        .await
     }
 
     pub(super) async fn close_file_transfers(&self) -> Result<(), EngineError> {

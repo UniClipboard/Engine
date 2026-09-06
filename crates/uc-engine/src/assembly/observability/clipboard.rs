@@ -4,6 +4,9 @@ use std::time::Instant;
 use async_trait::async_trait;
 use tracing::Instrument;
 use uc_application::deps::ApplicationClipboardAdapters;
+use uc_application::facade::{
+    ClipboardOutboundOutcome, LocalClipboardOutcome, ResendEntryError, ResendReport,
+};
 use uc_core::clipboard::{ClipboardEntry, ClipboardRepositoryError, ClipboardSelectionDecision};
 use uc_core::ids::DeviceId;
 use uc_core::ports::{
@@ -42,15 +45,161 @@ pub(crate) fn observe_clipboard_dependencies(deps: &mut uc_application::deps::Ap
 }
 
 /// 包装已有完整本机复制调用；不读取内容、条目身份或业务步骤。
-pub(crate) async fn observe_local_copy<T, E>(
-    action: impl std::future::Future<Output = Result<T, E>>,
-) -> Result<T, E> {
-    observe_local_operation(
-        DiagnosticOperation::ClipboardCopyAndSync,
-        DiagnosticErrorType::Internal,
-        action,
+pub(crate) async fn observe_local_copy<E>(
+    action: impl std::future::Future<Output = Result<LocalClipboardOutcome, E>>,
+) -> Result<LocalClipboardOutcome, E> {
+    observe_local_clipboard(DiagnosticOperation::ClipboardCopyAndSync, action).await
+}
+
+pub(crate) async fn observe_explicit_send<E>(
+    action: impl std::future::Future<Output = Result<LocalClipboardOutcome, E>>,
+) -> Result<LocalClipboardOutcome, E> {
+    observe_local_clipboard(DiagnosticOperation::ClipboardSend, action).await
+}
+
+async fn observe_local_clipboard<E>(
+    operation: DiagnosticOperation,
+    action: impl std::future::Future<Output = Result<LocalClipboardOutcome, E>>,
+) -> Result<LocalClipboardOutcome, E> {
+    let started = Instant::now();
+    let span = clipboard_local_span(operation);
+    let mut cancellation = ClipboardOperationCancellation {
+        span: span.clone(),
+        operation,
+        started,
+        finished: false,
+    };
+    let result = action.instrument(span.clone()).await;
+    cancellation.finished = true;
+    span.in_scope(|| {
+        let completion = match &result {
+            Ok(outcome) => copy_completion(operation, outcome, started.elapsed()),
+            Err(_) => OperationCompletion::failed(
+                DiagnosticDomain::Clipboard,
+                operation,
+                DiagnosticRole::Local,
+                DiagnosticErrorType::Internal,
+                started.elapsed(),
+            ),
+        };
+        complete_operation(completion);
+    });
+    result
+}
+
+/// 只解释既有派送汇总，不读取目标身份，不改变派送或恢复策略。
+fn copy_completion(
+    operation: DiagnosticOperation,
+    outcome: &LocalClipboardOutcome,
+    elapsed: std::time::Duration,
+) -> OperationCompletion {
+    let domain = DiagnosticDomain::Clipboard;
+    let role = DiagnosticRole::Local;
+    let LocalClipboardOutcome::Completed(completion) = outcome else {
+        return OperationCompletion::skipped(domain, operation, role, elapsed);
+    };
+    let Some(ClipboardOutboundOutcome::Dispatched {
+        accepted,
+        duplicate,
+        offline,
+        errored,
+        pending,
+        ..
+    }) = &completion.dispatch
+    else {
+        return OperationCompletion::skipped(domain, operation, role, elapsed);
+    };
+    delivery_completion(
+        operation,
+        *accepted != 0 || *duplicate != 0,
+        *offline != 0 || *pending != 0,
+        *errored != 0,
+        elapsed,
     )
-    .await
+}
+
+fn delivery_completion(
+    operation: DiagnosticOperation,
+    completed: bool,
+    waiting: bool,
+    failed: bool,
+    elapsed: std::time::Duration,
+) -> OperationCompletion {
+    let domain = DiagnosticDomain::Clipboard;
+    let role = DiagnosticRole::Local;
+    if completed {
+        if waiting || failed {
+            OperationCompletion::partial(domain, operation, role, elapsed)
+        } else {
+            OperationCompletion::succeeded(domain, operation, role, elapsed)
+        }
+    } else if waiting {
+        OperationCompletion::deferred(domain, operation, role, elapsed)
+    } else if failed {
+        OperationCompletion::failed(
+            domain,
+            operation,
+            role,
+            DiagnosticErrorType::DeliveryFailed,
+            elapsed,
+        )
+    } else {
+        OperationCompletion::skipped(domain, operation, role, elapsed)
+    }
+}
+
+pub(crate) async fn observe_resend(
+    action: impl std::future::Future<Output = Result<ResendReport, ResendEntryError>>,
+) -> Result<ResendReport, ResendEntryError> {
+    let operation = DiagnosticOperation::ClipboardResend;
+    let started = Instant::now();
+    let span = clipboard_local_span(operation);
+    let mut cancellation = ClipboardOperationCancellation {
+        span: span.clone(),
+        operation,
+        started,
+        finished: false,
+    };
+    let result = action.instrument(span.clone()).await;
+    cancellation.finished = true;
+    span.in_scope(|| {
+        let domain = DiagnosticDomain::Clipboard;
+        let role = DiagnosticRole::Local;
+        let elapsed = started.elapsed();
+        let completion = match &result {
+            Ok(report) => delivery_completion(
+                operation,
+                report.accepted != 0 || report.duplicate != 0,
+                report.offline != 0 || report.pending != 0,
+                report.errored != 0,
+                elapsed,
+            ),
+            Err(
+                ResendEntryError::SynchronizationDisabled | ResendEntryError::NoEligibleTargets,
+            ) => OperationCompletion::skipped(domain, operation, role, elapsed),
+            Err(
+                ResendEntryError::EntryNotFound(_)
+                | ResendEntryError::EntryNotResendable { .. }
+                | ResendEntryError::TargetNotTrusted(_),
+            ) => OperationCompletion::rejected(domain, operation, role, elapsed),
+            Err(ResendEntryError::Storage(_)) => OperationCompletion::failed(
+                domain,
+                operation,
+                role,
+                DiagnosticErrorType::Storage,
+                elapsed,
+            ),
+            Err(ResendEntryError::Dispatch(_)) => OperationCompletion::failed(
+                domain,
+                operation,
+                role,
+                DiagnosticErrorType::DeliveryFailed,
+                elapsed,
+            ),
+        };
+        complete_operation(completion);
+    });
+    result
 }
 
 async fn observe_local_operation<T, E>(
@@ -252,6 +401,168 @@ fn error_type(error: &ClipboardDispatchError) -> DiagnosticErrorType {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn resend_uses_delivery_results_and_preserves_refusal() {
+        use super::observe_resend;
+        for (report, expected) in [
+            (
+                ResendReport {
+                    accepted: 1,
+                    duplicate: 0,
+                    offline: 1,
+                    errored: 0,
+                    pending: 0,
+                },
+                "partial",
+            ),
+            (
+                ResendReport {
+                    accepted: 0,
+                    duplicate: 0,
+                    offline: 1,
+                    errored: 0,
+                    pending: 0,
+                },
+                "deferred",
+            ),
+        ] {
+            let writer = CapturedWriter::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .without_time()
+                .with_writer(writer.clone())
+                .finish();
+            let result = observe_resend(async { Ok(report.clone()) })
+                .with_subscriber(subscriber)
+                .await
+                .expect("result");
+            assert_eq!(result, report);
+            let output = String::from_utf8(writer.0.lock().expect("logs").clone()).expect("utf8");
+            assert!(output.contains("clipboard.resend"));
+            assert!(output.contains(&format!("uc.outcome=\"{expected}\"")));
+        }
+        assert!(matches!(
+            observe_resend(async { Err(ResendEntryError::SynchronizationDisabled) }).await,
+            Err(ResendEntryError::SynchronizationDisabled)
+        ));
+    }
+    use uc_application::facade::{
+        ClipboardOutboundOutcome, LocalClipboardCompletion, LocalClipboardIndexStatus,
+        LocalClipboardOutcome,
+    };
+
+    #[tokio::test]
+    async fn copy_result_reflects_delivery_instead_of_only_returning_ok() {
+        for (accepted, duplicate, offline, errored, pending, expected) in [
+            (0, 0, 1, 0, 0, "deferred"),
+            (0, 0, 0, 1, 0, "error"),
+            (1, 0, 0, 1, 0, "partial"),
+            (1, 0, 1, 0, 0, "partial"),
+            (0, 1, 0, 0, 1, "partial"),
+            (0, 0, 1, 1, 0, "deferred"),
+            (0, 0, 0, 0, 1, "deferred"),
+            (0, 0, 0, 0, 0, "skipped"),
+            (1, 0, 0, 0, 0, "ok"),
+            (0, 1, 0, 0, 0, "ok"),
+            (usize::MAX, usize::MAX, 0, 0, 0, "ok"),
+        ] {
+            let outcome = LocalClipboardOutcome::Completed(LocalClipboardCompletion {
+                entry_id: "PRIVATE_ENTRY".into(),
+                snapshot_hash: "PRIVATE_HASH".into(),
+                deduplicated: false,
+                index: LocalClipboardIndexStatus::NotAttempted,
+                dispatch: Some(ClipboardOutboundOutcome::Dispatched {
+                    snapshot_hash: "PRIVATE_HASH".into(),
+                    per_target: vec![],
+                    accepted,
+                    duplicate,
+                    offline,
+                    errored,
+                    pending,
+                    pending_targets: vec![],
+                    at_ms: 0,
+                    blob_ref_count: 0,
+                }),
+            });
+            assert_copy_observation(outcome, expected).await;
+        }
+        assert_copy_observation(LocalClipboardOutcome::Empty, "skipped").await;
+        for dispatch in [
+            None,
+            Some(ClipboardOutboundOutcome::Skipped {
+                reason: "PRIVATE_REASON".into(),
+            }),
+        ] {
+            assert_copy_observation(
+                LocalClipboardOutcome::Completed(LocalClipboardCompletion {
+                    entry_id: "PRIVATE_ENTRY".into(),
+                    snapshot_hash: "PRIVATE_HASH".into(),
+                    deduplicated: false,
+                    index: LocalClipboardIndexStatus::NotAttempted,
+                    dispatch,
+                }),
+                "skipped",
+            )
+            .await;
+        }
+    }
+
+    async fn assert_copy_observation(outcome: LocalClipboardOutcome, expected: &str) {
+        let writer = CapturedWriter::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(writer.clone()),
+        );
+        let result = observe_local_copy(async { Ok::<_, ()>(outcome.clone()) })
+            .with_subscriber(subscriber)
+            .await;
+        assert_eq!(result, Ok(outcome));
+        let output = String::from_utf8(writer.0.lock().expect("logs").clone()).expect("utf8");
+        assert!(
+            output.contains(&format!("uc.outcome=\"{expected}\"")),
+            "expected {expected}, got {output}"
+        );
+        assert_eq!(
+            output
+                .lines()
+                .filter(|line| line.contains("event.name=\"uc.operation.completed\""))
+                .count(),
+            1
+        );
+        assert!(!output.contains("PRIVATE_"));
+    }
+
+    #[tokio::test]
+    async fn copy_failure_preserves_source_without_recording_private_error() {
+        let writer = CapturedWriter::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(writer.clone()),
+        );
+        let error = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "PRIVATE_CAPTURE_ERROR",
+        ))
+        .context("PRIVATE_CAPTURE_CONTEXT");
+        let result = observe_local_copy(async { Err::<LocalClipboardOutcome, _>(error) })
+            .with_subscriber(subscriber)
+            .await;
+        let error = result.expect_err("failure unchanged");
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .expect("source preserved")
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        let output = String::from_utf8(writer.0.lock().expect("logs").clone()).expect("utf8");
+        assert!(output.contains("uc.outcome=\"error\""));
+        assert!(!output.contains("PRIVATE_"));
+    }
     use std::io::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -323,12 +634,21 @@ mod tests {
         let _subscriber = tracing::subscriber::set_default(subscriber);
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(10),
-            observe_local_copy(std::future::pending::<Result<(), ()>>()),
+            observe_local_copy(std::future::pending::<Result<LocalClipboardOutcome, ()>>()),
         )
         .await;
         assert!(result.is_err());
         let output = String::from_utf8(writer.0.lock().expect("logs").clone()).expect("utf8");
-        assert_eq!(output.matches("uc.outcome=\"cancelled\"").count(), 1);
+        assert_eq!(
+            output
+                .lines()
+                .filter(
+                    |line| line.contains("event.name=\"uc.operation.completed\"")
+                        && line.contains("uc.outcome=\"cancelled\"")
+                )
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
