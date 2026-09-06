@@ -124,6 +124,20 @@ function cargoMetadata() {
   return parseJson(output, 'cargo metadata')
 }
 
+function runCargoBuildStorageCheck() {
+  const checker = join(REPOSITORY_ROOT, 'scripts/architecture/check-cargo-build-storage.mjs')
+  const result = spawnSync(process.execPath, [checker], {
+    cwd: REPOSITORY_ROOT,
+    encoding: 'utf8',
+  })
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
+  if (result.status !== 0) {
+    process.stderr.write(output)
+    throw new Error('Cargo build storage validation did not pass')
+  }
+  process.stdout.write(output)
+}
+
 function packageByName(metadata, name) {
   const found = metadata.packages.find(candidate => candidate.name === name)
   if (!found) throw new Error(`workspace package is missing: ${name}`)
@@ -2054,6 +2068,7 @@ function main() {
   if (realpathSync(process.cwd()) !== REPOSITORY_ROOT) {
     throw new Error(`run from repository root: ${REPOSITORY_ROOT}`)
   }
+  runCargoBuildStorageCheck()
   const metadata = cargoMetadata()
   const sources = repositorySources()
   const problems = collectProblems(metadata, sources)
