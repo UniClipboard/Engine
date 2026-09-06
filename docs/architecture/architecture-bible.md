@@ -825,6 +825,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-09-04 | 037 第一切片：观测输出隐私基线 | Apple/Android 系统日志与移动文件日志改为默认拒绝普通模块记录，只允许逐字段审核的稳定目标；历史调用点保留为可再生 inventory，不以批量机械改写扩大风险。独立隐私门禁覆盖全部生产 Rust 源并接入仓库 preflight，运行时文件哨兵证明未经审核的路径字段不会落盘。旧移动日志计划按已完成部分和由 037 取代部分归档；本轮尚未接入远程 exporter。 |
 | 2026-09-04 | 037 OpenTelemetry 与结构化日志规划 | 新增 active 规格 037：保留 035 的 Engine capability decorator，先阻断现有敏感日志，再建立宿主进程级真实 OTLP traces/logs、Infra 认证后 W3C context propagation、有界 JSONL 与 Collector 验收；Core 不感知观测，Application 不承担持续计时，Engine 不查询业务步骤。本地使用 Jaeger 验证 trace，生产 Collector 优先输出到 PostHog，远程诊断许可只归宿主，本地日志保留 7 天且总量不超过 100 MB。规格以 Clipboard 为跨设备 tracer bullet，契约冻结后允许 Space 配对与平台输出双 Agent 按独占文件并行，最终串行删除 `uc_otlp`、旧 timing/flow 和临时关联原型。本轮只形成计划，无生产行为变化。 |
 | 2026-09-04 | 观测不得泄露业务步骤 | 为配对日志关联尝试新增待切换步骤查询会把 Application 内部状态泄露给 Engine，已撤回。后续观测只能装饰既有完整能力；不得为日志、tracing 或关联号扩大 facade、port/result 接口，跨步骤关联由完整流程负责人提供不透明观测上下文，Engine 不据此编排步骤。 |
+| 2026-09-04 | Alpha 旧资料的 V3 表归属兼容 | Profile 存储升级仍严格拒绝未知表和缺失的必需表；三张已退役 legacy relationship 表允许在旧版本已完成清理后不存在，存在时仍按 Space control 归属清空，避免把合法 alpha.4 资料误判为损坏。 |
 | 2026-09-04 | 升级与重新配对观测补全（已由 037 取代） | 当时 Engine 曾记录 Sponsor settlement 和重新配对内部状态。037 已删除这些步骤级包装；当前只观测完整认证 endpoint、真实网络边界和独立 profile 升级能力，事件继续排除 profile、Space、设备、邀请、凭据、地址、路径与错误文本。 |
 | 2026-09-03 | 无用实现清理 | 删除已退役的邀请消费入口、恢复报告合并函数和冗余读取字段；仅用于内部回归的 MLS 辅助入口明确限定在测试构建内。本轮不改变产品行为或架构。 |
 | 2026-09-03 | Core 准入状态导入清理 | 删除父模块中已由子模块直接导入的三个冗余名称；本轮无行为或架构变化。 |

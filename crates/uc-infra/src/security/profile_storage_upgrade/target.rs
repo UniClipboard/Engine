@@ -84,6 +84,11 @@ const PROFILE_COORDINATION_TABLES: &[&str] = &[
 ];
 
 const TECHNICAL_TABLES: &[&str] = &["__diesel_schema_migrations", "uc_database_revision"];
+const OPTIONAL_RETIRED_TABLES: &[&str] = &[
+    "relationship_legacy_peer_address",
+    "relationship_legacy_space_member",
+    "relationship_legacy_trusted_peer",
+];
 
 impl TargetGenerationStager {
     pub(super) fn new(root: PathBuf, source_pool: DbPool, keys: Arc<AdmissionKeyManager>) -> Self {
@@ -347,7 +352,16 @@ fn ensure_tables_empty(path: &Path, tables: &[&str]) -> Result<(), ProfileStorag
                     .context("open runtime generation for ownership validation"),
             }
         })?;
+    let actual = load_table_names(&mut connection)?;
     for table in tables {
+        if !actual.contains(*table) {
+            if OPTIONAL_RETIRED_TABLES.contains(table) {
+                continue;
+            }
+            return Err(ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::anyhow!("runtime generation is missing an owned table"),
+            });
+        }
         let row = diesel::sql_query(format!("SELECT COUNT(*) AS count FROM \"{table}\""))
             .get_result::<CountRow>(&mut connection)
             .map_err(|source| ProfileStorageUpgradeError::Corrupt {
@@ -383,10 +397,13 @@ fn separate_database(
     connection
         .batch_execute("PRAGMA journal_mode = DELETE; PRAGMA foreign_keys = OFF;")
         .map_err(database_error)?;
-    validate_table_ownership(&mut connection)?;
+    let actual = validate_table_ownership(&mut connection)?;
     connection
         .transaction::<_, diesel::result::Error, _>(|connection| {
             for table in excluded_tables {
+                if !actual.contains(*table) {
+                    continue;
+                }
                 diesel::sql_query(format!("DELETE FROM \"{table}\"")).execute(connection)?;
             }
             Ok(())
@@ -403,11 +420,7 @@ fn separate_database(
 
 fn validate_table_ownership(
     connection: &mut diesel::sqlite::SqliteConnection,
-) -> Result<(), ProfileStorageUpgradeError> {
-    let rows =
-        diesel::sql_query("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
-            .load::<TableNameRow>(connection)
-            .map_err(database_error)?;
+) -> Result<std::collections::BTreeSet<String>, ProfileStorageUpgradeError> {
     let mut declared = std::collections::BTreeSet::new();
     for table in PROFILE_DATA_TABLES
         .iter()
@@ -421,11 +434,7 @@ fn validate_table_ownership(
             });
         }
     }
-    let actual = rows
-        .into_iter()
-        .map(|row| row.name)
-        .filter(|name| !name.starts_with("sqlite_"))
-        .collect::<std::collections::BTreeSet<_>>();
+    let actual = load_table_names(connection)?;
     let unknown = actual
         .iter()
         .filter(|name| !declared.contains(name.as_str()))
@@ -433,7 +442,7 @@ fn validate_table_ownership(
         .collect::<Vec<_>>();
     let missing = declared
         .iter()
-        .filter(|name| !actual.contains(**name))
+        .filter(|name| !actual.contains(**name) && !OPTIONAL_RETIRED_TABLES.contains(name))
         .copied()
         .collect::<Vec<_>>();
     if !unknown.is_empty() || !missing.is_empty() {
@@ -443,7 +452,21 @@ fn validate_table_ownership(
             ),
         });
     }
-    Ok(())
+    Ok(actual)
+}
+
+fn load_table_names(
+    connection: &mut diesel::sqlite::SqliteConnection,
+) -> Result<std::collections::BTreeSet<String>, ProfileStorageUpgradeError> {
+    diesel::sql_query("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .load::<TableNameRow>(connection)
+        .map(|rows| {
+            rows.into_iter()
+                .map(|row| row.name)
+                .filter(|name| !name.starts_with("sqlite_"))
+                .collect()
+        })
+        .map_err(database_error)
 }
 
 pub(super) fn file_digest(path: &Path) -> Result<[u8; 32], ProfileStorageUpgradeError> {
@@ -556,9 +579,10 @@ fn storage_error(source: std::io::Error) -> ProfileStorageUpgradeError {
 
 #[cfg(test)]
 mod tests {
+    use diesel::connection::SimpleConnection as _;
     use diesel::RunQueryDsl as _;
 
-    use super::{ensure_tables_empty, SPACE_CONTROL_TABLES};
+    use super::{ensure_tables_empty, separate_database, SPACE_CONTROL_TABLES};
     use crate::db::pool::init_db_pool;
 
     #[test]
@@ -574,5 +598,38 @@ mod tests {
         .unwrap();
 
         assert!(ensure_tables_empty(&database, SPACE_CONTROL_TABLES).is_err());
+    }
+
+    #[test]
+    fn separation_accepts_retired_relationship_tables_already_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("alpha4.sqlite");
+        let pool = init_db_pool(database.to_str().unwrap()).unwrap();
+        pool.get()
+            .unwrap()
+            .batch_execute(
+                "DROP TABLE relationship_legacy_space_member;\
+                 DROP TABLE relationship_legacy_trusted_peer;\
+                 DROP TABLE relationship_legacy_peer_address;",
+            )
+            .unwrap();
+        drop(pool);
+
+        separate_database(&database, SPACE_CONTROL_TABLES)
+            .expect("already-cleaned retired relationship tables are a valid source");
+    }
+
+    #[test]
+    fn separation_still_rejects_a_missing_required_table() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("missing-required.sqlite");
+        let pool = init_db_pool(database.to_str().unwrap()).unwrap();
+        pool.get()
+            .unwrap()
+            .batch_execute("DROP TABLE clipboard_entry;")
+            .unwrap();
+        drop(pool);
+
+        assert!(separate_database(&database, SPACE_CONTROL_TABLES).is_err());
     }
 }
