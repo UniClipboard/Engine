@@ -3,6 +3,7 @@ mod effect_executor;
 mod error;
 mod initializer;
 mod model;
+mod presentation;
 mod repository;
 mod restricted_delivery;
 
@@ -18,7 +19,6 @@ pub use effect_executor::{
 };
 pub use error::MembershipLedgerError;
 pub(crate) use initializer::InitializeSpaceMembershipUseCase;
-#[cfg(test)]
 pub use model::MembershipConflictRecord;
 pub use model::{
     InboundMembershipTransfer, InitiatedMembershipRemovalEffect, LoadedMembershipLedger,
@@ -27,6 +27,7 @@ pub use model::{
     MembershipLedgerMutation, PeerHistorySyncOutcome, PeerHistorySyncState,
     PeerReconciliationRecord, PendingMembershipEffect, RestrictedMembershipDelivery,
 };
+pub use presentation::{MembershipConflictMember, MembershipConflictPresentation};
 pub use repository::{CommitMembershipLedgerPort, LoadMembershipLedgerPort};
 pub(crate) use repository::{MembershipLedger, VerifiedMembershipLedger};
 pub(crate) use restricted_delivery::DeliverRestrictedMembershipUseCase;

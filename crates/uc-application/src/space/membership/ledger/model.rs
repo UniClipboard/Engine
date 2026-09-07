@@ -453,6 +453,9 @@ pub struct LoadedMembershipLedger {
     /// 两阶段恢复的私有 staged state 与幂等响应随 ledger 整体 AEAD 加密。
     #[serde(default)]
     pub membership_branch_recovery_sessions: BTreeMap<[u8; 32], MembershipBranchRecoverySession>,
+    /// 已验证的候选展示资料随整个账本加密；不得用于授予成员或恢复权限。
+    pub membership_conflict_presentations:
+        BTreeMap<MembershipConflictId, super::MembershipConflictPresentation>,
 }
 
 impl LoadedMembershipLedger {
@@ -473,6 +476,7 @@ impl LoadedMembershipLedger {
             membership_branch_transitions: BTreeMap::new(),
             consumed_membership_recovery_nonces: BTreeMap::new(),
             membership_branch_recovery_sessions: BTreeMap::new(),
+            membership_conflict_presentations: BTreeMap::new(),
         }
     }
 }

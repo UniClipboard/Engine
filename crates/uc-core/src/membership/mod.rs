@@ -72,8 +72,10 @@ pub use membership_branch_transition::{
     MEMBERSHIP_BRANCH_TRANSITION_FORMAT_V1,
 };
 pub use membership_conflict_policy::{
-    MembershipBranchId, MembershipConflictChoice, MembershipConflictDescription,
-    MembershipConflictId, MembershipConflictPolicy, MembershipConflictPolicyError,
+    MembershipBranchId, MembershipChangeFact, MembershipChangeKind, MembershipChangeSide,
+    MembershipConflictChoice, MembershipConflictDescription, MembershipConflictDevice,
+    MembershipConflictExplanation, MembershipConflictId, MembershipConflictPolicy,
+    MembershipConflictPolicyError, MembershipConflictReason, MembershipDecisionFact,
 };
 pub use membership_history::{
     ack_confirms_membership_history_target, plan_membership_history_reconciliation,

@@ -1517,6 +1517,116 @@ async fn f4_single_bridge_cannot_splice_sibling_histories_into_a_union() {
     topology.shutdown().await;
 }
 
+// 交接复现：真实四实例分别接受、保留，最后对照事前预览和事后成员。
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn handoff_four_device_removal_preview_matches_executed_choice() {
+    let rendezvous = mount_rendezvous().await;
+    let mut topology = MembershipTopology::new(rendezvous.uri());
+    topology
+        .run(&[
+            TopologyAction::Start { node: "A" },
+            TopologyAction::Start { node: "B" },
+            TopologyAction::Start { node: "C" },
+            TopologyAction::Start { node: "D" },
+            TopologyAction::Create { node: "A" },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "B",
+            },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "C",
+            },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "D",
+            },
+        ])
+        .await;
+    topology
+        .wait_for_equivalent_branch(&["A", "B", "C", "D"], 4)
+        .await;
+    let epoch = topology.diagnostics("A").await.group_epoch;
+    topology.wait_for_group_epoch(&["B", "C", "D"], epoch).await;
+    topology
+        .run(&[TopologyAction::Remove {
+            sponsor: "B",
+            target: "C",
+        }])
+        .await;
+    topology.wait_for_pending_change(&["A", "C", "D"]).await;
+    let apply_preview = topology.device_group_choices("A").await;
+    let keep_preview = topology.device_group_choices("D").await;
+    let pending = apply_preview.issues.first().unwrap();
+    assert_eq!(
+        pending.reason.kind,
+        uc_engine::DeviceGroupChoiceReasonKind::PendingRemoval
+    );
+    assert_eq!(pending.reason.changes.len(), 1);
+    let removed = &pending.reason.changes[0].target.device_id;
+    let candidate = pending
+        .choices
+        .iter()
+        .find(|choice| !choice.is_current_group)
+        .unwrap();
+    assert!(candidate.members_complete);
+    assert_eq!(candidate.members.len(), 3);
+    assert!(candidate
+        .members
+        .iter()
+        .all(|member| !member.display_name.is_empty() && &member.device_id != removed));
+    assert!(!candidate
+        .impact
+        .as_ref()
+        .unwrap()
+        .sync_scope_device_ids
+        .contains(removed));
+    topology
+        .decide_pending_change("A", PendingChangeChoice::Apply)
+        .await;
+    topology
+        .decide_pending_change("D", PendingChangeChoice::Keep)
+        .await;
+    let applied = topology.device_group_choices("A").await;
+    let kept = topology.device_group_choices("D").await;
+    let applied_diagnostics = topology.diagnostics("A").await;
+    let kept_diagnostics = topology.diagnostics("D").await;
+    topology.run(&[TopologyAction::Restart { node: "D" }]).await;
+    let restarted_kept = topology.device_group_choices("D").await;
+    let restarted_diagnostics = topology.diagnostics("D").await;
+    topology.shutdown().await;
+
+    assert_eq!(applied_diagnostics.effective_member_count, 3);
+    assert_eq!(kept_diagnostics.effective_member_count, 4);
+    assert_eq!(restarted_diagnostics.effective_member_count, 4);
+    assert!(restarted_kept.device_trust.current_change.is_none());
+    assert!(restarted_kept.issues.is_empty());
+    assert!(applied.device_trust.current_change.is_none());
+    assert!(kept.device_trust.current_change.is_none());
+    let change = apply_preview.device_trust.current_change.unwrap();
+    let kept_change = keep_preview.device_trust.current_change.unwrap();
+    assert!(change.target_device_ids.iter().all(|id| applied
+        .device_trust
+        .devices
+        .iter()
+        .any(|device| &device.device_id == id
+            && device.membership == uc_engine::DeviceMembershipSummary::Removed)));
+    assert!(kept_change.target_device_ids.iter().all(|id| kept
+        .device_trust
+        .devices
+        .iter()
+        .any(|device| &device.device_id == id
+            && device.membership == uc_engine::DeviceMembershipSummary::Active)));
+    assert!(
+        change
+            .apply_impact
+            .usable_device_ids
+            .iter()
+            .all(|id| !change.target_device_ids.contains(id)),
+        "真实选择已经移除目标，但事前继续同步名单仍包含目标"
+    );
+}
+
 // F3：同一远端移除被不同设备接受和拒绝后，决定必须跨重启持久并保持内容隔离。
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn f3_opposite_removal_decisions_persist_divergence_across_restart() {
@@ -1675,13 +1785,58 @@ async fn f2_concurrent_leaf_removals_resolve_to_selected_branch() {
     topology.assert_snapshot("B", 4, 1).await;
     topology.assert_snapshot("C", 4, 1).await;
     let selected = topology.diagnostics("B").await;
+    let choices = topology.device_group_choices("C").await;
+    let remote = choices
+        .issues
+        .iter()
+        .flat_map(|issue| &issue.choices)
+        .find(|choice| !choice.is_current_group)
+        .unwrap();
+    assert!(
+        remote.members_complete,
+        "已验证远端分支必须提供完整候选名单"
+    );
+    assert_eq!(remote.member_device_ids.len(), 4);
+    assert_eq!(remote.members.len(), 4);
+    assert!(remote
+        .members
+        .iter()
+        .all(|member| !member.display_name.is_empty()));
+    let conflict = choices
+        .issues
+        .iter()
+        .find(|issue| issue.issue_id.starts_with("c:"))
+        .unwrap();
+    assert_eq!(
+        conflict.reason.kind,
+        uc_engine::DeviceGroupChoiceReasonKind::DifferentRemovals
+    );
+    assert_eq!(conflict.reason.changes.len(), 2);
+    let removed = &conflict
+        .reason
+        .changes
+        .iter()
+        .find(|change| change.side == uc_engine::DeviceGroupChangeSideSummary::Remote)
+        .unwrap()
+        .target
+        .device_id;
+    let impact = remote.impact.as_ref().unwrap();
+    assert!(impact.paused_device_ids.contains(removed));
+    assert!(impact.requires_rejoin_device_ids.contains(removed));
+    assert!(!impact.sync_scope_device_ids.contains(removed));
+    assert_eq!(
+        impact.pending_confirmation_device_ids,
+        impact.sync_scope_device_ids
+    );
     topology
         .run(&[TopologyAction::ResolveConflict {
             node: "C",
             branch_from: "B",
         }])
         .await;
-    topology.wait_for_equivalent_branch(&["B", "C"], 4).await;
+    topology
+        .wait_for_equivalent_branch_named(&["B", "C"], 4, "F2 selected candidate recovery")
+        .await;
     topology.assert_snapshot("C", 4, 0).await;
     let selected_after_recovery = topology.diagnostics("B").await;
     topology

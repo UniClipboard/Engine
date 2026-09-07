@@ -153,7 +153,8 @@ activity，持有唯一暂停、恢复和失败补偿顺序。Search 与 receive
 
 | 目录 | 主要文件 | 职责 |
 | --- | --- | --- |
-| `membership/ledger/` | `repository.rs`, `model.rs`, `join_record.rs`, `current_scope.rs`, `effect_executor.rs`, `restricted_delivery.rs`, `initializer.rs` | 验证和原子提交全部 application 成员事实；加入记录版本只在 ledger 内推进 |
+| `membership/ledger/` | `repository.rs`, `model.rs`, `current_scope.rs`, `effect_executor.rs`, `restricted_delivery.rs`, `initializer.rs` | 验证、读取和条件原子提交全部成员事实，不编排证据处理流程 |
+| `membership/reconcile_history_evidence/` | `use_case.rs`, `mod.rs` | 完整处理认证证据、旧选择衔接、关系提交和同快照回复；入站与主动核对共用 |
 | `membership/query_device_trust/` | `use_case.rs`, `model.rs`, `ports.rs`, `error.rs` | 单次读取完整设备信任状态 |
 | `membership/remove_space_member/` | `use_case.rs`, `model.rs`, `ports.rs`, `error.rs` | 本机发起正式成员移除 |
 | `membership/decide_device_trust_change/` | `use_case.rs`, `model.rs`, `error.rs` | 接受或拒绝远端移除变化 |
@@ -395,6 +396,9 @@ flowchart TD
 - **重点关注**：AllCurrentPeers 使用固定 10 秒总预算，不按设备叠加；单 peer 独立锁；页号只能严格前进一步；已移除、分叉和无效设备不能收到完整历史。
 
 ### 内部恢复 Cases
+
+成员规则与完整证据处理的细分归属见[成员历史职责](membership-history-ownership.md)。Core 负责可信事实和纯转换，
+`ReconcileMembershipEvidenceUseCase` 对收到证据后的业务处理负责，ledger 只提供验证读取与原子提交。
 
 #### `MaintainSpaceMembershipUseCase`
 

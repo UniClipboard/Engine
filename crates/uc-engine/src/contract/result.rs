@@ -550,19 +550,26 @@ pub struct DeviceGroupChoicesSummary {
     pub issues: Vec<DeviceGroupChoiceIssueSummary>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceGroupChoiceIssueSummary {
     pub issue_id: String,
     pub choices: Vec<DeviceGroupChoiceOptionSummary>,
+    #[serde(default)]
+    pub reason: super::DeviceGroupChoiceReasonSummary,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceGroupChoiceOptionSummary {
     pub choice_id: String,
     pub is_current_group: bool,
     pub requires_re_pairing: bool,
     pub member_device_ids: Vec<String>,
     pub members_complete: bool,
+    #[serde(default)]
+    pub members: Vec<super::DeviceGroupChoiceMemberSummary>,
+    #[serde(default)]
+    pub source_device_ids: Vec<String>,
+    pub impact: Option<super::DeviceGroupChoiceImpactSummary>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

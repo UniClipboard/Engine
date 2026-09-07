@@ -55,16 +55,17 @@ pub use membership::{
     DecideDeviceTrustChangeResult, DeviceTrustChangeChoice,
 };
 pub use membership::{
-    DeviceTrustDevice, DeviceTrustMembership, DeviceTrustObservation, DeviceTrustRelationship,
-    DeviceTrustStatus, DeviceTrustSyncState, PendingDeviceTrustChange, QueryDeviceTrustError,
-};
-pub use membership::{MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult};
-pub use membership::{
-    MembershipConflictBranchView, MembershipConflictStatus, MembershipConflictView,
-    MembershipConflictsView, MembershipDiagnosticsView, QueryMembershipConflictsError,
-    QueryMembershipDiagnosticsError, ResolveMembershipConflictError,
+    DeviceGroupChoiceImpact, MembershipConflictBranchView, MembershipConflictStatus,
+    MembershipConflictView, MembershipConflictsView, MembershipDiagnosticsView,
+    QueryMembershipConflictsError, QueryMembershipDiagnosticsError, ResolveMembershipConflictError,
     ResolveMembershipConflictInput, ResolveMembershipConflictResult,
 };
+pub use membership::{
+    DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
+    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, PendingDeviceTrustChange,
+    QueryDeviceTrustError,
+};
+pub use membership::{MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult};
 
 // Assembly contract re-exported by `crate::deps`.
 pub use admission::{
@@ -128,7 +129,8 @@ pub use membership::{
     CommitMembershipLedgerPort, CurrentSpaceMemberScope, CurrentSpaceMemberScopeError,
     CurrentSpaceMemberScopePort, InboundMembershipTransfer, InitiatedMembershipRemovalEffect,
     LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipBranchRecoverySession,
-    MembershipBranchRecoverySessionState, MembershipEffectExecutionError, MembershipEffectKind,
+    MembershipBranchRecoverySessionState, MembershipConflictMember, MembershipConflictPresentation,
+    MembershipConflictRecord, MembershipEffectExecutionError, MembershipEffectKind,
     MembershipEffectPhase, MembershipLedgerError, MembershipLedgerMutation, PausedSpaceMember,
     PeerHistorySyncState, PeerReconciliationRecord, PendingMembershipEffect,
     RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,

@@ -68,11 +68,10 @@ impl IssueMembershipBranchRecoveryUseCase {
             .get(&conflict_id)
             .ok_or_else(rejected)?;
         if record.local_branch_id != target_branch_id
-            || MembershipConflictPolicy::branch_id(&history).map_err(|error| {
-                IssueMembershipBranchRecoveryError::Corrupt {
+            || !MembershipConflictPolicy::matches_persisted_branch(&history, target_branch_id)
+                .map_err(|error| IssueMembershipBranchRecoveryError::Corrupt {
                     source: anyhow::Error::new(error),
-                }
-            })? != target_branch_id
+                })?
         {
             return Err(rejected());
         }

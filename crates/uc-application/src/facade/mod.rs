@@ -37,16 +37,16 @@ pub use crate::profile::factory_reset::{
 pub use crate::profile::probe_profile_key_access::ProbeProfileKeyAccessError;
 pub use crate::space::{
     CancelSpaceJoinError, CurrentJoinStatus, DecideDeviceTrustChange, DecideDeviceTrustChangeError,
-    DecideDeviceTrustChangeResult, DeviceTrustChangeChoice, DeviceTrustDevice,
-    DeviceTrustMembership, DeviceTrustObservation, DeviceTrustRelationship, DeviceTrustStatus,
-    DeviceTrustSyncState, JoinSpaceError, JoinSpaceInput, JoinSpaceResult, JoinedSpace,
-    LockSpaceSessionError, MembershipCommitReceipt, MembershipConflictStatus,
-    MembershipDiagnosticsView, NetworkRecoveryEvent, NetworkRecoveryFacade, NetworkRecoveryPhase,
-    NetworkRecoveryRequestError, NetworkRecoveryStatus, PendingDeviceTrustChange,
-    PendingInboundMember, QueryDeviceTrustError, QueryMembershipDiagnosticsError,
-    QuerySpaceAccessStateError, RebuildNetworkSessionError, RebuildNetworkSessionPort,
-    RecoverSpaceSessionError, RecoverSpaceSessionResult, RemoveSpaceMemberError,
-    RemoveSpaceMemberResult, SpaceAccessState,
+    DecideDeviceTrustChangeResult, DeviceGroupChoiceImpact, DeviceTrustChangeChoice,
+    DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
+    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, JoinSpaceError,
+    JoinSpaceInput, JoinSpaceResult, JoinedSpace, LockSpaceSessionError, MembershipCommitReceipt,
+    MembershipConflictStatus, MembershipDiagnosticsView, NetworkRecoveryEvent,
+    NetworkRecoveryFacade, NetworkRecoveryPhase, NetworkRecoveryRequestError,
+    NetworkRecoveryStatus, PendingDeviceTrustChange, PendingInboundMember, QueryDeviceTrustError,
+    QueryMembershipDiagnosticsError, QuerySpaceAccessStateError, RebuildNetworkSessionError,
+    RebuildNetworkSessionPort, RecoverSpaceSessionError, RecoverSpaceSessionResult,
+    RemoveSpaceMemberError, RemoveSpaceMemberResult, SpaceAccessState,
 };
 
 pub use crate::clipboard::active::{ActiveClipboardFacade, ActiveClipboardReconcileOutcome};

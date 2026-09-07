@@ -167,6 +167,25 @@ struct StaticObservations {
     calls: Arc<Mutex<Vec<Vec<DeviceId>>>>,
 }
 
+struct AllOfflineObservations;
+
+#[async_trait]
+impl LoadDeviceTrustObservationsPort for AllOfflineObservations {
+    async fn load(
+        &self,
+        device_ids: &[DeviceId],
+    ) -> Result<Vec<DeviceTrustObservation>, QueryDeviceTrustError> {
+        Ok(device_ids
+            .iter()
+            .map(|device_id| DeviceTrustObservation {
+                device_id: device_id.clone(),
+                display_name: None,
+                reachability: ReachabilityState::Offline,
+            })
+            .collect())
+    }
+}
+
 struct StaticCurrentJoin(Option<CurrentJoinStatus>);
 
 struct LocalOnlyObservations;
@@ -418,6 +437,27 @@ async fn status_exposes_the_current_pending_removal_facts() {
     assert_eq!(change.proposed_by_device_id, DeviceId::new("device-b"));
     assert_eq!(change.target_device_ids, vec![DeviceId::new("device-a")]);
     assert!(change.includes_local_device);
+    assert!(change.apply_impact.usable_device_ids.is_empty());
+    assert_eq!(
+        change.apply_impact.member_device_ids,
+        vec![DeviceId::new("device-b")]
+    );
+    assert_eq!(
+        change.apply_impact.local_membership,
+        DeviceTrustMembership::Removed
+    );
+    assert_eq!(
+        change.keep_current_impact.usable_device_ids,
+        vec![DeviceId::new("device-a")]
+    );
+    assert_eq!(
+        change.keep_current_impact.paused_device_ids,
+        vec![DeviceId::new("device-b")]
+    );
+    assert_eq!(
+        change.keep_current_impact.local_membership,
+        DeviceTrustMembership::Active
+    );
     let history = VersionedMembershipHistory::decode_persisted_v2(
         &ledger_with_pending_local_removal()
             .membership_history
@@ -430,6 +470,123 @@ async fn status_exposes_the_current_pending_removal_facts() {
         event.operation,
         MembershipOperationV2::RemoveDevice { .. }
     ));
+}
+
+#[tokio::test]
+async fn pending_peer_removal_previews_match_each_selected_history() {
+    let mut loaded = active_ledger();
+    let members = vec![
+        member_facts("device-a", 0x41),
+        member_facts("device-b", 0x42),
+        member_facts("device-c", 0x43),
+        member_facts("device-d", 0x44),
+    ];
+    let mut history = VersionedMembershipHistory::from_activation_baseline(
+        MembershipActivationBaselineV2::Established {
+            lineage_id: "space-a".to_owned(),
+            head_event_id: MembershipEventId::from_hex(&"11".repeat(32)).unwrap(),
+            head_depth: 0,
+            current_members: members.clone(),
+        },
+    )
+    .unwrap();
+    let local = members[0].0.member_instance;
+    let mut removal = history
+        .create_unsigned_local_removal_event(
+            members[1].0.member_instance,
+            &members[1].1,
+            members[2].0.member_instance,
+            [0x31; 16],
+            [0x32; 32],
+        )
+        .unwrap();
+    removal.signature = vec![0x33];
+    let removal_id = removal.event_id();
+    history
+        .verify_and_receive_remote_event_for_local_member(removal, local, &AcceptingVerifier)
+        .unwrap();
+    loaded.membership_history = Some(history.encode_persisted_v2().unwrap());
+    for (facts, _) in &members[1..] {
+        let mut peer = loaded.peer_reconciliation[&DeviceId::new("device-b")].clone();
+        peer.peer_device_id = facts.device_id.clone();
+        peer.relationship = if facts.device_id.as_str() == "device-b" {
+            MembershipHistoryRelationship::PendingRemovalDecision
+        } else {
+            MembershipHistoryRelationship::Consistent
+        };
+        loaded
+            .peer_reconciliation
+            .insert(facts.device_id.clone(), peer);
+    }
+    let repository = Arc::new(MemoryLedgerRepository { loaded });
+    let query = QueryDeviceTrustUseCase::new(
+        Arc::new(MembershipLedger::new(
+            repository.clone(),
+            repository,
+            Arc::new(AcceptingVerifier),
+        )),
+        Arc::new(AllOfflineObservations),
+        Arc::new(StaticCurrentJoin(None)),
+    );
+    let change = query.execute().await.unwrap().current_change.unwrap();
+    assert_eq!(
+        change.apply_impact.usable_device_ids,
+        ["device-a", "device-b", "device-d"].map(DeviceId::new)
+    );
+    assert_eq!(
+        change.apply_impact.paused_device_ids,
+        vec![DeviceId::new("device-c")]
+    );
+    assert_eq!(
+        change.keep_current_impact.usable_device_ids,
+        ["device-a", "device-c", "device-d"].map(DeviceId::new)
+    );
+    assert_eq!(
+        change.keep_current_impact.paused_device_ids,
+        vec![DeviceId::new("device-b")]
+    );
+    for (decision, preview) in [
+        (
+            uc_core::membership::RemovalDecision::Accept,
+            change.apply_impact,
+        ),
+        (
+            uc_core::membership::RemovalDecision::Reject,
+            change.keep_current_impact,
+        ),
+    ] {
+        let mut selected = history.clone();
+        let mut signed = selected
+            .create_unsigned_local_removal_decision(
+                removal_id,
+                local,
+                &members[0].1,
+                decision,
+                [0x71; 16],
+            )
+            .unwrap();
+        signed.signature = vec![0x72];
+        selected
+            .apply_signed_local_removal_decision(signed, local, &AcceptingVerifier)
+            .unwrap();
+        let mut actual = selected
+            .effective_members()
+            .into_iter()
+            .map(|member| {
+                selected
+                    .admission_facts_for(member)
+                    .unwrap()
+                    .device_id
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        actual.sort();
+        assert_eq!(preview.member_device_ids, actual);
+        assert!(preview
+            .usable_device_ids
+            .iter()
+            .all(|id| !preview.paused_device_ids.contains(id)));
+    }
 }
 
 #[tokio::test]

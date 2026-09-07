@@ -11,8 +11,8 @@ use crate::space::membership::MembershipLedger;
 use crate::space::membership::SpaceMemberPauseReason;
 
 use super::{
-    DeviceTrustDevice, DeviceTrustMembership, DeviceTrustObservation, DeviceTrustRelationship,
-    DeviceTrustStatus, DeviceTrustSyncState, LoadCurrentJoinStatusPort,
+    DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
+    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, LoadCurrentJoinStatusPort,
     LoadDeviceTrustObservationsPort, PendingDeviceTrustChange, QueryDeviceTrustError,
 };
 
@@ -178,7 +178,8 @@ impl QueryDeviceTrustUseCase {
             });
         }
 
-        let current_change = pending_change(history, local_member_instance)?;
+        let current_change =
+            pending_change(history, local_member_instance, &devices, snapshot.record())?;
         Ok(DeviceTrustStatus {
             revision: snapshot.record().revision,
             local_device_id: Some(local_device_id),
@@ -200,6 +201,8 @@ impl QueryDeviceTrustUseCase {
 fn pending_change(
     history: &VersionedMembershipHistory,
     local_member: MemberInstanceId,
+    devices: &[DeviceTrustDevice],
+    record: &crate::space::membership::LoadedMembershipLedger,
 ) -> Result<Option<PendingDeviceTrustChange>, QueryDeviceTrustError> {
     let Some(change_id) = history.pending_removal_decision(local_member) else {
         return Ok(None);
@@ -221,11 +224,115 @@ fn pending_change(
         .admission_facts_for(target)
         .map(|facts| facts.device_id.clone())
         .ok_or(QueryDeviceTrustError::RecoveryRequired)?;
+    let impact = |apply: bool| -> Result<DeviceTrustImpact, QueryDeviceTrustError> {
+        let members = if apply {
+            history.effective_members_at(change_id)
+        } else {
+            history.effective_members()
+        };
+        let local_removed = !members.contains(&local_member);
+        let active_members = history.active_members();
+        let mut member_devices = members
+            .into_iter()
+            .map(|member| {
+                history
+                    .admission_facts_for(member)
+                    .map(|facts| crate::space::membership::MembershipConflictMember {
+                        device: uc_core::membership::MembershipConflictDevice {
+                            device_id: facts.device_id.clone(),
+                            display_name: facts.device_name.clone(),
+                        },
+                        active: active_members.contains(&member),
+                    })
+                    .ok_or(QueryDeviceTrustError::RecoveryRequired)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        member_devices.sort_by(|a, b| a.device.device_id.cmp(&b.device.device_id));
+        let member_device_ids: Vec<_> = member_devices
+            .iter()
+            .map(|member| member.device.device_id.clone())
+            .collect();
+        let mut usable_device_ids = Vec::new();
+        let mut paused_device_ids = Vec::new();
+        for device in devices
+            .iter()
+            .filter(|device| device.membership != DeviceTrustMembership::Removed)
+        {
+            let usable = !local_removed
+                && member_device_ids.contains(&device.device_id)
+                && if device.device_id == proposed_by_device_id {
+                    apply
+                        && matches!(
+                            device.sync_state,
+                            DeviceTrustSyncState::Usable
+                                | DeviceTrustSyncState::Paused(
+                                    SpaceMemberPauseReason::PendingLocalDecision
+                                )
+                        )
+                } else {
+                    device.sync_state == DeviceTrustSyncState::Usable
+                };
+            if usable {
+                usable_device_ids.push(device.device_id.clone());
+            } else {
+                paused_device_ids.push(device.device_id.clone());
+            }
+        }
+        let desired_head = if apply {
+            Some(change_id)
+        } else {
+            history.current_head()
+        };
+        let pending_confirmation_device_ids = usable_device_ids
+            .iter()
+            .filter(|id| {
+                let id = *id;
+                record.local_device_id.as_ref() != Some(id)
+                    && !(apply && id == &proposed_by_device_id)
+                    && record
+                        .peer_reconciliation
+                        .get(id)
+                        .and_then(|peer| peer.confirmed_position.as_ref())
+                        .and_then(|position| position.event_id)
+                        != desired_head
+            })
+            .cloned()
+            .collect();
+        Ok(DeviceTrustImpact {
+            members: member_devices,
+            member_device_ids,
+            usable_device_ids,
+            paused_device_ids,
+            local_membership: if local_removed {
+                DeviceTrustMembership::Removed
+            } else {
+                devices
+                    .iter()
+                    .find(|device| device.is_local)
+                    .map(|device| device.membership)
+                    .ok_or(QueryDeviceTrustError::RecoveryRequired)?
+            },
+            requires_rejoin_device_ids: if apply {
+                vec![target_device_id.clone()]
+            } else {
+                Vec::new()
+            },
+            pending_confirmation_device_ids,
+        })
+    };
+    let apply_impact = impact(true)?;
+    let keep_current_impact = impact(false)?;
     Ok(Some(PendingDeviceTrustChange {
         change_id,
         proposed_by_device_id,
         target_device_ids: vec![target_device_id],
         includes_local_device: target == local_member,
+        apply_impact,
+        keep_current_impact,
+        explanation: uc_core::membership::MembershipConflictExplanation::pending_removal(
+            history, change_id,
+        )
+        .map_err(|_| QueryDeviceTrustError::RecoveryRequired)?,
     }))
 }
 

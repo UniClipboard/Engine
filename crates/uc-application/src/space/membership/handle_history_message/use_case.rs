@@ -11,7 +11,8 @@ use uc_core::membership::{
 use crate::space::membership::{
     InboundMembershipTransfer as LedgerInboundTransfer, LoadedMembershipLedger,
     MembershipEffectKind, MembershipEffectPhase, MembershipLedger, MembershipLedgerError,
-    PeerReconciliationRecord, PendingMembershipEffect, WakeSpaceMembershipMaintenancePort,
+    PeerReconciliationRecord, PendingMembershipEffect, ReconcileMembershipEvidenceUseCase,
+    WakeSpaceMembershipMaintenancePort,
 };
 
 use super::{AuthenticatedMember, HandleMembershipHistoryMessageError};
@@ -21,6 +22,7 @@ pub(super) const MAX_COMPLETED_INBOUND_TRANSFERS: usize = 256;
 
 pub(crate) struct HandleMembershipHistoryMessageUseCase {
     ledger: Arc<MembershipLedger>,
+    evidence: ReconcileMembershipEvidenceUseCase,
     execution_lock: tokio::sync::Mutex<()>,
     maintenance_wake: Option<Arc<dyn WakeSpaceMembershipMaintenancePort>>,
 }
@@ -29,6 +31,7 @@ impl HandleMembershipHistoryMessageUseCase {
     #[cfg(test)]
     pub(crate) fn new(ledger: Arc<MembershipLedger>) -> Self {
         Self {
+            evidence: ReconcileMembershipEvidenceUseCase::new(ledger.clone()),
             ledger,
             execution_lock: tokio::sync::Mutex::new(()),
             maintenance_wake: None,
@@ -40,6 +43,7 @@ impl HandleMembershipHistoryMessageUseCase {
         maintenance_wake: Arc<dyn WakeSpaceMembershipMaintenancePort>,
     ) -> Self {
         Self {
+            evidence: ReconcileMembershipEvidenceUseCase::new(ledger.clone()),
             ledger,
             execution_lock: tokio::sync::Mutex::new(()),
             maintenance_wake: Some(maintenance_wake),
@@ -388,9 +392,9 @@ impl HandleMembershipHistoryMessageUseCase {
             ));
         }
         let _guard = self.execution_lock.lock().await;
-        let Some(pages) = self
-            .ledger
-            .exchange_conflict_evidence(source.device_id(), &evidence)
+        let Some(exchange) = self
+            .evidence
+            .execute(source.device_id(), &evidence)
             .await
             .map_err(map_ledger_error)?
         else {
@@ -398,18 +402,8 @@ impl HandleMembershipHistoryMessageUseCase {
                 MembershipHistoryAckV3::Invalid,
             ));
         };
-        let transfer_id = self
-            .ledger
-            .load_verified()
-            .await
-            .map_err(map_ledger_error)?
-            .history()
-            .ok_or(HandleMembershipHistoryMessageError::RecoveryRequired)?
-            .current_position()
-            .map_err(|_| HandleMembershipHistoryMessageError::RecoveryRequired)?
-            .history_digest;
         Ok(MembershipHistoryMessage::ConflictEvidenceV3(
-            uc_core::membership::MembershipConflictEvidenceV3 { transfer_id, pages },
+            exchange.response,
         ))
     }
 

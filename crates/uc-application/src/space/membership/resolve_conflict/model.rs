@@ -3,13 +3,28 @@ use uc_core::membership::{
     MembershipConflictId,
 };
 
-use crate::space::membership::{DeviceTrustStatus, MembershipConflictStatus};
+use crate::space::membership::{
+    DeviceTrustMembership, DeviceTrustStatus, MembershipConflictMember, MembershipConflictStatus,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceGroupChoiceImpact {
+    /// 选择后的候选同步范围，不授予实际发送权限。
+    pub sync_scope_device_ids: Vec<uc_core::DeviceId>,
+    pub paused_device_ids: Vec<uc_core::DeviceId>,
+    pub pending_confirmation_device_ids: Vec<uc_core::DeviceId>,
+    pub requires_rejoin_device_ids: Vec<uc_core::DeviceId>,
+    pub local_membership: DeviceTrustMembership,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MembershipConflictBranchView {
     pub branch_id: MembershipBranchId,
     pub is_local: bool,
     pub choice: MembershipConflictChoice,
+    pub members: Option<Vec<MembershipConflictMember>>,
+    pub impact: Option<DeviceGroupChoiceImpact>,
+    pub source_device_ids: Vec<uc_core::DeviceId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +37,7 @@ pub struct MembershipConflictView {
     pub evidence_peer_count: usize,
     pub branches: [MembershipConflictBranchView; 2],
     pub local_resolution_completed: bool,
+    pub explanation: uc_core::membership::MembershipConflictExplanation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

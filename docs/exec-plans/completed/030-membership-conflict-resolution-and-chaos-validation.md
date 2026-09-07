@@ -49,7 +49,7 @@ Space 控制资格并切换到目标成员历史与安全状态。profile data g
 
 ```text
 Component: VersionedMembershipHistory
-Path: crates/uc-core/src/membership/versioned_membership_history.rs
+Path: crates/uc-core/src/membership/versioned_membership_history/mod.rs
 Responsibility: 验证单父历史、祖先关系、移除决定和 Diverged。
 Relationship: 继续作为分支真实性和成员资格的唯一事实来源；不执行切换。
 ```

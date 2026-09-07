@@ -245,6 +245,14 @@ impl DecideDeviceTrustChangeUseCase {
                                 payload: decision_payload,
                             },
                         );
+                    } else {
+                        for conflict in record.membership_conflicts.values_mut() {
+                            if conflict.selected_branch_id.is_none()
+                                && uc_core::membership::MembershipConflictPolicy::has_recorded_local_choice(history, local_member, conflict.remote_branch_id) {
+                                conflict.status = crate::space::membership::MembershipConflictStatus::Completed;
+                                conflict.selected_branch_id = Some(conflict.local_branch_id);
+                            }
+                        }
                     }
                     Ok(())
                 },

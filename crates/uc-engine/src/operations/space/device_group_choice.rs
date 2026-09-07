@@ -1,13 +1,15 @@
 use uc_application::facade::{
     ChooseDeviceGroup, ChooseDeviceGroupResult, DeviceGroupChoice, DeviceGroupIssue,
 };
-use uc_core::membership::{MembershipBranchId, MembershipConflictChoice, MembershipConflictId};
+use uc_core::membership::{MembershipBranchId, MembershipConflictId};
+
+mod presentation;
 
 use crate::operations::device::member::device_trust_snapshot;
 use crate::{
-    ChooseDeviceGroupInput, DeviceGroupChoiceIssueSummary, DeviceGroupChoiceOptionSummary,
-    DeviceGroupChoiceOutcomeSummary, DeviceGroupChoiceResultSummary, DeviceGroupChoicesSummary,
-    EngineError, EngineErrorCategory, OperationResult,
+    ChooseDeviceGroupInput, DeviceGroupChoiceIssueSummary, DeviceGroupChoiceOutcomeSummary,
+    DeviceGroupChoiceResultSummary, DeviceGroupChoicesSummary, EngineError, EngineErrorCategory,
+    OperationResult,
 };
 
 pub async fn execute_query_device_group_choices(
@@ -20,69 +22,32 @@ pub async fn execute_query_device_group_choices(
         );
         unavailable()
     })?;
-    let current_members = view
+    let local = view
         .device_trust
-        .devices
-        .iter()
-        .filter(|device| {
-            device.membership != uc_application::facade::DeviceTrustMembership::Removed
-        })
-        .map(|device| device.device_id.as_str().to_owned())
-        .collect::<Vec<_>>();
+        .local_device_id
+        .as_ref()
+        .map(|id| id.as_str())
+        .unwrap_or_default();
     let mut issues = Vec::new();
     if let Some(change) = &view.device_trust.current_change {
-        let targets = change
-            .target_device_ids
-            .iter()
-            .map(|id| id.as_str().to_owned())
-            .collect::<Vec<_>>();
-        let applied_members = current_members
-            .iter()
-            .filter(|id| !targets.contains(id))
-            .cloned()
-            .collect();
         issues.push(DeviceGroupChoiceIssueSummary {
             issue_id: format!("p:{}", change.change_id.to_hex()),
-            choices: vec![
-                DeviceGroupChoiceOptionSummary {
-                    choice_id: "apply".to_owned(),
-                    is_current_group: false,
-                    requires_re_pairing: change.includes_local_device,
-                    member_device_ids: applied_members,
-                    members_complete: true,
-                },
-                DeviceGroupChoiceOptionSummary {
-                    choice_id: "keep".to_owned(),
-                    is_current_group: true,
-                    requires_re_pairing: false,
-                    member_device_ids: current_members.clone(),
-                    members_complete: true,
-                },
-            ],
+            choices: presentation::pending(change, local),
+            reason: presentation::reason(change.explanation.clone()),
         });
     }
     for conflict in view.conflicts.conflicts {
         if conflict.local_resolution_completed {
             continue;
         }
-        let choices = conflict
-            .branches
-            .into_iter()
-            .map(|branch| DeviceGroupChoiceOptionSummary {
-                choice_id: format!("b:{}", encode(branch.branch_id.as_bytes())),
-                is_current_group: branch.is_local,
-                requires_re_pairing: branch.choice == MembershipConflictChoice::RePairingRequired,
-                member_device_ids: if branch.is_local {
-                    current_members.clone()
-                } else {
-                    Vec::new()
-                },
-                members_complete: branch.is_local,
-            })
-            .collect();
         issues.push(DeviceGroupChoiceIssueSummary {
             issue_id: format!("c:{}", encode(conflict.conflict_id.as_bytes())),
-            choices,
+            choices: conflict
+                .branches
+                .into_iter()
+                .map(|branch| presentation::branch(branch, local))
+                .collect(),
+            reason: presentation::reason(conflict.explanation),
         });
     }
     let device_trust = device_trust_snapshot(view.device_trust);

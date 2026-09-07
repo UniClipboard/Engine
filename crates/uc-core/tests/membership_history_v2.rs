@@ -309,6 +309,38 @@ fn history_with_a_and_b(
 }
 
 #[test]
+fn canonical_history_formats_remain_byte_stable() {
+    let (history, author, _, genesis, _) = history_with_a_and_b(true);
+    let verifier = DeterministicSignatureVerifier;
+    let mut base = VersionedMembershipHistory::new(LINEAGE.to_owned());
+    base.verify_and_receive_event(genesis, &verifier).unwrap();
+    let bytes = [
+        history.encode_persisted_v2().unwrap(),
+        postcard::to_stdvec(
+            &history
+                .export_conflict_evidence_pages_v2(author.facts.clone())
+                .unwrap(),
+        )
+        .unwrap(),
+        postcard::to_stdvec(
+            &history
+                .export_suffix_pages_v3(author.facts, base.current_position().unwrap())
+                .unwrap(),
+        )
+        .unwrap(),
+    ];
+    let hashes = bytes.map(|bytes| format!("{:x}", Sha256::digest(bytes)));
+    assert_eq!(
+        hashes,
+        [
+            "7da394e93b254dc4f009046f9e10ce35b41aa92d24ca732f167a6f61884af4b3",
+            "3f0e6116e992a88ddcfb534fbb51262e9848eb33deeda2f6b9eca0201f0945b2",
+            "aef014dec2d6ed8449ec4ca75f4c2d6db2dedd9eac32d51b422787befcd1497b",
+        ]
+    );
+}
+
+#[test]
 fn sibling_histories_produce_order_independent_conflict_and_branch_ids() {
     let verifier = DeterministicSignatureVerifier;
     let (base, a, _, _, add_b) = history_with_a_and_b(true);
@@ -332,10 +364,10 @@ fn sibling_histories_produce_order_independent_conflict_and_branch_ids() {
         4,
         &verifier,
     );
-    left.verify_and_receive_event(left_event, &verifier)
+    left.verify_and_receive_event(left_event.clone(), &verifier)
         .expect("left sibling verifies");
     right
-        .verify_and_receive_event(right_event, &verifier)
+        .verify_and_receive_event(right_event.clone(), &verifier)
         .expect("right sibling verifies");
 
     let observed_left_first =
@@ -344,6 +376,29 @@ fn sibling_histories_produce_order_independent_conflict_and_branch_ids() {
     let observed_right_first =
         MembershipConflictPolicy::describe(&right, &left, a.facts.member_instance)
             .expect("arrival order does not matter");
+    let explanation =
+        MembershipConflictPolicy::explain(&left, &right, a.facts.member_instance).unwrap();
+    assert_eq!(
+        explanation.reason,
+        uc_core::membership::MembershipConflictReason::DivergedHistory
+    );
+    assert!(explanation.details_complete);
+    assert!(explanation
+        .changes
+        .iter()
+        .all(|change| change.kind == uc_core::membership::MembershipChangeKind::AddedDevice));
+    assert_eq!(
+        explanation.changes[0].target.device_id,
+        DeviceId::new("device-c")
+    );
+    assert_eq!(
+        explanation.changes[1].target.device_id,
+        DeviceId::new("device-d")
+    );
+    let reversed =
+        MembershipConflictPolicy::explain(&right, &left, a.facts.member_instance).unwrap();
+    assert_eq!(reversed.reason, explanation.reason);
+    assert_eq!(reversed.changes[0].target, explanation.changes[1].target);
 
     assert_eq!(
         observed_left_first.conflict_id,
@@ -357,6 +412,65 @@ fn sibling_histories_produce_order_independent_conflict_and_branch_ids() {
         observed_left_first.choice_for(observed_left_first.local_branch_id),
         Some(MembershipConflictChoice::ActiveMemberRecovery)
     );
+    let legacy =
+        MembershipConflictPolicy::legacy_description(&left, &right, a.facts.member_instance)
+            .unwrap();
+    assert!(
+        MembershipConflictPolicy::matches_persisted_branch(&left, legacy.local_branch_id).unwrap()
+    );
+    let recipient = left
+        .effective_member_for_device(&DeviceId::new("device-b"))
+        .unwrap();
+    let unsigned = MembershipBranchRecoveryPackageV1::new_unsigned(
+        legacy.conflict_id,
+        legacy.local_branch_id,
+        recipient,
+        a.facts.member_instance,
+        2000,
+        [0x91; 32],
+        left.encode_persisted_v2().unwrap(),
+        vec![0x92],
+        vec![0x93],
+    )
+    .unwrap();
+    let signature = verifier.sign(
+        &a.membership_credential,
+        &unsigned.authorization_signing_payload(),
+    );
+    let legacy_package = unsigned.with_authorization_signature(signature);
+    let previous_position = left.current_position().unwrap();
+    left.verify_and_receive_event(right_event, &verifier)
+        .unwrap();
+    right
+        .verify_and_receive_event(left_event, &verifier)
+        .unwrap();
+    assert_eq!(
+        left.current_position().unwrap().event_id,
+        previous_position.event_id
+    );
+    assert_ne!(
+        left.current_position().unwrap().history_digest,
+        previous_position.history_digest
+    );
+    let after = MembershipConflictPolicy::describe(&left, &right, a.facts.member_instance).unwrap();
+    assert_eq!(after.conflict_id, observed_left_first.conflict_id);
+    assert_eq!(after.branch_ids(), observed_left_first.branch_ids());
+    assert_eq!(
+        MembershipConflictPolicy::explain(&left, &right, a.facts.member_instance).unwrap(),
+        explanation
+    );
+    assert!(
+        !MembershipConflictPolicy::matches_persisted_branch(&left, legacy.local_branch_id).unwrap()
+    );
+    assert!(legacy_package
+        .validate(
+            legacy.conflict_id,
+            legacy.local_branch_id,
+            recipient,
+            1000,
+            &verifier
+        )
+        .is_ok());
 }
 
 #[test]

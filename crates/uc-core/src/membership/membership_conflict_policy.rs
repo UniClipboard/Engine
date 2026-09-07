@@ -1,5 +1,11 @@
 use std::fmt;
 
+mod explanation;
+pub use explanation::{
+    MembershipChangeFact, MembershipChangeKind, MembershipChangeSide, MembershipConflictDevice,
+    MembershipConflictExplanation, MembershipConflictReason, MembershipDecisionFact,
+};
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -93,6 +99,64 @@ impl MembershipConflictDescription {
 pub struct MembershipConflictPolicy;
 
 impl MembershipConflictPolicy {
+    pub fn has_recorded_local_choice(
+        history: &VersionedMembershipHistory,
+        local_member: MemberInstanceId,
+        remote_branch: MembershipBranchId,
+    ) -> bool {
+        history
+            .rejected_removal_heads(local_member)
+            .any(|head| branch_id_at(history, head).ok() == Some(remote_branch))
+    }
+
+    /// 旧记录只在完整已验证快照精确匹配时续用，不能按设备来源推测旧选择。
+    pub fn matches_persisted_branch(
+        history: &VersionedMembershipHistory,
+        branch: MembershipBranchId,
+    ) -> Result<bool, MembershipConflictPolicyError> {
+        Ok(branch_id(history)? == branch || legacy_branch_id(history)? == branch)
+    }
+
+    pub fn legacy_description(
+        local: &VersionedMembershipHistory,
+        remote: &VersionedMembershipHistory,
+        local_member: MemberInstanceId,
+    ) -> Result<MembershipConflictDescription, MembershipConflictPolicyError> {
+        let mut description = Self::describe(local, remote, local_member)?;
+        description.local_branch_id = legacy_branch_id(local)?;
+        description.remote_branch_id = legacy_branch_id(remote)?;
+        let mut branches = description.branch_ids();
+        branches.sort();
+        description.conflict_id = conflict_id(
+            local.lineage_id(),
+            local
+                .closest_common_ancestor(remote)
+                .ok_or(MembershipConflictPolicyError::InvalidConflict)?,
+            branches[0],
+            branches[1],
+        );
+        Ok(description)
+    }
+
+    /// 一次拒绝只覆盖已明确拒绝的那个远端 head，不吞掉后续新成员操作。
+    pub fn local_choice_already_recorded(
+        local: &VersionedMembershipHistory,
+        remote: &VersionedMembershipHistory,
+        local_member: MemberInstanceId,
+    ) -> bool {
+        let Some(remote_head) = remote.current_head() else {
+            return false;
+        };
+        let Some(event) = remote.event(remote_head) else {
+            return false;
+        };
+        event.parent_event_id == local.current_head()
+            && local.event(remote_head) == Some(event)
+            && local
+                .decision_for(remote_head, local_member)
+                .is_some_and(|decision| decision.decision == super::RemovalDecision::Reject)
+    }
+
     pub fn branch_id(
         history: &VersionedMembershipHistory,
     ) -> Result<MembershipBranchId, MembershipConflictPolicyError> {
@@ -138,6 +202,32 @@ impl MembershipConflictPolicy {
 }
 
 fn branch_id(
+    history: &VersionedMembershipHistory,
+) -> Result<MembershipBranchId, MembershipConflictPolicyError> {
+    let head = history
+        .current_head()
+        .ok_or(MembershipConflictPolicyError::InvalidConflict)?;
+    branch_id_at(history, head)
+}
+
+fn branch_id_at(
+    history: &VersionedMembershipHistory,
+    head: MembershipEventId,
+) -> Result<MembershipBranchId, MembershipConflictPolicyError> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"uniclipboard/membership-branch/v2\0");
+    hash_field(&mut hasher, history.lineage_id().as_bytes());
+    hash_field(
+        &mut hasher,
+        &history
+            .activation_baseline_identity()
+            .map_err(|_| MembershipConflictPolicyError::InvalidConflict)?,
+    );
+    hasher.update(head.as_bytes());
+    Ok(MembershipBranchId(hasher.finalize().into()))
+}
+
+fn legacy_branch_id(
     history: &VersionedMembershipHistory,
 ) -> Result<MembershipBranchId, MembershipConflictPolicyError> {
     let position = history

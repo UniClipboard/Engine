@@ -121,7 +121,8 @@ fn fixture(
     )
     .unwrap();
     let conflict_id = MembershipConflictId::from_bytes([0x81; 32]);
-    let local_branch_id = MembershipBranchId::from_bytes([0x82; 32]);
+    let local_branch_id =
+        uc_core::membership::MembershipConflictPolicy::branch_id(&history).unwrap();
     let remote_branch_id = MembershipBranchId::from_bytes([0x83; 32]);
     let peer_id = DeviceId::new("peer");
     let mut record = LoadedMembershipLedger::no_current_space();

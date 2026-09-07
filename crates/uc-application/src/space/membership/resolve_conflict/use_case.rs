@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
-use uc_core::membership::{MembershipBranchTransitionV1, MembershipConflictChoice};
+use uc_core::membership::{
+    MembershipBranchTransitionV1, MembershipConflictChoice, MembershipConflictPolicy,
+};
 
 use crate::space::membership::{MembershipConflictStatus, MembershipLedger, MembershipLedgerError};
 
 use super::{
-    MembershipConflictBranchView, MembershipConflictView, MembershipConflictsView,
-    QueryMembershipConflictStatusPort, QueryMembershipConflictsError,
-    ResolveMembershipConflictError, ResolveMembershipConflictInput,
+    MembershipConflictView, MembershipConflictsView, QueryMembershipConflictStatusPort,
+    QueryMembershipConflictsError, ResolveMembershipConflictError, ResolveMembershipConflictInput,
     ResolveMembershipConflictResult,
 };
 
@@ -58,6 +59,16 @@ impl ResolveMembershipConflictUseCase {
                 });
             }
             return self.result_for_persisted_choice(conflict.status).await;
+        }
+
+        if snapshot
+            .history()
+            .and_then(|history| MembershipConflictPolicy::branch_id(history).ok())
+            != Some(conflict.local_branch_id)
+        {
+            return Ok(ResolveMembershipConflictResult::StateChanged {
+                current_conflict_id: None,
+            });
         }
 
         let target_is_local = input.target_branch_id == conflict.local_branch_id;
@@ -134,36 +145,81 @@ impl ResolveMembershipConflictUseCase {
                 }
             })?;
         let record = snapshot.record();
+        if record.membership_conflicts.is_empty() {
+            return Ok(MembershipConflictsView {
+                revision: record.revision,
+                conflicts: Vec::new(),
+            });
+        }
+        let history =
+            snapshot
+                .history()
+                .ok_or_else(|| QueryMembershipConflictsError::RecoveryRequired {
+                    source: anyhow::Error::new(MembershipLedgerError::RecoveryRequired),
+                })?;
+        let scope = snapshot.current_scope().map_err(|source| {
+            QueryMembershipConflictsError::RecoveryRequired {
+                source: anyhow::Error::new(source),
+            }
+        })?;
+        let current_branch = snapshot
+            .history()
+            .and_then(|history| MembershipConflictPolicy::branch_id(history).ok());
         let conflicts = record
             .membership_conflicts
             .values()
-            .map(|conflict| MembershipConflictView {
-                conflict_id: conflict.conflict_id,
-                status: conflict.status,
-                selected_branch_id: conflict.selected_branch_id,
-                transition_phase: conflict
-                    .transition_id
-                    .and_then(|transition_id| {
-                        record.membership_branch_transitions.get(&transition_id)
-                    })
-                    .map(|transition| transition.phase()),
-                detected_at_revision: conflict.detected_at_revision,
-                evidence_peer_count: conflict.evidence_peer_device_ids.len(),
-                branches: [
-                    MembershipConflictBranchView {
-                        branch_id: conflict.local_branch_id,
-                        is_local: true,
-                        choice: conflict.local_choice,
-                    },
-                    MembershipConflictBranchView {
-                        branch_id: conflict.remote_branch_id,
-                        is_local: false,
-                        choice: conflict.remote_choice,
-                    },
-                ],
-                local_resolution_completed: conflict.status == MembershipConflictStatus::Completed,
+            // 已提交恢复继续按原授权推进；过期的未选择快照等待新证据，不再提供旧选项。
+            .filter(|conflict| {
+                Some(conflict.local_branch_id) == current_branch
+                    || conflict.selected_branch_id.is_some()
             })
-            .collect();
+            .map(|conflict| {
+                let presentation = record
+                    .membership_conflict_presentations
+                    .get(&conflict.conflict_id);
+                Ok(MembershipConflictView {
+                    conflict_id: conflict.conflict_id,
+                    status: conflict.status,
+                    selected_branch_id: conflict.selected_branch_id,
+                    transition_phase: conflict
+                        .transition_id
+                        .and_then(|transition_id| {
+                            record.membership_branch_transitions.get(&transition_id)
+                        })
+                        .map(|transition| transition.phase()),
+                    detected_at_revision: conflict.detected_at_revision,
+                    evidence_peer_count: conflict.evidence_peer_device_ids.len(),
+                    branches: [
+                        super::presentation::branch_view(
+                            conflict,
+                            true,
+                            presentation,
+                            record,
+                            history,
+                            &scope,
+                        )?,
+                        super::presentation::branch_view(
+                            conflict,
+                            false,
+                            presentation,
+                            record,
+                            history,
+                            &scope,
+                        )?,
+                    ],
+                    local_resolution_completed: conflict.status
+                        == MembershipConflictStatus::Completed,
+                    explanation: presentation
+                        .map(|data| data.explanation.clone())
+                        .unwrap_or_else(
+                            uc_core::membership::MembershipConflictExplanation::unknown,
+                        ),
+                })
+            })
+            .collect::<Result<Vec<_>, MembershipLedgerError>>()
+            .map_err(|source| QueryMembershipConflictsError::RecoveryRequired {
+                source: anyhow::Error::new(source),
+            })?;
         Ok(MembershipConflictsView {
             revision: record.revision,
             conflicts,

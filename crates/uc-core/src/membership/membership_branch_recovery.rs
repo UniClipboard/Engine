@@ -156,9 +156,8 @@ impl MembershipBranchRecoveryPackageV1 {
             verifier,
         )
         .map_err(|_| MembershipBranchRecoveryError::InvalidHistory)?;
-        if MembershipConflictPolicy::branch_id(&history)
+        if !MembershipConflictPolicy::matches_persisted_branch(&history, self.target_branch_id)
             .map_err(|_| MembershipBranchRecoveryError::InvalidHistory)?
-            != self.target_branch_id
         {
             return Err(MembershipBranchRecoveryError::WrongBranch);
         }

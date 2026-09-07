@@ -50,11 +50,25 @@ pub struct DeviceTrustDevice {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceTrustImpact {
+    pub members: Vec<crate::space::membership::MembershipConflictMember>,
+    pub member_device_ids: Vec<DeviceId>,
+    pub usable_device_ids: Vec<DeviceId>,
+    pub paused_device_ids: Vec<DeviceId>,
+    pub local_membership: DeviceTrustMembership,
+    pub requires_rejoin_device_ids: Vec<DeviceId>,
+    pub pending_confirmation_device_ids: Vec<DeviceId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingDeviceTrustChange {
     pub change_id: MembershipEventId,
     pub proposed_by_device_id: DeviceId,
     pub target_device_ids: Vec<DeviceId>,
     pub includes_local_device: bool,
+    pub apply_impact: DeviceTrustImpact,
+    pub keep_current_impact: DeviceTrustImpact,
+    pub explanation: uc_core::membership::MembershipConflictExplanation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -15,6 +15,7 @@ use uc_core::membership::{
 
 use super::use_case::{remember_completed_inbound_transfer, MAX_COMPLETED_INBOUND_TRANSFERS};
 use super::*;
+mod handoff_reproduction;
 use crate::space::membership::{
     CommitMembershipLedgerPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
     MembershipEffectKind, MembershipEffectPhase, MembershipLedger, MembershipLedgerError,

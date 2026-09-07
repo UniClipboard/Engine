@@ -230,23 +230,11 @@ pub(crate) fn workspace_convergence_summary(
 }
 
 pub(crate) fn device_trust_snapshot(snapshot: DeviceTrustStatus) -> DeviceTrustSnapshotSummary {
-    let usable_device_ids = snapshot
-        .devices
-        .iter()
-        .filter(|device| matches!(device.sync_state, DeviceTrustSyncState::Usable))
-        .map(|device| device.device_id.to_string())
-        .collect::<Vec<_>>();
-    let paused_device_ids = snapshot
-        .devices
-        .iter()
-        .filter(|device| matches!(device.sync_state, DeviceTrustSyncState::Paused(_)))
-        .map(|device| device.device_id.to_string())
-        .collect::<Vec<_>>();
-    let current_impact = DeviceTrustImpactSummary {
-        usable_device_ids,
-        paused_device_ids,
-        local_device_outcome: device_membership(snapshot.local_membership),
-        requires_rejoin_device_ids: Vec::new(),
+    let impact = |impact: uc_application::facade::DeviceTrustImpact| DeviceTrustImpactSummary {
+        usable_device_ids: device_ids(impact.usable_device_ids),
+        paused_device_ids: device_ids(impact.paused_device_ids),
+        local_device_outcome: device_membership(impact.local_membership),
+        requires_rejoin_device_ids: device_ids(impact.requires_rejoin_device_ids),
     };
     DeviceTrustSnapshotSummary {
         revision: snapshot.revision,
@@ -262,8 +250,8 @@ pub(crate) fn device_trust_snapshot(snapshot: DeviceTrustStatus) -> DeviceTrustS
                 proposed_by_device_id: change.proposed_by_device_id.to_string(),
                 target_device_ids: device_ids(change.target_device_ids),
                 includes_local_device: change.includes_local_device,
-                apply_impact: current_impact.clone(),
-                keep_current_impact: current_impact,
+                apply_impact: impact(change.apply_impact),
+                keep_current_impact: impact(change.keep_current_impact),
                 allowed_choices: vec![
                     DeviceTrustChoiceSummary::ApplyChange,
                     DeviceTrustChoiceSummary::KeepCurrentDeviceGroup,
@@ -445,7 +433,7 @@ fn device_ids(device_ids: Vec<uc_core::DeviceId>) -> Vec<String> {
         .collect()
 }
 
-fn device_membership(membership: DeviceTrustMembership) -> DeviceMembershipSummary {
+pub(crate) fn device_membership(membership: DeviceTrustMembership) -> DeviceMembershipSummary {
     match membership {
         DeviceTrustMembership::Active => DeviceMembershipSummary::Active,
         DeviceTrustMembership::Removed => DeviceMembershipSummary::Removed,
@@ -635,6 +623,129 @@ fn map_remove_space_member_error(error: RemoveSpaceMemberError) -> EngineError {
 mod tests {
     use super::*;
     use uc_core::membership::{WorkspaceFailureCategory, WorkspacePhase};
+
+    fn handoff_pending_removal(includes_local_device: bool) -> DeviceTrustStatus {
+        use uc_application::deps::SpaceMemberPauseReason;
+        use uc_application::facade::{DeviceTrustDevice, PendingDeviceTrustChange};
+        use uc_core::{membership::MembershipEventId, DeviceId};
+
+        let members = |ids: &[&str]| {
+            ids.iter()
+                .map(|id| uc_application::deps::MembershipConflictMember {
+                    device: uc_core::membership::MembershipConflictDevice {
+                        device_id: DeviceId::new(*id),
+                        display_name: (*id).to_owned(),
+                    },
+                    active: true,
+                })
+                .collect()
+        };
+
+        DeviceTrustStatus {
+            revision: 30,
+            local_device_id: Some(DeviceId::new("d")),
+            local_membership: DeviceTrustMembership::Active,
+            current_change: Some(PendingDeviceTrustChange {
+                change_id: MembershipEventId::from_hex(&"11".repeat(32)).unwrap(),
+                proposed_by_device_id: DeviceId::new("b"),
+                target_device_ids: vec![DeviceId::new(if includes_local_device {
+                    "d"
+                } else {
+                    "c"
+                })],
+                includes_local_device,
+                explanation: uc_core::membership::MembershipConflictExplanation::unknown(),
+                apply_impact: uc_application::facade::DeviceTrustImpact {
+                    members: members(&["a", "b", if includes_local_device { "c" } else { "d" }]),
+                    pending_confirmation_device_ids: Vec::new(),
+                    member_device_ids: ["a", "b", if includes_local_device { "c" } else { "d" }]
+                        .map(DeviceId::new)
+                        .to_vec(),
+                    usable_device_ids: if includes_local_device {
+                        Vec::new()
+                    } else {
+                        ["a", "b", "d"].map(DeviceId::new).to_vec()
+                    },
+                    paused_device_ids: vec![DeviceId::new(if includes_local_device {
+                        "d"
+                    } else {
+                        "c"
+                    })],
+                    local_membership: if includes_local_device {
+                        DeviceTrustMembership::Removed
+                    } else {
+                        DeviceTrustMembership::Active
+                    },
+                    requires_rejoin_device_ids: vec![DeviceId::new(if includes_local_device {
+                        "d"
+                    } else {
+                        "c"
+                    })],
+                },
+                keep_current_impact: uc_application::facade::DeviceTrustImpact {
+                    members: members(&["a", "b", "c", "d"]),
+                    pending_confirmation_device_ids: Vec::new(),
+                    member_device_ids: ["a", "b", "c", "d"].map(DeviceId::new).to_vec(),
+                    usable_device_ids: ["a", "c", "d"].map(DeviceId::new).to_vec(),
+                    paused_device_ids: vec![DeviceId::new("b")],
+                    local_membership: DeviceTrustMembership::Active,
+                    requires_rejoin_device_ids: Vec::new(),
+                },
+            }),
+            current_join: None,
+            pending_inbound_member: None,
+            devices: ["a", "b", "c", "d"]
+                .into_iter()
+                .map(|id| DeviceTrustDevice {
+                    device_id: DeviceId::new(id),
+                    display_name: id.to_owned(),
+                    is_local: id == "d",
+                    reachability: ReachabilityState::Offline,
+                    membership: DeviceTrustMembership::Active,
+                    relationship: if id == "b" {
+                        DeviceTrustRelationship::PendingLocalDecision
+                    } else if id == "d" {
+                        DeviceTrustRelationship::Local
+                    } else {
+                        DeviceTrustRelationship::Consistent
+                    },
+                    sync_state: if id == "b" {
+                        DeviceTrustSyncState::Paused(SpaceMemberPauseReason::PendingLocalDecision)
+                    } else {
+                        DeviceTrustSyncState::Usable
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn handoff_apply_preview_excludes_the_removed_peer() {
+        let summary = device_trust_snapshot(handoff_pending_removal(false));
+        let change = summary.current_change.unwrap();
+        assert!(
+            change
+                .apply_impact
+                .usable_device_ids
+                .iter()
+                .all(|id| !change.target_device_ids.contains(id)),
+            "接受移除后，继续同步名单仍含移除目标：{:?}",
+            change.apply_impact.usable_device_ids
+        );
+    }
+
+    #[test]
+    fn handoff_apply_preview_marks_local_removal() {
+        let summary = device_trust_snapshot(handoff_pending_removal(true));
+        assert_eq!(
+            summary
+                .current_change
+                .unwrap()
+                .apply_impact
+                .local_device_outcome,
+            DeviceMembershipSummary::Removed
+        );
+    }
 
     #[test]
     fn join_status_preserves_the_peer_upgrade_prompt() {

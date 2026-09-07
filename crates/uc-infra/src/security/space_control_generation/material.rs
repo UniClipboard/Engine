@@ -165,6 +165,7 @@ impl PreparedAdmissionControl {
             completed_inbound_transfers: Default::default(),
             pending_effects: Default::default(),
             membership_conflicts: Default::default(),
+            membership_conflict_presentations: Default::default(),
             membership_branch_transitions: Default::default(),
             consumed_membership_recovery_nonces: Default::default(),
             membership_branch_recovery_sessions: Default::default(),

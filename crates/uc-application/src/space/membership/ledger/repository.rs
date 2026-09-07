@@ -3,17 +3,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use uc_core::membership::{
-    AdmissionChangeFacts, HistoricalMembershipSignatureVerifier, MembershipConflictEvidenceV3,
-    MembershipConflictPolicy, MembershipCredential, MembershipHistoryPageV2,
+    AdmissionChangeFacts, HistoricalMembershipSignatureVerifier, MembershipCredential,
     MembershipHistoryRelationship, VersionedMembershipHistory,
 };
 
-use super::model::MembershipConflictRecord;
 use super::{
     CurrentSpaceMemberScope, CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort,
-    LoadedMembershipLedger, MembershipBranchRecoverySession, MembershipConflictStatus,
-    MembershipEffectPhase, MembershipLedgerError, MembershipLedgerMutation, PausedSpaceMember,
-    SpaceMemberPauseReason,
+    LoadedMembershipLedger, MembershipEffectPhase, MembershipLedgerError, MembershipLedgerMutation,
+    PausedSpaceMember, SpaceMemberPauseReason,
 };
 
 /// Loads the complete decrypted application membership record.
@@ -155,132 +152,6 @@ fn derive_current_scope(
 }
 
 impl MembershipLedger {
-    pub(crate) async fn exchange_conflict_evidence(
-        &self,
-        source_device_id: &uc_core::ids::DeviceId,
-        evidence: &MembershipConflictEvidenceV3,
-    ) -> Result<Option<Vec<MembershipHistoryPageV2>>, MembershipLedgerError> {
-        let snapshot = self.load_verified().await?;
-        let local = snapshot
-            .history()
-            .ok_or(MembershipLedgerError::RecoveryRequired)?;
-        let Ok(remote) = self.verify_exchange_pages(&evidence.pages) else {
-            return Ok(None);
-        };
-        let Ok(remote_position) = remote.current_position() else {
-            return Ok(None);
-        };
-        if evidence.transfer_id != remote_position.history_digest
-            || remote
-                .effective_member_for_device(source_device_id)
-                .and_then(|member| remote.admission_facts_for(member))
-                .is_none_or(|facts| &facts.device_id != source_device_id)
-        {
-            return Ok(None);
-        }
-        let local_member = snapshot
-            .record()
-            .local_member_instance
-            .ok_or(MembershipLedgerError::RecoveryRequired)?;
-        let local_sender = local
-            .admission_facts_for(local_member)
-            .cloned()
-            .ok_or(MembershipLedgerError::RecoveryRequired)?;
-        let Ok(response_pages) = local.export_conflict_evidence_pages_v2(local_sender) else {
-            return Err(MembershipLedgerError::Corrupt);
-        };
-        let Ok(conflict) = MembershipConflictPolicy::describe(local, &remote, local_member) else {
-            return Ok(None);
-        };
-        let local_choice = conflict
-            .choice_for(conflict.local_branch_id)
-            .ok_or(MembershipLedgerError::Corrupt)?;
-        let remote_choice = conflict
-            .choice_for(conflict.remote_branch_id)
-            .ok_or(MembershipLedgerError::Corrupt)?;
-        let target_recovery_completed = snapshot
-            .record()
-            .membership_branch_recovery_sessions
-            .values()
-            .filter_map(MembershipBranchRecoverySession::target_completion)
-            .any(|(_, package)| {
-                package.conflict_id() == conflict.conflict_id
-                    && package.target_branch_id() == conflict.local_branch_id
-                    && local
-                        .admission_facts_for(package.recipient_member())
-                        .is_some_and(|facts| &facts.device_id == source_device_id)
-            });
-        if target_recovery_completed {
-            if snapshot
-                .record()
-                .peer_reconciliation
-                .get(source_device_id)
-                .is_some_and(|peer| peer.relationship == MembershipHistoryRelationship::Consistent)
-            {
-                return Ok(Some(response_pages));
-            }
-            let source_device_id = source_device_id.clone();
-            self.compare_and_commit(|record| {
-                let peer = record
-                    .peer_reconciliation
-                    .get_mut(&source_device_id)
-                    .ok_or(MembershipLedgerError::RecoveryRequired)?;
-                peer.relationship = MembershipHistoryRelationship::Consistent;
-                Ok(())
-            })
-            .await?;
-            return Ok(Some(response_pages));
-        }
-        let evidence_already_recorded = snapshot
-            .record()
-            .membership_conflicts
-            .get(&conflict.conflict_id)
-            .is_some_and(|current| current.evidence_peer_device_ids.contains(source_device_id))
-            && snapshot
-                .record()
-                .peer_reconciliation
-                .get(source_device_id)
-                .is_some_and(|peer| {
-                    peer.relationship == MembershipHistoryRelationship::Diverged
-                        && peer.confirmed_position.is_none()
-                });
-        if evidence_already_recorded {
-            return Ok(Some(response_pages));
-        }
-        let source_device_id = source_device_id.clone();
-        self.compare_and_commit(|record| {
-            let peer = record
-                .peer_reconciliation
-                .get_mut(&source_device_id)
-                .ok_or(MembershipLedgerError::RecoveryRequired)?;
-            peer.relationship = MembershipHistoryRelationship::Diverged;
-            peer.confirmed_position = None;
-            record
-                .membership_conflicts
-                .entry(conflict.conflict_id)
-                .and_modify(|current| {
-                    current
-                        .evidence_peer_device_ids
-                        .insert(source_device_id.clone());
-                })
-                .or_insert_with(|| MembershipConflictRecord {
-                    conflict_id: conflict.conflict_id,
-                    local_branch_id: conflict.local_branch_id,
-                    remote_branch_id: conflict.remote_branch_id,
-                    local_choice,
-                    remote_choice,
-                    evidence_peer_device_ids: [source_device_id.clone()].into(),
-                    detected_at_revision: record.revision,
-                    status: MembershipConflictStatus::Unresolved,
-                    selected_branch_id: None,
-                    transition_id: None,
-                });
-            Ok(())
-        })
-        .await?;
-        Ok(Some(response_pages))
-    }
-
     pub(crate) fn new(
         loader: Arc<dyn LoadMembershipLedgerPort>,
         committer: Arc<dyn CommitMembershipLedgerPort>,
@@ -330,6 +201,7 @@ impl MembershipLedger {
             record.completed_inbound_transfers.clear();
             record.pending_effects.clear();
             record.membership_conflicts.clear();
+            record.membership_conflict_presentations.clear();
             record.membership_branch_transitions.clear();
             record.consumed_membership_recovery_nonces.clear();
             record.membership_branch_recovery_sessions.clear();
@@ -351,6 +223,7 @@ impl MembershipLedger {
             record.completed_inbound_transfers.clear();
             record.pending_effects.clear();
             record.membership_conflicts.clear();
+            record.membership_conflict_presentations.clear();
             record.membership_branch_transitions.clear();
             record.consumed_membership_recovery_nonces.clear();
             record.membership_branch_recovery_sessions.clear();
@@ -364,6 +237,18 @@ impl MembershipLedger {
         &self,
         loaded: &LoadedMembershipLedger,
     ) -> Result<Option<VersionedMembershipHistory>, MembershipLedgerError> {
+        if loaded
+            .membership_conflict_presentations
+            .iter()
+            .any(|(id, data)| {
+                loaded
+                    .membership_conflicts
+                    .get(id)
+                    .is_none_or(|record| !data.matches_record(record))
+            })
+        {
+            return Err(MembershipLedgerError::Corrupt);
+        }
         if loaded
             .membership_branch_recovery_sessions
             .iter()

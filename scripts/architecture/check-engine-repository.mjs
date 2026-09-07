@@ -1822,8 +1822,34 @@ function checkSpaceAccessConstructionModes(sources) {
   return problems
 }
 
+function checkMembershipHistoryOwnership(sources) {
+  const problems = []
+  if (sources.monolithicMembershipHistoryPresent) {
+    addProblem(problems, 'membership history ownership', 'retired monolithic history file must not return')
+  }
+  if (/\basync\s+fn\b|ReconcileMembershipEvidenceUseCase/.test(sources.membershipHistoryCore)) {
+    addProblem(problems, 'membership history ownership', 'Core history must contain rules, not application execution')
+  }
+  if (/\bpub(?:\([^)]*\))?\s+mod\s/.test(sources.membershipHistoryRoot)) {
+    addProblem(problems, 'membership history ownership', 'history implementation modules must remain private')
+  }
+  if (/exchange_conflict_evidence|legacy_description|target_recovery_completed/.test(sources.membershipLedger)) {
+    addProblem(problems, 'membership history ownership', 'evidence reconciliation belongs to its application use case, not the ledger')
+  }
+  if (!sources.membershipEvidenceOwner.includes('struct ReconcileMembershipEvidenceUseCase') ||
+      !sources.membershipEvidenceOwner.includes('async fn execute(')) {
+    addProblem(problems, 'membership history ownership', 'one complete evidence reconciliation use case is required')
+  }
+  return problems
+}
+
 function repositorySources() {
   return {
+    monolithicMembershipHistoryPresent: existsSync(join(REPOSITORY_ROOT, 'crates/uc-core/src/membership/versioned_membership_history.rs')),
+    membershipHistoryRoot: read('crates/uc-core/src/membership/versioned_membership_history/mod.rs'),
+    membershipHistoryCore: readSourceTree('crates/uc-core/src/membership/versioned_membership_history'),
+    membershipLedger: read('crates/uc-application/src/space/membership/ledger/repository.rs'),
+    membershipEvidenceOwner: read('crates/uc-application/src/space/membership/reconcile_history_evidence/use_case.rs'),
     retiredMembershipPersistencePathPresent: [
       'crates/uc-infra/src/db/repositories/membership_candidate_repo.rs',
       'crates/uc-infra/src/db/repositories/membership_announcement_repo.rs',
@@ -1920,6 +1946,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkProfileStorageGenerationOwnership(sources),
     ...checkCurrentPeerScopeOwnership(),
     ...checkMembershipConfirmationWatermarkOwnership(sources),
+    ...checkMembershipHistoryOwnership(sources),
     ...checkApplicationMembershipCutover(),
     ...checkSpaceModuleInterface(),
     ...checkSpaceAdmissionProtocolOwnership(),
@@ -1955,6 +1982,15 @@ function expectRejected(name, mutate, metadata, sources) {
 }
 
 function runNegativeFixtures(metadata, sources) {
+  expectRejected('membership workflow returned to Core', (_metadata, changed) => {
+    changed.membershipHistoryCore += '\nasync fn reconcile_evidence() {}\n'
+  }, metadata, sources)
+  expectRejected('membership evidence workflow returned to ledger', (_metadata, changed) => {
+    changed.membershipLedger += '\nfn exchange_conflict_evidence() {}\n'
+  }, metadata, sources)
+  expectRejected('public membership history implementation modules', (_metadata, changed) => {
+    changed.membershipHistoryRoot += '\npub mod archive;\n'
+  }, metadata, sources)
   expectRejected('repository-external local dependency', changed => {
     packageByName(changed, 'uc-engine').dependencies.push({
       name: 'uc-platform',

@@ -7,6 +7,7 @@ mod query_admission;
 mod query_device_trust;
 mod query_diagnostics;
 mod re_pairing;
+mod reconcile_history_evidence;
 mod recover_conflict;
 mod remove_space_member;
 mod resolve_conflict;
@@ -17,8 +18,6 @@ pub use decide_device_trust_change::{
     DecideDeviceTrustChange, DecideDeviceTrustChangeError, DecideDeviceTrustChangeResult,
     DeviceTrustChangeChoice,
 };
-#[cfg(test)]
-pub use ledger::MembershipConflictRecord;
 pub use ledger::{
     ActivateMembershipEffectPort, ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort,
     CommitMembershipLedgerPort, CurrentSpaceMemberScope, CurrentSpaceMemberScopeError,
@@ -30,6 +29,9 @@ pub use ledger::{
     PendingMembershipEffect, RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
     RestrictedMembershipDeliveryPort, SpaceMemberPauseReason,
 };
+pub use ledger::{
+    MembershipConflictMember, MembershipConflictPresentation, MembershipConflictRecord,
+};
 pub(crate) use maintenance::PreparedSpaceMembershipMaintenanceRuntime;
 pub use maintenance::{
     CleanupLegacyMembershipDataPort, DeliverPendingGroupUpdatesPort,
@@ -37,13 +39,14 @@ pub use maintenance::{
     RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
 };
 pub use query_device_trust::{
-    DeviceTrustDevice, DeviceTrustMembership, DeviceTrustObservation, DeviceTrustRelationship,
-    DeviceTrustStatus, DeviceTrustSyncState, LoadCurrentJoinStatusPort,
+    DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
+    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, LoadCurrentJoinStatusPort,
     LoadDeviceTrustObservationsPort, PendingDeviceTrustChange, QueryDeviceTrustError,
 };
 pub(super) use query_diagnostics::QueryMembershipDiagnosticsUseCase;
 pub use query_diagnostics::{MembershipDiagnosticsView, QueryMembershipDiagnosticsError};
 pub use re_pairing::{RePairingStateError, RePairingStateStorePort};
+pub(crate) use reconcile_history_evidence::ReconcileMembershipEvidenceUseCase;
 pub use recover_conflict::{
     AdvanceMembershipBranchTransitionError, AdvanceMembershipBranchTransitionInput,
     AdvanceMembershipBranchTransitionPort, BeginMembershipBranchRecoveryInput,
@@ -61,9 +64,9 @@ pub use remove_space_member::{
     MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult,
 };
 pub use resolve_conflict::{
-    MembershipConflictBranchView, MembershipConflictView, MembershipConflictsView,
-    QueryMembershipConflictsError, ResolveMembershipConflictError, ResolveMembershipConflictInput,
-    ResolveMembershipConflictResult,
+    DeviceGroupChoiceImpact, MembershipConflictBranchView, MembershipConflictView,
+    MembershipConflictsView, QueryMembershipConflictsError, ResolveMembershipConflictError,
+    ResolveMembershipConflictInput, ResolveMembershipConflictResult,
 };
 pub use signing::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
 

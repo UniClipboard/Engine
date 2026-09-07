@@ -479,6 +479,128 @@ async fn rejection_keeps_local_membership_and_diverges_only_the_proposer() {
 }
 
 #[tokio::test]
+async fn handoff_rejecting_removal_does_not_require_a_second_keep_choice() {
+    use crate::space::membership::HandleMembershipHistoryMessageUseCase;
+    use uc_core::membership::{MembershipConflictEvidenceV3, MembershipHistoryMessage};
+
+    let (loaded, signer, change_id) = pending_local_removal_ledger();
+    let local = VersionedMembershipHistory::decode_persisted_v2(
+        loaded.membership_history.as_deref().unwrap(),
+        &AcceptingVerifier,
+    )
+    .unwrap();
+    let removal = local.event(change_id).unwrap().clone();
+    let prior = local
+        .event(removal.parent_event_id.unwrap())
+        .unwrap()
+        .clone();
+    let mut remote = VersionedMembershipHistory::from_activation_baseline(
+        MembershipActivationBaselineV2::Established {
+            lineage_id: "space-a".to_owned(),
+            head_event_id: MembershipEventId::from_hex(&"11".repeat(32)).unwrap(),
+            head_depth: 0,
+            current_members: vec![
+                member_facts("device-a", 0x41),
+                member_facts("device-b", 0x42),
+                member_facts("device-c", 0x43),
+            ],
+        },
+    )
+    .unwrap();
+    remote
+        .verify_and_receive_event(prior, &AcceptingVerifier)
+        .unwrap();
+    remote
+        .verify_and_receive_event(removal, &AcceptingVerifier)
+        .unwrap();
+    let repository = Arc::new(MemoryLedgerRepository {
+        loaded: Mutex::new(loaded),
+        commits: AtomicUsize::new(0),
+        remaining_conflicts: AtomicUsize::new(0),
+    });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    ));
+    let query = Arc::new(QueryDeviceTrustUseCase::new(
+        ledger.clone(),
+        Arc::new(OfflineObservations),
+        Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
+    ));
+    let decide = DecideDeviceTrustChangeUseCase::new(
+        ledger.clone(),
+        Arc::new(signer),
+        query.clone(),
+        Arc::new(NoopEffects),
+        Arc::new(WakeCounter(AtomicUsize::new(0))),
+    );
+    assert!(query.execute().await.unwrap().current_change.is_some());
+    assert!(matches!(
+        decide
+            .execute(DecideDeviceTrustChange {
+                change_id,
+                choice: DeviceTrustChangeChoice::KeepCurrentDeviceGroup,
+                confirm_local_removal: false,
+            })
+            .await
+            .unwrap(),
+        DecideDeviceTrustChangeResult::KeptCurrentDeviceGroup { .. }
+    ));
+    assert!(query.execute().await.unwrap().current_change.is_none());
+    assert!(repository
+        .load()
+        .await
+        .unwrap()
+        .membership_conflicts
+        .is_empty());
+    let (peer, _) = member_facts("device-b", 0x42);
+    let response = HandleMembershipHistoryMessageUseCase::new(ledger)
+        .execute(
+            &crate::space::membership::handle_history_message::AuthenticatedMember::new(
+                peer.device_id.clone(),
+            ),
+            MembershipHistoryMessage::ConflictEvidenceV3(MembershipConflictEvidenceV3 {
+                transfer_id: remote.current_position().unwrap().history_digest,
+                pages: remote.export_conflict_evidence_pages_v2(peer).unwrap(),
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        response,
+        MembershipHistoryMessage::ConflictEvidenceV3(_)
+    ));
+    assert!(query.execute().await.unwrap().current_change.is_none());
+    let persisted = repository.load().await.unwrap();
+    assert_eq!(
+        persisted
+            .membership_conflicts
+            .values()
+            .filter(|conflict| conflict.status
+                != crate::space::membership::MembershipConflictStatus::Completed)
+            .count(),
+        0,
+        "拒绝移除已完成，但同一次移除的证据又产生新的分支选择"
+    );
+    let reason = &persisted
+        .membership_conflict_presentations
+        .values()
+        .next()
+        .unwrap()
+        .explanation;
+    assert_eq!(
+        reason.reason,
+        uc_core::membership::MembershipConflictReason::RemovalDecisionDisagreement
+    );
+    assert!(reason
+        .decisions
+        .iter()
+        .any(|fact| fact.device.device_id == DeviceId::new("device-a")
+            && fact.decision == uc_core::membership::RemovalDecision::Reject));
+}
+
+#[tokio::test]
 async fn repeated_decision_returns_the_original_result_without_a_second_commit() {
     let (loaded, signer, change_id) = pending_local_removal_ledger();
     let repository = Arc::new(MemoryLedgerRepository {

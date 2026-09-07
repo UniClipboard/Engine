@@ -1,12 +1,13 @@
 mod error;
 mod model;
 mod ports;
+mod presentation;
 mod use_case;
 
 pub use error::{QueryMembershipConflictsError, ResolveMembershipConflictError};
 pub use model::{
-    MembershipConflictBranchView, MembershipConflictView, MembershipConflictsView,
-    ResolveMembershipConflictInput, ResolveMembershipConflictResult,
+    DeviceGroupChoiceImpact, MembershipConflictBranchView, MembershipConflictView,
+    MembershipConflictsView, ResolveMembershipConflictInput, ResolveMembershipConflictResult,
 };
 pub(crate) use ports::QueryMembershipConflictStatusPort;
 pub(crate) use use_case::ResolveMembershipConflictUseCase;

@@ -116,6 +116,89 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn candidate_details_are_encrypted_and_survive_reopen() {
+    use uc_application::deps::{
+        MembershipConflictMember, MembershipConflictPresentation, MembershipConflictRecord,
+    };
+    use uc_core::membership::{
+        MembershipBranchId, MembershipConflictChoice, MembershipConflictDevice,
+        MembershipConflictExplanation, MembershipConflictId,
+    };
+    let fixture = Fixture::new();
+    let migrated = fixture.ledger.load().await.unwrap();
+    assert_eq!(migrated.revision, 0);
+    assert!(migrated.membership_conflict_presentations.is_empty());
+
+    let id = MembershipConflictId::from_bytes([0x81; 32]);
+    let local = MembershipBranchId::from_bytes([0x82; 32]);
+    let remote = MembershipBranchId::from_bytes([0x83; 32]);
+    let mut next = migrated;
+    next.revision = 1;
+    next.membership_conflicts.insert(
+        id,
+        MembershipConflictRecord {
+            conflict_id: id,
+            local_branch_id: local,
+            remote_branch_id: remote,
+            local_choice: MembershipConflictChoice::ActiveMemberRecovery,
+            remote_choice: MembershipConflictChoice::ActiveMemberRecovery,
+            evidence_peer_device_ids: [DeviceId::new("remote-private-device")].into(),
+            detected_at_revision: 7,
+            status: uc_application::deps::MembershipConflictStatus::Unresolved,
+            selected_branch_id: None,
+            transition_id: None,
+        },
+    );
+    let member = |id: &str| MembershipConflictMember {
+        device: MembershipConflictDevice {
+            device_id: DeviceId::new(id),
+            display_name: "private-candidate-device-name-sentinel".to_owned(),
+        },
+        active: true,
+    };
+    next.membership_conflict_presentations.insert(
+        id,
+        MembershipConflictPresentation {
+            local_branch_id: local,
+            remote_branch_id: remote,
+            local_members: vec![member("local-private-device")],
+            remote_members: vec![member("remote-private-device")],
+            explanation: MembershipConflictExplanation::unknown(),
+        },
+    );
+    fixture
+        .ledger
+        .compare_and_commit(MembershipLedgerMutation {
+            expected_revision: 0,
+            expected_history_digest: None,
+            replacement: next.clone(),
+        })
+        .await
+        .unwrap();
+    let reopened = fixture.reopen().load().await.unwrap();
+    assert_eq!(reopened, next);
+    let encrypted = fixture.encrypted_payload();
+    let marker = b"private-candidate-device-name-sentinel";
+    assert!(!encrypted
+        .windows(marker.len())
+        .any(|window| window == marker));
+    for path in [
+        fixture.db_path.clone(),
+        PathBuf::from(format!("{}-wal", fixture.db_path.display())),
+        PathBuf::from(format!("{}-shm", fixture.db_path.display())),
+    ] {
+        if path.exists() {
+            assert!(!std::fs::read(path)
+                .unwrap()
+                .windows(marker.len())
+                .any(|window| window == marker));
+        }
+    }
+    assert!(!format!("{:?}", reopened.membership_conflict_presentations)
+        .contains("private-candidate-device-name-sentinel"));
+}
+
+#[tokio::test]
 async fn encrypted_ledger_survives_reopen_and_rejects_stale_commit() {
     let fixture = Fixture::new();
     let initial = fixture.ledger.load().await.unwrap();

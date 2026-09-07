@@ -1,5 +1,6 @@
 mod config;
 mod config_migration;
+mod device_group_presentation;
 mod diagnostics;
 mod error;
 pub mod error_codes;
@@ -15,6 +16,7 @@ mod value;
 
 pub use config::*;
 pub use config_migration::*;
+pub use device_group_presentation::*;
 pub use diagnostics::*;
 pub use error::*;
 pub use event::*;

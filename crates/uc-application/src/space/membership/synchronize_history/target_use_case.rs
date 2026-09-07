@@ -17,7 +17,7 @@ use uc_observability_contract::diagnostics::{
 
 use crate::space::membership::{
     CurrentSpaceMemberScopePort, MembershipLedger, MembershipLedgerError, PeerReconciliationRecord,
-    SpaceMemberPauseReason,
+    ReconcileMembershipEvidenceUseCase, SpaceMemberPauseReason,
 };
 use crate::space::membership::{
     MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger,
@@ -34,6 +34,7 @@ const MAX_RETRY_DELAY_MS: i64 = 5 * 60 * 1_000;
 
 pub(crate) struct SynchronizeMembershipHistoryUseCase {
     ledger: Arc<MembershipLedger>,
+    evidence: ReconcileMembershipEvidenceUseCase,
     current_scope: Arc<dyn CurrentSpaceMemberScopePort>,
     transport: Arc<dyn MembershipHistoryExchangePort>,
     clock: Arc<dyn ClockPort>,
@@ -50,6 +51,7 @@ impl SynchronizeMembershipHistoryUseCase {
         clock: Arc<dyn ClockPort>,
     ) -> Self {
         Self {
+            evidence: ReconcileMembershipEvidenceUseCase::new(ledger.clone()),
             ledger,
             current_scope,
             transport,
@@ -414,12 +416,17 @@ impl SynchronizeMembershipHistoryUseCase {
                     .map_err(map_exchange_error)?;
                 if let MembershipHistoryMessage::ConflictEvidenceV3(remote_evidence) = reply {
                     let recorded = self
-                        .ledger
-                        .exchange_conflict_evidence(peer, &remote_evidence)
+                        .evidence
+                        .execute(peer, &remote_evidence)
                         .await
                         .map_err(|_| PeerSyncError::Stable)?;
-                    if recorded.is_none() {
+                    let Some(recorded) = recorded else {
                         return Err(PeerSyncError::Stable);
+                    };
+                    if recorded.relationship
+                        == uc_core::membership::MembershipHistoryRelationship::Consistent
+                    {
+                        return Ok(());
                     }
                     describe_membership_conflict();
                 }
