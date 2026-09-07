@@ -4,17 +4,13 @@
 //! unlock facades) need the same trivial stand-ins; keeping them here avoids
 //! re-declaring one-off fakes per module.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 use async_trait::async_trait;
 use uc_core::clipboard::{
     ContentHash, EntryFileSet, EntryFileSetError, EntryFileSetLine, EntryFileSetLineKind,
     FileSetMemberKind, FileSetMemberLocation,
 };
 use uc_core::ids::{BlobId, EntryId};
-use uc_core::ports::clipboard::{ActiveClipboardRegisterError, EntryFileSetRepositoryPort};
-
-use crate::clipboard::write::MobileConsumableBackfill;
+use uc_core::ports::clipboard::EntryFileSetRepositoryPort;
 
 /// `EntryFileSetRepositoryPort` fake returning a fixed `load` result. `save`
 /// is unreachable because probe-side consumers never write.
@@ -97,33 +93,5 @@ pub(crate) fn empty_directory_file_set() -> EntryFileSet {
             }),
             kind: EntryFileSetLineKind::NonFile,
         }],
-    }
-}
-
-/// `MobileConsumableBackfill` fake that always no-ops.
-pub(crate) struct NoopMobileConsumableBackfill;
-
-#[async_trait]
-impl MobileConsumableBackfill for NoopMobileConsumableBackfill {
-    async fn backfill(&self) -> Result<bool, ActiveClipboardRegisterError> {
-        Ok(false)
-    }
-}
-
-/// `MobileConsumableBackfill` fake counting invocations.
-#[derive(Default)]
-pub(crate) struct CountingMobileConsumableBackfill(AtomicUsize);
-
-impl CountingMobileConsumableBackfill {
-    pub(crate) fn calls(&self) -> usize {
-        self.0.load(Ordering::SeqCst)
-    }
-}
-
-#[async_trait]
-impl MobileConsumableBackfill for CountingMobileConsumableBackfill {
-    async fn backfill(&self) -> Result<bool, ActiveClipboardRegisterError> {
-        self.0.fetch_add(1, Ordering::SeqCst);
-        Ok(false)
     }
 }

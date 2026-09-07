@@ -582,10 +582,6 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn utc_from_ms(ms: i64) -> DateTime<Utc> {
-        Utc.timestamp_millis_opt(ms).single().unwrap()
-    }
-
     struct FakeDeviceIdentity(DeviceId);
     impl DeviceIdentityPort for FakeDeviceIdentity {
         fn current_device_id(&self) -> DeviceId {

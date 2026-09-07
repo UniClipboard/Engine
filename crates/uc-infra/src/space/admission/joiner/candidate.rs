@@ -279,10 +279,9 @@ mod tests {
         AdmissionEncryptedPasswordEquivalent, AdmissionIdentitySignature, AdmissionJoinRequestV1,
         AdmissionJoinerPrivateState, AdmissionKeyPackage, AdmissionMessageId, AdmissionMlsCommit,
         AdmissionMlsWelcome, AdmissionPeerBinding, AdmissionRecoveryPublicKey, AdmissionRole,
-        AdmissionSealedRecoveryMaterial, AdmissionSourceSnapshot, BaseMembershipHistoryPosition,
-        InvitationId, JoinId, JoinerAdmission, MembershipCredential, PendingAdmissionExchange,
-        SpaceAdmissionId, SpaceAdmissionRoute, UnreadableHistoryPolicy,
-        ED25519_SIGNATURE_ALGORITHM_V1,
+        AdmissionSealedRecoveryMaterial, AdmissionSourceSnapshot, InvitationId, JoinId,
+        JoinerAdmission, MembershipCredential, PendingAdmissionExchange, SpaceAdmissionId,
+        SpaceAdmissionRoute, UnreadableHistoryPolicy, ED25519_SIGNATURE_ALGORITHM_V1,
     };
     use uc_core::ports::space::SpaceAccessError;
     use uc_core::security::IdentityFingerprint;

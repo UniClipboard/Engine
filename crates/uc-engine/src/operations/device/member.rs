@@ -10,7 +10,7 @@ use uc_application::facade::{
     MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch, MemberSyncPreferencesView,
     RemoveSpaceMemberError, RosterError, SpaceProtectionModeView, SpaceProtectionView,
 };
-#[cfg(any(test, feature = "dev-tools"))]
+#[cfg(test)]
 use uc_core::membership::WorkspaceSnapshot;
 use uc_core::ports::ReachabilityState;
 
@@ -26,7 +26,7 @@ use crate::{
     QueryMemberSyncPreferencesInput, RemoveMemberInput, SpaceProtectionModeSummary,
     SpaceProtectionSummary, UpdateMemberSyncPreferencesInput,
 };
-#[cfg(any(test, feature = "dev-tools"))]
+#[cfg(test)]
 use crate::{
     WorkspaceConvergenceFailureCategorySummary, WorkspaceConvergencePhaseSummary,
     WorkspaceConvergenceSummary,
@@ -157,7 +157,7 @@ fn space_protection_summary(result: SpaceProtectionView) -> SpaceProtectionSumma
     SpaceProtectionSummary { mode, members }
 }
 
-#[cfg(any(test, feature = "dev-tools"))]
+#[cfg(test)]
 pub(crate) fn workspace_convergence_summary(
     snapshot: WorkspaceSnapshot,
 ) -> WorkspaceConvergenceSummary {

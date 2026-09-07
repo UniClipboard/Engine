@@ -1971,13 +1971,6 @@ fn map_workspace_convergence_summary(
     }
 }
 
-fn map_device_trust(result: uc_engine::OperationResult) -> Result<String, BindingError> {
-    match result {
-        uc_engine::OperationResult::DeviceTrust(snapshot) => map_device_trust_snapshot(snapshot),
-        _ => Err(BindingError::UnexpectedResult),
-    }
-}
-
 fn map_device_group_choices(result: OperationResult) -> Result<String, BindingError> {
     match result {
         OperationResult::DeviceGroupChoices(summary) => {
@@ -1996,6 +1989,7 @@ fn map_device_group_choice_result(result: OperationResult) -> Result<String, Bin
     }
 }
 
+#[cfg(test)]
 fn map_device_trust_snapshot(
     snapshot: uc_engine::DeviceTrustSnapshotSummary,
 ) -> Result<String, BindingError> {

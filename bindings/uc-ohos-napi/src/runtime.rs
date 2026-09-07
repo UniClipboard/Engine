@@ -489,6 +489,7 @@ fn workspace_convergence(
     })
 }
 
+#[cfg(test)]
 fn device_trust_json(summary: uc_engine::DeviceTrustSnapshotSummary) -> napi::Result<String> {
     serde_json::to_string(&summary).map_err(|_| unexpected_result())
 }
