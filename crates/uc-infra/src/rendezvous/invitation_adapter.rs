@@ -146,6 +146,7 @@ impl RendezvousPairingInvitationAdapter {
             sponsor_device_name: device_name,
             sponsor_endpoint_id: endpoint_id.clone(),
             sponsor_ticket: full_invitation.as_str().to_owned(),
+            code_length: crate::pairing::code_mint::INVITATION_CODE_LENGTH,
             ttl_secs: Some(LOCAL_MINT_TTL.num_seconds() as u32),
         };
 
@@ -644,7 +645,7 @@ mod tests {
     /// channel unreachable / misbehaving) rather than being adopted from a
     /// server response. Two signals distinguish them:
     ///
-    /// 1. Shape — `mint_invitation_code` emits `XXXX-XXXX` (9 chars).
+    /// 1. 格式：六位数字，分为两个三位组。
     /// 2. TTL — the local path sets `expires_at = now + LOCAL_MINT_TTL`, so
     ///    the value must land in the window bracketed by the call. A
     ///    server-minted expiry would carry the response's own timestamp.
@@ -654,10 +655,14 @@ mod tests {
         after: DateTime<Utc>,
     ) {
         let code = issued.code.as_str();
-        assert_eq!(code.len(), 9, "local-mint code is XXXX-XXXX, got {code:?}");
+        assert_eq!(code.len(), 7, "local-mint code is XXX-XXX");
         let (left, right) = code.split_once('-').expect("local-mint code has a hyphen");
-        assert_eq!(left.len(), 4, "left group of {code:?}");
-        assert_eq!(right.len(), 4, "right group of {code:?}");
+        assert_eq!(left.len(), 3);
+        assert_eq!(right.len(), 3);
+        assert!(left
+            .bytes()
+            .chain(right.bytes())
+            .all(|b| b.is_ascii_digit()));
         assert!(
             issued.expires_at >= before + LOCAL_MINT_TTL
                 && issued.expires_at <= after + LOCAL_MINT_TTL,
@@ -856,6 +861,7 @@ mod tests {
             .and(body_partial_json(json!({
                 "sponsorDeviceId": "device-a",
                 "sponsorDeviceName": "mac",
+                "codeLength": 6,
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "code": "ABCD-EFGH",

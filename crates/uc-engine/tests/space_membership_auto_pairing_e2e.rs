@@ -1,5 +1,8 @@
 #![cfg(feature = "dev-tools")]
 
+#[path = "space_membership_auto_pairing_e2e/six_digit_pairing.rs"]
+mod six_digit_pairing;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
