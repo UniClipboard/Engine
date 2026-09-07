@@ -27,8 +27,8 @@ impl SecureStoragePort for MemoryStorage {
 }
 
 #[tokio::test]
-async fn encrypted_legacy_v1_and_v2_rows_upgrade_to_v3_on_commit() {
-    for (version, empty_fields) in [(1, 9), (2, 14)] {
+async fn encrypted_legacy_rows_upgrade_to_v4_on_commit() {
+    for (version, empty_fields) in [(1, 9), (2, 14), (3, 15)] {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("ledger.sqlite");
         let storage = Arc::new(MemoryStorage::default());
@@ -71,7 +71,7 @@ async fn encrypted_legacy_v1_and_v2_rows_upgrade_to_v3_on_commit() {
         let plain = keys
             .open_profile_payload(MEMBERSHIP_LEDGER_PURPOSE, &encrypted)
             .unwrap();
-        assert_eq!(postcard::take_from_bytes::<u16>(&plain).unwrap().0, 3);
+        assert_eq!(postcard::take_from_bytes::<u16>(&plain).unwrap().0, 4);
         let reopened = SqliteMembershipLedger::new(
             Arc::new(DieselSqliteExecutor::new(
                 init_db_pool(db.to_str().unwrap()).unwrap(),

@@ -37,6 +37,33 @@ impl<E> SqliteMembershipLedger<E> {
 }
 
 impl<E: DbExecutor> SqliteMembershipLedger<E> {
+    pub(crate) async fn apply_projection(
+        &self,
+        relationships: &crate::db::repositories::EncryptedRelationshipStore<E>,
+        plan: &uc_application::deps::MembershipProjectionPlan,
+    ) -> Result<(), uc_application::deps::ApplyMembershipProjectionError> {
+        use uc_application::deps::ApplyMembershipProjectionError;
+        relationships
+            .reconcile_membership_projection(plan, |conn| {
+                let current = self.load_on(conn).map_err(|source| {
+                    ApplyMembershipProjectionError::Dependency {
+                        source: anyhow::Error::new(source),
+                    }
+                })?;
+                let digest = current
+                    .membership_history
+                    .as_deref()
+                    .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)));
+                if current.revision != plan.expected_revision
+                    || digest != Some(plan.expected_history_digest)
+                {
+                    return Err(ApplyMembershipProjectionError::Conflict);
+                }
+                Ok(())
+            })
+            .await
+    }
+
     fn load_on(
         &self,
         conn: &mut SqliteConnection,

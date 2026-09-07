@@ -309,7 +309,7 @@ async fn removal_commits_all_local_facts_once_before_returning_success() {
         .effective_member_for_device(&DeviceId::new("device-b"))
         .is_none());
     let effect = persisted
-        .pending_effects
+        .effect_journal
         .get(result.change_id.as_bytes())
         .unwrap();
     assert_eq!(effect.kind, MembershipEffectKind::RemoveDevice);

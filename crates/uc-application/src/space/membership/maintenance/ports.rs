@@ -53,6 +53,6 @@ pub trait SynchronizeMembershipMaintenancePort: Send + Sync {
 }
 
 #[async_trait]
-pub trait CleanupLegacyMembershipDataPort: Send + Sync {
-    async fn cleanup_legacy_membership_data(&self) -> MembershipMaintenanceStepOutcome;
+pub trait ReconcileMembershipProjectionPort: Send + Sync {
+    async fn reconcile_membership_projection(&self) -> MembershipMaintenanceStepOutcome;
 }

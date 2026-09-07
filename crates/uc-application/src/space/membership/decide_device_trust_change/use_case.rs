@@ -235,7 +235,7 @@ impl DecideDeviceTrustChangeUseCase {
                             updated_at_ms: 0,
                         });
                     if decision_choice == RemovalDecision::Accept {
-                        record.pending_effects.insert(
+                        record.effect_journal.insert(
                             *input.change_id.as_bytes(),
                             PendingMembershipEffect {
                                 event_id: *input.change_id.as_bytes(),

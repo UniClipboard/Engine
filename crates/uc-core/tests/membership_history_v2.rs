@@ -324,7 +324,7 @@ fn canonical_history_formats_remain_byte_stable() {
         .unwrap(),
         postcard::to_stdvec(
             &history
-                .export_suffix_pages_v3(author.facts, base.current_position().unwrap())
+                .export_suffix_pages_v4(author.facts, base.current_position().unwrap())
                 .unwrap(),
         )
         .unwrap(),
@@ -335,7 +335,7 @@ fn canonical_history_formats_remain_byte_stable() {
         [
             "7da394e93b254dc4f009046f9e10ce35b41aa92d24ca732f167a6f61884af4b3",
             "3f0e6116e992a88ddcfb534fbb51262e9848eb33deeda2f6b9eca0201f0945b2",
-            "aef014dec2d6ed8449ec4ca75f4c2d6db2dedd9eac32d51b422787befcd1497b",
+            "7da2fdfa05341dc8f5cc05c9f88c551f6f09429c334f60756ef20c0c4c10f48e",
         ]
     );
 }
@@ -851,7 +851,7 @@ fn branch_recovery_package_binds_recipient_branch_expiry_and_authorization() {
 }
 
 #[test]
-fn v3_suffix_exports_only_records_after_the_receiver_position() {
+fn v4_suffix_exports_only_records_after_the_receiver_position() {
     let verifier = DeterministicSignatureVerifier;
     let (target, a, b, genesis, add_b) = history_with_a_and_b(true);
     let mut receiver = VersionedMembershipHistory::new(LINEAGE.to_owned());
@@ -864,7 +864,7 @@ fn v3_suffix_exports_only_records_after_the_receiver_position() {
         verifier.sign(&a.membership_credential, &sender_facts.signing_payload());
 
     let pages = target
-        .export_suffix_pages_v3(sender_facts, base.clone())
+        .export_suffix_pages_v4(sender_facts, base.clone())
         .expect("sender exports a bounded suffix");
 
     assert_eq!(pages.len(), 2, "suffix contains AddDevice and its receipt");
@@ -873,9 +873,10 @@ fn v3_suffix_exports_only_records_after_the_receiver_position() {
         pages[0].target_position(),
         &target.current_position().unwrap()
     );
-    assert!(receiver
-        .apply_suffix_pages_v3(&pages, a.facts.member_instance, &verifier)
-        .expect("receiver applies the verified suffix"));
+    let proven_sender = receiver
+        .apply_suffix_pages_v4(&pages, a.facts.member_instance, &verifier)
+        .expect("receiver applies the verified suffix");
+    assert_eq!(proven_sender.current_position(), target.current_position());
     assert_eq!(receiver.current_position(), target.current_position());
     assert!(receiver.active_members().contains(&b.facts.member_instance));
     assert_eq!(pages[0].page_index(), 0);
@@ -908,6 +909,163 @@ fn local_removal_event_is_bound_to_the_current_history_and_author() {
             if member == b.facts.member_instance
     ));
     assert!(removal.signature.is_empty());
+}
+
+#[test]
+fn suffix_preserves_verified_receiver_side_branches_and_local_decisions() {
+    let verifier = DeterministicSignatureVerifier;
+    let (mut common, a, b, _, add_b) = history_with_a_and_b(true);
+    let c = admission("device-c", credential(3));
+    let add_c = event(
+        &common,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::AddDevice {
+            admission: c.clone(),
+        },
+        61,
+        &verifier,
+    );
+    common
+        .verify_and_receive_event(add_c.clone(), &verifier)
+        .unwrap();
+    common
+        .verify_and_record_activation_receipt(activation_receipt(&add_c, &c, &verifier), &verifier)
+        .unwrap();
+    let old_removal = event(
+        &common,
+        Some(add_c.event_id()),
+        &b,
+        MembershipOperationV2::RemoveDevice {
+            member: c.facts.member_instance,
+        },
+        62,
+        &verifier,
+    );
+    let incoming_removal = event(
+        &common,
+        Some(add_c.event_id()),
+        &a,
+        MembershipOperationV2::RemoveDevice {
+            member: b.facts.member_instance,
+        },
+        63,
+        &verifier,
+    );
+    let mut receiver = common.clone();
+    receiver
+        .verify_and_receive_remote_event_for_local_member(
+            old_removal.clone(),
+            c.facts.member_instance,
+            &verifier,
+        )
+        .unwrap();
+    let mut rejection = receiver
+        .create_unsigned_local_removal_decision(
+            old_removal.event_id(),
+            c.facts.member_instance,
+            &c.membership_credential,
+            RemovalDecision::Reject,
+            [64; 16],
+        )
+        .unwrap();
+    rejection.signature = verifier.sign(&c.membership_credential, &rejection.signing_payload());
+    receiver
+        .apply_signed_local_removal_decision(rejection.clone(), c.facts.member_instance, &verifier)
+        .unwrap();
+    let mut sender = common;
+    sender
+        .verify_and_receive_event(incoming_removal, &verifier)
+        .unwrap();
+    let mut sender_facts = a.facts.clone();
+    sender_facts.identity_signature =
+        verifier.sign(&a.membership_credential, &sender_facts.signing_payload());
+    let pages = sender
+        .export_suffix_pages_v4(sender_facts, receiver.current_position().unwrap())
+        .unwrap();
+
+    receiver
+        .apply_suffix_pages_v4(&pages, c.facts.member_instance, &verifier)
+        .expect("合法的接收方旁支和已签决定不能使增量被误判为无效");
+    assert_eq!(
+        receiver.decision_for(old_removal.event_id(), c.facts.member_instance),
+        Some(&rejection)
+    );
+    assert!(receiver.active_members().contains(&c.facts.member_instance));
+}
+
+#[test]
+fn suffix_cannot_apply_records_outside_the_sender_proof() {
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct ProofFrame {
+        baseline_digest: [u8; 32],
+        events: Vec<MembershipEventId>,
+        activation_receipts: Vec<MembershipEventId>,
+        decisions: Vec<(MembershipEventId, uc_core::membership::MemberInstanceId)>,
+    }
+    // 独立生成恶意但格式正确的发送端承诺，不借用接收方的校验结果。
+    #[derive(serde::Serialize)]
+    enum RecordFrame {
+        Event(MembershipEventV2),
+        ActivationReceipt(AdmissionActivationReceipt),
+    }
+    let verifier = DeterministicSignatureVerifier;
+    let (sender, a, _, genesis, _) = history_with_a_and_b(true);
+    let mut receiver = VersionedMembershipHistory::new(LINEAGE.to_owned());
+    receiver
+        .verify_and_receive_event(genesis.clone(), &verifier)
+        .unwrap();
+    let base = receiver.current_position().unwrap();
+    let mut facts = a.facts.clone();
+    facts.identity_signature = verifier.sign(&a.membership_credential, &facts.signing_payload());
+    let pages = sender
+        .export_suffix_pages_v4(facts.clone(), base.clone())
+        .unwrap();
+    let mut frames = pages
+        .iter()
+        .map(|p| serde_json::to_value(p).unwrap())
+        .collect::<Vec<_>>();
+    let mut proof: ProofFrame = serde_json::from_value(frames[0]["sender_proof"].clone()).unwrap();
+    proof.events = vec![genesis.event_id()];
+    proof.activation_receipts.clear();
+    let records = frames
+        .iter()
+        .map(|p| {
+            if let Some(event) = p["events"].as_array().unwrap().first() {
+                RecordFrame::Event(serde_json::from_value(event.clone()).unwrap())
+            } else {
+                RecordFrame::ActivationReceipt(
+                    serde_json::from_value(p["activation_receipts"][0].clone()).unwrap(),
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    let encoded =
+        postcard::to_stdvec(&(4u16, LINEAGE, &base, &base, &facts, &records, &proof)).unwrap();
+    let mut hash = Sha256::new();
+    hash.update(b"uniclipboard/membership-history-suffix/v4\0");
+    hash.update((encoded.len() as u64).to_be_bytes());
+    hash.update(encoded);
+    let transfer: [u8; 32] = hash.finalize().into();
+    for page in &mut frames {
+        page["target_position"] = serde_json::to_value(&base).unwrap();
+        page["transfer_id"] = serde_json::to_value(transfer).unwrap();
+    }
+    frames[0]["sender_proof"] = serde_json::to_value(proof).unwrap();
+    let malicious = frames
+        .into_iter()
+        .map(|p| {
+            serde_json::from_value::<uc_core::membership::MembershipHistorySuffixPageV4>(p).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let before = receiver.encode_persisted_v2().unwrap();
+    assert!(
+        receiver
+            .apply_suffix_pages_v4(&malicious, a.facts.member_instance, &verifier)
+            .is_err(),
+        "发送者不得在已验证范围外夹带更新"
+    );
+    assert_eq!(receiver.encode_persisted_v2().unwrap(), before);
 }
 
 #[test]

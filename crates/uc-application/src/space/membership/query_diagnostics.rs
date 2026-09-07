@@ -110,7 +110,11 @@ impl QueryMembershipDiagnosticsUseCase {
                         && peer.awaits_confirmation(&position)
                 })
                 .count(),
-            pending_effect_count: record.pending_effects.len(),
+            pending_effect_count: record
+                .current_effects(history)
+                .iter()
+                .filter(|(_, effect)| effect.phase < super::MembershipEffectPhase::Activated)
+                .count(),
             transition_phases: record
                 .membership_branch_transitions
                 .values()

@@ -577,7 +577,11 @@ pub async fn wire_dependencies_from_inputs(
         DieselPeerAddressRepository::new(Arc::clone(&relationship_store)),
     );
     let relationship_reset: Arc<dyn uc_core::membership::RelationshipStateResetPort> =
-        relationship_store;
+        relationship_store.clone();
+    let membership_projection = Arc::new(uc_infra::space::MembershipProjectionAdapter::new(
+        membership_ledger.clone(),
+        relationship_store,
+    ));
     let v3_content_protection = platform.payload_runtime.content().cloned();
 
     // Transfer metadata and event payloads are encrypted with two independent
@@ -995,6 +999,7 @@ pub async fn wire_dependencies_from_inputs(
             current_member_signatures,
             membership_session,
             membership_ledger,
+            membership_projection,
             admission_state,
             admission_credentials,
             admission_space_transition,

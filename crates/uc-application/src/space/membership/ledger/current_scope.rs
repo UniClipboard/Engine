@@ -18,6 +18,19 @@ pub enum SpaceMemberPauseReason {
     EffectPending,
 }
 
+impl SpaceMemberPauseReason {
+    /// 资料核对与内容访问分开：仍在已验证成员范围内的异常关系允许重新证明。
+    pub(crate) fn permits_history_verification(self) -> bool {
+        matches!(
+            self,
+            Self::RelationshipUnconfirmed
+                | Self::PendingLocalDecision
+                | Self::UpgradeRequired
+                | Self::Invalid
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PausedSpaceMember {
     pub device_id: DeviceId,

@@ -181,6 +181,46 @@ async fn no_current_space_has_no_authorized_scope() {
 }
 
 #[tokio::test]
+async fn old_branch_incomplete_effect_does_not_pause_a_current_member() {
+    let mut record = active_two_member_ledger();
+    let history = VersionedMembershipHistory::decode_persisted_v2(
+        record.membership_history.as_ref().unwrap(),
+        &AcceptingVerifier,
+    )
+    .unwrap();
+    let local = record.local_member_instance.unwrap();
+    let peer = DeviceId::new("device-b");
+    let mut old_removal = history
+        .create_unsigned_local_removal_event(
+            local,
+            history.credential_for(local).unwrap(),
+            history.effective_member_for_device(&peer).unwrap(),
+            [72; 16],
+            [73; 32],
+        )
+        .unwrap();
+    old_removal.signature = vec![74];
+    record.effect_journal.insert(
+        *old_removal.event_id().as_bytes(),
+        PendingMembershipEffect {
+            event_id: *old_removal.event_id().as_bytes(),
+            kind: MembershipEffectKind::RemoveDevice,
+            phase: MembershipEffectPhase::Prepared,
+            affected_device_ids: vec![peer.clone()],
+            payload: postcard::to_stdvec(&old_removal).unwrap(),
+        },
+    );
+    let repository = Arc::new(MemoryLedgerRepository::new(record));
+    let ledger = MembershipLedger::new(repository.clone(), repository, Arc::new(AcceptingVerifier));
+    let scope = ledger.current_scope().await.unwrap();
+    assert_eq!(
+        scope.usable_peer_device_ids,
+        vec![peer],
+        "旧分支任务不能暂停当前组仍有效的成员"
+    );
+}
+
+#[tokio::test]
 async fn active_v2_root_authorizes_only_the_local_member() {
     let repository = Arc::new(MemoryLedgerRepository::new(active_single_member_ledger()));
     let ledger = MembershipLedger::new(repository.clone(), repository, Arc::new(AcceptingVerifier));
@@ -233,10 +273,10 @@ async fn pending_local_decision_pauses_only_that_peer() {
 #[tokio::test]
 async fn prepared_effect_keeps_the_affected_peer_paused() {
     let mut loaded = active_two_member_ledger();
-    loaded.pending_effects.insert(
-        [0x71; 32],
+    loaded.effect_journal.insert(
+        [0x11; 32],
         PendingMembershipEffect {
-            event_id: [0x71; 32],
+            event_id: [0x11; 32],
             kind: MembershipEffectKind::AddDevice,
             phase: MembershipEffectPhase::Prepared,
             affected_device_ids: vec![DeviceId::new("device-b")],
@@ -468,15 +508,24 @@ impl ActivateMembershipEffectPort for RecordingEffectPorts {
 #[tokio::test]
 async fn prepared_effect_resumes_each_persisted_phase_in_order() {
     let mut loaded = active_two_member_ledger();
-    let event = unordered_effect_event("device-b", 1, 0x82);
+    let mut history = VersionedMembershipHistory::decode_persisted_v2(
+        loaded.membership_history.as_ref().unwrap(),
+        &AcceptingVerifier,
+    )
+    .unwrap();
+    let event = effect_event(&history, "device-c", 0x82);
+    history
+        .verify_and_receive_event(event.clone(), &AcceptingVerifier)
+        .unwrap();
+    loaded.membership_history = Some(history.encode_persisted_v2().unwrap());
     let event_id = *event.event_id().as_bytes();
-    loaded.pending_effects.insert(
+    loaded.effect_journal.insert(
         event_id,
         PendingMembershipEffect {
             event_id,
             kind: MembershipEffectKind::AddDevice,
             phase: MembershipEffectPhase::Prepared,
-            affected_device_ids: vec![DeviceId::new("device-b")],
+            affected_device_ids: vec![DeviceId::new("device-c")],
             payload: postcard::to_stdvec(&event).unwrap(),
         },
     );
@@ -502,7 +551,7 @@ async fn prepared_effect_resumes_each_persisted_phase_in_order() {
             .load()
             .await
             .unwrap()
-            .pending_effects
+            .effect_journal
             .get(&event_id)
             .unwrap()
             .phase,
@@ -549,26 +598,39 @@ impl ActivateMembershipEffectPort for RecordingEffectDevices {
     }
 }
 
-fn unordered_effect_event(device: &str, depth: u64, marker: u8) -> MembershipEventV2 {
+fn effect_event(
+    history: &VersionedMembershipHistory,
+    device: &str,
+    marker: u8,
+) -> MembershipEventV2 {
     let (facts, credential) = member_facts(device, marker);
+    let author = history
+        .effective_member_for_device(&DeviceId::new("device-a"))
+        .unwrap();
+    let author_credential = history.credential_for(author).unwrap();
+    let parent = history.current_head();
+    let operation = MembershipOperationV2::AddDevice {
+        admission: MembershipAdmissionV2 {
+            facts,
+            membership_credential: credential,
+            resume_public_key_digest: [marker; 32],
+            security_commitment_id: [marker; 32],
+        },
+    };
+    let digest = history
+        .expected_resulting_members_digest(parent, &operation)
+        .unwrap();
     MembershipEventV2::new(
         MEMBERSHIP_EVENT_FORMAT_V2,
         "space-a".to_owned(),
-        None,
-        depth,
+        parent,
+        parent.map(|id| history.depth(id).unwrap() + 1).unwrap_or(0),
         [marker; 16],
-        facts.member_instance,
-        credential.credential_id,
-        credential.signature_algorithm_version,
-        MembershipOperationV2::AddDevice {
-            admission: MembershipAdmissionV2 {
-                facts,
-                membership_credential: credential,
-                resume_public_key_digest: [marker; 32],
-                security_commitment_id: [marker; 32],
-            },
-        },
-        [marker; 32],
+        author,
+        author_credential.credential_id,
+        author_credential.signature_algorithm_version,
+        operation,
+        digest,
         [marker; 32],
         vec![marker],
         Some([marker; 32]),
@@ -578,18 +640,30 @@ fn unordered_effect_event(device: &str, depth: u64, marker: u8) -> MembershipEve
 
 #[tokio::test]
 async fn membership_effects_follow_history_depth_instead_of_event_id_order() {
-    let parent = unordered_effect_event("device-c", 1, 0x31);
+    let mut loaded = active_two_member_ledger();
+    let mut history = VersionedMembershipHistory::decode_persisted_v2(
+        loaded.membership_history.as_ref().unwrap(),
+        &AcceptingVerifier,
+    )
+    .unwrap();
+    let parent = effect_event(&history, "device-c", 0x31);
+    history
+        .verify_and_receive_event(parent.clone(), &AcceptingVerifier)
+        .unwrap();
     let child = (0x32..=0xff)
-        .map(|marker| unordered_effect_event("device-d", 2, marker))
+        .map(|marker| effect_event(&history, "device-d", marker))
         .find(|event| event.event_id().as_bytes() < parent.event_id().as_bytes())
         .expect("test must find a child id ordered before its parent");
-    let mut loaded = active_two_member_ledger();
+    history
+        .verify_and_receive_event(child.clone(), &AcceptingVerifier)
+        .unwrap();
+    loaded.membership_history = Some(history.encode_persisted_v2().unwrap());
     for (event, device) in [
         (parent, DeviceId::new("device-c")),
         (child, DeviceId::new("device-d")),
     ] {
         let event_id = *event.event_id().as_bytes();
-        loaded.pending_effects.insert(
+        loaded.effect_journal.insert(
             event_id,
             PendingMembershipEffect {
                 event_id,
@@ -722,7 +796,7 @@ async fn space_rebuild_reset_clears_every_previous_membership_fact_atomically() 
     loaded
         .membership_branch_recovery_sessions
         .insert([0xd1; 32], recovery_session);
-    loaded.pending_effects.insert(
+    loaded.effect_journal.insert(
         [0xe4; 32],
         PendingMembershipEffect {
             event_id: [0xe4; 32],
@@ -752,7 +826,7 @@ async fn space_rebuild_reset_clears_every_previous_membership_fact_atomically() 
     assert!(persisted.peer_reconciliation.is_empty());
     assert!(persisted.inbound_transfers.is_empty());
     assert!(persisted.completed_inbound_transfers.is_empty());
-    assert!(persisted.pending_effects.is_empty());
+    assert!(persisted.effect_journal.is_empty());
     assert!(persisted.membership_branch_recovery_sessions.is_empty());
 }
 

@@ -74,8 +74,8 @@ impl SynchronizeMembershipMaintenancePort for RecordingStep {
 }
 
 #[async_trait]
-impl CleanupLegacyMembershipDataPort for RecordingStep {
-    async fn cleanup_legacy_membership_data(&self) -> MembershipMaintenanceStepOutcome {
+impl ReconcileMembershipProjectionPort for RecordingStep {
+    async fn reconcile_membership_projection(&self) -> MembershipMaintenanceStepOutcome {
         self.record()
     }
 }
@@ -197,6 +197,41 @@ async fn startup_runs_the_fixed_sequence_and_continues_after_deferred_work() {
 }
 
 #[tokio::test]
+async fn deferred_projection_is_revisited_by_periodic_maintenance() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let step = |name, outcome| {
+        Arc::new(RecordingStep {
+            name,
+            calls: Arc::clone(&calls),
+            outcome,
+        })
+    };
+    let maintain = MaintainSpaceMembershipUseCase::new(MaintainSpaceMembershipDeps {
+        admissions: step("admissions", MembershipMaintenanceStepOutcome::Completed),
+        effects: step("effects", MembershipMaintenanceStepOutcome::Completed),
+        conflicts: step("conflicts", MembershipMaintenanceStepOutcome::Completed),
+        group_update_delivery: step("group_updates", MembershipMaintenanceStepOutcome::Completed),
+        restricted_delivery: step("restricted", MembershipMaintenanceStepOutcome::Completed),
+        synchronization: step("synchronize", MembershipMaintenanceStepOutcome::Completed),
+        cleanup: step("projection", MembershipMaintenanceStepOutcome::Deferred),
+    });
+    assert_eq!(
+        maintain
+            .execute(MembershipMaintenanceTrigger::Startup)
+            .await
+            .deferred_count,
+        1
+    );
+    let retry = maintain
+        .execute(MembershipMaintenanceTrigger::Periodic)
+        .await;
+    assert_eq!(
+        retry.deferred_count, 1,
+        "暂时失败的成员资料维护必须在定期恢复中再次执行"
+    );
+}
+
+#[tokio::test]
 async fn corrupt_step_stops_later_permission_expanding_work() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let step = |name, outcome| {
@@ -229,7 +264,7 @@ async fn corrupt_step_stops_later_permission_expanding_work() {
 }
 
 #[tokio::test]
-async fn peer_online_runs_only_exact_peer_capabilities() {
+async fn peer_online_runs_targeted_network_work_and_local_projection() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let step = |name| {
         Arc::new(RecordingStep {
@@ -261,10 +296,11 @@ async fn peer_online_runs_only_exact_peer_capabilities() {
             "conflicts",
             "group_updates",
             "restricted",
-            "synchronize"
+            "synchronize",
+            "cleanup"
         ]
     );
-    assert_eq!(report.completed_count, 5);
+    assert_eq!(report.completed_count, 6);
 }
 
 #[tokio::test]
@@ -299,10 +335,11 @@ async fn periodic_retries_history_when_synchronization_is_still_required() {
             "effects",
             "conflicts",
             "group_updates",
-            "synchronize"
+            "synchronize",
+            "cleanup"
         ]
     );
-    assert_eq!(report.completed_count, 6);
+    assert_eq!(report.completed_count, 7);
 }
 
 async fn wait_for_call_count(calls: &Arc<Mutex<Vec<&'static str>>>, expected: usize) {
@@ -517,7 +554,7 @@ async fn online_events_for_different_peers_are_not_overwritten_during_a_round() 
     }
     release.notify_one();
 
-    wait_for_call_count(&calls, 17).await;
+    wait_for_call_count(&calls, 19).await;
 
     assert_eq!(
         calls.lock().unwrap().as_slice(),
@@ -534,11 +571,13 @@ async fn online_events_for_different_peers_are_not_overwritten_during_a_round() 
             "group_updates",
             "restricted",
             "synchronize",
+            "cleanup",
             "admissions",
             "conflicts",
             "group_updates",
             "restricted",
             "synchronize",
+            "cleanup",
         ]
     );
     runtime.shutdown().await;

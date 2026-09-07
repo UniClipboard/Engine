@@ -3,6 +3,11 @@ mod group_update_delivery;
 mod handle_history_message;
 mod ledger;
 mod maintenance;
+mod projection;
+pub(super) use projection::ReconcileMembershipProjectionUseCase;
+pub use projection::{
+    ApplyMembershipProjectionError, ApplyMembershipProjectionPort, MembershipProjectionPlan,
+};
 mod query_admission;
 mod query_device_trust;
 mod query_diagnostics;
@@ -34,8 +39,8 @@ pub use ledger::{
 };
 pub(crate) use maintenance::PreparedSpaceMembershipMaintenanceRuntime;
 pub use maintenance::{
-    CleanupLegacyMembershipDataPort, DeliverPendingGroupUpdatesPort,
-    DeliverRestrictedMembershipPort, MembershipNetworkActivityPort, RecoverMembershipConflictsPort,
+    DeliverPendingGroupUpdatesPort, DeliverRestrictedMembershipPort, MembershipNetworkActivityPort,
+    ReconcileMembershipProjectionPort, RecoverMembershipConflictsPort,
     RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
 };
 pub use query_device_trust::{

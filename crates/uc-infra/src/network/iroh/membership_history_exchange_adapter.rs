@@ -32,9 +32,9 @@ use super::connect_with_staggered_retry;
 use super::peer_address_resolver::PeerAddressResolver;
 use super::trace_context::{inject_current, set_remote_parent, WireTraceContext};
 
-pub const MEMBERSHIP_HISTORY_EXCHANGE_ALPN: &[u8] = b"uniclipboard/membership-history/3";
+pub const MEMBERSHIP_HISTORY_EXCHANGE_ALPN: &[u8] = b"uniclipboard/membership-history/4";
 
-const WIRE_VERSION: u8 = 3;
+const WIRE_VERSION: u8 = 4;
 const REQUEST_LAYOUT_MARKER: &[u8; 4] = b"UCT1";
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const ACCEPTED: u8 = 1;
@@ -156,9 +156,11 @@ impl RestrictedMembershipDeliveryPort for IrohMembershipHistoryExchangeAdapter {
                 | MembershipHistoryAckV3::RestrictedApplied,
             )) => Ok(()),
             Ok(MembershipHistoryMessage::AckV3(
-                MembershipHistoryAckV3::Invalid | MembershipHistoryAckV3::Diverged,
+                MembershipHistoryAckV3::Invalid
+                | MembershipHistoryAckV3::Diverged
+                | MembershipHistoryAckV3::NeedsEvidence,
             ))
-            | Ok(MembershipHistoryMessage::SuffixPageV3(_))
+            | Ok(MembershipHistoryMessage::SuffixPageV4(_))
             | Ok(MembershipHistoryMessage::SummaryV3(_))
             | Ok(MembershipHistoryMessage::RequestSuffixV3(_))
             | Ok(MembershipHistoryMessage::RequestConflictEvidenceV3(_))
@@ -279,7 +281,7 @@ pub(crate) fn request_purpose(message: &MembershipHistoryMessage) -> MembershipE
     match message {
         MembershipHistoryMessage::SummaryV3(_) => MembershipExchangePurpose::CompareSummary,
         MembershipHistoryMessage::RequestSuffixV3(_) => MembershipExchangePurpose::RequestHistory,
-        MembershipHistoryMessage::SuffixPageV3(_) => MembershipExchangePurpose::SendHistory,
+        MembershipHistoryMessage::SuffixPageV4(_) => MembershipExchangePurpose::SendHistory,
         MembershipHistoryMessage::RequestConflictEvidenceV3(_) => {
             MembershipExchangePurpose::RequestConflictEvidence
         }
@@ -384,7 +386,7 @@ fn decode_message(
         MembershipHistoryMessage::SummaryV3(_)
             | MembershipHistoryMessage::RequestSuffixV3(_)
             | MembershipHistoryMessage::AckV3(_)
-            | MembershipHistoryMessage::SuffixPageV3(_)
+            | MembershipHistoryMessage::SuffixPageV4(_)
             | MembershipHistoryMessage::RestrictedEventV3(_)
             | MembershipHistoryMessage::RestrictedDecisionV3(_)
             | MembershipHistoryMessage::RequestConflictEvidenceV3(_)
@@ -436,7 +438,7 @@ fn introduced_device(
 ) -> Option<DeviceId> {
     let admission = match message {
         MembershipHistoryMessage::SummaryV3(summary) => &summary.sender_admission,
-        MembershipHistoryMessage::SuffixPageV3(page) => page.sender_admission(),
+        MembershipHistoryMessage::SuffixPageV4(page) => page.sender_admission(),
         MembershipHistoryMessage::RequestSuffixV3(_)
         | MembershipHistoryMessage::RequestConflictEvidenceV3(_)
         | MembershipHistoryMessage::ConflictEvidenceV3(_)
@@ -585,14 +587,14 @@ mod tests {
     }
 
     #[test]
-    fn history_v3_wire_checks_version_before_decoding_the_body() {
+    fn history_v4_wire_checks_version_before_decoding_the_body() {
         assert_eq!(
             MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
-            b"uniclipboard/membership-history/3"
+            b"uniclipboard/membership-history/4"
         );
         let message = MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid);
         let encoded = encode_message(&message).unwrap();
-        assert_eq!(encoded[0], 3);
+        assert_eq!(encoded[0], 4);
         assert_eq!(decode_message(&encoded).unwrap(), message);
 
         let mut old_version_with_invalid_body = vec![1];
@@ -605,10 +607,13 @@ mod tests {
         let message = MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid);
         let encoded = encode_request(message.clone()).expect("request encodes");
 
-        assert_eq!(&encoded[..5], b"\x03UCT1");
+        assert_eq!(&encoded[..5], b"\x04UCT1");
         let decoded = decode_request(&encoded).expect("request decodes");
         assert_eq!(decoded.message, message);
         assert!(decoded.trace_context.is_none());
+        let mut old_version = encoded.clone();
+        old_version[0] = 3;
+        assert!(decode_request(&old_version).is_err());
         assert!(decode_request(&encode_message(&message).expect("response encodes")).is_err());
     }
 

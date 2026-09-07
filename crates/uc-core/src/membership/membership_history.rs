@@ -9,7 +9,7 @@ use crate::ids::DeviceId;
 
 use super::versioned_membership_history::{
     BaseMembershipHistoryPosition, MembershipDecisionV2, MembershipEventV2,
-    MembershipHistoryPageV2, MembershipHistorySuffixPageV3,
+    MembershipHistoryPageV2, MembershipHistorySuffixPageV4,
 };
 use super::{AdmissionChangeFacts, MemberInstanceId};
 
@@ -116,7 +116,7 @@ impl PendingRemovalFacts {
 pub enum MembershipHistoryMessage {
     SummaryV3(MembershipHistorySummaryV3),
     RequestSuffixV3(MembershipHistorySuffixRequestV3),
-    SuffixPageV3(MembershipHistorySuffixPageV3),
+    SuffixPageV4(MembershipHistorySuffixPageV4),
     AckV3(MembershipHistoryAckV3),
     /// 仅向被普通成员 scope 排除的对端交付指定成员事件。
     RestrictedEventV3(MembershipEventV2),
@@ -185,6 +185,8 @@ pub enum MembershipHistoryAckV3 {
     RestrictedConsistent,
     Diverged,
     Invalid,
+    /// 当前上下文不足以验证增量；需要完整证据，不表示对端资料损坏。
+    NeedsEvidence,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

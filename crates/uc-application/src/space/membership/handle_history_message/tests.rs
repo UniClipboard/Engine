@@ -408,7 +408,7 @@ fn two_page_extension() -> (
         .verify_and_receive_event(add_d, &AcceptingVerifier)
         .unwrap();
     let pages = incoming
-        .export_suffix_pages_v3(peer.clone(), base.current_position().unwrap())
+        .export_suffix_pages_v4(peer.clone(), base.current_position().unwrap())
         .unwrap();
     assert_eq!(pages.len(), 2);
     let peer_device_id = peer.device_id.clone();
@@ -446,7 +446,7 @@ fn two_page_extension() -> (
         peer_device_id,
         pages
             .into_iter()
-            .map(MembershipHistoryMessage::SuffixPageV3)
+            .map(MembershipHistoryMessage::SuffixPageV4)
             .collect(),
     )
 }
@@ -526,7 +526,7 @@ async fn restricted_event_applies_only_the_authenticated_signed_event() {
         MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::RestrictedApplied)
     );
     let persisted = repository.load().await.unwrap();
-    assert!(persisted.pending_effects.contains_key(&event_id));
+    assert!(persisted.effect_journal.contains_key(&event_id));
     assert_eq!(
         persisted
             .peer_reconciliation
@@ -624,7 +624,7 @@ async fn restricted_remote_removal_is_persisted_without_advancing_the_local_bran
         history.pending_removal_decision(local.member_instance),
         Some(removal_id)
     );
-    assert!(persisted.pending_effects.is_empty());
+    assert!(persisted.effect_journal.is_empty());
 }
 
 #[tokio::test]
@@ -699,7 +699,7 @@ async fn two_page_transfer_persists_each_page_and_applies_only_when_complete() {
         Some(&current_position)
     );
     let prepared_add_devices = persisted
-        .pending_effects
+        .effect_journal
         .values()
         .filter(|effect| {
             effect.kind == MembershipEffectKind::AddDevice
@@ -779,7 +779,7 @@ async fn out_of_order_page_requests_the_missing_page_without_persisting() {
 }
 
 #[tokio::test]
-async fn unknown_sender_can_stage_a_bounded_page_but_cannot_commit_unrelated_history() {
+async fn unknown_sender_requires_complete_evidence_without_committing_unrelated_history() {
     let (mut loaded, peer_device_id, pages) = two_page_extension();
     let (local, local_credential) = member_facts("device-a", 0x41);
     loaded.membership_history = Some(
@@ -817,7 +817,7 @@ async fn unknown_sender_can_stage_a_bounded_page_but_cannot_commit_unrelated_his
     let final_ack = handler.execute(&source, pages[1].clone()).await.unwrap();
     assert_eq!(
         final_ack,
-        MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid)
+        MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::NeedsEvidence)
     );
     let persisted = repository.load().await.unwrap();
     assert!(persisted.inbound_transfers.is_empty());
@@ -827,4 +827,109 @@ async fn unknown_sender_can_stage_a_bounded_page_but_cannot_commit_unrelated_his
     )
     .unwrap();
     assert_eq!(history.effective_members().len(), 1);
+    assert_ne!(
+        persisted.peer_reconciliation[&peer_device_id].relationship,
+        MembershipHistoryRelationship::Consistent
+    );
+}
+
+#[tokio::test]
+async fn changed_transfer_replaces_staged_pages_without_quarantining_the_member() {
+    let (loaded, peer, old_pages) = two_page_extension();
+    let mut base = VersionedMembershipHistory::decode_persisted_v2(
+        loaded.membership_history.as_ref().unwrap(),
+        &AcceptingVerifier,
+    )
+    .unwrap();
+    let base_position = base.current_position().unwrap();
+    let old_frames = old_pages
+        .iter()
+        .map(|message| match message {
+            MembershipHistoryMessage::SuffixPageV4(page) => page.clone(),
+            _ => unreachable!(),
+        })
+        .collect::<Vec<_>>();
+    let mut sender = base
+        .apply_suffix_pages_v4(
+            &old_frames,
+            loaded.local_member_instance.unwrap(),
+            &AcceptingVerifier,
+        )
+        .unwrap();
+    let author = sender.effective_member_for_device(&peer).unwrap();
+    let removed = sender
+        .effective_member_for_device(&DeviceId::new("device-observer"))
+        .unwrap();
+    let mut event = sender
+        .create_unsigned_local_removal_event(
+            author,
+            sender.credential_for(author).unwrap(),
+            removed,
+            [91; 16],
+            [92; 32],
+        )
+        .unwrap();
+    event.signature = vec![93];
+    sender
+        .verify_and_receive_event(event, &AcceptingVerifier)
+        .unwrap();
+    let next = sender
+        .export_suffix_pages_v4(
+            sender.admission_facts_for(author).unwrap().clone(),
+            base_position,
+        )
+        .unwrap();
+    let repository = Arc::new(MemoryLedgerRepository {
+        loaded: Mutex::new(loaded),
+        commits: AtomicUsize::new(0),
+        fail_on_commit: None,
+    });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    ));
+    let handler = HandleMembershipHistoryMessageUseCase::new(ledger);
+    let source = AuthenticatedMember::new(peer.clone());
+    handler
+        .execute(&source, old_pages[0].clone())
+        .await
+        .unwrap();
+    let response = handler
+        .execute(
+            &source,
+            MembershipHistoryMessage::SuffixPageV4(next[0].clone()),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            response,
+            MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Continue {
+                next_page_index: 1,
+                ..
+            })
+        ),
+        "新资料的首帧应取代旧暂存，而不是永久隔离成员"
+    );
+    let late = handler
+        .execute(&source, old_pages[1].clone())
+        .await
+        .unwrap();
+    assert!(matches!(
+        late,
+        MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Continue {
+            next_page_index: 0,
+            ..
+        })
+    ));
+    let state = repository.load().await.unwrap();
+    assert_eq!(
+        state.inbound_transfers[&peer].transfer_id,
+        next[0].transfer_id()
+    );
+    assert_ne!(
+        state.peer_reconciliation[&peer].relationship,
+        MembershipHistoryRelationship::Invalid
+    );
 }

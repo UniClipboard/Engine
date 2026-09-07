@@ -25,6 +25,7 @@ const RELATIONSHIP_MAGIC: [u8; 4] = *b"UCRL";
 const RELATIONSHIP_FORMAT_VERSION: u8 = 1;
 const NONCE_LEN: usize = 24;
 const HEADER_LEN: usize = 4 + 1 + NONCE_LEN;
+mod projection;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RelationshipStoreError {

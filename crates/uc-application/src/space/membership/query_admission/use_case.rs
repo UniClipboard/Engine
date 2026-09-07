@@ -62,9 +62,9 @@ impl QueryMembershipAdmissionPort for QueryMembershipAdmissionUseCase {
                     && !matches!(peer.relationship, MembershipHistoryRelationship::Consistent)
             }) || snapshot
                 .record()
-                .pending_effects
-                .values()
-                .any(|effect| effect.phase < MembershipEffectPhase::Activated)
+                .current_effects(history)
+                .iter()
+                .any(|(_, effect)| effect.phase < MembershipEffectPhase::Activated)
             {
                 MembershipAdmissionDecision::AwaitingConvergence
             } else {

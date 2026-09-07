@@ -459,13 +459,21 @@ flowchart TD
 | `peer_reconciliation` | 对端关系、确认位置、受限计划 | 关系不授予成员资格 |
 | `inbound_transfers` | 未完成历史分页 | 每来源最多一个活动 transfer |
 | `completed_inbound_transfers` | 幂等最终 ACK | 重放返回同一结果 |
-| `pending_effects` | Add/Remove 后续效果阶段 | 正式历史提交时创建 Prepared |
+| `effect_journal` | Add/Remove 效果的历史记录 | 正式提交时创建 Prepared；执行、暂停和准入只消费当前选中分支的派生视图 |
 
 ### 原子提交
 
 `MembershipLedger::compare_and_commit` 的接口包含 expected revision 和 expected history digest。adapter 必须在同一个加密事务中比较两者并替换完整记录。
 
 需要历史规则的动作使用 `compare_and_commit_history`：先加载并验证当前历史，再在闭包中应用 Core 规则，编码替换历史并与其他事实一起提交。不要在 case 中“先写历史，再写关系，再写效果”。
+
+成员投影也必须条件原子应用：`ReconcileMembershipProjectionUseCase` 从当前已验证历史产生完整计划，
+`ApplyMembershipProjectionPort` 在同一 SQLite 事务核对 ledger 修订和历史摘要，再补齐、保留或清理成员、信任与地址。
+旧效果日志不再直接决定删除谁；缺失的有效成员可以由签名准入事实重建，既有名称、偏好及可用地址尽量保留。
+投影核对是每轮维护的本地收尾工作，而非仅启动时的历史清理。修订竞争或暂时存储失败返回 Deferred 后，
+下一次定期维护重新从最新已验证历史生成计划，不依赖额外网络事件或用户重启；无变化时不重复写入。
+完整换组记录由 `LoadedMembershipLedger::recovered_branch` 构造，历史效果保留审计用途，当前执行范围只来自目标分支，
+旧传输暂存、完成 ACK 和调度游标不跨分支继承。
 
 ### 最终 scope
 

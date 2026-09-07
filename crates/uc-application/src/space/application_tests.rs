@@ -622,9 +622,12 @@ impl RestrictedMembershipDeliveryPort for PassivePorts {
 }
 
 #[async_trait]
-impl CleanupLegacyMembershipDataPort for PassivePorts {
-    async fn cleanup_legacy_membership_data(&self) -> MembershipMaintenanceStepOutcome {
-        MembershipMaintenanceStepOutcome::Completed
+impl ApplyMembershipProjectionPort for PassivePorts {
+    async fn apply_membership_projection(
+        &self,
+        _plan: MembershipProjectionPlan,
+    ) -> Result<(), ApplyMembershipProjectionError> {
+        Ok(())
     }
 }
 
@@ -814,7 +817,7 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
                 restricted_membership_delivery: passive.clone(),
                 group_update_store: passive.clone(),
                 group_update_dispatch: passive.clone(),
-                cleanup_legacy_membership_data: passive.clone(),
+                apply_membership_projection: passive.clone(),
                 membership_network_activity: passive.clone(),
             },
         },

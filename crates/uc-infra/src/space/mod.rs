@@ -8,7 +8,7 @@ pub use adapters::{
     CurrentSpaceResolver, DeviceTrustObservationsAdapter, EncryptedRePairingStateStore,
     FileSpaceRebuildProgress, GatedMembershipHistoryExchange, GatedSpaceAdmissionTransport,
     MembershipActivationAdapter, MembershipMemberFactsAdapter, MembershipNetworkGate,
-    MembershipProjectionCleanupAdapter,
+    MembershipProjectionAdapter,
 };
 #[cfg(test)]
 pub(crate) use admission::decode_full_invitation;

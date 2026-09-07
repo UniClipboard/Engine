@@ -3,7 +3,7 @@ mod device_trust_observations;
 mod membership_activation;
 mod membership_member_facts;
 mod membership_network_gate;
-mod membership_projection_cleanup;
+mod membership_projection;
 mod re_pairing_state;
 mod rebuild_progress;
 
@@ -14,6 +14,6 @@ pub use membership_member_facts::MembershipMemberFactsAdapter;
 pub use membership_network_gate::{
     GatedMembershipHistoryExchange, GatedSpaceAdmissionTransport, MembershipNetworkGate,
 };
-pub use membership_projection_cleanup::MembershipProjectionCleanupAdapter;
+pub use membership_projection::MembershipProjectionAdapter;
 pub use re_pairing_state::EncryptedRePairingStateStore;
 pub use rebuild_progress::FileSpaceRebuildProgress;

@@ -17,7 +17,7 @@ use super::admission::{
 use super::membership::RePairingStateStorePort;
 use super::membership::{
     ActivateMembershipEffectPort, AdvanceMembershipBranchTransitionPort,
-    ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort, CleanupLegacyMembershipDataPort,
+    ApplyMembershipMemberFactsPort, ApplyMembershipProjectionPort, ApplyMembershipSecurityPort,
     CommitMembershipLedgerPort, CurrentMemberSignaturePort, LoadCurrentJoinStatusPort,
     LoadDeviceTrustObservationsPort, LoadMembershipLedgerPort, MembershipBranchRecoveryChannelPort,
     MembershipNetworkActivityPort, PrepareMembershipBranchRecoveryMaterialPort,
@@ -75,7 +75,7 @@ pub struct SpaceMembershipAdapters {
     pub restricted_membership_delivery: Arc<dyn RestrictedMembershipDeliveryPort>,
     pub group_update_store: Arc<dyn GroupRevocationPort>,
     pub group_update_dispatch: Arc<dyn GroupUpdateDispatchPort>,
-    pub cleanup_legacy_membership_data: Arc<dyn CleanupLegacyMembershipDataPort>,
+    pub apply_membership_projection: Arc<dyn ApplyMembershipProjectionPort>,
     pub membership_network_activity: Arc<dyn MembershipNetworkActivityPort>,
 }
 

@@ -99,7 +99,7 @@ fn derive_current_scope(
             .admission_facts_for(member)
             .ok_or(CurrentSpaceMemberScopeError::RecoveryRequired)?;
         let peer_device_id = facts.device_id.clone();
-        let effect_pending = loaded.pending_effects.values().any(|effect| {
+        let effect_pending = loaded.current_effects(history).iter().any(|(_, effect)| {
             effect.phase < MembershipEffectPhase::Activated
                 && effect.affected_device_ids.contains(&peer_device_id)
         });
@@ -199,7 +199,7 @@ impl MembershipLedger {
             record.peer_reconciliation.clear();
             record.inbound_transfers.clear();
             record.completed_inbound_transfers.clear();
-            record.pending_effects.clear();
+            record.effect_journal.clear();
             record.membership_conflicts.clear();
             record.membership_conflict_presentations.clear();
             record.membership_branch_transitions.clear();
@@ -221,7 +221,7 @@ impl MembershipLedger {
             record.peer_reconciliation.clear();
             record.inbound_transfers.clear();
             record.completed_inbound_transfers.clear();
-            record.pending_effects.clear();
+            record.effect_journal.clear();
             record.membership_conflicts.clear();
             record.membership_conflict_presentations.clear();
             record.membership_branch_transitions.clear();

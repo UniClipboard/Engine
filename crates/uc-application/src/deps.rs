@@ -92,12 +92,12 @@ pub use crate::space::{
 pub use crate::space::{
     AdvanceMembershipBranchTransitionError, AdvanceMembershipBranchTransitionInput,
     AdvanceMembershipBranchTransitionPort, BeginMembershipBranchRecoveryInput,
-    CleanupLegacyMembershipDataPort, CommitMembershipLedgerPort, CurrentMemberSignatureError,
-    CurrentMemberSignaturePort, CurrentSpaceIdentityError, CurrentSpaceIdentityPort,
-    CurrentSpaceMemberScope, CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort,
-    DeliverRestrictedMembershipPort, DeviceManagementResetDataPort, InboundMembershipTransfer,
-    InitialSpaceActivationPort, InitializeSpacePort, InitiatedMembershipRemovalEffect,
-    IsSpaceUnlockedPort, IssueMembershipBranchRecoveryError, IssueMembershipBranchRecoveryInput,
+    CommitMembershipLedgerPort, CurrentMemberSignatureError, CurrentMemberSignaturePort,
+    CurrentSpaceIdentityError, CurrentSpaceIdentityPort, CurrentSpaceMemberScope,
+    CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort, DeliverRestrictedMembershipPort,
+    DeviceManagementResetDataPort, InboundMembershipTransfer, InitialSpaceActivationPort,
+    InitializeSpacePort, InitiatedMembershipRemovalEffect, IsSpaceUnlockedPort,
+    IssueMembershipBranchRecoveryError, IssueMembershipBranchRecoveryInput,
     IssueMembershipBranchRecoveryPort, JoinerStagedSecurityTransition, LoadCurrentJoinStatusPort,
     LoadDeviceTrustObservationsPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
     LockSpacePort, MembershipBranchRecoveryChannelError, MembershipBranchRecoveryChannelPort,
@@ -114,8 +114,9 @@ pub use crate::space::{
     PrepareMembershipBranchTransitionError, PrepareMembershipBranchTransitionInput,
     PrepareMembershipBranchTransitionPort, PrepareSpaceAdmissionCredentialsPort,
     PreparedMembershipBranchRecoveryMaterial, PreparedMembershipBranchRecoveryRecipient,
-    QueryDeviceTrustError, SpaceAdmissionCredentialPreparationError, SpaceRebuildProgressError,
-    SpaceRebuildProgressPort, SpaceSessionRebindError, UnlockSpacePort,
+    QueryDeviceTrustError, ReconcileMembershipProjectionPort,
+    SpaceAdmissionCredentialPreparationError, SpaceRebuildProgressError, SpaceRebuildProgressPort,
+    SpaceSessionRebindError, UnlockSpacePort,
 };
 pub use crate::space::{SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters};
 pub use crate::transfer::file::assembly::ReceiveCancellationDeps;
@@ -531,3 +532,6 @@ pub struct ApplicationDeps {
     /// 不需重复查询 `usage_analytics_enabled`。
     pub analytics: Arc<dyn AnalyticsPort>,
 }
+pub use crate::space::{
+    ApplyMembershipProjectionError, ApplyMembershipProjectionPort, MembershipProjectionPlan,
+};

@@ -7,7 +7,7 @@ use uc_core::membership::{
     BaseMembershipHistoryPosition, MemberInstanceId, MembershipBranchId,
     MembershipBranchRecoveryPackageV1, MembershipConflictChoice, MembershipConflictId,
     MembershipDecisionV2, MembershipHistoryAckV3, MembershipHistoryRelationship,
-    MembershipHistorySuffixPageV3,
+    MembershipHistorySuffixPageV4,
 };
 
 const MAX_RECOVERY_STATE_BYTES: usize = 4 * 1024 * 1024;
@@ -101,7 +101,7 @@ pub struct InboundMembershipTransfer {
     pub source_device_id: DeviceId,
     pub transfer_id: [u8; 32],
     pub page_count: u32,
-    pub pages: BTreeMap<u32, MembershipHistorySuffixPageV3>,
+    pub pages: BTreeMap<u32, MembershipHistorySuffixPageV4>,
     pub total_bytes: usize,
 }
 
@@ -439,7 +439,8 @@ pub struct LoadedMembershipLedger {
     pub history_sync_cursor: Option<DeviceId>,
     pub inbound_transfers: BTreeMap<DeviceId, InboundMembershipTransfer>,
     pub completed_inbound_transfers: BTreeMap<(DeviceId, [u8; 32]), MembershipHistoryAckV3>,
-    pub pending_effects: BTreeMap<[u8; 32], PendingMembershipEffect>,
+    /// 保留已发生的效果记录；执行、授权和资料维护只能消费当前分支的派生视图。
+    pub effect_journal: BTreeMap<[u8; 32], PendingMembershipEffect>,
     /// 冲突、证据来源和用户选择随 ledger 整体加密，并与关系状态共用 CAS revision。
     #[serde(default)]
     pub membership_conflicts: BTreeMap<MembershipConflictId, MembershipConflictRecord>,
@@ -471,7 +472,7 @@ impl LoadedMembershipLedger {
             history_sync_cursor: None,
             inbound_transfers: BTreeMap::new(),
             completed_inbound_transfers: BTreeMap::new(),
-            pending_effects: BTreeMap::new(),
+            effect_journal: BTreeMap::new(),
             membership_conflicts: BTreeMap::new(),
             membership_branch_transitions: BTreeMap::new(),
             consumed_membership_recovery_nonces: BTreeMap::new(),
@@ -603,7 +604,7 @@ impl std::fmt::Debug for LoadedMembershipLedger {
                 &self.membership_branch_recovery_sessions.len(),
             )
             .field("inbound_transfer_count", &self.inbound_transfers.len())
-            .field("pending_effect_count", &self.pending_effects.len())
+            .field("effect_record_count", &self.effect_journal.len())
             .finish()
     }
 }

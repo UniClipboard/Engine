@@ -163,7 +163,7 @@ impl PreparedAdmissionControl {
             history_sync_cursor: None,
             inbound_transfers: Default::default(),
             completed_inbound_transfers: Default::default(),
-            pending_effects: Default::default(),
+            effect_journal: Default::default(),
             membership_conflicts: Default::default(),
             membership_conflict_presentations: Default::default(),
             membership_branch_transitions: Default::default(),

@@ -8,6 +8,8 @@ use super::{
     MEMBERSHIP_HISTORY_PAGE_FRAME_OVERHEAD,
 };
 use serde::{Deserialize, Serialize};
+mod proof;
+use proof::MembershipHistoryProof;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MembershipHistoryPageRecordCountsV2 {
@@ -41,12 +43,12 @@ pub struct MembershipHistoryPageV2 {
     known_head: Option<MembershipEventId>,
 }
 
-pub(super) const MEMBERSHIP_HISTORY_SUFFIX_FORMAT_V3: u16 = 3;
+pub(super) const MEMBERSHIP_HISTORY_SUFFIX_FORMAT_V4: u16 = 4;
 pub const MAX_MEMBERSHIP_HISTORY_SUFFIX_PAGES: usize = 64;
 
-/// V3 只携带 `base_position` 之后的连续记录；接收方必须从完全匹配的 base 原子应用。
+/// V4 在第一帧携带发送方归档证明范围，内容仍按增量分页且原子接收。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MembershipHistorySuffixPageV3 {
+pub struct MembershipHistorySuffixPageV4 {
     format_version: u16,
     transfer_id: [u8; 32],
     page_index: u32,
@@ -58,9 +60,10 @@ pub struct MembershipHistorySuffixPageV3 {
     events: Vec<MembershipEventV2>,
     activation_receipts: Vec<AdmissionActivationReceipt>,
     decisions: Vec<MembershipDecisionV2>,
+    sender_proof: Option<MembershipHistoryProof>,
 }
 
-impl MembershipHistorySuffixPageV3 {
+impl MembershipHistorySuffixPageV4 {
     pub fn transfer_id(&self) -> [u8; 32] {
         self.transfer_id
     }
@@ -88,10 +91,12 @@ impl MembershipHistorySuffixPageV3 {
     pub fn validate_envelope(&self) -> Result<(), MembershipHistoryV2Error> {
         let record_count =
             self.events.len() + self.activation_receipts.len() + self.decisions.len();
-        if self.format_version != MEMBERSHIP_HISTORY_SUFFIX_FORMAT_V3
+        if self.format_version != MEMBERSHIP_HISTORY_SUFFIX_FORMAT_V4
             || self.page_count == 0
             || self.page_index >= self.page_count
-            || record_count != 1
+            || record_count > 1
+            || (record_count == 0 && self.page_count != 1)
+            || self.sender_proof.is_some() != (self.page_index == 0)
             || postcard::to_stdvec(self)
                 .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)?
                 .len()

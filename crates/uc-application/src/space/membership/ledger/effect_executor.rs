@@ -110,8 +110,9 @@ impl RecoverMembershipEffectsUseCase {
                     tracing::warn!("成员 effect 恢复缺少已验证历史");
                     return report;
                 };
-                let mut ordered = Vec::with_capacity(snapshot.record().pending_effects.len());
-                for (event_id, effect) in &snapshot.record().pending_effects {
+                let current_effects = snapshot.record().current_effects(history);
+                let mut ordered = Vec::with_capacity(current_effects.len());
+                for (event_id, effect) in current_effects {
                     let Some(depth) = effect_history_depth(effect, history) else {
                         report.corrupt_count = 1;
                         tracing::warn!("成员 effect 无法关联到有效历史负载");
@@ -135,15 +136,21 @@ impl RecoverMembershipEffectsUseCase {
         for event_id in event_ids {
             loop {
                 let effect = match self.ledger.load_verified().await {
-                    Ok(snapshot) => snapshot.record().pending_effects.get(&event_id).cloned(),
+                    Ok(snapshot) => snapshot.history().and_then(|history| {
+                        snapshot
+                            .record()
+                            .current_effects(history)
+                            .into_iter()
+                            .find(|(id, _)| **id == event_id)
+                            .map(|(_, effect)| effect.clone())
+                    }),
                     Err(_) => {
                         report.deferred_count += 1;
                         break;
                     }
                 };
                 let Some(effect) = effect else {
-                    report.corrupt_count += 1;
-                    tracing::warn!("成员 effect 在恢复期间消失");
+                    // 分支切换已接管执行，旧日志仍保留，但不再拥有运行资格。
                     break;
                 };
                 tracing::debug!(
@@ -254,7 +261,7 @@ impl MembershipLedger {
         }
         self.compare_and_commit(move |record| {
             let effect = record
-                .pending_effects
+                .effect_journal
                 .get_mut(&event_id)
                 .ok_or(MembershipLedgerError::Conflict)?;
             if effect.phase != expected_phase {

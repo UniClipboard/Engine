@@ -390,7 +390,7 @@ async fn confirmed_acceptance_commits_the_decision_and_stops_local_access() {
             .decision,
         uc_core::membership::RemovalDecision::Accept
     );
-    let effect = persisted.pending_effects.get(change_id.as_bytes()).unwrap();
+    let effect = persisted.effect_journal.get(change_id.as_bytes()).unwrap();
     assert_eq!(effect.kind, MembershipEffectKind::RemoveDevice);
     assert_eq!(effect.phase, MembershipEffectPhase::Prepared);
     let relationship = persisted
@@ -467,7 +467,7 @@ async fn rejection_keeps_local_membership_and_diverges_only_the_proposer() {
         uc_core::membership::RemovalDecision::Reject
     );
     assert!(history.active_members().contains(&local_member));
-    assert!(!persisted.pending_effects.contains_key(change_id.as_bytes()));
+    assert!(!persisted.effect_journal.contains_key(change_id.as_bytes()));
     assert_eq!(
         persisted
             .peer_reconciliation

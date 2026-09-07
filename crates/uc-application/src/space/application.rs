@@ -217,7 +217,7 @@ impl SpaceApplication {
             restricted_membership_delivery,
             group_update_store,
             group_update_dispatch,
-            cleanup_legacy_membership_data,
+            apply_membership_projection,
             membership_network_activity,
         } = membership;
         let branch_recovery_signatures = Arc::clone(&current_member_signatures);
@@ -331,7 +331,12 @@ impl SpaceApplication {
                 group_update_delivery: deliver_group_updates,
                 restricted_delivery: deliver_restricted_membership,
                 synchronization: membership_history_endpoint.clone(),
-                cleanup: cleanup_legacy_membership_data,
+                cleanup: Arc::new(
+                    super::membership::ReconcileMembershipProjectionUseCase::new(
+                        Arc::clone(&ledger),
+                        apply_membership_projection,
+                    ),
+                ),
             },
         ));
         let prepared_runtime = SpaceMembershipMaintenanceRuntime::prepare(

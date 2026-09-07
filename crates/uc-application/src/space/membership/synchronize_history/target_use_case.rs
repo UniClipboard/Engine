@@ -17,7 +17,7 @@ use uc_observability_contract::diagnostics::{
 
 use crate::space::membership::{
     CurrentSpaceMemberScopePort, MembershipLedger, MembershipLedgerError, PeerReconciliationRecord,
-    ReconcileMembershipEvidenceUseCase, SpaceMemberPauseReason,
+    ReconcileMembershipEvidenceUseCase,
 };
 use crate::space::membership::{
     MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger,
@@ -31,6 +31,12 @@ const MAX_PEERS_PER_ROUND: usize = 8;
 const MAX_CONCURRENT_PEERS: usize = 4;
 const INITIAL_RETRY_DELAY_MS: i64 = 1_000;
 const MAX_RETRY_DELAY_MS: i64 = 5 * 60 * 1_000;
+
+#[derive(Clone, Copy)]
+enum HistoryProofRequirement {
+    Incremental,
+    Complete,
+}
 
 pub(crate) struct SynchronizeMembershipHistoryUseCase {
     ledger: Arc<MembershipLedger>,
@@ -128,7 +134,9 @@ impl SynchronizeMembershipHistoryUseCase {
             let Some(record) = snapshot.record().peer_reconciliation.get(peer) else {
                 return true;
             };
-            if record.confirmed_position.as_ref() == Some(&current_position) {
+            if record.relationship == uc_core::membership::MembershipHistoryRelationship::Consistent
+                && record.confirmed_position.as_ref() == Some(&current_position)
+            {
                 already_confirmed_count += 1;
                 return false;
             }
@@ -139,7 +147,6 @@ impl SynchronizeMembershipHistoryUseCase {
             if matches!(
                 record.relationship,
                 uc_core::membership::MembershipHistoryRelationship::Diverged
-                    | uc_core::membership::MembershipHistoryRelationship::Invalid
             ) {
                 isolated_count += 1;
                 return false;
@@ -209,14 +216,7 @@ impl SynchronizeMembershipHistoryUseCase {
             scope
                 .paused_peer_devices
                 .into_iter()
-                .filter(|peer| {
-                    matches!(
-                        peer.reason,
-                        SpaceMemberPauseReason::RelationshipUnconfirmed
-                            | SpaceMemberPauseReason::PendingLocalDecision
-                            | SpaceMemberPauseReason::UpgradeRequired
-                    )
-                })
+                .filter(|peer| peer.reason.permits_history_verification())
                 .map(|peer| peer.device_id),
         );
         peers.sort();
@@ -259,6 +259,17 @@ impl SynchronizeMembershipHistoryUseCase {
         let mut report = MembershipSyncReport::default();
         // 网络交换并发有界；账本结果仍由下方顺序提交，避免把冲突重试泄漏给 transport。
         let attempts = stream::iter(peers.into_iter().map(|peer| {
+            let proof = match snapshot
+                .record()
+                .peer_reconciliation
+                .get(&peer)
+                .map(|record| record.relationship)
+            {
+                Some(uc_core::membership::MembershipHistoryRelationship::Invalid) => {
+                    HistoryProofRequirement::Complete
+                }
+                _ => HistoryProofRequirement::Incremental,
+            };
             let history = Arc::clone(&history);
             let sender = Arc::clone(&sender);
             let position = position.clone();
@@ -273,14 +284,16 @@ impl SynchronizeMembershipHistoryUseCase {
                         } else {
                             tokio::time::timeout(
                                 remaining,
-                                self.synchronize_peer(&peer, history, sender, position, lineage_id),
+                                self.synchronize_peer(
+                                    &peer, history, sender, position, lineage_id, proof,
+                                ),
                             )
                             .await
                             .unwrap_or(Err(PeerSyncError::Deferred))
                         }
                     }
                     None => {
-                        self.synchronize_peer(&peer, history, sender, position, lineage_id)
+                        self.synchronize_peer(&peer, history, sender, position, lineage_id, proof)
                             .await
                     }
                 };
@@ -298,6 +311,7 @@ impl SynchronizeMembershipHistoryUseCase {
                     report.deferred_peer_count += 1;
                 }
                 Err(PeerSyncError::Stable) => report.stable_failure_count += 1,
+                Err(PeerSyncError::Superseded) => report.deferred_peer_count += 1,
             }
         }
         tracing::debug!(
@@ -345,6 +359,7 @@ impl SynchronizeMembershipHistoryUseCase {
         sender: Arc<uc_core::membership::AdmissionChangeFacts>,
         position: uc_core::membership::BaseMembershipHistoryPosition,
         lineage_id: Arc<String>,
+        proof: HistoryProofRequirement,
     ) -> Result<(), PeerSyncError> {
         let peer_lock = {
             let mut locks = self.peer_locks.lock().await;
@@ -355,6 +370,11 @@ impl SynchronizeMembershipHistoryUseCase {
             )
         };
         let _guard = peer_lock.lock().await;
+        if matches!(proof, HistoryProofRequirement::Complete) {
+            return self
+                .exchange_complete_evidence(peer, &history, &sender, position)
+                .await;
+        }
         let summary_transfer_id = position.history_digest;
         let reply = self
             .transport
@@ -380,7 +400,8 @@ impl SynchronizeMembershipHistoryUseCase {
                 self.commit_peer_relationship(
                     peer,
                     uc_core::membership::MembershipHistoryRelationship::Consistent,
-                    Some(position),
+                    Some(position.clone()),
+                    &position,
                 )
                 .await?;
                 return Ok(());
@@ -390,47 +411,19 @@ impl SynchronizeMembershipHistoryUseCase {
                 known_position,
             }) if requested_transfer == summary_transfer_id => {
                 let pages = history
-                    .export_suffix_pages_v3((*sender).clone(), known_position)
+                    .export_suffix_pages_v4((*sender).clone(), known_position)
                     .map_err(|_| PeerSyncError::Stable)?;
                 tracing::debug!(page_count = pages.len(), "成员历史后缀已导出");
-                return self.send_suffix_pages(peer, pages, position).await;
+                return self
+                    .send_suffix_pages(peer, pages, position, history, sender)
+                    .await;
             }
             MembershipHistoryMessage::RequestConflictEvidenceV3(request)
                 if request.transfer_id == summary_transfer_id =>
             {
-                let pages = history
-                    .export_conflict_evidence_pages_v2((*sender).clone())
-                    .map_err(|_| PeerSyncError::Stable)?;
-                let reply = self
-                    .transport
-                    .exchange_membership_history(
-                        peer,
-                        MembershipHistoryMessage::ConflictEvidenceV3(
-                            MembershipConflictEvidenceV3 {
-                                transfer_id: summary_transfer_id,
-                                pages,
-                            },
-                        ),
-                    )
-                    .await
-                    .map_err(map_exchange_error)?;
-                if let MembershipHistoryMessage::ConflictEvidenceV3(remote_evidence) = reply {
-                    let recorded = self
-                        .evidence
-                        .execute(peer, &remote_evidence)
-                        .await
-                        .map_err(|_| PeerSyncError::Stable)?;
-                    let Some(recorded) = recorded else {
-                        return Err(PeerSyncError::Stable);
-                    };
-                    if recorded.relationship
-                        == uc_core::membership::MembershipHistoryRelationship::Consistent
-                    {
-                        return Ok(());
-                    }
-                    describe_membership_conflict();
-                }
-                return Err(PeerSyncError::Stable);
+                return self
+                    .exchange_complete_evidence(peer, &history, &sender, position)
+                    .await;
             }
             _ => {
                 tracing::debug!("成员历史摘要收到不匹配的稳定回复");
@@ -439,11 +432,63 @@ impl SynchronizeMembershipHistoryUseCase {
         }
     }
 
+    async fn exchange_complete_evidence(
+        &self,
+        peer: &DeviceId,
+        history: &uc_core::membership::VersionedMembershipHistory,
+        sender: &uc_core::membership::AdmissionChangeFacts,
+        position: uc_core::membership::BaseMembershipHistoryPosition,
+    ) -> Result<(), PeerSyncError> {
+        let pages = history
+            .export_conflict_evidence_pages_v2(sender.clone())
+            .map_err(|_| PeerSyncError::Stable)?;
+        let reply = self
+            .transport
+            .exchange_membership_history(
+                peer,
+                MembershipHistoryMessage::ConflictEvidenceV3(MembershipConflictEvidenceV3 {
+                    transfer_id: position.history_digest,
+                    pages,
+                }),
+            )
+            .await
+            .map_err(map_exchange_error)?;
+        let MembershipHistoryMessage::ConflictEvidenceV3(evidence) = reply else {
+            return Err(PeerSyncError::Deferred);
+        };
+        let Some(verified) = self
+            .evidence
+            .execute(peer, &evidence)
+            .await
+            .map_err(|_| PeerSyncError::Deferred)?
+        else {
+            return Err(PeerSyncError::Deferred);
+        };
+        match verified.relationship {
+            uc_core::membership::MembershipHistoryRelationship::Consistent => {
+                self.commit_peer_relationship(
+                    peer,
+                    uc_core::membership::MembershipHistoryRelationship::Consistent,
+                    Some(position.clone()),
+                    &position,
+                )
+                .await
+            }
+            uc_core::membership::MembershipHistoryRelationship::Diverged => {
+                describe_membership_conflict();
+                Err(PeerSyncError::Stable)
+            }
+            _ => Err(PeerSyncError::Deferred),
+        }
+    }
+
     async fn send_suffix_pages(
         &self,
         peer: &DeviceId,
-        pages: Vec<uc_core::membership::MembershipHistorySuffixPageV3>,
+        pages: Vec<uc_core::membership::MembershipHistorySuffixPageV4>,
         position: uc_core::membership::BaseMembershipHistoryPosition,
+        history: Arc<uc_core::membership::VersionedMembershipHistory>,
+        sender: Arc<uc_core::membership::AdmissionChangeFacts>,
     ) -> Result<(), PeerSyncError> {
         let transfer_id = pages
             .first()
@@ -457,7 +502,7 @@ impl SynchronizeMembershipHistoryUseCase {
                 .ok_or(PeerSyncError::Stable)?;
             let reply = self
                 .transport
-                .exchange_membership_history(peer, MembershipHistoryMessage::SuffixPageV3(page))
+                .exchange_membership_history(peer, MembershipHistoryMessage::SuffixPageV4(page))
                 .await
                 .map_err(map_exchange_error)?;
             let MembershipHistoryMessage::AckV3(ack) = reply else {
@@ -471,6 +516,11 @@ impl SynchronizeMembershipHistoryUseCase {
                 "成员历史后缀页收到 ACK"
             );
             match ack {
+                uc_core::membership::MembershipHistoryAckV3::NeedsEvidence => {
+                    return self
+                        .exchange_complete_evidence(peer, &history, &sender, position)
+                        .await;
+                }
                 uc_core::membership::MembershipHistoryAckV3::Continue {
                     transfer_id: acknowledged_transfer,
                     next_page_index: requested_page,
@@ -490,7 +540,8 @@ impl SynchronizeMembershipHistoryUseCase {
                     self.commit_peer_relationship(
                         peer,
                         uc_core::membership::MembershipHistoryRelationship::Consistent,
-                        Some(position),
+                        Some(position.clone()),
+                        &position,
                     )
                     .await?;
                     return Ok(());
@@ -500,6 +551,7 @@ impl SynchronizeMembershipHistoryUseCase {
                         peer,
                         uc_core::membership::MembershipHistoryRelationship::Diverged,
                         None,
+                        &position,
                     )
                     .await?;
                     describe_membership_conflict();
@@ -510,6 +562,7 @@ impl SynchronizeMembershipHistoryUseCase {
                         peer,
                         uc_core::membership::MembershipHistoryRelationship::Invalid,
                         None,
+                        &position,
                     )
                     .await?;
                     return Err(PeerSyncError::Stable);
@@ -530,42 +583,62 @@ impl SynchronizeMembershipHistoryUseCase {
         peer: &DeviceId,
         relationship: uc_core::membership::MembershipHistoryRelationship,
         confirmed_position: Option<uc_core::membership::BaseMembershipHistoryPosition>,
+        expected_position: &uc_core::membership::BaseMembershipHistoryPosition,
     ) -> Result<(), PeerSyncError> {
         let _guard = self.ledger_commit_lock.lock().await;
+        let snapshot = self
+            .ledger
+            .load_verified()
+            .await
+            .map_err(|_| PeerSyncError::Deferred)?;
+        let current = snapshot
+            .history()
+            .ok_or(PeerSyncError::Superseded)?
+            .current_position()
+            .map_err(|_| PeerSyncError::Stable)?;
+        if current != *expected_position {
+            return Err(PeerSyncError::Superseded);
+        }
         let peer = peer.clone();
         self.ledger
-            .compare_and_commit(|record| {
-                record
-                    .peer_reconciliation
-                    .entry(peer.clone())
-                    .and_modify(|current| {
-                        current.relationship = relationship;
-                        current.confirmed_position = confirmed_position.clone();
-                        current.sync_state.retry_attempt = 0;
-                        current.sync_state.next_attempt_at_ms = 0;
-                        current.sync_state.pending_since_revision = None;
-                        current.sync_state.last_attempt_outcome = if confirmed_position.is_some() {
-                            crate::space::membership::PeerHistorySyncOutcome::Acked
-                        } else {
-                            crate::space::membership::PeerHistorySyncOutcome::StableRejected
-                        };
-                    })
-                    .or_insert(PeerReconciliationRecord {
-                        peer_device_id: peer,
-                        relationship,
-                        confirmed_position,
-                        sync_state: Default::default(),
-                        restricted_delivery: Vec::new(),
-                        updated_at_ms: 0,
-                    });
-                Ok(())
-            })
+            .compare_and_commit_history(
+                snapshot.record().revision,
+                snapshot.history_digest(),
+                |record, _history, _verifier| {
+                    record
+                        .peer_reconciliation
+                        .entry(peer.clone())
+                        .and_modify(|current| {
+                            current.relationship = relationship;
+                            current.confirmed_position = confirmed_position.clone();
+                            current.sync_state.retry_attempt = 0;
+                            current.sync_state.next_attempt_at_ms = 0;
+                            current.sync_state.pending_since_revision = None;
+                            current.sync_state.last_attempt_outcome =
+                                if confirmed_position.is_some() {
+                                    crate::space::membership::PeerHistorySyncOutcome::Acked
+                                } else {
+                                    crate::space::membership::PeerHistorySyncOutcome::StableRejected
+                                };
+                        })
+                        .or_insert(PeerReconciliationRecord {
+                            peer_device_id: peer,
+                            relationship,
+                            confirmed_position,
+                            sync_state: Default::default(),
+                            restricted_delivery: Vec::new(),
+                            updated_at_ms: 0,
+                        });
+                    Ok(())
+                },
+            )
             .await
             .map(|_| ())
             .map_err(|error| match error {
-                MembershipLedgerError::Conflict
-                | MembershipLedgerError::Locked
-                | MembershipLedgerError::Unavailable => PeerSyncError::Deferred,
+                MembershipLedgerError::Conflict => PeerSyncError::Superseded,
+                MembershipLedgerError::Locked | MembershipLedgerError::Unavailable => {
+                    PeerSyncError::Deferred
+                }
                 MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired => {
                     PeerSyncError::Stable
                 }
@@ -577,7 +650,7 @@ fn membership_message_kind(message: &MembershipHistoryMessage) -> &'static str {
     match message {
         MembershipHistoryMessage::SummaryV3(_) => "summary",
         MembershipHistoryMessage::RequestSuffixV3(_) => "request_suffix",
-        MembershipHistoryMessage::SuffixPageV3(_) => "suffix_page",
+        MembershipHistoryMessage::SuffixPageV4(_) => "suffix_page",
         MembershipHistoryMessage::RequestConflictEvidenceV3(_) => "request_conflict_evidence",
         MembershipHistoryMessage::ConflictEvidenceV3(_) => "conflict_evidence",
         MembershipHistoryMessage::AckV3(ack) => membership_ack_kind(ack),
@@ -596,12 +669,14 @@ fn membership_ack_kind(ack: &uc_core::membership::MembershipHistoryAckV3) -> &'s
         }
         uc_core::membership::MembershipHistoryAckV3::Diverged => "ack_diverged",
         uc_core::membership::MembershipHistoryAckV3::Invalid => "ack_invalid",
+        uc_core::membership::MembershipHistoryAckV3::NeedsEvidence => "ack_needs_evidence",
     }
 }
 
 enum PeerSyncError {
     Deferred,
     Stable,
+    Superseded,
 }
 
 fn retry_delay_ms(retry_attempt: u32) -> i64 {
@@ -668,14 +743,10 @@ impl SynchronizeMembershipMaintenancePort for SynchronizeMembershipHistoryUseCas
             return Err(MembershipMaintenanceStepOutcome::Corrupt);
         }
         let mut eligible_peers = scope.usable_peer_device_ids;
-        let has_relationship_work = scope.paused_peer_devices.into_iter().any(|peer| {
-            matches!(
-                peer.reason,
-                SpaceMemberPauseReason::RelationshipUnconfirmed
-                    | SpaceMemberPauseReason::PendingLocalDecision
-                    | SpaceMemberPauseReason::UpgradeRequired
-            )
-        });
+        let has_relationship_work = scope
+            .paused_peer_devices
+            .into_iter()
+            .any(|peer| peer.reason.permits_history_verification());
         if has_relationship_work {
             return Ok(true);
         }

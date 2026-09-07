@@ -70,7 +70,7 @@ use uc_infra::space::{
     DefaultSponsorCompletePreparation, DefaultSponsorSettledPreparation,
     DeviceTrustObservationsAdapter, GatedMembershipHistoryExchange, GatedSpaceAdmissionTransport,
     MembershipActivationAdapter, MembershipMemberFactsAdapter, MembershipNetworkGate,
-    MembershipProjectionCleanupAdapter, OpenMlsHistoricalSignatureVerifier,
+    OpenMlsHistoricalSignatureVerifier,
 };
 
 struct CurrentMemberContentGate {
@@ -743,12 +743,7 @@ pub async fn build_sync_engine_assembly(
         restricted_membership_delivery: membership_history_transport,
         group_update_store: Arc::clone(&space_setup.space_access.group_revocation),
         group_update_dispatch,
-        cleanup_legacy_membership_data: Arc::new(MembershipProjectionCleanupAdapter::new(
-            space_setup.membership_ledger.clone()
-                as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
-            Arc::clone(&space_setup.member_repo),
-            Arc::clone(&space_setup.peer_addr_repo),
-        )),
+        apply_membership_projection: Arc::clone(&space_setup.membership_projection),
         membership_network_activity: membership_network_gate,
     });
     let admission = build_admission(Arc::clone(&membership.commit_membership_ledger));

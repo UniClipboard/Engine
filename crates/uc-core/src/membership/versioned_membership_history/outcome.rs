@@ -47,6 +47,8 @@ pub enum MembershipHistoryV2Error {
     InvalidDecision,
     DecisionConflict,
     InvalidPersistedHistory,
+    IncompleteHistoryProof,
+    HistoryPositionChanged,
 }
 
 impl fmt::Display for MembershipHistoryV2Error {
@@ -85,6 +87,8 @@ impl fmt::Display for MembershipHistoryV2Error {
             Self::InvalidDecision => "membership decision is invalid at the removal parent",
             Self::DecisionConflict => "membership decision conflicts with retained history",
             Self::InvalidPersistedHistory => "persisted membership history is invalid",
+            Self::IncompleteHistoryProof => "complete membership history evidence is required",
+            Self::HistoryPositionChanged => "membership history changed during transfer",
         })
     }
 }

@@ -270,7 +270,7 @@ async fn sqlite_failure_keeps_history_fanout_and_effects_in_one_atomic_state() {
         },
     );
     replacement.history_sync_cursor = Some(peer.clone());
-    replacement.pending_effects.insert(
+    replacement.effect_journal.insert(
         [0x31; 32],
         PendingMembershipEffect {
             event_id: [0x31; 32],

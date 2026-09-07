@@ -144,7 +144,7 @@ pub use versioned_membership_history::{
     MembershipActivationReceiptRecord, MembershipActivationReceiptStoreOutcome,
     MembershipAdmissionV2, MembershipCredential, MembershipCredentialId,
     MembershipDecisionStoreOutcome, MembershipDecisionV2, MembershipEventV2,
-    MembershipHistoryPageRecordCountsV2, MembershipHistoryPageV2, MembershipHistorySuffixPageV3,
+    MembershipHistoryPageRecordCountsV2, MembershipHistoryPageV2, MembershipHistorySuffixPageV4,
     MembershipHistoryV2Ack, MembershipHistoryV2Error, MembershipHistoryV2ReceiveOutcome,
     MembershipOperationV2, PreparedAdmissionProofV1, VersionedMembershipHistory,
     ADMISSION_COMPLETION_FORMAT_V1, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,

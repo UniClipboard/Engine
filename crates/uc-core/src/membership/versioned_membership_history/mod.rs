@@ -29,7 +29,7 @@ pub use credentials::{
     MembershipCredential, MembershipCredentialId,
 };
 pub use exchange::{
-    MembershipHistoryPageRecordCountsV2, MembershipHistoryPageV2, MembershipHistorySuffixPageV3,
+    MembershipHistoryPageRecordCountsV2, MembershipHistoryPageV2, MembershipHistorySuffixPageV4,
     MembershipHistoryV2Ack, MAX_MEMBERSHIP_HISTORY_SUFFIX_PAGES,
 };
 pub use outcome::{
@@ -45,7 +45,7 @@ use archive::{
     PersistedActivationBaselineV2, PersistedMembershipHistoryV2,
     PERSISTED_MEMBERSHIP_HISTORY_FORMAT_V2,
 };
-use exchange::MEMBERSHIP_HISTORY_SUFFIX_FORMAT_V3;
+use exchange::MEMBERSHIP_HISTORY_SUFFIX_FORMAT_V4;
 use signing::{append_field, append_operation, append_optional_digest, append_optional_event_id};
 use validation::{members_digest, verify_signature};
 

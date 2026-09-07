@@ -1,5 +1,6 @@
 mod current_scope;
 mod effect_executor;
+mod effects;
 mod error;
 mod initializer;
 mod model;

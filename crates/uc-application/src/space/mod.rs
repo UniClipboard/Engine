@@ -137,17 +137,17 @@ pub use membership::{
     RestrictedMembershipDeliveryPort, SpaceMemberPauseReason,
 };
 pub use membership::{
-    BeginMembershipBranchRecoveryInput, CleanupLegacyMembershipDataPort,
-    DeliverRestrictedMembershipPort, IssueMembershipBranchRecoveryError,
-    IssueMembershipBranchRecoveryInput, IssueMembershipBranchRecoveryPort,
-    MembershipBranchRecoveryChannelError, MembershipBranchRecoveryChannelPort,
-    MembershipBranchRecoveryCommit, MembershipBranchRecoveryRequest,
-    MembershipMaintenanceStepOutcome, MembershipNetworkActivityPort,
-    PrepareMembershipBranchRecoveryMaterialError, PrepareMembershipBranchRecoveryMaterialInput,
-    PrepareMembershipBranchRecoveryMaterialPort, PrepareMembershipBranchRecoveryRecipientError,
-    PrepareMembershipBranchRecoveryRecipientPort, PrepareMembershipBranchTransitionError,
-    PrepareMembershipBranchTransitionInput, PrepareMembershipBranchTransitionPort,
-    PreparedMembershipBranchRecoveryMaterial, PreparedMembershipBranchRecoveryRecipient,
+    BeginMembershipBranchRecoveryInput, DeliverRestrictedMembershipPort,
+    IssueMembershipBranchRecoveryError, IssueMembershipBranchRecoveryInput,
+    IssueMembershipBranchRecoveryPort, MembershipBranchRecoveryChannelError,
+    MembershipBranchRecoveryChannelPort, MembershipBranchRecoveryCommit,
+    MembershipBranchRecoveryRequest, MembershipMaintenanceStepOutcome,
+    MembershipNetworkActivityPort, PrepareMembershipBranchRecoveryMaterialError,
+    PrepareMembershipBranchRecoveryMaterialInput, PrepareMembershipBranchRecoveryMaterialPort,
+    PrepareMembershipBranchRecoveryRecipientError, PrepareMembershipBranchRecoveryRecipientPort,
+    PrepareMembershipBranchTransitionError, PrepareMembershipBranchTransitionInput,
+    PrepareMembershipBranchTransitionPort, PreparedMembershipBranchRecoveryMaterial,
+    PreparedMembershipBranchRecoveryRecipient, ReconcileMembershipProjectionPort,
     RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
 };
 pub use membership::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
@@ -158,3 +158,6 @@ pub use membership::{
 
 #[cfg(test)]
 mod application_tests;
+pub use membership::{
+    ApplyMembershipProjectionError, ApplyMembershipProjectionPort, MembershipProjectionPlan,
+};

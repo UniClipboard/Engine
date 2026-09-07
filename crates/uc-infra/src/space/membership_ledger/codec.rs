@@ -1,9 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uc_application::deps::{
-    InboundMembershipTransfer, LoadedMembershipLedger, MembershipBranchRecoverySession,
-    MembershipConflictRecord, MembershipLedgerError, PeerHistorySyncState,
-    PeerReconciliationRecord, PendingMembershipEffect,
+    LoadedMembershipLedger, MembershipBranchRecoverySession, MembershipConflictRecord,
+    MembershipLedgerError, PeerHistorySyncState, PeerReconciliationRecord, PendingMembershipEffect,
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
@@ -14,6 +13,9 @@ use uc_core::membership::{
 const MEMBERSHIP_LEDGER_FORMAT_V1: u16 = 1;
 const MEMBERSHIP_LEDGER_FORMAT_V2: u16 = 2;
 const MEMBERSHIP_LEDGER_FORMAT_V3: u16 = 3;
+const MEMBERSHIP_LEDGER_FORMAT_V4: u16 = 4;
+mod legacy;
+use legacy::LegacyInboundTransfer;
 
 #[derive(Serialize, Deserialize)]
 struct PersistedMembershipLedgerV1 {
@@ -33,6 +35,21 @@ struct PersistedMembershipLedgerV2 {
 struct PersistedMembershipLedgerV3 {
     format_version: u16,
     profile_generation: [u8; 16],
+    ledger: LegacyLoadedMembershipLedgerV3,
+}
+
+// Postcard 顺序编码中，V3 是 V2 字段后追加展示资料；不增加嵌套长度前缀。
+#[derive(Serialize, Deserialize)]
+struct LegacyLoadedMembershipLedgerV3 {
+    common: LegacyLoadedMembershipLedgerV2,
+    presentations:
+        BTreeMap<MembershipConflictId, uc_application::deps::MembershipConflictPresentation>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedMembershipLedgerV4 {
+    format_version: u16,
+    profile_generation: [u8; 16],
     ledger: LoadedMembershipLedger,
 }
 
@@ -46,9 +63,9 @@ struct LegacyLoadedMembershipLedgerV2 {
     local_join_active: bool,
     peer_reconciliation: BTreeMap<DeviceId, PeerReconciliationRecord>,
     history_sync_cursor: Option<DeviceId>,
-    inbound_transfers: BTreeMap<DeviceId, InboundMembershipTransfer>,
+    inbound_transfers: BTreeMap<DeviceId, LegacyInboundTransfer>,
     completed_inbound_transfers: BTreeMap<(DeviceId, [u8; 32]), MembershipHistoryAckV3>,
-    pending_effects: BTreeMap<[u8; 32], PendingMembershipEffect>,
+    effect_journal: BTreeMap<[u8; 32], PendingMembershipEffect>,
     membership_conflicts: BTreeMap<MembershipConflictId, MembershipConflictRecord>,
     membership_branch_transitions: BTreeMap<[u8; 32], MembershipBranchTransitionV1>,
     consumed_membership_recovery_nonces: BTreeMap<[u8; 32], MembershipConflictId>,
@@ -73,10 +90,10 @@ struct LegacyLoadedMembershipLedgerV1 {
     local_member_instance: Option<MemberInstanceId>,
     local_join_active: bool,
     peer_reconciliation: BTreeMap<DeviceId, LegacyPeerReconciliationRecordV1>,
-    inbound_transfers: BTreeMap<DeviceId, uc_application::deps::InboundMembershipTransfer>,
+    inbound_transfers: BTreeMap<DeviceId, LegacyInboundTransfer>,
     completed_inbound_transfers:
         BTreeMap<(DeviceId, [u8; 32]), uc_core::membership::MembershipHistoryV2Ack>,
-    pending_effects: BTreeMap<[u8; 32], uc_application::deps::PendingMembershipEffect>,
+    effect_journal: BTreeMap<[u8; 32], uc_application::deps::PendingMembershipEffect>,
 }
 
 pub(super) fn decode(
@@ -86,9 +103,15 @@ pub(super) fn decode(
     let (version, _) =
         postcard::take_from_bytes::<u16>(bytes).map_err(|_| MembershipLedgerError::Corrupt)?;
     let (profile_generation, ledger) = match version {
+        MEMBERSHIP_LEDGER_FORMAT_V4 => {
+            let value: PersistedMembershipLedgerV4 = parse(bytes)?;
+            (value.profile_generation, value.ledger)
+        }
         MEMBERSHIP_LEDGER_FORMAT_V3 => {
             let value: PersistedMembershipLedgerV3 = parse(bytes)?;
-            (value.profile_generation, value.ledger)
+            let mut ledger = migrate_v2_ledger(value.ledger.common);
+            ledger.membership_conflict_presentations = value.ledger.presentations;
+            (value.profile_generation, ledger)
         }
         MEMBERSHIP_LEDGER_FORMAT_V2 => {
             let value: PersistedMembershipLedgerV2 = parse(bytes)?;
@@ -110,8 +133,8 @@ pub(super) fn encode(
     ledger: &LoadedMembershipLedger,
     generation: [u8; 16],
 ) -> Result<Vec<u8>, MembershipLedgerError> {
-    postcard::to_stdvec(&PersistedMembershipLedgerV3 {
-        format_version: MEMBERSHIP_LEDGER_FORMAT_V3,
+    postcard::to_stdvec(&PersistedMembershipLedgerV4 {
+        format_version: MEMBERSHIP_LEDGER_FORMAT_V4,
         profile_generation: generation,
         ledger: ledger.clone(),
     })
@@ -137,9 +160,9 @@ fn migrate_v2_ledger(legacy: LegacyLoadedMembershipLedgerV2) -> LoadedMembership
         local_join_active: legacy.local_join_active,
         peer_reconciliation: legacy.peer_reconciliation,
         history_sync_cursor: legacy.history_sync_cursor,
-        inbound_transfers: legacy.inbound_transfers,
-        completed_inbound_transfers: legacy.completed_inbound_transfers,
-        pending_effects: legacy.pending_effects,
+        inbound_transfers: BTreeMap::new(),
+        completed_inbound_transfers: BTreeMap::new(),
+        effect_journal: legacy.effect_journal,
         membership_conflicts: legacy.membership_conflicts,
         membership_branch_transitions: legacy.membership_branch_transitions,
         consumed_membership_recovery_nonces: legacy.consumed_membership_recovery_nonces,
@@ -182,7 +205,7 @@ fn migrate_v1_ledger(legacy: LegacyLoadedMembershipLedgerV1) -> LoadedMembership
         // V2 的半成品传输不能被 V3 续传；历史本体保留，传输会由持久欠账重试。
         inbound_transfers: BTreeMap::new(),
         completed_inbound_transfers: BTreeMap::new(),
-        pending_effects: legacy.pending_effects,
+        effect_journal: legacy.effect_journal,
         membership_conflicts: BTreeMap::new(),
         membership_branch_transitions: BTreeMap::new(),
         consumed_membership_recovery_nonces: BTreeMap::new(),
@@ -222,7 +245,7 @@ mod tests {
             history_sync_cursor: Some(DeviceId::new("cursor")),
             inbound_transfers: BTreeMap::new(),
             completed_inbound_transfers: BTreeMap::new(),
-            pending_effects: BTreeMap::new(),
+            effect_journal: BTreeMap::new(),
             membership_conflicts: BTreeMap::from([(id, record.clone())]),
             membership_branch_transitions: BTreeMap::new(),
             consumed_membership_recovery_nonces: BTreeMap::from([([0x95; 32], id)]),
@@ -275,7 +298,7 @@ mod tests {
             )]),
             inbound_transfers: BTreeMap::new(),
             completed_inbound_transfers: BTreeMap::new(),
-            pending_effects: BTreeMap::new(),
+            effect_journal: BTreeMap::new(),
         };
 
         let migrated = migrate_v1_ledger(legacy);

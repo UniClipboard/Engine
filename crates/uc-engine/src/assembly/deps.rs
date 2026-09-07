@@ -93,6 +93,7 @@ pub struct SyncEngineDeps {
     pub membership_ledger: Arc<
         uc_infra::space::SqliteMembershipLedger<Arc<uc_infra::db::executor::DieselSqliteExecutor>>,
     >,
+    pub membership_projection: Arc<dyn uc_application::deps::ApplyMembershipProjectionPort>,
     /// MasterKey-encrypted aggregate repository shared by all admission roles.
     pub admission_state: Arc<
         uc_infra::space::SqliteSpaceAdmissionState<

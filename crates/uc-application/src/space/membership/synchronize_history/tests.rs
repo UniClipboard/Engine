@@ -682,6 +682,189 @@ async fn equal_summary_completes_without_sending_history_pages() {
     assert_eq!(transport.recipients.lock().unwrap().as_slice(), &[peer]);
 }
 
+struct CompleteEvidenceTransport(uc_core::membership::MembershipConflictEvidenceV3);
+
+struct HistoryChangingTransport {
+    repository: Arc<MemoryLedgerRepository>,
+    replacement_history: Vec<u8>,
+}
+
+#[async_trait]
+impl MembershipHistoryExchangePort for HistoryChangingTransport {
+    async fn exchange_membership_history(
+        &self,
+        peer: &DeviceId,
+        message: MembershipHistoryMessage,
+    ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
+        let MembershipHistoryMessage::SummaryV3(summary) = message else {
+            return Err(MembershipHistoryExchangeError::Rejected);
+        };
+        let before = self.repository.load().await.unwrap();
+        let mut after = before.clone();
+        after.revision += 1;
+        after.membership_history = Some(self.replacement_history.clone());
+        after
+            .peer_reconciliation
+            .get_mut(peer)
+            .unwrap()
+            .relationship = MembershipHistoryRelationship::Diverged;
+        after
+            .peer_reconciliation
+            .get_mut(peer)
+            .unwrap()
+            .confirmed_position = None;
+        self.repository
+            .compare_and_commit(MembershipLedgerMutation {
+                expected_revision: before.revision,
+                expected_history_digest: before
+                    .membership_history
+                    .as_ref()
+                    .map(|v| Sha256::digest(v).into()),
+                replacement: after,
+            })
+            .await
+            .unwrap();
+        Ok(MembershipHistoryMessage::AckV3(
+            MembershipHistoryAckV3::Confirmed {
+                transfer_id: summary.transfer_id,
+                confirmed_position: summary.current_position,
+            },
+        ))
+    }
+}
+
+#[tokio::test]
+async fn old_history_reply_cannot_clear_a_new_branch_divergence() {
+    let record = active_ledger();
+    let mut next = VersionedMembershipHistory::decode_persisted_v2(
+        record.membership_history.as_ref().unwrap(),
+        &AcceptingVerifier,
+    )
+    .unwrap();
+    let local = record.local_member_instance.unwrap();
+    let target = next
+        .effective_member_for_device(&DeviceId::new("device-c"))
+        .unwrap();
+    let mut removal = next
+        .create_unsigned_local_removal_event(
+            local,
+            next.credential_for(local).unwrap(),
+            target,
+            [81; 16],
+            [82; 32],
+        )
+        .unwrap();
+    removal.signature = vec![83];
+    next.verify_and_receive_event(removal, &AcceptingVerifier)
+        .unwrap();
+    let repository = Arc::new(MemoryLedgerRepository(Mutex::new(record)));
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    ));
+    let peer = DeviceId::new("device-b");
+    let transport = Arc::new(HistoryChangingTransport {
+        repository,
+        replacement_history: next.encode_persisted_v2().unwrap(),
+    });
+    let synchronize = SynchronizeMembershipHistoryUseCase::new(
+        ledger.clone(),
+        Arc::new(FixedScope(vec![peer.clone()])),
+        transport,
+        Arc::new(FixedClock),
+    );
+    synchronize
+        .execute(MembershipSyncTarget::AllCurrentPeers)
+        .await
+        .unwrap();
+    assert!(
+        !ledger
+            .current_scope()
+            .await
+            .unwrap()
+            .usable_peer_device_ids
+            .contains(&peer),
+        "旧历史回复不能把新分支的分歧改成正常"
+    );
+}
+
+#[async_trait]
+impl MembershipHistoryExchangePort for CompleteEvidenceTransport {
+    async fn exchange_membership_history(
+        &self,
+        _peer: &DeviceId,
+        message: MembershipHistoryMessage,
+    ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
+        match message {
+            MembershipHistoryMessage::ConflictEvidenceV3(_) => {
+                Ok(MembershipHistoryMessage::ConflictEvidenceV3(self.0.clone()))
+            }
+            _ => Err(MembershipHistoryExchangeError::Rejected),
+        }
+    }
+}
+
+#[tokio::test]
+async fn invalid_current_peer_recovers_only_after_complete_verified_evidence() {
+    for corrupted in [false, true] {
+        let peer = DeviceId::new("device-b");
+        let mut record = active_ledger();
+        record
+            .peer_reconciliation
+            .get_mut(&peer)
+            .unwrap()
+            .relationship = MembershipHistoryRelationship::Invalid;
+        let history = VersionedMembershipHistory::decode_persisted_v2(
+            record.membership_history.as_ref().unwrap(),
+            &AcceptingVerifier,
+        )
+        .unwrap();
+        let member = history.effective_member_for_device(&peer).unwrap();
+        let mut evidence = uc_core::membership::MembershipConflictEvidenceV3 {
+            transfer_id: history.current_position().unwrap().history_digest,
+            pages: history
+                .export_conflict_evidence_pages_v2(
+                    history.admission_facts_for(member).unwrap().clone(),
+                )
+                .unwrap(),
+        };
+        if corrupted {
+            evidence.transfer_id[0] ^= 1;
+        }
+        let repository = Arc::new(MemoryLedgerRepository(Mutex::new(record)));
+        let ledger = Arc::new(MembershipLedger::new(
+            repository.clone(),
+            repository,
+            Arc::new(AcceptingVerifier),
+        ));
+        let synchronize = SynchronizeMembershipHistoryUseCase::new(
+            ledger.clone(),
+            ledger.clone(),
+            Arc::new(CompleteEvidenceTransport(evidence)),
+            Arc::new(FixedClock),
+        );
+        let report = synchronize
+            .execute(MembershipSyncTarget::AllCurrentPeers)
+            .await
+            .unwrap();
+        assert_eq!(
+            report.completed_peer_count > 0,
+            !corrupted,
+            "只有完整证据验证通过才能恢复"
+        );
+        assert_eq!(
+            ledger
+                .current_scope()
+                .await
+                .unwrap()
+                .usable_peer_device_ids
+                .contains(&peer),
+            !corrupted
+        );
+    }
+}
+
 #[tokio::test]
 async fn round_batch_limit_preserves_unselected_peer_debt_for_the_next_round() {
     let peers = (0..9)

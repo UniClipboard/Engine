@@ -1137,7 +1137,7 @@ async fn f7_three_sibling_branches_keep_fair_anti_entropy_for_legal_peers() {
             let text = format!("F7 matrix {sender}-{receiver}");
             let report = topology.send(sender, receiver, &text).await;
             assert_eq!(
-                report.total_accepted,
+                report.total_accepted + report.total_pending,
                 usize::from(same_branch),
                 "unexpected F7 transfer result for {sender}-{receiver}: {report:?}"
             );
@@ -1788,12 +1788,25 @@ async fn f2_concurrent_leaf_removals_resolve_to_selected_branch() {
     topology.assert_snapshot("B", 4, 1).await;
     topology.assert_snapshot("C", 4, 1).await;
     let selected = topology.diagnostics("B").await;
-    let choices = topology.device_group_choices("C").await;
+    let choices = topology
+        .device_group_choices_for_branch("C", &selected.branch_id)
+        .await;
+    let choice_id = format!("b:{}", selected.branch_id);
+    let conflict = choices
+        .issues
+        .iter()
+        .find(|issue| {
+            issue
+                .choices
+                .iter()
+                .any(|choice| choice.choice_id == choice_id)
+        })
+        .unwrap();
     let remote = choices
         .issues
         .iter()
         .flat_map(|issue| &issue.choices)
-        .find(|choice| !choice.is_current_group)
+        .find(|choice| choice.choice_id == choice_id)
         .unwrap();
     assert!(
         remote.members_complete,
@@ -1805,11 +1818,6 @@ async fn f2_concurrent_leaf_removals_resolve_to_selected_branch() {
         .members
         .iter()
         .all(|member| !member.display_name.is_empty()));
-    let conflict = choices
-        .issues
-        .iter()
-        .find(|issue| issue.issue_id.starts_with("c:"))
-        .unwrap();
     assert_eq!(
         conflict.reason.kind,
         uc_engine::DeviceGroupChoiceReasonKind::DifferentRemovals
@@ -1849,6 +1857,19 @@ async fn f2_concurrent_leaf_removals_resolve_to_selected_branch() {
     assert_eq!(resolved.branch_id, selected.branch_id);
     assert_eq!(resolved.head_event_id, selected.head_event_id);
     assert_eq!(resolved.group_epoch, selected_after_recovery.group_epoch);
+    // 切到保留 E 的新分支后，旧 Remove(E) 不得在重启维护中删除 E 的资料。
+    topology.run(&[TopologyAction::Restart { node: "C" }]).await;
+    let restarted = topology.device_group_choices("C").await;
+    assert_eq!(
+        restarted
+            .device_trust
+            .devices
+            .iter()
+            .filter(|device| device.membership == uc_engine::DeviceMembershipSummary::Active)
+            .count(),
+        4,
+        "选中组的有效成员在重启后必须仍可完整查询"
+    );
     topology.shutdown().await;
 }
 
@@ -2448,16 +2469,48 @@ impl MembershipTopology {
         }
     }
 
+    async fn device_group_choices_for_branch(
+        &self,
+        node: &str,
+        branch_id: &str,
+    ) -> uc_engine::DeviceGroupChoicesSummary {
+        let choice_id = format!("b:{branch_id}");
+        let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+        loop {
+            let choices = self.device_group_choices(node).await;
+            if choices.issues.iter().any(|issue| {
+                issue.issue_id.starts_with("c:")
+                    && issue
+                        .choices
+                        .iter()
+                        .any(|choice| choice.choice_id == choice_id)
+            }) {
+                return choices;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "node {node} did not offer the requested branch"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     async fn resolve_conflict(&self, node: &str, branch_from: &str) {
         let target = self.diagnostics(branch_from).await.branch_id;
         let choice_id = format!("b:{target}");
         let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
         loop {
-            let choices = self.device_group_choices(node).await;
+            let choices = self.device_group_choices_for_branch(node, &target).await;
             let issue = choices
                 .issues
                 .iter()
-                .find(|issue| issue.issue_id.starts_with("c:"))
+                .find(|issue| {
+                    issue.issue_id.starts_with("c:")
+                        && issue
+                            .choices
+                            .iter()
+                            .any(|choice| choice.choice_id == choice_id)
+                })
                 .unwrap_or_else(|| panic!("node {node} has no branch conflict"));
             assert!(issue
                 .choices

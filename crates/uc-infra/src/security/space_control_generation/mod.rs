@@ -9,7 +9,6 @@ use sha2::Digest as _;
 use uc_application::deps::{
     AdmissionSpaceTransitionPreparationV2, AdvanceMembershipBranchTransitionInput,
     CommitMembershipLedgerPort, LoadMembershipLedgerPort, MembershipLedgerMutation,
-    PeerReconciliationRecord,
 };
 use uc_core::membership::{
     MembershipBranchTransitionPhaseV1, RelationshipStateResetPort, RevocationRepositoryPort,
@@ -510,15 +509,7 @@ impl SpaceControlGeneration {
             .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
         let (members, trusted_peers, peer_addresses) =
             branch_relationships(input, target.layout().space_id())?;
-        let encoded_history = input
-            .target_history
-            .encode_persisted_v2()
-            .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
         let local_member = input.recovery_package.recipient_member();
-        let local_facts = input
-            .target_history
-            .admission_facts_for(local_member)
-            .ok_or_else(|| inconsistent(anyhow::anyhow!("branch recipient facts are missing")))?;
 
         {
             let pool = open_existing_pool(database)?;
@@ -567,7 +558,9 @@ impl SpaceControlGeneration {
                 .load()
                 .await
                 .map_err(|source| storage(anyhow::Error::new(source)))?;
-            let mut replacement = current.clone();
+            let mut replacement = current
+                .recovered_branch(&input.target_history, local_member)
+                .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
             let stored = replacement
                 .membership_branch_transitions
                 .get_mut(input.transition.transition_id())
@@ -575,36 +568,6 @@ impl SpaceControlGeneration {
                     inconsistent(anyhow::anyhow!("branch target checkpoint is missing"))
                 })?;
             advance_branch_checkpoint_to_staged(stored, &input.transition)?;
-            replacement.membership_history = Some(encoded_history);
-            replacement.local_device_id = Some(local_facts.device_id.clone());
-            replacement.local_member_instance = Some(local_member);
-            replacement.local_join_active = true;
-            replacement.peer_reconciliation = input
-                .target_history
-                .active_members()
-                .into_iter()
-                .filter(|member| member != &local_member)
-                .map(|member| {
-                    let facts = input
-                        .target_history
-                        .admission_facts_for(member)
-                        .ok_or_else(|| {
-                            inconsistent(anyhow::anyhow!("branch target member facts are missing"))
-                        })?;
-                    Ok((
-                        facts.device_id.clone(),
-                        PeerReconciliationRecord {
-                            peer_device_id: facts.device_id.clone(),
-                            relationship:
-                                uc_core::membership::MembershipHistoryRelationship::Consistent,
-                            confirmed_position: None,
-                            sync_state: Default::default(),
-                            restricted_delivery: Vec::new(),
-                            updated_at_ms: 0,
-                        },
-                    ))
-                })
-                .collect::<Result<_, SpaceControlGenerationError>>()?;
             replacement.revision = current
                 .revision
                 .checked_add(1)

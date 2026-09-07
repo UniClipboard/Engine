@@ -141,7 +141,7 @@ impl RemoveSpaceMemberUseCase {
                         retained_device_ids,
                     })
                     .map_err(|_| MembershipLedgerError::Corrupt)?;
-                    record.pending_effects.insert(
+                    record.effect_journal.insert(
                         *change_id.as_bytes(),
                         PendingMembershipEffect {
                             event_id: *change_id.as_bytes(),

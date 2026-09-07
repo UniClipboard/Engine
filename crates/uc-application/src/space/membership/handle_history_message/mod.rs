@@ -1,5 +1,6 @@
 mod error;
 mod model;
+mod transfer;
 mod use_case;
 
 pub use error::HandleMembershipHistoryMessageError;
