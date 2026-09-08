@@ -52,7 +52,7 @@ impl UpgradePersistence {
             .write(true)
             .open(&self.lease_path)
             .map_err(storage_error)?;
-        match file.try_lock() {
+        match crate::fs::file_lock::try_lock_exclusive(&file) {
             Ok(()) => Ok(UpgradeLeaseResult::Acquired(UpgradeLease { _file: file })),
             Err(TryLockError::WouldBlock) => Ok(UpgradeLeaseResult::Busy),
             Err(TryLockError::Error(source)) => Err(storage_error(source)),

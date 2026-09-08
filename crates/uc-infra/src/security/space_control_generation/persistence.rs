@@ -41,7 +41,7 @@ pub(super) fn acquire_lease(
         .write(true)
         .open(generation_parent.join(".space-control-generation.lease"))
         .map_err(|source| storage(anyhow::Error::new(source)))?;
-    match file.try_lock() {
+    match crate::fs::file_lock::try_lock_exclusive(&file) {
         Ok(()) => Ok(ControlGenerationLease { _file: file }),
         Err(TryLockError::WouldBlock) => Err(SpaceControlGenerationError::Busy {
             source: anyhow::anyhow!("space control generation lease is held"),

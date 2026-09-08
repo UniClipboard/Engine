@@ -561,7 +561,7 @@ fn acquire_activation_lease(
         .write(true)
         .open(profile_root.join(".space-transition-activation.lease"))
         .map_err(|source| storage(anyhow::Error::new(source)))?;
-    match file.try_lock() {
+    match crate::fs::file_lock::try_lock_exclusive(&file) {
         Ok(()) => Ok(ActivationLease { _file: file }),
         Err(TryLockError::WouldBlock) => Err(SpaceTransitionActivationError::Busy {
             source: anyhow::anyhow!("space transition activation lease is held"),

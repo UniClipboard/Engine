@@ -743,7 +743,7 @@ async fn held_profile_lease_returns_busy_without_creating_a_journal() {
         .write(true)
         .open(upgrade_directory.join(".lease"))
         .unwrap();
-    lease.try_lock().unwrap();
+    uc_infra::fs::file_lock::try_lock_exclusive(&lease).unwrap();
 
     let secure_storage = Arc::new(MemorySecureStorage::default());
     let keys = Arc::new(AdmissionKeyManager::new(secure_storage.clone(), [0x41; 16]));
