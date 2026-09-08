@@ -18,8 +18,5 @@ tracing-opentelemetry = { version = "=0.33.0", default-features = false }
 tokio = { version = "1", default-features = false, features = ["rt"] }
 uuid = { version = "1", features = ["v7", "serde"] }
 
-[dev-dependencies]
-tracing-subscriber = "0.3"
-
 [lints]
 workspace = true

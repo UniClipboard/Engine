@@ -27,7 +27,6 @@ tracing = "0.1"
 thiserror = "2.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 url = "2"
-uuid = { version = "1", features = ["v4", "fast-rng"] }
 uc-application = { path = "../uc-application" }
 uc-core = { path = "../uc-core", features = ["task-registry"] }
 uc-infra = { path = "../uc-infra" }
@@ -48,6 +47,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "fast-rng"] }
 uc-infra = { path = "../uc-infra", features = ["test-util"] }
 wiremock = "0.6"
 

@@ -22,11 +22,6 @@ anyhow = "1.0"
 # Async traits
 async-trait = "0.1"
 
-# Cryptographic hashing
-
-# Base64 encoding
-base64 = "0.22"
-
 # Bytes handling
 bytes = "1.7"
 
@@ -36,7 +31,6 @@ tokio = { version = "1", features = ["sync"] }
 tokio-util = { version = "0.7", optional = true }
 thiserror = "2.0.17"
 serde_with = { version = "3.16.1", features = ["base64"] }
-rand = "0.9.2"
 hex = "0.4.3"
 url = "2"
 
@@ -57,7 +51,6 @@ zeroize = "1.8.2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
-mockall = "0.14.0"
 
 [features]
 default = []

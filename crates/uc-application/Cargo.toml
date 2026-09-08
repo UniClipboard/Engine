@@ -40,22 +40,15 @@ chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2.0.17"
 futures = "0.3.31"
 tracing = "0.1.44"
-hmac = "0.12"
 sha2 = "0.10"
 rand = "0.9.2"
-ed25519-dalek = "2.2.0"
 blake3 = "1"
-hex = "0.4"
 # Slice 2 Phase 2: carry ciphertext bytes across use case / facade / port
 # boundaries without extra clones. Matches uc-core + uc-infra.
 bytes = "1.7"
 url = "2"
 unicode-normalization = "0.1"
 zeroize = { version = "1.8", features = ["derive"] }
-# Base64 — Basic Auth credential parsing (mobile sync auth use case).
-base64 = "0.22"
-# QR code rendering for SyncClipboard install URL (mobile sync register use case).
-# Used to produce both PNG bytes (frontend img tag) and ASCII art (CLI stdout).
 # Semver parsing for upgrade-detection use case (`facade::upgrade`).
 # Compares last_seen_version (port-stored String) against current build
 # version to derive `UpgradeStatus`.
@@ -64,9 +57,6 @@ semver = "1"
 # rapid-replay inbound frames (snapshot_hash / visible_key → entry_id) without
 # rolling a custom expiring map.
 moka = { version = "0.12", default-features = false, features = ["sync"] }
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 
 [dependencies.uuid]
 version = "1.10.0"
@@ -77,7 +67,6 @@ mockall = "0.13"
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-image = "0.25"
 
 [lints]
 workspace = true
