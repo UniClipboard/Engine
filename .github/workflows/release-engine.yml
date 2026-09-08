@@ -209,6 +209,7 @@ jobs:
 
       - name: Build HarmonyOS assets and signed acceptance HAP
         env:
+          HOME: ${{ runner.temp }}/cargo-home-user
           RUSTC_WRAPPER: ''
           CARGO_HOME: ${{ runner.temp }}/cargo-home
           UC_OHOS_DIST_DIR: ${{ runner.temp }}/engine-dist/ohos
