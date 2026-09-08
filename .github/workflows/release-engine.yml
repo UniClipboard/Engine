@@ -196,6 +196,12 @@ jobs:
       - name: Isolate runner-local Cargo configuration
         shell: bash
         run: |
+          runner_user_home="$HOME"
+          for config in "$runner_user_home/.cargo/config" "$runner_user_home/.cargo/config.toml"; do
+            if [[ -f "$config" ]]; then
+              mv "$config" "${RUNNER_TEMP}/$(basename "$config").user-backup"
+            fi
+          done
           for config in .cargo/config .cargo/config.toml; do
             if [[ -f "$config" ]]; then
               mv "$config" "${RUNNER_TEMP}/$(basename "$config").runner-backup"
