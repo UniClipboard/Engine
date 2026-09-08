@@ -201,6 +201,11 @@ jobs:
               mv "$config" "${RUNNER_TEMP}/$(basename "$config").runner-backup"
             fi
           done
+          cargo_home="${RUNNER_TEMP}/cargo-home"
+          if [[ -e "$cargo_home" ]]; then
+            mv "$cargo_home" "${RUNNER_TEMP}/cargo-home.runner-backup-${GITHUB_RUN_ID}"
+          fi
+          mkdir -p "$cargo_home"
 
       - name: Build HarmonyOS assets and signed acceptance HAP
         env:
