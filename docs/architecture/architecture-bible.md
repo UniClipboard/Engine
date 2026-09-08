@@ -808,6 +808,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 | 日期 | 主题 | 长期结论 |
 | --- | --- | --- |
+| 2026-09-08 | Infra TLS provider 依赖收敛 | `uc-infra` 显式使用与 Iroh 一致的 rustls `ring` provider，不再由 rustls 默认 feature 引入未使用的 AWS-LC C 构建链；TLS 调用路径、网络协议与模块责任不变，无架构变化。 |
 | 2026-09-08 | Engine rc.14 发布准备 | 发布环境修复已通过运行 34202627250 的三端完整试运行及下载后的 22 项文件复核。仅同步版本到 1.1.0-rc.14，正式流程在构建和清单核验成功后创建标签与预发布；实机矩阵继续明确 skipped。 |
 | 2026-09-08 | Engine rc.13 发布准备 | 完成自托管发布机用户 Cargo 配置、工作区配置、HOME 与临时目录的隔离后，Engine workspace、HarmonyOS 包与宿主版本检查同步到 1.1.0-rc.13；业务最低版本与独立 LAN 发布版本不变，未执行设备矩阵明确记为 skipped。 |
 | 2026-09-08 | Engine rc.12 发布准备 | 完成自托管发布机 HOME 与 Cargo 配置隔离后，Engine workspace、HarmonyOS 包与宿主版本检查同步到 1.1.0-rc.12；业务最低版本与独立 LAN 发布版本不变，未执行设备矩阵明确记为 skipped。 |
