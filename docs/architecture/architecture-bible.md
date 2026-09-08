@@ -808,6 +808,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 | 日期 | 主题 | 长期结论 |
 | --- | --- | --- |
+| 2026-09-08 | Engine rc.10 发布准备 | 补齐自托管发布机的工作区 Cargo 配置隔离后，Engine workspace、HarmonyOS 包与宿主版本检查同步到 1.1.0-rc.10；业务最低版本与独立 LAN 发布版本不变，未执行设备矩阵明确记为 skipped。 |
 | 2026-09-08 | Engine rc.9 发布准备 | 修复 HarmonyOS 自托管发布机的 Cargo 配置隔离后，Engine workspace、HarmonyOS 包与宿主版本检查同步到 1.1.0-rc.9；业务最低版本与独立 LAN 发布版本不变，未执行设备矩阵明确记为 skipped。 |
 | 2026-09-08 | HarmonyOS 发布构建环境隔离 | 自托管发布机的用户级或工作区 Cargo 配置可能把仓库依赖替换为开发机本地路径；HarmonyOS 发布步骤移走工作区配置并使用临时 Cargo 主目录，确保锁定构建只读取发布提交中的依赖来源。 |
 | 2026-09-08 | Engine rc.8 发布准备 | Engine workspace、HarmonyOS 包与宿主版本检查同步到 1.1.0-rc.8，基于 rc.7 之后的准入恢复与 Android 文件租约修复；业务最低版本与独立 LAN 发布版本不变。继续使用现有不可变三端资产流程，未执行设备矩阵明确记为 skipped。 |
