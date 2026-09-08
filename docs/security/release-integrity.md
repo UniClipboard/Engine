@@ -8,6 +8,11 @@
 
 ## 必需资产
 
+HarmonyOS 自托管构建由 `scripts/release/with-isolated-source.mjs` 在用户目录之外检出同一提交，
+保持 HOME 与 Rust 安装位置不变。该入口拒绝带祖先 Cargo 配置的临时根目录；只复用依赖下载，
+不搬移用户配置或仓库配置，独立编译目录在子进程退出后回收。环境修复先通过 workflow_dispatch
+试运行及三端清单核验，再创建新版本标签，不能依靠连续发布版本验证猜测。
+
 - iOS XCFramework、Swift 绑定和 SwiftPM 校验值；
 - Android AAR、Kotlin 绑定、POM 和运行依赖；
 - HarmonyOS HAR、ARM64 动态库、ArkTS 声明和已签名验收 HAP；

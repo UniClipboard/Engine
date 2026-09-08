@@ -193,34 +193,14 @@ jobs:
           toolchain=$(rustup show active-toolchain | awk '{print $1}')
           rustup target add --toolchain "$toolchain" aarch64-unknown-linux-ohos
 
-      - name: Isolate runner-local Cargo configuration
-        shell: bash
-        run: |
-          runner_user_home="$HOME"
-          for config in "$runner_user_home/.cargo/config" "$runner_user_home/.cargo/config.toml"; do
-            if [[ -f "$config" ]]; then
-              mv "$config" "${RUNNER_TEMP}/$(basename "$config").user-backup"
-            fi
-          done
-          for config in .cargo/config .cargo/config.toml; do
-            if [[ -f "$config" ]]; then
-              mv "$config" "${RUNNER_TEMP}/$(basename "$config").runner-backup"
-            fi
-          done
-          cargo_home="${RUNNER_TEMP}/cargo-home"
-          if [[ -e "$cargo_home" ]]; then
-            mv "$cargo_home" "${RUNNER_TEMP}/cargo-home.runner-backup-${GITHUB_RUN_ID}"
-          fi
-          mkdir -p "$cargo_home"
-
       - name: Build HarmonyOS assets and signed acceptance HAP
         env:
-          HOME: ${{ runner.temp }}/cargo-home-user
-          RUSTC_WRAPPER: ''
-          CARGO_HOME: ${{ runner.temp }}/cargo-home
+          RUSTC_WRAPPER: sccache
           UC_OHOS_DIST_DIR: ${{ runner.temp }}/engine-dist/ohos
-          UC_OHOS_TARGET_DIR: ${{ runner.temp }}/uc-ohos-target
-        run: tests/hosts/ohos/build-emulator.sh
+        run: >-
+          node scripts/release/with-isolated-source.mjs
+          /Volumes/ExternalSSD/cargo-targets/active
+          bash tests/hosts/ohos/build-emulator.sh
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -273,7 +253,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.prepare.outputs.tag }}
           COMMIT: ${{ needs.prepare.outputs.commit }}
-          PRERELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease }}
+          PRERELEASE: ${{ github.event_name == 'push' && contains(github.ref_name, '-rc.') || inputs.prerelease }}
           REVERIFY_EXISTING: ${{ github.event_name == 'workflow_dispatch' && inputs.reverify_existing_release }}
           ASSET_DIR: ${{ runner.temp }}/engine-dist/release-assets
         shell: bash
