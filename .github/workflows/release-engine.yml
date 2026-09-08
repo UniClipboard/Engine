@@ -193,6 +193,15 @@ jobs:
           toolchain=$(rustup show active-toolchain | awk '{print $1}')
           rustup target add --toolchain "$toolchain" aarch64-unknown-linux-ohos
 
+      - name: Isolate runner-local Cargo configuration
+        shell: bash
+        run: |
+          for config in .cargo/config .cargo/config.toml; do
+            if [[ -f "$config" ]]; then
+              mv "$config" "${RUNNER_TEMP}/$(basename "$config").runner-backup"
+            fi
+          done
+
       - name: Build HarmonyOS assets and signed acceptance HAP
         env:
           RUSTC_WRAPPER: ''
