@@ -35,12 +35,7 @@ use crate::clipboard::sync::V3BlobRef;
 use crate::facade::config_migration::ConfigMigrationFacade;
 use crate::facade::roster::{MemberSummary, PeerSnapshotView, RosterError};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeviceGroupChoicesView {
-    pub revision: u64,
-    pub device_trust: crate::facade::DeviceTrustStatus,
-    pub conflicts: crate::facade::MembershipConflictsView,
-}
+pub use crate::space::{DeviceGroupChoicesView, QueryDeviceGroupChoicesError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceGroupIssue {
@@ -69,22 +64,6 @@ pub enum ChooseDeviceGroupResult {
     BranchConflict(crate::facade::ResolveMembershipConflictResult),
     StateChanged { current_revision: u64 },
     InvalidChoice,
-}
-
-#[derive(Debug, Error)]
-pub enum QueryDeviceGroupChoicesError {
-    #[error("查询设备信任状态失败")]
-    DeviceTrust {
-        #[source]
-        source: crate::facade::QueryDeviceTrustError,
-    },
-    #[error("查询成员分支冲突失败")]
-    MembershipConflict {
-        #[source]
-        source: crate::facade::QueryMembershipConflictsError,
-    },
-    #[error("读取期间成员状态发生变化")]
-    StateChanged,
 }
 
 #[derive(Debug, Error)]
@@ -431,24 +410,7 @@ impl AppFacade {
     pub async fn query_device_group_choices(
         &self,
     ) -> Result<DeviceGroupChoicesView, QueryDeviceGroupChoicesError> {
-        let device_trust = self
-            .space
-            .query_device_trust()
-            .await
-            .map_err(|source| QueryDeviceGroupChoicesError::DeviceTrust { source })?;
-        let conflicts = self
-            .space
-            .query_membership_conflicts()
-            .await
-            .map_err(|source| QueryDeviceGroupChoicesError::MembershipConflict { source })?;
-        if device_trust.revision != conflicts.revision {
-            return Err(QueryDeviceGroupChoicesError::StateChanged);
-        }
-        Ok(DeviceGroupChoicesView {
-            revision: device_trust.revision,
-            device_trust,
-            conflicts,
-        })
+        self.space.query_device_group_choices().await
     }
 
     pub async fn query_membership_diagnostics(

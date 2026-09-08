@@ -101,6 +101,7 @@ pub(crate) struct SpaceApplication {
     ledger: Arc<MembershipLedger>,
     current_scope: Arc<dyn CurrentSpaceMemberScopePort>,
     query_device_trust: Arc<QueryDeviceTrustUseCase>,
+    query_device_group_choices: Arc<super::membership::QueryDeviceGroupChoicesUseCase>,
     query_membership_admission: Arc<QueryMembershipAdmissionUseCase>,
     remove_space_member: Arc<RemoveSpaceMemberUseCase>,
     decide_device_trust_change: Arc<DecideDeviceTrustChangeUseCase>,
@@ -370,10 +371,17 @@ impl SpaceApplication {
             Arc::clone(&ledger),
             diagnostics_signatures,
         ));
+        let query_device_group_choices =
+            Arc::new(super::membership::QueryDeviceGroupChoicesUseCase::new(
+                Arc::clone(&ledger),
+                Arc::clone(&query_device_trust),
+                Arc::clone(&resolve_membership_conflict),
+            ));
         Self {
             ledger,
             current_scope,
             query_device_trust,
+            query_device_group_choices,
             query_membership_admission,
             remove_space_member,
             decide_device_trust_change,
@@ -399,6 +407,12 @@ impl SpaceApplication {
 
     pub(crate) fn query_device_trust(&self) -> Arc<QueryDeviceTrustUseCase> {
         Arc::clone(&self.query_device_trust)
+    }
+
+    pub(crate) fn query_device_group_choices(
+        &self,
+    ) -> Arc<super::membership::QueryDeviceGroupChoicesUseCase> {
+        Arc::clone(&self.query_device_group_choices)
     }
 
     pub(crate) fn current_scope(&self) -> Arc<dyn CurrentSpaceMemberScopePort> {

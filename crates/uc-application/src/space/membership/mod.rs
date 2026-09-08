@@ -9,7 +9,10 @@ pub use projection::{
     ApplyMembershipProjectionError, ApplyMembershipProjectionPort, MembershipProjectionPlan,
 };
 mod query_admission;
+mod query_device_group_choices;
 mod query_device_trust;
+pub(crate) use query_device_group_choices::QueryDeviceGroupChoicesUseCase;
+pub use query_device_group_choices::{DeviceGroupChoicesView, QueryDeviceGroupChoicesError};
 mod query_diagnostics;
 mod re_pairing;
 mod reconcile_history_evidence;

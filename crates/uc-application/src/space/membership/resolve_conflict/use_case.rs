@@ -4,7 +4,9 @@ use uc_core::membership::{
     MembershipBranchTransitionV1, MembershipConflictChoice, MembershipConflictPolicy,
 };
 
-use crate::space::membership::{MembershipConflictStatus, MembershipLedger, MembershipLedgerError};
+use crate::space::membership::{
+    MembershipConflictStatus, MembershipLedger, MembershipLedgerError, VerifiedMembershipLedger,
+};
 
 use super::{
     MembershipConflictView, MembershipConflictsView, QueryMembershipConflictStatusPort,
@@ -144,6 +146,13 @@ impl ResolveMembershipConflictUseCase {
                     }
                 }
             })?;
+        self.query_snapshot(&snapshot)
+    }
+
+    pub(crate) fn query_snapshot(
+        &self,
+        snapshot: &VerifiedMembershipLedger,
+    ) -> Result<MembershipConflictsView, QueryMembershipConflictsError> {
         let record = snapshot.record();
         if record.membership_conflicts.is_empty() {
             return Ok(MembershipConflictsView {

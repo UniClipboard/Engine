@@ -206,7 +206,6 @@ fn query_error_kind(error: &uc_application::facade::QueryDeviceGroupChoicesError
             }
         },
         QueryDeviceGroupChoicesError::MembershipConflict { .. } => "membership_conflict",
-        QueryDeviceGroupChoicesError::StateChanged => "state_changed",
     }
 }
 

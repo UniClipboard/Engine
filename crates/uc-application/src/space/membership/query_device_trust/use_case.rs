@@ -7,8 +7,8 @@ use uc_core::membership::{
 };
 use uc_core::ports::ReachabilityState;
 
-use crate::space::membership::MembershipLedger;
 use crate::space::membership::SpaceMemberPauseReason;
+use crate::space::membership::{MembershipLedger, VerifiedMembershipLedger};
 
 use super::{
     DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
@@ -37,6 +37,13 @@ impl QueryDeviceTrustUseCase {
 
     pub(crate) async fn execute(&self) -> Result<DeviceTrustStatus, QueryDeviceTrustError> {
         let snapshot = self.ledger.load_verified().await?;
+        self.query_snapshot(&snapshot).await
+    }
+
+    pub(crate) async fn query_snapshot(
+        &self,
+        snapshot: &VerifiedMembershipLedger,
+    ) -> Result<DeviceTrustStatus, QueryDeviceTrustError> {
         let current_join = self.current_join.load_current_join().await?;
         if snapshot.history().is_none() {
             let mut status = DeviceTrustStatus::no_current_space(snapshot.record().revision);

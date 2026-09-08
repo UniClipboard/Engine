@@ -468,6 +468,22 @@ impl SpaceFacade {
         query.execute().await
     }
 
+    pub async fn query_device_group_choices(
+        &self,
+    ) -> Result<crate::space::DeviceGroupChoicesView, crate::space::QueryDeviceGroupChoicesError>
+    {
+        let query = self
+            .application
+            .lock()
+            .await
+            .as_ref()
+            .map(SpaceApplication::query_device_group_choices)
+            .ok_or(crate::space::QueryDeviceGroupChoicesError::DeviceTrust {
+                source: crate::space::membership::QueryDeviceTrustError::Unavailable,
+            })?;
+        query.execute().await
+    }
+
     pub async fn remove_space_member(
         &self,
         target: &DeviceId,

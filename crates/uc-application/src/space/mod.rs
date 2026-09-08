@@ -21,6 +21,7 @@ mod connectivity;
 mod facade;
 mod lifecycle;
 mod membership;
+pub use membership::{DeviceGroupChoicesView, QueryDeviceGroupChoicesError};
 
 // Caller-facing facade contract.
 pub use adapters::{SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters};

@@ -228,6 +228,8 @@ Space
 
 `SpaceAdmissionProtocol` 是加入 Space 的唯一完整负责人。产品和绑定只提交一次加入、取消或查询动作，不接触候选、密码交换、历史分页、安全暂存、重试或恢复步骤。
 
+设备组统一查询由 Application 的 `QueryDeviceGroupChoicesUseCase` 负责，只读取一次已验证的成员快照，并据此生成设备关系与分支选项。门面只转发结果，不通过重试两次独立读取来拼出一致版本；用户提交选择时仍检查版本和选项是否有效。
+
 协议使用一套类型化消息和封闭状态：
 
 ```text
@@ -712,7 +714,7 @@ reconciliation: Idle -> Comparing -> FetchingHistory -> Consistent -> Idle
 - 进程被系统终止后重新 `start`，不能复用旧内存实例。
 - 事件必须持续消费；收到 `RefreshRequired` 后重新查询真实状态。
 - iOS、Android 和 HarmonyOS 必须为成员移除公开相同的完整状态、稳定错误、提交入口、当前查询和变化事件。
-- 产品只通过 Engine 的 `QueryDeviceGroupChoices` 与 `ChooseDeviceGroup` 处理设备组选择。Application `AppFacade` 是完整流程的唯一协调入口：它把待定成员变更与 sibling branch 冲突投影为同一批选择，并以 ledger revision 拒绝过期操作，再路由至内部决定或分支恢复用例。查询同时保留完整设备信任快照；远端分支成员在恢复前不可证明时以 `members_complete = false` 表达，不伪造名单。iOS/Android 共用 UniFFI 薄映射，HarmonyOS 使用同版本 N-API JSON 映射；绑定不解析问题类型或编排恢复步骤。
+- 产品只通过 Engine 的 `QueryDeviceGroupChoices` 与 `ChooseDeviceGroup` 处理设备组选择。Application `AppFacade` 保留统一调用入口，查询交由 `QueryDeviceGroupChoicesUseCase` 从同一份 ledger 快照生成待定成员变更、sibling branch 冲突及完整设备信任状态；选择时仍以 ledger revision 拒绝过期操作，再路由至内部决定或分支恢复用例。远端分支成员在恢复前不可证明时以 `members_complete = false` 表达，不伪造名单。iOS/Android 共用 UniFFI 薄映射，HarmonyOS 使用同版本 N-API JSON 映射；绑定不解析问题类型或编排恢复步骤。
 - iOS 和 Android 的绑定将一次新增、修改或删除中继节点及其访问令牌交给 Engine 的原子设置操作；绑定先读取当前节点列表并只合并该次变更，令牌只经宿主安全存储使用，绑定不得将其持久化或返回给产品界面。
 - 文件必须通过不透明句柄分块读写，不能把路径伪装成句柄。
 - 平台限制不构成自动切换 LAN 的理由。
