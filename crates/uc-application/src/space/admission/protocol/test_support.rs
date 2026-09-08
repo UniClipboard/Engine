@@ -525,6 +525,13 @@ impl PendingAdmissionRecoveryStatePort for RecordingJoinerStartState {
     ) -> Result<LoadedPendingAdmission, PendingAdmissionRecoveryStateError> {
         let effects = transition.effects();
         let aggregate = transition.into_replacement();
+        let mut stored = self.created_join.lock().expect("created join is available");
+        if stored.as_ref().is_none_or(|current| {
+            current.admission_id() != aggregate.admission_id()
+                || current.record_version().checked_add(1) != Some(aggregate.record_version())
+        }) {
+            return Err(PendingAdmissionRecoveryStateError::StateChanged);
+        }
         let resolution_event = match aggregate.invitation_resolution() {
             Some(uc_core::membership::JoinerInvitationResolution::Started { .. }) => {
                 Some((ProtocolEvent::JoinerInvitationResolutionStarted, 0x27))
@@ -616,7 +623,7 @@ impl PendingAdmissionRecoveryStatePort for RecordingJoinerStartState {
         let persisted = aggregate
             .encode_persisted()
             .expect("test aggregate can be persisted");
-        *self.created_join.lock().expect("created join is available") = Some(
+        *stored = Some(
             JoinerAdmission::decode_persisted(&persisted).expect("test aggregate can be reopened"),
         );
         self.events
@@ -1530,6 +1537,10 @@ impl SpaceAdmissionProtocolTestPair {
 
     pub(super) fn joiner(&self) -> &SpaceAdmissionProtocol {
         &self.joiner
+    }
+
+    pub(super) fn joiner_mut(&mut self) -> &mut SpaceAdmissionProtocol {
+        &mut self.joiner
     }
 
     pub(super) fn sponsor(&self) -> &SpaceAdmissionProtocol {

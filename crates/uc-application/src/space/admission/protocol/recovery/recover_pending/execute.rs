@@ -28,10 +28,7 @@ impl SpaceAdmissionProtocol {
         &self,
         trigger: AdmissionRecoveryTrigger,
     ) -> AdmissionRecoveryReport {
-        self.execute_exclusively(Box::pin(async {
-            self.recovery.recover_pending(&self.joiner, trigger).await
-        }))
-        .await
+        self.recovery.recover_pending(&self.joiner, trigger).await
     }
 }
 
@@ -41,6 +38,9 @@ impl AdmissionRecoveryService {
         joiner: &JoinerAdmissionService,
         trigger: AdmissionRecoveryTrigger,
     ) -> AdmissionRecoveryReport {
+        // 恢复执行独占自己的入口，不能跨网络等待占用本机动作锁。
+        // 状态提交仍由持久仓库校验版本，拒绝覆盖并发取消或替换。
+        let _recovery = self.execution_lock.lock().await;
         let mut report = AdmissionRecoveryReport::default();
         let loaded = match self.state.load(trigger).await {
             Ok(loaded) => loaded,

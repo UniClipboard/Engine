@@ -8,7 +8,7 @@ Space 全局入口和事实所有权见 [`docs/design-docs/space-application.md`
 - `joiner/` 包含 `JoinerAdmissionService`、开始加入、处理 Candidate、Commit、Complete、执行本机激活和处理 Settled；设置、开始材料、开始状态、各阶段准备、本机激活状态与执行、成功后的维护唤醒能力都留在本目录。
 - `sponsor/` 包含 `SponsorAdmissionService`、统一认证消息分发、处理 JoinRequest、Prepared、Applied 和 CompleteAck；角色内共享状态与各阶段回复准备能力都留在本目录。
 - `recovery/` 包含 `AdmissionRecoveryService`、扫描待恢复记录、建立或恢复连接、交换消息和保存恢复推进；恢复状态、transport、触发原因和恢复报告都留在本目录。
-- `SpaceAdmissionProtocol` 只选择一个完整角色动作并执行 profile 级串行约束。三个内部负责人不得从 `protocol` 模块外取得，也不得成为调用方需要编排的步骤入口。
+- `SpaceAdmissionProtocol` 串行执行本机动作；Recovery 独占自己的恢复入口，不能跨网络等待持有本机动作锁。并发取消、替换与恢复的提交以持久仓库版本校验为准。三个内部负责人不得从 `protocol` 模块外取得，也不得成为调用方需要编排的步骤入口。
 - 一个 Port 由对其业务结果负责的内部负责人持有。不得为缩短构造参数把无关能力集中到 `SpaceAdmissionProtocol` 或新增无生命周期职责的 `AdmissionRuntime`。
 
 ## 先按角色，再按业务动作组织

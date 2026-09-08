@@ -15,6 +15,7 @@ pub(crate) struct AdmissionRecoveryService {
     pub(super) state: Arc<dyn PendingAdmissionRecoveryStatePort>,
     pub(super) transport: Arc<dyn SpaceAdmissionTransportPort>,
     host_events: Arc<crate::facade::HostEventBus>,
+    pub(super) execution_lock: tokio::sync::Mutex<()>,
 }
 
 impl AdmissionRecoveryService {
@@ -27,6 +28,7 @@ impl AdmissionRecoveryService {
             state,
             transport,
             host_events,
+            execution_lock: tokio::sync::Mutex::new(()),
         }
     }
 

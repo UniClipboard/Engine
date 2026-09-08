@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod concurrency_tests;
 mod execute;
 mod model;
 mod ports;
