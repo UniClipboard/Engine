@@ -8,7 +8,7 @@ async function main() {
   assert.ok(addonPath, 'UC_OHOS_NAPI_NODE must point to the built N-API module');
 
   const addon = require(addonPath);
-  assert.equal(addon.coreVersion(), 'v1.1.0-rc.8');
+  assert.equal(addon.coreVersion(), 'v1.1.0-rc.9');
   assert.equal(typeof addon.installProcessObservability, 'function');
   assert.equal(typeof addon.queryProcessObservabilityHealth, 'function');
   assert.equal(typeof addon.flushProcessObservability, 'function');
