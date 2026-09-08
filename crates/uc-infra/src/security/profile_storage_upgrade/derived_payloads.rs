@@ -3,11 +3,14 @@
 //! 本模块只编排 owner codec，不拥有字段序列化、路径编码或实体 AAD。转换从
 //! 不可变 `v3-primary` 复制出完整候选目录，全部回读验证后才原子发布。
 
+use std::collections::BTreeSet;
+use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
 use diesel::connection::SimpleConnection as _;
 use diesel::{Connection as _, RunQueryDsl as _};
+use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
 use uc_core::ids::{EntryId, ProfileId};
 
 use crate::db::repositories::active_clipboard_register_cipher::{
@@ -17,7 +20,7 @@ use crate::db::repositories::directory_publish_log_cipher::{
     DirectoryPublishLogCipher, V3DirectoryPublishLogCipher,
 };
 use crate::db::repositories::entry_file_set_cipher::{
-    EntryFileSetPathCipher, V3EntryFileSetPathCipher,
+    EntryFileSetPathCipher, FileSetCipherError, V3EntryFileSetPathCipher,
 };
 use crate::db::repositories::receive_artifact_cipher::{
     ReceiveArtifactCipher, V3ReceiveArtifactCipher,
@@ -25,7 +28,7 @@ use crate::db::repositories::receive_artifact_cipher::{
 use crate::file_transfer::persistence_cipher::{
     TransferPersistenceCipher, V3TransferPersistenceCipher,
 };
-use crate::search::{RenderPayloadCodec, SearchGroupRef, V3SearchProtection};
+use crate::search::{RenderDecodeError, RenderPayloadCodec, SearchGroupRef, V3SearchProtection};
 use crate::security::{ContentProtection, ProfileContentKeyVault};
 use crate::space::InMemorySession;
 
@@ -36,6 +39,8 @@ use super::ProfileStorageUpgradeError;
 
 const DATABASE_FILE: &str = "profile.sqlite";
 const BLOB_DIRECTORY: &str = "blobs";
+const RECOVERY_SNAPSHOT_FILE: &str = ".unreadable-derived-v1";
+const RECOVERY_SNAPSHOT_AAD: &[u8] = b"profile-storage-upgrade/unreadable-derived-snapshot/v1";
 const V3_SEARCH_INDEX_VERSION: &str = "search-v12";
 
 pub(super) struct DerivedPayloadConverter {
@@ -77,6 +82,8 @@ impl DerivedPayloadConverter {
         target.verify_separated(journal)?;
         let paths = target.paths(journal);
         if paths.payload_output.is_dir() {
+            self.verify_recovery_snapshot(Some(&paths.primary_output), &paths.payload_output)
+                .await?;
             let converted = self.inspect_output(&paths.payload_output).await?;
             target.verify_source_revision(journal)?;
             return Ok(converted);
@@ -113,9 +120,10 @@ impl DerivedPayloadConverter {
         target: &TargetGenerationStager,
     ) -> Result<(), ProfileStorageUpgradeError> {
         target.verify_separated(journal)?;
-        let converted = self
-            .inspect_output(&target.paths(journal).payload_output)
+        let paths = target.paths(journal);
+        self.verify_recovery_snapshot(Some(&paths.primary_output), &paths.payload_output)
             .await?;
+        let converted = self.inspect_output(&paths.payload_output).await?;
         if journal.payload_profile_database_digest() != Some(converted.profile_database_digest)
             || journal.payload_blob_tree_digest() != Some(converted.blob_tree_digest)
             || journal.converted_derived_count() != Some(converted.derived_count)
@@ -138,8 +146,14 @@ impl DerivedPayloadConverter {
         let database = work.join(DATABASE_FILE);
         let rows = load_rows(&database)?;
         let converted = self.convert_rows(rows).await?;
+        if !converted.unreadable_file_sets.is_empty() || !converted.unreadable_search.is_empty() {
+            self.preserve_recovery_snapshot(primary_output, work)
+                .await?;
+        }
         save_rows(&database, &converted)?;
         compact_database(&database)?;
+        self.verify_recovery_snapshot(Some(primary_output), work)
+            .await?;
         let inspected = self.inspect_output(work).await?;
         if final_output.exists() {
             return Err(corrupt(anyhow::anyhow!(
@@ -205,49 +219,59 @@ impl DerivedPayloadConverter {
         let v3_artifact = V3ReceiveArtifactCipher::new(Arc::clone(&self.content_protection));
 
         let mut file_sets = Vec::with_capacity(rows.file_sets.len());
+        let mut unreadable_file_sets = BTreeSet::new();
         for row in rows.file_sets {
             let legacy = legacy_file_set.as_ref().ok_or_else(missing_legacy)?;
             let entry_id = EntryId::from(row.entry_id.as_str());
-            let original_text_ct = match row.original_text_ct {
-                Some(ciphertext) => {
-                    let plaintext = legacy
-                        .open_original_text(&entry_id, row.line_index, &ciphertext)
-                        .map_err(owner_security)?;
-                    Some(
-                        v3_file_set
-                            .seal_original_text(&entry_id, row.line_index, &plaintext)
-                            .await
-                            .map_err(owner_security)?,
-                    )
+            let opened = (|| {
+                Ok::<_, FileSetCipherError>((
+                    row.original_text_ct
+                        .as_deref()
+                        .map(|value| legacy.open_original_text(&entry_id, row.line_index, value))
+                        .transpose()?,
+                    row.relative_path_ct
+                        .as_deref()
+                        .map(|value| legacy.open_relative_path(&entry_id, row.line_index, value))
+                        .transpose()?,
+                    row.root_name_ct
+                        .as_deref()
+                        .map(|value| legacy.open_root_name(&entry_id, row.line_index, value))
+                        .transpose()?,
+                ))
+            })();
+            let (original, relative, root) = match opened {
+                Ok(values) => values,
+                Err(FileSetCipherError::DecryptFailed) => {
+                    unreadable_file_sets.insert(row.entry_id);
+                    continue;
                 }
+                Err(source) => return Err(owner_security(source)),
+            };
+            let original_text_ct = match original {
+                Some(value) => Some(
+                    v3_file_set
+                        .seal_original_text(&entry_id, row.line_index, &value)
+                        .await
+                        .map_err(owner_security)?,
+                ),
                 None => None,
             };
-            let relative_path_ct = match row.relative_path_ct {
-                Some(ciphertext) => {
-                    let plaintext = legacy
-                        .open_relative_path(&entry_id, row.line_index, &ciphertext)
-                        .map_err(owner_security)?;
-                    Some(
-                        v3_file_set
-                            .seal_relative_path(&entry_id, row.line_index, &plaintext)
-                            .await
-                            .map_err(owner_security)?,
-                    )
-                }
+            let relative_path_ct = match relative {
+                Some(value) => Some(
+                    v3_file_set
+                        .seal_relative_path(&entry_id, row.line_index, &value)
+                        .await
+                        .map_err(owner_security)?,
+                ),
                 None => None,
             };
-            let root_name_ct = match row.root_name_ct {
-                Some(ciphertext) => {
-                    let plaintext = legacy
-                        .open_root_name(&entry_id, row.line_index, &ciphertext)
-                        .map_err(owner_security)?;
-                    Some(
-                        v3_file_set
-                            .seal_root_name(&entry_id, row.line_index, &plaintext)
-                            .await
-                            .map_err(owner_security)?,
-                    )
-                }
+            let root_name_ct = match root {
+                Some(value) => Some(
+                    v3_file_set
+                        .seal_root_name(&entry_id, row.line_index, &value)
+                        .await
+                        .map_err(owner_security)?,
+                ),
                 None => None,
             };
             file_sets.push(ConvertedFileSetRow {
@@ -258,6 +282,8 @@ impl DerivedPayloadConverter {
                 root_name_ct,
             });
         }
+        // 文件清单是完整 entry 的投影，不能保留缺少成员的半份清单。
+        file_sets.retain(|row| !unreadable_file_sets.contains(&row.entry_id));
 
         let mut transfers = Vec::with_capacity(rows.transfers.len());
         for row in rows.transfers {
@@ -304,12 +330,18 @@ impl DerivedPayloadConverter {
             )
         };
         let mut search_documents = Vec::with_capacity(rows.search_documents.len());
+        let mut unreadable_search = Vec::new();
         for row in rows.search_documents {
             let legacy = legacy_render.as_ref().ok_or_else(missing_legacy)?;
             let entry_id = EntryId::from(row.entry_id.as_str());
-            let fields = legacy
-                .decrypt(&entry_id, &row.ciphertext)
-                .map_err(owner_security)?;
+            let fields = match legacy.decrypt(&entry_id, &row.ciphertext) {
+                Ok(fields) => fields,
+                Err(RenderDecodeError::DecryptFailed) => {
+                    unreadable_search.push((row.profile_id, row.entry_id));
+                    continue;
+                }
+                Err(source) => return Err(owner_security(source)),
+            };
             let ciphertext = self
                 .search_protection
                 .seal_render(&entry_id, &fields)
@@ -363,6 +395,8 @@ impl DerivedPayloadConverter {
             receive_artifacts.push((row.entry_id, row.attempt_id, ciphertext));
         }
         Ok(ConvertedRows {
+            unreadable_file_sets,
+            unreadable_search,
             file_sets,
             transfers,
             transfer_events,
@@ -371,6 +405,74 @@ impl DerivedPayloadConverter {
             publish_logs,
             receive_artifacts,
         })
+    }
+
+    /// 在清除不可读投影前，保留包含原行身份和原密文的完整输入数据库。
+    /// 快照自身也加密，固定文件名纳入既有 blob tree 摘要，清理来源不影响它。
+    async fn preserve_recovery_snapshot(
+        &self,
+        primary: &Path,
+        output: &Path,
+    ) -> Result<(), ProfileStorageUpgradeError> {
+        let bytes = std::fs::read(primary.join(DATABASE_FILE)).map_err(io_storage)?;
+        let sealed = self
+            .content_protection
+            .seal_for_active(
+                &Plaintext::new(bytes),
+                &Aad::new(RECOVERY_SNAPSHOT_AAD.to_vec()),
+            )
+            .await
+            .map_err(owner_security)?;
+        let path = output.join(BLOB_DIRECTORY).join(RECOVERY_SNAPSHOT_FILE);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(io_storage)?;
+        file.write_all(sealed.as_bytes()).map_err(io_storage)?;
+        file.sync_all().map_err(io_storage)?;
+        sync_directory(&output.join(BLOB_DIRECTORY)).map_err(io_storage)?;
+        self.verify_recovery_snapshot(None, output).await
+    }
+
+    async fn verify_recovery_snapshot(
+        &self,
+        primary: Option<&Path>,
+        output: &Path,
+    ) -> Result<(), ProfileStorageUpgradeError> {
+        let required = match primary {
+            Some(primary) => {
+                let source = load_rows(&primary.join(DATABASE_FILE))?;
+                let target = load_v3_rows(&output.join(DATABASE_FILE))?;
+                source.file_sets.len() > target.file_sets.len()
+                    || source.search_documents.len() > target.search_documents.len()
+            }
+            None => false,
+        };
+        let bytes = match std::fs::read(output.join(BLOB_DIRECTORY).join(RECOVERY_SNAPSHOT_FILE)) {
+            Ok(bytes) => bytes,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound && !required => {
+                return Ok(())
+            }
+            Err(source) => return Err(io_storage(source)),
+        };
+        let restored = self
+            .content_protection
+            .open(
+                &Ciphertext::new(bytes),
+                &Aad::new(RECOVERY_SNAPSHOT_AAD.to_vec()),
+            )
+            .await
+            .map_err(owner_corrupt)?;
+        if let Some(primary) = primary {
+            let source = std::fs::read(primary.join(DATABASE_FILE)).map_err(io_storage)?;
+            if source != restored.as_bytes() {
+                return Err(corrupt(anyhow::anyhow!(
+                    "derived recovery snapshot differs from the conversion source"
+                )));
+            }
+        }
+        Ok(())
     }
 
     async fn inspect_output(
@@ -382,6 +484,7 @@ impl DerivedPayloadConverter {
                 "profile payload output is missing"
             )));
         }
+        self.verify_recovery_snapshot(None, output).await?;
         let database = output.join(DATABASE_FILE);
         let rows = load_v3_rows(&database)?;
         let file_set = V3EntryFileSetPathCipher::new(Arc::clone(&self.content_protection));
@@ -568,6 +671,8 @@ struct ConvertedFileSetRow {
     root_name_ct: Option<Vec<u8>>,
 }
 struct ConvertedRows {
+    unreadable_file_sets: BTreeSet<String>,
+    unreadable_search: Vec<(String, String)>,
     file_sets: Vec<ConvertedFileSetRow>,
     transfers: Vec<(String, Vec<u8>)>,
     transfer_events: Vec<(i32, Vec<u8>)>,
@@ -617,6 +722,16 @@ fn save_rows(path: &Path, rows: &ConvertedRows) -> Result<(), ProfileStorageUpgr
     }
     connection.transaction::<_, diesel::result::Error, _>(|connection| {
         for row in &rows.file_sets { diesel::sql_query("UPDATE entry_file_set SET original_text_ct = ?, relative_path_ct = ?, root_name_ct = ? WHERE entry_id = ? AND line_index = ?").bind::<diesel::sql_types::Nullable<diesel::sql_types::Binary>, _>(row.original_text_ct.as_deref()).bind::<diesel::sql_types::Nullable<diesel::sql_types::Binary>, _>(row.relative_path_ct.as_deref()).bind::<diesel::sql_types::Nullable<diesel::sql_types::Binary>, _>(row.root_name_ct.as_deref()).bind::<diesel::sql_types::Text, _>(&row.entry_id).bind::<diesel::sql_types::BigInt, _>(row.line_index).execute(connection)?; }
+        for entry_id in &rows.unreadable_file_sets {
+            diesel::sql_query("DELETE FROM entry_file_set WHERE entry_id = ?")
+                .bind::<diesel::sql_types::Text, _>(entry_id).execute(connection)?;
+        }
+        for (profile_id, entry_id) in &rows.unreadable_search {
+            diesel::sql_query("UPDATE search_document SET render_payload = NULL, protection_group_ref = NULL, index_version = ? WHERE profile_id = ? AND entry_id = ?")
+                .bind::<diesel::sql_types::Text, _>(V3_SEARCH_INDEX_VERSION)
+                .bind::<diesel::sql_types::Text, _>(profile_id)
+                .bind::<diesel::sql_types::Text, _>(entry_id).execute(connection)?;
+        }
         for (id, ciphertext) in &rows.transfers { diesel::sql_query("UPDATE file_transfer SET metadata_ciphertext = ? WHERE transfer_id = ?").bind::<diesel::sql_types::Binary, _>(ciphertext).bind::<diesel::sql_types::Text, _>(id).execute(connection)?; }
         for (id, ciphertext) in &rows.transfer_events { diesel::sql_query("UPDATE file_transfer_events SET payload_ciphertext = ? WHERE id = ?").bind::<diesel::sql_types::Binary, _>(ciphertext).bind::<diesel::sql_types::Integer, _>(id).execute(connection)?; }
         for (profile_id, entry_id, ciphertext, group_ref) in &rows.search_documents { diesel::sql_query("UPDATE search_document SET render_payload = ?, protection_group_ref = ?, index_version = ? WHERE profile_id = ? AND entry_id = ?").bind::<diesel::sql_types::Binary, _>(ciphertext).bind::<diesel::sql_types::Binary, _>(group_ref).bind::<diesel::sql_types::Text, _>(V3_SEARCH_INDEX_VERSION).bind::<diesel::sql_types::Text, _>(profile_id).bind::<diesel::sql_types::Text, _>(entry_id).execute(connection)?; }
@@ -785,6 +900,15 @@ mod tests {
 
     #[tokio::test]
     async fn complete_derived_output_is_v3_only_and_search_is_rebuild_gated() {
+        derived_output_fixture(false).await;
+    }
+
+    #[tokio::test]
+    async fn unreadable_derived_caches_are_preserved_before_rebuild() {
+        derived_output_fixture(true).await;
+    }
+
+    async fn derived_output_fixture(unreadable: bool) {
         let directory = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::from("default");
         let session = Arc::new(InMemorySession::new());
@@ -895,6 +1019,29 @@ mod tests {
         diesel::sql_query("INSERT INTO search_posting (profile_id, term_tag, entry_id, field_mask, term_freq) VALUES ('default', zeroblob(32), ?, 1, 1)").bind::<diesel::sql_types::Text, _>(entry_id.as_ref()).execute(&mut connection).unwrap();
         diesel::sql_query("INSERT INTO search_entry_tag (profile_id, entry_id, tag_id) VALUES ('default', ?, 'derived-tag')").bind::<diesel::sql_types::Text, _>(entry_id.as_ref()).execute(&mut connection).unwrap();
         diesel::sql_query("INSERT INTO search_index_meta (profile_id, index_version, search_blocked, last_rebuild_started_at_ms, last_rebuild_completed_at_ms, plaintext_purge_done_ms) VALUES ('default', 'search-v11', 0, 1, 1, 1)").execute(&mut connection).unwrap();
+        if unreadable {
+            let mut fields = load_rows(&database).unwrap();
+            let mut path = fields.file_sets.remove(0).original_text_ct.unwrap();
+            *path.last_mut().unwrap() ^= 1;
+            let mut render = fields.search_documents.remove(0).ciphertext;
+            *render.last_mut().unwrap() ^= 1;
+            diesel::sql_query("UPDATE entry_file_set SET original_text_ct = ?")
+                .bind::<diesel::sql_types::Binary, _>(path)
+                .execute(&mut connection)
+                .unwrap();
+            diesel::sql_query("UPDATE search_document SET render_payload = ?")
+                .bind::<diesel::sql_types::Binary, _>(render)
+                .execute(&mut connection)
+                .unwrap();
+            // 同一 entry 的健康行也不能留下，避免返回缺少成员的半份清单。
+            let healthy_line = file_set
+                .seal_original_text(&entry_id, 1, "/secret/healthy.txt")
+                .unwrap();
+            diesel::sql_query("INSERT INTO entry_file_set (entry_id, line_index, kind, original_text_ct) VALUES (?, 1, 'non_file', ?)")
+                .bind::<diesel::sql_types::Text, _>(entry_id.as_ref())
+                .bind::<diesel::sql_types::Binary, _>(healthy_line)
+                .execute(&mut connection).unwrap();
+        }
         drop(connection);
         drop(pool);
         compact_database(&database).unwrap();
@@ -908,13 +1055,52 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(converted.derived_count, 7);
-        assert_eq!(converted.search_document_count, 1);
+        assert_eq!(converted.derived_count, if unreadable { 5 } else { 7 });
+        assert_eq!(
+            converted.search_document_count,
+            if unreadable { 0 } else { 1 }
+        );
+        let archive_path = work.join(BLOB_DIRECTORY).join(".unreadable-derived-v1");
+        if unreadable {
+            let archived = std::fs::read(&archive_path).unwrap();
+            let restored = converter
+                .content_protection
+                .open(
+                    &uc_core::crypto::domain::Ciphertext::new(archived),
+                    &uc_core::crypto::domain::Aad::new(
+                        b"profile-storage-upgrade/unreadable-derived-snapshot/v1".to_vec(),
+                    ),
+                )
+                .await
+                .unwrap();
+            assert_eq!(restored.as_bytes(), primary_database_before);
+            let output_rows = load_rows(&work.join(DATABASE_FILE)).unwrap();
+            assert!(output_rows.file_sets.is_empty());
+            assert!(output_rows.search_documents.is_empty());
+        } else {
+            assert!(!archive_path.exists());
+        }
         assert_eq!(std::fs::read(&database).unwrap(), primary_database_before);
         session.clear();
         let reopened = converter.inspect_output(&work).await.unwrap();
-        assert_eq!(reopened.derived_count, 7);
+        assert_eq!(reopened.derived_count, if unreadable { 5 } else { 7 });
         verify_search_rebuild_gate(&work.join(DATABASE_FILE)).unwrap();
+        if unreadable {
+            let mut archived = std::fs::read(&archive_path).unwrap();
+            std::fs::remove_file(&archive_path).unwrap();
+            assert!(converter
+                .verify_recovery_snapshot(Some(&primary), &work)
+                .await
+                .is_err());
+            std::fs::write(&archive_path, &archived).unwrap();
+            converter
+                .verify_recovery_snapshot(Some(&primary), &work)
+                .await
+                .unwrap();
+            *archived.last_mut().unwrap() ^= 1;
+            std::fs::write(&archive_path, archived).unwrap();
+            assert!(converter.inspect_output(&work).await.is_err());
+        }
         let bytes = std::fs::read(work.join(DATABASE_FILE)).unwrap();
         for secret in [
             b"secret/original.txt".as_slice(),

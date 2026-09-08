@@ -300,7 +300,7 @@ V3 持久内容 envelope 使用紧凑二进制 framing；inline adapter 直接�
 
 V1/V2 到 V3 的转换只在软件升级时通过独立、原子、可恢复的 profile storage upgrade 执行一次。升级同时把本机历史/搜索/文件数据与 membership、credential、MLS 等 Space 控制面表拆入独立 generation。完成后，切换 Space 复用同一 profile SQLite/blob generation，只替换完整 Space control generation，不得扫描、复制或重加密历史业务负载。旧格式 reader 只能存在于升级模块，正常路径只写 V3。
 
-`ProfileStorageUpgrade` 是该软件升级的唯一 Infra 协调边界；Engine 在普通运行期对象图之前只调用一次 `ensure_v3()`，不能编排逐表步骤。模块先取得 profile 级跨进程非阻塞租约，再认证 manifest、定位 source 和构造最小旧 reader；Busy 实例不得创建或迁移 SQLite。使用 profile 稳定密钥 AEAD 保存的 journal 显式绑定 V2 source manifest、数据库 revision 及唯一目标 profile data/control generation；一致性 snapshot、穷尽 table ownership、正式 owner codec 转换、V3 reader/搜索 gate、计数、介质摘要与 schema fingerprint 全部验证后才 compare-and-promote。V2 promotion 后 Engine 只从已认证 V3 manifest 构造双 pool；Fresh profile 使用升级负责人准备的唯一 generation pair，并由专属首次激活 owner 建立首个 manifest。后继启动只验证活动 V3 target 并清理旧 generation、legacy SQLite/blob、primary/scratch/临时 staging 和升级 journal，不再打开失去权威性的 source。任意缺钥、未声明表、target 损坏或 source 再写都失败关闭；Factory Reset 同时擦除 V3 generations 和升级状态。
+`ProfileStorageUpgrade` 是该软件升级的唯一 Infra 协调边界；Engine 在普通运行期对象图之前只调用一次 `ensure_v3()`，不能编排逐表步骤。模块先取得 profile 级跨进程非阻塞租约，再认证 manifest、定位 source 和构造最小旧 reader；Busy 实例不得创建或迁移 SQLite。使用 profile 稳定密钥 AEAD 保存的 journal 显式绑定 V2 source manifest、数据库 revision 及唯一目标 profile data/control generation；一致性 snapshot、穷尽 table ownership、正式 owner codec 转换、V3 reader/搜索 gate、计数、介质摘要与 schema fingerprint 全部验证后才 compare-and-promote。V2 promotion 后 Engine 只从已认证 V3 manifest 构造双 pool；Fresh profile 使用升级负责人准备的唯一 generation pair，并由专属首次激活 owner 建立首个 manifest。后继启动只验证活动 V3 target 并清理旧 generation、legacy SQLite/blob、primary/scratch/临时 staging 和升级 journal，不再打开失去权威性的 source。控制面或会话缺钥、未声明表、target 损坏或 source 再写都失败关闭；Factory Reset 同时擦除 V3 generations 和升级状态。
 
 `uc-core` 的 `ActiveRuntimeLayout` 只表达当前 Space、profile data generation 与 Space control generation 的合法组合，不拥有 keyslot、序列化、digest 或密码实现。V3 manifest 的技术格式、认证和原子提升属于 `uc-infra`；旧格式 loader 看到 V3 时在首次写前返回 `UnsupportedVersion`，当前 Engine 只通过 V3-aware runtime loader 和 storage gate 打开活动 profile，不能重新生成 V2 状态。
 
@@ -495,7 +495,9 @@ effect executor 按历史因果深度依次恢复成员事实与安全状态，�
 移除等待用户，不可比较历史标记相关设备分叉。任何同空间情况都不得准备跨 Space 数据备份或清理
 历史 catalog；分叉本身不强制整个 Space 切换。
 
-软件升级如果发现旧密钥无法读取历史，必须在 V3 manifest promotion 前整体失败关闭，保留旧 generation，不得自动删除、跳过、改写或把异常旧密文带入正常 V3 读取路径。普通 Space 切换不遍历历史，因此历史损坏不应被伪装成目标准入失败；读取时按稳定损坏/缺钥分类报告。
+软件升级遇到旧 UCBL 的 AEAD 认证失败时，升级负责人把原密文字节保留在目标 blob tree，保留旧算法标记，并在同一候选数据库事务中把全部引用标为 `Lost`、记录固定不可用原因；可读内容继续转换为 V3。发布前必须核对原字节、不可用引用与完整目录摘要，重启清理旧来源后保留副本仍属于活动 generation。普通 V3 reader 不增加旧格式回退，不可用密文仅保留作未来恢复材料。文件读取、格式、会话或密钥解析、不可重建字段转换及目标完整性失败仍在 manifest promotion 前整体失败关闭并保留来源。普通 Space 切换不遍历历史，因此历史损坏不应被伪装成目标准入失败；读取时按稳定损坏/缺钥分类报告。
+
+旧文件清单路径与搜索渲染的 AEAD 认证失败由同一升级负责人处理：在候选 blob tree 的固定 `.unreadable-derived-v1` 文件中，以 V3 ContentProtection 和专用 AAD 加密保留完整 primary 数据库快照，再于候选库事务内删除受影响 entry 的整份文件清单投影、清空不可读 render 字段；不保留缺少成员的半份清单，不删除正文、历史 entry 或传输状态。正常文件清单读取返回缺失，搜索仍由已有 blocked/rebuild gate 重建。快照包含原行身份、其他元数据和原密文，介质中不新增明文路径或标识；发布前回读认证并逐字节核对输入，目录摘要覆盖快照，恢复发现投影减少而快照缺失时失败关闭。来源和 staging 清理后快照仍属于活动 profile generation；Factory Reset 跟随整个 generation 清除。
 
 ## 7. 错误处理
 
@@ -808,6 +810,8 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 | 日期 | 主题 | 长期结论 |
 | --- | --- | --- |
+| 2026-09-08 | 不可读派生密文的恢复边界 | 手动资料验证发现旧文件清单与搜索预览亦可能无法认证；升级负责人在原子目标的 blob tree 内加密保留完整转换输入数据库，再清除不可用投影以触发现有重建。恢复快照纳入目录摘要，控制面、活动引用与传输状态仍失败关闭；安全库 149 项与升级集成 15 项通过，真实 dev 资料升级及重启健康检查通过。 |
+| 2026-09-08 | 旧 UCBL 不可用保留 | ProfileStorageUpgrade 将旧 blob 的 AEAD 认证失败收敛为原密文保留与引用 Lost，在原子候选 generation 中完成；校验覆盖原字节、不可用状态和目录摘要。调用方仍只执行 ensure_v3，正常 V3 reader 不增加兼容回退；介质、格式及控制面错误仍失败关闭。 |
 | 2026-09-08 | Infra TLS provider 依赖收敛 | `uc-infra` 显式使用与 Iroh 一致的 rustls `ring` provider，不再由 rustls 默认 feature 引入未使用的 AWS-LC C 构建链；TLS 调用路径、网络协议与模块责任不变，无架构变化。 |
 | 2026-09-08 | Engine rc.14 发布准备 | 发布环境修复已通过运行 34202627250 的三端完整试运行及下载后的 22 项文件复核。仅同步版本到 1.1.0-rc.14，正式流程在构建和清单核验成功后创建标签与预发布；实机矩阵继续明确 skipped。 |
 | 2026-09-08 | Engine rc.13 发布准备 | 完成自托管发布机用户 Cargo 配置、工作区配置、HOME 与临时目录的隔离后，Engine workspace、HarmonyOS 包与宿主版本检查同步到 1.1.0-rc.13；业务最低版本与独立 LAN 发布版本不变，未执行设备矩阵明确记为 skipped。 |

@@ -220,7 +220,7 @@ async fn runtime_upgrade_resumes_v2_only_after_the_lease_and_promotes_v3() {
     ));
     let source_session = Arc::new(InMemorySession::new());
     let source_space_id = SpaceId::from_string(source.space_id.clone());
-    let executor = Arc::new(DieselSqliteExecutor::new(source_pool));
+    let executor = Arc::new(DieselSqliteExecutor::new(source_pool.clone()));
     let security_repository = Arc::new(DieselSpaceSecurityStore::new(
         executor,
         source_session.as_ref().clone(),
@@ -231,7 +231,7 @@ async fn runtime_upgrade_resumes_v2_only_after_the_lease_and_promotes_v3() {
             Arc::new(JsonKeySlotStore::new(vault_path.clone())),
         )),
         Arc::new(DefaultCurrentProfile::for_profile(profile_id.clone())),
-        source_session,
+        Arc::clone(&source_session),
         security_repository.clone(),
         security_repository,
         Arc::clone(&content_vault),
@@ -240,7 +240,66 @@ async fn runtime_upgrade_resumes_v2_only_after_the_lease_and_promotes_v3() {
         .initialize(&source_space_id, &Passphrase::new("upgrade-passphrase"))
         .await
         .unwrap();
+    // V2 manifest 对应已建立并持久化的群组材料；空资料测试此前没有覆盖此条件。
+    uc_core::membership::GroupBootstrapPort::bootstrap_legacy_space(
+        &access,
+        &uc_core::DeviceId::new("upgrade-sponsor"),
+        &[],
+        1,
+    )
+    .await
+    .unwrap();
     drop(access);
+
+    use diesel::prelude::*;
+    use uc_core::{blob::ports::BlobReaderPort, BlobId};
+    use uc_infra::blob::{BlobStorePort, FilesystemBlobStore};
+    use uc_infra::security::{ContentProtection, EncryptedBlobStore, V3EncryptedBlobStore};
+
+    let source_blobs = EncryptedBlobStore::new(
+        Arc::new(FilesystemBlobStore::new(source_root.join("blobs"))),
+        Arc::clone(&source_session),
+    );
+    let mut preserved = Vec::new();
+    let readable_id = BlobId::from("readable-blob");
+    let mut connection = source_pool.get().unwrap();
+    diesel::sql_query("INSERT INTO clipboard_event (event_id, captured_at_ms, source_device, snapshot_hash) VALUES ('upgrade-event', 1, 'test-device', 'test-hash')")
+        .execute(&mut connection).unwrap();
+    for (id, unreadable, references) in [
+        (readable_id.clone(), false, 1),
+        (BlobId::from("unreadable-referenced"), true, 2),
+        (BlobId::from("unreadable-orphan"), true, 0),
+    ] {
+        let (path, compressed_size) = source_blobs
+            .put(&id, b"upgrade private payload")
+            .await
+            .unwrap();
+        if unreadable {
+            let mut ciphertext = std::fs::read(&path).unwrap();
+            *ciphertext.last_mut().unwrap() ^= 1;
+            std::fs::write(&path, &ciphertext).unwrap();
+            preserved.push((id.clone(), ciphertext));
+        }
+        diesel::sql_query("INSERT INTO blob (blob_id, storage_path, storage_backend, size_bytes, content_hash, encryption_algo, created_at_ms, compressed_size) VALUES (?, ?, 'local_fs', 23, ?, 'xchacha20poly1305', 1, ?)")
+            .bind::<diesel::sql_types::Text, _>(id.as_ref())
+            .bind::<diesel::sql_types::Text, _>(path.to_str().unwrap())
+            .bind::<diesel::sql_types::Text, _>(id.as_ref())
+            .bind::<diesel::sql_types::Nullable<diesel::sql_types::BigInt>, _>(compressed_size)
+            .execute(&mut connection).unwrap();
+        for index in 0..references {
+            diesel::sql_query("INSERT INTO clipboard_snapshot_representation (id, event_id, format_id, mime_type, size_bytes, blob_id, payload_state) VALUES (?, 'upgrade-event', 'image', 'image/png', 23, ?, 'BlobReady')")
+                .bind::<diesel::sql_types::Text, _>(format!("{id}-{index}"))
+                .bind::<diesel::sql_types::Text, _>(id.as_ref())
+                .execute(&mut connection).unwrap();
+        }
+    }
+    // 更早的 blob 行允许算法列为空，保留时不能改造来源元数据。
+    diesel::sql_query("UPDATE blob SET encryption_algo = NULL WHERE blob_id = 'unreadable-orphan'")
+        .execute(&mut connection)
+        .unwrap();
+    drop(connection);
+    drop(source_pool);
+    drop(source_blobs);
 
     let current_space = Arc::new(CurrentSpaceResolver::new(
         Arc::clone(&manifests),
@@ -248,24 +307,88 @@ async fn runtime_upgrade_resumes_v2_only_after_the_lease_and_promotes_v3() {
         Arc::clone(&keys),
     ));
 
-    let upgrade = ProfileStorageUpgrade::for_runtime(
-        root.clone(),
-        root.join("uniclipboard.db"),
-        root.join("blobs"),
-        profile_id,
-        secure_storage,
-        vault_path,
-        content_vault,
-        keys,
-        Arc::clone(&manifests),
-        current_space,
-    );
+    let new_runtime_upgrade = || {
+        ProfileStorageUpgrade::for_runtime(
+            root.clone(),
+            root.join("uniclipboard.db"),
+            root.join("blobs"),
+            profile_id.clone(),
+            secure_storage.clone(),
+            vault_path.clone(),
+            content_vault.clone(),
+            keys.clone(),
+            Arc::clone(&manifests),
+            current_space.clone(),
+        )
+    };
+    let upgrade = new_runtime_upgrade();
 
     assert_eq!(
         upgrade.ensure_v3().await.unwrap(),
         ProfileStorageUpgradeOutcome::Upgraded
     );
-    assert!(manifests.load_v3_sync().unwrap().is_some());
+    let active = manifests.load_v3_sync().unwrap().unwrap();
+    let layout = ProfileRuntimeLayout::v3(&root, &active);
+    assert!(source_root.exists());
+    drop(upgrade);
+    // 新 owner 在下次启动完成清理；保留副本必须存在于正式运行目录。
+    assert_eq!(
+        new_runtime_upgrade().ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::UpToDate
+    );
+    assert!(!source_root.exists());
+    assert_eq!(
+        new_runtime_upgrade().ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::UpToDate
+    );
+    let runtime_blobs = V3EncryptedBlobStore::new(
+        Arc::new(FilesystemBlobStore::new(layout.blob_root().to_path_buf())),
+        Arc::new(ContentProtection::for_content(
+            source_session,
+            content_vault,
+        )),
+    );
+    assert_eq!(
+        BlobReaderPort::get(&runtime_blobs, &readable_id)
+            .await
+            .unwrap(),
+        b"upgrade private payload"
+    );
+    let mut connection =
+        diesel::sqlite::SqliteConnection::establish(layout.profile_database().to_str().unwrap())
+            .unwrap();
+    use uc_infra::db::schema::{blob, clipboard_snapshot_representation as representation};
+    for (id, ciphertext) in &preserved {
+        assert_eq!(
+            std::fs::read(layout.blob_root().join(id.as_str())).unwrap(),
+            *ciphertext
+        );
+        assert!(BlobReaderPort::get(&runtime_blobs, id).await.is_err());
+        let algorithm = blob::table
+            .filter(blob::blob_id.eq(id.as_str()))
+            .select(blob::encryption_algo)
+            .first::<Option<String>>(&mut connection)
+            .unwrap();
+        assert_eq!(
+            algorithm.as_deref(),
+            (id.as_str() != "unreadable-orphan").then_some("xchacha20poly1305")
+        );
+    }
+    let states = representation::table
+        .order(representation::id)
+        .select(representation::payload_state)
+        .load::<String>(&mut connection)
+        .unwrap();
+    assert_eq!(states, vec!["BlobReady", "Lost", "Lost"]);
+    let bytes = std::fs::read(layout.profile_database()).unwrap();
+    assert!(!bytes
+        .windows(b"upgrade private payload".len())
+        .any(|value| value == b"upgrade private payload"));
+    for (_, bytes) in regular_files(layout.blob_root()) {
+        assert!(!bytes
+            .windows(b"upgrade private payload".len())
+            .any(|value| value == b"upgrade private payload"));
+    }
 }
 
 #[tokio::test]

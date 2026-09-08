@@ -1,7 +1,8 @@
 //! Inline 与 UCBL 的一次性 V3 转换边界。
 //!
 //! `StoresSeparated` target 始终保持只读。转换先在唯一临时目录中构建完整
-//! 数据库与 blob tree，使用正式 V3 reader 回读后再以目录 rename 发布；因此
+//! 数据库与 blob tree，可读内容使用正式 V3 reader 回读，认证失败的旧 blob
+//! 校验原密文与 Lost 引用后再以目录 rename 发布；因此
 //! 进程在任意 payload 之间终止都不会产生半转换数据库。
 
 use std::path::{Path, PathBuf};
@@ -26,6 +27,10 @@ use crate::space::InMemorySession;
 use super::journal::UpgradeJournalV1;
 use super::target::{file_digest, TargetGenerationStager};
 use super::ProfileStorageUpgradeError;
+
+const V3_BLOB_ALGORITHM: &str = "xchacha20poly1305-v3";
+const PRESERVED_BLOB_ERROR: &str =
+    "unreadable encrypted payload preserved during profile storage upgrade";
 
 const OUTPUT_DATABASE: &str = "profile.sqlite";
 const OUTPUT_BLOBS: &str = "blobs";
@@ -230,15 +235,34 @@ impl PrimaryPayloadConverter {
         let work_blob_root = work.join(OUTPUT_BLOBS);
         std::fs::create_dir_all(&work_blob_root).map_err(io_storage)?;
         let target = V3EncryptedBlobStore::new(
-            Arc::new(FilesystemBlobStore::new(work_blob_root)),
+            Arc::new(FilesystemBlobStore::new(work_blob_root.clone())),
             Arc::clone(&self.content_protection),
         );
         let mut converted = Vec::with_capacity(rows.len());
         for row in rows {
             let blob_id = BlobId::from(row.blob_id.as_str());
-            let plaintext = BlobReaderPort::get(&source, &blob_id)
-                .await
-                .map_err(|source| corrupt(source.context("open legacy UCBL payload")))?;
+            let source_bytes =
+                std::fs::read(self.source_blob_root.join(blob_id.as_str())).map_err(io_storage)?;
+            let plaintext = match source.open_bytes(&blob_id, &source_bytes) {
+                Ok(plaintext) => plaintext,
+                Err(source) if is_unreadable_ciphertext(&source) => {
+                    // 只保存原密文；不可用状态与 blob 行在同一候选数据库事务中提交。
+                    // 格式、会话、缺钥和介质失败仍向上传递，不能把它们猜成历史损坏。
+                    let preserved = work_blob_root.join(blob_id.as_str());
+                    std::fs::write(&preserved, &source_bytes).map_err(io_storage)?;
+                    std::fs::File::open(&preserved)
+                        .and_then(|file| file.sync_all())
+                        .map_err(io_storage)?;
+                    converted.push((
+                        row.blob_id,
+                        final_output.join(OUTPUT_BLOBS).join(blob_id.as_str()),
+                        None,
+                    ));
+                    continue;
+                }
+                Err(source) => return Err(corrupt(source.context("open legacy UCBL payload"))),
+            };
+            drop(source_bytes);
             let (_, compressed_size) = target
                 .put(&blob_id, &plaintext)
                 .await
@@ -250,29 +274,98 @@ impl PrimaryPayloadConverter {
                 return Err(corrupt(anyhow::anyhow!("V3 blob verification mismatch")));
             }
             let storage_path = final_output.join(OUTPUT_BLOBS).join(blob_id.as_str());
-            converted.push((row.blob_id, storage_path, compressed_size));
+            converted.push((row.blob_id, storage_path, Some(compressed_size)));
         }
+        sync_directory(&work_blob_root).map_err(io_storage)?;
         let count = u64::try_from(converted.len())
             .map_err(|source| corrupt(anyhow::Error::new(source).context("count blob rows")))?;
         let mut connection = open_connection(database)?;
         connection
             .transaction::<_, diesel::result::Error, _>(|connection| {
                 for (blob_id, storage_path, compressed_size) in &converted {
-                    diesel::sql_query(
-                        "UPDATE blob SET storage_path = ?, compressed_size = ?, \
-                         encryption_algo = 'xchacha20poly1305-v3' WHERE blob_id = ?",
-                    )
-                    .bind::<diesel::sql_types::Text, _>(storage_path.to_string_lossy().as_ref())
-                    .bind::<diesel::sql_types::Nullable<diesel::sql_types::BigInt>, _>(
-                        compressed_size,
-                    )
-                    .bind::<diesel::sql_types::Text, _>(blob_id)
-                    .execute(connection)?;
+                    if let Some(compressed_size) = compressed_size {
+                        diesel::sql_query(
+                            "UPDATE blob SET storage_path = ?, compressed_size = ?, \
+                             encryption_algo = ? WHERE blob_id = ?",
+                        )
+                        .bind::<diesel::sql_types::Text, _>(storage_path.to_string_lossy().as_ref())
+                        .bind::<diesel::sql_types::Nullable<diesel::sql_types::BigInt>, _>(
+                            compressed_size,
+                        )
+                        .bind::<diesel::sql_types::Text, _>(V3_BLOB_ALGORITHM)
+                        .bind::<diesel::sql_types::Text, _>(blob_id)
+                        .execute(connection)?;
+                    } else {
+                        diesel::sql_query("UPDATE blob SET storage_path = ? WHERE blob_id = ?")
+                            .bind::<diesel::sql_types::Text, _>(
+                                storage_path.to_string_lossy().as_ref(),
+                            )
+                            .bind::<diesel::sql_types::Text, _>(blob_id)
+                            .execute(connection)?;
+                        diesel::sql_query(
+                            "UPDATE clipboard_snapshot_representation \
+                             SET payload_state = 'Lost', last_error = ? WHERE blob_id = ?",
+                        )
+                        .bind::<diesel::sql_types::Text, _>(PRESERVED_BLOB_ERROR)
+                        .bind::<diesel::sql_types::Text, _>(blob_id)
+                        .execute(connection)?;
+                    }
                 }
                 Ok(())
             })
             .map_err(database_storage)?;
         Ok(count)
+    }
+
+    fn verify_preserved_blob(
+        &self,
+        database: &Path,
+        output: &Path,
+        row: &BlobRow,
+    ) -> Result<(), ProfileStorageUpgradeError> {
+        let blob_id = BlobId::from(row.blob_id.as_str());
+        let original =
+            std::fs::read(self.source_blob_root.join(blob_id.as_str())).map_err(io_storage)?;
+        let preserved =
+            std::fs::read(output.join(OUTPUT_BLOBS).join(blob_id.as_str())).map_err(io_storage)?;
+        if original != preserved {
+            return Err(corrupt(anyhow::anyhow!(
+                "preserved legacy ciphertext changed"
+            )));
+        }
+        let legacy = EncryptedBlobStore::new(
+            Arc::new(FilesystemBlobStore::new(self.source_blob_root.clone())),
+            Arc::clone(&self.source_session),
+        );
+        match legacy.open_bytes(&blob_id, &preserved) {
+            Err(source) if is_unreadable_ciphertext(&source) => {}
+            Err(source) => {
+                return Err(corrupt(
+                    source.context("verify preserved legacy ciphertext"),
+                ))
+            }
+            Ok(_) => {
+                return Err(corrupt(anyhow::anyhow!(
+                    "readable legacy ciphertext was not converted"
+                )))
+            }
+        }
+        use crate::db::schema::clipboard_snapshot_representation::dsl as representation;
+        use diesel::prelude::*;
+        let states = representation::clipboard_snapshot_representation
+            .filter(representation::blob_id.eq(blob_id.as_str()))
+            .select((representation::payload_state, representation::last_error))
+            .load::<(String, Option<String>)>(&mut open_connection(database)?)
+            .map_err(database_storage)?;
+        if states
+            .iter()
+            .any(|(state, error)| state != "Lost" || error.as_deref() != Some(PRESERVED_BLOB_ERROR))
+        {
+            return Err(corrupt(anyhow::anyhow!(
+                "preserved legacy ciphertext is not marked unavailable"
+            )));
+        }
+        Ok(())
     }
 
     async fn verify_payloads(
@@ -296,6 +389,10 @@ impl PrimaryPayloadConverter {
         );
         let blob_rows = load_blob_rows(&mut open_connection(database)?)?;
         for row in &blob_rows {
+            if row.encryption_algo.as_deref() != Some(V3_BLOB_ALGORITHM) {
+                self.verify_preserved_blob(database, output, row)?;
+                continue;
+            }
             BlobReaderPort::get(&v3_blobs, &BlobId::from(row.blob_id.as_str()))
                 .await
                 .map_err(|source| corrupt(source.context("verify V3 UCBL payload")))?;
@@ -325,6 +422,15 @@ struct InlineRow {
 struct BlobRow {
     #[diesel(sql_type = diesel::sql_types::Text)]
     blob_id: String,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    encryption_algo: Option<String>,
+}
+
+fn is_unreadable_ciphertext(source: &anyhow::Error) -> bool {
+    matches!(
+        source.downcast_ref::<crate::security::v1_aead::AeadError>(),
+        Some(crate::security::v1_aead::AeadError::DecryptFailed)
+    )
 }
 
 fn load_inline_rows(
@@ -341,7 +447,7 @@ fn load_inline_rows(
 fn load_blob_rows(
     connection: &mut diesel::sqlite::SqliteConnection,
 ) -> Result<Vec<BlobRow>, ProfileStorageUpgradeError> {
-    diesel::sql_query("SELECT blob_id FROM blob ORDER BY blob_id")
+    diesel::sql_query("SELECT blob_id, encryption_algo FROM blob ORDER BY blob_id")
         .load::<BlobRow>(connection)
         .map_err(database_storage)
 }
@@ -477,6 +583,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
+    use diesel::prelude::*;
     use uc_core::crypto::domain::Plaintext;
     use uc_core::ids::SpaceId;
     use uc_core::membership::ActiveSpaceGenerationManifestV2;
@@ -517,7 +624,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn primary_output_is_atomic_v3_only_and_digest_bound() {
+    async fn primary_output_is_atomic_preserves_unreadable_blobs_and_is_digest_bound() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("profile");
         std::fs::create_dir_all(&root).unwrap();
@@ -564,6 +671,20 @@ mod tests {
             .put(&blob_id, b"private blob payload")
             .await
             .unwrap();
+        let unreadable_blob_id = BlobId::from("blob-unreadable");
+        let unreadable_source_path = source_blob_root.join(unreadable_blob_id.as_str());
+        // 与现场相同：V1 文件使用早期 MasterKey，当前 session 无法认证。
+        let compressed = zstd::bulk::compress(b"unreadable private legacy payload", 3).unwrap();
+        let encrypted = crate::security::v1_aead::encrypt_blob_xchacha(
+            &MasterKey::from_bytes(&[0xA0; 32]).unwrap(),
+            &compressed,
+            &aad::for_blob_v2(&unreadable_blob_id),
+        )
+        .unwrap();
+        let mut unreadable_source_bytes = b"UCBL\x01".to_vec();
+        unreadable_source_bytes.extend_from_slice(&encrypted.nonce);
+        unreadable_source_bytes.extend_from_slice(&encrypted.ciphertext);
+        std::fs::write(&unreadable_source_path, &unreadable_source_bytes).unwrap();
         let mut connection = source_pool.get().unwrap();
         diesel::sql_query(
             "INSERT INTO clipboard_event \
@@ -576,11 +697,31 @@ mod tests {
             "INSERT INTO blob \
              (blob_id, storage_path, storage_backend, size_bytes, content_hash, encryption_algo, \
               created_at_ms, compressed_size) \
+             VALUES (?, ?, 'local_fs', 20, 'hash-unreadable', 'xchacha20poly1305', 1, ?)",
+        )
+        .bind::<diesel::sql_types::Text, _>(unreadable_blob_id.as_ref())
+        .bind::<diesel::sql_types::Text, _>(unreadable_source_path.to_string_lossy().as_ref())
+        .bind::<diesel::sql_types::Nullable<diesel::sql_types::BigInt>, _>(compressed_size)
+        .execute(&mut connection)
+        .unwrap();
+        diesel::sql_query(
+            "INSERT INTO blob \
+             (blob_id, storage_path, storage_backend, size_bytes, content_hash, encryption_algo, \
+              created_at_ms, compressed_size) \
              VALUES (?, ?, 'local_fs', 20, 'hash-primary', 'xchacha20poly1305', 1, ?)",
         )
         .bind::<diesel::sql_types::Text, _>(blob_id.as_ref())
         .bind::<diesel::sql_types::Text, _>(source_blob_path.to_string_lossy().as_ref())
         .bind::<diesel::sql_types::Nullable<diesel::sql_types::BigInt>, _>(compressed_size)
+        .execute(&mut connection)
+        .unwrap();
+        diesel::sql_query(
+            "INSERT INTO clipboard_snapshot_representation \
+             (id, event_id, format_id, mime_type, size_bytes, inline_data, blob_id, payload_state) \
+             VALUES ('representation-unreadable', 'event-primary', 'image', 'image/png', 20, \
+                     NULL, ?, 'BlobReady')",
+        )
+        .bind::<diesel::sql_types::Text, _>(unreadable_blob_id.as_ref())
         .execute(&mut connection)
         .unwrap();
         diesel::sql_query(
@@ -626,9 +767,30 @@ mod tests {
             Arc::clone(&vault),
         );
 
+        // 介质缺失必须保留 source chain，且不能发布半转换结果。
+        std::fs::remove_file(&unreadable_source_path).unwrap();
+        let missing = converter.convert(&journal, &target).await.err().unwrap();
+        match missing {
+            ProfileStorageUpgradeError::Storage { source } => {
+                assert_eq!(
+                    source.downcast_ref::<std::io::Error>().unwrap().kind(),
+                    std::io::ErrorKind::NotFound
+                );
+            }
+            other => panic!("unexpected missing-file result: {other:?}"),
+        }
+        assert!(!target.paths(&journal).primary_output.exists());
+        std::fs::write(&unreadable_source_path, b"unrecognized format").unwrap();
+        assert!(matches!(
+            converter.convert(&journal, &target).await,
+            Err(ProfileStorageUpgradeError::Corrupt { .. })
+        ));
+        assert!(!target.paths(&journal).primary_output.exists());
+        std::fs::write(&unreadable_source_path, &unreadable_source_bytes).unwrap();
+
         let converted = converter.convert(&journal, &target).await.unwrap();
         assert_eq!(converted.inline_count, 1);
-        assert_eq!(converted.blob_count, 1);
+        assert_eq!(converted.blob_count, 2);
         let recovered = converter.convert(&journal, &target).await.unwrap();
         assert_eq!(
             recovered.profile_database_digest,
@@ -662,6 +824,54 @@ mod tests {
             BlobReaderPort::get(&v3_blobs, &blob_id).await.unwrap(),
             b"private blob payload"
         );
+        assert_eq!(
+            std::fs::read(output.join(OUTPUT_BLOBS).join(unreadable_blob_id.as_str())).unwrap(),
+            unreadable_source_bytes
+        );
+        let mut output_connection = open_connection(&output.join(OUTPUT_DATABASE)).unwrap();
+        let (payload_state, last_error) =
+            crate::db::schema::clipboard_snapshot_representation::table
+                .filter(
+                    crate::db::schema::clipboard_snapshot_representation::id
+                        .eq("representation-unreadable"),
+                )
+                .select((
+                    crate::db::schema::clipboard_snapshot_representation::payload_state,
+                    crate::db::schema::clipboard_snapshot_representation::last_error,
+                ))
+                .first::<(String, Option<String>)>(&mut output_connection)
+                .unwrap();
+        assert_eq!(payload_state, "Lost");
+        assert_eq!(
+            last_error.as_deref(),
+            Some("unreadable encrypted payload preserved during profile storage upgrade")
+        );
+
+        // 未写 journal 的发布窗口也必须检查保留副本与 Lost 状态。
+        let preserved_path = output.join(OUTPUT_BLOBS).join(unreadable_blob_id.as_str());
+        std::fs::write(&preserved_path, b"tampered ciphertext").unwrap();
+        assert!(matches!(
+            converter.convert(&journal, &target).await,
+            Err(ProfileStorageUpgradeError::Corrupt { .. })
+        ));
+        std::fs::write(&preserved_path, &unreadable_source_bytes).unwrap();
+        diesel::sql_query("UPDATE clipboard_snapshot_representation SET payload_state = 'BlobReady' WHERE id = 'representation-unreadable'")
+            .execute(&mut output_connection).unwrap();
+        assert!(matches!(
+            converter.convert(&journal, &target).await,
+            Err(ProfileStorageUpgradeError::Corrupt { .. })
+        ));
+        diesel::sql_query("UPDATE clipboard_snapshot_representation SET payload_state = 'Lost' WHERE id = 'representation-unreadable'")
+            .execute(&mut output_connection).unwrap();
+        // 恢复测试修改后重新取得摘要，正式 journal 必须覆盖完整候选库。
+        let converted = converter.convert(&journal, &target).await.unwrap();
+        assert_eq!(
+            std::fs::read(&unreadable_source_path).unwrap(),
+            unreadable_source_bytes
+        );
+        assert!(BlobReaderPort::get(&v3_blobs, &unreadable_blob_id)
+            .await
+            .is_err());
 
         journal
             .mark_primary_payloads_converted(
@@ -671,6 +881,13 @@ mod tests {
                 converted.blob_count,
             )
             .unwrap();
+        converter.verify(&journal, &target).await.unwrap();
+        std::fs::write(&preserved_path, b"tampered ciphertext").unwrap();
+        assert!(matches!(
+            converter.verify(&journal, &target).await,
+            Err(ProfileStorageUpgradeError::Corrupt { .. })
+        ));
+        std::fs::write(&preserved_path, &unreadable_source_bytes).unwrap();
         converter.verify(&journal, &target).await.unwrap();
         std::fs::write(
             output.join(OUTPUT_BLOBS).join(blob_id.as_str()),

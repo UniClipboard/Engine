@@ -160,6 +160,60 @@ impl EncryptedBlobStore {
     pub fn new(inner: Arc<dyn BlobStorePort>, session: Arc<InMemorySession>) -> Self {
         Self { inner, session }
     }
+
+    /// 复用唯一旧格式解码器；升级器先读取原字节，以区分介质失败和密文认证失败。
+    pub(super) fn open_bytes(&self, blob_id: &BlobId, binary_data: &[u8]) -> Result<Vec<u8>> {
+        let parsed = parse_blob(binary_data)?;
+        let business_aad = aad::for_blob_v2(blob_id);
+        let compressed = match parsed {
+            ParsedBlob::Legacy { nonce, ciphertext } => {
+                let master_key = self
+                    .session
+                    .legacy_content_key()
+                    .context("encryption session not ready - cannot decrypt blob")?;
+                v1_aead::decrypt_blob_xchacha(&master_key, nonce, ciphertext, &business_aad)
+                    .context("failed to decrypt legacy blob")?
+            }
+            ParsedBlob::Keyed {
+                content_key_id,
+                epoch,
+                nonce,
+                ciphertext,
+            } => {
+                let space_id = self.session.current_space_id()?;
+                let resolved = self
+                    .session
+                    .content_key(&space_id, &content_key_id, ContentKeyPurpose::Content)
+                    .context("content key is unavailable - cannot decrypt blob")?;
+                if resolved.epoch() != epoch {
+                    return Err(anyhow::anyhow!("blob key epoch mismatch"));
+                }
+                let aad_bytes = key_epoch_aad::bind(
+                    b"ucbl-v2",
+                    &space_id,
+                    epoch,
+                    &content_key_id,
+                    ContentKeyPurpose::Content,
+                    &business_aad,
+                );
+                v1_aead::decrypt_blob_xchacha(resolved.key(), nonce, ciphertext, &aad_bytes)
+                    .context("failed to decrypt keyed blob")?
+            }
+        };
+
+        let plaintext = zstd::bulk::decompress(&compressed, MAX_DECOMPRESSED_SIZE)
+            .context("failed to decompress blob data - data may be corrupted")?;
+
+        debug!(
+            blob_id = %blob_id.as_ref(),
+            on_disk_size = binary_data.len(),
+            compressed_size = compressed.len(),
+            plaintext_size = plaintext.len(),
+            "Read V2 blob (UCBL binary -> decrypt -> decompress)"
+        );
+
+        Ok(plaintext)
+    }
 }
 
 #[async_trait]
@@ -274,56 +328,7 @@ impl BlobReaderPort for EncryptedBlobStore {
             .await
             .context("failed to read encrypted blob from storage")?;
 
-        let parsed = parse_blob(&binary_data)?;
-        let business_aad = aad::for_blob_v2(blob_id);
-        let compressed = match parsed {
-            ParsedBlob::Legacy { nonce, ciphertext } => {
-                let master_key = self
-                    .session
-                    .legacy_content_key()
-                    .context("encryption session not ready - cannot decrypt blob")?;
-                v1_aead::decrypt_blob_xchacha(&master_key, nonce, ciphertext, &business_aad)
-                    .context("failed to decrypt legacy blob")?
-            }
-            ParsedBlob::Keyed {
-                content_key_id,
-                epoch,
-                nonce,
-                ciphertext,
-            } => {
-                let space_id = self.session.current_space_id()?;
-                let resolved = self
-                    .session
-                    .content_key(&space_id, &content_key_id, ContentKeyPurpose::Content)
-                    .context("content key is unavailable - cannot decrypt blob")?;
-                if resolved.epoch() != epoch {
-                    return Err(anyhow::anyhow!("blob key epoch mismatch"));
-                }
-                let aad_bytes = key_epoch_aad::bind(
-                    b"ucbl-v2",
-                    &space_id,
-                    epoch,
-                    &content_key_id,
-                    ContentKeyPurpose::Content,
-                    &business_aad,
-                );
-                v1_aead::decrypt_blob_xchacha(resolved.key(), nonce, ciphertext, &aad_bytes)
-                    .context("failed to decrypt keyed blob")?
-            }
-        };
-
-        let plaintext = zstd::bulk::decompress(&compressed, MAX_DECOMPRESSED_SIZE)
-            .context("failed to decompress blob data - data may be corrupted")?;
-
-        debug!(
-            blob_id = %blob_id.as_ref(),
-            on_disk_size = binary_data.len(),
-            compressed_size = compressed.len(),
-            plaintext_size = plaintext.len(),
-            "Read V2 blob (UCBL binary -> decrypt -> decompress)"
-        );
-
-        Ok(plaintext)
+        self.open_bytes(blob_id, &binary_data)
     }
 }
 
