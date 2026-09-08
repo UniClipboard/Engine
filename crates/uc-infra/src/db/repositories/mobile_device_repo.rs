@@ -22,6 +22,7 @@ use diesel::prelude::*;
 use diesel::result::{DatabaseErrorKind, Error as DieselError};
 
 use uc_core::mobile_sync::{MobileDevice, MobileDeviceError, MobileDeviceId};
+use uc_core::ports::mobile_sync::MobileActivityError;
 use uc_core::ports::MobileDeviceStore;
 
 use crate::db::models::{MobileDeviceRow, NewMobileDeviceRow};
@@ -56,6 +57,31 @@ where
         + Send
         + Sync,
 {
+    async fn record_activity(
+        &self,
+        device_id_value: &MobileDeviceId,
+        observed_at_ms: i64,
+    ) -> Result<bool, MobileActivityError> {
+        let needle = device_id_value.as_str().to_owned();
+        self.executor
+            .run(move |conn| {
+                Ok(diesel::update(
+                    mobile_device.filter(device_id.eq(needle)).filter(
+                        last_seen_at_ms
+                            .is_null()
+                            .or(last_seen_at_ms.lt(observed_at_ms)),
+                    ),
+                )
+                .set(last_seen_at_ms.eq(Some(observed_at_ms)))
+                .execute(conn)
+                .map(|affected| affected > 0)
+                .map_err(|source| MobileActivityError::WriteFailed {
+                    source: source.into(),
+                }))
+            })
+            .map_err(|source| MobileActivityError::Unavailable { source })?
+    }
+
     async fn save(&self, device: &MobileDevice) -> Result<(), MobileDeviceError> {
         let row = self
             .mapper
@@ -355,6 +381,87 @@ mod tests {
             MobileDeviceRowMapper,
         );
         (repo, tmp)
+    }
+
+    #[cfg(feature = "lan-compat")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn activity_updates_preserve_time_fields_and_deletion() {
+        let (repo, _tmp) = make_repo();
+        crate::mobile_sync::device_repo::tests::verify_activity_contract(repo).await;
+    }
+
+    #[tokio::test]
+    async fn activity_survives_reopening_sqlite() {
+        let (repo, tmp) = make_repo();
+        let device = fixture("persisted", "persisted", "phone");
+        repo.save(&device).await.unwrap();
+        repo.record_activity(&device.device_id, 1234).await.unwrap();
+        drop(repo);
+        let pool = init_db_pool(tmp.path().join("mobile-device.sqlite").to_str().unwrap()).unwrap();
+        let reopened = DieselMobileDeviceRepository::new(
+            DieselSqliteExecutor::new(pool),
+            MobileDeviceRowMapper,
+        );
+        let mut expected = device;
+        expected.last_seen_at_ms = Some(1234);
+        assert_eq!(reopened.list_all().await.unwrap(), vec![expected]);
+    }
+
+    #[tokio::test]
+    async fn activity_write_failure_retains_source_and_recovers() {
+        let (repo, _tmp) = make_repo();
+        let device = fixture("failure", "failure", "phone");
+        repo.save(&device).await.unwrap();
+        repo.executor.run(|conn| {
+            diesel::sql_query("CREATE TRIGGER reject_activity BEFORE UPDATE OF last_seen_at_ms ON mobile_device BEGIN SELECT RAISE(FAIL, 'sensitive-name secret-password /private/path'); END").execute(conn)?;
+            Ok(())
+        }).unwrap();
+        let error = repo
+            .record_activity(&device.device_id, 1234)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, MobileActivityError::WriteFailed { .. }));
+        assert!(std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<DieselError>()
+            .is_some());
+        assert_eq!(error.to_string(), "activity_write_failed");
+        assert_eq!(repo.list_all().await.unwrap(), vec![device.clone()]);
+        repo.executor
+            .run(|conn| {
+                diesel::sql_query("DROP TRIGGER reject_activity").execute(conn)?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(repo.record_activity(&device.device_id, 2345).await.unwrap());
+        assert_eq!(
+            repo.list_all().await.unwrap()[0].last_seen_at_ms,
+            Some(2345)
+        );
+    }
+
+    #[tokio::test]
+    async fn activity_storage_unavailable_retains_original_source() {
+        struct UnavailableExecutor;
+        impl DbExecutor for UnavailableExecutor {
+            fn run<T>(
+                &self,
+                _: impl FnOnce(&mut SqliteConnection) -> anyhow::Result<T>,
+            ) -> anyhow::Result<T> {
+                Err(std::io::Error::other("sensitive storage path").into())
+            }
+        }
+        let repo = DieselMobileDeviceRepository::new(UnavailableExecutor, MobileDeviceRowMapper);
+        let error = repo
+            .record_activity(&MobileDeviceId::new("device"), 1)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, MobileActivityError::Unavailable { .. }));
+        assert!(std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .is_some());
+        assert_eq!(error.to_string(), "activity_storage_unavailable");
     }
 
     fn fixture(id: &str, username_suffix: &str, label_text: &str) -> MobileDevice {

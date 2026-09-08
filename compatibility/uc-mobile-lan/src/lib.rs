@@ -11,7 +11,7 @@ pub(crate) mod deps;
 pub(crate) mod facade;
 pub(crate) mod usecases;
 
-pub use deps::{MobileDevicePorts, MobileSyncPorts};
+pub use deps::{MobileDevicePorts, MobileSyncPorts, RecordMobileDeviceActivityPort};
 
 pub use facade::{
     ApplyIncomingMobileClipError, ApplyIncomingMobileClipInput, ApplyIncomingMobileClipOutcome,

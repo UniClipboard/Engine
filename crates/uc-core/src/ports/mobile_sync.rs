@@ -83,6 +83,14 @@ pub enum PasswordHasherError {
 /// consumers depend on the narrow ports, never on this aggregate.
 #[async_trait]
 pub trait MobileDeviceStore: Send + Sync {
+    /// 只推进既有设备的活动时间；时间相同或更旧、设备不存在时返回 false。
+    /// 不得改写其他字段，也不得重新创建已删除设备。
+    async fn record_activity(
+        &self,
+        device_id: &MobileDeviceId,
+        observed_at_ms: i64,
+    ) -> Result<bool, MobileActivityError>;
+
     /// 持久化一台新设备。重复 device_id / username 应返回对应的领域错误。
     async fn save(&self, device: &MobileDevice) -> Result<(), MobileDeviceError>;
 
@@ -115,6 +123,21 @@ pub trait MobileDeviceStore: Send + Sync {
     /// device.
     async fn update_mobile_device(&self, updated: &MobileDevice)
         -> Result<bool, MobileDeviceError>;
+}
+
+/// 活动写入的安全分类；原始来源只用于诊断，不得输出其正文。
+#[derive(Debug, Error)]
+pub enum MobileActivityError {
+    #[error("activity_storage_unavailable")]
+    Unavailable {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("activity_write_failed")]
+    WriteFailed {
+        #[source]
+        source: anyhow::Error,
+    },
 }
 
 // ─── device repository intent ports ──────────────────────────────────────
