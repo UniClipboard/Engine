@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use uc_application::deps::{CurrentSpaceIdentityPort as _, InitialSpaceActivationPort as _};
 use uc_core::ids::ProfileId;
+use uc_core::membership::RevocationRepositoryPort as _;
 use uc_core::ports::space::SpaceAccessStore as _;
 use uc_core::ports::SecureStoragePort;
 
@@ -235,7 +236,7 @@ impl RuntimeUpgradeBootstrap {
                 current_profile,
                 Arc::clone(&source_session),
                 security_repository.clone(),
-                security_repository,
+                security_repository.clone(),
                 Arc::clone(&self.vault),
             );
             let resumed = access
@@ -252,7 +253,19 @@ impl RuntimeUpgradeBootstrap {
                     ),
                 });
             }
-            if active.is_none() {
+            // 存储布局缺少 manifest 不代表旧版没有可用的群组密钥。
+            let needs_legacy_material = active.is_none()
+                && security_repository
+                    .load_space_material(&uc_core::ids::SpaceId::from_string(
+                        source_space_id.clone(),
+                    ))
+                    .await
+                    .map_err(|source| ProfileStorageUpgradeError::Security {
+                        source: anyhow::Error::new(source)
+                            .context("inspect restored legacy profile security material"),
+                    })?
+                    .is_none();
+            if needs_legacy_material {
                 let material = source_session
                     .create_profile_storage_upgrade_material(&uc_core::ids::SpaceId::from_string(
                         source_space_id.clone(),
@@ -545,7 +558,7 @@ impl ProfileStorageUpgrade {
     ) -> Result<ProfileStorageUpgradeOutcome, ProfileStorageUpgradeError> {
         let mut steps = 0_usize;
         loop {
-            let outcome = self.advance_once(components).await?;
+            let outcome = self.advance_once(components, steps == 0).await?;
             steps += 1;
             if outcome != ProfileStorageUpgradeOutcome::Pending
                 || self
@@ -560,6 +573,7 @@ impl ProfileStorageUpgrade {
     async fn advance_once(
         &self,
         components: &UpgradeComponents,
+        resuming: bool,
     ) -> Result<ProfileStorageUpgradeOutcome, ProfileStorageUpgradeError> {
         let runtime_manifest = match self.manifests.load_runtime_sync() {
             Ok(source) => source,
@@ -628,6 +642,19 @@ impl ProfileStorageUpgrade {
             Some(journal) => {
                 if !journal.matches_source(source.as_ref()) {
                     return Err(ProfileStorageUpgradeError::SourceChanged);
+                }
+                // 只在本次调用入口恢复旧版写入。当前升级期间的并发写入仍失败关闭。
+                if resuming
+                    && !matches!(
+                        journal.phase(),
+                        UpgradePhaseV1::Promoted | UpgradePhaseV1::CleanupPending
+                    )
+                    && components.target.source_changed(&journal)?
+                {
+                    self.persistence
+                        .save_journal(&journal.restart(source.as_ref()))
+                        .await?;
+                    return Ok(ProfileStorageUpgradeOutcome::Pending);
                 }
                 journal
             }

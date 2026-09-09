@@ -112,6 +112,17 @@ impl TargetGenerationStager {
         journal: &UpgradeJournalV1,
     ) -> Result<StagedTarget, ProfileStorageUpgradeError> {
         let paths = self.paths(journal);
+        // Detected 的候选从未激活；重启或旧版写入后不能复用过期转换输出。
+        for directory in [
+            profile_generation_directory(&self.root, journal.target_profile_data_generation()),
+            control_generation_directory(&self.root, journal.target_space_control_generation()),
+        ] {
+            match std::fs::remove_dir_all(directory) {
+                Ok(()) => {}
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => return Err(storage_error(source)),
+            }
+        }
         let source_database_revision = self.source_revision()?;
         let source_pool =
             self.source_pool
@@ -249,6 +260,16 @@ impl TargetGenerationStager {
             return Err(ProfileStorageUpgradeError::SourceChanged);
         }
         Ok(())
+    }
+
+    pub(super) fn source_changed(
+        &self,
+        journal: &UpgradeJournalV1,
+    ) -> Result<bool, ProfileStorageUpgradeError> {
+        match journal.source_database_revision() {
+            Some(revision) => Ok(self.source_revision()? != revision),
+            None => Ok(false),
+        }
     }
 
     /// 按最终双库布局验证所有业务 row 仍由唯一 store 拥有。
