@@ -208,7 +208,7 @@ impl RuntimeUpgradeBootstrap {
                 source: source.context("open profile storage upgrade source database"),
             }
         })?;
-        let source_session = Arc::new(InMemorySession::new());
+        let source_session = Arc::new(InMemorySession::for_maintenance());
         if let Some(source_space_id) = source_space_id.as_ref() {
             let current_profile: Arc<
                 dyn uc_core::ports::security::current_profile::CurrentProfilePort,

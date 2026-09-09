@@ -20,12 +20,9 @@ impl SpaceSessionRebindAdapter {
 #[async_trait]
 impl RebindSpaceSessionPort for SpaceSessionRebindAdapter {
     async fn rebind_to_space(&self, space_id: &SpaceId) -> Result<(), SpaceSessionRebindError> {
-        let master_key = self.session.get_master_key().map_err(map_rebind_error)?;
-
         self.session
-            .set_master_key_for_space(space_id.clone(), master_key);
-
-        Ok(())
+            .rebind_to_space(space_id)
+            .map_err(map_rebind_error)
     }
 }
 
@@ -66,5 +63,30 @@ mod tests {
         adapter.rebind_to_space(&target).await.unwrap();
 
         assert_eq!(session.current_space_id().unwrap(), target);
+    }
+    #[test]
+    fn concurrent_rebind_and_clear_never_restore_the_cleared_key() {
+        let session = InMemorySession::new();
+        let barrier = std::sync::Barrier::new(2);
+        let all_locked = std::sync::atomic::AtomicBool::new(true);
+        std::thread::scope(|threads| {
+            threads.spawn(|| {
+                for _ in 0..1000 {
+                    barrier.wait();
+                    let _ = session.rebind_to_space(&SpaceId::from("target"));
+                    barrier.wait();
+                }
+            });
+            for _ in 0..1000 {
+                session.set_master_key(MasterKey::from_bytes(&[7; 32]).unwrap());
+                barrier.wait();
+                session.clear();
+                barrier.wait();
+                if session.is_ready() {
+                    all_locked.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        });
+        assert!(all_locked.load(std::sync::atomic::Ordering::SeqCst));
     }
 }

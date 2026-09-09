@@ -998,6 +998,7 @@ pub async fn wire_dependencies_from_inputs(
             space_security_reset,
             current_member_signatures,
             membership_session,
+            security_lifecycle: Arc::clone(&space_access_adapter),
             membership_ledger,
             membership_projection,
             admission_state,

@@ -37,6 +37,7 @@ const OPERATION_UNAVAILABLE_CODE: u32 = 1103;
 
 pub(crate) struct ProductionRuntime {
     app_version: String,
+    security_lifecycle: Arc<uc_infra::space::RuntimeSpaceAccessAdapter>,
     session_supervisor: Arc<SessionSupervisor>,
     profile_reset: Arc<ProfileFactoryResetFacade>,
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
@@ -54,7 +55,18 @@ pub(crate) struct ProductionRuntime {
     network_partition_gate: uc_infra::network::iroh::IrohNetworkPartitionGate,
 }
 
+// 启动过程中还没有 ProductionRuntime；失败或取消也要封口已有安全会话。
+struct StartupSecurityGuard(Option<Arc<uc_infra::space::RuntimeSpaceAccessAdapter>>);
+impl Drop for StartupSecurityGuard {
+    fn drop(&mut self) {
+        if let Some(access) = &self.0 {
+            access.close_security_session();
+        }
+    }
+}
+
 struct ProductionProfileRuntimeStopper {
+    security_lifecycle: Arc<uc_infra::space::RuntimeSpaceAccessAdapter>,
     session_supervisor: Arc<SessionSupervisor>,
     tasks: Arc<TaskRegistry>,
 }
@@ -62,6 +74,7 @@ struct ProductionProfileRuntimeStopper {
 #[async_trait::async_trait]
 impl StopProfileRuntimePort for ProductionProfileRuntimeStopper {
     async fn stop_profile_runtime(&self) -> Result<(), ProfileFactoryResetCapabilityError> {
+        self.security_lifecycle.close_security_session();
         self.session_supervisor
             .suspend()
             .await
@@ -163,11 +176,14 @@ impl ProductionRuntime {
             .await
             .map_err(|error| startup_error("dependency wiring", error))?;
 
+        let security_lifecycle = Arc::clone(&wired.sync_engine.security_lifecycle);
+        let mut security_guard = StartupSecurityGuard(Some(Arc::clone(&security_lifecycle)));
         let host_adapters = wired.application.host_adapters();
         let session_supervisor = Arc::new(SessionSupervisor::new(wired.application.clone()));
         let task_registry = Arc::new(TaskRegistry::new());
         let profile_runtime: Arc<dyn StopProfileRuntimePort> =
             Arc::new(ProductionProfileRuntimeStopper {
+                security_lifecycle: Arc::clone(&security_lifecycle),
                 session_supervisor: Arc::clone(&session_supervisor),
                 tasks: Arc::clone(&task_registry),
             });
@@ -242,8 +258,10 @@ impl ProductionRuntime {
         ));
         let clock = Arc::clone(&host_adapters.clock);
         let file_cache_dir = paths.file_cache_dir.clone();
+        security_guard.0 = None;
         Ok(Self {
             app_version,
+            security_lifecycle,
             session_supervisor,
             profile_reset,
             network_recovery,
@@ -575,5 +593,12 @@ mod tests {
         assert_eq!(clear.code(), CLEAR_STORAGE_CACHE_FAILED_CODE);
         assert_eq!(stats.category(), EngineErrorCategory::Internal);
         assert_eq!(clear.category(), EngineErrorCategory::Internal);
+    }
+}
+
+// 失败启动或宿主释放运行期时，同样不留下可复用的密码材料。
+impl Drop for ProductionRuntime {
+    fn drop(&mut self) {
+        self.security_lifecycle.close_security_session();
     }
 }

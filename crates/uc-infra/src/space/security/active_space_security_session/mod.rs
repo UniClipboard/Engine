@@ -42,27 +42,20 @@ impl ActiveSpaceSecuritySession {
         }
 
         let _guard = self.activation_lock.lock().await;
+        let transaction = self
+            .session
+            .begin_transaction(Some((space_id.clone(), master_key)))
+            .map_err(session_error)?;
         if let Some(material) = material {
             self.vault
                 .install_verified_space_material(material)
                 .await
-                .map_err(|source| ActiveSpaceSecuritySessionError::Vault {
-                    source: anyhow::Error::new(source),
-                })?;
+                .map_err(vault_error)?;
+            self.session
+                .install_space_material(material)
+                .map_err(session_error)?;
         }
-
-        let previous = self.session.snapshot();
-        self.session
-            .set_master_key_for_space(space_id.clone(), master_key);
-        if let Some(material) = material {
-            if let Err(source) = self.session.install_space_material(material) {
-                self.session.restore(previous);
-                return Err(ActiveSpaceSecuritySessionError::Session {
-                    source: anyhow::Error::new(source),
-                });
-            }
-        }
-        Ok(())
+        transaction.commit(&self.vault)
     }
 
     /// 从由当前 MasterKey 加密的 repository 恢复活动 Space。
@@ -77,43 +70,34 @@ impl ActiveSpaceSecuritySession {
         repository: &dyn RevocationRepositoryPort,
     ) -> Result<Option<GroupEpoch>, ActiveSpaceSecuritySessionError> {
         let _guard = self.activation_lock.lock().await;
-        let previous = self.session.snapshot();
-        self.session
-            .set_master_key_for_space(space_id.clone(), master_key);
-
-        let material = match repository.load_space_material(space_id).await {
-            Ok(material) => material,
-            Err(source) => {
-                self.session.restore(previous);
-                return Err(ActiveSpaceSecuritySessionError::Repository {
-                    source: anyhow::Error::new(source),
+        let transaction = self
+            .session
+            .begin_transaction(Some((space_id.clone(), master_key)))
+            .map_err(session_error)?;
+        let material = repository
+            .load_space_material(space_id)
+            .await
+            .map_err(|source| ActiveSpaceSecuritySessionError::Repository {
+                source: anyhow::Error::new(source),
+            })?;
+        if let Some(material) = &material {
+            if material.state().space_id() != space_id {
+                return Err(ActiveSpaceSecuritySessionError::InvalidMaterial {
+                    source: anyhow::anyhow!(
+                        "repository security material belongs to another space"
+                    ),
                 });
             }
-        };
-
-        let Some(material) = material else {
-            return Ok(None);
-        };
-        if material.state().space_id() != space_id {
-            self.session.restore(previous);
-            return Err(ActiveSpaceSecuritySessionError::InvalidMaterial {
-                source: anyhow::anyhow!("repository security material belongs to another space"),
-            });
+            self.vault
+                .install_verified_space_material(material)
+                .await
+                .map_err(vault_error)?;
+            self.session
+                .install_space_material(material)
+                .map_err(session_error)?;
         }
-
-        if let Err(source) = self.vault.install_verified_space_material(&material).await {
-            self.session.restore(previous);
-            return Err(ActiveSpaceSecuritySessionError::Vault {
-                source: anyhow::Error::new(source),
-            });
-        }
-        if let Err(source) = self.session.install_space_material(&material) {
-            self.session.restore(previous);
-            return Err(ActiveSpaceSecuritySessionError::Session {
-                source: anyhow::Error::new(source),
-            });
-        }
-        Ok(Some(material.state().epoch()))
+        transaction.commit(&self.vault)?;
+        Ok(material.map(|material| material.state().epoch()))
     }
 
     /// 推进当前 Space 的完整安全材料。
@@ -125,32 +109,44 @@ impl ActiveSpaceSecuritySession {
         material: &SpaceKeyMaterial,
     ) -> Result<(), ActiveSpaceSecuritySessionError> {
         let _guard = self.activation_lock.lock().await;
-        let current_space_id = self.session.current_space_id().map_err(|source| {
-            ActiveSpaceSecuritySessionError::Session {
-                source: anyhow::Error::new(source),
-            }
-        })?;
+        let transaction = self
+            .session
+            .begin_transaction(None)
+            .map_err(session_error)?;
+        let current_space_id = self.session.current_space_id().map_err(session_error)?;
         if material.state().space_id() != &current_space_id {
             return Err(ActiveSpaceSecuritySessionError::InvalidMaterial {
                 source: anyhow::anyhow!("security material does not belong to the active space"),
             });
         }
-
         self.vault
             .install_verified_space_material(material)
             .await
-            .map_err(|source| ActiveSpaceSecuritySessionError::Vault {
-                source: anyhow::Error::new(source),
-            })?;
+            .map_err(vault_error)?;
+        self.session
+            .install_space_material(material)
+            .map_err(session_error)?;
+        transaction.commit(&self.vault)
+    }
 
-        let previous = self.session.snapshot();
-        if let Err(source) = self.session.install_space_material(material) {
-            self.session.restore(previous);
-            return Err(ActiveSpaceSecuritySessionError::Session {
-                source: anyhow::Error::new(source),
-            });
-        }
-        Ok(())
+    pub(crate) fn close(&self) {
+        self.session.close();
+        self.vault.close();
+    }
+}
+
+fn session_error(
+    source: uc_core::crypto::model::EncryptionError,
+) -> ActiveSpaceSecuritySessionError {
+    ActiveSpaceSecuritySessionError::Session {
+        source: anyhow::Error::new(source),
+    }
+}
+fn vault_error(
+    source: crate::security::ProfileContentKeyVaultError,
+) -> ActiveSpaceSecuritySessionError {
+    ActiveSpaceSecuritySessionError::Vault {
+        source: anyhow::Error::new(source),
     }
 }
 

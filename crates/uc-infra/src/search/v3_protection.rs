@@ -146,6 +146,23 @@ pub struct V3SearchProtection {
     render_protection: ContentProtection,
 }
 
+impl V3SearchProtectionError {
+    pub(super) fn runtime_closed(&self) -> bool {
+        use std::error::Error;
+        let mut source = self.source();
+        while let Some(error) = source {
+            if matches!(
+                error.downcast_ref::<crate::security::ProfileContentKeyVaultError>(),
+                Some(crate::security::ProfileContentKeyVaultError::Closed)
+            ) {
+                return true;
+            }
+            source = error.source();
+        }
+        false
+    }
+}
+
 impl V3SearchProtection {
     pub fn new(session: Arc<InMemorySession>, vault: Arc<ProfileContentKeyVault>) -> Self {
         let render_protection =

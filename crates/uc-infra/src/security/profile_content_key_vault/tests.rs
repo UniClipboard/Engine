@@ -12,10 +12,19 @@ use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use super::{ProfileContentKeyVault, ProfileContentKeyVaultError, PROFILE_CONTENT_VAULT_KEY_NAME};
 
 #[derive(Default)]
-struct MemorySecureStorage(Mutex<BTreeMap<String, Vec<u8>>>);
+struct MemorySecureStorage(
+    Mutex<BTreeMap<String, Vec<u8>>>,
+    std::sync::atomic::AtomicUsize,
+    std::sync::atomic::AtomicUsize,
+);
 
 impl SecureStoragePort for MemorySecureStorage {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
+        use std::sync::atomic::Ordering;
+        let call = self.1.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.2.load(Ordering::SeqCst) == call {
+            return Err(SecureStorageError::Unavailable("injected".into()));
+        }
         Ok(self.0.lock().unwrap().get(key).cloned())
     }
 
@@ -338,4 +347,186 @@ async fn oversized_encrypted_vault_is_rejected_before_decode() {
             .await,
         Err(ProfileContentKeyVaultError::CapacityExceeded)
     ));
+}
+
+#[tokio::test]
+async fn reusable_catalog_refreshes_after_commit_and_invalidates_after_failed_store() {
+    use std::sync::atomic::Ordering;
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Arc::new(MemorySecureStorage::default());
+    let vault = ProfileContentKeyVault::new(directory.path().into(), storage.clone(), [19; 16]);
+    let first = ready_material("space-a", "group-a", "key-a", 7, 49);
+    vault.install_verified_space_material(&first).await.unwrap();
+    let _lease = vault.begin_read_reuse().unwrap();
+    vault.search_catalog().await.unwrap();
+    let second = ready_material("space-b", "group-b", "key-b", 8, 50);
+    // 下一次安装先读取旧目录，再取外层 key 写入；在后者处注入故障。
+    storage
+        .2
+        .store(storage.1.load(Ordering::SeqCst) + 2, Ordering::SeqCst);
+    let error = vault
+        .install_verified_space_material(&second)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ProfileContentKeyVaultError::SecureStorage { .. }
+    ));
+    assert!(error.source().unwrap().source().is_some());
+    let before = storage.1.load(Ordering::SeqCst);
+    assert_eq!(
+        vault
+            .search_catalog()
+            .await
+            .unwrap()
+            .protection_groups()
+            .len(),
+        1
+    );
+    assert_eq!(storage.1.load(Ordering::SeqCst) - before, 1);
+    let installed = vault
+        .install_verified_space_material(&second)
+        .await
+        .unwrap();
+    assert_eq!(installed.revision(), 2);
+    let before = storage.1.load(Ordering::SeqCst);
+    for _ in 0..20 {
+        assert_eq!(
+            vault
+                .search_catalog()
+                .await
+                .unwrap()
+                .protection_groups()
+                .len(),
+            2
+        );
+        vault
+            .resolve(
+                &ContentKeyId::from_string("key-a").unwrap(),
+                GroupEpoch::new(7),
+            )
+            .await
+            .unwrap();
+        vault
+            .resolve(
+                &ContentKeyId::from_string("key-b").unwrap(),
+                GroupEpoch::new(8),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            vault
+                .resolve(
+                    &ContentKeyId::from_string("missing").unwrap(),
+                    GroupEpoch::new(7)
+                )
+                .await,
+            Err(ProfileContentKeyVaultError::KeyNotFound)
+        ));
+        assert!(matches!(
+            vault
+                .resolve(
+                    &ContentKeyId::from_string("key-a").unwrap(),
+                    GroupEpoch::new(8)
+                )
+                .await,
+            Err(ProfileContentKeyVaultError::EpochMismatch)
+        ));
+    }
+    assert_eq!(storage.1.load(Ordering::SeqCst), before);
+    assert!(!vault
+        .install_verified_space_material(&second)
+        .await
+        .unwrap()
+        .changed());
+}
+
+#[tokio::test]
+async fn concurrent_cold_reads_share_one_authenticated_load() {
+    use std::sync::atomic::Ordering;
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Arc::new(MemorySecureStorage::default());
+    let vault = Arc::new(ProfileContentKeyVault::new(
+        directory.path().into(),
+        storage.clone(),
+        [19; 16],
+    ));
+    vault
+        .install_verified_space_material(&ready_material("space-a", "group-a", "key-a", 7, 49))
+        .await
+        .unwrap();
+    let _lease = vault.begin_read_reuse().unwrap();
+    let before = storage.1.load(Ordering::SeqCst);
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..20 {
+        let vault = vault.clone();
+        tasks.spawn(async move { vault.search_catalog().await });
+    }
+    while let Some(result) = tasks.join_next().await {
+        result.unwrap().unwrap();
+    }
+    assert_eq!(storage.1.load(Ordering::SeqCst) - before, 1);
+}
+
+#[tokio::test]
+async fn uncertain_commit_and_cancelled_store_reload_the_committed_catalog() {
+    use super::persistence::StoreProbe;
+    for cancel in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Arc::new(MemorySecureStorage::default());
+        let vault = Arc::new(ProfileContentKeyVault::new(
+            directory.path().into(),
+            storage.clone(),
+            [19; 16],
+        ));
+        vault
+            .install_verified_space_material(&ready_material("space-a", "group-a", "key-a", 7, 49))
+            .await
+            .unwrap();
+        let _lease = vault.begin_read_reuse().unwrap();
+        vault.search_catalog().await.unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *vault.persistence.after_store.lock().unwrap() = Some(if cancel {
+            StoreProbe::Pause {
+                entered: entered.clone(),
+                release,
+            }
+        } else {
+            StoreProbe::Fail
+        });
+        let writer = vault.clone();
+        let write = tokio::spawn(async move {
+            writer
+                .install_verified_space_material(&ready_material(
+                    "space-b", "group-b", "key-b", 8, 50,
+                ))
+                .await
+        });
+        if cancel {
+            entered.notified().await;
+            write.abort();
+            assert!(write.await.unwrap_err().is_cancelled());
+        } else {
+            assert!(matches!(
+                write.await.unwrap(),
+                Err(ProfileContentKeyVaultError::Storage { .. })
+            ));
+        }
+        // 磁盘已有新组，但安装未报告成功；下一次读取必须重新认证而非使用旧缓存。
+        let before = storage.1.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            vault
+                .search_catalog()
+                .await
+                .unwrap()
+                .protection_groups()
+                .len(),
+            2
+        );
+        assert_eq!(
+            storage.1.load(std::sync::atomic::Ordering::SeqCst) - before,
+            1
+        );
+    }
 }

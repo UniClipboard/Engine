@@ -12,7 +12,7 @@ use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
 use uc_core::membership::{ContentKeyId, ContentKeyPurpose};
 
 use crate::security::v1_aead::{decrypt_xchacha_raw, encrypt_xchacha_raw};
-use crate::security::ProfileContentKeyVault;
+use crate::security::{ProfileContentKeyVault, ProfileContentKeyVaultError};
 use crate::space::InMemorySession;
 
 use context::ProtectionContextV1;
@@ -135,8 +135,17 @@ impl ContentProtection {
             .vault
             .resolve(&envelope.content_key_id, envelope.group_epoch)
             .await
-            .map_err(|source| ContentProtectionError::KeyUnavailable {
-                source: anyhow::Error::new(source).context("V3 content key resolution failed"),
+            .map_err(|source| {
+                if matches!(source, ProfileContentKeyVaultError::Closed) {
+                    ContentProtectionError::NotActive {
+                        source: anyhow::Error::new(source).context("V3 content runtime is closed"),
+                    }
+                } else {
+                    ContentProtectionError::KeyUnavailable {
+                        source: anyhow::Error::new(source)
+                            .context("V3 content key resolution failed"),
+                    }
+                }
             })?;
         let context = ProtectionContextV1::new(
             resolved.protection_group_id().clone(),

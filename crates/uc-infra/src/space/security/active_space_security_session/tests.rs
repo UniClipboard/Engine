@@ -14,10 +14,19 @@ use crate::security::{MasterKey, ProfileContentKeyVault};
 use crate::space::security::InMemorySession;
 
 #[derive(Default)]
-struct MemorySecureStorage(Mutex<BTreeMap<String, Vec<u8>>>);
+struct MemorySecureStorage(
+    Mutex<BTreeMap<String, Vec<u8>>>,
+    std::sync::atomic::AtomicUsize,
+    Mutex<Option<Box<dyn FnOnce() + Send>>>,
+);
 
 impl SecureStoragePort for MemorySecureStorage {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let hook = self.2.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
         Ok(self.0.lock().unwrap().get(key).cloned())
     }
 
@@ -305,4 +314,247 @@ async fn current_material_vault_failure_preserves_the_previous_session_and_sourc
     let current = session.current_content_protection_key().unwrap();
     assert_eq!(current.content_key_id().as_str(), "key-a");
     assert_eq!(current.epoch(), GroupEpoch::new(7));
+}
+
+#[tokio::test]
+async fn active_content_reads_reuse_profile_keys_across_payloads_and_search() {
+    use crate::security::ContentProtection;
+    use std::sync::atomic::Ordering;
+    use uc_core::crypto::domain::{Aad, Plaintext};
+
+    let directory = tempdir().unwrap();
+    let storage = Arc::new(MemorySecureStorage::default());
+    let vault = Arc::new(ProfileContentKeyVault::new(
+        directory.path().into(),
+        storage.clone(),
+        [19; 16],
+    ));
+    let session = Arc::new(InMemorySession::new());
+    let active = ActiveSpaceSecuritySession::new(session.clone(), vault.clone());
+    active
+        .activate(
+            &SpaceId::from("space-a"),
+            MasterKey::from_bytes(&[32; 32]).unwrap(),
+            Some(&ready_material("space-a", "group-a", "key-a")),
+        )
+        .await
+        .unwrap();
+    let protection = ContentProtection::for_content(session.clone(), vault.clone());
+    let aad = Aad::new(b"fixture".to_vec());
+    let ciphertext = protection
+        .seal_for_active(&Plaintext::new(b"protected fixture".to_vec()), &aad)
+        .await
+        .unwrap();
+    let before = storage.1.load(Ordering::SeqCst);
+    for _ in 0..20 {
+        assert_eq!(
+            protection.open(&ciphertext, &aad).await.unwrap().as_bytes(),
+            b"protected fixture"
+        );
+        vault.search_catalog().await.unwrap();
+    }
+    assert_eq!(
+        storage.1.load(Ordering::SeqCst) - before,
+        1,
+        "one cold load must serve all payload and search reads"
+    );
+}
+
+#[tokio::test]
+async fn clear_releases_reuse_but_historical_maintenance_reads_remain_available() {
+    let (directory, session, vault, active) = active_fixture();
+    let material = ready_material("space-a", "group-a", "key-a");
+    active
+        .activate(
+            &SpaceId::from("space-a"),
+            MasterKey::from_bytes(&[32; 32]).unwrap(),
+            Some(&material),
+        )
+        .await
+        .unwrap();
+    let id = ContentKeyId::from_string("key-a").unwrap();
+    vault.resolve(&id, GroupEpoch::new(7)).await.unwrap();
+    let contender = ProfileContentKeyVault::new(
+        directory.path().into(),
+        Arc::new(MemorySecureStorage::default()),
+        [17; 16],
+    );
+    let error = contender
+        .install_verified_space_material(&material)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::security::ProfileContentKeyVaultError::Storage { .. }
+    ));
+    assert!(std::error::Error::source(&error).is_some());
+    session.clear();
+    assert!(!session.is_ready());
+    // 维护读取继续可用，但不恢复活动 session。
+    vault.resolve(&id, GroupEpoch::new(7)).await.unwrap();
+    assert!(!session.is_ready());
+    // 未持有运行期租约，另一个实例可以进入并报告其真正的缺钥错误。
+    assert!(matches!(
+        contender.resolve(&id, GroupEpoch::new(7)).await,
+        Err(crate::security::ProfileContentKeyVaultError::Corrupt { .. })
+    ));
+}
+
+#[tokio::test]
+async fn closed_profile_cannot_reactivate_or_classify_read_as_corrupt() {
+    use crate::security::{ContentProtection, ContentProtectionError};
+    use uc_core::crypto::domain::{Aad, Plaintext};
+    let (_directory, session, vault, active) = active_fixture();
+    let material = ready_material("space-a", "group-a", "key-a");
+    active
+        .activate(
+            &SpaceId::from("space-a"),
+            MasterKey::from_bytes(&[32; 32]).unwrap(),
+            Some(&material),
+        )
+        .await
+        .unwrap();
+    let protection = ContentProtection::for_content(session.clone(), vault);
+    let aad = Aad::new(b"fixture".to_vec());
+    let ciphertext = protection
+        .seal_for_active(&Plaintext::new(b"fixture".to_vec()), &aad)
+        .await
+        .unwrap();
+    active.close();
+    assert!(matches!(
+        protection.open(&ciphertext, &aad).await,
+        Err(ContentProtectionError::NotActive { .. })
+    ));
+    assert!(active
+        .activate(
+            &SpaceId::from("space-a"),
+            MasterKey::from_bytes(&[32; 32]).unwrap(),
+            Some(&material)
+        )
+        .await
+        .is_err());
+    assert!(!session.is_ready());
+}
+
+#[tokio::test]
+async fn failed_or_cancelled_activation_cannot_resurrect_a_cleared_session() {
+    let (_directory, session, vault, active) = active_fixture();
+    active
+        .activate(
+            &SpaceId::from("space-a"),
+            MasterKey::from_bytes(&[32; 32]).unwrap(),
+            Some(&ready_material("space-a", "group-a", "key-a")),
+        )
+        .await
+        .unwrap();
+    let transaction = session
+        .begin_transaction(Some((
+            SpaceId::from("space-b"),
+            MasterKey::from_bytes(&[33; 32]).unwrap(),
+        )))
+        .unwrap();
+    drop(transaction);
+    assert_eq!(
+        session.current_space_id().unwrap(),
+        SpaceId::from("space-a")
+    );
+    let transaction = session
+        .begin_transaction(Some((
+            SpaceId::from("space-b"),
+            MasterKey::from_bytes(&[33; 32]).unwrap(),
+        )))
+        .unwrap();
+    session.clear();
+    assert!(transaction.commit(&vault).is_err());
+    assert!(!session.is_ready());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cold_load_finishing_after_clear_does_not_repopulate_reuse() {
+    use std::sync::atomic::Ordering;
+    let directory = tempdir().unwrap();
+    let storage = Arc::new(MemorySecureStorage::default());
+    let vault = Arc::new(ProfileContentKeyVault::new(
+        directory.path().into(),
+        storage.clone(),
+        [19; 16],
+    ));
+    let session = Arc::new(InMemorySession::new());
+    let active = ActiveSpaceSecuritySession::new(session.clone(), vault.clone());
+    active
+        .activate(
+            &SpaceId::from("space-a"),
+            MasterKey::from_bytes(&[32; 32]).unwrap(),
+            Some(&ready_material("space-a", "group-a", "key-a")),
+        )
+        .await
+        .unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(std::sync::Barrier::new(2));
+    let notify = entered.clone();
+    let gate = release.clone();
+    *storage.2.lock().unwrap() = Some(Box::new(move || {
+        notify.notify_one();
+        gate.wait();
+    }));
+    let reader = vault.clone();
+    let read = tokio::spawn(async move { reader.search_catalog().await });
+    entered.notified().await;
+    session.clear();
+    release.wait();
+    read.await.unwrap().unwrap();
+    let before = storage.1.load(Ordering::SeqCst);
+    vault.search_catalog().await.unwrap();
+    vault.search_catalog().await.unwrap();
+    assert_eq!(storage.1.load(Ordering::SeqCst) - before, 2);
+    assert!(!session.is_ready());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn starting_reuse_during_a_transient_read_requires_a_new_owned_load() {
+    use std::sync::atomic::Ordering;
+    let directory = tempdir().unwrap();
+    let storage = Arc::new(MemorySecureStorage::default());
+    let vault = Arc::new(ProfileContentKeyVault::new(
+        directory.path().into(),
+        storage.clone(),
+        [19; 16],
+    ));
+    let material = ready_material("space-a", "group-a", "key-a");
+    vault
+        .install_verified_space_material(&material)
+        .await
+        .unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(std::sync::Barrier::new(2));
+    let notify = entered.clone();
+    let gate = release.clone();
+    *storage.2.lock().unwrap() = Some(Box::new(move || {
+        notify.notify_one();
+        gate.wait();
+    }));
+    let reader = vault.clone();
+    let read = tokio::spawn(async move { reader.search_catalog().await });
+    entered.notified().await;
+    // 激活发生在旧临时读取已取得文件租约之后。
+    let session = InMemorySession::new();
+    let transaction = session
+        .begin_transaction(Some((
+            SpaceId::from("space-a"),
+            MasterKey::from_bytes(&[32; 32]).unwrap(),
+        )))
+        .unwrap();
+    session.install_space_material(&material).unwrap();
+    transaction.commit(&vault).unwrap();
+    release.wait();
+    read.await.unwrap().unwrap();
+    let before = storage.1.load(Ordering::SeqCst);
+    vault.search_catalog().await.unwrap();
+    vault.search_catalog().await.unwrap();
+    assert_eq!(storage.1.load(Ordering::SeqCst) - before, 1);
+    let contender = ProfileContentKeyVault::new(directory.path().into(), storage, [19; 16]);
+    assert!(matches!(
+        contender.search_catalog().await,
+        Err(crate::security::ProfileContentKeyVaultError::Storage { .. })
+    ));
 }

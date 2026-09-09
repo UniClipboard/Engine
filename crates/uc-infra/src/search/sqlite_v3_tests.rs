@@ -24,10 +24,14 @@ use crate::space::InMemorySession;
 const PROFILE_ID: &str = "v3-profile";
 
 #[derive(Default)]
-struct MemorySecureStorage(Mutex<BTreeMap<String, Vec<u8>>>);
+struct MemorySecureStorage(
+    Mutex<BTreeMap<String, Vec<u8>>>,
+    std::sync::atomic::AtomicUsize,
+);
 
 impl SecureStoragePort for MemorySecureStorage {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(self.0.lock().unwrap().get(key).cloned())
     }
 
@@ -317,4 +321,92 @@ async fn sqlite_v12_rejects_postings_from_a_stale_active_group() {
         .get_result::<i64>(&mut conn)
         .unwrap();
     assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn paginated_v3_search_reuses_one_cold_catalog_without_changing_results() {
+    use std::sync::atomic::Ordering;
+    let directory = tempfile::tempdir().unwrap();
+    let pool = init_db_pool(directory.path().join("search.sqlite").to_str().unwrap()).unwrap();
+    let storage = Arc::new(MemorySecureStorage::default());
+    let session = Arc::new(InMemorySession::new());
+    let vault = Arc::new(ProfileContentKeyVault::new(
+        directory.path().join("vault"),
+        storage.clone(),
+        [19; 16],
+    ));
+    let protection = Arc::new(V3SearchProtection::new(session.clone(), vault.clone()));
+    let index = SqliteSearchIndex::new_v3(pool, Arc::new(FixedProfile), protection.clone());
+    for (group, start, end) in [("a", 0, 50), ("b", 50, 100)] {
+        let material = ready_material(
+            &format!("space-{group}"),
+            &format!("group-{group}"),
+            &format!("key-{group}"),
+            7,
+            49,
+        );
+        vault
+            .install_verified_space_material(&material)
+            .await
+            .unwrap();
+        activate(&session, &material);
+        for number in start..end {
+            let id = format!("entry-{number:03}");
+            let mut doc = document(&id, &format!("private fixture {number}"));
+            doc.active_time_ms = number;
+            index
+                .index_entry(doc, postings(&protection, &id, &["shared"]).await)
+                .await
+                .unwrap();
+        }
+    }
+    let queries: Vec<_> = [
+        ("", 20, 0),
+        ("", 100, 0),
+        ("shared", 20, 20),
+        ("absent", 100, 0),
+    ]
+    .into_iter()
+    .map(|(text, limit, offset)| {
+        let mut query = and_query(text);
+        query.limit = limit;
+        query.offset = offset;
+        query
+    })
+    .collect();
+    let mut expected = Vec::new();
+    for query in &queries {
+        let started = std::time::Instant::now();
+        let page = index.search(query.clone()).await.unwrap();
+        println!(
+            "profile_search_fixture transient returned={} elapsed_us={}",
+            page.items.len(),
+            started.elapsed().as_micros()
+        );
+        expected.push(page);
+    }
+    assert_eq!(expected[0].items.len(), 20);
+    assert_eq!(expected[1].items.len(), 100);
+    assert_eq!(expected[3].total, 0);
+    let _lease = vault.begin_read_reuse().unwrap();
+    let before = storage.1.load(Ordering::SeqCst);
+    for round in 0..5 {
+        for (query, expected) in queries.iter().zip(&expected) {
+            let started = std::time::Instant::now();
+            let page = index.search(query.clone()).await.unwrap();
+            println!(
+                "profile_search_fixture round={round} returned={} elapsed_us={}",
+                page.items.len(),
+                started.elapsed().as_micros()
+            );
+            assert_eq!(&page, expected);
+        }
+    }
+    assert_eq!(storage.1.load(Ordering::SeqCst) - before, 1);
+    // 关闭不是 render 损坏，不应返回空白正文并安排重建。
+    vault.close();
+    assert!(matches!(
+        index.search(queries[0].clone()).await,
+        Err(uc_core::search::SearchError::SessionLocked)
+    ));
 }

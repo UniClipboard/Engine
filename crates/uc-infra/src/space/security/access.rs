@@ -114,6 +114,11 @@ pub struct MigrationSpaceAccessAdapter {
 }
 
 impl RuntimeSpaceAccessAdapter {
+    /// 终止本 profile 的后台安全能力；GUI 锁定不得调用此入口。
+    pub fn close_security_session(&self) {
+        self.active_security_session.close();
+    }
+
     pub fn new(
         key_material: Arc<KeyMaterialStore>,
         current_profile: Arc<dyn CurrentProfilePort>,
@@ -5113,6 +5118,8 @@ mod admission_tests {
         assert_eq!(sponsor_current.epoch(), GroupEpoch::new(2));
         assert_eq!(sponsor_current.key(), joiner_current.key());
 
+        // 冷恢复先结束旧运行期，不能同时持有两个活动安全会话。
+        joiner_session.clear();
         let restored_session = Arc::new(InMemorySession::new());
         let restored = adapter_with_existing_vault(
             joiner_key_material,

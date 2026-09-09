@@ -290,13 +290,15 @@ V3 搜索密码边界由 Infra `V3SearchProtection` 独占。profile 搜索根�
 
 `ProfileContentKeyVault` 在 Infra 内是一个自有目录的深模块：调用方只安装完整且已验证的 `SpaceKeyMaterial`，或按 content key identity 与精确 epoch 解析；catalog 规范化、跨组冲突、独立 secure-storage key、AEAD framing、资源上限和崩溃安全原子替换全部隐藏在模块内部。Space security 的 V2 content-key catalog codec 是 session 与 vault 的单一事实来源。Vault 文件只保存整体 AEAD 密文，已有文件缺少独立 key、未知 framing、digest/epoch 冲突或密文损坏都失败关闭；Factory Reset 同时擦除 vault key 和 profile 数据目录。
 
+后台安全运行期的历史材料复用也由 vault 独占：活动 session 仅关联不透明许可，跨 Space 切换保留 profile 历史目录；clear 撤销许可，shutdown/reset 封口，离线升级使用临时读取。加载、更新和租约绑定内存代次，失败/取消不能恢复旧视图。完整合同见[运行期密钥材料](../security/encrypted-persistence.md#运行期密钥材料)。未来 GUI 锁定只控制交互出口，不能撤销后台接收与密文写入能力。
+
 `ContentProtection` 是 Infra 内 V3 持久业务负载的唯一密码深模块：所属 adapter 在构造时固定 purpose，调用方只能执行 `seal_for_active` 或 `open`。新写入上下文来自活动 session；历史读取严格从密文的 key identity 与 epoch 经 profile vault 解析所属保护组，不读取当前 Space。purpose HKDF、完整上下文 AAD、V3 envelope 校验和错误分类都由该模块隐藏。Engine 在 storage gate 后为 production repository、UCBL 与搜索装配同一 profile vault 和 purpose 固定的保护策略；普通 V3 运行路径不保留 V1/V2 reader 或双写。
 
 V3 持久内容 envelope 使用紧凑二进制 framing；inline adapter 直接保存该 envelope，UCBL store 只增加固定外层 magic/version 并拥有 zstd 压缩。两者不得复制 key 解析、purpose 派生或 AEAD header。active register、文件路径、transfer/receive、directory publish 和搜索渲染等专用字段继续由所属模块拥有业务序列化与实体 AAD，并把序列化后的字节统一委托 `ContentProtection`；事务和领域 repository 仍保持单实现，不为每种格式建立平行仓储。
 
 持久 inline payload 的 `BlobCipherPort` 只允许调用方提交 payload 与业务实体 AAD，不接收 `ActiveSpace`、key id、epoch 或 purpose。活动写入上下文和密文读取上下文属于具体密码 adapter；Application decorator 不构造占位 Space，也不能选择保护域。Engine 以已认证 manifest 一次选择完整 V3 payload adapter family，inline 与 UCBL 不得混用 V2/V3，也不得在正常路径增加双 reader。
 
-`ActiveSpaceSecuritySession` 是正常 Space security runtime 安装目标材料的唯一 Infra 边界。它串行执行归属验证、profile vault 耐久 catalog 安装、活动 session 切换和失败恢复；调用方不能分别决定两次写入的顺序。已取得完整 material 的路径保持 vault-first；从同一 MasterKey 加密 repository 恢复时，该模块在互斥区内临时装入目标密钥以读取 material，再验证、安装 vault 并完成 session，repository、vault 或 session 失败均恢复旧 snapshot。已耐久但尚未被活动状态引用的 catalog 作为安全的幂等准备结果保留，但不能授予网络权限。Engine 只构造一次 profile vault 并注入 Space access adapter；Legacy 无 material 恢复允许只切换 session，不生成虚假 catalog。成员加入、epoch/revocation、Sponsor/Helper 准入和 membership branch recovery 的当前 material 推进也必须经该边界；repository 已提交后的安装失败由原恢复流程幂等重试，并以保留 source 的 `SecurityState` 稳定分类向上传播。临时 validator 只校验候选 material，不得写 vault；网络 adapter 只能从 active security session 与当前成员范围取得发送资格，不能直接读取历史 vault。
+`ActiveSpaceSecuritySession` 是正常 Space security runtime 安装目标材料的唯一 Infra 边界。它串行执行归属验证、profile vault 耐久 catalog 安装、活动 session 切换和失败恢复；调用方不能分别决定两次写入的顺序。已取得完整 material 的路径保持 vault-first；从同一 MasterKey 加密 repository 恢复时，该模块在互斥区内临时装入目标密钥以读取 material，再验证、安装 vault 并完成 session，repository、vault 或 session 失败与任务取消均由事务 guard 恢复旧 snapshot；若已发生 clear/close，旧快照不得复活会话。已耐久但尚未被活动状态引用的 catalog 作为安全的幂等准备结果保留，但不能授予网络权限。Engine 只构造一次 profile vault 并注入 Space access adapter；Legacy 无 material 恢复允许只切换 session，不生成虚假 catalog。成员加入、epoch/revocation、Sponsor/Helper 准入和 membership branch recovery 的当前 material 推进也必须经该边界；repository 已提交后的安装失败由原恢复流程幂等重试，并以保留 source 的 `SecurityState` 稳定分类向上传播。临时 validator 只校验候选 material，不得写 vault；网络 adapter 只能从 active security session 与当前成员范围取得发送资格，不能直接读取历史 vault。
 
 V1/V2 到 V3 的转换只在软件升级时通过独立、原子、可恢复的 profile storage upgrade 执行一次。升级同时把本机历史/搜索/文件数据与 membership、credential、MLS 等 Space 控制面表拆入独立 generation。完成后，切换 Space 复用同一 profile SQLite/blob generation，只替换完整 Space control generation，不得扫描、复制或重加密历史业务负载。旧格式 reader 只能存在于升级模块，正常路径只写 V3。
 
@@ -816,6 +818,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 | 日期 | 主题 | 长期结论 |
 | --- | --- | --- |
+| 2026-09-09 | Profile 密钥运行期复用设计 | 新增[设计提案](../exec-plans/completed/profile-content-key-runtime-reuse.md)：由 profile vault 持有有界历史目录，区分 GUI 交互锁定与后台安全会话生命周期；GUI 锁定须保持同步接收及密文写入。已完成 vault 复用、排他租约、会话撤销及关闭接线；Infra 808 项测试通过，完整验证限制见归档记录。
 | 2026-09-08 | 不可读派生密文的恢复边界 | 手动资料验证发现旧文件清单与搜索预览亦可能无法认证；升级负责人在原子目标的 blob tree 内加密保留完整转换输入数据库，再清除不可用投影以触发现有重建。恢复快照纳入目录摘要，控制面、活动引用与传输状态仍失败关闭；安全库 149 项与升级集成 15 项通过，真实 dev 资料升级及重启健康检查通过。 |
 | 2026-09-08 | 旧 UCBL 不可用保留 | ProfileStorageUpgrade 将旧 blob 的 AEAD 认证失败收敛为原密文保留与引用 Lost，在原子候选 generation 中完成；校验覆盖原字节、不可用状态和目录摘要。调用方仍只执行 ensure_v3，正常 V3 reader 不增加兼容回退；介质、格式及控制面错误仍失败关闭。 |
 | 2026-09-08 | Infra TLS provider 依赖收敛 | `uc-infra` 显式使用与 Iroh 一致的 rustls `ring` provider，不再由 rustls 默认 feature 引入未使用的 AWS-LC C 构建链；TLS 调用路径、网络协议与模块责任不变，无架构变化。 |
