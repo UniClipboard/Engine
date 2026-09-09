@@ -44,15 +44,44 @@ pub(super) struct UpgradeJournalV1 {
     primary_blob_tree_digest: Option<[u8; 32]>,
     converted_inline_count: Option<u64>,
     converted_blob_count: Option<u64>,
+    #[serde(skip)]
+    preserved_blob_count: Option<u64>,
     payload_profile_database_digest: Option<[u8; 32]>,
     payload_blob_tree_digest: Option<[u8; 32]>,
     converted_derived_count: Option<u64>,
     converted_search_document_count: Option<u64>,
+    #[serde(skip)]
+    unavailable_derived_count: Option<u64>,
     verified_profile_schema_digest: Option<[u8; 32]>,
     verified_control_schema_digest: Option<[u8; 32]>,
 }
 
 impl UpgradeJournalV1 {
+    /// 保持旧 journal 的 postcard 前缀不变，附加已加密认证的转换结果摘要。
+    pub(super) fn encode(&self) -> Result<Vec<u8>, postcard::Error> {
+        let mut bytes = postcard::to_stdvec(self)?;
+        bytes.extend(postcard::to_stdvec(&UpgradeWarningCountsV1 {
+            version: 1,
+            preserved_blobs: self.preserved_blob_count,
+            unavailable_records: self.unavailable_derived_count,
+        })?);
+        Ok(bytes)
+    }
+
+    pub(super) fn decode(bytes: &[u8]) -> Result<Self, postcard::Error> {
+        let (mut journal, remaining): (Self, _) = postcard::take_from_bytes(bytes)?;
+        if !remaining.is_empty() {
+            let (warnings, extra): (UpgradeWarningCountsV1, _) =
+                postcard::take_from_bytes(remaining)?;
+            if warnings.version != 1 || !extra.is_empty() {
+                return Err(postcard::Error::DeserializeBadEnum);
+            }
+            journal.preserved_blob_count = warnings.preserved_blobs;
+            journal.unavailable_derived_count = warnings.unavailable_records;
+        }
+        Ok(journal)
+    }
+
     pub(super) fn detected(source: Option<&ActiveSpaceGenerationManifestV2>) -> Self {
         let reserved = source
             .map(|manifest| {
@@ -84,17 +113,42 @@ impl UpgradeJournalV1 {
             primary_blob_tree_digest: None,
             converted_inline_count: None,
             converted_blob_count: None,
+            preserved_blob_count: None,
             payload_profile_database_digest: None,
             payload_blob_tree_digest: None,
             converted_derived_count: None,
             converted_search_document_count: None,
+            unavailable_derived_count: None,
             verified_profile_schema_digest: None,
             verified_control_schema_digest: None,
         }
     }
 
+    pub(super) fn record_primary_warnings(&mut self, count: u64) {
+        self.preserved_blob_count = Some(count);
+    }
+
+    pub(super) fn record_derived_warnings(&mut self, count: u64) {
+        self.unavailable_derived_count = Some(count);
+    }
+
+    pub(super) fn preserved_blob_count(&self) -> Option<u64> {
+        self.preserved_blob_count
+    }
+
+    pub(super) fn unavailable_derived_count(&self) -> Option<u64> {
+        self.unavailable_derived_count
+    }
+
     pub(super) fn validate(&self) -> Result<(), ProfileStorageUpgradeError> {
         if self.format_version != JOURNAL_FORMAT_V1
+            || self
+                .preserved_blob_count
+                .is_some_and(|count| self.converted_blob_count.is_none_or(|total| count > total))
+            || self.unavailable_derived_count.is_some_and(|count| {
+                self.converted_derived_count
+                    .is_none_or(|total| total.checked_add(count).is_none())
+            })
             || self.target_profile_data_generation == [0; 16]
             || self.target_space_control_generation == [0; 16]
             || self.target_profile_data_generation == self.target_space_control_generation
@@ -448,6 +502,13 @@ impl UpgradeJournalV1 {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct UpgradeWarningCountsV1 {
+    version: u16,
+    preserved_blobs: Option<u64>,
+    unavailable_records: Option<u64>,
+}
+
 impl From<&ActiveSpaceGenerationManifestV2> for UpgradeSourceV1 {
     fn from(manifest: &ActiveSpaceGenerationManifestV2) -> Self {
         Self {
@@ -472,6 +533,34 @@ impl UpgradeSourceV1 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn warning_extension_keeps_old_journal_bytes_readable_in_both_directions() {
+        let mut journal = verified_fresh_journal();
+        let original = postcard::to_stdvec(&journal).unwrap();
+        assert!(super::UpgradeJournalV1::decode(&original)
+            .unwrap()
+            .preserved_blob_count()
+            .is_none());
+        journal.record_primary_warnings(0);
+        journal.record_derived_warnings(2);
+        let encoded = journal.encode().unwrap();
+        assert!(encoded.starts_with(&original));
+        let old_reader: super::UpgradeJournalV1 = postcard::from_bytes(&encoded).unwrap();
+        old_reader.validate().unwrap();
+        let restored = super::UpgradeJournalV1::decode(&encoded).unwrap();
+        assert_eq!(restored.preserved_blob_count(), Some(0));
+        assert_eq!(restored.unavailable_derived_count(), Some(2));
+        let mut truncated = encoded;
+        truncated.pop();
+        assert!(super::UpgradeJournalV1::decode(&truncated).is_err());
+    }
+
+    #[test]
+    fn warning_count_cannot_exceed_processed_blobs() {
+        let mut journal = verified_fresh_journal();
+        journal.record_primary_warnings(u64::MAX);
+        assert!(journal.validate().is_err());
+    }
     use uc_core::ids::SpaceId;
     use uc_core::membership::ActiveRuntimeLayout;
 

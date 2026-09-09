@@ -484,13 +484,21 @@ pub async fn wire_host_capabilities(
     config: &EngineConfig,
     host: HostCapabilities,
 ) -> WiringResult<HostWiring> {
-    wire_host_capabilities_with_emitter(config, host, Arc::new(NoopHostEventEmitter)).await
+    let (progress, _) = crate::StartupProgress::channel();
+    wire_host_capabilities_with_emitter(
+        config,
+        host,
+        Arc::new(NoopHostEventEmitter),
+        progress.store.clone(),
+    )
+    .await
 }
 
 pub(crate) async fn wire_host_capabilities_with_emitter(
     config: &EngineConfig,
     host: HostCapabilities,
     host_event_emitter: Arc<dyn HostEventEmitterPort>,
+    startup_progress: Arc<dyn uc_infra::security::StorageUpgradeObserver>,
 ) -> WiringResult<HostWiring> {
     let (directories, secure_storage, mut clipboard, files, analytics) = host.into_parts();
     let clipboard_changes = clipboard.take_change_stream().map_err(|_| {
@@ -545,6 +553,7 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
             analytics.identity,
         )),
         host_event_emitter,
+        startup_progress,
     })
     .await?;
 

@@ -3023,6 +3023,222 @@ async fn engine_start_builds_a_resumable_real_session() {
 }
 
 #[tokio::test]
+async fn startup_progress_is_available_before_real_start_and_survives_failure() {
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let secure_storage = MemoryHostSecureStorage::default();
+    let host = || {
+        HostCapabilities::new(
+            HostDirectories::new(
+                temp.path().join("private"),
+                temp.path().join("cache"),
+                temp.path().join("temporary"),
+                temp.path().join("logs"),
+            ),
+            Box::new(secure_storage.clone()),
+            Box::new(StaticHostClipboard {
+                snapshot: HostClipboardSnapshot {
+                    observed_at_ms: 0,
+                    representations: Vec::new(),
+                },
+            }),
+            Box::new(RecordingHostFiles {
+                state: Arc::new(RecordingHostFilesState::default()),
+            }),
+        )
+    };
+    let (input, mut progress) = crate::StartupProgress::channel();
+    assert_eq!(progress.snapshot().state, crate::StartupState::Preparing);
+    let (engine, _events) = Engine::start_with_progress(EngineConfig::new("1.2.3"), host(), input)
+        .await
+        .unwrap();
+    let ready = progress.snapshot();
+    assert_eq!(ready.state, crate::StartupState::Ready);
+    assert!(ready
+        .upgrade
+        .as_ref()
+        .is_none_or(|upgrade| !upgrade.required));
+    assert_eq!(progress.changed().await.unwrap(), ready);
+    assert!(progress.changed().await.is_none());
+    engine
+        .shutdown(std::time::Duration::from_secs(10))
+        .await
+        .unwrap();
+
+    let (input, reopened) = crate::StartupProgress::channel();
+    let (engine, _) = Engine::start_with_progress(EngineConfig::new("1.2.3"), host(), input)
+        .await
+        .unwrap();
+    let ordinary_restart = reopened.snapshot();
+    assert!(ordinary_restart
+        .upgrade
+        .as_ref()
+        .is_none_or(|upgrade| !upgrade.required));
+    engine
+        .shutdown(std::time::Duration::from_secs(10))
+        .await
+        .unwrap();
+
+    // 真实启动入口在早期目录准备失败，状态仍应保留，且不泄露宿主路径。
+    std::fs::remove_dir_all(temp.path().join("temporary")).unwrap();
+    std::fs::write(temp.path().join("temporary"), b"blocked directory").unwrap();
+    let (input, progress) = crate::StartupProgress::channel();
+    assert!(
+        Engine::start_with_progress(EngineConfig::new("1.2.3"), host(), input)
+            .await
+            .is_err()
+    );
+    let failure = progress.snapshot();
+    assert_eq!(failure.state, crate::StartupState::Failed);
+    assert_ne!(failure.attempt_id, ready.attempt_id);
+    let json = serde_json::to_string(&failure).unwrap();
+    assert!(!json.contains(temp.path().to_str().unwrap()));
+}
+
+#[tokio::test]
+#[ignore = "requires a complete synthetic alpha.5 profile in UC_ALPHA5_FIXTURE_DATA"]
+async fn startup_progress_upgrades_alpha5_profile_and_reopens_history() {
+    use diesel::{Connection as _, RunQueryDsl as _};
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let source = PathBuf::from(std::env::var_os("UC_ALPHA5_FIXTURE_DATA").unwrap());
+    let temp = tempfile::tempdir().unwrap();
+    let private = temp.path().join("private");
+    let mut pending = vec![source.clone()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let kind = entry.file_type().unwrap();
+            assert!(!kind.is_symlink());
+            if kind.is_dir() {
+                pending.push(path);
+            } else if kind.is_file() {
+                let destination = private.join(path.strip_prefix(&source).unwrap());
+                std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                std::fs::copy(path, destination).unwrap();
+            }
+        }
+    }
+    let storage = MemoryHostSecureStorage::default();
+    for entry in std::fs::read_dir(private.join("keyring")).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_stem().unwrap().to_str().unwrap();
+        let bytes = (0..name.len())
+            .step_by(2)
+            .map(|offset| u8::from_str_radix(&name[offset..offset + 2], 16).unwrap())
+            .collect();
+        storage
+            .set(
+                &String::from_utf8(bytes).unwrap(),
+                &std::fs::read(path).unwrap(),
+            )
+            .unwrap();
+    }
+    #[derive(diesel::QueryableByName)]
+    struct Count {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        count: i64,
+    }
+    let mut original =
+        diesel::SqliteConnection::establish(private.join("uniclipboard.db").to_str().unwrap())
+            .unwrap();
+    let representations = diesel::sql_query("SELECT COUNT(*) AS count FROM clipboard_snapshot_representation WHERE inline_data IS NOT NULL").get_result::<Count>(&mut original).unwrap().count as u64;
+    let blobs = diesel::sql_query("SELECT COUNT(*) AS count FROM blob")
+        .get_result::<Count>(&mut original)
+        .unwrap()
+        .count as u64;
+    drop(original);
+    let host = || {
+        HostCapabilities::new(
+            HostDirectories::new(
+                private.clone(),
+                temp.path().join("cache"),
+                temp.path().join("temporary"),
+                temp.path().join("logs"),
+            ),
+            Box::new(storage.clone()),
+            Box::new(StaticHostClipboard {
+                snapshot: HostClipboardSnapshot {
+                    observed_at_ms: 0,
+                    representations: Vec::new(),
+                },
+            }),
+            Box::new(RecordingHostFiles {
+                state: Arc::new(RecordingHostFilesState::default()),
+            }),
+        )
+    };
+    let (input, mut progress) = crate::StartupProgress::channel();
+    let future = Engine::start_with_progress(EngineConfig::new("1.2.3"), host(), input);
+    tokio::pin!(future);
+    let mut observed_upgrade_before_ready = false;
+    let (engine, _) = loop {
+        tokio::select! {
+            result = &mut future => break result.unwrap(),
+            Some(snapshot) = progress.changed() => {
+                observed_upgrade_before_ready |= snapshot.state == crate::StartupState::Upgrading;
+            }
+        }
+    };
+    assert!(observed_upgrade_before_ready);
+    let snapshot = progress.snapshot();
+    assert_eq!(snapshot.state, crate::StartupState::Ready);
+    let upgrade = snapshot.upgrade.unwrap();
+    assert!(upgrade.required && upgrade.completed);
+    for (step, total) in [
+        (
+            crate::StartupUpgradeStep::ConvertingContents,
+            representations,
+        ),
+        (crate::StartupUpgradeStep::ConvertingLargeContents, blobs),
+    ] {
+        let counted = upgrade.steps.iter().find(|item| item.step == step).unwrap();
+        assert_eq!(
+            (counted.processed, counted.total, counted.completed),
+            (total, Some(total), true)
+        );
+    }
+    let history = engine
+        .execute(crate::Operation::ListHistoryEntries(
+            crate::ListHistoryEntriesInput {
+                limit: 100,
+                offset: 0,
+            },
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(history, crate::OperationResult::HistoryEntries(ref entries) if !entries.is_empty())
+    );
+    engine
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+    drop(engine);
+    let (input, progress) = crate::StartupProgress::channel();
+    let (engine, _) = Engine::start_with_progress(EngineConfig::new("1.2.3"), host(), input)
+        .await
+        .unwrap();
+    assert_eq!(progress.snapshot().state, crate::StartupState::Ready);
+    let history = engine
+        .execute(crate::Operation::ListHistoryEntries(
+            crate::ListHistoryEntriesInput {
+                limit: 100,
+                offset: 0,
+            },
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(history, crate::OperationResult::HistoryEntries(ref entries) if !entries.is_empty())
+    );
+    engine
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn engine_start_finishes_an_interrupted_factory_reset_before_opening_a_new_session() {
     let _guard = ENGINE_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();

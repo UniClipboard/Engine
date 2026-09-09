@@ -175,6 +175,7 @@ pub struct CoreWiringInputs {
     pub analytics_sink: Arc<dyn AnalyticsPort>,
     pub analytics_facade: Arc<dyn AnalyticsFacade>,
     pub host_event_emitter: Arc<dyn HostEventEmitterPort>,
+    pub startup_progress: Arc<dyn uc_infra::security::StorageUpgradeObserver>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -189,6 +190,7 @@ async fn ensure_profile_storage_v3(
     admission_keys: Arc<AdmissionKeyManager>,
     manifests: Arc<ActiveSpaceGenerationManifestStore>,
     current_space: Arc<uc_infra::space::CurrentSpaceResolver>,
+    progress: Arc<dyn uc_infra::security::StorageUpgradeObserver>,
 ) -> WiringResult<RuntimeStorageSelection> {
     let upgrade = ProfileStorageUpgrade::for_runtime(
         profile_root.to_path_buf(),
@@ -201,7 +203,8 @@ async fn ensure_profile_storage_v3(
         admission_keys,
         Arc::clone(&manifests),
         current_space,
-    );
+    )
+    .with_progress(progress);
     let outcome =
         crate::assembly::observability::observe_profile_storage_upgrade(upgrade.ensure_v3()).await;
     let outcome = outcome.map_err(|source| WiringError::StorageUpgrade { source })?;
@@ -325,6 +328,7 @@ pub async fn wire_dependencies_from_inputs(
         analytics_sink,
         analytics_facade,
         host_event_emitter,
+        startup_progress,
     } = inputs;
     let profile_reset_paths = paths.clone();
     let profile_reset_profile_id = profile_id.inner().to_owned();
@@ -382,6 +386,7 @@ pub async fn wire_dependencies_from_inputs(
             Arc::clone(&admission_keys),
             Arc::clone(&active_generation_manifest_store),
             Arc::clone(&current_space_resolver),
+            startup_progress,
         )
         .await?
     } else {

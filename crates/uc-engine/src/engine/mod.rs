@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) mod event_stream;
 mod in_flight;
+pub(crate) mod startup;
 
 use crate::runtime::ProductionRuntime;
 #[cfg(feature = "dev-tools")]
@@ -18,6 +19,7 @@ use crate::{
 pub use event_stream::EventStream;
 use event_stream::{event_channel, EventSender};
 use in_flight::InFlightOperations;
+pub use startup::{StartupProgress, StartupProgressInput};
 
 const INVALID_STATE_CODE: u32 = 1001;
 const OPERATION_CANCELLED_CODE: u32 = 1002;
@@ -62,10 +64,33 @@ impl Engine {
         config: EngineConfig,
         host: HostCapabilities,
     ) -> Result<(Self, EventStream), EngineError> {
+        let (input, _) = StartupProgress::channel();
+        Self::start_with_progress(config, host, input).await
+    }
+
+    /// 启动前交入只读进度通道；关闭观察者不影响本次启动。
+    pub async fn start_with_progress(
+        config: EngineConfig,
+        host: HostCapabilities,
+        progress: StartupProgressInput,
+    ) -> Result<(Self, EventStream), EngineError> {
+        let result = Self::start_runtime(config, host, &progress).await;
+        progress.finish(&result);
+        result
+    }
+
+    async fn start_runtime(
+        config: EngineConfig,
+        host: HostCapabilities,
+        progress: &StartupProgressInput,
+    ) -> Result<(Self, EventStream), EngineError> {
         const EVENT_CAPACITY: usize = 256;
 
         let (events, stream) = event_channel(EVENT_CAPACITY);
-        let runtime = Arc::new(ProductionRuntime::start(config, host, events.clone()).await?);
+        let runtime = Arc::new(
+            ProductionRuntime::start(config, host, events.clone(), Arc::clone(&progress.store))
+                .await?,
+        );
         let engine = Self {
             state: Mutex::new(EngineState::Running),
             lifecycle_gate: Mutex::new(()),

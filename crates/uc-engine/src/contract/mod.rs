@@ -11,6 +11,7 @@ pub mod observability;
 mod operation;
 mod result;
 mod settings;
+mod startup;
 mod upgrade;
 mod value;
 
@@ -25,5 +26,6 @@ pub use lifecycle::*;
 pub use operation::*;
 pub use result::*;
 pub use settings::*;
+pub use startup::*;
 pub use upgrade::*;
 pub use value::*;

@@ -52,6 +52,15 @@ impl SecureStoragePort for MemorySecureStorage {
 
 struct EmptyLedger;
 
+#[derive(Default)]
+struct UpgradeProgressRecorder(Mutex<Vec<uc_infra::security::StorageUpgradeSnapshot>>);
+
+impl uc_infra::security::StorageUpgradeObserver for UpgradeProgressRecorder {
+    fn update(&self, snapshot: uc_infra::security::StorageUpgradeSnapshot) {
+        self.0.lock().unwrap().push(snapshot);
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires a synthetic alpha.5 development profile in UC_ALPHA5_FIXTURE_DATA"]
 async fn alpha5_runtime_fixture_reaches_legacy_ready() {
@@ -241,11 +250,24 @@ async fn production_upgrade_completes_all_pre_promotion_phases_in_one_call() {
         Arc::clone(&manifests),
     );
 
+    let progress = Arc::new(UpgradeProgressRecorder::default());
+    let upgrade = upgrade.with_progress(progress.clone());
     assert_eq!(
         upgrade.ensure_v3().await.unwrap(),
         ProfileStorageUpgradeOutcome::Upgraded
     );
     assert!(manifests.load_v3_sync().unwrap().is_some());
+    let updates = progress.0.lock().unwrap();
+    assert!(updates
+        .iter()
+        .any(|snapshot| snapshot.required && snapshot.outcome.is_none()));
+    let last = updates.last().unwrap();
+    assert_eq!(
+        last.outcome,
+        Some(uc_infra::security::StorageUpgradeProgressOutcome::Completed)
+    );
+    assert!(last.steps.iter().all(|step| step.completed));
+    assert!(last.steps.len() <= 6);
 }
 
 #[tokio::test]
@@ -698,17 +720,36 @@ async fn v2_upgrade_coordination_is_durable_idempotent_and_encrypted() {
 
     // 每个 Pending 都模拟在持久边界后进程终止；下一次启动只依赖已认证
     // journal 和 source/target 介质继续推进，不能依赖内存中的 phase。
-    for _ in 0..6 {
+    for attempt in 0..6 {
+        let progress = Arc::new(UpgradeProgressRecorder::default());
         let upgrade = new_upgrade(
             &vault,
             secure_storage.clone(),
             Arc::clone(&keys),
             Arc::clone(&manifests),
-        );
+        )
+        .with_progress(progress.clone());
         assert_eq!(
             upgrade.ensure_v3().await.unwrap(),
             ProfileStorageUpgradeOutcome::Pending
         );
+        let snapshots = progress.0.lock().unwrap();
+        let last = snapshots.last().unwrap();
+        assert_eq!(last.recovering, attempt > 0);
+        assert_eq!(
+            last.outcome,
+            Some(uc_infra::security::StorageUpgradeProgressOutcome::Pending)
+        );
+        assert!(last.steps.len() <= 6);
+        if attempt >= 4 {
+            let blobs = last
+                .steps
+                .iter()
+                .find(|step| step.step == uc_infra::security::StorageUpgradeStep::LargeContents)
+                .unwrap();
+            assert_eq!(blobs.warning_count, Some(0));
+            assert!(blobs.completed);
+        }
     }
     let upgrade = new_upgrade(
         &vault,
@@ -970,13 +1011,19 @@ async fn held_profile_lease_returns_busy_without_creating_a_journal() {
         vault.clone(),
         Arc::clone(&keys),
     ));
-    let upgrade = new_upgrade(&vault, secure_storage, keys, manifests);
+    let progress = Arc::new(UpgradeProgressRecorder::default());
+    let upgrade =
+        new_upgrade(&vault, secure_storage, keys, manifests).with_progress(progress.clone());
 
     assert_eq!(
         upgrade.ensure_v3().await.unwrap(),
         ProfileStorageUpgradeOutcome::Busy
     );
     assert!(!upgrade_directory.join(".journal-v1").exists());
+    assert_eq!(
+        progress.0.lock().unwrap().last().unwrap().failure,
+        Some(uc_infra::security::StorageUpgradeFailure::Busy)
+    );
 }
 
 #[tokio::test]

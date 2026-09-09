@@ -10,5 +10,6 @@ pub(crate) mod network;
 pub(crate) mod observability;
 pub(crate) mod platform;
 pub(crate) mod runtime_storage;
+mod startup_progress;
 pub(crate) mod sync_engine;
 pub(crate) mod wire;

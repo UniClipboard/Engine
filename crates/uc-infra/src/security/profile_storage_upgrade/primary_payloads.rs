@@ -25,8 +25,10 @@ use crate::security::{
 use crate::space::InMemorySession;
 
 use super::journal::UpgradeJournalV1;
+use super::progress::UpgradeProgress;
 use super::target::{file_digest, TargetGenerationStager};
 use super::ProfileStorageUpgradeError;
+use super::{StorageUpgradeStep, StorageUpgradeUnit};
 
 const V3_BLOB_ALGORITHM: &str = "xchacha20poly1305-v3";
 const PRESERVED_BLOB_ERROR: &str =
@@ -47,6 +49,7 @@ pub(super) struct ConvertedPrimaryPayloads {
     pub(super) blob_tree_digest: [u8; 32],
     pub(super) inline_count: u64,
     pub(super) blob_count: u64,
+    pub(super) warning_count: u64,
 }
 
 impl PrimaryPayloadConverter {
@@ -69,6 +72,7 @@ impl PrimaryPayloadConverter {
         &self,
         journal: &UpgradeJournalV1,
         target: &TargetGenerationStager,
+        progress: &UpgradeProgress,
     ) -> Result<ConvertedPrimaryPayloads, ProfileStorageUpgradeError> {
         target.verify_separated(journal)?;
         let paths = target.paths(journal);
@@ -77,6 +81,22 @@ impl PrimaryPayloadConverter {
                 .inspect_output(&paths.profile_database, &paths.primary_output)
                 .await?;
             target.verify_source_revision(journal)?;
+            progress.begin(
+                StorageUpgradeStep::Contents,
+                Some(converted.inline_count),
+                Some(StorageUpgradeUnit::Representations),
+            );
+            progress.processed(StorageUpgradeStep::Contents, converted.inline_count, 0);
+            progress.begin(
+                StorageUpgradeStep::LargeContents,
+                Some(converted.blob_count),
+                Some(StorageUpgradeUnit::LargeContents),
+            );
+            progress.processed(
+                StorageUpgradeStep::LargeContents,
+                converted.blob_count,
+                converted.warning_count,
+            );
             return Ok(converted);
         }
         if paths.primary_output.exists() {
@@ -92,7 +112,12 @@ impl PrimaryPayloadConverter {
         std::fs::create_dir_all(parent).map_err(io_storage)?;
         let work = parent.join(format!(".v3-primary-{}.tmp", uuid::Uuid::new_v4()));
         let result = self
-            .build_output(&paths.profile_database, &paths.primary_output, &work)
+            .build_output(
+                &paths.profile_database,
+                &paths.primary_output,
+                &work,
+                progress,
+            )
             .await;
         let converted = match result {
             Ok(converted) => converted,
@@ -148,13 +173,17 @@ impl PrimaryPayloadConverter {
         separated_database: &Path,
         final_output: &Path,
         work: &Path,
+        progress: &UpgradeProgress,
     ) -> Result<ConvertedPrimaryPayloads, ProfileStorageUpgradeError> {
         std::fs::create_dir(work).map_err(io_storage)?;
         let database = work.join(OUTPUT_DATABASE);
         std::fs::copy(separated_database, &database).map_err(io_storage)?;
         crate::fs::durability::sync_existing_file(&database).map_err(io_storage)?;
-        let inline_count = self.convert_inline(&database).await?;
-        let blob_count = self.convert_blobs(&database, work, final_output).await?;
+        let inline_count = self.convert_inline(&database, progress).await?;
+        let (blob_count, warning_count) = self
+            .convert_blobs(&database, work, final_output, progress)
+            .await?;
+        progress.begin(StorageUpgradeStep::Verifying, None, None);
         self.verify_payloads(&database, work).await?;
         compact_database(&database)?;
         sync_directory(work).map_err(io_storage)?;
@@ -163,6 +192,7 @@ impl PrimaryPayloadConverter {
             blob_tree_digest: blob_tree_digest(&work.join(OUTPUT_BLOBS))?,
             inline_count,
             blob_count,
+            warning_count,
         })
     }
 
@@ -174,16 +204,30 @@ impl PrimaryPayloadConverter {
         let database = output.join(OUTPUT_DATABASE);
         verify_row_identity(separated_database, &database)?;
         let (inline_count, blob_count) = self.verify_payloads(&database, output).await?;
+        let warning_count = load_blob_rows(&mut open_connection(&database)?)?
+            .iter()
+            .filter(|row| row.encryption_algo.as_deref() != Some(V3_BLOB_ALGORITHM))
+            .count() as u64;
         Ok(ConvertedPrimaryPayloads {
             profile_database_digest: file_digest(&database)?,
             blob_tree_digest: blob_tree_digest(&output.join(OUTPUT_BLOBS))?,
             inline_count,
             blob_count,
+            warning_count,
         })
     }
 
-    async fn convert_inline(&self, database: &Path) -> Result<u64, ProfileStorageUpgradeError> {
+    async fn convert_inline(
+        &self,
+        database: &Path,
+        progress: &UpgradeProgress,
+    ) -> Result<u64, ProfileStorageUpgradeError> {
         let rows = load_inline_rows(&mut open_connection(database)?)?;
+        progress.begin(
+            StorageUpgradeStep::Contents,
+            Some(rows.len() as u64),
+            Some(StorageUpgradeUnit::Representations),
+        );
         let legacy = BlobCipherAdapter::new(Arc::clone(&self.source_session));
         let v3 = V3InlinePayloadCipher::new(Arc::clone(&self.content_protection));
         let mut converted = Vec::with_capacity(rows.len());
@@ -199,6 +243,10 @@ impl PrimaryPayloadConverter {
                 security(anyhow::Error::new(source).context("seal V3 inline payload"))
             })?;
             converted.push((row.id, ciphertext.into_bytes()));
+            progress.processed(StorageUpgradeStep::Contents, converted.len() as u64, 0);
+            if converted.len() % 64 == 0 {
+                tokio::task::yield_now().await;
+            }
         }
         let count = u64::try_from(converted.len())
             .map_err(|source| corrupt(anyhow::Error::new(source).context("count inline rows")))?;
@@ -224,8 +272,15 @@ impl PrimaryPayloadConverter {
         database: &Path,
         work: &Path,
         final_output: &Path,
-    ) -> Result<u64, ProfileStorageUpgradeError> {
+        progress: &UpgradeProgress,
+    ) -> Result<(u64, u64), ProfileStorageUpgradeError> {
         let rows = load_blob_rows(&mut open_connection(database)?)?;
+        progress.begin(
+            StorageUpgradeStep::LargeContents,
+            Some(rows.len() as u64),
+            Some(StorageUpgradeUnit::LargeContents),
+        );
+        let mut warning_count = 0;
         let source = EncryptedBlobStore::new(
             Arc::new(FilesystemBlobStore::new(self.source_blob_root.clone())),
             Arc::clone(&self.source_session),
@@ -254,6 +309,12 @@ impl PrimaryPayloadConverter {
                         final_output.join(OUTPUT_BLOBS).join(blob_id.as_str()),
                         None,
                     ));
+                    warning_count += 1;
+                    progress.processed(
+                        StorageUpgradeStep::LargeContents,
+                        converted.len() as u64,
+                        warning_count,
+                    );
                     continue;
                 }
                 Err(source) => return Err(corrupt(source.context("open legacy UCBL payload"))),
@@ -271,6 +332,11 @@ impl PrimaryPayloadConverter {
             }
             let storage_path = final_output.join(OUTPUT_BLOBS).join(blob_id.as_str());
             converted.push((row.blob_id, storage_path, Some(compressed_size)));
+            progress.processed(
+                StorageUpgradeStep::LargeContents,
+                converted.len() as u64,
+                warning_count,
+            );
         }
         sync_directory(&work_blob_root).map_err(io_storage)?;
         let count = u64::try_from(converted.len())
@@ -310,7 +376,7 @@ impl PrimaryPayloadConverter {
                 Ok(())
             })
             .map_err(database_storage)?;
-        Ok(count)
+        Ok((count, warning_count))
     }
 
     fn verify_preserved_blob(
@@ -727,6 +793,44 @@ mod tests {
         .bind::<diesel::sql_types::Binary, _>(inline_ciphertext.as_bytes())
         .execute(&mut connection)
         .unwrap();
+        let second_aad = Aad::from(aad::for_inline(
+            &event_id,
+            &RepresentationId::from("representation-additional"),
+        ));
+        let second = BlobCipherAdapter::new(Arc::clone(&session))
+            .encrypt(
+                &Plaintext::new(b"second representation".to_vec()),
+                &second_aad,
+            )
+            .await
+            .unwrap();
+        diesel::sql_query("INSERT INTO clipboard_snapshot_representation (id, event_id, format_id, mime_type, size_bytes, inline_data, blob_id) VALUES ('representation-additional', 'event-primary', 'html', 'text/html', 21, ?, NULL)")
+            .bind::<diesel::sql_types::Binary, _>(second.as_bytes()).execute(&mut connection).unwrap();
+        let stress_rows: usize = std::env::var("UC_UPGRADE_STRESS_ROWS")
+            .map(|value| value.parse().unwrap())
+            .unwrap_or(0);
+        let mut extra_rows = Vec::with_capacity(stress_rows);
+        for index in 0..stress_rows {
+            let id = format!("bulk-representation-{index:08}");
+            let extra_aad = Aad::from(aad::for_inline(
+                &event_id,
+                &RepresentationId::from(id.as_str()),
+            ));
+            let encrypted = BlobCipherAdapter::new(Arc::clone(&session))
+                .encrypt(&Plaintext::new(vec![b'x'; 4096]), &extra_aad)
+                .await
+                .unwrap();
+            extra_rows.push((id, encrypted.into_bytes()));
+        }
+        connection.transaction::<_, diesel::result::Error, _>(|connection| {
+            for (id, bytes) in &extra_rows {
+                diesel::sql_query("INSERT INTO clipboard_snapshot_representation (id, event_id, format_id, mime_type, size_bytes, inline_data) VALUES (?, 'event-primary', ?, 'text/plain', 4096, ?)")
+                    .bind::<diesel::sql_types::Text, _>(id)
+                    .bind::<diesel::sql_types::Text, _>(id)
+                    .bind::<diesel::sql_types::Binary, _>(bytes).execute(connection)?;
+            }
+            Ok(())
+        }).unwrap();
         drop(connection);
 
         let source_manifest = ActiveSpaceGenerationManifestV2::new(
@@ -764,7 +868,11 @@ mod tests {
 
         // 介质缺失必须保留 source chain，且不能发布半转换结果。
         std::fs::remove_file(&unreadable_source_path).unwrap();
-        let missing = converter.convert(&journal, &target).await.err().unwrap();
+        let missing = converter
+            .convert(&journal, &target, &UpgradeProgress::new(None))
+            .await
+            .err()
+            .unwrap();
         match missing {
             ProfileStorageUpgradeError::Storage { source } => {
                 assert_eq!(
@@ -777,16 +885,59 @@ mod tests {
         assert!(!target.paths(&journal).primary_output.exists());
         std::fs::write(&unreadable_source_path, b"unrecognized format").unwrap();
         assert!(matches!(
-            converter.convert(&journal, &target).await,
+            converter
+                .convert(&journal, &target, &UpgradeProgress::new(None))
+                .await,
             Err(ProfileStorageUpgradeError::Corrupt { .. })
         ));
         assert!(!target.paths(&journal).primary_output.exists());
         std::fs::write(&unreadable_source_path, &unreadable_source_bytes).unwrap();
 
-        let converted = converter.convert(&journal, &target).await.unwrap();
-        assert_eq!(converted.inline_count, 1);
+        let progress = super::super::progress::UpgradeProgress::new(None);
+        let converted = converter
+            .convert(&journal, &target, &progress)
+            .await
+            .unwrap();
+        assert_eq!(converted.inline_count, 2 + stress_rows as u64);
         assert_eq!(converted.blob_count, 2);
-        let recovered = converter.convert(&journal, &target).await.unwrap();
+        let snapshot = progress.snapshot();
+        let content = snapshot
+            .steps
+            .iter()
+            .find(|step| step.step == super::super::StorageUpgradeStep::Contents)
+            .unwrap();
+        assert_eq!(
+            (content.processed, content.total),
+            (2 + stress_rows as u64, Some(2 + stress_rows as u64))
+        );
+        assert!(
+            !content.completed,
+            "processing is not the durable owner commit"
+        );
+        let blobs = snapshot
+            .steps
+            .iter()
+            .find(|step| step.step == super::super::StorageUpgradeStep::LargeContents)
+            .unwrap();
+        assert_eq!(
+            (blobs.processed, blobs.total, blobs.warning_count),
+            (2, Some(2), Some(1))
+        );
+        let recovery_progress = super::super::progress::UpgradeProgress::new(None);
+        let recovered = converter
+            .convert(&journal, &target, &recovery_progress)
+            .await
+            .unwrap();
+        let restored = recovery_progress.snapshot();
+        let blobs = restored
+            .steps
+            .iter()
+            .find(|step| step.step == super::super::StorageUpgradeStep::LargeContents)
+            .unwrap();
+        assert_eq!(
+            (blobs.processed, blobs.total, blobs.warning_count),
+            (2, Some(2), Some(1))
+        );
         assert_eq!(
             recovered.profile_database_digest,
             converted.profile_database_digest
@@ -846,20 +997,27 @@ mod tests {
         let preserved_path = output.join(OUTPUT_BLOBS).join(unreadable_blob_id.as_str());
         std::fs::write(&preserved_path, b"tampered ciphertext").unwrap();
         assert!(matches!(
-            converter.convert(&journal, &target).await,
+            converter
+                .convert(&journal, &target, &UpgradeProgress::new(None))
+                .await,
             Err(ProfileStorageUpgradeError::Corrupt { .. })
         ));
         std::fs::write(&preserved_path, &unreadable_source_bytes).unwrap();
         diesel::sql_query("UPDATE clipboard_snapshot_representation SET payload_state = 'BlobReady' WHERE id = 'representation-unreadable'")
             .execute(&mut output_connection).unwrap();
         assert!(matches!(
-            converter.convert(&journal, &target).await,
+            converter
+                .convert(&journal, &target, &UpgradeProgress::new(None))
+                .await,
             Err(ProfileStorageUpgradeError::Corrupt { .. })
         ));
         diesel::sql_query("UPDATE clipboard_snapshot_representation SET payload_state = 'Lost' WHERE id = 'representation-unreadable'")
             .execute(&mut output_connection).unwrap();
         // 恢复测试修改后重新取得摘要，正式 journal 必须覆盖完整候选库。
-        let converted = converter.convert(&journal, &target).await.unwrap();
+        let converted = converter
+            .convert(&journal, &target, &UpgradeProgress::new(None))
+            .await
+            .unwrap();
         assert_eq!(
             std::fs::read(&unreadable_source_path).unwrap(),
             unreadable_source_bytes

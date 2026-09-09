@@ -157,6 +157,7 @@ impl ProductionRuntime {
         config: EngineConfig,
         host: HostCapabilities,
         events: EventSender,
+        progress: Arc<crate::engine::startup::StartupProgressStore>,
     ) -> Result<Self, EngineError> {
         let app_version = config.app_version().to_string();
         let rendezvous_base_url = config.rendezvous_base_url_override();
@@ -172,9 +173,11 @@ impl ProductionRuntime {
             clipboard_import_root,
             files,
             clipboard_changes,
-        } = wire_host_capabilities_with_emitter(&config, host, emitter)
+        } = wire_host_capabilities_with_emitter(&config, host, emitter, progress.clone())
             .await
             .map_err(|error| startup_error("dependency wiring", error))?;
+
+        progress.starting_services();
 
         let security_lifecycle = Arc::clone(&wired.sync_engine.security_lifecycle);
         let mut security_guard = StartupSecurityGuard(Some(Arc::clone(&security_lifecycle)));

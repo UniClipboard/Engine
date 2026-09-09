@@ -10,6 +10,7 @@ mod diagnostics;
 mod journal;
 mod persistence;
 mod primary_payloads;
+mod progress;
 mod target;
 mod validation;
 
@@ -38,6 +39,11 @@ use diagnostics::UpgradeDiagnostics;
 use journal::{UpgradeJournalV1, UpgradePhaseV1};
 use persistence::{UpgradeLeaseResult, UpgradePersistence};
 use primary_payloads::PrimaryPayloadConverter;
+use progress::UpgradeProgress;
+pub use progress::{
+    StorageUpgradeFailure, StorageUpgradeObserver, StorageUpgradeProgressOutcome,
+    StorageUpgradeSnapshot, StorageUpgradeStep, StorageUpgradeStepProgress, StorageUpgradeUnit,
+};
 use target::TargetGenerationStager;
 use validation::RuntimeGenerationValidator;
 
@@ -138,6 +144,7 @@ impl RuntimeUpgradeBootstrap {
         legacy_database: &Path,
         legacy_blob_root: &Path,
         manifests: &ActiveSpaceGenerationManifestStore,
+        progress: &UpgradeProgress,
     ) -> Result<UpgradeComponents, ProfileStorageUpgradeError> {
         let active = manifests.load_runtime_sync().map_err(|source| {
             ProfileStorageUpgradeError::Manifest {
@@ -159,6 +166,7 @@ impl RuntimeUpgradeBootstrap {
 
         let (source_database, source_blob_root, source_space_id) = match active.as_ref() {
             Some(ActiveRuntimeManifest::V2(source)) => {
+                progress.required(true);
                 let source_root = legacy_space_generation_directory(
                     &profile_root.join("space-generations"),
                     &source.space_id,
@@ -185,6 +193,7 @@ impl RuntimeUpgradeBootstrap {
             }
             None => {
                 let legacy_space_id = self.resolve_legacy_space_id().await?;
+                progress.required(legacy_space_id.is_some());
                 (
                     legacy_database.to_path_buf(),
                     legacy_blob_root.to_path_buf(),
@@ -373,6 +382,7 @@ pub struct ProfileStorageUpgrade {
     validator: RuntimeGenerationValidator,
     in_process: Mutex<()>,
     max_steps_per_call: Option<usize>,
+    progress: Option<Arc<dyn StorageUpgradeObserver>>,
 }
 
 impl ProfileStorageUpgrade {
@@ -410,6 +420,7 @@ impl ProfileStorageUpgrade {
             validator: RuntimeGenerationValidator::new(),
             in_process: Mutex::new(()),
             max_steps_per_call: None,
+            progress: None,
         }
     }
 
@@ -496,6 +507,7 @@ impl ProfileStorageUpgrade {
             validator: RuntimeGenerationValidator::new(),
             in_process: Mutex::new(()),
             max_steps_per_call,
+            progress: None,
         }
     }
 
@@ -522,7 +534,14 @@ impl ProfileStorageUpgrade {
             validator: RuntimeGenerationValidator::new(),
             in_process: Mutex::new(()),
             max_steps_per_call: None,
+            progress: None,
         }
+    }
+
+    /// 只接入进度摘要，不改变升级和恢复的所有权。
+    pub fn with_progress(mut self, observer: Arc<dyn StorageUpgradeObserver>) -> Self {
+        self.progress = Some(observer);
+        self
     }
 
     /// 确保当前 profile 使用完整 V3 存储布局。
@@ -533,16 +552,20 @@ impl ProfileStorageUpgrade {
         &self,
     ) -> Result<ProfileStorageUpgradeOutcome, ProfileStorageUpgradeError> {
         let mut diagnostic = UpgradeDiagnostics::new();
-        let result = self.ensure_locked(&mut diagnostic).await;
+        let progress = UpgradeProgress::new(self.progress.clone());
+        progress.begin(StorageUpgradeStep::Checking, None, None);
+        let result = self.ensure_locked(&mut diagnostic, &progress).await;
         if let Err(error) = &result {
             diagnostic.record_failure(error);
         }
+        progress.finish(&result);
         result
     }
 
     async fn ensure_locked(
         &self,
         diagnostic: &mut UpgradeDiagnostics,
+        progress: &UpgradeProgress,
     ) -> Result<ProfileStorageUpgradeOutcome, ProfileStorageUpgradeError> {
         let _in_process = self.in_process.lock().await;
         let _lease = match self.persistence.try_acquire_lease()? {
@@ -551,7 +574,9 @@ impl ProfileStorageUpgrade {
         };
 
         match &self.mode {
-            UpgradeMode::Prepared(components) => self.ensure_with(components, diagnostic).await,
+            UpgradeMode::Prepared(components) => {
+                self.ensure_with(components, diagnostic, progress).await
+            }
             UpgradeMode::Runtime(bootstrap) => {
                 diagnostic.action = "prepare_source";
                 let components = bootstrap
@@ -560,9 +585,10 @@ impl ProfileStorageUpgrade {
                         &self.legacy_database,
                         &self.legacy_blob_root,
                         &self.manifests,
+                        progress,
                     )
                     .await?;
-                self.ensure_with(&components, diagnostic).await
+                self.ensure_with(&components, diagnostic, progress).await
             }
         }
     }
@@ -571,11 +597,12 @@ impl ProfileStorageUpgrade {
         &self,
         components: &UpgradeComponents,
         diagnostic: &mut UpgradeDiagnostics,
+        progress: &UpgradeProgress,
     ) -> Result<ProfileStorageUpgradeOutcome, ProfileStorageUpgradeError> {
         let mut steps = 0_usize;
         loop {
             let outcome = self
-                .advance_once(components, steps == 0, diagnostic)
+                .advance_once(components, steps == 0, diagnostic, progress)
                 .await?;
             steps += 1;
             if outcome != ProfileStorageUpgradeOutcome::Pending
@@ -593,6 +620,7 @@ impl ProfileStorageUpgrade {
         components: &UpgradeComponents,
         resuming: bool,
         diagnostic: &mut UpgradeDiagnostics,
+        progress: &UpgradeProgress,
     ) -> Result<ProfileStorageUpgradeOutcome, ProfileStorageUpgradeError> {
         diagnostic.action = "inspect_manifest";
         let runtime_manifest = match self.manifests.load_runtime_sync() {
@@ -610,16 +638,41 @@ impl ProfileStorageUpgrade {
         ));
         diagnostic.action = "load_journal";
         let persisted_journal = self.persistence.load_journal().await?;
+        if resuming {
+            progress.required(
+                matches!(runtime_manifest, Some(ActiveRuntimeManifest::V2(_)))
+                    || components.legacy_space_id.is_some()
+                    || persisted_journal.as_ref().is_some_and(|journal| {
+                        journal.source_space_id().is_some()
+                            || journal
+                                .converted_inline_count()
+                                .is_some_and(|count| count > 0)
+                            || journal
+                                .converted_blob_count()
+                                .is_some_and(|count| count > 0)
+                            || journal
+                                .converted_derived_count()
+                                .is_some_and(|count| count > 0)
+                    }),
+            );
+            if let Some(journal) = &persisted_journal {
+                progress.recovering();
+                restore_upgrade_progress(journal, progress);
+            }
+        }
         diagnostic.phase = persisted_journal.as_ref().map(UpgradeJournalV1::phase);
         if let Some(ActiveRuntimeManifest::V3(target)) = runtime_manifest.as_ref() {
             diagnostic.action = "recover_active_target";
             let Some(mut journal) = persisted_journal else {
+                progress.complete(StorageUpgradeStep::Checking);
                 return Ok(ProfileStorageUpgradeOutcome::UpToDate);
             };
+            progress.begin(StorageUpgradeStep::Preparing, None, None);
             if !journal.matches_target(target) {
                 if journal.matches_activated_fresh_profile(target) {
                     self.cleanup(&journal, &components.target)?;
                     self.persistence.clear_journal().await?;
+                    progress.complete(StorageUpgradeStep::Preparing);
                     return Ok(ProfileStorageUpgradeOutcome::UpToDate);
                 }
                 return Err(ProfileStorageUpgradeError::SourceChanged);
@@ -647,6 +700,7 @@ impl ProfileStorageUpgrade {
                         .verify_promoted(&journal, &components.target, false)?;
                     self.cleanup(&journal, &components.target)?;
                     self.persistence.clear_journal().await?;
+                    progress.complete(StorageUpgradeStep::Preparing);
                     Ok(ProfileStorageUpgradeOutcome::UpToDate)
                 }
                 _ => Err(ProfileStorageUpgradeError::Corrupt {
@@ -685,6 +739,7 @@ impl ProfileStorageUpgrade {
                     self.persistence
                         .save_journal(&journal.restart(source.as_ref()))
                         .await?;
+                    progress.restart();
                     return Ok(ProfileStorageUpgradeOutcome::Pending);
                 }
                 journal
@@ -714,11 +769,12 @@ impl ProfileStorageUpgrade {
                     separated.control_database_digest,
                 )?;
                 self.persistence.save_journal(&journal).await?;
+                progress.complete(StorageUpgradeStep::Checking);
             }
             UpgradePhaseV1::StoresSeparated => {
                 let converted = self
                     .primary_payloads(components)?
-                    .convert(&journal, &components.target)
+                    .convert(&journal, &components.target, progress)
                     .await?;
                 journal.mark_primary_payloads_converted(
                     converted.profile_database_digest,
@@ -726,15 +782,19 @@ impl ProfileStorageUpgrade {
                     converted.inline_count,
                     converted.blob_count,
                 )?;
+                journal.record_primary_warnings(converted.warning_count);
                 self.persistence.save_journal(&journal).await?;
+                progress.complete(StorageUpgradeStep::Contents);
+                progress.complete(StorageUpgradeStep::LargeContents);
             }
             UpgradePhaseV1::PrimaryPayloadsConverted => {
+                progress.begin(StorageUpgradeStep::Verifying, None, None);
                 self.primary_payloads(components)?
                     .verify(&journal, &components.target)
                     .await?;
                 let converted = self
                     .derived_payloads(components)?
-                    .convert(&journal, &components.target)
+                    .convert(&journal, &components.target, progress)
                     .await?;
                 journal.mark_payloads_converted(
                     converted.profile_database_digest,
@@ -742,9 +802,12 @@ impl ProfileStorageUpgrade {
                     converted.derived_count,
                     converted.search_document_count,
                 )?;
+                journal.record_derived_warnings(converted.warning_count);
                 self.persistence.save_journal(&journal).await?;
+                progress.complete(StorageUpgradeStep::RelatedRecords);
             }
             UpgradePhaseV1::PayloadsConverted => {
+                progress.begin(StorageUpgradeStep::Verifying, None, None);
                 self.derived_payloads(components)?
                     .verify(&journal, &components.target)
                     .await?;
@@ -754,9 +817,12 @@ impl ProfileStorageUpgrade {
                     verified.control_schema_digest,
                 )?;
                 self.persistence.save_journal(&journal).await?;
+                progress.complete(StorageUpgradeStep::Verifying);
             }
             UpgradePhaseV1::Verified => {
+                progress.begin(StorageUpgradeStep::Preparing, None, None);
                 if source.is_none() {
+                    progress.complete(StorageUpgradeStep::Preparing);
                     if let Some(space_id) = components.legacy_space_id.clone() {
                         return Ok(ProfileStorageUpgradeOutcome::LegacyReady {
                             profile_data_generation: *journal.target_profile_data_generation(),
@@ -792,6 +858,7 @@ impl ProfileStorageUpgrade {
                 }
                 journal.mark_promoted()?;
                 self.persistence.save_journal(&journal).await?;
+                progress.complete(StorageUpgradeStep::Preparing);
                 return Ok(ProfileStorageUpgradeOutcome::Upgraded);
             }
             UpgradePhaseV1::Promoted | UpgradePhaseV1::CleanupPending => {
@@ -896,6 +963,47 @@ mod legacy_setup_status_tests {
 fn cleanup_source_unavailable() -> ProfileStorageUpgradeError {
     ProfileStorageUpgradeError::Corrupt {
         source: anyhow::anyhow!("profile upgrade source is unavailable after promotion"),
+    }
+}
+
+fn restore_upgrade_progress(journal: &UpgradeJournalV1, progress: &UpgradeProgress) {
+    if !matches!(
+        journal.phase(),
+        UpgradePhaseV1::Detected | UpgradePhaseV1::TargetStaged
+    ) {
+        progress.complete(StorageUpgradeStep::Checking);
+    }
+    if let Some(count) = journal.converted_inline_count() {
+        progress.restore(
+            StorageUpgradeStep::Contents,
+            count,
+            StorageUpgradeUnit::Representations,
+            Some(0),
+        );
+    }
+    if let Some(count) = journal.converted_blob_count() {
+        progress.restore(
+            StorageUpgradeStep::LargeContents,
+            count,
+            StorageUpgradeUnit::LargeContents,
+            journal.preserved_blob_count(),
+        );
+    }
+    if let Some(count) = journal.converted_derived_count() {
+        let warnings = journal.unavailable_derived_count();
+        progress.restore(
+            StorageUpgradeStep::RelatedRecords,
+            count.saturating_add(warnings.unwrap_or(0)),
+            StorageUpgradeUnit::Records,
+            warnings,
+        );
+    }
+    if matches!(
+        journal.phase(),
+        UpgradePhaseV1::Verified | UpgradePhaseV1::Promoted | UpgradePhaseV1::CleanupPending
+    ) {
+        progress.begin(StorageUpgradeStep::Verifying, None, None);
+        progress.complete(StorageUpgradeStep::Verifying);
     }
 }
 

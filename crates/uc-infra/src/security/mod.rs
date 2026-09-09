@@ -65,6 +65,8 @@ pub use profile_reset::{ProfileKeyWiper, ProfileStateCleaner};
 pub use profile_runtime_layout::ProfileRuntimeLayout;
 pub use profile_storage_upgrade::{
     ProfileStorageUpgrade, ProfileStorageUpgradeError, ProfileStorageUpgradeOutcome,
+    StorageUpgradeFailure, StorageUpgradeObserver, StorageUpgradeProgressOutcome,
+    StorageUpgradeSnapshot, StorageUpgradeStep, StorageUpgradeStepProgress, StorageUpgradeUnit,
 };
 pub(crate) use secrets::{Kek, MasterKey};
 pub use space_admission_auth::{

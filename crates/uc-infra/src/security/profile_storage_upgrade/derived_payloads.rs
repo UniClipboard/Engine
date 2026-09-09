@@ -34,8 +34,10 @@ use crate::space::InMemorySession;
 
 use super::journal::UpgradeJournalV1;
 use super::primary_payloads::{blob_tree_digest, compact_database, sync_directory};
+use super::progress::UpgradeProgress;
 use super::target::{file_digest, TargetGenerationStager};
 use super::ProfileStorageUpgradeError;
+use super::{StorageUpgradeStep, StorageUpgradeUnit};
 
 const DATABASE_FILE: &str = "profile.sqlite";
 const BLOB_DIRECTORY: &str = "blobs";
@@ -55,6 +57,7 @@ pub(super) struct ConvertedDerivedPayloads {
     pub(super) blob_tree_digest: [u8; 32],
     pub(super) derived_count: u64,
     pub(super) search_document_count: u64,
+    pub(super) warning_count: u64,
 }
 
 impl DerivedPayloadConverter {
@@ -78,14 +81,27 @@ impl DerivedPayloadConverter {
         &self,
         journal: &UpgradeJournalV1,
         target: &TargetGenerationStager,
+        progress: &UpgradeProgress,
     ) -> Result<ConvertedDerivedPayloads, ProfileStorageUpgradeError> {
         target.verify_separated(journal)?;
         let paths = target.paths(journal);
         if paths.payload_output.is_dir() {
             self.verify_recovery_snapshot(Some(&paths.primary_output), &paths.payload_output)
                 .await?;
-            let converted = self.inspect_output(&paths.payload_output).await?;
+            let mut converted = self.inspect_output(&paths.payload_output).await?;
+            let total = load_rows(&paths.primary_output.join(DATABASE_FILE))?.total_count();
+            converted.warning_count = total.saturating_sub(converted.derived_count);
             target.verify_source_revision(journal)?;
+            progress.begin(
+                StorageUpgradeStep::RelatedRecords,
+                Some(total),
+                Some(StorageUpgradeUnit::Records),
+            );
+            progress.processed(
+                StorageUpgradeStep::RelatedRecords,
+                total,
+                converted.warning_count,
+            );
             return Ok(converted);
         }
         if paths.payload_output.exists() {
@@ -99,7 +115,12 @@ impl DerivedPayloadConverter {
             .ok_or_else(|| storage(anyhow::anyhow!("payload output parent is missing")))?;
         let work = parent.join(format!(".v3-payloads-{}.tmp", uuid::Uuid::new_v4()));
         let result = self
-            .build_output(&paths.primary_output, &paths.payload_output, &work)
+            .build_output(
+                &paths.primary_output,
+                &paths.payload_output,
+                &work,
+                progress,
+            )
             .await;
         let converted = match result {
             Ok(converted) => converted,
@@ -141,11 +162,18 @@ impl DerivedPayloadConverter {
         primary_output: &Path,
         final_output: &Path,
         work: &Path,
+        progress: &UpgradeProgress,
     ) -> Result<ConvertedDerivedPayloads, ProfileStorageUpgradeError> {
         copy_directory(primary_output, work)?;
         let database = work.join(DATABASE_FILE);
         let rows = load_rows(&database)?;
-        let converted = self.convert_rows(rows).await?;
+        let total = rows.total_count();
+        progress.begin(
+            StorageUpgradeStep::RelatedRecords,
+            Some(total),
+            Some(StorageUpgradeUnit::Records),
+        );
+        let converted = self.convert_rows(rows, progress).await?;
         if !converted.unreadable_file_sets.is_empty() || !converted.unreadable_search.is_empty() {
             self.preserve_recovery_snapshot(primary_output, work)
                 .await?;
@@ -154,7 +182,13 @@ impl DerivedPayloadConverter {
         compact_database(&database)?;
         self.verify_recovery_snapshot(Some(primary_output), work)
             .await?;
-        let inspected = self.inspect_output(work).await?;
+        let mut inspected = self.inspect_output(work).await?;
+        inspected.warning_count = total.saturating_sub(inspected.derived_count);
+        progress.processed(
+            StorageUpgradeStep::RelatedRecords,
+            total,
+            inspected.warning_count,
+        );
         if final_output.exists() {
             return Err(corrupt(anyhow::anyhow!(
                 "profile upgrade payload output appeared during conversion"
@@ -167,7 +201,10 @@ impl DerivedPayloadConverter {
     async fn convert_rows(
         &self,
         rows: LoadedRows,
+        progress: &UpgradeProgress,
     ) -> Result<ConvertedRows, ProfileStorageUpgradeError> {
+        let mut processed = 0;
+        let mut warnings = 0;
         let legacy_file_set = (!rows.file_sets.is_empty())
             .then(|| {
                 EntryFileSetPathCipher::legacy_for_upgrade(&self.source_session, &self.profile_id)
@@ -243,6 +280,9 @@ impl DerivedPayloadConverter {
                 Ok(values) => values,
                 Err(FileSetCipherError::DecryptFailed) => {
                     unreadable_file_sets.insert(row.entry_id);
+                    processed += 1;
+                    warnings += 1;
+                    progress.processed(StorageUpgradeStep::RelatedRecords, processed, warnings);
                     continue;
                 }
                 Err(source) => return Err(owner_security(source)),
@@ -281,6 +321,8 @@ impl DerivedPayloadConverter {
                 relative_path_ct,
                 root_name_ct,
             });
+            processed += 1;
+            progress.processed(StorageUpgradeStep::RelatedRecords, processed, warnings);
         }
         // 文件清单是完整 entry 的投影，不能保留缺少成员的半份清单。
         file_sets.retain(|row| !unreadable_file_sets.contains(&row.entry_id));
@@ -296,6 +338,8 @@ impl DerivedPayloadConverter {
                 .await
                 .map_err(owner_security)?;
             transfers.push((row.transfer_id, ciphertext));
+            processed += 1;
+            progress.processed(StorageUpgradeStep::RelatedRecords, processed, warnings);
         }
 
         let mut transfer_events = Vec::with_capacity(rows.transfer_events.len());
@@ -314,6 +358,8 @@ impl DerivedPayloadConverter {
                 .await
                 .map_err(owner_security)?;
             transfer_events.push((row.id, ciphertext));
+            processed += 1;
+            progress.processed(StorageUpgradeStep::RelatedRecords, processed, warnings);
         }
 
         let search_group_ref = if rows.search_documents.is_empty() {
@@ -338,6 +384,9 @@ impl DerivedPayloadConverter {
                 Ok(fields) => fields,
                 Err(RenderDecodeError::DecryptFailed) => {
                     unreadable_search.push((row.profile_id, row.entry_id));
+                    processed += 1;
+                    warnings += 1;
+                    progress.processed(StorageUpgradeStep::RelatedRecords, processed, warnings);
                     continue;
                 }
                 Err(source) => return Err(owner_security(source)),
@@ -353,6 +402,8 @@ impl DerivedPayloadConverter {
                 ciphertext,
                 search_group_ref.clone().ok_or_else(missing_legacy)?,
             ));
+            processed += 1;
+            progress.processed(StorageUpgradeStep::RelatedRecords, processed, warnings);
         }
 
         let mut active_registers = Vec::with_capacity(rows.active_registers.len());
@@ -366,6 +417,8 @@ impl DerivedPayloadConverter {
                 row.id,
                 v3_active.seal(&reference).await.map_err(owner_security)?,
             ));
+            processed += 1;
+            progress.processed(StorageUpgradeStep::RelatedRecords, processed, warnings);
         }
         let mut publish_logs = Vec::with_capacity(rows.publish_logs.len());
         for row in rows.publish_logs {
@@ -380,6 +433,8 @@ impl DerivedPayloadConverter {
                 .await
                 .map_err(owner_security)?;
             publish_logs.push((row.entry_id, row.attempt_id, ciphertext));
+            processed += 1;
+            progress.processed(StorageUpgradeStep::RelatedRecords, processed, warnings);
         }
         let mut receive_artifacts = Vec::with_capacity(rows.receive_artifacts.len());
         for row in rows.receive_artifacts {
@@ -393,6 +448,8 @@ impl DerivedPayloadConverter {
                 .await
                 .map_err(owner_security)?;
             receive_artifacts.push((row.entry_id, row.attempt_id, ciphertext));
+            processed += 1;
+            progress.processed(StorageUpgradeStep::RelatedRecords, processed, warnings);
         }
         Ok(ConvertedRows {
             unreadable_file_sets,
@@ -562,6 +619,7 @@ impl DerivedPayloadConverter {
             blob_tree_digest: blob_tree_digest(&output.join(BLOB_DIRECTORY))?,
             derived_count: rows.derived_count(),
             search_document_count: rows.search_documents.len() as u64,
+            warning_count: 0,
         })
     }
 }
@@ -651,6 +709,17 @@ struct LoadedV3Rows {
     active_registers: Vec<IdRow>,
     publish_logs: Vec<AttemptRow>,
     receive_artifacts: Vec<AttemptRow>,
+}
+impl LoadedRows {
+    fn total_count(&self) -> u64 {
+        (self.file_sets.len()
+            + self.transfers.len()
+            + self.transfer_events.len()
+            + self.search_documents.len()
+            + self.active_registers.len()
+            + self.publish_logs.len()
+            + self.receive_artifacts.len()) as u64
+    }
 }
 impl LoadedV3Rows {
     fn derived_count(&self) -> u64 {
@@ -1049,7 +1118,7 @@ mod tests {
         let final_output = directory.path().join("v3-payloads");
         let work = directory.path().join("v3-payloads-work");
         let converted = converter
-            .build_output(&primary, &final_output, &work)
+            .build_output(&primary, &final_output, &work, &UpgradeProgress::new(None))
             .await
             .unwrap();
 

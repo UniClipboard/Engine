@@ -82,7 +82,7 @@ impl UpgradePersistence {
                 .open_profile_payload(UPGRADE_JOURNAL_PURPOSE, &ciphertext)
                 .map_err(security_error)?,
         );
-        let journal: UpgradeJournalV1 = postcard::from_bytes(&plaintext).map_err(|source| {
+        let journal = UpgradeJournalV1::decode(&plaintext).map_err(|source| {
             ProfileStorageUpgradeError::Corrupt {
                 source: anyhow::Error::new(source)
                     .context("decode profile storage upgrade journal"),
@@ -105,7 +105,7 @@ impl UpgradePersistence {
                 source: anyhow::anyhow!("profile storage upgrade journal already exists"),
             });
         }
-        let plaintext = Zeroizing::new(postcard::to_stdvec(journal).map_err(|source| {
+        let plaintext = Zeroizing::new(journal.encode().map_err(|source| {
             ProfileStorageUpgradeError::Corrupt {
                 source: anyhow::Error::new(source)
                     .context("encode profile storage upgrade journal"),
@@ -123,7 +123,7 @@ impl UpgradePersistence {
         journal: &UpgradeJournalV1,
     ) -> Result<(), ProfileStorageUpgradeError> {
         journal.validate()?;
-        let plaintext = Zeroizing::new(postcard::to_stdvec(journal).map_err(|source| {
+        let plaintext = Zeroizing::new(journal.encode().map_err(|source| {
             ProfileStorageUpgradeError::Corrupt {
                 source: anyhow::Error::new(source)
                     .context("encode profile storage upgrade journal"),
