@@ -363,6 +363,31 @@ impl TargetGenerationStager {
     }
 }
 
+pub(super) fn legacy_space_generation_directory(
+    generation_root: &Path,
+    space_id: &str,
+    generation: &[u8; 16],
+) -> PathBuf {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"uniclipboard/space-generation-directory/v1\0");
+    hasher.update(space_id.as_bytes());
+    hasher.update(generation);
+    let digest: [u8; 32] = hasher.finalize().into();
+    generation_root.join(legacy_generation_directory_name(&digest))
+}
+
+fn legacy_generation_directory_name(digest: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut value = String::with_capacity(32);
+    for byte in &digest[..16] {
+        value.push(HEX[(byte >> 4) as usize] as char);
+        value.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    value
+}
+
 pub(super) struct TargetPaths {
     pub(super) scratch: PathBuf,
     pub(super) profile_database: PathBuf,

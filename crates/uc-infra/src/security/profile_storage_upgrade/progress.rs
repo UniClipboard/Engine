@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use super::journal::{UpgradeJournalV1, UpgradePhaseV1};
 use super::{ProfileStorageUpgradeError, ProfileStorageUpgradeOutcome};
 
 /// 存储维护的稳定工作类别，不暴露 journal 或 generation。
@@ -180,6 +181,47 @@ impl UpgradeProgress {
                 state.steps.push(restored);
             }
         });
+    }
+
+    pub(super) fn restore_from_journal(&self, journal: &UpgradeJournalV1) {
+        if !matches!(
+            journal.phase(),
+            UpgradePhaseV1::Detected | UpgradePhaseV1::TargetStaged
+        ) {
+            self.complete(StorageUpgradeStep::Checking);
+        }
+        if let Some(count) = journal.converted_inline_count() {
+            self.restore(
+                StorageUpgradeStep::Contents,
+                count,
+                StorageUpgradeUnit::Representations,
+                Some(0),
+            );
+        }
+        if let Some(count) = journal.converted_blob_count() {
+            self.restore(
+                StorageUpgradeStep::LargeContents,
+                count,
+                StorageUpgradeUnit::LargeContents,
+                journal.preserved_blob_count(),
+            );
+        }
+        if let Some(count) = journal.converted_derived_count() {
+            let warnings = journal.unavailable_derived_count();
+            self.restore(
+                StorageUpgradeStep::RelatedRecords,
+                count.saturating_add(warnings.unwrap_or(0)),
+                StorageUpgradeUnit::Records,
+                warnings,
+            );
+        }
+        if matches!(
+            journal.phase(),
+            UpgradePhaseV1::Verified | UpgradePhaseV1::Promoted | UpgradePhaseV1::CleanupPending
+        ) {
+            self.begin(StorageUpgradeStep::Verifying, None, None);
+            self.complete(StorageUpgradeStep::Verifying);
+        }
     }
 
     pub(super) fn finish(
