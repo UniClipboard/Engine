@@ -23,3 +23,4 @@
 - [036 关键模块深化与退役路径 clean cutover](036-architecture-deepening-clean-cutovers.md)
 - [037 OpenTelemetry tracing 与结构化日志 clean cutover](037-opentelemetry-tracing-and-structured-logs.md)
 - [移动端日志文件层与连接中继日志](mobile-log-file-layer.md)（保留、导出和远程发送由 037 取代）
+- [Profile 内容密钥运行期复用](profile-content-key-runtime-reuse.md)（实现完成；含已知全量测试失败与 GUI 验收跳过记录）

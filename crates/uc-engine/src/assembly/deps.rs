@@ -89,6 +89,8 @@ pub struct SyncEngineDeps {
     pub current_member_signatures: Arc<dyn CurrentMemberSignaturePort>,
     /// The same unlocked session used by space access and encrypted storage.
     pub membership_session: Arc<uc_infra::space::InMemorySession>,
+    /// 完整后台安全生命周期；关闭时封口，普通 GUI 授权不影响它。
+    pub security_lifecycle: Arc<uc_infra::space::RuntimeSpaceAccessAdapter>,
     /// MasterKey-encrypted single membership ledger used by the new Space application.
     pub membership_ledger: Arc<
         uc_infra::space::SqliteMembershipLedger<Arc<uc_infra::db::executor::DieselSqliteExecutor>>,

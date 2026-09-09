@@ -1004,6 +1004,9 @@ impl SqliteSearchIndex {
                     let (fields, render_corrupted) = match &doc.render_payload {
                         Some(payload) => match protection.open_render(&entry_id, payload).await {
                             Ok(fields) => (fields, false),
+                            Err(error) if error.runtime_closed() => {
+                                return Err(SearchError::SessionLocked)
+                            }
                             Err(error) => {
                                 warn!(
                                     entry_id = %doc.entry_id,
@@ -1580,6 +1583,7 @@ impl SearchIndexPort for SqliteSearchIndex {
                         crate::search::V3SearchProtectionError::InvalidGroupReferences {
                             ..
                         } => SearchError::IndexNotReady,
+                        other if other.runtime_closed() => SearchError::SessionLocked,
                         other => SearchError::Internal(format!(
                             "prepare V3 search query failed: {other}"
                         )),

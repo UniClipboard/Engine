@@ -21,7 +21,8 @@ use uc_core::membership::{
 };
 use zeroize::Zeroizing;
 
-use crate::security::MasterKey;
+use crate::security::ProfileKeyReadLease;
+use crate::security::{MasterKey, ProfileContentKeyVault};
 
 use super::content_key_catalog::{
     decode as decode_content_key_catalog, encode as encode_content_key_catalog,
@@ -95,31 +96,115 @@ impl ResolvedContentKey {
 
 /// In-memory master-key 容器,线程安全。
 ///
-/// `MasterKey` 派生 `ZeroizeOnDrop`(见 `crate::security::secrets`),所以
-/// `set_master_key` 替换旧值、`clear` 把 `Option` 置空、整个 `InMemorySession`
-/// 被 drop 等路径都会就地把 32 字节密钥清零——会话生命周期结束后,残留密钥
-/// 物料就不会停留在堆/栈/swap 页面里。
+/// `MasterKey` 派生 `ZeroizeOnDrop`，替换、clear 与析构会清理本容器材料；
+/// clear 同时撤销 profile 目录复用。密码操作已取得的短期副本由各自析构清理，
+/// 不承诺撤回已返回的明文，也不保证操作系统交换页中的历史副本已被擦除。
 #[derive(Clone)]
 pub struct InMemorySession {
-    state: Arc<Mutex<State>>,
+    state: Arc<Mutex<SessionState>>,
     ready: Arc<Notify>,
 }
 
-pub(crate) struct SessionSnapshot(State);
+struct SessionState {
+    material: State,
+    generation: Arc<()>,
+    lease: Option<ProfileKeyReadLease>,
+    closed: bool,
+    allow_reuse: bool,
+}
+
+impl std::ops::Deref for SessionState {
+    type Target = State;
+    fn deref(&self) -> &State {
+        &self.material
+    }
+}
+impl std::ops::DerefMut for SessionState {
+    fn deref_mut(&mut self) -> &mut State {
+        &mut self.material
+    }
+}
+impl SessionState {
+    fn new(material: State) -> Self {
+        Self {
+            material,
+            generation: Arc::new(()),
+            lease: None,
+            closed: false,
+            allow_reuse: true,
+        }
+    }
+}
+
+pub(crate) struct SessionSnapshot {
+    material: State,
+    generation: Arc<()>,
+}
+
+/// 异步激活的回滚责任留在 Infra；取消也不能留下临时装入的目标密钥。
+pub(crate) struct SessionTransaction<'a> {
+    session: &'a InMemorySession,
+    previous: Option<SessionSnapshot>,
+}
+
+impl SessionTransaction<'_> {
+    pub(crate) fn commit(
+        mut self,
+        vault: &ProfileContentKeyVault,
+    ) -> Result<(), super::active_space_security_session::ActiveSpaceSecuritySessionError> {
+        use super::active_space_security_session::ActiveSpaceSecuritySessionError;
+        let mut state = self.session.lock_state();
+        let valid = self
+            .previous
+            .as_ref()
+            .is_some_and(|previous| Arc::ptr_eq(&previous.generation, &state.generation));
+        if !valid || state.closed || state.master_key.is_none() {
+            return Err(ActiveSpaceSecuritySessionError::Session {
+                source: anyhow::Error::new(EncryptionError::NotInitialized),
+            });
+        }
+        if state.allow_reuse && state.lease.is_none() {
+            state.lease = Some(vault.begin_read_reuse().map_err(|source| {
+                ActiveSpaceSecuritySessionError::Vault {
+                    source: anyhow::Error::new(source),
+                }
+            })?);
+        }
+        self.previous = None;
+        drop(state);
+        self.session.ready.notify_waiters();
+        Ok(())
+    }
+}
+
+impl Drop for SessionTransaction<'_> {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            self.session.restore(previous);
+        }
+    }
+}
 
 impl InMemorySession {
     pub fn new() -> Self {
         Self {
-            state: Arc::new(Mutex::new(State {
+            state: Arc::new(Mutex::new(SessionState::new(State {
                 master_key: None,
                 space_id: None,
                 protection_group_id: None,
                 current_content_key_id: None,
                 current_epoch: None,
                 content_keys: HashMap::new(),
-            })),
+            }))),
             ready: Arc::new(Notify::new()),
         }
+    }
+
+    /// 离线升级/验证不取得后台运行期的复用许可。
+    pub(crate) fn for_maintenance() -> Self {
+        let session = Self::new();
+        session.lock_state().allow_reuse = false;
+        session
     }
 
     pub fn is_ready(&self) -> bool {
@@ -130,10 +215,9 @@ impl InMemorySession {
     }
 
     pub(crate) fn detached_clone(&self) -> Arc<Self> {
-        Arc::new(Self {
-            state: Arc::new(Mutex::new(self.lock_state().clone())),
-            ready: Arc::new(Notify::new()),
-        })
+        let session = Self::for_maintenance();
+        session.lock_state().material = self.lock_state().material.clone();
+        Arc::new(session)
     }
 
     pub async fn wait_until_ready(&self) {
@@ -158,6 +242,9 @@ impl InMemorySession {
         let span = debug_span!("infra.session.set_master_key");
         span.in_scope(|| {
             let mut state = self.lock_state();
+            if state.closed {
+                return;
+            }
             state.master_key = Some(master_key);
             state.space_id = None;
             state.protection_group_id = None;
@@ -171,6 +258,29 @@ impl InMemorySession {
 
     pub(crate) fn set_master_key_for_space(&self, space_id: SpaceId, master_key: MasterKey) {
         let mut state = self.lock_state();
+        if state.closed {
+            return;
+        }
+        Self::set_space_key(&mut state, space_id, master_key);
+        drop(state);
+        self.ready.notify_waiters();
+    }
+
+    /// 重绑与 clear 共用一个临界区，不能把清理前复制出的 MasterKey 写回。
+    pub(crate) fn rebind_to_space(&self, space_id: &SpaceId) -> Result<(), EncryptionError> {
+        let mut state = self.lock_state();
+        let master_key = state
+            .master_key
+            .as_ref()
+            .cloned()
+            .ok_or(EncryptionError::NotInitialized)?;
+        Self::set_space_key(&mut state, space_id.clone(), master_key);
+        drop(state);
+        self.ready.notify_waiters();
+        Ok(())
+    }
+
+    fn set_space_key(state: &mut State, space_id: SpaceId, master_key: MasterKey) {
         state.master_key = Some(master_key.clone());
         state.space_id = Some(space_id);
         state.protection_group_id = None;
@@ -184,8 +294,27 @@ impl InMemorySession {
                 key: master_key,
             },
         );
-        drop(state);
-        self.ready.notify_waiters();
+    }
+
+    pub(crate) fn begin_transaction(
+        &self,
+        target: Option<(SpaceId, MasterKey)>,
+    ) -> Result<SessionTransaction<'_>, EncryptionError> {
+        let mut state = self.lock_state();
+        if state.closed {
+            return Err(EncryptionError::NotInitialized);
+        }
+        let previous = SessionSnapshot {
+            material: state.material.clone(),
+            generation: state.generation.clone(),
+        };
+        if let Some((space_id, key)) = target {
+            Self::set_space_key(&mut state, space_id, key);
+        }
+        Ok(SessionTransaction {
+            session: self,
+            previous: Some(previous),
+        })
     }
 
     fn create_ready_space_material(
@@ -448,12 +577,22 @@ impl InMemorySession {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn snapshot(&self) -> SessionSnapshot {
-        SessionSnapshot(self.lock_state().clone())
+        {
+            let state = self.lock_state();
+            SessionSnapshot {
+                material: state.material.clone(),
+                generation: state.generation.clone(),
+            }
+        }
     }
 
     pub(crate) fn restore(&self, snapshot: SessionSnapshot) {
-        *self.lock_state() = snapshot.0;
+        let mut state = self.lock_state();
+        if !state.closed && Arc::ptr_eq(&state.generation, &snapshot.generation) {
+            state.material = snapshot.material;
+        }
     }
 
     pub(crate) fn current_content_key(
@@ -571,25 +710,36 @@ impl InMemorySession {
         })
     }
 
-    fn lock_state(&self) -> std::sync::MutexGuard<'_, State> {
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, SessionState> {
         match self.state.lock() {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         }
     }
 
+    pub(crate) fn close(&self) {
+        let mut state = self.lock_state();
+        state.closed = true;
+        Self::clear_state(&mut state);
+    }
+
     pub fn clear(&self) {
         let span = debug_span!("infra.session.clear");
         span.in_scope(|| {
             let mut state = self.lock_state();
-            state.master_key = None;
-            state.space_id = None;
-            state.protection_group_id = None;
-            state.current_content_key_id = None;
-            state.current_epoch = None;
-            state.content_keys.clear();
+            Self::clear_state(&mut state);
             debug!("master key cleared");
         });
+    }
+    fn clear_state(state: &mut SessionState) {
+        state.generation = Arc::new(());
+        state.lease = None;
+        state.master_key = None;
+        state.space_id = None;
+        state.protection_group_id = None;
+        state.current_content_key_id = None;
+        state.current_epoch = None;
+        state.content_keys.clear();
     }
 }
 

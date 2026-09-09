@@ -11,6 +11,8 @@ pub(super) const MAX_TOTAL_ENTRIES: usize = 4096;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProfileContentKeyVaultError {
+    #[error("profile content key runtime is closed")]
+    Closed,
     #[error("profile content key secure storage is unavailable")]
     SecureStorage {
         #[source]

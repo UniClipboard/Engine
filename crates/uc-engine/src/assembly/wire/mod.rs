@@ -998,6 +998,7 @@ pub async fn wire_dependencies_from_inputs(
             space_security_reset,
             current_member_signatures,
             membership_session,
+            security_lifecycle: Arc::clone(&space_access_adapter),
             membership_ledger,
             membership_projection,
             admission_state,
@@ -1018,6 +1019,7 @@ pub async fn wire_dependencies_from_inputs(
         #[cfg(feature = "lan-compat")]
         mobile_sync_ports: uc_mobile_lan::MobileSyncPorts {
             devices: uc_mobile_lan::MobileDevicePorts {
+                activity: infra.mobile_device_ports.activity,
                 find_by_username: infra.mobile_device_ports.find_by_username,
                 find_by_id: infra.mobile_device_ports.find_by_id,
                 list: infra.mobile_device_ports.list,

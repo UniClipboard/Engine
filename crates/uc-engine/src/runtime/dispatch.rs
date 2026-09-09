@@ -631,6 +631,7 @@ impl EngineRuntime for ProductionRuntime {
     }
 
     async fn shutdown(&self, deadline: Duration) -> Result<(), EngineError> {
+        self.security_lifecycle.close_security_session();
         self.network_recovery.shutdown().await;
         self.suspend().await?;
         self.session_supervisor.clear_factory();

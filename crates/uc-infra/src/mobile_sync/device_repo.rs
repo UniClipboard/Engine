@@ -37,6 +37,25 @@ impl InMemoryMobileDeviceRepository {
 
 #[async_trait]
 impl MobileDeviceStore for InMemoryMobileDeviceRepository {
+    async fn record_activity(
+        &self,
+        device_id: &MobileDeviceId,
+        observed_at_ms: i64,
+    ) -> Result<bool, uc_core::ports::mobile_sync::MobileActivityError> {
+        let mut devices = self.devices.lock().await;
+        let Some(device) = devices.get_mut(device_id) else {
+            return Ok(false);
+        };
+        if device
+            .last_seen_at_ms
+            .is_some_and(|last| last >= observed_at_ms)
+        {
+            return Ok(false);
+        }
+        device.last_seen_at_ms = Some(observed_at_ms);
+        Ok(true)
+    }
+
     async fn save(&self, device: &MobileDevice) -> Result<(), MobileDeviceError> {
         let mut guard = self.devices.lock().await;
 
@@ -107,10 +126,79 @@ impl MobileDeviceStore for InMemoryMobileDeviceRepository {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use uc_core::mobile_sync::MobileClientType;
+
+    pub(crate) async fn verify_activity_contract<R: MobileDeviceStore + 'static>(repo: R) {
+        let repo = std::sync::Arc::new(repo);
+        let original = device("activity", "activity", "original");
+        let other = device("other", "other", "other");
+        repo.save(&original).await.unwrap();
+        repo.save(&other).await.unwrap();
+        assert!(repo
+            .record_activity(&original.device_id, 100)
+            .await
+            .unwrap());
+        assert!(!repo
+            .record_activity(&original.device_id, 100)
+            .await
+            .unwrap());
+        assert!(!repo.record_activity(&original.device_id, 50).await.unwrap());
+
+        let mut edited = original.clone();
+        edited.label = "edited".into();
+        edited.username = "edited_user".into();
+        edited.password_hash = "new_password_hash".into();
+        let edit_repo = repo.clone();
+        let edit = edited.clone();
+        let edit_task =
+            tokio::spawn(async move { edit_repo.update_mobile_device(&edit).await.unwrap() });
+        let mut writes = Vec::new();
+        for at_ms in (101..=120).rev() {
+            let repo = repo.clone();
+            let id = original.device_id.clone();
+            writes.push(tokio::spawn(async move {
+                repo.record_activity(&id, at_ms).await.unwrap()
+            }));
+        }
+        assert!(edit_task.await.unwrap());
+        for write in writes {
+            write.await.unwrap();
+        }
+        edited.last_seen_at_ms = Some(120);
+        assert_eq!(
+            repo.find_by_device_id(&original.device_id).await.unwrap(),
+            Some(edited)
+        );
+        assert_eq!(
+            repo.find_by_device_id(&other.device_id).await.unwrap(),
+            Some(other)
+        );
+
+        let delete_repo = repo.clone();
+        let id = original.device_id.clone();
+        let delete = tokio::spawn(async move { delete_repo.delete(&id).await.unwrap() });
+        repo.record_activity(&original.device_id, 130)
+            .await
+            .unwrap();
+        assert!(delete.await.unwrap());
+        assert!(!repo
+            .record_activity(&original.device_id, 140)
+            .await
+            .unwrap());
+        assert!(repo
+            .find_by_device_id(&original.device_id)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn activity_updates_preserve_time_fields_and_deletion() {
+        verify_activity_contract(InMemoryMobileDeviceRepository::new()).await;
+    }
 
     fn device(id: &str, username_suffix: &str, label: &str) -> MobileDevice {
         MobileDevice {

@@ -84,3 +84,5 @@ pub use v3_admission_space_transition::V3AdmissionSpaceTransition;
 pub use v3_device_management_reset::V3DeviceManagementReset;
 pub use v3_initial_space_activation::V3InitialSpaceActivation;
 pub use v3_membership_branch_transition::V3MembershipBranchTransition;
+
+pub(crate) use profile_content_key_vault::ProfileKeyReadLease;

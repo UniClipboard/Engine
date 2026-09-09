@@ -2,17 +2,15 @@ use std::collections::BTreeSet;
 
 use sha2::{Digest, Sha256};
 use uc_core::ids::SpaceId;
-use uc_core::membership::{
-    ContentKeyId, GroupEpoch, ProtectionGroupId, SpaceKeyMaterial, SpaceSecurityMode,
-};
+use uc_core::membership::{ContentKeyId, ProtectionGroupId, SpaceKeyMaterial, SpaceSecurityMode};
 
 use crate::space::export_admission_content_key_catalog;
 
 use super::super::MasterKey;
 use super::model::{
     corrupt, invalid_material, InstalledProfileCatalog, PersistedEntry, PersistedGroup,
-    PersistedVault, ProfileContentKeyVaultError, ProfileSearchCatalog, ResolvedProfileContentKey,
-    FORMAT_VERSION_V1, MAX_ENTRIES_PER_GROUP, MAX_GROUPS, MAX_TOTAL_ENTRIES,
+    PersistedVault, ProfileContentKeyVaultError, ProfileSearchCatalog, FORMAT_VERSION_V1,
+    MAX_ENTRIES_PER_GROUP, MAX_GROUPS, MAX_TOTAL_ENTRIES,
 };
 
 const GROUP_DIGEST_DOMAIN_V1: &[u8] = b"uniclipboard/protected-group-catalog/v1\0";
@@ -182,44 +180,6 @@ pub(super) fn validate(vault: &PersistedVault) -> Result<(), ProfileContentKeyVa
         return Err(ProfileContentKeyVaultError::CapacityExceeded);
     }
     Ok(())
-}
-
-pub(super) fn resolve(
-    vault: &PersistedVault,
-    content_key_id: &ContentKeyId,
-    epoch: GroupEpoch,
-) -> Result<ResolvedProfileContentKey, ProfileContentKeyVaultError> {
-    for group in &vault.groups {
-        if let Some(entry) = group
-            .entries
-            .iter()
-            .find(|entry| entry.content_key_id == content_key_id.as_str())
-        {
-            if entry.epoch != epoch.value() {
-                return Err(ProfileContentKeyVaultError::EpochMismatch);
-            }
-            let protection_group_id = ProtectionGroupId::from_string(
-                group.protection_group_id.clone(),
-            )
-            .map_err(|source| ProfileContentKeyVaultError::Corrupt {
-                source: anyhow::Error::new(source)
-                    .context("decode profile content protection group"),
-            })?;
-            let key = MasterKey::from_bytes(&entry.key).map_err(|source| {
-                ProfileContentKeyVaultError::Corrupt {
-                    source: anyhow::Error::new(source)
-                        .context("decode resolved profile content key"),
-                }
-            })?;
-            return Ok(ResolvedProfileContentKey {
-                protection_group_id,
-                content_key_id: content_key_id.clone(),
-                epoch,
-                key,
-            });
-        }
-    }
-    Err(ProfileContentKeyVaultError::KeyNotFound)
 }
 
 pub(super) fn summary(vault: &PersistedVault, changed: bool) -> InstalledProfileCatalog {

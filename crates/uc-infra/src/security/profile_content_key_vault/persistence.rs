@@ -23,6 +23,17 @@ pub(super) struct VaultPersistence {
     path: PathBuf,
     secure_storage: Arc<dyn SecureStoragePort>,
     profile_generation: [u8; 16],
+    #[cfg(test)]
+    pub(super) after_store: std::sync::Mutex<Option<StoreProbe>>,
+}
+
+#[cfg(test)]
+pub(super) enum StoreProbe {
+    Fail,
+    Pause {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    },
 }
 
 impl VaultPersistence {
@@ -35,10 +46,14 @@ impl VaultPersistence {
             path: directory.join(VAULT_FILE),
             secure_storage,
             profile_generation,
+            #[cfg(test)]
+            after_store: std::sync::Mutex::new(None),
         }
     }
 
-    pub(super) async fn load(&self) -> Result<PersistedVault, ProfileContentKeyVaultError> {
+    pub(super) async fn load(
+        &self,
+    ) -> Result<(PersistedVault, MasterKey), ProfileContentKeyVaultError> {
         self.load_optional()
             .await?
             .ok_or(ProfileContentKeyVaultError::KeyNotFound)
@@ -46,7 +61,7 @@ impl VaultPersistence {
 
     pub(super) async fn load_optional(
         &self,
-    ) -> Result<Option<PersistedVault>, ProfileContentKeyVaultError> {
+    ) -> Result<Option<(PersistedVault, MasterKey)>, ProfileContentKeyVaultError> {
         let file = match tokio::fs::File::open(&self.path).await {
             Ok(file) => file,
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -87,13 +102,13 @@ impl VaultPersistence {
             }
         })?;
         catalog::validate(&vault)?;
-        Ok(Some(vault))
+        Ok(Some((vault, self.derive_profile_search_root(&key)?)))
     }
 
     pub(super) async fn store(
         &self,
         vault: &PersistedVault,
-    ) -> Result<(), ProfileContentKeyVaultError> {
+    ) -> Result<MasterKey, ProfileContentKeyVaultError> {
         let key = self.load_or_create_key_for_install()?;
         let plaintext = Zeroizing::new(postcard::to_stdvec(vault).map_err(|source| {
             ProfileContentKeyVaultError::InvalidMaterial {
@@ -117,13 +132,34 @@ impl VaultPersistence {
         if ciphertext.len() > MAX_ENCRYPTED_VAULT_BYTES {
             return Err(ProfileContentKeyVaultError::CapacityExceeded);
         }
-        write_atomically(&self.path, &ciphertext).await
+        write_atomically(&self.path, &ciphertext).await?;
+        #[cfg(test)]
+        {
+            let probe = self
+                .after_store
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            match probe {
+                Some(StoreProbe::Fail) => {
+                    return Err(storage_error(std::io::Error::other(
+                        "injected post-commit failure",
+                    )))
+                }
+                Some(StoreProbe::Pause { entered, release }) => {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+                None => {}
+            }
+        }
+        self.derive_profile_search_root(&key)
     }
 
-    pub(super) fn derive_profile_search_root(
+    fn derive_profile_search_root(
         &self,
+        vault_key: &MasterKey,
     ) -> Result<MasterKey, ProfileContentKeyVaultError> {
-        let vault_key = self.load_existing_key()?;
         let hkdf = Hkdf::<Sha256>::new(Some(&self.profile_generation), vault_key.as_bytes());
         let mut output = Zeroizing::new([0u8; MasterKey::LEN]);
         hkdf.expand(PROFILE_SEARCH_ROOT_INFO, output.as_mut())
@@ -136,6 +172,29 @@ impl VaultPersistence {
                 source: anyhow::Error::new(source).context("decode profile search root"),
             }
         })
+    }
+
+    // 运行期复用持有租约；临时读取和安装也遵守同一跨实例排他规则。
+    pub(super) fn acquire_lease(&self) -> Result<std::fs::File, ProfileContentKeyVaultError> {
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| storage_error(std::io::Error::other("vault parent is missing")))?;
+        std::fs::create_dir_all(parent).map_err(storage_error)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(parent.join("profile-content-key-vault.lease"))
+            .map_err(storage_error)?;
+        crate::fs::file_lock::try_lock_exclusive(&file).map_err(|source| {
+            ProfileContentKeyVaultError::Storage {
+                source: anyhow::Error::new(source)
+                    .context("acquire profile content vault ownership"),
+            }
+        })?;
+        Ok(file)
     }
 
     #[cfg(test)]

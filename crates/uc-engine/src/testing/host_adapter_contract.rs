@@ -1707,6 +1707,162 @@ async fn host_capabilities_wire_real_core_dependencies() {
     assert_eq!(wiring.paths.app_data_root_dir, private);
 }
 
+#[cfg(feature = "lan-compat")]
+#[tokio::test]
+async fn mobile_activity_public_requests_survive_restart() {
+    use crate::{Operation, OperationResult};
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let secure_storage = MemoryHostSecureStorage::default();
+    let host = || {
+        HostCapabilities::new(
+            HostDirectories::new(
+                temp.path().join("private"),
+                temp.path().join("cache"),
+                temp.path().join("temporary"),
+                temp.path().join("logs"),
+            ),
+            Box::new(secure_storage.clone()),
+            Box::new(StaticHostClipboard {
+                snapshot: HostClipboardSnapshot {
+                    observed_at_ms: 0,
+                    representations: Vec::new(),
+                },
+            }),
+            Box::new(EmptyHostFiles),
+        )
+    };
+    async fn activity(engine: &Engine) -> Option<i64> {
+        match engine.execute(Operation::ListMobileDevices).await.unwrap() {
+            OperationResult::MobileDevices(devices) => devices[0].last_seen_at_ms,
+            other => panic!("expected devices, got {other:?}"),
+        }
+    }
+    let request = || {
+        Operation::AuthenticateMobileRequest(crate::AuthenticateMobileRequestInput {
+            authorization: crate::SecretString::new("Basic dGVzdF9waG9uZTp0ZXN0LXBhc3N3b3Jk"),
+        })
+    };
+    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host())
+        .await
+        .unwrap();
+    engine
+        .execute(Operation::UpdateMobileSyncSettings(Box::new(
+            crate::MobileSyncSettingsPatch {
+                enabled: Some(true),
+                lan_listen_enabled: Some(true),
+                lan_advertise_base_url: Some(Some("http://127.0.0.1:42720".into())),
+                ..Default::default()
+            },
+        )))
+        .await
+        .unwrap();
+    let registered = engine
+        .execute(Operation::RegisterMobileDevice(
+            crate::RegisterMobileDeviceInput {
+                label: "Test Phone".into(),
+                username: Some("test_phone".into()),
+                password: Some(crate::SecretString::new("test-password")),
+            },
+        ))
+        .await
+        .unwrap();
+    let id = match registered {
+        OperationResult::MobileDeviceRegistered(
+            crate::MobileDeviceRegistrationOutcome::Registered(device),
+        ) => device.device_id,
+        other => panic!("expected registration, got {other:?}"),
+    };
+    assert_eq!(activity(&engine).await, None);
+    for authorization in [
+        "invalid",
+        "Basic dGVzdF9waG9uZTp3cm9uZw==",
+        "Basic dW5rbm93bjp0ZXN0LXBhc3N3b3Jk",
+    ] {
+        assert_eq!(
+            engine
+                .execute(Operation::AuthenticateMobileRequest(
+                    crate::AuthenticateMobileRequestInput {
+                        authorization: crate::SecretString::new(authorization),
+                    }
+                ))
+                .await
+                .unwrap(),
+            OperationResult::MobileAuthentication(crate::MobileAuthenticationOutcome::Rejected)
+        );
+        assert_eq!(activity(&engine).await, None);
+    }
+    let session = match engine.execute(request()).await.unwrap() {
+        OperationResult::MobileRequestAuthenticated(session) => session,
+        other => panic!("expected authenticated request, got {other:?}"),
+    };
+    let first = activity(&engine).await.unwrap();
+    assert!(first > 0);
+    assert_eq!(
+        engine
+            .execute(Operation::RevalidateMobileCredential(
+                crate::RevalidateMobileCredentialInput {
+                    credential: session.credential,
+                }
+            ))
+            .await
+            .unwrap(),
+        OperationResult::MobileCredentialCurrent { current: true }
+    );
+    assert_eq!(activity(&engine).await, Some(first));
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    engine.execute(request()).await.unwrap();
+    let latest = activity(&engine).await.unwrap();
+    assert!(latest > first);
+    engine
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+    drop(engine);
+
+    let (restarted, _events) = Engine::start(EngineConfig::new("1.2.3"), host())
+        .await
+        .unwrap();
+    assert_eq!(activity(&restarted).await, Some(latest));
+    restarted
+        .execute(Operation::UpdateMobileDevice(
+            crate::UpdateMobileDeviceInput {
+                device_id: id.clone(),
+                label: Some("Renamed".into()),
+                username: None,
+                password: crate::MobilePasswordUpdate::AutoGenerate,
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        restarted.execute(request()).await.unwrap(),
+        OperationResult::MobileAuthentication(crate::MobileAuthenticationOutcome::Rejected)
+    );
+    assert_eq!(activity(&restarted).await, Some(latest));
+    restarted
+        .execute(Operation::RevokeMobileDevice(crate::MobileDeviceInput {
+            device_id: id,
+        }))
+        .await
+        .unwrap();
+    assert_eq!(
+        restarted.execute(request()).await.unwrap(),
+        OperationResult::MobileAuthentication(crate::MobileAuthenticationOutcome::Rejected)
+    );
+    assert_eq!(
+        restarted
+            .execute(Operation::ListMobileDevices)
+            .await
+            .unwrap(),
+        OperationResult::MobileDevices(Vec::new())
+    );
+    restarted
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn engine_start_builds_a_resumable_real_session() {
     let _guard = ENGINE_TEST_LOCK.lock().await;
