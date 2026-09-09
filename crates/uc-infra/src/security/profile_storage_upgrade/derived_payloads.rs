@@ -808,9 +808,7 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<(), ProfileStorag
             copy_directory(&entry.path(), &target)?;
         } else if kind.is_file() {
             std::fs::copy(entry.path(), &target).map_err(io_storage)?;
-            std::fs::File::open(&target)
-                .and_then(|file| file.sync_all())
-                .map_err(io_storage)?;
+            crate::fs::durability::sync_existing_file(&target).map_err(io_storage)?;
         } else {
             return Err(corrupt(anyhow::anyhow!(
                 "primary payload output contains an unsupported entry"

@@ -1,6 +1,7 @@
 pub mod atomic_publish;
 pub mod cache_fs;
 pub mod directory_staging_cleanup;
+pub(crate) mod durability;
 pub mod file_lock;
 pub mod hidden_path;
 pub mod inbound_target;

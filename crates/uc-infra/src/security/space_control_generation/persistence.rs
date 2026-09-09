@@ -76,8 +76,8 @@ pub(super) fn compact_database(database: &Path) -> Result<(), SpaceControlGenera
         .map_err(|source| {
             storage(anyhow::Error::new(source).context("compact prepared control database"))
         })?;
-    std::fs::File::open(database)
-        .and_then(|file| file.sync_all())
+    drop(connection);
+    crate::fs::durability::sync_existing_file(database)
         .map_err(|source| storage(anyhow::Error::new(source)))?;
     let parent = database
         .parent()
@@ -94,19 +94,33 @@ pub(super) fn checkpoint_database(
     let mut connection = pool
         .get()
         .map_err(|source| storage(anyhow::Error::new(source)))?;
-    connection
-        .batch_execute("PRAGMA wal_checkpoint(TRUNCATE);")
+    let checkpoint = diesel::sql_query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .get_result::<CheckpointRow>(&mut connection)
         .map_err(|source| {
             storage(anyhow::Error::new(source).context("checkpoint mutable control database"))
         })?;
     drop(connection);
-    std::fs::File::open(database)
-        .and_then(|file| file.sync_all())
+    if checkpoint.busy != 0 || (checkpoint.log >= 0 && checkpoint.checkpointed < checkpoint.log) {
+        return Err(SpaceControlGenerationError::Busy {
+            source: anyhow::anyhow!("mutable control database checkpoint is incomplete"),
+        });
+    }
+    crate::fs::durability::sync_existing_file(database)
         .map_err(|source| storage(anyhow::Error::new(source)))?;
     let parent = database
         .parent()
         .ok_or_else(|| storage(anyhow::anyhow!("control database parent is missing")))?;
     sync_directory(parent)
+}
+
+#[derive(diesel::QueryableByName)]
+struct CheckpointRow {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    busy: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    log: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    checkpointed: i64,
 }
 
 #[derive(diesel::QueryableByName)]
@@ -182,5 +196,33 @@ pub(super) fn remove_directory_if_present(
         Ok(()) => Ok(()),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(source) => Err(storage(anyhow::Error::new(source))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checkpoint_rejects_an_active_reader_and_succeeds_after_release() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("control.sqlite");
+        let pool = init_db_pool(database.to_str().unwrap()).unwrap();
+        pool.get().unwrap().batch_execute("CREATE TABLE checkpoint_probe (value INTEGER); INSERT INTO checkpoint_probe VALUES (1);").unwrap();
+        let mut reader = SqliteConnection::establish(database.to_str().unwrap()).unwrap();
+        reader
+            .batch_execute("BEGIN; SELECT * FROM checkpoint_probe;")
+            .unwrap();
+        pool.get()
+            .unwrap()
+            .batch_execute("INSERT INTO checkpoint_probe VALUES (2);")
+            .unwrap();
+        let result = checkpoint_database(&pool, &database);
+        reader.batch_execute("ROLLBACK;").unwrap();
+        assert!(
+            matches!(result, Err(SpaceControlGenerationError::Busy { .. })),
+            "checkpoint must not report an incomplete WAL checkpoint as success"
+        );
+        checkpoint_database(&pool, &database).unwrap();
     }
 }

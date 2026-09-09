@@ -274,6 +274,27 @@ impl TargetGenerationStager {
         }
     }
 
+    pub(super) fn staged_snapshot_matches(
+        &self,
+        journal: &UpgradeJournalV1,
+    ) -> Result<bool, ProfileStorageUpgradeError> {
+        let expected = journal.source_snapshot_digest().ok_or_else(|| {
+            ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::anyhow!("profile upgrade snapshot digest is missing"),
+            }
+        })?;
+        let paths = self.paths(journal);
+        for path in [&paths.profile_database, &paths.control_database] {
+            match std::fs::read(path) {
+                Ok(bytes) if *blake3::hash(&bytes).as_bytes() == expected => {}
+                Ok(_) => return Ok(false),
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(source) => return Err(storage_error(source)),
+            }
+        }
+        Ok(true)
+    }
+
     /// 按最终双库布局验证所有业务 row 仍由唯一 store 拥有。
     pub(super) fn verify_runtime_row_ownership(
         &self,
@@ -435,9 +456,8 @@ fn separate_database(
     connection
         .batch_execute("VACUUM; PRAGMA foreign_keys = ON;")
         .map_err(database_error)?;
-    std::fs::File::open(path)
-        .and_then(|file| file.sync_all())
-        .map_err(storage_error)?;
+    drop(connection);
+    crate::fs::durability::sync_existing_file(path).map_err(storage_error)?;
     Ok(())
 }
 
