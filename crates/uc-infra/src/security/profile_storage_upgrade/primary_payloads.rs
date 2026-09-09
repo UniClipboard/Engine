@@ -152,9 +152,7 @@ impl PrimaryPayloadConverter {
         std::fs::create_dir(work).map_err(io_storage)?;
         let database = work.join(OUTPUT_DATABASE);
         std::fs::copy(separated_database, &database).map_err(io_storage)?;
-        std::fs::File::open(&database)
-            .and_then(|file| file.sync_all())
-            .map_err(io_storage)?;
+        crate::fs::durability::sync_existing_file(&database).map_err(io_storage)?;
         let inline_count = self.convert_inline(&database).await?;
         let blob_count = self.convert_blobs(&database, work, final_output).await?;
         self.verify_payloads(&database, work).await?;
@@ -250,9 +248,7 @@ impl PrimaryPayloadConverter {
                     // 格式、会话、缺钥和介质失败仍向上传递，不能把它们猜成历史损坏。
                     let preserved = work_blob_root.join(blob_id.as_str());
                     std::fs::write(&preserved, &source_bytes).map_err(io_storage)?;
-                    std::fs::File::open(&preserved)
-                        .and_then(|file| file.sync_all())
-                        .map_err(io_storage)?;
+                    crate::fs::durability::sync_existing_file(&preserved).map_err(io_storage)?;
                     converted.push((
                         row.blob_id,
                         final_output.join(OUTPUT_BLOBS).join(blob_id.as_str()),
@@ -514,9 +510,8 @@ pub(super) fn compact_database(path: &Path) -> Result<(), ProfileStorageUpgradeE
     connection
         .batch_execute("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE; VACUUM;")
         .map_err(database_storage)?;
-    std::fs::File::open(path)
-        .and_then(|file| file.sync_all())
-        .map_err(io_storage)
+    drop(connection);
+    crate::fs::durability::sync_existing_file(path).map_err(io_storage)
 }
 
 pub(super) fn blob_tree_digest(root: &Path) -> Result<[u8; 32], ProfileStorageUpgradeError> {

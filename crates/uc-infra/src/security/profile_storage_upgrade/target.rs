@@ -72,6 +72,7 @@ const SPACE_CONTROL_TABLES: &[&str] = &[
     "relationship_privacy_maintenance",
     "space_admission_credentials",
     "space_key_epoch_state",
+    "ticket_nonce",
 ];
 
 const PROFILE_COORDINATION_TABLES: &[&str] = &[
@@ -85,6 +86,7 @@ const PROFILE_COORDINATION_TABLES: &[&str] = &[
 
 const TECHNICAL_TABLES: &[&str] = &["__diesel_schema_migrations", "uc_database_revision"];
 const OPTIONAL_RETIRED_TABLES: &[&str] = &[
+    "ticket_nonce",
     "relationship_legacy_peer_address",
     "relationship_legacy_space_member",
     "relationship_legacy_trusted_peer",
@@ -112,6 +114,17 @@ impl TargetGenerationStager {
         journal: &UpgradeJournalV1,
     ) -> Result<StagedTarget, ProfileStorageUpgradeError> {
         let paths = self.paths(journal);
+        // Detected 的候选从未激活；重启或旧版写入后不能复用过期转换输出。
+        for directory in [
+            profile_generation_directory(&self.root, journal.target_profile_data_generation()),
+            control_generation_directory(&self.root, journal.target_space_control_generation()),
+        ] {
+            match std::fs::remove_dir_all(directory) {
+                Ok(()) => {}
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => return Err(storage_error(source)),
+            }
+        }
         let source_database_revision = self.source_revision()?;
         let source_pool =
             self.source_pool
@@ -249,6 +262,37 @@ impl TargetGenerationStager {
             return Err(ProfileStorageUpgradeError::SourceChanged);
         }
         Ok(())
+    }
+
+    pub(super) fn source_changed(
+        &self,
+        journal: &UpgradeJournalV1,
+    ) -> Result<bool, ProfileStorageUpgradeError> {
+        match journal.source_database_revision() {
+            Some(revision) => Ok(self.source_revision()? != revision),
+            None => Ok(false),
+        }
+    }
+
+    pub(super) fn staged_snapshot_matches(
+        &self,
+        journal: &UpgradeJournalV1,
+    ) -> Result<bool, ProfileStorageUpgradeError> {
+        let expected = journal.source_snapshot_digest().ok_or_else(|| {
+            ProfileStorageUpgradeError::Corrupt {
+                source: anyhow::anyhow!("profile upgrade snapshot digest is missing"),
+            }
+        })?;
+        let paths = self.paths(journal);
+        for path in [&paths.profile_database, &paths.control_database] {
+            match std::fs::read(path) {
+                Ok(bytes) if *blake3::hash(&bytes).as_bytes() == expected => {}
+                Ok(_) => return Ok(false),
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(source) => return Err(storage_error(source)),
+            }
+        }
+        Ok(true)
     }
 
     /// 按最终双库布局验证所有业务 row 仍由唯一 store 拥有。
@@ -412,9 +456,8 @@ fn separate_database(
     connection
         .batch_execute("VACUUM; PRAGMA foreign_keys = ON;")
         .map_err(database_error)?;
-    std::fs::File::open(path)
-        .and_then(|file| file.sync_all())
-        .map_err(storage_error)?;
+    drop(connection);
+    crate::fs::durability::sync_existing_file(path).map_err(storage_error)?;
     Ok(())
 }
 
@@ -631,5 +674,56 @@ mod tests {
         drop(pool);
 
         assert!(separate_database(&database, SPACE_CONTROL_TABLES).is_err());
+    }
+
+    #[test]
+    fn retired_ticket_nonces_are_owned_by_the_control_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.sqlite");
+        let profile = directory.path().join("profile.sqlite");
+        let control = directory.path().join("control.sqlite");
+        let pool = init_db_pool(source.to_str().unwrap()).unwrap();
+        pool.get().unwrap().batch_execute(
+            "CREATE TABLE ticket_nonce (nonce_hash BLOB PRIMARY KEY NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL, redeemed_at INTEGER);\
+             CREATE INDEX idx_ticket_nonce_expires_at ON ticket_nonce (expires_at);\
+             INSERT INTO ticket_nonce VALUES (X'010203', 100, 1, NULL);\
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        ).unwrap();
+        drop(pool);
+        std::fs::copy(&source, &profile).unwrap();
+        std::fs::copy(&source, &control).unwrap();
+        separate_database(&profile, SPACE_CONTROL_TABLES).unwrap();
+        separate_database(&control, super::PROFILE_DATA_TABLES).unwrap();
+        use diesel::Connection as _;
+        for (database, expected) in [(&source, 1), (&profile, 0), (&control, 1)] {
+            let mut connection =
+                diesel::sqlite::SqliteConnection::establish(database.to_str().unwrap()).unwrap();
+            let row = diesel::sql_query("SELECT COUNT(*) AS count FROM ticket_nonce")
+                .get_result::<super::CountRow>(&mut connection)
+                .unwrap();
+            assert_eq!(row.count, expected);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires an isolated database copy in UC_LEGACY_DATABASE_COPY"]
+    fn supplied_legacy_database_separates_without_changing_the_source() {
+        let source = std::path::PathBuf::from(std::env::var_os("UC_LEGACY_DATABASE_COPY").unwrap());
+        let before = std::fs::read(&source).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let profile = directory.path().join("profile.sqlite");
+        let control = directory.path().join("control.sqlite");
+        std::fs::copy(&source, &profile).unwrap();
+        std::fs::copy(&source, &control).unwrap();
+        separate_database(&profile, SPACE_CONTROL_TABLES).unwrap();
+        let excluded: Vec<&str> = super::PROFILE_DATA_TABLES
+            .iter()
+            .chain(super::PROFILE_COORDINATION_TABLES)
+            .copied()
+            .collect();
+        separate_database(&control, &excluded).unwrap();
+        ensure_tables_empty(&profile, SPACE_CONTROL_TABLES).unwrap();
+        ensure_tables_empty(&control, &excluded).unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), before);
     }
 }

@@ -201,6 +201,14 @@ impl UpgradeJournalV1 {
         }
     }
 
+    pub(super) fn restart(&self, source: Option<&ActiveSpaceGenerationManifestV2>) -> Self {
+        let mut journal = Self::detected(source);
+        // 先持久化 Detected，再由 staging 幂等清理同一组未激活候选目录。
+        journal.target_profile_data_generation = self.target_profile_data_generation;
+        journal.target_space_control_generation = self.target_space_control_generation;
+        journal
+    }
+
     pub(super) const fn phase(&self) -> UpgradePhaseV1 {
         self.phase
     }

@@ -214,6 +214,11 @@ membership.recover.{startup|resume|peer_online|retry|state_changed|requested}。
 Pending 为 partial，Busy 为 deferred。UpToDate 只产生无关联的 skipped 诊断日志；编码端在验证合法性后省略其空检查节点，Collector 同样拒绝将它呈现为升级业务记录。
 不提前查询内部阶段，不改变 ensure_v3 的调用、返回、等待或重试行为。
 
+`ProfileStorageUpgrade` 内部另外向本地日志记录失败诊断：固定的 `upgrade_phase`、`upgrade_action`、
+`error_kind`，以及存在时的 `target_activated`、`io_error_kind`、`io_error_code`。只从错误来源提取系统错误类型和数字码，
+不输出错误正文或路径。该事件使用 Infra 本地 target，不属于 `uc.telemetry`，不进入远程 schema v1；
+Engine 仍只记录完整升级结果，不读取或暴露内部阶段。
+
 成员历史交换在协议边界用固定名称区分请求用途：`membership.{compare_summary|request_history|send_history|request_conflict_evidence|send_conflict_evidence|acknowledge|deliver_restricted_event|deliver_restricted_decision}.{exchange|handle_and_reply}`。
 Engine 原样装饰既有完整能力，不解析消息。Infra 只根据已有协议消息提供用途；`exchange` 成功表示发起方收到并解码回复，
 `handle_and_reply` 成功只表示对方处理并写出回复，不代表双方成员同步最终完成。每条记录仍是一次网络交换，不冒充完整成员收敛生命周期。

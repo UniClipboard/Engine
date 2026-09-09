@@ -52,6 +52,67 @@ impl SecureStoragePort for MemorySecureStorage {
 
 struct EmptyLedger;
 
+#[tokio::test]
+#[ignore = "requires a synthetic alpha.5 development profile in UC_ALPHA5_FIXTURE_DATA"]
+async fn alpha5_runtime_fixture_reaches_legacy_ready() {
+    let source = PathBuf::from(std::env::var_os("UC_ALPHA5_FIXTURE_DATA").unwrap());
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("profile");
+    for (file, bytes) in regular_files(&source) {
+        let destination = root.join(file.strip_prefix(&source).unwrap());
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::write(destination, bytes).unwrap();
+    }
+    let secure_storage = Arc::new(MemorySecureStorage::default());
+    for entry in std::fs::read_dir(root.join("keyring")).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry
+            .path()
+            .file_stem()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let key = String::from_utf8(hex::decode(name).unwrap()).unwrap();
+        secure_storage
+            .set(&key, &std::fs::read(entry.path()).unwrap())
+            .unwrap();
+    }
+    let vault_path = root.join("vault");
+    let keys = Arc::new(AdmissionKeyManager::new(secure_storage.clone(), [0xF4; 16]));
+    let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+        vault_path.clone(),
+        keys.clone(),
+    ));
+    let vault = Arc::new(ProfileContentKeyVault::new(
+        vault_path.clone(),
+        secure_storage.clone(),
+        [0xF4; 16],
+    ));
+    let current_space = Arc::new(CurrentSpaceResolver::new(
+        manifests.clone(),
+        vault_path.join(".current-space-id-v1"),
+        keys.clone(),
+    ));
+    let upgrade = ProfileStorageUpgrade::for_runtime(
+        root.clone(),
+        root.join("uniclipboard.db"),
+        vault_path.join("blobs"),
+        ProfileId::from("default"),
+        secure_storage,
+        vault_path,
+        vault,
+        keys,
+        manifests,
+        current_space,
+    );
+    let outcome = upgrade.ensure_v3().await.unwrap();
+    assert!(matches!(
+        outcome,
+        ProfileStorageUpgradeOutcome::LegacyReady { .. } | ProfileStorageUpgradeOutcome::Upgraded
+    ));
+}
+
 #[async_trait::async_trait]
 impl LoadMembershipLedgerPort for EmptyLedger {
     async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
@@ -393,6 +454,15 @@ async fn runtime_upgrade_resumes_v2_only_after_the_lease_and_promotes_v3() {
 
 #[tokio::test]
 async fn runtime_upgrade_imports_v019_identity_and_resumes_legacy_session() {
+    assert_legacy_runtime_upgrade(false).await;
+}
+
+#[tokio::test]
+async fn runtime_upgrade_preserves_existing_v2_keys_without_a_generation_manifest() {
+    assert_legacy_runtime_upgrade(true).await;
+}
+
+async fn assert_legacy_runtime_upgrade(with_group: bool) {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("profile");
     let vault_path = root.join("vault");
@@ -413,7 +483,7 @@ async fn runtime_upgrade_imports_v019_identity_and_resumes_legacy_session() {
         [0x9B; 16],
     ));
     let source_session = Arc::new(InMemorySession::new());
-    let executor = Arc::new(DieselSqliteExecutor::new(source_pool));
+    let executor = Arc::new(DieselSqliteExecutor::new(source_pool.clone()));
     let security_repository = Arc::new(DieselSpaceSecurityStore::new(
         executor,
         source_session.as_ref().clone(),
@@ -424,7 +494,7 @@ async fn runtime_upgrade_imports_v019_identity_and_resumes_legacy_session() {
             Arc::new(JsonKeySlotStore::new(vault_path.clone())),
         )),
         Arc::new(DefaultCurrentProfile::for_profile(profile_id.clone())),
-        source_session,
+        source_session.clone(),
         security_repository.clone(),
         security_repository,
         Arc::clone(&content_vault),
@@ -433,6 +503,32 @@ async fn runtime_upgrade_imports_v019_identity_and_resumes_legacy_session() {
         .initialize(&source_space_id, &Passphrase::new("upgrade-passphrase"))
         .await
         .unwrap();
+    if with_group {
+        use uc_core::crypto::domain::{Aad, Plaintext};
+        use uc_core::ports::security::blob_cipher::BlobCipherPort;
+        uc_core::membership::GroupBootstrapPort::bootstrap_legacy_space(
+            &access,
+            &uc_core::DeviceId::new("alpha5-sponsor"),
+            &[],
+            1,
+        )
+        .await
+        .unwrap();
+        let aad = Aad::from(uc_core::crypto::aad::for_inline(
+            &uc_core::ids::EventId::from("alpha5-event"),
+            &uc_core::ids::RepresentationId::from("alpha5-inline"),
+        ));
+        let ciphertext = uc_infra::security::BlobCipherAdapter::new(source_session.clone())
+            .encrypt(&Plaintext::new(b"alpha5 retained history".to_vec()), &aad)
+            .await
+            .unwrap();
+        let mut connection = source_pool.get().unwrap();
+        diesel::sql_query("INSERT INTO clipboard_event (event_id, captured_at_ms, source_device, snapshot_hash) VALUES ('alpha5-event', 1, 'synthetic-device', 'synthetic-hash')")
+            .execute(&mut connection).unwrap();
+        diesel::sql_query("INSERT INTO clipboard_snapshot_representation (id, event_id, format_id, mime_type, size_bytes, inline_data, payload_state) VALUES ('alpha5-inline', 'alpha5-event', 'text', 'text/plain', 22, ?, 'Inline')")
+            .bind::<diesel::sql_types::Binary, _>(ciphertext.into_bytes())
+            .execute(&mut connection).unwrap();
+    }
     drop(access);
     std::fs::write(
         vault_path.join(".setup_status"),
@@ -1025,10 +1121,10 @@ async fn source_snapshot_stages_one_durable_profile_and_control_target() {
     )
     .execute(&mut changed_source.get().unwrap())
     .unwrap();
-    assert!(matches!(
-        upgrade.ensure_v3().await.unwrap_err(),
-        ProfileStorageUpgradeError::SourceChanged
-    ));
+    assert_eq!(
+        upgrade.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Pending
+    );
 }
 
 #[derive(diesel::QueryableByName)]
@@ -1045,6 +1141,75 @@ fn table_count(database: &Path, table: &str) -> i64 {
         .get_result::<CountRow>(&mut connection)
         .unwrap()
         .count
+}
+
+#[tokio::test]
+async fn changed_source_restarts_each_unpromoted_phase_and_preserves_new_rows() {
+    for completed_steps in 2..=6 {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let source_pool = init_db_pool(root.join("source.sqlite").to_str().unwrap()).unwrap();
+        let secure_storage = Arc::new(MemorySecureStorage::default());
+        let keys = Arc::new(AdmissionKeyManager::new(secure_storage.clone(), [0xE1; 16]));
+        let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+            root.join("vault"),
+            keys.clone(),
+        ));
+        let source = ActiveSpaceGenerationManifestV2::new(
+            "restart-space".to_owned(),
+            [0xE2; 16],
+            [0xE3; 16],
+            [0xE4; 16],
+        )
+        .unwrap();
+        manifests.promote(&source).await.unwrap();
+        let new_upgrade = || {
+            new_upgrade_from_pool(
+                root,
+                source_pool.clone(),
+                secure_storage.clone(),
+                keys.clone(),
+                manifests.clone(),
+            )
+        };
+        let upgrade = new_upgrade();
+        for _ in 0..completed_steps {
+            assert_eq!(
+                upgrade.ensure_v3().await.unwrap(),
+                ProfileStorageUpgradeOutcome::Pending
+            );
+        }
+        drop(upgrade);
+        diesel::sql_query("INSERT INTO clipboard_event (event_id, captured_at_ms, source_device, snapshot_hash) VALUES ('after-failed-upgrade', 1, 'synthetic-device', 'synthetic-hash')")
+            .execute(&mut source_pool.get().unwrap()).unwrap();
+        let reopened = new_upgrade();
+        assert_eq!(
+            reopened.ensure_v3().await.unwrap(),
+            ProfileStorageUpgradeOutcome::Pending
+        );
+        drop(reopened);
+        // 恢复计划已落盘后再次退出，下一次启动仍能从新 source 重建候选。
+        let reopened = new_upgrade();
+        let mut result = ProfileStorageUpgradeOutcome::Pending;
+        for _ in 0..10 {
+            result = reopened.ensure_v3().await.unwrap();
+            if result != ProfileStorageUpgradeOutcome::Pending {
+                break;
+            }
+        }
+        assert_eq!(
+            result,
+            ProfileStorageUpgradeOutcome::Upgraded,
+            "phase {completed_steps}"
+        );
+        let active = manifests.load_v3_sync().unwrap().unwrap();
+        let layout = ProfileRuntimeLayout::v3(root, &active);
+        assert_eq!(table_count(layout.profile_database(), "clipboard_event"), 1);
+        assert_eq!(
+            table_count(&root.join("source.sqlite"), "clipboard_event"),
+            1
+        );
+    }
 }
 
 #[tokio::test]

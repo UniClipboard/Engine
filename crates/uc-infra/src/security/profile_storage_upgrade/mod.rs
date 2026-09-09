@@ -6,6 +6,7 @@
 //! 专用字段/搜索转换、验证、promotion 和清理。
 
 mod derived_payloads;
+mod diagnostics;
 mod journal;
 mod persistence;
 mod primary_payloads;
@@ -22,6 +23,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use uc_application::deps::{CurrentSpaceIdentityPort as _, InitialSpaceActivationPort as _};
 use uc_core::ids::ProfileId;
+use uc_core::membership::RevocationRepositoryPort as _;
 use uc_core::ports::space::SpaceAccessStore as _;
 use uc_core::ports::SecureStoragePort;
 
@@ -32,6 +34,7 @@ use super::{
 use crate::security::active_space_generation_manifest_store::V3ManifestPromotionOutcome;
 use crate::space::{InMemorySession, KeyMaterialStore, RuntimeSpaceAccessAdapter};
 use derived_payloads::DerivedPayloadConverter;
+use diagnostics::UpgradeDiagnostics;
 use journal::{UpgradeJournalV1, UpgradePhaseV1};
 use persistence::{UpgradeLeaseResult, UpgradePersistence};
 use primary_payloads::PrimaryPayloadConverter;
@@ -235,7 +238,7 @@ impl RuntimeUpgradeBootstrap {
                 current_profile,
                 Arc::clone(&source_session),
                 security_repository.clone(),
-                security_repository,
+                security_repository.clone(),
                 Arc::clone(&self.vault),
             );
             let resumed = access
@@ -252,7 +255,19 @@ impl RuntimeUpgradeBootstrap {
                     ),
                 });
             }
-            if active.is_none() {
+            // 存储布局缺少 manifest 不代表旧版没有可用的群组密钥。
+            let needs_legacy_material = active.is_none()
+                && security_repository
+                    .load_space_material(&uc_core::ids::SpaceId::from_string(
+                        source_space_id.clone(),
+                    ))
+                    .await
+                    .map_err(|source| ProfileStorageUpgradeError::Security {
+                        source: anyhow::Error::new(source)
+                            .context("inspect restored legacy profile security material"),
+                    })?
+                    .is_none();
+            if needs_legacy_material {
                 let material = source_session
                     .create_profile_storage_upgrade_material(&uc_core::ids::SpaceId::from_string(
                         source_space_id.clone(),
@@ -517,6 +532,18 @@ impl ProfileStorageUpgrade {
     pub async fn ensure_v3(
         &self,
     ) -> Result<ProfileStorageUpgradeOutcome, ProfileStorageUpgradeError> {
+        let mut diagnostic = UpgradeDiagnostics::new();
+        let result = self.ensure_locked(&mut diagnostic).await;
+        if let Err(error) = &result {
+            diagnostic.record_failure(error);
+        }
+        result
+    }
+
+    async fn ensure_locked(
+        &self,
+        diagnostic: &mut UpgradeDiagnostics,
+    ) -> Result<ProfileStorageUpgradeOutcome, ProfileStorageUpgradeError> {
         let _in_process = self.in_process.lock().await;
         let _lease = match self.persistence.try_acquire_lease()? {
             UpgradeLeaseResult::Acquired(lease) => lease,
@@ -524,8 +551,9 @@ impl ProfileStorageUpgrade {
         };
 
         match &self.mode {
-            UpgradeMode::Prepared(components) => self.ensure_with(components).await,
+            UpgradeMode::Prepared(components) => self.ensure_with(components, diagnostic).await,
             UpgradeMode::Runtime(bootstrap) => {
+                diagnostic.action = "prepare_source";
                 let components = bootstrap
                     .prepare(
                         &self.profile_root,
@@ -534,7 +562,7 @@ impl ProfileStorageUpgrade {
                         &self.manifests,
                     )
                     .await?;
-                self.ensure_with(&components).await
+                self.ensure_with(&components, diagnostic).await
             }
         }
     }
@@ -542,10 +570,13 @@ impl ProfileStorageUpgrade {
     async fn ensure_with(
         &self,
         components: &UpgradeComponents,
+        diagnostic: &mut UpgradeDiagnostics,
     ) -> Result<ProfileStorageUpgradeOutcome, ProfileStorageUpgradeError> {
         let mut steps = 0_usize;
         loop {
-            let outcome = self.advance_once(components).await?;
+            let outcome = self
+                .advance_once(components, steps == 0, diagnostic)
+                .await?;
             steps += 1;
             if outcome != ProfileStorageUpgradeOutcome::Pending
                 || self
@@ -560,7 +591,10 @@ impl ProfileStorageUpgrade {
     async fn advance_once(
         &self,
         components: &UpgradeComponents,
+        resuming: bool,
+        diagnostic: &mut UpgradeDiagnostics,
     ) -> Result<ProfileStorageUpgradeOutcome, ProfileStorageUpgradeError> {
+        diagnostic.action = "inspect_manifest";
         let runtime_manifest = match self.manifests.load_runtime_sync() {
             Ok(source) => source,
             Err(source) => {
@@ -570,8 +604,15 @@ impl ProfileStorageUpgrade {
                 });
             }
         };
+        diagnostic.target_activated = Some(matches!(
+            runtime_manifest,
+            Some(ActiveRuntimeManifest::V3(_))
+        ));
+        diagnostic.action = "load_journal";
         let persisted_journal = self.persistence.load_journal().await?;
+        diagnostic.phase = persisted_journal.as_ref().map(UpgradeJournalV1::phase);
         if let Some(ActiveRuntimeManifest::V3(target)) = runtime_manifest.as_ref() {
+            diagnostic.action = "recover_active_target";
             let Some(mut journal) = persisted_journal else {
                 return Ok(ProfileStorageUpgradeOutcome::UpToDate);
             };
@@ -626,18 +667,37 @@ impl ProfileStorageUpgrade {
         };
         let mut journal = match persisted_journal {
             Some(journal) => {
+                diagnostic.action = "verify_source";
                 if !journal.matches_source(source.as_ref()) {
                     return Err(ProfileStorageUpgradeError::SourceChanged);
+                }
+                // 恢复入口只重建未提交且不再完整的准备副本；原始资料仍须通过身份与修订校验。
+                if resuming
+                    && !matches!(
+                        journal.phase(),
+                        UpgradePhaseV1::Promoted | UpgradePhaseV1::CleanupPending
+                    )
+                    && (components.target.source_changed(&journal)?
+                        || (journal.phase() == UpgradePhaseV1::TargetStaged
+                            && !components.target.staged_snapshot_matches(&journal)?))
+                {
+                    diagnostic.action = "save_restart_plan";
+                    self.persistence
+                        .save_journal(&journal.restart(source.as_ref()))
+                        .await?;
+                    return Ok(ProfileStorageUpgradeOutcome::Pending);
                 }
                 journal
             }
             None => {
+                diagnostic.action = "create_upgrade_plan";
                 self.persistence
                     .save_new_journal(&UpgradeJournalV1::detected(source.as_ref()))
                     .await?;
                 return Ok(ProfileStorageUpgradeOutcome::Pending);
             }
         };
+        diagnostic.begin_step(journal.phase());
         match journal.phase() {
             UpgradePhaseV1::Detected => {
                 let staged = components.target.stage(&journal)?;
