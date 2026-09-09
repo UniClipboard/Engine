@@ -2,6 +2,12 @@ name: Windows Storage Upgrade
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main, fix/alpha5-storage-upgrade]
+    paths:
+      - 'crates/uc-infra/**'
+      - '.github/workflows/windows-storage-upgrade.yml'
+      - 'scripts/diagnostics/windows_flush_probe.rs'
   pull_request:
     branches: [main]
     paths:
