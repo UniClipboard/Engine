@@ -1093,3 +1093,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 - `docs/exec-plans/completed/032-admission-space-transition-internal-refactor.md`：断开 maintenance-only legacy 可达性、删除旧 V2 transition executor、私有化 upgrade source layout 并防止 payload rewrap 回流的实施记录。
 - `docs/exec-plans/completed/033-immutable-content-protection-context.md`：不可变保护上下文、profile 历史 content key vault、一次性 V3 密文升级及无历史重包 CrossSpace 实施记录。
 - `docs/exec-plans/completed/036-architecture-deepening-clean-cutovers.md`：Clipboard、membership persistence、Iroh 地址解析、生产 session 生命周期与 Space security 构造模式的 clean-cutover 实施记录。
+
+## 文档维护记录
+
+- 2026-09-10：取消加入仍由 Application 准入流程完整负责。后台恢复造成版本冲突时，取消流程有限次重新读取当前记录并重新执行领域判断；不覆盖已提交的加入状态，不改变持久化接口或密文边界，持续冲突保留原始错误链。

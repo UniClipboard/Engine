@@ -246,6 +246,7 @@ struct RecordingJoinerStartState {
     created_join: Mutex<Option<JoinerAdmission>>,
     superseded: AtomicBool,
     fail_next_activation_commit: AtomicBool,
+    cancellation_conflicts: AtomicUsize,
 }
 
 struct RecordingSettings {
@@ -484,6 +485,15 @@ impl CurrentJoinAdmissionStatePort for RecordingJoinerStartState {
         token: JoinerCancellationCommitToken,
         mutation: JoinerCancellationMutation,
     ) -> Result<(), JoinerCancellationStateError> {
+        if self
+            .cancellation_conflicts
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(JoinerCancellationStateError::state_changed(
+                anyhow::anyhow!("concurrent admission update"),
+            ));
+        }
         assert_eq!(token.as_bytes(), &[0xd2; 32]);
         let replacement = mutation.into_transition().into_replacement();
         let persisted = replacement
@@ -1431,6 +1441,7 @@ impl SpaceAdmissionProtocolTestPair {
             created_join: Mutex::new(None),
             superseded: AtomicBool::new(false),
             fail_next_activation_commit: AtomicBool::new(false),
+            cancellation_conflicts: AtomicUsize::new(0),
         });
         let sponsor_state = Arc::new(RecordingSponsorState {
             events: Arc::clone(&events),
@@ -1573,6 +1584,12 @@ impl SpaceAdmissionProtocolTestPair {
 
     pub(super) fn require_upgrade_once_more(&self) {
         self.upgrade_pending.store(true, Ordering::SeqCst);
+    }
+
+    pub(super) fn inject_cancellation_conflicts(&self, count: usize) {
+        self.state
+            .cancellation_conflicts
+            .store(count, Ordering::SeqCst);
     }
 
     pub(super) fn take_created_join(&self) -> JoinerAdmission {
