@@ -20,19 +20,19 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::Result;
-use tracing::{info, info_span, warn, Instrument};
+use anyhow::{Context, Result};
+use tracing::{info, warn};
 
-use uc_core::ids::{EntryId, EventId};
+use uc_core::ids::{EntryId, RepresentationId};
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::clipboard::{
-    DeleteClipboardEntryPort, GetClipboardEntryPort, ListClipboardEntriesPort,
-    ListRepresentationsForEventPort,
+    DeleteClipboardEntryPort, GetClipboardEntryPort, ListRepresentationsForEventPort,
 };
 use uc_core::ports::search::search_index::SearchIndexPort;
 use uc_core::ports::{CacheFsPort, ClipboardEventWriterPort, ClipboardSelectionRepositoryPort};
 
 use super::delete_entry::DeleteClipboardEntryUseCase;
+use super::file_references::HistoryFileReferencePort;
 
 /// Result of a reconcile pass.
 #[derive(Debug, Default, Clone)]
@@ -52,7 +52,7 @@ const ENTRY_LIST_BATCH_SIZE: usize = 1000;
 
 pub(crate) struct ReconcileMissingFilesUseCase {
     file_cache_dir: PathBuf,
-    list_entries: Arc<dyn ListClipboardEntriesPort>,
+    file_references: Arc<dyn HistoryFileReferencePort>,
     get_entry: Arc<dyn GetClipboardEntryPort>,
     delete_entry: Arc<dyn DeleteClipboardEntryPort>,
     selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
@@ -67,7 +67,7 @@ impl ReconcileMissingFilesUseCase {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         file_cache_dir: PathBuf,
-        list_entries: Arc<dyn ListClipboardEntriesPort>,
+        file_references: Arc<dyn HistoryFileReferencePort>,
         get_entry: Arc<dyn GetClipboardEntryPort>,
         delete_entry: Arc<dyn DeleteClipboardEntryPort>,
         selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
@@ -77,7 +77,7 @@ impl ReconcileMissingFilesUseCase {
     ) -> Self {
         Self {
             file_cache_dir,
-            list_entries,
+            file_references,
             get_entry,
             delete_entry,
             selection_repo,
@@ -122,52 +122,37 @@ impl ReconcileMissingFilesUseCase {
         }
 
         let mut result = ReconcileResult::default();
-        let mut offset = 0usize;
+        let mut after: Option<RepresentationId> = None;
         let mut handled: HashSet<EntryId> = HashSet::new();
         let mut to_delete: Vec<EntryId> = Vec::new();
 
-        // Two-phase: scan first, delete second. Deleting during the scan
-        // shrinks the underlying table, which silently shifts later
-        // offset-based pages and skips entries adjacent to deletions.
+        // 先扫描再删除；文件引用按稳定游标分页，不读取无关正文。
         loop {
             let batch = self
-                .list_entries
-                .list_entries(ENTRY_LIST_BATCH_SIZE, offset)
-                .instrument(info_span!(
-                    "list_entries_batch",
-                    batch_size = ENTRY_LIST_BATCH_SIZE,
-                    offset = offset
-                ))
+                .file_references
+                .list_file_references(after.as_ref(), ENTRY_LIST_BATCH_SIZE)
                 .await
-                .map_err(|e| anyhow::anyhow!("list entries for reconcile: {e}"))?;
+                .context("read history file references for reconciliation")?;
 
             if batch.is_empty() {
                 break;
             }
             let batch_len = batch.len();
-            result.entries_scanned += batch_len as u32;
-
-            for entry in &batch {
-                if !handled.insert(entry.entry_id.clone()) {
-                    continue;
+            after = batch.last().map(|item| item.representation_id.clone());
+            for item in &batch {
+                if handled.insert(item.entry_id.clone()) {
+                    result.entries_scanned += 1;
                 }
-                let missing = match self.entry_has_missing_cache_file(&entry.event_id).await {
-                    Ok(missing) => missing,
-                    Err(e) => {
-                        warn!(
-                            entry_id = %entry.entry_id,
-                            error = %e,
-                            "Failed to inspect representations while reconciling — skipping entry"
-                        );
-                        continue;
+                for path in extract_cache_paths(&item.uri_list, &self.file_cache_dir) {
+                    if !self.cache_fs.exists(&path).await {
+                        if !to_delete.contains(&item.entry_id) {
+                            to_delete.push(item.entry_id.clone());
+                        }
+                        break;
                     }
-                };
-                if missing {
-                    to_delete.push(entry.entry_id.clone());
                 }
             }
 
-            offset += batch_len;
             if batch_len < ENTRY_LIST_BATCH_SIZE {
                 break;
             }
@@ -200,34 +185,6 @@ impl ReconcileMissingFilesUseCase {
             "Reconcile pass complete"
         );
         Ok(result)
-    }
-
-    /// Return `Ok(true)` when any cache-managed `file://` URI in the
-    /// entry's representations points at a path that doesn't exist on
-    /// disk. Paths outside `file_cache_dir` are ignored (user-owned
-    /// files we never managed).
-    async fn entry_has_missing_cache_file(&self, event_id: &EventId) -> Result<bool> {
-        let representations = self
-            .representation_repo
-            .get_representations_for_event(event_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("get representations: {e}"))?;
-
-        for rep in &representations {
-            let mime = rep.mime_type.as_ref().map(|m| m.as_str()).unwrap_or("");
-            if !mime.contains("uri-list") {
-                continue;
-            }
-            let Some(inline) = rep.inline_data.as_ref() else {
-                continue;
-            };
-            for path in extract_cache_paths(inline, &self.file_cache_dir) {
-                if !self.cache_fs.exists(&path).await {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
     }
 }
 

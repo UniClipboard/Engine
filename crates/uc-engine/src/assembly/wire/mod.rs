@@ -893,6 +893,12 @@ pub async fn wire_dependencies_from_inputs(
         trusted_peer_repo: Arc::clone(&trusted_peer_repo),
         entry_delivery_repo: Arc::clone(&infra.entry_delivery_repo),
         clipboard: ClipboardPorts {
+            history_file_references: Arc::new(
+                uc_infra::db::repositories::DieselHistoryFileReferences::new(
+                    infra.db_executor.clone(),
+                    blob_cipher.clone(),
+                ),
+            ),
             clipboard: platform.clipboard,
             system_clipboard: platform.system_clipboard,
             entry_ports: infra.clipboard_entry_ports,

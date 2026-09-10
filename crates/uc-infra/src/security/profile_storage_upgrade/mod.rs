@@ -219,20 +219,21 @@ impl ProfileStorageUpgrade {
         let persisted_journal = self.persistence.load_journal().await?;
         if resuming {
             progress.required(
-                matches!(runtime_manifest, Some(ActiveRuntimeManifest::V2(_)))
-                    || components.legacy_space_id.is_some()
-                    || persisted_journal.as_ref().is_some_and(|journal| {
-                        journal.source_space_id().is_some()
-                            || journal
-                                .converted_inline_count()
-                                .is_some_and(|count| count > 0)
-                            || journal
-                                .converted_blob_count()
-                                .is_some_and(|count| count > 0)
-                            || journal
-                                .converted_derived_count()
-                                .is_some_and(|count| count > 0)
-                    }),
+                !matches!(runtime_manifest, Some(ActiveRuntimeManifest::V3(_)))
+                    && (matches!(runtime_manifest, Some(ActiveRuntimeManifest::V2(_)))
+                        || components.legacy_space_id.is_some()
+                        || persisted_journal.as_ref().is_some_and(|journal| {
+                            journal.source_space_id().is_some()
+                                || journal
+                                    .converted_inline_count()
+                                    .is_some_and(|count| count > 0)
+                                || journal
+                                    .converted_blob_count()
+                                    .is_some_and(|count| count > 0)
+                                || journal
+                                    .converted_derived_count()
+                                    .is_some_and(|count| count > 0)
+                        })),
             );
             if let Some(journal) = &persisted_journal {
                 progress.recovering();

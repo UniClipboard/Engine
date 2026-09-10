@@ -185,6 +185,8 @@ pub struct ClipboardRepresentationPorts {
 /// 剪贴板领域端口组。
 #[derive(Clone)]
 pub struct ClipboardPorts {
+    pub history_file_references:
+        Arc<dyn crate::facade::clipboard_history::HistoryFileReferencePort>,
     /// 读取平台剪贴板快照的端口。
     pub clipboard: Arc<dyn PlatformClipboardPort>,
     /// 读取或写入操作系统剪贴板快照的完整端口。

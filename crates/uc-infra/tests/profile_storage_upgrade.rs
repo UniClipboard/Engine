@@ -268,6 +268,18 @@ async fn production_upgrade_completes_all_pre_promotion_phases_in_one_call() {
     );
     assert!(last.steps.iter().all(|step| step.completed));
     assert!(last.steps.len() <= 6);
+    drop(updates);
+    progress.0.lock().unwrap().clear();
+    assert_eq!(
+        upgrade.ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::UpToDate
+    );
+    let restarted = progress.0.lock().unwrap();
+    assert!(restarted.iter().all(|snapshot| !snapshot.required));
+    assert_eq!(
+        restarted.last().unwrap().outcome,
+        Some(uc_infra::security::StorageUpgradeProgressOutcome::NotNeeded)
+    );
 }
 
 #[tokio::test]

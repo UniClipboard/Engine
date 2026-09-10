@@ -5,8 +5,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::Notify;
 
-use super::runtime::{HistoryMaintenance, HistoryMaintenanceRuntime};
-use super::{
+use super::{HistoryMaintenance, HistoryMaintenanceRuntime};
+use crate::clipboard::history::views::{
     CleanupResultView, ClipboardHistoryError, ReconcileResultView, RetentionEnforcementResultView,
 };
 
@@ -17,6 +17,9 @@ struct FakeHistoryMaintenance {
     cleanup_fails: AtomicBool,
     retention_fails: AtomicBool,
     block_cleanup: AtomicBool,
+    block_reconcile: AtomicBool,
+    reconcile_started: Notify,
+    reconcile_release: Notify,
     cleanup_started: Notify,
     cleanup_release: Notify,
 }
@@ -30,6 +33,9 @@ impl FakeHistoryMaintenance {
             cleanup_fails: AtomicBool::new(cleanup_fails),
             retention_fails: AtomicBool::new(retention_fails),
             block_cleanup: AtomicBool::new(false),
+            block_reconcile: AtomicBool::new(false),
+            reconcile_started: Notify::new(),
+            reconcile_release: Notify::new(),
             cleanup_started: Notify::new(),
             cleanup_release: Notify::new(),
         }
@@ -71,6 +77,10 @@ impl FakeHistoryMaintenance {
 impl HistoryMaintenance for FakeHistoryMaintenance {
     async fn reconcile_missing_files(&self) -> Result<ReconcileResultView, ClipboardHistoryError> {
         self.record("reconcile");
+        if self.block_reconcile.load(Ordering::SeqCst) {
+            self.reconcile_started.notify_one();
+            self.reconcile_release.notified().await;
+        }
         if self.consume_reconcile_failure() {
             Err(ClipboardHistoryError::Internal("probe".into()))
         } else {
@@ -117,6 +127,7 @@ async fn runtime_keeps_fixed_order_when_later_passes_fail() {
     )
     .await;
 
+    maintenance.wait_for_call_count(3).await;
     assert_eq!(
         maintenance.calls(),
         vec!["reconcile", "cleanup", "retention"]
@@ -199,4 +210,52 @@ async fn shutdown_waits_for_an_inflight_pass_to_finish() {
         .await
         .expect("shutdown task")
         .expect("runtime shutdown");
+}
+
+#[tokio::test]
+async fn initial_cleanup_does_not_block_startup_but_shutdown_drains_it() {
+    let maintenance = Arc::new(FakeHistoryMaintenance::new(0, false, false));
+    maintenance.block_cleanup.store(true, Ordering::SeqCst);
+    let runtime = tokio::time::timeout(
+        Duration::from_millis(100),
+        HistoryMaintenanceRuntime::start_with_interval(
+            maintenance_port(&maintenance),
+            Duration::from_secs(3600),
+        ),
+    )
+    .await
+    .expect("initial cache cleanup must not block startup");
+    maintenance.cleanup_started.notified().await;
+    assert_eq!(maintenance.calls(), vec!["reconcile", "cleanup"]);
+    let mut shutdown = tokio::spawn(runtime.shutdown());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut shutdown)
+            .await
+            .is_err()
+    );
+    maintenance.cleanup_release.notify_one();
+    shutdown.await.unwrap().unwrap();
+    assert_eq!(
+        maintenance.calls(),
+        vec!["reconcile", "cleanup", "retention"]
+    );
+}
+
+#[tokio::test]
+async fn startup_still_waits_for_file_reference_safety_check() {
+    let maintenance = Arc::new(FakeHistoryMaintenance::new(0, false, false));
+    maintenance.block_reconcile.store(true, Ordering::SeqCst);
+    let port = maintenance_port(&maintenance);
+    let mut startup = tokio::spawn(async move {
+        HistoryMaintenanceRuntime::start_with_interval(port, Duration::from_secs(3600)).await
+    });
+    maintenance.reconcile_started.notified().await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut startup)
+            .await
+            .is_err()
+    );
+    assert_eq!(maintenance.calls(), vec!["reconcile"]);
+    maintenance.reconcile_release.notify_one();
+    startup.await.unwrap().shutdown().await.unwrap();
 }

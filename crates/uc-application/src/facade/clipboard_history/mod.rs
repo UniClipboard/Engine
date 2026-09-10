@@ -31,6 +31,9 @@ use crate::clipboard::history::{
     ToggleFavoriteClipboardEntryUseCase,
 };
 
+pub use crate::clipboard::history::file_references::{
+    HistoryFileReference, HistoryFileReferencePort,
+};
 pub use crate::clipboard::history::maintenance_runtime::{
     HistoryMaintenanceRuntime, HistoryMaintenanceRuntimeError,
 };
@@ -46,6 +49,7 @@ pub use crate::clipboard::history::views::{
 /// wiring deps and pass it once to `ClipboardHistoryFacade::new`. The facade
 /// then owns the use cases internally; no per-call gateway adapter is needed.
 pub struct ClipboardHistoryFacadeDeps {
+    pub file_references: Arc<dyn HistoryFileReferencePort>,
     pub entry_ports: ClipboardEntryPorts,
     pub selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
     pub representation_ports: ClipboardRepresentationPorts,
@@ -98,6 +102,7 @@ pub struct ClipboardHistoryFacade {
 impl ClipboardHistoryFacade {
     pub fn new(deps: ClipboardHistoryFacadeDeps) -> Self {
         let ClipboardHistoryFacadeDeps {
+            file_references,
             entry_ports,
             selection_repo,
             representation_ports,
@@ -252,7 +257,7 @@ impl ClipboardHistoryFacade {
         let reconcile_uc = file_cache_dir.map(|dir| {
             let mut uc = ReconcileMissingFilesUseCase::new(
                 dir,
-                entry_list,
+                file_references,
                 entry_get,
                 entry_delete,
                 selection_repo,

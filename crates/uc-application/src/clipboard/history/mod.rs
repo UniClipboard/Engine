@@ -8,6 +8,7 @@
 pub(crate) mod cleanup;
 pub(crate) mod clear_history;
 pub(crate) mod delete_entry;
+pub(crate) mod file_references;
 pub(crate) mod get_entry_detail;
 pub(crate) mod get_entry_resource;
 pub(crate) mod list_entry_projections;

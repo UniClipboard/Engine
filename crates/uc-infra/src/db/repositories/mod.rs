@@ -24,6 +24,7 @@ mod receive_artifact_log_repo;
 mod relationship_store;
 #[cfg(test)]
 pub(crate) use relationship_store::test_relationship_store;
+mod history_file_references;
 mod representation_repo;
 mod space_member_repo;
 mod space_security_store;
@@ -43,6 +44,7 @@ pub use entry_file_set_repo::*;
 pub use entry_receive_attempt_repo::*;
 pub use entry_replace_repo::*;
 pub use file_transfer_repo::*;
+pub use history_file_references::*;
 pub use inbound_receive_commit_repo::*;
 pub use migration_repo::*;
 #[cfg(feature = "lan-compat")]
