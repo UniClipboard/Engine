@@ -1,7 +1,9 @@
+use uc_observability_contract::diagnostics::connectivity::CONNECTIVITY_TARGET;
 use uc_observability_contract::diagnostics::{HEALTH_TARGET, TELEMETRY_TARGET};
 
 const DIAGNOSTIC_OWNER: &str = "uc_observability_contract::diagnostics";
 const RUNTIME_HEALTH_OWNER: &str = "uc_observability_runtime::remote_health";
+const CONNECTIVITY_OWNER: &str = "uc_observability_contract::diagnostics::connectivity";
 
 const SPAN_FIELDS: &[&str] = &[
     "uc.outcome",
@@ -67,8 +69,20 @@ pub(crate) fn local_sink_enabled(metadata: &tracing::Metadata<'_>) -> bool {
         TELEMETRY_TARGET if metadata.is_span() => remote_span_enabled(metadata),
         TELEMETRY_TARGET => remote_log_enabled(metadata),
         HEALTH_TARGET => health_log_enabled(metadata),
+        CONNECTIVITY_TARGET => connectivity_log_enabled(metadata),
         _ => false,
     }
+}
+
+pub(crate) fn connectivity_log_enabled(metadata: &tracing::Metadata<'_>) -> bool {
+    metadata.is_event()
+        && metadata.target() == CONNECTIVITY_TARGET
+        && metadata.module_path() == Some(CONNECTIVITY_OWNER)
+        && fields_are_approved(metadata, &["event.name", "payload"])
+}
+
+pub(crate) fn sdk_log_enabled(metadata: &tracing::Metadata<'_>) -> bool {
+    remote_log_enabled(metadata) || connectivity_log_enabled(metadata)
 }
 
 fn fields_are_approved(metadata: &tracing::Metadata<'_>, approved: &[&str]) -> bool {

@@ -260,6 +260,54 @@ Space 的 OPAQUE 认证握手保持原布局；认证后的 Request/Reply 使用
 
 ## 输出与隐私
 
+### 本地连接排障记录
+
+连接、配对和恢复诊断采用完整动作的具体结果类型，不提供可任意组合的阶段与原因参数。原有认证
+完成事件只输出一次；本地文件增加具体失败位置与原因，远程仍使用原有 schema v1 摘要。读取层和
+错误转换只保留 source，不各自输出同一失败。认证材料读取可区分记录缺失、恢复材料缺失、锁定、
+损坏和读取不可用；认证负责人按原关闭码与业务返回结算。
+
+本地 SDK `LocalLogProcessor` 复用既有 `LocalFileRuntime` 有界队列，输出 `engine.YYYY-MM-DD.jsonl`。
+JSONL 保留 timestamp、level、target、fields，并用 `local_schema_version=1` 标明新的本地信封；有效的
+SDK TraceId/SpanId 位于顶层，缺失时省略。远程关闭不影响本地关联能力。普通完成日志退出旧 fmt 文件
+路径；health 仍通过独立接受门与只接受 HEALTH_TARGET 的格式层写入同一队列，在 SDK 收尾和遥测
+抑制时仍能记录健康结果。两个入口的 target 集合互斥，不会重复写入同一记录。
+
+桌面等已有日志输出的宿主使用 `ProcessObservabilityRuntime::install_with_host_layers` 在一次安装中
+提交标准 tracing Layer。共同运行时将核心记录与宿主记录分组过滤；宿主层不能接收核心合同事件、
+核心普通模块或网络依赖的原始诊断，不会复制核心文件记录或通过旧上传层外发本地详情。该能力由
+`uc-engine::observability` 重导出，只用于进程装配，不涉及业务阶段查询。额外宿主层只能首次提供，
+后续带新宿主层的安装请求明确失败；普通相同配置安装仍可复用。核心远程输出仍需要明确配置。
+
+单条完成事件的本地详情使用同步 OpenTelemetry Context 附件，只在当前 emit 内有效。附件是封闭
+类型，匹配既有事件的 domain/operation/role/outcome 后消费一次，不加入日志属性、baggage、网络消息
+或持久状态。运行时先校验原摘要再附加本地详情，不修改交给远程处理器的 SDK 记录。嵌套 Context
+恢复外层附件；不采用全局注册表或自制关联号。
+
+独立的恢复决定、在线检查、连接关闭与会话切换使用 `uc.connectivity`。合同通过 serde 编码封闭的
+动作类型；运行时只接受合同调用点、准确的 event.name/payload 字段，限制 payload 为 2048 字节，
+解码时拒绝未知字段、值和不符的事件名/级别，再展开为可读字段写入文件。该内部 payload 不是任意
+正文，也不原样写入诊断文件；系统日志中的编码只包含同一组固定分类。远程入口忽略这个本地 target，
+不将正常路由计为远程隐私拒收。
+
+- 触发原因、结果、失败位置、失败原因和下一步分别表达；未知信息省略，未测量耗时不写 0。
+- 正常开始/完成与预期离线延期为 INFO，明确拒绝或异常为 WARN，需恢复的损坏为 ERROR；既有远程
+  完成级别保持不变。成员确认超时是延期，不是对方明确拒绝。
+- Application 根据实际保存后的恢复报告结算；若原计划拒绝但保存失败，不能记录成已经拒绝。
+  只有实际保留待恢复状态才写 wait_for_recovery_trigger，不伪造计划重试时间。无实际工作不记录。
+- 在线检查在完整返回或取消时只结算一次；子拨号只提供分类。暂停、恢复由既有生命周期负责人记录
+  开始和结果，Future 被丢弃记录中断；不能把中断解释成用户主动取消，进程强制退出也不伪造结束。
+- 连接关闭只记录入站/出站及库的固定原因，不输出远端关闭文本，不延长已经结束的拨号 span。
+- 未认证服务端的失败仍是一条无 TraceId/SpanId 的完成记录，不能仅凭时间将两端匿名请求断言为同一
+  次请求；已有关联由完整负责人通过不透明 ObservationContext 延续，不扩大 Engine facade 或 Core 模型。
+
+日志队列满、磁盘不可写和序列化拒收不能改变业务结果；失败只累加既有本地丢弃计数，不递归写日志。
+文件刷新与最终关闭仍由进程运行时统一执行，SDK 处理器不提前关闭 health 共用的 writer。
+
+验收包括真实资料读取加本机协议加实际文件的缺失材料测试、远程摘要与本地详情分离、并发及嵌套
+关联、取消、健康收尾、隐私哨兵及现有协议结果回归。物理设备与产品仓的接入验证未执行时标为跳过，
+不能用主机测试代替 Windows/iPhone 现场验证。
+
 准入可读名称固定为 `pairing.lifecycle`、`pairing.authenticate`、`pairing.reconnect`、`pairing.receive_request`，以及
 `pairing.{request_join|confirm_prepared|confirm_applied|settle|cancel}.{send|process}`。未知请求使用固定的 `pairing.send_request` 或
 `pairing.process_request`。动作由 Application 在既有发送与认证请求处理位置提供，Engine 不解析消息或阶段。日志通过 TraceId/SpanId
@@ -311,3 +359,7 @@ transfer 原始 ID、摘要、原始错误正文或可恢复派生值。
 作为诊断粗估：发送端外壳仍含部分编码、认证与回包校验，初始连接又未完整覆盖，两种偏差方向相反，因此既不是严格上界也不是
 下界，不能作为一秒通过依据。精确区分纯网络等待、本机工作和重复样本 p95 由规格 038 完成；server 内的存储、认证、加解密和
 业务处理始终计入本机预算。
+
+Apple 系统日志仅消费已经过滤的事件。既有 `OsLogger` 的活动关联假定当前 span 总是可见，
+因此通过不注册 span 的私有输出对象直接消费事件，避免宿主 span 或被过滤 span 导致异常；
+此对象不安装全局 subscriber、不重新发射记录。业务关联仍由共同运行时写入 JSONL 与远程日志。

@@ -178,3 +178,22 @@ fn cancelled_lifecycle_keeps_its_explicit_outcome() {
     assert_eq!(captured.logs.len(), 1);
     assert_eq!(captured.logs[0].outcome.as_deref(), Some("cancelled"));
 }
+
+#[test]
+fn shared_bridge_keeps_local_events_available_to_the_file_processor() {
+    use uc_observability_contract::diagnostics::connectivity::{
+        record_presence_closed, ConnectionCloseReason, ConnectionDirection,
+    };
+    let captured = capture_telemetry(|| {
+        record_presence_closed(
+            ConnectionDirection::Outbound,
+            ConnectionCloseReason::RemoteApplicationClosed,
+        );
+    });
+    assert!(captured.spans.is_empty());
+    assert_eq!(
+        captured.logs.len(),
+        1,
+        "the shared bridge must retain local events until output routing"
+    );
+}

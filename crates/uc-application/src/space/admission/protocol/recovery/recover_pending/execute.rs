@@ -13,8 +13,12 @@ use uc_core::membership::{
     AdmissionPendingRecovery, AdmissionRecoveryCategory, JoinerAdmission,
     SpaceAdmissionMessageKind, SpaceAdmissionRejectionReason,
 };
+use uc_observability_contract::diagnostics::connectivity::{
+    record_admission_recovery_decision, ExchangeFailure, RecoveryDecision, RecoveryDeferral,
+    RecoveryProblem, RecoveryTrigger, RejectionCause, StateFailure,
+};
 use uc_observability_contract::diagnostics::{
-    DiagnosticErrorType, SpaceAdmissionObservationOutcome,
+    DiagnosticErrorType, ObservationContext, SpaceAdmissionObservationOutcome,
 };
 
 #[derive(Clone, Copy)]
@@ -45,6 +49,25 @@ impl AdmissionRecoveryService {
         let loaded = match self.state.load(trigger).await {
             Ok(loaded) => loaded,
             Err(error) => {
+                let decision = match &error {
+                    PendingAdmissionRecoveryStateError::RecoveryRequired => {
+                        RecoveryDecision::RequiresRecovery(Some(RecoveryProblem::CorruptState))
+                    }
+                    PendingAdmissionRecoveryStateError::Locked => RecoveryDecision::Deferred(Some(
+                        RecoveryDeferral::State(StateFailure::Locked),
+                    )),
+                    PendingAdmissionRecoveryStateError::Unavailable => RecoveryDecision::Deferred(
+                        Some(RecoveryDeferral::State(StateFailure::Unavailable)),
+                    ),
+                    PendingAdmissionRecoveryStateError::StateChanged => RecoveryDecision::Deferred(
+                        Some(RecoveryDeferral::State(StateFailure::Changed)),
+                    ),
+                };
+                record_admission_recovery_decision(
+                    &ObservationContext::capture(),
+                    diagnostic_trigger(trigger),
+                    decision,
+                );
                 let outcome = match &error {
                     PendingAdmissionRecoveryStateError::RecoveryRequired => {
                         SpaceAdmissionObservationOutcome::Failed(DiagnosticErrorType::Corrupt)
@@ -63,10 +86,30 @@ impl AdmissionRecoveryService {
 
         for loaded_admission in loaded {
             let (aggregate, commit_token) = loaded_admission.into_parts();
+            if aggregate.pending_recovery().is_none() && aggregate.invitation_resolution().is_none()
+            {
+                continue;
+            }
             let observation_before = report;
             let observation_material = *aggregate.admission_id().as_bytes();
             let was_cancelling = aggregate.is_cancelling();
-            let finish_observation = |after| {
+            let context = joiner
+                .observations
+                .scope(observation_material, async {
+                    ObservationContext::capture()
+                })
+                .await;
+            let mut decision_hint = None;
+            let finish_observation = |after, hint| {
+                if let Some(decision) =
+                    actual_recovery_decision(observation_before, after, was_cancelling, hint)
+                {
+                    record_admission_recovery_decision(
+                        &context,
+                        diagnostic_trigger(trigger),
+                        decision,
+                    );
+                }
                 finish_observation_after_recovery(
                     joiner,
                     observation_material,
@@ -79,7 +122,7 @@ impl AdmissionRecoveryService {
                 joiner
                     .recover_invitation_resolution(self, &mut report, aggregate, commit_token)
                     .await;
-                finish_observation(report);
+                finish_observation(report, decision_hint);
                 continue;
             }
             let Some(recovery) = aggregate.pending_recovery() else {
@@ -124,6 +167,7 @@ impl AdmissionRecoveryService {
             let mut exchange = match established {
                 Ok(exchange) => exchange,
                 Err(error) => {
+                    decision_hint = Some(connection_decision(channel_kind, error));
                     self.record_connection_failure(
                         &mut report,
                         channel_kind,
@@ -132,7 +176,7 @@ impl AdmissionRecoveryService {
                         error,
                     )
                     .await;
-                    finish_observation(report);
+                    finish_observation(report, decision_hint);
                     continue;
                 }
             };
@@ -141,6 +185,9 @@ impl AdmissionRecoveryService {
                 RecoveryChannel::Initial => {
                     let peer_binding = exchange.peer_binding();
                     let Some(continuation) = exchange.take_newly_established_continuation() else {
+                        decision_hint = Some(RecoveryDecision::RequiresRecovery(Some(
+                            RecoveryProblem::MissingCredential,
+                        )));
                         self.save_recovery_required(
                             &mut report,
                             aggregate,
@@ -148,7 +195,7 @@ impl AdmissionRecoveryService {
                             AdmissionRecoveryCategory::MissingKey,
                         )
                         .await;
-                        finish_observation(report);
+                        finish_observation(report, decision_hint);
                         continue;
                     };
                     let transition =
@@ -156,7 +203,7 @@ impl AdmissionRecoveryService {
                             Ok(transition) => transition,
                             Err(_) => {
                                 report.recovery_required_count += 1;
-                                finish_observation(report);
+                                finish_observation(report, decision_hint);
                                 continue;
                             }
                         };
@@ -167,7 +214,7 @@ impl AdmissionRecoveryService {
                         }
                         Err(error) => {
                             self.record_state_error(&mut report, error);
-                            finish_observation(report);
+                            finish_observation(report, decision_hint);
                             continue;
                         }
                     }
@@ -180,7 +227,7 @@ impl AdmissionRecoveryService {
             let (aggregate, commit_token) = loaded.into_parts();
             let Some(pending_exchange) = aggregate.pending_exchange() else {
                 report.recovery_required_count += 1;
-                finish_observation(report);
+                finish_observation(report, decision_hint);
                 continue;
             };
             let exchanged = joiner
@@ -201,12 +248,20 @@ impl AdmissionRecoveryService {
                         .await;
                 }
                 Err(SpaceAdmissionTransportError::PeerUpgradeRequired) => {
+                    decision_hint = Some(RecoveryDecision::Rejected(Some(
+                        RejectionCause::PeerUpgradeRequired,
+                    )));
                     self.save_peer_upgrade_result(&mut report, aggregate, commit_token)
                         .await;
                 }
-                Err(_) => report.deferred_count += 1,
+                Err(error) => {
+                    decision_hint = Some(RecoveryDecision::Deferred(Some(
+                        RecoveryDeferral::Exchange(exchange_failure(error)),
+                    )));
+                    report.deferred_count += 1;
+                }
             }
-            finish_observation(report);
+            finish_observation(report, decision_hint);
         }
 
         report
@@ -455,6 +510,88 @@ fn finish_observation_after_recovery(
     }
 }
 
+fn diagnostic_trigger(trigger: AdmissionRecoveryTrigger) -> RecoveryTrigger {
+    match trigger {
+        AdmissionRecoveryTrigger::Startup => RecoveryTrigger::Startup,
+        AdmissionRecoveryTrigger::Resume => RecoveryTrigger::Resume,
+        AdmissionRecoveryTrigger::Periodic => RecoveryTrigger::Periodic,
+        AdmissionRecoveryTrigger::StateChanged => RecoveryTrigger::StateChanged,
+        AdmissionRecoveryTrigger::PeerOnline(_) => RecoveryTrigger::PeerOnline,
+    }
+}
+fn exchange_failure(error: SpaceAdmissionTransportError) -> ExchangeFailure {
+    match error {
+        SpaceAdmissionTransportError::AuthenticationRejected => {
+            ExchangeFailure::AuthenticationRejected
+        }
+        SpaceAdmissionTransportError::ProtocolRejected => ExchangeFailure::ProtocolRejected,
+        SpaceAdmissionTransportError::InvitationUnavailable => {
+            ExchangeFailure::InvitationUnavailable
+        }
+        SpaceAdmissionTransportError::Unavailable => ExchangeFailure::Unavailable,
+        SpaceAdmissionTransportError::Deferred => ExchangeFailure::Deferred,
+        SpaceAdmissionTransportError::PeerUpgradeRequired => ExchangeFailure::PeerUpgradeRequired,
+    }
+}
+fn connection_decision(
+    channel: RecoveryChannel,
+    error: SpaceAdmissionTransportError,
+) -> RecoveryDecision {
+    match (channel, error) {
+        (RecoveryChannel::Initial, SpaceAdmissionTransportError::AuthenticationRejected) => {
+            RecoveryDecision::Rejected(Some(RejectionCause::AuthenticationRejected))
+        }
+        (RecoveryChannel::Initial, SpaceAdmissionTransportError::InvitationUnavailable) => {
+            RecoveryDecision::Rejected(Some(RejectionCause::InvitationUnavailable))
+        }
+        (RecoveryChannel::Initial, SpaceAdmissionTransportError::PeerUpgradeRequired) => {
+            RecoveryDecision::Rejected(Some(RejectionCause::PeerUpgradeRequired))
+        }
+        (_, SpaceAdmissionTransportError::ProtocolRejected) => {
+            RecoveryDecision::RequiresRecovery(Some(RecoveryProblem::ProtocolConflict))
+        }
+        (RecoveryChannel::Continuation, SpaceAdmissionTransportError::AuthenticationRejected) => {
+            RecoveryDecision::RequiresRecovery(Some(RecoveryProblem::MissingCredential))
+        }
+        (_, error) => {
+            RecoveryDecision::Deferred(Some(RecoveryDeferral::Connect(exchange_failure(error))))
+        }
+    }
+}
+
+// 先尊重实际保存结果，避免把“本来准备拒绝但保存失败”写成已经拒绝。
+fn actual_recovery_decision(
+    before: AdmissionRecoveryReport,
+    after: AdmissionRecoveryReport,
+    cancelling: bool,
+    hint: Option<RecoveryDecision>,
+) -> Option<RecoveryDecision> {
+    if after.recovery_required_count > before.recovery_required_count {
+        return Some(match hint {
+            Some(decision @ RecoveryDecision::RequiresRecovery(_)) => decision,
+            _ => RecoveryDecision::RequiresRecovery(None),
+        });
+    }
+    if after.peer_upgrade_required_count > before.peer_upgrade_required_count
+        || after.rejected_count > before.rejected_count
+    {
+        if cancelling && after.rejected_count > before.rejected_count {
+            return Some(RecoveryDecision::Cancelled);
+        }
+        return Some(match hint {
+            Some(decision @ RecoveryDecision::Rejected(_)) => decision,
+            _ => RecoveryDecision::Rejected(None),
+        });
+    }
+    if after.deferred_count > before.deferred_count {
+        return Some(match hint {
+            Some(decision @ RecoveryDecision::Deferred(_)) => decision,
+            _ => RecoveryDecision::Deferred(None),
+        });
+    }
+    None
+}
+
 #[async_trait::async_trait]
 impl RecoverSpaceAdmissionsPort for SpaceAdmissionProtocol {
     async fn recover_space_admissions(
@@ -480,5 +617,39 @@ impl RecoverSpaceAdmissionsPort for SpaceAdmissionProtocol {
         } else {
             MembershipMaintenanceStepOutcome::Completed
         }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    #[test]
+    fn failed_persistence_overrides_the_intended_rejection_in_diagnostics() {
+        let before = AdmissionRecoveryReport::default();
+        let after = AdmissionRecoveryReport {
+            deferred_count: 1,
+            ..before
+        };
+        let intended = RecoveryDecision::Rejected(Some(RejectionCause::AuthenticationRejected));
+        assert_eq!(
+            actual_recovery_decision(before, after, false, Some(intended)),
+            Some(RecoveryDecision::Deferred(None))
+        );
+    }
+    #[test]
+    fn exchange_rejection_that_stays_pending_keeps_the_actual_wait_decision() {
+        let before = AdmissionRecoveryReport::default();
+        let after = AdmissionRecoveryReport {
+            deferred_count: 1,
+            ..before
+        };
+        let actual = RecoveryDecision::Deferred(Some(RecoveryDeferral::Exchange(
+            ExchangeFailure::AuthenticationRejected,
+        )));
+        assert_eq!(
+            actual_recovery_decision(before, after, false, Some(actual)),
+            Some(actual)
+        );
+        assert_eq!(actual_recovery_decision(before, before, false, None), None);
     }
 }

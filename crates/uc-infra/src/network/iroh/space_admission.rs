@@ -1,6 +1,11 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use uc_observability_contract::diagnostics::connectivity::{
+    complete_admission_authentication_failure, complete_admission_connection_failure,
+    AuthenticationFailure, AuthenticationStage, CredentialFailure, DialFailure, IdentityCheck,
+    ProofFailure, ReadFailure,
+};
 
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
@@ -24,9 +29,8 @@ use uc_core::membership::{
     SpaceAdmissionProtocolVersion, SpaceAdmissionRoute,
 };
 use uc_observability_contract::diagnostics::{
-    complete_operation, complete_unassociated_operation, operation_span, DiagnosticDomain,
-    DiagnosticErrorType, DiagnosticOperation, DiagnosticRole, DiagnosticSpanKind,
-    OperationCompletion, OperationContext,
+    complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
+    DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
 };
 
 use crate::security::{
@@ -178,13 +182,19 @@ impl IrohSpaceAdmissionHandler {
     async fn run(&self, connection: &Connection) -> Result<(), HandlerError> {
         let connection_started = std::time::Instant::now();
         let deadline = tokio::time::Instant::now() + self.exchange_deadline;
+        let mut diagnostic_stage = AuthenticationStep::ReceiveHello;
         let authenticated = tokio::time::timeout_at(deadline, async {
-            let remote_peer_id = peer_id(connection.remote_id().as_bytes())
-                .map_err(|_| HandlerError::Authentication)?;
+            let remote_peer_id = peer_id(connection.remote_id().as_bytes()).map_err(|source| {
+                HandlerError::AuthenticationProof {
+                    source: anyhow::Error::new(source),
+                }
+            })?;
             let (mut send, mut receive) = tokio::time::timeout(IO_DEADLINE, connection.accept_bi())
                 .await
                 .map_err(|_| HandlerError::Timeout)?
-                .map_err(|_| HandlerError::Protocol)?;
+                .map_err(|source| HandlerError::Transport {
+                    source: anyhow::Error::new(source),
+                })?;
             let (kind, payload) = read_raw_with_limit(&mut receive, AUTH_FRAME_LIMIT)
                 .await
                 .map_err(map_server_wire_error)?;
@@ -196,17 +206,21 @@ impl IrohSpaceAdmissionHandler {
                         .ok_or(HandlerError::Protocol)?;
                     let invitation_id = InvitationId::from_bytes(hello.invitation_id)
                         .ok_or(HandlerError::Protocol)?;
+                    diagnostic_stage = AuthenticationStep::InitialVersion;
                     if hello.protocol_version != SpaceAdmissionProtocolVersion::V1.as_u16() {
                         return Err(HandlerError::Authentication);
                     }
+                    diagnostic_stage = AuthenticationStep::InitialIdentity;
                     if hello.joiner_peer_id != *remote_peer_id.as_bytes() {
                         return Err(HandlerError::Authentication);
                     }
+                    diagnostic_stage = AuthenticationStep::InitialCredential;
                     let material = self
                         .credentials
                         .resolve_initial(invitation_id, admission_id)
                         .await
-                        .map_err(|_| HandlerError::Authentication)?;
+                        .map_err(HandlerError::Credential)?;
+                    diagnostic_stage = AuthenticationStep::InitialProof;
                     let context = SpaceAdmissionAuthContext::new(
                         SpaceAdmissionProtocolVersion::V1,
                         admission_id,
@@ -214,15 +228,21 @@ impl IrohSpaceAdmissionHandler {
                         remote_peer_id,
                         self.local_peer_id,
                     );
-                    let ke1 = SpaceAdmissionKe1::decode_from_transport(&hello.ke1)
-                        .map_err(|_| HandlerError::Authentication)?;
+                    let ke1 =
+                        SpaceAdmissionKe1::decode_from_transport(&hello.ke1).map_err(|source| {
+                            HandlerError::AuthenticationProof {
+                                source: anyhow::Error::new(source),
+                            }
+                        })?;
                     let (server, ke2) = SpaceAdmissionAuth::start_server(
                         &material.server_setup,
                         &material.registration,
                         &context,
                         ke1,
                     )
-                    .map_err(|_| HandlerError::Authentication)?;
+                    .map_err(|source| HandlerError::AuthenticationProof {
+                        source: anyhow::Error::new(source),
+                    })?;
                     write_typed(
                         &mut send,
                         FrameKind::OpaqueResponse,
@@ -238,12 +258,17 @@ impl IrohSpaceAdmissionHandler {
                         read_typed(&mut receive, FrameKind::OpaqueFinish, AUTH_FRAME_LIMIT)
                             .await
                             .map_err(map_server_wire_error)?;
-                    let ke3 = SpaceAdmissionKe3::decode_from_transport(&finish.ke3)
-                        .map_err(|_| HandlerError::Authentication)?;
+                    let ke3 = SpaceAdmissionKe3::decode_from_transport(&finish.ke3).map_err(
+                        |source| HandlerError::AuthenticationProof {
+                            source: anyhow::Error::new(source),
+                        },
+                    )?;
                     let credential = server
                         .finish(&context, ke3)
                         .and_then(SpaceAdmissionContinuationCredential::into_core)
-                        .map_err(|_| HandlerError::Authentication)?;
+                        .map_err(|source| HandlerError::AuthenticationProof {
+                            source: anyhow::Error::new(source),
+                        })?;
                     (admission_id, credential, true)
                 }
                 FrameKind::ContinuationHello => {
@@ -251,16 +276,19 @@ impl IrohSpaceAdmissionHandler {
                         postcard::from_bytes(&payload).map_err(|_| HandlerError::Protocol)?;
                     let admission_id = SpaceAdmissionId::from_bytes(hello.admission_id)
                         .ok_or(HandlerError::Protocol)?;
+                    diagnostic_stage = AuthenticationStep::ContinuationIdentity;
                     if hello.local_peer_id != *remote_peer_id.as_bytes()
                         || hello.remote_peer_id != *self.local_peer_id.as_bytes()
                     {
                         return Err(HandlerError::Authentication);
                     }
+                    diagnostic_stage = AuthenticationStep::ContinuationCredential;
                     let credential = self
                         .credentials
                         .load_continuation(admission_id)
                         .await
-                        .map_err(|_| HandlerError::Authentication)?;
+                        .map_err(HandlerError::Credential)?;
+                    diagnostic_stage = AuthenticationStep::ContinuationProof;
                     verify_mac(
                         &credential,
                         b"resume",
@@ -277,13 +305,16 @@ impl IrohSpaceAdmissionHandler {
                 _ => return Err(HandlerError::Protocol),
             };
 
+            diagnostic_stage = AuthenticationStep::ReceiveRequest;
             let (wire, envelope, canonical_digest) =
                 read_envelope(&mut receive, FrameKind::Request)
                     .await
                     .map_err(map_request_wire_error)?;
+            diagnostic_stage = AuthenticationStep::RequestIdentity;
             if envelope.header().admission_id() != admission_id {
                 return Err(HandlerError::Authentication);
             }
+            diagnostic_stage = AuthenticationStep::RequestProof;
             verify_mac(
                 &credential,
                 b"request",
@@ -311,12 +342,18 @@ impl IrohSpaceAdmissionHandler {
         let authenticated = match authenticated {
             Ok(Ok(authenticated)) => authenticated,
             Ok(Err(error)) => {
-                record_pre_auth_server_failure(connection_started.elapsed(), &error);
+                complete_admission_authentication_failure(
+                    diagnostic_stage.failure(&error),
+                    connection_started.elapsed(),
+                );
                 return Err(error);
             }
             Err(_) => {
                 let error = HandlerError::Timeout;
-                record_pre_auth_server_failure(connection_started.elapsed(), &error);
+                complete_admission_authentication_failure(
+                    diagnostic_stage.failure(&error),
+                    connection_started.elapsed(),
+                );
                 return Err(error);
             }
         };
@@ -336,7 +373,11 @@ impl IrohSpaceAdmissionHandler {
         let started = std::time::Instant::now();
         let result = tokio::time::timeout_at(deadline, async {
             let endpoint_credential = if is_initial {
-                Some(copy_credential(&credential).map_err(|_| HandlerError::Authentication)?)
+                Some(copy_credential(&credential).map_err(|source| {
+                    HandlerError::AuthenticationProof {
+                        source: anyhow::Error::new(source),
+                    }
+                })?)
             } else {
                 None
             };
@@ -383,7 +424,9 @@ impl IrohSpaceAdmissionHandler {
             .await
             .map_err(map_server_wire_error)?;
             read_peer_acknowledgement(&mut receive).await?;
-            send.finish().map_err(|_| HandlerError::Protocol)?;
+            send.finish().map_err(|source| HandlerError::Transport {
+                source: anyhow::Error::new(source),
+            })?;
             Ok(())
         })
         .instrument(span.clone())
@@ -444,26 +487,30 @@ impl ProtocolHandler for IrohSpaceAdmissionHandler {
         };
         match self.run(&connection).await {
             Ok(()) => {}
-            Err(error @ HandlerError::Authentication) => {
-                debug!(?error, "Space admission exchange rejected");
+            Err(
+                error @ (HandlerError::Authentication
+                | HandlerError::Credential(_)
+                | HandlerError::AuthenticationProof { .. }),
+            ) => {
+                debug!(error_type = ?server_error_type(&error), "Space admission exchange rejected");
                 connection.close(CLOSE_AUTHENTICATION.into(), b"authentication_rejected");
             }
             Err(error @ HandlerError::PeerUpgradeRequired) => {
-                debug!(?error, "Space admission peer upgrade required");
+                debug!(error_type = ?server_error_type(&error), "Space admission peer upgrade required");
                 connection.close(CLOSE_PEER_UPGRADE_REQUIRED.into(), b"peer_upgrade_required");
             }
             Err(error @ HandlerError::Acknowledgement) => {
                 debug!(
-                    ?error,
+                    error_type = ?server_error_type(&error),
                     "Space admission reply completed without peer acknowledgement"
                 );
             }
             Err(error @ HandlerError::Timeout) => {
-                debug!(?error, "Space admission exchange timed out");
+                debug!(error_type = ?server_error_type(&error), "Space admission exchange timed out");
                 connection.close(CLOSE_PROTOCOL.into(), b"protocol_timeout");
             }
             Err(error) => {
-                debug!(?error, "Space admission exchange rejected");
+                debug!(error_type = ?server_error_type(&error), "Space admission exchange rejected");
                 connection.close(CLOSE_PROTOCOL.into(), b"protocol_rejected");
             }
         }
@@ -598,6 +645,7 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
             role: DiagnosticRole::Joiner,
             kind: DiagnosticSpanKind::Client,
         });
+        let mut connection_failure = None;
         let result = async {
             let route = decode_route(route, true)?;
             let invitation_id = route
@@ -618,7 +666,13 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
             let (client, ke1) =
                 SpaceAdmissionAuth::start_client_with_password_equivalent(password, &context)
                     .map_err(|_| SpaceAdmissionTransportError::AuthenticationRejected)?;
-            let connection = connect(&self.endpoint, route.endpoint_addr).await?;
+            let connection =
+                connect(&self.endpoint, route.endpoint_addr)
+                    .await
+                    .map_err(|error| {
+                        connection_failure = Some(error.category());
+                        SpaceAdmissionTransportError::Deferred
+                    })?;
             let (mut send, mut receive) = open_stream(&connection).await?;
             write_typed(
                 &mut send,
@@ -674,6 +728,10 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
         .instrument(span.clone())
         .await;
         span.in_scope(|| {
+            if let Some(failure) = connection_failure {
+                complete_admission_connection_failure(failure, started.elapsed());
+                return;
+            }
             record_client_completion(
                 DiagnosticOperation::SpaceAdmission,
                 started.elapsed(),
@@ -698,6 +756,7 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
             kind: DiagnosticSpanKind::Client,
         });
         uc_observability_contract::diagnostics::describe_admission_connection(&span, true);
+        let mut connection_failure = None;
         let result = async {
             let route = decode_route(route, false)?;
             let local = peer_id(self.endpoint.id().as_bytes())?;
@@ -705,7 +764,13 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
             if binding.local_peer_id() != local || binding.remote_peer_id() != remote {
                 return Err(SpaceAdmissionTransportError::AuthenticationRejected);
             }
-            let connection = connect(&self.endpoint, route.endpoint_addr).await?;
+            let connection =
+                connect(&self.endpoint, route.endpoint_addr)
+                    .await
+                    .map_err(|error| {
+                        connection_failure = Some(error.category());
+                        SpaceAdmissionTransportError::Deferred
+                    })?;
             let (mut send, receive) = open_stream(&connection).await?;
             let nonce = random_nonce();
             let request_digest = [0u8; 32];
@@ -749,6 +814,10 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
         .instrument(span.clone())
         .await;
         span.in_scope(|| {
+            if let Some(failure) = connection_failure {
+                complete_admission_connection_failure(failure, started.elapsed());
+                return;
+            }
             record_client_completion(
                 DiagnosticOperation::SpaceAdmission,
                 started.elapsed(),
@@ -793,12 +862,26 @@ pub(crate) fn decode_space_admission_route(
     ))
 }
 
+#[derive(Debug, thiserror::Error)]
+enum AdmissionConnectError {
+    #[error("admission connection timed out")]
+    TimedOut(#[source] tokio::time::error::Elapsed),
+    #[error("admission connection failed")]
+    Transport(#[source] iroh::endpoint::ConnectError),
+}
+impl AdmissionConnectError {
+    fn category(&self) -> DialFailure {
+        match self {
+            Self::TimedOut(_) => DialFailure::TimedOut,
+            Self::Transport(_) => DialFailure::TransportFailed,
+        }
+    }
+}
 async fn connect(
     endpoint: &Endpoint,
     addr: EndpointAddr,
-) -> Result<Connection, SpaceAdmissionTransportError> {
-    // noq 的连接驱动会长期持有当前 span。只在建链底层隔离 tracing 上下文，
-    // 外层认证调用继续计时，后续业务消息仍由正常 subscriber 记录和传播。
+) -> Result<Connection, AdmissionConnectError> {
+    // 底层连接驱动不能延长业务 span，完整调用的结算仍由外层负责人执行。
     let connection = endpoint
         .connect(addr, SPACE_ADMISSION_ALPN)
         .with_subscriber(tracing::Dispatch::new(
@@ -806,8 +889,8 @@ async fn connect(
         ));
     tokio::time::timeout(IO_DEADLINE, connection)
         .await
-        .map_err(|_| SpaceAdmissionTransportError::Deferred)?
-        .map_err(|_| SpaceAdmissionTransportError::Deferred)
+        .map_err(AdmissionConnectError::TimedOut)?
+        .map_err(AdmissionConnectError::Transport)
 }
 
 async fn open_stream(
@@ -1001,20 +1084,81 @@ fn server_operation_span() -> tracing::Span {
     })
 }
 
-fn record_pre_auth_server_failure(elapsed: Duration, error: &HandlerError) {
-    complete_unassociated_operation(OperationCompletion::failed(
-        DiagnosticDomain::SpaceAdmission,
-        DiagnosticOperation::NetworkTransport,
-        DiagnosticRole::Sponsor,
-        server_error_type(error),
-        elapsed,
-    ));
+// 等待位置只用于本次认证的外层截止时间，不参与协议状态或业务决策。
+#[derive(Clone, Copy)]
+enum AuthenticationStep {
+    ReceiveHello,
+    InitialVersion,
+    InitialIdentity,
+    InitialCredential,
+    InitialProof,
+    ContinuationIdentity,
+    ContinuationCredential,
+    ContinuationProof,
+    ReceiveRequest,
+    RequestIdentity,
+    RequestProof,
+}
+impl AuthenticationStep {
+    fn failure(self, error: &HandlerError) -> AuthenticationFailure {
+        let credential = match error {
+            HandlerError::Credential(source) => source.diagnostic_failure(),
+            _ => CredentialFailure::Unavailable,
+        };
+        let read = match error {
+            HandlerError::Transport { .. } => ReadFailure::TransportFailed,
+            HandlerError::Timeout => ReadFailure::TimedOut,
+            HandlerError::PeerUpgradeRequired => ReadFailure::PeerUpgradeRequired,
+            _ => ReadFailure::InvalidMessage,
+        };
+        let proof = if matches!(
+            error,
+            HandlerError::Authentication | HandlerError::AuthenticationProof { .. }
+        ) {
+            ProofFailure::Rejected
+        } else {
+            ProofFailure::Exchange(read)
+        };
+        match self {
+            Self::ReceiveHello => AuthenticationFailure::ReadHello(read),
+            Self::ReceiveRequest => AuthenticationFailure::ReadRequest(read),
+            Self::InitialVersion => {
+                AuthenticationFailure::IdentityMismatch(IdentityCheck::InitialVersion)
+            }
+            Self::InitialIdentity => {
+                AuthenticationFailure::IdentityMismatch(IdentityCheck::InitialPeer)
+            }
+            Self::ContinuationIdentity => {
+                AuthenticationFailure::IdentityMismatch(IdentityCheck::ContinuationPeer)
+            }
+            Self::RequestIdentity => {
+                AuthenticationFailure::IdentityMismatch(IdentityCheck::RequestBinding)
+            }
+            Self::InitialCredential if matches!(error, HandlerError::Timeout) => {
+                AuthenticationFailure::DeadlineExceeded(AuthenticationStage::InitialCredential)
+            }
+            Self::ContinuationCredential if matches!(error, HandlerError::Timeout) => {
+                AuthenticationFailure::DeadlineExceeded(AuthenticationStage::ContinuationCredential)
+            }
+            Self::InitialCredential => AuthenticationFailure::InitialCredential(credential),
+            Self::ContinuationCredential => {
+                AuthenticationFailure::ContinuationCredential(credential)
+            }
+            Self::InitialProof => AuthenticationFailure::InitialProof(proof),
+            Self::ContinuationProof => AuthenticationFailure::ContinuationProof(proof),
+            Self::RequestProof => AuthenticationFailure::RequestProof(proof),
+        }
+    }
 }
 
 fn server_error_type(error: &HandlerError) -> DiagnosticErrorType {
     match error {
-        HandlerError::Authentication => DiagnosticErrorType::AuthenticationFailed,
-        HandlerError::Protocol => DiagnosticErrorType::DecodeFailed,
+        HandlerError::Authentication
+        | HandlerError::Credential(_)
+        | HandlerError::AuthenticationProof { .. } => DiagnosticErrorType::AuthenticationFailed,
+        HandlerError::Protocol | HandlerError::Transport { .. } => {
+            DiagnosticErrorType::DecodeFailed
+        }
         HandlerError::PeerUpgradeRequired => DiagnosticErrorType::PeerIncompatible,
         HandlerError::Application => DiagnosticErrorType::Internal,
         HandlerError::Acknowledgement => DiagnosticErrorType::ChannelClosed,
@@ -1022,13 +1166,31 @@ fn server_error_type(error: &HandlerError) -> DiagnosticErrorType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 enum HandlerError {
+    #[error("admission message is invalid")]
     Protocol,
+    #[error("admission authentication was rejected")]
     Authentication,
+    #[error("admission credential could not be used")]
+    Credential(#[source] SpaceAdmissionChannelCredentialError),
+    #[error("admission proof was rejected")]
+    AuthenticationProof {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("admission transport failed")]
+    Transport {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("admission peer upgrade required")]
     PeerUpgradeRequired,
+    #[error("admission handling failed")]
     Application,
+    #[error("admission acknowledgement missing")]
     Acknowledgement,
+    #[error("admission deadline elapsed")]
     Timeout,
 }
 
@@ -1042,6 +1204,9 @@ fn map_request_wire_error(error: WireError) -> HandlerError {
 fn map_server_wire_error(error: WireError) -> HandlerError {
     match error {
         WireError::Timeout => HandlerError::Timeout,
+        WireError::Io(source) => HandlerError::Transport {
+            source: anyhow::Error::new(source),
+        },
         _ => HandlerError::Protocol,
     }
 }
@@ -1334,7 +1499,10 @@ mod tests {
             .with(log_layer);
 
         tracing::subscriber::with_default(subscriber, || {
-            record_pre_auth_server_failure(Duration::from_secs(30), &HandlerError::Authentication);
+            complete_admission_authentication_failure(
+                AuthenticationFailure::InitialProof(ProofFailure::Rejected),
+                Duration::from_secs(30),
+            );
         });
         traces.force_flush().expect("trace flush");
         logs.force_flush().expect("log flush");
@@ -1371,8 +1539,9 @@ mod tests {
             .with_tracer(traces.tracer("space-admission-stalled-auth-test"))
             .with_context_activation(true)
             .with_filter(filter_fn(|metadata| metadata.target() == "uc.telemetry"));
-        let log_layer = OpenTelemetryTracingBridge::new(&logs)
-            .with_filter(filter_fn(|metadata| metadata.target() == "uc.telemetry"));
+        let log_layer = OpenTelemetryTracingBridge::new(&logs).with_filter(filter_fn(|metadata| {
+            matches!(metadata.target(), "uc.telemetry" | "uc.connectivity")
+        }));
         let subscriber = tracing_subscriber::registry()
             .with(trace_layer)
             .with(log_layer);
@@ -1418,8 +1587,11 @@ mod tests {
             .expect("finished spans")
             .is_empty());
         let emitted = log_exporter.get_emitted_logs().expect("emitted logs");
-        assert_eq!(emitted.len(), 1);
-        let record = &emitted[0].record;
+        let completed: Vec<_> = emitted.iter().filter(|entry| entry.record.attributes_iter().any(|(key, value)| {
+            key.as_str() == "event.name" && matches!(value, AnyValue::String(value) if value.as_str() == "uc.operation.completed")
+        })).collect();
+        assert_eq!(completed.len(), 1);
+        let record = &completed[0].record;
         assert!(record.trace_context().is_none());
         assert!(record.attributes_iter().any(|(key, value)| {
             key.as_str() == "error.type"
@@ -1429,6 +1601,132 @@ mod tests {
             key.as_str() == "duration_ms"
                 && matches!(value, AnyValue::Int(duration) if *duration >= 100)
         }));
+    }
+
+    #[tokio::test]
+    async fn rejected_continuation_diagnostics_distinguish_identity_credentials_and_proof() {
+        #[derive(Debug)]
+        struct DetailProbe(Arc<std::sync::Mutex<Vec<(&'static str, &'static str)>>>);
+        impl opentelemetry_sdk::logs::LogProcessor for DetailProbe {
+            fn emit(
+                &self,
+                data: &mut opentelemetry_sdk::logs::SdkLogRecord,
+                _: &opentelemetry::InstrumentationScope,
+            ) {
+                let field = |name: &str| {
+                    data.attributes_iter()
+                        .find_map(|(key, value)| {
+                            if key.as_str() == name {
+                                if let AnyValue::String(value) = value {
+                                    return Some(value.as_str());
+                                }
+                            }
+                            None
+                        })
+                        .unwrap_or_default()
+                };
+                if let Some(detail) = uc_observability_contract::diagnostics::connectivity::take_local_completion_detail(
+                    field("uc.domain"), field("uc.operation"), field("uc.role"), field("uc.outcome"),
+                ) { self.0.lock().expect("details").push(detail.local_fields()); }
+            }
+            fn force_flush(&self) -> opentelemetry_sdk::error::OTelSdkResult {
+                Ok(())
+            }
+            fn shutdown_with_timeout(
+                &self,
+                _: Duration,
+            ) -> opentelemetry_sdk::error::OTelSdkResult {
+                Ok(())
+            }
+        }
+        for (wrong_identity, stored_credential, expected_stage, expected_reason) in [
+            (true, None, "continuation_identity", "identity_mismatch"),
+            (
+                false,
+                None,
+                "continuation_credential",
+                "storage_unavailable",
+            ),
+            (
+                false,
+                Some(vec![7; 64]),
+                "continuation_proof",
+                "proof_rejected",
+            ),
+        ] {
+            let exporter = InMemoryLogExporter::default();
+            let details = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let logs = SdkLoggerProvider::builder()
+                .with_simple_exporter(exporter.clone())
+                .with_log_processor(DetailProbe(details.clone()))
+                .build();
+            let subscriber = tracing_subscriber::registry().with(
+                OpenTelemetryTracingBridge::new(&logs)
+                    .with_filter(filter_fn(|metadata| metadata.target() == "uc.telemetry")),
+            );
+            let _subscriber = tracing::subscriber::set_default(subscriber);
+            let sponsor = bound_endpoint().await;
+            wait_for_direct_addrs(&sponsor).await;
+            let joiner = bound_endpoint().await;
+            wait_for_direct_addrs(&joiner).await;
+            let endpoint = Arc::new(HangingLoopbackEndpoint {
+                calls: AtomicUsize::new(0),
+                entered: Notify::new(),
+            });
+            let credentials = Arc::new(LoopbackCredentials {
+                initial: Mutex::new(None),
+                continuation: Mutex::new(stored_credential),
+            });
+            let handler = Arc::new(
+                IrohSpaceAdmissionHandler::new(&sponsor, endpoint.clone(), credentials)
+                    .expect("handler"),
+            );
+            let router = Router::builder((*sponsor).clone())
+                .accept(SPACE_ADMISSION_ALPN, handler)
+                .spawn();
+            let connection = connect(&joiner, sponsor.addr()).await.expect("connection");
+            let (mut send, _receive) = open_stream(&connection).await.expect("stream");
+            write_typed(
+                &mut send,
+                FrameKind::ContinuationHello,
+                &ContinuationHelloV1 {
+                    admission_id: [3; 32],
+                    local_peer_id: if wrong_identity {
+                        [9; 32]
+                    } else {
+                        *joiner.id().as_bytes()
+                    },
+                    remote_peer_id: *sponsor.id().as_bytes(),
+                    nonce: [4; 32],
+                    request_digest: [0; 32],
+                    mac: vec![0; 64],
+                },
+                AUTH_FRAME_LIMIT,
+            )
+            .await
+            .expect("hello");
+            let closed = tokio::time::timeout(Duration::from_secs(2), connection.closed())
+                .await
+                .expect("rejected");
+            assert!(
+                matches!(closed, iroh::endpoint::ConnectionError::ApplicationClosed(ref close) if close.error_code == CLOSE_AUTHENTICATION.into())
+            );
+            assert_eq!(endpoint.calls.load(Ordering::SeqCst), 0);
+            router.shutdown().await.expect("router");
+            joiner.close().await;
+            sponsor.close().await;
+            logs.force_flush().expect("flush");
+            let records = exporter.get_emitted_logs().expect("diagnostics");
+            assert_eq!(records.len(), 1);
+            assert_eq!(
+                *details.lock().expect("details"),
+                vec![(expected_stage, expected_reason)]
+            );
+            let record = &records[0].record;
+            assert!(record.attributes_iter().any(|(key, value)| key.as_str() == "error.type" && matches!(value, AnyValue::String(value) if value.as_str() == "authentication_failed")));
+            assert!(record.body().is_none());
+            assert!(record.trace_context().is_none());
+        }
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
+use uc_observability_contract::diagnostics::connectivity::DialFailure;
 
 use iroh::endpoint::ConnectOptions;
 use iroh::endpoint::Connection;
@@ -72,16 +73,18 @@ pub(crate) async fn connect_with_staggered_retry(
     alpn: &'static [u8],
     purpose: &'static str,
 ) -> Result<Connection, String> {
-    connect_with_staggered_retry_and_alpns(endpoint, addr, alpn, Vec::new(), purpose).await
+    connect_with_staggered_retry_classified(endpoint, addr, alpn, Vec::new(), purpose)
+        .await
+        .map_err(|(message, _)| message)
 }
 
-pub(crate) async fn connect_with_staggered_retry_and_alpns(
+pub(super) async fn connect_with_staggered_retry_classified(
     endpoint: Arc<Endpoint>,
     addr: EndpointAddr,
     alpn: &'static [u8],
     additional_alpns: Vec<Vec<u8>>,
     purpose: &'static str,
-) -> Result<Connection, String> {
+) -> Result<Connection, (String, DialFailure)> {
     let addr = strip_relay_if_lan_only(addr);
     let mut attempts = JoinSet::new();
 
@@ -147,16 +150,18 @@ pub(crate) async fn connect_with_staggered_retry_and_alpns(
                     );
                     Ok((attempt_no, connection))
                 }
-                Ok(Err(err)) => Err((attempt_no, err)),
+                Ok(Err(err)) => Err((attempt_no, err, false)),
                 Err(_) => Err((
                     attempt_no,
                     format!("timed out after {}ms", ATTEMPT_TIMEOUT.as_millis()),
+                    true,
                 )),
             }
         });
     }
 
     let mut failures = Vec::new();
+    let mut all_timed_out = true;
     while let Some(joined) = attempts.join_next().await {
         match joined {
             Ok(Ok((attempt, connection))) => {
@@ -169,7 +174,8 @@ pub(crate) async fn connect_with_staggered_retry_and_alpns(
                 attempts.abort_all();
                 return Ok(connection);
             }
-            Ok(Err((attempt, err))) => {
+            Ok(Err((attempt, err, timed_out))) => {
+                all_timed_out &= timed_out;
                 debug!(
                     purpose,
                     attempt,
@@ -179,11 +185,19 @@ pub(crate) async fn connect_with_staggered_retry_and_alpns(
                 failures.push(format!("attempt {attempt}: {err}"));
             }
             Err(err) => {
+                all_timed_out = false;
                 warn!(purpose, error = %err, "iroh connect attempt task failed");
                 failures.push(format!("task failed: {err}"));
             }
         }
     }
 
-    Err(failures.join("; "))
+    Err((
+        failures.join("; "),
+        if all_timed_out {
+            DialFailure::TimedOut
+        } else {
+            DialFailure::TransportFailed
+        },
+    ))
 }

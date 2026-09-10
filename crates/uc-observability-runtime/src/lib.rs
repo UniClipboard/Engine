@@ -5,6 +5,7 @@ mod android;
 mod config;
 mod filter;
 mod local_file;
+mod local_log_processor;
 mod remote_health;
 mod runtime;
 mod status;
@@ -17,6 +18,7 @@ pub use config::*;
 pub use local_file::managed_log_files;
 pub use runtime::*;
 pub use status::*;
+pub use subscriber::HostLogLayer;
 
 #[cfg(test)]
 mod test_support;

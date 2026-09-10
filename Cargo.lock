@@ -6793,6 +6793,7 @@ dependencies = [
  "uc-application",
  "uc-core",
  "uc-observability-contract",
+ "uc-observability-runtime",
  "unicode-normalization",
  "unicode-segmentation",
  "url",

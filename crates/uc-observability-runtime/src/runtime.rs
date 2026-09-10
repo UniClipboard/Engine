@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use tracing_subscriber::filter::dynamic_filter_fn;
 use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::Layer;
 
 use crate::config::ObservabilityConfig;
 use crate::filter::local_sink_enabled;
@@ -12,7 +13,7 @@ use crate::local_file::LocalFileRuntime;
 use crate::status::{
     FlushSummary, ObservabilityHealth, SetupStatus, ShutdownSummary, SignalResult,
 };
-use crate::subscriber::{local_file_layer, system_layer};
+use crate::subscriber::{local_health_layer, system_layer};
 use crate::telemetry::TelemetryRuntime;
 
 static INSTALL_GUARD: Mutex<()> = Mutex::new(());
@@ -22,11 +23,20 @@ pub struct ProcessObservabilityRuntime;
 
 impl ProcessObservabilityRuntime {
     pub fn install(config: ObservabilityConfig) -> Result<InstallOutcome, InstallError> {
+        Self::install_with_host_layers(config, Vec::new())
+    }
+
+    /// 在同一个进程 subscriber 中保留宿主日志输出。宿主层仅可在首次安装时提供，
+    /// 不接收 Engine 自有事件，不能复制核心诊断或绕过其隐私过滤。
+    pub fn install_with_host_layers(
+        config: ObservabilityConfig,
+        host_layers: Vec<crate::HostLogLayer>,
+    ) -> Result<InstallOutcome, InstallError> {
         let _install_guard = INSTALL_GUARD
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(installed) = INSTALLED.get() {
-            if installed.config == config {
+            if installed.config == config && host_layers.is_empty() {
                 return Ok(InstallOutcome::Reused(ProcessObservabilityHandle {
                     state: Arc::clone(installed),
                 }));
@@ -34,7 +44,7 @@ impl ProcessObservabilityRuntime {
             return Err(InstallError::AlreadyInstalled);
         }
 
-        let (state, subscriber) = build_runtime(config);
+        let (state, subscriber) = build_runtime(config, host_layers);
         tracing::subscriber::set_global_default(subscriber)
             .map_err(|_| InstallError::SubscriberAlreadyInstalled)?;
         let _ = tracing_log::LogTracer::init();
@@ -214,18 +224,12 @@ struct RuntimeState {
 
 fn build_runtime(
     config: ObservabilityConfig,
+    host_layers: Vec<crate::HostLogLayer>,
 ) -> (Arc<RuntimeState>, impl tracing::Subscriber + Send + Sync) {
-    let (telemetry, remote) = TelemetryRuntime::new(&config);
-    let telemetry_accepting = telemetry.accepting();
     let health_accepting = Arc::new(AtomicBool::new(true));
-    let mut layers = telemetry.layers();
-    layers.push(system_layer());
+    let mut layers = Vec::new();
     let (local_file_status, local_file) = match config.local_logs.as_ref() {
-        Some(local) => match local_file_layer(
-            &local.directory,
-            Arc::clone(&telemetry_accepting),
-            Arc::clone(&health_accepting),
-        ) {
+        Some(local) => match local_health_layer(&local.directory, Arc::clone(&health_accepting)) {
             Ok((layer, local_file)) => {
                 layers.push(layer);
                 (SetupStatus::Ready, Some(local_file))
@@ -235,19 +239,28 @@ fn build_runtime(
         None => (SetupStatus::Disabled, None),
     };
 
+    let (telemetry, remote) = TelemetryRuntime::new(&config, local_file.clone());
+    let telemetry_accepting = telemetry.accepting();
+    layers.extend(telemetry.layers());
+    layers.push(system_layer());
     let global_telemetry_accepting = Arc::clone(&telemetry_accepting);
     let global_health_accepting = Arc::clone(&health_accepting);
-    let subscriber = tracing_subscriber::registry()
-        .with(layers)
-        .with(dynamic_filter_fn(move |metadata, _| {
-            let accepting =
-                if metadata.target() == uc_observability_contract::diagnostics::HEALTH_TARGET {
-                    &global_health_accepting
-                } else {
-                    &global_telemetry_accepting
-                };
-            accepting.load(Ordering::Acquire) && local_sink_enabled(metadata)
-        }));
+    let engine_layer = layers.with_filter(dynamic_filter_fn(move |metadata, _| {
+        let accepting =
+            if metadata.target() == uc_observability_contract::diagnostics::HEALTH_TARGET {
+                &global_health_accepting
+            } else {
+                &global_telemetry_accepting
+            };
+        accepting.load(Ordering::Acquire) && local_sink_enabled(metadata)
+    }));
+    let mut all_layers: Vec<crate::HostLogLayer> = vec![Box::new(engine_layer)];
+    if !host_layers.is_empty() {
+        all_layers.push(Box::new(host_layers.with_filter(
+            tracing_subscriber::filter::filter_fn(host_metadata_enabled),
+        )));
+    }
+    let subscriber = tracing_subscriber::registry().with(all_layers);
     let state = Arc::new(RuntimeState {
         config,
         telemetry,
@@ -266,6 +279,60 @@ fn build_runtime(
         health_accepting,
     });
     (state, subscriber)
+}
+
+fn host_metadata_enabled(metadata: &tracing::Metadata<'_>) -> bool {
+    if matches!(
+        metadata.target(),
+        "uc.telemetry" | "uc.connectivity" | "observability.health"
+    ) {
+        return false;
+    }
+    let engine_source = |name: &str| {
+        [
+            "uc_core",
+            "uc_application",
+            "uc_infra",
+            "uc_engine",
+            "uc_observability_contract",
+            "uc_observability_runtime",
+            "uc_mobile",
+            "uc_mobile_lan",
+            "uc_mobile_proto",
+        ]
+        .iter()
+        .any(|prefix| {
+            name.strip_prefix(prefix)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+        })
+    };
+    // 网络依赖的原始地址、标识和错误正文也不能绕行到宿主输出。
+    let network_source = |name: &str| {
+        [
+            "iroh",
+            "noq",
+            "netwatch",
+            "swarm_discovery",
+            "hickory",
+            "pkarr",
+            "quinn",
+            "portmapper",
+            "netdev",
+        ]
+        .iter()
+        .any(|prefix| {
+            name.strip_prefix(prefix).is_some_and(|rest| {
+                rest.is_empty()
+                    || rest.starts_with("::")
+                    || rest.starts_with('_')
+                    || rest.starts_with('.')
+            })
+        })
+    };
+    !engine_source(metadata.target())
+        && !metadata.module_path().is_some_and(engine_source)
+        && !network_source(metadata.target())
+        && !metadata.module_path().is_some_and(network_source)
 }
 
 struct HealthAcceptanceGuard(Arc<AtomicBool>);

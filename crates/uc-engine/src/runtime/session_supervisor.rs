@@ -128,6 +128,41 @@ async fn observe_runtime_operation<T>(
     result
 }
 
+fn observe_session_request(
+    transition: uc_observability_contract::diagnostics::connectivity::SessionTransition,
+    future: impl Future<
+        Output = Result<
+            uc_observability_contract::diagnostics::connectivity::SessionTransitionResult,
+            EngineError,
+        >,
+    >,
+) -> impl Future<Output = Result<(), EngineError>> {
+    // 在进入观测 future 前固定存放业务 future，避免新增包裹重复放大调用方状态。
+    let future = Box::pin(future);
+    async move {
+        use uc_observability_contract::diagnostics::connectivity::{
+            SessionFailure, SessionTransitionObservation, SessionTransitionResult,
+        };
+        let observation = SessionTransitionObservation::begin(transition);
+        let result = future.await;
+        let completion = match &result {
+            Ok(completion) => *completion,
+            Err(error) => SessionTransitionResult::Failed(match error.category() {
+                crate::EngineErrorCategory::InvalidInput => SessionFailure::InvalidInput,
+                crate::EngineErrorCategory::InvalidState => SessionFailure::InvalidState,
+                crate::EngineErrorCategory::Unauthorized => SessionFailure::Unauthorized,
+                crate::EngineErrorCategory::NotFound => SessionFailure::NotFound,
+                crate::EngineErrorCategory::Conflict => SessionFailure::Conflict,
+                crate::EngineErrorCategory::Unavailable => SessionFailure::Unavailable,
+                crate::EngineErrorCategory::DeadlineExceeded => SessionFailure::DeadlineExceeded,
+                crate::EngineErrorCategory::Internal => SessionFailure::Internal,
+            }),
+        };
+        observation.finish(completion);
+        result.map(|_| ())
+    }
+}
+
 fn session_lifecycle_error_type(error: &EngineError) -> DiagnosticErrorType {
     match error.category() {
         crate::EngineErrorCategory::Unauthorized => DiagnosticErrorType::AuthenticationFailed,
@@ -392,20 +427,32 @@ impl SessionSupervisor {
     }
 
     pub(super) async fn suspend(&self) -> Result<(), EngineError> {
-        let _lifecycle = self.lifecycle.lock().await;
-        self.operations.close_and_wait(None).await?;
-        self.stop_current_session(uc_core::FileTransferCancellationReason::Unknown)
-            .await
+        observe_session_request(
+            uc_observability_contract::diagnostics::connectivity::SessionTransition::Suspend,
+            async {
+                let _lifecycle = self.lifecycle.lock().await;
+                self.operations.close_and_wait(None).await?;
+                self.stop_current_session(uc_core::FileTransferCancellationReason::Unknown)
+                    .await.map(|()| uc_observability_contract::diagnostics::connectivity::SessionTransitionResult::Completed)
+            },
+        )
+        .await
     }
 
     pub(super) async fn resume(&self) -> Result<(), EngineError> {
-        let _lifecycle = self.lifecycle.lock().await;
-        if self.session.lock().await.is_some() {
-            return Ok(());
-        }
-        observe_runtime_operation(
-            DiagnosticOperation::SessionLifecycle,
-            self.install_new_session(false),
+        observe_session_request(
+            uc_observability_contract::diagnostics::connectivity::SessionTransition::Resume,
+            async {
+                let _lifecycle = self.lifecycle.lock().await;
+                if self.session.lock().await.is_some() {
+                    return Ok(uc_observability_contract::diagnostics::connectivity::SessionTransitionResult::Skipped);
+                }
+                observe_runtime_operation(
+                    DiagnosticOperation::SessionLifecycle,
+                    self.install_new_session(false),
+                )
+                .await.map(|()| uc_observability_contract::diagnostics::connectivity::SessionTransitionResult::Completed)
+            },
         )
         .await
     }
@@ -897,6 +944,59 @@ mod tests {
         assert!(output.contains("uc.operation=\"session_lifecycle\""));
         assert!(output.contains("uc.outcome=\"error\""));
         assert!(output.contains("error.type=\"unavailable\""));
+    }
+
+    #[tokio::test]
+    async fn requested_session_transition_records_start_and_failure_without_hiding_the_result() {
+        let writer = CapturedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(writer.clone())
+            .finish();
+        let result = observe_session_request(
+            uc_observability_contract::diagnostics::connectivity::SessionTransition::Suspend,
+            async {
+                Err::<
+                    uc_observability_contract::diagnostics::connectivity::SessionTransitionResult,
+                    _,
+                >(operation_unavailable_error())
+            },
+        )
+        .with_subscriber(subscriber)
+        .await;
+        assert!(result.is_err());
+        let output = String::from_utf8(writer.0.lock().expect("capture").clone()).expect("logs");
+        assert!(output.contains("suspend"));
+        assert!(output.contains("session.transition.started"));
+        assert!(output.contains("failed"));
+        assert!(
+            output.contains("unavailable"),
+            "the known failure category must remain visible"
+        );
+        assert_eq!(output.lines().count(), 2);
+    }
+
+    #[tokio::test]
+    async fn cancelled_session_transition_records_interruption_instead_of_success() {
+        let writer = CapturedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(writer.clone())
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        let result = tokio::time::timeout(std::time::Duration::from_millis(5), observe_session_request(
+            uc_observability_contract::diagnostics::connectivity::SessionTransition::Suspend,
+            std::future::pending::<Result<uc_observability_contract::diagnostics::connectivity::SessionTransitionResult, EngineError>>(),
+        )).await;
+        assert!(result.is_err());
+        let output = String::from_utf8(writer.0.lock().expect("capture").clone()).expect("logs");
+        assert!(
+            output.contains("interrupted"),
+            "dropping the operation must not leave a false active transition"
+        );
+        assert!(!output.contains("completed"));
     }
 
     #[test]

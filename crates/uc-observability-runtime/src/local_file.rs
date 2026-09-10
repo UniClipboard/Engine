@@ -147,6 +147,10 @@ impl LocalFileRuntime {
         })
     }
 
+    pub(crate) fn record_rejection(&self) {
+        self.dropped_records.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub(crate) fn writer(&self) -> AsyncFileWriter {
         self.writer.clone()
     }

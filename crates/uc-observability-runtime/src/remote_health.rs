@@ -594,6 +594,13 @@ impl TrackedLogProcessor {
 
 impl LogProcessor for TrackedLogProcessor {
     fn emit(&self, data: &mut SdkLogRecord, instrumentation: &InstrumentationScope) {
+        // 纯本地记录有独立合同；不送往远程，也不是一次远程隐私拒收。
+        if data
+            .target()
+            .is_some_and(|target| target == "uc.connectivity")
+        {
+            return;
+        }
         let approved = data.body().is_none()
             && data.target().is_some_and(|target| target == "uc.telemetry")
             // The official tracing bridge uses an empty scope here and maps the
@@ -792,7 +799,7 @@ pub(crate) fn span_rejection_reason_for_test(span: &SpanData) -> Option<&'static
     span_rejection_reason(span)
 }
 
-fn log_is_approved(data: &SdkLogRecord) -> bool {
+pub(crate) fn log_is_approved(data: &SdkLogRecord) -> bool {
     let mut event = None;
     let mut domain = None;
     let mut operation = None;

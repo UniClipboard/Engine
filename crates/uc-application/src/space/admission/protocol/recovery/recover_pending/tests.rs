@@ -29,6 +29,13 @@ async fn loaded_pending_admission_keeps_the_aggregate_and_commit_token_together(
 
 #[tokio::test]
 async fn pending_join_recovery_requests_an_initial_channel_after_the_join_was_saved() {
+    let output_file = tempfile::NamedTempFile::new().expect("diagnostic output");
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(std::sync::Mutex::new(output_file.reopen().expect("writer")))
+        .finish();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
     let pair = SpaceAdmissionProtocolTestPair::fresh().await;
     pair.joiner()
         .start_join(join_input("recoverable-join"))
@@ -50,6 +57,11 @@ async fn pending_join_recovery_requests_an_initial_channel_after_the_join_was_sa
             ProtocolEvent::AdmissionRecoveryWoken,
             ProtocolEvent::JoinerInitialChannelRequested,
         ]
+    );
+    let diagnostics = std::fs::read_to_string(output_file.path()).expect("diagnostics");
+    assert!(
+        diagnostics.contains("deferred") && diagnostics.contains("state_changed"),
+        "deferred recovery must explain why it remains pending"
     );
 }
 

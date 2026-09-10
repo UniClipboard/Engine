@@ -1906,23 +1906,31 @@ async fn f1_remove_and_add_from_parent_head_preserve_branch_membership() {
         .await;
     let baseline = topology.diagnostics("A").await;
 
+    // 分区前确保现有成员已应用 group 更新，不能只依据成员列表已保存。
     topology
-        .run(&[
-            TopologyAction::Partition {
-                left: &["A", "C", "D"],
-                right: &["B", "E"],
-            },
-            TopologyAction::Join {
-                sponsor: "B",
-                joiner: "E",
-            },
-            TopologyAction::Remove {
-                sponsor: "A",
-                target: "D",
-            },
-        ])
+        .wait_for_group_epoch(&["B", "C", "D"], baseline.group_epoch)
         .await;
 
+    // 与其他分区场景一致：网络切断前取得邀请，隔离期间只执行加入。
+    let invitation = issue_invitation_named(topology.engine("B"), "B").await;
+    topology
+        .run(&[TopologyAction::Partition {
+            left: &["A", "C", "D"],
+            right: &["B", "E"],
+        }])
+        .await;
+    topology.join_with_invitation("B", "E", invitation).await;
+    topology
+        .run(&[TopologyAction::Remove {
+            sponsor: "A",
+            target: "D",
+        }])
+        .await;
+
+    // 移除提交允许 effect 留待恢复；先等待本机 group 更新，再断言分支状态。
+    topology
+        .wait_for_group_epoch(&["A"], baseline.group_epoch + 1)
+        .await;
     let removed_branch = topology.diagnostics("A").await;
     let added_branch = topology.diagnostics("B").await;
     assert_ne!(removed_branch.branch_id, added_branch.branch_id);
