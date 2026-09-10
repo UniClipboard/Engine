@@ -1168,6 +1168,16 @@ impl SqliteSearchIndex {
             .execute(conn)
             .map_err(|e| SearchError::Internal(format!("create temp posting table failed: {e}")))?;
 
+        // 替换单条记录时按条目定位，避免逐条扫描整个重建暂存表。
+        diesel::sql_query(format!(
+            "CREATE INDEX {}_entry ON {} (profile_id, entry_id)",
+            state.temp_posting_table, state.temp_posting_table
+        ))
+        .execute(conn)
+        .map_err(|e| {
+            SearchError::Internal(format!("create temp posting entry index failed: {e}"))
+        })?;
+
         diesel::sql_query(&create_entry_tag)
             .execute(conn)
             .map_err(|e| SearchError::Internal(format!("create temp tag table failed: {e}")))?;
@@ -1209,97 +1219,100 @@ impl SqliteSearchIndex {
         state: &ActiveRebuild,
         entry: &PreparedSearchEntry,
     ) -> Result<(), SearchError> {
-        let profile_id = &state.profile_id;
-        let entry_id_str = &entry.document.entry_id;
+        // 与实时写入采用同样的单条事务边界，词项不再各自提交；失败整体回滚。
+        conn.transaction::<(), diesel::result::Error, _>(|conn| {
+            let profile_id = &state.profile_id;
+            let entry_id_str = &entry.document.entry_id;
 
-        // Delete existing temp postings for this entry (idempotent upsert).
-        let del_postings = format!(
-            "DELETE FROM {post_table} WHERE profile_id = ? AND entry_id = ?",
-            post_table = state.temp_posting_table
-        );
-        diesel::sql_query(&del_postings)
-            .bind::<diesel::sql_types::Text, _>(profile_id)
-            .bind::<diesel::sql_types::Text, _>(&entry_id_str)
-            .execute(conn)
-            .map_err(|e| SearchError::Internal(format!("delete temp postings failed: {e}")))?;
+            // Delete existing temp postings for this entry (idempotent upsert).
+            let del_postings = format!(
+                "DELETE FROM {post_table} WHERE profile_id = ? AND entry_id = ?",
+                post_table = state.temp_posting_table
+            );
+            diesel::sql_query(&del_postings)
+                .bind::<diesel::sql_types::Text, _>(profile_id)
+                .bind::<diesel::sql_types::Text, _>(&entry_id_str)
+                .execute(conn)?;
 
-        let doc_row = &entry.document;
+            let doc_row = &entry.document;
 
-        let insert_doc = format!(
-            "INSERT OR REPLACE INTO {doc_table}
+            let insert_doc = format!(
+                "INSERT OR REPLACE INTO {doc_table}
              (profile_id, entry_id, event_id, active_time_ms, captured_at_ms,
               file_type, file_extensions, mime_type, indexed_at_ms, index_version,
               source_device, payload_state, render_payload, protection_group_ref)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            doc_table = state.temp_document_table
-        );
-        diesel::sql_query(&insert_doc)
-            .bind::<diesel::sql_types::Text, _>(&doc_row.profile_id)
-            .bind::<diesel::sql_types::Text, _>(&doc_row.entry_id)
-            .bind::<diesel::sql_types::Text, _>(&doc_row.event_id)
-            .bind::<diesel::sql_types::BigInt, _>(doc_row.active_time_ms)
-            .bind::<diesel::sql_types::BigInt, _>(doc_row.captured_at_ms)
-            .bind::<diesel::sql_types::Text, _>(&doc_row.file_type)
-            .bind::<diesel::sql_types::Text, _>(&doc_row.file_extensions)
-            .bind::<diesel::sql_types::Text, _>(&doc_row.mime_type)
-            .bind::<diesel::sql_types::BigInt, _>(doc_row.indexed_at_ms)
-            .bind::<diesel::sql_types::Text, _>(&doc_row.index_version)
-            .bind::<diesel::sql_types::Nullable<diesel::sql_types::Text>, _>(&doc_row.source_device)
-            .bind::<diesel::sql_types::Nullable<diesel::sql_types::Text>, _>(&doc_row.payload_state)
-            .bind::<diesel::sql_types::Nullable<diesel::sql_types::Binary>, _>(
-                &doc_row.render_payload,
-            )
-            .bind::<diesel::sql_types::Nullable<diesel::sql_types::Binary>, _>(
-                &doc_row.protection_group_ref,
-            )
-            .execute(conn)
-            .map_err(|e| SearchError::Internal(format!("insert temp doc failed: {e}")))?;
+                doc_table = state.temp_document_table
+            );
+            diesel::sql_query(&insert_doc)
+                .bind::<diesel::sql_types::Text, _>(&doc_row.profile_id)
+                .bind::<diesel::sql_types::Text, _>(&doc_row.entry_id)
+                .bind::<diesel::sql_types::Text, _>(&doc_row.event_id)
+                .bind::<diesel::sql_types::BigInt, _>(doc_row.active_time_ms)
+                .bind::<diesel::sql_types::BigInt, _>(doc_row.captured_at_ms)
+                .bind::<diesel::sql_types::Text, _>(&doc_row.file_type)
+                .bind::<diesel::sql_types::Text, _>(&doc_row.file_extensions)
+                .bind::<diesel::sql_types::Text, _>(&doc_row.mime_type)
+                .bind::<diesel::sql_types::BigInt, _>(doc_row.indexed_at_ms)
+                .bind::<diesel::sql_types::Text, _>(&doc_row.index_version)
+                .bind::<diesel::sql_types::Nullable<diesel::sql_types::Text>, _>(
+                    &doc_row.source_device,
+                )
+                .bind::<diesel::sql_types::Nullable<diesel::sql_types::Text>, _>(
+                    &doc_row.payload_state,
+                )
+                .bind::<diesel::sql_types::Nullable<diesel::sql_types::Binary>, _>(
+                    &doc_row.render_payload,
+                )
+                .bind::<diesel::sql_types::Nullable<diesel::sql_types::Binary>, _>(
+                    &doc_row.protection_group_ref,
+                )
+                .execute(conn)?;
 
-        // Insert postings.
-        for post_row in &entry.postings {
-            let insert_posting = format!(
-                "INSERT OR REPLACE INTO {post_table}
+            // Insert postings.
+            for post_row in &entry.postings {
+                let insert_posting = format!(
+                    "INSERT OR REPLACE INTO {post_table}
                  (profile_id, term_tag, entry_id, field_mask, term_freq)
                  VALUES (?, ?, ?, ?, ?)",
-                post_table = state.temp_posting_table
-            );
-            diesel::sql_query(&insert_posting)
-                .bind::<diesel::sql_types::Text, _>(&post_row.profile_id)
-                .bind::<diesel::sql_types::Binary, _>(&post_row.term_tag)
-                .bind::<diesel::sql_types::Text, _>(&post_row.entry_id)
-                .bind::<diesel::sql_types::Integer, _>(post_row.field_mask)
-                .bind::<diesel::sql_types::Integer, _>(post_row.term_freq)
-                .execute(conn)
-                .map_err(|e| SearchError::Internal(format!("insert temp posting failed: {e}")))?;
-        }
+                    post_table = state.temp_posting_table
+                );
+                diesel::sql_query(&insert_posting)
+                    .bind::<diesel::sql_types::Text, _>(&post_row.profile_id)
+                    .bind::<diesel::sql_types::Binary, _>(&post_row.term_tag)
+                    .bind::<diesel::sql_types::Text, _>(&post_row.entry_id)
+                    .bind::<diesel::sql_types::Integer, _>(post_row.field_mask)
+                    .bind::<diesel::sql_types::Integer, _>(post_row.term_freq)
+                    .execute(conn)?;
+            }
 
-        // Replace temp tag membership for this entry (mirror of document.tags).
-        let del_tags = format!(
-            "DELETE FROM {tag_table} WHERE profile_id = ? AND entry_id = ?",
-            tag_table = state.temp_entry_tag_table
-        );
-        diesel::sql_query(&del_tags)
-            .bind::<diesel::sql_types::Text, _>(profile_id)
-            .bind::<diesel::sql_types::Text, _>(&entry_id_str)
-            .execute(conn)
-            .map_err(|e| SearchError::Internal(format!("delete temp tags failed: {e}")))?;
-
-        for tag_row in &entry.tags {
-            let insert_tag = format!(
-                "INSERT OR REPLACE INTO {tag_table}
-                 (profile_id, entry_id, tag_id)
-                 VALUES (?, ?, ?)",
+            // Replace temp tag membership for this entry (mirror of document.tags).
+            let del_tags = format!(
+                "DELETE FROM {tag_table} WHERE profile_id = ? AND entry_id = ?",
                 tag_table = state.temp_entry_tag_table
             );
-            diesel::sql_query(&insert_tag)
-                .bind::<diesel::sql_types::Text, _>(&tag_row.profile_id)
-                .bind::<diesel::sql_types::Text, _>(&tag_row.entry_id)
-                .bind::<diesel::sql_types::Text, _>(&tag_row.tag_id)
-                .execute(conn)
-                .map_err(|e| SearchError::Internal(format!("insert temp tag failed: {e}")))?;
-        }
+            diesel::sql_query(&del_tags)
+                .bind::<diesel::sql_types::Text, _>(profile_id)
+                .bind::<diesel::sql_types::Text, _>(&entry_id_str)
+                .execute(conn)?;
 
-        Ok(())
+            for tag_row in &entry.tags {
+                let insert_tag = format!(
+                    "INSERT OR REPLACE INTO {tag_table}
+                 (profile_id, entry_id, tag_id)
+                 VALUES (?, ?, ?)",
+                    tag_table = state.temp_entry_tag_table
+                );
+                diesel::sql_query(&insert_tag)
+                    .bind::<diesel::sql_types::Text, _>(&tag_row.profile_id)
+                    .bind::<diesel::sql_types::Text, _>(&tag_row.entry_id)
+                    .bind::<diesel::sql_types::Text, _>(&tag_row.tag_id)
+                    .execute(conn)?;
+            }
+
+            Ok(())
+        })
+        .map_err(|e| SearchError::Internal(format!("insert temp entry transaction failed: {e}")))
     }
 
     /// Delete an entry from the rebuild temp tables.
@@ -2363,6 +2376,93 @@ mod tests {
             payload_state: None,
             char_count: None,
         }
+    }
+
+    #[tokio::test]
+    async fn rebuild_entry_failure_rolls_back_staged_document() {
+        let (index, pool, _dir) = make_index();
+        let state = ActiveRebuild::new(TEST_PROFILE, CURRENT_INDEX_VERSION);
+        let mut conn = pool.get().unwrap();
+        SqliteSearchIndex::create_rebuild_tables(&mut conn, &state).unwrap();
+        let doc = make_doc("failed-entry", vec![]);
+        let mut prepared = index.prepare_entry(TEST_PROFILE, &doc, &[]).await.unwrap();
+        prepared.postings.push(NewSearchPostingRow {
+            profile_id: TEST_PROFILE.to_owned(),
+            entry_id: "failed-entry".to_owned(),
+            term_tag: vec![1; 32],
+            field_mask: 1,
+            term_freq: 0,
+        });
+        assert!(SqliteSearchIndex::insert_temp_entry(&mut conn, &state, &prepared).is_err());
+        #[derive(QueryableByName)]
+        struct Count {
+            #[diesel(sql_type = diesel::sql_types::BigInt)]
+            count: i64,
+        }
+        let count = diesel::sql_query(format!(
+            "SELECT COUNT(*) AS count FROM {}",
+            state.temp_document_table
+        ))
+        .get_result::<Count>(&mut conn)
+        .unwrap();
+        assert_eq!(count.count, 0, "失败的记录不能留下部分暂存数据");
+    }
+
+    #[tokio::test]
+    async fn rebuild_failure_can_retry_without_partial_results() {
+        let (mut index, _pool, _dir) = make_index();
+        index.fail_after_n_entries = Some(1);
+        let entries = vec![(make_doc("retry-entry", vec![]), vec![])];
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        assert!(index.rebuild(entries.clone(), tx).await.is_err());
+        assert!(index.get_index_meta().await.unwrap().search_blocked);
+        assert!(index.rebuild_state.read().unwrap().is_none());
+        index.fail_after_n_entries = None;
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        index.rebuild(entries, tx).await.unwrap();
+        assert!(!index.get_index_meta().await.unwrap().search_blocked);
+        assert_eq!(index.search(filter_only_query()).await.unwrap().total, 1);
+    }
+
+    #[tokio::test]
+    async fn rebuild_preserves_live_update_and_delete_before_finalize() {
+        let (mut index, _pool, _dir) = make_index();
+        let resume = Arc::new(tokio::sync::Semaphore::new(0));
+        index.pause_before_finalize = Some(resume.clone());
+        let index = Arc::new(index);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let worker_index = index.clone();
+        let worker = tokio::spawn(async move {
+            worker_index
+                .rebuild(
+                    vec![
+                        (make_doc("updated", vec![]), vec![]),
+                        (make_doc("deleted", vec![]), vec![]),
+                    ],
+                    tx,
+                )
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let progress = rx.recv().await.unwrap();
+                if progress.stage == RebuildStage::Indexing && progress.indexed == 2 {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let mut updated = make_doc("updated", vec![TagId::new("favorite")]);
+        updated.text_preview = Some("更新后的内容".to_owned());
+        index.index_entry(updated, vec![]).await.unwrap();
+        index.remove_entry(&EntryId::from("deleted")).await.unwrap();
+        resume.add_permits(1);
+        worker.await.unwrap().unwrap();
+        let page = index.search(filter_only_query()).await.unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].text_preview.as_deref(), Some("更新后的内容"));
+        assert_eq!(page.items[0].tags, vec![TagId::new("favorite")]);
     }
 
     /// Load all `(entry_id, tag_id)` membership rows for the test profile, sorted.

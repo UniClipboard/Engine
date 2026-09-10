@@ -171,6 +171,102 @@ fn and_query(query_string: &str) -> SearchQuery {
     }
 }
 
+/// 固定输入、真实 V3 加密和 SQLite 重建；计时不包含数据库初始化和结果验证。
+#[tokio::test]
+#[ignore = "5000 条重建性能对照，手动运行并保留输出"]
+async fn rebuild_5000_benchmark() {
+    use crate::search::pipeline::SearchPipeline;
+    use uc_core::ports::search::search_pipeline::SearchPipelinePort;
+    use uc_core::search::{tag::TagId, SearchPipelineInput};
+    for run in 1..=3 {
+        let directory = tempfile::tempdir().unwrap();
+        let pool = init_db_pool(directory.path().join("search.sqlite").to_str().unwrap()).unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let vault = Arc::new(ProfileContentKeyVault::new(
+            directory.path().join("vault"),
+            Arc::new(MemorySecureStorage::default()),
+            [0xA1; 16],
+        ));
+        let material = ready_material("bench-space", "bench-group", "bench-key", 7, 0x41);
+        vault
+            .install_verified_space_material(&material)
+            .await
+            .unwrap();
+        activate(&session, &material);
+        let protection = Arc::new(V3SearchProtection::new(session, vault));
+        let index =
+            SqliteSearchIndex::new_v3(pool.clone(), Arc::new(FixedProfile), protection.clone());
+        let context = protection.active_key_context().await.unwrap();
+        let pipeline = SearchPipeline::new();
+        let started = std::time::Instant::now();
+        let mut entries = Vec::with_capacity(5000);
+        for i in 0..5000 {
+            let body = format!("benchmark 搜索重建测试 record {i} project{} alpha beta gamma delta clipboard history encrypted storage", i % 50);
+            let input = SearchPipelineInput {
+                entry_id: format!("bench-{i:05}").into(),
+                event_id: format!("event-{i:05}").into(),
+                active_time_ms: i,
+                captured_at_ms: i,
+                content_type: ContentType::Text,
+                tags: vec![TagId::new("benchmark")],
+                mime_type: "text/plain".to_owned(),
+                file_extensions: vec![],
+                plain_text: Some(body.clone()),
+                html_text: None,
+                uri_list: vec![],
+                file_paths: vec![],
+                file_names: vec![],
+                text_preview: Some(body.clone()),
+                char_count: Some(body.chars().count() as i64),
+                link_urls: vec![],
+                source_device: None,
+                payload_state: None,
+            };
+            entries.push(pipeline.build(&input, &context).unwrap());
+        }
+        let build_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let posting_count: usize = entries.iter().map(|(_, postings)| postings.len()).sum();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let rebuild_started = std::time::Instant::now();
+        let (result, progress) = tokio::join!(index.rebuild(entries, tx), async move {
+            let mut events = Vec::new();
+            while let Some(event) = rx.recv().await {
+                events.push(event);
+            }
+            events
+        });
+        result.unwrap();
+        let rebuild_ms = rebuild_started.elapsed().as_secs_f64() * 1000.0;
+        let meta = index.get_index_meta().await.unwrap();
+        assert!(!meta.search_blocked);
+        assert_eq!(meta.index_version, index.current_index_version());
+        assert_eq!(progress.last().unwrap().indexed, 5000);
+        let mut query = and_query("benchmark");
+        query.limit = 100;
+        let mut found = std::collections::BTreeSet::new();
+        for offset in (0..5000).step_by(100) {
+            query.offset = offset;
+            let page = index.search(query.clone()).await.unwrap();
+            assert_eq!(page.total, 5000);
+            for item in page.items {
+                assert!(item
+                    .text_preview
+                    .unwrap()
+                    .starts_with("benchmark 搜索重建测试"));
+                assert!(found.insert(item.entry_id.to_string()));
+            }
+        }
+        assert_eq!(found.len(), 5000);
+        let mut conn = pool.get().unwrap();
+        let stored: i64 = crate::db::schema::search_posting::table
+            .count()
+            .get_result(&mut conn)
+            .unwrap();
+        assert_eq!(stored as usize, posting_count);
+        println!("{{\"run\":{run},\"records\":5000,\"postings\":{posting_count},\"build_ms\":{build_ms:.3},\"rebuild_ms\":{rebuild_ms:.3},\"total_ms\":{:.3}}}", build_ms + rebuild_ms);
+    }
+}
+
 #[tokio::test]
 async fn sqlite_v12_searches_multiple_groups_without_plaintext_persistence() {
     let directory = tempfile::tempdir().unwrap();
