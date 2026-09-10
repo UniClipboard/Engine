@@ -265,7 +265,7 @@ fn forward_outbound_progress(
         active.remove(&event.transfer_id);
         bus.emit_or_warn(HostEvent::Transfer(TransferHostEvent::StatusChanged {
             transfer_id: event.transfer_id.clone(),
-            entry_id: event.transfer_id,
+            entry_id: Some(event.transfer_id),
             attempt_id: None,
             status: status.to_string(),
             reason,
@@ -308,7 +308,7 @@ impl OutboundProgressRuntime {
                                     total_bytes: progress.total_bytes,
                                 }));
                                 bus.emit_or_warn(HostEvent::Transfer(TransferHostEvent::StatusChanged {
-                                    entry_id: transfer_id.clone(),
+                                    entry_id: Some(transfer_id.clone()),
                                     transfer_id,
                                     attempt_id: None,
                                     status: "cancelled".to_owned(),
