@@ -47,7 +47,8 @@ pub enum ClipboardHostEvent {
 pub enum TransferHostEvent {
     StatusChanged {
         transfer_id: String,
-        entry_id: String,
+        // 临时接收尚未认领或因内容重复被丢弃时，没有历史记录归属。
+        entry_id: Option<String>,
         attempt_id: Option<String>,
         status: String,
         reason: Option<String>,

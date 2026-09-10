@@ -1008,6 +1008,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn engine_event_emitter_preserves_unowned_transfer_completion() {
+        let (events, mut stream) = event_channel(8);
+        let emitter = EngineHostEventEmitter::new(events);
+        emitter
+            .emit(HostEvent::Transfer(TransferHostEvent::StatusChanged {
+                transfer_id: "provisional".into(),
+                entry_id: None,
+                attempt_id: None,
+                status: "completed".into(),
+                reason: None,
+            }))
+            .unwrap();
+        assert!(
+            matches!(stream.next().await, Some(EngineEvent::TransferStatusChanged(TransferStatusChanged {
+            entry_id: None, attempt_id: None, transfer_id, status, ..
+        })) if transfer_id == "provisional" && status == "completed")
+        );
+    }
+
+    #[tokio::test]
     async fn engine_event_emitter_preserves_transfer_status_details() {
         let (events, mut stream) = event_channel(8);
         let emitter = EngineHostEventEmitter::new(events);
@@ -1015,7 +1035,7 @@ mod tests {
         emitter
             .emit(HostEvent::Transfer(TransferHostEvent::StatusChanged {
                 transfer_id: "transfer-1".into(),
-                entry_id: "entry-1".into(),
+                entry_id: Some("entry-1".into()),
                 attempt_id: Some("attempt-1".into()),
                 status: "failed".into(),
                 reason: Some("cancelled".into()),
@@ -1026,7 +1046,7 @@ mod tests {
             stream.next().await,
             Some(EngineEvent::TransferStatusChanged(TransferStatusChanged {
                 transfer_id: "transfer-1".into(),
-                entry_id: "entry-1".into(),
+                entry_id: Some("entry-1".into()),
                 attempt_id: Some("attempt-1".into()),
                 status: "failed".into(),
                 reason: Some("cancelled".into()),

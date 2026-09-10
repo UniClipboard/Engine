@@ -466,7 +466,7 @@ pub enum BindingEvent {
     },
     TransferStatusChanged {
         transfer_id: String,
-        entry_id: String,
+        entry_id: Option<String>,
         attempt_id: Option<String>,
         status: String,
         reason: Option<String>,

@@ -164,23 +164,20 @@ impl FileTransferHostEventPublisher {
         reason: Option<String>,
         event_kind: &'static str,
     ) {
-        match self.resolve_entry_id(transfer_id).await {
-            Some(entry_id) => {
-                self.emit(HostEvent::Transfer(TransferHostEvent::StatusChanged {
-                    transfer_id: transfer_id.to_string(),
-                    entry_id,
-                    attempt_id: self.resolve_attempt_id(transfer_id).await,
-                    status: status.to_string(),
-                    reason,
-                }));
-            }
-            None => {
-                warn!(
-                    transfer_id,
-                    event_kind, "no entry_id resolved; skipping host status event"
-                );
-            }
+        let entry_id = self.resolve_entry_id(transfer_id).await;
+        if entry_id.is_none() {
+            debug!(
+                event_kind,
+                "publishing provisional transfer status without entry ownership"
+            );
         }
+        self.emit(HostEvent::Transfer(TransferHostEvent::StatusChanged {
+            transfer_id: transfer_id.to_string(),
+            entry_id,
+            attempt_id: self.resolve_attempt_id(transfer_id).await,
+            status: status.to_string(),
+            reason,
+        }));
     }
 }
 
@@ -200,5 +197,100 @@ fn format_failure_reason(reason: FileTransferFailureReason, detail: Option<&str>
     match detail.map(str::trim).filter(|s| !s.is_empty()) {
         Some(detail) => format!("{label}: {detail}"),
         None => label.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uc_core::ports::host_event::{EmitError, HostEventEmitterPort};
+    use uc_core::ports::FileTransferProjectionError;
+
+    struct UnownedTransfer;
+    #[async_trait]
+    impl FindEntryIdForTransferPort for UnownedTransfer {
+        async fn get_entry_id_for_transfer(
+            &self,
+            _: &str,
+        ) -> std::result::Result<Option<String>, FileTransferProjectionError> {
+            Ok(None)
+        }
+    }
+    #[async_trait]
+    impl FindAttemptIdForTransferPort for UnownedTransfer {
+        async fn get_attempt_id_for_transfer(
+            &self,
+            _: &str,
+        ) -> std::result::Result<Option<String>, FileTransferProjectionError> {
+            Ok(None)
+        }
+    }
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<HostEvent>>);
+    impl HostEventEmitterPort for Recorder {
+        fn emit(&self, event: HostEvent) -> std::result::Result<(), EmitError> {
+            self.0.lock().unwrap().push(event);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_provisional_transfer_reaches_host_without_entry() {
+        let bus = Arc::new(HostEventBus::new());
+        let recorder = Arc::new(Recorder::default());
+        bus.register("test", recorder.clone());
+        let publisher = FileTransferHostEventPublisher::new(
+            bus,
+            Arc::new(UnownedTransfer),
+            Arc::new(UnownedTransfer),
+            Arc::new(OutboundEntryIdCache::new()),
+        );
+        publisher
+            .publish(FileTransferEvent::completed("mobile-lan:duplicate", "peer"))
+            .await
+            .unwrap();
+        let events = recorder.0.lock().unwrap();
+        assert!(
+            matches!(events.as_slice(), [HostEvent::Transfer(TransferHostEvent::StatusChanged { transfer_id, entry_id: None, attempt_id: None, status, .. })] if transfer_id == "mobile-lan:duplicate" && status == "completed"),
+            "the HUD must receive completion after duplicate provisional data is discarded"
+        );
+    }
+    #[tokio::test]
+    async fn provisional_failures_and_cancellations_reach_host() {
+        use uc_core::file_transfer::FileTransferCancellationReason;
+        for (event, expected) in [
+            (
+                FileTransferEvent::failed(
+                    "temporary",
+                    "peer",
+                    FileTransferFailureReason::TimedOut,
+                    None,
+                ),
+                "failed",
+            ),
+            (
+                FileTransferEvent::cancelled(
+                    "temporary",
+                    "peer",
+                    FileTransferCancellationReason::LocalUser,
+                ),
+                "cancelled",
+            ),
+        ] {
+            let bus = Arc::new(HostEventBus::new());
+            let recorder = Arc::new(Recorder::default());
+            bus.register("test", recorder.clone());
+            let publisher = FileTransferHostEventPublisher::new(
+                bus,
+                Arc::new(UnownedTransfer),
+                Arc::new(UnownedTransfer),
+                Arc::new(OutboundEntryIdCache::new()),
+            );
+            publisher.publish(event).await.unwrap();
+            let events = recorder.0.lock().unwrap();
+            assert!(
+                matches!(events.as_slice(), [HostEvent::Transfer(TransferHostEvent::StatusChanged { transfer_id, entry_id: None, status, .. })] if transfer_id == "temporary" && status == expected)
+            );
+        }
     }
 }

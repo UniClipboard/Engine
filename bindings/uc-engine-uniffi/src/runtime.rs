@@ -2960,7 +2960,7 @@ mod tests {
             map_engine_event(uc_engine::EngineEvent::TransferStatusChanged(
                 uc_engine::TransferStatusChanged {
                     transfer_id: "transfer-1".to_owned(),
-                    entry_id: "entry-1".to_owned(),
+                    entry_id: Some("entry-1".to_owned()),
                     attempt_id: Some("attempt-1".to_owned()),
                     status: "completed".to_owned(),
                     reason: None,
@@ -2968,7 +2968,7 @@ mod tests {
             )),
             BindingEvent::TransferStatusChanged {
                 transfer_id: "transfer-1".to_owned(),
-                entry_id: "entry-1".to_owned(),
+                entry_id: Some("entry-1".to_owned()),
                 attempt_id: Some("attempt-1".to_owned()),
                 status: "completed".to_owned(),
                 reason: None,

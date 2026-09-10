@@ -257,7 +257,7 @@ impl FileTransferLifecycle {
 
                         bus.emit_or_warn(HostEvent::Transfer(TransferHostEvent::StatusChanged {
                             transfer_id: t.transfer_id.clone(),
-                            entry_id: t.entry_id.clone(),
+                            entry_id: Some(t.entry_id.clone()),
                             attempt_id: None,
                             status: "failed".to_string(),
                             reason: Some(reason.to_string()),
@@ -307,7 +307,7 @@ impl FileTransferLifecycle {
             self.host_event_bus.emit_or_warn(HostEvent::Transfer(
                 TransferHostEvent::StatusChanged {
                     transfer_id: t.transfer_id.clone(),
-                    entry_id: t.entry_id.clone(),
+                    entry_id: Some(t.entry_id.clone()),
                     attempt_id: None,
                     status: "failed".to_string(),
                     reason: Some(reason.to_string()),

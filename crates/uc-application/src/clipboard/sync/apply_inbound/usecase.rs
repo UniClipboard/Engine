@@ -1124,7 +1124,7 @@ impl ApplyInboundClipboardUseCase {
                         self.emit_host_event(HostEvent::Transfer(
                             TransferHostEvent::StatusChanged {
                                 transfer_id: receiver_entry_id.as_ref().to_string(),
-                                entry_id: receiver_entry_id.as_ref().to_string(),
+                                entry_id: Some(receiver_entry_id.as_ref().to_string()),
                                 attempt_id: receive_attempt_id.clone(),
                                 status: if cancelled { "cancelled" } else { "failed" }.to_string(),
                                 reason: if cancelled {
@@ -1168,7 +1168,7 @@ impl ApplyInboundClipboardUseCase {
                         self.emit_host_event(HostEvent::Transfer(
                             TransferHostEvent::StatusChanged {
                                 transfer_id: receiver_entry_id.as_ref().to_string(),
-                                entry_id: receiver_entry_id.as_ref().to_string(),
+                                entry_id: Some(receiver_entry_id.as_ref().to_string()),
                                 attempt_id: receive_attempt_id.clone(),
                                 status: "failed".to_string(),
                                 reason: Some(err.to_string()),
@@ -1199,7 +1199,7 @@ impl ApplyInboundClipboardUseCase {
                 warn!(reason, "inbound dropped: blob materializer missing");
                 self.emit_host_event(HostEvent::Transfer(TransferHostEvent::StatusChanged {
                     transfer_id: receiver_entry_id.as_ref().to_string(),
-                    entry_id: receiver_entry_id.as_ref().to_string(),
+                    entry_id: Some(receiver_entry_id.as_ref().to_string()),
                     attempt_id: receive_attempt_id.clone(),
                     status: "failed".to_string(),
                     reason: Some(reason.clone()),
