@@ -2039,7 +2039,7 @@ impl SearchIndexPort for SqliteSearchIndex {
 #[async_trait]
 impl SearchIndexMaintenancePort for SqliteSearchIndex {
     fn current_index_version(&self) -> &'static str {
-        CURRENT_INDEX_VERSION
+        self.protection.index_version()
     }
 
     #[instrument(

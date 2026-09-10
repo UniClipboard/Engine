@@ -8,6 +8,7 @@ use uc_core::ids::{EntryId, ProfileId, SpaceId};
 use uc_core::membership::{
     ContentKeyId, GroupEpoch, ProtectionGroupId, SpaceKeyMaterial, SpaceKeyState,
 };
+use uc_core::ports::search::maintenance::SearchIndexMaintenancePort;
 use uc_core::ports::search::search_index::SearchIndexPort;
 use uc_core::ports::security::current_profile::{CurrentProfileError, CurrentProfilePort};
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
@@ -221,6 +222,8 @@ async fn sqlite_v12_searches_multiple_groups_without_plaintext_persistence() {
         .unwrap();
 
     let page = index.search(and_query("shared alpha")).await.unwrap();
+    let meta = index.get_index_meta().await.unwrap();
+    assert_eq!(index.current_index_version(), meta.index_version);
     assert_eq!(page.total, 2);
     let mut previews = page
         .items
