@@ -9,6 +9,7 @@ pub(crate) mod mutation_gate;
 pub(crate) mod projection;
 pub(crate) mod query;
 pub(crate) mod runtime;
+mod status;
 pub(crate) mod tagging;
 
 use uc_core::ids::DeviceId;
@@ -20,7 +21,15 @@ use crate::search::query::SearchClipboardEntriesUseCase;
 
 pub use assembly::SearchAssembly;
 use coordinator::{ManualRebuildResult, SearchCoordinator};
-pub use coordinator::{SearchRebuildProgressView, SearchStatusSnapshot};
+pub use status::SearchStatusEventPort;
+pub type SearchStatusSnapshot = SearchStatusView;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchRebuildProgressView {
+    pub stage: String,
+    pub indexed: u32,
+    pub total: Option<u32>,
+}
 pub use projection::SearchProjectionBuilder;
 
 #[derive(Debug, Error)]
@@ -99,6 +108,7 @@ pub struct SearchResultView {
 pub struct SearchStatusView {
     pub state: String,
     pub reason: Option<String>,
+    pub progress: Option<SearchRebuildProgressView>,
     pub last_rebuild_started_at_ms: Option<i64>,
     pub last_rebuild_completed_at_ms: Option<i64>,
 }

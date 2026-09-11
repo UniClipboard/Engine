@@ -244,6 +244,22 @@ pub struct NetworkRecoveryStatus {
     pub next_retry_in_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SearchRebuildProgress {
+    pub stage: String,
+    pub indexed: u32,
+    pub total: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SearchStatus {
+    pub state: String,
+    pub reason: Option<String>,
+    pub progress: Option<SearchRebuildProgress>,
+    pub last_rebuild_started_at_ms: Option<i64>,
+    pub last_rebuild_completed_at_ms: Option<i64>,
+}
+
 #[derive(Clone, PartialEq, Eq, uniffi::Record)]
 pub struct SpaceInvitation {
     pub invitation_code: String,
@@ -383,6 +399,9 @@ enum WorkerCommand {
     },
     QueryNetworkRecoveryStatus {
         response: mpsc::Sender<Result<NetworkRecoveryStatus, BindingError>>,
+    },
+    QuerySearchStatus {
+        response: mpsc::Sender<Result<SearchStatus, BindingError>>,
     },
     QuerySpaceState {
         response: mpsc::Sender<Result<SpaceState, BindingError>>,
@@ -840,6 +859,10 @@ impl MobileEngine {
 
     pub fn query_network_recovery_status(&self) -> Result<NetworkRecoveryStatus, BindingError> {
         self.request(|response| WorkerCommand::QueryNetworkRecoveryStatus { response })
+    }
+
+    pub fn query_search_status(&self) -> Result<SearchStatus, BindingError> {
+        self.request(|response| WorkerCommand::QuerySearchStatus { response })
     }
 
     pub fn query_space_state(&self) -> Result<SpaceState, BindingError> {
@@ -1434,6 +1457,17 @@ async fn run_worker_loop(
                     .and_then(map_network_recovery_status);
                 let _ = response.send(result);
             }
+            WorkerCommand::QuerySearchStatus { response } => {
+                let result = engine
+                    .execute(Operation::QuerySearchStatus)
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(|result| match result {
+                        OperationResult::SearchStatus(status) => Ok(search_status(status)),
+                        _ => Err(BindingError::RuntimeUnavailable),
+                    });
+                let _ = response.send(result);
+            }
             WorkerCommand::QuerySpaceState { response } => {
                 let result = engine
                     .execute(Operation::QuerySetupState)
@@ -1853,6 +1887,9 @@ fn map_engine_event(event: uc_engine::EngineEvent) -> BindingEvent {
                 next_retry_in_ms: status.next_retry_in_ms,
             }
         }
+        uc_engine::EngineEvent::SearchStatusChanged(status) => BindingEvent::SearchStatusChanged {
+            status: search_status(status),
+        },
         uc_engine::EngineEvent::RePairingRequired { scope } => BindingEvent::RePairingRequired {
             scope: match scope {
                 uc_engine::RePairingScope::AllDevices => BindingRePairingScope::AllDevices,
@@ -2225,6 +2262,20 @@ fn next_custom_relay_urls(
 
 fn map_network_recovered(result: OperationResult) -> Result<(), BindingError> {
     unpack_operation!(result, OperationResult::NetworkRecovered => ())
+}
+
+fn search_status(status: uc_engine::SearchStatusSummary) -> SearchStatus {
+    SearchStatus {
+        state: status.state,
+        reason: status.reason,
+        progress: status.progress.map(|progress| SearchRebuildProgress {
+            stage: progress.stage,
+            indexed: progress.indexed,
+            total: progress.total,
+        }),
+        last_rebuild_started_at_ms: status.last_rebuild_started_at_ms,
+        last_rebuild_completed_at_ms: status.last_rebuild_completed_at_ms,
+    }
 }
 
 fn map_network_recovery_status(
@@ -2918,6 +2969,34 @@ mod tests {
                 next_retry_in_ms: Some(500),
             }
         );
+    }
+
+    #[test]
+    fn search_status_event_preserves_unknown_total_and_terminal_result() {
+        for (stage, total) in [("preparing", None), ("complete", Some(100))] {
+            let status = uc_engine::SearchStatusSummary {
+                state: if total.is_some() {
+                    "ready"
+                } else {
+                    "rebuilding"
+                }
+                .to_owned(),
+                reason: None,
+                last_rebuild_started_at_ms: Some(1),
+                last_rebuild_completed_at_ms: total.map(|_| 2),
+                progress: Some(uc_engine::SearchRebuildProgressSummary {
+                    stage: stage.to_owned(),
+                    indexed: total.unwrap_or(0),
+                    total,
+                }),
+            };
+            assert_eq!(
+                map_engine_event(uc_engine::EngineEvent::SearchStatusChanged(status.clone())),
+                BindingEvent::SearchStatusChanged {
+                    status: search_status(status)
+                }
+            );
+        }
     }
 
     #[test]

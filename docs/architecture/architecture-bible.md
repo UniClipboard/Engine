@@ -280,6 +280,7 @@ Core 保存完整 admission aggregate 和状态转换规则。Application 内部
 - 生产搜索由应用层搜索运行期一次性完整构造，并由它负责后台重建、修复和关闭；引擎层不单独启动或终止搜索任务。
 - 空间锁定前必须暂停并等待搜索后台工作退出，解锁或恢复后由空间会话统一恢复；进程关闭后不得再次开启搜索后台工作。
 - 无后台能力的场景必须使用明确的只读搜索模式，不能先创建半成品再运行中补装。
+- 搜索协调器通过必要装配的产品状态出口通知 Engine，查询与通知共用同一份内存快照；`SearchStatusChanged` 经既有事件流发送，准备阶段总数未知，完成、失败和取消都有终态。进度不新增持久字段，掉队或重连由状态查询恢复；[外部订阅契约](../design-docs/uc-engine-interface.md#搜索重建状态订阅)为唯一说明。
 
 V3 搜索密码边界由 Infra `V3SearchProtection` 独占。profile 搜索根从 `ProfileContentVaultKey` 域分离派生；索引调用只提交规范词项，模块从活动 session 固定保护组并生成 opaque group ref 与组隔离 term tags。查询只接收索引中实际存在的 group refs，经 vault 验证后为每个查询词生成一组跨保护组 alternatives；AND 语义按查询词集合判断命中，禁止把全部组 tags 扁平后按总数计数。搜索 render 保留所属模块的 JSON schema 与实体 AAD，但 V3 AEAD、purpose 和历史 key resolution 委托 `ContentProtection`。`SqliteSearchIndex` 是 V11/V12 共用的唯一仓储实现：策略只在 SQLite 边界外准备或打开 render 密文与 query tags，事务、过滤、分页和重建切换保持单实现；V12 持久化每份文档的 group ref，拒绝 posting context 与落库时活动 context 不一致，并以 `search-v12` 独立版本失败关闭。Engine 在 V3 storage gate 成功后只选择 V12 production 构造；V2 搜索读取只留在一次性升级器中。
 
@@ -821,6 +822,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 | 日期 | 主题 | 长期结论 |
 | --- | --- | --- |
+| 2026-09-10 | 搜索状态持续通知 | Application 搜索协调器拥有重建、当前状态、进度和结束原因；Engine 只把产品状态转为稳定事件。调用方沿用重建请求、状态查询与事件流，接受请求不代表完成；失败和中断由既有重试与重启恢复路径负责，通知不承担业务推进。 |
 | 2026-09-10 | 搜索重建分批保存验证 | 重建每批最多 100 条，事务外准备密文；实时镜像共用同一暂存写入实现但保留单条提交。失败进度只计入已经提交的批次，尾批和重试保留全部条目。[第二轮测速](../generated/search-rebuild-5000-benchmark.md#第二轮有界分批保存)记录同输入对照和未保留的探索方案。 |
 | 2026-09-10 | 搜索重建写入性能验证 | 完整重建仍由 Application 搜索协调器负责，调用方只请求重建；Infra 负责密文暂存、原子切换及失败保留阻塞状态，重试和重启恢复仍由协调器承担。单条事务与条目定位索引优化不改变稳定入口；[5000 条真实 V3 重建对照](../generated/search-rebuild-5000-benchmark.md)记录逐轮结果与验证边界。 |
 | 2026-09-10 | 已激活资料的启动展示 | 活动布局已为 V3 时，遗留 journal 的核验和清理仍按原恢复规则执行，但不再声明需要资料转换；冷启动的产品状态为无需升级，实际未激活的转换与失败恢复保持原语义。 |

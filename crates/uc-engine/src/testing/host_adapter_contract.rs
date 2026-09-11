@@ -21,6 +21,88 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 static ENGINE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[tokio::test]
+async fn engine_search_rebuild_stream_and_query_share_the_final_status() {
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let host = HostCapabilities::new(
+        HostDirectories::new(
+            temp.path().join("private"),
+            temp.path().join("cache"),
+            temp.path().join("temporary"),
+            temp.path().join("logs"),
+        ),
+        Box::new(MemoryHostSecureStorage::default()),
+        Box::new(StaticHostClipboard {
+            snapshot: HostClipboardSnapshot {
+                observed_at_ms: 0,
+                representations: Vec::new(),
+            },
+        }),
+        Box::new(EmptyHostFiles),
+    );
+    let (engine, mut events) = Engine::start(EngineConfig::new("1.2.3"), host)
+        .await
+        .unwrap();
+    engine
+        .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
+            device_name: Some("Search Device".into()),
+            passphrase: crate::SecretString::new("correct horse"),
+            passphrase_confirmation: crate::SecretString::new("correct horse"),
+        }))
+        .await
+        .unwrap();
+    for i in 0..3 {
+        engine
+            .execute(crate::Operation::SendText(crate::SendTextInput {
+                text: format!("search notification record {i}"),
+                target_devices: Vec::new(),
+            }))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        engine
+            .execute(crate::Operation::RebuildSearchIndex)
+            .await
+            .unwrap(),
+        crate::OperationResult::SearchRebuildAccepted { accepted: true }
+    );
+    let started = next_engine_event_matching(&mut events, |event| matches!(event,
+        EngineEvent::SearchStatusChanged(status) if status.reason.as_deref() == Some("manual_rebuild") && status.progress.as_ref().is_some_and(|p| p.stage == "preparing")
+    )).await;
+    let EngineEvent::SearchStatusChanged(started) = started else {
+        unreachable!()
+    };
+    assert_eq!(started.progress.unwrap().total, None);
+    let indexing = next_engine_event_matching(&mut events, |event| matches!(event,
+        EngineEvent::SearchStatusChanged(status) if status.progress.as_ref().is_some_and(|p| p.stage == "indexing")
+    )).await;
+    let EngineEvent::SearchStatusChanged(indexing) = indexing else {
+        unreachable!()
+    };
+    assert_eq!(indexing.progress.unwrap().total, Some(3));
+    let completed = next_engine_event_matching(&mut events, |event| matches!(event,
+        EngineEvent::SearchStatusChanged(status) if status.progress.as_ref().is_some_and(|p| p.stage == "complete")
+    )).await;
+    let EngineEvent::SearchStatusChanged(completed) = completed else {
+        unreachable!()
+    };
+    assert_eq!(completed.state, "ready");
+    assert_eq!(completed.progress.as_ref().unwrap().indexed, 3);
+    assert_eq!(
+        engine
+            .execute(crate::Operation::QuerySearchStatus)
+            .await
+            .unwrap(),
+        crate::OperationResult::SearchStatus(completed)
+    );
+    engine
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+}
+
 async fn next_engine_event_matching(
     events: &mut crate::EventStream,
     predicate: impl Fn(&EngineEvent) -> bool,

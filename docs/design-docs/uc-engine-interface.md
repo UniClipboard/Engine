@@ -41,12 +41,49 @@ crate 根只保留稳定名称的统一导出，内部按职责分为七层：
 | `DeviceTrustChanged { revision }` | 正式设备组状态已经变化；宿主重新调用 `QueryDeviceGroupChoices` 读取完整事实与待处理选择 |
 | `WorkspaceConvergenceChanged` | 仅 `dev-tools` 的内部收敛诊断事件；不进入正式宿主和发布产物 |
 | `NetworkRecoveryChanged` | 网络会话恢复开始、等待下一次尝试、成功或最终失败的稳定状态变化 |
+| `SearchStatusChanged` | 搜索可用性、重建准备与保存进度、成功、失败或取消后的完整当前状态 |
 | `RePairingRequired { scope }` | 旧资料独立化完成，需要产品提示重新配对；`all_devices` 表示全部旧设备关系均须重新建立 |
 | `RefreshRequired` | 宿主必须重新查询当前状态 |
 | `OperationFinished` | 一次操作进入成功、失败或取消终态 |
 | `Fatal` | 核心遇到不可恢复错误 |
 
 当底层变化事件不包含完整条目摘要时，核心只发送 `RefreshRequired(StateInvalidated)`，不得猜测内容类型、时间或预览。
+
+### 搜索重建状态订阅
+
+Rust 宿主从 `Engine::start` 返回的 `EventStream` 持续调用 `next()`，处理
+`EngineEvent::SearchStatusChanged(SearchStatusSummary)`。无需创建第二条搜索订阅通道。
+`Operation::QuerySearchStatus` 返回同一份当前状态；中途打开页面、重新挂接消费者或收到
+`RefreshRequired` 后用它恢复。事件流有界，不保证重放所有进度，查询得到的快照才是当前事实；
+宿主应统一消费事件流并串行协调查询与视图更新，不能用查询前积压的旧通知覆盖查询结果。
+
+`SearchStatusSummary` 保留 `state`、`reason` 和最近开始/完成时间，并增加可选 `progress`：
+
+| 字段或取值 | 语义 |
+| --- | --- |
+| `state` | `ready`、`rebuilding`、`unavailable` |
+| `progress = None` | 当前没有本次运行的重建进度；进度不作为新的持久化数据保存 |
+| `stage = preparing` | 正在读取和整理历史，`indexed` 为已处理历史条目数，`total = None`，不显示百分比 |
+| `stage = indexing` | 正在保存索引，`indexed` 为已提交数量，`total = Some(n)`；进入该阶段后重新按保存数量计数 |
+| `stage = complete` | 重建成功，搜索已可用；成功状态由完整流程负责人结算，不以请求返回代替 |
+| `stage = failed` | 重建失败，`reason = rebuild_failed_waiting_for_retry`，不会附带底层错误正文 |
+| `stage = cancelled` | 重建因生命周期停止而中断，`reason = interrupted_rebuild`；不伪装为成功 |
+
+终态在当前搜索运行期内保留，直到下一次重建或恢复后重新评估。应用重启后通过既有索引元数据恢复
+可用性和最近时间，不重放历史进度。读取历史列表或生成索引失败时不能用部分结果发布成功；既有无法投影
+条目的跳过规则保持不变。一次性空间回收整理不属于重建完成条件。
+
+Application 搜索协调器是唯一完整负责人，以必要装配参数 `SearchStatusEventPort` 输出产品状态；
+Engine 只映射为稳定通知，不访问内部阶段对象、存储或业务步骤。通知出口在搜索启动前接入，调用立即完成，
+外部消费者离线或落后不阻塞重建。取消任务时关闭状态守卫并发布终态，不留下“正在重建”的假状态。
+
+iOS/Android 绑定沿用 `next_event()`，新增 `BindingEvent::SearchStatusChanged { status }` 和
+`query_search_status()`；HarmonyOS 的 `next_event()` 返回 `kind = search_status_changed`、
+`search_status` 字段，并提供 `query_search_status()`。它们只依赖同版本 `uc-engine`。
+本仓不提供桌面 WebSocket 转发：产品仓仍须把该事件映射到自己的 `search` 主题。
+
+`RebuildSearchIndex` 返回的 `SearchRebuildAccepted` 及对应 `OperationFinished` 只表示请求被接受。
+用户可见的重建成功必须以 `SearchStatusChanged` 的 `complete` 或后续状态查询为准。
 
 旧资料独立化完成后，核心发送 `RePairingRequired { scope: AllDevices }`。产品收到后立即展示完整重新配对引导；若启动时错过事件，则通过 `QuerySetupState.re_pairing_required` 恢复同一提示。该值为 `true` 表示仍须重新配对，为 `false` 表示无需重新配对；成功创建或加入新空间后由 Engine 清除。仅关闭提示不能清除该值。产品不得从设备列表自行推断范围，也不负责清理旧关系。
 

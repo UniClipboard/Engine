@@ -6,6 +6,7 @@ mod host_operations;
 mod lan_compatibility;
 #[cfg(feature = "lan-compat")]
 mod mobile_upload;
+mod search_events;
 mod session_supervisor;
 mod task_shutdown;
 

@@ -49,6 +49,7 @@ pub use crate::profile::probe_profile_key_access::{
     ProfileKeyAccessProbePortError,
 };
 use crate::search::mutation_gate::{CoordinatedSearchIndex, SearchMutationGate};
+pub use crate::search::SearchStatusEventPort;
 pub use crate::space::{
     ActivateCompletionHelperAdmissionSecurityPort,
     ActivateCompletionHelperAdmissionSecurityRequest, ActivateMembershipEffectPort,

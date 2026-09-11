@@ -1328,8 +1328,18 @@ impl fmt::Debug for SearchTagSummary {
 pub struct SearchStatusSummary {
     pub state: String,
     pub reason: Option<String>,
+    #[serde(default)]
+    pub progress: Option<SearchRebuildProgressSummary>,
     pub last_rebuild_started_at_ms: Option<i64>,
     pub last_rebuild_completed_at_ms: Option<i64>,
+}
+
+/// 面向调用方的重建进度；准备阶段总数未知，终态保留到下一次重建。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchRebuildProgressSummary {
+    pub stage: String,
+    pub indexed: u32,
+    pub total: Option<u32>,
 }
 
 impl fmt::Debug for SearchStatusSummary {
@@ -1338,6 +1348,7 @@ impl fmt::Debug for SearchStatusSummary {
             .debug_struct("SearchStatusSummary")
             .field("state", &self.state)
             .field("has_reason", &self.reason.is_some())
+            .field("progress", &self.progress)
             .field(
                 "last_rebuild_started_at_ms",
                 &self.last_rebuild_started_at_ms,

@@ -525,6 +525,9 @@ impl ProductionSessionFactory {
                 Arc::new(EngineClipboardInboundEvents {
                     events: events.clone(),
                 }),
+                Arc::new(super::search_events::EngineSearchStatusEvents {
+                    events: events.clone(),
+                }),
             ),
         )
         .await

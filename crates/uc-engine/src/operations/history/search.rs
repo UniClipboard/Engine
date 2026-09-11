@@ -68,12 +68,25 @@ pub async fn execute_query_search_status(
     facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
     let status = facade.search_status().await.map_err(map_search_error)?;
-    Ok(OperationResult::SearchStatus(SearchStatusSummary {
+    Ok(OperationResult::SearchStatus(search_status_summary(status)))
+}
+
+pub(crate) fn search_status_summary(
+    status: uc_application::facade::SearchStatusView,
+) -> SearchStatusSummary {
+    SearchStatusSummary {
         state: status.state,
         reason: status.reason,
+        progress: status
+            .progress
+            .map(|progress| crate::SearchRebuildProgressSummary {
+                stage: progress.stage,
+                indexed: progress.indexed,
+                total: progress.total,
+            }),
         last_rebuild_started_at_ms: status.last_rebuild_started_at_ms,
         last_rebuild_completed_at_ms: status.last_rebuild_completed_at_ms,
-    }))
+    }
 }
 
 pub async fn execute_rebuild_search_index(

@@ -16,8 +16,9 @@ use zeroize::Zeroizing;
 
 use crate::{
     host, OhActiveClipboard, OhEngineConfig, OhEngineEvent, OhHost, OhInvitationIssued,
-    OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhNetworkRecoveryStatus, OhSendReport,
-    OhSessionRecovery, OhSpaceCreated, OhWorkspaceConvergence,
+    OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhNetworkRecoveryStatus,
+    OhSearchRebuildProgress, OhSearchStatus, OhSendReport, OhSessionRecovery, OhSpaceCreated,
+    OhWorkspaceConvergence,
 };
 
 #[napi]
@@ -134,6 +135,19 @@ impl OhEngine {
                 device_id: device.device_id,
                 display_name: device.display_name,
             }),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn query_search_status(&self) -> napi::Result<OhSearchStatus> {
+        match self
+            .engine
+            .execute(Operation::QuerySearchStatus)
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::SearchStatus(status) => Ok(search_status(status)),
             _ => Err(unexpected_result()),
         }
     }
@@ -641,6 +655,7 @@ fn map_event(event: EngineEvent) -> OhEngineEvent {
         network_recovery_phase: None,
         next_retry_in_ms: None,
         re_pairing_scope: None,
+        search_status: None,
     };
     match event {
         EngineEvent::StateChanged { state } => mapped.state = Some(engine_state(state).to_owned()),
@@ -673,6 +688,9 @@ fn map_event(event: EngineEvent) -> OhEngineEvent {
             mapped.retryable = Some(status.retryable);
             mapped.next_retry_in_ms = status.next_retry_in_ms.map(|value| value as f64);
         }
+        EngineEvent::SearchStatusChanged(status) => {
+            mapped.search_status = Some(search_status(status))
+        }
         EngineEvent::RePairingRequired { scope } => {
             mapped.re_pairing_scope = Some(
                 match scope {
@@ -684,6 +702,22 @@ fn map_event(event: EngineEvent) -> OhEngineEvent {
         _ => {}
     }
     mapped
+}
+
+fn search_status(status: uc_engine::SearchStatusSummary) -> OhSearchStatus {
+    OhSearchStatus {
+        state: status.state,
+        reason: status.reason,
+        progress: status.progress.map(|progress| OhSearchRebuildProgress {
+            stage: progress.stage,
+            indexed: progress.indexed,
+            total: progress.total,
+        }),
+        last_rebuild_started_at_ms: status.last_rebuild_started_at_ms.map(|value| value as f64),
+        last_rebuild_completed_at_ms: status
+            .last_rebuild_completed_at_ms
+            .map(|value| value as f64),
+    }
 }
 
 fn recovery_phase(phase: uc_engine::NetworkRecoveryPhaseSummary) -> &'static str {
@@ -758,6 +792,36 @@ mod tests {
         assert_eq!(event.refresh_reason.as_deref(), Some("consumer_lagged"));
         assert_eq!(event.operation_id, None);
         assert_eq!(event.error_code, None);
+    }
+
+    #[test]
+    fn search_status_event_preserves_unknown_total_and_terminal_result() {
+        for (stage, total) in [("preparing", None), ("complete", Some(100))] {
+            let event = map_event(EngineEvent::SearchStatusChanged(
+                uc_engine::SearchStatusSummary {
+                    state: if total.is_some() {
+                        "ready"
+                    } else {
+                        "rebuilding"
+                    }
+                    .to_owned(),
+                    reason: None,
+                    last_rebuild_started_at_ms: Some(1),
+                    last_rebuild_completed_at_ms: total.map(|_| 2),
+                    progress: Some(uc_engine::SearchRebuildProgressSummary {
+                        stage: stage.to_owned(),
+                        indexed: total.unwrap_or(0),
+                        total,
+                    }),
+                },
+            ));
+            assert_eq!(event.kind, "search_status_changed");
+            let status = event.search_status.unwrap();
+            let progress = status.progress.unwrap();
+            assert_eq!(progress.total, total);
+            assert_eq!(progress.stage, stage);
+            assert_eq!(status.last_rebuild_started_at_ms, Some(1.0));
+        }
     }
 
     #[test]

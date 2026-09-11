@@ -127,6 +127,7 @@ pub struct ApplicationAdapters {
     network_recovery: Arc<crate::space::NetworkRecoveryFacade>,
     inbound_adapters: ClipboardInboundAdapters,
     inbound_events: Arc<dyn ClipboardInboundEventPort>,
+    search_events: Arc<dyn crate::search::SearchStatusEventPort>,
 }
 
 impl ApplicationNetworkBinding {
@@ -166,6 +167,7 @@ impl ApplicationNetworkBinding {
         >,
         inbound_hidden_marker: Arc<dyn uc_core::ports::hidden_path::MarkHiddenPort>,
         inbound_events: Arc<dyn ClipboardInboundEventPort>,
+        search_events: Arc<dyn crate::search::SearchStatusEventPort>,
     ) -> ApplicationAdapters {
         let inbound_adapters = ClipboardInboundAdapters {
             fetcher: Arc::clone(&self.blob_transfer) as Arc<_>,
@@ -179,6 +181,7 @@ impl ApplicationNetworkBinding {
             network_recovery,
             inbound_adapters,
             inbound_events,
+            search_events,
         }
     }
 }
@@ -470,6 +473,7 @@ impl ApplicationAssembly {
             network_recovery,
             inbound_adapters,
             inbound_events,
+            search_events,
         } = adapters;
         let ApplicationNetworkBinding {
             space,
@@ -490,7 +494,7 @@ impl ApplicationAssembly {
         if !space.start_application_runtime().await {
             return Err(ApplicationStartError::SpaceRuntimeUnavailable);
         }
-        let search = SearchAssembly::start(&self.deps);
+        let search = SearchAssembly::start(&self.deps, search_events);
         let active_clipboard = match self
             .clipboard
             .start_active(ActiveClipboardSessionDeps {

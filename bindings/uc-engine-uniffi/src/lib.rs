@@ -8,9 +8,9 @@ mod runtime;
 pub use runtime::{
     ActiveClipboard, Device, EntryNotResendableReason, InvitationAvailability, InvitationIssued,
     JoinSpaceRejectionReason, JoinSpaceStatus, JoinedSpace, LocalDevice, MobileEngine,
-    PeerConnectionRefresh, RelaySaveResult, ResendEntryOutcome, SendReport, SessionRecovery,
-    SpaceCreated, SpaceInvitation, SpaceState, WorkspaceConvergence,
-    WorkspaceConvergenceFailureCategory, WorkspaceConvergencePhase,
+    PeerConnectionRefresh, RelaySaveResult, ResendEntryOutcome, SearchRebuildProgress,
+    SearchStatus, SendReport, SessionRecovery, SpaceCreated, SpaceInvitation, SpaceState,
+    WorkspaceConvergence, WorkspaceConvergenceFailureCategory, WorkspaceConvergencePhase,
 };
 
 uniffi::setup_scaffolding!();
@@ -481,6 +481,9 @@ pub enum BindingEvent {
         phase: String,
         retryable: bool,
         next_retry_in_ms: Option<u64>,
+    },
+    SearchStatusChanged {
+        status: SearchStatus,
     },
     RePairingRequired {
         scope: BindingRePairingScope,
