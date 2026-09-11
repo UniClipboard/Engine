@@ -41,6 +41,8 @@ jobs:
 
       - name: Check repository ownership and release rules
         run: node scripts/architecture/check-engine-repository.mjs
+        env:
+          RUST_STYLE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
 
       - name: Check patch whitespace
         run: git diff --check

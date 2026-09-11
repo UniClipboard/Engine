@@ -138,6 +138,20 @@ function runCargoBuildStorageCheck() {
   process.stdout.write(output)
 }
 
+function runRustStyleCheck() {
+  const checker = join(REPOSITORY_ROOT, 'scripts/architecture/check-rust-style.mjs')
+  const result = spawnSync(process.execPath, [checker], {
+    cwd: REPOSITORY_ROOT,
+    encoding: 'utf8',
+  })
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
+  if (result.status !== 0) {
+    process.stderr.write(output)
+    throw new Error('Rust style validation did not pass')
+  }
+  process.stdout.write(output)
+}
+
 function packageByName(metadata, name) {
   const found = metadata.packages.find(candidate => candidate.name === name)
   if (!found) throw new Error(`workspace package is missing: ${name}`)
@@ -2105,6 +2119,7 @@ function main() {
     throw new Error(`run from repository root: ${REPOSITORY_ROOT}`)
   }
   runCargoBuildStorageCheck()
+  runRustStyleCheck()
   const metadata = cargoMetadata()
   const sources = repositorySources()
   const problems = collectProblems(metadata, sources)

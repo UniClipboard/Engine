@@ -8,6 +8,7 @@ node scripts/architecture/check-engine-repository.mjs
 
 检查内容包括：
 
+- 新增 Rust 代码遵守 [Rust 编写规范](rust-style.md)；本地比较当前工作区，CI 比较本次变更的基线，不追溯阻断历史写法。
 - 工作区只能包含本仓拥有的 Engine、内部实现、绑定、兼容和验收包。
 - 本地路径依赖不能指向仓库外，也不能依赖 desktop、daemon、CLI 或 Tauri 包。
 - `uc-engine` 是唯一稳定的 Rust 入口；移动绑定只依赖该入口。

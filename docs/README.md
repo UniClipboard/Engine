@@ -7,6 +7,7 @@
 
 - [架构](../ARCHITECTURE.md)：系统边界、依赖方向与主要模块。
 - [设计](DESIGN.md)：长期设计、稳定契约与 ADR。
+- [Rust 编写规范](design-docs/rust-style.md)：Rust 修改的规划、命名引用、实现与验证约束。
 - [计划](PLANS.md)：进行中、已关闭计划与技术债。
 - [产品理念](PRODUCT_SENSE.md)：愿景、产品原则与平台关系。
 - [产品/宿主边界](FRONTEND.md)：Engine 与前端、移动/桌面宿主的责任边界。
