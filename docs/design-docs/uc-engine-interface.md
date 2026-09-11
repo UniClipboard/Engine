@@ -62,6 +62,9 @@ crate 根只保留稳定名称的统一导出，内部按职责分为七层：
 Engine 前构造 `ObservabilityResource` 和 `ObservabilityConfig`，再调用 `ProcessObservabilityRuntime::install`。相同配置重复安装
 复用同一进程运行时，不同配置明确失败；远程诊断许可、Collector 地址和认证只归宿主，不属于 Engine 设置。
 
+Rust 宿主需要实现产品分析能力或识别受管诊断文件时，通过 `uc_engine::observability::analytics` 和
+`uc_engine::observability::diagnostics` 使用完整合同；不得直接依赖 Engine 内部的 `uc-observability-contract` 包。
+
 需要保留宿主自身日志层的 Rust 宿主，可在首次安装时调用 `ProcessObservabilityRuntime::install_with_host_layers`，
 传入标准 `HostLogLayer`。共同运行时负责分组过滤：核心诊断及底层原始网络输出不会绕行到宿主层。
 不允许在已有安装上追加或替换宿主层；相同配置的普通安装仍可复用。这个入口仅负责进程日志组合，

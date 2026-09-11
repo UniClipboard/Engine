@@ -7,6 +7,7 @@ pub use uc_observability_contract::analytics::{
     AdoptOutcome, AnalyticsEventContext, AnalyticsIdentityError, AnalyticsIdentityPort,
     AnalyticsPort, DeviceType, Event, GroupIdentifyPayload, IdentifyPayload, Os, ReleaseOutcome,
 };
+pub use uc_observability_contract::{analytics, diagnostics};
 pub use uc_observability_runtime::{
     managed_log_files, CaptureEndReason, ConfigError as ObservabilityConfigError,
     DeploymentEnvironment, DetailedCaptureRequest, FileSourceCounts,
