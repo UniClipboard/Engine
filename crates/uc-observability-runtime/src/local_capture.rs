@@ -170,6 +170,7 @@ pub(crate) struct CapturePolicy {
     pub(crate) host_lifecycle: HashMap<HostDiagnosticSource, HostLifecycleState>,
     pub(crate) sources: HashMap<LocalDiagnosticSource, SourceCoverage>,
     active: Option<CaptureSession>,
+    closed: bool,
     last_end: Option<CaptureEndReason>,
     last_id: Option<Uuid>,
     pub(crate) revision: u64,
@@ -183,6 +184,7 @@ pub(crate) struct CapturePolicy {
 
 impl CapturePolicy {
     pub(crate) fn shutdown(&mut self) {
+        self.closed = true;
         if let Some(active) = self.active.take() {
             self.last_id = Some(active.id);
             self.last_end = Some(CaptureEndReason::RuntimeShutdown);
@@ -227,6 +229,10 @@ impl CapturePolicy {
         request: DetailedCaptureRequest,
         now: Instant,
     ) -> Result<LocalCaptureStatus, LocalDiagnosticError> {
+        // 与关闭共同受采集锁保护，拒绝已通过外层检查但迟到的开启请求。
+        if self.closed {
+            return Err(LocalDiagnosticError::AlreadyShutdown);
+        }
         if request.duration < Duration::from_secs(1) || request.duration > Duration::from_secs(900)
         {
             return Err(LocalDiagnosticError::InvalidDuration);

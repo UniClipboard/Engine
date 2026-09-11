@@ -749,6 +749,65 @@ mod tests {
     use std::sync::Barrier;
 
     use super::*;
+    use crate::{
+        CaptureEndReason, DeploymentEnvironment, LocalCaptureMode, LocalLogConfig,
+        ObservabilityResource, OperatingSystem,
+    };
+
+    #[test]
+    fn shutdown_rejects_capture_that_passed_the_outer_check_before_closing() {
+        for initially_active in [false, true] {
+            let directory = tempfile::tempdir().expect("日志目录");
+            let config = ObservabilityConfig::new(
+                ObservabilityResource::new(
+                    "1.1.0",
+                    DeploymentEnvironment::Test,
+                    OperatingSystem::Macos,
+                    "test",
+                )
+                .expect("资源配置"),
+            )
+            .with_local_logs(LocalLogConfig::new(directory.path()));
+            let (state, _subscriber) = build_runtime(config, Vec::new());
+            let handle = ProcessObservabilityHandle { state };
+            if initially_active {
+                handle
+                    .start_local_diagnostic_capture(DetailedCaptureRequest::default())
+                    .expect("初始采集");
+            }
+            let (checked, observed_check) = mpsc::channel();
+            let (resume, resumed) = mpsc::channel();
+            let worker_handle = handle.clone();
+            let worker = std::thread::spawn(move || {
+                // 固定请求已通过外层检查、但尚未进入采集负责人的并发顺序。
+                assert!(!worker_handle.state.shutdown.is_started());
+                checked.send(()).expect("检查完成");
+                resumed.recv().expect("继续请求");
+                worker_handle
+                    .state
+                    .telemetry
+                    .recording
+                    .start_capture(DetailedCaptureRequest::default())
+            });
+            observed_check.recv().expect("请求已通过检查");
+            let shutdown = handle.shutdown(Duration::from_secs(2));
+            resume.send(()).expect("关闭后继续请求");
+            let result = worker.join().expect("采集线程");
+            assert_eq!(shutdown.logs, SignalResult::Completed);
+            assert!(matches!(result, Err(LocalDiagnosticError::AlreadyShutdown)));
+            let status = handle.query_local_diagnostic_status();
+            assert!(status.closed);
+            assert_eq!(status.capture.mode, LocalCaptureMode::Standard);
+            assert!(status.capture.capture_id.is_none());
+            assert_eq!(status.capture.remaining_ms, 0);
+            if initially_active {
+                assert_eq!(
+                    status.capture.end_reason,
+                    Some(CaptureEndReason::RuntimeShutdown)
+                );
+            }
+        }
+    }
 
     #[test]
     fn timed_out_lifecycle_work_keeps_later_flushes_out_until_it_finishes() {

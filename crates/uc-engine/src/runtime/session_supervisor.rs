@@ -29,7 +29,7 @@ use crate::{
 };
 
 use super::{operation_error_with_code, operation_unavailable_error, startup_error};
-use crate::{EngineError, OperationResult};
+use crate::{EngineError, EngineErrorCategory, OperationResult};
 
 const SESSION_OPERATION_GRACE: Duration = Duration::from_secs(2);
 
@@ -148,14 +148,14 @@ fn observe_session_request(
         let completion = match &result {
             Ok(completion) => *completion,
             Err(error) => SessionTransitionResult::Failed(match error.category() {
-                crate::EngineErrorCategory::InvalidInput => SessionFailure::InvalidInput,
-                crate::EngineErrorCategory::InvalidState => SessionFailure::InvalidState,
-                crate::EngineErrorCategory::Unauthorized => SessionFailure::Unauthorized,
-                crate::EngineErrorCategory::NotFound => SessionFailure::NotFound,
-                crate::EngineErrorCategory::Conflict => SessionFailure::Conflict,
-                crate::EngineErrorCategory::Unavailable => SessionFailure::Unavailable,
-                crate::EngineErrorCategory::DeadlineExceeded => SessionFailure::DeadlineExceeded,
-                crate::EngineErrorCategory::Internal => SessionFailure::Internal,
+                EngineErrorCategory::InvalidInput => SessionFailure::InvalidInput,
+                EngineErrorCategory::InvalidState => SessionFailure::InvalidState,
+                EngineErrorCategory::Unauthorized => SessionFailure::Unauthorized,
+                EngineErrorCategory::NotFound => SessionFailure::NotFound,
+                EngineErrorCategory::Conflict => SessionFailure::Conflict,
+                EngineErrorCategory::Unavailable => SessionFailure::Unavailable,
+                EngineErrorCategory::DeadlineExceeded => SessionFailure::DeadlineExceeded,
+                EngineErrorCategory::Internal => SessionFailure::Internal,
             }),
         };
         observation.finish(completion);
