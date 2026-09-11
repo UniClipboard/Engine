@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use uc_application::deps::*;
 use uc_core::membership::{
-    AdmissionChannelPeerId, AdmissionContinuationCredential, AdmissionPeerBinding,
+    AdmissionChannelPeerId, AdmissionContinuationCredential, AdmissionMessageId,
+    AdmissionPeerBinding, AdmissionRole, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1,
     SpaceAdmissionId, SpaceAdmissionRoute,
 };
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
@@ -17,6 +18,9 @@ use uc_infra::network::iroh::{
 };
 use uc_infra::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
 use uc_infra::space::{SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState};
+use uc_observability_contract::diagnostics::{
+    SpaceAdmissionObservation, SpaceAdmissionObservationOutcome,
+};
 use uc_observability_runtime::*;
 
 #[derive(Default)]
@@ -90,7 +94,7 @@ fn read_logs(directory: &std::path::Path) -> Vec<serde_json::Value> {
 }
 
 #[tokio::test]
-async fn missing_stored_credential_is_one_detailed_unassociated_file_record() {
+async fn missing_stored_credential_produces_diagnosable_client_and_server_records() {
     let profile = tempfile::tempdir().expect("profile");
     let logs = tempfile::tempdir().expect("logs");
     let handle = ProcessObservabilityRuntime::install(
@@ -107,6 +111,9 @@ async fn missing_stored_credential_is_one_detailed_unassociated_file_record() {
     )
     .expect("runtime")
     .handle();
+    handle
+        .start_local_diagnostic_capture(DetailedCaptureRequest::default())
+        .expect("detailed capture");
     let pool = init_db_pool(
         profile
             .path()
@@ -156,14 +163,39 @@ async fn missing_stored_credential_is_one_detailed_unassociated_file_record() {
     )
     .expect("binding");
     let transport = IrohSpaceAdmissionTransport::new(joiner.clone());
-    let exchange = transport
-        .resume(
-            SpaceAdmissionId::from_bytes([0x42; 32]).expect("attempt"),
-            &route,
-            binding.clone(),
-            &AdmissionContinuationCredential::from_bytes(vec![0x51; 64]).expect("credential"),
-        )
+    let admission_id = SpaceAdmissionId::from_bytes([0x42; 32]).expect("attempt");
+    let observation = SpaceAdmissionObservation::begin(admission_id.as_bytes());
+    let exchange = observation
+        .scope(async {
+            let exchange = transport
+                .resume(
+                    admission_id,
+                    &route,
+                    binding.clone(),
+                    &AdmissionContinuationCredential::from_bytes(vec![0x51; 64])
+                        .expect("credential"),
+                )
+                .await
+                .expect(
+                    "the physical connection should be established before authentication fails",
+                );
+            let request = SpaceAdmissionEnvelopeV1::new(
+                admission_id,
+                AdmissionRole::Joiner,
+                1,
+                AdmissionMessageId::from_bytes([0x43; 32]).expect("message"),
+                Some(AdmissionMessageId::from_bytes([0x44; 32]).expect("predecessor")),
+                SpaceAdmissionBodyV1::CancelRequested,
+            )
+            .expect("request");
+            exchange.exchange(&request).await
+        })
         .await;
+    assert!(matches!(
+        exchange,
+        Err(SpaceAdmissionTransportError::AuthenticationRejected)
+    ));
+    observation.finish(SpaceAdmissionObservationOutcome::Deferred);
     let mut captured = Vec::new();
     for _ in 0..100 {
         captured = read_logs(logs.path());
@@ -195,6 +227,18 @@ async fn missing_stored_credential_is_one_detailed_unassociated_file_record() {
     assert_eq!(failures[0]["fields"]["error.reason"], "record_missing");
     assert_eq!(failures[0]["fields"]["error.type"], "authentication_failed");
     assert!(failures[0].get("trace_id").is_none());
+    let client_failure = captured
+        .iter()
+        .find(|record| {
+            record["fields"]["uc.role"] == "joiner"
+                && record["fields"]["uc.operation"] == "network_transport"
+                && record["fields"]["uc.outcome"] == "error"
+        })
+        .expect("the joiner package must explain the remote authentication rejection");
+    assert_eq!(
+        client_failure["fields"]["error.type"],
+        "authentication_failed"
+    );
     let connection_records: Vec<_> = captured
         .iter()
         .filter(|r| {
@@ -222,10 +266,45 @@ async fn missing_stored_credential_is_one_detailed_unassociated_file_record() {
     );
     assert!(connection_records[0]["peer_ref"].as_str().is_some());
     assert!(connection_records[0]["run_id"].as_str().is_some());
+    assert_eq!(connection_records[0]["fields"]["purpose"], "admission");
+    assert_eq!(connection_records[1]["fields"]["attempt_count"], 1);
+    assert_eq!(connection_records[0]["capture_mode"], "detailed");
+    let connect_id = &connection_records[0]["fields"]["connect_id"];
+    let connection_story: Vec<_> = captured
+        .iter()
+        .filter(|record| record["fields"]["connect_id"] == *connect_id)
+        .collect();
+    for event in [
+        "connection.started",
+        "address.used",
+        "connection.attempt.started",
+        "connection.attempt.finished",
+        "connection.finished",
+    ] {
+        assert!(
+            connection_story
+                .iter()
+                .any(|record| record["fields"]["event.name"] == event),
+            "detailed capture must preserve {event}"
+        );
+    }
+    let used = connection_story
+        .iter()
+        .find(|record| record["fields"]["event.name"] == "address.used")
+        .expect("address source");
+    assert_eq!(used["fields"]["source"], "admission_route");
+    assert!(used["candidate_set_ref"].as_str().is_some());
+    let attempt = connection_story
+        .iter()
+        .find(|record| record["fields"]["event.name"] == "connection.attempt.finished")
+        .expect("attempt result");
+    assert_eq!(attempt["fields"]["outcome"], "connected");
+    let trace_id = connection_records[0]["trace_id"].clone();
+    assert!(trace_id.as_str().is_some());
+    assert_eq!(client_failure["trace_id"], trace_id);
     let serialized = serde_json::to_string(&captured).expect("records");
     assert!(!serialized.contains(&sponsor.id().to_string()));
     assert!(!serialized.contains(&joiner.id().to_string()));
-    drop(exchange);
     router.shutdown().await.expect("router");
     joiner.close().await;
     sponsor.close().await;

@@ -66,6 +66,43 @@ async fn pending_join_recovery_requests_an_initial_channel_after_the_join_was_sa
 }
 
 #[tokio::test]
+async fn authentication_rejection_diagnostic_explains_trigger_reason_and_outcome() {
+    let output_file = tempfile::NamedTempFile::new().expect("diagnostic output");
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(std::sync::Mutex::new(output_file.reopen().expect("writer")))
+        .finish();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let pair = SpaceAdmissionProtocolTestPair::authentication_rejected().await;
+    pair.joiner()
+        .start_join(join_input("private-device-name-sentinel"))
+        .await
+        .expect("the join request should be saved before recovery");
+
+    let report = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    assert_eq!(report.deferred_count, 1);
+    assert_eq!(pair.active_joiner_observation_count(), 0);
+    let diagnostics = std::fs::read_to_string(output_file.path()).expect("diagnostics");
+    for expected in [
+        "pairing.recovery.decided",
+        "state_changed",
+        "authentication_rejected",
+        "deferred",
+    ] {
+        assert!(
+            diagnostics.contains(expected),
+            "diagnostic output must contain {expected}: {diagnostics}"
+        );
+    }
+    assert!(!diagnostics.contains("private-device-name-sentinel"));
+}
+
+#[tokio::test]
 async fn short_code_resolution_is_marked_started_once_and_saves_the_full_invitation() {
     let pair = SpaceAdmissionProtocolTestPair::short_invitation().await;
     pair.joiner()
