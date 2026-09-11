@@ -218,6 +218,23 @@ pub struct OhEngineEvent {
     pub network_recovery_phase: Option<String>,
     pub next_retry_in_ms: Option<f64>,
     pub re_pairing_scope: Option<String>,
+    pub search_status: Option<OhSearchStatus>,
+}
+
+#[napi(object)]
+pub struct OhSearchRebuildProgress {
+    pub stage: String,
+    pub indexed: u32,
+    pub total: Option<u32>,
+}
+
+#[napi(object)]
+pub struct OhSearchStatus {
+    pub state: String,
+    pub reason: Option<String>,
+    pub progress: Option<OhSearchRebuildProgress>,
+    pub last_rebuild_started_at_ms: Option<f64>,
+    pub last_rebuild_completed_at_ms: Option<f64>,
 }
 
 pub struct PreparedHost {

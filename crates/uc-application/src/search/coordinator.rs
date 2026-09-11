@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use futures::FutureExt;
-use tokio::sync::{broadcast, mpsc, Mutex, Semaphore};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::task_tracker::TaskTrackerToken;
 use tokio_util::task::TaskTracker;
@@ -22,13 +22,15 @@ use uc_core::ports::clipboard::{
 use uc_core::ports::search::{SearchIndexMaintenancePort, SearchPipelinePort};
 use uc_core::ports::{ClipboardSelectionRepositoryPort, SearchIndexPort, SearchKeyDerivationPort};
 use uc_core::search::{
-    RebuildProgress, RebuildStage, SearchError, SearchPipelineInput, SearchResult,
-    SearchResultsPage,
+    RebuildProgress, SearchError, SearchPipelineInput, SearchResult, SearchResultsPage,
 };
 
+use super::status::SearchStatusStore;
 use crate::clipboard::file_set_query::load_has_directory_structure;
 use crate::search::mutation_gate::SearchMutationGate;
-use crate::search::{SearchProjectionBuilder, SearchStatusView};
+use crate::search::{
+    SearchProjectionBuilder, SearchStatusEventPort, SearchStatusSnapshot, SearchStatusView,
+};
 
 pub const REASON_INITIAL_BACKFILL: &str = "initial_backfill";
 pub const REASON_VERSION_MISMATCH: &str = "version_mismatch";
@@ -44,17 +46,6 @@ pub const STATUS_READY: &str = "ready";
 pub const STATUS_REBUILDING: &str = "rebuilding";
 pub const STATUS_UNAVAILABLE: &str = "unavailable";
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SearchStatusSnapshot {
-    /// Index availability: "ready" / "rebuilding" / "unavailable". Named `state`
-    /// (not `status`) to match `SearchStatusData.state`, so the WS `search` topic
-    /// carries the index status under one key for both the on-subscribe snapshot
-    /// and incremental coordinator updates (a single wire shape, not two).
-    pub state: String,
-    pub reason: Option<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManualRebuildResult {
     Accepted,
@@ -62,22 +53,8 @@ pub enum ManualRebuildResult {
     Unavailable,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SearchRebuildProgressView {
-    pub stage: String,
-    pub indexed: u32,
-    pub total: u32,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", content = "payload", rename_all = "camelCase")]
-pub enum SearchCoordinatorEvent {
-    Status(SearchStatusSnapshot),
-    RebuildProgress(SearchRebuildProgressView),
-}
-
 pub struct SearchCoordinatorDeps {
+    pub status_events: Arc<dyn SearchStatusEventPort>,
     pub search_index: Arc<dyn SearchIndexPort>,
     rebuild_index: Arc<dyn SearchIndexPort>,
     mutation_gate: Arc<SearchMutationGate>,
@@ -112,8 +89,10 @@ impl SearchCoordinatorDeps {
         selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
         event_repo: Arc<dyn ClipboardEventRepositoryPort>,
         entry_file_set_repo: Arc<dyn EntryFileSetRepositoryPort>,
+        status_events: Arc<dyn SearchStatusEventPort>,
     ) -> Self {
         Self {
+            status_events,
             rebuild_index: Arc::clone(&search_index),
             search_index,
             mutation_gate: Arc::new(SearchMutationGate::new()),
@@ -140,25 +119,10 @@ impl SearchCoordinatorDeps {
     }
 }
 
-struct CoordinatorState {
-    status: String,
-    reason: Option<String>,
-}
-
-impl Default for CoordinatorState {
-    fn default() -> Self {
-        Self {
-            status: STATUS_UNAVAILABLE.to_string(),
-            reason: None,
-        }
-    }
-}
-
 pub(super) struct SearchCoordinator {
     deps: Arc<SearchCoordinatorDeps>,
-    event_tx: broadcast::Sender<SearchCoordinatorEvent>,
     rebuild_lock: Arc<Mutex<()>>,
-    state: Arc<Mutex<CoordinatorState>>,
+    state: Arc<SearchStatusStore>,
     /// Entry ids with an in-flight re-projection repair, so repeated corruption
     /// reports for the same entry across multiple queries coalesce into one repair.
     repair_in_flight: Arc<Mutex<HashSet<String>>>,
@@ -198,12 +162,11 @@ const MAX_CONCURRENT_REPAIRS: usize = 4;
 
 impl SearchCoordinator {
     pub fn new(deps: SearchCoordinatorDeps) -> Self {
-        let (event_tx, _) = broadcast::channel(64);
+        let state = Arc::new(SearchStatusStore::new(Arc::clone(&deps.status_events)));
         Self {
             deps: Arc::new(deps),
-            event_tx,
             rebuild_lock: Arc::new(Mutex::new(())),
-            state: Arc::new(Mutex::new(CoordinatorState::default())),
+            state,
             repair_in_flight: Arc::new(Mutex::new(HashSet::new())),
             repair_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_REPAIRS)),
             task_scope: std::sync::Mutex::new(SearchTaskScope::open()),
@@ -264,6 +227,7 @@ impl SearchCoordinator {
             task_scope.tasks.clone()
         };
         tasks.wait().await;
+        self.state.pause();
     }
 
     #[cfg(test)]
@@ -305,22 +269,11 @@ impl SearchCoordinator {
     }
 
     pub async fn status_snapshot(&self) -> SearchStatusSnapshot {
-        let state = self.state.lock().await;
-        SearchStatusSnapshot {
-            state: state.status.clone(),
-            reason: state.reason.clone(),
-        }
+        self.state.snapshot()
     }
 
     pub async fn status_view(&self) -> Result<SearchStatusView, SearchError> {
-        let snapshot = self.status_snapshot().await;
-        let meta = self.deps.search_index.get_index_meta().await?;
-        Ok(SearchStatusView {
-            state: snapshot.state,
-            reason: snapshot.reason,
-            last_rebuild_started_at_ms: meta.last_rebuild_started_at_ms,
-            last_rebuild_completed_at_ms: meta.last_rebuild_completed_at_ms,
-        })
+        Ok(self.status_snapshot().await)
     }
 
     /// Project a page of entries directly from the main store, bypassing the
@@ -356,7 +309,6 @@ impl SearchCoordinator {
         match self.rebuild_lock.clone().try_lock_owned() {
             Ok(guard) => {
                 let deps = Arc::clone(&self.deps);
-                let event_tx = self.event_tx.clone();
                 let state = Arc::clone(&self.state);
 
                 let span = info_span!("search.rebuild", reason = REASON_MANUAL_REBUILD);
@@ -364,7 +316,7 @@ impl SearchCoordinator {
                     "search.rebuild.manual",
                     async move {
                         let _guard = guard;
-                        Self::run_rebuild(deps, event_tx, state, REASON_MANUAL_REBUILD).await;
+                        Self::run_rebuild(deps, state, REASON_MANUAL_REBUILD).await;
                     }
                     .instrument(span),
                 );
@@ -396,6 +348,7 @@ impl SearchCoordinator {
             }
         };
 
+        self.state.restore_metadata(&meta);
         if meta.index_version != self.deps.search_maintenance.current_index_version() {
             info!(
                 current = %meta.index_version,
@@ -541,14 +494,13 @@ impl SearchCoordinator {
     async fn trigger_rebuild_locked(&self, reason: &'static str) {
         let guard = self.rebuild_lock.clone().lock_owned().await;
         let deps = Arc::clone(&self.deps);
-        let event_tx = self.event_tx.clone();
         let state = Arc::clone(&self.state);
         let span = info_span!("search.rebuild", reason);
         self.spawn_task(
             "search.rebuild.trigger",
             async move {
                 let _guard = guard;
-                Self::run_rebuild(deps, event_tx, state, reason).await;
+                Self::run_rebuild(deps, state, reason).await;
             }
             .instrument(span),
         );
@@ -556,18 +508,12 @@ impl SearchCoordinator {
 
     async fn run_rebuild(
         deps: Arc<SearchCoordinatorDeps>,
-        event_tx: broadcast::Sender<SearchCoordinatorEvent>,
-        state: Arc<Mutex<CoordinatorState>>,
+        state: Arc<SearchStatusStore>,
         reason: &str,
     ) {
+        let _status_guard = state.begin(reason);
         let _mutation_guard = deps.mutation_gate.begin_rebuild().await;
         info!(reason, "search coordinator: starting rebuild");
-        {
-            let mut s = state.lock().await;
-            s.status = STATUS_REBUILDING.to_string();
-            s.reason = Some(reason.to_string());
-        }
-        emit_status_snapshot(&event_tx, STATUS_REBUILDING, Some(reason));
 
         const BATCH_SIZE: usize = 200;
         let mut all_entries = Vec::new();
@@ -577,7 +523,7 @@ impl SearchCoordinator {
             Ok(k) => k,
             Err(e) => {
                 warn!(error = %e, reason, "search coordinator: key derivation failed during rebuild");
-                set_failed_state(&event_tx, &state).await;
+                state.fail();
                 return;
             }
         };
@@ -591,7 +537,8 @@ impl SearchCoordinator {
                 Ok(b) => b,
                 Err(e) => {
                     warn!(error = %e, reason, "search coordinator: failed to list entries during rebuild");
-                    break;
+                    state.fail();
+                    return;
                 }
             };
 
@@ -622,12 +569,15 @@ impl SearchCoordinator {
                         warn!(
                             error = %e,
                             entry_id = %entry.entry_id,
-                            "search coordinator: pipeline build failed for entry, skipping"
+                            "search coordinator: pipeline build failed during rebuild"
                         );
+                        state.fail();
+                        return;
                     }
                 }
             }
 
+            state.preparing(offset.saturating_add(batch_len));
             if batch_len < BATCH_SIZE {
                 break;
             }
@@ -635,11 +585,11 @@ impl SearchCoordinator {
         }
 
         let (progress_tx, mut progress_rx) = mpsc::channel::<RebuildProgress>(64);
-        let event_tx_clone = event_tx.clone();
+        let progress_state = Arc::clone(&state);
         let rebuild = deps.rebuild_index.rebuild(all_entries, progress_tx);
         let progress_forwarder = async move {
             while let Some(progress) = progress_rx.recv().await {
-                emit_progress(&event_tx_clone, progress);
+                progress_state.progress(progress);
             }
         }
         .in_current_span();
@@ -648,12 +598,7 @@ impl SearchCoordinator {
         match rebuild_result {
             Ok(()) => {
                 info!(reason, "search coordinator: rebuild completed successfully");
-                {
-                    let mut s = state.lock().await;
-                    s.status = STATUS_READY.to_string();
-                    s.reason = None;
-                }
-                emit_status_snapshot(&event_tx, STATUS_READY, None);
+                state.complete();
                 // The rebuild rewrote every row through the encrypting projection,
                 // so the dropped plaintext columns' on-disk residue can now be
                 // reclaimed. Owed-once, tracked in meta.
@@ -661,16 +606,13 @@ impl SearchCoordinator {
             }
             Err(e) => {
                 warn!(error = %e, reason, "search coordinator: rebuild failed");
-                set_failed_state(&event_tx, &state).await;
+                state.fail();
             }
         }
     }
 
     async fn set_state(&self, status: &str, reason: Option<&str>) {
-        let mut s = self.state.lock().await;
-        s.status = status.to_string();
-        s.reason = reason.map(|r| r.to_string());
-        emit_status_snapshot(&self.event_tx, status, reason);
+        self.state.set_status(status, reason);
     }
 
     pub async fn start(&self, cancel: CancellationToken) -> anyhow::Result<()> {
@@ -688,56 +630,6 @@ impl SearchCoordinator {
         info!("search coordinator cancelled");
         Ok(())
     }
-}
-
-async fn set_failed_state(
-    event_tx: &broadcast::Sender<SearchCoordinatorEvent>,
-    state: &Mutex<CoordinatorState>,
-) {
-    let mut s = state.lock().await;
-    s.status = STATUS_UNAVAILABLE.to_string();
-    s.reason = Some(REASON_REBUILD_FAILED_WAITING.to_string());
-    emit_status_snapshot(
-        event_tx,
-        STATUS_UNAVAILABLE,
-        Some(REASON_REBUILD_FAILED_WAITING),
-    );
-}
-
-fn emit_status_snapshot(
-    event_tx: &broadcast::Sender<SearchCoordinatorEvent>,
-    status: &str,
-    reason: Option<&str>,
-) {
-    let snapshot = SearchStatusSnapshot {
-        state: status.to_string(),
-        reason: reason.map(|r| r.to_string()),
-    };
-    let _ = event_tx.send(SearchCoordinatorEvent::Status(snapshot));
-}
-
-fn emit_progress(event_tx: &broadcast::Sender<SearchCoordinatorEvent>, progress: RebuildProgress) {
-    let _ = event_tx.send(SearchCoordinatorEvent::RebuildProgress(
-        rebuild_progress_to_view(progress),
-    ));
-}
-
-fn rebuild_progress_to_view(progress: RebuildProgress) -> SearchRebuildProgressView {
-    SearchRebuildProgressView {
-        stage: rebuild_stage_to_string(progress.stage),
-        indexed: progress.indexed,
-        total: progress.total,
-    }
-}
-
-fn rebuild_stage_to_string(stage: RebuildStage) -> String {
-    match stage {
-        RebuildStage::Started => "started",
-        RebuildStage::Indexing => "indexing",
-        RebuildStage::Complete => "complete",
-        RebuildStage::Failed => "failed",
-    }
-    .to_string()
 }
 
 /// Re-derive one persisted entry's `SearchPipelineInput` from the main store,
@@ -999,6 +891,15 @@ mod tests {
     use uc_core::MimeType;
     const CURRENT_INDEX_VERSION: &str = "current-test-index";
 
+    #[derive(Default)]
+    struct RecordingStatusEvents(std::sync::Mutex<Vec<SearchStatusView>>);
+
+    impl SearchStatusEventPort for RecordingStatusEvents {
+        fn changed(&self, status: SearchStatusView) {
+            self.0.lock().unwrap().push(status);
+        }
+    }
+
     /// Returns the supplied entries verbatim (already windowed by the test).
     struct FakeEntryRepo {
         entries: Vec<ClipboardEntry>,
@@ -1014,6 +915,21 @@ mod tests {
             let end = (offset + limit).min(self.entries.len());
             let start = offset.min(end);
             Ok(self.entries[start..end].to_vec())
+        }
+    }
+
+    struct FailingEntryRepo;
+
+    #[async_trait::async_trait]
+    impl ListClipboardEntriesPort for FailingEntryRepo {
+        async fn list_entries(
+            &self,
+            _limit: usize,
+            _offset: usize,
+        ) -> Result<Vec<ClipboardEntry>, uc_core::clipboard::ClipboardRepositoryError> {
+            Err(uc_core::clipboard::ClipboardRepositoryError::Storage(
+                "injected failure".to_owned(),
+            ))
         }
     }
 
@@ -1252,6 +1168,7 @@ mod tests {
         meta: SearchIndexMeta,
         rebuild_started: Arc<tokio::sync::Notify>,
         rebuild_dropped: Arc<AtomicBool>,
+        finish: Option<(Arc<tokio::sync::Notify>, bool)>,
     }
 
     #[async_trait::async_trait]
@@ -1275,11 +1192,36 @@ mod tests {
         async fn rebuild(
             &self,
             _entries: Vec<(SearchDocument, Vec<SearchPosting>)>,
-            _progress_tx: mpsc::Sender<RebuildProgress>,
+            progress_tx: mpsc::Sender<RebuildProgress>,
         ) -> Result<(), SearchError> {
             let _drop_flag = DropFlag(Arc::clone(&self.rebuild_dropped));
+            progress_tx
+                .send(RebuildProgress {
+                    stage: uc_core::search::RebuildStage::Indexing,
+                    indexed: 100,
+                    total: 200,
+                })
+                .await
+                .unwrap();
             self.rebuild_started.notify_one();
-            std::future::pending().await
+            match &self.finish {
+                Some((finish, fail)) => {
+                    finish.notified().await;
+                    if *fail {
+                        return Err(SearchError::Internal("injected failure".to_owned()));
+                    }
+                    progress_tx
+                        .send(RebuildProgress {
+                            stage: uc_core::search::RebuildStage::Complete,
+                            indexed: 200,
+                            total: 200,
+                        })
+                        .await
+                        .unwrap();
+                    Ok(())
+                }
+                None => std::future::pending().await,
+            }
         }
 
         async fn get_index_meta(&self) -> Result<SearchIndexMeta, SearchError> {
@@ -1288,6 +1230,16 @@ mod tests {
     }
 
     fn blocking_coordinator_deps() -> (
+        SearchCoordinatorDeps,
+        Arc<tokio::sync::Notify>,
+        Arc<AtomicBool>,
+    ) {
+        controlled_coordinator_deps(None)
+    }
+
+    fn controlled_coordinator_deps(
+        finish: Option<(Arc<tokio::sync::Notify>, bool)>,
+    ) -> (
         SearchCoordinatorDeps,
         Arc<tokio::sync::Notify>,
         Arc<AtomicBool>,
@@ -1304,6 +1256,7 @@ mod tests {
             },
             rebuild_started: Arc::clone(&rebuild_started),
             rebuild_dropped: Arc::clone(&rebuild_dropped),
+            finish,
         };
         let rep_id = RepresentationId::new();
         let deps = SearchCoordinatorDeps::new(
@@ -1319,6 +1272,7 @@ mod tests {
             Arc::new(FakeSelectionRepo { rep_id }),
             Arc::new(FakeEventRepo),
             Arc::new(FakeFileSetRepo),
+            Arc::new(RecordingStatusEvents::default()),
         );
         (deps, rebuild_started, rebuild_dropped)
     }
@@ -1334,6 +1288,130 @@ mod tests {
             rebuild_started,
             rebuild_dropped,
         )
+    }
+
+    #[tokio::test]
+    async fn rebuild_notifications_match_query_for_progress_success_and_failure() {
+        for fail in [false, true] {
+            let finish = Arc::new(tokio::sync::Notify::new());
+            let (mut deps, _started, _) = controlled_coordinator_deps(Some((finish.clone(), fail)));
+            let events = Arc::new(RecordingStatusEvents::default());
+            deps.status_events = events.clone();
+            let coordinator = SearchCoordinator::new(deps);
+            assert_eq!(
+                coordinator.request_manual_rebuild().await,
+                ManualRebuildResult::Accepted
+            );
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if coordinator
+                        .status_view()
+                        .await
+                        .unwrap()
+                        .progress
+                        .as_ref()
+                        .is_some_and(|p| p.indexed == 100)
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let snapshot = coordinator.status_view().await.unwrap();
+            assert_eq!(snapshot.progress.as_ref().unwrap().total, Some(200));
+            assert_eq!(events.0.lock().unwrap().last(), Some(&snapshot));
+            assert!(events.0.lock().unwrap().iter().any(|s| s
+                .progress
+                .as_ref()
+                .is_some_and(|p| p.stage == "preparing" && p.total.is_none())));
+            assert_eq!(
+                coordinator.request_manual_rebuild().await,
+                ManualRebuildResult::AlreadyInProgress
+            );
+            finish.notify_one();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while coordinator.status_view().await.unwrap().state == STATUS_REBUILDING {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let snapshot = coordinator.status_view().await.unwrap();
+            assert_eq!(
+                snapshot.state,
+                if fail {
+                    STATUS_UNAVAILABLE
+                } else {
+                    STATUS_READY
+                }
+            );
+            let progress = snapshot.progress.as_ref().unwrap();
+            assert_eq!(progress.stage, if fail { "failed" } else { "complete" });
+            assert_eq!(progress.indexed, if fail { 100 } else { 200 });
+            assert_eq!(events.0.lock().unwrap().last(), Some(&snapshot));
+            coordinator.close_task_scope(true).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_rebuild_publishes_terminal_state_before_pause_returns() {
+        let (mut deps, started, _) = blocking_coordinator_deps();
+        let events = Arc::new(RecordingStatusEvents::default());
+        deps.status_events = events.clone();
+        let coordinator = SearchCoordinator::new(deps);
+        assert_eq!(
+            coordinator.request_manual_rebuild().await,
+            ManualRebuildResult::Accepted
+        );
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        coordinator.pause_background_activity().await;
+        let snapshot = coordinator.status_view().await.unwrap();
+        assert_eq!(snapshot.state, STATUS_UNAVAILABLE);
+        assert_eq!(snapshot.progress.as_ref().unwrap().stage, "cancelled");
+        assert_eq!(events.0.lock().unwrap().last(), Some(&snapshot));
+    }
+
+    #[tokio::test]
+    async fn preparation_read_failure_publishes_failure_without_replacing_index() {
+        let (mut deps, _started, dropped) = blocking_coordinator_deps();
+        let events = Arc::new(RecordingStatusEvents::default());
+        deps.status_events = events.clone();
+        deps.clipboard_entry_repo = Arc::new(FailingEntryRepo);
+        let coordinator = SearchCoordinator::new(deps);
+        assert_eq!(
+            coordinator.request_manual_rebuild().await,
+            ManualRebuildResult::Accepted
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if coordinator
+                    .status_view()
+                    .await
+                    .unwrap()
+                    .progress
+                    .as_ref()
+                    .is_some_and(|p| p.stage == "failed")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        coordinator.close_task_scope(true).await;
+        assert!(!dropped.load(Ordering::SeqCst));
+        let snapshot = coordinator.status_view().await.unwrap();
+        assert_eq!(
+            snapshot.reason.as_deref(),
+            Some(REASON_REBUILD_FAILED_WAITING)
+        );
+        assert_eq!(snapshot.progress.as_ref().unwrap().total, None);
+        assert_eq!(events.0.lock().unwrap().last(), Some(&snapshot));
     }
 
     struct FakeKeyDerivation;
@@ -1441,6 +1519,7 @@ mod tests {
             Arc::new(FakeSelectionRepo { rep_id }),
             Arc::new(FakeEventRepo),
             Arc::new(FakeFileSetRepo),
+            Arc::new(RecordingStatusEvents::default()),
         );
         let coordinator = SearchCoordinator::new(deps);
 
@@ -1587,6 +1666,11 @@ mod tests {
             .await
             .expect("runtime did not start search coordination");
         facade.pause_background_activity().await;
+        assert_eq!(
+            facade.status().await.unwrap().state,
+            STATUS_UNAVAILABLE,
+            "暂停后不能继续报告正在重建"
+        );
         assert!(
             rebuild_dropped.load(Ordering::SeqCst),
             "session pause returned before the active rebuild stopped"
@@ -1664,6 +1748,7 @@ mod tests {
             Arc::new(FakeSelectionRepo { rep_id }),
             Arc::new(FakeEventRepo),
             Arc::new(FakeFileSetRepo),
+            Arc::new(RecordingStatusEvents::default()),
         );
         let coordinator = SearchCoordinator::new(deps);
 
