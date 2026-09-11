@@ -45,13 +45,12 @@
 //!
 //! Offline detection is **not** mirrored here: the watchdog on our own
 //! outbound `Connection` remains the authoritative offline signal, so
-//! inbound `connection.closed()` only logs and returns. This keeps a single
+//! inbound `connection.closed()` only returns; the node records the closure. This keeps a single
 //! source of truth for Offline transitions and avoids state-write races
 //! between the watchdog and the inbound handler.
 
 use uc_observability_contract::diagnostics::connectivity::{
-    record_presence_closed, ConfirmationFailure, ConnectionCloseReason, ConnectionDirection,
-    DialFailure, PresenceCheckObservation, PresenceCheckResult,
+    ConfirmationFailure, DialFailure, PresenceCheckObservation, PresenceCheckResult,
 };
 
 use std::collections::HashMap;
@@ -359,8 +358,7 @@ impl ProtocolHandler for IrohPresenceHandler {
             return Ok(());
         }
 
-        let reason = connection.closed().await;
-        record_presence_closed(ConnectionDirection::Inbound, presence_close_reason(&reason));
+        let _ = connection.closed().await;
         self.state
             .inbound_connections
             .lock()
@@ -644,6 +642,7 @@ impl IrohPresenceAdapter {
                     PRESENCE_ALPN,
                     Vec::new(),
                     "network_recovery_confirmation",
+                    uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
                 ),
             )
             .await
@@ -668,6 +667,7 @@ impl IrohPresenceAdapter {
                             PRESENCE_ALPN,
                             Vec::new(),
                             "network_recovery_confirmation",
+                            uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
                         ),
                     )
                     .await
@@ -687,6 +687,7 @@ impl IrohPresenceAdapter {
                 PRESENCE_ALPN,
                 Vec::new(),
                 "presence",
+                uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
             )
             .await
         };
@@ -1066,20 +1067,6 @@ impl PeerReachabilityPort for IrohPresenceAdapter {
 // Watchdog
 // ============================================================================
 
-/// 只记录连接库的固定关闭分类，不检查或输出远端关闭正文。
-fn presence_close_reason(reason: &iroh::endpoint::ConnectionError) -> ConnectionCloseReason {
-    use iroh::endpoint::ConnectionError;
-    match reason {
-        ConnectionError::ApplicationClosed(_) => ConnectionCloseReason::RemoteApplicationClosed,
-        ConnectionError::ConnectionClosed(_) => ConnectionCloseReason::RemoteTransportClosed,
-        ConnectionError::LocallyClosed => ConnectionCloseReason::LocalClosed,
-        ConnectionError::TimedOut => ConnectionCloseReason::TimedOut,
-        ConnectionError::Reset => ConnectionCloseReason::RemoteReset,
-        ConnectionError::VersionMismatch => ConnectionCloseReason::VersionMismatch,
-        _ => ConnectionCloseReason::TransportFailed,
-    }
-}
-
 /// Spawn the per-peer watchdog task.
 ///
 /// The task awaits `connection.closed()` — the reliable offline signal
@@ -1102,11 +1089,7 @@ fn spawn_watchdog(
     connection: Connection,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let reason = connection.closed().await;
-        record_presence_closed(
-            ConnectionDirection::Outbound,
-            presence_close_reason(&reason),
-        );
+        let _ = connection.closed().await;
 
         // Remove the map entry first so concurrent `ensure_reachable`
         // readers observe "not tracked" + "last_state == Offline". The
@@ -1434,7 +1417,19 @@ mod tests {
             ),
         );
         let _subscriber = tracing::subscriber::set_default(subscriber);
-        let endpoint_a = bound_endpoint().await;
+        let observations = super::super::observed_connections::ObservedConnections::new(
+            uc_observability_contract::diagnostics::connectivity::NetworkRecorder::current(),
+        );
+        let endpoint_a = Arc::new(
+            Endpoint::builder(iroh::endpoint::presets::N0)
+                .alpns(vec![PRESENCE_ALPN.to_vec()])
+                .relay_mode(RelayMode::Disabled)
+                .clear_address_lookup()
+                .hooks(observations.clone())
+                .bind()
+                .await
+                .expect("endpoint"),
+        );
         wait_for_direct_addrs(&endpoint_a).await;
         let endpoint_b = bound_endpoint().await;
         wait_for_direct_addrs(&endpoint_b).await;
@@ -1482,8 +1477,12 @@ mod tests {
 
         router_b.shutdown().await.ok();
         endpoint_a.close().await;
+        observations.shutdown().await;
         logs.force_flush().expect("diagnostics flushed");
         let records = exporter.get_emitted_logs().expect("diagnostics");
+        assert!(!records.iter().any(|entry| entry.record.attributes_iter().any(|(key, value)|
+            key.as_str() == "event.name" && matches!(value, AnyValue::String(value) if value.as_str() == "presence.connection.closed")
+        )), "连接关闭只能由节点观察者记录一次");
         assert!(
             records.iter().any(|entry| {
                 let field = |name: &str| {

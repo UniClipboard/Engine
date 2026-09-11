@@ -263,6 +263,7 @@ impl MembershipGossipTransportPort for IrohMembershipGossipTransportAdapter {
             remote_addr.clone(),
             MEMBERSHIP_ATTESTATION_ALPN,
             "membership-gossip",
+            uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
         )
         .await;
         let connection = connection.map_err(|_| MembershipGossipTransportError::Offline)?;
@@ -384,6 +385,7 @@ impl MembershipAttestationPort for IrohMembershipAttestationAdapter {
             remote_addr.clone(),
             MEMBERSHIP_ATTESTATION_ALPN,
             "membership-attestation",
+            uc_observability_contract::diagnostics::connectivity::AddressInputSource::Provided,
         )
         .await;
         let connection = connection.map_err(|_| MembershipAttestationError::Offline)?;

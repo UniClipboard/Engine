@@ -347,6 +347,7 @@ impl ReporterImpl {
             addr,
             TRANSFER_PROGRESS_ALPN,
             "transfer-progress",
+            uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
         )
         .await
         .map_err(ReporterError::Dial)?;

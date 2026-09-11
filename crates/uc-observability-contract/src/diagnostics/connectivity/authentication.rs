@@ -171,6 +171,12 @@ pub fn take_local_completion_detail(
     opentelemetry::Context::map_current(|context| {
         let pending = context.get::<PendingCompletionDetail>()?;
         let expected = match pending.detail {
+            LocalCompletionDetail::GroupUpdate(_) => (
+                "space_membership",
+                "membership_group_update",
+                "member",
+                "error",
+            ),
             LocalCompletionDetail::Authentication(_) => {
                 ("space_admission", "network_transport", "sponsor", "error")
             }
@@ -192,14 +198,40 @@ pub fn take_local_completion_detail(
 pub enum LocalCompletionDetail {
     Authentication(AuthenticationFailure),
     AdmissionConnection(DialFailure),
+    GroupUpdate(super::GroupUpdateFailureDetail),
 }
 impl LocalCompletionDetail {
     pub fn local_fields(self) -> (&'static str, &'static str) {
         match self {
             Self::Authentication(failure) => failure.local_fields(),
             Self::AdmissionConnection(reason) => ("connect", dial_reason(reason)),
+            Self::GroupUpdate(detail) => (detail.phase.as_str(), detail.reason.as_str()),
         }
     }
+
+    pub fn source_chain(self) -> Option<[&'static str; 4]> {
+        match self {
+            Self::GroupUpdate(detail) => Some([
+                "membership_update",
+                detail.phase.as_str(),
+                detail.source.as_str(),
+                detail.reason.as_str(),
+            ]),
+            _ => None,
+        }
+    }
+}
+
+pub fn complete_group_update_failure(
+    detail: super::GroupUpdateFailureDetail,
+    completion: super::super::OperationCompletion,
+) {
+    let context = opentelemetry::Context::current().with_value(PendingCompletionDetail {
+        detail: LocalCompletionDetail::GroupUpdate(detail),
+        consumed: std::sync::atomic::AtomicBool::new(false),
+    });
+    let _guard = context.attach();
+    super::super::complete_operation(completion);
 }
 pub fn complete_admission_connection_failure(reason: DialFailure, duration: Duration) {
     let context = ObservationContext::capture()

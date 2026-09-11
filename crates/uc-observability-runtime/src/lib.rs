@@ -3,9 +3,24 @@
 #[cfg(target_os = "android")]
 mod android;
 mod config;
+mod file_statistics;
+mod host_diagnostics;
+pub use host_diagnostics::{
+    HostDiagnosticAction, HostDiagnosticEvent, HostDiagnosticFailure, HostDiagnosticOutcome,
+    HostDiagnosticReceipt, HostDiagnosticRecordStatus, HostDiagnosticSource, HostLifecycleState,
+    HostNetworkKind,
+};
 mod filter;
+mod local_capture;
 mod local_file;
+pub use file_statistics::{FileSourceCounts, LocalDiagnosticSource};
 mod local_log_processor;
+mod local_recording;
+pub use local_capture::{
+    CaptureEndReason, DetailedCaptureRequest, LocalCaptureMode, LocalCaptureStatus,
+    LocalDiagnosticError, LocalDiagnosticExportReport, LocalDiagnosticStatus, SourceCapability,
+    SourceCollection, SourceCoverage, StopCaptureResult,
+};
 mod remote_health;
 mod runtime;
 mod status;

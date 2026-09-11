@@ -89,6 +89,7 @@ fn local_file_keeps_valid_correlation_without_remote_export_and_respects_detachm
     let rows: Vec<serde_json::Value> = output
         .lines()
         .map(|l| serde_json::from_str(l).expect("JSON"))
+        .filter(|row: &serde_json::Value| row["target"] != "uc.diagnostics")
         .collect();
     assert_eq!(rows.len(), 4, "one file record per completion");
     assert_eq!(

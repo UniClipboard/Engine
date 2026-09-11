@@ -129,6 +129,24 @@ pub enum SessionFailure {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum LocalEvent {
+    Source {
+        record: super::source::SourceEvent,
+    },
+    AddressRecord {
+        record: super::address_record::AddressRecordEvent,
+    },
+    NetworkRecovery {
+        record: super::network_recovery::NetworkRecoveryEvent,
+    },
+    Physical {
+        record: super::physical::PhysicalEvent,
+    },
+    Address {
+        record: super::address::AddressEvent,
+    },
+    Connection {
+        record: super::connection::ConnectionEvent,
+    },
     Recovery {
         trigger: RecoveryTrigger,
         decision: RecoveryDecision,
@@ -154,6 +172,12 @@ pub(super) enum LocalEvent {
 impl LocalEvent {
     pub(super) fn name(&self) -> &'static str {
         match self {
+            Self::Source { .. } => "diagnostics.source.status",
+            Self::AddressRecord { record } => record.name(),
+            Self::NetworkRecovery { record } => record.name(),
+            Self::Physical { record } => record.name(),
+            Self::Address { record } => record.name(),
+            Self::Connection { record } => record.name(),
             Self::Recovery { .. } => "pairing.recovery.decided",
             Self::PresenceCheck { .. } => "presence.check.completed",
             Self::PresenceClosed { .. } => "presence.connection.closed",
@@ -163,6 +187,12 @@ impl LocalEvent {
     }
     pub(super) fn level(&self) -> &'static str {
         match self {
+            Self::Source { .. } => "INFO",
+            Self::AddressRecord { record } => record.level(),
+            Self::NetworkRecovery { record } => record.level(),
+            Self::Physical { record } => record.level(),
+            Self::Address { record } => record.level(),
+            Self::Connection { record } => record.level(),
             Self::Recovery {
                 decision: RecoveryDecision::RequiresRecovery(_),
                 ..
@@ -199,6 +229,16 @@ impl LocalEvent {
         let mut fields = Map::new();
         fields.insert("event.name".into(), json!(self.name()));
         match self {
+            Self::Source { record } => {
+                fields.insert("source".into(), json!(record.source));
+                fields.insert("capability".into(), json!(record.capability));
+                fields.insert("collection".into(), json!(record.collection));
+            }
+            Self::AddressRecord { record } => fields.extend(record.fields()),
+            Self::NetworkRecovery { record } => fields.extend(record.fields()),
+            Self::Physical { record } => fields.extend(record.fields()),
+            Self::Address { record } => fields.extend(record.fields()),
+            Self::Connection { record } => fields.extend(record.fields()),
             Self::Recovery { trigger, decision } => {
                 fields.insert("trigger".into(), json!(trigger));
                 let (outcome, next, failure) = match decision {

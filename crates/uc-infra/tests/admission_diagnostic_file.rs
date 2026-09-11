@@ -160,7 +160,7 @@ async fn missing_stored_credential_is_one_detailed_unassociated_file_record() {
         .resume(
             SpaceAdmissionId::from_bytes([0x42; 32]).expect("attempt"),
             &route,
-            binding,
+            binding.clone(),
             &AdmissionContinuationCredential::from_bytes(vec![0x51; 64]).expect("credential"),
         )
         .await;
@@ -195,10 +195,62 @@ async fn missing_stored_credential_is_one_detailed_unassociated_file_record() {
     assert_eq!(failures[0]["fields"]["error.reason"], "record_missing");
     assert_eq!(failures[0]["fields"]["error.type"], "authentication_failed");
     assert!(failures[0].get("trace_id").is_none());
-    assert!(captured.iter().all(|r| r["target"] != "uc.connectivity"));
+    let connection_records: Vec<_> = captured
+        .iter()
+        .filter(|r| {
+            r["fields"]["event.name"] == "connection.started"
+                || r["fields"]["event.name"] == "connection.finished"
+        })
+        .collect();
+    assert_eq!(
+        connection_records.len(),
+        2,
+        "导出必须区分连接成功和之后的认证失败"
+    );
+    assert_eq!(
+        connection_records[0]["fields"]["event.name"],
+        "connection.started"
+    );
+    assert_eq!(connection_records[1]["fields"]["outcome"], "connected");
+    assert_eq!(
+        connection_records[0]["fields"]["connect_id"],
+        connection_records[1]["fields"]["connect_id"]
+    );
+    assert_eq!(
+        connection_records[0]["peer_ref"],
+        connection_records[1]["peer_ref"]
+    );
+    assert!(connection_records[0]["peer_ref"].as_str().is_some());
+    assert!(connection_records[0]["run_id"].as_str().is_some());
+    let serialized = serde_json::to_string(&captured).expect("records");
+    assert!(!serialized.contains(&sponsor.id().to_string()));
+    assert!(!serialized.contains(&joiner.id().to_string()));
     drop(exchange);
     router.shutdown().await.expect("router");
     joiner.close().await;
     sponsor.close().await;
+    let closed = transport
+        .resume(
+            SpaceAdmissionId::from_bytes([0x42; 32]).expect("attempt"),
+            &route,
+            binding,
+            &AdmissionContinuationCredential::from_bytes(vec![0x51; 64]).expect("credential"),
+        )
+        .await;
+    assert!(closed.is_err());
+    let records = read_logs(logs.path());
+    let failed = records
+        .iter()
+        .find(|r| {
+            r["fields"]["event.name"] == "connection.finished" && r["fields"]["outcome"] == "failed"
+        })
+        .expect("失败连接必须保留终态");
+    assert_eq!(failed["fields"]["error.phase"], "establish");
+    assert_eq!(failed["fields"]["error.reason"], "endpoint_closed");
+    assert_eq!(failed["peer_ref"], connection_records[0]["peer_ref"]);
+    assert_ne!(
+        failed["fields"]["connect_id"],
+        connection_records[0]["fields"]["connect_id"]
+    );
     handle.shutdown(Duration::from_secs(5));
 }

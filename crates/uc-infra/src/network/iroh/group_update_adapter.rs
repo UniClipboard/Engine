@@ -21,6 +21,7 @@ use uc_observability_contract::diagnostics::{
 use super::connect_with_staggered_retry;
 use super::peer_address_resolver::PeerAddressResolver;
 use super::trace_context::{inject_current, set_remote_parent, WireTraceContext};
+use crate::space::group_update_failure_detail;
 
 pub const GROUP_UPDATE_ALPN: &[u8] = b"uniclipboard/group-update/1";
 const MAX_UPDATE_SIZE: usize = 4 * 1024 * 1024;
@@ -62,6 +63,14 @@ impl IrohGroupUpdateAdapter {
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         group_revocation: Arc<dyn GroupRevocationPort>,
     ) -> Self {
+        use uc_observability_contract::diagnostics::connectivity::{
+            LocalDiagnosticSource, NetworkRecorder, SourceCapability, SourceCollection,
+        };
+        NetworkRecorder::current().register_source(
+            LocalDiagnosticSource::MembershipUpdates,
+            SourceCapability::Supported,
+            SourceCollection::Enabled,
+        );
         Self {
             endpoint,
             peer_address_resolver: PeerAddressResolver::new(peer_addr_repo),
@@ -108,6 +117,7 @@ impl GroupUpdateDispatchPort for IrohGroupUpdateAdapter {
             addr,
             GROUP_UPDATE_ALPN,
             "group-update",
+            uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
         )
         .await
         .map_err(|_| GroupUpdateDispatchError::Offline)?;
@@ -232,7 +242,13 @@ impl ProtocolHandler for IrohGroupUpdateHandler {
                     started.elapsed(),
                 ),
             };
-            complete_operation(completion);
+            uc_observability_contract::diagnostics::connectivity::NetworkRecorder::current().in_connection_scope(
+                *connection.remote_id().as_bytes(), connection.stable_id() as u64, || {
+                    if let Err(error) = &applied {
+                        uc_observability_contract::diagnostics::connectivity::complete_group_update_failure(
+                            group_update_failure_detail(error), completion);
+                    } else { complete_operation(completion); }
+                });
         });
         drop(span);
         let _ = connection.closed().await;
@@ -242,7 +258,7 @@ impl ProtocolHandler for IrohGroupUpdateHandler {
 
 fn group_update_apply_error_type(error: &KeyEpochError) -> DiagnosticErrorType {
     match error {
-        KeyEpochError::Repository(_) => DiagnosticErrorType::Storage,
+        KeyEpochError::Repository(_) | KeyEpochError::StateIssue(_) => DiagnosticErrorType::Storage,
         KeyEpochError::SecurityState { .. }
         | KeyEpochError::DecryptionFailed
         | KeyEpochError::PersistedStateIntegrityFailed => DiagnosticErrorType::Security,
@@ -401,9 +417,9 @@ mod tests {
         assert!(decoded.trace_context.is_none());
         assert!(decode_request(b"MLS").is_err());
         assert_eq!(
-            group_update_apply_error_type(&KeyEpochError::Repository(
-                "PRIVATE_STORAGE_ERROR".to_owned()
-            )),
+            group_update_apply_error_type(&KeyEpochError::Repository(anyhow::anyhow!(
+                "PRIVATE_STORAGE_ERROR"
+            ))),
             DiagnosticErrorType::Storage
         );
     }
@@ -458,7 +474,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cryptographically_invalid_recovery_update_is_rejected() {
+    async fn storage_failure_is_rejected_and_keeps_its_local_cause() {
+        use opentelemetry::logs::AnyValue;
+        use opentelemetry::InstrumentationScope;
+        use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+        use opentelemetry_sdk::error::OTelSdkResult;
+        use opentelemetry_sdk::logs::{LogProcessor, SdkLogRecord, SdkLoggerProvider};
+        use tracing_subscriber::{layer::SubscriberExt, Layer};
+        #[derive(Debug)]
+        struct Probe(Arc<std::sync::Mutex<Option<(&'static str, &'static str)>>>);
+        impl LogProcessor for Probe {
+            fn emit(&self, data: &mut SdkLogRecord, _: &InstrumentationScope) {
+                let field = |name: &str| {
+                    data.attributes_iter()
+                        .find_map(|(key, value)| match value {
+                            AnyValue::String(value) if key.as_str() == name => Some(value.as_str()),
+                            _ => None,
+                        })
+                        .unwrap_or_default()
+                };
+                if let Some(detail) = uc_observability_contract::diagnostics::connectivity::take_local_completion_detail(
+                    field("uc.domain"), field("uc.operation"), field("uc.role"), field("uc.outcome")) {
+                    *self.0.lock().expect("capture") = Some(detail.local_fields());
+                }
+            }
+            fn force_flush(&self) -> OTelSdkResult {
+                Ok(())
+            }
+            fn shutdown_with_timeout(&self, _: Duration) -> OTelSdkResult {
+                Ok(())
+            }
+        }
+        let details = Arc::new(std::sync::Mutex::new(None));
+        let logs = SdkLoggerProvider::builder()
+            .with_log_processor(Probe(details.clone()))
+            .build();
+        let subscriber = tracing_subscriber::registry().with(
+            OpenTelemetryTracingBridge::new(&logs).with_filter(
+                tracing_subscriber::filter::filter_fn(|meta| meta.target() == "uc.telemetry"),
+            ),
+        );
+        let _scope = tracing::subscriber::set_default(subscriber);
         let sender_seed = [0x45u8; 32];
         let receiver_seed = [0x46u8; 32];
         let receiver = endpoint(receiver_seed).await;
@@ -471,7 +527,15 @@ mod tests {
             .expect_apply_group_epoch_update()
             .times(1)
             .withf(|payload| payload == b"MLS")
-            .returning(|_| Err(KeyEpochError::Repository("invalid update".to_owned())));
+            .returning(|_| {
+                Err(KeyEpochError::Repository(
+                    std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "PRIVATE_STORAGE_PATH",
+                    )
+                    .into(),
+                ))
+            });
         let adapter = IrohGroupUpdateAdapter::new(
             Arc::clone(&receiver),
             Arc::new(NoPeerAddresses),
@@ -495,6 +559,10 @@ mod tests {
         let mut ack = [0u8; 1];
         recv.read_exact(&mut ack).await.expect("read rejection ack");
         assert_eq!(ack[0], ACK_REJECTED);
+        assert_eq!(
+            *details.lock().expect("details"),
+            Some(("unknown", "permission_denied"))
+        );
 
         router.shutdown().await.ok();
         sender.close().await;

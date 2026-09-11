@@ -91,6 +91,7 @@ impl super::DeliverPendingGroupUpdatesPort for DeliverPendingGroupUpdatesUseCase
 fn classify_store_error(error: &KeyEpochError) -> MembershipMaintenanceStepOutcome {
     match error {
         KeyEpochError::Repository(_)
+        | KeyEpochError::StateIssue(_)
         | KeyEpochError::SecurityState { .. }
         | KeyEpochError::SpaceNotReady => MembershipMaintenanceStepOutcome::Deferred,
         _ => MembershipMaintenanceStepOutcome::Corrupt,

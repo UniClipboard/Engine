@@ -268,7 +268,7 @@ Space 的 OPAQUE 认证握手保持原布局；认证后的 Request/Reply 使用
 损坏和读取不可用；认证负责人按原关闭码与业务返回结算。
 
 本地 SDK `LocalLogProcessor` 复用既有 `LocalFileRuntime` 有界队列，输出 `engine.YYYY-MM-DD.jsonl`。
-JSONL 保留 timestamp、level、target、fields，并用 `local_schema_version=1` 标明新的本地信封；有效的
+JSONL 保留 timestamp、level、target、fields，当前使用 `local_schema_version=2`；旧版文件仍可导出。有效的
 SDK TraceId/SpanId 位于顶层，缺失时省略。远程关闭不影响本地关联能力。普通完成日志退出旧 fmt 文件
 路径；health 仍通过独立接受门与只接受 HEALTH_TARGET 的格式层写入同一队列，在 SDK 收尾和遥测
 抑制时仍能记录健康结果。两个入口的 target 集合互斥，不会重复写入同一记录。
@@ -301,8 +301,24 @@ SDK TraceId/SpanId 位于顶层，缺失时省略。远程关闭不影响本地�
 - 未认证服务端的失败仍是一条无 TraceId/SpanId 的完成记录，不能仅凭时间将两端匿名请求断言为同一
   次请求；已有关联由完整负责人通过不透明 ObservationContext 延续，不扩大 Engine facade 或 Core 模型。
 
-日志队列满、磁盘不可写和序列化拒收不能改变业务结果；失败只累加既有本地丢弃计数，不递归写日志。
+日志队列满、磁盘不可写和序列化拒收不能改变业务结果；分别统计策略过滤、格式拒收、队列丢弃、配额丢弃及写入失败，不递归写日志。
 文件刷新与最终关闭仍由进程运行时统一执行，SDK 处理器不提前关闭 health 共用的 writer。
+
+进程运行时拥有 standard/detailed 模式、随机 run/capture 编号和有界匿名映射。详细采集默认 600 秒，
+只接受 1–900 秒；重复开始不延期，停止校验 capture_id。恢复通知无法证明睡眠期间时钟推进时，
+保守结束详细模式。在途尝试保留一次终态；正常进程关闭记录结束并将未完成原生动作结算为中断。
+强制杀进程不伪造收尾。原始身份、候选签名和连接 key 仅留在内存，文件只保存随机引用。
+
+`start_local_diagnostic_capture`、`stop_local_diagnostic_capture`、`query_local_diagnostic_status`
+和 `prepare_local_diagnostic_export` 由 Engine 稳定入口及两套平台绑定提供。导出准备预算为 1–5000 ms，
+只等待本进程本地队列，返回完成、失败、超时或已关闭；与远程输出无关。报告包含查询时间窗口、
+来源登记/观察/过滤以及按来源的文件写入计数和最后写入时间。计数不是 ZIP 文件内容快照，业务并发
+继续产生记录，产品仍须报告实际读取、缺失和截断；本进程刷新不代表扩展或其他进程已经刷新。
+UniFFI 的导出准备是同步入口，宿主必须使用已有后台执行队列；HarmonyOS 入口异步等待阻塞工作。
+
+原生来源通过固定枚举登记，动作开始返回本进程生成且来源绑定的 token。重复、跨来源和未知结束
+均拒绝；最多保留 1024 个在途动作。未登记来源不能被当作零事件的完整覆盖。发现、路径和中转
+仅报告锁定 Iroh 接口实际提供的事实；发布请求不等于发布成功，恢复动作提交不等于中转恢复。
 
 验收包括真实资料读取加本机协议加实际文件的缺失材料测试、远程摘要与本地详情分离、并发及嵌套
 关联、取消、健康收尾、隐私哨兵及现有协议结果回归。物理设备与产品仓的接入验证未执行时标为跳过，

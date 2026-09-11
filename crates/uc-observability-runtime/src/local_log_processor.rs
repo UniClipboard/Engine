@@ -1,6 +1,5 @@
 //! SDK 记录到既有本地文件队列的适配；不拥有线程、刷新或关闭流程。
 
-use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,11 +10,14 @@ use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::logs::{LogProcessor, SdkLogRecord};
 use serde_json::{json, Map, Value};
 
+use crate::local_capture::source_for;
 use crate::local_file::LocalFileRuntime;
+use crate::local_recording::LocalRecordingState;
 use crate::remote_health::log_is_approved;
 
 pub(crate) struct LocalLogProcessor {
     file: Arc<LocalFileRuntime>,
+    recording: Arc<LocalRecordingState>,
 }
 
 impl std::fmt::Debug for LocalLogProcessor {
@@ -27,8 +29,8 @@ impl std::fmt::Debug for LocalLogProcessor {
 }
 
 impl LocalLogProcessor {
-    pub(crate) fn new(file: Arc<LocalFileRuntime>) -> Self {
-        Self { file }
+    pub(crate) fn new(file: Arc<LocalFileRuntime>, recording: Arc<LocalRecordingState>) -> Self {
+        Self { file, recording }
     }
 }
 
@@ -40,14 +42,27 @@ impl LogProcessor for LocalLogProcessor {
         {
             return;
         }
-        let Some(mut record) = encode_record(data, scope) else {
+        let Some(mut record) = decode_record(data, scope, &self.recording) else {
+            self.recording.rejected();
             self.file.record_rejection();
             return;
         };
-        record.push(b'\n');
-        if self.file.writer().write_all(&record).is_err() {
-            self.file.record_rejection();
+        if !self.recording.include(&mut record) {
+            return;
         }
+        let source = source_for(&record);
+        let Ok(mut record) = serde_json::to_vec(&record) else {
+            self.recording.rejected();
+            self.file.record_rejection();
+            return;
+        };
+        if record.len() > 4096 {
+            self.recording.rejected();
+            self.file.record_rejection();
+            return;
+        }
+        record.push(b'\n');
+        self.file.writer().write_record(&record, source);
     }
 
     // 文件队列由进程运行时在 SDK 刷新之后统一刷新，处理器自身没有缓存。
@@ -65,7 +80,11 @@ impl LogProcessor for LocalLogProcessor {
     }
 }
 
-fn encode_record(data: &SdkLogRecord, scope: &InstrumentationScope) -> Option<Vec<u8>> {
+fn decode_record(
+    data: &SdkLogRecord,
+    scope: &InstrumentationScope,
+    recording: &LocalRecordingState,
+) -> Option<Value> {
     if data.body().is_some()
         || !scope.name().is_empty()
         || scope.version().is_some()
@@ -128,6 +147,9 @@ fn encode_record(data: &SdkLogRecord, scope: &InstrumentationScope) -> Option<Ve
         let (phase, reason) = detail.local_fields();
         fields.insert("error.phase".into(), json!(phase));
         fields.insert("error.reason".into(), json!(reason));
+        if let Some(chain) = detail.source_chain() {
+            fields.insert("error.chain".into(), json!(chain));
+        }
     }
     let timestamp: DateTime<Utc> = data.timestamp().or(data.observed_timestamp())?.into();
     let mut record = json!({
@@ -143,5 +165,6 @@ fn encode_record(data: &SdkLogRecord, scope: &InstrumentationScope) -> Option<Ve
             record["span_id"] = json!(context.span_id.to_string());
         }
     }
-    serde_json::to_vec(&record).ok()
+    recording.annotate(&mut record);
+    Some(record)
 }

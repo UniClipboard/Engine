@@ -180,6 +180,14 @@ fn session_lifecycle_error_type(error: &EngineError) -> DiagnosticErrorType {
 
 impl SessionSupervisor {
     pub(super) fn new(application: uc_application::facade::ApplicationAssembly) -> Self {
+        use uc_observability_contract::diagnostics::connectivity::{
+            LocalDiagnosticSource, NetworkRecorder, SourceCapability, SourceCollection,
+        };
+        NetworkRecorder::current().register_source(
+            LocalDiagnosticSource::Sessions,
+            SourceCapability::Partial,
+            SourceCollection::Enabled,
+        );
         Self {
             session: Arc::new(Mutex::new(None)),
             factory: StdMutex::new(None),

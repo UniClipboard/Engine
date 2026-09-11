@@ -1,12 +1,16 @@
 use std::sync::Arc;
 use std::time::Duration;
-use uc_observability_contract::diagnostics::connectivity::DialFailure;
+use uc_observability_contract::diagnostics::connectivity::{
+    ConnectionFailurePhase, ConnectionFailureReason, ConnectionObservation, ConnectionPurpose,
+    DialFailure,
+};
 
 use iroh::endpoint::ConnectOptions;
 use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr, TransportAddr};
 use tokio::task::JoinSet;
-use tracing::{debug, info, warn};
+use tracing::instrument::WithSubscriber;
+use uc_observability_contract::diagnostics::connectivity::AddressInputSource;
 
 /// Per-attempt connect timeout.
 ///
@@ -72,8 +76,9 @@ pub(crate) async fn connect_with_staggered_retry(
     addr: EndpointAddr,
     alpn: &'static [u8],
     purpose: &'static str,
+    source: AddressInputSource,
 ) -> Result<Connection, String> {
-    connect_with_staggered_retry_classified(endpoint, addr, alpn, Vec::new(), purpose)
+    connect_with_staggered_retry_classified(endpoint, addr, alpn, Vec::new(), purpose, source)
         .await
         .map_err(|(message, _)| message)
 }
@@ -84,114 +89,108 @@ pub(super) async fn connect_with_staggered_retry_classified(
     alpn: &'static [u8],
     additional_alpns: Vec<Vec<u8>>,
     purpose: &'static str,
+    source: AddressInputSource,
 ) -> Result<Connection, (String, DialFailure)> {
     let addr = strip_relay_if_lan_only(addr);
+    let observation =
+        ConnectionObservation::begin(connection_purpose(purpose), *addr.id.as_bytes());
+    let (summary, fingerprint) = super::connection_diagnostics::candidate_summary(&addr);
+    observation.input_candidates(fingerprint, source, summary);
     let mut attempts = JoinSet::new();
 
     for (idx, delay) in STAGGERED_DELAYS.iter().copied().enumerate() {
         let endpoint = Arc::clone(&endpoint);
         let addr = addr.clone();
-        let addr_id = addr.id;
+        let observations = observation.attempts();
         let additional_alpns = additional_alpns.clone();
-        attempts.spawn(async move {
-            if !delay.is_zero() {
-                tokio::time::sleep(delay).await;
-            }
-
-            let attempt_no = idx + 1;
-            debug!(
-                purpose,
-                attempt = attempt_no,
-                timeout_ms = ATTEMPT_TIMEOUT.as_millis(),
-                "iroh connect attempt started"
-            );
-
-            let options = ConnectOptions::new().with_additional_alpns(additional_alpns);
-            let connect = async {
-                let connecting = endpoint
-                    .connect_with_opts(addr, alpn, options)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                connecting.await.map_err(|error| error.to_string())
-            };
-            match tokio::time::timeout(ATTEMPT_TIMEOUT, connect).await {
-                Ok(Ok(connection)) => {
-                    // Diagnostic for UniClipboard#486 — log which path won
-                    // the candidate race. iroh 0.98 replaced the older
-                    // `Endpoint::conn_type(id) -> Watcher<ConnectionType>` with
-                    // the snapshot-style `remote_info(id) -> Option<RemoteInfo>`;
-                    // we render only the `Active` `TransportAddrInfo`s, which
-                    // is the closest equivalent to the old Direct/Relay/Mixed
-                    // tag for "what's the path actually carrying packets right
-                    // now".
-                    let conn_type_str = match endpoint.remote_info(addr_id).await {
-                        Some(info) => {
-                            let active: Vec<String> = info
-                                .addrs()
-                                .filter(|a| {
-                                    matches!(a.usage(), iroh::endpoint::TransportAddrUsage::Active)
-                                })
-                                .map(|a| format!("{:?}", a.addr()))
-                                .collect();
-                            if active.is_empty() {
-                                "no_active_paths".to_string()
-                            } else {
-                                active.join(",")
-                            }
-                        }
-                        None => "unavailable".to_string(),
-                    };
-                    info!(
-                        purpose,
-                        attempt = attempt_no,
-                        peer = %addr_id.fmt_short(),
-                        conn_type = %conn_type_str,
-                        "iroh connect selected path (refs UniClipboard#486)"
-                    );
-                    Ok((attempt_no, connection))
+        attempts.spawn(
+            async move {
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
                 }
-                Ok(Err(err)) => Err((attempt_no, err, false)),
-                Err(_) => Err((
-                    attempt_no,
-                    format!("timed out after {}ms", ATTEMPT_TIMEOUT.as_millis()),
-                    true,
-                )),
+
+                let attempt_no = idx + 1;
+                let attempt = observations.begin(attempt_no as u32, ATTEMPT_TIMEOUT);
+                let driver = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+                let options = ConnectOptions::new().with_additional_alpns(additional_alpns);
+                let mut phase = ConnectionFailurePhase::Establish;
+                let connect = async {
+                    let connecting = endpoint
+                        .connect_with_opts(addr, alpn, options)
+                        .with_subscriber(driver.clone())
+                        .await
+                        .map_err(|error| {
+                            (
+                                error.to_string(),
+                                super::connection_diagnostics::preparation_failure(&error),
+                            )
+                        })?;
+                    phase = ConnectionFailurePhase::Handshake;
+                    connecting.with_subscriber(driver).await.map_err(|error| {
+                        (
+                            error.to_string(),
+                            super::connection_diagnostics::handshake_failure(&error),
+                        )
+                    })
+                };
+                match tokio::time::timeout(ATTEMPT_TIMEOUT, connect).await {
+                    Ok(Ok(connection)) => {
+                        attempt.connected(connection.stable_id() as u64);
+                        Ok((attempt_no, connection))
+                    }
+                    Ok(Err((err, outcome))) => {
+                        attempt.finish(outcome);
+                        Err((attempt_no, err, false, outcome))
+                    }
+                    Err(_) => {
+                        let outcome = super::connection_diagnostics::failed(
+                            phase,
+                            ConnectionFailureReason::TimedOut,
+                        );
+                        attempt.finish(outcome);
+                        Err((
+                            attempt_no,
+                            format!("timed out after {}ms", ATTEMPT_TIMEOUT.as_millis()),
+                            true,
+                            outcome,
+                        ))
+                    }
+                }
             }
-        });
+            .with_current_subscriber(),
+        );
     }
 
     let mut failures = Vec::new();
     let mut all_timed_out = true;
+    let mut last_failure = super::connection_diagnostics::failed(
+        ConnectionFailurePhase::Unknown,
+        ConnectionFailureReason::Internal,
+    );
     while let Some(joined) = attempts.join_next().await {
         match joined {
-            Ok(Ok((attempt, connection))) => {
-                if attempt > 1 {
-                    debug!(
-                        purpose,
-                        attempt, "iroh connect recovered on staggered retry"
-                    );
-                }
+            Ok(Ok((_attempt, connection))) => {
+                observation.connected(connection.stable_id() as u64);
                 attempts.abort_all();
                 return Ok(connection);
             }
-            Ok(Err((attempt, err, timed_out))) => {
+            Ok(Err((attempt, err, timed_out, outcome))) => {
                 all_timed_out &= timed_out;
-                debug!(
-                    purpose,
-                    attempt,
-                    error = %err,
-                    "iroh connect attempt failed"
-                );
+                last_failure = outcome;
                 failures.push(format!("attempt {attempt}: {err}"));
             }
             Err(err) => {
                 all_timed_out = false;
-                warn!(purpose, error = %err, "iroh connect attempt task failed");
+                last_failure = super::connection_diagnostics::failed(
+                    ConnectionFailurePhase::Unknown,
+                    ConnectionFailureReason::Internal,
+                );
                 failures.push(format!("task failed: {err}"));
             }
         }
     }
 
+    observation.finish(last_failure);
     Err((
         failures.join("; "),
         if all_timed_out {
@@ -200,4 +199,241 @@ pub(super) async fn connect_with_staggered_retry_classified(
             DialFailure::TransportFailed
         },
     ))
+}
+
+fn connection_purpose(purpose: &str) -> ConnectionPurpose {
+    match purpose {
+        "presence" => ConnectionPurpose::Presence,
+        "network_recovery_confirmation" => ConnectionPurpose::NetworkRecovery,
+        "clipboard" => ConnectionPurpose::Clipboard,
+        "active-clipboard" => ConnectionPurpose::ActiveClipboard,
+        "active-clipboard-pull" => ConnectionPurpose::ClipboardPull,
+        "transfer-progress" => ConnectionPurpose::TransferProgress,
+        "group-update" => ConnectionPurpose::GroupUpdate,
+        "membership-attestation" => ConnectionPurpose::MembershipAttestation,
+        "membership-gossip" => ConnectionPurpose::MembershipGossip,
+        "membership-history" => ConnectionPurpose::MembershipHistory,
+        "membership-branch-recovery" => ConnectionPurpose::MembershipRecovery,
+        _ => ConnectionPurpose::Other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opentelemetry::logs::AnyValue;
+    use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+    use opentelemetry_sdk::logs::{InMemoryLogExporter, SdkLoggerProvider};
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    #[derive(Debug, Default)]
+    struct BlockFirstAttempt(std::sync::atomic::AtomicBool);
+
+    impl iroh::endpoint::EndpointHooks for BlockFirstAttempt {
+        fn before_connect<'a>(
+            &'a self,
+            _: &'a EndpointAddr,
+            _: &'a [u8],
+        ) -> impl std::future::Future<Output = iroh::endpoint::BeforeConnectOutcome> + Send + 'a
+        {
+            async move {
+                if !self.0.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                    std::future::pending::<()>().await;
+                }
+                iroh::endpoint::BeforeConnectOutcome::Accept
+            }
+        }
+    }
+
+    fn records(exporter: &InMemoryLogExporter) -> Vec<serde_json::Value> {
+        exporter
+            .get_emitted_logs()
+            .expect("logs")
+            .iter()
+            .filter_map(|entry| {
+                let field = |name: &str| {
+                    entry.record.attributes_iter().find_map(|(key, value)| {
+                        if key.as_str() != name {
+                            return None;
+                        }
+                        match value {
+                            AnyValue::String(value) => Some(value.to_string()),
+                            _ => None,
+                        }
+                    })
+                };
+                uc_observability_contract::diagnostics::connectivity::decode_local_record(
+                    &field("event.name")?,
+                    &field("payload")?,
+                    entry.record.severity_text()?,
+                )
+                .map(serde_json::Value::Object)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn staggered_failure_and_cancellation_account_only_for_started_attempts() {
+        let exporter = InMemoryLogExporter::default();
+        let provider = SdkLoggerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber =
+            tracing_subscriber::registry().with(OpenTelemetryTracingBridge::new(&provider));
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let endpoint = Arc::new(
+            Endpoint::builder(iroh::endpoint::presets::N0)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .clear_address_lookup()
+                .bind()
+                .await
+                .expect("endpoint"),
+        );
+        endpoint.close().await;
+        let addr = EndpointAddr::new(iroh::SecretKey::generate().public());
+        let result = connect_with_staggered_retry(
+            endpoint.clone(),
+            addr.clone(),
+            b"probe",
+            "membership-history",
+            AddressInputSource::Provided,
+        )
+        .with_subscriber(dispatch.clone())
+        .await;
+        assert!(result.is_err());
+        let rows = records(&exporter);
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r["event.name"] == "connection.started")
+                .count(),
+            1
+        );
+        let attempts: Vec<_> = rows
+            .iter()
+            .filter(|r| r["event.name"] == "connection.attempt.finished")
+            .collect();
+        assert_eq!(attempts.len(), 3);
+        assert!(attempts
+            .iter()
+            .all(|r| r["error.reason"] == "endpoint_closed"));
+        let finished = rows
+            .iter()
+            .find(|r| r["event.name"] == "connection.finished")
+            .expect("finish");
+        assert_eq!(finished["attempt_count"], 3);
+        assert_eq!(finished["outcome"], "failed");
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(25),
+            connect_with_staggered_retry(
+                endpoint,
+                addr,
+                b"probe",
+                "membership-history",
+                AddressInputSource::Provided,
+            )
+            .with_subscriber(dispatch),
+        )
+        .await;
+        assert!(result.is_err());
+        let after = records(&exporter);
+        let cancelled = after[rows.len()..]
+            .iter()
+            .find(|r| r["event.name"] == "connection.finished")
+            .expect("cancelled");
+        assert_eq!(cancelled["outcome"], "interrupted");
+        assert_eq!(
+            cancelled["attempt_count"], 1,
+            "尚未醒来的错峰任务不算连接尝试"
+        );
+    }
+
+    #[tokio::test]
+    async fn winning_connection_cancels_a_started_loser_without_reporting_a_failure() {
+        let exporter = InMemoryLogExporter::default();
+        let provider = SdkLoggerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber =
+            tracing_subscriber::registry().with(OpenTelemetryTracingBridge::new(&provider));
+        let server = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .clear_address_lookup()
+            .alpns(vec![b"probe".to_vec()])
+            .bind()
+            .await
+            .expect("server");
+        let client = Arc::new(
+            Endpoint::builder(iroh::endpoint::presets::N0)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .clear_address_lookup()
+                .hooks(BlockFirstAttempt::default())
+                .bind()
+                .await
+                .expect("client"),
+        );
+        for _ in 0..100 {
+            if !server.addr().addrs.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!server.addr().addrs.is_empty());
+        let incoming_server = server.clone();
+        let incoming = tokio::spawn(async move {
+            incoming_server
+                .accept()
+                .await
+                .expect("incoming")
+                .await
+                .expect("handshake")
+        });
+        let connected = tokio::time::timeout(
+            Duration::from_secs(6),
+            connect_with_staggered_retry(
+                client.clone(),
+                server.addr(),
+                b"probe",
+                "membership-history",
+                AddressInputSource::Provided,
+            )
+            .with_subscriber(subscriber),
+        )
+        .await
+        .expect("deadline")
+        .expect("connection");
+        let accepted = incoming.await.expect("accept task");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if records(&exporter)
+                    .iter()
+                    .any(|r| r["outcome"] == "cancelled_by_winner")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("取消终态");
+        let rows = records(&exporter);
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r["event.name"] == "connection.finished")
+                .count(),
+            1
+        );
+        assert!(!rows.iter().any(|r| r["outcome"] == "failed"));
+        assert_eq!(
+            rows.iter()
+                .find(|r| r["event.name"] == "connection.finished")
+                .expect("finish")["attempt_count"],
+            2
+        );
+        connected.close(0u32.into(), b"done");
+        drop(accepted);
+        client.close().await;
+        server.close().await;
+    }
 }

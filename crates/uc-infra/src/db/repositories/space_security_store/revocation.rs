@@ -126,7 +126,9 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
         prepared: &RevocationRecord,
     ) -> Result<BeginRevocationOutcome, KeyEpochError> {
         if prepared.status() != RevocationStatus::Prepared {
-            return Err(backend("begin revocation requires prepared status"));
+            return Err(KeyEpochError::StateIssue(
+                uc_core::membership::KeyEpochStateIssue::InvalidStage,
+            ));
         }
         let master_key = self.session.get_master_key().map_err(backend)?;
         let encrypted = seal(
@@ -280,7 +282,9 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
             })
             .map_err(backend)?;
         if affected != 1 {
-            return Err(backend("revocation is not prepared"));
+            return Err(KeyEpochError::StateIssue(
+                uc_core::membership::KeyEpochStateIssue::InvalidStage,
+            ));
         }
         Ok(())
     }
@@ -307,7 +311,9 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
             &stage_aad(revocation_id.as_str()),
         )?;
         if stage.record().revocation_id() != revocation_id {
-            return Err(backend("staged revocation integrity mismatch"));
+            return Err(KeyEpochError::StateIssue(
+                uc_core::membership::KeyEpochStateIssue::CorruptMaterial,
+            ));
         }
         Ok(Some(stage))
     }
@@ -453,7 +459,9 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                 || stage.group_state() != material.group_state()
                 || stage.key_catalog() != material.key_catalog()))
         {
-            return Err(backend("invalid revocation recovery payload"));
+            return Err(KeyEpochError::StateIssue(
+                uc_core::membership::KeyEpochStateIssue::CorruptMaterial,
+            ));
         }
         let master_key = self.session.get_master_key().map_err(backend)?;
         let encrypted_record = seal(

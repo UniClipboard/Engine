@@ -46,6 +46,8 @@ async fn one_authentication_completion_has_local_detail_but_only_the_v1_remote_s
         ConnectionDirection::Outbound,
         ConnectionCloseReason::RemoteApplicationClosed,
     );
+    ConnectionObservation::begin(ConnectionPurpose::Admission, [0x41; 32])
+        .finish(ConnectionOutcome::Connected);
     assert_eq!(
         handle.force_flush(Duration::from_secs(5)).logs,
         SignalResult::Completed
@@ -86,8 +88,16 @@ async fn one_authentication_completion_has_local_detail_but_only_the_v1_remote_s
     let local: Vec<serde_json::Value> = output
         .lines()
         .map(|l| serde_json::from_str(l).expect("JSON"))
+        .filter(|row: &serde_json::Value| row["target"] != "uc.diagnostics")
         .collect();
-    assert_eq!(local.len(), 2);
+    assert_eq!(local.len(), 4);
+    assert!(local[2]["run_id"].as_str().is_some());
+    assert!(local[2]["peer_ref"].as_str().is_some());
+    assert!(!output.contains("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"));
+    assert!(logs[0]
+        .attributes
+        .iter()
+        .all(|a| !["run_id", "peer_ref", "connect_id"].contains(&a.key.as_str())));
     assert_eq!(local[0]["fields"]["error.reason"], "record_missing");
     assert_eq!(local[0]["fields"]["error.type"], "authentication_failed");
     assert_eq!(

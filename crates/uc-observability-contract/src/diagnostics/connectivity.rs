@@ -2,8 +2,46 @@
 use super::ObservationContext;
 use std::time::{Duration, Instant};
 
+mod address;
+mod address_record;
+
+pub use address_record::{
+    local_address_record_keys, AddressRecordResult, StoredAddressObservation,
+};
 mod authentication;
+mod connection;
+mod group_update;
+mod network_recovery;
+mod physical;
 mod record;
+mod source;
+pub use source::{LocalDiagnosticSource, SourceCapability, SourceCollection};
+
+pub use authentication::complete_group_update_failure;
+pub use group_update::{
+    GroupUpdateFailureDetail, GroupUpdatePhase, GroupUpdateReason, GroupUpdateSource,
+};
+
+pub use network_recovery::{
+    DnsProbeResult, DnsProbeStage, NetworkRecoveryResult, NetworkRecoveryTrigger,
+    RecoveryActionObservation,
+};
+
+pub use physical::{
+    local_connection_key, local_path_key, ConnectionLifetimeObservation, NetworkPathKind,
+    ObserverFailure, PathObservationKind,
+};
+
+pub use address::{
+    local_candidate_fingerprint, AddressInputSource, CandidateSummary, DiscoverySource,
+    LookupObservation, NetworkRecorder,
+};
+
+pub use connection::{
+    local_connection_peer, ConnectionAttemptObservation, ConnectionAttempts,
+    ConnectionFailurePhase, ConnectionFailureReason, ConnectionObservation, ConnectionOutcome,
+    ConnectionPurpose,
+};
 
 pub use authentication::{
     complete_admission_authentication_failure, complete_admission_connection_failure,
@@ -19,6 +57,10 @@ pub use record::{
 };
 
 pub const CONNECTIVITY_TARGET: &str = "uc.connectivity";
+
+fn local_events_enabled() -> bool {
+    tracing::event_enabled!(target: "uc.connectivity", tracing::Level::INFO)
+}
 
 pub fn record_admission_recovery_decision(
     context: &ObservationContext,

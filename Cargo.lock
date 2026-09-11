@@ -6910,6 +6910,7 @@ dependencies = [
  "rustls",
  "rustls-platform-verifier",
  "semver",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",

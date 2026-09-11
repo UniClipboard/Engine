@@ -207,6 +207,7 @@ pub(crate) struct DemandRecoveryCoordinator {
     endpoint: Endpoint,
     relays_enabled: bool,
     gate: Mutex<DemandRecoveryGate>,
+    recorder: uc_observability_contract::diagnostics::connectivity::NetworkRecorder,
 }
 
 impl DemandRecoveryCoordinator {
@@ -215,6 +216,8 @@ impl DemandRecoveryCoordinator {
             endpoint,
             relays_enabled,
             gate: Mutex::new(DemandRecoveryGate::new(DEMAND_RECOVERY_COOLDOWN)),
+            recorder:
+                uc_observability_contract::diagnostics::connectivity::NetworkRecorder::current(),
         }
     }
 
@@ -233,23 +236,24 @@ impl DemandRecoveryCoordinator {
             return;
         }
 
-        info!(
-            target: "iroh.net_recovery",
-            "outbound demand found home relay unhealthy; recovering immediately"
+        use uc_observability_contract::diagnostics::connectivity::{
+            NetworkRecoveryResult, NetworkRecoveryTrigger,
+        };
+        let observation = self.recorder.recovery_action(
+            *self.endpoint.id().as_bytes(),
+            NetworkRecoveryTrigger::Demand,
         );
         reset_resolver(&self.endpoint);
-        if !await_bounded(
+        let completed = await_bounded(
             DEMAND_RECOVERY_ACTION_TIMEOUT,
             self.endpoint.network_change(),
         )
-        .await
-        {
-            warn!(
-                target: "iroh.net_recovery",
-                budget_ms = DEMAND_RECOVERY_ACTION_TIMEOUT.as_millis() as u64,
-                "demand-driven endpoint recovery exceeded its action budget"
-            );
-        }
+        .await;
+        observation.finish(if completed {
+            NetworkRecoveryResult::Submitted
+        } else {
+            NetworkRecoveryResult::TimedOut
+        });
     }
 
     pub(crate) async fn recover_after_confirmed_path_failure(&self) {
@@ -265,12 +269,24 @@ impl DemandRecoveryCoordinator {
         if !claimed {
             return;
         }
+        use uc_observability_contract::diagnostics::connectivity::{
+            NetworkRecoveryResult, NetworkRecoveryTrigger,
+        };
+        let observation = self.recorder.recovery_action(
+            *self.endpoint.id().as_bytes(),
+            NetworkRecoveryTrigger::ConfirmedPathFailure,
+        );
         reset_resolver(&self.endpoint);
-        let _ = await_bounded(
+        let completed = await_bounded(
             DEMAND_RECOVERY_ACTION_TIMEOUT,
             self.endpoint.network_change(),
         )
         .await;
+        observation.finish(if completed {
+            NetworkRecoveryResult::Submitted
+        } else {
+            NetworkRecoveryResult::TimedOut
+        });
     }
 }
 
@@ -413,13 +429,19 @@ fn relay_healthy(statuses: &[iroh::endpoint::RelayStatus]) -> bool {
 pub(crate) fn spawn_net_recovery(
     endpoint: Endpoint,
     observations: Arc<NetworkRecoveryObservationSource>,
+    recorder: uc_observability_contract::diagnostics::connectivity::NetworkRecorder,
 ) -> JoinHandle<()> {
     let closed = endpoint.closed();
     tokio::spawn(async move {
         // `run_until` yields `Some(())` on normal return, `None` if the
         // endpoint closed first; either way there is nothing to propagate.
         let _ = closed
-            .run_until(run(endpoint, RecoveryPolicy::default(), observations))
+            .run_until(run(
+                endpoint,
+                RecoveryPolicy::default(),
+                observations,
+                recorder,
+            ))
             .await;
     })
 }
@@ -430,7 +452,11 @@ async fn run(
     endpoint: Endpoint,
     policy: RecoveryPolicy,
     observations: Arc<NetworkRecoveryObservationSource>,
+    recorder: uc_observability_contract::diagnostics::connectivity::NetworkRecorder,
 ) {
+    use uc_observability_contract::diagnostics::connectivity::{
+        DnsProbeStage, NetworkRecoveryResult, NetworkRecoveryTrigger,
+    };
     let mut watcher = endpoint.home_relay_status();
     let mut state = RecoveryState::new(policy);
     let mut was_unhealthy = !relay_healthy(&watcher.get());
@@ -444,10 +470,19 @@ async fn run(
     // healthy start this succeeds; on the wedge (e.g. installer auto-relaunch)
     // it fails from the very first attempt — the evidence that the resolver was
     // born with a stale/empty nameserver config, before any reset runs.
-    dns_selftest(&endpoint, "startup").await;
+    let initial = watcher.get();
+    let mut observed = relay_counts(&initial);
+    recorder.local_relay_status(*endpoint.id().as_bytes(), observed.0, observed.1);
+    dns_selftest(&endpoint, DnsProbeStage::Startup, &recorder).await;
 
     loop {
-        let healthy = relay_healthy(&watcher.get());
+        let statuses = watcher.get();
+        let healthy = relay_healthy(&statuses);
+        let counts = relay_counts(&statuses);
+        if counts != observed {
+            recorder.local_relay_status(*endpoint.id().as_bytes(), counts.0, counts.1);
+            observed = counts;
+        }
         if healthy && was_unhealthy {
             observations.publish(NetworkRecoveryObservation::LocalRelayRecovered);
         }
@@ -456,6 +491,8 @@ async fn run(
             Action::Idle => None,
             Action::Wait(d) => Some(d),
             Action::Nudge(next) => {
+                let observation = recorder
+                    .recovery_action(*endpoint.id().as_bytes(), NetworkRecoveryTrigger::Watchdog);
                 warn!(
                     target: "iroh.net_recovery",
                     next_recheck_ms = next.as_millis() as u64,
@@ -476,11 +513,12 @@ async fn run(
                 // re-check when the network genuinely changed. Harmless no-op
                 // otherwise, and prompts the relay actor to redial sooner.
                 endpoint.network_change().await;
+                observation.finish(NetworkRecoveryResult::Submitted);
                 // Did the reset restore resolution? Compare against "startup":
                 // startup FAIL + post-reset OK ⇒ the wedge was a stale resolver
                 // and reset is the fix. Still failing ⇒ the root cause is
                 // elsewhere (socket/env) and reset alone is insufficient.
-                dns_selftest(&endpoint, "post-reset").await;
+                dns_selftest(&endpoint, DnsProbeStage::AfterReset, &recorder).await;
                 Some(next)
             }
         };
@@ -517,11 +555,20 @@ async fn sleep_opt(d: Option<Duration>) {
 /// field logs can pin down *why* the relay is wedged (resolver born with a bad
 /// config vs. reset restoring it). `stage` labels which point in the lifecycle
 /// this probe ran at (`"startup"` / `"post-reset"`).
-async fn dns_selftest(endpoint: &Endpoint, stage: &'static str) {
+async fn dns_selftest(
+    endpoint: &Endpoint,
+    stage: uc_observability_contract::diagnostics::connectivity::DnsProbeStage,
+    recorder: &uc_observability_contract::diagnostics::connectivity::NetworkRecorder,
+) {
+    use uc_observability_contract::diagnostics::connectivity::DnsProbeResult;
     let resolver = match endpoint.dns_resolver() {
         Ok(resolver) => resolver,
-        Err(err) => {
-            warn!(target: "iroh.net_recovery", stage, error = %err, "DNS self-test skipped: resolver unavailable");
+        Err(_) => {
+            recorder.dns_probe(
+                *endpoint.id().as_bytes(),
+                stage,
+                DnsProbeResult::Unavailable,
+            );
             return;
         }
     };
@@ -531,30 +578,90 @@ async fn dns_selftest(endpoint: &Endpoint, stage: &'static str) {
     {
         Ok(addrs) => {
             let count = addrs.count();
-            info!(
-                target: "iroh.net_recovery",
+            recorder.dns_probe(
+                *endpoint.id().as_bytes(),
                 stage,
-                host = DNS_SELFTEST_HOST,
-                resolved = true,
-                addr_count = count,
-                "DNS self-test resolved",
+                DnsProbeResult::Resolved {
+                    address_count: u32::try_from(count).unwrap_or(u32::MAX),
+                },
             );
         }
-        Err(err) => {
-            warn!(
-                target: "iroh.net_recovery",
-                stage,
-                host = DNS_SELFTEST_HOST,
-                resolved = false,
-                error = %err,
-                "DNS self-test FAILED — resolver cannot resolve (likely a stale/empty nameserver config captured at process start)",
-            );
+        Err(_) => {
+            recorder.dns_probe(*endpoint.id().as_bytes(), stage, DnsProbeResult::Failed);
         }
     }
 }
 
+fn relay_counts(statuses: &[iroh::endpoint::RelayStatus]) -> (u32, u32) {
+    (
+        u32::try_from(statuses.iter().filter(|s| s.is_connected()).count()).unwrap_or(u32::MAX),
+        u32::try_from(statuses.len()).unwrap_or(u32::MAX),
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn demand_nudge_completion_is_not_reported_as_a_recovered_relay() {
+        use opentelemetry::logs::AnyValue;
+        use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+        use opentelemetry_sdk::logs::{InMemoryLogExporter, SdkLoggerProvider};
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::layer::SubscriberExt;
+        let exporter = InMemoryLogExporter::default();
+        let provider = SdkLoggerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber =
+            tracing_subscriber::registry().with(OpenTelemetryTracingBridge::new(&provider));
+        let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .expect("endpoint");
+        async {
+            let coordinator = super::DemandRecoveryCoordinator::new(endpoint.clone(), true);
+            coordinator.recover_for_demand().await;
+        }
+        .with_subscriber(subscriber)
+        .await;
+        endpoint.close().await;
+        let rows: Vec<_> = exporter
+            .get_emitted_logs()
+            .expect("logs")
+            .iter()
+            .filter_map(|entry| {
+                let field = |name: &str| {
+                    entry
+                        .record
+                        .attributes_iter()
+                        .find_map(|(key, value)| match value {
+                            AnyValue::String(value) if key.as_str() == name => {
+                                Some(value.to_string())
+                            }
+                            _ => None,
+                        })
+                };
+                uc_observability_contract::diagnostics::connectivity::decode_local_record(
+                    &field("event.name")?,
+                    &field("payload")?,
+                    entry.record.severity_text()?,
+                )
+            })
+            .collect();
+        assert!(rows
+            .iter()
+            .any(|row| row["event.name"] == "network.recovery.started"));
+        let finished = rows
+            .iter()
+            .find(|row| row["event.name"] == "network.recovery.finished")
+            .expect("action finish");
+        assert_eq!(finished["outcome"], "submitted");
+        assert!(!rows
+            .iter()
+            .any(|row| row.get("recovered").is_some_and(|value| value == true)));
+    }
     use super::*;
     use std::sync::{Arc, Mutex};
 

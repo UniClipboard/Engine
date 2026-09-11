@@ -71,7 +71,14 @@ fn one_process_can_keep_host_logs_and_route_engine_records_only_to_the_common_ru
         .expect("files")
         .map(|e| std::fs::read_to_string(e.expect("file").path()).expect("content"))
         .collect::<String>();
-    assert_eq!(engine_output.lines().count(), 1);
+    assert_eq!(
+        engine_output
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON"))
+            .filter(|row| row["target"] != "uc.diagnostics")
+            .count(),
+        1
+    );
     assert!(engine_output.contains("record_missing"));
     assert!(!engine_output.contains("host event"));
     assert!(matches!(

@@ -15,6 +15,12 @@ use crate::status::{
 };
 use crate::subscriber::{local_health_layer, system_layer};
 use crate::telemetry::TelemetryRuntime;
+use crate::{
+    DetailedCaptureRequest, HostDiagnosticEvent, HostDiagnosticReceipt, HostDiagnosticRecordStatus,
+    HostDiagnosticSource, HostLogLayer, LocalCaptureStatus, LocalDiagnosticError,
+    LocalDiagnosticExportReport, LocalDiagnosticStatus, SourceCapability, SourceCollection,
+    StopCaptureResult,
+};
 
 static INSTALL_GUARD: Mutex<()> = Mutex::new(());
 static INSTALLED: OnceLock<Arc<RuntimeState>> = OnceLock::new();
@@ -30,7 +36,7 @@ impl ProcessObservabilityRuntime {
     /// 不接收 Engine 自有事件，不能复制核心诊断或绕过其隐私过滤。
     pub fn install_with_host_layers(
         config: ObservabilityConfig,
-        host_layers: Vec<crate::HostLogLayer>,
+        host_layers: Vec<HostLogLayer>,
     ) -> Result<InstallOutcome, InstallError> {
         let _install_guard = INSTALL_GUARD
             .lock()
@@ -51,6 +57,10 @@ impl ProcessObservabilityRuntime {
         INSTALLED
             .set(Arc::clone(&state))
             .map_err(|_| InstallError::AlreadyInstalled)?;
+        state.telemetry.recording.checkpoint(
+            "diagnostics.run.started",
+            serde_json::json!({ "capture_mode": "standard" }),
+        );
         Ok(InstallOutcome::Installed(ProcessObservabilityHandle {
             state,
         }))
@@ -117,6 +127,116 @@ impl fmt::Debug for ProcessObservabilityHandle {
 }
 
 impl ProcessObservabilityHandle {
+    pub fn register_host_diagnostic_source(
+        &self,
+        source: HostDiagnosticSource,
+        capability: SourceCapability,
+    ) -> Result<(), LocalDiagnosticError> {
+        if !source.allowed(self.state.config.resource.os)
+            || matches!(
+                capability,
+                SourceCapability::Unknown | SourceCapability::Unsupported
+            )
+        {
+            return Err(LocalDiagnosticError::InvalidHostSource);
+        }
+        if self.state.shutdown.is_started() {
+            return Err(LocalDiagnosticError::AlreadyShutdown);
+        }
+        self.state.telemetry.recording.register_source(
+            source.source(),
+            capability,
+            SourceCollection::Enabled,
+        );
+        Ok(())
+    }
+
+    pub fn record_host_diagnostic(
+        &self,
+        source: HostDiagnosticSource,
+        event: HostDiagnosticEvent,
+    ) -> HostDiagnosticReceipt {
+        if self.state.shutdown.is_started() {
+            return HostDiagnosticReceipt::status(HostDiagnosticRecordStatus::AlreadyShutdown);
+        }
+        if self.state.local_file.is_none() {
+            return HostDiagnosticReceipt::status(HostDiagnosticRecordStatus::Unavailable);
+        }
+        self.state.telemetry.recording.record_host(source, event)
+    }
+    pub fn start_local_diagnostic_capture(
+        &self,
+        request: DetailedCaptureRequest,
+    ) -> Result<LocalCaptureStatus, LocalDiagnosticError> {
+        if self.state.shutdown.is_started() {
+            return Err(LocalDiagnosticError::AlreadyShutdown);
+        }
+        if self.state.local_file.is_none() {
+            return Err(LocalDiagnosticError::LocalSinkUnavailable);
+        }
+        self.state.telemetry.recording.start_capture(request)
+    }
+
+    pub fn stop_local_diagnostic_capture(
+        &self,
+        capture_id: &str,
+    ) -> Result<StopCaptureResult, LocalDiagnosticError> {
+        if self.state.shutdown.is_started() {
+            return Err(LocalDiagnosticError::AlreadyShutdown);
+        }
+        self.state.telemetry.recording.stop_capture(capture_id)
+    }
+
+    pub fn query_local_diagnostic_status(&self) -> LocalDiagnosticStatus {
+        self.state.telemetry.recording.status(
+            self.state.health.local_file,
+            self.state.shutdown.is_started(),
+        )
+    }
+
+    pub fn prepare_local_diagnostic_export(
+        &self,
+        deadline: Duration,
+    ) -> Result<LocalDiagnosticExportReport, LocalDiagnosticError> {
+        if deadline < Duration::from_millis(1) || deadline > Duration::from_secs(5) {
+            return Err(LocalDiagnosticError::InvalidDeadline);
+        }
+        let requested_at_utc = chrono::Utc::now().to_rfc3339();
+        let before_flush = self.query_local_diagnostic_status();
+        if !self.state.shutdown.is_started() {
+            self.state.telemetry.recording.checkpoint("diagnostics.export.snapshot", serde_json::json!({
+                "capture": before_flush.capture, "observed_records": before_flush.observed_records,
+                "policy_filtered_records": before_flush.policy_filtered_records, "schema_rejected_records": before_flush.schema_rejected_records,
+                "counter_scope": before_flush.counter_scope,
+            }));
+            for source in &before_flush.sources {
+                self.state.telemetry.recording.checkpoint(
+                    "diagnostics.export.source",
+                    serde_json::json!({ "coverage": source }),
+                );
+            }
+        }
+        let flush = if self.state.shutdown.is_started() {
+            SignalResult::AlreadyShutdown
+        } else {
+            match &self.state.local_file {
+                Some(file) => file.flush_result(deadline),
+                _ => SignalResult::Failed,
+            }
+        };
+        Ok(LocalDiagnosticExportReport {
+            flush,
+            status: self.query_local_diagnostic_status(),
+            requested_at_utc,
+            completed_at_utc: chrono::Utc::now().to_rfc3339(),
+            other_processes_flushed: false,
+            files: self
+                .state
+                .local_file
+                .as_ref()
+                .map_or_else(Vec::new, |file| file.statistics()),
+        })
+    }
     pub fn health(&self) -> ObservabilityHealth {
         let mut health = self.state.health;
         health.dropped_local_records = self
@@ -170,6 +290,7 @@ impl ProcessObservabilityHandle {
             ShutdownStart::Started => {}
         }
         self.state.health_accepting.store(true, Ordering::Release);
+        self.state.telemetry.recording.finish_run();
         self.state.telemetry.seal();
         let telemetry = self.state.telemetry.clone();
         let local_file = self.state.local_file.clone();
@@ -224,7 +345,7 @@ struct RuntimeState {
 
 fn build_runtime(
     config: ObservabilityConfig,
-    host_layers: Vec<crate::HostLogLayer>,
+    host_layers: Vec<HostLogLayer>,
 ) -> (Arc<RuntimeState>, impl tracing::Subscriber + Send + Sync) {
     let health_accepting = Arc::new(AtomicBool::new(true));
     let mut layers = Vec::new();
@@ -254,7 +375,7 @@ fn build_runtime(
             };
         accepting.load(Ordering::Acquire) && local_sink_enabled(metadata)
     }));
-    let mut all_layers: Vec<crate::HostLogLayer> = vec![Box::new(engine_layer)];
+    let mut all_layers: Vec<HostLogLayer> = vec![Box::new(engine_layer)];
     if !host_layers.is_empty() {
         all_layers.push(Box::new(host_layers.with_filter(
             tracing_subscriber::filter::filter_fn(host_metadata_enabled),

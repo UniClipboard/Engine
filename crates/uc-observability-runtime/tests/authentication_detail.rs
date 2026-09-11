@@ -52,6 +52,7 @@ fn authentication_completion_has_one_local_detail_and_does_not_leak_to_the_next_
     let rows: Vec<serde_json::Value> = output
         .lines()
         .map(|l| serde_json::from_str(l).expect("JSON"))
+        .filter(|row: &serde_json::Value| row["target"] != "uc.diagnostics")
         .collect();
     assert_eq!(
         rows.len(),

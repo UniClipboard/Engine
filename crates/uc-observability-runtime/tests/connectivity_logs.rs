@@ -48,6 +48,7 @@ fn connectivity_diagnostics_survive_the_export_file_without_private_fields() {
     let rows: Vec<serde_json::Value> = output
         .lines()
         .map(|l| serde_json::from_str(l).expect("JSON"))
+        .filter(|row: &serde_json::Value| row["target"] != "uc.diagnostics")
         .collect();
     assert_eq!(rows.len(), 5);
     assert_eq!(rows[0]["fields"]["uc.outcome"], "deferred");

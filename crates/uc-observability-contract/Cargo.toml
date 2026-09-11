@@ -16,7 +16,7 @@ tracing = "0.1"
 opentelemetry = { version = "=0.32.0", default-features = false, features = ["trace"] }
 tracing-opentelemetry = { version = "=0.33.0", default-features = false }
 tokio = { version = "1", default-features = false, features = ["rt"] }
-uuid = { version = "1", features = ["v7", "serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
 
 [lints]
 workspace = true

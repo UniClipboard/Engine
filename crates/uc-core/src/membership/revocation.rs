@@ -1310,7 +1310,22 @@ impl TryFrom<RawRevocationRecord> for RevocationRecord {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyEpochStateIssue {
+    MissingMaterial,
+    CorruptMaterial,
+    EpochMismatch,
+    MissingRevocation,
+    MissingStage,
+    RecoveryRequired,
+    UnsupportedUpdate,
+    OutOfOrderUpdate,
+    UnsupportedOperation,
+    InvalidStage,
+    StateChanged,
+}
+
+#[derive(Error)]
 pub enum KeyEpochError {
     #[error("group epoch overflow")]
     EpochOverflow,
@@ -1369,8 +1384,17 @@ pub enum KeyEpochError {
         to: RevocationStatus,
     },
 
-    #[error("key epoch repository failure: {0}")]
-    Repository(String),
+    #[error("key epoch repository failure")]
+    Repository(#[source] anyhow::Error),
+
+    #[error("key epoch state rejected: {0:?}")]
+    StateIssue(KeyEpochStateIssue),
+}
+
+impl std::fmt::Debug for KeyEpochError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, formatter)
+    }
 }
 
 #[cfg(test)]

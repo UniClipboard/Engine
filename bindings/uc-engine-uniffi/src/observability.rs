@@ -19,6 +19,10 @@ use crate::{
 const ENGINE_FLUSH_DEADLINE: Duration = Duration::from_millis(250);
 static PROCESS_HANDLE: OnceLock<ProcessObservabilityHandle> = OnceLock::new();
 
+pub(crate) fn process_handle() -> Option<ProcessObservabilityHandle> {
+    PROCESS_HANDLE.get().cloned()
+}
+
 pub(crate) fn install(
     config: BindingObservabilityConfig,
     directories: &HostDirectories,
@@ -272,6 +276,33 @@ mod tests {
         let setup = install(config, &directories).expect("process runtime install");
         assert_eq!(setup.remote, BindingObservabilitySetupStatus::Disabled);
         assert_eq!(setup.local_file, BindingObservabilitySetupStatus::Ready);
+        let capture = crate::start_local_diagnostic_capture(1000).expect("capture");
+        assert_eq!(capture.mode, crate::BindingLocalCaptureMode::Detailed);
+        crate::register_host_diagnostic_source(
+            crate::BindingHostDiagnosticSource::Application,
+            crate::BindingSourceCapability::Partial,
+        )
+        .expect("source");
+        let receipt = crate::record_host_diagnostic(
+            crate::BindingHostDiagnosticSource::Application,
+            crate::BindingHostDiagnosticEvent::Begin {
+                action: crate::BindingHostDiagnosticAction::RuntimeStart,
+            },
+        )
+        .expect("host event");
+        let token = receipt.token.expect("token");
+        crate::record_host_diagnostic(
+            crate::BindingHostDiagnosticSource::Application,
+            crate::BindingHostDiagnosticEvent::Finish {
+                token,
+                outcome: crate::BindingHostDiagnosticOutcome::Completed,
+            },
+        )
+        .expect("finish");
+        let report = crate::prepare_local_diagnostic_export(1000).expect("report");
+        assert_eq!(report.flush, BindingObservabilitySignalResult::Completed);
+        assert!(!report.other_processes_flushed);
+        crate::stop_local_diagnostic_capture(capture.capture_id.expect("id")).expect("stop");
 
         emit_test_diagnostic_completion(TestDiagnosticCompletion::ProfileStorageUpgrade);
         schedule_flush_after_success(&Ok::<(), ()>(()));
