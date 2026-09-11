@@ -43,19 +43,13 @@
 //! `Online` event. Repeat inbound dials from the same peer (every keepalive
 //! tick) are idempotent — they don't re-broadcast.
 //!
-//! Offline detection is **not** mirrored here: the watchdog on our own
-//! outbound `Connection` remains the authoritative offline signal, so
-//! inbound `connection.closed()` only returns; the node records the closure. This keeps a single
-//! source of truth for Offline transitions and avoids state-write races
-//! between the watchdog and the inbound handler.
-
-use uc_observability_contract::diagnostics::connectivity::{
-    ConfirmationFailure, DialFailure, PresenceCheckObservation, PresenceCheckResult,
-};
+//! 入站与出站共同观察最后一条有效连接的关闭。确认写入尚未完成的入站连接
+//! 单独受撤销管理，不作为在线证据；等待网络期间不持有共享状态锁。
+//! 每台设备的在途尝试分别受撤销约束，完整停用空间才让全部尝试失效。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -77,6 +71,9 @@ use uc_core::ports::{
     PresenceError, ReachabilityState,
 };
 use uc_core::security::IdentityFingerprint;
+use uc_observability_contract::diagnostics::connectivity::{
+    ConfirmationFailure, DialFailure, PresenceCheckObservation, PresenceCheckResult,
+};
 
 use super::connect::connect_with_staggered_retry_classified;
 use super::net_recovery::{
@@ -101,54 +98,13 @@ const ADMISSION_CONFIRMATION_REQUEST: u8 = 1;
 const ADMISSION_ACCEPTED: u8 = 1;
 const ADMISSION_REJECTED: u8 = 2;
 
-/// Maximum age of a tracked-connection entry before [`IrohPresenceAdapter::
-/// ensure_reachable`] refuses the fast-path and forces a fresh dial.
-///
-/// Without this guard the fast-path only checks `connection.close_reason().
-/// is_none()`. A peer that dies *silently* — process crash without a close
-/// frame, NAT mapping expiry, network black-hole — keeps `close_reason`
-/// as `None` until quinn's own keep-alive PING run hits `max_idle_timeout`
-/// (60s) and tears the connection down. During that window the fast-path
-/// lies "Online", `current_state` returns Online, `peer_keepalive` records
-/// Online, and `clipboard_sync::dispatch_entry` enrolls the dead peer into
-/// fan-out — burning the full `FAN_OUT_DEADLINE = 5s` on every clipboard
-/// dispatch until the watchdog finally fires.
-///
-/// 30s is picked to:
-/// * stay above `quinn keep_alive_interval = 15s` so two healthy keepalive
-///   PINGs always land inside one TTL window — fast-path hit rate on a
-///   live connection is unchanged;
-/// * stay above `peer_keepalive::BASE_INTERVAL = 25s` so the worker's
-///   normal cadence still mostly observes cached Online and doesn't pay
-///   a dial on every tick;
-/// * stay below `max_idle_timeout = 60s` so we surface a silently-dead
-///   peer *before* quinn's idle timer would, halving the worst-case
-///   stale window observable to `dispatch_entry`.
+/// 已有连接的快速复用证据最多保留 30 秒；超过后重新确认可达性。
+/// 无关闭帧的进程崩溃或网络黑洞可能晚于实际断线才被传输层发现，
+/// 因此发送前不能无限依赖旧的在线观察。自动连接与重试周期由 Application 负责。
 const FAST_PATH_TTL: Duration = Duration::from_secs(30);
 
-/// How long a `mark_offline` verdict keeps short-circuiting `current_state`
-/// to `Offline` for the affected device, even when `last_state` carries no
-/// opinion (e.g. presence never dialled this peer itself before the dispatch
-/// adapter handed in the verdict).
-///
-/// Pre-#886 the same window lived inside
-/// `DispatchClipboardEntryUseCase::recent_dial_failures`. Moving it onto the
-/// adapter collapses the two sources of "I just observed this peer
-/// unreachable" into one, so every consumer of `PresencePort::current_state`
-/// (roster view, dispatch preflight, fan-out skip, future mobile-sync /
-/// file-transfer paths) sees the same truth window without each having to
-/// keep its own cache. See #886 for the full motivation.
-///
-/// 30s is picked to:
-/// * slightly exceed `connect_with_staggered_retry`'s worst-case lifetime
-///   (~15s) so a freshly-stamped Offline outlives any in-flight dial that
-///   might race against it;
-/// * stay aligned with `peer_keepalive::BASE_INTERVAL = 25s` so a healthy
-///   peer's next inbound presence ping naturally falls inside the window
-///   and clears the stamp via the inbound-Online flip path;
-/// * stay short enough that a peer that genuinely came back online does
-///   not stay locked-out for a perceptibly long time if it never dials in
-///   (e.g. LAN-only with mDNS hiccups).
+/// 实际发送确认不可达后，短暂优先返回 Offline，统一查询和发送预检的判断。
+/// 新的认证连接成功会清除此观察；该有效期不承担重试调度，也不阻止主动确认恢复。
 const MARK_OFFLINE_STICKY_TTL: Duration = Duration::from_secs(30);
 
 // ============================================================================
@@ -161,7 +117,75 @@ const MARK_OFFLINE_STICKY_TTL: Duration = Duration::from_secs(30);
 /// single `Arc<Mutex<HashMap>>` for `last_state` is what makes the inbound
 /// Online flip race-safe with the outbound watchdog's Offline write — every
 /// state mutation goes through the same lock.
+#[derive(Default)]
+struct ConnectionObservations {
+    generation: u64,
+    next_success: u64,
+    successes: HashMap<DeviceId, u64>,
+    // 只保留在途尝试的弱引用；移除设备无需留下永久的撤销墓碑。
+    peer_epochs: HashMap<DeviceId, Weak<AttemptEpoch>>,
+    pending_inbound: HashMap<usize, (DeviceId, Connection)>,
+}
+
+#[derive(Default)]
+struct AttemptEpoch {
+    // 保留整段重叠窗口的事实，核验刚结束也不能丢失随后的新成功通知。
+    has_verification: AtomicBool,
+}
+
+#[derive(Clone)]
+struct AttemptObservation {
+    generation: u64,
+    peer_epoch: Arc<AttemptEpoch>,
+    success: Option<u64>,
+}
+
+impl ConnectionObservations {
+    fn begin(&mut self, device: DeviceId) -> AttemptObservation {
+        self.peer_epochs.retain(|_, epoch| epoch.strong_count() > 0);
+        let peer_epoch = self
+            .peer_epochs
+            .get(&device)
+            .and_then(Weak::upgrade)
+            .unwrap_or_else(|| {
+                let epoch = Arc::new(AttemptEpoch::default());
+                self.peer_epochs.insert(device, Arc::downgrade(&epoch));
+                epoch
+            });
+        AttemptObservation {
+            generation: self.generation,
+            peer_epoch,
+            success: self.successes.get(&device).copied(),
+        }
+    }
+
+    fn begin_verification(&mut self, device: DeviceId) -> AttemptObservation {
+        let attempt = self.begin(device);
+        attempt
+            .peer_epoch
+            .has_verification
+            .store(true, Ordering::Release);
+        attempt
+    }
+
+    fn is_current(&self, device: DeviceId, attempt: &AttemptObservation) -> bool {
+        self.generation == attempt.generation
+            && self
+                .peer_epochs
+                .get(&device)
+                .and_then(Weak::upgrade)
+                .is_some_and(|epoch| Arc::ptr_eq(&epoch, &attempt.peer_epoch))
+    }
+
+    fn succeeded(&mut self, device: DeviceId) {
+        self.next_success = self.next_success.wrapping_add(1);
+        self.successes.insert(device, self.next_success);
+    }
+}
+
 struct HandlerState {
+    observations: Arc<Mutex<ConnectionObservations>>,
+    peers: Arc<Mutex<HashMap<DeviceId, TrackedPeer>>>,
     member_repo: Arc<dyn MemberRepositoryPort>,
     peer_admission: Arc<dyn PeerAdmissionPort>,
     fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
@@ -171,13 +195,47 @@ struct HandlerState {
     /// the negative window in the same map the adapter reads from in
     /// `current_state`. See [`MARK_OFFLINE_STICKY_TTL`].
     last_offline_at: Arc<Mutex<HashMap<DeviceId, Instant>>>,
-    inbound_connections: Arc<Mutex<HashMap<usize, Connection>>>,
+    inbound_connections: Arc<Mutex<HashMap<usize, (DeviceId, Connection)>>>,
     accepting: AtomicBool,
     event_tx: broadcast::Sender<PeerReachabilityChanged>,
     clock: Arc<dyn ClockPort>,
 }
 
 impl HandlerState {
+    async fn mark_offline_if_disconnected(&self, device: DeviceId) {
+        if !self.accepting.load(Ordering::Acquire) {
+            return;
+        }
+        if self
+            .peers
+            .lock()
+            .await
+            .get(&device)
+            .is_some_and(|peer| peer.connection.close_reason().is_none())
+        {
+            return;
+        }
+        if self
+            .inbound_connections
+            .lock()
+            .await
+            .values()
+            .any(|(id, connection)| *id == device && connection.close_reason().is_none())
+        {
+            return;
+        }
+        let mut states = self.last_state.lock().await;
+        if states.get(&device) != Some(&ReachabilityState::Online) {
+            return;
+        }
+        states.insert(device, ReachabilityState::Offline);
+        let _ = self.event_tx.send(PeerReachabilityChanged {
+            device_id: device,
+            state: ReachabilityState::Offline,
+            at: self.now(),
+        });
+    }
+
     /// Resolve `remote_pubkey_bytes` (iroh `EndpointId` 32-byte public key)
     /// back to a `SpaceMember.device_id` via the same fingerprint factory
     /// the receiver adapter uses. `None` means "unknown peer" — handler
@@ -193,9 +251,9 @@ impl HandlerState {
             .from_public_key(remote_pubkey_bytes)
         {
             Ok(fp) => fp,
-            Err(err) => {
+            Err(_error) => {
                 warn!(
-                    error = %err,
+                    error.type = "unavailable",
                     "presence accept: fingerprint derivation failed — cannot resolve peer",
                 );
                 return None;
@@ -204,9 +262,9 @@ impl HandlerState {
 
         let members = match self.member_repo.list().await {
             Ok(ms) => ms,
-            Err(err) => {
+            Err(_error) => {
                 warn!(
-                    error = %err,
+                    error.type = "storage",
                     "presence accept: member_repo.list failed; treating peer as unknown",
                 );
                 return None;
@@ -222,8 +280,8 @@ impl HandlerState {
     async fn is_admitted(&self, device_id: &DeviceId) -> bool {
         match self.peer_admission.is_admitted(device_id).await {
             Ok(admitted) => admitted,
-            Err(error) => {
-                warn!(error = %error, peer = %device_id.as_str(), "presence accept: peer admission check failed");
+            Err(_error) => {
+                warn!(error.type = "unavailable", "presence accept: peer admission check failed");
                 false
             }
         }
@@ -263,9 +321,10 @@ impl std::fmt::Debug for IrohPresenceHandler {
 
 impl ProtocolHandler for IrohPresenceHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        let generation = self.state.observations.lock().await.generation;
         let remote = connection.remote_id();
         let connection_id = connection.stable_id();
-        debug!(remote = %remote, "presence connection accepted; holding open until peer closes");
+        debug!("presence connection accepted; holding open until peer closes");
 
         let (mut send, mut receive) =
             match tokio::time::timeout(PRESENCE_ADMISSION_IO_TIMEOUT, connection.accept_bi()).await
@@ -291,27 +350,57 @@ impl ProtocolHandler for IrohPresenceHandler {
         }
 
         let remote_bytes: [u8; 32] = *remote.as_bytes();
-        if let Some(device_id) = self.state.resolve_device(&remote_bytes).await {
+        let admitted_device = self.state.resolve_device(&remote_bytes).await;
+        if let Some(device_id) = admitted_device {
+            let before = self.state.observations.lock().await.begin(device_id);
             if !self.state.is_admitted(&device_id).await {
-                warn!(device = %device_id.as_str(), "presence accept: peer is not admitted by current space protection");
+                warn!(error.type = "peer_rejected", "presence accept: peer is not admitted by current space protection");
                 let _ = send.write_all(&[ADMISSION_REJECTED]).await;
                 let _ = send.finish();
                 let _ = connection.closed().await;
                 return Ok(());
             }
-            let mut inbound = self.state.inbound_connections.lock().await;
-            if !self.state.accepting.load(Ordering::Acquire) {
-                let _ = send.write_all(&[ADMISSION_REJECTED]).await;
-                let _ = send.finish();
-                let _ = connection.closed().await;
-                return Ok(());
+            {
+                let mut observation = self.state.observations.lock().await;
+                if observation.generation != generation
+                    || !observation.is_current(device_id, &before)
+                    || !self.state.accepting.load(Ordering::Acquire)
+                {
+                    drop(observation);
+                    let _ = send.write_all(&[ADMISSION_REJECTED]).await;
+                    let _ = send.finish();
+                    let _ = connection.closed().await;
+                    return Ok(());
+                }
+                // 等待确认期间也纳入撤销管理，但不能作为已在线的证据。
+                observation
+                    .pending_inbound
+                    .insert(connection_id, (device_id, connection.clone()));
             }
-            if send.write_all(&[ADMISSION_ACCEPTED]).await.is_err() || send.finish().is_err() {
+            // 网络等待不占用任何设备共用的状态锁。
+            let confirmed = matches!(
+                tokio::time::timeout(
+                    PRESENCE_ADMISSION_IO_TIMEOUT,
+                    send.write_all(&[ADMISSION_ACCEPTED])
+                )
+                .await,
+                Ok(Ok(()))
+            ) && send.finish().is_ok();
+            let mut observation = self.state.observations.lock().await;
+            observation.pending_inbound.remove(&connection_id);
+            if !confirmed
+                || !observation.is_current(device_id, &before)
+                || !self.state.accepting.load(Ordering::Acquire)
+            {
                 connection.close(0u32.into(), b"admission_confirmation_failed");
                 return Ok(());
             }
-            inbound.insert(connection_id, connection.clone());
-            drop(inbound);
+            self.state
+                .inbound_connections
+                .lock()
+                .await
+                .insert(connection_id, (device_id, connection.clone()));
+            observation.succeeded(device_id);
             let now_at = self.state.now();
 
             // Acquire `last_state` only long enough to insert and observe
@@ -322,7 +411,10 @@ impl ProtocolHandler for IrohPresenceHandler {
                 last.insert(device_id, ReachabilityState::Online)
             };
 
-            if prev != Some(ReachabilityState::Online) {
+            // 普通重复入站仍去重；与主动核验重叠的新成功必须交给上层结算。
+            if prev != Some(ReachabilityState::Online)
+                || before.peer_epoch.has_verification.load(Ordering::Acquire)
+            {
                 // Inbound presence ping is first-hand evidence the peer is
                 // back online, so drop any sticky Offline window an
                 // earlier `mark_offline` may have armed.
@@ -335,15 +427,9 @@ impl ProtocolHandler for IrohPresenceHandler {
                     state: ReachabilityState::Online,
                     at: now_at,
                 });
-                info!(
-                    device = %device_id.as_str(),
-                    "inbound presence connection: peer marked Online",
-                );
+                info!("inbound presence connection: peer marked Online",);
             } else {
-                debug!(
-                    device = %device_id.as_str(),
-                    "inbound presence connection: peer already Online (no event)",
-                );
+                debug!("inbound presence connection: peer already Online (no event)",);
             }
         } else {
             // A peer that is no longer in the local space must not keep a
@@ -351,20 +437,21 @@ impl ProtocolHandler for IrohPresenceHandler {
             let _ = send.write_all(&[ADMISSION_REJECTED]).await;
             let _ = send.finish();
             let _ = connection.closed().await;
-            debug!(
-                remote = %remote,
-                "inbound presence connection from unresolved peer; closing",
-            );
+            debug!("inbound presence connection from unresolved peer; closing",);
             return Ok(());
         }
 
-        let _ = connection.closed().await;
+        connection.closed().await;
+        let _observation = self.state.observations.lock().await;
         self.state
             .inbound_connections
             .lock()
             .await
             .remove(&connection_id);
-
+        if let Some(device) = admitted_device {
+            self.state.mark_offline_if_disconnected(device).await;
+        }
+        debug!("presence connection closed by peer",);
         Ok(())
     }
 }
@@ -381,6 +468,7 @@ fn fingerprints_equal(a: &IdentityFingerprint, b: &IdentityFingerprint) -> bool 
 
 /// Iroh-backed [`PresencePort`] implementation.
 pub struct IrohPresenceAdapter {
+    observations: Arc<Mutex<ConnectionObservations>>,
     endpoint: Arc<Endpoint>,
     demand_recovery: Option<Arc<DemandRecoveryCoordinator>>,
     network_recovery_observations: Option<Arc<NetworkRecoveryObservationSource>>,
@@ -504,7 +592,11 @@ impl IrohPresenceAdapter {
         let last_state = Arc::new(Mutex::new(HashMap::new()));
         let last_offline_at = Arc::new(Mutex::new(HashMap::new()));
         let inbound_connections = Arc::new(Mutex::new(HashMap::new()));
+        let observations = Arc::new(Mutex::new(ConnectionObservations::default()));
+        let peers = Arc::new(Mutex::new(HashMap::new()));
         let handler_state = Arc::new(HandlerState {
+            observations: Arc::clone(&observations),
+            peers: Arc::clone(&peers),
             member_repo,
             peer_admission,
             fingerprint_factory,
@@ -521,7 +613,8 @@ impl IrohPresenceAdapter {
             network_recovery_observations,
             peer_address_resolver: PeerAddressResolver::new(peer_addr_repo),
             clock,
-            peers: Arc::new(Mutex::new(HashMap::new())),
+            observations,
+            peers,
             last_state,
             last_offline_at,
             event_tx,
@@ -600,6 +693,7 @@ impl IrohPresenceAdapter {
         device: &DeviceId,
         failure: &mut PresenceCheckResult,
     ) -> Result<ReachabilityState, PresenceError> {
+        let before = self.observations.lock().await.begin_verification(*device);
         // Look up the stored transport address.
         let endpoint_addr =
             match self
@@ -613,6 +707,7 @@ impl IrohPresenceAdapter {
                 Some(address) => address,
                 None => {
                     *failure = PresenceCheckResult::AddressMissing;
+                    debug!("dial_and_track: no address record; returning NoAddress");
                     return Err(PresenceError::NoAddress(*device));
                 }
             };
@@ -716,34 +811,19 @@ impl IrohPresenceAdapter {
                         _ => ConfirmationFailure::PeerNotAdmitted,
                     });
                     connection.close(0u32.into(), b"peer_not_admitted");
-                    let now = self.now();
-                    self.last_state
-                        .lock()
-                        .await
-                        .insert(*device, ReachabilityState::Offline);
-                    self.last_offline_at
-                        .lock()
-                        .await
-                        .insert(*device, Instant::now());
-                    self.broadcast(*device, ReachabilityState::Offline, now);
+                    return Ok(self.record_failed_dial(device, before).await);
+                }
+                let mut observation = self.observations.lock().await;
+                if !observation.is_current(*device, &before)
+                    || !self.handler_state.accepting.load(Ordering::Acquire)
+                {
+                    connection.close(0u32.into(), b"stale_attempt");
                     return Ok(ReachabilityState::Offline);
                 }
+                observation.succeeded(*device);
                 let now = self.now();
-                let device_id_for_watchdog = *device;
-                let peers_for_watchdog = Arc::clone(&self.peers);
-                let last_state_for_watchdog = Arc::clone(&self.last_state);
-                let event_tx_for_watchdog = self.event_tx.clone();
-                let clock_for_watchdog = Arc::clone(&self.clock);
-                let connection_for_watchdog = connection.clone();
-
-                let watchdog = spawn_watchdog(
-                    peers_for_watchdog,
-                    last_state_for_watchdog,
-                    event_tx_for_watchdog,
-                    clock_for_watchdog,
-                    device_id_for_watchdog,
-                    connection_for_watchdog,
-                );
+                let watchdog =
+                    spawn_watchdog(Arc::clone(&self.handler_state), *device, connection.clone());
 
                 {
                     let mut peers = self.peers.lock().await;
@@ -807,44 +887,65 @@ impl IrohPresenceAdapter {
                     let mut stamps = self.last_offline_at.lock().await;
                     stamps.remove(device);
                 }
+                info!("dial_and_track: dial succeeded, peer marked Online");
                 self.broadcast(*device, ReachabilityState::Online, now);
                 if let Some(observations) = &self.network_recovery_observations {
                     observations.publish(NetworkRecoveryObservation::FreshPeerDialSucceeded);
                 }
                 Ok(ReachabilityState::Online)
             }
-            Err((err, category)) => {
+            Err((_error, category)) => {
                 *failure = PresenceCheckResult::Dial(category);
-                // No iroh error type leaks upward — per `docs/design-docs/layers/infrastructure.md`
-                // §9.1 the failure is summarised into `last_state` + an
-                // event. The member stays in the repo; the next dial
-                // attempt is how recovery happens.
-                debug!(error = %err, "dial_and_track: dial failed, peer marked Offline");
-                let now = self.now();
-                {
-                    let mut last = self.last_state.lock().await;
-                    last.insert(*device, ReachabilityState::Offline);
-                }
-                self.last_offline_at
-                    .lock()
-                    .await
-                    .insert(*device, Instant::now());
-                self.broadcast(*device, ReachabilityState::Offline, now);
-                if was_online {
+                let state = self.record_failed_dial(device, before).await;
+                if was_online && state == ReachabilityState::Offline {
                     if let Some(observations) = &self.network_recovery_observations {
                         observations
                             .publish(NetworkRecoveryObservation::PreviouslyOnlinePeerPathExhausted);
                     }
                 }
-                Ok(ReachabilityState::Offline)
+                Ok(state)
             }
         }
+    }
+    async fn record_failed_dial(
+        &self,
+        device: &DeviceId,
+        before: AttemptObservation,
+    ) -> ReachabilityState {
+        let observation = self.observations.lock().await;
+        if !observation.is_current(*device, &before)
+            || observation.successes.get(device).copied() != before.success
+        {
+            return self
+                .last_state
+                .lock()
+                .await
+                .get(device)
+                .copied()
+                .unwrap_or(ReachabilityState::Unknown);
+        }
+        if let Some(stale) = self.peers.lock().await.remove(device) {
+            stale.connection.close(0u32.into(), b"unreachable");
+        }
+        let previous = self
+            .last_state
+            .lock()
+            .await
+            .insert(*device, ReachabilityState::Offline);
+        self.last_offline_at
+            .lock()
+            .await
+            .insert(*device, Instant::now());
+        if previous != Some(ReachabilityState::Offline) {
+            self.broadcast(*device, ReachabilityState::Offline, self.now());
+        }
+        ReachabilityState::Offline
     }
 }
 
 #[async_trait]
 impl PeerReachabilityPort for IrohPresenceAdapter {
-    #[instrument(skip_all, fields(device = %device.as_str()))]
+    #[instrument(skip_all)]
     async fn ensure_reachable(
         &self,
         device: &DeviceId,
@@ -896,40 +997,18 @@ impl PeerReachabilityPort for IrohPresenceAdapter {
         self.dial_and_track(device).await
     }
 
-    #[instrument(skip_all, fields(device = %device.as_str()))]
+    #[instrument(skip_all)]
     async fn verify_reachable(
         &self,
         device: &DeviceId,
     ) -> Result<ReachabilityState, PresenceError> {
         // 跳过 fast-path —— 即便已有 alive 连接也强制重拨验证可达性。
-        let result = self.dial_and_track(device).await?;
-
-        // 拨号失败 ⇒ 对端真不可达。把任何"看起来还活着"的 tracked 条目
-        // 从 peers map 移除并主动 close，避免下次 `ensure_reachable` 又
-        // 走 fast-path 撒谎说 Online。
-        //
-        // 不显式 abort watchdog：`Connection::close()` 让 watchdog 的
-        // `connection.closed().await` 立即 resolve 跑 cleanup（remove 已
-        // noop, last_state 已是 Offline, 再发一次冗余 Offline 事件幂等
-        // 无害）。当 `stale` 离作用域时 `TrackedPeer::drop` 兜底 abort，
-        // 此时 watchdog 多半已 fire 完毕，abort 也是 noop。这比"先 abort
-        // 后 close"避免 watchdog cleanup 半途被砍的 race。
-        if matches!(result, ReachabilityState::Offline) {
-            let stale = {
-                let mut peers = self.peers.lock().await;
-                peers.remove(device)
-            };
-            if let Some(stale) = stale {
-                stale.connection.close(0u32.into(), b"verify_failed");
-                debug!("verify_reachable: closed stale connection after dial failure");
-            }
-        }
-
-        Ok(result)
+        self.dial_and_track(device).await
     }
 
-    #[instrument(skip_all, fields(device = %device.as_str()))]
+    #[instrument(skip_all)]
     async fn mark_offline(&self, device: &DeviceId) {
+        let _observation = self.observations.lock().await;
         // 1) Evict the live-connection slot. The peer is held to be dead by
         //    an external observer — anything we cached as alive is now a lie
         //    that the fast-path in `ensure_reachable` would happily serve.
@@ -983,6 +1062,29 @@ impl PeerReachabilityPort for IrohPresenceAdapter {
     }
 
     async fn forget(&self, device: &DeviceId) {
+        let mut observation = self.observations.lock().await;
+        observation.peer_epochs.remove(device);
+        observation.successes.remove(device);
+        observation.pending_inbound.retain(|_, (id, connection)| {
+            if id == device {
+                connection.close(0u32.into(), b"forgotten");
+                false
+            } else {
+                true
+            }
+        });
+        self.handler_state
+            .inbound_connections
+            .lock()
+            .await
+            .retain(|_, (id, connection)| {
+                if id == device {
+                    connection.close(0u32.into(), b"forgotten");
+                    false
+                } else {
+                    true
+                }
+            });
         let stale = self.peers.lock().await.remove(device);
         if let Some(stale) = stale {
             stale.connection.close(0u32.into(), b"forgotten");
@@ -992,7 +1094,14 @@ impl PeerReachabilityPort for IrohPresenceAdapter {
     }
 
     async fn disconnect_all(&self) {
+        let mut observation = self.observations.lock().await;
+        observation.generation = observation.generation.wrapping_add(1);
+        observation.successes.clear();
+        observation.peer_epochs.clear();
         self.handler_state.accepting.store(false, Ordering::Release);
+        for (_, (_, connection)) in observation.pending_inbound.drain() {
+            connection.close(0u32.into(), b"space_left");
+        }
 
         let outbound = {
             let mut peers = self.peers.lock().await;
@@ -1006,7 +1115,7 @@ impl PeerReachabilityPort for IrohPresenceAdapter {
             let mut connections = self.handler_state.inbound_connections.lock().await;
             connections
                 .drain()
-                .map(|(_, connection)| connection)
+                .map(|(_, (_, connection))| connection)
                 .collect::<Vec<_>>()
         };
         for connection in inbound {
@@ -1081,41 +1190,27 @@ impl PeerReachabilityPort for IrohPresenceAdapter {
 /// Errors on the broadcast send are ignored (no subscriber is a valid
 /// state; consumers recover via `current_state`).
 fn spawn_watchdog(
-    peers: Arc<Mutex<HashMap<DeviceId, TrackedPeer>>>,
-    last_state: Arc<Mutex<HashMap<DeviceId, ReachabilityState>>>,
-    event_tx: broadcast::Sender<PeerReachabilityChanged>,
-    clock: Arc<dyn ClockPort>,
+    state: Arc<HandlerState>,
     device_id: DeviceId,
     connection: Connection,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let _ = connection.closed().await;
-
-        // Remove the map entry first so concurrent `ensure_reachable`
-        // readers observe "not tracked" + "last_state == Offline". The
-        // `TrackedPeer::drop` impl will attempt to abort this very task,
-        // which is harmless — we're already past the `.await` point.
-        {
-            let mut map = peers.lock().await;
-            map.remove(&device_id);
-        }
-
-        let ms = clock.now_ms();
-        let at = Utc
-            .timestamp_millis_opt(ms)
-            .single()
-            .unwrap_or_else(Utc::now);
-
-        {
-            let mut last = last_state.lock().await;
-            last.insert(device_id, ReachabilityState::Offline);
-        }
-
-        let _ = event_tx.send(PeerReachabilityChanged {
-            device_id,
-            state: ReachabilityState::Offline,
-            at,
-        });
+        connection.closed().await;
+        let _observation = state.observations.lock().await;
+        let retired = {
+            let mut peers = state.peers.lock().await;
+            if peers
+                .get(&device_id)
+                .is_some_and(|peer| peer.connection.stable_id() == connection.stable_id())
+            {
+                peers.remove(&device_id)
+            } else {
+                None
+            }
+        };
+        state.mark_offline_if_disconnected(device_id).await;
+        // 结算后才释放自身 JoinHandle，不能在后续 await 之前中止自己。
+        drop(retired);
     })
 }
 
@@ -1151,6 +1246,7 @@ mod tests {
     #[derive(Default)]
     struct FakePeerAddressRepo {
         inner: StdMutex<StdHashMap<String, PeerAddressRecord>>,
+        delay: StdMutex<Option<Arc<DelayedAdmission>>>,
     }
 
     impl FakePeerAddressRepo {
@@ -1168,6 +1264,11 @@ mod tests {
             &self,
             device: &DeviceId,
         ) -> Result<Option<PeerAddressRecord>, PeerAddressError> {
+            let delay = self.delay.lock().unwrap().clone();
+            if let Some(delay) = delay {
+                delay.checking.notify_one();
+                delay.proceed.acquire().await.unwrap().forget();
+            }
             Ok(self.inner.lock().unwrap().get(device.as_str()).cloned())
         }
 
@@ -1401,35 +1502,7 @@ mod tests {
 
     #[tokio::test]
     async fn disconnecting_all_closes_connections_held_for_the_old_space() {
-        use opentelemetry::logs::AnyValue;
-        use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
-        use opentelemetry_sdk::logs::{InMemoryLogExporter, SdkLoggerProvider};
-        use tracing_subscriber::{layer::SubscriberExt, Layer};
-        let exporter = InMemoryLogExporter::default();
-        let logs = SdkLoggerProvider::builder()
-            .with_simple_exporter(exporter.clone())
-            .build();
-        let subscriber = tracing_subscriber::registry().with(
-            OpenTelemetryTracingBridge::new(&logs).with_filter(
-                tracing_subscriber::filter::filter_fn(|metadata| {
-                    metadata.target() == "uc.connectivity"
-                }),
-            ),
-        );
-        let _subscriber = tracing::subscriber::set_default(subscriber);
-        let observations = super::super::observed_connections::ObservedConnections::new(
-            uc_observability_contract::diagnostics::connectivity::NetworkRecorder::current(),
-        );
-        let endpoint_a = Arc::new(
-            Endpoint::builder(iroh::endpoint::presets::N0)
-                .alpns(vec![PRESENCE_ALPN.to_vec()])
-                .relay_mode(RelayMode::Disabled)
-                .clear_address_lookup()
-                .hooks(observations.clone())
-                .bind()
-                .await
-                .expect("endpoint"),
-        );
+        let endpoint_a = bound_endpoint().await;
         wait_for_direct_addrs(&endpoint_a).await;
         let endpoint_b = bound_endpoint().await;
         wait_for_direct_addrs(&endpoint_b).await;
@@ -1477,44 +1550,487 @@ mod tests {
 
         router_b.shutdown().await.ok();
         endpoint_a.close().await;
-        observations.shutdown().await;
-        logs.force_flush().expect("diagnostics flushed");
-        let records = exporter.get_emitted_logs().expect("diagnostics");
-        assert!(!records.iter().any(|entry| entry.record.attributes_iter().any(|(key, value)|
-            key.as_str() == "event.name" && matches!(value, AnyValue::String(value) if value.as_str() == "presence.connection.closed")
-        )), "连接关闭只能由节点观察者记录一次");
-        assert!(
-            records.iter().any(|entry| {
-                let field = |name: &str| {
-                    entry.record.attributes_iter().find_map(|(key, value)| {
-                        if key.as_str() == name {
-                            if let AnyValue::String(value) = value {
-                                return Some(value.as_str());
-                            }
-                        }
-                        None
-                    })
-                };
-                let (Some(name), Some(payload), Some(level)) = (
-                    field("event.name"),
-                    field("payload"),
-                    entry.record.severity_text(),
-                ) else {
-                    return false;
-                };
-                uc_observability_contract::diagnostics::connectivity::decode_local_record(
-                    name, payload, level,
+    }
+
+    struct DelayedAdmission {
+        checking: tokio::sync::Notify,
+        proceed: tokio::sync::Semaphore,
+    }
+    #[async_trait]
+    impl PeerAdmissionPort for DelayedAdmission {
+        async fn is_admitted(
+            &self,
+            _device: &DeviceId,
+        ) -> Result<bool, uc_core::membership::PeerAdmissionError> {
+            self.checking.notify_one();
+            self.proceed.acquire().await.unwrap().forget();
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn stalled_confirmation_does_not_block_other_peers_or_shutdown() {
+        for close_all in [false, true] {
+            let blocked = Arc::new(
+                Endpoint::builder(iroh::endpoint::presets::N0)
+                    .alpns(vec![PRESENCE_ALPN.to_vec()])
+                    .relay_mode(RelayMode::Disabled)
+                    .clear_address_lookup()
+                    .transport_config(
+                        iroh::endpoint::QuicTransportConfig::builder()
+                            .stream_receive_window(0u32.into())
+                            .build(),
+                    )
+                    .bind()
+                    .await
+                    .unwrap(),
+            );
+            let healthy = bound_endpoint().await;
+            let server = bound_endpoint().await;
+            wait_for_direct_addrs(&server).await;
+            let members = Arc::new(MemMemberRepo::default());
+            members.seed(member_for_endpoint(&blocked, "blocked"));
+            members.seed(member_for_endpoint(&healthy, "healthy"));
+            let gate = Arc::new(DelayedAdmission {
+                checking: tokio::sync::Notify::new(),
+                proceed: tokio::sync::Semaphore::new(2),
+            });
+            let adapter = IrohPresenceAdapter::new(
+                server.clone(),
+                Arc::new(FakePeerAddressRepo::default()),
+                members,
+                gate.clone(),
+                Arc::new(Sha256IdentityFingerprintFactory),
+                Arc::new(FixedClock),
+            );
+            let router = Router::builder((*server).clone())
+                .accept(PRESENCE_ALPN, adapter.handler())
+                .spawn();
+            let stalled = blocked.connect(server.addr(), PRESENCE_ALPN).await.unwrap();
+            let (mut send, _receive) = stalled.open_bi().await.unwrap();
+            send.write_all(&[ADMISSION_CONFIRMATION_REQUEST])
+                .await
+                .unwrap();
+            send.finish().unwrap();
+            timeout(Duration::from_secs(1), gate.checking.notified())
+                .await
+                .unwrap();
+            assert_eq!(
+                adapter.current_state(&DeviceId::new("blocked")).await,
+                ReachabilityState::Unknown,
+                "an unfinished confirmation is not online evidence"
+            );
+            let normal = healthy.connect(server.addr(), PRESENCE_ALPN).await.unwrap();
+            assert_eq!(
+                timeout(
+                    Duration::from_millis(500),
+                    request_admission_confirmation(&normal)
                 )
-                .is_some_and(|fields| {
-                    fields
-                        .get("close.reason")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("remote_application_closed")
-                })
-            }),
-            "remote closure must remain visible without exporting its raw reason"
+                .await
+                .expect("one stalled confirmation must not block another device"),
+                ADMISSION_ACCEPTED
+            );
+            if close_all {
+                timeout(Duration::from_millis(500), adapter.disconnect_all())
+                    .await
+                    .expect("shutdown must not wait for the peer's receive credit");
+            } else {
+                timeout(
+                    Duration::from_millis(500),
+                    adapter.forget(&DeviceId::new("blocked")),
+                )
+                .await
+                .expect("revocation must not wait for the peer's receive credit");
+                assert_eq!(
+                    adapter.current_state(&DeviceId::new("healthy")).await,
+                    ReachabilityState::Online
+                );
+            }
+            timeout(Duration::from_millis(500), stalled.closed())
+                .await
+                .unwrap();
+            timeout(Duration::from_millis(500), adapter.disconnect_all())
+                .await
+                .unwrap();
+            router.shutdown().await.unwrap();
+            blocked.close().await;
+            healthy.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn forgetting_one_peer_preserves_another_in_flight_connection() {
+        let a = bound_endpoint().await;
+        let c = bound_endpoint().await;
+        wait_for_direct_addrs(&c).await;
+        let gate = Arc::new(DelayedAdmission {
+            checking: tokio::sync::Notify::new(),
+            proceed: tokio::sync::Semaphore::new(0),
+        });
+        let members = Arc::new(MemMemberRepo::default());
+        members.seed(member_for_endpoint(&a, "a"));
+        let c_adapter = IrohPresenceAdapter::new(
+            c.clone(),
+            Arc::new(FakePeerAddressRepo::default()),
+            members,
+            gate.clone(),
+            Arc::new(Sha256IdentityFingerprintFactory),
+            Arc::new(FixedClock),
         );
-        assert!(!format!("{records:?}").contains("space_left"));
+        let router = Router::builder((*c).clone())
+            .accept(PRESENCE_ALPN, c_adapter.handler())
+            .spawn();
+        let addresses = Arc::new(FakePeerAddressRepo::default());
+        let c_id = DeviceId::new("c");
+        addresses.seed(record(&c_id, postcard::to_stdvec(&c.addr()).unwrap()));
+        let adapter = Arc::new(build_adapter(a.clone(), addresses));
+        adapter.mark_offline(&DeviceId::new("b")).await;
+        let dialing = tokio::spawn({
+            let adapter = adapter.clone();
+            async move { adapter.verify_reachable(&c_id).await }
+        });
+        timeout(Duration::from_secs(1), gate.checking.notified())
+            .await
+            .unwrap();
+        adapter.forget(&DeviceId::new("b")).await;
+        gate.proceed.add_permits(1);
+        assert_eq!(
+            timeout(DIAL_BUDGET, dialing)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            ReachabilityState::Online,
+            "removing B must not invalidate C's successful connection"
+        );
+        adapter.disconnect_all().await;
+        router.shutdown().await.unwrap();
+        a.close().await;
+    }
+
+    #[tokio::test]
+    async fn forgotten_peer_cannot_complete_an_old_inbound_admission() {
+        delayed_inbound_revocation_case(DeviceId::new("a"), ADMISSION_REJECTED).await;
+    }
+
+    #[tokio::test]
+    async fn forgetting_other_peer_preserves_inbound_admission() {
+        delayed_inbound_revocation_case(DeviceId::new("other"), ADMISSION_ACCEPTED).await;
+    }
+
+    async fn delayed_inbound_revocation_case(removed: DeviceId, expected: u8) {
+        let a = bound_endpoint().await;
+        let b = bound_endpoint().await;
+        wait_for_direct_addrs(&a).await;
+        wait_for_direct_addrs(&b).await;
+        let members = Arc::new(MemMemberRepo::default());
+        members.seed(member_for_endpoint(&a, "a"));
+        let gate = Arc::new(DelayedAdmission {
+            checking: tokio::sync::Notify::new(),
+            proceed: tokio::sync::Semaphore::new(0),
+        });
+        let adapter = IrohPresenceAdapter::new(
+            b.clone(),
+            Arc::new(FakePeerAddressRepo::default()),
+            members,
+            gate.clone(),
+            Arc::new(Sha256IdentityFingerprintFactory),
+            Arc::new(FixedClock),
+        );
+        let router = Router::builder((*b).clone())
+            .accept(PRESENCE_ALPN, adapter.handler())
+            .spawn();
+        let connection = a.connect(b.addr(), PRESENCE_ALPN).await.unwrap();
+        let confirmation = tokio::spawn({
+            let connection = connection.clone();
+            async move { request_admission_confirmation(&connection).await }
+        });
+        timeout(Duration::from_secs(1), gate.checking.notified())
+            .await
+            .unwrap();
+        adapter.forget(&removed).await;
+        gate.proceed.add_permits(1);
+        assert_eq!(
+            timeout(Duration::from_secs(1), confirmation)
+                .await
+                .unwrap()
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            adapter
+                .last_state
+                .lock()
+                .await
+                .get(&DeviceId::new("a"))
+                .copied(),
+            if expected == ADMISSION_ACCEPTED {
+                Some(ReachabilityState::Online)
+            } else {
+                None
+            }
+        );
+        connection.close(0u32.into(), b"test_finished");
+        router.shutdown().await.unwrap();
+        a.close().await;
+    }
+
+    #[tokio::test]
+    async fn stale_failure_cannot_overwrite_new_inbound_success_or_revocation() {
+        let a = bound_endpoint().await;
+        let b = bound_endpoint().await;
+        wait_for_direct_addrs(&a).await;
+        wait_for_direct_addrs(&b).await;
+        let members = Arc::new(MemMemberRepo::default());
+        members.seed(member_for_endpoint(&a, "a"));
+        let adapter = build_adapter_with_member_repo(
+            b.clone(),
+            Arc::new(FakePeerAddressRepo::default()),
+            members,
+        );
+        let device = DeviceId::new("a");
+        let before = adapter.observations.lock().await.begin(device);
+        let router = Router::builder((*b).clone())
+            .accept(PRESENCE_ALPN, adapter.handler())
+            .spawn();
+        let connection = a.connect(b.addr(), PRESENCE_ALPN).await.unwrap();
+        assert_eq!(
+            request_admission_confirmation(&connection).await,
+            ADMISSION_ACCEPTED
+        );
+        // 将旧拨号失败的结算精确排在真实新入站成功之后。
+        assert_eq!(
+            adapter.record_failed_dial(&device, before.clone()).await,
+            ReachabilityState::Online
+        );
+        assert_eq!(
+            adapter.current_state(&device).await,
+            ReachabilityState::Online
+        );
+        adapter.forget(&device).await;
+        assert_eq!(
+            adapter.record_failed_dial(&device, before).await,
+            ReachabilityState::Unknown
+        );
+        assert!(adapter.last_state.lock().await.get(&device).is_none());
+        timeout(Duration::from_secs(1), connection.closed())
+            .await
+            .unwrap();
+        router.shutdown().await.unwrap();
+        a.close().await;
+    }
+
+    #[tokio::test]
+    async fn fresh_inbound_success_notifies_an_already_online_peer_with_a_pending_check() {
+        let a = bound_endpoint().await;
+        let b = bound_endpoint().await;
+        wait_for_direct_addrs(&a).await;
+        let members = Arc::new(MemMemberRepo::default());
+        members.seed(member_for_endpoint(&b, "b"));
+        let addresses = Arc::new(FakePeerAddressRepo::default());
+        let adapter = Arc::new(build_adapter_with_member_repo(
+            a.clone(),
+            addresses.clone(),
+            members,
+        ));
+        let router = Router::builder((*a).clone())
+            .accept(PRESENCE_ALPN, adapter.handler())
+            .spawn();
+        let mut events = adapter.subscribe();
+        let first = b.connect(a.addr(), PRESENCE_ALPN).await.unwrap();
+        assert_eq!(
+            request_admission_confirmation(&first).await,
+            ADMISSION_ACCEPTED
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(1), events.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            ReachabilityState::Online
+        );
+        let delay = Arc::new(DelayedAdmission {
+            checking: tokio::sync::Notify::new(),
+            proceed: tokio::sync::Semaphore::new(0),
+        });
+        *addresses.delay.lock().unwrap() = Some(delay.clone());
+        let check = tokio::spawn({
+            let adapter = adapter.clone();
+            async move { adapter.verify_reachable(&DeviceId::new("b")).await }
+        });
+        timeout(Duration::from_secs(1), delay.checking.notified())
+            .await
+            .unwrap();
+        let second = b.connect(a.addr(), PRESENCE_ALPN).await.unwrap();
+        assert_eq!(
+            request_admission_confirmation(&second).await,
+            ADMISSION_ACCEPTED
+        );
+        assert_eq!(
+            timeout(Duration::from_millis(500), events.recv())
+                .await
+                .expect("the pending check must be told about the newer success")
+                .unwrap()
+                .state,
+            ReachabilityState::Online
+        );
+        check.abort();
+        assert!(check.await.unwrap_err().is_cancelled());
+        adapter.disconnect_all().await;
+        router.shutdown().await.unwrap();
+        b.close().await;
+    }
+
+    #[tokio::test]
+    async fn simultaneous_bidirectional_presence_dials_remain_online() {
+        let a = bound_endpoint().await;
+        let b = bound_endpoint().await;
+        wait_for_direct_addrs(&a).await;
+        wait_for_direct_addrs(&b).await;
+        let a_members = Arc::new(MemMemberRepo::default());
+        let b_members = Arc::new(MemMemberRepo::default());
+        a_members.seed(member_for_endpoint(&b, "b"));
+        b_members.seed(member_for_endpoint(&a, "a"));
+        let a_addresses = Arc::new(FakePeerAddressRepo::default());
+        let b_addresses = Arc::new(FakePeerAddressRepo::default());
+        a_addresses.seed(record(
+            &DeviceId::new("b"),
+            postcard::to_stdvec(&b.addr()).unwrap(),
+        ));
+        b_addresses.seed(record(
+            &DeviceId::new("a"),
+            postcard::to_stdvec(&a.addr()).unwrap(),
+        ));
+        let a_adapter = build_adapter_with_member_repo(a.clone(), a_addresses, a_members);
+        let b_adapter = build_adapter_with_member_repo(b.clone(), b_addresses, b_members);
+        let a_router = Router::builder((*a).clone())
+            .accept(PRESENCE_ALPN, a_adapter.handler())
+            .spawn();
+        let b_router = Router::builder((*b).clone())
+            .accept(PRESENCE_ALPN, b_adapter.handler())
+            .spawn();
+        let a_id = DeviceId::new("a");
+        let b_id = DeviceId::new("b");
+        for _ in 0..3 {
+            let (left, right) = tokio::join!(
+                a_adapter.verify_reachable(&b_id),
+                b_adapter.verify_reachable(&a_id)
+            );
+            assert_eq!(left.unwrap(), ReachabilityState::Online);
+            assert_eq!(right.unwrap(), ReachabilityState::Online);
+        }
+        assert_eq!(
+            a_adapter.current_state(&DeviceId::new("b")).await,
+            ReachabilityState::Online
+        );
+        assert_eq!(
+            b_adapter.current_state(&DeviceId::new("a")).await,
+            ReachabilityState::Online
+        );
+        a_adapter.disconnect_all().await;
+        b_adapter.disconnect_all().await;
+        a_router.shutdown().await.unwrap();
+        b_router.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn last_inbound_connection_close_reports_offline() {
+        let a = bound_endpoint().await;
+        let b = bound_endpoint().await;
+        wait_for_direct_addrs(&a).await;
+        wait_for_direct_addrs(&b).await;
+        let members = Arc::new(MemMemberRepo::default());
+        members.seed(member_for_endpoint(&a, "a"));
+        let adapter = build_adapter_with_member_repo(
+            b.clone(),
+            Arc::new(FakePeerAddressRepo::default()),
+            members,
+        );
+        let mut events = adapter.subscribe();
+        let router = Router::builder((*b).clone())
+            .accept(PRESENCE_ALPN, adapter.handler())
+            .spawn();
+        let connection = a.connect(b.addr(), PRESENCE_ALPN).await.unwrap();
+        assert_eq!(
+            request_admission_confirmation(&connection).await,
+            ADMISSION_ACCEPTED
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(1), events.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            ReachabilityState::Online
+        );
+        connection.close(0u32.into(), b"test_close");
+        assert_eq!(
+            timeout(Duration::from_secs(1), events.recv())
+                .await
+                .expect("last inbound presence connection must report offline")
+                .unwrap()
+                .state,
+            ReachabilityState::Offline
+        );
+        router.shutdown().await.unwrap();
+        a.close().await;
+    }
+
+    #[tokio::test]
+    async fn closing_old_inbound_connection_keeps_new_connection_online() {
+        let a = bound_endpoint().await;
+        let b = bound_endpoint().await;
+        wait_for_direct_addrs(&a).await;
+        wait_for_direct_addrs(&b).await;
+        let members = Arc::new(MemMemberRepo::default());
+        members.seed(member_for_endpoint(&a, "a"));
+        let adapter = build_adapter_with_member_repo(
+            b.clone(),
+            Arc::new(FakePeerAddressRepo::default()),
+            members,
+        );
+        let mut events = adapter.subscribe();
+        let router = Router::builder((*b).clone())
+            .accept(PRESENCE_ALPN, adapter.handler())
+            .spawn();
+        let old = a.connect(b.addr(), PRESENCE_ALPN).await.unwrap();
+        assert_eq!(
+            request_admission_confirmation(&old).await,
+            ADMISSION_ACCEPTED
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(1), events.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            ReachabilityState::Online
+        );
+        let new = a.connect(b.addr(), PRESENCE_ALPN).await.unwrap();
+        assert_eq!(
+            request_admission_confirmation(&new).await,
+            ADMISSION_ACCEPTED
+        );
+        old.close(0u32.into(), b"old_connection");
+        assert!(timeout(Duration::from_millis(100), events.recv())
+            .await
+            .is_err());
+        assert_eq!(
+            adapter.current_state(&DeviceId::new("a")).await,
+            ReachabilityState::Online
+        );
+        new.close(0u32.into(), b"last_connection");
+        assert_eq!(
+            timeout(Duration::from_secs(1), events.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            ReachabilityState::Offline
+        );
+        router.shutdown().await.unwrap();
+        a.close().await;
     }
 
     #[tokio::test]

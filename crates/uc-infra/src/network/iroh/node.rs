@@ -634,6 +634,7 @@ impl Drop for NodeRunLease {
 /// Staged builder — bind endpoint, install transport handlers, then
 /// [`spawn`](Self::spawn) the router.
 pub struct IrohNodeBuilder {
+    mdns: MdnsAddressLookup,
     endpoint: Arc<Endpoint>,
     connection_observations: super::observed_connections::ObservedConnections,
     network_recorder: uc_observability_contract::diagnostics::connectivity::NetworkRecorder,
@@ -649,6 +650,53 @@ pub struct IrohNodeBuilder {
 }
 
 impl IrohNodeBuilder {
+    /// 复用同一个本机地址 watcher 和 mDNS 实例，不创建额外后台任务。
+    pub async fn connection_hints(
+        &self,
+        members: Arc<dyn MemberRepositoryPort>,
+        fingerprints: Arc<dyn IdentityFingerprintFactoryPort>,
+    ) -> futures_util::stream::BoxStream<
+        'static,
+        Result<uc_application::deps::ConnectionHint, anyhow::Error>,
+    > {
+        use futures_util::{stream, StreamExt};
+        use iroh::Watcher as _;
+        let local = self
+            .endpoint
+            .watch_addr()
+            .stream()
+            .skip(1)
+            .map(|_| Ok(uc_application::deps::ConnectionHint::NetworkChanged));
+        let discovered = self.mdns.subscribe().await.filter_map(move |event| {
+            let members = Arc::clone(&members);
+            let fingerprints = Arc::clone(&fingerprints);
+            async move {
+                let iroh_mdns_address_lookup::DiscoveryEvent::Discovered { endpoint_info, .. } =
+                    event
+                else {
+                    return None;
+                };
+                let fingerprint =
+                    match fingerprints.from_public_key(endpoint_info.endpoint_id.as_bytes()) {
+                        Ok(value) => value,
+                        Err(source) => return Some(Err(source)),
+                    };
+                match members.list().await {
+                    Ok(members) => members
+                        .into_iter()
+                        .find(|member| member.identity_fingerprint == fingerprint)
+                        .map(|member| {
+                            Ok(uc_application::deps::ConnectionHint::PeerAddressChanged(
+                                member.device_id,
+                            ))
+                        }),
+                    Err(source) => Some(Err(anyhow::Error::new(source))),
+                }
+            }
+        });
+        Box::pin(stream::select(local, discovered))
+    }
+
     /// 返回当前节点将写入准入候选资料的认证传输身份与地址。
     pub fn local_endpoint_addr(&self) -> EndpointAddr {
         self.endpoint.addr()
@@ -703,6 +751,11 @@ impl IrohNodeBuilder {
 
         let secret = identity_store.ensure_secret_key()?;
         let relay_mode = relay_mode_from_config(&config)?;
+        let mdns = MdnsAddressLookup::builder()
+            .build(secret.public())
+            .map_err(|source| IrohNodeError::Discovery {
+                source: anyhow::Error::new(source),
+            })?;
         // Snapshot the overlay flag before consuming `config` into `Self`.
         let allow_overlay = config.allow_overlay_network_addrs;
         info!(
@@ -814,7 +867,7 @@ impl IrohNodeBuilder {
             // even if magicsock surfaces it locally.
             .address_lookup(
                 super::observed_address_lookup::ObservedAddressLookupBuilder::new(
-                    MdnsAddressLookup::builder(),
+                    mdns.clone(),
                     uc_observability_contract::diagnostics::connectivity::DiscoverySource::Mdns,
                     recorder.clone(),
                 ),
@@ -878,6 +931,7 @@ impl IrohNodeBuilder {
         );
         log_publish_addrs(&endpoint, "post-bind");
         Ok(Self {
+            mdns,
             endpoint,
             connection_observations,
             network_recorder: recorder,

@@ -15,6 +15,14 @@ use crate::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ConnectivityOpportunity {
+    Foreground,
+    SystemWake,
+    NetworkChanged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OperationKind {
     CreateSpace,
     JoinSpace,
@@ -31,6 +39,7 @@ pub enum OperationKind {
     QueryLocalDevice,
     QueryPeerConnections,
     RefreshPeerConnections,
+    NotifyConnectivityOpportunity,
     RecoverNetwork,
     QueryNetworkRecoveryStatus,
     QuerySettings,
@@ -126,6 +135,7 @@ impl fmt::Display for OperationKind {
             Self::QueryLocalDevice => "query_local_device",
             Self::QueryPeerConnections => "query_peer_connections",
             Self::RefreshPeerConnections => "refresh_peer_connections",
+            Self::NotifyConnectivityOpportunity => "notify_connectivity_opportunity",
             Self::RecoverNetwork => "recover_network",
             Self::QueryNetworkRecoveryStatus => "query_network_recovery_status",
             Self::QuerySettings => "query_settings",
@@ -244,6 +254,9 @@ pub enum Operation {
     QueryLocalDevice,
     QueryPeerConnections,
     RefreshPeerConnections,
+    NotifyConnectivityOpportunity {
+        reason: ConnectivityOpportunity,
+    },
     RecoverNetwork,
     QueryNetworkRecoveryStatus,
     QuerySettings,
@@ -339,6 +352,9 @@ impl Operation {
             Self::QueryLocalDevice => OperationKind::QueryLocalDevice,
             Self::QueryPeerConnections => OperationKind::QueryPeerConnections,
             Self::RefreshPeerConnections => OperationKind::RefreshPeerConnections,
+            Self::NotifyConnectivityOpportunity { .. } => {
+                OperationKind::NotifyConnectivityOpportunity
+            }
             Self::RecoverNetwork => OperationKind::RecoverNetwork,
             Self::QueryNetworkRecoveryStatus => OperationKind::QueryNetworkRecoveryStatus,
             Self::QuerySettings => OperationKind::QuerySettings,

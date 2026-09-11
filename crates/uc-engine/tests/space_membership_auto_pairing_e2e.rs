@@ -3,6 +3,9 @@
 #[path = "space_membership_auto_pairing_e2e/six_digit_pairing.rs"]
 mod six_digit_pairing;
 
+#[path = "space_membership_auto_pairing_e2e/automatic_connections.rs"]
+mod automatic_connections;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -125,6 +128,19 @@ impl DeviceHarness {
     }
 
     async fn start_with_clipboard(&self, clipboard: Box<dyn HostClipboard>) -> Engine {
+        self.start_configured(clipboard, true).await
+    }
+
+    async fn start_with_relay_fallback(&self, relay_fallback: bool) -> Engine {
+        self.start_configured(Box::new(EmptyClipboard), relay_fallback)
+            .await
+    }
+
+    async fn start_configured(
+        &self,
+        clipboard: Box<dyn HostClipboard>,
+        relay_fallback: bool,
+    ) -> Engine {
         let root = self.root.path();
         let host = HostCapabilities::new(
             HostDirectories::new(
@@ -139,7 +155,7 @@ impl DeviceHarness {
         );
         let config = EngineConfig::new("1.1.0")
             .with_rendezvous_base_url(self.rendezvous_base_url.clone())
-            .with_test_relay_fallback(true);
+            .with_test_relay_fallback(relay_fallback);
         let (engine, _events) = Engine::start(config, host)
             .await
             .expect("start complete engine");
@@ -3871,7 +3887,9 @@ async fn existing_member_receives_the_new_member_update() {
     let newcomer = newcomer_harness.start().await;
     let space_id = create_space(&sponsor, "Sponsor").await.0;
 
-    join_through(&sponsor, &existing, "Existing Member", &space_id).await;
+    let existing_id = join_through(&sponsor, &existing, "Existing Member", &space_id)
+        .await
+        .self_device_id;
     wait_for_active_member_count(&sponsor, 2).await;
     wait_for_active_member_count(&existing, 2).await;
     let newcomer_id = join_through(&sponsor, &newcomer, "New Member", &space_id)
@@ -3881,8 +3899,12 @@ async fn existing_member_receives_the_new_member_update() {
     for engine in [&sponsor, &existing, &newcomer] {
         wait_for_active_member_count(engine, 3).await;
     }
-    wait_for_peer_refresh(&existing, "existing member").await;
-    wait_for_peer_refresh(&newcomer, "new member").await;
+    tokio::join!(
+        automatic_connections::wait_eligible(&existing, &newcomer_id),
+        automatic_connections::wait_eligible(&newcomer, &existing_id),
+    );
+    automatic_connections::wait_online(&existing, &newcomer_id).await;
+    automatic_connections::wait_online(&newcomer, &existing_id).await;
     let text = "existing member sees newcomer";
     let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
     loop {
@@ -3985,12 +4007,16 @@ async fn completed_admission_survives_restart_and_allows_transfer() {
 async fn wait_for_peer_refresh(engine: &Engine, label: &str) {
     let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
     loop {
-        if engine
-            .execute(Operation::RefreshPeerConnections)
-            .await
-            .is_ok()
+        if let Ok(OperationResult::PeerConnectionsRefreshed(report)) =
+            engine.execute(Operation::RefreshPeerConnections).await
         {
-            return;
+            if report.total > 0
+                && report.online == report.total
+                && report.offline == 0
+                && report.errors == 0
+            {
+                return;
+            }
         }
         assert!(
             tokio::time::Instant::now() < deadline,

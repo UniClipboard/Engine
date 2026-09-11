@@ -38,6 +38,8 @@ pub(crate) struct MembershipLedger {
     loader: Arc<dyn LoadMembershipLedgerPort>,
     committer: Arc<dyn CommitMembershipLedgerPort>,
     pub(super) verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
+    changes: tokio::sync::watch::Sender<()>,
+    history_changes: tokio::sync::watch::Sender<()>,
 }
 
 pub(crate) struct VerifiedMembershipLedger {
@@ -161,7 +163,13 @@ impl MembershipLedger {
             loader,
             committer,
             verifier,
+            changes: tokio::sync::watch::channel(()).0,
+            history_changes: tokio::sync::watch::channel(()).0,
         }
+    }
+
+    pub(crate) fn subscribe_history_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.history_changes.subscribe()
     }
 
     pub(crate) fn verify_exchange_pages(
@@ -317,6 +325,12 @@ impl MembershipLedger {
         if committed != replacement {
             return Err(MembershipLedgerError::Corrupt);
         }
+        if committed.membership_history != loaded.membership_history
+            || committed.local_join_active != loaded.local_join_active
+        {
+            self.history_changes.send_replace(());
+        }
+        self.changes.send_replace(());
         Ok(committed)
     }
 
@@ -339,6 +353,7 @@ impl MembershipLedger {
         let next_revision = expected_revision
             .checked_add(1)
             .ok_or(MembershipLedgerError::Corrupt)?;
+        let was_active = snapshot.record.local_join_active;
         let mut replacement = snapshot.record;
         let mut history = snapshot
             .history
@@ -362,6 +377,14 @@ impl MembershipLedger {
         if committed != replacement {
             return Err(MembershipLedgerError::Corrupt);
         }
+        let history_digest = committed
+            .membership_history
+            .as_deref()
+            .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)));
+        if history_digest != expected_history_digest || committed.local_join_active != was_active {
+            self.history_changes.send_replace(());
+        }
+        self.changes.send_replace(());
         Ok((committed, output))
     }
 
@@ -392,6 +415,10 @@ impl crate::space::lifecycle::SpaceMembershipResetPort for MembershipLedger {
 
 #[async_trait]
 impl CurrentSpaceMemberScopePort for MembershipLedger {
+    fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.changes.subscribe()
+    }
+
     async fn snapshot(&self) -> Result<CurrentSpaceMemberScope, CurrentSpaceMemberScopeError> {
         self.current_scope().await
     }

@@ -2,6 +2,8 @@
 
 这里保留已完成、已由后续方案取代或仅供历史追溯的实施记录。它们不自动代表当前架构事实。
 
+- [已配对设备自动连接与恢复](2026-09-11-automatic-peer-connections.md)（实现与 Mac/iOS 模拟器验收完成；其他实体平台跳过）
+
 - [040 以完整业务动作组织观测记录](040-business-observability-records.md)（本机验证完成，产品宿主与真实后端未验收）
 
 - [015 离线优先成员移除](015-offline-first-member-removal.md)（部分由 ADR-020 取代）

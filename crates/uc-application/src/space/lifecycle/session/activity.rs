@@ -22,7 +22,7 @@ pub trait MembershipSessionActivityPort: Send + Sync {
 pub trait SpaceSessionActivityPort: Send + Sync {
     async fn resume_after_session_ready(&self) -> Result<(), SpaceActivityError>;
     async fn pause_for_lock(&self) -> Result<(), SpaceActivityError>;
-    async fn restore_after_failed_lock(&self) -> Result<(), String>;
+    async fn restore_after_failed_lock(&self) -> Result<(), anyhow::Error>;
 }
 
 pub(crate) struct DeferredSpaceSessionActivity {
@@ -58,14 +58,16 @@ impl SpaceSessionActivityPort for DeferredSpaceSessionActivity {
         self.delegate()?.pause_for_lock().await
     }
 
-    async fn restore_after_failed_lock(&self) -> Result<(), String> {
-        let delegate = self.delegate().map_err(|error| error.to_string())?;
+    async fn restore_after_failed_lock(&self) -> Result<(), anyhow::Error> {
+        let delegate = self.delegate()?;
         delegate.restore_after_failed_lock().await
     }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum SpaceActivityError {
+    #[error("peer connection activity failed")]
+    Connectivity(#[from] crate::space::PeerConnectionError),
     #[error("space session activity is unavailable")]
     Unavailable,
     #[error("search session activation failed: {0}")]
@@ -77,6 +79,7 @@ pub enum SpaceActivityError {
 }
 
 pub struct SpaceSessionActivity {
+    connections: Arc<crate::space::connectivity::PeerConnectionCoordinator>,
     receive: Arc<dyn EnsureReceiveReadyPort>,
     search: Arc<dyn SearchSessionActivityPort>,
 }
@@ -84,16 +87,22 @@ pub struct SpaceSessionActivity {
 pub(crate) fn build_space_session_activity(
     search: Arc<SearchFacade>,
     receive: Arc<dyn EnsureReceiveReadyPort>,
+    connections: Arc<crate::space::connectivity::PeerConnectionCoordinator>,
 ) -> Arc<SpaceSessionActivity> {
-    Arc::new(SpaceSessionActivity::new(receive, search))
+    Arc::new(SpaceSessionActivity::new(receive, search, connections))
 }
 
 impl SpaceSessionActivity {
     fn new(
         receive: Arc<dyn EnsureReceiveReadyPort>,
         search: Arc<dyn SearchSessionActivityPort>,
+        connections: Arc<crate::space::connectivity::PeerConnectionCoordinator>,
     ) -> Self {
-        Self { receive, search }
+        Self {
+            receive,
+            search,
+            connections,
+        }
     }
 
     pub(crate) async fn resume_after_session_ready(&self) -> Result<(), SpaceActivityError> {
@@ -105,10 +114,12 @@ impl SpaceSessionActivity {
             .ensure_receive_ready()
             .await
             .map_err(|error| SpaceActivityError::Receive(error.to_string()))?;
+        self.connections.resume().await?;
         Ok(())
     }
 
     pub(crate) async fn pause_for_lock(&self) -> Result<(), SpaceActivityError> {
+        self.connections.pause().await?;
         self.receive.close_receive_gate();
         self.search
             .pause()
@@ -116,20 +127,15 @@ impl SpaceSessionActivity {
             .map_err(SpaceActivityError::Search)
     }
 
-    pub(crate) async fn restore_after_failed_lock(&self) -> Result<(), String> {
+    pub(crate) async fn restore_after_failed_lock(&self) -> Result<(), anyhow::Error> {
         let search = self.search.resume().await;
         let receive = self.receive.ensure_receive_ready().await;
-        match (search, receive) {
-            (Ok(()), Ok(())) => Ok(()),
-            (search, receive) => Err(format!(
-                "search={}, receive={}",
-                search.err().unwrap_or_else(|| "restored".to_string()),
-                receive
-                    .err()
-                    .map(|error| error.to_string())
-                    .unwrap_or_else(|| "restored".to_string()),
-            )),
-        }
+        let connections = self.connections.resume().await;
+        restore_results(vec![
+            search.map_err(anyhow::Error::msg),
+            receive.map_err(anyhow::Error::new),
+            connections.map_err(anyhow::Error::new),
+        ])
     }
 }
 
@@ -168,17 +174,10 @@ impl SpaceSessionActivityPort for CombinedSpaceSessionActivity {
         Ok(())
     }
 
-    async fn restore_after_failed_lock(&self) -> Result<(), String> {
+    async fn restore_after_failed_lock(&self) -> Result<(), anyhow::Error> {
         let other = self.other.restore_after_failed_lock().await;
         let membership = self.membership.resume().await;
-        match (other, membership) {
-            (Ok(()), Ok(())) => Ok(()),
-            (other, membership) => Err(format!(
-                "application={}, membership={}",
-                other.err().unwrap_or_else(|| "restored".to_owned()),
-                membership.err().unwrap_or_else(|| "restored".to_owned()),
-            )),
-        }
+        restore_results(vec![other, membership.map_err(anyhow::Error::msg)])
     }
 }
 
@@ -192,7 +191,7 @@ impl SpaceSessionActivityPort for SpaceSessionActivity {
         SpaceSessionActivity::pause_for_lock(self).await
     }
 
-    async fn restore_after_failed_lock(&self) -> Result<(), String> {
+    async fn restore_after_failed_lock(&self) -> Result<(), anyhow::Error> {
         SpaceSessionActivity::restore_after_failed_lock(self).await
     }
 }
@@ -246,7 +245,7 @@ mod tests {
             Err(SpaceActivityError::Search("pause failed".to_owned()))
         }
 
-        async fn restore_after_failed_lock(&self) -> Result<(), String> {
+        async fn restore_after_failed_lock(&self) -> Result<(), anyhow::Error> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -287,5 +286,27 @@ mod tests {
             .restore_after_failed_lock()
             .await
             .expect("bound activity should delegate failed-lock restoration");
+    }
+}
+
+// 回滚尝试所有活动并保留全部失败，显示文本只包含固定分类。
+#[derive(Debug)]
+struct ActivityRestoreFailures(Vec<anyhow::Error>);
+impl std::fmt::Display for ActivityRestoreFailures {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("space activity restoration failed")
+    }
+}
+impl std::error::Error for ActivityRestoreFailures {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.first().map(|error| error.as_ref())
+    }
+}
+fn restore_results(results: Vec<Result<(), anyhow::Error>>) -> Result<(), anyhow::Error> {
+    let failures: Vec<_> = results.into_iter().filter_map(Result::err).collect();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow::Error::new(ActivityRestoreFailures(failures)))
     }
 }

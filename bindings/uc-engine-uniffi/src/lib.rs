@@ -8,11 +8,11 @@ pub use local_diagnostics::*;
 mod runtime;
 
 pub use runtime::{
-    ActiveClipboard, Device, EntryNotResendableReason, InvitationAvailability, InvitationIssued,
-    JoinSpaceRejectionReason, JoinSpaceStatus, JoinedSpace, LocalDevice, MobileEngine,
-    PeerConnectionRefresh, RelaySaveResult, ResendEntryOutcome, SendReport, SessionRecovery,
-    SpaceCreated, SpaceInvitation, SpaceState, WorkspaceConvergence,
-    WorkspaceConvergenceFailureCategory, WorkspaceConvergencePhase,
+    ActiveClipboard, ConnectivityOpportunity, Device, EntryNotResendableReason,
+    InvitationAvailability, InvitationIssued, JoinSpaceRejectionReason, JoinSpaceStatus,
+    JoinedSpace, LocalDevice, MobileEngine, PeerConnectionRefresh, RelaySaveResult,
+    ResendEntryOutcome, SendReport, SessionRecovery, SpaceCreated, SpaceInvitation, SpaceState,
+    WorkspaceConvergence, WorkspaceConvergenceFailureCategory, WorkspaceConvergencePhase,
 };
 
 uniffi::setup_scaffolding!();

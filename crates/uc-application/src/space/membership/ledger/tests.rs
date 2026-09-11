@@ -949,3 +949,30 @@ async fn add_device_activation_resolves_the_re_pairing_requirement() {
 
     assert_eq!(resolution.0.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn routine_commits_do_not_wake_history_maintenance_but_reset_does() {
+    let repository = Arc::new(MemoryLedgerRepository::new(active_single_member_ledger()));
+    let ledger = MembershipLedger::new(repository.clone(), repository, Arc::new(AcceptingVerifier));
+    let mut history_changes = ledger.subscribe_history_changes();
+    ledger.compare_and_commit(|_| Ok(())).await.unwrap();
+    assert!(!history_changes.has_changed().unwrap());
+    let snapshot = ledger.load_verified().await.unwrap();
+    ledger
+        .compare_and_commit_history(
+            snapshot.record().revision,
+            snapshot.history_digest(),
+            |_, _, _| Ok(()),
+        )
+        .await
+        .unwrap();
+    assert!(!history_changes.has_changed().unwrap());
+    ledger.reset_for_space_rebuild().await.unwrap();
+    assert!(history_changes.has_changed().unwrap());
+    history_changes.borrow_and_update();
+    assert!(ledger
+        .compare_and_commit(|_| Err(MembershipLedgerError::Conflict))
+        .await
+        .is_err());
+    assert!(!history_changes.has_changed().unwrap());
+}

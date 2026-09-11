@@ -345,6 +345,7 @@ impl SpaceApplication {
             peer_reachability_changed_events,
             Duration::from_secs(30),
             membership_network_activity,
+            ledger.subscribe_history_changes(),
         );
         let membership_activity = prepared_runtime.activity();
         deferred_maintenance_wake.bind(Arc::new(membership_activity.clone()));

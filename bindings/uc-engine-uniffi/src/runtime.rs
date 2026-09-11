@@ -361,7 +361,28 @@ pub struct RelaySaveResult {
     pub configured: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ConnectivityOpportunity {
+    Foreground,
+    SystemWake,
+    NetworkChanged,
+}
+
+impl From<ConnectivityOpportunity> for uc_engine::ConnectivityOpportunity {
+    fn from(reason: ConnectivityOpportunity) -> Self {
+        match reason {
+            ConnectivityOpportunity::Foreground => Self::Foreground,
+            ConnectivityOpportunity::SystemWake => Self::SystemWake,
+            ConnectivityOpportunity::NetworkChanged => Self::NetworkChanged,
+        }
+    }
+}
+
 enum WorkerCommand {
+    NotifyConnectivityOpportunity {
+        reason: ConnectivityOpportunity,
+        response: mpsc::Sender<Result<(), BindingError>>,
+    },
     RecoverSession {
         allow_secure_storage_unlock: bool,
         response: mpsc::Sender<Result<SessionRecovery, BindingError>>,
@@ -807,6 +828,13 @@ impl MobileEngine {
         result
             .recv()
             .map_err(|_| BindingError::RuntimeUnavailable)?
+    }
+
+    pub fn notify_connectivity_opportunity(
+        &self,
+        reason: ConnectivityOpportunity,
+    ) -> Result<(), BindingError> {
+        self.request(|response| WorkerCommand::NotifyConnectivityOpportunity { reason, response })
     }
 
     pub fn refresh_peer_connections(&self) -> Result<PeerConnectionRefresh, BindingError> {
@@ -1360,6 +1388,19 @@ async fn run_worker_loop(
                     .await
                     .map_err(BindingError::from)
                     .and_then(map_local_device);
+                let _ = response.send(result);
+            }
+            WorkerCommand::NotifyConnectivityOpportunity { reason, response } => {
+                let result = engine
+                    .execute(Operation::NotifyConnectivityOpportunity {
+                        reason: reason.into(),
+                    })
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(|result| match result {
+                        OperationResult::ConnectivityOpportunityAccepted => Ok(()),
+                        _ => Err(BindingError::UnexpectedResult),
+                    });
                 let _ = response.send(result);
             }
             WorkerCommand::RefreshPeerConnections { response } => {

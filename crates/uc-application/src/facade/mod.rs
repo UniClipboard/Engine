@@ -165,3 +165,5 @@ pub use space_setup::{
 };
 pub use storage::{ClearCacheResultView, StorageFacade, StorageFacadeError, StorageStatsView};
 pub use upgrade::{AcknowledgeUpgradeError, DetectUpgradeError, UpgradeFacade, UpgradeStatus};
+
+pub use crate::space::{ConnectivityOpportunity, PeerConnectionError};

@@ -448,6 +448,7 @@ pub enum OperationResult {
     LocalDevice(LocalDeviceSummary),
     PeerConnections(Vec<PeerConnectionSummary>),
     PeerConnectionsRefreshed(PeerConnectionRefreshSummary),
+    ConnectivityOpportunityAccepted,
     NetworkRecovered,
     NetworkRecoveryStatus(NetworkRecoveryStatusSummary),
     Settings(Box<SettingsSummary>),
@@ -654,6 +655,9 @@ impl fmt::Debug for OperationResult {
             Self::PeerConnectionsRefreshed(report) => debug
                 .field("kind", &"peer_connections_refreshed")
                 .field("report", report),
+            Self::ConnectivityOpportunityAccepted => {
+                debug.field("kind", &"connectivity_opportunity_accepted")
+            }
             Self::NetworkRecovered => debug.field("kind", &"network_recovered"),
             Self::NetworkRecoveryStatus(status) => debug
                 .field("kind", &"network_recovery_status")

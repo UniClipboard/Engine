@@ -33,8 +33,9 @@ pub use admission::{
     QueryPendingSpaceTransitionError,
 };
 pub use connectivity::{
-    NetworkRecoveryEvent, NetworkRecoveryFacade, NetworkRecoveryPhase, NetworkRecoveryRequestError,
-    NetworkRecoveryStatus, RebuildNetworkSessionError, RebuildNetworkSessionPort,
+    ConnectionHint, ConnectivityOpportunity, NetworkRecoveryEvent, NetworkRecoveryFacade,
+    NetworkRecoveryPhase, NetworkRecoveryRequestError, NetworkRecoveryStatus, PeerConnectionError,
+    RebuildNetworkSessionError, RebuildNetworkSessionPort,
 };
 pub use facade::{
     InitializeSpaceInput, InvitationAvailability, IssuePairingInvitationError,
