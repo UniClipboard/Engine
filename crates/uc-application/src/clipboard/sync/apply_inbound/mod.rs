@@ -61,6 +61,7 @@
 //! Production wires the concrete types via the blanket impls in
 //! [`ports`].
 
+use anyhow::Error as SourceError;
 use bytes::Bytes;
 use thiserror::Error;
 use uc_core::ids::{DeviceId, EntryId};
@@ -156,10 +157,10 @@ pub enum ApplyOutcome {
 
 #[derive(Debug, Error)]
 pub enum ApplyInboundError {
-    #[error("dedup query failed: {0}")]
-    DedupQuery(String),
-    #[error("capture pipeline failed: {0}")]
-    Capture(String),
+    #[error("dedup query failed")]
+    DedupQuery(#[source] SourceError),
+    #[error("capture pipeline failed")]
+    Capture(#[source] SourceError),
     #[error("clipboard write failed: {0}")]
     WriteCoordinator(String),
     #[error("internal: {0}")]

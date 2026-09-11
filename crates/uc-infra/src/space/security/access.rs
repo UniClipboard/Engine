@@ -5610,109 +5610,169 @@ mod admission_tests {
 
     #[tokio::test]
     async fn retained_device_applies_admission_then_revocation_epoch_updates() {
-        let (sponsor, sponsor_session, repository, space_id, _sponsor_dir) = sponsor_fixture();
-        let bob_dir = tempdir().unwrap();
-        let bob_session = Arc::new(InMemorySession::new());
-        let (bob_repository, _) = memory_revocation_repository(None);
-        let bob = adapter(
-            &bob_dir,
-            local_key_material(&bob_dir, memory_secure_storage()),
-            bob_session.clone(),
-            bob_repository.clone(),
-        );
-        let bob_pending = bob.prepare_group_join(&DeviceId::new("bob")).await.unwrap();
-        let bob_admission = sponsor
-            .admit_group_member(
-                &space_id,
-                &DeviceId::new("alice"),
-                &DeviceId::new("bob"),
-                &[],
-                &bob_pending.key_package,
-            )
-            .await
-            .unwrap();
-        bob.install_group_join(
-            &space_id,
-            &Passphrase::new("shared passphrase for bob"),
-            bob_pending,
-            &bob_admission.welcome,
-            &bob_admission.encrypted_key_catalog,
-            bob_admission.group_epoch,
-        )
-        .await
-        .unwrap();
-        let bob_outbound_update =
-            PendingGroupUpdate::persistent(DeviceId::new("dave"), b"bob-pending-update".to_vec());
-        let mut bob_material = bob_repository
-            .load_space_material(&space_id)
-            .await
-            .unwrap()
-            .unwrap();
-        bob_material.add_pending_group_updates([bob_outbound_update.clone()], 150);
-        bob_repository
-            .save_space_material(&bob_material)
-            .await
-            .unwrap();
+        use crate::clipboard::chunked_transfer::TransferCipherAdapter;
+        use uc_core::ports::TransferCipherPort;
 
-        let charlie_pending = sponsor
-            .prepare_group_join(&DeviceId::new("charlie"))
-            .await
-            .unwrap();
-        let charlie_admission = sponsor
-            .admit_group_member(
+        for missing_admission in [false, true] {
+            let (sponsor, sponsor_session, repository, space_id, _sponsor_dir) = sponsor_fixture();
+            let bob_dir = tempdir().unwrap();
+            let bob_session = Arc::new(InMemorySession::new());
+            let (bob_repository, _) = memory_revocation_repository(None);
+            let bob = adapter(
+                &bob_dir,
+                local_key_material(&bob_dir, memory_secure_storage()),
+                bob_session.clone(),
+                bob_repository.clone(),
+            );
+            let bob_pending = bob.prepare_group_join(&DeviceId::new("bob")).await.unwrap();
+            let bob_admission = sponsor
+                .admit_group_member(
+                    &space_id,
+                    &DeviceId::new("alice"),
+                    &DeviceId::new("bob"),
+                    &[],
+                    &bob_pending.key_package,
+                )
+                .await
+                .unwrap();
+            bob.install_group_join(
                 &space_id,
-                &DeviceId::new("alice"),
-                &DeviceId::new("charlie"),
-                &[DeviceId::new("bob")],
-                &charlie_pending.key_package,
+                &Passphrase::new("shared passphrase for bob"),
+                bob_pending,
+                &bob_admission.welcome,
+                &bob_admission.encrypted_key_catalog,
+                bob_admission.group_epoch,
             )
             .await
             .unwrap();
-        let admission_update = charlie_admission.existing_member_updates[0].payload();
-        bob.apply_group_epoch_update(admission_update)
-            .await
-            .unwrap();
-        assert_eq!(
-            bob.apply_group_epoch_update(admission_update)
-                .await
-                .unwrap(),
-            GroupEpoch::new(charlie_admission.group_epoch)
-        );
-        assert_eq!(
-            bob_repository
+            let bob_outbound_update = PendingGroupUpdate::persistent(
+                DeviceId::new("dave"),
+                b"bob-pending-update".to_vec(),
+            );
+            let mut bob_material = bob_repository
                 .load_space_material(&space_id)
                 .await
                 .unwrap()
+                .unwrap();
+            bob_material.add_pending_group_updates([bob_outbound_update.clone()], 150);
+            bob_repository
+                .save_space_material(&bob_material)
+                .await
+                .unwrap();
+
+            let charlie_pending = sponsor
+                .prepare_group_join(&DeviceId::new("charlie"))
+                .await
+                .unwrap();
+            let charlie_admission = sponsor
+                .admit_group_member(
+                    &space_id,
+                    &DeviceId::new("alice"),
+                    &DeviceId::new("charlie"),
+                    &[DeviceId::new("bob")],
+                    &charlie_pending.key_package,
+                )
+                .await
+                .unwrap();
+            let admission_update = charlie_admission.existing_member_updates[0].payload();
+            if !missing_admission {
+                bob.apply_group_epoch_update(admission_update)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    bob.apply_group_epoch_update(admission_update)
+                        .await
+                        .unwrap(),
+                    GroupEpoch::new(charlie_admission.group_epoch)
+                );
+                assert_eq!(
+                    bob_repository
+                        .load_space_material(&space_id)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .pending_group_updates(),
+                    &[bob_outbound_update]
+                );
+            }
+
+            let result = sponsor
+                .revoke_group_member(&DeviceId::new("charlie"), &[DeviceId::new("bob")], 200)
+                .await
+                .unwrap();
+            let pending_updates = sponsor.pending_space_group_updates().await.unwrap();
+            assert_eq!(pending_updates.len(), 1);
+            assert_eq!(pending_updates[0].recipient(), &DeviceId::new("bob"));
+            assert_eq!(pending_updates[0].revocation_id(), result.revocation_id());
+            let stage = repository
+                .load_staged_revocation(result.revocation_id().unwrap())
+                .await
                 .unwrap()
-                .pending_group_updates(),
-            &[bob_outbound_update]
-        );
+                .unwrap();
+            let sender = TransferCipherAdapter::new(sponsor_session.clone());
+            let receiver = TransferCipherAdapter::new(bob_session.clone());
+            let old_message = receiver
+                .encrypt(b"old sender payload")
+                .await
+                .expect("old encrypt");
+            let new_message = sender
+                .encrypt(b"new sender payload")
+                .await
+                .expect("new encrypt");
+            assert_eq!(
+                sender
+                    .decrypt(&old_message)
+                    .await
+                    .expect("new receives old"),
+                b"old sender payload"
+            );
+            assert!(
+                receiver.decrypt(&new_message).await.is_err(),
+                "缺少更新时不能接受新密钥的内容"
+            );
+            if missing_admission {
+                assert!(matches!(
+                    bob.apply_group_epoch_update(stage.outbox()[0].payload())
+                        .await,
+                    Err(KeyEpochError::StateIssue(
+                        uc_core::membership::KeyEpochStateIssue::OutOfOrderUpdate
+                    ))
+                ));
+                bob.apply_group_epoch_update(admission_update)
+                    .await
+                    .expect("补回前序更新");
+                bob.apply_group_epoch_update(admission_update)
+                    .await
+                    .expect("重复更新幂等");
+            }
+            bob.apply_group_epoch_update(stage.outbox()[0].payload())
+                .await
+                .unwrap();
+            assert_eq!(
+                receiver
+                    .decrypt(&new_message)
+                    .await
+                    .expect("更新后接收成功"),
+                b"new sender payload"
+            );
+            let reverse = receiver
+                .encrypt(b"recovered reverse payload")
+                .await
+                .expect("reverse encrypt");
+            assert_eq!(
+                sender.decrypt(&reverse).await.expect("反向接收成功"),
+                b"recovered reverse payload"
+            );
 
-        let result = sponsor
-            .revoke_group_member(&DeviceId::new("charlie"), &[DeviceId::new("bob")], 200)
-            .await
-            .unwrap();
-        let pending_updates = sponsor.pending_space_group_updates().await.unwrap();
-        assert_eq!(pending_updates.len(), 1);
-        assert_eq!(pending_updates[0].recipient(), &DeviceId::new("bob"));
-        assert_eq!(pending_updates[0].revocation_id(), result.revocation_id());
-        let stage = repository
-            .load_staged_revocation(result.revocation_id().unwrap())
-            .await
-            .unwrap()
-            .unwrap();
-        bob.apply_group_epoch_update(stage.outbox()[0].payload())
-            .await
-            .unwrap();
-
-        let sponsor_key = sponsor_session
-            .current_content_key(&space_id, ContentKeyPurpose::Content)
-            .unwrap();
-        let bob_key = bob_session
-            .current_content_key(&space_id, ContentKeyPurpose::Content)
-            .unwrap();
-        assert_eq!(bob_key.epoch(), sponsor_key.epoch());
-        assert_eq!(bob_key.key(), sponsor_key.key());
+            let sponsor_key = sponsor_session
+                .current_content_key(&space_id, ContentKeyPurpose::Content)
+                .unwrap();
+            let bob_key = bob_session
+                .current_content_key(&space_id, ContentKeyPurpose::Content)
+                .unwrap();
+            assert_eq!(bob_key.epoch(), sponsor_key.epoch());
+            assert_eq!(bob_key.key(), sponsor_key.key());
+        }
     }
 
     #[tokio::test]

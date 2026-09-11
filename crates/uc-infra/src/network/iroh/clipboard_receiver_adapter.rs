@@ -49,6 +49,9 @@ use uc_core::membership::{MemberRepositoryPort, PeerAdmissionPort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{InboundClipboard, InboundClipboardDisposition, InboundClipboardReceipt};
 use uc_core::security::IdentityFingerprint;
+use uc_observability_contract::diagnostics::connectivity::{
+    complete_clipboard_receive_failure, ClipboardReceiveFailure, ClipboardReceiveObservation,
+};
 use uc_observability_contract::diagnostics::{
     complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
     DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
@@ -210,6 +213,8 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
         });
         let _ = set_remote_parent(&span, decoded.trace_context.as_ref());
         let closed = connection.clone();
+        let receive_observation = ClipboardReceiveObservation::default();
+        let operation_observation = receive_observation.clone();
         let result = async move {
             let started = Instant::now();
             let ciphertext = match clipboard_wire::read_frame_payload(&mut recv, decoded.payload_len()).await {
@@ -246,7 +251,7 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
                 "clipboard receiver: no subscribers attached; inbound frame dropped"
             );
             emit_ack(&mut send, AckCode::Rejected).await;
-            complete_operation(OperationCompletion::failed(
+            complete_clipboard_receive_failure(ClipboardReceiveFailure::NoConsumer, OperationCompletion::failed(
                 DiagnosticDomain::Clipboard,
                 DiagnosticOperation::ClipboardReceive,
                 DiagnosticRole::Server,
@@ -256,10 +261,12 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
             return Ok(());
         }
 
-        let disposition = tokio::time::timeout(APPLICATION_SETTLEMENT_TIMEOUT, result.wait())
-            .await
-            .ok()
-            .flatten();
+        let settlement = tokio::time::timeout(APPLICATION_SETTLEMENT_TIMEOUT, result.wait()).await;
+        let (disposition, failure) = match settlement {
+            Ok(Some(disposition)) => (Some(disposition), ClipboardReceiveFailure::ApplicationRejected),
+            Ok(None) => (None, ClipboardReceiveFailure::ReceiptDropped),
+            Err(_) => (None, ClipboardReceiveFailure::SettlementTimeout),
+        };
         let ack = match disposition {
             Some(InboundClipboardDisposition::Applied) => AckCode::Accepted,
             Some(InboundClipboardDisposition::Duplicate) => AckCode::DuplicateIgnored,
@@ -281,7 +288,11 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
                 started.elapsed(),
             ),
         };
-        complete_operation(completion);
+        if matches!(ack, AckCode::Rejected | AckCode::Incompatible) {
+            operation_observation.finish_failure(failure, completion);
+        } else {
+            complete_operation(completion);
+        }
 
         // 5. Ack the application result; hold the connection open until the peer closes
         //    it so the ack byte has time to flush. The sender side drops
@@ -290,8 +301,8 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
         emit_ack(&mut send, ack).await;
         Ok(())
         }
-        .instrument(span)
-        .await;
+        .instrument(span);
+        let result = receive_observation.scope(result).await;
         // 回复后的连接清理不计入业务接收耗时。
         let _ = closed.closed().await;
         result

@@ -1,6 +1,8 @@
 //! 认证完成的本地详情：复用一次标准完成事件，来源详情不进入远程属性。
-use super::super::ObservationContext;
+use super::super::{complete_operation, ObservationContext, OperationCompletion};
 use super::record::{dial_reason, DialFailure};
+use super::ClipboardReceiveFailure;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +173,9 @@ pub fn take_local_completion_detail(
     opentelemetry::Context::map_current(|context| {
         let pending = context.get::<PendingCompletionDetail>()?;
         let expected = match pending.detail {
+            LocalCompletionDetail::ClipboardReceive(_) => {
+                ("clipboard", "clipboard_receive", "server", "error")
+            }
             LocalCompletionDetail::GroupUpdate(_) => (
                 "space_membership",
                 "membership_group_update",
@@ -196,6 +201,7 @@ pub fn take_local_completion_detail(
 
 #[derive(Clone, Copy)]
 pub enum LocalCompletionDetail {
+    ClipboardReceive(ClipboardReceiveFailure),
     Authentication(AuthenticationFailure),
     AdmissionConnection(DialFailure),
     GroupUpdate(super::GroupUpdateFailureDetail),
@@ -203,6 +209,7 @@ pub enum LocalCompletionDetail {
 impl LocalCompletionDetail {
     pub fn local_fields(self) -> (&'static str, &'static str) {
         match self {
+            Self::ClipboardReceive(failure) => failure.local_fields(),
             Self::Authentication(failure) => failure.local_fields(),
             Self::AdmissionConnection(reason) => ("connect", dial_reason(reason)),
             Self::GroupUpdate(detail) => (detail.phase.as_str(), detail.reason.as_str()),
@@ -211,6 +218,7 @@ impl LocalCompletionDetail {
 
     pub fn source_chain(self) -> Option<[&'static str; 4]> {
         match self {
+            Self::ClipboardReceive(failure) => failure.source_chain(),
             Self::GroupUpdate(detail) => Some([
                 "membership_update",
                 detail.phase.as_str(),
@@ -220,6 +228,18 @@ impl LocalCompletionDetail {
             _ => None,
         }
     }
+}
+
+pub fn complete_clipboard_receive_failure(
+    failure: ClipboardReceiveFailure,
+    completion: OperationCompletion,
+) {
+    let context = opentelemetry::Context::current().with_value(PendingCompletionDetail {
+        detail: LocalCompletionDetail::ClipboardReceive(failure),
+        consumed: AtomicBool::new(false),
+    });
+    let _guard = context.attach();
+    complete_operation(completion);
 }
 
 pub fn complete_group_update_failure(

@@ -236,6 +236,11 @@ Application 专用的 `ClipboardReceiverPort` 从 Core 移回接收模块，仍�
 但不反复进入或延长已结束的网络 span。Infra 接收回复后的连接清理也不计入业务接收耗时。地址解析与建链各自有一条固定分类完成日志。
 自动恢复重发不持久化旧上下文；它开始新的在线执行，不凭业务摘要重新拼接旧 trace。
 
+入站接收通过队列信封携带独立、不透明的失败观测作用域。Application 的策略、解密和保存负责人只提供第一次固定原因，
+Infra 的密钥读取提供缺钥或代次不符的更具体原因；普通返回错误不能覆盖已记录的具体原因。协议负责人在既有接收完成记录
+中附加本地详情，普通与详细采集均保留，不增加业务节点、不改变回执、远程摘要或 Engine 接口。没有消费者、回执丢弃和
+等待超时分别记录。保存错误保留原始来源，可识别的 IO 原因仅导出固定分类链，不输出错误正文、路径、密钥标识或代次数值。
+
 Application assembly 为每个 Engine 实例创建一个中性 Space admission registry，并在 Space Session 重建时复用。完整准入 owner 用既有
 32-byte attempt 材料创建或进入不可读取的生命周期 root，不增加 facade、port、result 或 Core 字段；registry 不跨 Engine 实例重启。
 Infra 当前只传播 W3C `traceparent`，不传播 `tracestate` 或 baggage。发送时从当前 client span 注入；接收时先完成既有业务身份和

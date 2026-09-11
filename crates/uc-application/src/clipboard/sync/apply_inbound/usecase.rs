@@ -963,7 +963,7 @@ impl ApplyInboundClipboardUseCase {
             .entry_repo
             .find_entry_id_by_snapshot_hash(&input.snapshot_hash)
             .await
-            .map_err(|e| ApplyInboundError::DedupQuery(e.to_string()))?;
+            .map_err(|error| ApplyInboundError::DedupQuery(error.into()))?;
         if let Some(existing_id) = existing.as_ref() {
             if self.is_entry_available(existing_id).await {
                 self.report_reused_outbound_transfers(&input.from_device, &blob_refs)
@@ -1458,7 +1458,7 @@ impl ApplyInboundClipboardUseCase {
                     has_receive_artifacts,
                 )
                 .await?;
-                return Err(ApplyInboundError::Capture(e.to_string()));
+                return Err(ApplyInboundError::Capture(e));
             }
         };
         if let Some(publication) = publication {
