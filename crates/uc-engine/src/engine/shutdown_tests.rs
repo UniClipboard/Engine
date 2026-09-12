@@ -11,6 +11,29 @@ use super::Engine;
 use crate::{EngineErrorCategory, EngineEvent, EngineState, Operation, OperationTerminal};
 
 #[tokio::test]
+async fn unbounded_shutdown_keeps_cleanup_owned_after_its_waiter_leaves() {
+    let runtime = Arc::new(FakeRuntime::default());
+    runtime.block_shutdown.store(true, Ordering::SeqCst);
+    let (engine, _events) = Engine::from_runtime(Arc::clone(&runtime), 16);
+    let engine = Arc::new(engine);
+    let owner = Arc::clone(&engine);
+    let waiter = tokio::spawn(async move { owner.shutdown_until_complete().await });
+    timeout(Duration::from_secs(1), runtime.shutdown_started.notified())
+        .await
+        .unwrap();
+    assert!(runtime.shutdown_deadline.lock().unwrap().is_none());
+    waiter.abort();
+    assert!(waiter.await.unwrap_err().is_cancelled());
+    runtime.shutdown_release.notify_one();
+    timeout(Duration::from_secs(1), engine.shutdown_until_complete())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(runtime.shutdown_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(engine.lifecycle_state().await, EngineState::Stopped);
+}
+
+#[tokio::test]
 async fn failed_shutdown_keeps_stream_open_and_allows_cleanup_retry() {
     let runtime = Arc::new(FakeRuntime::default());
     runtime.fail_shutdown.store(true, Ordering::SeqCst);

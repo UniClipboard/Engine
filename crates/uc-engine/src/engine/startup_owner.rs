@@ -62,8 +62,7 @@ impl Drop for StartupHandoff {
         let progress = self.progress.take();
         self.executor.spawn(async move {
             // 未交出的实例没有宿主等待预算，但仍走与显式关闭完全相同的收尾。
-            let result = engine.start_shutdown(None).await;
-            let result = result.unwrap_or_else(|_| Err(startup_task_failed()));
+            let result = engine.shutdown_until_complete().await;
             drop(engine);
             drop(events);
             if let (Some(progress), Err(error)) = (progress.as_ref(), &result) {

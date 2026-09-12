@@ -65,6 +65,37 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     #[test]
+    fn closed_event_queue_does_not_turn_a_failed_worker_into_success() {
+        let (commands, requests) = tokio::sync::mpsc::unbounded_channel();
+        let (lifecycle_commands, lifecycle_requests) = tokio::sync::mpsc::unbounded_channel();
+        let events = Arc::new(EventQueue::new(2));
+        let worker_events = Arc::clone(&events);
+        let error = BindingError::Engine {
+            code: 1108,
+            category: BindingErrorCategory::Internal,
+            retryable: true,
+        };
+        let failure = error.clone();
+        let (ready, closed) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            drop(requests);
+            drop(lifecycle_requests);
+            worker_events.close();
+            ready.send(()).unwrap();
+            Err(failure)
+        });
+        closed.recv_timeout(Duration::from_secs(1)).unwrap();
+        let engine = MobileEngine {
+            commands: Mutex::new(Some(commands)),
+            lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
+            events,
+            worker: WorkerJoin::new(worker),
+        };
+        assert_eq!(engine.shutdown(1000), Err(error.clone()));
+        assert_eq!(engine.shutdown(1000), Err(error));
+    }
+
+    #[test]
     fn failed_shutdown_keeps_worker_and_lifecycle_channel_for_retry() {
         let (commands, requests) = tokio::sync::mpsc::unbounded_channel();
         let (lifecycle_commands, mut lifecycle_requests) = tokio::sync::mpsc::unbounded_channel();
@@ -91,6 +122,7 @@ mod tests {
                     response.send(Ok(())).unwrap();
                 }
             }
+            Ok(())
         });
         let engine = MobileEngine {
             commands: Mutex::new(Some(commands)),
@@ -126,6 +158,7 @@ mod tests {
             );
             worker_events.close();
             let _ = response.send(Ok(()));
+            Ok(())
         });
         let engine = MobileEngine {
             commands: Mutex::new(Some(commands)),

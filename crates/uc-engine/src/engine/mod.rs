@@ -189,7 +189,7 @@ mod tests {
         fail_suspend: AtomicBool,
         fail_resume: AtomicBool,
         pub(super) shutdown_calls: AtomicUsize,
-        shutdown_deadline: StdMutex<Option<Duration>>,
+        pub(super) shutdown_deadline: StdMutex<Option<Duration>>,
         pub(super) fail_shutdown: AtomicBool,
         pub(super) block_shutdown: AtomicBool,
         pub(super) shutdown_started: Notify,

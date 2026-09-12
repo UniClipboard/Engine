@@ -51,6 +51,7 @@ mod tests {
             captured.send(deadline).unwrap();
             wait.recv().unwrap();
             let _ = response.send(Ok(()));
+            Ok(())
         });
         let engine = MobileEngine {
             commands: Mutex::new(Some(commands)),

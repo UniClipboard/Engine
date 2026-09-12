@@ -6,7 +6,7 @@ use super::{lock, shutdown::wait_timeout};
 use crate::BindingError;
 
 struct JoinState {
-    worker: Option<JoinHandle<()>>,
+    worker: Option<JoinHandle<Result<(), BindingError>>>,
     result: Option<Result<(), BindingError>>,
 }
 
@@ -15,7 +15,7 @@ pub(super) struct WorkerJoin {
 }
 
 impl WorkerJoin {
-    pub(super) fn new(worker: JoinHandle<()>) -> Self {
+    pub(super) fn new(worker: JoinHandle<Result<(), BindingError>>) -> Self {
         Self {
             state: Arc::new((
                 Mutex::new(JoinState {
@@ -37,7 +37,10 @@ impl WorkerJoin {
             if thread::Builder::new()
                 .name("uc-engine-uniffi-reaper".to_owned())
                 .spawn(move || {
-                    let result = worker.join().map_err(|_| BindingError::RuntimeUnavailable);
+                    let result = worker
+                        .join()
+                        .map_err(|_| BindingError::RuntimeUnavailable)
+                        .and_then(|result| result);
                     lock(&shared.0).result = Some(result);
                     shared.1.notify_all();
                 })
@@ -75,12 +78,26 @@ mod tests {
         let (release, wait) = mpsc::channel();
         let owner = WorkerJoin::new(thread::spawn(move || {
             wait.recv().unwrap();
+            Ok(())
         }));
         assert!(owner.wait(Duration::from_millis(10)).is_err());
         assert!(owner.wait(Duration::from_millis(10)).is_err());
         release.send(()).unwrap();
         owner.wait(Duration::from_secs(1)).unwrap();
         owner.wait(Duration::ZERO).unwrap();
+    }
+
+    #[test]
+    fn repeated_wait_preserves_a_returned_shutdown_failure() {
+        let error = BindingError::Engine {
+            code: 1108,
+            category: crate::BindingErrorCategory::Internal,
+            retryable: true,
+        };
+        let failure = error.clone();
+        let owner = WorkerJoin::new(thread::spawn(move || Err(failure)));
+        assert_eq!(owner.wait(Duration::from_secs(1)), Err(error.clone()));
+        assert_eq!(owner.wait(Duration::ZERO), Err(error));
     }
 
     #[test]

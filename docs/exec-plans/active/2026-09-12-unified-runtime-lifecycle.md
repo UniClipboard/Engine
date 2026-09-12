@@ -650,6 +650,13 @@ impl RuntimeLifecycleCoordinator {
 - 完成标准：服务启动失败返回前释放宿主所有者，解除端口占用后同一资料立即成功重启；正常启动、暂停、取消启动和资料重置不回归。
 - 验证：占用端口测试先复现失败，修复后 dev-tools 下 5 项真实宿主合同与资料重置合同通过；metadata、workspace 全目标、dev-tools 与 lan-compat 全目标、fmt、Rust 风格、架构与隐私、diff 检查通过。
 
+### 2026-09-13：绑定退出确认实际关闭结果
+
+- Engine 的 shutdown_until_complete 是同一完整关闭动作的无宿主期限等待入口；未领取启动也复用它，等待方取消仍不丢弃实际收尾，没有新增 Application 步骤接口。
+- UniFFI 在调用方离开或启动结果无人接收时等待实际关闭结果；成功则排完最后事件，失败才结束纯事件转发，不再等待不会出现的成功关闭通知。
+- 工作线程返回类型化关闭结果，WorkerJoin 保留实际错误并供重复确认；事件队列已关闭时也不能把失败变成成功。完成标准：真实关闭未返回前不结束事件工作，关闭失败不会挂死或虚报成功，正常关闭保留最后事件和重试约定。
+- 验证：45 项 Engine、32 项绑定内部测试与 25 项移动绑定合同通过；metadata、workspace 全目标、dev-tools 与 lan-compat 全目标、fmt、Rust 风格、架构与隐私、diff 检查通过。
+
 # 7. Edge Cases
 
 

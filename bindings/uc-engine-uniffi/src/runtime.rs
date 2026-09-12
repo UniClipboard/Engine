@@ -35,6 +35,7 @@ const LIFECYCLE_TRANSITION_DEADLINE: Duration = Duration::from_secs(10);
 mod lifecycle;
 mod shutdown;
 mod worker_join;
+mod worker_shutdown;
 use worker_join::WorkerJoin;
 
 fn log_mobile_query_failure(operation: &'static str, error: &BindingError) {
@@ -1226,7 +1227,7 @@ fn run_worker(
     lifecycle_requests: tokio::sync::mpsc::UnboundedReceiver<WorkerCommand>,
     events: Arc<EventQueue>,
     started: mpsc::Sender<Result<(), BindingError>>,
-) {
+) -> Result<(), BindingError> {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1234,7 +1235,7 @@ fn run_worker(
         Ok(runtime) => runtime,
         Err(_) => {
             let _ = started.send(Err(BindingError::RuntimeUnavailable));
-            return;
+            return Err(BindingError::RuntimeUnavailable);
         }
     };
     runtime.block_on(run_worker_loop(
@@ -1244,7 +1245,7 @@ fn run_worker(
         lifecycle_requests,
         events,
         started,
-    ));
+    ))
 }
 
 async fn run_worker_loop(
@@ -1254,27 +1255,32 @@ async fn run_worker_loop(
     mut lifecycle_requests: tokio::sync::mpsc::UnboundedReceiver<WorkerCommand>,
     events: Arc<EventQueue>,
     started: mpsc::Sender<Result<(), BindingError>>,
-) {
+) -> Result<(), BindingError> {
     let (engine, mut engine_events) = match Engine::start(config, host).await {
         Ok(started_engine) => started_engine,
         Err(error) => {
-            let _ = started.send(Err(error.into()));
-            return;
+            let error = BindingError::from(error);
+            let _ = started.send(Err(error.clone()));
+            return Err(error);
         }
     };
-    if started.send(Ok(())).is_err() {
-        let _ = engine.shutdown(Duration::ZERO).await;
-        while engine_events.next().await.is_some() {}
-        return;
-    }
     let engine = Arc::new(engine);
 
+    let forwarded_events = Arc::clone(&events);
     let event_task = tokio::spawn(async move {
         while let Some(event) = engine_events.next().await {
-            events.push(map_engine_event(event));
+            forwarded_events.push(map_engine_event(event));
         }
-        events.close();
+        forwarded_events.close();
     });
+    if started.send(Ok(())).is_err() {
+        return worker_shutdown::finish_shutdown(
+            engine.shutdown_until_complete(),
+            event_task,
+            events,
+        )
+        .await;
+    }
 
     let mut shutdown_response = None;
 
@@ -1764,13 +1770,22 @@ async fn run_worker_loop(
             }
         }
     }
-    if shutdown_response.is_none() {
-        let _ = engine.shutdown(Duration::ZERO).await;
+    let result = worker_shutdown::finish_shutdown(
+        async {
+            if shutdown_response.is_none() {
+                engine.shutdown_until_complete().await
+            } else {
+                Ok(())
+            }
+        },
+        event_task,
+        events,
+    )
+    .await;
+    if let Some((response, _)) = shutdown_response {
+        let _ = response.send(result.clone());
     }
-    let _ = event_task.await;
-    if let Some((response, result)) = shutdown_response {
-        let _ = response.send(result);
-    }
+    result
 }
 
 async fn complete_recovery_after_lifecycle<T>(
@@ -2749,6 +2764,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(200));
                 let _ = response.send(Ok(()));
             }
+            Ok(())
         });
         let engine = MobileEngine {
             commands: Mutex::new(Some(commands)),
@@ -2787,6 +2803,7 @@ mod tests {
                 }
                 let _ = recovery.join();
             }
+            Ok(())
         });
         let engine = Arc::new(MobileEngine {
             commands: Mutex::new(Some(commands)),

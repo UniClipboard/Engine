@@ -11,6 +11,13 @@ use crate::{EngineError, EngineErrorCategory, EngineEvent, EngineState, Operatio
 const SHUTDOWN_COMPLETION_MARGIN: Duration = Duration::from_millis(100);
 
 impl Engine {
+    /// 宿主销毁其运行期前完整等待关闭；没有调用方期限，失败仍如实返回。
+    pub async fn shutdown_until_complete(&self) -> Result<(), EngineError> {
+        self.start_shutdown(None)
+            .await
+            .map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?
+    }
+
     pub async fn shutdown(&self, deadline: Duration) -> Result<(), EngineError> {
         let deadline_at = Instant::now()
             .checked_add(deadline)
