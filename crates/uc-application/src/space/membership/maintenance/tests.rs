@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
+use super::runtime::SpaceMembershipMaintenanceRuntimeError;
 use super::*;
 
 #[derive(Clone)]
@@ -111,21 +112,6 @@ impl RecoverSpaceAdmissionsPort for BlockingFirstRecordingAdmission {
             self.release.notified().await;
         }
         MembershipMaintenanceStepOutcome::Completed
-    }
-}
-
-struct NonCooperativeAdmission {
-    started: Arc<tokio::sync::Notify>,
-}
-
-#[async_trait]
-impl RecoverSpaceAdmissionsPort for NonCooperativeAdmission {
-    async fn recover_space_admissions(
-        &self,
-        _trigger: &MembershipMaintenanceTrigger,
-    ) -> MembershipMaintenanceStepOutcome {
-        self.started.notify_one();
-        std::future::pending().await
     }
 }
 
@@ -467,7 +453,7 @@ async fn pause_cancels_network_work_and_waits_for_the_current_commit_boundary() 
 }
 
 #[tokio::test(start_paused = true)]
-async fn shutdown_uses_one_five_second_budget_without_aborting_the_active_round() {
+async fn shutdown_waits_beyond_the_old_timeout_until_the_active_round_finishes() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let step = |name| {
         Arc::new(RecordingStep {
@@ -477,10 +463,12 @@ async fn shutdown_uses_one_five_second_budget_without_aborting_the_active_round(
         })
     };
     let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
     let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
         MaintainSpaceMembershipDeps {
-            admissions: Arc::new(NonCooperativeAdmission {
+            admissions: Arc::new(BlockingAdmission {
                 started: Arc::clone(&started),
+                release: Arc::clone(&release),
             }),
             effects: step("effects"),
             conflicts: step("conflicts"),
@@ -504,9 +492,69 @@ async fn shutdown_uses_one_five_second_budget_without_aborting_the_active_round(
     tokio::time::advance(std::time::Duration::from_secs(5)).await;
     tokio::task::yield_now().await;
 
-    assert!(shutdown.is_finished());
-    shutdown.await.unwrap();
+    assert!(!shutdown.is_finished());
     assert!(calls.lock().unwrap().is_empty());
+    release.notify_one();
+    shutdown.await.unwrap();
+    assert_eq!(calls.lock().unwrap().len(), 6);
+}
+
+#[tokio::test]
+async fn dropping_the_owner_or_shutdown_waiter_keeps_the_round_owned_until_completion() {
+    for drop_waiter in [false, true] {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let step = |name| {
+            Arc::new(RecordingStep {
+                name,
+                calls: Arc::clone(&calls),
+                outcome: MembershipMaintenanceStepOutcome::Completed,
+            })
+        };
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
+            MaintainSpaceMembershipDeps {
+                admissions: Arc::new(BlockingAdmission {
+                    started: Arc::clone(&started),
+                    release: Arc::clone(&release),
+                }),
+                effects: step("effects"),
+                conflicts: step("conflicts"),
+                group_update_delivery: step("group_updates"),
+                restricted_delivery: step("restricted"),
+                synchronization: step("synchronize"),
+                cleanup: step("cleanup"),
+            },
+        ));
+        let (_presence_tx, presence_rx) = tokio::sync::broadcast::channel(4);
+        let runtime = SpaceMembershipMaintenanceRuntime::start(
+            maintain,
+            presence_rx,
+            std::time::Duration::from_secs(3600),
+            Arc::new(NoopNetworkActivity),
+        );
+        let activity = runtime.activity();
+        started.notified().await;
+        if drop_waiter {
+            let waiter = tokio::spawn(runtime.shutdown());
+            tokio::task::yield_now().await;
+            waiter.abort();
+            assert!(waiter.await.unwrap_err().is_cancelled());
+        } else {
+            drop(runtime);
+        }
+        let confirmation = tokio::spawn(async move { activity.pause().await });
+        tokio::task::yield_now().await;
+        let finished_before_release = confirmation.is_finished();
+        release.notify_one();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), confirmation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!finished_before_release);
+        assert_eq!(result, Err(SpaceMembershipMaintenanceRuntimeError::Closed));
+        assert_eq!(calls.lock().unwrap().len(), 6);
+    }
 }
 
 #[tokio::test]

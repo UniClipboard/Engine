@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use uc_core::ports::{PeerReachabilityChanged, ReachabilityState};
 
@@ -18,7 +19,6 @@ enum RuntimeCommand {
     Pause(oneshot::Sender<()>),
     Resume(oneshot::Sender<()>),
     StateChanged,
-    Shutdown(oneshot::Sender<()>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -30,6 +30,7 @@ pub enum SpaceMembershipMaintenanceRuntimeError {
 #[derive(Clone)]
 pub(crate) struct SpaceMembershipMaintenanceActivity {
     commands: mpsc::UnboundedSender<RuntimeCommand>,
+    cancel: CancellationToken,
 }
 
 impl SpaceMembershipMaintenanceActivity {
@@ -102,7 +103,10 @@ impl SpaceMembershipMaintenanceRuntime {
         history_changes: tokio::sync::watch::Receiver<()>,
     ) -> PreparedSpaceMembershipMaintenanceRuntime {
         let (commands, command_rx) = mpsc::unbounded_channel();
-        let activity = SpaceMembershipMaintenanceActivity { commands };
+        let activity = SpaceMembershipMaintenanceActivity {
+            commands,
+            cancel: CancellationToken::new(),
+        };
         PreparedSpaceMembershipMaintenanceRuntime {
             maintain,
             peer_reachability_changed_events,
@@ -140,14 +144,13 @@ impl SpaceMembershipMaintenanceRuntime {
             mut command_rx,
             mut history_changes,
         } = prepared;
+        let task_cancel = activity.cancel.clone();
         let task = tokio::spawn(async move {
             let mut paused = false;
             let mut peer_reachability_open = true;
             let mut history_open = true;
-            let mut active_round = Some(spawn_round(
-                Arc::clone(&maintain),
-                MembershipMaintenanceTrigger::Startup,
-            ));
+            let mut active_round = (!task_cancel.is_cancelled())
+                .then(|| spawn_round(Arc::clone(&maintain), MembershipMaintenanceTrigger::Startup));
             let mut queued_triggers = VecDeque::new();
             let mut periodic = tokio::time::interval_at(
                 tokio::time::Instant::now() + periodic_interval,
@@ -155,6 +158,8 @@ impl SpaceMembershipMaintenanceRuntime {
             );
             loop {
                 tokio::select! {
+                    biased;
+                    _ = task_cancel.cancelled() => break,
                     command = command_rx.recv() => match command {
                         Some(RuntimeCommand::Pause(completed)) => {
                             paused = true;
@@ -186,14 +191,6 @@ impl SpaceMembershipMaintenanceRuntime {
                             );
                         }
                         Some(RuntimeCommand::StateChanged) => {}
-                        Some(RuntimeCommand::Shutdown(completed)) => {
-                            network_activity.pause_network_work();
-                            if let Some(mut round) = active_round.take() {
-                                let _ = tokio::time::timeout(Duration::from_secs(5), &mut round).await;
-                            }
-                            let _ = completed.send(());
-                            break;
-                        }
                         None => break,
                     },
                     result = async {
@@ -238,6 +235,11 @@ impl SpaceMembershipMaintenanceRuntime {
                     }
                 }
             }
+            network_activity.pause_network_work();
+            // 宿主期限由外层负责；必须等当前完整动作结束后才能释放成员运行期。
+            if let Some(round) = active_round {
+                let _ = round.await;
+            }
         });
         Self {
             activity,
@@ -251,21 +253,9 @@ impl SpaceMembershipMaintenanceRuntime {
     }
 
     pub async fn shutdown(mut self) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let (completed, receiver) = oneshot::channel();
-        if self
-            .activity
-            .commands
-            .send(RuntimeCommand::Shutdown(completed))
-            .is_ok()
-        {
-            let _ = tokio::time::timeout_at(deadline, receiver).await;
-        }
-        if let Some(mut task) = self.task.take() {
-            if tokio::time::timeout_at(deadline, &mut task).await.is_err() {
-                task.abort();
-                let _ = task.await;
-            }
+        self.activity.cancel.cancel();
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
         }
     }
 }
@@ -296,8 +286,6 @@ fn schedule_round(
 
 impl Drop for SpaceMembershipMaintenanceRuntime {
     fn drop(&mut self) {
-        if let Some(task) = &self.task {
-            task.abort();
-        }
+        self.activity.cancel.cancel();
     }
 }
