@@ -717,6 +717,39 @@ fn space_management_preserves_state_devices_resend_outcomes_and_local_history() 
 }
 
 #[test]
+fn mobile_shutdown_timeout_can_be_joined_and_profile_reopened() {
+    let _test_guard = engine_test_guard();
+    let root = tempfile::tempdir().unwrap();
+    let host = Arc::new(MemoryHost::new(root.path()));
+    let config = BindingConfig {
+        app_version: "1.2.3".to_owned(),
+        profile_id: "shutdown-retry".to_owned(),
+    };
+    let engine = MobileEngine::start(config.clone(), host.clone()).unwrap();
+    engine
+        .create_space(
+            Some("shutdown-host".to_owned()),
+            "correct horse battery staple".to_owned(),
+        )
+        .unwrap();
+    if let Err(error) = engine.shutdown(0) {
+        assert!(matches!(
+            error,
+            BindingError::Engine {
+                category: BindingErrorCategory::DeadlineExceeded,
+                ..
+            }
+        ));
+    }
+    assert!(engine.list_devices().is_err());
+    engine.shutdown(ENGINE_SHUTDOWN_DEADLINE_MS).unwrap();
+    engine.shutdown(ENGINE_SHUTDOWN_DEADLINE_MS).unwrap();
+    let restarted = MobileEngine::start(config, host).unwrap();
+    assert!(restarted.recover_session(true).unwrap().unlocked);
+    restarted.shutdown(ENGINE_SHUTDOWN_DEADLINE_MS).unwrap();
+}
+
+#[test]
 fn mobile_host_recovers_the_same_identity_after_process_restart() {
     let _test_guard = engine_test_guard();
     let root = tempfile::tempdir().expect("temporary host root must be available");

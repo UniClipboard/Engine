@@ -3,7 +3,6 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use tracing::warn;
@@ -33,6 +32,9 @@ use crate::{
 };
 
 const LIFECYCLE_TRANSITION_DEADLINE: Duration = Duration::from_secs(10);
+mod shutdown;
+mod worker_join;
+use worker_join::WorkerJoin;
 
 fn log_mobile_query_failure(operation: &'static str, error: &BindingError) {
     match error {
@@ -503,7 +505,7 @@ enum WorkerCommand {
         response: mpsc::Sender<Result<(), BindingError>>,
     },
     Shutdown {
-        deadline: Duration,
+        deadline: Instant,
         response: mpsc::Sender<Result<(), BindingError>>,
     },
 }
@@ -513,7 +515,7 @@ pub struct MobileEngine {
     commands: Mutex<Option<tokio::sync::mpsc::UnboundedSender<WorkerCommand>>>,
     lifecycle_commands: Mutex<Option<tokio::sync::mpsc::UnboundedSender<WorkerCommand>>>,
     events: Arc<EventQueue>,
-    worker: Mutex<Option<JoinHandle<()>>>,
+    worker: WorkerJoin,
 }
 
 struct EventQueueState {
@@ -773,7 +775,7 @@ impl MobileEngine {
                 commands: Mutex::new(Some(commands)),
                 lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
                 events,
-                worker: Mutex::new(Some(worker)),
+                worker: WorkerJoin::new(worker),
             })),
             Ok(Err(error)) => {
                 let _ = worker.join();
@@ -1206,52 +1208,13 @@ impl MobileEngine {
             .cloned()
             .ok_or(BindingError::AlreadyStopped)
     }
-
-    fn shutdown_inner(&self, deadline: Duration, join: bool) -> Result<(), BindingError> {
-        let started_at = Instant::now();
-        let request_sender = lock(&self.commands).take();
-        let lifecycle_sender = lock(&self.lifecycle_commands)
-            .take()
-            .ok_or(BindingError::AlreadyStopped)?;
-        let (response, result) = mpsc::channel();
-        let shutdown_result = lifecycle_sender
-            .send(WorkerCommand::Shutdown { deadline, response })
-            .map_err(|_| BindingError::RuntimeUnavailable)
-            .and_then(|()| {
-                drop(request_sender);
-                result
-                    .recv_timeout(deadline.saturating_sub(started_at.elapsed()))
-                    .map_err(|_| BindingError::RuntimeUnavailable)?
-            });
-        let join_result = if join {
-            self.join_worker(deadline.saturating_sub(started_at.elapsed()))
-        } else {
-            Ok(())
-        };
-        shutdown_result.and(join_result)
-    }
-
-    fn join_worker(&self, deadline: Duration) -> Result<(), BindingError> {
-        if let Some(worker) = lock(&self.worker).take() {
-            let (finished, completion) = mpsc::channel();
-            std::thread::Builder::new()
-                .name("uc-engine-uniffi-reaper".to_owned())
-                .spawn(move || {
-                    let result = worker.join().map_err(|_| BindingError::RuntimeUnavailable);
-                    let _ = finished.send(result);
-                })
-                .map_err(|_| BindingError::RuntimeUnavailable)?;
-            completion
-                .recv_timeout(deadline)
-                .map_err(|_| BindingError::RuntimeUnavailable)??;
-        }
-        Ok(())
-    }
 }
 
 impl Drop for MobileEngine {
     fn drop(&mut self) {
-        let _ = self.shutdown_inner(Duration::from_secs(5), true);
+        if self.shutdown_inner(Duration::from_secs(5), true).is_err() {
+            let _ = self.join_worker(Duration::ZERO);
+        }
     }
 }
 
@@ -1300,6 +1263,7 @@ async fn run_worker_loop(
     };
     if started.send(Ok(())).is_err() {
         let _ = engine.shutdown(Duration::ZERO).await;
+        while engine_events.next().await.is_some() {}
         return;
     }
     let engine = Arc::new(engine);
@@ -1316,10 +1280,10 @@ async fn run_worker_loop(
     'worker: loop {
         let command = tokio::select! {
             biased;
-            command = lifecycle_requests.recv() => command,
-            command = requests.recv() => command,
+            Some(command) = lifecycle_requests.recv() => command,
+            Some(command) = requests.recv() => command,
+            else => break,
         };
-        let Some(command) = command else { break };
         match command {
             WorkerCommand::RecoverSession {
                 allow_secure_storage_unlock,
@@ -1373,6 +1337,8 @@ async fn run_worker_loop(
                                         break;
                                     }
                                     let _ = suspend_response.send(result);
+                                    let _ = response.send(Err(BindingError::RuntimeUnavailable));
+                                    break;
                                 }
                                 Some(WorkerCommand::LifecycleState { response }) => {
                                     let _ = response.send(map_engine_state(engine.lifecycle_state().await));
@@ -1382,7 +1348,7 @@ async fn run_worker_loop(
                                         &mut recovery,
                                         async {
                                             engine
-                                                .shutdown(deadline)
+                                                .shutdown(deadline.saturating_duration_since(Instant::now()))
                                                 .await
                                                 .map_err(BindingError::from)
                                         },
@@ -1391,8 +1357,12 @@ async fn run_worker_loop(
                                     .map(|_| ());
                                     crate::observability::schedule_flush_after_success(&result);
                                     let _ = response.send(Err(BindingError::RuntimeUnavailable));
-                                    shutdown_response = Some((shutdown, result));
-                                    break 'worker;
+                                    if result.is_ok() {
+                                        shutdown_response = Some((shutdown, result));
+                                        break 'worker;
+                                    }
+                                    let _ = shutdown.send(result);
+                                    break;
                                 }
                                 Some(WorkerCommand::Resume { response }) => {
                                     let result = engine.resume().await.map_err(BindingError::from);
@@ -1777,10 +1747,16 @@ async fn run_worker_loop(
                 let _ = response.send(result);
             }
             WorkerCommand::Shutdown { deadline, response } => {
-                let result = engine.shutdown(deadline).await.map_err(BindingError::from);
+                let result = engine
+                    .shutdown(deadline.saturating_duration_since(Instant::now()))
+                    .await
+                    .map_err(BindingError::from);
                 crate::observability::schedule_flush_after_success(&result);
-                shutdown_response = Some((response, result));
-                break;
+                if result.is_ok() {
+                    shutdown_response = Some((response, result));
+                    break;
+                }
+                let _ = response.send(result);
             }
         }
     }
@@ -2774,7 +2750,7 @@ mod tests {
             commands: Mutex::new(Some(commands)),
             lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
             events,
-            worker: Mutex::new(Some(worker)),
+            worker: WorkerJoin::new(worker),
         };
         let started_at = Instant::now();
 
@@ -2812,7 +2788,7 @@ mod tests {
             commands: Mutex::new(Some(commands)),
             lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
             events,
-            worker: Mutex::new(Some(worker)),
+            worker: WorkerJoin::new(worker),
         });
         let recovering_engine = Arc::clone(&engine);
         let recovery = std::thread::spawn(move || recovering_engine.recover_session(true));
