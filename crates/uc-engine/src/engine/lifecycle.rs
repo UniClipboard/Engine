@@ -12,8 +12,6 @@ use crate::{
     EngineError, EngineErrorCategory, EngineEvent, EngineState, LifecycleAction, OperationTerminal,
 };
 
-const SUSPEND_OPERATION_DRAIN: Duration = Duration::from_secs(2);
-
 enum Request {
     Quiesce(Instant),
     Suspend(Option<Instant>),
@@ -103,16 +101,9 @@ impl Transition {
             EngineState::Suspended => return Ok(()),
             _ => return Err(invalid_state_error()),
         }
-        let budget = deadline.map_or(SUSPEND_OPERATION_DRAIN, |deadline| {
-            deadline
-                .saturating_duration_since(Instant::now())
-                .min(SUSPEND_OPERATION_DRAIN)
-        });
-        let result = if self.operations.wait_until_empty(budget).await {
-            self.runtime.suspend(deadline).await
-        } else {
-            Err(operation_cancelled_error())
-        };
+        // 等待期限只约束调用方；已接受的暂停必须在真实读写结束后继续收尾。
+        self.operations.wait_empty().await;
+        let result = self.runtime.suspend(deadline).await;
         self.report_result(LifecycleAction::Suspend, result)?;
         self.publish(EngineState::Suspended).await;
         Ok(())

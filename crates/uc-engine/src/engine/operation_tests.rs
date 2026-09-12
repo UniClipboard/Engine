@@ -26,6 +26,7 @@ struct BlockingRuntime {
     release: Arc<Barrier>,
     disk_finished: Arc<AtomicBool>,
     shutdown_calls: AtomicUsize,
+    suspend_calls: AtomicUsize,
     panic: bool,
 }
 
@@ -36,6 +37,7 @@ impl BlockingRuntime {
             release: Arc::new(Barrier::new(2)),
             disk_finished: Arc::new(AtomicBool::new(false)),
             shutdown_calls: AtomicUsize::new(0),
+            suspend_calls: AtomicUsize::new(0),
             panic,
         }
     }
@@ -63,6 +65,8 @@ impl EngineRuntime for BlockingRuntime {
     }
 
     async fn suspend(&self, _deadline: Option<Instant>) -> Result<(), EngineError> {
+        assert!(self.disk_finished.load(Ordering::SeqCst));
+        self.suspend_calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
     async fn resume(&self) -> Result<(), EngineError> {
@@ -121,6 +125,55 @@ async fn abandoned_operation_keeps_disk_work_owned_until_shutdown_finishes() {
     assert_eq!(runtime.shutdown_calls.load(Ordering::SeqCst), 1);
     assert_eq!(cancelled, 1);
     assert!(stopped);
+}
+
+#[tokio::test]
+async fn suspend_timeout_during_disk_work_still_completes_without_another_request() {
+    let runtime = Arc::new(BlockingRuntime::new(false));
+    let (engine, mut events) = Engine::from_runtime(Arc::clone(&runtime), 16);
+    let engine = Arc::new(engine);
+    let caller = {
+        let engine = Arc::clone(&engine);
+        tokio::spawn(async move { engine.execute(Operation::ListDevices).await })
+    };
+    runtime.started.notified().await;
+    let result = engine
+        .suspend_with_deadline(Duration::from_millis(10))
+        .await;
+    let suspended_before_disk = runtime.suspend_calls.load(Ordering::SeqCst);
+    caller.abort();
+    let abandoned = caller.await;
+    drop(engine);
+    runtime.release.wait();
+    match abandoned {
+        Ok(result) => assert_eq!(
+            result.unwrap_err().category(),
+            EngineErrorCategory::DeadlineExceeded
+        ),
+        Err(error) => assert!(error.is_cancelled()),
+    }
+    assert_eq!(
+        result.unwrap_err().category(),
+        EngineErrorCategory::DeadlineExceeded
+    );
+    assert_eq!(suspended_before_disk, 0);
+    timeout(Duration::from_secs(1), async {
+        while let Some(event) = events.next().await {
+            if matches!(
+                event,
+                EngineEvent::StateChanged {
+                    state: EngineState::Suspended
+                }
+            ) {
+                return;
+            }
+        }
+        panic!("suspension ended without completion");
+    })
+    .await
+    .unwrap();
+    assert!(runtime.disk_finished.load(Ordering::SeqCst));
+    assert_eq!(runtime.suspend_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
