@@ -13,14 +13,14 @@ const CHUNK_BYTES: usize = 64 * 1024;
 const TAG_BYTES: usize = 16;
 const NONCE_BYTES: usize = 19;
 
-pub(super) struct ArchiveWriter<W: Write> {
+pub(in super::super) struct ArchiveWriter<W: Write> {
     output: W,
     cipher: EncryptorBE32<XChaCha20Poly1305>,
     buffer: Zeroizing<Vec<u8>>,
 }
 
 impl<W: Write> ArchiveWriter<W> {
-    pub(super) fn new(mut output: W, key: &MasterKey) -> io::Result<Self> {
+    pub(in super::super) fn new(mut output: W, key: &MasterKey) -> io::Result<Self> {
         let mut nonce = [0; NONCE_BYTES];
         rand::rng().fill_bytes(&mut nonce);
         output.write_all(MAGIC)?;
@@ -32,7 +32,7 @@ impl<W: Write> ArchiveWriter<W> {
         })
     }
 
-    pub(super) fn finish(mut self) -> io::Result<W> {
+    pub(in super::super) fn finish(mut self) -> io::Result<W> {
         let payload = Payload {
             msg: &self.buffer,
             aad: MAGIC,
@@ -74,7 +74,7 @@ fn write_frame(output: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
     output.write_all(bytes)
 }
 
-pub(super) struct ArchiveReader<R: Read> {
+pub(in super::super) struct ArchiveReader<R: Read> {
     input: R,
     cipher: Option<DecryptorBE32<XChaCha20Poly1305>>,
     buffer: Zeroizing<Vec<u8>>,
@@ -82,7 +82,7 @@ pub(super) struct ArchiveReader<R: Read> {
 }
 
 impl<R: Read> ArchiveReader<R> {
-    pub(super) fn new(mut input: R, key: &MasterKey) -> io::Result<Self> {
+    pub(in super::super) fn new(mut input: R, key: &MasterKey) -> io::Result<Self> {
         let mut magic = [0; MAGIC.len()];
         input.read_exact(&mut magic)?;
         if magic != *MAGIC {
@@ -155,9 +155,13 @@ fn crypto_error(source: AeadError) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, source)
 }
 
-pub(super) fn invalid_archive() -> io::Error {
+fn invalid_archive() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
         "profile backup archive is invalid",
     )
 }
+
+#[cfg(test)]
+#[path = "security_stream_tests.rs"]
+mod tests;

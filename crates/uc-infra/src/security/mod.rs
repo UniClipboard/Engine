@@ -20,7 +20,9 @@ mod profile_lifecycle;
 mod profile_payload_adapters;
 mod profile_reset;
 mod profile_runtime_layout;
+mod profile_startup_storage;
 mod profile_storage_upgrade;
+mod profile_upgrade_backup;
 mod secrets;
 mod space_admission_auth;
 mod space_control_generation;
@@ -67,11 +69,13 @@ pub use profile_lifecycle::ProfileLifecycleRepository;
 pub use profile_payload_adapters::ProfilePayloadAdapters;
 pub use profile_reset::{ProfileKeyWiper, ProfileStateCleaner};
 pub use profile_runtime_layout::ProfileRuntimeLayout;
+pub use profile_startup_storage::ProfileStartupStorage;
 pub use profile_storage_upgrade::{
     ProfileStorageUpgrade, ProfileStorageUpgradeError, ProfileStorageUpgradeOutcome,
     StorageUpgradeFailure, StorageUpgradeObserver, StorageUpgradeProgressOutcome,
     StorageUpgradeSnapshot, StorageUpgradeStep, StorageUpgradeStepProgress, StorageUpgradeUnit,
 };
+pub use profile_upgrade_backup::ProfileUpgradeBackupStore;
 pub(crate) use secrets::{Kek, MasterKey};
 pub use space_admission_auth::{
     SpaceAdmissionAuth, SpaceAdmissionAuthContext, SpaceAdmissionAuthError,

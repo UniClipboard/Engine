@@ -7,7 +7,7 @@ use uc_application::deps::{
 };
 use uc_core::ports::SecureStoragePort;
 
-const PROFILE_LIFECYCLE_MARKER_NAME: &str = "profile_lifecycle_marker:v1";
+pub(super) const PROFILE_LIFECYCLE_MARKER_NAME: &str = "profile_lifecycle_marker:v1";
 const PROFILE_LIFECYCLE_MARKER_FORMAT_V1: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

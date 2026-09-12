@@ -39,14 +39,19 @@ pub use crate::clipboard::inbound::{ClipboardDelivery, ClipboardReceiverPort};
 use crate::clipboard::write::{MobileConsumabilityProbe, MobileConsumableBackfill};
 pub use crate::facade::config_migration::ConfigMigrationDeps;
 pub use crate::profile::factory_reset::{
-    ClearProfileStatePort, FactoryResetPhase, PrepareProfileLifecycleUseCase,
-    ProfileFactoryResetCapabilityError, ProfileGeneration, ProfileLifecycle, ProfileLifecycleError,
-    ProfileLifecycleRepositoryError, ProfileLifecycleRepositoryPort, ProfileLifecycleState,
-    StopProfileRuntimePort, WipeProfileKeysPort,
+    ClearProfileStatePort, FactoryResetPhase, ProfileFactoryResetCapabilityError,
+    ProfileGeneration, ProfileLifecycle, ProfileLifecycleError, ProfileLifecycleRepositoryError,
+    ProfileLifecycleRepositoryPort, ProfileLifecycleState, StopProfileRuntimePort,
+    WipeProfileKeysPort,
 };
 pub use crate::profile::probe_profile_key_access::{
     ProbeProfileKeyAccessPort, ProbeProfileKeyAccessUseCase, ProfileKeyAccessProbe,
     ProfileKeyAccessProbePortError,
+};
+pub use crate::profile::startup::{
+    PrepareProfileStartupUseCase, ProfileStartupError, ProfileStartupStorageError,
+    ProfileStartupStoragePort, ProfileUpgradeBackupError, ProfileUpgradeBackupPort,
+    ProfileUpgradeSource, ProfileUpgradeVersions,
 };
 use crate::search::mutation_gate::{CoordinatedSearchIndex, SearchMutationGate};
 pub use crate::space::{

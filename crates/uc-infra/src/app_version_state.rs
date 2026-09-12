@@ -15,6 +15,7 @@
 //! * IO 失败 → `AppVersionStateError::Read` / `::Write`。
 //! * JSON 不合法或 schema 不识别 → `AppVersionStateError::Corrupt`。
 
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -36,6 +37,25 @@ struct UpgradeCursorFile {
 }
 
 const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+/// 升级前只读来源版本，复用游标格式，不创建目录、不打开数据库。
+pub(crate) fn read_version_before_upgrade(path: &Path) -> io::Result<Option<String>> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    file.take(4097).read_to_end(&mut bytes)?;
+    if bytes.len() > 4096 {
+        return Err(io::Error::other("upgrade version record exceeds limit"));
+    }
+    let parsed: UpgradeCursorFile = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    if parsed.schema_version != CURRENT_SCHEMA_VERSION || parsed.last_seen_version.is_empty() {
+        return Err(io::Error::other("upgrade version record is invalid"));
+    }
+    Ok(Some(parsed.last_seen_version))
+}
 
 pub struct FileAppVersionStateRepository {
     file_path: PathBuf,

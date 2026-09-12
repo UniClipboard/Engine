@@ -1,44 +1,18 @@
-use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
-use std::io::{self, Cursor, Read, Write};
+use std::io::{self, Cursor};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
 use diesel::connection::SimpleConnection;
 use diesel::{Connection, RunQueryDsl, SqliteConnection};
 use tempfile::{tempdir, TempDir};
-use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
-use super::super::MasterKey;
-use super::stream::{ArchiveReader, ArchiveWriter};
-use super::{key_name, ProfileBackupArchive, ProfileBackupArchiveError, ProfileBackupSource};
-
-#[derive(Default)]
-struct MemoryStorage(Mutex<BTreeMap<String, Vec<u8>>>);
-
-impl SecureStoragePort for MemoryStorage {
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
-        Ok(self.0.lock().unwrap().get(key).cloned())
-    }
-    fn set(&self, key: &str, value: &[u8]) -> Result<(), SecureStorageError> {
-        self.0
-            .lock()
-            .unwrap()
-            .insert(key.to_owned(), value.to_vec());
-        Ok(())
-    }
-    fn delete(&self, key: &str) -> Result<(), SecureStorageError> {
-        self.0.lock().unwrap().remove(key);
-        Ok(())
-    }
-}
+use super::{ProfileBackupArchive, ProfileBackupArchiveError, ProfileBackupSource};
 
 struct Fixture {
     _temporary: TempDir,
     root: PathBuf,
     source: PathBuf,
-    storage: Arc<MemoryStorage>,
     archive: ProfileBackupArchive,
 }
 
@@ -48,13 +22,11 @@ impl Fixture {
         let root = fs::canonicalize(temporary.path()).unwrap();
         let source = root.join("source");
         fs::create_dir(&source).unwrap();
-        let storage = Arc::new(MemoryStorage::default());
-        let archive = ProfileBackupArchive::new(root.join("backups"), storage.clone());
+        let archive = ProfileBackupArchive::new(root.join("backups"));
         Self {
             _temporary: temporary,
             root,
             source,
-            storage,
             archive,
         }
     }
@@ -62,12 +34,12 @@ impl Fixture {
 
 fn source_version() -> ProfileBackupSource {
     ProfileBackupSource {
-        product_version: "old-product-1.0".into(),
-        engine_version: "old-engine-0.9".into(),
+        product_version: Some("old-product-1.0".into()),
+        engine_version: Some("old-engine-0.9".into()),
         platform: "macos".into(),
         architecture: "aarch64".into(),
-        installation_channel: "direct".into(),
-        artifact_digest: [42; 32],
+        installation_channel: Some("direct".into()),
+        artifact_digest: Some([42; 32]),
     }
 }
 
@@ -160,7 +132,7 @@ fn cold_sqlite_wal_and_files_restore_without_schema_migration_or_source_writes()
         b"legacy.sqlite",
         b"old-product-1.0",
     ] {
-        assert!(!archive_bytes
+        assert!(archive_bytes
             .windows(probe.len())
             .any(|window| window == probe));
     }
@@ -173,7 +145,7 @@ fn empty_directory_round_trip_and_reopened_store_verification() {
         .archive
         .capture(&fixture.source, source_version())
         .unwrap();
-    let reopened = ProfileBackupArchive::new(fixture.root.join("backups"), fixture.storage.clone());
+    let reopened = ProfileBackupArchive::new(fixture.root.join("backups"));
     reopened.verify(&receipt).unwrap();
     let destination = fixture.root.join("restored");
     reopened
@@ -207,7 +179,7 @@ fn multiple_archives_never_overwrite_previous_data() {
 }
 
 #[test]
-fn missing_key_is_not_recreated_and_existing_destination_is_never_overwritten() {
+fn existing_destination_is_never_overwritten_and_source_deletion_does_not_lose_backup() {
     let fixture = Fixture::new();
     fs::write(fixture.source.join("payload"), b"unchanged").unwrap();
     let receipt = fixture
@@ -222,15 +194,14 @@ fn missing_key_is_not_recreated_and_existing_destination_is_never_overwritten() 
         fs::read(fixture.source.join("payload")).unwrap(),
         b"unchanged"
     );
+    fs::remove_dir_all(&fixture.source).unwrap();
+    fixture.archive.verify(&receipt).unwrap();
+    let restored = fixture.root.join("restored-after-delete");
     fixture
-        .storage
-        .delete(&key_name(uuid::Uuid::from_bytes(receipt.archive_id)))
+        .archive
+        .restore_to_new_directory(&receipt, &restored)
         .unwrap();
-    assert!(matches!(
-        fixture.archive.verify(&receipt),
-        Err(ProfileBackupArchiveError::KeyMissing)
-    ));
-    assert!(fixture.storage.0.lock().unwrap().is_empty());
+    assert_eq!(fs::read(restored.join("payload")).unwrap(), b"unchanged");
 }
 
 #[test]
@@ -243,7 +214,7 @@ fn damaged_archive_and_wrong_version_are_rejected_before_creating_restore_direct
         .unwrap();
     let destination = fixture.root.join("restored");
     let mut wrong_version = receipt.clone();
-    wrong_version.source.product_version = "not-the-old-version".into();
+    wrong_version.source.product_version = Some("not-the-old-version".into());
     assert!(matches!(
         fixture
             .archive
@@ -270,10 +241,9 @@ fn damaged_archive_and_wrong_version_are_rejected_before_creating_restore_direct
 fn backup_directory_inside_source_is_rejected_without_modifying_source() {
     let fixture = Fixture::new();
     let nested = fixture.source.join("nested/backups");
-    let archive = ProfileBackupArchive::new(nested, fixture.storage.clone());
+    let archive = ProfileBackupArchive::new(nested);
     assert!(archive.capture(&fixture.source, source_version()).is_err());
     assert_eq!(fs::read_dir(&fixture.source).unwrap().count(), 0);
-    assert!(fixture.storage.0.lock().unwrap().is_empty());
 }
 
 #[cfg(unix)]
@@ -300,104 +270,6 @@ fn symbolic_links_and_special_files_cannot_enter_archives() {
     assert!(fs::read_dir(fixture.root.join("backups"))
         .unwrap()
         .all(|entry| entry.unwrap().path().extension().unwrap() == "partial"));
-}
-
-#[test]
-fn stream_authenticates_exact_boundaries_and_rejects_truncation_reordering_and_append() {
-    let key = MasterKey::from_bytes(&[9; 32]).unwrap();
-    for size in [0, 1, 65_535, 65_536, 65_537, 131_072] {
-        let plaintext = vec![6; size];
-        let mut writer = ArchiveWriter::new(Vec::new(), &key).unwrap();
-        for part in plaintext.chunks(317) {
-            writer.write_all(part).unwrap();
-        }
-        let bytes = writer.finish().unwrap();
-        let mut recovered = Vec::new();
-        ArchiveReader::new(Cursor::new(&bytes), &key)
-            .unwrap()
-            .read_to_end(&mut recovered)
-            .unwrap();
-        assert_eq!(plaintext, recovered);
-        for length in [0, 8, 27, bytes.len() - 1] {
-            assert!(decode(&bytes[..length], &key).is_err());
-        }
-        let mut extra = bytes.clone();
-        extra.push(0);
-        assert!(decode(&extra, &key).is_err());
-        assert!(decode(&bytes, &MasterKey::from_bytes(&[10; 32]).unwrap()).is_err());
-        if size == 131_072 {
-            let mut reordered = bytes.clone();
-            let length = 4 + 65_536 + 16;
-            reordered[27..27 + length].copy_from_slice(&bytes[27 + length..27 + 2 * length]);
-            assert!(decode(&reordered, &key).is_err());
-        }
-    }
-}
-
-fn decode(bytes: &[u8], key: &MasterKey) -> io::Result<Vec<u8>> {
-    let mut output = Vec::new();
-    ArchiveReader::new(Cursor::new(bytes), key)?.read_to_end(&mut output)?;
-    Ok(output)
-}
-
-#[test]
-fn oversized_ciphertext_frame_is_rejected_without_large_allocation() {
-    let key = MasterKey::from_bytes(&[9; 32]).unwrap();
-    let mut bytes = ArchiveWriter::new(Vec::new(), &key)
-        .unwrap()
-        .finish()
-        .unwrap();
-    bytes[27..31].copy_from_slice(&u32::MAX.to_be_bytes());
-    assert!(decode(&bytes, &key).is_err());
-}
-
-#[test]
-fn streaming_large_input_uses_bounded_output_frames_and_preserves_write_failure() {
-    #[derive(Default)]
-    struct BoundedSink {
-        largest_write: usize,
-        bytes: usize,
-    }
-    impl Write for BoundedSink {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.largest_write = self.largest_write.max(bytes.len());
-            self.bytes += bytes.len();
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    let key = MasterKey::from_bytes(&[9; 32]).unwrap();
-    let mut writer = ArchiveWriter::new(BoundedSink::default(), &key).unwrap();
-    let size = 16 * 1024 * 1024;
-    io::copy(&mut io::repeat(19).take(size), &mut writer).unwrap();
-    let output = writer.finish().unwrap();
-    assert!(output.bytes > size as usize);
-    assert!(output.largest_write <= 65_536 + 16);
-
-    struct FailingSink;
-    impl Write for FailingSink {
-        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
-            Err(io::Error::from(io::ErrorKind::StorageFull))
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    let error = match ArchiveWriter::new(FailingSink, &key) {
-        Ok(_) => panic!("storage failure must be returned"),
-        Err(error) => ProfileBackupArchiveError::from(error),
-    };
-    assert_eq!(
-        error
-            .source()
-            .unwrap()
-            .downcast_ref::<io::Error>()
-            .unwrap()
-            .kind(),
-        io::ErrorKind::StorageFull
-    );
 }
 
 #[test]
@@ -486,77 +358,16 @@ fn backup_and_isolated_restore_are_private_to_the_current_user() {
 }
 
 #[test]
-fn changed_source_between_capture_and_verification_never_publishes_archive() {
-    struct MutatingStorage {
-        inner: MemoryStorage,
-        source: PathBuf,
-    }
-    impl SecureStoragePort for MutatingStorage {
-        fn get(&self, key: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
-            let value = self.inner.get(key)?;
-            if value.is_some() {
-                // 持久密钥回读发生在第一遍目录写出后，精确覆盖第二遍来源校验。
-                fs::write(&self.source, b"concurrent-new-content").unwrap();
-            }
-            Ok(value)
-        }
-        fn set(&self, key: &str, value: &[u8]) -> Result<(), SecureStorageError> {
-            self.inner.set(key, value)
-        }
-        fn delete(&self, key: &str) -> Result<(), SecureStorageError> {
-            self.inner.delete(key)
-        }
-    }
+fn source_recheck_detects_changes_without_a_secure_storage_dependency() {
     let fixture = Fixture::new();
     let source = fixture.source.join("payload");
     fs::write(&source, b"original").unwrap();
-    let archive = ProfileBackupArchive::new(
-        fixture.root.join("backups"),
-        Arc::new(MutatingStorage {
-            inner: MemoryStorage::default(),
-            source: source.clone(),
-        }),
-    );
-    assert!(matches!(
-        archive.capture(&fixture.source, source_version()),
-        Err(ProfileBackupArchiveError::SourceChanged)
-    ));
-    assert_eq!(fs::read(source).unwrap(), b"concurrent-new-content");
-    assert!(fs::read_dir(fixture.root.join("backups"))
-        .unwrap()
-        .all(|entry| entry.unwrap().path().extension().unwrap() == "partial"));
-}
-
-#[test]
-fn secure_storage_failure_retains_source_without_exposing_private_details() {
-    struct DeniedStorage;
-    impl SecureStoragePort for DeniedStorage {
-        fn get(&self, _: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
-            Err(SecureStorageError::PermissionDenied(
-                "private-diagnostic-probe".into(),
-            ))
-        }
-        fn set(&self, _: &str, _: &[u8]) -> Result<(), SecureStorageError> {
-            panic!("must stop on read failure")
-        }
-        fn delete(&self, _: &str) -> Result<(), SecureStorageError> {
-            panic!("must not remove existing data")
-        }
-    }
-    let fixture = Fixture::new();
-    let archive = ProfileBackupArchive::new(fixture.root.join("backups"), Arc::new(DeniedStorage));
-    let error = archive
-        .capture(&fixture.source, source_version())
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        ProfileBackupArchiveError::SecureStorage { .. }
-    ));
-    assert!(error
-        .source()
-        .unwrap()
-        .downcast_ref::<SecureStorageError>()
-        .is_some());
-    assert!(!error.to_string().contains("private-diagnostic-probe"));
-    assert_eq!(fs::read_dir(&fixture.source).unwrap().count(), 0);
+    let (_, before) =
+        super::tree::write_selected_tree(io::sink(), &fixture.source, &source_version(), &[])
+            .unwrap();
+    fs::write(&source, b"changed").unwrap();
+    let (_, after) =
+        super::tree::write_selected_tree(io::sink(), &fixture.source, &source_version(), &[])
+            .unwrap();
+    assert_ne!(before, after);
 }

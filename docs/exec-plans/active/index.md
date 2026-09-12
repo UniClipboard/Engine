@@ -6,7 +6,7 @@
 - [038 双设备配对本机耗时压缩到一秒](038-pairing-local-latency-budget.md)（等待用户决定是否实施）
 - [039 历史本地调试记录逐项收口](039-local-debug-inventory-cleanup.md)
 - [041 可导出的连接故障调查记录](041-exportable-connection-diagnostics.md)（含 Engine、手机、桌面宿主及联合验收，进度见正文）
-- [043 升级前备份与软件版本回退](043-pre-upgrade-profile-backup.md)（实施中：目录归档切片已验证，完整版本回退尚未接入）
+- [043 升级前备份与软件版本回退](043-pre-upgrade-profile-backup.md)（实施中：启动前备份及恢复出厂清理已接入，完整版本回退尚未完成）
 - [历史可读时的邀请失败](2026-09-12-invitation-admission-recovery.md)
 - [本地产物准备](local-artifacts-preparation.md)
 

@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use blake3::Hasher;
 use tar::{Archive, Builder, EntryType, Header};
 use zeroize::Zeroizing;
 
-use super::stream::invalid_archive;
+use super::error::invalid_archive;
 use super::{private_new_file, sync_directory, ProfileBackupSource};
 
 const MAX_ENTRIES: usize = 100_000;
@@ -16,10 +16,11 @@ const MAX_SOURCE_BYTES: u64 = 4096;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_INVENTORY_BYTES: usize = 16 * 1024 * 1024;
 
-pub(super) fn write_tree<W: Write>(
+pub(in super::super) fn write_selected_tree<W: Write>(
     output: W,
     root: &Path,
     source: &ProfileBackupSource,
+    excluded: &[PathBuf],
 ) -> io::Result<(W, [u8; 32])> {
     let mut builder = Builder::new(HashingIo::new(output));
     let metadata = Zeroizing::new(serde_json::to_vec(source).map_err(io::Error::other)?);
@@ -35,7 +36,20 @@ pub(super) fn write_tree<W: Write>(
     )?;
     let mut budget = InventoryBudget::default();
     budget.admit(Path::new("data"))?;
-    append_tree(&mut builder, root, Path::new("data"), &mut budget)?;
+    match fs::symlink_metadata(root) {
+        Ok(_) => append_tree(&mut builder, root, Path::new("data"), &mut budget, excluded)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            // 仅缓存待处理内容存在时，主资料目录可能尚未创建；归档空根而不改动来源。
+            append(
+                &mut builder,
+                Path::new("data"),
+                0,
+                EntryType::Directory,
+                io::empty(),
+            )?;
+        }
+        Err(error) => return Err(error),
+    }
     let hashed = builder.into_inner()?;
     Ok((hashed.inner, *hashed.hasher.finalize().as_bytes()))
 }
@@ -45,6 +59,7 @@ fn append_tree<W: Write>(
     source: &Path,
     relative: &Path,
     budget: &mut InventoryBudget,
+    excluded: &[PathBuf],
 ) -> io::Result<()> {
     let metadata = fs::symlink_metadata(source)?;
     if metadata.is_dir() {
@@ -52,6 +67,9 @@ fn append_tree<W: Write>(
         let mut children = Vec::new();
         for child in fs::read_dir(source)? {
             let child = child?;
+            if excluded.contains(&child.path()) {
+                continue;
+            }
             // 在保留待遍历项时扣除预算，避免深层目录累计持有多个满额列表。
             budget.admit(&relative.join(child.file_name()))?;
             children.push(child);
@@ -63,6 +81,7 @@ fn append_tree<W: Write>(
                 &child.path(),
                 &relative.join(child.file_name()),
                 budget,
+                excluded,
             )?;
         }
     } else if metadata.is_file() {
@@ -162,7 +181,7 @@ pub(super) fn read_tree<R: Read>(
     if seen.get(Path::new("data")) != Some(&true) {
         return Err(invalid_archive());
     }
-    // tar 在零块处结束，但仍必须消费并认证整个密文流的最后一块。
+    // tar 在零块处结束，仍消费全部尾部，使截断、追加也参与摘要校验。
     let mut hashed = archive.into_inner();
     let mut trailing = [0; 8192];
     loop {
@@ -227,7 +246,23 @@ pub(super) fn require_directory(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub(super) fn require_disjoint_destination(source: &Path, destination: &Path) -> io::Result<()> {
+pub(in super::super) fn resolve_source_root(path: &Path) -> io::Result<PathBuf> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => fs::canonicalize(path),
+        Ok(_) => Err(invalid_archive()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let parent = path.parent().ok_or_else(invalid_archive)?;
+            require_directory(parent)?;
+            Ok(fs::canonicalize(parent)?.join(path.file_name().ok_or_else(invalid_archive)?))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub(in super::super) fn require_disjoint_destination(
+    source: &Path,
+    destination: &Path,
+) -> io::Result<()> {
     if !destination.is_absolute()
         || destination
             .components()
@@ -258,10 +293,20 @@ pub(super) fn require_disjoint_destination(source: &Path, destination: &Path) ->
     }
 }
 
-pub(super) fn create_private_directory(path: &Path) -> io::Result<()> {
+pub(in super::super) fn create_private_directory(path: &Path) -> io::Result<()> {
     let mut builder = private_directory_builder();
     builder.recursive(true).create(path)?;
-    require_directory(path)
+    require_directory(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::symlink_metadata(path)?;
+        // 已存在的共享目录不能被当作私有副本目录，也不擅自修改调用方目录权限。
+        if metadata.mode() & 0o077 != 0 || metadata.uid() != unsafe { libc::geteuid() } {
+            return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn create_private_directory_new(path: &Path) -> io::Result<()> {
@@ -278,7 +323,7 @@ fn private_directory_builder() -> DirBuilder {
     builder
 }
 
-pub(super) fn open_regular_file(path: &Path) -> io::Result<File> {
+pub(in super::super) fn open_regular_file(path: &Path) -> io::Result<File> {
     if !fs::symlink_metadata(path)?.is_file() {
         return Err(invalid_archive());
     }
