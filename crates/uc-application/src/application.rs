@@ -200,6 +200,7 @@ pub enum ApplicationStartError {
         #[source]
         source: ActiveClipboardStartError,
         search_rollback: Option<SearchShutdownError>,
+        space_rollback: Option<Arc<LifecycleError>>,
     },
     #[error("active clipboard restore source attachment failed")]
     ActiveClipboardRestore {
@@ -207,11 +208,13 @@ pub enum ApplicationStartError {
         source: ActiveClipboardLifecycleError,
         search_rollback: Option<SearchShutdownError>,
         active_clipboard_rollback: Option<LifecycleError>,
+        space_rollback: Option<Arc<LifecycleError>>,
     },
     #[error("Space session activity was already bound")]
     SpaceActivityAlreadyBound {
         search_rollback: Option<SearchShutdownError>,
         active_clipboard_rollback: Option<LifecycleError>,
+        space_rollback: Option<Arc<LifecycleError>>,
     },
 }
 
@@ -522,10 +525,11 @@ impl ApplicationAssembly {
             Ok(runtime) => runtime,
             Err(source) => {
                 let search_rollback = search.shutdown().await.err();
-                space.on_shutdown().await;
+                let space_rollback = space.on_shutdown().await.err();
                 return Err(ApplicationStartError::ActiveClipboard {
                     source,
                     search_rollback,
+                    space_rollback,
                 });
             }
         };
@@ -533,11 +537,12 @@ impl ApplicationAssembly {
         if let Err(source) = active_clipboard.attach_restore_broadcast(restore_rx) {
             let active_clipboard_rollback = active_clipboard.shutdown().await.err();
             let search_rollback = search.shutdown().await.err();
-            space.on_shutdown().await;
+            let space_rollback = space.on_shutdown().await.err();
             return Err(ApplicationStartError::ActiveClipboardRestore {
                 source,
                 search_rollback,
                 active_clipboard_rollback,
+                space_rollback,
             });
         }
         if !space.bind_session_activity(
@@ -547,10 +552,11 @@ impl ApplicationAssembly {
         ) {
             let active_clipboard_rollback = active_clipboard.shutdown().await.err();
             let search_rollback = search.shutdown().await.err();
-            space.on_shutdown().await;
+            let space_rollback = space.on_shutdown().await.err();
             return Err(ApplicationStartError::SpaceActivityAlreadyBound {
                 search_rollback,
                 active_clipboard_rollback,
+                space_rollback,
             });
         }
 
@@ -690,6 +696,7 @@ impl ApplicationRuntime {
                 file_transfer_timeout: None,
                 clipboard: None,
                 active_clipboard: None,
+                space: None,
             };
         };
         let history = owners.history_maintenance.shutdown().await.err();
@@ -697,13 +704,14 @@ impl ApplicationRuntime {
         let clipboard = owners.clipboard.shutdown().await.err();
         let active_clipboard = owners.active_clipboard.shutdown().await.err();
         let search = owners.search.shutdown().await.err();
-        owners.space.on_shutdown().await;
+        let space = owners.space.on_shutdown().await.err();
         ApplicationShutdownReport {
             history,
             search,
             file_transfer_timeout,
             clipboard,
             active_clipboard,
+            space,
         }
     }
 }
@@ -726,6 +734,7 @@ pub struct ApplicationShutdownReport {
     pub file_transfer_timeout: Option<JoinError>,
     pub clipboard: Option<Arc<LifecycleError>>,
     pub active_clipboard: Option<LifecycleError>,
+    pub space: Option<Arc<LifecycleError>>,
 }
 
 impl ApplicationShutdownReport {
@@ -745,6 +754,9 @@ impl ApplicationShutdownReport {
         }
         if let Some(error) = self.active_clipboard {
             errors.push(anyhow::Error::new(error).context("stop active clipboard workers"));
+        }
+        if let Some(error) = self.space {
+            errors.push(anyhow::Error::new(error).context("stop space runtime"));
         }
         LifecycleError::from_errors(errors)
     }
@@ -768,6 +780,7 @@ mod tests {
             file_transfer_timeout: Some(timeout.await.unwrap_err()),
             clipboard: None,
             active_clipboard: None,
+            space: None,
             search: Some(SearchShutdownError::Coordinator {
                 source: std::io::Error::other("PRIVATE_SEARCH_FAILURE").into(),
             }),
@@ -810,6 +823,7 @@ mod tests {
         let error = ApplicationStartError::ActiveClipboard {
             source: ActiveClipboardStartError::BackgroundNotReady,
             search_rollback: None,
+            space_rollback: None,
         };
 
         assert!(error.source().is_some());

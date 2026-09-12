@@ -1,3 +1,4 @@
+use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -5,6 +6,105 @@ use async_trait::async_trait;
 
 use super::runtime::SpaceMembershipMaintenanceRuntimeError;
 use super::*;
+use crate::application::ApplicationShutdownReport;
+use crate::runtime_lifecycle::LifecycleError;
+
+struct PanickingAdmission;
+
+#[async_trait]
+impl RecoverSpaceAdmissionsPort for PanickingAdmission {
+    async fn recover_space_admissions(
+        &self,
+        _: &MembershipMaintenanceTrigger,
+    ) -> MembershipMaintenanceStepOutcome {
+        panic!("PRIVATE_MEMBERSHIP_FAILURE");
+    }
+}
+
+#[tokio::test]
+async fn failed_round_is_retained_by_pause_resume_shutdown_and_application_report() {
+    for finish_in_background in [false, true] {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let step = |name| {
+            Arc::new(RecordingStep {
+                name,
+                calls: Arc::clone(&calls),
+                outcome: MembershipMaintenanceStepOutcome::Completed,
+            })
+        };
+        let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
+            MaintainSpaceMembershipDeps {
+                admissions: Arc::new(PanickingAdmission),
+                effects: step("effects"),
+                conflicts: step("conflicts"),
+                group_update_delivery: step("group_updates"),
+                restricted_delivery: step("restricted"),
+                synchronization: step("synchronize"),
+                cleanup: step("cleanup"),
+            },
+        ));
+        let (_presence_tx, presence_rx) = tokio::sync::broadcast::channel(4);
+        let runtime = SpaceMembershipMaintenanceRuntime::start(
+            maintain,
+            presence_rx,
+            std::time::Duration::from_secs(3600),
+            Arc::new(NoopNetworkActivity),
+        );
+        let activity = runtime.activity();
+        if finish_in_background {
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while activity.request_state_changed().is_ok() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        let pause_error = activity.pause().await.unwrap_err();
+        let SpaceMembershipMaintenanceRuntimeError::Task(source) = &pause_error else {
+            panic!("missing original task failure");
+        };
+        assert!(source.is_panic());
+        assert!(pause_error.source().is_some());
+        assert!(!format!("{pause_error:?} {pause_error}").contains("PRIVATE"));
+        let resume_error = activity.resume().await.unwrap_err();
+        let SpaceMembershipMaintenanceRuntimeError::Task(resume_source) = resume_error else {
+            panic!("resume lost task failure");
+        };
+        assert!(Arc::ptr_eq(source, &resume_source));
+        let shutdown_error = runtime.shutdown().await.unwrap_err();
+        let SpaceMembershipMaintenanceRuntimeError::Task(shutdown_source) = shutdown_error
+            .downcast_ref::<SpaceMembershipMaintenanceRuntimeError>()
+            .unwrap()
+        else {
+            panic!("shutdown lost task failure");
+        };
+        assert!(Arc::ptr_eq(source, shutdown_source));
+        assert!(calls.lock().unwrap().is_empty());
+        let space_error = Arc::new(LifecycleError {
+            primary: shutdown_error,
+            additional: Vec::new(),
+        });
+        let report = ApplicationShutdownReport {
+            history: None,
+            search: None,
+            file_transfer_timeout: None,
+            clipboard: None,
+            active_clipboard: None,
+            space: Some(Arc::clone(&space_error)),
+        }
+        .into_result()
+        .unwrap_err();
+        assert!(Arc::ptr_eq(
+            &space_error,
+            report
+                .primary
+                .downcast_ref::<Arc<LifecycleError>>()
+                .unwrap()
+        ));
+        assert!(!format!("{report:?} {report}").contains("PRIVATE"));
+    }
+}
 
 #[derive(Clone)]
 struct RecordingStep {
@@ -387,7 +487,7 @@ async fn runtime_pause_resume_peer_reachability_and_shutdown_share_one_lifecycle
     });
     wait_for_call_count(&calls, 19).await;
 
-    runtime.shutdown().await;
+    runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -449,7 +549,7 @@ async fn pause_cancels_network_work_and_waits_for_the_current_commit_boundary() 
             "cleanup"
         ]
     );
-    runtime.shutdown().await;
+    runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test(start_paused = true)]
@@ -495,7 +595,7 @@ async fn shutdown_waits_beyond_the_old_timeout_until_the_active_round_finishes()
     assert!(!shutdown.is_finished());
     assert!(calls.lock().unwrap().is_empty());
     release.notify_one();
-    shutdown.await.unwrap();
+    shutdown.await.unwrap().unwrap();
     assert_eq!(calls.lock().unwrap().len(), 6);
 }
 
@@ -552,7 +652,10 @@ async fn dropping_the_owner_or_shutdown_waiter_keeps_the_round_owned_until_compl
             .unwrap()
             .unwrap();
         assert!(!finished_before_release);
-        assert_eq!(result, Err(SpaceMembershipMaintenanceRuntimeError::Closed));
+        assert!(matches!(
+            result,
+            Err(SpaceMembershipMaintenanceRuntimeError::Closed)
+        ));
         assert_eq!(calls.lock().unwrap().len(), 6);
     }
 }
@@ -628,5 +731,5 @@ async fn online_events_for_different_peers_are_not_overwritten_during_a_round() 
             "cleanup",
         ]
     );
-    runtime.shutdown().await;
+    runtime.shutdown().await.unwrap();
 }

@@ -1,3 +1,4 @@
+use std::fmt;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -14,8 +15,8 @@ trait SearchSessionActivityPort: Send + Sync {
 
 #[async_trait]
 pub trait MembershipSessionActivityPort: Send + Sync {
-    async fn pause(&self) -> Result<(), String>;
-    async fn resume(&self) -> Result<(), String>;
+    async fn pause(&self) -> anyhow::Result<()>;
+    async fn resume(&self) -> anyhow::Result<()>;
 }
 
 #[async_trait]
@@ -64,7 +65,7 @@ impl SpaceSessionActivityPort for DeferredSpaceSessionActivity {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum SpaceActivityError {
     #[error("peer connection activity failed")]
     Connectivity(#[from] crate::space::PeerConnectionError),
@@ -74,8 +75,20 @@ pub enum SpaceActivityError {
     Search(#[source] anyhow::Error),
     #[error("receive activation failed: {0}")]
     Receive(String),
-    #[error("membership activation failed: {0}")]
-    Membership(String),
+    #[error("membership activation failed")]
+    Membership(#[source] anyhow::Error),
+}
+
+impl fmt::Debug for SpaceActivityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Connectivity(_) => "SpaceActivityError::Connectivity",
+            Self::Unavailable => "SpaceActivityError::Unavailable",
+            Self::Search(_) => "SpaceActivityError::Search",
+            Self::Receive(_) => "SpaceActivityError::Receive",
+            Self::Membership(_) => "SpaceActivityError::Membership",
+        })
+    }
 }
 
 pub struct SpaceSessionActivity {
@@ -177,7 +190,7 @@ impl SpaceSessionActivityPort for CombinedSpaceSessionActivity {
     async fn restore_after_failed_lock(&self) -> Result<(), anyhow::Error> {
         let other = self.other.restore_after_failed_lock().await;
         let membership = self.membership.resume().await;
-        restore_results(vec![other, membership.map_err(anyhow::Error::msg)])
+        restore_results(vec![other, membership])
     }
 }
 
@@ -225,6 +238,16 @@ mod tests {
         assert!(!error.to_string().contains("private-search-storage-detail"));
     }
 
+    #[tokio::test]
+    async fn membership_task_failure_keeps_its_source_out_of_default_summaries() {
+        let source = tokio::spawn(async { panic!("PRIVATE_MEMBERSHIP_DETAIL") })
+            .await
+            .unwrap_err();
+        let error = SpaceActivityError::Membership(source.into());
+        assert!(error.source().unwrap().is::<tokio::task::JoinError>());
+        assert!(!format!("{error:?} {error}").contains("PRIVATE"));
+    }
+
     struct RecordingMembership {
         pauses: AtomicUsize,
         resumes: AtomicUsize,
@@ -232,12 +255,12 @@ mod tests {
 
     #[async_trait]
     impl MembershipSessionActivityPort for RecordingMembership {
-        async fn pause(&self) -> Result<(), String> {
+        async fn pause(&self) -> anyhow::Result<()> {
             self.pauses.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
-        async fn resume(&self) -> Result<(), String> {
+        async fn resume(&self) -> anyhow::Result<()> {
             self.resumes.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }

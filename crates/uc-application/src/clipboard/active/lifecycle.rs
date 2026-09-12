@@ -393,6 +393,7 @@ mod lifecycle_tests {
             file_transfer_timeout: None,
             clipboard: None,
             active_clipboard: Some(error),
+            space: None,
         }
         .into_result()
         .unwrap_err();

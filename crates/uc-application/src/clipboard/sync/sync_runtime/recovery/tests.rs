@@ -100,6 +100,7 @@ async fn shutdown_survives_waiter_cancellation_and_retains_both_worker_failures(
         file_transfer_timeout: None,
         clipboard: Some(Arc::clone(&error)),
         active_clipboard: None,
+        space: None,
     };
     let failure = report.into_result().unwrap_err();
     assert!(Arc::ptr_eq(

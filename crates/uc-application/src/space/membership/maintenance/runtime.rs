@@ -1,14 +1,18 @@
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::fmt;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use async_trait::async_trait;
+use thiserror::Error;
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 use uc_core::ports::{PeerReachabilityChanged, ReachabilityState};
 
 use super::{MaintainSpaceMembershipUseCase, MembershipMaintenanceTrigger};
+use crate::space::lifecycle::MembershipSessionActivityPort;
 
 pub trait MembershipNetworkActivityPort: Send + Sync {
     fn pause_network_work(&self);
@@ -21,16 +25,25 @@ enum RuntimeCommand {
     StateChanged,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Error)]
 pub enum SpaceMembershipMaintenanceRuntimeError {
     #[error("space membership maintenance runtime is closed")]
     Closed,
+    #[error("space membership maintenance task failed")]
+    Task(#[source] Arc<JoinError>),
+}
+
+impl fmt::Debug for SpaceMembershipMaintenanceRuntimeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
 }
 
 #[derive(Clone)]
 pub(crate) struct SpaceMembershipMaintenanceActivity {
     commands: mpsc::UnboundedSender<RuntimeCommand>,
     cancel: CancellationToken,
+    failure: Arc<OnceLock<Arc<JoinError>>>,
 }
 
 impl SpaceMembershipMaintenanceActivity {
@@ -43,33 +56,48 @@ impl SpaceMembershipMaintenanceActivity {
     }
 
     pub fn request_state_changed(&self) -> Result<(), SpaceMembershipMaintenanceRuntimeError> {
+        self.check_failure()?;
         self.commands
             .send(RuntimeCommand::StateChanged)
-            .map_err(|_| SpaceMembershipMaintenanceRuntimeError::Closed)
+            .map_err(|_| self.closed_error())
     }
 
     async fn request(
         &self,
         command: impl FnOnce(oneshot::Sender<()>) -> RuntimeCommand,
     ) -> Result<(), SpaceMembershipMaintenanceRuntimeError> {
+        self.check_failure()?;
         let (completed, receiver) = oneshot::channel();
         self.commands
             .send(command(completed))
-            .map_err(|_| SpaceMembershipMaintenanceRuntimeError::Closed)?;
-        receiver
-            .await
-            .map_err(|_| SpaceMembershipMaintenanceRuntimeError::Closed)
+            .map_err(|_| self.closed_error())?;
+        receiver.await.map_err(|_| self.closed_error())
+    }
+
+    fn check_failure(&self) -> Result<(), SpaceMembershipMaintenanceRuntimeError> {
+        match self.failure.get() {
+            Some(source) => Err(SpaceMembershipMaintenanceRuntimeError::Task(Arc::clone(
+                source,
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    fn closed_error(&self) -> SpaceMembershipMaintenanceRuntimeError {
+        self.check_failure()
+            .err()
+            .unwrap_or(SpaceMembershipMaintenanceRuntimeError::Closed)
     }
 }
 
-#[async_trait::async_trait]
-impl crate::space::lifecycle::MembershipSessionActivityPort for SpaceMembershipMaintenanceActivity {
-    async fn pause(&self) -> Result<(), String> {
-        self.pause().await.map_err(|error| error.to_string())
+#[async_trait]
+impl MembershipSessionActivityPort for SpaceMembershipMaintenanceActivity {
+    async fn pause(&self) -> anyhow::Result<()> {
+        self.pause().await.map_err(anyhow::Error::new)
     }
 
-    async fn resume(&self) -> Result<(), String> {
-        self.resume().await.map_err(|error| error.to_string())
+    async fn resume(&self) -> anyhow::Result<()> {
+        self.resume().await.map_err(anyhow::Error::new)
     }
 }
 
@@ -106,6 +134,7 @@ impl SpaceMembershipMaintenanceRuntime {
         let activity = SpaceMembershipMaintenanceActivity {
             commands,
             cancel: CancellationToken::new(),
+            failure: Arc::new(OnceLock::new()),
         };
         PreparedSpaceMembershipMaintenanceRuntime {
             maintain,
@@ -145,6 +174,7 @@ impl SpaceMembershipMaintenanceRuntime {
             mut history_changes,
         } = prepared;
         let task_cancel = activity.cancel.clone();
+        let failure = Arc::clone(&activity.failure);
         let task = tokio::spawn(async move {
             let mut paused = false;
             let mut peer_reachability_open = true;
@@ -160,13 +190,33 @@ impl SpaceMembershipMaintenanceRuntime {
                 tokio::select! {
                     biased;
                     _ = task_cancel.cancelled() => break,
+                    result = async {
+                        match active_round.as_mut() {
+                            Some(round) => Some(round.await),
+                            None => None,
+                        }
+                    }, if active_round.is_some() => {
+                        active_round = None;
+                        if let Some(Err(source)) = result {
+                            let _ = failure.set(Arc::new(source));
+                            break;
+                        }
+                        if !paused {
+                            if let Some(trigger) = queued_triggers.pop_front() {
+                                active_round = Some(spawn_round(Arc::clone(&maintain), trigger));
+                            }
+                        }
+                    },
                     command = command_rx.recv() => match command {
                         Some(RuntimeCommand::Pause(completed)) => {
                             paused = true;
                             queued_triggers.clear();
                             network_activity.pause_network_work();
                             if let Some(round) = active_round.take() {
-                                let _ = round.await;
+                                if let Err(source) = round.await {
+                                    let _ = failure.set(Arc::new(source));
+                                    break;
+                                }
                             }
                             let _ = completed.send(());
                         }
@@ -192,20 +242,6 @@ impl SpaceMembershipMaintenanceRuntime {
                         }
                         Some(RuntimeCommand::StateChanged) => {}
                         None => break,
-                    },
-                    result = async {
-                        match active_round.as_mut() {
-                            Some(round) => Some(round.await),
-                            None => None,
-                        }
-                    }, if active_round.is_some() => {
-                        let _ = result;
-                        active_round = None;
-                        if !paused {
-                            if let Some(trigger) = queued_triggers.pop_front() {
-                                active_round = Some(spawn_round(Arc::clone(&maintain), trigger));
-                            }
-                        }
                     },
                     changed = history_changes.changed(), if !paused && history_open => {
                         if changed.is_err() { history_open = false; }
@@ -238,7 +274,9 @@ impl SpaceMembershipMaintenanceRuntime {
             network_activity.pause_network_work();
             // 宿主期限由外层负责；必须等当前完整动作结束后才能释放成员运行期。
             if let Some(round) = active_round {
-                let _ = round.await;
+                if let Err(source) = round.await {
+                    let _ = failure.set(Arc::new(source));
+                }
             }
         });
         Self {
@@ -252,11 +290,14 @@ impl SpaceMembershipMaintenanceRuntime {
         self.activity.clone()
     }
 
-    pub async fn shutdown(mut self) {
+    pub async fn shutdown(mut self) -> anyhow::Result<()> {
         self.activity.cancel.cancel();
         if let Some(task) = self.task.take() {
-            let _ = task.await;
+            if let Err(source) = task.await {
+                let _ = self.activity.failure.set(Arc::new(source));
+            }
         }
+        self.activity.check_failure().map_err(anyhow::Error::new)
     }
 }
 
