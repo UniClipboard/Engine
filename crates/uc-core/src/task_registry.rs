@@ -7,14 +7,55 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::task::JoinSet;
+use std::{error::Error, fmt};
+use tokio::task::{JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Default)]
 pub struct TaskShutdownReport {
     pub completed_count: usize,
     pub timed_out_count: usize,
     pub join_error_count: usize,
+    failures: Vec<JoinError>,
+}
+
+impl TaskShutdownReport {
+    pub fn into_result(self) -> Result<(), Self> {
+        if self.failures.is_empty() {
+            Ok(())
+        } else {
+            Err(self)
+        }
+    }
+
+    pub fn failures(&self) -> &[JoinError] {
+        &self.failures
+    }
+}
+
+impl fmt::Debug for TaskShutdownReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TaskShutdownReport")
+            .field("completed_count", &self.completed_count)
+            .field("timed_out_count", &self.timed_out_count)
+            .field("join_error_count", &self.join_error_count)
+            .finish()
+    }
+}
+
+impl fmt::Display for TaskShutdownReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("background tasks did not stop cleanly")
+    }
+}
+
+impl Error for TaskShutdownReport {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.failures
+            .first()
+            .map(|source| source as &(dyn Error + 'static))
+    }
 }
 
 /// Centralized registry for tracking and managing long-lived async tasks.
@@ -97,9 +138,7 @@ impl TaskRegistry {
             tokio::select! {
                 result = tasks.join_next() => {
                     match result {
-                        Some(Ok(())) => report.completed_count += 1,
-                        Some(Err(error)) if error.is_cancelled() => report.timed_out_count += 1,
-                        Some(Err(_)) => report.join_error_count += 1,
+                        Some(result) => add_join_result(&mut report, result),
                         None => return report,
                     }
                 }
@@ -118,11 +157,17 @@ impl TaskRegistry {
     }
 }
 
-fn add_join_result(report: &mut TaskShutdownReport, result: Result<(), tokio::task::JoinError>) {
+fn add_join_result(report: &mut TaskShutdownReport, result: Result<(), JoinError>) {
     match result {
         Ok(()) => report.completed_count += 1,
-        Err(error) if error.is_cancelled() => report.timed_out_count += 1,
-        Err(_) => report.join_error_count += 1,
+        Err(error) => {
+            if error.is_cancelled() {
+                report.timed_out_count += 1;
+            } else {
+                report.join_error_count += 1;
+            }
+            report.failures.push(error);
+        }
     }
 }
 
@@ -153,6 +198,15 @@ mod tests {
         assert_eq!(report.join_error_count, 1);
         assert_eq!(report.timed_out_count, 0);
         assert!(!format!("{report:?}").contains("PRIVATE_TASK_PANIC"));
+        let failure = report.into_result().unwrap_err();
+        assert!(failure
+            .source()
+            .unwrap()
+            .downcast_ref::<JoinError>()
+            .unwrap()
+            .is_panic());
+        assert_eq!(failure.failures().len(), 1);
+        assert!(!failure.to_string().contains("PRIVATE_TASK_PANIC"));
     }
 
     #[tokio::test]
@@ -178,10 +232,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_retains_every_failure_with_redacted_summary() {
+        let registry = TaskRegistry::new();
+        assert!(
+            registry
+                .spawn(|_| async { panic!("PRIVATE_FAILURE") })
+                .await
+        );
+        assert!(registry.spawn(|_| std::future::pending()).await);
+        let report = registry
+            .shutdown(Duration::from_millis(10))
+            .await
+            .into_result()
+            .unwrap_err();
+        assert_eq!(report.failures().len(), 2);
+        assert_eq!(report.join_error_count, 1);
+        assert_eq!(report.timed_out_count, 1);
+        assert!(report.failures().iter().any(JoinError::is_panic));
+        assert!(report.failures().iter().any(JoinError::is_cancelled));
+        assert!(!format!("{report:?}").contains("PRIVATE_FAILURE"));
+    }
+
+    #[tokio::test]
     async fn spawn_is_rejected_after_shutdown_closes_the_registry() {
         let registry = TaskRegistry::new();
         let report = registry.shutdown(Duration::ZERO).await;
-        assert_eq!(report, TaskShutdownReport::default());
+        assert!(report.into_result().is_ok());
 
         assert!(!registry.spawn(|_| async {}).await);
         assert_eq!(registry.task_count().await, 0);

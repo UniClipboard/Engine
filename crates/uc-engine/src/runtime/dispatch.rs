@@ -7,6 +7,8 @@ use std::time::Duration;
 
 #[cfg(feature = "dev-tools")]
 use super::operation_error_with_code;
+use super::session_supervisor::lifecycle_error;
+use super::task_shutdown::shutdown_tasks;
 use super::ProductionRuntime;
 use crate::engine::EngineRuntime;
 use crate::operations::clipboard::capture::execute_capture_current_clipboard;
@@ -79,6 +81,7 @@ use crate::{EngineError, Operation, OperationResult};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
+use uc_application::facade::LifecycleError;
 
 #[async_trait]
 impl EngineRuntime for ProductionRuntime {
@@ -717,9 +720,14 @@ impl EngineRuntime for ProductionRuntime {
 
     async fn shutdown(&self, deadline: Duration) -> Result<(), EngineError> {
         self.network_recovery.shutdown().await;
-        self.session_supervisor.stop().await?;
+        self.session_supervisor
+            .stop()
+            .await
+            .map_err(lifecycle_error)?;
         self.session_supervisor.close_file_transfers().await?;
-        super::task_shutdown::shutdown_tasks(&self.task_registry, deadline).await;
+        let tasks = shutdown_tasks(&self.task_registry, deadline)
+            .await
+            .into_result();
         self.security_lifecycle.close_security_session();
         self.session_supervisor.clear_factory();
         if let Err(error) = std::fs::remove_dir_all(&self.clipboard_import_root) {
@@ -727,6 +735,7 @@ impl EngineRuntime for ProductionRuntime {
                 warn!(error = %error, "failed to remove host clipboard imports");
             }
         }
-        Ok(())
+        LifecycleError::from_errors(tasks.err().map(anyhow::Error::new).into_iter().collect())
+            .map_err(lifecycle_error)
     }
 }

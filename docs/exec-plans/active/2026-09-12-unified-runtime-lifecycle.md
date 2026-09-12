@@ -467,6 +467,18 @@ impl RuntimeLifecycleCoordinator {
 - 18 项 Application 关闭测试、8 项会话测试、3 项真实宿主测试通过；metadata、workspace 全目标、
   Engine lan-compat 全目标、fmt、Rust 风格、架构与隐私、diff 检查通过，仅有既存测试未使用内容警告。
 
+### 2026-09-13：后台任务报告与资料重置停止边界
+
+- TaskRegistry 在保持原有停止和析构顺序的基础上保留全部 JoinError；报告的 Debug/Display 不暴露 panic 负载。
+  标准 source 指向首个失败，其余失败可在同一报告内追溯。
+- 会话关闭、最终关闭、资料重置均检查报告。任务已经实际退出时继续永久资源收尾，最终返回失败；
+  任务取消超时经过嵌套报告仍保持 DeadlineExceeded 分类。
+- StopProfileRuntimePort 与统一生命周期共享错误合同，资料重置保留停止 source，不在停止失败后启动密钥或数据删除；
+  解除停止故障后可由同一入口重试。未修改资料重置其他失败类型及持久化阶段语义。
+- Iroh 下层完整报告、统一期限和设备验收仍未完成。
+- 显式启用 task-registry 的 4 项任务测试、6 项资料重置测试、9 项会话测试和 3 项真实宿主测试通过；
+  metadata、workspace 全目标、fmt、Rust 风格、架构与隐私、diff 检查通过，仅有既存测试未使用内容警告。
+
 # 7. Edge Cases
 
 

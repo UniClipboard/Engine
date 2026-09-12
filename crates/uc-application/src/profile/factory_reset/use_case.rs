@@ -49,7 +49,7 @@ impl ProfileFactoryResetFacade {
         self.runtime
             .stop_profile_runtime()
             .await
-            .map_err(|_| ProfileFactoryResetError::StopRuntime)?;
+            .map_err(|source| ProfileFactoryResetError::StopRuntime { source })?;
 
         if lifecycle.state() == ProfileLifecycleState::Ready {
             let previous = lifecycle.clone();
@@ -99,9 +99,11 @@ fn next_generation(previous: ProfileGeneration) -> ProfileGeneration {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
+    use crate::runtime_lifecycle::LifecycleError;
     use async_trait::async_trait;
 
     use super::*;
@@ -177,8 +179,11 @@ mod tests {
 
     #[async_trait]
     impl StopProfileRuntimePort for Capability {
-        async fn stop_profile_runtime(&self) -> Result<(), ProfileFactoryResetCapabilityError> {
-            self.invoke()
+        async fn stop_profile_runtime(&self) -> Result<(), LifecycleError> {
+            self.invoke().map_err(|error| LifecycleError {
+                primary: error.into(),
+                additional: Vec::new(),
+            })
         }
     }
 
@@ -222,6 +227,40 @@ mod tests {
         assert_eq!(lifecycle.current().state(), ProfileLifecycleState::Ready);
         assert_ne!(lifecycle.current().generation(), generation);
         assert_eq!(*calls.lock().unwrap(), ["stop", "wipe", "clear"]);
+    }
+
+    #[tokio::test]
+    async fn failed_runtime_stop_preserves_source_and_does_not_start_deletion() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let generation = ProfileGeneration::from_bytes([2; 16]);
+        let lifecycle = Arc::new(LifecycleRepository::ready(generation));
+        let reset = ProfileFactoryResetFacade::new(
+            lifecycle.clone(),
+            Arc::new(Capability::new("stop", Arc::clone(&calls), 1)),
+            Arc::new(Capability::new("wipe", Arc::clone(&calls), 0)),
+            Arc::new(Capability::new("clear", Arc::clone(&calls), 0)),
+        );
+        let error = reset
+            .execute(ProfileFactoryResetRequest::Start)
+            .await
+            .unwrap_err();
+        let source = error
+            .source()
+            .unwrap()
+            .downcast_ref::<LifecycleError>()
+            .unwrap();
+        assert!(source
+            .primary
+            .downcast_ref::<ProfileFactoryResetCapabilityError>()
+            .is_some());
+        assert_eq!(*calls.lock().unwrap(), ["stop"]);
+        assert_eq!(lifecycle.current().generation(), generation);
+        assert_eq!(lifecycle.current().state(), ProfileLifecycleState::Ready);
+        reset
+            .execute(ProfileFactoryResetRequest::Start)
+            .await
+            .unwrap();
+        assert_eq!(*calls.lock().unwrap(), ["stop", "stop", "wipe", "clear"]);
     }
 
     #[tokio::test]

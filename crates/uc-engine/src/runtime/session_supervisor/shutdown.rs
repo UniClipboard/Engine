@@ -19,7 +19,12 @@ impl ProductionSession {
         if let Err(error) = self.mobile_sync.shutdown_mobile_file_uploads().await {
             errors.push(anyhow::Error::new(error).context("stop mobile file uploads"));
         }
-        shutdown_tasks(&self.tasks, Duration::from_millis(500)).await;
+        if let Err(error) = shutdown_tasks(&self.tasks, Duration::from_millis(500))
+            .await
+            .into_result()
+        {
+            errors.push(error.into());
+        }
         info!("Engine session 网络观测任务已停止");
         if let Err(error) = self.application.shutdown().await.into_result() {
             errors.push(error.into());

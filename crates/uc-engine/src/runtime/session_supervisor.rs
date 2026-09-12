@@ -40,7 +40,8 @@ const SESSION_OPERATION_GRACE: Duration = Duration::from_secs(2);
 
 mod lifecycle;
 mod shutdown;
-use lifecycle::{lifecycle_error, SessionWork};
+pub(super) use lifecycle::lifecycle_error;
+use lifecycle::SessionWork;
 
 struct ProductionSessionFactory {
     wired: WiredDependencies,
@@ -489,8 +490,8 @@ impl SessionSupervisor {
             .map_err(|error| operation_error_with_code(1104, "close file transfers", error))
     }
 
-    pub(super) async fn stop(&self) -> Result<(), EngineError> {
-        self.coordinator.stop(None).await.map_err(lifecycle_error)
+    pub(super) async fn stop(&self) -> Result<(), LifecycleError> {
+        self.coordinator.stop(None).await
     }
 
     fn configured_factory(&self) -> Option<Arc<ProductionSessionFactory>> {

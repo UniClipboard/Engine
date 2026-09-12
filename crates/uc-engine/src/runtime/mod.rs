@@ -19,7 +19,7 @@ use uc_application::deps::{
     ProfileFactoryResetCapabilityError, ProfileUpgradeBackupPort, StopProfileRuntimePort,
 };
 use uc_application::facade::{
-    AppFacade, ApplicationRuntime, NetworkRecoveryEvent, ProfileFactoryResetFacade,
+    AppFacade, ApplicationRuntime, LifecycleError, NetworkRecoveryEvent, ProfileFactoryResetFacade,
     ProfileFactoryResetOutcome, ProfileFactoryResetRequest,
 };
 use uc_core::ports::ClockPort;
@@ -76,15 +76,14 @@ struct ProductionProfileRuntimeStopper {
 
 #[async_trait::async_trait]
 impl StopProfileRuntimePort for ProductionProfileRuntimeStopper {
-    async fn stop_profile_runtime(&self) -> Result<(), ProfileFactoryResetCapabilityError> {
-        self.session_supervisor
-            .stop()
+    async fn stop_profile_runtime(&self) -> Result<(), LifecycleError> {
+        self.session_supervisor.stop().await?;
+        let tasks = task_shutdown::shutdown_tasks(&self.tasks, Duration::from_millis(500))
             .await
-            .map_err(|_| ProfileFactoryResetCapabilityError)?;
-        task_shutdown::shutdown_tasks(&self.tasks, Duration::from_millis(500)).await;
+            .into_result();
         self.security_lifecycle.close_security_session();
         self.session_supervisor.clear_factory();
-        Ok(())
+        LifecycleError::from_errors(tasks.err().map(anyhow::Error::new).into_iter().collect())
     }
 }
 
