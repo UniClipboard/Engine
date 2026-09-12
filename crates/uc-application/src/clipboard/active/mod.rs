@@ -7,30 +7,20 @@
 //! single lifecycle seam for worker startup, late restore-source attachment,
 //! and coordinated shutdown.
 
+mod lifecycle;
 mod reconcile;
+
+pub use lifecycle::{ActiveClipboardLifecycle, ActiveClipboardLifecycleError};
 
 pub use reconcile::{
     ActiveClipboardReconcileDeps, ActiveClipboardReconcileError, ActiveClipboardReconcileFacade,
     ActiveClipboardReconcileOutcome,
 };
 
-use std::{
-    future::Future,
-    pin::Pin,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-};
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use thiserror::Error;
-use tokio::sync::{
-    broadcast,
-    mpsc::{self, UnboundedReceiver},
-    oneshot,
-};
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::sync::broadcast;
 use tracing::{debug, instrument, warn};
 
 use uc_core::clipboard::{ActiveClipboardState, ClipboardContentCategorySet};
@@ -61,8 +51,6 @@ use crate::clipboard::sync::active_state::apply_inbound::{
     InboundPulledContentStore, InboundPulledContentStoreError, InboundPulledContentStoreOutcome,
 };
 use crate::clipboard::sync::active_state::fanout::fan_out_active_state;
-use crate::clipboard::sync::active_state::peer_online_resync_worker::PeerOnlineResyncWorker;
-use crate::clipboard::sync::active_state::restore_broadcast_worker::RestoreBroadcastWorker;
 use crate::clipboard::sync::active_state::serve_pull::{
     ActiveClipboardPullServeDeps, ActiveClipboardPullServeUseCase,
 };
@@ -72,7 +60,7 @@ use crate::clipboard::sync::send_gate::MemberSendGate;
 use crate::clipboard::sync::snapshot_from_entry::SnapshotReconstructor;
 use crate::clipboard::write::{
     ClipboardWriteCoordinator, ClipboardWriteIntent, LocalActiveRegisterAdvancer,
-    MobileConsumabilityProbe, RestoreBroadcastRequest,
+    MobileConsumabilityProbe,
 };
 use crate::facade::blob_transfer::{BlobTransferFacade, SharedHostEventEmitter};
 use crate::facade::host_event::{ClipboardHostEvent, ClipboardOriginKind, HostEvent};
@@ -341,6 +329,7 @@ impl ActiveClipboardFacade {
         )
         .await;
     }
+<<<<<<< HEAD
 
     /// Start and own every Active Clipboard background worker. The returned
     /// lifecycle is the only task-lifetime seam exposed to bootstrap.
@@ -685,6 +674,8 @@ mod lifecycle_tests {
         .await;
         assert!(completed.is_ok(), "{message}");
     }
+=======
+>>>>>>> 3a8571ed (fix(clipboard): stop active workers without abandoning disk work)
 }
 
 #[instrument(name = "active_state.resurface", skip_all, fields(entry_id = %entry_id))]

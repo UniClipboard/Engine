@@ -206,10 +206,12 @@ pub enum ApplicationStartError {
         #[source]
         source: ActiveClipboardLifecycleError,
         search_rollback: Option<SearchShutdownError>,
+        active_clipboard_rollback: Option<LifecycleError>,
     },
     #[error("Space session activity was already bound")]
     SpaceActivityAlreadyBound {
         search_rollback: Option<SearchShutdownError>,
+        active_clipboard_rollback: Option<LifecycleError>,
     },
 }
 
@@ -529,12 +531,13 @@ impl ApplicationAssembly {
         };
         let (restore_tx, restore_rx) = tokio::sync::mpsc::unbounded_channel();
         if let Err(source) = active_clipboard.attach_restore_broadcast(restore_rx) {
-            active_clipboard.shutdown().await;
+            let active_clipboard_rollback = active_clipboard.shutdown().await.err();
             let search_rollback = search.shutdown().await.err();
             space.on_shutdown().await;
             return Err(ApplicationStartError::ActiveClipboardRestore {
                 source,
                 search_rollback,
+                active_clipboard_rollback,
             });
         }
         if !space.bind_session_activity(
@@ -542,10 +545,13 @@ impl ApplicationAssembly {
             self.file_transfer.facade()
                 as Arc<dyn crate::transfer::receive::reconciliation::EnsureReceiveReadyPort>,
         ) {
-            active_clipboard.shutdown().await;
+            let active_clipboard_rollback = active_clipboard.shutdown().await.err();
             let search_rollback = search.shutdown().await.err();
             space.on_shutdown().await;
-            return Err(ApplicationStartError::SpaceActivityAlreadyBound { search_rollback });
+            return Err(ApplicationStartError::SpaceActivityAlreadyBound {
+                search_rollback,
+                active_clipboard_rollback,
+            });
         }
 
         let clipboard = self.clipboard.start_session(ClipboardSessionDeps {
@@ -683,12 +689,13 @@ impl ApplicationRuntime {
                 search: None,
                 file_transfer_timeout: None,
                 clipboard: None,
+                active_clipboard: None,
             };
         };
         let history = owners.history_maintenance.shutdown().await.err();
         let file_transfer_timeout = owners.file_transfer_timeout.shutdown(deadline).await.err();
         let clipboard = owners.clipboard.shutdown().await.err();
-        owners.active_clipboard.shutdown().await;
+        let active_clipboard = owners.active_clipboard.shutdown().await.err();
         let search = owners.search.shutdown().await.err();
         owners.space.on_shutdown().await;
         ApplicationShutdownReport {
@@ -696,6 +703,7 @@ impl ApplicationRuntime {
             search,
             file_transfer_timeout,
             clipboard,
+            active_clipboard,
         }
     }
 }
@@ -717,6 +725,7 @@ pub struct ApplicationShutdownReport {
     pub search: Option<SearchShutdownError>,
     pub file_transfer_timeout: Option<JoinError>,
     pub clipboard: Option<Arc<LifecycleError>>,
+    pub active_clipboard: Option<LifecycleError>,
 }
 
 impl ApplicationShutdownReport {
@@ -733,6 +742,9 @@ impl ApplicationShutdownReport {
         }
         if let Some(error) = self.clipboard {
             errors.push(anyhow::Error::new(error).context("stop clipboard sync runtime"));
+        }
+        if let Some(error) = self.active_clipboard {
+            errors.push(anyhow::Error::new(error).context("stop active clipboard workers"));
         }
         LifecycleError::from_errors(errors)
     }
@@ -755,6 +767,7 @@ mod tests {
             history: Some(HistoryMaintenanceRuntimeError::Task(history)),
             file_transfer_timeout: Some(timeout.await.unwrap_err()),
             clipboard: None,
+            active_clipboard: None,
             search: Some(SearchShutdownError::Coordinator {
                 source: std::io::Error::other("PRIVATE_SEARCH_FAILURE").into(),
             }),

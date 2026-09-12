@@ -549,8 +549,8 @@ impl ActiveClipboardSession {
         self.lifecycle.attach_restore_broadcast(rx)
     }
 
-    pub async fn shutdown(self) {
-        self.lifecycle.shutdown().await;
+    pub async fn shutdown(self) -> Result<(), LifecycleError> {
+        self.lifecycle.shutdown().await
     }
 }
 

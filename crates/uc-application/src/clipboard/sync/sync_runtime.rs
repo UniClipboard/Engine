@@ -536,6 +536,7 @@ mod tests {
             search: None,
             file_transfer_timeout: None,
             clipboard: Some(Arc::clone(&error)),
+            active_clipboard: None,
         };
         let failure = report.into_result().unwrap_err();
         assert!(Arc::ptr_eq(

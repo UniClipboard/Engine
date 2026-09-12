@@ -34,6 +34,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
 use uc_core::clipboard::{ActiveClipboardState, ClipboardContentCategorySet};
@@ -232,10 +233,15 @@ impl ApplyInboundActiveClipboardStateUseCase {
     /// Spawn the inbound loop. Takes `Arc<Self>` so the spawned task owns the
     /// use case's dependencies without moving them out of the owning facade.
     #[instrument(name = "active_state.inbound_loop", skip_all)]
-    pub(crate) async fn run(self: Arc<Self>) {
+    pub(crate) async fn run(self: Arc<Self>, cancel: CancellationToken) {
         let mut rx = self.receiver.subscribe();
         loop {
-            match rx.recv().await {
+            let inbound = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                inbound = rx.recv() => inbound,
+            };
+            match inbound {
                 Ok(inbound) => self.handle_one(inbound).await,
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
                     warn!(
