@@ -7,7 +7,6 @@
 - [039 历史本地调试记录逐项收口](039-local-debug-inventory-cleanup.md)
 - [041 可导出的连接故障调查记录](041-exportable-connection-diagnostics.md)（含 Engine、手机、桌面宿主及联合验收，进度见正文）
 - [历史可读时的邀请失败](2026-09-12-invitation-admission-recovery.md)
-- [已有连接活性与故障恢复](2026-09-12-connection-liveness-and-recovery.md)（方案已编写，待实施；以自动化端到端验证为完成门禁）
 - [本地产物准备](local-artifacts-preparation.md)
 
 计划完成时先更新稳定设计/ADR 和验收证据，再移入 `../completed/`。

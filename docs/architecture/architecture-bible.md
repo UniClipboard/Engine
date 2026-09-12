@@ -324,7 +324,7 @@ V1/V2 到 V3 的转换只在软件升级时通过独立、原子、可恢复的 
 已接纳连接通过协商的 presence v2 请求/回应验证活性，旧端继续使用 v1 的传输关闭事实。
 新拨号或发送失败只提供单设备复核机会，不直接拆除健康连接，也不触发整会话重建。
 Application 的连接负责人统一周期检查和有界重试，Engine 保留显式会话恢复及生命周期处理。
-[已有连接活性与故障恢复计划](../exec-plans/active/2026-09-12-connection-liveness-and-recovery.md)记录预算、
+[已有连接活性与故障恢复记录](../exec-plans/completed/2026-09-12-connection-liveness-and-recovery.md)记录预算、
 兼容矩阵、验收进度和发布采用状态；实现行为不能代替尚未完成的验收或产品采用证据。
 
 ### 逻辑通道
@@ -825,9 +825,9 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 - 2026-09-12：iOS 与 Android 发布脚本以同一组 `bindgen-cli` feature 一次构建宿主库和接口生成器，并复用 dev profile；宿主库只用于读取接口元数据，不进入发布包。设备库仍使用原来的 release 设置，发布资产、来源校验和架构边界不变。缓存按 dev-host 构建方式区分，避免命中旧缓存后无法保存新增的 dev 依赖；首次准备和后续命中分别验收。Android 在恢复已有缓存后安装固定版本的 cargo-ndk，避免每次重新编译工具。
 
-- 2026-09-12：已有连接使用协商的 presence v2 请求/回应检查，内部名称与原 `PeerReachabilityPort` 对齐为 `peer_reachability`。Application 统一周期检查、通信失败复核与重试；远端失败到整会话重建的触发链已删除，显式恢复保留。阶段验收与旧端兼容的未完成项以活动计划为准。
+- 2026-09-12：已有连接使用协商的 presence v2 请求/回应检查，内部名称与原 `PeerReachabilityPort` 对齐为 `peer_reachability`。Application 统一周期检查、通信失败复核与重试；远端失败到整会话重建的触发链已删除，显式恢复保留。阶段验收与旧端兼容边界以已归档的执行记录为准，发布和宿主采用单列。
 
-- 2026-09-12：新增[已有连接活性与故障恢复计划](../exec-plans/active/2026-09-12-connection-liveness-and-recovery.md)，明确先前局部草稿尚未完成根因修复；补齐 Port 语义、发送失败入口、协议兼容及独立网络端到端门禁。本轮仅整理实施方案与事实状态，无已交付架构变化。
+- 2026-09-12：新增[已有连接活性与故障恢复计划](../exec-plans/completed/2026-09-12-connection-liveness-and-recovery.md)，明确先前局部草稿尚未完成根因修复；补齐 Port 语义、发送失败入口、协议兼容及独立网络端到端门禁。本轮仅整理实施方案与事实状态，无已交付架构变化。
 
 - 2026-09-12：HarmonyOS 绑定的编译期递归深度提升至 256，以完成 Engine 网络启动 Future 的 Send 检查；运行行为、绑定接口与分层所有权不变。
 

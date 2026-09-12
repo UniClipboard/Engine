@@ -64,6 +64,6 @@ Application 按收到的连接通知记录会话内修订。网络尝试超时�
 恢复日志只记录固定触发原因、结果及失败分类，连接的新观察不输出设备身份、地址或原始异常正文。
 公开 Engine 错误继续使用稳定分类；内部新增错误转换保留源错误。
 
-原自动连接验收见[原执行记录](../exec-plans/completed/2026-09-11-automatic-peer-connections.md)，活性与恢复改动见[本次执行计划](../exec-plans/active/2026-09-12-connection-liveness-and-recovery.md)。
+原自动连接验收见[原执行记录](../exec-plans/completed/2026-09-11-automatic-peer-connections.md)，活性与恢复改动见[本次执行记录](../exec-plans/completed/2026-09-12-connection-liveness-and-recovery.md)。
 专用入口为 `bash scripts/testing/run-connection-recovery-e2e.sh --suite all --repeat 3`，独立网络部分必须在支持命名空间和 nftables 的 Linux 环境执行。
 自动验收只查询在线状态，不能通过刷新或发送促成连接；连接后再验证当前成员资格及实际内容传送。
