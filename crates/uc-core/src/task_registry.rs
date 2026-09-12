@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::{error::Error, fmt};
 use tokio::task::{JoinError, JoinSet};
+use tokio::time::{sleep_until, Instant};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
@@ -126,11 +127,22 @@ impl TaskRegistry {
     /// 2. Awaits `join_next()` in a loop with a deadline
     /// 3. 宽限时间耗尽后取消剩余任务，并等待析构完成；不能把取消请求当作资源已释放。
     pub async fn shutdown(&self, timeout_duration: Duration) -> TaskShutdownReport {
+        self.shutdown_at(Instant::now().checked_add(timeout_duration))
+            .await
+    }
+
+    /// 共用调用方的绝对期限，排队不能重新获得宽限时间；None 表示不设期限。
+    pub async fn shutdown_at(&self, deadline: Option<Instant>) -> TaskShutdownReport {
         self.closed.store(true, Ordering::Release);
         self.token.cancel();
 
         let mut tasks = self.tasks.lock().await;
-        let deadline = tokio::time::sleep(timeout_duration);
+        let deadline = async {
+            match deadline {
+                Some(deadline) => sleep_until(deadline).await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::pin!(deadline);
         let mut report = TaskShutdownReport::default();
 
@@ -261,5 +273,47 @@ mod tests {
 
         assert!(!registry.spawn(|_| async {}).await);
         assert_eq!(registry.task_count().await, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_includes_time_waiting_for_the_task_lock() {
+        let registry = Arc::new(TaskRegistry::new());
+        let resource = Arc::new(());
+        let held = Arc::clone(&resource);
+        assert!(
+            registry
+                .spawn(move |_| async move {
+                    let _held = held;
+                    std::future::pending::<()>().await;
+                })
+                .await
+        );
+        let guard = registry.tasks.lock().await;
+        let started = Instant::now();
+        let closing = tokio::spawn({
+            let registry = Arc::clone(&registry);
+            async move { registry.shutdown(Duration::from_secs(1)).await }
+        });
+        registry.token.cancelled().await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        drop(guard);
+
+        let report = closing.await.unwrap();
+        assert_eq!(report.timed_out_count, 1);
+        assert!(started.elapsed() < Duration::from_millis(2100));
+        assert_eq!(Arc::strong_count(&resource), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sequential_registries_share_the_original_deadline() {
+        let first = TaskRegistry::new();
+        let second = TaskRegistry::new();
+        assert!(first.spawn(|_| std::future::pending()).await);
+        assert!(second.spawn(|_| std::future::pending()).await);
+        let started = Instant::now();
+        let deadline = Some(started + Duration::from_secs(1));
+        assert_eq!(first.shutdown_at(deadline).await.timed_out_count, 1);
+        assert_eq!(second.shutdown_at(deadline).await.timed_out_count, 1);
+        assert!(started.elapsed() < Duration::from_millis(1100));
     }
 }

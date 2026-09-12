@@ -719,9 +719,10 @@ impl EngineRuntime for ProductionRuntime {
     }
 
     async fn shutdown(&self, deadline: Duration) -> Result<(), EngineError> {
+        let deadline = tokio::time::Instant::now().checked_add(deadline);
         self.network_recovery.shutdown().await;
         self.session_supervisor
-            .stop()
+            .stop(deadline)
             .await
             .map_err(lifecycle_error)?;
         self.session_supervisor.close_file_transfers().await?;

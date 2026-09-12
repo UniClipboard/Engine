@@ -32,13 +32,16 @@ pub(in super::super) fn lifecycle_error(error: LifecycleError) -> EngineError {
 
 #[async_trait]
 impl RuntimeLifecyclePort for SessionWork {
-    async fn suspend(&self, _context: &TransitionContext) -> anyhow::Result<()> {
+    async fn suspend(&self, context: &TransitionContext) -> anyhow::Result<()> {
         let owner = self.0.upgrade().ok_or_else(operation_unavailable_error)?;
         let _lifecycle = owner.lifecycle.lock().await;
         owner.suspended.store(true, Ordering::Release);
-        owner.operations.close_and_wait(None).await?;
         owner
-            .stop_current_session(FileTransferCancellationReason::Unknown)
+            .operations
+            .close_and_wait(None, context.deadline())
+            .await?;
+        owner
+            .stop_current_session(FileTransferCancellationReason::Unknown, context.deadline())
             .await?;
         Ok(())
     }

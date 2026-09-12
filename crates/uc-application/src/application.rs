@@ -6,6 +6,7 @@
 use crate::clipboard::inbound::ClipboardReceiverPort;
 use std::sync::Arc;
 use tokio::task::JoinError;
+use tokio::time::Instant;
 
 use uc_core::clipboard::ClipboardIntegrationMode;
 use uc_core::file_transfer::OutboundProgressReporterPort;
@@ -675,7 +676,7 @@ impl ApplicationRuntime {
         Arc::clone(&self.inbound_clipboard)
     }
 
-    pub async fn shutdown(&self) -> ApplicationShutdownReport {
+    pub async fn shutdown(&self, deadline: Option<Instant>) -> ApplicationShutdownReport {
         let Some(owners) = self.owners.lock().await.take() else {
             return ApplicationShutdownReport {
                 history: None,
@@ -684,7 +685,7 @@ impl ApplicationRuntime {
             };
         };
         let history = owners.history_maintenance.shutdown().await.err();
-        let file_transfer_timeout = owners.file_transfer_timeout.shutdown().await.err();
+        let file_transfer_timeout = owners.file_transfer_timeout.shutdown(deadline).await.err();
         owners.clipboard.shutdown().await;
         owners.active_clipboard.shutdown().await;
         let search = owners.search.shutdown().await.err();

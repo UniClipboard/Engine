@@ -77,8 +77,9 @@ struct ProductionProfileRuntimeStopper {
 #[async_trait::async_trait]
 impl StopProfileRuntimePort for ProductionProfileRuntimeStopper {
     async fn stop_profile_runtime(&self) -> Result<(), LifecycleError> {
-        self.session_supervisor.stop().await?;
-        let tasks = task_shutdown::shutdown_tasks(&self.tasks, Duration::from_millis(500))
+        let deadline = tokio::time::Instant::now().checked_add(Duration::from_millis(500));
+        self.session_supervisor.stop(deadline).await?;
+        let tasks = task_shutdown::shutdown_tasks(&self.tasks, deadline)
             .await
             .into_result();
         self.security_lifecycle.close_security_session();

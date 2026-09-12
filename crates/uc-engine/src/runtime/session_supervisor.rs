@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use tokio::sync::{Mutex, Notify};
+use tokio::time::{timeout_at, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use uc_application::facade::{
@@ -317,9 +318,10 @@ impl SessionSupervisor {
             if self.suspended.load(Ordering::Acquire) {
                 return Err(operation_unavailable_error());
             }
-            self.operations.close_and_wait(None).await?;
+            self.operations.close_and_wait(None, None).await?;
             self.stop_current_session(
                 uc_core::FileTransferCancellationReason::ConnectivityRecovery,
+                None,
             )
             .await
             .map_err(lifecycle_error)?;
@@ -344,7 +346,7 @@ impl SessionSupervisor {
             }
         }
         observe_session_lifecycle(async {
-            self.operations.close_and_wait(None).await?;
+            self.operations.close_and_wait(None, None).await?;
             match facade.has_pending_space_transition().await {
                 Ok(true) => {}
                 Ok(false) => {
@@ -368,7 +370,7 @@ impl SessionSupervisor {
                 .take()
                 .ok_or_else(super::operation_unavailable_error)?;
             session
-                .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
+                .shutdown(FileTransferCancellationReason::ConnectivityRecovery, None)
                 .await
                 .map_err(lifecycle_error)?;
             let completed = facade.complete_pending_space_transition().await;
@@ -409,7 +411,7 @@ impl SessionSupervisor {
     ) -> Result<OperationResult, EngineError> {
         let _lifecycle = self.lifecycle.lock().await;
         self.operations
-            .close_and_wait(Some(current_operation))
+            .close_and_wait(Some(current_operation), None)
             .await?;
         let session = self
             .session
@@ -419,7 +421,7 @@ impl SessionSupervisor {
             .ok_or_else(super::operation_unavailable_error)?;
         let facade = Arc::clone(&session.facade);
         session
-            .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
+            .shutdown(FileTransferCancellationReason::ConnectivityRecovery, None)
             .await
             .map_err(lifecycle_error)?;
         let transfer_result = self
@@ -490,8 +492,8 @@ impl SessionSupervisor {
             .map_err(|error| operation_error_with_code(1104, "close file transfers", error))
     }
 
-    pub(super) async fn stop(&self) -> Result<(), LifecycleError> {
-        self.coordinator.stop(None).await
+    pub(super) async fn stop(&self, deadline: Option<Instant>) -> Result<(), LifecycleError> {
+        self.coordinator.stop(deadline).await
     }
 
     fn configured_factory(&self) -> Option<Arc<ProductionSessionFactory>> {
@@ -504,11 +506,12 @@ impl SessionSupervisor {
     async fn stop_current_session(
         &self,
         reason: FileTransferCancellationReason,
+        deadline: Option<Instant>,
     ) -> Result<(), LifecycleError> {
         let session = self.session.lock().await.take();
         let mut errors = Vec::new();
         if let Some(session) = session {
-            if let Err(error) = session.shutdown(reason).await {
+            if let Err(error) = session.shutdown(reason, deadline).await {
                 errors.push(error.into());
             }
         }
@@ -535,7 +538,7 @@ impl SessionSupervisor {
         if pending_transition {
             let facade = Arc::clone(&session.facade);
             session
-                .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
+                .shutdown(FileTransferCancellationReason::ConnectivityRecovery, None)
                 .await
                 .map_err(lifecycle_error)?;
             facade
@@ -811,6 +814,7 @@ impl SessionOperationGate {
     async fn close_and_wait(
         &self,
         current_operation: Option<SessionOperationLease>,
+        deadline: Option<Instant>,
     ) -> Result<(), EngineError> {
         if current_operation
             .as_ref()
@@ -828,12 +832,20 @@ impl SessionOperationGate {
             state.cancellation.clone()
         };
         drop(current_operation);
-        let drained = tokio::time::timeout(SESSION_OPERATION_GRACE, self.wait_for_drain()).await;
+        let grace = Instant::now() + SESSION_OPERATION_GRACE;
+        let drained = timeout_at(
+            deadline.map_or(grace, |end| end.min(grace)),
+            self.wait_for_drain(),
+        )
+        .await;
         if drained.is_err() {
             cancellation.cancel();
-            if tokio::time::timeout(SESSION_OPERATION_GRACE, self.wait_for_drain())
-                .await
-                .is_err()
+            if timeout_at(
+                deadline.unwrap_or_else(|| Instant::now() + SESSION_OPERATION_GRACE),
+                self.wait_for_drain(),
+            )
+            .await
+            .is_err()
             {
                 tracing::warn!(
                     error_kind = "session_operation_drain_timeout",
@@ -1027,7 +1039,7 @@ mod tests {
         let lease = gate.acquire().expect("new gate accepts an operation");
         let closing = tokio::spawn({
             let gate = Arc::clone(&gate);
-            async move { gate.close_and_wait(None).await }
+            async move { gate.close_and_wait(None, None).await }
         });
         tokio::task::yield_now().await;
         assert!(gate.acquire().is_err());
@@ -1049,7 +1061,7 @@ mod tests {
 
         let error = tokio::time::timeout(
             SESSION_OPERATION_GRACE.saturating_mul(2) + Duration::from_millis(1),
-            gate.close_and_wait(None),
+            gate.close_and_wait(None, None),
         )
         .await
         .expect("gate close must remain bounded after cancellation")
@@ -1057,7 +1069,7 @@ mod tests {
         assert_eq!(error.category(), EngineErrorCategory::DeadlineExceeded);
         assert!(gate.acquire().is_err());
         drop(_lease);
-        gate.close_and_wait(None).await.unwrap();
+        gate.close_and_wait(None, None).await.unwrap();
     }
 
     #[tokio::test]
@@ -1067,7 +1079,7 @@ mod tests {
         let other = gate.acquire().expect("concurrent operation acquires lease");
         let closing = tokio::spawn({
             let gate = Arc::clone(&gate);
-            async move { gate.close_and_wait(Some(transition)).await }
+            async move { gate.close_and_wait(Some(transition), None).await }
         });
 
         tokio::task::yield_now().await;
@@ -1076,5 +1088,19 @@ mod tests {
 
         drop(other);
         closing.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shared_deadline_limits_both_drain_and_cancellation_waits() {
+        let gate = SessionOperationGate::new_open();
+        let lease = gate.acquire().unwrap();
+        let started = Instant::now();
+        let deadline = Some(started + Duration::from_millis(10));
+        let error = gate.close_and_wait(None, deadline).await.unwrap_err();
+        assert_eq!(error.category(), EngineErrorCategory::DeadlineExceeded);
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(gate.acquire().is_err());
+        drop(lease);
+        gate.close_and_wait(None, deadline).await.unwrap();
     }
 }
