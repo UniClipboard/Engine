@@ -57,7 +57,7 @@ async fn failed_shutdown_keeps_stream_open_and_allows_cleanup_retry() {
 }
 
 #[tokio::test]
-async fn timed_out_shutdown_does_not_claim_stopped_and_can_retry() {
+async fn timed_out_shutdown_keeps_work_alive_and_repeated_wait_does_not_restart_it() {
     let runtime = Arc::new(FakeRuntime::default());
     runtime.block_shutdown.store(true, Ordering::SeqCst);
     let (engine, _events) = Engine::from_runtime(Arc::clone(&runtime), 16);
@@ -68,16 +68,26 @@ async fn timed_out_shutdown_does_not_claim_stopped_and_can_retry() {
     assert_eq!(error.category(), EngineErrorCategory::DeadlineExceeded);
     assert_eq!(engine.lifecycle_state().await, EngineState::ShuttingDown);
     assert!(engine.resume().await.is_err());
-    runtime.block_shutdown.store(false, Ordering::SeqCst);
+    let second_error = engine
+        .shutdown(Duration::from_millis(20))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        second_error.category(),
+        EngineErrorCategory::DeadlineExceeded
+    );
+    assert_eq!(runtime.shutdown_calls.load(Ordering::SeqCst), 1);
+    runtime.shutdown_release.notify_one();
     engine.shutdown(Duration::from_secs(1)).await.unwrap();
     assert_eq!(engine.lifecycle_state().await, EngineState::Stopped);
+    assert_eq!(runtime.shutdown_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
-async fn abandoned_shutdown_waiter_does_not_prevent_cleanup_retry() {
+async fn abandoned_shutdown_waiter_and_engine_do_not_cancel_cleanup() {
     let runtime = Arc::new(FakeRuntime::default());
     runtime.block_shutdown.store(true, Ordering::SeqCst);
-    let (engine, _events) = Engine::from_runtime(Arc::clone(&runtime), 16);
+    let (engine, mut events) = Engine::from_runtime(Arc::clone(&runtime), 16);
     let engine = Arc::new(engine);
     let caller = tokio::spawn({
         let engine = Arc::clone(&engine);
@@ -90,7 +100,66 @@ async fn abandoned_shutdown_waiter_does_not_prevent_cleanup_retry() {
     assert!(caller.await.unwrap_err().is_cancelled());
     assert_eq!(engine.lifecycle_state().await, EngineState::ShuttingDown);
     assert!(engine.resume().await.is_err());
-    runtime.block_shutdown.store(false, Ordering::SeqCst);
+    drop(engine);
+    runtime.shutdown_release.notify_one();
+    timeout(Duration::from_secs(1), async {
+        let mut stopped = false;
+        while let Some(event) = events.next().await {
+            if let EngineEvent::StateChanged {
+                state: EngineState::Stopped,
+            } = event
+            {
+                stopped = true;
+            }
+        }
+        assert!(stopped, "调用方离开后也必须完成实际收尾");
+    })
+    .await
+    .unwrap();
+    assert_eq!(runtime.shutdown_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn shutdown_deadline_includes_lifecycle_queue_wait() {
+    let runtime = Arc::new(FakeRuntime::default());
+    let (engine, _events) = Engine::from_runtime(Arc::clone(&runtime), 16);
+    let occupied = engine.lifecycle_gate.lock().await;
+    let error = timeout(
+        Duration::from_secs(1),
+        engine.shutdown(Duration::from_millis(20)),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(error.category(), EngineErrorCategory::DeadlineExceeded);
+    assert_eq!(runtime.shutdown_calls.load(Ordering::SeqCst), 0);
+    drop(occupied);
+    engine.shutdown(Duration::from_secs(1)).await.unwrap();
+}
+
+#[tokio::test]
+async fn unrepresentable_shutdown_deadline_is_rejected_without_changing_state() {
+    let runtime = Arc::new(FakeRuntime::default());
+    let (engine, _events) = Engine::from_runtime(Arc::clone(&runtime), 16);
+    let error = engine.shutdown(Duration::MAX).await.unwrap_err();
+    assert_eq!(error.category(), EngineErrorCategory::InvalidInput);
+    assert_eq!(engine.lifecycle_state().await, EngineState::Running);
+    assert_eq!(runtime.shutdown_calls.load(Ordering::SeqCst), 0);
+    engine.shutdown(Duration::from_secs(1)).await.unwrap();
+}
+
+#[tokio::test]
+async fn zero_wait_budget_still_starts_cleanup_and_does_not_cancel_it() {
+    let runtime = Arc::new(FakeRuntime::default());
+    runtime.block_shutdown.store(true, Ordering::SeqCst);
+    let (engine, _events) = Engine::from_runtime(Arc::clone(&runtime), 16);
+    let error = engine.shutdown(Duration::ZERO).await.unwrap_err();
+    assert_eq!(error.category(), EngineErrorCategory::DeadlineExceeded);
+    timeout(Duration::from_secs(1), runtime.shutdown_started.notified())
+        .await
+        .unwrap();
+    runtime.shutdown_release.notify_one();
     engine.shutdown(Duration::from_secs(1)).await.unwrap();
     assert_eq!(engine.lifecycle_state().await, EngineState::Stopped);
+    assert_eq!(runtime.shutdown_calls.load(Ordering::SeqCst), 1);
 }

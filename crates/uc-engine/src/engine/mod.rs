@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) mod event_stream;
 mod in_flight;
+mod shutdown;
 #[cfg(test)]
 mod shutdown_tests;
 pub(crate) mod startup;
@@ -25,7 +26,6 @@ pub use startup::{StartupProgress, StartupProgressInput};
 
 const INVALID_STATE_CODE: u32 = 1001;
 const OPERATION_CANCELLED_CODE: u32 = 1002;
-const SHUTDOWN_COMPLETION_MARGIN: Duration = Duration::from_millis(100);
 const SUSPEND_OPERATION_DRAIN: Duration = Duration::from_secs(2);
 
 #[async_trait]
@@ -55,8 +55,9 @@ pub(crate) trait EngineRuntime: Send + Sync {
 }
 
 pub struct Engine {
-    state: Mutex<EngineState>,
+    state: Arc<Mutex<EngineState>>,
     lifecycle_gate: Mutex<()>,
+    shutdown_gate: Arc<Mutex<()>>,
     runtime: Arc<dyn EngineRuntime>,
     events: EventSender,
     operations: InFlightOperations,
@@ -95,8 +96,9 @@ impl Engine {
                 .await?,
         );
         let engine = Self {
-            state: Mutex::new(EngineState::Running),
+            state: Arc::new(Mutex::new(EngineState::Running)),
             lifecycle_gate: Mutex::new(()),
+            shutdown_gate: Arc::new(Mutex::new(())),
             runtime,
             events,
             operations: InFlightOperations::new(),
@@ -115,8 +117,9 @@ impl Engine {
         let (events, stream) = event_channel(event_capacity);
         (
             Self {
-                state: Mutex::new(EngineState::Running),
+                state: Arc::new(Mutex::new(EngineState::Running)),
                 lifecycle_gate: Mutex::new(()),
+                shutdown_gate: Arc::new(Mutex::new(())),
                 runtime,
                 events,
                 operations: InFlightOperations::new(),
@@ -228,49 +231,6 @@ impl Engine {
         Ok(())
     }
 
-    pub async fn shutdown(&self, deadline: Duration) -> Result<(), EngineError> {
-        let _lifecycle = self.lifecycle_gate.lock().await;
-        let deadline_at = tokio::time::Instant::now() + deadline;
-        let lifecycle = *self.state.lock().await;
-        match lifecycle {
-            EngineState::Running => {
-                self.quiesce_locked(remaining_until(deadline_at)).await?;
-            }
-            EngineState::Quiesced | EngineState::Suspended | EngineState::ShuttingDown => {}
-            _ => return Err(invalid_state_error()),
-        }
-
-        *self.state.lock().await = EngineState::ShuttingDown;
-        self.events.send(EngineEvent::StateChanged {
-            state: EngineState::ShuttingDown,
-        });
-
-        let shutdown_deadline = remaining_until(deadline_at);
-        let runtime_deadline = shutdown_deadline.saturating_sub(SHUTDOWN_COMPLETION_MARGIN);
-        let shutdown_result =
-            match tokio::time::timeout(shutdown_deadline, self.runtime.shutdown(runtime_deadline))
-                .await
-            {
-                Ok(result) => result,
-                Err(_) => Err(operation_cancelled_error()),
-            };
-
-        if let Err(error) = &shutdown_result {
-            if !error.is_retryable() {
-                self.events.send(EngineEvent::Fatal {
-                    error: error.clone(),
-                });
-            }
-            return shutdown_result;
-        }
-        *self.state.lock().await = EngineState::Stopped;
-        self.events.send(EngineEvent::StateChanged {
-            state: EngineState::Stopped,
-        });
-        self.events.close();
-        shutdown_result
-    }
-
     async fn quiesce_locked(&self, deadline: Duration) -> Result<(), EngineError> {
         {
             let mut state = self.state.lock().await;
@@ -340,10 +300,6 @@ fn terminal_for_result<T>(result: &Result<T, EngineError>) -> OperationTerminal 
     }
 }
 
-fn remaining_until(deadline: tokio::time::Instant) -> Duration {
-    deadline.saturating_duration_since(tokio::time::Instant::now())
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::AtomicBool;
@@ -376,6 +332,7 @@ mod tests {
         pub(super) fail_shutdown: AtomicBool,
         pub(super) block_shutdown: AtomicBool,
         pub(super) shutdown_started: Notify,
+        pub(super) shutdown_release: Notify,
     }
 
     #[async_trait]
@@ -427,7 +384,7 @@ mod tests {
             *self.shutdown_deadline.lock().unwrap() = Some(deadline);
             if self.block_shutdown.load(Ordering::SeqCst) {
                 self.shutdown_started.notify_one();
-                std::future::pending::<()>().await;
+                self.shutdown_release.notified().await;
             }
             if self.fail_shutdown.load(Ordering::SeqCst) {
                 return Err(EngineError::new(9001, EngineErrorCategory::Internal, false));
