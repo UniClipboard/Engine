@@ -1,4 +1,6 @@
 use crate::clipboard::inbound::ClipboardReceiverPort;
+use std::error::Error as StdError;
+use std::io::{Error as IoError, ErrorKind};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -10,11 +12,15 @@ use tracing::{debug, info, instrument, warn};
 
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::DeviceId;
+use uc_core::ports::security::TransferCipherError;
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::{
     ClockPort, InboundClipboard, InboundClipboardDisposition, InboundClipboardReceipt, SettingsPort,
 };
 use uc_core::MemberRepositoryPort;
+use uc_observability_contract::diagnostics::connectivity::{
+    describe_clipboard_receive_failure, ClipboardReceiveFailure,
+};
 
 use crate::clipboard::sync::decode_v3_bytes_to_snapshot;
 use crate::clipboard::sync::receive_gate::MemberReceiveGate;
@@ -108,7 +114,9 @@ impl ClipboardInboundRuntime {
                     biased;
                     _ = task_cancel.cancelled() => return,
                     inbound = receiver.recv() => match inbound {
-                        Ok(inbound) => inbound.observation.scope(processor.handle_one(inbound.message)).await,
+                        Ok(inbound) => inbound.receive_observation.scope(
+                            inbound.observation.scope(processor.handle_one(inbound.message))
+                        ).await,
                         Err(broadcast::error::RecvError::Lagged(missed)) => {
                             warn!(missed, "clipboard inbound receiver lagged; dropped frames");
                         }
@@ -190,13 +198,15 @@ impl InboundProcessor {
                 )
             }
             Ok(InboundClipboardApplyOutcome::DecodeFailed { .. }) => {
+                describe_clipboard_receive_failure(ClipboardReceiveFailure::DecodeFailed);
                 debug!("inbound clipboard decode failed");
                 (
                     ClipboardInboundEventAction::NewEntry,
                     InboundClipboardDisposition::Rejected,
                 )
             }
-            Err(_) => {
+            Err(error) => {
+                describe_clipboard_receive_failure(classify_apply_failure(error));
                 warn!(
                     error_kind = "inbound_clipboard_apply_failed",
                     "inbound clipboard apply failed"
@@ -232,7 +242,20 @@ impl InboundProcessor {
         };
         let plaintext = match self.transfer_cipher.decrypt(&inbound.ciphertext).await {
             Ok(bytes) => Bytes::from(bytes),
-            Err(_) => {
+            Err(error) => {
+                let failure = match error {
+                    TransferCipherError::NotUnlocked => ClipboardReceiveFailure::SessionLocked,
+                    TransferCipherError::InvalidFormat => {
+                        ClipboardReceiveFailure::InvalidTransferFormat
+                    }
+                    TransferCipherError::DecryptionFailed => {
+                        ClipboardReceiveFailure::DecryptionFailed
+                    }
+                    TransferCipherError::EncryptionFailed | TransferCipherError::Internal(_) => {
+                        ClipboardReceiveFailure::CipherUnavailable
+                    }
+                };
+                describe_clipboard_receive_failure(failure);
                 warn!(
                     snapshot_hash = %inbound.header.snapshot_hash,
                     error_kind = "inbound_clipboard_decrypt_failed",
@@ -270,10 +293,30 @@ impl InboundProcessor {
     }
 }
 
+fn classify_apply_failure(error: &(dyn StdError + 'static)) -> ClipboardReceiveFailure {
+    let mut source = Some(error);
+    for _ in 0..32 {
+        let Some(error) = source else {
+            break;
+        };
+        if let Some(error) = error.downcast_ref::<IoError>() {
+            return match error.kind() {
+                ErrorKind::PermissionDenied => ClipboardReceiveFailure::ApplyPermissionDenied,
+                ErrorKind::StorageFull => ClipboardReceiveFailure::ApplyStorageFull,
+                ErrorKind::ReadOnlyFilesystem => ClipboardReceiveFailure::ApplyReadOnly,
+                _ => ClipboardReceiveFailure::ApplyIoFailed,
+            };
+        }
+        source = error.source();
+    }
+    ClipboardReceiveFailure::ApplyFailed
+}
+
 async fn inbound_sync_enabled(settings: &dyn SettingsPort) -> bool {
     match settings.load().await {
         Ok(settings) if settings.sync.sync_enabled => true,
         Ok(_) => {
+            describe_clipboard_receive_failure(ClipboardReceiveFailure::SyncDisabled);
             info!(
                 reason = "sync_disabled",
                 "clipboard inbound: delivery rejected by global sync setting"
@@ -281,6 +324,7 @@ async fn inbound_sync_enabled(settings: &dyn SettingsPort) -> bool {
             false
         }
         Err(_) => {
+            describe_clipboard_receive_failure(ClipboardReceiveFailure::SettingsUnavailable);
             warn!(
                 error_kind = "settings_load",
                 "clipboard inbound: delivery rejected"
@@ -1107,6 +1151,117 @@ mod tests {
         );
         assert_eq!(cipher.decrypt_calls.load(Ordering::SeqCst), 2);
         runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[test]
+    fn rejection_reasons_survive_the_delivery_and_receipt() {
+        use tracing_subscriber::{layer::SubscriberExt, Layer};
+        use uc_observability_contract::diagnostics::connectivity::{
+            take_local_completion_detail, ClipboardReceiveFailure, ClipboardReceiveObservation,
+        };
+        use uc_observability_contract::diagnostics::{
+            DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation, DiagnosticRole,
+            OperationCompletion,
+        };
+
+        #[derive(Clone)]
+        struct Details(Arc<Mutex<Vec<(&'static str, &'static str)>>>);
+        impl<S: tracing::Subscriber> Layer<S> for Details {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if event.metadata().target() == "uc.telemetry" {
+                    if let Some(detail) = take_local_completion_detail(
+                        "clipboard",
+                        "clipboard_receive",
+                        "server",
+                        "error",
+                    ) {
+                        self.0.lock().expect("details").push(detail.local_fields());
+                    }
+                }
+            }
+        }
+        let details = Details(Arc::new(Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::registry().with(details.clone());
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        tracing::subscriber::with_default(subscriber, || {
+            executor.block_on(async {
+            for case in ["decrypt", "locked", "format", "sync", "scope", "missing", "lookup", "disabled", "decode", "permission"] {
+            let receiver = Arc::new(FakeReceiver::new());
+            let mut dependencies = deps_with_policy(
+                receiver.clone(), Arc::new(AllowAllMembers),
+                Arc::new(QueueCipher {
+                    decrypt_calls: AtomicUsize::new(0),
+                    outcomes: Mutex::new(VecDeque::from([Err(TransferCipherError::DecryptionFailed)])),
+                }), Arc::new(NeverApply), Arc::new(RecordingEvents::default()),
+            );
+            match case {
+                "locked" | "format" => dependencies.transfer_cipher = Arc::new(QueueCipher {
+                    decrypt_calls: AtomicUsize::new(0),
+                    outcomes: Mutex::new(VecDeque::from([Err(if case == "locked" { TransferCipherError::NotUnlocked } else { TransferCipherError::InvalidFormat })])),
+                }),
+                "sync" => dependencies.settings = Arc::new(FixedSettings { sync_enabled: false }),
+                "scope" => dependencies.member_scope = Arc::new(BlockedScope),
+                "missing" | "lookup" => dependencies.member_repo = Arc::new(ConfigurableMembers {
+                    lookup: if case == "missing" { MemberLookup::Missing } else { MemberLookup::Failed },
+                }),
+                "disabled" => {
+                    let mut preferences = MemberSyncPreferences::default();
+                    preferences.receive_enabled = false;
+                    dependencies.member_repo = Arc::new(ConfigurableMembers { lookup: MemberLookup::Found(preferences) });
+                }
+                "decode" => {
+                    dependencies.transfer_cipher = Arc::new(EchoCipher);
+                    dependencies.apply = Arc::new(QueueApply {
+                        outcomes: Mutex::new(VecDeque::from([Ok(InboundClipboardApplyOutcome::DecodeFailed { reason: "private-content-sentinel".into() })])),
+                    });
+                }
+                "permission" => {
+                    dependencies.transfer_cipher = Arc::new(EchoCipher);
+                    dependencies.apply = Arc::new(QueueApply {
+                        outcomes: Mutex::new(VecDeque::from([Err(InboundClipboardApplyError::Internal(
+                            crate::clipboard::sync::apply_inbound::ApplyInboundError::Capture(
+                                std::io::Error::new(std::io::ErrorKind::PermissionDenied, "private-path-sentinel").into()
+                            )
+                        ))])),
+                    });
+                }
+                _ => {}
+            }
+            let runtime = ClipboardInboundRuntime::start(dependencies);
+            let observation = ClipboardReceiveObservation::default();
+            let (inbound, result) = fixture("peer-1", "private-hash-sentinel");
+            observation.scope(async { receiver.publish(inbound); }).await;
+            assert_eq!(result.wait().await, Some(InboundClipboardDisposition::Rejected));
+            observation.finish_failure(ClipboardReceiveFailure::ApplicationRejected, OperationCompletion::failed(
+                DiagnosticDomain::Clipboard, DiagnosticOperation::ClipboardReceive,
+                DiagnosticRole::Server, DiagnosticErrorType::Unavailable, Duration::from_millis(1),
+            ));
+            runtime.shutdown().await.expect("shutdown");
+            }
+        })
+        });
+        assert_eq!(
+            *details.0.lock().expect("details"),
+            vec![
+                ("decrypt", "decryption_failed"),
+                ("decrypt", "session_locked"),
+                ("decrypt", "invalid_transfer_format"),
+                ("policy", "sync_disabled"),
+                ("policy", "membership_scope_blocked"),
+                ("policy", "member_missing"),
+                ("policy", "member_lookup_failed"),
+                ("policy", "receive_disabled"),
+                ("decode", "invalid_content"),
+                ("apply", "permission_denied"),
+            ]
+        );
     }
 
     #[tokio::test]

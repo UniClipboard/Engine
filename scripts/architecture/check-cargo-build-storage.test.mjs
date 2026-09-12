@@ -52,3 +52,12 @@ test('接受仓库恢复后的默认 Cargo 构建目录', () => {
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stdout, /Cargo 构建目录检查通过/)
 })
+
+
+test('拒绝单独覆盖到内置临时目录的编译中间文件', () => {
+  const result = spawnSync(process.execPath, [CHECKER], {
+    encoding: 'utf8',
+    env: { ...process.env, CARGO_BUILD_BUILD_DIR: '/private/tmp/uc-hidden-build-cache' },
+  })
+  assert.equal(result.status, 1)
+})

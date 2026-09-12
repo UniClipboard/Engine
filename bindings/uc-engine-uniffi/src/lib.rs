@@ -2,7 +2,9 @@
 
 #[cfg(target_os = "android")]
 mod android;
+mod local_diagnostics;
 mod observability;
+pub use local_diagnostics::*;
 mod runtime;
 
 pub use runtime::{

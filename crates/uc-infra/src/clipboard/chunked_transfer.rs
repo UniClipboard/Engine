@@ -35,6 +35,9 @@ use uc_core::crypto::aad;
 use uc_core::crypto::model::EncryptionError;
 use uc_core::membership::{ContentKeyId, ContentKeyPurpose, GroupEpoch};
 use uc_core::ports::{TransferCipherError, TransferCipherPort};
+use uc_observability_contract::diagnostics::connectivity::{
+    describe_clipboard_receive_failure, ClipboardReceiveFailure,
+};
 use uuid::Uuid;
 
 use crate::security::{key_epoch_aad, MasterKey};
@@ -601,6 +604,7 @@ fn decode_v4(encrypted: &[u8], session: &InMemorySession) -> Result<Vec<u8>, Chu
         .content_key(&space_id, &content_key_id, ContentKeyPurpose::Transport)
         .map_err(map_session_error_for_v4)?;
     if resolved.epoch() != epoch {
+        describe_clipboard_receive_failure(ClipboardReceiveFailure::ContentKeyEpochMismatch);
         return Err(ChunkedTransferError::InvalidHeader {
             reason: "content key epoch mismatch".to_owned(),
         });
@@ -725,6 +729,9 @@ fn map_session_error_for_transfer(error: EncryptionError) -> TransferCipherError
 }
 
 fn map_session_error_for_v4(error: EncryptionError) -> ChunkedTransferError {
+    if matches!(error, EncryptionError::KeyNotFound) {
+        describe_clipboard_receive_failure(ClipboardReceiveFailure::ContentKeyMissing);
+    }
     match error {
         EncryptionError::NotInitialized => ChunkedTransferError::NotUnlocked,
         other => ChunkedTransferError::InvalidHeader {
@@ -798,6 +805,88 @@ mod tests {
         let reader = TransferCipherAdapter::new(reader_session);
 
         assert!(reader.decrypt(&encrypted).await.is_err());
+    }
+
+    #[test]
+    fn missing_key_and_epoch_mismatch_have_distinct_local_rejection_reasons() {
+        use std::sync::Mutex;
+        use tracing_subscriber::{layer::SubscriberExt, Layer};
+        use uc_observability_contract::diagnostics::connectivity::{
+            take_local_completion_detail, ClipboardReceiveFailure, ClipboardReceiveObservation,
+        };
+        use uc_observability_contract::diagnostics::{
+            DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation, DiagnosticRole,
+            OperationCompletion,
+        };
+        #[derive(Clone)]
+        struct Details(Arc<Mutex<Vec<(&'static str, &'static str)>>>);
+        impl<S: tracing::Subscriber> Layer<S> for Details {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if event.metadata().target() == "uc.telemetry" {
+                    if let Some(detail) = take_local_completion_detail(
+                        "clipboard",
+                        "clipboard_receive",
+                        "server",
+                        "error",
+                    ) {
+                        self.0.lock().expect("details").push(detail.local_fields());
+                    }
+                }
+            }
+        }
+        let details = Details(Arc::new(Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::registry().with(details.clone());
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        tracing::subscriber::with_default(subscriber, || {
+            executor.block_on(async {
+                let (session, root) = ready_session();
+                let writer = TransferCipherAdapter::new(session);
+                let encrypted = writer
+                    .encrypt(b"private-content-sentinel")
+                    .await
+                    .expect("encrypt");
+                let missing = Arc::new(InMemorySession::new());
+                missing.set_master_key_for_space(SpaceId::from_str("transfer-space"), root);
+                let reader = TransferCipherAdapter::new(missing);
+                for mismatch in [false, true] {
+                    let observation = ClipboardReceiveObservation::default();
+                    let mut input = encrypted.clone();
+                    if mismatch {
+                        input[4] ^= 1;
+                    }
+                    observation
+                        .scope(async {
+                            let adapter = if mismatch { &writer } else { &reader };
+                            assert!(adapter.decrypt(&input).await.is_err());
+                        })
+                        .await;
+                    observation.finish_failure(
+                        ClipboardReceiveFailure::ApplicationRejected,
+                        OperationCompletion::failed(
+                            DiagnosticDomain::Clipboard,
+                            DiagnosticOperation::ClipboardReceive,
+                            DiagnosticRole::Server,
+                            DiagnosticErrorType::Unavailable,
+                            std::time::Duration::from_millis(1),
+                        ),
+                    );
+                }
+            })
+        });
+        assert_eq!(
+            *details.0.lock().expect("details"),
+            vec![
+                ("decrypt", "content_key_missing"),
+                ("decrypt", "content_key_epoch_mismatch"),
+            ]
+        );
     }
 
     #[tokio::test]

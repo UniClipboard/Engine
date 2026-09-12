@@ -28,7 +28,7 @@ use crate::security::{
     AdmissionKeyManager, SpaceAdmissionAuth,
 };
 
-use super::repository::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissionState};
+use super::repository::{CredentialLoadError, SqliteSpaceAdmissionState};
 
 const CREDENTIAL_FORMAT_V1: u16 = 1;
 const CREDENTIAL_FORMAT_V2: u16 = 2;
@@ -649,31 +649,60 @@ fn map_store_error(error: anyhow::Error) -> SpaceAdmissionCredentialStoreError {
 fn map_channel_error(
     error: SpaceAdmissionCredentialStoreError,
 ) -> SpaceAdmissionChannelCredentialError {
-    match error {
-        SpaceAdmissionCredentialStoreError::Locked { source }
-        | SpaceAdmissionCredentialStoreError::Unavailable { source } => {
-            SpaceAdmissionChannelCredentialError::Unavailable { source }
-        }
-        SpaceAdmissionCredentialStoreError::RecoveryRequired { source } => {
-            SpaceAdmissionChannelCredentialError::Rejected { source }
-        }
+    let unavailable = matches!(
+        &error,
+        SpaceAdmissionCredentialStoreError::Locked { .. }
+            | SpaceAdmissionCredentialStoreError::Unavailable { .. }
+    );
+    let source = anyhow::Error::new(error);
+    if unavailable {
+        SpaceAdmissionChannelCredentialError::Unavailable { source }
+    } else {
+        SpaceAdmissionChannelCredentialError::Rejected { source }
     }
 }
 
-fn map_admission_state_error(
-    error: SpaceAdmissionStateStoreError,
-) -> SpaceAdmissionChannelCredentialError {
-    match error {
-        SpaceAdmissionStateStoreError::Locked | SpaceAdmissionStateStoreError::Unavailable => {
-            SpaceAdmissionChannelCredentialError::Unavailable {
-                source: anyhow::Error::new(error),
+fn map_admission_state_error(error: CredentialLoadError) -> SpaceAdmissionChannelCredentialError {
+    use uc_observability_contract::diagnostics::connectivity::CredentialFailure;
+    let unavailable = matches!(
+        error.diagnostic_failure(),
+        CredentialFailure::Locked | CredentialFailure::Unavailable
+    );
+    let source = anyhow::Error::new(error);
+    if unavailable {
+        SpaceAdmissionChannelCredentialError::Unavailable { source }
+    } else {
+        SpaceAdmissionChannelCredentialError::Rejected { source }
+    }
+}
+
+impl SpaceAdmissionChannelCredentialError {
+    /// 协议负责人只取得脱敏分类；来源类型和存储布局留在 Infra 内部。
+    pub(crate) fn diagnostic_failure(
+        &self,
+    ) -> uc_observability_contract::diagnostics::connectivity::CredentialFailure {
+        use uc_observability_contract::diagnostics::connectivity::CredentialFailure;
+        let (source, fallback) = match self {
+            Self::Unavailable { source } => (source, CredentialFailure::Unavailable),
+            Self::Rejected { source } => (source, CredentialFailure::RecoveryRequired),
+        };
+        for cause in source.chain() {
+            if let Some(error) = cause.downcast_ref::<CredentialLoadError>() {
+                return error.diagnostic_failure();
+            }
+            if let Some(error) = cause.downcast_ref::<SpaceAdmissionCredentialStoreError>() {
+                return match error {
+                    SpaceAdmissionCredentialStoreError::Locked { .. } => CredentialFailure::Locked,
+                    SpaceAdmissionCredentialStoreError::RecoveryRequired { .. } => {
+                        CredentialFailure::RecoveryRequired
+                    }
+                    SpaceAdmissionCredentialStoreError::Unavailable { .. } => {
+                        CredentialFailure::Unavailable
+                    }
+                };
             }
         }
-        SpaceAdmissionStateStoreError::Conflict | SpaceAdmissionStateStoreError::Corrupt => {
-            SpaceAdmissionChannelCredentialError::Rejected {
-                source: anyhow::Error::new(error),
-            }
-        }
+        fallback
     }
 }
 
@@ -701,6 +730,46 @@ mod tests {
     use crate::security::{
         ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore, SpaceAdmissionAuthContext,
     };
+
+    #[test]
+    fn credential_failure_diagnostics_preserve_source_without_exporting_it() {
+        use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+        use opentelemetry_sdk::logs::{InMemoryLogExporter, SdkLoggerProvider};
+        use tracing_subscriber::{layer::SubscriberExt, Layer};
+        let exporter = InMemoryLogExporter::default();
+        let logs = SdkLoggerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry().with(
+            OpenTelemetryTracingBridge::new(&logs).with_filter(
+                tracing_subscriber::filter::filter_fn(|metadata| {
+                    metadata.target() == "uc.connectivity"
+                }),
+            ),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            for error in [
+                SpaceAdmissionCredentialStoreError::Locked {
+                    source: anyhow::anyhow!("PRIVATE_CREDENTIAL_STORE"),
+                },
+                SpaceAdmissionCredentialStoreError::RecoveryRequired {
+                    source: anyhow::anyhow!("PRIVATE_CREDENTIAL_STORE"),
+                },
+                SpaceAdmissionCredentialStoreError::Unavailable {
+                    source: anyhow::anyhow!("PRIVATE_CREDENTIAL_STORE"),
+                },
+            ] {
+                let mapped = map_channel_error(error);
+                assert!(std::error::Error::source(&mapped).is_some());
+            }
+        });
+        logs.force_flush().expect("flush");
+        let records = exporter.get_emitted_logs().expect("logs");
+        assert!(
+            records.is_empty(),
+            "error conversion must not emit a second failure record"
+        );
+    }
 
     #[derive(Default)]
     struct MemorySecureStorage(Mutex<HashMap<String, Vec<u8>>>);

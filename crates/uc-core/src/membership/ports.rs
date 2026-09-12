@@ -262,8 +262,8 @@ pub trait GroupRevocationPort: Send + Sync {
         _permanently_lost_device_ids: &[DeviceId],
         _now_ms: i64,
     ) -> Result<GroupRevocationResult, KeyEpochError> {
-        Err(KeyEpochError::Repository(
-            "member revocation recovery unavailable".into(),
+        Err(KeyEpochError::StateIssue(
+            super::KeyEpochStateIssue::UnsupportedOperation,
         ))
     }
 

@@ -1,7 +1,9 @@
 //! HarmonyOS N-API bindings for the public `uc-engine` interface.
 
 mod host;
+mod local_diagnostics;
 mod observability;
+pub use local_diagnostics::*;
 mod runtime;
 
 use napi::bindgen_prelude::{Buffer, External};

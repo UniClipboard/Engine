@@ -15,6 +15,16 @@ use uc_engine::{
 use uc_engine::DeviceTrustSnapshotSummary;
 
 #[test]
+fn observability_contract_is_available_through_engine() {
+    fn accepts_analytics_port<T: uc_engine::observability::analytics::AnalyticsPort + ?Sized>() {}
+
+    accepts_analytics_port::<dyn uc_engine::observability::analytics::AnalyticsPort>();
+    let _ = uc_engine::observability::diagnostics::managed_log_file_date(
+        "uniclipboard-daemon.json.2026-09-11",
+    );
+}
+
+#[test]
 fn engine_config_has_stable_profile_and_version_inputs() {
     let config = EngineConfig::new("1.2.3")
         .with_profile_id("private-profile-name")

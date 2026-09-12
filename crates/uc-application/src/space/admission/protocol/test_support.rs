@@ -179,6 +179,7 @@ struct FixedJoinerActivation {
 enum TransportMode {
     DeferInitial,
     AuthenticateThenDefer,
+    AuthenticateThenReject,
     AuthenticateThenUpgradeRequired,
     AuthenticateThenCandidate,
     AuthenticateThenCandidateAndCommit,
@@ -232,6 +233,7 @@ struct ExchangeThenDeferred {
     settled_reply: bool,
     upgrade_on: Option<SpaceAdmissionMessageKind>,
     upgrade_pending: Arc<AtomicBool>,
+    authentication_rejected: bool,
 }
 
 impl ExchangeThenDeferred {
@@ -741,6 +743,7 @@ impl SpaceAdmissionTransportPort for RecordingSpaceAdmissionTransport {
             settled_reply: false,
             upgrade_on: self.mode.upgrade_on(),
             upgrade_pending: Arc::clone(&self.upgrade_pending),
+            authentication_rejected: matches!(self.mode, TransportMode::AuthenticateThenReject),
         }))
     }
 
@@ -772,6 +775,7 @@ impl SpaceAdmissionTransportPort for RecordingSpaceAdmissionTransport {
             settled_reply: self.mode.supports_complete_protocol(),
             upgrade_on: self.mode.upgrade_on(),
             upgrade_pending: Arc::clone(&self.upgrade_pending),
+            authentication_rejected: false,
         }))
     }
 }
@@ -801,6 +805,9 @@ impl AuthenticatedAdmissionExchangePort for ExchangeThenDeferred {
                 .lock()
                 .expect("event recorder is available")
                 .push(ProtocolEvent::JoinerJoinRequestExchanged);
+            if self.authentication_rejected {
+                return Err(SpaceAdmissionTransportError::AuthenticationRejected);
+            }
             if self.take_upgrade_failure(request.kind()) {
                 return Err(SpaceAdmissionTransportError::PeerUpgradeRequired);
             }
@@ -1374,6 +1381,10 @@ impl SpaceAdmissionProtocolTestPair {
 
     pub(super) async fn authenticating() -> Self {
         Self::with_mode(None, TransportMode::AuthenticateThenDefer).await
+    }
+
+    pub(super) async fn authentication_rejected() -> Self {
+        Self::with_mode(None, TransportMode::AuthenticateThenReject).await
     }
 
     pub(super) async fn peer_upgrade_required() -> Self {

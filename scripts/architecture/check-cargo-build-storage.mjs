@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
+import { spawnSync } from 'node:child_process'
 import { lstatSync, realpathSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
@@ -35,11 +36,7 @@ function canonicalTemporaryRoots() {
   return [...roots]
 }
 
-function main() {
-  const configured = process.env.CARGO_TARGET_DIR
-  const target = configured
-    ? resolve(REPOSITORY_ROOT, configured)
-    : join(REPOSITORY_ROOT, 'target')
+function checkTarget(target, allowMissing) {
 
   if (canonicalTemporaryRoots().some(root => isInside(target, root))) {
     fail(`不得把 CARGO_TARGET_DIR 放在内置临时目录：${target}`)
@@ -50,7 +47,7 @@ function main() {
   try {
     targetInfo = lstatSync(target)
   } catch (error) {
-    if (error?.code === 'ENOENT' && !configured) {
+    if (error?.code === 'ENOENT' && allowMissing) {
       process.stdout.write(`Cargo 构建目录检查通过：${target} 将由 Cargo 创建\n`)
       return
     }
@@ -80,6 +77,30 @@ function main() {
   }
 
   process.stdout.write(`Cargo 构建目录检查通过：${canonicalTarget}\n`)
+}
+
+function main() {
+  // 独立中间目录与最终目录必须同时检查；不能只检查仓库内的 target 链接。
+  const explicitTarget = process.env.CARGO_TARGET_DIR ?? process.env.CARGO_BUILD_TARGET_DIR
+  const explicitBuild = process.env.CARGO_BUILD_BUILD_DIR
+  for (const target of [explicitTarget, explicitBuild].filter(Boolean)) {
+    checkTarget(resolve(REPOSITORY_ROOT, target), false)
+  }
+  if (process.exitCode) return
+  if (explicitTarget && explicitBuild) return
+
+  const metadata = spawnSync('cargo', ['metadata', '--no-deps', '--offline', '--format-version', '1'], {
+    cwd: REPOSITORY_ROOT,
+    encoding: 'utf8',
+  })
+  if (metadata.status !== 0) {
+    fail('无法读取 Cargo 实际使用的编译目录')
+    return
+  }
+  const result = JSON.parse(metadata.stdout)
+  for (const target of new Set([result.target_directory, result.build_directory].filter(Boolean))) {
+    checkTarget(resolve(target), true)
+  }
 }
 
 main()

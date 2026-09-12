@@ -118,6 +118,7 @@ impl IrohActiveClipboardPullClientAdapter {
             addr,
             ACTIVE_CLIPBOARD_PULL_ALPN,
             "active-clipboard-pull",
+            uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
         )
         .await
         {

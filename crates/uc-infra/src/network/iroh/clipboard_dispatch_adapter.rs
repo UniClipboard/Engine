@@ -35,7 +35,6 @@ use async_trait::async_trait;
 use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr};
 use tokio::sync::{broadcast, Mutex};
-use tracing::instrument::WithSubscriber;
 use tracing::{debug, instrument, warn, Instrument};
 
 use uc_core::ids::DeviceId;
@@ -146,12 +145,9 @@ impl IrohClipboardDispatchAdapter {
                     Arc::clone(&self.endpoint),
                     addr,
                     CLIPBOARD_ALPN,
-                    "clipboard",
+            "clipboard",
+            uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
                 )
-                // 底层连接驱动不持有短期建链 span；外层仍记录真实结果和耗时。
-                .with_subscriber(tracing::Dispatch::new(
-                    tracing::subscriber::NoSubscriber::default(),
-                ))
                 .await;
 
                 // First-hand dial verdict — fold mark_offline into the

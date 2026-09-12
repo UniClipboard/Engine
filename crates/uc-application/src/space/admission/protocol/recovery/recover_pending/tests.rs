@@ -29,6 +29,13 @@ async fn loaded_pending_admission_keeps_the_aggregate_and_commit_token_together(
 
 #[tokio::test]
 async fn pending_join_recovery_requests_an_initial_channel_after_the_join_was_saved() {
+    let output_file = tempfile::NamedTempFile::new().expect("diagnostic output");
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(std::sync::Mutex::new(output_file.reopen().expect("writer")))
+        .finish();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
     let pair = SpaceAdmissionProtocolTestPair::fresh().await;
     pair.joiner()
         .start_join(join_input("recoverable-join"))
@@ -51,6 +58,48 @@ async fn pending_join_recovery_requests_an_initial_channel_after_the_join_was_sa
             ProtocolEvent::JoinerInitialChannelRequested,
         ]
     );
+    let diagnostics = std::fs::read_to_string(output_file.path()).expect("diagnostics");
+    assert!(
+        diagnostics.contains("deferred") && diagnostics.contains("state_changed"),
+        "deferred recovery must explain why it remains pending"
+    );
+}
+
+#[tokio::test]
+async fn authentication_rejection_diagnostic_explains_trigger_reason_and_outcome() {
+    let output_file = tempfile::NamedTempFile::new().expect("diagnostic output");
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(std::sync::Mutex::new(output_file.reopen().expect("writer")))
+        .finish();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let pair = SpaceAdmissionProtocolTestPair::authentication_rejected().await;
+    pair.joiner()
+        .start_join(join_input("private-device-name-sentinel"))
+        .await
+        .expect("the join request should be saved before recovery");
+
+    let report = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    assert_eq!(report.deferred_count, 1);
+    assert_eq!(pair.active_joiner_observation_count(), 0);
+    let diagnostics = std::fs::read_to_string(output_file.path()).expect("diagnostics");
+    for expected in [
+        "pairing.recovery.decided",
+        "state_changed",
+        "authentication_rejected",
+        "deferred",
+    ] {
+        assert!(
+            diagnostics.contains(expected),
+            "diagnostic output must contain {expected}: {diagnostics}"
+        );
+    }
+    assert!(!diagnostics.contains("private-device-name-sentinel"));
 }
 
 #[tokio::test]

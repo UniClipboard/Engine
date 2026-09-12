@@ -250,7 +250,78 @@ export interface OhEngine {
   shutdown(deadlineMs: number): Promise<void>
 }
 
+
+// 本地诊断计数使用十进制字符串；只有当前进程的刷新得到确认。
+export enum OhHostDiagnosticSource { Application, ShareExtension, KeyboardExtension, BackgroundService }
+export enum OhHostDiagnosticAction { RuntimeStart, RuntimeStop, OwnershipAcquire, SecurityPrepare }
+export enum OhHostDiagnosticFailure { Unavailable, PermissionDenied, Locked, Busy, Unknown }
+export enum OhHostLifecycleState { Foreground, Background }
+export enum OhHostNetworkKind { Wifi, Cellular, Ethernet, Other, Unknown }
+export enum OhSourceCapability { Supported, Partial, Unsupported, Unknown }
+export enum OhHostDiagnosticOutcome { Completed, Failed, Interrupted }
+export interface OhLocalCaptureStatus {
+  mode: string
+  captureId?: string
+  remainingMs: number
+  startedAtUtc?: string
+  endReason?: string
+  lastCaptureId?: string
+  revision: string
+}
+export interface OhSourceCoverage {
+  source: string
+  capability: string
+  collection: string
+  observedCount: string
+  policyFilteredCount: string
+}
+export interface OhFileSourceCounts {
+  source: string
+  acceptedCount: string
+  writtenCount: string
+  queueDroppedCount: string
+  quotaDroppedCount: string
+  writeFailedCount: string
+  lastWrittenAtMs?: string
+}
+export interface OhLocalDiagnosticStatus {
+  runId: string
+  capture: OhLocalCaptureStatus
+  observedRecords: string
+  policyFilteredRecords: string
+  schemaRejectedRecords: string
+  correlationLimitedRecords: string
+  engineVersion: string
+  sourceCommit: string
+  counterScope: string
+  sources: OhSourceCoverage[]
+  localFile: string
+  closed: boolean
+}
+export interface OhLocalDiagnosticExportReport {
+  flush: string
+  status: OhLocalDiagnosticStatus
+  requestedAtUtc: string
+  completedAtUtc: string
+  otherProcessesFlushed: boolean
+  files: OhFileSourceCounts[]
+}
+export interface OhHostDiagnosticReceipt {
+  status: string
+  token?: string
+}
+
 declare const engine: {
+  startLocalDiagnosticCapture(durationMs: number): OhLocalCaptureStatus
+  stopLocalDiagnosticCapture(captureId: string): string
+  queryLocalDiagnosticStatus(): OhLocalDiagnosticStatus
+  prepareLocalDiagnosticExport(deadlineMs: number): Promise<OhLocalDiagnosticExportReport>
+  registerHostDiagnosticSource(source: OhHostDiagnosticSource, capability: OhSourceCapability): void
+  beginHostDiagnostic(source: OhHostDiagnosticSource, action: OhHostDiagnosticAction): OhHostDiagnosticReceipt
+  finishHostDiagnostic(source: OhHostDiagnosticSource, token: string, outcome: OhHostDiagnosticOutcome, reason?: OhHostDiagnosticFailure): OhHostDiagnosticReceipt
+  recordHostLifecycle(source: OhHostDiagnosticSource, state: OhHostLifecycleState): OhHostDiagnosticReceipt
+  recordHostNetworkChange(source: OhHostDiagnosticSource, kind: OhHostNetworkKind, available: boolean): OhHostDiagnosticReceipt
+  recordHostOwnershipReleased(source: OhHostDiagnosticSource): OhHostDiagnosticReceipt
   coreVersion(): string
   installProcessObservability(
     config: OhObservabilityConfig,

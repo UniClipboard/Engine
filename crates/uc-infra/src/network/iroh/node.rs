@@ -177,6 +177,7 @@ pub struct TransferProgressHandlers {
 pub struct IrohNode {
     endpoint: Arc<Endpoint>,
     router: Router,
+    connection_observations: super::observed_connections::ObservedConnections,
     /// Relay self-healing watchdog (see `net_recovery`). `None` in LAN-only
     /// mode where there is no home relay to watch. Held so [`shutdown`] can
     /// abort it deterministically and surface a panic instead of letting a
@@ -257,6 +258,7 @@ impl IrohNode {
         // Step 1:跑完 iroh 自带的事件驱动关闭。无外层 timeout —— iroh 内部
         // 已经层层有界(详见上面 doc)。
         self.endpoint.close().await;
+        self.connection_observations.shutdown().await;
 
         // Step 2:join router cleanup。watchdog 仅用于规避 iroh#3875。
         const ROUTER_WATCHDOG: Duration = Duration::from_secs(5);
@@ -633,6 +635,8 @@ impl Drop for NodeRunLease {
 /// [`spawn`](Self::spawn) the router.
 pub struct IrohNodeBuilder {
     endpoint: Arc<Endpoint>,
+    connection_observations: super::observed_connections::ObservedConnections,
+    network_recorder: uc_observability_contract::diagnostics::connectivity::NetworkRecorder,
     demand_recovery: Arc<DemandRecoveryCoordinator>,
     network_recovery_observations: Arc<NetworkRecoveryObservationSource>,
     /// Held in `Option` so `install_*` methods can `take()` + reassign the
@@ -707,7 +711,12 @@ impl IrohNodeBuilder {
             "addr filter configured: overlay-network addresses {} (Tailscale 100.64/10 + fd7a:115c:a1e0::/48)",
             if allow_overlay { "ALLOWED" } else { "BLOCKED" },
         );
+        let recorder =
+            uc_observability_contract::diagnostics::connectivity::NetworkRecorder::current();
+        let connection_observations =
+            super::observed_connections::ObservedConnections::new(recorder.clone());
         let mut endpoint_builder = Endpoint::builder(presets::N0)
+            .clear_address_lookup()
             .secret_key(secret)
             .relay_mode(relay_mode)
             .transport_config(build_transport_config(config.congestion_controller))
@@ -715,9 +724,26 @@ impl IrohNodeBuilder {
             // address-lookup service in one shot, and drop CGNAT/Tailscale
             // overlay IPs unless the user opts in. See `build_addr_filter`.
             .addr_filter(build_addr_filter(allow_overlay));
+        // 保留 N0 原生平台的原服务及原配置，只包裹固定的采集入口。
+        if !config.disable_relays {
+            use super::observed_address_lookup::ObservedAddressLookupBuilder;
+            use uc_observability_contract::diagnostics::connectivity::DiscoverySource;
+            endpoint_builder = endpoint_builder
+                .address_lookup(ObservedAddressLookupBuilder::new(
+                    iroh::address_lookup::PkarrPublisher::n0_dns(),
+                    DiscoverySource::Pkarr,
+                    recorder.clone(),
+                ))
+                .address_lookup(ObservedAddressLookupBuilder::new(
+                    iroh::address_lookup::DnsAddressLookup::n0_dns(),
+                    DiscoverySource::Dns,
+                    recorder.clone(),
+                ));
+        }
         if let Some(gate) = &config.network_partition_gate {
             endpoint_builder = endpoint_builder.hooks(gate.clone());
         }
+        endpoint_builder = endpoint_builder.hooks(connection_observations.clone());
 
         // LAN-only Mode 收紧（Pitfall 5 防御 + 与 `disable_relays` 字段 doc 一致）：
         // `presets::N0` 默认注入 `PkarrPublisher` (publish 到 dns.iroh.link) +
@@ -786,7 +812,13 @@ impl IrohNodeBuilder {
             // The `addr_filter` above also runs over what mDNS publishes,
             // so a Clash `198.18.0.1` won't leak into the LAN announcement
             // even if magicsock surfaces it locally.
-            .address_lookup(MdnsAddressLookup::builder())
+            .address_lookup(
+                super::observed_address_lookup::ObservedAddressLookupBuilder::new(
+                    MdnsAddressLookup::builder(),
+                    uc_observability_contract::diagnostics::connectivity::DiscoverySource::Mdns,
+                    recorder.clone(),
+                ),
+            )
             .bind()
             // Endpoint 的长期驱动不能持有启动/恢复操作的 span。
             .with_subscriber(tracing::Dispatch::new(
@@ -795,6 +827,38 @@ impl IrohNodeBuilder {
             .await
             .map_err(|err| IrohNodeError::Bind(err.to_string()))?;
         let endpoint = Arc::new(endpoint);
+        // 只有 bind 完成才将来源标记为可采集；失败构造不能留下 Enabled 假象。
+        {
+            use uc_observability_contract::diagnostics::connectivity::{
+                LocalDiagnosticSource as Source, SourceCapability, SourceCollection,
+            };
+            for source in [
+                Source::Connections,
+                Source::ConnectionPaths,
+                Source::MdnsDiscovery,
+            ] {
+                recorder.register_source(
+                    source,
+                    SourceCapability::Partial,
+                    SourceCollection::Enabled,
+                );
+            }
+            for source in [
+                Source::DnsDiscovery,
+                Source::PkarrDiscovery,
+                Source::RelayRecovery,
+            ] {
+                recorder.register_source(
+                    source,
+                    SourceCapability::Partial,
+                    if config.disable_relays {
+                        SourceCollection::Disabled
+                    } else {
+                        SourceCollection::Enabled
+                    },
+                );
+            }
+        }
         if let Some(gate) = &config.network_partition_gate {
             gate.install_local_endpoint_id(*endpoint.id().as_bytes());
         }
@@ -815,6 +879,8 @@ impl IrohNodeBuilder {
         log_publish_addrs(&endpoint, "post-bind");
         Ok(Self {
             endpoint,
+            connection_observations,
+            network_recorder: recorder,
             demand_recovery,
             network_recovery_observations,
             router_builder: Some(router_builder),
@@ -1405,12 +1471,14 @@ impl IrohNodeBuilder {
             super::net_recovery::spawn_net_recovery(
                 (*self.endpoint).clone(),
                 Arc::clone(&self.network_recovery_observations),
+                self.network_recorder.clone(),
             )
         });
 
         IrohNode {
             endpoint: self.endpoint,
             router,
+            connection_observations: self.connection_observations,
             net_recovery,
             network_recovery_observations: self.network_recovery_observations,
             _run_lease: self.run_lease,
@@ -1653,6 +1721,101 @@ mod tests {
         // Clean shutdown exits without hanging; the test runner's default
         // timeout would catch a deadlock.
         node.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn native_network_diagnostics_survive_driver_isolation_without_retaining_connections() {
+        use opentelemetry::logs::AnyValue;
+        use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+        use opentelemetry_sdk::logs::{InMemoryLogExporter, SdkLoggerProvider};
+        use tracing_subscriber::layer::SubscriberExt;
+        let exporter = InMemoryLogExporter::default();
+        let provider = SdkLoggerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let dispatch = tracing::Dispatch::new(
+            tracing_subscriber::registry().with(OpenTelemetryTracingBridge::new(&provider)),
+        );
+        let store = identity_store();
+        let builder = IrohNodeBuilder::bind(
+            &store,
+            IrohNodeConfig {
+                disable_relays: true,
+                ..Default::default()
+            },
+        )
+        .with_subscriber(dispatch.clone())
+        .await
+        .expect("node");
+        builder
+            .endpoint
+            .set_alpns(vec![b"diagnostic-probe".to_vec()]);
+        for _ in 0..100 {
+            if !builder.endpoint.addr().addrs.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!builder.endpoint.addr().addrs.is_empty());
+        let client = Endpoint::builder(presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .expect("client");
+        let server_endpoint = Arc::clone(&builder.endpoint);
+        let incoming = tokio::spawn(async move {
+            server_endpoint
+                .accept()
+                .await
+                .expect("incoming")
+                .await
+                .expect("handshake")
+        });
+        let connected = client
+            .connect(builder.endpoint.addr(), b"diagnostic-probe")
+            .await
+            .expect("connected");
+        drop(incoming.await.expect("accept task"));
+        tokio::time::timeout(Duration::from_secs(3), connected.closed())
+            .await
+            .expect("诊断观察不能延长服务器连接寿命");
+        client.close().await;
+        builder.spawn().shutdown().with_subscriber(dispatch).await;
+        let records = exporter.get_emitted_logs().expect("logs");
+        let names: Vec<_> = records
+            .iter()
+            .filter_map(|record| {
+                record
+                    .record
+                    .attributes_iter()
+                    .find_map(|(key, value)| match value {
+                        AnyValue::String(value) if key.as_str() == "event.name" => {
+                            Some(value.to_string())
+                        }
+                        _ => None,
+                    })
+            })
+            .collect();
+        assert!(
+            names.iter().any(|name| name == "address.publish_requested"),
+            "mDNS 发布请求没有进入安全采集入口"
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "connection.established")
+                .count(),
+            1
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "connection.closed")
+                .count(),
+            1
+        );
+        assert!(!format!("{records:?}").contains(&client.id().to_string()));
     }
 
     #[tokio::test]

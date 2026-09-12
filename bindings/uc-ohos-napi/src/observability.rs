@@ -19,6 +19,10 @@ use crate::{
 const ENGINE_FLUSH_DEADLINE: Duration = Duration::from_millis(250);
 static PROCESS_HANDLE: OnceLock<ProcessObservabilityHandle> = OnceLock::new();
 
+pub(crate) fn process_handle() -> Option<ProcessObservabilityHandle> {
+    PROCESS_HANDLE.get().cloned()
+}
+
 pub(crate) fn install(
     config: OhObservabilityConfig,
     directories: OhHostDirectories,

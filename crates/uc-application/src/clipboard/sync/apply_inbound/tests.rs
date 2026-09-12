@@ -1423,6 +1423,9 @@ async fn dedup_query_failure_short_circuits() {
 
     let uc = build(repo, capture, write);
     let err = uc.execute(input).await.expect_err("dedup error propagates");
+    assert!(std::error::Error::source(&err)
+        .and_then(|source| source.downcast_ref::<ClipboardRepositoryError>())
+        .is_some());
     match err {
         ApplyInboundError::DedupQuery(_) => {}
         other => panic!("expected DedupQuery, got {other:?}"),
@@ -4717,10 +4720,13 @@ async fn apply_inbound_withdraws_published_roots_when_persistence_fails() {
         .returning(|_| Ok(None));
 
     let mut capture = MockCapture::new();
-    capture
-        .expect_capture()
-        .times(1)
-        .returning(|_, _, _| Err(anyhow::anyhow!("database is locked")));
+    capture.expect_capture().times(1).returning(|_, _, _| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "private-storage-sentinel",
+        )
+        .into())
+    });
     let mut write = MockWrite::new();
     write.expect_write().never();
 
@@ -4744,6 +4750,12 @@ async fn apply_inbound_withdraws_published_roots_when_persistence_fails() {
         .expect_err("a failed receipt must fail the delivery");
 
     assert!(matches!(err, ApplyInboundError::Capture(_)), "{err:?}");
+    assert_eq!(
+        std::error::Error::source(&err)
+            .and_then(|source| source.downcast_ref::<std::io::Error>())
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::PermissionDenied)
+    );
     assert!(
         visible_names(save_dir.path()).is_empty(),
         "roots outlived the entry that failed to persist: {:?}",

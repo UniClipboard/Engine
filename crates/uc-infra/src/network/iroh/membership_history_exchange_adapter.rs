@@ -8,7 +8,6 @@ use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr};
 use serde::{Deserialize, Serialize};
-use tracing::instrument::WithSubscriber;
 use tracing::Instrument;
 use uc_application::deps::{
     RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
@@ -109,10 +108,8 @@ impl MembershipHistoryExchangePort for IrohMembershipHistoryExchangeAdapter {
             address,
             MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
             "membership-history",
+            uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
         )
-        .with_subscriber(tracing::Dispatch::new(
-            tracing::subscriber::NoSubscriber::default(),
-        ))
         .await
         .map_err(|_| {
             describe_operation_failure(DiagnosticErrorType::ConnectFailed);

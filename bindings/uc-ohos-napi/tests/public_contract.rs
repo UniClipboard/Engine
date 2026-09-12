@@ -45,6 +45,41 @@ async fn process_observability_health_is_public_and_current() {
     assert_eq!(health.failed_remote_span_batches, 0.0);
     assert_eq!(health.failed_remote_log_batches, 0.0);
 
+    use uc_ohos_napi::*;
+    register_host_diagnostic_source(
+        OhHostDiagnosticSource::Application,
+        OhSourceCapability::Supported,
+    )
+    .expect("source");
+    let capture = start_local_diagnostic_capture(1_000).expect("capture");
+    assert_eq!(capture.mode, "detailed");
+    let action = begin_host_diagnostic(
+        OhHostDiagnosticSource::Application,
+        OhHostDiagnosticAction::RuntimeStart,
+    )
+    .expect("begin");
+    let finished = finish_host_diagnostic(
+        OhHostDiagnosticSource::Application,
+        action.token.expect("token"),
+        OhHostDiagnosticOutcome::Completed,
+        None,
+    )
+    .expect("finish");
+    assert_eq!(finished.status, "accepted");
+    let report = prepare_local_diagnostic_export(1_000)
+        .await
+        .expect("export");
+    assert_eq!(report.flush, "completed");
+    assert!(!report.other_processes_flushed);
+    assert!(report
+        .files
+        .iter()
+        .any(|source| source.written_count != "0"));
+    assert_eq!(
+        stop_local_diagnostic_capture(capture.capture_id.expect("capture id")).expect("stop"),
+        "stopped"
+    );
+
     let _ = shutdown_process_observability(1_000).await;
     let _ = fs::remove_dir_all(root);
 }

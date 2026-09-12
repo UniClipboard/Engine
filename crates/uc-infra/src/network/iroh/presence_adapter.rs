@@ -45,9 +45,13 @@
 //!
 //! Offline detection is **not** mirrored here: the watchdog on our own
 //! outbound `Connection` remains the authoritative offline signal, so
-//! inbound `connection.closed()` only logs and returns. This keeps a single
+//! inbound `connection.closed()` only returns; the node records the closure. This keeps a single
 //! source of truth for Offline transitions and avoids state-write races
 //! between the watchdog and the inbound handler.
+
+use uc_observability_contract::diagnostics::connectivity::{
+    ConfirmationFailure, DialFailure, PresenceCheckObservation, PresenceCheckResult,
+};
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -74,7 +78,7 @@ use uc_core::ports::{
 };
 use uc_core::security::IdentityFingerprint;
 
-use super::connect::connect_with_staggered_retry;
+use super::connect::connect_with_staggered_retry_classified;
 use super::net_recovery::{
     DemandRecoveryCoordinator, NetworkRecoveryObservation, NetworkRecoveryObservationSource,
 };
@@ -354,17 +358,13 @@ impl ProtocolHandler for IrohPresenceHandler {
             return Ok(());
         }
 
-        let reason = connection.closed().await;
+        let _ = connection.closed().await;
         self.state
             .inbound_connections
             .lock()
             .await
             .remove(&connection_id);
-        debug!(
-            remote = %remote,
-            reason = ?reason,
-            "presence connection closed by peer",
-        );
+
         Ok(())
     }
 }
@@ -584,19 +584,38 @@ impl IrohPresenceAdapter {
     ///    抖动失败，旧连接其实还可用；`verify_reachable` 在外层补偿
     ///    "把假装活着的旧连接 close 掉"的清理动作）
     async fn dial_and_track(&self, device: &DeviceId) -> Result<ReachabilityState, PresenceError> {
+        let observation = PresenceCheckObservation::begin();
+        let mut failure = PresenceCheckResult::Interrupted;
+        let result = self.dial_and_track_inner(device, &mut failure).await;
+        observation.finish(if matches!(&result, Ok(ReachabilityState::Online)) {
+            PresenceCheckResult::Reachable
+        } else {
+            failure
+        });
+        result
+    }
+
+    async fn dial_and_track_inner(
+        &self,
+        device: &DeviceId,
+        failure: &mut PresenceCheckResult,
+    ) -> Result<ReachabilityState, PresenceError> {
         // Look up the stored transport address.
-        let endpoint_addr = match self
-            .peer_address_resolver
-            .resolve(device)
-            .await
-            .map_err(PresenceError::internal)?
-        {
-            Some(address) => address,
-            None => {
-                debug!("dial_and_track: no address record; returning NoAddress");
-                return Err(PresenceError::NoAddress(*device));
-            }
-        };
+        let endpoint_addr =
+            match self
+                .peer_address_resolver
+                .resolve(device)
+                .await
+                .map_err(|error| {
+                    *failure = PresenceCheckResult::AddressUnavailable;
+                    PresenceError::internal(error)
+                })? {
+                Some(address) => address,
+                None => {
+                    *failure = PresenceCheckResult::AddressMissing;
+                    return Err(PresenceError::NoAddress(*device));
+                }
+            };
         let was_online = self
             .last_state
             .lock()
@@ -617,17 +636,22 @@ impl IrohPresenceAdapter {
             let deadline = Instant::now() + RECOVERY_CONFIRMATION_BUDGET;
             let first = match tokio::time::timeout(
                 deadline.saturating_duration_since(Instant::now()),
-                connect_with_staggered_retry(
+                connect_with_staggered_retry_classified(
                     Arc::clone(&self.endpoint),
                     endpoint_addr.clone(),
                     PRESENCE_ALPN,
+                    Vec::new(),
                     "network_recovery_confirmation",
+                    uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
                 ),
             )
             .await
             {
                 Ok(result) => result,
-                Err(_) => Err("network recovery confirmation timed out".to_string()),
+                Err(_) => Err((
+                    "network recovery confirmation timed out".to_string(),
+                    DialFailure::TimedOut,
+                )),
             };
             match first {
                 Ok(connection) => Ok(connection),
@@ -637,26 +661,33 @@ impl IrohPresenceAdapter {
                     }
                     match tokio::time::timeout(
                         deadline.saturating_duration_since(Instant::now()),
-                        connect_with_staggered_retry(
+                        connect_with_staggered_retry_classified(
                             Arc::clone(&self.endpoint),
                             endpoint_addr,
                             PRESENCE_ALPN,
+                            Vec::new(),
                             "network_recovery_confirmation",
+                            uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
                         ),
                     )
                     .await
                     {
                         Ok(result) => result,
-                        Err(_) => Err("network recovery confirmation timed out".to_string()),
+                        Err(_) => Err((
+                            "network recovery confirmation timed out".to_string(),
+                            DialFailure::TimedOut,
+                        )),
                     }
                 }
             }
         } else {
-            connect_with_staggered_retry(
+            connect_with_staggered_retry_classified(
                 Arc::clone(&self.endpoint),
                 endpoint_addr,
                 PRESENCE_ALPN,
+                Vec::new(),
                 "presence",
+                uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
             )
             .await
         };
@@ -676,10 +707,14 @@ impl IrohPresenceAdapter {
                         .map_err(|_| ())?;
                     Ok::<bool, ()>(acknowledgement[0] == ADMISSION_ACCEPTED)
                 };
-                if !matches!(
-                    tokio::time::timeout(PRESENCE_ADMISSION_IO_TIMEOUT, admission_confirmed).await,
-                    Ok(Ok(true))
-                ) {
+                let confirmation =
+                    tokio::time::timeout(PRESENCE_ADMISSION_IO_TIMEOUT, admission_confirmed).await;
+                if !matches!(confirmation, Ok(Ok(true))) {
+                    *failure = PresenceCheckResult::Confirmation(match confirmation {
+                        Err(_) => ConfirmationFailure::TimedOut,
+                        Ok(Err(())) => ConfirmationFailure::TransportFailed,
+                        _ => ConfirmationFailure::PeerNotAdmitted,
+                    });
                     connection.close(0u32.into(), b"peer_not_admitted");
                     let now = self.now();
                     self.last_state
@@ -772,14 +807,14 @@ impl IrohPresenceAdapter {
                     let mut stamps = self.last_offline_at.lock().await;
                     stamps.remove(device);
                 }
-                info!("dial_and_track: dial succeeded, peer marked Online");
                 self.broadcast(*device, ReachabilityState::Online, now);
                 if let Some(observations) = &self.network_recovery_observations {
                     observations.publish(NetworkRecoveryObservation::FreshPeerDialSucceeded);
                 }
                 Ok(ReachabilityState::Online)
             }
-            Err(err) => {
+            Err((err, category)) => {
+                *failure = PresenceCheckResult::Dial(category);
                 // No iroh error type leaks upward — per `docs/design-docs/layers/infrastructure.md`
                 // §9.1 the failure is summarised into `last_state` + an
                 // event. The member stays in the repo; the next dial
@@ -1054,12 +1089,7 @@ fn spawn_watchdog(
     connection: Connection,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let reason = connection.closed().await;
-        info!(
-            device = %device_id.as_str(),
-            reason = ?reason,
-            "presence watchdog fired; peer marked Offline",
-        );
+        let _ = connection.closed().await;
 
         // Remove the map entry first so concurrent `ensure_reachable`
         // readers observe "not tracked" + "last_state == Offline". The
@@ -1371,7 +1401,35 @@ mod tests {
 
     #[tokio::test]
     async fn disconnecting_all_closes_connections_held_for_the_old_space() {
-        let endpoint_a = bound_endpoint().await;
+        use opentelemetry::logs::AnyValue;
+        use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+        use opentelemetry_sdk::logs::{InMemoryLogExporter, SdkLoggerProvider};
+        use tracing_subscriber::{layer::SubscriberExt, Layer};
+        let exporter = InMemoryLogExporter::default();
+        let logs = SdkLoggerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry().with(
+            OpenTelemetryTracingBridge::new(&logs).with_filter(
+                tracing_subscriber::filter::filter_fn(|metadata| {
+                    metadata.target() == "uc.connectivity"
+                }),
+            ),
+        );
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        let observations = super::super::observed_connections::ObservedConnections::new(
+            uc_observability_contract::diagnostics::connectivity::NetworkRecorder::current(),
+        );
+        let endpoint_a = Arc::new(
+            Endpoint::builder(iroh::endpoint::presets::N0)
+                .alpns(vec![PRESENCE_ALPN.to_vec()])
+                .relay_mode(RelayMode::Disabled)
+                .clear_address_lookup()
+                .hooks(observations.clone())
+                .bind()
+                .await
+                .expect("endpoint"),
+        );
         wait_for_direct_addrs(&endpoint_a).await;
         let endpoint_b = bound_endpoint().await;
         wait_for_direct_addrs(&endpoint_b).await;
@@ -1419,6 +1477,44 @@ mod tests {
 
         router_b.shutdown().await.ok();
         endpoint_a.close().await;
+        observations.shutdown().await;
+        logs.force_flush().expect("diagnostics flushed");
+        let records = exporter.get_emitted_logs().expect("diagnostics");
+        assert!(!records.iter().any(|entry| entry.record.attributes_iter().any(|(key, value)|
+            key.as_str() == "event.name" && matches!(value, AnyValue::String(value) if value.as_str() == "presence.connection.closed")
+        )), "连接关闭只能由节点观察者记录一次");
+        assert!(
+            records.iter().any(|entry| {
+                let field = |name: &str| {
+                    entry.record.attributes_iter().find_map(|(key, value)| {
+                        if key.as_str() == name {
+                            if let AnyValue::String(value) = value {
+                                return Some(value.as_str());
+                            }
+                        }
+                        None
+                    })
+                };
+                let (Some(name), Some(payload), Some(level)) = (
+                    field("event.name"),
+                    field("payload"),
+                    entry.record.severity_text(),
+                ) else {
+                    return false;
+                };
+                uc_observability_contract::diagnostics::connectivity::decode_local_record(
+                    name, payload, level,
+                )
+                .is_some_and(|fields| {
+                    fields
+                        .get("close.reason")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("remote_application_closed")
+                })
+            }),
+            "remote closure must remain visible without exporting its raw reason"
+        );
+        assert!(!format!("{records:?}").contains("space_left"));
     }
 
     #[tokio::test]

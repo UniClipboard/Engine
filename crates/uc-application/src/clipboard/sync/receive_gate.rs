@@ -24,6 +24,9 @@ use uc_core::MemberRepositoryPort;
 use uc_core::MemberSyncPreferences;
 
 use crate::deps::CurrentSpaceMemberScopePort;
+use uc_observability_contract::diagnostics::connectivity::{
+    describe_clipboard_receive_failure, ClipboardReceiveFailure,
+};
 
 /// Reads a peer's per-device sync preferences to decide whether inbound
 /// clipboard data from it should be accepted.
@@ -57,7 +60,12 @@ impl MemberReceiveGate {
     pub(crate) async fn authorize(&self, peer: &DeviceId) -> Option<MemberReceivePermit> {
         let scope = match self.member_scope.snapshot().await {
             Ok(scope) if scope.usable_peer_device_ids.contains(peer) => scope,
-            _ => {
+            unavailable => {
+                describe_clipboard_receive_failure(if unavailable.is_err() {
+                    ClipboardReceiveFailure::MembershipScopeUnavailable
+                } else {
+                    ClipboardReceiveFailure::MembershipScopeBlocked
+                });
                 info!(
                     reason = "membership_scope_blocked",
                     "receive gate: dropping inbound from unavailable peer"
@@ -74,6 +82,7 @@ impl MemberReceiveGate {
                 })
             }
             Ok(Some(_)) => {
+                describe_clipboard_receive_failure(ClipboardReceiveFailure::ReceiveDisabled);
                 info!(
                     reason = "receive_disabled_by_user",
                     "receive gate: dropping inbound per per-device sync preferences"
@@ -81,6 +90,7 @@ impl MemberReceiveGate {
                 None
             }
             Ok(None) => {
+                describe_clipboard_receive_failure(ClipboardReceiveFailure::MemberMissing);
                 warn!(
                     reason = "member_not_found",
                     "receive gate: dropping inbound because member preferences are unavailable"
@@ -88,6 +98,7 @@ impl MemberReceiveGate {
                 None
             }
             Err(_err) => {
+                describe_clipboard_receive_failure(ClipboardReceiveFailure::MemberLookupFailed);
                 warn!(
                     reason = "member_lookup_failed",
                     "receive gate: dropping inbound because member preferences cannot be read"
@@ -106,6 +117,7 @@ impl MemberReceiveGate {
         if categories.allowed_by(&permit.preferences.receive_content_types) {
             true
         } else {
+            describe_clipboard_receive_failure(ClipboardReceiveFailure::ContentTypeDisabled);
             info!(
                 reason = "content_type_disabled_by_user",
                 "receive gate: dropping inbound per per-device content_types filter"

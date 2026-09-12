@@ -15,16 +15,22 @@ use tracing_subscriber::Layer;
 use uc_observability_contract::diagnostics::TELEMETRY_SCHEMA_VERSION;
 
 use crate::config::{ObservabilityConfig, OtlpHttpConfig};
-use crate::filter::{remote_log_enabled, remote_span_enabled};
+use crate::filter::{remote_span_enabled, sdk_log_enabled};
+use crate::local_file::LocalFileRuntime;
+use crate::local_log_processor::LocalLogProcessor;
+use crate::local_recording::LocalRecordingState;
 use crate::remote_health::{
     RemoteHealthCounters, RemoteHealthSnapshot, RemoteSubmissionControl, TrackedLogProcessor,
     TrackedSpanProcessor,
 };
 use crate::status::{SetupStatus, SignalResult};
 use crate::subscriber::RuntimeLayer;
+#[cfg(test)]
+use crate::{DeploymentEnvironment, ObservabilityResource, OperatingSystem};
 
 #[derive(Clone)]
 pub(crate) struct TelemetryRuntime {
+    pub(crate) recording: Arc<LocalRecordingState>,
     traces: SdkTracerProvider,
     logs: SdkLoggerProvider,
     health: RemoteHealthCounters,
@@ -38,19 +44,35 @@ pub(crate) struct TelemetrySignalSummary {
 }
 
 impl TelemetryRuntime {
-    pub(crate) fn new(config: &ObservabilityConfig) -> (Self, SetupStatus) {
+    pub(crate) fn new(
+        config: &ObservabilityConfig,
+        local_file: Option<Arc<LocalFileRuntime>>,
+    ) -> (Self, SetupStatus) {
         let resource = resource(config);
         let accepting = Arc::new(AtomicBool::new(true));
-        match config
-            .remote
-            .as_ref()
-            .and_then(|remote| Self::remote(resource.clone(), remote, Arc::clone(&accepting)).ok())
-        {
+        let recording = Arc::new(LocalRecordingState::new(
+            &config.resource,
+            local_file.as_ref(),
+        ));
+        match config.remote.as_ref().and_then(|remote| {
+            Self::remote(
+                resource.clone(),
+                remote,
+                Arc::clone(&accepting),
+                local_file.clone(),
+                Arc::clone(&recording),
+            )
+            .ok()
+        }) {
             Some(runtime) => (runtime, SetupStatus::Ready),
-            None if config.remote.is_some() => {
-                (Self::local(resource, accepting), SetupStatus::Unavailable)
-            }
-            None => (Self::local(resource, accepting), SetupStatus::Disabled),
+            None if config.remote.is_some() => (
+                Self::local(resource, accepting, local_file, recording),
+                SetupStatus::Unavailable,
+            ),
+            None => (
+                Self::local(resource, accepting, local_file, recording),
+                SetupStatus::Disabled,
+            ),
         }
     }
 
@@ -68,9 +90,7 @@ impl TelemetryRuntime {
             }));
         let log_accepting = Arc::clone(&self.accepting);
         let log_layer = OpenTelemetryTracingBridge::new(&self.logs).with_filter(dynamic_filter_fn(
-            move |metadata, _| {
-                log_accepting.load(Ordering::Acquire) && remote_log_enabled(metadata)
-            },
+            move |metadata, _| log_accepting.load(Ordering::Acquire) && sdk_log_enabled(metadata),
         ));
         vec![Box::new(trace_layer), Box::new(log_layer)]
     }
@@ -107,6 +127,16 @@ impl TelemetryRuntime {
     #[cfg(test)]
     pub(crate) fn from_providers(traces: SdkTracerProvider, logs: SdkLoggerProvider) -> Self {
         Self {
+            recording: Arc::new(LocalRecordingState::new(
+                &ObservabilityResource::new(
+                    "1.0.0",
+                    DeploymentEnvironment::Test,
+                    OperatingSystem::Other,
+                    "test",
+                )
+                .expect("test resource"),
+                None,
+            )),
             traces,
             logs,
             health: RemoteHealthCounters::default(),
@@ -115,12 +145,18 @@ impl TelemetryRuntime {
         }
     }
 
-    fn local(resource: Resource, accepting: Arc<AtomicBool>) -> Self {
+    fn local(
+        resource: Resource,
+        accepting: Arc<AtomicBool>,
+        local_file: Option<Arc<LocalFileRuntime>>,
+        recording: Arc<LocalRecordingState>,
+    ) -> Self {
         Self {
             traces: SdkTracerProvider::builder()
                 .with_resource(resource.clone())
                 .build(),
-            logs: SdkLoggerProvider::builder().with_resource(resource).build(),
+            logs: local_logger_provider(resource, local_file, recording.clone()).build(),
+            recording,
             health: RemoteHealthCounters::default(),
             submission: None,
             accepting,
@@ -131,6 +167,8 @@ impl TelemetryRuntime {
         resource: Resource,
         config: &OtlpHttpConfig,
         accepting: Arc<AtomicBool>,
+        local_file: Option<Arc<LocalFileRuntime>>,
+        recording: Arc<LocalRecordingState>,
     ) -> Result<Self, ()> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let headers = config
@@ -171,17 +209,29 @@ impl TelemetryRuntime {
                 ))
                 .with_resource(resource.clone())
                 .build(),
-            logs: SdkLoggerProvider::builder()
+            logs: local_logger_provider(resource, local_file, recording.clone())
                 .with_log_processor(TrackedLogProcessor::new(
                     log_exporter,
                     submission.log_gate(),
                 ))
-                .with_resource(resource)
                 .build(),
             health,
+            recording,
             submission: Some(submission),
             accepting,
         })
+    }
+}
+
+fn local_logger_provider(
+    resource: Resource,
+    local_file: Option<Arc<LocalFileRuntime>>,
+    recording: Arc<LocalRecordingState>,
+) -> opentelemetry_sdk::logs::LoggerProviderBuilder {
+    let builder = SdkLoggerProvider::builder().with_resource(resource);
+    match local_file {
+        Some(file) => builder.with_log_processor(LocalLogProcessor::new(file, recording)),
+        None => builder,
     }
 }
 

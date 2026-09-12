@@ -59,6 +59,7 @@ impl IrohMembershipBranchRecoveryChannel {
             address,
             super::membership_branch_recovery_wire::MEMBERSHIP_BRANCH_RECOVERY_ALPN,
             "membership-branch-recovery",
+            uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
         )
         .await
         .map_err(|source| unavailable(anyhow::Error::msg(source)))?;

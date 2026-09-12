@@ -13,6 +13,7 @@ use opentelemetry::trace::TraceContextExt;
 use sha2::{Digest, Sha256};
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+pub mod connectivity;
 mod membership_recovery;
 pub use membership_recovery::{
     describe_membership_conflict, scope_membership_recovery_trigger, MembershipRecoveryObservation,
@@ -918,6 +919,10 @@ pub fn complete_operation(mut completion: OperationCompletion) {
 pub fn complete_unassociated_operation(completion: OperationCompletion) {
     // 日志 SDK 从 OpenTelemetry 当前上下文补充关联；仅 parent: None 不足以清除外层上下文。
     let _unassociated = opentelemetry::Context::new().attach();
+    emit_unassociated_operation(completion);
+}
+
+fn emit_unassociated_operation(completion: OperationCompletion) {
     let duration_ms = u64::try_from(completion.duration.as_millis()).unwrap_or(u64::MAX);
     let domain = completion.domain.as_str();
     let operation = completion.operation.as_str();

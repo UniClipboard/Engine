@@ -3,6 +3,7 @@ mod admission;
 mod membership_branch_transition;
 mod membership_ledger;
 mod security;
+pub(crate) use security::group_update_failure_detail;
 
 pub use adapters::{
     CurrentSpaceResolver, DeviceTrustObservationsAdapter, EncryptedRePairingStateStore,

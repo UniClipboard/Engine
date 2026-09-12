@@ -38,8 +38,27 @@ impl PeerAddressResolver {
             .map_err(|source| PeerAddressResolutionError::Repository { source })?;
         record
             .map(|record| {
-                postcard::from_bytes(&record.addr_blob)
-                    .map_err(|source| PeerAddressResolutionError::InvalidEncoding { source })
+                use uc_observability_contract::diagnostics::connectivity::{
+                    AddressRecordResult, NetworkRecorder, StoredAddressObservation,
+                };
+                let observation =
+                    StoredAddressObservation::new(device.as_str(), Some(&record.addr_blob));
+                let addr: EndpointAddr =
+                    postcard::from_bytes(&record.addr_blob).map_err(|source| {
+                        NetworkRecorder::current()
+                            .address_record(&observation, AddressRecordResult::InvalidEncoding);
+                        PeerAddressResolutionError::InvalidEncoding { source }
+                    })?;
+                let (summary, signature) = super::connection_diagnostics::candidate_summary(&addr);
+                observation.in_scope(|| {
+                    NetworkRecorder::current().address_loaded(
+                        *addr.id.as_bytes(),
+                        signature,
+                        summary,
+                        record.observed_at.timestamp_millis(),
+                    )
+                });
+                Ok(addr)
             })
             .transpose()
     }
@@ -155,5 +174,54 @@ mod tests {
             PeerAddressResolutionError::InvalidEncoding { .. }
         ));
         assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[tokio::test]
+    async fn stored_address_read_records_its_origin_without_exporting_the_address() {
+        use opentelemetry::logs::AnyValue;
+        use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+        use opentelemetry_sdk::logs::{InMemoryLogExporter, SdkLoggerProvider};
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::layer::SubscriberExt;
+        let exporter = InMemoryLogExporter::default();
+        let provider = SdkLoggerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber =
+            tracing_subscriber::registry().with(OpenTelemetryTracingBridge::new(&provider));
+        let address = EndpointAddr::new(SecretKey::generate().public())
+            .with_ip_addr("192.0.2.77:4567".parse().expect("address"));
+        let result = resolver(Reply::Record(
+            postcard::to_stdvec(&address).expect("record"),
+        ))
+        .resolve(&DeviceId::new("PRIVATE_DEVICE"))
+        .with_subscriber(subscriber)
+        .await
+        .expect("resolved");
+        assert_eq!(result, Some(address.clone()));
+        let records = exporter.get_emitted_logs().expect("logs");
+        let record = records.iter().find(|entry| entry.record.attributes_iter().any(|(key, value)|
+            key.as_str() == "event.name" && matches!(value, AnyValue::String(value) if value.as_str() == "address.loaded")
+        )).expect("存储地址读取必须有来源记录");
+        let payload = record
+            .record
+            .attributes_iter()
+            .find_map(|(key, value)| match value {
+                AnyValue::String(value) if key.as_str() == "payload" => Some(value.as_str()),
+                _ => None,
+            })
+            .expect("payload");
+        let fields = uc_observability_contract::diagnostics::connectivity::decode_local_record(
+            "address.loaded",
+            payload,
+            "INFO",
+        )
+        .expect("typed fields");
+        assert_eq!(fields["source"], "stored");
+        assert_eq!(fields["direct_count"], 1);
+        assert!(fields["observed_at_ms"].as_i64().is_some());
+        assert!(!payload.contains("192.0.2.77"));
+        assert!(!payload.contains("PRIVATE_DEVICE"));
+        assert!(!payload.contains(&address.id.to_string()));
     }
 }

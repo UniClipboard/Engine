@@ -7,6 +7,7 @@
 
 - [核心信念](docs/design-docs/core-beliefs.md)
 - [工程与模块设计原则](docs/design-docs/engineering-principles.md)
+- [Rust 编写规范](docs/design-docs/rust-style.md)
 - [错误处理与转换](docs/design-docs/error-handling.md)
 - [运行期观测装配](docs/design-docs/observability.md)
   - 修改日志、tracing、采样或观测验收前，必须阅读其中的[业务记录组织标准](docs/design-docs/observability.md#业务记录组织标准)。
@@ -51,6 +52,7 @@
 - 默认保留环境中的共享编译缓存；除非任务就是诊断缓存本身，不得通过清空 `RUSTC_WRAPPER` 绕过它。
 - 确需隔离的构建目录必须位于明确的外置可再生目录，并在任务结束前检查活动进程后回收；不得把清理责任留给后续会话。
 - 生产代码禁止 `unwrap()`、`expect()`、`println!()` 和 `eprintln!()`。
+- Rust 名称默认在模块入口集中导入，函数签名和正文不重复书写 `crate::` 完整路径；允许情形与豁免格式见 Rust 编写规范。
 - Application 下层失败保留完整 source chain；禁止字符串化或吞错。详细规则见错误处理文档。
 - 跨层功能必须有唯一完整负责人；Core 保存规则、Application 负责流程、Infra 提供能力、Engine 只组装。
 - 跨层持续计时与结果分类只通过 Engine 组装层的领域 port decorator 实现。
@@ -67,6 +69,7 @@
 cargo metadata --locked --format-version 1
 cargo check --workspace --all-targets --locked
 cargo fmt --all -- --check
+node scripts/architecture/check-rust-style.mjs
 node scripts/architecture/check-engine-repository.mjs
 git diff --check
 ```

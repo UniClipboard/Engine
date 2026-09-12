@@ -95,6 +95,7 @@ impl ActiveClipboardDispatchPort for IrohActiveClipboardDispatchAdapter {
             addr,
             ACTIVE_CLIPBOARD_ALPN,
             "active-clipboard",
+            uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
         )
         .await
         {

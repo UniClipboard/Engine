@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use tracing_subscriber::filter::dynamic_filter_fn;
 use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::Layer;
 
 use crate::config::ObservabilityConfig;
 use crate::filter::local_sink_enabled;
@@ -12,8 +13,14 @@ use crate::local_file::LocalFileRuntime;
 use crate::status::{
     FlushSummary, ObservabilityHealth, SetupStatus, ShutdownSummary, SignalResult,
 };
-use crate::subscriber::{local_file_layer, system_layer};
+use crate::subscriber::{local_health_layer, system_layer};
 use crate::telemetry::TelemetryRuntime;
+use crate::{
+    DetailedCaptureRequest, HostDiagnosticEvent, HostDiagnosticReceipt, HostDiagnosticRecordStatus,
+    HostDiagnosticSource, HostLogLayer, LocalCaptureStatus, LocalDiagnosticError,
+    LocalDiagnosticExportReport, LocalDiagnosticStatus, SourceCapability, SourceCollection,
+    StopCaptureResult,
+};
 
 static INSTALL_GUARD: Mutex<()> = Mutex::new(());
 static INSTALLED: OnceLock<Arc<RuntimeState>> = OnceLock::new();
@@ -22,11 +29,20 @@ pub struct ProcessObservabilityRuntime;
 
 impl ProcessObservabilityRuntime {
     pub fn install(config: ObservabilityConfig) -> Result<InstallOutcome, InstallError> {
+        Self::install_with_host_layers(config, Vec::new())
+    }
+
+    /// 在同一个进程 subscriber 中保留宿主日志输出。宿主层仅可在首次安装时提供，
+    /// 不接收 Engine 自有事件，不能复制核心诊断或绕过其隐私过滤。
+    pub fn install_with_host_layers(
+        config: ObservabilityConfig,
+        host_layers: Vec<HostLogLayer>,
+    ) -> Result<InstallOutcome, InstallError> {
         let _install_guard = INSTALL_GUARD
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(installed) = INSTALLED.get() {
-            if installed.config == config {
+            if installed.config == config && host_layers.is_empty() {
                 return Ok(InstallOutcome::Reused(ProcessObservabilityHandle {
                     state: Arc::clone(installed),
                 }));
@@ -34,13 +50,17 @@ impl ProcessObservabilityRuntime {
             return Err(InstallError::AlreadyInstalled);
         }
 
-        let (state, subscriber) = build_runtime(config);
+        let (state, subscriber) = build_runtime(config, host_layers);
         tracing::subscriber::set_global_default(subscriber)
             .map_err(|_| InstallError::SubscriberAlreadyInstalled)?;
         let _ = tracing_log::LogTracer::init();
         INSTALLED
             .set(Arc::clone(&state))
             .map_err(|_| InstallError::AlreadyInstalled)?;
+        state.telemetry.recording.checkpoint(
+            "diagnostics.run.started",
+            serde_json::json!({ "capture_mode": "standard" }),
+        );
         Ok(InstallOutcome::Installed(ProcessObservabilityHandle {
             state,
         }))
@@ -107,6 +127,116 @@ impl fmt::Debug for ProcessObservabilityHandle {
 }
 
 impl ProcessObservabilityHandle {
+    pub fn register_host_diagnostic_source(
+        &self,
+        source: HostDiagnosticSource,
+        capability: SourceCapability,
+    ) -> Result<(), LocalDiagnosticError> {
+        if !source.allowed(self.state.config.resource.os)
+            || matches!(
+                capability,
+                SourceCapability::Unknown | SourceCapability::Unsupported
+            )
+        {
+            return Err(LocalDiagnosticError::InvalidHostSource);
+        }
+        if self.state.shutdown.is_started() {
+            return Err(LocalDiagnosticError::AlreadyShutdown);
+        }
+        self.state.telemetry.recording.register_source(
+            source.source(),
+            capability,
+            SourceCollection::Enabled,
+        );
+        Ok(())
+    }
+
+    pub fn record_host_diagnostic(
+        &self,
+        source: HostDiagnosticSource,
+        event: HostDiagnosticEvent,
+    ) -> HostDiagnosticReceipt {
+        if self.state.shutdown.is_started() {
+            return HostDiagnosticReceipt::status(HostDiagnosticRecordStatus::AlreadyShutdown);
+        }
+        if self.state.local_file.is_none() {
+            return HostDiagnosticReceipt::status(HostDiagnosticRecordStatus::Unavailable);
+        }
+        self.state.telemetry.recording.record_host(source, event)
+    }
+    pub fn start_local_diagnostic_capture(
+        &self,
+        request: DetailedCaptureRequest,
+    ) -> Result<LocalCaptureStatus, LocalDiagnosticError> {
+        if self.state.shutdown.is_started() {
+            return Err(LocalDiagnosticError::AlreadyShutdown);
+        }
+        if self.state.local_file.is_none() {
+            return Err(LocalDiagnosticError::LocalSinkUnavailable);
+        }
+        self.state.telemetry.recording.start_capture(request)
+    }
+
+    pub fn stop_local_diagnostic_capture(
+        &self,
+        capture_id: &str,
+    ) -> Result<StopCaptureResult, LocalDiagnosticError> {
+        if self.state.shutdown.is_started() {
+            return Err(LocalDiagnosticError::AlreadyShutdown);
+        }
+        self.state.telemetry.recording.stop_capture(capture_id)
+    }
+
+    pub fn query_local_diagnostic_status(&self) -> LocalDiagnosticStatus {
+        self.state.telemetry.recording.status(
+            self.state.health.local_file,
+            self.state.shutdown.is_started(),
+        )
+    }
+
+    pub fn prepare_local_diagnostic_export(
+        &self,
+        deadline: Duration,
+    ) -> Result<LocalDiagnosticExportReport, LocalDiagnosticError> {
+        if deadline < Duration::from_millis(1) || deadline > Duration::from_secs(5) {
+            return Err(LocalDiagnosticError::InvalidDeadline);
+        }
+        let requested_at_utc = chrono::Utc::now().to_rfc3339();
+        let before_flush = self.query_local_diagnostic_status();
+        if !self.state.shutdown.is_started() {
+            self.state.telemetry.recording.checkpoint("diagnostics.export.snapshot", serde_json::json!({
+                "capture": before_flush.capture, "observed_records": before_flush.observed_records,
+                "policy_filtered_records": before_flush.policy_filtered_records, "schema_rejected_records": before_flush.schema_rejected_records,
+                "counter_scope": before_flush.counter_scope,
+            }));
+            for source in &before_flush.sources {
+                self.state.telemetry.recording.checkpoint(
+                    "diagnostics.export.source",
+                    serde_json::json!({ "coverage": source }),
+                );
+            }
+        }
+        let flush = if self.state.shutdown.is_started() {
+            SignalResult::AlreadyShutdown
+        } else {
+            match &self.state.local_file {
+                Some(file) => file.flush_result(deadline),
+                _ => SignalResult::Failed,
+            }
+        };
+        Ok(LocalDiagnosticExportReport {
+            flush,
+            status: self.query_local_diagnostic_status(),
+            requested_at_utc,
+            completed_at_utc: chrono::Utc::now().to_rfc3339(),
+            other_processes_flushed: false,
+            files: self
+                .state
+                .local_file
+                .as_ref()
+                .map_or_else(Vec::new, |file| file.statistics()),
+        })
+    }
     pub fn health(&self) -> ObservabilityHealth {
         let mut health = self.state.health;
         health.dropped_local_records = self
@@ -160,6 +290,7 @@ impl ProcessObservabilityHandle {
             ShutdownStart::Started => {}
         }
         self.state.health_accepting.store(true, Ordering::Release);
+        self.state.telemetry.recording.finish_run();
         self.state.telemetry.seal();
         let telemetry = self.state.telemetry.clone();
         let local_file = self.state.local_file.clone();
@@ -214,18 +345,12 @@ struct RuntimeState {
 
 fn build_runtime(
     config: ObservabilityConfig,
+    host_layers: Vec<HostLogLayer>,
 ) -> (Arc<RuntimeState>, impl tracing::Subscriber + Send + Sync) {
-    let (telemetry, remote) = TelemetryRuntime::new(&config);
-    let telemetry_accepting = telemetry.accepting();
     let health_accepting = Arc::new(AtomicBool::new(true));
-    let mut layers = telemetry.layers();
-    layers.push(system_layer());
+    let mut layers = Vec::new();
     let (local_file_status, local_file) = match config.local_logs.as_ref() {
-        Some(local) => match local_file_layer(
-            &local.directory,
-            Arc::clone(&telemetry_accepting),
-            Arc::clone(&health_accepting),
-        ) {
+        Some(local) => match local_health_layer(&local.directory, Arc::clone(&health_accepting)) {
             Ok((layer, local_file)) => {
                 layers.push(layer);
                 (SetupStatus::Ready, Some(local_file))
@@ -235,19 +360,28 @@ fn build_runtime(
         None => (SetupStatus::Disabled, None),
     };
 
+    let (telemetry, remote) = TelemetryRuntime::new(&config, local_file.clone());
+    let telemetry_accepting = telemetry.accepting();
+    layers.extend(telemetry.layers());
+    layers.push(system_layer());
     let global_telemetry_accepting = Arc::clone(&telemetry_accepting);
     let global_health_accepting = Arc::clone(&health_accepting);
-    let subscriber = tracing_subscriber::registry()
-        .with(layers)
-        .with(dynamic_filter_fn(move |metadata, _| {
-            let accepting =
-                if metadata.target() == uc_observability_contract::diagnostics::HEALTH_TARGET {
-                    &global_health_accepting
-                } else {
-                    &global_telemetry_accepting
-                };
-            accepting.load(Ordering::Acquire) && local_sink_enabled(metadata)
-        }));
+    let engine_layer = layers.with_filter(dynamic_filter_fn(move |metadata, _| {
+        let accepting =
+            if metadata.target() == uc_observability_contract::diagnostics::HEALTH_TARGET {
+                &global_health_accepting
+            } else {
+                &global_telemetry_accepting
+            };
+        accepting.load(Ordering::Acquire) && local_sink_enabled(metadata)
+    }));
+    let mut all_layers: Vec<HostLogLayer> = vec![Box::new(engine_layer)];
+    if !host_layers.is_empty() {
+        all_layers.push(Box::new(host_layers.with_filter(
+            tracing_subscriber::filter::filter_fn(host_metadata_enabled),
+        )));
+    }
+    let subscriber = tracing_subscriber::registry().with(all_layers);
     let state = Arc::new(RuntimeState {
         config,
         telemetry,
@@ -266,6 +400,60 @@ fn build_runtime(
         health_accepting,
     });
     (state, subscriber)
+}
+
+fn host_metadata_enabled(metadata: &tracing::Metadata<'_>) -> bool {
+    if matches!(
+        metadata.target(),
+        "uc.telemetry" | "uc.connectivity" | "observability.health"
+    ) {
+        return false;
+    }
+    let engine_source = |name: &str| {
+        [
+            "uc_core",
+            "uc_application",
+            "uc_infra",
+            "uc_engine",
+            "uc_observability_contract",
+            "uc_observability_runtime",
+            "uc_mobile",
+            "uc_mobile_lan",
+            "uc_mobile_proto",
+        ]
+        .iter()
+        .any(|prefix| {
+            name.strip_prefix(prefix)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+        })
+    };
+    // 网络依赖的原始地址、标识和错误正文也不能绕行到宿主输出。
+    let network_source = |name: &str| {
+        [
+            "iroh",
+            "noq",
+            "netwatch",
+            "swarm_discovery",
+            "hickory",
+            "pkarr",
+            "quinn",
+            "portmapper",
+            "netdev",
+        ]
+        .iter()
+        .any(|prefix| {
+            name.strip_prefix(prefix).is_some_and(|rest| {
+                rest.is_empty()
+                    || rest.starts_with("::")
+                    || rest.starts_with('_')
+                    || rest.starts_with('.')
+            })
+        })
+    };
+    !engine_source(metadata.target())
+        && !metadata.module_path().is_some_and(engine_source)
+        && !network_source(metadata.target())
+        && !metadata.module_path().is_some_and(network_source)
 }
 
 struct HealthAcceptanceGuard(Arc<AtomicBool>);
@@ -561,6 +749,65 @@ mod tests {
     use std::sync::Barrier;
 
     use super::*;
+    use crate::{
+        CaptureEndReason, DeploymentEnvironment, LocalCaptureMode, LocalLogConfig,
+        ObservabilityResource, OperatingSystem,
+    };
+
+    #[test]
+    fn shutdown_rejects_capture_that_passed_the_outer_check_before_closing() {
+        for initially_active in [false, true] {
+            let directory = tempfile::tempdir().expect("日志目录");
+            let config = ObservabilityConfig::new(
+                ObservabilityResource::new(
+                    "1.1.0",
+                    DeploymentEnvironment::Test,
+                    OperatingSystem::Macos,
+                    "test",
+                )
+                .expect("资源配置"),
+            )
+            .with_local_logs(LocalLogConfig::new(directory.path()));
+            let (state, _subscriber) = build_runtime(config, Vec::new());
+            let handle = ProcessObservabilityHandle { state };
+            if initially_active {
+                handle
+                    .start_local_diagnostic_capture(DetailedCaptureRequest::default())
+                    .expect("初始采集");
+            }
+            let (checked, observed_check) = mpsc::channel();
+            let (resume, resumed) = mpsc::channel();
+            let worker_handle = handle.clone();
+            let worker = std::thread::spawn(move || {
+                // 固定请求已通过外层检查、但尚未进入采集负责人的并发顺序。
+                assert!(!worker_handle.state.shutdown.is_started());
+                checked.send(()).expect("检查完成");
+                resumed.recv().expect("继续请求");
+                worker_handle
+                    .state
+                    .telemetry
+                    .recording
+                    .start_capture(DetailedCaptureRequest::default())
+            });
+            observed_check.recv().expect("请求已通过检查");
+            let shutdown = handle.shutdown(Duration::from_secs(2));
+            resume.send(()).expect("关闭后继续请求");
+            let result = worker.join().expect("采集线程");
+            assert_eq!(shutdown.logs, SignalResult::Completed);
+            assert!(matches!(result, Err(LocalDiagnosticError::AlreadyShutdown)));
+            let status = handle.query_local_diagnostic_status();
+            assert!(status.closed);
+            assert_eq!(status.capture.mode, LocalCaptureMode::Standard);
+            assert!(status.capture.capture_id.is_none());
+            assert_eq!(status.capture.remaining_ms, 0);
+            if initially_active {
+                assert_eq!(
+                    status.capture.end_reason,
+                    Some(CaptureEndReason::RuntimeShutdown)
+                );
+            }
+        }
+    }
 
     #[test]
     fn timed_out_lifecycle_work_keeps_later_flushes_out_until_it_finishes() {

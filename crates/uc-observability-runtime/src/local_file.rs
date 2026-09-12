@@ -10,7 +10,8 @@ use chrono::{Days, NaiveDate, Utc};
 use tracing_subscriber::fmt::MakeWriter;
 use uc_observability_contract::diagnostics::{managed_log_file_date, managed_log_file_name};
 
-use crate::{LOCAL_LOG_MAX_BYTES, LOCAL_LOG_RETENTION_DAYS};
+use crate::file_statistics::{increment, FileSourceCounts, FileStatistics, LocalDiagnosticSource};
+use crate::{SignalResult, LOCAL_LOG_MAX_BYTES, LOCAL_LOG_RETENTION_DAYS};
 
 const ASYNC_QUEUE_CAPACITY: usize = 4_096;
 
@@ -18,6 +19,7 @@ const ASYNC_QUEUE_CAPACITY: usize = 4_096;
 pub(crate) struct BoundedDailyMakeWriter {
     state: Arc<Mutex<WriterState>>,
     dropped_records: Arc<AtomicU64>,
+    statistics: Arc<FileStatistics>,
 }
 
 impl BoundedDailyMakeWriter {
@@ -35,6 +37,7 @@ impl BoundedDailyMakeWriter {
             Self {
                 state: Arc::new(Mutex::new(state)),
                 dropped_records: Arc::clone(&dropped_records),
+                statistics: Arc::new(FileStatistics::default()),
             },
             dropped_records,
         ))
@@ -77,6 +80,7 @@ pub(crate) struct AsyncFileWriter {
     dropped_records: Arc<AtomicU64>,
     closed: Arc<AtomicBool>,
     submission: Arc<Mutex<()>>,
+    statistics: Arc<FileStatistics>,
 }
 
 pub(crate) struct LocalFileRuntime {
@@ -121,7 +125,7 @@ impl Default for FileShutdownCoordinator {
 }
 
 enum FileMessage {
-    Line(Vec<u8>),
+    Line(Vec<u8>, LocalDiagnosticSource),
     Flush(mpsc::Sender<bool>),
     Shutdown(mpsc::Sender<bool>),
 }
@@ -147,6 +151,14 @@ impl LocalFileRuntime {
         })
     }
 
+    pub(crate) fn record_rejection(&self) {
+        increment(&self.dropped_records);
+    }
+
+    pub(crate) fn statistics(&self) -> Vec<FileSourceCounts> {
+        self.writer.statistics.snapshot()
+    }
+
     pub(crate) fn writer(&self) -> AsyncFileWriter {
         self.writer.clone()
     }
@@ -157,6 +169,10 @@ impl LocalFileRuntime {
 
     pub(crate) fn flush(&self, deadline: Duration) -> bool {
         self.worker.flush(deadline)
+    }
+
+    pub(crate) fn flush_result(&self, deadline: Duration) -> SignalResult {
+        self.worker.flush_result(deadline)
     }
 
     pub(crate) fn shutdown(&self, deadline: Duration) -> bool {
@@ -172,6 +188,7 @@ fn non_blocking_file_writer(
     writer: BoundedDailyMakeWriter,
     dropped_records: Arc<AtomicU64>,
 ) -> io::Result<(AsyncFileWriter, Arc<LocalFileWorker>)> {
+    let statistics = Arc::clone(&writer.statistics);
     let (sender, receiver) = mpsc::sync_channel(ASYNC_QUEUE_CAPACITY);
     let closed = Arc::new(AtomicBool::new(false));
     let submission = Arc::new(Mutex::new(()));
@@ -185,6 +202,7 @@ fn non_blocking_file_writer(
             dropped_records,
             closed: Arc::clone(&closed),
             submission: Arc::clone(&submission),
+            statistics,
         },
         Arc::new(LocalFileWorker {
             sender,
@@ -196,24 +214,35 @@ fn non_blocking_file_writer(
     ))
 }
 
-impl Write for AsyncFileWriter {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+impl AsyncFileWriter {
+    pub(crate) fn write_record(&self, buffer: &[u8], source: LocalDiagnosticSource) {
+        let statistics = self.statistics.source(source);
         let _submission = match self.submission.try_lock() {
             Ok(submission) => submission,
             Err(TryLockError::WouldBlock) => {
-                self.dropped_records.fetch_add(1, Ordering::Relaxed);
-                return Ok(buffer.len());
+                increment(&self.dropped_records);
+                increment(&statistics.queue_dropped);
+                return;
             }
             Err(TryLockError::Poisoned(error)) => error.into_inner(),
         };
         if self.closed.load(Ordering::Acquire)
             || self
                 .sender
-                .try_send(FileMessage::Line(buffer.to_vec()))
+                .try_send(FileMessage::Line(buffer.to_vec(), source))
                 .is_err()
         {
-            self.dropped_records.fetch_add(1, Ordering::Relaxed);
+            increment(&self.dropped_records);
+            increment(&statistics.queue_dropped);
+        } else {
+            increment(&statistics.accepted);
         }
+    }
+}
+
+impl Write for AsyncFileWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.write_record(buffer, LocalDiagnosticSource::Runtime);
         Ok(buffer.len())
     }
 
@@ -237,37 +266,43 @@ impl LocalFileWorker {
     }
 
     pub(crate) fn flush(&self, deadline: Duration) -> bool {
+        self.flush_result(deadline) == SignalResult::Completed
+    }
+
+    pub(crate) fn flush_result(&self, deadline: Duration) -> SignalResult {
         let started = Instant::now();
         let (sender, receiver) = mpsc::channel();
         let mut message = FileMessage::Flush(sender);
         {
             let Some(_submission) = lock_before_deadline(&self.submission, started, deadline)
             else {
-                return false;
+                return SignalResult::TimedOut;
             };
             if started.elapsed() >= deadline {
-                return false;
+                return SignalResult::TimedOut;
             }
             if self.closed.load(Ordering::Acquire) {
-                return false;
+                return SignalResult::AlreadyShutdown;
             }
             loop {
                 match self.sender.try_send(message) {
                     Ok(()) => break,
                     Err(mpsc::TrySendError::Full(returned)) => {
                         if started.elapsed() >= deadline {
-                            return false;
+                            return SignalResult::TimedOut;
                         }
                         message = returned;
                         std::thread::sleep(Duration::from_millis(1));
                     }
-                    Err(mpsc::TrySendError::Disconnected(_)) => return false,
+                    Err(mpsc::TrySendError::Disconnected(_)) => return SignalResult::Failed,
                 }
             }
         }
-        receiver
-            .recv_timeout(deadline.saturating_sub(started.elapsed()))
-            .unwrap_or(false)
+        match receiver.recv_timeout(deadline.saturating_sub(started.elapsed())) {
+            Ok(true) => SignalResult::Completed,
+            Ok(false) | Err(mpsc::RecvTimeoutError::Disconnected) => SignalResult::Failed,
+            Err(mpsc::RecvTimeoutError::Timeout) => SignalResult::TimedOut,
+        }
     }
 
     pub(crate) fn shutdown(&self, deadline: Duration) -> bool {
@@ -377,11 +412,13 @@ fn run_file_worker(
     let mut healthy = true;
     while let Ok(message) = receiver.recv() {
         match message {
-            FileMessage::Line(bytes) => {
+            FileMessage::Line(bytes, source) => {
                 if !healthy {
-                    dropped_records.fetch_add(1, Ordering::Relaxed);
-                } else if writer.write_all(&bytes).is_err() {
-                    dropped_records.fetch_add(1, Ordering::Relaxed);
+                    increment(&dropped_records);
+                    increment(&writer.statistics.source(source).write_failed);
+                } else if writer.write_record(&bytes, source).is_err() {
+                    increment(&dropped_records);
+                    increment(&writer.statistics.source(source).write_failed);
                     healthy = false;
                 }
             }
@@ -402,17 +439,33 @@ fn run_file_worker(
     }
 }
 
-impl Write for BoundedDailyWriter {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        let mut state = lock(&self.owner.state);
+impl BoundedDailyMakeWriter {
+    fn write_record(&self, buffer: &[u8], source: LocalDiagnosticSource) -> io::Result<()> {
+        let mut state = lock(&self.state);
         state.rotate_if_needed()?;
         let additional = u64::try_from(buffer.len()).unwrap_or(u64::MAX);
         if state.total_bytes.saturating_add(additional) > state.max_bytes {
-            self.owner.dropped_records.fetch_add(1, Ordering::Relaxed);
-            return Ok(buffer.len());
+            increment(&self.dropped_records);
+            increment(&self.statistics.source(source).quota_dropped);
+            return Ok(());
         }
         state.file.write_all(buffer)?;
         state.total_bytes = state.total_bytes.saturating_add(additional);
+        increment(&self.statistics.source(source).written);
+        if let Ok(timestamp) = u64::try_from(chrono::Utc::now().timestamp_millis()) {
+            self.statistics
+                .source(source)
+                .last_written_at_ms
+                .store(timestamp, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+}
+
+impl Write for BoundedDailyWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.owner
+            .write_record(buffer, LocalDiagnosticSource::Runtime)?;
         Ok(buffer.len())
     }
 
@@ -703,7 +756,10 @@ mod tests {
         started_receiver.recv().expect("flush start signal");
         worker
             .sender
-            .try_send(FileMessage::Line(b"before-flush\n".to_vec()))
+            .try_send(FileMessage::Line(
+                b"before-flush\n".to_vec(),
+                LocalDiagnosticSource::Runtime,
+            ))
             .expect("line accepted before flush");
         drop(submission);
 
@@ -743,7 +799,10 @@ mod tests {
         }
 
         let started = Instant::now();
-        assert!(!worker.flush(Duration::from_millis(5)));
+        assert_eq!(
+            worker.flush_result(Duration::from_millis(5)),
+            SignalResult::TimedOut
+        );
         assert!(started.elapsed() < Duration::from_millis(50));
 
         assert!(!long_flush.join().expect("long flush thread"));
@@ -766,12 +825,19 @@ mod tests {
         let files = managed_log_files(directory.path()).expect("files");
         assert_eq!(std::fs::read(&files[0]).expect("read file"), b"12345678");
         assert_eq!(runtime.dropped_records(), 1);
+        let counts = runtime.statistics();
+        assert_eq!(counts[0].quota_dropped_count, 1);
+        assert_eq!(counts[0].write_failed_count, 0);
+        assert_eq!(counts[0].written_count, 1);
+        assert!(counts[0].last_written_at_ms.is_some());
+        assert!(counts[1].last_written_at_ms.is_none());
 
         assert!(runtime.shutdown(Duration::from_secs(1)));
         writer
             .write_all(b"after-shutdown")
             .expect("closed writer remains non-fatal");
         assert_eq!(runtime.dropped_records(), 2);
+        assert_eq!(runtime.statistics()[0].queue_dropped_count, 1);
     }
 
     #[test]
@@ -863,6 +929,7 @@ mod tests {
             dropped_records: Arc::clone(&dropped_records),
             closed: Arc::new(AtomicBool::new(false)),
             submission: Arc::clone(&submission),
+            statistics: Arc::new(FileStatistics::default()),
         };
 
         let started = Instant::now();

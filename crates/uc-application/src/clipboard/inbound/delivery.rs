@@ -2,6 +2,7 @@
 
 use tokio::sync::broadcast;
 use uc_core::ports::InboundClipboard;
+use uc_observability_contract::diagnostics::connectivity::ClipboardReceiveObservation;
 use uc_observability_contract::diagnostics::ObservationContext;
 
 /// 已认证接收任务。关联不可读取，不参与授权、去重或回执。
@@ -9,6 +10,7 @@ use uc_observability_contract::diagnostics::ObservationContext;
 pub struct ClipboardDelivery {
     pub message: InboundClipboard,
     pub(crate) observation: ObservationContext,
+    pub(crate) receive_observation: ClipboardReceiveObservation,
 }
 
 impl ClipboardDelivery {
@@ -16,6 +18,7 @@ impl ClipboardDelivery {
         Self {
             message,
             observation: ObservationContext::capture(),
+            receive_observation: ClipboardReceiveObservation::capture(),
         }
     }
 }

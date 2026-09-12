@@ -1,6 +1,8 @@
 mod access;
 mod active_space_security_session;
 mod content_key_catalog;
+mod group_update_error;
+pub(crate) use group_update_error::group_update_failure_detail;
 mod history_signature;
 mod key_material;
 mod membership_update;
