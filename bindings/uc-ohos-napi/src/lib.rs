@@ -1,5 +1,8 @@
 //! HarmonyOS N-API bindings for the public `uc-engine` interface.
 
+// HarmonyOS 网络启动的 Send 检查包含深层 netlink 类型，超过编译器默认递归深度。
+#![recursion_limit = "256"]
+
 mod host;
 mod local_diagnostics;
 mod observability;
