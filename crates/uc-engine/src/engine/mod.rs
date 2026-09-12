@@ -30,6 +30,7 @@ use crate::{
 pub use event_stream::EventStream;
 use event_stream::{event_channel, EventSender};
 use in_flight::InFlightOperations;
+use lifecycle::TransitionQueue;
 pub use startup::{StartupProgress, StartupProgressInput};
 
 const INVALID_STATE_CODE: u32 = 1001;
@@ -57,13 +58,14 @@ pub(crate) trait EngineRuntime: Send + Sync {
     }
 
     async fn suspend(&self, deadline: Option<Instant>) -> Result<(), EngineError>;
-    async fn resume(&self) -> Result<(), EngineError>;
+    async fn resume(&self, cancellation: CancellationToken) -> Result<(), EngineError>;
     async fn shutdown(&self, deadline: Option<Instant>) -> Result<(), EngineError>;
 }
 
 pub struct Engine {
     state: Arc<Mutex<EngineState>>,
     lifecycle_gate: Arc<Mutex<()>>,
+    lifecycle_requests: Arc<TransitionQueue>,
     shutdown_gate: Arc<Mutex<()>>,
     stop_requested: Arc<AtomicBool>,
     runtime: Arc<dyn EngineRuntime>,
@@ -104,6 +106,7 @@ impl Engine {
         let engine = Self {
             state: Arc::new(Mutex::new(EngineState::Running)),
             lifecycle_gate: Arc::new(Mutex::new(())),
+            lifecycle_requests: Arc::new(TransitionQueue::default()),
             shutdown_gate: Arc::new(Mutex::new(())),
             stop_requested: Arc::new(AtomicBool::new(false)),
             runtime,
@@ -126,6 +129,7 @@ impl Engine {
             Self {
                 state: Arc::new(Mutex::new(EngineState::Running)),
                 lifecycle_gate: Arc::new(Mutex::new(())),
+                lifecycle_requests: Arc::new(TransitionQueue::default()),
                 shutdown_gate: Arc::new(Mutex::new(())),
                 stop_requested: Arc::new(AtomicBool::new(false)),
                 runtime,
@@ -230,7 +234,7 @@ mod tests {
             Ok(())
         }
 
-        async fn resume(&self) -> Result<(), EngineError> {
+        async fn resume(&self, _cancellation: CancellationToken) -> Result<(), EngineError> {
             self.resume_calls.fetch_add(1, Ordering::SeqCst);
             if self.fail_resume.load(Ordering::SeqCst) {
                 return Err(EngineError::new(

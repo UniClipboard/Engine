@@ -1,4 +1,3 @@
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,9 +31,11 @@ impl Engine {
         &self,
         deadline_at: Option<Instant>,
     ) -> JoinHandle<Result<(), EngineError>> {
-        self.stop_requested.store(true, Ordering::Release);
+        self.lifecycle_requests
+            .accept_shutdown(&self.stop_requested);
         let shutdown_gate = Arc::clone(&self.shutdown_gate);
         let lifecycle_gate = Arc::clone(&self.lifecycle_gate);
+        let lifecycle_requests = Arc::clone(&self.lifecycle_requests);
         let state = Arc::clone(&self.state);
         let runtime = Arc::clone(&self.runtime);
         let events = self.events.clone();
@@ -51,6 +52,7 @@ impl Engine {
                 state: EngineState::ShuttingDown,
             });
             drop(lifecycle_guard);
+            lifecycle_requests.wait_empty().await;
             if !operations
                 .wait_until_empty(deadline_at.map_or(Duration::ZERO, remaining_until))
                 .await

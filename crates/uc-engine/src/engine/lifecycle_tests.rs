@@ -14,10 +14,13 @@ use crate::{
     EngineError, EngineErrorCategory, EngineEvent, EngineState, Operation, OperationResult,
 };
 
+mod targets;
+
 #[derive(Default)]
 struct HeldRuntime {
     suspend_held: AtomicBool,
     resume_held: AtomicBool,
+    panic_resume: AtomicBool,
     suspend_calls: AtomicUsize,
     resume_calls: AtomicUsize,
     entered: Notify,
@@ -46,12 +49,16 @@ impl EngineRuntime for HeldRuntime {
         Ok(())
     }
 
-    async fn resume(&self) -> Result<(), EngineError> {
+    async fn resume(&self, _cancellation: CancellationToken) -> Result<(), EngineError> {
         self.resume_calls.fetch_add(1, Ordering::SeqCst);
         if self.resume_held.load(Ordering::SeqCst) {
             self.entered.notify_one();
             self.release.notified().await;
         }
+        assert!(
+            !self.panic_resume.load(Ordering::SeqCst),
+            "intentional resume panic"
+        );
         Ok(())
     }
 

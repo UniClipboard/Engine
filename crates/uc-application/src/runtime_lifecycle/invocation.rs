@@ -8,7 +8,7 @@ pub(super) async fn invoke(
     context: &TransitionContext,
 ) -> anyhow::Result<()> {
     let participant = Arc::clone(participant);
-    let context = TransitionContext::new(context.generation(), context.deadline());
+    let context = context.clone();
     // 独立任务把参与者 panic 保留为 JoinError，让完整负责人继续处理其他收尾。
     tokio::spawn(async move {
         match target {

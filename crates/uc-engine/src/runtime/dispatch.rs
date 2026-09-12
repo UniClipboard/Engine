@@ -723,8 +723,8 @@ impl EngineRuntime for ProductionRuntime {
         self.session_supervisor.suspend(deadline).await
     }
 
-    async fn resume(&self) -> Result<(), EngineError> {
-        self.session_supervisor.resume().await
+    async fn resume(&self, cancellation: CancellationToken) -> Result<(), EngineError> {
+        self.session_supervisor.resume(cancellation).await
     }
 
     async fn shutdown(&self, deadline: Option<Instant>) -> Result<(), EngineError> {

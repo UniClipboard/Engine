@@ -12,6 +12,7 @@ use super::{
 };
 
 mod panics;
+mod superseded;
 
 type Calls = Arc<Mutex<Vec<(&'static str, u64, Option<Instant>)>>>;
 

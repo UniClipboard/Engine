@@ -474,10 +474,10 @@ impl SessionSupervisor {
         .await
     }
 
-    pub(super) async fn resume(&self) -> Result<(), EngineError> {
+    pub(super) async fn resume(&self, cancellation: CancellationToken) -> Result<(), EngineError> {
         observe_session_request(SessionTransition::Resume, async {
             self.coordinator
-                .transition(LifecycleTarget::Active, None)
+                .transition_with_cancellation(LifecycleTarget::Active, None, cancellation)
                 .await
                 .map_err(lifecycle_error)?;
             Ok(SessionTransitionResult::Completed)

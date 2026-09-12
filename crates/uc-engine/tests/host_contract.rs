@@ -12,37 +12,18 @@ use uc_engine::{
 #[path = "host_contract/startup.rs"]
 mod startup;
 
+#[path = "host_contract/lease.rs"]
+mod lease;
+
+use lease::{find_lease, open_lease};
+
 #[tokio::test(flavor = "multi_thread")]
 async fn suspended_engine_releases_profile_lease_and_can_resume() {
-    use std::fs::{File, OpenOptions};
-    use std::path::Path;
     use std::time::Duration;
     use uc_engine::{
         CreateSpaceInput, Engine, EngineConfig, EngineState, HistoryEntryInput, Operation,
         OperationResult, SecretString, SendTextInput,
     };
-
-    fn find_lease(root: &Path) -> Option<PathBuf> {
-        for entry in std::fs::read_dir(root).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                if let Some(path) = find_lease(&path) {
-                    return Some(path);
-                }
-            } else if path.file_name().unwrap() == "profile-content-key-vault.lease" {
-                return Some(path);
-            }
-        }
-        None
-    }
-
-    fn open_lease(path: &Path) -> File {
-        OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .unwrap()
-    }
 
     let root = tempfile::tempdir().unwrap();
     let secure_storage = MemorySecureStorage::default();

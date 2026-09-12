@@ -14,10 +14,15 @@ use crate::{EngineError, EngineErrorCategory};
 pub(super) struct SessionWork(pub(super) Weak<SessionSupervisor>);
 
 pub(in super::super) fn lifecycle_error(error: LifecycleError) -> EngineError {
-    if error.is_stopped() {
-        return EngineError::new(1001, EngineErrorCategory::InvalidState, false);
-    }
-    if error.primary.chain().any(|source| {
+    let source = if error.is_stopped() || error.is_superseded() {
+        match error.additional.first() {
+            Some(source) => source,
+            None => return EngineError::new(1001, EngineErrorCategory::InvalidState, false),
+        }
+    } else {
+        &error.primary
+    };
+    if source.chain().any(|source| {
         matches!(
             source.downcast_ref::<NetworkRecoveryRequestError>(),
             Some(NetworkRecoveryRequestError::Task(_))
@@ -25,16 +30,14 @@ pub(in super::super) fn lifecycle_error(error: LifecycleError) -> EngineError {
     }) {
         return EngineError::new(1108, EngineErrorCategory::Internal, false);
     }
-    if error
-        .primary
+    if source
         .chain()
         .filter_map(|source| source.downcast_ref::<TaskShutdownReport>())
         .any(|report| report.timed_out_count > 0)
     {
         return EngineError::new(1106, EngineErrorCategory::DeadlineExceeded, true);
     }
-    error
-        .primary
+    source
         .downcast_ref::<EngineError>()
         .cloned()
         .unwrap_or_else(|| EngineError::new(1108, EngineErrorCategory::Internal, true))
@@ -69,10 +72,15 @@ impl RuntimeLifecyclePort for SessionWork {
 mod tests {
     use super::{
         lifecycle_error, EngineError, EngineErrorCategory, LifecycleError,
-        NetworkRecoveryRequestError,
+        NetworkRecoveryRequestError, RuntimeLifecyclePort, TransitionContext,
     };
+    use async_trait::async_trait;
     use std::sync::Arc;
     use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+    use uc_application::facade::{
+        LifecycleTarget, RuntimeLifecycleCoordinator, RuntimeLifecycleParticipants,
+    };
     use uc_core::TaskRegistry;
 
     #[tokio::test]
@@ -121,6 +129,43 @@ mod tests {
         assert_eq!(
             lifecycle_error(error),
             EngineError::new(1108, EngineErrorCategory::Internal, false)
+        );
+    }
+
+    struct CancelledResumeWithFailedCleanup(CancellationToken);
+
+    #[async_trait]
+    impl RuntimeLifecyclePort for CancelledResumeWithFailedCleanup {
+        async fn suspend(&self, _context: &TransitionContext) -> anyhow::Result<()> {
+            Err(EngineError::new(1106, EngineErrorCategory::DeadlineExceeded, true).into())
+        }
+
+        async fn resume(&self, _context: &TransitionContext) -> anyhow::Result<()> {
+            self.0.cancel();
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_failure_is_not_hidden_by_a_superseded_resume() {
+        let cancellation = CancellationToken::new();
+        let participant = Arc::new(CancelledResumeWithFailedCleanup(cancellation.clone()));
+        let coordinator = Arc::new(RuntimeLifecycleCoordinator::new(
+            RuntimeLifecycleParticipants {
+                session_work: participant.clone(),
+                local_work: participant.clone(),
+                local_resources: participant,
+            },
+        ));
+        let error = coordinator
+            .transition_with_cancellation(LifecycleTarget::Active, None, cancellation)
+            .await
+            .unwrap_err();
+        assert!(error.is_superseded());
+        assert_eq!(error.additional.len(), 2);
+        assert_eq!(
+            lifecycle_error(error),
+            EngineError::new(1106, EngineErrorCategory::DeadlineExceeded, true)
         );
     }
 }

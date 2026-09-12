@@ -69,7 +69,7 @@ impl EngineRuntime for BlockingRuntime {
         self.suspend_calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn resume(&self) -> Result<(), EngineError> {
+    async fn resume(&self, _cancellation: CancellationToken) -> Result<(), EngineError> {
         Ok(())
     }
     async fn shutdown(&self, _deadline: Option<Instant>) -> Result<(), EngineError> {

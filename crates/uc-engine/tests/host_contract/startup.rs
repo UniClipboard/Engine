@@ -16,6 +16,9 @@ use super::{EmptyClipboard, EmptyFiles, MemorySecureStorage};
 #[path = "startup/crash.rs"]
 mod crash;
 
+#[path = "startup/targets.rs"]
+mod targets;
+
 #[cfg(feature = "dev-tools")]
 #[path = "startup/failure.rs"]
 mod failure;
@@ -23,7 +26,7 @@ mod failure;
 struct HeldSecureStorage {
     storage: MemorySecureStorage,
     entered: Arc<Notify>,
-    release: Mutex<Option<mpsc::Receiver<()>>>,
+    release: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
 }
 
 impl HostSecureStorage for HeldSecureStorage {
@@ -98,7 +101,7 @@ async fn abandoned_startup_finishes_cleanup_before_retry_and_preserves_saved_con
         Box::new(HeldSecureStorage {
             storage: storage.clone(),
             entered: Arc::clone(&entered),
-            release: Mutex::new(Some(released)),
+            release: Arc::new(Mutex::new(Some(released))),
         }),
     );
     let (input, mut progress) = StartupProgress::channel();

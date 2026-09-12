@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 use super::invocation::invoke;
 use super::{LifecycleError, LifecycleTarget, RuntimeLifecycleParticipants, TransitionContext};
@@ -50,9 +51,20 @@ impl RuntimeLifecycleCoordinator {
         target: LifecycleTarget,
         deadline: Option<Instant>,
     ) -> Result<(), LifecycleError> {
+        self.transition_with_cancellation(target, deadline, CancellationToken::new())
+            .await
+    }
+
+    /// 撤销恢复目标只阻止下一项能力；已经开始的动作及必要收尾仍完整等待。
+    pub async fn transition_with_cancellation(
+        self: &Arc<Self>,
+        target: LifecycleTarget,
+        deadline: Option<Instant>,
+        cancellation: CancellationToken,
+    ) -> Result<(), LifecycleError> {
         let owner = Arc::clone(self);
         // 执行任务持有负责人；丢弃等待者不会取消已接受的转换或资源收尾。
-        tokio::spawn(async move { owner.execute(target, deadline).await })
+        tokio::spawn(async move { owner.execute(target, deadline, cancellation).await })
             .await
             .map_err(|source| LifecycleError {
                 primary: source.into(),
@@ -64,10 +76,14 @@ impl RuntimeLifecycleCoordinator {
         &self,
         target: LifecycleTarget,
         deadline: Option<Instant>,
+        cancellation: CancellationToken,
     ) -> Result<(), LifecycleError> {
         let mut state = self.state.lock().await;
         if target == LifecycleTarget::Active && self.stop_requested.load(Ordering::Acquire) {
             return Err(LifecycleError::stopped());
+        }
+        if target == LifecycleTarget::Active && cancellation.is_cancelled() {
+            return Err(LifecycleError::superseded());
         }
         if state.phase == Phase::Stopped {
             return Ok(());
@@ -83,7 +99,8 @@ impl RuntimeLifecycleCoordinator {
             return Ok(());
         }
         state.generation = state.generation.saturating_add(1);
-        let context = TransitionContext::new(state.generation, deadline);
+        let context =
+            TransitionContext::new(state.generation, deadline).with_cancellation(cancellation);
         let needs_cleanup = state.phase == Phase::Incomplete;
         state.phase = Phase::Incomplete;
         if needs_cleanup || target == LifecycleTarget::Suspended {
@@ -146,7 +163,7 @@ impl RuntimeLifecycleCoordinator {
     }
 
     async fn resume(&self, context: &TransitionContext) -> anyhow::Result<()> {
-        self.ensure_running()?;
+        self.ensure_running(context)?;
         invoke(
             &self.participants.local_resources,
             LifecycleTarget::Active,
@@ -155,7 +172,7 @@ impl RuntimeLifecycleCoordinator {
         .await
         .map_err(|error| error.context("prepare local resources"))?;
         // 会话构造可能使用本地物化，因此先恢复其依赖。
-        self.ensure_running()?;
+        self.ensure_running(context)?;
         invoke(
             &self.participants.local_work,
             LifecycleTarget::Active,
@@ -163,7 +180,7 @@ impl RuntimeLifecycleCoordinator {
         )
         .await
         .map_err(|error| error.context("prepare local work"))?;
-        self.ensure_running()?;
+        self.ensure_running(context)?;
         invoke(
             &self.participants.session_work,
             LifecycleTarget::Active,
@@ -171,7 +188,7 @@ impl RuntimeLifecycleCoordinator {
         )
         .await
         .map_err(|error| error.context("prepare session work"))?;
-        self.ensure_running()
+        self.ensure_running(context)
     }
 
     fn stopped_phase(&self) -> Phase {
@@ -182,9 +199,12 @@ impl RuntimeLifecycleCoordinator {
         }
     }
 
-    fn ensure_running(&self) -> anyhow::Result<()> {
+    fn ensure_running(&self, context: &TransitionContext) -> anyhow::Result<()> {
         if self.stop_requested.load(Ordering::Acquire) {
             return Err(LifecycleError::stopped().primary);
+        }
+        if context.is_cancelled() {
+            return Err(LifecycleError::superseded().primary);
         }
         Ok(())
     }

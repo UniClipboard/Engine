@@ -1,9 +1,12 @@
+mod queue;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Mutex;
 use tokio::time::{timeout_at, Instant};
+use tokio_util::sync::CancellationToken;
 
 use super::event_stream::EventSender;
 use super::in_flight::InFlightOperations;
@@ -11,6 +14,8 @@ use super::{invalid_state_error, operation_cancelled_error, Engine, EngineRuntim
 use crate::{
     EngineError, EngineErrorCategory, EngineEvent, EngineState, LifecycleAction, OperationTerminal,
 };
+
+pub(super) use queue::TransitionQueue;
 
 enum Request {
     Quiesce(Instant),
@@ -21,6 +26,7 @@ enum Request {
 /// 持有宿主入口的状态发布与排空；参与者顺序仍由 Application 完整负责。
 struct Transition {
     gate: Arc<Mutex<()>>,
+    requests: Arc<TransitionQueue>,
     stop_requested: Arc<AtomicBool>,
     state: Arc<Mutex<EngineState>>,
     runtime: Arc<dyn EngineRuntime>,
@@ -59,6 +65,7 @@ impl Engine {
         };
         let transition = Transition {
             gate: Arc::clone(&self.lifecycle_gate),
+            requests: Arc::clone(&self.lifecycle_requests),
             stop_requested: Arc::clone(&self.stop_requested),
             state: Arc::clone(&self.state),
             runtime: Arc::clone(&self.runtime),
@@ -66,19 +73,23 @@ impl Engine {
             events: self.events.clone(),
         };
         // 接受请求后，排队、执行和状态发布都不依赖调用方继续等待。
-        let task = tokio::spawn(async move { transition.execute(request).await });
+        let completion = self.lifecycle_requests.enqueue(request, transition);
         let result = match deadline {
-            Some(deadline) => timeout_at(deadline, task)
+            Some(deadline) => timeout_at(deadline, completion)
                 .await
                 .map_err(|_| operation_cancelled_error())?,
-            None => task.await,
+            None => completion.await,
         };
         result.map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?
     }
 }
 
 impl Transition {
-    async fn execute(&self, request: Request) -> Result<(), EngineError> {
+    async fn execute(
+        &self,
+        request: Request,
+        cancellation: CancellationToken,
+    ) -> Result<(), EngineError> {
         let _gate = self.gate.lock().await;
         if self.stop_requested.load(Ordering::Acquire) {
             return Err(invalid_state_error());
@@ -89,7 +100,7 @@ impl Transition {
                     .await
             }
             Request::Suspend(deadline) => self.suspend(deadline).await,
-            Request::Resume => self.resume().await,
+            Request::Resume => self.resume(cancellation).await,
         }
     }
 
@@ -109,23 +120,33 @@ impl Transition {
         Ok(())
     }
 
-    async fn resume(&self) -> Result<(), EngineError> {
+    async fn resume(&self, cancellation: CancellationToken) -> Result<(), EngineError> {
         let state = *self.state.lock().await;
         match state {
             EngineState::Running => return Ok(()),
             EngineState::Suspended | EngineState::Quiesced => {}
             _ => return Err(invalid_state_error()),
         }
+        if cancellation.is_cancelled() {
+            return self.report_result(LifecycleAction::Resume, Err(invalid_state_error()));
+        }
         // 恢复开始后旧暂停证明已失效；失败时仍关闭入口，并允许完整负责人重试收尾。
         if state == EngineState::Suspended {
             self.publish(EngineState::Quiesced).await;
         }
-        self.report_result(LifecycleAction::Resume, self.runtime.resume().await)?;
-        if self.stop_requested.load(Ordering::Acquire) {
-            return self.report_result(LifecycleAction::Resume, Err(invalid_state_error()));
-        }
-        self.publish(EngineState::Running).await;
-        Ok(())
+        self.report_result(
+            LifecycleAction::Resume,
+            self.runtime.resume(cancellation.clone()).await,
+        )?;
+        let mut state = self.state.lock().await;
+        let result = self.requests.publish_resume(
+            &cancellation,
+            &self.stop_requested,
+            &mut state,
+            &self.events,
+        );
+        drop(state);
+        self.report_result(LifecycleAction::Resume, result)
     }
 
     async fn quiesce(&self, budget: Duration) -> Result<(), EngineError> {

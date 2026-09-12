@@ -6,6 +6,10 @@ use thiserror::Error;
 #[error("runtime lifecycle has been stopped")]
 struct LifecycleStopped;
 
+#[derive(Debug, Error)]
+#[error("runtime lifecycle request has been superseded")]
+struct LifecycleSuperseded;
+
 /// 标准 source 指向首项，其余原因保存在同一报告内，不丢失其他失败。
 #[derive(Error)]
 #[error("runtime lifecycle transition incomplete")]
@@ -27,6 +31,17 @@ impl fmt::Debug for LifecycleError {
 impl LifecycleError {
     pub fn is_stopped(&self) -> bool {
         self.primary.is::<LifecycleStopped>()
+    }
+
+    pub fn is_superseded(&self) -> bool {
+        self.primary.is::<LifecycleSuperseded>()
+    }
+
+    pub(super) fn superseded() -> Self {
+        Self {
+            primary: LifecycleSuperseded.into(),
+            additional: Vec::new(),
+        }
     }
 
     pub(super) fn stopped() -> Self {

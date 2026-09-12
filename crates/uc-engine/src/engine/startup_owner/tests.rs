@@ -32,7 +32,7 @@ impl EngineRuntime for HeldShutdown {
         unreachable!("unclaimed startup cannot suspend");
     }
 
-    async fn resume(&self) -> Result<(), EngineError> {
+    async fn resume(&self, _cancellation: CancellationToken) -> Result<(), EngineError> {
         unreachable!("unclaimed startup cannot resume");
     }
 

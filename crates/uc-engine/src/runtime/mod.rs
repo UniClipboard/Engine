@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 use uc_application::deps::{
     ProfileFactoryResetCapabilityError, ProfileUpgradeBackupPort, StopProfileRuntimePort,
@@ -239,7 +240,7 @@ impl ProductionRuntime {
                 .start_process_runtime(Arc::clone(&task_registry))
                 .await
                 .map_err(|error| startup_error("clipboard background", error))?;
-            session_supervisor.resume().await
+            session_supervisor.resume(CancellationToken::new()).await
         }
         .await;
         if let Err(primary) = started {
