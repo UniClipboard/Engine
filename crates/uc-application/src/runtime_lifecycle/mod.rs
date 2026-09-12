@@ -2,6 +2,7 @@
 
 mod coordinator;
 mod error;
+mod invocation;
 mod model;
 mod ports;
 

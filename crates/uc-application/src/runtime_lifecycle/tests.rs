@@ -11,6 +11,8 @@ use super::{
     RuntimeLifecyclePort, TransitionContext,
 };
 
+mod panics;
+
 type Calls = Arc<Mutex<Vec<(&'static str, u64, Option<Instant>)>>>;
 
 struct Participant {
@@ -18,6 +20,8 @@ struct Participant {
     calls: Calls,
     fail_suspend: AtomicBool,
     fail_resume: AtomicBool,
+    panic_suspend: AtomicBool,
+    panic_resume: AtomicBool,
     block_suspend: AtomicBool,
     block_resume: AtomicBool,
     starting: Notify,
@@ -33,6 +37,8 @@ impl Participant {
             calls: Arc::clone(calls),
             fail_suspend: AtomicBool::new(false),
             fail_resume: AtomicBool::new(false),
+            panic_suspend: AtomicBool::new(false),
+            panic_resume: AtomicBool::new(false),
             block_suspend: AtomicBool::new(false),
             block_resume: AtomicBool::new(false),
             starting: Notify::new(),
@@ -57,6 +63,10 @@ impl RuntimeLifecyclePort for Participant {
         if self.fail_suspend.load(Ordering::SeqCst) {
             return Err(std::io::Error::other("stop failure").into());
         }
+        assert!(
+            !self.panic_suspend.load(Ordering::SeqCst),
+            "sensitive stop panic payload"
+        );
         Ok(())
     }
 
@@ -72,6 +82,10 @@ impl RuntimeLifecyclePort for Participant {
         if self.fail_resume.load(Ordering::SeqCst) {
             return Err(std::io::Error::other("start failure").into());
         }
+        assert!(
+            !self.panic_resume.load(Ordering::SeqCst),
+            "sensitive resume panic payload"
+        );
         Ok(())
     }
 }
@@ -80,6 +94,7 @@ struct Fixture {
     coordinator: Arc<RuntimeLifecycleCoordinator>,
     session: Arc<Participant>,
     local: Arc<Participant>,
+    resources: Arc<Participant>,
     calls: Calls,
 }
 
@@ -94,11 +109,12 @@ impl Fixture {
                 RuntimeLifecycleParticipants {
                     session_work: session.clone(),
                     local_work: local.clone(),
-                    local_resources: resources,
+                    local_resources: resources.clone(),
                 },
             )),
             session,
             local,
+            resources,
             calls,
         }
     }

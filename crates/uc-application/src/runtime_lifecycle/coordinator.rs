@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
+use super::invocation::invoke;
 use super::{LifecycleError, LifecycleTarget, RuntimeLifecycleParticipants, TransitionContext};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -112,14 +113,32 @@ impl RuntimeLifecycleCoordinator {
     async fn suspend(&self, context: &TransitionContext) -> Vec<anyhow::Error> {
         let mut errors = Vec::new();
         // 会话可能等待本地物化，先结束会话，不能先关闭它需要的本地工作。
-        if let Err(error) = self.participants.session_work.suspend(context).await {
+        if let Err(error) = invoke(
+            &self.participants.session_work,
+            LifecycleTarget::Suspended,
+            context,
+        )
+        .await
+        {
             errors.push(error.context("stop session work"));
         }
-        if let Err(error) = self.participants.local_work.suspend(context).await {
+        if let Err(error) = invoke(
+            &self.participants.local_work,
+            LifecycleTarget::Suspended,
+            context,
+        )
+        .await
+        {
             errors.push(error.context("stop local work"));
         }
         if errors.is_empty() {
-            if let Err(error) = self.participants.local_resources.suspend(context).await {
+            if let Err(error) = invoke(
+                &self.participants.local_resources,
+                LifecycleTarget::Suspended,
+                context,
+            )
+            .await
+            {
                 errors.push(error.context("release local resources"));
             }
         }
@@ -128,24 +147,30 @@ impl RuntimeLifecycleCoordinator {
 
     async fn resume(&self, context: &TransitionContext) -> anyhow::Result<()> {
         self.ensure_running()?;
-        self.participants
-            .local_resources
-            .resume(context)
-            .await
-            .map_err(|error| error.context("prepare local resources"))?;
+        invoke(
+            &self.participants.local_resources,
+            LifecycleTarget::Active,
+            context,
+        )
+        .await
+        .map_err(|error| error.context("prepare local resources"))?;
         // 会话构造可能使用本地物化，因此先恢复其依赖。
         self.ensure_running()?;
-        self.participants
-            .local_work
-            .resume(context)
-            .await
-            .map_err(|error| error.context("prepare local work"))?;
+        invoke(
+            &self.participants.local_work,
+            LifecycleTarget::Active,
+            context,
+        )
+        .await
+        .map_err(|error| error.context("prepare local work"))?;
         self.ensure_running()?;
-        self.participants
-            .session_work
-            .resume(context)
-            .await
-            .map_err(|error| error.context("prepare session work"))?;
+        invoke(
+            &self.participants.session_work,
+            LifecycleTarget::Active,
+            context,
+        )
+        .await
+        .map_err(|error| error.context("prepare session work"))?;
         self.ensure_running()
     }
 
