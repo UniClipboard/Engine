@@ -815,7 +815,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 ## 文档维护记录
 
-- 2026-09-12：iOS 与 Android 发布脚本以同一组 `bindgen-cli` feature 一次构建宿主库和接口生成器，并复用 dev profile；宿主库只用于读取接口元数据，不进入发布包。设备库仍使用原来的 release 设置，发布资产、来源校验和架构边界不变。Android 在恢复已有缓存后安装固定版本的 cargo-ndk，避免每次重新编译工具。
+- 2026-09-12：iOS 与 Android 发布脚本以同一组 `bindgen-cli` feature 一次构建宿主库和接口生成器，并复用 dev profile；宿主库只用于读取接口元数据，不进入发布包。设备库仍使用原来的 release 设置，发布资产、来源校验和架构边界不变。缓存按 dev-host 构建方式区分，避免命中旧缓存后无法保存新增的 dev 依赖；首次准备和后续命中分别验收。Android 在恢复已有缓存后安装固定版本的 cargo-ndk，避免每次重新编译工具。
 - 2026-09-12：HarmonyOS 绑定的编译期递归深度提升至 256，以完成 Engine 网络启动 Future 的 Send 检查；运行行为、绑定接口与分层所有权不变。
 
 - 2026-09-12：成员撤销区分本地安全变更未完成与已激活但仍待远端确认；只有前者阻止下一次本地移除。原记录与消息继续承担远端补齐责任，Application 邀请资格检查不变。邀请错误分别保留网络未启动、成员关系处理中和需要恢复的原因；验收见[执行记录](../exec-plans/active/2026-09-12-invitation-admission-recovery.md)。v1.1.0-rc.15 同步工作区、HarmonyOS 包与宿主检查版本，发布所有权及设备验收边界不变。

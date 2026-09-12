@@ -122,7 +122,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           workspaces: . -> target
-          shared-key: engine-release-ios
+          shared-key: engine-release-ios-dev-host
 
       - name: Build iOS assets
         env:
@@ -159,7 +159,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           workspaces: . -> target
-          shared-key: engine-release-android
+          shared-key: engine-release-android-dev-host
 
       - name: Install Android build helper
         run: cargo install cargo-ndk --version 4.1.2 --locked
