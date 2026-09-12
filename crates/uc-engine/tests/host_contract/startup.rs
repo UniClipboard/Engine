@@ -13,6 +13,10 @@ use uc_engine::{
 
 use super::{EmptyClipboard, EmptyFiles, MemorySecureStorage};
 
+#[cfg(feature = "dev-tools")]
+#[path = "startup/failure.rs"]
+mod failure;
+
 struct HeldSecureStorage {
     storage: MemorySecureStorage,
     entered: Arc<Notify>,

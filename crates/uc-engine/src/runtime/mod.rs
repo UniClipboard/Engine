@@ -33,7 +33,7 @@ use crate::assembly::mobile_lan::MobileLanEndpointUpdater;
 use crate::engine::event_stream::EventSender;
 use crate::{EngineConfig, EngineError, EngineErrorCategory, HostCapabilities, HostFileAccess};
 use host_clipboard::{spawn_host_clipboard_change_task, HostClipboardChangeRuntime};
-use session_supervisor::SessionSupervisor;
+use session_supervisor::{lifecycle_error, SessionSupervisor};
 const START_FAILED_CODE: u32 = 1101;
 const OPERATION_UNAVAILABLE_CODE: u32 = 1103;
 
@@ -198,7 +198,7 @@ impl ProductionRuntime {
             });
         let profile_reset = Arc::new(ProfileFactoryResetFacade::new(
             Arc::clone(&wired.profile_reset.lifecycle_repository),
-            profile_runtime,
+            Arc::clone(&profile_runtime),
             Arc::clone(&wired.profile_reset.keys),
             Arc::clone(&wired.profile_reset.state),
         ));
@@ -233,12 +233,25 @@ impl ProductionRuntime {
             network_partition_gate.clone(),
             Arc::clone(&network_recovery),
         );
-        wired
-            .application
-            .start_process_runtime(Arc::clone(&task_registry))
-            .await
-            .map_err(|error| startup_error("clipboard background", error))?;
-        session_supervisor.resume().await?;
+        let started = async {
+            wired
+                .application
+                .start_process_runtime(Arc::clone(&task_registry))
+                .await
+                .map_err(|error| startup_error("clipboard background", error))?;
+            session_supervisor.resume().await
+        }
+        .await;
+        if let Err(primary) = started {
+            network_recovery.shutdown().await;
+            if let Err(rollback) = profile_runtime.stop_profile_runtime().await {
+                return Err(lifecycle_error(LifecycleError {
+                    primary: primary.into(),
+                    additional: vec![rollback.into()],
+                }));
+            }
+            return Err(primary);
+        }
         spawn_space_transition_watcher(
             Arc::clone(&session_supervisor),
             &task_registry,
