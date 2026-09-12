@@ -68,8 +68,7 @@ jobs:
           tool: cargo-llvm-cov
 
       - name: Validate automatic connections without coverage instrumentation
-        run: |
-          cargo test -p uc-engine --features dev-tools --test space_membership_auto_pairing_e2e --locked -- automatic_connections:: --test-threads=1
+        run: "cargo test -p uc-engine --features dev-tools --test space_membership_auto_pairing_e2e --locked -- automatic_connections:: --test-threads=1"
 
       - name: Generate Rust coverage
         run: cargo llvm-cov --workspace --all-targets --locked --lcov --output-path lcov.info
