@@ -7,6 +7,9 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) mod event_stream;
 mod in_flight;
+mod lifecycle;
+#[cfg(test)]
+mod lifecycle_tests;
 mod shutdown;
 #[cfg(test)]
 mod shutdown_tests;
@@ -17,7 +20,7 @@ use crate::runtime::ProductionRuntime;
 use crate::{DevOperation, DevOperationResult};
 use crate::{
     EngineConfig, EngineError, EngineErrorCategory, EngineEvent, EngineState, HostCapabilities,
-    LifecycleAction, Operation, OperationResult, OperationTerminal,
+    Operation, OperationResult, OperationTerminal,
 };
 pub use event_stream::EventStream;
 use event_stream::{event_channel, EventSender};
@@ -26,7 +29,6 @@ pub use startup::{StartupProgress, StartupProgressInput};
 
 const INVALID_STATE_CODE: u32 = 1001;
 const OPERATION_CANCELLED_CODE: u32 = 1002;
-const SUSPEND_OPERATION_DRAIN: Duration = Duration::from_secs(2);
 
 #[async_trait]
 pub(crate) trait EngineRuntime: Send + Sync {
@@ -56,7 +58,7 @@ pub(crate) trait EngineRuntime: Send + Sync {
 
 pub struct Engine {
     state: Arc<Mutex<EngineState>>,
-    lifecycle_gate: Mutex<()>,
+    lifecycle_gate: Arc<Mutex<()>>,
     shutdown_gate: Arc<Mutex<()>>,
     runtime: Arc<dyn EngineRuntime>,
     events: EventSender,
@@ -97,7 +99,7 @@ impl Engine {
         );
         let engine = Self {
             state: Arc::new(Mutex::new(EngineState::Running)),
-            lifecycle_gate: Mutex::new(()),
+            lifecycle_gate: Arc::new(Mutex::new(())),
             shutdown_gate: Arc::new(Mutex::new(())),
             runtime,
             events,
@@ -118,7 +120,7 @@ impl Engine {
         (
             Self {
                 state: Arc::new(Mutex::new(EngineState::Running)),
-                lifecycle_gate: Mutex::new(()),
+                lifecycle_gate: Arc::new(Mutex::new(())),
                 shutdown_gate: Arc::new(Mutex::new(())),
                 runtime,
                 events,
@@ -180,101 +182,6 @@ impl Engine {
             self.events.send(EngineEvent::OperationFinished {
                 operation_id: registered.id.clone(),
                 terminal: terminal_for_result(&result),
-            });
-        }
-        result
-    }
-
-    pub async fn quiesce(&self, deadline: Duration) -> Result<(), EngineError> {
-        let _lifecycle = self.lifecycle_gate.lock().await;
-        self.quiesce_locked(deadline).await
-    }
-
-    pub async fn suspend(&self) -> Result<(), EngineError> {
-        let _lifecycle = self.lifecycle_gate.lock().await;
-        let lifecycle = *self.state.lock().await;
-        match lifecycle {
-            EngineState::Running => self.quiesce_locked(Duration::ZERO).await?,
-            EngineState::Quiesced => {}
-            _ => return Err(invalid_state_error()),
-        }
-
-        if !self
-            .operations
-            .wait_until_empty(SUSPEND_OPERATION_DRAIN)
-            .await
-        {
-            return self.report_lifecycle_result(
-                LifecycleAction::Suspend,
-                Err(operation_cancelled_error()),
-            );
-        }
-        self.report_lifecycle_result(LifecycleAction::Suspend, self.runtime.suspend().await)?;
-        *self.state.lock().await = EngineState::Suspended;
-        self.events.send(EngineEvent::StateChanged {
-            state: EngineState::Suspended,
-        });
-        Ok(())
-    }
-
-    pub async fn resume(&self) -> Result<(), EngineError> {
-        let _lifecycle = self.lifecycle_gate.lock().await;
-        if *self.state.lock().await != EngineState::Suspended {
-            return Err(invalid_state_error());
-        }
-
-        self.report_lifecycle_result(LifecycleAction::Resume, self.runtime.resume().await)?;
-        *self.state.lock().await = EngineState::Running;
-        self.events.send(EngineEvent::StateChanged {
-            state: EngineState::Running,
-        });
-        Ok(())
-    }
-
-    async fn quiesce_locked(&self, deadline: Duration) -> Result<(), EngineError> {
-        {
-            let mut state = self.state.lock().await;
-            if *state != EngineState::Running {
-                return Err(invalid_state_error());
-            }
-            *state = EngineState::Quiescing;
-        }
-        self.events.send(EngineEvent::StateChanged {
-            state: EngineState::Quiescing,
-        });
-
-        let drained = self.operations.wait_until_empty(deadline).await;
-        if !drained {
-            self.cancel_in_flight().await;
-        }
-
-        *self.state.lock().await = EngineState::Quiesced;
-        self.events.send(EngineEvent::StateChanged {
-            state: EngineState::Quiesced,
-        });
-        Ok(())
-    }
-
-    async fn cancel_in_flight(&self) {
-        let cancelled = self.operations.cancel_all().await;
-
-        for operation_id in cancelled {
-            self.events.send(EngineEvent::OperationFinished {
-                operation_id,
-                terminal: OperationTerminal::Cancelled,
-            });
-        }
-    }
-
-    fn report_lifecycle_result(
-        &self,
-        action: LifecycleAction,
-        result: Result<(), EngineError>,
-    ) -> Result<(), EngineError> {
-        if let Err(error) = &result {
-            self.events.send(EngineEvent::LifecycleFailed {
-                action,
-                error: error.clone(),
             });
         }
         result
