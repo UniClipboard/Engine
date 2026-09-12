@@ -457,6 +457,16 @@ impl RuntimeLifecycleCoordinator {
 - 25 项 Engine 相关测试及 3 项真实宿主测试通过；metadata、workspace 全目标编译、fmt、Rust 风格、
   仓库架构及隐私、diff 检查通过，仅有既存测试未使用内容警告。
 
+### 2026-09-13：Application 关闭失败返回生产调用方
+
+- FileTransferTimeoutRuntime 回归 transfer/file 领域目录；等待正常退出时保留任务错误，强制取消后等待实际析构并返回原始 JoinError。
+- ApplicationShutdownReport 汇总历史维护、超时任务与搜索的全部类型化来源。生产会话关闭继续执行网络清理后才返回失败，
+  SessionSupervisor 的暂停、重建、重置及 Space 切换消费该结果，不能在关闭失败后继续安装新会话。
+- 本地恢复失败后的清理同时保留首因和清理失败，直到 Engine 稳定错误转换边界；不把原始失败替换成字符串。
+- 尚未完成 TaskRegistry 和 Iroh 停止失败的完整汇总、共同期限及设备验证，不据此勾选整体关闭验收。
+- 18 项 Application 关闭测试、8 项会话测试、3 项真实宿主测试通过；metadata、workspace 全目标、
+  Engine lan-compat 全目标、fmt、Rust 风格、架构与隐私、diff 检查通过，仅有既存测试未使用内容警告。
+
 # 7. Edge Cases
 
 

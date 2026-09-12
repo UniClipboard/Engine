@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn, Instrument};
+use tracing::Instrument;
 use uc_application::facade::{
     AppFacade, ApplicationAssembly, ApplicationRuntime, ClipboardInboundEvent,
-    ClipboardInboundEventAction, ClipboardInboundEventPort, LifecycleTarget,
+    ClipboardInboundEventAction, ClipboardInboundEventPort, LifecycleError, LifecycleTarget,
     RecoverSpaceSessionError, RuntimeLifecycleCoordinator, RuntimeLifecycleParticipants,
 };
 use uc_core::{FileTransferCancellationReason, TaskRegistry};
@@ -39,6 +39,7 @@ use crate::{EngineError, EngineErrorCategory, OperationResult};
 const SESSION_OPERATION_GRACE: Duration = Duration::from_secs(2);
 
 mod lifecycle;
+mod shutdown;
 use lifecycle::{lifecycle_error, SessionWork};
 
 struct ProductionSessionFactory {
@@ -319,7 +320,8 @@ impl SessionSupervisor {
             self.stop_current_session(
                 uc_core::FileTransferCancellationReason::ConnectivityRecovery,
             )
-            .await?;
+            .await
+            .map_err(lifecycle_error)?;
             self.install_new_session(false).await
         })
         .await
@@ -366,7 +368,8 @@ impl SessionSupervisor {
                 .ok_or_else(super::operation_unavailable_error)?;
             session
                 .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
-                .await;
+                .await
+                .map_err(lifecycle_error)?;
             let completed = facade.complete_pending_space_transition().await;
             match completed {
                 Ok(_) => {
@@ -416,7 +419,8 @@ impl SessionSupervisor {
         let facade = Arc::clone(&session.facade);
         session
             .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
-            .await;
+            .await
+            .map_err(lifecycle_error)?;
         let transfer_result = self
             .application
             .cancel_active_file_transfers(
@@ -498,16 +502,19 @@ impl SessionSupervisor {
 
     async fn stop_current_session(
         &self,
-        reason: uc_core::FileTransferCancellationReason,
-    ) -> Result<(), EngineError> {
+        reason: FileTransferCancellationReason,
+    ) -> Result<(), LifecycleError> {
         let session = self.session.lock().await.take();
+        let mut errors = Vec::new();
         if let Some(session) = session {
-            session.shutdown(reason).await;
+            if let Err(error) = session.shutdown(reason).await {
+                errors.push(error.into());
+            }
         }
-        self.application
-            .cancel_active_file_transfers(reason)
-            .await
-            .map_err(|error| operation_error_with_code(1104, "cancel active file transfers", error))
+        if let Err(error) = self.application.cancel_active_file_transfers(reason).await {
+            errors.push(anyhow::Error::new(error).context("cancel active file transfers"));
+        }
+        LifecycleError::from_errors(errors)
     }
 
     async fn install_new_session(&self, resume_space_activities: bool) -> Result<(), EngineError> {
@@ -519,21 +526,17 @@ impl SessionSupervisor {
         let pending_transition = match session.facade.has_pending_space_transition().await {
             Ok(pending) => pending,
             Err(error) => {
-                session
-                    .shutdown(FileTransferCancellationReason::Unknown)
-                    .await;
-                return Err(operation_error_with_code(
-                    1103,
-                    "inspect pending space transition",
-                    error,
-                ));
+                let primary =
+                    operation_error_with_code(1103, "inspect pending space transition", error);
+                return Err(session.shutdown_after_failure(primary).await);
             }
         };
         if pending_transition {
             let facade = Arc::clone(&session.facade);
             session
                 .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
-                .await;
+                .await
+                .map_err(lifecycle_error)?;
             facade
                 .complete_pending_space_transition()
                 .await
@@ -548,25 +551,17 @@ impl SessionSupervisor {
             // 缺少缓存口令是正常锁定；存储故障和损坏不能降级为恢复成功。
             Err(RecoverSpaceSessionError::KeyringMiss) if !resume_space_activities => false,
             Err(error) => {
-                session
-                    .shutdown(FileTransferCancellationReason::Unknown)
-                    .await;
-                return Err(operation_error_with_code(
-                    1103,
-                    "recover local session",
-                    error,
-                ));
+                let primary = operation_error_with_code(1103, "recover local session", error);
+                return Err(session.shutdown_after_failure(primary).await);
             }
         };
         if resume_space_activities && !unlocked {
-            session
-                .shutdown(FileTransferCancellationReason::Unknown)
-                .await;
-            return Err(operation_error_with_code(
+            let primary = operation_error_with_code(
                 1103,
                 "activate transitioned space session",
                 "the transitioned space could not be unlocked",
-            ));
+            );
+            return Err(session.shutdown_after_failure(primary).await);
         }
         *self.session.lock().await = Some(session);
         self.operations.reopen();
@@ -665,36 +660,6 @@ impl ProductionSessionFactory {
             sync_engine,
             tasks,
         })
-    }
-}
-
-impl ProductionSession {
-    async fn shutdown(self, transfer_reason: uc_core::FileTransferCancellationReason) {
-        info!("Engine session 开始关闭");
-        #[cfg(feature = "lan-compat")]
-        if self
-            .mobile_sync
-            .shutdown_mobile_file_uploads()
-            .await
-            .is_err()
-        {
-            warn!("mobile file upload shutdown finished with an error");
-        }
-        super::task_shutdown::shutdown_tasks(&self.tasks, Duration::from_millis(500)).await;
-        info!("Engine session 网络观测任务已停止");
-        let application_shutdown = self.application.shutdown().await;
-        info!("Engine session Application runtime 已停止");
-        if application_shutdown.history.is_some() {
-            warn!(
-                error_kind = "history",
-                "history maintenance stopped with an error"
-            );
-        }
-        if application_shutdown.search.is_some() {
-            error!(error_kind = "search", "search runtime stopped with error");
-        }
-        self.sync_engine.shutdown(transfer_reason).await;
-        info!("Engine session Iroh 网络已停止");
     }
 }
 

@@ -5,7 +5,7 @@
 
 use crate::clipboard::inbound::ClipboardReceiverPort;
 use std::sync::Arc;
-use std::time::Duration;
+use tokio::task::JoinError;
 
 use uc_core::clipboard::ClipboardIntegrationMode;
 use uc_core::file_transfer::OutboundProgressReporterPort;
@@ -37,7 +37,7 @@ use crate::facade::clipboard::facade::ClipboardSyncDeps;
 use crate::facade::clipboard::ClipboardSyncFacade;
 use crate::facade::clipboard_history::{HistoryMaintenanceRuntime, HistoryMaintenanceRuntimeError};
 use crate::facade::clipboard_write::RestoreBroadcastTrigger;
-use crate::runtime_lifecycle::{RuntimeLifecyclePort, TransitionContext};
+use crate::runtime_lifecycle::{LifecycleError, RuntimeLifecyclePort, TransitionContext};
 use crate::search::{SearchAssembly, SearchShutdownError};
 use crate::settings::SettingsAssembly;
 use crate::space::SpaceAdmissionObservationRegistry;
@@ -49,6 +49,7 @@ use crate::space::{
 use crate::transfer::blob::facade::BlobTransferDeps;
 use crate::transfer::file::assembly::FileTransferAssembly;
 use crate::transfer::file::assembly::{FileTransferAssemblyDeps, ReceiveCancellationDeps};
+use crate::transfer::file::timeout_runtime::FileTransferTimeoutRuntime;
 
 /// Engine 在 Iroh builder 上选择完成的 Space adapter。
 pub struct ApplicationSpaceAdapters {
@@ -641,40 +642,6 @@ struct ApplicationRuntimeOwners {
     active_clipboard: ActiveClipboardSession,
 }
 
-struct FileTransferTimeoutRuntime {
-    cancel: tokio::sync::watch::Sender<bool>,
-    handle: tokio::task::JoinHandle<()>,
-}
-
-impl FileTransferTimeoutRuntime {
-    fn start(
-        file_transfer: Arc<crate::facade::FileTransferFacade>,
-        blob_transfer: Arc<BlobTransferFacade>,
-    ) -> Self {
-        let (cancel, receiver) = tokio::sync::watch::channel(false);
-        let handle = file_transfer.spawn_timeout_sweep(receiver, blob_transfer);
-        Self { cancel, handle }
-    }
-
-    async fn shutdown(mut self) {
-        let _ = self.cancel.send(true);
-        if tokio::time::timeout(Duration::from_secs(1), &mut self.handle)
-            .await
-            .is_err()
-        {
-            self.handle.abort();
-            if let Err(error) = self.handle.await {
-                if !error.is_cancelled() {
-                    tracing::warn!(
-                        error_kind = "join_failed",
-                        "file transfer timeout worker shutdown failed"
-                    );
-                }
-            }
-        }
-    }
-}
-
 impl ApplicationRuntime {
     pub async fn start(
         assembly: &ApplicationAssembly,
@@ -713,15 +680,20 @@ impl ApplicationRuntime {
             return ApplicationShutdownReport {
                 history: None,
                 search: None,
+                file_transfer_timeout: None,
             };
         };
         let history = owners.history_maintenance.shutdown().await.err();
-        owners.file_transfer_timeout.shutdown().await;
+        let file_transfer_timeout = owners.file_transfer_timeout.shutdown().await.err();
         owners.clipboard.shutdown().await;
         owners.active_clipboard.shutdown().await;
         let search = owners.search.shutdown().await.err();
         owners.space.on_shutdown().await;
-        ApplicationShutdownReport { history, search }
+        ApplicationShutdownReport {
+            history,
+            search,
+            file_transfer_timeout,
+        }
     }
 }
 
@@ -740,6 +712,23 @@ pub enum ApplicationRuntimeError {
 pub struct ApplicationShutdownReport {
     pub history: Option<HistoryMaintenanceRuntimeError>,
     pub search: Option<SearchShutdownError>,
+    pub file_transfer_timeout: Option<JoinError>,
+}
+
+impl ApplicationShutdownReport {
+    pub fn into_result(self) -> Result<(), LifecycleError> {
+        let mut errors = Vec::new();
+        if let Some(error) = self.history {
+            errors.push(anyhow::Error::new(error).context("stop history maintenance"));
+        }
+        if let Some(error) = self.file_transfer_timeout {
+            errors.push(anyhow::Error::new(error).context("stop file transfer timeout worker"));
+        }
+        if let Some(error) = self.search {
+            errors.push(anyhow::Error::new(error).context("stop search runtime"));
+        }
+        LifecycleError::from_errors(errors)
+    }
 }
 
 #[cfg(test)]
@@ -747,6 +736,38 @@ mod tests {
     use std::error::Error as _;
 
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_report_keeps_all_typed_sources_and_safe_summary() {
+        let history = tokio::spawn(async { panic!("PRIVATE_HISTORY_FAILURE") })
+            .await
+            .unwrap_err();
+        let timeout = tokio::spawn(std::future::pending::<()>());
+        timeout.abort();
+        let report = ApplicationShutdownReport {
+            history: Some(HistoryMaintenanceRuntimeError::Task(history)),
+            file_transfer_timeout: Some(timeout.await.unwrap_err()),
+            search: Some(SearchShutdownError::Coordinator {
+                source: std::io::Error::other("PRIVATE_SEARCH_FAILURE").into(),
+            }),
+        };
+        let failure = report.into_result().unwrap_err();
+        assert!(failure.source().is_some());
+        assert!(failure
+            .primary
+            .downcast_ref::<HistoryMaintenanceRuntimeError>()
+            .is_some());
+        assert_eq!(failure.additional.len(), 2);
+        assert!(failure.additional[0]
+            .downcast_ref::<JoinError>()
+            .unwrap()
+            .is_cancelled());
+        let search = failure.additional[1]
+            .downcast_ref::<SearchShutdownError>()
+            .unwrap();
+        assert!(search.source().is_some());
+        assert!(!failure.to_string().contains("PRIVATE"));
+    }
 
     #[test]
     fn runtime_error_keeps_typed_source_and_redacts_public_text() {

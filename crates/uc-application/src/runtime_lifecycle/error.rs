@@ -25,7 +25,7 @@ impl LifecycleError {
         }
     }
 
-    pub(super) fn from_errors(mut errors: Vec<anyhow::Error>) -> Result<(), Self> {
+    pub fn from_errors(mut errors: Vec<anyhow::Error>) -> Result<(), Self> {
         if errors.is_empty() {
             return Ok(());
         }
