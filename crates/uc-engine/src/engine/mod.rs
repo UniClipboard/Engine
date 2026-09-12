@@ -1,6 +1,5 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::Mutex;
@@ -19,6 +18,7 @@ mod shutdown;
 #[cfg(test)]
 mod shutdown_tests;
 pub(crate) mod startup;
+mod startup_owner;
 
 use crate::runtime::ProductionRuntime;
 #[cfg(feature = "dev-tools")]
@@ -58,7 +58,7 @@ pub(crate) trait EngineRuntime: Send + Sync {
 
     async fn suspend(&self, deadline: Option<Instant>) -> Result<(), EngineError>;
     async fn resume(&self) -> Result<(), EngineError>;
-    async fn shutdown(&self, deadline: Duration) -> Result<(), EngineError>;
+    async fn shutdown(&self, deadline: Option<Instant>) -> Result<(), EngineError>;
 }
 
 pub struct Engine {
@@ -86,9 +86,7 @@ impl Engine {
         host: HostCapabilities,
         progress: StartupProgressInput,
     ) -> Result<(Self, EventStream), EngineError> {
-        let result = Self::start_runtime(config, host, &progress).await;
-        progress.finish(&result);
-        result
+        Self::start_owned(config, host, progress).await
     }
 
     async fn start_runtime(
@@ -242,9 +240,10 @@ mod tests {
             Ok(())
         }
 
-        async fn shutdown(&self, deadline: Duration) -> Result<(), EngineError> {
+        async fn shutdown(&self, deadline: Option<Instant>) -> Result<(), EngineError> {
             self.shutdown_calls.fetch_add(1, Ordering::SeqCst);
-            *self.shutdown_deadline.lock().unwrap() = Some(deadline);
+            *self.shutdown_deadline.lock().unwrap() =
+                deadline.map(|end| end.saturating_duration_since(Instant::now()));
             if self.block_shutdown.load(Ordering::SeqCst) {
                 self.shutdown_started.notify_one();
                 self.shutdown_release.notified().await;

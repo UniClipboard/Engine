@@ -55,7 +55,7 @@ impl EngineRuntime for HeldRuntime {
         Ok(())
     }
 
-    async fn shutdown(&self, _deadline: Duration) -> Result<(), EngineError> {
+    async fn shutdown(&self, _deadline: Option<Instant>) -> Result<(), EngineError> {
         Ok(())
     }
 }

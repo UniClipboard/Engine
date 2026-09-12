@@ -419,7 +419,10 @@ mod tests {
             .execute(ProfileFactoryResetRequest::Start)
             .await
             .unwrap();
-        runtime.shutdown(Duration::from_secs(15)).await.unwrap();
+        runtime
+            .shutdown(Some(tokio::time::Instant::now() + Duration::from_secs(15)))
+            .await
+            .unwrap();
     }
 
     #[test]

@@ -15,14 +15,18 @@ impl ProductionSession {
         transfer_reason: FileTransferCancellationReason,
         deadline: Option<Instant>,
     ) -> Result<(), LifecycleError> {
-        let deadline = deadline.or_else(|| Instant::now().checked_add(Duration::from_millis(500)));
+        let task_deadline =
+            deadline.or_else(|| Instant::now().checked_add(Duration::from_millis(500)));
         let mut errors = Vec::new();
         info!("Engine session 开始关闭");
         #[cfg(feature = "lan-compat")]
         if let Err(error) = self.mobile_sync.shutdown_mobile_file_uploads().await {
             errors.push(anyhow::Error::new(error).context("stop mobile file uploads"));
         }
-        if let Err(error) = shutdown_tasks(&self.tasks, deadline).await.into_result() {
+        if let Err(error) = shutdown_tasks(&self.tasks, task_deadline)
+            .await
+            .into_result()
+        {
             errors.push(error.into());
         }
         info!("Engine session 网络观测任务已停止");

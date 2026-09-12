@@ -724,8 +724,7 @@ impl EngineRuntime for ProductionRuntime {
         self.session_supervisor.resume().await
     }
 
-    async fn shutdown(&self, deadline: Duration) -> Result<(), EngineError> {
-        let deadline = tokio::time::Instant::now().checked_add(deadline);
+    async fn shutdown(&self, deadline: Option<Instant>) -> Result<(), EngineError> {
         self.network_recovery.shutdown().await;
         self.session_supervisor
             .stop(deadline)

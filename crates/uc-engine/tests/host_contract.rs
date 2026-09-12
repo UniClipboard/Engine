@@ -9,6 +9,9 @@ use uc_engine::{
     HostFileHandle, HostFileMetadata, HostSecureStorage,
 };
 
+#[path = "host_contract/startup.rs"]
+mod startup;
+
 #[tokio::test(flavor = "multi_thread")]
 async fn suspended_engine_releases_profile_lease_and_can_resume() {
     use std::fs::{File, OpenOptions};
@@ -129,9 +132,9 @@ async fn suspended_engine_releases_profile_lease_and_can_resume() {
     assert!(released, "暂停成功后仍持有 profile 文件锁");
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct MemorySecureStorage {
-    values: Mutex<HashMap<String, Vec<u8>>>,
+    values: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     fail_reads: Arc<AtomicBool>,
 }
 
