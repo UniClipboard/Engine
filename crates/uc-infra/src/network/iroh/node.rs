@@ -1546,6 +1546,12 @@ impl IrohNodeBuilder {
 /// types don't leak third-party error types upward).
 #[derive(Debug, thiserror::Error)]
 pub enum IrohNodeError {
+    #[error("failed to initialize peer discovery")]
+    Discovery {
+        #[source]
+        source: anyhow::Error,
+    },
+
     #[error("an iroh node is already running in this process")]
     AlreadyRunning,
 
