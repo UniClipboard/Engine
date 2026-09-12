@@ -52,6 +52,7 @@ use crate::facade::{
     BlobTransferFacade, ClipboardCaptureFacade, ClipboardHistoryFacade, ClipboardRestoreFacade,
     ClipboardSyncFacade, HostEventBus, ResourceFacade,
 };
+use crate::runtime_lifecycle::LifecycleError;
 use crate::search::live_index::{
     ClipboardLiveIndexDeps, ClipboardLiveIndexPort, ClipboardLiveIndexer,
 };
@@ -566,8 +567,8 @@ impl ClipboardSession {
         Arc::clone(&self.local)
     }
 
-    pub async fn shutdown(self) {
-        self.sync.shutdown().await;
+    pub async fn shutdown(self) -> Result<(), Arc<LifecycleError>> {
+        self.sync.shutdown().await
     }
 }
 

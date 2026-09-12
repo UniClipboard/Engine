@@ -1,3 +1,5 @@
+use std::fmt;
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -5,12 +7,21 @@ use thiserror::Error;
 struct LifecycleStopped;
 
 /// 标准 source 指向首项，其余原因保存在同一报告内，不丢失其他失败。
-#[derive(Debug, Error)]
+#[derive(Error)]
 #[error("runtime lifecycle transition incomplete")]
 pub struct LifecycleError {
     #[source]
     pub primary: anyhow::Error,
     pub additional: Vec<anyhow::Error>,
+}
+
+impl fmt::Debug for LifecycleError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LifecycleError")
+            .field("failure_count", &(1 + self.additional.len()))
+            .finish()
+    }
 }
 
 impl LifecycleError {

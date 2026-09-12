@@ -1,9 +1,12 @@
 //! Owns automatic clipboard delivery after local capture and peer recovery.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+mod shutdown;
+
 use async_trait::async_trait;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -18,18 +21,21 @@ use uc_core::ports::{
 use crate::clipboard::inbound::ClipboardInboundRuntime;
 use crate::clipboard::outbound::{
     ClipboardOutboundError, ClipboardOutboundFacade, ClipboardOutboundInput,
-    ClipboardOutboundOutcome, ResendEntryError, ResendReport,
+    ClipboardOutboundOutcome, ClipboardOutboundPort, ResendEntryError, ResendReport,
 };
+use crate::runtime_lifecycle::LifecycleError;
 const RECOVERY_PAGE_SIZE: usize = 256;
 
 /// 自动出站的完整生命周期。调用方只提交本地捕获；手动重发使用独立
 /// facade，离线恢复保持为本运行期的内部责任。
 pub struct ClipboardSyncRuntime {
-    outbound: Arc<ClipboardOutboundFacade>,
+    outbound: Arc<dyn ClipboardOutboundPort>,
     settings: Arc<dyn SettingsPort>,
     inbound: tokio::sync::Mutex<Option<ClipboardInboundRuntime>>,
     delivery_gate: Arc<tokio::sync::Mutex<()>>,
     recovery: OfflineDeliveryRecovery,
+    stopping: AtomicBool,
+    shutdown_result: tokio::sync::Mutex<Option<Result<(), Arc<LifecycleError>>>>,
 }
 
 pub struct ClipboardSyncRuntimeDeps {
@@ -66,6 +72,8 @@ impl ClipboardSyncRuntime {
             inbound: tokio::sync::Mutex::new(Some(deps.inbound)),
             delivery_gate,
             recovery,
+            stopping: AtomicBool::new(false),
+            shutdown_result: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -77,16 +85,18 @@ impl ClipboardSyncRuntime {
         target_filter: Option<Vec<DeviceId>>,
     ) -> Result<ClipboardOutboundOutcome, ClipboardOutboundError> {
         let _gate = self.delivery_gate.lock().await;
+        if self.stopping.load(Ordering::Acquire) {
+            return Ok(ClipboardOutboundOutcome::Skipped {
+                reason: "runtime_stopped".to_owned(),
+            });
+        }
         if !automatic_sync_enabled(self.settings.as_ref()).await {
             return Ok(ClipboardOutboundOutcome::Skipped {
                 reason: "automatic_sync_disabled".to_string(),
             });
         }
         let entry_id = EntryId::from(input.entry_id.as_str());
-        let outcome = self
-            .outbound
-            .dispatch_capture_to_targets(input, target_filter)
-            .await?;
+        let outcome = self.outbound.dispatch_capture(input, target_filter).await?;
         if let ClipboardOutboundOutcome::Dispatched {
             per_target,
             pending_targets,
@@ -101,18 +111,6 @@ impl ClipboardSyncRuntime {
                 .await;
         }
         Ok(outcome)
-    }
-
-    pub async fn shutdown(&self) {
-        self.recovery.shutdown().await;
-        if let Some(inbound) = self.inbound.lock().await.take() {
-            if inbound.shutdown().await.is_err() {
-                warn!(
-                    error_kind = "inbound_shutdown",
-                    "clipboard sync: inbound runtime stopped unexpectedly"
-                );
-            }
-        }
     }
 }
 
@@ -218,16 +216,21 @@ impl OfflineDeliveryRecovery {
         }
     }
 
-    async fn shutdown(&self) {
+    async fn shutdown(&self) -> Result<(), JoinError> {
         self.cancel.cancel();
-        if let Some(task) = self.task.lock().await.take() {
-            if task.await.is_err() {
-                warn!(
-                    error_kind = "task",
-                    "clipboard delivery recovery task stopped unexpectedly"
-                );
-            }
-        }
+        let mut task = self.task.lock().await;
+        let result = match task.as_mut() {
+            Some(task) => task.await,
+            None => Ok(()),
+        };
+        *task = None;
+        result
+    }
+}
+
+impl Drop for OfflineDeliveryRecovery {
+    fn drop(&mut self) {
+        self.cancel.cancel();
     }
 }
 
@@ -446,12 +449,122 @@ mod tests {
     use super::*;
 
     use std::collections::HashMap;
+    use std::error::Error;
     use std::sync::Mutex;
 
     use uc_core::clipboard::{ClipboardEntry, ClipboardRepositoryError};
     use uc_core::ids::{EntryId, EventId};
     use uc_core::ports::peer_reachability::{PeerReachabilityChanged, PeerReachabilityError};
     use uc_core::settings::model::Settings;
+    use uc_core::{ClipboardChangeOrigin, SystemClipboardSnapshot};
+
+    struct NeverDispatch;
+
+    #[async_trait]
+    impl ClipboardOutboundPort for NeverDispatch {
+        async fn dispatch_capture(
+            &self,
+            _: ClipboardOutboundInput,
+            _: Option<Vec<DeviceId>>,
+        ) -> Result<ClipboardOutboundOutcome, ClipboardOutboundError> {
+            panic!("stopped runtime dispatched clipboard content");
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_survives_waiter_cancellation_and_retains_both_worker_failures() {
+        let deps = recovery_deps(
+            true,
+            Vec::new(),
+            HashMap::new(),
+            Arc::new(Deliveries {
+                records: Mutex::new(HashMap::new()),
+            }),
+            Arc::new(RecordingDispatch {
+                commands: Mutex::new(Vec::new()),
+                result: DispatchResult::Delivered,
+            }),
+        );
+        let gate = Arc::clone(&deps.delivery_gate);
+        let dispatch = gate.lock().await;
+        let runtime = Arc::new(ClipboardSyncRuntime {
+            outbound: Arc::new(NeverDispatch),
+            settings: Arc::clone(&deps.settings),
+            inbound: tokio::sync::Mutex::new(Some(ClipboardInboundRuntime::from_task(
+                tokio::spawn(async { panic!("PRIVATE_INBOUND_FAILURE") }),
+            ))),
+            delivery_gate: Arc::clone(&gate),
+            recovery: OfflineDeliveryRecovery {
+                cancel: CancellationToken::new(),
+                task: tokio::sync::Mutex::new(Some(tokio::spawn(async {
+                    panic!("PRIVATE_RECOVERY_FAILURE")
+                }))),
+                deps: Arc::new(deps),
+            },
+            stopping: AtomicBool::new(false),
+            shutdown_result: tokio::sync::Mutex::new(None),
+        });
+        let waiter = {
+            let runtime = Arc::clone(&runtime);
+            tokio::spawn(async move { runtime.shutdown().await })
+        };
+        runtime.recovery.cancel.cancelled().await;
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        let confirmation = {
+            let runtime = Arc::clone(&runtime);
+            tokio::spawn(async move { runtime.shutdown().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!confirmation.is_finished());
+        drop(dispatch);
+        let error = confirmation.await.unwrap().unwrap_err();
+        assert!(error
+            .primary
+            .downcast_ref::<JoinError>()
+            .unwrap()
+            .is_panic());
+        assert_eq!(error.additional.len(), 1);
+        let inbound = error.additional[0]
+            .downcast_ref::<crate::clipboard::inbound::ClipboardInboundRuntimeError>()
+            .unwrap();
+        assert!(inbound.source().unwrap().is::<JoinError>());
+        assert!(!format!("{error:?} {error}").contains("PRIVATE"));
+        assert!(Arc::ptr_eq(&error, &runtime.shutdown().await.unwrap_err()));
+        let report = crate::application::ApplicationShutdownReport {
+            history: None,
+            search: None,
+            file_transfer_timeout: None,
+            clipboard: Some(Arc::clone(&error)),
+        };
+        let failure = report.into_result().unwrap_err();
+        assert!(Arc::ptr_eq(
+            &error,
+            failure
+                .primary
+                .downcast_ref::<Arc<LifecycleError>>()
+                .unwrap()
+        ));
+        let result = runtime
+            .dispatch_local_capture_to_targets(
+                ClipboardOutboundInput {
+                    entry_id: "entry".to_owned(),
+                    snapshot: SystemClipboardSnapshot {
+                        representations: Vec::new(),
+                        ts_ms: 0,
+                        file_content_digests: Vec::new(),
+                        file_set_v1_component: None,
+                    },
+                    origin: ClipboardChangeOrigin::LocalCapture,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, ClipboardOutboundOutcome::Skipped { reason } if reason == "runtime_stopped")
+        );
+    }
 
     struct FixedSettings {
         sync_enabled: bool,

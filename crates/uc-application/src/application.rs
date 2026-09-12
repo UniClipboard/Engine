@@ -682,11 +682,12 @@ impl ApplicationRuntime {
                 history: None,
                 search: None,
                 file_transfer_timeout: None,
+                clipboard: None,
             };
         };
         let history = owners.history_maintenance.shutdown().await.err();
         let file_transfer_timeout = owners.file_transfer_timeout.shutdown(deadline).await.err();
-        owners.clipboard.shutdown().await;
+        let clipboard = owners.clipboard.shutdown().await.err();
         owners.active_clipboard.shutdown().await;
         let search = owners.search.shutdown().await.err();
         owners.space.on_shutdown().await;
@@ -694,6 +695,7 @@ impl ApplicationRuntime {
             history,
             search,
             file_transfer_timeout,
+            clipboard,
         }
     }
 }
@@ -714,6 +716,7 @@ pub struct ApplicationShutdownReport {
     pub history: Option<HistoryMaintenanceRuntimeError>,
     pub search: Option<SearchShutdownError>,
     pub file_transfer_timeout: Option<JoinError>,
+    pub clipboard: Option<Arc<LifecycleError>>,
 }
 
 impl ApplicationShutdownReport {
@@ -727,6 +730,9 @@ impl ApplicationShutdownReport {
         }
         if let Some(error) = self.search {
             errors.push(anyhow::Error::new(error).context("stop search runtime"));
+        }
+        if let Some(error) = self.clipboard {
+            errors.push(anyhow::Error::new(error).context("stop clipboard sync runtime"));
         }
         LifecycleError::from_errors(errors)
     }
@@ -748,6 +754,7 @@ mod tests {
         let report = ApplicationShutdownReport {
             history: Some(HistoryMaintenanceRuntimeError::Task(history)),
             file_transfer_timeout: Some(timeout.await.unwrap_err()),
+            clipboard: None,
             search: Some(SearchShutdownError::Coordinator {
                 source: std::io::Error::other("PRIVATE_SEARCH_FAILURE").into(),
             }),
