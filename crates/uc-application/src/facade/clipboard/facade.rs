@@ -37,6 +37,7 @@ use crate::facade::blob_transfer::{BlobTransferFacade, SharedHostEventEmitter};
 use crate::facade::clipboard::cancel_entry_receive::{
     CancelEntryReceiveError, CancelEntryReceiveOutcome, CancelEntryReceiveUseCase,
 };
+use crate::runtime_lifecycle::LifecycleError;
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ports::clipboard::GetClipboardEntryPort;
 use uc_core::ports::ClipboardEventRepositoryPort;
@@ -131,6 +132,8 @@ pub struct DispatchEntryOutcome {
 /// subset meaningful to external callers.
 #[derive(Debug, thiserror::Error)]
 pub enum ClipboardSyncError {
+    #[error("clipboard dispatch is stopped")]
+    Stopped,
     #[error("encryption session not unlocked")]
     LockedSpace,
     #[error("transfer cipher failure: {0}")]
@@ -142,6 +145,7 @@ pub enum ClipboardSyncError {
 impl From<DispatchSyncError> for ClipboardSyncError {
     fn from(err: DispatchSyncError) -> Self {
         match err {
+            DispatchSyncError::Stopped => ClipboardSyncError::Stopped,
             DispatchSyncError::LockedSpace => ClipboardSyncError::LockedSpace,
             DispatchSyncError::CipherFailure(msg) => ClipboardSyncError::CipherFailure(msg),
             DispatchSyncError::Repository(msg) => ClipboardSyncError::Repository(msg),
@@ -170,6 +174,10 @@ pub(crate) struct ClipboardSyncDispatch<'a> {
 }
 
 impl ClipboardSyncFacade {
+    pub(crate) async fn shutdown(&self) -> Result<(), LifecycleError> {
+        self.dispatch_uc.shutdown().await
+    }
+
     /// Reclaim the areas where interrupted directory receives were being
     /// assembled, and report how many were removed.
     ///

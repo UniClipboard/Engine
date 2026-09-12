@@ -152,6 +152,7 @@ pub struct ActiveClipboardSession {
 
 /// Clipboard session 对外稳定入口与唯一关闭句柄。
 pub struct ClipboardSession {
+    dispatch: Arc<ClipboardSyncFacade>,
     outbound: Arc<ClipboardOutboundFacade>,
     sync: Arc<ClipboardSyncRuntime>,
     local: Arc<LocalClipboardProcessor>,
@@ -352,6 +353,7 @@ impl ClipboardAssembly {
         }));
 
         ClipboardSession {
+            dispatch: session.clipboard_sync,
             outbound,
             sync,
             local,
@@ -568,7 +570,26 @@ impl ClipboardSession {
     }
 
     pub async fn shutdown(self) -> Result<(), Arc<LifecycleError>> {
-        self.sync.shutdown().await
+        tokio::spawn(async move {
+            let sync = self.sync.shutdown().await;
+            let dispatch = self.dispatch.shutdown().await;
+            let mut errors = Vec::new();
+            if let Err(source) = sync {
+                errors.push(anyhow::Error::new(source).context("stop clipboard synchronization"));
+            }
+            if let Err(source) = dispatch {
+                errors
+                    .push(anyhow::Error::new(source).context("finish clipboard delivery records"));
+            }
+            LifecycleError::from_errors(errors).map_err(Arc::new)
+        })
+        .await
+        .map_err(|source| {
+            Arc::new(LifecycleError {
+                primary: source.into(),
+                additional: Vec::new(),
+            })
+        })?
     }
 }
 

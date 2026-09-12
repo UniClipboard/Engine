@@ -16,11 +16,19 @@ use tracing::{debug, info, warn};
 use uc_core::clipboard::{DeliveryFailureReason, EntryDeliveryRecord, EntryDeliveryStatus};
 use uc_core::ids::EntryId;
 use uc_core::ports::{ClipboardDispatchError, ClockPort, DispatchAck, EntryDeliveryRepositoryPort};
+use uc_observability_contract::diagnostics::{
+    record_task_join_failure, DiagnosticTaskKind, ObservationContext,
+};
 
 use crate::facade::blob_transfer::SharedHostEventEmitter;
 use crate::facade::host_event::{DeliveryHostEvent, HostEvent};
 
+use super::lifecycle::DispatchWork;
 use super::{DispatchPerTarget, PeerDispatchResult};
+
+#[cfg(test)]
+#[path = "delivery/lifecycle_tests.rs"]
+mod lifecycle_tests;
 
 /// Outcome bucket for [`classify_dispatch_result`]. `Panicked` rolls up
 /// into `Errored` at the call site because `DispatchOutcome` has no
@@ -206,14 +214,10 @@ impl DeliveryRecorder {
     }
 }
 
-/// Drive the post-deadline leftover tasks to completion on a detached
-/// task: classify each settle, record it immediately (per-settle, NOT
-/// batched, so an early-settling peer's badge isn't held hostage by a
-/// staggered-retry long-tail), and log a per-bucket summary when drained.
-///
-/// Best-effort RECORD-ONLY: a peer that finally settles Offline / Errored
-/// after the deadline is recorded as such. This continuation never retries.
-pub(crate) fn spawn_deferred_drain(
+/// 前台期限后继续等待已发出的对端结果，每条完成即记录并通知，不重试发送。
+/// 工作许可归同一发送负责人；暂停必须等待这里的记录与异常处理结束。
+pub(super) fn spawn_deferred_drain(
+    work: DispatchWork,
     mut set: JoinSet<PeerDispatchResult>,
     entry_id: Option<EntryId>,
     clock: Arc<dyn ClockPort>,
@@ -221,41 +225,46 @@ pub(crate) fn spawn_deferred_drain(
     snapshot_hash: String,
 ) {
     let deferred_count = set.len();
-    let observation = uc_observability_contract::diagnostics::ObservationContext::capture();
-    crate::support::task_supervision::spawn_supervised(
-        uc_observability_contract::diagnostics::DiagnosticTaskKind::ClipboardDeferredDrain,
-        observation.scope(async move {
-            let mut accepted = 0usize;
-            let mut duplicate = 0usize;
-            let mut offline = 0usize;
-            let mut errored = 0usize;
-            while let Some(joined) = set.join_next().await {
-                let processed = classify_dispatch_result(joined, entry_id.as_ref(), clock.now_ms());
-                match processed.bucket {
-                    DispatchResultBucket::Accepted => accepted += 1,
-                    DispatchResultBucket::Duplicate => duplicate += 1,
-                    DispatchResultBucket::Offline => offline += 1,
-                    DispatchResultBucket::Errored | DispatchResultBucket::Panicked => errored += 1,
-                }
-                if let Some(rec) = processed.delivery_record {
-                    recorder.flush(std::slice::from_ref(&rec)).await;
-                }
+    let observation = ObservationContext::capture();
+    let task = tokio::spawn(observation.scope(async move {
+        let mut accepted = 0usize;
+        let mut duplicate = 0usize;
+        let mut offline = 0usize;
+        let mut errored = 0usize;
+        while let Some(joined) = set.join_next().await {
+            let processed = classify_dispatch_result(joined, entry_id.as_ref(), clock.now_ms());
+            match processed.bucket {
+                DispatchResultBucket::Accepted => accepted += 1,
+                DispatchResultBucket::Duplicate => duplicate += 1,
+                DispatchResultBucket::Offline => offline += 1,
+                DispatchResultBucket::Errored | DispatchResultBucket::Panicked => errored += 1,
             }
-            info!(
-                snapshot_hash = %snapshot_hash,
-                deferred_count,
-                accepted,
-                duplicate,
-                offline,
-                errored,
-                "dispatch: deferred fan-out completed"
-            );
-        }),
-    );
+            if let Some(rec) = processed.delivery_record {
+                recorder.flush(std::slice::from_ref(&rec)).await;
+            }
+        }
+        info!(
+            snapshot_hash = %snapshot_hash,
+            deferred_count,
+            accepted,
+            duplicate,
+            offline,
+            errored,
+            "dispatch: deferred fan-out completed"
+        );
+    }));
+    tokio::spawn(async move {
+        if let Err(source) = task.await {
+            work.failed(source);
+            record_task_join_failure(DiagnosticTaskKind::ClipboardDeferredDrain);
+        }
+        drop(work);
+    });
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::lifecycle::DispatchWorkOwner;
     use super::*;
 
     #[tokio::test]
@@ -311,8 +320,10 @@ mod tests {
             (dev("peer"), Ok(DispatchAck::Accepted))
         });
         let root = tracing::info_span!("foreground");
+        let owner = DispatchWorkOwner::default();
         root.in_scope(|| {
             spawn_deferred_drain(
+                owner.begin().unwrap(),
                 tasks,
                 Some(eid()),
                 Arc::new(super::super::test_support::FixedClock(0)),

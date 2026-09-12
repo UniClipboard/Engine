@@ -71,17 +71,20 @@ const FAN_OUT_DEADLINE: Duration = Duration::from_secs(5);
 mod delivery;
 mod fanout;
 mod header;
+mod lifecycle;
 mod per_peer;
 mod target_selector;
 
 #[cfg(test)]
 mod test_support;
 
+use crate::runtime_lifecycle::LifecycleError;
 use delivery::{
     classify_dispatch_result, spawn_deferred_drain, DeliveryRecorder, DispatchResultBucket,
 };
 use fanout::DeadlineBoundedFanout;
 use header::OutboundHeaderFactory;
+use lifecycle::DispatchWorkOwner;
 use per_peer::PerPeerDispatcher;
 use target_selector::TargetSelector;
 
@@ -246,6 +249,8 @@ pub(crate) struct DispatchOutcome {
 /// `per_target`; they are not errors in this sense.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DispatchSyncError {
+    #[error("clipboard dispatch is stopped")]
+    Stopped,
     /// Encryption failed — typically because the space session is locked.
     #[error("encryption session not unlocked")]
     LockedSpace,
@@ -296,6 +301,7 @@ impl DispatchEntryRunner for DispatchClipboardEntryUseCase {
 /// per pass: identity stamps both the self-filter and the header origin;
 /// the clock stamps the aggregate outcome and each peer's delivery record.
 pub(crate) struct DispatchClipboardEntryUseCase {
+    work: DispatchWorkOwner,
     cipher: Arc<dyn TransferCipherPort>,
     device_identity: Arc<dyn DeviceIdentityPort>,
     clock: Arc<dyn ClockPort>,
@@ -419,6 +425,7 @@ impl DispatchClipboardEntryUseCase {
     ) -> Self {
         let header_clock = Arc::clone(&clock);
         Self {
+            work: DispatchWorkOwner::default(),
             cipher: transfer_cipher,
             device_identity,
             clock,
@@ -448,6 +455,7 @@ impl DispatchClipboardEntryUseCase {
         &self,
         input: DispatchClipboardEntryInput,
     ) -> Result<DispatchOutcome, DispatchSyncError> {
+        let work = self.work.begin()?;
         // 1. Encrypt once. A locked session surfaces here — let it
         //    short-circuit so we don't spam the dispatch wire with retries.
         let ciphertext = match self.cipher.encrypt(&input.plaintext).await {
@@ -550,14 +558,7 @@ impl DispatchClipboardEntryUseCase {
             })
             .await;
 
-        // 6. Record the foreground deliveries (write-then-emit is
-        //    load-bearing — see `DeliveryRecorder::flush`).
-        self.recorder.flush(&delivery_records).await;
-
-        // 7. Hand still-in-flight peers to a detached background drain that
-        //    records each as it finally settles — so an early-acking peer's
-        //    badge isn't held hostage by a staggered-retry long tail. This
-        //    is best-effort RECORD-ONLY, never a resend (VISION #59).
+        // 未完成对端先交给同一负责人持有，前台记录失败也不能丢弃它们。
         let total_pending = leftover.len();
         let settled_targets: HashSet<DeviceId> =
             per_target.iter().map(|target| target.device_id).collect();
@@ -568,6 +569,7 @@ impl DispatchClipboardEntryUseCase {
             .collect();
         if total_pending > 0 {
             spawn_deferred_drain(
+                work.continuation(),
                 leftover,
                 entry_id,
                 Arc::clone(&self.clock),
@@ -575,6 +577,9 @@ impl DispatchClipboardEntryUseCase {
                 input.snapshot_hash.clone(),
             );
         }
+
+        // 每条结果仍先持久化再通知；前台许可保留到自己的记录结束。
+        self.recorder.flush(&delivery_records).await;
 
         Ok(DispatchOutcome {
             snapshot_hash: input.snapshot_hash,
@@ -587,6 +592,10 @@ impl DispatchClipboardEntryUseCase {
             pending_targets,
             at_ms: self.clock.now_ms(),
         })
+    }
+
+    pub(crate) async fn shutdown(&self) -> Result<(), LifecycleError> {
+        self.work.shutdown().await
     }
 }
 
