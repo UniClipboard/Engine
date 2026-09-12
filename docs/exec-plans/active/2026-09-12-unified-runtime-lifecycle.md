@@ -479,6 +479,17 @@ impl RuntimeLifecycleCoordinator {
 - 显式启用 task-registry 的 4 项任务测试、6 项资料重置测试、9 项会话测试和 3 项真实宿主测试通过；
   metadata、workspace 全目标、fmt、Rust 风格、架构与隐私、diff 检查通过，仅有既存测试未使用内容警告。
 
+### 2026-09-13：Iroh 慢收尾不丢弃协议资源
+
+- 当前锁定的 Iroh Router.shutdown 首次调用会取走任务句柄，后续调用看到取消标记会直接成功；
+  因此不能在 watchdog 到期后丢弃原 future 或重新调用关闭。
+- 节点在 watchdog 后继续等待同一关闭 future，保留节点许可直至协议处理器实际结束；
+  watchdog 只记录固定慢收尾诊断，不作为安全完成依据。实现归 node/shutdown，调用入口保持不变。
+- 验证使用真实 Router 和故意阻塞关闭的协议处理器，检查超过 watchdog 后资源仍被持有且节点未报告关闭；
+  放行处理器后检查资源释放。Iroh 结构化失败返回及共同期限仍待完成，设备矩阵跳过。
+- 新增真实慢收尾测试、32 项既有节点测试和 3 项真实宿主测试通过；受保护中继测试因缺少对应环境按原设置跳过。
+  metadata、workspace 全目标、fmt、Rust 风格、架构与隐私、diff 检查通过，仅有既存测试未使用内容警告。
+
 # 7. Edge Cases
 
 
