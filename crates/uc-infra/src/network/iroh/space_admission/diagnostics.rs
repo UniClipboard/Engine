@@ -165,9 +165,8 @@ pub(super) fn server_error_type(error: &HandlerError) -> DiagnosticErrorType {
         HandlerError::Authentication
         | HandlerError::Credential(_)
         | HandlerError::AuthenticationProof { .. } => DiagnosticErrorType::AuthenticationFailed,
-        HandlerError::Protocol | HandlerError::Transport { .. } => {
-            DiagnosticErrorType::DecodeFailed
-        }
+        HandlerError::Protocol => DiagnosticErrorType::DecodeFailed,
+        HandlerError::Transport { .. } => DiagnosticErrorType::StreamFailed,
         HandlerError::PeerUpgradeRequired => DiagnosticErrorType::PeerIncompatible,
         HandlerError::Application => DiagnosticErrorType::Internal,
         HandlerError::Acknowledgement => DiagnosticErrorType::ChannelClosed,
