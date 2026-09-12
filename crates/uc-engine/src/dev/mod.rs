@@ -149,14 +149,37 @@ fn current_os() -> OperatingSystem {
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum DevOperation {
-    SeedText { text: String },
-    CaptureFilePaths { paths: Vec<PathBuf> },
+    SeedText {
+        text: String,
+    },
+    CaptureFilePaths {
+        paths: Vec<PathBuf>,
+    },
     ListPairingInvitationAddresses,
-    IssueInvitationForAddress { address: IpAddr },
-    PublishBlob { bytes: Vec<u8> },
-    FetchBlob { ticket: Vec<u8>, entry_id: String },
+    IssueInvitationForAddress {
+        address: IpAddr,
+    },
+    PublishBlob {
+        bytes: Vec<u8>,
+    },
+    FetchBlob {
+        ticket: Vec<u8>,
+        entry_id: String,
+    },
     QueryNetworkEndpointId,
-    SetNetworkPartition { blocked_endpoint_ids: Vec<[u8; 32]> },
+    SetNetworkPartition {
+        blocked_endpoint_ids: Vec<[u8; 32]>,
+    },
+    RejectNewConnections {
+        endpoint_ids: Vec<[u8; 32]>,
+        peer_reachability: bool,
+    },
+    QueryRejectedConnectionCount,
+    QueryPeerReachabilityConnections,
+    RetainOnePeerReachabilityConnection,
+    SuppressConnectivityOpportunities {
+        suppressed: bool,
+    },
 }
 
 impl fmt::Debug for DevOperation {
@@ -170,6 +193,11 @@ impl fmt::Debug for DevOperation {
             Self::FetchBlob { .. } => "fetch_blob",
             Self::QueryNetworkEndpointId => "query_network_endpoint_id",
             Self::SetNetworkPartition { .. } => "set_network_partition",
+            Self::RejectNewConnections { .. } => "reject_new_connections",
+            Self::QueryRejectedConnectionCount => "query_rejected_connection_count",
+            Self::QueryPeerReachabilityConnections => "query_peer_reachability_connections",
+            Self::RetainOnePeerReachabilityConnection => "retain_one_peer_reachability_connection",
+            Self::SuppressConnectivityOpportunities { .. } => "suppress_connectivity_opportunities",
         };
         formatter
             .debug_struct("DevOperation")
@@ -293,6 +321,16 @@ pub enum DevOperationResult {
         digest: Vec<u8>,
     },
     NetworkEndpointId([u8; 32]),
+    ConnectivityOpportunitiesUpdated,
+    PeerReachabilityConnections {
+        incoming: usize,
+        outgoing: usize,
+        registered_tasks: usize,
+        admitted_transports: u64,
+    },
+    RejectedConnectionCount {
+        count: u64,
+    },
     NetworkPartitionUpdated {
         blocked_peer_count: usize,
     },
@@ -308,6 +346,9 @@ impl fmt::Debug for DevOperationResult {
             Self::BlobPublished(_) => "blob_published",
             Self::BlobFetched { .. } => "blob_fetched",
             Self::NetworkEndpointId(_) => "network_endpoint_id",
+            Self::RejectedConnectionCount { .. } => "rejected_connection_count",
+            Self::PeerReachabilityConnections { .. } => "peer_reachability_connections",
+            Self::ConnectivityOpportunitiesUpdated => "connectivity_opportunities_updated",
             Self::NetworkPartitionUpdated { .. } => "network_partition_updated",
         };
         formatter

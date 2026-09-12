@@ -9,11 +9,11 @@
 //!
 //! The builder pattern is deliberate: each `install_*` method is where a
 //! new transport slices in. Invitation discovery does not register an ALPN; Slice 2
-//! Phase 1 adds [`install_presence`]; Slice 2 Phase 2 adds
+//! Phase 1 adds [`install_peer_reachability`]; Slice 2 Phase 2 adds
 //! [`install_clipboard`]; Slice 3 will add `install_blobs` on the same
 //! builder.
 //!
-//! [`install_presence`]: IrohNodeBuilder::install_presence
+//! [`install_peer_reachability`]: IrohNodeBuilder::install_peer_reachability
 //! [`install_clipboard`]: IrohNodeBuilder::install_clipboard
 
 use std::collections::BTreeMap;
@@ -24,9 +24,10 @@ use std::sync::Mutex;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use uc_application::deps::ClipboardReceiverPort;
 
+use super::protocol_router::ProtocolRouterBuilder;
 use iroh::address_lookup::AddrFilter;
 use iroh::endpoint::{presets, QuicTransportConfig, VarInt};
-use iroh::protocol::{Router, RouterBuilder};
+use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayConfig, RelayMode, RelayUrl, TransportAddr};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use noq_proto::congestion::{Bbr3Config, CubicConfig};
@@ -89,7 +90,9 @@ use super::membership_history_exchange_adapter::{
 use super::net_recovery::DemandRecoveryCoordinator;
 use super::net_recovery::NetworkRecoveryObservationSource;
 use super::network_partition::IrohNetworkPartitionGate;
-use super::presence_adapter::{IrohPresenceAdapter, PRESENCE_ALPN};
+use super::peer_reachability_adapter::{
+    IrohPeerReachabilityAdapter, LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN,
+};
 use super::space_admission::{
     IrohSpaceAdmissionHandler, IrohSpaceAdmissionTransport, SpaceAdmissionChannelCredentialPort,
     SPACE_ADMISSION_ALPN,
@@ -185,18 +188,12 @@ pub struct IrohNode {
     ///
     /// [`shutdown`]: IrohNode::shutdown
     net_recovery: Option<tokio::task::JoinHandle<()>>,
-    network_recovery_observations: Arc<NetworkRecoveryObservationSource>,
     /// Keeps the process-wide single-node reservation until shutdown is
     /// complete. Dropping a partially-built or live node releases it too.
     _run_lease: NodeRunLease,
 }
 
 impl IrohNode {
-    pub fn subscribe_network_recovery_observations(
-        &self,
-    ) -> tokio::sync::broadcast::Receiver<super::net_recovery::NetworkRecoveryObservation> {
-        self.network_recovery_observations.subscribe()
-    }
     #[cfg(any(test, feature = "test-util"))]
     pub async fn accepts_protocol_for_test(&self, alpn: &[u8]) -> bool {
         let client = match Endpoint::builder(presets::N0)
@@ -428,7 +425,7 @@ fn log_publish_addrs(endpoint: &Endpoint, stage: &'static str) {
 /// MB/s. These knobs give QUIC more slack for the jitter floor without
 /// changing the congestion algorithm itself.
 ///
-/// Any change here affects every transport (pairing / presence / clipboard
+/// Any change here affects every transport (pairing / peer_reachability / clipboard
 /// / blobs) because they share this one endpoint.
 ///
 /// iroh 0.97 reshaped the API: the old quinn-style `&mut TransportConfig`
@@ -642,7 +639,7 @@ pub struct IrohNodeBuilder {
     network_recovery_observations: Arc<NetworkRecoveryObservationSource>,
     /// Held in `Option` so `install_*` methods can `take()` + reassign the
     /// builder (iroh's `RouterBuilder::accept` consumes `self`).
-    router_builder: Option<RouterBuilder>,
+    router_builder: Option<ProtocolRouterBuilder>,
     /// Retained so `install_*` methods can read the rendezvous override
     /// when constructing the per-transport adapters.
     config: IrohNodeConfig,
@@ -694,7 +691,33 @@ impl IrohNodeBuilder {
                 }
             }
         });
-        Box::pin(stream::select(local, discovered))
+        let observations = self.network_recovery_observations.subscribe();
+        let recovery = stream::unfold(observations, |mut receiver| async move {
+            use super::net_recovery::NetworkRecoveryObservation;
+            let hint = match receiver.recv().await {
+                Ok(NetworkRecoveryObservation::LocalRelayRecovered)
+                | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    uc_application::deps::ConnectionHint::NetworkChanged
+                }
+                Ok(NetworkRecoveryObservation::CommunicationFailed(device)) => {
+                    uc_application::deps::ConnectionHint::CommunicationFailed(device)
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            };
+            Some((Ok(hint), receiver))
+        });
+        let hints = stream::select(stream::select(local, discovered), recovery);
+        #[cfg(any(test, feature = "test-util"))]
+        let hints = hints.filter_map({
+            let gate = self.config.network_partition_gate.clone();
+            move |hint| {
+                let suppressed = gate
+                    .as_ref()
+                    .is_some_and(|gate| gate.opportunities_suppressed());
+                futures_util::future::ready((!suppressed).then_some(hint))
+            }
+        });
+        Box::pin(hints)
     }
 
     /// 返回当前节点将写入准入候选资料的认证传输身份与地址。
@@ -711,7 +734,7 @@ impl IrohNodeBuilder {
         })
     }
 
-    fn take_router_builder(&mut self) -> Result<RouterBuilder, IrohNodeError> {
+    fn take_router_builder(&mut self) -> Result<ProtocolRouterBuilder, IrohNodeError> {
         self.router_builder
             .take()
             .ok_or(IrohNodeError::InstallAfterSpawn)
@@ -920,7 +943,7 @@ impl IrohNodeBuilder {
             !config.disable_relays,
         ));
         let network_recovery_observations = Arc::new(NetworkRecoveryObservationSource::new());
-        let router_builder = Router::builder((*endpoint).clone());
+        let router_builder = ProtocolRouterBuilder::new((*endpoint).clone());
         debug!(
             endpoint_id = %endpoint.id().fmt_short(),
             disable_relays = config.disable_relays,
@@ -984,21 +1007,21 @@ impl IrohNodeBuilder {
         }
     }
 
-    /// Install the presence transport (Slice 2 Phase 1):
+    /// Install the peer_reachability transport (Slice 2 Phase 1):
     ///
-    /// * Registers [`IrohPresenceHandler`] as the [`PRESENCE_ALPN`]
+    /// * Registers [`IrohPeerReachabilityHandler`] as the [`PEER_REACHABILITY_ALPN`]
     ///   [`iroh::protocol::ProtocolHandler`] so incoming "is this peer
     ///   reachable" probes are accepted and held open until the peer closes.
-    /// * Builds [`IrohPresenceAdapter`] wired to the shared endpoint,
+    /// * Builds [`IrohPeerReachabilityAdapter`] wired to the shared endpoint,
     ///   [`PeerAddressRepositoryPort`] for stored NodeAddr bytes, and
     ///   [`ClockPort`] for event timestamps. Returns it as
-    ///   `Arc<dyn PresencePort>` so callers depend on the port, not the
+    ///   `Arc<dyn PeerReachabilityPort>` so callers depend on the port, not the
     ///   concrete adapter (`docs/design-docs/layers/infrastructure.md` §4.3).
     ///
     /// Must be called before [`spawn`](Self::spawn). Safe to call alongside
     /// 邀请 discovery 不注册 ALPN；成员与准入 handler 使用互不重叠的 ALPN
     /// coexist on the same router.
-    pub fn install_presence(
+    pub fn install_peer_reachability(
         &mut self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
@@ -1010,7 +1033,7 @@ impl IrohNodeBuilder {
         // and broadcast `Sender` — that's what makes inbound dials flip a
         // recovered peer to Online without needing our own keepalive to
         // dial them again.
-        let adapter = IrohPresenceAdapter::new_with_recovery(
+        let adapter = IrohPeerReachabilityAdapter::new_with_recovery(
             Arc::clone(&self.endpoint),
             peer_addr_repo,
             member_repo,
@@ -1026,7 +1049,9 @@ impl IrohNodeBuilder {
             .router_builder
             .take()
             .expect("router_builder missing — install_* called after spawn");
-        let builder = builder.accept(PRESENCE_ALPN, handler);
+        let builder = builder
+            .accept(PEER_REACHABILITY_ALPN, handler.clone())
+            .accept(LEGACY_PEER_REACHABILITY_ALPN, handler);
         self.router_builder = Some(builder);
 
         Arc::new(adapter)
@@ -1061,12 +1086,12 @@ impl IrohNodeBuilder {
     ///   for identity resolution via `remote_id()` + fingerprint.
     /// * Returns both clipboard ports as trait objects. The dispatch
     ///   adapter shares the same `Endpoint` and `PeerAddressRepositoryPort`
-    ///   as presence — reusing the stored `addr_blob` per peer so a
-    ///   dispatch flows through the same NAT/relay mapping the presence
+    ///   as peer_reachability — reusing the stored `addr_blob` per peer so a
+    ///   dispatch flows through the same NAT/relay mapping the peer_reachability
     ///   watchdog already established.
     ///
     /// Must be called before [`spawn`](Self::spawn). Coexists with
-    /// invitation discovery / [`install_presence`] — all transports share
+    /// invitation discovery / [`install_peer_reachability`] — all transports share
     /// a single router.
     ///
     /// [`IrohClipboardReceiverHandler`]: super::clipboard_receiver_adapter::IrohClipboardReceiverHandler
@@ -1076,7 +1101,7 @@ impl IrohNodeBuilder {
         member_repo: Arc<dyn MemberRepositoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
-        presence: Arc<dyn PeerReachabilityPort>,
+        peer_reachability: Arc<dyn PeerReachabilityPort>,
     ) -> ClipboardHandlers {
         let receiver = IrohClipboardReceiverAdapter::new(
             Arc::clone(&self.endpoint),
@@ -1096,7 +1121,7 @@ impl IrohNodeBuilder {
         let dispatch = Arc::new(IrohClipboardDispatchAdapter::new(
             Arc::clone(&self.endpoint),
             peer_addr_repo,
-            presence,
+            peer_reachability,
         ));
 
         ClipboardHandlers {
@@ -1275,7 +1300,7 @@ impl IrohNodeBuilder {
     ///   identity boundary via `remote_id()` + fingerprint resolution.
     /// * Builds the outbound dispatch adapter on the same endpoint, reusing
     ///   `peer_addr_repo` so a state send rides the same NAT/relay mapping
-    ///   presence already established (mirrors `install_clipboard`).
+    ///   peer_reachability already established (mirrors `install_clipboard`).
     /// * Returns both ports as trait objects.
     ///
     /// Must be called before [`spawn`](Self::spawn). Coexists with every
@@ -1323,7 +1348,7 @@ impl IrohNodeBuilder {
     ///   `serve` (the application-layer serve port), which produces a fresh
     ///   transfer envelope and requires an unlocked session.
     /// * Builds the outbound pull client on the same endpoint, reusing
-    ///   `peer_addr_repo` so a pull rides the same NAT/relay mapping presence
+    ///   `peer_addr_repo` so a pull rides the same NAT/relay mapping peer_reachability
     ///   already established (mirrors `install_active_clipboard`).
     /// * Returns only the client port; the serve side has no outbound surface.
     ///
@@ -1534,7 +1559,6 @@ impl IrohNodeBuilder {
             router,
             connection_observations: self.connection_observations,
             net_recovery,
-            network_recovery_observations: self.network_recovery_observations,
             _run_lease: self.run_lease,
         }
     }
@@ -2029,7 +2053,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invitation_discovery_and_presence_coexist_on_same_node() {
+    async fn invitation_discovery_and_peer_reachability_coexist_on_same_node() {
         let store = identity_store();
         let mut builder = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
             .await
@@ -2040,7 +2064,7 @@ mod tests {
             Arc::new(InMemorySettings(StdMutex::new(Settings::default()))),
         );
 
-        let presence: Arc<dyn PeerReachabilityPort> = builder.install_presence(
+        let peer_reachability: Arc<dyn PeerReachabilityPort> = builder.install_peer_reachability(
             Arc::new(EmptyPeerAddressRepo),
             Arc::new(EmptyMemberRepo),
             Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
@@ -2049,12 +2073,14 @@ mod tests {
         );
 
         // current_state before any dial is Unknown — proves the adapter
-        // survived the type-erasure round trip through install_presence.
-        let unknown_state = presence.current_state(&DeviceId::new("never-dialed")).await;
+        // survived the type-erasure round trip through install_peer_reachability.
+        let unknown_state = peer_reachability
+            .current_state(&DeviceId::new("never-dialed"))
+            .await;
         assert_eq!(unknown_state, uc_core::ports::ReachabilityState::Unknown,);
 
         let node = builder.spawn();
-        assert!(node.accepts_protocol_for_test(PRESENCE_ALPN).await);
+        assert!(node.accepts_protocol_for_test(PEER_REACHABILITY_ALPN).await);
         assert!(!node.accepts_protocol_for_test(LEGACY_CLIPBOARD_ALPN).await);
         node.shutdown().await;
     }
@@ -2091,7 +2117,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invitation_presence_and_clipboard_coexist_on_same_router() {
+    async fn invitation_peer_reachability_and_clipboard_coexist_on_same_router() {
         // Presence 与 clipboard 共享 Router，invitation discovery 只共享 endpoint。
         // survive the trait-object round trip and the router spawns /
         // shuts down cleanly when all three transports are installed.
@@ -2106,7 +2132,7 @@ mod tests {
         );
 
         let peer_addr_repo: Arc<dyn PeerAddressRepositoryPort> = Arc::new(EmptyPeerAddressRepo);
-        let presence = builder.install_presence(
+        let peer_reachability = builder.install_peer_reachability(
             Arc::clone(&peer_addr_repo),
             Arc::new(EmptyMemberRepo),
             Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
@@ -2119,7 +2145,7 @@ mod tests {
             Arc::new(EmptyMemberRepo),
             Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
             Arc::new(crate::security::Sha256IdentityFingerprintFactory),
-            presence,
+            peer_reachability,
         );
 
         // Dispatch against an unknown device — the repo is empty so we
@@ -2156,7 +2182,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invitation_presence_clipboard_and_blobs_coexist_on_same_router() {
+    async fn invitation_peer_reachability_clipboard_and_blobs_coexist_on_same_router() {
         let store = identity_store();
         let mut builder = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
             .await
@@ -2168,7 +2194,7 @@ mod tests {
         );
 
         let peer_addr_repo: Arc<dyn PeerAddressRepositoryPort> = Arc::new(EmptyPeerAddressRepo);
-        let presence = builder.install_presence(
+        let peer_reachability = builder.install_peer_reachability(
             Arc::clone(&peer_addr_repo),
             Arc::new(EmptyMemberRepo),
             Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
@@ -2181,7 +2207,7 @@ mod tests {
             Arc::new(EmptyMemberRepo),
             Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
             Arc::new(crate::security::Sha256IdentityFingerprintFactory),
-            presence,
+            peer_reachability,
         );
 
         let tempdir = tempfile::tempdir().expect("tempdir");

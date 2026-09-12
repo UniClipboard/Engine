@@ -46,7 +46,7 @@ pub(crate) struct RestoreBroadcastWorker {
     dispatch: Arc<dyn ActiveClipboardDispatchPort>,
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
-    presence: Arc<dyn PeerReachabilityPort>,
+    peer_reachability: Arc<dyn PeerReachabilityPort>,
     send_gate: MemberSendGate,
 }
 
@@ -57,7 +57,7 @@ impl RestoreBroadcastWorker {
         dispatch: Arc<dyn ActiveClipboardDispatchPort>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
-        presence: Arc<dyn PeerReachabilityPort>,
+        peer_reachability: Arc<dyn PeerReachabilityPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
     ) -> Self {
         Self {
@@ -66,7 +66,7 @@ impl RestoreBroadcastWorker {
             dispatch,
             peer_addr_repo,
             peer_scope: Arc::clone(&peer_scope),
-            presence,
+            peer_reachability,
             send_gate: MemberSendGate::new(member_repo),
         }
     }
@@ -140,7 +140,7 @@ impl RestoreBroadcastWorker {
             &self.dispatch,
             &self.peer_addr_repo,
             &self.peer_scope,
-            &self.presence,
+            &self.peer_reachability,
             &self.send_gate,
             &request.state,
             &request.categories,
@@ -169,8 +169,8 @@ mod tests {
     use uc_core::membership::{MembershipError, SpaceMember};
     use uc_core::ports::clipboard::ActiveClipboardDispatchError;
     use uc_core::ports::{
-        PeerAddressError, PeerAddressRecord, PeerReachabilityChanged, PeerReachabilityPort,
-        PresenceError, ReachabilityState,
+        PeerAddressError, PeerAddressRecord, PeerReachabilityChanged, PeerReachabilityError,
+        PeerReachabilityPort, ReachabilityState,
     };
     use uc_core::settings::model::Settings;
     use uc_core::MemberSyncPreferences;
@@ -178,13 +178,13 @@ mod tests {
     /// Presence fake reporting every device with a fixed reachability. The
     /// broadcast tests want their roster peer reachable, so `Online` is the
     /// default; `Offline` exercises the fan-out skip.
-    struct StaticPresence(ReachabilityState);
+    struct StaticPeerReachability(ReachabilityState);
     #[async_trait]
-    impl PeerReachabilityPort for StaticPresence {
+    impl PeerReachabilityPort for StaticPeerReachability {
         async fn ensure_reachable(
             &self,
             _device: &DeviceId,
-        ) -> Result<ReachabilityState, PresenceError> {
+        ) -> Result<ReachabilityState, PeerReachabilityError> {
             Ok(self.0)
         }
         async fn current_state(&self, _device: &DeviceId) -> ReachabilityState {
@@ -315,7 +315,7 @@ mod tests {
 
     fn build_worker(
         sync_on_restore: bool,
-        presence: ReachabilityState,
+        peer_reachability: ReachabilityState,
     ) -> (
         RestoreBroadcastWorker,
         tokio::sync::mpsc::UnboundedSender<RestoreBroadcastRequest>,
@@ -331,7 +331,7 @@ mod tests {
                 device: DeviceId::new("peer-1"),
             }),
             Arc::new(FixedPeerScope(vec![DeviceId::new("peer-1")])),
-            Arc::new(StaticPresence(presence)),
+            Arc::new(StaticPeerReachability(peer_reachability)),
             Arc::new(AllowAllMembers),
         );
         (worker, tx, dispatch)
@@ -351,7 +351,7 @@ mod tests {
                 device: DeviceId::new("peer-1"),
             }),
             Arc::new(FixedPeerScope(vec![])),
-            Arc::new(StaticPresence(ReachabilityState::Online)),
+            Arc::new(StaticPeerReachability(ReachabilityState::Online)),
             Arc::new(AllowAllMembers),
         );
         let handle = worker.spawn();
@@ -408,7 +408,7 @@ mod tests {
                 device: DeviceId::new("peer-1"),
             }),
             Arc::new(FixedPeerScope(vec![])),
-            Arc::new(StaticPresence(ReachabilityState::Online)),
+            Arc::new(StaticPeerReachability(ReachabilityState::Online)),
             Arc::new(AllowAllMembers),
         );
         let handle = worker.spawn();

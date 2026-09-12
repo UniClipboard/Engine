@@ -3,7 +3,7 @@
 //!
 //! ## 真相源：委托 `conn_path::path_for`
 //!
-//! 与 `presence_adapter.rs` 不同 ——本 adapter **不持有连接**、**不发拨号**、
+//! 与 `peer_reachability_adapter.rs` 不同 ——本 adapter **不持有连接**、**不发拨号**、
 //! **不订阅事件**。`channel_for(device)` 被调用时它只做两件事：
 //!
 //! 1. 从 `peer_addr_repo` 拿 `addr_blob` 解码出 `EndpointAddr.id`（iroh

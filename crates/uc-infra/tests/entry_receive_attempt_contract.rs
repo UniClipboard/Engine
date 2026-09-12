@@ -1,4 +1,6 @@
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
+use std::thread;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use diesel::prelude::*;
@@ -26,6 +28,32 @@ use uc_infra::db::schema::{entry_receive_attempt, file_transfer};
 
 type AttemptRepo = DieselEntryReceiveAttemptRepository<DieselSqliteExecutor>;
 type TransferRepo = DieselFileTransferRepository<DieselSqliteExecutor>;
+
+#[tokio::test]
+async fn first_receive_waits_for_an_independent_database_writer() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("concurrent-attempt.sqlite");
+    let pool = init_db_pool(database.to_str().unwrap()).unwrap();
+    let writer_pool = pool.clone();
+    let (locked_tx, locked_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let writer = thread::spawn(move || {
+        let mut connection = writer_pool.get().unwrap();
+        connection
+            .immediate_transaction::<_, diesel::result::Error, _>(|_| {
+                locked_tx.send(()).unwrap();
+                let _ = release_rx.recv_timeout(Duration::from_millis(500));
+                Ok(())
+            })
+            .unwrap();
+    });
+    locked_rx.recv().unwrap();
+    let attempts = AttemptRepo::new(DieselSqliteExecutor::new(pool));
+    let result = attempts.begin_first_receive("entry", "attempt", 1).await;
+    let _ = release_tx.send(());
+    writer.join().unwrap();
+    assert_eq!(result.unwrap(), BeginReceiveOutcome::Begun);
+}
 
 struct FixedSubkey;
 

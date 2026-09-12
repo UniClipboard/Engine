@@ -2,6 +2,9 @@
 //! trust, roster, reset, and session actions. Network adapters receive the two
 //! authenticated endpoints exposed here; all workflow state remains private.
 
+use crate::facade::roster::PeerReachabilityRefreshReport;
+use crate::space::PeerConnectionError;
+
 use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -144,19 +147,19 @@ impl SpaceFacade {
             pairing_invitation,
             pairing_invitation_addresses,
             pairing_invitation_by_address,
-            presence,
+            peer_reachability,
             analytics,
             connection_channel,
         } = admission;
         let connections = crate::space::connectivity::PeerConnectionCoordinator::new(
             Arc::clone(&peer_scope),
-            Arc::clone(&presence),
+            Arc::clone(&peer_reachability),
             connection_hints,
         );
         let member_roster = MemberRosterFacade::new(MemberRosterDeps {
             member_repo: Arc::clone(&member_repo),
             local_identity: Arc::clone(&local_identity),
-            presence: Arc::clone(&presence),
+            peer_reachability: Arc::clone(&peer_reachability),
             connection_channel,
             peer_scope: Arc::clone(&peer_scope),
         })
@@ -383,7 +386,7 @@ impl SpaceFacade {
     }
 
     /// A1 · Create the encrypted space on a fresh device. On success the
-    /// presence cache is primed (F1).
+    /// peer_reachability cache is primed (F1).
     #[instrument(skip_all)]
     pub async fn initialize_space(
         &self,
@@ -404,7 +407,7 @@ impl SpaceFacade {
     }
 
     /// A2 · Unlock the encrypted space after a restart. On success the
-    /// presence cache is primed (F1).
+    /// peer_reachability cache is primed (F1).
     #[instrument(skip_all)]
     pub async fn unlock_space(
         &self,
@@ -689,17 +692,16 @@ impl SpaceFacade {
         self.connections.notify_opportunity(reason)
     }
 
-    pub async fn refresh_presence(
+    pub async fn refresh_peer_reachability(
         &self,
-    ) -> Result<crate::facade::roster::PresenceRefreshReport, crate::space::PeerConnectionError>
-    {
+    ) -> Result<PeerReachabilityRefreshReport, PeerConnectionError> {
         self.connections.refresh().await
     }
 
     pub async fn list_roster_entries(
         &self,
     ) -> Result<Vec<crate::facade::roster::RosterEntry>, crate::facade::roster::RosterError> {
-        self.member_roster.list_with_presence().await
+        self.member_roster.list_with_peer_reachability().await
     }
 
     pub async fn member_sync_preferences(
@@ -735,10 +737,10 @@ impl SpaceFacade {
         self.member_roster.list_peer_snapshots().await
     }
 
-    pub fn subscribe_presence_events(
+    pub fn subscribe_peer_reachability_events(
         &self,
     ) -> tokio::sync::broadcast::Receiver<uc_core::ports::PeerReachabilityChanged> {
-        self.member_roster.subscribe_presence_events()
+        self.member_roster.subscribe_peer_reachability_events()
     }
 
     /// F2 · Tear down facade-owned background work cleanly on app exit.

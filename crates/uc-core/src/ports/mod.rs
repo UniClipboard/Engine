@@ -43,7 +43,7 @@ pub mod local_identity;
 pub mod mobile_sync;
 pub mod pairing_invitation;
 pub mod peer_address;
-pub mod presence;
+pub mod peer_reachability;
 pub mod receive_artifact_log;
 pub mod search;
 pub mod security;
@@ -119,8 +119,8 @@ pub use pairing_invitation::{
     PairingInvitationByAddressPort, PairingInvitationPort,
 };
 pub use peer_address::{PeerAddressError, PeerAddressRecord, PeerAddressRepositoryPort};
-pub use presence::{
-    PeerReachabilityChanged, PeerReachabilityPort, PresenceError, ReachabilityState,
+pub use peer_reachability::{
+    PeerReachabilityChanged, PeerReachabilityError, PeerReachabilityPort, ReachabilityState,
 };
 pub use receive_artifact_log::{
     CleanupReceiveArtifactsPort, ListUnsettledReceiveArtifactsPort, ReceiveArtifact,

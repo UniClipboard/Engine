@@ -3,7 +3,7 @@
 //! The adapter publishes an [`InboundActiveClipboardState`] broadcast stream
 //! that the application layer subscribes to. Inbound connections are handled
 //! by [`IrohActiveClipboardReceiverHandler`] — the same `ProtocolHandler`
-//! split pattern used for the bulk clipboard / presence / pairing transports
+//! split pattern used for the bulk clipboard / peer_reachability / pairing transports
 //! (see `docs/design-docs/layers/infrastructure.md` §4.3): the adapter owns the broadcast `Sender`
 //! and the domain dependencies, and the handler is a cheap `Clone` that
 //! iroh's `Router` registers under [`ACTIVE_CLIPBOARD_ALPN`].
@@ -43,7 +43,7 @@ use uc_core::security::IdentityFingerprint;
 use super::wire;
 
 /// ALPN identifier for the active-clipboard state protocol. An independent
-/// sibling of the bulk clipboard / presence / pairing ALPNs so the Router can
+/// sibling of the bulk clipboard / peer_reachability / pairing ALPNs so the Router can
 /// multiplex every transport on the same endpoint.
 pub const ACTIVE_CLIPBOARD_ALPN: &[u8] = b"uniclipboard/active-clipboard/0";
 

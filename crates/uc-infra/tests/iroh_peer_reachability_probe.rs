@@ -1,4 +1,4 @@
-//! T3a — `Connection::closed()` liveness probe.
+//! Peer reachability: `Connection::closed()` liveness probe.
 //!
 //! This file originally probed iroh 0.95's `Endpoint::conn_type(peer_id)`
 //! semantics — three tests asserting properties of the
@@ -6,7 +6,7 @@
 //! study). iroh 0.97 / 0.98 removed `conn_type` in favour of the
 //! snapshot-style `remote_info(id) -> Option<RemoteInfo>`, so those
 //! assertions no longer apply (and won't compile). The probe that
-//! survives is the one that actually backs `IrohPresenceAdapter` in
+//! survives is the one that actually backs `IrohPeerReachabilityAdapter` in
 //! production: `Connection::closed().await` fires reliably when the peer
 //! tears down, which is what the adapter's per-peer watchdog awaits.
 //!
@@ -56,7 +56,7 @@ fn spawn_hold_open_acceptor(endpoint: Endpoint) -> tokio::task::JoinHandle<()> {
 }
 
 /// The actual fallback: `Connection::closed().await` fires when the peer
-/// drops. Adapter `IrohPresenceAdapter` holds the `Connection` and awaits
+/// drops. Adapter `IrohPeerReachabilityAdapter` holds the `Connection` and awaits
 /// this future in a watchdog task per tracked peer.
 #[tokio::test]
 async fn connection_closed_fires_when_peer_shuts_down() {

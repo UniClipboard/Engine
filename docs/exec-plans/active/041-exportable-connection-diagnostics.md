@@ -57,7 +57,7 @@ Responsibility: 进程安装、分层过滤、本地队列、关联编码、远�
 Relationship: uc.connectivity 已独立进入本地文件；普通 target 仍拒绝。健康 fmt 层无 span 列表，不表示 SDK 完成日志没有关联。
 
 Component: 连接、地址与恢复
-Path: crates/uc-infra/src/network/iroh/{connect,peer_address_resolver,node,addr_filter,conn_path,net_recovery,presence_adapter}.rs
+Path: crates/uc-infra/src/network/iroh/{connect,peer_address_resolver,node,addr_filter,conn_path,net_recovery,peer_reachability_adapter}.rs
 Responsibility: 真实地址选择、连接尝试、路径查询和运行恢复。
 Relationship: connect 仍有字符串化错误和含原始地址的历史日志；resolver 只读存储，不能代表所有发现来源。
 
@@ -107,7 +107,7 @@ Relationship: Swift/Kotlin、HarmonyOS 使用同一 Engine 版本；新增诊断
 | node.rs 中实际发现服务及候选过滤入口 | 来源、候选类型/数量、收到/接受/拒绝、来源内代次、变化原因 | 只有过滤回调时不能宣称观察了完整 DNS 查询或发布确认 |
 | conn_path.rs 及连接生命周期 | direct/relay/mixed/unknown、实际观察到的路径变化 | 快照不能证明两次采样之间没有短暂切换 |
 | net_recovery.rs | 本机中转状态、恢复触发、执行动作、退避、结果 | 本机 home relay 状态不等于对端中转位置 |
-| presence_adapter.rs 及关闭观察任务 | connection_id、方向、关闭原因、已知本地关闭意图 | 不因连接失效就认定远端主动关闭 |
+| peer_reachability_adapter.rs 及关闭观察任务 | connection_id、方向、关闭原因、已知本地关闭意图 | 不因连接失效就认定远端主动关闭 |
 
 实施时先检查锁定版本 Iroh 的结构化错误、watcher、address lookup 接口。优先复用实际回调；只记录已观察事实。没有阶段接口则用 `connection_establish/unknown`，不得解析 Debug 文本补出 DNS、TLS 等细节。若确需升级/修改第三方库，先在 S0 明确差异和测试范围，不顺带升级整套依赖。
 
@@ -227,7 +227,7 @@ daemon 重启后返回新 run 和 standard 模式，GUI/CLI 清除旧采集展�
 | --- | --- | --- | --- |
 | S0 合同和证据确认 | 本规格、锁定 Iroh 依赖、现有观测测试 | 核对手机构建修订；列出发现/连接/路径/关闭的真实 API 与覆盖限制；固定枚举、身份范围、字段审查和来源链映射 | 无底层 API 时标 partial，不解析原始日志；隐私字段未过审不得落盘 |
 | S1 最小可导出连接链 | connectivity/、connect.rs、local_log_processor.rs、filter.rs、现有 writer 测试 | standard 下真实连接开始/终态、匿名编号、尝试失败分类写入 JSONL；远程关闭仍可导出；重复/取消终态正确 | 不扩大远程字段；不改变错峰顺序或实际超时；在默认线程栈验证 |
-| S2 地址及恢复证据 | peer_address_resolver.rs、node.rs、实际地址写入方、net_recovery.rs、conn_path.rs、presence_adapter.rs | 已知旧候选失败、收到新候选、采用新候选后成功的受控链路可查；可观察路径变化与关闭有连接关联 | 观察/保存/使用代次分开；新增观察任务纳入既有任务收尾，不在 drop 中发起异步清理 |
+| S2 地址及恢复证据 | peer_address_resolver.rs、node.rs、实际地址写入方、net_recovery.rs、conn_path.rs、peer_reachability_adapter.rs | 已知旧候选失败、收到新候选、采用新候选后成功的受控链路可查；可观察路径变化与关闭有连接关联 | 观察/保存/使用代次分开；新增观察任务纳入既有任务收尾，不在 drop 中发起异步清理 |
 | S3 成员错误来源 | revocation.rs 错误类型、space_security_store/、space/security/access.rs、group_update_adapter.rs | 真正存储失败有 source，固定阶段/原因落盘，原回执和恢复行为不变 | 不把规则错误伪装成存储错误；不增加业务步骤查询或字符串旁路 |
 | S4 限时模式与覆盖 | runtime.rs、config.rs、status.rs、filter.rs、local_file.rs | 期限、模式切换、容量、来源登记及各类丢弃口径测试通过；生成可靠检查点和刷新屏障报告 | 高频事件不挤占无限内存；截断/过滤/未开启不能混为 dropped=0；重启回 standard |
 | S5 稳定入口和平台合同 | Engine observability 出口、UniFFI/OHOS observability、绑定测试宿主 | 新增采集/原生事件/导出准备接口；现有构造器兼容；两套绑定同源；原生事件进入本地文件 | 不输出源业务 ID；不同进程只报告自己的覆盖；不增加第二个全局运行时 |

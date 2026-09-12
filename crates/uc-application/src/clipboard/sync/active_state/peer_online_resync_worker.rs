@@ -4,7 +4,7 @@
 //!
 //! When a peer `Q` becomes reachable it may hold a stale (or empty) view of
 //! the active clipboard — it was offline while the register last advanced.
-//! This worker reacts to "peer online" presence transitions and sends `Q` our
+//! This worker reacts to "peer online" peer_reachability transitions and sends `Q` our
 //! current register so the two ends converge under LWW. The resync is
 //! **symmetric**: `Q` runs the same worker and sends us *its* register; the
 //! LWW order picks the winner on both sides. There is no ack or handshake —
@@ -27,7 +27,7 @@
 //!
 //! ## Convergence scope (D6)
 //!
-//! Presence transitions only fire for **directly-connected** peers (presence
+//! Presence transitions only fire for **directly-connected** peers (peer_reachability
 //! is driven by the local endpoint's dial/connection state). A peer reachable
 //! only through a relay chain is not observed here, so its resync is
 //! best-effort and not guaranteed — consistent with the no-retry posture of
@@ -46,7 +46,7 @@ use tracing::{debug, info, instrument, warn};
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::DeviceId;
 use uc_core::ports::clipboard::{ActiveClipboardDispatchPort, LoadActiveClipboardPort};
-use uc_core::ports::presence::{PeerReachabilityChanged, ReachabilityState};
+use uc_core::ports::peer_reachability::{PeerReachabilityChanged, ReachabilityState};
 use uc_core::ports::PeerReachabilityPort;
 use uc_core::MemberRepositoryPort;
 
@@ -64,7 +64,7 @@ const PEER_ONLINE_RESYNC_DEBOUNCE: Duration = Duration::from_millis(1_500);
 
 /// Dependencies for the peer-online resync worker.
 pub(crate) struct PeerOnlineResyncWorker {
-    presence: Arc<dyn PeerReachabilityPort>,
+    peer_reachability: Arc<dyn PeerReachabilityPort>,
     load_register: Arc<dyn LoadActiveClipboardPort>,
     reconstructor: SnapshotReconstructor,
     dispatch: Arc<dyn ActiveClipboardDispatchPort>,
@@ -74,7 +74,7 @@ pub(crate) struct PeerOnlineResyncWorker {
 
 impl PeerOnlineResyncWorker {
     pub(crate) fn new(
-        presence: Arc<dyn PeerReachabilityPort>,
+        peer_reachability: Arc<dyn PeerReachabilityPort>,
         load_register: Arc<dyn LoadActiveClipboardPort>,
         reconstructor: SnapshotReconstructor,
         dispatch: Arc<dyn ActiveClipboardDispatchPort>,
@@ -82,7 +82,7 @@ impl PeerOnlineResyncWorker {
         member_repo: Arc<dyn MemberRepositoryPort>,
     ) -> Self {
         Self {
-            presence,
+            peer_reachability,
             load_register,
             reconstructor,
             dispatch,
@@ -98,7 +98,7 @@ impl PeerOnlineResyncWorker {
 
     #[instrument(name = "active_state.peer_online_resync_loop", skip_all)]
     pub(crate) async fn run(self) {
-        let mut rx = self.presence.subscribe();
+        let mut rx = self.peer_reachability.subscribe();
         loop {
             // Block until the first online transition (or all senders drop →
             // exit). Non-online transitions (offline / unknown) are not a
@@ -139,7 +139,7 @@ impl PeerOnlineResyncWorker {
         }
     }
 
-    /// Pull the next presence event that is an *online* transition, skipping
+    /// Pull the next peer_reachability event that is an *online* transition, skipping
     /// offline / unknown transitions and lag gaps. Returns `None` when the
     /// subscription is closed.
     async fn recv_next_online(
@@ -153,7 +153,7 @@ impl PeerOnlineResyncWorker {
                 // Offline / Unknown transitions are not a resync trigger.
                 Ok(_) => continue,
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
-                    // A missed online transition self-heals: presence
+                    // A missed online transition self-heals: peer_reachability
                     // re-emits, or the peer's own resync reaches us.
                     warn!(missed, "peer-online resync: presence receiver lagged");
                     continue;
@@ -258,21 +258,22 @@ mod tests {
 
     /// Presence port whose `subscribe()` hands out receivers attached to a
     /// caller-controlled broadcast sender.
-    struct FakePresence {
+    struct FakePeerReachability {
         tx: broadcast::Sender<PeerReachabilityChanged>,
     }
-    impl FakePresence {
+    impl FakePeerReachability {
         fn new() -> (Arc<Self>, broadcast::Sender<PeerReachabilityChanged>) {
             let (tx, _) = broadcast::channel(16);
             (Arc::new(Self { tx: tx.clone() }), tx)
         }
     }
     #[async_trait]
-    impl PeerReachabilityPort for FakePresence {
+    impl PeerReachabilityPort for FakePeerReachability {
         async fn ensure_reachable(
             &self,
             _device: &DeviceId,
-        ) -> Result<ReachabilityState, uc_core::ports::presence::PresenceError> {
+        ) -> Result<ReachabilityState, uc_core::ports::peer_reachability::PeerReachabilityError>
+        {
             Ok(ReachabilityState::Online)
         }
         async fn current_state(&self, _device: &DeviceId) -> ReachabilityState {
@@ -497,17 +498,17 @@ mod tests {
         broadcast::Sender<PeerReachabilityChanged>,
         Arc<DispatchSpy>,
     ) {
-        let (presence, presence_tx) = FakePresence::new();
+        let (peer_reachability, peer_reachability_tx) = FakePeerReachability::new();
         let dispatch = Arc::new(DispatchSpy::default());
         let worker = PeerOnlineResyncWorker::new(
-            presence,
+            peer_reachability,
             Arc::new(FixedRegister(register)),
             reconstructor(),
             Arc::clone(&dispatch) as Arc<dyn ActiveClipboardDispatchPort>,
             Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
             Arc::new(AllowAllMembers),
         );
-        (worker, presence_tx, dispatch)
+        (worker, peer_reachability_tx, dispatch)
     }
 
     // A debounce window plus a slice of slack — keep tests above the 1.5s
@@ -550,10 +551,10 @@ mod tests {
 
     #[tokio::test]
     async fn upgrade_required_peer_does_not_receive_resync() {
-        let (presence, presence_tx) = FakePresence::new();
+        let (peer_reachability, peer_reachability_tx) = FakePeerReachability::new();
         let dispatch = Arc::new(DispatchSpy::default());
         let worker = PeerOnlineResyncWorker::new(
-            presence,
+            peer_reachability,
             Arc::new(FixedRegister(Some(state("blake3v1:aa", "self")))),
             reconstructor(),
             Arc::clone(&dispatch) as Arc<dyn ActiveClipboardDispatchPort>,
@@ -563,7 +564,7 @@ mod tests {
         let handle = worker.spawn();
         tokio::task::yield_now().await;
 
-        presence_tx.send(online("peer-1")).unwrap();
+        peer_reachability_tx.send(online("peer-1")).unwrap();
         tokio::time::sleep(past_window()).await;
 
         assert!(

@@ -26,8 +26,10 @@ pub mod node;
 mod observed_address_lookup;
 mod observed_connections;
 mod peer_address_resolver;
+pub mod peer_reachability_adapter;
+mod peer_reachability_protocol;
 pub mod persistable_addr;
-pub mod presence_adapter;
+mod protocol_router;
 pub mod relay_probe;
 pub(crate) mod runtime_consts;
 pub mod space_admission;
@@ -70,14 +72,16 @@ pub use membership_history_exchange_adapter::{
     IrohMembershipHistoryExchangeAdapter, IrohMembershipHistoryExchangeHandler,
     MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
 };
-pub use net_recovery::NetworkRecoveryObservation;
 pub use network_partition::IrohNetworkPartitionGate;
 pub use node::{
     ActiveClipboardHandlers, ActiveClipboardPullHandlers, BlobHandlers, ClipboardHandlers,
     GroupUpdateHandlers, IrohNode, IrohNodeBuilder, IrohNodeConfig, IrohNodeError,
     IrohRelayAccessToken, PairingInvitationHandlers, TransferProgressHandlers,
 };
-pub use presence_adapter::{IrohPresenceAdapter, IrohPresenceHandler, PRESENCE_ALPN};
+pub use peer_reachability_adapter::{
+    IrohPeerReachabilityAdapter, IrohPeerReachabilityHandler, LEGACY_PEER_REACHABILITY_ALPN,
+    PEER_REACHABILITY_ALPN,
+};
 pub use relay_probe::{
     IrohRelayProbeAdapter, RelayProbeError as IrohRelayProbeError,
     RelayProbeReport as IrohRelayProbeReport,

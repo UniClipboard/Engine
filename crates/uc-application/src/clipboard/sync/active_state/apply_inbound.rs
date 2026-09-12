@@ -133,7 +133,7 @@ pub(crate) struct ApplyInboundActiveClipboardStateUseCase {
     peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
     /// Reachability tracker: the re-broadcast fan-out skips peers already known
     /// offline rather than burning a dial timeout per stale/ghost roster entry.
-    presence: Arc<dyn PeerReachabilityPort>,
+    peer_reachability: Arc<dyn PeerReachabilityPort>,
     send_gate: MemberSendGate,
     clock: Arc<dyn ClockPort>,
     mobile_consumability: MobileConsumabilityProbe,
@@ -169,7 +169,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
         dispatch: Arc<dyn ActiveClipboardDispatchPort>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
-        presence: Arc<dyn PeerReachabilityPort>,
+        peer_reachability: Arc<dyn PeerReachabilityPort>,
         clock: Arc<dyn ClockPort>,
         mobile_consumability: MobileConsumabilityProbe,
         converged_tx: broadcast::Sender<ActiveClipboardConvergedEvent>,
@@ -186,7 +186,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
             dispatch,
             peer_addr_repo,
             peer_scope: Arc::clone(&peer_scope),
-            presence,
+            peer_reachability,
             send_gate: MemberSendGate::new(member_repo),
             clock,
             mobile_consumability,
@@ -524,7 +524,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
         let dispatch = Arc::clone(&self.dispatch);
         let peer_addr_repo = Arc::clone(&self.peer_addr_repo);
         let peer_scope = Arc::clone(&self.peer_scope);
-        let presence = Arc::clone(&self.presence);
+        let peer_reachability = Arc::clone(&self.peer_reachability);
         let send_gate = self.send_gate.clone();
         let converged_tx = self.converged_tx.clone();
 
@@ -583,7 +583,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
                     &dispatch,
                     &peer_addr_repo,
                     &peer_scope,
-                    &presence,
+                    &peer_reachability,
                     &send_gate,
                     &state,
                     &categories,
@@ -627,7 +627,7 @@ mod tests {
     };
     use uc_core::ports::{
         ClipboardSelectionRepositoryPort, PeerAddressError, PeerAddressRecord,
-        PeerReachabilityChanged, PeerReachabilityPort, PresenceError, ReachabilityState,
+        PeerReachabilityChanged, PeerReachabilityError, PeerReachabilityPort, ReachabilityState,
         SystemClipboardPort,
     };
     use uc_core::{BlobId, MemberSyncPreferences};
@@ -636,13 +636,13 @@ mod tests {
     /// early-return gate tests never reach the fan-out, and the convergence
     /// tests want their re-broadcast target reachable, so `Online` is the
     /// natural default; a test can pass `Offline` to exercise the skip.
-    struct StaticPresence(ReachabilityState);
+    struct StaticPeerReachability(ReachabilityState);
     #[async_trait]
-    impl PeerReachabilityPort for StaticPresence {
+    impl PeerReachabilityPort for StaticPeerReachability {
         async fn ensure_reachable(
             &self,
             _device: &DeviceId,
-        ) -> Result<ReachabilityState, PresenceError> {
+        ) -> Result<ReachabilityState, PeerReachabilityError> {
             Ok(self.0)
         }
         async fn current_state(&self, _device: &DeviceId) -> ReachabilityState {
@@ -961,7 +961,7 @@ mod tests {
             Arc::clone(&dispatch) as Arc<dyn ActiveClipboardDispatchPort>,
             Arc::new(EmptyPeerAddrRepo),
             member_scope,
-            Arc::new(StaticPresence(ReachabilityState::Online)),
+            Arc::new(StaticPeerReachability(ReachabilityState::Online)),
             Arc::new(FixedClock(now_ms)),
             MobileConsumabilityProbe::new(Arc::new(crate::test_support::FixedFileSets::empty())),
             converged_tx,
@@ -1342,7 +1342,7 @@ mod tests {
             Arc::clone(&dispatch) as Arc<dyn ActiveClipboardDispatchPort>,
             peer_addr_repo,
             Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
-            Arc::new(StaticPresence(ReachabilityState::Online)),
+            Arc::new(StaticPeerReachability(ReachabilityState::Online)),
             Arc::new(FixedClock(1_000)),
             probe,
             converged_tx,

@@ -36,7 +36,7 @@ use super::wire::{self, ActiveClipboardWireMessage};
 
 /// Sends one active-clipboard state observation to a single peer over the
 /// active-clipboard ALPN. Reuses the shared endpoint + `peer_addr_repo` so a
-/// state send rides the same NAT/relay mapping presence already established.
+/// state send rides the same NAT/relay mapping peer_reachability already established.
 pub struct IrohActiveClipboardDispatchAdapter {
     endpoint: Arc<Endpoint>,
     peer_address_resolver: PeerAddressResolver,

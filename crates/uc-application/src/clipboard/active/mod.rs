@@ -121,7 +121,7 @@ pub struct ActiveClipboardDeps {
     pub peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
     /// Presence stream for the peer-online resync worker: an "online"
     /// transition triggers a resend of the current register to that peer.
-    pub presence: Arc<dyn PeerReachabilityPort>,
+    pub peer_reachability: Arc<dyn PeerReachabilityPort>,
     pub entry_lookup: Arc<dyn FindEntryIdBySnapshotHashPort>,
     /// Live availability query. When set, a hash match against a partial entry
     /// is pulled and completed before converging instead of writing its
@@ -216,7 +216,7 @@ pub struct ActiveClipboardFacade {
     peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
     member_repo: Arc<dyn MemberRepositoryPort>,
     settings: Arc<dyn SettingsPort>,
-    presence: Arc<dyn PeerReachabilityPort>,
+    peer_reachability: Arc<dyn PeerReachabilityPort>,
     load_register: Arc<dyn LoadActiveClipboardPort>,
     reconstructor: SnapshotReconstructor,
     local_advancer: LocalActiveRegisterAdvancer,
@@ -253,7 +253,7 @@ impl ActiveClipboardFacade {
             Arc::clone(&deps.dispatch),
             Arc::clone(&deps.peer_addr_repo),
             Arc::clone(&deps.peer_scope),
-            Arc::clone(&deps.presence),
+            Arc::clone(&deps.peer_reachability),
             deps.clock,
             mobile_consumability,
             converged_tx,
@@ -288,7 +288,7 @@ impl ActiveClipboardFacade {
             peer_scope: deps.peer_scope,
             member_repo: deps.member_repo,
             settings: deps.settings,
-            presence: deps.presence,
+            peer_reachability: deps.peer_reachability,
             load_register: deps.load_register,
             reconstructor,
             local_advancer,
@@ -334,7 +334,7 @@ impl ActiveClipboardFacade {
             &self.dispatch,
             &self.peer_addr_repo,
             &self.peer_scope,
-            &self.presence,
+            &self.peer_reachability,
             &self.send_gate,
             &state,
             &categories,
@@ -380,7 +380,7 @@ impl ActiveClipboardFacade {
 
     fn peer_online_resync_worker(&self) -> PeerOnlineResyncWorker {
         PeerOnlineResyncWorker::new(
-            Arc::clone(&self.presence),
+            Arc::clone(&self.peer_reachability),
             Arc::clone(&self.load_register),
             self.reconstructor.clone(),
             Arc::clone(&self.dispatch),
@@ -399,7 +399,7 @@ impl ActiveClipboardFacade {
             Arc::clone(&self.dispatch),
             Arc::clone(&self.peer_addr_repo),
             Arc::clone(&self.peer_scope),
-            Arc::clone(&self.presence),
+            Arc::clone(&self.peer_reachability),
             Arc::clone(&self.member_repo),
         )
     }
