@@ -615,10 +615,18 @@ impl ProductionSessionFactory {
         {
             Ok(runtime) => Arc::new(runtime),
             Err(error) => {
-                sync_engine
-                    .shutdown(uc_core::FileTransferCancellationReason::Unknown)
-                    .await;
-                return Err(startup_error("application runtime", error));
+                let primary = startup_error("application runtime", error);
+                let additional = sync_engine
+                    .shutdown(FileTransferCancellationReason::Unknown)
+                    .await
+                    .err()
+                    .map(anyhow::Error::new)
+                    .into_iter()
+                    .collect();
+                return Err(lifecycle_error(LifecycleError {
+                    primary: primary.into(),
+                    additional,
+                }));
             }
         };
         let facade = application_runtime.facade();

@@ -12,8 +12,8 @@ use uc_application::deps::ClipboardReceiverPort;
 
 use tracing::{info, instrument};
 
-use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio::task::JoinHandle;
+use tokio::sync::{broadcast, mpsc};
+use tokio::task::{JoinError, JoinHandle};
 use tracing::debug;
 
 /// 反向 progress 翻译器对前端 emit 的硬上限(<=5/sec per transfer)。
@@ -36,7 +36,7 @@ use uc_application::deps::{
     ApplicationSpaceAdapters, CurrentSpaceMemberScopePort, SpaceAdmissionAdapters,
     SpaceMembershipAdapters, SpaceRuntimeAdapters,
 };
-use uc_application::facade::ApplicationAssembly;
+use uc_application::facade::{ApplicationAssembly, LifecycleError};
 use uc_application::facade::{HostEvent, HostEventBus, TransferHostEvent};
 use uc_core::file_transfer::{
     FileTransferCancellationReason, FileTransferDirection, OutboundProgressStatus,
@@ -172,11 +172,22 @@ impl SyncEngineAssembly {
     /// 先停止 Engine 自有的进度翻译，再关闭共享 Iroh Router；Application
     /// 领域运行期由独立的 `ApplicationRuntime` 负责停止。
     #[instrument(skip_all)]
-    pub async fn shutdown(self, transfer_reason: FileTransferCancellationReason) {
-        self.outbound_progress_translator
+    pub async fn shutdown(
+        self,
+        transfer_reason: FileTransferCancellationReason,
+    ) -> Result<(), LifecycleError> {
+        let mut errors = Vec::new();
+        if let Err(error) = self
+            .outbound_progress_translator
             .shutdown(transfer_reason)
-            .await;
-        self.iroh_node.shutdown().await;
+            .await
+        {
+            errors.push(anyhow::Error::new(error).context("stop outbound progress worker"));
+        }
+        if let Err(error) = self.iroh_node.shutdown().await {
+            errors.push(error.into());
+        }
+        LifecycleError::from_errors(errors)
     }
 }
 
@@ -198,7 +209,6 @@ struct OutboundProgressRuntime {
 enum OutboundProgressCommand {
     Shutdown {
         reason: FileTransferCancellationReason,
-        done: oneshot::Sender<()>,
     },
 }
 
@@ -287,7 +297,7 @@ impl OutboundProgressRuntime {
             loop {
                 tokio::select! {
                     command = command_rx.recv() => match command {
-                        Some(OutboundProgressCommand::Shutdown { reason, done }) => {
+                        Some(OutboundProgressCommand::Shutdown { reason }) => {
                             while let Ok(event) = rx.try_recv() {
                                 forward_outbound_progress(&bus, &mut last_progress_emit, &mut active, event);
                             }
@@ -309,7 +319,6 @@ impl OutboundProgressRuntime {
                                     reason: Some(reason.as_str().to_owned()),
                                 }));
                             }
-                            let _ = done.send(());
                             return;
                         }
                         None => return,
@@ -331,16 +340,12 @@ impl OutboundProgressRuntime {
         Self { commands, task }
     }
 
-    async fn shutdown(self, reason: FileTransferCancellationReason) {
-        let (done, received) = oneshot::channel();
-        if self
+    async fn shutdown(self, reason: FileTransferCancellationReason) -> Result<(), JoinError> {
+        // 事件源可能已经正常关闭；任务本身的 join 才是最终完成依据。
+        let _ = self
             .commands
-            .send(OutboundProgressCommand::Shutdown { reason, done })
-            .is_ok()
-        {
-            let _ = received.await;
-        }
-        let _ = self.task.await;
+            .send(OutboundProgressCommand::Shutdown { reason });
+        self.task.await
     }
 }
 
@@ -351,6 +356,20 @@ mod outbound_progress_tests {
     use super::*;
     use uc_application::facade::{EmitError, HostEventEmitterPort};
     use uc_core::ids::DeviceId;
+
+    #[tokio::test]
+    async fn outbound_progress_shutdown_preserves_worker_failure() {
+        let (commands, _receiver) = mpsc::unbounded_channel();
+        let runtime = OutboundProgressRuntime {
+            commands,
+            task: tokio::spawn(async { panic!("PRIVATE_PROGRESS_FAILURE") }),
+        };
+        assert!(runtime
+            .shutdown(FileTransferCancellationReason::Unknown)
+            .await
+            .unwrap_err()
+            .is_panic());
+    }
 
     #[derive(Default)]
     struct Recorder(Mutex<Vec<HostEvent>>);
@@ -398,7 +417,8 @@ mod outbound_progress_tests {
 
         runtime
             .shutdown(FileTransferCancellationReason::ConnectivityRecovery)
-            .await;
+            .await
+            .unwrap();
 
         let events = recorder
             .0
@@ -433,7 +453,8 @@ mod outbound_progress_tests {
             .unwrap_or_else(|error| panic!("send terminal: {error}"));
         runtime
             .shutdown(FileTransferCancellationReason::ConnectivityRecovery)
-            .await;
+            .await
+            .unwrap();
 
         let events = recorder
             .0

@@ -102,6 +102,7 @@ use super::transfer_progress_adapter::{
 };
 
 mod shutdown;
+pub use shutdown::IrohNodeShutdownError;
 
 /// 邀请发布与解析端口，由 [`IrohNodeBuilder::install_pairing_invitation`] 构造。
 ///
@@ -1746,7 +1747,7 @@ mod tests {
         let node = builder.spawn();
         // Clean shutdown exits without hanging; the test runner's default
         // timeout would catch a deadlock.
-        node.shutdown().await;
+        node.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -1807,7 +1808,12 @@ mod tests {
             .await
             .expect("诊断观察不能延长服务器连接寿命");
         client.close().await;
-        builder.spawn().shutdown().with_subscriber(dispatch).await;
+        builder
+            .spawn()
+            .shutdown()
+            .with_subscriber(dispatch)
+            .await
+            .unwrap();
         let records = exporter.get_emitted_logs().expect("logs");
         let names: Vec<_> = records
             .iter()
@@ -1870,7 +1876,7 @@ mod tests {
             .install_membership_attestation_handler(&adapter, Arc::new(RejectingMembershipEndpoint))
             .expect("install membership attestation handler");
 
-        builder.spawn().shutdown().await;
+        builder.spawn().shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -1922,7 +1928,7 @@ mod tests {
             )
             .expect("install membership handler");
 
-        builder.spawn().shutdown().await;
+        builder.spawn().shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -1950,13 +1956,13 @@ mod tests {
             .expect("first bind");
         let first_id = first.endpoint.id();
         let first_node = first.spawn();
-        first_node.shutdown().await;
+        first_node.shutdown().await.unwrap();
 
         let second = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
             .await
             .expect("second bind");
         assert_eq!(second.endpoint.id(), first_id);
-        second.spawn().shutdown().await;
+        second.spawn().shutdown().await.unwrap();
     }
 
     #[derive(Default)]
@@ -2024,7 +2030,7 @@ mod tests {
         let node = builder.spawn();
         assert!(node.accepts_protocol_for_test(PEER_REACHABILITY_ALPN).await);
         assert!(!node.accepts_protocol_for_test(LEGACY_CLIPBOARD_ALPN).await);
-        node.shutdown().await;
+        node.shutdown().await.unwrap();
     }
 
     #[derive(Default)]
@@ -2120,7 +2126,7 @@ mod tests {
         let _inbound_rx = receiver.subscribe();
 
         let node = builder.spawn();
-        node.shutdown().await;
+        node.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -2170,7 +2176,7 @@ mod tests {
         assert!(blob_transfer.has(&digest).await.expect("has digest"));
 
         let node = builder.spawn();
-        node.shutdown().await;
+        node.shutdown().await.unwrap();
     }
 
     // ──────────────────────────────────────────────────────────────────

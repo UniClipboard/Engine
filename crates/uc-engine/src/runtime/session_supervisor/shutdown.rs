@@ -30,7 +30,9 @@ impl ProductionSession {
             errors.push(error.into());
         }
         info!("Engine session Application runtime 已停止");
-        self.sync_engine.shutdown(transfer_reason).await;
+        if let Err(error) = self.sync_engine.shutdown(transfer_reason).await {
+            errors.push(error.into());
+        }
         info!("Engine session Iroh 网络已停止");
         LifecycleError::from_errors(errors)
     }

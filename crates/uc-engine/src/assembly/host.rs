@@ -881,7 +881,8 @@ mod tests {
         lifecycle
             .sync_engine_assembly
             .shutdown(uc_core::FileTransferCancellationReason::Unknown)
-            .await;
+            .await
+            .unwrap();
         task_registry
             .shutdown(std::time::Duration::from_millis(500))
             .await;
