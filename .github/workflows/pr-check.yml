@@ -1,6 +1,7 @@
 name: PR Check
 
 on:
+  workflow_dispatch:
   pull_request:
     branches: [main, migration/initial-core-import]
   push:
@@ -66,6 +67,9 @@ jobs:
         uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
         with:
           tool: cargo-llvm-cov
+
+      - name: Validate automatic connections without coverage instrumentation
+        run: "cargo test -p uc-engine --features dev-tools --test space_membership_auto_pairing_e2e --locked -- automatic_connections:: --test-threads=1"
 
       - name: Generate Rust coverage
         run: cargo llvm-cov --workspace --all-targets --locked --lcov --output-path lcov.info

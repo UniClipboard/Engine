@@ -194,6 +194,24 @@ impl EngineRuntime for ProductionRuntime {
                 Operation::QueryPeerConnections => {
                     execute_query_peer_connections(self.current_facade().await?.as_ref()).await
                 }
+                Operation::NotifyConnectivityOpportunity { reason } => {
+                    let reason = match reason {
+                        crate::ConnectivityOpportunity::Foreground => {
+                            uc_application::facade::ConnectivityOpportunity::Foreground
+                        }
+                        crate::ConnectivityOpportunity::SystemWake => {
+                            uc_application::facade::ConnectivityOpportunity::SystemWake
+                        }
+                        crate::ConnectivityOpportunity::NetworkChanged => {
+                            uc_application::facade::ConnectivityOpportunity::NetworkChanged
+                        }
+                    };
+                    self.current_facade()
+                        .await?
+                        .notify_connectivity_opportunity(reason)
+                        .map_err(|_| super::operation_unavailable_error())?;
+                    Ok(OperationResult::ConnectivityOpportunityAccepted)
+                }
                 Operation::RefreshPeerConnections => {
                     execute_refresh_peer_connections(self.current_facade().await?.as_ref()).await
                 }

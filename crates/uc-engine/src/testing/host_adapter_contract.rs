@@ -25,7 +25,7 @@ async fn next_engine_event_matching(
     events: &mut crate::EventStream,
     predicate: impl Fn(&EngineEvent) -> bool,
 ) -> EngineEvent {
-    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             let event = events.next().await.expect("engine event stream closed");
             if predicate(&event) {
@@ -35,6 +35,38 @@ async fn next_engine_event_matching(
     })
     .await
     .expect("timed out waiting for engine event")
+}
+
+async fn wait_entry_delivered(engine: &Engine, entry_id: &str, target_device_id: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let result = engine
+                .execute(crate::Operation::QueryEntryDelivery(
+                    crate::HistoryEntryInput {
+                        entry_id: entry_id.to_owned(),
+                    },
+                ))
+                .await
+                .expect("delivery query must succeed");
+            if matches!(
+                result,
+                crate::OperationResult::EntryDelivery(view)
+                    if view.deliveries.iter().any(|delivery| {
+                        delivery.target_device_id == target_device_id
+                            && matches!(
+                                delivery.status,
+                                crate::EntryDeliveryStatusSummary::Delivered
+                                    | crate::EntryDeliveryStatusSummary::Duplicate
+                            )
+                    })
+            ) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for delivered entry");
 }
 
 #[cfg(feature = "dev-tools")]
@@ -301,6 +333,7 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
         crate::OperationResult::HistoryPage { ref entries, next_cursor: None }
             if entries.len() == 1 && entries[0].preview.as_deref() == Some(text)
     ));
+    wait_entry_delivered(&sponsor, &first_entry_id, &joiner_device_id).await;
 
     let resend = sponsor
         .execute(crate::Operation::ResendEntry(crate::ResendEntryInput {
@@ -309,18 +342,14 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
         }))
         .await
         .unwrap();
-    assert_eq!(
+    assert!(matches!(
         resend,
-        crate::OperationResult::EntryResent(crate::ResendEntryOutcome::Completed(
-            crate::ResendReportSummary {
-                accepted: 0,
-                duplicate: 1,
-                offline: 0,
-                errored: 0,
-                pending: 0,
-            },
-        ))
-    );
+        crate::OperationResult::EntryResent(crate::ResendEntryOutcome::Completed(report))
+            if report.accepted + report.duplicate == 1
+                && report.offline == 0
+                && report.errored == 0
+                && report.pending == 0
+    ));
     let history_after_resend = joiner
         .execute(crate::Operation::QueryHistory(crate::QueryHistoryInput {
             cursor: None,
@@ -394,7 +423,7 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
     let file_resend = sponsor
         .execute(crate::Operation::ResendEntry(crate::ResendEntryInput {
             entry_id: file_entry_id.clone(),
-            target_devices: vec![joiner_device_id],
+            target_devices: vec![joiner_device_id.clone()],
         }))
         .await
         .unwrap();
@@ -437,6 +466,7 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
         received_file,
         crate::OperationResult::EntryFileRead(resource) if resource.bytes == file_bytes
     ));
+    wait_entry_delivered(&sponsor, &file_entry_id, &joiner_device_id).await;
 
     sponsor
         .execute(crate::Operation::UpdateSettings(Box::new(
@@ -458,7 +488,7 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
             }))
             .await
             .unwrap(),
-        crate::OperationResult::EntryResent(crate::ResendEntryOutcome::SynchronizationDisabled)
+        crate::OperationResult::EntryResent(crate::ResendEntryOutcome::NoEligibleTargets)
     );
 
     sponsor

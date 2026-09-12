@@ -53,6 +53,8 @@ pub(crate) struct SpaceTransitionDeps {
 }
 
 pub(crate) struct SpaceFacadeDeps {
+    pub connection_hints:
+        futures::stream::BoxStream<'static, Result<crate::space::ConnectionHint, anyhow::Error>>,
     pub application: ApplicationDeps,
     pub session: SpaceSessionDeps,
     pub admission: SpaceAdmissionDeps,

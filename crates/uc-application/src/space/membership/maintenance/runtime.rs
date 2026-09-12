@@ -84,6 +84,7 @@ pub(crate) struct PreparedSpaceMembershipMaintenanceRuntime {
     network_activity: Arc<dyn MembershipNetworkActivityPort>,
     activity: SpaceMembershipMaintenanceActivity,
     command_rx: mpsc::UnboundedReceiver<RuntimeCommand>,
+    history_changes: tokio::sync::watch::Receiver<()>,
 }
 
 impl PreparedSpaceMembershipMaintenanceRuntime {
@@ -98,6 +99,7 @@ impl SpaceMembershipMaintenanceRuntime {
         peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
         periodic_interval: Duration,
         network_activity: Arc<dyn MembershipNetworkActivityPort>,
+        history_changes: tokio::sync::watch::Receiver<()>,
     ) -> PreparedSpaceMembershipMaintenanceRuntime {
         let (commands, command_rx) = mpsc::unbounded_channel();
         let activity = SpaceMembershipMaintenanceActivity { commands };
@@ -108,6 +110,7 @@ impl SpaceMembershipMaintenanceRuntime {
             network_activity,
             activity,
             command_rx,
+            history_changes,
         }
     }
 
@@ -123,6 +126,7 @@ impl SpaceMembershipMaintenanceRuntime {
             peer_reachability_changed_events,
             periodic_interval,
             network_activity,
+            tokio::sync::watch::channel(()).1,
         ))
     }
 
@@ -134,10 +138,12 @@ impl SpaceMembershipMaintenanceRuntime {
             network_activity,
             activity,
             mut command_rx,
+            mut history_changes,
         } = prepared;
         let task = tokio::spawn(async move {
             let mut paused = false;
             let mut presence_open = true;
+            let mut history_open = true;
             let mut active_round = Some(spawn_round(
                 Arc::clone(&maintain),
                 MembershipMaintenanceTrigger::Startup,
@@ -202,6 +208,12 @@ impl SpaceMembershipMaintenanceRuntime {
                             if let Some(trigger) = queued_triggers.pop_front() {
                                 active_round = Some(spawn_round(Arc::clone(&maintain), trigger));
                             }
+                        }
+                    },
+                    changed = history_changes.changed(), if !paused && history_open => {
+                        if changed.is_err() { history_open = false; }
+                        else {
+                            schedule_round(&maintain, &mut active_round, &mut queued_triggers, MembershipMaintenanceTrigger::StateChanged);
                         }
                     },
                     event = reachability_changes.recv(), if !paused && presence_open => match event {

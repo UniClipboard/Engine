@@ -366,9 +366,17 @@ impl AppFacade {
         self.space.query_device_trust().await
     }
 
+    pub fn notify_connectivity_opportunity(
+        &self,
+        reason: crate::space::ConnectivityOpportunity,
+    ) -> Result<(), crate::space::PeerConnectionError> {
+        self.space.notify_connectivity_opportunity(reason)
+    }
+
     pub async fn refresh_presence(
         &self,
-    ) -> Result<crate::facade::roster::PresenceRefreshReport, crate::facade::RosterError> {
+    ) -> Result<crate::facade::roster::PresenceRefreshReport, crate::space::PeerConnectionError>
+    {
         self.space.refresh_presence().await
     }
 

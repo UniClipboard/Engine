@@ -70,6 +70,7 @@ pub struct SpaceFacade {
     query_space_setup_state: Arc<QuerySpaceSetupStateUseCase>,
     current_member_scope: Arc<dyn crate::space::membership::CurrentSpaceMemberScopePort>,
     member_roster: MemberRosterFacade,
+    connections: Arc<crate::space::connectivity::PeerConnectionCoordinator>,
     reset_space: Arc<ResetSpaceUseCase>,
     query_committed_device_management_reset: Arc<QueryCommittedDeviceManagementResetUseCase>,
     membership_history_endpoint:
@@ -83,6 +84,7 @@ impl SpaceFacade {
     /// 构造全部 Space 用例和认证消息 endpoint，但不启动任何后台维护任务。
     pub(crate) fn new_dormant(deps: SpaceFacadeDeps) -> Self {
         let SpaceFacadeDeps {
+            connection_hints,
             application: app_deps,
             session,
             admission,
@@ -146,6 +148,11 @@ impl SpaceFacade {
             analytics,
             connection_channel,
         } = admission;
+        let connections = crate::space::connectivity::PeerConnectionCoordinator::new(
+            Arc::clone(&peer_scope),
+            Arc::clone(&presence),
+            connection_hints,
+        );
         let member_roster = MemberRosterFacade::new(MemberRosterDeps {
             member_repo: Arc::clone(&member_repo),
             local_identity: Arc::clone(&local_identity),
@@ -289,6 +296,7 @@ impl SpaceFacade {
             query_space_setup_state,
             current_member_scope: peer_scope,
             member_roster,
+            connections,
             reset_space,
             query_committed_device_management_reset,
             membership_history_endpoint,
@@ -329,9 +337,13 @@ impl SpaceFacade {
     /// 返回 `false` 表示 runtime 已启动或 facade 已关闭。
     pub async fn start_application_runtime(&self) -> bool {
         let mut application = self.application.lock().await;
-        application
+        let started = application
             .as_mut()
-            .is_some_and(SpaceApplication::start_runtime)
+            .is_some_and(SpaceApplication::start_runtime);
+        if started {
+            self.connections.start().await;
+        }
+        started
     }
 
     /// 绑定 Search 与 receive 的完整 Space session activity。
@@ -343,8 +355,11 @@ impl SpaceFacade {
         search: Arc<SearchFacade>,
         receive: Arc<dyn EnsureReceiveReadyPort>,
     ) -> bool {
-        self.application_activity
-            .bind(build_space_session_activity(search, receive))
+        self.application_activity.bind(build_space_session_activity(
+            search,
+            receive,
+            Arc::clone(&self.connections),
+        ))
     }
 
     pub async fn lock_space_session(&self) -> Result<(), LockSpaceSessionError> {
@@ -667,10 +682,18 @@ impl SpaceFacade {
         self.member_roster.list_members().await
     }
 
+    pub fn notify_connectivity_opportunity(
+        &self,
+        reason: crate::space::ConnectivityOpportunity,
+    ) -> Result<(), crate::space::PeerConnectionError> {
+        self.connections.notify_opportunity(reason)
+    }
+
     pub async fn refresh_presence(
         &self,
-    ) -> Result<crate::facade::roster::PresenceRefreshReport, crate::facade::RosterError> {
-        self.member_roster.refresh_presence().await
+    ) -> Result<crate::facade::roster::PresenceRefreshReport, crate::space::PeerConnectionError>
+    {
+        self.connections.refresh().await
     }
 
     pub async fn list_roster_entries(
@@ -726,6 +749,9 @@ impl SpaceFacade {
     /// 立刻 drop,底层 adapter 才能释放事件 channel。
     #[instrument(skip_all)]
     pub async fn on_shutdown(&self) {
+        if self.connections.shutdown().await.is_err() {
+            tracing::warn!(error.type = "join_failed", "peer connection coordinator shutdown failed");
+        }
         if let Some(application) = self.application.lock().await.take() {
             application.shutdown().await;
         }

@@ -5,6 +5,11 @@ use super::MembershipLedgerError;
 #[async_trait::async_trait]
 pub trait CurrentSpaceMemberScopePort: Send + Sync {
     async fn snapshot(&self) -> Result<CurrentSpaceMemberScope, CurrentSpaceMemberScopeError>;
+
+    /// 通知仅使旧读取失效，接收者必须重新读取权威范围。
+    fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        tokio::sync::watch::channel(()).1
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

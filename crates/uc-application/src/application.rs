@@ -49,6 +49,8 @@ use crate::transfer::file::assembly::{FileTransferAssemblyDeps, ReceiveCancellat
 
 /// Engine 在 Iroh builder 上选择完成的 Space adapter。
 pub struct ApplicationSpaceAdapters {
+    pub connection_hints:
+        futures::stream::BoxStream<'static, Result<crate::space::ConnectionHint, anyhow::Error>>,
     pub current_engine_version: String,
     pub admission_credentials: Arc<dyn crate::deps::PrepareSpaceAdmissionCredentialsPort>,
     pub local_identity: Arc<dyn LocalIdentityPort>,
@@ -341,6 +343,7 @@ impl ApplicationAssembly {
             file_transfer: Some(self.file_transfer.facade()),
         }));
         let ApplicationSpaceAdapters {
+            connection_hints,
             current_engine_version,
             admission_credentials,
             local_identity,
@@ -358,6 +361,7 @@ impl ApplicationAssembly {
         } = space;
         let re_pairing_state_store = Arc::clone(&runtime.admission.re_pairing_state_store);
         let space = Arc::new(SpaceFacade::new_dormant(SpaceFacadeDeps {
+            connection_hints,
             application: self.deps.clone(),
             session: SpaceSessionDeps {
                 space_access: self.deps.security.space_access_ports.clone(),

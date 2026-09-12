@@ -93,6 +93,30 @@ impl OhEngine {
     }
 
     #[napi]
+    pub async fn notify_connectivity_opportunity(&self, reason: String) -> napi::Result<()> {
+        let reason = match reason.as_str() {
+            "foreground" => uc_engine::ConnectivityOpportunity::Foreground,
+            "system_wake" => uc_engine::ConnectivityOpportunity::SystemWake,
+            "network_changed" => uc_engine::ConnectivityOpportunity::NetworkChanged,
+            _ => {
+                return Err(napi::Error::new(
+                    Status::InvalidArg,
+                    "invalid connectivity opportunity",
+                ))
+            }
+        };
+        match self
+            .engine
+            .execute(Operation::NotifyConnectivityOpportunity { reason })
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::ConnectivityOpportunityAccepted => Ok(()),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
     pub async fn recover_network(&self) -> napi::Result<()> {
         match self
             .engine

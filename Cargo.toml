@@ -28,6 +28,9 @@ print_stdout = "warn"
 print_stderr = "warn"
 dbg_macro = "warn"
 
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
+
 # Keep the audited UniClipboard fix for HashContext::persist().
 [patch.crates-io]
 iroh-blobs = { git = "https://github.com/UniClipboard/iroh-blobs.git", rev = "b33af91e8a4bd189cc0f954fc6584feb5ffd1823" }

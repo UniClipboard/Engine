@@ -10,6 +10,6 @@ pub enum LockSpaceSessionError {
     Activity(#[from] SpaceActivityError),
     #[error("space lock failed")]
     LockFailed,
-    #[error("space lock failed and activity recovery was incomplete: {0}")]
-    RecoveryFailed(String),
+    #[error("space lock failed and activity recovery was incomplete")]
+    RecoveryFailed(#[source] anyhow::Error),
 }

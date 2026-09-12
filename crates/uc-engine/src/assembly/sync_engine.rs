@@ -778,6 +778,12 @@ pub async fn build_sync_engine_assembly(
         blob_reference: Arc::clone(&space_setup.blob_reference_repo),
         outbound_progress_reporter: Arc::clone(&outbound_progress_reporter),
         space: ApplicationSpaceAdapters {
+            connection_hints: builder
+                .connection_hints(
+                    Arc::clone(&space_setup.member_repo),
+                    Arc::clone(&space_setup.fingerprint),
+                )
+                .await,
             current_engine_version: env!("CARGO_PKG_VERSION").to_owned(),
             admission_credentials: space_setup.admission_credentials.clone()
                 as Arc<dyn uc_application::deps::PrepareSpaceAdmissionCredentialsPort>,
