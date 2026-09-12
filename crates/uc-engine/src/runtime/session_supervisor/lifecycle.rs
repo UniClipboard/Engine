@@ -2,7 +2,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Weak;
 
 use async_trait::async_trait;
-use uc_application::facade::{LifecycleError, RuntimeLifecyclePort, TransitionContext};
+use uc_application::facade::{
+    LifecycleError, NetworkRecoveryRequestError, RuntimeLifecyclePort, TransitionContext,
+};
 use uc_core::{FileTransferCancellationReason, TaskShutdownReport};
 
 use super::SessionSupervisor;
@@ -14,6 +16,14 @@ pub(super) struct SessionWork(pub(super) Weak<SessionSupervisor>);
 pub(in super::super) fn lifecycle_error(error: LifecycleError) -> EngineError {
     if error.is_stopped() {
         return EngineError::new(1001, EngineErrorCategory::InvalidState, false);
+    }
+    if error.primary.chain().any(|source| {
+        matches!(
+            source.downcast_ref::<NetworkRecoveryRequestError>(),
+            Some(NetworkRecoveryRequestError::Task(_))
+        )
+    }) {
+        return EngineError::new(1108, EngineErrorCategory::Internal, false);
     }
     if error
         .primary
@@ -57,7 +67,11 @@ impl RuntimeLifecyclePort for SessionWork {
 
 #[cfg(test)]
 mod tests {
-    use super::{lifecycle_error, EngineError, EngineErrorCategory, LifecycleError};
+    use super::{
+        lifecycle_error, EngineError, EngineErrorCategory, LifecycleError,
+        NetworkRecoveryRequestError,
+    };
+    use std::sync::Arc;
     use std::time::Duration;
     use uc_core::TaskRegistry;
 
@@ -92,5 +106,21 @@ mod tests {
             additional: Vec::new(),
         };
         assert_eq!(lifecycle_error(error), original);
+    }
+
+    #[tokio::test]
+    async fn network_recovery_panic_keeps_its_non_retryable_classification_during_shutdown() {
+        let source = tokio::spawn(async { panic!("private recovery failure") })
+            .await
+            .unwrap_err();
+        let failure = NetworkRecoveryRequestError::Task(Arc::new(source));
+        let error = LifecycleError {
+            primary: anyhow::Error::new(failure).context("stop network recovery"),
+            additional: Vec::new(),
+        };
+        assert_eq!(
+            lifecycle_error(error),
+            EngineError::new(1108, EngineErrorCategory::Internal, false)
+        );
     }
 }

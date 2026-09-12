@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -728,39 +728,6 @@ fn recover_space_session_error_kind(
         RecoverSpaceSessionError::Activity(_) => "activity",
         RecoverSpaceSessionError::Internal(_) => "internal",
     }
-}
-
-async fn spawn_network_recovery_observation_task(
-    mut observations: tokio::sync::broadcast::Receiver<
-        uc_infra::network::iroh::NetworkRecoveryObservation,
-    >,
-    recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
-    generation: Arc<AtomicU64>,
-    tasks: &Arc<TaskRegistry>,
-) {
-    let _ = tasks
-        .spawn(move |cancel| async move {
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => return,
-                    observation = observations.recv() => match observation {
-                        Ok(uc_infra::network::iroh::NetworkRecoveryObservation::LocalRelayRecovered) => {
-                            let current_generation = generation.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-                            recovery.observe_local_network_recovered(current_generation).await;
-                        }
-                        Ok(uc_infra::network::iroh::NetworkRecoveryObservation::PreviouslyOnlinePeerPathExhausted) => {
-                            recovery.observe_previously_online_peer_path_exhausted(generation.load(Ordering::Relaxed)).await;
-                        }
-                        Ok(uc_infra::network::iroh::NetworkRecoveryObservation::FreshPeerDialSucceeded) => {
-                            recovery.observe_fresh_peer_dial_succeeded(generation.load(Ordering::Relaxed)).await;
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                    }
-                }
-            }
-        })
-        .await;
 }
 
 #[async_trait::async_trait]

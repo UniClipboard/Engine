@@ -78,11 +78,11 @@ use crate::operations::space::membership_diagnostics::execute_query_membership_d
 use crate::operations::space::session_recovery::execute_recover_session;
 use crate::operations::space::setup_state::execute_query_setup_state;
 use crate::operations::space::unlock::execute_unlock_space;
-use crate::{EngineError, Operation, OperationResult};
+use crate::{EngineError, EngineErrorCategory, Operation, OperationResult};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
-use uc_application::facade::LifecycleError;
+use uc_application::facade::{LifecycleError, NetworkRecoveryRequestError};
 
 #[async_trait]
 impl EngineRuntime for ProductionRuntime {
@@ -126,11 +126,14 @@ impl EngineRuntime for ProductionRuntime {
                     .await
                     .map(|()| OperationResult::NetworkRecovered)
                     .map_err(|error| match error {
-                        uc_application::facade::NetworkRecoveryRequestError::Stopped => {
+                        NetworkRecoveryRequestError::Stopped => {
                             super::operation_unavailable_error()
                         }
-                        uc_application::facade::NetworkRecoveryRequestError::Rebuild(_) => {
+                        NetworkRecoveryRequestError::Rebuild(_) => {
                             EngineError::new(1105, crate::EngineErrorCategory::Unavailable, true)
+                        }
+                        NetworkRecoveryRequestError::Task(_) => {
+                            EngineError::new(1108, EngineErrorCategory::Internal, false)
                         }
                     });
             }
@@ -725,12 +728,18 @@ impl EngineRuntime for ProductionRuntime {
     }
 
     async fn shutdown(&self, deadline: Option<Instant>) -> Result<(), EngineError> {
-        self.network_recovery.shutdown().await;
-        self.session_supervisor
-            .stop(deadline)
-            .await
-            .map_err(lifecycle_error)?;
-        self.session_supervisor.close_file_transfers().await?;
+        let mut errors = Vec::new();
+        if let Err(error) = self.network_recovery.shutdown().await {
+            errors.push(error.into());
+        }
+        if let Err(error) = self.session_supervisor.stop(deadline).await {
+            errors.push(error.into());
+            return LifecycleError::from_errors(errors).map_err(lifecycle_error);
+        }
+        if let Err(error) = self.session_supervisor.close_file_transfers().await {
+            errors.push(error.into());
+            return LifecycleError::from_errors(errors).map_err(lifecycle_error);
+        }
         let tasks = shutdown_tasks(&self.task_registry, deadline)
             .await
             .into_result();
@@ -741,7 +750,9 @@ impl EngineRuntime for ProductionRuntime {
                 warn!(error = %error, "failed to remove host clipboard imports");
             }
         }
-        LifecycleError::from_errors(tasks.err().map(anyhow::Error::new).into_iter().collect())
-            .map_err(lifecycle_error)
+        if let Err(error) = tasks {
+            errors.push(error.into());
+        }
+        LifecycleError::from_errors(errors).map_err(lifecycle_error)
     }
 }

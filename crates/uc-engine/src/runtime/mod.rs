@@ -243,11 +243,17 @@ impl ProductionRuntime {
         }
         .await;
         if let Err(primary) = started {
-            network_recovery.shutdown().await;
+            let mut additional = Vec::new();
+            if let Err(error) = network_recovery.shutdown().await {
+                additional.push(error.into());
+            }
             if let Err(rollback) = profile_runtime.stop_profile_runtime().await {
+                additional.push(rollback.into());
+            }
+            if !additional.is_empty() {
                 return Err(lifecycle_error(LifecycleError {
                     primary: primary.into(),
-                    additional: vec![rollback.into()],
+                    additional,
                 }));
             }
             return Err(primary);
