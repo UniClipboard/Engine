@@ -85,10 +85,12 @@ mkdir -p \
   "$DEBUG_DIR"
 
 echo "==> Generate Swift bindings from the host library"
-cargo build -p uc-engine-uniffi --release $CARGO_LOCKED_FLAG
-cargo run -p uc-engine-uniffi --release --features bindgen-cli \
+# 宿主库只用于读取接口元数据，不进入发布包；与生成器共用 dev 构建以节省时间。
+cargo build -p uc-engine-uniffi --profile dev --features bindgen-cli \
+  --lib --bin uc-engine-uniffi-bindgen $CARGO_LOCKED_FLAG
+cargo run -p uc-engine-uniffi --profile dev --features bindgen-cli \
   --bin uc-engine-uniffi-bindgen $CARGO_LOCKED_FLAG -- \
-  generate --library "$TARGET_DIR/release/libuc_engine_uniffi.dylib" \
+  generate --library "$TARGET_DIR/debug/libuc_engine_uniffi.dylib" \
   --language swift --out-dir "$BINDINGS_DIR"
 cp "$BINDINGS_DIR/uc_engine_uniffiFFI.h" "$INCLUDE_DIR/"
 cp "$BINDINGS_DIR/uc_engine_uniffiFFI.modulemap" "$INCLUDE_DIR/module.modulemap"

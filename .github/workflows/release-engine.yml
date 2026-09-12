@@ -149,18 +149,20 @@ jobs:
           ref: ${{ needs.prepare.outputs.commit }}
           fetch-depth: 0
 
-      - name: Install Android targets and build helper
+      - name: Install Android targets
         shell: bash
         run: |
           toolchain=$(rustup show active-toolchain | awk '{print $1}')
           rustup target add --toolchain "$toolchain" \
             aarch64-linux-android x86_64-linux-android
-          cargo install cargo-ndk --locked
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           workspaces: . -> target
           shared-key: engine-release-android
+
+      - name: Install Android build helper
+        run: cargo install cargo-ndk --version 4.1.2 --locked
 
       - name: Build Android assets
         env:

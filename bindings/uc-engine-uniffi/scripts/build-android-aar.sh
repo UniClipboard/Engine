@@ -22,8 +22,8 @@ if [[ -n "${UC_ENGINE_UNIFFI_BUILD_LOCKED:-}" ]]; then
 fi
 
 case "$(uname -s)" in
-  Darwin) HOST_LIBRARY="$TARGET_DIR/release/libuc_engine_uniffi.dylib" ;;
-  Linux) HOST_LIBRARY="$TARGET_DIR/release/libuc_engine_uniffi.so" ;;
+  Darwin) HOST_LIBRARY="$TARGET_DIR/debug/libuc_engine_uniffi.dylib" ;;
+  Linux) HOST_LIBRARY="$TARGET_DIR/debug/libuc_engine_uniffi.so" ;;
   *) echo "Android packaging requires a macOS or Linux host" >&2; exit 1 ;;
 esac
 
@@ -33,8 +33,10 @@ rm -rf "$STAGE_DIR" "$DIST_DIR" "$DEBUG_DIR"
 mkdir -p "$BINDINGS_DIR" "$JNI_DIR" "$DIST_DIR" "$DEBUG_DIR"
 
 echo "==> Generate Kotlin bindings from the host library"
-cargo build -p uc-engine-uniffi --release $CARGO_LOCKED_FLAG
-cargo run -p uc-engine-uniffi --release --features bindgen-cli \
+# 宿主库只用于读取接口元数据，不进入发布包；与生成器共用 dev 构建以节省时间。
+cargo build -p uc-engine-uniffi --profile dev --features bindgen-cli \
+  --lib --bin uc-engine-uniffi-bindgen $CARGO_LOCKED_FLAG
+cargo run -p uc-engine-uniffi --profile dev --features bindgen-cli \
   --bin uc-engine-uniffi-bindgen $CARGO_LOCKED_FLAG -- \
   generate --library "$HOST_LIBRARY" --language kotlin \
   --out-dir "$BINDINGS_DIR" --no-format
