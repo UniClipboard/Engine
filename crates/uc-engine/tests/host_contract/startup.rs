@@ -13,6 +13,9 @@ use uc_engine::{
 
 use super::{EmptyClipboard, EmptyFiles, MemorySecureStorage};
 
+#[path = "startup/crash.rs"]
+mod crash;
+
 #[cfg(feature = "dev-tools")]
 #[path = "startup/failure.rs"]
 mod failure;
