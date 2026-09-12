@@ -10,6 +10,7 @@ pub(crate) mod projection;
 pub(crate) mod query;
 pub(crate) mod runtime;
 pub(crate) mod tagging;
+mod task_scope;
 
 use uc_core::ids::DeviceId;
 use uc_core::ports::SearchIndexPort;
