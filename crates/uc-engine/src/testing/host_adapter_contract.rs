@@ -23,6 +23,9 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 static ENGINE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[cfg(feature = "dev-tools")]
+mod offline_lifecycle;
+
 #[tokio::test]
 #[ignore = "需要显式提供本地资料，只操作临时副本"]
 async fn invitation_from_isolated_profile_copy() {
