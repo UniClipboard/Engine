@@ -38,7 +38,8 @@ pub(in super::super) fn lifecycle_error(error: LifecycleError) -> EngineError {
         return EngineError::new(1106, EngineErrorCategory::DeadlineExceeded, true);
     }
     source
-        .downcast_ref::<EngineError>()
+        .chain()
+        .find_map(|source| source.downcast_ref::<EngineError>())
         .cloned()
         .unwrap_or_else(|| EngineError::new(1108, EngineErrorCategory::Internal, true))
 }
@@ -79,7 +80,8 @@ mod tests {
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
     use uc_application::facade::{
-        LifecycleTarget, RuntimeLifecycleCoordinator, RuntimeLifecycleParticipants,
+        LifecycleTarget, RebuildNetworkSessionError, RuntimeLifecycleCoordinator,
+        RuntimeLifecycleParticipants,
     };
     use uc_core::TaskRegistry;
 
@@ -111,6 +113,20 @@ mod tests {
         let original = EngineError::new(1106, EngineErrorCategory::DeadlineExceeded, true);
         let error = LifecycleError {
             primary: anyhow::Error::new(original.clone()).context("stop session work"),
+            additional: Vec::new(),
+        };
+        assert_eq!(lifecycle_error(error), original);
+    }
+
+    #[test]
+    fn rebuild_failure_keeps_its_original_classification_through_shutdown() {
+        let original = EngineError::new(1106, EngineErrorCategory::DeadlineExceeded, false);
+        let failure = NetworkRecoveryRequestError::Rebuild(RebuildNetworkSessionError::new(
+            original.clone(),
+            false,
+        ));
+        let error = LifecycleError {
+            primary: anyhow::Error::new(failure).context("stop network recovery"),
             additional: Vec::new(),
         };
         assert_eq!(lifecycle_error(error), original);

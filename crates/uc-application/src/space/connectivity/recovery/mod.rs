@@ -11,7 +11,7 @@ use tokio::time::Instant;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 use cycle::start_cycle;
-pub use error::NetworkRecoveryRequestError;
+pub use error::{NetworkRecoveryRequestError, RebuildNetworkSessionError};
 
 const RETRY_DELAYS: [Duration; 5] = [
     Duration::from_secs(1),
@@ -45,14 +45,6 @@ pub enum NetworkRecoveryEvent {
     Failed { retryable: bool },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum RebuildNetworkSessionError {
-    #[error("network session rebuild can be retried")]
-    Retryable,
-    #[error("network session rebuild cannot be retried")]
-    Permanent,
-}
-
 /// The Engine owns the complete replacement of a running network session.
 /// The application layer only decides when that action is needed and how it
 /// is retried.
@@ -77,6 +69,7 @@ struct NetworkRecoveryInner {
 
 struct RecoveryState {
     phase: NetworkRecoveryPhase,
+    retryable: bool,
     next_retry_at: Option<Instant>,
     in_flight: Option<RecoveryCompletion>,
     failure: Option<NetworkRecoveryRequestError>,
@@ -97,6 +90,7 @@ impl NetworkRecoveryFacade {
                 events,
                 state: Mutex::new(RecoveryState {
                     phase: NetworkRecoveryPhase::Idle,
+                    retryable: false,
                     next_retry_at: None,
                     in_flight: None,
                     failure: None,
@@ -111,10 +105,8 @@ impl NetworkRecoveryFacade {
             phase: state.phase,
             retryable: !self.inner.cancel.is_cancelled()
                 && state.failure.is_none()
-                && matches!(
-                    state.phase,
-                    NetworkRecoveryPhase::RetryScheduled | NetworkRecoveryPhase::Failed
-                ),
+                && (state.phase == NetworkRecoveryPhase::RetryScheduled
+                    || (state.phase == NetworkRecoveryPhase::Failed && state.retryable)),
             next_retry_in: state
                 .next_retry_at
                 .and_then(|at| at.checked_duration_since(Instant::now())),

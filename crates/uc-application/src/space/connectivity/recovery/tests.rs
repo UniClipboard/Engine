@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,6 +13,11 @@ use super::{
 };
 
 mod shutdown;
+mod sources;
+
+fn retryable_failure() -> RebuildNetworkSessionError {
+    RebuildNetworkSessionError::new(io::Error::other("test rebuild failure"), true)
+}
 
 struct RecordingRebuilder {
     calls: AtomicUsize,
@@ -90,8 +96,8 @@ async fn simultaneous_manual_requests_share_one_rebuild() {
 #[tokio::test(start_paused = true)]
 async fn retryable_failures_use_the_bounded_retry_ladder() {
     let rebuilder = Arc::new(RecordingRebuilder::new([
-        Err(RebuildNetworkSessionError::Retryable),
-        Err(RebuildNetworkSessionError::Retryable),
+        Err(retryable_failure()),
+        Err(retryable_failure()),
         Ok(()),
     ]));
     let recovery = NetworkRecoveryFacade::new(rebuilder.clone());

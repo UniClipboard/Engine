@@ -6,7 +6,7 @@ use tracing::Instrument;
 
 use super::{
     NetworkRecoveryEvent, NetworkRecoveryInner, NetworkRecoveryPhase, NetworkRecoveryRequestError,
-    RebuildNetworkSessionError, RecoveryCompletion, RETRY_DELAYS,
+    RecoveryCompletion, RETRY_DELAYS,
 };
 
 pub(super) fn start_cycle(inner: Arc<NetworkRecoveryInner>) -> RecoveryCompletion {
@@ -43,8 +43,8 @@ pub(super) fn start_cycle(inner: Arc<NetworkRecoveryInner>) -> RecoveryCompletio
 async fn run_recovery_cycle(
     inner: Arc<NetworkRecoveryInner>,
 ) -> Result<(), NetworkRecoveryRequestError> {
-    let mut last_error = RebuildNetworkSessionError::Retryable;
-    for attempt in 0..=RETRY_DELAYS.len() {
+    let mut attempt = 0;
+    loop {
         if attempt > 0 {
             let delay = RETRY_DELAYS[attempt - 1];
             {
@@ -90,20 +90,16 @@ async fn run_recovery_cycle(
             Ok(()) => {
                 return finish_cycle(&inner, Ok(()), false).await;
             }
-            Err(NetworkRecoveryRequestError::Rebuild(RebuildNetworkSessionError::Retryable)) => {
-                last_error = RebuildNetworkSessionError::Retryable;
-            }
             Err(error) => {
-                return finish_cycle(&inner, Err(error), false).await;
+                let retryable = matches!(&error, NetworkRecoveryRequestError::Rebuild(source) if source.is_retryable());
+                if retryable && attempt < RETRY_DELAYS.len() {
+                    attempt += 1;
+                } else {
+                    return finish_cycle(&inner, Err(error), retryable).await;
+                }
             }
         }
     }
-    finish_cycle(
-        &inner,
-        Err(NetworkRecoveryRequestError::Rebuild(last_error)),
-        true,
-    )
-    .await
 }
 
 async fn finish_cycle(
@@ -112,6 +108,7 @@ async fn finish_cycle(
     retryable: bool,
 ) -> Result<(), NetworkRecoveryRequestError> {
     let mut state = inner.state.lock().await;
+    state.retryable = retryable;
     state.in_flight = None;
     state.next_retry_at = None;
     if inner.cancel.is_cancelled() {

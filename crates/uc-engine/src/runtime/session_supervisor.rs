@@ -40,6 +40,7 @@ use crate::{EngineError, EngineErrorCategory, OperationResult};
 const SESSION_OPERATION_GRACE: Duration = Duration::from_secs(2);
 
 mod lifecycle;
+mod recovery;
 mod shutdown;
 pub(super) use lifecycle::lifecycle_error;
 use lifecycle::SessionWork;
@@ -727,21 +728,6 @@ fn recover_space_session_error_kind(
         RecoverSpaceSessionError::CorruptedKeyMaterial => "corrupted_key_material",
         RecoverSpaceSessionError::Activity(_) => "activity",
         RecoverSpaceSessionError::Internal(_) => "internal",
-    }
-}
-
-#[async_trait::async_trait]
-impl uc_application::facade::RebuildNetworkSessionPort for SessionSupervisor {
-    async fn rebuild_network_session(
-        &self,
-    ) -> Result<(), uc_application::facade::RebuildNetworkSessionError> {
-        self.rebuild_session().await.map_err(|error| {
-            if error.is_retryable() {
-                uc_application::facade::RebuildNetworkSessionError::Retryable
-            } else {
-                uc_application::facade::RebuildNetworkSessionError::Permanent
-            }
-        })
     }
 }
 

@@ -129,9 +129,11 @@ impl EngineRuntime for ProductionRuntime {
                         NetworkRecoveryRequestError::Stopped => {
                             super::operation_unavailable_error()
                         }
-                        NetworkRecoveryRequestError::Rebuild(_) => {
-                            EngineError::new(1105, crate::EngineErrorCategory::Unavailable, true)
-                        }
+                        NetworkRecoveryRequestError::Rebuild(source) => EngineError::new(
+                            1105,
+                            EngineErrorCategory::Unavailable,
+                            source.is_retryable(),
+                        ),
                         NetworkRecoveryRequestError::Task(_) => {
                             EngineError::new(1108, EngineErrorCategory::Internal, false)
                         }

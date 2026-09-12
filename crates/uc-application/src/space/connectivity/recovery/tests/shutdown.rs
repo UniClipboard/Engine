@@ -1,3 +1,5 @@
+use std::error::Error;
+use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,8 +9,9 @@ use tokio::sync::{oneshot, Notify};
 use tokio::time::timeout;
 
 use super::{
-    NetworkRecoveryEvent, NetworkRecoveryFacade, NetworkRecoveryPhase, NetworkRecoveryRequestError,
-    RebuildNetworkSessionError, RebuildNetworkSessionPort, RecordingRebuilder,
+    retryable_failure, NetworkRecoveryEvent, NetworkRecoveryFacade, NetworkRecoveryPhase,
+    NetworkRecoveryRequestError, RebuildNetworkSessionError, RebuildNetworkSessionPort,
+    RecordingRebuilder,
 };
 
 struct DiskRebuilder {
@@ -27,7 +30,7 @@ impl RebuildNetworkSessionPort for DiskRebuilder {
         disk.await.unwrap();
         self.completed.store(true, Ordering::SeqCst);
         if self.fail.load(Ordering::SeqCst) {
-            Err(RebuildNetworkSessionError::Retryable)
+            Err(retryable_failure())
         } else {
             Ok(())
         }
@@ -155,8 +158,6 @@ impl RebuildNetworkSessionPort for PanickingRebuilder {
 
 #[tokio::test]
 async fn worker_panic_is_retained_for_requests_and_repeated_shutdown() {
-    use std::error::Error;
-
     let recovery = NetworkRecoveryFacade::new(Arc::new(PanickingRebuilder));
     let original = recovery.request_recovery().await.unwrap_err();
     let NetworkRecoveryRequestError::Task(source) = &original else {
@@ -174,10 +175,7 @@ async fn worker_panic_is_retained_for_requests_and_repeated_shutdown() {
 
 #[tokio::test(start_paused = true)]
 async fn releasing_the_last_facade_stops_scheduled_retries() {
-    let port = Arc::new(RecordingRebuilder::new([
-        Err(RebuildNetworkSessionError::Retryable),
-        Ok(()),
-    ]));
+    let port = Arc::new(RecordingRebuilder::new([Err(retryable_failure()), Ok(())]));
     let recovery = NetworkRecoveryFacade::new(port.clone());
     let mut events = recovery.subscribe();
     let (result, _) = recovery.start_recovery(None).await.unwrap();
@@ -202,6 +200,11 @@ async fn a_rebuild_failure_during_shutdown_is_retained_for_repeated_confirmation
     release.send(()).unwrap();
     assert!(premature.is_err());
     let error = closing.await.unwrap_err();
+    assert!(error
+        .source()
+        .unwrap()
+        .downcast_ref::<io::Error>()
+        .is_some());
     assert_eq!(request.await.unwrap_err(), error);
     assert_eq!(recovery.shutdown().await.unwrap_err(), error);
 }
