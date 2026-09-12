@@ -617,7 +617,7 @@ impl ProductionSessionFactory {
             Err(error) => {
                 let primary = startup_error("application runtime", error);
                 let additional = sync_engine
-                    .shutdown(FileTransferCancellationReason::Unknown)
+                    .shutdown(FileTransferCancellationReason::Unknown, None)
                     .await
                     .err()
                     .map(anyhow::Error::new)

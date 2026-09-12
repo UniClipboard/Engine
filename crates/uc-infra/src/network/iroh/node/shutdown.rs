@@ -1,7 +1,7 @@
 use std::time::Duration;
 use std::{error::Error, fmt};
 
-use tokio::time::timeout;
+use tokio::time::{timeout_at, Instant};
 use tracing::{debug, instrument, warn};
 
 use super::IrohNode;
@@ -45,8 +45,16 @@ impl Error for IrohNodeShutdownError {
 
 impl IrohNode {
     /// 等待节点与协议处理器实际关闭；watchdog 只诊断慢收尾，不丢弃持有资源的 future。
-    #[instrument(skip_all)]
     pub async fn shutdown(self) -> Result<(), IrohNodeShutdownError> {
+        self.shutdown_at(None).await
+    }
+
+    /// 有宿主期限时，内部宽限和慢收尾诊断共用该期限；超时后仍等待实际析构。
+    #[instrument(skip_all)]
+    pub async fn shutdown_at(self, deadline: Option<Instant>) -> Result<(), IrohNodeShutdownError> {
+        let started = Instant::now();
+        let watchdog = started + ROUTER_WATCHDOG;
+        let watchdog = deadline.map_or(watchdog, |deadline| deadline.min(watchdog));
         let mut failures = Vec::new();
         if let Some(handle) = self.net_recovery {
             handle.abort();
@@ -68,11 +76,11 @@ impl IrohNode {
             async {
                 let closing = self.router.shutdown();
                 tokio::pin!(closing);
-                match timeout(ROUTER_WATCHDOG, &mut closing).await {
+                match timeout_at(watchdog, &mut closing).await {
                     Ok(result) => result,
                     Err(_) => {
                         warn!(
-                            budget_ms = ROUTER_WATCHDOG.as_millis() as u64,
+                            budget_ms = watchdog.saturating_duration_since(started).as_millis() as u64,
                             "iroh router cleanup is still pending; retaining shutdown ownership"
                         );
                         closing.await
@@ -81,7 +89,7 @@ impl IrohNode {
             },
             async {
                 self.endpoint.close().await;
-                self.connection_observations.shutdown().await
+                self.connection_observations.shutdown(deadline).await
             }
         );
         failures.extend(
@@ -110,9 +118,10 @@ mod tests {
     use iroh::protocol::{AcceptError, ProtocolHandler};
     use tokio::sync::Notify;
     use tokio::task::JoinError;
+    use tokio::time::timeout;
 
     use super::super::{tests::identity_store, IrohNodeBuilder, IrohNodeConfig};
-    use super::{timeout, Duration};
+    use super::{Duration, Instant};
 
     #[derive(Debug)]
     struct HeldCleanup {
@@ -232,6 +241,15 @@ mod tests {
 
     #[tokio::test]
     async fn slow_protocol_cleanup_keeps_node_owned_after_watchdog() {
+        assert_cleanup_remains_owned(None, Duration::from_secs(7)).await;
+    }
+
+    #[tokio::test]
+    async fn expired_host_deadline_does_not_abandon_protocol_cleanup() {
+        assert_cleanup_remains_owned(Some(Duration::ZERO), Duration::from_millis(10)).await;
+    }
+
+    async fn assert_cleanup_remains_owned(budget: Option<Duration>, wait: Duration) {
         let store = identity_store();
         let mut builder = IrohNodeBuilder::bind(
             &store,
@@ -253,11 +271,12 @@ mod tests {
                 resource: Arc::clone(&resource),
             },
         ));
-        let mut closing = tokio::spawn(builder.spawn().shutdown());
+        let deadline = budget.map(|budget| Instant::now() + budget);
+        let mut closing = tokio::spawn(builder.spawn().shutdown_at(deadline));
         timeout(Duration::from_secs(10), started.notified())
             .await
             .unwrap();
-        let early = timeout(Duration::from_secs(7), &mut closing).await;
+        let early = timeout(wait, &mut closing).await;
         let retained = Arc::strong_count(&resource) > 1;
         release.notify_one();
         if early.is_err() {

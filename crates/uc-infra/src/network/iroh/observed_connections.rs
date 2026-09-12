@@ -6,6 +6,7 @@ use sha2::Digest;
 use std::sync::{Arc, Mutex, TryLockError};
 use std::time::Duration;
 use tokio::task::{JoinError, JoinSet};
+use tokio::time::{timeout_at, Instant};
 use uc_observability_contract::diagnostics::connectivity::{
     ConnectionCloseReason, ConnectionDirection, NetworkPathKind, NetworkRecorder, ObserverFailure,
     PathObservationKind,
@@ -55,7 +56,8 @@ impl ObservedConnections {
         }
     }
 
-    pub(super) async fn shutdown(&self) -> Vec<JoinError> {
+    pub(super) async fn shutdown(&self, deadline: Option<Instant>) -> Vec<JoinError> {
+        let deadline = deadline.unwrap_or_else(|| Instant::now() + Duration::from_millis(500));
         let (mut tasks, mut failures) = {
             let mut state = self
                 .state
@@ -67,7 +69,7 @@ impl ObservedConnections {
                 std::mem::take(&mut state.failures),
             )
         };
-        if tokio::time::timeout(Duration::from_millis(500), async {
+        if timeout_at(deadline, async {
             while let Some(result) = tasks.join_next().await {
                 if let Err(error) = result {
                     failures.push(error);
@@ -198,7 +200,25 @@ fn close_reason(reason: &iroh::endpoint::ConnectionError) -> ConnectionCloseReas
 
 #[cfg(test)]
 mod tests {
-    use super::{Arc, NetworkRecorder, ObservedConnections};
+    use super::{Arc, Duration, Instant, NetworkRecorder, ObservedConnections};
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_deadline_does_not_start_another_observer_grace_period() {
+        let observers = ObservedConnections::new(NetworkRecorder::default());
+        observers
+            .state
+            .lock()
+            .unwrap()
+            .tasks
+            .spawn(std::future::pending());
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(10);
+        tokio::time::advance(Duration::from_millis(20)).await;
+        let failures = observers.shutdown(Some(deadline)).await;
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].is_cancelled());
+        assert!(started.elapsed() < Duration::from_millis(100));
+    }
 
     #[tokio::test]
     async fn reaped_observer_failure_remains_visible_at_shutdown() {
@@ -216,7 +236,7 @@ mod tests {
             assert!(state.closed);
             assert_eq!(state.tasks.len(), 0);
         }
-        let failures = observers.shutdown().await;
+        let failures = observers.shutdown(None).await;
         assert_eq!(failures.len(), 1);
         assert!(failures[0].is_panic());
     }
@@ -230,7 +250,7 @@ mod tests {
             let _held = held;
             std::future::pending::<()>().await;
         });
-        let failures = observers.shutdown().await;
+        let failures = observers.shutdown(None).await;
         assert_eq!(failures.len(), 1);
         assert!(failures[0].is_cancelled());
         assert_eq!(Arc::strong_count(&resource), 1);

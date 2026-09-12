@@ -880,7 +880,7 @@ mod tests {
             .await;
         lifecycle
             .sync_engine_assembly
-            .shutdown(uc_core::FileTransferCancellationReason::Unknown)
+            .shutdown(uc_core::FileTransferCancellationReason::Unknown, None)
             .await
             .unwrap();
         task_registry

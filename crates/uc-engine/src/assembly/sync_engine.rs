@@ -8,6 +8,7 @@
 mod outbound_progress;
 
 use std::sync::Arc;
+use tokio::time::Instant;
 use uc_application::deps::ClipboardReceiverPort;
 
 use tracing::{info, instrument};
@@ -154,6 +155,7 @@ impl SyncEngineAssembly {
     pub async fn shutdown(
         self,
         transfer_reason: FileTransferCancellationReason,
+        deadline: Option<Instant>,
     ) -> Result<(), LifecycleError> {
         let mut errors = Vec::new();
         if let Err(error) = self
@@ -163,7 +165,7 @@ impl SyncEngineAssembly {
         {
             errors.push(anyhow::Error::new(error).context("stop outbound progress worker"));
         }
-        if let Err(error) = self.iroh_node.shutdown().await {
+        if let Err(error) = self.iroh_node.shutdown_at(deadline).await {
             errors.push(error.into());
         }
         LifecycleError::from_errors(errors)
