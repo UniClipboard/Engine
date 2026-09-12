@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Mutex;
-use tokio::time::Instant;
+use tokio::time::{timeout_at, Instant};
 
 use super::event_stream::EventSender;
 use super::in_flight::InFlightOperations;
@@ -15,7 +15,7 @@ const SUSPEND_OPERATION_DRAIN: Duration = Duration::from_secs(2);
 
 enum Request {
     Quiesce(Instant),
-    Suspend,
+    Suspend(Option<Instant>),
     Resume,
 }
 
@@ -37,7 +37,15 @@ impl Engine {
     }
 
     pub async fn suspend(&self) -> Result<(), EngineError> {
-        self.transition(Request::Suspend).await
+        self.transition(Request::Suspend(None)).await
+    }
+
+    /// 期限包含排队；超时只结束本次等待，实际收尾继续，不能据此认定已安全暂停。
+    pub async fn suspend_with_deadline(&self, deadline: Duration) -> Result<(), EngineError> {
+        let deadline = Instant::now()
+            .checked_add(deadline)
+            .ok_or_else(|| EngineError::new(1003, EngineErrorCategory::InvalidInput, false))?;
+        self.transition(Request::Suspend(Some(deadline))).await
     }
 
     pub async fn resume(&self) -> Result<(), EngineError> {
@@ -45,6 +53,10 @@ impl Engine {
     }
 
     async fn transition(&self, request: Request) -> Result<(), EngineError> {
+        let deadline = match request {
+            Request::Suspend(deadline) => deadline,
+            _ => None,
+        };
         let transition = Transition {
             gate: Arc::clone(&self.lifecycle_gate),
             state: Arc::clone(&self.state),
@@ -53,9 +65,14 @@ impl Engine {
             events: self.events.clone(),
         };
         // 接受请求后，排队、执行和状态发布都不依赖调用方继续等待。
-        tokio::spawn(async move { transition.execute(request).await })
-            .await
-            .map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?
+        let task = tokio::spawn(async move { transition.execute(request).await });
+        let result = match deadline {
+            Some(deadline) => timeout_at(deadline, task)
+                .await
+                .map_err(|_| operation_cancelled_error())?,
+            None => task.await,
+        };
+        result.map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?
     }
 }
 
@@ -67,12 +84,12 @@ impl Transition {
                 self.quiesce(deadline.saturating_duration_since(Instant::now()))
                     .await
             }
-            Request::Suspend => self.suspend().await,
+            Request::Suspend(deadline) => self.suspend(deadline).await,
             Request::Resume => self.resume().await,
         }
     }
 
-    async fn suspend(&self) -> Result<(), EngineError> {
+    async fn suspend(&self, deadline: Option<Instant>) -> Result<(), EngineError> {
         let lifecycle = *self.state.lock().await;
         match lifecycle {
             EngineState::Running => self.quiesce(Duration::ZERO).await?,
@@ -80,12 +97,13 @@ impl Transition {
             EngineState::Suspended => return Ok(()),
             _ => return Err(invalid_state_error()),
         }
-        let result = if self
-            .operations
-            .wait_until_empty(SUSPEND_OPERATION_DRAIN)
-            .await
-        {
-            self.runtime.suspend().await
+        let budget = deadline.map_or(SUSPEND_OPERATION_DRAIN, |deadline| {
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(SUSPEND_OPERATION_DRAIN)
+        });
+        let result = if self.operations.wait_until_empty(budget).await {
+            self.runtime.suspend(deadline).await
         } else {
             Err(operation_cancelled_error())
         };

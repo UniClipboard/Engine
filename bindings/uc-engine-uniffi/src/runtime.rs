@@ -32,6 +32,7 @@ use crate::{
 };
 
 const LIFECYCLE_TRANSITION_DEADLINE: Duration = Duration::from_secs(10);
+mod lifecycle;
 mod shutdown;
 mod worker_join;
 use worker_join::WorkerJoin;
@@ -499,6 +500,7 @@ enum WorkerCommand {
         response: mpsc::Sender<Result<(), BindingError>>,
     },
     Suspend {
+        deadline: Instant,
         response: mpsc::Sender<Result<(), BindingError>>,
     },
     Resume {
@@ -1154,12 +1156,11 @@ impl MobileEngine {
     }
 
     pub fn suspend(&self) -> Result<(), BindingError> {
-        let commands = self.lifecycle_sender()?;
-        let (response, result) = mpsc::channel();
-        commands
-            .send(WorkerCommand::Suspend { response })
-            .map_err(|_| BindingError::RuntimeUnavailable)?;
-        receive_lifecycle_result(result, LIFECYCLE_TRANSITION_DEADLINE)?
+        self.suspend_inner(LIFECYCLE_TRANSITION_DEADLINE)
+    }
+
+    pub fn suspend_with_deadline(&self, deadline_ms: u64) -> Result<(), BindingError> {
+        self.suspend_inner(Duration::from_millis(deadline_ms))
     }
 
     pub fn resume(&self) -> Result<(), BindingError> {
@@ -1317,11 +1318,11 @@ async fn run_worker_loop(
                         }
                         lifecycle = lifecycle_requests.recv() => {
                             match lifecycle {
-                                Some(WorkerCommand::Suspend { response: suspend_response }) => {
+                                Some(WorkerCommand::Suspend { deadline, response: suspend_response }) => {
                                     let result = complete_recovery_after_lifecycle(
                                         &mut recovery,
                                         async {
-                                            engine.suspend().await.map_err(BindingError::from)
+                                            engine.suspend_with_deadline(deadline.saturating_duration_since(Instant::now())).await.map_err(BindingError::from)
                                         },
                                     )
                                     .await
@@ -1737,8 +1738,11 @@ async fn run_worker_loop(
                     .and_then(map_entry_exported);
                 let _ = response.send(result);
             }
-            WorkerCommand::Suspend { response } => {
-                let result = engine.suspend().await.map_err(BindingError::from);
+            WorkerCommand::Suspend { deadline, response } => {
+                let result = engine
+                    .suspend_with_deadline(deadline.saturating_duration_since(Instant::now()))
+                    .await
+                    .map_err(BindingError::from);
                 crate::observability::schedule_flush_after_success(&result);
                 let _ = response.send(result);
             }
@@ -2776,7 +2780,7 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(200));
                     let _ = response.send(Err(BindingError::RuntimeUnavailable));
                 });
-                if let Some(WorkerCommand::Suspend { response }) =
+                if let Some(WorkerCommand::Suspend { response, .. }) =
                     lifecycle_requests.blocking_recv()
                 {
                     let _ = response.send(Ok(()));

@@ -248,7 +248,7 @@ async fn mount_engine_rendezvous(server: &MockServer) {
 }
 
 #[cfg(feature = "dev-tools")]
-fn empty_engine_host(root: &std::path::Path) -> HostCapabilities {
+pub(crate) fn empty_engine_host(root: &std::path::Path) -> HostCapabilities {
     HostCapabilities::new(
         HostDirectories::new(
             root.join("private"),

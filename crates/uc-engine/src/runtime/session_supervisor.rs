@@ -463,10 +463,10 @@ impl SessionSupervisor {
         }
     }
 
-    pub(super) async fn suspend(&self) -> Result<(), EngineError> {
+    pub(super) async fn suspend(&self, deadline: Option<Instant>) -> Result<(), EngineError> {
         observe_session_request(SessionTransition::Suspend, async {
             self.coordinator
-                .transition(LifecycleTarget::Suspended, None)
+                .transition(LifecycleTarget::Suspended, deadline)
                 .await
                 .map_err(lifecycle_error)?;
             Ok(SessionTransitionResult::Completed)

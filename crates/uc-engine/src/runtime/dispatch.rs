@@ -4,6 +4,7 @@ use crate::{
     DevOperationResult,
 };
 use std::time::Duration;
+use tokio::time::Instant;
 
 #[cfg(feature = "dev-tools")]
 use super::operation_error_with_code;
@@ -710,8 +711,8 @@ impl EngineRuntime for ProductionRuntime {
         }
     }
 
-    async fn suspend(&self) -> Result<(), EngineError> {
-        self.session_supervisor.suspend().await
+    async fn suspend(&self, deadline: Option<Instant>) -> Result<(), EngineError> {
+        self.session_supervisor.suspend(deadline).await
     }
 
     async fn resume(&self) -> Result<(), EngineError> {

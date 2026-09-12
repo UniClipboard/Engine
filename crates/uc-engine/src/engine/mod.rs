@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) mod event_stream;
@@ -51,7 +52,7 @@ pub(crate) trait EngineRuntime: Send + Sync {
         ))
     }
 
-    async fn suspend(&self) -> Result<(), EngineError>;
+    async fn suspend(&self, deadline: Option<Instant>) -> Result<(), EngineError>;
     async fn resume(&self) -> Result<(), EngineError>;
     async fn shutdown(&self, deadline: Duration) -> Result<(), EngineError>;
 }
@@ -216,6 +217,7 @@ mod tests {
 
     use async_trait::async_trait;
     use tokio::sync::Notify;
+    use tokio::time::Instant;
     use tokio_util::sync::CancellationToken;
 
     use crate::{
@@ -262,7 +264,7 @@ mod tests {
             Ok(OperationResult::Devices(Vec::new()))
         }
 
-        async fn suspend(&self) -> Result<(), EngineError> {
+        async fn suspend(&self, _deadline: Option<Instant>) -> Result<(), EngineError> {
             self.suspend_calls.fetch_add(1, Ordering::SeqCst);
             if self.fail_suspend.load(Ordering::SeqCst) {
                 return Err(EngineError::new(

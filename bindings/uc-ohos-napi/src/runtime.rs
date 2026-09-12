@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::observability::schedule_flush_after_success;
 use napi::bindgen_prelude::Buffer;
 use napi::Status;
 use napi_derive::napi;
@@ -452,7 +453,18 @@ impl OhEngine {
     #[napi]
     pub async fn suspend(&self) -> napi::Result<()> {
         let result = self.engine.suspend().await.map_err(engine_error);
-        crate::observability::schedule_flush_after_success(&result);
+        schedule_flush_after_success(&result);
+        result
+    }
+
+    #[napi]
+    pub async fn suspend_with_deadline(&self, deadline_ms: u32) -> napi::Result<()> {
+        let result = self
+            .engine
+            .suspend_with_deadline(Duration::from_millis(u64::from(deadline_ms)))
+            .await
+            .map_err(engine_error);
+        schedule_flush_after_success(&result);
         result
     }
 
@@ -484,7 +496,7 @@ impl OhEngine {
             .shutdown(Duration::from_millis(u64::from(deadline_ms)))
             .await
             .map_err(engine_error);
-        crate::observability::schedule_flush_after_success(&result);
+        schedule_flush_after_success(&result);
         result
     }
 }

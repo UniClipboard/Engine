@@ -1,6 +1,6 @@
 use std::future::{poll_fn, Future};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -10,7 +10,9 @@ use tokio::time::{advance, timeout, Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::{Engine, EngineRuntime, EventStream};
-use crate::{EngineError, EngineEvent, EngineState, Operation, OperationResult};
+use crate::{
+    EngineError, EngineErrorCategory, EngineEvent, EngineState, Operation, OperationResult,
+};
 
 #[derive(Default)]
 struct HeldRuntime {
@@ -21,6 +23,7 @@ struct HeldRuntime {
     entered: Notify,
     release: Notify,
     resource: Arc<()>,
+    suspend_deadline: StdMutex<Option<Instant>>,
 }
 
 #[async_trait]
@@ -33,7 +36,8 @@ impl EngineRuntime for HeldRuntime {
         Ok(OperationResult::Devices(Vec::new()))
     }
 
-    async fn suspend(&self) -> Result<(), EngineError> {
+    async fn suspend(&self, deadline: Option<Instant>) -> Result<(), EngineError> {
+        *self.suspend_deadline.lock().unwrap() = deadline;
         self.suspend_calls.fetch_add(1, Ordering::SeqCst);
         if self.suspend_held.load(Ordering::SeqCst) {
             self.entered.notify_one();
@@ -160,4 +164,65 @@ async fn abandoned_quiesce_keeps_the_deadline_from_before_queueing() {
     wait_state(&mut events, EngineState::Quiesced).await;
     assert!(started.elapsed() < Duration::from_millis(2100));
     assert!(operation.cancellation.is_cancelled());
+}
+
+#[tokio::test(start_paused = true)]
+async fn suspend_timeout_keeps_cleanup_owned_until_actual_completion() {
+    let runtime = Arc::new(HeldRuntime::default());
+    runtime.suspend_held.store(true, Ordering::SeqCst);
+    let (engine, mut events) = Engine::from_runtime(Arc::clone(&runtime), 16);
+    let error = engine
+        .suspend_with_deadline(Duration::from_millis(10))
+        .await
+        .unwrap_err();
+    assert_eq!(error.category(), EngineErrorCategory::DeadlineExceeded);
+    assert_eq!(engine.lifecycle_state().await, EngineState::Quiesced);
+    assert_eq!(runtime.suspend_calls.load(Ordering::SeqCst), 1);
+    runtime.release.notify_one();
+    wait_state(&mut events, EngineState::Suspended).await;
+    engine
+        .suspend_with_deadline(Duration::from_millis(10))
+        .await
+        .unwrap();
+    assert_eq!(runtime.suspend_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn queued_suspend_keeps_its_expired_deadline_after_the_caller_times_out() {
+    let runtime = Arc::new(HeldRuntime::default());
+    let (engine, mut events) = Engine::from_runtime(Arc::clone(&runtime), 16);
+    let gate = Arc::clone(&engine.lifecycle_gate).lock_owned().await;
+    let started = Instant::now();
+    let budget = Duration::from_millis(10);
+    assert_eq!(
+        engine
+            .suspend_with_deadline(budget)
+            .await
+            .unwrap_err()
+            .category(),
+        EngineErrorCategory::DeadlineExceeded
+    );
+    advance(Duration::from_millis(20)).await;
+    drop(gate);
+    wait_state(&mut events, EngineState::Suspended).await;
+    assert_eq!(
+        *runtime.suspend_deadline.lock().unwrap(),
+        Some(started + budget)
+    );
+}
+
+#[tokio::test]
+async fn unrepresentable_suspend_deadline_is_rejected_before_acceptance() {
+    let runtime = Arc::new(HeldRuntime::default());
+    let (engine, _) = Engine::from_runtime(Arc::clone(&runtime), 16);
+    assert_eq!(
+        engine
+            .suspend_with_deadline(Duration::MAX)
+            .await
+            .unwrap_err()
+            .category(),
+        EngineErrorCategory::InvalidInput
+    );
+    assert_eq!(engine.lifecycle_state().await, EngineState::Running);
+    assert_eq!(runtime.suspend_calls.load(Ordering::SeqCst), 0);
 }

@@ -77,8 +77,9 @@ struct ProductionProfileRuntimeStopper {
 #[async_trait::async_trait]
 impl StopProfileRuntimePort for ProductionProfileRuntimeStopper {
     async fn stop_profile_runtime(&self) -> Result<(), LifecycleError> {
+        // 资料重置没有宿主期限，不能把最后一组任务的宽限误用作完整重置预算。
+        self.session_supervisor.stop(None).await?;
         let deadline = tokio::time::Instant::now().checked_add(Duration::from_millis(500));
-        self.session_supervisor.stop(deadline).await?;
         let tasks = task_shutdown::shutdown_tasks(&self.tasks, deadline)
             .await
             .into_result();
@@ -365,6 +366,14 @@ fn operation_error_with_code(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "dev-tools")]
+    use crate::engine::{event_stream::event_channel, EngineRuntime, StartupProgress};
+    #[cfg(feature = "dev-tools")]
+    use crate::testing::empty_engine_host;
+    #[cfg(feature = "dev-tools")]
+    use crate::{CreateSpaceInput, Operation, SecretString};
+    #[cfg(feature = "dev-tools")]
+    use tokio_util::sync::CancellationToken;
     use uc_application::facade::{
         ClipboardOutboundOutcome, SearchFacadeError, SearchPageView, SearchResultView,
         StorageFacadeError, StorageStatsView,
@@ -379,6 +388,39 @@ mod tests {
     use crate::operations::settings::storage::{map_storage_error, storage_stats_result};
     use crate::runtime::host_operations::send_report_result;
     use crate::{EntrySummary, OperationResult, QueryHistoryInput, StorageStatsSummary};
+
+    #[cfg(feature = "dev-tools")]
+    #[tokio::test]
+    async fn production_profile_reset_finishes_shutdown_before_deleting_state() {
+        let root = tempfile::tempdir().unwrap();
+        let (events, _stream) = event_channel(32);
+        let (progress, _) = StartupProgress::channel();
+        let runtime = ProductionRuntime::start(
+            EngineConfig::new("1.2.3"),
+            empty_engine_host(root.path()),
+            events,
+            Arc::clone(&progress.store),
+        )
+        .await
+        .unwrap();
+        runtime
+            .execute(
+                Operation::CreateSpace(CreateSpaceInput {
+                    device_name: Some("reset-test".to_owned()),
+                    passphrase: SecretString::new("test-passphrase"),
+                    passphrase_confirmation: SecretString::new("test-passphrase"),
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        runtime
+            .profile_reset
+            .execute(ProfileFactoryResetRequest::Start)
+            .await
+            .unwrap();
+        runtime.shutdown(Duration::from_secs(15)).await.unwrap();
+    }
 
     #[test]
     fn network_recovery_events_expose_only_stable_status() {
