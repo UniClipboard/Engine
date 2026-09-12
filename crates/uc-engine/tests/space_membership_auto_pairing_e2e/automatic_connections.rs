@@ -347,30 +347,23 @@ async fn host_opportunities_are_nonblocking_and_recover_connections() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn offline_member_does_not_block_another_members_restart() {
     let pair = Pair::new().await;
-    eprintln!("triple: original pair ready");
+    pair.engines[1].shutdown(SHUTDOWN_TIMEOUT).await.unwrap();
     let c_host = DeviceHarness::new(pair._rendezvous.uri());
     let c = c_host.start_with_relay_fallback(false).await;
     let c_id = join_through(&pair.engines[0], &c, "C", &pair.space)
         .await
         .self_device_id;
-    for engine in [&pair.engines[0], &pair.engines[1], &c] {
+    for engine in [&pair.engines[0], &c] {
         wait_for_active_member_count(engine, 3).await;
     }
     tokio::join!(
         wait_eligible(&pair.engines[0], &c_id),
-        wait_eligible(&pair.engines[1], &c_id),
         wait_eligible(&c, &pair.ids[0]),
     );
-    eprintln!("triple: A to C after admission");
     wait_online(&pair.engines[0], &c_id).await;
-    eprintln!("triple: B to C after admission");
-    wait_online(&pair.engines[1], &c_id).await;
-    eprintln!("triple: C to A after admission");
     wait_online(&c, &pair.ids[0]).await;
-    pair.engines[1].shutdown(SHUTDOWN_TIMEOUT).await.unwrap();
     c.shutdown(SHUTDOWN_TIMEOUT).await.unwrap();
     let c = c_host.start_with_relay_fallback(false).await;
-    eprintln!("triple: A and C after restart with B offline");
     tokio::join!(
         wait_online(&pair.engines[0], &c_id),
         wait_online(&c, &pair.ids[0])

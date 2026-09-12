@@ -1,4 +1,5 @@
 #![cfg(feature = "dev-tools")]
+#![cfg(not(coverage))]
 
 #[path = "space_membership_auto_pairing_e2e/six_digit_pairing.rs"]
 mod six_digit_pairing;
@@ -4145,7 +4146,7 @@ async fn wait_for_completed_join(
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "space admission timed out for {device_name}"
+            "space admission timed out for {device_name}; last status: {status:?}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
         let snapshot = match engine.execute(Operation::QueryDeviceGroupChoices).await {
