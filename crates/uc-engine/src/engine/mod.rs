@@ -162,6 +162,8 @@ fn terminal_for_result<T>(result: &Result<T, EngineError>) -> OperationTerminal 
 
 #[cfg(test)]
 mod tests {
+    mod resume_failure;
+
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
@@ -392,7 +394,7 @@ mod tests {
         assert_eq!(runtime.execute_calls.load(Ordering::SeqCst), 1);
 
         let mut states = Vec::new();
-        while states.len() < 4 {
+        while states.len() < 5 {
             if let Some(EngineEvent::StateChanged { state }) = events.next().await {
                 states.push(state);
             }
@@ -403,6 +405,7 @@ mod tests {
                 EngineState::Quiescing,
                 EngineState::Quiesced,
                 EngineState::Suspended,
+                EngineState::Quiesced,
                 EngineState::Running,
             ]
         );

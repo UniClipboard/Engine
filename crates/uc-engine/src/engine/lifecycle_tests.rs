@@ -149,7 +149,7 @@ async fn cancelled_resume_waiter_does_not_leave_a_running_runtime_marked_suspend
     runtime.entered.notified().await;
     waiter.abort();
     assert!(waiter.await.unwrap_err().is_cancelled());
-    assert_eq!(engine.lifecycle_state().await, EngineState::Suspended);
+    assert_eq!(engine.lifecycle_state().await, EngineState::Quiesced);
     runtime.release.notify_one();
     wait_state(&mut events, EngineState::Running).await;
     engine.resume().await.unwrap();

@@ -3256,9 +3256,8 @@ async fn engine_start_builds_a_resumable_real_session() {
             EngineState::Quiescing,
             EngineState::Quiesced,
             EngineState::Suspended,
-            EngineState::Running,
-            EngineState::Quiescing,
             EngineState::Quiesced,
+            EngineState::Running,
             EngineState::ShuttingDown,
             EngineState::Stopped,
         ]

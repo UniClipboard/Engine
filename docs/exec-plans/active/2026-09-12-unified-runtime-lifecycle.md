@@ -686,6 +686,13 @@ impl RuntimeLifecycleCoordinator {
 - 最后一个 facade 释放只通知停止后续重试；当前动作仍有独立所有者。Stopped 只在实际动作结束后发布，关闭与结果通知共享同一顺序；关闭期间的重建失败和任务异常均保留供重复确认。
 - 验证：239 项 Space 测试（含 16 项网络恢复）、3 项 Engine 关闭错误分类测试和 dev-tools 下 6 项真实宿主合同通过；metadata、workspace 全目标、dev-tools 与 lan-compat 全目标、fmt、Rust 风格、架构与隐私、diff 检查通过。
 
+### 2026-09-13：恢复开始后撤销旧暂停证明
+
+- 已复现恢复失败后 Engine 仍显示 Suspended、后续暂停直接返回成功而未调用实际清理的问题。恢复一旦开始，资源可能已经重新取得，旧暂停结果不能证明当前安全。
+- Engine 先保持 Quiesced 关闭入口，再调用 Application 完整恢复；只有成功后发布 Running。恢复失败可直接重试完整动作，或再次暂停完成实际清理；Application 仍独占部分恢复回收与 Incomplete 重试顺序。
+- 完成标准：恢复中等待者取消与恢复失败均不再显示安全暂停；失败后再次暂停确实调用下层并保留其失败；解除故障后恢复重试成功。真实租约占用和安全存储不可读测试继续验证失败后不开放操作。
+- 验证：47 项 Engine 测试、dev-tools 下 6 项真实宿主合同、完整会话重开合同、公开转换合同，以及移动绑定的暂停恢复通知与超时后重试合同通过。重开合同中早前关闭流程的两项过时事件断言已按当前行为修正；metadata、workspace 全目标、dev-tools 与 lan-compat 全目标、fmt、Rust 风格、架构与隐私、diff 检查通过。
+
 # 7. Edge Cases
 
 

@@ -110,10 +110,15 @@ impl Transition {
     }
 
     async fn resume(&self) -> Result<(), EngineError> {
-        match *self.state.lock().await {
+        let state = *self.state.lock().await;
+        match state {
             EngineState::Running => return Ok(()),
-            EngineState::Suspended => {}
+            EngineState::Suspended | EngineState::Quiesced => {}
             _ => return Err(invalid_state_error()),
+        }
+        // 恢复开始后旧暂停证明已失效；失败时仍关闭入口，并允许完整负责人重试收尾。
+        if state == EngineState::Suspended {
+            self.publish(EngineState::Quiesced).await;
         }
         self.report_result(LifecycleAction::Resume, self.runtime.resume().await)?;
         if self.stop_requested.load(Ordering::Acquire) {

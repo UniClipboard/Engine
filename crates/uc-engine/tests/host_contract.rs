@@ -87,12 +87,12 @@ async fn suspended_engine_releases_profile_lease_and_can_resume() {
         let other_owner = open_lease(&path);
         other_owner.try_lock().unwrap();
         assert!(engine.resume().await.is_err());
-        assert_eq!(engine.lifecycle_state().await, EngineState::Suspended);
+        assert_eq!(engine.lifecycle_state().await, EngineState::Quiesced);
         drop(other_owner);
         fail_secure_reads.store(true, Ordering::SeqCst);
         let failed_resume = engine.resume().await;
         assert!(failed_resume.is_err(), "本地资料不可读时不能报告恢复成功");
-        assert_eq!(engine.lifecycle_state().await, EngineState::Suspended);
+        assert_eq!(engine.lifecycle_state().await, EngineState::Quiesced);
         assert!(open_lease(&path).try_lock().is_ok(), "失败恢复必须交还租约");
         assert!(engine
             .execute(Operation::SendText(SendTextInput {
