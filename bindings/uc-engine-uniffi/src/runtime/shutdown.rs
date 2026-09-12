@@ -1,7 +1,7 @@
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use super::{lock, MobileEngine, WorkerCommand};
+use super::{lock, LifecycleCommand, MobileEngine};
 use crate::{BindingError, BindingErrorCategory};
 
 impl MobileEngine {
@@ -33,7 +33,7 @@ impl MobileEngine {
         let commands = self.lifecycle_sender()?;
         let (response, result) = mpsc::channel();
         commands
-            .send(WorkerCommand::Shutdown { deadline, response })
+            .send(LifecycleCommand::Shutdown { deadline, response })
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
@@ -58,7 +58,7 @@ pub(super) fn wait_timeout() -> BindingError {
 
 #[cfg(test)]
 mod tests {
-    use super::{lock, mpsc, Duration, Instant, MobileEngine, WorkerCommand};
+    use super::{lock, mpsc, Duration, Instant, LifecycleCommand, MobileEngine};
     use crate::runtime::worker_join::WorkerJoin;
     use crate::runtime::EventQueue;
     use crate::{BindingError, BindingErrorCategory};
@@ -104,7 +104,7 @@ mod tests {
         let worker = std::thread::spawn(move || {
             drop(requests);
             for attempt in 0..2 {
-                let Some(WorkerCommand::Shutdown { response, .. }) =
+                let Some(LifecycleCommand::Shutdown { response, .. }) =
                     lifecycle_requests.blocking_recv()
                 else {
                     panic!("关闭重试通道提前关闭")
@@ -147,7 +147,7 @@ mod tests {
         let worker = std::thread::spawn(move || {
             drop(requests);
             released.recv().unwrap();
-            let Some(WorkerCommand::Shutdown { deadline, response }) =
+            let Some(LifecycleCommand::Shutdown { deadline, response }) =
                 lifecycle_requests.blocking_recv()
             else {
                 panic!("缺少关闭请求")

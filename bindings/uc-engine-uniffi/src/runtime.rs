@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::future::Future;
+use std::future::pending;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -35,8 +35,10 @@ const LIFECYCLE_TRANSITION_DEADLINE: Duration = Duration::from_secs(10);
 mod lifecycle;
 mod shutdown;
 mod worker_join;
+mod worker_lifecycle;
 mod worker_shutdown;
 use worker_join::WorkerJoin;
+use worker_lifecycle::LifecycleCommand;
 
 fn log_mobile_query_failure(operation: &'static str, error: &BindingError) {
     match error {
@@ -437,9 +439,6 @@ enum WorkerCommand {
     LeaveSpace {
         response: mpsc::Sender<Result<(), BindingError>>,
     },
-    LifecycleState {
-        response: mpsc::Sender<BindingEngineState>,
-    },
     CreateSpace {
         device_name: Option<String>,
         passphrase: Zeroizing<String>,
@@ -500,23 +499,12 @@ enum WorkerCommand {
         destination_handle: Zeroizing<String>,
         response: mpsc::Sender<Result<(), BindingError>>,
     },
-    Suspend {
-        deadline: Instant,
-        response: mpsc::Sender<Result<(), BindingError>>,
-    },
-    Resume {
-        response: mpsc::Sender<Result<(), BindingError>>,
-    },
-    Shutdown {
-        deadline: Instant,
-        response: mpsc::Sender<Result<(), BindingError>>,
-    },
 }
 
 #[derive(uniffi::Object)]
 pub struct MobileEngine {
     commands: Mutex<Option<tokio::sync::mpsc::UnboundedSender<WorkerCommand>>>,
-    lifecycle_commands: Mutex<Option<tokio::sync::mpsc::UnboundedSender<WorkerCommand>>>,
+    lifecycle_commands: Mutex<Option<tokio::sync::mpsc::UnboundedSender<LifecycleCommand>>>,
     events: Arc<EventQueue>,
     worker: WorkerJoin,
 }
@@ -935,7 +923,7 @@ impl MobileEngine {
         let commands = self.lifecycle_sender()?;
         let (response, result) = mpsc::channel();
         commands
-            .send(WorkerCommand::LifecycleState { response })
+            .send(LifecycleCommand::LifecycleState { response })
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         receive_lifecycle_result(result, LIFECYCLE_TRANSITION_DEADLINE)
     }
@@ -1168,7 +1156,7 @@ impl MobileEngine {
         let commands = self.lifecycle_sender()?;
         let (response, result) = mpsc::channel();
         commands
-            .send(WorkerCommand::Resume { response })
+            .send(LifecycleCommand::Resume { response })
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         receive_lifecycle_result(result, LIFECYCLE_TRANSITION_DEADLINE)?
     }
@@ -1204,7 +1192,7 @@ impl MobileEngine {
 
     fn lifecycle_sender(
         &self,
-    ) -> Result<tokio::sync::mpsc::UnboundedSender<WorkerCommand>, BindingError> {
+    ) -> Result<tokio::sync::mpsc::UnboundedSender<LifecycleCommand>, BindingError> {
         lock(&self.lifecycle_commands)
             .as_ref()
             .cloned()
@@ -1224,7 +1212,7 @@ fn run_worker(
     config: EngineConfig,
     host: HostCapabilities,
     requests: tokio::sync::mpsc::UnboundedReceiver<WorkerCommand>,
-    lifecycle_requests: tokio::sync::mpsc::UnboundedReceiver<WorkerCommand>,
+    lifecycle_requests: tokio::sync::mpsc::UnboundedReceiver<LifecycleCommand>,
     events: Arc<EventQueue>,
     started: mpsc::Sender<Result<(), BindingError>>,
 ) -> Result<(), BindingError> {
@@ -1251,8 +1239,8 @@ fn run_worker(
 async fn run_worker_loop(
     config: EngineConfig,
     host: HostCapabilities,
-    mut requests: tokio::sync::mpsc::UnboundedReceiver<WorkerCommand>,
-    mut lifecycle_requests: tokio::sync::mpsc::UnboundedReceiver<WorkerCommand>,
+    requests: tokio::sync::mpsc::UnboundedReceiver<WorkerCommand>,
+    lifecycle_requests: tokio::sync::mpsc::UnboundedReceiver<LifecycleCommand>,
     events: Arc<EventQueue>,
     started: mpsc::Sender<Result<(), BindingError>>,
 ) -> Result<(), BindingError> {
@@ -1282,15 +1270,25 @@ async fn run_worker_loop(
         .await;
     }
 
-    let mut shutdown_response = None;
+    let shutdown_response = tokio::select! {
+        biased;
+        response = worker_lifecycle::run(Arc::clone(&engine), lifecycle_requests) => response,
+        () = run_operations(&engine, requests) => Vec::new(),
+    };
+    let result =
+        worker_shutdown::finish_shutdown(engine.shutdown_until_complete(), event_task, events)
+            .await;
+    for response in shutdown_response {
+        let _ = response.send(result.clone());
+    }
+    result
+}
 
-    'worker: loop {
-        let command = tokio::select! {
-            biased;
-            Some(command) = lifecycle_requests.recv() => command,
-            Some(command) = requests.recv() => command,
-            else => break,
-        };
+async fn run_operations(
+    engine: &Arc<Engine>,
+    mut requests: tokio::sync::mpsc::UnboundedReceiver<WorkerCommand>,
+) {
+    while let Some(command) = requests.recv().await {
         match command {
             WorkerCommand::RecoverSession {
                 allow_secure_storage_unlock,
@@ -1303,87 +1301,14 @@ async fn run_worker_loop(
                     }));
                     continue;
                 }
-                let recovery_engine = Arc::clone(&engine);
-                let mut recovery = tokio::spawn(async move {
-                    recovery_engine
-                        .execute(Operation::RecoverSession(RecoverSessionInput {
-                            allow_secure_storage_unlock,
-                        }))
-                        .await
-                        .map_err(BindingError::from)
-                        .and_then(map_session_recovery)
-                });
-                loop {
-                    tokio::select! {
-                        result = &mut recovery => {
-                            let result = result
-                                .map_err(|_| BindingError::RuntimeUnavailable)
-                                .and_then(|result| result);
-                            let _ = response.send(result);
-                            break;
-                        }
-                        lifecycle = lifecycle_requests.recv() => {
-                            match lifecycle {
-                                Some(WorkerCommand::Suspend { deadline, response: suspend_response }) => {
-                                    let result = complete_recovery_after_lifecycle(
-                                        &mut recovery,
-                                        async {
-                                            engine.suspend_with_deadline(deadline.saturating_duration_since(Instant::now())).await.map_err(BindingError::from)
-                                        },
-                                    )
-                                    .await
-                                    .map(|_| ());
-                                    crate::observability::schedule_flush_after_success(&result);
-                                    let suspended = result.is_ok();
-                                    if suspended {
-                                        let _ = response.send(Ok(SessionRecovery {
-                                            unlocked: false,
-                                            resumed: false,
-                                        }));
-                                        let _ = suspend_response.send(Ok(()));
-                                        break;
-                                    }
-                                    let _ = suspend_response.send(result);
-                                    let _ = response.send(Err(BindingError::RuntimeUnavailable));
-                                    break;
-                                }
-                                Some(WorkerCommand::LifecycleState { response }) => {
-                                    let _ = response.send(map_engine_state(engine.lifecycle_state().await));
-                                }
-                                Some(WorkerCommand::Shutdown { deadline, response: shutdown }) => {
-                                    let result = complete_recovery_after_lifecycle(
-                                        &mut recovery,
-                                        async {
-                                            engine
-                                                .shutdown(deadline.saturating_duration_since(Instant::now()))
-                                                .await
-                                                .map_err(BindingError::from)
-                                        },
-                                    )
-                                    .await
-                                    .map(|_| ());
-                                    crate::observability::schedule_flush_after_success(&result);
-                                    let _ = response.send(Err(BindingError::RuntimeUnavailable));
-                                    if result.is_ok() {
-                                        shutdown_response = Some((shutdown, result));
-                                        break 'worker;
-                                    }
-                                    let _ = shutdown.send(result);
-                                    break;
-                                }
-                                Some(WorkerCommand::Resume { response }) => {
-                                    let result = engine.resume().await.map_err(BindingError::from);
-                                    let _ = response.send(result);
-                                }
-                                Some(_) => {}
-                                None => {
-                                    let _ = response.send(Err(BindingError::RuntimeUnavailable));
-                                    break 'worker;
-                                }
-                            }
-                        }
-                    }
-                }
+                let result = engine
+                    .execute(Operation::RecoverSession(RecoverSessionInput {
+                        allow_secure_storage_unlock,
+                    }))
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_session_recovery);
+                let _ = response.send(result);
             }
             WorkerCommand::QueryLocalDevice { response } => {
                 let result = engine
@@ -1563,9 +1488,6 @@ async fn run_worker_loop(
                     .and_then(map_space_left);
                 let _ = response.send(result);
             }
-            WorkerCommand::LifecycleState { response } => {
-                let _ = response.send(map_engine_state(engine.lifecycle_state().await));
-            }
             WorkerCommand::CreateSpace {
                 device_name,
                 passphrase,
@@ -1744,58 +1666,10 @@ async fn run_worker_loop(
                     .and_then(map_entry_exported);
                 let _ = response.send(result);
             }
-            WorkerCommand::Suspend { deadline, response } => {
-                let result = engine
-                    .suspend_with_deadline(deadline.saturating_duration_since(Instant::now()))
-                    .await
-                    .map_err(BindingError::from);
-                crate::observability::schedule_flush_after_success(&result);
-                let _ = response.send(result);
-            }
-            WorkerCommand::Resume { response } => {
-                let result = engine.resume().await.map_err(BindingError::from);
-                let _ = response.send(result);
-            }
-            WorkerCommand::Shutdown { deadline, response } => {
-                let result = engine
-                    .shutdown(deadline.saturating_duration_since(Instant::now()))
-                    .await
-                    .map_err(BindingError::from);
-                crate::observability::schedule_flush_after_success(&result);
-                if result.is_ok() {
-                    shutdown_response = Some((response, result));
-                    break;
-                }
-                let _ = response.send(result);
-            }
         }
     }
-    let result = worker_shutdown::finish_shutdown(
-        async {
-            if shutdown_response.is_none() {
-                engine.shutdown_until_complete().await
-            } else {
-                Ok(())
-            }
-        },
-        event_task,
-        events,
-    )
-    .await;
-    if let Some((response, _)) = shutdown_response {
-        let _ = response.send(result.clone());
-    }
-    result
-}
-
-async fn complete_recovery_after_lifecycle<T>(
-    recovery: &mut tokio::task::JoinHandle<T>,
-    lifecycle: impl Future<Output = Result<(), BindingError>>,
-) -> Result<T, BindingError> {
-    let lifecycle_result = lifecycle.await;
-    let recovery_result = recovery.await.map_err(|_| BindingError::RuntimeUnavailable);
-    lifecycle_result?;
-    recovery_result
+    // 关闭普通通道是关闭请求的第一步，生命周期通道仍负责最后确认。
+    pending::<()>().await;
 }
 
 fn receive_lifecycle_result<T>(
@@ -2717,48 +2591,13 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_wait_keeps_recovery_polled_until_cancellation_settles() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("test runtime must start");
-
-        runtime.block_on(async {
-            let (started, recovery_started) = tokio::sync::oneshot::channel();
-            let (cancel, cancelled) = tokio::sync::oneshot::channel();
-            let (settled, recovery_settled) = tokio::sync::oneshot::channel();
-            let mut recovery = tokio::spawn(async move {
-                let _ = started.send(());
-                let _ = cancelled.await;
-                let _ = settled.send(());
-                "cancelled"
-            });
-            recovery_started.await.expect("recovery task did not start");
-            let lifecycle = async move {
-                let _ = cancel.send(());
-                tokio::time::timeout(Duration::from_millis(100), recovery_settled)
-                    .await
-                    .map_err(|_| BindingError::RuntimeUnavailable)?
-                    .map_err(|_| BindingError::RuntimeUnavailable)?;
-                Ok(())
-            };
-
-            let outcome = complete_recovery_after_lifecycle(&mut recovery, lifecycle)
-                .await
-                .expect("lifecycle and cancelled recovery must both settle");
-
-            assert_eq!(outcome, "cancelled");
-        });
-    }
-
-    #[test]
     fn shutdown_deadline_bounds_the_worker_reply_and_join() {
         let (commands, requests) = tokio::sync::mpsc::unbounded_channel();
         let (lifecycle_commands, mut lifecycle_requests) = tokio::sync::mpsc::unbounded_channel();
         let events = Arc::new(EventQueue::new(1));
         let worker = std::thread::spawn(move || {
             drop(requests);
-            if let Some(WorkerCommand::Shutdown { response, .. }) =
+            if let Some(LifecycleCommand::Shutdown { response, .. }) =
                 lifecycle_requests.blocking_recv()
             {
                 std::thread::sleep(Duration::from_millis(200));
@@ -2796,7 +2635,7 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(200));
                     let _ = response.send(Err(BindingError::RuntimeUnavailable));
                 });
-                if let Some(WorkerCommand::Suspend { response, .. }) =
+                if let Some(LifecycleCommand::Suspend { response, .. }) =
                     lifecycle_requests.blocking_recv()
                 {
                     let _ = response.send(Ok(()));

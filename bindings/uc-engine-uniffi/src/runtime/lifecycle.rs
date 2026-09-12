@@ -2,7 +2,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use super::shutdown::wait_timeout;
-use super::{MobileEngine, WorkerCommand};
+use super::{LifecycleCommand, MobileEngine};
 use crate::{BindingError, BindingErrorCategory};
 
 impl MobileEngine {
@@ -17,7 +17,7 @@ impl MobileEngine {
         let commands = self.lifecycle_sender()?;
         let (response, result) = mpsc::channel();
         commands
-            .send(WorkerCommand::Suspend { deadline, response })
+            .send(LifecycleCommand::Suspend { deadline, response })
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
@@ -31,7 +31,7 @@ impl MobileEngine {
 #[cfg(test)]
 mod tests {
     use super::{
-        mpsc, BindingError, BindingErrorCategory, Duration, Instant, MobileEngine, WorkerCommand,
+        mpsc, BindingError, BindingErrorCategory, Duration, Instant, LifecycleCommand, MobileEngine,
     };
     use crate::runtime::worker_join::WorkerJoin;
     use crate::runtime::EventQueue;
@@ -44,7 +44,7 @@ mod tests {
         let (captured, deadline) = mpsc::channel();
         let (release, wait) = mpsc::channel();
         let worker = std::thread::spawn(move || {
-            let Some(WorkerCommand::Suspend { deadline, response }) = requests.blocking_recv()
+            let Some(LifecycleCommand::Suspend { deadline, response }) = requests.blocking_recv()
             else {
                 panic!("expected suspend");
             };

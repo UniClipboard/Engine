@@ -20,6 +20,9 @@ use uc_engine_uniffi::{
 static ENGINE_TEST_LOCK: Mutex<()> = Mutex::new(());
 const ENGINE_SHUTDOWN_DEADLINE_MS: u64 = 30_000;
 
+#[path = "public_contract/lifecycle_targets.rs"]
+mod lifecycle_targets;
+
 #[test]
 fn core_version_uses_the_binding_package_version() {
     assert_eq!(core_version(), format!("v{}", env!("CARGO_PKG_VERSION")));
@@ -185,6 +188,7 @@ struct MemoryHost {
     clipboard: Mutex<BindingClipboardSnapshot>,
     clipboard_writes: Mutex<Vec<BindingClipboardSnapshot>>,
     finished_files: Mutex<Vec<String>>,
+    secure_read_gate: Mutex<Option<lifecycle_targets::ReadGate>>,
 }
 
 struct TestFile {
@@ -206,6 +210,7 @@ impl MemoryHost {
             }),
             clipboard_writes: Mutex::new(Vec::new()),
             finished_files: Mutex::new(Vec::new()),
+            secure_read_gate: Mutex::new(None),
         }
     }
 
@@ -276,6 +281,11 @@ impl BindingHost for MemoryHost {
     }
 
     fn secure_storage_get(&self, key: String) -> Result<Option<Vec<u8>>, HostBindingError> {
+        if key.starts_with("kek:v1:") {
+            if let Some(gate) = lock(&self.secure_read_gate).take() {
+                gate.wait();
+            }
+        }
         Ok(self.values().get(&key).cloned())
     }
 
