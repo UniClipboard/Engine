@@ -6,7 +6,7 @@ use tokio::time::timeout;
 
 use super::tests::FakeRuntime;
 use super::Engine;
-use crate::{EngineErrorCategory, EngineEvent, EngineState, Operation};
+use crate::{EngineErrorCategory, EngineEvent, EngineState, Operation, OperationTerminal};
 
 #[tokio::test]
 async fn failed_shutdown_keeps_stream_open_and_allows_cleanup_retry() {
@@ -161,5 +161,63 @@ async fn zero_wait_budget_still_starts_cleanup_and_does_not_cancel_it() {
     runtime.shutdown_release.notify_one();
     engine.shutdown(Duration::from_secs(1)).await.unwrap();
     assert_eq!(engine.lifecycle_state().await, EngineState::Stopped);
+    assert_eq!(runtime.shutdown_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn abandoned_waiter_during_operation_drain_keeps_resources_until_actual_exit() {
+    let runtime = Arc::new(FakeRuntime::default());
+    let (engine, mut events) = Engine::from_runtime(Arc::clone(&runtime), 16);
+    let engine = Arc::new(engine);
+    let operation = engine.operations.register("held-operation").await;
+    let caller = tokio::spawn({
+        let engine = Arc::clone(&engine);
+        async move { engine.shutdown(Duration::from_millis(30)).await }
+    });
+    assert_eq!(
+        timeout(Duration::from_secs(1), events.next())
+            .await
+            .unwrap(),
+        Some(EngineEvent::StateChanged {
+            state: EngineState::ShuttingDown
+        })
+    );
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert!(engine.execute(Operation::ListDevices).await.is_err());
+    assert!(engine.resume().await.is_err());
+    drop(engine);
+
+    timeout(Duration::from_secs(1), operation.cancellation.cancelled())
+        .await
+        .unwrap();
+    assert_eq!(runtime.shutdown_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        timeout(Duration::from_secs(1), events.next())
+            .await
+            .unwrap(),
+        Some(EngineEvent::OperationFinished {
+            operation_id: operation.id.clone(),
+            terminal: OperationTerminal::Cancelled,
+        })
+    );
+    assert!(timeout(Duration::from_millis(20), events.next())
+        .await
+        .is_err());
+    drop(operation);
+    assert_eq!(
+        timeout(Duration::from_secs(1), events.next())
+            .await
+            .unwrap(),
+        Some(EngineEvent::StateChanged {
+            state: EngineState::Stopped
+        })
+    );
+    assert_eq!(
+        timeout(Duration::from_secs(1), events.next())
+            .await
+            .unwrap(),
+        None
+    );
     assert_eq!(runtime.shutdown_calls.load(Ordering::SeqCst), 1);
 }

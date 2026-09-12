@@ -62,23 +62,25 @@ impl InFlightOperations {
     }
 
     pub(crate) async fn wait_until_empty(&self, deadline: Duration) -> bool {
-        tokio::time::timeout(deadline, async {
-            loop {
-                let changed = self.state.changed.notified();
-                if self
-                    .state
-                    .operations
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .is_empty()
-                {
-                    break;
-                }
-                changed.await;
+        tokio::time::timeout(deadline, self.wait_empty())
+            .await
+            .is_ok()
+    }
+
+    pub(super) async fn wait_empty(&self) {
+        loop {
+            let changed = self.state.changed.notified();
+            if self
+                .state
+                .operations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+            {
+                break;
             }
-        })
-        .await
-        .is_ok()
+            changed.await;
+        }
     }
 
     pub(crate) async fn cancel_all(&self) -> Vec<String> {

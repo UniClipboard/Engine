@@ -60,7 +60,7 @@ pub struct Engine {
     shutdown_gate: Arc<Mutex<()>>,
     runtime: Arc<dyn EngineRuntime>,
     events: EventSender,
-    operations: InFlightOperations,
+    operations: Arc<InFlightOperations>,
 }
 
 impl Engine {
@@ -101,7 +101,7 @@ impl Engine {
             shutdown_gate: Arc::new(Mutex::new(())),
             runtime,
             events,
-            operations: InFlightOperations::new(),
+            operations: Arc::new(InFlightOperations::new()),
         };
         engine.events.send(EngineEvent::StateChanged {
             state: EngineState::Running,
@@ -122,7 +122,7 @@ impl Engine {
                 shutdown_gate: Arc::new(Mutex::new(())),
                 runtime,
                 events,
-                operations: InFlightOperations::new(),
+                operations: Arc::new(InFlightOperations::new()),
             },
             stream,
         )
@@ -615,12 +615,7 @@ mod tests {
         .expect("event stream remained open after shutdown");
         assert_eq!(
             states,
-            vec![
-                EngineState::Quiescing,
-                EngineState::Quiesced,
-                EngineState::ShuttingDown,
-                EngineState::Stopped,
-            ]
+            vec![EngineState::ShuttingDown, EngineState::Stopped,]
         );
         let error = engine.execute(Operation::ListDevices).await.unwrap_err();
         assert_eq!(error.category(), EngineErrorCategory::InvalidState);
