@@ -129,6 +129,12 @@ pub enum SessionFailure {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum LocalEvent {
+    AdmissionNetwork {
+        record: super::admission_network::AdmissionNetworkEvent,
+    },
+    AdmissionExchange {
+        record: super::admission_exchange::AdmissionExchangeEvent,
+    },
     Source {
         record: super::source::SourceEvent,
     },
@@ -172,6 +178,8 @@ pub(super) enum LocalEvent {
 impl LocalEvent {
     pub(super) fn name(&self) -> &'static str {
         match self {
+            Self::AdmissionNetwork { .. } => "pairing.exchange.network.snapshot",
+            Self::AdmissionExchange { record } => record.name(),
             Self::Source { .. } => "diagnostics.source.status",
             Self::AddressRecord { record } => record.name(),
             Self::NetworkRecovery { record } => record.name(),
@@ -187,6 +195,8 @@ impl LocalEvent {
     }
     pub(super) fn level(&self) -> &'static str {
         match self {
+            Self::AdmissionNetwork { .. } => "INFO",
+            Self::AdmissionExchange { record } => record.level(),
             Self::Source { .. } => "INFO",
             Self::AddressRecord { record } => record.level(),
             Self::NetworkRecovery { record } => record.level(),
@@ -229,6 +239,8 @@ impl LocalEvent {
         let mut fields = Map::new();
         fields.insert("event.name".into(), json!(self.name()));
         match self {
+            Self::AdmissionNetwork { record } => fields.extend(record.fields()),
+            Self::AdmissionExchange { record } => fields.extend(record.fields()),
             Self::Source { record } => {
                 fields.insert("source".into(), json!(record.source));
                 fields.insert("capability".into(), json!(record.capability));

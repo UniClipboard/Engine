@@ -362,6 +362,7 @@ impl CapturePolicy {
             None
         };
         let detail_only = match name {
+            "pairing.exchange.network.snapshot" => true,
             "connection.attempt.started" | "address.lookup.started" => true,
             "connection.attempt.finished" => {
                 fields["outcome"] == "connected" || fields["outcome"] == "cancelled_by_winner"

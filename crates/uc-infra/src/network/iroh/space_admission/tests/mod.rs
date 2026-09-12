@@ -548,4 +548,5 @@ fn prepared_request(
 
 mod crypto;
 mod diagnostics;
+mod exchange_progress;
 mod protocol;

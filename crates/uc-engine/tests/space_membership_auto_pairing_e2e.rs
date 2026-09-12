@@ -3249,16 +3249,8 @@ async fn uninterrupted_admission_uses_one_trace() {
     wait_for_active_member_count(&sponsor, 2).await;
     wait_for_active_member_count(&joiner, 2).await;
     let elapsed = started.elapsed();
-    sponsor
-        .shutdown(SHUTDOWN_TIMEOUT)
-        .await
-        .expect("stop sponsor");
-    joiner
-        .shutdown(SHUTDOWN_TIMEOUT)
-        .await
-        .expect("stop joiner");
-    uc_engine::flush_test_tracing();
 
+    // Active 早于最后一轮通信完成；先收齐证据，不能用关闭打断待验收的确认。
     let evidence_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let trace_evidence = loop {
         uc_engine::flush_test_tracing();
@@ -3277,14 +3269,18 @@ async fn uninterrupted_admission_uses_one_trace() {
         }
         assert!(
             tokio::time::Instant::now() < evidence_deadline,
-            "OTLP receiver did not collect four complete admission exchanges"
+            "OTLP receiver did not collect four complete admission exchanges: {evidence:?}"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     };
 
     assert_eq!(trace_evidence.flow_ids.len(), 1);
     assert_eq!(trace_evidence.lifecycle_root_count, 1);
-    assert_eq!(trace_evidence.invalid_pair_count, 0);
+    assert_eq!(
+        trace_evidence.invalid_pair_count, 0,
+        "{:?}",
+        trace_evidence.invalid_pair_details
+    );
     assert_eq!(trace_evidence.invalid_completion_log_count, 0);
     let requests = telemetry
         .received_requests()
@@ -3297,6 +3293,14 @@ async fn uninterrupted_admission_uses_one_trace() {
         "one uninterrupted admission must be visible as one trace: {:?}",
         trace_evidence.admission_trace_counts,
     );
+    sponsor
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("stop sponsor");
+    joiner
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("stop joiner");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
@@ -3522,6 +3526,7 @@ async fn two_device_hot_path_pairing_completes_within_one_second() {
     );
 }
 
+#[derive(Debug)]
 struct PairingTraceEvidence {
     local_elapsed: Duration,
     network_elapsed: Duration,
@@ -3530,6 +3535,7 @@ struct PairingTraceEvidence {
     paired_admission_endpoint_count: usize,
     lifecycle_root_count: usize,
     invalid_pair_count: usize,
+    invalid_pair_details: Vec<String>,
     invalid_completion_log_count: usize,
     flow_ids: BTreeSet<String>,
     admission_trace_ids: BTreeSet<Vec<u8>>,
@@ -3765,24 +3771,39 @@ fn pairing_trace_evidence(
             .entry(client.trace_id.clone())
             .or_insert(0) += 1;
     }
+    let mut invalid_pair_details = Vec::new();
     let mut invalid_pair_count = clients
         .iter()
         .filter(|client| {
             let root =
                 lifecycle_root_ids.get(&(client.trace_id.clone(), client.parent_span_id.clone()));
-            client.parent_span_id.is_empty()
+            let invalid = client.parent_span_id.is_empty()
                 || root.is_none()
                 || root.and_then(|span| otlp_string_attribute(&span.attributes, "uc.flow.id"))
                     != otlp_string_attribute(&client.attributes, "uc.flow.id")
                 || otlp_string_attribute(&client.attributes, "uc.flow.id").is_none()
-                || !otlp_span_succeeded(client)
+                || !otlp_span_succeeded(client);
+            if invalid {
+                invalid_pair_details.push(format!(
+                    "client {} root_present={} status={:?}",
+                    client.name,
+                    root.is_some(),
+                    client.status
+                ));
+            }
+            invalid
         })
         .count()
         + paired_servers
             .iter()
             .filter(|(_, server)| {
-                otlp_string_attribute(&server.attributes, "uc.flow.id").is_some()
-                    || !otlp_span_succeeded(server)
+                let invalid = otlp_string_attribute(&server.attributes, "uc.flow.id").is_some()
+                    || !otlp_span_succeeded(server);
+                if invalid {
+                    invalid_pair_details
+                        .push(format!("server {} status={:?}", server.name, server.status));
+                }
+                invalid
             })
             .count()
         + spans
@@ -3819,6 +3840,14 @@ fn pairing_trace_evidence(
             if client.start_time_unix_nano > server.start_time_unix_nano
                 || server.end_time_unix_nano > client.end_time_unix_nano
             {
+                invalid_pair_details.push(format!(
+                    "配对两端时间边界：client={} server={} start_delta_ns={} end_delta_ns={}",
+                    client.name,
+                    server.name,
+                    i128::from(server.start_time_unix_nano)
+                        - i128::from(client.start_time_unix_nano),
+                    i128::from(server.end_time_unix_nano) - i128::from(client.end_time_unix_nano)
+                ));
                 invalid_pair_count += 1;
                 return Vec::new();
             }
@@ -3862,6 +3891,7 @@ fn pairing_trace_evidence(
         paired_admission_endpoint_count,
         lifecycle_root_count: lifecycle_roots.len(),
         invalid_pair_count,
+        invalid_pair_details,
         invalid_completion_log_count,
         flow_ids,
         admission_trace_ids,

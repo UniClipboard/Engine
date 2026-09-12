@@ -4,6 +4,15 @@ use std::time::{Duration, Instant};
 
 mod address;
 mod address_record;
+mod admission_exchange;
+mod admission_network;
+pub use admission_exchange::{
+    AdmissionExchangeFailure, AdmissionExchangeFailureDetail, AdmissionExchangeObservation,
+    AdmissionExchangeSide, AdmissionExchangeStep,
+};
+pub use admission_network::{
+    record_admission_network_snapshot, AdmissionNetworkPoint, AdmissionNetworkSnapshot,
+};
 
 pub use address_record::{
     local_address_record_keys, AddressRecordResult, StoredAddressObservation,

@@ -7,7 +7,11 @@ use uc_observability_contract::diagnostics::connectivity::{
 };
 
 use super::super::space_admission_wire::IO_DEADLINE;
+use super::diagnostics::record_network_snapshot;
 use super::SPACE_ADMISSION_ALPN;
+use uc_observability_contract::diagnostics::connectivity::{
+    AdmissionExchangeSide, AdmissionNetworkPoint,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum AdmissionConnectError {
@@ -60,6 +64,11 @@ pub(super) async fn connect(
         }
     };
     if let Ok(connection) = &result {
+        record_network_snapshot(
+            connection,
+            AdmissionExchangeSide::Joiner,
+            AdmissionNetworkPoint::Connected,
+        );
         attempt.connected(connection.stable_id() as u64);
         observation.connected(connection.stable_id() as u64);
     } else {

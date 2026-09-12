@@ -139,8 +139,10 @@ async fn stalled_authenticated_endpoint_records_one_server_timeout() {
         .with_tracer(provider.tracer("space-admission-timeout-test"))
         .with_context_activation(true)
         .with_filter(filter_fn(|metadata| metadata.target() == "uc.telemetry"));
-    let log_layer = OpenTelemetryTracingBridge::new(&log_provider)
-        .with_filter(filter_fn(|metadata| metadata.target() == "uc.telemetry"));
+    let log_layer =
+        OpenTelemetryTracingBridge::new(&log_provider).with_filter(filter_fn(|metadata| {
+            matches!(metadata.target(), "uc.telemetry" | "uc.connectivity")
+        }));
     let subscriber = tracing_subscriber::registry()
         .with(trace_layer)
         .with(log_layer);
@@ -248,6 +250,16 @@ async fn stalled_authenticated_endpoint_records_one_server_timeout() {
         })
         .collect::<Vec<_>>();
     assert_eq!(timeout_logs.len(), 1);
+    let steps = super::exchange_progress::step_records(&log_exporter);
+    let failed = steps
+        .iter()
+        .find(|record| {
+            record["uc.role"] == "sponsor"
+                && record["step"] == "handle_request"
+                && record["error.reason"] == "timed_out"
+        })
+        .expect("总期限到达必须指出真实等待步骤，不误报为中断");
+    assert_eq!(failed["uc.outcome"], "error");
     assert!(timeout_logs[0].record.body().is_none());
     assert!(!timeout_logs[0]
         .record

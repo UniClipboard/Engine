@@ -9,5 +9,6 @@
 - [043 升级前备份与软件版本回退](043-pre-upgrade-profile-backup.md)（实施中：启动前备份及恢复出厂清理已接入，完整版本回退尚未完成）
 - [历史可读时的邀请失败](2026-09-12-invitation-admission-recovery.md)
 - [本地产物准备](local-artifacts-preparation.md)
+- [配对通信等待诊断](2026-09-12-admission-exchange-diagnostics.md)
 
 计划完成时先更新稳定设计/ADR 和验收证据，再移入 `../completed/`。
