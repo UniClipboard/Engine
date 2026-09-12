@@ -23,7 +23,7 @@ pub(crate) struct SourceCounters {
     pub(crate) last_written_at_ms: AtomicU64,
 }
 
-pub(crate) struct FileStatistics([SourceCounters; 14]);
+pub(crate) struct FileStatistics([SourceCounters; LocalDiagnosticSource::ALL.len()]);
 impl Default for FileStatistics {
     fn default() -> Self {
         Self(std::array::from_fn(|_| SourceCounters::default()))
