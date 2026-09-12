@@ -127,12 +127,17 @@ async fn cancelled_suspend_waiter_does_not_interrupt_completion_or_repeat_work()
     waiter.abort();
     assert!(waiter.await.unwrap_err().is_cancelled());
     assert_eq!(engine.lifecycle_state().await, EngineState::Quiesced);
-    assert!(timeout(
-        Duration::from_millis(10),
-        engine.execute(Operation::ListDevices)
-    )
-    .await
-    .is_err());
+    assert_eq!(
+        timeout(
+            Duration::from_millis(10),
+            engine.execute(Operation::ListDevices)
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .category(),
+        EngineErrorCategory::InvalidState
+    );
     runtime.release.notify_one();
     wait_state(&mut events, EngineState::Suspended).await;
     assert!(engine.execute(Operation::ListDevices).await.is_err());
@@ -189,7 +194,7 @@ async fn queued_suspend_survives_waiter_and_engine_destruction() {
 async fn abandoned_quiesce_keeps_the_deadline_from_before_queueing() {
     let runtime = Arc::new(HeldRuntime::default());
     let (engine, mut events) = Engine::from_runtime(runtime, 16);
-    let operation = engine.operations.register("test").await;
+    let operation = engine.operations.register("test");
     let gate = Arc::clone(&engine.lifecycle_gate).lock_owned().await;
     let started = Instant::now();
     let mut request = Box::pin(engine.quiesce(Duration::from_secs(1)));

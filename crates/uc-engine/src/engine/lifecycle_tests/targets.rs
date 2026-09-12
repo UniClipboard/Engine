@@ -8,6 +8,7 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 use super::{Engine, EngineErrorCategory, EngineEvent, EngineState, HeldRuntime};
+use crate::Operation;
 
 async fn accept<F: Future>(mut request: Pin<&mut F>) {
     poll_fn(|context| {
@@ -15,6 +16,65 @@ async fn accept<F: Future>(mut request: Pin<&mut F>) {
         Poll::Ready(())
     })
     .await;
+}
+
+#[tokio::test]
+async fn accepted_pause_rejects_operations_before_it_can_acquire_the_transition_lock() {
+    let runtime = Arc::new(HeldRuntime::default());
+    let (engine, _events) = Engine::from_runtime(runtime, 32);
+    let gate = engine.lifecycle_gate.clone().lock_owned().await;
+    let mut pause = Box::pin(engine.suspend());
+    accept(pause.as_mut()).await;
+    drop(pause);
+    assert_eq!(engine.lifecycle_state().await, EngineState::Running);
+    let result = timeout(
+        Duration::from_millis(100),
+        engine.execute(Operation::ListDevices),
+    )
+    .await;
+    drop(gate);
+    assert_eq!(
+        result.unwrap().unwrap_err().category(),
+        EngineErrorCategory::InvalidState
+    );
+    engine.suspend().await.unwrap();
+    engine.resume().await.unwrap();
+    engine.execute(Operation::ListDevices).await.unwrap();
+    engine.shutdown_until_complete().await.unwrap();
+}
+
+#[tokio::test]
+async fn quiesce_during_resume_keeps_admission_closed_until_a_later_resume() {
+    let runtime = Arc::new(HeldRuntime::default());
+    let (engine, _events) = Engine::from_runtime(runtime.clone(), 32);
+    engine.suspend().await.unwrap();
+    runtime.resume_held.store(true, Ordering::SeqCst);
+    let mut resume = Box::pin(engine.resume());
+    accept(resume.as_mut()).await;
+    runtime.entered.notified().await;
+    let mut quiet = Box::pin(engine.quiesce(Duration::ZERO));
+    accept(quiet.as_mut()).await;
+    let result = timeout(
+        Duration::from_millis(100),
+        engine.execute(Operation::ListDevices),
+    )
+    .await;
+    runtime.resume_held.store(false, Ordering::SeqCst);
+    runtime.release.notify_one();
+    assert_eq!(
+        result.unwrap().unwrap_err().category(),
+        EngineErrorCategory::InvalidState
+    );
+    assert_eq!(
+        resume.await.unwrap_err().category(),
+        EngineErrorCategory::InvalidState
+    );
+    quiet.await.unwrap();
+    assert_eq!(engine.lifecycle_state().await, EngineState::Quiesced);
+    assert!(engine.execute(Operation::ListDevices).await.is_err());
+    engine.resume().await.unwrap();
+    engine.execute(Operation::ListDevices).await.unwrap();
+    engine.shutdown_until_complete().await.unwrap();
 }
 
 #[tokio::test]

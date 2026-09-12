@@ -237,7 +237,7 @@ async fn abandoned_waiter_during_operation_drain_keeps_resources_until_actual_ex
     let runtime = Arc::new(FakeRuntime::default());
     let (engine, mut events) = Engine::from_runtime(Arc::clone(&runtime), 16);
     let engine = Arc::new(engine);
-    let operation = engine.operations.register("held-operation").await;
+    let operation = engine.operations.register("held-operation");
     let caller = tokio::spawn({
         let engine = Arc::clone(&engine);
         async move { engine.shutdown(Duration::from_millis(30)).await }

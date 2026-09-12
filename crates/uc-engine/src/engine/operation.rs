@@ -39,6 +39,7 @@ impl Engine {
         F: FnOnce(Arc<dyn EngineRuntime>, CancellationToken) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, EngineError>> + Send + 'static,
     {
+        self.lifecycle_requests.check_admission()?;
         let registered = {
             let _lifecycle = self.lifecycle_gate.lock().await;
             if self.stop_requested.load(Ordering::Acquire)
@@ -46,7 +47,8 @@ impl Engine {
             {
                 return Err(invalid_state_error());
             }
-            self.operations.register(prefix).await
+            self.lifecycle_requests
+                .register_operation(&self.operations, prefix)?
         };
         let cancellation = registered.cancellation.clone();
         let _cancel_on_waiter_drop = cancellation.clone().drop_guard();

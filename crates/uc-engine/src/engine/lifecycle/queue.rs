@@ -6,6 +6,7 @@ use tokio::sync::{oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 
 use super::super::event_stream::EventSender;
+use super::super::in_flight::{InFlightOperations, RegisteredOperation};
 use super::super::invalid_state_error;
 use super::{Request, Transition};
 use crate::{EngineError, EngineErrorCategory, EngineEvent, EngineState};
@@ -18,6 +19,7 @@ pub(in super::super) struct TransitionQueue {
 
 #[derive(Default)]
 struct State {
+    admission_closed: bool,
     resume_cancellation: CancellationToken,
     running: bool,
     pending: VecDeque<QueuedRequest>,
@@ -42,7 +44,8 @@ impl TransitionQueue {
             let _ = response.send(Err(invalid_state_error()));
             return completion;
         }
-        if matches!(request, Request::Suspend(_)) {
+        if matches!(request, Request::Suspend(_) | Request::Quiesce(_)) {
+            state.admission_closed = true;
             state.resume_cancellation.cancel();
             state.resume_cancellation = CancellationToken::new();
         }
@@ -64,6 +67,7 @@ impl TransitionQueue {
     pub(in super::super) fn accept_shutdown(&self, stop_requested: &AtomicBool) {
         let mut state = self.state();
         stop_requested.store(true, Ordering::Release);
+        state.admission_closed = true;
         state.resume_cancellation.cancel();
         for request in state.pending.drain(..) {
             let _ = request.response.send(Err(invalid_state_error()));
@@ -82,6 +86,26 @@ impl TransitionQueue {
         }
     }
 
+    pub(in super::super) fn check_admission(&self) -> Result<(), EngineError> {
+        if self.state().admission_closed {
+            return Err(invalid_state_error());
+        }
+        Ok(())
+    }
+
+    pub(in super::super) fn register_operation(
+        &self,
+        operations: &InFlightOperations,
+        prefix: &str,
+    ) -> Result<RegisteredOperation, EngineError> {
+        let state = self.state();
+        if state.admission_closed {
+            return Err(invalid_state_error());
+        }
+        // 登记与暂停接收不可交错；已接收的操作必须进入同一排空清单。
+        Ok(operations.register(prefix))
+    }
+
     pub(super) fn publish_resume(
         &self,
         cancellation: &CancellationToken,
@@ -89,12 +113,13 @@ impl TransitionQueue {
         state: &mut EngineState,
         events: &EventSender,
     ) -> Result<(), EngineError> {
-        let _requests = self.state();
+        let mut requests = self.state();
         if stop_requested.load(Ordering::Acquire) || cancellation.is_cancelled() {
             return Err(invalid_state_error());
         }
         // 发布与接收新暂停共用同一顺序，过期恢复不能重新开放入口。
         *state = EngineState::Running;
+        requests.admission_closed = false;
         events.send(EngineEvent::StateChanged {
             state: EngineState::Running,
         });

@@ -38,7 +38,7 @@ impl InFlightOperations {
         }
     }
 
-    pub(crate) async fn register(&self, prefix: &str) -> RegisteredOperation {
+    pub(crate) fn register(&self, prefix: &str) -> RegisteredOperation {
         let id = format!("{prefix}-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
         let cancellation = CancellationToken::new();
         self.state
@@ -121,10 +121,10 @@ mod tests {
     #[tokio::test]
     async fn waiter_cancellation_does_not_consume_the_terminal_notification() {
         let operations = InFlightOperations::new();
-        let registered = operations.register("test").await;
+        let registered = operations.register("test");
         registered.cancellation.cancel();
         assert!(operations.finish(&registered.id).await);
-        let registered = operations.register("test").await;
+        let registered = operations.register("test");
         registered.cancellation.cancel();
         assert_eq!(operations.cancel_all().await, vec![registered.id.clone()]);
         assert!(operations.cancel_all().await.is_empty());
@@ -134,7 +134,7 @@ mod tests {
     #[tokio::test]
     async fn cancellation_does_not_report_resources_released_until_the_operation_exits() {
         let operations = InFlightOperations::new();
-        let registered = operations.register("test").await;
+        let registered = operations.register("test");
         assert_eq!(operations.cancel_all().await, vec![registered.id.clone()]);
         assert!(registered.cancellation.is_cancelled());
         assert!(!operations.wait_until_empty(Duration::ZERO).await);

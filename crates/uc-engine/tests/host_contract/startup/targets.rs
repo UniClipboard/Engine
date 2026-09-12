@@ -69,7 +69,16 @@ async fn pause_during_real_resume_releases_the_profile_without_publishing_stale_
         Poll::Ready(())
     })
     .await;
+    let admission = timeout(
+        Duration::from_millis(100),
+        engine.execute(Operation::ListDevices),
+    )
+    .await;
     release.send(()).unwrap();
+    assert_eq!(
+        admission.unwrap().unwrap_err().category(),
+        EngineErrorCategory::InvalidState
+    );
     assert_eq!(
         resuming.await.unwrap().unwrap_err().category(),
         EngineErrorCategory::InvalidState

@@ -150,8 +150,10 @@ impl Transition {
     }
 
     async fn quiesce(&self, budget: Duration) -> Result<(), EngineError> {
-        if *self.state.lock().await != EngineState::Running {
-            return Err(invalid_state_error());
+        match *self.state.lock().await {
+            EngineState::Quiesced => return Ok(()),
+            EngineState::Running => {}
+            _ => return Err(invalid_state_error()),
         }
         self.publish(EngineState::Quiescing).await;
         if !self.operations.wait_until_empty(budget).await {
