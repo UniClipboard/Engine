@@ -8,8 +8,8 @@ use crate::transfer::receive::reconciliation::EnsureReceiveReadyPort;
 
 #[async_trait]
 trait SearchSessionActivityPort: Send + Sync {
-    async fn pause(&self) -> Result<(), String>;
-    async fn resume(&self) -> Result<(), String>;
+    async fn pause(&self) -> Result<(), anyhow::Error>;
+    async fn resume(&self) -> Result<(), anyhow::Error>;
 }
 
 #[async_trait]
@@ -70,8 +70,8 @@ pub enum SpaceActivityError {
     Connectivity(#[from] crate::space::PeerConnectionError),
     #[error("space session activity is unavailable")]
     Unavailable,
-    #[error("search session activation failed: {0}")]
-    Search(String),
+    #[error("search session activity failed")]
+    Search(#[source] anyhow::Error),
     #[error("receive activation failed: {0}")]
     Receive(String),
     #[error("membership activation failed: {0}")]
@@ -132,7 +132,7 @@ impl SpaceSessionActivity {
         let receive = self.receive.ensure_receive_ready().await;
         let connections = self.connections.resume().await;
         restore_results(vec![
-            search.map_err(anyhow::Error::msg),
+            search,
             receive.map_err(anyhow::Error::new),
             connections.map_err(anyhow::Error::new),
         ])
@@ -198,22 +198,32 @@ impl SpaceSessionActivityPort for SpaceSessionActivity {
 
 #[async_trait]
 impl SearchSessionActivityPort for SearchFacade {
-    async fn pause(&self) -> Result<(), String> {
-        self.pause_background_activity().await;
+    async fn pause(&self) -> Result<(), anyhow::Error> {
+        self.pause_background_activity().await?;
         Ok(())
     }
 
-    async fn resume(&self) -> Result<(), String> {
-        self.on_session_ready().await;
+    async fn resume(&self) -> Result<(), anyhow::Error> {
+        self.on_session_ready().await?;
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
+    #[test]
+    fn search_failure_preserves_source_and_redacts_details() {
+        let error = SpaceActivityError::Search(
+            std::io::Error::other("private-search-storage-detail").into(),
+        );
+        assert!(error.source().unwrap().is::<std::io::Error>());
+        assert!(!error.to_string().contains("private-search-storage-detail"));
+    }
 
     struct RecordingMembership {
         pauses: AtomicUsize,
@@ -242,7 +252,7 @@ mod tests {
         }
 
         async fn pause_for_lock(&self) -> Result<(), SpaceActivityError> {
-            Err(SpaceActivityError::Search("pause failed".to_owned()))
+            Err(SpaceActivityError::Search(anyhow::anyhow!("pause failed")))
         }
 
         async fn restore_after_failed_lock(&self) -> Result<(), anyhow::Error> {
@@ -280,7 +290,7 @@ mod tests {
         assert!(!activity.bind(delegate));
         assert!(matches!(
             activity.pause_for_lock().await,
-            Err(SpaceActivityError::Search(error)) if error == "pause failed"
+            Err(SpaceActivityError::Search(error)) if error.to_string() == "pause failed"
         ));
         activity
             .restore_after_failed_lock()

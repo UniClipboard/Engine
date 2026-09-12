@@ -23,6 +23,7 @@ pub use assembly::SearchAssembly;
 use coordinator::{ManualRebuildResult, SearchCoordinator};
 pub use coordinator::{SearchRebuildProgressView, SearchStatusSnapshot};
 pub use projection::SearchProjectionBuilder;
+pub use task_scope::SearchTaskError;
 
 #[derive(Debug, Error)]
 pub enum SearchShutdownError {
@@ -223,12 +224,12 @@ impl SearchFacade {
     /// Notify the search subsystem that the encryption session just became ready.
     ///
     /// Drives any rebuild or purge that a locked cold start could not run.
-    pub(crate) async fn on_session_ready(&self) {
-        self.coordinator.on_session_ready().await;
+    pub(crate) async fn on_session_ready(&self) -> Result<(), SearchTaskError> {
+        self.coordinator.on_session_ready().await
     }
 
-    pub(crate) async fn pause_background_activity(&self) {
-        self.coordinator.pause_background_activity().await;
+    pub(crate) async fn pause_background_activity(&self) -> Result<(), SearchTaskError> {
+        self.coordinator.pause_background_activity().await
     }
 
     pub async fn request_rebuild(&self) -> Result<SearchRebuildAcceptedView, SearchFacadeError> {

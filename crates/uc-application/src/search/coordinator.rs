@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Semaphore};
+use tokio::sync::{broadcast, mpsc, Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, info_span, instrument, warn, Instrument};
 
@@ -23,7 +23,7 @@ use uc_core::search::{
 use crate::clipboard::file_set_query::load_has_directory_structure;
 use crate::search::mutation_gate::SearchMutationGate;
 use crate::search::task_scope::SearchTaskScope;
-use crate::search::{SearchProjectionBuilder, SearchStatusView};
+use crate::search::{SearchProjectionBuilder, SearchStatusView, SearchTaskError};
 
 pub const REASON_INITIAL_BACKFILL: &str = "initial_backfill";
 pub const REASON_VERSION_MISMATCH: &str = "version_mismatch";
@@ -275,16 +275,11 @@ impl SearchCoordinator {
     #[instrument(name = "search.startup_evaluation", level = "info", skip(self))]
     async fn startup_evaluation(&self) {
         let owner = self.clone();
-        let (done, completion) = oneshot::channel();
-        if self
-            .task_scope
-            .spawn("search.startup", move |cancel| async move {
+        self.task_scope
+            .run("search.startup", move |cancel| async move {
                 owner.evaluate_startup(&cancel).await;
-                let _ = done.send(());
             })
-        {
-            let _ = completion.await;
-        }
+            .await;
     }
 
     async fn evaluate_startup(&self, cancel: &CancellationToken) {
@@ -378,9 +373,10 @@ impl SearchCoordinator {
     /// purge cannot run and would otherwise stay owed until the next process
     /// restart. This drives them the moment the session unlocks. Guarded so a
     /// rebuild already in progress is not duplicated.
-    pub async fn on_session_ready(&self) {
+    pub async fn on_session_ready(&self) -> Result<(), SearchTaskError> {
+        self.task_scope.result()?;
         if !self.task_scope.reopen() {
-            return;
+            return Ok(());
         }
         // If a rebuild is already running it holds the rebuild lock; it will run
         // the purge itself on completion, so there is nothing to do here.
@@ -392,14 +388,15 @@ impl SearchCoordinator {
             }
             Err(_) => {
                 debug!("search coordinator: session ready while rebuild in progress, skipping");
-                return;
+                return Ok(());
             }
         }
         self.startup_evaluation().await;
+        self.task_scope.result()
     }
 
-    pub async fn pause_background_activity(&self) {
-        self.task_scope.close(false).await;
+    pub async fn pause_background_activity(&self) -> Result<(), SearchTaskError> {
+        self.task_scope.close(false).await
     }
 
     /// Schedule a re-projection repair for entries whose stored render payload
@@ -418,23 +415,19 @@ impl SearchCoordinator {
                 Err(_) => continue,
             };
             let key = entry_id.to_string();
-            {
-                let mut in_flight = match self.repair_in_flight.try_lock() {
-                    Ok(g) => g,
-                    Err(_) => {
-                        // Contended; skip this report — a later query re-reports it.
-                        // (`permit` drops here, releasing the slot.)
-                        continue;
-                    }
-                };
-                if !in_flight.insert(key.clone()) {
-                    // Already being repaired. (`permit` drops here.)
+            let mut registered = match self.repair_in_flight.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    // 后续查询可再次报告，等待锁时不额外积压修复任务。
                     continue;
                 }
+            };
+            if !registered.insert(key.clone()) {
+                continue;
             }
             let deps = Arc::clone(&self.deps);
             let in_flight = Arc::clone(&self.repair_in_flight);
-            self.task_scope.spawn("search.repair", move |cancel| {
+            let accepted = self.task_scope.spawn("search.repair", move |cancel| {
                 async move {
                     // Hold the permit for the whole repair so concurrency stays
                     // capped at `MAX_CONCURRENT_REPAIRS`.
@@ -446,6 +439,9 @@ impl SearchCoordinator {
                 }
                 .instrument(info_span!("search.repair_entry"))
             });
+            if !accepted {
+                registered.remove(&key);
+            }
         }
     }
 
@@ -615,7 +611,7 @@ impl SearchCoordinator {
                 cancel.cancelled().await;
             } => {}
         }
-        self.task_scope.close(true).await;
+        self.task_scope.close(true).await?;
         info!("search coordinator cancelled");
         Ok(())
     }
@@ -1482,7 +1478,9 @@ mod tests {
             let coordinator = Arc::clone(&coordinator);
             tokio::spawn(async move { coordinator.pause_background_activity().await })
         };
-        finish_blocked_work(pausing, &dropped, &release).await;
+        finish_blocked_work(pausing, &dropped, &release)
+            .await
+            .unwrap();
         assert!(dropped.load(Ordering::SeqCst));
         assert!(coordinator.task_scope.is_empty());
     }
@@ -1593,6 +1591,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn background_failure_reaches_pause_resume_and_runtime_shutdown() {
+        let (deps, started, dropped, release) = blocking_coordinator_deps();
+        let runtime = crate::search::runtime::SearchRuntime::start(deps);
+        let facade = runtime.facade();
+        started.notified().await;
+        assert!(facade
+            .coordinator
+            .task_scope
+            .spawn("search.test.failure", |_| async {
+                panic!("private-search-failure");
+            }));
+        let pausing = {
+            let facade = Arc::clone(&facade);
+            tokio::spawn(async move { facade.pause_background_activity().await })
+        };
+        let error = finish_blocked_work(pausing, &dropped, &release)
+            .await
+            .unwrap_err();
+        assert!(error.failures()[0].is_panic());
+        assert!(facade.on_session_ready().await.is_err());
+        let error = runtime.shutdown().await.unwrap_err();
+        let crate::search::SearchShutdownError::Coordinator { source } = error else {
+            panic!("expected coordinator failure");
+        };
+        assert!(source.downcast_ref::<SearchTaskError>().unwrap().failures()[0].is_panic());
+    }
+
+    #[tokio::test]
+    async fn rejected_repair_does_not_block_a_later_retry() {
+        let (coordinator, _, _, _) = blocking_coordinator();
+        coordinator.pause_background_activity().await.unwrap();
+        let entry_id = EntryId::new();
+        coordinator.schedule_repair(vec![entry_id]);
+        assert!(coordinator.repair_in_flight.lock().await.is_empty());
+        assert_eq!(
+            coordinator.repair_semaphore.available_permits(),
+            MAX_CONCURRENT_REPAIRS
+        );
+    }
+
+    #[tokio::test]
     async fn search_runtime_pauses_for_lock_and_restarts_after_session_resume() {
         let (deps, rebuild_started, rebuild_dropped, release) = blocking_coordinator_deps();
         let runtime = crate::search::runtime::SearchRuntime::start(deps);
@@ -1605,7 +1644,9 @@ mod tests {
             let facade = Arc::clone(&facade);
             tokio::spawn(async move { facade.pause_background_activity().await })
         };
-        finish_blocked_work(pausing, &rebuild_dropped, &release).await;
+        finish_blocked_work(pausing, &rebuild_dropped, &release)
+            .await
+            .unwrap();
         assert!(
             rebuild_dropped.load(Ordering::SeqCst),
             "session pause returned before the active rebuild stopped"
@@ -1618,7 +1659,7 @@ mod tests {
         );
 
         rebuild_dropped.store(false, Ordering::SeqCst);
-        facade.on_session_ready().await;
+        facade.on_session_ready().await.unwrap();
         tokio::time::timeout(Duration::from_secs(1), rebuild_started.notified())
             .await
             .expect("session resume did not restart search coordination");
