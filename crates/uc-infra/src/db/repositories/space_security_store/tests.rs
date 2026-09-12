@@ -211,6 +211,49 @@ struct RawCiphertexts {
     encrypted_stage: Option<Vec<u8>>,
 }
 
+#[tokio::test]
+async fn locally_activated_revocation_does_not_block_next_member_removal_after_restart() {
+    for distributing in [false, true] {
+        let (repo, pool, _tempdir) = make_repo();
+        seed_current_space(&repo).await;
+        let first = prepared("first-removal");
+        repo.begin_revocation(&first).await.unwrap();
+        repo.stage_revocation(&staged(first.clone())).await.unwrap();
+        repo.activate_revocation(first.revocation_id(), 120)
+            .await
+            .unwrap();
+        if distributing {
+            repo.start_distribution(first.revocation_id(), 130)
+                .await
+                .unwrap();
+        }
+        let repo = reopen_repo(&pool);
+        let second = RevocationRecord::prepare(
+            RevocationId::from_string("second-removal").unwrap(),
+            SpaceId::from_str("space-sensitive"),
+            DeviceId::new("another-removed-device"),
+            GroupEpoch::new(2),
+            140,
+        )
+        .unwrap();
+        assert!(matches!(
+            repo.begin_revocation(&second).await.unwrap(),
+            BeginRevocationOutcome::Begun(_)
+        ));
+        assert_eq!(repo.list_incomplete_revocations().await.unwrap().len(), 2);
+        let previous = repo
+            .load_staged_revocation(first.revocation_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(previous.outbox().len(), 2);
+        assert!(previous
+            .outbox()
+            .iter()
+            .all(|message| !message.is_confirmed()));
+    }
+}
+
 #[derive(QueryableByName)]
 struct RawSpaceCiphertext {
     #[diesel(sql_type = Text)]

@@ -12,6 +12,8 @@ const INVITATION_INVALID_STATE_CODE: u32 = 1221;
 const INVITATION_INVALID_INPUT_CODE: u32 = 1222;
 const INVITATION_UNAVAILABLE_CODE: u32 = 1223;
 const INVITATION_FAILED_CODE: u32 = 1224;
+const INVITATION_RECONCILIATION_PENDING_CODE: u32 = 1225;
+const INVITATION_RECOVERY_REQUIRED_CODE: u32 = 1226;
 
 pub async fn execute_issue_invitation(facade: &AppFacade) -> Result<OperationResult, EngineError> {
     let invitation = facade
@@ -41,12 +43,12 @@ fn map_issue_invitation_error(error: IssuePairingInvitationError) -> EngineError
             true,
         ),
         IssuePairingInvitationError::MembershipReconciliationInProgress => EngineError::new(
-            INVITATION_INVALID_STATE_CODE,
+            INVITATION_RECONCILIATION_PENDING_CODE,
             EngineErrorCategory::InvalidState,
             true,
         ),
         IssuePairingInvitationError::MembershipReconciliationRequired => EngineError::new(
-            INVITATION_INVALID_STATE_CODE,
+            INVITATION_RECOVERY_REQUIRED_CODE,
             EngineErrorCategory::InvalidState,
             false,
         ),
@@ -68,6 +70,33 @@ fn map_issue_invitation_error(error: IssuePairingInvitationError) -> EngineError
         IssuePairingInvitationError::Internal(_) => {
             error!(error = %error, "issue invitation failed");
             EngineError::new(INVITATION_FAILED_CODE, EngineErrorCategory::Internal, false)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invitation_state_failures_keep_distinct_reasons() {
+        for (error, code, retryable) in [
+            (IssuePairingInvitationError::NetworkNotStarted, 1221, true),
+            (
+                IssuePairingInvitationError::MembershipReconciliationInProgress,
+                1225,
+                true,
+            ),
+            (
+                IssuePairingInvitationError::MembershipReconciliationRequired,
+                1226,
+                false,
+            ),
+        ] {
+            let error = map_issue_invitation_error(error);
+            assert_eq!(error.code(), code);
+            assert_eq!(error.category(), EngineErrorCategory::InvalidState);
+            assert_eq!(error.is_retryable(), retryable);
         }
     }
 }

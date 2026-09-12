@@ -179,7 +179,12 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                             );
                             continue;
                         }
-                        has_incomplete = true;
+                        // 本地安全状态已提交后的远端确认不能阻塞下一次本地移除。
+                        // 旧记录和 outbox 继续保留，由原恢复流程负责投递与确认。
+                        has_incomplete |= !matches!(
+                            existing.status(),
+                            RevocationStatus::Activated | RevocationStatus::Distributing
+                        );
                         if existing.target_device_id() == prepared.target_device_id() {
                             return Ok(BeginRevocationOutcome::Existing(existing));
                         }

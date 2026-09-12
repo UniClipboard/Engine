@@ -3051,6 +3051,72 @@ async fn f0_partitioned_sponsors_create_isolated_sibling_branches() {
 
 // 声明式拓扑脚本只能通过稳定 Engine operation 观察和推进节点。
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn offline_member_returns_after_repeated_invitation_cancellation_and_new_join() {
+    let rendezvous = mount_rendezvous().await;
+    let mut topology = MembershipTopology::new(rendezvous.uri());
+    topology
+        .run(&[
+            TopologyAction::Start { node: "A" },
+            TopologyAction::Start { node: "B" },
+            TopologyAction::Start { node: "C" },
+            TopologyAction::Create { node: "A" },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "B",
+            },
+        ])
+        .await;
+    topology
+        .wait_for_equivalent_branch_named(&["A", "B"], 2, "initial members")
+        .await;
+    topology.stop("B").await;
+    let before = topology.diagnostics("A").await;
+    for _ in 0..3 {
+        issue_invitation(topology.engine("A")).await;
+        topology
+            .engine("A")
+            .execute(Operation::CancelInvitation)
+            .await
+            .unwrap();
+        let OperationResult::SetupState(setup) = topology
+            .engine("A")
+            .execute(Operation::QuerySetupState)
+            .await
+            .unwrap()
+        else {
+            panic!("expected setup state");
+        };
+        assert!(setup.current_invitation.is_none());
+        let after = topology.diagnostics("A").await;
+        assert_eq!(after.head_event_id, before.head_event_id);
+        assert_eq!(after.group_epoch, before.group_epoch);
+        assert_eq!(after.effective_member_count, 2);
+    }
+    topology.join("A", "C").await;
+    let returning = topology.harnesses.get("B").unwrap().start().await;
+    topology.engines.insert("B".to_owned(), returning);
+    topology
+        .wait_for_equivalent_branch_named(
+            &["A", "B", "C"],
+            3,
+            "offline member catches new admission",
+        )
+        .await;
+    let epoch = topology.diagnostics("A").await.group_epoch;
+    topology.wait_for_group_epoch(&["B", "C"], epoch).await;
+    for node in ["A", "B", "C"] {
+        wait_for_peer_refresh(topology.engine(node), node).await;
+    }
+    let text = "returning member after cancelled invitations";
+    assert_eq!(topology.send("A", "B", text).await.total_accepted, 1);
+    wait_for_received_text(topology.engine("B"), text).await;
+    let reverse = "returning member can send";
+    assert_eq!(topology.send("B", "C", reverse).await.total_accepted, 1);
+    wait_for_received_text(topology.engine("C"), reverse).await;
+    topology.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn topology_script_builds_a_two_node_space_through_public_operations() {
     uc_engine::init_test_tracing();
     let rendezvous = mount_rendezvous().await;
@@ -3080,6 +3146,59 @@ async fn topology_script_builds_a_two_node_space_through_public_operations() {
         .await;
     topology.shutdown().await;
     uc_engine::flush_test_tracing();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn offline_member_catches_multiple_removals_without_blocking_new_invitations() {
+    let rendezvous = mount_rendezvous().await;
+    let mut topology = MembershipTopology::new(rendezvous.uri());
+    for node in ["A", "B", "C", "D"] {
+        topology.start(node).await;
+    }
+    topology.create("A").await;
+    for node in ["B", "C", "D"] {
+        topology.join("A", node).await;
+    }
+    topology
+        .wait_for_equivalent_branch_named(&["A", "B", "C", "D"], 4, "initial four members")
+        .await;
+    for node in ["B", "C", "D"] {
+        topology.stop(node).await;
+    }
+    for node in ["C", "D"] {
+        topology.remove("A", node).await;
+        issue_invitation(topology.engine("A")).await;
+        topology
+            .engine("A")
+            .execute(Operation::CancelInvitation)
+            .await
+            .unwrap();
+    }
+    topology.restart("A").await;
+    issue_invitation(topology.engine("A")).await;
+    let returning = topology.harnesses.get("B").unwrap().start().await;
+    topology.engines.insert("B".to_owned(), returning);
+    for _ in 0..2 {
+        topology.wait_for_pending_change(&["B"]).await;
+        topology
+            .decide_pending_change("B", PendingChangeChoice::Apply)
+            .await;
+        if topology.diagnostics("B").await.effective_member_count == 2 {
+            break;
+        }
+    }
+    topology
+        .wait_for_equivalent_branch_named(&["A", "B"], 2, "returning member accepts removals")
+        .await;
+    let epoch = topology.diagnostics("A").await.group_epoch;
+    topology.wait_for_group_epoch(&["B"], epoch).await;
+    for node in ["A", "B"] {
+        wait_for_peer_refresh(topology.engine(node), node).await;
+    }
+    let text = "multiple offline removals recovered";
+    assert_eq!(topology.send("A", "B", text).await.total_accepted, 1);
+    wait_for_received_text(topology.engine("B"), text).await;
+    topology.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]

@@ -21,6 +21,102 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 static ENGINE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[tokio::test]
+#[ignore = "需要显式提供本地资料，只操作临时副本"]
+async fn invitation_from_isolated_profile_copy() {
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let source = PathBuf::from(std::env::var_os("UC_INVITATION_FIXTURE_DATA").unwrap());
+    let temp = tempfile::tempdir().unwrap();
+    let private = temp.path().join("private");
+    let mut pending = vec![source.clone()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let kind = entry.file_type().unwrap();
+            assert!(!kind.is_symlink());
+            if kind.is_dir() {
+                pending.push(path);
+            } else if kind.is_file() {
+                let destination = private.join(path.strip_prefix(&source).unwrap());
+                std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                std::fs::copy(path, destination).unwrap();
+            }
+        }
+    }
+    let storage = MemoryHostSecureStorage::default();
+    for entry in std::fs::read_dir(private.join("keyring")).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_stem().unwrap().to_str().unwrap();
+        let bytes = (0..name.len())
+            .step_by(2)
+            .map(|offset| u8::from_str_radix(&name[offset..offset + 2], 16).unwrap())
+            .collect();
+        storage
+            .set(
+                &String::from_utf8(bytes).unwrap(),
+                &std::fs::read(path).unwrap(),
+            )
+            .unwrap();
+    }
+    for allow_secure_storage_unlock in [false, false, true] {
+        let (engine, _events) = Engine::start(
+            EngineConfig::new("1.2.3"),
+            persistent_engine_host(temp.path(), storage.clone()),
+        )
+        .await
+        .unwrap();
+        engine
+            .execute(crate::Operation::RecoverSession(
+                crate::RecoverSessionInput {
+                    allow_secure_storage_unlock,
+                },
+            ))
+            .await
+            .unwrap();
+        let state = engine
+            .execute(crate::Operation::QueryEncryptionState)
+            .await
+            .unwrap();
+        assert!(matches!(
+            state,
+            crate::OperationResult::EncryptionState(crate::EncryptionStateSummary {
+                initialized: true,
+                session_ready: true,
+            })
+        ));
+        let history = engine
+            .execute(crate::Operation::ListHistoryEntries(
+                crate::ListHistoryEntriesInput {
+                    limit: 1,
+                    offset: 0,
+                },
+            ))
+            .await
+            .unwrap();
+        assert!(
+            matches!(history, crate::OperationResult::HistoryEntries(entries) if !entries.is_empty())
+        );
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let invitation = loop {
+            let result = engine.execute(crate::Operation::IssueInvitation).await;
+            if result.is_ok() || tokio::time::Instant::now() >= deadline {
+                break result;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        };
+        engine
+            .shutdown(std::time::Duration::from_secs(15))
+            .await
+            .unwrap();
+        assert!(
+            invitation.is_ok(),
+            "readable profile must issue invitation: {:?}",
+            invitation.err()
+        );
+    }
+}
+
 async fn next_engine_event_matching(
     events: &mut crate::EventStream,
     predicate: impl Fn(&EngineEvent) -> bool,

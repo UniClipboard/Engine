@@ -815,6 +815,8 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 ## 文档维护记录
 
+- 2026-09-12：成员撤销区分本地安全变更未完成与已激活但仍待远端确认；只有前者阻止下一次本地移除。原记录与消息继续承担远端补齐责任，Application 邀请资格检查不变。邀请错误分别保留网络未启动、成员关系处理中和需要恢复的原因；验收见[执行记录](../exec-plans/active/2026-09-12-invitation-admission-recovery.md)。
+
 本节只记录会改变长期架构理解的修订，不记录单个测试、重命名、格式化或中间切片。实现过程应进入提交历史、规格实施清单或任务记录。
 
 启动资料升级通过[只读启动通道](../design-docs/startup-upgrade-progress.md)提供产品摘要；`ProfileStorageUpgrade` 仍负责完整升级和恢复，Engine 仅在组合根转换摘要并结算启动结果。进度不作为恢复依据，也不属于遥测接口。
