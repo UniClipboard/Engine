@@ -5,16 +5,15 @@ use std::sync::Arc;
 use hkdf::Hkdf;
 use sha2::Sha256;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use uc_core::ports::{SecureStorageError, SecureStoragePort};
+use uc_core::ports::SecureStoragePort;
 use zeroize::Zeroizing;
 
 use super::super::crypto_model::EncryptedBlob;
 use super::super::{v1_aead, MasterKey};
-use super::catalog;
 use super::model::{PersistedVault, ProfileContentKeyVaultError, MAX_VAULT_PLAINTEXT_BYTES};
+use super::{catalog, key_store};
 
 const VAULT_FILE: &str = "profile-content-key-vault-v1.json";
-pub(in crate::security) const VAULT_KEY_NAME: &str = "profile_content_vault_key:v1";
 const VAULT_PURPOSE: &[u8] = b"uniclipboard/profile-content-key-vault/v1\0";
 const PROFILE_SEARCH_ROOT_INFO: &[u8] = b"uniclipboard/profile-search-root/v1\0";
 const MAX_ENCRYPTED_VAULT_BYTES: usize = 8 * 1024 * 1024;
@@ -86,7 +85,7 @@ impl VaultPersistence {
         })?;
         let aad = self.aad();
         validate_framing(&encrypted, &aad)?;
-        let key = self.load_existing_key()?;
+        let key = key_store::load_existing(Arc::clone(&self.secure_storage)).await?;
         let plaintext = Zeroizing::new(
             v1_aead::decrypt_blob_xchacha(&key, &encrypted.nonce, &encrypted.ciphertext, &aad)
                 .map_err(|source| ProfileContentKeyVaultError::Corrupt {
@@ -109,7 +108,7 @@ impl VaultPersistence {
         &self,
         vault: &PersistedVault,
     ) -> Result<MasterKey, ProfileContentKeyVaultError> {
-        let key = self.load_or_create_key_for_install()?;
+        let key = key_store::load_or_create(Arc::clone(&self.secure_storage)).await?;
         let plaintext = Zeroizing::new(postcard::to_stdvec(vault).map_err(|source| {
             ProfileContentKeyVaultError::InvalidMaterial {
                 source: anyhow::Error::new(source).context("encode profile content key vault"),
@@ -200,43 +199,6 @@ impl VaultPersistence {
     #[cfg(test)]
     pub(super) fn path(&self) -> &Path {
         &self.path
-    }
-
-    fn load_or_create_key_for_install(&self) -> Result<MasterKey, ProfileContentKeyVaultError> {
-        if let Some(key) = self.read_key()? {
-            return Ok(key);
-        }
-        let generated =
-            MasterKey::generate().map_err(|source| ProfileContentKeyVaultError::SecureStorage {
-                source: anyhow::Error::new(source).context("generate profile content vault key"),
-            })?;
-        self.secure_storage
-            .set(VAULT_KEY_NAME, generated.as_bytes())
-            .map_err(secure_storage_error)?;
-        self.load_existing_key()
-    }
-
-    fn load_existing_key(&self) -> Result<MasterKey, ProfileContentKeyVaultError> {
-        self.read_key()?
-            .ok_or_else(|| ProfileContentKeyVaultError::Corrupt {
-                source: anyhow::anyhow!("profile content vault key is missing"),
-            })
-    }
-
-    fn read_key(&self) -> Result<Option<MasterKey>, ProfileContentKeyVaultError> {
-        self.secure_storage
-            .get(VAULT_KEY_NAME)
-            .map_err(secure_storage_error)?
-            .map(|bytes| {
-                let bytes = Zeroizing::new(bytes);
-                MasterKey::from_bytes(&bytes).map_err(|source| {
-                    ProfileContentKeyVaultError::Corrupt {
-                        source: anyhow::Error::new(source)
-                            .context("decode profile content vault key"),
-                    }
-                })
-            })
-            .transpose()
     }
 
     fn aad(&self) -> Vec<u8> {
@@ -349,12 +311,6 @@ fn sync_parent_directory(parent: &Path) -> std::io::Result<()> {
 #[cfg(windows)]
 fn sync_parent_directory(_parent: &Path) -> std::io::Result<()> {
     Ok(())
-}
-
-fn secure_storage_error(source: SecureStorageError) -> ProfileContentKeyVaultError {
-    ProfileContentKeyVaultError::SecureStorage {
-        source: anyhow::Error::new(source).context("access profile content vault key"),
-    }
 }
 
 fn storage_error(source: std::io::Error) -> ProfileContentKeyVaultError {

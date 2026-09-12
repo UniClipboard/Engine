@@ -281,10 +281,16 @@ impl BindingHost for MemoryHost {
     }
 
     fn secure_storage_get(&self, key: String) -> Result<Option<Vec<u8>>, HostBindingError> {
-        if key.starts_with("kek:v1:") {
-            if let Some(gate) = lock(&self.secure_read_gate).take() {
-                gate.wait();
+        let gate = {
+            let mut gate = lock(&self.secure_read_gate);
+            if gate.as_ref().is_some_and(|gate| gate.matches(&key)) {
+                gate.take()
+            } else {
+                None
             }
+        };
+        if let Some(gate) = gate {
+            gate.wait();
         }
         Ok(self.values().get(&key).cloned())
     }

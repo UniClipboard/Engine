@@ -1,4 +1,5 @@
 mod catalog;
+mod key_store;
 mod model;
 mod persistence;
 mod read_state;
@@ -12,10 +13,10 @@ use uc_core::membership::{ContentKeyId, GroupEpoch, SpaceKeyMaterial};
 use uc_core::ports::SecureStoragePort;
 
 use super::MasterKey;
+pub(super) use key_store::VAULT_KEY_NAME as PROFILE_CONTENT_VAULT_KEY_NAME;
 pub(crate) use model::ProfileSearchCatalog;
 pub use model::{InstalledProfileCatalog, ProfileContentKeyVaultError, ResolvedProfileContentKey};
 use persistence::VaultPersistence;
-pub(in crate::security) use persistence::VAULT_KEY_NAME as PROFILE_CONTENT_VAULT_KEY_NAME;
 pub(crate) use read_state::ProfileKeyReadLease;
 use read_state::{lock, InvalidateOnDrop, ReadState, ReadView};
 

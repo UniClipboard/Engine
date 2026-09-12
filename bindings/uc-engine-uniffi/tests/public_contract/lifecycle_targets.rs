@@ -8,11 +8,16 @@ use super::{
 };
 
 pub(super) struct ReadGate {
+    key_prefix: &'static str,
     entered: mpsc::Sender<()>,
     release: mpsc::Receiver<()>,
 }
 
 impl ReadGate {
+    pub(super) fn matches(&self, key: &str) -> bool {
+        key.starts_with(self.key_prefix)
+    }
+
     pub(super) fn wait(self) {
         self.entered.send(()).unwrap();
         let _ = self.release.recv_timeout(Duration::from_secs(15));
@@ -21,6 +26,15 @@ impl ReadGate {
 
 #[test]
 fn a_pause_reaches_the_engine_while_the_previous_mobile_resume_is_waiting() {
+    pause_during_key_read("kek:v1:");
+}
+
+#[test]
+fn a_pause_reaches_the_engine_while_the_profile_vault_key_is_waiting() {
+    pause_during_key_read("profile_content_vault_key:v1");
+}
+
+fn pause_during_key_read(key_prefix: &'static str) {
     let _guard = engine_test_guard();
     let root = tempfile::tempdir().unwrap();
     let host = Arc::new(MemoryHost::new(root.path()));
@@ -42,6 +56,7 @@ fn a_pause_reaches_the_engine_while_the_previous_mobile_resume_is_waiting() {
     let (entered, waiting) = mpsc::channel();
     let (release, proceed) = mpsc::channel();
     *lock(&host.secure_read_gate) = Some(ReadGate {
+        key_prefix,
         entered,
         release: proceed,
     });

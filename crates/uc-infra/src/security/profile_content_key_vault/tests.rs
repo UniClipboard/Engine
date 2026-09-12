@@ -12,6 +12,8 @@ use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use super::persistence::StoreProbe;
 use super::{ProfileContentKeyVault, ProfileContentKeyVaultError, PROFILE_CONTENT_VAULT_KEY_NAME};
 
+mod secure_access;
+
 #[derive(Default)]
 struct MemorySecureStorage(
     Mutex<BTreeMap<String, Vec<u8>>>,
