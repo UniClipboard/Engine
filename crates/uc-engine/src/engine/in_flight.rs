@@ -18,8 +18,13 @@ pub(crate) struct InFlightOperations {
 }
 
 struct InFlightOperationState {
-    operations: Mutex<HashMap<String, CancellationToken>>,
+    operations: Mutex<HashMap<String, OperationState>>,
     changed: Notify,
+}
+
+struct OperationState {
+    cancellation: CancellationToken,
+    terminal_reported: bool,
 }
 
 impl InFlightOperations {
@@ -40,7 +45,13 @@ impl InFlightOperations {
             .operations
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(id.clone(), cancellation.clone());
+            .insert(
+                id.clone(),
+                OperationState {
+                    cancellation: cancellation.clone(),
+                    terminal_reported: false,
+                },
+            );
         RegisteredOperation {
             id,
             cancellation,
@@ -58,7 +69,7 @@ impl InFlightOperations {
         if removed.is_some() {
             self.state.changed.notify_one();
         }
-        removed.is_some_and(|cancellation| !cancellation.is_cancelled())
+        removed.is_some_and(|operation| !operation.terminal_reported)
     }
 
     pub(crate) async fn wait_until_empty(&self, deadline: Duration) -> bool {
@@ -89,10 +100,11 @@ impl InFlightOperations {
             .operations
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .filter(|(_, cancellation)| !cancellation.is_cancelled())
-            .map(|(operation_id, cancellation)| {
-                cancellation.cancel();
+            .iter_mut()
+            .filter(|(_, operation)| !operation.terminal_reported)
+            .map(|(operation_id, operation)| {
+                operation.terminal_reported = true;
+                operation.cancellation.cancel();
                 operation_id.clone()
             })
             .collect();
@@ -105,6 +117,19 @@ impl InFlightOperations {
 mod tests {
     use super::InFlightOperations;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn waiter_cancellation_does_not_consume_the_terminal_notification() {
+        let operations = InFlightOperations::new();
+        let registered = operations.register("test").await;
+        registered.cancellation.cancel();
+        assert!(operations.finish(&registered.id).await);
+        let registered = operations.register("test").await;
+        registered.cancellation.cancel();
+        assert_eq!(operations.cancel_all().await, vec![registered.id.clone()]);
+        assert!(operations.cancel_all().await.is_empty());
+        assert!(!operations.finish(&registered.id).await);
+    }
 
     #[tokio::test]
     async fn cancellation_does_not_report_resources_released_until_the_operation_exits() {

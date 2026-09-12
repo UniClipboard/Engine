@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,6 +12,9 @@ mod in_flight;
 mod lifecycle;
 #[cfg(test)]
 mod lifecycle_tests;
+mod operation;
+#[cfg(test)]
+mod operation_tests;
 mod shutdown;
 #[cfg(test)]
 mod shutdown_tests;
@@ -137,63 +140,6 @@ impl Engine {
 
     pub async fn lifecycle_state(&self) -> EngineState {
         *self.state.lock().await
-    }
-
-    pub async fn execute(&self, operation: Operation) -> Result<OperationResult, EngineError> {
-        let registered = {
-            let _lifecycle = self.lifecycle_gate.lock().await;
-            if self.stop_requested.load(Ordering::Acquire)
-                || !self.state.lock().await.accepts_operations()
-            {
-                return Err(invalid_state_error());
-            }
-            self.operations.register("operation").await
-        };
-
-        let result = tokio::select! {
-            _ = registered.cancellation.cancelled() => Err(operation_cancelled_error()),
-            result = self.runtime.execute(operation, registered.cancellation.clone()) => result,
-        };
-
-        let should_emit_terminal = self.operations.finish(&registered.id).await;
-        if should_emit_terminal {
-            self.events.send(EngineEvent::OperationFinished {
-                operation_id: registered.id.clone(),
-                terminal: terminal_for_result(&result),
-            });
-        }
-
-        result
-    }
-
-    #[cfg(feature = "dev-tools")]
-    pub async fn execute_dev(
-        &self,
-        operation: DevOperation,
-    ) -> Result<DevOperationResult, EngineError> {
-        let registered = {
-            let _lifecycle = self.lifecycle_gate.lock().await;
-            if self.stop_requested.load(Ordering::Acquire)
-                || !self.state.lock().await.accepts_operations()
-            {
-                return Err(invalid_state_error());
-            }
-            self.operations.register("dev-operation").await
-        };
-
-        let result = tokio::select! {
-            _ = registered.cancellation.cancelled() => Err(operation_cancelled_error()),
-            result = self.runtime.execute_dev(operation, registered.cancellation.clone()) => result,
-        };
-
-        let should_emit_terminal = self.operations.finish(&registered.id).await;
-        if should_emit_terminal {
-            self.events.send(EngineEvent::OperationFinished {
-                operation_id: registered.id.clone(),
-                terminal: terminal_for_result(&result),
-            });
-        }
-        result
     }
 }
 
@@ -372,7 +318,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn shutdown_does_not_wait_for_an_abandoned_operation_future() {
+    async fn abandoned_waiter_cancels_cooperative_work_before_shutdown() {
         let runtime = Arc::new(FakeRuntime {
             block_operations: AtomicBool::new(true),
             ..FakeRuntime::default()

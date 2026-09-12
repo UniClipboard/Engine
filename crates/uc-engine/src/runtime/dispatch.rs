@@ -512,9 +512,14 @@ impl EngineRuntime for ProductionRuntime {
         let result = if matches!(operation_kind, crate::OperationKind::ResetSpace) {
             operation.await
         } else {
+            tokio::pin!(operation);
             tokio::select! {
-                _ = session_cancellation.cancelled() => Err(super::operation_unavailable_error()),
-                result = operation => result,
+                _ = session_cancellation.cancelled() => {
+                    // 停止通知交给动作的安全边界处理，不能丢弃仍等待磁盘工作的调用。
+                    cancellation.cancel();
+                    operation.await
+                },
+                result = &mut operation => result,
             }
         };
         if matches!(operation_kind, crate::OperationKind::UnlockSpace) && result.is_ok() {
