@@ -37,6 +37,7 @@ use crate::facade::clipboard::facade::ClipboardSyncDeps;
 use crate::facade::clipboard::ClipboardSyncFacade;
 use crate::facade::clipboard_history::{HistoryMaintenanceRuntime, HistoryMaintenanceRuntimeError};
 use crate::facade::clipboard_write::RestoreBroadcastTrigger;
+use crate::runtime_lifecycle::{RuntimeLifecyclePort, TransitionContext};
 use crate::search::{SearchAssembly, SearchShutdownError};
 use crate::settings::SettingsAssembly;
 use crate::space::SpaceAdmissionObservationRegistry;
@@ -611,6 +612,19 @@ impl ApplicationAssembly {
     }
 }
 
+#[async_trait::async_trait]
+impl RuntimeLifecyclePort for ApplicationAssembly {
+    async fn suspend(&self, _context: &TransitionContext) -> anyhow::Result<()> {
+        self.clipboard.suspend_background().await;
+        Ok(())
+    }
+
+    async fn resume(&self, _context: &TransitionContext) -> anyhow::Result<()> {
+        self.clipboard.resume_background().await;
+        Ok(())
+    }
+}
+
 /// Application 领域运行期的唯一关闭 owner。
 pub struct ApplicationRuntime {
     facade: Arc<AppFacade>,
@@ -649,6 +663,14 @@ impl FileTransferTimeoutRuntime {
             .is_err()
         {
             self.handle.abort();
+            if let Err(error) = self.handle.await {
+                if !error.is_cancelled() {
+                    tracing::warn!(
+                        error_kind = "join_failed",
+                        "file transfer timeout worker shutdown failed"
+                    );
+                }
+            }
         }
     }
 }

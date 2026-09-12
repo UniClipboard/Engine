@@ -86,6 +86,8 @@ pub enum ClipboardBackgroundError {
 pub trait ClipboardBackgroundPort: Send + Sync {
     async fn start(&self, task_registry: Arc<TaskRegistry>)
         -> Result<(), ClipboardBackgroundError>;
+    async fn suspend(&self);
+    async fn resume(&self);
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -250,6 +252,14 @@ impl ClipboardAssembly {
         .await?;
         self.background_ready.store(true, Ordering::Release);
         Ok(())
+    }
+
+    pub(crate) async fn suspend_background(&self) {
+        self.background.suspend().await;
+    }
+
+    pub(crate) async fn resume_background(&self) {
+        self.background.resume().await;
     }
 
     pub fn start_session(&self, session: ClipboardSessionDeps) -> ClipboardSession {
@@ -574,6 +584,8 @@ mod tests {
 
     #[async_trait]
     impl ClipboardBackgroundPort for BackgroundProbe {
+        async fn suspend(&self) {}
+        async fn resume(&self) {}
         async fn start(
             &self,
             _task_registry: Arc<TaskRegistry>,

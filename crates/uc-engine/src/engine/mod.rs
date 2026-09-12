@@ -7,6 +7,8 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) mod event_stream;
 mod in_flight;
+#[cfg(test)]
+mod shutdown_tests;
 pub(crate) mod startup;
 
 use crate::runtime::ProductionRuntime;
@@ -24,6 +26,7 @@ pub use startup::{StartupProgress, StartupProgressInput};
 const INVALID_STATE_CODE: u32 = 1001;
 const OPERATION_CANCELLED_CODE: u32 = 1002;
 const SHUTDOWN_COMPLETION_MARGIN: Duration = Duration::from_millis(100);
+const SUSPEND_OPERATION_DRAIN: Duration = Duration::from_secs(2);
 
 #[async_trait]
 pub(crate) trait EngineRuntime: Send + Sync {
@@ -193,6 +196,16 @@ impl Engine {
             _ => return Err(invalid_state_error()),
         }
 
+        if !self
+            .operations
+            .wait_until_empty(SUSPEND_OPERATION_DRAIN)
+            .await
+        {
+            return self.report_lifecycle_result(
+                LifecycleAction::Suspend,
+                Err(operation_cancelled_error()),
+            );
+        }
         self.report_lifecycle_result(LifecycleAction::Suspend, self.runtime.suspend().await)?;
         *self.state.lock().await = EngineState::Suspended;
         self.events.send(EngineEvent::StateChanged {
@@ -223,7 +236,7 @@ impl Engine {
             EngineState::Running => {
                 self.quiesce_locked(remaining_until(deadline_at)).await?;
             }
-            EngineState::Quiesced | EngineState::Suspended => {}
+            EngineState::Quiesced | EngineState::Suspended | EngineState::ShuttingDown => {}
             _ => return Err(invalid_state_error()),
         }
 
@@ -248,6 +261,7 @@ impl Engine {
                     error: error.clone(),
                 });
             }
+            return shutdown_result;
         }
         *self.state.lock().await = EngineState::Stopped;
         self.events.send(EngineEvent::StateChanged {
@@ -349,7 +363,7 @@ mod tests {
     use super::{Engine, EngineRuntime};
 
     #[derive(Default)]
-    struct FakeRuntime {
+    pub(super) struct FakeRuntime {
         execute_calls: AtomicUsize,
         block_operations: AtomicBool,
         operation_started: Notify,
@@ -357,9 +371,11 @@ mod tests {
         resume_calls: AtomicUsize,
         fail_suspend: AtomicBool,
         fail_resume: AtomicBool,
-        shutdown_calls: AtomicUsize,
+        pub(super) shutdown_calls: AtomicUsize,
         shutdown_deadline: StdMutex<Option<Duration>>,
-        fail_shutdown: AtomicBool,
+        pub(super) fail_shutdown: AtomicBool,
+        pub(super) block_shutdown: AtomicBool,
+        pub(super) shutdown_started: Notify,
     }
 
     #[async_trait]
@@ -409,6 +425,10 @@ mod tests {
         async fn shutdown(&self, deadline: Duration) -> Result<(), EngineError> {
             self.shutdown_calls.fetch_add(1, Ordering::SeqCst);
             *self.shutdown_deadline.lock().unwrap() = Some(deadline);
+            if self.block_shutdown.load(Ordering::SeqCst) {
+                self.shutdown_started.notify_one();
+                std::future::pending::<()>().await;
+            }
             if self.fail_shutdown.load(Ordering::SeqCst) {
                 return Err(EngineError::new(9001, EngineErrorCategory::Internal, false));
             }
@@ -658,28 +678,5 @@ mod tests {
 
         let runtime_deadline = runtime.shutdown_deadline.lock().unwrap().unwrap();
         assert!(runtime_deadline <= Duration::from_millis(900));
-    }
-
-    #[tokio::test]
-    async fn shutdown_failure_is_reported_before_stream_closes() {
-        let runtime = Arc::new(FakeRuntime {
-            fail_shutdown: AtomicBool::new(true),
-            ..FakeRuntime::default()
-        });
-        let (engine, mut events) = Engine::from_runtime(runtime, 8);
-
-        let error = engine
-            .shutdown(Duration::from_millis(50))
-            .await
-            .unwrap_err();
-        assert_eq!(error.category(), EngineErrorCategory::Internal);
-
-        let mut fatal = None;
-        while let Some(event) = events.next().await {
-            if let EngineEvent::Fatal { error } = event {
-                fatal = Some(error);
-            }
-        }
-        assert_eq!(fatal, Some(error));
     }
 }

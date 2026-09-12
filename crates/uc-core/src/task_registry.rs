@@ -83,7 +83,7 @@ impl TaskRegistry {
     ///
     /// 1. Cancels the root token (propagates to all child tokens)
     /// 2. Awaits `join_next()` in a loop with a deadline
-    /// 3. If the deadline fires before all tasks join, aborts the remaining tasks
+    /// 3. 宽限时间耗尽后取消剩余任务，并等待析构完成；不能把取消请求当作资源已释放。
     pub async fn shutdown(&self, timeout_duration: Duration) -> TaskShutdownReport {
         self.closed.store(true, Ordering::Release);
         self.token.cancel();
@@ -107,10 +107,10 @@ impl TaskRegistry {
                     while let Some(result) = tasks.try_join_next() {
                         add_join_result(&mut report, result);
                     }
-                    let remaining = tasks.len();
                     tasks.abort_all();
-                    tasks.detach_all();
-                    report.timed_out_count = report.timed_out_count.saturating_add(remaining);
+                    while let Some(result) = tasks.join_next().await {
+                        add_join_result(&mut report, result);
+                    }
                     return report;
                 }
             }
@@ -158,9 +158,12 @@ mod tests {
     #[tokio::test]
     async fn shutdown_aborts_tasks_that_ignore_cancellation_after_the_deadline() {
         let registry = TaskRegistry::new();
+        let resource = Arc::new(());
+        let held = Arc::clone(&resource);
         assert!(
             registry
-                .spawn(|_| async {
+                .spawn(move |_| async move {
+                    let _held = held;
                     std::future::pending::<()>().await;
                 })
                 .await
@@ -171,6 +174,7 @@ mod tests {
         assert_eq!(report.timed_out_count, 1);
         assert_eq!(report.completed_count, 0);
         assert_eq!(report.join_error_count, 0);
+        assert_eq!(Arc::strong_count(&resource), 1, "关闭完成必须释放任务资源");
     }
 
     #[tokio::test]

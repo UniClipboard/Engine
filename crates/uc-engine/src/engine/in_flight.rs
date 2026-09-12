@@ -54,12 +54,11 @@ impl InFlightOperations {
             .operations
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(operation_id)
-            .is_some();
-        if removed {
+            .remove(operation_id);
+        if removed.is_some() {
             self.state.changed.notify_one();
         }
-        removed
+        removed.is_some_and(|cancellation| !cancellation.is_cancelled())
     }
 
     pub(crate) async fn wait_until_empty(&self, deadline: Duration) -> bool {
@@ -88,14 +87,33 @@ impl InFlightOperations {
             .operations
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .drain()
+            .iter()
+            .filter(|(_, cancellation)| !cancellation.is_cancelled())
             .map(|(operation_id, cancellation)| {
                 cancellation.cancel();
-                operation_id
+                operation_id.clone()
             })
             .collect();
         self.state.changed.notify_one();
         cancelled
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InFlightOperations;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn cancellation_does_not_report_resources_released_until_the_operation_exits() {
+        let operations = InFlightOperations::new();
+        let registered = operations.register("test").await;
+        assert_eq!(operations.cancel_all().await, vec![registered.id.clone()]);
+        assert!(registered.cancellation.is_cancelled());
+        assert!(!operations.wait_until_empty(Duration::ZERO).await);
+        assert!(operations.cancel_all().await.is_empty());
+        drop(registered);
+        assert!(operations.wait_until_empty(Duration::ZERO).await);
     }
 }
 

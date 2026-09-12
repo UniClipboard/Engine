@@ -18,6 +18,7 @@ use uc_core::ports::clipboard::{
 use uc_core::ports::{ClockPort, ContentHashPort};
 use uc_core::TaskRegistry;
 
+use super::background_activity::BackgroundActivity;
 use crate::blob::BlobWriterPort;
 
 use super::{
@@ -28,6 +29,7 @@ use super::{
 const SPOOL_JANITOR_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 pub struct ClipboardBackgroundRuntime {
+    activity: Arc<BackgroundActivity>,
     representation_cache: Arc<RepresentationCache>,
     spool_manager: Arc<SpoolManager>,
     worker_rx: Mutex<Option<mpsc::Receiver<RepresentationId>>>,
@@ -63,6 +65,7 @@ impl ClipboardBackgroundRuntime {
         thumbnail_generator: Arc<dyn ThumbnailGeneratorPort>,
     ) -> Self {
         Self {
+            activity: Arc::new(BackgroundActivity::new()),
             representation_cache,
             spool_manager,
             worker_rx: Mutex::new(Some(worker_rx)),
@@ -135,11 +138,12 @@ impl ClipboardBackgroundPort for ClipboardBackgroundRuntime {
             self.worker_retry_max_attempts,
             self.worker_retry_backoff,
         );
+        let activity = Arc::clone(&self.activity);
         let _ = task_registry
             .spawn(|cancel| async move {
                 tokio::select! {
                     _ = cancel.cancelled() => info!("background clipboard blob worker stopped"),
-                    _ = worker.run() => info!("background clipboard blob worker completed"),
+                    _ = worker.run_with_activity(activity) => info!("background clipboard blob worker completed"),
                 }
             })
             .await;
@@ -150,21 +154,33 @@ impl ClipboardBackgroundPort for ClipboardBackgroundRuntime {
             Arc::clone(&self.clock),
             self.spool_ttl_days,
         );
+        let activity = Arc::clone(&self.activity);
         let _ = task_registry
             .spawn(|cancel| async move {
                 let mut interval = tokio::time::interval(SPOOL_JANITOR_INTERVAL);
                 loop {
                     tokio::select! {
                         _ = cancel.cancelled() => return,
-                        _ = interval.tick() => match janitor.run_once().await {
+                        _ = interval.tick() => {
+                            let _permit = activity.enter().await;
+                            match janitor.run_once().await {
                             Ok(removed) if removed > 0 => info!(removed, "removed expired spool entries"),
                             Ok(_) => {}
                             Err(error) => warn!(error = %error, "spool janitor sweep failed"),
+                            }
                         }
                     }
                 }
             })
             .await;
         Ok(())
+    }
+
+    async fn suspend(&self) {
+        self.activity.suspend().await;
+    }
+
+    async fn resume(&self) {
+        self.activity.resume().await;
     }
 }

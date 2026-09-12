@@ -50,6 +50,23 @@ impl ProfileContentKeyVault {
         lock(&self.reads).close();
     }
 
+    pub(crate) async fn suspend(&self) {
+        let _io = self.io_lock.lock().await;
+        lock(&self.reads).suspend();
+    }
+
+    pub(crate) fn resume(&self) -> Result<(), ProfileContentKeyVaultError> {
+        let mut state = lock(&self.reads);
+        if state.closed {
+            return Err(ProfileContentKeyVaultError::Closed);
+        }
+        if state.suspended {
+            state.lease = Some(Arc::new(self.persistence.acquire_lease()?));
+            state.suspended = false;
+        }
+        Ok(())
+    }
+
     // 租约与 generation 在同一临界区捕获；清理后重建的运行期不得
     // 接收持有旧租约的加载结果，否则可能出现有缓存却没有排他租约。
     fn operation_lease(

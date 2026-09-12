@@ -77,13 +77,13 @@ struct ProductionProfileRuntimeStopper {
 #[async_trait::async_trait]
 impl StopProfileRuntimePort for ProductionProfileRuntimeStopper {
     async fn stop_profile_runtime(&self) -> Result<(), ProfileFactoryResetCapabilityError> {
-        self.security_lifecycle.close_security_session();
         self.session_supervisor
-            .suspend()
+            .stop()
             .await
             .map_err(|_| ProfileFactoryResetCapabilityError)?;
-        self.session_supervisor.clear_factory();
         task_shutdown::shutdown_tasks(&self.tasks, Duration::from_millis(500)).await;
+        self.security_lifecycle.close_security_session();
+        self.session_supervisor.clear_factory();
         Ok(())
     }
 }
@@ -186,7 +186,8 @@ impl ProductionRuntime {
         let security_lifecycle = Arc::clone(&wired.sync_engine.security_lifecycle);
         let mut security_guard = StartupSecurityGuard(Some(Arc::clone(&security_lifecycle)));
         let host_adapters = wired.application.host_adapters();
-        let session_supervisor = Arc::new(SessionSupervisor::new(wired.application.clone()));
+        let session_supervisor =
+            SessionSupervisor::new(wired.application.clone(), Arc::clone(&security_lifecycle));
         let task_registry = Arc::new(TaskRegistry::new());
         let profile_runtime: Arc<dyn StopProfileRuntimePort> =
             Arc::new(ProductionProfileRuntimeStopper {

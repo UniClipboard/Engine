@@ -235,10 +235,7 @@ async fn initial_cleanup_does_not_block_startup_but_shutdown_drains_it() {
     );
     maintenance.cleanup_release.notify_one();
     shutdown.await.unwrap().unwrap();
-    assert_eq!(
-        maintenance.calls(),
-        vec!["reconcile", "cleanup", "retention"]
-    );
+    assert_eq!(maintenance.calls(), vec!["reconcile", "cleanup"]);
 }
 
 #[tokio::test]
@@ -258,4 +255,55 @@ async fn startup_still_waits_for_file_reference_safety_check() {
     assert_eq!(maintenance.calls(), vec!["reconcile"]);
     maintenance.reconcile_release.notify_one();
     startup.await.unwrap().shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_after_reconciliation_does_not_start_cache_cleanup() {
+    let maintenance = Arc::new(FakeHistoryMaintenance::new(0, false, false));
+    let runtime = HistoryMaintenanceRuntime::start_with_interval(
+        maintenance_port(&maintenance),
+        Duration::from_millis(5),
+    )
+    .await;
+    maintenance.wait_for_call_count(3).await;
+    maintenance.block_reconcile.store(true, Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            maintenance.reconcile_started.notified().await;
+            if maintenance.calls().len() >= 4 {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("periodic reconciliation started");
+    runtime.cancel.cancel();
+    let calls_at_stop = maintenance.calls();
+    let mut stopping = tokio::spawn(runtime.shutdown());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut stopping)
+            .await
+            .is_err()
+    );
+    maintenance.reconcile_release.notify_one();
+    stopping.await.unwrap().unwrap();
+    assert_eq!(maintenance.calls(), calls_at_stop);
+}
+
+#[tokio::test]
+async fn shutdown_preserves_task_failure_without_exposing_panic_text() {
+    use std::error::Error;
+    use tokio::task::JoinError;
+    use tokio_util::sync::CancellationToken;
+
+    let runtime = HistoryMaintenanceRuntime {
+        cancel: CancellationToken::new(),
+        task: Some(tokio::spawn(async {
+            panic!("private maintenance failure")
+        })),
+    };
+    let error = runtime.shutdown().await.unwrap_err();
+    let source = error.source().unwrap().downcast_ref::<JoinError>().unwrap();
+    assert!(source.is_panic());
+    assert_eq!(error.to_string(), "history maintenance task failed");
 }

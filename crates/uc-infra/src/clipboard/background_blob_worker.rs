@@ -16,6 +16,7 @@ use uc_core::ports::clipboard::{
 };
 use uc_core::ports::{ClipboardRepresentationStore, ClockPort, ContentHashPort};
 
+use super::background_activity::BackgroundActivity;
 use crate::blob::BlobWriterPort;
 use crate::clipboard::{RepresentationCache, SpoolManager};
 
@@ -117,8 +118,14 @@ impl BackgroundBlobWorker {
 
     /// Run the worker loop until the channel is closed.
     /// 运行工作循环，直到通道关闭。
-    pub async fn run(mut self) {
+    pub async fn run(self) {
+        self.run_with_activity(Arc::new(BackgroundActivity::new()))
+            .await;
+    }
+
+    pub(super) async fn run_with_activity(mut self, activity: Arc<BackgroundActivity>) {
         while let Some(rep_id) = self.worker_rx.recv().await {
+            let _permit = activity.enter().await;
             let span = info_span!(
                 "infra.background_blob_worker",
                 representation_id = %rep_id,
@@ -587,7 +594,7 @@ mod tests {
     /// ceiling, so daemon memory grows under a stream of copies and never
     /// falls back down.
     #[tokio::test]
-    async fn worker_releases_cache_after_processing() {
+    async fn worker_preserves_queued_bytes_while_suspended_and_releases_cache_after_processing() {
         let dir = TempDir::new().expect("tempdir");
         let cache = Arc::new(RepresentationCache::new(16, 1024 * 1024));
         let spool = Arc::new(SpoolManager::new(dir.path(), 1024 * 1024).expect("spool"));
@@ -624,7 +631,17 @@ mod tests {
 
         tx.send(rep_id.clone()).await.expect("send");
         drop(tx); // close channel so run() drains and returns
-        worker.run().await;
+        let activity = Arc::new(BackgroundActivity::new());
+        activity.suspend().await;
+        let running = tokio::spawn({
+            let activity = Arc::clone(&activity);
+            async move { worker.run_with_activity(activity).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!running.is_finished());
+        assert!(cache.get(&rep_id).await.is_some());
+        activity.resume().await;
+        running.await.unwrap();
 
         assert!(
             cache.get(&rep_id).await.is_none(),

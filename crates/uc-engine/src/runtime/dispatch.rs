@@ -716,12 +716,12 @@ impl EngineRuntime for ProductionRuntime {
     }
 
     async fn shutdown(&self, deadline: Duration) -> Result<(), EngineError> {
-        self.security_lifecycle.close_security_session();
         self.network_recovery.shutdown().await;
-        self.suspend().await?;
-        self.session_supervisor.clear_factory();
+        self.session_supervisor.stop().await?;
         self.session_supervisor.close_file_transfers().await?;
         super::task_shutdown::shutdown_tasks(&self.task_registry, deadline).await;
+        self.security_lifecycle.close_security_session();
+        self.session_supervisor.clear_factory();
         if let Err(error) = std::fs::remove_dir_all(&self.clipboard_import_root) {
             if error.kind() != std::io::ErrorKind::NotFound {
                 warn!(error = %error, "failed to remove host clipboard imports");
