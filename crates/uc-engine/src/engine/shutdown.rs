@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,28 +14,25 @@ impl Engine {
         let deadline_at = Instant::now()
             .checked_add(deadline)
             .ok_or_else(|| EngineError::new(1003, EngineErrorCategory::InvalidInput, false))?;
-        // 已开始的收尾独占此许可；后续等待者不能重复启动或重置它的预算。
-        let shutdown = timeout_at(deadline_at, Arc::clone(&self.shutdown_gate).lock_owned())
-            .await
-            .map_err(|_| operation_cancelled_error())?;
-        let lifecycle_guard = timeout_at(deadline_at, self.lifecycle_gate.lock())
-            .await
-            .map_err(|_| operation_cancelled_error())?;
-        if *self.state.lock().await == EngineState::Stopped {
-            return Ok(());
-        }
-
-        *self.state.lock().await = EngineState::ShuttingDown;
-        self.events.send(EngineEvent::StateChanged {
-            state: EngineState::ShuttingDown,
-        });
+        self.stop_requested.store(true, Ordering::Release);
+        let shutdown_gate = Arc::clone(&self.shutdown_gate);
+        let lifecycle_gate = Arc::clone(&self.lifecycle_gate);
         let state = Arc::clone(&self.state);
         let runtime = Arc::clone(&self.runtime);
         let events = self.events.clone();
         let operations = Arc::clone(&self.operations);
-        // 丢弃 JoinHandle 仅结束等待；任务继续持有运行期和许可，直到实际收尾完成。
+        // 排队也由执行任务持有；等待方离开不会撤销已接受的关闭意图。
         let task = tokio::spawn(async move {
-            let _shutdown = shutdown;
+            let _shutdown = shutdown_gate.lock().await;
+            let lifecycle_guard = lifecycle_gate.lock().await;
+            if *state.lock().await == EngineState::Stopped {
+                return Ok(());
+            }
+            *state.lock().await = EngineState::ShuttingDown;
+            events.send(EngineEvent::StateChanged {
+                state: EngineState::ShuttingDown,
+            });
+            drop(lifecycle_guard);
             if !operations
                 .wait_until_empty(remaining_until(deadline_at))
                 .await
@@ -65,7 +63,6 @@ impl Engine {
             events.close();
             result
         });
-        drop(lifecycle_guard);
         timeout_at(deadline_at, task)
             .await
             .map_err(|_| operation_cancelled_error())?

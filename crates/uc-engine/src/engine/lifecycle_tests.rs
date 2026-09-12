@@ -74,6 +74,39 @@ async fn wait_state(events: &mut EventStream, expected: EngineState) {
 }
 
 #[tokio::test]
+async fn accepted_shutdown_prevents_a_late_resume_from_reopening_operations() {
+    let runtime = Arc::new(HeldRuntime::default());
+    runtime.resume_held.store(true, Ordering::SeqCst);
+    let (engine, mut events) = Engine::from_runtime(Arc::clone(&runtime), 16);
+    let engine = Arc::new(engine);
+    engine.suspend().await.unwrap();
+    wait_state(&mut events, EngineState::Suspended).await;
+    let resuming = {
+        let engine = Arc::clone(&engine);
+        tokio::spawn(async move { engine.resume().await })
+    };
+    runtime.entered.notified().await;
+    let error = engine.shutdown(Duration::ZERO).await.unwrap_err();
+    assert_eq!(error.category(), EngineErrorCategory::DeadlineExceeded);
+    runtime.release.notify_one();
+    assert!(resuming.await.unwrap().is_err());
+    assert!(engine.execute(Operation::ListDevices).await.is_err());
+    timeout(Duration::from_secs(1), async {
+        while let Some(event) = events.next().await {
+            assert_ne!(
+                event,
+                EngineEvent::StateChanged {
+                    state: EngineState::Running
+                }
+            );
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(engine.lifecycle_state().await, EngineState::Stopped);
+}
+
+#[tokio::test]
 async fn cancelled_suspend_waiter_does_not_interrupt_completion_or_repeat_work() {
     let runtime = Arc::new(HeldRuntime::default());
     runtime.suspend_held.store(true, Ordering::SeqCst);

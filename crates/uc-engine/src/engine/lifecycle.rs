@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,6 +23,7 @@ enum Request {
 /// 持有宿主入口的状态发布与排空；参与者顺序仍由 Application 完整负责。
 struct Transition {
     gate: Arc<Mutex<()>>,
+    stop_requested: Arc<AtomicBool>,
     state: Arc<Mutex<EngineState>>,
     runtime: Arc<dyn EngineRuntime>,
     operations: Arc<InFlightOperations>,
@@ -59,6 +61,7 @@ impl Engine {
         };
         let transition = Transition {
             gate: Arc::clone(&self.lifecycle_gate),
+            stop_requested: Arc::clone(&self.stop_requested),
             state: Arc::clone(&self.state),
             runtime: Arc::clone(&self.runtime),
             operations: Arc::clone(&self.operations),
@@ -79,6 +82,9 @@ impl Engine {
 impl Transition {
     async fn execute(&self, request: Request) -> Result<(), EngineError> {
         let _gate = self.gate.lock().await;
+        if self.stop_requested.load(Ordering::Acquire) {
+            return Err(invalid_state_error());
+        }
         match request {
             Request::Quiesce(deadline) => {
                 self.quiesce(deadline.saturating_duration_since(Instant::now()))
@@ -119,6 +125,9 @@ impl Transition {
             _ => return Err(invalid_state_error()),
         }
         self.report_result(LifecycleAction::Resume, self.runtime.resume().await)?;
+        if self.stop_requested.load(Ordering::Acquire) {
+            return self.report_result(LifecycleAction::Resume, Err(invalid_state_error()));
+        }
         self.publish(EngineState::Running).await;
         Ok(())
     }

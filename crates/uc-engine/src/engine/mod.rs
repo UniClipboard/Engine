@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -61,6 +62,7 @@ pub struct Engine {
     state: Arc<Mutex<EngineState>>,
     lifecycle_gate: Arc<Mutex<()>>,
     shutdown_gate: Arc<Mutex<()>>,
+    stop_requested: Arc<AtomicBool>,
     runtime: Arc<dyn EngineRuntime>,
     events: EventSender,
     operations: Arc<InFlightOperations>,
@@ -102,6 +104,7 @@ impl Engine {
             state: Arc::new(Mutex::new(EngineState::Running)),
             lifecycle_gate: Arc::new(Mutex::new(())),
             shutdown_gate: Arc::new(Mutex::new(())),
+            stop_requested: Arc::new(AtomicBool::new(false)),
             runtime,
             events,
             operations: Arc::new(InFlightOperations::new()),
@@ -123,6 +126,7 @@ impl Engine {
                 state: Arc::new(Mutex::new(EngineState::Running)),
                 lifecycle_gate: Arc::new(Mutex::new(())),
                 shutdown_gate: Arc::new(Mutex::new(())),
+                stop_requested: Arc::new(AtomicBool::new(false)),
                 runtime,
                 events,
                 operations: Arc::new(InFlightOperations::new()),
@@ -138,7 +142,9 @@ impl Engine {
     pub async fn execute(&self, operation: Operation) -> Result<OperationResult, EngineError> {
         let registered = {
             let _lifecycle = self.lifecycle_gate.lock().await;
-            if !self.state.lock().await.accepts_operations() {
+            if self.stop_requested.load(Ordering::Acquire)
+                || !self.state.lock().await.accepts_operations()
+            {
                 return Err(invalid_state_error());
             }
             self.operations.register("operation").await
@@ -167,7 +173,9 @@ impl Engine {
     ) -> Result<DevOperationResult, EngineError> {
         let registered = {
             let _lifecycle = self.lifecycle_gate.lock().await;
-            if !self.state.lock().await.accepts_operations() {
+            if self.stop_requested.load(Ordering::Acquire)
+                || !self.state.lock().await.accepts_operations()
+            {
                 return Err(invalid_state_error());
             }
             self.operations.register("dev-operation").await

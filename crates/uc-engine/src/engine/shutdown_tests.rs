@@ -1,5 +1,7 @@
+use std::future::{poll_fn, Future};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
 use tokio::time::timeout;
@@ -134,7 +136,49 @@ async fn shutdown_deadline_includes_lifecycle_queue_wait() {
     assert_eq!(error.category(), EngineErrorCategory::DeadlineExceeded);
     assert_eq!(runtime.shutdown_calls.load(Ordering::SeqCst), 0);
     drop(occupied);
-    engine.shutdown(Duration::from_secs(1)).await.unwrap();
+    timeout(Duration::from_secs(1), async {
+        while engine.lifecycle_state().await != EngineState::Stopped {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(runtime.shutdown_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn abandoned_shutdown_queue_keeps_ownership_after_engine_drop() {
+    let runtime = Arc::new(FakeRuntime::default());
+    let (engine, mut events) = Engine::from_runtime(Arc::clone(&runtime), 16);
+    let occupied = Arc::clone(&engine.lifecycle_gate).lock_owned().await;
+    {
+        let mut request = Box::pin(engine.shutdown(Duration::from_secs(1)));
+        poll_fn(|cx| {
+            assert!(request.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+    }
+    assert!(engine.stop_requested.load(Ordering::Acquire));
+    assert_eq!(runtime.shutdown_calls.load(Ordering::SeqCst), 0);
+    drop(engine);
+    drop(occupied);
+    timeout(Duration::from_secs(1), async {
+        let mut stopped = false;
+        while let Some(event) = events.next().await {
+            if event
+                == (EngineEvent::StateChanged {
+                    state: EngineState::Stopped,
+                })
+            {
+                stopped = true;
+            }
+        }
+        assert!(stopped);
+    })
+    .await
+    .unwrap();
+    assert_eq!(runtime.shutdown_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -145,6 +189,7 @@ async fn unrepresentable_shutdown_deadline_is_rejected_without_changing_state() 
     assert_eq!(error.category(), EngineErrorCategory::InvalidInput);
     assert_eq!(engine.lifecycle_state().await, EngineState::Running);
     assert_eq!(runtime.shutdown_calls.load(Ordering::SeqCst), 0);
+    assert!(!engine.stop_requested.load(Ordering::Acquire));
     engine.shutdown(Duration::from_secs(1)).await.unwrap();
 }
 
