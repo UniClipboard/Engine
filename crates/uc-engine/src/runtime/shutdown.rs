@@ -1,9 +1,13 @@
 use async_trait::async_trait;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::time::Instant;
 use tracing::warn;
+use uc_application::deps::StopProfileRuntimePort;
 use uc_application::facade::LifecycleError;
+use uc_core::TaskRegistry;
 
-use super::session_supervisor::lifecycle_error;
+use super::session_supervisor::{lifecycle_error, SessionSupervisor};
 use super::task_shutdown::shutdown_tasks;
 use super::ProductionRuntime;
 use crate::EngineError;
@@ -24,7 +28,6 @@ impl ShutdownOutcome {
 
 #[async_trait]
 trait ShutdownActions: Send + Sync {
-    async fn stop_network_recovery(&self) -> anyhow::Result<()>;
     async fn stop_session(&self, deadline: Option<Instant>) -> anyhow::Result<()>;
     async fn close_file_transfers(&self) -> anyhow::Result<()>;
     async fn stop_process_tasks(&self, deadline: Option<Instant>) -> anyhow::Result<()>;
@@ -35,10 +38,6 @@ struct ProductionShutdownActions<'a>(&'a ProductionRuntime);
 
 #[async_trait]
 impl ShutdownActions for ProductionShutdownActions<'_> {
-    async fn stop_network_recovery(&self) -> anyhow::Result<()> {
-        self.0.network_recovery.shutdown().await.map_err(Into::into)
-    }
-
     async fn stop_session(&self, deadline: Option<Instant>) -> anyhow::Result<()> {
         self.0
             .session_supervisor
@@ -77,20 +76,27 @@ pub(super) async fn shutdown(
     runtime: &ProductionRuntime,
     deadline: Option<Instant>,
 ) -> Result<(), EngineError> {
-    run(&ProductionShutdownActions(runtime), deadline)
+    let mut errors = runtime
+        .network_recovery
+        .shutdown()
         .await
-        .map_err(lifecycle_error)
+        .err()
+        .map(anyhow::Error::new)
+        .into_iter()
+        .collect::<Vec<_>>();
+    errors.extend(
+        stop_resource_users(&ProductionShutdownActions(runtime), deadline)
+            .await
+            .errors,
+    );
+    LifecycleError::from_errors(errors).map_err(lifecycle_error)
 }
 
-async fn run(
+async fn stop_resource_users(
     actions: &dyn ShutdownActions,
     deadline: Option<Instant>,
-) -> Result<(), LifecycleError> {
+) -> ShutdownOutcome {
     let mut outcome = ShutdownOutcome::default();
-
-    if let Err(error) = actions.stop_network_recovery().await {
-        outcome.errors.push(error);
-    }
 
     match actions.stop_session(deadline).await {
         Ok(()) => outcome.session_stopped = true,
@@ -109,7 +115,62 @@ async fn run(
         actions.close_local_resources();
     }
 
-    LifecycleError::from_errors(outcome.errors)
+    outcome
+}
+
+pub(super) struct ProfileRuntimeStopper {
+    security_lifecycle: Arc<uc_infra::space::RuntimeSpaceAccessAdapter>,
+    session_supervisor: Arc<SessionSupervisor>,
+    tasks: Arc<TaskRegistry>,
+}
+
+impl ProfileRuntimeStopper {
+    pub(super) fn new(
+        security_lifecycle: Arc<uc_infra::space::RuntimeSpaceAccessAdapter>,
+        session_supervisor: Arc<SessionSupervisor>,
+        tasks: Arc<TaskRegistry>,
+    ) -> Self {
+        Self {
+            security_lifecycle,
+            session_supervisor,
+            tasks,
+        }
+    }
+}
+
+#[async_trait]
+impl ShutdownActions for ProfileRuntimeStopper {
+    async fn stop_session(&self, _deadline: Option<Instant>) -> anyhow::Result<()> {
+        self.session_supervisor.stop(None).await.map_err(Into::into)
+    }
+
+    async fn close_file_transfers(&self) -> anyhow::Result<()> {
+        self.session_supervisor
+            .close_file_transfers()
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn stop_process_tasks(&self, _deadline: Option<Instant>) -> anyhow::Result<()> {
+        let deadline = Instant::now().checked_add(Duration::from_millis(500));
+        shutdown_tasks(&self.tasks, deadline)
+            .await
+            .into_result()
+            .map_err(Into::into)
+    }
+
+    fn close_local_resources(&self) {
+        self.security_lifecycle.close_security_session();
+        self.session_supervisor.clear_factory();
+    }
+}
+
+#[async_trait]
+impl StopProfileRuntimePort for ProfileRuntimeStopper {
+    async fn stop_profile_runtime(&self) -> Result<(), LifecycleError> {
+        let outcome = stop_resource_users(self, None).await;
+        LifecycleError::from_errors(outcome.errors)
+    }
 }
 
 #[cfg(test)]
@@ -120,7 +181,6 @@ mod tests {
 
     struct RecordingActions {
         calls: Mutex<Vec<&'static str>>,
-        fail_network: bool,
         fail_session: bool,
         fail_transfers: bool,
         fail_tasks: bool,
@@ -139,10 +199,6 @@ mod tests {
 
     #[async_trait]
     impl ShutdownActions for RecordingActions {
-        async fn stop_network_recovery(&self) -> anyhow::Result<()> {
-            self.result(self.fail_network, "network")
-        }
-
         async fn stop_session(&self, _deadline: Option<Instant>) -> anyhow::Result<()> {
             self.result(self.fail_session, "session")
         }
@@ -202,21 +258,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_shutdown_action_runs_after_earlier_failures() {
+    async fn every_resource_user_stops_after_earlier_failures() {
         let actions = RecordingActions {
             calls: Mutex::new(Vec::new()),
-            fail_network: true,
             fail_session: true,
             fail_transfers: true,
             fail_tasks: true,
         };
 
-        let error = run(&actions, None).await.unwrap_err();
+        let outcome = stop_resource_users(&actions, None).await;
+        let error = LifecycleError::from_errors(outcome.errors).unwrap_err();
 
-        assert_eq!(error.additional.len(), 3);
+        assert_eq!(error.additional.len(), 2);
         assert_eq!(
             *actions.calls.lock().unwrap(),
-            vec!["network", "session", "transfers", "tasks"]
+            vec!["session", "transfers", "tasks"]
         );
     }
 
@@ -224,16 +280,16 @@ mod tests {
     async fn local_resources_close_after_every_dependent_owner_stops() {
         let actions = RecordingActions {
             calls: Mutex::new(Vec::new()),
-            fail_network: true,
             fail_session: false,
             fail_transfers: false,
             fail_tasks: false,
         };
 
-        assert!(run(&actions, None).await.is_err());
+        let outcome = stop_resource_users(&actions, None).await;
+        assert!(outcome.errors.is_empty());
         assert_eq!(
             *actions.calls.lock().unwrap(),
-            vec!["network", "session", "transfers", "tasks", "resources"]
+            vec!["session", "transfers", "tasks", "resources"]
         );
     }
 }

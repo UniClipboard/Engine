@@ -70,27 +70,6 @@ impl Drop for StartupSecurityGuard {
     }
 }
 
-struct ProductionProfileRuntimeStopper {
-    security_lifecycle: Arc<uc_infra::space::RuntimeSpaceAccessAdapter>,
-    session_supervisor: Arc<SessionSupervisor>,
-    tasks: Arc<TaskRegistry>,
-}
-
-#[async_trait::async_trait]
-impl StopProfileRuntimePort for ProductionProfileRuntimeStopper {
-    async fn stop_profile_runtime(&self) -> Result<(), LifecycleError> {
-        // 资料重置没有宿主期限，不能把最后一组任务的宽限误用作完整重置预算。
-        self.session_supervisor.stop(None).await?;
-        let deadline = tokio::time::Instant::now().checked_add(Duration::from_millis(500));
-        let tasks = task_shutdown::shutdown_tasks(&self.tasks, deadline)
-            .await
-            .into_result();
-        self.security_lifecycle.close_security_session();
-        self.session_supervisor.clear_factory();
-        LifecycleError::from_errors(tasks.err().map(anyhow::Error::new).into_iter().collect())
-    }
-}
-
 fn re_pairing_scope_for_setup_state(
     state: &uc_application::facade::SetupStateView,
 ) -> Option<crate::RePairingScope> {
@@ -192,12 +171,12 @@ impl ProductionRuntime {
         let session_supervisor =
             SessionSupervisor::new(wired.application.clone(), Arc::clone(&security_lifecycle));
         let task_registry = Arc::new(TaskRegistry::new());
-        let profile_runtime: Arc<dyn StopProfileRuntimePort> =
-            Arc::new(ProductionProfileRuntimeStopper {
-                security_lifecycle: Arc::clone(&security_lifecycle),
-                session_supervisor: Arc::clone(&session_supervisor),
-                tasks: Arc::clone(&task_registry),
-            });
+        let profile_runtime: Arc<dyn uc_application::deps::StopProfileRuntimePort> =
+            Arc::new(shutdown::ProfileRuntimeStopper::new(
+                Arc::clone(&security_lifecycle),
+                Arc::clone(&session_supervisor),
+                Arc::clone(&task_registry),
+            ));
         let profile_reset = Arc::new(ProfileFactoryResetFacade::new(
             Arc::clone(&wired.profile_reset.lifecycle_repository),
             Arc::clone(&profile_runtime),
