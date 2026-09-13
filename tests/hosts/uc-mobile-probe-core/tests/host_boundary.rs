@@ -96,8 +96,10 @@ fn ios_device_commands_publish_pollable_timing_evidence() {
     assert!(model.contains("\"elapsed_ms\""));
     assert!(model.contains("\"block_ms\""));
     assert!(model.contains("\"capture\""));
+    assert!(model.contains("\"restore\""));
     assert!(probe.contains("deadline_ms: Option<u64>"));
     assert!(probe.contains("SuspendDuringClipboardRead"));
+    assert!(probe.contains("SuspendDuringClipboardWrite"));
     assert!(probe.contains("started_at.elapsed()"));
 }
 
