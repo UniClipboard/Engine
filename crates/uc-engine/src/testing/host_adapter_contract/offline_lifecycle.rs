@@ -4,29 +4,57 @@ use tokio::time::{sleep, timeout};
 use wiremock::MockServer;
 
 use super::{
-    empty_engine_host, mount_engine_rendezvous, next_engine_event_matching, ENGINE_TEST_LOCK,
+    mount_engine_rendezvous, next_engine_event_matching, persistent_engine_host,
+    wait_entry_delivered, MemoryHostSecureStorage, ReadableHostFiles, RecordingHostFilesState,
+    StaticHostClipboard, ENGINE_TEST_LOCK,
 };
 use crate::{
     CreateSpaceInput, DeviceMembershipSummary, Engine, EngineConfig, EngineEvent, EngineState,
-    HistoryEntryInput, JoinSpaceInput, JoinSpaceStatusSummary, Operation, OperationResult,
-    SecretString, SendTextInput,
+    HistoryEntryInput, HostCapabilities, HostClipboardSnapshot, HostDirectories, HostFileHandle,
+    JoinSpaceInput, JoinSpaceStatusSummary, Operation, OperationResult, QueryHistoryInput,
+    SecretString, SendFilesInput, SendTextInput,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn paired_peer_shutdown_does_not_block_local_resume_read_or_save() {
+async fn peer_restart_does_not_block_local_work_and_recovers_an_offline_file() {
     let _guard = ENGINE_TEST_LOCK.lock().await;
     let rendezvous = MockServer::start().await;
     mount_engine_rendezvous(&rendezvous).await;
     let sponsor_root = tempfile::tempdir().unwrap();
     let local_root = tempfile::tempdir().unwrap();
+    let sponsor_storage = MemoryHostSecureStorage::default();
+    let file_bytes = b"file saved while the paired receiver is offline".to_vec();
+    let file_name = "offline-recovery.txt";
     let config = EngineConfig::new("2.0.0").with_rendezvous_base_url(rendezvous.uri());
-    let (sponsor, _sponsor_events) =
-        Engine::start(config.clone(), empty_engine_host(sponsor_root.path()))
-            .await
-            .unwrap();
-    let (local, mut local_events) = Engine::start(config, empty_engine_host(local_root.path()))
-        .await
-        .unwrap();
+    let (sponsor, _sponsor_events) = Engine::start(
+        config.clone(),
+        persistent_engine_host(sponsor_root.path(), sponsor_storage.clone()),
+    )
+    .await
+    .unwrap();
+    let local_host = HostCapabilities::new(
+        HostDirectories::new(
+            local_root.path().join("private"),
+            local_root.path().join("cache"),
+            local_root.path().join("temporary"),
+            local_root.path().join("logs"),
+        ),
+        Box::new(MemoryHostSecureStorage::default()),
+        Box::new(StaticHostClipboard {
+            snapshot: HostClipboardSnapshot {
+                observed_at_ms: 0,
+                representations: Vec::new(),
+            },
+        }),
+        Box::new(ReadableHostFiles {
+            handle: "offline-file".into(),
+            display_name: file_name.into(),
+            mime_type: Some("text/plain".into()),
+            bytes: file_bytes.clone(),
+            state: std::sync::Arc::new(RecordingHostFilesState::default()),
+        }),
+    );
+    let (local, mut local_events) = Engine::start(config.clone(), local_host).await.unwrap();
     sponsor
         .execute(Operation::CreateSpace(CreateSpaceInput {
             device_name: Some("offline lifecycle sponsor".into()),
@@ -87,7 +115,7 @@ async fn paired_peer_shutdown_does_not_block_local_resume_read_or_save() {
     let OperationResult::EntrySent(saved) = local
         .execute(Operation::SendText(SendTextInput {
             text: "confirmed before peer shutdown".into(),
-            target_devices: vec![peer_id],
+            target_devices: vec![peer_id.clone()],
         }))
         .await
         .unwrap()
@@ -140,5 +168,63 @@ async fn paired_peer_shutdown_does_not_block_local_resume_read_or_save() {
         panic!("expected offline entry");
     };
     assert_eq!(entry.content, "confirmed while paired peer remains offline");
+
+    let OperationResult::EntrySent(file) = local
+        .execute(Operation::SendFiles(SendFilesInput {
+            files: vec![HostFileHandle::new("offline-file")],
+            target_devices: vec![peer_id.clone()],
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected offline file save");
+    };
+    assert_eq!(file.total_accepted, 0);
+    assert_eq!(file.total_offline, 1);
+
+    let (restarted, _restarted_events) = Engine::start(
+        config,
+        persistent_engine_host(sponsor_root.path(), sponsor_storage),
+    )
+    .await
+    .unwrap();
+    wait_entry_delivered(&local, &file.entry_id, &peer_id).await;
+    let received_entry_id = timeout(Duration::from_secs(30), async {
+        loop {
+            let OperationResult::HistoryPage { entries, .. } = restarted
+                .execute(Operation::QueryHistory(QueryHistoryInput {
+                    cursor: None,
+                    limit: 20,
+                    query: None,
+                }))
+                .await
+                .unwrap()
+            else {
+                panic!("expected restarted peer history");
+            };
+            if let Some(entry) = entries
+                .into_iter()
+                .find(|entry| entry.preview.as_deref() == Some(file_name))
+            {
+                break entry.entry_id;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("restarted peer must receive the offline file");
+    let OperationResult::EntryFileRead(received) = restarted
+        .execute(Operation::ReadEntryFile(HistoryEntryInput {
+            entry_id: received_entry_id,
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected recovered file content");
+    };
+    assert_eq!(received.bytes, file_bytes);
+    assert_eq!(received.file_name, file_name);
+
+    restarted.shutdown_until_complete().await.unwrap();
     local.shutdown_until_complete().await.unwrap();
 }
