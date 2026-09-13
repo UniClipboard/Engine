@@ -130,6 +130,7 @@ impl ConnectionRuntime {
                 due.map_or(next_scope, |at| at.min(next_scope))
             };
             tokio::select! {
+                biased;
                 _ = self.cancel.cancelled() => break,
                 command = self.commands.recv() => match command {
                     Some(Command::Pause(response)) => {
