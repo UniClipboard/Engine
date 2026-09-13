@@ -40,10 +40,9 @@ function command(program, args, input) {
 function ip(...args) { return command('ip', args) }
 function net(node, ...args) { return ip('netns', 'exec', node.namespace, ...args) }
 
-function applyNftRules(node, rules) {
+function nft(node, ...args) {
   try {
-    return execFileSync('ip', ['netns', 'exec', node.namespace, 'nft', '-f', '-'], {
-      input: rules,
+    return execFileSync('ip', ['netns', 'exec', node.namespace, 'nft', ...args], {
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
     })
@@ -227,8 +226,11 @@ function partition(node, blocked) {
     faults.push({ node: node.label, action: 'heal', at_ms: Math.round(at) })
     return at
   }
-  applyNftRules(node,
-    'table inet uc_liveness { chain input { type filter hook input priority -100; policy accept; counter drop; }; chain output { type filter hook output priority -100; policy accept; counter drop; }; }\n')
+  nft(node, 'add', 'table', 'inet', 'uc_liveness')
+  nft(node, 'add', 'chain', 'inet', 'uc_liveness', 'input', '{ type filter hook input priority -100; policy accept; }')
+  nft(node, 'add', 'rule', 'inet', 'uc_liveness', 'input', 'counter', 'drop')
+  nft(node, 'add', 'chain', 'inet', 'uc_liveness', 'output', '{ type filter hook output priority -100; policy accept; }')
+  nft(node, 'add', 'rule', 'inet', 'uc_liveness', 'output', 'counter', 'drop')
   const activated = performance.now()
   node.partitionedAt = activated
   // An independent probe and packet counters prove the fault, independently of Engine state.
@@ -438,8 +440,9 @@ async function stopRelay() {
 }
 
 function blockDirect(node) {
-  applyNftRules(node,
-    'table inet uc_direct { chain output { type filter hook output priority -50; policy accept; meta l4proto udp counter drop; }; }\n')
+  nft(node, 'add', 'table', 'inet', 'uc_direct')
+  nft(node, 'add', 'chain', 'inet', 'uc_direct', 'output', '{ type filter hook output priority -50; policy accept; }')
+  nft(node, 'add', 'rule', 'inet', 'uc_direct', 'output', 'meta', 'l4proto', 'udp', 'counter', 'drop')
   net(node, 'node', '-e', "const s=require('dgram').createSocket('udp4');s.send('probe',19091,'10.233.0.1',()=>s.close())")
   const rules = JSON.parse(net(node, 'nft', '-j', 'list', 'table', 'inet', 'uc_direct'))
   assert(rules.nftables.some(row => row.rule?.expr?.some(expr => expr.counter?.packets > 0)), 'direct-path drop rule was not exercised')
