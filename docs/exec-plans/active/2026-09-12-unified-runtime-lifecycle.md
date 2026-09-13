@@ -1,6 +1,6 @@
 # 1. Overview
 
-状态：实施中。统一负责人已接入三类现有能力及不可逆关闭意图，稳定入口的通知顺序、启动中目标、公开操作门禁、移动通知独立转交、本地恢复故障拒绝、离线本地恢复、普通剪贴板投递意图、文件离线重启补送、最终关闭与资料重置错误汇总、资源清单及部分锁交接和进程终止验证已完成。共同期限与阻塞操作的最坏占用证据、传输中强制终止验证和实际设备矩阵仍待完成。局部修复不代表本规格完成。
+状态：实施中。统一负责人已接入三类现有能力及不可逆关闭意图，稳定入口的通知顺序、启动中目标、公开操作门禁、移动通知独立转交、本地恢复故障拒绝、离线本地恢复、普通剪贴板投递意图、文件离线重启补送、最终关闭与资料重置错误汇总、资源清单及已确认保存和传输中的进程终止验证已完成。共同期限与阻塞操作的最坏占用证据、取消或失效意图不复活及实际设备矩阵仍待完成。局部修复不代表本规格完成。
 
 iOS 退后台时 Engine 曾报告暂停成功，但真实文件租约仍被持有。现有修复已覆盖一部分释放和任务退出问题，
 但暂停责任仍分散，停止预算不统一，恢复耦合网络运行期，重启也不保证未完成同步再次执行。
@@ -310,7 +310,7 @@ impl RuntimeLifecycleCoordinator {
 | 搜索重建及修复 | `crates/uc-application/src/search/runtime.rs`、`crates/uc-application/src/search/coordinator.rs` | Search runtime 持有任务范围；停止后等待已经开始的索引动作真正退出 | SQLite 索引完整写入的最坏时长未证明 | 搜索协调器阻塞线程与 Application 关闭测试 |
 | 剪贴板发送、接收与活动广播 | `crates/uc-application/src/clipboard/sync/`、`crates/uc-application/src/clipboard/inbound/`、`crates/uc-application/src/clipboard/active/` | 各自私有工作负责人登记完整动作，`ClipboardSession` 统一通知并排空 | 单次拉取、保存和宿主写入的最坏时长未证明 | 发送、接收、活动剪贴板关闭及离线恢复测试 |
 | 历史维护 | `crates/uc-application/src/clipboard/history/maintenance_runtime.rs` | Application 拥有；当前动作完整结算，后续动作在停止边界退出 | 核对和清理单轮最坏时长未证明 | history maintenance 生命周期测试 |
-| 文件接收与超时清理 | `crates/uc-application/src/transfer/file/session.rs`、`crates/uc-application/src/transfer/file/shutdown.rs`、`crates/uc-application/src/transfer/file/timeout_runtime.rs` | 接收会话由私有关闭负责人逐项完整取消；超时工作由 Application 停止并等待 | 文件发布与清理的最坏时长、传输中强制终止仍待验收 | 文件关闭、超时工作及双 Engine 离线重启补送测试 |
+| 文件接收与超时清理 | `crates/uc-application/src/transfer/file/session.rs`、`crates/uc-application/src/transfer/file/shutdown.rs`、`crates/uc-application/src/transfer/file/timeout_runtime.rs` | 接收会话由私有关闭负责人逐项完整取消；超时工作由 Application 停止并等待 | 文件发布与清理的最坏时长仍待设备验收 | 文件关闭、超时工作、离线重启补送及传输中进程终止测试 |
 | 成员维护与自动连接 | `crates/uc-application/src/space/membership/maintenance/runtime.rs`、`crates/uc-application/src/space/connectivity/` | Space runtime 拥有；停止当前完整轮次并保留异常，不再使用独立五秒后放弃 | 单轮持久访问最坏时长未证明 | membership maintenance、peer connections 与 Space shutdown 测试 |
 | Iroh Router、协议处理器与下载 | `crates/uc-infra/src/network/iroh/node/shutdown.rs`、`crates/uc-infra/src/network/iroh/blobs.rs` | `SyncEngineAssembly` 先停进度工作，再关闭 Router、endpoint 和观测任务；慢收尾继续由原所有者等待，下载取消关闭对应连接 | 真实弱网和大文件下 Router/下载退出上界仍待设备验证 | Iroh 多异常关闭、慢处理器资源释放及文件传输测试 |
 | 本地安全资料与租约 | `crates/uc-infra/src/security/profile_content_key_vault/`、`crates/uc-infra/src/space/security/` | 安装、冷读取、文件租约和系统安全存储访问均由私有所有者持有；使用者全部退出后才清缓存和交还租约 | 系统安全存储及目录同步的设备上界未证明 | Vault 锁竞争、阻塞安全存储、暂停交接及进程重开测试 |
@@ -336,8 +336,8 @@ impl RuntimeLifecycleCoordinator {
 - 文件发送复用同一条目送达记录，真实双 Engine 测试已覆盖接收端退出、发送端离线保存文件及接收端以原资料重启后自动补送。
   接收侧 reconciliation 仍只负责清理未完成展示状态，不被误作发送意图。
 - 搜索用已持久化的 blocked 状态触发重建；spool 使用启动扫描恢复物化。两者都必须补充强制终止后的真实目录验证。
-- Vault 恢复重新读取持久资料；已确认内容的真实子进程终止后可读性已经验证。传输中强制终止，以及取消、删除、撤权后
-  不恢复旧意图，仍是本规格的独立验收项。
+- Vault 恢复重新读取持久资料；已确认内容及传输中的真实子进程终止恢复已经验证。取消、删除、撤权后不恢复旧意图，
+  仍是本规格的独立验收项。
 
 ### 当前验证
 
@@ -854,6 +854,13 @@ impl RuntimeLifecycleCoordinator {
 - 删除已经失效的缺口描述：Application 关闭会汇总所有领域结果，成员维护不再固定等待后放弃，Iroh 慢收尾不再丢失所有权，剪贴板与文件发送已有重启恢复依据，最终关闭和资料重置也会继续处理全部资源使用者。
 - 完成标准：每个生产工作者、持久访问和嵌套任务都能归入一个完整动作及上级关闭负责人；测试辅助调用明确排除，进程级保留能力与暂停时必须停止的业务工作明确区分。
 - 本切片只完成归属与验证入口清单。共同期限、每种阻塞操作的最坏时长、传输中强制终止及实际设备矩阵仍未完成，不据此宣告完整交付。
+
+### 2026-09-13：文件传输中进程终止与重启恢复
+
+- 新增独立传输终止测试模块。接收端以真实子进程和原资料启动，确认已经接受 8 MiB 文件传输后，父进程直接终止它，不调用 Engine 关闭或析构。
+- 终止后先确认发送记录仍为 Pending 或 Unreachable，排除文件已传完才退出的假通过；随后用同一资料重开接收端，等待既有送达意图自动补送，并逐字节读取文件核对名称与内容。
+- 完成标准：进程终止发生时传输明确未完成；重开后同一发送记录收敛为送达，不生成第二套恢复任务；接收文件完整且无半成品成功状态。子进程输入继续只经匿名管道传递，不增加持久明文。
+- 验证：专项真实双端测试连续运行，先暴露未并发驱动发送的测试错误并修正；最终带未完成状态断言的完整流程通过。Engine 217 项及真实宿主 9 项通过，Engine 4 项、宿主 1 项按原设计忽略。metadata、workspace 全目标、dev-tools 与 lan-compat 全目标、格式、Rust 风格、架构及差异检查通过。取消、删除、撤权后不恢复旧意图及物理设备验证仍未完成。
 
 # 7. Edge Cases
 

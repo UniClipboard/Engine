@@ -15,6 +15,9 @@ use crate::{
     SecretString, SendFilesInput, SendTextInput,
 };
 
+#[path = "offline_lifecycle/crash.rs"]
+mod crash;
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn peer_restart_does_not_block_local_work_and_recovers_an_offline_file() {
     let _guard = ENGINE_TEST_LOCK.lock().await;
