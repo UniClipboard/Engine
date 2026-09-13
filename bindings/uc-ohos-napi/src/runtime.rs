@@ -571,6 +571,7 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
             cancel_requested: None,
             peer_upgrade_required,
             rejection_reason: None,
+            termination_reason: None,
         },
         uc_engine::JoinSpaceStatusSummary::Pending {
             join_id,
@@ -589,6 +590,7 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
             cancel_requested: Some(cancel_requested),
             peer_upgrade_required,
             rejection_reason: None,
+            termination_reason: None,
         },
         uc_engine::JoinSpaceStatusSummary::Rejected { join_id, reason } => OhJoinSpaceStatus {
             status: "rejected".to_owned(),
@@ -626,6 +628,26 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
                     uc_engine::JoinSpaceRejectionReasonSummary::RemovedBeforeActivation => {
                         "removed_before_activation"
                     }
+                }
+                .to_owned(),
+            ),
+            termination_reason: None,
+        },
+        uc_engine::JoinSpaceStatusSummary::Terminated { join_id, reason } => OhJoinSpaceStatus {
+            status: "terminated".to_owned(),
+            join_id,
+            joined_space: None,
+            target_space_id: None,
+            sponsor_device_id: None,
+            sponsor_identity_fingerprint: None,
+            cancel_requested: None,
+            peer_upgrade_required: false,
+            rejection_reason: None,
+            termination_reason: Some(
+                match reason {
+                    uc_engine::JoinSpaceTerminationReasonSummary::Cancelled => "cancelled",
+                    uc_engine::JoinSpaceTerminationReasonSummary::Expired => "expired",
+                    uc_engine::JoinSpaceTerminationReasonSummary::Superseded => "superseded",
                 }
                 .to_owned(),
             ),
@@ -899,6 +921,21 @@ mod tests {
         .expect("join status must map");
 
         assert!(status.peer_upgrade_required);
+    }
+
+    #[test]
+    fn join_status_preserves_local_termination() {
+        let status = join_space_status(OperationResult::JoinSpace(
+            uc_engine::JoinSpaceStatusSummary::Terminated {
+                join_id: "join-id".to_owned(),
+                reason: uc_engine::JoinSpaceTerminationReasonSummary::Expired,
+            },
+        ))
+        .expect("join status must map");
+
+        assert_eq!(status.status, "terminated");
+        assert_eq!(status.termination_reason.as_deref(), Some("expired"));
+        assert!(status.rejection_reason.is_none());
     }
 
     #[test]

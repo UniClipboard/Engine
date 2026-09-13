@@ -35,6 +35,7 @@ use super::{
     UnreadableHistoryPolicy,
 };
 
+mod attempt;
 mod exchange;
 mod id;
 mod message;

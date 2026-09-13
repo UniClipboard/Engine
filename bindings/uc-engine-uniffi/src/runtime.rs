@@ -197,6 +197,13 @@ pub enum JoinSpaceRejectionReason {
     RemovedBeforeActivation,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum JoinSpaceTerminationReason {
+    Cancelled,
+    Expired,
+    Superseded,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum JoinSpaceStatus {
     Active {
@@ -215,6 +222,10 @@ pub enum JoinSpaceStatus {
     Rejected {
         join_id: String,
         reason: JoinSpaceRejectionReason,
+    },
+    Terminated {
+        join_id: String,
+        reason: JoinSpaceTerminationReason,
     },
 }
 
@@ -2217,6 +2228,22 @@ fn map_join_space_status(result: OperationResult) -> Result<JoinSpaceStatus, Bin
                 },
             }
         }
+        uc_engine::JoinSpaceStatusSummary::Terminated { join_id, reason } => {
+            JoinSpaceStatus::Terminated {
+                join_id,
+                reason: match reason {
+                    uc_engine::JoinSpaceTerminationReasonSummary::Cancelled => {
+                        JoinSpaceTerminationReason::Cancelled
+                    }
+                    uc_engine::JoinSpaceTerminationReasonSummary::Expired => {
+                        JoinSpaceTerminationReason::Expired
+                    }
+                    uc_engine::JoinSpaceTerminationReasonSummary::Superseded => {
+                        JoinSpaceTerminationReason::Superseded
+                    }
+                },
+            }
+        }
     })
 }
 
@@ -2719,6 +2746,25 @@ mod tests {
                 if joined_space.migrated_records == Some(4)
                     && joined_space.preserved_unreadable_records == Some(2)
         ));
+    }
+
+    #[test]
+    fn join_space_mapping_preserves_local_termination() {
+        let status = map_join_space_status(OperationResult::JoinSpace(
+            uc_engine::JoinSpaceStatusSummary::Terminated {
+                join_id: "join-id".into(),
+                reason: uc_engine::JoinSpaceTerminationReasonSummary::Expired,
+            },
+        ))
+        .expect("join-space result must map");
+
+        assert_eq!(
+            status,
+            JoinSpaceStatus::Terminated {
+                join_id: "join-id".into(),
+                reason: JoinSpaceTerminationReason::Expired,
+            }
+        );
     }
 
     #[test]

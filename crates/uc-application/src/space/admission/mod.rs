@@ -30,7 +30,7 @@ pub use invitation::{
     CancelInvitationError, PairingInvitationAddressCandidate, QueryPairingInvitationAddressesError,
 };
 pub use join_space::{JoinSpaceError, JoinSpaceInput, JoinSpaceResult};
-pub use model::{CurrentJoinStatus, JoinedSpace, PendingInboundMember};
+pub use model::{CurrentJoinStatus, JoinSpaceTerminationReason, JoinedSpace, PendingInboundMember};
 pub(crate) use observation::SpaceAdmissionObservationRegistry;
 pub use protocol::{
     ActivateSponsorAdmissionError, ActivateSponsorAdmissionPort, AdmissionRecoveryCommitToken,

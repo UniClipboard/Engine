@@ -29,9 +29,9 @@ pub use adapters::{SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntime
 pub(crate) use admission::SpaceAdmissionObservationRegistry;
 pub use admission::{
     CancelInvitationError, CancelSpaceJoinError, CompletePendingSpaceTransitionError,
-    CurrentJoinStatus, JoinSpaceError, JoinSpaceInput, JoinSpaceResult, JoinedSpace,
-    PairingInvitationAddressCandidate, PendingInboundMember, QueryPairingInvitationAddressesError,
-    QueryPendingSpaceTransitionError,
+    CurrentJoinStatus, JoinSpaceError, JoinSpaceInput, JoinSpaceResult, JoinSpaceTerminationReason,
+    JoinedSpace, PairingInvitationAddressCandidate, PendingInboundMember,
+    QueryPairingInvitationAddressesError, QueryPendingSpaceTransitionError,
 };
 pub use connectivity::{
     ConnectionHint, ConnectivityOpportunity, NetworkRecoveryEvent, NetworkRecoveryFacade,
@@ -66,8 +66,8 @@ pub use membership::{
 };
 pub use membership::{
     DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
-    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, PendingDeviceTrustChange,
-    QueryDeviceTrustError,
+    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, PairingConfirmationStatus,
+    PendingDeviceTrustChange, QueryDeviceTrustError,
 };
 pub use membership::{MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult};
 

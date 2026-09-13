@@ -4457,6 +4457,9 @@ async fn wait_for_completed_join(
             JoinSpaceStatusSummary::Rejected { reason, .. } => {
                 panic!("admission was rejected: {reason:?}")
             }
+            JoinSpaceStatusSummary::Terminated { reason, .. } => {
+                panic!("admission was terminated locally: {reason:?}")
+            }
             JoinSpaceStatusSummary::Pending { .. } => {}
         }
         assert!(

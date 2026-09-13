@@ -1,4 +1,5 @@
 mod artifact;
+mod attempt;
 mod exchange;
 mod id;
 mod message;
@@ -15,6 +16,10 @@ pub use artifact::{
     AdmissionSourceSnapshot, AdmissionSpaceTransition, AdmissionSpaceTransitionResult,
     AdmissionStagedSecurityState, AdmissionStagedTarget, AdmissionStagedTargetInput,
     SpaceAdmissionRoute,
+};
+pub use attempt::{
+    AdmissionAttemptContractError, AdmissionAttemptContractV2, AdmissionMemberBindingError,
+    AdmissionMemberBindingV2, SPACE_ADMISSION_ATTEMPT_DURATION_MS,
 };
 pub use exchange::{
     AdmissionErrorCategory, AdmissionEvidenceRelation, AdmissionInboundDecision,

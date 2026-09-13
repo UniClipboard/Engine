@@ -182,6 +182,7 @@ impl QueryDeviceTrustUseCase {
                 membership,
                 relationship,
                 sync_state,
+                pairing_confirmation: None,
             });
         }
 

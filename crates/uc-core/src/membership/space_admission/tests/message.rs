@@ -1,13 +1,18 @@
 use super::*;
 
 #[test]
-fn protocol_version_accepts_only_the_single_current_version() {
-    let version = SpaceAdmissionProtocolVersion::from_u16(1)
-        .expect("version 1 is the only supported protocol");
-
-    assert_eq!(version.as_u16(), 1);
+fn protocol_version_distinguishes_legacy_and_attempt_contract_versions() {
+    assert_eq!(
+        SpaceAdmissionProtocolVersion::from_u16(1),
+        Some(SpaceAdmissionProtocolVersion::V1)
+    );
+    assert_eq!(
+        SpaceAdmissionProtocolVersion::from_u16(2),
+        Some(SpaceAdmissionProtocolVersion::V2)
+    );
+    assert_eq!(SpaceAdmissionProtocolVersion::V2.as_u16(), 2);
     assert!(SpaceAdmissionProtocolVersion::from_u16(0).is_none());
-    assert!(SpaceAdmissionProtocolVersion::from_u16(2).is_none());
+    assert!(SpaceAdmissionProtocolVersion::from_u16(3).is_none());
 }
 
 #[test]

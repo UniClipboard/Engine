@@ -369,6 +369,9 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
         crate::JoinSpaceStatusSummary::Rejected { reason, .. } => {
             panic!("join was rejected: {reason:?}")
         }
+        crate::JoinSpaceStatusSummary::Terminated { reason, .. } => {
+            panic!("join was terminated locally: {reason:?}")
+        }
     };
     // ADR-017: join success is expressed by the saved workspace state. Both
     // sides receive a refetch event and read the authoritative result.

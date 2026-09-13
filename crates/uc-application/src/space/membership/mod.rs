@@ -50,7 +50,8 @@ pub use maintenance::{
 pub use query_device_trust::{
     DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
     DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, LoadCurrentJoinStatusPort,
-    LoadDeviceTrustObservationsPort, PendingDeviceTrustChange, QueryDeviceTrustError,
+    LoadDeviceTrustObservationsPort, PairingConfirmationStatus, PendingDeviceTrustChange,
+    QueryDeviceTrustError,
 };
 pub(super) use query_diagnostics::QueryMembershipDiagnosticsUseCase;
 pub use query_diagnostics::{MembershipDiagnosticsView, QueryMembershipDiagnosticsError};

@@ -31,6 +31,13 @@ pub enum DeviceTrustSyncState {
     Paused(SpaceMemberPauseReason),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairingConfirmationStatus {
+    AwaitingPeerConfirmation,
+    Unconfirmed,
+    Confirmed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceTrustObservation {
     pub device_id: DeviceId,
@@ -47,6 +54,7 @@ pub struct DeviceTrustDevice {
     pub membership: DeviceTrustMembership,
     pub relationship: DeviceTrustRelationship,
     pub sync_state: DeviceTrustSyncState,
+    pub pairing_confirmation: Option<PairingConfirmationStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

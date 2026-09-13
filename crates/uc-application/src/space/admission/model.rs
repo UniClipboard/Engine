@@ -15,6 +15,13 @@ pub struct JoinedSpace {
     pub preserved_unreadable_records: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinSpaceTerminationReason {
+    Cancelled,
+    Expired,
+    Superseded,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CurrentJoinStatus {
     Active {
@@ -33,5 +40,9 @@ pub enum CurrentJoinStatus {
     Rejected {
         join_id: [u8; 16],
         reason: uc_core::membership::SpaceAdmissionRejectionReason,
+    },
+    Terminated {
+        join_id: [u8; 16],
+        reason: JoinSpaceTerminationReason,
     },
 }

@@ -23,3 +23,4 @@ ADR 记录重要取舍的背景、备选方案和后果。编号保持历史稳�
 - [ADR-023：旧资料独立化](023-legacy-profile-isolation-and-re-pairing.md)
 - [ADR-024：设备管理重置](024-reset-space-as-device-management-reset.md)
 - [ADR-025：Application Space 一次性重写](025-application-space-membership-one-shot-rewrite.md)
+- [ADR-026：配对尝试期限与终止](026-bounded-admission-lifecycle.md)
