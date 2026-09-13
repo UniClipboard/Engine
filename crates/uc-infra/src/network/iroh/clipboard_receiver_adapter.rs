@@ -3,7 +3,7 @@
 //! The adapter publishes an [`InboundClipboard`] broadcast stream that the
 //! application inbound runtime subscribes to. Actual connections are handled by
 //! [`IrohClipboardReceiverHandler`] — the same `ProtocolHandler` split
-//! pattern we use for pairing / presence (see `docs/design-docs/layers/infrastructure.md` §4.3):
+//! pattern we use for pairing / peer_reachability (see `docs/design-docs/layers/infrastructure.md` §4.3):
 //! adapter owns the broadcast `Sender` and the domain dependencies, the
 //! handler is a cheap `Clone` that iroh's `Router` registers under
 //! [`CLIPBOARD_ALPN`](super::clipboard_dispatch_adapter::CLIPBOARD_ALPN).
@@ -62,7 +62,7 @@ use super::conn_path::{path_for, OnMissing};
 use super::trace_context::set_remote_parent;
 
 /// Capacity of the `InboundClipboard` broadcast channel. Matches the
-/// presence adapter (`PRESENCE_EVENT_CHANNEL_CAPACITY`) so both streams
+/// peer_reachability adapter (`PRESENCE_EVENT_CHANNEL_CAPACITY`) so both streams
 /// share the same burst tolerance. Lagging subscribers drop frames per
 /// broadcast semantics — they recover on the peer's next dispatch.
 const INBOUND_CHANNEL_CAPACITY: usize = 64;
@@ -412,7 +412,7 @@ mod tests {
     use uc_core::membership::{MembershipError, SpaceMember};
     use uc_core::ports::{
         ClipboardDispatchPort, ClipboardHeader, InboundClipboardDisposition,
-        PeerReachabilityChanged, PeerReachabilityPort, PresenceError, ReachabilityState,
+        PeerReachabilityChanged, PeerReachabilityError, PeerReachabilityPort, ReachabilityState,
         SyncPayload,
     };
     use uc_core::MemberSyncPreferences;
@@ -470,32 +470,32 @@ mod tests {
         })
     }
 
-    // PresencePort mock. Receiver-side tests use the dispatch adapter only
+    // PeerReachabilityPort mock. Receiver-side tests use the dispatch adapter only
     // as a wire-driver against the receiver under test; the dispatch path
-    // never hits dial failure in these scenarios, so `mark_offline` is
+    // never hits dial failure in these scenarios, so `report_communication_failure` is
     // never invoked. The mock therefore needs no expectations — any
     // unexpected call surfaces as a mockall panic.
     //
-    // `mark_offline` is intentionally omitted from the mock so the trait's
+    // `report_communication_failure` is intentionally omitted from the mock so the trait's
     // default noop impl is in play; if a future test does exercise the
-    // dial-failure path, mockall will catch any accidental presence-side
+    // dial-failure path, mockall will catch any accidental peer_reachability-side
     // assumption it makes.
     mockall::mock! {
-        Presence {}
+        PeerReachability {}
 
         #[async_trait]
-        impl PeerReachabilityPort for Presence {
+        impl PeerReachabilityPort for PeerReachability {
             async fn ensure_reachable(
                 &self,
                 device: &DeviceId,
-            ) -> Result<ReachabilityState, PresenceError>;
+            ) -> Result<ReachabilityState, PeerReachabilityError>;
             async fn current_state(&self, device: &DeviceId) -> ReachabilityState;
             fn subscribe(&self) -> broadcast::Receiver<PeerReachabilityChanged>;
         }
     }
 
-    fn presence_mock() -> Arc<dyn PeerReachabilityPort> {
-        Arc::new(MockPresence::new())
+    fn peer_reachability_mock() -> Arc<dyn PeerReachabilityPort> {
+        Arc::new(MockPeerReachability::new())
     }
 
     // ----- test doubles ------------------------------------------------------
@@ -676,8 +676,11 @@ mod tests {
             })
             .await
             .unwrap();
-        let dispatch =
-            IrohClipboardDispatchAdapter::new(sender_endpoint, peer_addr_repo, presence_mock());
+        let dispatch = IrohClipboardDispatchAdapter::new(
+            sender_endpoint,
+            peer_addr_repo,
+            peer_reachability_mock(),
+        );
 
         let payload = Bytes::from(vec![0xAB; 128]);
         let expected_payload = payload.clone();
@@ -840,8 +843,11 @@ mod tests {
             })
             .await
             .unwrap();
-        let dispatch =
-            IrohClipboardDispatchAdapter::new(sender_endpoint, peer_addr_repo, presence_mock());
+        let dispatch = IrohClipboardDispatchAdapter::new(
+            sender_endpoint,
+            peer_addr_repo,
+            peer_reachability_mock(),
+        );
 
         let client_span = operation_span(OperationContext {
             domain: DiagnosticDomain::Clipboard,
@@ -918,8 +924,11 @@ mod tests {
             })
             .await
             .unwrap();
-        let dispatch =
-            IrohClipboardDispatchAdapter::new(sender_endpoint, peer_addr_repo, presence_mock());
+        let dispatch = IrohClipboardDispatchAdapter::new(
+            sender_endpoint,
+            peer_addr_repo,
+            peer_reachability_mock(),
+        );
 
         let result = dispatch
             .dispatch(
@@ -1032,7 +1041,7 @@ mod tests {
                 let dispatch = IrohClipboardDispatchAdapter::new(
                     sender_endpoint,
                     peer_addr_repo,
-                    presence_mock(),
+                    peer_reachability_mock(),
                 );
 
                 let mut header = sample_header();

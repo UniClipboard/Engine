@@ -2,16 +2,15 @@
 //!
 //! ## 职责范围
 //!
-//! * `list_with_presence` —— `member_repo.list()` + `presence.current_state()` +
-//!   `local_identity.get_current_fingerprint()` 聚合。纯读,不拨号。
-//! * `subscribe_presence_events` —— `PresencePort::subscribe` 的 thin 转发。
+//! * `list_with_peer_reachability` —— 转发 Space roster 查询。纯读,不拨号。
+//! * `subscribe_peer_reachability_events` —— `PeerReachabilityPort::subscribe` 的 thin 转发。
 //!
 //! ## 刻意不做
 //!
 //! * 主动拨号 —— T6 `EnsureReachableAllUseCase` 在 F1 hook 里统一触发;
 //!   查询路径不背"触发副作用"的责任。
 //! * rename / revoke —— Phase 3 membership 变更能力,Slice 2 不涉及。
-//! * last_seen_at 汇总 —— `PresencePort` 当前不追踪时间戳,加了也是永远
+//! * last_seen_at 汇总 —— `PeerReachabilityPort` 当前不追踪时间戳,加了也是永远
 //!   `None`,省了先。
 
 use std::sync::Arc;
@@ -33,16 +32,17 @@ use crate::deps::CurrentSpaceMemberScopePort;
 use crate::facade::roster::commands::{
     apply_member_sync_preferences_patch, MemberProtectionStatusView, MemberProtectionView,
     MemberSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesView, PeerSnapshotView,
-    RosterEntry, SpaceProtectionModeView, SpaceProtectionView,
+    SpaceProtectionModeView, SpaceProtectionView,
 };
 use crate::facade::roster::errors::RosterError;
+use crate::space::{QueryMemberRosterError, QueryMemberRosterUseCase, RosterEntry};
 
 /// 构造 `MemberRosterFacade` 时需要的 port 束。对齐 `SpaceFacadeDeps`
 /// 的风格,便于 bootstrap 分步 construct 各 facade。
 pub(crate) struct MemberRosterDeps {
     pub member_repo: Arc<dyn MemberRepositoryPort>,
     pub local_identity: Arc<dyn LocalIdentityPort>,
-    pub presence: Arc<dyn PeerReachabilityPort>,
+    pub peer_reachability: Arc<dyn PeerReachabilityPort>,
     /// Phase 96 INDIC-01:连接通道单一真相源。`Option` 是为了 CLI / 测试
     /// 路径不强制构造 iroh adapter —— 缺省时 `list_peer_snapshots` 把
     /// channel 填成 `Unknown` 透传给 UI,UI 显式可见而非误判。
@@ -54,21 +54,29 @@ pub(crate) struct MemberRosterDeps {
 pub(crate) struct MemberRosterFacade {
     member_repo: Arc<dyn MemberRepositoryPort>,
     local_identity: Arc<dyn LocalIdentityPort>,
-    presence: Arc<dyn PeerReachabilityPort>,
+    peer_reachability: Arc<dyn PeerReachabilityPort>,
     connection_channel: Option<Arc<dyn ConnectionChannelPort>>,
     space_protection: Option<Arc<dyn SpaceProtectionStatusPort>>,
     peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
+    query_member_roster: QueryMemberRosterUseCase,
 }
 
 impl MemberRosterFacade {
     pub fn new(deps: MemberRosterDeps) -> Self {
+        let query_member_roster = QueryMemberRosterUseCase::new(
+            Arc::clone(&deps.member_repo),
+            Arc::clone(&deps.local_identity),
+            Arc::clone(&deps.peer_reachability),
+            Arc::clone(&deps.peer_scope),
+        );
         Self {
             member_repo: deps.member_repo,
             local_identity: deps.local_identity,
-            presence: deps.presence,
+            peer_reachability: deps.peer_reachability,
             connection_channel: deps.connection_channel,
             space_protection: None,
             peer_scope: deps.peer_scope,
+            query_member_roster,
         }
     }
 
@@ -80,62 +88,22 @@ impl MemberRosterFacade {
         self
     }
 
-    #[cfg(test)]
-    fn with_peer_scope(mut self, peer_scope: Arc<dyn CurrentSpaceMemberScopePort>) -> Self {
-        self.peer_scope = peer_scope;
-        self
-    }
-
-    /// 聚合当前所有成员 + 各自 presence 状态 + 本机标记。
-    ///
-    /// 读路径保证:`PresencePort::current_state` 按 port 契约是纯缓存读,
-    /// 不会拨号 / 不会阻塞 IO。member_repo / local_identity 都是本地存
-    /// 储读,整体延迟受 IO 限制但不受网络影响——可以被 UI 高频调用。
-    ///
-    /// `local_identity.get_current_fingerprint()` 返回 `Ok(None)` 表示本
-    /// 机尚未创建身份(pre-A1 / pre-B2),此时所有 entry 都会标 `is_local
-    /// == false`——对该窗口期通常没有成员记录所以影响微乎其微,属于
-    /// 防御性路径。
-    #[instrument(skip_all)]
-    pub async fn list_with_presence(&self) -> Result<Vec<RosterEntry>, RosterError> {
-        let members = self
-            .member_repo
-            .list()
+    /// 转发当前 Space 的完整成员名单查询。
+    pub async fn list_with_peer_reachability(&self) -> Result<Vec<RosterEntry>, RosterError> {
+        self.query_member_roster
+            .execute()
             .await
-            .map_err(|err| RosterError::MemberRepository(err.to_string()))?;
-        let scope = self
-            .peer_scope
-            .snapshot()
-            .await
-            .map_err(|_| RosterError::MembershipReconciliationUnavailable)?;
-        let local_fp = self
-            .local_identity
-            .get_current_fingerprint()
-            .await
-            .map_err(|err| RosterError::LocalIdentity(err.to_string()))?;
-
-        let mut entries = Vec::with_capacity(members.len());
-        for member in members {
-            let is_local = local_fp
-                .as_ref()
-                .is_some_and(|fp| fp == &member.identity_fingerprint);
-            let is_current_peer = scope.usable_peer_device_ids.contains(&member.device_id)
-                || scope
-                    .paused_peer_devices
-                    .iter()
-                    .any(|peer| peer.device_id == member.device_id);
-            if !is_local && !is_current_peer {
-                continue;
-            }
-            let state = self.presence.current_state(&member.device_id).await;
-            entries.push(RosterEntry {
-                device_id: member.device_id,
-                device_name: member.device_name,
-                is_local,
-                state,
-            });
-        }
-        Ok(entries)
+            .map_err(|error| match error {
+                QueryMemberRosterError::MemberRepository { source } => {
+                    RosterError::MemberRepository(source.to_string())
+                }
+                QueryMemberRosterError::MemberScope { .. } => {
+                    RosterError::MembershipReconciliationUnavailable
+                }
+                QueryMemberRosterError::LocalIdentity { source } => {
+                    RosterError::LocalIdentity(source.to_string())
+                }
+            })
     }
 
     /// 列出成员摘要。该方法面向 daemon/http 等外部入口,只返回应用层值对象。
@@ -178,7 +146,7 @@ impl MemberRosterFacade {
             .collect())
     }
 
-    /// 列出对外有效 peer 快照。该方法复用 roster + presence 聚合规则，并排除
+    /// 列出对外有效 peer 快照。该方法复用 roster + peer_reachability 聚合规则，并排除
     /// 已被本机移除的旧成员实例，避免原始成员记录重新暴露失效设备。
     ///
     /// Phase 96:每条 entry 顺带带上 `channel`(Direct/Relay/Offline/
@@ -186,7 +154,7 @@ impl MemberRosterFacade {
     /// 显式可见,优于猜测(Pitfall 4)。
     #[instrument(skip_all)]
     pub async fn list_peer_snapshots(&self) -> Result<Vec<PeerSnapshotView>, RosterError> {
-        let entries = self.list_with_presence().await?;
+        let entries = self.list_with_peer_reachability().await?;
         let mut snapshots = Vec::with_capacity(entries.len());
         for entry in entries {
             if entry.is_local {
@@ -313,14 +281,16 @@ impl MemberRosterFacade {
         SpaceProtectionView { mode, members }
     }
 
-    /// `PresencePort::subscribe` 的 thin 转发。
+    /// `PeerReachabilityPort::subscribe` 的 thin 转发。
     ///
     /// 每次调用拿一个新 receiver,共享 adapter 的 broadcast 源。标准
     /// `tokio::sync::broadcast` lag 语义:某个 subscriber 落后 capacity 时
     /// 最老的事件会被丢——acceptable,因为最新状态总能通过
-    /// `list_with_presence` 或再来一次订阅重建。
-    pub fn subscribe_presence_events(&self) -> broadcast::Receiver<PeerReachabilityChanged> {
-        self.presence.subscribe()
+    /// `list_with_peer_reachability` 或再来一次订阅重建。
+    pub fn subscribe_peer_reachability_events(
+        &self,
+    ) -> broadcast::Receiver<PeerReachabilityChanged> {
+        self.peer_reachability.subscribe()
     }
 }
 
@@ -378,14 +348,14 @@ mod tests {
         }
     }
 
-    struct StaticPresence;
+    struct StaticPeerReachability;
 
     #[async_trait]
-    impl PeerReachabilityPort for StaticPresence {
+    impl PeerReachabilityPort for StaticPeerReachability {
         async fn ensure_reachable(
             &self,
             _device_id: &DeviceId,
-        ) -> Result<ReachabilityState, uc_core::ports::PresenceError> {
+        ) -> Result<ReachabilityState, uc_core::ports::PeerReachabilityError> {
             Ok(ReachabilityState::Online)
         }
 
@@ -459,11 +429,10 @@ mod tests {
                 member("charlie", "C", fingerprint("CCCCCCCCCCCCCCCC")),
             ])),
             local_identity: Arc::new(LocalIdentity(local)),
-            presence: Arc::new(StaticPresence),
+            peer_reachability: Arc::new(StaticPeerReachability),
             connection_channel: None,
-            peer_scope: Arc::new(FixedPeerScope(Vec::new())),
-        })
-        .with_peer_scope(Arc::new(FixedPeerScope(vec![DeviceId::new("charlie")])));
+            peer_scope: Arc::new(FixedPeerScope(vec![DeviceId::new("charlie")])),
+        });
 
         let snapshots = roster.list_peer_snapshots().await.unwrap();
         assert_eq!(
@@ -493,7 +462,7 @@ mod tests {
                 member("charlie", "C", fingerprint("CCCCCCCCCCCCCCCC")),
             ])),
             local_identity: Arc::new(LocalIdentity(local)),
-            presence: Arc::new(StaticPresence),
+            peer_reachability: Arc::new(StaticPeerReachability),
             connection_channel: None,
             peer_scope: Arc::new(PausedPeerScope(DeviceId::new("charlie"))),
         });

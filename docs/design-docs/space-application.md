@@ -50,7 +50,7 @@ flowchart LR
         SpaceFacade --> Life[生命周期 cases]
         SpaceFacade --> Admission[准入 cases]
         SpaceFacade --> Trust[成员信任 cases]
-        SpaceFacade --> Roster[内部 MemberRosterFacade]
+        SpaceFacade --> RosterFacade[内部 MemberRosterFacade]
     end
 
     subgraph Membership[成员 application]
@@ -60,6 +60,7 @@ flowchart LR
         SpaceApp --> AdmissionRx[准入接收 endpoint]
         SpaceApp --> Runtime[SpaceMembershipMaintenanceRuntime]
         Runtime --> Maintain[MaintainSpaceMembershipUseCase]
+        RosterFacade --> Roster[QueryMemberRosterUseCase]
         Trust --> Ledger[MembershipLedger]
         HistoryTx --> Ledger
         HistoryRx --> Ledger
@@ -172,7 +173,8 @@ activity，持有唯一暂停、恢复和失败补偿顺序。Search 与 receive
 | `lifecycle/session/` | 组合成员、搜索、接收的 pause/resume；失败恢复 | 不执行 lock/unlock 本身 |
 | `membership/re_pairing/` | 重新配对提示状态 | 不代表当前成员集合 |
 | `connectivity/recovery/mod.rs` | 重建网络 session、共享请求、退避和网络变化窗口 | 不读写成员资格，不代替成员 runtime |
-| `facade/roster/`（相邻目录） | 用最终 scope 过滤成员资料，再叠加在线状态和偏好 | 不授予成员资格；不是第二个公开 Space facade |
+| `space/membership/query_member_roster.rs` | 用最终 scope 过滤成员资料并叠加在线状态 | 不授予成员资格；不处理名单之外的成员操作 |
+| `facade/roster/`（相邻目录） | 对外转发名单查询，并提供稳定展示类型和状态订阅 | 不聚合仓储、成员范围或逐成员在线状态 |
 
 ## 调用关系
 

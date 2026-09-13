@@ -5,7 +5,9 @@ use tokio::time::Instant;
 use uc_core::ports::PeerReachabilityChanged;
 
 const MAX_CONCURRENT: usize = 4;
-const DIAL_BUDGET: Duration = Duration::from_secs(10);
+// Bound the complete target operation, including qualification and admission.
+const DIAL_BUDGET: Duration = Duration::from_secs(20);
+const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 const SCOPE_BUDGET: Duration = Duration::from_secs(1);
 const SCOPE_RECHECK: Duration = Duration::from_secs(60);
 const COALESCE: Duration = Duration::from_millis(250);
@@ -17,7 +19,6 @@ struct Peer {
     started: Option<Instant>,
     in_flight: Option<CancellationToken>,
     rerun: bool,
-    force: bool,
     online: bool,
     observation_revision: u64,
     started_observation_revision: u64,
@@ -28,8 +29,8 @@ struct Peer {
 
 struct Refresh {
     pending: HashSet<DeviceId>,
-    report: PresenceRefreshReport,
-    response: oneshot::Sender<Result<PresenceRefreshReport, PeerConnectionError>>,
+    report: PeerReachabilityRefreshReport,
+    response: oneshot::Sender<Result<PeerReachabilityRefreshReport, PeerConnectionError>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -39,7 +40,7 @@ enum AttemptError {
     #[error("peer qualification read timed out")]
     ScopeTimeout(#[source] tokio::time::error::Elapsed),
     #[error("peer reachability check failed")]
-    Presence(#[source] uc_core::ports::PresenceError),
+    PeerReachability(#[source] uc_core::ports::PeerReachabilityError),
     #[error("peer connection attempt timed out")]
     Timeout(#[source] tokio::time::error::Elapsed),
     #[error("peer is no longer eligible")]
@@ -49,7 +50,7 @@ impl AttemptError {
     fn kind(&self) -> &'static str {
         match self {
             Self::Scope(_) | Self::ScopeTimeout(_) => "scope_unavailable",
-            Self::Presence(_) => "presence_failed",
+            Self::PeerReachability(_) => "presence_failed",
             Self::Timeout(_) => "timeout",
             Self::Ineligible => "ineligible",
         }
@@ -64,9 +65,9 @@ type Dial = BoxFuture<'static, (DeviceId, u64, DialResult)>;
 
 pub(super) struct ConnectionRuntime {
     scope: Arc<dyn CurrentSpaceMemberScopePort>,
-    presence: Arc<dyn PeerReachabilityPort>,
+    peer_reachability: Arc<dyn PeerReachabilityPort>,
     scope_changes: watch::Receiver<()>,
-    presence_changes: broadcast::Receiver<PeerReachabilityChanged>,
+    peer_reachability_changes: broadcast::Receiver<PeerReachabilityChanged>,
     hints: BoxStream<'static, Result<ConnectionHint, anyhow::Error>>,
     commands: mpsc::Receiver<Command>,
     opportunities: watch::Receiver<ConnectivityOpportunity>,
@@ -81,7 +82,7 @@ pub(super) struct ConnectionRuntime {
 impl ConnectionRuntime {
     pub(super) fn new(
         scope: Arc<dyn CurrentSpaceMemberScopePort>,
-        presence: Arc<dyn PeerReachabilityPort>,
+        peer_reachability: Arc<dyn PeerReachabilityPort>,
         hints: BoxStream<'static, Result<ConnectionHint, anyhow::Error>>,
         commands: mpsc::Receiver<Command>,
         opportunities: watch::Receiver<ConnectivityOpportunity>,
@@ -89,9 +90,9 @@ impl ConnectionRuntime {
     ) -> Self {
         Self {
             scope_changes: scope.subscribe_changes(),
-            presence_changes: presence.subscribe(),
+            peer_reachability_changes: peer_reachability.subscribe(),
             scope,
-            presence,
+            peer_reachability,
             hints,
             commands,
             opportunities,
@@ -107,7 +108,7 @@ impl ConnectionRuntime {
     pub(super) async fn run(mut self) {
         let mut next_scope = Instant::now();
         let mut scope_open = true;
-        let mut presence_open = true;
+        let mut peer_reachability_open = true;
         let mut hints_open = true;
         loop {
             if self.cancel.is_cancelled() {
@@ -148,11 +149,11 @@ impl ConnectionRuntime {
                             match self.reconcile().await {
                                 Ok(()) => {
                                     let pending = self.peers.keys().copied().collect::<HashSet<_>>();
-                                    let report = PresenceRefreshReport { total: pending.len(), online: 0, offline: 0, errors: 0 };
+                                    let report = PeerReachabilityRefreshReport { total: pending.len(), online: 0, offline: 0, errors: 0 };
                                     if pending.is_empty() { let _ = response.send(Ok(report)); }
                                     else {
                                         for peer in self.peers.values_mut() {
-                                            if peer.in_flight.is_none() { peer.due = Some(Instant::now()); peer.force = true; peer.next_trigger = "manual_refresh"; }
+                                            if peer.in_flight.is_none() { peer.due = Some(Instant::now()); peer.next_trigger = "manual_refresh"; }
                                         }
                                         self.refreshes.push(Refresh { pending, report, response });
                                     }
@@ -185,6 +186,7 @@ impl ConnectionRuntime {
                 hint = self.hints.next(), if hints_open => match hint {
                     Some(Ok(ConnectionHint::NetworkChanged)) if !self.paused => { self.opportunity(None, "network_changed"); next_scope = Instant::now(); }
                     Some(Ok(ConnectionHint::PeerAddressChanged(device))) if !self.paused => self.opportunity(Some(device), "peer_discovered"),
+                    Some(Ok(ConnectionHint::CommunicationFailed(device))) if !self.paused => self.opportunity(Some(device), "communication_failed"),
                     Some(Err(source)) => {
                         let failure = PeerConnectionError::Environment(source);
                         tracing::warn!(error.type = "unavailable", "peer connection environment observation failed");
@@ -194,11 +196,11 @@ impl ConnectionRuntime {
                     Some(Ok(_)) => {},
                     None => hints_open = false,
                 },
-                event = self.presence_changes.recv(), if presence_open => match event {
-                    Ok(event) if !self.paused => self.presence_changed(event),
+                event = self.peer_reachability_changes.recv(), if peer_reachability_open => match event {
+                    Ok(event) if !self.paused => self.peer_reachability_changed(event),
                     Ok(_) => {},
                     Err(broadcast::error::RecvError::Lagged(_)) => next_scope = Instant::now(),
-                    Err(broadcast::error::RecvError::Closed) => presence_open = false,
+                    Err(broadcast::error::RecvError::Closed) => peer_reachability_open = false,
                 },
                 _ = tokio::time::sleep_until(next) => {
                     if !self.paused && Instant::now() >= next_scope {
@@ -239,12 +241,12 @@ impl ConnectionRuntime {
                     cancel.cancel();
                 }
             }
-            self.presence.forget(&device).await;
+            self.peer_reachability.forget(&device).await;
             self.settle_refresh(device, &DialResult::Error(AttemptError::Ineligible));
         }
-        self.presence.activate().await;
+        self.peer_reachability.activate().await;
         for device in current {
-            let state = self.presence.current_state(&device).await;
+            let state = self.peer_reachability.current_state(&device).await;
             if let Some(peer) = self.peers.get_mut(&device) {
                 if state != ReachabilityState::Online && peer.online && peer.in_flight.is_none() {
                     peer.online = false;
@@ -260,7 +262,6 @@ impl ConnectionRuntime {
                         started: None,
                         in_flight: None,
                         rerun: false,
-                        force: false,
                         online: state == ReachabilityState::Online,
                         observation_revision: 0,
                         started_observation_revision: 0,
@@ -287,12 +288,11 @@ impl ConnectionRuntime {
                 let at =
                     (now + COALESCE).max(peer.started.map_or(now, |at| at + MIN_START_INTERVAL));
                 peer.due = Some(peer.due.map_or(at, |due| due.min(at)));
-                peer.force = true;
             }
         }
     }
 
-    fn presence_changed(&mut self, event: PeerReachabilityChanged) {
+    fn peer_reachability_changed(&mut self, event: PeerReachabilityChanged) {
         let awaiting_refresh = self
             .refreshes
             .iter()
@@ -307,7 +307,7 @@ impl ConnectionRuntime {
                 peer.failures = 0;
                 peer.rerun = false;
                 if peer.in_flight.is_none() && !awaiting_refresh {
-                    peer.due = None;
+                    peer.due = Some(Instant::now() + HEALTH_CHECK_INTERVAL);
                 }
             }
             _ => {
@@ -339,20 +339,15 @@ impl ConnectionRuntime {
             let Some(peer) = self.peers.get_mut(&device) else {
                 continue;
             };
-            if peer.online && !peer.force {
-                peer.due = None;
-                continue;
-            }
             let cancel = self.cancel.child_token();
             peer.in_flight = Some(cancel.clone());
             peer.started = Some(now);
             peer.started_observation_revision = peer.observation_revision;
             peer.due = None;
-            peer.force = false;
             peer.active_trigger = peer.next_trigger;
             let generation = peer.generation;
             let scope = Arc::clone(&self.scope);
-            let presence = Arc::clone(&self.presence);
+            let peer_reachability = Arc::clone(&self.peer_reachability);
             self.dials.push(
                 async move {
                     let attempt = async {
@@ -365,10 +360,10 @@ impl ConnectionRuntime {
                         {
                             return Err(AttemptError::Ineligible);
                         }
-                        presence
+                        peer_reachability
                             .verify_reachable(&device)
                             .await
-                            .map_err(AttemptError::Presence)
+                            .map_err(AttemptError::PeerReachability)
                     };
                     let result = tokio::select! {
                         biased;
@@ -404,7 +399,9 @@ impl ConnectionRuntime {
             && matches!(
                 result,
                 DialResult::State(ReachabilityState::Offline | ReachabilityState::Unknown)
-                    | DialResult::Error(AttemptError::Timeout(_) | AttemptError::Presence(_))
+                    | DialResult::Error(
+                        AttemptError::Timeout(_) | AttemptError::PeerReachability(_)
+                    )
             )
         {
             result = DialResult::State(ReachabilityState::Online);
@@ -425,7 +422,8 @@ impl ConnectionRuntime {
         if matches!(result, DialResult::State(ReachabilityState::Online)) {
             peer.online = true;
             peer.failures = 0;
-            peer.due = None;
+            peer.due = Some(Instant::now() + HEALTH_CHECK_INTERVAL);
+            peer.next_trigger = "health_check";
             peer.rerun = false;
         } else {
             peer.online = false;
@@ -472,6 +470,6 @@ impl ConnectionRuntime {
         for request in self.refreshes.drain(..) {
             let _ = request.response.send(Err(PeerConnectionError::Paused));
         }
-        self.presence.disconnect_all().await;
+        self.peer_reachability.disconnect_all().await;
     }
 }

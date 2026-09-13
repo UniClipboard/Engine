@@ -39,7 +39,7 @@ pub(crate) struct SpaceAdmissionDeps {
     pub pairing_invitation: Arc<dyn PairingInvitationPort>,
     pub pairing_invitation_addresses: Arc<dyn PairingInvitationAddressQueryPort>,
     pub pairing_invitation_by_address: Arc<dyn PairingInvitationByAddressPort>,
-    pub presence: Arc<dyn PeerReachabilityPort>,
+    pub peer_reachability: Arc<dyn PeerReachabilityPort>,
     pub analytics: Arc<dyn AnalyticsFacade>,
     pub connection_channel: Option<Arc<dyn uc_core::ports::ConnectionChannelPort>>,
 }

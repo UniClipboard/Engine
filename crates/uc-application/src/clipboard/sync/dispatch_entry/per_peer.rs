@@ -1,6 +1,6 @@
 //! `PerPeerDispatcher` — the per-target dispatch body fanned out by the
 //! use case. Owns the four ports the JoinSet task touches 1:1 per peer
-//! (wire dispatch + presence preflight + the two telemetry funnels) so the
+//! (wire dispatch + peer_reachability preflight + the two telemetry funnels) so the
 //! "send to one peer and emit its per-peer analytics" concern has a single
 //! home and an independent test surface.
 //!
@@ -10,7 +10,7 @@
 //!   known-offline deferral — so `attempted = succeeded + failed +
 //!   deferred` holds and the dashboard can derive user-perceived attempts
 //!   as `attempted - deferred`.
-//! - A presence preflight of `Offline` short-circuits to
+//! - A peer_reachability preflight of `Offline` short-circuits to
 //!   `SyncDeferred(PeerKnownOffline)` + `Err(Offline)` WITHOUT dialing —
 //!   redialing a peer the dispatch adapter already concluded unreachable
 //!   would only burn the fan-out deadline (see the use-case module doc).
@@ -39,7 +39,7 @@ use super::{
 
 pub(crate) struct PerPeerDispatcher {
     clipboard_dispatch: Arc<dyn ClipboardDispatchPort>,
-    presence: Arc<dyn PeerReachabilityPort>,
+    peer_reachability: Arc<dyn PeerReachabilityPort>,
     analytics: Arc<dyn AnalyticsPort>,
     first_sync_state: Arc<dyn FirstSyncStatePort>,
 }
@@ -47,13 +47,13 @@ pub(crate) struct PerPeerDispatcher {
 impl PerPeerDispatcher {
     pub(crate) fn new(
         clipboard_dispatch: Arc<dyn ClipboardDispatchPort>,
-        presence: Arc<dyn PeerReachabilityPort>,
+        peer_reachability: Arc<dyn PeerReachabilityPort>,
         analytics: Arc<dyn AnalyticsPort>,
         first_sync_state: Arc<dyn FirstSyncStatePort>,
     ) -> Self {
         Self {
             clipboard_dispatch,
-            presence,
+            peer_reachability,
             analytics,
             first_sync_state,
         }
@@ -102,19 +102,16 @@ impl PerPeerDispatcher {
         payload_type: PayloadType,
         payload_size_bucket: PayloadSizeBucket,
     ) -> PeerDispatchResult {
-        // Preflight presence, then fire attempted (ordering: attempted must
+        // Preflight peer_reachability, then fire attempted (ordering: attempted must
         // precede the dial / deferral so funnel parity holds).
-        let preflight_state = self.presence.current_state(&device_id).await;
+        let preflight_state = self.peer_reachability.current_state(&device_id).await;
         let known_offline = matches!(preflight_state, ReachabilityState::Offline);
         self.capture_attempted(payload_type, payload_size_bucket)
             .await;
 
-        // Skip the dial entirely when presence already reports Offline. The
-        // dispatch adapter writes presence Offline on its own dial failures
-        // and enforces a TTL re-dial, so by the time `known_offline` is true
-        // we have first-hand evidence the peer is unreachable. Telemetry
-        // fires `sync_deferred` (not `sync_failed`) to preserve
-        // attempted+deferred parity.
+        // Confirmed Offline is owned by the connection coordinator's checks.
+        // A failed content operation only requests another check; it cannot
+        // create this state. Preserve attempted/deferred accounting.
         if known_offline {
             self.analytics
                 .capture(Event::SyncDeferred(SyncDeferredProps {
@@ -245,7 +242,7 @@ mod tests {
         let analytics = Arc::new(CapturingAnalyticsSink::default());
         let dispatcher = PerPeerDispatcher::new(
             Arc::new(dispatch),
-            Arc::new(StaticPresence(ReachabilityState::Unknown)),
+            Arc::new(StaticPeerReachability(ReachabilityState::Unknown)),
             analytics.clone(),
             Arc::new(AllMarkedFirstSyncState),
         );
@@ -294,7 +291,7 @@ mod tests {
         let analytics = Arc::new(CapturingAnalyticsSink::default());
         let dispatcher = PerPeerDispatcher::new(
             Arc::new(dispatch),
-            Arc::new(StaticPresence(ReachabilityState::Offline)),
+            Arc::new(StaticPeerReachability(ReachabilityState::Offline)),
             analytics.clone(),
             Arc::new(AllMarkedFirstSyncState),
         );
@@ -339,7 +336,7 @@ mod tests {
         let analytics = Arc::new(CapturingAnalyticsSink::default());
         let dispatcher = PerPeerDispatcher::new(
             Arc::new(dispatch),
-            Arc::new(StaticPresence(ReachabilityState::Unknown)),
+            Arc::new(StaticPeerReachability(ReachabilityState::Unknown)),
             analytics.clone(),
             Arc::new(AllMarkedFirstSyncState),
         );
@@ -388,7 +385,7 @@ mod tests {
         let analytics = Arc::new(CapturingAnalyticsSink::default());
         let dispatcher = PerPeerDispatcher::new(
             Arc::new(dispatch),
-            Arc::new(StaticPresence(ReachabilityState::Unknown)),
+            Arc::new(StaticPeerReachability(ReachabilityState::Unknown)),
             analytics.clone(),
             Arc::new(InMemoryFirstSyncState::default()),
         );
@@ -451,7 +448,7 @@ mod tests {
             let analytics = Arc::new(CapturingAnalyticsSink::default());
             let dispatcher = PerPeerDispatcher::new(
                 Arc::new(dispatch),
-                Arc::new(StaticPresence(ReachabilityState::Unknown)),
+                Arc::new(StaticPeerReachability(ReachabilityState::Unknown)),
                 analytics.clone(),
                 Arc::new(AllMarkedFirstSyncState),
             );

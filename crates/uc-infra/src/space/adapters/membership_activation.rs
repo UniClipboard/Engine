@@ -43,7 +43,7 @@ mod tests {
     use tokio::sync::broadcast;
     use uc_application::deps::MembershipEffectPhase;
     use uc_core::ids::DeviceId;
-    use uc_core::ports::{PeerReachabilityChanged, PresenceError, ReachabilityState};
+    use uc_core::ports::{PeerReachabilityChanged, PeerReachabilityError, ReachabilityState};
 
     use super::*;
 
@@ -57,7 +57,7 @@ mod tests {
         async fn ensure_reachable(
             &self,
             _device: &DeviceId,
-        ) -> Result<ReachabilityState, PresenceError> {
+        ) -> Result<ReachabilityState, PeerReachabilityError> {
             Ok(ReachabilityState::Unknown)
         }
 

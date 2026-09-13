@@ -142,7 +142,7 @@ impl SpaceMembershipMaintenanceRuntime {
         } = prepared;
         let task = tokio::spawn(async move {
             let mut paused = false;
-            let mut presence_open = true;
+            let mut peer_reachability_open = true;
             let mut history_open = true;
             let mut active_round = Some(spawn_round(
                 Arc::clone(&maintain),
@@ -216,7 +216,7 @@ impl SpaceMembershipMaintenanceRuntime {
                             schedule_round(&maintain, &mut active_round, &mut queued_triggers, MembershipMaintenanceTrigger::StateChanged);
                         }
                     },
-                    event = reachability_changes.recv(), if !paused && presence_open => match event {
+                    event = reachability_changes.recv(), if !paused && peer_reachability_open => match event {
                         Ok(event) if event.state == ReachabilityState::Online => {
                             schedule_round(
                                 &maintain,
@@ -226,7 +226,7 @@ impl SpaceMembershipMaintenanceRuntime {
                             );
                         }
                         Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(broadcast::error::RecvError::Closed) => presence_open = false,
+                        Err(broadcast::error::RecvError::Closed) => peer_reachability_open = false,
                     },
                     _ = periodic.tick(), if !paused => {
                         schedule_round(

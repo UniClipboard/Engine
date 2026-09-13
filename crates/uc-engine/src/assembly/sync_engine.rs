@@ -135,12 +135,6 @@ pub(crate) struct SyncEngineAssemblyOutput {
 }
 
 impl SyncEngineAssembly {
-    pub(crate) fn subscribe_network_recovery_observations(
-        &self,
-    ) -> tokio::sync::broadcast::Receiver<uc_infra::network::iroh::NetworkRecoveryObservation> {
-        self.iroh_node.subscribe_network_recovery_observations()
-    }
-
     #[cfg(test)]
     pub(crate) async fn membership_history_exchange_is_reachable_for_test(&self) -> bool {
         self.iroh_node
@@ -514,7 +508,7 @@ pub async fn build_sync_engine_assembly(
     );
     // Presence is installed before the convergence owner is assembled so the
     // owner can expose reachability as an independent product fact.
-    let peer_reachability: Arc<dyn PeerReachabilityPort> = builder.install_presence(
+    let peer_reachability: Arc<dyn PeerReachabilityPort> = builder.install_peer_reachability(
         Arc::clone(&space_setup.peer_addr_repo),
         Arc::clone(&space_setup.member_repo),
         Arc::clone(&space_setup.peer_admission),
@@ -532,7 +526,7 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&space_setup.space_access.group_revocation),
     )?;
     // Slice 2 Phase 2 · T10:同一节点装第三个 ALPN(剪切板同步)。dispatch
-    // 复用 endpoint + peer_addr_repo,与 presence 共享 NAT/relay 映射;
+    // 复用 endpoint + peer_addr_repo,与 peer_reachability 共享 NAT/relay 映射;
     // receiver handler 通过 `member_repo` 把 `Connection::remote_id()` 反查
     // 成 DeviceId 再喂给应用层 broadcast。同样必须在 `spawn` 前装。
     let ClipboardHandlers {
@@ -791,7 +785,7 @@ pub async fn build_sync_engine_assembly(
             pairing_invitation: handlers.invitation,
             pairing_invitation_addresses: handlers.invitation_addresses,
             pairing_invitation_by_address: handlers.invitation_by_address,
-            presence: Arc::clone(&peer_reachability),
+            peer_reachability: Arc::clone(&peer_reachability),
             analytics: Arc::clone(&space_setup.analytics_facade),
             connection_channel: Some(Arc::clone(&connection_channel)),
             device_management_reset_data: Arc::clone(&space_setup.device_management_reset_data),

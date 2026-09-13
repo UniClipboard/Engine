@@ -14,6 +14,7 @@ mod query_device_trust;
 pub(crate) use query_device_group_choices::QueryDeviceGroupChoicesUseCase;
 pub use query_device_group_choices::{DeviceGroupChoicesView, QueryDeviceGroupChoicesError};
 mod query_diagnostics;
+mod query_member_roster;
 mod re_pairing;
 mod reconcile_history_evidence;
 mod recover_conflict;
@@ -53,6 +54,8 @@ pub use query_device_trust::{
 };
 pub(super) use query_diagnostics::QueryMembershipDiagnosticsUseCase;
 pub use query_diagnostics::{MembershipDiagnosticsView, QueryMembershipDiagnosticsError};
+pub use query_member_roster::RosterEntry;
+pub(crate) use query_member_roster::{QueryMemberRosterError, QueryMemberRosterUseCase};
 pub use re_pairing::{RePairingStateError, RePairingStateStorePort};
 pub(crate) use reconcile_history_evidence::ReconcileMembershipEvidenceUseCase;
 pub use recover_conflict::{

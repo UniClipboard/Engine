@@ -1,4 +1,6 @@
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
+use std::thread;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use diesel::prelude::*;
@@ -26,6 +28,36 @@ use uc_infra::db::schema::{entry_receive_attempt, file_transfer};
 
 type AttemptRepo = DieselEntryReceiveAttemptRepository<DieselSqliteExecutor>;
 type TransferRepo = DieselFileTransferRepository<DieselSqliteExecutor>;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_receive_waits_for_an_independent_database_writer() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("concurrent-attempt.sqlite");
+    let pool = init_db_pool(database.to_str().unwrap()).unwrap();
+    let writer_pool = pool.clone();
+    let (locked_tx, locked_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let writer = thread::spawn(move || {
+        let mut connection = writer_pool.get().unwrap();
+        connection
+            .immediate_transaction::<_, diesel::result::Error, _>(|_| {
+                locked_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+            .unwrap();
+    });
+    locked_rx.recv().unwrap();
+    let attempts = Arc::new(AttemptRepo::new(DieselSqliteExecutor::new(pool)));
+    let mut begin =
+        tokio::spawn(async move { attempts.begin_first_receive("entry", "attempt", 1).await });
+    assert!(tokio::time::timeout(Duration::from_millis(100), &mut begin)
+        .await
+        .is_err());
+    release_tx.send(()).unwrap();
+    writer.join().unwrap();
+    assert_eq!(begin.await.unwrap().unwrap(), BeginReceiveOutcome::Begun);
+}
 
 struct FixedSubkey;
 

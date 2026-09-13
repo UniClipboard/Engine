@@ -1,17 +1,19 @@
 use std::sync::Arc;
 
-use uc_application::facade::{AppFacade, AppPresenceEvent, AppPresenceSubscriptionError};
+use uc_application::facade::{
+    AppFacade, AppPeerReachabilityEvent, AppPeerReachabilitySubscriptionError,
+};
 use uc_core::TaskRegistry;
 
 use crate::engine::event_stream::EventSender;
 use crate::{EngineEvent, PeerPresenceChanged};
 
-pub(crate) async fn spawn_peer_presence_event_task(
+pub(crate) async fn spawn_peer_reachability_event_task(
     facade: Arc<AppFacade>,
     tasks: &Arc<TaskRegistry>,
     events: EventSender,
 ) {
-    let Ok(mut presence) = facade.subscribe_peer_presence_events() else {
+    let Ok(mut peer_reachability) = facade.subscribe_peer_reachability_events() else {
         return;
     };
     let _ = tasks
@@ -19,14 +21,14 @@ pub(crate) async fn spawn_peer_presence_event_task(
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => return,
-                    event = presence.recv() => match event {
-                        Ok(event) => events.send(engine_event_for_presence(&event)),
-                        Err(AppPresenceSubscriptionError::Lagged(_)) => {
+                    event = peer_reachability.recv() => match event {
+                        Ok(event) => events.send(engine_event_for_peer_reachability(&event)),
+                        Err(AppPeerReachabilitySubscriptionError::Lagged(_)) => {
                             events.send(EngineEvent::RefreshRequired {
                                 reason: crate::RefreshReason::ConsumerLagged,
                             });
                         }
-                        Err(AppPresenceSubscriptionError::Closed) => return,
+                        Err(AppPeerReachabilitySubscriptionError::Closed) => return,
                     }
                 }
             }
@@ -34,7 +36,7 @@ pub(crate) async fn spawn_peer_presence_event_task(
         .await;
 }
 
-fn engine_event_for_presence(event: &AppPresenceEvent) -> EngineEvent {
+fn engine_event_for_peer_reachability(event: &AppPeerReachabilityEvent) -> EngineEvent {
     EngineEvent::PeerPresenceChanged(PeerPresenceChanged {
         device_id: event.device_id.clone(),
         state: event.state.clone(),

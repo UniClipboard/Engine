@@ -2,6 +2,8 @@
 
 这里保留已完成、已由后续方案取代或仅供历史追溯的实施记录。它们不自动代表当前架构事实。
 
+- [已有连接活性与故障恢复](2026-09-12-connection-liveness-and-recovery.md)（实现与本地三轮完整验收完成；远程 CI、发布和产品采用未执行）
+
 - [已配对设备自动连接与恢复](2026-09-11-automatic-peer-connections.md)（实现与 Mac/iOS 模拟器验收完成；其他实体平台跳过）
 
 - [040 以完整业务动作组织观测记录](040-business-observability-records.md)（本机验证完成，产品宿主与真实后端未验收）

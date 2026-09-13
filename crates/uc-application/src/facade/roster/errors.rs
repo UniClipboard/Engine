@@ -2,9 +2,9 @@
 
 use thiserror::Error;
 
-/// Failure modes of [`crate::facade::roster::MemberRosterFacade::list_with_presence`].
+/// Failure modes of [`crate::facade::roster::MemberRosterFacade::list_with_peer_reachability`].
 ///
-/// `PresencePort::current_state` 故意**不**在这里出现——它的签名是
+/// `PeerReachabilityPort::current_state` 故意**不**在这里出现——它的签名是
 /// `async fn current_state(...) -> ReachabilityState`(无 Result),
 /// 表示"读缓存不可能失败"。若未来 adapter 想在缓存失效时回退到
 /// `Unknown`,也应继续在 port 内部消化,保持本 error 小而稳定。

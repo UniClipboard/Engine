@@ -53,7 +53,7 @@ pub(crate) async fn send_active_state_to_with_scope(
 /// The roster is the set of peers we hold an address for
 /// (`peer_addr_repo.list()`), so a peer with no address is silently skipped
 /// (offline / never reachable). The device that activated the state
-/// (`state.activated_by`) is never echoed back to, and a peer the presence
+/// (`state.activated_by`) is never echoed back to, and a peer the peer_reachability
 /// tracker already reports `Offline` is skipped without dialing. Each surviving
 /// target is gated by the full outbound gate (`send_enabled` ∧
 /// `send_content_types`, the latter via `categories`). Per-peer dispatch
@@ -63,7 +63,7 @@ pub(crate) async fn fan_out_active_state(
     dispatch: &Arc<dyn ActiveClipboardDispatchPort>,
     peer_addr_repo: &Arc<dyn PeerAddressRepositoryPort>,
     peer_scope: &Arc<dyn CurrentSpaceMemberScopePort>,
-    presence: &Arc<dyn PeerReachabilityPort>,
+    peer_reachability: &Arc<dyn PeerReachabilityPort>,
     send_gate: &MemberSendGate,
     state: &ActiveClipboardState,
     categories: &ClipboardContentCategorySet,
@@ -92,14 +92,14 @@ pub(crate) async fn fan_out_active_state(
         if target == state.activated_by {
             continue;
         }
-        // Skip peers the presence tracker already knows are offline (mirrors the
+        // Skip peers the peer_reachability tracker already knows are offline (mirrors the
         // 0xC1 dispatch preflight): the roster can carry stale/ghost members,
         // and dialing each costs a multi-second connect timeout. `Unknown` is
         // deliberately NOT pre-filtered — the dispatch adapter marks peers
         // offline on its own dial failures, so an unprobed peer still gets one
         // real attempt rather than being silently dropped.
         if matches!(
-            presence.current_state(&target).await,
+            peer_reachability.current_state(&target).await,
             ReachabilityState::Offline
         ) {
             debug!("active state fan-out: skipping peer known offline (deferred)");

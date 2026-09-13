@@ -51,9 +51,10 @@ pub use crate::space::{
 
 pub use crate::clipboard::active::{ActiveClipboardFacade, ActiveClipboardReconcileOutcome};
 pub use app_facade::{
-    AppFacade, AppPresenceEvent, AppPresenceSubscription, AppPresenceSubscriptionError,
-    ChooseDeviceGroup, ChooseDeviceGroupError, ChooseDeviceGroupResult, ClipboardRestoreMode,
-    DeviceGroupChoice, DeviceGroupChoicesView, DeviceGroupIssue, QueryDeviceGroupChoicesError,
+    AppFacade, AppPeerReachabilityEvent, AppPeerReachabilitySubscription,
+    AppPeerReachabilitySubscriptionError, ChooseDeviceGroup, ChooseDeviceGroupError,
+    ChooseDeviceGroupResult, ClipboardRestoreMode, DeviceGroupChoice, DeviceGroupChoicesView,
+    DeviceGroupIssue, QueryDeviceGroupChoicesError,
 };
 pub use app_paths::AppPaths;
 pub use blob_transfer::{
@@ -130,8 +131,8 @@ pub use crate::clipboard::resource::{
 pub use roster::{
     connection_channel_to_wire, ConnectionChannel, ContentTypesPatch, ContentTypesView,
     MemberProtectionStatusView, MemberProtectionView, MemberSummary, MemberSyncPreferencesPatch,
-    MemberSyncPreferencesView, PeerReachabilityChanged, PeerSnapshotView, PresenceRefreshReport,
-    RosterEntry, RosterError, SpaceProtectionModeView, SpaceProtectionView,
+    MemberSyncPreferencesView, PeerReachabilityChanged, PeerReachabilityRefreshReport,
+    PeerSnapshotView, RosterEntry, RosterError, SpaceProtectionModeView, SpaceProtectionView,
 };
 pub use search::{
     map_search_error, SearchFacade, SearchFacadeError, SearchPageView, SearchProjectionBuilder,
