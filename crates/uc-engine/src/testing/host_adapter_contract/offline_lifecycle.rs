@@ -1,3 +1,4 @@
+use std::net::TcpListener;
 use std::time::Duration;
 
 use tokio::time::{sleep, timeout};
@@ -17,6 +18,72 @@ use crate::{
 
 #[path = "offline_lifecycle/crash.rs"]
 mod crash;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unavailable_network_does_not_block_local_resume_save_or_read() {
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let unavailable = TcpListener::bind("127.0.0.1:0").unwrap();
+    let unavailable_url = format!("http://{}", unavailable.local_addr().unwrap());
+    drop(unavailable);
+
+    let root = tempfile::tempdir().unwrap();
+    let config = EngineConfig::new("2.0.0").with_rendezvous_base_url(unavailable_url);
+    let (engine, _events) = timeout(
+        Duration::from_secs(10),
+        Engine::start(
+            config,
+            persistent_engine_host(root.path(), MemoryHostSecureStorage::default()),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    timeout(
+        Duration::from_secs(10),
+        engine.execute(Operation::CreateSpace(CreateSpaceInput {
+            device_name: Some("offline local device".into()),
+            passphrase: SecretString::new("offline-local-passphrase"),
+            passphrase_confirmation: SecretString::new("offline-local-passphrase"),
+        })),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    engine.suspend().await.unwrap();
+    timeout(Duration::from_secs(10), engine.resume())
+        .await
+        .unwrap()
+        .unwrap();
+    let OperationResult::EntrySent(saved) = timeout(
+        Duration::from_secs(10),
+        engine.execute(Operation::SendText(SendTextInput {
+            text: "saved without any network service".into(),
+            target_devices: Vec::new(),
+        })),
+    )
+    .await
+    .unwrap()
+    .unwrap() else {
+        panic!("expected local save");
+    };
+    let OperationResult::HistoryEntry(entry) = timeout(
+        Duration::from_secs(10),
+        engine.execute(Operation::GetHistoryEntry(HistoryEntryInput {
+            entry_id: saved.entry_id,
+        })),
+    )
+    .await
+    .unwrap()
+    .unwrap() else {
+        panic!("expected local history entry");
+    };
+    assert_eq!(entry.content, "saved without any network service");
+    timeout(Duration::from_secs(10), engine.shutdown_until_complete())
+        .await
+        .unwrap()
+        .unwrap();
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn peer_restart_does_not_block_local_work_and_recovers_an_offline_file() {
