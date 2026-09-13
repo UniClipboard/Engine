@@ -48,10 +48,11 @@ impl AdvanceActiveClipboardPort for BroadcastingAdvance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use uc_core::ids::{DeviceId, EntryId};
 
     struct StubAdvance {
-        result: Result<bool, ActiveClipboardRegisterError>,
+        result: Mutex<Result<bool, ActiveClipboardRegisterError>>,
     }
 
     #[async_trait]
@@ -61,10 +62,7 @@ mod tests {
             _state: &ActiveClipboardState,
             _mobile_consumable: bool,
         ) -> Result<bool, ActiveClipboardRegisterError> {
-            match &self.result {
-                Ok(v) => Ok(*v),
-                Err(e) => Err(ActiveClipboardRegisterError::Storage(e.to_string())),
-            }
+            std::mem::replace(&mut *self.result.lock().unwrap(), Ok(false))
         }
     }
 
@@ -75,7 +73,12 @@ mod tests {
     #[tokio::test]
     async fn advance_true_broadcasts_the_state() {
         let (tx, mut rx) = broadcast::channel(64);
-        let decorator = BroadcastingAdvance::new(Arc::new(StubAdvance { result: Ok(true) }), tx);
+        let decorator = BroadcastingAdvance::new(
+            Arc::new(StubAdvance {
+                result: Mutex::new(Ok(true)),
+            }),
+            tx,
+        );
 
         let published_state = state();
         let advanced = decorator.advance(&published_state, true).await.unwrap();
@@ -87,7 +90,12 @@ mod tests {
     #[tokio::test]
     async fn advance_false_does_not_broadcast() {
         let (tx, mut rx) = broadcast::channel(64);
-        let decorator = BroadcastingAdvance::new(Arc::new(StubAdvance { result: Ok(false) }), tx);
+        let decorator = BroadcastingAdvance::new(
+            Arc::new(StubAdvance {
+                result: Mutex::new(Ok(false)),
+            }),
+            tx,
+        );
 
         let advanced = decorator.advance(&state(), true).await.unwrap();
         assert!(!advanced);
@@ -99,7 +107,9 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(64);
         let decorator = BroadcastingAdvance::new(
             Arc::new(StubAdvance {
-                result: Err(ActiveClipboardRegisterError::Storage("boom".into())),
+                result: Mutex::new(Err(ActiveClipboardRegisterError::Storage(anyhow::anyhow!(
+                    "boom"
+                )))),
             }),
             tx,
         );
@@ -113,7 +123,12 @@ mod tests {
     async fn no_subscribers_does_not_affect_advance_result() {
         let (tx, rx) = broadcast::channel(64);
         drop(rx);
-        let decorator = BroadcastingAdvance::new(Arc::new(StubAdvance { result: Ok(true) }), tx);
+        let decorator = BroadcastingAdvance::new(
+            Arc::new(StubAdvance {
+                result: Mutex::new(Ok(true)),
+            }),
+            tx,
+        );
 
         let advanced = decorator.advance(&state(), true).await.unwrap();
         assert!(
