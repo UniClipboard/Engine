@@ -1,6 +1,6 @@
 # 1. Overview
 
-状态：实施中。统一负责人已接入三类现有能力及不可逆关闭意图，稳定入口的通知顺序、启动中目标、公开操作门禁、移动通知独立转交、本地恢复故障拒绝、离线本地恢复、普通剪贴板投递意图、文件离线重启补送、最终关闭与资料重置错误汇总及部分锁交接和进程终止验证已完成。全资源门禁与阻塞清单、共同期限的最坏占用证据、传输中强制终止验证和实际设备矩阵仍待完成。局部修复不代表本规格完成。
+状态：实施中。统一负责人已接入三类现有能力及不可逆关闭意图，稳定入口的通知顺序、启动中目标、公开操作门禁、移动通知独立转交、本地恢复故障拒绝、离线本地恢复、普通剪贴板投递意图、文件离线重启补送、最终关闭与资料重置错误汇总、资源清单及部分锁交接和进程终止验证已完成。共同期限与阻塞操作的最坏占用证据、传输中强制终止验证和实际设备矩阵仍待完成。局部修复不代表本规格完成。
 
 iOS 退后台时 Engine 曾报告暂停成功，但真实文件租约仍被持有。现有修复已覆盖一部分释放和任务退出问题，
 但暂停责任仍分散，停止预算不统一，恢复耦合网络运行期，重启也不保证未完成同步再次执行。
@@ -296,52 +296,48 @@ impl RuntimeLifecycleCoordinator {
 
 ## 实施记录：资源与恢复清单
 
-2026-09-12 开工检查以当前工作区为准，保留此前未提交的后台暂停修复。清单中的“未证明”是后续实施门禁，
-不是已通过验收；现有取消通知、固定等待值和一次正常执行耗时均不构成磁盘临界区的最坏上界。
+本清单在 2026-09-13 按当前实现重新核对。它回答“谁负责、从哪里停止、用什么验证”，并覆盖运行期工作者、
+持久访问、网络嵌套任务、进程线程及绑定命令。清单完整不代表耗时验收完成；现有取消通知、固定等待值和一次正常执行耗时
+均不构成磁盘临界区的最坏上界。
 
 | 工作或资源 | 当前唯一所有者与代码入口 | 当前停止与恢复方式 | 临界区与缺口 | 实际验证入口 |
 | --- | --- | --- | --- | --- |
-| 宿主调用 | `crates/uc-engine/src/engine/in_flight.rs`、`engine/mod.rs` | 登记保留到调用退出，暂停取消并等待 | 外层取消不能证明底层阻塞写入退出；需统一入口和期限 | `in_flight::tests::cancellation_does_not_report_resources_released_until_the_operation_exits` |
-| 会话调用及重建 | `crates/uc-engine/src/runtime/session_supervisor.rs` | 关闭操作门、停止旧会话、重建后开门 | 当前两段 2 秒等待各自计时；生命周期锁等待未计入；恢复存在只警告的失败分支 | 同文件操作门测试、`crates/uc-engine/tests/host_contract.rs` |
-| 内容物化与 spool 清理 | `crates/uc-infra/src/clipboard/background_runtime.rs`、`background_activity.rs` | 进程 TaskRegistry 持有两项任务；共享读许可包围磁盘动作，写许可暂停 | 当前暂停无期限；完整动作中读写及扫描的最坏时长未证明 | `background_activity::tests`、`background_blob_worker` 的取消测试 |
-| 搜索重建及修复 | `crates/uc-application/src/search/runtime.rs`、`coordinator.rs` | 会话 ApplicationRuntime 拥有，取消 scope 并等待 TaskTracker | `spawn_task` 通过 select 丢弃业务 future；`crates/uc-infra/src/search/sqlite_index.rs` 中已启动的 spawn_blocking 可能继续持有数据库连接；需在实际存储边界等待 | `search::coordinator::tests`；需新增真实阻塞存储退出测试 |
-| 历史维护 | `crates/uc-application/src/clipboard/history/maintenance_runtime.rs` | 会话 ApplicationRuntime 拥有；等待当前完整动作结束，在后续动作开始前检查取消并 join | 启动先做文件核对；单个动作仍无共同期限；关闭保留原始 JoinError，Engine 汇总传播仍待迁移 | `maintenance_runtime_tests.rs` |
-| 文件超时清理 | `crates/uc-application/src/application.rs` 的 FileTransferTimeoutRuntime | 会话拥有；通知后等待 1 秒，再 abort 并 join | abort 不保证 tokio::fs 的底层工作退出；逐项清理的最坏上界未证明 | `transfer/file/lifecycle.rs::tests::timeout_sweep_can_stop_before_receive_becomes_ready`；需磁盘动作验收 |
-| 入站保存与自动发送 | `crates/uc-application/src/clipboard/assembly.rs`、`sync/sync_runtime.rs`、`inbound/runtime.rs` | ClipboardSession 拥有；顺序停止 recovery 与 inbound | 停止结果部分只记录警告；正在执行的恢复发送尚未消费共同期限 | `inbound/runtime.rs` 关闭测试、`sync/sync_runtime.rs` 恢复测试 |
-| 活跃内容与恢复广播 | `crates/uc-application/src/clipboard/active/mod.rs` | ActiveClipboardSession 拥有 JoinSet 和监督任务 | 嵌套任务由此所有者接入，不能再向总负责人重复登记；发布及接收中的磁盘临界区待验证 | 同目录测试及 `sync/active_state/` 测试 |
-| 成员维护及自动连接 | `crates/uc-application/src/space/membership/maintenance/runtime.rs`、`space/connectivity/` | SpaceFacade 拥有并随会话停止 | 维护当前轮次有独立 5 秒等待；关闭期限需要来自同一转换；不允许暂停后旧重建重开入口 | `membership/maintenance/tests.rs`、`connectivity/peer_connections/tests.rs` |
-| 网络与文件传输 | `crates/uc-engine/src/assembly/sync_engine.rs`、`runtime/session_supervisor.rs` | ProductionSession 拥有 SyncEngineAssembly；应用工作退出后关闭网络 | 关闭结果与所有嵌套 provider/fetch 任务仍需逐项核验；停止尝试不能等同主动取消 | 网络关闭测试、传输真实接收测试，待补完整清单 |
-| 本地安全资料与租约 | `crates/uc-infra/src/security/profile_content_key_vault/`、`space/security/active_space_security_session/` | 安全 adapter 暂停后清缓存、释放租约，恢复重新取用 | 必须先证明所有使用者退出；正常锁定、租约冲突与损坏需明确区分 | Vault tests、`host_contract::suspended_engine_releases_profile_lease_and_can_resume` |
-| SQLite 连接及事务 | `crates/uc-infra/src/db/pool.rs`、`executor.rs` | DbPool 当前没有暂停门；执行者同步取得连接并运行闭包 | SQLite busy_timeout 为 5000 ms，但这不是完整事务上界；池等待、池维护线程、搜索阻塞任务均需核验 | `db/pool.rs` 真实数据库测试；需新增暂停后拒绝旧访问和事务退出证明 |
-| 进程事件转发及剪贴板监听 | `crates/uc-engine/src/runtime/mod.rs`、`host_clipboard.rs` | 进程 TaskRegistry 拥有，普通暂停保留 | 纯转发可休眠；触发业务的路径必须走关闭后的统一入口；需检查迟到通知 | Engine 生命周期及宿主通知测试 |
-| 诊断文件写入 | `crates/uc-observability-runtime/src/local_file.rs` | 进程 LocalFileRuntime 独立线程、有界队列、刷新与最终关闭 | 普通暂停没有可恢复停止入口；刷新后仍可接受新记录，不能用 flush 证明暂停后静默；文件写入上界待测 | `local_file.rs` 刷新/关闭测试；需暂停与恢复实测 |
-| 绑定命令 | `bindings/uc-engine-uniffi/src/runtime.rs` | 独立命令线程，生命周期通道优先处理恢复期间的暂停 | 等待方 recv_timeout 不取消命令；需要入队时固定绝对期限并区分未接收与未完成 | 同文件生命周期等待与关闭期限测试 |
+| 宿主操作 | `crates/uc-engine/src/engine/operation.rs` 与 `crates/uc-engine/src/engine/in_flight.rs` | 操作门先拒绝新工作；已登记动作由独立所有者完成，暂停等待实际退出 | 动作内部不可中断步骤仍需测量最坏时长 | Engine 操作取消、真实数据库锁竞争及启动中切换测试 |
+| 生命周期命令与启动交接 | `crates/uc-engine/src/engine/lifecycle/queue.rs`、`crates/uc-engine/src/engine/startup_owner.rs` | 单一队列保存顺序与最新目标；启动前后转交同一运行期，等待方离开不取消收尾 | 宿主剩余时间仍需真机核对 | Engine 生命周期、启动所有者及 UniFFI 公开合同测试 |
+| 会话重建 | `crates/uc-engine/src/runtime/session_supervisor/` | 关闭操作门，完整停止旧会话；本地资料成功恢复后才开门，失败时反向回收 | 整次构造中不可中断步骤仍需设备上界 | 会话生命周期、启动回收及真实宿主离线恢复测试 |
+| Application 领域工作 | `crates/uc-application/src/application/shutdown/owners.rs` | 同时停止历史、文件超时、搜索、Space、普通剪贴板和活动剪贴板，等待全部结果并汇总异常 | 每项内部磁盘动作仍需共同期限证据 | Application shutdown、各领域 lifecycle 测试 |
+| 内容物化与 spool | `crates/uc-infra/src/clipboard/background_runtime.rs`、`crates/uc-infra/src/clipboard/background_activity.rs` | 进程 `TaskRegistry` 持有工作；暂停门等待当前完整磁盘动作后交接 | 大内容读写及目录扫描最坏时长未证明 | background activity、blob worker 与真实保存后重开测试 |
+| 搜索重建及修复 | `crates/uc-application/src/search/runtime.rs`、`crates/uc-application/src/search/coordinator.rs` | Search runtime 持有任务范围；停止后等待已经开始的索引动作真正退出 | SQLite 索引完整写入的最坏时长未证明 | 搜索协调器阻塞线程与 Application 关闭测试 |
+| 剪贴板发送、接收与活动广播 | `crates/uc-application/src/clipboard/sync/`、`crates/uc-application/src/clipboard/inbound/`、`crates/uc-application/src/clipboard/active/` | 各自私有工作负责人登记完整动作，`ClipboardSession` 统一通知并排空 | 单次拉取、保存和宿主写入的最坏时长未证明 | 发送、接收、活动剪贴板关闭及离线恢复测试 |
+| 历史维护 | `crates/uc-application/src/clipboard/history/maintenance_runtime.rs` | Application 拥有；当前动作完整结算，后续动作在停止边界退出 | 核对和清理单轮最坏时长未证明 | history maintenance 生命周期测试 |
+| 文件接收与超时清理 | `crates/uc-application/src/transfer/file/session.rs`、`crates/uc-application/src/transfer/file/shutdown.rs`、`crates/uc-application/src/transfer/file/timeout_runtime.rs` | 接收会话由私有关闭负责人逐项完整取消；超时工作由 Application 停止并等待 | 文件发布与清理的最坏时长、传输中强制终止仍待验收 | 文件关闭、超时工作及双 Engine 离线重启补送测试 |
+| 成员维护与自动连接 | `crates/uc-application/src/space/membership/maintenance/runtime.rs`、`crates/uc-application/src/space/connectivity/` | Space runtime 拥有；停止当前完整轮次并保留异常，不再使用独立五秒后放弃 | 单轮持久访问最坏时长未证明 | membership maintenance、peer connections 与 Space shutdown 测试 |
+| Iroh Router、协议处理器与下载 | `crates/uc-infra/src/network/iroh/node/shutdown.rs`、`crates/uc-infra/src/network/iroh/blobs.rs` | `SyncEngineAssembly` 先停进度工作，再关闭 Router、endpoint 和观测任务；慢收尾继续由原所有者等待，下载取消关闭对应连接 | 真实弱网和大文件下 Router/下载退出上界仍待设备验证 | Iroh 多异常关闭、慢处理器资源释放及文件传输测试 |
+| 本地安全资料与租约 | `crates/uc-infra/src/security/profile_content_key_vault/`、`crates/uc-infra/src/space/security/` | 安装、冷读取、文件租约和系统安全存储访问均由私有所有者持有；使用者全部退出后才清缓存和交还租约 | 系统安全存储及目录同步的设备上界未证明 | Vault 锁竞争、阻塞安全存储、暂停交接及进程重开测试 |
+| SQLite 连接及事务 | `crates/uc-infra/src/db/executor.rs`、`crates/uc-infra/src/db/pool.rs` 及各 repository 私有阻塞所有者 | 业务负责人等待完整数据库调用；资料切换只在上层工作全部结束后替换连接池 | 5 秒 busy timeout 不是事务总上界；全库设备耗时仍待测量 | 发送记录、活动登记真实锁竞争及各 repository 回归测试 |
+| 进程任务与诊断线程 | `crates/uc-engine/src/runtime/task_shutdown.rs`、`crates/uc-core/src/task_registry.rs`、`crates/uc-observability-runtime/src/local_file.rs` | Engine 最终关闭等待任务登记实际退出；诊断线程以有界队列刷新并在最终关闭时 join | 普通暂停保留进程级诊断能力；文件刷新最坏时长待测 | TaskRegistry 取消/异常测试、Engine 最终关闭及 local file 刷新/关闭测试 |
+| 移动绑定与兼容线命令 | `bindings/uc-engine-uniffi/src/runtime/`、`bindings/uc-ohos-napi/`、`compatibility/uc-mobile*/` | 绑定线程只负责命令转交；生命周期在普通调用阻塞时仍可入队，已接收收尾不随等待超时丢失 | iOS、Android、HarmonyOS 的真实系统回调和期限仍待设备矩阵 | UniFFI 单线程宿主、公开合同及兼容线检查 |
 
-#### 阻塞访问与网络嵌套工作的补充核对
+#### 阻塞访问与网络嵌套工作的完整归属
 
-- `crates/uc-infra/src/blob/blob_writer.rs`、`blob/filesystem_store.rs`：文件摘要、硬链接及复制在阻塞线程执行，
-  由内容保存/物化调用者拥有。大文件操作没有已证明上界；只取消等待者不能宣称文件访问停止。
-- `crates/uc-infra/src/fs/atomic_publish.rs`、`fs/hidden_path.rs`：发布重命名、文件系统探测及隐藏属性同样进入阻塞线程，
-  由入站接收/发布流程拥有。发布成功后如何在取消时完整结算需用真实文件检查。
-- `crates/uc-infra/src/config_migration/adapter.rs`：归档、数据库快照、密封及发布归配置迁移完整调用所有，
-  属于在途宿主调用，不能因不是循环工作而遗漏。`file_transfer/privacy_maintenance.rs` 的阻塞迁移归接收准备所有。
-- `crates/uc-infra/src/mobile_sync/password_hasher.rs`：阻塞任务执行密码计算，需确认不持有挂起敏感资源，
-  不能将所有阻塞任务等同磁盘写入者。以上连同搜索覆盖本次全目录搜索发现的 33 个实际 `spawn_blocking` 调用位置。
-- `crates/uc-infra/src/network/iroh/node.rs::install_blobs` 创建 FsStore，并启用库内 GC；Router 的 BlobsProtocol
-  负责 store 关闭。`IrohNode::shutdown` 先停止恢复 watchdog、关闭 endpoint 和连接观测，再等待 Router；
-  当前 Router 超时或错误只警告并返回，不能作为磁盘安全证明。
-- `crates/uc-infra/src/network/iroh/blobs.rs` 的 IrohBlobTransferAdapter 缓存 Downloader，库内部持有下载 JoinSet。
-  `shutdown_inflight_fetch` 请求 `shutdown_endpoint`；该请求成功与全部下载/存储动作退出是否等价仍须核对锁定的库源码并实测。
-  进度翻译由 `SyncEngineAssembly::outbound_progress_translator` 独立拥有，先停止后关闭 IrohNode。
+- Blob 摘要、复制、链接、文件系统发布、隐藏属性、配置迁移、隐私迁移、密钥文件与系统安全存储访问，均由发起它们的
+  完整业务动作持有；调用方取消只停止等待，所有者继续等待阻塞线程结束，再向生命周期负责人报告完成。
+- SQLite 主库、搜索索引、活动登记和送达记录的阻塞调用均由对应 repository 或 coordinator 私有持有；数据库池不另设
+  生命周期接口，上层只在全部使用者停止后切换或释放资料。密码计算、网络探测等非磁盘阻塞工作同样归其完整调用所有。
+- Iroh 的 Router 拥有协议处理器及 blob store，下载器内部任务通过连接关闭停止；节点关闭会等待 Router 的唯一 join、endpoint
+  和连接观测任务，慢收尾只报告诊断而不放弃所有权。进度翻译在节点关闭前由 `SyncEngineAssembly` 单独停止。
+- UniFFI、HarmonyOS、兼容线和观测运行期中的独立线程均有明确 join 或进程级保留规则。测试辅助代码中的阻塞调用不计入
+  生产资源，但继续由测试本身回收。全仓搜索到的生产阻塞入口均已归入上述类别；新增入口必须同步更新本表。
 
 ### 持久恢复依据
 
-- `clipboard/sync/sync_runtime.rs` 已有 EntryDeliveryRecord 恢复及当前成员检查，但不能据此宣称覆盖全部中断尝试。
-  当前恢复选择还会替换更旧的离线内容，新增恢复必须保留这一业务规则。
-- `transfer/file/lifecycle.rs` 启动执行接收 reconciliation，再执行 `bulk_fail_inflight` 清理遗留尝试。
-  清理展示状态不提供发送意图；用户取消与暂停原因的持久互斥仍待逐条核对。
+- `clipboard/sync/sync_runtime/recovery.rs` 使用既有送达记录恢复 Pending 与 Unreachable；每台目标在开始发送前先写 Pending，
+  因而结果落盘前终止也可在重启后重试。恢复继续检查当前成员、同步开关和内容有效性，并由更新内容替代更旧的离线内容。
+- 文件发送复用同一条目送达记录，真实双 Engine 测试已覆盖接收端退出、发送端离线保存文件及接收端以原资料重启后自动补送。
+  接收侧 reconciliation 仍只负责清理未完成展示状态，不被误作发送意图。
 - 搜索用已持久化的 blocked 状态触发重建；spool 使用启动扫描恢复物化。两者都必须补充强制终止后的真实目录验证。
-- Vault 恢复需重新读取持久资料；已确认内容的跨进程可读性和取消/删除/撤权后不重发尚未完成本规格验收。
+- Vault 恢复重新读取持久资料；已确认内容的真实子进程终止后可读性已经验证。传输中强制终止，以及取消、删除、撤权后
+  不恢复旧意图，仍是本规格的独立验收项。
 
 ### 当前验证
 
@@ -349,8 +345,8 @@ impl RuntimeLifecycleCoordinator {
 - 已运行 `cargo test -p uc-engine --test host_contract suspended_engine_releases_profile_lease_and_can_resume --locked -- --nocapture`，
   1 项通过。实际覆盖保存、暂停释放租约、另一持有者占用时恢复失败、释放后恢复读取与再次保存；测试运行 8.50 秒。
   这是本次重新执行的基准，不覆盖统一负责人、共同期限或重启同步恢复。
-- 资源清单尚未完成：网络 provider/fetch 嵌套任务、数据库池维护线程及所有阻塞磁盘访问的上界仍需核验。
-  因此阶段 1 和总验收均未勾选；不提前宣告进入统一替换完成状态。
+- 资源清单已按当前生产入口收口，网络 provider/fetch、数据库连接池、独立线程和阻塞访问均有唯一归属及验证入口。
+  阶段 1 的清单门禁完成；最坏占用上界属于阶段 4 和设备验收，仍不得据此宣告总规格完成。
 - `cargo check --workspace --all-targets --locked`、`cargo fmt --all -- --check`、Rust 风格检查、仓库架构及隐私检查、
   `git diff --check` 均通过。整仓检查仅报告 HarmonyOS 测试中的现有未使用导入警告。
 - 以上为 2026-09-12 盘点基准；当时未修改生产 Rust 实现。后续实施以下方按日记录为准。
@@ -852,6 +848,13 @@ impl RuntimeLifecycleCoordinator {
 - 完成标准：会话、文件接收和进程任务分别失败或同时失败时，其余动作仍执行且资料不释放；全部成功才允许重置继续；生产重置后旧运行期不能再接收文件或重建会话。
 - 验证：4 项共同关闭规则专项和 1 项真实资料重置合同通过；Engine 216 项及真实宿主 9 项通过，Engine 原有 3 项、宿主原有 1 项忽略。metadata、workspace 全目标、dev-tools 与 lan-compat 全目标、格式、Rust 风格、架构及差异检查通过。阻塞访问最坏上界和设备验收继续追踪。
 
+### 2026-09-13：资源与恢复清单按当前实现收口
+
+- 重新扫描运行期工作者、阻塞线程、持久访问、Iroh 嵌套任务、进程线程、移动绑定和兼容线，将旧表更新为当前唯一所有者、停止方式及实际验证入口。新增入口必须同步更新这张清单。
+- 删除已经失效的缺口描述：Application 关闭会汇总所有领域结果，成员维护不再固定等待后放弃，Iroh 慢收尾不再丢失所有权，剪贴板与文件发送已有重启恢复依据，最终关闭和资料重置也会继续处理全部资源使用者。
+- 完成标准：每个生产工作者、持久访问和嵌套任务都能归入一个完整动作及上级关闭负责人；测试辅助调用明确排除，进程级保留能力与暂停时必须停止的业务工作明确区分。
+- 本切片只完成归属与验证入口清单。共同期限、每种阻塞操作的最坏时长、传输中强制终止及实际设备矩阵仍未完成，不据此宣告完整交付。
+
 # 7. Edge Cases
 
 
@@ -895,7 +898,7 @@ impl RuntimeLifecycleCoordinator {
 
 # 9. Acceptance Criteria
 
-* [ ] 资源清单覆盖所有工作者、持久访问及嵌套任务；每项有唯一所有者与实际验证入口。
+* [x] 资源清单覆盖所有工作者、持久访问及嵌套任务；每项有唯一所有者与实际验证入口。
 * [ ] 所有参与者实现统一约定，旧分散生命周期顺序已删除，Engine 未暴露内部步骤。
 * [ ] 暂停成功后锁可交接、事务已结束、无旧任务延迟写入或重开资源。
 * [ ] 队列和清理共享期限；每个参与者的取消及最坏临界区有证据，超时不虚报安全。
