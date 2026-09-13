@@ -170,6 +170,35 @@ async fn dependency_order_and_context_are_shared_across_the_transition() {
 }
 
 #[tokio::test]
+async fn slow_session_does_not_delay_local_stop_notification() {
+    let fixture = Fixture::new();
+    fixture.activate().await;
+    fixture.session.block_suspend.store(true, Ordering::SeqCst);
+    fixture.local.block_suspend.store(true, Ordering::SeqCst);
+    let stopping = tokio::spawn({
+        let owner = Arc::clone(&fixture.coordinator);
+        async move { owner.transition(LifecycleTarget::Suspended, None).await }
+    });
+    timeout(Duration::from_secs(1), fixture.session.stopping.notified())
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(1), fixture.local.stopping.notified())
+        .await
+        .unwrap();
+    assert_eq!(fixture.names(), ["session", "local"]);
+    fixture.session.release.notify_one();
+    tokio::task::yield_now().await;
+    assert_eq!(fixture.names(), ["session", "local"]);
+    fixture.local.release.notify_one();
+    timeout(Duration::from_secs(1), stopping)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(fixture.names(), ["session", "local", "resources"]);
+}
+
+#[tokio::test]
 async fn stop_failure_attempts_other_work_but_retains_resources_and_all_sources() {
     let fixture = Fixture::new();
     fixture.activate().await;
@@ -251,7 +280,7 @@ async fn dropping_the_waiter_does_not_drop_cleanup_or_allow_overlapping_resume()
     assert!(timeout(Duration::from_millis(20), &mut resume)
         .await
         .is_err());
-    assert_eq!(fixture.names(), ["session"]);
+    assert_eq!(fixture.names(), ["session", "local"]);
     fixture.session.release.notify_one();
     timeout(Duration::from_secs(1), resume)
         .await

@@ -128,24 +128,24 @@ impl RuntimeLifecycleCoordinator {
     }
 
     async fn suspend(&self, context: &TransitionContext) -> Vec<anyhow::Error> {
+        // 两类工作先同时收到停止通知；资源仍要等双方完整收尾后才能交接。
+        let (session, local) = tokio::join!(
+            invoke(
+                &self.participants.session_work,
+                LifecycleTarget::Suspended,
+                context,
+            ),
+            invoke(
+                &self.participants.local_work,
+                LifecycleTarget::Suspended,
+                context,
+            ),
+        );
         let mut errors = Vec::new();
-        // 会话可能等待本地物化，先结束会话，不能先关闭它需要的本地工作。
-        if let Err(error) = invoke(
-            &self.participants.session_work,
-            LifecycleTarget::Suspended,
-            context,
-        )
-        .await
-        {
+        if let Err(error) = session {
             errors.push(error.context("stop session work"));
         }
-        if let Err(error) = invoke(
-            &self.participants.local_work,
-            LifecycleTarget::Suspended,
-            context,
-        )
-        .await
-        {
+        if let Err(error) = local {
             errors.push(error.context("stop local work"));
         }
         if errors.is_empty() {
