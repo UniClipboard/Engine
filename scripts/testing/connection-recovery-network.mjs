@@ -175,13 +175,13 @@ async function paired(group) {
 
 async function offline(isolated, budget) {
   await until(async () => {
-    for (const node of nodes) {
+    const results = await Promise.all(nodes.map(async node => {
       const peers = await node.call('peers')
       await node.drain()
       const expected = node === isolated ? nodes.filter(peer => peer !== isolated) : [isolated]
-      if (!expected.every(peer => peers.some(row => row.peer_id === peer.id && !row.connected))) return false
-    }
-    return true
+      return expected.every(peer => peers.some(row => row.peer_id === peer.id && !row.connected))
+    }))
+    return results.every(Boolean)
   }, budget, 'silent disconnection exceeded its deadline')
 }
 
