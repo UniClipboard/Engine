@@ -17,6 +17,7 @@ use super::automatic_sync_enabled;
 use crate::clipboard::outbound::{
     ClipboardOutboundFacade, NotResendableReason, ResendEntryError, ResendReport,
 };
+use crate::deps::CurrentSpaceMemberScopePort;
 
 #[cfg(test)]
 mod tests;
@@ -54,6 +55,7 @@ impl RecoveryDeliveryPort for ClipboardOutboundFacade {
 pub(super) struct OfflineDeliveryRecoveryDeps {
     pub(super) peer_reachability: Arc<dyn PeerReachabilityPort>,
     pub(super) known_peers: Arc<dyn PeerAddressRepositoryPort>,
+    pub(super) member_scope: Arc<dyn CurrentSpaceMemberScopePort>,
     pub(super) settings: Arc<dyn SettingsPort>,
     pub(super) entries: Arc<dyn ListClipboardEntriesPort>,
     pub(super) events: Arc<dyn ClipboardEventRepositoryPort>,
@@ -188,6 +190,20 @@ async fn recover_for_target(
         return;
     }
 
+    let scope = match deps.member_scope.snapshot().await {
+        Ok(scope) if scope.local_member_active => scope,
+        Ok(_) | Err(_) => return,
+    };
+    let target_is_current = scope.usable_peer_device_ids.contains(&target);
+    if !target_is_current
+        && scope
+            .paused_peer_devices
+            .iter()
+            .any(|peer| peer.device_id == target)
+    {
+        return;
+    }
+
     let local_device = deps.device_identity.current_device_id();
     let mut offset = 0;
     loop {
@@ -250,6 +266,10 @@ async fn recover_for_target(
             else {
                 continue;
             };
+            if !target_is_current {
+                supersede_delivery(deps, &entry.entry_id, &target).await;
+                return;
+            }
             // 旧内容失效是一项完整动作，必须完成后才处理停止，避免重启后补发旧内容。
             if !supersede_older_recoverable_entries(deps, &entry.entry_id, &target).await {
                 warn!(
@@ -383,6 +403,26 @@ async fn stop_automatic_recovery(
         warn!(
             error_kind = "delivery_record",
             "clipboard delivery recovery: failed to stop unavailable entry recovery"
+        );
+    }
+}
+
+async fn supersede_delivery(
+    deps: &OfflineDeliveryRecoveryDeps,
+    entry_id: &EntryId,
+    target: &DeviceId,
+) {
+    let record = EntryDeliveryRecord {
+        entry_id: entry_id.clone(),
+        target_device_id: target.clone(),
+        status: EntryDeliveryStatus::Superseded,
+        reason_detail: None,
+        updated_at_ms: deps.clock.now_ms(),
+    };
+    if deps.deliveries.record_attempt(&record).await.is_err() {
+        warn!(
+            error_kind = "delivery_record",
+            "clipboard delivery recovery: failed to stop ineligible target recovery"
         );
     }
 }

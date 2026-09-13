@@ -14,6 +14,10 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
+use crate::deps::{
+    CurrentSpaceMemberScope, CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort,
+    PausedSpaceMember, SpaceMemberPauseReason,
+};
 use uc_core::clipboard::{ClipboardEntry, ClipboardRepositoryError};
 use uc_core::ids::{EntryId, EventId};
 use uc_core::ports::presence::{PeerReachabilityChanged, PresenceError};
@@ -416,6 +420,23 @@ impl PeerReachabilityPort for IdlePresence {
 
 struct NoPeers;
 
+struct FixedMemberScope {
+    usable: Vec<DeviceId>,
+    paused: Vec<PausedSpaceMember>,
+}
+
+#[async_trait]
+impl CurrentSpaceMemberScopePort for FixedMemberScope {
+    async fn snapshot(&self) -> Result<CurrentSpaceMemberScope, CurrentSpaceMemberScopeError> {
+        Ok(CurrentSpaceMemberScope {
+            revision: 1,
+            local_member_active: true,
+            usable_peer_device_ids: self.usable.clone(),
+            paused_peer_devices: self.paused.clone(),
+        })
+    }
+}
+
 #[async_trait]
 impl PeerAddressRepositoryPort for NoPeers {
     async fn get(
@@ -458,6 +479,10 @@ fn recovery_deps(
     OfflineDeliveryRecoveryDeps {
         presence: Arc::new(IdlePresence { tx }),
         known_peers: Arc::new(NoPeers),
+        member_scope: Arc::new(FixedMemberScope {
+            usable: vec![DeviceId::new("target"), DeviceId::new("recovered")],
+            paused: Vec::new(),
+        }),
         settings: Arc::new(FixedSettings {
             sync_enabled: true,
             auto_sync_enabled,
@@ -527,7 +552,6 @@ async fn recovery_only_dispatches_the_recovered_devices_unreachable_local_entry(
         deliveries,
         Arc::clone(&delivery),
     );
-
     recover_for_target(&deps, target.clone(), &CancellationToken::new()).await;
 
     let commands = delivery.commands.lock().unwrap();
@@ -569,6 +593,160 @@ async fn recovery_dispatches_an_attempt_left_pending_by_process_exit() {
         delivery.commands.lock().unwrap().as_slice(),
         &[(pending_entry.entry_id, vec![target])]
     );
+}
+
+#[tokio::test]
+async fn deleted_and_terminal_entries_never_resume_automatic_delivery() {
+    let deleted = entry("deleted", "deleted-event");
+    let cancelled = entry("cancelled", "cancelled-event");
+    let failed = entry("failed", "failed-event");
+    let target = DeviceId::new("recovered");
+    let deliveries = Arc::new(Deliveries {
+        records: Mutex::new(HashMap::from([
+            (
+                deleted.entry_id.clone(),
+                vec![EntryDeliveryRecord {
+                    entry_id: deleted.entry_id,
+                    target_device_id: target.clone(),
+                    status: EntryDeliveryStatus::Pending,
+                    reason_detail: None,
+                    updated_at_ms: 1,
+                }],
+            ),
+            (
+                cancelled.entry_id.clone(),
+                vec![EntryDeliveryRecord {
+                    entry_id: cancelled.entry_id.clone(),
+                    target_device_id: target.clone(),
+                    status: EntryDeliveryStatus::Superseded,
+                    reason_detail: None,
+                    updated_at_ms: 2,
+                }],
+            ),
+            (
+                failed.entry_id.clone(),
+                vec![EntryDeliveryRecord {
+                    entry_id: failed.entry_id.clone(),
+                    target_device_id: target.clone(),
+                    status: EntryDeliveryStatus::Failed {
+                        reason: DeliveryFailureReason::Internal,
+                    },
+                    reason_detail: None,
+                    updated_at_ms: 3,
+                }],
+            ),
+        ])),
+    });
+    let delivery = Arc::new(RecordingDispatch {
+        commands: Mutex::new(Vec::new()),
+        result: DispatchResult::Delivered,
+    });
+    let deps = recovery_deps(
+        true,
+        vec![cancelled.clone(), failed.clone()],
+        HashMap::from([
+            (cancelled.event_id, DeviceId::new("local")),
+            (failed.event_id, DeviceId::new("local")),
+        ]),
+        deliveries,
+        Arc::clone(&delivery),
+    );
+
+    recover_for_target(&deps, target, &CancellationToken::new()).await;
+
+    assert!(delivery.commands.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn target_that_lost_delivery_eligibility_becomes_terminal() {
+    let pending = entry("pending", "pending-event");
+    let target = DeviceId::new("revoked");
+    let deliveries = Arc::new(Deliveries {
+        records: Mutex::new(HashMap::from([(
+            pending.entry_id.clone(),
+            vec![EntryDeliveryRecord {
+                entry_id: pending.entry_id.clone(),
+                target_device_id: target.clone(),
+                status: EntryDeliveryStatus::Pending,
+                reason_detail: None,
+                updated_at_ms: 1,
+            }],
+        )])),
+    });
+    let delivery = Arc::new(RecordingDispatch {
+        commands: Mutex::new(Vec::new()),
+        result: DispatchResult::Delivered,
+    });
+    let mut deps = recovery_deps(
+        true,
+        vec![pending.clone()],
+        HashMap::from([(pending.event_id.clone(), DeviceId::new("local"))]),
+        Arc::clone(&deliveries),
+        Arc::clone(&delivery),
+    );
+    deps.member_scope = Arc::new(FixedMemberScope {
+        usable: Vec::new(),
+        paused: Vec::new(),
+    });
+
+    recover_for_target(&deps, target.clone(), &CancellationToken::new()).await;
+    recover_for_target(&deps, target.clone(), &CancellationToken::new()).await;
+
+    assert!(delivery.commands.lock().unwrap().is_empty());
+    let stored = deliveries.list_by_entry(&pending.entry_id).await.unwrap();
+    assert!(matches!(
+        stored.as_slice(),
+        [record]
+            if record.target_device_id == target
+                && record.status == EntryDeliveryStatus::Superseded
+    ));
+}
+
+#[tokio::test]
+async fn temporarily_paused_target_keeps_its_pending_delivery() {
+    let pending = entry("pending", "pending-event");
+    let target = DeviceId::new("paused");
+    let deliveries = Arc::new(Deliveries {
+        records: Mutex::new(HashMap::from([(
+            pending.entry_id.clone(),
+            vec![EntryDeliveryRecord {
+                entry_id: pending.entry_id.clone(),
+                target_device_id: target.clone(),
+                status: EntryDeliveryStatus::Pending,
+                reason_detail: None,
+                updated_at_ms: 1,
+            }],
+        )])),
+    });
+    let delivery = Arc::new(RecordingDispatch {
+        commands: Mutex::new(Vec::new()),
+        result: DispatchResult::Delivered,
+    });
+    let mut deps = recovery_deps(
+        true,
+        vec![pending.clone()],
+        HashMap::from([(pending.event_id.clone(), DeviceId::new("local"))]),
+        Arc::clone(&deliveries),
+        Arc::clone(&delivery),
+    );
+    deps.member_scope = Arc::new(FixedMemberScope {
+        usable: Vec::new(),
+        paused: vec![PausedSpaceMember {
+            device_id: target.clone(),
+            reason: SpaceMemberPauseReason::RelationshipUnconfirmed,
+        }],
+    });
+
+    recover_for_target(&deps, target.clone(), &CancellationToken::new()).await;
+
+    assert!(delivery.commands.lock().unwrap().is_empty());
+    let stored = deliveries.list_by_entry(&pending.entry_id).await.unwrap();
+    assert!(matches!(
+        stored.as_slice(),
+        [record]
+            if record.target_device_id == target
+                && record.status == EntryDeliveryStatus::Pending
+    ));
 }
 
 #[tokio::test]

@@ -22,6 +22,7 @@ use crate::clipboard::outbound::{
     ClipboardOutboundError, ClipboardOutboundFacade, ClipboardOutboundInput,
     ClipboardOutboundOutcome, ClipboardOutboundPort,
 };
+use crate::deps::CurrentSpaceMemberScopePort;
 use crate::runtime_lifecycle::LifecycleError;
 
 /// 自动出站的完整生命周期。调用方只提交本地捕获；手动重发使用独立
@@ -42,6 +43,7 @@ pub struct ClipboardSyncRuntimeDeps {
     pub inbound: ClipboardInboundRuntime,
     pub peer_reachability: Arc<dyn PeerReachabilityPort>,
     pub known_peers: Arc<dyn PeerAddressRepositoryPort>,
+    pub member_scope: Arc<dyn CurrentSpaceMemberScopePort>,
     pub entries: Arc<dyn ListClipboardEntriesPort>,
     pub events: Arc<dyn ClipboardEventRepositoryPort>,
     pub deliveries: Arc<dyn EntryDeliveryRepositoryPort>,
@@ -55,6 +57,7 @@ impl ClipboardSyncRuntime {
         let recovery = OfflineDeliveryRecovery::start(OfflineDeliveryRecoveryDeps {
             peer_reachability: deps.peer_reachability,
             known_peers: deps.known_peers,
+            member_scope: deps.member_scope,
             settings: Arc::clone(&deps.settings),
             entries: deps.entries,
             events: deps.events,
