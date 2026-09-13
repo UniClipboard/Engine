@@ -95,6 +95,8 @@ fn ios_device_commands_publish_pollable_timing_evidence() {
     assert!(command.contains("request_id"));
     assert!(model.contains("\"elapsed_ms\""));
     assert!(model.contains("\"block_ms\""));
+    assert!(model.contains("\"stale_count\""));
+    assert!(model.contains("\"fresh_count\""));
     assert!(model.contains("\"capture\""));
     assert!(model.contains("\"restore\""));
     assert!(probe.contains("deadline_ms: Option<u64>"));
@@ -103,6 +105,7 @@ fn ios_device_commands_publish_pollable_timing_evidence() {
     assert!(probe.contains("SuspendDuringFileRead"));
     assert!(probe.contains("SuspendDuringFileWrite"));
     assert!(probe.contains("SuspendDuringStartup"));
+    assert!(probe.contains("VerifyStaleClipboardChangeAfterSuspend"));
     assert!(probe.contains("started_at.elapsed()"));
 }
 

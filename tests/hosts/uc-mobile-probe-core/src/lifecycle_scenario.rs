@@ -1,10 +1,11 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 use uc_engine::{
     ClipboardRestoreMode, ExportEntryInput, HostCapabilities, Operation, OperationResult,
-    QueryHistoryInput, RestoreClipboardInput, SendFilesInput, StartupLifecycle, StartupProgress,
+    QueryHistoryInput, RestoreClipboardInput, SendFilesInput, SendTextInput, StartupLifecycle,
+    StartupProgress,
 };
 
 use super::secure_storage::ControlledSecureStorage;
@@ -265,6 +266,113 @@ pub(super) async fn suspend_during_file_write(
             "block_ms": block_ms,
             "outcome": outcome,
         }),
+    }
+}
+
+pub(super) async fn verify_stale_clipboard_change_after_suspend(
+    state: &ProbeState,
+    deadline_ms: u64,
+) -> Value {
+    let Some(engine) = state.engine.as_ref().cloned() else {
+        return probe_error("not_started");
+    };
+    let marker = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let stale_text = format!("mobile stale callback {marker}");
+    let fresh_text = format!("mobile fresh work {marker}");
+
+    let suspend_started_at = Instant::now();
+    if let Err(error) = engine
+        .suspend_with_deadline(Duration::from_millis(deadline_ms))
+        .await
+    {
+        return json!({
+            "ok": false,
+            "kind": engine_error_kind(&error),
+            "phase": "suspend",
+            "elapsed_ms": suspend_started_at.elapsed().as_millis(),
+        });
+    }
+    let suspend_elapsed_ms = suspend_started_at.elapsed().as_millis();
+    if !state.clipboard.publish_text_change(&stale_text) {
+        return probe_error("clipboard_change_stream_unavailable");
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let resume_started_at = Instant::now();
+    if let Err(error) = engine.resume().await {
+        return json!({
+            "ok": false,
+            "kind": engine_error_kind(&error),
+            "phase": "resume",
+            "elapsed_ms": resume_started_at.elapsed().as_millis(),
+        });
+    }
+    let resume_elapsed_ms = resume_started_at.elapsed().as_millis();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let stale_count = match history_match_count(engine.as_ref(), &stale_text).await {
+        Ok(count) => count,
+        Err(error) => return error,
+    };
+    if stale_count != 0 {
+        return json!({
+            "ok": false,
+            "kind": "stale_clipboard_change_written",
+            "stale_count": stale_count,
+            "suspend_elapsed_ms": suspend_elapsed_ms,
+            "resume_elapsed_ms": resume_elapsed_ms,
+        });
+    }
+
+    if let Err(error) = engine
+        .execute(Operation::SendText(SendTextInput {
+            text: fresh_text.clone(),
+            target_devices: Vec::new(),
+        }))
+        .await
+    {
+        return probe_error(engine_error_kind(&error));
+    }
+    let fresh_count = match history_match_count(engine.as_ref(), &fresh_text).await {
+        Ok(count) => count,
+        Err(error) => return error,
+    };
+    if fresh_count != 1 {
+        return json!({
+            "ok": false,
+            "kind": "fresh_clipboard_write_missing",
+            "stale_count": stale_count,
+            "fresh_count": fresh_count,
+            "suspend_elapsed_ms": suspend_elapsed_ms,
+            "resume_elapsed_ms": resume_elapsed_ms,
+        });
+    }
+
+    json!({
+        "ok": true,
+        "kind": "stale_clipboard_change_stayed_silent",
+        "stale_count": stale_count,
+        "fresh_count": fresh_count,
+        "suspend_elapsed_ms": suspend_elapsed_ms,
+        "resume_elapsed_ms": resume_elapsed_ms,
+    })
+}
+
+async fn history_match_count(engine: &uc_engine::Engine, query: &str) -> Result<usize, Value> {
+    match engine
+        .execute(Operation::QueryHistory(QueryHistoryInput {
+            cursor: None,
+            limit: 10,
+            query: Some(query.to_owned()),
+        }))
+        .await
+    {
+        Ok(OperationResult::HistoryPage { entries, .. }) => Ok(entries.len()),
+        Ok(_) => Err(probe_error("history_unavailable")),
+        Err(error) => Err(probe_error(engine_error_kind(&error))),
     }
 }
 

@@ -120,6 +120,9 @@ enum ProbeCommand {
         block_ms: u64,
         deadline_ms: u64,
     },
+    VerifyStaleClipboardChangeAfterSuspend {
+        deadline_ms: u64,
+    },
     Resume,
     EventSummary,
     Shutdown,
@@ -507,6 +510,10 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
             block_ms,
             deadline_ms,
         } => lifecycle_scenario::suspend_during_startup(state, block_ms, deadline_ms).await,
+        ProbeCommand::VerifyStaleClipboardChangeAfterSuspend { deadline_ms } => {
+            lifecycle_scenario::verify_stale_clipboard_change_after_suspend(state, deadline_ms)
+                .await
+        }
         ProbeCommand::Resume => match state.engine.as_ref() {
             Some(engine) => {
                 let started_at = Instant::now();
@@ -1636,6 +1643,19 @@ mod tests {
             r#"{"command":"suspend_during_startup","block_ms":10,"deadline_ms":100}"#,
         )
         .expect("busy startup command must deserialize");
+        let mut state = ProbeState::default();
+
+        let response = execute_command(&mut state, command).await;
+
+        assert_eq!(response, probe_error("not_started"));
+    }
+
+    #[tokio::test]
+    async fn stale_clipboard_change_command_reaches_the_engine_boundary() {
+        let command: ProbeCommand = serde_json::from_str(
+            r#"{"command":"verify_stale_clipboard_change_after_suspend","deadline_ms":100}"#,
+        )
+        .expect("stale clipboard change command must deserialize");
         let mut state = ProbeState::default();
 
         let response = execute_command(&mut state, command).await;
