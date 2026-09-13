@@ -4,7 +4,7 @@
 
 - 状态：实现、仓库检查、本地一键三轮验收与归档完成。接收并发写入修复后的新旧版本连续 30 次互传通过；完整仓库检查的既存失败已分别完成基线对照。GitHub 远程门禁、发布和产品宿主更新未执行。
 - 日期：2026-09-12；本地完成：2026-09-13。
-- 实现提交：`c1ae314666d1b4ad78c7096c54b79558111989a4`，未推送或发布。
+- 实现提交：`246e28da`，未推送或发布。
 - 研究基线：Engine `f6f305d9689e4e79e7ab6d0e4921061f9416e4a6`，版本 `1.1.0-rc.15`，锁定 Iroh `1.0.0-rc.1`。
 - 前置设计：[已配对设备自动连接](../../design-docs/automatic-peer-connections.md)及其[已完成实施记录](../completed/2026-09-11-automatic-peer-connections.md)。
 - 完整负责人：Application 的 `PeerConnectionCoordinator` 负责单设备连接维护；Infra 的 peer reachability adapter 负责连接证据及协议；`NetworkRecoveryFacade` 只负责被明确请求的整会话恢复。Engine 只装配和执行生命周期替换。
@@ -352,7 +352,7 @@ P0/P1 需要核实的是工程事实，不需要用户再提供资料：旧版�
 
 | 对象 | 状态 |
 | --- | --- |
-| Engine 实现 | 已本地提交 `c1ae314666d1b4ad78c7096c54b79558111989a4`，分支 `fix/connection-liveness-and-recovery` |
+| Engine 实现 | 已本地提交 `246e28da`，分支 `fix/connection-liveness-and-recovery` |
 | 本地验收 | 完整三轮入口通过；旧版对照与修复前失败记录保留；全仓两项既存失败单列技术债 |
 | GitHub 持续集成 | job 已加入，一致的脚本在本地 Linux 实跑；未推送分支，远程 job 未触发 |
 | Engine 发布 | 未执行，版本仍为研究基线的 `1.1.0-rc.15`，不将本地源码当作已发布产物 |

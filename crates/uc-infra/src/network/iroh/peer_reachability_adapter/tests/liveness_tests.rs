@@ -191,6 +191,114 @@ async fn one_connection_supports_checks_from_both_directions_without_redial() {
 }
 
 #[tokio::test]
+async fn peer_rejection_wins_over_an_alive_parallel_connection() {
+    let a = bound_endpoint().await;
+    let b = bound_endpoint().await;
+    wait_for_direct_addrs(&a).await;
+    wait_for_direct_addrs(&b).await;
+    let b_id = DeviceId::new("b");
+    let members = Arc::new(MemMemberRepo::default());
+    members.seed(member_for_endpoint(&b, "b"));
+    let adapter = Arc::new(build_adapter_with_member_repo(
+        a.clone(),
+        Arc::new(FakePeerAddressRepo::default()),
+        members,
+    ));
+    let router = Router::builder((*a).clone())
+        .accept(PEER_REACHABILITY_ALPN, adapter.handler())
+        .spawn();
+
+    let alive = b.connect(a.addr(), PEER_REACHABILITY_ALPN).await.unwrap();
+    assert_eq!(
+        request_admission_confirmation(&alive).await,
+        ADMISSION_ACCEPTED
+    );
+    let rejected = b.connect(a.addr(), PEER_REACHABILITY_ALPN).await.unwrap();
+    assert_eq!(
+        request_admission_confirmation(&rejected).await,
+        ADMISSION_ACCEPTED
+    );
+    timeout(Duration::from_secs(2), async {
+        while adapter.handler_state.inbound_connections.lock().await.len() < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let alive_replied = Arc::new(tokio::sync::Notify::new());
+    let release_rejection = Arc::new(tokio::sync::Semaphore::new(0));
+    let alive_response = tokio::spawn({
+        let alive_replied = alive_replied.clone();
+        async move {
+            reply_to_liveness(&alive, true).await;
+            alive_replied.notify_one();
+        }
+    });
+    let rejected_response = tokio::spawn({
+        let release_rejection = release_rejection.clone();
+        async move {
+            let (mut send, mut receive) = rejected.accept_bi().await.unwrap();
+            let bytes = receive
+                .read_to_end(peer_reachability_protocol::FRAME_SIZE)
+                .await
+                .unwrap();
+            let challenge = peer_reachability_protocol::challenge(&bytes).unwrap();
+            release_rejection.acquire().await.unwrap().forget();
+            send.write_all(&peer_reachability_protocol::reply(&challenge, false))
+                .await
+                .unwrap();
+            send.finish().unwrap();
+        }
+    });
+    let check = tokio::spawn({
+        let adapter = adapter.clone();
+        async move { adapter.verify_reachable(&b_id).await }
+    });
+
+    timeout(Duration::from_secs(2), alive_replied.notified())
+        .await
+        .unwrap();
+    release_rejection.add_permits(1);
+    assert_eq!(
+        timeout(Duration::from_secs(2), check)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        ReachabilityState::Offline
+    );
+    assert_eq!(
+        adapter.current_state(&b_id).await,
+        ReachabilityState::Offline
+    );
+    assert!(adapter
+        .handler_state
+        .inbound_connections
+        .lock()
+        .await
+        .is_empty());
+    alive_response.await.unwrap();
+    rejected_response.await.unwrap();
+    adapter.disconnect_all().await;
+    router.shutdown().await.unwrap();
+    b.close().await;
+}
+
+async fn reply_to_liveness(connection: &Connection, admitted: bool) {
+    let (mut send, mut receive) = connection.accept_bi().await.unwrap();
+    let bytes = receive
+        .read_to_end(peer_reachability_protocol::FRAME_SIZE)
+        .await
+        .unwrap();
+    let challenge = peer_reachability_protocol::challenge(&bytes).unwrap();
+    send.write_all(&peer_reachability_protocol::reply(&challenge, admitted))
+        .await
+        .unwrap();
+    send.finish().unwrap();
+}
+
+#[tokio::test]
 async fn repeated_admitted_inbound_connections_have_a_fixed_limit() {
     let a = bound_endpoint().await;
     let b = bound_endpoint().await;

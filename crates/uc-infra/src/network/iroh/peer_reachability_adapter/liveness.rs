@@ -104,15 +104,34 @@ impl IrohPeerReachabilityAdapter {
             });
         }
         let mut checks = checks;
+        let mut alive_connections = Vec::new();
+        let mut rejected_by_peer = false;
         while let Some((connection, result)) = checks.next().await {
-            if result != CheckResult::Alive {
-                *failure = super::PresenceCheckResult::Confirmation(match result {
-                    CheckResult::Rejected => super::ConfirmationFailure::PeerNotAdmitted,
-                    CheckResult::TimedOut => super::ConfirmationFailure::TimedOut,
-                    _ => super::ConfirmationFailure::TransportFailed,
-                });
-                continue;
+            match result {
+                CheckResult::Alive => alive_connections.push(connection),
+                CheckResult::Rejected => {
+                    rejected_by_peer = true;
+                    *failure = super::PresenceCheckResult::Confirmation(
+                        super::ConfirmationFailure::PeerNotAdmitted,
+                    );
+                }
+                CheckResult::TimedOut if !rejected_by_peer => {
+                    *failure = super::PresenceCheckResult::Confirmation(
+                        super::ConfirmationFailure::TimedOut,
+                    );
+                }
+                CheckResult::Failed if !rejected_by_peer => {
+                    *failure = super::PresenceCheckResult::Confirmation(
+                        super::ConfirmationFailure::TransportFailed,
+                    );
+                }
+                CheckResult::TimedOut | CheckResult::Failed => {}
             }
+        }
+        if rejected_by_peer {
+            alive_connections.clear();
+        }
+        for connection in alive_connections {
             let admitted = self
                 .handler_state
                 .peer_admission
