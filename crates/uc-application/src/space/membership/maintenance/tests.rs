@@ -6,8 +6,6 @@ use async_trait::async_trait;
 
 use super::runtime::SpaceMembershipMaintenanceRuntimeError;
 use super::*;
-use crate::application::ApplicationShutdownReport;
-use crate::runtime_lifecycle::LifecycleError;
 
 struct PanickingAdmission;
 
@@ -81,28 +79,6 @@ async fn failed_round_is_retained_by_pause_resume_shutdown_and_application_repor
         };
         assert!(Arc::ptr_eq(source, shutdown_source));
         assert!(calls.lock().unwrap().is_empty());
-        let space_error = Arc::new(LifecycleError {
-            primary: shutdown_error,
-            additional: Vec::new(),
-        });
-        let report = ApplicationShutdownReport {
-            history: None,
-            search: None,
-            file_transfer_timeout: None,
-            clipboard: None,
-            active_clipboard: None,
-            space: Some(Arc::clone(&space_error)),
-        }
-        .into_result()
-        .unwrap_err();
-        assert!(Arc::ptr_eq(
-            &space_error,
-            report
-                .primary
-                .downcast_ref::<Arc<LifecycleError>>()
-                .unwrap()
-        ));
-        assert!(!format!("{report:?} {report}").contains("PRIVATE"));
     }
 }
 

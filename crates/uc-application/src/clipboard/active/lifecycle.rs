@@ -387,20 +387,6 @@ mod lifecycle_tests {
             .unwrap()
             .is_panic());
         assert!(!format!("{error:?} {error}").contains("PRIVATE"));
-        let failure = crate::application::ApplicationShutdownReport {
-            history: None,
-            search: None,
-            file_transfer_timeout: None,
-            clipboard: None,
-            active_clipboard: Some(error),
-            space: None,
-        }
-        .into_result()
-        .unwrap_err();
-        assert!(failure
-            .primary
-            .downcast_ref::<crate::runtime_lifecycle::LifecycleError>()
-            .is_some());
     }
 
     #[tokio::test]

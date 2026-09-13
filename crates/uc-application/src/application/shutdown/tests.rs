@@ -1,3 +1,4 @@
+use std::error::Error as _;
 use std::io::{Error as IoError, ErrorKind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -7,7 +8,134 @@ use tokio::sync::{oneshot, Notify};
 use tokio::task::{spawn_blocking, JoinError};
 use tokio::time::timeout;
 
-use super::{ApplicationShutdown, LifecycleError};
+use crate::facade::clipboard_history::HistoryMaintenanceRuntimeError;
+use crate::search::SearchShutdownError;
+
+use super::{begin, finish, ApplicationShutdown, LifecycleError};
+
+#[tokio::test]
+async fn stopping_domains_preserves_each_typed_failure() {
+    let history = tokio::spawn(async { panic!("PRIVATE_HISTORY_FAILURE") })
+        .await
+        .unwrap_err();
+    let timeout = tokio::spawn(std::future::pending::<()>());
+    timeout.abort();
+    let clipboard = Arc::new(LifecycleError {
+        primary: IoError::other("private clipboard").into(),
+        additional: Vec::new(),
+    });
+    let space = Arc::new(LifecycleError {
+        primary: IoError::other("private space").into(),
+        additional: Vec::new(),
+    });
+    let tasks = vec![
+        begin("stop history", async move {
+            Err(HistoryMaintenanceRuntimeError::Task(history))
+        }),
+        begin(
+            "stop timeout",
+            async move { Err(timeout.await.unwrap_err()) },
+        ),
+        begin("stop search", async {
+            Err(SearchShutdownError::Coordinator {
+                source: IoError::other("PRIVATE_SEARCH_FAILURE").into(),
+            })
+        }),
+        begin("stop clipboard", {
+            let source = Arc::clone(&clipboard);
+            async move { Err(source) }
+        }),
+        begin("stop active clipboard", async {
+            Err(LifecycleError {
+                primary: IoError::other("private active clipboard").into(),
+                additional: Vec::new(),
+            })
+        }),
+        begin("stop space", {
+            let source = Arc::clone(&space);
+            async move { Err(source) }
+        }),
+    ];
+    let failure = finish(tasks).await.unwrap_err();
+    assert!(failure.source().is_some());
+    assert!(failure
+        .primary
+        .downcast_ref::<HistoryMaintenanceRuntimeError>()
+        .is_some());
+    assert_eq!(failure.additional.len(), 5);
+    assert!(failure.additional[0]
+        .downcast_ref::<JoinError>()
+        .unwrap()
+        .is_cancelled());
+    assert!(failure.additional[1]
+        .downcast_ref::<SearchShutdownError>()
+        .unwrap()
+        .source()
+        .is_some());
+    assert!(Arc::ptr_eq(
+        &clipboard,
+        failure.additional[2]
+            .downcast_ref::<Arc<LifecycleError>>()
+            .unwrap()
+    ));
+    assert!(failure.additional[3]
+        .downcast_ref::<LifecycleError>()
+        .is_some());
+    assert!(Arc::ptr_eq(
+        &space,
+        failure.additional[4]
+            .downcast_ref::<Arc<LifecycleError>>()
+            .unwrap()
+    ));
+    assert!(!format!("{failure:?}").contains("PRIVATE"));
+}
+
+async fn panicking_cleanup() -> Result<(), IoError> {
+    panic!("private domain shutdown panic");
+}
+
+#[tokio::test]
+async fn one_slow_domain_does_not_delay_other_shutdowns_or_hide_panics() {
+    let entered = Arc::new(Notify::new());
+    let quick = Arc::new(Notify::new());
+    let (release, blocked) = oneshot::channel();
+    let tasks = vec![
+        begin("stop slow domain", {
+            let entered = Arc::clone(&entered);
+            async move {
+                spawn_blocking(move || {
+                    entered.notify_one();
+                    blocked.blocking_recv().unwrap();
+                })
+                .await
+                .unwrap();
+                Ok::<(), IoError>(())
+            }
+        }),
+        begin("stop quick domain", {
+            let quick = Arc::clone(&quick);
+            async move {
+                quick.notify_one();
+                Err(IoError::other("private quick failure"))
+            }
+        }),
+        begin("stop panicking domain", panicking_cleanup()),
+    ];
+    let mut closing = tokio::spawn(finish(tasks));
+    entered.notified().await;
+    let notified = timeout(Duration::from_secs(1), quick.notified()).await;
+    let early = timeout(Duration::from_millis(20), &mut closing).await;
+    release.send(()).unwrap();
+    assert!(notified.is_ok());
+    assert!(early.is_err());
+    let failure = closing.await.unwrap().unwrap_err();
+    assert!(failure.primary.downcast_ref::<IoError>().is_some());
+    assert_eq!(failure.additional.len(), 1);
+    assert!(failure.additional[0]
+        .downcast_ref::<JoinError>()
+        .unwrap()
+        .is_panic());
+}
 
 #[tokio::test]
 async fn cancelled_waiter_and_repeated_shutdown_share_the_complete_cleanup() {

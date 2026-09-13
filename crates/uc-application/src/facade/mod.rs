@@ -25,8 +25,8 @@ pub mod storage;
 pub mod upgrade;
 
 pub use crate::application::{
-    ApplicationAssembly, ApplicationRuntime, ApplicationRuntimeError, ApplicationShutdownReport,
-    ApplicationStartError, ApplicationUpgradeError,
+    ApplicationAssembly, ApplicationRuntime, ApplicationRuntimeError, ApplicationStartError,
+    ApplicationUpgradeError,
 };
 
 pub use crate::device::query_local_device::LocalDeviceInfo;

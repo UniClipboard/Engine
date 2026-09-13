@@ -1,11 +1,10 @@
 //! Application 顶层对象图与运行期所有权。
 //!
 //! Engine 只选择具体 adapter；本模块统一构造稳定 facade，并持有 Search、
-//! Clipboard 与历史维护的启动、关闭顺序。
+//! Clipboard 与历史维护的启动及完整关闭。
 
 use crate::clipboard::inbound::ClipboardReceiverPort;
 use std::sync::Arc;
-use tokio::task::JoinError;
 use tokio::time::Instant;
 
 use uc_core::clipboard::ClipboardIntegrationMode;
@@ -36,7 +35,7 @@ use crate::facade::app_facade::{AppFacade, AppFacadeParts};
 use crate::facade::blob_transfer::BlobTransferFacade;
 use crate::facade::clipboard::facade::ClipboardSyncDeps;
 use crate::facade::clipboard::ClipboardSyncFacade;
-use crate::facade::clipboard_history::{HistoryMaintenanceRuntime, HistoryMaintenanceRuntimeError};
+use crate::facade::clipboard_history::HistoryMaintenanceRuntime;
 use crate::facade::clipboard_write::RestoreBroadcastTrigger;
 use crate::runtime_lifecycle::{LifecycleError, RuntimeLifecyclePort, TransitionContext};
 use crate::search::{SearchAssembly, SearchShutdownError};
@@ -700,22 +699,7 @@ impl ApplicationRuntime {
                 let Some(owners) = owners.lock().await.take() else {
                     return Ok(());
                 };
-                let history = owners.history_maintenance.shutdown().await.err();
-                let file_transfer_timeout =
-                    owners.file_transfer_timeout.shutdown(deadline).await.err();
-                let clipboard = owners.clipboard.shutdown().await.err();
-                let active_clipboard = owners.active_clipboard.shutdown().await.err();
-                let search = owners.search.shutdown().await.err();
-                let space = owners.space.on_shutdown().await.err();
-                ApplicationShutdownReport {
-                    history,
-                    search,
-                    file_transfer_timeout,
-                    clipboard,
-                    active_clipboard,
-                    space,
-                }
-                .into_result()
+                owners.shutdown(deadline).await
             })
             .await
     }
@@ -732,81 +716,11 @@ pub enum ApplicationRuntimeError {
     },
 }
 
-/// 关闭会尝试所有领域；报告保留每个下层的类型化失败。
-pub struct ApplicationShutdownReport {
-    pub history: Option<HistoryMaintenanceRuntimeError>,
-    pub search: Option<SearchShutdownError>,
-    pub file_transfer_timeout: Option<JoinError>,
-    pub clipboard: Option<Arc<LifecycleError>>,
-    pub active_clipboard: Option<LifecycleError>,
-    pub space: Option<Arc<LifecycleError>>,
-}
-
-impl ApplicationShutdownReport {
-    pub fn into_result(self) -> Result<(), LifecycleError> {
-        let mut errors = Vec::new();
-        if let Some(error) = self.history {
-            errors.push(anyhow::Error::new(error).context("stop history maintenance"));
-        }
-        if let Some(error) = self.file_transfer_timeout {
-            errors.push(anyhow::Error::new(error).context("stop file transfer timeout worker"));
-        }
-        if let Some(error) = self.search {
-            errors.push(anyhow::Error::new(error).context("stop search runtime"));
-        }
-        if let Some(error) = self.clipboard {
-            errors.push(anyhow::Error::new(error).context("stop clipboard sync runtime"));
-        }
-        if let Some(error) = self.active_clipboard {
-            errors.push(anyhow::Error::new(error).context("stop active clipboard workers"));
-        }
-        if let Some(error) = self.space {
-            errors.push(anyhow::Error::new(error).context("stop space runtime"));
-        }
-        LifecycleError::from_errors(errors)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::error::Error as _;
 
     use super::*;
-
-    #[tokio::test]
-    async fn shutdown_report_keeps_all_typed_sources_and_safe_summary() {
-        let history = tokio::spawn(async { panic!("PRIVATE_HISTORY_FAILURE") })
-            .await
-            .unwrap_err();
-        let timeout = tokio::spawn(std::future::pending::<()>());
-        timeout.abort();
-        let report = ApplicationShutdownReport {
-            history: Some(HistoryMaintenanceRuntimeError::Task(history)),
-            file_transfer_timeout: Some(timeout.await.unwrap_err()),
-            clipboard: None,
-            active_clipboard: None,
-            space: None,
-            search: Some(SearchShutdownError::Coordinator {
-                source: std::io::Error::other("PRIVATE_SEARCH_FAILURE").into(),
-            }),
-        };
-        let failure = report.into_result().unwrap_err();
-        assert!(failure.source().is_some());
-        assert!(failure
-            .primary
-            .downcast_ref::<HistoryMaintenanceRuntimeError>()
-            .is_some());
-        assert_eq!(failure.additional.len(), 2);
-        assert!(failure.additional[0]
-            .downcast_ref::<JoinError>()
-            .unwrap()
-            .is_cancelled());
-        let search = failure.additional[1]
-            .downcast_ref::<SearchShutdownError>()
-            .unwrap();
-        assert!(search.source().is_some());
-        assert!(!failure.to_string().contains("PRIVATE"));
-    }
 
     #[test]
     fn runtime_error_keeps_typed_source_and_redacts_public_text() {

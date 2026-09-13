@@ -4,7 +4,6 @@ use crate::clipboard::inbound::ClipboardInboundRuntime;
 use crate::clipboard::outbound::{
     ClipboardOutboundError, ClipboardOutboundInput, ClipboardOutboundOutcome, ClipboardOutboundPort,
 };
-use crate::runtime_lifecycle::LifecycleError;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use std::collections::HashMap;
@@ -94,22 +93,6 @@ async fn shutdown_survives_waiter_cancellation_and_retains_both_worker_failures(
     assert!(inbound.source().unwrap().is::<JoinError>());
     assert!(!format!("{error:?} {error}").contains("PRIVATE"));
     assert!(Arc::ptr_eq(&error, &runtime.shutdown().await.unwrap_err()));
-    let report = crate::application::ApplicationShutdownReport {
-        history: None,
-        search: None,
-        file_transfer_timeout: None,
-        clipboard: Some(Arc::clone(&error)),
-        active_clipboard: None,
-        space: None,
-    };
-    let failure = report.into_result().unwrap_err();
-    assert!(Arc::ptr_eq(
-        &error,
-        failure
-            .primary
-            .downcast_ref::<Arc<LifecycleError>>()
-            .unwrap()
-    ));
     let result = runtime
         .dispatch_local_capture_to_targets(
             ClipboardOutboundInput {
