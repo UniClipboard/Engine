@@ -7,6 +7,7 @@ mod lan_compatibility;
 #[cfg(feature = "lan-compat")]
 mod mobile_upload;
 mod session_supervisor;
+mod shutdown;
 mod task_shutdown;
 
 use std::io::Write as _;

@@ -8,8 +8,6 @@ use tokio::time::Instant;
 
 #[cfg(feature = "dev-tools")]
 use super::operation_error_with_code;
-use super::session_supervisor::lifecycle_error;
-use super::task_shutdown::shutdown_tasks;
 use super::ProductionRuntime;
 use crate::engine::EngineRuntime;
 use crate::operations::clipboard::capture::execute_capture_current_clipboard;
@@ -81,8 +79,7 @@ use crate::operations::space::unlock::execute_unlock_space;
 use crate::{EngineError, EngineErrorCategory, Operation, OperationResult};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
-use uc_application::facade::{LifecycleError, NetworkRecoveryRequestError};
+use uc_application::facade::NetworkRecoveryRequestError;
 
 #[async_trait]
 impl EngineRuntime for ProductionRuntime {
@@ -730,31 +727,6 @@ impl EngineRuntime for ProductionRuntime {
     }
 
     async fn shutdown(&self, deadline: Option<Instant>) -> Result<(), EngineError> {
-        let mut errors = Vec::new();
-        if let Err(error) = self.network_recovery.shutdown().await {
-            errors.push(error.into());
-        }
-        if let Err(error) = self.session_supervisor.stop(deadline).await {
-            errors.push(error.into());
-            return LifecycleError::from_errors(errors).map_err(lifecycle_error);
-        }
-        if let Err(error) = self.session_supervisor.close_file_transfers().await {
-            errors.push(error.into());
-            return LifecycleError::from_errors(errors).map_err(lifecycle_error);
-        }
-        let tasks = shutdown_tasks(&self.task_registry, deadline)
-            .await
-            .into_result();
-        self.security_lifecycle.close_security_session();
-        self.session_supervisor.clear_factory();
-        if let Err(error) = std::fs::remove_dir_all(&self.clipboard_import_root) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                warn!(error = %error, "failed to remove host clipboard imports");
-            }
-        }
-        if let Err(error) = tasks {
-            errors.push(error.into());
-        }
-        LifecycleError::from_errors(errors).map_err(lifecycle_error)
+        super::shutdown::shutdown(self, deadline).await
     }
 }
