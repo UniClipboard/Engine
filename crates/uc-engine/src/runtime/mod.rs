@@ -112,6 +112,7 @@ async fn spawn_network_recovery_events(
         .spawn(move |cancel| async move {
             loop {
                 tokio::select! {
+                    biased;
                     _ = cancel.cancelled() => return,
                     change = changes.recv() => match change {
                         Ok(change) => events.send(crate::EngineEvent::NetworkRecoveryChanged(network_recovery_summary(change))),
@@ -313,6 +314,7 @@ async fn spawn_space_transition_watcher(
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
+                    biased;
                     _ = cancel.cancelled() => return,
                     _ = interval.tick() => match supervisor.transition_pending_session().await {
                         Ok(Some(revision)) => {

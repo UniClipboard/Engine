@@ -161,6 +161,7 @@ impl ClipboardBackgroundPort for ClipboardBackgroundRuntime {
                 loop {
                     let ticket = activity.timer_ticket();
                     tokio::select! {
+                    biased;
                         _ = cancel.cancelled() => return,
                         _ = interval.tick() => {
                             let Some(_permit) = activity.enter_timer(ticket).await else {
