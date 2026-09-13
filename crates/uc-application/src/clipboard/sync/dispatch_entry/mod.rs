@@ -71,20 +71,19 @@ const FAN_OUT_DEADLINE: Duration = Duration::from_secs(5);
 mod delivery;
 mod fanout;
 mod header;
-mod lifecycle;
 mod per_peer;
 mod target_selector;
 
 #[cfg(test)]
 mod test_support;
 
+use super::work::WorkOwner;
 use crate::runtime_lifecycle::LifecycleError;
 use delivery::{
     classify_dispatch_result, spawn_deferred_drain, DeliveryRecorder, DispatchResultBucket,
 };
 use fanout::DeadlineBoundedFanout;
 use header::OutboundHeaderFactory;
-use lifecycle::DispatchWorkOwner;
 use per_peer::PerPeerDispatcher;
 use target_selector::TargetSelector;
 
@@ -301,7 +300,7 @@ impl DispatchEntryRunner for DispatchClipboardEntryUseCase {
 /// per pass: identity stamps both the self-filter and the header origin;
 /// the clock stamps the aggregate outcome and each peer's delivery record.
 pub(crate) struct DispatchClipboardEntryUseCase {
-    work: DispatchWorkOwner,
+    work: WorkOwner,
     cipher: Arc<dyn TransferCipherPort>,
     device_identity: Arc<dyn DeviceIdentityPort>,
     clock: Arc<dyn ClockPort>,
@@ -425,7 +424,7 @@ impl DispatchClipboardEntryUseCase {
     ) -> Self {
         let header_clock = Arc::clone(&clock);
         Self {
-            work: DispatchWorkOwner::default(),
+            work: WorkOwner::default(),
             cipher: transfer_cipher,
             device_identity,
             clock,
@@ -455,7 +454,7 @@ impl DispatchClipboardEntryUseCase {
         &self,
         input: DispatchClipboardEntryInput,
     ) -> Result<DispatchOutcome, DispatchSyncError> {
-        let work = self.work.begin()?;
+        let work = self.work.begin().ok_or(DispatchSyncError::Stopped)?;
         // 1. Encrypt once. A locked session surfaces here — let it
         //    short-circuit so we don't spam the dispatch wire with retries.
         let ciphertext = match self.cipher.encrypt(&input.plaintext).await {

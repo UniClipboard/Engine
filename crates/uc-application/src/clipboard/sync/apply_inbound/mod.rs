@@ -157,6 +157,8 @@ pub enum ApplyOutcome {
 
 #[derive(Debug, Error)]
 pub enum ApplyInboundError {
+    #[error("clipboard receive stopped")]
+    Stopped,
     #[error("dedup query failed")]
     DedupQuery(#[source] SourceError),
     #[error("capture pipeline failed")]

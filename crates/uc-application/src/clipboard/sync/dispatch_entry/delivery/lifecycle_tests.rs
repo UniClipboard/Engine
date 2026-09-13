@@ -10,7 +10,7 @@ use uc_core::clipboard::{EntryDeliveryError, EntryDeliveryRecord};
 use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::{DispatchAck, EntryDeliveryRepositoryPort};
 
-use super::super::lifecycle::DispatchWorkOwner;
+use super::super::super::work::WorkOwner;
 use super::super::test_support::FixedClock;
 use super::{spawn_deferred_drain, DeliveryRecorder};
 use crate::facade::HostEventBus;
@@ -55,7 +55,7 @@ async fn abandoned_shutdown_keeps_the_real_deferred_write_in_the_drain() {
         repository.clone(),
         Arc::new(HostEventBus::new()),
     ));
-    let owner = DispatchWorkOwner::default();
+    let owner = WorkOwner::default();
     let mut peers = JoinSet::new();
     peers.spawn(async { (DeviceId::new("peer"), Ok(DispatchAck::Accepted)) });
     spawn_deferred_drain(

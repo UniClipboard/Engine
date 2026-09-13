@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use moka::sync::Cache;
 use tracing::{debug, error, info, instrument, warn};
+use uc_observability_contract::diagnostics::{DiagnosticTaskKind, ObservationContext};
 
 use uc_core::clipboard::ActiveClipboardState;
 use uc_core::file_transfer::{OutboundProgressReporterPort, OutboundProgressStatus};
@@ -26,6 +27,7 @@ use uc_core::{SnapshotHash, SystemClipboardSnapshot};
 use crate::clipboard::capture::InboundCaptureCommitContext;
 use crate::clipboard::entry_identity::EntryIdentityCoordinator;
 use crate::clipboard::write::{ClipboardWriteIntent, MobileConsumabilityProbe};
+use crate::runtime_lifecycle::LifecycleError;
 use crate::transfer::receive::reconciliation::ReceiveReadinessCoordinator;
 
 use crate::clipboard::active::ClipboardSnapshotDeps;
@@ -40,6 +42,7 @@ use crate::search::live_index::{
     ClipboardLiveIndexInput, ClipboardLiveIndexOutcome, ClipboardLiveIndexPort,
 };
 
+use super::super::work::WorkOwner;
 use super::materializer::{
     is_directory_cancel_error, verify_file_set_identity, DirectoryPublication,
     InboundBlobMaterializer, MaterializeOutcome, ReceiveWorkPlan, RollbackOutcome,
@@ -51,6 +54,7 @@ use super::{ApplyInboundError, ApplyInboundInput, ApplyOutcome};
 const RECENT_INBOUND_MAX_RECORDS: u64 = 128;
 
 pub struct ApplyInboundClipboardUseCase {
+    work: WorkOwner,
     entry_repo: Arc<dyn FindEntryIdBySnapshotHashPort>,
     capture: Arc<dyn InboundCapture>,
     mode: InboundApplyMode,
@@ -261,6 +265,7 @@ impl ApplyInboundClipboardUseCase {
             entry_identity_coordinator,
         } = deps;
         Self {
+            work: WorkOwner::default(),
             entry_repo,
             capture,
             mode,
@@ -296,6 +301,7 @@ impl ApplyInboundClipboardUseCase {
         write: Arc<dyn InboundWrite>,
     ) -> Self {
         Self {
+            work: WorkOwner::default(),
             entry_repo,
             capture,
             mode: InboundApplyMode::Test {
@@ -888,6 +894,10 @@ impl ApplyInboundClipboardUseCase {
         }
     }
 
+    pub(crate) async fn shutdown(&self) -> Result<(), LifecycleError> {
+        self.work.shutdown().await
+    }
+
     pub async fn execute(
         &self,
         input: ApplyInboundInput,
@@ -918,6 +928,7 @@ impl ApplyInboundClipboardUseCase {
         input: ApplyInboundInput,
         provisional: Option<(String, ReceiveItemRole)>,
     ) -> Result<ApplyOutcome, ApplyInboundError> {
+        let work = self.work.begin().ok_or(ApplyInboundError::Stopped)?;
         if let Some(readiness) = &self.receive_readiness {
             readiness.wait_ready().await;
         }
@@ -1528,10 +1539,9 @@ impl ApplyInboundClipboardUseCase {
                 let snapshot_hash_for_write = input.snapshot_hash.clone();
                 let origin_guard_key_for_write = snapshot_for_write.origin_guard_key();
                 // 只延续在线关联，后台写入不延长原接收 span。
-                let observation =
-                    uc_observability_contract::diagnostics::ObservationContext::capture();
-                crate::support::task_supervision::spawn_supervised(
-                    uc_observability_contract::diagnostics::DiagnosticTaskKind::ClipboardInboundOsWrite,
+                let observation = ObservationContext::capture();
+                work.continuation().spawn(
+                    DiagnosticTaskKind::ClipboardInboundOsWrite,
                     observation.scope(async move {
                         let snapshot_for_write = Arc::try_unwrap(snapshot_for_write)
                             .unwrap_or_else(|shared| (*shared).clone());

@@ -40,7 +40,9 @@ use crate::clipboard::local::{
 };
 use crate::clipboard::outbound::{ClipboardOutboundDeps, ClipboardOutboundFacade};
 use crate::clipboard::resource::ResourceFacadeDeps;
-use crate::clipboard::sync::apply_inbound::{InboundBlobFetcher, InboundCapture, InboundWrite};
+use crate::clipboard::sync::apply_inbound::{
+    ApplyInboundClipboardUseCase, InboundBlobFetcher, InboundCapture, InboundWrite,
+};
 use crate::clipboard::sync::sync_runtime::{ClipboardSyncRuntime, ClipboardSyncRuntimeDeps};
 use crate::clipboard::write::{
     ClipboardWriteCoordinator, LocalActiveRegisterAdvancer, RestoreBroadcastTrigger,
@@ -156,7 +158,7 @@ pub struct ClipboardSession {
     outbound: Arc<ClipboardOutboundFacade>,
     sync: Arc<ClipboardSyncRuntime>,
     local: Arc<LocalClipboardProcessor>,
-    apply_inbound: Arc<dyn InboundClipboardApplyPort>,
+    apply_inbound: Arc<ApplyInboundClipboardUseCase>,
 }
 
 /// Clipboard 领域唯一对象图 owner。
@@ -322,7 +324,7 @@ impl ClipboardAssembly {
             transfer_cipher: Arc::clone(&self.deps.security.transfer_cipher),
             settings: Arc::clone(&self.deps.settings),
             clock: Arc::clone(&self.deps.system.clock),
-            apply: Arc::clone(&apply_inbound),
+            apply: Arc::clone(&apply_inbound) as Arc<dyn InboundClipboardApplyPort>,
             events: session.inbound_events,
         });
         let sync = Arc::new(ClipboardSyncRuntime::start(ClipboardSyncRuntimeDeps {
@@ -562,7 +564,7 @@ impl ClipboardSession {
     }
 
     pub fn apply_inbound(&self) -> Arc<dyn InboundClipboardApplyPort> {
-        Arc::clone(&self.apply_inbound)
+        Arc::clone(&self.apply_inbound) as Arc<dyn InboundClipboardApplyPort>
     }
 
     pub(crate) fn local_processor(&self) -> Arc<LocalClipboardProcessor> {
@@ -573,6 +575,7 @@ impl ClipboardSession {
         tokio::spawn(async move {
             let sync = self.sync.shutdown().await;
             let dispatch = self.dispatch.shutdown().await;
+            let inbound = self.apply_inbound.shutdown().await;
             let mut errors = Vec::new();
             if let Err(source) = sync {
                 errors.push(anyhow::Error::new(source).context("stop clipboard synchronization"));
@@ -580,6 +583,9 @@ impl ClipboardSession {
             if let Err(source) = dispatch {
                 errors
                     .push(anyhow::Error::new(source).context("finish clipboard delivery records"));
+            }
+            if let Err(source) = inbound {
+                errors.push(anyhow::Error::new(source).context("finish clipboard receive work"));
             }
             LifecycleError::from_errors(errors).map_err(Arc::new)
         })

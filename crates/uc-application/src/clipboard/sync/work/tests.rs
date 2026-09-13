@@ -4,15 +4,15 @@ use std::time::Duration;
 use tokio::task::JoinError;
 use tokio::time::timeout;
 
-use super::{DispatchSyncError, DispatchWorkOwner};
+use super::WorkOwner;
 
 #[tokio::test]
 async fn shutdown_waits_for_both_the_accepted_action_and_its_continuation() {
-    let owner = DispatchWorkOwner::default();
+    let owner = WorkOwner::default();
     let action = owner.begin().unwrap();
     let continuation = action.continuation();
     assert!(timeout(Duration::ZERO, owner.shutdown()).await.is_err());
-    assert!(matches!(owner.begin(), Err(DispatchSyncError::Stopped)));
+    assert!(owner.begin().is_none());
     drop(action);
     assert!(timeout(Duration::ZERO, owner.shutdown()).await.is_err());
     drop(continuation);
@@ -22,7 +22,7 @@ async fn shutdown_waits_for_both_the_accepted_action_and_its_continuation() {
 
 #[tokio::test]
 async fn background_failure_is_retained_without_skipping_other_accepted_work() {
-    let owner = DispatchWorkOwner::default();
+    let owner = WorkOwner::default();
     let first = owner.begin().unwrap();
     let second = owner.begin().unwrap();
     let failure = tokio::spawn(async { panic!("private delivery failure") })

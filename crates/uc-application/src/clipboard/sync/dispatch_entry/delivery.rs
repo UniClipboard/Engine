@@ -16,14 +16,12 @@ use tracing::{debug, info, warn};
 use uc_core::clipboard::{DeliveryFailureReason, EntryDeliveryRecord, EntryDeliveryStatus};
 use uc_core::ids::EntryId;
 use uc_core::ports::{ClipboardDispatchError, ClockPort, DispatchAck, EntryDeliveryRepositoryPort};
-use uc_observability_contract::diagnostics::{
-    record_task_join_failure, DiagnosticTaskKind, ObservationContext,
-};
+use uc_observability_contract::diagnostics::{DiagnosticTaskKind, ObservationContext};
 
 use crate::facade::blob_transfer::SharedHostEventEmitter;
 use crate::facade::host_event::{DeliveryHostEvent, HostEvent};
 
-use super::lifecycle::DispatchWork;
+use super::super::work::OwnedWork;
 use super::{DispatchPerTarget, PeerDispatchResult};
 
 #[cfg(test)]
@@ -217,7 +215,7 @@ impl DeliveryRecorder {
 /// 前台期限后继续等待已发出的对端结果，每条完成即记录并通知，不重试发送。
 /// 工作许可归同一发送负责人；暂停必须等待这里的记录与异常处理结束。
 pub(super) fn spawn_deferred_drain(
-    work: DispatchWork,
+    work: OwnedWork,
     mut set: JoinSet<PeerDispatchResult>,
     entry_id: Option<EntryId>,
     clock: Arc<dyn ClockPort>,
@@ -226,45 +224,41 @@ pub(super) fn spawn_deferred_drain(
 ) {
     let deferred_count = set.len();
     let observation = ObservationContext::capture();
-    let task = tokio::spawn(observation.scope(async move {
-        let mut accepted = 0usize;
-        let mut duplicate = 0usize;
-        let mut offline = 0usize;
-        let mut errored = 0usize;
-        while let Some(joined) = set.join_next().await {
-            let processed = classify_dispatch_result(joined, entry_id.as_ref(), clock.now_ms());
-            match processed.bucket {
-                DispatchResultBucket::Accepted => accepted += 1,
-                DispatchResultBucket::Duplicate => duplicate += 1,
-                DispatchResultBucket::Offline => offline += 1,
-                DispatchResultBucket::Errored | DispatchResultBucket::Panicked => errored += 1,
+    work.spawn(
+        DiagnosticTaskKind::ClipboardDeferredDrain,
+        observation.scope(async move {
+            let mut accepted = 0usize;
+            let mut duplicate = 0usize;
+            let mut offline = 0usize;
+            let mut errored = 0usize;
+            while let Some(joined) = set.join_next().await {
+                let processed = classify_dispatch_result(joined, entry_id.as_ref(), clock.now_ms());
+                match processed.bucket {
+                    DispatchResultBucket::Accepted => accepted += 1,
+                    DispatchResultBucket::Duplicate => duplicate += 1,
+                    DispatchResultBucket::Offline => offline += 1,
+                    DispatchResultBucket::Errored | DispatchResultBucket::Panicked => errored += 1,
+                }
+                if let Some(rec) = processed.delivery_record {
+                    recorder.flush(std::slice::from_ref(&rec)).await;
+                }
             }
-            if let Some(rec) = processed.delivery_record {
-                recorder.flush(std::slice::from_ref(&rec)).await;
-            }
-        }
-        info!(
-            snapshot_hash = %snapshot_hash,
-            deferred_count,
-            accepted,
-            duplicate,
-            offline,
-            errored,
-            "dispatch: deferred fan-out completed"
-        );
-    }));
-    tokio::spawn(async move {
-        if let Err(source) = task.await {
-            work.failed(source);
-            record_task_join_failure(DiagnosticTaskKind::ClipboardDeferredDrain);
-        }
-        drop(work);
-    });
+            info!(
+                snapshot_hash = %snapshot_hash,
+                deferred_count,
+                accepted,
+                duplicate,
+                offline,
+                errored,
+                "dispatch: deferred fan-out completed"
+            );
+        }),
+    );
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::lifecycle::DispatchWorkOwner;
+    use super::super::super::work::WorkOwner;
     use super::*;
 
     #[tokio::test]
@@ -320,7 +314,7 @@ mod tests {
             (dev("peer"), Ok(DispatchAck::Accepted))
         });
         let root = tracing::info_span!("foreground");
-        let owner = DispatchWorkOwner::default();
+        let owner = WorkOwner::default();
         root.in_scope(|| {
             spawn_deferred_drain(
                 owner.begin().unwrap(),

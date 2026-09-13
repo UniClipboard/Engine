@@ -1,16 +1,17 @@
+use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::Notify;
 use tokio::task::JoinError;
+use uc_observability_contract::diagnostics::{record_task_join_failure, DiagnosticTaskKind};
 
-use super::DispatchSyncError;
 use crate::runtime_lifecycle::LifecycleError;
 
 #[cfg(test)]
 mod tests;
 
 #[derive(Default)]
-pub(super) struct DispatchWorkOwner(Arc<Shared>);
+pub(super) struct WorkOwner(Arc<Shared>);
 
 #[derive(Default)]
 struct Shared {
@@ -25,16 +26,16 @@ struct State {
     failures: Vec<Arc<JoinError>>,
 }
 
-pub(super) struct DispatchWork(Arc<Shared>);
+pub(super) struct OwnedWork(Arc<Shared>);
 
-impl DispatchWorkOwner {
-    pub(super) fn begin(&self) -> Result<DispatchWork, DispatchSyncError> {
+impl WorkOwner {
+    pub(super) fn begin(&self) -> Option<OwnedWork> {
         let mut state = self.0.state();
         if state.closed {
-            return Err(DispatchSyncError::Stopped);
+            return None;
         }
         state.active += 1;
-        Ok(DispatchWork(Arc::clone(&self.0)))
+        Some(OwnedWork(Arc::clone(&self.0)))
     }
 
     pub(super) async fn shutdown(&self) -> Result<(), LifecycleError> {
@@ -61,7 +62,22 @@ impl DispatchWorkOwner {
     }
 }
 
-impl DispatchWork {
+impl OwnedWork {
+    pub(super) fn spawn(
+        self,
+        kind: DiagnosticTaskKind,
+        future: impl Future<Output = ()> + Send + 'static,
+    ) {
+        let worker = tokio::spawn(future);
+        tokio::spawn(async move {
+            if let Err(source) = worker.await {
+                self.failed(source);
+                record_task_join_failure(kind);
+            }
+            drop(self);
+        });
+    }
+
     pub(super) fn continuation(&self) -> Self {
         // 已接收动作可以转交自己的后续工作；原许可保留到前台记录完成。
         self.0.state().active += 1;
@@ -75,7 +91,7 @@ impl DispatchWork {
     }
 }
 
-impl Drop for DispatchWork {
+impl Drop for OwnedWork {
     fn drop(&mut self) {
         self.0.state().active -= 1;
         self.0.changed.notify_waiters();
