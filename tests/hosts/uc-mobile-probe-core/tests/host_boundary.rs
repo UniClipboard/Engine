@@ -94,7 +94,10 @@ fn ios_device_commands_publish_pollable_timing_evidence() {
     assert!(command.contains("devicectl device copy from"));
     assert!(command.contains("request_id"));
     assert!(model.contains("\"elapsed_ms\""));
+    assert!(model.contains("\"block_ms\""));
+    assert!(model.contains("\"capture\""));
     assert!(probe.contains("deadline_ms: Option<u64>"));
+    assert!(probe.contains("SuspendDuringClipboardRead"));
     assert!(probe.contains("started_at.elapsed()"));
 }
 

@@ -1,6 +1,6 @@
 # 1. Overview
 
-状态：实施中。统一负责人已接入三类现有能力及不可逆关闭意图，稳定入口的通知顺序、启动中目标、公开操作门禁、移动通知独立转交、本地恢复故障拒绝、离线本地恢复、普通剪贴板投递意图、文件离线重启补送、取消或失效意图不复活、最终关闭与资料重置错误汇总、资源清单及已确认保存和传输中的进程终止验证已完成。共同期限的软件合同、会话与本地工作的同时停止通知及当前可用 iOS、Android 真机基线已完成；各阻塞操作的最坏占用证据、另一类受支持 iOS 系统、锁屏与传输中切换、HarmonyOS 及产品宿主矩阵仍待完成。局部修复不代表本规格完成。
+状态：实施中。统一负责人已接入三类现有能力及不可逆关闭意图，稳定入口的通知顺序、启动中目标、公开操作门禁、移动通知独立转交、本地恢复故障拒绝、离线本地恢复、普通剪贴板投递意图、文件离线重启补送、取消或失效意图不复活、最终关闭与资料重置错误汇总、资源清单及已确认保存和传输中的进程终止验证已完成。共同期限的软件合同、会话与本地工作的同时停止通知、当前可用 iOS、Android 真机基线及 iOS 真机阻塞读取中的暂停证据已完成；其余阻塞操作的最坏占用证据、另一类受支持 iOS 系统、锁屏与传输中切换、HarmonyOS 及产品宿主矩阵仍待完成。局部修复不代表本规格完成。
 
 iOS 退后台时 Engine 曾报告暂停成功，但真实文件租约仍被持有。现有修复已覆盖一部分释放和任务退出问题，
 但暂停责任仍分散，停止预算不统一，恢复耦合网络运行期，重启也不保证未完成同步再次执行。
@@ -308,7 +308,7 @@ impl RuntimeLifecycleCoordinator {
 | Application 领域工作 | `crates/uc-application/src/application/shutdown/owners.rs` | 同时停止历史、文件超时、搜索、Space、普通剪贴板和活动剪贴板，等待全部结果并汇总异常 | 每项内部磁盘动作仍需共同期限证据 | Application shutdown、各领域 lifecycle 测试 |
 | 内容物化与 spool | `crates/uc-infra/src/clipboard/background_runtime.rs`、`crates/uc-infra/src/clipboard/background_activity.rs` | 进程 `TaskRegistry` 持有工作；暂停门等待当前完整磁盘动作后交接 | 大内容读写及目录扫描最坏时长未证明 | background activity、blob worker 与真实保存后重开测试 |
 | 搜索重建及修复 | `crates/uc-application/src/search/runtime.rs`、`crates/uc-application/src/search/coordinator.rs` | Search runtime 持有任务范围；停止后等待已经开始的索引动作真正退出 | SQLite 索引完整写入的最坏时长未证明 | 搜索协调器阻塞线程与 Application 关闭测试 |
-| 剪贴板发送、接收与活动广播 | `crates/uc-application/src/clipboard/sync/`、`crates/uc-application/src/clipboard/inbound/`、`crates/uc-application/src/clipboard/active/` | 各自私有工作负责人登记完整动作，`ClipboardSession` 统一通知并排空 | 单次拉取、保存和宿主写入的最坏时长未证明 | 发送、接收、活动剪贴板关闭及离线恢复测试 |
+| 剪贴板发送、接收与活动广播 | `crates/uc-application/src/clipboard/sync/`、`crates/uc-application/src/clipboard/inbound/`、`crates/uc-application/src/clipboard/active/` | 各自私有工作负责人登记完整动作，`ClipboardSession` 统一通知并排空 | iOS 专用宿主已证明阻塞读取结束前暂停不成功；生产拉取、保存和宿主写入的最坏时长仍未证明 | 发送、接收、活动剪贴板关闭、离线恢复及 iOS 阻塞读取真机测试 |
 | 历史维护 | `crates/uc-application/src/clipboard/history/maintenance_runtime.rs` | Application 拥有；当前动作完整结算，后续动作在停止边界退出 | 核对和清理单轮最坏时长未证明 | history maintenance 生命周期测试 |
 | 文件接收与超时清理 | `crates/uc-application/src/transfer/file/session.rs`、`crates/uc-application/src/transfer/file/shutdown.rs`、`crates/uc-application/src/transfer/file/timeout_runtime.rs` | 接收会话由私有关闭负责人逐项完整取消；超时工作由 Application 停止并等待 | 文件发布与清理的最坏时长仍待设备验收 | 文件关闭、超时工作、离线重启补送及传输中进程终止测试 |
 | 成员维护与自动连接 | `crates/uc-application/src/space/membership/maintenance/runtime.rs`、`crates/uc-application/src/space/connectivity/` | Space runtime 拥有；停止当前完整轮次并保留异常，不再使用独立五秒后放弃 | 单轮持久访问最坏时长未证明 | membership maintenance、peer connections 与 Space shutdown 测试 |
@@ -876,6 +876,13 @@ impl RuntimeLifecycleCoordinator {
 - 本地资源仍只在两类工作都成功结束后交接。任一方失败时继续等待另一方，并保留双方的完整失败，不把并发通知变成首个失败即返回。
 - 完成标准：会话与本地工作都被真实阻塞时，两边都能收到停止通知；只放开一边不会释放本地资源，双方结束后才继续资源交接。既有依赖顺序、异常隔离和失败重试继续通过。
 - 验证：统一生命周期专项测试通过；完整 Application、真实宿主及仓库门禁随本切片提交前复验。设备最坏耗时与剩余宿主矩阵继续单独追踪。
+
+### 2026-09-13：iOS 真机在阻塞剪贴板读取中暂停
+
+- 共享移动验收核心新增独立的受控剪贴板和生命周期场景；测试先确认同步读取已经开始，再发出暂停，并在设定时间后放行读取。场景代码与命令分派分开，未把测试控制逻辑塞回统一入口。
+- 物理 iPhone 在读取被阻塞 1200 毫秒时执行带 10 秒期限的暂停。暂停在 2209 毫秒后成功，读取动作先以取消结果结束；随后恢复耗时 64 毫秒，原资料中的一条历史记录仍可查询。
+- 完成标准：暂停不能在受控读取释放前报告成功；设备结果明确包含设定阻塞时长、实际暂停时长和读取终态；恢复后本地资料仍可读取。该结果只证明专用宿主的一次阻塞读取边界，不代表生产宿主全部读写或传输路径已有最坏时长。
+- 验证：共享宿主 16 项单元测试和 13 项边界测试通过；iOS 真机构建、覆盖安装、阻塞读取暂停、恢复和历史查询通过；Android 安装包构建通过。Android 当前在线，但设备厂商禁止 USB 更新安装且要求插入 SIM 卡，本场景的 Android 运行记为跳过，不记录通过。
 
 ### 2026-09-13：iOS 真机生命周期耗时与系统前后台基线
 
