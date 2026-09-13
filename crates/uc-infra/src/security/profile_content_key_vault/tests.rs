@@ -610,7 +610,7 @@ async fn uncertain_commit_and_cancelled_store_reload_the_committed_catalog() {
         *vault.persistence.after_store.lock().unwrap() = Some(if cancel {
             StoreProbe::Pause {
                 entered: entered.clone(),
-                release,
+                release: release.clone(),
             }
         } else {
             StoreProbe::Fail
@@ -627,13 +627,15 @@ async fn uncertain_commit_and_cancelled_store_reload_the_committed_catalog() {
             entered.notified().await;
             write.abort();
             assert!(write.await.unwrap_err().is_cancelled());
+            release.notify_one();
+            drop(vault.io_lock.lock().await);
         } else {
             assert!(matches!(
                 write.await.unwrap(),
                 Err(ProfileContentKeyVaultError::Storage { .. })
             ));
         }
-        // 磁盘已有新组，但安装未报告成功；下一次读取必须重新认证而非使用旧缓存。
+        // 失败重新认证；取消等待则由实际安装完成后发布新目录，均不能返回旧缓存。
         let before = storage.1.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
             vault
@@ -646,7 +648,7 @@ async fn uncertain_commit_and_cancelled_store_reload_the_committed_catalog() {
         );
         assert_eq!(
             storage.1.load(std::sync::atomic::Ordering::SeqCst) - before,
-            1
+            if cancel { 0 } else { 1 }
         );
     }
 }
