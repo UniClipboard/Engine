@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
@@ -76,20 +77,50 @@ pub(super) async fn shutdown(
     runtime: &ProductionRuntime,
     deadline: Option<Instant>,
 ) -> Result<(), EngineError> {
-    let mut errors = runtime
-        .network_recovery
-        .shutdown()
-        .await
-        .err()
-        .map(anyhow::Error::new)
-        .into_iter()
-        .collect::<Vec<_>>();
-    errors.extend(
-        stop_resource_users(&ProductionShutdownActions(runtime), deadline)
-            .await
-            .errors,
+    let outcome = stop_runtime_resource_users(
+        async {
+            runtime
+                .network_recovery
+                .shutdown()
+                .await
+                .map_err(anyhow::Error::new)
+        },
+        &ProductionShutdownActions(runtime),
+        deadline,
+    )
+    .await;
+    LifecycleError::from_errors(outcome.errors).map_err(lifecycle_error)
+}
+
+async fn stop_runtime_resource_users<Recovery>(
+    stop_network_recovery: Recovery,
+    actions: &dyn ShutdownActions,
+    deadline: Option<Instant>,
+) -> ShutdownOutcome
+where
+    Recovery: Future<Output = anyhow::Result<()>>,
+{
+    let (recovery, mut outcome) = tokio::join!(
+        stop_network_recovery,
+        stop_resource_users(actions, deadline),
     );
-    LifecycleError::from_errors(errors).map_err(lifecycle_error)
+    match recovery {
+        Ok(()) if outcome.resources_can_close() => actions.close_local_resources(),
+        Ok(()) => {}
+        Err(error) => outcome.errors.insert(0, error),
+    }
+    outcome
+}
+
+async fn stop_resource_users_and_close(
+    actions: &dyn ShutdownActions,
+    deadline: Option<Instant>,
+) -> ShutdownOutcome {
+    let outcome = stop_resource_users(actions, deadline).await;
+    if outcome.resources_can_close() {
+        actions.close_local_resources();
+    }
+    outcome
 }
 
 async fn stop_resource_users(
@@ -109,10 +140,6 @@ async fn stop_resource_users(
     match actions.stop_process_tasks(deadline).await {
         Ok(()) => outcome.process_tasks_stopped = true,
         Err(error) => outcome.errors.push(error),
-    }
-
-    if outcome.resources_can_close() {
-        actions.close_local_resources();
     }
 
     outcome
@@ -168,7 +195,7 @@ impl ShutdownActions for ProfileRuntimeStopper {
 #[async_trait]
 impl StopProfileRuntimePort for ProfileRuntimeStopper {
     async fn stop_profile_runtime(&self) -> Result<(), LifecycleError> {
-        let outcome = stop_resource_users(self, None).await;
+        let outcome = stop_resource_users_and_close(self, None).await;
         LifecycleError::from_errors(outcome.errors)
     }
 }
@@ -258,6 +285,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slow_network_recovery_does_not_delay_other_stop_notifications() {
+        let actions = Arc::new(RecordingActions {
+            calls: Mutex::new(Vec::new()),
+            fail_session: false,
+            fail_transfers: false,
+            fail_tasks: false,
+        });
+        let recovery_started = Arc::new(tokio::sync::Notify::new());
+        let recovery_release = Arc::new(tokio::sync::Notify::new());
+        let stopping = tokio::spawn({
+            let actions = Arc::clone(&actions);
+            let recovery_started = Arc::clone(&recovery_started);
+            let recovery_release = Arc::clone(&recovery_release);
+            async move {
+                stop_runtime_resource_users(
+                    async move {
+                        recovery_started.notify_one();
+                        recovery_release.notified().await;
+                        Ok(())
+                    },
+                    actions.as_ref(),
+                    None,
+                )
+                .await
+            }
+        });
+
+        recovery_started.notified().await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            *actions.calls.lock().unwrap(),
+            vec!["session", "transfers", "tasks"]
+        );
+        assert!(!stopping.is_finished());
+        recovery_release.notify_one();
+        assert!(stopping.await.unwrap().errors.is_empty());
+        assert_eq!(
+            *actions.calls.lock().unwrap(),
+            vec!["session", "transfers", "tasks", "resources"]
+        );
+    }
+
+    #[tokio::test]
     async fn every_resource_user_stops_after_earlier_failures() {
         let actions = RecordingActions {
             calls: Mutex::new(Vec::new()),
@@ -285,7 +355,7 @@ mod tests {
             fail_tasks: false,
         };
 
-        let outcome = stop_resource_users(&actions, None).await;
+        let outcome = stop_resource_users_and_close(&actions, None).await;
         assert!(outcome.errors.is_empty());
         assert_eq!(
             *actions.calls.lock().unwrap(),
