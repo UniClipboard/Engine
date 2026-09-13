@@ -18,4 +18,5 @@ pub use contract::*;
 #[cfg(feature = "dev-tools")]
 pub use dev::*;
 pub use engine::{Engine, EventStream};
+pub use engine::{StartupLifecycle, StartupLifecycleInput};
 pub use engine::{StartupProgress, StartupProgressInput};

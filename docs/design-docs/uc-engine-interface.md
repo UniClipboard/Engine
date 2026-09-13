@@ -29,6 +29,13 @@ crate 根只保留稳定名称的统一导出，内部按职责分为七层：
 需要在启动完成前展示资料升级时，使用兼容的 `Engine::start_with_progress` 入口，先创建只读进度通道。
 快照、失败后的最终结果、计数单位及宿主责任见[启动资料升级进度](startup-upgrade-progress.md)。该能力独立于下文正常运行事件流。
 
+需要在启动期间接受退后台通知时，先调用 `StartupLifecycle::channel()`，将不可克隆的输入与进度输入交给
+`Engine::start_with_lifecycle(config, host, progress, lifecycle)`。可克隆的控制句柄只提供完整 `suspend()`、
+`suspend_with_deadline(deadline)` 和 `resume()`，启动前后复用同一宿主通知队列；只读进度不接收命令。
+构造完成后先处理已接收通知再交出实例，因此实例可能以 Suspended 或 Quiesced 状态交出，Ready 不代表正在运行。
+期限包括启动等待；超时不撤销通知，也不代表资源已安全释放。启动耗尽原期限后可能仍处于 Quiesced，宿主必须继续
+请求完整暂停并确认成功。启动失败或未使用输入被丢弃会结束等待，重试创建新输入；最终关闭后旧控制句柄拒绝恢复。
+
 事件流采用有限容量。消费者落后时不会收到伪造或不完整的数据，而是收到 `RefreshRequired(ConsumerLagged)`，随后应重新查询当前状态。
 
 核心事件包括：

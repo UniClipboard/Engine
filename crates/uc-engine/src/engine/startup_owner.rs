@@ -1,7 +1,7 @@
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
-use super::{Engine, EventStream, StartupProgressInput};
+use super::{Engine, EventStream, StartupLifecycleInput, StartupProgressInput};
 use crate::{EngineConfig, EngineError, EngineErrorCategory, HostCapabilities};
 
 #[cfg(test)]
@@ -12,13 +12,16 @@ impl Engine {
         config: EngineConfig,
         host: HostCapabilities,
         progress: StartupProgressInput,
+        lifecycle: StartupLifecycleInput,
     ) -> Result<(Self, EventStream), EngineError> {
         let (sender, receiver) = oneshot::channel();
         tokio::spawn(async move {
-            let result = Self::start_runtime(config, host, &progress).await;
+            let result =
+                Self::start_runtime(config, host, &progress, lifecycle.requests.clone()).await;
             let result = match result {
                 Ok(parts) => Ok(StartupHandoff::new(parts, progress)),
                 Err(error) => {
+                    lifecycle.requests.fail_startup(error.clone());
                     progress.finish(&Err::<(), _>(error.clone()));
                     Err(error)
                 }

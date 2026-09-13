@@ -1,9 +1,13 @@
+use std::future::{poll_fn, Future};
 use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
-use uc_engine::{Engine, EngineConfig, HostCapabilityError, HostSecureStorage};
+use uc_engine::{
+    Engine, EngineConfig, HostCapabilityError, HostSecureStorage, StartupLifecycle, StartupProgress,
+};
 
 use super::{host, MemorySecureStorage};
 
@@ -40,7 +44,15 @@ async fn failed_service_start_releases_every_host_owner_before_returning() {
     let ipv6 = UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0)).unwrap();
     let port = ipv6.local_addr().unwrap().port();
     let ipv4 = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).ok();
-    let result = Engine::start(
+    let (progress, _) = StartupProgress::channel();
+    let (lifecycle, control) = StartupLifecycle::channel();
+    let mut pause = Box::pin(control.suspend());
+    poll_fn(|context| {
+        assert!(pause.as_mut().poll(context).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    let result = Engine::start_with_lifecycle(
         EngineConfig::new("2.0.0").with_test_iroh_bind_port(port),
         host(
             root.path(),
@@ -49,9 +61,15 @@ async fn failed_service_start_releases_every_host_owner_before_returning() {
                 dropped: Arc::clone(&dropped),
             }),
         ),
+        progress,
+        lifecycle,
     )
     .await;
     assert!(result.is_err(), "occupied network port must reject startup");
+    assert_eq!(
+        pause.await.unwrap_err().category(),
+        result.err().unwrap().category()
+    );
     assert!(
         dropped.load(Ordering::SeqCst),
         "failed startup retained a host owner"

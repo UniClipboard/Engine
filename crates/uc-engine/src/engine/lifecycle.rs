@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 use tokio::time::{timeout_at, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -17,16 +17,24 @@ use crate::{
 
 pub(super) use queue::TransitionQueue;
 
-enum Request {
+pub(super) enum Request {
     Quiesce(Instant),
     Suspend(Option<Instant>),
     Resume,
 }
 
+impl Request {
+    pub(super) fn suspend_with_deadline(deadline: Duration) -> Result<Self, EngineError> {
+        let deadline = Instant::now()
+            .checked_add(deadline)
+            .ok_or_else(|| EngineError::new(1003, EngineErrorCategory::InvalidInput, false))?;
+        Ok(Self::Suspend(Some(deadline)))
+    }
+}
+
 /// 持有宿主入口的状态发布与排空；参与者顺序仍由 Application 完整负责。
 struct Transition {
     gate: Arc<Mutex<()>>,
-    requests: Arc<TransitionQueue>,
     stop_requested: Arc<AtomicBool>,
     state: Arc<Mutex<EngineState>>,
     runtime: Arc<dyn EngineRuntime>,
@@ -48,10 +56,8 @@ impl Engine {
 
     /// 期限包含排队；超时只结束本次等待，实际收尾继续，不能据此认定已安全暂停。
     pub async fn suspend_with_deadline(&self, deadline: Duration) -> Result<(), EngineError> {
-        let deadline = Instant::now()
-            .checked_add(deadline)
-            .ok_or_else(|| EngineError::new(1003, EngineErrorCategory::InvalidInput, false))?;
-        self.transition(Request::Suspend(Some(deadline))).await
+        self.transition(Request::suspend_with_deadline(deadline)?)
+            .await
     }
 
     pub async fn resume(&self) -> Result<(), EngineError> {
@@ -59,29 +65,39 @@ impl Engine {
     }
 
     async fn transition(&self, request: Request) -> Result<(), EngineError> {
-        let deadline = match request {
-            Request::Suspend(deadline) => deadline,
-            _ => None,
-        };
+        submit(&self.lifecycle_requests, request).await
+    }
+
+    pub(super) fn bind_lifecycle(&self, announce_start: bool) -> oneshot::Receiver<()> {
         let transition = Transition {
             gate: Arc::clone(&self.lifecycle_gate),
-            requests: Arc::clone(&self.lifecycle_requests),
             stop_requested: Arc::clone(&self.stop_requested),
             state: Arc::clone(&self.state),
             runtime: Arc::clone(&self.runtime),
             operations: Arc::clone(&self.operations),
             events: self.events.clone(),
         };
-        // 接受请求后，排队、执行和状态发布都不依赖调用方继续等待。
-        let completion = self.lifecycle_requests.enqueue(request, transition);
-        let result = match deadline {
-            Some(deadline) => timeout_at(deadline, completion)
-                .await
-                .map_err(|_| operation_cancelled_error())?,
-            None => completion.await,
-        };
-        result.map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?
+        self.lifecycle_requests.bind(transition, announce_start)
     }
+}
+
+pub(super) async fn submit(
+    requests: &Arc<TransitionQueue>,
+    request: Request,
+) -> Result<(), EngineError> {
+    let deadline = match request {
+        Request::Suspend(deadline) => deadline,
+        _ => None,
+    };
+    // 接受请求后，启动排队、执行和状态发布都不依赖调用方继续等待。
+    let completion = requests.enqueue(request);
+    let result = match deadline {
+        Some(deadline) => timeout_at(deadline, completion)
+            .await
+            .map_err(|_| operation_cancelled_error())?,
+        None => completion.await,
+    };
+    result.map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?
 }
 
 impl Transition {
@@ -89,6 +105,7 @@ impl Transition {
         &self,
         request: Request,
         cancellation: CancellationToken,
+        requests: &TransitionQueue,
     ) -> Result<(), EngineError> {
         let _gate = self.gate.lock().await;
         if self.stop_requested.load(Ordering::Acquire) {
@@ -100,7 +117,7 @@ impl Transition {
                     .await
             }
             Request::Suspend(deadline) => self.suspend(deadline).await,
-            Request::Resume => self.resume(cancellation).await,
+            Request::Resume => self.resume(cancellation, requests).await,
         }
     }
 
@@ -120,7 +137,11 @@ impl Transition {
         Ok(())
     }
 
-    async fn resume(&self, cancellation: CancellationToken) -> Result<(), EngineError> {
+    async fn resume(
+        &self,
+        cancellation: CancellationToken,
+        requests: &TransitionQueue,
+    ) -> Result<(), EngineError> {
         let state = *self.state.lock().await;
         match state {
             EngineState::Running => return Ok(()),
@@ -139,7 +160,7 @@ impl Transition {
             self.runtime.resume(cancellation.clone()).await,
         )?;
         let mut state = self.state.lock().await;
-        let result = self.requests.publish_resume(
+        let result = requests.publish_resume(
             &cancellation,
             &self.stop_requested,
             &mut state,

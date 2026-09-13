@@ -18,20 +18,22 @@ mod shutdown;
 #[cfg(test)]
 mod shutdown_tests;
 pub(crate) mod startup;
+mod startup_control;
 mod startup_owner;
 
 use crate::runtime::ProductionRuntime;
 #[cfg(feature = "dev-tools")]
 use crate::{DevOperation, DevOperationResult};
 use crate::{
-    EngineConfig, EngineError, EngineErrorCategory, EngineEvent, EngineState, HostCapabilities,
-    Operation, OperationResult, OperationTerminal,
+    EngineConfig, EngineError, EngineErrorCategory, EngineState, HostCapabilities, Operation,
+    OperationResult, OperationTerminal,
 };
 pub use event_stream::EventStream;
 use event_stream::{event_channel, EventSender};
 use in_flight::InFlightOperations;
 use lifecycle::TransitionQueue;
 pub use startup::{StartupProgress, StartupProgressInput};
+pub use startup_control::{StartupLifecycle, StartupLifecycleInput};
 
 const INVALID_STATE_CODE: u32 = 1001;
 const OPERATION_CANCELLED_CODE: u32 = 1002;
@@ -88,13 +90,25 @@ impl Engine {
         host: HostCapabilities,
         progress: StartupProgressInput,
     ) -> Result<(Self, EventStream), EngineError> {
-        Self::start_owned(config, host, progress).await
+        let (lifecycle, _) = StartupLifecycle::channel();
+        Self::start_with_lifecycle(config, host, progress, lifecycle).await
+    }
+
+    /// 启动前接受宿主生命周期通知；构造完成后先处理已接收的通知再交出实例。
+    pub async fn start_with_lifecycle(
+        config: EngineConfig,
+        host: HostCapabilities,
+        progress: StartupProgressInput,
+        lifecycle: StartupLifecycleInput,
+    ) -> Result<(Self, EventStream), EngineError> {
+        Self::start_owned(config, host, progress, lifecycle).await
     }
 
     async fn start_runtime(
         config: EngineConfig,
         host: HostCapabilities,
         progress: &StartupProgressInput,
+        requests: Arc<TransitionQueue>,
     ) -> Result<(Self, EventStream), EngineError> {
         const EVENT_CAPACITY: usize = 256;
 
@@ -106,16 +120,17 @@ impl Engine {
         let engine = Self {
             state: Arc::new(Mutex::new(EngineState::Running)),
             lifecycle_gate: Arc::new(Mutex::new(())),
-            lifecycle_requests: Arc::new(TransitionQueue::default()),
+            lifecycle_requests: requests,
             shutdown_gate: Arc::new(Mutex::new(())),
             stop_requested: Arc::new(AtomicBool::new(false)),
             runtime,
             events,
             operations: Arc::new(InFlightOperations::new()),
         };
-        engine.events.send(EngineEvent::StateChanged {
-            state: EngineState::Running,
-        });
+        let startup_handoff = engine.bind_lifecycle(true);
+        startup_handoff
+            .await
+            .map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?;
         Ok((engine, stream))
     }
 
@@ -124,20 +139,35 @@ impl Engine {
     where
         R: EngineRuntime + 'static,
     {
-        let (events, stream) = event_channel(event_capacity);
-        (
-            Self {
-                state: Arc::new(Mutex::new(EngineState::Running)),
-                lifecycle_gate: Arc::new(Mutex::new(())),
-                lifecycle_requests: Arc::new(TransitionQueue::default()),
-                shutdown_gate: Arc::new(Mutex::new(())),
-                stop_requested: Arc::new(AtomicBool::new(false)),
-                runtime,
-                events,
-                operations: Arc::new(InFlightOperations::new()),
-            },
-            stream,
+        Self::from_runtime_with_queue(
+            runtime,
+            event_capacity,
+            Arc::new(TransitionQueue::default()),
         )
+    }
+
+    #[cfg(test)]
+    fn from_runtime_with_queue<R>(
+        runtime: Arc<R>,
+        event_capacity: usize,
+        requests: Arc<TransitionQueue>,
+    ) -> (Self, EventStream)
+    where
+        R: EngineRuntime + 'static,
+    {
+        let (events, stream) = event_channel(event_capacity);
+        let engine = Self {
+            state: Arc::new(Mutex::new(EngineState::Running)),
+            lifecycle_gate: Arc::new(Mutex::new(())),
+            lifecycle_requests: requests,
+            shutdown_gate: Arc::new(Mutex::new(())),
+            stop_requested: Arc::new(AtomicBool::new(false)),
+            runtime,
+            events,
+            operations: Arc::new(InFlightOperations::new()),
+        };
+        let _ = engine.bind_lifecycle(false);
+        (engine, stream)
     }
 
     pub async fn lifecycle_state(&self) -> EngineState {

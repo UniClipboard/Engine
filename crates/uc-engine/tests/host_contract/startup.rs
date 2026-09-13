@@ -19,6 +19,9 @@ mod crash;
 #[path = "startup/targets.rs"]
 mod targets;
 
+#[path = "startup/control.rs"]
+mod control;
+
 #[cfg(feature = "dev-tools")]
 #[path = "startup/failure.rs"]
 mod failure;

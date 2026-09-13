@@ -19,30 +19,54 @@ pub(in super::super) struct TransitionQueue {
 
 #[derive(Default)]
 struct State {
+    binding: Binding,
     admission_closed: bool,
     resume_cancellation: CancellationToken,
     running: bool,
-    pending: VecDeque<QueuedRequest>,
+    pending: VecDeque<QueuedItem>,
+}
+
+#[derive(Default)]
+enum Binding {
+    #[default]
+    Waiting,
+    Ready(Arc<Transition>),
+    Failed(EngineError),
+    Stopped,
 }
 
 struct QueuedRequest {
     request: Request,
     cancellation: CancellationToken,
-    transition: Transition,
     response: oneshot::Sender<Result<(), EngineError>>,
+}
+
+enum QueuedItem {
+    Request(QueuedRequest),
+    StartupHandoff(oneshot::Sender<()>),
 }
 
 impl TransitionQueue {
     pub(super) fn enqueue(
         self: &Arc<Self>,
         request: Request,
-        transition: Transition,
     ) -> oneshot::Receiver<Result<(), EngineError>> {
         let (response, completion) = oneshot::channel();
         let mut state = self.state();
-        if transition.stop_requested.load(Ordering::Acquire) {
-            let _ = response.send(Err(invalid_state_error()));
-            return completion;
+        match &state.binding {
+            Binding::Stopped => {
+                let _ = response.send(Err(invalid_state_error()));
+                return completion;
+            }
+            Binding::Failed(error) => {
+                let _ = response.send(Err(error.clone()));
+                return completion;
+            }
+            Binding::Ready(transition) if transition.stop_requested.load(Ordering::Acquire) => {
+                let _ = response.send(Err(invalid_state_error()));
+                return completion;
+            }
+            _ => {}
         }
         if matches!(request, Request::Suspend(_) | Request::Quiesce(_)) {
             state.admission_closed = true;
@@ -50,12 +74,34 @@ impl TransitionQueue {
             state.resume_cancellation = CancellationToken::new();
         }
         let cancellation = state.resume_cancellation.clone();
-        state.pending.push_back(QueuedRequest {
+        state.pending.push_back(QueuedItem::Request(QueuedRequest {
             request,
             cancellation,
-            transition,
             response,
-        });
+        }));
+        if !state.running && matches!(state.binding, Binding::Ready(_)) {
+            state.running = true;
+            let owner = Arc::clone(self);
+            tokio::spawn(async move { owner.run().await });
+        }
+        completion
+    }
+
+    pub(super) fn bind(
+        self: &Arc<Self>,
+        transition: Transition,
+        announce_start: bool,
+    ) -> oneshot::Receiver<()> {
+        let (handoff, completion) = oneshot::channel();
+        let mut state = self.state();
+        if announce_start && !state.admission_closed {
+            transition.events.send(EngineEvent::StateChanged {
+                state: EngineState::Running,
+            });
+        }
+        // 输入只交给一次启动；绑定后原队列继续处理交接后的宿主通知。
+        state.binding = Binding::Ready(Arc::new(transition));
+        state.pending.push_back(QueuedItem::StartupHandoff(handoff));
         if !state.running {
             state.running = true;
             let owner = Arc::clone(self);
@@ -64,13 +110,31 @@ impl TransitionQueue {
         completion
     }
 
+    pub(in super::super) fn fail_startup(&self, error: EngineError) {
+        let mut state = self.state();
+        if !matches!(state.binding, Binding::Waiting) {
+            return;
+        }
+        state.binding = Binding::Failed(error.clone());
+        state.admission_closed = true;
+        state.resume_cancellation.cancel();
+        for item in state.pending.drain(..) {
+            if let QueuedItem::Request(request) = item {
+                let _ = request.response.send(Err(error.clone()));
+            }
+        }
+    }
+
     pub(in super::super) fn accept_shutdown(&self, stop_requested: &AtomicBool) {
         let mut state = self.state();
         stop_requested.store(true, Ordering::Release);
+        state.binding = Binding::Stopped;
         state.admission_closed = true;
         state.resume_cancellation.cancel();
-        for request in state.pending.drain(..) {
-            let _ = request.response.send(Err(invalid_state_error()));
+        for item in state.pending.drain(..) {
+            if let QueuedItem::Request(request) = item {
+                let _ = request.response.send(Err(invalid_state_error()));
+            }
         }
     }
 
@@ -128,10 +192,16 @@ impl TransitionQueue {
 
     async fn run(self: Arc<Self>) {
         loop {
-            let next = {
+            let (next, transition) = {
                 let mut state = self.state();
+                let Binding::Ready(transition) = &state.binding else {
+                    state.running = false;
+                    self.drained.notify_waiters();
+                    return;
+                };
+                let transition = Arc::clone(transition);
                 match state.pending.pop_front() {
-                    Some(next) => next,
+                    Some(next) => (next, transition),
                     None => {
                         state.running = false;
                         self.drained.notify_waiters();
@@ -139,19 +209,25 @@ impl TransitionQueue {
                     }
                 }
             };
-            let QueuedRequest {
-                request,
-                cancellation,
-                transition,
-                response,
-            } = next;
+            let (request, cancellation, response) = match next {
+                QueuedItem::Request(request) => {
+                    (request.request, request.cancellation, request.response)
+                }
+                QueuedItem::StartupHandoff(completion) => {
+                    let _ = completion.send(());
+                    continue;
+                }
+            };
             // 每个请求拥有完整执行；调用方离开或一次意外退出不丢弃其余已接收请求。
+            let requests = Arc::clone(&self);
             let result =
-                tokio::spawn(async move { transition.execute(request, cancellation).await })
-                    .await
-                    .unwrap_or_else(|_| {
-                        Err(EngineError::new(1108, EngineErrorCategory::Internal, true))
-                    });
+                tokio::spawn(
+                    async move { transition.execute(request, cancellation, &requests).await },
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    Err(EngineError::new(1108, EngineErrorCategory::Internal, true))
+                });
             let _ = response.send(result);
         }
     }
