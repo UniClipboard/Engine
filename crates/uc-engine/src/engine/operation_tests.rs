@@ -7,6 +7,7 @@ use tokio::sync::Notify;
 use tokio::time::{timeout, Instant};
 use tokio_util::sync::CancellationToken;
 
+use super::operation::await_operation_completion;
 use super::{Engine, EngineRuntime};
 use crate::{
     EngineError, EngineErrorCategory, EngineEvent, EngineState, Operation, OperationResult,
@@ -192,4 +193,20 @@ async fn operation_panic_releases_registration_and_reports_one_failure() {
         })
     ));
     engine.shutdown(Duration::from_secs(1)).await.unwrap();
+}
+
+#[tokio::test]
+async fn cancellation_wins_when_operation_result_is_already_ready() {
+    let cancellation = CancellationToken::new();
+    let task = tokio::spawn(async { Ok::<_, EngineError>(OperationResult::Devices(Vec::new())) });
+    while !task.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    cancellation.cancel();
+
+    let error = await_operation_completion(cancellation, task)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.category(), EngineErrorCategory::DeadlineExceeded);
 }

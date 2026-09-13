@@ -2,6 +2,7 @@ use std::future::Future;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, Span};
 
@@ -87,9 +88,17 @@ impl Engine {
             }
             .instrument(Span::current()),
         );
-        tokio::select! {
-            _ = cancellation.cancelled() => Err(operation_cancelled_error()),
-            result = task => result.map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?,
-        }
+        await_operation_completion(cancellation, task).await
+    }
+}
+
+pub(super) async fn await_operation_completion<T>(
+    cancellation: CancellationToken,
+    task: JoinHandle<Result<T, EngineError>>,
+) -> Result<T, EngineError> {
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => Err(operation_cancelled_error()),
+        result = task => result.map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?,
     }
 }
