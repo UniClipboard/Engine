@@ -79,6 +79,21 @@ impl HistoricalMembershipSignatureVerifier for AcceptingVerifier {
     }
 }
 
+struct CountingVerifier(AtomicUsize);
+
+impl HistoricalMembershipSignatureVerifier for CountingVerifier {
+    fn verify(
+        &self,
+        _signature_algorithm_version: u16,
+        _public_key: &[u8],
+        _payload: &[u8],
+        _signature: &[u8],
+    ) -> Result<bool, HistoricalMembershipSignatureError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(true)
+    }
+}
+
 fn active_single_member_ledger() -> LoadedMembershipLedger {
     let device_id = DeviceId::new("device-a");
     let credential = MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x41; 32]);
@@ -178,6 +193,29 @@ async fn no_current_space_has_no_authorized_scope() {
     let error = ledger.current_scope().await.unwrap_err();
 
     assert_eq!(error, CurrentSpaceMemberScopeError::NoCurrentSpace);
+}
+
+#[tokio::test]
+async fn unchanged_membership_history_reuses_its_verified_result() {
+    let repository = Arc::new(MemoryLedgerRepository::new(active_two_member_ledger()));
+    let verifier = Arc::new(CountingVerifier(AtomicUsize::new(0)));
+    let ledger = MembershipLedger::new(repository.clone(), repository.clone(), verifier.clone());
+
+    ledger.load_verified().await.unwrap();
+    let first_count = verifier.0.load(Ordering::SeqCst);
+    assert!(first_count > 0);
+
+    {
+        let mut loaded = repository.loaded.lock().unwrap();
+        loaded.revision += 1;
+        loaded.history_sync_cursor = Some(DeviceId::new("device-b"));
+    }
+    ledger.load_verified().await.unwrap();
+    assert_eq!(verifier.0.load(Ordering::SeqCst), first_count);
+
+    *repository.loaded.lock().unwrap() = active_single_member_ledger();
+    ledger.load_verified().await.unwrap();
+    assert!(verifier.0.load(Ordering::SeqCst) > first_count);
 }
 
 #[tokio::test]

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -40,11 +40,18 @@ pub(crate) struct MembershipLedger {
     pub(super) verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
     changes: tokio::sync::watch::Sender<()>,
     history_changes: tokio::sync::watch::Sender<()>,
+    verified_history_cache: Mutex<Option<VerifiedMembershipHistory>>,
 }
 
+#[derive(Clone)]
 pub(crate) struct VerifiedMembershipLedger {
     record: LoadedMembershipLedger,
     history: Option<VersionedMembershipHistory>,
+}
+
+struct VerifiedMembershipHistory {
+    persisted: Vec<u8>,
+    history: VersionedMembershipHistory,
 }
 
 impl VerifiedMembershipLedger {
@@ -165,6 +172,7 @@ impl MembershipLedger {
             verifier,
             changes: tokio::sync::watch::channel(()).0,
             history_changes: tokio::sync::watch::channel(()).0,
+            verified_history_cache: Mutex::new(None),
         }
     }
 
@@ -244,6 +252,7 @@ impl MembershipLedger {
     fn validate_loaded(
         &self,
         loaded: &LoadedMembershipLedger,
+        cached_history: Option<&VerifiedMembershipHistory>,
     ) -> Result<Option<VersionedMembershipHistory>, MembershipLedgerError> {
         if loaded
             .membership_conflict_presentations
@@ -279,9 +288,14 @@ impl MembershipLedger {
             .membership_history
             .as_deref()
             .ok_or(MembershipLedgerError::RecoveryRequired)?;
-        let history =
-            VersionedMembershipHistory::decode_persisted_v2(history_bytes, self.verifier.as_ref())
-                .map_err(|_| MembershipLedgerError::Corrupt)?;
+        let history = match cached_history {
+            Some(cached) if cached.persisted == history_bytes => cached.history.clone(),
+            _ => VersionedMembershipHistory::decode_persisted_v2(
+                history_bytes,
+                self.verifier.as_ref(),
+            )
+            .map_err(|_| MembershipLedgerError::Corrupt)?,
+        };
         if history.lineage_id() != lineage_id {
             return Err(MembershipLedgerError::Corrupt);
         }
@@ -292,7 +306,18 @@ impl MembershipLedger {
         &self,
     ) -> Result<VerifiedMembershipLedger, MembershipLedgerError> {
         let record = self.loader.load().await?;
-        let history = self.validate_loaded(&record)?;
+        let mut cache = self
+            .verified_history_cache
+            .lock()
+            .map_err(|_| MembershipLedgerError::Unavailable)?;
+        let history = self.validate_loaded(&record, cache.as_ref())?;
+        *cache = match (&record.membership_history, &history) {
+            (Some(persisted), Some(history)) => Some(VerifiedMembershipHistory {
+                persisted: persisted.clone(),
+                history: history.clone(),
+            }),
+            _ => None,
+        };
         Ok(VerifiedMembershipLedger { record, history })
     }
 
@@ -300,8 +325,8 @@ impl MembershipLedger {
         &self,
         update: impl FnOnce(&mut LoadedMembershipLedger) -> Result<(), MembershipLedgerError>,
     ) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-        let loaded = self.loader.load().await?;
-        self.validate_loaded(&loaded)?;
+        let snapshot = self.load_verified().await?;
+        let loaded = snapshot.record;
         let expected_history_digest = loaded
             .membership_history
             .as_deref()
@@ -313,7 +338,7 @@ impl MembershipLedger {
         let mut replacement = loaded.clone();
         update(&mut replacement)?;
         replacement.revision = next_revision;
-        self.validate_loaded(&replacement)?;
+        let replacement_history = self.validate_loaded(&replacement, None)?;
         let committed = self
             .committer
             .compare_and_commit(MembershipLedgerMutation {
@@ -325,6 +350,16 @@ impl MembershipLedger {
         if committed != replacement {
             return Err(MembershipLedgerError::Corrupt);
         }
+        *self
+            .verified_history_cache
+            .lock()
+            .map_err(|_| MembershipLedgerError::Unavailable)? = replacement_history
+            .as_ref()
+            .zip(committed.membership_history.as_ref())
+            .map(|(history, persisted)| VerifiedMembershipHistory {
+                persisted: persisted.clone(),
+                history: history.clone(),
+            });
         if committed.membership_history != loaded.membership_history
             || committed.local_join_active != loaded.local_join_active
         {
@@ -365,7 +400,7 @@ impl MembershipLedger {
                 .map_err(|_| MembershipLedgerError::Corrupt)?,
         );
         replacement.revision = next_revision;
-        self.validate_loaded(&replacement)?;
+        let replacement_history = self.validate_loaded(&replacement, None)?;
         let committed = self
             .committer
             .compare_and_commit(MembershipLedgerMutation {
@@ -377,6 +412,16 @@ impl MembershipLedger {
         if committed != replacement {
             return Err(MembershipLedgerError::Corrupt);
         }
+        *self
+            .verified_history_cache
+            .lock()
+            .map_err(|_| MembershipLedgerError::Unavailable)? = replacement_history
+            .as_ref()
+            .zip(committed.membership_history.as_ref())
+            .map(|(history, persisted)| VerifiedMembershipHistory {
+                persisted: persisted.clone(),
+                history: history.clone(),
+            });
         let history_digest = committed
             .membership_history
             .as_deref()
