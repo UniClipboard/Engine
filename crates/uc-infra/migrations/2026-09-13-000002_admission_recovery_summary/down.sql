@@ -1,0 +1,3 @@
+DROP TRIGGER invalidate_admission_recovery_summary_after_delete;
+DROP TRIGGER invalidate_admission_recovery_summary_after_update;
+DROP TABLE admission_recovery_summary;

@@ -263,6 +263,7 @@ async fn v3_membership_branch_replays_every_control_phase_after_crash() {
         .compare_and_commit(MembershipLedgerMutation {
             expected_revision: 0,
             expected_history_digest: None,
+            device_trust_changed: true,
             replacement: LoadedMembershipLedger {
                 revision: 1,
                 lineage_id: Some(space.as_ref().to_owned()),
@@ -370,6 +371,7 @@ async fn v3_membership_branch_replays_every_control_phase_after_crash() {
             .insert(transition_id, next.clone());
         ledger
             .compare_and_commit(MembershipLedgerMutation {
+                device_trust_changed: true,
                 expected_revision: loaded.revision,
                 expected_history_digest: loaded
                     .membership_history

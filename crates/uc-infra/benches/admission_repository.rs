@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use uc_infra::db::repositories::GroupUpdateDeliveryBenchmark;
 use uc_infra::space::AdmissionRepositoryBenchmark;
 
 fn benchmark_sizes() -> &'static [usize] {
@@ -39,5 +40,34 @@ fn admission_repository(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, admission_repository);
+fn group_update_delivery(c: &mut Criterion) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|error| panic!("benchmark runtime failed: {error}"));
+    let mut group = c.benchmark_group("group_update_delivery/warm_due");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+
+    for &material_bytes in benchmark_sizes() {
+        let fixture = runtime
+            .block_on(GroupUpdateDeliveryBenchmark::new(material_bytes))
+            .unwrap_or_else(|error| panic!("benchmark fixture failed: {error:#}"));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(material_bytes),
+            &fixture,
+            |b, fixture| {
+                b.to_async(&runtime).iter(|| async {
+                    fixture
+                        .load_due()
+                        .await
+                        .unwrap_or_else(|error| panic!("benchmark load failed: {error:#}"));
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+criterion_group!(benches, admission_repository, group_update_delivery);
 criterion_main!(benches);

@@ -118,8 +118,20 @@ impl GroupRevocationPort for PassivePorts {
     ) -> Result<Vec<GroupRevocationResult>, KeyEpochError> {
         Ok(Vec::new())
     }
-    async fn pending_space_group_updates(&self) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
+    async fn due_space_group_updates(
+        &self,
+        _: i64,
+        _: Option<DeviceId>,
+    ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
         Ok(Vec::new())
+    }
+
+    async fn record_space_group_update_failures(
+        &self,
+        _: &[(String, GroupUpdateDispatchError)],
+        _: i64,
+    ) -> Result<usize, KeyEpochError> {
+        Ok(0)
     }
     async fn acknowledge_space_group_update(&self, _: &str, _: i64) -> Result<bool, KeyEpochError> {
         Ok(false)

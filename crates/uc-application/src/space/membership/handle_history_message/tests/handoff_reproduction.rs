@@ -407,13 +407,11 @@ async fn verified_candidates_explain_changes_and_keep_remote_sync_pending() {
 async fn old_conflict_without_presentation_stays_explicitly_unknown() {
     let fixture = Fixture::new();
     fixture.deliver(&fixture.peer).await;
-    fixture
-        .repository
-        .loaded
-        .lock()
-        .unwrap()
-        .membership_conflict_presentations
-        .clear();
+    {
+        let mut loaded = fixture.repository.loaded.lock().unwrap();
+        loaded.membership_conflict_presentations.clear();
+        loaded.revision += 1;
+    }
     let view = fixture.resolver().query().await.unwrap();
     let conflict = &view.conflicts[0];
     assert_eq!(

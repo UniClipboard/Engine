@@ -6,7 +6,7 @@ import { resolve } from "node:path";
 
 const suiteIndex = process.argv.indexOf("--suite");
 const suite = suiteIndex >= 0 ? process.argv[suiteIndex + 1] : "smoke";
-if (!new Set(["smoke", "admission_repository"]).has(suite)) {
+if (!new Set(["smoke", "admission_repository", "group_update_delivery"]).has(suite)) {
   throw new Error(`unknown performance suite: ${suite}`);
 }
 
@@ -39,7 +39,7 @@ writeFileSync(
       platform: process.platform,
       architecture: process.arch,
       rustc,
-      fixture: "synthetic-admission-repository-v1",
+      fixture: "synthetic-engine-storage-v2",
     },
     null,
     2,
@@ -50,18 +50,28 @@ const environment = { ...process.env };
 if (suite === "smoke") {
   environment.UNICLIPBOARD_BENCH_SMOKE = "1";
 }
+const benchmarkFilter =
+  suite === "smoke"
+    ? undefined
+    : suite === "admission_repository"
+      ? "admission_repository"
+      : "group_update_delivery";
+const cargoArguments = [
+  "bench",
+  "-p",
+  "uc-infra",
+  "--locked",
+  "--features",
+  "test-util",
+  "--bench",
+  "admission_repository",
+];
+if (benchmarkFilter) {
+  cargoArguments.push("--", benchmarkFilter);
+}
 execFileSync(
   "cargo",
-  [
-    "bench",
-    "-p",
-    "uc-infra",
-    "--locked",
-    "--features",
-    "test-util",
-    "--bench",
-    "admission_repository",
-  ],
+  cargoArguments,
   { cwd: root, env: environment, stdio: "inherit" },
 );
 writeFileSync(

@@ -44,10 +44,30 @@ crate::generated_macro_entry!();
 
 - 先完成最小端到端切片，再增加已经证明必要的范围。
 - 完整行为只有一个负责人；辅助模块提供能力，不把流程决定泄露给调用方。
+- 重写仓库内部接口时必须同步迁移全部调用方并删除旧入口，严禁为了兼容旧调用方式保留无意义的转调函数。
+- 仅补充默认参数、传入固定参数、改名后继续调用，或原样转交结果的函数不构成模块边界，必须合并到唯一实现中。确需保持的稳定外部入口只能留在已有公开边界，不能据此在内部继续增加包装层。
 - 生产代码不使用 `unwrap()`、`expect()`、`println!()` 或 `eprintln!()`。
 - 下层失败保留原始来源，转换由拥有目标错误类型的层负责。
 - 测试覆盖可观察行为、失败边界或真实回归，不机械复述实现。
 - 修改过程中发现范围外问题时保留证据并单独处理，不顺手扩大当前变更。
+
+`scripts/architecture/check-rust-style.mjs` 会拒绝本次新增或修改的仓库内部纯转调方法。真正公开的稳定入口不受这条机械检查限制，但仍需满足已有公开边界的职责要求。
+
+禁止：
+
+```rust
+pub(super) async fn execute(&self) -> StepOutcome {
+    self.execute_for_trigger(&MaintenanceTrigger::Periodic).await
+}
+```
+
+应直接让唯一入口接收真实调用所需的信息，并一次性修改调用方：
+
+```rust
+pub(super) async fn execute(&self, trigger: &MaintenanceTrigger) -> StepOutcome {
+    // 完整实现
+}
+```
 
 ## 交付
 

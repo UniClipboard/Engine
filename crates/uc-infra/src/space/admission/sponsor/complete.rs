@@ -250,6 +250,7 @@ impl DefaultSponsorAdmissionActivation {
             .compare_and_commit(MembershipLedgerMutation {
                 expected_revision,
                 expected_history_digest,
+                device_trust_changed: true,
                 replacement: ledger,
             })
             .await

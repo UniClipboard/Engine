@@ -168,6 +168,7 @@ mod tests {
             .compare_and_commit(MembershipLedgerMutation {
                 expected_revision: 0,
                 expected_history_digest: None,
+                device_trust_changed: true,
                 replacement: loaded,
             })
             .await

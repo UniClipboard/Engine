@@ -38,7 +38,7 @@ struct EncryptedRepositoryRow {
 }
 
 #[derive(QueryableByName)]
-struct EncryptedRecordRow {
+pub(super) struct EncryptedRecordRow {
     #[diesel(sql_type = Binary)]
     lookup_token: Vec<u8>,
     #[diesel(sql_type = Binary)]
@@ -96,25 +96,31 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         conn: &mut SqliteConnection,
     ) -> Result<Option<([u8; 16], [u8; 32], StoredSpaceAdmissionV1)>, SpaceAdmissionStateStoreError>
     {
-        let Some(row) = load_repository_row(conn)? else {
+        let Some(metadata) = self.load_metadata_on(conn)? else {
             return Ok(None);
         };
-        let metadata = match self.try_open_metadata(&row.encrypted_payload)? {
-            Some(metadata) => metadata,
-            None => {
-                self.load_state_on(conn)?;
-                let migrated =
-                    load_repository_row(conn)?.ok_or(SpaceAdmissionStateStoreError::Corrupt)?;
-                self.try_open_metadata(&migrated.encrypted_payload)?
-                    .ok_or(SpaceAdmissionStateStoreError::Corrupt)?
-            }
-        };
-        self.validate_metadata(&metadata)?;
         let Some(admission_id) = metadata.current_local_join_id else {
             return Ok(None);
         };
         let stored = self.load_v3_record_on(conn, admission_id)?;
         Ok(Some((metadata.profile_generation, admission_id, stored)))
+    }
+
+    pub(super) fn load_metadata_on(
+        &self,
+        conn: &mut SqliteConnection,
+    ) -> Result<Option<PersistedSpaceAdmissionMetadataV3>, SpaceAdmissionStateStoreError> {
+        let Some(row) = load_repository_row(conn)? else {
+            return Ok(None);
+        };
+        if let Some(metadata) = self.try_open_metadata(&row.encrypted_payload)? {
+            return Ok(Some(metadata));
+        }
+        self.load_state_on(conn)?;
+        let migrated = load_repository_row(conn)?.ok_or(SpaceAdmissionStateStoreError::Corrupt)?;
+        self.try_open_metadata(&migrated.encrypted_payload)?
+            .map(Some)
+            .ok_or(SpaceAdmissionStateStoreError::Corrupt)
     }
 
     // rust-style: allow-qualified-path -- 可见性必须覆盖 repository 的相邻准入角色模块
@@ -257,7 +263,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         })
     }
 
-    fn load_v3_record_on(
+    pub(super) fn load_v3_record_on(
         &self,
         conn: &mut SqliteConnection,
         admission_id: [u8; 32],
@@ -279,10 +285,13 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         Ok(record.stored)
     }
 
-    fn open_v3_record_row(
+    pub(super) fn open_v3_record_row(
         &self,
         row: EncryptedRecordRow,
     ) -> Result<PersistedSpaceAdmissionRecordV3, SpaceAdmissionStateStoreError> {
+        #[cfg(test)]
+        self.record_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let reader = self
             .keys
             .profile_payload_reader(RECORD_PAYLOAD_PURPOSE)
@@ -485,7 +494,7 @@ pub(in crate::space::admission) fn into_anyhow(
     anyhow::anyhow!(error)
 }
 
-fn map_key_error(error: AdmissionKeyError) -> SpaceAdmissionStateStoreError {
+pub(super) fn map_key_error(error: AdmissionKeyError) -> SpaceAdmissionStateStoreError {
     match error {
         AdmissionKeyError::SecureStorage => SpaceAdmissionStateStoreError::Locked,
         AdmissionKeyError::Corrupt | AdmissionKeyError::OpenFailed => {

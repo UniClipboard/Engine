@@ -55,6 +55,7 @@ async fn encrypted_legacy_rows_upgrade_to_v4_on_commit() {
             .compare_and_commit(MembershipLedgerMutation {
                 expected_revision: 7,
                 expected_history_digest: None,
+                device_trust_changed: true,
                 replacement: current.clone(),
             })
             .await

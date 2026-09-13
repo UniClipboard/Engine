@@ -720,6 +720,7 @@ impl MembershipHistoryExchangePort for HistoryChangingTransport {
                     .membership_history
                     .as_ref()
                     .map(|v| Sha256::digest(v).into()),
+                device_trust_changed: true,
                 replacement: after,
             })
             .await

@@ -443,3 +443,188 @@ fn local_profile_repository_read_probe() {
     eprintln!("records={}, cold={cold_duration:?}, four_unchanged_reads={warm_duration:?}, all_records_decode={record_duration:?}", state.records.len());
     assert!(warm_duration < cold_duration * 2);
 }
+
+fn pending_join_for_recovery(id: u8) -> uc_core::membership::JoinerAdmission {
+    use uc_core::membership::{
+        AdmissionJoinerStartContext, AdmissionShortInvitationCode, AdmissionSourceSnapshot, JoinId,
+        JoinerAdmission, SpaceAdmissionId,
+    };
+    JoinerAdmission::start_resolving_invitation(
+        SpaceAdmissionId::from_bytes([id; 32]).unwrap(),
+        JoinId::from_bytes([id; 16]).unwrap(),
+        1,
+        AdmissionSourceSnapshot::from_bytes(vec![1; 32]).unwrap(),
+        AdmissionJoinerStartContext::from_bytes(vec![2; 32]).unwrap(),
+        AdmissionShortInvitationCode::from_bytes(b"test-code".to_vec()).unwrap(),
+    )
+    .unwrap()
+    .into_replacement()
+}
+
+#[tokio::test]
+async fn recovery_does_not_reopen_unchanged_unrelated_records() {
+    use uc_application::deps::{AdmissionRecoveryTrigger, PendingAdmissionRecoveryStatePort};
+    let mut fixture = Fixture::new();
+    let mut state = PersistedSpaceAdmissionRepositoryV2::fresh([0x31; 16]);
+    let terminal = pending_join_for_recovery(0x41)
+        .supersede()
+        .unwrap()
+        .into_replacement();
+    state.records.insert(
+        [0x41; 32],
+        fixture.repository.seal_new_record(&terminal).unwrap(),
+    );
+    fixture.write_state(&state);
+    assert!(PendingAdmissionRecoveryStatePort::load(
+        &fixture.repository,
+        AdmissionRecoveryTrigger::Startup
+    )
+    .await
+    .unwrap()
+    .is_empty());
+    fixture.repository.record_reads.store(0, Ordering::SeqCst);
+    for _ in 0..3 {
+        assert!(PendingAdmissionRecoveryStatePort::load(
+            &fixture.repository,
+            AdmissionRecoveryTrigger::Periodic
+        )
+        .await
+        .unwrap()
+        .is_empty());
+    }
+    assert_eq!(
+        fixture.repository.record_reads.load(Ordering::SeqCst),
+        0,
+        "没有待办的恢复扫描不能读取无关记录正文"
+    );
+}
+
+#[tokio::test]
+async fn recovery_summary_tracks_changes_and_rollbacks_without_reading_other_records() {
+    use uc_application::deps::{AdmissionRecoveryTrigger, PendingAdmissionRecoveryStatePort};
+    let mut fixture = Fixture::new();
+    let mut state = PersistedSpaceAdmissionRepositoryV2::fresh([0x31; 16]);
+    let terminal = pending_join_for_recovery(0x41)
+        .supersede()
+        .unwrap()
+        .into_replacement();
+    state.records.insert(
+        [0x41; 32],
+        fixture.repository.seal_new_record(&terminal).unwrap(),
+    );
+    fixture.write_state(&state);
+    assert!(PendingAdmissionRecoveryStatePort::load(
+        &fixture.repository,
+        AdmissionRecoveryTrigger::Startup
+    )
+    .await
+    .unwrap()
+    .is_empty());
+    let pending = pending_join_for_recovery(0x42);
+    state.records.insert(
+        [0x42; 32],
+        fixture.repository.seal_new_record(&pending).unwrap(),
+    );
+    // 当前加入指针缺省也不能漏掉恢复任务。
+    fixture
+        .repository
+        .save_state_on(&mut fixture.connection, &state)
+        .unwrap();
+    fixture.repository.record_reads.store(0, Ordering::SeqCst);
+    let loaded = PendingAdmissionRecoveryStatePort::load(
+        &fixture.repository,
+        AdmissionRecoveryTrigger::Periodic,
+    )
+    .await
+    .unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(fixture.repository.record_reads.load(Ordering::SeqCst), 1);
+    let (aggregate, _) = loaded.into_iter().next().unwrap().into_parts();
+    let cancelled = aggregate.supersede().unwrap().into_replacement();
+    state.records.insert(
+        [0x42; 32],
+        fixture.repository.seal_new_record(&cancelled).unwrap(),
+    );
+    let rollback: Result<(), diesel::result::Error> = fixture.connection.transaction(|conn| {
+        fixture.repository.save_state_on(conn, &state).unwrap();
+        Err(diesel::result::Error::RollbackTransaction)
+    });
+    assert!(rollback.is_err());
+    assert_eq!(
+        PendingAdmissionRecoveryStatePort::load(
+            &fixture.repository,
+            AdmissionRecoveryTrigger::Resume
+        )
+        .await
+        .unwrap()
+        .len(),
+        1
+    );
+    fixture
+        .repository
+        .save_state_on(&mut fixture.connection, &state)
+        .unwrap();
+    assert!(PendingAdmissionRecoveryStatePort::load(
+        &fixture.repository,
+        AdmissionRecoveryTrigger::Periodic
+    )
+    .await
+    .unwrap()
+    .is_empty());
+    fixture.repository.record_reads.store(0, Ordering::SeqCst);
+    assert!(PendingAdmissionRecoveryStatePort::load(
+        &fixture.repository,
+        AdmissionRecoveryTrigger::Startup
+    )
+    .await
+    .unwrap()
+    .is_empty());
+    assert_eq!(fixture.repository.record_reads.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn recovery_summary_rejects_corruption_and_locked_keys() {
+    use uc_application::deps::{
+        AdmissionRecoveryTrigger, PendingAdmissionRecoveryStateError,
+        PendingAdmissionRecoveryStatePort,
+    };
+    let mut fixture = Fixture::new();
+    let mut state = PersistedSpaceAdmissionRepositoryV2::fresh([0x31; 16]);
+    let pending = pending_join_for_recovery(0x41);
+    state.records.insert(
+        [0x41; 32],
+        fixture.repository.seal_new_record(&pending).unwrap(),
+    );
+    fixture.write_state(&state);
+    assert_eq!(
+        PendingAdmissionRecoveryStatePort::load(
+            &fixture.repository,
+            AdmissionRecoveryTrigger::Startup
+        )
+        .await
+        .unwrap()
+        .len(),
+        1
+    );
+    fixture.storage.1.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        PendingAdmissionRecoveryStatePort::load(
+            &fixture.repository,
+            AdmissionRecoveryTrigger::Periodic
+        )
+        .await,
+        Err(PendingAdmissionRecoveryStateError::Locked)
+    ));
+    fixture.storage.1.store(false, Ordering::SeqCst);
+    sql_query("UPDATE admission_recovery_summary SET encrypted_payload = x'010203'")
+        .execute(&mut fixture.connection)
+        .unwrap();
+    assert!(matches!(
+        PendingAdmissionRecoveryStatePort::load(
+            &fixture.repository,
+            AdmissionRecoveryTrigger::Periodic
+        )
+        .await,
+        Err(PendingAdmissionRecoveryStateError::RecoveryRequired)
+    ));
+}

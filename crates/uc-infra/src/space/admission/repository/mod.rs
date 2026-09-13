@@ -1,5 +1,6 @@
 pub(super) mod codec;
 mod persisted;
+mod recovery_index;
 pub(super) mod token;
 
 #[cfg(feature = "test-util")]
@@ -26,6 +27,8 @@ pub struct SqliteSpaceAdmissionState<E> {
     pub(super) manifests: Arc<ActiveSpaceGenerationManifestStore>,
     pub(super) membership: Arc<dyn LoadMembershipLedgerPort>,
     read_cache: Mutex<Option<RepositoryReadCache>>,
+    #[cfg(test)]
+    record_reads: std::sync::atomic::AtomicUsize,
 }
 
 impl<E> SqliteSpaceAdmissionState<E> {
@@ -41,6 +44,8 @@ impl<E> SqliteSpaceAdmissionState<E> {
             manifests,
             membership,
             read_cache: Mutex::new(None),
+            #[cfg(test)]
+            record_reads: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }

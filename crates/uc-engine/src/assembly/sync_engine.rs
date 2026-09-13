@@ -55,6 +55,7 @@ use uc_infra::network::iroh::{
 // Re-exported so external callers can parametrise the assembly without
 // having to `use uc_infra` themselves.
 use crate::assembly::deps::SyncEngineDeps;
+use crate::assembly::membership_events::MembershipLedgerAccess;
 use uc_infra::fs::{
     FsAtomicPublisher, FsDirectoryStagingCleaner, FsHiddenPathMarker, FsInboundFileTarget,
 };
@@ -614,6 +615,13 @@ pub async fn build_sync_engine_assembly(
     ));
     let local_device_id = space_setup.device_identity.current_device_id();
     let local_identity: Arc<dyn LocalIdentityPort> = identity_store;
+    let membership_access = Arc::new(MembershipLedgerAccess::new(
+        space_setup.membership_ledger.clone()
+            as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
+        space_setup.membership_ledger.clone()
+            as Arc<dyn uc_application::deps::CommitMembershipLedgerPort>,
+        application.host_event_bus(),
+    ));
     let build_admission =
         |membership_committer: Arc<dyn uc_application::deps::CommitMembershipLedgerPort>| {
             SpaceAdmissionAdapters {
@@ -654,7 +662,7 @@ pub async fn build_sync_engine_assembly(
                 )),
                 activate_sponsor_admission: Arc::new(DefaultSponsorAdmissionActivation::new(
                     Arc::clone(&space_setup.space_access.activate_sponsor_admission_security),
-                    space_setup.membership_ledger.clone()
+                    membership_access.clone()
                         as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
                     Arc::clone(&membership_committer),
                     historical_signatures.clone(),
@@ -688,15 +696,11 @@ pub async fn build_sync_engine_assembly(
                     as Arc<dyn uc_application::deps::LoadCurrentJoinStatusPort>,
             }
         };
-    let membership_commit = crate::assembly::membership_events::publish_membership_commit_events(
-        space_setup.membership_ledger.clone()
-            as Arc<dyn uc_application::deps::CommitMembershipLedgerPort>,
-        application.host_event_bus(),
-    );
     let membership = crate::assembly::observability::observe_membership(SpaceMembershipAdapters {
-        load_membership_ledger: space_setup.membership_ledger.clone()
+        load_membership_ledger: membership_access.clone()
             as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
-        commit_membership_ledger: membership_commit,
+        commit_membership_ledger: membership_access.clone()
+            as Arc<dyn uc_application::deps::CommitMembershipLedgerPort>,
         historical_membership_signatures: historical_signatures.clone(),
         current_member_signatures: Arc::clone(&space_setup.current_member_signatures),
         membership_identity: removal_identity,

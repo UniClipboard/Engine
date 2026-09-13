@@ -1,0 +1,6 @@
+DROP TRIGGER invalidate_revocation_delivery_summary_after_delete;
+DROP TRIGGER invalidate_revocation_delivery_summary_after_update;
+DROP TRIGGER invalidate_space_delivery_summary_after_delete;
+DROP TRIGGER invalidate_space_delivery_summary_after_update;
+DROP TABLE group_update_source;
+DROP TABLE group_update_delivery;

@@ -171,6 +171,7 @@ async fn candidate_details_are_encrypted_and_survive_reopen() {
         .compare_and_commit(MembershipLedgerMutation {
             expected_revision: 0,
             expected_history_digest: None,
+            device_trust_changed: true,
             replacement: next.clone(),
         })
         .await
@@ -212,6 +213,7 @@ async fn encrypted_ledger_survives_reopen_and_rejects_stale_commit() {
         .compare_and_commit(MembershipLedgerMutation {
             expected_revision: 0,
             expected_history_digest: None,
+            device_trust_changed: true,
             replacement: replacement.clone(),
         })
         .await
@@ -229,6 +231,7 @@ async fn encrypted_ledger_survives_reopen_and_rejects_stale_commit() {
         .compare_and_commit(MembershipLedgerMutation {
             expected_revision: 0,
             expected_history_digest: None,
+            device_trust_changed: true,
             replacement: LoadedMembershipLedger::no_current_space(),
         })
         .await;
@@ -246,6 +249,7 @@ async fn sqlite_failure_keeps_history_fanout_and_effects_in_one_atomic_state() {
         .compare_and_commit(MembershipLedgerMutation {
             expected_revision: 0,
             expected_history_digest: None,
+            device_trust_changed: true,
             replacement: initial.clone(),
         })
         .await
@@ -285,6 +289,7 @@ async fn sqlite_failure_keeps_history_fanout_and_effects_in_one_atomic_state() {
         expected_history_digest: Some(<[u8; 32]>::from(Sha256::digest(
             initial.membership_history.as_deref().unwrap(),
         ))),
+        device_trust_changed: true,
         replacement: replacement.clone(),
     };
     fixture.execute_sql(

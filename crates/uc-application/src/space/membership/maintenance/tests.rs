@@ -52,7 +52,10 @@ impl DeliverRestrictedMembershipPort for RecordingStep {
 
 #[async_trait]
 impl DeliverPendingGroupUpdatesPort for RecordingStep {
-    async fn deliver_pending_group_updates(&self) -> MembershipMaintenanceStepOutcome {
+    async fn deliver_pending_group_updates(
+        &self,
+        _: &MembershipMaintenanceTrigger,
+    ) -> MembershipMaintenanceStepOutcome {
         self.record()
     }
 }

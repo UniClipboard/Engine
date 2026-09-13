@@ -3,7 +3,7 @@ use uc_application::deps::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryTrigger, LoadedPendingAdmission,
     PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
 };
-use uc_core::membership::{AdmissionRecordPersistence, JoinerAdmission, JoinerAdmissionTransition};
+use uc_core::membership::{AdmissionRecordPersistence, JoinerAdmissionTransition};
 use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
 
 use crate::db::ports::DbExecutor;
@@ -24,21 +24,11 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
         observe_local_result(LocalWorkStep::JoinerStateLoad, async {
             self.executor
                 .run(|conn| {
-                    let state = self.load_state_on(conn).map_err(into_anyhow)?;
+                    let aggregates = self.load_pending_recovery_on(conn).map_err(into_anyhow)?;
                     let mut loaded = Vec::new();
-                    for (admission_id, stored) in &state.records {
-                        let aggregate = self
-                            .open_record(*admission_id, stored)
-                            .map_err(into_anyhow)?;
-                        if aggregate.pending_recovery().is_none()
-                            && aggregate.invitation_resolution().is_none()
-                        {
-                            continue;
-                        }
-                        let aggregate = JoinerAdmission::try_from_record(aggregate)
-                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                    for aggregate in aggregates {
                         let token = AdmissionRecoveryCommitToken::from_bytes(recovery_token(
-                            state.profile_generation,
+                            self.keys.profile_generation(),
                             &aggregate,
                         ))
                         .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;

@@ -96,7 +96,7 @@ impl MaintainSpaceMembershipUseCase {
             LocalWorkStep::MaintenanceGroupUpdates,
             self.deps
                 .group_update_delivery
-                .deliver_pending_group_updates(),
+                .deliver_pending_group_updates(&trigger),
         )
         .await
         {

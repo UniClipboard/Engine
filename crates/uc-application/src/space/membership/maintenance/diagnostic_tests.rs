@@ -78,7 +78,10 @@ struct BlockFirstUpdate {
 }
 #[async_trait]
 impl DeliverPendingGroupUpdatesPort for BlockFirstUpdate {
-    async fn deliver_pending_group_updates(&self) -> MembershipMaintenanceStepOutcome {
+    async fn deliver_pending_group_updates(
+        &self,
+        _: &MembershipMaintenanceTrigger,
+    ) -> MembershipMaintenanceStepOutcome {
         if self.first.swap(false, Ordering::SeqCst) {
             self.started.notify_one();
             self.release.notified().await;

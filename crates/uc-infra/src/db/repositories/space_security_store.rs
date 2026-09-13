@@ -1,7 +1,13 @@
+mod delivery;
 mod encrypted_payload;
 mod legacy_bootstrap;
 mod revocation;
 mod space_material;
+
+#[cfg(feature = "test-util")]
+mod benchmark;
+#[cfg(feature = "test-util")]
+pub use benchmark::GroupUpdateDeliveryBenchmark;
 
 #[cfg(test)]
 mod tests;

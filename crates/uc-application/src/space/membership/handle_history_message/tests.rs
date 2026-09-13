@@ -216,6 +216,10 @@ impl LoadMembershipLedgerPort for MemoryLedgerRepository {
     async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
         Ok(self.loaded.lock().unwrap().clone())
     }
+
+    fn current_revision(&self) -> Option<u64> {
+        self.loaded.lock().ok().map(|loaded| loaded.revision)
+    }
 }
 
 #[async_trait]
