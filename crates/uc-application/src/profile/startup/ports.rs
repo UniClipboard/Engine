@@ -1,13 +1,17 @@
 use async_trait::async_trait;
 
 use super::{
-    ProfileStartupStorageError, ProfileUpgradeBackupError, ProfileUpgradeSource,
-    ProfileUpgradeVersions,
+    ProfileStartupStorageError, ProfileUpgradeBackupEntry, ProfileUpgradeBackupError,
+    ProfileUpgradeSource, ProfileUpgradeVersions,
 };
 
 /// 已停写资料的备份能力；实现自行安排阻塞工作，取消等待不能修改来源资料。
 #[async_trait]
 pub trait ProfileUpgradeBackupPort: Send + Sync {
+    async fn list_backups(
+        &self,
+    ) -> Result<Vec<ProfileUpgradeBackupEntry>, ProfileUpgradeBackupError>;
+    async fn delete_backup(&self, id: &str) -> Result<(), ProfileUpgradeBackupError>;
     fn read_source(&self) -> Result<ProfileUpgradeSource, ProfileUpgradeBackupError>;
     fn read_prepared_target(
         &self,

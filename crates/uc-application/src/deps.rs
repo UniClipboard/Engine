@@ -50,8 +50,8 @@ pub use crate::profile::probe_profile_key_access::{
 };
 pub use crate::profile::startup::{
     PrepareProfileStartupUseCase, ProfileStartupError, ProfileStartupStorageError,
-    ProfileStartupStoragePort, ProfileUpgradeBackupError, ProfileUpgradeBackupPort,
-    ProfileUpgradeSource, ProfileUpgradeVersions,
+    ProfileStartupStoragePort, ProfileUpgradeBackupEntry, ProfileUpgradeBackupError,
+    ProfileUpgradeBackupPort, ProfileUpgradeSource, ProfileUpgradeVersions,
 };
 use crate::search::mutation_gate::{CoordinatedSearchIndex, SearchMutationGate};
 pub use crate::space::{

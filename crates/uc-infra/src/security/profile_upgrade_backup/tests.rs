@@ -593,3 +593,42 @@ async fn shared_backup_directory_is_rejected_without_changing_its_permissions() 
         0o755
     );
 }
+
+#[tokio::test]
+async fn completed_backups_keep_only_the_five_most_recent() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    let mut created = Vec::new();
+    for version in 1..=6 {
+        let target = ProfileUpgradeVersions {
+            product: format!("2.0.{version}"),
+            engine: format!("3.0.{version}"),
+        };
+        fixture.workflow(target).execute().await.unwrap();
+        created.push(fixture.record().files.receipt);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
+    let backups = fixture.backup.list_backups().await.unwrap();
+    assert_eq!(backups.len(), 5);
+    assert!(!fixture.backup.archive_path(&created[0]).exists());
+    for receipt in created.iter().skip(1) {
+        assert!(fixture.backup.archive_path(receipt).exists());
+    }
+}
+
+#[tokio::test]
+async fn listed_backup_can_be_deleted_without_touching_the_profile() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    fixture.prepare().await.unwrap();
+    let backup = fixture.backup.list_backups().await.unwrap().remove(0);
+
+    fixture.backup.delete_backup(&backup.id).await.unwrap();
+
+    assert!(fixture.backup.list_backups().await.unwrap().is_empty());
+    assert!(fixture.paths.settings_path.exists());
+    assert!(!fixture.backup.directory().join("current").exists());
+    assert!(!fixture.backup.directory().join("security-current").exists());
+    assert!(fixture.storage.get(record::RECORD_KEY).unwrap().is_none());
+}

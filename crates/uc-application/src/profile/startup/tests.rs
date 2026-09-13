@@ -14,6 +14,7 @@ enum BackupMode {
     Fresh,
     Upgrade,
     Current,
+    CurrentEngineOnly,
     Retry,
     Fail,
     Pending,
@@ -55,12 +56,26 @@ fn target() -> ProfileUpgradeVersions {
 
 #[async_trait]
 impl ProfileUpgradeBackupPort for Fixture {
+    async fn list_backups(
+        &self,
+    ) -> Result<Vec<ProfileUpgradeBackupEntry>, ProfileUpgradeBackupError> {
+        Ok(Vec::new())
+    }
+
+    async fn delete_backup(&self, _: &str) -> Result<(), ProfileUpgradeBackupError> {
+        Ok(())
+    }
+
     fn read_source(&self) -> Result<ProfileUpgradeSource, ProfileUpgradeBackupError> {
         self.event("read backup state");
         Ok(ProfileUpgradeSource {
             has_data: self.mode != BackupMode::Fresh,
             source_product: (self.mode == BackupMode::Current).then(|| target().product),
-            source_engine: (self.mode == BackupMode::Current).then(|| target().engine),
+            source_engine: matches!(
+                self.mode,
+                BackupMode::Current | BackupMode::CurrentEngineOnly
+            )
+            .then(|| target().engine),
         })
     }
     fn read_prepared_target(
@@ -68,7 +83,7 @@ impl ProfileUpgradeBackupPort for Fixture {
     ) -> Result<Option<ProfileUpgradeVersions>, ProfileUpgradeBackupError> {
         assert!(!matches!(
             self.mode,
-            BackupMode::Fresh | BackupMode::Current
+            BackupMode::Fresh | BackupMode::Current | BackupMode::CurrentEngineOnly
         ));
         Ok((self.mode == BackupMode::Retry).then(target))
     }
@@ -237,7 +252,11 @@ async fn retry_verifies_original_backup_and_reuses_lifecycle() {
 
 #[tokio::test]
 async fn fresh_or_current_version_prepares_without_backup() {
-    for mode in [BackupMode::Fresh, BackupMode::Current] {
+    for mode in [
+        BackupMode::Fresh,
+        BackupMode::Current,
+        BackupMode::CurrentEngineOnly,
+    ] {
         let fixture = Fixture::new(mode);
         fixture.workflow().execute().await.unwrap();
         assert_eq!(

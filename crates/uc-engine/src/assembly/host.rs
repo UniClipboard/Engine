@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tracing::warn;
-use uc_application::deps::{PrepareProfileStartupUseCase, ProfileUpgradeVersions};
+use uc_application::deps::{
+    PrepareProfileStartupUseCase, ProfileUpgradeBackupPort, ProfileUpgradeVersions,
+};
 use uc_core::app_dirs::{AppDirs, AppPaths};
 use uc_core::clipboard::{
     normalize_wire_mime, FileDisplayMetadata, FileDisplayMetadataEntry,
@@ -418,6 +420,7 @@ pub struct HostWiring {
     pub temporary_dir: std::path::PathBuf,
     pub clipboard_import_root: std::path::PathBuf,
     pub files: Arc<dyn HostFileAccess>,
+    pub profile_upgrade_backups: Arc<dyn ProfileUpgradeBackupPort>,
     pub clipboard_changes: Option<Box<dyn HostClipboardChangeStream>>,
 }
 
@@ -446,14 +449,16 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
     let paths = derive_app_paths(&directories);
     let secure_storage = adapt_secure_storage(secure_storage);
     let app_data_root = paths.app_data_root_dir.clone();
+    let profile_upgrade_backups: Arc<dyn ProfileUpgradeBackupPort> =
+        Arc::new(ProfileUpgradeBackupStore::new(
+            paths.clone(),
+            config.profile_id().to_owned(),
+            Arc::clone(&secure_storage),
+            directories.upgrade_backups().to_path_buf(),
+        ));
     let profile_lifecycle = PrepareProfileStartupUseCase::new(
         Arc::new(super::startup_progress::StartupProfileUpgradeBackup::new(
-            Arc::new(ProfileUpgradeBackupStore::new(
-                paths.clone(),
-                config.profile_id().to_owned(),
-                Arc::clone(&secure_storage),
-                directories.upgrade_backups().to_path_buf(),
-            )),
+            Arc::clone(&profile_upgrade_backups),
             startup_progress.clone(),
         )),
         Arc::new(ProfileStartupStorage::new(
@@ -521,6 +526,7 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
         temporary_dir,
         clipboard_import_root,
         files,
+        profile_upgrade_backups,
         clipboard_changes,
     })
 }

@@ -131,6 +131,17 @@ impl StartupProfileUpgradeBackup {
 
 #[async_trait]
 impl ProfileUpgradeBackupPort for StartupProfileUpgradeBackup {
+    async fn list_backups(
+        &self,
+    ) -> Result<Vec<uc_application::deps::ProfileUpgradeBackupEntry>, ProfileUpgradeBackupError>
+    {
+        self.inner.list_backups().await
+    }
+
+    async fn delete_backup(&self, id: &str) -> Result<(), ProfileUpgradeBackupError> {
+        self.inner.delete_backup(id).await
+    }
+
     fn read_source(&self) -> Result<ProfileUpgradeSource, ProfileUpgradeBackupError> {
         self.inner.read_source()
     }

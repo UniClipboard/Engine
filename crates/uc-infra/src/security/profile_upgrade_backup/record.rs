@@ -78,7 +78,14 @@ pub(super) fn read_record(
     directory: &Path,
     storage: &dyn SecureStoragePort,
 ) -> Result<Option<SecurityBackupRecord>, ProfileUpgradeBackupError> {
-    let Some(ciphertext) = read_bounded(&directory.join("security-current"))? else {
+    read_record_path(&directory.join("security-current"), storage)
+}
+
+pub(super) fn read_record_path(
+    path: &Path,
+    storage: &dyn SecureStoragePort,
+) -> Result<Option<SecurityBackupRecord>, ProfileUpgradeBackupError> {
+    let Some(ciphertext) = read_bounded(path)? else {
         return Ok(None);
     };
     let key = load_key(storage)?;
@@ -156,7 +163,13 @@ pub(super) fn publish_record(
 pub(super) fn read_file_record(
     directory: &Path,
 ) -> Result<Option<FileBackupRecord>, ProfileUpgradeBackupError> {
-    let Some(bytes) = read_bounded(&directory.join("current"))? else {
+    read_file_record_path(&directory.join("current"))
+}
+
+pub(super) fn read_file_record_path(
+    path: &Path,
+) -> Result<Option<FileBackupRecord>, ProfileUpgradeBackupError> {
+    let Some(bytes) = read_bounded(path)? else {
         return Ok(None);
     };
     let record: FileBackupRecord = serde_json::from_slice(&bytes).map_err(backup_error)?;

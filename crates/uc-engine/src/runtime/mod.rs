@@ -15,7 +15,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::{error, warn};
-use uc_application::deps::{ProfileFactoryResetCapabilityError, StopProfileRuntimePort};
+use uc_application::deps::{
+    ProfileFactoryResetCapabilityError, ProfileUpgradeBackupPort, StopProfileRuntimePort,
+};
 use uc_application::facade::{
     AppFacade, ApplicationRuntime, NetworkRecoveryEvent, ProfileFactoryResetFacade,
     ProfileFactoryResetOutcome, ProfileFactoryResetRequest,
@@ -49,6 +51,7 @@ pub(crate) struct ProductionRuntime {
     temporary_dir: std::path::PathBuf,
     clipboard_import_root: std::path::PathBuf,
     files: Arc<dyn HostFileAccess>,
+    profile_upgrade_backups: Arc<dyn ProfileUpgradeBackupPort>,
     clipboard_change_runtime: HostClipboardChangeRuntime,
     events: EventSender,
     #[cfg(feature = "dev-tools")]
@@ -172,6 +175,7 @@ impl ProductionRuntime {
             temporary_dir,
             clipboard_import_root,
             files,
+            profile_upgrade_backups,
             clipboard_changes,
         } = wire_host_capabilities_with_emitter(&config, host, emitter, progress.clone())
             .await
@@ -276,6 +280,7 @@ impl ProductionRuntime {
             temporary_dir,
             clipboard_import_root,
             files,
+            profile_upgrade_backups,
             clipboard_change_runtime,
             events,
             #[cfg(feature = "dev-tools")]

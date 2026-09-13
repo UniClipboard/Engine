@@ -23,6 +23,7 @@ impl ProfileUpgradeBackupStore {
                 && existing.files.spool_receipt == files.spool_receipt
                 && existing.files.target() == files.target()
             {
+                self.prune_locked()?;
                 return Ok(());
             }
         }
@@ -39,7 +40,8 @@ impl ProfileUpgradeBackupStore {
             &self.directory(),
             self.secure_storage.as_ref(),
             &SecurityBackupRecord { files, secrets },
-        )
+        )?;
+        self.prune_locked()
     }
 
     fn verify_source_files(

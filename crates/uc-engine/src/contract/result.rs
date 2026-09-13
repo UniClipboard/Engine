@@ -442,6 +442,10 @@ pub enum OperationResult {
     SpaceFactoryReset,
     SetupState(SetupStateSummary),
     StorageStats(StorageStatsSummary),
+    UpgradeBackups(Vec<UpgradeBackupSummary>),
+    UpgradeBackupDeleted {
+        id: String,
+    },
     StorageCacheCleared {
         freed_bytes: u64,
     },
@@ -643,6 +647,10 @@ impl fmt::Debug for OperationResult {
             Self::StorageStats(stats) => {
                 debug.field("kind", &"storage_stats").field("stats", stats)
             }
+            Self::UpgradeBackups(backups) => debug
+                .field("kind", &"upgrade_backups")
+                .field("count", &backups.len()),
+            Self::UpgradeBackupDeleted { .. } => debug.field("kind", &"upgrade_backup_deleted"),
             Self::StorageCacheCleared { freed_bytes } => debug
                 .field("kind", &"storage_cache_cleared")
                 .field("freed_bytes", freed_bytes),
@@ -907,6 +915,17 @@ impl fmt::Debug for SetupStateSummary {
             .field("re_pairing_required", &self.re_pairing_required)
             .finish()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpgradeBackupSummary {
+    pub id: String,
+    pub created_at_ms: u64,
+    pub source_product: Option<String>,
+    pub source_engine: Option<String>,
+    pub target_product: String,
+    pub target_engine: String,
+    pub size_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

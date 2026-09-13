@@ -57,10 +57,16 @@ impl PrepareProfileStartupUseCase {
 
     async fn ensure_backup(&self) -> Result<bool, ProfileUpgradeBackupError> {
         let state = self.backup.read_source()?;
-        if !state.has_data
-            || (state.source_product.as_deref() == Some(&self.target.product)
-                && state.source_engine.as_deref() == Some(&self.target.engine))
-        {
+        let has_known_version = state.source_product.is_some() || state.source_engine.is_some();
+        let known_versions_are_current = state
+            .source_product
+            .as_deref()
+            .is_none_or(|version| version == self.target.product)
+            && state
+                .source_engine
+                .as_deref()
+                .is_none_or(|version| version == self.target.engine);
+        if !state.has_data || (has_known_version && known_versions_are_current) {
             return Ok(false);
         }
         if self.backup.read_prepared_target()?.as_ref() == Some(&self.target) {

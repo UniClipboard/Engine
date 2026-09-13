@@ -1,13 +1,14 @@
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use blake3::hash;
 use uc_application::deps::{
-    ProfileUpgradeBackupError, ProfileUpgradeBackupPort, ProfileUpgradeSource,
-    ProfileUpgradeVersions,
+    ProfileUpgradeBackupEntry, ProfileUpgradeBackupError, ProfileUpgradeBackupPort,
+    ProfileUpgradeSource, ProfileUpgradeVersions,
 };
 use uc_core::app_dirs::AppPaths;
 use uc_core::ports::SecureStoragePort;
@@ -20,8 +21,13 @@ use crate::security::profile_backup_archive::tree::{
 };
 
 use super::inventory::{excluded_paths, has_profile};
-use super::record::{publish_file_record, read_file_record, FileBackupRecord};
+use super::record::{
+    publish_file_record, read_file_record, read_file_record_path, read_record_path,
+    FileBackupRecord, RECORD_KEY,
+};
 use crate::security::{ProfileBackupArchive, ProfileBackupSource};
+
+const MAX_RETAINED_BACKUPS: usize = 5;
 
 /// 宿主保证资料独占后使用；不打开数据库，不执行任何旧资料迁移。
 #[derive(Clone)]
@@ -74,6 +80,29 @@ impl ProfileUpgradeBackupStore {
 
 #[async_trait]
 impl ProfileUpgradeBackupPort for ProfileUpgradeBackupStore {
+    async fn list_backups(
+        &self,
+    ) -> Result<Vec<ProfileUpgradeBackupEntry>, ProfileUpgradeBackupError> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _lease = store.lease()?;
+            store.list_locked()
+        })
+        .await
+        .map_err(backup_error)?
+    }
+
+    async fn delete_backup(&self, id: &str) -> Result<(), ProfileUpgradeBackupError> {
+        let store = self.clone();
+        let id = id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let _lease = store.lease()?;
+            store.delete_locked(&id)
+        })
+        .await
+        .map_err(backup_error)?
+    }
+
     fn read_source(&self) -> Result<ProfileUpgradeSource, ProfileUpgradeBackupError> {
         if !has_profile(&self.paths)? {
             return Ok(ProfileUpgradeSource {
@@ -206,6 +235,119 @@ impl ProfileUpgradeBackupStore {
         )
     }
 
+    pub(super) fn prune_locked(&self) -> Result<(), ProfileUpgradeBackupError> {
+        let backups = self.list_locked()?;
+        for backup in backups.into_iter().skip(MAX_RETAINED_BACKUPS) {
+            self.delete_locked(&backup.id)?;
+        }
+        Ok(())
+    }
+
+    fn list_locked(&self) -> Result<Vec<ProfileUpgradeBackupEntry>, ProfileUpgradeBackupError> {
+        let directory = self.directory();
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(backup_error(error)),
+        };
+        let mut backups = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(backup_error)?;
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("files") {
+                continue;
+            }
+            let Some(record) = read_file_record_path(&path)? else {
+                continue;
+            };
+            let id = uuid::Uuid::from_bytes(record.receipt.archive_id).to_string();
+            if path.file_stem().and_then(|value| value.to_str()) != Some(id.as_str()) {
+                return Err(backup_error(io::Error::other(
+                    "profile backup record identity changed",
+                )));
+            }
+            let created_at_ms = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH)
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64;
+            let mut size_bytes =
+                file_size(&path)? + file_size(&self.archive_path(&record.receipt))?;
+            if let Some(receipt) = &record.spool_receipt {
+                size_bytes = size_bytes.saturating_add(file_size(&self.archive_path(receipt))?);
+            }
+            backups.push(ProfileUpgradeBackupEntry {
+                id,
+                created_at_ms,
+                source_product: record.receipt.source.product_version.clone(),
+                source_engine: record.receipt.source.engine_version.clone(),
+                target_product: record.target_product,
+                target_engine: record.target_engine,
+                size_bytes,
+            });
+        }
+        backups.sort_by(|left, right| {
+            right
+                .created_at_ms
+                .cmp(&left.created_at_ms)
+                .then_with(|| right.id.cmp(&left.id))
+        });
+        Ok(backups)
+    }
+
+    fn delete_locked(&self, id: &str) -> Result<(), ProfileUpgradeBackupError> {
+        let archive_id = uuid::Uuid::parse_str(id).map_err(backup_error)?;
+        let directory = self.directory();
+        let record_path = directory.join(format!("{archive_id}.files"));
+        let record = read_file_record_path(&record_path)?
+            .ok_or_else(|| backup_error(io::Error::from(io::ErrorKind::NotFound)))?;
+        if record.receipt.archive_id != *archive_id.as_bytes() {
+            return Err(backup_error(io::Error::other(
+                "profile backup record identity changed",
+            )));
+        }
+
+        let current_matches = read_file_record(&directory)?
+            .is_some_and(|current| current.receipt.archive_id == record.receipt.archive_id);
+        if current_matches {
+            remove_if_exists(&directory.join("current"))?;
+            remove_if_exists(&directory.join("security-current"))?;
+        }
+
+        for entry in fs::read_dir(&directory).map_err(backup_error)? {
+            let path = entry.map_err(backup_error)?.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("record") {
+                continue;
+            }
+            if read_record_path(&path, self.secure_storage.as_ref())?.is_some_and(|security| {
+                security.files.receipt.archive_id == record.receipt.archive_id
+            }) {
+                remove_if_exists(&path)?;
+            }
+        }
+        remove_if_exists(&self.archive_path(&record.receipt))?;
+        if let Some(receipt) = &record.spool_receipt {
+            remove_if_exists(&self.archive_path(receipt))?;
+        }
+        remove_if_exists(&record_path)?;
+        if self.list_locked()?.is_empty() {
+            self.secure_storage
+                .delete(RECORD_KEY)
+                .map_err(backup_error)?;
+        }
+        crate::security::profile_backup_archive::sync_directory(&directory).map_err(backup_error)
+    }
+
+    pub(super) fn archive_path(&self, receipt: &crate::security::ProfileArchiveReceipt) -> PathBuf {
+        self.directory().join(format!(
+            "{}.archive",
+            uuid::Uuid::from_bytes(receipt.archive_id)
+        ))
+    }
+
     pub(super) fn verify(
         &self,
         target: &ProfileUpgradeVersions,
@@ -234,5 +376,19 @@ impl ProfileUpgradeBackupStore {
 pub(super) fn backup_error(source: impl Into<anyhow::Error>) -> ProfileUpgradeBackupError {
     ProfileUpgradeBackupError {
         source: source.into(),
+    }
+}
+
+fn file_size(path: &Path) -> Result<u64, ProfileUpgradeBackupError> {
+    fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .map_err(backup_error)
+}
+
+fn remove_if_exists(path: &Path) -> Result<(), ProfileUpgradeBackupError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(backup_error(error)),
     }
 }

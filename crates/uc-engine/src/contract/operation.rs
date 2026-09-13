@@ -35,6 +35,8 @@ pub enum OperationKind {
     FactoryResetSpace,
     QuerySetupState,
     QueryStorageStats,
+    ListUpgradeBackups,
+    DeleteUpgradeBackup,
     ClearStorageCache,
     QueryLocalDevice,
     QueryPeerConnections,
@@ -131,6 +133,8 @@ impl fmt::Display for OperationKind {
             Self::FactoryResetSpace => "factory_reset_space",
             Self::QuerySetupState => "query_setup_state",
             Self::QueryStorageStats => "query_storage_stats",
+            Self::ListUpgradeBackups => "list_upgrade_backups",
+            Self::DeleteUpgradeBackup => "delete_upgrade_backup",
             Self::ClearStorageCache => "clear_storage_cache",
             Self::QueryLocalDevice => "query_local_device",
             Self::QueryPeerConnections => "query_peer_connections",
@@ -250,6 +254,8 @@ pub enum Operation {
     FactoryResetSpace,
     QuerySetupState,
     QueryStorageStats,
+    ListUpgradeBackups,
+    DeleteUpgradeBackup(DeleteUpgradeBackupInput),
     ClearStorageCache,
     QueryLocalDevice,
     QueryPeerConnections,
@@ -348,6 +354,8 @@ impl Operation {
             Self::FactoryResetSpace => OperationKind::FactoryResetSpace,
             Self::QuerySetupState => OperationKind::QuerySetupState,
             Self::QueryStorageStats => OperationKind::QueryStorageStats,
+            Self::ListUpgradeBackups => OperationKind::ListUpgradeBackups,
+            Self::DeleteUpgradeBackup(_) => OperationKind::DeleteUpgradeBackup,
             Self::ClearStorageCache => OperationKind::ClearStorageCache,
             Self::QueryLocalDevice => OperationKind::QueryLocalDevice,
             Self::QueryPeerConnections => OperationKind::QueryPeerConnections,
@@ -823,4 +831,9 @@ pub enum ResendEntryOutcome {
 pub enum EntryNotResendableReason {
     RemoteOrigin,
     PayloadLost,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteUpgradeBackupInput {
+    pub id: String,
 }
