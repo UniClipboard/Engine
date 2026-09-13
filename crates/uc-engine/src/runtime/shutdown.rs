@@ -127,8 +127,22 @@ async fn stop_resource_users(
     actions: &dyn ShutdownActions,
     deadline: Option<Instant>,
 ) -> ShutdownOutcome {
-    let mut outcome = ShutdownOutcome::default();
+    let (mut outcome, process_tasks) = tokio::join!(
+        stop_session_and_transfers(actions, deadline),
+        actions.stop_process_tasks(deadline),
+    );
+    match process_tasks {
+        Ok(()) => outcome.process_tasks_stopped = true,
+        Err(error) => outcome.errors.push(error),
+    }
+    outcome
+}
 
+async fn stop_session_and_transfers(
+    actions: &dyn ShutdownActions,
+    deadline: Option<Instant>,
+) -> ShutdownOutcome {
+    let mut outcome = ShutdownOutcome::default();
     match actions.stop_session(deadline).await {
         Ok(()) => outcome.session_stopped = true,
         Err(error) => outcome.errors.push(error),
@@ -137,11 +151,6 @@ async fn stop_resource_users(
         Ok(()) => outcome.file_transfers_closed = true,
         Err(error) => outcome.errors.push(error),
     }
-    match actions.stop_process_tasks(deadline).await {
-        Ok(()) => outcome.process_tasks_stopped = true,
-        Err(error) => outcome.errors.push(error),
-    }
-
     outcome
 }
 
@@ -282,6 +291,60 @@ mod tests {
         assert_eq!(error.additional.len(), 2);
         assert_eq!(error.to_string(), "runtime lifecycle transition incomplete");
         assert!(!format!("{error:?}").contains("private failure"));
+    }
+
+    struct BlockingSessionActions {
+        calls: Mutex<Vec<&'static str>>,
+        session_started: tokio::sync::Notify,
+        session_release: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl ShutdownActions for BlockingSessionActions {
+        async fn stop_session(&self, _deadline: Option<Instant>) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push("session");
+            self.session_started.notify_one();
+            self.session_release.notified().await;
+            Ok(())
+        }
+
+        async fn close_file_transfers(&self) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push("transfers");
+            Ok(())
+        }
+
+        async fn stop_process_tasks(&self, _deadline: Option<Instant>) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push("tasks");
+            Ok(())
+        }
+
+        fn close_local_resources(&self) {
+            self.calls.lock().unwrap().push("resources");
+        }
+    }
+
+    #[tokio::test]
+    async fn slow_session_does_not_delay_process_task_stop() {
+        let actions = Arc::new(BlockingSessionActions {
+            calls: Mutex::new(Vec::new()),
+            session_started: tokio::sync::Notify::new(),
+            session_release: tokio::sync::Notify::new(),
+        });
+        let stopping = tokio::spawn({
+            let actions = Arc::clone(&actions);
+            async move { stop_resource_users_and_close(actions.as_ref(), None).await }
+        });
+
+        actions.session_started.notified().await;
+        tokio::task::yield_now().await;
+        assert_eq!(*actions.calls.lock().unwrap(), vec!["session", "tasks"]);
+        assert!(!stopping.is_finished());
+        actions.session_release.notify_one();
+        assert!(stopping.await.unwrap().errors.is_empty());
+        assert_eq!(
+            *actions.calls.lock().unwrap(),
+            vec!["session", "tasks", "transfers", "resources"]
+        );
     }
 
     #[tokio::test]
