@@ -88,11 +88,9 @@ impl HostClipboardChangeRuntime {
         dispatch_mode: HostClipboardDispatch,
     ) -> Result<Option<SendReportSummary>, EngineError> {
         let lease = self.session_supervisor.acquire_operation().await?;
-        let cancellation = lease.cancellation();
-        let result = tokio::select! {
-            _ = cancellation.cancelled() => Err(super::operation_unavailable_error()),
-            result = self.process_change_while_leased(dispatch_mode) => result,
-        };
+        // 取得租约后，这次剪贴板处理已经开始。暂停由租约排空负责等待，
+        // 不能在这里再用同一停止信号丢弃正在提交的完整动作。
+        let result = self.process_change_while_leased(dispatch_mode).await;
         drop(lease);
         result
     }
