@@ -16,16 +16,17 @@ use uc_core::ports::SecureStoragePort;
 use crate::app_version_state::{read_version_before_upgrade, DEFAULT_FILE_NAME};
 use crate::fs::file_lock::try_lock_exclusive;
 use crate::fs::VaultLayout;
-use crate::security::profile_backup_archive::tree::{
-    create_private_directory, require_disjoint_destination, resolve_source_root,
+use crate::security::profile_backup_archive::{
+    sync_directory,
+    tree::{create_private_directory, require_disjoint_destination, resolve_source_root},
 };
+use crate::security::{ProfileArchiveReceipt, ProfileBackupArchive, ProfileBackupSource};
 
 use super::inventory::{excluded_paths, has_profile};
 use super::record::{
     publish_file_record, read_file_record, read_file_record_path, read_record_path,
     FileBackupRecord, RECORD_KEY,
 };
-use crate::security::{ProfileBackupArchive, ProfileBackupSource};
 
 const MAX_RETAINED_BACKUPS: usize = 5;
 
@@ -338,10 +339,10 @@ impl ProfileUpgradeBackupStore {
                 .delete(RECORD_KEY)
                 .map_err(backup_error)?;
         }
-        crate::security::profile_backup_archive::sync_directory(&directory).map_err(backup_error)
+        sync_directory(&directory).map_err(backup_error)
     }
 
-    pub(super) fn archive_path(&self, receipt: &crate::security::ProfileArchiveReceipt) -> PathBuf {
+    pub(super) fn archive_path(&self, receipt: &ProfileArchiveReceipt) -> PathBuf {
         self.directory().join(format!(
             "{}.archive",
             uuid::Uuid::from_bytes(receipt.archive_id)
