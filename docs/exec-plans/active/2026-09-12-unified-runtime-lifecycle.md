@@ -306,7 +306,7 @@ impl RuntimeLifecycleCoordinator {
 | 生命周期命令与启动交接 | `crates/uc-engine/src/engine/lifecycle/queue.rs`、`crates/uc-engine/src/engine/startup_owner.rs` | 单一队列保存顺序与最新目标；启动前后转交同一运行期，等待方离开不取消收尾 | 专用 iOS 宿主已证明安全存储读取阻塞期间收到的暂停会在启动完成前落实；50 毫秒期限到期明确报告未完成，启动交接后仍保留暂停目标；其他启动资源和平台仍需核对 | Engine 生命周期、启动所有者、UniFFI 公开合同及 iOS 启动中切换测试 |
 | 会话重建 | `crates/uc-engine/src/runtime/session_supervisor/` | 关闭操作门，完整停止旧会话；本地资料成功恢复后才开门，失败时反向回收 | 整次构造中不可中断步骤仍需设备上界 | 会话生命周期、启动回收及真实宿主离线恢复测试 |
 | Application 领域工作 | `crates/uc-application/src/application/shutdown/owners.rs` | 同时停止历史、文件超时、搜索、Space、普通剪贴板和活动剪贴板，等待全部结果并汇总异常 | 每项内部磁盘动作仍需共同期限证据 | Application shutdown、各领域 lifecycle 测试 |
-| 内容物化与 spool | `crates/uc-infra/src/clipboard/background_runtime.rs`、`crates/uc-infra/src/clipboard/background_activity.rs` | 进程 `TaskRegistry` 持有工作；暂停门等待当前完整磁盘动作后交接 | 大内容读写及目录扫描最坏时长未证明 | background activity、blob worker 与真实保存后重开测试 |
+| 内容物化与 spool | `crates/uc-infra/src/clipboard/background_runtime.rs`、`crates/uc-infra/src/clipboard/background_activity.rs` | 进程 `TaskRegistry` 持有工作；暂停门等待当前完整磁盘动作后交接，暂停前或暂停期间到点的旧清理批次不在恢复后补跑 | 大内容读写及目录扫描最坏时长未证明 | background activity、blob worker 与真实保存后重开测试 |
 | 搜索重建及修复 | `crates/uc-application/src/search/runtime.rs`、`crates/uc-application/src/search/coordinator.rs` | Search runtime 持有任务范围；停止后等待已经开始的索引动作真正退出 | SQLite 索引完整写入的最坏时长未证明 | 搜索协调器阻塞线程与 Application 关闭测试 |
 | 剪贴板发送、接收与活动广播 | `crates/uc-application/src/clipboard/sync/`、`crates/uc-application/src/clipboard/inbound/`、`crates/uc-application/src/clipboard/active/` | 各自私有工作负责人登记完整动作，`ClipboardSession` 统一通知并排空 | iOS 专用宿主已证明阻塞读取或写入结束前暂停不成功；生产拉取和保存的最坏时长仍未证明 | 发送、接收、活动剪贴板关闭、离线恢复及 iOS 阻塞读写真机测试 |
 | 历史维护 | `crates/uc-application/src/clipboard/history/maintenance_runtime.rs` | Application 拥有；当前动作完整结算，后续动作在停止边界退出 | 核对和清理单轮最坏时长未证明 | history maintenance 生命周期测试 |
@@ -987,6 +987,14 @@ impl RuntimeLifecycleCoordinator {
 - iOS 26.3 模拟器中，暂停在 1995 毫秒完成，恢复在 50 毫秒完成；旧通知产生 0 条历史，新动作产生 1 条。Android 16 模拟器中，暂停在 24 毫秒完成，恢复在 27 毫秒完成；旧通知同样产生 0 条历史，新动作产生 1 条。
 - 完成标准：两端必须使用实际安装的专用宿主运行同一场景；暂停期间发出的旧通知在恢复后等待一秒仍不能出现，新动作必须仍可保存。iOS 结果额外保留请求编号，防止读取旧文件。
 - 验证：共享宿主 26 项单元测试和 13 项边界测试通过；iOS 与 Android 模拟器均完成重新构建、覆盖安装和场景运行。该结果补充剪贴板旧回调的软件行为证据，不替代实体设备、网络回调、计时器或所有数据库事务的联合验收。
+
+### 2026-09-13：暂停淘汰旧缓存清理计时批次
+
+- 已确认缓存清理计时器在暂停期间到点时会等待活动门重新开放，并在恢复后执行旧批次。该行为可能在宿主已经确认暂停后保留一次延迟磁盘访问。
+- 本地后台活动现在为计时工作发放当前运行周期凭据。暂停会推进周期；暂停前尚未到点、或暂停期间到点的清理批次均不能进入恢复后的新周期。已经取得磁盘许可的清理仍由暂停等待其完整结束，普通内容物化工作继续保留并在恢复后处理。
+- 完成标准：暂停前登记的计时批次在暂停并恢复后失效；暂停期间取得的批次立即丢弃；恢复后新登记的批次可正常执行。不能通过中断已开始的磁盘动作换取提前完成。
+- 验证：本地后台活动 3 项专项测试通过，包括当前磁盘动作排空、旧计时批次失效及暂停期间计时批次丢弃。完整 Infra 回归与仓库检查在本片提交前执行。单次目录扫描最坏时长仍按设备验收追踪。
+
 
 # 7. Edge Cases
 

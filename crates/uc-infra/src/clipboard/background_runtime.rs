@@ -159,10 +159,13 @@ impl ClipboardBackgroundPort for ClipboardBackgroundRuntime {
             .spawn(|cancel| async move {
                 let mut interval = tokio::time::interval(SPOOL_JANITOR_INTERVAL);
                 loop {
+                    let ticket = activity.timer_ticket();
                     tokio::select! {
                         _ = cancel.cancelled() => return,
                         _ = interval.tick() => {
-                            let _permit = activity.enter().await;
+                            let Some(_permit) = activity.enter_timer(ticket).await else {
+                                continue;
+                            };
                             match janitor.run_once().await {
                             Ok(removed) if removed > 0 => info!(removed, "removed expired spool entries"),
                             Ok(_) => {}
