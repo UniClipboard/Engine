@@ -21,6 +21,7 @@ impl StartupState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StartupUpgradeStep {
+    BackingUp,
     Checking,
     ConvertingContents,
     ConvertingLargeContents,
@@ -62,6 +63,7 @@ pub struct StartupUpgradeProgress {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StartupFailureReason {
+    BackupFailed,
     StorageFull,
     PermissionDenied,
     StorageUnavailable,
