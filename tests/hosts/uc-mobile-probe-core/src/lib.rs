@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use serde::Deserialize;
@@ -94,7 +94,10 @@ enum ProbeCommand {
     ResendEntry {
         entry_id: String,
     },
-    Suspend,
+    Suspend {
+        #[serde(default)]
+        deadline_ms: Option<u64>,
+    },
     Resume,
     EventSummary,
     Shutdown,
@@ -561,16 +564,27 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
             )
             .await
         }
-        ProbeCommand::Suspend => match state.engine.as_ref() {
+        ProbeCommand::Suspend { deadline_ms } => match state.engine.as_ref() {
             Some(engine) => {
-                let result = engine.suspend().await;
+                let started_at = Instant::now();
+                let result = match deadline_ms {
+                    Some(deadline_ms) => {
+                        engine
+                            .suspend_with_deadline(Duration::from_millis(deadline_ms))
+                            .await
+                    }
+                    None => engine.suspend().await,
+                };
                 flush_observability_after_success(state.observability.as_ref(), &result);
-                lifecycle_response(result, "suspended")
+                lifecycle_response(result, "suspended", started_at.elapsed())
             }
             None => probe_error("not_started"),
         },
         ProbeCommand::Resume => match state.engine.as_ref() {
-            Some(engine) => lifecycle_response(engine.resume().await, "resumed"),
+            Some(engine) => {
+                let started_at = Instant::now();
+                lifecycle_response(engine.resume().await, "resumed", started_at.elapsed())
+            }
             None => probe_error("not_started"),
         },
         ProbeCommand::EventSummary => {
@@ -592,9 +606,10 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
         }
         ProbeCommand::Shutdown => match state.engine.take() {
             Some(engine) => {
+                let started_at = Instant::now();
                 let result = engine.shutdown(Duration::from_secs(15)).await;
                 flush_observability_after_success(state.observability.as_ref(), &result);
-                lifecycle_response(result, "shutdown")
+                lifecycle_response(result, "shutdown", started_at.elapsed())
             }
             None => probe_error("not_started"),
         },
@@ -1460,11 +1475,15 @@ fn mobile_sync_apply_outcome(
     }
 }
 
-fn lifecycle_response(result: Result<(), EngineError>, kind: &str) -> Value {
-    match result {
+fn lifecycle_response(result: Result<(), EngineError>, kind: &str, elapsed: Duration) -> Value {
+    let mut response = match result {
         Ok(()) => json!({"ok": true, "kind": kind}),
         Err(error) => engine_error(error),
+    };
+    if let Some(response) = response.as_object_mut() {
+        response.insert("elapsed_ms".to_owned(), json!(elapsed.as_millis()));
     }
+    response
 }
 
 #[allow(unreachable_patterns)]
@@ -1592,6 +1611,15 @@ fn string_to_c_string(value: String) -> *mut c_char {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifecycle_response_reports_host_visible_elapsed_time() {
+        let response = lifecycle_response(Ok(()), "suspended", Duration::from_millis(37));
+
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["kind"], "suspended");
+        assert_eq!(response["elapsed_ms"], 37);
+    }
 
     #[tokio::test]
     async fn query_active_clipboard_command_reaches_the_engine_boundary() {

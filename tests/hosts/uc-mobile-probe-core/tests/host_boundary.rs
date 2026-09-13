@@ -84,6 +84,21 @@ fn ios_simulator_commands_publish_pollable_redacted_evidence() {
 }
 
 #[test]
+fn ios_device_commands_publish_pollable_timing_evidence() {
+    let root = workspace_root();
+    let model = read(root.join("tests/hosts/ios/EngineProbe/ProbeModel.swift"));
+    let command = read(root.join("tests/hosts/ios/probe-command-device.sh"));
+    let probe = read(root.join("tests/hosts/uc-mobile-probe-core/src/lib.rs"));
+
+    assert!(command.contains("devicectl device process launch"));
+    assert!(command.contains("devicectl device copy from"));
+    assert!(command.contains("request_id"));
+    assert!(model.contains("\"elapsed_ms\""));
+    assert!(probe.contains("deadline_ms: Option<u64>"));
+    assert!(probe.contains("started_at.elapsed()"));
+}
+
+#[test]
 fn android_probe_scripts_require_an_explicit_emulator() {
     let root = workspace_root();
     let command = read(root.join("tests/hosts/android/probe-command.sh"));
