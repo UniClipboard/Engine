@@ -536,6 +536,42 @@ async fn recovery_only_dispatches_the_recovered_devices_unreachable_local_entry(
 }
 
 #[tokio::test]
+async fn recovery_dispatches_an_attempt_left_pending_by_process_exit() {
+    let pending_entry = entry("pending-entry", "local-event");
+    let target = DeviceId::new("recovered");
+    let deliveries = Arc::new(Deliveries {
+        records: Mutex::new(HashMap::from([(
+            pending_entry.entry_id.clone(),
+            vec![EntryDeliveryRecord {
+                entry_id: pending_entry.entry_id.clone(),
+                target_device_id: target,
+                status: EntryDeliveryStatus::Pending,
+                reason_detail: None,
+                updated_at_ms: 1,
+            }],
+        )])),
+    });
+    let delivery = Arc::new(RecordingDispatch {
+        commands: Mutex::new(Vec::new()),
+        result: DispatchResult::Delivered,
+    });
+    let deps = recovery_deps(
+        true,
+        vec![pending_entry.clone()],
+        HashMap::from([(pending_entry.event_id.clone(), DeviceId::new("local"))]),
+        deliveries,
+        Arc::clone(&delivery),
+    );
+
+    recover_for_target(&deps, target, &CancellationToken::new()).await;
+
+    assert_eq!(
+        delivery.commands.lock().unwrap().as_slice(),
+        &[(pending_entry.entry_id, vec![target])]
+    );
+}
+
+#[tokio::test]
 async fn recovery_only_dispatches_the_newest_unreachable_entry_for_a_device() {
     let newest_entry = entry("newest-entry", "newest-event");
     let older_entry = entry("older-entry", "older-event");

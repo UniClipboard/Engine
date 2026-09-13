@@ -105,7 +105,7 @@ impl ClipboardSyncRuntime {
                 per_target.iter().map(|target| target.device_id).collect();
             targets.extend(pending_targets.iter().copied());
             self.recovery
-                .supersede_older_unreachable_entries(&entry_id, &targets)
+                .supersede_older_recoverable_entries(&entry_id, &targets)
                 .await;
         }
         Ok(outcome)

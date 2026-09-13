@@ -251,12 +251,17 @@ impl GetEntryDeliveryViewUseCase {
             let target_name = name_index.get(&target_id).cloned();
             match delivery_index.get(target_id.as_str()) {
                 Some(rec) => {
+                    let updated_at_ms = if matches!(rec.status, DomainDeliveryStatus::Pending) {
+                        None
+                    } else {
+                        Some(rec.updated_at_ms)
+                    };
                     target_views.push(EntryDeliveryTargetView {
                         target_device_id: target_id,
                         target_device_name: target_name,
                         status: map_status(&rec.status),
                         reason_detail: rec.reason_detail.clone(),
-                        updated_at_ms: Some(rec.updated_at_ms),
+                        updated_at_ms,
                     });
                 }
                 None => {
@@ -300,6 +305,7 @@ impl GetEntryDeliveryViewUseCase {
 
 fn map_status(status: &DomainDeliveryStatus) -> EntryDeliveryStatusView {
     match status {
+        DomainDeliveryStatus::Pending => EntryDeliveryStatusView::Pending,
         DomainDeliveryStatus::Delivered => EntryDeliveryStatusView::Delivered,
         DomainDeliveryStatus::Duplicate => EntryDeliveryStatusView::Duplicate,
         DomainDeliveryStatus::Unreachable => EntryDeliveryStatusView::Unreachable,
@@ -325,6 +331,14 @@ mod tests {
     use uc_core::trusted_peer::{TrustedPeer, TrustedPeerError};
     use uc_core::ObservedClipboardRepresentation;
     use uc_core::{MemberSyncPreferences, MembershipError, SpaceMember};
+
+    #[test]
+    fn persisted_pending_intent_keeps_the_pending_public_state() {
+        assert_eq!(
+            map_status(&DomainDeliveryStatus::Pending),
+            EntryDeliveryStatusView::Pending
+        );
+    }
 
     // ── 测试 doubles ───────────────────────────────────────────────────
 

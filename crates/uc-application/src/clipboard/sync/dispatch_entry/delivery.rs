@@ -15,7 +15,7 @@ use tokio::task::{JoinError, JoinSet};
 use tracing::{debug, info, warn, Instrument};
 
 use uc_core::clipboard::{DeliveryFailureReason, EntryDeliveryRecord, EntryDeliveryStatus};
-use uc_core::ids::EntryId;
+use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::{ClipboardDispatchError, ClockPort, DispatchAck, EntryDeliveryRepositoryPort};
 use uc_observability_contract::diagnostics::{DiagnosticTaskKind, ObservationContext};
 
@@ -178,6 +178,23 @@ pub(crate) struct DeliveryRecorder {
 }
 
 impl DeliveryRecorder {
+    pub(super) async fn record_pending(
+        &self,
+        entry_id: &EntryId,
+        target_device_id: DeviceId,
+        now_ms: i64,
+    ) -> Result<(), uc_core::clipboard::EntryDeliveryError> {
+        self.entry_delivery_repo
+            .record_attempt(&EntryDeliveryRecord {
+                entry_id: entry_id.clone(),
+                target_device_id,
+                status: EntryDeliveryStatus::Pending,
+                reason_detail: None,
+                updated_at_ms: now_ms,
+            })
+            .await
+    }
+
     pub(super) async fn flush_owned(
         self: &Arc<Self>,
         work: OwnedWork,

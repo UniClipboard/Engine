@@ -56,6 +56,7 @@ impl<E: DbExecutor + 'static> DieselEntryDeliveryRepository<E> {
 mod status_codec {
     use super::*;
 
+    pub const PENDING: &str = "pending";
     pub const DELIVERED: &str = "delivered";
     pub const DUPLICATE: &str = "duplicate";
     pub const UNREACHABLE: &str = "unreachable";
@@ -71,6 +72,7 @@ mod status_codec {
 
     pub fn encode(status: &EntryDeliveryStatus) -> &'static str {
         match status {
+            EntryDeliveryStatus::Pending => PENDING,
             EntryDeliveryStatus::Delivered => DELIVERED,
             EntryDeliveryStatus::Duplicate => DUPLICATE,
             EntryDeliveryStatus::Unreachable => UNREACHABLE,
@@ -87,6 +89,7 @@ mod status_codec {
 
     pub fn decode(raw: &str) -> Result<EntryDeliveryStatus, EntryDeliveryError> {
         match raw {
+            PENDING => Ok(EntryDeliveryStatus::Pending),
             DELIVERED => Ok(EntryDeliveryStatus::Delivered),
             DUPLICATE => Ok(EntryDeliveryStatus::Duplicate),
             UNREACHABLE | LEGACY_FAILED_OFFLINE => Ok(EntryDeliveryStatus::Unreachable),
@@ -398,6 +401,16 @@ mod tests {
     }
 
     #[test]
+    fn pending_delivery_round_trips() {
+        let encoded = status_codec::encode(&EntryDeliveryStatus::Pending);
+        assert_eq!(encoded, "pending");
+        assert_eq!(
+            status_codec::decode(encoded).unwrap(),
+            EntryDeliveryStatus::Pending
+        );
+    }
+
+    #[test]
     fn superseded_delivery_round_trips() {
         let encoded = status_codec::encode(&EntryDeliveryStatus::Superseded);
         assert_eq!(encoded, "superseded");
@@ -442,7 +455,7 @@ mod tests {
         repo.record_attempt(&make_record(
             "entry-1",
             "peer-A",
-            EntryDeliveryStatus::Delivered,
+            EntryDeliveryStatus::Pending,
         ))
         .await
         .unwrap();

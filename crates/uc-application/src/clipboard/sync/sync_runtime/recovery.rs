@@ -24,7 +24,11 @@ mod tests;
 const RECOVERY_PAGE_SIZE: usize = 256;
 
 fn is_recovery_eligible(record: &EntryDeliveryRecord, target: &DeviceId) -> bool {
-    record.target_device_id == *target && matches!(record.status, EntryDeliveryStatus::Unreachable)
+    record.target_device_id == *target
+        && matches!(
+            record.status,
+            EntryDeliveryStatus::Pending | EntryDeliveryStatus::Unreachable
+        )
 }
 
 #[async_trait]
@@ -100,13 +104,13 @@ impl OfflineDeliveryRecovery {
         }
     }
 
-    pub(super) async fn supersede_older_unreachable_entries(
+    pub(super) async fn supersede_older_recoverable_entries(
         &self,
         entry_id: &EntryId,
         targets: &[DeviceId],
     ) {
         for target in targets {
-            if !supersede_older_unreachable_entries(&self.deps, entry_id, target).await {
+            if !supersede_older_recoverable_entries(&self.deps, entry_id, target).await {
                 warn!(
                     entry_id = %entry_id,
                     "clipboard delivery recovery: unable to replace older offline content"
@@ -247,14 +251,19 @@ async fn recover_for_target(
                 continue;
             };
             // 旧内容失效是一项完整动作，必须完成后才处理停止，避免重启后补发旧内容。
-            if !supersede_older_unreachable_entries(deps, &entry.entry_id, &target).await {
+            if !supersede_older_recoverable_entries(deps, &entry.entry_id, &target).await {
                 warn!(
                     entry_id = %entry.entry_id,
                     "clipboard delivery recovery: unable to replace older offline content"
                 );
                 return;
             }
-            if cancel.is_cancelled() || !matches!(record.status, EntryDeliveryStatus::Unreachable) {
+            if cancel.is_cancelled()
+                || !matches!(
+                    record.status,
+                    EntryDeliveryStatus::Pending | EntryDeliveryStatus::Unreachable
+                )
+            {
                 return;
             }
             if !automatic_sync_enabled(deps.settings.as_ref()).await || cancel.is_cancelled() {
@@ -294,7 +303,7 @@ async fn recover_for_target(
 
 /// 仅保留当前条目向目标自动发送的资格。
 /// 列表按新到旧排列，当前条目之后的旧内容不再允许自动发送。
-async fn supersede_older_unreachable_entries(
+async fn supersede_older_recoverable_entries(
     deps: &OfflineDeliveryRecoveryDeps,
     entry_id: &EntryId,
     target: &DeviceId,

@@ -6,9 +6,9 @@
 //! 及其结果"提升为可被查询的领域事实,让上层可以基于"已成功送达哪些设备
 //! 与失败原因"做展示、追踪和未来的重传决策。
 //!
-//! 本模块只关心**已发生**的投递尝试。`Pending`(还没尝试)不是一个会被
-//! 持久化的事实,而是"已知 trusted peer 集合减去已尝试过的目标集合"的差集,
-//! 由应用层在拼装视图时合成,不在本模块定义。
+//! 本模块只关心已经被发送负责人接受的投递。`Pending` 表示发送开始前已
+//! 持久确认、但尚无最终结果；从未接受的目标仍由应用层通过当前成员集合
+//! 与已有记录的差集合成，不写入本模块。
 
 use crate::ids::{DeviceId, EntryId};
 use anyhow::Error as SourceError;
@@ -23,6 +23,8 @@ use thiserror::Error;
 /// 恢复;`Failed` 携带细分原因,代表需要关注或干预的真正失败。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntryDeliveryStatus {
+    /// 发送负责人已经持久接受该目标，但尚未得到最终结果。进程中断后可据此恢复。
+    Pending,
     /// 对端节点接收了 bytes(adapter 层 ack)。
     Delivered,
     /// 对端节点报告"已存在",通常因为对端从另一路径已收到同一内容。
