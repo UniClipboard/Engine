@@ -59,6 +59,7 @@ async fn run_recovery_cycle(
                     .send(NetworkRecoveryEvent::RetryScheduled { delay });
             }
             tokio::select! {
+                biased;
                 _ = inner.cancel.cancelled() => return Err(NetworkRecoveryRequestError::Stopped),
                 _ = inner.manual_wake.notified() => {}
                 _ = tokio::time::sleep(delay) => {}

@@ -174,6 +174,24 @@ async fn worker_panic_is_retained_for_requests_and_repeated_shutdown() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn final_stop_wins_over_a_ready_manual_retry() {
+    let port = Arc::new(RecordingRebuilder::new([Err(retryable_failure()), Ok(())]));
+    let recovery = NetworkRecoveryFacade::new(port.clone());
+    let (result, _) = recovery.start_recovery(None).await.unwrap();
+    tokio::task::yield_now().await;
+    assert_eq!(
+        recovery.status().await.phase,
+        NetworkRecoveryPhase::RetryScheduled
+    );
+
+    recovery.inner.cancel.cancel();
+    recovery.inner.manual_wake.notify_one();
+
+    assert_eq!(result.await, Err(NetworkRecoveryRequestError::Stopped));
+    assert_eq!(port.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
 async fn releasing_the_last_facade_stops_scheduled_retries() {
     let port = Arc::new(RecordingRebuilder::new([Err(retryable_failure()), Ok(())]));
     let recovery = NetworkRecoveryFacade::new(port.clone());
