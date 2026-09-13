@@ -92,6 +92,24 @@ pub(super) async fn shutdown(
     LifecycleError::from_errors(outcome.errors).map_err(lifecycle_error)
 }
 
+pub(super) async fn shutdown_failed_start(
+    network_recovery: &uc_application::facade::NetworkRecoveryFacade,
+    runtime: &ProfileRuntimeStopper,
+) -> Result<(), LifecycleError> {
+    let outcome = stop_runtime_resource_users(
+        async {
+            network_recovery
+                .shutdown()
+                .await
+                .map_err(anyhow::Error::new)
+        },
+        runtime,
+        None,
+    )
+    .await;
+    LifecycleError::from_errors(outcome.errors)
+}
+
 async fn stop_runtime_resource_users<Recovery>(
     stop_network_recovery: Recovery,
     actions: &dyn ShutdownActions,
@@ -344,6 +362,28 @@ mod tests {
         assert_eq!(
             *actions.calls.lock().unwrap(),
             vec!["session", "tasks", "transfers", "resources"]
+        );
+    }
+
+    #[tokio::test]
+    async fn network_recovery_failure_keeps_local_resources_open() {
+        let actions = RecordingActions {
+            calls: Mutex::new(Vec::new()),
+            fail_session: false,
+            fail_transfers: false,
+            fail_tasks: false,
+        };
+        let outcome = stop_runtime_resource_users(
+            async { Err(anyhow::anyhow!("recovery stop failed")) },
+            &actions,
+            None,
+        )
+        .await;
+
+        assert_eq!(outcome.errors.len(), 1);
+        assert_eq!(
+            *actions.calls.lock().unwrap(),
+            vec!["session", "transfers", "tasks"]
         );
     }
 

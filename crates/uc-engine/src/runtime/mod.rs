@@ -171,15 +171,16 @@ impl ProductionRuntime {
         let session_supervisor =
             SessionSupervisor::new(wired.application.clone(), Arc::clone(&security_lifecycle));
         let task_registry = Arc::new(TaskRegistry::new());
-        let profile_runtime: Arc<dyn uc_application::deps::StopProfileRuntimePort> =
-            Arc::new(shutdown::ProfileRuntimeStopper::new(
-                Arc::clone(&security_lifecycle),
-                Arc::clone(&session_supervisor),
-                Arc::clone(&task_registry),
-            ));
+        let profile_runtime = Arc::new(shutdown::ProfileRuntimeStopper::new(
+            Arc::clone(&security_lifecycle),
+            Arc::clone(&session_supervisor),
+            Arc::clone(&task_registry),
+        ));
+        let profile_runtime_port: Arc<dyn uc_application::deps::StopProfileRuntimePort> =
+            profile_runtime.clone();
         let profile_reset = Arc::new(ProfileFactoryResetFacade::new(
             Arc::clone(&wired.profile_reset.lifecycle_repository),
-            Arc::clone(&profile_runtime),
+            profile_runtime_port,
             Arc::clone(&wired.profile_reset.keys),
             Arc::clone(&wired.profile_reset.state),
         ));
@@ -224,17 +225,12 @@ impl ProductionRuntime {
         }
         .await;
         if let Err(primary) = started {
-            let mut additional = Vec::new();
-            if let Err(error) = network_recovery.shutdown().await {
-                additional.push(error.into());
-            }
-            if let Err(rollback) = profile_runtime.stop_profile_runtime().await {
-                additional.push(rollback.into());
-            }
-            if !additional.is_empty() {
+            if let Err(rollback) =
+                shutdown::shutdown_failed_start(&network_recovery, &profile_runtime).await
+            {
                 return Err(lifecycle_error(LifecycleError {
                     primary: primary.into(),
-                    additional,
+                    additional: vec![rollback.into()],
                 }));
             }
             return Err(primary);
