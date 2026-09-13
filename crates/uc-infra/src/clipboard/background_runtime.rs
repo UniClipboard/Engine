@@ -141,10 +141,10 @@ impl ClipboardBackgroundPort for ClipboardBackgroundRuntime {
         let activity = Arc::clone(&self.activity);
         let _ = task_registry
             .spawn(|cancel| async move {
-                tokio::select! {
-                    _ = cancel.cancelled() => info!("background clipboard blob worker stopped"),
-                    _ = worker.run_with_activity(activity) => info!("background clipboard blob worker completed"),
-                }
+                worker
+                    .run_until_cancelled(activity, cancel.cancelled_owned())
+                    .await;
+                info!("background clipboard blob worker stopped");
             })
             .await;
 

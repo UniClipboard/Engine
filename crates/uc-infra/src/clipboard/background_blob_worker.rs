@@ -1,6 +1,7 @@
 //! Background worker to materialize blobs from staged representations.
 //! 从暂存表示中异步生成 blob 的后台工作者。
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -123,9 +124,33 @@ impl BackgroundBlobWorker {
             .await;
     }
 
-    pub(super) async fn run_with_activity(mut self, activity: Arc<BackgroundActivity>) {
-        while let Some(rep_id) = self.worker_rx.recv().await {
-            let _permit = activity.enter().await;
+    pub(super) async fn run_with_activity(self, activity: Arc<BackgroundActivity>) {
+        self.run_until_cancelled(activity, std::future::pending())
+            .await;
+    }
+
+    pub(super) async fn run_until_cancelled<Cancellation>(
+        mut self,
+        activity: Arc<BackgroundActivity>,
+        cancellation: Cancellation,
+    ) where
+        Cancellation: Future<Output = ()> + Send,
+    {
+        tokio::pin!(cancellation);
+        loop {
+            let rep_id = tokio::select! {
+                biased;
+                _ = &mut cancellation => return,
+                rep_id = self.worker_rx.recv() => match rep_id {
+                    Some(rep_id) => rep_id,
+                    None => return,
+                },
+            };
+            let _permit = tokio::select! {
+                biased;
+                _ = &mut cancellation => return,
+                permit = activity.enter() => permit,
+            };
             let span = info_span!(
                 "infra.background_blob_worker",
                 representation_id = %rep_id,
@@ -518,6 +543,7 @@ mod tests {
     use crate::clipboard::testing::{ScriptedRepRepo, ScriptedReturn};
     use crate::security::Blake3Hasher;
     use async_trait::async_trait;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::TempDir;
     use uc_core::clipboard::PersistedClipboardRepresentation;
     use uc_core::ids::FormatId;
@@ -532,6 +558,30 @@ mod tests {
             _content_id: &ContentHash,
             _bytes: &[u8],
         ) -> anyhow::Result<BlobId> {
+            Ok(BlobId::from("blob-x"))
+        }
+
+        async fn write_path_if_absent(&self, _path: &std::path::Path) -> anyhow::Result<BlobId> {
+            unimplemented!("worker only uses write_if_absent")
+        }
+    }
+
+    struct BlockingBlobWriter {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        completed: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl BlobWriterPort for BlockingBlobWriter {
+        async fn write_if_absent(
+            &self,
+            _content_id: &ContentHash,
+            _bytes: &[u8],
+        ) -> anyhow::Result<BlobId> {
+            self.started.notify_one();
+            self.release.notified().await;
+            self.completed.store(true, Ordering::SeqCst);
             Ok(BlobId::from("blob-x"))
         }
 
@@ -586,6 +636,70 @@ mod tests {
             Some(MimeType("text/plain".to_string())),
             10,
         )
+    }
+
+    #[tokio::test]
+    async fn final_stop_waits_for_started_materialization_and_skips_queued_work() {
+        let dir = TempDir::new().expect("tempdir");
+        let cache = Arc::new(RepresentationCache::new(16, 1024 * 1024));
+        let spool = Arc::new(SpoolManager::new(dir.path(), 1024 * 1024).expect("spool"));
+        let (tx, rx) = mpsc::channel(8);
+        let first = RepresentationId::from("rep-1");
+        let queued = RepresentationId::from("rep-2");
+        cache.put(&first, b"clipboard-bytes".to_vec()).await;
+        cache.put(&queued, b"queued-bytes".to_vec()).await;
+
+        let repo = Arc::new(ScriptedRepRepo::new());
+        repo.push_update_outcome(ScriptedReturn::Ok(ProcessingUpdateOutcome::Updated(
+            text_rep(&first),
+        )));
+        repo.push_update_outcome(ScriptedReturn::Ok(ProcessingUpdateOutcome::Updated(
+            text_rep(&first),
+        )));
+        repo.set_representation(text_rep(&first));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let completed = Arc::new(AtomicBool::new(false));
+        let worker = BackgroundBlobWorker::new(
+            rx,
+            cache.clone(),
+            spool,
+            repo,
+            Arc::new(BlockingBlobWriter {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+                completed: Arc::clone(&completed),
+            }),
+            Arc::new(Blake3Hasher),
+            Arc::new(UnusedThumbnailRepo),
+            Arc::new(UnusedThumbnailGenerator),
+            Arc::new(FixedClock),
+            3,
+            Duration::from_millis(1),
+        );
+        let (cancel, cancellation) = tokio::sync::oneshot::channel();
+        let running = tokio::spawn(async move {
+            worker
+                .run_until_cancelled(Arc::new(BackgroundActivity::new()), async move {
+                    let _ = cancellation.await;
+                })
+                .await
+        });
+
+        tx.send(first.clone()).await.expect("send first");
+        tx.send(queued.clone()).await.expect("send queued");
+        started.notified().await;
+        let _ = cancel.send(());
+        tokio::task::yield_now().await;
+        assert!(!running.is_finished());
+        assert!(!completed.load(Ordering::SeqCst));
+
+        release.notify_one();
+        running.await.unwrap();
+
+        assert!(completed.load(Ordering::SeqCst));
+        assert!(cache.get(&first).await.is_none());
+        assert!(cache.get(&queued).await.is_some());
     }
 
     /// Regression: once the worker materializes a blob, the in-memory
