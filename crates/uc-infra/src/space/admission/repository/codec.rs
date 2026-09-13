@@ -126,11 +126,6 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         observe_local_sync_result(LocalWorkStep::RepositorySave, || {
             conn.transaction::<_, SpaceAdmissionStateStoreError, _>(|conn| {
                 self.persist_v3_state_on(conn, state)?;
-                let reopened =
-                    self.load_v3_state_on(conn, PersistedSpaceAdmissionMetadataV3::from(state))?;
-                if reopened != *state {
-                    return Err(SpaceAdmissionStateStoreError::Corrupt);
-                }
                 self.clear_read_cache();
                 Ok(())
             })
@@ -312,6 +307,12 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
     ) -> Result<(), SpaceAdmissionStateStoreError> {
         if state.format_version != SPACE_ADMISSION_REPOSITORY_FORMAT_V2
             || state.profile_generation != self.keys.profile_generation()
+            || state
+                .current_local_join_id
+                .is_some_and(|id| !state.records.contains_key(&id))
+            || state
+                .latest_local_join_id
+                .is_some_and(|id| !state.records.contains_key(&id))
         {
             return Err(SpaceAdmissionStateStoreError::Corrupt);
         }

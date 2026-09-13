@@ -69,6 +69,12 @@ struct CountRow {
     count: i64,
 }
 
+#[derive(QueryableByName)]
+struct PayloadRow {
+    #[diesel(sql_type = Binary)]
+    encrypted_payload: Vec<u8>,
+}
+
 impl Fixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
@@ -138,6 +144,39 @@ async fn activation_query_migrates_legacy_state_and_ignores_unrelated_record_pay
         .await
         .unwrap();
     assert!(loaded.is_none());
+}
+
+#[test]
+fn metadata_only_save_keeps_unchanged_record_ciphertext() {
+    let mut fixture = Fixture::new();
+    let mut state = PersistedSpaceAdmissionRepositoryV2::fresh([0x31; 16]);
+    state.records.insert(
+        [0x41; 32],
+        StoredSpaceAdmissionV1 {
+            wrapped_data_key: fixture.keys.create_wrapped_attempt_key([0x41; 32]).unwrap(),
+            encrypted_payload: vec![0x51; 1024 * 1024].into(),
+        },
+    );
+    fixture
+        .repository
+        .save_state_on(&mut fixture.connection, &state)
+        .unwrap();
+    let before = sql_query("SELECT encrypted_payload FROM admission_repository_record")
+        .get_result::<PayloadRow>(&mut fixture.connection)
+        .unwrap()
+        .encrypted_payload;
+
+    state.next_local_join_ordinal = 1;
+    fixture
+        .repository
+        .save_state_on(&mut fixture.connection, &state)
+        .unwrap();
+    let after = sql_query("SELECT encrypted_payload FROM admission_repository_record")
+        .get_result::<PayloadRow>(&mut fixture.connection)
+        .unwrap()
+        .encrypted_payload;
+
+    assert_eq!(after, before);
 }
 
 #[test]
