@@ -157,11 +157,7 @@ async fn recover_currently_online(deps: &OfflineDeliveryRecoveryDeps, cancel: &C
         if cancel.is_cancelled() {
             return;
         }
-        if deps
-            .peer_reachability
-            .current_state(&peer.device_id)
-            .await
-            == ReachabilityState::Online
+        if deps.peer_reachability.current_state(&peer.device_id).await == ReachabilityState::Online
         {
             recover_online_target(deps, peer.device_id, cancel).await;
         }

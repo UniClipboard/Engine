@@ -17,9 +17,7 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
-use uc_application::deps::{
-    ProfileFactoryResetCapabilityError, ProfileUpgradeBackupPort, StopProfileRuntimePort,
-};
+use uc_application::deps::ProfileUpgradeBackupPort;
 use uc_application::facade::{
     AppFacade, ApplicationRuntime, LifecycleError, NetworkRecoveryEvent, ProfileFactoryResetFacade,
     ProfileFactoryResetOutcome, ProfileFactoryResetRequest,

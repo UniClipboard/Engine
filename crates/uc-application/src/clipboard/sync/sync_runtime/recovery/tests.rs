@@ -20,7 +20,7 @@ use crate::deps::{
 };
 use uc_core::clipboard::{ClipboardEntry, ClipboardRepositoryError};
 use uc_core::ids::{EntryId, EventId};
-use uc_core::ports::presence::{PeerReachabilityChanged, PresenceError};
+use uc_core::ports::peer_reachability::{PeerReachabilityChanged, PeerReachabilityError};
 use uc_core::settings::model::Settings;
 use uc_core::{ClipboardChangeOrigin, SystemClipboardSnapshot};
 
@@ -396,16 +396,16 @@ impl RecoveryDeliveryPort for RecordingDispatch {
     }
 }
 
-struct IdlePresence {
+struct IdlePeerReachability {
     tx: tokio::sync::broadcast::Sender<PeerReachabilityChanged>,
 }
 
 #[async_trait]
-impl PeerReachabilityPort for IdlePresence {
+impl PeerReachabilityPort for IdlePeerReachability {
     async fn ensure_reachable(
         &self,
         _device: &DeviceId,
-    ) -> Result<ReachabilityState, PresenceError> {
+    ) -> Result<ReachabilityState, PeerReachabilityError> {
         Ok(ReachabilityState::Unknown)
     }
 
@@ -477,7 +477,7 @@ fn recovery_deps(
 ) -> OfflineDeliveryRecoveryDeps {
     let (tx, _) = tokio::sync::broadcast::channel(1);
     OfflineDeliveryRecoveryDeps {
-        presence: Arc::new(IdlePresence { tx }),
+        peer_reachability: Arc::new(IdlePeerReachability { tx }),
         known_peers: Arc::new(NoPeers),
         member_scope: Arc::new(FixedMemberScope {
             usable: vec![DeviceId::new("target"), DeviceId::new("recovered")],

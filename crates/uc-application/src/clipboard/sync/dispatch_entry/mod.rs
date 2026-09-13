@@ -2240,7 +2240,7 @@ mod tests {
         let uc = DispatchClipboardEntryUseCase::new(
             Arc::new(repo),
             Arc::new(make_member_repo_all_enabled()),
-            Arc::new(StaticPresence(ReachabilityState::Unknown)),
+            Arc::new(StaticPeerReachability(ReachabilityState::Unknown)),
             Arc::new(cipher),
             Arc::new(dispatch),
             Arc::new(make_device_identity("self-device")),

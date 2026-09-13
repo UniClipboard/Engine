@@ -718,20 +718,6 @@ impl ClipboardInboundEventPort for EngineClipboardInboundEvents {
     }
 }
 
-fn recover_space_session_error_kind(
-    error: &uc_application::facade::RecoverSpaceSessionError,
-) -> &'static str {
-    use uc_application::facade::RecoverSpaceSessionError;
-
-    match error {
-        RecoverSpaceSessionError::CurrentSpace(_) => "current_space",
-        RecoverSpaceSessionError::KeyringMiss => "keyring_miss",
-        RecoverSpaceSessionError::CorruptedKeyMaterial => "corrupted_key_material",
-        RecoverSpaceSessionError::Activity(_) => "activity",
-        RecoverSpaceSessionError::Internal(_) => "internal",
-    }
-}
-
 impl SessionOperationGate {
     fn new_open() -> Self {
         Self {

@@ -141,7 +141,7 @@ async fn repeated_shutdown_waits_even_after_the_first_shutdown_caller_leaves() {
 async fn shutdown_before_a_queued_cycle_starts_does_not_begin_a_rebuild() {
     let port = Arc::new(RecordingRebuilder::new([]));
     let recovery = NetworkRecoveryFacade::new(port.clone());
-    let (request, _) = recovery.start_recovery(None).await.unwrap();
+    let (request, _) = recovery.start_recovery().await.unwrap();
     recovery.shutdown().await.unwrap();
     assert_eq!(request.await, Err(NetworkRecoveryRequestError::Stopped));
     assert_eq!(port.calls.load(Ordering::SeqCst), 0);
@@ -177,7 +177,7 @@ async fn worker_panic_is_retained_for_requests_and_repeated_shutdown() {
 async fn final_stop_wins_over_a_ready_manual_retry() {
     let port = Arc::new(RecordingRebuilder::new([Err(retryable_failure()), Ok(())]));
     let recovery = NetworkRecoveryFacade::new(port.clone());
-    let (result, _) = recovery.start_recovery(None).await.unwrap();
+    let (result, _) = recovery.start_recovery().await.unwrap();
     tokio::task::yield_now().await;
     assert_eq!(
         recovery.status().await.phase,
@@ -196,7 +196,7 @@ async fn releasing_the_last_facade_stops_scheduled_retries() {
     let port = Arc::new(RecordingRebuilder::new([Err(retryable_failure()), Ok(())]));
     let recovery = NetworkRecoveryFacade::new(port.clone());
     let mut events = recovery.subscribe();
-    let (result, _) = recovery.start_recovery(None).await.unwrap();
+    let (result, _) = recovery.start_recovery().await.unwrap();
     assert_eq!(events.recv().await.unwrap(), NetworkRecoveryEvent::Started);
     assert!(matches!(
         events.recv().await.unwrap(),
@@ -211,7 +211,7 @@ async fn releasing_the_last_facade_stops_scheduled_retries() {
 async fn a_rebuild_failure_during_shutdown_is_retained_for_repeated_confirmation() {
     let (port, release, recovery) = fixture();
     port.fail.store(true, Ordering::SeqCst);
-    let (request, _) = recovery.start_recovery(None).await.unwrap();
+    let (request, _) = recovery.start_recovery().await.unwrap();
     port.entered.notified().await;
     let mut closing = Box::pin(recovery.shutdown());
     let premature = timeout(Duration::from_millis(20), closing.as_mut()).await;
@@ -231,7 +231,7 @@ async fn a_rebuild_failure_during_shutdown_is_retained_for_repeated_confirmation
 async fn shutdown_queued_before_completion_suppresses_the_stale_success_event() {
     let (port, release, recovery) = fixture();
     let mut events = recovery.subscribe();
-    let (request, _) = recovery.start_recovery(None).await.unwrap();
+    let (request, _) = recovery.start_recovery().await.unwrap();
     port.entered.notified().await;
     let state = recovery.inner.state.lock().await;
     let mut closing = Box::pin(recovery.shutdown());

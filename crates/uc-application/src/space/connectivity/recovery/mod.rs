@@ -150,7 +150,9 @@ impl NetworkRecoveryFacade {
         }
     }
 
-    async fn start_recovery(&self) -> Result<(RecoveryCompletion, bool), NetworkRecoveryRequestError> {
+    async fn start_recovery(
+        &self,
+    ) -> Result<(RecoveryCompletion, bool), NetworkRecoveryRequestError> {
         let mut state = self.inner.state.lock().await;
         if state.phase == NetworkRecoveryPhase::Stopped || self.inner.cancel.is_cancelled() {
             return Err(NetworkRecoveryRequestError::Stopped);
@@ -159,7 +161,10 @@ impl NetworkRecoveryFacade {
             return Err(error);
         }
         if let Some(in_flight) = state.in_flight.clone() {
-            return Ok((in_flight, state.phase == NetworkRecoveryPhase::RetryScheduled));
+            return Ok((
+                in_flight,
+                state.phase == NetworkRecoveryPhase::RetryScheduled,
+            ));
         }
 
         state.phase = NetworkRecoveryPhase::Recovering;
