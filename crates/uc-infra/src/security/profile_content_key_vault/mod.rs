@@ -1,5 +1,6 @@
 mod catalog;
 mod key_store;
+mod lifecycle;
 mod model;
 mod operation;
 mod persistence;
@@ -46,54 +47,6 @@ impl ProfileContentKeyVault {
         }
     }
 
-    pub(crate) fn begin_read_reuse(
-        &self,
-    ) -> Result<ProfileKeyReadLease, ProfileContentKeyVaultError> {
-        ProfileKeyReadLease::begin(&self.reads)
-    }
-
-    pub(crate) fn close(&self) {
-        lock(&self.reads).close();
-    }
-
-    pub(crate) async fn suspend(&self) {
-        let _io = self.io_lock.lock().await;
-        lock(&self.reads).suspend();
-    }
-
-    pub(crate) fn resume(&self) -> Result<(), ProfileContentKeyVaultError> {
-        let mut state = lock(&self.reads);
-        if state.closed {
-            return Err(ProfileContentKeyVaultError::Closed);
-        }
-        if state.suspended {
-            state.lease = Some(Arc::new(self.persistence.acquire_lease()?));
-            state.suspended = false;
-        }
-        Ok(())
-    }
-
-    // 租约与 generation 在同一临界区捕获；清理后重建的运行期不得
-    // 接收持有旧租约的加载结果，否则可能出现有缓存却没有排他租约。
-    fn operation_lease(
-        &self,
-    ) -> Result<(Arc<std::fs::File>, Arc<()>), ProfileContentKeyVaultError> {
-        {
-            let state = lock(&self.reads);
-            state.check_open()?;
-            if let Some(file) = &state.lease {
-                return Ok((file.clone(), state.generation.clone()));
-            }
-        }
-        let file = Arc::new(self.persistence.acquire_lease()?);
-        let mut state = lock(&self.reads);
-        state.check_open()?;
-        if state.reusable {
-            state.lease = Some(file.clone());
-        }
-        Ok((file, state.generation.clone()))
-    }
-
     pub async fn install_verified_space_material(
         &self,
         material: &SpaceKeyMaterial,
@@ -108,7 +61,7 @@ impl ProfileContentKeyVault {
         material: &SpaceKeyMaterial,
     ) -> Result<InstalledProfileCatalog, ProfileContentKeyVaultError> {
         let _io = self.io_lock.lock().await;
-        let (_lease, generation) = self.operation_lease()?;
+        let (_lease, generation) = self.operation_lease().await?;
         let group = catalog::group_from_verified_material(material)?;
         let mut vault = self
             .persistence
@@ -156,7 +109,7 @@ impl ProfileContentKeyVault {
         read: impl FnOnce(&ReadView) -> Result<T, ProfileContentKeyVaultError>,
     ) -> Result<T, ProfileContentKeyVaultError> {
         let _io = self.io_lock.lock().await;
-        let (_lease, generation) = self.operation_lease()?;
+        let (_lease, generation) = self.operation_lease().await?;
         {
             let state = lock(&self.reads);
             if let Some(view) = &state.view {

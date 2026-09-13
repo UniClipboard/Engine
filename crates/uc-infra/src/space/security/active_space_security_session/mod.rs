@@ -140,8 +140,8 @@ impl ActiveSpaceSecuritySession {
         self.session.clear();
     }
 
-    pub(crate) fn resume(&self) -> Result<(), ProfileContentKeyVaultError> {
-        self.vault.resume()
+    pub(crate) async fn resume(&self) -> Result<(), ProfileContentKeyVaultError> {
+        self.vault.resume().await
     }
 }
 

@@ -122,7 +122,7 @@ impl RuntimeLifecyclePort for RuntimeSpaceAccessAdapter {
     }
 
     async fn resume(&self, _context: &TransitionContext) -> anyhow::Result<()> {
-        self.active_security_session.resume()?;
+        self.active_security_session.resume().await?;
         Ok(())
     }
 }

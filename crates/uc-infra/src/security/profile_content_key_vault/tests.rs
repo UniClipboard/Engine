@@ -12,6 +12,7 @@ use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use super::persistence::StoreProbe;
 use super::{ProfileContentKeyVault, ProfileContentKeyVaultError, PROFILE_CONTENT_VAULT_KEY_NAME};
 
+mod lease;
 mod secure_access;
 
 #[derive(Default)]
@@ -138,7 +139,7 @@ async fn suspension_releases_ownership_and_resume_reads_external_changes() {
         .install_verified_space_material(&second)
         .await
         .unwrap();
-    vault.resume().unwrap();
+    vault.resume().await.unwrap();
     let _new_lease = vault.begin_read_reuse().unwrap();
     drop(old_lease);
     let resolved = vault
@@ -156,7 +157,7 @@ async fn suspension_releases_ownership_and_resume_reads_external_changes() {
 
     vault.close();
     assert!(matches!(
-        vault.resume(),
+        vault.resume().await,
         Err(ProfileContentKeyVaultError::Closed)
     ));
     assert!(matches!(

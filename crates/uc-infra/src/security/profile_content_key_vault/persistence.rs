@@ -8,10 +8,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uc_core::ports::SecureStoragePort;
 use zeroize::Zeroizing;
 
+use crate::fs::file_lock::try_lock_exclusive;
+
 use super::super::crypto_model::EncryptedBlob;
 use super::super::{v1_aead, MasterKey};
 use super::model::{PersistedVault, ProfileContentKeyVaultError, MAX_VAULT_PLAINTEXT_BYTES};
 use super::{catalog, key_store};
+
+mod filesystem;
 
 const VAULT_FILE: &str = "profile-content-key-vault-v1.json";
 const VAULT_PURPOSE: &[u8] = b"uniclipboard/profile-content-key-vault/v1\0";
@@ -24,6 +28,14 @@ pub(super) struct VaultPersistence {
     profile_generation: [u8; 16],
     #[cfg(test)]
     pub(super) after_store: std::sync::Mutex<Option<StoreProbe>>,
+    #[cfg(test)]
+    pub(super) before_lease: std::sync::Mutex<Option<LeaseProbe>>,
+}
+
+#[cfg(test)]
+pub(super) struct LeaseProbe {
+    pub(super) entered: Arc<tokio::sync::Notify>,
+    pub(super) release: std::sync::mpsc::Receiver<()>,
 }
 
 #[cfg(test)]
@@ -47,6 +59,8 @@ impl VaultPersistence {
             profile_generation,
             #[cfg(test)]
             after_store: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            before_lease: std::sync::Mutex::new(None),
         }
     }
 
@@ -174,26 +188,36 @@ impl VaultPersistence {
     }
 
     // 运行期复用持有租约；临时读取和安装也遵守同一跨实例排他规则。
-    pub(super) fn acquire_lease(&self) -> Result<std::fs::File, ProfileContentKeyVaultError> {
-        let parent = self
-            .path
-            .parent()
-            .ok_or_else(|| storage_error(std::io::Error::other("vault parent is missing")))?;
-        std::fs::create_dir_all(parent).map_err(storage_error)?;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(parent.join("profile-content-key-vault.lease"))
-            .map_err(storage_error)?;
-        crate::fs::file_lock::try_lock_exclusive(&file).map_err(|source| {
-            ProfileContentKeyVaultError::Storage {
+    pub(super) async fn acquire_lease(&self) -> Result<std::fs::File, ProfileContentKeyVaultError> {
+        let path = self.path.clone();
+        #[cfg(test)]
+        let probe = self.before_lease.lock().unwrap().take();
+        filesystem::run(move || {
+            #[cfg(test)]
+            if let Some(probe) = probe {
+                probe.entered.notify_one();
+                let _ = probe
+                    .release
+                    .recv_timeout(std::time::Duration::from_secs(2));
+            }
+            let parent = path
+                .parent()
+                .ok_or_else(|| storage_error(std::io::Error::other("vault parent is missing")))?;
+            std::fs::create_dir_all(parent).map_err(storage_error)?;
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(parent.join("profile-content-key-vault.lease"))
+                .map_err(storage_error)?;
+            try_lock_exclusive(&file).map_err(|source| ProfileContentKeyVaultError::Storage {
                 source: anyhow::Error::new(source)
                     .context("acquire profile content vault ownership"),
-            }
-        })?;
-        Ok(file)
+            })?;
+            Ok(file)
+        })
+        .await
     }
 
     #[cfg(test)]
@@ -262,8 +286,14 @@ async fn write_atomically(
         file.write_all(ciphertext).await.map_err(storage_error)?;
         file.sync_all().await.map_err(storage_error)?;
         drop(file);
-        replace_file_atomically(&temporary, path).map_err(storage_error)?;
-        sync_parent_directory(parent).map_err(storage_error)
+        let source = temporary.clone();
+        let destination = path.to_path_buf();
+        let parent = parent.to_path_buf();
+        filesystem::run(move || {
+            replace_file_atomically(&source, &destination).map_err(storage_error)?;
+            sync_parent_directory(&parent).map_err(storage_error)
+        })
+        .await
     }
     .await;
     if result.is_err() {

@@ -137,7 +137,7 @@ async fn check_suspend_during_secure_storage(cancel_waiter: bool, cold_read: boo
     stopping.await;
     competing.try_lock().unwrap();
     drop(competing);
-    vault.resume().unwrap();
+    vault.resume().await.unwrap();
     assert_eq!(
         vault
             .resolve(
