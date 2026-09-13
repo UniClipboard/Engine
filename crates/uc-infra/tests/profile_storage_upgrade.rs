@@ -371,7 +371,11 @@ async fn runtime_upgrade_resumes_v2_only_after_the_lease_and_promotes_v3() {
             .unwrap();
         if unreadable {
             let mut ciphertext = std::fs::read(&path).unwrap();
-            *ciphertext.last_mut().unwrap() ^= 1;
+            if id.as_str() == "unreadable-orphan" {
+                ciphertext = b"malformed legacy payload".to_vec();
+            } else {
+                *ciphertext.last_mut().unwrap() ^= 1;
+            }
             std::fs::write(&path, &ciphertext).unwrap();
             preserved.push((id.clone(), ciphertext));
         }

@@ -13,6 +13,7 @@ use diesel::{Connection as _, RunQueryDsl as _};
 use uc_core::blob::ports::BlobReaderPort;
 use uc_core::crypto::aad;
 use uc_core::crypto::domain::{Aad, Ciphertext};
+use uc_core::crypto::model::EncryptionError;
 use uc_core::ids::{EventId, RepresentationId};
 use uc_core::ports::security::BlobCipherPort as _;
 use uc_core::BlobId;
@@ -298,9 +299,9 @@ impl PrimaryPayloadConverter {
                 std::fs::read(self.source_blob_root.join(blob_id.as_str())).map_err(io_storage)?;
             let plaintext = match source.open_bytes(&blob_id, &source_bytes) {
                 Ok(plaintext) => plaintext,
-                Err(source) if is_unreadable_ciphertext(&source) => {
-                    // 只保存原密文；不可用状态与 blob 行在同一候选数据库事务中提交。
-                    // 格式、会话、缺钥和介质失败仍向上传递，不能把它们猜成历史损坏。
+                Err(source) if !is_protection_unavailable(&source) => {
+                    // 文件已成功读取但内容无法解码时原样保留；不可用状态与 blob 行在
+                    // 同一候选数据库事务中提交。介质与保护材料失败仍向上传递。
                     let preserved = work_blob_root.join(blob_id.as_str());
                     std::fs::write(&preserved, &source_bytes).map_err(io_storage)?;
                     crate::fs::durability::sync_existing_file(&preserved).map_err(io_storage)?;
@@ -317,7 +318,11 @@ impl PrimaryPayloadConverter {
                     );
                     continue;
                 }
-                Err(source) => return Err(corrupt(source.context("open legacy UCBL payload"))),
+                Err(source) => {
+                    return Err(security(
+                        source.context("open protected legacy UCBL payload"),
+                    ))
+                }
             };
             drop(source_bytes);
             let (_, compressed_size) = target
@@ -400,12 +405,8 @@ impl PrimaryPayloadConverter {
             Arc::clone(&self.source_session),
         );
         match legacy.open_bytes(&blob_id, &preserved) {
-            Err(source) if is_unreadable_ciphertext(&source) => {}
-            Err(source) => {
-                return Err(corrupt(
-                    source.context("verify preserved legacy ciphertext"),
-                ))
-            }
+            Err(source) if !is_protection_unavailable(&source) => {}
+            Err(source) => return Err(security(source.context("verify protected legacy payload"))),
             Ok(_) => {
                 return Err(corrupt(anyhow::anyhow!(
                     "readable legacy ciphertext was not converted"
@@ -488,11 +489,10 @@ struct BlobRow {
     encryption_algo: Option<String>,
 }
 
-fn is_unreadable_ciphertext(source: &anyhow::Error) -> bool {
-    matches!(
-        source.downcast_ref::<crate::security::v1_aead::AeadError>(),
-        Some(crate::security::v1_aead::AeadError::DecryptFailed)
-    )
+fn is_protection_unavailable(source: &anyhow::Error) -> bool {
+    source
+        .chain()
+        .any(|cause| cause.downcast_ref::<EncryptionError>().is_some())
 }
 
 fn load_inline_rows(
@@ -682,6 +682,16 @@ mod tests {
                 .remove(key);
             Ok(())
         }
+    }
+
+    #[test]
+    fn protection_failures_are_not_treated_as_unreadable_history() {
+        let protection = anyhow::Error::new(EncryptionError::KeyNotFound)
+            .context("open protected legacy payload");
+        assert!(is_protection_unavailable(&protection));
+        assert!(!is_protection_unavailable(&anyhow::anyhow!(
+            "invalid legacy payload"
+        )));
     }
 
     #[tokio::test]
@@ -884,13 +894,12 @@ mod tests {
         }
         assert!(!target.paths(&journal).primary_output.exists());
         std::fs::write(&unreadable_source_path, b"unrecognized format").unwrap();
-        assert!(matches!(
-            converter
-                .convert(&journal, &target, &UpgradeProgress::new(None))
-                .await,
-            Err(ProfileStorageUpgradeError::Corrupt { .. })
-        ));
-        assert!(!target.paths(&journal).primary_output.exists());
+        let malformed = converter
+            .convert(&journal, &target, &UpgradeProgress::new(None))
+            .await
+            .unwrap();
+        assert_eq!(malformed.warning_count, 1);
+        std::fs::remove_dir_all(&target.paths(&journal).primary_output).unwrap();
         std::fs::write(&unreadable_source_path, &unreadable_source_bytes).unwrap();
 
         let progress = super::super::progress::UpgradeProgress::new(None);
