@@ -30,7 +30,7 @@ impl ProductionSession {
             errors.push(error.into());
         }
         info!("Engine session 网络观测任务已停止");
-        if let Err(error) = self.application.shutdown(deadline).await.into_result() {
+        if let Err(error) = self.application.shutdown(deadline).await {
             errors.push(error.into());
         }
         info!("Engine session Application runtime 已停止");

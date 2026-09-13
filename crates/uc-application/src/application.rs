@@ -52,6 +52,9 @@ use crate::transfer::file::assembly::FileTransferAssembly;
 use crate::transfer::file::assembly::{FileTransferAssemblyDeps, ReceiveCancellationDeps};
 use crate::transfer::file::timeout_runtime::FileTransferTimeoutRuntime;
 
+mod shutdown;
+use shutdown::ApplicationShutdown;
+
 /// Engine 在 Iroh builder 上选择完成的 Space adapter。
 pub struct ApplicationSpaceAdapters {
     pub connection_hints:
@@ -614,14 +617,15 @@ impl ApplicationAssembly {
         Ok(ApplicationRuntime {
             facade,
             inbound_clipboard,
-            owners: tokio::sync::Mutex::new(Some(ApplicationRuntimeOwners {
+            owners: Arc::new(tokio::sync::Mutex::new(Some(ApplicationRuntimeOwners {
                 history_maintenance,
                 file_transfer_timeout,
                 search,
                 space,
                 clipboard,
                 active_clipboard,
-            })),
+            }))),
+            shutdown: ApplicationShutdown::default(),
         })
     }
 }
@@ -643,7 +647,8 @@ impl RuntimeLifecyclePort for ApplicationAssembly {
 pub struct ApplicationRuntime {
     facade: Arc<AppFacade>,
     inbound_clipboard: Arc<dyn InboundClipboardApplyPort>,
-    owners: tokio::sync::Mutex<Option<ApplicationRuntimeOwners>>,
+    owners: Arc<tokio::sync::Mutex<Option<ApplicationRuntimeOwners>>>,
+    shutdown: ApplicationShutdown,
 }
 
 struct ApplicationRuntimeOwners {
@@ -688,31 +693,31 @@ impl ApplicationRuntime {
         Arc::clone(&self.inbound_clipboard)
     }
 
-    pub async fn shutdown(&self, deadline: Option<Instant>) -> ApplicationShutdownReport {
-        let Some(owners) = self.owners.lock().await.take() else {
-            return ApplicationShutdownReport {
-                history: None,
-                search: None,
-                file_transfer_timeout: None,
-                clipboard: None,
-                active_clipboard: None,
-                space: None,
-            };
-        };
-        let history = owners.history_maintenance.shutdown().await.err();
-        let file_transfer_timeout = owners.file_transfer_timeout.shutdown(deadline).await.err();
-        let clipboard = owners.clipboard.shutdown().await.err();
-        let active_clipboard = owners.active_clipboard.shutdown().await.err();
-        let search = owners.search.shutdown().await.err();
-        let space = owners.space.on_shutdown().await.err();
-        ApplicationShutdownReport {
-            history,
-            search,
-            file_transfer_timeout,
-            clipboard,
-            active_clipboard,
-            space,
-        }
+    pub async fn shutdown(&self, deadline: Option<Instant>) -> Result<(), Arc<LifecycleError>> {
+        let owners = Arc::clone(&self.owners);
+        self.shutdown
+            .run(async move {
+                let Some(owners) = owners.lock().await.take() else {
+                    return Ok(());
+                };
+                let history = owners.history_maintenance.shutdown().await.err();
+                let file_transfer_timeout =
+                    owners.file_transfer_timeout.shutdown(deadline).await.err();
+                let clipboard = owners.clipboard.shutdown().await.err();
+                let active_clipboard = owners.active_clipboard.shutdown().await.err();
+                let search = owners.search.shutdown().await.err();
+                let space = owners.space.on_shutdown().await.err();
+                ApplicationShutdownReport {
+                    history,
+                    search,
+                    file_transfer_timeout,
+                    clipboard,
+                    active_clipboard,
+                    space,
+                }
+                .into_result()
+            })
+            .await
     }
 }
 
