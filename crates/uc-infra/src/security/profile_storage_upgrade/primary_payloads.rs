@@ -973,7 +973,7 @@ mod tests {
         );
         let v3_blobs = V3EncryptedBlobStore::new(
             Arc::new(FilesystemBlobStore::new(output.join(OUTPUT_BLOBS))),
-            Arc::new(ContentProtection::for_content(session, vault)),
+            Arc::new(ContentProtection::for_content(Arc::clone(&session), vault)),
         );
         assert_eq!(
             BlobReaderPort::get(&v3_blobs, &blob_id).await.unwrap(),
@@ -1059,6 +1059,33 @@ mod tests {
         assert!(matches!(
             converter.verify(&journal, &target).await,
             Err(ProfileStorageUpgradeError::Corrupt { .. })
+        ));
+
+        let unreadable_row = load_blob_rows(&mut output_connection)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.blob_id == unreadable_blob_id.as_str())
+            .unwrap();
+        session.clear();
+        let protection_work = directory.path().join("protection-convert");
+        assert!(matches!(
+            converter
+                .convert_blobs(
+                    &target.paths(&journal).profile_database,
+                    &protection_work,
+                    &output,
+                    &UpgradeProgress::new(None),
+                )
+                .await,
+            Err(ProfileStorageUpgradeError::Security { .. })
+        ));
+        assert!(matches!(
+            converter.verify_preserved_blob(
+                &output.join(OUTPUT_DATABASE),
+                &output,
+                &unreadable_row,
+            ),
+            Err(ProfileStorageUpgradeError::Security { .. })
         ));
     }
 }
