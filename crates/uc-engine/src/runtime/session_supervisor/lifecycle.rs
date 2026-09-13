@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::atomic::Ordering;
 use std::sync::Weak;
 
@@ -50,14 +51,11 @@ impl RuntimeLifecyclePort for SessionWork {
         let owner = self.0.upgrade().ok_or_else(operation_unavailable_error)?;
         let _lifecycle = owner.lifecycle.lock().await;
         owner.suspended.store(true, Ordering::Release);
-        owner
-            .operations
-            .close_and_wait(None, context.deadline())
-            .await?;
-        owner
-            .stop_current_session(FileTransferCancellationReason::Unknown, context.deadline())
-            .await?;
-        Ok(())
+        drain_operations_and_stop_session(
+            owner.operations.close_and_wait(None, context.deadline()),
+            owner.stop_current_session(FileTransferCancellationReason::Unknown, context.deadline()),
+        )
+        .await
     }
 
     async fn resume(&self, _context: &TransitionContext) -> anyhow::Result<()> {
@@ -69,6 +67,30 @@ impl RuntimeLifecyclePort for SessionWork {
     }
 }
 
+async fn drain_operations_and_stop_session<Drain, Stop>(
+    drain_operations: Drain,
+    stop_session: Stop,
+) -> anyhow::Result<()>
+where
+    Drain: Future<Output = Result<(), EngineError>>,
+    Stop: Future<Output = Result<(), LifecycleError>>,
+{
+    let mut errors = Vec::new();
+    if let Err(error) = drain_operations.await {
+        errors.push(error.into());
+    }
+    if let Err(error) = stop_session.await {
+        errors.push(error.primary.context("stop current session"));
+        errors.extend(
+            error
+                .additional
+                .into_iter()
+                .map(|error| error.context("stop current session")),
+        );
+    }
+    LifecycleError::from_errors(errors).map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -76,6 +98,7 @@ mod tests {
         NetworkRecoveryRequestError, RuntimeLifecyclePort, TransitionContext,
     };
     use async_trait::async_trait;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
@@ -84,6 +107,37 @@ mod tests {
         RuntimeLifecycleParticipants,
     };
     use uc_core::TaskRegistry;
+
+    #[tokio::test]
+    async fn operation_drain_failure_still_notifies_and_reports_session_stop() {
+        let stop_called = AtomicBool::new(false);
+        let result = super::drain_operations_and_stop_session(
+            async {
+                Err(EngineError::new(
+                    1106,
+                    EngineErrorCategory::DeadlineExceeded,
+                    true,
+                ))
+            },
+            async {
+                stop_called.store(true, Ordering::SeqCst);
+                Err(LifecycleError {
+                    primary: std::io::Error::other("session stop failed").into(),
+                    additional: vec![std::io::Error::other("transfer stop failed").into()],
+                })
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(stop_called.load(Ordering::SeqCst));
+        let report = result.downcast::<LifecycleError>().unwrap();
+        assert_eq!(report.additional.len(), 2);
+        assert_eq!(
+            super::lifecycle_error(report).category(),
+            EngineErrorCategory::DeadlineExceeded
+        );
+    }
 
     #[tokio::test]
     async fn task_timeout_keeps_its_category_through_nested_shutdown_reports() {
