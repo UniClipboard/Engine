@@ -40,6 +40,21 @@ function command(program, args, input) {
 function ip(...args) { return command('ip', args) }
 function net(node, ...args) { return ip('netns', 'exec', node.namespace, ...args) }
 
+function applyNftRules(node, rules) {
+  try {
+    return execFileSync('ip', ['netns', 'exec', node.namespace, 'nft', '-f', '-'], {
+      input: rules,
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+  } catch (error) {
+    const detail = typeof error.stderr === 'string'
+      ? error.stderr.trim().split('\n')[0].replaceAll(runId, '<run>')
+      : ''
+    throw new Error(`nft test environment command failed${detail ? `: ${detail}` : ''}`)
+  }
+}
+
 function processResources(node) {
   const tasks = `/proc/${node.child.pid}/task`
   const names = readdirSync(tasks).flatMap(id => {
@@ -212,7 +227,7 @@ function partition(node, blocked) {
     faults.push({ node: node.label, action: 'heal', at_ms: Math.round(at) })
     return at
   }
-  command('ip', ['netns', 'exec', node.namespace, 'nft', '-f', '-'],
+  applyNftRules(node,
     'table inet uc_liveness { chain input { type filter hook input priority -100; policy accept; counter drop; }; chain output { type filter hook output priority -100; policy accept; counter drop; }; }\n')
   const activated = performance.now()
   node.partitionedAt = activated
@@ -423,7 +438,7 @@ async function stopRelay() {
 }
 
 function blockDirect(node) {
-  command('ip', ['netns', 'exec', node.namespace, 'nft', '-f', '-'],
+  applyNftRules(node,
     'table inet uc_direct { chain output { type filter hook output priority -50; policy accept; meta l4proto udp counter drop; }; }\n')
   net(node, 'node', '-e', "const s=require('dgram').createSocket('udp4');s.send('probe',19091,'10.233.0.1',()=>s.close())")
   const rules = JSON.parse(net(node, 'nft', '-j', 'list', 'table', 'inet', 'uc_direct'))
