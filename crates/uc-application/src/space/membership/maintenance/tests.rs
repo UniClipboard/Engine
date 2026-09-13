@@ -6,10 +6,10 @@ use async_trait::async_trait;
 use super::*;
 
 #[derive(Clone)]
-struct RecordingStep {
-    name: &'static str,
-    calls: Arc<Mutex<Vec<&'static str>>>,
-    outcome: MembershipMaintenanceStepOutcome,
+pub(super) struct RecordingStep {
+    pub(super) name: &'static str,
+    pub(super) calls: Arc<Mutex<Vec<&'static str>>>,
+    pub(super) outcome: MembershipMaintenanceStepOutcome,
 }
 
 impl RecordingStep {
@@ -80,7 +80,7 @@ impl ReconcileMembershipProjectionPort for RecordingStep {
     }
 }
 
-struct NoopNetworkActivity;
+pub(super) struct NoopNetworkActivity;
 
 impl MembershipNetworkActivityPort for NoopNetworkActivity {
     fn pause_network_work(&self) {}

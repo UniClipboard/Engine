@@ -16,6 +16,10 @@ use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
 use prost::Message;
 use tempfile::TempDir;
+use uc_engine::observability::{
+    DeploymentEnvironment, LocalLogConfig, ObservabilityConfig, ObservabilityResource,
+    OperatingSystem, OtlpHttpConfig, ProcessObservabilityRuntime,
+};
 use uc_engine::{
     ChooseDeviceGroupInput, CreateSpaceInput, Engine, EngineConfig, HistoryEntryInput,
     HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory, HostClipboard,
@@ -3230,10 +3234,37 @@ async fn uninterrupted_admission_uses_one_trace() {
             .mount(&telemetry)
             .await;
     }
-    assert!(uc_engine::init_test_tracing_with_otlp(
-        &format!("{}/v1/traces", telemetry.uri()),
-        &format!("{}/v1/logs", telemetry.uri()),
-    ));
+    let local_logs = TempDir::new().expect("local logs");
+    let os = match std::env::consts::OS {
+        "macos" => OperatingSystem::Macos,
+        "linux" => OperatingSystem::Linux,
+        "windows" => OperatingSystem::Windows,
+        _ => OperatingSystem::Other,
+    };
+    let config = ObservabilityConfig::new(
+        ObservabilityResource::new(
+            env!("CARGO_PKG_VERSION"),
+            DeploymentEnvironment::Test,
+            os,
+            "test",
+        )
+        .expect("resource"),
+    )
+    .with_remote(
+        OtlpHttpConfig::new_loopback(
+            &format!("{}/v1/traces", telemetry.uri()),
+            &format!("{}/v1/logs", telemetry.uri()),
+        )
+        .expect("OTLP"),
+    )
+    .with_local_logs(LocalLogConfig::new(local_logs.path()));
+    let observation = std::thread::spawn(move || {
+        ProcessObservabilityRuntime::install(config)
+            .expect("runtime")
+            .handle()
+    })
+    .join()
+    .expect("install");
 
     let rendezvous = mount_rendezvous().await;
     let sponsor_harness = DeviceHarness::new(rendezvous.uri());
@@ -3253,7 +3284,7 @@ async fn uninterrupted_admission_uses_one_trace() {
     // Active 早于最后一轮通信完成；先收齐证据，不能用关闭打断待验收的确认。
     let evidence_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let trace_evidence = loop {
-        uc_engine::flush_test_tracing();
+        let _ = observation.force_flush(Duration::from_secs(10));
         let requests = telemetry
             .received_requests()
             .await
@@ -3293,6 +3324,107 @@ async fn uninterrupted_admission_uses_one_trace() {
         "one uninterrupted admission must be visible as one trace: {:?}",
         trace_evidence.admission_trace_counts,
     );
+    let _ = observation.force_flush(Duration::from_secs(10));
+    let local_records: Vec<serde_json::Value> = std::fs::read_dir(local_logs.path())
+        .expect("files")
+        .flat_map(|entry| {
+            std::fs::read_to_string(entry.expect("entry").path())
+                .expect("file")
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("record"))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let lifecycle = local_records
+        .iter()
+        .find(|r| {
+            r["fields"]["event.name"] == "uc.operation.completed"
+                && r["fields"]["uc.role"] == "local"
+                && r["fields"]["uc.domain"] == "space_admission"
+        })
+        .expect("lifecycle");
+    for (step, role) in [
+        ("sponsor_state_load", "sponsor"),
+        ("sponsor_state_commit", "sponsor"),
+        ("sponsor_prepare_candidate", "sponsor"),
+        ("sponsor_prepare_commit", "sponsor"),
+        ("sponsor_prepare_complete", "sponsor"),
+        ("sponsor_prepare_settled", "sponsor"),
+        ("sponsor_activate", "sponsor"),
+        ("re_pairing_state_commit", "sponsor"),
+        ("joiner_process_reply", "joiner"),
+        ("joiner_prepare_candidate", "joiner"),
+        ("joiner_prepare_applied", "joiner"),
+        ("joiner_prepare_activation", "joiner"),
+        ("joiner_activate", "joiner"),
+    ] {
+        let records: Vec<_> = local_records
+            .iter()
+            .filter(|r| {
+                r["fields"]["event.name"] == "runtime.work.finished"
+                    && r["fields"]["step"] == step
+                    && r["fields"]["uc.role"] == role
+            })
+            .collect();
+        assert!(!records.is_empty(), "缺少真实内部步骤：{step}");
+        for record in records {
+            assert_eq!(
+                record["trace_id"], lifecycle["trace_id"],
+                "步骤关联丢失：{step}"
+            );
+            assert_eq!(record["capture_mode"], "standard");
+            assert_eq!(
+                record["fields"]["uc.outcome"], "ok",
+                "正常配对步骤结果：{step}"
+            );
+        }
+    }
+    for message in ["join_request", "prepared", "applied", "complete_ack"] {
+        for role in ["joiner", "sponsor"] {
+            assert!(
+                local_records
+                    .iter()
+                    .any(|r| r["fields"]["message"] == message
+                        && r["fields"]["uc.role"] == role
+                        && r["trace_id"] == lifecycle["trace_id"]),
+                "四轮协议必须在两端可识别：{role} {message}"
+            );
+        }
+    }
+    let transition = local_records
+        .iter()
+        .find(|r| {
+            r["fields"]["event.name"] == "runtime.work.finished"
+                && r["fields"]["step"] == "session_complete_transition"
+        })
+        .expect("实际会话切换");
+    assert!(transition["trace_id"].is_string());
+    assert!(
+        local_records
+            .iter()
+            .any(|r| r["fields"]["event.name"] == "uc.operation.completed"
+                && r["fields"]["uc.operation"] == "session_lifecycle"
+                && r["trace_id"] == transition["trace_id"]),
+        "实际切换必须有完整结果"
+    );
+    for step in [
+        "session_drain_operations",
+        "session_stop_application",
+        "session_stop_network",
+        "session_complete_transition",
+        "session_prepare",
+        "session_start",
+        "session_recover",
+    ] {
+        assert!(
+            local_records
+                .iter()
+                .any(|r| r["fields"]["event.name"] == "runtime.work.finished"
+                    && r["fields"]["step"] == step
+                    && r["trace_id"] == transition["trace_id"]),
+            "实际会话切换缺少关联步骤：{step}"
+        );
+    }
     sponsor
         .shutdown(SHUTDOWN_TIMEOUT)
         .await

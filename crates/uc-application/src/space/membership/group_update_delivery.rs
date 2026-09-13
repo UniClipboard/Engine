@@ -1,4 +1,7 @@
 use std::sync::Arc;
+use uc_observability_contract::diagnostics::connectivity::{
+    record_pending_group_updates, LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
+};
 
 use uc_core::membership::{
     GroupRevocationPort, GroupUpdateDispatchError, GroupUpdateDispatchPort, KeyEpochError,
@@ -36,9 +39,20 @@ impl DeliverPendingGroupUpdatesUseCase {
             Err(error) => return classify_store_error(&error),
         };
         let mut outcome = MembershipMaintenanceStepOutcome::Completed;
+        record_pending_group_updates(pending.len(), pending.len().min(MAX_UPDATES_PER_ROUND));
 
         for update in pending.iter().take(MAX_UPDATES_PER_ROUND) {
-            match self.dispatch.dispatch_group_update(update).await {
+            let observation =
+                LocalWorkObservation::begin(LocalWorkStep::MaintenanceGroupUpdateDispatch);
+            let dispatched = self.dispatch.dispatch_group_update(update).await;
+            observation.finish(match &dispatched {
+                Ok(()) => LocalWorkOutcome::Ok,
+                Err(GroupUpdateDispatchError::Offline | GroupUpdateDispatchError::Transport) => {
+                    LocalWorkOutcome::Deferred
+                }
+                Err(GroupUpdateDispatchError::Rejected) => LocalWorkOutcome::Rejected,
+            });
+            match dispatched {
                 Ok(()) => match self
                     .store
                     .acknowledge_space_group_update(update.update_id(), self.clock.now_ms())

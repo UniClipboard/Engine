@@ -6,6 +6,9 @@ use uc_core::membership::{
     AdmissionRetryState, JoinerAdmission, PendingAdmissionExchange, SpaceAdmissionMessageKind,
 };
 use uc_core::ports::SettingsPort;
+use uc_observability_contract::diagnostics::connectivity::{
+    scope_pairing_work, AdmissionExchangeSide,
+};
 use uc_observability_contract::diagnostics::SpaceAdmissionObservationOutcome;
 
 impl SpaceAdmissionProtocol {
@@ -13,7 +16,12 @@ impl SpaceAdmissionProtocol {
         &self,
         input: JoinSpaceInput,
     ) -> Result<JoinSpaceResult, JoinSpaceError> {
-        self.execute_exclusively(self.joiner.start(input)).await
+        scope_pairing_work(
+            AdmissionExchangeSide::Joiner,
+            None,
+            self.execute_exclusively(self.joiner.start(input)),
+        )
+        .await
     }
 }
 
@@ -98,7 +106,11 @@ impl JoinerAdmissionService {
                 .finish(material, SpaceAdmissionObservationOutcome::Cancelled);
         }
         self.observations.begin(*admission_id.as_bytes());
-        self.maintenance_wake.wake();
+        self.observations
+            .scope(*admission_id.as_bytes(), async {
+                self.maintenance_wake.wake();
+            })
+            .await;
 
         Ok(JoinSpaceResult {
             status: CurrentJoinStatus::Pending {

@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
@@ -11,6 +11,10 @@ use uc_application::facade::{
 };
 use uc_core::TaskRegistry;
 use uc_infra::fs::{FsAtomicPublisher, FsHiddenPathMarker, FsInboundFileTarget};
+use uc_observability_contract::diagnostics::connectivity::{
+    observe_local_result, record_session_lock_wait, LocalWorkObservation, LocalWorkOutcome,
+    LocalWorkStep,
+};
 use uc_observability_contract::diagnostics::{
     complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
     DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
@@ -301,7 +305,9 @@ impl SessionSupervisor {
     }
 
     pub(super) async fn transition_pending_session(&self) -> Result<Option<u64>, EngineError> {
+        let waiting = Instant::now();
         let _lifecycle = self.lifecycle.lock().await;
+        let waited = waiting.elapsed();
         let facade = match self.session.lock().await.as_ref() {
             Some(session) => Arc::clone(&session.facade),
             None => return Ok(None),
@@ -312,10 +318,15 @@ impl SessionSupervisor {
             Err(error) => {
                 let error =
                     operation_error_with_code(1103, "inspect runtime space transition", error);
-                return observe_session_lifecycle(async { Err(error) }).await;
+                return observe_session_lifecycle(async {
+                    record_session_lock_wait(waited);
+                    Err(error)
+                })
+                .await;
             }
         }
         observe_session_lifecycle(async {
+            record_session_lock_wait(waited);
             self.operations.close_and_wait(None).await?;
             match facade.has_pending_space_transition().await {
                 Ok(true) => {}
@@ -342,7 +353,11 @@ impl SessionSupervisor {
             session
                 .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
                 .await;
-            let completed = facade.complete_pending_space_transition().await;
+            let completed = observe_local_result(
+                LocalWorkStep::SessionCompleteTransition,
+                facade.complete_pending_space_transition(),
+            )
+            .await;
             match completed {
                 Ok(_) => {
                     self.install_new_session(true).await?;
@@ -493,7 +508,8 @@ impl SessionSupervisor {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
             .ok_or_else(super::operation_unavailable_error)?;
-        let mut session = factory.build().await?;
+        let mut session =
+            observe_local_result(LocalWorkStep::SessionPrepare, factory.build()).await?;
         let mut resume_space_activities = resume_space_activities;
         if session
             .facade
@@ -507,16 +523,22 @@ impl SessionSupervisor {
             session
                 .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
                 .await;
-            facade
-                .complete_pending_space_transition()
-                .await
-                .map_err(|error| {
-                    operation_error_with_code(1103, "recover pending space transition", error)
-                })?;
-            session = factory.build().await?;
+            observe_local_result(
+                LocalWorkStep::SessionCompleteTransition,
+                facade.complete_pending_space_transition(),
+            )
+            .await
+            .map_err(|error| {
+                operation_error_with_code(1103, "recover pending space transition", error)
+            })?;
+            session = observe_local_result(LocalWorkStep::SessionPrepare, factory.build()).await?;
             resume_space_activities = true;
         }
-        let recovered = session.facade.recover_space_session().await;
+        let recovered = observe_local_result(
+            LocalWorkStep::SessionRecover,
+            session.facade.recover_space_session(),
+        )
+        .await;
         if let Err(error) = &recovered {
             tracing::warn!(
                 error_kind = recover_space_session_error_kind(error),
@@ -566,17 +588,20 @@ impl ProductionSessionFactory {
         .map_err(|error| startup_error("p2p session", error))?;
         let sync_engine = lifecycle.sync_engine_assembly;
         let network_adapters = lifecycle.application_adapters;
-        let application_runtime = match ApplicationRuntime::start(
-            &application,
-            network_adapters.binding.complete(
-                network_adapters.active_pull_client,
-                Arc::clone(&self.network_recovery),
-                FsAtomicPublisher::new(),
-                FsInboundFileTarget::new(Arc::clone(&wired.sync_engine.settings)),
-                FsHiddenPathMarker::new(),
-                Arc::new(EngineClipboardInboundEvents {
-                    events: events.clone(),
-                }),
+        let application_runtime = match observe_local_result(
+            LocalWorkStep::SessionStart,
+            ApplicationRuntime::start(
+                &application,
+                network_adapters.binding.complete(
+                    network_adapters.active_pull_client,
+                    Arc::clone(&self.network_recovery),
+                    FsAtomicPublisher::new(),
+                    FsInboundFileTarget::new(Arc::clone(&wired.sync_engine.settings)),
+                    FsHiddenPathMarker::new(),
+                    Arc::new(EngineClipboardInboundEvents {
+                        events: events.clone(),
+                    }),
+                ),
             ),
         )
         .await
@@ -647,9 +672,26 @@ impl ProductionSession {
         {
             warn!("mobile file upload shutdown finished with an error");
         }
-        super::task_shutdown::shutdown_tasks(&self.tasks, Duration::from_millis(500)).await;
+        let stopping = LocalWorkObservation::begin(LocalWorkStep::SessionStopTasks);
+        let stopped =
+            super::task_shutdown::shutdown_tasks(&self.tasks, Duration::from_millis(500)).await;
+        stopping.finish(
+            if stopped.timed_out_count > 0 || stopped.join_error_count > 0 {
+                LocalWorkOutcome::Error
+            } else {
+                LocalWorkOutcome::Ok
+            },
+        );
         info!("Engine session 网络观测任务已停止");
+        let stopping = LocalWorkObservation::begin(LocalWorkStep::SessionStopApplication);
         let application_shutdown = self.application.shutdown().await;
+        stopping.finish(
+            if application_shutdown.history.is_some() || application_shutdown.search.is_some() {
+                LocalWorkOutcome::Error
+            } else {
+                LocalWorkOutcome::Ok
+            },
+        );
         info!("Engine session Application runtime 已停止");
         if application_shutdown.history.is_some() {
             warn!(
@@ -660,7 +702,9 @@ impl ProductionSession {
         if application_shutdown.search.is_some() {
             error!(error_kind = "search", "search runtime stopped with error");
         }
+        let stopping = LocalWorkObservation::begin(LocalWorkStep::SessionStopNetwork);
         self.sync_engine.shutdown(transfer_reason).await;
+        stopping.finish(LocalWorkOutcome::Ok);
         info!("Engine session Iroh 网络已停止");
     }
 }
@@ -780,36 +824,46 @@ impl SessionOperationGate {
         &self,
         current_operation: Option<SessionOperationLease>,
     ) -> Result<(), EngineError> {
-        if current_operation
-            .as_ref()
-            .is_some_and(|lease| !Arc::ptr_eq(&lease.gate, &self.inner))
-        {
-            return Err(super::operation_unavailable_error());
-        }
-        let cancellation = {
-            let mut state = self
-                .inner
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            state.open = false;
-            state.cancellation.clone()
-        };
-        drop(current_operation);
-        let drained = tokio::time::timeout(SESSION_OPERATION_GRACE, self.wait_for_drain()).await;
-        if drained.is_err() {
-            cancellation.cancel();
-            if tokio::time::timeout(SESSION_OPERATION_GRACE, self.wait_for_drain())
+        observe_local_result(LocalWorkStep::SessionDrainOperations, async {
+            if current_operation
+                .as_ref()
+                .is_some_and(|lease| !Arc::ptr_eq(&lease.gate, &self.inner))
+            {
+                return Err(super::operation_unavailable_error());
+            }
+            let cancellation = {
+                let mut state = self
+                    .inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.open = false;
+                state.cancellation.clone()
+            };
+            drop(current_operation);
+            let drained = observe_local_result(
+                LocalWorkStep::SessionDrainGrace,
+                tokio::time::timeout(SESSION_OPERATION_GRACE, self.wait_for_drain()),
+            )
+            .await;
+            if drained.is_err() {
+                cancellation.cancel();
+                if observe_local_result(
+                    LocalWorkStep::SessionDrainCancellation,
+                    tokio::time::timeout(SESSION_OPERATION_GRACE, self.wait_for_drain()),
+                )
                 .await
                 .is_err()
-            {
-                tracing::warn!(
-                    error_kind = "session_operation_drain_timeout",
-                    "session operation did not stop after cancellation"
-                );
+                {
+                    tracing::warn!(
+                        error_kind = "session_operation_drain_timeout",
+                        "session operation did not stop after cancellation"
+                    );
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 
     async fn wait_for_drain(&self) {

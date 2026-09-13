@@ -1,8 +1,17 @@
 use async_trait::async_trait;
+use tracing::Instrument;
 use uc_application::deps::{
     AuthenticatedSpaceAdmissionMessage, LoadMembershipLedgerPort, LoadedMembershipLedger,
     MembershipLedgerError, SponsorAdmissionMutation, SponsorAdmissionState,
     SponsorAdmissionStateError, SponsorAdmissionStatePort,
+};
+use uc_observability_contract::diagnostics::{
+    operation_span, DiagnosticDomain, DiagnosticOperation, DiagnosticRole, DiagnosticSpanKind,
+    OperationContext,
+};
+use uc_observability_runtime::{
+    DeploymentEnvironment, LocalLogConfig, ObservabilityConfig, ObservabilityResource,
+    OperatingSystem, ProcessObservabilityRuntime, SignalResult,
 };
 
 use super::*;
@@ -10,6 +19,67 @@ use super::*;
 #[derive(Clone)]
 struct FixedMembershipLedger {
     loaded: LoadedMembershipLedger,
+}
+
+#[tokio::test]
+async fn sponsor_state_load_is_correlated_in_standard_log_file() {
+    let logs = tempfile::tempdir().expect("logs");
+    let _runtime = ProcessObservabilityRuntime::install(
+        ObservabilityConfig::new(
+            ObservabilityResource::new(
+                "1.1.0",
+                DeploymentEnvironment::Test,
+                OperatingSystem::Macos,
+                "test",
+            )
+            .expect("resource"),
+        )
+        .with_local_logs(LocalLogConfig::new(logs.path())),
+    )
+    .expect("runtime");
+    let fixture = Fixture::new();
+    let store = sponsor_store(&fixture);
+    let message = authenticated_join_request(0xe1, 0xe2);
+    let span = operation_span(OperationContext {
+        domain: DiagnosticDomain::SpaceAdmission,
+        operation: DiagnosticOperation::SpaceAdmission,
+        role: DiagnosticRole::Sponsor,
+        kind: DiagnosticSpanKind::Internal,
+    });
+    assert!(!span.is_disabled(), "operation span must be enabled");
+    span.in_scope(|| uc_observability_contract::diagnostics::ObservationContext::capture())
+        .scope(SponsorAdmissionStatePort::load(&store, &message))
+        .instrument(span)
+        .await
+        .expect("fresh state");
+    assert_eq!(
+        ProcessObservabilityRuntime::flush_local_logs(std::time::Duration::from_secs(5)),
+        SignalResult::Completed
+    );
+    let records: Vec<serde_json::Value> = std::fs::read_dir(logs.path())
+        .expect("files")
+        .flat_map(|entry| {
+            std::fs::read_to_string(entry.expect("entry").path())
+                .expect("file")
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("record"))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let steps: Vec<_> = records
+        .iter()
+        .filter(|record| {
+            record["fields"]["step"] == "sponsor_state_load" && record["trace_id"].is_string()
+        })
+        .collect();
+    assert_eq!(steps.len(), 2, "{records:?}");
+    assert_eq!(steps[0]["fields"]["event.name"], "runtime.work.started");
+    assert_eq!(steps[1]["fields"]["event.name"], "runtime.work.finished");
+    assert_eq!(steps[1]["fields"]["uc.outcome"], "ok");
+    assert_eq!(steps[0]["trace_id"], steps[1]["trace_id"]);
+    assert_eq!(steps[0]["span_id"], steps[1]["span_id"]);
+    assert_eq!(steps[1]["capture_mode"], "standard");
+    assert!(steps[1]["fields"]["duration_ms"].is_u64());
 }
 
 #[async_trait]

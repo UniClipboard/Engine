@@ -2,6 +2,9 @@ use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::Binary;
 use uc_core::membership::{AdmissionRecordPersistence, SpaceAdmissionAggregate};
+use uc_observability_contract::diagnostics::connectivity::{
+    observe_local_sync_result, LocalWorkStep,
+};
 
 use super::persisted::{
     decode_repository, PersistedSpaceAdmissionRepositoryV2, StoredSpaceAdmissionV1,
@@ -24,34 +27,37 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         &self,
         conn: &mut SqliteConnection,
     ) -> Result<PersistedSpaceAdmissionRepositoryV2, SpaceAdmissionStateStoreError> {
-        let row = sql_query(
-            "SELECT encrypted_payload FROM admission_repository_state WHERE singleton_id = 1",
-        )
-        .get_result::<EncryptedRepositoryRow>(conn)
-        .optional()
-        .map_err(|_| SpaceAdmissionStateStoreError::Unavailable)?;
-        let Some(row) = row else {
-            return Ok(PersistedSpaceAdmissionRepositoryV2::fresh(
-                self.keys.profile_generation(),
-            ));
-        };
-        let plaintext = self
-            .keys
-            .open_profile_payload(REPOSITORY_PAYLOAD_PURPOSE, &row.encrypted_payload)
-            .map_err(map_key_error)?;
-        let state = decode_repository(&plaintext).ok_or(SpaceAdmissionStateStoreError::Corrupt)?;
-        if state.format_version != SPACE_ADMISSION_REPOSITORY_FORMAT_V2
-            || state.profile_generation != self.keys.profile_generation()
-            || state
-                .current_local_join_id
-                .is_some_and(|id| !state.records.contains_key(&id))
-            || state
-                .latest_local_join_id
-                .is_some_and(|id| !state.records.contains_key(&id))
-        {
-            return Err(SpaceAdmissionStateStoreError::Corrupt);
-        }
-        Ok(state)
+        observe_local_sync_result(LocalWorkStep::RepositoryLoad, || {
+            let row = sql_query(
+                "SELECT encrypted_payload FROM admission_repository_state WHERE singleton_id = 1",
+            )
+            .get_result::<EncryptedRepositoryRow>(conn)
+            .optional()
+            .map_err(|_| SpaceAdmissionStateStoreError::Unavailable)?;
+            let Some(row) = row else {
+                return Ok(PersistedSpaceAdmissionRepositoryV2::fresh(
+                    self.keys.profile_generation(),
+                ));
+            };
+            let plaintext = self
+                .keys
+                .open_profile_payload(REPOSITORY_PAYLOAD_PURPOSE, &row.encrypted_payload)
+                .map_err(map_key_error)?;
+            let state =
+                decode_repository(&plaintext).ok_or(SpaceAdmissionStateStoreError::Corrupt)?;
+            if state.format_version != SPACE_ADMISSION_REPOSITORY_FORMAT_V2
+                || state.profile_generation != self.keys.profile_generation()
+                || state
+                    .current_local_join_id
+                    .is_some_and(|id| !state.records.contains_key(&id))
+                || state
+                    .latest_local_join_id
+                    .is_some_and(|id| !state.records.contains_key(&id))
+            {
+                return Err(SpaceAdmissionStateStoreError::Corrupt);
+            }
+            Ok(state)
+        })
     }
 
     pub(in crate::space::admission) fn save_state_on(
@@ -59,24 +65,26 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         conn: &mut SqliteConnection,
         state: &PersistedSpaceAdmissionRepositoryV2,
     ) -> Result<(), SpaceAdmissionStateStoreError> {
-        let plaintext =
-            postcard::to_stdvec(state).map_err(|_| SpaceAdmissionStateStoreError::Corrupt)?;
-        let encrypted = self
-            .keys
-            .seal_profile_payload(REPOSITORY_PAYLOAD_PURPOSE, &plaintext)
-            .map_err(map_key_error)?;
-        sql_query(
+        observe_local_sync_result(LocalWorkStep::RepositorySave, || {
+            let plaintext =
+                postcard::to_stdvec(state).map_err(|_| SpaceAdmissionStateStoreError::Corrupt)?;
+            let encrypted = self
+                .keys
+                .seal_profile_payload(REPOSITORY_PAYLOAD_PURPOSE, &plaintext)
+                .map_err(map_key_error)?;
+            sql_query(
             "INSERT INTO admission_repository_state (singleton_id, encrypted_payload) VALUES (1, ?) \
              ON CONFLICT(singleton_id) DO UPDATE SET encrypted_payload = excluded.encrypted_payload",
         )
         .bind::<Binary, _>(encrypted)
         .execute(conn)
         .map_err(|_| SpaceAdmissionStateStoreError::Unavailable)?;
-        let reopened = self.load_state_on(conn)?;
-        if reopened != *state {
-            return Err(SpaceAdmissionStateStoreError::Corrupt);
-        }
-        Ok(())
+            let reopened = self.load_state_on(conn)?;
+            if reopened != *state {
+                return Err(SpaceAdmissionStateStoreError::Corrupt);
+            }
+            Ok(())
+        })
     }
 
     pub(in crate::space::admission) fn open_record(

@@ -1,5 +1,10 @@
+use crate::space::admission::observation::message_action;
 use async_trait::async_trait;
 use uc_core::membership::SpaceAdmissionMessageKind;
+use uc_observability_contract::diagnostics::connectivity::{
+    scope_pairing_work, AdmissionExchangeSide,
+};
+use uc_observability_contract::diagnostics::describe_admission_request;
 
 use super::super::{
     AuthenticatedSpaceAdmissionMessage, HandleAuthenticatedSpaceAdmissionMessageError,
@@ -13,8 +18,16 @@ impl HandleAuthenticatedSpaceAdmissionMessagePort for SpaceAdmissionProtocol {
         &self,
         message: AuthenticatedSpaceAdmissionMessage,
     ) -> Result<SpaceAdmissionMessageReply, HandleAuthenticatedSpaceAdmissionMessageError> {
-        self.execute_exclusively(self.sponsor.handle_authenticated_message(message))
-            .await
+        let action = message_action(message.envelope().kind());
+        if let Some(action) = action {
+            describe_admission_request(action);
+        }
+        scope_pairing_work(
+            AdmissionExchangeSide::Sponsor,
+            action,
+            self.execute_exclusively(self.sponsor.handle_authenticated_message(message)),
+        )
+        .await
     }
 }
 
@@ -23,11 +36,6 @@ impl SponsorAdmissionService {
         &self,
         message: AuthenticatedSpaceAdmissionMessage,
     ) -> Result<SpaceAdmissionMessageReply, HandleAuthenticatedSpaceAdmissionMessageError> {
-        if let Some(action) =
-            crate::space::admission::observation::message_action(message.envelope().kind())
-        {
-            uc_observability_contract::diagnostics::describe_admission_request(action);
-        }
         match message.envelope().kind() {
             SpaceAdmissionMessageKind::JoinRequest => self.handle_join_request(message).await,
             SpaceAdmissionMessageKind::Prepared => self.handle_prepared(message).await,

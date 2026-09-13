@@ -129,6 +129,12 @@ pub enum SessionFailure {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum LocalEvent {
+    Maintenance {
+        record: super::maintenance::MaintenanceEvent,
+    },
+    LocalWork {
+        record: super::local_work::LocalWorkEvent,
+    },
     AdmissionNetwork {
         record: super::admission_network::AdmissionNetworkEvent,
     },
@@ -168,6 +174,9 @@ pub(super) enum LocalEvent {
     SessionStarted {
         transition: SessionTransition,
     },
+    SessionLockWait {
+        duration_ms: u64,
+    },
     SessionFinished {
         transition: SessionTransition,
         result: SessionTransitionResult,
@@ -178,6 +187,8 @@ pub(super) enum LocalEvent {
 impl LocalEvent {
     pub(super) fn name(&self) -> &'static str {
         match self {
+            Self::LocalWork { record } => record.name(),
+            Self::Maintenance { record } => record.name(),
             Self::AdmissionNetwork { .. } => "pairing.exchange.network.snapshot",
             Self::AdmissionExchange { record } => record.name(),
             Self::Source { .. } => "diagnostics.source.status",
@@ -190,11 +201,14 @@ impl LocalEvent {
             Self::PresenceCheck { .. } => "presence.check.completed",
             Self::PresenceClosed { .. } => "presence.connection.closed",
             Self::SessionStarted { .. } => "session.transition.started",
+            Self::SessionLockWait { .. } => "session.lock.waited",
             Self::SessionFinished { .. } => "session.transition.finished",
         }
     }
     pub(super) fn level(&self) -> &'static str {
         match self {
+            Self::LocalWork { record } => record.level(),
+            Self::Maintenance { record } => record.level(),
             Self::AdmissionNetwork { .. } => "INFO",
             Self::AdmissionExchange { record } => record.level(),
             Self::Source { .. } => "INFO",
@@ -239,6 +253,11 @@ impl LocalEvent {
         let mut fields = Map::new();
         fields.insert("event.name".into(), json!(self.name()));
         match self {
+            Self::LocalWork { record } => fields.extend(record.fields()),
+            Self::SessionLockWait { duration_ms } => {
+                fields.insert("duration_ms".into(), json!(duration_ms));
+            }
+            Self::Maintenance { record } => fields.extend(record.fields()),
             Self::AdmissionNetwork { record } => fields.extend(record.fields()),
             Self::AdmissionExchange { record } => fields.extend(record.fields()),
             Self::Source { record } => {

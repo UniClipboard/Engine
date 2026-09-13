@@ -3,6 +3,7 @@ use super::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryTrigger, AuthenticatedAdmissionReply,
     LoadedPendingAdmission, PendingAdmissionRecoveryStateError, SpaceAdmissionTransportError,
 };
+use crate::space::admission::observation::message_action;
 use crate::space::admission::protocol::{
     AdmissionRecoveryService, JoinerAdmissionService, SpaceAdmissionProtocol,
 };
@@ -14,11 +15,13 @@ use uc_core::membership::{
     SpaceAdmissionMessageKind, SpaceAdmissionRejectionReason,
 };
 use uc_observability_contract::diagnostics::connectivity::{
-    record_admission_recovery_decision, ExchangeFailure, RecoveryDecision, RecoveryDeferral,
+    record_admission_recovery_decision, scope_pairing_work, AdmissionExchangeSide, ExchangeFailure,
+    LocalWorkObservation, LocalWorkOutcome, LocalWorkStep, RecoveryDecision, RecoveryDeferral,
     RecoveryProblem, RecoveryTrigger, RejectionCause, StateFailure,
 };
 use uc_observability_contract::diagnostics::{
-    DiagnosticErrorType, ObservationContext, SpaceAdmissionObservationOutcome,
+    scope_admission_action, DiagnosticErrorType, ObservationContext,
+    SpaceAdmissionObservationOutcome,
 };
 
 #[derive(Clone, Copy)]
@@ -44,7 +47,9 @@ impl AdmissionRecoveryService {
     ) -> AdmissionRecoveryReport {
         // 恢复执行独占自己的入口，不能跨网络等待占用本机动作锁。
         // 状态提交仍由持久仓库校验版本，拒绝覆盖并发取消或替换。
+        let waiting = LocalWorkObservation::begin(LocalWorkStep::RecoveryLock);
         let _recovery = self.execution_lock.lock().await;
+        waiting.finish(LocalWorkOutcome::Ok);
         let mut report = AdmissionRecoveryReport::default();
         let loaded = match self.state.load(trigger).await {
             Ok(loaded) => loaded,
@@ -120,7 +125,20 @@ impl AdmissionRecoveryService {
             };
             if aggregate.invitation_resolution().is_some() {
                 joiner
-                    .recover_invitation_resolution(self, &mut report, aggregate, commit_token)
+                    .observations
+                    .scope(
+                        observation_material,
+                        scope_pairing_work(
+                            AdmissionExchangeSide::Joiner,
+                            None,
+                            joiner.recover_invitation_resolution(
+                                self,
+                                &mut report,
+                                aggregate,
+                                commit_token,
+                            ),
+                        ),
+                    )
                     .await;
                 finish_observation(report, decision_hint);
                 continue;
@@ -207,7 +225,18 @@ impl AdmissionRecoveryService {
                                 continue;
                             }
                         };
-                    match self.commit_recovery(commit_token, transition).await {
+                    match joiner
+                        .observations
+                        .scope(
+                            observation_material,
+                            scope_pairing_work(
+                                AdmissionExchangeSide::Joiner,
+                                message_action(SpaceAdmissionMessageKind::JoinRequest),
+                                self.commit_recovery(commit_token, transition),
+                            ),
+                        )
+                        .await
+                    {
                         Ok(loaded) => {
                             report.advanced_count += 1;
                             loaded
@@ -230,21 +259,52 @@ impl AdmissionRecoveryService {
                 finish_observation(report, decision_hint);
                 continue;
             };
+            let action = message_action(pending_exchange.request_envelope().kind());
             let exchanged = joiner
                 .observations
                 .scope(
                     observation_material,
-                    uc_observability_contract::diagnostics::scope_admission_action(
-                        crate::space::admission::observation::message_action(
-                            pending_exchange.request_envelope().kind(),
-                        ),
+                    scope_admission_action(
+                        action,
                         exchange.exchange(pending_exchange.request_envelope()),
                     ),
                 )
                 .await;
             match exchanged {
                 Ok(reply) => {
-                    self.commit_joiner_reply(joiner, &mut report, aggregate, commit_token, reply)
+                    joiner
+                        .observations
+                        .scope(
+                            observation_material,
+                            scope_pairing_work(AdmissionExchangeSide::Joiner, action, async {
+                                let work =
+                                    LocalWorkObservation::begin(LocalWorkStep::JoinerProcessReply);
+                                let before = report;
+                                self.commit_joiner_reply(
+                                    joiner,
+                                    &mut report,
+                                    aggregate,
+                                    commit_token,
+                                    reply,
+                                )
+                                .await;
+                                let outcome = if report.recovery_required_count
+                                    > before.recovery_required_count
+                                {
+                                    LocalWorkOutcome::Corrupt
+                                } else if report.deferred_count > before.deferred_count {
+                                    LocalWorkOutcome::Deferred
+                                } else if report.rejected_count > before.rejected_count
+                                    || report.peer_upgrade_required_count
+                                        > before.peer_upgrade_required_count
+                                {
+                                    LocalWorkOutcome::Rejected
+                                } else {
+                                    LocalWorkOutcome::Ok
+                                };
+                                work.finish(outcome);
+                            }),
+                        )
                         .await;
                 }
                 Err(SpaceAdmissionTransportError::PeerUpgradeRequired) => {

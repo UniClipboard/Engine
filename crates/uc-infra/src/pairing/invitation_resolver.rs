@@ -13,6 +13,7 @@ use tracing::debug;
 use uc_application::deps::{ResolveJoinerInvitationError, ResolveJoinerInvitationPort};
 use uc_core::membership::AdmissionShortInvitationCode;
 use uc_core::pairing::invitation::FullInvitation;
+use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
 
 use crate::rendezvous::{RendezvousClient, RendezvousHttpError};
 
@@ -97,12 +98,15 @@ impl ResolveJoinerInvitationPort for PairingInvitationResolverAdapter {
         &self,
         short_code: &AdmissionShortInvitationCode,
     ) -> Result<FullInvitation, ResolveJoinerInvitationError> {
-        let code = std::str::from_utf8(short_code.as_bytes()).map_err(|source| {
-            ResolveJoinerInvitationError::unavailable(anyhow::Error::new(source))
-        })?;
-        self.resolve(code)
-            .await
-            .map_err(ResolveJoinerInvitationError::unavailable)
+        observe_local_result(LocalWorkStep::JoinerResolveInvitation, async {
+            let code = std::str::from_utf8(short_code.as_bytes()).map_err(|source| {
+                ResolveJoinerInvitationError::unavailable(anyhow::Error::new(source))
+            })?;
+            self.resolve(code)
+                .await
+                .map_err(ResolveJoinerInvitationError::unavailable)
+        })
+        .await
     }
 }
 

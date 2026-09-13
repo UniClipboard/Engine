@@ -6,6 +6,7 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use uc_application::deps::{RePairingStateError, RePairingStateStorePort};
+use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
 
 use crate::security::{AdmissionKeyError, AdmissionKeyManager};
 
@@ -55,30 +56,33 @@ impl RePairingStateStorePort for EncryptedRePairingStateStore {
     }
 
     async fn set_required(&self, required: bool) -> Result<(), RePairingStateError> {
-        let _guard = self.write_lock.lock().await;
-        let state = PersistedRePairingStateV1 {
-            format_version: FORMAT_VERSION,
-            required,
-        };
-        let plaintext =
-            postcard::to_stdvec(&state).map_err(|_| RePairingStateError::Inconsistent)?;
-        let ciphertext = self
-            .keys
-            .seal_profile_payload(PURPOSE, &plaintext)
-            .map_err(map_key_error)?;
-        let parent = self.path.parent().ok_or(RePairingStateError::Unavailable)?;
-        fs::create_dir_all(parent)
-            .await
-            .map_err(|_| RePairingStateError::Unavailable)?;
-        let mut file = fs::File::create(&self.path)
-            .await
-            .map_err(|_| RePairingStateError::Unavailable)?;
-        file.write_all(&ciphertext)
-            .await
-            .map_err(|_| RePairingStateError::Unavailable)?;
-        file.sync_all()
-            .await
-            .map_err(|_| RePairingStateError::Unavailable)
+        observe_local_result(LocalWorkStep::RePairingStateCommit, async {
+            let _guard = self.write_lock.lock().await;
+            let state = PersistedRePairingStateV1 {
+                format_version: FORMAT_VERSION,
+                required,
+            };
+            let plaintext =
+                postcard::to_stdvec(&state).map_err(|_| RePairingStateError::Inconsistent)?;
+            let ciphertext = self
+                .keys
+                .seal_profile_payload(PURPOSE, &plaintext)
+                .map_err(map_key_error)?;
+            let parent = self.path.parent().ok_or(RePairingStateError::Unavailable)?;
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|_| RePairingStateError::Unavailable)?;
+            let mut file = fs::File::create(&self.path)
+                .await
+                .map_err(|_| RePairingStateError::Unavailable)?;
+            file.write_all(&ciphertext)
+                .await
+                .map_err(|_| RePairingStateError::Unavailable)?;
+            file.sync_all()
+                .await
+                .map_err(|_| RePairingStateError::Unavailable)
+        })
+        .await
     }
 }
 
