@@ -152,6 +152,9 @@ async fn run_history_maintenance_once(
     maintenance: &dyn HistoryMaintenance,
     cancel: &CancellationToken,
 ) {
+    if cancel.is_cancelled() {
+        return;
+    }
     let summary = reconcile_history_once(maintenance).await;
     complete_history_maintenance(maintenance, summary, cancel).await;
 }

@@ -168,6 +168,17 @@ async fn periodic_pass_retries_after_a_failed_startup_pass() {
 }
 
 #[tokio::test]
+async fn cancelled_periodic_pass_does_not_start_reconciliation() {
+    let maintenance = Arc::new(FakeHistoryMaintenance::new(0, false, false));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+
+    super::run_history_maintenance_once(maintenance.as_ref(), &cancel).await;
+
+    assert!(maintenance.calls().is_empty());
+}
+
+#[tokio::test]
 async fn shutdown_interrupts_the_long_interval_wait() {
     let maintenance = Arc::new(FakeHistoryMaintenance::new(0, false, false));
     let runtime = HistoryMaintenanceRuntime::start_with_interval(
