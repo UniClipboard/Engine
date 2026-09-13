@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +11,8 @@ pub(in crate::space::admission) const SPACE_ADMISSION_REPOSITORY_FORMAT_V2: u16 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::space::admission) struct StoredSpaceAdmissionV1 {
     pub(in crate::space::admission) wrapped_data_key: WrappedSpaceAdmissionDataKey,
-    pub(in crate::space::admission) encrypted_payload: Vec<u8>,
+    // rust-style: allow-qualified-path -- 可见性限定要求模块路径，不能使用导入别名
+    pub(in crate::space::admission) encrypted_payload: Arc<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

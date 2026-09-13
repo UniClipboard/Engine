@@ -2,6 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use rand::RngCore;
+use sha2::{Digest, Sha256};
 use uc_core::ports::SecureStoragePort;
 
 use super::crypto_model::EncryptedBlob;
@@ -44,6 +45,34 @@ pub struct WrappedSpaceAdmissionDataKey {
 pub struct AdmissionKeyManager {
     secure_storage: Arc<dyn SecureStoragePort>,
     profile_generation: [u8; 16],
+}
+
+// 单次读取固定使用同一把密钥；缓存只保存绑定摘要，不延长密钥的生命周期。
+pub(crate) struct ProfilePayloadReader {
+    key: MasterKey,
+    aad: Vec<u8>,
+}
+
+impl ProfilePayloadReader {
+    pub(crate) fn cache_binding(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(b"uniclipboard/admission-read-cache/v1\0");
+        digest.update(self.key.as_bytes());
+        digest.update(&self.aad);
+        digest.finalize().into()
+    }
+
+    pub(crate) fn open(&self, ciphertext: &[u8]) -> Result<Vec<u8>, AdmissionKeyError> {
+        let encrypted: EncryptedBlob =
+            serde_json::from_slice(ciphertext).map_err(|_| AdmissionKeyError::Corrupt)?;
+        v1_aead::decrypt_blob_xchacha(
+            &self.key,
+            &encrypted.nonce,
+            &encrypted.ciphertext,
+            &self.aad,
+        )
+        .map_err(|_| AdmissionKeyError::OpenFailed)
+    }
 }
 
 impl AdmissionKeyManager {
@@ -134,6 +163,16 @@ impl AdmissionKeyManager {
             &self.profile_payload_aad(purpose),
         )
         .map_err(|_| AdmissionKeyError::OpenFailed)
+    }
+
+    pub(crate) fn profile_payload_reader(
+        &self,
+        purpose: &[u8],
+    ) -> Result<ProfilePayloadReader, AdmissionKeyError> {
+        Ok(ProfilePayloadReader {
+            key: self.profile_key()?,
+            aad: self.profile_payload_aad(purpose),
+        })
     }
 
     fn attempt_key_aad(&self, attempt_id: [u8; 32]) -> Vec<u8> {

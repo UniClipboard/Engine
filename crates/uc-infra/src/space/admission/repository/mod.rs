@@ -2,18 +2,24 @@ pub(super) mod codec;
 mod persisted;
 pub(super) mod token;
 
-use std::sync::Arc;
+#[cfg(test)]
+mod tests;
+
+use std::sync::{Arc, Mutex};
 
 use crate::db::ports::DbExecutor;
 use crate::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
 use uc_application::deps::LoadMembershipLedgerPort;
 use uc_core::membership::{AdmissionContinuationCredential, SpaceAdmissionId};
 
+use codec::RepositoryReadCache;
+
 pub struct SqliteSpaceAdmissionState<E> {
     pub(super) executor: E,
     pub(super) keys: Arc<AdmissionKeyManager>,
     pub(super) manifests: Arc<ActiveSpaceGenerationManifestStore>,
     pub(super) membership: Arc<dyn LoadMembershipLedgerPort>,
+    read_cache: Mutex<Option<RepositoryReadCache>>,
 }
 
 impl<E> SqliteSpaceAdmissionState<E> {
@@ -28,6 +34,7 @@ impl<E> SqliteSpaceAdmissionState<E> {
             keys,
             manifests,
             membership,
+            read_cache: Mutex::new(None),
         }
     }
 }

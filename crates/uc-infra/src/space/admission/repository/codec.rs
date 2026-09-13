@@ -15,6 +15,13 @@ use crate::db::ports::DbExecutor;
 use crate::security::{AdmissionKeyError, WrappedSpaceAdmissionDataKey};
 
 const REPOSITORY_PAYLOAD_PURPOSE: &[u8] = b"space-admission-repository-v1";
+const MAX_READ_CACHE_BYTES: usize = 128 * 1024 * 1024;
+
+pub(super) struct RepositoryReadCache {
+    key_binding: [u8; 32],
+    ciphertext: Vec<u8>,
+    state: PersistedSpaceAdmissionRepositoryV2,
+}
 
 #[derive(QueryableByName)]
 struct EncryptedRepositoryRow {
@@ -34,15 +41,37 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             .get_result::<EncryptedRepositoryRow>(conn)
             .optional()
             .map_err(|_| SpaceAdmissionStateStoreError::Unavailable)?;
+            let mut cache = match self.read_cache.lock() {
+                Ok(cache) => cache,
+                Err(poisoned) => {
+                    let mut cache = poisoned.into_inner();
+                    *cache = None;
+                    cache
+                }
+            };
             let Some(row) = row else {
+                *cache = None;
                 return Ok(PersistedSpaceAdmissionRepositoryV2::fresh(
                     self.keys.profile_generation(),
                 ));
             };
-            let plaintext = self
-                .keys
-                .open_profile_payload(REPOSITORY_PAYLOAD_PURPOSE, &row.encrypted_payload)
-                .map_err(map_key_error)?;
+            let reader = match self.keys.profile_payload_reader(REPOSITORY_PAYLOAD_PURPOSE) {
+                Ok(reader) => reader,
+                Err(error) => {
+                    *cache = None;
+                    return Err(map_key_error(error));
+                }
+            };
+            let key_binding = reader.cache_binding();
+            // 每次核对完整密文，不能仅靠 nonce、连接版本或提交前通知判断命中。
+            // 因此跨连接修改、事务回滚和密文损坏都会重新进入认证读取。
+            if let Some(cached) = cache.as_ref() {
+                if cached.key_binding == key_binding && cached.ciphertext == row.encrypted_payload {
+                    return Ok(cached.state.clone());
+                }
+            }
+            *cache = None;
+            let plaintext = reader.open(&row.encrypted_payload).map_err(map_key_error)?;
             let state =
                 decode_repository(&plaintext).ok_or(SpaceAdmissionStateStoreError::Corrupt)?;
             if state.format_version != SPACE_ADMISSION_REPOSITORY_FORMAT_V2
@@ -55,6 +84,19 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                     .is_some_and(|id| !state.records.contains_key(&id))
             {
                 return Err(SpaceAdmissionStateStoreError::Corrupt);
+            }
+            let estimated_bytes = row
+                .encrypted_payload
+                .len()
+                .saturating_add(plaintext.len())
+                .saturating_add(state.records.len().saturating_mul(256))
+                .saturating_add(state.claimed_invitations.len().saturating_mul(128));
+            if estimated_bytes <= MAX_READ_CACHE_BYTES {
+                *cache = Some(RepositoryReadCache {
+                    key_binding,
+                    ciphertext: row.encrypted_payload,
+                    state: state.clone(),
+                });
             }
             Ok(state)
         })
@@ -135,7 +177,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             .map_err(map_key_error)?;
         Ok(StoredSpaceAdmissionV1 {
             wrapped_data_key,
-            encrypted_payload,
+            encrypted_payload: encrypted_payload.into(),
         })
     }
 }
