@@ -19,6 +19,7 @@ use crate::transfer::receive::reconciliation::{
 };
 
 use super::session::{ReceiverTransferHandle, ReceiverTransferHandleRegistry};
+use super::shutdown;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReceiverTransferRegistration {
@@ -151,36 +152,14 @@ impl FileTransferFacade {
     }
 
     pub async fn close(&self) -> Result<(), FileTransferApplicationError> {
-        let _creation = self.sessions.lock_creation().await;
-        let sessions = self.sessions.close_and_snapshot().await;
-        Self::cancel_sessions(sessions, uc_core::FileTransferCancellationReason::Unknown).await
+        shutdown::close(Arc::clone(&self.sessions)).await
     }
 
     pub async fn cancel_active_sessions(
         &self,
         reason: uc_core::FileTransferCancellationReason,
     ) -> Result<(), FileTransferApplicationError> {
-        let _creation = self.sessions.lock_creation().await;
-        let sessions = self.sessions.snapshot().await;
-        Self::cancel_sessions(sessions, reason).await
-    }
-
-    async fn cancel_sessions(
-        sessions: Vec<Arc<ReceiverTransferHandle>>,
-        reason: uc_core::FileTransferCancellationReason,
-    ) -> Result<(), FileTransferApplicationError> {
-        let mut first_error = None;
-        for session in sessions {
-            match session.cancel(reason).await {
-                Ok(_) | Err(FileTransferApplicationError::TransferAlreadyFinished { .. }) => {}
-                Err(error) if first_error.is_none() => first_error = Some(error),
-                Err(_) => {}
-            }
-        }
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
+        shutdown::cancel_active(Arc::clone(&self.sessions), reason).await
     }
 
     async fn register_receiver(

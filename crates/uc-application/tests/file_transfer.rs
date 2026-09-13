@@ -1,4 +1,7 @@
 use std::error::Error as _;
+
+#[path = "file_transfer/shutdown.rs"]
+mod shutdown;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
