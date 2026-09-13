@@ -122,10 +122,11 @@ where
         stop_network_recovery,
         stop_resource_users(actions, deadline),
     );
-    match recovery {
-        Ok(()) if outcome.resources_can_close() => actions.close_local_resources(),
-        Ok(()) => {}
-        Err(error) => outcome.errors.insert(0, error),
+    if outcome.resources_can_close() {
+        actions.close_local_resources();
+    }
+    if let Err(error) = recovery {
+        outcome.errors.insert(0, error);
     }
     outcome
 }
@@ -366,7 +367,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn network_recovery_failure_keeps_local_resources_open() {
+    async fn completed_network_recovery_failure_does_not_block_local_resource_close() {
         let actions = RecordingActions {
             calls: Mutex::new(Vec::new()),
             fail_session: false,
@@ -383,7 +384,7 @@ mod tests {
         assert_eq!(outcome.errors.len(), 1);
         assert_eq!(
             *actions.calls.lock().unwrap(),
-            vec!["session", "transfers", "tasks"]
+            vec!["session", "transfers", "tasks", "resources"]
         );
     }
 
