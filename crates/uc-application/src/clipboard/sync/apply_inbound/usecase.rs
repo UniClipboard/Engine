@@ -42,7 +42,7 @@ use crate::search::live_index::{
     ClipboardLiveIndexInput, ClipboardLiveIndexOutcome, ClipboardLiveIndexPort,
 };
 
-use super::super::work::WorkOwner;
+use super::super::work::{OwnedWork, WorkOwner};
 use super::materializer::{
     is_directory_cancel_error, verify_file_set_identity, DirectoryPublication,
     InboundBlobMaterializer, MaterializeOutcome, ReceiveWorkPlan, RollbackOutcome,
@@ -53,6 +53,9 @@ use super::{ApplyInboundError, ApplyInboundInput, ApplyOutcome};
 
 const RECENT_INBOUND_MAX_RECORDS: u64 = 128;
 
+mod owned;
+
+#[derive(Clone)]
 pub struct ApplyInboundClipboardUseCase {
     work: WorkOwner,
     entry_repo: Arc<dyn FindEntryIdBySnapshotHashPort>,
@@ -98,6 +101,7 @@ pub struct ApplyInboundClipboardUseCase {
     search_live_index: Option<Arc<dyn ClipboardLiveIndexPort>>,
 }
 
+#[derive(Clone)]
 enum InboundApplyMode {
     InteractiveReceive {
         write: Arc<dyn InboundWrite>,
@@ -154,6 +158,7 @@ pub(crate) struct StoreOnlyPullDeps {
 }
 
 /// Ports needed to re-activate an already-held entry on a dedup hit.
+#[derive(Clone)]
 struct ResurfacePorts {
     /// Rebuilds the snapshot from local storage, so re-activating held content
     /// never re-downloads the sender's payload.
@@ -163,6 +168,7 @@ struct ResurfacePorts {
     touch_entry: Arc<dyn TouchClipboardEntryPort>,
 }
 
+#[derive(Clone)]
 struct ReceiveAttemptPorts {
     get: Arc<dyn GetEntryAttemptPort>,
     begin: Arc<dyn BeginReceiveAttemptPort>,
@@ -902,7 +908,7 @@ impl ApplyInboundClipboardUseCase {
         &self,
         input: ApplyInboundInput,
     ) -> Result<ApplyOutcome, ApplyInboundError> {
-        self.execute_internal(input, None).await
+        self.execute_owned(input, None).await
     }
 
     pub async fn execute_with_provisional(
@@ -911,7 +917,7 @@ impl ApplyInboundClipboardUseCase {
         provisional_transfer_id: String,
         role: ReceiveItemRole,
     ) -> Result<ApplyOutcome, ApplyInboundError> {
-        self.execute_internal(input, Some((provisional_transfer_id, role)))
+        self.execute_owned(input, Some((provisional_transfer_id, role)))
             .await
     }
 
@@ -927,10 +933,14 @@ impl ApplyInboundClipboardUseCase {
         &self,
         input: ApplyInboundInput,
         provisional: Option<(String, ReceiveItemRole)>,
+        work: &OwnedWork,
     ) -> Result<ApplyOutcome, ApplyInboundError> {
-        let work = self.work.begin().ok_or(ApplyInboundError::Stopped)?;
         if let Some(readiness) = &self.receive_readiness {
-            readiness.wait_ready().await;
+            tokio::select! {
+                biased;
+                _ = work.stopped() => return Err(ApplyInboundError::Stopped),
+                _ = readiness.wait_ready() => {}
+            }
         }
         // 1. Decode V3 envelope. Decode failure is non-fatal — drop the
         // frame, keep the loop alive (peer may be on a newer wire).

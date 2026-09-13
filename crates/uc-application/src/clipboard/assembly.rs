@@ -573,9 +573,11 @@ impl ClipboardSession {
 
     pub async fn shutdown(self) -> Result<(), Arc<LifecycleError>> {
         tokio::spawn(async move {
-            let sync = self.sync.shutdown().await;
-            let dispatch = self.dispatch.shutdown().await;
-            let inbound = self.apply_inbound.shutdown().await;
+            let (sync, dispatch, inbound) = tokio::join!(
+                self.sync.shutdown(),
+                self.dispatch.shutdown(),
+                self.apply_inbound.shutdown(),
+            );
             let mut errors = Vec::new();
             if let Err(source) = sync {
                 errors.push(anyhow::Error::new(source).context("stop clipboard synchronization"));

@@ -10,7 +10,7 @@ use crate::runtime_lifecycle::LifecycleError;
 #[cfg(test)]
 mod tests;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct WorkOwner(Arc<Shared>);
 
 #[derive(Default)]
@@ -40,6 +40,7 @@ impl WorkOwner {
 
     pub(super) async fn shutdown(&self) -> Result<(), LifecycleError> {
         self.0.state().closed = true;
+        self.0.changed.notify_waiters();
         loop {
             let changed = self.0.changed.notified();
             tokio::pin!(changed);
@@ -63,6 +64,18 @@ impl WorkOwner {
 }
 
 impl OwnedWork {
+    pub(super) async fn stopped(&self) {
+        loop {
+            let changed = self.0.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.0.state().closed {
+                return;
+            }
+            changed.await;
+        }
+    }
+
     pub(super) fn spawn(
         self,
         kind: DiagnosticTaskKind,
@@ -84,10 +97,13 @@ impl OwnedWork {
         Self(Arc::clone(&self.0))
     }
 
-    pub(super) fn failed(&self, source: JoinError) {
+    pub(super) fn failed(&self, source: JoinError) -> Arc<JoinError> {
+        let source = Arc::new(source);
         let mut state = self.0.state();
         state.closed = true;
-        state.failures.push(Arc::new(source));
+        state.failures.push(Arc::clone(&source));
+        self.0.changed.notify_waiters();
+        source
     }
 }
 
