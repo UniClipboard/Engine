@@ -107,7 +107,7 @@ fn ios_device_commands_publish_pollable_timing_evidence() {
 }
 
 #[test]
-fn android_probe_scripts_require_an_explicit_emulator() {
+fn android_probe_scripts_use_an_explicit_emulator_and_repository_build_cache() {
     let root = workspace_root();
     let command = read(root.join("tests/hosts/android/probe-command.sh"));
     let install = read(root.join("tests/hosts/android/install-emulator.sh"));
@@ -117,7 +117,8 @@ fn android_probe_scripts_require_an_explicit_emulator() {
     assert!(command.contains("adb -s \"$ANDROID_SERIAL\""));
     assert!(install.contains("ANDROID_SERIAL"));
     assert!(install.contains("adb -s \"$ANDROID_SERIAL\""));
-    assert!(build.contains("mktemp -d"));
+    assert!(build.contains("$REPO_ROOT/target/android-probe-cargo"));
+    assert!(!build.contains("mktemp -d"));
 }
 
 #[test]
