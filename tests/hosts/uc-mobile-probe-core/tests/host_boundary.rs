@@ -100,6 +100,7 @@ fn ios_device_commands_publish_pollable_timing_evidence() {
     assert!(probe.contains("deadline_ms: Option<u64>"));
     assert!(probe.contains("SuspendDuringClipboardRead"));
     assert!(probe.contains("SuspendDuringClipboardWrite"));
+    assert!(probe.contains("SuspendDuringFileRead"));
     assert!(probe.contains("started_at.elapsed()"));
 }
 

@@ -1,10 +1,6 @@
-use std::collections::HashMap;
 use std::ffi::{c_char, CStr, CString};
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::ptr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -19,17 +15,19 @@ use uc_engine::{
     },
     CreateSpaceInput, Engine, EngineConfig, EngineError, EngineEvent, ExportEntryInput,
     HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory, HostDirectories,
-    HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage, JoinSpaceInput, Operation,
-    OperationResult, QueryHistoryInput, RemoveMemberInput, ResendEntryInput, SecretString,
-    SendFilesInput, SendImageInput, SendTextInput, UnlockSpaceInput,
+    HostSecureStorage, JoinSpaceInput, Operation, OperationResult, QueryHistoryInput,
+    RemoveMemberInput, ResendEntryInput, SecretString, SendFilesInput, SendImageInput,
+    SendTextInput, UnlockSpaceInput,
 };
 
 #[cfg(target_os = "android")]
 mod android;
 mod clipboard;
+mod file_access;
 mod lifecycle_scenario;
 
 use clipboard::ProbeClipboard;
+use file_access::ProbeFiles;
 
 #[cfg(target_vendor = "apple")]
 const KEYCHAIN_SERVICE: &str = "app.uniclipboard.engine-probe";
@@ -109,6 +107,10 @@ enum ProbeCommand {
         block_ms: u64,
         deadline_ms: u64,
     },
+    SuspendDuringFileRead {
+        block_ms: u64,
+        deadline_ms: u64,
+    },
     Resume,
     EventSummary,
     Shutdown,
@@ -172,110 +174,6 @@ struct EventSummary {
     member_removal_changes: u64,
     last_workspace_phase: Option<String>,
     last_re_pairing_scope: Option<String>,
-}
-
-#[derive(Clone)]
-struct RegisteredFile {
-    path: PathBuf,
-    display_name: String,
-    mime_type: Option<String>,
-}
-
-#[derive(Clone, Default)]
-struct ProbeFiles {
-    next_handle: Arc<AtomicU64>,
-    files: Arc<Mutex<HashMap<String, RegisteredFile>>>,
-}
-
-impl ProbeFiles {
-    fn register(
-        &self,
-        path: PathBuf,
-        display_name: String,
-        mime_type: Option<String>,
-    ) -> HostFileHandle {
-        let handle = format!(
-            "probe-file-{}",
-            self.next_handle.fetch_add(1, Ordering::Relaxed)
-        );
-        lock_unpoisoned(&self.files).insert(
-            handle.clone(),
-            RegisteredFile {
-                path,
-                display_name,
-                mime_type,
-            },
-        );
-        HostFileHandle::new(handle)
-    }
-
-    fn lookup(&self, handle: &HostFileHandle) -> Result<RegisteredFile, HostCapabilityError> {
-        lock_unpoisoned(&self.files)
-            .get(handle.as_str())
-            .cloned()
-            .ok_or_else(|| host_error(HostCapabilityErrorCategory::InvalidHandle))
-    }
-}
-
-impl HostFileAccess for ProbeFiles {
-    fn metadata(&self, handle: &HostFileHandle) -> Result<HostFileMetadata, HostCapabilityError> {
-        let file = self.lookup(handle)?;
-        let metadata = std::fs::metadata(&file.path)
-            .map_err(|_| host_error(HostCapabilityErrorCategory::Io))?;
-        Ok(HostFileMetadata {
-            display_name: file.display_name,
-            size_bytes: metadata.len(),
-            mime_type: file.mime_type,
-        })
-    }
-
-    fn read_chunk(
-        &self,
-        handle: &HostFileHandle,
-        offset: u64,
-        max_bytes: u32,
-    ) -> Result<Vec<u8>, HostCapabilityError> {
-        let file = self.lookup(handle)?;
-        let mut input =
-            File::open(file.path).map_err(|_| host_error(HostCapabilityErrorCategory::Io))?;
-        input
-            .seek(SeekFrom::Start(offset))
-            .map_err(|_| host_error(HostCapabilityErrorCategory::Io))?;
-        let mut bytes = vec![0; max_bytes as usize];
-        let read = input
-            .read(&mut bytes)
-            .map_err(|_| host_error(HostCapabilityErrorCategory::Io))?;
-        bytes.truncate(read);
-        Ok(bytes)
-    }
-
-    fn write_chunk(
-        &self,
-        handle: &HostFileHandle,
-        offset: u64,
-        bytes: &[u8],
-    ) -> Result<(), HostCapabilityError> {
-        let file = self.lookup(handle)?;
-        let mut output = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(file.path)
-            .map_err(|_| host_error(HostCapabilityErrorCategory::Io))?;
-        output
-            .seek(SeekFrom::Start(offset))
-            .and_then(|_| output.write_all(bytes))
-            .map_err(|_| host_error(HostCapabilityErrorCategory::Io))
-    }
-
-    fn finish_write(&self, handle: &HostFileHandle) -> Result<(), HostCapabilityError> {
-        let file = self.lookup(handle)?;
-        OpenOptions::new()
-            .write(true)
-            .open(file.path)
-            .and_then(|output| output.sync_all())
-            .map_err(|_| host_error(HostCapabilityErrorCategory::Io))
-    }
 }
 
 #[cfg(target_vendor = "apple")]
@@ -581,6 +479,10 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
             block_ms,
             deadline_ms,
         } => lifecycle_scenario::suspend_during_clipboard_write(state, block_ms, deadline_ms).await,
+        ProbeCommand::SuspendDuringFileRead {
+            block_ms,
+            deadline_ms,
+        } => lifecycle_scenario::suspend_during_file_read(state, block_ms, deadline_ms).await,
         ProbeCommand::Resume => match state.engine.as_ref() {
             Some(engine) => {
                 let started_at = Instant::now();
@@ -1661,6 +1563,19 @@ mod tests {
             r#"{"command":"suspend_during_clipboard_write","block_ms":10,"deadline_ms":100}"#,
         )
         .expect("busy clipboard write command must deserialize");
+        let mut state = ProbeState::default();
+
+        let response = execute_command(&mut state, command).await;
+
+        assert_eq!(response, probe_error("not_started"));
+    }
+
+    #[tokio::test]
+    async fn busy_file_read_command_reaches_the_engine_boundary() {
+        let command: ProbeCommand = serde_json::from_str(
+            r#"{"command":"suspend_during_file_read","block_ms":10,"deadline_ms":100}"#,
+        )
+        .expect("busy file read command must deserialize");
         let mut state = ProbeState::default();
 
         let response = execute_command(&mut state, command).await;

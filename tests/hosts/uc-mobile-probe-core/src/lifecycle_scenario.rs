@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use uc_engine::{
     ClipboardRestoreMode, Operation, OperationResult, QueryHistoryInput, RestoreClipboardInput,
+    SendFilesInput,
 };
 
 use super::{engine_error_kind, probe_error, ProbeState};
@@ -142,6 +143,70 @@ pub(super) async fn suspend_during_clipboard_write(
             "elapsed_ms": elapsed_ms,
             "block_ms": block_ms,
             "restore": restore,
+        }),
+    }
+}
+
+pub(super) async fn suspend_during_file_read(
+    state: &ProbeState,
+    block_ms: u64,
+    deadline_ms: u64,
+) -> Value {
+    const FIXTURE_BYTES: usize = 1024 * 1024;
+
+    let Some(engine) = state.engine.as_ref().cloned() else {
+        return probe_error("not_started");
+    };
+    let handle = state.files.register_fixture(vec![0x5a; FIXTURE_BYTES]);
+    state.files.prepare_blocked_read();
+    let send = tokio::spawn({
+        let engine = Arc::clone(&engine);
+        async move {
+            engine
+                .execute(Operation::SendFiles(SendFilesInput {
+                    files: vec![handle],
+                    target_devices: Vec::new(),
+                }))
+                .await
+        }
+    });
+    if tokio::time::timeout(Duration::from_secs(5), state.files.wait_until_read_starts())
+        .await
+        .is_err()
+    {
+        state.files.release_read();
+        let _ = send.await;
+        return probe_error("file_read_not_started");
+    }
+    let files = state.files.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(block_ms)).await;
+        files.release_read();
+    });
+    let started_at = Instant::now();
+    let suspend = engine
+        .suspend_with_deadline(Duration::from_millis(deadline_ms))
+        .await;
+    let elapsed_ms = started_at.elapsed().as_millis();
+    let outcome = match send.await {
+        Ok(Ok(_)) => "completed",
+        Ok(Err(_)) => "cancelled",
+        Err(_) => "failed",
+    };
+    match suspend {
+        Ok(()) => json!({
+            "ok": true,
+            "kind": "suspended_during_file_read",
+            "elapsed_ms": elapsed_ms,
+            "block_ms": block_ms,
+            "outcome": outcome,
+        }),
+        Err(error) => json!({
+            "ok": false,
+            "kind": engine_error_kind(&error),
+            "elapsed_ms": elapsed_ms,
+            "block_ms": block_ms,
+            "outcome": outcome,
         }),
     }
 }
