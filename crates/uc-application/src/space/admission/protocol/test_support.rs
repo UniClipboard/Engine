@@ -117,6 +117,7 @@ pub(super) struct SpaceAdmissionProtocolTestPair {
     sponsor_state: Arc<RecordingSponsorState>,
     admission_status_invalidations: Arc<AtomicUsize>,
     upgrade_pending: Arc<AtomicBool>,
+    space_transition_changes: Mutex<tokio::sync::watch::Receiver<()>>,
 }
 
 struct AdmissionStatusEventRecorder(Arc<AtomicUsize>);
@@ -1439,6 +1440,7 @@ impl SpaceAdmissionProtocolTestPair {
         let events = Arc::new(Mutex::new(Vec::new()));
         let upgrade_pending = Arc::new(AtomicBool::new(mode.upgrade_on().is_some()));
         let admission_status_invalidations = Arc::new(AtomicUsize::new(0));
+        let (space_transition_wake, space_transition_changes) = tokio::sync::watch::channel(());
         let host_events = Arc::new(crate::facade::HostEventBus::new());
         host_events.register(
             "space-admission-test",
@@ -1484,6 +1486,7 @@ impl SpaceAdmissionProtocolTestPair {
                     Arc::new(RecordingMaintenanceWake {
                         events: Arc::clone(&events),
                     }),
+                    space_transition_wake.clone(),
                     Arc::new(UnusedSponsorPorts),
                     Arc::new(SpaceAdmissionObservationRegistry::default()),
                 ),
@@ -1528,6 +1531,7 @@ impl SpaceAdmissionProtocolTestPair {
                     Arc::new(RecordingMaintenanceWake {
                         events: Arc::clone(&events),
                     }),
+                    space_transition_wake,
                     Arc::new(UnusedSponsorPorts),
                     Arc::new(SpaceAdmissionObservationRegistry::default()),
                 ),
@@ -1554,6 +1558,7 @@ impl SpaceAdmissionProtocolTestPair {
             sponsor_state,
             admission_status_invalidations,
             upgrade_pending,
+            space_transition_changes: Mutex::new(space_transition_changes),
         }
     }
 
@@ -1583,6 +1588,14 @@ impl SpaceAdmissionProtocolTestPair {
 
     pub(super) fn admission_status_invalidation_count(&self) -> usize {
         self.admission_status_invalidations.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn space_transition_change_pending(&self) -> bool {
+        self.space_transition_changes
+            .lock()
+            .expect("Space transition changes are available")
+            .has_changed()
+            .expect("Space transition sender remains active")
     }
 
     pub(super) fn active_joiner_observation_count(&self) -> usize {

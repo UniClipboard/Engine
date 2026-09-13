@@ -14,6 +14,7 @@ async fn protocol_queries_and_completes_the_saved_activation_as_one_action() {
             .await;
     }
 
+    assert!(pair.space_transition_change_pending());
     assert!(pair
         .joiner()
         .has_pending_space_transition()

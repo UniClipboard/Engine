@@ -77,6 +77,7 @@ struct SpaceApplicationDeps {
     settings: Arc<dyn uc_core::ports::SettingsPort>,
     host_event_bus: Arc<crate::facade::HostEventBus>,
     admission_observations: Arc<SpaceAdmissionObservationRegistry>,
+    space_transition_changes: tokio::sync::watch::Sender<()>,
 }
 
 impl SpaceApplicationDeps {
@@ -84,6 +85,7 @@ impl SpaceApplicationDeps {
         application: &ApplicationDeps,
         adapters: SpaceRuntimeAdapters,
         admission_observations: Arc<SpaceAdmissionObservationRegistry>,
+        space_transition_changes: tokio::sync::watch::Sender<()>,
     ) -> Self {
         Self {
             adapters,
@@ -93,6 +95,7 @@ impl SpaceApplicationDeps {
             settings: Arc::clone(&application.settings),
             host_event_bus: Arc::clone(&application.host_event_bus),
             admission_observations,
+            space_transition_changes,
         }
     }
 }
@@ -123,9 +126,15 @@ impl SpaceApplication {
         peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
         re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
         admission_observations: Arc<SpaceAdmissionObservationRegistry>,
+        space_transition_changes: tokio::sync::watch::Sender<()>,
     ) -> Self {
         Self::build_from_deps(
-            SpaceApplicationDeps::from_application(application, adapters, admission_observations),
+            SpaceApplicationDeps::from_application(
+                application,
+                adapters,
+                admission_observations,
+                space_transition_changes,
+            ),
             peer_reachability_changed_events,
             re_pairing,
         )
@@ -151,6 +160,7 @@ impl SpaceApplication {
                 settings,
                 host_event_bus,
                 admission_observations: Arc::new(SpaceAdmissionObservationRegistry::default()),
+                space_transition_changes: tokio::sync::watch::channel(()).0,
             },
             peer_reachability_changed_events,
             re_pairing,
@@ -174,6 +184,7 @@ impl SpaceApplication {
             settings,
             host_event_bus,
             admission_observations,
+            space_transition_changes,
         } = deps;
         let SpaceAdmissionAdapters {
             re_pairing_state_store: _,
@@ -267,6 +278,7 @@ impl SpaceApplication {
             joiner_activation_state,
             execute_joiner_activation,
             deferred_maintenance_wake.clone(),
+            space_transition_changes,
             Arc::clone(&re_pairing),
             admission_observations,
         );

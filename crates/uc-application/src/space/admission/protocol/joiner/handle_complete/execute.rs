@@ -55,7 +55,10 @@ impl JoinerAdmissionService {
             .commit_recovery_with_optional_notification(token, transition, notify_upgrade_cleared)
             .await;
         match commit_result {
-            Ok(_) => report.advanced_count += 1,
+            Ok(_) => {
+                report.advanced_count += 1;
+                self.space_transition_changes.send_replace(());
+            }
             Err(error) => recovery.record_state_error(report, error),
         }
     }

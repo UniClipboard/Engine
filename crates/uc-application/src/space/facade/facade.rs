@@ -101,6 +101,7 @@ impl SpaceFacade {
             runtime_adapters,
             peer_reachability_changed_events,
             admission_observations,
+            space_transition_changes,
         } = deps;
         let SpaceTransitionDeps {
             device_management_reset_data,
@@ -118,6 +119,7 @@ impl SpaceFacade {
             Arc::clone(&re_pairing_state)
                 as Arc<dyn crate::space::membership::ResolveRePairingPort>,
             admission_observations,
+            space_transition_changes,
         );
         let membership_initializer = application.initialize_membership();
         let membership_admission = application.query_membership_admission();

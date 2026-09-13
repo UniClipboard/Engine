@@ -55,6 +55,7 @@ pub(crate) struct JoinerAdmissionService {
     pub(super) activation_state: Arc<dyn JoinerActivationStatePort>,
     pub(super) execute_activation: Arc<dyn ExecuteJoinerActivationPort>,
     pub(super) maintenance_wake: Arc<dyn WakeSpaceMembershipMaintenancePort>,
+    pub(super) space_transition_changes: tokio::sync::watch::Sender<()>,
     pub(super) re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
     pub(super) observations: Arc<SpaceAdmissionObservationRegistry>,
 }
@@ -74,6 +75,7 @@ impl JoinerAdmissionService {
         activation_state: Arc<dyn JoinerActivationStatePort>,
         execute_activation: Arc<dyn ExecuteJoinerActivationPort>,
         maintenance_wake: Arc<dyn WakeSpaceMembershipMaintenancePort>,
+        space_transition_changes: tokio::sync::watch::Sender<()>,
         re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
         observations: Arc<SpaceAdmissionObservationRegistry>,
     ) -> Self {
@@ -91,6 +93,7 @@ impl JoinerAdmissionService {
             activation_state,
             execute_activation,
             maintenance_wake,
+            space_transition_changes,
             re_pairing,
             observations,
         }
