@@ -25,6 +25,7 @@ mod android;
 mod clipboard;
 mod file_access;
 mod lifecycle_scenario;
+mod secure_storage;
 
 use clipboard::ProbeClipboard;
 use file_access::ProbeFiles;
@@ -112,6 +113,10 @@ enum ProbeCommand {
         deadline_ms: u64,
     },
     SuspendDuringFileWrite {
+        block_ms: u64,
+        deadline_ms: u64,
+    },
+    SuspendDuringStartup {
         block_ms: u64,
         deadline_ms: u64,
     },
@@ -225,9 +230,16 @@ impl HostSecureStorage for UnavailableSecureStorage {
     }
 }
 
+#[derive(Clone)]
+struct ProbeStartConfig {
+    engine: EngineConfig,
+    directories: HostDirectories,
+}
+
 #[derive(Default)]
 struct ProbeState {
     engine: Option<Arc<Engine>>,
+    start_config: Option<ProbeStartConfig>,
     observability: Option<ProcessObservabilityHandle>,
     files: ProbeFiles,
     clipboard: ProbeClipboard,
@@ -284,21 +296,21 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
                 Err(_) => return probe_error("observability_install_failed"),
             };
             state.observability = Some(observability);
+            let engine_config = EngineConfig::new(app_version);
+            let start_config = ProbeStartConfig {
+                engine: engine_config.clone(),
+                directories: directories.clone(),
+            };
             let host = HostCapabilities::new(
                 directories,
                 host_secure_storage(),
                 Box::new(state.clipboard.clone()),
                 Box::new(state.files.clone()),
             );
-            match Engine::start(EngineConfig::new(app_version), host).await {
-                Ok((engine, mut stream)) => {
-                    let events = Arc::clone(&state.events);
-                    tokio::spawn(async move {
-                        while let Some(event) = stream.next().await {
-                            record_event(&events, event);
-                        }
-                    });
-                    state.engine = Some(Arc::new(engine));
+            match Engine::start(engine_config, host).await {
+                Ok((engine, stream)) => {
+                    state.start_config = Some(start_config);
+                    store_engine(state, engine, stream);
                     json!({"ok": true, "kind": "started"})
                 }
                 Err(error) => engine_error(error),
@@ -491,6 +503,10 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
             block_ms,
             deadline_ms,
         } => lifecycle_scenario::suspend_during_file_write(state, block_ms, deadline_ms).await,
+        ProbeCommand::SuspendDuringStartup {
+            block_ms,
+            deadline_ms,
+        } => lifecycle_scenario::suspend_during_startup(state, block_ms, deadline_ms).await,
         ProbeCommand::Resume => match state.engine.as_ref() {
             Some(engine) => {
                 let started_at = Instant::now();
@@ -1397,6 +1413,16 @@ fn lifecycle_response(result: Result<(), EngineError>, kind: &str, elapsed: Dura
     response
 }
 
+fn store_engine(state: &mut ProbeState, engine: Engine, mut stream: uc_engine::EventStream) {
+    let events = Arc::clone(&state.events);
+    tokio::spawn(async move {
+        while let Some(event) = stream.next().await {
+            record_event(&events, event);
+        }
+    });
+    state.engine = Some(Arc::new(engine));
+}
+
 #[allow(unreachable_patterns)]
 fn record_event(summary: &Arc<Mutex<EventSummary>>, event: EngineEvent) {
     let mut summary = lock_unpoisoned(summary);
@@ -1597,6 +1623,19 @@ mod tests {
             r#"{"command":"suspend_during_file_write","block_ms":10,"deadline_ms":100}"#,
         )
         .expect("busy file write command must deserialize");
+        let mut state = ProbeState::default();
+
+        let response = execute_command(&mut state, command).await;
+
+        assert_eq!(response, probe_error("not_started"));
+    }
+
+    #[tokio::test]
+    async fn busy_startup_command_reaches_the_engine_boundary() {
+        let command: ProbeCommand = serde_json::from_str(
+            r#"{"command":"suspend_during_startup","block_ms":10,"deadline_ms":100}"#,
+        )
+        .expect("busy startup command must deserialize");
         let mut state = ProbeState::default();
 
         let response = execute_command(&mut state, command).await;

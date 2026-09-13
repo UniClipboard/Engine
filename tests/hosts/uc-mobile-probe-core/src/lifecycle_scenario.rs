@@ -3,11 +3,12 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use uc_engine::{
-    ClipboardRestoreMode, ExportEntryInput, Operation, OperationResult, QueryHistoryInput,
-    RestoreClipboardInput, SendFilesInput,
+    ClipboardRestoreMode, ExportEntryInput, HostCapabilities, Operation, OperationResult,
+    QueryHistoryInput, RestoreClipboardInput, SendFilesInput, StartupLifecycle, StartupProgress,
 };
 
-use super::{engine_error_kind, probe_error, ProbeState};
+use super::secure_storage::ControlledSecureStorage;
+use super::{engine_error_kind, host_secure_storage, probe_error, store_engine, ProbeState};
 
 pub(super) async fn suspend_during_clipboard_read(
     state: &ProbeState,
@@ -283,5 +284,90 @@ async fn latest_history_entry_id(engine: &uc_engine::Engine) -> Result<String, V
             .ok_or_else(|| probe_error("history_empty")),
         Ok(_) => Err(probe_error("history_unavailable")),
         Err(error) => Err(probe_error(engine_error_kind(&error))),
+    }
+}
+
+pub(super) async fn suspend_during_startup(
+    state: &mut ProbeState,
+    block_ms: u64,
+    deadline_ms: u64,
+) -> Value {
+    let Some(engine) = state.engine.take() else {
+        return probe_error("not_started");
+    };
+    let Some(start_config) = state.start_config.clone() else {
+        state.engine = Some(engine);
+        return probe_error("startup_config_unavailable");
+    };
+    if let Err(error) = engine.shutdown(Duration::from_secs(15)).await {
+        return probe_error(engine_error_kind(&error));
+    }
+
+    let storage = ControlledSecureStorage::new(host_secure_storage());
+    storage.prepare_blocked_get();
+    let host = HostCapabilities::new(
+        start_config.directories,
+        Box::new(storage.clone()),
+        Box::new(state.clipboard.clone()),
+        Box::new(state.files.clone()),
+    );
+    let (progress_input, _) = StartupProgress::channel();
+    let (lifecycle_input, lifecycle) = StartupLifecycle::channel();
+    let startup = tokio::spawn(uc_engine::Engine::start_with_lifecycle(
+        start_config.engine,
+        host,
+        progress_input,
+        lifecycle_input,
+    ));
+    if tokio::time::timeout(Duration::from_secs(5), storage.wait_until_get_starts())
+        .await
+        .is_err()
+    {
+        storage.release_get();
+        if let Ok(Ok((engine, stream))) = startup.await {
+            store_engine(state, engine, stream);
+        }
+        return probe_error("secure_storage_get_not_started");
+    }
+    let storage_release = storage.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(block_ms)).await;
+        storage_release.release_get();
+    });
+    let started_at = Instant::now();
+    let suspend = lifecycle
+        .suspend_with_deadline(Duration::from_millis(deadline_ms))
+        .await;
+    let elapsed_ms = started_at.elapsed().as_millis();
+    let startup = startup.await;
+    let startup_completed = match startup {
+        Ok(Ok((engine, stream))) => {
+            store_engine(state, engine, stream);
+            true
+        }
+        Ok(Err(_)) | Err(_) => false,
+    };
+    match (suspend, startup_completed) {
+        (Ok(()), true) => json!({
+            "ok": true,
+            "kind": "suspended_during_startup",
+            "elapsed_ms": elapsed_ms,
+            "block_ms": block_ms,
+            "outcome": "completed",
+        }),
+        (Ok(()), false) => json!({
+            "ok": false,
+            "kind": "startup_failed",
+            "elapsed_ms": elapsed_ms,
+            "block_ms": block_ms,
+            "outcome": "failed",
+        }),
+        (Err(error), completed) => json!({
+            "ok": false,
+            "kind": engine_error_kind(&error),
+            "elapsed_ms": elapsed_ms,
+            "block_ms": block_ms,
+            "outcome": if completed { "completed" } else { "failed" },
+        }),
     }
 }
