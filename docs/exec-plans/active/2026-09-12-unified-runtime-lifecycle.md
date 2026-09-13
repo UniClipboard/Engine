@@ -303,7 +303,7 @@ impl RuntimeLifecycleCoordinator {
 | 工作或资源 | 当前唯一所有者与代码入口 | 当前停止与恢复方式 | 临界区与缺口 | 实际验证入口 |
 | --- | --- | --- | --- | --- |
 | 宿主操作 | `crates/uc-engine/src/engine/operation.rs` 与 `crates/uc-engine/src/engine/in_flight.rs` | 操作门先拒绝新工作；已登记动作由独立所有者完成，暂停等待实际退出 | 专用 iOS 宿主已证明文件导入读取或导出写入结束前暂停不成功，50 毫秒期限到期会明确报告未完成并继续收尾；其余动作仍需测量最坏时长 | Engine 操作取消、真实数据库锁竞争、iOS 文件读写及启动中切换测试 |
-| 生命周期命令与启动交接 | `crates/uc-engine/src/engine/lifecycle/queue.rs`、`crates/uc-engine/src/engine/startup_owner.rs` | 单一队列保存顺序与最新目标；启动前后转交同一运行期，等待方离开不取消收尾 | 专用 iOS 宿主已证明安全存储读取阻塞期间收到的暂停会在启动完成前落实；其他启动资源和平台仍需核对 | Engine 生命周期、启动所有者、UniFFI 公开合同及 iOS 启动中切换测试 |
+| 生命周期命令与启动交接 | `crates/uc-engine/src/engine/lifecycle/queue.rs`、`crates/uc-engine/src/engine/startup_owner.rs` | 单一队列保存顺序与最新目标；启动前后转交同一运行期，等待方离开不取消收尾 | 专用 iOS 宿主已证明安全存储读取阻塞期间收到的暂停会在启动完成前落实；50 毫秒期限到期明确报告未完成，启动交接后仍保留暂停目标；其他启动资源和平台仍需核对 | Engine 生命周期、启动所有者、UniFFI 公开合同及 iOS 启动中切换测试 |
 | 会话重建 | `crates/uc-engine/src/runtime/session_supervisor/` | 关闭操作门，完整停止旧会话；本地资料成功恢复后才开门，失败时反向回收 | 整次构造中不可中断步骤仍需设备上界 | 会话生命周期、启动回收及真实宿主离线恢复测试 |
 | Application 领域工作 | `crates/uc-application/src/application/shutdown/owners.rs` | 同时停止历史、文件超时、搜索、Space、普通剪贴板和活动剪贴板，等待全部结果并汇总异常 | 每项内部磁盘动作仍需共同期限证据 | Application shutdown、各领域 lifecycle 测试 |
 | 内容物化与 spool | `crates/uc-infra/src/clipboard/background_runtime.rs`、`crates/uc-infra/src/clipboard/background_activity.rs` | 进程 `TaskRegistry` 持有工作；暂停门等待当前完整磁盘动作后交接 | 大内容读写及目录扫描最坏时长未证明 | background activity、blob worker 与真实保存后重开测试 |
@@ -904,6 +904,13 @@ impl RuntimeLifecycleCoordinator {
 - 物理 iPhone 在文件写入被阻塞 1200 毫秒时执行带 10 秒期限的暂停。暂停在 2207 毫秒后成功，历史导出动作先以取消结果结束；随后恢复耗时 62 毫秒，原资料中的一条历史记录仍可查询。
 - 完成标准：暂停不能在受控文件写入释放前报告成功；设备结果明确包含设定阻塞时长、实际暂停时长和导出终态；恢复后本地资料仍可读取。该结果证明宿主文件导出写入的交接边界，不代表大文件落盘同步、网络传输或文件发布均已有最坏时长。
 - 验证：共享宿主 22 项单元测试和 13 项边界测试通过；iOS 真机构建、覆盖安装、阻塞文件写入暂停、恢复和历史查询通过；Android 安装包构建通过。Android 设备厂商仍要求插入 SIM 卡才允许 USB 更新安装，本场景的 Android 运行记为跳过，不记录通过。
+
+### 2026-09-13：iOS 真机启动短期限保留暂停目标
+
+- 复用真实安全存储启动阻塞场景，把暂停期限缩短为 50 毫秒，同时让读取保持阻塞 1200 毫秒。等待在 52 毫秒时明确返回期限耗尽；启动随后完成，已接收的暂停目标没有因等待结束而撤销。
+- 启动交接后再次请求暂停立即确认已经处于安全状态；随后恢复耗时 63 毫秒，原资料中的两条历史记录仍可查询。
+- 完成标准：启动未完成时短期限不能报告安全，等待结束不能取消已接收的暂停目标；实例交出后可确认暂停并正常恢复。该结果只覆盖专用 iOS 宿主的一次安全存储启动边界。
+- 验证：使用提交 `849ef9a8` 对应的 iOS 真机安装包完成启动短期限、交接后二次确认、恢复和历史查询。Android 设备运行仍因 USB 安装要求插入 SIM 卡而跳过，不记录通过。
 
 ### 2026-09-13：iOS 真机短期限不虚报暂停完成
 
