@@ -19,6 +19,7 @@ use super::artifact::{
     AdmissionSpaceTransitionResult, AdmissionStagedSecurityState, AdmissionStagedTarget,
     AdmissionStagedTargetInput, SpaceAdmissionRoute,
 };
+use super::attempt::AdmissionAttemptTimeline;
 use super::exchange::{
     AdmissionErrorCategory, AdmissionExchangeBlockReason, AdmissionMessageEvidence,
     AdmissionRetryState, PendingAdmissionExchange, SavedAdmissionReply,
@@ -30,7 +31,7 @@ use crate::pairing::invitation::FullInvitation;
 pub use aggregate::{
     AdmissionEffect, AdmissionRecoveryCategory, AdmissionTransition, SpaceAdmissionAggregate,
     SpaceAdmissionAggregateError, SpaceAdmissionRecordState, SpaceAdmissionTerminalState,
-    SPACE_ADMISSION_RECORD_FORMAT_V1,
+    SPACE_ADMISSION_RECORD_FORMAT_V1, SPACE_ADMISSION_RECORD_FORMAT_V2,
 };
 pub use capability::{
     AdmissionRecordPersistence, JoinerAdmission, JoinerAdmissionTransition, SponsorAdmission,
@@ -56,9 +57,10 @@ pub use sponsor::{
 pub use terminal::{
     SpaceAdmissionActivePendingSettlement, SpaceAdmissionActiveSettled, SpaceAdmissionActiveState,
     SpaceAdmissionCompletedTerminal, SpaceAdmissionJoinerRejected,
-    SpaceAdmissionLocalJoinerRejected, SpaceAdmissionRecoveryRequiredTerminal,
-    SpaceAdmissionRejectedState, SpaceAdmissionSponsorRejected, SpaceAdmissionSupersededState,
-    SpaceAdmissionSupersededTerminal,
+    SpaceAdmissionLocalJoinerRejected, SpaceAdmissionLocalJoinerTerminated,
+    SpaceAdmissionRecoveryRequiredTerminal, SpaceAdmissionRejectedState,
+    SpaceAdmissionSponsorRejected, SpaceAdmissionSupersededState, SpaceAdmissionSupersededTerminal,
+    SpaceAdmissionTerminationReason,
 };
 pub use view::{
     AdmissionPendingRecovery, JoinerActivationPreparation, JoinerAppliedPreparation,

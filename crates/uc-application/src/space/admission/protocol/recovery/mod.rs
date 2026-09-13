@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use uc_core::membership::JoinerAdmissionTransition;
+use uc_core::ports::ClockPort;
 
 mod recover_pending;
 
@@ -15,6 +16,7 @@ pub(crate) struct AdmissionRecoveryService {
     pub(super) state: Arc<dyn PendingAdmissionRecoveryStatePort>,
     pub(super) transport: Arc<dyn SpaceAdmissionTransportPort>,
     host_events: Arc<crate::facade::HostEventBus>,
+    pub(super) clock: Arc<dyn ClockPort>,
     pub(super) execution_lock: tokio::sync::Mutex<()>,
 }
 
@@ -23,11 +25,13 @@ impl AdmissionRecoveryService {
         state: Arc<dyn PendingAdmissionRecoveryStatePort>,
         transport: Arc<dyn SpaceAdmissionTransportPort>,
         host_events: Arc<crate::facade::HostEventBus>,
+        clock: Arc<dyn ClockPort>,
     ) -> Self {
         Self {
             state,
             transport,
             host_events,
+            clock,
             execution_lock: tokio::sync::Mutex::new(()),
         }
     }

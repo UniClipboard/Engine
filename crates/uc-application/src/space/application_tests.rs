@@ -848,12 +848,15 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
 
     let joined = application
         .space_admission()
-        .start_join(JoinSpaceInput {
-            invitation_code: uc_core::pairing::InvitationCode::new("join-code"),
-            device_name: Some("New Device".to_owned()),
-            passphrase: uc_core::crypto::domain::Passphrase::new("passphrase"),
-            preserve_unreadable_history: false,
-        })
+        .start_join_at(
+            JoinSpaceInput {
+                invitation_code: uc_core::pairing::InvitationCode::new("join-code"),
+                device_name: Some("New Device".to_owned()),
+                passphrase: uc_core::crypto::domain::Passphrase::new("passphrase"),
+                preserve_unreadable_history: false,
+            },
+            1_800_000_000_000,
+        )
         .await
         .expect("new protocol JoinSpace should return after saving Pending");
     assert!(matches!(joined.status, CurrentJoinStatus::Pending { .. }));

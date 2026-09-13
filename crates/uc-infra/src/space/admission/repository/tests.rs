@@ -456,6 +456,7 @@ fn pending_join_for_recovery(id: u8) -> uc_core::membership::JoinerAdmission {
         AdmissionSourceSnapshot::from_bytes(vec![1; 32]).unwrap(),
         AdmissionJoinerStartContext::from_bytes(vec![2; 32]).unwrap(),
         AdmissionShortInvitationCode::from_bytes(b"test-code".to_vec()).unwrap(),
+        1_000,
     )
     .unwrap()
     .into_replacement()

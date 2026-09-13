@@ -470,6 +470,49 @@ async fn pause_cancels_network_work_and_waits_for_the_current_commit_boundary() 
 }
 
 #[tokio::test(start_paused = true)]
+async fn admission_deadline_wakes_maintenance_at_the_exact_boundary() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let step = |name| {
+        Arc::new(RecordingStep {
+            name,
+            calls: Arc::clone(&calls),
+            outcome: MembershipMaintenanceStepOutcome::Completed,
+        })
+    };
+    let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
+        MaintainSpaceMembershipDeps {
+            admissions: step("admissions"),
+            effects: step("effects"),
+            conflicts: step("conflicts"),
+            group_update_delivery: step("group_updates"),
+            restricted_delivery: step("restricted"),
+            synchronization: step("synchronize"),
+            cleanup: step("cleanup"),
+        },
+    ));
+    let (_peer_reachability_tx, peer_reachability_rx) = tokio::sync::broadcast::channel(4);
+    let runtime = SpaceMembershipMaintenanceRuntime::start(
+        maintain,
+        peer_reachability_rx,
+        std::time::Duration::from_secs(3600),
+        Arc::new(NoopNetworkActivity),
+    );
+    wait_for_call_count(&calls, 7).await;
+    calls.lock().unwrap().clear();
+
+    runtime.activity().schedule_at(301_000, 1_000);
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_millis(299_999)).await;
+    tokio::task::yield_now().await;
+    assert!(calls.lock().unwrap().is_empty());
+
+    tokio::time::advance(std::time::Duration::from_millis(1)).await;
+    wait_for_call_count(&calls, 7).await;
+    assert_eq!(calls.lock().unwrap().first(), Some(&"admissions"));
+    runtime.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn shutdown_uses_one_five_second_budget_without_aborting_the_active_round() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let step = |name| {

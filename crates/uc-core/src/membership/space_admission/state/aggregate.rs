@@ -1,6 +1,7 @@
 use super::*;
 
 pub const SPACE_ADMISSION_RECORD_FORMAT_V1: u16 = 1;
+pub const SPACE_ADMISSION_RECORD_FORMAT_V2: u16 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionEffect {
@@ -81,6 +82,8 @@ pub enum SpaceAdmissionAggregateError {
     RecordVersionOverflow,
     #[error("the admission transition is not valid from the current state")]
     InvalidTransition,
+    #[error("the admission attempt timeline is invalid")]
+    InvalidAttemptTimeline,
     #[error("the inbound message evidence does not match the message")]
     InvalidInboundEvidence,
     #[error("the candidate reply is invalid")]
@@ -139,6 +142,7 @@ impl SpaceAdmissionAggregateError {
                 AdmissionErrorCategory::RecoveryRequired
             }
             Self::InvalidInitialExchange
+            | Self::InvalidAttemptTimeline
             | Self::InvalidInboundEvidence
             | Self::InvalidCandidateReply
             | Self::InvalidPreparedRequest
@@ -167,6 +171,7 @@ pub enum SpaceAdmissionTerminalState {
     Completed(SpaceAdmissionCompletedTerminal),
     Superseded(SpaceAdmissionSupersededState),
     Rejected(SpaceAdmissionRejectedState),
+    Terminated(SpaceAdmissionLocalJoinerTerminated),
     RecoveryRequired(SpaceAdmissionRecoveryRequiredTerminal),
 }
 
@@ -183,6 +188,7 @@ pub struct SpaceAdmissionAggregate {
     pub(super) format_version: u16,
     pub(super) record_version: u64,
     pub(super) admission_id: SpaceAdmissionId,
+    pub(super) attempt_timeline: Option<AdmissionAttemptTimeline>,
     pub(super) state: SpaceAdmissionRecordState,
 }
 
@@ -249,6 +255,9 @@ impl std::fmt::Debug for SpaceAdmissionAggregate {
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(_)) => {
                 "Terminal::Rejected"
             }
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(_)) => {
+                "Terminal::Terminated"
+            }
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
                 _,
             )) => "Terminal::RecoveryRequired",
@@ -260,5 +269,14 @@ impl std::fmt::Debug for SpaceAdmissionAggregate {
             .field("admission_id", &"[REDACTED]")
             .field("state", &state)
             .finish()
+    }
+}
+
+#[cfg(test)]
+impl SpaceAdmissionAggregate {
+    pub(crate) fn into_legacy_persistence_fixture(mut self) -> Self {
+        self.format_version = SPACE_ADMISSION_RECORD_FORMAT_V1;
+        self.attempt_timeline = None;
+        self
     }
 }

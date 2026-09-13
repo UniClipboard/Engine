@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use uc_core::membership::{
     AdmissionActivatedSecurityState, AdmissionActivationReceipt, AdmissionAppliedV1,
@@ -24,9 +24,17 @@ use uc_core::membership::{
 };
 use uc_core::pairing::invitation::FullInvitation;
 use uc_core::ports::{
-    EmitError, HostEvent, HostEventEmitterPort, MembershipHostEvent, SettingsPort,
+    ClockPort, EmitError, HostEvent, HostEventEmitterPort, MembershipHostEvent, SettingsPort,
 };
 use uc_core::security::IdentityFingerprint;
+
+struct FixedAdmissionClock(AtomicI64);
+
+impl ClockPort for FixedAdmissionClock {
+    fn now_ms(&self) -> i64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
 
 fn join_request_identity_facts(
     device_id: DeviceId,
@@ -87,6 +95,7 @@ pub(super) enum ProtocolEvent {
     JoinerRejectedPeerUpgrade,
     JoinerPeerUpgradeBlocked,
     JoinerSavedRejected,
+    JoinerSavedTerminated,
     AdmissionRecoveryWoken,
     JoinerInitialChannelRequested,
     JoinerAuthenticatedChannelSaved,
@@ -118,6 +127,7 @@ pub(super) struct SpaceAdmissionProtocolTestPair {
     admission_status_invalidations: Arc<AtomicUsize>,
     upgrade_pending: Arc<AtomicBool>,
     space_transition_changes: Mutex<tokio::sync::watch::Receiver<()>>,
+    clock: Arc<FixedAdmissionClock>,
 }
 
 struct AdmissionStatusEventRecorder(Arc<AtomicUsize>);
@@ -248,6 +258,7 @@ struct RecordingJoinerStartState {
     current_join: Mutex<Option<JoinerAdmission>>,
     created_join: Mutex<Option<JoinerAdmission>>,
     superseded: AtomicBool,
+    previous_termination: Mutex<Option<uc_core::membership::SpaceAdmissionTerminationReason>>,
     fail_next_activation_commit: AtomicBool,
     cancellation_conflicts: AtomicUsize,
 }
@@ -264,6 +275,8 @@ impl crate::space::membership::WakeSpaceMembershipMaintenancePort for RecordingM
             .expect("event recorder is available")
             .push(ProtocolEvent::AdmissionRecoveryWoken);
     }
+
+    fn schedule_at(&self, _expires_at_ms: i64, _now_ms: i64) {}
 }
 
 #[async_trait]
@@ -437,9 +450,15 @@ impl JoinerStartStatePort for RecordingJoinerStartState {
     ) -> Result<(), JoinerStartStateError> {
         assert_eq!(token.as_bytes(), &[0x25; 32]);
         let (created, superseded) = mutation.into_parts();
-        assert_eq!(created.replacement().record_version(), 0);
+        assert!(matches!(created.replacement().record_version(), 0 | 1));
         self.superseded
             .store(superseded.is_some(), Ordering::SeqCst);
+        *self
+            .previous_termination
+            .lock()
+            .expect("previous termination is available") = superseded
+            .as_ref()
+            .and_then(|transition| transition.replacement().termination_reason());
         let event = if matches!(
             created.replacement().invitation_resolution(),
             Some(uc_core::membership::JoinerInvitationResolution::Ready { .. })
@@ -564,11 +583,16 @@ impl PendingAdmissionRecoveryStatePort for RecordingJoinerStartState {
             .rejection_reason()
             .is_some()
             .then_some((ProtocolEvent::JoinerSavedRejected, 0x30));
+        let local_termination = aggregate
+            .termination_reason()
+            .is_some()
+            .then_some((ProtocolEvent::JoinerSavedTerminated, 0x31));
         let terminal_resolution_event = (aggregate.is_terminal()
             && aggregate.record_version() == 2)
             .then_some((ProtocolEvent::JoinerRejectedConsumedInvitation, 0x28));
         let (event, next_token_byte) = if let Some(event) = resolution_event
             .or(peer_upgrade_rejection)
+            .or(local_termination)
             .or(terminal_resolution_event)
             .or(peer_upgrade_block)
             .or(other_rejection)
@@ -1440,6 +1464,7 @@ impl SpaceAdmissionProtocolTestPair {
         let events = Arc::new(Mutex::new(Vec::new()));
         let upgrade_pending = Arc::new(AtomicBool::new(mode.upgrade_on().is_some()));
         let admission_status_invalidations = Arc::new(AtomicUsize::new(0));
+        let clock = Arc::new(FixedAdmissionClock(AtomicI64::new(1_000)));
         let (space_transition_wake, space_transition_changes) = tokio::sync::watch::channel(());
         let host_events = Arc::new(crate::facade::HostEventBus::new());
         host_events.register(
@@ -1453,6 +1478,7 @@ impl SpaceAdmissionProtocolTestPair {
             current_join: Mutex::new(current_join),
             created_join: Mutex::new(None),
             superseded: AtomicBool::new(false),
+            previous_termination: Mutex::new(None),
             fail_next_activation_commit: AtomicBool::new(false),
             cancellation_conflicts: AtomicUsize::new(0),
         });
@@ -1470,6 +1496,7 @@ impl SpaceAdmissionProtocolTestPair {
                         value: Mutex::new(Default::default()),
                         events: Arc::clone(&events),
                     }),
+                    clock.clone(),
                     Arc::new(FixedJoinerInvitationPreparation),
                     Arc::new(FixedJoinerInvitationResolver {
                         events: Arc::clone(&events),
@@ -1507,6 +1534,7 @@ impl SpaceAdmissionProtocolTestPair {
                         upgrade_pending: Arc::clone(&upgrade_pending),
                     }),
                     Arc::clone(&host_events),
+                    clock.clone(),
                 ),
             ),
             sponsor: SpaceAdmissionProtocol::new(
@@ -1515,6 +1543,7 @@ impl SpaceAdmissionProtocolTestPair {
                         value: Mutex::new(Default::default()),
                         events: Arc::clone(&events),
                     }),
+                    clock.clone(),
                     Arc::new(FixedJoinerInvitationPreparation),
                     Arc::new(FixedJoinerInvitationResolver {
                         events: Arc::clone(&events),
@@ -1552,6 +1581,7 @@ impl SpaceAdmissionProtocolTestPair {
                         upgrade_pending: Arc::new(AtomicBool::new(false)),
                     }),
                     host_events,
+                    clock.clone(),
                 ),
             ),
             state,
@@ -1559,6 +1589,7 @@ impl SpaceAdmissionProtocolTestPair {
             admission_status_invalidations,
             upgrade_pending,
             space_transition_changes: Mutex::new(space_transition_changes),
+            clock,
         }
     }
 
@@ -1616,6 +1647,10 @@ impl SpaceAdmissionProtocolTestPair {
             .store(count, Ordering::SeqCst);
     }
 
+    pub(super) fn set_now_ms(&self, now_ms: i64) {
+        self.clock.0.store(now_ms, Ordering::SeqCst);
+    }
+
     pub(super) fn take_created_join(&self) -> JoinerAdmission {
         self.state
             .created_join
@@ -1647,6 +1682,16 @@ impl SpaceAdmissionProtocolTestPair {
 
     pub(super) fn superseded_previous_join(&self) -> bool {
         self.state.superseded.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn previous_termination(
+        &self,
+    ) -> Option<uc_core::membership::SpaceAdmissionTerminationReason> {
+        *self
+            .state
+            .previous_termination
+            .lock()
+            .expect("previous termination is available")
     }
 
     pub(super) fn simulate_invitation_resolution_started(&self) {

@@ -5,6 +5,8 @@ use crate::membership::{
     SPACE_ADMISSION_ATTEMPT_DURATION_MS,
 };
 
+use super::super::attempt::AdmissionAttemptTimeline;
+
 fn attempt(admission: u8) -> AdmissionAttemptContractV2 {
     AdmissionAttemptContractV2::start(
         SpaceAdmissionId::from_bytes([admission; 32]).expect("non-zero admission"),
@@ -179,4 +181,30 @@ fn attempt_contract_debug_redacts_all_identifiers_and_times() {
 
     assert_eq!(debug, "AdmissionAttemptContractV2([REDACTED])");
     assert!(!debug.contains("1789268400000"));
+}
+
+#[test]
+fn local_attempt_timeline_expires_at_the_single_five_minute_boundary() {
+    let timeline = AdmissionAttemptTimeline::start(1_000).expect("valid local attempt timeline");
+
+    assert_eq!(timeline.started_at_ms(), 1_000);
+    assert_eq!(timeline.expires_at_ms(), 301_000);
+    assert!(!timeline.is_expired(300_999));
+    assert!(timeline.is_expired(301_000));
+}
+
+#[test]
+fn local_attempt_timeline_rejects_invalid_or_renewed_boundaries() {
+    assert_eq!(
+        AdmissionAttemptTimeline::start(-1),
+        Err(AdmissionAttemptContractError::InvalidStartTime)
+    );
+    assert_eq!(
+        AdmissionAttemptTimeline::start(i64::MAX),
+        Err(AdmissionAttemptContractError::DeadlineOverflow)
+    );
+    assert_eq!(
+        AdmissionAttemptTimeline::new(1_000, 301_001),
+        Err(AdmissionAttemptContractError::InvalidDeadline)
+    );
 }

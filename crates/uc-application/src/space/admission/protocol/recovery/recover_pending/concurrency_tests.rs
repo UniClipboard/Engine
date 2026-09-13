@@ -118,7 +118,11 @@ fn join_input() -> JoinSpaceInput {
 
 async fn assert_offline_recovery_does_not_block_local_actions(block_at: BlockAt) {
     let mut pair = SpaceAdmissionProtocolTestPair::receiving_commit().await;
-    let started = pair.joiner().start_join(join_input()).await.unwrap();
+    let started = pair
+        .joiner()
+        .start_join_at(join_input(), 1_000)
+        .await
+        .unwrap();
     if matches!(block_at, BlockAt::Reply) {
         pair.joiner()
             .recover_pending(AdmissionRecoveryTrigger::StateChanged)
@@ -155,13 +159,18 @@ async fn assert_offline_recovery_does_not_block_local_actions(block_at: BlockAt)
         .await
         .expect("local cancellation must not wait for the network")
         .unwrap();
-        assert!(matches!(
-            cancelled,
-            CurrentJoinStatus::Pending {
-                cancel_requested: true,
-                ..
+        match block_at {
+            BlockAt::Authentication => {
+                assert!(matches!(cancelled, CurrentJoinStatus::Terminated { .. }));
             }
-        ));
+            BlockAt::Reply => assert!(matches!(
+                cancelled,
+                CurrentJoinStatus::Pending {
+                    cancel_requested: true,
+                    ..
+                }
+            )),
+        }
         barrier.release.notify_one();
     };
     let (report, ()) = tokio::join!(recovery, local_actions);
@@ -172,8 +181,8 @@ async fn assert_offline_recovery_does_not_block_local_actions(block_at: BlockAt)
     let saved = pair.take_created_join();
     match block_at {
         BlockAt::Authentication => assert_eq!(
-            saved.rejection_reason(),
-            Some(uc_core::membership::SpaceAdmissionRejectionReason::Cancelled)
+            saved.termination_reason(),
+            Some(uc_core::membership::SpaceAdmissionTerminationReason::Cancelled)
         ),
         BlockAt::Reply => assert!(saved.is_cancelling()),
     }
@@ -216,7 +225,7 @@ async fn overlapping_recovery_does_not_consume_the_short_code_twice() {
     });
     let mut input = join_input();
     input.invitation_code = uc_core::pairing::InvitationCode::new("short-once");
-    pair.joiner().start_join(input).await.unwrap();
+    pair.joiner().start_join_at(input, 1_000).await.unwrap();
     let first = pair
         .joiner()
         .recover_pending(AdmissionRecoveryTrigger::Startup);

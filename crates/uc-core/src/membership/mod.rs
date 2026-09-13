@@ -135,10 +135,11 @@ pub use space_admission::{
     SpaceAdmissionAggregateError, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeHeaderV1,
     SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionMessageKind,
     SpaceAdmissionPersistenceError, SpaceAdmissionProtocolVersion, SpaceAdmissionRejectionReason,
-    SpaceAdmissionRoute, SponsorAdmission, SponsorAdmissionTransition, SponsorCandidatePreparation,
-    SponsorCommitPreparation, SponsorCompletePreparation, SponsorSettlementPreparation,
-    StartedJoinerInvitationResolution, UnreadableHistoryPolicy,
-    SPACE_ADMISSION_ATTEMPT_DURATION_MS, SPACE_ADMISSION_RECORD_FORMAT_V1,
+    SpaceAdmissionRoute, SpaceAdmissionTerminationReason, SponsorAdmission,
+    SponsorAdmissionTransition, SponsorCandidatePreparation, SponsorCommitPreparation,
+    SponsorCompletePreparation, SponsorSettlementPreparation, StartedJoinerInvitationResolution,
+    UnreadableHistoryPolicy, SPACE_ADMISSION_ATTEMPT_DURATION_MS, SPACE_ADMISSION_RECORD_FORMAT_V1,
+    SPACE_ADMISSION_RECORD_FORMAT_V2,
 };
 pub use versioned_membership_history::{
     AdmissionActivationReceipt, AdmissionCompletionV1, AdmissionSecurityCommitmentV1,

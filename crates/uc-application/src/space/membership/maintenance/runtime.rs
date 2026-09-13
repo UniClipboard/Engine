@@ -21,6 +21,7 @@ enum RuntimeCommand {
     Pause(oneshot::Sender<()>),
     Resume(oneshot::Sender<()>),
     StateChanged(ScheduledRound),
+    Deadline(tokio::time::Instant),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -56,6 +57,17 @@ impl SpaceMembershipMaintenanceActivity {
                 }
                 SpaceMembershipMaintenanceRuntimeError::Closed
             })
+    }
+
+    pub fn request_deadline(
+        &self,
+        remaining: Duration,
+    ) -> Result<(), SpaceMembershipMaintenanceRuntimeError> {
+        self.commands
+            .send(RuntimeCommand::Deadline(
+                tokio::time::Instant::now() + remaining,
+            ))
+            .map_err(|_| SpaceMembershipMaintenanceRuntimeError::Closed)
     }
 
     async fn request(
@@ -160,6 +172,7 @@ impl SpaceMembershipMaintenanceRuntime {
                 ScheduledRound::new(MembershipMaintenanceTrigger::Startup),
             ));
             let mut queued_triggers = VecDeque::new();
+            let mut deadline = None;
             let mut periodic = tokio::time::interval_at(
                 tokio::time::Instant::now() + periodic_interval,
                 periodic_interval,
@@ -200,6 +213,9 @@ impl SpaceMembershipMaintenanceRuntime {
                             );
                         }
                         Some(RuntimeCommand::StateChanged(round)) => { round.observation.not_executed(MaintenanceDisposition::Paused); }
+                        Some(RuntimeCommand::Deadline(instant)) => {
+                            deadline = Some(Box::pin(tokio::time::sleep_until(instant)));
+                        }
                         Some(RuntimeCommand::Shutdown(completed)) => {
                             network_activity.pause_network_work();
                             if let Some(mut round) = active_round.take() {
@@ -248,6 +264,20 @@ impl SpaceMembershipMaintenanceRuntime {
                             &mut active_round,
                             &mut queued_triggers,
                             ScheduledRound::new(MembershipMaintenanceTrigger::Periodic),
+                        );
+                    }
+                    _ = async {
+                        match deadline.as_mut() {
+                            Some(sleep) => sleep.await,
+                            None => std::future::pending().await,
+                        }
+                    }, if !paused && deadline.is_some() => {
+                        deadline = None;
+                        schedule_round(
+                            &maintain,
+                            &mut active_round,
+                            &mut queued_triggers,
+                            ScheduledRound::new(MembershipMaintenanceTrigger::StateChanged),
                         );
                     }
                 }

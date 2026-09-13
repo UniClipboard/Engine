@@ -111,6 +111,7 @@ impl JoinerAdmission {
         source_snapshot: AdmissionSourceSnapshot,
         start_context: AdmissionJoinerStartContext,
         short_code: AdmissionShortInvitationCode,
+        started_at_ms: i64,
     ) -> Result<JoinerAdmissionTransition, SpaceAdmissionAggregateError> {
         SpaceAdmissionAggregate::start_resolving_invitation(
             admission_id,
@@ -119,6 +120,7 @@ impl JoinerAdmission {
             source_snapshot,
             start_context,
             short_code,
+            started_at_ms,
         )
         .map(JoinerAdmissionTransition::from_transition)
     }
@@ -133,6 +135,7 @@ impl JoinerAdmission {
                     SpaceAdmissionRejectedState::LocalJoiner(_)
                         | SpaceAdmissionRejectedState::Joiner(_)
                 ))
+                | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(_))
         ) {
             Some(Self { record })
         } else {
@@ -148,6 +151,7 @@ impl JoinerAdmission {
         private_state: AdmissionJoinerPrivateState,
         encrypted_password_equivalent: AdmissionEncryptedPasswordEquivalent,
         pending_exchange: PendingAdmissionExchange,
+        started_at_ms: i64,
     ) -> Result<JoinerAdmissionTransition, SpaceAdmissionAggregateError> {
         SpaceAdmissionAggregate::start_join(
             admission_id,
@@ -157,6 +161,7 @@ impl JoinerAdmission {
             private_state,
             encrypted_password_equivalent,
             pending_exchange,
+            started_at_ms,
         )
         .map(JoinerAdmissionTransition::from_transition)
     }
@@ -214,6 +219,9 @@ impl JoinerAdmission {
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
                 SpaceAdmissionRejectedState::Joiner(state),
             )) => state.join_id,
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state)) => {
+                state.join_id
+            }
             _ => unreachable!("JoinerAdmission only contains joiner-owned states"),
         }
     }
@@ -239,6 +247,87 @@ impl JoinerAdmission {
             )) => Some(state.reason),
             _ => None,
         }
+    }
+
+    pub const fn termination_reason(&self) -> Option<SpaceAdmissionTerminationReason> {
+        match &self.record.state {
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state)) => {
+                Some(state.reason)
+            }
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Superseded(_)) => {
+                Some(SpaceAdmissionTerminationReason::Superseded)
+            }
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+                SpaceAdmissionRejectedState::LocalJoiner(state),
+            )) if matches!(state.reason, SpaceAdmissionRejectionReason::Cancelled) => {
+                Some(SpaceAdmissionTerminationReason::Cancelled)
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn termination_local_join_ordinal(&self) -> Option<u64> {
+        match &self.record.state {
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state)) => {
+                Some(state.local_join_ordinal)
+            }
+            _ => None,
+        }
+    }
+
+    pub const fn can_terminate_locally(&self) -> bool {
+        matches!(
+            &self.record.state,
+            SpaceAdmissionRecordState::Joiner(
+                SpaceAdmissionJoinerState::ResolvingInvitation(_)
+                    | SpaceAdmissionJoinerState::ResolvedInvitation(_)
+                    | SpaceAdmissionJoinerState::Candidate(_)
+            )
+        ) || matches!(
+            &self.record.state,
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(state))
+                if matches!(
+                    state.channel_state,
+                    SpaceAdmissionJoinerChannelState::AwaitingAuthentication { .. }
+                )
+        )
+    }
+
+    pub const fn expires_at_ms(&self) -> Option<i64> {
+        match self.record.attempt_timeline {
+            Some(timeline) => Some(timeline.expires_at_ms()),
+            None => None,
+        }
+    }
+
+    pub const fn is_expired_at(&self, now_ms: i64) -> Option<bool> {
+        match self.record.attempt_timeline {
+            Some(timeline) => Some(timeline.is_expired(now_ms)),
+            None => None,
+        }
+    }
+
+    pub fn terminate_if_expired(
+        self,
+        now_ms: i64,
+    ) -> Result<Option<JoinerAdmissionTransition>, SpaceAdmissionAggregateError> {
+        let Some(timeline) = self.record.attempt_timeline else {
+            return Ok(None);
+        };
+        if !timeline.is_expired(now_ms) {
+            return Ok(None);
+        }
+        self.record
+            .terminate_locally(SpaceAdmissionTerminationReason::Expired)
+            .map(JoinerAdmissionTransition::from_transition)
+            .map(Some)
+    }
+
+    pub fn cancel_locally(self) -> Result<JoinerAdmissionTransition, SpaceAdmissionAggregateError> {
+        self.record
+            .terminate_locally(SpaceAdmissionTerminationReason::Cancelled)
+            .map(JoinerAdmissionTransition::from_transition)
     }
 
     pub const fn active_transition_result(&self) -> Option<&AdmissionSpaceTransitionResult> {

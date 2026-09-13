@@ -87,6 +87,8 @@ impl EngineRuntime for ProductionRuntime {
         operation: Operation,
         cancellation: CancellationToken,
     ) -> Result<OperationResult, EngineError> {
+        let join_started_at_ms =
+            matches!(&operation, Operation::JoinSpace(_)).then(|| self.clock.now_ms());
         match operation {
             Operation::QueryDeviceGroupChoices => {
                 return execute_query_device_group_choices(self.current_facade().await?.as_ref())
@@ -185,7 +187,10 @@ impl EngineRuntime for ProductionRuntime {
                     .await
                 }
                 Operation::JoinSpace(input) => {
-                    execute_join_space(self.current_facade().await?.as_ref(), input).await
+                    let started_at_ms =
+                        join_started_at_ms.ok_or_else(super::operation_unavailable_error)?;
+                    execute_join_space(self.current_facade().await?.as_ref(), input, started_at_ms)
+                        .await
                 }
                 Operation::IssueInvitation => {
                     execute_issue_invitation(self.current_facade().await?.as_ref()).await

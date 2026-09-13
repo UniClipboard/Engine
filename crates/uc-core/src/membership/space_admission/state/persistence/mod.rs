@@ -70,6 +70,26 @@ struct PersistedSpaceAdmissionRecordV1 {
 }
 
 #[derive(Serialize, Deserialize)]
+struct PersistedSpaceAdmissionRecordV2 {
+    format_version: u16,
+    record_version: u64,
+    admission_id: [u8; 32],
+    started_at_ms: i64,
+    expires_at_ms: i64,
+    state: PersistedSpaceAdmissionStateV2,
+}
+
+#[derive(Serialize, Deserialize)]
+enum PersistedSpaceAdmissionStateV2 {
+    Existing(Vec<u8>),
+    LocalJoinerTerminated {
+        join_id: [u8; 16],
+        local_join_ordinal: u64,
+        reason: u8,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
 enum PersistedSpaceAdmissionStateV1 {
     JoinerInitiated(PersistedJoinerInitiatedV1),
     JoinerCandidate(PersistedJoinerCandidateV1),

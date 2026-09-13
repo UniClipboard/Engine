@@ -1,5 +1,19 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceAdmissionTerminationReason {
+    Cancelled,
+    Expired,
+    Superseded,
+}
+
+#[derive(PartialEq, Eq)]
+pub struct SpaceAdmissionLocalJoinerTerminated {
+    pub(super) join_id: JoinId,
+    pub(super) local_join_ordinal: u64,
+    pub(super) reason: SpaceAdmissionTerminationReason,
+}
+
 #[derive(PartialEq, Eq)]
 pub struct SpaceAdmissionActivePendingSettlement {
     pub(super) join_id: JoinId,

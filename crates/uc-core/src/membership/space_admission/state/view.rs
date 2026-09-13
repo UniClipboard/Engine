@@ -188,6 +188,25 @@ impl SponsorCandidatePreparation<'_> {
 }
 
 impl SpaceAdmissionAggregate {
+    pub const fn has_expirable_local_join(&self) -> bool {
+        self.attempt_timeline.is_some()
+            && (matches!(
+                &self.state,
+                SpaceAdmissionRecordState::Joiner(
+                    SpaceAdmissionJoinerState::ResolvingInvitation(_)
+                        | SpaceAdmissionJoinerState::ResolvedInvitation(_)
+                        | SpaceAdmissionJoinerState::Candidate(_)
+                )
+            ) || matches!(
+                &self.state,
+                SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(state))
+                    if matches!(
+                        state.channel_state,
+                        SpaceAdmissionJoinerChannelState::AwaitingAuthentication { .. }
+                    )
+            ))
+    }
+
     pub fn invitation_resolution(&self) -> Option<JoinerInvitationResolution<'_>> {
         match &self.state {
             SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvingInvitation(
@@ -491,7 +510,10 @@ impl SpaceAdmissionAggregate {
             | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Superseded(_))
             | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
                 _,
-            )) => None,
+            ))
+            | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(_)) => {
+                None
+            }
         }
     }
 

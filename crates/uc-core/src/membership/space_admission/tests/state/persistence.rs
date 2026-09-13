@@ -1,13 +1,25 @@
 #[test]
 fn pending_exchanges_decode_real_bytes_from_the_previous_v1_layout() {
     for (name, aggregate) in [
-        ("initiated", initiated_joiner_aggregate_fixture()),
-        ("prepared", joiner_prepared_aggregate_fixture()),
-        ("applied", joiner_applied_aggregate_fixture()),
-        ("cancelling", cancelling_joiner_aggregate_fixture()),
+        (
+            "initiated",
+            initiated_joiner_aggregate_fixture().into_legacy_persistence_fixture(),
+        ),
+        (
+            "prepared",
+            joiner_prepared_aggregate_fixture().into_legacy_persistence_fixture(),
+        ),
+        (
+            "applied",
+            joiner_applied_aggregate_fixture().into_legacy_persistence_fixture(),
+        ),
+        (
+            "cancelling",
+            cancelling_joiner_aggregate_fixture().into_legacy_persistence_fixture(),
+        ),
         (
             "active pending settlement",
-            active_pending_settlement_aggregate_fixture(),
+            active_pending_settlement_aggregate_fixture().into_legacy_persistence_fixture(),
         ),
     ] {
         let mut legacy = aggregate
@@ -19,7 +31,7 @@ fn pending_exchanges_decode_real_bytes_from_the_previous_v1_layout() {
         assert_eq!(decoded, aggregate, "{name}");
     }
 
-    let aggregate = initiated_joiner_aggregate_fixture();
+    let aggregate = initiated_joiner_aggregate_fixture().into_legacy_persistence_fixture();
     let current = aggregate.encode_persisted().expect("current bytes encode");
     let mut current_with_junk = current.clone();
     current_with_junk.push(0xaa);

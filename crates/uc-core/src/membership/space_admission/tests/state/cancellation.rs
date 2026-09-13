@@ -115,6 +115,76 @@ fn unauthenticated_initiated_joiner_cancels_locally_without_network_message() {
 }
 
 #[test]
+fn bounded_joiner_expires_only_at_its_persisted_deadline() {
+    let before_deadline = JoinerAdmission::try_from_record(initiated_joiner_aggregate_fixture())
+        .expect("joiner fixture")
+        .terminate_if_expired(300_999)
+        .expect("expiry check succeeds");
+    assert!(before_deadline.is_none());
+
+    let expired = JoinerAdmission::try_from_record(initiated_joiner_aggregate_fixture())
+        .expect("joiner fixture")
+        .terminate_if_expired(301_000)
+        .expect("expiry transition succeeds")
+        .expect("deadline is due")
+        .into_replacement();
+    assert_eq!(
+        expired.termination_reason(),
+        Some(SpaceAdmissionTerminationReason::Expired)
+    );
+    assert_eq!(expired.termination_local_join_ordinal(), Some(2));
+    let encoded = expired
+        .encode_persisted()
+        .expect("bounded terminal result encodes");
+    let recovered = JoinerAdmission::decode_persisted(&encoded)
+        .expect("bounded terminal result decodes");
+    assert_eq!(recovered.termination_local_join_ordinal(), Some(2));
+}
+
+#[test]
+fn bounded_joiner_cancels_locally_but_prepared_joiner_is_outside_s1() {
+    let cancelled = JoinerAdmission::try_from_record(initiated_joiner_aggregate_fixture())
+        .expect("joiner fixture")
+        .cancel_locally()
+        .expect("early join cancels locally")
+        .into_replacement();
+    assert_eq!(
+        cancelled.termination_reason(),
+        Some(SpaceAdmissionTerminationReason::Cancelled)
+    );
+
+    assert!(matches!(
+        JoinerAdmission::try_from_record(joiner_prepared_aggregate_fixture())
+            .expect("prepared joiner fixture")
+            .terminate_if_expired(301_000),
+        Err(SpaceAdmissionAggregateError::UnsafeCancellation)
+    ));
+}
+
+#[test]
+fn legacy_joiner_can_still_cancel_locally_without_inventing_a_deadline() {
+    let legacy = initiated_joiner_aggregate_fixture().into_legacy_persistence_fixture();
+    let cancelled = JoinerAdmission::try_from_record(legacy)
+        .expect("legacy joiner fixture")
+        .cancel_locally()
+        .expect("legacy early join cancels locally")
+        .into_replacement();
+    assert_eq!(
+        cancelled.termination_reason(),
+        Some(SpaceAdmissionTerminationReason::Cancelled)
+    );
+    assert_eq!(cancelled.expires_at_ms(), None);
+
+    let encoded = cancelled.encode_persisted().expect("legacy result encodes");
+    let decoded = JoinerAdmission::decode_persisted(&encoded).expect("legacy result decodes");
+    assert_eq!(
+        decoded.termination_reason(),
+        Some(SpaceAdmissionTerminationReason::Cancelled)
+    );
+    assert_eq!(decoded.expires_at_ms(), None);
+}
+
+#[test]
 fn sponsor_rejects_cancel_before_commit_and_saves_exact_reply() {
     let sponsor = sponsor_candidate_aggregate_fixture();
     let candidate_message_id = match sponsor.state() {

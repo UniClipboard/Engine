@@ -8,12 +8,16 @@ impl SpaceAdmissionAggregate {
         source_snapshot: AdmissionSourceSnapshot,
         start_context: AdmissionJoinerStartContext,
         short_code: AdmissionShortInvitationCode,
+        started_at_ms: i64,
     ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        let attempt_timeline = AdmissionAttemptTimeline::start(started_at_ms)
+            .map_err(|_| SpaceAdmissionAggregateError::InvalidAttemptTimeline)?;
         Ok(AdmissionTransition::new(
             Self {
-                format_version: SPACE_ADMISSION_RECORD_FORMAT_V1,
+                format_version: SPACE_ADMISSION_RECORD_FORMAT_V2,
                 record_version: 0,
                 admission_id,
+                attempt_timeline: Some(attempt_timeline),
                 state: SpaceAdmissionRecordState::Joiner(
                     SpaceAdmissionJoinerState::ResolvingInvitation(
                         SpaceAdmissionJoinerResolvingInvitation {
@@ -40,7 +44,10 @@ impl SpaceAdmissionAggregate {
         private_state: AdmissionJoinerPrivateState,
         encrypted_password_equivalent: AdmissionEncryptedPasswordEquivalent,
         pending_exchange: PendingAdmissionExchange,
+        started_at_ms: i64,
     ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        let attempt_timeline = AdmissionAttemptTimeline::start(started_at_ms)
+            .map_err(|_| SpaceAdmissionAggregateError::InvalidAttemptTimeline)?;
         if pending_exchange.request_envelope().header().admission_id() != admission_id {
             return Err(SpaceAdmissionAggregateError::AdmissionMismatch);
         }
@@ -50,9 +57,10 @@ impl SpaceAdmissionAggregate {
             return Err(SpaceAdmissionAggregateError::InvalidInitialExchange);
         }
         let replacement = Self {
-            format_version: SPACE_ADMISSION_RECORD_FORMAT_V1,
+            format_version: SPACE_ADMISSION_RECORD_FORMAT_V2,
             record_version: 0,
             admission_id,
+            attempt_timeline: Some(attempt_timeline),
             state: SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(
                 SpaceAdmissionJoinerInitiated {
                     join_id,
@@ -91,6 +99,7 @@ impl SpaceAdmissionAggregate {
             format_version: SPACE_ADMISSION_RECORD_FORMAT_V1,
             record_version: 0,
             admission_id,
+            attempt_timeline: None,
             state: SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Accepted(
                 SpaceAdmissionSponsorAccepted {
                     invitation_claim,

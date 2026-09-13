@@ -73,6 +73,7 @@ fn new_joiner_aggregate_starts_with_all_required_durable_material() {
         AdmissionEncryptedPasswordEquivalent::from_bytes(vec![0xec; 64])
             .expect("bounded encrypted password fixture"),
         exchange,
+        1_000,
     )
     .expect("complete initial joiner state");
 
@@ -123,6 +124,7 @@ fn new_joiner_aggregate_rejects_an_exchange_for_another_admission() {
             AdmissionEncryptedPasswordEquivalent::from_bytes(vec![0xf3])
                 .expect("bounded encrypted password fixture"),
             exchange,
+            1_000,
         ),
         Err(SpaceAdmissionAggregateError::AdmissionMismatch)
     );
@@ -152,6 +154,7 @@ fn initiated_joiner_aggregate_fixture() -> SpaceAdmissionAggregate {
             AdmissionRetryState::new(0, 0).expect("valid initial retry state"),
         )
         .expect("JoinRequest expects Candidate"),
+        1_000,
     )
     .expect("complete initial joiner fixture")
     .into_replacement()

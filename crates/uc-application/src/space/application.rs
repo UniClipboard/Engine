@@ -40,6 +40,7 @@ use crate::space::SpaceAdmissionObservationRegistry;
 struct DeferredMaintenanceWake {
     target: OnceLock<Arc<dyn crate::space::membership::WakeSpaceMembershipMaintenancePort>>,
     pending: AtomicBool,
+    pending_deadline: std::sync::Mutex<Option<(i64, i64)>>,
 }
 
 impl DeferredMaintenanceWake {
@@ -47,6 +48,7 @@ impl DeferredMaintenanceWake {
         Self {
             target: OnceLock::new(),
             pending: AtomicBool::new(false),
+            pending_deadline: std::sync::Mutex::new(None),
         }
     }
 
@@ -54,6 +56,16 @@ impl DeferredMaintenanceWake {
         if self.target.set(target).is_ok() && self.pending.swap(false, Ordering::AcqRel) {
             if let Some(target) = self.target.get() {
                 target.wake();
+            }
+        }
+        if let Some(target) = self.target.get() {
+            if let Some((expires_at_ms, now_ms)) = self
+                .pending_deadline
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                target.schedule_at(expires_at_ms, now_ms);
             }
         }
     }
@@ -65,6 +77,17 @@ impl crate::space::membership::WakeSpaceMembershipMaintenancePort for DeferredMa
             target.wake();
         } else {
             self.pending.store(true, Ordering::Release);
+        }
+    }
+
+    fn schedule_at(&self, expires_at_ms: i64, now_ms: i64) {
+        if let Some(target) = self.target.get() {
+            target.schedule_at(expires_at_ms, now_ms);
+        } else {
+            *self
+                .pending_deadline
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((expires_at_ms, now_ms));
         }
     }
 }
@@ -266,6 +289,7 @@ impl SpaceApplication {
         ));
         let joiner_admission = JoinerAdmissionService::new(
             settings,
+            Arc::clone(&clock),
             prepare_joiner_invitation,
             resolve_joiner_invitation,
             joiner_start_material,
@@ -295,6 +319,7 @@ impl SpaceApplication {
             pending_admission_recovery_state,
             space_admission_transport,
             host_event_bus,
+            Arc::clone(&clock),
         );
         let space_admission = Arc::new(SpaceAdmissionProtocol::new(
             joiner_admission,

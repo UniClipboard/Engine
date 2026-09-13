@@ -6,10 +6,13 @@ use uc_application::deps::{
     LoadCurrentJoinStatusPort, LoadedCurrentJoin, PrepareJoinerCancellationPort,
     QueryDeviceTrustError,
 };
-use uc_application::facade::CurrentJoinStatus;
+use uc_application::facade::{
+    CurrentJoinStatus, JoinSpaceTerminationReason as ApplicationTerminationReason,
+};
 use uc_core::membership::{
     AdmissionMessageId, AdmissionRecordPersistence, AdmissionRetryState,
-    AdmissionSpaceTransitionResultV2, JoinId, JoinerAdmission, VersionedMembershipHistory,
+    AdmissionSpaceTransitionResultV2, JoinId, JoinerAdmission, SpaceAdmissionTerminationReason,
+    VersionedMembershipHistory,
 };
 
 use crate::db::ports::DbExecutor;
@@ -168,6 +171,18 @@ impl<E: DbExecutor + Send + Sync> SqliteSpaceAdmissionState<E> {
     ) -> Result<CurrentJoinStatus, QueryDeviceTrustError> {
         let join_id = *admission.join_id().as_bytes();
         let peer_upgrade_required = admission.peer_upgrade_required();
+        if let Some(reason) = admission.termination_reason() {
+            let reason = match reason {
+                SpaceAdmissionTerminationReason::Cancelled => {
+                    ApplicationTerminationReason::Cancelled
+                }
+                SpaceAdmissionTerminationReason::Expired => ApplicationTerminationReason::Expired,
+                SpaceAdmissionTerminationReason::Superseded => {
+                    ApplicationTerminationReason::Superseded
+                }
+            };
+            return Ok(CurrentJoinStatus::Terminated { join_id, reason });
+        }
         if let Some(reason) = admission.rejection_reason() {
             return Ok(CurrentJoinStatus::Rejected { join_id, reason });
         }

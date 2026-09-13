@@ -93,7 +93,13 @@ impl<E: DbExecutor + Send + Sync> JoinerStartStatePort for SqliteSpaceAdmissionS
                         if token.as_bytes() != &expected {
                             return Err(into_anyhow(SpaceAdmissionStateStoreError::Conflict));
                         }
-                        if created.record_version() != 0
+                        let valid_created = created.record_version() == 0
+                            || (created.record_version() == 1
+                                && created.termination_reason()
+                                    == Some(
+                                        uc_core::membership::SpaceAdmissionTerminationReason::Expired,
+                                    ));
+                        if !valid_created
                             || state
                                 .records
                                 .contains_key(created.admission_id().as_bytes())
@@ -134,7 +140,7 @@ impl<E: DbExecutor + Send + Sync> JoinerStartStatePort for SqliteSpaceAdmissionS
                         let created_id = *created.admission_id().as_bytes();
                         let sealed = self.seal_new_record(&created).map_err(into_anyhow)?;
                         state.records.insert(created_id, sealed);
-                        state.current_local_join_id = Some(created_id);
+                        state.current_local_join_id = (!created.is_terminal()).then_some(created_id);
                         state.latest_local_join_id = Some(created_id);
                         state.next_local_join_ordinal = state
                             .next_local_join_ordinal

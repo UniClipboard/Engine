@@ -91,6 +91,40 @@ impl AdmissionRecoveryService {
 
         for loaded_admission in loaded {
             let (aggregate, commit_token) = loaded_admission.into_parts();
+            let now_ms = self.clock.now_ms();
+            if let Some(expires_at_ms) = aggregate.expires_at_ms() {
+                if now_ms < expires_at_ms {
+                    joiner.maintenance_wake.schedule_at(expires_at_ms, now_ms);
+                }
+            }
+            if aggregate.is_expired_at(now_ms) == Some(true) && aggregate.can_terminate_locally() {
+                let observation_material = *aggregate.admission_id().as_bytes();
+                match aggregate.terminate_if_expired(now_ms) {
+                    Ok(Some(transition)) => {
+                        match self
+                            .commit_recovery_and_notify(commit_token, transition)
+                            .await
+                        {
+                            Ok(_) => {
+                                report.terminated_count += 1;
+                                joiner.observations.finish(
+                                    observation_material,
+                                    SpaceAdmissionObservationOutcome::Failed(
+                                        DiagnosticErrorType::Timeout,
+                                    ),
+                                );
+                            }
+                            Err(error) => self.record_state_error(&mut report, error),
+                        }
+                        continue;
+                    }
+                    Ok(None) => continue,
+                    Err(_) => {
+                        report.recovery_required_count += 1;
+                        continue;
+                    }
+                }
+            }
             if aggregate.pending_recovery().is_none() && aggregate.invitation_resolution().is_none()
             {
                 continue;

@@ -485,6 +485,7 @@ impl SpaceFacade {
     pub async fn join_space(
         &self,
         input: JoinSpaceInput,
+        started_at_ms: i64,
     ) -> Result<JoinSpaceResult, JoinSpaceError> {
         let space_admission = self
             .application
@@ -493,7 +494,7 @@ impl SpaceFacade {
             .as_ref()
             .map(SpaceApplication::space_admission)
             .ok_or(JoinSpaceError::Unavailable)?;
-        space_admission.start_join(input).await
+        space_admission.start_join_at(input, started_at_ms).await
     }
 
     pub async fn query_device_trust(

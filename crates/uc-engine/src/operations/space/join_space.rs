@@ -16,14 +16,18 @@ use crate::{EngineError, EngineErrorCategory, JoinSpaceInput, OperationResult};
 pub async fn execute_join_space(
     facade: &AppFacade,
     input: JoinSpaceInput,
+    started_at_ms: i64,
 ) -> Result<OperationResult, EngineError> {
     let joined = facade
-        .join_space(AppJoinSpaceInput {
-            invitation_code: InvitationCode::new(input.invitation_code),
-            device_name: input.device_name,
-            passphrase: Passphrase::new(input.passphrase.expose()),
-            preserve_unreadable_history: input.preserve_unreadable_history,
-        })
+        .join_space(
+            AppJoinSpaceInput {
+                invitation_code: InvitationCode::new(input.invitation_code),
+                device_name: input.device_name,
+                passphrase: Passphrase::new(input.passphrase.expose()),
+                preserve_unreadable_history: input.preserve_unreadable_history,
+            },
+            started_at_ms,
+        )
         .await
         .map_err(map_join_space_error)?;
     Ok(join_status_result(joined.status))

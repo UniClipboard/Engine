@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::space::membership::WakeSpaceMembershipMaintenancePort;
-use uc_core::ports::SettingsPort;
+use uc_core::ports::{ClockPort, SettingsPort};
 
 mod activate_complete;
 mod cancel_join;
@@ -43,6 +43,7 @@ pub use start_join::{
 
 pub(crate) struct JoinerAdmissionService {
     pub(super) settings: Arc<dyn SettingsPort>,
+    pub(super) clock: Arc<dyn ClockPort>,
     pub(super) prepare_invitation: Arc<dyn PrepareJoinerInvitationPort>,
     pub(super) resolve_invitation: Arc<dyn ResolveJoinerInvitationPort>,
     pub(super) start_material: Arc<dyn JoinerStartMaterialPort>,
@@ -63,6 +64,7 @@ pub(crate) struct JoinerAdmissionService {
 impl JoinerAdmissionService {
     pub(crate) fn new(
         settings: Arc<dyn SettingsPort>,
+        clock: Arc<dyn ClockPort>,
         prepare_invitation: Arc<dyn PrepareJoinerInvitationPort>,
         resolve_invitation: Arc<dyn ResolveJoinerInvitationPort>,
         start_material: Arc<dyn JoinerStartMaterialPort>,
@@ -81,6 +83,7 @@ impl JoinerAdmissionService {
     ) -> Self {
         Self {
             settings,
+            clock,
             prepare_invitation,
             resolve_invitation,
             start_material,

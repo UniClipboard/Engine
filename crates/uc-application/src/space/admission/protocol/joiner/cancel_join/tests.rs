@@ -9,7 +9,7 @@ async fn current_prepared_join_is_replaced_by_one_saved_cancel_request() {
     let pair = SpaceAdmissionProtocolTestPair::receiving_candidate().await;
     let started = pair
         .joiner()
-        .start_join(join_input("cancel-prepared"))
+        .start_join_at(join_input("cancel-prepared"), 1_000)
         .await
         .expect("join should be saved");
     pair.joiner()
@@ -69,7 +69,7 @@ async fn cancellation_reloads_after_a_concurrent_admission_update() {
     let pair = SpaceAdmissionProtocolTestPair::receiving_candidate().await;
     let started = pair
         .joiner()
-        .start_join(join_input("cancel-conflict"))
+        .start_join_at(join_input("cancel-conflict"), 1_000)
         .await
         .expect("saved join");
     let CurrentJoinStatus::Pending { join_id, .. } = started.status else {
@@ -81,16 +81,10 @@ async fn cancellation_reloads_after_a_concurrent_admission_update() {
         .cancel_join(join_id)
         .await
         .expect("cancellation survives concurrent update");
-    assert!(matches!(
-        status,
-        CurrentJoinStatus::Pending {
-            cancel_requested: true,
-            ..
-        }
-    ));
+    assert!(matches!(status, CurrentJoinStatus::Terminated { .. }));
     assert_eq!(
-        pair.take_created_join().rejection_reason(),
-        Some(uc_core::membership::SpaceAdmissionRejectionReason::Cancelled)
+        pair.take_created_join().termination_reason(),
+        Some(uc_core::membership::SpaceAdmissionTerminationReason::Cancelled)
     );
 }
 
@@ -99,7 +93,7 @@ async fn persistent_cancellation_conflicts_preserve_the_failure_source() {
     let pair = SpaceAdmissionProtocolTestPair::receiving_candidate().await;
     let started = pair
         .joiner()
-        .start_join(join_input("cancel-conflicts"))
+        .start_join_at(join_input("cancel-conflicts"), 1_000)
         .await
         .expect("saved join");
     let CurrentJoinStatus::Pending { join_id, .. } = started.status else {

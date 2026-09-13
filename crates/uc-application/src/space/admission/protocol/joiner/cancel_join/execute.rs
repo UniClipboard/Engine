@@ -1,8 +1,11 @@
 use super::super::JoinerAdmissionService;
 use super::{JoinerCancellationMutation, JoinerCancellationStateError};
 use crate::space::admission::protocol::SpaceAdmissionProtocol;
-use crate::space::admission::{CancelSpaceJoinError, CurrentJoinStatus};
+use crate::space::admission::{
+    CancelSpaceJoinError, CurrentJoinStatus, JoinSpaceTerminationReason,
+};
 use uc_core::membership::{JoinId, SpaceAdmissionAggregateError};
+use uc_observability_contract::diagnostics::SpaceAdmissionObservationOutcome;
 
 impl SpaceAdmissionProtocol {
     pub(crate) async fn cancel_join(
@@ -31,7 +34,36 @@ impl JoinerAdmissionService {
                 .map_err(CancelSpaceJoinError::state)?
                 .ok_or(CancelSpaceJoinError::NotFound)?;
             let (admission, token) = loaded.into_parts();
+            let observation_material = *admission.admission_id().as_bytes();
             let peer_upgrade_required = admission.peer_upgrade_required();
+            if admission.can_terminate_locally() {
+                let transition = admission
+                    .cancel_locally()
+                    .map_err(CancelSpaceJoinError::state)?;
+                match self
+                    .cancellation_state
+                    .commit(token, JoinerCancellationMutation::new(transition))
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(JoinerCancellationStateError::StateChanged { .. })
+                        if conflicts < MAX_STATE_CONFLICTS =>
+                    {
+                        conflicts += 1;
+                        continue;
+                    }
+                    Err(error) => return Err(CancelSpaceJoinError::state(error)),
+                }
+                self.observations.finish(
+                    observation_material,
+                    SpaceAdmissionObservationOutcome::Cancelled,
+                );
+                self.maintenance_wake.wake();
+                return Ok(CurrentJoinStatus::Terminated {
+                    join_id: *join_id.as_bytes(),
+                    reason: JoinSpaceTerminationReason::Cancelled,
+                });
+            }
             let material = self
                 .prepare_cancellation
                 .prepare()

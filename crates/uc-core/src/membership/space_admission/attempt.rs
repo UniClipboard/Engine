@@ -23,6 +23,59 @@ pub enum AdmissionAttemptContractError {
     IdenticalPeers,
 }
 
+/// 本机从用户发起加入起保存的唯一五分钟期限。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct AdmissionAttemptTimeline {
+    started_at_ms: i64,
+    expires_at_ms: i64,
+}
+
+impl AdmissionAttemptTimeline {
+    pub fn start(started_at_ms: i64) -> Result<Self, AdmissionAttemptContractError> {
+        let expires_at_ms = started_at_ms
+            .checked_add(SPACE_ADMISSION_ATTEMPT_DURATION_MS)
+            .ok_or(AdmissionAttemptContractError::DeadlineOverflow)?;
+        Self::new(started_at_ms, expires_at_ms)
+    }
+
+    pub fn new(
+        started_at_ms: i64,
+        expires_at_ms: i64,
+    ) -> Result<Self, AdmissionAttemptContractError> {
+        if started_at_ms < 0 {
+            return Err(AdmissionAttemptContractError::InvalidStartTime);
+        }
+        let expected = started_at_ms
+            .checked_add(SPACE_ADMISSION_ATTEMPT_DURATION_MS)
+            .ok_or(AdmissionAttemptContractError::DeadlineOverflow)?;
+        if expires_at_ms != expected {
+            return Err(AdmissionAttemptContractError::InvalidDeadline);
+        }
+        Ok(Self {
+            started_at_ms,
+            expires_at_ms,
+        })
+    }
+
+    pub const fn started_at_ms(self) -> i64 {
+        self.started_at_ms
+    }
+
+    pub const fn expires_at_ms(self) -> i64 {
+        self.expires_at_ms
+    }
+
+    pub const fn is_expired(self, now_ms: i64) -> bool {
+        now_ms >= self.expires_at_ms
+    }
+}
+
+impl std::fmt::Debug for AdmissionAttemptTimeline {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AdmissionAttemptTimeline([REDACTED])")
+    }
+}
+
 /// 新版准入首次认证必须共同确认的固定尝试边界。
 ///
 /// Space 与正式成员实例在首次认证时尚未知，随后由成员绑定契约关联到本契约摘要。

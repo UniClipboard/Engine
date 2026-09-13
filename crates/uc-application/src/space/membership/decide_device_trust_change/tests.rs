@@ -158,6 +158,8 @@ impl WakeSpaceMembershipMaintenancePort for WakeCounter {
     fn wake(&self) {
         self.0.fetch_add(1, Ordering::SeqCst);
     }
+
+    fn schedule_at(&self, _expires_at_ms: i64, _now_ms: i64) {}
 }
 
 struct NoopEffects;

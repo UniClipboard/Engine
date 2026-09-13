@@ -440,6 +440,7 @@ mod tests {
                 AdmissionRetryState::new(0, 0).expect("retry state"),
             )
             .expect("pending exchange"),
+            1_000,
         )
         .expect("Joiner starts")
         .into_replacement()
