@@ -149,9 +149,9 @@ async fn stop_resource_users(
         stop_session_and_transfers(actions, deadline),
         actions.stop_process_tasks(deadline),
     );
-    match process_tasks {
-        Ok(()) => outcome.process_tasks_stopped = true,
-        Err(error) => outcome.errors.push(error),
+    outcome.process_tasks_stopped = true;
+    if let Err(error) = process_tasks {
+        outcome.errors.push(error);
     }
     outcome
 }
@@ -446,6 +446,23 @@ mod tests {
         assert_eq!(
             *actions.calls.lock().unwrap(),
             vec!["session", "transfers", "tasks"]
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_task_stop_failure_does_not_block_local_resource_close() {
+        let actions = RecordingActions {
+            calls: Mutex::new(Vec::new()),
+            fail_session: false,
+            fail_transfers: false,
+            fail_tasks: true,
+        };
+
+        let outcome = stop_resource_users_and_close(&actions, None).await;
+        assert_eq!(outcome.errors.len(), 1);
+        assert_eq!(
+            *actions.calls.lock().unwrap(),
+            vec!["session", "transfers", "tasks", "resources"]
         );
     }
 
