@@ -111,6 +111,10 @@ enum ProbeCommand {
         block_ms: u64,
         deadline_ms: u64,
     },
+    SuspendDuringFileWrite {
+        block_ms: u64,
+        deadline_ms: u64,
+    },
     Resume,
     EventSummary,
     Shutdown,
@@ -483,6 +487,10 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
             block_ms,
             deadline_ms,
         } => lifecycle_scenario::suspend_during_file_read(state, block_ms, deadline_ms).await,
+        ProbeCommand::SuspendDuringFileWrite {
+            block_ms,
+            deadline_ms,
+        } => lifecycle_scenario::suspend_during_file_write(state, block_ms, deadline_ms).await,
         ProbeCommand::Resume => match state.engine.as_ref() {
             Some(engine) => {
                 let started_at = Instant::now();
@@ -1576,6 +1584,19 @@ mod tests {
             r#"{"command":"suspend_during_file_read","block_ms":10,"deadline_ms":100}"#,
         )
         .expect("busy file read command must deserialize");
+        let mut state = ProbeState::default();
+
+        let response = execute_command(&mut state, command).await;
+
+        assert_eq!(response, probe_error("not_started"));
+    }
+
+    #[tokio::test]
+    async fn busy_file_write_command_reaches_the_engine_boundary() {
+        let command: ProbeCommand = serde_json::from_str(
+            r#"{"command":"suspend_during_file_write","block_ms":10,"deadline_ms":100}"#,
+        )
+        .expect("busy file write command must deserialize");
         let mut state = ProbeState::default();
 
         let response = execute_command(&mut state, command).await;

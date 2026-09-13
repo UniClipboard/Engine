@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use uc_engine::{
-    ClipboardRestoreMode, Operation, OperationResult, QueryHistoryInput, RestoreClipboardInput,
-    SendFilesInput,
+    ClipboardRestoreMode, ExportEntryInput, Operation, OperationResult, QueryHistoryInput,
+    RestoreClipboardInput, SendFilesInput,
 };
 
 use super::{engine_error_kind, probe_error, ProbeState};
@@ -74,22 +74,9 @@ pub(super) async fn suspend_during_clipboard_write(
     let Some(engine) = state.engine.as_ref().cloned() else {
         return probe_error("not_started");
     };
-    let entry_id = match engine
-        .execute(Operation::QueryHistory(QueryHistoryInput {
-            cursor: None,
-            limit: 1,
-            query: None,
-        }))
-        .await
-    {
-        Ok(OperationResult::HistoryPage { entries, .. }) => {
-            let Some(entry) = entries.into_iter().next() else {
-                return probe_error("history_empty");
-            };
-            entry.entry_id
-        }
-        Ok(_) => return probe_error("history_unavailable"),
-        Err(error) => return probe_error(engine_error_kind(&error)),
+    let entry_id = match latest_history_entry_id(engine.as_ref()).await {
+        Ok(entry_id) => entry_id,
+        Err(error) => return error,
     };
     state.clipboard.prepare_blocked_write();
     let restore = tokio::spawn({
@@ -208,5 +195,93 @@ pub(super) async fn suspend_during_file_read(
             "block_ms": block_ms,
             "outcome": outcome,
         }),
+    }
+}
+
+pub(super) async fn suspend_during_file_write(
+    state: &ProbeState,
+    block_ms: u64,
+    deadline_ms: u64,
+) -> Value {
+    let Some(engine) = state.engine.as_ref().cloned() else {
+        return probe_error("not_started");
+    };
+    let entry_id = match latest_history_entry_id(engine.as_ref()).await {
+        Ok(entry_id) => entry_id,
+        Err(error) => return error,
+    };
+    let destination = state.files.register_output();
+    state.files.prepare_blocked_write();
+    let export = tokio::spawn({
+        let engine = Arc::clone(&engine);
+        async move {
+            engine
+                .execute(Operation::ExportEntry(ExportEntryInput {
+                    entry_id,
+                    destination,
+                }))
+                .await
+        }
+    });
+    if tokio::time::timeout(
+        Duration::from_secs(5),
+        state.files.wait_until_write_starts(),
+    )
+    .await
+    .is_err()
+    {
+        state.files.release_write();
+        let _ = export.await;
+        return probe_error("file_write_not_started");
+    }
+    let files = state.files.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(block_ms)).await;
+        files.release_write();
+    });
+    let started_at = Instant::now();
+    let suspend = engine
+        .suspend_with_deadline(Duration::from_millis(deadline_ms))
+        .await;
+    let elapsed_ms = started_at.elapsed().as_millis();
+    let outcome = match export.await {
+        Ok(Ok(_)) => "completed",
+        Ok(Err(_)) => "cancelled",
+        Err(_) => "failed",
+    };
+    match suspend {
+        Ok(()) => json!({
+            "ok": true,
+            "kind": "suspended_during_file_write",
+            "elapsed_ms": elapsed_ms,
+            "block_ms": block_ms,
+            "outcome": outcome,
+        }),
+        Err(error) => json!({
+            "ok": false,
+            "kind": engine_error_kind(&error),
+            "elapsed_ms": elapsed_ms,
+            "block_ms": block_ms,
+            "outcome": outcome,
+        }),
+    }
+}
+
+async fn latest_history_entry_id(engine: &uc_engine::Engine) -> Result<String, Value> {
+    match engine
+        .execute(Operation::QueryHistory(QueryHistoryInput {
+            cursor: None,
+            limit: 1,
+            query: None,
+        }))
+        .await
+    {
+        Ok(OperationResult::HistoryPage { entries, .. }) => entries
+            .into_iter()
+            .next()
+            .map(|entry| entry.entry_id)
+            .ok_or_else(|| probe_error("history_empty")),
+        Ok(_) => Err(probe_error("history_unavailable")),
+        Err(error) => Err(probe_error(engine_error_kind(&error))),
     }
 }

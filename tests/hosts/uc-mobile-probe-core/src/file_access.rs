@@ -16,7 +16,8 @@ use super::{host_error, lock_unpoisoned};
 #[derive(Clone)]
 enum RegisteredFileSource {
     Path(PathBuf),
-    Bytes(Arc<[u8]>),
+    ReadOnlyBytes(Arc<[u8]>),
+    Output(Arc<Mutex<Vec<u8>>>),
 }
 
 #[derive(Clone)]
@@ -30,12 +31,15 @@ struct RegisteredFile {
 struct FileControlState {
     block_next_read: bool,
     read_blocked: bool,
+    block_next_write: bool,
+    write_blocked: bool,
 }
 
 struct FileControl {
     state: Mutex<FileControlState>,
     released: Condvar,
     read_started: Notify,
+    write_started: Notify,
 }
 
 #[derive(Clone)]
@@ -54,6 +58,7 @@ impl Default for ProbeFiles {
                 state: Mutex::new(FileControlState::default()),
                 released: Condvar::new(),
                 read_started: Notify::new(),
+                write_started: Notify::new(),
             }),
         }
     }
@@ -75,8 +80,16 @@ impl ProbeFiles {
 
     pub(super) fn register_fixture(&self, bytes: Vec<u8>) -> HostFileHandle {
         self.register_source(RegisteredFile {
-            source: RegisteredFileSource::Bytes(bytes.into()),
+            source: RegisteredFileSource::ReadOnlyBytes(bytes.into()),
             display_name: "lifecycle-probe.bin".to_owned(),
+            mime_type: Some("application/octet-stream".to_owned()),
+        })
+    }
+
+    pub(super) fn register_output(&self) -> HostFileHandle {
+        self.register_source(RegisteredFile {
+            source: RegisteredFileSource::Output(Arc::new(Mutex::new(Vec::new()))),
+            display_name: "lifecycle-export.bin".to_owned(),
             mime_type: Some("application/octet-stream".to_owned()),
         })
     }
@@ -100,6 +113,28 @@ impl ProbeFiles {
     pub(super) fn release_read(&self) {
         let mut state = lock_unpoisoned(&self.control.state);
         state.read_blocked = false;
+        self.control.released.notify_all();
+    }
+
+    pub(super) fn prepare_blocked_write(&self) {
+        let mut state = lock_unpoisoned(&self.control.state);
+        state.block_next_write = true;
+        state.write_blocked = false;
+    }
+
+    pub(super) async fn wait_until_write_starts(&self) {
+        loop {
+            let started = self.control.write_started.notified();
+            if lock_unpoisoned(&self.control.state).write_blocked {
+                return;
+            }
+            started.await;
+        }
+    }
+
+    pub(super) fn release_write(&self) {
+        let mut state = lock_unpoisoned(&self.control.state);
+        state.write_blocked = false;
         self.control.released.notify_all();
     }
 
@@ -134,6 +169,22 @@ impl ProbeFiles {
             }
         }
     }
+
+    fn wait_if_write_blocked(&self) {
+        let mut state = lock_unpoisoned(&self.control.state);
+        if state.block_next_write {
+            state.block_next_write = false;
+            state.write_blocked = true;
+            self.control.write_started.notify_waiters();
+            while state.write_blocked {
+                state = self
+                    .control
+                    .released
+                    .wait(state)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        }
+    }
 }
 
 impl HostFileAccess for ProbeFiles {
@@ -143,7 +194,8 @@ impl HostFileAccess for ProbeFiles {
             RegisteredFileSource::Path(path) => std::fs::metadata(path)
                 .map_err(|_| host_error(HostCapabilityErrorCategory::Io))?
                 .len(),
-            RegisteredFileSource::Bytes(bytes) => bytes.len() as u64,
+            RegisteredFileSource::ReadOnlyBytes(bytes) => bytes.len() as u64,
+            RegisteredFileSource::Output(bytes) => lock_unpoisoned(bytes).len() as u64,
         };
         Ok(HostFileMetadata {
             display_name: file.display_name,
@@ -174,14 +226,12 @@ impl HostFileAccess for ProbeFiles {
                 bytes.truncate(read);
                 Ok(bytes)
             }
-            RegisteredFileSource::Bytes(bytes) => {
-                let start = usize::try_from(offset)
-                    .map_err(|_| host_error(HostCapabilityErrorCategory::Io))?;
-                if start >= bytes.len() {
-                    return Ok(Vec::new());
-                }
-                let end = start.saturating_add(max_bytes as usize).min(bytes.len());
-                Ok(bytes[start..end].to_vec())
+            RegisteredFileSource::ReadOnlyBytes(bytes) => {
+                read_memory_chunk(bytes.as_ref(), offset, max_bytes)
+            }
+            RegisteredFileSource::Output(bytes) => {
+                let bytes = lock_unpoisoned(&bytes);
+                read_memory_chunk(bytes.as_slice(), offset, max_bytes)
             }
         }
     }
@@ -193,32 +243,65 @@ impl HostFileAccess for ProbeFiles {
         bytes: &[u8],
     ) -> Result<(), HostCapabilityError> {
         let file = self.lookup(handle)?;
-        let RegisteredFileSource::Path(path) = file.source else {
-            return Err(host_error(HostCapabilityErrorCategory::InvalidHandle));
-        };
-        let mut output = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(path)
-            .map_err(|_| host_error(HostCapabilityErrorCategory::Io))?;
-        output
-            .seek(SeekFrom::Start(offset))
-            .and_then(|_| output.write_all(bytes))
-            .map_err(|_| host_error(HostCapabilityErrorCategory::Io))
+        self.wait_if_write_blocked();
+        match file.source {
+            RegisteredFileSource::Path(path) => {
+                let mut output = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(false)
+                    .open(path)
+                    .map_err(|_| host_error(HostCapabilityErrorCategory::Io))?;
+                output
+                    .seek(SeekFrom::Start(offset))
+                    .and_then(|_| output.write_all(bytes))
+                    .map_err(|_| host_error(HostCapabilityErrorCategory::Io))
+            }
+            RegisteredFileSource::Output(output) => {
+                let start = usize::try_from(offset)
+                    .map_err(|_| host_error(HostCapabilityErrorCategory::Io))?;
+                let end = start
+                    .checked_add(bytes.len())
+                    .ok_or_else(|| host_error(HostCapabilityErrorCategory::Io))?;
+                let mut output = lock_unpoisoned(&output);
+                let output_len = output.len();
+                output.resize(output_len.max(end), 0);
+                output[start..end].copy_from_slice(bytes);
+                Ok(())
+            }
+            RegisteredFileSource::ReadOnlyBytes(_) => {
+                Err(host_error(HostCapabilityErrorCategory::InvalidHandle))
+            }
+        }
     }
 
     fn finish_write(&self, handle: &HostFileHandle) -> Result<(), HostCapabilityError> {
         let file = self.lookup(handle)?;
-        let RegisteredFileSource::Path(path) = file.source else {
-            return Err(host_error(HostCapabilityErrorCategory::InvalidHandle));
-        };
-        OpenOptions::new()
-            .write(true)
-            .open(path)
-            .and_then(|output| output.sync_all())
-            .map_err(|_| host_error(HostCapabilityErrorCategory::Io))
+        match file.source {
+            RegisteredFileSource::Path(path) => OpenOptions::new()
+                .write(true)
+                .open(path)
+                .and_then(|output| output.sync_all())
+                .map_err(|_| host_error(HostCapabilityErrorCategory::Io)),
+            RegisteredFileSource::Output(_) => Ok(()),
+            RegisteredFileSource::ReadOnlyBytes(_) => {
+                Err(host_error(HostCapabilityErrorCategory::InvalidHandle))
+            }
+        }
     }
+}
+
+fn read_memory_chunk(
+    bytes: &[u8],
+    offset: u64,
+    max_bytes: u32,
+) -> Result<Vec<u8>, HostCapabilityError> {
+    let start = usize::try_from(offset).map_err(|_| host_error(HostCapabilityErrorCategory::Io))?;
+    if start >= bytes.len() {
+        return Ok(Vec::new());
+    }
+    let end = start.saturating_add(max_bytes as usize).min(bytes.len());
+    Ok(bytes[start..end].to_vec())
 }
 
 #[cfg(test)]
@@ -242,5 +325,24 @@ mod tests {
         assert!(!reading.is_finished());
         files.release_read();
         assert_eq!(reading.await.unwrap().unwrap(), vec![7; 512]);
+    }
+
+    #[tokio::test]
+    async fn controlled_file_write_stays_blocked_until_released() {
+        let files = ProbeFiles::default();
+        let handle = files.register_output();
+        files.prepare_blocked_write();
+        let writing = tokio::task::spawn_blocking({
+            let files = files.clone();
+            let handle = handle.clone();
+            move || files.write_chunk(&handle, 0, &[9; 512])
+        });
+        tokio::time::timeout(Duration::from_secs(1), files.wait_until_write_starts())
+            .await
+            .unwrap();
+        assert!(!writing.is_finished());
+        files.release_write();
+        writing.await.unwrap().unwrap();
+        assert_eq!(files.read_chunk(&handle, 0, 512).unwrap(), vec![9; 512]);
     }
 }
