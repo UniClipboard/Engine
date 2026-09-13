@@ -15,6 +15,9 @@ mod startup;
 #[path = "host_contract/lease.rs"]
 mod lease;
 
+#[path = "host_contract/stale_callback.rs"]
+mod stale_callback;
+
 use lease::{find_lease, open_lease};
 
 #[tokio::test(flavor = "multi_thread")]
