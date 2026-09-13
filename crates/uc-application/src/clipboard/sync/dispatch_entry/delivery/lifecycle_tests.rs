@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use tokio::sync::{oneshot, Notify};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
-use uc_core::clipboard::{EntryDeliveryError, EntryDeliveryRecord};
+use uc_core::clipboard::{EntryDeliveryError, EntryDeliveryRecord, EntryDeliveryStatus};
 use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::{DispatchAck, EntryDeliveryRepositoryPort};
 
@@ -41,6 +41,44 @@ impl EntryDeliveryRepositoryPort for HeldRecorder {
     ) -> Result<Vec<EntryDeliveryRecord>, EntryDeliveryError> {
         Ok(Vec::new())
     }
+}
+
+#[tokio::test]
+async fn abandoned_foreground_waiter_keeps_the_record_in_the_shutdown_drain() {
+    let (release, wait) = oneshot::channel();
+    let repository = Arc::new(HeldRecorder {
+        entered: Notify::new(),
+        release: Mutex::new(Some(wait)),
+        written: AtomicBool::new(false),
+    });
+    let recorder = Arc::new(DeliveryRecorder::new(
+        repository.clone(),
+        Arc::new(HostEventBus::new()),
+    ));
+    let owner = WorkOwner::default();
+    let work = owner.begin().unwrap();
+    let waiter = tokio::spawn(async move {
+        recorder
+            .flush_owned(
+                work,
+                vec![EntryDeliveryRecord {
+                    entry_id: EntryId::from("entry"),
+                    target_device_id: DeviceId::new("peer"),
+                    status: EntryDeliveryStatus::Delivered,
+                    reason_detail: None,
+                    updated_at_ms: 0,
+                }],
+            )
+            .await;
+    });
+    repository.entered.notified().await;
+    waiter.abort();
+    assert!(waiter.await.unwrap_err().is_cancelled());
+    let early = timeout(Duration::from_millis(20), owner.shutdown()).await;
+    release.send(()).unwrap();
+    assert!(early.is_err());
+    owner.shutdown().await.unwrap();
+    assert!(repository.written.load(Ordering::SeqCst));
 }
 
 #[tokio::test]

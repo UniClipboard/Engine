@@ -11,6 +11,9 @@
 //! 由应用层在拼装视图时合成,不在本模块定义。
 
 use crate::ids::{DeviceId, EntryId};
+use anyhow::Error as SourceError;
+use std::fmt;
+use thiserror::Error;
 
 /// 一条 entry 对单个对端的最新投递结果。
 ///
@@ -72,12 +75,26 @@ pub struct EntryDeliveryRecord {
 
 /// 仓储端口可能返回的领域错误。具体实现侧的底层错误必须被翻译为本枚举,
 /// 不得把第三方错误类型暴露给调用方。
-#[derive(Debug, thiserror::Error)]
+#[derive(Error)]
 pub enum EntryDeliveryError {
     /// 引用的 entry_id 在系统中不存在(违反 FK)。
-    #[error("entry not found: {0}")]
-    EntryNotFound(String),
+    #[error("delivery entry not found")]
+    EntryNotFound {
+        #[source]
+        source: SourceError,
+    },
     /// 持久化层操作失败。
-    #[error("storage failure: {0}")]
-    Storage(String),
+    #[error("delivery storage failed")]
+    Storage {
+        #[source]
+        source: SourceError,
+    },
+    #[error("invalid persisted delivery status")]
+    InvalidStatus,
+}
+
+impl fmt::Debug for EntryDeliveryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
 }

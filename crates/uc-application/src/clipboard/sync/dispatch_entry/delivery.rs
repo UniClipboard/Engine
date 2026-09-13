@@ -10,8 +10,9 @@
 
 use std::sync::Arc;
 
+use tokio::sync::oneshot;
 use tokio::task::{JoinError, JoinSet};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, Instrument};
 
 use uc_core::clipboard::{DeliveryFailureReason, EntryDeliveryRecord, EntryDeliveryStatus};
 use uc_core::ids::EntryId;
@@ -177,6 +178,31 @@ pub(crate) struct DeliveryRecorder {
 }
 
 impl DeliveryRecorder {
+    pub(super) async fn flush_owned(
+        self: &Arc<Self>,
+        work: OwnedWork,
+        records: Vec<EntryDeliveryRecord>,
+    ) {
+        if records.is_empty() {
+            return;
+        }
+        let recorder = Arc::clone(self);
+        let (finished, completion) = oneshot::channel();
+        let observation = ObservationContext::capture();
+        work.spawn(
+            DiagnosticTaskKind::ClipboardDeliveryRecord,
+            observation.scope(
+                async move {
+                    recorder.flush(&records).await;
+                    let _ = finished.send(());
+                }
+                .in_current_span(),
+            ),
+        );
+        // 异常由工作负责人保存；已收到的对端回执不因记录失败改写。
+        let _ = completion.await;
+    }
+
     pub(crate) fn new(
         entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
         host_event_bus: SharedHostEventEmitter,

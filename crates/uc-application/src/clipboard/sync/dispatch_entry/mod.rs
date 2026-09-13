@@ -578,7 +578,9 @@ impl DispatchClipboardEntryUseCase {
         }
 
         // 每条结果仍先持久化再通知；前台许可保留到自己的记录结束。
-        self.recorder.flush(&delivery_records).await;
+        self.recorder
+            .flush_owned(work.continuation(), delivery_records)
+            .await;
 
         Ok(DispatchOutcome {
             snapshot_hash: input.snapshot_hash,
