@@ -76,6 +76,7 @@ const SPACE_CONTROL_TABLES: &[&str] = &[
 ];
 
 const PROFILE_COORDINATION_TABLES: &[&str] = &[
+    "admission_repository_record",
     "admission_repository_state",
     "legacy_upgrade_pending_join",
     "workspace_convergence_state",

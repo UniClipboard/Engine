@@ -57,6 +57,12 @@ pub(super) enum SpaceAdmissionStateStoreError {
     Unavailable,
 }
 
+impl From<diesel::result::Error> for SpaceAdmissionStateStoreError {
+    fn from(_error: diesel::result::Error) -> Self {
+        Self::Unavailable
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(super) enum CredentialLoadError {
     #[error("admission record is absent")]

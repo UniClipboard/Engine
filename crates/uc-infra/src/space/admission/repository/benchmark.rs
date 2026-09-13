@@ -69,7 +69,6 @@ pub struct AdmissionRepositoryBenchmark {
     keys: Arc<AdmissionKeyManager>,
     manifests: Arc<ActiveSpaceGenerationManifestStore>,
     membership: Arc<dyn LoadMembershipLedgerPort>,
-    encrypted_repository_bytes: usize,
 }
 
 impl AdmissionRepositoryBenchmark {
@@ -101,7 +100,6 @@ impl AdmissionRepositoryBenchmark {
         }
         let plaintext = postcard::to_stdvec(&state)?;
         let encrypted = keys.seal_profile_payload(b"space-admission-repository-v1", &plaintext)?;
-        let encrypted_repository_bytes = encrypted.len();
         diesel::sql_query(
             "INSERT INTO admission_repository_state (singleton_id, encrypted_payload) VALUES (1, ?)",
         )
@@ -114,12 +112,7 @@ impl AdmissionRepositoryBenchmark {
             keys,
             manifests,
             membership,
-            encrypted_repository_bytes,
         })
-    }
-
-    pub const fn encrypted_repository_bytes(&self) -> usize {
-        self.encrypted_repository_bytes
     }
 
     pub async fn load_without_current_join(&self) -> anyhow::Result<()> {

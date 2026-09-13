@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use uc_infra::space::AdmissionRepositoryBenchmark;
 
 fn benchmark_sizes() -> &'static [usize] {
@@ -23,9 +23,6 @@ fn admission_repository(c: &mut Criterion) {
     for &unrelated_record_bytes in benchmark_sizes() {
         let fixture = AdmissionRepositoryBenchmark::without_current_join(unrelated_record_bytes)
             .unwrap_or_else(|error| panic!("benchmark fixture failed: {error:#}"));
-        group.throughput(Throughput::Bytes(
-            fixture.encrypted_repository_bytes() as u64
-        ));
         group.bench_with_input(
             BenchmarkId::from_parameter(unrelated_record_bytes),
             &fixture,

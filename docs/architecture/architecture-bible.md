@@ -249,7 +249,7 @@ Core 保存完整 admission aggregate 和状态转换规则。Application 内部
 成员账本、admission aggregate 和 OPAQUE credential 都使用 MasterKey AEAD 加密保存：
 
 - `SqliteMembershipLedger` 是成员历史、关系、待执行影响和 revision 的唯一提交边界。
-- admission repository 保存完整可恢复协议状态，使用版本凭证防止旧读取覆盖新状态。
+- admission repository 在同一数据库事务中保存加密小状态与逐条加密记录，使用 profile 密钥派生的不可逆标记定位记录，并使用版本凭证防止旧读取覆盖新状态。当前加入查询只读取小状态及对应记录；恢复扫描才读取全部记录。旧整包首次访问时向前升级，本机不支持回退旧程序。
 - `SqliteSpaceAdmissionCredentials` 保存绑定当前 Space 存储作用域的 OPAQUE setup 与 registration：V2 精确绑定 keyslot/database/security generation；V3 精确绑定 keyslot 与完整 `space_control_generation`，不依赖 profile data generation。一次性 profile upgrade 只调用 credential owner 的完整转换操作，在 control target 内验证并重新封装旧 registration 后才允许记录 target digest；普通 V3 运行路径不读取 V2 scope。
 - 口令、私密 MLS 状态、continuation credential、文件路径和协议载荷不得进入日志或明文字段。
 
@@ -840,6 +840,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 - 2026-09-14：设备列表只显示有效本机时新增修改加密口令流程，不要求处于升级重建状态。口令由用户自定义，产品一次提交新口令及再次输入值；两次不一致、仍显示其他设备或成员状态无法确认时均在修改前拒绝。能力及公开入口统一使用“修改加密口令”命名，不与重新配对状态混用。现有 MasterKey 与历史内容保持不变，受保护恢复记录保证中断后只向前完成；移动绑定公开相同动作，既有重新配对提醒仍由实际新设备加入结束。
 
+- 2026-09-13：准入仓储把加密的小状态与逐条记录分开保存，以 profile 密钥派生的不可逆标记定位记录，并用紧凑密文消除字节数组的文本膨胀。旧整包在首次访问时于单一事务中向前升级；当前加入查询只打开小状态及对应记录，无当前加入时不读取无关大记录。设备间协议、验证规则和重放字节不变，本机不支持回退旧程序。
 - 2026-09-13：为准入仓储增加只使用合成密文资料的正式性能套件，固定“无当前加入但存在无关大记录”的首次查询规模曲线；测试支撑只在 `test-util` 构建中公开，不扩大生产接口或改变运行架构。
 - 2026-09-13：性能执行计划按用户确认排除本机升级后回退旧程序的设计与验收，保留旧设备互通、升级资料完整性及中断后向前恢复要求；仅调整计划范围，无架构变化。
 - 2026-09-13：新增[空闲重复工作与准入存储性能执行计划](../exec-plans/active/2026-09-13-engine-idle-work-and-admission-performance.md)，记录正式 benchmark 套件、按变化唤醒、按需密文读取、成员历史验证复用及兼容性验收的待讨论方案；仅编写计划，未改变现有运行架构或资料格式。

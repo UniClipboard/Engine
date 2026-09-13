@@ -10,7 +10,8 @@ use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::Binary;
 use uc_application::deps::{
-    LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipLedgerError,
+    JoinerActivationStatePort, LoadMembershipLedgerPort, LoadedMembershipLedger,
+    MembershipLedgerError,
 };
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
@@ -62,6 +63,12 @@ struct Fixture {
     repository: SqliteSpaceAdmissionState<DieselSqliteExecutor>,
 }
 
+#[derive(QueryableByName)]
+struct CountRow {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    count: i64,
+}
+
 impl Fixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
@@ -100,6 +107,37 @@ impl Fixture {
             .execute(&mut self.connection)
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn activation_query_migrates_legacy_state_and_ignores_unrelated_record_payloads() {
+    let mut fixture = Fixture::new();
+    let mut state = PersistedSpaceAdmissionRepositoryV2::fresh([0x31; 16]);
+    state.records.insert(
+        [0x41; 32],
+        StoredSpaceAdmissionV1 {
+            wrapped_data_key: fixture.keys.create_wrapped_attempt_key([0x41; 32]).unwrap(),
+            encrypted_payload: vec![0x51; 1024 * 1024].into(),
+        },
+    );
+    fixture.write_state(&state);
+
+    let loaded = JoinerActivationStatePort::load(&fixture.repository)
+        .await
+        .unwrap();
+    assert!(loaded.is_none());
+    let rows = sql_query("SELECT COUNT(*) AS count FROM admission_repository_record")
+        .get_result::<CountRow>(&mut fixture.connection)
+        .unwrap();
+    assert_eq!(rows.count, 1);
+
+    sql_query("UPDATE admission_repository_record SET encrypted_payload = x'010203'")
+        .execute(&mut fixture.connection)
+        .unwrap();
+    let loaded = JoinerActivationStatePort::load(&fixture.repository)
+        .await
+        .unwrap();
+    assert!(loaded.is_none());
 }
 
 #[test]

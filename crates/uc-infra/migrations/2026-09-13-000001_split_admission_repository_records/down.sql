@@ -1,0 +1,1 @@
+DROP TABLE admission_repository_record;

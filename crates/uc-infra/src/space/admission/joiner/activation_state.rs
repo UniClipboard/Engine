@@ -20,16 +20,13 @@ impl<E: DbExecutor + Send + Sync> JoinerActivationStatePort for SqliteSpaceAdmis
     async fn load(&self) -> Result<Option<LoadedJoinerActivation>, JoinerActivationStateError> {
         self.executor
             .run(|conn| {
-                let state = self.load_state_on(conn).map_err(into_anyhow)?;
-                let Some(admission_id) = state.current_local_join_id else {
+                let Some((profile_generation, admission_id, stored)) =
+                    self.load_current_record_on(conn).map_err(into_anyhow)?
+                else {
                     return Ok(None);
                 };
-                let stored = state
-                    .records
-                    .get(&admission_id)
-                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
                 let record = self
-                    .open_record(admission_id, stored)
+                    .open_record(admission_id, &stored)
                     .map_err(into_anyhow)?;
                 let admission = JoinerAdmission::try_from_record(record)
                     .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
@@ -37,7 +34,7 @@ impl<E: DbExecutor + Send + Sync> JoinerActivationStatePort for SqliteSpaceAdmis
                     return Ok(None);
                 }
                 let token = JoinerActivationCommitToken::from_bytes(joiner_activation_token(
-                    state.profile_generation,
+                    profile_generation,
                     &admission,
                 ))
                 .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
