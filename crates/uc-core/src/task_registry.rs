@@ -148,13 +148,9 @@ impl TaskRegistry {
 
         loop {
             tokio::select! {
-                result = tasks.join_next() => {
-                    match result {
-                        Some(result) => add_join_result(&mut report, result),
-                        None => return report,
-                    }
-                }
+                biased;
                 _ = &mut deadline => {
+                    // 截止已到时先固定进入收尾；已经完成的任务仍在这里完整计入报告。
                     while let Some(result) = tasks.try_join_next() {
                         add_join_result(&mut report, result);
                     }
@@ -163,6 +159,12 @@ impl TaskRegistry {
                         add_join_result(&mut report, result);
                     }
                     return report;
+                }
+                result = tasks.join_next() => {
+                    match result {
+                        Some(result) => add_join_result(&mut report, result),
+                        None => return report,
+                    }
                 }
             }
         }
