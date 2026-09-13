@@ -980,9 +980,9 @@ pub struct AppPeerReachabilityEvent {
 /// application 层 peer_reachability 订阅错误。
 #[derive(Debug, Error)]
 pub enum AppPeerReachabilitySubscriptionError {
-    #[error("presence event receiver lagged by {0} messages")]
+    #[error("peer reachability receiver lagged by {0} messages")]
     Lagged(u64),
-    #[error("presence event receiver closed")]
+    #[error("peer reachability receiver closed")]
     Closed,
 }
 

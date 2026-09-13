@@ -11,9 +11,8 @@
 //!   `ReachabilityState`(离散三态),没有时间维度。T7 验收点也只要求
 //!   `state` 三值正确,先不加,省得打出一个永远 `None` 的误导字段。
 
-use uc_core::ids::DeviceId;
 use uc_core::membership::MemberSyncPreferences;
-use uc_core::ports::{ConnectionChannel, ReachabilityState};
+use uc_core::ports::ConnectionChannel;
 use uc_core::settings::model::ContentTypes;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,26 +49,6 @@ pub struct MemberProtectionView {
 pub struct SpaceProtectionView {
     pub mode: SpaceProtectionModeView,
     pub members: Vec<MemberProtectionView>,
-}
-
-/// One row of the member roster view.
-///
-/// 字段顺序按"UI 最关心 → 诊断信息"排列,方便 CLI 直接按 `{entry.device_name}
-/// ({entry.state})` 打印。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RosterEntry {
-    /// Stable device id(跨 rename 不变)——作为 member 的主键。
-    pub device_id: DeviceId,
-    /// 用户在 A1 / B2 时设置的可读名字,仅展示用。
-    pub device_name: String,
-    /// 当前正好有一条 entry 的 `is_local == true` —— 即本机。pre-A1/B2
-    /// 状态下本机身份还没生成,此时所有成员都会是 `false`(此窗口期内
-    /// `list_with_peer_reachability` 返回的 roster 也应该是空,因为还没有 membership
-    /// 记录,但防御性仍处理)。
-    pub is_local: bool,
-    /// 来自 `PeerReachabilityPort::current_state` 的纯缓存读。首次拨号(F1 hook 触
-    /// 发的 `ensure_reachable_all`)完成前,典型值是 `Unknown`。
-    pub state: ReachabilityState,
 }
 
 /// 应用层 peer 快照。供 daemon HTTP/WS 对外投影,不暴露 core peer_reachability 类型。

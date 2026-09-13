@@ -29,7 +29,7 @@ use uc_infra::db::schema::{entry_receive_attempt, file_transfer};
 type AttemptRepo = DieselEntryReceiveAttemptRepository<DieselSqliteExecutor>;
 type TransferRepo = DieselFileTransferRepository<DieselSqliteExecutor>;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn first_receive_waits_for_an_independent_database_writer() {
     let directory = tempdir().unwrap();
     let database = directory.path().join("concurrent-attempt.sqlite");
@@ -42,17 +42,21 @@ async fn first_receive_waits_for_an_independent_database_writer() {
         connection
             .immediate_transaction::<_, diesel::result::Error, _>(|_| {
                 locked_tx.send(()).unwrap();
-                let _ = release_rx.recv_timeout(Duration::from_millis(500));
+                release_rx.recv().unwrap();
                 Ok(())
             })
             .unwrap();
     });
     locked_rx.recv().unwrap();
-    let attempts = AttemptRepo::new(DieselSqliteExecutor::new(pool));
-    let result = attempts.begin_first_receive("entry", "attempt", 1).await;
-    let _ = release_tx.send(());
+    let attempts = Arc::new(AttemptRepo::new(DieselSqliteExecutor::new(pool)));
+    let mut begin =
+        tokio::spawn(async move { attempts.begin_first_receive("entry", "attempt", 1).await });
+    assert!(tokio::time::timeout(Duration::from_millis(100), &mut begin)
+        .await
+        .is_err());
+    release_tx.send(()).unwrap();
     writer.join().unwrap();
-    assert_eq!(result.unwrap(), BeginReceiveOutcome::Begun);
+    assert_eq!(begin.await.unwrap().unwrap(), BeginReceiveOutcome::Begun);
 }
 
 struct FixedSubkey;

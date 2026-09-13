@@ -237,6 +237,19 @@ async function scenario(id, action) {
   process.stdout.write(`${id}: passed (${record.elapsed_ms} ms)\n`)
 }
 
+async function handleRendezvousRequest(request, response) {
+  let body = ''
+  for await (const chunk of request) {
+    body += chunk
+    if (body.length > 1_048_576) { response.writeHead(413).end(); return }
+  }
+  const value = body ? JSON.parse(body) : {}
+  const result = request.url === '/v1/pairings' ? { code: value.sponsorTicket, expiresAtMs: 2_000_000_000_000 }
+    : { sponsorTicket: value.code, sponsorEndpointId: 'local-test', expiresAtMs: 2_000_000_000_000 }
+  response.writeHead(request.url?.endsWith('/consume') ? 204 : 200, { 'content-type': 'application/json' })
+  response.end(JSON.stringify(result))
+}
+
 async function run() {
   assert.equal(process.platform, 'linux', 'Linux network namespaces are required')
   command('nft', ['--version'])
@@ -246,14 +259,11 @@ async function run() {
   ip('link', 'add', bridge, 'type', 'bridge')
   ip('addr', 'add', '10.233.0.1/24', 'dev', bridge)
   ip('link', 'set', bridge, 'up')
-  server = createServer(async (request, response) => {
-    let body = ''
-    for await (const chunk of request) { body += chunk; if (body.length > 1_048_576) { response.writeHead(413).end(); return } }
-    const value = body ? JSON.parse(body) : {}
-    const result = request.url === '/v1/pairings' ? { code: value.sponsorTicket, expiresAtMs: 2_000_000_000_000 }
-      : { sponsorTicket: value.code, sponsorEndpointId: 'local-test', expiresAtMs: 2_000_000_000_000 }
-    response.writeHead(request.url?.endsWith('/consume') ? 204 : 200, { 'content-type': 'application/json' })
-    response.end(JSON.stringify(result))
+  server = createServer((request, response) => {
+    handleRendezvousRequest(request, response).catch(() => {
+      failed = true
+      response.destroy()
+    })
   })
   server.listen(0, '10.233.0.1')
   await once(server, 'listening')

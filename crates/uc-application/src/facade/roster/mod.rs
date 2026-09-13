@@ -23,11 +23,11 @@ mod commands;
 mod errors;
 mod facade;
 
+pub use crate::space::RosterEntry;
 pub use commands::{
     ContentTypesPatch, ContentTypesView, MemberProtectionStatusView, MemberProtectionView,
     MemberSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesView,
-    PeerReachabilityRefreshReport, PeerSnapshotView, RosterEntry, SpaceProtectionModeView,
-    SpaceProtectionView,
+    PeerReachabilityRefreshReport, PeerSnapshotView, SpaceProtectionModeView, SpaceProtectionView,
 };
 pub use errors::RosterError;
 pub(crate) use facade::{MemberRosterDeps, MemberRosterFacade};

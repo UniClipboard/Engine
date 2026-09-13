@@ -97,7 +97,7 @@ Relationship: 当前被多个流程直接枚举，形成并列的事实来源；
 
 ```text
 Component: Ordinary peer consumers
-Path: crates/uc-application/src/facade/roster/facade.rs
+Path: crates/uc-application/src/space/membership/query_member_roster.rs
 Path: crates/uc-application/src/space/convergence/connectivity/reachability.rs
 Path: crates/uc-application/src/space/convergence/connectivity/membership.rs
 Path: crates/uc-application/src/space/convergence/membership/legacy_upgrade.rs
@@ -327,7 +327,7 @@ Engine 入口。内部错误按现有稳定类别映射；列表和后台任务�
 
 ## Step 5: 迁移普通公开列表和应用层候选
 
-**File:** `crates/uc-application/src/facade/roster/facade.rs`
+**File:** `crates/uc-application/src/space/membership/query_member_roster.rs`
 **File:** `crates/uc-application/src/facade/space_setup/facade.rs`
 **File:** `crates/uc-application/src/space/convergence/connectivity/reachability.rs`
 **File:** `crates/uc-application/src/space/convergence/connectivity/membership.rs`
