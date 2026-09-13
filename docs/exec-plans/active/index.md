@@ -11,5 +11,6 @@
 - [本地产物准备](local-artifacts-preparation.md)
 - [配对通信等待诊断](2026-09-12-admission-exchange-diagnostics.md)
 - [配对内部处理与排队诊断](2026-09-13-pairing-local-work-diagnostics.md)
+- [Engine 空闲重复工作与准入存储性能修复](2026-09-13-engine-idle-work-and-admission-performance.md)
 
 计划完成时先更新稳定设计/ADR 和验收证据，再移入 `../completed/`。
