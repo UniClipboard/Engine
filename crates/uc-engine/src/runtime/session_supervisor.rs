@@ -649,6 +649,7 @@ impl ProductionSessionFactory {
             .spawn(move |cancel| async move {
                 loop {
                     tokio::select! {
+                        biased;
                         _ = cancel.cancelled() => return,
                         change = active_clipboard_changes.recv() => match change {
                             Ok(state) => active_clipboard_events
