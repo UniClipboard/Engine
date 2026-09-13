@@ -1655,6 +1655,70 @@ impl RuntimeSpaceAccessAdapter {
         Ok(false)
     }
 
+    async fn defer_space_group_updates(
+        &self,
+        update_ids: &[String],
+        now_ms: i64,
+    ) -> Result<usize, KeyEpochError> {
+        if update_ids.is_empty() {
+            return Ok(0);
+        }
+        let repository = self.key_epoch_repository.as_ref();
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|error| KeyEpochError::Repository(error.into()))?;
+        let mut remaining = update_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+
+        if let Some(mut material) = repository.load_space_material(&space_id).await? {
+            let mut changed = false;
+            for update_id in update_ids {
+                if material.defer_group_update(update_id, now_ms) {
+                    remaining.remove(update_id.as_str());
+                    changed = true;
+                }
+            }
+            if changed {
+                repository.save_space_material(&material).await?;
+            }
+        }
+
+        if !remaining.is_empty() {
+            for record in repository.list_incomplete_revocations().await? {
+                if record.space_id() != &space_id {
+                    continue;
+                }
+                let Some(stage) = repository
+                    .load_staged_revocation(record.revocation_id())
+                    .await?
+                else {
+                    continue;
+                };
+                for message in stage
+                    .outbox()
+                    .iter()
+                    .filter(|message| !message.is_confirmed())
+                {
+                    let update_id = PendingGroupUpdate::for_generation(
+                        record.revocation_id().clone(),
+                        GroupEpoch::new(message.generation()),
+                        message.recipient().clone(),
+                        message.payload().to_vec(),
+                    );
+                    remaining.remove(update_id.update_id());
+                }
+                if remaining.is_empty() {
+                    break;
+                }
+            }
+        }
+
+        Ok(update_ids.len() - remaining.len())
+    }
+
     async fn group_revocation_result(
         repository: &dyn RevocationRepositoryPort,
         record: &RevocationRecord,
@@ -2451,6 +2515,14 @@ impl GroupRevocationPort for RuntimeSpaceAccessAdapter {
         now_ms: i64,
     ) -> Result<bool, KeyEpochError> {
         RuntimeSpaceAccessAdapter::defer_space_group_update(self, update_id, now_ms).await
+    }
+
+    async fn defer_space_group_updates(
+        &self,
+        update_ids: &[String],
+        now_ms: i64,
+    ) -> Result<usize, KeyEpochError> {
+        RuntimeSpaceAccessAdapter::defer_space_group_updates(self, update_ids, now_ms).await
     }
 }
 
@@ -4072,6 +4144,62 @@ mod admission_tests {
             Arc::clone(vault),
         );
         adapter
+    }
+
+    #[tokio::test]
+    async fn deferred_group_update_batch_loads_and_saves_large_material_once() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("batched-deferred-updates");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x62; 32]).unwrap(),
+        );
+        let mut material = SpaceKeyMaterial::new(
+            SpaceKeyState::legacy(space_id.clone()),
+            vec![0x31; 1024 * 1024],
+            vec![0x32; 1024 * 1024],
+            100,
+        );
+        let updates = (0..8)
+            .map(|index| {
+                PendingGroupUpdate::persistent(
+                    DeviceId::new(format!("offline-peer-{index}")),
+                    vec![index as u8],
+                )
+            })
+            .collect::<Vec<_>>();
+        let update_ids = updates
+            .iter()
+            .map(|update| update.update_id().to_owned())
+            .collect::<Vec<_>>();
+        material.add_pending_group_updates(updates, 100);
+
+        let mut repository = MockRevocationRepository::new();
+        repository
+            .expect_load_space_material()
+            .times(1)
+            .withf(move |candidate| candidate == &space_id)
+            .return_once(move |_| Ok(Some(material)));
+        repository
+            .expect_save_space_material()
+            .times(1)
+            .returning(|_| Ok(()));
+        repository.expect_list_incomplete_revocations().never();
+        repository.expect_load_staged_revocation().never();
+        let adapter = adapter(
+            &directory,
+            local_key_material(&directory, memory_secure_storage()),
+            session,
+            Arc::new(repository),
+        );
+
+        let deferred = adapter
+            .defer_space_group_updates(&update_ids, 200)
+            .await
+            .unwrap();
+
+        assert_eq!(deferred, update_ids.len());
     }
 
     #[tokio::test]

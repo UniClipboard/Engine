@@ -287,6 +287,20 @@ pub trait GroupRevocationPort: Send + Sync {
     ) -> Result<bool, KeyEpochError> {
         Ok(false)
     }
+
+    async fn defer_space_group_updates(
+        &self,
+        update_ids: &[String],
+        now_ms: i64,
+    ) -> Result<usize, KeyEpochError> {
+        let mut deferred = 0;
+        for update_id in update_ids {
+            if self.defer_space_group_update(update_id, now_ms).await? {
+                deferred += 1;
+            }
+        }
+        Ok(deferred)
+    }
 }
 
 #[async_trait]

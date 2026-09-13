@@ -39,6 +39,7 @@ impl DeliverPendingGroupUpdatesUseCase {
             Err(error) => return classify_store_error(&error),
         };
         let mut outcome = MembershipMaintenanceStepOutcome::Completed;
+        let mut deferred_update_ids = Vec::new();
         record_pending_group_updates(pending.len(), pending.len().min(MAX_UPDATES_PER_ROUND));
 
         for update in pending.iter().take(MAX_UPDATES_PER_ROUND) {
@@ -63,27 +64,27 @@ impl DeliverPendingGroupUpdatesUseCase {
                     Err(error) => return classify_store_error(&error),
                 },
                 Err(GroupUpdateDispatchError::Offline | GroupUpdateDispatchError::Transport) => {
-                    if let Err(error) = self
-                        .store
-                        .defer_space_group_update(update.update_id(), self.clock.now_ms())
-                        .await
-                    {
-                        return classify_store_error(&error);
-                    }
+                    deferred_update_ids.push(update.update_id().to_owned());
                     outcome = MembershipMaintenanceStepOutcome::Deferred;
                 }
                 Err(GroupUpdateDispatchError::Rejected) => {
-                    if let Err(error) = self
-                        .store
-                        .defer_space_group_update(update.update_id(), self.clock.now_ms())
-                        .await
-                    {
-                        return classify_store_error(&error);
-                    }
+                    deferred_update_ids.push(update.update_id().to_owned());
                     if outcome != MembershipMaintenanceStepOutcome::Deferred {
                         outcome = MembershipMaintenanceStepOutcome::StableFailure;
                     }
                 }
+            }
+        }
+
+        if !deferred_update_ids.is_empty() {
+            match self
+                .store
+                .defer_space_group_updates(&deferred_update_ids, self.clock.now_ms())
+                .await
+            {
+                Ok(deferred) if deferred == deferred_update_ids.len() => {}
+                Ok(_) => outcome = MembershipMaintenanceStepOutcome::StableFailure,
+                Err(error) => return classify_store_error(&error),
             }
         }
 
@@ -134,6 +135,7 @@ mod tests {
     struct RecordingStore {
         pending: Mutex<Vec<PendingGroupUpdate>>,
         acknowledged: Mutex<Vec<String>>,
+        deferred_batches: Mutex<Vec<Vec<String>>>,
     }
 
     #[async_trait]
@@ -211,6 +213,24 @@ mod tests {
             pending.push(update);
             Ok(true)
         }
+
+        async fn defer_space_group_updates(
+            &self,
+            update_ids: &[String],
+            now_ms: i64,
+        ) -> Result<usize, KeyEpochError> {
+            self.deferred_batches
+                .lock()
+                .unwrap()
+                .push(update_ids.to_vec());
+            let mut deferred = 0;
+            for update_id in update_ids {
+                if self.defer_space_group_update(update_id, now_ms).await? {
+                    deferred += 1;
+                }
+            }
+            Ok(deferred)
+        }
     }
 
     struct RecordingDispatch {
@@ -248,6 +268,7 @@ mod tests {
         let store = Arc::new(RecordingStore {
             pending: Mutex::new(vec![update]),
             acknowledged: Mutex::new(Vec::new()),
+            deferred_batches: Mutex::new(Vec::new()),
         });
         let use_case = DeliverPendingGroupUpdatesUseCase::new(
             store.clone(),
@@ -267,6 +288,7 @@ mod tests {
         let store = Arc::new(RecordingStore {
             pending: Mutex::new(vec![update]),
             acknowledged: Mutex::new(Vec::new()),
+            deferred_batches: Mutex::new(Vec::new()),
         });
         let use_case = DeliverPendingGroupUpdatesUseCase::new(
             store.clone(),
@@ -278,6 +300,7 @@ mod tests {
 
         assert_eq!(outcome, MembershipMaintenanceStepOutcome::Deferred);
         assert!(store.acknowledged.lock().unwrap().is_empty());
+        assert_eq!(store.deferred_batches.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -290,6 +313,7 @@ mod tests {
         let store = Arc::new(RecordingStore {
             pending: Mutex::new(pending),
             acknowledged: Mutex::new(Vec::new()),
+            deferred_batches: Mutex::new(Vec::new()),
         });
         let dispatch = dispatch_with(std::iter::repeat_n(Ok(()), 10));
         let use_case = DeliverPendingGroupUpdatesUseCase::new(
@@ -325,6 +349,7 @@ mod tests {
         let store = Arc::new(RecordingStore {
             pending: Mutex::new(pending),
             acknowledged: Mutex::new(Vec::new()),
+            deferred_batches: Mutex::new(Vec::new()),
         });
         let dispatch = dispatch_with(std::iter::repeat_n(
             Err(GroupUpdateDispatchError::Offline),
@@ -336,6 +361,11 @@ mod tests {
         assert_eq!(
             use_case.execute().await,
             MembershipMaintenanceStepOutcome::Deferred
+        );
+        assert_eq!(store.deferred_batches.lock().unwrap().len(), 1);
+        assert_eq!(
+            store.deferred_batches.lock().unwrap()[0].len(),
+            MAX_UPDATES_PER_ROUND
         );
         assert_eq!(
             use_case.execute().await,
