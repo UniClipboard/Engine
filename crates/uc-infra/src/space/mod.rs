@@ -14,6 +14,8 @@ pub use adapters::{
 #[cfg(test)]
 pub(crate) use admission::decode_full_invitation;
 pub(crate) use admission::prepare_registration;
+#[cfg(feature = "test-util")]
+pub use admission::AdmissionRepositoryBenchmark;
 pub(crate) use admission::{decode_invitation_entry, encode_full_invitation};
 pub(crate) use admission::{
     install_prepared_registration_for_control_generation,

@@ -2,6 +2,9 @@ pub(super) mod codec;
 mod persisted;
 pub(super) mod token;
 
+#[cfg(feature = "test-util")]
+mod benchmark;
+
 #[cfg(test)]
 mod tests;
 
@@ -13,6 +16,9 @@ use uc_application::deps::LoadMembershipLedgerPort;
 use uc_core::membership::{AdmissionContinuationCredential, SpaceAdmissionId};
 
 use codec::RepositoryReadCache;
+
+#[cfg(feature = "test-util")]
+pub use benchmark::AdmissionRepositoryBenchmark;
 
 pub struct SqliteSpaceAdmissionState<E> {
     pub(super) executor: E,
