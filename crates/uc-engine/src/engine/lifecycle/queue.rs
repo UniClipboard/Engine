@@ -14,6 +14,7 @@ use crate::{EngineError, EngineErrorCategory, EngineEvent, EngineState};
 #[derive(Default)]
 pub(in super::super) struct TransitionQueue {
     state: Mutex<State>,
+    ready: Notify,
     drained: Notify,
 }
 
@@ -21,8 +22,9 @@ pub(in super::super) struct TransitionQueue {
 struct State {
     binding: Binding,
     admission_closed: bool,
+    owner_dropped: bool,
     resume_cancellation: CancellationToken,
-    running: bool,
+    active_request: bool,
     pending: VecDeque<QueuedItem>,
 }
 
@@ -53,6 +55,10 @@ impl TransitionQueue {
     ) -> oneshot::Receiver<Result<(), EngineError>> {
         let (response, completion) = oneshot::channel();
         let mut state = self.state();
+        if state.owner_dropped {
+            let _ = response.send(Err(invalid_state_error()));
+            return completion;
+        }
         match &state.binding {
             Binding::Stopped => {
                 let _ = response.send(Err(invalid_state_error()));
@@ -79,11 +85,8 @@ impl TransitionQueue {
             cancellation,
             response,
         }));
-        if !state.running && matches!(state.binding, Binding::Ready(_)) {
-            state.running = true;
-            let owner = Arc::clone(self);
-            tokio::spawn(async move { owner.run().await });
-        }
+        drop(state);
+        self.ready.notify_one();
         completion
     }
 
@@ -102,11 +105,8 @@ impl TransitionQueue {
         // 输入只交给一次启动；绑定后原队列继续处理交接后的宿主通知。
         state.binding = Binding::Ready(Arc::new(transition));
         state.pending.push_back(QueuedItem::StartupHandoff(handoff));
-        if !state.running {
-            state.running = true;
-            let owner = Arc::clone(self);
-            tokio::spawn(async move { owner.run().await });
-        }
+        let owner = Arc::clone(self);
+        tokio::spawn(async move { owner.run().await });
         completion
     }
 
@@ -123,6 +123,8 @@ impl TransitionQueue {
                 let _ = request.response.send(Err(error.clone()));
             }
         }
+        drop(state);
+        self.ready.notify_one();
     }
 
     pub(in super::super) fn accept_shutdown(&self, stop_requested: &AtomicBool) {
@@ -136,6 +138,16 @@ impl TransitionQueue {
                 let _ = request.response.send(Err(invalid_state_error()));
             }
         }
+        drop(state);
+        self.ready.notify_one();
+    }
+
+    pub(in super::super) fn abandon_owner(&self) {
+        let mut state = self.state();
+        state.owner_dropped = true;
+        state.admission_closed = true;
+        drop(state);
+        self.ready.notify_one();
     }
 
     pub(in super::super) async fn wait_empty(&self) {
@@ -143,7 +155,15 @@ impl TransitionQueue {
             let drained = self.drained.notified();
             tokio::pin!(drained);
             drained.as_mut().enable();
-            if !self.state().running {
+            let is_empty = {
+                let state = self.state();
+                let has_pending_request = state
+                    .pending
+                    .iter()
+                    .any(|item| matches!(item, QueuedItem::Request(_)));
+                !state.active_request && !has_pending_request
+            };
+            if is_empty {
                 return;
             }
             drained.await;
@@ -192,22 +212,32 @@ impl TransitionQueue {
 
     async fn run(self: Arc<Self>) {
         loop {
-            let (next, transition) = {
+            let ready = self.ready.notified();
+            tokio::pin!(ready);
+            ready.as_mut().enable();
+            let next = {
                 let mut state = self.state();
                 let Binding::Ready(transition) = &state.binding else {
-                    state.running = false;
                     self.drained.notify_waiters();
                     return;
                 };
                 let transition = Arc::clone(transition);
                 match state.pending.pop_front() {
-                    Some(next) => (next, transition),
-                    None => {
-                        state.running = false;
+                    Some(next) => {
+                        state.active_request = matches!(next, QueuedItem::Request(_));
+                        Some((next, transition))
+                    }
+                    None if state.owner_dropped => {
+                        state.binding = Binding::Stopped;
                         self.drained.notify_waiters();
                         return;
                     }
+                    None => None,
                 }
+            };
+            let Some((next, transition)) = next else {
+                ready.await;
+                continue;
             };
             let (request, cancellation, response) = match next {
                 QueuedItem::Request(request) => {
@@ -229,6 +259,8 @@ impl TransitionQueue {
                     Err(EngineError::new(1108, EngineErrorCategory::Internal, true))
                 });
             let _ = response.send(result);
+            self.state().active_request = false;
+            self.drained.notify_waiters();
         }
     }
 

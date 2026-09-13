@@ -18,7 +18,8 @@ use uc_engine::{
     HostSecureStorage, JoinSpaceInput, NetworkSettingsPatch, ObserveClipboardChangeInput,
     Operation, OperationResult, RecoverSessionInput, RelayCredentialEdit, RemoveMemberInput,
     ResendEntryInput, RestoreClipboardInput, SaveRelayInput, SaveRelayOutcome, SecretString,
-    SendFilesInput, SendImageInput, SendTextInput, SettingsPatch,
+    SendFilesInput, SendImageInput, SendTextInput, SettingsPatch, StartupLifecycleInput,
+    StartupProgress,
 };
 use zeroize::Zeroizing;
 
@@ -34,9 +35,11 @@ use crate::{
 const LIFECYCLE_TRANSITION_DEADLINE: Duration = Duration::from_secs(10);
 mod lifecycle;
 mod shutdown;
+mod startup_lifecycle;
 mod worker_join;
 mod worker_lifecycle;
 mod worker_shutdown;
+pub use startup_lifecycle::MobileStartupLifecycle;
 use worker_join::WorkerJoin;
 use worker_lifecycle::LifecycleCommand;
 
@@ -739,8 +742,12 @@ impl MobileEngine {
         config: BindingConfig,
         host: Arc<dyn BindingHost>,
         analytics: Option<(Arc<dyn BindingAnalyticsHost>, BindingAnalyticsContext)>,
+        startup_lifecycle: Option<&MobileStartupLifecycle>,
     ) -> Result<Arc<Self>, BindingError> {
         let capabilities = host_capabilities(Arc::clone(&host), analytics)?;
+        let startup_lifecycle = startup_lifecycle
+            .map(MobileStartupLifecycle::take_input)
+            .transpose()?;
         let config = EngineConfig::new(config.app_version).with_profile_id(config.profile_id);
         let (commands, requests) = tokio::sync::mpsc::unbounded_channel();
         let (lifecycle_commands, lifecycle_requests) = tokio::sync::mpsc::unbounded_channel();
@@ -757,6 +764,7 @@ impl MobileEngine {
                     lifecycle_requests,
                     worker_events,
                     started,
+                    startup_lifecycle,
                 )
             })
             .map_err(|_| BindingError::RuntimeUnavailable)?;
@@ -787,7 +795,7 @@ impl MobileEngine {
         config: BindingConfig,
         host: Arc<dyn BindingHost>,
     ) -> Result<Arc<Self>, BindingError> {
-        Self::start_inner(config, host, None)
+        Self::start_inner(config, host, None, None)
     }
 
     #[uniffi::constructor]
@@ -797,7 +805,27 @@ impl MobileEngine {
         analytics: Arc<dyn BindingAnalyticsHost>,
         context: BindingAnalyticsContext,
     ) -> Result<Arc<Self>, BindingError> {
-        Self::start_inner(config, host, Some((analytics, context)))
+        Self::start_inner(config, host, Some((analytics, context)), None)
+    }
+
+    #[uniffi::constructor]
+    pub fn start_with_lifecycle(
+        config: BindingConfig,
+        host: Arc<dyn BindingHost>,
+        lifecycle: Arc<MobileStartupLifecycle>,
+    ) -> Result<Arc<Self>, BindingError> {
+        Self::start_inner(config, host, None, Some(&lifecycle))
+    }
+
+    #[uniffi::constructor]
+    pub fn start_with_analytics_and_lifecycle(
+        config: BindingConfig,
+        host: Arc<dyn BindingHost>,
+        analytics: Arc<dyn BindingAnalyticsHost>,
+        context: BindingAnalyticsContext,
+        lifecycle: Arc<MobileStartupLifecycle>,
+    ) -> Result<Arc<Self>, BindingError> {
+        Self::start_inner(config, host, Some((analytics, context)), Some(&lifecycle))
     }
 
     pub fn recover_session(
@@ -1215,6 +1243,7 @@ fn run_worker(
     lifecycle_requests: tokio::sync::mpsc::UnboundedReceiver<LifecycleCommand>,
     events: Arc<EventQueue>,
     started: mpsc::Sender<Result<(), BindingError>>,
+    startup_lifecycle: Option<StartupLifecycleInput>,
 ) -> Result<(), BindingError> {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1233,6 +1262,7 @@ fn run_worker(
         lifecycle_requests,
         events,
         started,
+        startup_lifecycle,
     ))
 }
 
@@ -1243,8 +1273,16 @@ async fn run_worker_loop(
     lifecycle_requests: tokio::sync::mpsc::UnboundedReceiver<LifecycleCommand>,
     events: Arc<EventQueue>,
     started: mpsc::Sender<Result<(), BindingError>>,
+    startup_lifecycle: Option<StartupLifecycleInput>,
 ) -> Result<(), BindingError> {
-    let (engine, mut engine_events) = match Engine::start(config, host).await {
+    let result = match startup_lifecycle {
+        Some(lifecycle) => {
+            let (progress, _) = StartupProgress::channel();
+            Engine::start_with_lifecycle(config, host, progress, lifecycle).await
+        }
+        None => Engine::start(config, host).await,
+    };
+    let (engine, mut engine_events) = match result {
         Ok(started_engine) => started_engine,
         Err(error) => {
             let error = BindingError::from(error);

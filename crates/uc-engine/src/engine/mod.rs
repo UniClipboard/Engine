@@ -175,6 +175,12 @@ impl Engine {
     }
 }
 
+impl Drop for Engine {
+    fn drop(&mut self) {
+        self.lifecycle_requests.abandon_owner();
+    }
+}
+
 fn invalid_state_error() -> EngineError {
     EngineError::new(INVALID_STATE_CODE, EngineErrorCategory::InvalidState, false)
 }

@@ -8,9 +8,9 @@ use super::{
 };
 
 pub(super) struct ReadGate {
-    key_prefix: &'static str,
-    entered: mpsc::Sender<()>,
-    release: mpsc::Receiver<()>,
+    pub(super) key_prefix: &'static str,
+    pub(super) entered: mpsc::Sender<()>,
+    pub(super) release: mpsc::Receiver<()>,
 }
 
 impl ReadGate {

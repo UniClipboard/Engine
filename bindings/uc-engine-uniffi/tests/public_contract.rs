@@ -14,7 +14,8 @@ use uc_engine_uniffi::{
     BindingCollectorConfig, BindingConfig, BindingDeploymentEnvironment, BindingEngineState,
     BindingError, BindingErrorCategory, BindingEvent, BindingFileMetadata, BindingHost,
     BindingObservabilityConfig, BindingObservabilitySetupStatus, BindingObservabilitySignalResult,
-    BindingOperationTerminal, HostBindingError, InvitationIssued, MobileEngine, SendReport,
+    BindingOperationTerminal, HostBindingError, InvitationIssued, MobileEngine,
+    MobileStartupLifecycle, SendReport,
 };
 
 static ENGINE_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -22,6 +23,9 @@ const ENGINE_SHUTDOWN_DEADLINE_MS: u64 = 30_000;
 
 #[path = "public_contract/lifecycle_targets.rs"]
 mod lifecycle_targets;
+
+#[path = "public_contract/startup_lifecycle.rs"]
+mod startup_lifecycle;
 
 #[test]
 fn core_version_uses_the_binding_package_version() {
