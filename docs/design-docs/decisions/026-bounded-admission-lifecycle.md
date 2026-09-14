@@ -1,13 +1,13 @@
 # ADR-026：配对尝试采用固定期限、可终止结果与精确成员绑定
 
-- **状态**：已采纳；S0、S1 已实施，S2–S8 待实施
+- **状态**：已采纳；S0–S8 已实施
 - **日期**：2026-09-13
 - **取代**：ADR-017 中“正式提交后只能继续到成功”和 ADR-022 中“Prepared 后不能由本机终止或取代”的规则
 - **保留**：每次用户明确提交创建独立尝试、邀请一次性消费、正式 Add/Remove 不回滚、成员撤销只保证前向安全
 - **相关文档**：`docs/design-docs/decisions/011-reliable-member-revocation.md`、
   `docs/design-docs/decisions/017-pairing-as-workspace-admission.md`、
   `docs/design-docs/decisions/022-user-initiated-join-supersession.md`、
-  `docs/exec-plans/active/2026-09-13-admission-expiry-and-replacement.md`
+  `docs/exec-plans/completed/2026-09-13-admission-expiry-and-replacement.md`
 
 ## 背景
 
@@ -70,7 +70,7 @@ Sponsor 生成正式 Add 后，再以首次契约摘要绑定 Space、精确 mem
 - 系统需要持久保存终止围栏、未知远端提交责任和邀请方确认状态，并允许受限的迟到确认。
 - 一端已经本机完成、另一端放弃而永久失联时，两端可能暂时保留不同看法；系统不声称全局同时撤销。
 - 精确撤销必须复用现有完整成员移除流程和后续安全效果，不能只删设备关系。
-- S1 已接通正式决定前的本机自动到期、取消、替换和重启恢复；双端期限、正式决定后的撤销和跨 Space 清理由后续切片完成，在 S8 前不宣称完整功能可用。
+- S0–S8 已接通公开结果、双端共同期限、任何阶段的本机终止、精确撤销、跨 Space 隔离、可靠放弃投递和有界恢复索引。真实设备与产品前台接入仍需由各产品仓单独验收。
 
 ## S0 验收
 

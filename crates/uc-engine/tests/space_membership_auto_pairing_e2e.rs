@@ -25,7 +25,7 @@ use uc_engine::{
     HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory, HostClipboard,
     HostClipboardSnapshot, HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata,
     HostSecureStorage, JoinSpaceInput, JoinSpaceStatusSummary, ListHistoryEntriesInput, Operation,
-    OperationResult, RemoveMemberInput, SecretString, SendTextInput,
+    OperationResult, PairingConfirmationSummary, RemoveMemberInput, SecretString, SendTextInput,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -4302,6 +4302,100 @@ async fn completed_admission_survives_restart_and_allows_transfer() {
         .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("shut down restarted joiner");
+}
+
+// 公开查询必须把已确认状态与准确成员一起持久保留；移除后同一设备可作为新实例重新配对。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn confirmed_pairing_survives_restart_removal_and_same_device_rejoin() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let sponsor_harness = DeviceHarness::new(rendezvous.uri());
+    let joiner_harness = DeviceHarness::new(rendezvous.uri());
+    let sponsor = sponsor_harness.start().await;
+    let joiner = joiner_harness.start().await;
+    let space_id = create_space(&sponsor, "Sponsor").await.0;
+    let joiner_id = join_through(&sponsor, &joiner, "Joiner", &space_id)
+        .await
+        .self_device_id;
+
+    wait_for_pairing_confirmation(&sponsor, &joiner_id, PairingConfirmationSummary::Confirmed)
+        .await;
+    sponsor
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down sponsor before confirmation reload");
+    let restarted_sponsor = sponsor_harness.start().await;
+    wait_for_pairing_confirmation(
+        &restarted_sponsor,
+        &joiner_id,
+        PairingConfirmationSummary::Confirmed,
+    )
+    .await;
+
+    remove_member(&restarted_sponsor, &joiner_id).await;
+    wait_for_active_member_count(&restarted_sponsor, 1).await;
+    let rejoined_id = join_through(&restarted_sponsor, &joiner, "Joiner", &space_id)
+        .await
+        .self_device_id;
+    assert_eq!(rejoined_id, joiner_id);
+    wait_for_pairing_confirmation(
+        &restarted_sponsor,
+        &joiner_id,
+        PairingConfirmationSummary::Confirmed,
+    )
+    .await;
+
+    restarted_sponsor
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down rejoined sponsor");
+    joiner
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down rejoined device");
+}
+
+async fn wait_for_pairing_confirmation(
+    engine: &Engine,
+    device_id: &str,
+    expected: PairingConfirmationSummary,
+) {
+    let deadline = tokio::time::Instant::now() + ADMISSION_WAIT_TIMEOUT;
+    loop {
+        if let Ok(OperationResult::DeviceGroupChoices(summary)) =
+            engine.execute(Operation::QueryDeviceGroupChoices).await
+        {
+            if summary.device_trust.devices.iter().any(|device| {
+                device.device_id == device_id && device.pairing_confirmation == Some(expected)
+            }) {
+                return;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "pairing confirmation did not reach {expected:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn remove_member(engine: &Engine, device_id: &str) {
+    let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+    loop {
+        match engine
+            .execute(Operation::RemoveMember(RemoveMemberInput {
+                device_id: device_id.to_owned(),
+            }))
+            .await
+        {
+            Ok(OperationResult::DeviceTrust(_)) => return,
+            Err(error) if error.is_retryable() && tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Ok(_) => panic!("unexpected remove member result"),
+            Err(error) => panic!("remove member failed: {error}"),
+        }
+    }
 }
 
 async fn refresh_available_members(engine: &Engine) {

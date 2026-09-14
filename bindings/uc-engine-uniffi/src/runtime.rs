@@ -2705,16 +2705,49 @@ mod tests {
 
     #[test]
     fn device_trust_json_keeps_complete_snapshot_fields() {
-        let json = map_device_trust_snapshot(
-            uc_engine::DeviceTrustSnapshotSummary::empty_unavailable("local-device".into()),
-        )
-        .unwrap();
-        assert!(json.contains("local_device_id"));
-        assert!(json.contains("current_change"));
-        assert!(json.contains("devices"));
-        assert!(json.contains("recovery"));
-        assert!(json.contains("allowed_actions"));
-        assert!(json.contains("blocked_reason"));
+        let mut snapshot =
+            uc_engine::DeviceTrustSnapshotSummary::empty_unavailable("local-device".into());
+        snapshot
+            .devices
+            .push(uc_engine::DeviceTrustRelationshipSummary {
+                device_id: "peer-device".into(),
+                display_name: "Peer Device".into(),
+                is_local: false,
+                reachability: uc_engine::DeviceReachabilitySummary::Offline,
+                membership: uc_engine::DeviceMembershipSummary::Active,
+                group_relationship: uc_engine::DeviceGroupRelationshipSummary::Consistent,
+                compatibility: uc_engine::DeviceCompatibilitySummary::Compatible,
+                sync_relationship: uc_engine::DeviceSyncRelationshipSummary::Usable,
+                pairing_confirmation: Some(
+                    uc_engine::PairingConfirmationSummary::AwaitingPeerConfirmation,
+                ),
+                available_actions: Vec::new(),
+                blocked_reason: None,
+            });
+        for (status, expected) in [
+            (
+                uc_engine::PairingConfirmationSummary::AwaitingPeerConfirmation,
+                "awaiting_peer_confirmation",
+            ),
+            (
+                uc_engine::PairingConfirmationSummary::Unconfirmed,
+                "unconfirmed",
+            ),
+            (
+                uc_engine::PairingConfirmationSummary::Confirmed,
+                "confirmed",
+            ),
+        ] {
+            snapshot.devices[0].pairing_confirmation = Some(status);
+            let json = map_device_trust_snapshot(snapshot.clone()).unwrap();
+            assert!(json.contains("local_device_id"));
+            assert!(json.contains("current_change"));
+            assert!(json.contains("devices"));
+            assert!(json.contains("recovery"));
+            assert!(json.contains("allowed_actions"));
+            assert!(json.contains("blocked_reason"));
+            assert!(json.contains(&format!("\"pairing_confirmation\":\"{expected}\"")));
+        }
     }
 
     #[test]

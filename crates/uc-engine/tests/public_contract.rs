@@ -1474,14 +1474,29 @@ fn pairing_confirmation_is_optional_and_uses_stable_names() {
     let absent = serde_json::to_value(&relationship).expect("serializable relationship");
     assert!(absent.get("pairing_confirmation").is_none());
 
-    relationship.pairing_confirmation = Some(uc_engine::PairingConfirmationSummary::Unconfirmed);
-    let present = serde_json::to_value(&relationship).expect("serializable relationship");
-    assert_eq!(
-        present
-            .get("pairing_confirmation")
-            .and_then(|value| value.as_str()),
-        Some("unconfirmed")
-    );
+    for (status, expected) in [
+        (
+            uc_engine::PairingConfirmationSummary::AwaitingPeerConfirmation,
+            "awaiting_peer_confirmation",
+        ),
+        (
+            uc_engine::PairingConfirmationSummary::Unconfirmed,
+            "unconfirmed",
+        ),
+        (
+            uc_engine::PairingConfirmationSummary::Confirmed,
+            "confirmed",
+        ),
+    ] {
+        relationship.pairing_confirmation = Some(status);
+        let present = serde_json::to_value(&relationship).expect("serializable relationship");
+        assert_eq!(
+            present
+                .get("pairing_confirmation")
+                .and_then(|value| value.as_str()),
+            Some(expected)
+        );
+    }
 }
 
 #[test]
