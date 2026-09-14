@@ -4,18 +4,50 @@ impl SpaceAdmissionAggregate {
     /// Produces a sensitive plaintext payload that Infra must AEAD-seal before persistence.
     pub fn encode_persisted(&self) -> Result<Vec<u8>, SpaceAdmissionPersistenceError> {
         if self.format_version == SPACE_ADMISSION_RECORD_FORMAT_V2 {
-            if let SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(
-                state,
-            )) = &self.state
-            {
-                return encode_record_v2(
-                    self,
-                    PersistedSpaceAdmissionStateV2::LocalJoinerTerminated {
-                        join_id: *state.join_id.as_bytes(),
-                        local_join_ordinal: state.local_join_ordinal,
-                        reason: encode_local_termination_reason(state.reason)?,
-                    },
-                );
+            match &self.state {
+                SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(
+                    state,
+                )) => {
+                    return encode_record_v2(
+                        self,
+                        PersistedSpaceAdmissionStateV2::LocalJoinerTerminated {
+                            join_id: *state.join_id.as_bytes(),
+                            local_join_ordinal: state.local_join_ordinal,
+                            reason: encode_local_termination_reason(state.reason)?,
+                        },
+                    )
+                }
+                SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Applied(state))
+                    if state.confirmation.is_some() =>
+                {
+                    return encode_record_v2(
+                        self,
+                        PersistedSpaceAdmissionStateV2::SponsorApplied {
+                            applied: PersistedSponsorAppliedV1::try_from(state)?,
+                            confirmation: encode_sponsor_confirmation(
+                                state
+                                    .confirmation
+                                    .ok_or(SpaceAdmissionPersistenceError::InvalidState)?,
+                            ),
+                        },
+                    );
+                }
+                SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Completed(
+                    state,
+                )) if state.confirmation.is_some() => {
+                    return encode_record_v2(
+                        self,
+                        PersistedSpaceAdmissionStateV2::SponsorCompleted {
+                            completed: PersistedCompletedV1::try_from(state)?,
+                            confirmation: encode_sponsor_confirmation(
+                                state
+                                    .confirmation
+                                    .ok_or(SpaceAdmissionPersistenceError::InvalidState)?,
+                            ),
+                        },
+                    );
+                }
+                _ => {}
             }
         } else if self.format_version != SPACE_ADMISSION_RECORD_FORMAT_V1 {
             return Err(SpaceAdmissionPersistenceError::UnsupportedVersion);
@@ -324,7 +356,7 @@ fn decode_record_v2(
             })
             .map_err(|_| SpaceAdmissionPersistenceError::InvalidEncoding)?;
             let mut aggregate = SpaceAdmissionAggregate::decode_persisted(&legacy)?;
-            if !is_joiner_owned_v2_state(&aggregate.state) {
+            if !is_attempt_timeline_v2_state(&aggregate.state) {
                 return Err(SpaceAdmissionPersistenceError::InvalidState);
             }
             aggregate.format_version = SPACE_ADMISSION_RECORD_FORMAT_V2;
@@ -348,7 +380,75 @@ fn decode_record_v2(
                 },
             )),
         }),
+        PersistedSpaceAdmissionStateV2::SponsorApplied {
+            applied,
+            confirmation,
+        } => {
+            let mut state = applied.into_domain(admission_id)?;
+            state.confirmation = Some(decode_sponsor_confirmation(confirmation, admission_id)?);
+            Ok(SpaceAdmissionAggregate {
+                format_version: SPACE_ADMISSION_RECORD_FORMAT_V2,
+                record_version: persisted.record_version,
+                admission_id,
+                attempt_timeline: Some(attempt_timeline),
+                state: SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Applied(
+                    state,
+                )),
+            })
+        }
+        PersistedSpaceAdmissionStateV2::SponsorCompleted {
+            completed,
+            confirmation,
+        } => {
+            let mut state = completed.into_domain(admission_id)?;
+            state.confirmation = Some(decode_sponsor_confirmation(confirmation, admission_id)?);
+            Ok(SpaceAdmissionAggregate {
+                format_version: SPACE_ADMISSION_RECORD_FORMAT_V2,
+                record_version: persisted.record_version,
+                admission_id,
+                attempt_timeline: Some(attempt_timeline),
+                state: SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Completed(
+                    state,
+                )),
+            })
+        }
     }
+}
+
+fn encode_sponsor_confirmation(
+    summary: SponsorPairingConfirmationSummary,
+) -> PersistedSponsorPairingConfirmationV2 {
+    PersistedSponsorPairingConfirmationV2 {
+        status: match summary.status {
+            SponsorPairingConfirmationStatus::AwaitingPeerConfirmation => 0,
+            SponsorPairingConfirmationStatus::Unconfirmed => 1,
+            SponsorPairingConfirmationStatus::Confirmed => 2,
+        },
+        admission_id: *summary.admission_id.as_bytes(),
+        member_instance_id: *summary.member_instance_id.as_bytes(),
+        add_event_id: *summary.add_event_id.as_bytes(),
+    }
+}
+
+fn decode_sponsor_confirmation(
+    persisted: PersistedSponsorPairingConfirmationV2,
+    admission_id: SpaceAdmissionId,
+) -> Result<SponsorPairingConfirmationSummary, SpaceAdmissionPersistenceError> {
+    if persisted.admission_id != *admission_id.as_bytes() {
+        return Err(SpaceAdmissionPersistenceError::InvalidState);
+    }
+    let status = match persisted.status {
+        0 => SponsorPairingConfirmationStatus::AwaitingPeerConfirmation,
+        1 => SponsorPairingConfirmationStatus::Unconfirmed,
+        2 => SponsorPairingConfirmationStatus::Confirmed,
+        _ => return Err(SpaceAdmissionPersistenceError::InvalidState),
+    };
+    Ok(SponsorPairingConfirmationSummary {
+        status,
+        admission_id,
+        member_instance_id: MemberInstanceId::from_bytes(persisted.member_instance_id),
+        add_event_id: MembershipEventId::from_bytes(persisted.add_event_id),
+    })
 }
 
 const fn encode_local_termination_reason(
@@ -373,15 +473,21 @@ const fn decode_local_termination_reason(
     }
 }
 
-const fn is_joiner_owned_v2_state(state: &SpaceAdmissionRecordState) -> bool {
+const fn is_attempt_timeline_v2_state(state: &SpaceAdmissionRecordState) -> bool {
     matches!(
         state,
         SpaceAdmissionRecordState::Joiner(_)
+            | SpaceAdmissionRecordState::Sponsor(
+                SpaceAdmissionSponsorState::Accepted(_)
+                    | SpaceAdmissionSponsorState::Candidate(_)
+                    | SpaceAdmissionSponsorState::Committed(_)
+            )
             | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Active(_))
             | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Superseded(_))
             | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
                 SpaceAdmissionRejectedState::LocalJoiner(_)
                     | SpaceAdmissionRejectedState::Joiner(_)
+                    | SpaceAdmissionRejectedState::Sponsor(_)
             ))
             | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(_))
     )

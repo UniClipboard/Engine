@@ -13,8 +13,8 @@ use uc_core::membership::{
     AdmissionChangeFacts, AdmissionEncryptedPasswordEquivalent, AdmissionIdentitySignature,
     AdmissionJoinRequestV1, AdmissionJoinerPrivateState, AdmissionKeyPackage, AdmissionMessageId,
     AdmissionRecoveryPublicKey, AdmissionRole, JoinId, MembershipCredential, SpaceAdmissionBodyV1,
-    SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionRoute, UnreadableHistoryPolicy,
-    ED25519_SIGNATURE_ALGORITHM_V1,
+    SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionProtocolVersion, SpaceAdmissionRoute,
+    UnreadableHistoryPolicy, ED25519_SIGNATURE_ALGORITHM_V1,
 };
 use uc_core::pairing::InvitationCode;
 use uc_core::ports::SettingsPort;
@@ -150,7 +150,8 @@ impl DefaultJoinerStartMaterial {
                 policy,
             )
             .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
-            let join_request = SpaceAdmissionEnvelopeV1::new(
+            let join_request = SpaceAdmissionEnvelopeV1::new_with_version(
+                SpaceAdmissionProtocolVersion::V2,
                 admission_id,
                 AdmissionRole::Joiner,
                 0,

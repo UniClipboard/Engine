@@ -28,8 +28,8 @@ pub(crate) use recovery::AdmissionRecoveryService;
 pub use recovery::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryReport, AdmissionRecoveryTrigger,
     AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply, LoadedPendingAdmission,
-    PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
-    SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
+    LoadedSponsorConfirmation, PendingAdmissionRecoveryStateError,
+    PendingAdmissionRecoveryStatePort, SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
 };
 pub(crate) use sponsor::SponsorAdmissionService;
 pub use sponsor::{

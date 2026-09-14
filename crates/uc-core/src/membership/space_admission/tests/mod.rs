@@ -11,15 +11,15 @@ use crate::membership::{
 use crate::security::IdentityFingerprint;
 
 use super::{
-    AdmissionAppliedV1, AdmissionArtifactError, AdmissionBaseSnapshot, AdmissionCandidateV1,
-    AdmissionChannelPeerId, AdmissionCommitV1, AdmissionCompleteAckV1, AdmissionCompleteV1,
-    AdmissionContinuationCredential, AdmissionContinuationRoute, AdmissionEffect,
-    AdmissionEncryptedPasswordEquivalent, AdmissionErrorCategory, AdmissionEvidenceRelation,
-    AdmissionExchangeBlockReason, AdmissionIdentitySignature, AdmissionInboundDecision,
-    AdmissionInboundExpectation, AdmissionInvitationClaim, AdmissionJoinRequestError,
-    AdmissionJoinRequestV1, AdmissionJoinerPrivateState, AdmissionKeyPackage,
-    AdmissionMessageEvidence, AdmissionMessageHeaderError, AdmissionMessageId, AdmissionMlsCommit,
-    AdmissionMlsWelcome, AdmissionPeerBinding, AdmissionPendingExchangeError,
+    AdmissionAppliedV1, AdmissionArtifactError, AdmissionAttemptTimeline, AdmissionBaseSnapshot,
+    AdmissionCandidateV1, AdmissionChannelPeerId, AdmissionCommitV1, AdmissionCompleteAckV1,
+    AdmissionCompleteV1, AdmissionContinuationCredential, AdmissionContinuationRoute,
+    AdmissionEffect, AdmissionEncryptedPasswordEquivalent, AdmissionErrorCategory,
+    AdmissionEvidenceRelation, AdmissionExchangeBlockReason, AdmissionIdentitySignature,
+    AdmissionInboundDecision, AdmissionInboundExpectation, AdmissionInvitationClaim,
+    AdmissionJoinRequestError, AdmissionJoinRequestV1, AdmissionJoinerPrivateState,
+    AdmissionKeyPackage, AdmissionMessageEvidence, AdmissionMessageHeaderError, AdmissionMessageId,
+    AdmissionMlsCommit, AdmissionMlsWelcome, AdmissionPeerBinding, AdmissionPendingExchangeError,
     AdmissionPendingRecovery, AdmissionPreparedV1, AdmissionProtocolMessageError,
     AdmissionRecordPersistence, AdmissionRecoveryCategory, AdmissionRecoveryPublicKey,
     AdmissionReplayDecision, AdmissionReplayError, AdmissionRetryState, AdmissionRole,
@@ -32,7 +32,8 @@ use super::{
     SpaceAdmissionJoinerState, SpaceAdmissionMessageKind, SpaceAdmissionProtocolVersion,
     SpaceAdmissionRecordState, SpaceAdmissionRejectedState, SpaceAdmissionRejectionReason,
     SpaceAdmissionRoute, SpaceAdmissionSponsorState, SpaceAdmissionTerminalState,
-    SpaceAdmissionTerminationReason, SponsorAdmission, UnreadableHistoryPolicy,
+    SpaceAdmissionTerminationReason, SponsorAdmission, SponsorPairingConfirmationStatus,
+    UnreadableHistoryPolicy,
 };
 
 mod attempt;

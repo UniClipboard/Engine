@@ -48,9 +48,10 @@ pub use maintenance::{
     RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
 };
 pub use query_device_trust::{
-    DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
-    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, LoadCurrentJoinStatusPort,
-    LoadDeviceTrustObservationsPort, PairingConfirmationStatus, PendingDeviceTrustChange,
+    AdmissionDisplayStatus, DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership,
+    DeviceTrustObservation, DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState,
+    LoadCurrentJoinStatusPort, LoadDeviceTrustObservationsPort, PairingConfirmationObservation,
+    PairingConfirmationStatus, PairingConfirmationTarget, PendingDeviceTrustChange,
     QueryDeviceTrustError,
 };
 pub(super) use query_diagnostics::QueryMembershipDiagnosticsUseCase;

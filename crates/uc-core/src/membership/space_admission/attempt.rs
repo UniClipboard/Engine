@@ -164,6 +164,13 @@ impl AdmissionAttemptContractV2 {
         self.expires_at_ms
     }
 
+    pub const fn timeline(&self) -> AdmissionAttemptTimeline {
+        AdmissionAttemptTimeline {
+            started_at_ms: self.started_at_ms,
+            expires_at_ms: self.expires_at_ms,
+        }
+    }
+
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut encoded = Vec::with_capacity(178);
         encoded.extend_from_slice(ATTEMPT_CONTRACT_DOMAIN_V2);

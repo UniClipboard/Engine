@@ -87,6 +87,29 @@ impl SpaceAdmissionAggregate {
         peer_binding: AdmissionPeerBinding,
         continuation_credential: AdmissionContinuationCredential,
     ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        Self::accept_join_request_with_timeline(
+            admission_id,
+            invitation_claim,
+            join_request,
+            join_request_evidence,
+            base_snapshot,
+            peer_binding,
+            continuation_credential,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn accept_join_request_with_timeline(
+        admission_id: SpaceAdmissionId,
+        invitation_claim: AdmissionInvitationClaim,
+        join_request: SpaceAdmissionEnvelopeV1,
+        join_request_evidence: AdmissionMessageEvidence,
+        base_snapshot: AdmissionBaseSnapshot,
+        peer_binding: AdmissionPeerBinding,
+        continuation_credential: AdmissionContinuationCredential,
+        attempt_timeline: Option<AdmissionAttemptTimeline>,
+    ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
         if join_request.header().admission_id() != admission_id {
             return Err(SpaceAdmissionAggregateError::AdmissionMismatch);
         }
@@ -96,10 +119,14 @@ impl SpaceAdmissionAggregate {
             return Err(SpaceAdmissionAggregateError::InvalidInboundEvidence);
         }
         let replacement = Self {
-            format_version: SPACE_ADMISSION_RECORD_FORMAT_V1,
+            format_version: if attempt_timeline.is_some() {
+                SPACE_ADMISSION_RECORD_FORMAT_V2
+            } else {
+                SPACE_ADMISSION_RECORD_FORMAT_V1
+            },
             record_version: 0,
             admission_id,
-            attempt_timeline: None,
+            attempt_timeline,
             state: SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Accepted(
                 SpaceAdmissionSponsorAccepted {
                     invitation_claim,

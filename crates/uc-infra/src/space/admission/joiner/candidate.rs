@@ -191,12 +191,11 @@ impl PrepareJoinerCandidatePort for DefaultJoinerCandidatePreparation {
                 &proof.signing_payload(),
             )
             .map_err(PrepareJoinerCandidateError::invalid)?;
-            let prepared = SpaceAdmissionEnvelopeV1::new(
-                candidate_envelope.header().admission_id(),
+            let prepared = SpaceAdmissionEnvelopeV1::reply_to(
+                candidate_envelope,
                 uc_core::membership::AdmissionRole::Joiner,
                 1,
                 mint_message_id(),
-                Some(candidate_envelope.header().message_id()),
                 SpaceAdmissionBodyV1::Prepared(AdmissionPreparedV1::new(proof)),
             )
             .map_err(PrepareJoinerCandidateError::invalid)?;

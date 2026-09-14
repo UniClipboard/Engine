@@ -66,7 +66,8 @@ pub use membership::{
 };
 pub use membership::{
     DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
-    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, PairingConfirmationStatus,
+    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState,
+    PairingConfirmationObservation, PairingConfirmationStatus, PairingConfirmationTarget,
     PendingDeviceTrustChange, QueryDeviceTrustError,
 };
 pub use membership::{MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult};
@@ -95,19 +96,20 @@ pub use admission::{
     JoinerStartMaterial, JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation,
     JoinerStartStateError, JoinerStartStatePort, LoadedCurrentJoin, LoadedJoinerActivation,
     LoadedJoinerStartState, LoadedPendingAdmission, LoadedSponsorAdmission,
-    PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
-    PrepareJoinerActivationError, PrepareJoinerActivationPort, PrepareJoinerAppliedError,
-    PrepareJoinerAppliedPort, PrepareJoinerCancellationPort, PrepareJoinerCandidateError,
-    PrepareJoinerCandidatePort, PrepareJoinerInvitationError, PrepareJoinerInvitationPort,
-    PrepareSponsorCandidateError, PrepareSponsorCandidatePort, PrepareSponsorCommitError,
-    PrepareSponsorCommitPort, PrepareSponsorCompleteError, PrepareSponsorCompletePort,
-    PrepareSponsorSettledError, PrepareSponsorSettledPort, PreparedJoinerActivation,
-    PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial, PreparedJoinerInvitation,
-    PreparedSponsorCandidate, PreparedSponsorCommit, PreparedSponsorComplete,
-    PreparedSponsorSettled, ResolveJoinerInvitationError, ResolveJoinerInvitationPort,
-    SpaceAdmissionCommitToken, SpaceAdmissionMessageReply, SpaceAdmissionTransportError,
-    SpaceAdmissionTransportPort, SponsorAdmissionCommitToken, SponsorAdmissionMutation,
-    SponsorAdmissionState, SponsorAdmissionStateError, SponsorAdmissionStatePort,
+    LoadedSponsorConfirmation, PendingAdmissionRecoveryStateError,
+    PendingAdmissionRecoveryStatePort, PrepareJoinerActivationError, PrepareJoinerActivationPort,
+    PrepareJoinerAppliedError, PrepareJoinerAppliedPort, PrepareJoinerCancellationPort,
+    PrepareJoinerCandidateError, PrepareJoinerCandidatePort, PrepareJoinerInvitationError,
+    PrepareJoinerInvitationPort, PrepareSponsorCandidateError, PrepareSponsorCandidatePort,
+    PrepareSponsorCommitError, PrepareSponsorCommitPort, PrepareSponsorCompleteError,
+    PrepareSponsorCompletePort, PrepareSponsorSettledError, PrepareSponsorSettledPort,
+    PreparedJoinerActivation, PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial,
+    PreparedJoinerInvitation, PreparedSponsorCandidate, PreparedSponsorCommit,
+    PreparedSponsorComplete, PreparedSponsorSettled, ResolveJoinerInvitationError,
+    ResolveJoinerInvitationPort, SpaceAdmissionCommitToken, SpaceAdmissionMessageReply,
+    SpaceAdmissionTransportError, SpaceAdmissionTransportPort, SponsorAdmissionCommitToken,
+    SponsorAdmissionMutation, SponsorAdmissionState, SponsorAdmissionStateError,
+    SponsorAdmissionStatePort,
 };
 pub use admission::{
     AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
@@ -141,6 +143,10 @@ pub use membership::{
     RestrictedMembershipDeliveryPort, SpaceMemberPauseReason,
 };
 pub use membership::{
+    AdmissionDisplayStatus, LoadCurrentJoinStatusPort, LoadDeviceTrustObservationsPort,
+    RePairingStateError, RePairingStateStorePort,
+};
+pub use membership::{
     BeginMembershipBranchRecoveryInput, DeliverRestrictedMembershipPort,
     IssueMembershipBranchRecoveryError, IssueMembershipBranchRecoveryInput,
     IssueMembershipBranchRecoveryPort, MembershipBranchRecoveryChannelError,
@@ -155,10 +161,6 @@ pub use membership::{
     RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
 };
 pub use membership::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
-pub use membership::{
-    LoadCurrentJoinStatusPort, LoadDeviceTrustObservationsPort, RePairingStateError,
-    RePairingStateStorePort,
-};
 
 #[cfg(test)]
 mod application_tests;

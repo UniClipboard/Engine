@@ -361,6 +361,7 @@ pub struct SpaceAdmissionAuthContext {
     invitation_id: InvitationId,
     joiner_peer_id: AdmissionChannelPeerId,
     sponsor_peer_id: AdmissionChannelPeerId,
+    attempt_contract_digest: Option<[u8; 32]>,
 }
 
 impl SpaceAdmissionAuthContext {
@@ -377,7 +378,28 @@ impl SpaceAdmissionAuthContext {
             invitation_id,
             joiner_peer_id,
             sponsor_peer_id,
+            attempt_contract_digest: None,
         }
+    }
+
+    pub fn with_attempt_contract(
+        admission_id: SpaceAdmissionId,
+        invitation_id: InvitationId,
+        joiner_peer_id: AdmissionChannelPeerId,
+        sponsor_peer_id: AdmissionChannelPeerId,
+        attempt_contract_digest: [u8; 32],
+    ) -> Option<Self> {
+        if attempt_contract_digest == [0; 32] {
+            return None;
+        }
+        Some(Self {
+            protocol_version: SpaceAdmissionProtocolVersion::V2,
+            admission_id,
+            invitation_id,
+            joiner_peer_id,
+            sponsor_peer_id,
+            attempt_contract_digest: Some(attempt_contract_digest),
+        })
     }
 
     fn encode(&self) -> Vec<u8> {
@@ -392,6 +414,10 @@ impl SpaceAdmissionAuthContext {
         encoded.extend_from_slice(self.joiner_peer_id.as_bytes());
         encoded.extend_from_slice(b"sponsor");
         encoded.extend_from_slice(self.sponsor_peer_id.as_bytes());
+        if let Some(digest) = self.attempt_contract_digest {
+            encoded.extend_from_slice(b"attempt-contract");
+            encoded.extend_from_slice(&digest);
+        }
         encoded.extend_from_slice(b"ristretto255-sha512-3dh-argon2id");
         encoded
     }

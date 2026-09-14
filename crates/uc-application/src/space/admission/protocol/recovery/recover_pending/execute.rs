@@ -51,6 +51,35 @@ impl AdmissionRecoveryService {
         let _recovery = self.execution_lock.lock().await;
         waiting.finish(LocalWorkOutcome::Ok);
         let mut report = AdmissionRecoveryReport::default();
+        let sponsor_confirmations = match self.state.load_sponsor_confirmations().await {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.record_state_error(&mut report, error);
+                return report;
+            }
+        };
+        for loaded in sponsor_confirmations {
+            let (aggregate, token) = loaded.into_parts();
+            let now_ms = self.clock.now_ms();
+            if let Some(expires_at_ms) = aggregate.expires_at_ms() {
+                if now_ms < expires_at_ms {
+                    joiner.maintenance_wake.schedule_at(expires_at_ms, now_ms);
+                }
+            }
+            match aggregate.mark_confirmation_unconfirmed(now_ms) {
+                Ok(Some(transition)) => {
+                    match self
+                        .commit_sponsor_confirmation_and_notify(token, transition)
+                        .await
+                    {
+                        Ok(_) => report.advanced_count += 1,
+                        Err(error) => self.record_state_error(&mut report, error),
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => report.recovery_required_count += 1,
+            }
+        }
         let loaded = match self.state.load(trigger).await {
             Ok(loaded) => loaded,
             Err(error) => {
@@ -189,13 +218,19 @@ impl AdmissionRecoveryService {
                             pending_exchange,
                         } => (
                             RecoveryChannel::Initial,
-                            self.transport
-                                .establish_initial(
-                                    aggregate.admission_id(),
-                                    pending_exchange.route(),
-                                    encrypted_password_equivalent,
-                                )
-                                .await,
+                            match aggregate.attempt_timeline() {
+                                Some(attempt_timeline) => {
+                                    self.transport
+                                        .establish_initial(
+                                            aggregate.admission_id(),
+                                            attempt_timeline,
+                                            pending_exchange.route(),
+                                            encrypted_password_equivalent,
+                                        )
+                                        .await
+                                }
+                                None => Err(SpaceAdmissionTransportError::PeerUpgradeRequired),
+                            },
                         ),
                         AdmissionPendingRecovery::Continuation {
                             peer_binding,

@@ -128,9 +128,9 @@ async fn accepted_sponsor_record_survives_restart_and_loads_existing() {
     else {
         panic!("new admission must load Fresh sponsor state");
     };
-    let (peer_binding, envelope, digest, continuation) = message.into_parts();
+    let (peer_binding, envelope, digest, continuation, attempt_contract) = message.into_parts();
     let evidence = envelope.evidence(digest).unwrap();
-    let transition = SponsorAdmission::accept_join_request(
+    let transition = SponsorAdmission::accept_join_request_with_timeline(
         envelope.header().admission_id(),
         invitation_claim,
         envelope,
@@ -138,6 +138,7 @@ async fn accepted_sponsor_record_survives_restart_and_loads_existing() {
         base_snapshot,
         peer_binding,
         continuation.unwrap(),
+        attempt_contract.unwrap().timeline(),
     )
     .unwrap();
 
@@ -267,7 +268,8 @@ fn authenticated_join_request(
     let device_id = DeviceId::new("joining-device");
     let credential = MembershipCredential::new(1, vec![admission_byte + 2; 32]);
     let signature = vec![admission_byte + 5; 64];
-    let envelope = SpaceAdmissionEnvelopeV1::new(
+    let envelope = SpaceAdmissionEnvelopeV1::new_with_version(
+        SpaceAdmissionProtocolVersion::V2,
         admission_id,
         AdmissionRole::Joiner,
         0,
@@ -288,11 +290,22 @@ fn authenticated_join_request(
         ),
     )
     .unwrap();
+    let binding = peer_binding();
     AuthenticatedSpaceAdmissionMessage::new(
-        peer_binding(),
+        binding,
         envelope,
         [admission_byte + 6; 32],
         Some(continuation()),
+        Some(
+            AdmissionAttemptContractV2::start(
+                admission_id,
+                InvitationId::from_bytes([invitation_byte; 32]).unwrap(),
+                binding.remote_peer_id(),
+                binding.local_peer_id(),
+                1_000,
+            )
+            .expect("valid attempt contract"),
+        ),
     )
     .unwrap()
 }
@@ -322,9 +335,9 @@ fn accepted_transition(
     else {
         panic!("fixture must be Fresh sponsor state");
     };
-    let (peer_binding, envelope, digest, continuation) = message.into_parts();
+    let (peer_binding, envelope, digest, continuation, attempt_contract) = message.into_parts();
     let evidence = envelope.evidence(digest).unwrap();
-    SponsorAdmission::accept_join_request(
+    SponsorAdmission::accept_join_request_with_timeline(
         envelope.header().admission_id(),
         invitation_claim,
         envelope,
@@ -332,6 +345,7 @@ fn accepted_transition(
         base_snapshot,
         peer_binding,
         continuation.unwrap(),
+        attempt_contract.unwrap().timeline(),
     )
     .unwrap()
 }

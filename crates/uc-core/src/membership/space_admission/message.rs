@@ -139,6 +139,27 @@ impl SpaceAdmissionEnvelopeHeaderV1 {
         message_id: AdmissionMessageId,
         predecessor_message_id: Option<AdmissionMessageId>,
     ) -> Result<Self, AdmissionMessageHeaderError> {
+        Self::new_with_version(
+            SpaceAdmissionProtocolVersion::V1,
+            admission_id,
+            kind,
+            sender_role,
+            sender_sequence,
+            message_id,
+            predecessor_message_id,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_version(
+        protocol_version: SpaceAdmissionProtocolVersion,
+        admission_id: SpaceAdmissionId,
+        kind: SpaceAdmissionMessageKind,
+        sender_role: AdmissionRole,
+        sender_sequence: u64,
+        message_id: AdmissionMessageId,
+        predecessor_message_id: Option<AdmissionMessageId>,
+    ) -> Result<Self, AdmissionMessageHeaderError> {
         if !kind.accepts_sender(sender_role) {
             return Err(AdmissionMessageHeaderError::SenderNotAllowed);
         }
@@ -151,7 +172,7 @@ impl SpaceAdmissionEnvelopeHeaderV1 {
         }
 
         Ok(Self {
-            protocol_version: SpaceAdmissionProtocolVersion::V1,
+            protocol_version,
             admission_id,
             kind,
             sender_role,
@@ -671,6 +692,45 @@ impl SpaceAdmissionEnvelopeV1 {
             predecessor_message_id,
         )?;
         Ok(Self { header, body })
+    }
+
+    pub fn new_with_version(
+        protocol_version: SpaceAdmissionProtocolVersion,
+        admission_id: SpaceAdmissionId,
+        sender_role: AdmissionRole,
+        sender_sequence: u64,
+        message_id: AdmissionMessageId,
+        predecessor_message_id: Option<AdmissionMessageId>,
+        body: SpaceAdmissionBodyV1,
+    ) -> Result<Self, AdmissionProtocolMessageError> {
+        let header = SpaceAdmissionEnvelopeHeaderV1::new_with_version(
+            protocol_version,
+            admission_id,
+            body.kind(),
+            sender_role,
+            sender_sequence,
+            message_id,
+            predecessor_message_id,
+        )?;
+        Ok(Self { header, body })
+    }
+
+    pub fn reply_to(
+        predecessor: &Self,
+        sender_role: AdmissionRole,
+        sender_sequence: u64,
+        message_id: AdmissionMessageId,
+        body: SpaceAdmissionBodyV1,
+    ) -> Result<Self, AdmissionProtocolMessageError> {
+        Self::new_with_version(
+            predecessor.header().protocol_version(),
+            predecessor.header().admission_id(),
+            sender_role,
+            sender_sequence,
+            message_id,
+            Some(predecessor.header().message_id()),
+            body,
+        )
     }
 
     pub const fn header(&self) -> &SpaceAdmissionEnvelopeHeaderV1 {

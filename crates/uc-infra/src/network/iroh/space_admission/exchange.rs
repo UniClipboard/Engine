@@ -7,7 +7,7 @@ use uc_application::deps::{
 };
 use uc_core::membership::{
     AdmissionContinuationCredential, AdmissionPeerBinding, SpaceAdmissionEnvelopeV1,
-    SpaceAdmissionId,
+    SpaceAdmissionId, SpaceAdmissionProtocolVersion,
 };
 use uc_observability_contract::diagnostics::connectivity::{
     AdmissionExchangeFailure, AdmissionExchangeObservation, AdmissionExchangeSide,
@@ -90,6 +90,10 @@ impl AuthenticatedAdmissionExchangePort for EstablishedExchange {
                 AdmissionNetworkPoint::ExchangeStarted,
             );
             progress.start_step(AdmissionExchangeStep::PrepareRequest);
+            if request.header().protocol_version() != SpaceAdmissionProtocolVersion::V2 {
+                progress.fail(AdmissionExchangeFailure::PeerUpgradeRequired);
+                return Err(SpaceAdmissionTransportError::PeerUpgradeRequired);
+            }
             let canonical = request
                 .encode_canonical_v1()
                 .inspect_err(|_| progress.fail(AdmissionExchangeFailure::InvalidMessage))
@@ -128,6 +132,10 @@ impl AuthenticatedAdmissionExchangePort for EstablishedExchange {
                 read_authenticated_reply(&mut self.receive, &self.connection, &mut progress)
                     .await?;
             progress.start_step(AdmissionExchangeStep::ValidateReply);
+            if reply.header().protocol_version() != request.header().protocol_version() {
+                progress.fail(AdmissionExchangeFailure::PeerUpgradeRequired);
+                return Err(SpaceAdmissionTransportError::PeerUpgradeRequired);
+            }
             verify_mac(
                 &self.credential,
                 b"reply",

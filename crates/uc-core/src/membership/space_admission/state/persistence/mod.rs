@@ -87,6 +87,22 @@ enum PersistedSpaceAdmissionStateV2 {
         local_join_ordinal: u64,
         reason: u8,
     },
+    SponsorApplied {
+        applied: PersistedSponsorAppliedV1,
+        confirmation: PersistedSponsorPairingConfirmationV2,
+    },
+    SponsorCompleted {
+        completed: PersistedCompletedV1,
+        confirmation: PersistedSponsorPairingConfirmationV2,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedSponsorPairingConfirmationV2 {
+    status: u8,
+    admission_id: [u8; 32],
+    member_instance_id: [u8; 32],
+    add_event_id: [u8; 32],
 }
 
 #[derive(Serialize, Deserialize)]

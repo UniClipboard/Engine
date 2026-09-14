@@ -170,6 +170,14 @@ impl SpaceAdmissionAggregate {
         let saved_reply =
             SavedAdmissionReply::new(self.admission_id, applied_evidence, complete_reply)
                 .map_err(|_| SpaceAdmissionAggregateError::InvalidCompleteReply)?;
+        let confirmation = self
+            .attempt_timeline
+            .map(|_| SponsorPairingConfirmationSummary {
+                status: SponsorPairingConfirmationStatus::AwaitingPeerConfirmation,
+                admission_id: self.admission_id,
+                member_instance_id: receipt.joiner_member_instance_id,
+                add_event_id: receipt.event_id,
+            });
 
         self.record_version = record_version;
         self.state = SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Applied(
@@ -180,6 +188,7 @@ impl SpaceAdmissionAggregate {
                 activation_receipt: receipt.clone(),
                 activated_security,
                 saved_reply,
+                confirmation,
             },
         ));
         Ok(AdmissionTransition::new(
@@ -207,6 +216,7 @@ impl SpaceAdmissionAggregate {
             complete_message_id,
             settled_sender_role,
             settled_sender_sequence,
+            confirmation,
         ) = match self.state {
             SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Applied(state)) => (
                 state.peer_binding,
@@ -218,6 +228,9 @@ impl SpaceAdmissionAggregate {
                     .message_id(),
                 AdmissionRole::Sponsor,
                 3,
+                state.confirmation.map(|summary| {
+                    summary.with_status(SponsorPairingConfirmationStatus::Confirmed)
+                }),
             ),
             SpaceAdmissionRecordState::CompletionHelper(
                 SpaceAdmissionCompletionHelperState::Applied(state),
@@ -231,6 +244,7 @@ impl SpaceAdmissionAggregate {
                     .message_id(),
                 AdmissionRole::CompletionHelper,
                 1,
+                None,
             ),
             _ => return Err(SpaceAdmissionAggregateError::InvalidTransition),
         };
@@ -263,9 +277,40 @@ impl SpaceAdmissionAggregate {
                 peer_binding,
                 continuation_credential,
                 saved_reply,
+                confirmation,
             },
         ));
         Ok(AdmissionTransition::new(self, &[]))
+    }
+
+    pub(crate) fn mark_sponsor_confirmation_unconfirmed(
+        mut self,
+        now_ms: i64,
+    ) -> Result<Option<AdmissionTransition>, SpaceAdmissionAggregateError> {
+        let Some(timeline) = self.attempt_timeline else {
+            return Ok(None);
+        };
+        if !timeline.is_expired(now_ms) {
+            return Ok(None);
+        }
+        let SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Applied(state)) =
+            &mut self.state
+        else {
+            return Ok(None);
+        };
+        let Some(summary) = state.confirmation else {
+            return Ok(None);
+        };
+        if summary.status != SponsorPairingConfirmationStatus::AwaitingPeerConfirmation {
+            return Ok(None);
+        }
+        self.record_version = self
+            .record_version
+            .checked_add(1)
+            .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
+        state.confirmation =
+            Some(summary.with_status(SponsorPairingConfirmationStatus::Unconfirmed));
+        Ok(Some(AdmissionTransition::new(self, &[])))
     }
 
     pub(crate) fn reject_cancel(

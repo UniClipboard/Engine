@@ -1,5 +1,5 @@
 use uc_core::ids::DeviceId;
-use uc_core::membership::MembershipEventId;
+use uc_core::membership::{MemberInstanceId, MembershipEventId};
 use uc_core::ports::ReachabilityState;
 
 use crate::space::admission::{CurrentJoinStatus, PendingInboundMember};
@@ -36,6 +36,24 @@ pub enum PairingConfirmationStatus {
     AwaitingPeerConfirmation,
     Unconfirmed,
     Confirmed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PairingConfirmationTarget {
+    pub member_instance_id: MemberInstanceId,
+    pub add_event_id: MembershipEventId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PairingConfirmationObservation {
+    pub target: PairingConfirmationTarget,
+    pub status: PairingConfirmationStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmissionDisplayStatus {
+    pub current_join: Option<CurrentJoinStatus>,
+    pub pairing_confirmations: Vec<PairingConfirmationObservation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

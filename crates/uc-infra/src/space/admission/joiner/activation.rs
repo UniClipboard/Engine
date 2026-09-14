@@ -293,12 +293,11 @@ impl ExecuteJoinerActivationPort for DefaultJoinerActivationExecutor {
             };
             let acknowledgment = AdmissionCompleteAckV1::new(completion_digest(completion))
                 .ok_or_else(|| invalid_execution("the completion digest is invalid"))?;
-            let request = SpaceAdmissionEnvelopeV1::new(
-                admission_id,
+            let request = SpaceAdmissionEnvelopeV1::reply_to(
+                preparation.completion(),
                 uc_core::membership::AdmissionRole::Joiner,
                 3,
                 mint_message_id(),
-                Some(preparation.completion().header().message_id()),
                 SpaceAdmissionBodyV1::CompleteAck(acknowledgment),
             )
             .map_err(|error| ExecuteJoinerActivationError::invalid(anyhow::Error::new(error)))?;

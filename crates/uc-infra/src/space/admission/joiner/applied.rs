@@ -119,12 +119,11 @@ impl PrepareJoinerAppliedPort for DefaultJoinerAppliedPreparation {
                 &receipt.signing_payload(),
             )
             .map_err(|error| PrepareJoinerAppliedError::unavailable(anyhow::Error::new(error)))?;
-            let applied = SpaceAdmissionEnvelopeV1::new(
-                admission_id,
+            let applied = SpaceAdmissionEnvelopeV1::reply_to(
+                preparation.exact_commit(),
                 uc_core::membership::AdmissionRole::Joiner,
                 2,
                 mint_message_id(),
-                Some(preparation.exact_commit().header().message_id()),
                 SpaceAdmissionBodyV1::Applied(AdmissionAppliedV1::new(receipt)),
             )
             .map_err(|error| PrepareJoinerAppliedError::invalid(anyhow::Error::new(error)))?;

@@ -10,9 +10,10 @@ impl SponsorAdmissionService {
     pub(in crate::space::admission::protocol::sponsor) async fn handle_applied(
         &self,
         message: AuthenticatedSpaceAdmissionMessage,
+        now_ms: i64,
     ) -> Result<SpaceAdmissionMessageReply, HandleAuthenticatedSpaceAdmissionMessageError> {
         let loaded = self.state.load(&message).await?;
-        let (peer_binding, applied, canonical_digest, _) = message.into_parts();
+        let (peer_binding, applied, canonical_digest, _, _) = message.into_parts();
         let evidence = applied.evidence(canonical_digest).ok_or_else(|| {
             HandleAuthenticatedSpaceAdmissionMessageError::invalid(anyhow::anyhow!(
                 "the Applied canonical digest is invalid"
@@ -43,6 +44,14 @@ impl SponsorAdmissionService {
                 });
             }
             AdmissionReplayDecision::Duplicate | AdmissionReplayDecision::New => {}
+        }
+        if aggregate
+            .expires_at_ms()
+            .is_some_and(|expires_at_ms| now_ms >= expires_at_ms)
+        {
+            return Err(HandleAuthenticatedSpaceAdmissionMessageError::invalid(
+                anyhow::anyhow!("the Applied message arrived after the attempt deadline"),
+            ));
         }
         let preparation = aggregate.sponsor_complete_preparation().ok_or_else(|| {
             HandleAuthenticatedSpaceAdmissionMessageError::recovery_required(anyhow::anyhow!(

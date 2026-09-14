@@ -350,12 +350,11 @@ impl PrepareSponsorCompletePort for DefaultSponsorCompletePreparation {
                 .map_err(|error| {
                     PrepareSponsorCompleteError::unavailable(anyhow::Error::new(error))
                 })?;
-            let complete_reply = SpaceAdmissionEnvelopeV1::new(
-                admission_id,
+            let complete_reply = SpaceAdmissionEnvelopeV1::reply_to(
+                applied,
                 uc_core::membership::AdmissionRole::Sponsor,
                 2,
                 mint_message_id(),
-                Some(applied.header().message_id()),
                 SpaceAdmissionBodyV1::Complete(AdmissionCompleteV1::new(completion)),
             )
             .map_err(|error| PrepareSponsorCompleteError::invalid(anyhow::Error::new(error)))?;

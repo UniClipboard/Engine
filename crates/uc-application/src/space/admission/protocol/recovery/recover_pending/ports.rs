@@ -1,11 +1,12 @@
 use async_trait::async_trait;
 use uc_core::membership::{
-    AdmissionContinuationCredential, AdmissionEncryptedPasswordEquivalent, AdmissionPeerBinding,
-    JoinerAdmissionTransition, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionRoute,
+    AdmissionAttemptTimeline, AdmissionContinuationCredential,
+    AdmissionEncryptedPasswordEquivalent, AdmissionPeerBinding, JoinerAdmissionTransition,
+    SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionRoute, SponsorAdmissionTransition,
 };
 
 use super::AuthenticatedAdmissionReply;
-use super::{AdmissionRecoveryTrigger, LoadedPendingAdmission};
+use super::{AdmissionRecoveryTrigger, LoadedPendingAdmission, LoadedSponsorConfirmation};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PendingAdmissionRecoveryStateError {
@@ -37,6 +38,20 @@ pub trait PendingAdmissionRecoveryStatePort: Send + Sync {
         token: super::AdmissionRecoveryCommitToken,
         transition: JoinerAdmissionTransition,
     ) -> Result<LoadedPendingAdmission, PendingAdmissionRecoveryStateError>;
+
+    async fn load_sponsor_confirmations(
+        &self,
+    ) -> Result<Vec<LoadedSponsorConfirmation>, PendingAdmissionRecoveryStateError> {
+        Ok(Vec::new())
+    }
+
+    async fn commit_sponsor_confirmation(
+        &self,
+        _token: super::AdmissionRecoveryCommitToken,
+        _transition: SponsorAdmissionTransition,
+    ) -> Result<LoadedSponsorConfirmation, PendingAdmissionRecoveryStateError> {
+        Err(PendingAdmissionRecoveryStateError::Unavailable)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -78,6 +93,7 @@ pub trait SpaceAdmissionTransportPort: Send + Sync {
     async fn establish_initial(
         &self,
         admission_id: SpaceAdmissionId,
+        attempt_timeline: AdmissionAttemptTimeline,
         route: &SpaceAdmissionRoute,
         encrypted_password_equivalent: &AdmissionEncryptedPasswordEquivalent,
     ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError>;

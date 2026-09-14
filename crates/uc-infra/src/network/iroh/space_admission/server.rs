@@ -80,6 +80,7 @@ impl IrohSpaceAdmissionHandler {
             wire,
             envelope,
             canonical_digest,
+            attempt_contract,
         } = self
             .authenticate(connection, deadline, connection_started)
             .await?;
@@ -111,6 +112,7 @@ impl IrohSpaceAdmissionHandler {
                 envelope,
                 canonical_digest,
                 endpoint_credential,
+                attempt_contract,
             )
             .ok_or(HandlerError::Protocol)?;
             let reply = self

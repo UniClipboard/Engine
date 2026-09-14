@@ -108,7 +108,12 @@ async fn new_client_maps_a_real_legacy_layout_server_to_peer_upgrade_required() 
     .expect("route");
 
     let mut exchange = IrohSpaceAdmissionTransport::new(joiner.clone())
-        .establish_initial(admission, &route, &password)
+        .establish_initial(
+            admission,
+            AdmissionAttemptTimeline::start(1_000).expect("valid attempt timeline"),
+            &route,
+            &password,
+        )
         .await
         .expect("legacy peer authenticates before layout detection");
     let _ = exchange.take_newly_established_continuation();
@@ -181,7 +186,12 @@ async fn stalled_authenticated_endpoint_records_one_server_timeout() {
     )
     .expect("route");
     let exchange = IrohSpaceAdmissionTransport::new(joiner.clone())
-        .establish_initial(admission, &route, &password)
+        .establish_initial(
+            admission,
+            AdmissionAttemptTimeline::start(1_000).expect("valid attempt timeline"),
+            &route,
+            &password,
+        )
         .await
         .expect("initial authentication");
 
@@ -303,7 +313,12 @@ async fn real_iroh_loopback_runs_initial_and_continuation_typed_exchanges() {
     let password = AdmissionEncryptedPasswordEquivalent::from_bytes(derived.as_bytes().to_vec())
         .expect("password equivalent");
     let mut initial = transport
-        .establish_initial(admission, &route, &password)
+        .establish_initial(
+            admission,
+            AdmissionAttemptTimeline::start(1_000).expect("valid attempt timeline"),
+            &route,
+            &password,
+        )
         .await
         .expect("initial OPAQUE");
     let binding = initial.peer_binding();

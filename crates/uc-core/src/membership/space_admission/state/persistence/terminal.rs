@@ -163,6 +163,7 @@ impl PersistedCompletedV1 {
             peer_binding: self.peer_binding.into_domain()?,
             continuation_credential: decode_continuation_credential(self.continuation_credential)?,
             saved_reply,
+            confirmation: None,
         })
     }
 }

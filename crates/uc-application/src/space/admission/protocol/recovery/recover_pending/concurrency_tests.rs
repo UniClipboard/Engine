@@ -4,8 +4,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::Notify;
 use uc_core::membership::{
-    AdmissionContinuationCredential, AdmissionEncryptedPasswordEquivalent, AdmissionPeerBinding,
-    SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionRoute,
+    AdmissionAttemptTimeline, AdmissionContinuationCredential,
+    AdmissionEncryptedPasswordEquivalent, AdmissionPeerBinding, SpaceAdmissionEnvelopeV1,
+    SpaceAdmissionId, SpaceAdmissionRoute,
 };
 
 use super::{
@@ -57,13 +58,17 @@ impl SpaceAdmissionTransportPort for DelayedTransport {
     async fn establish_initial(
         &self,
         id: SpaceAdmissionId,
+        attempt_timeline: AdmissionAttemptTimeline,
         route: &SpaceAdmissionRoute,
         password: &AdmissionEncryptedPasswordEquivalent,
     ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError> {
         if matches!(self.block_at, BlockAt::Authentication) {
             self.barrier.wait().await;
         }
-        let exchange = self.inner.establish_initial(id, route, password).await?;
+        let exchange = self
+            .inner
+            .establish_initial(id, attempt_timeline, route, password)
+            .await?;
         if matches!(self.block_at, BlockAt::Reply) {
             Ok(Box::new(DelayedExchange {
                 inner: exchange,

@@ -18,8 +18,8 @@ pub use artifact::{
     SpaceAdmissionRoute,
 };
 pub use attempt::{
-    AdmissionAttemptContractError, AdmissionAttemptContractV2, AdmissionMemberBindingError,
-    AdmissionMemberBindingV2, SPACE_ADMISSION_ATTEMPT_DURATION_MS,
+    AdmissionAttemptContractError, AdmissionAttemptContractV2, AdmissionAttemptTimeline,
+    AdmissionMemberBindingError, AdmissionMemberBindingV2, SPACE_ADMISSION_ATTEMPT_DURATION_MS,
 };
 pub use exchange::{
     AdmissionErrorCategory, AdmissionEvidenceRelation, AdmissionInboundDecision,
@@ -44,7 +44,8 @@ pub use state::{
     JoinerCompletePreparation, JoinerInvitationResolution, SpaceAdmissionAggregate,
     SpaceAdmissionAggregateError, SpaceAdmissionPersistenceError, SpaceAdmissionTerminationReason,
     SponsorAdmission, SponsorAdmissionTransition, SponsorCandidatePreparation,
-    SponsorCommitPreparation, SponsorCompletePreparation, SponsorSettlementPreparation,
+    SponsorCommitPreparation, SponsorCompletePreparation, SponsorPairingConfirmationStatus,
+    SponsorPairingConfirmationSummary, SponsorSettlementPreparation,
     StartedJoinerInvitationResolution, SPACE_ADMISSION_RECORD_FORMAT_V1,
     SPACE_ADMISSION_RECORD_FORMAT_V2,
 };

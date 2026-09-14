@@ -1,9 +1,13 @@
 use async_trait::async_trait;
 use uc_application::deps::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryTrigger, LoadedPendingAdmission,
-    PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
+    LoadedSponsorConfirmation, PendingAdmissionRecoveryStateError,
+    PendingAdmissionRecoveryStatePort,
 };
-use uc_core::membership::{AdmissionRecordPersistence, JoinerAdmissionTransition};
+use uc_core::membership::{
+    AdmissionRecordPersistence, JoinerAdmissionTransition, SponsorAdmission,
+    SponsorAdmissionTransition, SponsorPairingConfirmationStatus,
+};
 use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
 
 use crate::db::ports::DbExecutor;
@@ -88,6 +92,92 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                         ))
                         .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
                         Ok(LoadedPendingAdmission::new(replacement, next_token))
+                    })
+                })
+                .map_err(map_executor_error)
+                .map_err(map_recovery_error)
+        })
+        .await
+    }
+
+    async fn load_sponsor_confirmations(
+        &self,
+    ) -> Result<Vec<LoadedSponsorConfirmation>, PendingAdmissionRecoveryStateError> {
+        observe_local_result(LocalWorkStep::SponsorStateLoad, async {
+            self.executor
+                .run(|conn| {
+                    let state = self.load_state_on(conn).map_err(into_anyhow)?;
+                    let profile_generation = state.profile_generation;
+                    let mut loaded = Vec::new();
+                    for (admission_id, stored) in state.records {
+                        let aggregate = self
+                            .open_record(admission_id, &stored)
+                            .map_err(into_anyhow)?;
+                        let Some(sponsor) = SponsorAdmission::try_from_record(aggregate) else {
+                            continue;
+                        };
+                        if sponsor
+                            .pairing_confirmation()
+                            .map(|summary| summary.status())
+                            != Some(SponsorPairingConfirmationStatus::AwaitingPeerConfirmation)
+                        {
+                            continue;
+                        }
+                        let token = AdmissionRecoveryCommitToken::from_bytes(recovery_token(
+                            profile_generation,
+                            &sponsor,
+                        ))
+                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                        loaded.push(LoadedSponsorConfirmation::new(sponsor, token));
+                    }
+                    Ok(loaded)
+                })
+                .map_err(map_executor_error)
+                .map_err(map_recovery_error)
+        })
+        .await
+    }
+
+    async fn commit_sponsor_confirmation(
+        &self,
+        token: AdmissionRecoveryCommitToken,
+        transition: SponsorAdmissionTransition,
+    ) -> Result<LoadedSponsorConfirmation, PendingAdmissionRecoveryStateError> {
+        observe_local_result(LocalWorkStep::SponsorStateCommit, async {
+            let replacement = transition.into_replacement();
+            self.executor
+                .run(|conn| {
+                    conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                        let mut state = self.load_state_on(conn).map_err(into_anyhow)?;
+                        let admission_id = *replacement.admission_id().as_bytes();
+                        let stored =
+                            state.records.get(&admission_id).cloned().ok_or_else(|| {
+                                into_anyhow(SpaceAdmissionStateStoreError::Conflict)
+                            })?;
+                        let current = self
+                            .open_record(admission_id, &stored)
+                            .map_err(into_anyhow)?;
+                        let expected_token = recovery_token(state.profile_generation, &current);
+                        let expected_version = current
+                            .record_version()
+                            .checked_add(1)
+                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                        if token.as_bytes() != &expected_token
+                            || replacement.record_version() != expected_version
+                        {
+                            return Err(into_anyhow(SpaceAdmissionStateStoreError::Conflict));
+                        }
+                        let sealed = self
+                            .seal_record(&replacement, stored.wrapped_data_key)
+                            .map_err(into_anyhow)?;
+                        state.records.insert(admission_id, sealed);
+                        self.save_state_on(conn, &state).map_err(into_anyhow)?;
+                        let next_token = AdmissionRecoveryCommitToken::from_bytes(recovery_token(
+                            state.profile_generation,
+                            &replacement,
+                        ))
+                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                        Ok(LoadedSponsorConfirmation::new(replacement, next_token))
                     })
                 })
                 .map_err(map_executor_error)

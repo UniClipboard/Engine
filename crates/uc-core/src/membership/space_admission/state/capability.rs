@@ -301,6 +301,10 @@ impl JoinerAdmission {
         }
     }
 
+    pub const fn attempt_timeline(&self) -> Option<AdmissionAttemptTimeline> {
+        self.record.attempt_timeline
+    }
+
     pub const fn is_expired_at(&self, now_ms: i64) -> Option<bool> {
         match self.record.attempt_timeline {
             Some(timeline) => Some(timeline.is_expired(now_ms)),
@@ -648,6 +652,30 @@ impl SponsorAdmission {
         .map(SponsorAdmissionTransition::from_transition)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn accept_join_request_with_timeline(
+        admission_id: SpaceAdmissionId,
+        invitation_claim: AdmissionInvitationClaim,
+        join_request: SpaceAdmissionEnvelopeV1,
+        join_request_evidence: AdmissionMessageEvidence,
+        base_snapshot: AdmissionBaseSnapshot,
+        peer_binding: AdmissionPeerBinding,
+        continuation_credential: AdmissionContinuationCredential,
+        attempt_timeline: AdmissionAttemptTimeline,
+    ) -> Result<SponsorAdmissionTransition, SpaceAdmissionAggregateError> {
+        SpaceAdmissionAggregate::accept_join_request_with_timeline(
+            admission_id,
+            invitation_claim,
+            join_request,
+            join_request_evidence,
+            base_snapshot,
+            peer_binding,
+            continuation_credential,
+            Some(attempt_timeline),
+        )
+        .map(SponsorAdmissionTransition::from_transition)
+    }
+
     pub const fn admission_id(&self) -> SpaceAdmissionId {
         self.record.admission_id()
     }
@@ -674,6 +702,26 @@ impl SponsorAdmission {
 
     pub fn sponsor_settlement_preparation(&self) -> Option<SponsorSettlementPreparation<'_>> {
         self.record.sponsor_settlement_preparation()
+    }
+
+    pub const fn expires_at_ms(&self) -> Option<i64> {
+        match self.record.attempt_timeline {
+            Some(timeline) => Some(timeline.expires_at_ms()),
+            None => None,
+        }
+    }
+
+    pub const fn pairing_confirmation(&self) -> Option<SponsorPairingConfirmationSummary> {
+        self.record.sponsor_pairing_confirmation()
+    }
+
+    pub fn mark_confirmation_unconfirmed(
+        self,
+        now_ms: i64,
+    ) -> Result<Option<SponsorAdmissionTransition>, SpaceAdmissionAggregateError> {
+        self.record
+            .mark_sponsor_confirmation_unconfirmed(now_ms)
+            .map(|transition| transition.map(SponsorAdmissionTransition::from_transition))
     }
 
     pub fn replay_or_reject<'a>(

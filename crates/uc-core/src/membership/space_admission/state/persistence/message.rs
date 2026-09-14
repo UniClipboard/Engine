@@ -97,6 +97,7 @@ impl PersistedEnvelopeHeaderV1 {
         self,
     ) -> Result<
         (
+            SpaceAdmissionProtocolVersion,
             SpaceAdmissionId,
             AdmissionRole,
             u64,
@@ -105,12 +106,10 @@ impl PersistedEnvelopeHeaderV1 {
         ),
         SpaceAdmissionPersistenceError,
     > {
-        if SpaceAdmissionProtocolVersion::from_u16(self.protocol_version)
-            != Some(SpaceAdmissionProtocolVersion::V1)
-        {
-            return Err(SpaceAdmissionPersistenceError::UnsupportedVersion);
-        }
+        let protocol_version = SpaceAdmissionProtocolVersion::from_u16(self.protocol_version)
+            .ok_or(SpaceAdmissionPersistenceError::UnsupportedVersion)?;
         Ok((
+            protocol_version,
             SpaceAdmissionId::from_bytes(self.admission_id)
                 .ok_or(SpaceAdmissionPersistenceError::InvalidState)?,
             decode_role(self.sender_role)?,
@@ -167,8 +166,14 @@ impl PersistedEnvelopeV1 {
     pub(super) fn into_domain(
         self,
     ) -> Result<SpaceAdmissionEnvelopeV1, SpaceAdmissionPersistenceError> {
-        let (admission_id, sender_role, sender_sequence, message_id, predecessor_message_id) =
-            self.header.into_domain_parts()?;
+        let (
+            protocol_version,
+            admission_id,
+            sender_role,
+            sender_sequence,
+            message_id,
+            predecessor_message_id,
+        ) = self.header.into_domain_parts()?;
         let body = match self.body {
             PersistedBodyV1::JoinRequest(body) => {
                 SpaceAdmissionBodyV1::JoinRequest(body.into_domain()?)
@@ -220,7 +225,8 @@ impl PersistedEnvelopeV1 {
                 reason: decode_rejection_reason(reason)?,
             },
         };
-        SpaceAdmissionEnvelopeV1::new(
+        SpaceAdmissionEnvelopeV1::new_with_version(
+            protocol_version,
             admission_id,
             sender_role,
             sender_sequence,
@@ -312,9 +318,16 @@ impl PersistedCandidateEnvelopeV1 {
     pub(super) fn into_domain(
         self,
     ) -> Result<SpaceAdmissionEnvelopeV1, SpaceAdmissionPersistenceError> {
-        let (admission_id, sender_role, sender_sequence, message_id, predecessor_message_id) =
-            self.header.into_domain_parts()?;
-        SpaceAdmissionEnvelopeV1::new(
+        let (
+            protocol_version,
+            admission_id,
+            sender_role,
+            sender_sequence,
+            message_id,
+            predecessor_message_id,
+        ) = self.header.into_domain_parts()?;
+        SpaceAdmissionEnvelopeV1::new_with_version(
+            protocol_version,
             admission_id,
             sender_role,
             sender_sequence,
@@ -380,9 +393,16 @@ impl PersistedPreparedEnvelopeV1 {
         if self.proof.proof_format_version != PREPARED_ADMISSION_PROOF_FORMAT_V1 {
             return Err(SpaceAdmissionPersistenceError::UnsupportedVersion);
         }
-        let (admission_id, sender_role, sender_sequence, message_id, predecessor_message_id) =
-            self.header.into_domain_parts()?;
-        SpaceAdmissionEnvelopeV1::new(
+        let (
+            protocol_version,
+            admission_id,
+            sender_role,
+            sender_sequence,
+            message_id,
+            predecessor_message_id,
+        ) = self.header.into_domain_parts()?;
+        SpaceAdmissionEnvelopeV1::new_with_version(
+            protocol_version,
             admission_id,
             sender_role,
             sender_sequence,
@@ -549,11 +569,8 @@ impl PersistedJoinRequestEnvelopeV1 {
     pub(super) fn into_domain(
         self,
     ) -> Result<SpaceAdmissionEnvelopeV1, SpaceAdmissionPersistenceError> {
-        if SpaceAdmissionProtocolVersion::from_u16(self.protocol_version)
-            != Some(SpaceAdmissionProtocolVersion::V1)
-        {
-            return Err(SpaceAdmissionPersistenceError::UnsupportedVersion);
-        }
+        let protocol_version = SpaceAdmissionProtocolVersion::from_u16(self.protocol_version)
+            .ok_or(SpaceAdmissionPersistenceError::UnsupportedVersion)?;
         let predecessor_message_id = match self.predecessor_message_id {
             Some(message_id) => Some(
                 AdmissionMessageId::from_bytes(message_id)
@@ -561,7 +578,8 @@ impl PersistedJoinRequestEnvelopeV1 {
             ),
             None => None,
         };
-        SpaceAdmissionEnvelopeV1::new(
+        SpaceAdmissionEnvelopeV1::new_with_version(
+            protocol_version,
             SpaceAdmissionId::from_bytes(self.admission_id)
                 .ok_or(SpaceAdmissionPersistenceError::InvalidState)?,
             decode_role(self.sender_role)?,

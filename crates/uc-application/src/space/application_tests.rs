@@ -405,6 +405,7 @@ impl SpaceAdmissionTransportPort for PassivePorts {
     async fn establish_initial(
         &self,
         _admission_id: SpaceAdmissionId,
+        _attempt_timeline: AdmissionAttemptTimeline,
         _route: &SpaceAdmissionRoute,
         _encrypted_password_equivalent: &AdmissionEncryptedPasswordEquivalent,
     ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError> {

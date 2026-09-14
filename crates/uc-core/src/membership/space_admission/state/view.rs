@@ -188,6 +188,25 @@ impl SponsorCandidatePreparation<'_> {
 }
 
 impl SpaceAdmissionAggregate {
+    pub const fn expires_at_ms(&self) -> Option<i64> {
+        match self.attempt_timeline {
+            Some(timeline) => Some(timeline.expires_at_ms()),
+            None => None,
+        }
+    }
+
+    pub const fn sponsor_pairing_confirmation(&self) -> Option<SponsorPairingConfirmationSummary> {
+        match &self.state {
+            SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Applied(state)) => {
+                state.confirmation
+            }
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Completed(state)) => {
+                state.confirmation
+            }
+            _ => None,
+        }
+    }
+
     pub const fn has_expirable_local_join(&self) -> bool {
         self.attempt_timeline.is_some()
             && (matches!(

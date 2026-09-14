@@ -128,12 +128,11 @@ impl PrepareSponsorCommitPort for DefaultSponsorCommitPreparation {
                     })?,
                 sealed_recovery,
             );
-            let commit_reply = SpaceAdmissionEnvelopeV1::new(
-                admission_id,
+            let commit_reply = SpaceAdmissionEnvelopeV1::reply_to(
+                prepared,
                 AdmissionRole::Sponsor,
                 1,
                 mint_message_id(),
-                Some(prepared.header().message_id()),
                 SpaceAdmissionBodyV1::Commit(commit_body),
             )
             .map_err(|error| PrepareSponsorCommitError::invalid(anyhow::Error::new(error)))?;

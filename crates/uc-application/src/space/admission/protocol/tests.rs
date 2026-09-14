@@ -1,10 +1,10 @@
-use uc_core::membership::SpaceAdmissionMessageKind;
+use uc_core::membership::{SpaceAdmissionMessageKind, SponsorPairingConfirmationStatus};
 
 use super::sponsor::HandleAuthenticatedSpaceAdmissionMessagePort;
 use super::test_support::{
     authenticated_applied, authenticated_complete_ack, authenticated_join_request,
-    authenticated_prepared, authenticated_prepared_with_peers, ProtocolEvent,
-    SpaceAdmissionProtocolTestPair,
+    authenticated_join_request_started_at, authenticated_prepared,
+    authenticated_prepared_with_peers, ProtocolEvent, SpaceAdmissionProtocolTestPair,
 };
 
 #[tokio::test]
@@ -43,6 +43,19 @@ async fn prepared_is_committed_before_the_sponsor_returns_commit() {
             ProtocolEvent::SponsorSavedCommitted,
         ]
     );
+}
+
+#[tokio::test]
+async fn sponsor_rejects_a_future_attempt_before_consuming_the_invitation() {
+    let pair = SpaceAdmissionProtocolTestPair::fresh().await;
+
+    assert!(matches!(
+        pair.sponsor()
+            .handle(authenticated_join_request_started_at(2_000))
+            .await,
+        Err(super::HandleAuthenticatedSpaceAdmissionMessageError::Invalid { .. })
+    ));
+    assert!(pair.events().is_empty());
 }
 
 #[tokio::test]
@@ -100,6 +113,60 @@ async fn complete_ack_is_saved_before_the_sponsor_returns_settled() {
             ProtocolEvent::SponsorSavedApplied,
             ProtocolEvent::SponsorSavedCompleted,
         ]
+    );
+}
+
+#[tokio::test]
+async fn sponsor_keeps_the_member_unconfirmed_and_accepts_a_late_complete_ack() {
+    let pair = SpaceAdmissionProtocolTestPair::fresh().await;
+    let candidate = pair
+        .sponsor()
+        .handle(authenticated_join_request())
+        .await
+        .expect("JoinRequest should produce Candidate");
+    let prepared = authenticated_prepared(
+        candidate
+            .envelope()
+            .expect("Candidate reply must be available"),
+    );
+    pair.seed_sponsor(candidate.into_admission());
+    let commit = pair
+        .sponsor()
+        .handle(prepared)
+        .await
+        .expect("Prepared should produce Commit");
+    let applied = authenticated_applied(commit.envelope().expect("Commit reply must be available"));
+    pair.seed_sponsor(commit.into_admission());
+    let complete = pair
+        .sponsor()
+        .handle(applied)
+        .await
+        .expect("Applied should produce Complete");
+    let late_ack = authenticated_complete_ack(
+        complete
+            .envelope()
+            .expect("Complete reply must be available"),
+    );
+    pair.seed_sponsor(complete.into_admission());
+
+    pair.set_now_ms(301_000);
+    let report = pair.recover_sponsor().await;
+
+    assert_eq!(report.advanced_count, 1);
+    assert_eq!(
+        pair.sponsor_confirmation_status(),
+        Some(SponsorPairingConfirmationStatus::Unconfirmed)
+    );
+
+    let settled = pair
+        .sponsor()
+        .handle(late_ack)
+        .await
+        .expect("late CompleteAck should still settle the exact admission");
+    pair.seed_sponsor(settled.into_admission());
+    assert_eq!(
+        pair.sponsor_confirmation_status(),
+        Some(SponsorPairingConfirmationStatus::Confirmed)
     );
 }
 

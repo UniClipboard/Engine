@@ -39,12 +39,11 @@ impl PrepareSponsorSettledPort for DefaultSponsorSettledPreparation {
                     "the CompleteAck is not bound to the exact Complete",
                 ));
             }
-            let settled = SpaceAdmissionEnvelopeV1::new(
-                admission_id,
+            let settled = SpaceAdmissionEnvelopeV1::reply_to(
+                complete_ack,
                 AdmissionRole::Sponsor,
                 3,
                 mint_message_id(),
-                Some(complete_ack.header().message_id()),
                 SpaceAdmissionBodyV1::Settled(
                     AdmissionSettledV1::new(complete_ack_digest(acknowledgment))
                         .ok_or_else(|| invalid("the CompleteAck digest is invalid"))?,

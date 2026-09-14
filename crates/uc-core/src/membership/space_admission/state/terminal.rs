@@ -91,6 +91,7 @@ pub struct SpaceAdmissionCompletedTerminal {
     pub(super) peer_binding: AdmissionPeerBinding,
     pub(super) continuation_credential: AdmissionContinuationCredential,
     pub(super) saved_reply: SavedAdmissionReply,
+    pub(super) confirmation: Option<SponsorPairingConfirmationSummary>,
 }
 
 #[derive(PartialEq, Eq)]

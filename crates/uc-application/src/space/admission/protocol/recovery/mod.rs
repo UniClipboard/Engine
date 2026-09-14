@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use uc_core::membership::JoinerAdmissionTransition;
+use uc_core::membership::{JoinerAdmissionTransition, SponsorAdmissionTransition};
 use uc_core::ports::ClockPort;
 
 mod recover_pending;
@@ -8,8 +8,8 @@ mod recover_pending;
 pub use recover_pending::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryReport, AdmissionRecoveryTrigger,
     AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply, LoadedPendingAdmission,
-    PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
-    SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
+    LoadedSponsorConfirmation, PendingAdmissionRecoveryStateError,
+    PendingAdmissionRecoveryStatePort, SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
 };
 
 pub(crate) struct AdmissionRecoveryService {
@@ -57,6 +57,22 @@ impl AdmissionRecoveryService {
         Ok(loaded)
     }
 
+    pub(super) async fn commit_sponsor_confirmation_and_notify(
+        &self,
+        token: AdmissionRecoveryCommitToken,
+        transition: SponsorAdmissionTransition,
+    ) -> Result<LoadedSponsorConfirmation, PendingAdmissionRecoveryStateError> {
+        let loaded = self
+            .state
+            .commit_sponsor_confirmation(token, transition)
+            .await?;
+        self.host_events
+            .emit_or_warn(uc_core::ports::HostEvent::Membership(
+                uc_core::ports::MembershipHostEvent::AdmissionChanged,
+            ));
+        Ok(loaded)
+    }
+
     pub(super) async fn commit_recovery_with_optional_notification(
         &self,
         token: AdmissionRecoveryCommitToken,
@@ -86,5 +102,16 @@ impl AdmissionRecoveryService {
             | PendingAdmissionRecoveryStateError::Unavailable
             | PendingAdmissionRecoveryStateError::StateChanged => report.deferred_count += 1,
         }
+    }
+
+    pub(super) fn now_ms(&self) -> i64 {
+        self.clock.now_ms()
+    }
+
+    pub(super) fn notify_admission_changed(&self) {
+        self.host_events
+            .emit_or_warn(uc_core::ports::HostEvent::Membership(
+                uc_core::ports::MembershipHostEvent::AdmissionChanged,
+            ));
     }
 }

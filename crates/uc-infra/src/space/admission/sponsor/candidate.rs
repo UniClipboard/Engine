@@ -253,12 +253,11 @@ impl PrepareSponsorCandidatePort for DefaultSponsorCandidatePreparation {
                 )?,
             )
             .map_err(|error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)))?;
-            let candidate_reply = SpaceAdmissionEnvelopeV1::new(
-                admission_id,
+            let candidate_reply = SpaceAdmissionEnvelopeV1::reply_to(
+                preparation.join_request(),
                 AdmissionRole::Sponsor,
                 0,
                 mint_message_id(),
-                Some(preparation.join_request().header().message_id()),
                 SpaceAdmissionBodyV1::Candidate(candidate),
             )
             .map_err(|error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)))?;

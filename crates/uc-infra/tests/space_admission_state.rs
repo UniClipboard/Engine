@@ -13,16 +13,16 @@ use uc_application::deps::{
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    ActiveSpaceGenerationManifestV2, AdmissionChangeFacts, AdmissionChannelPeerId,
-    AdmissionContinuationCredential, AdmissionEncryptedPasswordEquivalent,
+    ActiveSpaceGenerationManifestV2, AdmissionAttemptContractV2, AdmissionChangeFacts,
+    AdmissionChannelPeerId, AdmissionContinuationCredential, AdmissionEncryptedPasswordEquivalent,
     AdmissionIdentitySignature, AdmissionJoinRequestV1, AdmissionJoinerPrivateState,
     AdmissionJoinerStartContext, AdmissionKeyPackage, AdmissionPeerBinding,
     AdmissionRecordPersistence, AdmissionRecoveryPublicKey, AdmissionRetryState, AdmissionRole,
     AdmissionShortInvitationCode, AdmissionSourceSnapshot, InvitationId, JoinId, JoinerAdmission,
     JoinerAdmissionTransition, JoinerInvitationResolution, MembershipCredential,
     PendingAdmissionExchange, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
-    SpaceAdmissionMessageKind, SpaceAdmissionRejectionReason, SpaceAdmissionRoute,
-    SponsorAdmission, SponsorAdmissionTransition, UnreadableHistoryPolicy,
+    SpaceAdmissionMessageKind, SpaceAdmissionProtocolVersion, SpaceAdmissionRejectionReason,
+    SpaceAdmissionRoute, SponsorAdmission, SponsorAdmissionTransition, UnreadableHistoryPolicy,
 };
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use uc_core::security::IdentityFingerprint;

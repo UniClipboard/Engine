@@ -9,7 +9,7 @@ mod terminal;
 mod transition;
 mod view;
 
-use super::super::AdmissionActivationReceipt;
+use super::super::{AdmissionActivationReceipt, MemberInstanceId, MembershipEventId};
 use super::artifact::{
     AdmissionActivatedSecurityState, AdmissionBaseSnapshot, AdmissionContinuationCredential,
     AdmissionEncryptedPasswordEquivalent, AdmissionHelperNonce, AdmissionHelperSecurityState,
@@ -52,7 +52,8 @@ pub use persistence::SpaceAdmissionPersistenceError;
 pub(crate) use persistence::{decode_envelope_v1, encode_envelope_v1};
 pub use sponsor::{
     SpaceAdmissionSponsorAccepted, SpaceAdmissionSponsorApplied, SpaceAdmissionSponsorCandidate,
-    SpaceAdmissionSponsorCommitted, SpaceAdmissionSponsorState,
+    SpaceAdmissionSponsorCommitted, SpaceAdmissionSponsorState, SponsorPairingConfirmationStatus,
+    SponsorPairingConfirmationSummary,
 };
 pub use terminal::{
     SpaceAdmissionActivePendingSettlement, SpaceAdmissionActiveSettled, SpaceAdmissionActiveState,
