@@ -100,7 +100,9 @@ impl<E: DbExecutor> BeginReceiveAttemptPort for DieselEntryReceiveAttemptReposit
         let attempt_id = attempt_id.to_owned();
         self.executor
             .run(move |conn| {
-                conn.transaction::<_, anyhow::Error, _>(|conn| {
+                // Acquire write authority before reading; a deferred read cannot
+                // upgrade while another writer holds the database reservation.
+                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
                     let existing = entry_receive_attempt::table
                         .filter(entry_receive_attempt::entry_id.eq(&entry_id))
                         .select(EntryReceiveAttemptRow::as_select())

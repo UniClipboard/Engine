@@ -36,7 +36,7 @@ pub struct ClipboardSyncRuntimeDeps {
     pub outbound: Arc<ClipboardOutboundFacade>,
     pub settings: Arc<dyn SettingsPort>,
     pub inbound: ClipboardInboundRuntime,
-    pub presence: Arc<dyn PeerReachabilityPort>,
+    pub peer_reachability: Arc<dyn PeerReachabilityPort>,
     pub known_peers: Arc<dyn PeerAddressRepositoryPort>,
     pub entries: Arc<dyn ListClipboardEntriesPort>,
     pub events: Arc<dyn ClipboardEventRepositoryPort>,
@@ -49,7 +49,7 @@ impl ClipboardSyncRuntime {
     pub fn start(deps: ClipboardSyncRuntimeDeps) -> Self {
         let delivery_gate = Arc::new(tokio::sync::Mutex::new(()));
         let recovery = OfflineDeliveryRecovery::start(OfflineDeliveryRecoveryDeps {
-            presence: deps.presence,
+            peer_reachability: deps.peer_reachability,
             known_peers: deps.known_peers,
             settings: Arc::clone(&deps.settings),
             entries: deps.entries,
@@ -154,7 +154,7 @@ impl RecoveryDeliveryPort for ClipboardOutboundFacade {
 }
 
 struct OfflineDeliveryRecoveryDeps {
-    presence: Arc<dyn PeerReachabilityPort>,
+    peer_reachability: Arc<dyn PeerReachabilityPort>,
     known_peers: Arc<dyn PeerAddressRepositoryPort>,
     settings: Arc<dyn SettingsPort>,
     entries: Arc<dyn ListClipboardEntriesPort>,
@@ -181,7 +181,7 @@ impl OfflineDeliveryRecovery {
         let task_cancel = cancel.clone();
         let task_deps = Arc::clone(&deps);
         let task = tokio::spawn(async move {
-            let mut events = task_deps.presence.subscribe();
+            let mut events = task_deps.peer_reachability.subscribe();
             recover_currently_online(&task_deps).await;
             loop {
                 tokio::select! {
@@ -243,7 +243,8 @@ async fn recover_currently_online(deps: &OfflineDeliveryRecoveryDeps) {
         }
     };
     for peer in peers {
-        if deps.presence.current_state(&peer.device_id).await == ReachabilityState::Online {
+        if deps.peer_reachability.current_state(&peer.device_id).await == ReachabilityState::Online
+        {
             let _gate = deps.delivery_gate.lock().await;
             recover_for_target(deps, peer.device_id).await;
         }
@@ -449,7 +450,7 @@ mod tests {
 
     use uc_core::clipboard::{ClipboardEntry, ClipboardRepositoryError};
     use uc_core::ids::{EntryId, EventId};
-    use uc_core::ports::presence::{PeerReachabilityChanged, PresenceError};
+    use uc_core::ports::peer_reachability::{PeerReachabilityChanged, PeerReachabilityError};
     use uc_core::settings::model::Settings;
 
     struct FixedSettings {
@@ -584,16 +585,16 @@ mod tests {
         }
     }
 
-    struct IdlePresence {
+    struct IdlePeerReachability {
         tx: tokio::sync::broadcast::Sender<PeerReachabilityChanged>,
     }
 
     #[async_trait]
-    impl PeerReachabilityPort for IdlePresence {
+    impl PeerReachabilityPort for IdlePeerReachability {
         async fn ensure_reachable(
             &self,
             _device: &DeviceId,
-        ) -> Result<ReachabilityState, PresenceError> {
+        ) -> Result<ReachabilityState, PeerReachabilityError> {
             Ok(ReachabilityState::Unknown)
         }
 
@@ -650,7 +651,7 @@ mod tests {
     ) -> OfflineDeliveryRecoveryDeps {
         let (tx, _) = tokio::sync::broadcast::channel(1);
         OfflineDeliveryRecoveryDeps {
-            presence: Arc::new(IdlePresence { tx }),
+            peer_reachability: Arc::new(IdlePeerReachability { tx }),
             known_peers: Arc::new(NoPeers),
             settings: Arc::new(FixedSettings {
                 sync_enabled: true,

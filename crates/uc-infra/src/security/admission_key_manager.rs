@@ -7,7 +7,7 @@ use uc_core::ports::SecureStoragePort;
 use super::crypto_model::EncryptedBlob;
 use super::{v1_aead, MasterKey};
 
-const PROFILE_ADMISSION_KEY_NAME: &str = "profile_admission_master_key:v1";
+pub(super) const PROFILE_ADMISSION_KEY_NAME: &str = "profile_admission_master_key:v1";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AdmissionKeyError {

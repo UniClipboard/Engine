@@ -46,7 +46,7 @@ use super::transfer_progress_wire::{
 };
 
 /// ALPN identifier for the reverse-direction transfer progress protocol.
-/// Disjoint from the forward clipboard / presence / blobs ALPNs so the
+/// Disjoint from the forward clipboard / peer_reachability / blobs ALPNs so the
 /// shared Router multiplexes correctly.
 pub const TRANSFER_PROGRESS_ALPN: &[u8] = b"uniclipboard/transfer-progress/1";
 

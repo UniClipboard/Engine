@@ -1,0 +1,13 @@
+[package]
+name = "uc-connectivity-relay"
+version.workspace = true
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = "1"
+iroh-relay = { version = "=1.0.0-rc.1", features = ["server"] }
+tokio = { version = "1", features = ["full"] }
+
+[lints]
+workspace = true

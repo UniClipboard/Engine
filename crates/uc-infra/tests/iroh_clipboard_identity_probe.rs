@@ -23,7 +23,7 @@
 //! the existing `from_public_key(&[u8])` entry point is sufficient.
 //!
 //! Runs loopback-only (relays disabled) and uses a test-local ALPN so the
-//! probe does not collide with production pairing / presence / clipboard
+//! probe does not collide with production pairing / peer_reachability / clipboard
 //! traffic.
 
 use std::time::Duration;

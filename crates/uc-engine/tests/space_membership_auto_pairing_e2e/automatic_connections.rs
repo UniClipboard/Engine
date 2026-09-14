@@ -1,8 +1,8 @@
 use super::*;
 
-// 只读取目标状态；禁止通过刷新或发送促成连接。
+// Read-only recovery without an opportunity follows the maximum retry budget.
 pub(super) async fn wait_online(engine: &Engine, peer_id: &str) {
-    wait_online_within(engine, peer_id, Duration::from_secs(15)).await;
+    wait_online_within(engine, peer_id, Duration::from_secs(92)).await;
 }
 
 async fn wait_online_within(engine: &Engine, peer_id: &str, budget: Duration) {
@@ -116,17 +116,23 @@ struct Pair {
     engines: [Engine; 2],
     ids: [String; 2],
     space: String,
+    events: [tokio::sync::Mutex<uc_engine::EventStream>; 2],
 }
 
 impl Pair {
     async fn new() -> Self {
+        uc_engine::init_test_tracing();
         let rendezvous = mount_rendezvous().await;
         let hosts = [
             DeviceHarness::new(rendezvous.uri()),
             DeviceHarness::new(rendezvous.uri()),
         ];
-        let a = hosts[0].start_with_relay_fallback(false).await;
-        let b = hosts[1].start_with_relay_fallback(false).await;
+        let (a, a_events) = hosts[0]
+            .start_with_events(Box::new(EmptyClipboard), false)
+            .await;
+        let (b, b_events) = hosts[1]
+            .start_with_events(Box::new(EmptyClipboard), false)
+            .await;
         let space = create_space(&a, "A").await.0;
         let b_id = join_through(&a, &b, "B", &space).await.self_device_id;
         wait_for_active_member_count(&a, 2).await;
@@ -143,6 +149,10 @@ impl Pair {
             engines: [a, b],
             ids: [a_id, b_id],
             space,
+            events: [
+                tokio::sync::Mutex::new(a_events),
+                tokio::sync::Mutex::new(b_events),
+            ],
         };
         pair.online().await;
         pair
@@ -201,6 +211,171 @@ impl Pair {
             engine.shutdown(SHUTDOWN_TIMEOUT).await.unwrap();
         }
     }
+
+    async fn drain_events(&self, assert_healthy: bool) {
+        for events in &self.events {
+            let mut events = events.lock().await;
+            while let Ok(Some(event)) =
+                tokio::time::timeout(Duration::from_millis(1), events.next()).await
+            {
+                if assert_healthy {
+                    match event {
+                        uc_engine::EngineEvent::PeerPresenceChanged(change) => {
+                            assert_eq!(change.state, "online")
+                        }
+                        uc_engine::EngineEvent::NetworkRecoveryChanged(_) => {
+                            panic!("ordinary peer maintenance rebuilt the session")
+                        }
+                        uc_engine::EngineEvent::RefreshRequired {
+                            reason: uc_engine::RefreshReason::ConsumerLagged,
+                        } => panic!("test lost state events"),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    async fn reject_dials(&self, peer_reachability: bool, enabled: bool) {
+        for index in 0..2 {
+            let target = query_endpoint_id(&self.engines[1 - index], "peer").await;
+            self.engines[index]
+                .execute_dev(uc_engine::DevOperation::RejectNewConnections {
+                    endpoint_ids: if enabled { vec![target] } else { vec![] },
+                    peer_reachability,
+                })
+                .await
+                .unwrap();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn existing_connections_survive_rejected_new_dials() {
+    for single_connection in [false, true] {
+        let pair = Pair::new().await;
+        pair.transfer("baseline before rejecting new dials").await;
+        pair.drain_events(false).await;
+        pair.reject_dials(true, true).await;
+        if single_connection {
+            let retained = pair.engines[0]
+                .execute_dev(uc_engine::DevOperation::RetainOnePeerReachabilityConnection)
+                .await
+                .unwrap();
+            let uc_engine::DevOperationResult::PeerReachabilityConnections {
+                incoming,
+                outgoing,
+                ..
+            } = retained
+            else {
+                panic!("connection counts expected")
+            };
+            assert_eq!(incoming + outgoing, 1);
+        }
+        let mut transport_baseline = Vec::new();
+        for engine in &pair.engines {
+            let uc_engine::DevOperationResult::PeerReachabilityConnections {
+                admitted_transports,
+                ..
+            } = engine
+                .execute_dev(uc_engine::DevOperation::QueryPeerReachabilityConnections)
+                .await
+                .unwrap()
+            else {
+                panic!("connection counts expected")
+            };
+            transport_baseline.push(admitted_transports);
+            engine
+                .execute(Operation::NotifyConnectivityOpportunity {
+                    reason: uc_engine::ConnectivityOpportunity::NetworkChanged,
+                })
+                .await
+                .unwrap();
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(22);
+        while tokio::time::Instant::now() < deadline {
+            pair.online().await;
+            pair.drain_events(true).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        pair.transfer("existing connection remains usable").await;
+        for (index, engine) in pair.engines.iter().enumerate() {
+            let uc_engine::DevOperationResult::PeerReachabilityConnections {
+                admitted_transports,
+                ..
+            } = engine
+                .execute_dev(uc_engine::DevOperation::QueryPeerReachabilityConnections)
+                .await
+                .unwrap()
+            else {
+                panic!("connection counts expected")
+            };
+            assert_eq!(
+                admitted_transports, transport_baseline[index],
+                "liveness verification replaced an established connection"
+            );
+        }
+        if single_connection {
+            let mut total_incoming = 0;
+            let mut total_outgoing = 0;
+            for engine in &pair.engines {
+                let uc_engine::DevOperationResult::PeerReachabilityConnections {
+                    incoming,
+                    outgoing,
+                    ..
+                } = engine
+                    .execute_dev(uc_engine::DevOperation::QueryPeerReachabilityConnections)
+                    .await
+                    .unwrap()
+                else {
+                    panic!("connection counts expected")
+                };
+                assert_eq!(incoming + outgoing, 1);
+                total_incoming += incoming;
+                total_outgoing += outgoing;
+            }
+            assert_eq!((total_incoming, total_outgoing), (1, 1));
+        }
+        pair.drain_events(true).await;
+        pair.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn failed_content_dial_preserves_peer_connection() {
+    let pair = Pair::new().await;
+    pair.transfer("baseline before rejecting content").await;
+    pair.drain_events(false).await;
+    pair.reject_dials(false, true).await;
+    let result = pair.engines[0]
+        .execute(Operation::SendText(SendTextInput {
+            text: "failed send must not be replayed".into(),
+            target_devices: vec![pair.ids[1].clone()],
+        }))
+        .await;
+    if let Ok(OperationResult::EntrySent(report)) = result {
+        assert_eq!(report.total_accepted, 0);
+    } else {
+        assert!(result.is_err());
+    }
+    pair.online().await;
+    pair.drain_events(true).await;
+    let uc_engine::DevOperationResult::RejectedConnectionCount { count } = pair.engines[0]
+        .execute_dev(uc_engine::DevOperation::QueryRejectedConnectionCount)
+        .await
+        .unwrap()
+    else {
+        panic!("rejection count expected")
+    };
+    assert!(
+        count > 0,
+        "the failure rule must reject a real content connection"
+    );
+    pair.reject_dials(false, false).await;
+    pair.transfer("new user operation after healing").await;
+    assert!(!receiver_has_exact_text(&pair.engines[1], "failed send must not be replayed").await);
+    pair.drain_events(true).await;
+    pair.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
@@ -282,8 +457,8 @@ async fn long_partition_recovers_without_refresh_or_host_notification() {
     }
     pair.partition(false).await;
     tokio::join!(
-        wait_online_within(&pair.engines[0], &pair.ids[1], Duration::from_secs(85)),
-        wait_online_within(&pair.engines[1], &pair.ids[0], Duration::from_secs(85)),
+        wait_online(&pair.engines[0], &pair.ids[1]),
+        wait_online(&pair.engines[1], &pair.ids[0]),
     );
     pair.online().await;
     pair.transfer("long network interruption").await;

@@ -142,6 +142,14 @@ impl DeviceHarness {
         clipboard: Box<dyn HostClipboard>,
         relay_fallback: bool,
     ) -> Engine {
+        self.start_with_events(clipboard, relay_fallback).await.0
+    }
+
+    async fn start_with_events(
+        &self,
+        clipboard: Box<dyn HostClipboard>,
+        relay_fallback: bool,
+    ) -> (Engine, uc_engine::EventStream) {
         let root = self.root.path();
         let host = HostCapabilities::new(
             HostDirectories::new(
@@ -157,10 +165,9 @@ impl DeviceHarness {
         let config = EngineConfig::new("1.1.0")
             .with_rendezvous_base_url(self.rendezvous_base_url.clone())
             .with_test_relay_fallback(relay_fallback);
-        let (engine, _events) = Engine::start(config, host)
+        Engine::start(config, host)
             .await
-            .expect("start complete engine");
-        engine
+            .expect("start complete engine")
     }
 }
 
@@ -1279,7 +1286,7 @@ async fn f6_deep_chain_recovers_selected_branch_without_online_sponsors() {
         )
         .await;
     for node in ["A", "C", "E", "F"] {
-        wait_for_peer_refresh(topology.engine(node), node).await;
+        refresh_available_members(topology.engine(node)).await;
     }
     let recovered = topology.diagnostics("F").await;
     assert_eq!(recovered.branch_id, target.branch_id);
@@ -1410,7 +1417,7 @@ async fn f5_ring_propagates_one_conflict_without_message_or_effect_loops() {
         .await;
     for _ in 0..2 {
         for node in ["A", "B", "C", "D"] {
-            wait_for_peer_refresh(topology.engine(node), node).await;
+            refresh_available_members(topology.engine(node)).await;
         }
     }
     topology
@@ -1702,9 +1709,20 @@ async fn f3_opposite_removal_decisions_persist_divergence_across_restart() {
     let rejected_before = topology.diagnostics("C").await;
     assert_ne!(accepted_before.branch_id, rejected_before.branch_id);
     assert_ne!(accepted_before.head_event_id, rejected_before.head_event_id);
-    topology
-        .wait_for_group_epoch(&["B"], topology.diagnostics("A").await.group_epoch)
-        .await;
+    let epoch_deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+    loop {
+        // Key distribution may advance while the two snapshots are read.
+        let source = topology.diagnostics("A").await.group_epoch;
+        let target = topology.diagnostics("B").await.group_epoch;
+        if source == target && source >= accepted_before.group_epoch {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < epoch_deadline,
+            "accepted peers did not converge to their current group epoch"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 
     let accepted_text = "F3 accepted branch transfer";
     assert_eq!(
@@ -1992,7 +2010,7 @@ async fn f1_remove_and_add_from_parent_head_preserve_branch_membership() {
         }])
         .await;
     for node in ["A", "B", "C", "D", "E"] {
-        wait_for_peer_refresh(topology.engine(node), node).await;
+        refresh_available_members(topology.engine(node)).await;
     }
     topology.assert_snapshot("A", 3, 1).await;
     topology.assert_snapshot("B", 5, 1).await;
@@ -3028,7 +3046,7 @@ async fn f0_partitioned_sponsors_create_isolated_sibling_branches() {
         }])
         .await;
     for node in ["A", "B", "C", "D", "E"] {
-        wait_for_peer_refresh(topology.engine(node), node).await;
+        refresh_available_members(topology.engine(node)).await;
     }
     topology.assert_snapshot("A", 4, 1).await;
     topology.assert_snapshot("B", 4, 1).await;
@@ -4122,6 +4140,22 @@ async fn completed_admission_survives_restart_and_allows_transfer() {
         .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("shut down restarted joiner");
+}
+
+async fn refresh_available_members(engine: &Engine) {
+    // These topologies deliberately contain isolated or divergent members.
+    // Refresh must settle; branch and content assertions prove the result.
+    let result = tokio::time::timeout(
+        WAIT_TIMEOUT,
+        engine.execute(Operation::RefreshPeerConnections),
+    )
+    .await
+    .expect("peer refresh exceeded its budget")
+    .expect("peer refresh failed");
+    let OperationResult::PeerConnectionsRefreshed(report) = result else {
+        panic!("peer refresh result expected")
+    };
+    assert_eq!(report.total, report.online + report.offline + report.errors);
 }
 
 async fn wait_for_peer_refresh(engine: &Engine, label: &str) {

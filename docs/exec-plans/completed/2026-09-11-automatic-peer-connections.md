@@ -46,8 +46,8 @@
 | 当前成员范围 | `crates/uc-application/src/space/membership/ledger/current_scope.rs`、`repository.rs` | 从已验证历史派生可通信成员；目前只有 snapshot，没有通知订阅。 |
 | 成员后台维护 | `crates/uc-application/src/space/membership/maintenance/runtime.rs` | 启动、恢复、成员变化、在线事件和 30 秒周期驱动成员流程；并非连接维护。 |
 | 手动刷新 | `crates/uc-application/src/facade/roster/facade.rs` | 目前直接顺序调用 `verify_reachable`；应把连接流程移交完整负责人，保留查询纯读。 |
-| 可达性能力 | `crates/uc-core/src/ports/presence.rs` | `ensure_reachable`、`verify_reachable`、`mark_offline`、状态查询/订阅和断开能力。 |
-| Iroh presence | `crates/uc-infra/src/network/iroh/presence_adapter.rs` | 拨号、入站认证、连接持有和离线观察；需要验证双向同时连接、过期观察与取消。 |
+| 可达性能力 | `crates/uc-core/src/ports/peer_reachability.rs` | `ensure_reachable`、`verify_reachable`、`report_communication_failure`（原 `mark_offline`）、状态查询/订阅和断开能力。 |
+| Iroh presence | `crates/uc-infra/src/network/iroh/peer_reachability_adapter.rs` | 拨号、入站认证、连接持有和离线观察；需要验证双向同时连接、过期观察与取消。 |
 | 网络节点与发现 | `crates/uc-infra/src/network/iroh/node.rs` | 单一 Endpoint，已装配 mDNS 和公网地址查询；目前未把 mDNS 发现流交给 Application。 |
 | 网络自恢复 | `crates/uc-infra/src/network/iroh/net_recovery.rs` | DNS/中继自恢复及脱敏观察；普通 peer 重连复用它，不改变其会话重建规则。 |
 | Engine 生命周期 | `crates/uc-engine/src/engine/mod.rs`、`runtime/session_supervisor.rs` | `suspend` 释放会话，`resume` 重建会话；Running 状态调用 `resume` 会报无效状态，不能拿它冒充前台通知。 |
@@ -346,7 +346,7 @@ Desktop 转发窗口前台与系统唤醒；mobile 转发前台和网络变化�
 
 Engine 的九项新增真实连接场景分批执行通过；完整自动轮次首次为 7 通过、1 前置条件失败，修正资格等待后该项单独通过，再补跑手动并发场景。没有把首次整轮失败改写成整轮通过。
 
-关键复验命令：
+当时执行的关键复验命令如下；后续命名统一后，当前版本需将测试过滤词 `presence_adapter` 改为 `peer_reachability_adapter`，并核对实际执行数量。
 
 ```bash
 cargo test -p uc-application --lib --locked --offline

@@ -1,0 +1,124 @@
+//! Preserve registration ownership while selecting the current wire version first.
+
+use iroh::protocol::{DynProtocolHandler, IncomingFilterOutcome, Router, RouterBuilder};
+use iroh::Endpoint;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+
+use super::PEER_REACHABILITY_ALPN;
+
+pub(super) struct ProtocolRouterBuilder {
+    inner: RouterBuilder,
+    alpns: Vec<Vec<u8>>,
+}
+
+impl ProtocolRouterBuilder {
+    pub(super) fn new(endpoint: Endpoint) -> Self {
+        Self {
+            inner: Router::builder(endpoint),
+            alpns: Vec::new(),
+        }
+    }
+
+    pub(super) fn accept(
+        mut self,
+        alpn: impl AsRef<[u8]>,
+        handler: impl Into<Box<dyn DynProtocolHandler>>,
+    ) -> Self {
+        let alpn = alpn.as_ref().to_vec();
+        if !self.alpns.contains(&alpn) {
+            self.alpns.push(alpn.clone());
+        }
+        self.inner = self.inner.accept(alpn, handler);
+        self
+    }
+
+    pub(super) fn spawn(mut self) -> Router {
+        // Router sorts ALPNs lexically, but TLS uses the server's preference order.
+        self.alpns
+            .sort_by_key(|alpn| alpn.as_slice() != PEER_REACHABILITY_ALPN);
+        let ready = Arc::new(AtomicBool::new(false));
+        self.inner = self.inner.incoming_filter(Arc::new({
+            let ready = ready.clone();
+            move |_| {
+                if ready.load(Ordering::Acquire) {
+                    IncomingFilterOutcome::Accept
+                } else {
+                    IncomingFilterOutcome::Retry
+                }
+            }
+        }));
+        let router = self.inner.spawn();
+        router.endpoint().set_alpns(self.alpns);
+        ready.store(true, Ordering::Release);
+        router
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::iroh::LEGACY_PEER_REACHABILITY_ALPN;
+    use iroh::{
+        endpoint::{ConnectOptions, Connection},
+        protocol::{AcceptError, ProtocolHandler},
+        RelayMode,
+    };
+
+    #[derive(Debug)]
+    struct Hold;
+    impl ProtocolHandler for Hold {
+        async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+            connection.closed().await;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn new_peers_negotiate_current_version_and_legacy_peers_still_connect() {
+        let server = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .unwrap();
+        let client = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .unwrap();
+        let router = ProtocolRouterBuilder::new(server.clone())
+            .accept(LEGACY_PEER_REACHABILITY_ALPN, Hold)
+            .accept(PEER_REACHABILITY_ALPN, Hold)
+            .spawn();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while server.addr().addrs.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let current = client
+            .connect_with_opts(
+                server.addr(),
+                PEER_REACHABILITY_ALPN,
+                ConnectOptions::new()
+                    .with_additional_alpns(vec![LEGACY_PEER_REACHABILITY_ALPN.to_vec()]),
+            )
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+        assert_eq!(current.alpn(), PEER_REACHABILITY_ALPN);
+        let legacy = client
+            .connect(server.addr(), LEGACY_PEER_REACHABILITY_ALPN)
+            .await
+            .unwrap();
+        assert_eq!(legacy.alpn(), LEGACY_PEER_REACHABILITY_ALPN);
+        client.close().await;
+        router.shutdown().await.unwrap();
+    }
+}

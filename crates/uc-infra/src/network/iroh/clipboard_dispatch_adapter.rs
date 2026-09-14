@@ -53,7 +53,7 @@ use super::connect::connect_with_staggered_retry;
 use super::peer_address_resolver::PeerAddressResolver;
 
 /// ALPN identifier for the Slice 2 clipboard sync protocol. Independent of
-/// the presence / pairing ALPNs so the Router can multiplex all three
+/// the peer_reachability / pairing ALPNs so the Router can multiplex all three
 /// transports on the same endpoint.
 pub const CLIPBOARD_ALPN: &[u8] = b"uniclipboard/clipboard-applied/1";
 #[cfg(test)]
@@ -69,13 +69,13 @@ type DialResult = Result<Connection, String>;
 pub struct IrohClipboardDispatchAdapter {
     endpoint: Arc<Endpoint>,
     peer_address_resolver: PeerAddressResolver,
-    /// PresencePort handle the adapter notifies on dial failure. A dial
+    /// PeerReachabilityPort handle the adapter notifies on dial failure. A dial
     /// that we have to fall back to `Offline` is first-hand evidence the
     /// peer is unreachable; feeding that signal back through
-    /// [`PresencePort::mark_offline`] lets every other consumer of presence
+    /// [`PeerReachabilityPort::report_communication_failure`] lets every other consumer of peer_reachability
     /// (roster view, fan-out skip logic) observe the truth without waiting
     /// for the keepalive worker's next probe cycle.
-    presence: Arc<dyn PeerReachabilityPort>,
+    peer_reachability: Arc<dyn PeerReachabilityPort>,
     /// Single-flight slot per destination device. Concurrent dispatches to
     /// the same peer collapse to one `connect_with_staggered_retry`
     /// invocation: the first caller becomes the leader (records its
@@ -85,7 +85,7 @@ pub struct IrohClipboardDispatchAdapter {
     ///
     /// Pre-#886 a storm of N concurrent copies against the same offline
     /// peer kicked off N parallel staggered-retry loops (3·N raw `iroh
-    /// connect` attempts) and N `mark_offline` calls; single-flight cuts
+    /// connect` attempts) and N `report_communication_failure` calls; single-flight cuts
     /// both to 1.
     in_flight_dials: Mutex<HashMap<DeviceId, broadcast::Sender<DialResult>>>,
 }
@@ -94,12 +94,12 @@ impl IrohClipboardDispatchAdapter {
     pub fn new(
         endpoint: Arc<Endpoint>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        presence: Arc<dyn PeerReachabilityPort>,
+        peer_reachability: Arc<dyn PeerReachabilityPort>,
     ) -> Self {
         Self {
             endpoint,
             peer_address_resolver: PeerAddressResolver::new(peer_addr_repo),
-            presence,
+            peer_reachability,
             in_flight_dials: Mutex::new(HashMap::new()),
         }
     }
@@ -112,11 +112,11 @@ impl IrohClipboardDispatchAdapter {
     /// the broadcast.
     ///
     /// On dial failure only the leader calls
-    /// [`PresencePort::mark_offline`]; followers inherit the verdict
+    /// [`PeerReachabilityPort::report_communication_failure`]; followers inherit the verdict
     /// through the broadcast. This is what shrinks the storm metric in
     /// #886's acceptance table: N concurrent copies against an offline
     /// peer collapse from N·3 raw `iroh connect` attempts and N
-    /// `mark_offline` calls to 3 and 1 respectively.
+    /// `report_communication_failure` calls to 3 and 1 respectively.
     async fn dial_single_flight(&self, target: &DeviceId, addr: EndpointAddr) -> DialResult {
         enum Role {
             Leader(broadcast::Sender<DialResult>),
@@ -150,17 +150,19 @@ impl IrohClipboardDispatchAdapter {
                 )
                 .await;
 
-                // First-hand dial verdict — fold mark_offline into the
+                // First-hand dial verdict — fold report_communication_failure into the
                 // leader's tail so concurrent followers piling on the
                 // same dead peer collapse to a single side-effect rather
-                // than each calling `presence.mark_offline` on their own
+                // than each calling `peer_reachability.report_communication_failure` on their own
                 // failure return.
                 if let Err(ref err) = result {
                     debug!(
                         error = %err,
                         "clipboard dispatch: single-flight dial failed; marking offline"
                     );
-                    self.presence.mark_offline(target).await;
+                    self.peer_reachability
+                        .report_communication_failure(target)
+                        .await;
                 }
 
                 // Remove the slot before broadcasting so any caller that
@@ -300,9 +302,9 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
 
         // 3. Dial via the per-peer single-flight slot so a concurrent
         //    dispatch storm against the same offline peer collapses to one
-        //    staggered-retry batch + one `mark_offline`. Dial failure =
+        //    staggered-retry batch + one `report_communication_failure`. Dial failure =
         //    offline (no typed iroh error leaks up); the leader has
-        //    already fed the verdict to PresencePort so this branch only
+        //    already fed the verdict to PeerReachabilityPort so this branch only
         //    has to surface the public error. No path established →
         //    transport Unknown.
         let started = Instant::now();
@@ -435,37 +437,37 @@ mod tests {
     use tokio::sync::broadcast;
 
     use uc_core::ports::{
-        PeerAddressError, PeerAddressRecord, PeerReachabilityChanged, PresenceError,
+        PeerAddressError, PeerAddressRecord, PeerReachabilityChanged, PeerReachabilityError,
         ReachabilityState,
     };
 
-    // PresencePort mock for the dispatch tests. None of the four tests in
+    // PeerReachabilityPort mock for the dispatch tests. None of the four tests in
     // this module reach the dial-failure path (happy ack, duplicate ack,
     // missing peer_addr short-circuit, oversized local reject), so the
-    // adapter never invokes `mark_offline`. The mock therefore needs no
+    // adapter never invokes `report_communication_failure`. The mock therefore needs no
     // expectations — any accidental call surfaces as a mockall panic, which
     // is exactly the regression guard we want for "dispatch tests shouldn't
-    // be touching presence state."
+    // be touching peer_reachability state."
     //
-    // `mark_offline` is omitted intentionally: it has a default impl on the
+    // `report_communication_failure` is omitted intentionally: it has a default impl on the
     // trait (noop), so leaving it off the mock keeps that default in play
     // without forcing every test to wire an empty expectation.
     mockall::mock! {
-        Presence {}
+        PeerReachability {}
 
         #[async_trait]
-        impl PeerReachabilityPort for Presence {
+        impl PeerReachabilityPort for PeerReachability {
             async fn ensure_reachable(
                 &self,
                 device: &DeviceId,
-            ) -> Result<ReachabilityState, PresenceError>;
+            ) -> Result<ReachabilityState, PeerReachabilityError>;
             async fn current_state(&self, device: &DeviceId) -> ReachabilityState;
             fn subscribe(&self) -> broadcast::Receiver<PeerReachabilityChanged>;
         }
     }
 
-    fn presence_mock() -> Arc<dyn PeerReachabilityPort> {
-        Arc::new(MockPresence::new())
+    fn peer_reachability_mock() -> Arc<dyn PeerReachabilityPort> {
+        Arc::new(MockPeerReachability::new())
     }
 
     /// In-memory peer_addr_repo the tests use to inject an address blob
@@ -603,7 +605,8 @@ mod tests {
         let target = DeviceId::new("target-alpha");
         seed_addr(&repo, &target, &peer_addr).await;
 
-        let adapter = IrohClipboardDispatchAdapter::new(sender_endpoint, repo, presence_mock());
+        let adapter =
+            IrohClipboardDispatchAdapter::new(sender_endpoint, repo, peer_reachability_mock());
         let payload = SyncPayload {
             ciphertext: Bytes::from(vec![0x11, 0x22, 0x33, 0x44]),
         };
@@ -633,7 +636,8 @@ mod tests {
         let target = DeviceId::new("target-beta");
         seed_addr(&repo, &target, &peer_addr).await;
 
-        let adapter = IrohClipboardDispatchAdapter::new(sender_endpoint, repo, presence_mock());
+        let adapter =
+            IrohClipboardDispatchAdapter::new(sender_endpoint, repo, peer_reachability_mock());
         let payload = SyncPayload {
             ciphertext: Bytes::from(vec![0xAA; 16]),
         };
@@ -658,7 +662,8 @@ mod tests {
         let repo = Arc::new(MemRepo::default());
         let target = DeviceId::new("old-engine-target");
         seed_addr(&repo, &target, &peer_addr).await;
-        let adapter = IrohClipboardDispatchAdapter::new(sender_endpoint, repo, presence_mock());
+        let adapter =
+            IrohClipboardDispatchAdapter::new(sender_endpoint, repo, peer_reachability_mock());
 
         let outcome = adapter
             .dispatch(
@@ -699,7 +704,8 @@ mod tests {
         let target = DeviceId::new("legacy-target");
         seed_addr(&repo, &target, &peer_addr).await;
 
-        let adapter = IrohClipboardDispatchAdapter::new(sender_endpoint, repo, presence_mock());
+        let adapter =
+            IrohClipboardDispatchAdapter::new(sender_endpoint, repo, peer_reachability_mock());
         let result = adapter
             .dispatch(
                 &target,
@@ -721,7 +727,8 @@ mod tests {
     async fn dispatch_returns_offline_when_peer_addr_missing() {
         let sender_endpoint = bind_endpoint().await;
         let repo = Arc::new(MemRepo::default());
-        let adapter = IrohClipboardDispatchAdapter::new(sender_endpoint, repo, presence_mock());
+        let adapter =
+            IrohClipboardDispatchAdapter::new(sender_endpoint, repo, peer_reachability_mock());
 
         let result = adapter
             .dispatch(
@@ -739,38 +746,38 @@ mod tests {
         }
     }
 
-    /// Presence fake that counts `mark_offline` calls instead of asserting
+    /// Presence fake that counts `report_communication_failure` calls instead of asserting
     /// they never happen. Reserved for the single-flight tests below
     /// (verdicts 5 and 6) — the happy-path tests above keep using
-    /// `presence_mock()` so any accidental call still panics.
-    struct CountingPresence {
-        mark_offline_calls: Arc<std::sync::atomic::AtomicUsize>,
+    /// `peer_reachability_mock()` so any accidental call still panics.
+    struct CountingPeerReachability {
+        communication_failure_calls: Arc<std::sync::atomic::AtomicUsize>,
         events: broadcast::Sender<PeerReachabilityChanged>,
     }
 
-    impl CountingPresence {
+    impl CountingPeerReachability {
         fn new() -> Self {
             let (events, _) = broadcast::channel(8);
             Self {
-                mark_offline_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                communication_failure_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 events,
             }
         }
     }
 
     #[async_trait]
-    impl PeerReachabilityPort for CountingPresence {
+    impl PeerReachabilityPort for CountingPeerReachability {
         async fn ensure_reachable(
             &self,
             _device: &DeviceId,
-        ) -> Result<ReachabilityState, PresenceError> {
+        ) -> Result<ReachabilityState, PeerReachabilityError> {
             Ok(ReachabilityState::Unknown)
         }
         async fn current_state(&self, _device: &DeviceId) -> ReachabilityState {
             ReachabilityState::Unknown
         }
-        async fn mark_offline(&self, _device: &DeviceId) {
-            self.mark_offline_calls
+        async fn report_communication_failure(&self, _device: &DeviceId) {
+            self.communication_failure_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         fn subscribe(&self) -> broadcast::Receiver<PeerReachabilityChanged> {
@@ -779,12 +786,12 @@ mod tests {
     }
 
     /// Verdict 5 — single-flight collapse. Two dispatches racing against
-    /// the same offline peer must produce exactly one `mark_offline` call
+    /// the same offline peer must produce exactly one `report_communication_failure` call
     /// (the leader's) — followers inherit the verdict through the
     /// broadcast and surface their own `Offline` without re-stamping
-    /// presence. This is the storm-axis half of #886's acceptance table.
+    /// peer_reachability. This is the storm-axis half of #886's acceptance table.
     #[tokio::test]
-    async fn concurrent_dispatch_to_offline_peer_calls_mark_offline_once() {
+    async fn concurrent_dispatch_to_offline_peer_reports_communication_failure_once() {
         let sender_endpoint = bind_endpoint().await;
         wait_for_direct_addrs(&sender_endpoint).await;
 
@@ -799,13 +806,14 @@ mod tests {
         let repo = Arc::new(MemRepo::default());
         seed_addr(&repo, &target, &dead_addr).await;
 
-        let presence = Arc::new(CountingPresence::new());
-        let mark_offline_calls = Arc::clone(&presence.mark_offline_calls);
+        let peer_reachability = Arc::new(CountingPeerReachability::new());
+        let communication_failure_calls =
+            Arc::clone(&peer_reachability.communication_failure_calls);
 
         let adapter = Arc::new(IrohClipboardDispatchAdapter::new(
             sender_endpoint.clone(),
             repo,
-            presence,
+            peer_reachability,
         ));
 
         let header = sample_header();
@@ -843,10 +851,10 @@ mod tests {
             other => panic!("both dispatches should report Offline; got {other:?}"),
         }
 
-        let calls = mark_offline_calls.load(std::sync::atomic::Ordering::SeqCst);
+        let calls = communication_failure_calls.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
             calls, 1,
-            "single-flight must collapse mark_offline to one call; got {calls}",
+            "single-flight must collapse report_communication_failure to one call; got {calls}",
         );
 
         // Slot must be empty after the leader finishes so a later
@@ -869,7 +877,8 @@ mod tests {
         // we would hit Offline first.
         let sender_endpoint = bind_endpoint().await;
         let repo = Arc::new(MemRepo::default());
-        let adapter = IrohClipboardDispatchAdapter::new(sender_endpoint, repo, presence_mock());
+        let adapter =
+            IrohClipboardDispatchAdapter::new(sender_endpoint, repo, peer_reachability_mock());
 
         let oversized = vec![0u8; clipboard_wire::MAX_PAYLOAD_SIZE as usize + 1];
         let result = adapter

@@ -1,7 +1,6 @@
 mod error;
 mod model;
 mod ports;
-mod prepare;
 mod use_case;
 
 pub use error::{
@@ -16,5 +15,4 @@ pub use ports::{
     ClearProfileStatePort, ProfileLifecycleRepositoryPort, StopProfileRuntimePort,
     WipeProfileKeysPort,
 };
-pub use prepare::PrepareProfileLifecycleUseCase;
 pub use use_case::ProfileFactoryResetFacade;

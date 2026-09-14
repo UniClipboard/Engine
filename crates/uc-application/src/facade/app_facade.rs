@@ -33,7 +33,10 @@ use uc_core::membership::{MembershipBranchId, MembershipConflictId, MembershipEv
 
 use crate::clipboard::sync::V3BlobRef;
 use crate::facade::config_migration::ConfigMigrationFacade;
-use crate::facade::roster::{MemberSummary, PeerSnapshotView, RosterError};
+use crate::facade::roster::{
+    MemberSummary, PeerReachabilityRefreshReport, PeerSnapshotView, RosterError,
+};
+use crate::space::PeerConnectionError;
 
 pub use crate::space::{DeviceGroupChoicesView, QueryDeviceGroupChoicesError};
 
@@ -373,11 +376,10 @@ impl AppFacade {
         self.space.notify_connectivity_opportunity(reason)
     }
 
-    pub async fn refresh_presence(
+    pub async fn refresh_peer_reachability(
         &self,
-    ) -> Result<crate::facade::roster::PresenceRefreshReport, crate::space::PeerConnectionError>
-    {
-        self.space.refresh_presence().await
+    ) -> Result<PeerReachabilityRefreshReport, PeerConnectionError> {
+        self.space.refresh_peer_reachability().await
     }
 
     pub async fn remove_space_member(
@@ -567,7 +569,7 @@ impl AppFacade {
         self.space.list_members().await
     }
 
-    /// 列出带 presence 的 roster entry。
+    /// 列出带 peer_reachability 的 roster entry。
     pub async fn list_roster_entries(
         &self,
     ) -> Result<Vec<crate::facade::roster::RosterEntry>, RosterError> {
@@ -580,7 +582,7 @@ impl AppFacade {
     /// - `None` —— 全 fan-out（向所有 trusted online peer）;
     /// - `Some(list)` —— 仅向指定 device 集合 fan-out;空列表合法,表示零目标。
     ///
-    /// 不绕过 `is_send_allowed` / member gating / presence 这三层 use case
+    /// 不绕过 `is_send_allowed` / member gating / peer_reachability 这三层 use case
     /// 内部检查,filter 在它们之后生效。
     pub async fn dispatch_clipboard_snapshot(
         &self,
@@ -959,51 +961,55 @@ impl AppFacade {
     }
 
     /// 订阅成员在线状态变化。外部拿到的是 application 事件,不暴露 core 事件类型。
-    pub fn subscribe_peer_presence_events(&self) -> Result<AppPresenceSubscription, RosterError> {
-        let inner = self.space.subscribe_presence_events();
-        Ok(AppPresenceSubscription { inner })
+    pub fn subscribe_peer_reachability_events(
+        &self,
+    ) -> Result<AppPeerReachabilitySubscription, RosterError> {
+        let inner = self.space.subscribe_peer_reachability_events();
+        Ok(AppPeerReachabilitySubscription { inner })
     }
 }
 
-/// application 层 presence 事件。
+/// application 层 peer_reachability 事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppPresenceEvent {
+pub struct AppPeerReachabilityEvent {
     pub device_id: String,
     pub state: String,
     pub at_ms: i64,
 }
 
-/// application 层 presence 订阅错误。
+/// application 层 peer_reachability 订阅错误。
 #[derive(Debug, Error)]
-pub enum AppPresenceSubscriptionError {
-    #[error("presence event receiver lagged by {0} messages")]
+pub enum AppPeerReachabilitySubscriptionError {
+    #[error("peer reachability receiver lagged by {0} messages")]
     Lagged(u64),
-    #[error("presence event receiver closed")]
+    #[error("peer reachability receiver closed")]
     Closed,
 }
 
-/// application 层 presence 订阅句柄。
-pub struct AppPresenceSubscription {
+/// application 层 peer_reachability 订阅句柄。
+pub struct AppPeerReachabilitySubscription {
     inner: broadcast::Receiver<PeerReachabilityChanged>,
 }
 
-impl AppPresenceSubscription {
-    pub async fn recv(&mut self) -> Result<AppPresenceEvent, AppPresenceSubscriptionError> {
+impl AppPeerReachabilitySubscription {
+    pub async fn recv(
+        &mut self,
+    ) -> Result<AppPeerReachabilityEvent, AppPeerReachabilitySubscriptionError> {
         self.inner
             .recv()
             .await
-            .map(presence_event_to_app)
+            .map(peer_reachability_event_to_app)
             .map_err(|err| match err {
                 broadcast::error::RecvError::Lagged(skipped) => {
-                    AppPresenceSubscriptionError::Lagged(skipped)
+                    AppPeerReachabilitySubscriptionError::Lagged(skipped)
                 }
-                broadcast::error::RecvError::Closed => AppPresenceSubscriptionError::Closed,
+                broadcast::error::RecvError::Closed => AppPeerReachabilitySubscriptionError::Closed,
             })
     }
 }
 
-fn presence_event_to_app(event: PeerReachabilityChanged) -> AppPresenceEvent {
-    AppPresenceEvent {
+fn peer_reachability_event_to_app(event: PeerReachabilityChanged) -> AppPeerReachabilityEvent {
+    AppPeerReachabilityEvent {
         device_id: event.device_id.as_str().to_string(),
         state: reachability_state_to_string(event.state),
         at_ms: event.at.timestamp_millis(),

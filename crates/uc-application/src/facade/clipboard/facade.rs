@@ -96,7 +96,7 @@ pub struct DispatchEntryInput {
     /// (still runs encrypt so callers see a well-formed report).
     ///
     /// **Iron rule**: this filter narrows candidates only. It does NOT
-    /// bypass `is_send_allowed` / member gating / presence — those checks
+    /// bypass `is_send_allowed` / member gating / peer_reachability — those checks
     /// still apply per peer (see `dispatch_entry.rs` module doc).
     pub target_filter: Option<Vec<DeviceId>>,
 }
@@ -584,7 +584,7 @@ fn lift_per_target(internal: DispatchPerTarget) -> DispatchEntryPerTarget {
 //
 // * Use `mockall::mock!` for ports asserted via call counts + return
 //   values: `PeerAddressRepositoryPort`, `TransferCipherPort`,
-//   `ClipboardDispatchPort`, `PresencePort`, `DeviceIdentityPort`,
+//   `ClipboardDispatchPort`, `PeerReachabilityPort`, `DeviceIdentityPort`,
 //   `LocalIdentityPort`, `SettingsPort`.
 // * Trivial sync `FixedClock` stays hand-written (4 lines).
 
@@ -599,7 +599,7 @@ mod tests {
     use uc_core::ports::{
         ClipboardDispatchError, ClipboardHeader, ConnectionChannel, DispatchAck, DispatchReport,
         FirstSyncStateError, LocalIdentityError, PeerAddressError, PeerAddressRecord,
-        PeerReachabilityChanged, PresenceError, ReachabilityState, SyncPayload,
+        PeerReachabilityChanged, PeerReachabilityError, ReachabilityState, SyncPayload,
     };
     use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
@@ -638,13 +638,13 @@ mod tests {
     }
 
     mockall::mock! {
-        pub Presence {}
+        pub PeerReachability {}
         #[async_trait]
-        impl PeerReachabilityPort for Presence {
+        impl PeerReachabilityPort for PeerReachability {
             async fn ensure_reachable(
                 &self,
                 device: &DeviceId,
-            ) -> Result<ReachabilityState, PresenceError>;
+            ) -> Result<ReachabilityState, PeerReachabilityError>;
             async fn current_state(&self, device: &DeviceId) -> ReachabilityState;
             fn subscribe(&self) -> broadcast::Receiver<PeerReachabilityChanged>;
         }
@@ -878,8 +878,8 @@ mod tests {
         m
     }
 
-    fn make_presence_unknown() -> MockPresence {
-        let mut m = MockPresence::new();
+    fn make_peer_reachability_unknown() -> MockPeerReachability {
+        let mut m = MockPeerReachability::new();
         m.expect_current_state()
             .returning(|_| ReachabilityState::Unknown);
         m
@@ -921,7 +921,7 @@ mod tests {
     /// Wire the outbound facade with the given mock ports.
     fn build_facade(
         peer_addr_repo: MockPeerAddrRepo,
-        presence: MockPresence,
+        peer_reachability: MockPeerReachability,
         cipher: MockCipher,
         dispatch: MockDispatch,
         device_identity: MockDeviceId_,
@@ -932,7 +932,7 @@ mod tests {
             peer_addr_repo: Arc::new(peer_addr_repo),
             member_repo: Arc::new(make_member_repo_all_enabled()),
             peer_scope: Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
-            peer_reachability: Arc::new(presence),
+            peer_reachability: Arc::new(peer_reachability),
             transfer_cipher: Arc::new(cipher),
             clipboard_dispatch: Arc::new(dispatch),
             device_identity: Arc::new(device_identity),
@@ -964,7 +964,7 @@ mod tests {
             .times(1)
             .returning(|| Ok(vec![record("peer-a")]));
 
-        let presence = make_presence_unknown();
+        let peer_reachability = make_peer_reachability_unknown();
 
         let mut cipher = MockCipher::new();
         cipher
@@ -981,7 +981,7 @@ mod tests {
 
         let facade = build_facade(
             repo,
-            presence,
+            peer_reachability,
             cipher,
             dispatch,
             make_device_identity("self"),
@@ -1019,7 +1019,7 @@ mod tests {
             .times(1)
             .returning(|| Ok(vec![record("peer-a")]));
 
-        let presence = make_presence_unknown();
+        let peer_reachability = make_peer_reachability_unknown();
 
         let mut cipher = MockCipher::new();
         // Encrypt gets the V3 envelope bytes, not the raw text. We just
@@ -1047,7 +1047,7 @@ mod tests {
 
         let facade = build_facade(
             repo,
-            presence,
+            peer_reachability,
             cipher,
             dispatch,
             make_device_identity("self"),
@@ -1096,7 +1096,7 @@ mod tests {
             .times(1)
             .returning(|| Ok(vec![record("peer-a"), record("peer-b")]));
 
-        let presence = make_presence_unknown();
+        let peer_reachability = make_peer_reachability_unknown();
 
         let mut cipher = MockCipher::new();
         cipher
@@ -1113,7 +1113,7 @@ mod tests {
 
         let facade = build_facade(
             repo,
-            presence,
+            peer_reachability,
             cipher,
             dispatch,
             make_device_identity("self"),

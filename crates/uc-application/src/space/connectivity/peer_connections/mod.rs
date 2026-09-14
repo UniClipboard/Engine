@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use uc_core::ids::DeviceId;
 use uc_core::ports::{PeerReachabilityPort, ReachabilityState};
 
-use crate::facade::roster::PresenceRefreshReport;
+use crate::facade::roster::PeerReachabilityRefreshReport;
 use crate::space::membership::{CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort};
 use runtime::ConnectionRuntime;
 
@@ -30,6 +30,7 @@ pub enum ConnectivityOpportunity {
 pub enum ConnectionHint {
     NetworkChanged,
     PeerAddressChanged(DeviceId),
+    CommunicationFailed(DeviceId),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -53,7 +54,7 @@ pub enum PeerConnectionError {
 }
 
 enum Command {
-    Refresh(oneshot::Sender<Result<PresenceRefreshReport, PeerConnectionError>>),
+    Refresh(oneshot::Sender<Result<PeerReachabilityRefreshReport, PeerConnectionError>>),
     Pause(oneshot::Sender<()>),
     Resume(oneshot::Sender<()>),
 }
@@ -69,7 +70,7 @@ pub(crate) struct PeerConnectionCoordinator {
 impl PeerConnectionCoordinator {
     pub(crate) fn new(
         scope: Arc<dyn CurrentSpaceMemberScopePort>,
-        presence: Arc<dyn PeerReachabilityPort>,
+        peer_reachability: Arc<dyn PeerReachabilityPort>,
         hints: BoxStream<'static, Result<ConnectionHint, anyhow::Error>>,
     ) -> Arc<Self> {
         let (commands, receiver) = mpsc::channel(32);
@@ -77,7 +78,7 @@ impl PeerConnectionCoordinator {
         let cancel = CancellationToken::new();
         let runtime = ConnectionRuntime::new(
             scope,
-            presence,
+            peer_reachability,
             hints,
             receiver,
             opportunities,
@@ -111,7 +112,9 @@ impl PeerConnectionCoordinator {
         Ok(())
     }
 
-    pub(crate) async fn refresh(&self) -> Result<PresenceRefreshReport, PeerConnectionError> {
+    pub(crate) async fn refresh(
+        &self,
+    ) -> Result<PeerReachabilityRefreshReport, PeerConnectionError> {
         let (send, receive) = oneshot::channel();
         self.send(Command::Refresh(send))?;
         receive.await.map_err(PeerConnectionError::Response)?

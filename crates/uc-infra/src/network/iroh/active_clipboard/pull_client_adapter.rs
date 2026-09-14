@@ -44,7 +44,7 @@ const PULL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Requests one active-clipboard pull from a single peer over the pull ALPN.
 /// Reuses the shared endpoint + `peer_addr_repo` so a pull rides the same
-/// NAT/relay mapping presence already established.
+/// NAT/relay mapping peer_reachability already established.
 pub struct IrohActiveClipboardPullClientAdapter {
     endpoint: Arc<Endpoint>,
     peer_address_resolver: PeerAddressResolver,

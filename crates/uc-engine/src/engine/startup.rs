@@ -5,7 +5,7 @@ use tokio::sync::watch;
 
 use crate::{
     EngineError, StartupAllowedActions, StartupFailure, StartupFailureReason, StartupSnapshot,
-    StartupState,
+    StartupState, StartupStepProgress, StartupUpgradeProgress, StartupUpgradeStep,
 };
 
 /// 启动前创建、可在窗口之间共享的只读观察者。
@@ -72,6 +72,69 @@ impl StartupProgressStore {
             snapshot.elapsed_ms =
                 self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
             true
+        });
+    }
+
+    pub(crate) fn backup_started(&self) {
+        self.update(|snapshot| {
+            snapshot.state = StartupState::Upgrading;
+            snapshot.failure = None;
+            let upgrade = snapshot.upgrade.get_or_insert(StartupUpgradeProgress {
+                required: true,
+                recovering: false,
+                completed: false,
+                current_step: None,
+                steps: Vec::new(),
+            });
+            upgrade.required = true;
+            upgrade.completed = false;
+            upgrade.current_step = Some(StartupUpgradeStep::BackingUp);
+            if let Some(step) = upgrade
+                .steps
+                .iter_mut()
+                .find(|step| step.step == StartupUpgradeStep::BackingUp)
+            {
+                step.completed = false;
+            } else {
+                upgrade.steps.insert(
+                    0,
+                    StartupStepProgress {
+                        step: StartupUpgradeStep::BackingUp,
+                        processed: 0,
+                        total: None,
+                        unit: None,
+                        warning_count: Some(0),
+                        completed: false,
+                    },
+                );
+            }
+        });
+    }
+
+    pub(crate) fn backup_completed(&self) {
+        self.update(|snapshot| {
+            let Some(upgrade) = snapshot.upgrade.as_mut() else {
+                return;
+            };
+            if let Some(step) = upgrade
+                .steps
+                .iter_mut()
+                .find(|step| step.step == StartupUpgradeStep::BackingUp)
+            {
+                step.completed = true;
+            }
+            if upgrade.current_step == Some(StartupUpgradeStep::BackingUp) {
+                upgrade.current_step = None;
+            }
+        });
+    }
+
+    pub(crate) fn backup_failed(&self) {
+        self.update(|snapshot| {
+            snapshot.failure = Some(StartupFailure {
+                reason: StartupFailureReason::BackupFailed,
+                retryable: true,
+            });
         });
     }
 
@@ -148,6 +211,77 @@ mod tests {
         }
         input.finish(&Ok::<(), crate::EngineError>(()));
         assert_eq!(progress.snapshot().state, StartupState::Ready);
+    }
+
+    #[test]
+    fn backup_is_visible_before_storage_upgrade_and_remains_in_activity() {
+        let (input, progress) = StartupProgress::channel();
+        input.store.backup_started();
+        let backing_up = progress.snapshot();
+        assert_eq!(backing_up.state, StartupState::Upgrading);
+        let upgrade = backing_up.upgrade.unwrap();
+        assert!(upgrade.required);
+        assert_eq!(upgrade.current_step, Some(StartupUpgradeStep::BackingUp));
+        assert_eq!(upgrade.steps.len(), 1);
+        assert!(!upgrade.steps[0].completed);
+
+        input.store.backup_completed();
+        StorageUpgradeObserver::update(
+            input.store.as_ref(),
+            StorageUpgradeSnapshot {
+                required: true,
+                current_step: Some(StorageUpgradeStep::Checking),
+                steps: vec![uc_infra::security::StorageUpgradeStepProgress {
+                    step: StorageUpgradeStep::Checking,
+                    processed: 0,
+                    total: None,
+                    unit: None,
+                    warning_count: Some(0),
+                    completed: false,
+                }],
+                ..StorageUpgradeSnapshot::default()
+            },
+        );
+        let checking = progress.snapshot().upgrade.unwrap();
+        assert_eq!(checking.current_step, Some(StartupUpgradeStep::Checking));
+        assert_eq!(checking.steps[0].step, StartupUpgradeStep::BackingUp);
+        assert!(checking.steps[0].completed);
+        assert_eq!(checking.steps[1].step, StartupUpgradeStep::Checking);
+    }
+
+    #[test]
+    fn restarting_backup_marks_the_step_active_again() {
+        let (input, progress) = StartupProgress::channel();
+        input.store.backup_started();
+        input.store.backup_completed();
+        input.store.backup_started();
+
+        let upgrade = progress.snapshot().upgrade.unwrap();
+        assert_eq!(upgrade.current_step, Some(StartupUpgradeStep::BackingUp));
+        assert!(!upgrade.steps[0].completed);
+    }
+
+    #[test]
+    fn backup_failure_keeps_the_failed_step_and_allows_retry() {
+        let (input, progress) = StartupProgress::channel();
+        input.store.backup_started();
+        input.store.backup_failed();
+        input.finish(&Err::<(), _>(crate::EngineError::new(
+            1101,
+            crate::EngineErrorCategory::Unavailable,
+            true,
+        )));
+        let failed = progress.snapshot();
+        assert_eq!(failed.state, StartupState::Failed);
+        assert_eq!(
+            failed.failure.unwrap().reason,
+            StartupFailureReason::BackupFailed
+        );
+        assert!(failed.allowed_actions.retry);
+        assert_eq!(
+            failed.upgrade.unwrap().current_step,
+            Some(StartupUpgradeStep::BackingUp)
+        );
     }
 
     #[test]

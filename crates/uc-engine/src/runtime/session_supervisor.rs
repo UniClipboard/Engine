@@ -1,5 +1,4 @@
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -23,7 +22,7 @@ use crate::assembly::facade::build_mobile_sync_facade;
 use crate::assembly::lifecycle::build_daemon_lifecycle;
 use crate::assembly::sync_engine::SyncEngineAssembly;
 use crate::engine::event_stream::EventSender;
-use crate::subsystems::peer_keepalive::spawn_peer_presence_event_task;
+use crate::subsystems::peer_keepalive::spawn_peer_reachability_event_task;
 use crate::{
     EngineEvent, InboundNoticeActionSummary, InboundNoticeEvent, InboundRepresentationSummary,
 };
@@ -45,7 +44,6 @@ struct ProductionSessionFactory {
     #[cfg(feature = "dev-tools")]
     network_partition_gate: uc_infra::network::iroh::IrohNetworkPartitionGate,
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
-    recovery_generation: Arc<AtomicU64>,
 }
 
 struct ProductionSession {
@@ -223,7 +221,6 @@ impl SessionSupervisor {
             #[cfg(feature = "dev-tools")]
             network_partition_gate,
             network_recovery,
-            recovery_generation: Arc::new(AtomicU64::new(0)),
         });
         let mut slot = self
             .factory
@@ -626,14 +623,7 @@ impl ProductionSessionFactory {
                 }
             })
             .await;
-        spawn_network_recovery_observation_task(
-            sync_engine.subscribe_network_recovery_observations(),
-            Arc::clone(&self.network_recovery),
-            Arc::clone(&self.recovery_generation),
-            &tasks,
-        )
-        .await;
-        spawn_peer_presence_event_task(Arc::clone(&facade), &tasks, events).await;
+        spawn_peer_reachability_event_task(Arc::clone(&facade), &tasks, events).await;
         Ok(ProductionSession {
             facade,
             application: application_runtime,
@@ -714,39 +704,6 @@ impl ClipboardInboundEventPort for EngineClipboardInboundEvents {
                 at_ms: event.at_ms,
             }));
     }
-}
-
-async fn spawn_network_recovery_observation_task(
-    mut observations: tokio::sync::broadcast::Receiver<
-        uc_infra::network::iroh::NetworkRecoveryObservation,
-    >,
-    recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
-    generation: Arc<AtomicU64>,
-    tasks: &Arc<TaskRegistry>,
-) {
-    let _ = tasks
-        .spawn(move |cancel| async move {
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => return,
-                    observation = observations.recv() => match observation {
-                        Ok(uc_infra::network::iroh::NetworkRecoveryObservation::LocalRelayRecovered) => {
-                            let current_generation = generation.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-                            recovery.observe_local_network_recovered(current_generation).await;
-                        }
-                        Ok(uc_infra::network::iroh::NetworkRecoveryObservation::PreviouslyOnlinePeerPathExhausted) => {
-                            recovery.observe_previously_online_peer_path_exhausted(generation.load(Ordering::Relaxed)).await;
-                        }
-                        Ok(uc_infra::network::iroh::NetworkRecoveryObservation::FreshPeerDialSucceeded) => {
-                            recovery.observe_fresh_peer_dial_succeeded(generation.load(Ordering::Relaxed)).await;
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                    }
-                }
-            }
-        })
-        .await;
 }
 
 fn recover_space_session_error_kind(

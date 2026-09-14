@@ -1,3 +1,8 @@
+#[cfg(feature = "dev-tools")]
+use crate::{
+    DevBlobPublished, DevCapturedFileSet, DevCapturedFileSetLine, DevInvitation, DevOperation,
+    DevOperationResult,
+};
 use std::time::Duration;
 
 #[cfg(feature = "dev-tools")]
@@ -52,6 +57,9 @@ use crate::operations::settings::storage::{
 use crate::operations::settings::upgrade::{
     execute_acknowledge_upgrade, execute_query_upgrade_status,
 };
+use crate::operations::settings::upgrade_backups::{
+    execute_delete_upgrade_backup, execute_list_upgrade_backups,
+};
 use crate::operations::space::cancel_invitation::execute_cancel_invitation;
 use crate::operations::space::cancel_join_space::execute_cancel_join_space;
 use crate::operations::space::create_space::execute_create_space;
@@ -98,6 +106,13 @@ impl EngineRuntime for ProductionRuntime {
             }
             Operation::FactoryResetSpace => {
                 return execute_factory_reset_space(self.profile_reset.as_ref()).await;
+            }
+            Operation::ListUpgradeBackups => {
+                return execute_list_upgrade_backups(self.profile_upgrade_backups.as_ref()).await;
+            }
+            Operation::DeleteUpgradeBackup(input) => {
+                return execute_delete_upgrade_backup(self.profile_upgrade_backups.as_ref(), input)
+                    .await;
             }
             Operation::RecoverNetwork => {
                 return self
@@ -351,7 +366,9 @@ impl EngineRuntime for ProductionRuntime {
                 }
                 Operation::QueryDeviceGroupChoices
                 | Operation::CancelJoinSpace(_)
-                | Operation::FactoryResetSpace => Err(super::operation_unavailable_error()),
+                | Operation::FactoryResetSpace
+                | Operation::ListUpgradeBackups
+                | Operation::DeleteUpgradeBackup(_) => Err(super::operation_unavailable_error()),
                 Operation::ChooseDeviceGroup(_) => Err(super::operation_unavailable_error()),
                 #[cfg(feature = "dev-tools")]
                 Operation::QueryMembershipDiagnostics => Err(super::operation_unavailable_error()),
@@ -535,16 +552,16 @@ impl EngineRuntime for ProductionRuntime {
 
         let facade = self.current_facade().await?;
         match operation {
-            crate::DevOperation::SeedText { text } => facade
+            DevOperation::SeedText { text } => facade
                 .seed_history_text(&text)
                 .await
-                .map(|entry_id| crate::DevOperationResult::TextSeeded { entry_id })
+                .map(|entry_id| DevOperationResult::TextSeeded { entry_id })
                 .map_err(|error| operation_error_with_code(1903, "seed text", error)),
-            crate::DevOperation::CaptureFilePaths { paths } => facade
+            DevOperation::CaptureFilePaths { paths } => facade
                 .capture_file_paths_for_diagnostics(paths)
                 .await
                 .map(|captured| {
-                    crate::DevOperationResult::FilePathsCaptured(crate::DevCapturedFileSet {
+                    DevOperationResult::FilePathsCaptured(DevCapturedFileSet {
                         entry_id: captured.entry.entry_id,
                         deduplicated: captured.entry.deduplicated,
                         snapshot_hash: captured.entry.snapshot_hash,
@@ -553,7 +570,7 @@ impl EngineRuntime for ProductionRuntime {
                         lines: captured
                             .lines
                             .into_iter()
-                            .map(|line| crate::DevCapturedFileSetLine {
+                            .map(|line| DevCapturedFileSetLine {
                                 line_index: line.line_index,
                                 root_index: line.root_index,
                                 root_name: line.root_name,
@@ -566,11 +583,11 @@ impl EngineRuntime for ProductionRuntime {
                     })
                 })
                 .map_err(|error| operation_error_with_code(1904, "capture file paths", error)),
-            crate::DevOperation::ListPairingInvitationAddresses => facade
+            DevOperation::ListPairingInvitationAddresses => facade
                 .list_pairing_invitation_addresses()
                 .await
                 .map(|addresses| {
-                    crate::DevOperationResult::PairingInvitationAddresses(
+                    DevOperationResult::PairingInvitationAddresses(
                         addresses
                             .into_iter()
                             .map(|address| crate::DevPairingInvitationAddress {
@@ -583,24 +600,24 @@ impl EngineRuntime for ProductionRuntime {
                 .map_err(|error| {
                     operation_error_with_code(1905, "list invitation addresses", error)
                 }),
-            crate::DevOperation::IssueInvitationForAddress { address } => facade
+            DevOperation::IssueInvitationForAddress { address } => facade
                 .issue_pairing_invitation_for_address(address)
                 .await
                 .map(|invitation| {
-                    crate::DevOperationResult::InvitationIssued(crate::DevInvitation {
+                    DevOperationResult::InvitationIssued(DevInvitation {
                         code: invitation.code.to_string(),
                         expires_at_ms: invitation.expires_at.timestamp_millis(),
                     })
                 })
                 .map_err(|error| operation_error_with_code(1906, "issue invitation", error)),
-            crate::DevOperation::PublishBlob { bytes } => facade
+            DevOperation::PublishBlob { bytes } => facade
                 .publish_blob(PublishBlobCommand {
                     plaintext: Bytes::from(bytes),
                     entry_id: None,
                 })
                 .await
                 .map(|published| {
-                    crate::DevOperationResult::BlobPublished(crate::DevBlobPublished {
+                    DevOperationResult::BlobPublished(DevBlobPublished {
                         ticket: published.ticket.as_bytes().to_vec(),
                         entry_id: published.entry_id.to_string(),
                         plaintext_hash: published.plaintext_hash.as_bytes().to_vec(),
@@ -609,34 +626,76 @@ impl EngineRuntime for ProductionRuntime {
                     })
                 })
                 .map_err(|error| operation_error_with_code(1907, "publish blob", error)),
-            crate::DevOperation::FetchBlob { ticket, entry_id } => facade
+            DevOperation::FetchBlob { ticket, entry_id } => facade
                 .fetch_blob(FetchBlobCommand {
                     ticket: BlobTicket::from_bytes(ticket),
                     entry_id: EntryId::from_string(entry_id),
                     transfer_context: None,
                 })
                 .await
-                .map(|fetched| crate::DevOperationResult::BlobFetched {
+                .map(|fetched| DevOperationResult::BlobFetched {
                     bytes: fetched.plaintext.to_vec(),
                     entry_id: fetched.entry_id.to_string(),
                     plaintext_hash: fetched.plaintext_hash.as_bytes().to_vec(),
                     digest: fetched.digest.as_bytes().to_vec(),
                 })
                 .map_err(|error| operation_error_with_code(1910, "fetch blob", error)),
-            crate::DevOperation::QueryNetworkEndpointId => self
+            DevOperation::QueryNetworkEndpointId => self
                 .network_partition_gate
                 .local_endpoint_id()
-                .map(crate::DevOperationResult::NetworkEndpointId)
+                .map(DevOperationResult::NetworkEndpointId)
                 .ok_or_else(|| {
                     EngineError::new(1911, crate::EngineErrorCategory::Unavailable, true)
                 }),
-            crate::DevOperation::SetNetworkPartition {
+            DevOperation::SetNetworkPartition {
                 blocked_endpoint_ids,
-            } => Ok(crate::DevOperationResult::NetworkPartitionUpdated {
+            } => Ok(DevOperationResult::NetworkPartitionUpdated {
                 blocked_peer_count: self
                     .network_partition_gate
                     .replace_blocked(blocked_endpoint_ids),
             }),
+            DevOperation::RejectNewConnections {
+                endpoint_ids,
+                peer_reachability,
+            } => {
+                let alpns = if peer_reachability {
+                    vec![
+                        uc_infra::network::iroh::LEGACY_PEER_REACHABILITY_ALPN.to_vec(),
+                        uc_infra::network::iroh::PEER_REACHABILITY_ALPN.to_vec(),
+                    ]
+                } else {
+                    vec![uc_infra::network::iroh::CLIPBOARD_ALPN.to_vec()]
+                };
+                Ok(DevOperationResult::NetworkPartitionUpdated {
+                    blocked_peer_count: self
+                        .network_partition_gate
+                        .reject_new_connections(endpoint_ids, alpns),
+                })
+            }
+            DevOperation::SuppressConnectivityOpportunities { suppressed } => {
+                self.network_partition_gate
+                    .suppress_connectivity_opportunities(suppressed);
+                Ok(DevOperationResult::ConnectivityOpportunitiesUpdated)
+            }
+            DevOperation::QueryRejectedConnectionCount => {
+                Ok(DevOperationResult::RejectedConnectionCount {
+                    count: self.network_partition_gate.rejected_dial_count(),
+                })
+            }
+            DevOperation::QueryPeerReachabilityConnections
+            | DevOperation::RetainOnePeerReachabilityConnection => {
+                let retain_one =
+                    matches!(operation, DevOperation::RetainOnePeerReachabilityConnection);
+                let (incoming, outgoing, admitted_transports) = self
+                    .network_partition_gate
+                    .peer_reachability_connections(retain_one);
+                Ok(DevOperationResult::PeerReachabilityConnections {
+                    incoming,
+                    outgoing,
+                    registered_tasks: self.task_registry.task_count().await,
+                    admitted_transports,
+                })
+            }
         }
     }
 

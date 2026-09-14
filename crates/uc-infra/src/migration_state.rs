@@ -46,6 +46,19 @@ enum LegacyMigrationPhaseV1 {
     },
 }
 
+/// 备份只复用历史格式解析，不执行历史恢复动作。
+pub(crate) fn decode_legacy_migration_run_id(
+    bytes: &[u8],
+) -> Result<Option<MigrationRunId>, serde_json::Error> {
+    serde_json::from_slice::<Option<LegacyMigrationPhaseV1>>(bytes).map(|phase| {
+        phase.map(|phase| match phase {
+            LegacyMigrationPhaseV1::Prepared { run_id, .. }
+            | LegacyMigrationPhaseV1::HandshakeDone { run_id, .. }
+            | LegacyMigrationPhaseV1::Swapped { run_id, .. } => run_id,
+        })
+    })
+}
+
 async fn read_legacy_phase(
     state_file_path: &std::path::Path,
 ) -> Result<Option<LegacyMigrationPhaseV1>, LegacyMigrationRecoveryError> {

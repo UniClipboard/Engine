@@ -36,7 +36,7 @@ use super::{
 /// The assembled outbound payload: the (possibly mutated) snapshot with its
 /// identity fields stamped, the published blob refs, and the directory
 /// manifest when the entry is a directory set (`None` for flat/text entries —
-/// the caller picks the matching V3 encoder from its presence).
+/// the caller picks the matching V3 encoder from its peer_reachability).
 pub(crate) struct OutboundPayload {
     pub snapshot: SystemClipboardSnapshot,
     pub blob_refs: Vec<V3BlobRef>,

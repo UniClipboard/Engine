@@ -15,6 +15,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  connection-recovery:
+    name: Connection recovery on isolated Linux networks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install network test tools
+        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping file clang libclang-dev cmake
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          shared-key: connection-recovery-linux
+      - name: Validate connection liveness and recovery
+        run: bash scripts/testing/run-connection-recovery-e2e.sh --suite all --repeat 3
+      - name: Retain sanitized evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: connection-recovery-evidence
+          path: target/connection-recovery-evidence
+          if-no-files-found: warn
   checks:
     name: Engine repository checks
     runs-on: macos-14

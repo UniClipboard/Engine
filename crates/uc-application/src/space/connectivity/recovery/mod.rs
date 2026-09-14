@@ -1,12 +1,12 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use async_trait::async_trait;
 use futures::future::{BoxFuture, FutureExt, Shared};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-const NETWORK_CHANGE_WINDOW: Duration = Duration::from_secs(60);
 const RETRY_DELAYS: [Duration; 5] = [
     Duration::from_secs(1),
     Duration::from_secs(2),
@@ -78,23 +78,8 @@ struct NetworkRecoveryInner {
 
 struct RecoveryState {
     phase: NetworkRecoveryPhase,
-    network_change: Option<NetworkChange>,
-    recovered_generation: Option<u64>,
-    automatic_cycle: Option<AutomaticRecoveryCycle>,
     next_retry_at: Option<Instant>,
     in_flight: Option<Shared<BoxFuture<'static, Result<(), NetworkRecoveryRequestError>>>>,
-}
-
-#[derive(Clone, Copy)]
-struct NetworkChange {
-    generation: u64,
-    expires_at: Instant,
-}
-
-struct AutomaticRecoveryCycle {
-    generation: u64,
-    cancel: CancellationToken,
-    rebuilding: bool,
 }
 
 impl NetworkRecoveryFacade {
@@ -108,9 +93,6 @@ impl NetworkRecoveryFacade {
                 events,
                 state: Mutex::new(RecoveryState {
                     phase: NetworkRecoveryPhase::Idle,
-                    network_change: None,
-                    recovered_generation: None,
-                    automatic_cycle: None,
                     next_retry_at: None,
                     in_flight: None,
                 }),
@@ -139,65 +121,11 @@ impl NetworkRecoveryFacade {
     /// Starts or joins the single current recovery cycle. A manual request can
     /// use this without needing a network-change observation.
     pub async fn request_recovery(&self) -> Result<(), NetworkRecoveryRequestError> {
-        let (future, wake_retry) = self.start_recovery(None).await?;
+        let (future, wake_retry) = self.start_recovery().await?;
         if wake_retry {
             self.inner.manual_wake.notify_one();
         }
         future.await
-    }
-
-    /// Opens the short automatic-recovery window after an already-running
-    /// session observes its local network become healthy again.
-    pub async fn observe_local_network_recovered(&self, generation: u64) {
-        let mut state = self.inner.state.lock().await;
-        if state.phase == NetworkRecoveryPhase::Stopped {
-            return;
-        }
-        state.network_change = Some(NetworkChange {
-            generation,
-            expires_at: Instant::now() + NETWORK_CHANGE_WINDOW,
-        });
-        state.recovered_generation = None;
-    }
-
-    /// Called only after the infrastructure layer has completed both bounded
-    /// confirmation attempts for a previously-online peer.
-    pub async fn observe_previously_online_peer_path_exhausted(&self, generation: u64) {
-        let should_start = {
-            let state = self.inner.state.lock().await;
-            matches!(
-                state.network_change,
-                Some(change)
-                    if change.generation == generation
-                        && change.expires_at > Instant::now()
-                        && state.recovered_generation != Some(generation)
-            ) && state.in_flight.is_none()
-        };
-        if should_start {
-            if let Ok((future, _)) = self.start_recovery(Some(generation)).await {
-                tokio::spawn(async move {
-                    let _ = future.await;
-                });
-            }
-        }
-    }
-
-    /// A fresh peer dial proves that the current failure period is no longer
-    /// active, so a later stale failure cannot trigger another rebuild.
-    pub async fn observe_fresh_peer_dial_succeeded(&self, generation: u64) {
-        let mut state = self.inner.state.lock().await;
-        if state
-            .network_change
-            .is_some_and(|change| change.generation == generation)
-        {
-            state.network_change = None;
-            state.recovered_generation = None;
-            if let Some(cycle) = state.automatic_cycle.as_ref() {
-                if cycle.generation == generation && !cycle.rebuilding {
-                    cycle.cancel.cancel();
-                }
-            }
-        }
     }
 
     pub async fn shutdown(&self) {
@@ -210,7 +138,6 @@ impl NetworkRecoveryFacade {
 
     async fn start_recovery(
         &self,
-        automatic_generation: Option<u64>,
     ) -> Result<
         (
             Shared<BoxFuture<'static, Result<(), NetworkRecoveryRequestError>>>,
@@ -223,35 +150,18 @@ impl NetworkRecoveryFacade {
             return Err(NetworkRecoveryRequestError::Stopped);
         }
         if let Some(in_flight) = state.in_flight.clone() {
-            if automatic_generation.is_none() {
-                state.automatic_cycle = None;
-            }
             return Ok((
                 in_flight,
-                automatic_generation.is_none()
-                    && state.phase == NetworkRecoveryPhase::RetryScheduled,
+                state.phase == NetworkRecoveryPhase::RetryScheduled,
             ));
         }
 
-        if let Some(generation) = automatic_generation {
-            state.recovered_generation = Some(generation);
-        }
-        let automatic_cancel = automatic_generation.map(|generation| {
-            let cancel = CancellationToken::new();
-            state.automatic_cycle = Some(AutomaticRecoveryCycle {
-                generation,
-                cancel: cancel.clone(),
-                rebuilding: false,
-            });
-            cancel
-        });
         state.phase = NetworkRecoveryPhase::Recovering;
         state.next_retry_at = None;
         let inner = Arc::clone(&self.inner);
-        let future =
-            async move { run_recovery_cycle(inner, automatic_generation, automatic_cancel).await }
-                .boxed()
-                .shared();
+        let future = async move { run_recovery_cycle(inner).await }
+            .boxed()
+            .shared();
         state.in_flight = Some(future.clone());
         let _ = self.inner.events.send(NetworkRecoveryEvent::Started);
         Ok((future, false))
@@ -260,8 +170,6 @@ impl NetworkRecoveryFacade {
 
 async fn run_recovery_cycle(
     inner: Arc<NetworkRecoveryInner>,
-    automatic_generation: Option<u64>,
-    automatic_cancel: Option<CancellationToken>,
 ) -> Result<(), NetworkRecoveryRequestError> {
     let mut last_error = RebuildNetworkSessionError::Retryable;
     for attempt in 0..=RETRY_DELAYS.len() {
@@ -274,30 +182,14 @@ async fn run_recovery_cycle(
                 }
                 state.phase = NetworkRecoveryPhase::RetryScheduled;
                 state.next_retry_at = Some(Instant::now() + delay);
-                if let (Some(generation), Some(cycle)) =
-                    (automatic_generation, state.automatic_cycle.as_mut())
-                {
-                    if cycle.generation == generation {
-                        cycle.rebuilding = false;
-                    }
-                }
             }
             let _ = inner
                 .events
                 .send(NetworkRecoveryEvent::RetryScheduled { delay });
-            if let Some(automatic_cancel) = &automatic_cancel {
-                tokio::select! {
-                    _ = inner.cancel.cancelled() => return Err(NetworkRecoveryRequestError::Stopped),
-                    _ = automatic_cancel.cancelled() => return cancel_automatic_cycle(&inner).await,
-                    _ = inner.manual_wake.notified() => {}
-                    _ = tokio::time::sleep(delay) => {}
-                }
-            } else {
-                tokio::select! {
-                    _ = inner.cancel.cancelled() => return Err(NetworkRecoveryRequestError::Stopped),
-                    _ = inner.manual_wake.notified() => {}
-                    _ = tokio::time::sleep(delay) => {}
-                }
+            tokio::select! {
+                _ = inner.cancel.cancelled() => return Err(NetworkRecoveryRequestError::Stopped),
+                _ = inner.manual_wake.notified() => {}
+                _ = tokio::time::sleep(delay) => {}
             }
         }
 
@@ -306,23 +198,9 @@ async fn run_recovery_cycle(
             if state.phase == NetworkRecoveryPhase::Stopped {
                 return Err(NetworkRecoveryRequestError::Stopped);
             }
-            if automatic_cancel
-                .as_ref()
-                .is_some_and(CancellationToken::is_cancelled)
-            {
-                drop(state);
-                return cancel_automatic_cycle(&inner).await;
-            }
             let resumed_from_retry = state.phase == NetworkRecoveryPhase::RetryScheduled;
             state.phase = NetworkRecoveryPhase::Recovering;
             state.next_retry_at = None;
-            if let (Some(generation), Some(cycle)) =
-                (automatic_generation, state.automatic_cycle.as_mut())
-            {
-                if cycle.generation == generation {
-                    cycle.rebuilding = true;
-                }
-            }
             resumed_from_retry
         };
         if resumed_from_retry {
@@ -367,30 +245,7 @@ async fn finish_cycle(
         state.phase = phase;
         state.next_retry_at = next_retry_at;
     }
-    state.automatic_cycle = None;
     state.in_flight = None;
-}
-
-async fn cancel_automatic_cycle(
-    inner: &NetworkRecoveryInner,
-) -> Result<(), NetworkRecoveryRequestError> {
-    let transitioned_to_idle = {
-        let mut state = inner.state.lock().await;
-        let transitioned_to_idle = if state.phase == NetworkRecoveryPhase::Stopped {
-            false
-        } else {
-            state.phase = NetworkRecoveryPhase::Idle;
-            state.next_retry_at = None;
-            true
-        };
-        state.automatic_cycle = None;
-        state.in_flight = None;
-        transitioned_to_idle
-    };
-    if transitioned_to_idle {
-        let _ = inner.events.send(NetworkRecoveryEvent::Succeeded);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -447,41 +302,6 @@ mod tests {
             self.release.notified().await;
             Ok(())
         }
-    }
-
-    #[tokio::test]
-    async fn ordinary_or_expired_peer_failures_do_not_rebuild() {
-        let rebuilder = Arc::new(RecordingRebuilder::new([]));
-        let recovery = NetworkRecoveryFacade::new(rebuilder.clone());
-
-        recovery
-            .observe_previously_online_peer_path_exhausted(1)
-            .await;
-        recovery.observe_local_network_recovered(2).await;
-        recovery
-            .observe_previously_online_peer_path_exhausted(1)
-            .await;
-        tokio::task::yield_now().await;
-
-        assert_eq!(rebuilder.calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn confirmed_path_failure_rebuilds_once_per_network_change() {
-        let rebuilder = Arc::new(RecordingRebuilder::new([Ok(())]));
-        let recovery = NetworkRecoveryFacade::new(rebuilder.clone());
-
-        recovery.observe_local_network_recovered(4).await;
-        recovery
-            .observe_previously_online_peer_path_exhausted(4)
-            .await;
-        recovery
-            .observe_previously_online_peer_path_exhausted(4)
-            .await;
-        tokio::task::yield_now().await;
-        tokio::task::yield_now().await;
-
-        assert_eq!(rebuilder.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -547,10 +367,10 @@ mod tests {
             Ok(()),
         ]));
         let recovery = NetworkRecoveryFacade::new(rebuilder.clone());
-        recovery.observe_local_network_recovered(5).await;
-        recovery
-            .observe_previously_online_peer_path_exhausted(5)
-            .await;
+        let task = tokio::spawn({
+            let recovery = recovery.clone();
+            async move { recovery.request_recovery().await }
+        });
         tokio::task::yield_now().await;
         assert_eq!(
             recovery.status().await.phase,
@@ -558,45 +378,8 @@ mod tests {
         );
 
         assert_eq!(recovery.request_recovery().await, Ok(()));
+        assert_eq!(task.await.unwrap(), Ok(()));
         assert_eq!(rebuilder.calls.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn fresh_peer_dial_cancels_a_scheduled_automatic_retry() {
-        let rebuilder = Arc::new(RecordingRebuilder::new([
-            Err(RebuildNetworkSessionError::Retryable),
-            Ok(()),
-        ]));
-        let recovery = NetworkRecoveryFacade::new(rebuilder.clone());
-        let mut events = recovery.subscribe();
-
-        recovery.observe_local_network_recovered(6).await;
-        recovery
-            .observe_previously_online_peer_path_exhausted(6)
-            .await;
-        tokio::task::yield_now().await;
-        assert_eq!(
-            recovery.status().await.phase,
-            NetworkRecoveryPhase::RetryScheduled
-        );
-        assert_eq!(events.recv().await, Ok(NetworkRecoveryEvent::Started));
-        assert_eq!(
-            events.recv().await,
-            Ok(NetworkRecoveryEvent::RetryScheduled {
-                delay: Duration::from_secs(1)
-            })
-        );
-
-        recovery.observe_fresh_peer_dial_succeeded(6).await;
-        assert_eq!(
-            tokio::time::timeout(Duration::from_millis(10), events.recv()).await,
-            Ok(Ok(NetworkRecoveryEvent::Succeeded))
-        );
-        tokio::time::advance(Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
-
-        assert_eq!(rebuilder.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(recovery.status().await.phase, NetworkRecoveryPhase::Idle);
     }
 
     #[tokio::test]

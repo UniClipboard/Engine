@@ -60,15 +60,21 @@ pub struct HostDirectories {
     cache: PathBuf,
     temporary: PathBuf,
     logs: PathBuf,
+    upgrade_backups: PathBuf,
 }
 
 impl HostDirectories {
     pub fn new(private_data: PathBuf, cache: PathBuf, temporary: PathBuf, logs: PathBuf) -> Self {
+        // 默认使用同级独立目录；便携安装等特殊布局必须由宿主覆盖为安装目录外的位置。
+        let mut backup_name = private_data.file_name().unwrap_or_default().to_os_string();
+        backup_name.push("-upgrade-backups");
+        let upgrade_backups = private_data.with_file_name(backup_name);
         Self {
             private_data,
             cache,
             temporary,
             logs,
+            upgrade_backups,
         }
     }
 
@@ -87,6 +93,16 @@ impl HostDirectories {
     pub fn logs(&self) -> &Path {
         &self.logs
     }
+
+    /// 必须位于当前用户私有区域，且不在安装、活动资料、缓存或临时清理范围内。
+    pub fn with_upgrade_backups(mut self, directory: PathBuf) -> Self {
+        self.upgrade_backups = directory;
+        self
+    }
+
+    pub fn upgrade_backups(&self) -> &Path {
+        &self.upgrade_backups
+    }
 }
 
 impl fmt::Debug for HostDirectories {
@@ -97,6 +113,7 @@ impl fmt::Debug for HostDirectories {
             .field("cache", &"[REDACTED]")
             .field("temporary", &"[REDACTED]")
             .field("logs", &"[REDACTED]")
+            .field("upgrade_backups", &"[REDACTED]")
             .finish()
     }
 }

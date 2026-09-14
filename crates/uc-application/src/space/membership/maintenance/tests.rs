@@ -353,7 +353,7 @@ async fn wait_for_call_count(calls: &Arc<Mutex<Vec<&'static str>>>, expected: us
 }
 
 #[tokio::test]
-async fn runtime_pause_resume_presence_and_shutdown_share_one_lifecycle() {
+async fn runtime_pause_resume_peer_reachability_and_shutdown_share_one_lifecycle() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let step = |name| {
         Arc::new(RecordingStep {
@@ -373,10 +373,10 @@ async fn runtime_pause_resume_presence_and_shutdown_share_one_lifecycle() {
             cleanup: step("cleanup"),
         },
     ));
-    let (presence_tx, presence_rx) = tokio::sync::broadcast::channel(8);
+    let (peer_reachability_tx, peer_reachability_rx) = tokio::sync::broadcast::channel(8);
     let runtime = SpaceMembershipMaintenanceRuntime::start(
         maintain,
-        presence_rx,
+        peer_reachability_rx,
         std::time::Duration::from_secs(3600),
         Arc::new(NoopNetworkActivity),
     );
@@ -384,7 +384,7 @@ async fn runtime_pause_resume_presence_and_shutdown_share_one_lifecycle() {
     wait_for_call_count(&calls, 7).await;
 
     activity.pause().await.unwrap();
-    let _ = presence_tx.send(uc_core::ports::PeerReachabilityChanged {
+    let _ = peer_reachability_tx.send(uc_core::ports::PeerReachabilityChanged {
         device_id: uc_core::ids::DeviceId::new("device-b"),
         state: uc_core::ports::ReachabilityState::Online,
         at: chrono::Utc::now(),
@@ -394,7 +394,7 @@ async fn runtime_pause_resume_presence_and_shutdown_share_one_lifecycle() {
 
     activity.resume().await.unwrap();
     wait_for_call_count(&calls, 14).await;
-    let _ = presence_tx.send(uc_core::ports::PeerReachabilityChanged {
+    let _ = peer_reachability_tx.send(uc_core::ports::PeerReachabilityChanged {
         device_id: uc_core::ids::DeviceId::new("device-b"),
         state: uc_core::ports::ReachabilityState::Online,
         at: chrono::Utc::now(),
@@ -434,10 +434,10 @@ async fn pause_cancels_network_work_and_waits_for_the_current_commit_boundary() 
         pauses: AtomicUsize::new(0),
         release,
     });
-    let (_presence_tx, presence_rx) = tokio::sync::broadcast::channel(4);
+    let (_peer_reachability_tx, peer_reachability_rx) = tokio::sync::broadcast::channel(4);
     let runtime = SpaceMembershipMaintenanceRuntime::start(
         maintain,
-        presence_rx,
+        peer_reachability_rx,
         std::time::Duration::from_secs(3600),
         network.clone(),
     );
@@ -490,10 +490,10 @@ async fn shutdown_uses_one_five_second_budget_without_aborting_the_active_round(
             cleanup: step("cleanup"),
         },
     ));
-    let (_presence_tx, presence_rx) = tokio::sync::broadcast::channel(4);
+    let (_peer_reachability_tx, peer_reachability_rx) = tokio::sync::broadcast::channel(4);
     let runtime = SpaceMembershipMaintenanceRuntime::start(
         maintain,
-        presence_rx,
+        peer_reachability_rx,
         std::time::Duration::from_secs(3600),
         Arc::new(NoopNetworkActivity),
     );
@@ -537,16 +537,16 @@ async fn online_events_for_different_peers_are_not_overwritten_during_a_round() 
             cleanup: step("cleanup"),
         },
     ));
-    let (presence_tx, presence_rx) = tokio::sync::broadcast::channel(4);
+    let (peer_reachability_tx, peer_reachability_rx) = tokio::sync::broadcast::channel(4);
     let runtime = SpaceMembershipMaintenanceRuntime::start(
         maintain,
-        presence_rx,
+        peer_reachability_rx,
         std::time::Duration::from_secs(3600),
         Arc::new(NoopNetworkActivity),
     );
     started.notified().await;
     for device in ["device-b", "device-c"] {
-        let _ = presence_tx.send(uc_core::ports::PeerReachabilityChanged {
+        let _ = peer_reachability_tx.send(uc_core::ports::PeerReachabilityChanged {
             device_id: uc_core::ids::DeviceId::new(device),
             state: uc_core::ports::ReachabilityState::Online,
             at: chrono::Utc::now(),

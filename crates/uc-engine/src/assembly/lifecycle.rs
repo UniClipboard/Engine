@@ -27,7 +27,7 @@ use uc_application::facade::ApplicationAssembly;
 /// 也只跑一次。本结构体的物理意义是 "async (tokio) 装配链路上需要 iroh
 /// bind 与 SyncEngineAssembly 的那一段"。
 pub struct DaemonLifecycle {
-    /// 完整 iroh assembly。持有 iroh node、pairing/presence/clipboard
+    /// 完整 iroh assembly。持有 iroh node、pairing/peer_reachability/clipboard
     /// handler、auto-spawned ingest loop。daemon shutdown 调
     /// `sync_engine_assembly.shutdown()` 干净拆 router + abort ingest。
     pub sync_engine_assembly: SyncEngineAssembly,
@@ -42,7 +42,7 @@ pub struct DaemonLifecycle {
 /// runtime 内执行)。
 ///
 /// `startup::reconcile::reconcile_*` 在每次 daemon 启动时跑(治理性、失败只 log),
-/// 与 `build_sync_engine_assembly` 之前执行,确保 dispatch / presence /
+/// 与 `build_sync_engine_assembly` 之前执行,确保 dispatch / peer_reachability /
 /// 重新配对路径一上线就是干净状态。
 ///
 /// caller 必须在 tokio runtime 上下文中调用 —— `build_sync_engine_assembly`

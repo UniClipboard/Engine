@@ -17,9 +17,9 @@
 //! * `Unknown` —— 还在握手 / 路径切换中（`remote_info` 已存在但没有
 //!   `Active` 路径，仅有 discovery / probe 候选）
 //!
-//! ## 与 `PresencePort` 的边界
+//! ## 与 `PeerReachabilityPort` 的边界
 //!
-//! `PresencePort` 回答 "对端在不在线"（三态 Online/Offline/Unknown），
+//! `PeerReachabilityPort` 回答 "对端在不在线"（三态 Online/Offline/Unknown），
 //! `ConnectionChannelPort` 回答 "对端如果在线，走的哪条路"（四态）。
 //! 两者读同一个 iroh endpoint 的不同切面，应用层各取所需。
 //!

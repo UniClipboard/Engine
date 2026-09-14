@@ -21,14 +21,9 @@ use uc_observability_contract::diagnostics::connectivity::AddressInputSource;
 /// budget below [`crate::network::iroh::FAN_OUT_DEADLINE_HINT`]'s 5s
 /// dispatch-side hard cap.
 ///
-/// Pre-#886 phase 4 this was 10s, picked when staggered retry was the
-/// only thing guarding the dispatch path. Now that the dispatch
-/// adapter has single-flight (one staggered-retry batch per peer per
-/// concurrent storm) and presence has a 30s sticky window after
-/// `mark_offline`, repeated copies against a dead peer no longer
-/// accumulate 15s tails — the leader's first batch alone defines the
-/// per-storm dial cost, so trimming the constant is no longer
-/// trading off ergonomics against repeated-storm cost.
+/// Concurrent content operations share one staggered dial batch per target.
+/// A failed batch reports a communication failure; the peer connection owner
+/// independently checks existing connections and schedules subsequent recovery.
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Stagger offsets for the three concurrent attempts inside one
@@ -42,7 +37,7 @@ const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(3);
 /// burst against an offline peer at 1s intervals lands at ~4s spawn
 /// + 4.5s leader = 8.5s aggregate wall (down from the 19s phase-0
 /// baseline), with `iroh connect` attempts capped at 3 and
-/// `mark_offline` at 1.
+/// `report_communication_failure` at 1.
 const STAGGERED_DELAYS: [Duration; 3] = [
     Duration::from_millis(0),
     Duration::from_millis(500),
