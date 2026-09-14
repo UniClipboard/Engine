@@ -6,7 +6,10 @@ use uc_core::membership::{
 };
 
 use super::AuthenticatedAdmissionReply;
-use super::{AdmissionRecoveryTrigger, LoadedPendingAdmission, LoadedSponsorConfirmation};
+use super::{
+    AdmissionRecoveryTrigger, LoadedPendingAdmission, LoadedSponsorAbandonment,
+    LoadedSponsorConfirmation,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PendingAdmissionRecoveryStateError {
@@ -50,6 +53,20 @@ pub trait PendingAdmissionRecoveryStatePort: Send + Sync {
         _token: super::AdmissionRecoveryCommitToken,
         _transition: SponsorAdmissionTransition,
     ) -> Result<LoadedSponsorConfirmation, PendingAdmissionRecoveryStateError> {
+        Err(PendingAdmissionRecoveryStateError::Unavailable)
+    }
+
+    async fn load_sponsor_abandonments(
+        &self,
+    ) -> Result<Vec<LoadedSponsorAbandonment>, PendingAdmissionRecoveryStateError> {
+        Ok(Vec::new())
+    }
+
+    async fn commit_sponsor_abandonment(
+        &self,
+        _token: super::AdmissionRecoveryCommitToken,
+        _transition: SponsorAdmissionTransition,
+    ) -> Result<LoadedSponsorAbandonment, PendingAdmissionRecoveryStateError> {
         Err(PendingAdmissionRecoveryStateError::Unavailable)
     }
 }

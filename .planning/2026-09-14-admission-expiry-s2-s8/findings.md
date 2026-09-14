@@ -30,3 +30,12 @@
 - The terminal record keeps the authenticated peer binding and continuation credential required by S5; the current Join pointer is released independently.
 - Old records without the new deadline keep their previous recovery behavior and do not gain an invented cleanup contract.
 - S2 already established disk format V2, so S4 cleanup fields require V3 rather than extending the postcard V2 structure in place.
+
+## S5 invariants
+- A bounded terminal Joiner fixes one V2 Abandonment request, route and continuation credential; retries cannot generate a different request.
+- Abandoned acknowledges durable receipt of the abandonment fact. It clears delivery work but never removes the local terminal fence.
+- Sponsor validates the exact attempt digest, authenticated peer and current-stage predecessor before saving its exact reply.
+- Sponsor Committed preserves the full original member binding. Sponsor Applied can preserve member/Add for lookup, but lookup must verify the current history and must never select by device id.
+- Sponsor persists cleanup before replying. Restart scans that responsibility and transfers exact removal to the existing S3 owner.
+- Missing original membership or loss of local membership cannot keep the user-visible pairing flow blocked forever; corrupt self-targets and invalid bindings still fail closed.
+- Record V1-V3 layouts stay unchanged. V4 is the first format that persists the terminal outbox or Sponsor abandonment cleanup.

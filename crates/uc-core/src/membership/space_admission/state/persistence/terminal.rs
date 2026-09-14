@@ -245,12 +245,17 @@ impl TryFrom<&SpaceAdmissionRejectedState> for PersistedRejectedV1 {
                 reason: encode_rejection_reason(state.reason),
                 last_received: PersistedMessageEvidenceV1::from(&state.last_received),
             },
-            SpaceAdmissionRejectedState::Sponsor(state) => Self::Sponsor {
-                peer_binding: PersistedPeerBindingV1::from(state.peer_binding),
-                continuation_credential: state.continuation_credential.as_bytes().to_vec(),
-                reason: encode_rejection_reason(state.reason),
-                saved_reply: PersistedSavedReplyV1::try_from(&state.saved_reply)?,
-            },
+            SpaceAdmissionRejectedState::Sponsor(state) => {
+                if state.abandonment_cleanup.is_some() {
+                    return Err(SpaceAdmissionPersistenceError::InvalidState);
+                }
+                Self::Sponsor {
+                    peer_binding: PersistedPeerBindingV1::from(state.peer_binding),
+                    continuation_credential: state.continuation_credential.as_bytes().to_vec(),
+                    reason: encode_rejection_reason(state.reason),
+                    saved_reply: PersistedSavedReplyV1::try_from(&state.saved_reply)?,
+                }
+            }
         })
     }
 }
@@ -303,6 +308,7 @@ impl PersistedRejectedV1 {
                         )?,
                         reason: decode_rejection_reason(reason)?,
                         saved_reply,
+                        abandonment_cleanup: None,
                     },
                 ))
             }

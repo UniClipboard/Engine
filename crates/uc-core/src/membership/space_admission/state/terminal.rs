@@ -27,6 +27,7 @@ pub struct AdmissionCleanupObligation {
     pub(super) member_binding: Option<AdmissionMemberBindingV2>,
     pub(super) peer_binding: AdmissionPeerBinding,
     pub(super) continuation_credential: AdmissionContinuationCredential,
+    pub(super) pending_exchange: Option<PendingAdmissionExchange>,
 }
 
 impl AdmissionCleanupObligation {
@@ -44,6 +45,10 @@ impl AdmissionCleanupObligation {
 
     pub const fn continuation_credential(&self) -> &AdmissionContinuationCredential {
         &self.continuation_credential
+    }
+
+    pub const fn pending_exchange(&self) -> Option<&PendingAdmissionExchange> {
+        self.pending_exchange.as_ref()
     }
 }
 
@@ -133,6 +138,18 @@ pub struct SpaceAdmissionSponsorRejected {
     pub(super) continuation_credential: AdmissionContinuationCredential,
     pub(super) reason: SpaceAdmissionRejectionReason,
     pub(super) saved_reply: SavedAdmissionReply,
+    pub(super) abandonment_cleanup: Option<SponsorAbandonmentCleanup>,
+}
+
+#[derive(PartialEq, Eq)]
+pub enum SponsorAbandonmentCleanup {
+    NotRequired,
+    Known(AdmissionMemberBindingV2),
+    Unknown {
+        attempt_digest: [u8; 32],
+        member_instance_id: MemberInstanceId,
+        add_event_id: MembershipEventId,
+    },
 }
 
 #[derive(PartialEq, Eq)]

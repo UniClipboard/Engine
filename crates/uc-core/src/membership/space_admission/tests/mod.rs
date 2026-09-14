@@ -11,8 +11,9 @@ use crate::membership::{
 use crate::security::IdentityFingerprint;
 
 use super::{
-    AdmissionAppliedV1, AdmissionArtifactError, AdmissionAttemptTimeline, AdmissionBaseSnapshot,
-    AdmissionCandidateV1, AdmissionChannelPeerId, AdmissionCommitKnowledge, AdmissionCommitV1,
+    AdmissionAbandonedV2, AdmissionAppliedV1, AdmissionArtifactError, AdmissionAttemptTimeline,
+    AdmissionBaseSnapshot, AdmissionCandidateV1, AdmissionChannelPeerId,
+    AdmissionCleanupObligation, AdmissionCommitKnowledge, AdmissionCommitV1,
     AdmissionCompleteAckV1, AdmissionCompleteV1, AdmissionContinuationCredential,
     AdmissionContinuationRoute, AdmissionEffect, AdmissionEncryptedPasswordEquivalent,
     AdmissionErrorCategory, AdmissionEvidenceRelation, AdmissionExchangeBlockReason,

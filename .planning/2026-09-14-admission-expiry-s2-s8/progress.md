@@ -28,4 +28,11 @@
 - Legacy records can still continue authentication and retain their original no-deadline behavior.
 - Strict review moved the new cleanup fields into record format V3; the already committed V2 layout remains readable and has a regression test.
 - Core admission, Application admission and real SQLite admission-state tests pass for S4.
-- Current work: complete S4 review and gates, create its commit, then begin S5.
+- S4 was committed as `746b092d`.
+- S5 adds a fixed Abandonment/Abandoned exchange to terminal Joiner records and resumes it through the existing authenticated admission transport.
+- Sponsor validates the exact peer, attempt and current-stage predecessor, then persists the terminal fence, exact reply and known or lookup cleanup target before responding.
+- Recovery transfers cleanup to the S3 exact member-removal owner; completion survives restart and never resolves a target by device id.
+- Duplicate delivery replays the exact reply, late older-stage abandonment is rejected, and acknowledgement ends only delivery while retaining the local terminal fence.
+- Core 287 tests, Application 821 tests, real SQLite admission 27 tests and Iroh admission network 17 tests pass; one pre-existing Application test remains ignored.
+- Full workspace check, formatting, Rust rules, architecture/privacy gates and diff checks pass. The existing HarmonyOS unused-import warning remains unrelated.
+- Final review tightened V4 restart validation, rejected stale-stage abandonment, and ensured Applied cleanup never trusts a caller-provided Space binding.

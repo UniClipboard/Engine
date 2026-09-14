@@ -65,6 +65,14 @@ fn every_message_kind_accepts_only_its_protocol_sender() {
             SpaceAdmissionMessageKind::Rejected,
             &[AdmissionRole::Sponsor, AdmissionRole::CompletionHelper][..],
         ),
+        (
+            SpaceAdmissionMessageKind::Abandonment,
+            &[AdmissionRole::Joiner][..],
+        ),
+        (
+            SpaceAdmissionMessageKind::Abandoned,
+            &[AdmissionRole::Sponsor, AdmissionRole::CompletionHelper][..],
+        ),
     ];
 
     for (kind, expected_senders) in cases {
@@ -86,6 +94,7 @@ fn helper_can_send_only_completion_messages() {
     assert!(SpaceAdmissionMessageKind::Complete.accepts_sender(AdmissionRole::CompletionHelper));
     assert!(SpaceAdmissionMessageKind::Settled.accepts_sender(AdmissionRole::CompletionHelper));
     assert!(SpaceAdmissionMessageKind::Rejected.accepts_sender(AdmissionRole::CompletionHelper));
+    assert!(SpaceAdmissionMessageKind::Abandoned.accepts_sender(AdmissionRole::CompletionHelper));
     assert!(!SpaceAdmissionMessageKind::Commit.accepts_sender(AdmissionRole::CompletionHelper));
     assert!(!SpaceAdmissionMessageKind::Candidate.accepts_sender(AdmissionRole::CompletionHelper));
 }

@@ -368,8 +368,223 @@ impl SpaceAdmissionAggregate {
                 continuation_credential: state.continuation_credential,
                 reason,
                 saved_reply,
+                abandonment_cleanup: None,
             }),
         ));
         Ok(AdmissionTransition::new(self, &[]))
     }
+
+    pub(crate) fn accept_abandonment(
+        mut self,
+        abandonment: SpaceAdmissionEnvelopeV1,
+        canonical_digest: [u8; 32],
+        abandoned_reply: SpaceAdmissionEnvelopeV1,
+    ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        let record_version = self
+            .record_version
+            .checked_add(1)
+            .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
+        let attempt_digest = self
+            .attempt_digest
+            .ok_or(SpaceAdmissionAggregateError::InvalidAbandonmentRequest)?;
+        if abandonment.header().admission_id() != self.admission_id
+            || abandonment.header().protocol_version() != SpaceAdmissionProtocolVersion::V2
+            || abandonment.kind() != SpaceAdmissionMessageKind::Abandonment
+            || abandonment.header().sender_role() != AdmissionRole::Joiner
+            || abandonment.header().sender_sequence() != 4
+        {
+            return Err(SpaceAdmissionAggregateError::InvalidAbandonmentRequest);
+        }
+        let evidence = abandonment
+            .evidence(canonical_digest)
+            .ok_or(SpaceAdmissionAggregateError::InvalidAbandonmentRequest)?;
+        let SpaceAdmissionBodyV1::Abandonment(body) = abandonment.body() else {
+            return Err(SpaceAdmissionAggregateError::InvalidAbandonmentRequest);
+        };
+        if body.attempt_digest() != &attempt_digest {
+            return Err(SpaceAdmissionAggregateError::InvalidAbandonmentRequest);
+        }
+        let (peer_binding, continuation_credential, cleanup) = match self.state {
+            SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Candidate(state)) => {
+                if body.member_binding().is_some()
+                    || abandonment.header().predecessor_message_id()
+                        != Some(
+                            state
+                                .saved_reply
+                                .exact_reply_envelope()
+                                .header()
+                                .message_id(),
+                        )
+                {
+                    return Err(SpaceAdmissionAggregateError::InvalidAbandonmentRequest);
+                }
+                (
+                    state.peer_binding,
+                    state.continuation_credential,
+                    SponsorAbandonmentCleanup::NotRequired,
+                )
+            }
+            SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Committed(state)) => {
+                if abandonment.header().predecessor_message_id()
+                    != Some(
+                        state
+                            .saved_reply
+                            .exact_reply_envelope()
+                            .header()
+                            .message_id(),
+                    )
+                {
+                    return Err(SpaceAdmissionAggregateError::InvalidAbandonmentRequest);
+                }
+                let binding = sponsor_commit_member_binding(attempt_digest, &state.saved_reply)?;
+                if body
+                    .member_binding()
+                    .is_some_and(|claimed| claimed != &binding)
+                {
+                    return Err(SpaceAdmissionAggregateError::InvalidAbandonmentRequest);
+                }
+                (
+                    state.peer_binding,
+                    state.continuation_credential,
+                    SponsorAbandonmentCleanup::Known(binding),
+                )
+            }
+            SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Applied(state)) => {
+                if abandonment.header().predecessor_message_id()
+                    != Some(
+                        state
+                            .saved_reply
+                            .exact_reply_envelope()
+                            .header()
+                            .message_id(),
+                    )
+                {
+                    return Err(SpaceAdmissionAggregateError::InvalidAbandonmentRequest);
+                }
+                let confirmation = state
+                    .confirmation
+                    .ok_or(SpaceAdmissionAggregateError::InvalidAbandonmentRequest)?;
+                let cleanup = sponsor_applied_abandonment_cleanup(
+                    attempt_digest,
+                    confirmation,
+                    body.member_binding(),
+                )?;
+                (state.peer_binding, state.continuation_credential, cleanup)
+            }
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Completed(state)) => {
+                if abandonment.header().predecessor_message_id()
+                    != Some(
+                        state
+                            .saved_reply
+                            .exact_reply_envelope()
+                            .header()
+                            .message_id(),
+                    )
+                {
+                    return Err(SpaceAdmissionAggregateError::InvalidAbandonmentRequest);
+                }
+                let confirmation = state
+                    .confirmation
+                    .ok_or(SpaceAdmissionAggregateError::InvalidAbandonmentRequest)?;
+                let cleanup = sponsor_applied_abandonment_cleanup(
+                    attempt_digest,
+                    confirmation,
+                    body.member_binding(),
+                )?;
+                (state.peer_binding, state.continuation_credential, cleanup)
+            }
+            _ => return Err(SpaceAdmissionAggregateError::InvalidAbandonmentRequest),
+        };
+        let SpaceAdmissionBodyV1::Abandoned(reply) = abandoned_reply.body() else {
+            return Err(SpaceAdmissionAggregateError::InvalidAbandonmentRequest);
+        };
+        if abandoned_reply.header().admission_id() != self.admission_id
+            || abandoned_reply.header().protocol_version() != SpaceAdmissionProtocolVersion::V2
+            || abandoned_reply.header().sender_role() != AdmissionRole::Sponsor
+            || abandoned_reply.kind() != SpaceAdmissionMessageKind::Abandoned
+            || abandoned_reply.header().sender_sequence() != 4
+            || abandoned_reply.header().predecessor_message_id() != Some(evidence.message_id())
+            || reply.abandonment_digest() != &canonical_digest
+        {
+            return Err(SpaceAdmissionAggregateError::InvalidAbandonmentRequest);
+        }
+        let saved_reply = SavedAdmissionReply::new(self.admission_id, evidence, abandoned_reply)
+            .map_err(|_| SpaceAdmissionAggregateError::InvalidAbandonmentRequest)?;
+        self.format_version = SPACE_ADMISSION_RECORD_FORMAT_V4;
+        self.record_version = record_version;
+        self.state = SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+            SpaceAdmissionRejectedState::Sponsor(SpaceAdmissionSponsorRejected {
+                peer_binding,
+                continuation_credential,
+                reason: SpaceAdmissionRejectionReason::Cancelled,
+                saved_reply,
+                abandonment_cleanup: Some(cleanup),
+            }),
+        ));
+        Ok(AdmissionTransition::new(self, &[]))
+    }
+
+    pub(crate) fn complete_abandonment_cleanup(
+        mut self,
+    ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        let SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+            SpaceAdmissionRejectedState::Sponsor(state),
+        )) = &mut self.state
+        else {
+            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        };
+        let cleanup = state
+            .abandonment_cleanup
+            .as_mut()
+            .ok_or(SpaceAdmissionAggregateError::InvalidTransition)?;
+        if matches!(cleanup, SponsorAbandonmentCleanup::NotRequired) {
+            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        }
+        self.record_version = self
+            .record_version
+            .checked_add(1)
+            .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
+        *cleanup = SponsorAbandonmentCleanup::NotRequired;
+        Ok(AdmissionTransition::new(self, &[]))
+    }
+}
+
+fn sponsor_commit_member_binding(
+    attempt_digest: [u8; 32],
+    saved_reply: &SavedAdmissionReply,
+) -> Result<AdmissionMemberBindingV2, SpaceAdmissionAggregateError> {
+    let SpaceAdmissionBodyV1::Commit(commit) = saved_reply.exact_reply_envelope().body() else {
+        return Err(SpaceAdmissionAggregateError::InvalidAbandonmentRequest);
+    };
+    let event = commit.exact_candidate().candidate_event();
+    let MembershipOperationV2::AddDevice { admission } = &event.operation else {
+        return Err(SpaceAdmissionAggregateError::InvalidAbandonmentRequest);
+    };
+    AdmissionMemberBindingV2::new(
+        attempt_digest,
+        SpaceId::from_str(&event.lineage_id),
+        admission.facts.member_instance,
+        event.event_id(),
+    )
+    .map_err(|_| SpaceAdmissionAggregateError::InvalidAbandonmentRequest)
+}
+
+fn sponsor_applied_abandonment_cleanup(
+    attempt_digest: [u8; 32],
+    confirmation: SponsorPairingConfirmationSummary,
+    claimed: Option<&AdmissionMemberBindingV2>,
+) -> Result<SponsorAbandonmentCleanup, SpaceAdmissionAggregateError> {
+    if let Some(binding) = claimed {
+        if binding.attempt_digest() != &attempt_digest
+            || binding.member_instance_id() != confirmation.member_instance_id
+            || binding.add_event_id() != confirmation.add_event_id
+        {
+            return Err(SpaceAdmissionAggregateError::InvalidAbandonmentRequest);
+        }
+    }
+    Ok(SponsorAbandonmentCleanup::Unknown {
+        attempt_digest,
+        member_instance_id: confirmation.member_instance_id,
+        add_event_id: confirmation.add_event_id,
+    })
 }

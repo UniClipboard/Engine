@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use sha2::{Digest, Sha256};
 use tracing::Instrument;
 use uc_application::deps::{
     AuthenticatedSpaceAdmissionMessage, LoadMembershipLedgerPort, LoadedMembershipLedger,
@@ -130,7 +131,7 @@ async fn accepted_sponsor_record_survives_restart_and_loads_existing() {
     };
     let (peer_binding, envelope, digest, continuation, attempt_contract) = message.into_parts();
     let evidence = envelope.evidence(digest).unwrap();
-    let transition = SponsorAdmission::accept_join_request_with_timeline(
+    let transition = SponsorAdmission::accept_join_request_with_contract(
         envelope.header().admission_id(),
         invitation_claim,
         envelope,
@@ -138,7 +139,7 @@ async fn accepted_sponsor_record_survives_restart_and_loads_existing() {
         base_snapshot,
         peer_binding,
         continuation.unwrap(),
-        attempt_contract.unwrap().timeline(),
+        attempt_contract.unwrap(),
     )
     .unwrap();
 
@@ -228,6 +229,171 @@ async fn sponsor_payload_does_not_expose_invitation_or_membership_history() {
 
     assert!(!encrypted.windows(32).any(|window| window == [0xeb; 32]));
     assert!(!encrypted.windows(64).any(|window| window == [0x44; 64]));
+}
+
+#[tokio::test]
+async fn sponsor_abandonment_cleanup_survives_restart_and_commits_once() {
+    let fixture = Fixture::new();
+    let store = sponsor_store(&fixture);
+    let message = authenticated_join_request(0xec, 0xed);
+    let loaded = SponsorAdmissionStatePort::load(&store, &message)
+        .await
+        .expect("fresh sponsor state");
+    let (token, mutation) = accepted_mutation(message, loaded);
+    let accepted = SponsorAdmissionStatePort::commit(&store, token, mutation)
+        .await
+        .expect("accepted state commits");
+    let (accepted, token) = accepted.into_parts();
+    let join_request = authenticated_join_request(0xec, 0xed);
+    let (_, join_request, _, _, contract) = join_request.into_parts();
+    let attempt_digest = contract.expect("attempt contract").digest();
+    let candidate_reply = SpaceAdmissionEnvelopeV1::reply_to(
+        &join_request,
+        AdmissionRole::Sponsor,
+        0,
+        uc_core::membership::AdmissionMessageId::from_bytes([0xee; 32])
+            .expect("candidate message id"),
+        SpaceAdmissionBodyV1::Candidate(super::activation::candidate_body_fixture()),
+    )
+    .expect("candidate reply");
+    let candidate = accepted
+        .fix_candidate(
+            candidate_reply,
+            uc_core::membership::AdmissionStagedSecurityState::from_bytes(vec![0xef; 64])
+                .expect("staged security"),
+        )
+        .expect("candidate transition");
+    let candidate =
+        SponsorAdmissionStatePort::commit(&store, token, SponsorAdmissionMutation::new(candidate))
+            .await
+            .expect("candidate state commits");
+    let (candidate, token) = candidate.into_parts();
+    let predecessor = candidate
+        .current_exact_reply()
+        .expect("candidate exact reply");
+    let candidate_body = super::activation::candidate_body_fixture();
+    let prepared = SpaceAdmissionEnvelopeV1::reply_to(
+        predecessor,
+        AdmissionRole::Joiner,
+        1,
+        uc_core::membership::AdmissionMessageId::from_bytes([0xf0; 32])
+            .expect("prepared message id"),
+        SpaceAdmissionBodyV1::Prepared(uc_core::membership::AdmissionPreparedV1::new(
+            uc_core::membership::PreparedAdmissionProofV1::new(
+                *predecessor.header().admission_id().as_bytes(),
+                candidate_body.candidate_event().lineage_id.clone(),
+                uc_core::membership::BaseMembershipHistoryPosition {
+                    event_id: None,
+                    depth: 0,
+                    history_digest: [0xf1; 32],
+                },
+                candidate_body.candidate_event().event_id(),
+                candidate_body.candidate_event().resulting_members_digest,
+                candidate_body.security_commitment().security_commitment_id,
+                uc_core::membership::MemberInstanceId::from_bytes([0xf2; 32]),
+                uc_core::membership::MembershipCredential::new(1, vec![0xf3; 32]).credential_id,
+                vec![0xf4; 64],
+            ),
+        )),
+    )
+    .expect("prepared request");
+    let committed_history =
+        uc_core::membership::AdmissionSignedMembershipHistory::from_bytes(vec![0xf5; 128])
+            .expect("committed history");
+    let commit_reply = SpaceAdmissionEnvelopeV1::reply_to(
+        &prepared,
+        AdmissionRole::Sponsor,
+        1,
+        uc_core::membership::AdmissionMessageId::from_bytes([0xf6; 32]).expect("commit message id"),
+        SpaceAdmissionBodyV1::Commit(uc_core::membership::AdmissionCommitV1::new(
+            super::activation::candidate_body_fixture(),
+            uc_core::membership::AdmissionSignedMembershipHistory::from_bytes(vec![0xf5; 128])
+                .expect("commit target history"),
+            uc_core::membership::AdmissionSealedRecoveryMaterial::from_bytes(vec![0xf7; 128])
+                .expect("sealed recovery material"),
+        )),
+    )
+    .expect("commit reply");
+    let committed = candidate
+        .commit_prepared(
+            prepared,
+            [0xf8; 32],
+            committed_history,
+            uc_core::membership::AdmissionSealedSecurityState::from_bytes(vec![0xf9; 128])
+                .expect("sealed security"),
+            commit_reply,
+        )
+        .expect("commit transition");
+    let committed =
+        SponsorAdmissionStatePort::commit(&store, token, SponsorAdmissionMutation::new(committed))
+            .await
+            .expect("committed state saves");
+    let (committed, token) = committed.into_parts();
+    let predecessor = committed.current_exact_reply().expect("commit exact reply");
+    let abandonment = SpaceAdmissionEnvelopeV1::reply_to(
+        predecessor,
+        AdmissionRole::Joiner,
+        4,
+        uc_core::membership::AdmissionMessageId::from_bytes([0xfa; 32])
+            .expect("abandonment message id"),
+        SpaceAdmissionBodyV1::Abandonment(
+            uc_core::membership::AdmissionAbandonmentV2::new(
+                attempt_digest,
+                None,
+                uc_core::membership::AdmissionAbandonmentReasonV2::Cancelled,
+            )
+            .expect("abandonment body"),
+        ),
+    )
+    .expect("abandonment request");
+    let abandonment_digest: [u8; 32] = Sha256::digest(
+        abandonment
+            .encode_canonical_v1()
+            .expect("canonical abandonment request"),
+    )
+    .into();
+    let abandoned_reply = SpaceAdmissionEnvelopeV1::reply_to(
+        &abandonment,
+        AdmissionRole::Sponsor,
+        4,
+        uc_core::membership::AdmissionMessageId::from_bytes([0xfb; 32])
+            .expect("abandoned message id"),
+        SpaceAdmissionBodyV1::Abandoned(
+            uc_core::membership::AdmissionAbandonedV2::new(abandonment_digest)
+                .expect("abandonment digest"),
+        ),
+    )
+    .expect("abandoned reply");
+    let abandoned = committed
+        .accept_abandonment(abandonment, abandonment_digest, abandoned_reply)
+        .expect("abandonment transition");
+    SponsorAdmissionStatePort::commit(&store, token, SponsorAdmissionMutation::new(abandoned))
+        .await
+        .expect("abandonment state commits");
+
+    let reopened = sponsor_store(&fixture);
+    let mut pending = PendingAdmissionRecoveryStatePort::load_sponsor_abandonments(&reopened)
+        .await
+        .expect("pending abandonment loads after restart");
+    assert_eq!(pending.len(), 1);
+    let (abandoned, recovery_token) = pending.pop().expect("one pending abandonment").into_parts();
+    let completed = abandoned
+        .complete_abandonment_cleanup()
+        .expect("cleanup completion transition");
+    PendingAdmissionRecoveryStatePort::commit_sponsor_abandonment(
+        &reopened,
+        recovery_token,
+        completed,
+    )
+    .await
+    .expect("cleanup completion commits");
+
+    assert!(
+        PendingAdmissionRecoveryStatePort::load_sponsor_abandonments(&reopened)
+            .await
+            .expect("completed abandonment reloads")
+            .is_empty()
+    );
 }
 
 fn sponsor_store(fixture: &Fixture) -> SqliteSpaceAdmissionState<Arc<DieselSqliteExecutor>> {
@@ -337,7 +503,7 @@ fn accepted_transition(
     };
     let (peer_binding, envelope, digest, continuation, attempt_contract) = message.into_parts();
     let evidence = envelope.evidence(digest).unwrap();
-    SponsorAdmission::accept_join_request_with_timeline(
+    SponsorAdmission::accept_join_request_with_contract(
         envelope.header().admission_id(),
         invitation_claim,
         envelope,
@@ -345,7 +511,7 @@ fn accepted_transition(
         base_snapshot,
         peer_binding,
         continuation.unwrap(),
-        attempt_contract.unwrap().timeline(),
+        attempt_contract.unwrap(),
     )
     .unwrap()
 }

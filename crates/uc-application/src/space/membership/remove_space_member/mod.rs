@@ -5,8 +5,8 @@ mod use_case;
 
 pub use error::RemoveSpaceMemberError;
 pub use model::{
-    AdmissionRevocationResult, AdmissionRevocationTarget, MembershipCommitReceipt,
-    RemoveSpaceMemberResult,
+    AdmissionAbandonmentRevocationTarget, AdmissionRevocationResult, AdmissionRevocationTarget,
+    MembershipCommitReceipt, RemoveSpaceMemberResult,
 };
 pub use revocation::AdmissionRevocationPort;
 pub(crate) use use_case::RemoveSpaceMemberUseCase;

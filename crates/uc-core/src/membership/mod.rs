@@ -110,6 +110,7 @@ pub use revocation::{
     SpaceSecurityMode,
 };
 pub use space_admission::{
+    AdmissionAbandonedV2, AdmissionAbandonmentReasonV2, AdmissionAbandonmentV2,
     AdmissionActivatedSecurityState, AdmissionAppliedV1, AdmissionArtifactError,
     AdmissionAttemptContractError, AdmissionAttemptContractV2, AdmissionAttemptTimeline,
     AdmissionBaseSnapshot, AdmissionCandidateError, AdmissionCandidateV1, AdmissionChannelPeerId,
@@ -136,13 +137,14 @@ pub use space_admission::{
     SpaceAdmissionAggregateError, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeHeaderV1,
     SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionMessageKind,
     SpaceAdmissionPersistenceError, SpaceAdmissionProtocolVersion, SpaceAdmissionRejectionReason,
-    SpaceAdmissionRoute, SpaceAdmissionTerminationReason, SponsorAdmission,
-    SponsorAdmissionTransition, SponsorCandidatePreparation, SponsorCommitPreparation,
-    SponsorCompletePreparation, SponsorPairingConfirmationStatus,
+    SpaceAdmissionRoute, SpaceAdmissionTerminationReason, SponsorAbandonmentCleanup,
+    SponsorAdmission, SponsorAdmissionTransition, SponsorCandidatePreparation,
+    SponsorCommitPreparation, SponsorCompletePreparation, SponsorPairingConfirmationStatus,
     SponsorPairingConfirmationSummary, SponsorSettlementPreparation,
     StartedJoinerInvitationResolution, UnreadableHistoryPolicy,
     SPACE_ADMISSION_ATTEMPT_DURATION_MS, SPACE_ADMISSION_RECORD_FORMAT_V1,
     SPACE_ADMISSION_RECORD_FORMAT_V2, SPACE_ADMISSION_RECORD_FORMAT_V3,
+    SPACE_ADMISSION_RECORD_FORMAT_V4,
 };
 pub use versioned_membership_history::{
     AdmissionActivationReceipt, AdmissionCompletionV1, AdmissionSecurityCommitmentV1,

@@ -1,4 +1,6 @@
-use uc_core::membership::{AdmissionMemberBindingV2, MembershipEventId, SpaceAdmissionId};
+use uc_core::membership::{
+    AdmissionMemberBindingV2, MemberInstanceId, MembershipEventId, SpaceAdmissionId,
+};
 
 use crate::space::membership::DeviceTrustStatus;
 
@@ -19,6 +21,46 @@ pub struct RemoveSpaceMemberResult {
 pub struct AdmissionRevocationTarget {
     admission_id: SpaceAdmissionId,
     member_binding: AdmissionMemberBindingV2,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AdmissionAbandonmentRevocationTarget {
+    admission_id: SpaceAdmissionId,
+    attempt_digest: [u8; 32],
+    member_instance_id: MemberInstanceId,
+    add_event_id: MembershipEventId,
+}
+
+impl AdmissionAbandonmentRevocationTarget {
+    pub const fn new(
+        admission_id: SpaceAdmissionId,
+        attempt_digest: [u8; 32],
+        member_instance_id: MemberInstanceId,
+        add_event_id: MembershipEventId,
+    ) -> Self {
+        Self {
+            admission_id,
+            attempt_digest,
+            member_instance_id,
+            add_event_id,
+        }
+    }
+
+    pub const fn admission_id(&self) -> SpaceAdmissionId {
+        self.admission_id
+    }
+
+    pub const fn attempt_digest(&self) -> [u8; 32] {
+        self.attempt_digest
+    }
+
+    pub const fn member_instance_id(&self) -> MemberInstanceId {
+        self.member_instance_id
+    }
+
+    pub const fn add_event_id(&self) -> MembershipEventId {
+        self.add_event_id
+    }
 }
 
 impl AdmissionRevocationTarget {

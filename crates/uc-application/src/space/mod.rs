@@ -54,8 +54,9 @@ pub use lifecycle::{
 };
 pub use lifecycle::{CurrentInvitation, QuerySetupStateError, SetupStateView};
 pub use membership::{
-    AdmissionRevocationPort, AdmissionRevocationResult, AdmissionRevocationTarget,
-    MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult,
+    AdmissionAbandonmentRevocationTarget, AdmissionRevocationPort, AdmissionRevocationResult,
+    AdmissionRevocationTarget, MembershipCommitReceipt, RemoveSpaceMemberError,
+    RemoveSpaceMemberResult,
 };
 pub use membership::{
     AdvanceMembershipBranchTransitionError, AdvanceMembershipBranchTransitionInput,
@@ -98,8 +99,8 @@ pub use admission::{
     JoinerCancellationMaterialError, JoinerCancellationMutation, JoinerCancellationStateError,
     JoinerStartMaterial, JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation,
     JoinerStartStateError, JoinerStartStatePort, LoadedCurrentJoin, LoadedJoinerActivation,
-    LoadedJoinerStartState, LoadedPendingAdmission, LoadedSponsorAdmission,
-    LoadedSponsorConfirmation, PendingAdmissionRecoveryStateError,
+    LoadedJoinerStartState, LoadedPendingAdmission, LoadedSponsorAbandonment,
+    LoadedSponsorAdmission, LoadedSponsorConfirmation, PendingAdmissionRecoveryStateError,
     PendingAdmissionRecoveryStatePort, PrepareJoinerActivationError, PrepareJoinerActivationPort,
     PrepareJoinerAppliedError, PrepareJoinerAppliedPort, PrepareJoinerCancellationPort,
     PrepareJoinerCandidateError, PrepareJoinerCandidatePort, PrepareJoinerInvitationError,

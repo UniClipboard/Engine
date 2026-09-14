@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 
-use super::{AdmissionRevocationResult, AdmissionRevocationTarget, RemoveSpaceMemberError};
+use super::{
+    AdmissionAbandonmentRevocationTarget, AdmissionRevocationResult, AdmissionRevocationTarget,
+    RemoveSpaceMemberError,
+};
 
 #[async_trait]
 pub trait AdmissionRevocationPort: Send + Sync {
@@ -8,4 +11,11 @@ pub trait AdmissionRevocationPort: Send + Sync {
         &self,
         target: AdmissionRevocationTarget,
     ) -> Result<AdmissionRevocationResult, RemoveSpaceMemberError>;
+
+    async fn revoke_abandoned_admission(
+        &self,
+        _target: AdmissionAbandonmentRevocationTarget,
+    ) -> Result<AdmissionRevocationResult, RemoveSpaceMemberError> {
+        Err(RemoveSpaceMemberError::Unavailable)
+    }
 }

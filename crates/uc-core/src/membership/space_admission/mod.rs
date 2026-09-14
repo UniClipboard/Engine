@@ -30,8 +30,9 @@ pub use exchange::{
 pub(crate) use exchange::{AdmissionExchangeBlockReason, SavedAdmissionReply};
 pub use id::{AdmissionChannelPeerId, AdmissionMessageId, InvitationId, JoinId, SpaceAdmissionId};
 pub use message::{
-    AdmissionAppliedV1, AdmissionCandidateError, AdmissionCandidateV1, AdmissionCommitV1,
-    AdmissionCompleteAckV1, AdmissionCompleteV1, AdmissionJoinRequestError, AdmissionJoinRequestV1,
+    AdmissionAbandonedV2, AdmissionAbandonmentReasonV2, AdmissionAbandonmentV2, AdmissionAppliedV1,
+    AdmissionCandidateError, AdmissionCandidateV1, AdmissionCommitV1, AdmissionCompleteAckV1,
+    AdmissionCompleteV1, AdmissionJoinRequestError, AdmissionJoinRequestV1,
     AdmissionMessageHeaderError, AdmissionPreparedV1, AdmissionProtocolMessageError, AdmissionRole,
     AdmissionSettledV1, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeHeaderV1,
     SpaceAdmissionEnvelopeV1, SpaceAdmissionMessageKind, SpaceAdmissionProtocolVersion,
@@ -43,12 +44,13 @@ pub use state::{
     JoinerActivationPreparation, JoinerAdmission, JoinerAdmissionTransition,
     JoinerAppliedPreparation, JoinerCandidatePreparation, JoinerCompletePreparation,
     JoinerInvitationResolution, SpaceAdmissionAggregate, SpaceAdmissionAggregateError,
-    SpaceAdmissionPersistenceError, SpaceAdmissionTerminationReason, SponsorAdmission,
-    SponsorAdmissionTransition, SponsorCandidatePreparation, SponsorCommitPreparation,
-    SponsorCompletePreparation, SponsorPairingConfirmationStatus,
+    SpaceAdmissionPersistenceError, SpaceAdmissionTerminationReason, SponsorAbandonmentCleanup,
+    SponsorAdmission, SponsorAdmissionTransition, SponsorCandidatePreparation,
+    SponsorCommitPreparation, SponsorCompletePreparation, SponsorPairingConfirmationStatus,
     SponsorPairingConfirmationSummary, SponsorSettlementPreparation,
     StartedJoinerInvitationResolution, SPACE_ADMISSION_RECORD_FORMAT_V1,
     SPACE_ADMISSION_RECORD_FORMAT_V2, SPACE_ADMISSION_RECORD_FORMAT_V3,
+    SPACE_ADMISSION_RECORD_FORMAT_V4,
 };
 #[cfg(test)]
 pub(crate) use state::{

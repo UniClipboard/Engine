@@ -1,11 +1,220 @@
-use uc_core::membership::{SpaceAdmissionMessageKind, SponsorPairingConfirmationStatus};
+use uc_core::membership::{
+    AdmissionRecordPersistence, SpaceAdmissionMessageKind, SponsorAbandonmentCleanup,
+    SponsorPairingConfirmationStatus,
+};
 
 use super::sponsor::HandleAuthenticatedSpaceAdmissionMessagePort;
 use super::test_support::{
-    authenticated_applied, authenticated_complete_ack, authenticated_join_request,
-    authenticated_join_request_started_at, authenticated_prepared,
+    authenticated_abandonment, authenticated_applied, authenticated_complete_ack,
+    authenticated_join_request, authenticated_join_request_started_at, authenticated_prepared,
     authenticated_prepared_with_peers, ProtocolEvent, SpaceAdmissionProtocolTestPair,
 };
+
+#[tokio::test]
+async fn candidate_abandonment_is_saved_before_reply_and_duplicate_replays_it() {
+    let pair = SpaceAdmissionProtocolTestPair::fresh().await;
+    let candidate = pair
+        .sponsor()
+        .handle(authenticated_join_request())
+        .await
+        .expect("JoinRequest should produce Candidate");
+    let first = authenticated_abandonment(
+        candidate
+            .envelope()
+            .expect("Candidate reply must be available"),
+        None,
+    );
+    let duplicate = authenticated_abandonment(
+        candidate
+            .envelope()
+            .expect("Candidate reply must be available"),
+        None,
+    );
+    pair.seed_sponsor(candidate.into_admission());
+
+    let abandoned = pair
+        .sponsor()
+        .handle(first)
+        .await
+        .expect("Abandonment should produce Abandoned");
+    let expected_message_id = abandoned
+        .envelope()
+        .expect("Abandoned reply must be available")
+        .header()
+        .message_id();
+    let admission = abandoned.into_admission();
+    assert!(matches!(
+        admission.abandonment_cleanup(),
+        Some(SponsorAbandonmentCleanup::NotRequired)
+    ));
+    pair.seed_sponsor(admission);
+
+    let replay = pair
+        .sponsor()
+        .handle(duplicate)
+        .await
+        .expect("duplicate Abandonment should replay Abandoned");
+    assert_eq!(
+        replay
+            .envelope()
+            .expect("replayed Abandoned must be available")
+            .header()
+            .message_id(),
+        expected_message_id
+    );
+    assert_eq!(
+        pair.events(),
+        &[
+            ProtocolEvent::SponsorSavedAccepted,
+            ProtocolEvent::SponsorSavedCandidate,
+            ProtocolEvent::SponsorSavedAbandoned,
+            ProtocolEvent::AdmissionRecoveryWoken,
+            ProtocolEvent::AdmissionRecoveryWoken,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn committed_abandonment_keeps_the_exact_member_revocation_target() {
+    let pair = SpaceAdmissionProtocolTestPair::fresh().await;
+    let candidate = pair
+        .sponsor()
+        .handle(authenticated_join_request())
+        .await
+        .expect("JoinRequest should produce Candidate");
+    let prepared = authenticated_prepared(
+        candidate
+            .envelope()
+            .expect("Candidate reply must be available"),
+    );
+    pair.seed_sponsor(candidate.into_admission());
+    let commit = pair
+        .sponsor()
+        .handle(prepared)
+        .await
+        .expect("Prepared should produce Commit");
+    let abandonment = authenticated_abandonment(
+        commit.envelope().expect("Commit reply must be available"),
+        None,
+    );
+    pair.seed_sponsor(commit.into_admission());
+
+    let abandoned = pair
+        .sponsor()
+        .handle(abandonment)
+        .await
+        .expect("Abandonment should produce Abandoned")
+        .into_admission();
+
+    assert!(matches!(
+        abandoned.abandonment_cleanup(),
+        Some(SponsorAbandonmentCleanup::Known(_))
+    ));
+    let persisted = abandoned
+        .encode_persisted()
+        .expect("abandoned state should persist");
+    let reopened = uc_core::membership::SponsorAdmission::decode_persisted(&persisted)
+        .expect("abandoned state should reopen");
+    assert!(matches!(
+        reopened.abandonment_cleanup(),
+        Some(SponsorAbandonmentCleanup::Known(_))
+    ));
+}
+
+#[tokio::test]
+async fn late_abandonment_for_an_older_stage_cannot_end_the_advanced_attempt() {
+    let pair = SpaceAdmissionProtocolTestPair::fresh().await;
+    let candidate = pair
+        .sponsor()
+        .handle(authenticated_join_request())
+        .await
+        .expect("JoinRequest should produce Candidate");
+    let late_abandonment = authenticated_abandonment(
+        candidate
+            .envelope()
+            .expect("Candidate reply must be available"),
+        None,
+    );
+    let prepared = authenticated_prepared(
+        candidate
+            .envelope()
+            .expect("Candidate reply must be available"),
+    );
+    pair.seed_sponsor(candidate.into_admission());
+    let commit = pair
+        .sponsor()
+        .handle(prepared)
+        .await
+        .expect("Prepared should produce Commit");
+    pair.seed_sponsor(commit.into_admission());
+
+    assert!(matches!(
+        pair.sponsor().handle(late_abandonment).await,
+        Err(super::HandleAuthenticatedSpaceAdmissionMessageError::Invalid { .. })
+    ));
+    assert!(!pair
+        .events()
+        .contains(&ProtocolEvent::SponsorSavedAbandoned));
+}
+
+#[tokio::test]
+async fn applied_abandonment_without_claimed_binding_keeps_a_lookup_target() {
+    let pair = SpaceAdmissionProtocolTestPair::fresh().await;
+    let candidate = pair
+        .sponsor()
+        .handle(authenticated_join_request())
+        .await
+        .expect("JoinRequest should produce Candidate");
+    let prepared = authenticated_prepared(
+        candidate
+            .envelope()
+            .expect("Candidate reply must be available"),
+    );
+    pair.seed_sponsor(candidate.into_admission());
+    let commit = pair
+        .sponsor()
+        .handle(prepared)
+        .await
+        .expect("Prepared should produce Commit");
+    let applied = authenticated_applied(commit.envelope().expect("Commit reply must be available"));
+    pair.seed_sponsor(commit.into_admission());
+    let complete = pair
+        .sponsor()
+        .handle(applied)
+        .await
+        .expect("Applied should produce Complete");
+    let abandonment = authenticated_abandonment(
+        complete
+            .envelope()
+            .expect("Complete reply must be available"),
+        None,
+    );
+    pair.seed_sponsor(complete.into_admission());
+
+    let abandoned = pair
+        .sponsor()
+        .handle(abandonment)
+        .await
+        .expect("Abandonment should produce Abandoned")
+        .into_admission();
+
+    assert!(matches!(
+        abandoned.abandonment_cleanup(),
+        Some(SponsorAbandonmentCleanup::Unknown { .. })
+    ));
+    pair.seed_sponsor(abandoned);
+
+    let recovery = pair.recover_sponsor().await;
+
+    assert_eq!(recovery.advanced_count, 1);
+    assert_eq!(recovery.deferred_count, 0);
+    assert_eq!(recovery.recovery_required_count, 0);
+    assert!(pair.sponsor_abandonment_cleanup_complete());
+    assert!(pair.events().ends_with(&[
+        ProtocolEvent::SponsorMemberRevoked,
+        ProtocolEvent::SponsorAbandonmentCleanupCompleted,
+    ]));
+}
 
 #[tokio::test]
 async fn prepared_is_committed_before_the_sponsor_returns_commit() {

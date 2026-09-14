@@ -3,6 +3,7 @@ use super::*;
 pub const SPACE_ADMISSION_RECORD_FORMAT_V1: u16 = 1;
 pub const SPACE_ADMISSION_RECORD_FORMAT_V2: u16 = 2;
 pub const SPACE_ADMISSION_RECORD_FORMAT_V3: u16 = 3;
+pub const SPACE_ADMISSION_RECORD_FORMAT_V4: u16 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionEffect {
@@ -115,6 +116,8 @@ pub enum SpaceAdmissionAggregateError {
     InvalidSettledMessage,
     #[error("the cancellation request is invalid")]
     InvalidCancellationRequest,
+    #[error("the abandonment request is invalid")]
+    InvalidAbandonmentRequest,
     #[error("the current admission cannot be superseded")]
     UnsafeSupersession,
     #[error("the current admission cannot be cancelled")]
@@ -159,6 +162,7 @@ impl SpaceAdmissionAggregateError {
             | Self::InvalidSettledReply
             | Self::InvalidSettledMessage
             | Self::InvalidCancellationRequest
+            | Self::InvalidAbandonmentRequest
             | Self::InvalidRejectedReply
             | Self::InvalidHelperChallenge
             | Self::InvalidHelperCompletion => AdmissionErrorCategory::Invalid,

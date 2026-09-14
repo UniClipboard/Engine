@@ -1,7 +1,9 @@
 use async_trait::async_trait;
+use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use uc_core::membership::{
+    AdmissionAbandonedV2, AdmissionAbandonmentReasonV2, AdmissionAbandonmentV2,
     AdmissionActivatedSecurityState, AdmissionActivationReceipt, AdmissionAppliedV1,
     AdmissionAttemptContractV2, AdmissionAttemptTimeline, AdmissionBaseSnapshot,
     AdmissionCandidateV1, AdmissionChangeFacts, AdmissionChannelPeerId, AdmissionCommitV1,
@@ -9,20 +11,20 @@ use uc_core::membership::{
     AdmissionContinuationCredential, AdmissionEncryptedPasswordEquivalent,
     AdmissionIdentitySignature, AdmissionInvitationClaim, AdmissionJoinRequestV1,
     AdmissionJoinerPrivateState, AdmissionJoinerStartContext, AdmissionKeyPackage,
-    AdmissionMessageId, AdmissionMlsCommit, AdmissionMlsWelcome, AdmissionPeerBinding,
-    AdmissionPreparedV1, AdmissionRecordPersistence, AdmissionRecoveryPublicKey,
-    AdmissionRetryState, AdmissionRole, AdmissionSealedRecoveryMaterial,
-    AdmissionSealedSecurityState, AdmissionSecurityCommitmentV1, AdmissionSettledV1,
-    AdmissionSignedMembershipHistory, AdmissionSourceSnapshot, AdmissionSpaceTransitionResult,
-    AdmissionStagedSecurityState, AdmissionStagedTarget, AdmissionStagedTargetInput,
-    BaseMembershipHistoryPosition, InvitationId, JoinId, JoinerAdmission,
-    JoinerAdmissionTransition, MemberInstanceId, MembershipAdmissionV2, MembershipCredential,
-    MembershipEventV2, MembershipOperationV2, PendingAdmissionExchange, PreparedAdmissionProofV1,
-    SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionMessageKind,
-    SpaceAdmissionProtocolVersion, SpaceAdmissionRoute, SponsorAdmission,
-    SponsorAdmissionTransition, SponsorPairingConfirmationStatus, UnreadableHistoryPolicy,
-    ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
-    MEMBERSHIP_EVENT_FORMAT_V2,
+    AdmissionMemberBindingV2, AdmissionMessageId, AdmissionMlsCommit, AdmissionMlsWelcome,
+    AdmissionPeerBinding, AdmissionPreparedV1, AdmissionRecordPersistence,
+    AdmissionRecoveryPublicKey, AdmissionRetryState, AdmissionRole,
+    AdmissionSealedRecoveryMaterial, AdmissionSealedSecurityState, AdmissionSecurityCommitmentV1,
+    AdmissionSettledV1, AdmissionSignedMembershipHistory, AdmissionSourceSnapshot,
+    AdmissionSpaceTransitionResult, AdmissionStagedSecurityState, AdmissionStagedTarget,
+    AdmissionStagedTargetInput, BaseMembershipHistoryPosition, InvitationId, JoinId,
+    JoinerAdmission, JoinerAdmissionTransition, MemberInstanceId, MembershipAdmissionV2,
+    MembershipCredential, MembershipEventV2, MembershipOperationV2, PendingAdmissionExchange,
+    PreparedAdmissionProofV1, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
+    SpaceAdmissionMessageKind, SpaceAdmissionProtocolVersion, SpaceAdmissionRoute,
+    SponsorAdmission, SponsorAdmissionTransition, SponsorPairingConfirmationStatus,
+    UnreadableHistoryPolicy, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
+    ED25519_SIGNATURE_ALGORITHM_V1, MEMBERSHIP_EVENT_FORMAT_V2,
 };
 use uc_core::pairing::invitation::FullInvitation;
 use uc_core::ports::{
@@ -68,21 +70,25 @@ use super::{
     JoinerCancellationMutation, JoinerCancellationStateError, JoinerStartMaterial,
     JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation, JoinerStartStateError,
     JoinerStartStatePort, LoadedCurrentJoin, LoadedJoinerActivation, LoadedJoinerStartState,
-    LoadedPendingAdmission, LoadedSponsorAdmission, LoadedSponsorConfirmation,
-    PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
-    PrepareJoinerActivationError, PrepareJoinerActivationPort, PrepareJoinerAppliedError,
-    PrepareJoinerAppliedPort, PrepareJoinerCancellationPort, PrepareJoinerCandidateError,
-    PrepareJoinerCandidatePort, PrepareJoinerInvitationError, PrepareJoinerInvitationPort,
-    PrepareSponsorCandidateError, PrepareSponsorCandidatePort, PrepareSponsorCommitError,
-    PrepareSponsorCommitPort, PrepareSponsorCompleteError, PrepareSponsorCompletePort,
-    PrepareSponsorSettledError, PrepareSponsorSettledPort, PreparedJoinerActivation,
-    PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial, PreparedJoinerInvitation,
-    PreparedSponsorCandidate, PreparedSponsorCommit, PreparedSponsorComplete,
-    PreparedSponsorSettled, ResolveJoinerInvitationError, ResolveJoinerInvitationPort,
-    SpaceAdmissionCommitToken, SpaceAdmissionProtocol, SpaceAdmissionTransportError,
-    SpaceAdmissionTransportPort, SponsorAdmissionCommitToken, SponsorAdmissionMutation,
-    SponsorAdmissionService, SponsorAdmissionState, SponsorAdmissionStateError,
-    SponsorAdmissionStatePort,
+    LoadedPendingAdmission, LoadedSponsorAbandonment, LoadedSponsorAdmission,
+    LoadedSponsorConfirmation, PendingAdmissionRecoveryStateError,
+    PendingAdmissionRecoveryStatePort, PrepareJoinerActivationError, PrepareJoinerActivationPort,
+    PrepareJoinerAppliedError, PrepareJoinerAppliedPort, PrepareJoinerCancellationPort,
+    PrepareJoinerCandidateError, PrepareJoinerCandidatePort, PrepareJoinerInvitationError,
+    PrepareJoinerInvitationPort, PrepareSponsorCandidateError, PrepareSponsorCandidatePort,
+    PrepareSponsorCommitError, PrepareSponsorCommitPort, PrepareSponsorCompleteError,
+    PrepareSponsorCompletePort, PrepareSponsorSettledError, PrepareSponsorSettledPort,
+    PreparedJoinerActivation, PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial,
+    PreparedJoinerInvitation, PreparedSponsorCandidate, PreparedSponsorCommit,
+    PreparedSponsorComplete, PreparedSponsorSettled, ResolveJoinerInvitationError,
+    ResolveJoinerInvitationPort, SpaceAdmissionCommitToken, SpaceAdmissionProtocol,
+    SpaceAdmissionTransportError, SpaceAdmissionTransportPort, SponsorAdmissionCommitToken,
+    SponsorAdmissionMutation, SponsorAdmissionService, SponsorAdmissionState,
+    SponsorAdmissionStateError, SponsorAdmissionStatePort,
+};
+use crate::space::membership::{
+    AdmissionAbandonmentRevocationTarget, AdmissionRevocationPort, AdmissionRevocationResult,
+    AdmissionRevocationTarget, RemoveSpaceMemberError,
 };
 use crate::space::SpaceAdmissionObservationRegistry;
 
@@ -114,6 +120,7 @@ pub(super) enum ProtocolEvent {
     JoinerActivationExecuted,
     JoinerSavedActivePendingSettlement,
     JoinerCompleteAckExchanged,
+    JoinerAbandonmentExchanged,
     JoinerSavedActiveSettled,
     SponsorSavedAccepted,
     SponsorSavedCandidate,
@@ -121,6 +128,9 @@ pub(super) enum ProtocolEvent {
     SponsorSavedApplied,
     SponsorMarkedUnconfirmed,
     SponsorSavedCompleted,
+    SponsorSavedAbandoned,
+    SponsorMemberRevoked,
+    SponsorAbandonmentCleanupCompleted,
 }
 
 pub(super) struct SpaceAdmissionProtocolTestPair {
@@ -158,12 +168,62 @@ struct FixedJoinerInvitationResolver {
 
 struct UnusedSponsorPorts;
 
+struct RecordingAdmissionRevocation {
+    events: Arc<Mutex<Vec<ProtocolEvent>>>,
+}
+
+#[async_trait]
+impl AdmissionRevocationPort for RecordingAdmissionRevocation {
+    async fn revoke_admission(
+        &self,
+        target: AdmissionRevocationTarget,
+    ) -> Result<AdmissionRevocationResult, RemoveSpaceMemberError> {
+        self.events
+            .lock()
+            .expect("event recorder is available")
+            .push(ProtocolEvent::SponsorMemberRevoked);
+        Ok(AdmissionRevocationResult::AlreadyAbsent {
+            change_id: target.member_binding().add_event_id(),
+        })
+    }
+
+    async fn revoke_abandoned_admission(
+        &self,
+        target: AdmissionAbandonmentRevocationTarget,
+    ) -> Result<AdmissionRevocationResult, RemoveSpaceMemberError> {
+        self.events
+            .lock()
+            .expect("event recorder is available")
+            .push(ProtocolEvent::SponsorMemberRevoked);
+        Ok(AdmissionRevocationResult::AlreadyAbsent {
+            change_id: target.add_event_id(),
+        })
+    }
+}
+
 #[async_trait]
 impl crate::space::membership::ResolveRePairingPort for UnusedSponsorPorts {
     async fn resolve_after_successful_pairing(
         &self,
     ) -> Result<(), crate::space::membership::RePairingStateError> {
         Ok(())
+    }
+}
+
+#[async_trait]
+impl AdmissionRevocationPort for UnusedSponsorPorts {
+    async fn revoke_admission(
+        &self,
+        _target: AdmissionRevocationTarget,
+    ) -> Result<AdmissionRevocationResult, RemoveSpaceMemberError> {
+        Err(RemoveSpaceMemberError::Unavailable)
+    }
+
+    async fn revoke_abandoned_admission(
+        &self,
+        _target: AdmissionAbandonmentRevocationTarget,
+    ) -> Result<AdmissionRevocationResult, RemoveSpaceMemberError> {
+        Err(RemoveSpaceMemberError::Unavailable)
     }
 }
 
@@ -961,6 +1021,39 @@ impl AuthenticatedAdmissionExchangePort for ExchangeThenDeferred {
             return Ok(AuthenticatedAdmissionReply::new(rejected, [0xc9; 32])
                 .expect("valid authenticated cancellation reply"));
         }
+        if request.kind() == SpaceAdmissionMessageKind::Abandonment {
+            self.events
+                .lock()
+                .expect("event recorder is available")
+                .push(ProtocolEvent::JoinerAbandonmentExchanged);
+            let request_digest: [u8; 32] = Sha256::digest(
+                request
+                    .encode_canonical_v1()
+                    .expect("valid canonical abandonment request"),
+            )
+            .into();
+            let abandoned = SpaceAdmissionEnvelopeV1::reply_to(
+                request,
+                AdmissionRole::Sponsor,
+                4,
+                AdmissionMessageId::from_bytes([0xca; 32])
+                    .expect("valid abandonment reply message id"),
+                SpaceAdmissionBodyV1::Abandoned(
+                    AdmissionAbandonedV2::new(request_digest).expect("valid abandonment digest"),
+                ),
+            )
+            .expect("valid abandonment reply");
+            let abandoned_digest: [u8; 32] = Sha256::digest(
+                abandoned
+                    .encode_canonical_v1()
+                    .expect("valid canonical abandonment reply"),
+            )
+            .into();
+            return Ok(
+                AuthenticatedAdmissionReply::new(abandoned, abandoned_digest)
+                    .expect("valid authenticated abandonment reply"),
+            );
+        }
         Err(SpaceAdmissionTransportError::Deferred)
     }
 }
@@ -1053,6 +1146,10 @@ impl SponsorAdmissionStatePort for RecordingSponsorState {
                 assert!(effects.is_empty());
                 ProtocolEvent::SponsorSavedCompleted
             }
+            Some(SpaceAdmissionMessageKind::Abandoned) => {
+                assert!(effects.is_empty());
+                ProtocolEvent::SponsorSavedAbandoned
+            }
             _ => {
                 return Err(SponsorAdmissionStateError::recovery_required(
                     anyhow::anyhow!("unexpected Sponsor aggregate state in test recorder"),
@@ -1133,6 +1230,56 @@ impl PendingAdmissionRecoveryStatePort for RecordingSponsorState {
             replacement,
             AdmissionRecoveryCommitToken::from_bytes([0xd2; 32])
                 .expect("valid next recovery token"),
+        ))
+    }
+
+    async fn load_sponsor_abandonments(
+        &self,
+    ) -> Result<Vec<LoadedSponsorAbandonment>, PendingAdmissionRecoveryStateError> {
+        let current = self.current.lock().expect("sponsor state is available");
+        let Some(current) = current.as_ref() else {
+            return Ok(Vec::new());
+        };
+        if current.abandonment_cleanup().is_none_or(|cleanup| {
+            matches!(
+                cleanup,
+                uc_core::membership::SponsorAbandonmentCleanup::NotRequired
+            )
+        }) {
+            return Ok(Vec::new());
+        }
+        let persisted = current
+            .encode_persisted()
+            .map_err(|_| PendingAdmissionRecoveryStateError::RecoveryRequired)?;
+        let reopened = SponsorAdmission::decode_persisted(&persisted)
+            .map_err(|_| PendingAdmissionRecoveryStateError::RecoveryRequired)?;
+        Ok(vec![LoadedSponsorAbandonment::new(
+            reopened,
+            AdmissionRecoveryCommitToken::from_bytes([0xd5; 32])
+                .expect("valid abandonment recovery token"),
+        )])
+    }
+
+    async fn commit_sponsor_abandonment(
+        &self,
+        _token: AdmissionRecoveryCommitToken,
+        transition: SponsorAdmissionTransition,
+    ) -> Result<LoadedSponsorAbandonment, PendingAdmissionRecoveryStateError> {
+        let replacement = transition.into_replacement();
+        let persisted = replacement
+            .encode_persisted()
+            .map_err(|_| PendingAdmissionRecoveryStateError::RecoveryRequired)?;
+        let stored = SponsorAdmission::decode_persisted(&persisted)
+            .map_err(|_| PendingAdmissionRecoveryStateError::RecoveryRequired)?;
+        *self.current.lock().expect("sponsor state is available") = Some(stored);
+        self.events
+            .lock()
+            .expect("event recorder is available")
+            .push(ProtocolEvent::SponsorAbandonmentCleanupCompleted);
+        Ok(LoadedSponsorAbandonment::new(
+            replacement,
+            AdmissionRecoveryCommitToken::from_bytes([0xd6; 32])
+                .expect("valid next abandonment recovery token"),
         ))
     }
 }
@@ -1602,6 +1749,7 @@ impl SpaceAdmissionProtocolTestPair {
                     }),
                     Arc::clone(&host_events),
                     clock.clone(),
+                    Arc::new(UnusedSponsorPorts),
                 ),
             ),
             sponsor: SpaceAdmissionProtocol::new(
@@ -1649,6 +1797,9 @@ impl SpaceAdmissionProtocolTestPair {
                     }),
                     host_events,
                     clock.clone(),
+                    Arc::new(RecordingAdmissionRevocation {
+                        events: Arc::clone(&events),
+                    }),
                 ),
             ),
             state,
@@ -1694,6 +1845,18 @@ impl SpaceAdmissionProtocolTestPair {
             .as_ref()
             .and_then(SponsorAdmission::pairing_confirmation)
             .map(|summary| summary.status())
+    }
+
+    pub(super) fn sponsor_abandonment_cleanup_complete(&self) -> bool {
+        matches!(
+            self.sponsor_state
+                .current
+                .lock()
+                .expect("sponsor state is available")
+                .as_ref()
+                .and_then(SponsorAdmission::abandonment_cleanup),
+            Some(uc_core::membership::SponsorAbandonmentCleanup::NotRequired)
+        )
     }
 
     pub(super) fn events(&self) -> Vec<ProtocolEvent> {
@@ -1954,6 +2117,44 @@ pub(super) fn authenticated_complete_ack(
         None,
     )
     .expect("valid authenticated CompleteAck")
+}
+
+pub(super) fn authenticated_abandonment(
+    predecessor: &SpaceAdmissionEnvelopeV1,
+    member_binding: Option<AdmissionMemberBindingV2>,
+) -> AuthenticatedSpaceAdmissionMessage {
+    let admission_id = predecessor.header().admission_id();
+    let binding = AdmissionPeerBinding::new(
+        AdmissionChannelPeerId::from_bytes([0x53; 32]).expect("valid local peer"),
+        AdmissionChannelPeerId::from_bytes([0x54; 32]).expect("valid remote peer"),
+    )
+    .expect("distinct peers");
+    let attempt_digest = AdmissionAttemptContractV2::start(
+        admission_id,
+        InvitationId::from_bytes([0x57; 32]).expect("valid invitation id"),
+        binding.remote_peer_id(),
+        binding.local_peer_id(),
+        1_000,
+    )
+    .expect("valid attempt contract")
+    .digest();
+    let abandonment = SpaceAdmissionEnvelopeV1::reply_to(
+        predecessor,
+        AdmissionRole::Joiner,
+        4,
+        AdmissionMessageId::from_bytes([0xd3; 32]).expect("valid Abandonment message id"),
+        SpaceAdmissionBodyV1::Abandonment(
+            AdmissionAbandonmentV2::new(
+                attempt_digest,
+                member_binding,
+                AdmissionAbandonmentReasonV2::Cancelled,
+            )
+            .expect("valid Abandonment body"),
+        ),
+    )
+    .expect("valid Abandonment request");
+    AuthenticatedSpaceAdmissionMessage::new(binding, abandonment, [0xd4; 32], None, None)
+        .expect("valid authenticated Abandonment")
 }
 
 pub(super) fn authenticated_prepared_with_peers(

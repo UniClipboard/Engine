@@ -137,6 +137,54 @@ struct PersistedAdmissionCleanupObligationV3 {
 }
 
 #[derive(Serialize, Deserialize)]
+struct PersistedSpaceAdmissionRecordV4 {
+    format_version: u16,
+    record_version: u64,
+    admission_id: [u8; 32],
+    started_at_ms: i64,
+    expires_at_ms: i64,
+    attempt_digest: [u8; 32],
+    state: PersistedSpaceAdmissionStateV4,
+}
+
+#[derive(Serialize, Deserialize)]
+enum PersistedSpaceAdmissionStateV4 {
+    LocalJoinerTerminated {
+        join_id: [u8; 16],
+        local_join_ordinal: u64,
+        reason: u8,
+        cleanup: PersistedAdmissionCleanupObligationV4,
+    },
+    SponsorAbandoned {
+        peer_binding: PersistedPeerBindingV1,
+        continuation_credential: Vec<u8>,
+        saved_reply: PersistedSavedReplyV1,
+        cleanup: PersistedSponsorAbandonmentCleanupV4,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedAdmissionCleanupObligationV4 {
+    commit_knowledge: u8,
+    member_binding: Option<Vec<u8>>,
+    local_peer_id: [u8; 32],
+    remote_peer_id: [u8; 32],
+    continuation_credential: Vec<u8>,
+    pending_exchange: Option<PersistedAnyPendingExchangeV1>,
+}
+
+#[derive(Serialize, Deserialize)]
+enum PersistedSponsorAbandonmentCleanupV4 {
+    NotRequired,
+    Known(Vec<u8>),
+    Unknown {
+        attempt_digest: [u8; 32],
+        member_instance_id: [u8; 32],
+        add_event_id: [u8; 32],
+    },
+}
+
+#[derive(Serialize, Deserialize)]
 struct PersistedSponsorPairingConfirmationV2 {
     status: u8,
     admission_id: [u8; 32],
@@ -529,6 +577,12 @@ enum PersistedBodyV1 {
     Settled([u8; 32]),
     CancelRequested,
     Rejected(u8),
+    Abandonment {
+        attempt_digest: [u8; 32],
+        member_binding: Option<Vec<u8>>,
+        reason: u8,
+    },
+    Abandoned([u8; 32]),
 }
 
 #[derive(Serialize, Deserialize)]

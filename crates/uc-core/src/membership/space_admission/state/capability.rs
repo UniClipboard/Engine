@@ -606,6 +606,16 @@ impl JoinerAdmission {
             .map(JoinerAdmissionTransition::from_transition)
     }
 
+    pub fn accept_abandoned(
+        self,
+        abandoned: SpaceAdmissionEnvelopeV1,
+        canonical_digest: [u8; 32],
+    ) -> Result<JoinerAdmissionTransition, SpaceAdmissionAggregateError> {
+        self.record
+            .accept_abandoned(abandoned, canonical_digest)
+            .map(JoinerAdmissionTransition::from_transition)
+    }
+
     pub fn cancel(
         self,
         pending_exchange: PendingAdmissionExchange,
@@ -783,6 +793,34 @@ impl SponsorAdmission {
         self.record
             .mark_sponsor_confirmation_unconfirmed(now_ms)
             .map(|transition| transition.map(SponsorAdmissionTransition::from_transition))
+    }
+
+    pub const fn abandonment_cleanup(&self) -> Option<&SponsorAbandonmentCleanup> {
+        match &self.record.state {
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+                SpaceAdmissionRejectedState::Sponsor(state),
+            )) => state.abandonment_cleanup.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub fn accept_abandonment(
+        self,
+        abandonment: SpaceAdmissionEnvelopeV1,
+        canonical_digest: [u8; 32],
+        abandoned_reply: SpaceAdmissionEnvelopeV1,
+    ) -> Result<SponsorAdmissionTransition, SpaceAdmissionAggregateError> {
+        self.record
+            .accept_abandonment(abandonment, canonical_digest, abandoned_reply)
+            .map(SponsorAdmissionTransition::from_transition)
+    }
+
+    pub fn complete_abandonment_cleanup(
+        self,
+    ) -> Result<SponsorAdmissionTransition, SpaceAdmissionAggregateError> {
+        self.record
+            .complete_abandonment_cleanup()
+            .map(SponsorAdmissionTransition::from_transition)
     }
 
     pub fn replay_or_reject<'a>(

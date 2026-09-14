@@ -1,4 +1,5 @@
 use super::*;
+use sha2::{Digest, Sha256};
 
 impl SpaceAdmissionAggregate {
     pub(crate) fn terminate_locally(
@@ -38,15 +39,26 @@ impl SpaceAdmissionAggregate {
             SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Prepared(state))
                 if has_authenticated_attempt =>
             {
+                let attempt_digest = self
+                    .attempt_digest
+                    .ok_or(SpaceAdmissionAggregateError::InvalidAttemptTimeline)?;
                 (
                     state.join_id,
                     state.local_join_ordinal,
-                    Some(AdmissionCleanupObligation {
-                        commit_knowledge: AdmissionCommitKnowledge::Unknown,
-                        member_binding: None,
-                        peer_binding: state.peer_binding,
-                        continuation_credential: state.continuation_credential,
-                    }),
+                    Some(cleanup_obligation(
+                        self.admission_id,
+                        attempt_digest,
+                        AdmissionCommitKnowledge::Unknown,
+                        None,
+                        state.peer_binding,
+                        state.continuation_credential,
+                        SpaceAdmissionRoute::from_bytes(
+                            state.pending_exchange.route().as_bytes().to_vec(),
+                        )
+                        .map_err(|_| SpaceAdmissionAggregateError::InvalidTransition)?,
+                        state.candidate_evidence.message_id(),
+                        reason,
+                    )?),
                 )
             }
             SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Committed(state))
@@ -60,6 +72,8 @@ impl SpaceAdmissionAggregate {
                         &state.exact_commit,
                         state.peer_binding,
                         state.continuation_credential,
+                        state.exact_commit.header().message_id(),
+                        reason,
                     )?),
                 )
             }
@@ -74,6 +88,8 @@ impl SpaceAdmissionAggregate {
                         &state.exact_commit,
                         state.peer_binding,
                         state.continuation_credential,
+                        state.exact_commit.header().message_id(),
+                        reason,
                     )?),
                 )
             }
@@ -88,12 +104,17 @@ impl SpaceAdmissionAggregate {
                         &state.exact_commit,
                         state.peer_binding,
                         state.continuation_credential,
+                        state.completion.header().message_id(),
+                        reason,
                     )?),
                 )
             }
             _ => return Err(SpaceAdmissionAggregateError::UnsafeCancellation),
         };
         self.record_version = record_version;
+        if cleanup.is_some() {
+            self.format_version = SPACE_ADMISSION_RECORD_FORMAT_V4;
+        }
         self.state = if self.attempt_timeline.is_none()
             && matches!(reason, SpaceAdmissionTerminationReason::Cancelled)
         {
@@ -134,6 +155,67 @@ impl SpaceAdmissionAggregate {
             ));
         Ok(AdmissionTransition::new(self, &[]))
     }
+
+    pub(crate) fn accept_abandoned(
+        mut self,
+        abandoned: SpaceAdmissionEnvelopeV1,
+        canonical_digest: [u8; 32],
+    ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        let record_version = self
+            .record_version
+            .checked_add(1)
+            .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
+        let SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state)) =
+            &mut self.state
+        else {
+            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        };
+        let cleanup = state
+            .cleanup
+            .as_mut()
+            .ok_or(SpaceAdmissionAggregateError::InvalidTransition)?;
+        let pending = cleanup
+            .pending_exchange
+            .as_ref()
+            .ok_or(SpaceAdmissionAggregateError::InvalidTransition)?;
+        let expected = AdmissionInboundExpectation::new(
+            self.admission_id,
+            abandoned.header().sender_role(),
+            4,
+            Some(pending.request_envelope().header().message_id()),
+        );
+        let AdmissionInboundDecision::New(_) = expected
+            .classify(&abandoned, canonical_digest, None)
+            .map_err(|_| SpaceAdmissionAggregateError::InvalidTransition)?
+        else {
+            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        };
+        if abandoned.header().protocol_version() != SpaceAdmissionProtocolVersion::V2
+            || abandoned.kind() != SpaceAdmissionMessageKind::Abandoned
+            || !matches!(
+                abandoned.header().sender_role(),
+                AdmissionRole::Sponsor | AdmissionRole::CompletionHelper
+            )
+        {
+            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        }
+        let SpaceAdmissionBodyV1::Abandoned(body) = abandoned.body() else {
+            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        };
+        let request_digest: [u8; 32] = Sha256::digest(
+            pending
+                .request_envelope()
+                .encode_canonical_v1()
+                .map_err(|_| SpaceAdmissionAggregateError::InvalidTransition)?,
+        )
+        .into();
+        if body.abandonment_digest() != &request_digest {
+            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        }
+        cleanup.pending_exchange = None;
+        self.record_version = record_version;
+        Ok(AdmissionTransition::new(self, &[]))
+    }
 }
 
 fn known_cleanup_obligation(
@@ -141,6 +223,8 @@ fn known_cleanup_obligation(
     exact_commit: &SpaceAdmissionEnvelopeV1,
     peer_binding: AdmissionPeerBinding,
     continuation_credential: AdmissionContinuationCredential,
+    predecessor_message_id: AdmissionMessageId,
+    reason: SpaceAdmissionTerminationReason,
 ) -> Result<AdmissionCleanupObligation, SpaceAdmissionAggregateError> {
     let SpaceAdmissionBodyV1::Commit(commit) = exact_commit.body() else {
         return Err(SpaceAdmissionAggregateError::InvalidCommitReply);
@@ -156,10 +240,72 @@ fn known_cleanup_obligation(
         event.event_id(),
     )
     .map_err(|_| SpaceAdmissionAggregateError::InvalidCommitReply)?;
-    Ok(AdmissionCleanupObligation {
-        commit_knowledge: AdmissionCommitKnowledge::Known,
-        member_binding: Some(member_binding),
+    let route = SpaceAdmissionRoute::from_bytes(
+        commit
+            .exact_candidate()
+            .continuation_route()
+            .as_bytes()
+            .to_vec(),
+    )
+    .map_err(|_| SpaceAdmissionAggregateError::InvalidCommitReply)?;
+    cleanup_obligation(
+        exact_commit.header().admission_id(),
+        *member_binding.attempt_digest(),
+        AdmissionCommitKnowledge::Known,
+        Some(member_binding),
         peer_binding,
         continuation_credential,
+        route,
+        predecessor_message_id,
+        reason,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cleanup_obligation(
+    admission_id: SpaceAdmissionId,
+    attempt_digest: [u8; 32],
+    commit_knowledge: AdmissionCommitKnowledge,
+    member_binding: Option<AdmissionMemberBindingV2>,
+    peer_binding: AdmissionPeerBinding,
+    continuation_credential: AdmissionContinuationCredential,
+    route: SpaceAdmissionRoute,
+    predecessor_message_id: AdmissionMessageId,
+    reason: SpaceAdmissionTerminationReason,
+) -> Result<AdmissionCleanupObligation, SpaceAdmissionAggregateError> {
+    let abandonment_reason = match reason {
+        SpaceAdmissionTerminationReason::Cancelled => AdmissionAbandonmentReasonV2::Cancelled,
+        SpaceAdmissionTerminationReason::Expired => AdmissionAbandonmentReasonV2::Expired,
+        SpaceAdmissionTerminationReason::Superseded => AdmissionAbandonmentReasonV2::Superseded,
+    };
+    let body =
+        AdmissionAbandonmentV2::new(attempt_digest, member_binding.clone(), abandonment_reason)
+            .ok_or(SpaceAdmissionAggregateError::InvalidAttemptTimeline)?;
+    let message_id = AdmissionMessageId::from_bytes(attempt_digest)
+        .ok_or(SpaceAdmissionAggregateError::InvalidAttemptTimeline)?;
+    let request = SpaceAdmissionEnvelopeV1::new_with_version(
+        SpaceAdmissionProtocolVersion::V2,
+        admission_id,
+        AdmissionRole::Joiner,
+        4,
+        message_id,
+        Some(predecessor_message_id),
+        SpaceAdmissionBodyV1::Abandonment(body),
+    )
+    .map_err(|_| SpaceAdmissionAggregateError::InvalidTransition)?;
+    let pending_exchange = PendingAdmissionExchange::new(
+        route,
+        request,
+        SpaceAdmissionMessageKind::Abandoned,
+        AdmissionRetryState::new(0, 0)
+            .map_err(|_| SpaceAdmissionAggregateError::InvalidTransition)?,
+    )
+    .map_err(|_| SpaceAdmissionAggregateError::InvalidTransition)?;
+    Ok(AdmissionCleanupObligation {
+        commit_knowledge,
+        member_binding,
+        peer_binding,
+        continuation_credential,
+        pending_exchange: Some(pending_exchange),
     })
 }

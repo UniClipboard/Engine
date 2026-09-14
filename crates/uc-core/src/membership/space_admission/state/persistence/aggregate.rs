@@ -3,7 +3,38 @@ use super::*;
 impl SpaceAdmissionAggregate {
     /// Produces a sensitive plaintext payload that Infra must AEAD-seal before persistence.
     pub fn encode_persisted(&self) -> Result<Vec<u8>, SpaceAdmissionPersistenceError> {
-        if self.format_version == SPACE_ADMISSION_RECORD_FORMAT_V3 {
+        if self.format_version == SPACE_ADMISSION_RECORD_FORMAT_V4 {
+            let state = match &self.state {
+                SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(
+                    state,
+                )) => PersistedSpaceAdmissionStateV4::LocalJoinerTerminated {
+                    join_id: *state.join_id.as_bytes(),
+                    local_join_ordinal: state.local_join_ordinal,
+                    reason: encode_local_termination_reason(state.reason)?,
+                    cleanup: encode_cleanup_obligation_v4(
+                        state
+                            .cleanup
+                            .as_ref()
+                            .ok_or(SpaceAdmissionPersistenceError::InvalidState)?,
+                    )?,
+                },
+                SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+                    SpaceAdmissionRejectedState::Sponsor(state),
+                )) => PersistedSpaceAdmissionStateV4::SponsorAbandoned {
+                    peer_binding: PersistedPeerBindingV1::from(state.peer_binding),
+                    continuation_credential: state.continuation_credential.as_bytes().to_vec(),
+                    saved_reply: PersistedSavedReplyV1::try_from(&state.saved_reply)?,
+                    cleanup: encode_sponsor_abandonment_cleanup(
+                        state
+                            .abandonment_cleanup
+                            .as_ref()
+                            .ok_or(SpaceAdmissionPersistenceError::InvalidState)?,
+                    ),
+                },
+                _ => return Err(SpaceAdmissionPersistenceError::InvalidState),
+            };
+            return encode_record_v4(self, state);
+        } else if self.format_version == SPACE_ADMISSION_RECORD_FORMAT_V3 {
             match &self.state {
                 SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(
                     state,
@@ -242,6 +273,9 @@ impl SpaceAdmissionAggregate {
         }
         if format_version == SPACE_ADMISSION_RECORD_FORMAT_V3 {
             return decode_record_v3(bytes);
+        }
+        if format_version == SPACE_ADMISSION_RECORD_FORMAT_V4 {
+            return decode_record_v4(bytes);
         }
         let persisted = decode_record_with_legacy_pending_exchange(bytes)?;
         if persisted.format_version != SPACE_ADMISSION_RECORD_FORMAT_V1 {
@@ -583,6 +617,193 @@ fn decode_record_v3(
     })
 }
 
+fn encode_record_v4(
+    aggregate: &SpaceAdmissionAggregate,
+    state: PersistedSpaceAdmissionStateV4,
+) -> Result<Vec<u8>, SpaceAdmissionPersistenceError> {
+    let timeline = aggregate
+        .attempt_timeline
+        .ok_or(SpaceAdmissionPersistenceError::InvalidState)?;
+    let attempt_digest = aggregate
+        .attempt_digest
+        .ok_or(SpaceAdmissionPersistenceError::InvalidState)?;
+    postcard::to_stdvec(&PersistedSpaceAdmissionRecordV4 {
+        format_version: SPACE_ADMISSION_RECORD_FORMAT_V4,
+        record_version: aggregate.record_version,
+        admission_id: *aggregate.admission_id.as_bytes(),
+        started_at_ms: timeline.started_at_ms(),
+        expires_at_ms: timeline.expires_at_ms(),
+        attempt_digest,
+        state,
+    })
+    .map_err(|_| SpaceAdmissionPersistenceError::InvalidEncoding)
+}
+
+fn decode_record_v4(
+    bytes: &[u8],
+) -> Result<SpaceAdmissionAggregate, SpaceAdmissionPersistenceError> {
+    let (persisted, remaining): (PersistedSpaceAdmissionRecordV4, _) =
+        postcard::take_from_bytes(bytes)
+            .map_err(|_| SpaceAdmissionPersistenceError::InvalidEncoding)?;
+    if !remaining.is_empty() {
+        return Err(SpaceAdmissionPersistenceError::InvalidEncoding);
+    }
+    if persisted.format_version != SPACE_ADMISSION_RECORD_FORMAT_V4
+        || persisted.attempt_digest == [0; 32]
+    {
+        return Err(SpaceAdmissionPersistenceError::InvalidState);
+    }
+    let admission_id = SpaceAdmissionId::from_bytes(persisted.admission_id)
+        .ok_or(SpaceAdmissionPersistenceError::InvalidState)?;
+    let state = match persisted.state {
+        PersistedSpaceAdmissionStateV4::LocalJoinerTerminated {
+            join_id,
+            local_join_ordinal,
+            reason,
+            cleanup,
+        } => {
+            let cleanup = decode_cleanup_obligation_v4(cleanup, admission_id)?;
+            validate_joiner_cleanup_attempt(&cleanup, persisted.attempt_digest)?;
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(
+                SpaceAdmissionLocalJoinerTerminated {
+                    join_id: decode_join_id(join_id)?,
+                    local_join_ordinal,
+                    reason: decode_local_termination_reason(reason)?,
+                    cleanup: Some(cleanup),
+                },
+            ))
+        }
+        PersistedSpaceAdmissionStateV4::SponsorAbandoned {
+            peer_binding,
+            continuation_credential,
+            saved_reply,
+            cleanup,
+        } => {
+            let saved_reply = saved_reply.into_domain(admission_id)?;
+            if saved_reply.exact_reply_envelope().kind() != SpaceAdmissionMessageKind::Abandoned {
+                return Err(SpaceAdmissionPersistenceError::InvalidState);
+            }
+            let cleanup = decode_sponsor_abandonment_cleanup(cleanup)?;
+            validate_sponsor_cleanup_attempt(&cleanup, persisted.attempt_digest)?;
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+                SpaceAdmissionRejectedState::Sponsor(SpaceAdmissionSponsorRejected {
+                    peer_binding: peer_binding.into_domain()?,
+                    continuation_credential: decode_continuation_credential(
+                        continuation_credential,
+                    )?,
+                    reason: SpaceAdmissionRejectionReason::Cancelled,
+                    saved_reply,
+                    abandonment_cleanup: Some(cleanup),
+                }),
+            ))
+        }
+    };
+    Ok(SpaceAdmissionAggregate {
+        format_version: SPACE_ADMISSION_RECORD_FORMAT_V4,
+        record_version: persisted.record_version,
+        admission_id,
+        attempt_timeline: Some(
+            AdmissionAttemptTimeline::new(persisted.started_at_ms, persisted.expires_at_ms)
+                .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
+        ),
+        attempt_digest: Some(persisted.attempt_digest),
+        state,
+    })
+}
+
+fn encode_sponsor_abandonment_cleanup(
+    cleanup: &SponsorAbandonmentCleanup,
+) -> PersistedSponsorAbandonmentCleanupV4 {
+    match cleanup {
+        SponsorAbandonmentCleanup::NotRequired => PersistedSponsorAbandonmentCleanupV4::NotRequired,
+        SponsorAbandonmentCleanup::Known(binding) => {
+            PersistedSponsorAbandonmentCleanupV4::Known(binding.canonical_bytes())
+        }
+        SponsorAbandonmentCleanup::Unknown {
+            attempt_digest,
+            member_instance_id,
+            add_event_id,
+        } => PersistedSponsorAbandonmentCleanupV4::Unknown {
+            attempt_digest: *attempt_digest,
+            member_instance_id: *member_instance_id.as_bytes(),
+            add_event_id: *add_event_id.as_bytes(),
+        },
+    }
+}
+
+fn decode_sponsor_abandonment_cleanup(
+    cleanup: PersistedSponsorAbandonmentCleanupV4,
+) -> Result<SponsorAbandonmentCleanup, SpaceAdmissionPersistenceError> {
+    match cleanup {
+        PersistedSponsorAbandonmentCleanupV4::NotRequired => {
+            Ok(SponsorAbandonmentCleanup::NotRequired)
+        }
+        PersistedSponsorAbandonmentCleanupV4::Known(binding) => {
+            Ok(SponsorAbandonmentCleanup::Known(
+                AdmissionMemberBindingV2::decode_canonical(&binding)
+                    .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
+            ))
+        }
+        PersistedSponsorAbandonmentCleanupV4::Unknown {
+            attempt_digest,
+            member_instance_id,
+            add_event_id,
+        } if attempt_digest != [0; 32] => Ok(SponsorAbandonmentCleanup::Unknown {
+            attempt_digest,
+            member_instance_id: MemberInstanceId::from_bytes(member_instance_id),
+            add_event_id: MembershipEventId::from_bytes(add_event_id),
+        }),
+        PersistedSponsorAbandonmentCleanupV4::Unknown { .. } => {
+            Err(SpaceAdmissionPersistenceError::InvalidState)
+        }
+    }
+}
+
+fn validate_joiner_cleanup_attempt(
+    cleanup: &AdmissionCleanupObligation,
+    attempt_digest: [u8; 32],
+) -> Result<(), SpaceAdmissionPersistenceError> {
+    if cleanup
+        .member_binding()
+        .is_some_and(|binding| binding.attempt_digest() != &attempt_digest)
+    {
+        return Err(SpaceAdmissionPersistenceError::InvalidState);
+    }
+    let Some(pending) = cleanup.pending_exchange() else {
+        return Ok(());
+    };
+    let SpaceAdmissionBodyV1::Abandonment(abandonment) = pending.request_envelope().body() else {
+        return Err(SpaceAdmissionPersistenceError::InvalidState);
+    };
+    if abandonment.attempt_digest() != &attempt_digest
+        || abandonment.member_binding() != cleanup.member_binding()
+    {
+        return Err(SpaceAdmissionPersistenceError::InvalidState);
+    }
+    Ok(())
+}
+
+fn validate_sponsor_cleanup_attempt(
+    cleanup: &SponsorAbandonmentCleanup,
+    attempt_digest: [u8; 32],
+) -> Result<(), SpaceAdmissionPersistenceError> {
+    match cleanup {
+        SponsorAbandonmentCleanup::NotRequired => Ok(()),
+        SponsorAbandonmentCleanup::Known(binding)
+            if binding.attempt_digest() == &attempt_digest =>
+        {
+            Ok(())
+        }
+        SponsorAbandonmentCleanup::Unknown {
+            attempt_digest: cleanup_digest,
+            ..
+        } if cleanup_digest == &attempt_digest => Ok(()),
+        SponsorAbandonmentCleanup::Known(_) | SponsorAbandonmentCleanup::Unknown { .. } => {
+            Err(SpaceAdmissionPersistenceError::InvalidState)
+        }
+    }
+}
+
 fn encode_sponsor_confirmation(
     summary: SponsorPairingConfirmationSummary,
 ) -> PersistedSponsorPairingConfirmationV2 {
@@ -665,7 +886,45 @@ fn decode_cleanup_obligation(
         member_binding,
         peer_binding,
         continuation_credential,
+        pending_exchange: None,
     })
+}
+
+fn encode_cleanup_obligation_v4(
+    cleanup: &AdmissionCleanupObligation,
+) -> Result<PersistedAdmissionCleanupObligationV4, SpaceAdmissionPersistenceError> {
+    let base = encode_cleanup_obligation(cleanup)?;
+    Ok(PersistedAdmissionCleanupObligationV4 {
+        commit_knowledge: base.commit_knowledge,
+        member_binding: base.member_binding,
+        local_peer_id: base.local_peer_id,
+        remote_peer_id: base.remote_peer_id,
+        continuation_credential: base.continuation_credential,
+        pending_exchange: cleanup
+            .pending_exchange
+            .as_ref()
+            .map(PersistedAnyPendingExchangeV1::try_from)
+            .transpose()?,
+    })
+}
+
+fn decode_cleanup_obligation_v4(
+    persisted: PersistedAdmissionCleanupObligationV4,
+    admission_id: SpaceAdmissionId,
+) -> Result<AdmissionCleanupObligation, SpaceAdmissionPersistenceError> {
+    let pending_exchange = persisted
+        .pending_exchange
+        .map(|exchange| exchange.into_domain(admission_id))
+        .transpose()?;
+    let mut cleanup = decode_cleanup_obligation(PersistedAdmissionCleanupObligationV3 {
+        commit_knowledge: persisted.commit_knowledge,
+        member_binding: persisted.member_binding,
+        local_peer_id: persisted.local_peer_id,
+        remote_peer_id: persisted.remote_peer_id,
+        continuation_credential: persisted.continuation_credential,
+    })?;
+    cleanup.pending_exchange = pending_exchange;
+    Ok(cleanup)
 }
 
 const fn encode_local_termination_reason(

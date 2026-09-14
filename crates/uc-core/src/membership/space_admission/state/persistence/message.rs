@@ -154,6 +154,16 @@ impl TryFrom<&SpaceAdmissionEnvelopeV1> for PersistedEnvelopeV1 {
             SpaceAdmissionBodyV1::Rejected { reason } => {
                 PersistedBodyV1::Rejected(encode_rejection_reason(*reason))
             }
+            SpaceAdmissionBodyV1::Abandonment(body) => PersistedBodyV1::Abandonment {
+                attempt_digest: *body.attempt_digest(),
+                member_binding: body
+                    .member_binding()
+                    .map(AdmissionMemberBindingV2::canonical_bytes),
+                reason: encode_abandonment_reason(body.reason()),
+            },
+            SpaceAdmissionBodyV1::Abandoned(body) => {
+                PersistedBodyV1::Abandoned(*body.abandonment_digest())
+            }
         };
         Ok(Self {
             header: PersistedEnvelopeHeaderV1::from(envelope.header()),
@@ -224,6 +234,25 @@ impl PersistedEnvelopeV1 {
             PersistedBodyV1::Rejected(reason) => SpaceAdmissionBodyV1::Rejected {
                 reason: decode_rejection_reason(reason)?,
             },
+            PersistedBodyV1::Abandonment {
+                attempt_digest,
+                member_binding,
+                reason,
+            } => SpaceAdmissionBodyV1::Abandonment(
+                AdmissionAbandonmentV2::new(
+                    attempt_digest,
+                    member_binding
+                        .map(|binding| AdmissionMemberBindingV2::decode_canonical(&binding))
+                        .transpose()
+                        .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
+                    decode_abandonment_reason(reason)?,
+                )
+                .ok_or(SpaceAdmissionPersistenceError::InvalidState)?,
+            ),
+            PersistedBodyV1::Abandoned(digest) => SpaceAdmissionBodyV1::Abandoned(
+                AdmissionAbandonedV2::new(digest)
+                    .ok_or(SpaceAdmissionPersistenceError::InvalidState)?,
+            ),
         };
         SpaceAdmissionEnvelopeV1::new_with_version(
             protocol_version,
@@ -675,6 +704,8 @@ const fn encode_message_kind(kind: SpaceAdmissionMessageKind) -> u8 {
         SpaceAdmissionMessageKind::Settled => 8,
         SpaceAdmissionMessageKind::CancelRequested => 9,
         SpaceAdmissionMessageKind::Rejected => 10,
+        SpaceAdmissionMessageKind::Abandonment => 11,
+        SpaceAdmissionMessageKind::Abandoned => 12,
     }
 }
 
@@ -692,6 +723,27 @@ fn decode_message_kind(
         8 => Ok(SpaceAdmissionMessageKind::Settled),
         9 => Ok(SpaceAdmissionMessageKind::CancelRequested),
         10 => Ok(SpaceAdmissionMessageKind::Rejected),
+        11 => Ok(SpaceAdmissionMessageKind::Abandonment),
+        12 => Ok(SpaceAdmissionMessageKind::Abandoned),
+        _ => Err(SpaceAdmissionPersistenceError::InvalidState),
+    }
+}
+
+const fn encode_abandonment_reason(reason: AdmissionAbandonmentReasonV2) -> u8 {
+    match reason {
+        AdmissionAbandonmentReasonV2::Cancelled => 0,
+        AdmissionAbandonmentReasonV2::Expired => 1,
+        AdmissionAbandonmentReasonV2::Superseded => 2,
+    }
+}
+
+const fn decode_abandonment_reason(
+    reason: u8,
+) -> Result<AdmissionAbandonmentReasonV2, SpaceAdmissionPersistenceError> {
+    match reason {
+        0 => Ok(AdmissionAbandonmentReasonV2::Cancelled),
+        1 => Ok(AdmissionAbandonmentReasonV2::Expired),
+        2 => Ok(AdmissionAbandonmentReasonV2::Superseded),
         _ => Err(SpaceAdmissionPersistenceError::InvalidState),
     }
 }

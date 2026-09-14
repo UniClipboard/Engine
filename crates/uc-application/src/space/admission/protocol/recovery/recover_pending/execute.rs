@@ -8,11 +8,13 @@ use crate::space::admission::protocol::{
     AdmissionRecoveryService, JoinerAdmissionService, SpaceAdmissionProtocol,
 };
 use crate::space::membership::{
+    AdmissionAbandonmentRevocationTarget, AdmissionRevocationTarget,
     MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, RecoverSpaceAdmissionsPort,
+    RemoveSpaceMemberError,
 };
 use uc_core::membership::{
     AdmissionPendingRecovery, AdmissionRecoveryCategory, JoinerAdmission,
-    SpaceAdmissionMessageKind, SpaceAdmissionRejectionReason,
+    SpaceAdmissionMessageKind, SpaceAdmissionRejectionReason, SponsorAbandonmentCleanup,
 };
 use uc_observability_contract::diagnostics::connectivity::{
     record_admission_recovery_decision, scope_pairing_work, AdmissionExchangeSide, ExchangeFailure,
@@ -78,6 +80,68 @@ impl AdmissionRecoveryService {
                 }
                 Ok(None) => {}
                 Err(_) => report.recovery_required_count += 1,
+            }
+        }
+        let sponsor_abandonments = match self.state.load_sponsor_abandonments().await {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.record_state_error(&mut report, error);
+                return report;
+            }
+        };
+        for loaded in sponsor_abandonments {
+            let (aggregate, token) = loaded.into_parts();
+            let revocation = match aggregate.abandonment_cleanup() {
+                Some(SponsorAbandonmentCleanup::Known(binding)) => {
+                    self.admission_revocation
+                        .revoke_admission(AdmissionRevocationTarget::new(
+                            aggregate.admission_id(),
+                            binding.clone(),
+                        ))
+                        .await
+                }
+                Some(SponsorAbandonmentCleanup::Unknown {
+                    attempt_digest,
+                    member_instance_id,
+                    add_event_id,
+                }) => {
+                    self.admission_revocation
+                        .revoke_abandoned_admission(AdmissionAbandonmentRevocationTarget::new(
+                            aggregate.admission_id(),
+                            *attempt_digest,
+                            *member_instance_id,
+                            *add_event_id,
+                        ))
+                        .await
+                }
+                Some(SponsorAbandonmentCleanup::NotRequired) | None => continue,
+            };
+            match revocation {
+                // 原成员已经不存在、或本机已经失去成员资格时，没有可继续执行的撤销动作。
+                // 终止记录仍然完成，不能把设备永久卡在恢复流程里。
+                Ok(_)
+                | Err(
+                    RemoveSpaceMemberError::CommittedButPending { .. }
+                    | RemoveSpaceMemberError::LocalMemberRemoved
+                    | RemoveSpaceMemberError::TargetNotFound,
+                ) => match aggregate.complete_abandonment_cleanup() {
+                    Ok(transition) => match self
+                        .commit_sponsor_abandonment_and_notify(token, transition)
+                        .await
+                    {
+                        Ok(_) => report.advanced_count += 1,
+                        Err(error) => self.record_state_error(&mut report, error),
+                    },
+                    Err(_) => report.recovery_required_count += 1,
+                },
+                Err(
+                    RemoveSpaceMemberError::Locked
+                    | RemoveSpaceMemberError::StateChanged
+                    | RemoveSpaceMemberError::Unavailable,
+                ) => report.deferred_count += 1,
+                Err(
+                    RemoveSpaceMemberError::RecoveryRequired | RemoveSpaceMemberError::SelfTarget,
+                ) => report.recovery_required_count += 1,
             }
         }
         let loaded = match self.state.load(trigger).await {
@@ -160,7 +224,8 @@ impl AdmissionRecoveryService {
             }
             let observation_before = report;
             let observation_material = *aggregate.admission_id().as_bytes();
-            let was_cancelling = aggregate.is_cancelling();
+            let was_cancelling =
+                aggregate.is_cancelling() || aggregate.termination_reason().is_some();
             let context = joiner
                 .observations
                 .scope(observation_material, async {
@@ -597,6 +662,19 @@ impl AdmissionRecoveryService {
                     )
                     .await;
             }
+            SpaceAdmissionMessageKind::Abandoned => {
+                let transition = match aggregate.accept_abandoned(reply, canonical_digest) {
+                    Ok(transition) => transition,
+                    Err(_) => {
+                        report.recovery_required_count += 1;
+                        return;
+                    }
+                };
+                match self.commit_recovery(token, transition).await {
+                    Ok(_) => report.advanced_count += 1,
+                    Err(error) => self.record_state_error(report, error),
+                }
+            }
             _ => {
                 self.save_recovery_required(
                     report,
@@ -631,6 +709,8 @@ fn finish_observation_after_recovery(
         })
     } else if after.deferred_count > before.deferred_count {
         Some(SpaceAdmissionObservationOutcome::Deferred)
+    } else if was_cancelling && after.advanced_count > before.advanced_count {
+        Some(SpaceAdmissionObservationOutcome::Cancelled)
     } else {
         None
     };
@@ -717,6 +797,9 @@ fn actual_recovery_decision(
             Some(decision @ RecoveryDecision::Deferred(_)) => decision,
             _ => RecoveryDecision::Deferred(None),
         });
+    }
+    if cancelling && after.advanced_count > before.advanced_count {
+        return Some(RecoveryDecision::Cancelled);
     }
     None
 }

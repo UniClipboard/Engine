@@ -280,6 +280,23 @@ impl SpaceApplication {
             Arc::new(QueryMembershipAdmissionUseCase::new(Arc::clone(&ledger)));
         let current_scope: Arc<dyn CurrentSpaceMemberScopePort> = ledger.clone();
         let deferred_maintenance_wake = Arc::new(DeferredMaintenanceWake::new());
+        let membership_activation = Arc::new(RePairingAwareMembershipActivation::new(
+            activate_membership_effect,
+            Arc::clone(&re_pairing),
+        ));
+        let recover_membership_effects = Arc::new(RecoverMembershipEffectsUseCase::new(
+            Arc::clone(&ledger),
+            apply_membership_member_facts,
+            apply_membership_security,
+            membership_activation,
+        ));
+        let remove_space_member = Arc::new(RemoveSpaceMemberUseCase::new(
+            Arc::clone(&ledger),
+            Arc::clone(&current_member_signatures),
+            Arc::clone(&query_device_trust),
+            recover_membership_effects.clone(),
+            deferred_maintenance_wake.clone(),
+        ));
         let membership_history_endpoint = Arc::new(MembershipHistoryAntiEntropy::new(
             Arc::clone(&ledger),
             Arc::clone(&current_scope),
@@ -320,21 +337,12 @@ impl SpaceApplication {
             space_admission_transport,
             host_event_bus,
             Arc::clone(&clock),
+            remove_space_member.clone(),
         );
         let space_admission = Arc::new(SpaceAdmissionProtocol::new(
             joiner_admission,
             sponsor_admission,
             admission_recovery,
-        ));
-        let membership_activation = Arc::new(RePairingAwareMembershipActivation::new(
-            activate_membership_effect,
-            re_pairing,
-        ));
-        let recover_membership_effects = Arc::new(RecoverMembershipEffectsUseCase::new(
-            Arc::clone(&ledger),
-            apply_membership_member_facts,
-            apply_membership_security,
-            membership_activation,
         ));
         let deliver_restricted_membership = Arc::new(DeliverRestrictedMembershipUseCase::new(
             Arc::clone(&ledger),
@@ -387,13 +395,6 @@ impl SpaceApplication {
         let membership_activity = prepared_runtime.activity();
         deferred_maintenance_wake.bind(Arc::new(membership_activity.clone()));
         let activity = Arc::new(membership_activity.clone());
-        let remove_space_member = Arc::new(RemoveSpaceMemberUseCase::new(
-            Arc::clone(&ledger),
-            Arc::clone(&current_member_signatures),
-            Arc::clone(&query_device_trust),
-            recover_membership_effects.clone(),
-            activity.clone(),
-        ));
         let decide_device_trust_change = Arc::new(DecideDeviceTrustChangeUseCase::new(
             Arc::clone(&ledger),
             current_member_signatures,

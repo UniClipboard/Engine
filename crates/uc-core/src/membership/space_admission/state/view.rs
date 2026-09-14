@@ -314,6 +314,17 @@ impl SpaceAdmissionAggregate {
                 continuation_credential: &state.continuation_credential,
                 pending_exchange: &state.pending_exchange,
             }),
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state)) => {
+                state.cleanup.as_ref().and_then(|cleanup| {
+                    cleanup.pending_exchange.as_ref().map(|pending_exchange| {
+                        AdmissionPendingRecovery::Continuation {
+                            peer_binding: cleanup.peer_binding,
+                            continuation_credential: &cleanup.continuation_credential,
+                            pending_exchange,
+                        }
+                    })
+                })
+            }
             _ => None,
         }
     }
@@ -553,6 +564,12 @@ impl SpaceAdmissionAggregate {
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Active(
                 SpaceAdmissionActiveState::PendingSettlement(state),
             )) => Some(&state.pending_exchange),
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state)) => {
+                match &state.cleanup {
+                    Some(cleanup) => cleanup.pending_exchange(),
+                    None => None,
+                }
+            }
             _ => None,
         }
     }

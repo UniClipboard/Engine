@@ -437,6 +437,62 @@ async fn replaying_an_old_admission_revocation_does_not_remove_the_repaired_inst
 }
 
 #[tokio::test]
+async fn abandoned_admission_lookup_resolves_to_the_exact_original_member() {
+    let (loaded, signer, old_member, old_add_event_id) = admitted_peer_ledger();
+    let repository = Arc::new(MemoryLedgerRepository {
+        loaded: Mutex::new(loaded),
+        commits: AtomicUsize::new(0),
+        remaining_conflicts: AtomicUsize::new(0),
+    });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    ));
+    let query = Arc::new(QueryDeviceTrustUseCase::new(
+        Arc::clone(&ledger),
+        Arc::new(OfflineObservations),
+        Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
+    ));
+    let remove = RemoveSpaceMemberUseCase::new(
+        ledger,
+        Arc::new(signer),
+        query,
+        Arc::new(NoopEffects),
+        Arc::new(WakeCounter(AtomicUsize::new(0))),
+    );
+    let target = AdmissionAbandonmentRevocationTarget::new(
+        SpaceAdmissionId::from_bytes([0x63; 32]).unwrap(),
+        [0x64; 32],
+        old_member,
+        old_add_event_id,
+    );
+
+    assert!(matches!(
+        remove.revoke_abandoned_admission(target).await.unwrap(),
+        AdmissionRevocationResult::Removed { .. }
+    ));
+
+    let new_member = {
+        let mut loaded = repository.loaded.lock().unwrap();
+        append_active_peer(&mut loaded, "device-b", 0x65, 0x72)
+    };
+    let history = VersionedMembershipHistory::decode_persisted_v2(
+        repository
+            .load()
+            .await
+            .unwrap()
+            .membership_history
+            .as_deref()
+            .unwrap(),
+        &AcceptingVerifier,
+    )
+    .unwrap();
+    assert!(history.active_members().contains(&new_member));
+    assert!(!history.active_members().contains(&old_member));
+}
+
+#[tokio::test]
 async fn exact_revocation_rejects_wrong_space_and_unknown_add_without_committing() {
     let (loaded, signer, member, add_event_id) = admitted_peer_ledger();
     let repository = Arc::new(MemoryLedgerRepository {

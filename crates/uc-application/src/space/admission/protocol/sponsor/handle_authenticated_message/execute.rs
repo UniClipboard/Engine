@@ -80,6 +80,9 @@ impl HandleAuthenticatedSpaceAdmissionMessagePort for SpaceAdmissionProtocol {
                 && reply.has_pairing_confirmation()
             {
                 self.recovery.notify_admission_changed();
+            } else if message_kind == SpaceAdmissionMessageKind::Abandonment {
+                self.joiner.maintenance_wake.wake();
+                self.recovery.notify_admission_changed();
             }
         }
         result
@@ -97,6 +100,7 @@ impl SponsorAdmissionService {
             SpaceAdmissionMessageKind::Prepared => self.handle_prepared(message, now_ms).await,
             SpaceAdmissionMessageKind::Applied => self.handle_applied(message, now_ms).await,
             SpaceAdmissionMessageKind::CompleteAck => self.handle_complete_ack(message).await,
+            SpaceAdmissionMessageKind::Abandonment => self.handle_abandonment(message).await,
             _ => Err(HandleAuthenticatedSpaceAdmissionMessageError::out_of_order(
                 anyhow::anyhow!("the Sponsor cannot handle this admission message kind"),
             )),

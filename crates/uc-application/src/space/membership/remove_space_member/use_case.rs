@@ -3,21 +3,22 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
-    MemberInstanceId, MembershipEventId, MembershipHistoryRelationship,
+    AdmissionMemberBindingV2, MemberInstanceId, MembershipEventId, MembershipHistoryRelationship,
     MembershipHistoryV2ReceiveOutcome, VersionedMembershipHistory,
 };
 
 use crate::space::membership::{
     CurrentMemberSignatureError, CurrentMemberSignaturePort, InitiatedMembershipRemovalEffect,
     LoadedMembershipLedger, MembershipEffectKind, MembershipEffectPhase, MembershipLedger,
-    MembershipLedgerError, MembershipMaintenanceStepOutcome, PendingMembershipEffect,
-    QueryDeviceTrustUseCase, RecoverMembershipEffectsPort, RestrictedMembershipDelivery,
-    WakeSpaceMembershipMaintenancePort,
+    MembershipLedgerError, MembershipMaintenanceStepOutcome, PeerReconciliationRecord,
+    PendingMembershipEffect, QueryDeviceTrustUseCase, RecoverMembershipEffectsPort,
+    RestrictedMembershipDelivery, WakeSpaceMembershipMaintenancePort,
 };
 
 use super::{
-    AdmissionRevocationPort, AdmissionRevocationResult, AdmissionRevocationTarget,
-    MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult,
+    AdmissionAbandonmentRevocationTarget, AdmissionRevocationPort, AdmissionRevocationResult,
+    AdmissionRevocationTarget, MembershipCommitReceipt, RemoveSpaceMemberError,
+    RemoveSpaceMemberResult,
 };
 
 pub(crate) struct RemoveSpaceMemberUseCase {
@@ -258,7 +259,7 @@ impl RemoveSpaceMemberUseCase {
                                     event_for_commit.clone(),
                                 )];
                         })
-                        .or_insert(crate::space::membership::PeerReconciliationRecord {
+                        .or_insert(PeerReconciliationRecord {
                             peer_device_id: target_device_for_commit,
                             relationship: MembershipHistoryRelationship::PendingRemovalDecision,
                             confirmed_position: None,
@@ -306,15 +307,11 @@ impl RemoveSpaceMemberUseCase {
             status,
         })
     }
-}
 
-#[async_trait::async_trait]
-impl AdmissionRevocationPort for RemoveSpaceMemberUseCase {
-    async fn revoke_admission(
+    async fn execute_admission_revocation(
         &self,
         target: AdmissionRevocationTarget,
     ) -> Result<AdmissionRevocationResult, RemoveSpaceMemberError> {
-        let _guard = self.execution_lock.lock().await;
         let binding = target.member_binding();
         let exact = ExactRemovalTarget {
             space_id: binding.space_id().clone(),
@@ -338,6 +335,44 @@ impl AdmissionRevocationPort for RemoveSpaceMemberUseCase {
                 change_id: committed.change_id,
             },
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl AdmissionRevocationPort for RemoveSpaceMemberUseCase {
+    async fn revoke_admission(
+        &self,
+        target: AdmissionRevocationTarget,
+    ) -> Result<AdmissionRevocationResult, RemoveSpaceMemberError> {
+        let _guard = self.execution_lock.lock().await;
+        self.execute_admission_revocation(target).await
+    }
+
+    async fn revoke_abandoned_admission(
+        &self,
+        target: AdmissionAbandonmentRevocationTarget,
+    ) -> Result<AdmissionRevocationResult, RemoveSpaceMemberError> {
+        let _guard = self.execution_lock.lock().await;
+        let snapshot = self
+            .ledger
+            .load_verified()
+            .await
+            .map_err(map_ledger_error)?;
+        let history = snapshot
+            .history()
+            .ok_or(RemoveSpaceMemberError::RecoveryRequired)?;
+        let binding = AdmissionMemberBindingV2::new(
+            target.attempt_digest(),
+            SpaceId::from_str(history.lineage_id()),
+            target.member_instance_id(),
+            target.add_event_id(),
+        )
+        .map_err(|_| RemoveSpaceMemberError::RecoveryRequired)?;
+        self.execute_admission_revocation(AdmissionRevocationTarget::new(
+            target.admission_id(),
+            binding,
+        ))
+        .await
     }
 }
 

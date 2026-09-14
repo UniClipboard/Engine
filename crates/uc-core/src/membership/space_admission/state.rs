@@ -25,11 +25,15 @@ use super::attempt::{
     AdmissionAttemptContractV2, AdmissionAttemptTimeline, AdmissionMemberBindingV2,
 };
 use super::exchange::{
-    AdmissionErrorCategory, AdmissionExchangeBlockReason, AdmissionMessageEvidence,
-    AdmissionRetryState, PendingAdmissionExchange, SavedAdmissionReply,
+    AdmissionErrorCategory, AdmissionExchangeBlockReason, AdmissionInboundDecision,
+    AdmissionInboundExpectation, AdmissionMessageEvidence, AdmissionRetryState,
+    PendingAdmissionExchange, SavedAdmissionReply,
 };
 use super::id::{AdmissionMessageId, JoinId, SpaceAdmissionId};
-use super::message::{SpaceAdmissionEnvelopeV1, SpaceAdmissionRejectionReason};
+use super::message::{
+    AdmissionAbandonedV2, AdmissionAbandonmentReasonV2, AdmissionAbandonmentV2,
+    SpaceAdmissionEnvelopeV1, SpaceAdmissionProtocolVersion, SpaceAdmissionRejectionReason,
+};
 use crate::ids::SpaceId;
 use crate::pairing::invitation::FullInvitation;
 
@@ -37,7 +41,7 @@ pub use aggregate::{
     AdmissionEffect, AdmissionRecoveryCategory, AdmissionTransition, SpaceAdmissionAggregate,
     SpaceAdmissionAggregateError, SpaceAdmissionRecordState, SpaceAdmissionTerminalState,
     SPACE_ADMISSION_RECORD_FORMAT_V1, SPACE_ADMISSION_RECORD_FORMAT_V2,
-    SPACE_ADMISSION_RECORD_FORMAT_V3,
+    SPACE_ADMISSION_RECORD_FORMAT_V3, SPACE_ADMISSION_RECORD_FORMAT_V4,
 };
 pub use capability::{
     AdmissionRecordPersistence, JoinerAdmission, JoinerAdmissionTransition, SponsorAdmission,
@@ -67,7 +71,7 @@ pub use terminal::{
     SpaceAdmissionJoinerRejected, SpaceAdmissionLocalJoinerRejected,
     SpaceAdmissionLocalJoinerTerminated, SpaceAdmissionRecoveryRequiredTerminal,
     SpaceAdmissionRejectedState, SpaceAdmissionSponsorRejected, SpaceAdmissionSupersededState,
-    SpaceAdmissionSupersededTerminal, SpaceAdmissionTerminationReason,
+    SpaceAdmissionSupersededTerminal, SpaceAdmissionTerminationReason, SponsorAbandonmentCleanup,
 };
 pub use view::{
     AdmissionPendingRecovery, JoinerActivationPreparation, JoinerAppliedPreparation,

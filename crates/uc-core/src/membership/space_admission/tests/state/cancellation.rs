@@ -189,6 +189,14 @@ fn bounded_joiner_and_prepared_joiner_both_terminate_locally() {
         AdmissionCommitKnowledge::Unknown
     );
     assert!(cleanup.member_binding().is_none());
+    assert_eq!(
+        cleanup
+            .pending_exchange()
+            .expect("cleanup delivery remains pending")
+            .request_envelope()
+            .kind(),
+        SpaceAdmissionMessageKind::Abandonment
+    );
     let encoded = prepared.encode_persisted().expect("cleanup state encodes");
     let recovered = JoinerAdmission::decode_persisted(&encoded).expect("cleanup state decodes");
     assert_eq!(
@@ -197,6 +205,56 @@ fn bounded_joiner_and_prepared_joiner_both_terminate_locally() {
             .expect("cleanup survives restart")
             .commit_knowledge(),
         AdmissionCommitKnowledge::Unknown
+    );
+}
+
+#[test]
+fn abandonment_acknowledgement_ends_delivery_without_removing_the_fence() {
+    let terminated = JoinerAdmission::try_from_record(joiner_prepared_aggregate_fixture())
+        .expect("prepared joiner fixture")
+        .cancel_locally()
+        .expect("prepared join terminates locally")
+        .into_replacement();
+    let request = terminated
+        .cleanup_obligation()
+        .and_then(AdmissionCleanupObligation::pending_exchange)
+        .expect("abandonment delivery is pending")
+        .request_envelope();
+    let request_digest: [u8; 32] = Sha256::digest(
+        request
+            .encode_canonical_v1()
+            .expect("abandonment request encodes"),
+    )
+    .into();
+    let acknowledged = SpaceAdmissionEnvelopeV1::reply_to(
+        request,
+        AdmissionRole::Sponsor,
+        4,
+        AdmissionMessageId::from_bytes([0xf4; 32]).expect("ack message id fixture"),
+        SpaceAdmissionBodyV1::Abandoned(
+            AdmissionAbandonedV2::new(request_digest).expect("request digest fixture"),
+        ),
+    )
+    .expect("valid Abandoned reply");
+    let acknowledged_digest: [u8; 32] = Sha256::digest(
+        acknowledged
+            .encode_canonical_v1()
+            .expect("Abandoned reply encodes"),
+    )
+    .into();
+
+    let completed = terminated
+        .accept_abandoned(acknowledged, acknowledged_digest)
+        .expect("matching acknowledgement is accepted")
+        .into_replacement();
+
+    let cleanup = completed
+        .cleanup_obligation()
+        .expect("termination fence remains saved");
+    assert!(cleanup.pending_exchange().is_none());
+    assert_eq!(
+        completed.termination_reason(),
+        Some(SpaceAdmissionTerminationReason::Cancelled)
     );
 }
 
@@ -354,3 +412,4 @@ fn cancelling_joiner_accepts_cancelled_rejection() {
     assert_eq!(state.reason(), SpaceAdmissionRejectionReason::Cancelled);
     assert_eq!(state.last_received().canonical_digest(), &[0xbd; 32]);
 }
+use sha2::{Digest, Sha256};

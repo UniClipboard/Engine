@@ -202,7 +202,8 @@ async fn actual_client_exchange_reports_reply_failures_and_preserves_trace_resul
             send.finish().expect("finish reply");
             std::future::pending::<()>().await;
         });
-        let request = SpaceAdmissionEnvelopeV1::new(
+        let request = SpaceAdmissionEnvelopeV1::new_with_version(
+            SpaceAdmissionProtocolVersion::V2,
             admission_id(),
             AdmissionRole::Joiner,
             1,

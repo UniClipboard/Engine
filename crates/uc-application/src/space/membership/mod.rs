@@ -74,8 +74,9 @@ pub use recover_conflict::{
     PreparedMembershipBranchRecoveryRecipient,
 };
 pub use remove_space_member::{
-    AdmissionRevocationPort, AdmissionRevocationResult, AdmissionRevocationTarget,
-    MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult,
+    AdmissionAbandonmentRevocationTarget, AdmissionRevocationPort, AdmissionRevocationResult,
+    AdmissionRevocationTarget, MembershipCommitReceipt, RemoveSpaceMemberError,
+    RemoveSpaceMemberResult,
 };
 pub use resolve_conflict::{
     DeviceGroupChoiceImpact, MembershipConflictBranchView, MembershipConflictView,

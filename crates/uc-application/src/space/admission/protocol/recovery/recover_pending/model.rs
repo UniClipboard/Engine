@@ -59,6 +59,11 @@ pub struct LoadedSponsorConfirmation {
     commit_token: AdmissionRecoveryCommitToken,
 }
 
+pub struct LoadedSponsorAbandonment {
+    aggregate: SponsorAdmission,
+    commit_token: AdmissionRecoveryCommitToken,
+}
+
 pub struct AuthenticatedAdmissionReply {
     envelope: SpaceAdmissionEnvelopeV1,
     canonical_digest: [u8; 32],
@@ -91,6 +96,19 @@ impl LoadedPendingAdmission {
 }
 
 impl LoadedSponsorConfirmation {
+    pub fn new(aggregate: SponsorAdmission, commit_token: AdmissionRecoveryCommitToken) -> Self {
+        Self {
+            aggregate,
+            commit_token,
+        }
+    }
+
+    pub fn into_parts(self) -> (SponsorAdmission, AdmissionRecoveryCommitToken) {
+        (self.aggregate, self.commit_token)
+    }
+}
+
+impl LoadedSponsorAbandonment {
     pub fn new(aggregate: SponsorAdmission, commit_token: AdmissionRecoveryCommitToken) -> Self {
         Self {
             aggregate,

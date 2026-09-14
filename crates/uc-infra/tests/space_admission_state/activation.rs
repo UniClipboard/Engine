@@ -427,7 +427,7 @@ fn activation_mutation(joiner: JoinerAdmission, result_byte: u8) -> JoinerActiva
     )
 }
 
-fn candidate_body_fixture() -> AdmissionCandidateV1 {
+pub(super) fn candidate_body_fixture() -> AdmissionCandidateV1 {
     let sponsor_credential =
         MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x91; 32]);
     let joiner_credential =
