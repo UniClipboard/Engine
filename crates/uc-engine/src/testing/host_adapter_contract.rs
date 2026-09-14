@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+
+mod profile_upgrade_backup;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};

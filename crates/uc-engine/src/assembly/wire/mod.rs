@@ -25,7 +25,7 @@ use uc_application::deps::{
     ApplicationDeps, ClipboardEntryPorts, ClipboardPorts, ClipboardRepresentationPorts,
     ConfigMigrationDeps, CurrentSpaceIdentityPort, DevicePorts, DirectoryReceivePorts,
     FileTransferPorts, InitialSpaceActivationPort, PortableCurrentSpaceIdentityPort,
-    PrepareProfileLifecycleUseCase, ProfileLifecycleRepositoryPort, ProfileLifecycleState,
+    ProfileLifecycle, ProfileLifecycleRepositoryPort, ProfileLifecycleState,
     RePairingStateStorePort, SearchPorts, SecurityPorts, SpaceAccessPorts,
     SpaceRebuildProgressPort, StoragePorts, SystemPorts,
 };
@@ -164,6 +164,7 @@ struct InfraLayer {
 }
 
 pub struct CoreWiringInputs {
+    pub profile_lifecycle: ProfileLifecycle,
     pub paths: AppPaths,
     pub secure_storage: Arc<dyn SecureStoragePort>,
     pub profile_id: ProfileId,
@@ -317,6 +318,7 @@ pub async fn wire_dependencies_from_inputs(
     inputs: CoreWiringInputs,
 ) -> WiringResult<WiredDependencies> {
     let CoreWiringInputs {
+        profile_lifecycle,
         paths,
         secure_storage,
         profile_id,
@@ -340,10 +342,6 @@ pub async fn wire_dependencies_from_inputs(
     let app_data_root = paths.app_data_root_dir.clone();
     let profile_lifecycle_repository: Arc<dyn ProfileLifecycleRepositoryPort> =
         Arc::new(ProfileLifecycleRepository::new(Arc::clone(&secure_storage)));
-    let profile_lifecycle =
-        PrepareProfileLifecycleUseCase::new(Arc::clone(&profile_lifecycle_repository))
-            .execute()
-            .map_err(|error| WiringError::DatabaseInit(error.to_string()))?;
     let admission_keys = Arc::new(AdmissionKeyManager::new(
         Arc::clone(&secure_storage),
         profile_lifecycle.generation().into_bytes(),

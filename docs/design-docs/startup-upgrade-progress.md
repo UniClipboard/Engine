@@ -44,7 +44,7 @@ async fn start(config: EngineConfig, host: HostCapabilities) {
 ## 产品含义
 
 - Preparing：准备启动或检查是否需要升级；无需升级不强制展示升级页面。
-- Upgrading：确实需要资料升级，当前步骤和有限已完成记录可读。
+- Upgrading：需要先备份旧资料或转换资料，当前步骤和有限已完成记录可读。升级前备份作为首个步骤展示，完成后保留在处理记录中。
 - StartingServices：资料准备完成，但 Engine 尚不可用。
 - Ready：完整 Engine 已构造并返回；这才是宿主进入应用的条件。
 - Failed / Interrupted：本次尝试已结束，保留最后步骤和安全失败分类。

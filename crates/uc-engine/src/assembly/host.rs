@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tracing::warn;
+use uc_application::deps::{
+    PrepareProfileStartupUseCase, ProfileUpgradeBackupPort, ProfileUpgradeVersions,
+};
 use uc_core::app_dirs::{AppDirs, AppPaths};
 use uc_core::clipboard::{
     normalize_wire_mime, FileDisplayMetadata, FileDisplayMetadataEntry,
@@ -16,12 +19,16 @@ use uc_core::ports::{
     HostEventEmitterPort, MembershipHostEvent, PlatformClipboardPort, SecureStorageError,
     SecureStoragePort, SystemClipboardPort, TransferHostEvent,
 };
+use uc_infra::security::{
+    ProfileLifecycleRepository, ProfileStartupStorage, ProfileUpgradeBackupStore,
+};
 use uc_observability_contract::analytics::DefaultAnalyticsFacade;
 
 use crate::assembly::deps::{WiredDependencies, WiringError, WiringResult};
 use crate::assembly::platform::SystemClipboardLayer;
 use crate::assembly::wire::{wire_dependencies_from_inputs, CoreWiringInputs};
 use crate::engine::event_stream::EventSender;
+use crate::engine::startup::StartupProgressStore;
 use crate::{
     EngineConfig, EngineEvent, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
     HostClipboard, HostClipboardChangeStream, HostClipboardRepresentation, HostDirectories,
@@ -275,69 +282,6 @@ pub fn derive_app_paths(directories: &HostDirectories) -> AppPaths {
     })
 }
 
-fn adopt_v019_profile_directories(app_data_root: &Path) -> WiringResult<()> {
-    let directories = [("iroh-identity", "identity"), ("iroh-blobs", "blob store")];
-    let mut removals = Vec::new();
-    let mut moves = Vec::new();
-    let entries = match std::fs::read_dir(app_data_root) {
-        Ok(entries) => entries
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| WiringError::SettingsInit("failed to inspect v0.19 data".to_owned()))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => {
-            return Err(WiringError::SettingsInit(
-                "failed to inspect v0.19 data".to_owned(),
-            ))
-        }
-    };
-
-    for (name, description) in directories {
-        let current = app_data_root.join(name);
-        let mut legacy_directories = entries.iter().map(|entry| entry.path()).filter(|path| {
-            path.file_name()
-                .and_then(|value| value.to_str())
-                .is_some_and(|value| value.starts_with(&format!("{name}_")))
-        });
-        let legacy = legacy_directories.next();
-        if legacy_directories.next().is_some() {
-            return Err(WiringError::SettingsInit(format!(
-                "multiple v0.19 {description} directories found"
-            )));
-        }
-        let Some(legacy) = legacy else {
-            continue;
-        };
-        if current.exists() {
-            let legacy_is_empty =
-                std::fs::read_dir(&legacy).is_ok_and(|mut entries| entries.next().is_none());
-            if legacy_is_empty {
-                removals.push((legacy, description));
-                continue;
-            }
-            return Err(WiringError::SettingsInit(format!(
-                "v0.19 {description} directory conflict"
-            )));
-        }
-        moves.push((legacy, current, description));
-    }
-
-    for (legacy, description) in removals {
-        std::fs::remove_dir(&legacy).map_err(|_| {
-            WiringError::SettingsInit(format!(
-                "failed to remove empty v0.19 {description} directory"
-            ))
-        })?;
-    }
-
-    for (legacy, current, description) in moves {
-        std::fs::rename(&legacy, &current).map_err(|_| {
-            WiringError::SettingsInit(format!("failed to adopt v0.19 {description} directory"))
-        })?;
-    }
-
-    Ok(())
-}
-
 fn adapt_system_clipboard_layer(
     host: Box<dyn HostClipboard>,
     files: Arc<dyn HostFileAccess>,
@@ -476,6 +420,7 @@ pub struct HostWiring {
     pub temporary_dir: std::path::PathBuf,
     pub clipboard_import_root: std::path::PathBuf,
     pub files: Arc<dyn HostFileAccess>,
+    pub profile_upgrade_backups: Arc<dyn ProfileUpgradeBackupPort>,
     pub clipboard_changes: Option<Box<dyn HostClipboardChangeStream>>,
 }
 
@@ -498,25 +443,42 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
     config: &EngineConfig,
     host: HostCapabilities,
     host_event_emitter: Arc<dyn HostEventEmitterPort>,
-    startup_progress: Arc<dyn uc_infra::security::StorageUpgradeObserver>,
+    startup_progress: Arc<StartupProgressStore>,
 ) -> WiringResult<HostWiring> {
     let (directories, secure_storage, mut clipboard, files, analytics) = host.into_parts();
-    let clipboard_changes = clipboard.take_change_stream().map_err(|_| {
-        WiringError::ClipboardInit("failed to open host clipboard change stream".into())
-    })?;
     let paths = derive_app_paths(&directories);
     let secure_storage = adapt_secure_storage(secure_storage);
     let app_data_root = paths.app_data_root_dir.clone();
-    adopt_v019_profile_directories(&app_data_root)?;
-    uc_infra::config_migration::staging::apply_pending_import(
-        &app_data_root,
-        &paths.db_path,
-        &paths.vault_dir,
-        &paths.settings_path,
-        &app_data_root.join("iroh-identity"),
-        secure_storage.as_ref(),
+    let profile_upgrade_backups: Arc<dyn ProfileUpgradeBackupPort> =
+        Arc::new(ProfileUpgradeBackupStore::new(
+            paths.clone(),
+            config.profile_id().to_owned(),
+            Arc::clone(&secure_storage),
+            directories.upgrade_backups().to_path_buf(),
+        ));
+    let profile_lifecycle = PrepareProfileStartupUseCase::new(
+        Arc::new(super::startup_progress::StartupProfileUpgradeBackup::new(
+            Arc::clone(&profile_upgrade_backups),
+            startup_progress.clone(),
+        )),
+        Arc::new(ProfileStartupStorage::new(
+            paths.clone(),
+            Arc::clone(&secure_storage),
+        )),
+        Arc::new(ProfileLifecycleRepository::new(Arc::clone(&secure_storage))),
+        ProfileUpgradeVersions {
+            product: config.app_version().to_owned(),
+            engine: env!("CARGO_PKG_VERSION").to_owned(),
+        },
     )
-    .map_err(|error| WiringError::SettingsInit(error.to_string()))?;
+    .execute()
+    .await
+    .map_err(|source| WiringError::StorageUpgradePrerequisite {
+        source: source.into(),
+    })?;
+    let clipboard_changes = clipboard.take_change_stream().map_err(|_| {
+        WiringError::ClipboardInit("failed to open host clipboard change stream".into())
+    })?;
     let temporary_dir = directories.temporary().to_path_buf();
     let clipboard_import_root = temporary_dir.join("clipboard-imports");
     if let Err(error) = std::fs::remove_dir_all(&clipboard_import_root) {
@@ -531,6 +493,7 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
     })?;
     let files: Arc<dyn HostFileAccess> = Arc::from(files);
     let wired = wire_dependencies_from_inputs(CoreWiringInputs {
+        profile_lifecycle,
         paths: paths.clone(),
         secure_storage,
         profile_id: uc_core::ids::ProfileId::from(config.profile_id()),
@@ -563,6 +526,7 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
         temporary_dir,
         clipboard_import_root,
         files,
+        profile_upgrade_backups,
         clipboard_changes,
     })
 }
@@ -589,104 +553,9 @@ mod tests {
         TransferStatusChanged,
     };
 
-    use super::{adopt_v019_profile_directories, wire_host_capabilities, EngineHostEventEmitter};
+    use super::{wire_host_capabilities, EngineHostEventEmitter};
     use crate::assembly::deps::WiringError;
     use crate::assembly::lifecycle::build_daemon_lifecycle;
-
-    #[test]
-    fn v019_profile_directories_are_adopted_before_engine_wiring() {
-        let root = tempfile::tempdir().unwrap();
-        let data_root = root.path();
-        let legacy_identity = data_root.join("iroh-identity_mobile_primary");
-        let legacy_blobs = data_root.join("iroh-blobs_mobile_primary");
-        std::fs::create_dir_all(&legacy_identity).unwrap();
-        std::fs::create_dir_all(&legacy_blobs).unwrap();
-        std::fs::write(legacy_identity.join("identity.bin"), b"identity").unwrap();
-        std::fs::write(legacy_blobs.join("blobs.db"), b"blobs").unwrap();
-
-        adopt_v019_profile_directories(data_root).unwrap();
-
-        assert_eq!(
-            std::fs::read(data_root.join("iroh-identity/identity.bin")).unwrap(),
-            b"identity"
-        );
-        assert_eq!(
-            std::fs::read(data_root.join("iroh-blobs/blobs.db")).unwrap(),
-            b"blobs"
-        );
-        assert!(!legacy_identity.exists());
-        assert!(!legacy_blobs.exists());
-    }
-
-    #[test]
-    fn absent_v019_profile_directories_leave_current_layout_untouched() {
-        let root = tempfile::tempdir().unwrap();
-
-        adopt_v019_profile_directories(root.path()).unwrap();
-
-        assert!(!root.path().join("iroh-identity").exists());
-        assert!(!root.path().join("iroh-blobs").exists());
-    }
-
-    #[test]
-    fn missing_app_data_root_is_treated_as_a_fresh_installation() {
-        let root = tempfile::tempdir().unwrap();
-        let data_root = root.path().join("private");
-
-        adopt_v019_profile_directories(&data_root).unwrap();
-
-        assert!(!data_root.exists());
-    }
-
-    #[test]
-    fn empty_v019_identity_directory_is_removed_when_current_identity_exists() {
-        let root = tempfile::tempdir().unwrap();
-        let current_identity = root.path().join("iroh-identity");
-        let legacy_identity = root.path().join("iroh-identity_profile");
-        std::fs::create_dir_all(&current_identity).unwrap();
-        std::fs::create_dir_all(&legacy_identity).unwrap();
-        std::fs::write(current_identity.join("identity.bin"), b"current identity").unwrap();
-
-        adopt_v019_profile_directories(root.path()).unwrap();
-
-        assert_eq!(
-            std::fs::read(current_identity.join("identity.bin")).unwrap(),
-            b"current identity"
-        );
-        assert!(!legacy_identity.exists());
-    }
-
-    #[test]
-    fn nonempty_v019_and_current_blob_directories_stop_startup() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join("iroh-identity_a")).unwrap();
-        let legacy_blobs = root.path().join("iroh-blobs_a");
-        std::fs::create_dir_all(&legacy_blobs).unwrap();
-        std::fs::write(legacy_blobs.join("blobs.db"), b"legacy blobs").unwrap();
-        std::fs::create_dir_all(root.path().join("iroh-blobs")).unwrap();
-
-        let error = adopt_v019_profile_directories(root.path()).unwrap_err();
-
-        assert!(error.to_string().contains("blob store directory conflict"));
-        assert!(root.path().join("iroh-identity_a").exists());
-        assert!(!root.path().join("iroh-identity").exists());
-    }
-
-    #[test]
-    fn multiple_empty_v019_directories_stop_startup() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join("iroh-identity")).unwrap();
-        std::fs::create_dir_all(root.path().join("iroh-identity_a")).unwrap();
-        std::fs::create_dir_all(root.path().join("iroh-identity_b")).unwrap();
-
-        let error = adopt_v019_profile_directories(root.path()).unwrap_err();
-
-        assert!(error
-            .to_string()
-            .contains("multiple v0.19 identity directories found"));
-        assert!(root.path().join("iroh-identity_a").exists());
-        assert!(root.path().join("iroh-identity_b").exists());
-    }
 
     #[derive(Default)]
     struct TestSecureStorage(Mutex<HashMap<String, Vec<u8>>>);
@@ -707,6 +576,124 @@ mod tests {
         fn delete(&self, key: &str) -> Result<(), HostCapabilityError> {
             self.0.lock().unwrap().remove(key);
             Ok(())
+        }
+    }
+
+    struct BackupTestStorage {
+        storage: Arc<TestSecureStorage>,
+        reject_backup: bool,
+    }
+
+    impl HostSecureStorage for BackupTestStorage {
+        fn get(&self, key: &str) -> Result<Option<Vec<u8>>, HostCapabilityError> {
+            self.storage.get(key)
+        }
+        fn set(&self, key: &str, value: &[u8]) -> Result<(), HostCapabilityError> {
+            if self.reject_backup && key == "profile_upgrade_backup_record_key:v1" {
+                return Err(HostCapabilityError::new(
+                    crate::HostCapabilityErrorCategory::PermissionDenied,
+                    "backup denied",
+                ));
+            }
+            self.storage.set(key, value)
+        }
+        fn delete(&self, key: &str) -> Result<(), HostCapabilityError> {
+            self.storage.delete(key)
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_preparation_stops_before_legacy_mutations_when_backup_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let private = root.path().join("private");
+        let legacy = private.join("iroh-identity_old");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("identity.bin"), b"old identity").unwrap();
+        let marker = private.join("pending-import.json");
+        std::fs::write(&marker, b"invalid import marker").unwrap();
+        let storage = Arc::new(TestSecureStorage::default());
+        let host = HostCapabilities::new(
+            HostDirectories::new(
+                private.clone(),
+                root.path().join("cache"),
+                root.path().join("tmp"),
+                root.path().join("logs"),
+            ),
+            Box::new(BackupTestStorage {
+                storage: storage.clone(),
+                reject_backup: true,
+            }),
+            Box::new(EmptyHostClipboard),
+            Box::new(EmptyHostFiles),
+        );
+        assert!(matches!(
+            wire_host_capabilities(&EngineConfig::new("test"), host).await,
+            Err(WiringError::StorageUpgradePrerequisite { .. })
+        ));
+        assert!(legacy.exists());
+        assert!(!private.join("iroh-identity").exists());
+        assert_eq!(std::fs::read(marker).unwrap(), b"invalid import marker");
+        assert!(storage
+            .get("profile_lifecycle_marker:v1")
+            .unwrap()
+            .is_none());
+        assert!(!private.join("uniclipboard.db").exists());
+    }
+
+    #[tokio::test]
+    async fn startup_preparation_reuses_backup_after_later_import_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let private = root.path().join("private");
+        let legacy = private.join("iroh-identity_old");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("identity.bin"), b"old identity").unwrap();
+        std::fs::write(
+            private.join("pending-import.json"),
+            b"invalid import marker",
+        )
+        .unwrap();
+        let storage = Arc::new(TestSecureStorage::default());
+        let mut previous = None;
+        for _ in 0..2 {
+            let host = HostCapabilities::new(
+                HostDirectories::new(
+                    private.clone(),
+                    root.path().join("cache"),
+                    root.path().join("tmp"),
+                    root.path().join("logs"),
+                ),
+                Box::new(BackupTestStorage {
+                    storage: storage.clone(),
+                    reject_backup: false,
+                }),
+                Box::new(EmptyHostClipboard),
+                Box::new(EmptyHostFiles),
+            );
+            assert!(wire_host_capabilities(&EngineConfig::new("test"), host)
+                .await
+                .is_err());
+            assert!(!legacy.exists());
+            assert_eq!(
+                std::fs::read(private.join("iroh-identity/identity.bin")).unwrap(),
+                b"old identity"
+            );
+            assert!(storage
+                .get("profile_lifecycle_marker:v1")
+                .unwrap()
+                .is_none());
+            let archives: Vec<_> =
+                std::fs::read_dir(private.with_file_name("private-upgrade-backups"))
+                    .unwrap()
+                    .flat_map(|entry| std::fs::read_dir(entry.unwrap().path()).unwrap())
+                    .map(|entry| entry.unwrap().path())
+                    .filter(|path| path.extension().is_some_and(|value| value == "archive"))
+                    .collect();
+            assert_eq!(archives.len(), 1);
+            let current = std::fs::read(&archives[0]).unwrap();
+            if let Some(previous) = previous.as_ref() {
+                assert_eq!(&current, previous);
+            }
+            previous = Some(current);
         }
     }
 

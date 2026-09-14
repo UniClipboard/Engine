@@ -57,6 +57,9 @@ use crate::operations::settings::storage::{
 use crate::operations::settings::upgrade::{
     execute_acknowledge_upgrade, execute_query_upgrade_status,
 };
+use crate::operations::settings::upgrade_backups::{
+    execute_delete_upgrade_backup, execute_list_upgrade_backups,
+};
 use crate::operations::space::cancel_invitation::execute_cancel_invitation;
 use crate::operations::space::cancel_join_space::execute_cancel_join_space;
 use crate::operations::space::create_space::execute_create_space;
@@ -103,6 +106,13 @@ impl EngineRuntime for ProductionRuntime {
             }
             Operation::FactoryResetSpace => {
                 return execute_factory_reset_space(self.profile_reset.as_ref()).await;
+            }
+            Operation::ListUpgradeBackups => {
+                return execute_list_upgrade_backups(self.profile_upgrade_backups.as_ref()).await;
+            }
+            Operation::DeleteUpgradeBackup(input) => {
+                return execute_delete_upgrade_backup(self.profile_upgrade_backups.as_ref(), input)
+                    .await;
             }
             Operation::RecoverNetwork => {
                 return self
@@ -356,7 +366,9 @@ impl EngineRuntime for ProductionRuntime {
                 }
                 Operation::QueryDeviceGroupChoices
                 | Operation::CancelJoinSpace(_)
-                | Operation::FactoryResetSpace => Err(super::operation_unavailable_error()),
+                | Operation::FactoryResetSpace
+                | Operation::ListUpgradeBackups
+                | Operation::DeleteUpgradeBackup(_) => Err(super::operation_unavailable_error()),
                 Operation::ChooseDeviceGroup(_) => Err(super::operation_unavailable_error()),
                 #[cfg(feature = "dev-tools")]
                 Operation::QueryMembershipDiagnostics => Err(super::operation_unavailable_error()),
