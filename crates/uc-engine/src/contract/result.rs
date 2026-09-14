@@ -431,6 +431,7 @@ pub enum OperationResult {
         unlocked: bool,
         resumed: bool,
     },
+    EncryptionPassphraseChanged,
     InvitationIssued {
         invitation_code: String,
         full_invitation: String,
@@ -639,6 +640,9 @@ impl fmt::Debug for OperationResult {
                 .field("kind", &"session_recovered")
                 .field("unlocked", unlocked)
                 .field("resumed", resumed),
+            Self::EncryptionPassphraseChanged => {
+                debug.field("kind", &"encryption_passphrase_changed")
+            }
             Self::InvitationIssued { .. } => debug.field("kind", &"invitation_issued"),
             Self::InvitationCancelled => debug.field("kind", &"invitation_cancelled"),
             Self::SpaceReset => debug.field("kind", &"space_reset"),

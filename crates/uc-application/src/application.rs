@@ -27,7 +27,9 @@ use crate::clipboard::inbound::{ClipboardInboundEventPort, InboundClipboardApply
 use crate::clipboard::local::{
     LocalClipboardOutcome, LocalClipboardProcessError, LocalClipboardRequest,
 };
-use crate::deps::{ApplicationDeps, CurrentSpaceMemberScopePort};
+use crate::deps::{
+    ApplicationDeps, ApplyEncryptionPassphraseChangePort, CurrentSpaceMemberScopePort,
+};
 use crate::device::query_local_device::QueryLocalDeviceUseCase;
 use crate::facade::app_facade::{AppFacade, AppFacadeParts};
 use crate::facade::blob_transfer::BlobTransferFacade;
@@ -53,6 +55,7 @@ pub struct ApplicationSpaceAdapters {
         futures::stream::BoxStream<'static, Result<crate::space::ConnectionHint, anyhow::Error>>,
     pub current_engine_version: String,
     pub admission_credentials: Arc<dyn crate::deps::PrepareSpaceAdmissionCredentialsPort>,
+    pub encryption_passphrase_change: Arc<dyn ApplyEncryptionPassphraseChangePort>,
     pub local_identity: Arc<dyn LocalIdentityPort>,
     pub pairing_invitation: Arc<dyn PairingInvitationPort>,
     pub pairing_invitation_addresses: Arc<dyn PairingInvitationAddressQueryPort>,
@@ -346,6 +349,7 @@ impl ApplicationAssembly {
             connection_hints,
             current_engine_version,
             admission_credentials,
+            encryption_passphrase_change,
             local_identity,
             pairing_invitation,
             pairing_invitation_addresses,
@@ -373,6 +377,7 @@ impl ApplicationAssembly {
                 current_space_identity: Arc::clone(&self.deps.current_space_identity),
                 initial_space_activation: Arc::clone(&self.deps.initial_space_activation),
                 admission_credentials,
+                encryption_passphrase_change,
             },
             admission: SpaceAdmissionDeps {
                 local_identity: Arc::clone(&local_identity),

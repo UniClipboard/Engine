@@ -13,7 +13,6 @@ pub use adapters::{
 };
 #[cfg(test)]
 pub(crate) use admission::decode_full_invitation;
-#[cfg(test)]
 pub(crate) use admission::prepare_registration;
 pub(crate) use admission::{decode_invitation_entry, encode_full_invitation};
 pub(crate) use admission::{
@@ -36,7 +35,7 @@ pub use membership_ledger::SqliteMembershipLedger;
 pub(crate) use security::export_admission_content_key_catalog;
 pub(crate) use security::import_admission_content_key_catalog;
 pub use security::{
-    DefaultMembershipSecurityUpdateAdapter, InMemorySession, KeyMaterialStore,
-    MigrationSpaceAccessAdapter, MlsPeerAdmissionAdapter, OpenMlsHistoricalSignatureVerifier,
-    RuntimeSpaceAccessAdapter, SpaceSessionRebindAdapter,
+    DefaultMembershipSecurityUpdateAdapter, EncryptionPassphraseChange, InMemorySession,
+    KeyMaterialStore, MigrationSpaceAccessAdapter, MlsPeerAdmissionAdapter,
+    OpenMlsHistoricalSignatureVerifier, RuntimeSpaceAccessAdapter, SpaceSessionRebindAdapter,
 };

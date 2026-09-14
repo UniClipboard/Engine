@@ -465,6 +465,37 @@ impl<E> SqliteSpaceAdmissionCredentials<E> {
 }
 
 impl<E: DbExecutor> SqliteSpaceAdmissionCredentials<E> {
+    pub(crate) async fn replace_registration_with_prepared(
+        &self,
+        prepared: &[u8],
+    ) -> Result<(), SpaceAdmissionCredentialStoreError> {
+        let scope = self.active_scope().await.map_err(map_store_error)?;
+        let prepared = decode_prepared_registration(prepared).map_err(map_store_error)?;
+        let encrypted = seal_credentials(
+            &self.keys,
+            &scope,
+            prepared.server_setup.clone(),
+            prepared.registration.clone(),
+        )
+        .map_err(map_store_error)?;
+        self.executor
+            .run(|conn| {
+                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                    sql_query(
+                        "INSERT INTO space_admission_credentials (singleton_id, encrypted_payload) \
+                         VALUES (1, ?) ON CONFLICT(singleton_id) DO UPDATE SET \
+                         encrypted_payload = excluded.encrypted_payload",
+                    )
+                    .bind::<Binary, _>(encrypted)
+                    .execute(conn)?;
+                    self.load_on(conn, &scope)?
+                        .ok_or_else(|| anyhow::anyhow!("credential replacement was not durable"))?;
+                    Ok(())
+                })
+            })
+            .map_err(map_store_error)
+    }
+
     pub async fn ensure_registration(
         &self,
         passphrase: &Passphrase,

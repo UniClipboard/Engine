@@ -12,14 +12,14 @@ use uc_engine::observability::{
     AnalyticsPort, DeviceType, Event, GroupIdentifyPayload, IdentifyPayload, Os, ReleaseOutcome,
 };
 use uc_engine::{
-    ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig,
-    ExportEntryInput, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
-    HostClipboard, HostClipboardRepresentation, HostClipboardSnapshot, HostDirectories,
-    HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage, JoinSpaceInput,
-    NetworkSettingsPatch, ObserveClipboardChangeInput, Operation, OperationResult,
-    RecoverSessionInput, RelayCredentialEdit, RemoveMemberInput, ResendEntryInput,
-    RestoreClipboardInput, SaveRelayInput, SaveRelayOutcome, SecretString, SendFilesInput,
-    SendImageInput, SendTextInput, SettingsPatch,
+    ChangeEncryptionPassphraseInput, ClipboardRestoreMode, ClipboardRestoreOutcome,
+    CreateSpaceInput, Engine, EngineConfig, ExportEntryInput, HostCapabilities,
+    HostCapabilityError, HostCapabilityErrorCategory, HostClipboard, HostClipboardRepresentation,
+    HostClipboardSnapshot, HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata,
+    HostSecureStorage, JoinSpaceInput, NetworkSettingsPatch, ObserveClipboardChangeInput,
+    Operation, OperationResult, RecoverSessionInput, RelayCredentialEdit, RemoveMemberInput,
+    ResendEntryInput, RestoreClipboardInput, SaveRelayInput, SaveRelayOutcome, SecretString,
+    SendFilesInput, SendImageInput, SendTextInput, SettingsPatch,
 };
 use zeroize::Zeroizing;
 
@@ -443,6 +443,11 @@ enum WorkerCommand {
     },
     IssueInvitation {
         response: mpsc::Sender<Result<InvitationIssued, BindingError>>,
+    },
+    ChangeEncryptionPassphrase {
+        passphrase: Zeroizing<String>,
+        passphrase_confirmation: Zeroizing<String>,
+        response: mpsc::Sender<Result<(), BindingError>>,
     },
     JoinSpace {
         invitation_code: Zeroizing<String>,
@@ -955,6 +960,27 @@ impl MobileEngine {
         let (response, result) = mpsc::channel();
         commands
             .send(WorkerCommand::IssueInvitation { response })
+            .map_err(|_| BindingError::RuntimeUnavailable)?;
+        result
+            .recv()
+            .map_err(|_| BindingError::RuntimeUnavailable)?
+    }
+
+    pub fn change_encryption_passphrase(
+        &self,
+        passphrase: String,
+        passphrase_confirmation: String,
+    ) -> Result<(), BindingError> {
+        let passphrase = Zeroizing::new(passphrase);
+        let passphrase_confirmation = Zeroizing::new(passphrase_confirmation);
+        let commands = self.command_sender()?;
+        let (response, result) = mpsc::channel();
+        commands
+            .send(WorkerCommand::ChangeEncryptionPassphrase {
+                passphrase,
+                passphrase_confirmation,
+                response,
+            })
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
@@ -1587,6 +1613,25 @@ async fn run_worker_loop(
                     .and_then(map_invitation_issued);
                 let _ = response.send(result);
             }
+            WorkerCommand::ChangeEncryptionPassphrase {
+                passphrase,
+                passphrase_confirmation,
+                response,
+            } => {
+                let result = engine
+                    .execute(Operation::ChangeEncryptionPassphrase(
+                        ChangeEncryptionPassphraseInput {
+                            passphrase: SecretString::new(passphrase.as_str()),
+                            passphrase_confirmation: SecretString::new(
+                                passphrase_confirmation.as_str(),
+                            ),
+                        },
+                    ))
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_encryption_passphrase_changed);
+                let _ = response.send(result);
+            }
             WorkerCommand::JoinSpace {
                 mut invitation_code,
                 device_name,
@@ -2095,6 +2140,10 @@ fn map_invitation_issued(result: OperationResult) -> Result<InvitationIssued, Bi
         expires_at_ms,
         availability: map_invitation_availability(availability),
     })
+}
+
+fn map_encryption_passphrase_changed(result: OperationResult) -> Result<(), BindingError> {
+    unpack_operation!(result, OperationResult::EncryptionPassphraseChanged => ())
 }
 
 fn map_join_space_status(result: OperationResult) -> Result<JoinSpaceStatus, BindingError> {

@@ -114,6 +114,7 @@ fn typescript_contract_exposes_join_upgrade_status() {
         "joinSpace(",
         "cancelJoinSpace(joinId: string): Promise<OhJoinSpaceStatus>",
         "queryDeviceGroupChoices(): Promise<string>",
+        "changeEncryptionPassphrase(passphrase: string, passphraseConfirmation: string): Promise<void>",
     ] {
         assert!(
             declarations.contains(required),

@@ -155,14 +155,15 @@ pub use settings::{
 };
 
 pub use space_setup::{
-    CancelInvitationError, CompletePendingSpaceTransitionError, CurrentInvitation,
-    InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
-    IssuePairingInvitationResult, MembershipConflictBranchView, MembershipConflictView,
-    MembershipConflictsView, PairingInvitationAddressCandidate, QueryMembershipConflictsError,
-    QueryPairingInvitationAddressesError, QueryPendingSpaceTransitionError, QuerySetupStateError,
-    RedeemPairingInvitationError, ResetSpaceError, ResolveMembershipConflictError,
-    ResolveMembershipConflictInput, ResolveMembershipConflictResult, SetupStateView,
-    SpaceActivityError, SpaceFacade, UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
+    CancelInvitationError, ChangeEncryptionPassphraseError, CompletePendingSpaceTransitionError,
+    CurrentInvitation, InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult,
+    IssuePairingInvitationError, IssuePairingInvitationResult, MembershipConflictBranchView,
+    MembershipConflictView, MembershipConflictsView, PairingInvitationAddressCandidate,
+    QueryMembershipConflictsError, QueryPairingInvitationAddressesError,
+    QueryPendingSpaceTransitionError, QuerySetupStateError, RedeemPairingInvitationError,
+    ResetSpaceError, ResolveMembershipConflictError, ResolveMembershipConflictInput,
+    ResolveMembershipConflictResult, SetupStateView, SpaceActivityError, SpaceFacade,
+    UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
 };
 pub use storage::{ClearCacheResultView, StorageFacade, StorageFacadeError, StorageStatsView};
 pub use upgrade::{AcknowledgeUpgradeError, DetectUpgradeError, UpgradeFacade, UpgradeStatus};

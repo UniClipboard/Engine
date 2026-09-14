@@ -119,21 +119,22 @@ use crate::facade::space_setup::{
 };
 use crate::facade::upgrade::UpgradeFacade;
 use crate::facade::{
-    BlobTransferError, BlobTransferFacade, ClipboardCaptureFacade, ClipboardHistoryFacade,
-    ClipboardOutboundFacade, ClipboardRestoreError, ClipboardRestoreFacade, ClipboardSyncError,
-    ClipboardSyncFacade, DiagnosticsFacade, DispatchEntryOutcome, FetchBlobCommand,
-    FetchBlobResult, FetchBlobToPathCommand, FetchBlobToPathResult, LocalDeviceInfo,
-    ProbeProfileKeyAccessError, PublishBlobCommand, PublishBlobPathCommand, PublishBlobResult,
-    QuerySpaceAccessStateError, ResendEntryCommand, ResendEntryError, ResendReport, ResourceFacade,
-    SearchFacade, SearchFacadeError, SearchPageView, SearchQueryInput, SearchRebuildAcceptedView,
-    SearchStatusView, SettingsFacade, SettingsFacadeError, SpaceAccessState, SpaceFacade,
-    StorageFacade,
+    BlobTransferError, BlobTransferFacade, ChangeEncryptionPassphraseError, ClipboardCaptureFacade,
+    ClipboardHistoryFacade, ClipboardOutboundFacade, ClipboardRestoreError, ClipboardRestoreFacade,
+    ClipboardSyncError, ClipboardSyncFacade, DiagnosticsFacade, DispatchEntryOutcome,
+    FetchBlobCommand, FetchBlobResult, FetchBlobToPathCommand, FetchBlobToPathResult,
+    LocalDeviceInfo, ProbeProfileKeyAccessError, PublishBlobCommand, PublishBlobPathCommand,
+    PublishBlobResult, QuerySpaceAccessStateError, ResendEntryCommand, ResendEntryError,
+    ResendReport, ResourceFacade, SearchFacade, SearchFacadeError, SearchPageView,
+    SearchQueryInput, SearchRebuildAcceptedView, SearchStatusView, SettingsFacade,
+    SettingsFacadeError, SpaceAccessState, SpaceFacade, StorageFacade,
 };
 use crate::profile::probe_profile_key_access::ProbeProfileKeyAccessUseCase;
 use crate::space::{
     LockSpaceSessionError, NetworkRecoveryFacade, NetworkRecoveryRequestError,
     NetworkRecoveryStatus, RecoverSpaceSessionError, RecoverSpaceSessionResult,
 };
+use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::DeviceId;
 use uc_core::ports::{PeerReachabilityChanged, ReachabilityState};
 use uc_core::ClipboardChangeOrigin;
@@ -541,6 +542,16 @@ impl AppFacade {
         &self,
     ) -> Result<IssuePairingInvitationResult, IssuePairingInvitationError> {
         self.space.issue_pairing_invitation().await
+    }
+
+    pub async fn change_encryption_passphrase(
+        &self,
+        passphrase: &Passphrase,
+        passphrase_confirmation: &Passphrase,
+    ) -> Result<(), ChangeEncryptionPassphraseError> {
+        self.space
+            .change_encryption_passphrase(passphrase, passphrase_confirmation)
+            .await
     }
 
     /// 按指定本机地址签发配对邀请。

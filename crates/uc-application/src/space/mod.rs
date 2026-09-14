@@ -46,12 +46,13 @@ pub use facade::{
 pub(crate) use facade::{
     SpaceAdmissionDeps, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps,
 };
-pub use lifecycle::{CurrentInvitation, QuerySetupStateError, SetupStateView};
 pub use lifecycle::{
-    InitializeSpaceError, InitializeSpaceResult, LockSpaceSessionError, QuerySpaceAccessStateError,
-    RecoverSpaceSessionError, RecoverSpaceSessionResult, ResetSpaceError, SpaceAccessState,
-    UnlockSpaceError,
+    ApplyEncryptionPassphraseChangePort, ApplyEncryptionPassphraseChangePortError,
+    ChangeEncryptionPassphraseError, InitializeSpaceError, InitializeSpaceResult,
+    LockSpaceSessionError, QuerySpaceAccessStateError, RecoverSpaceSessionError,
+    RecoverSpaceSessionResult, ResetSpaceError, SpaceAccessState, UnlockSpaceError,
 };
+pub use lifecycle::{CurrentInvitation, QuerySetupStateError, SetupStateView};
 pub use membership::{
     AdvanceMembershipBranchTransitionError, AdvanceMembershipBranchTransitionInput,
     AdvanceMembershipBranchTransitionPort, DecideDeviceTrustChange, DecideDeviceTrustChangeError,

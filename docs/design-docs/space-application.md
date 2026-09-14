@@ -131,6 +131,7 @@ activity，持有唯一暂停、恢复和失败补偿顺序。Search 与 receive
 | `lifecycle/recover_space_session/` | `use_case.rs`, `model.rs`, `error.rs` | 从已保存钥匙恢复会话和后台活动 |
 | `lifecycle/query_space_access_state/` | `use_case.rs`, `model.rs`, `error.rs` | 查询是否已有 Space、会话是否 ready |
 | `lifecycle/query_space_setup_state/` | `use_case.rs`, `model.rs`, `error.rs` | 查询 setup UI 所需的 Space、邀请、设备名和 re-pairing 状态 |
+| `lifecycle/change_encryption_passphrase/` | `use_case.rs`, `ports.rs`, `error.rs` | 设备列表只显示有效本机时修改为用户自定义口令；不要求重新配对状态 |
 | `lifecycle/rebuild_space/` | `use_case.rs`, `transition.rs`, `membership_rebuilder.rs`, `ports.rs` | 可恢复地重建单设备 Space |
 | `lifecycle/reset_space/` | `use_case.rs`, `ports.rs`, `error.rs` | 用户重置和重置提交状态查询 |
 | `lifecycle/upgrade_space/` | `use_case.rs`, `error.rs` | 跨版本里程碑触发必要重建并记录版本 |
@@ -284,6 +285,13 @@ flowchart TD
 - **关系**：读取 current Space、邀请 holder、settings 和 `RePairingState`。
 - **重点关注**：不修复状态、不拨号；邀请只是内存临时状态，重启丢失是设计行为。
 
+#### `ChangeEncryptionPassphraseUseCase`
+
+- **入口**：一次提交用户自定义的新口令及再次输入值。
+- **职责/作用**：先确认两次输入一致，再使用与公开设备列表相同的当前成员范围确认只存在有效本机；撤销全部现有邀请后调用单一口令替换能力。
+- **关系**：与邀请签发共享串行边界；Infra 保存受保护恢复记录并在重启时前向完成。
+- **重点关注**：不读取或要求 re-pairing 提示；可用或暂停的其他成员任一存在都拒绝；不生成口令；不清除既有 re-pairing 提示，不遍历或重加密历史内容。
+
 #### `RebuildSpaceUseCase`
 
 - **入口**：无输入，内部返回唯一目标 `SpaceId`。
@@ -338,9 +346,9 @@ flowchart TD
 #### `CancelPairingInvitationUseCase`
 
 - **入口**：无输入，返回 `()` 或 `NotIssued`。
-- **职责/作用**：清空所有进程内待用邀请。
+- **职责/作用**：逐项撤销实际发行方中的全部待用邀请，再清空进程内 holder；发行方已不存在或已过期视为撤销完成。
 - **关系**：操作 `InMemoryPairingInvitationHolder`；reset 也复用 holder 的清理 port。
-- **重点关注**：不通知 rendezvous、不修改持久成员状态；竞态加入会在准入 endpoint 中因 invitation miss 被拒绝。
+- **重点关注**：发行方暂时不可用时保留本机 holder 供重试，不修改持久成员状态；成功撤销后竞态加入会在准入 endpoint 中因 invitation miss 被拒绝。
 
 #### `SpaceAdmissionProtocol`
 

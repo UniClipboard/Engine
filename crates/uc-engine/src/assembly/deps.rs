@@ -54,6 +54,12 @@ pub enum WiringError {
         #[source]
         source: anyhow::Error,
     },
+
+    #[error("unfinished passphrase change could not be recovered")]
+    PassphraseChangeRecovery {
+        #[source]
+        source: uc_application::deps::ApplyEncryptionPassphraseChangePortError,
+    },
 }
 
 /// P2P / iroh sync-engine assembly inputs. Sole consumer:
@@ -105,6 +111,11 @@ pub struct SyncEngineDeps {
     /// Space-generation-bound OPAQUE setup and registration lifecycle.
     pub admission_credentials: Arc<
         uc_infra::space::SqliteSpaceAdmissionCredentials<
+            Arc<uc_infra::db::executor::DieselSqliteExecutor>,
+        >,
+    >,
+    pub encryption_passphrase_change: Arc<
+        uc_infra::space::EncryptionPassphraseChange<
             Arc<uc_infra::db::executor::DieselSqliteExecutor>,
         >,
     >,

@@ -5,12 +5,12 @@ use napi::bindgen_prelude::Buffer;
 use napi::Status;
 use napi_derive::napi;
 use uc_engine::{
-    CancelJoinSpaceInput, ChooseDeviceGroupInput, ClipboardRestoreMode, ClipboardRestoreOutcome,
-    CreateSpaceInput, Engine, EngineConfig, EngineError, EngineEvent, EngineState, EventStream,
-    ExportEntryInput, HostFileHandle, InvitationAvailability, JoinSpaceInput, Operation,
-    OperationResult, OperationTerminal, RecoverSessionInput, RefreshReason, RemoveMemberInput,
-    RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput, SendReportSummary,
-    SendTextInput,
+    CancelJoinSpaceInput, ChangeEncryptionPassphraseInput, ChooseDeviceGroupInput,
+    ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig,
+    EngineError, EngineEvent, EngineState, EventStream, ExportEntryInput, HostFileHandle,
+    InvitationAvailability, JoinSpaceInput, Operation, OperationResult, OperationTerminal,
+    RecoverSessionInput, RefreshReason, RemoveMemberInput, RestoreClipboardInput, SecretString,
+    SendFilesInput, SendImageInput, SendReportSummary, SendTextInput,
 };
 use zeroize::Zeroizing;
 
@@ -237,6 +237,30 @@ impl OhEngine {
                 expires_at_ms: expires_at_ms as f64,
                 availability: invitation_availability(availability).to_owned(),
             }),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn change_encryption_passphrase(
+        &self,
+        passphrase: String,
+        passphrase_confirmation: String,
+    ) -> napi::Result<()> {
+        let passphrase = Zeroizing::new(passphrase);
+        let passphrase_confirmation = Zeroizing::new(passphrase_confirmation);
+        match self
+            .engine
+            .execute(Operation::ChangeEncryptionPassphrase(
+                ChangeEncryptionPassphraseInput {
+                    passphrase: SecretString::new(passphrase.as_str()),
+                    passphrase_confirmation: SecretString::new(passphrase_confirmation.as_str()),
+                },
+            ))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::EncryptionPassphraseChanged => Ok(()),
             _ => Err(unexpected_result()),
         }
     }

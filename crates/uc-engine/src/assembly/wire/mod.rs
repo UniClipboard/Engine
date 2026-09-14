@@ -476,6 +476,15 @@ pub async fn wire_dependencies_from_inputs(
         Arc::clone(&membership_ledger) as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
         Arc::clone(&admission_state),
     ));
+    let encryption_passphrase_change = Arc::new(uc_infra::space::EncryptionPassphraseChange::new(
+        Arc::clone(&space_access_adapter),
+        Arc::clone(&admission_credentials),
+        Arc::clone(&active_generation_manifest_store),
+    ));
+    encryption_passphrase_change
+        .recover_pending()
+        .await
+        .map_err(|source| WiringError::PassphraseChangeRecovery { source })?;
     let (
         admission_space_transition,
         device_management_reset_data,
@@ -1012,6 +1021,7 @@ pub async fn wire_dependencies_from_inputs(
             membership_projection,
             admission_state,
             admission_credentials,
+            encryption_passphrase_change,
             admission_space_transition,
             re_pairing_state_store,
             membership_branch_transition_executor,

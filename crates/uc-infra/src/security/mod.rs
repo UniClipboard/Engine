@@ -33,6 +33,7 @@ mod v3_device_management_reset;
 mod v3_initial_space_activation;
 mod v3_membership_branch_transition;
 
+pub(crate) use active_space_generation_manifest_store::EncryptionPassphraseChangeJournal;
 pub use active_space_generation_manifest_store::{
     ActiveRuntimeManifest, ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore,
     ActiveSpaceGenerationManifestStoreError,

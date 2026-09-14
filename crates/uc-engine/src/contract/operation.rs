@@ -29,6 +29,7 @@ pub enum OperationKind {
     CancelJoinSpace,
     UnlockSpace,
     RecoverSession,
+    ChangeEncryptionPassphrase,
     IssueInvitation,
     CancelInvitation,
     ResetSpace,
@@ -127,6 +128,7 @@ impl fmt::Display for OperationKind {
             Self::CancelJoinSpace => "cancel_join_space",
             Self::UnlockSpace => "unlock_space",
             Self::RecoverSession => "recover_session",
+            Self::ChangeEncryptionPassphrase => "change_encryption_passphrase",
             Self::IssueInvitation => "issue_invitation",
             Self::CancelInvitation => "cancel_invitation",
             Self::ResetSpace => "reset_space",
@@ -241,6 +243,25 @@ mod device_group_choice_contract_tests {
     }
 }
 
+#[cfg(test)]
+mod encryption_passphrase_contract_tests {
+    use super::{ChangeEncryptionPassphraseInput, Operation, OperationKind};
+    use crate::SecretString;
+
+    #[test]
+    fn passphrase_change_operation_has_stable_kind_and_redacts_input() {
+        let operation = Operation::ChangeEncryptionPassphrase(ChangeEncryptionPassphraseInput {
+            passphrase: SecretString::new("DO-NOT-LOG-THIS"),
+            passphrase_confirmation: SecretString::new("DO-NOT-LOG-EITHER"),
+        });
+
+        assert_eq!(operation.kind(), OperationKind::ChangeEncryptionPassphrase);
+        assert_eq!(operation.kind().to_string(), "change_encryption_passphrase");
+        assert!(!format!("{operation:?}").contains("DO-NOT-LOG-THIS"));
+        assert!(!format!("{operation:?}").contains("DO-NOT-LOG-EITHER"));
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub enum Operation {
     CreateSpace(CreateSpaceInput),
@@ -248,6 +269,7 @@ pub enum Operation {
     CancelJoinSpace(CancelJoinSpaceInput),
     UnlockSpace(UnlockSpaceInput),
     RecoverSession(RecoverSessionInput),
+    ChangeEncryptionPassphrase(ChangeEncryptionPassphraseInput),
     IssueInvitation,
     CancelInvitation,
     ResetSpace,
@@ -348,6 +370,7 @@ impl Operation {
             Self::CancelJoinSpace(_) => OperationKind::CancelJoinSpace,
             Self::UnlockSpace(_) => OperationKind::UnlockSpace,
             Self::RecoverSession(_) => OperationKind::RecoverSession,
+            Self::ChangeEncryptionPassphrase(_) => OperationKind::ChangeEncryptionPassphrase,
             Self::IssueInvitation => OperationKind::IssueInvitation,
             Self::CancelInvitation => OperationKind::CancelInvitation,
             Self::ResetSpace => OperationKind::ResetSpace,
@@ -500,6 +523,22 @@ impl fmt::Debug for JoinSpaceInput {
 #[derive(Clone, PartialEq, Eq)]
 pub struct UnlockSpaceInput {
     pub passphrase: SecretString,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ChangeEncryptionPassphraseInput {
+    pub passphrase: SecretString,
+    pub passphrase_confirmation: SecretString,
+}
+
+impl fmt::Debug for ChangeEncryptionPassphraseInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChangeEncryptionPassphraseInput")
+            .field("passphrase", &"[REDACTED]")
+            .field("passphrase_confirmation", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl fmt::Debug for UnlockSpaceInput {

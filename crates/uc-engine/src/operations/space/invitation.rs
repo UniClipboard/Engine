@@ -67,6 +67,14 @@ fn map_issue_invitation_error(error: IssuePairingInvitationError) -> EngineError
             EngineErrorCategory::Unavailable,
             true,
         ),
+        IssuePairingInvitationError::PassphraseChangeRecovery { .. } => {
+            error!(error = %error, "issue invitation requires passphrase change recovery");
+            EngineError::new(
+                INVITATION_RECOVERY_REQUIRED_CODE,
+                EngineErrorCategory::InvalidState,
+                true,
+            )
+        }
         IssuePairingInvitationError::Internal(_) => {
             error!(error = %error, "issue invitation failed");
             EngineError::new(INVITATION_FAILED_CODE, EngineErrorCategory::Internal, false)

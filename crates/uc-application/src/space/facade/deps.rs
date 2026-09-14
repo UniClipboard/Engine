@@ -13,7 +13,10 @@ use uc_core::ports::{
 use uc_observability_contract::analytics::AnalyticsFacade;
 
 use crate::clipboard::write::MobileConsumableBackfill;
-use crate::deps::{ApplicationDeps, DeviceManagementResetDataPort};
+use crate::deps::{
+    ApplicationDeps, ApplyEncryptionPassphraseChangePort, DeviceManagementResetDataPort,
+    PrepareSpaceAdmissionCredentialsPort,
+};
 use crate::deps::{
     CurrentSpaceIdentityPort, InitialSpaceActivationPort, RePairingStateStorePort,
     SpaceAccessPorts, SpaceRebuildProgressPort,
@@ -27,7 +30,8 @@ pub(crate) struct SpaceSessionDeps {
     pub current_engine_version: String,
     pub current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
     pub initial_space_activation: Arc<dyn InitialSpaceActivationPort>,
-    pub admission_credentials: Arc<dyn crate::deps::PrepareSpaceAdmissionCredentialsPort>,
+    pub admission_credentials: Arc<dyn PrepareSpaceAdmissionCredentialsPort>,
+    pub encryption_passphrase_change: Arc<dyn ApplyEncryptionPassphraseChangePort>,
 }
 
 pub(crate) struct SpaceAdmissionDeps {
