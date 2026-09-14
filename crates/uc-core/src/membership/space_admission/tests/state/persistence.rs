@@ -59,20 +59,20 @@ fn pending_exchanges_decode_real_bytes_from_the_previous_v1_layout() {
 }
 
 #[test]
-fn authenticated_join_decodes_the_previous_v2_record_layout() {
-    let previous_v2 = joiner_prepared_aggregate_fixture().into_v2_persistence_fixture();
-    let encoded = previous_v2
-        .encode_persisted()
-        .expect("previous V2 record encodes");
-
-    let decoded = SpaceAdmissionAggregate::decode_persisted(&encoded)
-        .expect("previous V2 record remains readable");
-
-    assert_eq!(decoded, previous_v2);
+fn authenticated_join_round_trips_through_the_current_v2_record() {
+    let current_v2 = joiner_prepared_aggregate_fixture();
+    let encoded = current_v2.encode_persisted().expect("V2 record encodes");
+    let (format_version, _) = postcard::take_from_bytes::<u16>(&encoded)
+        .expect("V2 record starts with its format version");
     assert_eq!(
-        decoded.supersede(),
-        Err(SpaceAdmissionAggregateError::UnsafeSupersession)
+        format_version,
+        crate::membership::SPACE_ADMISSION_RECORD_FORMAT_V2
     );
+
+    let decoded =
+        SpaceAdmissionAggregate::decode_persisted(&encoded).expect("V2 record remains readable");
+
+    assert_eq!(decoded, current_v2);
 }
 
 fn assert_admission_persistence_round_trip(aggregate: SpaceAdmissionAggregate) {

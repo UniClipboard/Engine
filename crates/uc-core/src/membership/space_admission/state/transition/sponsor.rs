@@ -346,7 +346,7 @@ impl SpaceAdmissionAggregate {
             .record_version
             .checked_add(1)
             .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
-        self.format_version = SPACE_ADMISSION_RECORD_FORMAT_V6;
+        self.format_version = SPACE_ADMISSION_RECORD_FORMAT_V2;
         self.state = SpaceAdmissionRecordState::Terminal(
             SpaceAdmissionTerminalState::SponsorExpired(SpaceAdmissionSponsorExpired {
                 abandonment_cleanup: cleanup,
@@ -552,7 +552,7 @@ impl SpaceAdmissionAggregate {
         }
         let saved_reply = SavedAdmissionReply::new(self.admission_id, evidence, abandoned_reply)
             .map_err(|_| SpaceAdmissionAggregateError::InvalidAbandonmentRequest)?;
-        self.format_version = SPACE_ADMISSION_RECORD_FORMAT_V4;
+        self.format_version = SPACE_ADMISSION_RECORD_FORMAT_V2;
         self.record_version = record_version;
         self.state = SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
             SpaceAdmissionRejectedState::Sponsor(SpaceAdmissionSponsorRejected {

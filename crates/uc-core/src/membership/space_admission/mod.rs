@@ -49,8 +49,7 @@ pub use state::{
     SponsorCommitPreparation, SponsorCompletePreparation, SponsorPairingConfirmationStatus,
     SponsorPairingConfirmationSummary, SponsorSettlementPreparation,
     StartedJoinerInvitationResolution, SPACE_ADMISSION_RECORD_FORMAT_V1,
-    SPACE_ADMISSION_RECORD_FORMAT_V2, SPACE_ADMISSION_RECORD_FORMAT_V3,
-    SPACE_ADMISSION_RECORD_FORMAT_V4,
+    SPACE_ADMISSION_RECORD_FORMAT_V2,
 };
 #[cfg(test)]
 pub(crate) use state::{

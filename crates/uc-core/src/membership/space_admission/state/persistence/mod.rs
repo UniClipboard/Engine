@@ -76,6 +76,7 @@ struct PersistedSpaceAdmissionRecordV2 {
     admission_id: [u8; 32],
     started_at_ms: i64,
     expires_at_ms: i64,
+    attempt_digest: Option<[u8; 32]>,
     state: PersistedSpaceAdmissionStateV2,
 }
 
@@ -86,6 +87,7 @@ enum PersistedSpaceAdmissionStateV2 {
         join_id: [u8; 16],
         local_join_ordinal: u64,
         reason: u8,
+        cleanup: Option<PersistedAdmissionCleanupObligationV2>,
     },
     SponsorApplied {
         applied: PersistedSponsorAppliedV1,
@@ -94,127 +96,31 @@ enum PersistedSpaceAdmissionStateV2 {
     SponsorCompleted {
         completed: PersistedCompletedV1,
         confirmation: PersistedSponsorPairingConfirmationV2,
-    },
-}
-
-#[derive(Serialize, Deserialize)]
-struct PersistedSpaceAdmissionRecordV3 {
-    format_version: u16,
-    record_version: u64,
-    admission_id: [u8; 32],
-    started_at_ms: i64,
-    expires_at_ms: i64,
-    attempt_digest: [u8; 32],
-    state: PersistedSpaceAdmissionStateV3,
-}
-
-#[derive(Serialize, Deserialize)]
-enum PersistedSpaceAdmissionStateV3 {
-    Existing(Vec<u8>),
-    LocalJoinerTerminated {
-        join_id: [u8; 16],
-        local_join_ordinal: u64,
-        reason: u8,
-        cleanup: Option<PersistedAdmissionCleanupObligationV3>,
-    },
-    SponsorApplied {
-        applied: PersistedSponsorAppliedV1,
-        confirmation: PersistedSponsorPairingConfirmationV2,
-    },
-    SponsorCompleted {
-        completed: PersistedCompletedV1,
-        confirmation: PersistedSponsorPairingConfirmationV2,
-    },
-}
-
-#[derive(Serialize, Deserialize)]
-struct PersistedAdmissionCleanupObligationV3 {
-    commit_knowledge: u8,
-    member_binding: Option<Vec<u8>>,
-    local_peer_id: [u8; 32],
-    remote_peer_id: [u8; 32],
-    continuation_credential: Vec<u8>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct PersistedSpaceAdmissionRecordV4 {
-    format_version: u16,
-    record_version: u64,
-    admission_id: [u8; 32],
-    started_at_ms: i64,
-    expires_at_ms: i64,
-    attempt_digest: [u8; 32],
-    state: PersistedSpaceAdmissionStateV4,
-}
-
-#[derive(Serialize, Deserialize)]
-enum PersistedSpaceAdmissionStateV4 {
-    LocalJoinerTerminated {
-        join_id: [u8; 16],
-        local_join_ordinal: u64,
-        reason: u8,
-        cleanup: PersistedAdmissionCleanupObligationV4,
     },
     SponsorAbandoned {
         peer_binding: PersistedPeerBindingV1,
         continuation_credential: Vec<u8>,
         saved_reply: PersistedSavedReplyV1,
-        cleanup: PersistedSponsorAbandonmentCleanupV4,
+        cleanup: PersistedSponsorAbandonmentCleanupV2,
+    },
+    SponsorExpired {
+        cleanup: PersistedSponsorAbandonmentCleanupV2,
     },
 }
 
 #[derive(Serialize, Deserialize)]
-struct PersistedAdmissionCleanupObligationV4 {
+struct PersistedAdmissionCleanupObligationV2 {
     commit_knowledge: u8,
     member_binding: Option<Vec<u8>>,
     local_peer_id: [u8; 32],
     remote_peer_id: [u8; 32],
     continuation_credential: Vec<u8>,
     pending_exchange: Option<PersistedAnyPendingExchangeV1>,
+    local_space_transition: Option<Vec<u8>>,
 }
 
 #[derive(Serialize, Deserialize)]
-struct PersistedSpaceAdmissionRecordV5 {
-    format_version: u16,
-    record_version: u64,
-    admission_id: [u8; 32],
-    started_at_ms: i64,
-    expires_at_ms: i64,
-    attempt_digest: [u8; 32],
-    state: PersistedSpaceAdmissionStateV5,
-}
-
-#[derive(Serialize, Deserialize)]
-struct PersistedSpaceAdmissionRecordV6 {
-    format_version: u16,
-    record_version: u64,
-    admission_id: [u8; 32],
-    started_at_ms: i64,
-    expires_at_ms: i64,
-    attempt_digest: [u8; 32],
-    state: PersistedSpaceAdmissionStateV6,
-}
-
-#[derive(Serialize, Deserialize)]
-enum PersistedSpaceAdmissionStateV6 {
-    SponsorExpired {
-        cleanup: PersistedSponsorAbandonmentCleanupV4,
-    },
-}
-
-#[derive(Serialize, Deserialize)]
-enum PersistedSpaceAdmissionStateV5 {
-    LocalJoinerTerminated {
-        join_id: [u8; 16],
-        local_join_ordinal: u64,
-        reason: u8,
-        cleanup: PersistedAdmissionCleanupObligationV4,
-        local_space_transition: Vec<u8>,
-    },
-}
-
-#[derive(Serialize, Deserialize)]
-enum PersistedSponsorAbandonmentCleanupV4 {
+enum PersistedSponsorAbandonmentCleanupV2 {
     NotRequired,
     Known(Vec<u8>),
     Unknown {

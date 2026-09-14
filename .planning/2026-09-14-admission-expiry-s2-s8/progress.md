@@ -26,7 +26,7 @@
 - Prepared termination persists unknown-commit cleanup; known Commit states persist the exact admission/member/Add binding plus the authenticated continuation material.
 - Cancel, expiry and a distinct new Join all release the local slot without waiting for the peer; a concurrent late Commit loses the state-version check.
 - Legacy records can still continue authentication and retain their original no-deadline behavior.
-- Strict review moved the new cleanup fields into record format V3; the already committed V2 layout remains readable and has a regression test.
+- 严格审查当时把新增清理字段放进过渡记录布局；发布前已把全部分支内布局统一收敛到 V2，并保留 V1 读取兼容。
 - Core admission, Application admission and real SQLite admission-state tests pass for S4.
 - S4 was committed as `746b092d`.
 - S5 adds a fixed Abandonment/Abandoned exchange to terminal Joiner records and resumes it through the existing authenticated admission transport.

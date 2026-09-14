@@ -123,9 +123,7 @@ impl SpaceAdmissionAggregate {
             return Err(SpaceAdmissionAggregateError::InvalidInboundEvidence);
         }
         let replacement = Self {
-            format_version: if attempt_digest.is_some() {
-                SPACE_ADMISSION_RECORD_FORMAT_V3
-            } else if attempt_timeline.is_some() {
+            format_version: if attempt_timeline.is_some() {
                 SPACE_ADMISSION_RECORD_FORMAT_V2
             } else {
                 SPACE_ADMISSION_RECORD_FORMAT_V1

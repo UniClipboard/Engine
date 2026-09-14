@@ -115,14 +115,7 @@ impl SpaceAdmissionAggregate {
         };
         self.record_version = record_version;
         if cleanup.is_some() {
-            self.format_version = if cleanup
-                .as_ref()
-                .is_some_and(|cleanup| cleanup.local_space_transition.is_some())
-            {
-                SPACE_ADMISSION_RECORD_FORMAT_V5
-            } else {
-                SPACE_ADMISSION_RECORD_FORMAT_V4
-            };
+            self.format_version = SPACE_ADMISSION_RECORD_FORMAT_V2;
         }
         self.state = if self.attempt_timeline.is_none()
             && matches!(reason, SpaceAdmissionTerminationReason::Cancelled)
@@ -165,7 +158,7 @@ impl SpaceAdmissionAggregate {
             .record_version
             .checked_add(1)
             .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
-        self.format_version = SPACE_ADMISSION_RECORD_FORMAT_V4;
+        self.format_version = SPACE_ADMISSION_RECORD_FORMAT_V2;
         Ok(AdmissionTransition::new(self, &[]))
     }
 

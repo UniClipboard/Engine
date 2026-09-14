@@ -29,7 +29,7 @@
 - Local cancellation does not wait for a CancelRequested exchange after the attempt is bounded by the new five-minute contract.
 - The terminal record keeps the authenticated peer binding and continuation credential required by S5; the current Join pointer is released independently.
 - Old records without the new deadline keep their previous recovery behavior and do not gain an invented cleanup contract.
-- S2 already established disk format V2, so S4 cleanup fields require V3 rather than extending the postcard V2 structure in place.
+- S2–S7 曾按切片顺序增加过渡磁盘格式；功能未发布，因此这些布局后来统一收敛到最终 V2，不形成长期兼容合同。
 
 ## S5 invariants
 - A bounded terminal Joiner fixes one V2 Abandonment request, route and continuation credential; retries cannot generate a different request.

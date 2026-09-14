@@ -290,7 +290,7 @@ impl SpaceAdmissionAggregate {
             .transpose()?;
         self.record_version = record_version;
         if attempt_digest.is_some() {
-            self.format_version = SPACE_ADMISSION_RECORD_FORMAT_V3;
+            self.format_version = SPACE_ADMISSION_RECORD_FORMAT_V2;
         }
         self.attempt_digest = attempt_digest;
         self.state = SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(

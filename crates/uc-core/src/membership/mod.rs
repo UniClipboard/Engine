@@ -143,8 +143,7 @@ pub use space_admission::{
     SponsorPairingConfirmationSummary, SponsorSettlementPreparation,
     StartedJoinerInvitationResolution, UnreadableHistoryPolicy,
     SPACE_ADMISSION_ATTEMPT_DURATION_MS, SPACE_ADMISSION_RECORD_FORMAT_V1,
-    SPACE_ADMISSION_RECORD_FORMAT_V2, SPACE_ADMISSION_RECORD_FORMAT_V3,
-    SPACE_ADMISSION_RECORD_FORMAT_V4,
+    SPACE_ADMISSION_RECORD_FORMAT_V2,
 };
 pub use versioned_membership_history::{
     AdmissionActivationReceipt, AdmissionCompletionV1, AdmissionSecurityCommitmentV1,
