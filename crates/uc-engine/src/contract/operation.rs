@@ -29,8 +29,7 @@ pub enum OperationKind {
     CancelJoinSpace,
     UnlockSpace,
     RecoverSession,
-    GenerateEncryptionPassphrase,
-    ConfirmEncryptionPassphraseChange,
+    ChangeEncryptionPassphrase,
     IssueInvitation,
     CancelInvitation,
     ResetSpace,
@@ -129,8 +128,7 @@ impl fmt::Display for OperationKind {
             Self::CancelJoinSpace => "cancel_join_space",
             Self::UnlockSpace => "unlock_space",
             Self::RecoverSession => "recover_session",
-            Self::GenerateEncryptionPassphrase => "generate_encryption_passphrase",
-            Self::ConfirmEncryptionPassphraseChange => "confirm_encryption_passphrase_change",
+            Self::ChangeEncryptionPassphrase => "change_encryption_passphrase",
             Self::IssueInvitation => "issue_invitation",
             Self::CancelInvitation => "cancel_invitation",
             Self::ResetSpace => "reset_space",
@@ -247,31 +245,20 @@ mod device_group_choice_contract_tests {
 
 #[cfg(test)]
 mod encryption_passphrase_contract_tests {
-    use super::{ConfirmEncryptionPassphraseChangeInput, Operation, OperationKind};
+    use super::{ChangeEncryptionPassphraseInput, Operation, OperationKind};
     use crate::SecretString;
 
     #[test]
-    fn passphrase_change_operations_have_stable_kinds_and_redact_input() {
-        let generate = Operation::GenerateEncryptionPassphrase;
-        let confirm =
-            Operation::ConfirmEncryptionPassphraseChange(ConfirmEncryptionPassphraseChangeInput {
-                passphrase: SecretString::new("DO-NOT-LOG-THIS"),
-            });
+    fn passphrase_change_operation_has_stable_kind_and_redacts_input() {
+        let operation = Operation::ChangeEncryptionPassphrase(ChangeEncryptionPassphraseInput {
+            passphrase: SecretString::new("DO-NOT-LOG-THIS"),
+            passphrase_confirmation: SecretString::new("DO-NOT-LOG-EITHER"),
+        });
 
-        assert_eq!(generate.kind(), OperationKind::GenerateEncryptionPassphrase);
-        assert_eq!(
-            generate.kind().to_string(),
-            "generate_encryption_passphrase"
-        );
-        assert_eq!(
-            confirm.kind(),
-            OperationKind::ConfirmEncryptionPassphraseChange
-        );
-        assert_eq!(
-            confirm.kind().to_string(),
-            "confirm_encryption_passphrase_change"
-        );
-        assert!(!format!("{confirm:?}").contains("DO-NOT-LOG-THIS"));
+        assert_eq!(operation.kind(), OperationKind::ChangeEncryptionPassphrase);
+        assert_eq!(operation.kind().to_string(), "change_encryption_passphrase");
+        assert!(!format!("{operation:?}").contains("DO-NOT-LOG-THIS"));
+        assert!(!format!("{operation:?}").contains("DO-NOT-LOG-EITHER"));
     }
 }
 
@@ -282,8 +269,7 @@ pub enum Operation {
     CancelJoinSpace(CancelJoinSpaceInput),
     UnlockSpace(UnlockSpaceInput),
     RecoverSession(RecoverSessionInput),
-    GenerateEncryptionPassphrase,
-    ConfirmEncryptionPassphraseChange(ConfirmEncryptionPassphraseChangeInput),
+    ChangeEncryptionPassphrase(ChangeEncryptionPassphraseInput),
     IssueInvitation,
     CancelInvitation,
     ResetSpace,
@@ -384,10 +370,7 @@ impl Operation {
             Self::CancelJoinSpace(_) => OperationKind::CancelJoinSpace,
             Self::UnlockSpace(_) => OperationKind::UnlockSpace,
             Self::RecoverSession(_) => OperationKind::RecoverSession,
-            Self::GenerateEncryptionPassphrase => OperationKind::GenerateEncryptionPassphrase,
-            Self::ConfirmEncryptionPassphraseChange(_) => {
-                OperationKind::ConfirmEncryptionPassphraseChange
-            }
+            Self::ChangeEncryptionPassphrase(_) => OperationKind::ChangeEncryptionPassphrase,
             Self::IssueInvitation => OperationKind::IssueInvitation,
             Self::CancelInvitation => OperationKind::CancelInvitation,
             Self::ResetSpace => OperationKind::ResetSpace,
@@ -543,15 +526,17 @@ pub struct UnlockSpaceInput {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-pub struct ConfirmEncryptionPassphraseChangeInput {
+pub struct ChangeEncryptionPassphraseInput {
     pub passphrase: SecretString,
+    pub passphrase_confirmation: SecretString,
 }
 
-impl fmt::Debug for ConfirmEncryptionPassphraseChangeInput {
+impl fmt::Debug for ChangeEncryptionPassphraseInput {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("ConfirmEncryptionPassphraseChangeInput")
+            .debug_struct("ChangeEncryptionPassphraseInput")
             .field("passphrase", &"[REDACTED]")
+            .field("passphrase_confirmation", &"[REDACTED]")
             .finish()
     }
 }

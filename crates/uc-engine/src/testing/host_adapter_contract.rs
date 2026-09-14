@@ -984,21 +984,13 @@ async fn reset_space_rebuilds_device_management_state_and_preserves_local_histor
         crate::OperationResult::EntrySent(report) => report.entry_id,
         other => panic!("expected sent entry, got {other:?}"),
     };
-    let first_new_passphrase = match engine
-        .execute(crate::Operation::GenerateEncryptionPassphrase)
-        .await
-        .unwrap()
-    {
-        crate::OperationResult::EncryptionPassphraseGenerated { passphrase } => {
-            passphrase.expose().to_owned()
-        }
-        other => panic!("expected generated passphrase, got {other:?}"),
-    };
+    let first_new_passphrase = "first user selected passphrase";
     assert_eq!(
         engine
-            .execute(crate::Operation::ConfirmEncryptionPassphraseChange(
-                crate::ConfirmEncryptionPassphraseChangeInput {
-                    passphrase: crate::SecretString::new(first_new_passphrase.clone()),
+            .execute(crate::Operation::ChangeEncryptionPassphrase(
+                crate::ChangeEncryptionPassphraseInput {
+                    passphrase: crate::SecretString::new(first_new_passphrase),
+                    passphrase_confirmation: crate::SecretString::new(first_new_passphrase),
                 },
             ))
             .await
@@ -1101,24 +1093,36 @@ async fn reset_space_rebuilds_device_management_state_and_preserves_local_histor
             .unwrap(),
         crate::OperationResult::InvitationIssued { .. }
     ));
-    let generated = engine
-        .execute(crate::Operation::GenerateEncryptionPassphrase)
+    let new_passphrase = "second user selected passphrase";
+    let mismatch = engine
+        .execute(crate::Operation::ChangeEncryptionPassphrase(
+            crate::ChangeEncryptionPassphraseInput {
+                passphrase: crate::SecretString::new(new_passphrase),
+                passphrase_confirmation: crate::SecretString::new("different passphrase"),
+            },
+        ))
         .await
-        .unwrap();
-    let new_passphrase = match generated {
-        crate::OperationResult::EncryptionPassphraseGenerated { passphrase } => {
-            let exposed = passphrase.expose().to_owned();
-            assert_eq!(exposed.len(), 27);
-            assert!(!format!("{passphrase:?}").contains(&exposed));
-            exposed
-        }
-        other => panic!("expected generated passphrase, got {other:?}"),
-    };
+        .unwrap_err();
+    assert_eq!(
+        mismatch.code(),
+        crate::error_codes::ENCRYPTION_PASSPHRASE_MISMATCH_CODE
+    );
+    assert!(matches!(
+        engine
+            .execute(crate::Operation::QuerySetupState)
+            .await
+            .unwrap(),
+        crate::OperationResult::SetupState(crate::SetupStateSummary {
+            current_invitation: Some(_),
+            ..
+        })
+    ));
     assert_eq!(
         engine
-            .execute(crate::Operation::ConfirmEncryptionPassphraseChange(
-                crate::ConfirmEncryptionPassphraseChangeInput {
-                    passphrase: crate::SecretString::new(new_passphrase.clone()),
+            .execute(crate::Operation::ChangeEncryptionPassphrase(
+                crate::ChangeEncryptionPassphraseInput {
+                    passphrase: crate::SecretString::new(new_passphrase),
+                    passphrase_confirmation: crate::SecretString::new(new_passphrase),
                 },
             ))
             .await

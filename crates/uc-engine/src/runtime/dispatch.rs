@@ -66,9 +66,7 @@ use crate::operations::space::create_space::execute_create_space;
 use crate::operations::space::device_group_choice::{
     execute_choose_device_group, execute_query_device_group_choices,
 };
-use crate::operations::space::encryption_passphrase::{
-    execute_confirm_encryption_passphrase_change, execute_generate_encryption_passphrase,
-};
+use crate::operations::space::encryption_passphrase::execute_change_encryption_passphrase;
 use crate::operations::space::factory_reset::execute_factory_reset_space;
 use crate::operations::space::invitation::execute_issue_invitation;
 use crate::operations::space::join_space::execute_join_space;
@@ -179,12 +177,8 @@ impl EngineRuntime for ProductionRuntime {
                 Operation::RecoverSession(input) => {
                     execute_recover_session(self.current_facade().await?.as_ref(), input).await
                 }
-                Operation::GenerateEncryptionPassphrase => {
-                    execute_generate_encryption_passphrase(self.current_facade().await?.as_ref())
-                        .await
-                }
-                Operation::ConfirmEncryptionPassphraseChange(input) => {
-                    execute_confirm_encryption_passphrase_change(
+                Operation::ChangeEncryptionPassphrase(input) => {
+                    execute_change_encryption_passphrase(
                         self.current_facade().await?.as_ref(),
                         input,
                     )

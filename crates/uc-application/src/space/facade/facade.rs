@@ -675,20 +675,16 @@ impl SpaceFacade {
         self.cancel_pairing_invitation.execute().await
     }
 
-    /// 为升级后的单设备重新配对流程生成一次待展示的新口令。
-    pub async fn generate_encryption_passphrase(
-        &self,
-    ) -> Result<uc_core::crypto::domain::Passphrase, ChangeEncryptionPassphraseError> {
-        self.change_encryption_passphrase.generate().await
-    }
-
-    /// 用户确认已经保存口令后，撤销旧邀请并启用新口令。
-    pub async fn confirm_encryption_passphrase_change(
+    /// 单设备用户提交并确认自定义口令后，撤销旧邀请并启用新口令。
+    pub async fn change_encryption_passphrase(
         &self,
         passphrase: &uc_core::crypto::domain::Passphrase,
+        passphrase_confirmation: &uc_core::crypto::domain::Passphrase,
     ) -> Result<(), ChangeEncryptionPassphraseError> {
         let _guard = self.pairing_configuration.lock().await;
-        self.change_encryption_passphrase.confirm(passphrase).await
+        self.change_encryption_passphrase
+            .execute(passphrase, passphrase_confirmation)
+            .await
     }
 
     /// Rebuild this profile as a single-device space while retaining local

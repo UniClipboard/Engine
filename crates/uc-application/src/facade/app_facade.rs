@@ -544,18 +544,13 @@ impl AppFacade {
         self.space.issue_pairing_invitation().await
     }
 
-    pub async fn generate_encryption_passphrase(
-        &self,
-    ) -> Result<Passphrase, ChangeEncryptionPassphraseError> {
-        self.space.generate_encryption_passphrase().await
-    }
-
-    pub async fn confirm_encryption_passphrase_change(
+    pub async fn change_encryption_passphrase(
         &self,
         passphrase: &Passphrase,
+        passphrase_confirmation: &Passphrase,
     ) -> Result<(), ChangeEncryptionPassphraseError> {
         self.space
-            .confirm_encryption_passphrase_change(passphrase)
+            .change_encryption_passphrase(passphrase, passphrase_confirmation)
             .await
     }
 

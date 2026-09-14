@@ -11,7 +11,7 @@ use crate::{
     MobileFileUploadHandle, MobileLanInterfaceSummary, MobileSyncDocument,
     MobileSyncDocumentApplyOutcome, MobileSyncFileReadOutcome, MobileSyncSettingsSummary,
     MobileSyncSettingsUpdateOutcome, RelayCredentialStatus, RelayProbeOutcome, SaveRelayOutcome,
-    SecretString, SettingsSummary, SettingsUpdateOutcome, UpgradeStatusSummary,
+    SettingsSummary, SettingsUpdateOutcome, UpgradeStatusSummary,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -431,9 +431,6 @@ pub enum OperationResult {
         unlocked: bool,
         resumed: bool,
     },
-    EncryptionPassphraseGenerated {
-        passphrase: SecretString,
-    },
     EncryptionPassphraseChanged,
     InvitationIssued {
         invitation_code: String,
@@ -643,9 +640,6 @@ impl fmt::Debug for OperationResult {
                 .field("kind", &"session_recovered")
                 .field("unlocked", unlocked)
                 .field("resumed", resumed),
-            Self::EncryptionPassphraseGenerated { .. } => {
-                debug.field("kind", &"encryption_passphrase_generated")
-            }
             Self::EncryptionPassphraseChanged => {
                 debug.field("kind", &"encryption_passphrase_changed")
             }
@@ -1385,8 +1379,7 @@ impl fmt::Debug for SearchStatusSummary {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeviceGroupRelationshipSummary, OperationResult};
-    use crate::SecretString;
+    use super::DeviceGroupRelationshipSummary;
 
     #[test]
     fn confirmation_pending_relationship_has_a_stable_wire_value() {
@@ -1394,14 +1387,5 @@ mod tests {
             .expect("serialize relationship");
 
         assert_eq!(encoded, "\"confirmation_pending\"");
-    }
-
-    #[test]
-    fn generated_encryption_passphrase_is_redacted_from_debug_output() {
-        let result = OperationResult::EncryptionPassphraseGenerated {
-            passphrase: SecretString::new("DO-NOT-LOG-THIS"),
-        };
-
-        assert!(!format!("{result:?}").contains("DO-NOT-LOG-THIS"));
     }
 }

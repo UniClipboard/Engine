@@ -3,29 +3,17 @@ use uc_application::facade::{AppFacade, ChangeEncryptionPassphraseError};
 use uc_core::crypto::domain::Passphrase;
 
 use crate::error_codes::*;
-use crate::{
-    ConfirmEncryptionPassphraseChangeInput, EngineError, EngineErrorCategory, OperationResult,
-    SecretString,
-};
+use crate::{ChangeEncryptionPassphraseInput, EngineError, EngineErrorCategory, OperationResult};
 
-pub async fn execute_generate_encryption_passphrase(
+pub async fn execute_change_encryption_passphrase(
     facade: &AppFacade,
-) -> Result<OperationResult, EngineError> {
-    let passphrase = facade
-        .generate_encryption_passphrase()
-        .await
-        .map_err(map_error)?;
-    Ok(OperationResult::EncryptionPassphraseGenerated {
-        passphrase: SecretString::new(passphrase.expose()),
-    })
-}
-
-pub async fn execute_confirm_encryption_passphrase_change(
-    facade: &AppFacade,
-    input: ConfirmEncryptionPassphraseChangeInput,
+    input: ChangeEncryptionPassphraseInput,
 ) -> Result<OperationResult, EngineError> {
     facade
-        .confirm_encryption_passphrase_change(&Passphrase::new(input.passphrase.expose()))
+        .change_encryption_passphrase(
+            &Passphrase::new(input.passphrase.expose()),
+            &Passphrase::new(input.passphrase_confirmation.expose()),
+        )
         .await
         .map_err(map_error)?;
     Ok(OperationResult::EncryptionPassphraseChanged)
@@ -33,8 +21,8 @@ pub async fn execute_confirm_encryption_passphrase_change(
 
 fn map_error(error: ChangeEncryptionPassphraseError) -> EngineError {
     match error {
-        ChangeEncryptionPassphraseError::NotGenerated => EngineError::new(
-            ENCRYPTION_PASSPHRASE_NOT_GENERATED_CODE,
+        ChangeEncryptionPassphraseError::PassphraseMismatch => EngineError::new(
+            ENCRYPTION_PASSPHRASE_MISMATCH_CODE,
             EngineErrorCategory::InvalidInput,
             false,
         ),
@@ -80,15 +68,12 @@ mod tests {
 
     #[test]
     fn eligibility_failures_have_stable_distinct_codes() {
-        let not_generated = map_error(ChangeEncryptionPassphraseError::NotGenerated);
+        let mismatch = map_error(ChangeEncryptionPassphraseError::PassphraseMismatch);
         let locked = map_error(ChangeEncryptionPassphraseError::Locked);
         let multiple = map_error(ChangeEncryptionPassphraseError::MultipleDevices);
 
-        assert_eq!(
-            not_generated.code(),
-            ENCRYPTION_PASSPHRASE_NOT_GENERATED_CODE
-        );
-        assert_eq!(not_generated.category(), EngineErrorCategory::InvalidInput);
+        assert_eq!(mismatch.code(), ENCRYPTION_PASSPHRASE_MISMATCH_CODE);
+        assert_eq!(mismatch.category(), EngineErrorCategory::InvalidInput);
         assert_eq!(locked.code(), ENCRYPTION_PASSPHRASE_LOCKED_CODE);
         assert_eq!(multiple.code(), ENCRYPTION_PASSPHRASE_MULTIPLE_DEVICES_CODE);
         assert_eq!(multiple.category(), EngineErrorCategory::Conflict);

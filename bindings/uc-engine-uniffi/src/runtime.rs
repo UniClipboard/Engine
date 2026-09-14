@@ -12,7 +12,7 @@ use uc_engine::observability::{
     AnalyticsPort, DeviceType, Event, GroupIdentifyPayload, IdentifyPayload, Os, ReleaseOutcome,
 };
 use uc_engine::{
-    ClipboardRestoreMode, ClipboardRestoreOutcome, ConfirmEncryptionPassphraseChangeInput,
+    ChangeEncryptionPassphraseInput, ClipboardRestoreMode, ClipboardRestoreOutcome,
     CreateSpaceInput, Engine, EngineConfig, ExportEntryInput, HostCapabilities,
     HostCapabilityError, HostCapabilityErrorCategory, HostClipboard, HostClipboardRepresentation,
     HostClipboardSnapshot, HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata,
@@ -444,11 +444,9 @@ enum WorkerCommand {
     IssueInvitation {
         response: mpsc::Sender<Result<InvitationIssued, BindingError>>,
     },
-    GenerateEncryptionPassphrase {
-        response: mpsc::Sender<Result<String, BindingError>>,
-    },
-    ConfirmEncryptionPassphraseChange {
+    ChangeEncryptionPassphrase {
         passphrase: Zeroizing<String>,
+        passphrase_confirmation: Zeroizing<String>,
         response: mpsc::Sender<Result<(), BindingError>>,
     },
     JoinSpace {
@@ -968,20 +966,19 @@ impl MobileEngine {
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
-    pub fn generate_encryption_passphrase(&self) -> Result<String, BindingError> {
-        self.request(|response| WorkerCommand::GenerateEncryptionPassphrase { response })
-    }
-
-    pub fn confirm_encryption_passphrase_change(
+    pub fn change_encryption_passphrase(
         &self,
         passphrase: String,
+        passphrase_confirmation: String,
     ) -> Result<(), BindingError> {
         let passphrase = Zeroizing::new(passphrase);
+        let passphrase_confirmation = Zeroizing::new(passphrase_confirmation);
         let commands = self.command_sender()?;
         let (response, result) = mpsc::channel();
         commands
-            .send(WorkerCommand::ConfirmEncryptionPassphraseChange {
+            .send(WorkerCommand::ChangeEncryptionPassphrase {
                 passphrase,
+                passphrase_confirmation,
                 response,
             })
             .map_err(|_| BindingError::RuntimeUnavailable)?;
@@ -1616,22 +1613,18 @@ async fn run_worker_loop(
                     .and_then(map_invitation_issued);
                 let _ = response.send(result);
             }
-            WorkerCommand::GenerateEncryptionPassphrase { response } => {
-                let result = engine
-                    .execute(Operation::GenerateEncryptionPassphrase)
-                    .await
-                    .map_err(BindingError::from)
-                    .and_then(map_encryption_passphrase);
-                let _ = response.send(result);
-            }
-            WorkerCommand::ConfirmEncryptionPassphraseChange {
+            WorkerCommand::ChangeEncryptionPassphrase {
                 passphrase,
+                passphrase_confirmation,
                 response,
             } => {
                 let result = engine
-                    .execute(Operation::ConfirmEncryptionPassphraseChange(
-                        ConfirmEncryptionPassphraseChangeInput {
+                    .execute(Operation::ChangeEncryptionPassphrase(
+                        ChangeEncryptionPassphraseInput {
                             passphrase: SecretString::new(passphrase.as_str()),
+                            passphrase_confirmation: SecretString::new(
+                                passphrase_confirmation.as_str(),
+                            ),
                         },
                     ))
                     .await
@@ -2147,10 +2140,6 @@ fn map_invitation_issued(result: OperationResult) -> Result<InvitationIssued, Bi
         expires_at_ms,
         availability: map_invitation_availability(availability),
     })
-}
-
-fn map_encryption_passphrase(result: OperationResult) -> Result<String, BindingError> {
-    unpack_operation!(result, OperationResult::EncryptionPassphraseGenerated { passphrase } => passphrase.expose().to_owned())
 }
 
 fn map_encryption_passphrase_changed(result: OperationResult) -> Result<(), BindingError> {

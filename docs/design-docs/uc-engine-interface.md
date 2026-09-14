@@ -102,8 +102,7 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `CreateSpace` | 创建空间、设备身份和加密存储 |
 | `UnlockSpace` | 使用口令恢复当前空间会话 |
 | `RecoverSession` | 按宿主策略从系统安全存储恢复加密与空间会话 |
-| `GenerateEncryptionPassphrase` | 当前设备列表只显示有效本机时，生成一次应展示并保存的新口令；不立即启用 |
-| `ConfirmEncryptionPassphraseChange` | 用户确认已保存后启用同一新口令，并撤销此前签发的邀请 |
+| `ChangeEncryptionPassphrase` | 当前设备列表只显示有效本机时，把加密口令修改为用户输入并再次确认的新口令，同时撤销此前签发的邀请 |
 | `JoinSpace` | 接受完整长邀请或可手输短码，发起或继续同一次空间加入，返回 Active、Pending 或 Rejected，并携带稳定 `join_id` |
 | `CancelJoinSpace` | 请求取消指定的本机加入；只与发起方正式提交点竞争 |
 | `IssueInvitation` | 签发一次配对邀请，同时返回指向同一邀请身份的短码与完整长邀请 |
@@ -174,7 +173,7 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 
 `RecoverSession` 的 `allow_secure_storage_unlock` 由宿主根据当前运行环境决定。值为 `false` 时核心不得尝试从系统安全存储恢复密钥；值为 `true` 时，核心统一完成加密会话、空间会话、搜索和接收能力恢复。
 
-单设备修改加密口令采用两步产品流程。产品先调用 `GenerateEncryptionPassphrase`，完整展示返回值并要求用户保存；此时旧口令和全部安全资料不变。用户明确确认后，把同一口令交给 `ConfirmEncryptionPassphraseChange`。成功后旧口令不能解锁或通过新配对认证，确认前已有邀请失效，新口令在重启后继续有效。该能力不要求 `re_pairing_required`，只允许 Space 已解锁、本机成员有效且当前设备列表范围只含本机；存在正常或暂停的其他设备、成员恢复中或成员资料不可确认时均拒绝。它保留现有 MasterKey 和历史内容，不触发批量重加密；已有的重新配对提示仍由新设备实际加入结束。iOS、Android 和 HarmonyOS 绑定公开相同的生成与确认动作，不承担资格判断或恢复。
+单设备修改加密口令采用一个产品动作。产品收集用户自定义的新口令和再次输入值，一并交给 `ChangeEncryptionPassphrase`；两次输入不一致时不修改任何资料。成功后旧口令不能解锁或通过新配对认证，此前签发的邀请失效，新口令在重启后继续有效。该能力不要求 `re_pairing_required`，只允许 Space 已解锁、本机成员有效且当前设备列表范围只含本机；存在正常或暂停的其他设备、成员恢复中或成员资料不可确认时均拒绝。它保留现有 MasterKey 和历史内容，不触发批量重加密；已有的重新配对提示仍由新设备实际加入结束。iOS、Android 和 HarmonyOS 绑定公开相同的修改动作，不承担资格判断或恢复。
 
 `CancelInvitation` 在没有待取消邀请时返回冲突错误。`ResetSpace` 是用户明确触发的最后兜底：Engine 先停止
 旧空间运行，清除未结束加入、待确认发送、恢复、切换、邀请和全部旧设备关系，把仍可读取的本机历史与文件

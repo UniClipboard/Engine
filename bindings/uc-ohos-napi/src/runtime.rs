@@ -5,9 +5,9 @@ use napi::bindgen_prelude::Buffer;
 use napi::Status;
 use napi_derive::napi;
 use uc_engine::{
-    CancelJoinSpaceInput, ChooseDeviceGroupInput, ClipboardRestoreMode, ClipboardRestoreOutcome,
-    ConfirmEncryptionPassphraseChangeInput, CreateSpaceInput, Engine, EngineConfig, EngineError,
-    EngineEvent, EngineState, EventStream, ExportEntryInput, HostFileHandle,
+    CancelJoinSpaceInput, ChangeEncryptionPassphraseInput, ChooseDeviceGroupInput,
+    ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig,
+    EngineError, EngineEvent, EngineState, EventStream, ExportEntryInput, HostFileHandle,
     InvitationAvailability, JoinSpaceInput, Operation, OperationResult, OperationTerminal,
     RecoverSessionInput, RefreshReason, RemoveMemberInput, RestoreClipboardInput, SecretString,
     SendFilesInput, SendImageInput, SendReportSummary, SendTextInput,
@@ -242,31 +242,19 @@ impl OhEngine {
     }
 
     #[napi]
-    pub async fn generate_encryption_passphrase(&self) -> napi::Result<String> {
-        match self
-            .engine
-            .execute(Operation::GenerateEncryptionPassphrase)
-            .await
-            .map_err(engine_error)?
-        {
-            OperationResult::EncryptionPassphraseGenerated { passphrase } => {
-                Ok(passphrase.expose().to_owned())
-            }
-            _ => Err(unexpected_result()),
-        }
-    }
-
-    #[napi]
-    pub async fn confirm_encryption_passphrase_change(
+    pub async fn change_encryption_passphrase(
         &self,
         passphrase: String,
+        passphrase_confirmation: String,
     ) -> napi::Result<()> {
         let passphrase = Zeroizing::new(passphrase);
+        let passphrase_confirmation = Zeroizing::new(passphrase_confirmation);
         match self
             .engine
-            .execute(Operation::ConfirmEncryptionPassphraseChange(
-                ConfirmEncryptionPassphraseChangeInput {
+            .execute(Operation::ChangeEncryptionPassphrase(
+                ChangeEncryptionPassphraseInput {
                     passphrase: SecretString::new(passphrase.as_str()),
+                    passphrase_confirmation: SecretString::new(passphrase_confirmation.as_str()),
                 },
             ))
             .await

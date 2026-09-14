@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use rand::{rngs::OsRng, TryRngCore};
-use tokio::sync::Mutex;
 use uc_core::crypto::domain::Passphrase;
 
 use super::{
@@ -10,15 +8,10 @@ use super::{
 };
 use crate::space::membership::{CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort};
 
-const PASSPHRASE_ALPHABET: &[u8; 32] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
-const PASSPHRASE_SYMBOLS: usize = 24;
-const PASSPHRASE_GROUP: usize = 6;
-
 pub(crate) struct ChangeEncryptionPassphraseUseCase {
     member_scope: Arc<dyn CurrentSpaceMemberScopePort>,
     invitations: Arc<dyn RetirePairingInvitationsPort>,
     apply: Arc<dyn ApplyEncryptionPassphraseChangePort>,
-    generated_passphrase: Mutex<Option<Passphrase>>,
 }
 
 impl ChangeEncryptionPassphraseUseCase {
@@ -31,29 +24,18 @@ impl ChangeEncryptionPassphraseUseCase {
             member_scope,
             invitations,
             apply,
-            generated_passphrase: Mutex::new(None),
         }
     }
 
-    pub(crate) async fn generate(&self) -> Result<Passphrase, ChangeEncryptionPassphraseError> {
-        self.ensure_eligible().await?;
-        let passphrase = generate_passphrase()?;
-        *self.generated_passphrase.lock().await = Some(Passphrase::new(passphrase.expose()));
-        Ok(passphrase)
-    }
-
-    pub(crate) async fn confirm(
+    pub(crate) async fn execute(
         &self,
         passphrase: &Passphrase,
+        passphrase_confirmation: &Passphrase,
     ) -> Result<(), ChangeEncryptionPassphraseError> {
-        self.ensure_eligible().await?;
-        let mut generated = self.generated_passphrase.lock().await;
-        if !generated
-            .as_ref()
-            .is_some_and(|candidate| candidate == passphrase)
-        {
-            return Err(ChangeEncryptionPassphraseError::NotGenerated);
+        if passphrase != passphrase_confirmation {
+            return Err(ChangeEncryptionPassphraseError::PassphraseMismatch);
         }
+        self.ensure_eligible().await?;
         self.invitations
             .retire_all()
             .await
@@ -69,7 +51,6 @@ impl ChangeEncryptionPassphraseUseCase {
                     ChangeEncryptionPassphraseError::unavailable(source)
                 }
             })?;
-        generated.take();
         Ok(())
     }
 
@@ -112,21 +93,6 @@ impl ChangeEncryptionPassphraseUseCase {
         }
         Ok(())
     }
-}
-
-fn generate_passphrase() -> Result<Passphrase, ChangeEncryptionPassphraseError> {
-    let mut random = [0_u8; PASSPHRASE_SYMBOLS];
-    OsRng.try_fill_bytes(&mut random).map_err(|source| {
-        ChangeEncryptionPassphraseError::unavailable(anyhow::Error::new(source))
-    })?;
-    let mut value = String::with_capacity(PASSPHRASE_SYMBOLS + 3);
-    for (index, byte) in random.into_iter().enumerate() {
-        if index > 0 && index % PASSPHRASE_GROUP == 0 {
-            value.push('-');
-        }
-        value.push(char::from(PASSPHRASE_ALPHABET[usize::from(byte & 31)]));
-    }
-    Ok(Passphrase::new(value))
 }
 
 #[cfg(test)]
@@ -211,43 +177,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generated_passphrases_are_strong_formatted_and_distinct() {
-        let (use_case, _, _) = use_case(Ok(local_only()));
-
-        let first = use_case.generate().await.unwrap();
-        let second = use_case.generate().await.unwrap();
-
-        assert_eq!(first.expose().len(), 27);
-        assert_eq!(
-            first.expose().chars().filter(|value| *value == '-').count(),
-            3
-        );
-        assert_ne!(first, second);
-    }
-
-    #[tokio::test]
-    async fn confirmation_retires_invitations_before_applying_passphrase() {
+    async fn change_retires_invitations_before_applying_user_passphrase() {
         let (use_case, invitations, apply) = use_case(Ok(local_only()));
-        let generated = use_case.generate().await.unwrap();
+        let passphrase = Passphrase::new("user-selected-passphrase");
 
-        use_case.confirm(&generated).await.unwrap();
+        use_case.execute(&passphrase, &passphrase).await.unwrap();
 
         assert_eq!(*invitations.0.lock().unwrap(), 1);
-        assert_eq!(*apply.0.lock().unwrap(), [generated.expose()]);
+        assert_eq!(*apply.0.lock().unwrap(), [passphrase.expose()]);
     }
 
     #[tokio::test]
-    async fn confirmation_rejects_a_passphrase_not_generated_by_this_flow() {
+    async fn mismatched_confirmation_is_rejected_before_changing_anything() {
         let (use_case, invitations, apply) = use_case(Ok(local_only()));
 
         let error = use_case
-            .confirm(&Passphrase::new("caller-selected-passphrase"))
+            .execute(
+                &Passphrase::new("user-selected-passphrase"),
+                &Passphrase::new("different-passphrase"),
+            )
             .await
             .unwrap_err();
 
         assert!(matches!(
             error,
-            ChangeEncryptionPassphraseError::NotGenerated
+            ChangeEncryptionPassphraseError::PassphraseMismatch
         ));
         assert_eq!(*invitations.0.lock().unwrap(), 0);
         assert!(apply.0.lock().unwrap().is_empty());
@@ -256,12 +210,12 @@ mod tests {
     #[tokio::test]
     async fn ordinary_single_device_space_can_change_passphrase() {
         let (use_case, invitations, apply) = use_case(Ok(local_only()));
-        let generated = use_case.generate().await.unwrap();
+        let passphrase = Passphrase::new("user-selected-passphrase");
 
-        use_case.confirm(&generated).await.unwrap();
+        use_case.execute(&passphrase, &passphrase).await.unwrap();
 
         assert_eq!(*invitations.0.lock().unwrap(), 1);
-        assert_eq!(*apply.0.lock().unwrap(), [generated.expose()]);
+        assert_eq!(*apply.0.lock().unwrap(), [passphrase.expose()]);
     }
 
     #[tokio::test]
@@ -270,7 +224,13 @@ mod tests {
         usable.usable_peer_device_ids.push(DeviceId::new("peer-a"));
         let (usable_case, _, _) = use_case(Ok(usable));
         assert!(matches!(
-            usable_case.generate().await.unwrap_err(),
+            usable_case
+                .execute(
+                    &Passphrase::new("new-passphrase"),
+                    &Passphrase::new("new-passphrase"),
+                )
+                .await
+                .unwrap_err(),
             ChangeEncryptionPassphraseError::MultipleDevices
         ));
 
@@ -281,7 +241,13 @@ mod tests {
         });
         let (paused_case, _, _) = use_case(Ok(paused));
         assert!(matches!(
-            paused_case.generate().await.unwrap_err(),
+            paused_case
+                .execute(
+                    &Passphrase::new("new-passphrase"),
+                    &Passphrase::new("new-passphrase"),
+                )
+                .await
+                .unwrap_err(),
             ChangeEncryptionPassphraseError::MultipleDevices
         ));
     }
@@ -293,7 +259,13 @@ mod tests {
         let (use_case, _, _) = use_case(Ok(inactive));
 
         assert!(matches!(
-            use_case.generate().await.unwrap_err(),
+            use_case
+                .execute(
+                    &Passphrase::new("new-passphrase"),
+                    &Passphrase::new("new-passphrase"),
+                )
+                .await
+                .unwrap_err(),
             ChangeEncryptionPassphraseError::MembershipRecoveryRequired
         ));
     }
@@ -302,13 +274,25 @@ mod tests {
     async fn locked_or_recovering_membership_is_rejected() {
         let (locked, _, _) = use_case(Err(CurrentSpaceMemberScopeError::Locked));
         assert!(matches!(
-            locked.generate().await.unwrap_err(),
+            locked
+                .execute(
+                    &Passphrase::new("new-passphrase"),
+                    &Passphrase::new("new-passphrase"),
+                )
+                .await
+                .unwrap_err(),
             ChangeEncryptionPassphraseError::Locked
         ));
 
         let (recovering, _, _) = use_case(Err(CurrentSpaceMemberScopeError::RecoveryRequired));
         assert!(matches!(
-            recovering.generate().await.unwrap_err(),
+            recovering
+                .execute(
+                    &Passphrase::new("new-passphrase"),
+                    &Passphrase::new("new-passphrase"),
+                )
+                .await
+                .unwrap_err(),
             ChangeEncryptionPassphraseError::MembershipRecoveryRequired
         ));
     }
