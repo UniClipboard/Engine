@@ -18,6 +18,7 @@ impl SpaceAdmissionAggregate {
                 record_version: 0,
                 admission_id,
                 attempt_timeline: Some(attempt_timeline),
+                attempt_digest: None,
                 state: SpaceAdmissionRecordState::Joiner(
                     SpaceAdmissionJoinerState::ResolvingInvitation(
                         SpaceAdmissionJoinerResolvingInvitation {
@@ -61,6 +62,7 @@ impl SpaceAdmissionAggregate {
             record_version: 0,
             admission_id,
             attempt_timeline: Some(attempt_timeline),
+            attempt_digest: None,
             state: SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(
                 SpaceAdmissionJoinerInitiated {
                     join_id,
@@ -96,6 +98,7 @@ impl SpaceAdmissionAggregate {
             peer_binding,
             continuation_credential,
             None,
+            None,
         )
     }
 
@@ -109,6 +112,7 @@ impl SpaceAdmissionAggregate {
         peer_binding: AdmissionPeerBinding,
         continuation_credential: AdmissionContinuationCredential,
         attempt_timeline: Option<AdmissionAttemptTimeline>,
+        attempt_digest: Option<[u8; 32]>,
     ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
         if join_request.header().admission_id() != admission_id {
             return Err(SpaceAdmissionAggregateError::AdmissionMismatch);
@@ -119,7 +123,9 @@ impl SpaceAdmissionAggregate {
             return Err(SpaceAdmissionAggregateError::InvalidInboundEvidence);
         }
         let replacement = Self {
-            format_version: if attempt_timeline.is_some() {
+            format_version: if attempt_digest.is_some() {
+                SPACE_ADMISSION_RECORD_FORMAT_V3
+            } else if attempt_timeline.is_some() {
                 SPACE_ADMISSION_RECORD_FORMAT_V2
             } else {
                 SPACE_ADMISSION_RECORD_FORMAT_V1
@@ -127,6 +133,7 @@ impl SpaceAdmissionAggregate {
             record_version: 0,
             admission_id,
             attempt_timeline,
+            attempt_digest,
             state: SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Accepted(
                 SpaceAdmissionSponsorAccepted {
                     invitation_claim,

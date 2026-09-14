@@ -98,6 +98,45 @@ enum PersistedSpaceAdmissionStateV2 {
 }
 
 #[derive(Serialize, Deserialize)]
+struct PersistedSpaceAdmissionRecordV3 {
+    format_version: u16,
+    record_version: u64,
+    admission_id: [u8; 32],
+    started_at_ms: i64,
+    expires_at_ms: i64,
+    attempt_digest: [u8; 32],
+    state: PersistedSpaceAdmissionStateV3,
+}
+
+#[derive(Serialize, Deserialize)]
+enum PersistedSpaceAdmissionStateV3 {
+    Existing(Vec<u8>),
+    LocalJoinerTerminated {
+        join_id: [u8; 16],
+        local_join_ordinal: u64,
+        reason: u8,
+        cleanup: Option<PersistedAdmissionCleanupObligationV3>,
+    },
+    SponsorApplied {
+        applied: PersistedSponsorAppliedV1,
+        confirmation: PersistedSponsorPairingConfirmationV2,
+    },
+    SponsorCompleted {
+        completed: PersistedCompletedV1,
+        confirmation: PersistedSponsorPairingConfirmationV2,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedAdmissionCleanupObligationV3 {
+    commit_knowledge: u8,
+    member_binding: Option<Vec<u8>>,
+    local_peer_id: [u8; 32],
+    remote_peer_id: [u8; 32],
+    continuation_credential: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
 struct PersistedSponsorPairingConfirmationV2 {
     status: u8,
     admission_id: [u8; 32],

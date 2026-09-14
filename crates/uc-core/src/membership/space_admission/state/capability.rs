@@ -277,6 +277,32 @@ impl JoinerAdmission {
     }
 
     pub const fn can_terminate_locally(&self) -> bool {
+        if self.record.attempt_timeline.is_some()
+            && matches!(
+                &self.record.state,
+                SpaceAdmissionRecordState::Joiner(
+                    SpaceAdmissionJoinerState::ResolvingInvitation(_)
+                        | SpaceAdmissionJoinerState::ResolvedInvitation(_)
+                        | SpaceAdmissionJoinerState::Initiated(_)
+                        | SpaceAdmissionJoinerState::Candidate(_)
+                )
+            )
+        {
+            return true;
+        }
+        if self.record.attempt_digest.is_some()
+            && matches!(
+                &self.record.state,
+                SpaceAdmissionRecordState::Joiner(
+                    SpaceAdmissionJoinerState::Prepared(_)
+                        | SpaceAdmissionJoinerState::Committed(_)
+                        | SpaceAdmissionJoinerState::Applied(_)
+                        | SpaceAdmissionJoinerState::Activating(_)
+                )
+            )
+        {
+            return true;
+        }
         matches!(
             &self.record.state,
             SpaceAdmissionRecordState::Joiner(
@@ -292,6 +318,15 @@ impl JoinerAdmission {
                     SpaceAdmissionJoinerChannelState::AwaitingAuthentication { .. }
                 )
         )
+    }
+
+    pub const fn cleanup_obligation(&self) -> Option<&AdmissionCleanupObligation> {
+        match &self.record.state {
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state)) => {
+                state.cleanup.as_ref()
+            }
+            _ => None,
+        }
     }
 
     pub const fn expires_at_ms(&self) -> Option<i64> {
@@ -672,6 +707,32 @@ impl SponsorAdmission {
             peer_binding,
             continuation_credential,
             Some(attempt_timeline),
+            None,
+        )
+        .map(SponsorAdmissionTransition::from_transition)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn accept_join_request_with_contract(
+        admission_id: SpaceAdmissionId,
+        invitation_claim: AdmissionInvitationClaim,
+        join_request: SpaceAdmissionEnvelopeV1,
+        join_request_evidence: AdmissionMessageEvidence,
+        base_snapshot: AdmissionBaseSnapshot,
+        peer_binding: AdmissionPeerBinding,
+        continuation_credential: AdmissionContinuationCredential,
+        attempt_contract: AdmissionAttemptContractV2,
+    ) -> Result<SponsorAdmissionTransition, SpaceAdmissionAggregateError> {
+        SpaceAdmissionAggregate::accept_join_request_with_timeline(
+            admission_id,
+            invitation_claim,
+            join_request,
+            join_request_evidence,
+            base_snapshot,
+            peer_binding,
+            continuation_credential,
+            Some(attempt_contract.timeline()),
+            Some(attempt_contract.digest()),
         )
         .map(SponsorAdmissionTransition::from_transition)
     }

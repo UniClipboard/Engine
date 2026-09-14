@@ -410,7 +410,7 @@ async fn applied_join_stays_pending_until_the_upgraded_peer_can_complete_it() {
 }
 
 #[tokio::test]
-async fn cancelling_join_preserves_the_cancel_request_until_the_peer_can_confirm_it() {
+async fn cancelling_prepared_join_ends_locally_without_waiting_for_peer_upgrade() {
     let pair = SpaceAdmissionProtocolTestPair::upgrade_once_on_cancel().await;
     let started = pair
         .joiner()
@@ -426,41 +426,26 @@ async fn cancelling_join_preserves_the_cancel_request_until_the_peer_can_confirm
     pair.joiner()
         .cancel_join(join_id)
         .await
-        .expect("prepared join should save cancellation");
+        .expect("prepared join should terminate locally");
 
     let blocked = pair
         .joiner()
         .recover_pending(AdmissionRecoveryTrigger::StateChanged)
         .await;
 
-    assert_eq!(blocked.peer_upgrade_required_count, 1);
+    assert_eq!(blocked.peer_upgrade_required_count, 0);
     assert_eq!(blocked.recovery_required_count, 0);
     let saved = pair.saved_join();
-    assert!(saved.peer_upgrade_required());
-    assert!(saved.is_cancelling());
+    assert_eq!(
+        saved.termination_reason(),
+        Some(uc_core::membership::SpaceAdmissionTerminationReason::Cancelled)
+    );
     assert_eq!(
         saved
-            .pending_exchange()
-            .expect("CancelRequested remains pending")
-            .request_envelope()
-            .kind(),
-        uc_core::membership::SpaceAdmissionMessageKind::CancelRequested
-    );
-
-    let resumed = pair
-        .joiner()
-        .recover_pending(AdmissionRecoveryTrigger::PeerOnline(
-            uc_core::DeviceId::new("upgraded-peer"),
-        ))
-        .await;
-
-    assert_eq!(resumed.peer_upgrade_required_count, 0);
-    assert_eq!(resumed.recovery_required_count, 0);
-    let saved = pair.saved_join();
-    assert!(!saved.peer_upgrade_required());
-    assert_eq!(
-        saved.rejection_reason(),
-        Some(uc_core::membership::SpaceAdmissionRejectionReason::Cancelled)
+            .cleanup_obligation()
+            .expect("Prepared Joiner keeps cleanup responsibility")
+            .commit_knowledge(),
+        uc_core::membership::AdmissionCommitKnowledge::Unknown
     );
     assert_eq!(pair.active_joiner_observation_count(), 0);
 }

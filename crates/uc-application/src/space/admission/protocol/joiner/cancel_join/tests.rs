@@ -2,10 +2,10 @@ use crate::space::admission::protocol::test_support::SpaceAdmissionProtocolTestP
 use crate::space::admission::{
     AdmissionRecoveryTrigger, CancelSpaceJoinError, CurrentJoinStatus, JoinSpaceInput,
 };
-use uc_core::membership::{AdmissionPendingRecovery, SpaceAdmissionMessageKind};
+use uc_core::membership::AdmissionCommitKnowledge;
 
 #[tokio::test]
-async fn current_prepared_join_is_replaced_by_one_saved_cancel_request() {
+async fn current_prepared_join_terminates_locally_with_unknown_cleanup() {
     let pair = SpaceAdmissionProtocolTestPair::receiving_candidate().await;
     let started = pair
         .joiner()
@@ -25,24 +25,48 @@ async fn current_prepared_join_is_replaced_by_one_saved_cancel_request() {
         .await
         .expect("prepared join should accept cancellation");
 
-    assert!(matches!(
-        status,
-        CurrentJoinStatus::Pending {
-            cancel_requested: true,
-            ..
-        }
-    ));
+    assert!(matches!(status, CurrentJoinStatus::Terminated { .. }));
     let cancelled = pair.take_created_join();
-    let Some(AdmissionPendingRecovery::Continuation {
-        pending_exchange, ..
-    }) = cancelled.pending_recovery()
-    else {
-        panic!("saved cancellation should be recoverable");
-    };
     assert_eq!(
-        pending_exchange.request_envelope().kind(),
-        SpaceAdmissionMessageKind::CancelRequested
+        cancelled
+            .cleanup_obligation()
+            .expect("Prepared Joiner keeps cleanup responsibility")
+            .commit_knowledge(),
+        AdmissionCommitKnowledge::Unknown
     );
+}
+
+#[tokio::test]
+async fn current_committed_join_terminates_locally_with_exact_cleanup_target() {
+    let pair = SpaceAdmissionProtocolTestPair::receiving_commit().await;
+    let started = pair
+        .joiner()
+        .start_join_at(join_input("cancel-committed"), 1_000)
+        .await
+        .expect("join should be saved");
+    pair.joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+    pair.joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+    let CurrentJoinStatus::Pending { join_id, .. } = started.status else {
+        panic!("new join should be pending");
+    };
+
+    let status = pair
+        .joiner()
+        .cancel_join(join_id)
+        .await
+        .expect("committed join should terminate locally");
+
+    assert!(matches!(status, CurrentJoinStatus::Terminated { .. }));
+    let cancelled = pair.take_created_join();
+    let cleanup = cancelled
+        .cleanup_obligation()
+        .expect("Committed Joiner keeps cleanup responsibility");
+    assert_eq!(cleanup.commit_knowledge(), AdmissionCommitKnowledge::Known);
+    assert!(cleanup.member_binding().is_some());
 }
 
 #[tokio::test]

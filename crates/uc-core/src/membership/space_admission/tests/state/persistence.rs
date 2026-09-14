@@ -58,6 +58,23 @@ fn pending_exchanges_decode_real_bytes_from_the_previous_v1_layout() {
     );
 }
 
+#[test]
+fn authenticated_join_decodes_the_previous_v2_record_layout() {
+    let previous_v2 = joiner_prepared_aggregate_fixture().into_v2_persistence_fixture();
+    let encoded = previous_v2
+        .encode_persisted()
+        .expect("previous V2 record encodes");
+
+    let decoded = SpaceAdmissionAggregate::decode_persisted(&encoded)
+        .expect("previous V2 record remains readable");
+
+    assert_eq!(decoded, previous_v2);
+    assert_eq!(
+        decoded.supersede(),
+        Err(SpaceAdmissionAggregateError::UnsafeSupersession)
+    );
+}
+
 fn assert_admission_persistence_round_trip(aggregate: SpaceAdmissionAggregate) {
     let encoded = aggregate
         .encode_persisted()

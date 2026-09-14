@@ -21,4 +21,11 @@
 - Wrong space/Add and unavailable signing never commit; deferred local effects return LocalEffectsPending.
 - Strict review replaced optional origin data with an explicit baseline/admission origin and removed a pure forwarding method.
 - Full workspace check, formatting, Rust rules, architecture/privacy gates and diff checks pass for S3.
-- Current work: create the S3 commit, then begin S4.
+- S3 was committed as `0a139a8c`.
+- S4 now lets bounded Joiner records terminate locally through Prepared, Committed, Applied and Activating.
+- Prepared termination persists unknown-commit cleanup; known Commit states persist the exact admission/member/Add binding plus the authenticated continuation material.
+- Cancel, expiry and a distinct new Join all release the local slot without waiting for the peer; a concurrent late Commit loses the state-version check.
+- Legacy records can still continue authentication and retain their original no-deadline behavior.
+- Strict review moved the new cleanup fields into record format V3; the already committed V2 layout remains readable and has a regression test.
+- Core admission, Application admission and real SQLite admission-state tests pass for S4.
+- Current work: complete S4 review and gates, create its commit, then begin S5.

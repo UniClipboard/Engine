@@ -2,6 +2,7 @@ use super::*;
 
 pub const SPACE_ADMISSION_RECORD_FORMAT_V1: u16 = 1;
 pub const SPACE_ADMISSION_RECORD_FORMAT_V2: u16 = 2;
+pub const SPACE_ADMISSION_RECORD_FORMAT_V3: u16 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionEffect {
@@ -189,6 +190,7 @@ pub struct SpaceAdmissionAggregate {
     pub(super) record_version: u64,
     pub(super) admission_id: SpaceAdmissionId,
     pub(super) attempt_timeline: Option<AdmissionAttemptTimeline>,
+    pub(super) attempt_digest: Option<[u8; 32]>,
     pub(super) state: SpaceAdmissionRecordState,
 }
 
@@ -274,9 +276,16 @@ impl std::fmt::Debug for SpaceAdmissionAggregate {
 
 #[cfg(test)]
 impl SpaceAdmissionAggregate {
+    pub(crate) fn into_v2_persistence_fixture(mut self) -> Self {
+        self.format_version = SPACE_ADMISSION_RECORD_FORMAT_V2;
+        self.attempt_digest = None;
+        self
+    }
+
     pub(crate) fn into_legacy_persistence_fixture(mut self) -> Self {
         self.format_version = SPACE_ADMISSION_RECORD_FORMAT_V1;
         self.attempt_timeline = None;
+        self.attempt_digest = None;
         self
     }
 }

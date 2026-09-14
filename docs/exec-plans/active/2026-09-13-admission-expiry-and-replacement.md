@@ -1,6 +1,6 @@
 # 1. Overview
 
-状态：研究与规格完成，六项产品决策已逐项确认，见第 11 节；S0–S3 已实施，S4–S8 待实施。本文是实现规格与执行计划的唯一正文；当前已支持双端统一期限、邀请方确认状态和精确成员撤销，但尚未把撤销接到正式决定后的取消与到期。
+状态：研究与规格完成，六项产品决策已逐项确认，见第 11 节；S0–S4 已实施，S5–S8 待实施。本文是实现规格与执行计划的唯一正文；当前已支持双端统一期限、邀请方确认状态、精确成员撤销，以及正式决定后的本机终止与清理责任保存；放弃事实投递和跨空间最终隔离仍待后续切片。
 
 研究基线：2026-09-13，`b8b96105` 加当时工作区。决策回写时仓库已整理至 `255e1a68`；第 4 节保留研究时的源码结论，不代表本次重新审计了实现。实施前须核对准入恢复摘要、成员更新投递和性能路径的最新结构。
 
@@ -226,7 +226,7 @@ Relationship: 现有公开入口按 device_id 查当前有效成员，且拒绝�
 
 从上到下指每个切片先确定调用方能得到的完整结果，再下沉到 Application 编排、Core 规则、Infra 保存/网络，最后回到 Engine 完整入口验收；不是先铺完所有接口、再铺所有存储。禁止只返回假状态的空实现。
 
-当前已完成 S0、S1，后续按 S2 → S3 → S4 → S5 → S6 → S7 → S8 顺序实施；每片在前一片验证通过的基础上增加行为。S1 是第一个最小端到端切片；S0 只完成契约与测试准备，不冒充功能交付。S1–S7 仅在定向测试与隔离 host 中验证，S8 前不得对真实用户宣告支持完整新协议；不增加永久产品配置层或第二套准入仓储。
+当前已完成 S0–S4，后续按 S5 → S6 → S7 → S8 顺序实施；每片在前一片验证通过的基础上增加行为。S1 是第一个最小端到端切片；S0 只完成契约与测试准备，不冒充功能交付。S1–S7 仅在定向测试与隔离 host 中验证，S8 前不得对真实用户宣告支持完整新协议；不增加永久产品配置层或第二套准入仓储。
 
 每片完成必须同时具备：唯一完整负责人、既有公开调用路径、明确成功/失败结果、持久恢复责任、非零目标测试和实际输出证据。仅有类型能编译不算完成，无法安全独立开放的切片不得单独发布。
 
@@ -315,6 +315,8 @@ Relationship: 现有公开入口按 device_id 查当前有效成员，且拒绝�
 
 依赖 S3，接通用户 Cancel、新 Join 替换和到期的同一终止规则。
 
+状态：已完成本机终止与持久清理责任。Prepared 保存“远端是否提交未知”，收到 Commit 后的阶段保存精确成员目标；取消、到期和新意图都不再等待旧设备在线。放弃事实的可靠投递属于 S5，跨空间活动状态的最终隔离属于 S6。
+
 - **文件**：Core `state/transition/{joiner.rs,sponsor.rs,terminal.rs}` 与角色 capability；Application `joiner/cancel_join/`、`joiner/start_join/`、`recovery/recover_pending/`；Infra 准入仓储与取消 adapter。
 - **内部结果**：Core 产生 `KeepUnconfirmed | TerminateWithoutCommit | TerminateWithKnownCommit | TerminateWithUnknownCommit` 等价的角色变化，Application 只接收 Joiner/Sponsor 能力与完整变化，不自行拼 aggregate。
 - **持久责任**：AttemptTermination 与 CleanupObligation 属于旧 attempt 的密文记录，profile current/latest 可以指向 B。旧 A 与 B 同库事务持久化；旧网络响应只能补齐 A 的清理。
@@ -323,6 +325,8 @@ Relationship: 现有公开入口按 device_id 查当前有效成员，且拒绝�
 - **恢复**：所有恢复先读终止围栏；旧 Prepared 等不到提交回复也不阻止 B。存储/密钥失败返回具体本机错误，不无限 Pending。
 - **验证**：Sponsor commit 已落盘但回复丢失；Joiner A Prepared→Cancel/Join B→晚到 A Commit；A 永不激活，B 不覆盖；已知/未知两条路径都留下完整可恢复责任。
 - **风险**：本片本机清理对活动空间的最终隔离由 S6 完成；不得把“已保存终止意图”当作“所有本机安全效果已完成”。
+- **当前实现**：新版加入在认证后保存尝试摘要。Prepared 本机终止时保留认证连接资料并标记远端提交未知；Committed、Applied、Activating 从准确 Commit 中保存原 Space、成员实例和 Add 绑定。取消、原期限到期和新 Join 替换共用这条转换，结束记录与 current 指针更新由原准入仓储提交；并发晚到 Commit 因版本变化不能覆盖终止结果。本片使用下一版磁盘记录保存新增责任，上一片已经写出的 V2 记录保持可读；旧记录仍按原规则继续，不虚构期限或撤销责任。
+- **验证结果**：Core 准入 97 项、Application 准入 70 项、Infra 真实 SQLite 准入 26 项通过；覆盖 Prepared/Committed 取消、新 Join 替换、到期、重启编码、上一版记录兼容、晚到 Commit 竞态和旧记录继续认证。全仓编译、格式、Rust 规则、架构与隐私门禁、差异检查通过。放弃消息、跨空间退出、实体设备和跨真实网络验证跳过，分别留到 S5、S6、S8。
 
 ## 6.8 S5：放弃消息可靠投递与迟到消息隔离
 
@@ -463,7 +467,7 @@ Relationship: 现有公开入口按 device_id 查当前有效成员，且拒绝�
 | `git diff --check` | 通过 |
 | 新方案双端及真实设备验证 | 跳过：尚未实现，不以现有仓库检查代替新行为验收 |
 
-决策回写与切片细化时的验证：metadata、全 workspace/all-targets check、fmt、两项架构脚本和 diff 检查重新执行通过；check 仍有当时已有的 HarmonyOS 测试 unused imports 警告。文档三个修改文件的 34 个相对链接通过，六项决策与过时规则检查通过。此段仅保留开工前的历史检查；S0–S3 的当前实现证据见 6.3–6.6，S4–S8 仍未执行。
+决策回写与切片细化时的验证：metadata、全 workspace/all-targets check、fmt、两项架构脚本和 diff 检查重新执行通过；check 仍有当时已有的 HarmonyOS 测试 unused imports 警告。文档三个修改文件的 34 个相对链接通过，六项决策与过时规则检查通过。此段仅保留开工前的历史检查；S0–S4 的当前实现证据见 6.3–6.7，S5–S8 仍未执行。
 
 # 10. Risks and Trade-offs
 

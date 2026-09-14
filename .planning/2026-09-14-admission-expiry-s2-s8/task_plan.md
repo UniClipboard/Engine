@@ -20,31 +20,30 @@
 | --- | --- | --- |
 | S1 | complete | 91287ca1 |
 | S2 | complete | 38470b48 |
-| S3 | complete | this commit |
-| S4 | pending | pending |
+| S3 | complete | 0a139a8c |
+| S4 | complete | this commit |
 | S5 | pending | pending |
 | S6 | pending | pending |
 | S7 | pending | pending |
 | S8 | pending | pending |
 
-## Current Slice: S3
+## Current Slice: S4
 
 ### Owner and boundary
-- 现有成员移除用例继续完整负责签名、成员历史提交、安全效果和受限投递责任。
-- 公开按设备移除先固定当前精确成员；冲突重试不得重新解析为后来同设备的新成员。
-- 准入撤销只提交已验证的 admission、space、成员实例和原 Add 绑定。
-- Core 只提供按精确成员查找既有 Remove 的规则，不在准入流程复制移除逻辑。
-- 本片只提供可复用的精确撤销能力；到期和取消接线属于 S4。
+- 准入流程继续完整负责取消、新意图替换和到期恢复；调用方不判断内部阶段。
+- Core 决定本机能否结束，并把远端是否已经提交分为已知和未知两种清理责任。
+- 准入仓储在结束记录中密文保存清理责任，并在同一提交中释放当前加入槽位。
+- 本片不发送放弃事实，不执行跨空间退出；网络投递属于 S5，最终本机隔离属于 S6。
 
-### S3 Phases
-- [x] 调查现有成员移除、签名、账本和安全效果路径
-- [x] 先写旧撤销重放不能移除同设备新实例的失败测试
-- [x] 固定精确目标并让 CAS 重试保持原实例
-- [x] 增加 admission 专用目标、稳定去重和结果分类
-- [x] 验证错误空间、错误 Add、无权签名和本机效果待完成
+### S4 Phases
+- [x] 正式决定前继续允许直接取消和替换
+- [x] Prepared 保存远端决定未知的清理责任并立即结束本机
+- [x] Committed、Applied、Activating 保存精确成员清理目标并立即结束本机
+- [x] 用户取消、到期和新意图替换共用同一条本机终止规则
+- [x] 验证重启编码、并发晚到 Commit、旧记录兼容和真实加密仓储
 - [x] 更新执行计划和架构圣经
 - [x] 严格审查、完整门禁
-- [x] 创建 S3 本地提交
+- [x] 创建 S4 本地提交
 
 ## Errors Encountered
 

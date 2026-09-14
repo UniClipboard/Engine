@@ -19,7 +19,7 @@ fn joiner_candidate_saves_cancel_request_without_becoming_terminal() {
 }
 
 #[test]
-fn supersession_is_allowed_through_candidate_but_not_after_prepared() {
+fn supersession_terminates_bounded_joiners_before_and_after_prepared() {
     let superseded = joiner_candidate_aggregate_fixture()
         .supersede()
         .expect("Candidate Joiner can be superseded");
@@ -28,9 +28,21 @@ fn supersession_is_allowed_through_candidate_but_not_after_prepared() {
         SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Superseded(_))
     ));
 
+    let prepared = joiner_prepared_aggregate_fixture()
+        .supersede()
+        .expect("Prepared Joiner can terminate locally when superseded")
+        .into_replacement();
+    let prepared = JoinerAdmission::try_from_record(prepared).expect("terminated Joiner record");
     assert_eq!(
-        joiner_prepared_aggregate_fixture().supersede(),
-        Err(SpaceAdmissionAggregateError::UnsafeSupersession)
+        prepared.termination_reason(),
+        Some(SpaceAdmissionTerminationReason::Superseded)
+    );
+    assert_eq!(
+        prepared
+            .cleanup_obligation()
+            .expect("Prepared Joiner keeps cleanup responsibility")
+            .commit_knowledge(),
+        AdmissionCommitKnowledge::Unknown
     );
 }
 
@@ -63,7 +75,7 @@ fn prepared_joiner_can_cancel_before_formal_commit() {
 }
 
 #[test]
-fn formal_commit_blocks_cancellation_and_supersession() {
+fn formal_commit_blocks_cancel_message_but_allows_local_supersession_cleanup() {
     let committed = joiner_committed_aggregate_fixture();
     let commit_message_id = match committed.state() {
         SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Committed(state)) => {
@@ -92,10 +104,20 @@ fn formal_commit_blocks_cancellation_and_supersession() {
         committed.cancel(pending_exchange),
         Err(SpaceAdmissionAggregateError::TooLateCommitted)
     );
+    let superseded = JoinerAdmission::try_from_record(joiner_committed_aggregate_fixture())
+        .expect("committed joiner")
+        .supersede()
+        .expect("a committed bounded join can terminate locally")
+        .into_replacement();
     assert_eq!(
-        joiner_committed_aggregate_fixture().supersede(),
-        Err(SpaceAdmissionAggregateError::UnsafeSupersession)
+        superseded.termination_reason(),
+        Some(SpaceAdmissionTerminationReason::Superseded)
     );
+    let cleanup = superseded
+        .cleanup_obligation()
+        .expect("known commit keeps cleanup responsibility");
+    assert_eq!(cleanup.commit_knowledge(), AdmissionCommitKnowledge::Known);
+    assert!(cleanup.member_binding().is_some());
 }
 
 #[test]
@@ -142,7 +164,7 @@ fn bounded_joiner_expires_only_at_its_persisted_deadline() {
 }
 
 #[test]
-fn bounded_joiner_cancels_locally_but_prepared_joiner_is_outside_s1() {
+fn bounded_joiner_and_prepared_joiner_both_terminate_locally() {
     let cancelled = JoinerAdmission::try_from_record(initiated_joiner_aggregate_fixture())
         .expect("joiner fixture")
         .cancel_locally()
@@ -153,12 +175,29 @@ fn bounded_joiner_cancels_locally_but_prepared_joiner_is_outside_s1() {
         Some(SpaceAdmissionTerminationReason::Cancelled)
     );
 
-    assert!(matches!(
-        JoinerAdmission::try_from_record(joiner_prepared_aggregate_fixture())
-            .expect("prepared joiner fixture")
-            .terminate_if_expired(301_000),
-        Err(SpaceAdmissionAggregateError::UnsafeCancellation)
-    ));
+    let prepared = JoinerAdmission::try_from_record(joiner_prepared_aggregate_fixture())
+        .expect("prepared joiner fixture")
+        .terminate_if_expired(301_000)
+        .expect("prepared join can expire locally")
+        .expect("deadline is due")
+        .into_replacement();
+    let cleanup = prepared
+        .cleanup_obligation()
+        .expect("unknown remote commit keeps cleanup responsibility");
+    assert_eq!(
+        cleanup.commit_knowledge(),
+        AdmissionCommitKnowledge::Unknown
+    );
+    assert!(cleanup.member_binding().is_none());
+    let encoded = prepared.encode_persisted().expect("cleanup state encodes");
+    let recovered = JoinerAdmission::decode_persisted(&encoded).expect("cleanup state decodes");
+    assert_eq!(
+        recovered
+            .cleanup_obligation()
+            .expect("cleanup survives restart")
+            .commit_knowledge(),
+        AdmissionCommitKnowledge::Unknown
+    );
 }
 
 #[test]
@@ -182,6 +221,28 @@ fn legacy_joiner_can_still_cancel_locally_without_inventing_a_deadline() {
         Some(SpaceAdmissionTerminationReason::Cancelled)
     );
     assert_eq!(decoded.expires_at_ms(), None);
+}
+
+#[test]
+fn legacy_joiner_can_still_save_an_authenticated_channel() {
+    let legacy = initiated_joiner_aggregate_fixture().into_legacy_persistence_fixture();
+    let peer_binding = AdmissionPeerBinding::new(
+        AdmissionChannelPeerId::from_bytes([0xf1; 32]).expect("local peer fixture"),
+        AdmissionChannelPeerId::from_bytes([0xf2; 32]).expect("remote peer fixture"),
+    )
+    .expect("distinct peer fixture");
+    let continuation = AdmissionContinuationCredential::from_bytes(vec![0xf3; 64])
+        .expect("continuation fixture");
+    let authenticated = JoinerAdmission::try_from_record(legacy)
+        .expect("legacy joiner fixture")
+        .with_authenticated_channel(peer_binding, continuation)
+        .expect("legacy joiner can continue authentication")
+        .into_replacement();
+
+    assert!(matches!(
+        authenticated.pending_recovery(),
+        Some(AdmissionPendingRecovery::Continuation { .. })
+    ));
 }
 
 #[test]

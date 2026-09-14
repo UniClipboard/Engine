@@ -19,6 +19,7 @@ impl SpaceAdmissionAggregate {
             record_version: 0,
             admission_id,
             attempt_timeline: None,
+            attempt_digest: None,
             state: SpaceAdmissionRecordState::CompletionHelper(
                 SpaceAdmissionCompletionHelperState::Challenged(
                     SpaceAdmissionCompletionHelperChallenged {

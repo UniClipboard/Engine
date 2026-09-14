@@ -3,7 +3,9 @@ use super::{LoadedJoinerStartState, SpaceAdmissionCommitToken};
 use crate::space::admission::protocol::test_support::{
     ProtocolEvent, SpaceAdmissionProtocolTestPair,
 };
-use crate::space::admission::{CurrentJoinStatus, JoinSpaceError, JoinSpaceInput};
+use crate::space::admission::{
+    AdmissionRecoveryTrigger, CurrentJoinStatus, JoinSpaceError, JoinSpaceInput,
+};
 use uc_core::membership::AdmissionSourceSnapshot;
 
 #[test]
@@ -188,6 +190,42 @@ async fn a_replaceable_current_join_is_superseded_with_the_new_join_in_one_commi
 
     assert!(replacement.superseded_previous_join());
     assert_eq!(replacement.active_joiner_observation_count(), 1);
+}
+
+#[tokio::test]
+async fn a_committed_current_join_does_not_block_a_distinct_new_join() {
+    let first = SpaceAdmissionProtocolTestPair::receiving_commit().await;
+    first
+        .joiner()
+        .start_join_at(join_input("committed-attempt-a"), 1_000)
+        .await
+        .expect("attempt A is saved");
+    first
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+    first
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+    let attempt_a = first.take_created_join();
+
+    let replacement = SpaceAdmissionProtocolTestPair::with_current_join(Some(attempt_a)).await;
+    let attempt_b = replacement
+        .joiner()
+        .start_join_at(join_input("attempt-b"), 2_000)
+        .await
+        .expect("attempt B replaces committed attempt A");
+
+    assert!(matches!(
+        attempt_b.status,
+        CurrentJoinStatus::Pending { .. }
+    ));
+    assert!(replacement.superseded_previous_join());
+    assert_eq!(
+        replacement.previous_termination(),
+        Some(uc_core::membership::SpaceAdmissionTerminationReason::Superseded)
+    );
 }
 
 #[tokio::test]

@@ -9,7 +9,9 @@ mod terminal;
 mod transition;
 mod view;
 
-use super::super::{AdmissionActivationReceipt, MemberInstanceId, MembershipEventId};
+use super::super::{
+    AdmissionActivationReceipt, MemberInstanceId, MembershipEventId, MembershipOperationV2,
+};
 use super::artifact::{
     AdmissionActivatedSecurityState, AdmissionBaseSnapshot, AdmissionContinuationCredential,
     AdmissionEncryptedPasswordEquivalent, AdmissionHelperNonce, AdmissionHelperSecurityState,
@@ -19,19 +21,23 @@ use super::artifact::{
     AdmissionSpaceTransitionResult, AdmissionStagedSecurityState, AdmissionStagedTarget,
     AdmissionStagedTargetInput, SpaceAdmissionRoute,
 };
-use super::attempt::AdmissionAttemptTimeline;
+use super::attempt::{
+    AdmissionAttemptContractV2, AdmissionAttemptTimeline, AdmissionMemberBindingV2,
+};
 use super::exchange::{
     AdmissionErrorCategory, AdmissionExchangeBlockReason, AdmissionMessageEvidence,
     AdmissionRetryState, PendingAdmissionExchange, SavedAdmissionReply,
 };
 use super::id::{AdmissionMessageId, JoinId, SpaceAdmissionId};
 use super::message::{SpaceAdmissionEnvelopeV1, SpaceAdmissionRejectionReason};
+use crate::ids::SpaceId;
 use crate::pairing::invitation::FullInvitation;
 
 pub use aggregate::{
     AdmissionEffect, AdmissionRecoveryCategory, AdmissionTransition, SpaceAdmissionAggregate,
     SpaceAdmissionAggregateError, SpaceAdmissionRecordState, SpaceAdmissionTerminalState,
     SPACE_ADMISSION_RECORD_FORMAT_V1, SPACE_ADMISSION_RECORD_FORMAT_V2,
+    SPACE_ADMISSION_RECORD_FORMAT_V3,
 };
 pub use capability::{
     AdmissionRecordPersistence, JoinerAdmission, JoinerAdmissionTransition, SponsorAdmission,
@@ -56,12 +62,12 @@ pub use sponsor::{
     SponsorPairingConfirmationSummary,
 };
 pub use terminal::{
-    SpaceAdmissionActivePendingSettlement, SpaceAdmissionActiveSettled, SpaceAdmissionActiveState,
-    SpaceAdmissionCompletedTerminal, SpaceAdmissionJoinerRejected,
-    SpaceAdmissionLocalJoinerRejected, SpaceAdmissionLocalJoinerTerminated,
-    SpaceAdmissionRecoveryRequiredTerminal, SpaceAdmissionRejectedState,
-    SpaceAdmissionSponsorRejected, SpaceAdmissionSupersededState, SpaceAdmissionSupersededTerminal,
-    SpaceAdmissionTerminationReason,
+    AdmissionCleanupObligation, AdmissionCommitKnowledge, SpaceAdmissionActivePendingSettlement,
+    SpaceAdmissionActiveSettled, SpaceAdmissionActiveState, SpaceAdmissionCompletedTerminal,
+    SpaceAdmissionJoinerRejected, SpaceAdmissionLocalJoinerRejected,
+    SpaceAdmissionLocalJoinerTerminated, SpaceAdmissionRecoveryRequiredTerminal,
+    SpaceAdmissionRejectedState, SpaceAdmissionSponsorRejected, SpaceAdmissionSupersededState,
+    SpaceAdmissionSupersededTerminal, SpaceAdmissionTerminationReason,
 };
 pub use view::{
     AdmissionPendingRecovery, JoinerActivationPreparation, JoinerAppliedPreparation,

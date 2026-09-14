@@ -12,6 +12,39 @@ pub struct SpaceAdmissionLocalJoinerTerminated {
     pub(super) join_id: JoinId,
     pub(super) local_join_ordinal: u64,
     pub(super) reason: SpaceAdmissionTerminationReason,
+    pub(super) cleanup: Option<AdmissionCleanupObligation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionCommitKnowledge {
+    Unknown,
+    Known,
+}
+
+#[derive(PartialEq, Eq)]
+pub struct AdmissionCleanupObligation {
+    pub(super) commit_knowledge: AdmissionCommitKnowledge,
+    pub(super) member_binding: Option<AdmissionMemberBindingV2>,
+    pub(super) peer_binding: AdmissionPeerBinding,
+    pub(super) continuation_credential: AdmissionContinuationCredential,
+}
+
+impl AdmissionCleanupObligation {
+    pub const fn commit_knowledge(&self) -> AdmissionCommitKnowledge {
+        self.commit_knowledge
+    }
+
+    pub const fn member_binding(&self) -> Option<&AdmissionMemberBindingV2> {
+        self.member_binding.as_ref()
+    }
+
+    pub const fn peer_binding(&self) -> AdmissionPeerBinding {
+        self.peer_binding
+    }
+
+    pub const fn continuation_credential(&self) -> &AdmissionContinuationCredential {
+        &self.continuation_credential
+    }
 }
 
 #[derive(PartialEq, Eq)]

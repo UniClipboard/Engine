@@ -47,7 +47,7 @@ impl SponsorAdmissionService {
                 })?;
                 let admission_id = envelope.header().admission_id();
                 let transition = match attempt_contract {
-                    Some(contract) => SponsorAdmission::accept_join_request_with_timeline(
+                    Some(contract) => SponsorAdmission::accept_join_request_with_contract(
                         admission_id,
                         invitation_claim,
                         envelope,
@@ -55,7 +55,7 @@ impl SponsorAdmissionService {
                         base_snapshot,
                         peer_binding,
                         continuation,
-                        contract.timeline(),
+                        contract,
                     )?,
                     None => SponsorAdmission::accept_join_request(
                         admission_id,

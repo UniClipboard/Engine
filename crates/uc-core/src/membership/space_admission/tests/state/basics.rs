@@ -278,6 +278,7 @@ fn sponsor_candidate_aggregate_fixture() -> SpaceAdmissionAggregate {
         AdmissionContinuationCredential::from_bytes(vec![0x48; 64])
             .expect("bounded continuation credential fixture"),
         Some(AdmissionAttemptTimeline::start(1_000).expect("valid Sponsor timeline fixture")),
+        None,
     )
     .expect("complete accepted Sponsor fixture")
     .into_replacement();

@@ -22,3 +22,11 @@
 - Existing CompleteAck settlement already checks the authenticated peer, exact predecessor, and replay state. Late confirmation must reuse that path rather than add a looser acknowledgement path.
 - The recovery summary is only a pending boolean and always restores JoinerAdmission. S2 needs Sponsor expiry to run through the sole Recovery owner; S7 can later finish bounded batches and full dual-role scheduling.
 - Device-trust queries currently always return `pairing_confirmation=None`. The lookup must bind the Sponsor admission to the exact active member instance, not infer it from device_id alone.
+
+## S4 invariants
+- Prepared means the Sponsor may have committed even when the Joiner did not receive Commit; local termination therefore saves an unknown-commit cleanup obligation rather than claiming no member exists.
+- Once Commit is saved, cleanup binds the authenticated attempt digest to the exact Space, member instance and Add event; later cleanup cannot select a newer instance by device id.
+- Local cancellation does not wait for a CancelRequested exchange after the attempt is bounded by the new five-minute contract.
+- The terminal record keeps the authenticated peer binding and continuation credential required by S5; the current Join pointer is released independently.
+- Old records without the new deadline keep their previous recovery behavior and do not gain an invented cleanup contract.
+- S2 already established disk format V2, so S4 cleanup fields require V3 rather than extending the postcard V2 structure in place.
