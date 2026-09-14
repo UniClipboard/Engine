@@ -686,6 +686,11 @@ impl RuntimeSpaceAccessAdapter {
         Ok(())
     }
 
+    /// 停止使用已被终止准入提升的控制世代；持久停止事实由切换负责人先保存。
+    pub(crate) fn stop_using_admission_target(&self) {
+        self.session.clear();
+    }
+
     async fn prepare_target_access(
         &self,
         target_space_id: &SpaceId,

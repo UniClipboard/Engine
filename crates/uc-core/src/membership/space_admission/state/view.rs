@@ -329,6 +329,14 @@ impl SpaceAdmissionAggregate {
         }
     }
 
+    pub const fn has_pending_local_termination(&self) -> bool {
+        matches!(
+            &self.state,
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state))
+                if matches!(&state.cleanup, Some(cleanup) if cleanup.local_space_transition.is_some())
+        )
+    }
+
     pub fn joiner_candidate_preparation(&self) -> Option<JoinerCandidatePreparation<'_>> {
         let SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(state)) =
             &self.state

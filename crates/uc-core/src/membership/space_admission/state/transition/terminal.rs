@@ -96,24 +96,33 @@ impl SpaceAdmissionAggregate {
             SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Activating(state))
                 if has_authenticated_attempt =>
             {
-                (
-                    state.join_id,
-                    state.local_join_ordinal,
-                    Some(known_cleanup_obligation(
-                        self.attempt_digest,
-                        &state.exact_commit,
-                        state.peer_binding,
-                        state.continuation_credential,
-                        state.completion.header().message_id(),
-                        reason,
-                    )?),
+                let local_space_transition = AdmissionSpaceTransition::from_bytes(
+                    state.space_transition.as_bytes().to_vec(),
                 )
+                .map_err(|_| SpaceAdmissionAggregateError::InvalidTransition)?;
+                let mut cleanup = known_cleanup_obligation(
+                    self.attempt_digest,
+                    &state.exact_commit,
+                    state.peer_binding,
+                    state.continuation_credential,
+                    state.completion.header().message_id(),
+                    reason,
+                )?;
+                cleanup.local_space_transition = Some(local_space_transition);
+                (state.join_id, state.local_join_ordinal, Some(cleanup))
             }
             _ => return Err(SpaceAdmissionAggregateError::UnsafeCancellation),
         };
         self.record_version = record_version;
         if cleanup.is_some() {
-            self.format_version = SPACE_ADMISSION_RECORD_FORMAT_V4;
+            self.format_version = if cleanup
+                .as_ref()
+                .is_some_and(|cleanup| cleanup.local_space_transition.is_some())
+            {
+                SPACE_ADMISSION_RECORD_FORMAT_V5
+            } else {
+                SPACE_ADMISSION_RECORD_FORMAT_V4
+            };
         }
         self.state = if self.attempt_timeline.is_none()
             && matches!(reason, SpaceAdmissionTerminationReason::Cancelled)
@@ -307,5 +316,6 @@ fn cleanup_obligation(
         peer_binding,
         continuation_credential,
         pending_exchange: Some(pending_exchange),
+        local_space_transition: None,
     })
 }

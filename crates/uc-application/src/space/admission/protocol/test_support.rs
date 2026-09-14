@@ -118,6 +118,7 @@ pub(super) enum ProtocolEvent {
     JoinerSavedApplied,
     JoinerSavedActivating,
     JoinerActivationExecuted,
+    JoinerActivationTerminated,
     JoinerSavedActivePendingSettlement,
     JoinerCompleteAckExchanged,
     JoinerAbandonmentExchanged,
@@ -472,6 +473,14 @@ impl ExecuteJoinerActivationPort for UnusedSponsorPorts {
         _admission_id: SpaceAdmissionId,
         _preparation: uc_core::membership::JoinerActivationPreparation<'_>,
     ) -> Result<CompletedJoinerActivation, ExecuteJoinerActivationError> {
+        unreachable!()
+    }
+
+    async fn terminate(
+        &self,
+        _admission_id: SpaceAdmissionId,
+        _saved_transition: &[u8],
+    ) -> Result<(), ExecuteJoinerActivationError> {
         unreachable!()
     }
 }
@@ -1606,6 +1615,19 @@ impl ExecuteJoinerActivationPort for FixedJoinerActivation {
                 preserved_unreadable_records: None,
             },
         ))
+    }
+
+    async fn terminate(
+        &self,
+        _admission_id: SpaceAdmissionId,
+        saved_transition: &[u8],
+    ) -> Result<(), ExecuteJoinerActivationError> {
+        assert!(!saved_transition.is_empty());
+        self.events
+            .lock()
+            .expect("event recorder is available")
+            .push(ProtocolEvent::JoinerActivationTerminated);
+        Ok(())
     }
 }
 

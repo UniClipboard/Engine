@@ -1,6 +1,7 @@
 use std::error::Error as _;
 use uc_application::deps::{
-    JoinerActivationMutation, JoinerActivationStateError, JoinerActivationStatePort,
+    JoinerActivationIntent, JoinerActivationMutation, JoinerActivationStateError,
+    JoinerActivationStatePort, ValidateJoinerActivationIntentPort,
 };
 use uc_core::membership::{
     AdmissionActivationReceipt, AdmissionAppliedV1, AdmissionCandidateV1, AdmissionChangeFacts,
@@ -70,6 +71,42 @@ async fn activating_join_reopens_and_commits_active_state() {
     assert_eq!(
         active.current_exact_reply().map(|reply| reply.kind()),
         Some(SpaceAdmissionMessageKind::CompleteAck)
+    );
+}
+
+#[tokio::test]
+async fn activation_intent_accepts_only_the_exact_current_saved_plan() {
+    let fixture = Fixture::new();
+    commit_activating_join(&fixture).await;
+    let loaded = JoinerActivationStatePort::load(&fixture.store)
+        .await
+        .unwrap()
+        .unwrap();
+    let (joiner, token) = loaded.into_parts();
+    let admission_id = joiner.admission_id();
+    let preparation = joiner.joiner_activation_preparation().unwrap();
+    let plan = preparation.space_transition().as_bytes();
+    let current = JoinerActivationIntent::from_saved_plan(admission_id, plan).unwrap();
+    let stale = JoinerActivationIntent::from_saved_plan(admission_id, &[0xff; 32]).unwrap();
+
+    assert!(
+        ValidateJoinerActivationIntentPort::validate(&fixture.store, current)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !ValidateJoinerActivationIntentPort::validate(&fixture.store, stale)
+            .await
+            .unwrap()
+    );
+
+    JoinerActivationStatePort::commit(&fixture.store, token, activation_mutation(joiner, 0xe4))
+        .await
+        .unwrap();
+    assert!(
+        !ValidateJoinerActivationIntentPort::validate(&fixture.store, current)
+            .await
+            .unwrap()
     );
 }
 

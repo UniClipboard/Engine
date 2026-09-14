@@ -42,6 +42,7 @@ pub use aggregate::{
     SpaceAdmissionAggregateError, SpaceAdmissionRecordState, SpaceAdmissionTerminalState,
     SPACE_ADMISSION_RECORD_FORMAT_V1, SPACE_ADMISSION_RECORD_FORMAT_V2,
     SPACE_ADMISSION_RECORD_FORMAT_V3, SPACE_ADMISSION_RECORD_FORMAT_V4,
+    SPACE_ADMISSION_RECORD_FORMAT_V5,
 };
 pub use capability::{
     AdmissionRecordPersistence, JoinerAdmission, JoinerAdmissionTransition, SponsorAdmission,

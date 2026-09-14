@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use sha2::{Digest as _, Sha256};
 use uc_application::deps::{
     AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
-    AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionStepV2,
+    AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionStepV2, JoinerActivationIntent,
+    ValidateJoinerActivationIntentPort,
 };
 use uc_core::ids::SpaceId;
 use uc_core::membership::{
@@ -36,6 +37,7 @@ pub struct V3AdmissionSpaceTransition {
     manifests: Arc<ActiveSpaceGenerationManifestStore>,
     control_generations: Arc<SpaceControlGeneration>,
     activation: Arc<SpaceTransitionActivation>,
+    activation_intents: Arc<dyn ValidateJoinerActivationIntentPort>,
 }
 
 impl V3AdmissionSpaceTransition {
@@ -44,6 +46,7 @@ impl V3AdmissionSpaceTransition {
         manifests: Arc<ActiveSpaceGenerationManifestStore>,
         control_generations: Arc<SpaceControlGeneration>,
         activation: Arc<SpaceTransitionActivation>,
+        activation_intents: Arc<dyn ValidateJoinerActivationIntentPort>,
     ) -> Self {
         Self {
             profile_salt,
@@ -51,6 +54,7 @@ impl V3AdmissionSpaceTransition {
             manifests,
             control_generations,
             activation,
+            activation_intents,
         }
     }
 
@@ -61,6 +65,7 @@ impl V3AdmissionSpaceTransition {
         manifests: Arc<ActiveSpaceGenerationManifestStore>,
         control_generations: Arc<SpaceControlGeneration>,
         activation: Arc<SpaceTransitionActivation>,
+        activation_intents: Arc<dyn ValidateJoinerActivationIntentPort>,
     ) -> Self {
         Self {
             profile_salt,
@@ -69,6 +74,7 @@ impl V3AdmissionSpaceTransition {
             manifests,
             control_generations,
             activation,
+            activation_intents,
         }
     }
 
@@ -167,6 +173,7 @@ impl V3AdmissionSpaceTransition {
     async fn continue_activation(
         &self,
         transition: &CrossSpaceControlTransitionV3,
+        intent: JoinerActivationIntent,
     ) -> Result<(), AdmissionSpaceTransitionError> {
         let source = Self::source_manifest(transition)?;
         let target = Self::target_manifest(transition)?;
@@ -179,13 +186,24 @@ impl V3AdmissionSpaceTransition {
             Some(ActiveRuntimeManifest::V3(active)) if active == source => {
                 let proof = self.proof(transition).await?;
                 self.activation
-                    .activate_cross_space(&source, &proof, &transition.target_access_state)
+                    .activate_cross_space(
+                        &source,
+                        &proof,
+                        &transition.target_access_state,
+                        self.activation_intents.as_ref(),
+                        intent,
+                    )
                     .await
                     .map_err(map_activation_error)?;
             }
             Some(ActiveRuntimeManifest::V3(active)) if active == target => {
                 self.activation
-                    .recover_cross_space(&target, &transition.target_access_state)
+                    .recover_cross_space(
+                        &target,
+                        &transition.target_access_state,
+                        self.activation_intents.as_ref(),
+                        intent,
+                    )
                     .await
                     .map_err(map_activation_error)?;
             }
@@ -199,6 +217,7 @@ impl V3AdmissionSpaceTransition {
     async fn continue_same_space_activation(
         &self,
         transition: &SameSpaceControlTransitionV3,
+        intent: JoinerActivationIntent,
     ) -> Result<(), AdmissionSpaceTransitionError> {
         let source = Self::same_space_source_manifest(transition)?;
         let target = Self::same_space_target_manifest(transition)?;
@@ -215,13 +234,13 @@ impl V3AdmissionSpaceTransition {
                     .await
                     .map_err(map_control_generation_error)?;
                 self.activation
-                    .activate_same_space(&source, &proof)
+                    .activate_same_space(&source, &proof, self.activation_intents.as_ref(), intent)
                     .await
                     .map_err(map_activation_error)?;
             }
             Some(ActiveRuntimeManifest::V3(active)) if active == target => {
                 self.activation
-                    .recover_same_space(&target)
+                    .recover_same_space(&target, self.activation_intents.as_ref(), intent)
                     .await
                     .map_err(map_activation_error)?;
             }
@@ -235,6 +254,7 @@ impl V3AdmissionSpaceTransition {
     async fn continue_fresh_activation(
         &self,
         transition: &FreshSpaceControlTransitionV3,
+        intent: JoinerActivationIntent,
     ) -> Result<(), AdmissionSpaceTransitionError> {
         let target = Self::fresh_target_manifest(transition)?;
         match self
@@ -250,13 +270,23 @@ impl V3AdmissionSpaceTransition {
                     .await
                     .map_err(map_control_generation_error)?;
                 self.activation
-                    .activate_fresh(&proof, &transition.target_access_state)
+                    .activate_fresh(
+                        &proof,
+                        &transition.target_access_state,
+                        self.activation_intents.as_ref(),
+                        intent,
+                    )
                     .await
                     .map_err(map_activation_error)?;
             }
             Some(ActiveRuntimeManifest::V3(active)) if active == target => {
                 self.activation
-                    .recover_fresh(&target, &transition.target_access_state)
+                    .recover_fresh(
+                        &target,
+                        &transition.target_access_state,
+                        self.activation_intents.as_ref(),
+                        intent,
+                    )
                     .await
                     .map_err(map_activation_error)?;
             }
@@ -298,6 +328,7 @@ impl V3AdmissionSpaceTransition {
     async fn advance_same_space(
         &self,
         transition: &SameSpaceControlTransitionV3,
+        intent: Option<JoinerActivationIntent>,
     ) -> Result<AdmissionSpaceTransitionStepV2, AdmissionSpaceTransitionError> {
         if !transition.validate() {
             return Err(AdmissionSpaceTransitionError::Inconsistent);
@@ -308,7 +339,11 @@ impl V3AdmissionSpaceTransition {
                 SameSpaceControlTransitionPhaseV3::ActivationStarted,
             ),
             SameSpaceControlTransitionPhaseV3::ActivationStarted => {
-                self.continue_same_space_activation(transition).await?;
+                self.continue_same_space_activation(
+                    transition,
+                    intent.ok_or(AdmissionSpaceTransitionError::Inconsistent)?,
+                )
+                .await?;
                 Self::same_space_advanced(
                     transition,
                     SameSpaceControlTransitionPhaseV3::TargetPromoted,
@@ -318,7 +353,11 @@ impl V3AdmissionSpaceTransition {
                 let source = Self::same_space_source_manifest(transition)?;
                 let target = Self::same_space_target_manifest(transition)?;
                 self.activation
-                    .recover_same_space(&target)
+                    .recover_same_space(
+                        &target,
+                        self.activation_intents.as_ref(),
+                        intent.ok_or(AdmissionSpaceTransitionError::Inconsistent)?,
+                    )
                     .await
                     .map_err(map_activation_error)?;
                 self.activation
@@ -357,6 +396,7 @@ impl V3AdmissionSpaceTransition {
     async fn advance_fresh(
         &self,
         transition: &FreshSpaceControlTransitionV3,
+        intent: Option<JoinerActivationIntent>,
     ) -> Result<AdmissionSpaceTransitionStepV2, AdmissionSpaceTransitionError> {
         if !transition.validate() {
             return Err(AdmissionSpaceTransitionError::Inconsistent);
@@ -367,7 +407,11 @@ impl V3AdmissionSpaceTransition {
                 FreshSpaceControlTransitionPhaseV3::ActivationStarted,
             ),
             FreshSpaceControlTransitionPhaseV3::ActivationStarted => {
-                self.continue_fresh_activation(transition).await?;
+                self.continue_fresh_activation(
+                    transition,
+                    intent.ok_or(AdmissionSpaceTransitionError::Inconsistent)?,
+                )
+                .await?;
                 Self::fresh_advanced(
                     transition,
                     FreshSpaceControlTransitionPhaseV3::TargetPromoted,
@@ -376,7 +420,12 @@ impl V3AdmissionSpaceTransition {
             FreshSpaceControlTransitionPhaseV3::TargetPromoted => {
                 let target = Self::fresh_target_manifest(transition)?;
                 self.activation
-                    .recover_fresh(&target, &transition.target_access_state)
+                    .recover_fresh(
+                        &target,
+                        &transition.target_access_state,
+                        self.activation_intents.as_ref(),
+                        intent.ok_or(AdmissionSpaceTransitionError::Inconsistent)?,
+                    )
                     .await
                     .map_err(map_activation_error)?;
                 Self::fresh_advanced(
@@ -389,6 +438,61 @@ impl V3AdmissionSpaceTransition {
                     .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
                 Ok(AdmissionSpaceTransitionStepV2::Finished(
                     AdmissionSpaceTransitionResultV2::FreshControl(result),
+                ))
+            }
+        }
+    }
+
+    async fn advance_cross_space(
+        &self,
+        transition: &CrossSpaceControlTransitionV3,
+        intent: Option<JoinerActivationIntent>,
+    ) -> Result<AdmissionSpaceTransitionStepV2, AdmissionSpaceTransitionError> {
+        if !transition.validate() {
+            return Err(AdmissionSpaceTransitionError::Inconsistent);
+        }
+        match transition.phase {
+            CrossSpaceControlTransitionPhaseV3::TargetPrepared => Self::advanced(
+                transition,
+                CrossSpaceControlTransitionPhaseV3::ActivationStarted,
+            ),
+            CrossSpaceControlTransitionPhaseV3::ActivationStarted => {
+                self.continue_activation(
+                    transition,
+                    intent.ok_or(AdmissionSpaceTransitionError::Inconsistent)?,
+                )
+                .await?;
+                Self::advanced(
+                    transition,
+                    CrossSpaceControlTransitionPhaseV3::TargetPromoted,
+                )
+            }
+            CrossSpaceControlTransitionPhaseV3::TargetPromoted => {
+                let source = Self::source_manifest(transition)?;
+                let target = Self::target_manifest(transition)?;
+                self.activation
+                    .recover_cross_space(
+                        &target,
+                        &transition.target_access_state,
+                        self.activation_intents.as_ref(),
+                        intent.ok_or(AdmissionSpaceTransitionError::Inconsistent)?,
+                    )
+                    .await
+                    .map_err(map_activation_error)?;
+                self.activation
+                    .cleanup_source_control_generation(&source, &target)
+                    .await
+                    .map_err(map_activation_error)?;
+                Self::advanced(
+                    transition,
+                    CrossSpaceControlTransitionPhaseV3::CleanupPending,
+                )
+            }
+            CrossSpaceControlTransitionPhaseV3::CleanupPending => {
+                let result = CrossSpaceControlTransitionResultV3::from_cleanup_pending(transition)
+                    .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
+                Ok(AdmissionSpaceTransitionStepV2::Finished(
+                    AdmissionSpaceTransitionResultV2::CrossSpaceControl(result),
                 ))
             }
         }
@@ -515,53 +619,35 @@ impl AdmissionSpaceTransitionPort for V3AdmissionSpaceTransition {
         transition: &AdmissionSpaceTransitionV2,
     ) -> Result<AdmissionSpaceTransitionStepV2, AdmissionSpaceTransitionError> {
         if let AdmissionSpaceTransitionV2::SameSpaceControl(transition) = transition {
-            return self.advance_same_space(transition).await;
+            return self.advance_same_space(transition, None).await;
         }
         if let AdmissionSpaceTransitionV2::FreshControl(transition) = transition {
-            return self.advance_fresh(transition).await;
+            return self.advance_fresh(transition, None).await;
         }
         let AdmissionSpaceTransitionV2::CrossSpaceControl(transition) = transition else {
             return Err(AdmissionSpaceTransitionError::Inconsistent);
         };
-        if !transition.validate() {
+        self.advance_cross_space(transition, None).await
+    }
+
+    async fn advance_admission(
+        &self,
+        transition: &AdmissionSpaceTransitionV2,
+        intent: JoinerActivationIntent,
+    ) -> Result<AdmissionSpaceTransitionStepV2, AdmissionSpaceTransitionError> {
+        if transition.attempt_id() != intent.admission_id() {
             return Err(AdmissionSpaceTransitionError::Inconsistent);
         }
-        match transition.phase {
-            CrossSpaceControlTransitionPhaseV3::TargetPrepared => Self::advanced(
-                transition,
-                CrossSpaceControlTransitionPhaseV3::ActivationStarted,
-            ),
-            CrossSpaceControlTransitionPhaseV3::ActivationStarted => {
-                self.continue_activation(transition).await?;
-                Self::advanced(
-                    transition,
-                    CrossSpaceControlTransitionPhaseV3::TargetPromoted,
-                )
-            }
-            CrossSpaceControlTransitionPhaseV3::TargetPromoted => {
-                let source = Self::source_manifest(transition)?;
-                let target = Self::target_manifest(transition)?;
-                self.activation
-                    .recover_cross_space(&target, &transition.target_access_state)
-                    .await
-                    .map_err(map_activation_error)?;
-                self.activation
-                    .cleanup_source_control_generation(&source, &target)
-                    .await
-                    .map_err(map_activation_error)?;
-                Self::advanced(
-                    transition,
-                    CrossSpaceControlTransitionPhaseV3::CleanupPending,
-                )
-            }
-            CrossSpaceControlTransitionPhaseV3::CleanupPending => {
-                let result = CrossSpaceControlTransitionResultV3::from_cleanup_pending(transition)
-                    .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
-                Ok(AdmissionSpaceTransitionStepV2::Finished(
-                    AdmissionSpaceTransitionResultV2::CrossSpaceControl(result),
-                ))
-            }
+        if let AdmissionSpaceTransitionV2::SameSpaceControl(transition) = transition {
+            return self.advance_same_space(transition, Some(intent)).await;
         }
+        if let AdmissionSpaceTransitionV2::FreshControl(transition) = transition {
+            return self.advance_fresh(transition, Some(intent)).await;
+        }
+        let AdmissionSpaceTransitionV2::CrossSpaceControl(transition) = transition else {
+            return Err(AdmissionSpaceTransitionError::Inconsistent);
+        };
+        self.advance_cross_space(transition, Some(intent)).await
     }
 
     async fn discard_pre_activation(
@@ -619,6 +705,53 @@ impl AdmissionSpaceTransitionPort for V3AdmissionSpaceTransition {
             .discard_prepared_control(&source, &proof)
             .await
             .map_err(map_activation_error)
+    }
+
+    async fn terminate_admission(
+        &self,
+        transition: &AdmissionSpaceTransitionV2,
+    ) -> Result<(), AdmissionSpaceTransitionError> {
+        match transition {
+            AdmissionSpaceTransitionV2::FreshControl(transition) if transition.validate() => {
+                let target = Self::fresh_target_manifest(transition)?;
+                self.activation
+                    .terminate_admission_target(
+                        *transition.attempt_id.as_bytes(),
+                        None,
+                        &target,
+                        &transition.prepared_database_digest,
+                    )
+                    .await
+                    .map_err(map_activation_error)
+            }
+            AdmissionSpaceTransitionV2::SameSpaceControl(transition) if transition.validate() => {
+                let source = Self::same_space_source_manifest(transition)?;
+                let target = Self::same_space_target_manifest(transition)?;
+                self.activation
+                    .terminate_admission_target(
+                        *transition.attempt_id.as_bytes(),
+                        Some(&source),
+                        &target,
+                        &transition.prepared_database_digest,
+                    )
+                    .await
+                    .map_err(map_activation_error)
+            }
+            AdmissionSpaceTransitionV2::CrossSpaceControl(transition) if transition.validate() => {
+                let source = Self::source_manifest(transition)?;
+                let target = Self::target_manifest(transition)?;
+                self.activation
+                    .terminate_admission_target(
+                        *transition.attempt_id.as_bytes(),
+                        Some(&source),
+                        &target,
+                        &transition.prepared_database_digest,
+                    )
+                    .await
+                    .map_err(map_activation_error)
+            }
+            _ => Err(AdmissionSpaceTransitionError::Inconsistent),
+        }
     }
 }
 

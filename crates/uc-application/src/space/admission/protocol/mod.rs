@@ -10,18 +10,18 @@ mod tests;
 pub(crate) use joiner::JoinerAdmissionService;
 pub use joiner::{
     CompletedJoinerActivation, CurrentJoinAdmissionStatePort, ExecuteJoinerActivationError,
-    ExecuteJoinerActivationPort, JoinerActivationCommitToken, JoinerActivationMutation,
-    JoinerActivationOutcome, JoinerActivationStateError, JoinerActivationStatePort,
-    JoinerCancellationCommitToken, JoinerCancellationMaterial, JoinerCancellationMaterialError,
-    JoinerCancellationMutation, JoinerCancellationStateError, JoinerStartMaterial,
-    JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation, JoinerStartStateError,
-    JoinerStartStatePort, LoadedCurrentJoin, LoadedJoinerActivation, LoadedJoinerStartState,
-    PrepareJoinerActivationError, PrepareJoinerActivationPort, PrepareJoinerAppliedError,
-    PrepareJoinerAppliedPort, PrepareJoinerCancellationPort, PrepareJoinerCandidateError,
-    PrepareJoinerCandidatePort, PrepareJoinerInvitationError, PrepareJoinerInvitationPort,
-    PreparedJoinerActivation, PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial,
-    PreparedJoinerInvitation, ResolveJoinerInvitationError, ResolveJoinerInvitationPort,
-    SpaceAdmissionCommitToken,
+    ExecuteJoinerActivationPort, JoinerActivationCommitToken, JoinerActivationIntent,
+    JoinerActivationMutation, JoinerActivationOutcome, JoinerActivationStateError,
+    JoinerActivationStatePort, JoinerCancellationCommitToken, JoinerCancellationMaterial,
+    JoinerCancellationMaterialError, JoinerCancellationMutation, JoinerCancellationStateError,
+    JoinerStartMaterial, JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation,
+    JoinerStartStateError, JoinerStartStatePort, LoadedCurrentJoin, LoadedJoinerActivation,
+    LoadedJoinerStartState, PrepareJoinerActivationError, PrepareJoinerActivationPort,
+    PrepareJoinerAppliedError, PrepareJoinerAppliedPort, PrepareJoinerCancellationPort,
+    PrepareJoinerCandidateError, PrepareJoinerCandidatePort, PrepareJoinerInvitationError,
+    PrepareJoinerInvitationPort, PreparedJoinerActivation, PreparedJoinerAppliedMaterial,
+    PreparedJoinerCandidateMaterial, PreparedJoinerInvitation, ResolveJoinerInvitationError,
+    ResolveJoinerInvitationPort, SpaceAdmissionCommitToken, ValidateJoinerActivationIntentPort,
 };
 pub(crate) use protocol::SpaceAdmissionProtocol;
 pub(crate) use recovery::AdmissionRecoveryService;

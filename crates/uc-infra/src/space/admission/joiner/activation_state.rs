@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use uc_application::deps::{
     JoinerActivationCommitToken, JoinerActivationMutation, JoinerActivationStateError,
-    JoinerActivationStatePort, LoadedJoinerActivation,
+    JoinerActivationStatePort, LoadedJoinerActivation, ValidateJoinerActivationIntentPort,
 };
 use uc_core::membership::{
     AdmissionEffect, AdmissionRecordPersistence, JoinerAdmission, SpaceAdmissionMessageKind,
@@ -110,6 +110,44 @@ impl<E: DbExecutor + Send + Sync> JoinerActivationStatePort for SqliteSpaceAdmis
                 .map_err(map_activation_error)
         })
         .await
+    }
+}
+
+#[async_trait]
+impl<E: DbExecutor + Send + Sync> ValidateJoinerActivationIntentPort
+    for SqliteSpaceAdmissionState<E>
+{
+    async fn validate(
+        &self,
+        intent: uc_application::deps::JoinerActivationIntent,
+    ) -> Result<bool, JoinerActivationStateError> {
+        self.executor
+            .run(|conn| {
+                let state = self.load_state_on(conn).map_err(into_anyhow)?;
+                if state.current_local_join_id != Some(*intent.admission_id().as_bytes()) {
+                    return Ok(false);
+                }
+                let stored = state
+                    .records
+                    .get(intent.admission_id().as_bytes())
+                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                let record = self
+                    .open_record(*intent.admission_id().as_bytes(), stored)
+                    .map_err(into_anyhow)?;
+                let admission = JoinerAdmission::try_from_record(record)
+                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                let Some(preparation) = admission.joiner_activation_preparation() else {
+                    return Ok(false);
+                };
+                let current = uc_application::deps::JoinerActivationIntent::from_saved_plan(
+                    intent.admission_id(),
+                    preparation.space_transition().as_bytes(),
+                )
+                .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                Ok(current == intent)
+            })
+            .map_err(map_executor_error)
+            .map_err(map_activation_error)
     }
 }
 

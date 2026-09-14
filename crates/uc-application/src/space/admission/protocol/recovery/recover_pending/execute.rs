@@ -5,7 +5,8 @@ use super::{
 };
 use crate::space::admission::observation::message_action;
 use crate::space::admission::protocol::{
-    AdmissionRecoveryService, JoinerAdmissionService, SpaceAdmissionProtocol,
+    AdmissionRecoveryService, ExecuteJoinerActivationError, JoinerAdmissionService,
+    SpaceAdmissionProtocol,
 };
 use crate::space::membership::{
     AdmissionAbandonmentRevocationTarget, AdmissionRevocationTarget,
@@ -190,6 +191,9 @@ impl AdmissionRecoveryService {
                     joiner.maintenance_wake.schedule_at(expires_at_ms, now_ms);
                 }
             }
+            if !recover_local_termination(joiner, &aggregate, &mut report).await {
+                continue;
+            }
             if aggregate.is_expired_at(now_ms) == Some(true) && aggregate.can_terminate_locally() {
                 let observation_material = *aggregate.admission_id().as_bytes();
                 match aggregate.terminate_if_expired(now_ms) {
@@ -198,8 +202,14 @@ impl AdmissionRecoveryService {
                             .commit_recovery_and_notify(commit_token, transition)
                             .await
                         {
-                            Ok(_) => {
+                            Ok(loaded) => {
                                 report.terminated_count += 1;
+                                let (terminated, _) = loaded.into_parts();
+                                if !recover_local_termination(joiner, &terminated, &mut report)
+                                    .await
+                                {
+                                    continue;
+                                }
                                 joiner.observations.finish(
                                     observation_material,
                                     SpaceAdmissionObservationOutcome::Failed(
@@ -684,6 +694,34 @@ impl AdmissionRecoveryService {
                 )
                 .await;
             }
+        }
+    }
+}
+
+async fn recover_local_termination(
+    joiner: &JoinerAdmissionService,
+    aggregate: &JoinerAdmission,
+    report: &mut AdmissionRecoveryReport,
+) -> bool {
+    let Some(transition) = aggregate
+        .cleanup_obligation()
+        .and_then(|cleanup| cleanup.local_space_transition())
+    else {
+        return true;
+    };
+    match joiner
+        .execute_activation
+        .terminate(aggregate.admission_id(), transition.as_bytes())
+        .await
+    {
+        Ok(()) => true,
+        Err(ExecuteJoinerActivationError::Unavailable { .. }) => {
+            report.deferred_count += 1;
+            false
+        }
+        Err(ExecuteJoinerActivationError::Invalid { .. }) => {
+            report.recovery_required_count += 1;
+            false
         }
     }
 }

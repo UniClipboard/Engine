@@ -546,6 +546,14 @@ impl ExecuteJoinerActivationPort for PassivePorts {
     ) -> Result<CompletedJoinerActivation, ExecuteJoinerActivationError> {
         unreachable!()
     }
+
+    async fn terminate(
+        &self,
+        _admission_id: SpaceAdmissionId,
+        _saved_transition: &[u8],
+    ) -> Result<(), ExecuteJoinerActivationError> {
+        unreachable!()
+    }
 }
 
 #[async_trait]
@@ -586,6 +594,13 @@ impl AdmissionSpaceTransitionPort for PassivePorts {
     }
 
     async fn discard_pre_activation(
+        &self,
+        _transition: &AdmissionSpaceTransitionV2,
+    ) -> Result<(), AdmissionSpaceTransitionError> {
+        unreachable!()
+    }
+
+    async fn terminate_admission(
         &self,
         _transition: &AdmissionSpaceTransitionV2,
     ) -> Result<(), AdmissionSpaceTransitionError> {

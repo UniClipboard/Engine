@@ -209,6 +209,37 @@ fn bounded_joiner_and_prepared_joiner_both_terminate_locally() {
 }
 
 #[test]
+fn activating_joiner_keeps_the_exact_local_transition_after_termination() {
+    let activating = JoinerAdmission::try_from_record(joiner_activating_aggregate_fixture())
+        .expect("activating Joiner fixture");
+    let expected = activating
+        .joiner_activation_preparation()
+        .expect("activation preparation")
+        .space_transition()
+        .as_bytes()
+        .to_vec();
+
+    let terminated = activating
+        .cancel_locally()
+        .expect("activating Joiner terminates locally")
+        .into_replacement();
+    let encoded = terminated
+        .encode_persisted()
+        .expect("termination responsibility encodes");
+    let reopened = JoinerAdmission::decode_persisted(&encoded)
+        .expect("termination responsibility survives restart");
+
+    assert_eq!(
+        reopened
+            .cleanup_obligation()
+            .and_then(AdmissionCleanupObligation::local_space_transition)
+            .expect("local transition remains recoverable")
+            .as_bytes(),
+        expected
+    );
+}
+
+#[test]
 fn abandonment_acknowledgement_ends_delivery_without_removing_the_fence() {
     let terminated = JoinerAdmission::try_from_record(joiner_prepared_aggregate_fixture())
         .expect("prepared joiner fixture")

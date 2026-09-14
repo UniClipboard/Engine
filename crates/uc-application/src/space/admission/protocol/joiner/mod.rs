@@ -16,8 +16,9 @@ use crate::space::SpaceAdmissionObservationRegistry;
 
 pub use activate_complete::{
     CompletedJoinerActivation, ExecuteJoinerActivationError, ExecuteJoinerActivationPort,
-    JoinerActivationCommitToken, JoinerActivationMutation, JoinerActivationOutcome,
-    JoinerActivationStateError, JoinerActivationStatePort, LoadedJoinerActivation,
+    JoinerActivationCommitToken, JoinerActivationIntent, JoinerActivationMutation,
+    JoinerActivationOutcome, JoinerActivationStateError, JoinerActivationStatePort,
+    LoadedJoinerActivation, ValidateJoinerActivationIntentPort,
 };
 pub use cancel_join::{
     CurrentJoinAdmissionStatePort, JoinerCancellationCommitToken, JoinerCancellationMaterial,

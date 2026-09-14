@@ -70,6 +70,40 @@ async fn current_committed_join_terminates_locally_with_exact_cleanup_target() {
 }
 
 #[tokio::test]
+async fn activating_join_is_isolated_before_cancellation_returns() {
+    let pair = SpaceAdmissionProtocolTestPair::receiving_complete().await;
+    let started = pair
+        .joiner()
+        .start_join_at(join_input("cancel-activating"), 1_000)
+        .await
+        .expect("join should be saved");
+    for _ in 0..3 {
+        pair.joiner()
+            .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+            .await;
+    }
+    let CurrentJoinStatus::Pending { join_id, .. } = started.status else {
+        panic!("new join should be pending");
+    };
+
+    let status = pair
+        .joiner()
+        .cancel_join(join_id)
+        .await
+        .expect("activating join should terminate locally");
+
+    assert!(matches!(status, CurrentJoinStatus::Terminated { .. }));
+    assert!(pair
+        .events()
+        .contains(&super::super::super::test_support::ProtocolEvent::JoinerActivationTerminated));
+    let cancelled = pair.take_created_join();
+    assert!(cancelled
+        .cleanup_obligation()
+        .and_then(uc_core::membership::AdmissionCleanupObligation::local_space_transition)
+        .is_some());
+}
+
+#[tokio::test]
 async fn cancellation_only_targets_the_current_join_id() {
     let pair = SpaceAdmissionProtocolTestPair::fresh().await;
 

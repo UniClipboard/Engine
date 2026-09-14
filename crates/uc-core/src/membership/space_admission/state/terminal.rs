@@ -28,6 +28,7 @@ pub struct AdmissionCleanupObligation {
     pub(super) peer_binding: AdmissionPeerBinding,
     pub(super) continuation_credential: AdmissionContinuationCredential,
     pub(super) pending_exchange: Option<PendingAdmissionExchange>,
+    pub(super) local_space_transition: Option<AdmissionSpaceTransition>,
 }
 
 impl AdmissionCleanupObligation {
@@ -49,6 +50,11 @@ impl AdmissionCleanupObligation {
 
     pub const fn pending_exchange(&self) -> Option<&PendingAdmissionExchange> {
         self.pending_exchange.as_ref()
+    }
+
+    /// 终止前已经保存的本机切换计划；只用于幂等隔离该尝试的目标。
+    pub const fn local_space_transition(&self) -> Option<&AdmissionSpaceTransition> {
+        self.local_space_transition.as_ref()
     }
 }
 

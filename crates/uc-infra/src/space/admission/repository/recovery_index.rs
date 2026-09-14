@@ -38,6 +38,7 @@ fn needs_recovery(aggregate: &SpaceAdmissionAggregate) -> bool {
     aggregate.pending_recovery().is_some()
         || aggregate.invitation_resolution().is_some()
         || aggregate.has_expirable_local_join()
+        || aggregate.has_pending_local_termination()
 }
 
 impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {

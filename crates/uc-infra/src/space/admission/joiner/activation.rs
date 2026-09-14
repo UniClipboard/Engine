@@ -6,8 +6,8 @@ use serde::Deserialize;
 use uc_application::deps::{
     AdmissionSpaceTransitionPort, AdmissionSpaceTransitionPreparationV2,
     AdmissionSpaceTransitionStepV2, CompletedJoinerActivation, ExecuteJoinerActivationError,
-    ExecuteJoinerActivationPort, JoinerActivationOutcome, PrepareJoinerActivationError,
-    PrepareJoinerActivationPort, PreparedJoinerActivation,
+    ExecuteJoinerActivationPort, JoinerActivationIntent, JoinerActivationOutcome,
+    PrepareJoinerActivationError, PrepareJoinerActivationPort, PreparedJoinerActivation,
 };
 use uc_core::membership::{
     AdmissionCompleteAckV1, AdmissionCompletionV1, AdmissionRetryState, AdmissionSpaceTransition,
@@ -246,6 +246,11 @@ impl ExecuteJoinerActivationPort for DefaultJoinerActivationExecutor {
         preparation: uc_core::membership::JoinerActivationPreparation<'_>,
     ) -> Result<CompletedJoinerActivation, ExecuteJoinerActivationError> {
         observe_local_result(LocalWorkStep::JoinerActivate, async {
+            let intent = JoinerActivationIntent::from_saved_plan(
+                admission_id,
+                preparation.space_transition().as_bytes(),
+            )
+            .ok_or_else(|| invalid_execution("the saved activation intent is invalid"))?;
             let mut transition =
                 AdmissionSpaceTransitionV2::decode(preparation.space_transition().as_bytes())
                     .ok_or_else(|| invalid_execution("the saved Space transition is invalid"))?;
@@ -259,7 +264,7 @@ impl ExecuteJoinerActivationPort for DefaultJoinerActivationExecutor {
                 for _ in 0..MAX_TRANSITION_ADVANCES {
                     match self
                         .transition
-                        .advance(&transition)
+                        .advance_admission(&transition, intent)
                         .await
                         .map_err(|error| {
                             ExecuteJoinerActivationError::unavailable(anyhow::Error::new(error))
@@ -321,6 +326,24 @@ impl ExecuteJoinerActivationPort for DefaultJoinerActivationExecutor {
             Ok(completed)
         })
         .await
+    }
+
+    async fn terminate(
+        &self,
+        admission_id: SpaceAdmissionId,
+        saved_transition: &[u8],
+    ) -> Result<(), ExecuteJoinerActivationError> {
+        let transition = AdmissionSpaceTransitionV2::decode(saved_transition)
+            .ok_or_else(|| invalid_execution("the saved Space transition is invalid"))?;
+        if transition.attempt_id() != admission_id {
+            return Err(invalid_execution(
+                "the terminated Space transition belongs to another admission",
+            ));
+        }
+        self.transition
+            .terminate_admission(&transition)
+            .await
+            .map_err(|error| ExecuteJoinerActivationError::unavailable(anyhow::Error::new(error)))
     }
 }
 

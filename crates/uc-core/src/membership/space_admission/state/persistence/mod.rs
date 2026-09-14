@@ -174,6 +174,28 @@ struct PersistedAdmissionCleanupObligationV4 {
 }
 
 #[derive(Serialize, Deserialize)]
+struct PersistedSpaceAdmissionRecordV5 {
+    format_version: u16,
+    record_version: u64,
+    admission_id: [u8; 32],
+    started_at_ms: i64,
+    expires_at_ms: i64,
+    attempt_digest: [u8; 32],
+    state: PersistedSpaceAdmissionStateV5,
+}
+
+#[derive(Serialize, Deserialize)]
+enum PersistedSpaceAdmissionStateV5 {
+    LocalJoinerTerminated {
+        join_id: [u8; 16],
+        local_join_ordinal: u64,
+        reason: u8,
+        cleanup: PersistedAdmissionCleanupObligationV4,
+        local_space_transition: Vec<u8>,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
 enum PersistedSponsorAbandonmentCleanupV4 {
     NotRequired,
     Known(Vec<u8>),

@@ -4,6 +4,7 @@ pub const SPACE_ADMISSION_RECORD_FORMAT_V1: u16 = 1;
 pub const SPACE_ADMISSION_RECORD_FORMAT_V2: u16 = 2;
 pub const SPACE_ADMISSION_RECORD_FORMAT_V3: u16 = 3;
 pub const SPACE_ADMISSION_RECORD_FORMAT_V4: u16 = 4;
+pub const SPACE_ADMISSION_RECORD_FORMAT_V5: u16 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionEffect {

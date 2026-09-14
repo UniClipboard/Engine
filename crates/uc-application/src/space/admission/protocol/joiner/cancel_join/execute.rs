@@ -34,7 +34,11 @@ impl JoinerAdmissionService {
                 .map_err(CancelSpaceJoinError::state)?
                 .ok_or(CancelSpaceJoinError::NotFound)?;
             let (admission, token) = loaded.into_parts();
+            let admission_id = admission.admission_id();
             let observation_material = *admission.admission_id().as_bytes();
+            let local_transition = admission
+                .joiner_activation_preparation()
+                .map(|preparation| preparation.space_transition().as_bytes().to_vec());
             let peer_upgrade_required = admission.peer_upgrade_required();
             if admission.can_terminate_locally() {
                 let transition = admission
@@ -53,6 +57,12 @@ impl JoinerAdmissionService {
                         continue;
                     }
                     Err(error) => return Err(CancelSpaceJoinError::state(error)),
+                }
+                if let Some(local_transition) = local_transition {
+                    self.execute_activation
+                        .terminate(admission_id, &local_transition)
+                        .await
+                        .map_err(CancelSpaceJoinError::state)?;
                 }
                 self.observations.finish(
                     observation_material,

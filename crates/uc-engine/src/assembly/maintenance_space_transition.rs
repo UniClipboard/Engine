@@ -48,6 +48,13 @@ impl AdmissionSpaceTransitionPort for MaintenanceOnlySpaceTransitionPorts {
     ) -> Result<(), AdmissionSpaceTransitionError> {
         Err(AdmissionSpaceTransitionError::Locked)
     }
+
+    async fn terminate_admission(
+        &self,
+        _transition: &AdmissionSpaceTransitionV2,
+    ) -> Result<(), AdmissionSpaceTransitionError> {
+        Err(AdmissionSpaceTransitionError::Locked)
+    }
 }
 
 #[async_trait]
