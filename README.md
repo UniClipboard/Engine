@@ -454,6 +454,8 @@ if (!recovery.unlocked) {
 
 ## 生成移动产物
 
+两端脚本默认生成正式产物。设置 `UC_ENGINE_UNIFFI_BUILD_PROFILE=dev` 可生成本地调试产物；只接受 `dev` 或 `release`。还可以把另一个 Engine 源码目录作为脚本的第一个参数，使用当前打包工具构建该目录中的固定版本。正式发布只接受标记为 `release` 的 iOS 与 Android 产物。
+
 ### iOS
 
 ```bash

@@ -4,7 +4,7 @@
 
 每个 `v*` 发布的源码、锁文件、许可证、iOS、Android、HarmonyOS 和调试资料必须来自同一 Git 提交，并共享同一个 Engine 版本。
 
-发布流程先生成各平台产物，再由 `scripts/release/build-release-manifest.mjs` 计算文件大小和 SHA-256，最后由 `scripts/release/verify-release-bundle.mjs` 重新计算并核对。校验完成前不得创建 GitHub Release。发布工作流中的第三方 Action 必须固定到完整提交，写入权限只授予创建 Release 的作业；标签构建不得读取或写入跨运行 Rust 编译缓存。
+发布流程先生成各平台产物；iOS 与 Android 产物必须携带 `build-profile.txt`，且值为 `release`，开发构建不得进入正式发布归集。随后由 `scripts/release/build-release-manifest.mjs` 计算文件大小和 SHA-256，最后由 `scripts/release/verify-release-bundle.mjs` 重新计算并核对。校验完成前不得创建 GitHub Release。发布工作流中的第三方 Action 必须固定到完整提交，写入权限只授予创建 Release 的作业；标签构建不得读取或写入跨运行 Rust 编译缓存。
 
 ## 必需资产
 

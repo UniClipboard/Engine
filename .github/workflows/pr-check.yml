@@ -70,6 +70,9 @@ jobs:
         env:
           RUST_STYLE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
 
+      - name: Check mobile build profiles
+        run: node --test scripts/architecture/check-mobile-build-profile.test.mjs scripts/release/build-profile.test.mjs
+
       - name: Check patch whitespace
         run: git diff --check
 

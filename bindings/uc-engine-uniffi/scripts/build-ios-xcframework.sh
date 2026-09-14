@@ -3,6 +3,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+REPO_ROOT="$(cd "${1:-$REPO_ROOT}" && pwd)"
 TARGET_DIR="${UC_ENGINE_UNIFFI_TARGET_DIR:-${CARGO_TARGET_DIR:-$REPO_ROOT/target}}"
 DIST_ROOT="${UC_ENGINE_UNIFFI_DIST_DIR:-$TARGET_DIR/uc-engine-uniffi-dist}"
 DIST_DIR="$DIST_ROOT/ios"
@@ -18,6 +19,12 @@ XCFRAMEWORK_ZIP="$DIST_DIR/UniClipboardEngine.xcframework.zip"
 CHECKSUM_FILE="$DIST_DIR/UniClipboardEngine.checksum.txt"
 DEBUG_DIR="$DIST_ROOT/debug-symbols/ios"
 CARGO_LOCKED_FLAG=""
+BUILD_PROFILE="${UC_ENGINE_UNIFFI_BUILD_PROFILE:-release}"
+case "$BUILD_PROFILE" in
+  dev) PROFILE_DIR=debug ;;
+  release) PROFILE_DIR=release ;;
+  *) echo "UC_ENGINE_UNIFFI_BUILD_PROFILE must be dev or release" >&2; exit 1 ;;
+esac
 SLICE="${UC_ENGINE_UNIFFI_SLICE:-universal}"
 case "$SLICE" in
   device|simulator|universal) ;;
@@ -25,6 +32,8 @@ case "$SLICE" in
 esac
 
 selective_strip_archive() {
+  # 本机调试保留符号，也不做发布包的归档重写。
+  if [[ "$BUILD_PROFILE" == "dev" ]]; then return; fi
   local archive="$1"
   local work_dir
   local members
@@ -97,19 +106,19 @@ cp "$BINDINGS_DIR/uc_engine_uniffiFFI.modulemap" "$INCLUDE_DIR/module.modulemap"
 
 if [[ "$SLICE" != "simulator" ]]; then
   echo "==> Build iOS device library"
-  cargo build -p uc-engine-uniffi --release --target aarch64-apple-ios $CARGO_LOCKED_FLAG
-  cp "$TARGET_DIR/aarch64-apple-ios/release/libuc_engine_uniffi.a" "$DEVICE_DIR/"
+  cargo build -p uc-engine-uniffi --profile "$BUILD_PROFILE" --target aarch64-apple-ios $CARGO_LOCKED_FLAG
+  cp "$TARGET_DIR/aarch64-apple-ios/$PROFILE_DIR/libuc_engine_uniffi.a" "$DEVICE_DIR/"
   cp "$DEVICE_DIR/libuc_engine_uniffi.a" "$DEBUG_DIR/device.a"
   selective_strip_archive "$DEVICE_DIR/libuc_engine_uniffi.a"
 fi
 
 if [[ "$SLICE" != "device" ]]; then
   echo "==> Build iOS simulator libraries"
-  cargo build -p uc-engine-uniffi --release --target aarch64-apple-ios-sim $CARGO_LOCKED_FLAG
-  cargo build -p uc-engine-uniffi --release --target x86_64-apple-ios $CARGO_LOCKED_FLAG
-  cp "$TARGET_DIR/aarch64-apple-ios-sim/release/libuc_engine_uniffi.a" \
+  cargo build -p uc-engine-uniffi --profile "$BUILD_PROFILE" --target aarch64-apple-ios-sim $CARGO_LOCKED_FLAG
+  cargo build -p uc-engine-uniffi --profile "$BUILD_PROFILE" --target x86_64-apple-ios $CARGO_LOCKED_FLAG
+  cp "$TARGET_DIR/aarch64-apple-ios-sim/$PROFILE_DIR/libuc_engine_uniffi.a" \
     "$SIMULATOR_ARM64_DIR/"
-  cp "$TARGET_DIR/x86_64-apple-ios/release/libuc_engine_uniffi.a" \
+  cp "$TARGET_DIR/x86_64-apple-ios/$PROFILE_DIR/libuc_engine_uniffi.a" \
     "$SIMULATOR_X86_64_DIR/"
   cp "$SIMULATOR_ARM64_DIR/libuc_engine_uniffi.a" "$DEBUG_DIR/simulator-arm64.a"
   cp "$SIMULATOR_X86_64_DIR/libuc_engine_uniffi.a" "$DEBUG_DIR/simulator-x86_64.a"
@@ -140,6 +149,7 @@ VERSION="${VERSION##*#}"
 COMMIT="$(git rev-parse HEAD)"
 printf 'v%s\n' "$VERSION" > "$DIST_DIR/version.txt"
 printf '%s\n' "$COMMIT" > "$DIST_DIR/source-commit.txt"
+printf '%s\n' "$BUILD_PROFILE" > "$DIST_DIR/build-profile.txt"
 
 echo "OK: $XCFRAMEWORK"
 echo "OK: $XCFRAMEWORK_ZIP"

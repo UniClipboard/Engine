@@ -3,6 +3,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+REPO_ROOT="$(cd "${1:-$REPO_ROOT}" && pwd)"
 TARGET_DIR="${UC_ENGINE_UNIFFI_TARGET_DIR:-${CARGO_TARGET_DIR:-$REPO_ROOT/target}}"
 DIST_ROOT="${UC_ENGINE_UNIFFI_DIST_DIR:-$TARGET_DIR/uc-engine-uniffi-dist}"
 DIST_DIR="$DIST_ROOT/android"
@@ -17,6 +18,12 @@ AAR_OUT="$DIST_DIR/UniClipboardEngine.aar"
 CHECKSUM_FILE="$DIST_DIR/UniClipboardEngine.checksum.txt"
 DEBUG_DIR="$DIST_ROOT/debug-symbols/android"
 CARGO_LOCKED_FLAG=""
+BUILD_PROFILE="${UC_ENGINE_UNIFFI_BUILD_PROFILE:-release}"
+case "$BUILD_PROFILE" in
+  dev) PROFILE_DIR=debug; GRADLE_TASK=assembleDebug ;;
+  release) PROFILE_DIR=release; GRADLE_TASK=assembleRelease ;;
+  *) echo "UC_ENGINE_UNIFFI_BUILD_PROFILE must be dev or release" >&2; exit 1 ;;
+esac
 if [[ -n "${UC_ENGINE_UNIFFI_BUILD_LOCKED:-}" ]]; then
   CARGO_LOCKED_FLAG="--locked"
 fi
@@ -43,11 +50,11 @@ cargo run -p uc-engine-uniffi --profile dev --features bindgen-cli \
 
 echo "==> Build Android native libraries"
 cargo ndk -t arm64-v8a -t x86_64 \
-  build -p uc-engine-uniffi --release $CARGO_LOCKED_FLAG
+  build -p uc-engine-uniffi --profile "$BUILD_PROFILE" $CARGO_LOCKED_FLAG
 mkdir -p "$JNI_DIR/arm64-v8a" "$JNI_DIR/x86_64"
-cp "$TARGET_DIR/aarch64-linux-android/release/libuc_engine_uniffi.so" \
+cp "$TARGET_DIR/aarch64-linux-android/$PROFILE_DIR/libuc_engine_uniffi.so" \
   "$JNI_DIR/arm64-v8a/"
-cp "$TARGET_DIR/x86_64-linux-android/release/libuc_engine_uniffi.so" \
+cp "$TARGET_DIR/x86_64-linux-android/$PROFILE_DIR/libuc_engine_uniffi.so" \
   "$JNI_DIR/x86_64/"
 cp "$JNI_DIR/arm64-v8a/libuc_engine_uniffi.so" "$DEBUG_DIR/arm64-v8a.so"
 cp "$JNI_DIR/x86_64/libuc_engine_uniffi.so" "$DEBUG_DIR/x86_64.so"
@@ -74,14 +81,14 @@ if [[ ! -s "$RUSTLS_VERIFIER_JAR" ]]; then
   exit 1
 fi
 
-echo "==> Compile Kotlin bindings and assembleRelease"
+echo "==> Compile Kotlin bindings and $GRADLE_TASK"
 UC_ENGINE_UNIFFI_KOTLIN_DIR="$BINDINGS_DIR" \
 UC_ENGINE_UNIFFI_JNI_DIR="$JNI_DIR" \
 UC_ENGINE_UNIFFI_GRADLE_BUILD_DIR="$GRADLE_BUILD_DIR" \
 UC_ENGINE_UNIFFI_RUSTLS_VERIFIER_JAR="$RUSTLS_VERIFIER_JAR" \
-  "$GRADLEW" --no-daemon -p "$ANDROID_PROJECT" assembleRelease
+  "$GRADLEW" --no-daemon -p "$ANDROID_PROJECT" "$GRADLE_TASK"
 
-cp "$GRADLE_BUILD_DIR/outputs/aar/UniClipboardEngine-release.aar" "$AAR_OUT"
+cp "$GRADLE_BUILD_DIR/outputs/aar/UniClipboardEngine-$PROFILE_DIR.aar" "$AAR_OUT"
 # 必须读完整个清单；grep 提前退出会在 pipefail 下把上游 SIGPIPE 误判为缺失。
 if ! unzip -Z1 "$AAR_OUT" | grep -Fx 'libs/rustls-platform-verifier-classes.jar' >/dev/null; then
   echo "Android archive does not contain rustls-platform-verifier classes" >&2
@@ -99,6 +106,7 @@ VERSION="${VERSION##*#}"
 COMMIT="$(git rev-parse HEAD)"
 printf 'v%s\n' "$VERSION" > "$DIST_DIR/version.txt"
 printf '%s\n' "$COMMIT" > "$DIST_DIR/source-commit.txt"
+printf '%s\n' "$BUILD_PROFILE" > "$DIST_DIR/build-profile.txt"
 printf '%s\n' \
   'net.java.dev.jna:jna:5.14.0@aar' \
   'org.jetbrains.kotlin:kotlin-stdlib:2.1.20' \
