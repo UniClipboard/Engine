@@ -88,6 +88,19 @@ impl IrohPeerReachabilityAdapter {
             );
         }
         if snapshots.is_empty() {
+            let observations = self.observations.lock().await;
+            if observations.is_current(*device, before)
+                && observations.successes.get(device).copied() == before.success
+            {
+                let previous = self
+                    .last_state
+                    .lock()
+                    .await
+                    .insert(*device, ReachabilityState::Offline);
+                if previous == Some(ReachabilityState::Online) {
+                    self.broadcast(*device, ReachabilityState::Offline, self.now());
+                }
+            }
             return Ok(None);
         }
         let checks = FuturesUnordered::new();

@@ -1,4 +1,5 @@
 use opentelemetry::trace::TraceContextExt;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -45,7 +46,8 @@ fn local_file_keeps_valid_correlation_without_remote_export_and_respects_detachm
     });
     let mut expected = Vec::new();
     let runtime = tokio::runtime::Runtime::new().expect("async runtime");
-    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let submission = Arc::new(Mutex::new(()));
     runtime.block_on(async {
         let mut tasks = Vec::new();
         for duration in [11, 22] {
@@ -60,10 +62,12 @@ fn local_file_keeps_valid_correlation_without_remote_export_and_respects_detachm
                 span.context().span().span_context().trace_id().to_string(),
             ));
             let barrier = barrier.clone();
+            let submission = Arc::clone(&submission);
             tasks.push(tokio::spawn(
                 async move {
                     barrier.wait().await;
                     tokio::task::yield_now().await;
+                    let _submission = submission.lock().expect("serialize record submission");
                     complete_operation(OperationCompletion::succeeded(
                         DiagnosticDomain::Runtime,
                         DiagnosticOperation::SessionRecovery,

@@ -5,6 +5,7 @@
 //! 校验原密文与 Lost 引用后再以目录 rename 发布；因此
 //! 进程在任意 payload 之间终止都不会产生半转换数据库。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,7 +16,7 @@ use uc_core::crypto::aad;
 use uc_core::crypto::domain::{Aad, Ciphertext};
 use uc_core::crypto::model::EncryptionError;
 use uc_core::ids::{EventId, RepresentationId};
-use uc_core::ports::security::BlobCipherPort as _;
+use uc_core::ports::security::{BlobCipherError, BlobCipherPort as _};
 use uc_core::BlobId;
 
 use crate::blob::{BlobStorePort, FilesystemBlobStore};
@@ -32,7 +33,7 @@ use super::ProfileStorageUpgradeError;
 use super::{StorageUpgradeStep, StorageUpgradeUnit};
 
 const V3_BLOB_ALGORITHM: &str = "xchacha20poly1305-v3";
-const PRESERVED_BLOB_ERROR: &str =
+const PRESERVED_PAYLOAD_ERROR: &str =
     "unreadable encrypted payload preserved during profile storage upgrade";
 
 const OUTPUT_DATABASE: &str = "profile.sqlite";
@@ -51,6 +52,7 @@ pub(super) struct ConvertedPrimaryPayloads {
     pub(super) inline_count: u64,
     pub(super) blob_count: u64,
     pub(super) warning_count: u64,
+    inline_warning_count: u64,
 }
 
 impl PrimaryPayloadConverter {
@@ -87,7 +89,11 @@ impl PrimaryPayloadConverter {
                 Some(converted.inline_count),
                 Some(StorageUpgradeUnit::Representations),
             );
-            progress.processed(StorageUpgradeStep::Contents, converted.inline_count, 0);
+            progress.processed(
+                StorageUpgradeStep::Contents,
+                converted.inline_count,
+                converted.inline_warning_count,
+            );
             progress.begin(
                 StorageUpgradeStep::LargeContents,
                 Some(converted.blob_count),
@@ -180,12 +186,13 @@ impl PrimaryPayloadConverter {
         let database = work.join(OUTPUT_DATABASE);
         std::fs::copy(separated_database, &database).map_err(io_storage)?;
         crate::fs::durability::sync_existing_file(&database).map_err(io_storage)?;
-        let inline_count = self.convert_inline(&database, progress).await?;
-        let (blob_count, warning_count) = self
+        let (inline_count, inline_warning_count) = self.convert_inline(&database, progress).await?;
+        let (blob_count, blob_warning_count) = self
             .convert_blobs(&database, work, final_output, progress)
             .await?;
         progress.begin(StorageUpgradeStep::Verifying, None, None);
-        self.verify_payloads(&database, work).await?;
+        self.verify_payloads(separated_database, &database, work)
+            .await?;
         compact_database(&database)?;
         sync_directory(work).map_err(io_storage)?;
         Ok(ConvertedPrimaryPayloads {
@@ -193,7 +200,8 @@ impl PrimaryPayloadConverter {
             blob_tree_digest: blob_tree_digest(&work.join(OUTPUT_BLOBS))?,
             inline_count,
             blob_count,
-            warning_count,
+            warning_count: blob_warning_count,
+            inline_warning_count,
         })
     }
 
@@ -204,8 +212,14 @@ impl PrimaryPayloadConverter {
     ) -> Result<ConvertedPrimaryPayloads, ProfileStorageUpgradeError> {
         let database = output.join(OUTPUT_DATABASE);
         verify_row_identity(separated_database, &database)?;
-        let (inline_count, blob_count) = self.verify_payloads(&database, output).await?;
-        let warning_count = load_blob_rows(&mut open_connection(&database)?)?
+        let (inline_count, blob_count) = self
+            .verify_payloads(separated_database, &database, output)
+            .await?;
+        let inline_warning_count = load_inline_rows(&mut open_connection(&database)?)?
+            .iter()
+            .filter(|row| is_preserved_inline(row))
+            .count() as u64;
+        let blob_warning_count = load_blob_rows(&mut open_connection(&database)?)?
             .iter()
             .filter(|row| row.encryption_algo.as_deref() != Some(V3_BLOB_ALGORITHM))
             .count() as u64;
@@ -214,7 +228,8 @@ impl PrimaryPayloadConverter {
             blob_tree_digest: blob_tree_digest(&output.join(OUTPUT_BLOBS))?,
             inline_count,
             blob_count,
-            warning_count,
+            warning_count: blob_warning_count,
+            inline_warning_count,
         })
     }
 
@@ -222,7 +237,7 @@ impl PrimaryPayloadConverter {
         &self,
         database: &Path,
         progress: &UpgradeProgress,
-    ) -> Result<u64, ProfileStorageUpgradeError> {
+    ) -> Result<(u64, u64), ProfileStorageUpgradeError> {
         let rows = load_inline_rows(&mut open_connection(database)?)?;
         progress.begin(
             StorageUpgradeStep::Contents,
@@ -232,19 +247,39 @@ impl PrimaryPayloadConverter {
         let legacy = BlobCipherAdapter::new(Arc::clone(&self.source_session));
         let v3 = V3InlinePayloadCipher::new(Arc::clone(&self.content_protection));
         let mut converted = Vec::with_capacity(rows.len());
+        let mut warning_count = 0;
         for row in rows {
             let aad = inline_aad(&row);
-            let plaintext = legacy
-                .decrypt(&Ciphertext::new(row.inline_data), &aad)
+            let plaintext = match legacy
+                .decrypt(&Ciphertext::new(row.inline_data.clone()), &aad)
                 .await
-                .map_err(|source| {
-                    corrupt(anyhow::Error::new(source).context("open legacy inline payload"))
-                })?;
+            {
+                Ok(plaintext) => plaintext,
+                Err(BlobCipherError::InvalidCiphertext { .. }) => {
+                    converted.push((row.id, row.inline_data, true));
+                    warning_count += 1;
+                    progress.processed(
+                        StorageUpgradeStep::Contents,
+                        converted.len() as u64,
+                        warning_count,
+                    );
+                    continue;
+                }
+                Err(source) => {
+                    return Err(security(
+                        anyhow::Error::new(source).context("open protected legacy inline payload"),
+                    ))
+                }
+            };
             let ciphertext = v3.encrypt(&plaintext, &aad).await.map_err(|source| {
                 security(anyhow::Error::new(source).context("seal V3 inline payload"))
             })?;
-            converted.push((row.id, ciphertext.into_bytes()));
-            progress.processed(StorageUpgradeStep::Contents, converted.len() as u64, 0);
+            converted.push((row.id, ciphertext.into_bytes(), false));
+            progress.processed(
+                StorageUpgradeStep::Contents,
+                converted.len() as u64,
+                warning_count,
+            );
             if converted.len() % 64 == 0 {
                 tokio::task::yield_now().await;
             }
@@ -254,18 +289,29 @@ impl PrimaryPayloadConverter {
         let mut connection = open_connection(database)?;
         connection
             .transaction::<_, diesel::result::Error, _>(|connection| {
-                for (id, ciphertext) in &converted {
-                    diesel::sql_query(
-                        "UPDATE clipboard_snapshot_representation SET inline_data = ? WHERE id = ?",
-                    )
-                    .bind::<diesel::sql_types::Binary, _>(ciphertext)
-                    .bind::<diesel::sql_types::Text, _>(id)
-                    .execute(connection)?;
+                for (id, ciphertext, preserved) in &converted {
+                    if *preserved {
+                        diesel::sql_query(
+                            "UPDATE clipboard_snapshot_representation SET inline_data = ?, \
+                             payload_state = 'Lost', last_error = ? WHERE id = ?",
+                        )
+                        .bind::<diesel::sql_types::Binary, _>(ciphertext)
+                        .bind::<diesel::sql_types::Text, _>(PRESERVED_PAYLOAD_ERROR)
+                        .bind::<diesel::sql_types::Text, _>(id)
+                        .execute(connection)?;
+                    } else {
+                        diesel::sql_query(
+                            "UPDATE clipboard_snapshot_representation SET inline_data = ? WHERE id = ?",
+                        )
+                        .bind::<diesel::sql_types::Binary, _>(ciphertext)
+                        .bind::<diesel::sql_types::Text, _>(id)
+                        .execute(connection)?;
+                    }
                 }
                 Ok(())
             })
             .map_err(database_storage)?;
-        Ok(count)
+        Ok((count, warning_count))
     }
 
     async fn convert_blobs(
@@ -373,7 +419,7 @@ impl PrimaryPayloadConverter {
                             "UPDATE clipboard_snapshot_representation \
                              SET payload_state = 'Lost', last_error = ? WHERE blob_id = ?",
                         )
-                        .bind::<diesel::sql_types::Text, _>(PRESERVED_BLOB_ERROR)
+                        .bind::<diesel::sql_types::Text, _>(PRESERVED_PAYLOAD_ERROR)
                         .bind::<diesel::sql_types::Text, _>(blob_id)
                         .execute(connection)?;
                     }
@@ -420,10 +466,9 @@ impl PrimaryPayloadConverter {
             .select((representation::payload_state, representation::last_error))
             .load::<(String, Option<String>)>(&mut open_connection(database)?)
             .map_err(database_storage)?;
-        if states
-            .iter()
-            .any(|(state, error)| state != "Lost" || error.as_deref() != Some(PRESERVED_BLOB_ERROR))
-        {
+        if states.iter().any(|(state, error)| {
+            state != "Lost" || error.as_deref() != Some(PRESERVED_PAYLOAD_ERROR)
+        }) {
             return Err(corrupt(anyhow::anyhow!(
                 "preserved legacy ciphertext is not marked unavailable"
             )));
@@ -433,12 +478,46 @@ impl PrimaryPayloadConverter {
 
     async fn verify_payloads(
         &self,
+        separated_database: &Path,
         database: &Path,
         output: &Path,
     ) -> Result<(u64, u64), ProfileStorageUpgradeError> {
         let v3_inline = V3InlinePayloadCipher::new(Arc::clone(&self.content_protection));
+        let source_inline_rows = load_inline_rows(&mut open_connection(separated_database)?)?;
+        let source_inline_by_id = source_inline_rows
+            .iter()
+            .map(|row| (row.id.as_str(), row))
+            .collect::<HashMap<_, _>>();
+        let legacy_inline = BlobCipherAdapter::new(Arc::clone(&self.source_session));
         let inline_rows = load_inline_rows(&mut open_connection(database)?)?;
         for row in &inline_rows {
+            if is_preserved_inline(row) {
+                let source = source_inline_by_id.get(row.id.as_str()).ok_or_else(|| {
+                    corrupt(anyhow::anyhow!("preserved legacy inline source is missing"))
+                })?;
+                if source.inline_data != row.inline_data {
+                    return Err(corrupt(anyhow::anyhow!(
+                        "preserved legacy inline ciphertext changed"
+                    )));
+                }
+                match legacy_inline
+                    .decrypt(&Ciphertext::new(row.inline_data.clone()), &inline_aad(row))
+                    .await
+                {
+                    Err(BlobCipherError::InvalidCiphertext { .. }) => continue,
+                    Err(source) => {
+                        return Err(security(
+                            anyhow::Error::new(source)
+                                .context("verify protected legacy inline payload"),
+                        ))
+                    }
+                    Ok(_) => {
+                        return Err(corrupt(anyhow::anyhow!(
+                            "readable legacy inline ciphertext was not converted"
+                        )))
+                    }
+                }
+            }
             v3_inline
                 .decrypt(&Ciphertext::new(row.inline_data.clone()), &inline_aad(row))
                 .await
@@ -479,6 +558,10 @@ struct InlineRow {
     event_id: String,
     #[diesel(sql_type = diesel::sql_types::Binary)]
     inline_data: Vec<u8>,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    payload_state: String,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    last_error: Option<String>,
 }
 
 #[derive(diesel::QueryableByName)]
@@ -499,11 +582,16 @@ fn load_inline_rows(
     connection: &mut diesel::sqlite::SqliteConnection,
 ) -> Result<Vec<InlineRow>, ProfileStorageUpgradeError> {
     diesel::sql_query(
-        "SELECT id, event_id, inline_data FROM clipboard_snapshot_representation \
+        "SELECT id, event_id, inline_data, payload_state, last_error \
+         FROM clipboard_snapshot_representation \
          WHERE inline_data IS NOT NULL ORDER BY id",
     )
     .load::<InlineRow>(connection)
     .map_err(database_storage)
+}
+
+fn is_preserved_inline(row: &InlineRow) -> bool {
+    row.payload_state == "Lost" && row.last_error.as_deref() == Some(PRESERVED_PAYLOAD_ERROR)
 }
 
 fn load_blob_rows(
@@ -695,7 +783,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn primary_output_is_atomic_preserves_unreadable_blobs_and_is_digest_bound() {
+    async fn primary_output_is_atomic_preserves_unreadable_payloads_and_is_digest_bound() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("profile");
         std::fs::create_dir_all(&root).unwrap();
@@ -733,6 +821,21 @@ mod tests {
             )
             .await
             .unwrap();
+        let unreadable_inline_id = RepresentationId::from("representation-unreadable-inline");
+        let unreadable_inline_aad = Aad::from(aad::for_inline(&event_id, &unreadable_inline_id));
+        let unreadable_inline = BlobCipherAdapter::new(Arc::clone(&session))
+            .encrypt(
+                &Plaintext::new(b"unreadable private inline payload".to_vec()),
+                &unreadable_inline_aad,
+            )
+            .await
+            .unwrap();
+        let mut unreadable_inline_value =
+            serde_json::from_slice::<serde_json::Value>(unreadable_inline.as_bytes()).unwrap();
+        let first_ciphertext_byte = unreadable_inline_value["ciphertext"][0].as_u64().unwrap();
+        unreadable_inline_value["ciphertext"][0] =
+            serde_json::Value::from((first_ciphertext_byte + 1) % 256);
+        let unreadable_inline_bytes = serde_json::to_vec(&unreadable_inline_value).unwrap();
         let blob_id = BlobId::from("blob-primary");
         let source_blob_store = EncryptedBlobStore::new(
             Arc::new(FilesystemBlobStore::new(source_blob_root.clone())),
@@ -801,6 +904,15 @@ mod tests {
              VALUES ('representation-primary', 'event-primary', 'text', 'text/plain', 22, ?, NULL)",
         )
         .bind::<diesel::sql_types::Binary, _>(inline_ciphertext.as_bytes())
+        .execute(&mut connection)
+        .unwrap();
+        diesel::sql_query(
+            "INSERT INTO clipboard_snapshot_representation \
+             (id, event_id, format_id, mime_type, size_bytes, inline_data, blob_id) \
+             VALUES ('representation-unreadable-inline', 'event-primary', 'text', \
+                     'text/plain', 33, ?, NULL)",
+        )
+        .bind::<diesel::sql_types::Binary, _>(&unreadable_inline_bytes)
         .execute(&mut connection)
         .unwrap();
         let second_aad = Aad::from(aad::for_inline(
@@ -907,7 +1019,7 @@ mod tests {
             .convert(&journal, &target, &progress)
             .await
             .unwrap();
-        assert_eq!(converted.inline_count, 2 + stress_rows as u64);
+        assert_eq!(converted.inline_count, 3 + stress_rows as u64);
         assert_eq!(converted.blob_count, 2);
         let snapshot = progress.snapshot();
         let content = snapshot
@@ -916,8 +1028,12 @@ mod tests {
             .find(|step| step.step == super::super::StorageUpgradeStep::Contents)
             .unwrap();
         assert_eq!(
-            (content.processed, content.total),
-            (2 + stress_rows as u64, Some(2 + stress_rows as u64))
+            (content.processed, content.total, content.warning_count),
+            (
+                3 + stress_rows as u64,
+                Some(3 + stress_rows as u64),
+                Some(1)
+            )
         );
         assert!(
             !content.completed,
@@ -956,7 +1072,8 @@ mod tests {
         let output = target.paths(&journal).primary_output;
         let inline = load_inline_rows(&mut open_connection(&output.join(OUTPUT_DATABASE)).unwrap())
             .unwrap()
-            .pop()
+            .into_iter()
+            .find(|row| row.id == "representation-primary")
             .unwrap();
         assert_eq!(&inline.inline_data[..4], b"UCP3");
         let v3_inline = V3InlinePayloadCipher::new(Arc::new(ContentProtection::for_content(
@@ -1001,6 +1118,25 @@ mod tests {
             last_error.as_deref(),
             Some("unreadable encrypted payload preserved during profile storage upgrade")
         );
+        let (preserved_inline, inline_state, inline_error) =
+            crate::db::schema::clipboard_snapshot_representation::table
+                .filter(
+                    crate::db::schema::clipboard_snapshot_representation::id
+                        .eq("representation-unreadable-inline"),
+                )
+                .select((
+                    crate::db::schema::clipboard_snapshot_representation::inline_data,
+                    crate::db::schema::clipboard_snapshot_representation::payload_state,
+                    crate::db::schema::clipboard_snapshot_representation::last_error,
+                ))
+                .first::<(Option<Vec<u8>>, String, Option<String>)>(&mut output_connection)
+                .unwrap();
+        assert_eq!(
+            preserved_inline.as_deref(),
+            Some(unreadable_inline_bytes.as_slice())
+        );
+        assert_eq!(inline_state, "Lost");
+        assert_eq!(inline_error.as_deref(), Some(PRESERVED_PAYLOAD_ERROR));
 
         // 未写 journal 的发布窗口也必须检查保留副本与 Lost 状态。
         let preserved_path = output.join(OUTPUT_BLOBS).join(unreadable_blob_id.as_str());
@@ -1022,6 +1158,25 @@ mod tests {
         ));
         diesel::sql_query("UPDATE clipboard_snapshot_representation SET payload_state = 'Lost' WHERE id = 'representation-unreadable'")
             .execute(&mut output_connection).unwrap();
+        diesel::sql_query(
+            "UPDATE clipboard_snapshot_representation SET inline_data = X'00' \
+             WHERE id = 'representation-unreadable-inline'",
+        )
+        .execute(&mut output_connection)
+        .unwrap();
+        assert!(matches!(
+            converter
+                .convert(&journal, &target, &UpgradeProgress::new(None))
+                .await,
+            Err(ProfileStorageUpgradeError::Corrupt { .. })
+        ));
+        diesel::sql_query(
+            "UPDATE clipboard_snapshot_representation SET inline_data = ? \
+             WHERE id = 'representation-unreadable-inline'",
+        )
+        .bind::<diesel::sql_types::Binary, _>(&unreadable_inline_bytes)
+        .execute(&mut output_connection)
+        .unwrap();
         // 恢复测试修改后重新取得摘要，正式 journal 必须覆盖完整候选库。
         let converted = converter
             .convert(&journal, &target, &UpgradeProgress::new(None))
@@ -1068,6 +1223,15 @@ mod tests {
             .unwrap();
         session.clear();
         let protection_work = directory.path().join("protection-convert");
+        assert!(matches!(
+            converter
+                .convert_inline(
+                    &target.paths(&journal).profile_database,
+                    &UpgradeProgress::new(None),
+                )
+                .await,
+            Err(ProfileStorageUpgradeError::Security { .. })
+        ));
         assert!(matches!(
             converter
                 .convert_blobs(

@@ -6,6 +6,45 @@ struct ControlledAdmission {
     proceed: tokio::sync::Semaphore,
 }
 
+#[tokio::test]
+async fn stale_online_without_a_retained_connection_settles_before_redial() {
+    let endpoint = bound_endpoint().await;
+    let addresses = Arc::new(FakePeerAddressRepo::default());
+    let gate = Arc::new(DelayedAdmission {
+        checking: tokio::sync::Notify::new(),
+        proceed: tokio::sync::Semaphore::new(0),
+    });
+    *addresses.delay.lock().unwrap() = Some(gate.clone());
+    let adapter = Arc::new(build_adapter(endpoint.clone(), addresses));
+    let device = DeviceId::new("stale-online");
+    adapter
+        .last_state
+        .lock()
+        .await
+        .insert(device, ReachabilityState::Online);
+
+    let verification = tokio::spawn({
+        let adapter = adapter.clone();
+        async move { adapter.verify_reachable(&device).await }
+    });
+    timeout(Duration::from_secs(1), gate.checking.notified())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        adapter.current_state(&device).await,
+        ReachabilityState::Offline,
+        "an online cache without a retained connection must not survive a blocked redial"
+    );
+
+    gate.proceed.add_permits(1);
+    assert!(matches!(
+        verification.await.unwrap(),
+        Err(PeerReachabilityError::NoAddress(id)) if id == device
+    ));
+    endpoint.close().await;
+}
+
 #[async_trait]
 impl PeerAdmissionPort for ControlledAdmission {
     async fn is_admitted(
