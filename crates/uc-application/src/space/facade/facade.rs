@@ -31,6 +31,10 @@ use crate::space::lifecycle::{
     build_space_session_activity, combine_space_session_activity, DeferredSpaceSessionActivity,
 };
 use crate::space::lifecycle::{
+    ChangeEncryptionPassphraseError, ChangeEncryptionPassphraseUseCase,
+    RetirePairingInvitationsPort,
+};
+use crate::space::lifecycle::{
     InitializeSpaceError, InitializeSpaceRequest, InitializeSpaceResult, InitializeSpaceUseCase,
 };
 use crate::space::lifecycle::{LockSpaceSessionError, LockSpaceSessionUseCase};
@@ -69,6 +73,7 @@ pub struct SpaceFacade {
     membership_maintenance: Arc<dyn crate::space::membership::WakeSpaceMembershipMaintenancePort>,
     lock_space_session: Arc<LockSpaceSessionUseCase>,
     recover_space_session: Arc<RecoverSpaceSessionUseCase>,
+    change_encryption_passphrase: Arc<ChangeEncryptionPassphraseUseCase>,
     query_space_access_state: Arc<QuerySpaceAccessStateUseCase>,
     query_space_setup_state: Arc<QuerySpaceSetupStateUseCase>,
     current_member_scope: Arc<dyn crate::space::membership::CurrentSpaceMemberScopePort>,
@@ -80,6 +85,7 @@ pub struct SpaceFacade {
         Arc<dyn uc_core::membership::MembershipHistoryExchangeEndpointPort>,
     membership_branch_recovery_endpoint: Arc<dyn crate::deps::IssueMembershipBranchRecoveryPort>,
     space_admission_endpoint: Arc<dyn crate::deps::HandleAuthenticatedSpaceAdmissionMessagePort>,
+    pairing_configuration: Mutex<()>,
     application: Mutex<Option<SpaceApplication>>,
 }
 
@@ -132,6 +138,7 @@ impl SpaceFacade {
             current_space_identity,
             initial_space_activation,
             admission_credentials,
+            encryption_passphrase_change,
         } = session;
         let activity = combine_space_session_activity(
             membership_session_activity,
@@ -185,6 +192,11 @@ impl SpaceFacade {
         let cancel_pairing_invitation = Arc::new(CancelPairingInvitationUseCase::new(
             Arc::clone(&invitation_holder_for_facade),
             Arc::clone(&pairing_invitation),
+        ));
+        let change_encryption_passphrase = Arc::new(ChangeEncryptionPassphraseUseCase::new(
+            Arc::clone(&peer_scope),
+            Arc::clone(&cancel_pairing_invitation) as Arc<dyn RetirePairingInvitationsPort>,
+            encryption_passphrase_change,
         ));
         let rebuild_transition = Arc::new(SpaceRebuildTransition::new(
             device_management_reset_data,
@@ -295,6 +307,7 @@ impl SpaceFacade {
             membership_maintenance,
             lock_space_session,
             recover_space_session,
+            change_encryption_passphrase,
             query_space_access_state,
             query_space_setup_state,
             current_member_scope: peer_scope,
@@ -305,6 +318,7 @@ impl SpaceFacade {
             membership_history_endpoint,
             membership_branch_recovery_endpoint,
             space_admission_endpoint,
+            pairing_configuration: Mutex::new(()),
             application: Mutex::new(Some(application)),
         }
     }
@@ -432,6 +446,11 @@ impl SpaceFacade {
     pub async fn issue_pairing_invitation(
         &self,
     ) -> Result<IssuePairingInvitationResult, IssuePairingInvitationError> {
+        let _guard = self.pairing_configuration.lock().await;
+        self.change_encryption_passphrase
+            .ensure_ready()
+            .await
+            .map_err(IssuePairingInvitationError::passphrase_change_recovery)?;
         self.issue_pairing_invitation.execute().await
     }
 
@@ -441,6 +460,11 @@ impl SpaceFacade {
         &self,
         selected_ip: IpAddr,
     ) -> Result<IssuePairingInvitationResult, IssuePairingInvitationError> {
+        let _guard = self.pairing_configuration.lock().await;
+        self.change_encryption_passphrase
+            .ensure_ready()
+            .await
+            .map_err(IssuePairingInvitationError::passphrase_change_recovery)?;
         self.issue_pairing_invitation_for_address
             .execute(selected_ip)
             .await
@@ -647,7 +671,24 @@ impl SpaceFacade {
     /// cannot leave a displayed short code redeemable.
     #[instrument(skip_all)]
     pub async fn cancel_invitation(&self) -> Result<(), CancelInvitationError> {
+        let _guard = self.pairing_configuration.lock().await;
         self.cancel_pairing_invitation.execute().await
+    }
+
+    /// 为升级后的单设备重新配对流程生成一次待展示的新口令。
+    pub async fn generate_encryption_passphrase(
+        &self,
+    ) -> Result<uc_core::crypto::domain::Passphrase, ChangeEncryptionPassphraseError> {
+        self.change_encryption_passphrase.generate().await
+    }
+
+    /// 用户确认已经保存口令后，撤销旧邀请并启用新口令。
+    pub async fn confirm_encryption_passphrase_change(
+        &self,
+        passphrase: &uc_core::crypto::domain::Passphrase,
+    ) -> Result<(), ChangeEncryptionPassphraseError> {
+        let _guard = self.pairing_configuration.lock().await;
+        self.change_encryption_passphrase.confirm(passphrase).await
     }
 
     /// Rebuild this profile as a single-device space while retaining local

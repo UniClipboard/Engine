@@ -1,4 +1,5 @@
 mod admission_credentials;
+mod change_encryption_passphrase;
 mod current_space;
 mod initialize_space;
 mod lock_space_session;
@@ -30,6 +31,11 @@ pub use unlock_space::{UnlockSpaceError, UnlockSpacePort};
 
 pub use admission_credentials::{
     PrepareSpaceAdmissionCredentialsPort, SpaceAdmissionCredentialPreparationError,
+};
+pub(crate) use change_encryption_passphrase::ChangeEncryptionPassphraseUseCase;
+pub use change_encryption_passphrase::{
+    ApplyEncryptionPassphraseChangePort, ApplyEncryptionPassphraseChangePortError,
+    ChangeEncryptionPassphraseError, RetirePairingInvitationsPort,
 };
 pub(super) use initialize_space::{InitializeSpaceRequest, InitializeSpaceUseCase};
 pub(super) use lock_space_session::LockSpaceSessionUseCase;

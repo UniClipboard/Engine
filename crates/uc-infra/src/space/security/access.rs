@@ -139,6 +139,90 @@ impl RuntimeSpaceAccessAdapter {
             kek_observed: AtomicBool::new(false),
         }
     }
+
+    pub(crate) async fn prepare_encryption_passphrase_material(
+        &self,
+        passphrase: &DomainPassphrase,
+    ) -> Result<(KeySlot, Kek), SpaceAccessError> {
+        self.session
+            .current_space_id()
+            .map_err(map_encryption_error)?;
+        let master_key = self
+            .session
+            .get_master_key()
+            .map_err(map_encryption_error)?;
+        let profile = self
+            .current_profile
+            .current_profile()
+            .await
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let scope = key_scope_from_profile(&profile);
+        self.key_material
+            .load_keyslot(&scope)
+            .await
+            .map_err(map_encryption_error)?;
+        let draft = KeySlot::draft_v1(scope).map_err(map_encryption_error)?;
+        let legacy = LegacyPassphrase(passphrase.expose().to_owned());
+        let kek = v1_aead::derive_kek_argon2id(&legacy, &draft.salt, &draft.kdf)
+            .map_err(|error| map_and_log_kdf_error(error, "prepare_encryption_passphrase"))?;
+        let wrapped = v1_aead::wrap_master_key_xchacha(&kek, &master_key).map_err(|error| {
+            map_and_log_local_crypto_error(
+                error.to_string(),
+                "prepare_encryption_passphrase",
+                "wrap_master_key",
+            )
+        })?;
+        Ok((draft.finalize(WrappedMasterKey { blob: wrapped }), kek))
+    }
+
+    pub(crate) async fn install_encryption_passphrase_material(
+        &self,
+        keyslot: &KeySlot,
+        kek: &Kek,
+    ) -> Result<(), SpaceAccessError> {
+        let wrapped = keyslot
+            .wrapped_master_key
+            .as_ref()
+            .ok_or(SpaceAccessError::CorruptedKeyMaterial)?;
+        let unwrapped = v1_aead::unwrap_master_key_xchacha(kek, &wrapped.blob)
+            .map_err(|_| SpaceAccessError::CorruptedKeyMaterial)?;
+        if self
+            .session
+            .get_master_key()
+            .is_ok_and(|master_key| unwrapped != master_key)
+        {
+            return Err(SpaceAccessError::CorruptedKeyMaterial);
+        }
+        self.key_material
+            .store_keyslot(keyslot)
+            .await
+            .map_err(map_encryption_error)?;
+        self.key_material
+            .store_kek(&keyslot.scope, kek)
+            .await
+            .map_err(map_encryption_error)?;
+        let stored_keyslot = self
+            .key_material
+            .load_keyslot(&keyslot.scope)
+            .await
+            .map_err(map_encryption_error)?;
+        let stored_kek = self
+            .key_material
+            .load_kek(&keyslot.scope)
+            .await
+            .map_err(map_encryption_error)?;
+        let stored_wrapped = stored_keyslot
+            .wrapped_master_key
+            .as_ref()
+            .ok_or(SpaceAccessError::CorruptedKeyMaterial)?;
+        let stored_master = v1_aead::unwrap_master_key_xchacha(&stored_kek, &stored_wrapped.blob)
+            .map_err(|_| SpaceAccessError::CorruptedKeyMaterial)?;
+        if stored_master != unwrapped {
+            return Err(SpaceAccessError::CorruptedKeyMaterial);
+        }
+        self.kek_observed.store(true, Ordering::Release);
+        Ok(())
+    }
 }
 
 impl MigrationSpaceAccessAdapter {

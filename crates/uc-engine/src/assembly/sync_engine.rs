@@ -781,6 +781,8 @@ pub async fn build_sync_engine_assembly(
             current_engine_version: env!("CARGO_PKG_VERSION").to_owned(),
             admission_credentials: space_setup.admission_credentials.clone()
                 as Arc<dyn uc_application::deps::PrepareSpaceAdmissionCredentialsPort>,
+            encryption_passphrase_change: space_setup.encryption_passphrase_change.clone()
+                as Arc<dyn uc_application::deps::ApplyEncryptionPassphraseChangePort>,
             local_identity: Arc::clone(&local_identity),
             pairing_invitation: handlers.invitation,
             pairing_invitation_addresses: handlers.invitation_addresses,

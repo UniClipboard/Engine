@@ -63,6 +63,7 @@ pub use crate::space::{
     AdmissionSecurityTransitionError, AdmissionSecurityTransitionInput,
     AdmissionSecurityTransitionPort, AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
     AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionStepV2,
+    ApplyEncryptionPassphraseChangePort, ApplyEncryptionPassphraseChangePortError,
     ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort,
     AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply,
     AuthenticatedSpaceAdmissionMessage, CommittedSponsorAdmission, CompletedJoinerActivation,

@@ -3,6 +3,7 @@ mod active_space_security_session;
 mod content_key_catalog;
 mod group_update_error;
 pub(crate) use group_update_error::group_update_failure_detail;
+mod encryption_passphrase_change;
 mod history_signature;
 mod key_material;
 mod membership_update;
@@ -16,6 +17,7 @@ pub use access::{MigrationSpaceAccessAdapter, RuntimeSpaceAccessAdapter};
 pub(crate) use content_key_catalog::{
     export_admission_content_key_catalog, import_admission_content_key_catalog,
 };
+pub use encryption_passphrase_change::EncryptionPassphraseChange;
 pub use history_signature::OpenMlsHistoricalSignatureVerifier;
 pub use key_material::KeyMaterialStore;
 pub use membership_update::DefaultMembershipSecurityUpdateAdapter;

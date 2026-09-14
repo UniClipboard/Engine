@@ -8,7 +8,6 @@ mod repository;
 mod security;
 mod sponsor;
 
-#[cfg(test)]
 pub(crate) use credentials::prepare_registration;
 pub(crate) use credentials::{
     install_prepared_registration_for_control_generation,

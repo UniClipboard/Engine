@@ -984,6 +984,53 @@ async fn reset_space_rebuilds_device_management_state_and_preserves_local_histor
         crate::OperationResult::EntrySent(report) => report.entry_id,
         other => panic!("expected sent entry, got {other:?}"),
     };
+    let first_new_passphrase = match engine
+        .execute(crate::Operation::GenerateEncryptionPassphrase)
+        .await
+        .unwrap()
+    {
+        crate::OperationResult::EncryptionPassphraseGenerated { passphrase } => {
+            passphrase.expose().to_owned()
+        }
+        other => panic!("expected generated passphrase, got {other:?}"),
+    };
+    assert_eq!(
+        engine
+            .execute(crate::Operation::ConfirmEncryptionPassphraseChange(
+                crate::ConfirmEncryptionPassphraseChangeInput {
+                    passphrase: crate::SecretString::new(first_new_passphrase.clone()),
+                },
+            ))
+            .await
+            .unwrap(),
+        crate::OperationResult::EncryptionPassphraseChanged
+    );
+    assert_eq!(
+        engine
+            .execute(crate::Operation::LockEncryption)
+            .await
+            .unwrap(),
+        crate::OperationResult::EncryptionLocked
+    );
+    assert_eq!(
+        engine
+            .execute(crate::Operation::UnlockSpace(crate::UnlockSpaceInput {
+                passphrase: crate::SecretString::new("correct horse"),
+            }))
+            .await
+            .unwrap_err()
+            .category(),
+        crate::EngineErrorCategory::Unauthorized
+    );
+    assert!(matches!(
+        engine
+            .execute(crate::Operation::UnlockSpace(crate::UnlockSpaceInput {
+                passphrase: crate::SecretString::new(first_new_passphrase),
+            }))
+            .await
+            .unwrap(),
+        crate::OperationResult::SpaceUnlocked { .. }
+    ));
     engine
         .execute(crate::Operation::IssueInvitation)
         .await
@@ -1053,6 +1100,67 @@ async fn reset_space_rebuilds_device_management_state_and_preserves_local_histor
             .await
             .unwrap(),
         crate::OperationResult::InvitationIssued { .. }
+    ));
+    let generated = engine
+        .execute(crate::Operation::GenerateEncryptionPassphrase)
+        .await
+        .unwrap();
+    let new_passphrase = match generated {
+        crate::OperationResult::EncryptionPassphraseGenerated { passphrase } => {
+            let exposed = passphrase.expose().to_owned();
+            assert_eq!(exposed.len(), 27);
+            assert!(!format!("{passphrase:?}").contains(&exposed));
+            exposed
+        }
+        other => panic!("expected generated passphrase, got {other:?}"),
+    };
+    assert_eq!(
+        engine
+            .execute(crate::Operation::ConfirmEncryptionPassphraseChange(
+                crate::ConfirmEncryptionPassphraseChangeInput {
+                    passphrase: crate::SecretString::new(new_passphrase.clone()),
+                },
+            ))
+            .await
+            .unwrap(),
+        crate::OperationResult::EncryptionPassphraseChanged
+    );
+    assert!(matches!(
+        engine
+            .execute(crate::Operation::QuerySetupState)
+            .await
+            .unwrap(),
+        crate::OperationResult::SetupState(crate::SetupStateSummary {
+            re_pairing_required: true,
+            current_invitation: None,
+            ..
+        })
+    ));
+    assert_eq!(
+        engine
+            .execute(crate::Operation::LockEncryption)
+            .await
+            .unwrap(),
+        crate::OperationResult::EncryptionLocked
+    );
+    let old_passphrase = engine
+        .execute(crate::Operation::UnlockSpace(crate::UnlockSpaceInput {
+            passphrase: crate::SecretString::new("correct horse"),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        old_passphrase.category(),
+        crate::EngineErrorCategory::Unauthorized
+    );
+    assert!(matches!(
+        engine
+            .execute(crate::Operation::UnlockSpace(crate::UnlockSpaceInput {
+                passphrase: crate::SecretString::new(new_passphrase),
+            }))
+            .await
+            .unwrap(),
+        crate::OperationResult::SpaceUnlocked { .. }
     ));
     assert!(!temp
         .path()

@@ -229,6 +229,8 @@ export interface OhEngine {
   queryDeviceGroupChoices(): Promise<string>
   queryMembershipConvergence(): Promise<OhMembershipConvergence>
   issueInvitation(): Promise<OhInvitationIssued>
+  generateEncryptionPassphrase(): Promise<string>
+  confirmEncryptionPassphraseChange(passphrase: string): Promise<void>
   joinSpace(
     invitationCode: string,
     deviceName: string | null,

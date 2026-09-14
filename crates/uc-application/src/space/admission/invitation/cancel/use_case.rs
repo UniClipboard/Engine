@@ -5,6 +5,7 @@ use uc_core::ports::{ConsumeInvitationError, PairingInvitationPort};
 
 use super::CancelInvitationError;
 use crate::space::admission::invitation::InMemoryPairingInvitationHolder;
+use crate::space::lifecycle::RetirePairingInvitationsPort;
 
 /// 清除当前全部待处理配对邀请；没有邀请时返回明确冲突。
 pub(crate) struct CancelPairingInvitationUseCase {
@@ -24,9 +25,16 @@ impl CancelPairingInvitationUseCase {
     }
 
     pub(crate) async fn execute(&self) -> Result<(), CancelInvitationError> {
+        if self.execute_if_any().await? == 0 {
+            return Err(CancelInvitationError::NotIssued);
+        }
+        Ok(())
+    }
+
+    async fn execute_if_any(&self) -> Result<usize, CancelInvitationError> {
         let codes = self.invitation_holder.pending_codes().await;
         if codes.is_empty() {
-            return Err(CancelInvitationError::NotIssued);
+            return Ok(0);
         }
         for code in &codes {
             match self.pairing_invitation.consume_invitation(code).await {
@@ -43,7 +51,17 @@ impl CancelPairingInvitationUseCase {
         }
         let removed = self.invitation_holder.cancel_all().await;
         info!(count = removed, "cancelled in-flight pairing invitations");
-        Ok(())
+        Ok(removed)
+    }
+}
+
+#[async_trait::async_trait]
+impl RetirePairingInvitationsPort for CancelPairingInvitationUseCase {
+    async fn retire_all(&self) -> Result<(), anyhow::Error> {
+        self.execute_if_any()
+            .await
+            .map(|_| ())
+            .map_err(anyhow::Error::new)
     }
 }
 

@@ -33,6 +33,12 @@ pub enum IssuePairingInvitationError {
     #[error("pairing invitation service unavailable")]
     ServiceUnavailable,
 
+    #[error("pending passphrase change must recover before issuing an invitation")]
+    PassphraseChangeRecovery {
+        #[source]
+        source: anyhow::Error,
+    },
+
     /// 调用方指定的本机地址当前不能用于配对邀请。
     #[error("requested address is not available: {0}")]
     AddressNotAvailable(IpAddr),
@@ -40,6 +46,14 @@ pub enum IssuePairingInvitationError {
     /// Uncategorised adapter-side failure; message for logs only.
     #[error("internal error: {0}")]
     Internal(String),
+}
+
+impl IssuePairingInvitationError {
+    pub(super) fn passphrase_change_recovery(source: impl Into<anyhow::Error>) -> Self {
+        Self::PassphraseChangeRecovery {
+            source: source.into(),
+        }
+    }
 }
 
 /// Failure modes of B2 `RedeemPairingInvitationUseCase` (joiner side).
