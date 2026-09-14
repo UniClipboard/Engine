@@ -1,3 +1,4 @@
+use crate::runtime_lifecycle::LifecycleError;
 use thiserror::Error;
 
 /// Application-layer errors for file-transfer orchestration.
@@ -8,6 +9,8 @@ use thiserror::Error;
 /// 不承担底层存储实现或传输实现的细节语义。
 #[derive(Debug, Error)]
 pub enum FileTransferApplicationError {
+    #[error("file transfer cleanup incomplete")]
+    Cleanup(#[source] LifecycleError),
     /// The process-wide transfer lifecycle no longer accepts new sessions.
     #[error("file transfer lifecycle is closed")]
     LifecycleClosed,

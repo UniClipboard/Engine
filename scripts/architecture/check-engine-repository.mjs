@@ -1790,6 +1790,90 @@ function checkSessionSupervisorOwnership(sources) {
   return problems
 }
 
+function checkRuntimeLifecycleOwnership(sources) {
+  const problems = []
+  for (const marker of [
+    'mod coordinator;',
+    'mod error;',
+    'mod invocation;',
+    'mod model;',
+    'mod ports;',
+  ]) {
+    if (!sources.runtimeLifecycleModule.includes(marker)) {
+      addProblem(
+        problems,
+        'runtime lifecycle ownership',
+        `runtime lifecycle module is missing separated responsibility: ${marker}`
+      )
+    }
+  }
+  for (const participant of ['session_work', 'local_work', 'local_resources']) {
+    if (!sources.runtimeLifecyclePorts.includes(`pub ${participant}: Arc<dyn RuntimeLifecyclePort>`)) {
+      addProblem(
+        problems,
+        'runtime lifecycle ownership',
+        `unified lifecycle participant is missing: ${participant}`
+      )
+    }
+    if (!sources.runtimeLifecycleCoordinator.includes(`&self.participants.${participant}`)) {
+      addProblem(
+        problems,
+        'runtime lifecycle ownership',
+        `unified lifecycle coordinator does not own participant: ${participant}`
+      )
+    }
+    if (!sources.sessionSupervisor.includes(`${participant}:`)) {
+      addProblem(
+        problems,
+        'runtime lifecycle ownership',
+        `session supervisor does not wire complete participant: ${participant}`
+      )
+    }
+  }
+  for (const marker of [
+    'pub struct RuntimeLifecycleCoordinator',
+    'tokio::join!(',
+    'LifecycleTarget::Suspended',
+    'LifecycleTarget::Active',
+  ]) {
+    if (!sources.runtimeLifecycleCoordinator.includes(marker)) {
+      addProblem(
+        problems,
+        'runtime lifecycle ownership',
+        `unified lifecycle coordinator is missing required behavior: ${marker}`
+      )
+    }
+  }
+  for (const pattern of [
+    /self\.coordinator\s*\.transition\(LifecycleTarget::Suspended, deadline\)/,
+    /self\.coordinator\s*\.transition_with_cancellation\(LifecycleTarget::Active, None, cancellation\)/,
+    /self\.coordinator\.stop\(deadline\)/,
+  ]) {
+    if (!pattern.test(sources.sessionSupervisor)) {
+      addProblem(
+        problems,
+        'runtime lifecycle ownership',
+        `session supervisor bypasses the unified lifecycle action: ${pattern}`
+      )
+    }
+  }
+  for (const marker of [
+    'suspend_background(',
+    'resume_background(',
+    'security_lifecycle.suspend(',
+    'security_lifecycle.resume(',
+  ]) {
+    if (sources.engineRuntime.includes(marker)) {
+      addProblem(
+        problems,
+        'runtime lifecycle ownership',
+        `Engine reaches into an internal lifecycle step through ${marker}`
+      )
+    }
+  }
+  return problems
+}
+
 function checkSpaceAccessConstructionModes(sources) {
   const problems = []
   for (const marker of [
@@ -1896,6 +1980,11 @@ function repositorySources() {
     ].map(path => read(`crates/uc-infra/src/network/iroh/${path}`)).join('\n'),
     runtimeModule: read('crates/uc-engine/src/runtime/mod.rs'),
     sessionSupervisor: read('crates/uc-engine/src/runtime/session_supervisor.rs'),
+    runtimeLifecycleModule: read('crates/uc-application/src/runtime_lifecycle/mod.rs'),
+    runtimeLifecyclePorts: read('crates/uc-application/src/runtime_lifecycle/ports.rs'),
+    runtimeLifecycleCoordinator: read(
+      'crates/uc-application/src/runtime_lifecycle/coordinator.rs'
+    ),
     spaceAccess: read('crates/uc-infra/src/space/security/access.rs'),
     configMigration: read('crates/uc-infra/src/config_migration/mod.rs'),
     engineSpaceAccessWiring: read('crates/uc-engine/src/assembly/wire/infra.rs'),
@@ -1973,6 +2062,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkRetiredMembershipPersistence(sources),
     ...checkIrohPeerAddressResolution(sources),
     ...checkSessionSupervisorOwnership(sources),
+    ...checkRuntimeLifecycleOwnership(sources),
     ...checkSpaceAccessConstructionModes(sources),
     ...checkObservabilityAssemblyInterface(sources),
     ...checkObservabilityCutover(sources),
@@ -2034,6 +2124,21 @@ function runNegativeFixtures(metadata, sources) {
   }, metadata, sources)
   expectRejected('ProductionRuntime session builder', (_changed, changedSources) => {
     changedSources.runtimeModule += '\nimpl ProductionRuntime { async fn build_session() {} }\n'
+  }, metadata, sources)
+  expectRejected('missing unified lifecycle participant', (_changed, changedSources) => {
+    changedSources.runtimeLifecyclePorts = changedSources.runtimeLifecyclePorts.replace(
+      '    pub local_resources: Arc<dyn RuntimeLifecyclePort>,\n',
+      ''
+    )
+  }, metadata, sources)
+  expectRejected('Engine internal lifecycle step', (_changed, changedSources) => {
+    changedSources.engineRuntime += '\nfn bypass_lifecycle() { suspend_background(); }\n'
+  }, metadata, sources)
+  expectRejected('session supervisor lifecycle bypass', (_changed, changedSources) => {
+    changedSources.sessionSupervisor = changedSources.sessionSupervisor.replace(
+      '.transition(LifecycleTarget::Suspended, deadline)',
+      '.transition(LifecycleTarget::Active, deadline)'
+    )
   }, metadata, sources)
   expectRejected('optional runtime Space access dependency', (_changed, changedSources) => {
     changedSources.spaceAccess += '\nstruct Broken { active_security_session: Option<Session> }\n'

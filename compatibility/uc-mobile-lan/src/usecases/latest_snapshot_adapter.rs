@@ -345,7 +345,9 @@ mod tests {
         /// The register load itself fails.
         fn load_err(msg: &str) -> Arc<Self> {
             Self::build(
-                Err(ActiveClipboardRegisterError::Storage(msg.to_string())),
+                Err(ActiveClipboardRegisterError::Storage(anyhow::anyhow!(
+                    msg.to_owned()
+                ))),
                 Ok(None),
             )
         }

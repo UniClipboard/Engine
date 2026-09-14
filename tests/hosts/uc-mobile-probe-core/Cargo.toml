@@ -10,6 +10,7 @@ description = "Mobile acceptance host for uc-engine"
 crate-type = ["lib", "staticlib", "cdylib"]
 
 [dependencies]
+async-trait = "0.1"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

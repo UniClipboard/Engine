@@ -84,7 +84,33 @@ fn ios_simulator_commands_publish_pollable_redacted_evidence() {
 }
 
 #[test]
-fn android_probe_scripts_require_an_explicit_emulator() {
+fn ios_device_commands_publish_pollable_timing_evidence() {
+    let root = workspace_root();
+    let model = read(root.join("tests/hosts/ios/EngineProbe/ProbeModel.swift"));
+    let command = read(root.join("tests/hosts/ios/probe-command-device.sh"));
+    let probe = read(root.join("tests/hosts/uc-mobile-probe-core/src/lib.rs"));
+
+    assert!(command.contains("devicectl device process launch"));
+    assert!(command.contains("devicectl device copy from"));
+    assert!(command.contains("request_id"));
+    assert!(model.contains("\"elapsed_ms\""));
+    assert!(model.contains("\"block_ms\""));
+    assert!(model.contains("\"stale_count\""));
+    assert!(model.contains("\"fresh_count\""));
+    assert!(model.contains("\"capture\""));
+    assert!(model.contains("\"restore\""));
+    assert!(probe.contains("deadline_ms: Option<u64>"));
+    assert!(probe.contains("SuspendDuringClipboardRead"));
+    assert!(probe.contains("SuspendDuringClipboardWrite"));
+    assert!(probe.contains("SuspendDuringFileRead"));
+    assert!(probe.contains("SuspendDuringFileWrite"));
+    assert!(probe.contains("SuspendDuringStartup"));
+    assert!(probe.contains("VerifyStaleClipboardChangeAfterSuspend"));
+    assert!(probe.contains("started_at.elapsed()"));
+}
+
+#[test]
+fn android_probe_scripts_use_an_explicit_emulator_and_repository_build_cache() {
     let root = workspace_root();
     let command = read(root.join("tests/hosts/android/probe-command.sh"));
     let install = read(root.join("tests/hosts/android/install-emulator.sh"));
@@ -94,7 +120,8 @@ fn android_probe_scripts_require_an_explicit_emulator() {
     assert!(command.contains("adb -s \"$ANDROID_SERIAL\""));
     assert!(install.contains("ANDROID_SERIAL"));
     assert!(install.contains("adb -s \"$ANDROID_SERIAL\""));
-    assert!(build.contains("mktemp -d"));
+    assert!(build.contains("$REPO_ROOT/target/android-probe-cargo"));
+    assert!(!build.contains("mktemp -d"));
 }
 
 #[test]

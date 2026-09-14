@@ -4,7 +4,7 @@ use tokio::sync::Mutex;
 use uc_core::ids::SpaceId;
 use uc_core::membership::{GroupEpoch, RevocationRepositoryPort, SpaceKeyMaterial};
 
-use crate::security::{MasterKey, ProfileContentKeyVault};
+use crate::security::{MasterKey, ProfileContentKeyVault, ProfileContentKeyVaultError};
 
 use super::InMemorySession;
 
@@ -132,6 +132,16 @@ impl ActiveSpaceSecuritySession {
     pub(crate) fn close(&self) {
         self.session.close();
         self.vault.close();
+    }
+
+    pub(crate) async fn suspend(&self) {
+        let _guard = self.activation_lock.lock().await;
+        self.vault.suspend().await;
+        self.session.clear();
+    }
+
+    pub(crate) async fn resume(&self) -> Result<(), ProfileContentKeyVaultError> {
+        self.vault.resume().await
     }
 }
 

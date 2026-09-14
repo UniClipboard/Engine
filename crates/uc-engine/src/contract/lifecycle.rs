@@ -22,6 +22,8 @@ impl EngineState {
             (Self::Running, Self::Quiescing)
                 | (Self::Quiescing, Self::Quiesced)
                 | (Self::Quiesced, Self::Suspended)
+                | (Self::Suspended, Self::Quiesced)
+                | (Self::Quiesced, Self::Running)
                 | (Self::Suspended, Self::Running)
                 | (Self::Running, Self::ShuttingDown)
                 | (Self::Quiescing, Self::ShuttingDown)

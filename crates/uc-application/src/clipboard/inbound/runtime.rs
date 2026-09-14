@@ -1,12 +1,13 @@
 use crate::clipboard::inbound::ClipboardReceiverPort;
 use std::error::Error as StdError;
+use std::fmt;
 use std::io::{Error as IoError, ErrorKind};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use thiserror::Error;
 use tokio::sync::broadcast;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
@@ -67,10 +68,19 @@ pub struct ClipboardInboundRuntimeDeps {
     pub events: Arc<dyn ClipboardInboundEventPort>,
 }
 
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum ClipboardInboundRuntimeError {
-    #[error("clipboard inbound task failed: {0}")]
-    Task(String),
+    #[error("clipboard inbound task failed")]
+    Task {
+        #[source]
+        source: JoinError,
+    },
+}
+
+impl fmt::Debug for ClipboardInboundRuntimeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ClipboardInboundRuntimeError::Task")
+    }
 }
 
 pub struct ClipboardInboundRuntime {
@@ -96,6 +106,14 @@ struct PreparedInbound {
 }
 
 impl ClipboardInboundRuntime {
+    #[cfg(test)]
+    pub(crate) fn from_task(task: JoinHandle<()>) -> Self {
+        Self {
+            cancel: CancellationToken::new(),
+            task: Some(task),
+        }
+    }
+
     pub fn start(deps: ClipboardInboundRuntimeDeps) -> Self {
         let mut receiver = deps.receiver.subscribe();
         let processor = InboundProcessor {
@@ -140,7 +158,7 @@ impl ClipboardInboundRuntime {
             return Ok(());
         };
         task.await
-            .map_err(|error| ClipboardInboundRuntimeError::Task(error.to_string()))
+            .map_err(|source| ClipboardInboundRuntimeError::Task { source })
     }
 }
 

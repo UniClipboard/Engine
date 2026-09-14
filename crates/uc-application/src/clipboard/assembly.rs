@@ -40,7 +40,9 @@ use crate::clipboard::local::{
 };
 use crate::clipboard::outbound::{ClipboardOutboundDeps, ClipboardOutboundFacade};
 use crate::clipboard::resource::ResourceFacadeDeps;
-use crate::clipboard::sync::apply_inbound::{InboundBlobFetcher, InboundCapture, InboundWrite};
+use crate::clipboard::sync::apply_inbound::{
+    ApplyInboundClipboardUseCase, InboundBlobFetcher, InboundCapture, InboundWrite,
+};
 use crate::clipboard::sync::sync_runtime::{ClipboardSyncRuntime, ClipboardSyncRuntimeDeps};
 use crate::clipboard::write::{
     ClipboardWriteCoordinator, LocalActiveRegisterAdvancer, RestoreBroadcastTrigger,
@@ -52,6 +54,7 @@ use crate::facade::{
     BlobTransferFacade, ClipboardCaptureFacade, ClipboardHistoryFacade, ClipboardRestoreFacade,
     ClipboardSyncFacade, HostEventBus, ResourceFacade,
 };
+use crate::runtime_lifecycle::LifecycleError;
 use crate::search::live_index::{
     ClipboardLiveIndexDeps, ClipboardLiveIndexPort, ClipboardLiveIndexer,
 };
@@ -86,6 +89,8 @@ pub enum ClipboardBackgroundError {
 pub trait ClipboardBackgroundPort: Send + Sync {
     async fn start(&self, task_registry: Arc<TaskRegistry>)
         -> Result<(), ClipboardBackgroundError>;
+    async fn suspend(&self);
+    async fn resume(&self);
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -149,10 +154,11 @@ pub struct ActiveClipboardSession {
 
 /// Clipboard session 对外稳定入口与唯一关闭句柄。
 pub struct ClipboardSession {
+    dispatch: Arc<ClipboardSyncFacade>,
     outbound: Arc<ClipboardOutboundFacade>,
     sync: Arc<ClipboardSyncRuntime>,
     local: Arc<LocalClipboardProcessor>,
-    apply_inbound: Arc<dyn InboundClipboardApplyPort>,
+    apply_inbound: Arc<ApplyInboundClipboardUseCase>,
 }
 
 /// Clipboard 领域唯一对象图 owner。
@@ -252,6 +258,14 @@ impl ClipboardAssembly {
         Ok(())
     }
 
+    pub(crate) async fn suspend_background(&self) {
+        self.background.suspend().await;
+    }
+
+    pub(crate) async fn resume_background(&self) {
+        self.background.resume().await;
+    }
+
     pub fn start_session(&self, session: ClipboardSessionDeps) -> ClipboardSession {
         let outbound = Arc::new(ClipboardOutboundFacade::new(ClipboardOutboundDeps {
             settings: Arc::clone(&self.deps.settings),
@@ -310,7 +324,7 @@ impl ClipboardAssembly {
             transfer_cipher: Arc::clone(&self.deps.security.transfer_cipher),
             settings: Arc::clone(&self.deps.settings),
             clock: Arc::clone(&self.deps.system.clock),
-            apply: Arc::clone(&apply_inbound),
+            apply: Arc::clone(&apply_inbound) as Arc<dyn InboundClipboardApplyPort>,
             events: session.inbound_events,
         });
         let sync = Arc::new(ClipboardSyncRuntime::start(ClipboardSyncRuntimeDeps {
@@ -319,6 +333,7 @@ impl ClipboardAssembly {
             inbound,
             peer_reachability: session.peer_reachability,
             known_peers: session.known_peers,
+            member_scope: session.member_scope,
             entries: Arc::clone(&self.deps.clipboard.entry_ports.list),
             events: Arc::clone(&self.deps.clipboard.clipboard_event_reader_repo),
             deliveries: session.deliveries,
@@ -341,6 +356,7 @@ impl ClipboardAssembly {
         }));
 
         ClipboardSession {
+            dispatch: session.clipboard_sync,
             outbound,
             sync,
             local,
@@ -538,8 +554,8 @@ impl ActiveClipboardSession {
         self.lifecycle.attach_restore_broadcast(rx)
     }
 
-    pub async fn shutdown(self) {
-        self.lifecycle.shutdown().await;
+    pub async fn shutdown(self) -> Result<(), LifecycleError> {
+        self.lifecycle.shutdown().await
     }
 }
 
@@ -549,15 +565,40 @@ impl ClipboardSession {
     }
 
     pub fn apply_inbound(&self) -> Arc<dyn InboundClipboardApplyPort> {
-        Arc::clone(&self.apply_inbound)
+        Arc::clone(&self.apply_inbound) as Arc<dyn InboundClipboardApplyPort>
     }
 
     pub(crate) fn local_processor(&self) -> Arc<LocalClipboardProcessor> {
         Arc::clone(&self.local)
     }
 
-    pub async fn shutdown(self) {
-        self.sync.shutdown().await;
+    pub async fn shutdown(self) -> Result<(), Arc<LifecycleError>> {
+        tokio::spawn(async move {
+            let (sync, dispatch, inbound) = tokio::join!(
+                self.sync.shutdown(),
+                self.dispatch.shutdown(),
+                self.apply_inbound.shutdown(),
+            );
+            let mut errors = Vec::new();
+            if let Err(source) = sync {
+                errors.push(anyhow::Error::new(source).context("stop clipboard synchronization"));
+            }
+            if let Err(source) = dispatch {
+                errors
+                    .push(anyhow::Error::new(source).context("finish clipboard delivery records"));
+            }
+            if let Err(source) = inbound {
+                errors.push(anyhow::Error::new(source).context("finish clipboard receive work"));
+            }
+            LifecycleError::from_errors(errors).map_err(Arc::new)
+        })
+        .await
+        .map_err(|source| {
+            Arc::new(LifecycleError {
+                primary: source.into(),
+                additional: Vec::new(),
+            })
+        })?
     }
 }
 
@@ -574,6 +615,8 @@ mod tests {
 
     #[async_trait]
     impl ClipboardBackgroundPort for BackgroundProbe {
+        async fn suspend(&self) {}
+        async fn resume(&self) {}
         async fn start(
             &self,
             _task_registry: Arc<TaskRegistry>,
@@ -588,7 +631,7 @@ mod tests {
         let background = BackgroundProbe(AtomicBool::new(false));
         let result = start_background_after_reconcile(
             Err(ActiveClipboardReconcileError::LoadRegister {
-                source: ActiveClipboardRegisterError::Storage("unavailable".to_owned()),
+                source: ActiveClipboardRegisterError::Storage(anyhow::anyhow!("unavailable")),
             }),
             &background,
             Arc::new(TaskRegistry::new()),

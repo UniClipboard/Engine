@@ -76,13 +76,14 @@ pub(super) struct ReadState {
     pub(super) generation: Arc<()>,
     pub(super) reusable: bool,
     pub(super) closed: bool,
+    pub(super) suspended: bool,
     pub(super) view: Option<ReadView>,
     pub(super) lease: Option<Arc<File>>,
 }
 
 impl ReadState {
     pub(super) fn check_open(&self) -> Result<(), ProfileContentKeyVaultError> {
-        if self.closed {
+        if self.closed || self.suspended {
             Err(ProfileContentKeyVaultError::Closed)
         } else {
             Ok(())
@@ -99,6 +100,11 @@ impl ReadState {
     pub(super) fn close(&mut self) {
         self.revoke();
         self.closed = true;
+    }
+
+    pub(super) fn suspend(&mut self) {
+        self.revoke();
+        self.suspended = true;
     }
 }
 

@@ -21,7 +21,7 @@ pub async fn execute_factory_reset_space(
 
 pub(crate) fn map_profile_factory_reset_error(error: ProfileFactoryResetError) -> EngineError {
     let code = match error {
-        ProfileFactoryResetError::StopRuntime => FACTORY_RESET_UNAVAILABLE_CODE,
+        ProfileFactoryResetError::StopRuntime { .. } => FACTORY_RESET_UNAVAILABLE_CODE,
         ProfileFactoryResetError::WipeKeys => FACTORY_RESET_KEY_MATERIAL_FAILED_CODE,
         ProfileFactoryResetError::ClearState => FACTORY_RESET_STORAGE_FAILED_CODE,
         ProfileFactoryResetError::Lifecycle(_)

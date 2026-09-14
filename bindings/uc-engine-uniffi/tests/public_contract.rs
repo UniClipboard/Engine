@@ -14,11 +14,18 @@ use uc_engine_uniffi::{
     BindingCollectorConfig, BindingConfig, BindingDeploymentEnvironment, BindingEngineState,
     BindingError, BindingErrorCategory, BindingEvent, BindingFileMetadata, BindingHost,
     BindingObservabilityConfig, BindingObservabilitySetupStatus, BindingObservabilitySignalResult,
-    BindingOperationTerminal, HostBindingError, InvitationIssued, MobileEngine, SendReport,
+    BindingOperationTerminal, HostBindingError, InvitationIssued, MobileEngine,
+    MobileStartupLifecycle, SendReport,
 };
 
 static ENGINE_TEST_LOCK: Mutex<()> = Mutex::new(());
 const ENGINE_SHUTDOWN_DEADLINE_MS: u64 = 30_000;
+
+#[path = "public_contract/lifecycle_targets.rs"]
+mod lifecycle_targets;
+
+#[path = "public_contract/startup_lifecycle.rs"]
+mod startup_lifecycle;
 
 #[test]
 fn core_version_uses_the_binding_package_version() {
@@ -185,6 +192,7 @@ struct MemoryHost {
     clipboard: Mutex<BindingClipboardSnapshot>,
     clipboard_writes: Mutex<Vec<BindingClipboardSnapshot>>,
     finished_files: Mutex<Vec<String>>,
+    secure_read_gate: Mutex<Option<lifecycle_targets::ReadGate>>,
 }
 
 struct TestFile {
@@ -206,6 +214,7 @@ impl MemoryHost {
             }),
             clipboard_writes: Mutex::new(Vec::new()),
             finished_files: Mutex::new(Vec::new()),
+            secure_read_gate: Mutex::new(None),
         }
     }
 
@@ -276,6 +285,17 @@ impl BindingHost for MemoryHost {
     }
 
     fn secure_storage_get(&self, key: String) -> Result<Option<Vec<u8>>, HostBindingError> {
+        let gate = {
+            let mut gate = lock(&self.secure_read_gate);
+            if gate.as_ref().is_some_and(|gate| gate.matches(&key)) {
+                gate.take()
+            } else {
+                None
+            }
+        };
+        if let Some(gate) = gate {
+            gate.wait();
+        }
         Ok(self.values().get(&key).cloned())
     }
 
@@ -714,6 +734,78 @@ fn space_management_preserves_state_devices_resend_outcomes_and_local_history() 
     restarted
         .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("binding engine must shut down within the deadline");
+}
+
+#[test]
+fn mobile_shutdown_timeout_can_be_joined_and_profile_reopened() {
+    let _test_guard = engine_test_guard();
+    let root = tempfile::tempdir().unwrap();
+    let host = Arc::new(MemoryHost::new(root.path()));
+    let config = BindingConfig {
+        app_version: "1.2.3".to_owned(),
+        profile_id: "shutdown-retry".to_owned(),
+    };
+    let engine = MobileEngine::start(config.clone(), host.clone()).unwrap();
+    engine
+        .create_space(
+            Some("shutdown-host".to_owned()),
+            "correct horse battery staple".to_owned(),
+        )
+        .unwrap();
+    if let Err(error) = engine.shutdown(0) {
+        assert!(matches!(
+            error,
+            BindingError::Engine {
+                category: BindingErrorCategory::DeadlineExceeded,
+                ..
+            }
+        ));
+    }
+    assert!(engine.list_devices().is_err());
+    engine.shutdown(ENGINE_SHUTDOWN_DEADLINE_MS).unwrap();
+    engine.shutdown(ENGINE_SHUTDOWN_DEADLINE_MS).unwrap();
+    let restarted = MobileEngine::start(config, host).unwrap();
+    assert!(restarted.recover_session(true).unwrap().unlocked);
+    restarted.shutdown(ENGINE_SHUTDOWN_DEADLINE_MS).unwrap();
+}
+
+#[test]
+fn mobile_suspend_deadline_allows_completion_retry_and_resume() {
+    let _test_guard = engine_test_guard();
+    let root = tempfile::tempdir().unwrap();
+    let host = Arc::new(MemoryHost::new(root.path()));
+    let engine = MobileEngine::start(
+        BindingConfig {
+            app_version: "1.2.3".to_owned(),
+            profile_id: "suspend-deadline".to_owned(),
+        },
+        host,
+    )
+    .unwrap();
+    engine
+        .create_space(
+            Some("suspend-host".to_owned()),
+            "correct horse battery staple".to_owned(),
+        )
+        .unwrap();
+    if let Err(error) = engine.suspend_with_deadline(0) {
+        assert!(matches!(
+            error,
+            BindingError::Engine {
+                category: BindingErrorCategory::DeadlineExceeded,
+                ..
+            }
+        ));
+    }
+    engine
+        .suspend_with_deadline(ENGINE_SHUTDOWN_DEADLINE_MS)
+        .unwrap();
+    wait_for_state(&engine, BindingEngineState::Suspended);
+    assert!(engine.list_devices().is_err());
+    engine.resume().unwrap();
+    wait_for_state(&engine, BindingEngineState::Running);
+    assert!(engine.list_devices().is_ok());
+    engine.shutdown(ENGINE_SHUTDOWN_DEADLINE_MS).unwrap();
 }
 
 #[test]

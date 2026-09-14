@@ -9,7 +9,7 @@ pub(super) const MAX_GROUPS: usize = 128;
 pub(super) const MAX_ENTRIES_PER_GROUP: usize = 1024;
 pub(super) const MAX_TOTAL_ENTRIES: usize = 4096;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum ProfileContentKeyVaultError {
     #[error("profile content key runtime is closed")]
     Closed,
@@ -41,6 +41,12 @@ pub enum ProfileContentKeyVaultError {
     EpochMismatch,
     #[error("profile content key vault capacity was exceeded")]
     CapacityExceeded,
+}
+
+impl fmt::Debug for ProfileContentKeyVaultError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,3 +172,4 @@ pub(super) fn corrupt(context: &'static str) -> ProfileContentKeyVaultError {
         source: anyhow::anyhow!(context),
     }
 }
+use std::fmt;

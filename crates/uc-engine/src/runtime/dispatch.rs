@@ -3,7 +3,7 @@ use crate::{
     DevBlobPublished, DevCapturedFileSet, DevCapturedFileSetLine, DevInvitation, DevOperation,
     DevOperationResult,
 };
-use std::time::Duration;
+use tokio::time::Instant;
 
 #[cfg(feature = "dev-tools")]
 use super::operation_error_with_code;
@@ -75,10 +75,10 @@ use crate::operations::space::membership_diagnostics::execute_query_membership_d
 use crate::operations::space::session_recovery::execute_recover_session;
 use crate::operations::space::setup_state::execute_query_setup_state;
 use crate::operations::space::unlock::execute_unlock_space;
-use crate::{EngineError, Operation, OperationResult};
+use crate::{EngineError, EngineErrorCategory, Operation, OperationResult};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use uc_application::facade::NetworkRecoveryRequestError;
 
 #[async_trait]
 impl EngineRuntime for ProductionRuntime {
@@ -122,11 +122,16 @@ impl EngineRuntime for ProductionRuntime {
                     .await
                     .map(|()| OperationResult::NetworkRecovered)
                     .map_err(|error| match error {
-                        uc_application::facade::NetworkRecoveryRequestError::Stopped => {
+                        NetworkRecoveryRequestError::Stopped => {
                             super::operation_unavailable_error()
                         }
-                        uc_application::facade::NetworkRecoveryRequestError::Rebuild(_) => {
-                            EngineError::new(1105, crate::EngineErrorCategory::Unavailable, true)
+                        NetworkRecoveryRequestError::Rebuild(source) => EngineError::new(
+                            1105,
+                            EngineErrorCategory::Unavailable,
+                            source.is_retryable(),
+                        ),
+                        NetworkRecoveryRequestError::Task(_) => {
+                            EngineError::new(1108, EngineErrorCategory::Internal, false)
                         }
                     });
             }
@@ -508,9 +513,14 @@ impl EngineRuntime for ProductionRuntime {
         let result = if matches!(operation_kind, crate::OperationKind::ResetSpace) {
             operation.await
         } else {
+            tokio::pin!(operation);
             tokio::select! {
-                _ = session_cancellation.cancelled() => Err(super::operation_unavailable_error()),
-                result = operation => result,
+                _ = session_cancellation.cancelled() => {
+                    // 停止通知交给动作的安全边界处理，不能丢弃仍等待磁盘工作的调用。
+                    cancellation.cancel();
+                    operation.await
+                },
+                result = &mut operation => result,
             }
         };
         if matches!(operation_kind, crate::OperationKind::UnlockSpace) && result.is_ok() {
@@ -707,26 +717,15 @@ impl EngineRuntime for ProductionRuntime {
         }
     }
 
-    async fn suspend(&self) -> Result<(), EngineError> {
-        self.session_supervisor.suspend().await
+    async fn suspend(&self, deadline: Option<Instant>) -> Result<(), EngineError> {
+        self.session_supervisor.suspend(deadline).await
     }
 
-    async fn resume(&self) -> Result<(), EngineError> {
-        self.session_supervisor.resume().await
+    async fn resume(&self, cancellation: CancellationToken) -> Result<(), EngineError> {
+        self.session_supervisor.resume(cancellation).await
     }
 
-    async fn shutdown(&self, deadline: Duration) -> Result<(), EngineError> {
-        self.security_lifecycle.close_security_session();
-        self.network_recovery.shutdown().await;
-        self.suspend().await?;
-        self.session_supervisor.clear_factory();
-        self.session_supervisor.close_file_transfers().await?;
-        super::task_shutdown::shutdown_tasks(&self.task_registry, deadline).await;
-        if let Err(error) = std::fs::remove_dir_all(&self.clipboard_import_root) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                warn!(error = %error, "failed to remove host clipboard imports");
-            }
-        }
-        Ok(())
+    async fn shutdown(&self, deadline: Option<Instant>) -> Result<(), EngineError> {
+        super::shutdown::shutdown(self, deadline).await
     }
 }

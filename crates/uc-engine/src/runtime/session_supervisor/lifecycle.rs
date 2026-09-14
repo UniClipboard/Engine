@@ -1,0 +1,241 @@
+use std::future::Future;
+use std::sync::atomic::Ordering;
+use std::sync::Weak;
+
+use async_trait::async_trait;
+use uc_application::facade::{
+    LifecycleError, NetworkRecoveryRequestError, RuntimeLifecyclePort, TransitionContext,
+};
+use uc_core::{FileTransferCancellationReason, TaskShutdownReport};
+
+use super::SessionSupervisor;
+use crate::runtime::operation_unavailable_error;
+use crate::{EngineError, EngineErrorCategory};
+
+pub(super) struct SessionWork(pub(super) Weak<SessionSupervisor>);
+
+pub(in super::super) fn lifecycle_error(error: LifecycleError) -> EngineError {
+    let source = if error.is_stopped() || error.is_superseded() {
+        match error.additional.first() {
+            Some(source) => source,
+            None => return EngineError::new(1001, EngineErrorCategory::InvalidState, false),
+        }
+    } else {
+        &error.primary
+    };
+    if source.chain().any(|source| {
+        matches!(
+            source.downcast_ref::<NetworkRecoveryRequestError>(),
+            Some(NetworkRecoveryRequestError::Task(_))
+        )
+    }) {
+        return EngineError::new(1108, EngineErrorCategory::Internal, false);
+    }
+    if source
+        .chain()
+        .filter_map(|source| source.downcast_ref::<TaskShutdownReport>())
+        .any(|report| report.timed_out_count > 0)
+    {
+        return EngineError::new(1106, EngineErrorCategory::DeadlineExceeded, true);
+    }
+    source
+        .chain()
+        .find_map(|source| source.downcast_ref::<EngineError>())
+        .cloned()
+        .unwrap_or_else(|| EngineError::new(1108, EngineErrorCategory::Internal, true))
+}
+
+#[async_trait]
+impl RuntimeLifecyclePort for SessionWork {
+    async fn suspend(&self, context: &TransitionContext) -> anyhow::Result<()> {
+        let owner = self.0.upgrade().ok_or_else(operation_unavailable_error)?;
+        let _lifecycle = owner.lifecycle.lock().await;
+        owner.suspended.store(true, Ordering::Release);
+        drain_operations_and_stop_session(
+            owner.operations.close_and_wait(None, context.deadline()),
+            owner.stop_current_session(FileTransferCancellationReason::Unknown, context.deadline()),
+        )
+        .await
+    }
+
+    async fn resume(&self, _context: &TransitionContext) -> anyhow::Result<()> {
+        let owner = self.0.upgrade().ok_or_else(operation_unavailable_error)?;
+        let _lifecycle = owner.lifecycle.lock().await;
+        owner.install_new_session(false).await?;
+        owner.suspended.store(false, Ordering::Release);
+        Ok(())
+    }
+}
+
+async fn drain_operations_and_stop_session<Drain, Stop>(
+    drain_operations: Drain,
+    stop_session: Stop,
+) -> anyhow::Result<()>
+where
+    Drain: Future<Output = Result<(), EngineError>>,
+    Stop: Future<Output = Result<(), LifecycleError>>,
+{
+    let mut errors = Vec::new();
+    if let Err(error) = drain_operations.await {
+        errors.push(error.into());
+    }
+    if let Err(error) = stop_session.await {
+        errors.push(error.primary.context("stop current session"));
+        errors.extend(
+            error
+                .additional
+                .into_iter()
+                .map(|error| error.context("stop current session")),
+        );
+    }
+    LifecycleError::from_errors(errors).map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        lifecycle_error, EngineError, EngineErrorCategory, LifecycleError,
+        NetworkRecoveryRequestError, RuntimeLifecyclePort, TransitionContext,
+    };
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+    use uc_application::facade::{
+        LifecycleTarget, RebuildNetworkSessionError, RuntimeLifecycleCoordinator,
+        RuntimeLifecycleParticipants,
+    };
+    use uc_core::TaskRegistry;
+
+    #[tokio::test]
+    async fn operation_drain_failure_still_notifies_and_reports_session_stop() {
+        let stop_called = AtomicBool::new(false);
+        let result = super::drain_operations_and_stop_session(
+            async {
+                Err(EngineError::new(
+                    1106,
+                    EngineErrorCategory::DeadlineExceeded,
+                    true,
+                ))
+            },
+            async {
+                stop_called.store(true, Ordering::SeqCst);
+                Err(LifecycleError {
+                    primary: std::io::Error::other("session stop failed").into(),
+                    additional: vec![std::io::Error::other("transfer stop failed").into()],
+                })
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(stop_called.load(Ordering::SeqCst));
+        let report = result.downcast::<LifecycleError>().unwrap();
+        assert_eq!(report.additional.len(), 2);
+        assert_eq!(
+            super::lifecycle_error(report).category(),
+            EngineErrorCategory::DeadlineExceeded
+        );
+    }
+
+    #[tokio::test]
+    async fn task_timeout_keeps_its_category_through_nested_shutdown_reports() {
+        let registry = TaskRegistry::new();
+        assert!(registry.spawn(|_| std::future::pending()).await);
+        let tasks = registry
+            .shutdown(Duration::ZERO)
+            .await
+            .into_result()
+            .unwrap_err();
+        let inner = LifecycleError {
+            primary: tasks.into(),
+            additional: Vec::new(),
+        };
+        let outer = LifecycleError {
+            primary: anyhow::Error::new(inner).context("stop session work"),
+            additional: Vec::new(),
+        };
+        assert_eq!(
+            lifecycle_error(outer),
+            EngineError::new(1106, EngineErrorCategory::DeadlineExceeded, true)
+        );
+    }
+
+    #[test]
+    fn participant_failure_keeps_the_engine_category_and_retry_policy() {
+        let original = EngineError::new(1106, EngineErrorCategory::DeadlineExceeded, true);
+        let error = LifecycleError {
+            primary: anyhow::Error::new(original.clone()).context("stop session work"),
+            additional: Vec::new(),
+        };
+        assert_eq!(lifecycle_error(error), original);
+    }
+
+    #[test]
+    fn rebuild_failure_keeps_its_original_classification_through_shutdown() {
+        let original = EngineError::new(1106, EngineErrorCategory::DeadlineExceeded, false);
+        let failure = NetworkRecoveryRequestError::Rebuild(RebuildNetworkSessionError::new(
+            original.clone(),
+            false,
+        ));
+        let error = LifecycleError {
+            primary: anyhow::Error::new(failure).context("stop network recovery"),
+            additional: Vec::new(),
+        };
+        assert_eq!(lifecycle_error(error), original);
+    }
+
+    #[tokio::test]
+    async fn network_recovery_panic_keeps_its_non_retryable_classification_during_shutdown() {
+        let source = tokio::spawn(async { panic!("private recovery failure") })
+            .await
+            .unwrap_err();
+        let failure = NetworkRecoveryRequestError::Task(Arc::new(source));
+        let error = LifecycleError {
+            primary: anyhow::Error::new(failure).context("stop network recovery"),
+            additional: Vec::new(),
+        };
+        assert_eq!(
+            lifecycle_error(error),
+            EngineError::new(1108, EngineErrorCategory::Internal, false)
+        );
+    }
+
+    struct CancelledResumeWithFailedCleanup(CancellationToken);
+
+    #[async_trait]
+    impl RuntimeLifecyclePort for CancelledResumeWithFailedCleanup {
+        async fn suspend(&self, _context: &TransitionContext) -> anyhow::Result<()> {
+            Err(EngineError::new(1106, EngineErrorCategory::DeadlineExceeded, true).into())
+        }
+
+        async fn resume(&self, _context: &TransitionContext) -> anyhow::Result<()> {
+            self.0.cancel();
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_failure_is_not_hidden_by_a_superseded_resume() {
+        let cancellation = CancellationToken::new();
+        let participant = Arc::new(CancelledResumeWithFailedCleanup(cancellation.clone()));
+        let coordinator = Arc::new(RuntimeLifecycleCoordinator::new(
+            RuntimeLifecycleParticipants {
+                session_work: participant.clone(),
+                local_work: participant.clone(),
+                local_resources: participant,
+            },
+        ));
+        let error = coordinator
+            .transition_with_cancellation(LifecycleTarget::Active, None, cancellation)
+            .await
+            .unwrap_err();
+        assert!(error.is_superseded());
+        assert_eq!(error.additional.len(), 2);
+        assert_eq!(
+            lifecycle_error(error),
+            EngineError::new(1106, EngineErrorCategory::DeadlineExceeded, true)
+        );
+    }
+}

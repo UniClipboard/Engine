@@ -20,6 +20,7 @@ pub(crate) async fn spawn_peer_reachability_event_task(
         .spawn(move |cancel| async move {
             loop {
                 tokio::select! {
+                    biased;
                     _ = cancel.cancelled() => return,
                     event = peer_reachability.recv() => match event {
                         Ok(event) => events.send(engine_event_for_peer_reachability(&event)),

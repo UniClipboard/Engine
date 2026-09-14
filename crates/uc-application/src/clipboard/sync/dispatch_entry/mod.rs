@@ -77,6 +77,8 @@ mod target_selector;
 #[cfg(test)]
 mod test_support;
 
+use super::work::WorkOwner;
+use crate::runtime_lifecycle::LifecycleError;
 use delivery::{
     classify_dispatch_result, spawn_deferred_drain, DeliveryRecorder, DispatchResultBucket,
 };
@@ -86,6 +88,7 @@ use per_peer::PerPeerDispatcher;
 use target_selector::TargetSelector;
 
 use crate::facade::blob_transfer::SharedHostEventEmitter;
+use tracing::warn;
 use uc_core::clipboard::{
     ClipboardContentCategory, ClipboardContentCategorySet, EntryDeliveryRecord,
 };
@@ -246,6 +249,8 @@ pub(crate) struct DispatchOutcome {
 /// `per_target`; they are not errors in this sense.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DispatchSyncError {
+    #[error("clipboard dispatch is stopped")]
+    Stopped,
     /// Encryption failed — typically because the space session is locked.
     #[error("encryption session not unlocked")]
     LockedSpace,
@@ -296,6 +301,7 @@ impl DispatchEntryRunner for DispatchClipboardEntryUseCase {
 /// per pass: identity stamps both the self-filter and the header origin;
 /// the clock stamps the aggregate outcome and each peer's delivery record.
 pub(crate) struct DispatchClipboardEntryUseCase {
+    work: WorkOwner,
     cipher: Arc<dyn TransferCipherPort>,
     device_identity: Arc<dyn DeviceIdentityPort>,
     clock: Arc<dyn ClockPort>,
@@ -419,6 +425,7 @@ impl DispatchClipboardEntryUseCase {
     ) -> Self {
         let header_clock = Arc::clone(&clock);
         Self {
+            work: WorkOwner::default(),
             cipher: transfer_cipher,
             device_identity,
             clock,
@@ -448,6 +455,7 @@ impl DispatchClipboardEntryUseCase {
         &self,
         input: DispatchClipboardEntryInput,
     ) -> Result<DispatchOutcome, DispatchSyncError> {
+        let work = self.work.begin().ok_or(DispatchSyncError::Stopped)?;
         // 1. Encrypt once. A locked session surfaces here — let it
         //    short-circuit so we don't spam the dispatch wire with retries.
         let ciphertext = match self.cipher.encrypt(&input.plaintext).await {
@@ -493,8 +501,26 @@ impl DispatchClipboardEntryUseCase {
         let payload_type = payload_type_from_categories(&input.categories);
         let payload_size_bucket = PayloadSizeBucket::from_bytes(input.plaintext.len() as u64);
         let header = Arc::new(header);
+        let entry_id = input.entry_id.clone();
         let mut set: JoinSet<PeerDispatchResult> = JoinSet::new();
+        let mut dispatch_candidates = Vec::with_capacity(candidates.len());
+        let mut intent_failures = Vec::new();
         for device_id in &candidates {
+            if let Some(entry_id) = entry_id.as_ref() {
+                if let Err(error) = self
+                    .recorder
+                    .record_pending(entry_id, *device_id, self.clock.now_ms())
+                    .await
+                {
+                    warn!(
+                        error = %error,
+                        "dispatch: delivery intent persistence failed"
+                    );
+                    intent_failures.push(*device_id);
+                    continue;
+                }
+            }
+            dispatch_candidates.push(*device_id);
             let dispatcher = Arc::clone(&self.dispatcher);
             let header = Arc::clone(&header);
             let payload = SyncPayload {
@@ -520,12 +546,17 @@ impl DispatchClipboardEntryUseCase {
         //    `now_ms` (inside the closure), so a delivery record reflects
         //    that peer's actual completion time. Tasks still in flight at
         //    the deadline are handed back for the background drain below.
-        let entry_id = input.entry_id.clone();
-        let mut per_target = Vec::with_capacity(candidates.len());
+        let mut per_target = intent_failures
+            .iter()
+            .map(|device_id| DispatchPerTarget {
+                device_id: *device_id,
+                outcome: Err("delivery_intent_not_persisted".to_owned()),
+            })
+            .collect::<Vec<_>>();
         let mut total_accepted = 0;
         let mut total_duplicate = 0;
         let mut total_offline = 0;
-        let mut total_errored = 0;
+        let mut total_errored = intent_failures.len();
         let mut delivery_records: Vec<EntryDeliveryRecord> = Vec::new();
 
         let leftover = self
@@ -550,24 +581,18 @@ impl DispatchClipboardEntryUseCase {
             })
             .await;
 
-        // 6. Record the foreground deliveries (write-then-emit is
-        //    load-bearing — see `DeliveryRecorder::flush`).
-        self.recorder.flush(&delivery_records).await;
-
-        // 7. Hand still-in-flight peers to a detached background drain that
-        //    records each as it finally settles — so an early-acking peer's
-        //    badge isn't held hostage by a staggered-retry long tail. This
-        //    is best-effort RECORD-ONLY, never a resend (VISION #59).
+        // 未完成对端先交给同一负责人持有，前台记录失败也不能丢弃它们。
         let total_pending = leftover.len();
         let settled_targets: HashSet<DeviceId> =
             per_target.iter().map(|target| target.device_id).collect();
-        let pending_targets = candidates
+        let pending_targets = dispatch_candidates
             .iter()
             .filter(|target| !settled_targets.contains(target))
             .copied()
             .collect();
         if total_pending > 0 {
             spawn_deferred_drain(
+                work.continuation(),
                 leftover,
                 entry_id,
                 Arc::clone(&self.clock),
@@ -575,6 +600,11 @@ impl DispatchClipboardEntryUseCase {
                 input.snapshot_hash.clone(),
             );
         }
+
+        // 每条结果仍先持久化再通知；前台许可保留到自己的记录结束。
+        self.recorder
+            .flush_owned(work.continuation(), delivery_records)
+            .await;
 
         Ok(DispatchOutcome {
             snapshot_hash: input.snapshot_hash,
@@ -587,6 +617,10 @@ impl DispatchClipboardEntryUseCase {
             pending_targets,
             at_ms: self.clock.now_ms(),
         })
+    }
+
+    pub(crate) async fn shutdown(&self) -> Result<(), LifecycleError> {
+        self.work.shutdown().await
     }
 }
 
@@ -787,6 +821,27 @@ mod tests {
     #[derive(Default)]
     struct SpyEntryDeliveryRepo {
         attempts: tokio::sync::Mutex<Vec<EntryDeliveryRecord>>,
+    }
+
+    struct RejectingDeliveryRepo;
+
+    #[async_trait]
+    impl EntryDeliveryRepositoryPort for RejectingDeliveryRepo {
+        async fn record_attempt(
+            &self,
+            _: &EntryDeliveryRecord,
+        ) -> Result<(), uc_core::clipboard::EntryDeliveryError> {
+            Err(uc_core::clipboard::EntryDeliveryError::Storage {
+                source: anyhow::anyhow!("test storage unavailable"),
+            })
+        }
+
+        async fn list_by_entry(
+            &self,
+            _: &EntryId,
+        ) -> Result<Vec<EntryDeliveryRecord>, uc_core::clipboard::EntryDeliveryError> {
+            Ok(Vec::new())
+        }
     }
     impl SpyEntryDeliveryRepo {
         async fn snapshot(&self) -> Vec<EntryDeliveryRecord> {
@@ -2112,7 +2167,10 @@ mod tests {
         let _ = uc.execute(input).await.expect("dispatch ok");
 
         let attempts = spy.snapshot().await;
-        assert_eq!(attempts.len(), 5, "每个 target 写一行");
+        assert_eq!(attempts.len(), 10, "每个 target 先写恢复意图再写最终结果");
+        assert!(attempts[..5]
+            .iter()
+            .all(|record| matches!(record.status, EntryDeliveryStatus::Pending)));
 
         let by_target: std::collections::HashMap<String, &EntryDeliveryRecord> = attempts
             .iter()
@@ -2167,6 +2225,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_does_not_start_a_target_without_a_persisted_intent() {
+        let mut repo = MockPeerAddrRepo::new();
+        repo.expect_list()
+            .times(1)
+            .returning(|| Ok(vec![record("peer-ok")]));
+        let mut cipher = MockCipher::new();
+        cipher
+            .expect_encrypt()
+            .times(1)
+            .returning(|plaintext| Ok(plaintext.to_vec()));
+        let mut dispatch = MockDispatch::new();
+        dispatch.expect_dispatch().times(0);
+        let uc = DispatchClipboardEntryUseCase::new(
+            Arc::new(repo),
+            Arc::new(make_member_repo_all_enabled()),
+            Arc::new(StaticPeerReachability(ReachabilityState::Unknown)),
+            Arc::new(cipher),
+            Arc::new(dispatch),
+            Arc::new(make_device_identity("self-device")),
+            Arc::new(make_local_identity_stub()),
+            Arc::new(make_settings_stub()),
+            Arc::new(FixedClock(1_700_000_000_000)),
+            Arc::new(uc_observability_contract::analytics::NoopAnalyticsSink),
+            Arc::new(AllMarkedFirstSyncState),
+            Arc::new(RejectingDeliveryRepo),
+            Arc::new(crate::facade::host_event::HostEventBus::new()),
+        );
+        let mut input = input();
+        input.entry_id = Some(EntryId::from("entry-without-intent"));
+
+        let outcome = uc.execute(input).await.unwrap();
+
+        assert_eq!(outcome.total_errored, 1);
+        assert_eq!(outcome.per_target.len(), 1);
+        assert_eq!(
+            outcome.per_target[0].outcome.as_ref().unwrap_err(),
+            "delivery_intent_not_persisted"
+        );
+    }
+
+    #[tokio::test]
     async fn directory_send_to_v2_receiver_records_explicit_rejection() {
         let mut repo = MockPeerAddrRepo::new();
         repo.expect_list()
@@ -2217,15 +2316,16 @@ mod tests {
         assert_eq!(outcome.total_errored, 1);
 
         let attempts = spy.snapshot().await;
-        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts.len(), 2);
+        assert!(matches!(attempts[0].status, EntryDeliveryStatus::Pending));
         assert!(matches!(
-            attempts[0].status,
+            attempts[1].status,
             EntryDeliveryStatus::Failed {
                 reason: DeliveryFailureReason::PeerRejected
             }
         ));
         assert_eq!(
-            attempts[0].reason_detail.as_deref(),
+            attempts[1].reason_detail.as_deref(),
             Some("unsupported clipboard wire version 3")
         );
     }
@@ -2518,10 +2618,11 @@ mod tests {
         input.entry_id = Some(EntryId::from("entry-no-emitter".to_string()));
         uc.execute(input).await.expect("dispatch ok");
 
-        // 落盘行为不变 —— bus 即便空,record_attempt 仍触发。
+        // bus 即便空，恢复意图与最终结果仍依次落盘。
         let attempts = spy.snapshot().await;
-        assert_eq!(attempts.len(), 1);
-        assert!(matches!(attempts[0].status, EntryDeliveryStatus::Delivered));
+        assert_eq!(attempts.len(), 2);
+        assert!(matches!(attempts[0].status, EntryDeliveryStatus::Pending));
+        assert!(matches!(attempts[1].status, EntryDeliveryStatus::Delivered));
     }
 
     /// Slow fan-out 适用的 hand-written fake:peer-fast 立即 ack,peer-slow
@@ -2625,12 +2726,15 @@ mod tests {
         assert_eq!(outcome.per_target.len(), 1);
         assert_eq!(outcome.per_target[0].device_id.as_str(), "peer-fast");
 
-        // 主流程返回时 spy/emitter 只应观察到 fast peer 的写入。
+        // 主流程返回时两个恢复意图都已写入，fast peer 另有最终结果。
         let mid_records = spy.snapshot().await;
-        assert_eq!(mid_records.len(), 1);
-        assert_eq!(mid_records[0].target_device_id.as_str(), "peer-fast");
+        assert_eq!(mid_records.len(), 3);
+        assert!(mid_records[..2]
+            .iter()
+            .all(|record| matches!(record.status, EntryDeliveryStatus::Pending)));
+        assert_eq!(mid_records[2].target_device_id.as_str(), "peer-fast");
         assert!(matches!(
-            mid_records[0].status,
+            mid_records[2].status,
             EntryDeliveryStatus::Delivered
         ));
         assert_eq!(recorder.snapshot().len(), 1);
@@ -2647,7 +2751,7 @@ mod tests {
         let final_records = spy.snapshot().await;
         assert_eq!(
             final_records.len(),
-            2,
+            4,
             "background should have written slow peer's record: {final_records:?}"
         );
         let final_targets: std::collections::HashSet<String> = final_records
