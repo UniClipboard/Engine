@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -46,11 +47,18 @@ struct DelayedTransport {
     inner: Arc<dyn SpaceAdmissionTransportPort>,
     barrier: Arc<NetworkBarrier>,
     block_at: BlockAt,
+    delay_next_reply: Arc<AtomicBool>,
+}
+
+struct DelayedFirstTransport {
+    barrier: Arc<NetworkBarrier>,
+    delay_next: AtomicBool,
 }
 
 struct DelayedExchange {
     inner: Box<dyn AuthenticatedAdmissionExchangePort>,
     barrier: Arc<NetworkBarrier>,
+    delay_next_reply: Arc<AtomicBool>,
 }
 
 #[async_trait]
@@ -73,6 +81,7 @@ impl SpaceAdmissionTransportPort for DelayedTransport {
             Ok(Box::new(DelayedExchange {
                 inner: exchange,
                 barrier: Arc::clone(&self.barrier),
+                delay_next_reply: Arc::clone(&self.delay_next_reply),
             }))
         } else {
             Ok(exchange)
@@ -89,7 +98,34 @@ impl SpaceAdmissionTransportPort for DelayedTransport {
         Ok(Box::new(DelayedExchange {
             inner: self.inner.resume(id, route, peer, credential).await?,
             barrier: Arc::clone(&self.barrier),
+            delay_next_reply: Arc::clone(&self.delay_next_reply),
         }))
+    }
+}
+
+#[async_trait]
+impl SpaceAdmissionTransportPort for DelayedFirstTransport {
+    async fn establish_initial(
+        &self,
+        _id: SpaceAdmissionId,
+        _attempt_timeline: AdmissionAttemptTimeline,
+        _route: &SpaceAdmissionRoute,
+        _password: &AdmissionEncryptedPasswordEquivalent,
+    ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError> {
+        if self.delay_next.swap(false, Ordering::SeqCst) {
+            self.barrier.wait().await;
+        }
+        Err(SpaceAdmissionTransportError::Deferred)
+    }
+
+    async fn resume(
+        &self,
+        _id: SpaceAdmissionId,
+        _route: &SpaceAdmissionRoute,
+        _peer: AdmissionPeerBinding,
+        _credential: &AdmissionContinuationCredential,
+    ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError> {
+        Err(SpaceAdmissionTransportError::Deferred)
     }
 }
 
@@ -107,7 +143,9 @@ impl AuthenticatedAdmissionExchangePort for DelayedExchange {
         self: Box<Self>,
         request: &SpaceAdmissionEnvelopeV1,
     ) -> Result<AuthenticatedAdmissionReply, SpaceAdmissionTransportError> {
-        self.barrier.wait().await;
+        if self.delay_next_reply.swap(false, Ordering::SeqCst) {
+            self.barrier.wait().await;
+        }
         self.inner.exchange(request).await
     }
 }
@@ -138,6 +176,7 @@ async fn assert_offline_recovery_does_not_block_local_actions(block_at: BlockAt)
         inner: Arc::clone(&pair.joiner().recovery.transport),
         barrier: Arc::clone(&barrier),
         block_at,
+        delay_next_reply: Arc::new(AtomicBool::new(matches!(block_at, BlockAt::Reply))),
     });
     let CurrentJoinStatus::Pending { join_id, .. } = started.status else {
         panic!("join must start pending");
@@ -165,13 +204,13 @@ async fn assert_offline_recovery_does_not_block_local_actions(block_at: BlockAt)
         .expect("local cancellation must not wait for the network")
         .unwrap();
         assert!(matches!(cancelled, CurrentJoinStatus::Terminated { .. }));
-        barrier.release.notify_one();
     };
-    let (report, ()) = tokio::join!(recovery, local_actions);
-    assert_eq!(
-        report.deferred_count, 1,
-        "late reply must lose the version check"
-    );
+    let (report, ()) = tokio::time::timeout(Duration::from_millis(500), async {
+        tokio::join!(recovery, local_actions)
+    })
+    .await
+    .expect("local cancellation must stop the in-flight network attempt");
+    assert_eq!(report.deferred_count, 0);
     let saved = pair.take_created_join();
     assert_eq!(
         saved.termination_reason(),
@@ -186,8 +225,45 @@ async fn offline_authentication_does_not_block_startup_or_cancellation() {
 }
 
 #[tokio::test]
-async fn late_commit_reply_cannot_overwrite_local_cancellation() {
+async fn offline_reply_wait_is_stopped_by_local_cancellation() {
     assert_offline_recovery_does_not_block_local_actions(BlockAt::Reply).await;
+}
+
+#[tokio::test]
+async fn a_replacement_join_stops_the_previous_network_attempt_and_recovers_immediately() {
+    let mut pair = SpaceAdmissionProtocolTestPair::receiving_commit().await;
+    pair.joiner()
+        .start_join_at(join_input(), 1_000)
+        .await
+        .unwrap();
+    let barrier = Arc::new(NetworkBarrier::default());
+    pair.joiner_mut().recovery.transport = Arc::new(DelayedFirstTransport {
+        barrier: Arc::clone(&barrier),
+        delay_next: AtomicBool::new(true),
+    });
+    pair.set_next_join_identity(0x21, 0x22);
+
+    let recovery = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::Startup);
+    let replace = async {
+        barrier.entered.notified().await;
+        let mut input = join_input();
+        input.invitation_code = uc_core::pairing::InvitationCode::new("replacement-join");
+        pair.joiner()
+            .start_join_at(input, 1_000)
+            .await
+            .expect("replacement join should be saved");
+    };
+    let (report, ()) = tokio::time::timeout(Duration::from_millis(500), async {
+        tokio::join!(recovery, replace)
+    })
+    .await
+    .expect("replacement join must stop the previous network attempt");
+
+    assert!(pair.superseded_previous_join());
+    assert_eq!(report.deferred_count, 1);
+    assert_eq!(pair.saved_join().admission_id().as_bytes(), &[0x21; 32]);
 }
 
 struct DelayedResolver {

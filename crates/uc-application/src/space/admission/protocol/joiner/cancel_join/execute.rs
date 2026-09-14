@@ -12,8 +12,13 @@ impl SpaceAdmissionProtocol {
         &self,
         join_id: [u8; 16],
     ) -> Result<CurrentJoinStatus, CancelSpaceJoinError> {
-        self.execute_exclusively(self.joiner.cancel_join(join_id))
-            .await
+        let result = self
+            .execute_exclusively(self.joiner.cancel_join(join_id))
+            .await;
+        if result.is_ok() {
+            self.recovery.interrupt_current();
+        }
+        result
     }
 }
 

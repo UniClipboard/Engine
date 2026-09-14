@@ -22,12 +22,16 @@ impl SpaceAdmissionProtocol {
         input: JoinSpaceInput,
         started_at_ms: i64,
     ) -> Result<JoinSpaceResult, JoinSpaceError> {
-        scope_pairing_work(
+        let result = scope_pairing_work(
             AdmissionExchangeSide::Joiner,
             None,
             self.execute_exclusively(self.joiner.start(input, started_at_ms)),
         )
-        .await
+        .await;
+        if result.is_ok() {
+            self.recovery.interrupt_current();
+        }
+        result
     }
 }
 

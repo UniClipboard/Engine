@@ -4,6 +4,7 @@ use uc_core::membership::{JoinerAdmissionTransition, SponsorAdmissionTransition}
 use uc_core::ports::ClockPort;
 
 use crate::facade::HostEventBus;
+use crate::space::membership::AdmissionRevocationPort;
 
 mod recover_pending;
 
@@ -20,8 +21,9 @@ pub(crate) struct AdmissionRecoveryService {
     pub(super) transport: Arc<dyn SpaceAdmissionTransportPort>,
     host_events: Arc<HostEventBus>,
     pub(super) clock: Arc<dyn ClockPort>,
-    pub(super) admission_revocation: Arc<dyn crate::space::membership::AdmissionRevocationPort>,
+    pub(super) admission_revocation: Arc<dyn AdmissionRevocationPort>,
     pub(super) execution_lock: tokio::sync::Mutex<()>,
+    interrupt_generation: tokio::sync::watch::Sender<u64>,
 }
 
 impl AdmissionRecoveryService {
@@ -30,8 +32,9 @@ impl AdmissionRecoveryService {
         transport: Arc<dyn SpaceAdmissionTransportPort>,
         host_events: Arc<HostEventBus>,
         clock: Arc<dyn ClockPort>,
-        admission_revocation: Arc<dyn crate::space::membership::AdmissionRevocationPort>,
+        admission_revocation: Arc<dyn AdmissionRevocationPort>,
     ) -> Self {
+        let (interrupt_generation, _) = tokio::sync::watch::channel(0);
         Self {
             state,
             transport,
@@ -39,7 +42,13 @@ impl AdmissionRecoveryService {
             clock,
             admission_revocation,
             execution_lock: tokio::sync::Mutex::new(()),
+            interrupt_generation,
         }
+    }
+
+    pub(super) fn interrupt_current(&self) {
+        self.interrupt_generation
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
     pub(super) async fn commit_recovery(

@@ -161,6 +161,7 @@ impl HostEventEmitterPort for AdmissionStatusEventRecorder {
 
 struct FixedJoinerStartMaterial {
     admission_id_byte: u8,
+    join_id_byte: u8,
 }
 struct FixedJoinerInvitationPreparation;
 struct FixedJoinerInvitationResolver {
@@ -504,13 +505,30 @@ impl SettingsPort for RecordingSettings {
 #[async_trait]
 impl JoinerStartStatePort for RecordingJoinerStartState {
     async fn load(&self) -> Result<LoadedJoinerStartState, JoinerStartStateError> {
+        let current_join = self
+            .current_join
+            .lock()
+            .expect("current join is available")
+            .take();
+        let current_join = match current_join {
+            Some(current_join) => Some(current_join),
+            None => self
+                .created_join
+                .lock()
+                .expect("created join is available")
+                .as_ref()
+                .map(|admission| {
+                    let persisted = admission
+                        .encode_persisted()
+                        .expect("current join can be persisted");
+                    JoinerAdmission::decode_persisted(&persisted)
+                        .expect("current join can be reopened")
+                }),
+        };
         Ok(LoadedJoinerStartState::new(
             7,
             AdmissionSourceSnapshot::from_bytes(vec![0x24; 32]).expect("valid source snapshot"),
-            self.current_join
-                .lock()
-                .expect("current join is available")
-                .take(),
+            current_join,
             true,
             SpaceAdmissionCommitToken::from_bytes([0x25; 32]).expect("valid commit token"),
         ))
@@ -1744,7 +1762,10 @@ impl SpaceAdmissionProtocolTestPair {
                     Arc::new(FixedJoinerInvitationResolver {
                         events: Arc::clone(&events),
                     }),
-                    Arc::new(FixedJoinerStartMaterial { admission_id_byte }),
+                    Arc::new(FixedJoinerStartMaterial {
+                        admission_id_byte,
+                        join_id_byte: 0x12,
+                    }),
                     state.clone(),
                     state.clone(),
                     Arc::new(FixedJoinerCancellation),
@@ -1792,7 +1813,10 @@ impl SpaceAdmissionProtocolTestPair {
                     Arc::new(FixedJoinerInvitationResolver {
                         events: Arc::clone(&events),
                     }),
-                    Arc::new(FixedJoinerStartMaterial { admission_id_byte }),
+                    Arc::new(FixedJoinerStartMaterial {
+                        admission_id_byte,
+                        join_id_byte: 0x12,
+                    }),
                     state.clone(),
                     state.clone(),
                     Arc::new(FixedJoinerCancellation),
@@ -1846,6 +1870,13 @@ impl SpaceAdmissionProtocolTestPair {
 
     pub(super) fn joiner_mut(&mut self) -> &mut SpaceAdmissionProtocol {
         &mut self.joiner
+    }
+
+    pub(super) fn set_next_join_identity(&mut self, admission_id_byte: u8, join_id_byte: u8) {
+        self.joiner.joiner.start_material = Arc::new(FixedJoinerStartMaterial {
+            admission_id_byte,
+            join_id_byte,
+        });
     }
 
     pub(super) fn sponsor(&self) -> &SpaceAdmissionProtocol {
@@ -2349,7 +2380,7 @@ impl JoinerStartMaterialPort for FixedJoinerStartMaterial {
     ) -> Result<JoinerStartMaterial, JoinerStartMaterialError> {
         let admission_id =
             SpaceAdmissionId::from_bytes([self.admission_id_byte; 32]).expect("valid admission id");
-        let join_id = JoinId::from_bytes([0x12; 16]).expect("valid join id");
+        let join_id = JoinId::from_bytes([self.join_id_byte; 16]).expect("valid join id");
         fixed_joiner_start_material(admission_id, join_id, input.preserve_unreadable_history)
     }
 

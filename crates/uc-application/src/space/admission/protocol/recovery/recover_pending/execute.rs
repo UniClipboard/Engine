@@ -54,6 +54,27 @@ impl AdmissionRecoveryService {
         let waiting = LocalWorkObservation::begin(LocalWorkStep::RecoveryLock);
         let _recovery = self.execution_lock.lock().await;
         waiting.finish(LocalWorkOutcome::Ok);
+        loop {
+            // 本机取消或替换保存后，丢弃旧状态仍在等待的网络动作，
+            // 并由同一个恢复 owner 立即重新读取当前状态继续处理。
+            let mut interrupted = self.interrupt_generation.subscribe();
+            tokio::select! {
+                biased;
+                changed = interrupted.changed() => {
+                    if changed.is_err() {
+                        return self.recover_pending_once(joiner, trigger).await;
+                    }
+                }
+                report = self.recover_pending_once(joiner, trigger) => return report,
+            }
+        }
+    }
+
+    async fn recover_pending_once(
+        &self,
+        joiner: &JoinerAdmissionService,
+        trigger: AdmissionRecoveryTrigger,
+    ) -> AdmissionRecoveryReport {
         let mut report = AdmissionRecoveryReport::default();
         let now_ms = self.clock.now_ms();
         let recovery = match self.state.load(trigger, now_ms).await {
