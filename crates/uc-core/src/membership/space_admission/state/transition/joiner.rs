@@ -809,6 +809,21 @@ impl SpaceAdmissionAggregate {
     }
 
     pub(crate) fn supersede(mut self) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        if self.attempt_timeline.is_none()
+            && self.attempt_digest.is_none()
+            && matches!(
+                &self.state,
+                SpaceAdmissionRecordState::Joiner(
+                    SpaceAdmissionJoinerState::Prepared(_)
+                        | SpaceAdmissionJoinerState::Committed(_)
+                        | SpaceAdmissionJoinerState::Applied(_)
+                        | SpaceAdmissionJoinerState::Activating(_)
+                        | SpaceAdmissionJoinerState::Cancelling(_)
+                )
+            )
+        {
+            return self.terminate_locally(SpaceAdmissionTerminationReason::Cancelled);
+        }
         if self.attempt_digest.is_some()
             && matches!(
                 &self.state,
@@ -860,6 +875,14 @@ impl SpaceAdmissionAggregate {
                     peer_binding: state.peer_binding,
                     continuation_credential: state.continuation_credential,
                     last_received: state.candidate_evidence,
+                })
+            }
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Cancelling(state)) => {
+                SpaceAdmissionSupersededState::Candidate(SpaceAdmissionSupersededTerminal {
+                    join_id: state.join_id,
+                    peer_binding: state.peer_binding,
+                    continuation_credential: state.continuation_credential,
+                    last_received: state.last_received,
                 })
             }
             _ => return Err(SpaceAdmissionAggregateError::UnsafeSupersession),

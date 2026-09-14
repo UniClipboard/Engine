@@ -44,6 +44,21 @@ fn supersession_terminates_bounded_joiners_before_and_after_prepared() {
             .commit_knowledge(),
         AdmissionCommitKnowledge::Unknown
     );
+
+    let cancelling = cancelling_joiner_aggregate_fixture()
+        .supersede()
+        .expect("Cancelling Joiner can be superseded by a new intent")
+        .into_replacement();
+    let cancelling = JoinerAdmission::decode_persisted(
+        &cancelling
+            .encode_persisted()
+            .expect("superseded Cancelling Joiner encodes"),
+    )
+    .expect("superseded Cancelling Joiner decodes");
+    assert_eq!(
+        cancelling.termination_reason(),
+        Some(SpaceAdmissionTerminationReason::Superseded)
+    );
 }
 
 #[test]
@@ -339,6 +354,43 @@ fn legacy_joiner_can_still_cancel_locally_without_inventing_a_deadline() {
         Some(SpaceAdmissionTerminationReason::Cancelled)
     );
     assert_eq!(decoded.expires_at_ms(), None);
+}
+
+#[test]
+fn legacy_post_decision_joiners_can_be_ended_for_a_new_intent() {
+    for (name, aggregate) in [
+        ("prepared", joiner_prepared_aggregate_fixture()),
+        ("committed", joiner_committed_aggregate_fixture()),
+        ("applied", joiner_applied_aggregate_fixture()),
+        ("activating", joiner_activating_aggregate_fixture()),
+        ("cancelling", cancelling_joiner_aggregate_fixture()),
+    ] {
+        let legacy = aggregate.into_legacy_persistence_fixture();
+        let legacy = JoinerAdmission::decode_persisted(
+            &legacy
+                .encode_persisted()
+                .unwrap_or_else(|error| panic!("{name} legacy fixture encodes: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("{name} legacy fixture decodes: {error}"));
+        assert!(legacy.can_terminate_locally(), "{name}");
+        let ended = legacy
+            .supersede()
+            .unwrap_or_else(|error| panic!("{name} legacy Joiner can end: {error}"))
+            .into_replacement();
+
+        assert!(ended.is_terminal(), "{name}");
+        assert_eq!(
+            ended.termination_reason(),
+            Some(SpaceAdmissionTerminationReason::Cancelled),
+            "{name}"
+        );
+        let encoded = ended
+            .encode_persisted()
+            .unwrap_or_else(|error| panic!("{name} terminal result encodes: {error}"));
+        let decoded = JoinerAdmission::decode_persisted(&encoded)
+            .unwrap_or_else(|error| panic!("{name} terminal result decodes: {error}"));
+        assert!(decoded.is_terminal(), "{name}");
+    }
 }
 
 #[test]

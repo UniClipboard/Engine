@@ -303,6 +303,21 @@ impl JoinerAdmission {
         {
             return true;
         }
+        if self.record.attempt_timeline.is_none()
+            && self.record.attempt_digest.is_none()
+            && matches!(
+                &self.record.state,
+                SpaceAdmissionRecordState::Joiner(
+                    SpaceAdmissionJoinerState::Prepared(_)
+                        | SpaceAdmissionJoinerState::Committed(_)
+                        | SpaceAdmissionJoinerState::Applied(_)
+                        | SpaceAdmissionJoinerState::Activating(_)
+                        | SpaceAdmissionJoinerState::Cancelling(_)
+                )
+            )
+        {
+            return true;
+        }
         matches!(
             &self.record.state,
             SpaceAdmissionRecordState::Joiner(
