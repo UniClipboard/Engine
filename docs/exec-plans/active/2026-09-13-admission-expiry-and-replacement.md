@@ -1,6 +1,6 @@
 # 1. Overview
 
-状态：研究与规格完成，六项产品决策已逐项确认，见第 11 节；S0–S2 已实施，S3–S8 待实施。本文是实现规格与执行计划的唯一正文；当前已支持双端统一期限和邀请方确认状态，但尚未支持正式决定后的完整撤销。
+状态：研究与规格完成，六项产品决策已逐项确认，见第 11 节；S0–S3 已实施，S4–S8 待实施。本文是实现规格与执行计划的唯一正文；当前已支持双端统一期限、邀请方确认状态和精确成员撤销，但尚未把撤销接到正式决定后的取消与到期。
 
 研究基线：2026-09-13，`b8b96105` 加当时工作区。决策回写时仓库已整理至 `255e1a68`；第 4 节保留研究时的源码结论，不代表本次重新审计了实现。实施前须核对准入恢复摘要、成员更新投递和性能路径的最新结构。
 
@@ -298,14 +298,18 @@ Relationship: 现有公开入口按 device_id 查当前有效成员，且拒绝�
 
 依赖 S2；先把撤销作为完整业务能力验证，再接到自动到期。
 
+状态：已完成。按设备移除在首次读取时固定精确成员，准入撤销同时绑定原空间、准入和 Add；并发重试与重复调用都不再重新解析到后来同设备的新成员。
+
 - **负责人**：现有成员移除 case；不在 admission 复制 Remove 的签名、账本与安全效果流程。
-- **文件**：Application `membership/remove_space_member/{use_case.rs,model.rs,ports.rs,tests.rs}`、`membership/signing/`、`membership/ledger/`；Core 成员历史签名/目标规则；Infra 原安全效果 adapter。
+- **文件**：Application `membership/remove_space_member/{use_case.rs,model.rs,revocation.rs,tests.rs}`、`membership/signing/`、`membership/ledger/`；Core 成员历史签名/目标规则；Infra 原安全效果 adapter。
 - **输入**：内部 `AdmissionRevocationTarget { space_id, admission_id, member_instance_id, add_event_id }` 与已验证原因证明。公开按设备移除先在同一 verified snapshot 固定精确目标，再进入同一个完整执行函数；原 SelfTarget 拒绝保持不变。
 - **输出**：Removed、AlreadyAbsent、LocalEffectsPending 或有来源的错误。无权签名不得返回 Removed；未知 Add 不得返回 AlreadyAbsent 来丢弃责任。
 - **事务**：核对 current history digest + revision + 精确实例后保存 Remove 和 Prepared effect、受限投递责任；重复动作按稳定 operation_id 去重。不能先删关系再签历史。
 - **重试**：CAS 冲突重读当前历史，但目标始终保持原实例，不能重新解析成该设备最新实例。本机效果失败继续保留责任；网络未确认不挡后续本机动作。
 - **验证**：A 被移除后同设备加入 B，重放 A 撤销不伤 B；目标永久离线，本机 Remove/安全效果完成；无权、错空间、错 Add、并发 Remove 分别验证。
 - **风险**：Joiner 自我放弃证明不是普通 Remove 签名权限；它由有权的 Sponsor/在册成员转换，Joiner 本机脱离由 S6 负责。
+- **当前实现**：公开移除和准入撤销复用同一个完整成员移除流程。目标已移除时必须找到原 Remove 才返回 AlreadyAbsent；未知 Add、错误空间、错误成员或无有效本机签名都不会丢弃责任或返回成功。正式 Remove 与待执行安全效果同一次提交，网络未确认不阻塞本机结果。
+- **验证结果**：六项成员移除定向测试通过，覆盖正常移除、冲突重试、旧实例移除后同设备重配、错误空间、错误 Add、无效本机凭据和本机效果待完成；全仓编译、格式、Rust 规则、架构与隐私门禁、差异检查通过。实体设备和跨真实网络验证跳过，留到 S8。
 
 ## 6.7 S4：已决定与远端决定未知时终止
 
@@ -459,7 +463,7 @@ Relationship: 现有公开入口按 device_id 查当前有效成员，且拒绝�
 | `git diff --check` | 通过 |
 | 新方案双端及真实设备验证 | 跳过：尚未实现，不以现有仓库检查代替新行为验收 |
 
-决策回写与切片细化时的验证：metadata、全 workspace/all-targets check、fmt、两项架构脚本和 diff 检查重新执行通过；check 仍有当时已有的 HarmonyOS 测试 unused imports 警告。文档三个修改文件的 34 个相对链接通过，六项决策与过时规则检查通过。此段仅保留开工前的历史检查；S0、S1、S2 的当前实现证据分别见 6.3、6.4、6.5，S3–S8 仍未执行。
+决策回写与切片细化时的验证：metadata、全 workspace/all-targets check、fmt、两项架构脚本和 diff 检查重新执行通过；check 仍有当时已有的 HarmonyOS 测试 unused imports 警告。文档三个修改文件的 34 个相对链接通过，六项决策与过时规则检查通过。此段仅保留开工前的历史检查；S0–S3 的当前实现证据见 6.3–6.6，S4–S8 仍未执行。
 
 # 10. Risks and Trade-offs
 

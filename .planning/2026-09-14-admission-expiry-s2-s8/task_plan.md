@@ -19,32 +19,32 @@
 | Slice | Status | Commit |
 | --- | --- | --- |
 | S1 | complete | 91287ca1 |
-| S2 | complete | this commit |
-| S3 | pending | pending |
+| S2 | complete | 38470b48 |
+| S3 | complete | this commit |
 | S4 | pending | pending |
 | S5 | pending | pending |
 | S6 | pending | pending |
 | S7 | pending | pending |
 | S8 | pending | pending |
 
-## Current Slice: S2
+## Current Slice: S3
 
 ### Owner and boundary
-- `SpaceAdmissionProtocol` 继续完整负责准入流程；Sponsor 角色负责正式应用后的确认状态。
-- Engine/Facade 只执行既有 Join、消息处理和设备查询动作，不读取协议内部阶段。
-- Core 验证统一期限、确认转换、精确绑定和迟到确认白名单。
-- Infra 继续使用现有逐记录密文仓储，不把确认状态写入成员账本。
-- Recovery 在原截止点把等待确认转为未确认；未确认不撤销成员、不占加入入口。
+- 现有成员移除用例继续完整负责签名、成员历史提交、安全效果和受限投递责任。
+- 公开按设备移除先固定当前精确成员；冲突重试不得重新解析为后来同设备的新成员。
+- 准入撤销只提交已验证的 admission、space、成员实例和原 Add 绑定。
+- Core 只提供按精确成员查找既有 Remove 的规则，不在准入流程复制移除逻辑。
+- 本片只提供可复用的精确撤销能力；到期和取消接线属于 S4。
 
-### S2 Phases
-- [x] 调查当前消息、Sponsor/Helper 状态、查询与持久化接线
-- [x] 先写双端期限、等待确认、到期未确认、迟到确认的失败测试
-- [x] 实现 Core 消息和状态规则
-- [x] 接通 Application/Infra 查询、恢复与通知
-- [x] 运行双端、重启、错误绑定和权限不扩张验证
+### S3 Phases
+- [x] 调查现有成员移除、签名、账本和安全效果路径
+- [x] 先写旧撤销重放不能移除同设备新实例的失败测试
+- [x] 固定精确目标并让 CAS 重试保持原实例
+- [x] 增加 admission 专用目标、稳定去重和结果分类
+- [x] 验证错误空间、错误 Add、无权签名和本机效果待完成
 - [x] 更新执行计划和架构圣经
 - [x] 严格审查、完整门禁
-- [x] 创建 S2 本地提交
+- [x] 创建 S3 本地提交
 
 ## Errors Encountered
 

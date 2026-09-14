@@ -60,6 +60,7 @@ pub use crate::space::{
     ActivateSponsorAdmissionError, ActivateSponsorAdmissionPort,
     ActivateSponsorAdmissionSecurityPort, ActivateSponsorAdmissionSecurityRequest,
     AdmissionRecoveryCommitToken, AdmissionRecoveryReport, AdmissionRecoveryTrigger,
+    AdmissionRevocationPort, AdmissionRevocationResult, AdmissionRevocationTarget,
     AdmissionSecurityTransitionError, AdmissionSecurityTransitionInput,
     AdmissionSecurityTransitionPort, AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
     AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionStepV2,

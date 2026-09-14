@@ -54,6 +54,10 @@ pub use lifecycle::{
 };
 pub use lifecycle::{CurrentInvitation, QuerySetupStateError, SetupStateView};
 pub use membership::{
+    AdmissionRevocationPort, AdmissionRevocationResult, AdmissionRevocationTarget,
+    MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult,
+};
+pub use membership::{
     AdvanceMembershipBranchTransitionError, AdvanceMembershipBranchTransitionInput,
     AdvanceMembershipBranchTransitionPort, DecideDeviceTrustChange, DecideDeviceTrustChangeError,
     DecideDeviceTrustChangeResult, DeviceTrustChangeChoice,
@@ -70,7 +74,6 @@ pub use membership::{
     PairingConfirmationObservation, PairingConfirmationStatus, PairingConfirmationTarget,
     PendingDeviceTrustChange, QueryDeviceTrustError,
 };
-pub use membership::{MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult};
 
 // Assembly contract re-exported by `crate::deps`.
 pub use admission::{

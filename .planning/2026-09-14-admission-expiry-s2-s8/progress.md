@@ -14,4 +14,11 @@
 - Permission was restored; Core, Application, Infra storage, real loopback network and full workspace checks pass.
 - Fixed the device-query test fixture so confirmation is verified against a real activated Add record rather than a baseline-only member.
 - Strict review moved the combined admission display query out of Joiner cancellation into its own focused module; no blocking structural findings remain.
-- Current work: finish final post-review gates and create the S2 commit.
+- S2 was committed as `38470b48`.
+- S3 failing coverage confirmed the old removal case had no admission-specific exact target.
+- Public removal now resolves the member instance once, and conflict retry keeps that exact target.
+- Admission revocation binds space, admission, member instance and original Add; replay after re-pairing returns AlreadyAbsent without touching the new instance.
+- Wrong space/Add and unavailable signing never commit; deferred local effects return LocalEffectsPending.
+- Strict review replaced optional origin data with an explicit baseline/admission origin and removed a pure forwarding method.
+- Full workspace check, formatting, Rust rules, architecture/privacy gates and diff checks pass for S3.
+- Current work: create the S3 commit, then begin S4.
