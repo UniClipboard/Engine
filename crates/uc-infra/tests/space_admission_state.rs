@@ -180,9 +180,10 @@ async fn committed_joiner_is_reloaded_for_recovery_after_reopen() {
 
     let reopened = fixture.reopen();
     let pending =
-        PendingAdmissionRecoveryStatePort::load(&reopened, AdmissionRecoveryTrigger::Startup)
+        PendingAdmissionRecoveryStatePort::load(&reopened, AdmissionRecoveryTrigger::Startup, 0)
             .await
-            .unwrap();
+            .unwrap()
+            .into_pending_admissions();
     assert_eq!(pending.len(), 1);
     let (aggregate, _) = pending.into_iter().next().unwrap().into_parts();
     assert_eq!(aggregate.encode_persisted().unwrap(), expected);
@@ -195,9 +196,10 @@ async fn bounded_join_expires_persistently_and_releases_the_slot_for_a_new_join(
 
     let reopened = fixture.reopen();
     let mut pending =
-        PendingAdmissionRecoveryStatePort::load(&reopened, AdmissionRecoveryTrigger::Startup)
+        PendingAdmissionRecoveryStatePort::load(&reopened, AdmissionRecoveryTrigger::Startup, 0)
             .await
-            .unwrap();
+            .unwrap()
+            .into_pending_admissions();
     let (attempt_a, token) = pending.pop().unwrap().into_parts();
     assert_eq!(attempt_a.is_expired_at(300_999), Some(false));
     let expired = attempt_a
@@ -249,9 +251,11 @@ async fn rejected_join_remains_queryable_after_it_becomes_terminal() {
     let pending = PendingAdmissionRecoveryStatePort::load(
         &fixture.store,
         AdmissionRecoveryTrigger::StateChanged,
+        0,
     )
     .await
-    .unwrap();
+    .unwrap()
+    .into_pending_admissions();
     let (joiner, token) = pending.into_iter().next().unwrap().into_parts();
     let join_id = *joiner.join_id().as_bytes();
     let rejected = joiner
@@ -361,6 +365,7 @@ async fn successful_supersede_keeps_only_replacement_recoverable() {
     let pending = PendingAdmissionRecoveryStatePort::load(
         &fixture.store,
         AdmissionRecoveryTrigger::StateChanged,
+        0,
     )
     .await
     .unwrap();
@@ -371,14 +376,22 @@ async fn successful_supersede_keeps_only_replacement_recoverable() {
 async fn recovery_commit_advances_record_and_rejects_old_token() {
     let fixture = Fixture::new();
     commit_fresh_join(&fixture, 0x91, 0x92).await;
-    let mut first =
-        PendingAdmissionRecoveryStatePort::load(&fixture.store, AdmissionRecoveryTrigger::Startup)
-            .await
-            .unwrap();
-    let mut stale =
-        PendingAdmissionRecoveryStatePort::load(&fixture.store, AdmissionRecoveryTrigger::Startup)
-            .await
-            .unwrap();
+    let mut first = PendingAdmissionRecoveryStatePort::load(
+        &fixture.store,
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .unwrap()
+    .into_pending_admissions();
+    let mut stale = PendingAdmissionRecoveryStatePort::load(
+        &fixture.store,
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .unwrap()
+    .into_pending_admissions();
     let (aggregate, token) = first.pop().unwrap().into_parts();
     let (stale_aggregate, stale_token) = stale.pop().unwrap().into_parts();
     let advanced = aggregate
@@ -423,10 +436,14 @@ async fn short_code_is_removed_before_the_single_resolution_request() {
     .await
     .unwrap();
 
-    let mut pending =
-        PendingAdmissionRecoveryStatePort::load(&fixture.store, AdmissionRecoveryTrigger::Startup)
-            .await
-            .unwrap();
+    let mut pending = PendingAdmissionRecoveryStatePort::load(
+        &fixture.store,
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .unwrap()
+    .into_pending_admissions();
     let (ready, token) = pending.pop().unwrap().into_parts();
     assert!(matches!(
         ready.invitation_resolution(),

@@ -61,10 +61,14 @@ async fn activating_join_reopens_and_commits_active_state() {
         .await
         .unwrap()
         .is_none());
-    let pending =
-        PendingAdmissionRecoveryStatePort::load(&reopened, AdmissionRecoveryTrigger::StateChanged)
-            .await
-            .unwrap();
+    let pending = PendingAdmissionRecoveryStatePort::load(
+        &reopened,
+        AdmissionRecoveryTrigger::StateChanged,
+        0,
+    )
+    .await
+    .unwrap()
+    .into_pending_admissions();
     assert_eq!(pending.len(), 1);
     let (active, _) = pending.into_iter().next().unwrap().into_parts();
     assert_eq!(active.admission_id(), admission_id);
@@ -422,9 +426,11 @@ async fn load_one_pending(fixture: &Fixture) -> uc_application::deps::LoadedPend
     let mut pending = PendingAdmissionRecoveryStatePort::load(
         &fixture.store,
         AdmissionRecoveryTrigger::StateChanged,
+        0,
     )
     .await
-    .unwrap();
+    .unwrap()
+    .into_pending_admissions();
     assert_eq!(pending.len(), 1);
     pending.pop().unwrap()
 }

@@ -188,6 +188,39 @@ impl SponsorCandidatePreparation<'_> {
 }
 
 impl SpaceAdmissionAggregate {
+    pub const fn record_role(&self) -> Option<AdmissionRole> {
+        match &self.state {
+            SpaceAdmissionRecordState::Joiner(_)
+            | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Active(_))
+            | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Superseded(_))
+            | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(_)) => {
+                Some(AdmissionRole::Joiner)
+            }
+            SpaceAdmissionRecordState::Sponsor(_)
+            | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorExpired(_))
+            | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+                SpaceAdmissionRejectedState::Sponsor(_),
+            )) => Some(AdmissionRole::Sponsor),
+            SpaceAdmissionRecordState::CompletionHelper(_) => Some(AdmissionRole::CompletionHelper),
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Completed(state)) => {
+                Some(
+                    state
+                        .saved_reply
+                        .exact_reply_envelope()
+                        .header()
+                        .sender_role(),
+                )
+            }
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+                SpaceAdmissionRejectedState::LocalJoiner(_)
+                | SpaceAdmissionRejectedState::Joiner(_),
+            )) => Some(AdmissionRole::Joiner),
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
+                _,
+            )) => None,
+        }
+    }
+
     pub const fn expires_at_ms(&self) -> Option<i64> {
         match self.attempt_timeline {
             Some(timeline) => Some(timeline.expires_at_ms()),
@@ -224,6 +257,19 @@ impl SpaceAdmissionAggregate {
                         SpaceAdmissionJoinerChannelState::AwaitingAuthentication { .. }
                     )
             ))
+    }
+
+    pub const fn has_expirable_sponsor(&self) -> bool {
+        self.attempt_timeline.is_some()
+            && self.attempt_digest.is_some()
+            && matches!(
+                self.state,
+                SpaceAdmissionRecordState::Sponsor(
+                    SpaceAdmissionSponsorState::Accepted(_)
+                        | SpaceAdmissionSponsorState::Candidate(_)
+                        | SpaceAdmissionSponsorState::Committed(_)
+                )
+            )
     }
 
     pub fn invitation_resolution(&self) -> Option<JoinerInvitationResolution<'_>> {
@@ -335,6 +381,23 @@ impl SpaceAdmissionAggregate {
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state))
                 if matches!(&state.cleanup, Some(cleanup) if cleanup.local_space_transition.is_some())
         )
+    }
+
+    pub const fn has_pending_sponsor_abandonment(&self) -> bool {
+        match &self.state {
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+                SpaceAdmissionRejectedState::Sponsor(state),
+            )) => {
+                matches!(&state.abandonment_cleanup, Some(cleanup) if !matches!(cleanup, SponsorAbandonmentCleanup::NotRequired))
+            }
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorExpired(
+                state,
+            )) => !matches!(
+                state.abandonment_cleanup,
+                SponsorAbandonmentCleanup::NotRequired
+            ),
+            _ => false,
+        }
     }
 
     pub fn joiner_candidate_preparation(&self) -> Option<JoinerCandidatePreparation<'_>> {
@@ -550,6 +613,9 @@ impl SpaceAdmissionAggregate {
                 _,
             ))
             | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(_)) => {
+                None
+            }
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorExpired(_)) => {
                 None
             }
         }

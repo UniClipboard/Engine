@@ -5,6 +5,7 @@ pub const SPACE_ADMISSION_RECORD_FORMAT_V2: u16 = 2;
 pub const SPACE_ADMISSION_RECORD_FORMAT_V3: u16 = 3;
 pub const SPACE_ADMISSION_RECORD_FORMAT_V4: u16 = 4;
 pub const SPACE_ADMISSION_RECORD_FORMAT_V5: u16 = 5;
+pub const SPACE_ADMISSION_RECORD_FORMAT_V6: u16 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionEffect {
@@ -178,6 +179,7 @@ pub enum SpaceAdmissionTerminalState {
     Superseded(SpaceAdmissionSupersededState),
     Rejected(SpaceAdmissionRejectedState),
     Terminated(SpaceAdmissionLocalJoinerTerminated),
+    SponsorExpired(SpaceAdmissionSponsorExpired),
     RecoveryRequired(SpaceAdmissionRecoveryRequiredTerminal),
 }
 
@@ -264,6 +266,9 @@ impl std::fmt::Debug for SpaceAdmissionAggregate {
             }
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(_)) => {
                 "Terminal::Terminated"
+            }
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorExpired(_)) => {
+                "Terminal::SponsorExpired"
             }
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
                 _,

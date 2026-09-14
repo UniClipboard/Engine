@@ -391,7 +391,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         Ok(())
     }
 
-    fn record_lookup_token(
+    pub(super) fn record_lookup_token(
         &self,
         admission_id: [u8; 32],
     ) -> Result<[u8; 32], SpaceAdmissionStateStoreError> {

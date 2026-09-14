@@ -8,8 +8,8 @@ mod tests;
 
 pub use model::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryReport, AdmissionRecoveryTrigger,
-    AuthenticatedAdmissionReply, LoadedPendingAdmission, LoadedSponsorAbandonment,
-    LoadedSponsorConfirmation,
+    AuthenticatedAdmissionReply, LoadedAdmissionRecovery, LoadedPendingAdmission,
+    LoadedSponsorAbandonment, LoadedSponsorDeadline,
 };
 pub use ports::{
     AuthenticatedAdmissionExchangePort, PendingAdmissionRecoveryStateError,

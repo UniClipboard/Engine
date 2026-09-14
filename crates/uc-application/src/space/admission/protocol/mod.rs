@@ -27,9 +27,10 @@ pub(crate) use protocol::SpaceAdmissionProtocol;
 pub(crate) use recovery::AdmissionRecoveryService;
 pub use recovery::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryReport, AdmissionRecoveryTrigger,
-    AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply, LoadedPendingAdmission,
-    LoadedSponsorAbandonment, LoadedSponsorConfirmation, PendingAdmissionRecoveryStateError,
-    PendingAdmissionRecoveryStatePort, SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
+    AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply, LoadedAdmissionRecovery,
+    LoadedPendingAdmission, LoadedSponsorAbandonment, LoadedSponsorDeadline,
+    PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
+    SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
 };
 pub(crate) use sponsor::SponsorAdmissionService;
 pub use sponsor::{

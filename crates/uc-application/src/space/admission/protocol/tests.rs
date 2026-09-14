@@ -380,6 +380,24 @@ async fn sponsor_keeps_the_member_unconfirmed_and_accepts_a_late_complete_ack() 
 }
 
 #[tokio::test]
+async fn sponsor_unfinished_attempt_ends_itself_at_the_shared_deadline() {
+    let pair = SpaceAdmissionProtocolTestPair::fresh().await;
+    let candidate = pair
+        .sponsor()
+        .handle(authenticated_join_request())
+        .await
+        .expect("JoinRequest should produce Candidate");
+    pair.seed_sponsor(candidate.into_admission());
+
+    pair.set_now_ms(301_000);
+    let report = pair.recover_sponsor().await;
+
+    assert_eq!(report.advanced_count, 1);
+    assert!(pair.sponsor_is_terminal());
+    assert!(pair.sponsor_abandonment_cleanup_complete());
+}
+
+#[tokio::test]
 async fn duplicate_complete_ack_replays_settled_without_a_new_commit() {
     let pair = SpaceAdmissionProtocolTestPair::fresh().await;
     let candidate = pair

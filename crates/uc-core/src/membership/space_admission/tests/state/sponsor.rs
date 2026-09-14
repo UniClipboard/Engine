@@ -364,3 +364,45 @@ fn sponsor_confirmation_uses_the_original_deadline_and_accepts_late_ack() {
         SponsorPairingConfirmationStatus::Confirmed
     );
 }
+
+#[test]
+fn sponsor_unfinished_states_expire_locally_and_committed_members_keep_revocation_proof() {
+    let candidate = SponsorAdmission::try_from_record(sponsor_candidate_aggregate_fixture())
+        .expect("candidate Sponsor fixture");
+    assert!(candidate
+        .terminate_if_expired(300_999)
+        .expect("deadline check")
+        .is_none());
+    let expired_candidate =
+        SponsorAdmission::try_from_record(sponsor_candidate_aggregate_fixture())
+            .expect("candidate Sponsor fixture")
+            .terminate_if_expired(301_000)
+            .expect("candidate expiry transition")
+            .expect("candidate expires at the shared deadline")
+            .into_replacement();
+    assert!(matches!(
+        expired_candidate.abandonment_cleanup(),
+        Some(SponsorAbandonmentCleanup::NotRequired)
+    ));
+
+    let expired_committed =
+        SponsorAdmission::try_from_record(sponsor_committed_aggregate_fixture())
+            .expect("committed Sponsor fixture")
+            .terminate_if_expired(301_000)
+            .expect("committed expiry transition")
+            .expect("committed Sponsor expires at the shared deadline")
+            .into_replacement();
+    assert!(matches!(
+        expired_committed.abandonment_cleanup(),
+        Some(SponsorAbandonmentCleanup::Known(_))
+    ));
+    let encoded = expired_committed
+        .encode_persisted()
+        .expect("expired Sponsor proof encodes");
+    let reopened = SponsorAdmission::decode_persisted(&encoded)
+        .expect("expired Sponsor proof survives restart");
+    assert!(matches!(
+        reopened.abandonment_cleanup(),
+        Some(SponsorAbandonmentCleanup::Known(_))
+    ));
+}

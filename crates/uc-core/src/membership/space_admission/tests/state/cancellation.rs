@@ -240,6 +240,35 @@ fn activating_joiner_keeps_the_exact_local_transition_after_termination() {
 }
 
 #[test]
+fn completed_local_termination_releases_only_the_large_transition_plan() {
+    let terminated = JoinerAdmission::try_from_record(joiner_activating_aggregate_fixture())
+        .expect("activating Joiner fixture")
+        .cancel_locally()
+        .expect("activating Joiner terminates locally")
+        .into_replacement();
+
+    let completed = terminated
+        .complete_local_space_termination()
+        .expect("local termination completion is recorded")
+        .into_replacement();
+    let encoded = completed
+        .encode_persisted()
+        .expect("compacted termination record encodes");
+    let reopened = JoinerAdmission::decode_persisted(&encoded)
+        .expect("compacted termination record survives restart");
+
+    let cleanup = reopened
+        .cleanup_obligation()
+        .expect("minimum cleanup evidence remains");
+    assert!(cleanup.local_space_transition().is_none());
+    assert!(cleanup.pending_exchange().is_some());
+    assert_eq!(
+        reopened.termination_reason(),
+        Some(SpaceAdmissionTerminationReason::Cancelled)
+    );
+}
+
+#[test]
 fn abandonment_acknowledgement_ends_delivery_without_removing_the_fence() {
     let terminated = JoinerAdmission::try_from_record(joiner_prepared_aggregate_fixture())
         .expect("prepared joiner fixture")

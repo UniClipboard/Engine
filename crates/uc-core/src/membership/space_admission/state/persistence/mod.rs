@@ -185,6 +185,24 @@ struct PersistedSpaceAdmissionRecordV5 {
 }
 
 #[derive(Serialize, Deserialize)]
+struct PersistedSpaceAdmissionRecordV6 {
+    format_version: u16,
+    record_version: u64,
+    admission_id: [u8; 32],
+    started_at_ms: i64,
+    expires_at_ms: i64,
+    attempt_digest: [u8; 32],
+    state: PersistedSpaceAdmissionStateV6,
+}
+
+#[derive(Serialize, Deserialize)]
+enum PersistedSpaceAdmissionStateV6 {
+    SponsorExpired {
+        cleanup: PersistedSponsorAbandonmentCleanupV4,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
 enum PersistedSpaceAdmissionStateV5 {
     LocalJoinerTerminated {
         join_id: [u8; 16],

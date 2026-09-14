@@ -148,6 +148,11 @@ pub struct SpaceAdmissionSponsorRejected {
 }
 
 #[derive(PartialEq, Eq)]
+pub struct SpaceAdmissionSponsorExpired {
+    pub(super) abandonment_cleanup: SponsorAbandonmentCleanup,
+}
+
+#[derive(PartialEq, Eq)]
 pub enum SponsorAbandonmentCleanup {
     NotRequired,
     Known(AdmissionMemberBindingV2),

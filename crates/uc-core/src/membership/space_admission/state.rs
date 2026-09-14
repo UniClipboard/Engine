@@ -31,7 +31,7 @@ use super::exchange::{
 };
 use super::id::{AdmissionMessageId, JoinId, SpaceAdmissionId};
 use super::message::{
-    AdmissionAbandonedV2, AdmissionAbandonmentReasonV2, AdmissionAbandonmentV2,
+    AdmissionAbandonedV2, AdmissionAbandonmentReasonV2, AdmissionAbandonmentV2, AdmissionRole,
     SpaceAdmissionEnvelopeV1, SpaceAdmissionProtocolVersion, SpaceAdmissionRejectionReason,
 };
 use crate::ids::SpaceId;
@@ -42,7 +42,7 @@ pub use aggregate::{
     SpaceAdmissionAggregateError, SpaceAdmissionRecordState, SpaceAdmissionTerminalState,
     SPACE_ADMISSION_RECORD_FORMAT_V1, SPACE_ADMISSION_RECORD_FORMAT_V2,
     SPACE_ADMISSION_RECORD_FORMAT_V3, SPACE_ADMISSION_RECORD_FORMAT_V4,
-    SPACE_ADMISSION_RECORD_FORMAT_V5,
+    SPACE_ADMISSION_RECORD_FORMAT_V5, SPACE_ADMISSION_RECORD_FORMAT_V6,
 };
 pub use capability::{
     AdmissionRecordPersistence, JoinerAdmission, JoinerAdmissionTransition, SponsorAdmission,
@@ -71,8 +71,9 @@ pub use terminal::{
     SpaceAdmissionActiveSettled, SpaceAdmissionActiveState, SpaceAdmissionCompletedTerminal,
     SpaceAdmissionJoinerRejected, SpaceAdmissionLocalJoinerRejected,
     SpaceAdmissionLocalJoinerTerminated, SpaceAdmissionRecoveryRequiredTerminal,
-    SpaceAdmissionRejectedState, SpaceAdmissionSponsorRejected, SpaceAdmissionSupersededState,
-    SpaceAdmissionSupersededTerminal, SpaceAdmissionTerminationReason, SponsorAbandonmentCleanup,
+    SpaceAdmissionRejectedState, SpaceAdmissionSponsorExpired, SpaceAdmissionSponsorRejected,
+    SpaceAdmissionSupersededState, SpaceAdmissionSupersededTerminal,
+    SpaceAdmissionTerminationReason, SponsorAbandonmentCleanup,
 };
 pub use view::{
     AdmissionPendingRecovery, JoinerActivationPreparation, JoinerAppliedPreparation,

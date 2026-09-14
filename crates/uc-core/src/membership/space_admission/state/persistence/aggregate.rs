@@ -3,7 +3,20 @@ use super::*;
 impl SpaceAdmissionAggregate {
     /// Produces a sensitive plaintext payload that Infra must AEAD-seal before persistence.
     pub fn encode_persisted(&self) -> Result<Vec<u8>, SpaceAdmissionPersistenceError> {
-        if self.format_version == SPACE_ADMISSION_RECORD_FORMAT_V5 {
+        if self.format_version == SPACE_ADMISSION_RECORD_FORMAT_V6 {
+            let SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorExpired(
+                state,
+            )) = &self.state
+            else {
+                return Err(SpaceAdmissionPersistenceError::InvalidState);
+            };
+            return encode_record_v6(
+                self,
+                PersistedSpaceAdmissionStateV6::SponsorExpired {
+                    cleanup: encode_sponsor_abandonment_cleanup(&state.abandonment_cleanup),
+                },
+            );
+        } else if self.format_version == SPACE_ADMISSION_RECORD_FORMAT_V5 {
             let SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state)) =
                 &self.state
             else {
@@ -253,7 +266,10 @@ impl SpaceAdmissionAggregate {
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(state)) => {
                 PersistedSpaceAdmissionStateV1::Rejected(PersistedRejectedV1::try_from(state)?)
             }
-            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(_)) => {
+            SpaceAdmissionRecordState::Terminal(
+                SpaceAdmissionTerminalState::Terminated(_)
+                | SpaceAdmissionTerminalState::SponsorExpired(_),
+            ) => {
                 return Err(SpaceAdmissionPersistenceError::InvalidState);
             }
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
@@ -303,6 +319,9 @@ impl SpaceAdmissionAggregate {
         }
         if format_version == SPACE_ADMISSION_RECORD_FORMAT_V5 {
             return decode_record_v5(bytes);
+        }
+        if format_version == SPACE_ADMISSION_RECORD_FORMAT_V6 {
+            return decode_record_v6(bytes);
         }
         let persisted = decode_record_with_legacy_pending_exchange(bytes)?;
         if persisted.format_version != SPACE_ADMISSION_RECORD_FORMAT_V1 {
@@ -800,6 +819,64 @@ fn decode_record_v5(
     };
     Ok(SpaceAdmissionAggregate {
         format_version: SPACE_ADMISSION_RECORD_FORMAT_V5,
+        record_version: persisted.record_version,
+        admission_id,
+        attempt_timeline: Some(
+            AdmissionAttemptTimeline::new(persisted.started_at_ms, persisted.expires_at_ms)
+                .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
+        ),
+        attempt_digest: Some(persisted.attempt_digest),
+        state,
+    })
+}
+
+fn encode_record_v6(
+    aggregate: &SpaceAdmissionAggregate,
+    state: PersistedSpaceAdmissionStateV6,
+) -> Result<Vec<u8>, SpaceAdmissionPersistenceError> {
+    let timeline = aggregate
+        .attempt_timeline
+        .ok_or(SpaceAdmissionPersistenceError::InvalidState)?;
+    let attempt_digest = aggregate
+        .attempt_digest
+        .ok_or(SpaceAdmissionPersistenceError::InvalidState)?;
+    postcard::to_stdvec(&PersistedSpaceAdmissionRecordV6 {
+        format_version: SPACE_ADMISSION_RECORD_FORMAT_V6,
+        record_version: aggregate.record_version,
+        admission_id: *aggregate.admission_id.as_bytes(),
+        started_at_ms: timeline.started_at_ms(),
+        expires_at_ms: timeline.expires_at_ms(),
+        attempt_digest,
+        state,
+    })
+    .map_err(|_| SpaceAdmissionPersistenceError::InvalidEncoding)
+}
+
+fn decode_record_v6(
+    bytes: &[u8],
+) -> Result<SpaceAdmissionAggregate, SpaceAdmissionPersistenceError> {
+    let (persisted, remaining): (PersistedSpaceAdmissionRecordV6, _) =
+        postcard::take_from_bytes(bytes)
+            .map_err(|_| SpaceAdmissionPersistenceError::InvalidEncoding)?;
+    if !remaining.is_empty()
+        || persisted.format_version != SPACE_ADMISSION_RECORD_FORMAT_V6
+        || persisted.attempt_digest == [0; 32]
+    {
+        return Err(SpaceAdmissionPersistenceError::InvalidState);
+    }
+    let admission_id = SpaceAdmissionId::from_bytes(persisted.admission_id)
+        .ok_or(SpaceAdmissionPersistenceError::InvalidState)?;
+    let state = match persisted.state {
+        PersistedSpaceAdmissionStateV6::SponsorExpired { cleanup } => {
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorExpired(
+                SpaceAdmissionSponsorExpired {
+                    abandonment_cleanup: decode_sponsor_abandonment_cleanup(cleanup)?,
+                },
+            ))
+        }
+    };
+    Ok(SpaceAdmissionAggregate {
+        format_version: SPACE_ADMISSION_RECORD_FORMAT_V6,
         record_version: persisted.record_version,
         admission_id,
         attempt_timeline: Some(

@@ -16,6 +16,7 @@ use crate::space::membership::{
 use uc_core::membership::{
     AdmissionPendingRecovery, AdmissionRecoveryCategory, JoinerAdmission,
     SpaceAdmissionMessageKind, SpaceAdmissionRejectionReason, SponsorAbandonmentCleanup,
+    SponsorPairingConfirmationStatus,
 };
 use uc_observability_contract::diagnostics::connectivity::{
     record_admission_recovery_decision, scope_pairing_work, AdmissionExchangeSide, ExchangeFailure,
@@ -38,7 +39,7 @@ impl SpaceAdmissionProtocol {
         &self,
         trigger: AdmissionRecoveryTrigger,
     ) -> AdmissionRecoveryReport {
-        self.recovery.recover_pending(&self.joiner, trigger).await
+        Box::pin(self.recovery.recover_pending(&self.joiner, trigger)).await
     }
 }
 
@@ -54,25 +55,34 @@ impl AdmissionRecoveryService {
         let _recovery = self.execution_lock.lock().await;
         waiting.finish(LocalWorkOutcome::Ok);
         let mut report = AdmissionRecoveryReport::default();
-        let sponsor_confirmations = match self.state.load_sponsor_confirmations().await {
+        let now_ms = self.clock.now_ms();
+        let recovery = match self.state.load(trigger, now_ms).await {
             Ok(loaded) => loaded,
             Err(error) => {
+                record_recovery_load_error(joiner, trigger, &error);
                 self.record_state_error(&mut report, error);
                 return report;
             }
         };
-        for loaded in sponsor_confirmations {
+        let (loaded, sponsor_deadlines, sponsor_abandonments, next_deadline_ms) =
+            recovery.into_parts();
+        if let Some(deadline_ms) = next_deadline_ms {
+            joiner.maintenance_wake.schedule_at(deadline_ms, now_ms);
+        }
+        for loaded in sponsor_deadlines {
             let (aggregate, token) = loaded.into_parts();
-            let now_ms = self.clock.now_ms();
-            if let Some(expires_at_ms) = aggregate.expires_at_ms() {
-                if now_ms < expires_at_ms {
-                    joiner.maintenance_wake.schedule_at(expires_at_ms, now_ms);
-                }
-            }
-            match aggregate.mark_confirmation_unconfirmed(now_ms) {
+            let awaiting_confirmation = aggregate.pairing_confirmation().is_some_and(|summary| {
+                summary.status() == SponsorPairingConfirmationStatus::AwaitingPeerConfirmation
+            });
+            let transition = if awaiting_confirmation {
+                aggregate.mark_confirmation_unconfirmed(now_ms)
+            } else {
+                aggregate.terminate_if_expired(now_ms)
+            };
+            match transition {
                 Ok(Some(transition)) => {
                     match self
-                        .commit_sponsor_confirmation_and_notify(token, transition)
+                        .commit_sponsor_deadline_and_notify(token, transition)
                         .await
                     {
                         Ok(_) => report.advanced_count += 1,
@@ -83,13 +93,15 @@ impl AdmissionRecoveryService {
                 Err(_) => report.recovery_required_count += 1,
             }
         }
-        let sponsor_abandonments = match self.state.load_sponsor_abandonments().await {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                self.record_state_error(&mut report, error);
-                return report;
+        let mut joiner_network = Vec::new();
+        for loaded in loaded {
+            if let Some(loaded) = self
+                .recover_joiner_local_work(joiner, loaded, &mut report)
+                .await
+            {
+                joiner_network.push(loaded);
             }
-        };
+        }
         for loaded in sponsor_abandonments {
             let (aggregate, token) = loaded.into_parts();
             let revocation = match aggregate.abandonment_cleanup() {
@@ -145,89 +157,8 @@ impl AdmissionRecoveryService {
                 ) => report.recovery_required_count += 1,
             }
         }
-        let loaded = match self.state.load(trigger).await {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                let decision = match &error {
-                    PendingAdmissionRecoveryStateError::RecoveryRequired => {
-                        RecoveryDecision::RequiresRecovery(Some(RecoveryProblem::CorruptState))
-                    }
-                    PendingAdmissionRecoveryStateError::Locked => RecoveryDecision::Deferred(Some(
-                        RecoveryDeferral::State(StateFailure::Locked),
-                    )),
-                    PendingAdmissionRecoveryStateError::Unavailable => RecoveryDecision::Deferred(
-                        Some(RecoveryDeferral::State(StateFailure::Unavailable)),
-                    ),
-                    PendingAdmissionRecoveryStateError::StateChanged => RecoveryDecision::Deferred(
-                        Some(RecoveryDeferral::State(StateFailure::Changed)),
-                    ),
-                };
-                record_admission_recovery_decision(
-                    &ObservationContext::capture(),
-                    diagnostic_trigger(trigger),
-                    decision,
-                );
-                let outcome = match &error {
-                    PendingAdmissionRecoveryStateError::RecoveryRequired => {
-                        SpaceAdmissionObservationOutcome::Failed(DiagnosticErrorType::Corrupt)
-                    }
-                    PendingAdmissionRecoveryStateError::Locked
-                    | PendingAdmissionRecoveryStateError::Unavailable
-                    | PendingAdmissionRecoveryStateError::StateChanged => {
-                        SpaceAdmissionObservationOutcome::Deferred
-                    }
-                };
-                joiner.observations.finish_all(outcome);
-                self.record_state_error(&mut report, error);
-                return report;
-            }
-        };
-
-        for loaded_admission in loaded {
+        for loaded_admission in joiner_network {
             let (aggregate, commit_token) = loaded_admission.into_parts();
-            let now_ms = self.clock.now_ms();
-            if let Some(expires_at_ms) = aggregate.expires_at_ms() {
-                if now_ms < expires_at_ms {
-                    joiner.maintenance_wake.schedule_at(expires_at_ms, now_ms);
-                }
-            }
-            if !recover_local_termination(joiner, &aggregate, &mut report).await {
-                continue;
-            }
-            if aggregate.is_expired_at(now_ms) == Some(true) && aggregate.can_terminate_locally() {
-                let observation_material = *aggregate.admission_id().as_bytes();
-                match aggregate.terminate_if_expired(now_ms) {
-                    Ok(Some(transition)) => {
-                        match self
-                            .commit_recovery_and_notify(commit_token, transition)
-                            .await
-                        {
-                            Ok(loaded) => {
-                                report.terminated_count += 1;
-                                let (terminated, _) = loaded.into_parts();
-                                if !recover_local_termination(joiner, &terminated, &mut report)
-                                    .await
-                                {
-                                    continue;
-                                }
-                                joiner.observations.finish(
-                                    observation_material,
-                                    SpaceAdmissionObservationOutcome::Failed(
-                                        DiagnosticErrorType::Timeout,
-                                    ),
-                                );
-                            }
-                            Err(error) => self.record_state_error(&mut report, error),
-                        }
-                        continue;
-                    }
-                    Ok(None) => continue,
-                    Err(_) => {
-                        report.recovery_required_count += 1;
-                        continue;
-                    }
-                }
-            }
             if aggregate.pending_recovery().is_none() && aggregate.invitation_resolution().is_none()
             {
                 continue;
@@ -471,6 +402,47 @@ impl AdmissionRecoveryService {
         report
     }
 
+    async fn recover_joiner_local_work(
+        &self,
+        joiner: &JoinerAdmissionService,
+        loaded: LoadedPendingAdmission,
+        report: &mut AdmissionRecoveryReport,
+    ) -> Option<LoadedPendingAdmission> {
+        let (aggregate, commit_token) = loaded.into_parts();
+        let now_ms = self.clock.now_ms();
+        let loaded =
+            recover_local_termination(self, joiner, aggregate, commit_token, report).await?;
+        let (aggregate, commit_token) = loaded.into_parts();
+        if aggregate.is_expired_at(now_ms) != Some(true) || !aggregate.can_terminate_locally() {
+            return Some(LoadedPendingAdmission::new(aggregate, commit_token));
+        }
+        let observation_material = *aggregate.admission_id().as_bytes();
+        let transition = match aggregate.terminate_if_expired(now_ms) {
+            Ok(Some(transition)) => transition,
+            Ok(None) => return None,
+            Err(_) => {
+                report.recovery_required_count += 1;
+                return None;
+            }
+        };
+        match self
+            .commit_recovery_and_notify(commit_token, transition)
+            .await
+        {
+            Ok(loaded) => {
+                report.terminated_count += 1;
+                let (terminated, token) = loaded.into_parts();
+                recover_local_termination(self, joiner, terminated, token, report).await?;
+                joiner.observations.finish(
+                    observation_material,
+                    SpaceAdmissionObservationOutcome::Failed(DiagnosticErrorType::Timeout),
+                );
+            }
+            Err(error) => self.record_state_error(report, error),
+        }
+        None
+    }
+
     async fn record_connection_failure(
         &self,
         report: &mut AdmissionRecoveryReport,
@@ -698,30 +670,88 @@ impl AdmissionRecoveryService {
     }
 }
 
-async fn recover_local_termination(
+fn record_recovery_load_error(
     joiner: &JoinerAdmissionService,
-    aggregate: &JoinerAdmission,
+    trigger: AdmissionRecoveryTrigger,
+    error: &PendingAdmissionRecoveryStateError,
+) {
+    let decision = match error {
+        PendingAdmissionRecoveryStateError::RecoveryRequired => {
+            RecoveryDecision::RequiresRecovery(Some(RecoveryProblem::CorruptState))
+        }
+        PendingAdmissionRecoveryStateError::Locked => {
+            RecoveryDecision::Deferred(Some(RecoveryDeferral::State(StateFailure::Locked)))
+        }
+        PendingAdmissionRecoveryStateError::Unavailable => {
+            RecoveryDecision::Deferred(Some(RecoveryDeferral::State(StateFailure::Unavailable)))
+        }
+        PendingAdmissionRecoveryStateError::StateChanged => {
+            RecoveryDecision::Deferred(Some(RecoveryDeferral::State(StateFailure::Changed)))
+        }
+    };
+    record_admission_recovery_decision(
+        &ObservationContext::capture(),
+        diagnostic_trigger(trigger),
+        decision,
+    );
+    let outcome = match error {
+        PendingAdmissionRecoveryStateError::RecoveryRequired => {
+            SpaceAdmissionObservationOutcome::Failed(DiagnosticErrorType::Corrupt)
+        }
+        PendingAdmissionRecoveryStateError::Locked
+        | PendingAdmissionRecoveryStateError::Unavailable
+        | PendingAdmissionRecoveryStateError::StateChanged => {
+            SpaceAdmissionObservationOutcome::Deferred
+        }
+    };
+    joiner.observations.finish_all(outcome);
+}
+
+async fn recover_local_termination(
+    recovery: &AdmissionRecoveryService,
+    joiner: &JoinerAdmissionService,
+    aggregate: JoinerAdmission,
+    token: AdmissionRecoveryCommitToken,
     report: &mut AdmissionRecoveryReport,
-) -> bool {
-    let Some(transition) = aggregate
+) -> Option<LoadedPendingAdmission> {
+    let Some(transition_bytes) = aggregate
         .cleanup_obligation()
         .and_then(|cleanup| cleanup.local_space_transition())
+        .map(|transition| transition.as_bytes().to_vec())
     else {
-        return true;
+        return Some(LoadedPendingAdmission::new(aggregate, token));
     };
     match joiner
         .execute_activation
-        .terminate(aggregate.admission_id(), transition.as_bytes())
+        .terminate(aggregate.admission_id(), &transition_bytes)
         .await
     {
-        Ok(()) => true,
+        Ok(()) => {
+            let transition = match aggregate.complete_local_space_termination() {
+                Ok(transition) => transition,
+                Err(_) => {
+                    report.recovery_required_count += 1;
+                    return None;
+                }
+            };
+            match recovery.commit_recovery_and_notify(token, transition).await {
+                Ok(loaded) => {
+                    report.advanced_count += 1;
+                    Some(loaded)
+                }
+                Err(error) => {
+                    recovery.record_state_error(report, error);
+                    None
+                }
+            }
+        }
         Err(ExecuteJoinerActivationError::Unavailable { .. }) => {
             report.deferred_count += 1;
-            false
+            None
         }
         Err(ExecuteJoinerActivationError::Invalid { .. }) => {
             report.recovery_required_count += 1;
-            false
+            None
         }
     }
 }

@@ -34,7 +34,8 @@ use super::{
     SpaceAdmissionMessageKind, SpaceAdmissionProtocolVersion, SpaceAdmissionRecordState,
     SpaceAdmissionRejectedState, SpaceAdmissionRejectionReason, SpaceAdmissionRoute,
     SpaceAdmissionSponsorState, SpaceAdmissionTerminalState, SpaceAdmissionTerminationReason,
-    SponsorAdmission, SponsorPairingConfirmationStatus, UnreadableHistoryPolicy,
+    SponsorAbandonmentCleanup, SponsorAdmission, SponsorPairingConfirmationStatus,
+    UnreadableHistoryPolicy,
 };
 
 mod attempt;

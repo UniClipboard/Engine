@@ -387,8 +387,9 @@ impl PendingAdmissionRecoveryStatePort for PassivePorts {
     async fn load(
         &self,
         _trigger: AdmissionRecoveryTrigger,
-    ) -> Result<Vec<LoadedPendingAdmission>, PendingAdmissionRecoveryStateError> {
-        Ok(Vec::new())
+        _now_ms: i64,
+    ) -> Result<LoadedAdmissionRecovery, PendingAdmissionRecoveryStateError> {
+        Ok(LoadedAdmissionRecovery::default())
     }
 
     async fn commit(

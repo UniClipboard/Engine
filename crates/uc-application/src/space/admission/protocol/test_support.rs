@@ -69,9 +69,9 @@ use super::{
     JoinerCancellationCommitToken, JoinerCancellationMaterial, JoinerCancellationMaterialError,
     JoinerCancellationMutation, JoinerCancellationStateError, JoinerStartMaterial,
     JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation, JoinerStartStateError,
-    JoinerStartStatePort, LoadedCurrentJoin, LoadedJoinerActivation, LoadedJoinerStartState,
-    LoadedPendingAdmission, LoadedSponsorAbandonment, LoadedSponsorAdmission,
-    LoadedSponsorConfirmation, PendingAdmissionRecoveryStateError,
+    JoinerStartStatePort, LoadedAdmissionRecovery, LoadedCurrentJoin, LoadedJoinerActivation,
+    LoadedJoinerStartState, LoadedPendingAdmission, LoadedSponsorAbandonment,
+    LoadedSponsorAdmission, LoadedSponsorDeadline, PendingAdmissionRecoveryStateError,
     PendingAdmissionRecoveryStatePort, PrepareJoinerActivationError, PrepareJoinerActivationPort,
     PrepareJoinerAppliedError, PrepareJoinerAppliedPort, PrepareJoinerCancellationPort,
     PrepareJoinerCandidateError, PrepareJoinerCandidatePort, PrepareJoinerInvitationError,
@@ -606,21 +606,27 @@ impl PendingAdmissionRecoveryStatePort for RecordingJoinerStartState {
     async fn load(
         &self,
         _trigger: AdmissionRecoveryTrigger,
-    ) -> Result<Vec<LoadedPendingAdmission>, PendingAdmissionRecoveryStateError> {
+        _now_ms: i64,
+    ) -> Result<LoadedAdmissionRecovery, PendingAdmissionRecoveryStateError> {
         let stored = self.created_join.lock().expect("created join is available");
         let Some(aggregate) = stored.as_ref() else {
-            return Ok(Vec::new());
+            return Ok(LoadedAdmissionRecovery::default());
         };
         let persisted = aggregate
             .encode_persisted()
             .expect("pending aggregate can be persisted");
         let aggregate = JoinerAdmission::decode_persisted(&persisted)
             .expect("pending aggregate can be reopened");
-        Ok(vec![LoadedPendingAdmission::new(
-            aggregate,
-            AdmissionRecoveryCommitToken::from_bytes([0x26; 32])
-                .expect("valid recovery commit token"),
-        )])
+        Ok(LoadedAdmissionRecovery::new(
+            vec![LoadedPendingAdmission::new(
+                aggregate,
+                AdmissionRecoveryCommitToken::from_bytes([0x26; 32])
+                    .expect("valid recovery commit token"),
+            )],
+            Vec::new(),
+            Vec::new(),
+            None,
+        ))
     }
 
     async fn commit(
@@ -1182,8 +1188,61 @@ impl PendingAdmissionRecoveryStatePort for RecordingSponsorState {
     async fn load(
         &self,
         _trigger: AdmissionRecoveryTrigger,
-    ) -> Result<Vec<LoadedPendingAdmission>, PendingAdmissionRecoveryStateError> {
-        Ok(Vec::new())
+        now_ms: i64,
+    ) -> Result<LoadedAdmissionRecovery, PendingAdmissionRecoveryStateError> {
+        let current = self.current.lock().expect("sponsor state is available");
+        let Some(current) = current.as_ref() else {
+            return Ok(LoadedAdmissionRecovery::default());
+        };
+        let is_abandonment = current.abandonment_cleanup().is_some_and(|cleanup| {
+            !matches!(
+                cleanup,
+                uc_core::membership::SponsorAbandonmentCleanup::NotRequired
+            )
+        });
+        let awaiting_confirmation = current.pairing_confirmation().is_some_and(|summary| {
+            summary.status() == SponsorPairingConfirmationStatus::AwaitingPeerConfirmation
+        });
+        let unfinished = !current.is_terminal() && current.pairing_confirmation().is_none();
+        let deadline = (awaiting_confirmation || unfinished)
+            .then(|| current.expires_at_ms())
+            .flatten();
+        let due_confirmation = deadline.is_some_and(|deadline| now_ms >= deadline);
+        let next_deadline = deadline.filter(|deadline| *deadline > now_ms);
+        if !is_abandonment && !due_confirmation {
+            return Ok(LoadedAdmissionRecovery::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                next_deadline,
+            ));
+        }
+        let persisted = current
+            .encode_persisted()
+            .map_err(|_| PendingAdmissionRecoveryStateError::RecoveryRequired)?;
+        let reopened = SponsorAdmission::decode_persisted(&persisted)
+            .map_err(|_| PendingAdmissionRecoveryStateError::RecoveryRequired)?;
+        let token = AdmissionRecoveryCommitToken::from_bytes(if is_abandonment {
+            [0xd5; 32]
+        } else {
+            [0xd1; 32]
+        })
+        .expect("valid recovery token");
+        Ok(if is_abandonment {
+            LoadedAdmissionRecovery::new(
+                Vec::new(),
+                Vec::new(),
+                vec![LoadedSponsorAbandonment::new(reopened, token)],
+                None,
+            )
+        } else {
+            LoadedAdmissionRecovery::new(
+                Vec::new(),
+                vec![LoadedSponsorDeadline::new(reopened, token)],
+                Vec::new(),
+                None,
+            )
+        })
     }
 
     async fn commit(
@@ -1194,36 +1253,11 @@ impl PendingAdmissionRecoveryStatePort for RecordingSponsorState {
         Err(PendingAdmissionRecoveryStateError::RecoveryRequired)
     }
 
-    async fn load_sponsor_confirmations(
-        &self,
-    ) -> Result<Vec<LoadedSponsorConfirmation>, PendingAdmissionRecoveryStateError> {
-        let current = self.current.lock().expect("sponsor state is available");
-        let Some(current) = current.as_ref() else {
-            return Ok(Vec::new());
-        };
-        if current
-            .pairing_confirmation()
-            .map(|summary| summary.status())
-            != Some(SponsorPairingConfirmationStatus::AwaitingPeerConfirmation)
-        {
-            return Ok(Vec::new());
-        }
-        let persisted = current
-            .encode_persisted()
-            .map_err(|_| PendingAdmissionRecoveryStateError::RecoveryRequired)?;
-        let reopened = SponsorAdmission::decode_persisted(&persisted)
-            .map_err(|_| PendingAdmissionRecoveryStateError::RecoveryRequired)?;
-        Ok(vec![LoadedSponsorConfirmation::new(
-            reopened,
-            AdmissionRecoveryCommitToken::from_bytes([0xd1; 32]).expect("valid recovery token"),
-        )])
-    }
-
-    async fn commit_sponsor_confirmation(
+    async fn commit_sponsor_deadline(
         &self,
         _token: AdmissionRecoveryCommitToken,
         transition: SponsorAdmissionTransition,
-    ) -> Result<LoadedSponsorConfirmation, PendingAdmissionRecoveryStateError> {
+    ) -> Result<LoadedSponsorDeadline, PendingAdmissionRecoveryStateError> {
         let replacement = transition.into_replacement();
         let persisted = replacement
             .encode_persisted()
@@ -1235,38 +1269,11 @@ impl PendingAdmissionRecoveryStatePort for RecordingSponsorState {
             .lock()
             .expect("event recorder is available")
             .push(ProtocolEvent::SponsorMarkedUnconfirmed);
-        Ok(LoadedSponsorConfirmation::new(
+        Ok(LoadedSponsorDeadline::new(
             replacement,
             AdmissionRecoveryCommitToken::from_bytes([0xd2; 32])
                 .expect("valid next recovery token"),
         ))
-    }
-
-    async fn load_sponsor_abandonments(
-        &self,
-    ) -> Result<Vec<LoadedSponsorAbandonment>, PendingAdmissionRecoveryStateError> {
-        let current = self.current.lock().expect("sponsor state is available");
-        let Some(current) = current.as_ref() else {
-            return Ok(Vec::new());
-        };
-        if current.abandonment_cleanup().is_none_or(|cleanup| {
-            matches!(
-                cleanup,
-                uc_core::membership::SponsorAbandonmentCleanup::NotRequired
-            )
-        }) {
-            return Ok(Vec::new());
-        }
-        let persisted = current
-            .encode_persisted()
-            .map_err(|_| PendingAdmissionRecoveryStateError::RecoveryRequired)?;
-        let reopened = SponsorAdmission::decode_persisted(&persisted)
-            .map_err(|_| PendingAdmissionRecoveryStateError::RecoveryRequired)?;
-        Ok(vec![LoadedSponsorAbandonment::new(
-            reopened,
-            AdmissionRecoveryCommitToken::from_bytes([0xd5; 32])
-                .expect("valid abandonment recovery token"),
-        )])
     }
 
     async fn commit_sponsor_abandonment(
@@ -1867,6 +1874,15 @@ impl SpaceAdmissionProtocolTestPair {
             .as_ref()
             .and_then(SponsorAdmission::pairing_confirmation)
             .map(|summary| summary.status())
+    }
+
+    pub(super) fn sponsor_is_terminal(&self) -> bool {
+        self.sponsor_state
+            .current
+            .lock()
+            .expect("sponsor state is available")
+            .as_ref()
+            .is_some_and(AdmissionRecordPersistence::is_terminal)
     }
 
     pub(super) fn sponsor_abandonment_cleanup_complete(&self) -> bool {

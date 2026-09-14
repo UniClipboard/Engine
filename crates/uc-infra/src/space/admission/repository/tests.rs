@@ -478,7 +478,8 @@ async fn recovery_does_not_reopen_unchanged_unrelated_records() {
     fixture.write_state(&state);
     assert!(PendingAdmissionRecoveryStatePort::load(
         &fixture.repository,
-        AdmissionRecoveryTrigger::Startup
+        AdmissionRecoveryTrigger::Startup,
+        0
     )
     .await
     .unwrap()
@@ -487,7 +488,8 @@ async fn recovery_does_not_reopen_unchanged_unrelated_records() {
     for _ in 0..3 {
         assert!(PendingAdmissionRecoveryStatePort::load(
             &fixture.repository,
-            AdmissionRecoveryTrigger::Periodic
+            AdmissionRecoveryTrigger::Periodic,
+            0
         )
         .await
         .unwrap()
@@ -498,6 +500,43 @@ async fn recovery_does_not_reopen_unchanged_unrelated_records() {
         0,
         "没有待办的恢复扫描不能读取无关记录正文"
     );
+}
+
+#[tokio::test]
+async fn recovery_index_pages_through_large_unrelated_history_without_reopening_bodies() {
+    use uc_application::deps::{AdmissionRecoveryTrigger, PendingAdmissionRecoveryStatePort};
+    let mut fixture = Fixture::new();
+    let mut state = PersistedSpaceAdmissionRepositoryV2::fresh([0x31; 16]);
+    for id in 1..=130 {
+        let terminal = pending_join_for_recovery(id)
+            .supersede()
+            .unwrap()
+            .into_replacement();
+        state.records.insert(
+            [id; 32],
+            fixture.repository.seal_new_record(&terminal).unwrap(),
+        );
+    }
+    fixture.write_state(&state);
+    assert!(PendingAdmissionRecoveryStatePort::load(
+        &fixture.repository,
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .unwrap()
+    .is_empty());
+
+    fixture.repository.record_reads.store(0, Ordering::SeqCst);
+    assert!(PendingAdmissionRecoveryStatePort::load(
+        &fixture.repository,
+        AdmissionRecoveryTrigger::Periodic,
+        0,
+    )
+    .await
+    .unwrap()
+    .is_empty());
+    assert_eq!(fixture.repository.record_reads.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -516,7 +555,8 @@ async fn recovery_summary_tracks_changes_and_rollbacks_without_reading_other_rec
     fixture.write_state(&state);
     assert!(PendingAdmissionRecoveryStatePort::load(
         &fixture.repository,
-        AdmissionRecoveryTrigger::Startup
+        AdmissionRecoveryTrigger::Startup,
+        0
     )
     .await
     .unwrap()
@@ -535,12 +575,17 @@ async fn recovery_summary_tracks_changes_and_rollbacks_without_reading_other_rec
     let loaded = PendingAdmissionRecoveryStatePort::load(
         &fixture.repository,
         AdmissionRecoveryTrigger::Periodic,
+        0,
     )
     .await
     .unwrap();
     assert_eq!(loaded.len(), 1);
     assert_eq!(fixture.repository.record_reads.load(Ordering::SeqCst), 1);
-    let (aggregate, _) = loaded.into_iter().next().unwrap().into_parts();
+    let (mut pending, confirmations, abandonments, next_deadline_ms) = loaded.into_parts();
+    assert!(confirmations.is_empty());
+    assert!(abandonments.is_empty());
+    assert_eq!(next_deadline_ms, Some(301_000));
+    let (aggregate, _) = pending.pop().unwrap().into_parts();
     let cancelled = aggregate.supersede().unwrap().into_replacement();
     state.records.insert(
         [0x42; 32],
@@ -554,7 +599,8 @@ async fn recovery_summary_tracks_changes_and_rollbacks_without_reading_other_rec
     assert_eq!(
         PendingAdmissionRecoveryStatePort::load(
             &fixture.repository,
-            AdmissionRecoveryTrigger::Resume
+            AdmissionRecoveryTrigger::Resume,
+            0
         )
         .await
         .unwrap()
@@ -567,7 +613,8 @@ async fn recovery_summary_tracks_changes_and_rollbacks_without_reading_other_rec
         .unwrap();
     assert!(PendingAdmissionRecoveryStatePort::load(
         &fixture.repository,
-        AdmissionRecoveryTrigger::Periodic
+        AdmissionRecoveryTrigger::Periodic,
+        0
     )
     .await
     .unwrap()
@@ -575,7 +622,8 @@ async fn recovery_summary_tracks_changes_and_rollbacks_without_reading_other_rec
     fixture.repository.record_reads.store(0, Ordering::SeqCst);
     assert!(PendingAdmissionRecoveryStatePort::load(
         &fixture.repository,
-        AdmissionRecoveryTrigger::Startup
+        AdmissionRecoveryTrigger::Startup,
+        0
     )
     .await
     .unwrap()
@@ -600,7 +648,8 @@ async fn recovery_summary_rejects_corruption_and_locked_keys() {
     assert_eq!(
         PendingAdmissionRecoveryStatePort::load(
             &fixture.repository,
-            AdmissionRecoveryTrigger::Startup
+            AdmissionRecoveryTrigger::Startup,
+            0
         )
         .await
         .unwrap()
@@ -611,7 +660,8 @@ async fn recovery_summary_rejects_corruption_and_locked_keys() {
     assert!(matches!(
         PendingAdmissionRecoveryStatePort::load(
             &fixture.repository,
-            AdmissionRecoveryTrigger::Periodic
+            AdmissionRecoveryTrigger::Periodic,
+            0
         )
         .await,
         Err(PendingAdmissionRecoveryStateError::Locked)
@@ -623,7 +673,8 @@ async fn recovery_summary_rejects_corruption_and_locked_keys() {
     assert!(matches!(
         PendingAdmissionRecoveryStatePort::load(
             &fixture.repository,
-            AdmissionRecoveryTrigger::Periodic
+            AdmissionRecoveryTrigger::Periodic,
+            0
         )
         .await,
         Err(PendingAdmissionRecoveryStateError::RecoveryRequired)

@@ -9,9 +9,10 @@ mod recover_pending;
 
 pub use recover_pending::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryReport, AdmissionRecoveryTrigger,
-    AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply, LoadedPendingAdmission,
-    LoadedSponsorAbandonment, LoadedSponsorConfirmation, PendingAdmissionRecoveryStateError,
-    PendingAdmissionRecoveryStatePort, SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
+    AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply, LoadedAdmissionRecovery,
+    LoadedPendingAdmission, LoadedSponsorAbandonment, LoadedSponsorDeadline,
+    PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
+    SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
 };
 
 pub(crate) struct AdmissionRecoveryService {
@@ -62,14 +63,14 @@ impl AdmissionRecoveryService {
         Ok(loaded)
     }
 
-    pub(super) async fn commit_sponsor_confirmation_and_notify(
+    pub(super) async fn commit_sponsor_deadline_and_notify(
         &self,
         token: AdmissionRecoveryCommitToken,
         transition: SponsorAdmissionTransition,
-    ) -> Result<LoadedSponsorConfirmation, PendingAdmissionRecoveryStateError> {
+    ) -> Result<LoadedSponsorDeadline, PendingAdmissionRecoveryStateError> {
         let loaded = self
             .state
-            .commit_sponsor_confirmation(token, transition)
+            .commit_sponsor_deadline(token, transition)
             .await?;
         self.host_events
             .emit_or_warn(uc_core::ports::HostEvent::Membership(

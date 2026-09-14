@@ -1,12 +1,11 @@
 use async_trait::async_trait;
 use uc_application::deps::{
-    AdmissionRecoveryCommitToken, AdmissionRecoveryTrigger, LoadedPendingAdmission,
-    LoadedSponsorAbandonment, LoadedSponsorConfirmation, PendingAdmissionRecoveryStateError,
-    PendingAdmissionRecoveryStatePort,
+    AdmissionRecoveryCommitToken, AdmissionRecoveryTrigger, LoadedAdmissionRecovery,
+    LoadedPendingAdmission, LoadedSponsorAbandonment, LoadedSponsorDeadline,
+    PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
 };
 use uc_core::membership::{
-    AdmissionRecordPersistence, JoinerAdmissionTransition, SponsorAdmission,
-    SponsorAdmissionTransition, SponsorPairingConfirmationStatus,
+    AdmissionRecordPersistence, JoinerAdmissionTransition, SponsorAdmissionTransition,
 };
 use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
 
@@ -24,21 +23,45 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
     async fn load(
         &self,
         _trigger: AdmissionRecoveryTrigger,
-    ) -> Result<Vec<LoadedPendingAdmission>, PendingAdmissionRecoveryStateError> {
+        now_ms: i64,
+    ) -> Result<LoadedAdmissionRecovery, PendingAdmissionRecoveryStateError> {
         observe_local_result(LocalWorkStep::JoinerStateLoad, async {
             self.executor
                 .run(|conn| {
-                    let aggregates = self.load_pending_recovery_on(conn).map_err(into_anyhow)?;
-                    let mut loaded = Vec::new();
-                    for aggregate in aggregates {
-                        let token = AdmissionRecoveryCommitToken::from_bytes(recovery_token(
-                            self.keys.profile_generation(),
-                            &aggregate,
-                        ))
-                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
-                        loaded.push(LoadedPendingAdmission::new(aggregate, token));
-                    }
-                    Ok(loaded)
+                    let index = self
+                        .load_recovery_index_on(conn, now_ms)
+                        .map_err(into_anyhow)?;
+                    let profile_generation = self.keys.profile_generation();
+                    let pending = index
+                        .joiners
+                        .into_iter()
+                        .map(|aggregate| {
+                            recovery_commit_token(profile_generation, &aggregate)
+                                .map(|token| LoadedPendingAdmission::new(aggregate, token))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let confirmations = index
+                        .sponsor_deadlines
+                        .into_iter()
+                        .map(|aggregate| {
+                            recovery_commit_token(profile_generation, &aggregate)
+                                .map(|token| LoadedSponsorDeadline::new(aggregate, token))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let abandonments = index
+                        .sponsor_abandonments
+                        .into_iter()
+                        .map(|aggregate| {
+                            recovery_commit_token(profile_generation, &aggregate)
+                                .map(|token| LoadedSponsorAbandonment::new(aggregate, token))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(LoadedAdmissionRecovery::new(
+                        pending,
+                        confirmations,
+                        abandonments,
+                        index.next_deadline_ms,
+                    ))
                 })
                 .map_err(map_executor_error)
                 .map_err(map_recovery_error)
@@ -100,49 +123,11 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
         .await
     }
 
-    async fn load_sponsor_confirmations(
-        &self,
-    ) -> Result<Vec<LoadedSponsorConfirmation>, PendingAdmissionRecoveryStateError> {
-        observe_local_result(LocalWorkStep::SponsorStateLoad, async {
-            self.executor
-                .run(|conn| {
-                    let state = self.load_state_on(conn).map_err(into_anyhow)?;
-                    let profile_generation = state.profile_generation;
-                    let mut loaded = Vec::new();
-                    for (admission_id, stored) in state.records {
-                        let aggregate = self
-                            .open_record(admission_id, &stored)
-                            .map_err(into_anyhow)?;
-                        let Some(sponsor) = SponsorAdmission::try_from_record(aggregate) else {
-                            continue;
-                        };
-                        if sponsor
-                            .pairing_confirmation()
-                            .map(|summary| summary.status())
-                            != Some(SponsorPairingConfirmationStatus::AwaitingPeerConfirmation)
-                        {
-                            continue;
-                        }
-                        let token = AdmissionRecoveryCommitToken::from_bytes(recovery_token(
-                            profile_generation,
-                            &sponsor,
-                        ))
-                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
-                        loaded.push(LoadedSponsorConfirmation::new(sponsor, token));
-                    }
-                    Ok(loaded)
-                })
-                .map_err(map_executor_error)
-                .map_err(map_recovery_error)
-        })
-        .await
-    }
-
-    async fn commit_sponsor_confirmation(
+    async fn commit_sponsor_deadline(
         &self,
         token: AdmissionRecoveryCommitToken,
         transition: SponsorAdmissionTransition,
-    ) -> Result<LoadedSponsorConfirmation, PendingAdmissionRecoveryStateError> {
+    ) -> Result<LoadedSponsorDeadline, PendingAdmissionRecoveryStateError> {
         observe_local_result(LocalWorkStep::SponsorStateCommit, async {
             let replacement = transition.into_replacement();
             self.executor
@@ -177,47 +162,8 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                             &replacement,
                         ))
                         .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
-                        Ok(LoadedSponsorConfirmation::new(replacement, next_token))
+                        Ok(LoadedSponsorDeadline::new(replacement, next_token))
                     })
-                })
-                .map_err(map_executor_error)
-                .map_err(map_recovery_error)
-        })
-        .await
-    }
-
-    async fn load_sponsor_abandonments(
-        &self,
-    ) -> Result<Vec<LoadedSponsorAbandonment>, PendingAdmissionRecoveryStateError> {
-        observe_local_result(LocalWorkStep::SponsorStateLoad, async {
-            self.executor
-                .run(|conn| {
-                    let state = self.load_state_on(conn).map_err(into_anyhow)?;
-                    let profile_generation = state.profile_generation;
-                    let mut loaded = Vec::new();
-                    for (admission_id, stored) in state.records {
-                        let aggregate = self
-                            .open_record(admission_id, &stored)
-                            .map_err(into_anyhow)?;
-                        let Some(sponsor) = SponsorAdmission::try_from_record(aggregate) else {
-                            continue;
-                        };
-                        if sponsor.abandonment_cleanup().is_none_or(|cleanup| {
-                            matches!(
-                                cleanup,
-                                uc_core::membership::SponsorAbandonmentCleanup::NotRequired
-                            )
-                        }) {
-                            continue;
-                        }
-                        let token = AdmissionRecoveryCommitToken::from_bytes(recovery_token(
-                            profile_generation,
-                            &sponsor,
-                        ))
-                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
-                        loaded.push(LoadedSponsorAbandonment::new(sponsor, token));
-                    }
-                    Ok(loaded)
                 })
                 .map_err(map_executor_error)
                 .map_err(map_recovery_error)
@@ -272,6 +218,14 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
         })
         .await
     }
+}
+
+fn recovery_commit_token(
+    profile_generation: [u8; 16],
+    aggregate: &impl AdmissionRecordPersistence,
+) -> Result<AdmissionRecoveryCommitToken, anyhow::Error> {
+    AdmissionRecoveryCommitToken::from_bytes(recovery_token(profile_generation, aggregate))
+        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))
 }
 
 fn map_recovery_error(error: SpaceAdmissionStateStoreError) -> PendingAdmissionRecoveryStateError {

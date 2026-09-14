@@ -372,9 +372,11 @@ async fn sponsor_abandonment_cleanup_survives_restart_and_commits_once() {
         .expect("abandonment state commits");
 
     let reopened = sponsor_store(&fixture);
-    let mut pending = PendingAdmissionRecoveryStatePort::load_sponsor_abandonments(&reopened)
-        .await
-        .expect("pending abandonment loads after restart");
+    let recovery =
+        PendingAdmissionRecoveryStatePort::load(&reopened, AdmissionRecoveryTrigger::Startup, 0)
+            .await
+            .expect("pending abandonment loads after restart");
+    let (_, _, mut pending, _) = recovery.into_parts();
     assert_eq!(pending.len(), 1);
     let (abandoned, recovery_token) = pending.pop().expect("one pending abandonment").into_parts();
     let completed = abandoned
@@ -388,12 +390,14 @@ async fn sponsor_abandonment_cleanup_survives_restart_and_commits_once() {
     .await
     .expect("cleanup completion commits");
 
-    assert!(
-        PendingAdmissionRecoveryStatePort::load_sponsor_abandonments(&reopened)
-            .await
-            .expect("completed abandonment reloads")
-            .is_empty()
-    );
+    assert!(PendingAdmissionRecoveryStatePort::load(
+        &reopened,
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .expect("completed abandonment reloads")
+    .is_empty());
 }
 
 fn sponsor_store(fixture: &Fixture) -> SqliteSpaceAdmissionState<Arc<DieselSqliteExecutor>> {

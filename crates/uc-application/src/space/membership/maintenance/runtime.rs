@@ -172,7 +172,7 @@ impl SpaceMembershipMaintenanceRuntime {
                 ScheduledRound::new(MembershipMaintenanceTrigger::Startup),
             ));
             let mut queued_triggers = VecDeque::new();
-            let mut deadline = None;
+            let mut deadline: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
             let mut periodic = tokio::time::interval_at(
                 tokio::time::Instant::now() + periodic_interval,
                 periodic_interval,
@@ -214,7 +214,12 @@ impl SpaceMembershipMaintenanceRuntime {
                         }
                         Some(RuntimeCommand::StateChanged(round)) => { round.observation.not_executed(MaintenanceDisposition::Paused); }
                         Some(RuntimeCommand::Deadline(instant)) => {
-                            deadline = Some(Box::pin(tokio::time::sleep_until(instant)));
+                            if deadline
+                                .as_ref()
+                                .is_none_or(|current| instant < current.deadline())
+                            {
+                                deadline = Some(Box::pin(tokio::time::sleep_until(instant)));
+                            }
                         }
                         Some(RuntimeCommand::Shutdown(completed)) => {
                             network_activity.pause_network_work();

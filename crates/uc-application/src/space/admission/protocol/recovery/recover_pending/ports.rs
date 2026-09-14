@@ -7,8 +7,8 @@ use uc_core::membership::{
 
 use super::AuthenticatedAdmissionReply;
 use super::{
-    AdmissionRecoveryTrigger, LoadedPendingAdmission, LoadedSponsorAbandonment,
-    LoadedSponsorConfirmation,
+    AdmissionRecoveryTrigger, LoadedAdmissionRecovery, LoadedPendingAdmission,
+    LoadedSponsorAbandonment, LoadedSponsorDeadline,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -31,7 +31,8 @@ pub trait PendingAdmissionRecoveryStatePort: Send + Sync {
     async fn load(
         &self,
         trigger: AdmissionRecoveryTrigger,
-    ) -> Result<Vec<LoadedPendingAdmission>, PendingAdmissionRecoveryStateError>;
+        now_ms: i64,
+    ) -> Result<LoadedAdmissionRecovery, PendingAdmissionRecoveryStateError>;
 
     /// Commits the replacement and every declared admission effect as one
     /// durable result. Returning success after saving only the replacement is
@@ -42,24 +43,12 @@ pub trait PendingAdmissionRecoveryStatePort: Send + Sync {
         transition: JoinerAdmissionTransition,
     ) -> Result<LoadedPendingAdmission, PendingAdmissionRecoveryStateError>;
 
-    async fn load_sponsor_confirmations(
-        &self,
-    ) -> Result<Vec<LoadedSponsorConfirmation>, PendingAdmissionRecoveryStateError> {
-        Ok(Vec::new())
-    }
-
-    async fn commit_sponsor_confirmation(
+    async fn commit_sponsor_deadline(
         &self,
         _token: super::AdmissionRecoveryCommitToken,
         _transition: SponsorAdmissionTransition,
-    ) -> Result<LoadedSponsorConfirmation, PendingAdmissionRecoveryStateError> {
+    ) -> Result<LoadedSponsorDeadline, PendingAdmissionRecoveryStateError> {
         Err(PendingAdmissionRecoveryStateError::Unavailable)
-    }
-
-    async fn load_sponsor_abandonments(
-        &self,
-    ) -> Result<Vec<LoadedSponsorAbandonment>, PendingAdmissionRecoveryStateError> {
-        Ok(Vec::new())
     }
 
     async fn commit_sponsor_abandonment(

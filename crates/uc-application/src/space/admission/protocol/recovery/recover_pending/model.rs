@@ -54,7 +54,7 @@ pub struct LoadedPendingAdmission {
     commit_token: AdmissionRecoveryCommitToken,
 }
 
-pub struct LoadedSponsorConfirmation {
+pub struct LoadedSponsorDeadline {
     aggregate: SponsorAdmission,
     commit_token: AdmissionRecoveryCommitToken,
 }
@@ -62,6 +62,14 @@ pub struct LoadedSponsorConfirmation {
 pub struct LoadedSponsorAbandonment {
     aggregate: SponsorAdmission,
     commit_token: AdmissionRecoveryCommitToken,
+}
+
+#[derive(Default)]
+pub struct LoadedAdmissionRecovery {
+    pending_admissions: Vec<LoadedPendingAdmission>,
+    sponsor_deadlines: Vec<LoadedSponsorDeadline>,
+    sponsor_abandonments: Vec<LoadedSponsorAbandonment>,
+    next_deadline_ms: Option<i64>,
 }
 
 pub struct AuthenticatedAdmissionReply {
@@ -95,7 +103,7 @@ impl LoadedPendingAdmission {
     }
 }
 
-impl LoadedSponsorConfirmation {
+impl LoadedSponsorDeadline {
     pub fn new(aggregate: SponsorAdmission, commit_token: AdmissionRecoveryCommitToken) -> Self {
         Self {
             aggregate,
@@ -118,5 +126,53 @@ impl LoadedSponsorAbandonment {
 
     pub fn into_parts(self) -> (SponsorAdmission, AdmissionRecoveryCommitToken) {
         (self.aggregate, self.commit_token)
+    }
+}
+
+impl LoadedAdmissionRecovery {
+    pub fn new(
+        pending_admissions: Vec<LoadedPendingAdmission>,
+        sponsor_deadlines: Vec<LoadedSponsorDeadline>,
+        sponsor_abandonments: Vec<LoadedSponsorAbandonment>,
+        next_deadline_ms: Option<i64>,
+    ) -> Self {
+        Self {
+            pending_admissions,
+            sponsor_deadlines,
+            sponsor_abandonments,
+            next_deadline_ms,
+        }
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<LoadedPendingAdmission>,
+        Vec<LoadedSponsorDeadline>,
+        Vec<LoadedSponsorAbandonment>,
+        Option<i64>,
+    ) {
+        (
+            self.pending_admissions,
+            self.sponsor_deadlines,
+            self.sponsor_abandonments,
+            self.next_deadline_ms,
+        )
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pending_admissions.is_empty()
+            && self.sponsor_deadlines.is_empty()
+            && self.sponsor_abandonments.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.pending_admissions.len()
+            + self.sponsor_deadlines.len()
+            + self.sponsor_abandonments.len()
+    }
+
+    pub fn into_pending_admissions(self) -> Vec<LoadedPendingAdmission> {
+        self.pending_admissions
     }
 }

@@ -313,6 +313,48 @@ impl SpaceAdmissionAggregate {
         Ok(Some(AdmissionTransition::new(self, &[])))
     }
 
+    pub(crate) fn terminate_sponsor_if_expired(
+        mut self,
+        now_ms: i64,
+    ) -> Result<Option<AdmissionTransition>, SpaceAdmissionAggregateError> {
+        let Some(timeline) = self.attempt_timeline else {
+            return Ok(None);
+        };
+        if !timeline.is_expired(now_ms) {
+            return Ok(None);
+        }
+        let cleanup = match &self.state {
+            SpaceAdmissionRecordState::Sponsor(
+                SpaceAdmissionSponsorState::Accepted(_) | SpaceAdmissionSponsorState::Candidate(_),
+            ) => SponsorAbandonmentCleanup::NotRequired,
+            SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Committed(state)) => {
+                let attempt_digest = self
+                    .attempt_digest
+                    .ok_or(SpaceAdmissionAggregateError::UnsafeCancellation)?;
+                SponsorAbandonmentCleanup::Known(sponsor_commit_member_binding(
+                    attempt_digest,
+                    &state.saved_reply,
+                )?)
+            }
+            // 已写入完成关系的 Sponsor 到期后进入 Unconfirmed，仍允许迟到确认。
+            SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Applied(_)) => {
+                return Ok(None);
+            }
+            _ => return Ok(None),
+        };
+        self.record_version = self
+            .record_version
+            .checked_add(1)
+            .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
+        self.format_version = SPACE_ADMISSION_RECORD_FORMAT_V6;
+        self.state = SpaceAdmissionRecordState::Terminal(
+            SpaceAdmissionTerminalState::SponsorExpired(SpaceAdmissionSponsorExpired {
+                abandonment_cleanup: cleanup,
+            }),
+        );
+        Ok(Some(AdmissionTransition::new(self, &[])))
+    }
+
     pub(crate) fn reject_cancel(
         mut self,
         cancel_request: SpaceAdmissionEnvelopeV1,
@@ -527,16 +569,18 @@ impl SpaceAdmissionAggregate {
     pub(crate) fn complete_abandonment_cleanup(
         mut self,
     ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
-        let SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
-            SpaceAdmissionRejectedState::Sponsor(state),
-        )) = &mut self.state
-        else {
-            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        let cleanup = match &mut self.state {
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+                SpaceAdmissionRejectedState::Sponsor(state),
+            )) => state
+                .abandonment_cleanup
+                .as_mut()
+                .ok_or(SpaceAdmissionAggregateError::InvalidTransition)?,
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorExpired(
+                state,
+            )) => &mut state.abandonment_cleanup,
+            _ => return Err(SpaceAdmissionAggregateError::InvalidTransition),
         };
-        let cleanup = state
-            .abandonment_cleanup
-            .as_mut()
-            .ok_or(SpaceAdmissionAggregateError::InvalidTransition)?;
         if matches!(cleanup, SponsorAbandonmentCleanup::NotRequired) {
             return Err(SpaceAdmissionAggregateError::InvalidTransition);
         }

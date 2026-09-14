@@ -146,6 +146,29 @@ impl SpaceAdmissionAggregate {
         Ok(AdmissionTransition::new(self, &[]))
     }
 
+    pub(crate) fn complete_local_space_termination(
+        mut self,
+    ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        let SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state)) =
+            &mut self.state
+        else {
+            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        };
+        let cleanup = state
+            .cleanup
+            .as_mut()
+            .ok_or(SpaceAdmissionAggregateError::InvalidTransition)?;
+        if cleanup.local_space_transition.take().is_none() {
+            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        }
+        self.record_version = self
+            .record_version
+            .checked_add(1)
+            .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
+        self.format_version = SPACE_ADMISSION_RECORD_FORMAT_V4;
+        Ok(AdmissionTransition::new(self, &[]))
+    }
+
     pub(crate) fn require_recovery(
         mut self,
         category: AdmissionRecoveryCategory,

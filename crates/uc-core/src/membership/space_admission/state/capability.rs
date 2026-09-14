@@ -369,6 +369,14 @@ impl JoinerAdmission {
             .map(JoinerAdmissionTransition::from_transition)
     }
 
+    pub fn complete_local_space_termination(
+        self,
+    ) -> Result<JoinerAdmissionTransition, SpaceAdmissionAggregateError> {
+        self.record
+            .complete_local_space_termination()
+            .map(JoinerAdmissionTransition::from_transition)
+    }
+
     pub const fn active_transition_result(&self) -> Option<&AdmissionSpaceTransitionResult> {
         match &self.record.state {
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Active(
@@ -655,6 +663,9 @@ impl SponsorAdmission {
     pub fn try_from_record(record: SpaceAdmissionAggregate) -> Option<Self> {
         let is_sponsor = match &record.state {
             SpaceAdmissionRecordState::Sponsor(_) => true,
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorExpired(_)) => {
+                true
+            }
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Completed(state)) => {
                 state
                     .saved_reply
@@ -795,11 +806,23 @@ impl SponsorAdmission {
             .map(|transition| transition.map(SponsorAdmissionTransition::from_transition))
     }
 
+    pub fn terminate_if_expired(
+        self,
+        now_ms: i64,
+    ) -> Result<Option<SponsorAdmissionTransition>, SpaceAdmissionAggregateError> {
+        self.record
+            .terminate_sponsor_if_expired(now_ms)
+            .map(|transition| transition.map(SponsorAdmissionTransition::from_transition))
+    }
+
     pub const fn abandonment_cleanup(&self) -> Option<&SponsorAbandonmentCleanup> {
         match &self.record.state {
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
                 SpaceAdmissionRejectedState::Sponsor(state),
             )) => state.abandonment_cleanup.as_ref(),
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorExpired(
+                state,
+            )) => Some(&state.abandonment_cleanup),
             _ => None,
         }
     }
