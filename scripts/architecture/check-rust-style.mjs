@@ -17,6 +17,7 @@ function git(args) {
   const result = spawnSync('git', args, {
     cwd: REPOSITORY_ROOT,
     encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
   })
   if (result.status !== 0) {
     process.stderr.write(result.stderr ?? '')
