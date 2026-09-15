@@ -36,6 +36,7 @@ const ADMISSION_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 const EXPIRES_AT_MS: i64 = 2_000_000_000_000;
 const PAIRING_HOT_PATH_BUDGET: Duration = Duration::from_secs(1);
+const PAIRING_HANDOVER_BUDGET: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Default)]
 struct MemorySecureStorage(Arc<Mutex<HashMap<String, Vec<u8>>>>);
@@ -3549,39 +3550,96 @@ async fn in_flight_admission_restart_uses_new_traces_and_one_flow() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 #[ignore = "显式性能门禁：需要空闲的本机真实网络栈，使用 --ignored 运行"]
 async fn two_device_hot_path_pairing_completes_within_one_second() {
-    let benchmark_mode = std::env::var("UC_PAIRING_OBSERVABILITY_BENCHMARK").ok();
-    let telemetry = if matches!(
-        benchmark_mode.as_deref(),
-        Some("none" | "disabled" | "unavailable")
-    ) {
-        None
+    let telemetry = start_test_telemetry().await;
+    assert!(uc_engine::init_test_tracing_with_otlp(
+        &format!("{}/v1/traces", telemetry.uri()),
+        &format!("{}/v1/logs", telemetry.uri()),
+    ));
+    let (started_at, elapsed) = measure_two_device_pairing().await;
+    let trace_evidence = collect_pairing_trace_evidence(&telemetry, started_at, elapsed).await;
+    assert_pairing_trace_evidence(&trace_evidence);
+    assert!(
+        trace_evidence.local_elapsed < PAIRING_HOT_PATH_BUDGET,
+        "two-device local pairing work took {:?}, network-related time {:?}, end-to-end {:?}, local budget {:?}",
+        trace_evidence.local_elapsed,
+        trace_evidence.network_elapsed,
+        elapsed,
+        PAIRING_HOT_PATH_BUDGET,
+    );
+}
+
+// 普通 Space 交接复用同一网络入口，端到端配对必须稳定落在三秒预算内。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore = "显式性能门禁：需要空闲的本机真实网络栈，使用 --ignored 运行"]
+async fn two_device_pairing_with_session_handover_completes_within_three_seconds() {
+    let telemetry = start_test_telemetry().await;
+    assert!(uc_engine::init_test_tracing_with_otlp(
+        &format!("{}/v1/traces", telemetry.uri()),
+        &format!("{}/v1/logs", telemetry.uri()),
+    ));
+    let (started_at, elapsed) = measure_two_device_pairing().await;
+    let trace_evidence = collect_pairing_trace_evidence(&telemetry, started_at, elapsed).await;
+    assert_pairing_trace_evidence(&trace_evidence);
+    eprintln!(
+        "UC_PAIRING_HANDOVER_RESULT elapsed_us={} local_us={} network_us={}",
+        elapsed.as_micros(),
+        trace_evidence.local_elapsed.as_micros(),
+        trace_evidence.network_elapsed.as_micros(),
+    );
+    assert!(
+        elapsed < PAIRING_HANDOVER_BUDGET,
+        "two-device end-to-end pairing took {elapsed:?}, budget {PAIRING_HANDOVER_BUDGET:?}",
+    );
+}
+
+// 不同观测装配只验证配对能完成，不承担一秒或三秒性能门。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore = "显式观测开销验收：通过 UC_PAIRING_OBSERVABILITY_BENCHMARK 选择模式"]
+async fn two_device_pairing_observability_mode_completes() {
+    let mode = std::env::var("UC_PAIRING_OBSERVABILITY_BENCHMARK")
+        .expect("UC_PAIRING_OBSERVABILITY_BENCHMARK must select an observability mode");
+    let telemetry = if mode == "healthy" {
+        Some(start_test_telemetry().await)
     } else {
-        let telemetry = MockServer::start().await;
-        for endpoint in ["/v1/traces", "/v1/logs"] {
-            Mock::given(method("POST"))
-                .and(path(endpoint))
-                .respond_with(ResponseTemplate::new(200))
-                .mount(&telemetry)
-                .await;
-        }
-        Some(telemetry)
+        None
     };
-    match benchmark_mode.as_deref() {
-        Some("none") => {}
-        Some("disabled") => assert!(uc_engine::init_test_tracing_without_remote()),
-        Some("unavailable") => assert!(uc_engine::init_test_tracing_with_otlp(
+    match mode.as_str() {
+        "none" => {}
+        "disabled" => assert!(uc_engine::init_test_tracing_without_remote()),
+        "unavailable" => assert!(uc_engine::init_test_tracing_with_otlp(
             "http://127.0.0.1:1/v1/traces",
             "http://127.0.0.1:1/v1/logs",
         )),
-        Some("healthy" | "handover") | None => {
+        "healthy" => {
             let telemetry = telemetry.as_ref().expect("healthy OTLP receiver");
             assert!(uc_engine::init_test_tracing_with_otlp(
                 &format!("{}/v1/traces", telemetry.uri()),
                 &format!("{}/v1/logs", telemetry.uri()),
             ));
         }
-        Some(other) => panic!("unknown observability benchmark mode: {other}"),
+        other => panic!("unknown observability benchmark mode: {other}"),
     }
+    let (_, elapsed) = measure_two_device_pairing().await;
+    eprintln!(
+        "UC_PAIRING_OBSERVABILITY_RESULT mode={mode} elapsed_us={}",
+        elapsed.as_micros()
+    );
+    assert!(elapsed < Duration::from_secs(30));
+}
+
+async fn start_test_telemetry() -> MockServer {
+    let telemetry = MockServer::start().await;
+    for endpoint in ["/v1/traces", "/v1/logs"] {
+        Mock::given(method("POST"))
+            .and(path(endpoint))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&telemetry)
+            .await;
+    }
+    telemetry
+}
+
+async fn measure_two_device_pairing() -> (SystemTime, Duration) {
     let rendezvous = mount_rendezvous().await;
     let sponsor_harness = DeviceHarness::new(rendezvous.uri());
     let joiner_harness = DeviceHarness::new(rendezvous.uri());
@@ -3606,17 +3664,16 @@ async fn two_device_hot_path_pairing_completes_within_one_second() {
         .await
         .expect("shut down joiner");
     uc_engine::flush_test_tracing();
-    if let Some(mode) = benchmark_mode.as_deref().filter(|mode| *mode != "handover") {
-        eprintln!(
-            "UC_PAIRING_OBSERVABILITY_RESULT mode={mode} elapsed_us={}",
-            elapsed.as_micros()
-        );
-        assert!(elapsed < Duration::from_secs(30));
-        return;
-    }
-    let telemetry = telemetry.expect("performance gate OTLP receiver");
+    (started_at, elapsed)
+}
+
+async fn collect_pairing_trace_evidence(
+    telemetry: &MockServer,
+    started_at: SystemTime,
+    elapsed: Duration,
+) -> PairingTraceEvidence {
     let evidence_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let trace_evidence = loop {
+    loop {
         uc_engine::flush_test_tracing();
         let requests = telemetry
             .received_requests()
@@ -3636,7 +3693,10 @@ async fn two_device_hot_path_pairing_completes_within_one_second() {
             "OTLP receiver did not collect four complete admission exchanges"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
-    };
+    }
+}
+
+fn assert_pairing_trace_evidence(trace_evidence: &PairingTraceEvidence) {
     assert!(trace_evidence.client_count >= 4);
     assert!(trace_evidence.paired_server_count >= 4);
     assert_eq!(
@@ -3648,27 +3708,6 @@ async fn two_device_hot_path_pairing_completes_within_one_second() {
     assert_eq!(trace_evidence.flow_ids.len(), 1);
     assert_eq!(trace_evidence.lifecycle_root_count, 1);
     assert_eq!(trace_evidence.admission_trace_ids.len(), 1);
-    if benchmark_mode.as_deref() == Some("handover") {
-        eprintln!(
-            "UC_PAIRING_HANDOVER_RESULT elapsed_us={} local_us={} network_us={}",
-            elapsed.as_micros(),
-            trace_evidence.local_elapsed.as_micros(),
-            trace_evidence.network_elapsed.as_micros(),
-        );
-        assert!(
-            elapsed < Duration::from_secs(3),
-            "two-device end-to-end pairing took {elapsed:?}, budget 3s",
-        );
-        return;
-    }
-    assert!(
-        trace_evidence.local_elapsed < PAIRING_HOT_PATH_BUDGET,
-        "two-device local pairing work took {:?}, network-related time {:?}, end-to-end {:?}, local budget {:?}",
-        trace_evidence.local_elapsed,
-        trace_evidence.network_elapsed,
-        elapsed,
-        PAIRING_HOT_PATH_BUDGET,
-    );
 }
 
 #[derive(Debug)]
