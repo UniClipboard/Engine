@@ -7,7 +7,6 @@ mod test_support;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use joiner::JoinerAdmissionService;
 pub use joiner::{
     CompletedJoinerActivation, CurrentJoinAdmissionStatePort, ExecuteJoinerActivationError,
     ExecuteJoinerActivationPort, JoinerActivationCommitToken, JoinerActivationIntent,
@@ -23,6 +22,7 @@ pub use joiner::{
     PreparedJoinerCandidateMaterial, PreparedJoinerInvitation, ResolveJoinerInvitationError,
     ResolveJoinerInvitationPort, SpaceAdmissionCommitToken, ValidateJoinerActivationIntentPort,
 };
+pub(crate) use joiner::{JoinerAdmissionService, JoinerReplyHandlingOutcome};
 pub(crate) use protocol::SpaceAdmissionProtocol;
 pub(crate) use recovery::AdmissionRecoveryService;
 pub use recovery::{

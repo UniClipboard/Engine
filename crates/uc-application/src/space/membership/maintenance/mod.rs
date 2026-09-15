@@ -4,7 +4,8 @@ mod runtime;
 mod use_case;
 
 pub use model::{
-    MembershipMaintenanceReport, MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger,
+    AdmissionMaintenanceOutcome, MembershipMaintenanceReport, MembershipMaintenanceStepOutcome,
+    MembershipMaintenanceTrigger,
 };
 pub use ports::{
     DeliverPendingGroupUpdatesPort, DeliverRestrictedMembershipPort,

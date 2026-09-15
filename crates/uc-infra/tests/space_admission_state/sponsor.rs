@@ -376,7 +376,7 @@ async fn sponsor_abandonment_cleanup_survives_restart_and_commits_once() {
         PendingAdmissionRecoveryStatePort::load(&reopened, AdmissionRecoveryTrigger::Startup, 0)
             .await
             .expect("pending abandonment loads after restart");
-    let (_, _, mut pending, _) = recovery.into_parts();
+    let (_, _, mut pending, _, _) = recovery.into_parts();
     assert_eq!(pending.len(), 1);
     let (abandoned, recovery_token) = pending.pop().expect("one pending abandonment").into_parts();
     let completed = abandoned

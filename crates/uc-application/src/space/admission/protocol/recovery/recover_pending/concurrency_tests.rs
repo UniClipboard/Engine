@@ -166,11 +166,6 @@ async fn assert_offline_recovery_does_not_block_local_actions(block_at: BlockAt)
         .start_join_at(join_input(), 1_000)
         .await
         .unwrap();
-    if matches!(block_at, BlockAt::Reply) {
-        pair.joiner()
-            .recover_pending(AdmissionRecoveryTrigger::StateChanged)
-            .await;
-    }
     let barrier = Arc::new(NetworkBarrier::default());
     pair.joiner_mut().recovery.transport = Arc::new(DelayedTransport {
         inner: Arc::clone(&pair.joiner().recovery.transport),

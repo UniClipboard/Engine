@@ -1,38 +1,100 @@
-use super::model::AdmissionRecoveryReport;
+use super::model::{AdmissionRecoveryDisposition, AdmissionRecoveryReport};
 use super::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryTrigger, AuthenticatedAdmissionReply,
     LoadedPendingAdmission, PendingAdmissionRecoveryStateError, SpaceAdmissionTransportError,
 };
-use crate::space::admission::observation::message_action;
 use crate::space::admission::protocol::{
     AdmissionRecoveryService, ExecuteJoinerActivationError, JoinerAdmissionService,
-    SpaceAdmissionProtocol,
+    JoinerReplyHandlingOutcome, SpaceAdmissionProtocol,
 };
 use crate::space::membership::{
-    AdmissionAbandonmentRevocationTarget, AdmissionRevocationTarget,
+    AdmissionAbandonmentRevocationTarget, AdmissionMaintenanceOutcome, AdmissionRevocationTarget,
     MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, RecoverSpaceAdmissionsPort,
     RemoveSpaceMemberError,
 };
 use uc_core::membership::{
-    AdmissionPendingRecovery, AdmissionRecoveryCategory, JoinerAdmission,
-    SpaceAdmissionMessageKind, SpaceAdmissionRejectionReason, SponsorAbandonmentCleanup,
-    SponsorPairingConfirmationStatus,
+    AdmissionRecoveryCategory, JoinerAdmission, SpaceAdmissionMessageKind,
+    SpaceAdmissionRejectionReason, SponsorAbandonmentCleanup, SponsorPairingConfirmationStatus,
 };
 use uc_observability_contract::diagnostics::connectivity::{
-    record_admission_recovery_decision, scope_pairing_work, AdmissionExchangeSide, ExchangeFailure,
-    LocalWorkObservation, LocalWorkOutcome, LocalWorkStep, RecoveryDecision, RecoveryDeferral,
-    RecoveryProblem, RecoveryTrigger, RejectionCause, StateFailure,
+    record_admission_recovery_decision, ExchangeFailure, LocalWorkObservation, LocalWorkOutcome,
+    LocalWorkStep, RecoveryDecision, RecoveryDeferral, RecoveryProblem, RecoveryTrigger,
+    RejectionCause, StateFailure,
 };
 use uc_observability_contract::diagnostics::{
-    scope_admission_action, DiagnosticErrorType, ObservationContext,
-    SpaceAdmissionObservationOutcome,
+    DiagnosticErrorType, ObservationContext, SpaceAdmissionObservationOutcome,
 };
+
+mod joiner_network;
 
 #[derive(Clone, Copy)]
 enum RecoveryChannel {
     Initial,
     Continuation,
 }
+
+enum AuthenticatedChannelProgress {
+    Ready(LoadedPendingAdmission),
+    Stopped(Option<RecoveryDecision>),
+}
+
+struct JoinerRecoveryObservation {
+    trigger: AdmissionRecoveryTrigger,
+    material: [u8; 32],
+    was_cancelling: bool,
+    before: AdmissionRecoveryReport,
+    context: ObservationContext,
+}
+
+impl JoinerRecoveryObservation {
+    async fn begin(
+        joiner: &JoinerAdmissionService,
+        trigger: AdmissionRecoveryTrigger,
+        aggregate: &JoinerAdmission,
+        before: AdmissionRecoveryReport,
+    ) -> Self {
+        let material = *aggregate.admission_id().as_bytes();
+        let context = joiner
+            .observations
+            .scope(material, async { ObservationContext::capture() })
+            .await;
+        Self {
+            trigger,
+            material,
+            was_cancelling: aggregate.is_cancelling() || aggregate.termination_reason().is_some(),
+            before,
+            context,
+        }
+    }
+
+    fn finish(
+        self,
+        joiner: &JoinerAdmissionService,
+        after: AdmissionRecoveryReport,
+        hint: Option<RecoveryDecision>,
+    ) {
+        if let Some(decision) =
+            actual_recovery_decision(self.before, after, self.was_cancelling, hint)
+        {
+            record_admission_recovery_decision(
+                &self.context,
+                diagnostic_trigger(self.trigger),
+                decision,
+            );
+        }
+        finish_observation_after_recovery(
+            joiner,
+            self.material,
+            self.was_cancelling,
+            self.before,
+            after,
+        );
+    }
+}
+
+// 完整协议最多包含加入、准备、应用和最终确认四次请求。
+// 上限只防止异常对端让同一轮无限推进，不参与正常重试计时。
+const MAX_IMMEDIATE_EXCHANGES_PER_ADMISSION: usize = 4;
 
 impl SpaceAdmissionProtocol {
     pub(crate) async fn recover_pending(
@@ -62,10 +124,10 @@ impl AdmissionRecoveryService {
                 biased;
                 changed = interrupted.changed() => {
                     if changed.is_err() {
-                        return self.recover_pending_once(joiner, trigger).await;
+                        return Box::pin(self.recover_pending_once(joiner, trigger)).await;
                     }
                 }
-                report = self.recover_pending_once(joiner, trigger) => return report,
+                report = Box::pin(self.recover_pending_once(joiner, trigger)) => return report,
             }
         }
     }
@@ -85,8 +147,16 @@ impl AdmissionRecoveryService {
                 return report;
             }
         };
-        let (loaded, sponsor_deadlines, sponsor_abandonments, next_deadline_ms) =
-            recovery.into_parts();
+        let (
+            loaded,
+            sponsor_deadlines,
+            sponsor_abandonments,
+            next_deadline_ms,
+            sponsor_confirmation_pending,
+        ) = recovery.into_parts();
+        if sponsor_confirmation_pending {
+            report.disposition = AdmissionRecoveryDisposition::YieldMaintenance;
+        }
         if let Some(deadline_ms) = next_deadline_ms {
             joiner.maintenance_wake.schedule_at(deadline_ms, now_ms);
         }
@@ -178,247 +248,8 @@ impl AdmissionRecoveryService {
                 ) => report.recovery_required_count += 1,
             }
         }
-        for loaded_admission in joiner_network {
-            let (aggregate, commit_token) = loaded_admission.into_parts();
-            if aggregate.pending_recovery().is_none() && aggregate.invitation_resolution().is_none()
-            {
-                continue;
-            }
-            let observation_before = report;
-            let observation_material = *aggregate.admission_id().as_bytes();
-            let was_cancelling =
-                aggregate.is_cancelling() || aggregate.termination_reason().is_some();
-            let context = joiner
-                .observations
-                .scope(observation_material, async {
-                    ObservationContext::capture()
-                })
-                .await;
-            let mut decision_hint = None;
-            let finish_observation = |after, hint| {
-                if let Some(decision) =
-                    actual_recovery_decision(observation_before, after, was_cancelling, hint)
-                {
-                    record_admission_recovery_decision(
-                        &context,
-                        diagnostic_trigger(trigger),
-                        decision,
-                    );
-                }
-                finish_observation_after_recovery(
-                    joiner,
-                    observation_material,
-                    was_cancelling,
-                    observation_before,
-                    after,
-                );
-            };
-            if aggregate.invitation_resolution().is_some() {
-                joiner
-                    .observations
-                    .scope(
-                        observation_material,
-                        scope_pairing_work(
-                            AdmissionExchangeSide::Joiner,
-                            None,
-                            joiner.recover_invitation_resolution(
-                                self,
-                                &mut report,
-                                aggregate,
-                                commit_token,
-                            ),
-                        ),
-                    )
-                    .await;
-                finish_observation(report, decision_hint);
-                continue;
-            }
-            let Some(recovery) = aggregate.pending_recovery() else {
-                continue;
-            };
-            let (channel_kind, established) = joiner
-                .observations
-                .scope(observation_material, async {
-                    match recovery {
-                        AdmissionPendingRecovery::Initial {
-                            encrypted_password_equivalent,
-                            pending_exchange,
-                        } => (
-                            RecoveryChannel::Initial,
-                            match aggregate.attempt_timeline() {
-                                Some(attempt_timeline) => {
-                                    self.transport
-                                        .establish_initial(
-                                            aggregate.admission_id(),
-                                            attempt_timeline,
-                                            pending_exchange.route(),
-                                            encrypted_password_equivalent,
-                                        )
-                                        .await
-                                }
-                                None => Err(SpaceAdmissionTransportError::PeerUpgradeRequired),
-                            },
-                        ),
-                        AdmissionPendingRecovery::Continuation {
-                            peer_binding,
-                            continuation_credential,
-                            pending_exchange,
-                        } => (
-                            RecoveryChannel::Continuation,
-                            self.transport
-                                .resume(
-                                    aggregate.admission_id(),
-                                    pending_exchange.route(),
-                                    peer_binding,
-                                    continuation_credential,
-                                )
-                                .await,
-                        ),
-                    }
-                })
-                .await;
-
-            let mut exchange = match established {
-                Ok(exchange) => exchange,
-                Err(error) => {
-                    decision_hint = Some(connection_decision(channel_kind, error));
-                    self.record_connection_failure(
-                        &mut report,
-                        channel_kind,
-                        aggregate,
-                        commit_token,
-                        error,
-                    )
-                    .await;
-                    finish_observation(report, decision_hint);
-                    continue;
-                }
-            };
-
-            let loaded = match channel_kind {
-                RecoveryChannel::Initial => {
-                    let peer_binding = exchange.peer_binding();
-                    let Some(continuation) = exchange.take_newly_established_continuation() else {
-                        decision_hint = Some(RecoveryDecision::RequiresRecovery(Some(
-                            RecoveryProblem::MissingCredential,
-                        )));
-                        self.save_recovery_required(
-                            &mut report,
-                            aggregate,
-                            commit_token,
-                            AdmissionRecoveryCategory::MissingKey,
-                        )
-                        .await;
-                        finish_observation(report, decision_hint);
-                        continue;
-                    };
-                    let transition =
-                        match aggregate.with_authenticated_channel(peer_binding, continuation) {
-                            Ok(transition) => transition,
-                            Err(_) => {
-                                report.recovery_required_count += 1;
-                                finish_observation(report, decision_hint);
-                                continue;
-                            }
-                        };
-                    match joiner
-                        .observations
-                        .scope(
-                            observation_material,
-                            scope_pairing_work(
-                                AdmissionExchangeSide::Joiner,
-                                message_action(SpaceAdmissionMessageKind::JoinRequest),
-                                self.commit_recovery(commit_token, transition),
-                            ),
-                        )
-                        .await
-                    {
-                        Ok(loaded) => {
-                            report.advanced_count += 1;
-                            loaded
-                        }
-                        Err(error) => {
-                            self.record_state_error(&mut report, error);
-                            finish_observation(report, decision_hint);
-                            continue;
-                        }
-                    }
-                }
-                RecoveryChannel::Continuation => {
-                    LoadedPendingAdmission::new(aggregate, commit_token)
-                }
-            };
-
-            let (aggregate, commit_token) = loaded.into_parts();
-            let Some(pending_exchange) = aggregate.pending_exchange() else {
-                report.recovery_required_count += 1;
-                finish_observation(report, decision_hint);
-                continue;
-            };
-            let action = message_action(pending_exchange.request_envelope().kind());
-            let exchanged = joiner
-                .observations
-                .scope(
-                    observation_material,
-                    scope_admission_action(
-                        action,
-                        exchange.exchange(pending_exchange.request_envelope()),
-                    ),
-                )
-                .await;
-            match exchanged {
-                Ok(reply) => {
-                    joiner
-                        .observations
-                        .scope(
-                            observation_material,
-                            scope_pairing_work(AdmissionExchangeSide::Joiner, action, async {
-                                let work =
-                                    LocalWorkObservation::begin(LocalWorkStep::JoinerProcessReply);
-                                let before = report;
-                                self.commit_joiner_reply(
-                                    joiner,
-                                    &mut report,
-                                    aggregate,
-                                    commit_token,
-                                    reply,
-                                )
-                                .await;
-                                let outcome = if report.recovery_required_count
-                                    > before.recovery_required_count
-                                {
-                                    LocalWorkOutcome::Corrupt
-                                } else if report.deferred_count > before.deferred_count {
-                                    LocalWorkOutcome::Deferred
-                                } else if report.rejected_count > before.rejected_count
-                                    || report.peer_upgrade_required_count
-                                        > before.peer_upgrade_required_count
-                                {
-                                    LocalWorkOutcome::Rejected
-                                } else {
-                                    LocalWorkOutcome::Ok
-                                };
-                                work.finish(outcome);
-                            }),
-                        )
-                        .await;
-                }
-                Err(SpaceAdmissionTransportError::PeerUpgradeRequired) => {
-                    decision_hint = Some(RecoveryDecision::Rejected(Some(
-                        RejectionCause::PeerUpgradeRequired,
-                    )));
-                    self.save_peer_upgrade_result(&mut report, aggregate, commit_token)
-                        .await;
-                }
-                Err(error) => {
-                    decision_hint = Some(RecoveryDecision::Deferred(Some(
-                        RecoveryDeferral::Exchange(exchange_failure(error)),
-                    )));
-                    report.deferred_count += 1;
-                }
-            }
-            finish_observation(report, decision_hint);
-        }
+        Box::pin(self.recover_joiner_network_work(joiner, trigger, joiner_network, &mut report))
+            .await;
 
         report
     }
@@ -602,7 +433,7 @@ impl AdmissionRecoveryService {
         aggregate: JoinerAdmission,
         token: AdmissionRecoveryCommitToken,
         reply: AuthenticatedAdmissionReply,
-    ) {
+    ) -> JoinerReplyHandlingOutcome {
         let (reply, canonical_digest) = reply.into_parts();
         match reply.kind() {
             SpaceAdmissionMessageKind::Rejected => {
@@ -610,18 +441,19 @@ impl AdmissionRecoveryService {
                     Ok(transition) => transition,
                     Err(_) => {
                         report.recovery_required_count += 1;
-                        return;
+                        return JoinerReplyHandlingOutcome::NoImmediateWork;
                     }
                 };
                 match self.commit_recovery_and_notify(token, transition).await {
                     Ok(_) => report.rejected_count += 1,
                     Err(error) => self.record_state_error(report, error),
                 }
+                JoinerReplyHandlingOutcome::NoImmediateWork
             }
             SpaceAdmissionMessageKind::Candidate => {
                 joiner
                     .handle_candidate(self, report, aggregate, token, reply, canonical_digest)
-                    .await;
+                    .await
             }
             SpaceAdmissionMessageKind::Commit => {
                 let notify_upgrade_cleared = aggregate.peer_upgrade_required();
@@ -635,7 +467,7 @@ impl AdmissionRecoveryService {
                         canonical_digest,
                         notify_upgrade_cleared,
                     )
-                    .await;
+                    .await
             }
             SpaceAdmissionMessageKind::Complete => {
                 let notify_upgrade_cleared = aggregate.peer_upgrade_required();
@@ -649,7 +481,7 @@ impl AdmissionRecoveryService {
                         canonical_digest,
                         notify_upgrade_cleared,
                     )
-                    .await;
+                    .await
             }
             SpaceAdmissionMessageKind::Settled => {
                 let notify_upgrade_cleared = aggregate.peer_upgrade_required();
@@ -663,20 +495,21 @@ impl AdmissionRecoveryService {
                         canonical_digest,
                         notify_upgrade_cleared,
                     )
-                    .await;
+                    .await
             }
             SpaceAdmissionMessageKind::Abandoned => {
                 let transition = match aggregate.accept_abandoned(reply, canonical_digest) {
                     Ok(transition) => transition,
                     Err(_) => {
                         report.recovery_required_count += 1;
-                        return;
+                        return JoinerReplyHandlingOutcome::NoImmediateWork;
                     }
                 };
                 match self.commit_recovery(token, transition).await {
                     Ok(_) => report.advanced_count += 1,
                     Err(error) => self.record_state_error(report, error),
                 }
+                JoinerReplyHandlingOutcome::NoImmediateWork
             }
             _ => {
                 self.save_recovery_required(
@@ -686,6 +519,7 @@ impl AdmissionRecoveryService {
                     AdmissionRecoveryCategory::ProtocolConflict,
                 )
                 .await;
+                JoinerReplyHandlingOutcome::NoImmediateWork
             }
         }
     }
@@ -808,6 +642,23 @@ fn finish_observation_after_recovery(
     }
 }
 
+fn joiner_reply_work_outcome(
+    before: AdmissionRecoveryReport,
+    after: AdmissionRecoveryReport,
+) -> LocalWorkOutcome {
+    if after.recovery_required_count > before.recovery_required_count {
+        LocalWorkOutcome::Corrupt
+    } else if after.deferred_count > before.deferred_count {
+        LocalWorkOutcome::Deferred
+    } else if after.rejected_count > before.rejected_count
+        || after.peer_upgrade_required_count > before.peer_upgrade_required_count
+    {
+        LocalWorkOutcome::Rejected
+    } else {
+        LocalWorkOutcome::Ok
+    }
+}
+
 fn diagnostic_trigger(trigger: AdmissionRecoveryTrigger) -> RecoveryTrigger {
     match trigger {
         AdmissionRecoveryTrigger::Startup => RecoveryTrigger::Startup,
@@ -898,7 +749,7 @@ impl RecoverSpaceAdmissionsPort for SpaceAdmissionProtocol {
     async fn recover_space_admissions(
         &self,
         trigger: &MembershipMaintenanceTrigger,
-    ) -> MembershipMaintenanceStepOutcome {
+    ) -> AdmissionMaintenanceOutcome {
         let trigger = match trigger {
             MembershipMaintenanceTrigger::Startup => AdmissionRecoveryTrigger::Startup,
             MembershipMaintenanceTrigger::Resume => AdmissionRecoveryTrigger::Resume,
@@ -909,7 +760,7 @@ impl RecoverSpaceAdmissionsPort for SpaceAdmissionProtocol {
             }
         };
         let report = self.recover_pending(trigger).await;
-        if report.recovery_required_count > 0 {
+        let outcome = if report.recovery_required_count > 0 {
             MembershipMaintenanceStepOutcome::Corrupt
         } else if report.peer_upgrade_required_count > 0 || report.rejected_count > 0 {
             MembershipMaintenanceStepOutcome::StableFailure
@@ -917,6 +768,14 @@ impl RecoverSpaceAdmissionsPort for SpaceAdmissionProtocol {
             MembershipMaintenanceStepOutcome::Deferred
         } else {
             MembershipMaintenanceStepOutcome::Completed
+        };
+        match report.disposition {
+            AdmissionRecoveryDisposition::ContinueMaintenance => {
+                AdmissionMaintenanceOutcome::Continue(outcome)
+            }
+            AdmissionRecoveryDisposition::YieldMaintenance => {
+                AdmissionMaintenanceOutcome::Yield(outcome)
+            }
         }
     }
 }

@@ -24,8 +24,8 @@ impl RecoverSpaceAdmissionsPort for RecordingStep {
     async fn recover_space_admissions(
         &self,
         _trigger: &MembershipMaintenanceTrigger,
-    ) -> MembershipMaintenanceStepOutcome {
-        self.record()
+    ) -> AdmissionMaintenanceOutcome {
+        AdmissionMaintenanceOutcome::Continue(self.record())
     }
 }
 
@@ -95,6 +95,21 @@ struct BlockingAdmission {
     release: Arc<tokio::sync::Notify>,
 }
 
+struct YieldingAdmission {
+    calls: Arc<Mutex<Vec<&'static str>>>,
+}
+
+#[async_trait]
+impl RecoverSpaceAdmissionsPort for YieldingAdmission {
+    async fn recover_space_admissions(
+        &self,
+        _trigger: &MembershipMaintenanceTrigger,
+    ) -> AdmissionMaintenanceOutcome {
+        self.calls.lock().unwrap().push("admissions");
+        AdmissionMaintenanceOutcome::Yield(MembershipMaintenanceStepOutcome::Completed)
+    }
+}
+
 struct BlockingFirstRecordingAdmission {
     started: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
@@ -107,13 +122,13 @@ impl RecoverSpaceAdmissionsPort for BlockingFirstRecordingAdmission {
     async fn recover_space_admissions(
         &self,
         _trigger: &MembershipMaintenanceTrigger,
-    ) -> MembershipMaintenanceStepOutcome {
+    ) -> AdmissionMaintenanceOutcome {
         self.calls.lock().unwrap().push("admissions");
         if self.first.swap(false, Ordering::SeqCst) {
             self.started.notify_one();
             self.release.notified().await;
         }
-        MembershipMaintenanceStepOutcome::Completed
+        AdmissionMaintenanceOutcome::Continue(MembershipMaintenanceStepOutcome::Completed)
     }
 }
 
@@ -126,7 +141,7 @@ impl RecoverSpaceAdmissionsPort for NonCooperativeAdmission {
     async fn recover_space_admissions(
         &self,
         _trigger: &MembershipMaintenanceTrigger,
-    ) -> MembershipMaintenanceStepOutcome {
+    ) -> AdmissionMaintenanceOutcome {
         self.started.notify_one();
         std::future::pending().await
     }
@@ -137,10 +152,10 @@ impl RecoverSpaceAdmissionsPort for BlockingAdmission {
     async fn recover_space_admissions(
         &self,
         _trigger: &MembershipMaintenanceTrigger,
-    ) -> MembershipMaintenanceStepOutcome {
+    ) -> AdmissionMaintenanceOutcome {
         self.started.notify_one();
         self.release.notified().await;
-        MembershipMaintenanceStepOutcome::Completed
+        AdmissionMaintenanceOutcome::Continue(MembershipMaintenanceStepOutcome::Completed)
     }
 }
 
@@ -197,6 +212,37 @@ async fn startup_runs_the_fixed_sequence_and_continues_after_deferred_work() {
     assert_eq!(report.completed_count, 6);
     assert_eq!(report.deferred_count, 1);
     assert_eq!(report.stable_failure_count, 0);
+}
+
+#[tokio::test]
+async fn session_transition_stops_the_current_maintenance_round_after_admission() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let step = |name| {
+        Arc::new(RecordingStep {
+            name,
+            calls: Arc::clone(&calls),
+            outcome: MembershipMaintenanceStepOutcome::Completed,
+        })
+    };
+    let maintain = MaintainSpaceMembershipUseCase::new(MaintainSpaceMembershipDeps {
+        admissions: Arc::new(YieldingAdmission {
+            calls: Arc::clone(&calls),
+        }),
+        effects: step("effects"),
+        conflicts: step("conflicts"),
+        group_update_delivery: step("group_updates"),
+        restricted_delivery: step("restricted"),
+        synchronization: step("synchronize"),
+        cleanup: step("cleanup"),
+    });
+
+    let report = maintain
+        .execute(MembershipMaintenanceTrigger::StateChanged)
+        .await;
+
+    assert_eq!(calls.lock().unwrap().as_slice(), &["admissions"]);
+    assert_eq!(report.completed_count, 1);
+    assert_eq!(report.deferred_count, 0);
 }
 
 #[tokio::test]

@@ -1,11 +1,14 @@
 use super::{
-    AdmissionRecoveryCommitToken, AdmissionRecoveryReport, AdmissionRecoveryTrigger,
-    LoadedPendingAdmission,
+    AdmissionRecoveryCommitToken, AdmissionRecoveryDisposition, AdmissionRecoveryReport,
+    AdmissionRecoveryTrigger, LoadedPendingAdmission,
 };
 use crate::space::admission::protocol::test_support::{
     ProtocolEvent, SpaceAdmissionProtocolTestPair,
 };
 use crate::space::admission::JoinSpaceInput;
+use crate::space::membership::{
+    MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, RecoverSpaceAdmissionsPort,
+};
 use uc_core::membership::AdmissionRecordPersistence;
 
 #[tokio::test]
@@ -307,12 +310,6 @@ async fn prepared_join_keeps_its_exact_request_until_the_upgraded_peer_recovers(
         .start_join_at(join_input("upgrade-prepared"), 1_000)
         .await
         .expect("join request should be saved");
-    pair.joiner()
-        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
-        .await;
-    let before_block = pair.admission_status_invalidation_count();
-    assert_eq!(before_block, 0);
-
     let blocked = pair
         .joiner()
         .recover_pending(AdmissionRecoveryTrigger::StateChanged)
@@ -373,12 +370,6 @@ async fn applied_join_stays_pending_until_the_upgraded_peer_can_complete_it() {
         .start_join_at(join_input("upgrade-applied"), 1_000)
         .await
         .expect("join request should be saved");
-    for _ in 0..2 {
-        pair.joiner()
-            .recover_pending(AdmissionRecoveryTrigger::StateChanged)
-            .await;
-    }
-
     let blocked = pair
         .joiner()
         .recover_pending(AdmissionRecoveryTrigger::StateChanged)
@@ -410,7 +401,7 @@ async fn applied_join_stays_pending_until_the_upgraded_peer_can_complete_it() {
 }
 
 #[tokio::test]
-async fn cancelling_prepared_join_ends_locally_without_waiting_for_peer_upgrade() {
+async fn cancelling_join_ends_locally_without_waiting_for_peer_upgrade() {
     let pair = SpaceAdmissionProtocolTestPair::upgrade_once_on_cancel().await;
     let started = pair
         .joiner()
@@ -445,7 +436,7 @@ async fn cancelling_prepared_join_ends_locally_without_waiting_for_peer_upgrade(
             .cleanup_obligation()
             .expect("Prepared Joiner keeps cleanup responsibility")
             .commit_knowledge(),
-        uc_core::membership::AdmissionCommitKnowledge::Unknown
+        uc_core::membership::AdmissionCommitKnowledge::Known
     );
     assert_eq!(pair.active_joiner_observation_count(), 0);
 }
@@ -501,7 +492,7 @@ async fn active_join_remains_active_while_final_settlement_waits_for_a_peer_upgr
 }
 
 #[tokio::test]
-async fn candidate_is_saved_then_prepared_before_the_next_exchange_is_woken() {
+async fn candidate_is_saved_without_scheduling_another_maintenance_wake() {
     let pair = SpaceAdmissionProtocolTestPair::receiving_candidate().await;
     pair.joiner()
         .start_join_at(join_input("candidate-join"), 1_000)
@@ -514,7 +505,7 @@ async fn candidate_is_saved_then_prepared_before_the_next_exchange_is_woken() {
         .await;
 
     assert_eq!(report.advanced_count, 3);
-    assert_eq!(report.deferred_count, 0);
+    assert_eq!(report.deferred_count, 1);
     assert_eq!(
         pair.events(),
         &[
@@ -526,29 +517,24 @@ async fn candidate_is_saved_then_prepared_before_the_next_exchange_is_woken() {
             ProtocolEvent::JoinerJoinRequestExchanged,
             ProtocolEvent::JoinerSavedCandidate,
             ProtocolEvent::JoinerSavedPrepared,
-            ProtocolEvent::AdmissionRecoveryWoken,
         ]
     );
 }
 
 #[tokio::test]
-async fn prepared_is_exchanged_and_commit_is_saved_on_the_next_recovery() {
+async fn candidate_and_commit_are_advanced_in_one_recovery() {
     let pair = SpaceAdmissionProtocolTestPair::receiving_commit().await;
     pair.joiner()
         .start_join_at(join_input("commit-join"), 1_000)
         .await
         .expect("the join request should be saved before recovery");
-    pair.joiner()
-        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
-        .await;
-
     let report = pair
         .joiner()
         .recover_pending(AdmissionRecoveryTrigger::StateChanged)
         .await;
 
-    assert_eq!(report.advanced_count, 2);
-    assert_eq!(report.deferred_count, 0);
+    assert_eq!(report.advanced_count, 5);
+    assert_eq!(report.deferred_count, 1);
     assert_eq!(
         pair.events(),
         &[
@@ -560,53 +546,34 @@ async fn prepared_is_exchanged_and_commit_is_saved_on_the_next_recovery() {
             ProtocolEvent::JoinerJoinRequestExchanged,
             ProtocolEvent::JoinerSavedCandidate,
             ProtocolEvent::JoinerSavedPrepared,
-            ProtocolEvent::AdmissionRecoveryWoken,
             ProtocolEvent::JoinerContinuationChannelRequested,
             ProtocolEvent::JoinerPreparedExchanged,
             ProtocolEvent::JoinerSavedCommitted,
             ProtocolEvent::JoinerSavedApplied,
-            ProtocolEvent::AdmissionRecoveryWoken,
+            ProtocolEvent::JoinerContinuationChannelRequested,
         ]
     );
 }
 
 #[tokio::test]
-async fn commit_is_applied_and_saved_before_the_next_exchange_is_woken() {
-    let pair = SpaceAdmissionProtocolTestPair::receiving_commit().await;
+async fn maintenance_yields_after_the_activation_plan_is_saved() {
+    let pair = SpaceAdmissionProtocolTestPair::receiving_complete().await;
     pair.joiner()
         .start_join_at(join_input("apply-commit"), 1_000)
         .await
         .expect("the join request should be saved before recovery");
-    pair.joiner()
-        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
-        .await;
-
-    let report = pair
+    let outcome = pair
         .joiner()
-        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .recover_space_admissions(&MembershipMaintenanceTrigger::StateChanged)
         .await;
 
-    assert_eq!(report.advanced_count, 2);
-    assert_eq!(report.deferred_count, 0);
-    assert_eq!(
-        pair.events(),
-        &[
-            ProtocolEvent::DeviceNameSaved,
-            ProtocolEvent::JoinerSavedJoinRequest,
-            ProtocolEvent::AdmissionRecoveryWoken,
-            ProtocolEvent::JoinerInitialChannelRequested,
-            ProtocolEvent::JoinerAuthenticatedChannelSaved,
-            ProtocolEvent::JoinerJoinRequestExchanged,
-            ProtocolEvent::JoinerSavedCandidate,
-            ProtocolEvent::JoinerSavedPrepared,
-            ProtocolEvent::AdmissionRecoveryWoken,
-            ProtocolEvent::JoinerContinuationChannelRequested,
-            ProtocolEvent::JoinerPreparedExchanged,
-            ProtocolEvent::JoinerSavedCommitted,
-            ProtocolEvent::JoinerSavedApplied,
-            ProtocolEvent::AdmissionRecoveryWoken,
-        ]
-    );
+    assert_eq!(outcome.step(), MembershipMaintenanceStepOutcome::Completed);
+    assert!(!outcome.should_continue());
+    assert!(pair
+        .joiner()
+        .has_pending_space_transition()
+        .await
+        .expect("the saved activation requires a lifecycle transition"));
 }
 
 #[tokio::test]
@@ -616,20 +583,17 @@ async fn complete_is_saved_as_an_activation_plan_before_local_activation() {
         .start_join_at(join_input("complete-join"), 1_000)
         .await
         .expect("the join request should be saved before recovery");
-    pair.joiner()
-        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
-        .await;
-    pair.joiner()
-        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
-        .await;
-
     let report = pair
         .joiner()
         .recover_pending(AdmissionRecoveryTrigger::StateChanged)
         .await;
 
-    assert_eq!(report.advanced_count, 1);
+    assert_eq!(report.advanced_count, 6);
     assert_eq!(report.recovery_required_count, 0);
+    assert_eq!(
+        report.disposition,
+        AdmissionRecoveryDisposition::YieldMaintenance
+    );
     assert!(pair.events().ends_with(&[
         ProtocolEvent::JoinerContinuationChannelRequested,
         ProtocolEvent::JoinerAppliedExchanged,
@@ -719,10 +683,15 @@ async fn settled_is_saved_and_finishes_joiner_recovery() {
 
     assert_eq!(report.advanced_count, 1);
     assert_eq!(report.recovery_required_count, 0);
+    assert_eq!(
+        report.disposition,
+        AdmissionRecoveryDisposition::YieldMaintenance
+    );
     assert!(pair.events().ends_with(&[
         ProtocolEvent::JoinerContinuationChannelRequested,
         ProtocolEvent::JoinerCompleteAckExchanged,
         ProtocolEvent::JoinerSavedActiveSettled,
+        ProtocolEvent::AdmissionRecoveryWoken,
     ]));
     assert!(pair.take_created_join().is_active_settled());
     assert_eq!(pair.active_joiner_observation_count(), 0);

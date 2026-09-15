@@ -581,9 +581,11 @@ async fn recovery_summary_tracks_changes_and_rollbacks_without_reading_other_rec
     .unwrap();
     assert_eq!(loaded.len(), 1);
     assert_eq!(fixture.repository.record_reads.load(Ordering::SeqCst), 1);
-    let (mut pending, confirmations, abandonments, next_deadline_ms) = loaded.into_parts();
+    let (mut pending, confirmations, abandonments, next_deadline_ms, sponsor_confirmation_pending) =
+        loaded.into_parts();
     assert!(confirmations.is_empty());
     assert!(abandonments.is_empty());
+    assert!(!sponsor_confirmation_pending);
     assert_eq!(next_deadline_ms, Some(301_000));
     let (aggregate, _) = pending.pop().unwrap().into_parts();
     let cancelled = aggregate.supersede().unwrap().into_replacement();

@@ -51,13 +51,14 @@ impl MaintainSpaceMembershipUseCase {
         let peer_online = matches!(trigger, MembershipMaintenanceTrigger::PeerOnline(_));
         let periodic = matches!(trigger, MembershipMaintenanceTrigger::Periodic);
 
-        if !record(
-            &mut report,
-            LocalWorkStep::MaintenanceAdmissions,
-            self.deps.admissions.recover_space_admissions(&trigger),
-        )
-        .await
-        {
+        let observation = LocalWorkObservation::begin(LocalWorkStep::MaintenanceAdmissions);
+        let admissions = self
+            .deps
+            .admissions
+            .recover_space_admissions(&trigger)
+            .await;
+        observation.finish(diagnostic_outcome(admissions.step()));
+        if !record_outcome(&mut report, admissions.step()) || !admissions.should_continue() {
             return report;
         }
         if !peer_online

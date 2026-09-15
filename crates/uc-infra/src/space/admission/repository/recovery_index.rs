@@ -48,6 +48,7 @@ enum RecoveryAction {
     SponsorDeadline,
     SponsorAbandonment,
     CompletionHelper,
+    SponsorConfirmation,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -67,6 +68,7 @@ pub(crate) struct LoadedRecoveryIndex {
     pub(crate) sponsor_deadlines: Vec<SponsorAdmission>,
     pub(crate) sponsor_abandonments: Vec<SponsorAdmission>,
     pub(crate) next_deadline_ms: Option<i64>,
+    pub(crate) sponsor_confirmation_pending: bool,
 }
 
 impl RecoverySummaryRow {
@@ -100,7 +102,9 @@ impl RecoverySummary {
                 });
         let action = if aggregate.has_pending_sponsor_abandonment() {
             RecoveryAction::SponsorAbandonment
-        } else if sponsor_confirmation_pending || aggregate.has_expirable_sponsor() {
+        } else if sponsor_confirmation_pending {
+            RecoveryAction::SponsorConfirmation
+        } else if aggregate.has_expirable_sponsor() {
             RecoveryAction::SponsorDeadline
         } else if aggregate.pending_recovery().is_some()
             || aggregate.invitation_resolution().is_some()
@@ -119,6 +123,7 @@ impl RecoverySummary {
         let expires_at_ms = match action {
             RecoveryAction::JoinerNetwork
             | RecoveryAction::JoinerExpiry
+            | RecoveryAction::SponsorConfirmation
             | RecoveryAction::SponsorDeadline
             | RecoveryAction::CompletionHelper => aggregate.expires_at_ms(),
             RecoveryAction::None | RecoveryAction::SponsorAbandonment => None,
@@ -149,9 +154,9 @@ impl RecoverySummary {
         match self.action {
             RecoveryAction::JoinerNetwork => true,
             RecoveryAction::JoinerExpiry => self.is_due(now_ms),
-            RecoveryAction::SponsorDeadline | RecoveryAction::CompletionHelper => {
-                self.is_due(now_ms)
-            }
+            RecoveryAction::SponsorConfirmation
+            | RecoveryAction::SponsorDeadline
+            | RecoveryAction::CompletionHelper => self.is_due(now_ms),
             RecoveryAction::SponsorAbandonment => true,
             RecoveryAction::None => false,
         }
@@ -172,6 +177,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                     sponsor_deadlines: Vec::new(),
                     sponsor_abandonments: Vec::new(),
                     next_deadline_ms: None,
+                    sponsor_confirmation_pending: false,
                 });
             }
             let mut cursor: Option<Vec<u8>> = None;
@@ -179,6 +185,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             let mut sponsor_deadlines = Vec::new();
             let mut sponsor_abandonments = Vec::new();
             let mut next_deadline_ms: Option<i64> = None;
+            let mut sponsor_confirmation_pending = false;
             loop {
                 let rows = load_summary_batch(conn, cursor.as_deref())?;
                 if rows.is_empty() {
@@ -210,6 +217,11 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                             next_deadline_ms.map_or(deadline, |current| current.min(deadline)),
                         );
                     }
+                    if summary.action == RecoveryAction::SponsorConfirmation
+                        && !summary.is_due(now_ms)
+                    {
+                        sponsor_confirmation_pending = true;
+                    }
                     if !summary.needs_body(now_ms) {
                         continue;
                     }
@@ -223,10 +235,12 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                                 JoinerAdmission::try_from_record(aggregate)
                                     .ok_or(SpaceAdmissionStateStoreError::Corrupt)?,
                             ),
-                        RecoveryAction::SponsorDeadline => sponsor_deadlines.push(
-                            SponsorAdmission::try_from_record(aggregate)
-                                .ok_or(SpaceAdmissionStateStoreError::Corrupt)?,
-                        ),
+                        RecoveryAction::SponsorConfirmation | RecoveryAction::SponsorDeadline => {
+                            sponsor_deadlines.push(
+                                SponsorAdmission::try_from_record(aggregate)
+                                    .ok_or(SpaceAdmissionStateStoreError::Corrupt)?,
+                            )
+                        }
                         RecoveryAction::SponsorAbandonment => sponsor_abandonments.push(
                             SponsorAdmission::try_from_record(aggregate)
                                 .ok_or(SpaceAdmissionStateStoreError::Corrupt)?,
@@ -245,6 +259,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                 sponsor_deadlines,
                 sponsor_abandonments,
                 next_deadline_ms,
+                sponsor_confirmation_pending,
             })
         })
     }

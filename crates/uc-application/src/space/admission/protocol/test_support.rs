@@ -644,6 +644,7 @@ impl PendingAdmissionRecoveryStatePort for RecordingJoinerStartState {
             Vec::new(),
             Vec::new(),
             None,
+            false,
         ))
     }
 
@@ -1233,6 +1234,7 @@ impl PendingAdmissionRecoveryStatePort for RecordingSponsorState {
                 Vec::new(),
                 Vec::new(),
                 next_deadline,
+                awaiting_confirmation,
             ));
         }
         let persisted = current
@@ -1252,6 +1254,7 @@ impl PendingAdmissionRecoveryStatePort for RecordingSponsorState {
                 Vec::new(),
                 vec![LoadedSponsorAbandonment::new(reopened, token)],
                 None,
+                false,
             )
         } else {
             LoadedAdmissionRecovery::new(
@@ -1259,6 +1262,7 @@ impl PendingAdmissionRecoveryStatePort for RecordingSponsorState {
                 vec![LoadedSponsorDeadline::new(reopened, token)],
                 Vec::new(),
                 None,
+                false,
             )
         })
     }

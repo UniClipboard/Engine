@@ -61,6 +61,7 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                         confirmations,
                         abandonments,
                         index.next_deadline_ms,
+                        index.sponsor_confirmation_pending,
                     ))
                 })
                 .map_err(map_executor_error)

@@ -12,6 +12,7 @@ mod handle_settled;
 mod resolve_invitation;
 mod start_join;
 
+use super::recovery::LoadedPendingAdmission;
 use crate::space::SpaceAdmissionObservationRegistry;
 
 pub use activate_complete::{
@@ -60,6 +61,13 @@ pub(crate) struct JoinerAdmissionService {
     pub(super) space_transition_changes: tokio::sync::watch::Sender<()>,
     pub(super) re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
     pub(super) observations: Arc<SpaceAdmissionObservationRegistry>,
+}
+
+pub(crate) enum JoinerReplyHandlingOutcome {
+    Continue(LoadedPendingAdmission),
+    AwaitingSpaceTransition,
+    PairingFinished,
+    NoImmediateWork,
 }
 
 impl JoinerAdmissionService {

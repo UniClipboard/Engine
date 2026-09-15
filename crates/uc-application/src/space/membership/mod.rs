@@ -43,9 +43,9 @@ pub use ledger::{
 };
 pub(crate) use maintenance::PreparedSpaceMembershipMaintenanceRuntime;
 pub use maintenance::{
-    DeliverPendingGroupUpdatesPort, DeliverRestrictedMembershipPort, MembershipNetworkActivityPort,
-    ReconcileMembershipProjectionPort, RecoverMembershipConflictsPort,
-    RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
+    AdmissionMaintenanceOutcome, DeliverPendingGroupUpdatesPort, DeliverRestrictedMembershipPort,
+    MembershipNetworkActivityPort, ReconcileMembershipProjectionPort,
+    RecoverMembershipConflictsPort, RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
 };
 pub use query_device_trust::{
     AdmissionDisplayStatus, DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership,

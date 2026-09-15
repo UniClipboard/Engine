@@ -152,18 +152,18 @@ pub use membership::{
     RePairingStateError, RePairingStateStorePort,
 };
 pub use membership::{
-    BeginMembershipBranchRecoveryInput, DeliverRestrictedMembershipPort,
-    IssueMembershipBranchRecoveryError, IssueMembershipBranchRecoveryInput,
-    IssueMembershipBranchRecoveryPort, MembershipBranchRecoveryChannelError,
-    MembershipBranchRecoveryChannelPort, MembershipBranchRecoveryCommit,
-    MembershipBranchRecoveryRequest, MembershipMaintenanceStepOutcome,
-    MembershipNetworkActivityPort, PrepareMembershipBranchRecoveryMaterialError,
-    PrepareMembershipBranchRecoveryMaterialInput, PrepareMembershipBranchRecoveryMaterialPort,
-    PrepareMembershipBranchRecoveryRecipientError, PrepareMembershipBranchRecoveryRecipientPort,
-    PrepareMembershipBranchTransitionError, PrepareMembershipBranchTransitionInput,
-    PrepareMembershipBranchTransitionPort, PreparedMembershipBranchRecoveryMaterial,
-    PreparedMembershipBranchRecoveryRecipient, ReconcileMembershipProjectionPort,
-    RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
+    AdmissionMaintenanceOutcome, BeginMembershipBranchRecoveryInput,
+    DeliverRestrictedMembershipPort, IssueMembershipBranchRecoveryError,
+    IssueMembershipBranchRecoveryInput, IssueMembershipBranchRecoveryPort,
+    MembershipBranchRecoveryChannelError, MembershipBranchRecoveryChannelPort,
+    MembershipBranchRecoveryCommit, MembershipBranchRecoveryRequest,
+    MembershipMaintenanceStepOutcome, MembershipNetworkActivityPort,
+    PrepareMembershipBranchRecoveryMaterialError, PrepareMembershipBranchRecoveryMaterialInput,
+    PrepareMembershipBranchRecoveryMaterialPort, PrepareMembershipBranchRecoveryRecipientError,
+    PrepareMembershipBranchRecoveryRecipientPort, PrepareMembershipBranchTransitionError,
+    PrepareMembershipBranchTransitionInput, PrepareMembershipBranchTransitionPort,
+    PreparedMembershipBranchRecoveryMaterial, PreparedMembershipBranchRecoveryRecipient,
+    ReconcileMembershipProjectionPort, RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
 };
 pub use membership::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
 

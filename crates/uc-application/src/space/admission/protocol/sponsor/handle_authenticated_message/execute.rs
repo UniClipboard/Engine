@@ -79,6 +79,7 @@ impl HandleAuthenticatedSpaceAdmissionMessagePort for SpaceAdmissionProtocol {
             } else if message_kind == SpaceAdmissionMessageKind::CompleteAck
                 && reply.has_pairing_confirmation()
             {
+                self.joiner.maintenance_wake.wake();
                 self.recovery.notify_admission_changed();
             } else if message_kind == SpaceAdmissionMessageKind::Abandonment {
                 self.joiner.maintenance_wake.wake();

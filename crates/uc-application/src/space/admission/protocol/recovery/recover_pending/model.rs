@@ -30,6 +30,15 @@ pub struct AdmissionRecoveryReport {
     pub peer_upgrade_required_count: usize,
     /// 状态损坏或违反规则，必须进入恢复处理的数量
     pub recovery_required_count: usize,
+    /// 本次准入推进结束后，成员维护是否可以继续执行普通同步
+    pub(crate) disposition: AdmissionRecoveryDisposition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum AdmissionRecoveryDisposition {
+    #[default]
+    ContinueMaintenance,
+    YieldMaintenance,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -70,6 +79,8 @@ pub struct LoadedAdmissionRecovery {
     sponsor_deadlines: Vec<LoadedSponsorDeadline>,
     sponsor_abandonments: Vec<LoadedSponsorAbandonment>,
     next_deadline_ms: Option<i64>,
+    /// 邀请方仍在等待加入方的最终确认
+    sponsor_confirmation_pending: bool,
 }
 
 pub struct AuthenticatedAdmissionReply {
@@ -135,12 +146,14 @@ impl LoadedAdmissionRecovery {
         sponsor_deadlines: Vec<LoadedSponsorDeadline>,
         sponsor_abandonments: Vec<LoadedSponsorAbandonment>,
         next_deadline_ms: Option<i64>,
+        sponsor_confirmation_pending: bool,
     ) -> Self {
         Self {
             pending_admissions,
             sponsor_deadlines,
             sponsor_abandonments,
             next_deadline_ms,
+            sponsor_confirmation_pending,
         }
     }
 
@@ -151,12 +164,14 @@ impl LoadedAdmissionRecovery {
         Vec<LoadedSponsorDeadline>,
         Vec<LoadedSponsorAbandonment>,
         Option<i64>,
+        bool,
     ) {
         (
             self.pending_admissions,
             self.sponsor_deadlines,
             self.sponsor_abandonments,
             self.next_deadline_ms,
+            self.sponsor_confirmation_pending,
         )
     }
 

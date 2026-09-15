@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 
-use super::{MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger};
+use super::{
+    AdmissionMaintenanceOutcome, MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger,
+};
 
 pub trait WakeSpaceMembershipMaintenancePort: Send + Sync {
     fn wake(&self);
@@ -24,7 +26,7 @@ pub trait RecoverSpaceAdmissionsPort: Send + Sync {
     async fn recover_space_admissions(
         &self,
         trigger: &MembershipMaintenanceTrigger,
-    ) -> MembershipMaintenanceStepOutcome;
+    ) -> AdmissionMaintenanceOutcome;
 }
 
 #[async_trait]

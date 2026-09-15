@@ -9,6 +9,10 @@ use super::test_support::{
     authenticated_join_request, authenticated_join_request_started_at, authenticated_prepared,
     authenticated_prepared_with_peers, ProtocolEvent, SpaceAdmissionProtocolTestPair,
 };
+use crate::space::membership::{
+    AdmissionMaintenanceOutcome, MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger,
+    RecoverSpaceAdmissionsPort,
+};
 
 #[tokio::test]
 async fn candidate_abandonment_is_saved_before_reply_and_duplicate_replays_it() {
@@ -321,6 +325,7 @@ async fn complete_ack_is_saved_before_the_sponsor_returns_settled() {
             ProtocolEvent::SponsorSavedCommitted,
             ProtocolEvent::SponsorSavedApplied,
             ProtocolEvent::SponsorSavedCompleted,
+            ProtocolEvent::AdmissionRecoveryWoken,
         ]
     );
 }
@@ -468,6 +473,8 @@ async fn duplicate_complete_ack_replays_settled_without_a_new_commit() {
             ProtocolEvent::SponsorSavedCommitted,
             ProtocolEvent::SponsorSavedApplied,
             ProtocolEvent::SponsorSavedCompleted,
+            ProtocolEvent::AdmissionRecoveryWoken,
+            ProtocolEvent::AdmissionRecoveryWoken,
         ]
     );
 }
@@ -506,6 +513,13 @@ async fn applied_is_saved_before_the_sponsor_returns_complete() {
             .expect("Complete reply must be available")
             .kind(),
         SpaceAdmissionMessageKind::Complete
+    );
+    pair.seed_sponsor(complete.into_admission());
+    assert_eq!(
+        pair.sponsor()
+            .recover_space_admissions(&MembershipMaintenanceTrigger::StateChanged)
+            .await,
+        AdmissionMaintenanceOutcome::Yield(MembershipMaintenanceStepOutcome::Completed)
     );
 }
 
