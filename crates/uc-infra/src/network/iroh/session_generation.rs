@@ -126,21 +126,26 @@ impl SessionProtocolRegistry {
         }
     }
 
-    pub(super) fn publish(
+    pub(super) async fn publish(
         &self,
         handlers: SessionProtocolHandlers,
     ) -> Result<SessionProtocolGenerationHandle, SessionProtocolRegistryError> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state.current.is_some() {
-            return Err(SessionProtocolRegistryError::AlreadyActive);
-        }
+        let rejected_handlers = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.current.is_some() {
+                handlers
+            } else {
+                let generation = Arc::new(SessionProtocolGeneration::new(handlers));
+                state.current = Some(Arc::clone(&generation));
+                return Ok(SessionProtocolGenerationHandle { generation });
+            }
+        };
 
-        let generation = Arc::new(SessionProtocolGeneration::new(handlers));
-        state.current = Some(Arc::clone(&generation));
-        Ok(SessionProtocolGenerationHandle { generation })
+        rejected_handlers.shutdown().await;
+        Err(SessionProtocolRegistryError::AlreadyActive)
     }
 
     pub(super) async fn quiesce(
@@ -330,6 +335,12 @@ impl SessionProtocolGeneration {
 }
 
 impl SessionProtocolHandlers {
+    pub(super) async fn shutdown(self) {
+        for handler in self.handlers {
+            handler.shutdown().await;
+        }
+    }
+
     fn handler(&self, alpn: &[u8]) -> Option<Arc<dyn DynProtocolHandler>> {
         self.routes
             .get(alpn)

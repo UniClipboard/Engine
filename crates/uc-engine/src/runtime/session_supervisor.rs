@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn, Instrument};
 use uc_application::facade::{
     AppFacade, ApplicationRuntime, ClipboardInboundEvent, ClipboardInboundEventAction,
-    ClipboardInboundEventPort,
+    ClipboardInboundEventPort, CompletePendingSpaceTransitionError,
 };
 use uc_core::TaskRegistry;
 use uc_infra::fs::{FsAtomicPublisher, FsHiddenPathMarker, FsInboundFileTarget};
@@ -30,6 +30,8 @@ use crate::assembly::lifecycle::{build_network_runtime, prepare_daemon_session};
 use crate::assembly::sync_engine::SyncSessionAssembly;
 use crate::engine::event_stream::EventSender;
 use crate::subsystems::peer_keepalive::spawn_peer_reachability_event_task;
+#[cfg(feature = "dev-tools")]
+use crate::SessionHandoverFailurePoint;
 use crate::{
     EngineEvent, InboundNoticeActionSummary, InboundNoticeEvent, InboundRepresentationSummary,
 };
@@ -42,26 +44,64 @@ const SESSION_RUNTIME_FAILED_CODE: u32 = 1101;
 
 #[cfg(feature = "dev-tools")]
 #[derive(Default)]
+struct SessionHandoverTestFailure {
+    remaining: AtomicUsize,
+    consumed: AtomicUsize,
+}
+
+#[cfg(feature = "dev-tools")]
+impl SessionHandoverTestFailure {
+    fn arm(&self) {
+        self.remaining.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn consume(&self) -> bool {
+        let consumed = self
+            .remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok();
+        if consumed {
+            self.consumed.fetch_add(1, Ordering::SeqCst);
+        }
+        consumed
+    }
+
+    fn consumed(&self) -> usize {
+        self.consumed.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(feature = "dev-tools")]
+#[derive(Default)]
 struct SessionHandoverTestControl {
-    remaining_preparation_failures: AtomicUsize,
+    session_quiesce: SessionHandoverTestFailure,
+    transition_completion: SessionHandoverTestFailure,
+    session_preparation: SessionHandoverTestFailure,
+    session_activation: SessionHandoverTestFailure,
     network_build_count: AtomicUsize,
-    preparation_failure_count: AtomicUsize,
 }
 
 #[cfg(feature = "dev-tools")]
 impl SessionHandoverTestControl {
-    fn arm_preparation_failure(&self) {
-        self.remaining_preparation_failures
-            .fetch_add(1, Ordering::SeqCst);
+    fn failure(&self, point: SessionHandoverFailurePoint) -> &SessionHandoverTestFailure {
+        match point {
+            SessionHandoverFailurePoint::SessionQuiesce => &self.session_quiesce,
+            SessionHandoverFailurePoint::TransitionCompletion => &self.transition_completion,
+            SessionHandoverFailurePoint::SessionPreparation => &self.session_preparation,
+            SessionHandoverFailurePoint::SessionActivation => &self.session_activation,
+        }
     }
+}
 
-    fn consume_preparation_failure(&self) -> bool {
-        self.remaining_preparation_failures
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                remaining.checked_sub(1)
-            })
-            .is_ok()
-    }
+#[cfg(feature = "dev-tools")]
+pub(super) struct SessionHandoverDiagnostics {
+    pub(super) network_build_count: usize,
+    pub(super) session_quiesce_failure_count: usize,
+    pub(super) transition_completion_failure_count: usize,
+    pub(super) session_preparation_failure_count: usize,
+    pub(super) session_activation_failure_count: usize,
 }
 
 fn session_runtime_error(context: &'static str, error: impl std::fmt::Display) -> EngineError {
@@ -71,6 +111,29 @@ fn session_runtime_error(context: &'static str, error: impl std::fmt::Display) -
         EngineErrorCategory::Unavailable,
         true,
     )
+}
+
+fn retryable_space_transition_runtime_error(
+    context: &'static str,
+    error: impl std::fmt::Display,
+) -> EngineError {
+    error!(context, error = %error, "engine Space transition failed");
+    EngineError::new(1103, EngineErrorCategory::Unavailable, true)
+}
+
+fn space_transition_error(
+    context: &'static str,
+    error: CompletePendingSpaceTransitionError,
+) -> EngineError {
+    error!(context, error = %error, "engine Space transition failed");
+    match error {
+        CompletePendingSpaceTransitionError::State { .. } => {
+            EngineError::new(1103, EngineErrorCategory::Unavailable, true)
+        }
+        CompletePendingSpaceTransitionError::JoinNotActive => {
+            EngineError::new(1103, EngineErrorCategory::Internal, false)
+        }
+    }
 }
 
 struct ProductionSessionFactory {
@@ -354,18 +417,19 @@ impl SessionSupervisor {
     }
 
     #[cfg(feature = "dev-tools")]
-    pub(super) fn fail_next_session_preparation(&self) {
-        self.test_control.arm_preparation_failure();
+    pub(super) fn fail_next_session_handover(&self, point: SessionHandoverFailurePoint) {
+        self.test_control.failure(point).arm();
     }
 
     #[cfg(feature = "dev-tools")]
-    pub(super) fn session_handover_diagnostics(&self) -> (usize, usize) {
-        (
-            self.test_control.network_build_count.load(Ordering::SeqCst),
-            self.test_control
-                .preparation_failure_count
-                .load(Ordering::SeqCst),
-        )
+    pub(super) fn session_handover_diagnostics(&self) -> SessionHandoverDiagnostics {
+        SessionHandoverDiagnostics {
+            network_build_count: self.test_control.network_build_count.load(Ordering::SeqCst),
+            session_quiesce_failure_count: self.test_control.session_quiesce.consumed(),
+            transition_completion_failure_count: self.test_control.transition_completion.consumed(),
+            session_preparation_failure_count: self.test_control.session_preparation.consumed(),
+            session_activation_failure_count: self.test_control.session_activation.consumed(),
+        }
     }
 
     pub(super) async fn rebuild_session(&self) -> Result<(), EngineError> {
@@ -461,11 +525,9 @@ impl SessionSupervisor {
             session
                 .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
                 .await;
-            let completed = observe_local_result(
-                LocalWorkStep::SessionCompleteTransition,
-                facade.complete_pending_space_transition(),
-            )
-            .await;
+            let completed = self
+                .complete_pending_space_transition(&facade, "complete runtime space transition")
+                .await;
             match completed {
                 Ok(_) => {
                     self.install_new_session(true).await?;
@@ -484,14 +546,10 @@ impl SessionSupervisor {
                         .revision;
                     Ok(Some(revision))
                 }
-                Err(error) => {
-                    let original =
-                        operation_error_with_code(1103, "complete runtime space transition", error);
-                    match self.install_new_session(false).await {
-                        Ok(()) => Err(original),
-                        Err(restore_error) => Err(restore_error),
-                    }
-                }
+                Err(error) => match self.install_new_session(false).await {
+                    Ok(()) => Err(error),
+                    Err(restore_error) => Err(restore_error),
+                },
             }
         })
         .await
@@ -616,6 +674,17 @@ impl SessionSupervisor {
     }
 
     async fn quiesce_network_session(&self) -> Result<(), EngineError> {
+        #[cfg(feature = "dev-tools")]
+        if self
+            .test_control
+            .failure(SessionHandoverFailurePoint::SessionQuiesce)
+            .consume()
+        {
+            return Err(session_runtime_error(
+                "quiesce p2p session",
+                "injected session quiesce failure",
+            ));
+        }
         let mut runtime = self.runtime.lock().await;
         let Some(network) = runtime.network.as_mut() else {
             return Ok(());
@@ -640,6 +709,31 @@ impl SessionSupervisor {
         Ok(())
     }
 
+    async fn complete_pending_space_transition(
+        &self,
+        facade: &AppFacade,
+        error_context: &'static str,
+    ) -> Result<(), EngineError> {
+        #[cfg(feature = "dev-tools")]
+        if self
+            .test_control
+            .failure(SessionHandoverFailurePoint::TransitionCompletion)
+            .consume()
+        {
+            return Err(retryable_space_transition_runtime_error(
+                error_context,
+                "injected transition completion failure",
+            ));
+        }
+        observe_local_result(
+            LocalWorkStep::SessionCompleteTransition,
+            facade.complete_pending_space_transition(),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| space_transition_error(error_context, error))
+    }
+
     async fn install_active_session(
         &self,
         factory: &ProductionSessionFactory,
@@ -659,22 +753,43 @@ impl SessionSupervisor {
                 .prepare_session()
         };
         let prepared = factory.prepare(session_builder).await?;
+        #[cfg(feature = "dev-tools")]
+        if self
+            .test_control
+            .failure(SessionHandoverFailurePoint::SessionActivation)
+            .consume()
+        {
+            prepared.network_session.shutdown().await;
+            prepared
+                .session
+                .shutdown(uc_core::FileTransferCancellationReason::Unknown)
+                .await;
+            return Err(session_runtime_error(
+                "activate p2p session",
+                "injected session activation failure",
+            ));
+        }
         let mut runtime = self.runtime.lock().await;
         let Some(network) = runtime.network.as_mut() else {
             drop(runtime);
+            prepared.network_session.shutdown().await;
             prepared
                 .session
                 .shutdown(uc_core::FileTransferCancellationReason::Unknown)
                 .await;
             return Err(operation_unavailable_error());
         };
-        if let Err(error) = network.activate_session(prepared.network_session) {
+        let activation = network
+            .activate_session(prepared.network_session)
+            .await
+            .map_err(|error| session_runtime_error("activate p2p session", error));
+        if let Err(error) = activation {
             drop(runtime);
             prepared
                 .session
                 .shutdown(uc_core::FileTransferCancellationReason::Unknown)
                 .await;
-            return Err(session_runtime_error("activate p2p session", error));
+            return Err(error);
         }
         runtime.session = Some(prepared.session);
         Ok(())
@@ -712,14 +827,8 @@ impl SessionSupervisor {
             session
                 .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
                 .await;
-            observe_local_result(
-                LocalWorkStep::SessionCompleteTransition,
-                facade.complete_pending_space_transition(),
-            )
-            .await
-            .map_err(|error| {
-                operation_error_with_code(1103, "recover pending space transition", error)
-            })?;
+            self.complete_pending_space_transition(&facade, "recover pending space transition")
+                .await?;
             observe_local_result(
                 LocalWorkStep::SessionPrepare,
                 self.install_active_session(&factory),
@@ -782,10 +891,11 @@ impl ProductionSessionFactory {
         session_builder: IrohSessionBuilder,
     ) -> Result<PreparedProductionSession, EngineError> {
         #[cfg(feature = "dev-tools")]
-        if self.test_control.consume_preparation_failure() {
-            self.test_control
-                .preparation_failure_count
-                .fetch_add(1, Ordering::SeqCst);
+        if self
+            .test_control
+            .failure(SessionHandoverFailurePoint::SessionPreparation)
+            .consume()
+        {
             return Err(session_runtime_error(
                 "p2p session",
                 "injected session preparation failure",
@@ -1249,6 +1359,28 @@ mod tests {
         assert_eq!(error.code(), SESSION_RUNTIME_FAILED_CODE);
         assert_eq!(error.category(), EngineErrorCategory::Unavailable);
         assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn space_transition_runtime_failure_remains_retryable_for_background_recovery() {
+        let error =
+            retryable_space_transition_runtime_error("complete Space transition", "test failure");
+
+        assert_eq!(error.code(), 1103);
+        assert_eq!(error.category(), EngineErrorCategory::Unavailable);
+        assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn missing_active_join_stops_background_transition_recovery() {
+        let error = space_transition_error(
+            "complete Space transition",
+            CompletePendingSpaceTransitionError::JoinNotActive,
+        );
+
+        assert_eq!(error.code(), 1103);
+        assert_eq!(error.category(), EngineErrorCategory::Internal);
+        assert!(!error.is_retryable());
     }
 
     #[test]

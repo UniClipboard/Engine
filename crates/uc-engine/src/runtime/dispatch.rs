@@ -671,16 +671,20 @@ impl EngineRuntime for ProductionRuntime {
                 .ok_or_else(|| {
                     EngineError::new(1911, crate::EngineErrorCategory::Unavailable, true)
                 }),
-            DevOperation::FailNextSessionPreparation => {
-                self.session_supervisor.fail_next_session_preparation();
-                Ok(DevOperationResult::SessionPreparationFailureArmed)
+            DevOperation::FailNextSessionHandover { point } => {
+                self.session_supervisor.fail_next_session_handover(point);
+                Ok(DevOperationResult::SessionHandoverFailureArmed)
             }
             DevOperation::QuerySessionHandoverDiagnostics => {
-                let (network_build_count, preparation_failure_count) =
-                    self.session_supervisor.session_handover_diagnostics();
+                let diagnostics = self.session_supervisor.session_handover_diagnostics();
                 Ok(DevOperationResult::SessionHandoverDiagnostics {
-                    network_build_count,
-                    preparation_failure_count,
+                    network_build_count: diagnostics.network_build_count,
+                    session_quiesce_failure_count: diagnostics.session_quiesce_failure_count,
+                    transition_completion_failure_count: diagnostics
+                        .transition_completion_failure_count,
+                    session_preparation_failure_count: diagnostics
+                        .session_preparation_failure_count,
+                    session_activation_failure_count: diagnostics.session_activation_failure_count,
                 })
             }
             DevOperation::SetNetworkPartition {

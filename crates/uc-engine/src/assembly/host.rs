@@ -869,7 +869,10 @@ mod tests {
         )
         .await
         .unwrap_or_else(|error| panic!("daemon lifecycle assembly failed: {error:#}"));
-        network.activate_session(prepared.prepared_session).unwrap();
+        network
+            .activate_session(prepared.prepared_session)
+            .await
+            .unwrap();
         let membership_history_reachable = network
             .accepts_protocol_for_test(uc_infra::network::iroh::MEMBERSHIP_HISTORY_EXCHANGE_ALPN)
             .await;

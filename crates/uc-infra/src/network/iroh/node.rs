@@ -219,10 +219,14 @@ impl IrohNode {
     }
 
     /// 发布已经完整准备好的下一代空间会话。
-    pub fn activate_session(&mut self, prepared: PreparedIrohSession) -> Result<(), IrohNodeError> {
+    pub async fn activate_session(
+        &mut self,
+        prepared: PreparedIrohSession,
+    ) -> Result<(), IrohNodeError> {
         let generation = self
             .session_protocols
             .publish(prepared.handlers)
+            .await
             .map_err(IrohNodeError::session_protocol)?;
         self.session_generation = Some(generation);
         Ok(())
@@ -700,6 +704,12 @@ pub struct IrohSessionBuilder {
 
 pub struct PreparedIrohSession {
     handlers: SessionProtocolHandlers,
+}
+
+impl PreparedIrohSession {
+    pub async fn shutdown(self) {
+        self.handlers.shutdown().await;
+    }
 }
 
 impl IrohSessionBuilder {
@@ -1765,9 +1775,10 @@ mod tests {
         ))
     }
 
-    fn spawn_session(network: IrohNodeBuilder, builder: IrohSessionBuilder) -> IrohNode {
+    async fn spawn_session(network: IrohNodeBuilder, builder: IrohSessionBuilder) -> IrohNode {
         let mut node = network.spawn();
         node.activate_session(builder.finish())
+            .await
             .expect("activate session");
         node
     }
@@ -1898,7 +1909,7 @@ mod tests {
         // Ports are handed out as trait objects so ownership (and hence
         // the session adapter) survives past the node's spawn.
         drop(handlers);
-        let node = spawn_session(network, builder);
+        let node = spawn_session(network, builder).await;
         assert!(!node.accepts_protocol_for_test(PEER_REACHABILITY_ALPN).await);
         // Clean shutdown exits without hanging; the test runner's default
         // timeout would catch a deadlock.
@@ -1966,6 +1977,7 @@ mod tests {
         client.close().await;
         let session = builder.prepare_session();
         spawn_session(builder, session)
+            .await
             .shutdown()
             .with_subscriber(dispatch)
             .await;
@@ -2032,7 +2044,7 @@ mod tests {
             .install_membership_attestation_handler(&adapter, Arc::new(RejectingMembershipEndpoint))
             .expect("install membership attestation handler");
 
-        spawn_session(network, builder).shutdown().await;
+        spawn_session(network, builder).await.shutdown().await;
     }
 
     #[tokio::test]
@@ -2085,7 +2097,7 @@ mod tests {
             )
             .expect("install membership handler");
 
-        spawn_session(network, builder).shutdown().await;
+        spawn_session(network, builder).await.shutdown().await;
     }
 
     #[tokio::test]
@@ -2099,7 +2111,7 @@ mod tests {
             .expect("first bind");
         let first_id = first.session_context.endpoint.id();
         let first_session = first.prepare_session();
-        let first_node = spawn_session(first, first_session);
+        let first_node = spawn_session(first, first_session).await;
         first_node.shutdown().await;
 
         let second = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
@@ -2107,7 +2119,7 @@ mod tests {
             .expect("second bind");
         assert_eq!(second.session_context.endpoint.id(), first_id);
         let second_session = second.prepare_session();
-        spawn_session(second, second_session).shutdown().await;
+        spawn_session(second, second_session).await.shutdown().await;
     }
 
     #[derive(Default)]
@@ -2175,7 +2187,7 @@ mod tests {
             .await;
         assert_eq!(unknown_state, uc_core::ports::ReachabilityState::Unknown,);
 
-        let node = spawn_session(network, builder);
+        let node = spawn_session(network, builder).await;
         assert!(node.accepts_protocol_for_test(PEER_REACHABILITY_ALPN).await);
         assert!(!node.accepts_protocol_for_test(LEGACY_CLIPBOARD_ALPN).await);
         node.shutdown().await;
@@ -2197,7 +2209,7 @@ mod tests {
                 Arc::new(FixedClock(1_700_000_000_000)),
             )
             .expect("install first session");
-        let mut node = spawn_session(network, first);
+        let mut node = spawn_session(network, first).await;
         let endpoint_id = node.session_context.endpoint.id();
         assert!(node.accepts_protocol_for_test(PEER_REACHABILITY_ALPN).await);
 
@@ -2215,6 +2227,7 @@ mod tests {
         node.quiesce_session().await.expect("quiesce first session");
         assert!(!node.accepts_protocol_for_test(PEER_REACHABILITY_ALPN).await);
         node.activate_session(second.finish())
+            .await
             .expect("activate second session");
 
         assert_eq!(node.session_context.endpoint.id(), endpoint_id);
@@ -2319,7 +2332,7 @@ mod tests {
         // Receiver's subscribe handle is ready for the ingest use case.
         let _inbound_rx = receiver.subscribe();
 
-        let node = spawn_session(network, builder);
+        let node = spawn_session(network, builder).await;
         node.shutdown().await;
     }
 
@@ -2374,7 +2387,7 @@ mod tests {
             .expect("publish through blob port");
         assert!(blob_transfer.has(&digest).await.expect("has digest"));
 
-        let node = spawn_session(network, builder);
+        let node = spawn_session(network, builder).await;
         node.shutdown().await;
     }
 

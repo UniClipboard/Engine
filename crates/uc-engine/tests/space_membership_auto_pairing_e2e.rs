@@ -4315,9 +4315,50 @@ async fn existing_device_switches_space_through_stable_operations() {
     }
 }
 
+// Space 切换连续封口失败后必须重试，且不能重绑网络入口。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn space_switch_recovers_after_repeated_session_quiesce_failures() {
+    assert_space_switch_recovers_after_repeated_handover_failures(
+        uc_engine::SessionHandoverFailurePoint::SessionQuiesce,
+        2,
+    )
+    .await;
+}
+
+// Space 切换连续提交失败后必须从权威状态恢复，且不能重绑网络入口。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn space_switch_recovers_after_repeated_transition_completion_failures() {
+    assert_space_switch_recovers_after_repeated_handover_failures(
+        uc_engine::SessionHandoverFailurePoint::TransitionCompletion,
+        2,
+    )
+    .await;
+}
+
 // 已提交的 Space 切换即使连续会话准备失败，也只能恢复目标 Space，且不能重绑网络入口。
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn committed_space_switch_recovers_after_repeated_session_preparation_failures() {
+    assert_space_switch_recovers_after_repeated_handover_failures(
+        uc_engine::SessionHandoverFailurePoint::SessionPreparation,
+        2,
+    )
+    .await;
+}
+
+// 已准备的新会话连续发布失败后必须被清理并重试，且不能重绑网络入口。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn committed_space_switch_recovers_after_repeated_session_activation_failures() {
+    assert_space_switch_recovers_after_repeated_handover_failures(
+        uc_engine::SessionHandoverFailurePoint::SessionActivation,
+        2,
+    )
+    .await;
+}
+
+async fn assert_space_switch_recovers_after_repeated_handover_failures(
+    failure_point: uc_engine::SessionHandoverFailurePoint,
+    failure_repetitions: usize,
+) {
     uc_engine::init_test_tracing();
     let rendezvous = mount_rendezvous().await;
     let sponsor_harness = DeviceHarness::new(rendezvous.uri());
@@ -4327,23 +4368,16 @@ async fn committed_space_switch_recovers_after_repeated_session_preparation_fail
     let target_space_id = create_space(&sponsor, "Sponsor").await.0;
     let source_space_id = create_space(&joiner, "Joiner").await.0;
     let endpoint_before = query_endpoint_id(&joiner, "joiner before injected failure").await;
-    assert_eq!(query_session_handover_diagnostics(&joiner).await, (1, 0));
-    let armed = joiner
-        .execute_dev(uc_engine::DevOperation::FailNextSessionPreparation)
-        .await
-        .expect("arm one session preparation failure");
+    let initial_diagnostics = query_session_handover_diagnostics(&joiner).await;
+    assert_eq!(initial_diagnostics.network_build_count, 1);
     assert_eq!(
-        armed,
-        uc_engine::DevOperationResult::SessionPreparationFailureArmed
+        initial_diagnostics.failure_count(failure_point),
+        0,
+        "the selected failure point must start unused"
     );
-    let armed = joiner
-        .execute_dev(uc_engine::DevOperation::FailNextSessionPreparation)
-        .await
-        .expect("arm a second session preparation failure");
-    assert_eq!(
-        armed,
-        uc_engine::DevOperationResult::SessionPreparationFailureArmed
-    );
+    for _ in 0..failure_repetitions {
+        arm_session_handover_failure(&joiner, failure_point).await;
+    }
 
     let invitation = issue_invitation(&sponsor).await;
     let OperationResult::JoinSpace(status) = joiner
@@ -4361,19 +4395,20 @@ async fn committed_space_switch_recovers_after_repeated_session_preparation_fail
 
     let failure_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
-        if query_session_handover_diagnostics(&joiner).await == (1, 1) {
+        let diagnostics = query_session_handover_diagnostics(&joiner).await;
+        if diagnostics.failure_count(failure_point) >= 1 {
             break;
         }
         assert!(
             tokio::time::Instant::now() < failure_deadline,
-            "the injected session preparation failure was not observed"
+            "the injected session handover failure was not observed"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let unavailable = joiner
         .execute(Operation::QuerySetupState)
         .await
-        .expect_err("old Space operations must stay closed after preparation failure");
+        .expect_err("old Space operations must stay closed after handover failure");
     assert_eq!(
         unavailable.category(),
         uc_engine::EngineErrorCategory::Unavailable
@@ -4383,11 +4418,9 @@ async fn committed_space_switch_recovers_after_repeated_session_preparation_fail
         endpoint_before,
         "session recovery must keep the existing endpoint"
     );
-    assert_eq!(
-        query_session_handover_diagnostics(&joiner).await,
-        (1, 1),
-        "the first failure must be consumed without building another network"
-    );
+    let failure_diagnostics = query_session_handover_diagnostics(&joiner).await;
+    assert_eq!(failure_diagnostics.network_build_count, 1);
+    assert!(failure_diagnostics.failure_count(failure_point) >= 1);
 
     wait_for_completed_join(&joiner, "Joiner", status, &target_space_id).await;
     assert_ne!(source_space_id, target_space_id);
@@ -4396,10 +4429,14 @@ async fn committed_space_switch_recovers_after_repeated_session_preparation_fail
         endpoint_before,
         "successful retry must not rebind the endpoint"
     );
+    let recovered_diagnostics = query_session_handover_diagnostics(&joiner).await;
     assert_eq!(
-        query_session_handover_diagnostics(&joiner).await,
-        (1, 2),
+        recovered_diagnostics.network_build_count, 1,
         "repeated failures and the successful retry must reuse the original network"
+    );
+    assert_eq!(
+        recovered_diagnostics.failure_count(failure_point),
+        failure_repetitions
     );
     wait_for_active_member_count(&sponsor, 2).await;
     wait_for_active_member_count(&joiner, 2).await;
@@ -4596,19 +4633,69 @@ async fn query_endpoint_id(engine: &Engine, node: &str) -> [u8; 32] {
     endpoint_id
 }
 
-async fn query_session_handover_diagnostics(engine: &Engine) -> (usize, usize) {
+struct SessionHandoverDiagnostics {
+    network_build_count: usize,
+    session_quiesce_failure_count: usize,
+    transition_completion_failure_count: usize,
+    session_preparation_failure_count: usize,
+    session_activation_failure_count: usize,
+}
+
+impl SessionHandoverDiagnostics {
+    fn failure_count(&self, point: uc_engine::SessionHandoverFailurePoint) -> usize {
+        match point {
+            uc_engine::SessionHandoverFailurePoint::SessionQuiesce => {
+                self.session_quiesce_failure_count
+            }
+            uc_engine::SessionHandoverFailurePoint::TransitionCompletion => {
+                self.transition_completion_failure_count
+            }
+            uc_engine::SessionHandoverFailurePoint::SessionPreparation => {
+                self.session_preparation_failure_count
+            }
+            uc_engine::SessionHandoverFailurePoint::SessionActivation => {
+                self.session_activation_failure_count
+            }
+        }
+    }
+}
+
+async fn arm_session_handover_failure(
+    engine: &Engine,
+    point: uc_engine::SessionHandoverFailurePoint,
+) {
+    let result = engine
+        .execute_dev(uc_engine::DevOperation::FailNextSessionHandover { point })
+        .await
+        .expect("arm session handover failure");
+    assert_eq!(
+        result,
+        uc_engine::DevOperationResult::SessionHandoverFailureArmed
+    );
+}
+
+async fn query_session_handover_diagnostics(engine: &Engine) -> SessionHandoverDiagnostics {
     let result = engine
         .execute_dev(uc_engine::DevOperation::QuerySessionHandoverDiagnostics)
         .await
         .expect("query session handover diagnostics");
     let uc_engine::DevOperationResult::SessionHandoverDiagnostics {
         network_build_count,
-        preparation_failure_count,
+        session_quiesce_failure_count,
+        transition_completion_failure_count,
+        session_preparation_failure_count,
+        session_activation_failure_count,
     } = result
     else {
         panic!("unexpected session handover diagnostics result");
     };
-    (network_build_count, preparation_failure_count)
+    SessionHandoverDiagnostics {
+        network_build_count,
+        session_quiesce_failure_count,
+        transition_completion_failure_count,
+        session_preparation_failure_count,
+        session_activation_failure_count,
+    }
 }
 
 async fn create_space(engine: &Engine, device_name: &str) -> (String, String) {

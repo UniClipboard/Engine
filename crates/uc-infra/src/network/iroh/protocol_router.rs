@@ -61,7 +61,7 @@ impl ProtocolRouterBuilder {
 mod tests {
     use super::*;
     use crate::network::iroh::session_generation::{
-        SessionProtocolHandlersBuilder, SessionProtocolRegistry,
+        SessionProtocolHandlersBuilder, SessionProtocolRegistry, SessionProtocolRegistryError,
     };
     use crate::network::iroh::LEGACY_PEER_REACHABILITY_ALPN;
     use iroh::{
@@ -99,6 +99,50 @@ mod tests {
         async fn shutdown(&self) {
             self.shutdowns.fetch_add(1, AtomicOrdering::SeqCst);
         }
+    }
+
+    #[tokio::test]
+    async fn rejected_generation_handlers_are_closed_without_retiring_current_generation() {
+        const TEST_ALPN: &[u8] = b"uniclipboard/test-rejected-generation/1";
+
+        let registry = SessionProtocolRegistry::new();
+        let active_shutdowns = Arc::new(AtomicUsize::new(0));
+        let mut active_handlers = SessionProtocolHandlersBuilder::new();
+        active_handlers
+            .install(
+                [TEST_ALPN],
+                CountAndHold {
+                    accepted: Arc::new(AtomicUsize::new(0)),
+                    shutdowns: Arc::clone(&active_shutdowns),
+                    started: Arc::new(Notify::new()),
+                },
+            )
+            .unwrap();
+        let active = registry.publish(active_handlers.build()).await.unwrap();
+
+        let rejected_shutdowns = Arc::new(AtomicUsize::new(0));
+        let mut rejected_handlers = SessionProtocolHandlersBuilder::new();
+        rejected_handlers
+            .install(
+                [TEST_ALPN],
+                CountAndHold {
+                    accepted: Arc::new(AtomicUsize::new(0)),
+                    shutdowns: Arc::clone(&rejected_shutdowns),
+                    started: Arc::new(Notify::new()),
+                },
+            )
+            .unwrap();
+        let error = registry
+            .publish(rejected_handlers.build())
+            .await
+            .expect_err("second generation must be rejected while the first is active");
+        assert!(matches!(error, SessionProtocolRegistryError::AlreadyActive));
+
+        assert_eq!(rejected_shutdowns.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(active_shutdowns.load(AtomicOrdering::SeqCst), 0);
+
+        registry.quiesce(&active).await.unwrap();
+        assert_eq!(active_shutdowns.load(AtomicOrdering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -148,7 +192,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let first = registry.publish(first_handlers.build()).unwrap();
+        let first = registry.publish(first_handlers.build()).await.unwrap();
         assert!(matches!(
             hooks.before_connect(&server.addr(), TEST_ALPN).await,
             iroh::endpoint::BeforeConnectOutcome::Accept
@@ -188,7 +232,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let second = registry.publish(second_handlers.build()).unwrap();
+        let second = registry.publish(second_handlers.build()).await.unwrap();
         let second_connection = client.connect(server.addr(), TEST_ALPN).await.unwrap();
         second_started.notified().await;
 
