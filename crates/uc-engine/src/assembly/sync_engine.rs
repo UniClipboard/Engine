@@ -515,7 +515,7 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&space_setup.peer_admission),
         Arc::clone(&space_setup.fingerprint),
         Arc::clone(&space_setup.clock),
-    );
+    )?;
     // Phase 96 INDIC-01:连接通道单一真相源。复用同一 endpoint +
     // peer_addr_repo,纯读 adapter 不装 ALPN handler。
     let connection_channel: Arc<dyn ConnectionChannelPort> =
@@ -539,7 +539,7 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&space_setup.peer_admission),
         Arc::clone(&space_setup.fingerprint),
         Arc::clone(&peer_reachability),
-    );
+    )?;
     let clipboard_dispatch: Arc<dyn ClipboardDispatchPort> = clipboard_dispatch;
     let clipboard_receiver: Arc<dyn ClipboardReceiverPort> = clipboard_receiver;
     // Install the active-clipboard state ALPN (0xC3) as an independent
@@ -557,7 +557,7 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&space_setup.member_repo),
         Arc::clone(&space_setup.peer_admission),
         Arc::clone(&space_setup.fingerprint),
-    );
+    )?;
     let active_clipboard_dispatch: Arc<dyn ActiveClipboardDispatchPort> = active_clipboard_dispatch;
     let active_clipboard_receiver: Arc<dyn ActiveClipboardReceiverPort> = active_clipboard_receiver;
     // 反向"传输进度"通道(receiver → sender):同一节点装第四个 ALPN。
@@ -572,7 +572,7 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&space_setup.member_repo),
         Arc::clone(&space_setup.peer_admission),
         Arc::clone(&space_setup.fingerprint),
-    );
+    )?;
 
     // Slice 3 Phase 1:同一节点装第五个 ALPN(iroh-blobs)。BlobReference
     // 是 sqlite 仓储,不跟 router 绑定;这里只拿传输 port。
@@ -838,9 +838,9 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&space_setup.fingerprint),
         application_network.active_clipboard_pull_serve(),
         content_gate,
-    );
+    )?;
 
-    let iroh_node = builder.spawn();
+    let iroh_node = builder.spawn()?;
 
     // Translator worker:从 sender 端的反向通道收 InboundProgressEvent,
     // 翻译为 application 层 HostEvent(Sending 方向)发到 host_event_bus。

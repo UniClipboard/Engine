@@ -32,7 +32,6 @@ pub mod persistable_addr;
 mod protocol_router;
 pub mod relay_probe;
 pub(crate) mod runtime_consts;
-#[cfg(test)]
 mod session_generation;
 pub mod space_admission;
 mod space_admission_wire;
