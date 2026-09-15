@@ -4315,6 +4315,103 @@ async fn existing_device_switches_space_through_stable_operations() {
     }
 }
 
+// 已提交的 Space 切换即使连续会话准备失败，也只能恢复目标 Space，且不能重绑网络入口。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn committed_space_switch_recovers_after_repeated_session_preparation_failures() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let sponsor_harness = DeviceHarness::new(rendezvous.uri());
+    let joiner_harness = DeviceHarness::new(rendezvous.uri());
+    let sponsor = sponsor_harness.start().await;
+    let joiner = joiner_harness.start().await;
+    let target_space_id = create_space(&sponsor, "Sponsor").await.0;
+    let source_space_id = create_space(&joiner, "Joiner").await.0;
+    let endpoint_before = query_endpoint_id(&joiner, "joiner before injected failure").await;
+    assert_eq!(query_session_handover_diagnostics(&joiner).await, (1, 0));
+    let armed = joiner
+        .execute_dev(uc_engine::DevOperation::FailNextSessionPreparation)
+        .await
+        .expect("arm one session preparation failure");
+    assert_eq!(
+        armed,
+        uc_engine::DevOperationResult::SessionPreparationFailureArmed
+    );
+    let armed = joiner
+        .execute_dev(uc_engine::DevOperation::FailNextSessionPreparation)
+        .await
+        .expect("arm a second session preparation failure");
+    assert_eq!(
+        armed,
+        uc_engine::DevOperationResult::SessionPreparationFailureArmed
+    );
+
+    let invitation = issue_invitation(&sponsor).await;
+    let OperationResult::JoinSpace(status) = joiner
+        .execute(Operation::JoinSpace(JoinSpaceInput {
+            invitation_code: invitation,
+            device_name: Some("Joiner".to_owned()),
+            passphrase: SecretString::new(PASSPHRASE),
+            preserve_unreadable_history: false,
+        }))
+        .await
+        .expect("start injected-failure join")
+    else {
+        panic!("unexpected join result");
+    };
+
+    let failure_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if query_session_handover_diagnostics(&joiner).await == (1, 1) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < failure_deadline,
+            "the injected session preparation failure was not observed"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let unavailable = joiner
+        .execute(Operation::QuerySetupState)
+        .await
+        .expect_err("old Space operations must stay closed after preparation failure");
+    assert_eq!(
+        unavailable.category(),
+        uc_engine::EngineErrorCategory::Unavailable
+    );
+    assert_eq!(
+        query_endpoint_id(&joiner, "joiner during injected failure").await,
+        endpoint_before,
+        "session recovery must keep the existing endpoint"
+    );
+    assert_eq!(
+        query_session_handover_diagnostics(&joiner).await,
+        (1, 1),
+        "the first failure must be consumed without building another network"
+    );
+
+    wait_for_completed_join(&joiner, "Joiner", status, &target_space_id).await;
+    assert_ne!(source_space_id, target_space_id);
+    assert_eq!(
+        query_endpoint_id(&joiner, "joiner after injected failure").await,
+        endpoint_before,
+        "successful retry must not rebind the endpoint"
+    );
+    assert_eq!(
+        query_session_handover_diagnostics(&joiner).await,
+        (1, 2),
+        "repeated failures and the successful retry must reuse the original network"
+    );
+    wait_for_active_member_count(&sponsor, 2).await;
+    wait_for_active_member_count(&joiner, 2).await;
+
+    for engine in [&sponsor, &joiner] {
+        engine
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .await
+            .expect("shut down injected-failure engine");
+    }
+}
+
 // 加入完成后重启 Joiner，持久化准入状态必须足以恢复成员权限并接收正文。
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn completed_admission_survives_restart_and_allows_transfer() {
@@ -4497,6 +4594,21 @@ async fn query_endpoint_id(engine: &Engine, node: &str) -> [u8; 32] {
         panic!("node {node} returned an unexpected endpoint result");
     };
     endpoint_id
+}
+
+async fn query_session_handover_diagnostics(engine: &Engine) -> (usize, usize) {
+    let result = engine
+        .execute_dev(uc_engine::DevOperation::QuerySessionHandoverDiagnostics)
+        .await
+        .expect("query session handover diagnostics");
+    let uc_engine::DevOperationResult::SessionHandoverDiagnostics {
+        network_build_count,
+        preparation_failure_count,
+    } = result
+    else {
+        panic!("unexpected session handover diagnostics result");
+    };
+    (network_build_count, preparation_failure_count)
 }
 
 async fn create_space(engine: &Engine, device_name: &str) -> (String, String) {

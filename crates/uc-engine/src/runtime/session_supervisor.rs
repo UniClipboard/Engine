@@ -1,4 +1,6 @@
 use std::future::Future;
+#[cfg(feature = "dev-tools")]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -38,6 +40,30 @@ use crate::{EngineError, EngineErrorCategory, OperationResult};
 const SESSION_OPERATION_GRACE: Duration = Duration::from_secs(2);
 const SESSION_RUNTIME_FAILED_CODE: u32 = 1101;
 
+#[cfg(feature = "dev-tools")]
+#[derive(Default)]
+struct SessionHandoverTestControl {
+    remaining_preparation_failures: AtomicUsize,
+    network_build_count: AtomicUsize,
+    preparation_failure_count: AtomicUsize,
+}
+
+#[cfg(feature = "dev-tools")]
+impl SessionHandoverTestControl {
+    fn arm_preparation_failure(&self) {
+        self.remaining_preparation_failures
+            .fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn consume_preparation_failure(&self) -> bool {
+        self.remaining_preparation_failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+    }
+}
+
 fn session_runtime_error(context: &'static str, error: impl std::fmt::Display) -> EngineError {
     error!(context, error = %error, "engine session lifecycle failed");
     EngineError::new(
@@ -58,6 +84,8 @@ struct ProductionSessionFactory {
     iroh_bind_port_override: Option<u16>,
     #[cfg(feature = "dev-tools")]
     network_partition_gate: uc_infra::network::iroh::IrohNetworkPartitionGate,
+    #[cfg(feature = "dev-tools")]
+    test_control: Arc<SessionHandoverTestControl>,
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
 }
 
@@ -86,6 +114,8 @@ pub(super) struct SessionSupervisor {
     application: uc_application::facade::ApplicationAssembly,
     lifecycle: Mutex<()>,
     operations: SessionOperationGate,
+    #[cfg(feature = "dev-tools")]
+    test_control: Arc<SessionHandoverTestControl>,
 }
 
 pub(super) struct SessionOperationLease {
@@ -220,6 +250,8 @@ impl SessionSupervisor {
             application,
             lifecycle: Mutex::new(()),
             operations: SessionOperationGate::new_open(),
+            #[cfg(feature = "dev-tools")]
+            test_control: Arc::new(SessionHandoverTestControl::default()),
         }
     }
 
@@ -248,6 +280,8 @@ impl SessionSupervisor {
             iroh_bind_port_override,
             #[cfg(feature = "dev-tools")]
             network_partition_gate,
+            #[cfg(feature = "dev-tools")]
+            test_control: Arc::clone(&self.test_control),
             network_recovery,
         });
         let mut slot = self
@@ -317,6 +351,21 @@ impl SessionSupervisor {
 
     pub(super) async fn acquire_operation(&self) -> Result<SessionOperationLease, EngineError> {
         self.operations.acquire()
+    }
+
+    #[cfg(feature = "dev-tools")]
+    pub(super) fn fail_next_session_preparation(&self) {
+        self.test_control.arm_preparation_failure();
+    }
+
+    #[cfg(feature = "dev-tools")]
+    pub(super) fn session_handover_diagnostics(&self) -> (usize, usize) {
+        (
+            self.test_control.network_build_count.load(Ordering::SeqCst),
+            self.test_control
+                .preparation_failure_count
+                .load(Ordering::SeqCst),
+        )
     }
 
     pub(super) async fn rebuild_session(&self) -> Result<(), EngineError> {
@@ -709,6 +758,10 @@ impl SessionSupervisor {
 
 impl ProductionSessionFactory {
     async fn build_network(&self) -> Result<IrohNode, EngineError> {
+        #[cfg(feature = "dev-tools")]
+        self.test_control
+            .network_build_count
+            .fetch_add(1, Ordering::SeqCst);
         build_network_runtime(
             &self.wired.application,
             &self.wired.sync_engine,
@@ -728,6 +781,16 @@ impl ProductionSessionFactory {
         &self,
         session_builder: IrohSessionBuilder,
     ) -> Result<PreparedProductionSession, EngineError> {
+        #[cfg(feature = "dev-tools")]
+        if self.test_control.consume_preparation_failure() {
+            self.test_control
+                .preparation_failure_count
+                .fetch_add(1, Ordering::SeqCst);
+            return Err(session_runtime_error(
+                "p2p session",
+                "injected session preparation failure",
+            ));
+        }
         let wired = &self.wired;
         #[cfg(feature = "lan-compat")]
         let paths = &self.paths;
