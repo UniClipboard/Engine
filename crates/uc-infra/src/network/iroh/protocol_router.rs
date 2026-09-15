@@ -60,12 +60,17 @@ impl ProtocolRouterBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::iroh::session_generation::{
+        SessionProtocolHandlers, SessionProtocolRegistry,
+    };
     use crate::network::iroh::LEGACY_PEER_REACHABILITY_ALPN;
     use iroh::{
         endpoint::{ConnectOptions, Connection},
         protocol::{AcceptError, ProtocolHandler},
         RelayMode,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use tokio::sync::Notify;
 
     #[derive(Debug)]
     struct Hold;
@@ -74,6 +79,83 @@ mod tests {
             connection.closed().await;
             Ok(())
         }
+    }
+
+    #[derive(Debug)]
+    struct CountAndHold {
+        accepted: Arc<AtomicUsize>,
+        started: Arc<Notify>,
+    }
+
+    impl ProtocolHandler for CountAndHold {
+        async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+            self.accepted.fetch_add(1, AtomicOrdering::SeqCst);
+            self.started.notify_one();
+            connection.closed().await;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn published_generation_replaces_retired_handler_without_restarting_router() {
+        const TEST_ALPN: &[u8] = b"uniclipboard/test-session-generation/1";
+
+        let server = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .unwrap();
+        let client = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .unwrap();
+        let registry = Arc::new(SessionProtocolRegistry::new());
+        let router = ProtocolRouterBuilder::new(server.clone())
+            .accept(TEST_ALPN, registry.dispatcher(TEST_ALPN))
+            .spawn();
+
+        let first_count = Arc::new(AtomicUsize::new(0));
+        let first_started = Arc::new(Notify::new());
+        let first = registry
+            .publish(SessionProtocolHandlers::single_for_test(
+                TEST_ALPN,
+                CountAndHold {
+                    accepted: Arc::clone(&first_count),
+                    started: Arc::clone(&first_started),
+                },
+            ))
+            .unwrap();
+        let first_connection = client.connect(server.addr(), TEST_ALPN).await.unwrap();
+        first_started.notified().await;
+
+        registry.quiesce(first).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), first_connection.closed())
+            .await
+            .unwrap();
+
+        let second_count = Arc::new(AtomicUsize::new(0));
+        let second_started = Arc::new(Notify::new());
+        registry
+            .publish(SessionProtocolHandlers::single_for_test(
+                TEST_ALPN,
+                CountAndHold {
+                    accepted: Arc::clone(&second_count),
+                    started: Arc::clone(&second_started),
+                },
+            ))
+            .unwrap();
+        let second_connection = client.connect(server.addr(), TEST_ALPN).await.unwrap();
+        second_started.notified().await;
+
+        assert_eq!(first_count.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(second_count.load(AtomicOrdering::SeqCst), 1);
+
+        second_connection.close(0u32.into(), b"test_complete");
+        client.close().await;
+        router.shutdown().await.unwrap();
     }
 
     #[tokio::test]
