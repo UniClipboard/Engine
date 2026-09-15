@@ -8,6 +8,7 @@ mod six_digit_pairing;
 mod automatic_connections;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -114,6 +115,48 @@ impl HostFileAccess for EmptyFiles {
     }
 }
 
+struct SlowReadableFiles {
+    read_count: Arc<AtomicUsize>,
+    size_bytes: u64,
+    delay: Duration,
+}
+
+impl HostFileAccess for SlowReadableFiles {
+    fn metadata(&self, _handle: &HostFileHandle) -> Result<HostFileMetadata, HostCapabilityError> {
+        Ok(HostFileMetadata {
+            display_name: "slow-file.bin".to_owned(),
+            size_bytes: self.size_bytes,
+            mime_type: Some("application/octet-stream".to_owned()),
+        })
+    }
+
+    fn read_chunk(
+        &self,
+        _handle: &HostFileHandle,
+        offset: u64,
+        max_bytes: u32,
+    ) -> Result<Vec<u8>, HostCapabilityError> {
+        self.read_count.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(self.delay);
+        let remaining = self.size_bytes.saturating_sub(offset);
+        let length = remaining.min(u64::from(max_bytes)) as usize;
+        Ok(vec![0x5a; length])
+    }
+
+    fn write_chunk(
+        &self,
+        _handle: &HostFileHandle,
+        _offset: u64,
+        _bytes: &[u8],
+    ) -> Result<(), HostCapabilityError> {
+        Ok(())
+    }
+
+    fn finish_write(&self, _handle: &HostFileHandle) -> Result<(), HostCapabilityError> {
+        Ok(())
+    }
+}
+
 struct DeviceHarness {
     root: TempDir,
     secure_storage: MemorySecureStorage,
@@ -137,6 +180,12 @@ impl DeviceHarness {
         self.start_configured(clipboard, true).await
     }
 
+    async fn start_with_files(&self, files: Box<dyn HostFileAccess>) -> Engine {
+        self.start_with_host(Box::new(EmptyClipboard), files, true)
+            .await
+            .0
+    }
+
     async fn start_with_relay_fallback(&self, relay_fallback: bool) -> Engine {
         self.start_configured(Box::new(EmptyClipboard), relay_fallback)
             .await
@@ -155,6 +204,16 @@ impl DeviceHarness {
         clipboard: Box<dyn HostClipboard>,
         relay_fallback: bool,
     ) -> (Engine, uc_engine::EventStream) {
+        self.start_with_host(clipboard, Box::new(EmptyFiles), relay_fallback)
+            .await
+    }
+
+    async fn start_with_host(
+        &self,
+        clipboard: Box<dyn HostClipboard>,
+        files: Box<dyn HostFileAccess>,
+        relay_fallback: bool,
+    ) -> (Engine, uc_engine::EventStream) {
         let root = self.root.path();
         let host = HostCapabilities::new(
             HostDirectories::new(
@@ -165,7 +224,7 @@ impl DeviceHarness {
             ),
             Box::new(self.secure_storage.clone()),
             clipboard,
-            Box::new(EmptyFiles),
+            files,
         );
         let config = EngineConfig::new("1.1.0")
             .with_rendezvous_base_url(self.rendezvous_base_url.clone())
@@ -4353,6 +4412,195 @@ async fn committed_space_switch_recovers_after_repeated_session_activation_failu
         2,
     )
     .await;
+}
+
+// Space 切换恢复空窗内暂停后，旧恢复任务不得重建网络；恢复时只允许重建一次。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn suspend_during_space_switch_recovery_does_not_resurrect_the_network() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let sponsor_harness = DeviceHarness::new(rendezvous.uri());
+    let joiner_harness = DeviceHarness::new(rendezvous.uri());
+    let sponsor = sponsor_harness.start().await;
+    let joiner = joiner_harness.start().await;
+    let target_space_id = create_space(&sponsor, "Sponsor").await.0;
+    create_space(&joiner, "Joiner").await;
+    assert_eq!(
+        query_session_handover_diagnostics(&joiner)
+            .await
+            .network_build_count,
+        1
+    );
+    arm_session_handover_failure(
+        &joiner,
+        uc_engine::SessionHandoverFailurePoint::SessionPreparation,
+    )
+    .await;
+
+    let invitation = issue_invitation(&sponsor).await;
+    let OperationResult::JoinSpace(status) = joiner
+        .execute(Operation::JoinSpace(JoinSpaceInput {
+            invitation_code: invitation,
+            device_name: Some("Joiner".to_owned()),
+            passphrase: SecretString::new(PASSPHRASE),
+            preserve_unreadable_history: false,
+        }))
+        .await
+        .expect("start suspend-during-transition join")
+    else {
+        panic!("unexpected join result");
+    };
+
+    let failure_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let diagnostics = query_session_handover_diagnostics(&joiner).await;
+        if diagnostics.session_preparation_failure_count == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < failure_deadline,
+            "the injected session preparation failure was not observed"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    joiner
+        .suspend()
+        .await
+        .expect("suspend joiner during recovery");
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    joiner
+        .resume()
+        .await
+        .expect("resume joiner after recovery gap");
+
+    wait_for_completed_join(&joiner, "Joiner", status, &target_space_id).await;
+    wait_for_active_member_count(&sponsor, 2).await;
+    wait_for_active_member_count(&joiner, 2).await;
+    assert_eq!(
+        query_session_handover_diagnostics(&joiner)
+            .await
+            .network_build_count,
+        2,
+        "suspend must close the original network and resume must rebuild it exactly once"
+    );
+
+    for engine in [&sponsor, &joiner] {
+        engine
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .await
+            .expect("shut down suspend-during-transition engine");
+    }
+}
+
+// Space 切换必须取消仍在读取宿主文件的旧发送，并清理未完成的导入文件。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn space_switch_cancels_in_flight_file_send_without_leaving_imports() {
+    const FILE_CHUNKS: u64 = 70;
+    const FILE_CHUNK_BYTES: u64 = 64 * 1024;
+
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let sponsor_harness = DeviceHarness::new(rendezvous.uri());
+    let joiner_harness = DeviceHarness::new(rendezvous.uri());
+    let sponsor = sponsor_harness.start().await;
+    let read_count = Arc::new(AtomicUsize::new(0));
+    let joiner = Arc::new(
+        joiner_harness
+            .start_with_files(Box::new(SlowReadableFiles {
+                read_count: Arc::clone(&read_count),
+                size_bytes: FILE_CHUNKS * FILE_CHUNK_BYTES,
+                delay: Duration::from_millis(100),
+            }))
+            .await,
+    );
+    let target_space_id = create_space(&sponsor, "Sponsor").await.0;
+    create_space(&joiner, "Joiner").await;
+    let endpoint_before = query_endpoint_id(&joiner, "joiner before in-flight send").await;
+
+    let sending_engine = Arc::clone(&joiner);
+    let send = tokio::spawn(async move {
+        sending_engine
+            .execute(Operation::SendFiles(uc_engine::SendFilesInput {
+                files: vec![HostFileHandle::new("slow-file")],
+                target_devices: Vec::new(),
+            }))
+            .await
+    });
+    let read_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while read_count.load(Ordering::SeqCst) == 0 {
+        assert!(
+            tokio::time::Instant::now() < read_deadline,
+            "the file send did not start reading"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let invitation = issue_invitation(&sponsor).await;
+    let OperationResult::JoinSpace(status) = joiner
+        .execute(Operation::JoinSpace(JoinSpaceInput {
+            invitation_code: invitation,
+            device_name: Some("Joiner".to_owned()),
+            passphrase: SecretString::new(PASSPHRASE),
+            preserve_unreadable_history: false,
+        }))
+        .await
+        .expect("start join while file send is in flight")
+    else {
+        panic!("unexpected join result");
+    };
+
+    let send_error = tokio::time::timeout(Duration::from_secs(10), send)
+        .await
+        .expect("in-flight file send must stop during Space switch")
+        .expect("file send task must not panic")
+        .expect_err("the old file send must be cancelled");
+    assert_eq!(
+        send_error.category(),
+        uc_engine::EngineErrorCategory::Unavailable
+    );
+    let joined = wait_for_completed_join(&joiner, "Joiner", status, &target_space_id).await;
+    wait_for_active_member_count(&sponsor, 2).await;
+    wait_for_active_member_count(&joiner, 2).await;
+    assert_eq!(
+        query_endpoint_id(&joiner, "joiner after in-flight send").await,
+        endpoint_before,
+        "cancelling an old file send must keep the existing network"
+    );
+    assert_eq!(
+        query_session_handover_diagnostics(&joiner)
+            .await
+            .network_build_count,
+        1
+    );
+
+    let import_root = joiner_harness.root.path().join("cache/engine-imports");
+    let import_count = std::fs::read_dir(&import_root)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(
+        import_count, 0,
+        "cancelled file send must remove its incomplete import"
+    );
+
+    let text = "new session remains usable after file cancellation";
+    sponsor
+        .execute(Operation::SendText(SendTextInput {
+            text: text.to_owned(),
+            target_devices: vec![joined.self_device_id],
+        }))
+        .await
+        .expect("send through the new session after file cancellation");
+    wait_for_received_text(&joiner, text).await;
+
+    sponsor
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down sponsor after file-send cancellation");
+    joiner
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down joiner after file-send cancellation");
 }
 
 async fn assert_space_switch_recovers_after_repeated_handover_failures(

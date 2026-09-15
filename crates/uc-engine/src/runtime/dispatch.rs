@@ -513,7 +513,9 @@ impl EngineRuntime for ProductionRuntime {
         let result = if matches!(operation_kind, crate::OperationKind::ResetSpace) {
             operation.await
         } else {
+            // 会话交接已要求终止旧操作时，不允许同时完成的旧结果越过关闭边界。
             tokio::select! {
+                biased;
                 _ = session_cancellation.cancelled() => Err(super::operation_unavailable_error()),
                 result = operation => result,
             }
