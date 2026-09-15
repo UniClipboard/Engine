@@ -1209,7 +1209,7 @@ async fn f7_three_sibling_branches_keep_fair_anti_entropy_for_legal_peers() {
         for sender in branch {
             for receiver in branch {
                 if sender != receiver {
-                    topology.wait_for_paired_peer(sender, receiver).await;
+                    topology.wait_for_connected_peer(sender, receiver).await;
                 }
             }
         }
@@ -1357,7 +1357,7 @@ async fn f6_deep_chain_recovers_selected_branch_without_online_sponsors() {
     assert_eq!(recovered.head_event_id, target.head_event_id);
 
     for (sender, receiver) in [("A", "C"), ("C", "E"), ("E", "F")] {
-        topology.wait_for_paired_peer(sender, receiver).await;
+        topology.wait_for_connected_peer(sender, receiver).await;
         let text = format!("F6 converged hop {sender}-{receiver}");
         let report = topology.send(sender, receiver, &text).await;
         assert!(
@@ -2508,7 +2508,7 @@ impl MembershipTopology {
         report
     }
 
-    async fn wait_for_paired_peer(&self, sender: &str, receiver: &str) {
+    async fn wait_for_connected_peer(&self, sender: &str, receiver: &str) {
         let receiver_id = self
             .device_ids
             .get(receiver)
@@ -2523,7 +2523,7 @@ impl MembershipTopology {
                 Ok(OperationResult::PeerConnections(peers))
                     if peers
                         .iter()
-                        .any(|peer| &peer.peer_id == receiver_id && peer.is_paired) =>
+                        .any(|peer| &peer.peer_id == receiver_id && peer.connected) =>
                 {
                     return;
                 }
@@ -2534,7 +2534,30 @@ impl MembershipTopology {
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "same-branch peer {sender}-{receiver} did not become paired"
+                "same-branch peer {sender}-{receiver} did not become connected"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn wait_for_admission_ready(&self, nodes: &[&str]) {
+        let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+        loop {
+            let mut ready = true;
+            for node in nodes {
+                let diagnostics = self.diagnostics(node).await;
+                if diagnostics.pending_confirmation_count != 0
+                    || diagnostics.pending_effect_count != 0
+                {
+                    ready = false;
+                }
+            }
+            if ready {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "membership admission did not become ready"
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -3052,6 +3075,7 @@ async fn f0_partitioned_sponsors_create_isolated_sibling_branches() {
     topology
         .wait_for_equivalent_branch(&["A", "B", "C"], 3)
         .await;
+    topology.wait_for_admission_ready(&["A", "B", "C"]).await;
     let baseline_a = topology.diagnostics("A").await;
     let baseline_b = topology.diagnostics("B").await;
     assert_eq!(baseline_a.branch_id, baseline_b.branch_id);
