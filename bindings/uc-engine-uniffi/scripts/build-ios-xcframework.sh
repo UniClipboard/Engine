@@ -18,6 +18,7 @@ XCFRAMEWORK="$DIST_DIR/UniClipboardEngine.xcframework"
 XCFRAMEWORK_ZIP="$DIST_DIR/UniClipboardEngine.xcframework.zip"
 CHECKSUM_FILE="$DIST_DIR/UniClipboardEngine.checksum.txt"
 DEBUG_DIR="$DIST_ROOT/debug-symbols/ios"
+BINDINGS_CACHE_ROOT="${UC_ENGINE_UNIFFI_BINDINGS_CACHE_DIR:-}"
 CARGO_LOCKED_FLAG=""
 BUILD_PROFILE="${UC_ENGINE_UNIFFI_BUILD_PROFILE:-release}"
 case "$BUILD_PROFILE" in
@@ -93,14 +94,58 @@ mkdir -p \
   "$DIST_DIR" \
   "$DEBUG_DIR"
 
-echo "==> Generate Swift bindings from the host library"
-# 宿主库只用于读取接口元数据，不进入发布包；与生成器共用 dev 构建以节省时间。
-cargo build -p uc-engine-uniffi --profile dev --features bindgen-cli \
-  --lib --bin uc-engine-uniffi-bindgen $CARGO_LOCKED_FLAG
-cargo run -p uc-engine-uniffi --profile dev --features bindgen-cli \
-  --bin uc-engine-uniffi-bindgen $CARGO_LOCKED_FLAG -- \
-  generate --library "$TARGET_DIR/debug/libuc_engine_uniffi.dylib" \
-  --language swift --out-dir "$BINDINGS_DIR"
+binding_inputs_sha256() {
+  {
+    printf '%s\n' 'uc-engine-uniffi-swift-bindings-v1'
+    for file in Cargo.toml Cargo.lock rust-toolchain.toml bindings/uc-engine-uniffi/Cargo.toml; do
+      printf 'file:%s\n' "$file"
+      shasum -a 256 "$file"
+    done
+    find bindings/uc-engine-uniffi/src -type f -print | LC_ALL=C sort | while IFS= read -r file; do
+      printf 'file:%s\n' "$file"
+      shasum -a 256 "$file"
+    done
+  } | shasum -a 256 | awk '{print $1}'
+}
+
+BINDINGS_INPUT_SHA256="$(binding_inputs_sha256)"
+BINDINGS_CACHE_ENTRY=""
+if [[ -n "$BINDINGS_CACHE_ROOT" ]]; then
+  BINDINGS_CACHE_ENTRY="$BINDINGS_CACHE_ROOT/$BINDINGS_INPUT_SHA256"
+fi
+
+if [[ -n "$BINDINGS_CACHE_ENTRY" &&
+      -f "$BINDINGS_CACHE_ENTRY/complete" &&
+      -f "$BINDINGS_CACHE_ENTRY/uc_engine_uniffi.swift" &&
+      -f "$BINDINGS_CACHE_ENTRY/uc_engine_uniffiFFI.h" &&
+      -f "$BINDINGS_CACHE_ENTRY/uc_engine_uniffiFFI.modulemap" ]]; then
+  echo "==> Reuse Swift bindings ($BINDINGS_INPUT_SHA256)"
+  cp "$BINDINGS_CACHE_ENTRY/uc_engine_uniffi.swift" "$BINDINGS_DIR/"
+  cp "$BINDINGS_CACHE_ENTRY/uc_engine_uniffiFFI.h" "$BINDINGS_DIR/"
+  cp "$BINDINGS_CACHE_ENTRY/uc_engine_uniffiFFI.modulemap" "$BINDINGS_DIR/"
+else
+  echo "==> Generate Swift bindings from the host library"
+  # 宿主库只用于读取接口元数据，不进入发布包；公开接口输入不变时复用已验证生成物。
+  cargo build -p uc-engine-uniffi --profile dev --features bindgen-cli \
+    --lib --bin uc-engine-uniffi-bindgen $CARGO_LOCKED_FLAG
+  cargo run -p uc-engine-uniffi --profile dev --features bindgen-cli \
+    --bin uc-engine-uniffi-bindgen $CARGO_LOCKED_FLAG -- \
+    generate --library "$TARGET_DIR/debug/libuc_engine_uniffi.dylib" \
+    --language swift --out-dir "$BINDINGS_DIR"
+  if [[ -n "$BINDINGS_CACHE_ENTRY" ]]; then
+    mkdir -p "$BINDINGS_CACHE_ROOT"
+    pending_cache="$(mktemp -d "$BINDINGS_CACHE_ROOT/.bindings.XXXXXX")"
+    cp "$BINDINGS_DIR/uc_engine_uniffi.swift" "$pending_cache/"
+    cp "$BINDINGS_DIR/uc_engine_uniffiFFI.h" "$pending_cache/"
+    cp "$BINDINGS_DIR/uc_engine_uniffiFFI.modulemap" "$pending_cache/"
+    printf '%s\n' "$BINDINGS_INPUT_SHA256" > "$pending_cache/complete"
+    if [[ ! -e "$BINDINGS_CACHE_ENTRY" ]]; then
+      mv "$pending_cache" "$BINDINGS_CACHE_ENTRY"
+    else
+      rm -rf "$pending_cache"
+    fi
+  fi
+fi
 cp "$BINDINGS_DIR/uc_engine_uniffiFFI.h" "$INCLUDE_DIR/"
 cp "$BINDINGS_DIR/uc_engine_uniffiFFI.modulemap" "$INCLUDE_DIR/module.modulemap"
 
