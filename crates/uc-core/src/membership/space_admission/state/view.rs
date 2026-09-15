@@ -188,6 +188,90 @@ impl SponsorCandidatePreparation<'_> {
 }
 
 impl SpaceAdmissionAggregate {
+    pub const fn record_role(&self) -> Option<AdmissionRole> {
+        match &self.state {
+            SpaceAdmissionRecordState::Joiner(_)
+            | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Active(_))
+            | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Superseded(_))
+            | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(_)) => {
+                Some(AdmissionRole::Joiner)
+            }
+            SpaceAdmissionRecordState::Sponsor(_)
+            | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorExpired(_))
+            | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+                SpaceAdmissionRejectedState::Sponsor(_),
+            )) => Some(AdmissionRole::Sponsor),
+            SpaceAdmissionRecordState::CompletionHelper(_) => Some(AdmissionRole::CompletionHelper),
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Completed(state)) => {
+                Some(
+                    state
+                        .saved_reply
+                        .exact_reply_envelope()
+                        .header()
+                        .sender_role(),
+                )
+            }
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+                SpaceAdmissionRejectedState::LocalJoiner(_)
+                | SpaceAdmissionRejectedState::Joiner(_),
+            )) => Some(AdmissionRole::Joiner),
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
+                _,
+            )) => None,
+        }
+    }
+
+    pub const fn expires_at_ms(&self) -> Option<i64> {
+        match self.attempt_timeline {
+            Some(timeline) => Some(timeline.expires_at_ms()),
+            None => None,
+        }
+    }
+
+    pub const fn sponsor_pairing_confirmation(&self) -> Option<SponsorPairingConfirmationSummary> {
+        match &self.state {
+            SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Applied(state)) => {
+                state.confirmation
+            }
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Completed(state)) => {
+                state.confirmation
+            }
+            _ => None,
+        }
+    }
+
+    pub const fn has_expirable_local_join(&self) -> bool {
+        self.attempt_timeline.is_some()
+            && (matches!(
+                &self.state,
+                SpaceAdmissionRecordState::Joiner(
+                    SpaceAdmissionJoinerState::ResolvingInvitation(_)
+                        | SpaceAdmissionJoinerState::ResolvedInvitation(_)
+                        | SpaceAdmissionJoinerState::Candidate(_)
+                )
+            ) || matches!(
+                &self.state,
+                SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(state))
+                    if matches!(
+                        state.channel_state,
+                        SpaceAdmissionJoinerChannelState::AwaitingAuthentication { .. }
+                    )
+            ))
+    }
+
+    pub const fn has_expirable_sponsor(&self) -> bool {
+        self.attempt_timeline.is_some()
+            && self.attempt_digest.is_some()
+            && matches!(
+                self.state,
+                SpaceAdmissionRecordState::Sponsor(
+                    SpaceAdmissionSponsorState::Accepted(_)
+                        | SpaceAdmissionSponsorState::Candidate(_)
+                        | SpaceAdmissionSponsorState::Committed(_)
+                )
+            )
+    }
+
     pub fn invitation_resolution(&self) -> Option<JoinerInvitationResolution<'_>> {
         match &self.state {
             SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvingInvitation(
@@ -276,7 +360,43 @@ impl SpaceAdmissionAggregate {
                 continuation_credential: &state.continuation_credential,
                 pending_exchange: &state.pending_exchange,
             }),
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state)) => {
+                state.cleanup.as_ref().and_then(|cleanup| {
+                    cleanup.pending_exchange.as_ref().map(|pending_exchange| {
+                        AdmissionPendingRecovery::Continuation {
+                            peer_binding: cleanup.peer_binding,
+                            continuation_credential: &cleanup.continuation_credential,
+                            pending_exchange,
+                        }
+                    })
+                })
+            }
             _ => None,
+        }
+    }
+
+    pub const fn has_pending_local_termination(&self) -> bool {
+        matches!(
+            &self.state,
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state))
+                if matches!(&state.cleanup, Some(cleanup) if cleanup.local_space_transition.is_some())
+        )
+    }
+
+    pub const fn has_pending_sponsor_abandonment(&self) -> bool {
+        match &self.state {
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+                SpaceAdmissionRejectedState::Sponsor(state),
+            )) => {
+                matches!(&state.abandonment_cleanup, Some(cleanup) if !matches!(cleanup, SponsorAbandonmentCleanup::NotRequired))
+            }
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorExpired(
+                state,
+            )) => !matches!(
+                state.abandonment_cleanup,
+                SponsorAbandonmentCleanup::NotRequired
+            ),
+            _ => false,
         }
     }
 
@@ -491,7 +611,13 @@ impl SpaceAdmissionAggregate {
             | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Superseded(_))
             | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
                 _,
-            )) => None,
+            ))
+            | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(_)) => {
+                None
+            }
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorExpired(_)) => {
+                None
+            }
         }
     }
 
@@ -512,6 +638,12 @@ impl SpaceAdmissionAggregate {
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Active(
                 SpaceAdmissionActiveState::PendingSettlement(state),
             )) => Some(&state.pending_exchange),
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state)) => {
+                match &state.cleanup {
+                    Some(cleanup) => cleanup.pending_exchange(),
+                    None => None,
+                }
+            }
             _ => None,
         }
     }

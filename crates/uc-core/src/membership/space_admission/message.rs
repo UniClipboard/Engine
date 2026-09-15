@@ -10,18 +10,21 @@ use super::artifact::{
     AdmissionMlsCommit, AdmissionMlsWelcome, AdmissionRecoveryPublicKey,
     AdmissionSealedRecoveryMaterial, AdmissionSignedMembershipHistory,
 };
+use super::attempt::AdmissionMemberBindingV2;
 use super::exchange::AdmissionMessageEvidence;
 use super::id::{AdmissionMessageId, InvitationId, SpaceAdmissionId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpaceAdmissionProtocolVersion {
     V1,
+    V2,
 }
 
 impl SpaceAdmissionProtocolVersion {
     pub const fn from_u16(value: u16) -> Option<Self> {
         match value {
             1 => Some(Self::V1),
+            2 => Some(Self::V2),
             _ => None,
         }
     }
@@ -29,6 +32,7 @@ impl SpaceAdmissionProtocolVersion {
     pub const fn as_u16(self) -> u16 {
         match self {
             Self::V1 => 1,
+            Self::V2 => 2,
         }
     }
 }
@@ -69,6 +73,8 @@ pub enum SpaceAdmissionMessageKind {
     Settled,
     CancelRequested,
     Rejected,
+    Abandonment,
+    Abandoned,
 }
 
 impl SpaceAdmissionMessageKind {
@@ -78,9 +84,10 @@ impl SpaceAdmissionMessageKind {
             | Self::Prepared
             | Self::Applied
             | Self::CompleteAck
-            | Self::CancelRequested => matches!(sender, AdmissionRole::Joiner),
+            | Self::CancelRequested
+            | Self::Abandonment => matches!(sender, AdmissionRole::Joiner),
             Self::Candidate | Self::Commit => matches!(sender, AdmissionRole::Sponsor),
-            Self::Complete | Self::Settled | Self::Rejected => {
+            Self::Complete | Self::Settled | Self::Rejected | Self::Abandoned => {
                 matches!(
                     sender,
                     AdmissionRole::Sponsor | AdmissionRole::CompletionHelper
@@ -102,6 +109,7 @@ impl SpaceAdmissionMessageKind {
                 | (Self::Applied, Self::Complete)
                 | (Self::Complete, Self::CompleteAck)
                 | (Self::CompleteAck, Self::Settled)
+                | (Self::Abandonment, Self::Abandoned)
         )
     }
 }
@@ -136,6 +144,27 @@ impl SpaceAdmissionEnvelopeHeaderV1 {
         message_id: AdmissionMessageId,
         predecessor_message_id: Option<AdmissionMessageId>,
     ) -> Result<Self, AdmissionMessageHeaderError> {
+        Self::new_with_version(
+            SpaceAdmissionProtocolVersion::V1,
+            admission_id,
+            kind,
+            sender_role,
+            sender_sequence,
+            message_id,
+            predecessor_message_id,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_version(
+        protocol_version: SpaceAdmissionProtocolVersion,
+        admission_id: SpaceAdmissionId,
+        kind: SpaceAdmissionMessageKind,
+        sender_role: AdmissionRole,
+        sender_sequence: u64,
+        message_id: AdmissionMessageId,
+        predecessor_message_id: Option<AdmissionMessageId>,
+    ) -> Result<Self, AdmissionMessageHeaderError> {
         if !kind.accepts_sender(sender_role) {
             return Err(AdmissionMessageHeaderError::SenderNotAllowed);
         }
@@ -148,7 +177,7 @@ impl SpaceAdmissionEnvelopeHeaderV1 {
         }
 
         Ok(Self {
-            protocol_version: SpaceAdmissionProtocolVersion::V1,
+            protocol_version,
             admission_id,
             kind,
             sender_role,
@@ -562,6 +591,80 @@ impl std::fmt::Debug for AdmissionCompleteAckV1 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionAbandonmentReasonV2 {
+    Cancelled,
+    Expired,
+    Superseded,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct AdmissionAbandonmentV2 {
+    attempt_digest: [u8; 32],
+    member_binding: Option<AdmissionMemberBindingV2>,
+    reason: AdmissionAbandonmentReasonV2,
+}
+
+impl AdmissionAbandonmentV2 {
+    pub fn new(
+        attempt_digest: [u8; 32],
+        member_binding: Option<AdmissionMemberBindingV2>,
+        reason: AdmissionAbandonmentReasonV2,
+    ) -> Option<Self> {
+        if attempt_digest == [0; 32]
+            || member_binding
+                .as_ref()
+                .is_some_and(|binding| binding.attempt_digest() != &attempt_digest)
+        {
+            return None;
+        }
+        Some(Self {
+            attempt_digest,
+            member_binding,
+            reason,
+        })
+    }
+
+    pub const fn attempt_digest(&self) -> &[u8; 32] {
+        &self.attempt_digest
+    }
+
+    pub const fn member_binding(&self) -> Option<&AdmissionMemberBindingV2> {
+        self.member_binding.as_ref()
+    }
+
+    pub const fn reason(&self) -> AdmissionAbandonmentReasonV2 {
+        self.reason
+    }
+}
+
+impl std::fmt::Debug for AdmissionAbandonmentV2 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AdmissionAbandonmentV2([REDACTED])")
+    }
+}
+
+#[derive(PartialEq, Eq)]
+pub struct AdmissionAbandonedV2 {
+    abandonment_digest: [u8; 32],
+}
+
+impl AdmissionAbandonedV2 {
+    pub fn new(abandonment_digest: [u8; 32]) -> Option<Self> {
+        (abandonment_digest != [0; 32]).then_some(Self { abandonment_digest })
+    }
+
+    pub const fn abandonment_digest(&self) -> &[u8; 32] {
+        &self.abandonment_digest
+    }
+}
+
+impl std::fmt::Debug for AdmissionAbandonedV2 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AdmissionAbandonedV2([REDACTED])")
+    }
+}
+
 #[derive(PartialEq, Eq)]
 pub enum SpaceAdmissionBodyV1 {
     JoinRequest(AdmissionJoinRequestV1),
@@ -576,6 +679,8 @@ pub enum SpaceAdmissionBodyV1 {
     Rejected {
         reason: SpaceAdmissionRejectionReason,
     },
+    Abandonment(AdmissionAbandonmentV2),
+    Abandoned(AdmissionAbandonedV2),
 }
 
 impl SpaceAdmissionBodyV1 {
@@ -591,6 +696,8 @@ impl SpaceAdmissionBodyV1 {
             Self::Settled(_) => SpaceAdmissionMessageKind::Settled,
             Self::CancelRequested => SpaceAdmissionMessageKind::CancelRequested,
             Self::Rejected { .. } => SpaceAdmissionMessageKind::Rejected,
+            Self::Abandonment(_) => SpaceAdmissionMessageKind::Abandonment,
+            Self::Abandoned(_) => SpaceAdmissionMessageKind::Abandoned,
         }
     }
 }
@@ -608,6 +715,8 @@ impl std::fmt::Debug for SpaceAdmissionBodyV1 {
             Self::Settled(_) => formatter.write_str("Settled([REDACTED])"),
             Self::CancelRequested => formatter.write_str("CancelRequested"),
             Self::Rejected { .. } => formatter.write_str("Rejected([REDACTED])"),
+            Self::Abandonment(_) => formatter.write_str("Abandonment([REDACTED])"),
+            Self::Abandoned(_) => formatter.write_str("Abandoned([REDACTED])"),
         }
     }
 }
@@ -668,6 +777,45 @@ impl SpaceAdmissionEnvelopeV1 {
             predecessor_message_id,
         )?;
         Ok(Self { header, body })
+    }
+
+    pub fn new_with_version(
+        protocol_version: SpaceAdmissionProtocolVersion,
+        admission_id: SpaceAdmissionId,
+        sender_role: AdmissionRole,
+        sender_sequence: u64,
+        message_id: AdmissionMessageId,
+        predecessor_message_id: Option<AdmissionMessageId>,
+        body: SpaceAdmissionBodyV1,
+    ) -> Result<Self, AdmissionProtocolMessageError> {
+        let header = SpaceAdmissionEnvelopeHeaderV1::new_with_version(
+            protocol_version,
+            admission_id,
+            body.kind(),
+            sender_role,
+            sender_sequence,
+            message_id,
+            predecessor_message_id,
+        )?;
+        Ok(Self { header, body })
+    }
+
+    pub fn reply_to(
+        predecessor: &Self,
+        sender_role: AdmissionRole,
+        sender_sequence: u64,
+        message_id: AdmissionMessageId,
+        body: SpaceAdmissionBodyV1,
+    ) -> Result<Self, AdmissionProtocolMessageError> {
+        Self::new_with_version(
+            predecessor.header().protocol_version(),
+            predecessor.header().admission_id(),
+            sender_role,
+            sender_sequence,
+            message_id,
+            Some(predecessor.header().message_id()),
+            body,
+        )
     }
 
     pub const fn header(&self) -> &SpaceAdmissionEnvelopeHeaderV1 {

@@ -13,7 +13,15 @@ function writeExecutable(path, contents) {
 }
 
 // 执行真实打包脚本，以固定工具替身覆盖完整流程，避免测试依赖 SDK 或下载。
-function run(t, platform, profile, separateSource = false, complete = false) {
+function run(
+  t,
+  platform,
+  profile,
+  separateSource = false,
+  complete = false,
+  extraEnv = {},
+  bindingSource = 'binding',
+) {
   const fixture = mkdtempSync(join(tmpdir(), 'uc-mobile-profile-'))
   t.after(() => rmSync(fixture, { recursive: true, force: true }))
   const scripts = join(fixture, 'bindings/uc-engine-uniffi/scripts')
@@ -61,7 +69,6 @@ fi
   writeExecutable(join(bin, 'git'), `#!/bin/sh
 if [ "$1" = rev-parse ]; then printf '%040d\n' 0; fi
 `)
-  writeExecutable(join(bin, 'shasum'), '#!/bin/sh\necho checksum\n')
   writeExecutable(join(bin, 'xcodebuild'), `#!/bin/bash
 set -eu
 while [[ "$1" != -output ]]; do shift; done
@@ -72,7 +79,7 @@ mkdir -p "$2"
 if [ "$1" = -p ]; then echo classes; else echo libs/rustls-platform-verifier-classes.jar; fi
 `)
   writeExecutable(join(bin, 'jar'), '#!/bin/sh\necho org/rustls/platformverifier/CertificateVerifier.class\n')
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`,
+  const env = { ...process.env, ...extraEnv, PATH: `${bin}:${process.env.PATH}`,
     UC_ENGINE_UNIFFI_TARGET_DIR: join(fixture, 'target'),
     UC_ENGINE_UNIFFI_DIST_DIR: join(fixture, 'dist'),
     UC_ENGINE_UNIFFI_SLICE: 'device', PROFILE_TEST_LOG: join(fixture, 'commands'),
@@ -89,6 +96,11 @@ printf 'gradle %s\\n' "$*" >> "$PROFILE_TEST_LOG"
 mkdir -p "$UC_ENGINE_UNIFFI_GRADLE_BUILD_DIR/outputs/aar"
 touch "$UC_ENGINE_UNIFFI_GRADLE_BUILD_DIR/outputs/aar/UniClipboardEngine-debug.aar"
 `)
+  for (const file of ['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'bindings/uc-engine-uniffi/Cargo.toml', 'bindings/uc-engine-uniffi/src/lib.rs']) {
+    const path = join(env.PROFILE_TEST_SOURCE, file)
+    mkdirSync(resolve(path, '..'), { recursive: true })
+    writeFileSync(path, file.endsWith('/src/lib.rs') ? bindingSource : file)
+  }
   delete env.UC_ENGINE_UNIFFI_BUILD_PROFILE
   if (profile !== undefined) env.UC_ENGINE_UNIFFI_BUILD_PROFILE = profile
   const args = [join(scripts, name), ...(separateSource ? [env.PROFILE_TEST_SOURCE] : [])]
@@ -96,6 +108,27 @@ touch "$UC_ENGINE_UNIFFI_GRADLE_BUILD_DIR/outputs/aar/UniClipboardEngine-debug.a
   const dist = join(fixture, 'dist', platform)
   return { result, dist, commands: () => readFileSync(env.PROFILE_TEST_LOG, 'utf8') }
 }
+
+test('iOS 相同公开接口复用绑定，只重新编译设备库', (t) => {
+  const bindingCache = join(tmpdir(), `uc-mobile-bindings-${process.pid}-${Date.now()}`)
+  t.after(() => rmSync(bindingCache, { recursive: true, force: true }))
+  const first = run(t, 'ios', 'dev', false, false, {
+    UC_ENGINE_UNIFFI_BINDINGS_CACHE_DIR: bindingCache,
+  })
+  assert.equal(first.result.status, 77, first.result.stdout + first.result.stderr)
+
+  const second = run(t, 'ios', 'dev', false, false, {
+    UC_ENGINE_UNIFFI_BINDINGS_CACHE_DIR: bindingCache,
+  })
+  assert.equal(second.result.status, 77, second.result.stdout + second.result.stderr)
+  assert.equal(second.commands().trim().split('\n').length, 1)
+
+  const changed = run(t, 'ios', 'dev', false, false, {
+    UC_ENGINE_UNIFFI_BINDINGS_CACHE_DIR: bindingCache,
+  }, 'changed binding')
+  assert.equal(changed.result.status, 77, changed.result.stdout + changed.result.stderr)
+  assert.equal(changed.commands().trim().split('\n').length, 3)
+})
 
 for (const platform of ['ios', 'android']) {
   test(`${platform} 当前打包工具编译指定的旧版源码`, (t) => {

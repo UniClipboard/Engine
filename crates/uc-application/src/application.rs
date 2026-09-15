@@ -232,6 +232,7 @@ pub struct ApplicationAssembly {
     file_transfer: Arc<FileTransferAssembly>,
     clipboard: Arc<ClipboardAssembly>,
     admission_observations: Arc<SpaceAdmissionObservationRegistry>,
+    space_transition_changes: tokio::sync::watch::Sender<()>,
 }
 
 impl ApplicationAssembly {
@@ -262,11 +263,16 @@ impl ApplicationAssembly {
             file_transfer,
             clipboard,
             admission_observations: Arc::new(SpaceAdmissionObservationRegistry::default()),
+            space_transition_changes: tokio::sync::watch::channel(()).0,
         }
     }
 
     pub fn host_event_bus(&self) -> Arc<crate::facade::HostEventBus> {
         Arc::clone(&self.deps.host_event_bus)
+    }
+
+    pub fn subscribe_space_transition_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.space_transition_changes.subscribe()
     }
 
     pub fn host_adapters(&self) -> ApplicationHostAdapters {
@@ -402,6 +408,7 @@ impl ApplicationAssembly {
             runtime_adapters: runtime,
             peer_reachability_changed_events,
             admission_observations: Arc::clone(&self.admission_observations),
+            space_transition_changes: self.space_transition_changes.clone(),
         }));
         let member_scope = space.current_member_scope();
         let ApplicationClipboardAdapters {

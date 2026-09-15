@@ -360,8 +360,9 @@ impl AppFacade {
     pub async fn join_space(
         &self,
         input: crate::facade::JoinSpaceInput,
+        started_at_ms: i64,
     ) -> Result<crate::facade::JoinSpaceResult, crate::facade::JoinSpaceError> {
-        self.space.join_space(input).await
+        self.space.join_space(input, started_at_ms).await
     }
 
     pub async fn query_device_trust(

@@ -18,8 +18,10 @@ use uc_core::membership::{
     VersionedMembershipHistory,
 };
 use uc_core::ports::space::PrepareAdmissionTargetAccessPort;
+use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::space::admission::credentials::prepare_registration;
 use crate::space::admission::security::AdmissionSecurityTransitionAdapter;
 use crate::space::security::mls_group::{MlsClientState, MlsGroupEngine};
 
@@ -75,177 +77,178 @@ impl PrepareJoinerCandidatePort for DefaultJoinerCandidatePreparation {
         preparation: uc_core::membership::JoinerCandidatePreparation<'_>,
         candidate_envelope: &SpaceAdmissionEnvelopeV1,
     ) -> Result<PreparedJoinerCandidateMaterial, PrepareJoinerCandidateError> {
-        let original_request = match preparation.join_request().body() {
-            SpaceAdmissionBodyV1::JoinRequest(request) => request,
-            _ => return Err(PrepareJoinerCandidateError::Invalid),
-        };
-        let candidate = match candidate_envelope.body() {
-            SpaceAdmissionBodyV1::Candidate(candidate) => candidate,
-            _ => return Err(PrepareJoinerCandidateError::Invalid),
-        };
-        if candidate_envelope.header().admission_id()
-            != preparation.join_request().header().admission_id()
-            || candidate_envelope.header().predecessor_message_id()
-                != Some(preparation.join_request().header().message_id())
-        {
-            return Err(PrepareJoinerCandidateError::Invalid);
-        }
-        let MembershipOperationV2::AddDevice { admission } = &candidate.candidate_event().operation
-        else {
-            return Err(PrepareJoinerCandidateError::Invalid);
-        };
-        let expected_resume_digest: [u8; 32] =
-            Sha256::digest(original_request.recovery_public_key().as_bytes()).into();
-        if admission.facts != *original_request.identity_facts()
-            || admission.membership_credential != *original_request.membership_credential()
-            || admission.resume_public_key_digest != expected_resume_digest
-            || admission.security_commitment_id
-                != candidate.security_commitment().security_commitment_id
-        {
-            return Err(PrepareJoinerCandidateError::Invalid);
-        }
-        let mut history = VersionedMembershipHistory::decode_persisted_v2(
-            candidate.base_membership_history().as_bytes(),
-            self.history_verifier.as_ref(),
-        )
-        .map_err(PrepareJoinerCandidateError::invalid)?;
-        let commitment = candidate.security_commitment();
-        if commitment.attempt_id != *candidate_envelope.header().admission_id().as_bytes()
-            || commitment.base_history_position
-                != history
-                    .current_position()
-                    .map_err(PrepareJoinerCandidateError::invalid)?
-            || commitment.candidate_core_digest
-                != candidate
-                    .candidate_event()
-                    .admission_candidate_core_digest(
-                        commitment.attempt_id,
-                        original_request.key_package().as_bytes(),
-                    )
-                    .map_err(PrepareJoinerCandidateError::invalid)?
-        {
-            return Err(PrepareJoinerCandidateError::Invalid);
-        }
-        history
-            .verify_and_receive_event(
-                candidate.candidate_event().clone(),
+        observe_local_result(LocalWorkStep::JoinerPrepareCandidate, async {
+            let original_request = match preparation.join_request().body() {
+                SpaceAdmissionBodyV1::JoinRequest(request) => request,
+                _ => return Err(PrepareJoinerCandidateError::Invalid),
+            };
+            let candidate = match candidate_envelope.body() {
+                SpaceAdmissionBodyV1::Candidate(candidate) => candidate,
+                _ => return Err(PrepareJoinerCandidateError::Invalid),
+            };
+            if candidate_envelope.header().admission_id()
+                != preparation.join_request().header().admission_id()
+                || candidate_envelope.header().predecessor_message_id()
+                    != Some(preparation.join_request().header().message_id())
+            {
+                return Err(PrepareJoinerCandidateError::Invalid);
+            }
+            let MembershipOperationV2::AddDevice { admission } =
+                &candidate.candidate_event().operation
+            else {
+                return Err(PrepareJoinerCandidateError::Invalid);
+            };
+            let expected_resume_digest: [u8; 32] =
+                Sha256::digest(original_request.recovery_public_key().as_bytes()).into();
+            if admission.facts != *original_request.identity_facts()
+                || admission.membership_credential != *original_request.membership_credential()
+                || admission.resume_public_key_digest != expected_resume_digest
+                || admission.security_commitment_id
+                    != candidate.security_commitment().security_commitment_id
+            {
+                return Err(PrepareJoinerCandidateError::Invalid);
+            }
+            let mut history = VersionedMembershipHistory::decode_persisted_v2(
+                candidate.base_membership_history().as_bytes(),
                 self.history_verifier.as_ref(),
             )
             .map_err(PrepareJoinerCandidateError::invalid)?;
-
-        let private: OwnedJoinerPrivateStateV1 =
-            postcard::from_bytes(preparation.private_state().as_bytes())
-                .map_err(PrepareJoinerCandidateError::invalid)?;
-        if private.format_version != 2 {
-            return Err(PrepareJoinerCandidateError::Invalid);
-        }
-        let transition_input = AdmissionSecurityTransitionInput {
-            attempt_id: commitment.attempt_id,
-            base_history_position: commitment.base_history_position.clone(),
-            candidate_core_digest: commitment.candidate_core_digest,
-            key_catalog_digest: commitment.key_catalog_digest,
-            admission_bundle_digest: commitment.admission_bundle_digest,
-        };
-        let staged = AdmissionSecurityTransitionAdapter::stage_joiner(
-            &private.mls_state,
-            original_request.key_package().as_bytes(),
-            commitment.lineage_id.as_bytes(),
-            candidate.mls_welcome().as_bytes(),
-            candidate.mls_commit().as_bytes(),
-            &transition_input,
-        )
-        .map_err(PrepareJoinerCandidateError::invalid)?;
-        if staged.public_commitment != *commitment {
-            return Err(PrepareJoinerCandidateError::Invalid);
-        }
-        let passphrase = std::str::from_utf8(&private.passphrase)
-            .map_err(PrepareJoinerCandidateError::invalid)?;
-        let target_access = self
-            .target_access
-            .prepare_target_access(
-                &SpaceId::from_str(&commitment.lineage_id),
-                &Passphrase::new(passphrase),
-            )
-            .await
-            .map_err(PrepareJoinerCandidateError::unavailable)?;
-        let target_admission_credentials =
-            crate::space::admission::credentials::prepare_registration(&Passphrase::new(
-                passphrase,
-            ))
-            .map_err(PrepareJoinerCandidateError::unavailable)?;
-
-        let mut proof = PreparedAdmissionProofV1::new(
-            commitment.attempt_id,
-            commitment.lineage_id.clone(),
-            commitment.base_history_position.clone(),
-            candidate.candidate_event().event_id(),
-            candidate.candidate_event().resulting_members_digest,
-            commitment.security_commitment_id,
-            admission.facts.member_instance,
-            admission.membership_credential.credential_id,
-            Vec::new(),
-        );
-        proof.signature = MlsGroupEngine::sign_member_payload(
-            &MlsClientState::from_bytes(staged.staged_state.clone()),
-            &proof.signing_payload(),
-        )
-        .map_err(PrepareJoinerCandidateError::invalid)?;
-        let prepared = SpaceAdmissionEnvelopeV1::new(
-            candidate_envelope.header().admission_id(),
-            uc_core::membership::AdmissionRole::Joiner,
-            1,
-            mint_message_id(),
-            Some(candidate_envelope.header().message_id()),
-            SpaceAdmissionBodyV1::Prepared(AdmissionPreparedV1::new(proof)),
-        )
-        .map_err(PrepareJoinerCandidateError::invalid)?;
-        let prepared_exchange = PendingAdmissionExchange::new(
-            uc_core::membership::SpaceAdmissionRoute::from_bytes(
-                candidate.continuation_route().as_bytes().to_vec(),
-            )
-            .map_err(PrepareJoinerCandidateError::invalid)?,
-            prepared,
-            SpaceAdmissionMessageKind::Commit,
-            AdmissionRetryState::new(0, 0).map_err(PrepareJoinerCandidateError::invalid)?,
-        )
-        .map_err(PrepareJoinerCandidateError::invalid)?;
-        let staged_input = AdmissionStagedTargetInput::from_bytes(
-            postcard::to_stdvec(&JoinerStagedInputV1 {
-                format_version: JOINER_STAGED_INPUT_FORMAT_V1,
-                recovery_secret: &private.recovery_secret,
-                candidate_digest: candidate_digest(candidate),
-            })
-            .map_err(PrepareJoinerCandidateError::unavailable)?,
-        )
-        .map_err(PrepareJoinerCandidateError::invalid)?;
-        let staged_target = AdmissionStagedTarget::from_bytes(
-            postcard::to_stdvec(&JoinerStagedTargetV1 {
-                format_version: JOINER_STAGED_TARGET_FORMAT_V2,
-                mls_state: &staged.staged_state,
-                recovery_secret: &private.recovery_secret,
-                target_access: target_access.as_bytes(),
-                target_admission_credentials: &target_admission_credentials,
-                preserve_unreadable_history: matches!(
-                    original_request.unreadable_history_policy(),
-                    uc_core::membership::UnreadableHistoryPolicy::Preserve
-                ),
-            })
-            .map_err(PrepareJoinerCandidateError::unavailable)?,
-        )
-        .map_err(PrepareJoinerCandidateError::invalid)?;
-        let verified_history = AdmissionSignedMembershipHistory::from_bytes(
+            let commitment = candidate.security_commitment();
+            if commitment.attempt_id != *candidate_envelope.header().admission_id().as_bytes()
+                || commitment.base_history_position
+                    != history
+                        .current_position()
+                        .map_err(PrepareJoinerCandidateError::invalid)?
+                || commitment.candidate_core_digest
+                    != candidate
+                        .candidate_event()
+                        .admission_candidate_core_digest(
+                            commitment.attempt_id,
+                            original_request.key_package().as_bytes(),
+                        )
+                        .map_err(PrepareJoinerCandidateError::invalid)?
+            {
+                return Err(PrepareJoinerCandidateError::Invalid);
+            }
             history
-                .encode_persisted_v2()
-                .map_err(PrepareJoinerCandidateError::invalid)?,
-        )
-        .map_err(PrepareJoinerCandidateError::invalid)?;
+                .verify_and_receive_event(
+                    candidate.candidate_event().clone(),
+                    self.history_verifier.as_ref(),
+                )
+                .map_err(PrepareJoinerCandidateError::invalid)?;
 
-        Ok(PreparedJoinerCandidateMaterial::new(
-            staged_input,
-            verified_history,
-            staged_target,
-            prepared_exchange,
-        ))
+            let private: OwnedJoinerPrivateStateV1 =
+                postcard::from_bytes(preparation.private_state().as_bytes())
+                    .map_err(PrepareJoinerCandidateError::invalid)?;
+            if private.format_version != 2 {
+                return Err(PrepareJoinerCandidateError::Invalid);
+            }
+            let transition_input = AdmissionSecurityTransitionInput {
+                attempt_id: commitment.attempt_id,
+                base_history_position: commitment.base_history_position.clone(),
+                candidate_core_digest: commitment.candidate_core_digest,
+                key_catalog_digest: commitment.key_catalog_digest,
+                admission_bundle_digest: commitment.admission_bundle_digest,
+            };
+            let staged = AdmissionSecurityTransitionAdapter::stage_joiner(
+                &private.mls_state,
+                original_request.key_package().as_bytes(),
+                commitment.lineage_id.as_bytes(),
+                candidate.mls_welcome().as_bytes(),
+                candidate.mls_commit().as_bytes(),
+                &transition_input,
+            )
+            .map_err(PrepareJoinerCandidateError::invalid)?;
+            if staged.public_commitment != *commitment {
+                return Err(PrepareJoinerCandidateError::Invalid);
+            }
+            let passphrase = std::str::from_utf8(&private.passphrase)
+                .map_err(PrepareJoinerCandidateError::invalid)?;
+            let target_access = self
+                .target_access
+                .prepare_target_access(
+                    &SpaceId::from_str(&commitment.lineage_id),
+                    &Passphrase::new(passphrase),
+                )
+                .await
+                .map_err(PrepareJoinerCandidateError::unavailable)?;
+            let target_admission_credentials = prepare_registration(&Passphrase::new(passphrase))
+                .map_err(PrepareJoinerCandidateError::unavailable)?;
+
+            let mut proof = PreparedAdmissionProofV1::new(
+                commitment.attempt_id,
+                commitment.lineage_id.clone(),
+                commitment.base_history_position.clone(),
+                candidate.candidate_event().event_id(),
+                candidate.candidate_event().resulting_members_digest,
+                commitment.security_commitment_id,
+                admission.facts.member_instance,
+                admission.membership_credential.credential_id,
+                Vec::new(),
+            );
+            proof.signature = MlsGroupEngine::sign_member_payload(
+                &MlsClientState::from_bytes(staged.staged_state.clone()),
+                &proof.signing_payload(),
+            )
+            .map_err(PrepareJoinerCandidateError::invalid)?;
+            let prepared = SpaceAdmissionEnvelopeV1::reply_to(
+                candidate_envelope,
+                uc_core::membership::AdmissionRole::Joiner,
+                1,
+                mint_message_id(),
+                SpaceAdmissionBodyV1::Prepared(AdmissionPreparedV1::new(proof)),
+            )
+            .map_err(PrepareJoinerCandidateError::invalid)?;
+            let prepared_exchange = PendingAdmissionExchange::new(
+                uc_core::membership::SpaceAdmissionRoute::from_bytes(
+                    candidate.continuation_route().as_bytes().to_vec(),
+                )
+                .map_err(PrepareJoinerCandidateError::invalid)?,
+                prepared,
+                SpaceAdmissionMessageKind::Commit,
+                AdmissionRetryState::new(0, 0).map_err(PrepareJoinerCandidateError::invalid)?,
+            )
+            .map_err(PrepareJoinerCandidateError::invalid)?;
+            let staged_input = AdmissionStagedTargetInput::from_bytes(
+                postcard::to_stdvec(&JoinerStagedInputV1 {
+                    format_version: JOINER_STAGED_INPUT_FORMAT_V1,
+                    recovery_secret: &private.recovery_secret,
+                    candidate_digest: candidate_digest(candidate),
+                })
+                .map_err(PrepareJoinerCandidateError::unavailable)?,
+            )
+            .map_err(PrepareJoinerCandidateError::invalid)?;
+            let staged_target = AdmissionStagedTarget::from_bytes(
+                postcard::to_stdvec(&JoinerStagedTargetV1 {
+                    format_version: JOINER_STAGED_TARGET_FORMAT_V2,
+                    mls_state: &staged.staged_state,
+                    recovery_secret: &private.recovery_secret,
+                    target_access: target_access.as_bytes(),
+                    target_admission_credentials: &target_admission_credentials,
+                    preserve_unreadable_history: matches!(
+                        original_request.unreadable_history_policy(),
+                        uc_core::membership::UnreadableHistoryPolicy::Preserve
+                    ),
+                })
+                .map_err(PrepareJoinerCandidateError::unavailable)?,
+            )
+            .map_err(PrepareJoinerCandidateError::invalid)?;
+            let verified_history = AdmissionSignedMembershipHistory::from_bytes(
+                history
+                    .encode_persisted_v2()
+                    .map_err(PrepareJoinerCandidateError::invalid)?,
+            )
+            .map_err(PrepareJoinerCandidateError::invalid)?;
+
+            let prepared = PreparedJoinerCandidateMaterial::new(
+                staged_input,
+                verified_history,
+                staged_target,
+                prepared_exchange,
+            );
+            Ok(prepared)
+        })
+        .await
     }
 }
 
@@ -436,6 +439,7 @@ mod tests {
                 AdmissionRetryState::new(0, 0).expect("retry state"),
             )
             .expect("pending exchange"),
+            1_000,
         )
         .expect("Joiner starts")
         .into_replacement()

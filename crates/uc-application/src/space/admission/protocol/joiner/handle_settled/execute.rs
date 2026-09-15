@@ -3,7 +3,7 @@ use uc_observability_contract::diagnostics::SpaceAdmissionObservationOutcome;
 
 use crate::space::admission::protocol::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryReport, AdmissionRecoveryService,
-    JoinerAdmissionService,
+    JoinerAdmissionService, JoinerReplyHandlingOutcome,
 };
 
 impl JoinerAdmissionService {
@@ -16,13 +16,13 @@ impl JoinerAdmissionService {
         reply: SpaceAdmissionEnvelopeV1,
         canonical_digest: [u8; 32],
         notify_upgrade_cleared: bool,
-    ) {
+    ) -> JoinerReplyHandlingOutcome {
         let observation_material = *aggregate.admission_id().as_bytes();
         let transition = match aggregate.accept_settled(reply, canonical_digest) {
             Ok(transition) => transition,
             Err(_) => {
                 report.recovery_required_count += 1;
-                return;
+                return JoinerReplyHandlingOutcome::NoImmediateWork;
             }
         };
         let commit_result = recovery
@@ -38,8 +38,12 @@ impl JoinerAdmissionService {
                     Ok(()) => report.advanced_count += 1,
                     Err(_) => report.deferred_count += 1,
                 }
+                JoinerReplyHandlingOutcome::PairingFinished
             }
-            Err(error) => recovery.record_state_error(report, error),
+            Err(error) => {
+                recovery.record_state_error(report, error);
+                JoinerReplyHandlingOutcome::NoImmediateWork
+            }
         }
     }
 }

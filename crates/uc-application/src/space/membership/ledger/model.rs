@@ -486,6 +486,8 @@ impl LoadedMembershipLedger {
 pub struct MembershipLedgerMutation {
     pub expected_revision: u64,
     pub expected_history_digest: Option<[u8; 32]>,
+    /// 这次提交是否改变宿主可见的设备分组状态。
+    pub device_trust_changed: bool,
     pub replacement: LoadedMembershipLedger,
 }
 
@@ -615,6 +617,7 @@ impl std::fmt::Debug for MembershipLedgerMutation {
             .debug_struct("MembershipLedgerMutation")
             .field("expected_revision", &self.expected_revision)
             .field("expected_history_digest", &"[REDACTED]")
+            .field("device_trust_changed", &self.device_trust_changed)
             .field("replacement", &self.replacement)
             .finish()
     }

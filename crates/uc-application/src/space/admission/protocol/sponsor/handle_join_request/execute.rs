@@ -12,7 +12,8 @@ impl SponsorAdmissionService {
         message: AuthenticatedSpaceAdmissionMessage,
     ) -> Result<SpaceAdmissionMessageReply, HandleAuthenticatedSpaceAdmissionMessageError> {
         let loaded = self.state.load(&message).await?;
-        let (peer_binding, envelope, canonical_digest, continuation) = message.into_parts();
+        let (peer_binding, envelope, canonical_digest, continuation, attempt_contract) =
+            message.into_parts();
         let evidence = envelope.evidence(canonical_digest).ok_or_else(|| {
             HandleAuthenticatedSpaceAdmissionMessageError::invalid(anyhow::anyhow!(
                 "the JoinRequest canonical digest is invalid"
@@ -45,15 +46,27 @@ impl SponsorAdmissionService {
                     ))
                 })?;
                 let admission_id = envelope.header().admission_id();
-                let transition = SponsorAdmission::accept_join_request(
-                    admission_id,
-                    invitation_claim,
-                    envelope,
-                    evidence,
-                    base_snapshot,
-                    peer_binding,
-                    continuation,
-                )?;
+                let transition = match attempt_contract {
+                    Some(contract) => SponsorAdmission::accept_join_request_with_contract(
+                        admission_id,
+                        invitation_claim,
+                        envelope,
+                        evidence,
+                        base_snapshot,
+                        peer_binding,
+                        continuation,
+                        contract,
+                    )?,
+                    None => SponsorAdmission::accept_join_request(
+                        admission_id,
+                        invitation_claim,
+                        envelope,
+                        evidence,
+                        base_snapshot,
+                        peer_binding,
+                        continuation,
+                    )?,
+                };
                 self.state
                     .commit(commit_token, SponsorAdmissionMutation::new(transition))
                     .await?

@@ -49,11 +49,13 @@ impl FrameKind {
 }
 
 #[derive(Serialize, Deserialize)]
-pub(super) struct InitialHelloV1 {
+pub(super) struct InitialHelloV2 {
     pub protocol_version: u16,
     pub admission_id: [u8; 32],
     pub invitation_id: [u8; 32],
     pub joiner_peer_id: [u8; 32],
+    pub attempt_started_at_ms: i64,
+    pub attempt_expires_at_ms: i64,
     pub ke1: Vec<u8>,
 }
 

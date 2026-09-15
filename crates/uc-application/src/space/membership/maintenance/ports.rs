@@ -1,14 +1,23 @@
 use async_trait::async_trait;
 
-use super::{MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger};
+use super::{
+    AdmissionMaintenanceOutcome, MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger,
+};
 
 pub trait WakeSpaceMembershipMaintenancePort: Send + Sync {
     fn wake(&self);
+
+    fn schedule_at(&self, expires_at_ms: i64, now_ms: i64);
 }
 
 impl WakeSpaceMembershipMaintenancePort for super::SpaceMembershipMaintenanceActivity {
     fn wake(&self) {
         let _ = self.request_state_changed();
+    }
+
+    fn schedule_at(&self, expires_at_ms: i64, now_ms: i64) {
+        let remaining_ms = expires_at_ms.saturating_sub(now_ms).max(0) as u64;
+        let _ = self.request_deadline(std::time::Duration::from_millis(remaining_ms));
     }
 }
 
@@ -17,7 +26,7 @@ pub trait RecoverSpaceAdmissionsPort: Send + Sync {
     async fn recover_space_admissions(
         &self,
         trigger: &MembershipMaintenanceTrigger,
-    ) -> MembershipMaintenanceStepOutcome;
+    ) -> AdmissionMaintenanceOutcome;
 }
 
 #[async_trait]
@@ -37,7 +46,10 @@ pub trait DeliverRestrictedMembershipPort: Send + Sync {
 
 #[async_trait]
 pub trait DeliverPendingGroupUpdatesPort: Send + Sync {
-    async fn deliver_pending_group_updates(&self) -> MembershipMaintenanceStepOutcome;
+    async fn deliver_pending_group_updates(
+        &self,
+        trigger: &MembershipMaintenanceTrigger,
+    ) -> MembershipMaintenanceStepOutcome;
 }
 
 #[async_trait]

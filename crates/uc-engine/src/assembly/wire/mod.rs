@@ -517,6 +517,8 @@ pub async fn wire_dependencies_from_inputs(
                     Arc::clone(&active_generation_manifest_store),
                     Arc::clone(&control_generations),
                     Arc::clone(&activation),
+                    admission_state.clone()
+                        as Arc<dyn uc_application::deps::ValidateJoinerActivationIntentPort>,
                 )
             }
             None => V3AdmissionSpaceTransition::new(
@@ -524,6 +526,8 @@ pub async fn wire_dependencies_from_inputs(
                 Arc::clone(&active_generation_manifest_store),
                 Arc::clone(&control_generations),
                 Arc::clone(&activation),
+                admission_state.clone()
+                    as Arc<dyn uc_application::deps::ValidateJoinerActivationIntentPort>,
             ),
         });
         let device_reset = Arc::new(V3DeviceManagementReset::new(

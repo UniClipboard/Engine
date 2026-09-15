@@ -4,7 +4,8 @@ mod runtime;
 mod use_case;
 
 pub use model::{
-    MembershipMaintenanceReport, MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger,
+    AdmissionMaintenanceOutcome, MembershipMaintenanceReport, MembershipMaintenanceStepOutcome,
+    MembershipMaintenanceTrigger,
 };
 pub use ports::{
     DeliverPendingGroupUpdatesPort, DeliverRestrictedMembershipPort,
@@ -19,5 +20,7 @@ pub(crate) use runtime::{
 };
 pub(crate) use use_case::{MaintainSpaceMembershipDeps, MaintainSpaceMembershipUseCase};
 
+#[cfg(test)]
+mod diagnostic_tests;
 #[cfg(test)]
 mod tests;

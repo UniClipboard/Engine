@@ -40,6 +40,7 @@ use crate::space::SpaceAdmissionObservationRegistry;
 struct DeferredMaintenanceWake {
     target: OnceLock<Arc<dyn crate::space::membership::WakeSpaceMembershipMaintenancePort>>,
     pending: AtomicBool,
+    pending_deadline: std::sync::Mutex<Option<(i64, i64)>>,
 }
 
 impl DeferredMaintenanceWake {
@@ -47,6 +48,7 @@ impl DeferredMaintenanceWake {
         Self {
             target: OnceLock::new(),
             pending: AtomicBool::new(false),
+            pending_deadline: std::sync::Mutex::new(None),
         }
     }
 
@@ -54,6 +56,16 @@ impl DeferredMaintenanceWake {
         if self.target.set(target).is_ok() && self.pending.swap(false, Ordering::AcqRel) {
             if let Some(target) = self.target.get() {
                 target.wake();
+            }
+        }
+        if let Some(target) = self.target.get() {
+            if let Some((expires_at_ms, now_ms)) = self
+                .pending_deadline
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                target.schedule_at(expires_at_ms, now_ms);
             }
         }
     }
@@ -67,6 +79,17 @@ impl crate::space::membership::WakeSpaceMembershipMaintenancePort for DeferredMa
             self.pending.store(true, Ordering::Release);
         }
     }
+
+    fn schedule_at(&self, expires_at_ms: i64, now_ms: i64) {
+        if let Some(target) = self.target.get() {
+            target.schedule_at(expires_at_ms, now_ms);
+        } else {
+            *self
+                .pending_deadline
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((expires_at_ms, now_ms));
+        }
+    }
 }
 
 struct SpaceApplicationDeps {
@@ -77,6 +100,7 @@ struct SpaceApplicationDeps {
     settings: Arc<dyn uc_core::ports::SettingsPort>,
     host_event_bus: Arc<crate::facade::HostEventBus>,
     admission_observations: Arc<SpaceAdmissionObservationRegistry>,
+    space_transition_changes: tokio::sync::watch::Sender<()>,
 }
 
 impl SpaceApplicationDeps {
@@ -84,6 +108,7 @@ impl SpaceApplicationDeps {
         application: &ApplicationDeps,
         adapters: SpaceRuntimeAdapters,
         admission_observations: Arc<SpaceAdmissionObservationRegistry>,
+        space_transition_changes: tokio::sync::watch::Sender<()>,
     ) -> Self {
         Self {
             adapters,
@@ -93,6 +118,7 @@ impl SpaceApplicationDeps {
             settings: Arc::clone(&application.settings),
             host_event_bus: Arc::clone(&application.host_event_bus),
             admission_observations,
+            space_transition_changes,
         }
     }
 }
@@ -123,9 +149,15 @@ impl SpaceApplication {
         peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
         re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
         admission_observations: Arc<SpaceAdmissionObservationRegistry>,
+        space_transition_changes: tokio::sync::watch::Sender<()>,
     ) -> Self {
         Self::build_from_deps(
-            SpaceApplicationDeps::from_application(application, adapters, admission_observations),
+            SpaceApplicationDeps::from_application(
+                application,
+                adapters,
+                admission_observations,
+                space_transition_changes,
+            ),
             peer_reachability_changed_events,
             re_pairing,
         )
@@ -151,6 +183,7 @@ impl SpaceApplication {
                 settings,
                 host_event_bus,
                 admission_observations: Arc::new(SpaceAdmissionObservationRegistry::default()),
+                space_transition_changes: tokio::sync::watch::channel(()).0,
             },
             peer_reachability_changed_events,
             re_pairing,
@@ -174,6 +207,7 @@ impl SpaceApplication {
             settings,
             host_event_bus,
             admission_observations,
+            space_transition_changes,
         } = deps;
         let SpaceAdmissionAdapters {
             re_pairing_state_store: _,
@@ -246,6 +280,23 @@ impl SpaceApplication {
             Arc::new(QueryMembershipAdmissionUseCase::new(Arc::clone(&ledger)));
         let current_scope: Arc<dyn CurrentSpaceMemberScopePort> = ledger.clone();
         let deferred_maintenance_wake = Arc::new(DeferredMaintenanceWake::new());
+        let membership_activation = Arc::new(RePairingAwareMembershipActivation::new(
+            activate_membership_effect,
+            Arc::clone(&re_pairing),
+        ));
+        let recover_membership_effects = Arc::new(RecoverMembershipEffectsUseCase::new(
+            Arc::clone(&ledger),
+            apply_membership_member_facts,
+            apply_membership_security,
+            membership_activation,
+        ));
+        let remove_space_member = Arc::new(RemoveSpaceMemberUseCase::new(
+            Arc::clone(&ledger),
+            Arc::clone(&current_member_signatures),
+            Arc::clone(&query_device_trust),
+            recover_membership_effects.clone(),
+            deferred_maintenance_wake.clone(),
+        ));
         let membership_history_endpoint = Arc::new(MembershipHistoryAntiEntropy::new(
             Arc::clone(&ledger),
             Arc::clone(&current_scope),
@@ -255,6 +306,7 @@ impl SpaceApplication {
         ));
         let joiner_admission = JoinerAdmissionService::new(
             settings,
+            Arc::clone(&clock),
             prepare_joiner_invitation,
             resolve_joiner_invitation,
             joiner_start_material,
@@ -267,6 +319,7 @@ impl SpaceApplication {
             joiner_activation_state,
             execute_joiner_activation,
             deferred_maintenance_wake.clone(),
+            space_transition_changes,
             Arc::clone(&re_pairing),
             admission_observations,
         );
@@ -283,21 +336,13 @@ impl SpaceApplication {
             pending_admission_recovery_state,
             space_admission_transport,
             host_event_bus,
+            Arc::clone(&clock),
+            remove_space_member.clone(),
         );
         let space_admission = Arc::new(SpaceAdmissionProtocol::new(
             joiner_admission,
             sponsor_admission,
             admission_recovery,
-        ));
-        let membership_activation = Arc::new(RePairingAwareMembershipActivation::new(
-            activate_membership_effect,
-            re_pairing,
-        ));
-        let recover_membership_effects = Arc::new(RecoverMembershipEffectsUseCase::new(
-            Arc::clone(&ledger),
-            apply_membership_member_facts,
-            apply_membership_security,
-            membership_activation,
         ));
         let deliver_restricted_membership = Arc::new(DeliverRestrictedMembershipUseCase::new(
             Arc::clone(&ledger),
@@ -350,13 +395,6 @@ impl SpaceApplication {
         let membership_activity = prepared_runtime.activity();
         deferred_maintenance_wake.bind(Arc::new(membership_activity.clone()));
         let activity = Arc::new(membership_activity.clone());
-        let remove_space_member = Arc::new(RemoveSpaceMemberUseCase::new(
-            Arc::clone(&ledger),
-            Arc::clone(&current_member_signatures),
-            Arc::clone(&query_device_trust),
-            recover_membership_effects.clone(),
-            activity.clone(),
-        ));
         let decide_device_trust_change = Arc::new(DecideDeviceTrustChangeUseCase::new(
             Arc::clone(&ledger),
             current_member_signatures,

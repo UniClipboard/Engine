@@ -4,6 +4,24 @@ use std::time::{Duration, Instant};
 
 mod address;
 mod address_record;
+mod admission_exchange;
+mod admission_network;
+mod local_work;
+mod maintenance;
+pub use admission_exchange::{
+    AdmissionExchangeFailure, AdmissionExchangeFailureDetail, AdmissionExchangeObservation,
+    AdmissionExchangeSide, AdmissionExchangeStep,
+};
+pub use admission_network::{
+    record_admission_network_snapshot, AdmissionNetworkPoint, AdmissionNetworkSnapshot,
+};
+pub use local_work::{
+    observe_local_result, observe_local_sync_result, scope_pairing_work, LocalWorkObservation,
+    LocalWorkOutcome, LocalWorkStep,
+};
+pub use maintenance::{
+    record_pending_group_updates, MaintenanceDisposition, MaintenanceObservation,
+};
 
 pub use address_record::{
     local_address_record_keys, AddressRecordResult, StoredAddressObservation,
@@ -62,6 +80,16 @@ pub use record::{
 };
 
 pub const CONNECTIVITY_TARGET: &str = "uc.connectivity";
+
+/// 确认真正需要切换后报告已测量的锁等待；空轮询不产生记录，不伪造开始事件。
+pub fn record_session_lock_wait(waited: Duration) {
+    emit_local(
+        LocalEvent::SessionLockWait {
+            duration_ms: millis(waited),
+        },
+        &ObservationContext::capture(),
+    );
+}
 
 fn local_events_enabled() -> bool {
     tracing::event_enabled!(target: "uc.connectivity", tracing::Level::INFO)

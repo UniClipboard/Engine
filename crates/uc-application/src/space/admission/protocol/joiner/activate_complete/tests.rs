@@ -5,7 +5,7 @@ use crate::space::admission::{AdmissionRecoveryTrigger, CurrentJoinStatus, JoinS
 async fn protocol_queries_and_completes_the_saved_activation_as_one_action() {
     let pair = SpaceAdmissionProtocolTestPair::receiving_complete().await;
     pair.joiner()
-        .start_join(join_input("explicit-activation"))
+        .start_join_at(join_input("explicit-activation"), 1_000)
         .await
         .expect("join should be saved");
     for _ in 0..3 {
@@ -14,6 +14,7 @@ async fn protocol_queries_and_completes_the_saved_activation_as_one_action() {
             .await;
     }
 
+    assert!(pair.space_transition_change_pending());
     assert!(pair
         .joiner()
         .has_pending_space_transition()

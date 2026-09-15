@@ -43,14 +43,16 @@ pub use ledger::{
 };
 pub(crate) use maintenance::PreparedSpaceMembershipMaintenanceRuntime;
 pub use maintenance::{
-    DeliverPendingGroupUpdatesPort, DeliverRestrictedMembershipPort, MembershipNetworkActivityPort,
-    ReconcileMembershipProjectionPort, RecoverMembershipConflictsPort,
-    RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
+    AdmissionMaintenanceOutcome, DeliverPendingGroupUpdatesPort, DeliverRestrictedMembershipPort,
+    MembershipNetworkActivityPort, ReconcileMembershipProjectionPort,
+    RecoverMembershipConflictsPort, RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
 };
 pub use query_device_trust::{
-    DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
-    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, LoadCurrentJoinStatusPort,
-    LoadDeviceTrustObservationsPort, PendingDeviceTrustChange, QueryDeviceTrustError,
+    AdmissionDisplayStatus, DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership,
+    DeviceTrustObservation, DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState,
+    LoadCurrentJoinStatusPort, LoadDeviceTrustObservationsPort, PairingConfirmationObservation,
+    PairingConfirmationStatus, PairingConfirmationTarget, PendingDeviceTrustChange,
+    QueryDeviceTrustError,
 };
 pub(super) use query_diagnostics::QueryMembershipDiagnosticsUseCase;
 pub use query_diagnostics::{MembershipDiagnosticsView, QueryMembershipDiagnosticsError};
@@ -72,7 +74,9 @@ pub use recover_conflict::{
     PreparedMembershipBranchRecoveryRecipient,
 };
 pub use remove_space_member::{
-    MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult,
+    AdmissionAbandonmentRevocationTarget, AdmissionRevocationPort, AdmissionRevocationResult,
+    AdmissionRevocationTarget, MembershipCommitReceipt, RemoveSpaceMemberError,
+    RemoveSpaceMemberResult,
 };
 pub use resolve_conflict::{
     DeviceGroupChoiceImpact, MembershipConflictBranchView, MembershipConflictView,

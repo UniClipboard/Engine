@@ -1,16 +1,23 @@
 use std::future::Future;
+#[cfg(feature = "dev-tools")]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn, Instrument};
 use uc_application::facade::{
     AppFacade, ApplicationRuntime, ClipboardInboundEvent, ClipboardInboundEventAction,
-    ClipboardInboundEventPort,
+    ClipboardInboundEventPort, CompletePendingSpaceTransitionError,
 };
 use uc_core::TaskRegistry;
 use uc_infra::fs::{FsAtomicPublisher, FsHiddenPathMarker, FsInboundFileTarget};
+use uc_infra::network::iroh::{IrohNode, IrohSessionBuilder, PreparedIrohSession};
+use uc_observability_contract::diagnostics::connectivity::{
+    observe_local_result, record_session_lock_wait, LocalWorkObservation, LocalWorkOutcome,
+    LocalWorkStep,
+};
 use uc_observability_contract::diagnostics::{
     complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
     DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
@@ -19,18 +26,115 @@ use uc_observability_contract::diagnostics::{
 use crate::assembly::deps::WiredDependencies;
 #[cfg(feature = "lan-compat")]
 use crate::assembly::facade::build_mobile_sync_facade;
-use crate::assembly::lifecycle::build_daemon_lifecycle;
-use crate::assembly::sync_engine::SyncEngineAssembly;
+use crate::assembly::lifecycle::{build_network_runtime, prepare_daemon_session};
+use crate::assembly::sync_engine::SyncSessionAssembly;
 use crate::engine::event_stream::EventSender;
 use crate::subsystems::peer_keepalive::spawn_peer_reachability_event_task;
+#[cfg(feature = "dev-tools")]
+use crate::SessionHandoverFailurePoint;
 use crate::{
     EngineEvent, InboundNoticeActionSummary, InboundNoticeEvent, InboundRepresentationSummary,
 };
 
-use super::{operation_error_with_code, operation_unavailable_error, startup_error};
+use super::{operation_error_with_code, operation_unavailable_error};
 use crate::{EngineError, EngineErrorCategory, OperationResult};
 
 const SESSION_OPERATION_GRACE: Duration = Duration::from_secs(2);
+const SESSION_RUNTIME_FAILED_CODE: u32 = 1101;
+
+#[cfg(feature = "dev-tools")]
+#[derive(Default)]
+struct SessionHandoverTestFailure {
+    remaining: AtomicUsize,
+    consumed: AtomicUsize,
+}
+
+#[cfg(feature = "dev-tools")]
+impl SessionHandoverTestFailure {
+    fn arm(&self) {
+        self.remaining.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn consume(&self) -> bool {
+        let consumed = self
+            .remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok();
+        if consumed {
+            self.consumed.fetch_add(1, Ordering::SeqCst);
+        }
+        consumed
+    }
+
+    fn consumed(&self) -> usize {
+        self.consumed.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(feature = "dev-tools")]
+#[derive(Default)]
+struct SessionHandoverTestControl {
+    session_quiesce: SessionHandoverTestFailure,
+    transition_completion: SessionHandoverTestFailure,
+    session_preparation: SessionHandoverTestFailure,
+    session_activation: SessionHandoverTestFailure,
+    network_build_count: AtomicUsize,
+}
+
+#[cfg(feature = "dev-tools")]
+impl SessionHandoverTestControl {
+    fn failure(&self, point: SessionHandoverFailurePoint) -> &SessionHandoverTestFailure {
+        match point {
+            SessionHandoverFailurePoint::SessionQuiesce => &self.session_quiesce,
+            SessionHandoverFailurePoint::TransitionCompletion => &self.transition_completion,
+            SessionHandoverFailurePoint::SessionPreparation => &self.session_preparation,
+            SessionHandoverFailurePoint::SessionActivation => &self.session_activation,
+        }
+    }
+}
+
+#[cfg(feature = "dev-tools")]
+pub(super) struct SessionHandoverDiagnostics {
+    pub(super) network_build_count: usize,
+    pub(super) session_quiesce_failure_count: usize,
+    pub(super) transition_completion_failure_count: usize,
+    pub(super) session_preparation_failure_count: usize,
+    pub(super) session_activation_failure_count: usize,
+}
+
+fn session_runtime_error(context: &'static str, error: impl std::fmt::Display) -> EngineError {
+    error!(context, error = %error, "engine session lifecycle failed");
+    EngineError::new(
+        SESSION_RUNTIME_FAILED_CODE,
+        EngineErrorCategory::Unavailable,
+        true,
+    )
+}
+
+fn retryable_space_transition_runtime_error(
+    context: &'static str,
+    error: impl std::fmt::Display,
+) -> EngineError {
+    error!(context, error = %error, "engine Space transition failed");
+    EngineError::new(1103, EngineErrorCategory::Unavailable, true)
+}
+
+fn space_transition_error(
+    context: &'static str,
+    error: CompletePendingSpaceTransitionError,
+) -> EngineError {
+    error!(context, error = %error, "engine Space transition failed");
+    match error {
+        CompletePendingSpaceTransitionError::State { .. } => {
+            EngineError::new(1103, EngineErrorCategory::Unavailable, true)
+        }
+        CompletePendingSpaceTransitionError::JoinNotActive => {
+            EngineError::new(1103, EngineErrorCategory::Internal, false)
+        }
+    }
+}
 
 struct ProductionSessionFactory {
     wired: WiredDependencies,
@@ -43,6 +147,8 @@ struct ProductionSessionFactory {
     iroh_bind_port_override: Option<u16>,
     #[cfg(feature = "dev-tools")]
     network_partition_gate: uc_infra::network::iroh::IrohNetworkPartitionGate,
+    #[cfg(feature = "dev-tools")]
+    test_control: Arc<SessionHandoverTestControl>,
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
 }
 
@@ -51,16 +157,28 @@ struct ProductionSession {
     application: Arc<ApplicationRuntime>,
     #[cfg(feature = "lan-compat")]
     mobile_sync: Arc<uc_mobile_lan::MobileSyncFacade>,
-    sync_engine: SyncEngineAssembly,
+    sync_session: SyncSessionAssembly,
     tasks: Arc<TaskRegistry>,
 }
 
+struct PreparedProductionSession {
+    session: ProductionSession,
+    network_session: PreparedIrohSession,
+}
+
+struct SessionRuntimeState {
+    network: Option<IrohNode>,
+    session: Option<ProductionSession>,
+}
+
 pub(super) struct SessionSupervisor {
-    session: Arc<Mutex<Option<ProductionSession>>>,
+    runtime: Mutex<SessionRuntimeState>,
     factory: StdMutex<Option<Arc<ProductionSessionFactory>>>,
     application: uc_application::facade::ApplicationAssembly,
     lifecycle: Mutex<()>,
     operations: SessionOperationGate,
+    #[cfg(feature = "dev-tools")]
+    test_control: Arc<SessionHandoverTestControl>,
 }
 
 pub(super) struct SessionOperationLease {
@@ -187,11 +305,16 @@ impl SessionSupervisor {
             SourceCollection::Enabled,
         );
         Self {
-            session: Arc::new(Mutex::new(None)),
+            runtime: Mutex::new(SessionRuntimeState {
+                network: None,
+                session: None,
+            }),
             factory: StdMutex::new(None),
             application,
             lifecycle: Mutex::new(()),
             operations: SessionOperationGate::new_open(),
+            #[cfg(feature = "dev-tools")]
+            test_control: Arc::new(SessionHandoverTestControl::default()),
         }
     }
 
@@ -220,6 +343,8 @@ impl SessionSupervisor {
             iroh_bind_port_override,
             #[cfg(feature = "dev-tools")]
             network_partition_gate,
+            #[cfg(feature = "dev-tools")]
+            test_control: Arc::clone(&self.test_control),
             network_recovery,
         });
         let mut slot = self
@@ -230,18 +355,20 @@ impl SessionSupervisor {
     }
 
     pub(super) async fn current_facade(&self) -> Result<Arc<AppFacade>, EngineError> {
-        self.session
+        self.runtime
             .lock()
             .await
+            .session
             .as_ref()
             .map(|session| Arc::clone(&session.facade))
             .ok_or_else(operation_unavailable_error)
     }
 
     pub(super) async fn current_application(&self) -> Result<Arc<ApplicationRuntime>, EngineError> {
-        self.session
+        self.runtime
             .lock()
             .await
+            .session
             .as_ref()
             .map(|session| Arc::clone(&session.application))
             .ok_or_else(operation_unavailable_error)
@@ -250,9 +377,10 @@ impl SessionSupervisor {
     pub(super) async fn current_facade_and_application(
         &self,
     ) -> Result<(Arc<AppFacade>, Arc<ApplicationRuntime>), EngineError> {
-        self.session
+        self.runtime
             .lock()
             .await
+            .session
             .as_ref()
             .map(|session| {
                 (
@@ -267,9 +395,10 @@ impl SessionSupervisor {
     pub(super) async fn current_mobile_sync(
         &self,
     ) -> Result<Arc<uc_mobile_lan::MobileSyncFacade>, EngineError> {
-        self.session
+        self.runtime
             .lock()
             .await
+            .session
             .as_ref()
             .map(|session| Arc::clone(&session.mobile_sync))
             .ok_or_else(operation_unavailable_error)
@@ -287,6 +416,22 @@ impl SessionSupervisor {
         self.operations.acquire()
     }
 
+    #[cfg(feature = "dev-tools")]
+    pub(super) fn fail_next_session_handover(&self, point: SessionHandoverFailurePoint) {
+        self.test_control.failure(point).arm();
+    }
+
+    #[cfg(feature = "dev-tools")]
+    pub(super) fn session_handover_diagnostics(&self) -> SessionHandoverDiagnostics {
+        SessionHandoverDiagnostics {
+            network_build_count: self.test_control.network_build_count.load(Ordering::SeqCst),
+            session_quiesce_failure_count: self.test_control.session_quiesce.consumed(),
+            transition_completion_failure_count: self.test_control.transition_completion.consumed(),
+            session_preparation_failure_count: self.test_control.session_preparation.consumed(),
+            session_activation_failure_count: self.test_control.session_activation.consumed(),
+        }
+    }
+
     pub(super) async fn rebuild_session(&self) -> Result<(), EngineError> {
         observe_runtime_operation(DiagnosticOperation::SessionRecovery, async {
             let _lifecycle = self.lifecycle.lock().await;
@@ -295,15 +440,46 @@ impl SessionSupervisor {
                 uc_core::FileTransferCancellationReason::ConnectivityRecovery,
             )
             .await?;
+            self.shutdown_network().await?;
             self.install_new_session(false).await
         })
         .await
     }
 
     pub(super) async fn transition_pending_session(&self) -> Result<Option<u64>, EngineError> {
+        let waiting = Instant::now();
         let _lifecycle = self.lifecycle.lock().await;
-        let facade = match self.session.lock().await.as_ref() {
-            Some(session) => Arc::clone(&session.facade),
+        let waited = waiting.elapsed();
+        let (facade, network_active) = {
+            let runtime = self.runtime.lock().await;
+            (
+                runtime
+                    .session
+                    .as_ref()
+                    .map(|session| Arc::clone(&session.facade)),
+                runtime.network.is_some(),
+            )
+        };
+        let facade = match facade {
+            Some(facade) => facade,
+            None if network_active => {
+                record_session_lock_wait(waited);
+                self.install_new_session(false).await?;
+                let revision = self
+                    .current_facade()
+                    .await?
+                    .query_device_group_choices()
+                    .await
+                    .map_err(|error| {
+                        operation_error_with_code(
+                            1103,
+                            "query recovered device trust revision",
+                            error,
+                        )
+                    })?
+                    .revision;
+                return Ok(Some(revision));
+            }
             None => return Ok(None),
         };
         match facade.has_pending_space_transition().await {
@@ -312,10 +488,15 @@ impl SessionSupervisor {
             Err(error) => {
                 let error =
                     operation_error_with_code(1103, "inspect runtime space transition", error);
-                return observe_session_lifecycle(async { Err(error) }).await;
+                return observe_session_lifecycle(async {
+                    record_session_lock_wait(waited);
+                    Err(error)
+                })
+                .await;
             }
         }
         observe_session_lifecycle(async {
+            record_session_lock_wait(waited);
             self.operations.close_and_wait(None).await?;
             match facade.has_pending_space_transition().await {
                 Ok(true) => {}
@@ -333,16 +514,20 @@ impl SessionSupervisor {
                 }
             }
 
+            self.quiesce_network_session().await?;
             let session = self
-                .session
+                .runtime
                 .lock()
                 .await
+                .session
                 .take()
                 .ok_or_else(super::operation_unavailable_error)?;
             session
                 .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
                 .await;
-            let completed = facade.complete_pending_space_transition().await;
+            let completed = self
+                .complete_pending_space_transition(&facade, "complete runtime space transition")
+                .await;
             match completed {
                 Ok(_) => {
                     self.install_new_session(true).await?;
@@ -361,14 +546,10 @@ impl SessionSupervisor {
                         .revision;
                     Ok(Some(revision))
                 }
-                Err(error) => {
-                    let original =
-                        operation_error_with_code(1103, "complete runtime space transition", error);
-                    match self.install_new_session(false).await {
-                        Ok(()) => Err(original),
-                        Err(restore_error) => Err(restore_error),
-                    }
-                }
+                Err(error) => match self.install_new_session(false).await {
+                    Ok(()) => Err(error),
+                    Err(restore_error) => Err(restore_error),
+                },
             }
         })
         .await
@@ -382,10 +563,12 @@ impl SessionSupervisor {
         self.operations
             .close_and_wait(Some(current_operation))
             .await?;
+        self.quiesce_network_session().await?;
         let session = self
-            .session
+            .runtime
             .lock()
             .await
+            .session
             .take()
             .ok_or_else(super::operation_unavailable_error)?;
         let facade = Arc::clone(&session.facade);
@@ -414,9 +597,10 @@ impl SessionSupervisor {
             (Ok(result), Ok(())) => Ok(result),
             (Err(error), Ok(())) => {
                 let facade = self
-                    .session
+                    .runtime
                     .lock()
                     .await
+                    .session
                     .as_ref()
                     .map(|session| Arc::clone(&session.facade))
                     .ok_or_else(super::operation_unavailable_error)?;
@@ -438,7 +622,9 @@ impl SessionSupervisor {
                 let _lifecycle = self.lifecycle.lock().await;
                 self.operations.close_and_wait(None).await?;
                 self.stop_current_session(uc_core::FileTransferCancellationReason::Unknown)
-                    .await.map(|()| uc_observability_contract::diagnostics::connectivity::SessionTransitionResult::Completed)
+                    .await?;
+                self.shutdown_network().await?;
+                Ok(uc_observability_contract::diagnostics::connectivity::SessionTransitionResult::Completed)
             },
         )
         .await
@@ -449,7 +635,7 @@ impl SessionSupervisor {
             uc_observability_contract::diagnostics::connectivity::SessionTransition::Resume,
             async {
                 let _lifecycle = self.lifecycle.lock().await;
-                if self.session.lock().await.is_some() {
+                if self.runtime.lock().await.session.is_some() {
                     return Ok(uc_observability_contract::diagnostics::connectivity::SessionTransitionResult::Skipped);
                 }
                 observe_runtime_operation(
@@ -473,7 +659,8 @@ impl SessionSupervisor {
         &self,
         reason: uc_core::FileTransferCancellationReason,
     ) -> Result<(), EngineError> {
-        let session = self.session.lock().await.take();
+        self.quiesce_network_session().await?;
+        let session = self.runtime.lock().await.session.take();
         if let Some(session) = session {
             session.shutdown(reason).await;
             self.application
@@ -486,6 +673,128 @@ impl SessionSupervisor {
         Ok(())
     }
 
+    async fn quiesce_network_session(&self) -> Result<(), EngineError> {
+        #[cfg(feature = "dev-tools")]
+        if self
+            .test_control
+            .failure(SessionHandoverFailurePoint::SessionQuiesce)
+            .consume()
+        {
+            return Err(session_runtime_error(
+                "quiesce p2p session",
+                "injected session quiesce failure",
+            ));
+        }
+        let mut runtime = self.runtime.lock().await;
+        let Some(network) = runtime.network.as_mut() else {
+            return Ok(());
+        };
+        network
+            .quiesce_session()
+            .await
+            .map_err(|error| session_runtime_error("quiesce p2p session", error))
+    }
+
+    async fn shutdown_network(&self) -> Result<(), EngineError> {
+        let network = {
+            let mut runtime = self.runtime.lock().await;
+            if runtime.session.is_some() {
+                return Err(operation_unavailable_error());
+            }
+            runtime.network.take()
+        };
+        if let Some(network) = network {
+            network.shutdown().await;
+        }
+        Ok(())
+    }
+
+    async fn complete_pending_space_transition(
+        &self,
+        facade: &AppFacade,
+        error_context: &'static str,
+    ) -> Result<(), EngineError> {
+        #[cfg(feature = "dev-tools")]
+        if self
+            .test_control
+            .failure(SessionHandoverFailurePoint::TransitionCompletion)
+            .consume()
+        {
+            return Err(retryable_space_transition_runtime_error(
+                error_context,
+                "injected transition completion failure",
+            ));
+        }
+        observe_local_result(
+            LocalWorkStep::SessionCompleteTransition,
+            facade.complete_pending_space_transition(),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| space_transition_error(error_context, error))
+    }
+
+    async fn install_active_session(
+        &self,
+        factory: &ProductionSessionFactory,
+    ) -> Result<(), EngineError> {
+        let session_builder = {
+            let mut runtime = self.runtime.lock().await;
+            if runtime.session.is_some() {
+                return Err(operation_unavailable_error());
+            }
+            if runtime.network.is_none() {
+                runtime.network = Some(factory.build_network().await?);
+            }
+            runtime
+                .network
+                .as_ref()
+                .ok_or_else(operation_unavailable_error)?
+                .prepare_session()
+        };
+        let prepared = factory.prepare(session_builder).await?;
+        #[cfg(feature = "dev-tools")]
+        if self
+            .test_control
+            .failure(SessionHandoverFailurePoint::SessionActivation)
+            .consume()
+        {
+            prepared.network_session.shutdown().await;
+            prepared
+                .session
+                .shutdown(uc_core::FileTransferCancellationReason::Unknown)
+                .await;
+            return Err(session_runtime_error(
+                "activate p2p session",
+                "injected session activation failure",
+            ));
+        }
+        let mut runtime = self.runtime.lock().await;
+        let Some(network) = runtime.network.as_mut() else {
+            drop(runtime);
+            prepared.network_session.shutdown().await;
+            prepared
+                .session
+                .shutdown(uc_core::FileTransferCancellationReason::Unknown)
+                .await;
+            return Err(operation_unavailable_error());
+        };
+        let activation = network
+            .activate_session(prepared.network_session)
+            .await
+            .map_err(|error| session_runtime_error("activate p2p session", error));
+        if let Err(error) = activation {
+            drop(runtime);
+            prepared
+                .session
+                .shutdown(uc_core::FileTransferCancellationReason::Unknown)
+                .await;
+            return Err(error);
+        }
+        runtime.session = Some(prepared.session);
+        Ok(())
+    }
+
     async fn install_new_session(&self, resume_space_activities: bool) -> Result<(), EngineError> {
         let factory = self
             .factory
@@ -493,30 +802,46 @@ impl SessionSupervisor {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
             .ok_or_else(super::operation_unavailable_error)?;
-        let mut session = factory.build().await?;
+        observe_local_result(
+            LocalWorkStep::SessionPrepare,
+            self.install_active_session(&factory),
+        )
+        .await?;
         let mut resume_space_activities = resume_space_activities;
-        if session
-            .facade
+        let facade = self.current_facade().await?;
+        if facade
             .has_pending_space_transition()
             .await
             .map_err(|error| {
                 operation_error_with_code(1103, "inspect pending space transition", error)
             })?
         {
-            let facade = Arc::clone(&session.facade);
+            self.quiesce_network_session().await?;
+            let session = self
+                .runtime
+                .lock()
+                .await
+                .session
+                .take()
+                .ok_or_else(operation_unavailable_error)?;
             session
                 .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
                 .await;
-            facade
-                .complete_pending_space_transition()
-                .await
-                .map_err(|error| {
-                    operation_error_with_code(1103, "recover pending space transition", error)
-                })?;
-            session = factory.build().await?;
+            self.complete_pending_space_transition(&facade, "recover pending space transition")
+                .await?;
+            observe_local_result(
+                LocalWorkStep::SessionPrepare,
+                self.install_active_session(&factory),
+            )
+            .await?;
             resume_space_activities = true;
         }
-        let recovered = session.facade.recover_space_session().await;
+        let facade = self.current_facade().await?;
+        let recovered = observe_local_result(
+            LocalWorkStep::SessionRecover,
+            facade.recover_space_session(),
+        )
+        .await;
         if let Err(error) = &recovered {
             tracing::warn!(
                 error_kind = recover_space_session_error_kind(error),
@@ -535,25 +860,20 @@ impl SessionSupervisor {
                 ));
             }
         }
-        *self.session.lock().await = Some(session);
         self.operations.reopen();
         Ok(())
     }
 }
 
 impl ProductionSessionFactory {
-    async fn build(&self) -> Result<ProductionSession, EngineError> {
-        let wired = &self.wired;
-        #[cfg(feature = "lan-compat")]
-        let paths = &self.paths;
-        let events = self.events.clone();
-        let application = wired.application.clone();
-        let lifecycle = build_daemon_lifecycle(
-            &application,
-            &wired.sync_engine,
-            &self.app_version,
-            #[cfg(feature = "lan-compat")]
-            wired.mobile_sync_ports.clone(),
+    async fn build_network(&self) -> Result<IrohNode, EngineError> {
+        #[cfg(feature = "dev-tools")]
+        self.test_control
+            .network_build_count
+            .fetch_add(1, Ordering::SeqCst);
+        build_network_runtime(
+            &self.wired.application,
+            &self.wired.sync_engine,
             self.rendezvous_base_url.clone(),
             self.relay_fallback_override,
             self.iroh_bind_port_override,
@@ -563,30 +883,66 @@ impl ProductionSessionFactory {
             None,
         )
         .await
-        .map_err(|error| startup_error("p2p session", error))?;
-        let sync_engine = lifecycle.sync_engine_assembly;
-        let network_adapters = lifecycle.application_adapters;
-        let application_runtime = match ApplicationRuntime::start(
+        .map_err(|error| session_runtime_error("p2p network", error))
+    }
+
+    async fn prepare(
+        &self,
+        session_builder: IrohSessionBuilder,
+    ) -> Result<PreparedProductionSession, EngineError> {
+        #[cfg(feature = "dev-tools")]
+        if self
+            .test_control
+            .failure(SessionHandoverFailurePoint::SessionPreparation)
+            .consume()
+        {
+            return Err(session_runtime_error(
+                "p2p session",
+                "injected session preparation failure",
+            ));
+        }
+        let wired = &self.wired;
+        #[cfg(feature = "lan-compat")]
+        let paths = &self.paths;
+        let events = self.events.clone();
+        let application = wired.application.clone();
+        let prepared = prepare_daemon_session(
             &application,
-            network_adapters.binding.complete(
-                network_adapters.active_pull_client,
-                Arc::clone(&self.network_recovery),
-                FsAtomicPublisher::new(),
-                FsInboundFileTarget::new(Arc::clone(&wired.sync_engine.settings)),
-                FsHiddenPathMarker::new(),
-                Arc::new(EngineClipboardInboundEvents {
-                    events: events.clone(),
-                }),
+            &wired.sync_engine,
+            &self.app_version,
+            #[cfg(feature = "lan-compat")]
+            wired.mobile_sync_ports.clone(),
+            session_builder,
+        )
+        .await
+        .map_err(|error| session_runtime_error("p2p session", error))?;
+        let sync_session = prepared.session;
+        let network_adapters = prepared.application;
+        let prepared_session = prepared.prepared_session;
+        let application_runtime = match observe_local_result(
+            LocalWorkStep::SessionStart,
+            ApplicationRuntime::start(
+                &application,
+                network_adapters.binding.complete(
+                    network_adapters.active_pull_client,
+                    Arc::clone(&self.network_recovery),
+                    FsAtomicPublisher::new(),
+                    FsInboundFileTarget::new(Arc::clone(&wired.sync_engine.settings)),
+                    FsHiddenPathMarker::new(),
+                    Arc::new(EngineClipboardInboundEvents {
+                        events: events.clone(),
+                    }),
+                ),
             ),
         )
         .await
         {
             Ok(runtime) => Arc::new(runtime),
             Err(error) => {
-                sync_engine
+                sync_session
                     .shutdown(uc_core::FileTransferCancellationReason::Unknown)
                     .await;
-                return Err(startup_error("application runtime", error));
+                return Err(session_runtime_error("application runtime", error));
             }
         };
         let facade = application_runtime.facade();
@@ -624,13 +980,16 @@ impl ProductionSessionFactory {
             })
             .await;
         spawn_peer_reachability_event_task(Arc::clone(&facade), &tasks, events).await;
-        Ok(ProductionSession {
-            facade,
-            application: application_runtime,
-            #[cfg(feature = "lan-compat")]
-            mobile_sync,
-            sync_engine,
-            tasks,
+        Ok(PreparedProductionSession {
+            session: ProductionSession {
+                facade,
+                application: application_runtime,
+                #[cfg(feature = "lan-compat")]
+                mobile_sync,
+                sync_session,
+                tasks,
+            },
+            network_session: prepared_session,
         })
     }
 }
@@ -647,9 +1006,26 @@ impl ProductionSession {
         {
             warn!("mobile file upload shutdown finished with an error");
         }
-        super::task_shutdown::shutdown_tasks(&self.tasks, Duration::from_millis(500)).await;
+        let stopping = LocalWorkObservation::begin(LocalWorkStep::SessionStopTasks);
+        let stopped =
+            super::task_shutdown::shutdown_tasks(&self.tasks, Duration::from_millis(500)).await;
+        stopping.finish(
+            if stopped.timed_out_count > 0 || stopped.join_error_count > 0 {
+                LocalWorkOutcome::Error
+            } else {
+                LocalWorkOutcome::Ok
+            },
+        );
         info!("Engine session 网络观测任务已停止");
+        let stopping = LocalWorkObservation::begin(LocalWorkStep::SessionStopApplication);
         let application_shutdown = self.application.shutdown().await;
+        stopping.finish(
+            if application_shutdown.history.is_some() || application_shutdown.search.is_some() {
+                LocalWorkOutcome::Error
+            } else {
+                LocalWorkOutcome::Ok
+            },
+        );
         info!("Engine session Application runtime 已停止");
         if application_shutdown.history.is_some() {
             warn!(
@@ -660,8 +1036,10 @@ impl ProductionSession {
         if application_shutdown.search.is_some() {
             error!(error_kind = "search", "search runtime stopped with error");
         }
-        self.sync_engine.shutdown(transfer_reason).await;
-        info!("Engine session Iroh 网络已停止");
+        let stopping = LocalWorkObservation::begin(LocalWorkStep::SessionStopNetwork);
+        self.sync_session.shutdown(transfer_reason).await;
+        stopping.finish(LocalWorkOutcome::Ok);
+        info!("Engine session 网络会话任务已停止");
     }
 }
 
@@ -780,36 +1158,46 @@ impl SessionOperationGate {
         &self,
         current_operation: Option<SessionOperationLease>,
     ) -> Result<(), EngineError> {
-        if current_operation
-            .as_ref()
-            .is_some_and(|lease| !Arc::ptr_eq(&lease.gate, &self.inner))
-        {
-            return Err(super::operation_unavailable_error());
-        }
-        let cancellation = {
-            let mut state = self
-                .inner
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            state.open = false;
-            state.cancellation.clone()
-        };
-        drop(current_operation);
-        let drained = tokio::time::timeout(SESSION_OPERATION_GRACE, self.wait_for_drain()).await;
-        if drained.is_err() {
-            cancellation.cancel();
-            if tokio::time::timeout(SESSION_OPERATION_GRACE, self.wait_for_drain())
+        observe_local_result(LocalWorkStep::SessionDrainOperations, async {
+            if current_operation
+                .as_ref()
+                .is_some_and(|lease| !Arc::ptr_eq(&lease.gate, &self.inner))
+            {
+                return Err(super::operation_unavailable_error());
+            }
+            let cancellation = {
+                let mut state = self
+                    .inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.open = false;
+                state.cancellation.clone()
+            };
+            drop(current_operation);
+            let drained = observe_local_result(
+                LocalWorkStep::SessionDrainGrace,
+                tokio::time::timeout(SESSION_OPERATION_GRACE, self.wait_for_drain()),
+            )
+            .await;
+            if drained.is_err() {
+                cancellation.cancel();
+                if observe_local_result(
+                    LocalWorkStep::SessionDrainCancellation,
+                    tokio::time::timeout(SESSION_OPERATION_GRACE, self.wait_for_drain()),
+                )
                 .await
                 .is_err()
-            {
-                tracing::warn!(
-                    error_kind = "session_operation_drain_timeout",
-                    "session operation did not stop after cancellation"
-                );
+                {
+                    tracing::warn!(
+                        error_kind = "session_operation_drain_timeout",
+                        "session operation did not stop after cancellation"
+                    );
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 
     async fn wait_for_drain(&self) {
@@ -962,6 +1350,37 @@ mod tests {
             "dropping the operation must not leave a false active transition"
         );
         assert!(!output.contains("completed"));
+    }
+
+    #[test]
+    fn session_runtime_failure_remains_retryable_without_becoming_an_operation_error() {
+        let error = session_runtime_error("prepare p2p session", "test failure");
+
+        assert_eq!(error.code(), SESSION_RUNTIME_FAILED_CODE);
+        assert_eq!(error.category(), EngineErrorCategory::Unavailable);
+        assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn space_transition_runtime_failure_remains_retryable_for_background_recovery() {
+        let error =
+            retryable_space_transition_runtime_error("complete Space transition", "test failure");
+
+        assert_eq!(error.code(), 1103);
+        assert_eq!(error.category(), EngineErrorCategory::Unavailable);
+        assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn missing_active_join_stops_background_transition_recovery() {
+        let error = space_transition_error(
+            "complete Space transition",
+            CompletePendingSpaceTransitionError::JoinNotActive,
+        );
+
+        assert_eq!(error.code(), 1103);
+        assert_eq!(error.category(), EngineErrorCategory::Internal);
+        assert!(!error.is_retryable());
     }
 
     #[test]

@@ -347,7 +347,8 @@ mod tests {
             async fn pending_group_updates(&self, revocation_id: &RevocationId) -> Result<Vec<PendingGroupUpdate>, KeyEpochError>;
             async fn query_group_revocation(&self, revocation_id: &RevocationId) -> Result<Option<GroupRevocationResult>, KeyEpochError>;
             async fn resume_group_revocations(&self, now_ms: i64) -> Result<Vec<GroupRevocationResult>, KeyEpochError>;
-            async fn pending_space_group_updates(&self) -> Result<Vec<PendingGroupUpdate>, KeyEpochError>;
+            async fn due_space_group_updates(&self, now_ms: i64, online_peer: Option<DeviceId>) -> Result<Vec<PendingGroupUpdate>, KeyEpochError>;
+            async fn record_space_group_update_failures(&self, failures: &[(String, GroupUpdateDispatchError)], now_ms: i64) -> Result<usize, KeyEpochError>;
             async fn acknowledge_space_group_update(&self, update_id: &str, now_ms: i64) -> Result<bool, KeyEpochError>;
         }
     }

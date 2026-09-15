@@ -1,13 +1,18 @@
 use super::*;
 
 #[test]
-fn protocol_version_accepts_only_the_single_current_version() {
-    let version = SpaceAdmissionProtocolVersion::from_u16(1)
-        .expect("version 1 is the only supported protocol");
-
-    assert_eq!(version.as_u16(), 1);
+fn protocol_version_distinguishes_legacy_and_attempt_contract_versions() {
+    assert_eq!(
+        SpaceAdmissionProtocolVersion::from_u16(1),
+        Some(SpaceAdmissionProtocolVersion::V1)
+    );
+    assert_eq!(
+        SpaceAdmissionProtocolVersion::from_u16(2),
+        Some(SpaceAdmissionProtocolVersion::V2)
+    );
+    assert_eq!(SpaceAdmissionProtocolVersion::V2.as_u16(), 2);
     assert!(SpaceAdmissionProtocolVersion::from_u16(0).is_none());
-    assert!(SpaceAdmissionProtocolVersion::from_u16(2).is_none());
+    assert!(SpaceAdmissionProtocolVersion::from_u16(3).is_none());
 }
 
 #[test]
@@ -60,6 +65,14 @@ fn every_message_kind_accepts_only_its_protocol_sender() {
             SpaceAdmissionMessageKind::Rejected,
             &[AdmissionRole::Sponsor, AdmissionRole::CompletionHelper][..],
         ),
+        (
+            SpaceAdmissionMessageKind::Abandonment,
+            &[AdmissionRole::Joiner][..],
+        ),
+        (
+            SpaceAdmissionMessageKind::Abandoned,
+            &[AdmissionRole::Sponsor, AdmissionRole::CompletionHelper][..],
+        ),
     ];
 
     for (kind, expected_senders) in cases {
@@ -81,6 +94,7 @@ fn helper_can_send_only_completion_messages() {
     assert!(SpaceAdmissionMessageKind::Complete.accepts_sender(AdmissionRole::CompletionHelper));
     assert!(SpaceAdmissionMessageKind::Settled.accepts_sender(AdmissionRole::CompletionHelper));
     assert!(SpaceAdmissionMessageKind::Rejected.accepts_sender(AdmissionRole::CompletionHelper));
+    assert!(SpaceAdmissionMessageKind::Abandoned.accepts_sender(AdmissionRole::CompletionHelper));
     assert!(!SpaceAdmissionMessageKind::Commit.accepts_sender(AdmissionRole::CompletionHelper));
     assert!(!SpaceAdmissionMessageKind::Candidate.accepts_sender(AdmissionRole::CompletionHelper));
 }

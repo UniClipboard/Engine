@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -20,6 +20,11 @@ use super::{
 #[async_trait]
 pub trait LoadMembershipLedgerPort: Send + Sync {
     async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError>;
+
+    /// 返回同一进程内已知的最新账本版本；没有廉价来源时保持未知。
+    fn current_revision(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Atomically commits the complete sensitive membership record.
@@ -40,8 +45,11 @@ pub(crate) struct MembershipLedger {
     pub(super) verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
     changes: tokio::sync::watch::Sender<()>,
     history_changes: tokio::sync::watch::Sender<()>,
+    verified_snapshot_cache: Mutex<Option<Arc<VerifiedMembershipLedger>>>,
+    operation: tokio::sync::Mutex<()>,
 }
 
+#[derive(Clone)]
 pub(crate) struct VerifiedMembershipLedger {
     record: LoadedMembershipLedger,
     history: Option<VersionedMembershipHistory>,
@@ -165,6 +173,8 @@ impl MembershipLedger {
             verifier,
             changes: tokio::sync::watch::channel(()).0,
             history_changes: tokio::sync::watch::channel(()).0,
+            verified_snapshot_cache: Mutex::new(None),
+            operation: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -244,6 +254,7 @@ impl MembershipLedger {
     fn validate_loaded(
         &self,
         loaded: &LoadedMembershipLedger,
+        cached_snapshot: Option<&VerifiedMembershipLedger>,
     ) -> Result<Option<VersionedMembershipHistory>, MembershipLedgerError> {
         if loaded
             .membership_conflict_presentations
@@ -279,29 +290,128 @@ impl MembershipLedger {
             .membership_history
             .as_deref()
             .ok_or(MembershipLedgerError::RecoveryRequired)?;
-        let history =
-            VersionedMembershipHistory::decode_persisted_v2(history_bytes, self.verifier.as_ref())
-                .map_err(|_| MembershipLedgerError::Corrupt)?;
+        let history = match cached_snapshot {
+            Some(cached) if cached.record.membership_history.as_deref() == Some(history_bytes) => {
+                cached
+                    .history
+                    .clone()
+                    .ok_or(MembershipLedgerError::Corrupt)?
+            }
+            _ => VersionedMembershipHistory::decode_persisted_v2(
+                history_bytes,
+                self.verifier.as_ref(),
+            )
+            .map_err(|_| MembershipLedgerError::Corrupt)?,
+        };
         if history.lineage_id() != lineage_id {
             return Err(MembershipLedgerError::Corrupt);
         }
         Ok(Some(history))
     }
 
+    fn cached_verified(
+        &self,
+    ) -> Result<Option<Arc<VerifiedMembershipLedger>>, MembershipLedgerError> {
+        let mut cached = self
+            .verified_snapshot_cache
+            .lock()
+            .map_err(|_| MembershipLedgerError::Unavailable)?;
+        if cached.as_ref().is_some_and(|snapshot| {
+            self.loader
+                .current_revision()
+                .is_some_and(|revision| revision != snapshot.record.revision)
+        }) {
+            *cached = None;
+        }
+        Ok(cached.clone())
+    }
+
+    pub(super) fn clear_cached_verified(&self) -> Result<(), MembershipLedgerError> {
+        *self
+            .verified_snapshot_cache
+            .lock()
+            .map_err(|_| MembershipLedgerError::Unavailable)? = None;
+        Ok(())
+    }
+
+    fn cache_verified(
+        &self,
+        snapshot: &VerifiedMembershipLedger,
+    ) -> Result<(), MembershipLedgerError> {
+        *self
+            .verified_snapshot_cache
+            .lock()
+            .map_err(|_| MembershipLedgerError::Unavailable)? = Some(Arc::new(snapshot.clone()));
+        Ok(())
+    }
+
+    async fn load_verified_exclusive(
+        &self,
+    ) -> Result<Arc<VerifiedMembershipLedger>, MembershipLedgerError> {
+        self.clear_cached_verified()?;
+        let record = self.loader.load().await?;
+        let history = self.validate_loaded(&record, None)?;
+        let snapshot = VerifiedMembershipLedger { record, history };
+        self.cache_verified(&snapshot)?;
+        self.cached_verified()?
+            .ok_or(MembershipLedgerError::Unavailable)
+    }
+
     pub(crate) async fn load_verified(
         &self,
-    ) -> Result<VerifiedMembershipLedger, MembershipLedgerError> {
-        let record = self.loader.load().await?;
-        let history = self.validate_loaded(&record)?;
-        Ok(VerifiedMembershipLedger { record, history })
+    ) -> Result<Arc<VerifiedMembershipLedger>, MembershipLedgerError> {
+        if let Some(cached) = self.cached_verified()? {
+            return Ok(cached);
+        }
+        let _operation = self.operation.lock().await;
+        if let Some(cached) = self.cached_verified()? {
+            return Ok(cached);
+        }
+        self.load_verified_exclusive().await
+    }
+
+    fn device_trust_changed(
+        current: &LoadedMembershipLedger,
+        replacement: &LoadedMembershipLedger,
+    ) -> bool {
+        current.lineage_id != replacement.lineage_id
+            || current.membership_history != replacement.membership_history
+            || current.local_device_id != replacement.local_device_id
+            || current.local_member_instance != replacement.local_member_instance
+            || current.local_join_active != replacement.local_join_active
+            || current.effect_journal != replacement.effect_journal
+            || current.membership_conflicts != replacement.membership_conflicts
+            || current.membership_branch_transitions != replacement.membership_branch_transitions
+            || current.membership_conflict_presentations
+                != replacement.membership_conflict_presentations
+            || current
+                .peer_reconciliation
+                .iter()
+                .any(|(device_id, record)| {
+                    replacement
+                        .peer_reconciliation
+                        .get(device_id)
+                        .is_none_or(|candidate| {
+                            record.relationship != candidate.relationship
+                                || record.confirmed_position != candidate.confirmed_position
+                        })
+                })
+            || replacement
+                .peer_reconciliation
+                .keys()
+                .any(|device_id| !current.peer_reconciliation.contains_key(device_id))
     }
 
     pub(crate) async fn compare_and_commit(
         &self,
         update: impl FnOnce(&mut LoadedMembershipLedger) -> Result<(), MembershipLedgerError>,
     ) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-        let loaded = self.loader.load().await?;
-        self.validate_loaded(&loaded)?;
+        let _operation = self.operation.lock().await;
+        let snapshot = match self.cached_verified()? {
+            Some(snapshot) => snapshot,
+            None => self.load_verified_exclusive().await?,
+        };
+        let loaded = snapshot.record();
         let expected_history_digest = loaded
             .membership_history
             .as_deref()
@@ -313,18 +423,32 @@ impl MembershipLedger {
         let mut replacement = loaded.clone();
         update(&mut replacement)?;
         replacement.revision = next_revision;
-        self.validate_loaded(&replacement)?;
-        let committed = self
+        let replacement_history = self.validate_loaded(&replacement, Some(&snapshot))?;
+        let device_trust_changed = Self::device_trust_changed(loaded, &replacement);
+        let committed = match self
             .committer
             .compare_and_commit(MembershipLedgerMutation {
                 expected_revision: loaded.revision,
                 expected_history_digest,
+                device_trust_changed,
                 replacement: replacement.clone(),
             })
-            .await?;
+            .await
+        {
+            Ok(committed) => committed,
+            Err(error) => {
+                self.clear_cached_verified()?;
+                return Err(error);
+            }
+        };
         if committed != replacement {
+            self.clear_cached_verified()?;
             return Err(MembershipLedgerError::Corrupt);
         }
+        self.cache_verified(&VerifiedMembershipLedger {
+            record: committed.clone(),
+            history: replacement_history,
+        })?;
         if committed.membership_history != loaded.membership_history
             || committed.local_join_active != loaded.local_join_active
         {
@@ -344,7 +468,11 @@ impl MembershipLedger {
             &dyn HistoricalMembershipSignatureVerifier,
         ) -> Result<T, MembershipLedgerError>,
     ) -> Result<(LoadedMembershipLedger, T), MembershipLedgerError> {
-        let snapshot = self.load_verified().await?;
+        let _operation = self.operation.lock().await;
+        let snapshot = match self.cached_verified()? {
+            Some(snapshot) => snapshot,
+            None => self.load_verified_exclusive().await?,
+        };
         if snapshot.record.revision != expected_revision
             || snapshot.history_digest() != expected_history_digest
         {
@@ -354,9 +482,10 @@ impl MembershipLedger {
             .checked_add(1)
             .ok_or(MembershipLedgerError::Corrupt)?;
         let was_active = snapshot.record.local_join_active;
-        let mut replacement = snapshot.record;
+        let mut replacement = snapshot.record.clone();
         let mut history = snapshot
             .history
+            .clone()
             .ok_or(MembershipLedgerError::RecoveryRequired)?;
         let output = update(&mut replacement, &mut history, self.verifier.as_ref())?;
         replacement.membership_history = Some(
@@ -365,18 +494,32 @@ impl MembershipLedger {
                 .map_err(|_| MembershipLedgerError::Corrupt)?,
         );
         replacement.revision = next_revision;
-        self.validate_loaded(&replacement)?;
-        let committed = self
+        let replacement_history = self.validate_loaded(&replacement, None)?;
+        let device_trust_changed = Self::device_trust_changed(&snapshot.record, &replacement);
+        let committed = match self
             .committer
             .compare_and_commit(MembershipLedgerMutation {
                 expected_revision,
                 expected_history_digest,
+                device_trust_changed,
                 replacement: replacement.clone(),
             })
-            .await?;
+            .await
+        {
+            Ok(committed) => committed,
+            Err(error) => {
+                self.clear_cached_verified()?;
+                return Err(error);
+            }
+        };
         if committed != replacement {
+            self.clear_cached_verified()?;
             return Err(MembershipLedgerError::Corrupt);
         }
+        self.cache_verified(&VerifiedMembershipLedger {
+            record: committed.clone(),
+            history: replacement_history,
+        })?;
         let history_digest = committed
             .membership_history
             .as_deref()

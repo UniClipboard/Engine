@@ -3,9 +3,10 @@ use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Binary, Nullable, Text};
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
-    BeginRevocationOutcome, KeyEpochError, PreparedRevocationResolution, RevocationId,
-    RevocationRecord, RevocationRepositoryPort, RevocationStage, RevocationStatus,
-    SpaceKeyMaterial, SpaceSecurityStateResetError, SpaceSecurityStateResetPort,
+    BeginRevocationOutcome, GroupUpdateDispatchError, KeyEpochError, PendingGroupUpdate,
+    PreparedRevocationResolution, RevocationId, RevocationRecord, RevocationRepositoryPort,
+    RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceSecurityStateResetError,
+    SpaceSecurityStateResetPort,
 };
 
 use crate::db::ports::DbExecutor;
@@ -16,25 +17,25 @@ use super::space_material::{load_space_material_on, save_space_material_on};
 use super::{backend, epoch_to_i64, DieselSpaceSecurityStore};
 
 #[derive(QueryableByName)]
-struct RevocationRow {
+pub(super) struct RevocationRow {
     #[diesel(sql_type = Text)]
-    revocation_id: String,
+    pub(super) revocation_id: String,
     #[diesel(sql_type = Text)]
-    space_lookup_token: String,
+    pub(super) space_lookup_token: String,
     #[diesel(sql_type = BigInt)]
-    previous_epoch: i64,
+    pub(super) previous_epoch: i64,
     #[diesel(sql_type = BigInt)]
-    next_epoch: i64,
+    pub(super) next_epoch: i64,
     #[diesel(sql_type = Text)]
-    status: String,
+    pub(super) status: String,
     #[diesel(sql_type = Binary)]
-    encrypted_record: Vec<u8>,
+    pub(super) encrypted_record: Vec<u8>,
     #[diesel(sql_type = Nullable<Binary>)]
-    encrypted_stage: Option<Vec<u8>>,
+    pub(super) encrypted_stage: Option<Vec<u8>>,
     #[diesel(sql_type = BigInt)]
-    created_at_ms: i64,
+    pub(super) created_at_ms: i64,
     #[diesel(sql_type = BigInt)]
-    updated_at_ms: i64,
+    pub(super) updated_at_ms: i64,
 }
 
 fn status_name(status: RevocationStatus) -> &'static str {
@@ -48,15 +49,15 @@ fn status_name(status: RevocationStatus) -> &'static str {
     }
 }
 
-fn record_aad(revocation_id: &str, status: &str) -> Vec<u8> {
+pub(super) fn record_aad(revocation_id: &str, status: &str) -> Vec<u8> {
     format!("uc-revocation-record-v1|{revocation_id}|{status}").into_bytes()
 }
 
-fn stage_aad(revocation_id: &str) -> Vec<u8> {
+pub(super) fn stage_aad(revocation_id: &str) -> Vec<u8> {
     format!("uc-revocation-stage-v1|{revocation_id}").into_bytes()
 }
 
-fn load_revocation_row(
+pub(super) fn load_revocation_row(
     conn: &mut SqliteConnection,
     revocation_id: &str,
 ) -> anyhow::Result<Option<RevocationRow>> {
@@ -71,7 +72,7 @@ fn load_revocation_row(
     .map_err(anyhow::Error::from)
 }
 
-fn decode_record(
+pub(super) fn decode_record(
     master_key: &MasterKey,
     row: &RevocationRow,
 ) -> Result<RevocationRecord, KeyEpochError> {
@@ -119,6 +120,30 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                     .map_err(|error| anyhow::anyhow!(error.to_string()))
             })
             .map_err(backend)
+    }
+
+    async fn due_group_updates(
+        &self,
+        space_id: &SpaceId,
+        now_ms: i64,
+        online_peer: Option<DeviceId>,
+    ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
+        let key = self.session.get_master_key().map_err(backend)?;
+        self.executor
+            .run(|conn| Ok(self.load_due_updates_on(conn, &key, space_id, now_ms, online_peer)))
+            .map_err(backend)?
+    }
+
+    async fn record_group_update_failures(
+        &self,
+        space_id: &SpaceId,
+        failures: &[(String, GroupUpdateDispatchError)],
+        now_ms: i64,
+    ) -> Result<usize, KeyEpochError> {
+        let key = self.session.get_master_key().map_err(backend)?;
+        self.executor
+            .run(|conn| Ok(self.save_delivery_failures_on(conn, &key, space_id, failures, now_ms)))
+            .map_err(backend)?
     }
 
     async fn begin_revocation(

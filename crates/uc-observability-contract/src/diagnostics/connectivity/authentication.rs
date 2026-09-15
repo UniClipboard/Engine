@@ -1,6 +1,7 @@
 //! 认证完成的本地详情：复用一次标准完成事件，来源详情不进入远程属性。
 use super::super::{complete_operation, ObservationContext, OperationCompletion};
 use super::record::{dial_reason, DialFailure};
+use super::AdmissionExchangeFailureDetail;
 use super::ClipboardReceiveFailure;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -173,6 +174,12 @@ pub fn take_local_completion_detail(
     opentelemetry::Context::map_current(|context| {
         let pending = context.get::<PendingCompletionDetail>()?;
         let expected = match pending.detail {
+            LocalCompletionDetail::AdmissionExchange(detail) => (
+                "space_admission",
+                "network_transport",
+                detail.side.role().as_str(),
+                "error",
+            ),
             LocalCompletionDetail::ClipboardReceive(_) => {
                 ("clipboard", "clipboard_receive", "server", "error")
             }
@@ -201,6 +208,7 @@ pub fn take_local_completion_detail(
 
 #[derive(Clone, Copy)]
 pub enum LocalCompletionDetail {
+    AdmissionExchange(AdmissionExchangeFailureDetail),
     ClipboardReceive(ClipboardReceiveFailure),
     Authentication(AuthenticationFailure),
     AdmissionConnection(DialFailure),
@@ -209,6 +217,7 @@ pub enum LocalCompletionDetail {
 impl LocalCompletionDetail {
     pub fn local_fields(self) -> (&'static str, &'static str) {
         match self {
+            Self::AdmissionExchange(detail) => detail.local_fields(),
             Self::ClipboardReceive(failure) => failure.local_fields(),
             Self::Authentication(failure) => failure.local_fields(),
             Self::AdmissionConnection(reason) => ("connect", dial_reason(reason)),
@@ -236,6 +245,18 @@ pub fn complete_clipboard_receive_failure(
 ) {
     let context = opentelemetry::Context::current().with_value(PendingCompletionDetail {
         detail: LocalCompletionDetail::ClipboardReceive(failure),
+        consumed: AtomicBool::new(false),
+    });
+    let _guard = context.attach();
+    complete_operation(completion);
+}
+
+pub(super) fn complete_admission_exchange_failure(
+    detail: AdmissionExchangeFailureDetail,
+    completion: OperationCompletion,
+) {
+    let context = opentelemetry::Context::current().with_value(PendingCompletionDetail {
+        detail: LocalCompletionDetail::AdmissionExchange(detail),
         consumed: AtomicBool::new(false),
     });
     let _guard = context.attach();

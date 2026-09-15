@@ -3,10 +3,10 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    AdmissionChangeFacts, HistoricalMembershipSignatureError,
+    AdmissionActivationReceipt, AdmissionChangeFacts, HistoricalMembershipSignatureError,
     HistoricalMembershipSignatureVerifier, MembershipActivationBaselineV2, MembershipCredential,
-    MembershipEventId, MembershipHistoryRelationship, MembershipOperationV2,
-    VersionedMembershipHistory, ED25519_SIGNATURE_ALGORITHM_V1,
+    MembershipEventId, MembershipEventV2, MembershipHistoryRelationship, MembershipOperationV2,
+    VersionedMembershipHistory, ED25519_SIGNATURE_ALGORITHM_V1, MEMBERSHIP_EVENT_FORMAT_V2,
 };
 use uc_core::ports::ReachabilityState;
 
@@ -188,6 +188,8 @@ impl LoadDeviceTrustObservationsPort for AllOfflineObservations {
 
 struct StaticCurrentJoin(Option<CurrentJoinStatus>);
 
+struct StaticPairingConfirmation(PairingConfirmationObservation);
+
 struct LocalOnlyObservations;
 
 #[async_trait]
@@ -208,6 +210,27 @@ impl LoadDeviceTrustObservationsPort for LocalOnlyObservations {
 impl LoadCurrentJoinStatusPort for StaticCurrentJoin {
     async fn load_current_join(&self) -> Result<Option<CurrentJoinStatus>, QueryDeviceTrustError> {
         Ok(self.0.clone())
+    }
+}
+
+#[async_trait]
+impl LoadCurrentJoinStatusPort for StaticPairingConfirmation {
+    async fn load_current_join(&self) -> Result<Option<CurrentJoinStatus>, QueryDeviceTrustError> {
+        Ok(None)
+    }
+
+    async fn load_admission_display(
+        &self,
+        targets: &[PairingConfirmationTarget],
+    ) -> Result<AdmissionDisplayStatus, QueryDeviceTrustError> {
+        Ok(AdmissionDisplayStatus {
+            current_join: None,
+            pairing_confirmations: targets
+                .contains(&self.0.target)
+                .then_some(self.0)
+                .into_iter()
+                .collect(),
+        })
     }
 }
 
@@ -368,6 +391,106 @@ async fn active_status_combines_verified_members_with_one_observation_read() {
         DeviceTrustRelationship::ConfirmationPending
     );
     assert_eq!(status.devices[1].sync_state, DeviceTrustSyncState::Usable);
+}
+
+#[tokio::test]
+async fn pairing_confirmation_is_matched_to_the_exact_active_member() {
+    let mut loaded = active_ledger();
+    let mut history = VersionedMembershipHistory::decode_persisted_v2(
+        loaded.membership_history.as_deref().unwrap(),
+        &AcceptingVerifier,
+    )
+    .unwrap();
+    let (peer_facts, peer_credential) = member_facts("device-c", 0x43);
+    let peer_device_id = peer_facts.device_id.clone();
+    let member_instance_id = peer_facts.member_instance;
+    let author = loaded.local_member_instance.unwrap();
+    let author_credential = history.credential_for(author).unwrap();
+    let parent = history.current_head();
+    let operation = MembershipOperationV2::AddDevice {
+        admission: uc_core::membership::MembershipAdmissionV2 {
+            facts: peer_facts,
+            membership_credential: peer_credential,
+            resume_public_key_digest: [0x43; 32],
+            security_commitment_id: [0x44; 32],
+        },
+    };
+    let resulting_members_digest = history
+        .expected_resulting_members_digest(parent, &operation)
+        .unwrap();
+    let add_event = MembershipEventV2::new(
+        MEMBERSHIP_EVENT_FORMAT_V2,
+        "space-a".to_owned(),
+        parent,
+        parent.map(|id| history.depth(id).unwrap() + 1).unwrap_or(0),
+        [0x45; 16],
+        author,
+        author_credential.credential_id,
+        author_credential.signature_algorithm_version,
+        operation,
+        resulting_members_digest,
+        [0x44; 32],
+        vec![0x46],
+        Some([0x47; 32]),
+        vec![0x48],
+    );
+    let add_event_id = add_event.event_id();
+    let activation_receipt = AdmissionActivationReceipt::new(
+        1,
+        [0x49; 32],
+        add_event_id,
+        add_event.resulting_members_digest,
+        [0x44; 32],
+        member_instance_id,
+        vec![0x4a],
+    );
+    history
+        .verify_and_receive_event(add_event, &AcceptingVerifier)
+        .unwrap();
+    history
+        .verify_and_record_activation_receipt(activation_receipt, &AcceptingVerifier)
+        .unwrap();
+    loaded.membership_history = Some(history.encode_persisted_v2().unwrap());
+    loaded.peer_reconciliation.insert(
+        peer_device_id.clone(),
+        crate::space::membership::PeerReconciliationRecord {
+            peer_device_id: peer_device_id.clone(),
+            relationship: MembershipHistoryRelationship::Consistent,
+            confirmed_position: None,
+            sync_state: Default::default(),
+            restricted_delivery: Vec::new(),
+            updated_at_ms: 1,
+        },
+    );
+    let repository = Arc::new(MemoryLedgerRepository { loaded });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let query = QueryDeviceTrustUseCase::new(
+        ledger,
+        Arc::new(AllOfflineObservations),
+        Arc::new(StaticPairingConfirmation(PairingConfirmationObservation {
+            target: PairingConfirmationTarget {
+                member_instance_id,
+                add_event_id,
+            },
+            status: PairingConfirmationStatus::Unconfirmed,
+        })),
+    );
+
+    let status = query.execute().await.unwrap();
+    let peer = status
+        .devices
+        .iter()
+        .find(|device| device.device_id == peer_device_id)
+        .unwrap();
+    assert_eq!(
+        peer.pairing_confirmation,
+        Some(PairingConfirmationStatus::Unconfirmed)
+    );
+    assert_eq!(peer.sync_state, DeviceTrustSyncState::Usable);
 }
 
 #[tokio::test]

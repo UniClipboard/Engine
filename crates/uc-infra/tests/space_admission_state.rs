@@ -13,16 +13,16 @@ use uc_application::deps::{
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    ActiveSpaceGenerationManifestV2, AdmissionChangeFacts, AdmissionChannelPeerId,
-    AdmissionContinuationCredential, AdmissionEncryptedPasswordEquivalent,
+    ActiveSpaceGenerationManifestV2, AdmissionAttemptContractV2, AdmissionChangeFacts,
+    AdmissionChannelPeerId, AdmissionContinuationCredential, AdmissionEncryptedPasswordEquivalent,
     AdmissionIdentitySignature, AdmissionJoinRequestV1, AdmissionJoinerPrivateState,
     AdmissionJoinerStartContext, AdmissionKeyPackage, AdmissionPeerBinding,
     AdmissionRecordPersistence, AdmissionRecoveryPublicKey, AdmissionRetryState, AdmissionRole,
     AdmissionShortInvitationCode, AdmissionSourceSnapshot, InvitationId, JoinId, JoinerAdmission,
     JoinerAdmissionTransition, JoinerInvitationResolution, MembershipCredential,
     PendingAdmissionExchange, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
-    SpaceAdmissionMessageKind, SpaceAdmissionRejectionReason, SpaceAdmissionRoute,
-    SponsorAdmission, SponsorAdmissionTransition, UnreadableHistoryPolicy,
+    SpaceAdmissionMessageKind, SpaceAdmissionProtocolVersion, SpaceAdmissionRejectionReason,
+    SpaceAdmissionRoute, SponsorAdmission, SponsorAdmissionTransition, UnreadableHistoryPolicy,
 };
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use uc_core::security::IdentityFingerprint;
@@ -180,12 +180,60 @@ async fn committed_joiner_is_reloaded_for_recovery_after_reopen() {
 
     let reopened = fixture.reopen();
     let pending =
-        PendingAdmissionRecoveryStatePort::load(&reopened, AdmissionRecoveryTrigger::Startup)
+        PendingAdmissionRecoveryStatePort::load(&reopened, AdmissionRecoveryTrigger::Startup, 0)
             .await
-            .unwrap();
+            .unwrap()
+            .into_pending_admissions();
     assert_eq!(pending.len(), 1);
     let (aggregate, _) = pending.into_iter().next().unwrap().into_parts();
     assert_eq!(aggregate.encode_persisted().unwrap(), expected);
+}
+
+#[tokio::test]
+async fn bounded_join_expires_persistently_and_releases_the_slot_for_a_new_join() {
+    let fixture = Fixture::new();
+    commit_fresh_join(&fixture, 0x43, 0x44).await;
+
+    let reopened = fixture.reopen();
+    let mut pending =
+        PendingAdmissionRecoveryStatePort::load(&reopened, AdmissionRecoveryTrigger::Startup, 0)
+            .await
+            .unwrap()
+            .into_pending_admissions();
+    let (attempt_a, token) = pending.pop().unwrap().into_parts();
+    assert_eq!(attempt_a.is_expired_at(300_999), Some(false));
+    let expired = attempt_a
+        .terminate_if_expired(301_000)
+        .unwrap()
+        .expect("deadline is due");
+    PendingAdmissionRecoveryStatePort::commit(&reopened, token, expired)
+        .await
+        .unwrap();
+
+    let status = LoadCurrentJoinStatusPort::load_current_join(&fixture.reopen())
+        .await
+        .unwrap();
+    assert!(matches!(
+        status,
+        Some(uc_application::facade::CurrentJoinStatus::Terminated {
+            reason: uc_application::facade::JoinSpaceTerminationReason::Expired,
+            ..
+        })
+    ));
+
+    let reopened = fixture.reopen();
+    let loaded = JoinerStartStatePort::load(&reopened).await.unwrap();
+    let (ordinal, snapshot, current, _, token) = loaded.into_parts();
+    assert!(current.is_none());
+    let attempt_b = start_join_transition_at(0x45, 0x46, ordinal, snapshot, 301_000);
+    JoinerStartStatePort::commit(&reopened, token, JoinerStartMutation::new(attempt_b, None))
+        .await
+        .unwrap();
+    let loaded = JoinerStartStatePort::load(&fixture.reopen()).await.unwrap();
+    let (_, _, current, _, _) = loaded.into_parts();
+    let current = current.expect("attempt B occupies the current slot");
+    assert_eq!(current.admission_id().as_bytes(), &[0x45; 32]);
+    assert_eq!(current.expires_at_ms(), Some(601_000));
 }
 
 #[tokio::test]
@@ -203,9 +251,11 @@ async fn rejected_join_remains_queryable_after_it_becomes_terminal() {
     let pending = PendingAdmissionRecoveryStatePort::load(
         &fixture.store,
         AdmissionRecoveryTrigger::StateChanged,
+        0,
     )
     .await
-    .unwrap();
+    .unwrap()
+    .into_pending_admissions();
     let (joiner, token) = pending.into_iter().next().unwrap().into_parts();
     let join_id = *joiner.join_id().as_bytes();
     let rejected = joiner
@@ -260,13 +310,16 @@ async fn stale_joiner_start_token_cannot_overwrite_new_state() {
 }
 
 #[tokio::test]
-async fn superseding_join_and_replacement_commit_atomically() {
+async fn expiring_join_and_replacement_commit_atomically() {
     let fixture = Fixture::new();
     commit_fresh_join(&fixture, 0x71, 0x72).await;
     let loaded = JoinerStartStatePort::load(&fixture.store).await.unwrap();
     let (ordinal, snapshot, current, _, token) = loaded.into_parts();
     let current = current.unwrap();
-    let superseded = current.supersede().unwrap();
+    let superseded = current
+        .terminate_if_expired(301_000)
+        .unwrap()
+        .expect("attempt A is expired");
     let replacement = start_join_transition(0x81, 0x82, ordinal, snapshot);
 
     fixture.execute(
@@ -312,6 +365,7 @@ async fn successful_supersede_keeps_only_replacement_recoverable() {
     let pending = PendingAdmissionRecoveryStatePort::load(
         &fixture.store,
         AdmissionRecoveryTrigger::StateChanged,
+        0,
     )
     .await
     .unwrap();
@@ -322,14 +376,22 @@ async fn successful_supersede_keeps_only_replacement_recoverable() {
 async fn recovery_commit_advances_record_and_rejects_old_token() {
     let fixture = Fixture::new();
     commit_fresh_join(&fixture, 0x91, 0x92).await;
-    let mut first =
-        PendingAdmissionRecoveryStatePort::load(&fixture.store, AdmissionRecoveryTrigger::Startup)
-            .await
-            .unwrap();
-    let mut stale =
-        PendingAdmissionRecoveryStatePort::load(&fixture.store, AdmissionRecoveryTrigger::Startup)
-            .await
-            .unwrap();
+    let mut first = PendingAdmissionRecoveryStatePort::load(
+        &fixture.store,
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .unwrap()
+    .into_pending_admissions();
+    let mut stale = PendingAdmissionRecoveryStatePort::load(
+        &fixture.store,
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .unwrap()
+    .into_pending_admissions();
     let (aggregate, token) = first.pop().unwrap().into_parts();
     let (stale_aggregate, stale_token) = stale.pop().unwrap().into_parts();
     let advanced = aggregate
@@ -363,6 +425,7 @@ async fn short_code_is_removed_before_the_single_resolution_request() {
         snapshot,
         AdmissionJoinerStartContext::from_bytes(b"secret-passphrase".to_vec()).unwrap(),
         AdmissionShortInvitationCode::from_bytes(b"ONCE-CODE".to_vec()).unwrap(),
+        1_000,
     )
     .unwrap();
     JoinerStartStatePort::commit(
@@ -373,10 +436,14 @@ async fn short_code_is_removed_before_the_single_resolution_request() {
     .await
     .unwrap();
 
-    let mut pending =
-        PendingAdmissionRecoveryStatePort::load(&fixture.store, AdmissionRecoveryTrigger::Startup)
-            .await
-            .unwrap();
+    let mut pending = PendingAdmissionRecoveryStatePort::load(
+        &fixture.store,
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .unwrap()
+    .into_pending_admissions();
     let (ready, token) = pending.pop().unwrap().into_parts();
     assert!(matches!(
         ready.invitation_resolution(),
@@ -530,6 +597,16 @@ fn start_join_transition(
     ordinal: u64,
     source_snapshot: AdmissionSourceSnapshot,
 ) -> JoinerAdmissionTransition {
+    start_join_transition_at(admission_byte, join_byte, ordinal, source_snapshot, 1_000)
+}
+
+fn start_join_transition_at(
+    admission_byte: u8,
+    join_byte: u8,
+    ordinal: u64,
+    source_snapshot: AdmissionSourceSnapshot,
+    started_at_ms: i64,
+) -> JoinerAdmissionTransition {
     let admission_id = SpaceAdmissionId::from_bytes([admission_byte; 32]).unwrap();
     let device_id = DeviceId::new("joining-device");
     let credential = MembershipCredential::new(1, vec![admission_byte + 3; 32]);
@@ -570,6 +647,7 @@ fn start_join_transition(
         AdmissionJoinerPrivateState::from_bytes(vec![admission_byte.wrapping_add(9); 64]).unwrap(),
         AdmissionEncryptedPasswordEquivalent::from_bytes(vec![admission_byte + 8; 64]).unwrap(),
         pending,
+        started_at_ms,
     )
     .unwrap()
 }

@@ -1,40 +1,76 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use uc_application::deps::{
-    CommitMembershipLedgerPort, LoadedMembershipLedger, MembershipLedgerError,
-    MembershipLedgerMutation,
+    CommitMembershipLedgerPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
+    MembershipLedgerError, MembershipLedgerMutation,
 };
 use uc_application::facade::HostEventBus;
 use uc_core::ports::{HostEvent, MembershipHostEvent};
 
-pub(crate) fn publish_membership_commit_events(
-    inner: Arc<dyn CommitMembershipLedgerPort>,
+const UNKNOWN_REVISION: u64 = u64::MAX;
+
+/// 让同一 Engine 会话中的所有账本读写共享版本，并只发布真实的设备分组变化。
+pub(crate) struct MembershipLedgerAccess {
+    loader: Arc<dyn LoadMembershipLedgerPort>,
+    committer: Arc<dyn CommitMembershipLedgerPort>,
     host_events: Arc<HostEventBus>,
-) -> Arc<dyn CommitMembershipLedgerPort> {
-    Arc::new(PublishingMembershipCommit { inner, host_events })
+    revision: AtomicU64,
 }
 
-struct PublishingMembershipCommit {
-    inner: Arc<dyn CommitMembershipLedgerPort>,
-    host_events: Arc<HostEventBus>,
+impl MembershipLedgerAccess {
+    pub(crate) fn new(
+        loader: Arc<dyn LoadMembershipLedgerPort>,
+        committer: Arc<dyn CommitMembershipLedgerPort>,
+        host_events: Arc<HostEventBus>,
+    ) -> Self {
+        Self {
+            loader,
+            committer,
+            host_events,
+            revision: AtomicU64::new(UNKNOWN_REVISION),
+        }
+    }
+
+    fn remember(&self, revision: u64) {
+        self.revision.store(revision, Ordering::Release);
+    }
 }
 
 #[async_trait]
-impl CommitMembershipLedgerPort for PublishingMembershipCommit {
+impl LoadMembershipLedgerPort for MembershipLedgerAccess {
+    async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
+        let loaded = self.loader.load().await?;
+        self.remember(loaded.revision);
+        Ok(loaded)
+    }
+
+    fn current_revision(&self) -> Option<u64> {
+        match self.revision.load(Ordering::Acquire) {
+            UNKNOWN_REVISION => None,
+            revision => Some(revision),
+        }
+    }
+}
+
+#[async_trait]
+impl CommitMembershipLedgerPort for MembershipLedgerAccess {
     async fn compare_and_commit(
         &self,
         mutation: MembershipLedgerMutation,
     ) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-        let result = self.inner.compare_and_commit(mutation).await;
-        if let Ok(committed) = &result {
+        let device_trust_changed = mutation.device_trust_changed;
+        let committed = self.committer.compare_and_commit(mutation).await?;
+        self.remember(committed.revision);
+        if device_trust_changed {
             self.host_events.emit_or_warn(HostEvent::Membership(
                 MembershipHostEvent::LedgerCommitted {
                     revision: committed.revision,
                 },
             ));
         }
-        result
+        Ok(committed)
     }
 }
 
@@ -44,35 +80,40 @@ mod tests {
 
     use async_trait::async_trait;
     use uc_application::deps::{
-        CommitMembershipLedgerPort, LoadedMembershipLedger, MembershipLedgerError,
-        MembershipLedgerMutation,
+        CommitMembershipLedgerPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
+        MembershipLedgerError, MembershipLedgerMutation,
     };
     use uc_application::facade::HostEventBus;
     use uc_core::ports::{EmitError, HostEvent, HostEventEmitterPort, MembershipHostEvent};
 
-    use super::publish_membership_commit_events;
+    use super::MembershipLedgerAccess;
 
-    struct SuccessfulCommit;
+    struct MemoryLedger(Mutex<LoadedMembershipLedger>);
+
+    impl Default for MemoryLedger {
+        fn default() -> Self {
+            Self(Mutex::new(LoadedMembershipLedger::no_current_space()))
+        }
+    }
 
     #[async_trait]
-    impl CommitMembershipLedgerPort for SuccessfulCommit {
+    impl LoadMembershipLedgerPort for MemoryLedger {
+        async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
+            Ok(self.0.lock().expect("membership ledger lock").clone())
+        }
+    }
+
+    #[async_trait]
+    impl CommitMembershipLedgerPort for MemoryLedger {
         async fn compare_and_commit(
             &self,
             mutation: MembershipLedgerMutation,
         ) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
+            if mutation.expected_revision == 99 {
+                return Err(MembershipLedgerError::Conflict);
+            }
+            *self.0.lock().expect("membership ledger lock") = mutation.replacement.clone();
             Ok(mutation.replacement)
-        }
-    }
-
-    struct FailingCommit;
-
-    #[async_trait]
-    impl CommitMembershipLedgerPort for FailingCommit {
-        async fn compare_and_commit(
-            &self,
-            _mutation: MembershipLedgerMutation,
-        ) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-            Err(MembershipLedgerError::Conflict)
         }
     }
 
@@ -88,49 +129,70 @@ mod tests {
         }
     }
 
-    fn mutation(revision: u64) -> MembershipLedgerMutation {
+    fn mutation(revision: u64, device_trust_changed: bool) -> MembershipLedgerMutation {
         let mut replacement = LoadedMembershipLedger::no_current_space();
         replacement.revision = revision;
         MembershipLedgerMutation {
             expected_revision: revision.saturating_sub(1),
             expected_history_digest: None,
+            device_trust_changed,
             replacement,
         }
     }
 
-    #[tokio::test]
-    async fn successful_commit_publishes_the_revision_once() {
+    fn access() -> (Arc<MembershipLedgerAccess>, Arc<HostEventRecorder>) {
+        let repository = Arc::new(MemoryLedger::default());
         let recorder = Arc::new(HostEventRecorder::default());
         let host_events = Arc::new(HostEventBus::new());
         host_events.register("test", recorder.clone());
-        let publisher = publish_membership_commit_events(Arc::new(SuccessfulCommit), host_events);
+        (
+            Arc::new(MembershipLedgerAccess::new(
+                repository.clone(),
+                repository,
+                host_events,
+            )),
+            recorder,
+        )
+    }
 
-        let committed = publisher
-            .compare_and_commit(mutation(7))
+    #[tokio::test]
+    async fn visible_commit_updates_revision_and_publishes_once() {
+        let (access, recorder) = access();
+        let committed = access
+            .compare_and_commit(mutation(7, true))
             .await
             .expect("membership commit");
 
         assert_eq!(committed.revision, 7);
+        assert_eq!(access.current_revision(), Some(7));
         let events = recorder.events.lock().expect("host events lock");
-        assert_eq!(events.len(), 1);
         assert!(matches!(
-            events.first(),
-            Some(HostEvent::Membership(
+            events.as_slice(),
+            [HostEvent::Membership(
                 MembershipHostEvent::LedgerCommitted { revision: 7 }
-            ))
+            )]
         ));
     }
 
     #[tokio::test]
-    async fn failed_commit_does_not_publish_an_event() {
-        let recorder = Arc::new(HostEventRecorder::default());
-        let host_events = Arc::new(HostEventBus::new());
-        host_events.register("test", recorder.clone());
-        let publisher = publish_membership_commit_events(Arc::new(FailingCommit), host_events);
+    async fn maintenance_commit_updates_revision_without_publishing() {
+        let (access, recorder) = access();
+        access
+            .compare_and_commit(mutation(3, false))
+            .await
+            .expect("maintenance commit");
 
-        let result = publisher.compare_and_commit(mutation(1)).await;
+        assert_eq!(access.current_revision(), Some(3));
+        assert!(recorder.events.lock().expect("host events lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_commit_changes_neither_revision_nor_events() {
+        let (access, recorder) = access();
+        let result = access.compare_and_commit(mutation(100, true)).await;
 
         assert!(matches!(result, Err(MembershipLedgerError::Conflict)));
+        assert_eq!(access.current_revision(), None);
         assert!(recorder.events.lock().expect("host events lock").is_empty());
     }
 }

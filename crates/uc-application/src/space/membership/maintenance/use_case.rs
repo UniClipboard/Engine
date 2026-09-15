@@ -1,4 +1,8 @@
+use std::future::Future;
 use std::sync::Arc;
+use uc_observability_contract::diagnostics::connectivity::{
+    LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
+};
 
 use super::{
     DeliverPendingGroupUpdatesPort, DeliverRestrictedMembershipPort, MembershipMaintenanceReport,
@@ -34,7 +38,9 @@ impl MaintainSpaceMembershipUseCase {
         &self,
         trigger: MembershipMaintenanceTrigger,
     ) -> MembershipMaintenanceReport {
+        let waiting = LocalWorkObservation::begin(LocalWorkStep::MaintenanceLock);
         let _guard = self.execution_lock.lock().await;
+        waiting.finish(LocalWorkOutcome::Ok);
         let mut report = MembershipMaintenanceReport::default();
         let full_round = matches!(
             trigger,
@@ -45,70 +51,86 @@ impl MaintainSpaceMembershipUseCase {
         let peer_online = matches!(trigger, MembershipMaintenanceTrigger::PeerOnline(_));
         let periodic = matches!(trigger, MembershipMaintenanceTrigger::Periodic);
 
-        if !record(
-            &mut report,
-            self.deps
-                .admissions
-                .recover_space_admissions(&trigger)
-                .await,
-        ) {
+        let observation = LocalWorkObservation::begin(LocalWorkStep::MaintenanceAdmissions);
+        let admissions = self
+            .deps
+            .admissions
+            .recover_space_admissions(&trigger)
+            .await;
+        observation.finish(diagnostic_outcome(admissions.step()));
+        if !record_outcome(&mut report, admissions.step()) || !admissions.should_continue() {
             return report;
         }
         if !peer_online
             && !record(
                 &mut report,
+                LocalWorkStep::MaintenanceRestricted,
                 self.deps
                     .restricted_delivery
-                    .deliver_restricted_membership()
-                    .await,
+                    .deliver_restricted_membership(),
             )
+            .await
         {
             return report;
         }
         if !peer_online
             && !record(
                 &mut report,
-                self.deps.effects.recover_membership_effects().await,
+                LocalWorkStep::MaintenanceEffects,
+                self.deps.effects.recover_membership_effects(),
             )
+            .await
         {
             return report;
         }
         if !record(
             &mut report,
-            self.deps.conflicts.recover_membership_conflicts().await,
-        ) {
+            LocalWorkStep::MaintenanceConflicts,
+            self.deps.conflicts.recover_membership_conflicts(),
+        )
+        .await
+        {
             return report;
         }
         if !record(
             &mut report,
+            LocalWorkStep::MaintenanceGroupUpdates,
             self.deps
                 .group_update_delivery
-                .deliver_pending_group_updates()
-                .await,
-        ) {
+                .deliver_pending_group_updates(&trigger),
+        )
+        .await
+        {
             return report;
         }
         if peer_online
             && !record(
                 &mut report,
+                LocalWorkStep::MaintenanceRestricted,
                 self.deps
                     .restricted_delivery
-                    .deliver_restricted_membership()
-                    .await,
+                    .deliver_restricted_membership(),
             )
+            .await
         {
             return report;
         }
         let should_synchronize = if periodic {
-            match self
+            let observation =
+                LocalWorkObservation::begin(LocalWorkStep::MaintenanceSynchronizationCheck);
+            let required = self
                 .deps
                 .synchronization
                 .periodic_synchronization_required()
-                .await
-            {
+                .await;
+            observation.finish(match &required {
+                Ok(_) => LocalWorkOutcome::Ok,
+                Err(outcome) => diagnostic_outcome(*outcome),
+            });
+            match required {
                 Ok(required) => required,
                 Err(outcome) => {
-                    record(&mut report, outcome);
+                    record_outcome(&mut report, outcome);
                     return report;
                 }
             }
@@ -118,23 +140,45 @@ impl MaintainSpaceMembershipUseCase {
         if should_synchronize {
             if !record(
                 &mut report,
-                self.deps
-                    .synchronization
-                    .synchronize_membership(&trigger)
-                    .await,
-            ) {
+                LocalWorkStep::MaintenanceSynchronization,
+                self.deps.synchronization.synchronize_membership(&trigger),
+            )
+            .await
+            {
                 return report;
             }
         }
         record(
             &mut report,
-            self.deps.cleanup.reconcile_membership_projection().await,
-        );
+            LocalWorkStep::MaintenanceCleanup,
+            self.deps.cleanup.reconcile_membership_projection(),
+        )
+        .await;
         report
     }
 }
 
-fn record(
+async fn record(
+    report: &mut MembershipMaintenanceReport,
+    step: LocalWorkStep,
+    work: impl Future<Output = MembershipMaintenanceStepOutcome>,
+) -> bool {
+    let observation = LocalWorkObservation::begin(step);
+    let outcome = work.await;
+    observation.finish(diagnostic_outcome(outcome));
+    record_outcome(report, outcome)
+}
+
+fn diagnostic_outcome(outcome: MembershipMaintenanceStepOutcome) -> LocalWorkOutcome {
+    match outcome {
+        MembershipMaintenanceStepOutcome::Completed => LocalWorkOutcome::Ok,
+        MembershipMaintenanceStepOutcome::Deferred => LocalWorkOutcome::Deferred,
+        MembershipMaintenanceStepOutcome::StableFailure => LocalWorkOutcome::Error,
+        MembershipMaintenanceStepOutcome::Corrupt => LocalWorkOutcome::Corrupt,
+    }
+}
+
+fn record_outcome(
     report: &mut MembershipMaintenanceReport,
     outcome: MembershipMaintenanceStepOutcome,
 ) -> bool {

@@ -8,6 +8,7 @@ mod six_digit_pairing;
 mod automatic_connections;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -16,12 +17,16 @@ use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
 use prost::Message;
 use tempfile::TempDir;
+use uc_engine::observability::{
+    DeploymentEnvironment, LocalLogConfig, ObservabilityConfig, ObservabilityResource,
+    OperatingSystem, OtlpHttpConfig, ProcessObservabilityRuntime,
+};
 use uc_engine::{
     ChooseDeviceGroupInput, CreateSpaceInput, Engine, EngineConfig, HistoryEntryInput,
     HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory, HostClipboard,
     HostClipboardSnapshot, HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata,
     HostSecureStorage, JoinSpaceInput, JoinSpaceStatusSummary, ListHistoryEntriesInput, Operation,
-    OperationResult, RemoveMemberInput, SecretString, SendTextInput,
+    OperationResult, PairingConfirmationSummary, RemoveMemberInput, SecretString, SendTextInput,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -32,6 +37,7 @@ const ADMISSION_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 const EXPIRES_AT_MS: i64 = 2_000_000_000_000;
 const PAIRING_HOT_PATH_BUDGET: Duration = Duration::from_secs(1);
+const PAIRING_HANDOVER_BUDGET: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Default)]
 struct MemorySecureStorage(Arc<Mutex<HashMap<String, Vec<u8>>>>);
@@ -109,6 +115,48 @@ impl HostFileAccess for EmptyFiles {
     }
 }
 
+struct SlowReadableFiles {
+    read_count: Arc<AtomicUsize>,
+    size_bytes: u64,
+    delay: Duration,
+}
+
+impl HostFileAccess for SlowReadableFiles {
+    fn metadata(&self, _handle: &HostFileHandle) -> Result<HostFileMetadata, HostCapabilityError> {
+        Ok(HostFileMetadata {
+            display_name: "slow-file.bin".to_owned(),
+            size_bytes: self.size_bytes,
+            mime_type: Some("application/octet-stream".to_owned()),
+        })
+    }
+
+    fn read_chunk(
+        &self,
+        _handle: &HostFileHandle,
+        offset: u64,
+        max_bytes: u32,
+    ) -> Result<Vec<u8>, HostCapabilityError> {
+        self.read_count.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(self.delay);
+        let remaining = self.size_bytes.saturating_sub(offset);
+        let length = remaining.min(u64::from(max_bytes)) as usize;
+        Ok(vec![0x5a; length])
+    }
+
+    fn write_chunk(
+        &self,
+        _handle: &HostFileHandle,
+        _offset: u64,
+        _bytes: &[u8],
+    ) -> Result<(), HostCapabilityError> {
+        Ok(())
+    }
+
+    fn finish_write(&self, _handle: &HostFileHandle) -> Result<(), HostCapabilityError> {
+        Ok(())
+    }
+}
+
 struct DeviceHarness {
     root: TempDir,
     secure_storage: MemorySecureStorage,
@@ -132,6 +180,12 @@ impl DeviceHarness {
         self.start_configured(clipboard, true).await
     }
 
+    async fn start_with_files(&self, files: Box<dyn HostFileAccess>) -> Engine {
+        self.start_with_host(Box::new(EmptyClipboard), files, true)
+            .await
+            .0
+    }
+
     async fn start_with_relay_fallback(&self, relay_fallback: bool) -> Engine {
         self.start_configured(Box::new(EmptyClipboard), relay_fallback)
             .await
@@ -150,6 +204,16 @@ impl DeviceHarness {
         clipboard: Box<dyn HostClipboard>,
         relay_fallback: bool,
     ) -> (Engine, uc_engine::EventStream) {
+        self.start_with_host(clipboard, Box::new(EmptyFiles), relay_fallback)
+            .await
+    }
+
+    async fn start_with_host(
+        &self,
+        clipboard: Box<dyn HostClipboard>,
+        files: Box<dyn HostFileAccess>,
+        relay_fallback: bool,
+    ) -> (Engine, uc_engine::EventStream) {
         let root = self.root.path();
         let host = HostCapabilities::new(
             HostDirectories::new(
@@ -160,7 +224,7 @@ impl DeviceHarness {
             ),
             Box::new(self.secure_storage.clone()),
             clipboard,
-            Box::new(EmptyFiles),
+            files,
         );
         let config = EngineConfig::new("1.1.0")
             .with_rendezvous_base_url(self.rendezvous_base_url.clone())
@@ -1145,7 +1209,7 @@ async fn f7_three_sibling_branches_keep_fair_anti_entropy_for_legal_peers() {
         for sender in branch {
             for receiver in branch {
                 if sender != receiver {
-                    topology.wait_for_paired_peer(sender, receiver).await;
+                    topology.wait_for_connected_peer(sender, receiver).await;
                 }
             }
         }
@@ -1293,7 +1357,7 @@ async fn f6_deep_chain_recovers_selected_branch_without_online_sponsors() {
     assert_eq!(recovered.head_event_id, target.head_event_id);
 
     for (sender, receiver) in [("A", "C"), ("C", "E"), ("E", "F")] {
-        topology.wait_for_paired_peer(sender, receiver).await;
+        topology.wait_for_connected_peer(sender, receiver).await;
         let text = format!("F6 converged hop {sender}-{receiver}");
         let report = topology.send(sender, receiver, &text).await;
         assert!(
@@ -2444,7 +2508,7 @@ impl MembershipTopology {
         report
     }
 
-    async fn wait_for_paired_peer(&self, sender: &str, receiver: &str) {
+    async fn wait_for_connected_peer(&self, sender: &str, receiver: &str) {
         let receiver_id = self
             .device_ids
             .get(receiver)
@@ -2459,7 +2523,7 @@ impl MembershipTopology {
                 Ok(OperationResult::PeerConnections(peers))
                     if peers
                         .iter()
-                        .any(|peer| &peer.peer_id == receiver_id && peer.is_paired) =>
+                        .any(|peer| &peer.peer_id == receiver_id && peer.connected) =>
                 {
                     return;
                 }
@@ -2470,7 +2534,30 @@ impl MembershipTopology {
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "same-branch peer {sender}-{receiver} did not become paired"
+                "same-branch peer {sender}-{receiver} did not become connected"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn wait_for_admission_ready(&self, nodes: &[&str]) {
+        let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+        loop {
+            let mut ready = true;
+            for node in nodes {
+                let diagnostics = self.diagnostics(node).await;
+                if diagnostics.pending_confirmation_count != 0
+                    || diagnostics.pending_effect_count != 0
+                {
+                    ready = false;
+                }
+            }
+            if ready {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "membership admission did not become ready"
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -2988,6 +3075,7 @@ async fn f0_partitioned_sponsors_create_isolated_sibling_branches() {
     topology
         .wait_for_equivalent_branch(&["A", "B", "C"], 3)
         .await;
+    topology.wait_for_admission_ready(&["A", "B", "C"]).await;
     let baseline_a = topology.diagnostics("A").await;
     let baseline_b = topology.diagnostics("B").await;
     assert_eq!(baseline_a.branch_id, baseline_b.branch_id);
@@ -3230,10 +3318,37 @@ async fn uninterrupted_admission_uses_one_trace() {
             .mount(&telemetry)
             .await;
     }
-    assert!(uc_engine::init_test_tracing_with_otlp(
-        &format!("{}/v1/traces", telemetry.uri()),
-        &format!("{}/v1/logs", telemetry.uri()),
-    ));
+    let local_logs = TempDir::new().expect("local logs");
+    let os = match std::env::consts::OS {
+        "macos" => OperatingSystem::Macos,
+        "linux" => OperatingSystem::Linux,
+        "windows" => OperatingSystem::Windows,
+        _ => OperatingSystem::Other,
+    };
+    let config = ObservabilityConfig::new(
+        ObservabilityResource::new(
+            env!("CARGO_PKG_VERSION"),
+            DeploymentEnvironment::Test,
+            os,
+            "test",
+        )
+        .expect("resource"),
+    )
+    .with_remote(
+        OtlpHttpConfig::new_loopback(
+            &format!("{}/v1/traces", telemetry.uri()),
+            &format!("{}/v1/logs", telemetry.uri()),
+        )
+        .expect("OTLP"),
+    )
+    .with_local_logs(LocalLogConfig::new(local_logs.path()));
+    let observation = std::thread::spawn(move || {
+        ProcessObservabilityRuntime::install(config)
+            .expect("runtime")
+            .handle()
+    })
+    .join()
+    .expect("install");
 
     let rendezvous = mount_rendezvous().await;
     let sponsor_harness = DeviceHarness::new(rendezvous.uri());
@@ -3249,19 +3364,11 @@ async fn uninterrupted_admission_uses_one_trace() {
     wait_for_active_member_count(&sponsor, 2).await;
     wait_for_active_member_count(&joiner, 2).await;
     let elapsed = started.elapsed();
-    sponsor
-        .shutdown(SHUTDOWN_TIMEOUT)
-        .await
-        .expect("stop sponsor");
-    joiner
-        .shutdown(SHUTDOWN_TIMEOUT)
-        .await
-        .expect("stop joiner");
-    uc_engine::flush_test_tracing();
 
+    // Active 早于最后一轮通信完成；先收齐证据，不能用关闭打断待验收的确认。
     let evidence_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let trace_evidence = loop {
-        uc_engine::flush_test_tracing();
+        let _ = observation.force_flush(Duration::from_secs(10));
         let requests = telemetry
             .received_requests()
             .await
@@ -3277,14 +3384,18 @@ async fn uninterrupted_admission_uses_one_trace() {
         }
         assert!(
             tokio::time::Instant::now() < evidence_deadline,
-            "OTLP receiver did not collect four complete admission exchanges"
+            "OTLP receiver did not collect four complete admission exchanges: {evidence:?}"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     };
 
     assert_eq!(trace_evidence.flow_ids.len(), 1);
     assert_eq!(trace_evidence.lifecycle_root_count, 1);
-    assert_eq!(trace_evidence.invalid_pair_count, 0);
+    assert_eq!(
+        trace_evidence.invalid_pair_count, 0,
+        "{:?}",
+        trace_evidence.invalid_pair_details
+    );
     assert_eq!(trace_evidence.invalid_completion_log_count, 0);
     let requests = telemetry
         .received_requests()
@@ -3297,6 +3408,115 @@ async fn uninterrupted_admission_uses_one_trace() {
         "one uninterrupted admission must be visible as one trace: {:?}",
         trace_evidence.admission_trace_counts,
     );
+    let _ = observation.force_flush(Duration::from_secs(10));
+    let local_records: Vec<serde_json::Value> = std::fs::read_dir(local_logs.path())
+        .expect("files")
+        .flat_map(|entry| {
+            std::fs::read_to_string(entry.expect("entry").path())
+                .expect("file")
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("record"))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let lifecycle = local_records
+        .iter()
+        .find(|r| {
+            r["fields"]["event.name"] == "uc.operation.completed"
+                && r["fields"]["uc.role"] == "local"
+                && r["fields"]["uc.domain"] == "space_admission"
+        })
+        .expect("lifecycle");
+    for (step, role) in [
+        ("sponsor_state_load", "sponsor"),
+        ("sponsor_state_commit", "sponsor"),
+        ("sponsor_prepare_candidate", "sponsor"),
+        ("sponsor_prepare_commit", "sponsor"),
+        ("sponsor_prepare_complete", "sponsor"),
+        ("sponsor_prepare_settled", "sponsor"),
+        ("sponsor_activate", "sponsor"),
+        ("re_pairing_state_commit", "sponsor"),
+        ("joiner_process_reply", "joiner"),
+        ("joiner_prepare_candidate", "joiner"),
+        ("joiner_prepare_applied", "joiner"),
+        ("joiner_prepare_activation", "joiner"),
+        ("joiner_activate", "joiner"),
+    ] {
+        let records: Vec<_> = local_records
+            .iter()
+            .filter(|r| {
+                r["fields"]["event.name"] == "runtime.work.finished"
+                    && r["fields"]["step"] == step
+                    && r["fields"]["uc.role"] == role
+            })
+            .collect();
+        assert!(!records.is_empty(), "缺少真实内部步骤：{step}");
+        for record in records {
+            assert_eq!(
+                record["trace_id"], lifecycle["trace_id"],
+                "步骤关联丢失：{step}"
+            );
+            assert_eq!(record["capture_mode"], "standard");
+            assert_eq!(
+                record["fields"]["uc.outcome"], "ok",
+                "正常配对步骤结果：{step}"
+            );
+        }
+    }
+    for message in ["join_request", "prepared", "applied", "complete_ack"] {
+        for role in ["joiner", "sponsor"] {
+            assert!(
+                local_records
+                    .iter()
+                    .any(|r| r["fields"]["message"] == message
+                        && r["fields"]["uc.role"] == role
+                        && r["trace_id"] == lifecycle["trace_id"]),
+                "四轮协议必须在两端可识别：{role} {message}"
+            );
+        }
+    }
+    let transition = local_records
+        .iter()
+        .find(|r| {
+            r["fields"]["event.name"] == "runtime.work.finished"
+                && r["fields"]["step"] == "session_complete_transition"
+        })
+        .expect("实际会话切换");
+    assert!(transition["trace_id"].is_string());
+    assert!(
+        local_records
+            .iter()
+            .any(|r| r["fields"]["event.name"] == "uc.operation.completed"
+                && r["fields"]["uc.operation"] == "session_lifecycle"
+                && r["trace_id"] == transition["trace_id"]),
+        "实际切换必须有完整结果"
+    );
+    for step in [
+        "session_drain_operations",
+        "session_stop_application",
+        "session_stop_network",
+        "session_complete_transition",
+        "session_prepare",
+        "session_start",
+        "session_recover",
+    ] {
+        assert!(
+            local_records
+                .iter()
+                .any(|r| r["fields"]["event.name"] == "runtime.work.finished"
+                    && r["fields"]["step"] == step
+                    && r["trace_id"] == transition["trace_id"]),
+            "实际会话切换缺少关联步骤：{step}"
+        );
+    }
+    sponsor
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("stop sponsor");
+    joiner
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("stop joiner");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
@@ -3413,39 +3633,96 @@ async fn in_flight_admission_restart_uses_new_traces_and_one_flow() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 #[ignore = "显式性能门禁：需要空闲的本机真实网络栈，使用 --ignored 运行"]
 async fn two_device_hot_path_pairing_completes_within_one_second() {
-    let benchmark_mode = std::env::var("UC_PAIRING_OBSERVABILITY_BENCHMARK").ok();
-    let telemetry = if matches!(
-        benchmark_mode.as_deref(),
-        Some("none" | "disabled" | "unavailable")
-    ) {
-        None
+    let telemetry = start_test_telemetry().await;
+    assert!(uc_engine::init_test_tracing_with_otlp(
+        &format!("{}/v1/traces", telemetry.uri()),
+        &format!("{}/v1/logs", telemetry.uri()),
+    ));
+    let (started_at, elapsed) = measure_two_device_pairing().await;
+    let trace_evidence = collect_pairing_trace_evidence(&telemetry, started_at, elapsed).await;
+    assert_pairing_trace_evidence(&trace_evidence);
+    assert!(
+        trace_evidence.local_elapsed < PAIRING_HOT_PATH_BUDGET,
+        "two-device local pairing work took {:?}, network-related time {:?}, end-to-end {:?}, local budget {:?}",
+        trace_evidence.local_elapsed,
+        trace_evidence.network_elapsed,
+        elapsed,
+        PAIRING_HOT_PATH_BUDGET,
+    );
+}
+
+// 普通 Space 交接复用同一网络入口，端到端配对必须稳定落在三秒预算内。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore = "显式性能门禁：需要空闲的本机真实网络栈，使用 --ignored 运行"]
+async fn two_device_pairing_with_session_handover_completes_within_three_seconds() {
+    let telemetry = start_test_telemetry().await;
+    assert!(uc_engine::init_test_tracing_with_otlp(
+        &format!("{}/v1/traces", telemetry.uri()),
+        &format!("{}/v1/logs", telemetry.uri()),
+    ));
+    let (started_at, elapsed) = measure_two_device_pairing().await;
+    let trace_evidence = collect_pairing_trace_evidence(&telemetry, started_at, elapsed).await;
+    assert_pairing_trace_evidence(&trace_evidence);
+    eprintln!(
+        "UC_PAIRING_HANDOVER_RESULT elapsed_us={} local_us={} network_us={}",
+        elapsed.as_micros(),
+        trace_evidence.local_elapsed.as_micros(),
+        trace_evidence.network_elapsed.as_micros(),
+    );
+    assert!(
+        elapsed < PAIRING_HANDOVER_BUDGET,
+        "two-device end-to-end pairing took {elapsed:?}, budget {PAIRING_HANDOVER_BUDGET:?}",
+    );
+}
+
+// 不同观测装配只验证配对能完成，不承担一秒或三秒性能门。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore = "显式观测开销验收：通过 UC_PAIRING_OBSERVABILITY_BENCHMARK 选择模式"]
+async fn two_device_pairing_observability_mode_completes() {
+    let mode = std::env::var("UC_PAIRING_OBSERVABILITY_BENCHMARK")
+        .expect("UC_PAIRING_OBSERVABILITY_BENCHMARK must select an observability mode");
+    let telemetry = if mode == "healthy" {
+        Some(start_test_telemetry().await)
     } else {
-        let telemetry = MockServer::start().await;
-        for endpoint in ["/v1/traces", "/v1/logs"] {
-            Mock::given(method("POST"))
-                .and(path(endpoint))
-                .respond_with(ResponseTemplate::new(200))
-                .mount(&telemetry)
-                .await;
-        }
-        Some(telemetry)
+        None
     };
-    match benchmark_mode.as_deref() {
-        Some("none") => {}
-        Some("disabled") => assert!(uc_engine::init_test_tracing_without_remote()),
-        Some("unavailable") => assert!(uc_engine::init_test_tracing_with_otlp(
+    match mode.as_str() {
+        "none" => {}
+        "disabled" => assert!(uc_engine::init_test_tracing_without_remote()),
+        "unavailable" => assert!(uc_engine::init_test_tracing_with_otlp(
             "http://127.0.0.1:1/v1/traces",
             "http://127.0.0.1:1/v1/logs",
         )),
-        Some("healthy") | None => {
+        "healthy" => {
             let telemetry = telemetry.as_ref().expect("healthy OTLP receiver");
             assert!(uc_engine::init_test_tracing_with_otlp(
                 &format!("{}/v1/traces", telemetry.uri()),
                 &format!("{}/v1/logs", telemetry.uri()),
             ));
         }
-        Some(other) => panic!("unknown observability benchmark mode: {other}"),
+        other => panic!("unknown observability benchmark mode: {other}"),
     }
+    let (_, elapsed) = measure_two_device_pairing().await;
+    eprintln!(
+        "UC_PAIRING_OBSERVABILITY_RESULT mode={mode} elapsed_us={}",
+        elapsed.as_micros()
+    );
+    assert!(elapsed < Duration::from_secs(30));
+}
+
+async fn start_test_telemetry() -> MockServer {
+    let telemetry = MockServer::start().await;
+    for endpoint in ["/v1/traces", "/v1/logs"] {
+        Mock::given(method("POST"))
+            .and(path(endpoint))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&telemetry)
+            .await;
+    }
+    telemetry
+}
+
+async fn measure_two_device_pairing() -> (SystemTime, Duration) {
     let rendezvous = mount_rendezvous().await;
     let sponsor_harness = DeviceHarness::new(rendezvous.uri());
     let joiner_harness = DeviceHarness::new(rendezvous.uri());
@@ -3470,17 +3747,16 @@ async fn two_device_hot_path_pairing_completes_within_one_second() {
         .await
         .expect("shut down joiner");
     uc_engine::flush_test_tracing();
-    if let Some(mode) = benchmark_mode {
-        eprintln!(
-            "UC_PAIRING_OBSERVABILITY_RESULT mode={mode} elapsed_us={}",
-            elapsed.as_micros()
-        );
-        assert!(elapsed < Duration::from_secs(30));
-        return;
-    }
-    let telemetry = telemetry.expect("performance gate OTLP receiver");
+    (started_at, elapsed)
+}
+
+async fn collect_pairing_trace_evidence(
+    telemetry: &MockServer,
+    started_at: SystemTime,
+    elapsed: Duration,
+) -> PairingTraceEvidence {
     let evidence_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let trace_evidence = loop {
+    loop {
         uc_engine::flush_test_tracing();
         let requests = telemetry
             .received_requests()
@@ -3500,7 +3776,10 @@ async fn two_device_hot_path_pairing_completes_within_one_second() {
             "OTLP receiver did not collect four complete admission exchanges"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
-    };
+    }
+}
+
+fn assert_pairing_trace_evidence(trace_evidence: &PairingTraceEvidence) {
     assert!(trace_evidence.client_count >= 4);
     assert!(trace_evidence.paired_server_count >= 4);
     assert_eq!(
@@ -3512,16 +3791,9 @@ async fn two_device_hot_path_pairing_completes_within_one_second() {
     assert_eq!(trace_evidence.flow_ids.len(), 1);
     assert_eq!(trace_evidence.lifecycle_root_count, 1);
     assert_eq!(trace_evidence.admission_trace_ids.len(), 1);
-    assert!(
-        trace_evidence.local_elapsed < PAIRING_HOT_PATH_BUDGET,
-        "two-device local pairing work took {:?}, network-related time {:?}, end-to-end {:?}, local budget {:?}",
-        trace_evidence.local_elapsed,
-        trace_evidence.network_elapsed,
-        elapsed,
-        PAIRING_HOT_PATH_BUDGET,
-    );
 }
 
+#[derive(Debug)]
 struct PairingTraceEvidence {
     local_elapsed: Duration,
     network_elapsed: Duration,
@@ -3530,6 +3802,7 @@ struct PairingTraceEvidence {
     paired_admission_endpoint_count: usize,
     lifecycle_root_count: usize,
     invalid_pair_count: usize,
+    invalid_pair_details: Vec<String>,
     invalid_completion_log_count: usize,
     flow_ids: BTreeSet<String>,
     admission_trace_ids: BTreeSet<Vec<u8>>,
@@ -3765,24 +4038,39 @@ fn pairing_trace_evidence(
             .entry(client.trace_id.clone())
             .or_insert(0) += 1;
     }
+    let mut invalid_pair_details = Vec::new();
     let mut invalid_pair_count = clients
         .iter()
         .filter(|client| {
             let root =
                 lifecycle_root_ids.get(&(client.trace_id.clone(), client.parent_span_id.clone()));
-            client.parent_span_id.is_empty()
+            let invalid = client.parent_span_id.is_empty()
                 || root.is_none()
                 || root.and_then(|span| otlp_string_attribute(&span.attributes, "uc.flow.id"))
                     != otlp_string_attribute(&client.attributes, "uc.flow.id")
                 || otlp_string_attribute(&client.attributes, "uc.flow.id").is_none()
-                || !otlp_span_succeeded(client)
+                || !otlp_span_succeeded(client);
+            if invalid {
+                invalid_pair_details.push(format!(
+                    "client {} root_present={} status={:?}",
+                    client.name,
+                    root.is_some(),
+                    client.status
+                ));
+            }
+            invalid
         })
         .count()
         + paired_servers
             .iter()
             .filter(|(_, server)| {
-                otlp_string_attribute(&server.attributes, "uc.flow.id").is_some()
-                    || !otlp_span_succeeded(server)
+                let invalid = otlp_string_attribute(&server.attributes, "uc.flow.id").is_some()
+                    || !otlp_span_succeeded(server);
+                if invalid {
+                    invalid_pair_details
+                        .push(format!("server {} status={:?}", server.name, server.status));
+                }
+                invalid
             })
             .count()
         + spans
@@ -3819,6 +4107,14 @@ fn pairing_trace_evidence(
             if client.start_time_unix_nano > server.start_time_unix_nano
                 || server.end_time_unix_nano > client.end_time_unix_nano
             {
+                invalid_pair_details.push(format!(
+                    "配对两端时间边界：client={} server={} start_delta_ns={} end_delta_ns={}",
+                    client.name,
+                    server.name,
+                    i128::from(server.start_time_unix_nano)
+                        - i128::from(client.start_time_unix_nano),
+                    i128::from(server.end_time_unix_nano) - i128::from(client.end_time_unix_nano)
+                ));
                 invalid_pair_count += 1;
                 return Vec::new();
             }
@@ -3862,6 +4158,7 @@ fn pairing_trace_evidence(
         paired_admission_endpoint_count,
         lifecycle_root_count: lifecycle_roots.len(),
         invalid_pair_count,
+        invalid_pair_details,
         invalid_completion_log_count,
         flow_ids,
         admission_trace_ids,
@@ -4101,6 +4398,329 @@ async fn existing_device_switches_space_through_stable_operations() {
     }
 }
 
+// Space 切换连续封口失败后必须重试，且不能重绑网络入口。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn space_switch_recovers_after_repeated_session_quiesce_failures() {
+    assert_space_switch_recovers_after_repeated_handover_failures(
+        uc_engine::SessionHandoverFailurePoint::SessionQuiesce,
+        2,
+    )
+    .await;
+}
+
+// Space 切换连续提交失败后必须从权威状态恢复，且不能重绑网络入口。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn space_switch_recovers_after_repeated_transition_completion_failures() {
+    assert_space_switch_recovers_after_repeated_handover_failures(
+        uc_engine::SessionHandoverFailurePoint::TransitionCompletion,
+        2,
+    )
+    .await;
+}
+
+// 已提交的 Space 切换即使连续会话准备失败，也只能恢复目标 Space，且不能重绑网络入口。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn committed_space_switch_recovers_after_repeated_session_preparation_failures() {
+    assert_space_switch_recovers_after_repeated_handover_failures(
+        uc_engine::SessionHandoverFailurePoint::SessionPreparation,
+        2,
+    )
+    .await;
+}
+
+// 已准备的新会话连续发布失败后必须被清理并重试，且不能重绑网络入口。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn committed_space_switch_recovers_after_repeated_session_activation_failures() {
+    assert_space_switch_recovers_after_repeated_handover_failures(
+        uc_engine::SessionHandoverFailurePoint::SessionActivation,
+        2,
+    )
+    .await;
+}
+
+// Space 切换恢复空窗内暂停后，旧恢复任务不得重建网络；恢复时只允许重建一次。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn suspend_during_space_switch_recovery_does_not_resurrect_the_network() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let sponsor_harness = DeviceHarness::new(rendezvous.uri());
+    let joiner_harness = DeviceHarness::new(rendezvous.uri());
+    let sponsor = sponsor_harness.start().await;
+    let joiner = joiner_harness.start().await;
+    let target_space_id = create_space(&sponsor, "Sponsor").await.0;
+    create_space(&joiner, "Joiner").await;
+    assert_eq!(
+        query_session_handover_diagnostics(&joiner)
+            .await
+            .network_build_count,
+        1
+    );
+    arm_session_handover_failure(
+        &joiner,
+        uc_engine::SessionHandoverFailurePoint::SessionPreparation,
+    )
+    .await;
+
+    let invitation = issue_invitation(&sponsor).await;
+    let OperationResult::JoinSpace(status) = joiner
+        .execute(Operation::JoinSpace(JoinSpaceInput {
+            invitation_code: invitation,
+            device_name: Some("Joiner".to_owned()),
+            passphrase: SecretString::new(PASSPHRASE),
+            preserve_unreadable_history: false,
+        }))
+        .await
+        .expect("start suspend-during-transition join")
+    else {
+        panic!("unexpected join result");
+    };
+
+    let failure_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let diagnostics = query_session_handover_diagnostics(&joiner).await;
+        if diagnostics.session_preparation_failure_count == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < failure_deadline,
+            "the injected session preparation failure was not observed"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    joiner
+        .suspend()
+        .await
+        .expect("suspend joiner during recovery");
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    joiner
+        .resume()
+        .await
+        .expect("resume joiner after recovery gap");
+
+    wait_for_completed_join(&joiner, "Joiner", status, &target_space_id).await;
+    wait_for_active_member_count(&sponsor, 2).await;
+    wait_for_active_member_count(&joiner, 2).await;
+    assert_eq!(
+        query_session_handover_diagnostics(&joiner)
+            .await
+            .network_build_count,
+        2,
+        "suspend must close the original network and resume must rebuild it exactly once"
+    );
+
+    for engine in [&sponsor, &joiner] {
+        engine
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .await
+            .expect("shut down suspend-during-transition engine");
+    }
+}
+
+// Space 切换必须取消仍在读取宿主文件的旧发送，并清理未完成的导入文件。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn space_switch_cancels_in_flight_file_send_without_leaving_imports() {
+    const FILE_CHUNKS: u64 = 70;
+    const FILE_CHUNK_BYTES: u64 = 64 * 1024;
+
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let sponsor_harness = DeviceHarness::new(rendezvous.uri());
+    let joiner_harness = DeviceHarness::new(rendezvous.uri());
+    let sponsor = sponsor_harness.start().await;
+    let read_count = Arc::new(AtomicUsize::new(0));
+    let joiner = Arc::new(
+        joiner_harness
+            .start_with_files(Box::new(SlowReadableFiles {
+                read_count: Arc::clone(&read_count),
+                size_bytes: FILE_CHUNKS * FILE_CHUNK_BYTES,
+                delay: Duration::from_millis(100),
+            }))
+            .await,
+    );
+    let target_space_id = create_space(&sponsor, "Sponsor").await.0;
+    create_space(&joiner, "Joiner").await;
+    let endpoint_before = query_endpoint_id(&joiner, "joiner before in-flight send").await;
+
+    let sending_engine = Arc::clone(&joiner);
+    let send = tokio::spawn(async move {
+        sending_engine
+            .execute(Operation::SendFiles(uc_engine::SendFilesInput {
+                files: vec![HostFileHandle::new("slow-file")],
+                target_devices: Vec::new(),
+            }))
+            .await
+    });
+    let read_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while read_count.load(Ordering::SeqCst) == 0 {
+        assert!(
+            tokio::time::Instant::now() < read_deadline,
+            "the file send did not start reading"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let invitation = issue_invitation(&sponsor).await;
+    let OperationResult::JoinSpace(status) = joiner
+        .execute(Operation::JoinSpace(JoinSpaceInput {
+            invitation_code: invitation,
+            device_name: Some("Joiner".to_owned()),
+            passphrase: SecretString::new(PASSPHRASE),
+            preserve_unreadable_history: false,
+        }))
+        .await
+        .expect("start join while file send is in flight")
+    else {
+        panic!("unexpected join result");
+    };
+
+    let send_error = tokio::time::timeout(Duration::from_secs(10), send)
+        .await
+        .expect("in-flight file send must stop during Space switch")
+        .expect("file send task must not panic")
+        .expect_err("the old file send must be cancelled");
+    assert_eq!(
+        send_error.category(),
+        uc_engine::EngineErrorCategory::Unavailable
+    );
+    let joined = wait_for_completed_join(&joiner, "Joiner", status, &target_space_id).await;
+    wait_for_active_member_count(&sponsor, 2).await;
+    wait_for_active_member_count(&joiner, 2).await;
+    assert_eq!(
+        query_endpoint_id(&joiner, "joiner after in-flight send").await,
+        endpoint_before,
+        "cancelling an old file send must keep the existing network"
+    );
+    assert_eq!(
+        query_session_handover_diagnostics(&joiner)
+            .await
+            .network_build_count,
+        1
+    );
+
+    let import_root = joiner_harness.root.path().join("cache/engine-imports");
+    let import_count = std::fs::read_dir(&import_root)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(
+        import_count, 0,
+        "cancelled file send must remove its incomplete import"
+    );
+
+    let text = "new session remains usable after file cancellation";
+    sponsor
+        .execute(Operation::SendText(SendTextInput {
+            text: text.to_owned(),
+            target_devices: vec![joined.self_device_id],
+        }))
+        .await
+        .expect("send through the new session after file cancellation");
+    wait_for_received_text(&joiner, text).await;
+
+    sponsor
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down sponsor after file-send cancellation");
+    joiner
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down joiner after file-send cancellation");
+}
+
+async fn assert_space_switch_recovers_after_repeated_handover_failures(
+    failure_point: uc_engine::SessionHandoverFailurePoint,
+    failure_repetitions: usize,
+) {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let sponsor_harness = DeviceHarness::new(rendezvous.uri());
+    let joiner_harness = DeviceHarness::new(rendezvous.uri());
+    let sponsor = sponsor_harness.start().await;
+    let joiner = joiner_harness.start().await;
+    let target_space_id = create_space(&sponsor, "Sponsor").await.0;
+    let source_space_id = create_space(&joiner, "Joiner").await.0;
+    let endpoint_before = query_endpoint_id(&joiner, "joiner before injected failure").await;
+    let initial_diagnostics = query_session_handover_diagnostics(&joiner).await;
+    assert_eq!(initial_diagnostics.network_build_count, 1);
+    assert_eq!(
+        initial_diagnostics.failure_count(failure_point),
+        0,
+        "the selected failure point must start unused"
+    );
+    for _ in 0..failure_repetitions {
+        arm_session_handover_failure(&joiner, failure_point).await;
+    }
+
+    let invitation = issue_invitation(&sponsor).await;
+    let OperationResult::JoinSpace(status) = joiner
+        .execute(Operation::JoinSpace(JoinSpaceInput {
+            invitation_code: invitation,
+            device_name: Some("Joiner".to_owned()),
+            passphrase: SecretString::new(PASSPHRASE),
+            preserve_unreadable_history: false,
+        }))
+        .await
+        .expect("start injected-failure join")
+    else {
+        panic!("unexpected join result");
+    };
+
+    let failure_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let diagnostics = query_session_handover_diagnostics(&joiner).await;
+        if diagnostics.failure_count(failure_point) >= 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < failure_deadline,
+            "the injected session handover failure was not observed"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let unavailable = joiner
+        .execute(Operation::QuerySetupState)
+        .await
+        .expect_err("old Space operations must stay closed after handover failure");
+    assert_eq!(
+        unavailable.category(),
+        uc_engine::EngineErrorCategory::Unavailable
+    );
+    assert_eq!(
+        query_endpoint_id(&joiner, "joiner during injected failure").await,
+        endpoint_before,
+        "session recovery must keep the existing endpoint"
+    );
+    let failure_diagnostics = query_session_handover_diagnostics(&joiner).await;
+    assert_eq!(failure_diagnostics.network_build_count, 1);
+    assert!(failure_diagnostics.failure_count(failure_point) >= 1);
+
+    wait_for_completed_join(&joiner, "Joiner", status, &target_space_id).await;
+    assert_ne!(source_space_id, target_space_id);
+    assert_eq!(
+        query_endpoint_id(&joiner, "joiner after injected failure").await,
+        endpoint_before,
+        "successful retry must not rebind the endpoint"
+    );
+    let recovered_diagnostics = query_session_handover_diagnostics(&joiner).await;
+    assert_eq!(
+        recovered_diagnostics.network_build_count, 1,
+        "repeated failures and the successful retry must reuse the original network"
+    );
+    assert_eq!(
+        recovered_diagnostics.failure_count(failure_point),
+        failure_repetitions
+    );
+    wait_for_active_member_count(&sponsor, 2).await;
+    wait_for_active_member_count(&joiner, 2).await;
+
+    for engine in [&sponsor, &joiner] {
+        engine
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .await
+            .expect("shut down injected-failure engine");
+    }
+}
+
 // 加入完成后重启 Joiner，持久化准入状态必须足以恢复成员权限并接收正文。
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn completed_admission_survives_restart_and_allows_transfer() {
@@ -4140,6 +4760,100 @@ async fn completed_admission_survives_restart_and_allows_transfer() {
         .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("shut down restarted joiner");
+}
+
+// 公开查询必须把已确认状态与准确成员一起持久保留；移除后同一设备可作为新实例重新配对。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn confirmed_pairing_survives_restart_removal_and_same_device_rejoin() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let sponsor_harness = DeviceHarness::new(rendezvous.uri());
+    let joiner_harness = DeviceHarness::new(rendezvous.uri());
+    let sponsor = sponsor_harness.start().await;
+    let joiner = joiner_harness.start().await;
+    let space_id = create_space(&sponsor, "Sponsor").await.0;
+    let joiner_id = join_through(&sponsor, &joiner, "Joiner", &space_id)
+        .await
+        .self_device_id;
+
+    wait_for_pairing_confirmation(&sponsor, &joiner_id, PairingConfirmationSummary::Confirmed)
+        .await;
+    sponsor
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down sponsor before confirmation reload");
+    let restarted_sponsor = sponsor_harness.start().await;
+    wait_for_pairing_confirmation(
+        &restarted_sponsor,
+        &joiner_id,
+        PairingConfirmationSummary::Confirmed,
+    )
+    .await;
+
+    remove_member(&restarted_sponsor, &joiner_id).await;
+    wait_for_active_member_count(&restarted_sponsor, 1).await;
+    let rejoined_id = join_through(&restarted_sponsor, &joiner, "Joiner", &space_id)
+        .await
+        .self_device_id;
+    assert_eq!(rejoined_id, joiner_id);
+    wait_for_pairing_confirmation(
+        &restarted_sponsor,
+        &joiner_id,
+        PairingConfirmationSummary::Confirmed,
+    )
+    .await;
+
+    restarted_sponsor
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down rejoined sponsor");
+    joiner
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down rejoined device");
+}
+
+async fn wait_for_pairing_confirmation(
+    engine: &Engine,
+    device_id: &str,
+    expected: PairingConfirmationSummary,
+) {
+    let deadline = tokio::time::Instant::now() + ADMISSION_WAIT_TIMEOUT;
+    loop {
+        if let Ok(OperationResult::DeviceGroupChoices(summary)) =
+            engine.execute(Operation::QueryDeviceGroupChoices).await
+        {
+            if summary.device_trust.devices.iter().any(|device| {
+                device.device_id == device_id && device.pairing_confirmation == Some(expected)
+            }) {
+                return;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "pairing confirmation did not reach {expected:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn remove_member(engine: &Engine, device_id: &str) {
+    let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+    loop {
+        match engine
+            .execute(Operation::RemoveMember(RemoveMemberInput {
+                device_id: device_id.to_owned(),
+            }))
+            .await
+        {
+            Ok(OperationResult::DeviceTrust(_)) => return,
+            Err(error) if error.is_retryable() && tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Ok(_) => panic!("unexpected remove member result"),
+            Err(error) => panic!("remove member failed: {error}"),
+        }
+    }
 }
 
 async fn refresh_available_members(engine: &Engine) {
@@ -4189,6 +4903,71 @@ async fn query_endpoint_id(engine: &Engine, node: &str) -> [u8; 32] {
         panic!("node {node} returned an unexpected endpoint result");
     };
     endpoint_id
+}
+
+struct SessionHandoverDiagnostics {
+    network_build_count: usize,
+    session_quiesce_failure_count: usize,
+    transition_completion_failure_count: usize,
+    session_preparation_failure_count: usize,
+    session_activation_failure_count: usize,
+}
+
+impl SessionHandoverDiagnostics {
+    fn failure_count(&self, point: uc_engine::SessionHandoverFailurePoint) -> usize {
+        match point {
+            uc_engine::SessionHandoverFailurePoint::SessionQuiesce => {
+                self.session_quiesce_failure_count
+            }
+            uc_engine::SessionHandoverFailurePoint::TransitionCompletion => {
+                self.transition_completion_failure_count
+            }
+            uc_engine::SessionHandoverFailurePoint::SessionPreparation => {
+                self.session_preparation_failure_count
+            }
+            uc_engine::SessionHandoverFailurePoint::SessionActivation => {
+                self.session_activation_failure_count
+            }
+        }
+    }
+}
+
+async fn arm_session_handover_failure(
+    engine: &Engine,
+    point: uc_engine::SessionHandoverFailurePoint,
+) {
+    let result = engine
+        .execute_dev(uc_engine::DevOperation::FailNextSessionHandover { point })
+        .await
+        .expect("arm session handover failure");
+    assert_eq!(
+        result,
+        uc_engine::DevOperationResult::SessionHandoverFailureArmed
+    );
+}
+
+async fn query_session_handover_diagnostics(engine: &Engine) -> SessionHandoverDiagnostics {
+    let result = engine
+        .execute_dev(uc_engine::DevOperation::QuerySessionHandoverDiagnostics)
+        .await
+        .expect("query session handover diagnostics");
+    let uc_engine::DevOperationResult::SessionHandoverDiagnostics {
+        network_build_count,
+        session_quiesce_failure_count,
+        transition_completion_failure_count,
+        session_preparation_failure_count,
+        session_activation_failure_count,
+    } = result
+    else {
+        panic!("unexpected session handover diagnostics result");
+    };
+    SessionHandoverDiagnostics {
+        network_build_count,
+        session_quiesce_failure_count,
+        transition_completion_failure_count,
+        session_preparation_failure_count,
+        session_activation_failure_count,
+    }
 }
 
 async fn create_space(engine: &Engine, device_name: &str) -> (String, String) {
@@ -4294,6 +5073,9 @@ async fn wait_for_completed_join(
             }
             JoinSpaceStatusSummary::Rejected { reason, .. } => {
                 panic!("admission was rejected: {reason:?}")
+            }
+            JoinSpaceStatusSummary::Terminated { reason, .. } => {
+                panic!("admission was terminated locally: {reason:?}")
             }
             JoinSpaceStatusSummary::Pending { .. } => {}
         }

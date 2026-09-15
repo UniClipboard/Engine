@@ -197,6 +197,13 @@ pub enum JoinSpaceRejectionReason {
     RemovedBeforeActivation,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum JoinSpaceTerminationReason {
+    Cancelled,
+    Expired,
+    Superseded,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum JoinSpaceStatus {
     Active {
@@ -215,6 +222,10 @@ pub enum JoinSpaceStatus {
     Rejected {
         join_id: String,
         reason: JoinSpaceRejectionReason,
+    },
+    Terminated {
+        join_id: String,
+        reason: JoinSpaceTerminationReason,
     },
 }
 
@@ -2217,6 +2228,22 @@ fn map_join_space_status(result: OperationResult) -> Result<JoinSpaceStatus, Bin
                 },
             }
         }
+        uc_engine::JoinSpaceStatusSummary::Terminated { join_id, reason } => {
+            JoinSpaceStatus::Terminated {
+                join_id,
+                reason: match reason {
+                    uc_engine::JoinSpaceTerminationReasonSummary::Cancelled => {
+                        JoinSpaceTerminationReason::Cancelled
+                    }
+                    uc_engine::JoinSpaceTerminationReasonSummary::Expired => {
+                        JoinSpaceTerminationReason::Expired
+                    }
+                    uc_engine::JoinSpaceTerminationReasonSummary::Superseded => {
+                        JoinSpaceTerminationReason::Superseded
+                    }
+                },
+            }
+        }
     })
 }
 
@@ -2678,16 +2705,49 @@ mod tests {
 
     #[test]
     fn device_trust_json_keeps_complete_snapshot_fields() {
-        let json = map_device_trust_snapshot(
-            uc_engine::DeviceTrustSnapshotSummary::empty_unavailable("local-device".into()),
-        )
-        .unwrap();
-        assert!(json.contains("local_device_id"));
-        assert!(json.contains("current_change"));
-        assert!(json.contains("devices"));
-        assert!(json.contains("recovery"));
-        assert!(json.contains("allowed_actions"));
-        assert!(json.contains("blocked_reason"));
+        let mut snapshot =
+            uc_engine::DeviceTrustSnapshotSummary::empty_unavailable("local-device".into());
+        snapshot
+            .devices
+            .push(uc_engine::DeviceTrustRelationshipSummary {
+                device_id: "peer-device".into(),
+                display_name: "Peer Device".into(),
+                is_local: false,
+                reachability: uc_engine::DeviceReachabilitySummary::Offline,
+                membership: uc_engine::DeviceMembershipSummary::Active,
+                group_relationship: uc_engine::DeviceGroupRelationshipSummary::Consistent,
+                compatibility: uc_engine::DeviceCompatibilitySummary::Compatible,
+                sync_relationship: uc_engine::DeviceSyncRelationshipSummary::Usable,
+                pairing_confirmation: Some(
+                    uc_engine::PairingConfirmationSummary::AwaitingPeerConfirmation,
+                ),
+                available_actions: Vec::new(),
+                blocked_reason: None,
+            });
+        for (status, expected) in [
+            (
+                uc_engine::PairingConfirmationSummary::AwaitingPeerConfirmation,
+                "awaiting_peer_confirmation",
+            ),
+            (
+                uc_engine::PairingConfirmationSummary::Unconfirmed,
+                "unconfirmed",
+            ),
+            (
+                uc_engine::PairingConfirmationSummary::Confirmed,
+                "confirmed",
+            ),
+        ] {
+            snapshot.devices[0].pairing_confirmation = Some(status);
+            let json = map_device_trust_snapshot(snapshot.clone()).unwrap();
+            assert!(json.contains("local_device_id"));
+            assert!(json.contains("current_change"));
+            assert!(json.contains("devices"));
+            assert!(json.contains("recovery"));
+            assert!(json.contains("allowed_actions"));
+            assert!(json.contains("blocked_reason"));
+            assert!(json.contains(&format!("\"pairing_confirmation\":\"{expected}\"")));
+        }
     }
 
     #[test]
@@ -2719,6 +2779,25 @@ mod tests {
                 if joined_space.migrated_records == Some(4)
                     && joined_space.preserved_unreadable_records == Some(2)
         ));
+    }
+
+    #[test]
+    fn join_space_mapping_preserves_local_termination() {
+        let status = map_join_space_status(OperationResult::JoinSpace(
+            uc_engine::JoinSpaceStatusSummary::Terminated {
+                join_id: "join-id".into(),
+                reason: uc_engine::JoinSpaceTerminationReasonSummary::Expired,
+            },
+        ))
+        .expect("join-space result must map");
+
+        assert_eq!(
+            status,
+            JoinSpaceStatus::Terminated {
+                join_id: "join-id".into(),
+                reason: JoinSpaceTerminationReason::Expired,
+            }
+        );
     }
 
     #[test]

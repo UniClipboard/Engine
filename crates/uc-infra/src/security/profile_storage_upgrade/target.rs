@@ -62,6 +62,8 @@ const PROFILE_DATA_TABLES: &[&str] = &[
 
 const SPACE_CONTROL_TABLES: &[&str] = &[
     "encrypted_relationship",
+    "group_update_delivery",
+    "group_update_source",
     "legacy_space_bootstrap_log",
     "member_revocation_log",
     "membership_ledger_state",
@@ -76,6 +78,8 @@ const SPACE_CONTROL_TABLES: &[&str] = &[
 ];
 
 const PROFILE_COORDINATION_TABLES: &[&str] = &[
+    "admission_recovery_summary",
+    "admission_repository_record",
     "admission_repository_state",
     "legacy_upgrade_pending_join",
     "workspace_convergence_state",
@@ -650,7 +654,9 @@ mod tests {
     use diesel::connection::SimpleConnection as _;
     use diesel::RunQueryDsl as _;
 
-    use super::{ensure_tables_empty, separate_database, SPACE_CONTROL_TABLES};
+    use super::{
+        ensure_tables_empty, separate_database, PROFILE_COORDINATION_TABLES, SPACE_CONTROL_TABLES,
+    };
     use crate::db::pool::init_db_pool;
 
     #[test]
@@ -666,6 +672,47 @@ mod tests {
         .unwrap();
 
         assert!(ensure_tables_empty(&database, SPACE_CONTROL_TABLES).is_err());
+    }
+
+    #[test]
+    fn final_profile_ownership_rejects_group_update_delivery_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("profile.sqlite");
+        let pool = init_db_pool(database.to_str().unwrap()).unwrap();
+        diesel::sql_query(
+            "INSERT INTO group_update_delivery \
+             (lookup_token, space_lookup_token, encrypted_metadata, encrypted_payload) \
+             VALUES (X'01', X'02', X'03', X'04')",
+        )
+        .execute(&mut pool.get().unwrap())
+        .unwrap();
+
+        assert!(ensure_tables_empty(&database, SPACE_CONTROL_TABLES).is_err());
+    }
+
+    #[test]
+    fn final_control_ownership_accepts_group_update_delivery_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("control.sqlite");
+        let pool = init_db_pool(database.to_str().unwrap()).unwrap();
+        drop(pool);
+        let forbidden: Vec<&str> = super::PROFILE_DATA_TABLES
+            .iter()
+            .chain(PROFILE_COORDINATION_TABLES)
+            .copied()
+            .collect();
+        separate_database(&database, &forbidden).unwrap();
+        let pool = init_db_pool(database.to_str().unwrap()).unwrap();
+        diesel::sql_query(
+            "INSERT INTO group_update_delivery \
+             (lookup_token, space_lookup_token, encrypted_metadata, encrypted_payload) \
+             VALUES (X'01', X'02', X'03', X'04')",
+        )
+        .execute(&mut pool.get().unwrap())
+        .unwrap();
+        drop(pool);
+
+        ensure_tables_empty(&database, &forbidden).unwrap();
     }
 
     #[test]

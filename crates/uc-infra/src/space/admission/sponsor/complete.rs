@@ -20,6 +20,7 @@ use uc_core::membership::{
     SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SponsorCompletePreparation,
     VersionedMembershipHistory,
 };
+use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
 
 use super::candidate::SponsorCandidateStagedV1;
 
@@ -99,9 +100,12 @@ impl ActivateSponsorAdmissionPort for DefaultSponsorAdmissionActivation {
         &self,
         activated_security: &AdmissionActivatedSecurityState,
     ) -> Result<(), ActivateSponsorAdmissionError> {
-        self.activate_inner(activated_security)
-            .await
-            .map_err(ActivateSponsorAdmissionError::new)
+        observe_local_result(
+            LocalWorkStep::SponsorActivate,
+            self.activate_inner(activated_security),
+        )
+        .await
+        .map_err(ActivateSponsorAdmissionError::new)
     }
 }
 
@@ -246,6 +250,7 @@ impl DefaultSponsorAdmissionActivation {
             .compare_and_commit(MembershipLedgerMutation {
                 expected_revision,
                 expected_history_digest,
+                device_trust_changed: true,
                 replacement: ledger,
             })
             .await
@@ -266,100 +271,112 @@ impl PrepareSponsorCompletePort for DefaultSponsorCompletePreparation {
         preparation: SponsorCompletePreparation<'_>,
         applied: &SpaceAdmissionEnvelopeV1,
     ) -> Result<PreparedSponsorComplete, PrepareSponsorCompleteError> {
-        let commit = match preparation.commit_reply().body() {
-            SpaceAdmissionBodyV1::Commit(commit) => commit,
-            _ => return Err(invalid("the saved Sponsor message is not Commit")),
-        };
-        let receipt = match applied.body() {
-            SpaceAdmissionBodyV1::Applied(applied) => applied.activation_receipt(),
-            _ => return Err(invalid("the Sponsor Complete input is not Applied")),
-        };
-        if applied.header().admission_id() != admission_id
-            || applied.header().predecessor_message_id()
-                != Some(preparation.commit_reply().header().message_id())
-        {
-            return Err(invalid("the Applied envelope is not bound to Commit"));
-        }
-        let candidate = commit.exact_candidate();
-        if receipt.attempt_id != *admission_id.as_bytes()
-            || receipt.event_id != candidate.candidate_event().event_id()
-            || receipt.installed_security_commitment_id
-                != candidate.security_commitment().security_commitment_id
-        {
-            return Err(invalid("the Applied receipt differs from Commit"));
-        }
-        let mut history = VersionedMembershipHistory::decode_persisted_v2(
-            preparation.committed_history().as_bytes(),
-            self.history_verifier.as_ref(),
-        )
-        .map_err(|error| PrepareSponsorCompleteError::invalid(anyhow::Error::new(error)))?;
-        history
-            .verify_and_record_activation_receipt(receipt.clone(), self.history_verifier.as_ref())
+        observe_local_result(LocalWorkStep::SponsorPrepareComplete, async {
+            let commit = match preparation.commit_reply().body() {
+                SpaceAdmissionBodyV1::Commit(commit) => commit,
+                _ => return Err(invalid("the saved Sponsor message is not Commit")),
+            };
+            let receipt = match applied.body() {
+                SpaceAdmissionBodyV1::Applied(applied) => applied.activation_receipt(),
+                _ => return Err(invalid("the Sponsor Complete input is not Applied")),
+            };
+            if applied.header().admission_id() != admission_id
+                || applied.header().predecessor_message_id()
+                    != Some(preparation.commit_reply().header().message_id())
+            {
+                return Err(invalid("the Applied envelope is not bound to Commit"));
+            }
+            let candidate = commit.exact_candidate();
+            if receipt.attempt_id != *admission_id.as_bytes()
+                || receipt.event_id != candidate.candidate_event().event_id()
+                || receipt.installed_security_commitment_id
+                    != candidate.security_commitment().security_commitment_id
+            {
+                return Err(invalid("the Applied receipt differs from Commit"));
+            }
+            let mut history = VersionedMembershipHistory::decode_persisted_v2(
+                preparation.committed_history().as_bytes(),
+                self.history_verifier.as_ref(),
+            )
             .map_err(|error| PrepareSponsorCompleteError::invalid(anyhow::Error::new(error)))?;
-        let committed_history = history
-            .encode_persisted_v2()
-            .map_err(|error| PrepareSponsorCompleteError::unavailable(anyhow::Error::new(error)))?;
-        let completed_position = history
-            .current_position()
-            .map_err(|error| PrepareSponsorCompleteError::invalid(anyhow::Error::new(error)))?;
-
-        let staged: SponsorCandidateStagedV1 =
-            postcard::from_bytes(preparation.sealed_security().as_bytes())
+            history
+                .verify_and_record_activation_receipt(
+                    receipt.clone(),
+                    self.history_verifier.as_ref(),
+                )
                 .map_err(|error| PrepareSponsorCompleteError::invalid(anyhow::Error::new(error)))?;
-        if staged.format_version != 1 {
-            return Err(invalid("the sealed Sponsor security format is unsupported"));
-        }
-        let member_instance = self
-            .signatures
-            .current_member_instance(&self.local_device_id)
-            .await
-            .map_err(|error| PrepareSponsorCompleteError::unavailable(anyhow::Error::new(error)))?;
-        let credential = self
-            .signatures
-            .current_membership_credential(&self.local_device_id)
-            .await
-            .map_err(|error| PrepareSponsorCompleteError::unavailable(anyhow::Error::new(error)))?;
-        let mut completion = AdmissionCompletionV1::new(
-            *admission_id.as_bytes(),
-            receipt.event_id,
-            activation_receipt_digest(receipt),
-            receipt.installed_security_commitment_id,
-            member_instance,
-            credential.credential_id,
-            completed_position,
-            Vec::new(),
-        );
-        completion.signature = self
-            .signatures
-            .sign_current_member_payload(&completion.signing_payload())
-            .await
-            .map_err(|error| PrepareSponsorCompleteError::unavailable(anyhow::Error::new(error)))?;
-        let complete_reply = SpaceAdmissionEnvelopeV1::new(
-            admission_id,
-            uc_core::membership::AdmissionRole::Sponsor,
-            2,
-            mint_message_id(),
-            Some(applied.header().message_id()),
-            SpaceAdmissionBodyV1::Complete(AdmissionCompleteV1::new(completion)),
-        )
-        .map_err(|error| PrepareSponsorCompleteError::invalid(anyhow::Error::new(error)))?;
-        let activated_security = AdmissionActivatedSecurityState::from_bytes(
-            postcard::to_stdvec(&SponsorActivatedSecurityV1 {
-                format_version: SPONSOR_ACTIVATED_SECURITY_FORMAT_V1,
-                space_id: &candidate.security_commitment().lineage_id,
-                staged_state: &staged.staged_state,
-                commit: candidate.mls_commit().as_bytes(),
-                expected_commitment: candidate.security_commitment(),
-                committed_history: &committed_history,
-                security_commitment_id: receipt.installed_security_commitment_id,
-            })
-            .map_err(|error| PrepareSponsorCompleteError::unavailable(anyhow::Error::new(error)))?,
-        )
-        .map_err(|error| PrepareSponsorCompleteError::invalid(anyhow::Error::new(error)))?;
-        Ok(PreparedSponsorComplete::new(
-            activated_security,
-            complete_reply,
-        ))
+            let committed_history = history.encode_persisted_v2().map_err(|error| {
+                PrepareSponsorCompleteError::unavailable(anyhow::Error::new(error))
+            })?;
+            let completed_position = history
+                .current_position()
+                .map_err(|error| PrepareSponsorCompleteError::invalid(anyhow::Error::new(error)))?;
+
+            let staged: SponsorCandidateStagedV1 = postcard::from_bytes(
+                preparation.sealed_security().as_bytes(),
+            )
+            .map_err(|error| PrepareSponsorCompleteError::invalid(anyhow::Error::new(error)))?;
+            if staged.format_version != 1 {
+                return Err(invalid("the sealed Sponsor security format is unsupported"));
+            }
+            let member_instance = self
+                .signatures
+                .current_member_instance(&self.local_device_id)
+                .await
+                .map_err(|error| {
+                    PrepareSponsorCompleteError::unavailable(anyhow::Error::new(error))
+                })?;
+            let credential = self
+                .signatures
+                .current_membership_credential(&self.local_device_id)
+                .await
+                .map_err(|error| {
+                    PrepareSponsorCompleteError::unavailable(anyhow::Error::new(error))
+                })?;
+            let mut completion = AdmissionCompletionV1::new(
+                *admission_id.as_bytes(),
+                receipt.event_id,
+                activation_receipt_digest(receipt),
+                receipt.installed_security_commitment_id,
+                member_instance,
+                credential.credential_id,
+                completed_position,
+                Vec::new(),
+            );
+            completion.signature = self
+                .signatures
+                .sign_current_member_payload(&completion.signing_payload())
+                .await
+                .map_err(|error| {
+                    PrepareSponsorCompleteError::unavailable(anyhow::Error::new(error))
+                })?;
+            let complete_reply = SpaceAdmissionEnvelopeV1::reply_to(
+                applied,
+                uc_core::membership::AdmissionRole::Sponsor,
+                2,
+                mint_message_id(),
+                SpaceAdmissionBodyV1::Complete(AdmissionCompleteV1::new(completion)),
+            )
+            .map_err(|error| PrepareSponsorCompleteError::invalid(anyhow::Error::new(error)))?;
+            let activated_security = AdmissionActivatedSecurityState::from_bytes(
+                postcard::to_stdvec(&SponsorActivatedSecurityV1 {
+                    format_version: SPONSOR_ACTIVATED_SECURITY_FORMAT_V1,
+                    space_id: &candidate.security_commitment().lineage_id,
+                    staged_state: &staged.staged_state,
+                    commit: candidate.mls_commit().as_bytes(),
+                    expected_commitment: candidate.security_commitment(),
+                    committed_history: &committed_history,
+                    security_commitment_id: receipt.installed_security_commitment_id,
+                })
+                .map_err(|error| {
+                    PrepareSponsorCompleteError::unavailable(anyhow::Error::new(error))
+                })?,
+            )
+            .map_err(|error| PrepareSponsorCompleteError::invalid(anyhow::Error::new(error)))?;
+            let prepared = PreparedSponsorComplete::new(activated_security, complete_reply);
+            Ok(prepared)
+        })
+        .await
     }
 }
 

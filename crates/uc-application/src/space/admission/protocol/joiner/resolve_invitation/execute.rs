@@ -2,6 +2,9 @@ use uc_core::membership::{
     AdmissionRetryState, PendingAdmissionExchange, SpaceAdmissionMessageKind,
 };
 use uc_core::membership::{JoinerAdmission, JoinerInvitationResolution};
+use uc_observability_contract::diagnostics::{
+    DiagnosticErrorType, SpaceAdmissionObservationOutcome,
+};
 
 use crate::space::admission::protocol::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryReport, AdmissionRecoveryService,
@@ -48,6 +51,30 @@ impl JoinerAdmissionService {
                 let resolved = self.resolve_invitation.resolve_once(&short_code).await;
                 let resolution_succeeded = resolved.is_ok();
                 let (aggregate, token) = committed.into_parts();
+                let now_ms = recovery.clock.now_ms();
+                if aggregate.is_expired_at(now_ms) == Some(true) {
+                    let observation_material = *aggregate.admission_id().as_bytes();
+                    let transition = match aggregate.terminate_if_expired(now_ms) {
+                        Ok(Some(transition)) => transition,
+                        Ok(None) | Err(_) => {
+                            report.recovery_required_count += 1;
+                            return;
+                        }
+                    };
+                    match recovery.commit_recovery_and_notify(token, transition).await {
+                        Ok(_) => {
+                            report.terminated_count += 1;
+                            self.observations.finish(
+                                observation_material,
+                                SpaceAdmissionObservationOutcome::Failed(
+                                    DiagnosticErrorType::Timeout,
+                                ),
+                            );
+                        }
+                        Err(error) => recovery.record_state_error(report, error),
+                    }
+                    return;
+                }
                 let transition = match resolved {
                     Ok(full_invitation) => aggregate.save_resolved_invitation(full_invitation),
                     Err(_) => aggregate.reject_started_invitation_resolution(),

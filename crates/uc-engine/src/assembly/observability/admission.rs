@@ -189,8 +189,9 @@ mod tests {
             AdmissionChannelPeerId::from_bytes([2; 32]).expect("remote peer"),
         )
         .expect("distinct peers");
-        let message = AuthenticatedSpaceAdmissionMessage::new(binding, envelope, [5; 32], None)
-            .expect("authenticated message");
+        let message =
+            AuthenticatedSpaceAdmissionMessage::new(binding, envelope, [5; 32], None, None)
+                .expect("authenticated message");
 
         let result = endpoint
             .handle(message)

@@ -170,6 +170,22 @@ pub trait RevocationRepositoryPort: Send + Sync {
         space_id: &SpaceId,
     ) -> Result<Option<SpaceKeyMaterial>, KeyEpochError>;
 
+    /// 按到期时间读取投递任务；恢复机会只唤醒匹配设备，不能释放拒绝状态。
+    async fn due_group_updates(
+        &self,
+        space_id: &SpaceId,
+        now_ms: i64,
+        online_peer: Option<DeviceId>,
+    ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError>;
+
+    /// 记录发送失败，不更改安全事实或确认结果。
+    async fn record_group_update_failures(
+        &self,
+        space_id: &SpaceId,
+        failures: &[(String, GroupUpdateDispatchError)],
+        now_ms: i64,
+    ) -> Result<usize, KeyEpochError>;
+
     async fn begin_revocation(
         &self,
         prepared: &RevocationRecord,
@@ -272,21 +288,23 @@ pub trait GroupRevocationPort: Send + Sync {
         now_ms: i64,
     ) -> Result<Vec<GroupRevocationResult>, KeyEpochError>;
 
-    async fn pending_space_group_updates(&self) -> Result<Vec<PendingGroupUpdate>, KeyEpochError>;
+    async fn due_space_group_updates(
+        &self,
+        now_ms: i64,
+        online_peer: Option<DeviceId>,
+    ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError>;
+
+    async fn record_space_group_update_failures(
+        &self,
+        failures: &[(String, GroupUpdateDispatchError)],
+        now_ms: i64,
+    ) -> Result<usize, KeyEpochError>;
 
     async fn acknowledge_space_group_update(
         &self,
         update_id: &str,
         now_ms: i64,
     ) -> Result<bool, KeyEpochError>;
-
-    async fn defer_space_group_update(
-        &self,
-        _update_id: &str,
-        _now_ms: i64,
-    ) -> Result<bool, KeyEpochError> {
-        Ok(false)
-    }
 }
 
 #[async_trait]

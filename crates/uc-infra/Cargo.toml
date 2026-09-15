@@ -12,7 +12,7 @@ lan-compat = ["dep:network-interface"]
 # Allows test harnesses to bind sponsor and joiner endpoints in one process.
 # Production builds must not enable it: the runtime lease must reject a second
 # live node. See src/network/iroh/node.rs for the production lifecycle guard.
-test-util = []
+test-util = ["dep:tempfile"]
 
 [dependencies]
 # ===== Workspace crates =====
@@ -23,7 +23,7 @@ uc-application = { path = "../uc-application" }
 uc-observability-contract = { path = "../uc-observability-contract" }
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 
 # Time handling
@@ -154,6 +154,7 @@ network-interface = { version = "2.0", optional = true }
 # inside a `.ucbundle`. Plain (uncompressed) tar — no compression layer, so the
 # AEAD ciphertext does not leak archive structure through compression ratios.
 tar = "0.4"
+tempfile = { version = "3", optional = true }
 
 [dependencies.uuid]
 version = "1.10.0"
@@ -173,6 +174,7 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [dev-dependencies]
+criterion = { version = "0.8", features = ["async_tokio"] }
 uc-observability-runtime = { path = "../uc-observability-runtime" }
 tokio = { version = "1", features = ["full", "test-util"] }
 tempfile = "3"
@@ -183,6 +185,11 @@ static_assertions = "1"
 opentelemetry = { version = "=0.32.0", default-features = false, features = ["trace", "logs"] }
 opentelemetry-appender-tracing = { version = "=0.32.0", default-features = false }
 opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["trace", "logs", "testing"] }
+
+[[bench]]
+name = "admission_repository"
+harness = false
+required-features = ["test-util"]
 
 [lints]
 workspace = true

@@ -6,9 +6,10 @@ use base64::Engine as _;
 use tracing::{error, info};
 use uc_application::facade::{
     AppFacade, ContentTypesPatch as AppContentTypesPatch, CurrentJoinStatus, DeviceTrustMembership,
-    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, MemberProtectionStatusView,
-    MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch, MemberSyncPreferencesView,
-    RemoveSpaceMemberError, RosterError, SpaceProtectionModeView, SpaceProtectionView,
+    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, JoinSpaceTerminationReason,
+    MemberProtectionStatusView, MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch,
+    MemberSyncPreferencesView, PairingConfirmationStatus, RemoveSpaceMemberError, RosterError,
+    SpaceProtectionModeView, SpaceProtectionView,
 };
 #[cfg(test)]
 use uc_core::membership::WorkspaceSnapshot;
@@ -20,11 +21,12 @@ use crate::{
     DeviceSummary, DeviceSyncRelationshipSummary, DeviceTrustChangeSummary,
     DeviceTrustChoiceSummary, DeviceTrustImpactSummary, DeviceTrustRecoverySummary,
     DeviceTrustRelationshipSummary, DeviceTrustSnapshotSummary, EngineError, EngineErrorCategory,
-    JoinSpaceRejectionReasonSummary, JoinSpaceStatusSummary, JoinedSpaceSummary,
-    MemberProtectionStatusSummary, MemberProtectionSummary, MemberSyncPreferencesPatch,
-    MemberSyncPreferencesSummary, OperationResult, PendingInboundMemberSummary,
-    QueryMemberSyncPreferencesInput, RemoveMemberInput, SpaceProtectionModeSummary,
-    SpaceProtectionSummary, UpdateMemberSyncPreferencesInput,
+    JoinSpaceRejectionReasonSummary, JoinSpaceStatusSummary, JoinSpaceTerminationReasonSummary,
+    JoinedSpaceSummary, MemberProtectionStatusSummary, MemberProtectionSummary,
+    MemberSyncPreferencesPatch, MemberSyncPreferencesSummary, OperationResult,
+    PairingConfirmationSummary, PendingInboundMemberSummary, QueryMemberSyncPreferencesInput,
+    RemoveMemberInput, SpaceProtectionModeSummary, SpaceProtectionSummary,
+    UpdateMemberSyncPreferencesInput,
 };
 #[cfg(test)]
 use crate::{
@@ -304,6 +306,15 @@ pub(crate) fn device_trust_snapshot(snapshot: DeviceTrustStatus) -> DeviceTrustS
                     _ => DeviceCompatibilitySummary::Compatible,
                 },
                 sync_relationship: device_sync_relationship(device.sync_state, device.is_local),
+                pairing_confirmation: device.pairing_confirmation.map(|status| match status {
+                    PairingConfirmationStatus::AwaitingPeerConfirmation => {
+                        PairingConfirmationSummary::AwaitingPeerConfirmation
+                    }
+                    PairingConfirmationStatus::Unconfirmed => {
+                        PairingConfirmationSummary::Unconfirmed
+                    }
+                    PairingConfirmationStatus::Confirmed => PairingConfirmationSummary::Confirmed,
+                }),
                 available_actions: Vec::new(),
                 blocked_reason: None,
             })
@@ -416,6 +427,18 @@ pub(crate) fn join_space_status(status: CurrentJoinStatus) -> JoinSpaceStatusSum
                 }
                 uc_core::membership::SpaceAdmissionRejectionReason::RemovedBeforeActivation => {
                     JoinSpaceRejectionReasonSummary::RemovedBeforeActivation
+                }
+            },
+        },
+        CurrentJoinStatus::Terminated { join_id, reason } => JoinSpaceStatusSummary::Terminated {
+            join_id: encode_join_id(join_id),
+            reason: match reason {
+                JoinSpaceTerminationReason::Cancelled => {
+                    JoinSpaceTerminationReasonSummary::Cancelled
+                }
+                JoinSpaceTerminationReason::Expired => JoinSpaceTerminationReasonSummary::Expired,
+                JoinSpaceTerminationReason::Superseded => {
+                    JoinSpaceTerminationReasonSummary::Superseded
                 }
             },
         },
@@ -714,6 +737,7 @@ mod tests {
                     } else {
                         DeviceTrustSyncState::Usable
                     },
+                    pairing_confirmation: None,
                 })
                 .collect(),
         }
@@ -765,6 +789,49 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn terminated_join_status_is_not_reported_as_pending_or_rejected() {
+        let summary = join_space_status(CurrentJoinStatus::Terminated {
+            join_id: [0x41; 16],
+            reason: JoinSpaceTerminationReason::Expired,
+        });
+
+        assert_eq!(
+            summary,
+            JoinSpaceStatusSummary::Terminated {
+                join_id: "QUFBQUFBQUFBQUFBQUFBQQ".to_owned(),
+                reason: JoinSpaceTerminationReasonSummary::Expired,
+            }
+        );
+    }
+
+    #[test]
+    fn pairing_confirmation_is_presentation_only() {
+        let mut status = handoff_pending_removal(false);
+        let device = status
+            .devices
+            .iter_mut()
+            .find(|device| device.device_id.as_str() == "a")
+            .expect("fixture device");
+        let original_sync_state = device.sync_state;
+        device.pairing_confirmation = Some(PairingConfirmationStatus::Unconfirmed);
+
+        let summary = device_trust_snapshot(status);
+        let device = summary
+            .devices
+            .iter()
+            .find(|device| device.device_id == "a")
+            .expect("mapped device");
+        assert_eq!(
+            device.pairing_confirmation,
+            Some(PairingConfirmationSummary::Unconfirmed)
+        );
+        assert_eq!(
+            device.sync_relationship,
+            device_sync_relationship(original_sync_state, false)
+        );
     }
 
     #[test]

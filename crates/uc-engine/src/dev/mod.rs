@@ -147,6 +147,14 @@ fn current_os() -> OperatingSystem {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionHandoverFailurePoint {
+    SessionQuiesce,
+    TransitionCompletion,
+    SessionPreparation,
+    SessionActivation,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub enum DevOperation {
     SeedText {
@@ -167,6 +175,10 @@ pub enum DevOperation {
         entry_id: String,
     },
     QueryNetworkEndpointId,
+    FailNextSessionHandover {
+        point: SessionHandoverFailurePoint,
+    },
+    QuerySessionHandoverDiagnostics,
     SetNetworkPartition {
         blocked_endpoint_ids: Vec<[u8; 32]>,
     },
@@ -192,6 +204,8 @@ impl fmt::Debug for DevOperation {
             Self::PublishBlob { .. } => "publish_blob",
             Self::FetchBlob { .. } => "fetch_blob",
             Self::QueryNetworkEndpointId => "query_network_endpoint_id",
+            Self::FailNextSessionHandover { .. } => "fail_next_session_handover",
+            Self::QuerySessionHandoverDiagnostics => "query_session_handover_diagnostics",
             Self::SetNetworkPartition { .. } => "set_network_partition",
             Self::RejectNewConnections { .. } => "reject_new_connections",
             Self::QueryRejectedConnectionCount => "query_rejected_connection_count",
@@ -321,6 +335,14 @@ pub enum DevOperationResult {
         digest: Vec<u8>,
     },
     NetworkEndpointId([u8; 32]),
+    SessionHandoverFailureArmed,
+    SessionHandoverDiagnostics {
+        network_build_count: usize,
+        session_quiesce_failure_count: usize,
+        transition_completion_failure_count: usize,
+        session_preparation_failure_count: usize,
+        session_activation_failure_count: usize,
+    },
     ConnectivityOpportunitiesUpdated,
     PeerReachabilityConnections {
         incoming: usize,
@@ -346,6 +368,8 @@ impl fmt::Debug for DevOperationResult {
             Self::BlobPublished(_) => "blob_published",
             Self::BlobFetched { .. } => "blob_fetched",
             Self::NetworkEndpointId(_) => "network_endpoint_id",
+            Self::SessionHandoverFailureArmed => "session_handover_failure_armed",
+            Self::SessionHandoverDiagnostics { .. } => "session_handover_diagnostics",
             Self::RejectedConnectionCount { .. } => "rejected_connection_count",
             Self::PeerReachabilityConnections { .. } => "peer_reachability_connections",
             Self::ConnectivityOpportunitiesUpdated => "connectivity_opportunities_updated",

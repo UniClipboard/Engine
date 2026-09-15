@@ -13,12 +13,13 @@ use uc_core::membership::{
     AdmissionChangeFacts, AdmissionEncryptedPasswordEquivalent, AdmissionIdentitySignature,
     AdmissionJoinRequestV1, AdmissionJoinerPrivateState, AdmissionKeyPackage, AdmissionMessageId,
     AdmissionRecoveryPublicKey, AdmissionRole, JoinId, MembershipCredential, SpaceAdmissionBodyV1,
-    SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionRoute, UnreadableHistoryPolicy,
-    ED25519_SIGNATURE_ALGORITHM_V1,
+    SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionProtocolVersion, SpaceAdmissionRoute,
+    UnreadableHistoryPolicy, ED25519_SIGNATURE_ALGORITHM_V1,
 };
 use uc_core::pairing::InvitationCode;
 use uc_core::ports::SettingsPort;
 use uc_core::security::IdentityFingerprint;
+use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
 use x25519_dalek::{PublicKey as RecoveryPublicKey, StaticSecret as RecoverySecret};
 use zeroize::Zeroizing;
 
@@ -69,118 +70,128 @@ impl DefaultJoinerStartMaterial {
         admission_id: SpaceAdmissionId,
         join_id: JoinId,
     ) -> Result<JoinerStartMaterial, JoinerStartMaterialError> {
-        let decoded = decode_invitation_entry(
-            input.invitation_code.as_str(),
-            chrono::Utc::now().timestamp_millis(),
-        )
-        .map_err(|_| JoinerStartMaterialError::InvalidInvitation)?
-        .ok_or(JoinerStartMaterialError::InvalidInvitation)?;
-
-        let settings = self.settings.load().await.map_err(|error| {
-            JoinerStartMaterialError::unavailable(
-                error.context("load the local device name for Space admission"),
+        observe_local_result(LocalWorkStep::JoinerPrepareStart, async {
+            let decoded = decode_invitation_entry(
+                input.invitation_code.as_str(),
+                chrono::Utc::now().timestamp_millis(),
             )
-        })?;
-        let device_name = settings
-            .general
-            .device_name
-            .filter(|name| !name.trim().is_empty())
-            .ok_or_else(|| {
-                JoinerStartMaterialError::unavailable(anyhow::anyhow!(
-                    "the local device name is unavailable for Space admission"
-                ))
+            .map_err(|_| JoinerStartMaterialError::InvalidInvitation)?
+            .ok_or(JoinerStartMaterialError::InvalidInvitation)?;
+
+            let settings = self.settings.load().await.map_err(|error| {
+                JoinerStartMaterialError::unavailable(
+                    error.context("load the local device name for Space admission"),
+                )
             })?;
-        let pending = MlsGroupEngine::prepare_join(self.device_id.as_str().as_bytes())
+            let device_name = settings
+                .general
+                .device_name
+                .filter(|name| !name.trim().is_empty())
+                .ok_or_else(|| {
+                    JoinerStartMaterialError::unavailable(anyhow::anyhow!(
+                        "the local device name is unavailable for Space admission"
+                    ))
+                })?;
+            let pending = MlsGroupEngine::prepare_join(self.device_id.as_str().as_bytes())
+                .map_err(|error| {
+                    JoinerStartMaterialError::unavailable(anyhow::Error::new(error))
+                })?;
+            let signing_public_key = MlsGroupEngine::signing_public_key(&pending.client_state)
+                .map_err(|error| {
+                    JoinerStartMaterialError::unavailable(anyhow::Error::new(error))
+                })?;
+
+            let mut recovery_secret_bytes = Zeroizing::new([0u8; 32]);
+            rand::rng().fill_bytes(recovery_secret_bytes.as_mut());
+            let recovery_secret = RecoverySecret::from(*recovery_secret_bytes);
+            let recovery_public_bytes = RecoveryPublicKey::from(&recovery_secret).to_bytes();
+            let recovery_public_key = AdmissionRecoveryPublicKey::from_bytes(recovery_public_bytes)
+                .ok_or_else(|| {
+                    JoinerStartMaterialError::unavailable(anyhow::anyhow!(
+                        "generated recovery public key is invalid"
+                    ))
+                })?;
+
+            let policy = if input.preserve_unreadable_history {
+                UnreadableHistoryPolicy::Preserve
+            } else {
+                UnreadableHistoryPolicy::Discard
+            };
+            let credential =
+                MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, signing_public_key);
+            let mut identity_facts = AdmissionChangeFacts {
+                member_instance: credential.member_instance_id(&self.device_id),
+                device_id: self.device_id.clone(),
+                device_name,
+                identity_fingerprint: self.identity_fingerprint.clone(),
+                transport_public_key: self.transport_public_key.clone(),
+                transport_address_blob: self.transport_address_blob.clone(),
+                identity_signature: Vec::new(),
+            };
+            let identity_signature = MlsGroupEngine::sign_pending_member_payload(
+                &pending.client_state,
+                &identity_facts.signing_payload(),
+            )
             .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
-        let signing_public_key = MlsGroupEngine::signing_public_key(&pending.client_state)
+            identity_facts.identity_signature = identity_signature.clone();
+
+            let request = AdmissionJoinRequestV1::new(
+                decoded.invitation_id(),
+                self.device_id.clone(),
+                identity_facts,
+                credential,
+                AdmissionKeyPackage::from_bytes(pending.key_package.clone()).map_err(|error| {
+                    JoinerStartMaterialError::unavailable(anyhow::Error::new(error))
+                })?,
+                recovery_public_key,
+                AdmissionIdentitySignature::from_bytes(identity_signature).map_err(|error| {
+                    JoinerStartMaterialError::unavailable(anyhow::Error::new(error))
+                })?,
+                policy,
+            )
+            .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
+            let join_request = SpaceAdmissionEnvelopeV1::new_with_version(
+                SpaceAdmissionProtocolVersion::V2,
+                admission_id,
+                AdmissionRole::Joiner,
+                0,
+                mint_message_id(),
+                None,
+                SpaceAdmissionBodyV1::JoinRequest(request),
+            )
             .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
 
-        let mut recovery_secret_bytes = Zeroizing::new([0u8; 32]);
-        rand::rng().fill_bytes(recovery_secret_bytes.as_mut());
-        let recovery_secret = RecoverySecret::from(*recovery_secret_bytes);
-        let recovery_public_bytes = RecoveryPublicKey::from(&recovery_secret).to_bytes();
-        let recovery_public_key = AdmissionRecoveryPublicKey::from_bytes(recovery_public_bytes)
-            .ok_or_else(|| {
-                JoinerStartMaterialError::unavailable(anyhow::anyhow!(
-                    "generated recovery public key is invalid"
-                ))
-            })?;
+            let private_state = postcard::to_stdvec(&JoinerPrivateStateV1 {
+                format_version: JOINER_PRIVATE_STATE_FORMAT_V2,
+                mls_state: pending.client_state.as_bytes(),
+                recovery_secret: &recovery_secret_bytes,
+                passphrase: input.passphrase.expose().as_bytes(),
+            })
+            .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
+            let private_state =
+                AdmissionJoinerPrivateState::from_bytes(private_state).map_err(|error| {
+                    JoinerStartMaterialError::unavailable(anyhow::Error::new(error))
+                })?;
 
-        let policy = if input.preserve_unreadable_history {
-            UnreadableHistoryPolicy::Preserve
-        } else {
-            UnreadableHistoryPolicy::Discard
-        };
-        let credential =
-            MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, signing_public_key);
-        let mut identity_facts = AdmissionChangeFacts {
-            member_instance: credential.member_instance_id(&self.device_id),
-            device_id: self.device_id.clone(),
-            device_name,
-            identity_fingerprint: self.identity_fingerprint.clone(),
-            transport_public_key: self.transport_public_key.clone(),
-            transport_address_blob: self.transport_address_blob.clone(),
-            identity_signature: Vec::new(),
-        };
-        let identity_signature = MlsGroupEngine::sign_pending_member_payload(
-            &pending.client_state,
-            &identity_facts.signing_payload(),
-        )
-        .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
-        identity_facts.identity_signature = identity_signature.clone();
+            // OPAQUE already binds the transcript to the invitation id. The
+            // password input must remain the same value used by the Sponsor's
+            // Space-scoped registration created during initialize/unlock.
+            let password_equivalent = AdmissionEncryptedPasswordEquivalent::from_bytes(
+                input.passphrase.expose().as_bytes().to_vec(),
+            )
+            .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
+            let route = preserve_admission_route(decoded.route())?;
 
-        let request = AdmissionJoinRequestV1::new(
-            decoded.invitation_id(),
-            self.device_id.clone(),
-            identity_facts,
-            credential,
-            AdmissionKeyPackage::from_bytes(pending.key_package.clone()).map_err(|error| {
-                JoinerStartMaterialError::unavailable(anyhow::Error::new(error))
-            })?,
-            recovery_public_key,
-            AdmissionIdentitySignature::from_bytes(identity_signature).map_err(|error| {
-                JoinerStartMaterialError::unavailable(anyhow::Error::new(error))
-            })?,
-            policy,
-        )
-        .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
-        let join_request = SpaceAdmissionEnvelopeV1::new(
-            admission_id,
-            AdmissionRole::Joiner,
-            0,
-            mint_message_id(),
-            None,
-            SpaceAdmissionBodyV1::JoinRequest(request),
-        )
-        .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
-
-        let private_state = postcard::to_stdvec(&JoinerPrivateStateV1 {
-            format_version: JOINER_PRIVATE_STATE_FORMAT_V2,
-            mls_state: pending.client_state.as_bytes(),
-            recovery_secret: &recovery_secret_bytes,
-            passphrase: input.passphrase.expose().as_bytes(),
+            Ok(JoinerStartMaterial::new(
+                admission_id,
+                join_id,
+                route,
+                join_request,
+                private_state,
+                password_equivalent,
+            ))
         })
-        .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
-        let private_state = AdmissionJoinerPrivateState::from_bytes(private_state)
-            .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
-
-        // OPAQUE already binds the transcript to the invitation id. The
-        // password input must remain the same value used by the Sponsor's
-        // Space-scoped registration created during initialize/unlock.
-        let password_equivalent = AdmissionEncryptedPasswordEquivalent::from_bytes(
-            input.passphrase.expose().as_bytes().to_vec(),
-        )
-        .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
-        let route = preserve_admission_route(decoded.route())?;
-
-        Ok(JoinerStartMaterial::new(
-            admission_id,
-            join_id,
-            route,
-            join_request,
-            private_state,
-            password_equivalent,
-        ))
+        .await
     }
 }
 

@@ -1,19 +1,34 @@
 pub(super) mod codec;
 mod persisted;
+mod recovery_index;
 pub(super) mod token;
 
-use std::sync::Arc;
+#[cfg(feature = "test-util")]
+mod benchmark;
+
+#[cfg(test)]
+mod tests;
+
+use std::sync::{Arc, Mutex};
 
 use crate::db::ports::DbExecutor;
 use crate::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
 use uc_application::deps::LoadMembershipLedgerPort;
 use uc_core::membership::{AdmissionContinuationCredential, SpaceAdmissionId};
 
+use codec::RepositoryReadCache;
+
+#[cfg(feature = "test-util")]
+pub use benchmark::AdmissionRepositoryBenchmark;
+
 pub struct SqliteSpaceAdmissionState<E> {
     pub(super) executor: E,
     pub(super) keys: Arc<AdmissionKeyManager>,
     pub(super) manifests: Arc<ActiveSpaceGenerationManifestStore>,
     pub(super) membership: Arc<dyn LoadMembershipLedgerPort>,
+    read_cache: Mutex<Option<RepositoryReadCache>>,
+    #[cfg(test)]
+    record_reads: std::sync::atomic::AtomicUsize,
 }
 
 impl<E> SqliteSpaceAdmissionState<E> {
@@ -28,6 +43,9 @@ impl<E> SqliteSpaceAdmissionState<E> {
             keys,
             manifests,
             membership,
+            read_cache: Mutex::new(None),
+            #[cfg(test)]
+            record_reads: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -42,6 +60,12 @@ pub(super) enum SpaceAdmissionStateStoreError {
     Conflict,
     #[error("space admission state storage is unavailable")]
     Unavailable,
+}
+
+impl From<diesel::result::Error> for SpaceAdmissionStateStoreError {
+    fn from(_error: diesel::result::Error) -> Self {
+        Self::Unavailable
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

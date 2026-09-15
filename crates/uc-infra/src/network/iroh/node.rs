@@ -13,8 +13,8 @@
 //! [`install_clipboard`]; Slice 3 will add `install_blobs` on the same
 //! builder.
 //!
-//! [`install_peer_reachability`]: IrohNodeBuilder::install_peer_reachability
-//! [`install_clipboard`]: IrohNodeBuilder::install_clipboard
+//! [`install_peer_reachability`]: IrohSessionBuilder::install_peer_reachability
+//! [`install_clipboard`]: IrohSessionBuilder::install_clipboard
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -25,6 +25,10 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use uc_application::deps::ClipboardReceiverPort;
 
 use super::protocol_router::ProtocolRouterBuilder;
+use super::session_generation::{
+    SessionProtocolGenerationHandle, SessionProtocolHandlers, SessionProtocolHandlersBuilder,
+    SessionProtocolRegistry, SessionProtocolRegistryError,
+};
 use iroh::address_lookup::AddrFilter;
 use iroh::endpoint::{presets, QuicTransportConfig, VarInt};
 use iroh::protocol::Router;
@@ -101,7 +105,7 @@ use super::transfer_progress_adapter::{
     InboundProgressEvent, IrohTransferProgressAdapter, TRANSFER_PROGRESS_ALPN,
 };
 
-/// 邀请发布与解析端口，由 [`IrohNodeBuilder::install_pairing_invitation`] 构造。
+/// 邀请发布与解析端口，由 [`IrohSessionBuilder::install_pairing_invitation`] 构造。
 ///
 /// resolver 只解析短码或完整邀请；`invitation`、`invitation_addresses` 和
 /// `invitation_by_address` 是同一个 rendezvous HTTP adapter 的三个端口视图。
@@ -116,7 +120,7 @@ pub struct PairingInvitationHandlers {
     pub invitation_by_address: Arc<dyn PairingInvitationByAddressPort>,
 }
 
-/// The two clipboard ports produced by [`IrohNodeBuilder::install_clipboard`].
+/// The two clipboard ports produced by [`IrohSessionBuilder::install_clipboard`].
 ///
 /// `dispatch` opens a fresh bi-stream per message; `receiver` exposes the
 /// broadcast of inbound payloads. Both share the endpoint — the receiver
@@ -132,7 +136,7 @@ pub struct GroupUpdateHandlers {
 }
 
 /// The active-clipboard state ports produced by
-/// [`IrohNodeBuilder::install_active_clipboard`].
+/// [`IrohSessionBuilder::install_active_clipboard`].
 ///
 /// `receiver` exposes the broadcast of inbound active-clipboard state
 /// observations; `dispatch` sends one such observation to a single peer.
@@ -145,7 +149,7 @@ pub struct ActiveClipboardHandlers {
 }
 
 /// The active-clipboard pull port produced by
-/// [`IrohNodeBuilder::install_active_clipboard_pull`].
+/// [`IrohSessionBuilder::install_active_clipboard_pull`].
 ///
 /// `client` requests the on-demand transfer envelope for content this device
 /// observed but does not hold; the serve handler (the holder side) is
@@ -157,12 +161,12 @@ pub struct ActiveClipboardPullHandlers {
     pub client: Arc<dyn ActiveClipboardPullClientPort>,
 }
 
-/// [`IrohNodeBuilder::install_blobs`] 产出的 blob port。
+/// [`IrohSessionBuilder::install_blobs`] 产出的 blob port。
 pub struct BlobHandlers {
     pub blob_transfer: Arc<dyn BlobTransferPort>,
 }
 
-/// [`IrohNodeBuilder::install_transfer_progress`] 产出的进度反向通道句柄。
+/// [`IrohSessionBuilder::install_transfer_progress`] 产出的进度反向通道句柄。
 ///
 /// `reporter` 给接收端 fetch sink 用,把字节进度推回 sender;
 /// `inbound_events` 给应用层 worker 订阅,翻译为前端 host event。
@@ -175,11 +179,13 @@ pub struct TransferProgressHandlers {
 /// Live iroh node with a spawned [`Router`].
 ///
 /// Owns the [`Router`] so shutdown runs through a single call site; Slice 2 /
-/// 3 add handlers by extending [`IrohNodeBuilder`], not by adding shutdown
+/// 3 add handlers by extending [`IrohSessionBuilder`], not by adding shutdown
 /// paths here.
 pub struct IrohNode {
-    endpoint: Arc<Endpoint>,
+    session_context: Arc<IrohSessionContext>,
     router: Router,
+    session_protocols: Arc<SessionProtocolRegistry>,
+    session_generation: Option<SessionProtocolGenerationHandle>,
     connection_observations: super::observed_connections::ObservedConnections,
     /// Relay self-healing watchdog (see `net_recovery`). `None` in LAN-only
     /// mode where there is no home relay to watch. Held so [`shutdown`] can
@@ -194,6 +200,38 @@ pub struct IrohNode {
 }
 
 impl IrohNode {
+    /// 为下一代空间会话准备协议能力，但不影响当前会话。
+    pub fn prepare_session(&self) -> IrohSessionBuilder {
+        IrohSessionBuilder::new(Arc::clone(&self.session_context))
+    }
+
+    /// 停止当前空间会话并排空其连接，长期网络节点继续运行。
+    pub async fn quiesce_session(&mut self) -> Result<(), IrohNodeError> {
+        let Some(generation) = self.session_generation.as_ref() else {
+            return Ok(());
+        };
+        self.session_protocols
+            .quiesce(generation)
+            .await
+            .map_err(IrohNodeError::session_protocol)?;
+        self.session_generation = None;
+        Ok(())
+    }
+
+    /// 发布已经完整准备好的下一代空间会话。
+    pub async fn activate_session(
+        &mut self,
+        prepared: PreparedIrohSession,
+    ) -> Result<(), IrohNodeError> {
+        let generation = self
+            .session_protocols
+            .publish(prepared.handlers)
+            .await
+            .map_err(IrohNodeError::session_protocol)?;
+        self.session_generation = Some(generation);
+        Ok(())
+    }
+
     #[cfg(any(test, feature = "test-util"))]
     pub async fn accepts_protocol_for_test(&self, alpn: &[u8]) -> bool {
         let client = match Endpoint::builder(presets::N0)
@@ -206,25 +244,33 @@ impl IrohNode {
         };
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            client.connect(self.endpoint.addr(), alpn),
+            client.connect(self.session_context.endpoint.addr(), alpn),
         )
         .await;
-        let connected = matches!(result, Ok(Ok(_)));
+        let connected = match result {
+            Ok(Ok(connection)) => {
+                tokio::time::timeout(Duration::from_millis(100), connection.closed())
+                    .await
+                    .is_err()
+            }
+            Ok(Err(_)) | Err(_) => false,
+        };
         client.close().await;
         connected
     }
 
-    /// 优雅关闭 iroh 节点。两步序列均为信号驱动,不再用外层 timeout 与 iroh
+    /// 优雅关闭 iroh 节点。三步序列均为信号驱动,不再用外层 timeout 与 iroh
     /// 内部状态机 race。
     ///
-    /// 1. [`Endpoint::close`] —— 显式跑完 iroh 自带的关闭状态机:cancel
+    /// 1. 封口当前会话协议，关闭并排空受管连接，再停止本代 handler。
+    /// 2. [`Endpoint::close`] —— 显式跑完 iroh 自带的关闭状态机:cancel
     ///    `at_close_start` token、`address_lookup().clear()` 同步停掉 mDNS /
     ///    pkarr 子任务、发送 QUIC `CONNECTION_CLOSE`、`wait_idle` 等 ack
     ///    (自带 ~3s probe timeout)、cancel actors、shutdown runtime。**整条
     ///    链路本身就是有界的**;再叠一层更短的外层 timeout 只会把 ack 阶段
     ///    从"事件驱动地等到 OK 或自然超时"退化成"中途砍断 → `EndpointInner::drop`
     ///    走 ungraceful abort 喷 ERROR + 留下 mDNS 残留任务"。
-    /// 2. [`Router::shutdown`] —— endpoint 已 closed 后,router 的 accept loop
+    /// 3. [`Router::shutdown`] —— endpoint 已 closed 后,router 的 accept loop
     ///    在 `endpoint.accept()` 处自然返回 None 退出,这一步主要是 join 已
     ///    spawn 的 protocol handler shutdown(例如 iroh-blobs 的 store 关闭)
     ///    并 abort 残留 accept 任务。理应很快,但保留一个比 endpoint.close
@@ -235,13 +281,13 @@ impl IrohNode {
     /// 上层 GUI 退出路径再有 `DAEMON_SHUTDOWN_TIMEOUT = 15s` 兜底,所以这里不
     /// 需要也不应该用激进的硬截断。
     #[instrument(skip_all)]
-    pub async fn shutdown(self) {
+    pub async fn shutdown(mut self) {
         // Step 0: stop the relay self-healing watchdog before closing the
         // endpoint. Abort then join so shutdown is deterministic and a panic
         // in the watchdog surfaces as a WARN instead of vanishing with the
         // task (observability requirement — see `workers/mod.rs` on why
         // detached tasks are disallowed).
-        if let Some(handle) = self.net_recovery {
+        if let Some(handle) = self.net_recovery.take() {
             handle.abort();
             match handle.await {
                 Ok(()) => {}
@@ -252,12 +298,17 @@ impl IrohNode {
             }
         }
 
-        // Step 1:跑完 iroh 自带的事件驱动关闭。无外层 timeout —— iroh 内部
+        // Step 1:停止本代新连接，关闭已登记连接，并等待 handler 退出。
+        if let Err(source) = self.quiesce_session().await {
+            tracing::warn!(error = %source, "iroh session protocols did not quiesce cleanly");
+        }
+
+        // Step 2:跑完 iroh 自带的事件驱动关闭。无外层 timeout —— iroh 内部
         // 已经层层有界(详见上面 doc)。
-        self.endpoint.close().await;
+        self.session_context.endpoint.close().await;
         self.connection_observations.shutdown().await;
 
-        // Step 2:join router cleanup。watchdog 仅用于规避 iroh#3875。
+        // Step 3:join router cleanup。watchdog 仅用于规避 iroh#3875。
         const ROUTER_WATCHDOG: Duration = Duration::from_secs(5);
         match tokio::time::timeout(ROUTER_WATCHDOG, self.router.shutdown()).await {
             Ok(Ok(())) => {}
@@ -628,25 +679,54 @@ impl Drop for NodeRunLease {
     }
 }
 
-/// Staged builder — bind endpoint, install transport handlers, then
-/// [`spawn`](Self::spawn) the router.
+/// 长期网络构造器：绑定 endpoint 并启动固定 Router。
 pub struct IrohNodeBuilder {
-    mdns: MdnsAddressLookup,
-    endpoint: Arc<Endpoint>,
+    session_context: Arc<IrohSessionContext>,
     connection_observations: super::observed_connections::ObservedConnections,
     network_recorder: uc_observability_contract::diagnostics::connectivity::NetworkRecorder,
-    demand_recovery: Arc<DemandRecoveryCoordinator>,
-    network_recovery_observations: Arc<NetworkRecoveryObservationSource>,
-    /// Held in `Option` so `install_*` methods can `take()` + reassign the
-    /// builder (iroh's `RouterBuilder::accept` consumes `self`).
-    router_builder: Option<ProtocolRouterBuilder>,
-    /// Retained so `install_*` methods can read the rendezvous override
-    /// when constructing the per-transport adapters.
-    config: IrohNodeConfig,
+    router_builder: ProtocolRouterBuilder,
+    session_protocols: Arc<SessionProtocolRegistry>,
     run_lease: NodeRunLease,
 }
 
-impl IrohNodeBuilder {
+struct IrohSessionContext {
+    mdns: MdnsAddressLookup,
+    endpoint: Arc<Endpoint>,
+    demand_recovery: Arc<DemandRecoveryCoordinator>,
+    network_recovery_observations: Arc<NetworkRecoveryObservationSource>,
+    config: IrohNodeConfig,
+}
+
+pub struct IrohSessionBuilder {
+    context: Arc<IrohSessionContext>,
+    handlers: SessionProtocolHandlersBuilder,
+}
+
+pub struct PreparedIrohSession {
+    handlers: SessionProtocolHandlers,
+}
+
+impl PreparedIrohSession {
+    pub async fn shutdown(self) {
+        self.handlers.shutdown().await;
+    }
+}
+
+impl IrohSessionBuilder {
+    fn new(context: Arc<IrohSessionContext>) -> Self {
+        Self {
+            context,
+            handlers: SessionProtocolHandlersBuilder::new(),
+        }
+    }
+
+    /// 完成会话能力装配。结果只有整体发布后才会开始接收请求。
+    pub fn finish(self) -> PreparedIrohSession {
+        PreparedIrohSession {
+            handlers: self.handlers.build(),
+        }
+    }
+
     /// 复用同一个本机地址 watcher 和 mDNS 实例，不创建额外后台任务。
     pub async fn connection_hints(
         &self,
@@ -659,39 +739,46 @@ impl IrohNodeBuilder {
         use futures_util::{stream, StreamExt};
         use iroh::Watcher as _;
         let local = self
+            .context
             .endpoint
             .watch_addr()
             .stream()
             .skip(1)
             .map(|_| Ok(uc_application::deps::ConnectionHint::NetworkChanged));
-        let discovered = self.mdns.subscribe().await.filter_map(move |event| {
-            let members = Arc::clone(&members);
-            let fingerprints = Arc::clone(&fingerprints);
-            async move {
-                let iroh_mdns_address_lookup::DiscoveryEvent::Discovered { endpoint_info, .. } =
-                    event
-                else {
-                    return None;
-                };
-                let fingerprint =
-                    match fingerprints.from_public_key(endpoint_info.endpoint_id.as_bytes()) {
-                        Ok(value) => value,
-                        Err(source) => return Some(Err(source)),
+        let discovered = self
+            .context
+            .mdns
+            .subscribe()
+            .await
+            .filter_map(move |event| {
+                let members = Arc::clone(&members);
+                let fingerprints = Arc::clone(&fingerprints);
+                async move {
+                    let iroh_mdns_address_lookup::DiscoveryEvent::Discovered {
+                        endpoint_info, ..
+                    } = event
+                    else {
+                        return None;
                     };
-                match members.list().await {
-                    Ok(members) => members
-                        .into_iter()
-                        .find(|member| member.identity_fingerprint == fingerprint)
-                        .map(|member| {
-                            Ok(uc_application::deps::ConnectionHint::PeerAddressChanged(
-                                member.device_id,
-                            ))
-                        }),
-                    Err(source) => Some(Err(anyhow::Error::new(source))),
+                    let fingerprint =
+                        match fingerprints.from_public_key(endpoint_info.endpoint_id.as_bytes()) {
+                            Ok(value) => value,
+                            Err(source) => return Some(Err(source)),
+                        };
+                    match members.list().await {
+                        Ok(members) => members
+                            .into_iter()
+                            .find(|member| member.identity_fingerprint == fingerprint)
+                            .map(|member| {
+                                Ok(uc_application::deps::ConnectionHint::PeerAddressChanged(
+                                    member.device_id,
+                                ))
+                            }),
+                        Err(source) => Some(Err(anyhow::Error::new(source))),
+                    }
                 }
-            }
-        });
-        let observations = self.network_recovery_observations.subscribe();
+            });
+        let observations = self.context.network_recovery_observations.subscribe();
         let recovery = stream::unfold(observations, |mut receiver| async move {
             use super::net_recovery::NetworkRecoveryObservation;
             let hint = match receiver.recv().await {
@@ -709,7 +796,7 @@ impl IrohNodeBuilder {
         let hints = stream::select(stream::select(local, discovered), recovery);
         #[cfg(any(test, feature = "test-util"))]
         let hints = hints.filter_map({
-            let gate = self.config.network_partition_gate.clone();
+            let gate = self.context.config.network_partition_gate.clone();
             move |hint| {
                 let suppressed = gate
                     .as_ref()
@@ -722,27 +809,37 @@ impl IrohNodeBuilder {
 
     /// 返回当前节点将写入准入候选资料的认证传输身份与地址。
     pub fn local_endpoint_addr(&self) -> EndpointAddr {
-        self.endpoint.addr()
+        self.context.endpoint.addr()
     }
 
     /// 返回成员投影可直接保存的认证传输地址编码。
     pub fn local_endpoint_addr_blob(&self) -> Result<Vec<u8>, IrohNodeError> {
-        postcard::to_stdvec(&self.endpoint.addr()).map_err(|source| {
+        postcard::to_stdvec(&self.context.endpoint.addr()).map_err(|source| {
             IrohNodeError::AdmissionInstall {
                 source: anyhow::Error::new(source),
             }
         })
     }
 
-    fn take_router_builder(&mut self) -> Result<ProtocolRouterBuilder, IrohNodeError> {
-        self.router_builder
-            .take()
-            .ok_or(IrohNodeError::InstallAfterSpawn)
+    fn install_session_handler<I, A>(
+        &mut self,
+        alpns: I,
+        handler: impl Into<Box<dyn iroh::protocol::DynProtocolHandler>>,
+    ) -> Result<(), IrohNodeError>
+    where
+        I: IntoIterator<Item = A>,
+        A: AsRef<[u8]>,
+    {
+        self.handlers
+            .install(alpns, handler)
+            .map_err(IrohNodeError::session_protocol)
     }
 
     /// 在 Application 构造前取得同一 endpoint 支撑的被动出站能力。
     pub fn space_admission_transport(&self) -> Arc<dyn SpaceAdmissionTransportPort> {
-        Arc::new(IrohSpaceAdmissionTransport::new(Arc::clone(&self.endpoint)))
+        Arc::new(IrohSpaceAdmissionTransport::new(Arc::clone(
+            &self.context.endpoint,
+        )))
     }
 
     /// 在 Router spawn 前一次性安装 Application 的认证消息 endpoint。
@@ -751,13 +848,18 @@ impl IrohNodeBuilder {
         endpoint: Arc<dyn HandleAuthenticatedSpaceAdmissionMessagePort>,
         credentials: Arc<dyn SpaceAdmissionChannelCredentialPort>,
     ) -> Result<(), IrohNodeError> {
-        let handler = IrohSpaceAdmissionHandler::new(&self.endpoint, endpoint, credentials)
+        let handler = IrohSpaceAdmissionHandler::new(&self.context.endpoint, endpoint, credentials)
             .map_err(|source| IrohNodeError::AdmissionInstall {
                 source: anyhow::anyhow!(source),
             })?;
-        let builder = self.take_router_builder()?;
-        self.router_builder = Some(builder.accept(SPACE_ADMISSION_ALPN, handler));
-        Ok(())
+        self.install_session_handler([SPACE_ADMISSION_ALPN], handler)
+    }
+}
+
+impl IrohNodeBuilder {
+    /// 创建一套尚未发布的空间会话能力。
+    pub fn prepare_session(&self) -> IrohSessionBuilder {
+        IrohSessionBuilder::new(Arc::clone(&self.session_context))
     }
 
     /// Bind the iroh endpoint, reusing the Ed25519 secret persisted by
@@ -791,6 +893,7 @@ impl IrohNodeBuilder {
             uc_observability_contract::diagnostics::connectivity::NetworkRecorder::current();
         let connection_observations =
             super::observed_connections::ObservedConnections::new(recorder.clone());
+        let session_protocols = Arc::new(SessionProtocolRegistry::new());
         let mut endpoint_builder = Endpoint::builder(presets::N0)
             .clear_address_lookup()
             .secret_key(secret)
@@ -799,7 +902,8 @@ impl IrohNodeBuilder {
             // UniClipboard#486: drop Clash TUN / link-local IPs from every
             // address-lookup service in one shot, and drop CGNAT/Tailscale
             // overlay IPs unless the user opts in. See `build_addr_filter`.
-            .addr_filter(build_addr_filter(allow_overlay));
+            .addr_filter(build_addr_filter(allow_overlay))
+            .hooks(session_protocols.endpoint_hooks());
         // 保留 N0 原生平台的原服务及原配置，只包裹固定的采集入口。
         if !config.disable_relays {
             use super::observed_address_lookup::ObservedAddressLookupBuilder;
@@ -943,7 +1047,23 @@ impl IrohNodeBuilder {
             !config.disable_relays,
         ));
         let network_recovery_observations = Arc::new(NetworkRecoveryObservationSource::new());
-        let router_builder = ProtocolRouterBuilder::new((*endpoint).clone());
+        let mut router_builder = ProtocolRouterBuilder::new((*endpoint).clone());
+        for alpn in [
+            SPACE_ADMISSION_ALPN,
+            PEER_REACHABILITY_ALPN,
+            LEGACY_PEER_REACHABILITY_ALPN,
+            CLIPBOARD_ALPN,
+            GROUP_UPDATE_ALPN,
+            MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
+            MEMBERSHIP_BRANCH_RECOVERY_ALPN,
+            MEMBERSHIP_ATTESTATION_ALPN,
+            ACTIVE_CLIPBOARD_ALPN,
+            ACTIVE_CLIPBOARD_PULL_ALPN,
+            TRANSFER_PROGRESS_ALPN,
+            BLOBS_ALPN,
+        ] {
+            router_builder = router_builder.accept(alpn, session_protocols.dispatcher(alpn));
+        }
         debug!(
             endpoint_id = %endpoint.id().fmt_short(),
             disable_relays = config.disable_relays,
@@ -953,19 +1073,25 @@ impl IrohNodeBuilder {
             "iroh node bound; ready to install transport handlers"
         );
         log_publish_addrs(&endpoint, "post-bind");
-        Ok(Self {
+        let session_context = Arc::new(IrohSessionContext {
             mdns,
             endpoint,
-            connection_observations,
-            network_recorder: recorder,
             demand_recovery,
             network_recovery_observations,
-            router_builder: Some(router_builder),
             config,
+        });
+        Ok(Self {
+            session_context,
+            connection_observations,
+            network_recorder: recorder,
+            router_builder,
+            session_protocols,
             run_lease,
         })
     }
+}
 
+impl IrohSessionBuilder {
     /// 构造邀请发布、地址查询与短码解析能力，不注册业务 ALPN。
     ///
     /// A single [`RendezvousClient`] is built here and shared between the
@@ -978,18 +1104,18 @@ impl IrohNodeBuilder {
         device_identity: Arc<dyn DeviceIdentityPort>,
         settings: Arc<dyn SettingsPort>,
     ) -> PairingInvitationHandlers {
-        let rendezvous = Arc::new(match &self.config.rendezvous_base_url {
+        let rendezvous = Arc::new(match &self.context.config.rendezvous_base_url {
             Some(url) => RendezvousClient::with_base_url(url.clone()),
             None => RendezvousClient::new(),
         });
 
         let resolver = Arc::new(PairingInvitationResolverAdapter::new(
-            Arc::clone(&self.endpoint),
+            Arc::clone(&self.context.endpoint),
             Arc::clone(&rendezvous),
         ));
 
         let invitation_adapter = Arc::new(RendezvousPairingInvitationAdapter::new(
-            Arc::clone(&self.endpoint),
+            Arc::clone(&self.context.endpoint),
             device_identity,
             settings,
             rendezvous,
@@ -1028,33 +1154,29 @@ impl IrohNodeBuilder {
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         clock: Arc<dyn ClockPort>,
-    ) -> Arc<dyn PeerReachabilityPort> {
+    ) -> Result<Arc<dyn PeerReachabilityPort>, IrohNodeError> {
         // Build the adapter first so the handler shares its `last_state`
         // and broadcast `Sender` — that's what makes inbound dials flip a
         // recovered peer to Online without needing our own keepalive to
         // dial them again.
         let adapter = IrohPeerReachabilityAdapter::new_with_recovery(
-            Arc::clone(&self.endpoint),
+            Arc::clone(&self.context.endpoint),
             peer_addr_repo,
             member_repo,
             peer_admission,
             fingerprint_factory,
             clock,
-            Arc::clone(&self.demand_recovery),
-            Arc::clone(&self.network_recovery_observations),
+            Arc::clone(&self.context.demand_recovery),
+            Arc::clone(&self.context.network_recovery_observations),
         );
         let handler = adapter.handler();
 
-        let builder = self
-            .router_builder
-            .take()
-            .expect("router_builder missing — install_* called after spawn");
-        let builder = builder
-            .accept(PEER_REACHABILITY_ALPN, handler.clone())
-            .accept(LEGACY_PEER_REACHABILITY_ALPN, handler);
-        self.router_builder = Some(builder);
+        self.install_session_handler(
+            [PEER_REACHABILITY_ALPN, LEGACY_PEER_REACHABILITY_ALPN],
+            handler,
+        )?;
 
-        Arc::new(adapter)
+        Ok(Arc::new(adapter))
     }
 
     /// Build a [`ConnectionChannelPort`] (Phase 96 INDIC-01).
@@ -1073,7 +1195,7 @@ impl IrohNodeBuilder {
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     ) -> Arc<dyn ConnectionChannelPort> {
         Arc::new(IrohConnectionChannelAdapter::new(
-            Arc::clone(&self.endpoint),
+            Arc::clone(&self.context.endpoint),
             peer_addr_repo,
         ))
     }
@@ -1102,32 +1224,27 @@ impl IrohNodeBuilder {
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         peer_reachability: Arc<dyn PeerReachabilityPort>,
-    ) -> ClipboardHandlers {
+    ) -> Result<ClipboardHandlers, IrohNodeError> {
         let receiver = IrohClipboardReceiverAdapter::new(
-            Arc::clone(&self.endpoint),
+            Arc::clone(&self.context.endpoint),
             member_repo,
             peer_admission,
             fingerprint_factory,
         );
         let handler = receiver.handler();
 
-        let builder = self
-            .router_builder
-            .take()
-            .expect("router_builder missing — install_* called after spawn");
-        let builder = builder.accept(CLIPBOARD_ALPN, handler);
-        self.router_builder = Some(builder);
+        self.install_session_handler([CLIPBOARD_ALPN], handler)?;
 
         let dispatch = Arc::new(IrohClipboardDispatchAdapter::new(
-            Arc::clone(&self.endpoint),
+            Arc::clone(&self.context.endpoint),
             peer_addr_repo,
             peer_reachability,
         ));
 
-        ClipboardHandlers {
+        Ok(ClipboardHandlers {
             dispatch,
             receiver: Arc::new(receiver),
-        }
+        })
     }
 
     /// Install the encrypted group-update transport under [`GROUP_UPDATE_ALPN`].
@@ -1140,12 +1257,11 @@ impl IrohNodeBuilder {
         group_revocation: Arc<dyn GroupRevocationPort>,
     ) -> Result<GroupUpdateHandlers, IrohNodeError> {
         let adapter = Arc::new(IrohGroupUpdateAdapter::new(
-            Arc::clone(&self.endpoint),
+            Arc::clone(&self.context.endpoint),
             peer_addr_repo,
             group_revocation,
         ));
-        let builder = self.take_router_builder()?;
-        self.router_builder = Some(builder.accept(GROUP_UPDATE_ALPN, adapter.handler()));
+        self.install_session_handler([GROUP_UPDATE_ALPN], adapter.handler())?;
         Ok(GroupUpdateHandlers { dispatch: adapter })
     }
 
@@ -1156,12 +1272,10 @@ impl IrohNodeBuilder {
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         endpoint: Arc<dyn MembershipHistoryExchangeEndpointPort>,
     ) -> Result<(), IrohNodeError> {
-        let builder = self.take_router_builder()?;
-        self.router_builder = Some(builder.accept(
-            MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
+        self.install_session_handler(
+            [MEMBERSHIP_HISTORY_EXCHANGE_ALPN],
             adapter.handler(member_repo, fingerprint_factory, endpoint),
-        ));
-        Ok(())
+        )
     }
 
     pub fn install_membership_branch_recovery(
@@ -1170,12 +1284,10 @@ impl IrohNodeBuilder {
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         endpoint: Arc<dyn IssueMembershipBranchRecoveryPort>,
     ) -> Result<(), IrohNodeError> {
-        let builder = self.take_router_builder()?;
-        self.router_builder = Some(builder.accept(
-            MEMBERSHIP_BRANCH_RECOVERY_ALPN,
+        self.install_session_handler(
+            [MEMBERSHIP_BRANCH_RECOVERY_ALPN],
             IrohMembershipBranchRecoveryHandler::new(member_repo, fingerprint_factory, endpoint),
-        ));
-        Ok(())
+        )
     }
 
     pub fn build_membership_attestation_adapter(
@@ -1193,7 +1305,7 @@ impl IrohNodeBuilder {
             Arc::clone(&fingerprint_factory),
         );
         Arc::new(IrohMembershipAttestationAdapter::new(
-            Arc::clone(&self.endpoint),
+            Arc::clone(&self.context.endpoint),
             identity,
             signatures,
             fingerprint_factory,
@@ -1208,7 +1320,7 @@ impl IrohNodeBuilder {
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Arc<dyn CurrentMembershipIdentityPort> {
         Arc::new(IrohMembershipIdentityAdapter::new(
-            Arc::clone(&self.endpoint),
+            Arc::clone(&self.context.endpoint),
             session,
             device_identity,
             settings,
@@ -1221,7 +1333,7 @@ impl IrohNodeBuilder {
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     ) -> Arc<IrohMembershipHistoryExchangeAdapter> {
         Arc::new(IrohMembershipHistoryExchangeAdapter::new(
-            Arc::clone(&self.endpoint),
+            Arc::clone(&self.context.endpoint),
             peer_addr_repo,
         ))
     }
@@ -1231,7 +1343,7 @@ impl IrohNodeBuilder {
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     ) -> Arc<super::IrohMembershipBranchRecoveryChannel> {
         Arc::new(super::IrohMembershipBranchRecoveryChannel::new(
-            Arc::clone(&self.endpoint),
+            Arc::clone(&self.context.endpoint),
             peer_addr_repo,
         ))
     }
@@ -1247,14 +1359,14 @@ impl IrohNodeBuilder {
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Arc<IrohMembershipGossipTransportAdapter> {
         let identity = Arc::new(IrohMembershipIdentityAdapter::new(
-            Arc::clone(&self.endpoint),
+            Arc::clone(&self.context.endpoint),
             Arc::clone(&session),
             device_identity,
             settings,
             Arc::clone(&fingerprint_factory),
         ));
         Arc::new(IrohMembershipGossipTransportAdapter::new(
-            Arc::clone(&self.endpoint),
+            Arc::clone(&self.context.endpoint),
             Arc::clone(&session),
             identity,
             peer_addr_repo,
@@ -1269,12 +1381,10 @@ impl IrohNodeBuilder {
         adapter: &IrohMembershipAttestationAdapter,
         application_endpoint: Arc<dyn MembershipAttestationEndpointPort>,
     ) -> Result<(), IrohNodeError> {
-        let builder = self.take_router_builder()?;
-        self.router_builder = Some(builder.accept(
-            MEMBERSHIP_ATTESTATION_ALPN,
+        self.install_session_handler(
+            [MEMBERSHIP_ATTESTATION_ALPN],
             adapter.handler(application_endpoint),
-        ));
-        Ok(())
+        )
     }
 
     pub fn install_membership_handler(
@@ -1284,12 +1394,10 @@ impl IrohNodeBuilder {
         gossip: &IrohMembershipGossipTransportAdapter,
         gossip_endpoint: Arc<dyn uc_core::membership::MembershipGossipEndpointPort>,
     ) -> Result<(), IrohNodeError> {
-        let builder = self.take_router_builder()?;
-        self.router_builder = Some(builder.accept(
-            MEMBERSHIP_ATTESTATION_ALPN,
+        self.install_session_handler(
+            [MEMBERSHIP_ATTESTATION_ALPN],
             attestation.handler_with_gossip(attestation_endpoint, gossip, gossip_endpoint),
-        ));
-        Ok(())
+        )
     }
 
     /// Install the active-clipboard state transport.
@@ -1313,7 +1421,7 @@ impl IrohNodeBuilder {
         member_repo: Arc<dyn MemberRepositoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
-    ) -> ActiveClipboardHandlers {
+    ) -> Result<ActiveClipboardHandlers, IrohNodeError> {
         let receiver = IrohActiveClipboardReceiverAdapter::new(
             member_repo,
             peer_admission,
@@ -1321,22 +1429,17 @@ impl IrohNodeBuilder {
         );
         let handler = receiver.handler();
 
-        let builder = self
-            .router_builder
-            .take()
-            .expect("router_builder missing — install_* called after spawn");
-        let builder = builder.accept(ACTIVE_CLIPBOARD_ALPN, handler);
-        self.router_builder = Some(builder);
+        self.install_session_handler([ACTIVE_CLIPBOARD_ALPN], handler)?;
 
         let dispatch = Arc::new(IrohActiveClipboardDispatchAdapter::new(
-            Arc::clone(&self.endpoint),
+            Arc::clone(&self.context.endpoint),
             peer_addr_repo,
         ));
 
-        ActiveClipboardHandlers {
+        Ok(ActiveClipboardHandlers {
             dispatch,
             receiver: Arc::new(receiver),
-        }
+        })
     }
 
     /// Install the active-clipboard pull transport (issue #1017 PR8).
@@ -1364,7 +1467,7 @@ impl IrohNodeBuilder {
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         serve: Arc<dyn ActiveClipboardPullServePort>,
         content_gate: Arc<dyn ContentExchangeGatePort>,
-    ) -> ActiveClipboardPullHandlers {
+    ) -> Result<ActiveClipboardPullHandlers, IrohNodeError> {
         let serve_adapter = IrohActiveClipboardPullServeAdapter::new(
             member_repo,
             peer_admission,
@@ -1374,19 +1477,14 @@ impl IrohNodeBuilder {
         );
         let handler = serve_adapter.handler();
 
-        let builder = self
-            .router_builder
-            .take()
-            .expect("router_builder missing — install_* called after spawn");
-        let builder = builder.accept(ACTIVE_CLIPBOARD_PULL_ALPN, handler);
-        self.router_builder = Some(builder);
+        self.install_session_handler([ACTIVE_CLIPBOARD_PULL_ALPN], handler)?;
 
         let client = Arc::new(IrohActiveClipboardPullClientAdapter::new(
-            Arc::clone(&self.endpoint),
+            Arc::clone(&self.context.endpoint),
             peer_addr_repo,
         ));
 
-        ActiveClipboardPullHandlers { client }
+        Ok(ActiveClipboardPullHandlers { client })
     }
 
     /// 安装"反向传输进度"通道(receiver → sender)。
@@ -1406,9 +1504,9 @@ impl IrohNodeBuilder {
         member_repo: Arc<dyn MemberRepositoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
-    ) -> TransferProgressHandlers {
+    ) -> Result<TransferProgressHandlers, IrohNodeError> {
         let adapter = IrohTransferProgressAdapter::new(
-            Arc::clone(&self.endpoint),
+            Arc::clone(&self.context.endpoint),
             peer_addr_repo,
             member_repo,
             peer_admission,
@@ -1418,22 +1516,17 @@ impl IrohNodeBuilder {
         let reporter = adapter.reporter();
         let inbound_events = adapter.subscribe();
 
-        let builder = self
-            .router_builder
-            .take()
-            .expect("router_builder missing — install_* called after spawn");
-        let builder = builder.accept(TRANSFER_PROGRESS_ALPN, handler);
-        self.router_builder = Some(builder);
+        self.install_session_handler([TRANSFER_PROGRESS_ALPN], handler)?;
 
         // adapter is dropped after this method returns; reporter and the
         // broadcast subscriber both hold strong refs into the inner state
         // so the handler keeps working.
         let _ = adapter;
 
-        TransferProgressHandlers {
+        Ok(TransferProgressHandlers {
             reporter,
             inbound_events,
-        }
+        })
     }
 
     /// 安装 iroh-blobs 传输能力。
@@ -1503,22 +1596,17 @@ impl IrohNodeBuilder {
 
         let protocol = iroh_blobs::BlobsProtocol::new(&store, None);
 
-        let builder = self
-            .router_builder
-            .take()
-            .expect("router_builder missing — install_* called after spawn");
-        let builder = builder.accept(BLOBS_ALPN, protocol);
-        self.router_builder = Some(builder);
+        self.install_session_handler([BLOBS_ALPN], protocol)?;
 
         let adapter = Arc::new(IrohBlobTransferAdapter::new(
-            Arc::clone(&self.endpoint),
+            Arc::clone(&self.context.endpoint),
             store,
         ));
 
         info!(
             store_dir = %store_dir.display(),
             alpn = %String::from_utf8_lossy(BLOBS_ALPN),
-            endpoint_id = %self.endpoint.id().fmt_short(),
+            endpoint_id = %self.context.endpoint.id().fmt_short(),
             gc_interval_secs = crate::network::iroh::blobs::BLOBS_GC_INTERVAL.as_secs(),
             "iroh blobs acceptor installed"
         );
@@ -1527,36 +1615,36 @@ impl IrohNodeBuilder {
             blob_transfer: adapter,
         })
     }
+}
 
-    /// Finalize the builder: spawn the [`Router`]. After this point no more
-    /// `install_*` calls are allowed.
+impl IrohNodeBuilder {
+    /// 启动固定 [`Router`]。此时尚无活动 Space 会话。
     pub fn spawn(self) -> IrohNode {
-        let builder = self
-            .router_builder
-            .expect("router_builder missing — spawn called twice");
         // Router 只捕获空 span；后续协议处理仍使用进程 subscriber 和已认证远端父关系。
         let router = tracing::dispatcher::with_default(
             &tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()),
-            || builder.spawn(),
+            || self.router_builder.spawn(),
         );
-        log_publish_addrs(&self.endpoint, "post-spawn");
+        log_publish_addrs(&self.session_context.endpoint, "post-spawn");
 
         // Relay self-healing watchdog (see `net_recovery`). Only meaningful
         // when relays are enabled: in LAN-only mode there is no home relay by
         // design, so an empty relay-status set is expected, not a wedge. The
         // handle is retained (not detached) so `shutdown` can stop it
         // deterministically and keep a panic visible.
-        let net_recovery = (!self.config.disable_relays).then(|| {
+        let net_recovery = (!self.session_context.config.disable_relays).then(|| {
             super::net_recovery::spawn_net_recovery(
-                (*self.endpoint).clone(),
-                Arc::clone(&self.network_recovery_observations),
+                (*self.session_context.endpoint).clone(),
+                Arc::clone(&self.session_context.network_recovery_observations),
                 self.network_recorder.clone(),
             )
         });
 
         IrohNode {
-            endpoint: self.endpoint,
+            session_context: self.session_context,
             router,
+            session_protocols: self.session_protocols,
+            session_generation: None,
             connection_observations: self.connection_observations,
             net_recovery,
             _run_lease: self.run_lease,
@@ -1588,8 +1676,11 @@ pub enum IrohNodeError {
     #[error("failed to initialize iroh blob store: {0}")]
     BlobStoreInit(String),
 
-    #[error("iroh transport handlers must be installed before the router is spawned")]
-    InstallAfterSpawn,
+    #[error("failed to configure iroh session protocols")]
+    SessionProtocol {
+        #[source]
+        source: anyhow::Error,
+    },
 
     #[error("failed to install the Space admission transport")]
     AdmissionInstall {
@@ -1605,6 +1696,14 @@ pub enum IrohNodeError {
 
     #[error(transparent)]
     Identity(#[from] LocalIdentityError),
+}
+
+impl IrohNodeError {
+    fn session_protocol(source: SessionProtocolRegistryError) -> Self {
+        Self::SessionProtocol {
+            source: anyhow::Error::new(source),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1674,6 +1773,14 @@ mod tests {
             Arc::new(InMemorySecureStorage::default()),
             Arc::new(Sha256IdentityFingerprintFactory),
         ))
+    }
+
+    async fn spawn_session(network: IrohNodeBuilder, builder: IrohSessionBuilder) -> IrohNode {
+        let mut node = network.spawn();
+        node.activate_session(builder.finish())
+            .await
+            .expect("activate session");
+        node
     }
 
     struct UnavailableMemberSignatures;
@@ -1758,7 +1865,7 @@ mod tests {
             ..Default::default()
         };
         let builder = IrohNodeBuilder::bind(&store, cfg).await.expect("bind");
-        let bound = builder.endpoint.bound_sockets();
+        let bound = builder.session_context.endpoint.bound_sockets();
         assert!(
             bound.iter().any(|s| s.is_ipv4() && s.port() == port),
             "expected pinned IPv4 port {port} in bound sockets {bound:?}"
@@ -1781,7 +1888,7 @@ mod tests {
             ..Default::default()
         };
         let builder = IrohNodeBuilder::bind(&store, cfg).await.expect("bind");
-        let addr = builder.endpoint.addr();
+        let addr = builder.session_context.endpoint.addr();
         assert!(
             addr.ip_addrs().any(|a| *a == public_addr),
             "configured public addr {public_addr} not advertised in {addr:?}"
@@ -1791,9 +1898,10 @@ mod tests {
     #[tokio::test]
     async fn bind_install_invitation_discovery_spawn_and_shutdown_cleanly() {
         let store = identity_store();
-        let mut builder = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
+        let network = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
             .await
             .expect("bind");
+        let mut builder = network.prepare_session();
         let handlers = builder.install_pairing_invitation(
             Arc::new(FixedDeviceIdentity(DeviceId::new("device-1"))),
             Arc::new(InMemorySettings(StdMutex::new(Settings::default()))),
@@ -1801,7 +1909,8 @@ mod tests {
         // Ports are handed out as trait objects so ownership (and hence
         // the session adapter) survives past the node's spawn.
         drop(handlers);
-        let node = builder.spawn();
+        let node = spawn_session(network, builder).await;
+        assert!(!node.accepts_protocol_for_test(PEER_REACHABILITY_ALPN).await);
         // Clean shutdown exits without hanging; the test runner's default
         // timeout would catch a deadlock.
         node.shutdown().await;
@@ -1832,22 +1941,23 @@ mod tests {
         .await
         .expect("node");
         builder
+            .session_context
             .endpoint
             .set_alpns(vec![b"diagnostic-probe".to_vec()]);
         for _ in 0..100 {
-            if !builder.endpoint.addr().addrs.is_empty() {
+            if !builder.session_context.endpoint.addr().addrs.is_empty() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(!builder.endpoint.addr().addrs.is_empty());
+        assert!(!builder.session_context.endpoint.addr().addrs.is_empty());
         let client = Endpoint::builder(presets::N0)
             .relay_mode(RelayMode::Disabled)
             .clear_address_lookup()
             .bind()
             .await
             .expect("client");
-        let server_endpoint = Arc::clone(&builder.endpoint);
+        let server_endpoint = Arc::clone(&builder.session_context.endpoint);
         let incoming = tokio::spawn(async move {
             server_endpoint
                 .accept()
@@ -1857,7 +1967,7 @@ mod tests {
                 .expect("handshake")
         });
         let connected = client
-            .connect(builder.endpoint.addr(), b"diagnostic-probe")
+            .connect(builder.session_context.endpoint.addr(), b"diagnostic-probe")
             .await
             .expect("connected");
         drop(incoming.await.expect("accept task"));
@@ -1865,7 +1975,12 @@ mod tests {
             .await
             .expect("诊断观察不能延长服务器连接寿命");
         client.close().await;
-        builder.spawn().shutdown().with_subscriber(dispatch).await;
+        let session = builder.prepare_session();
+        spawn_session(builder, session)
+            .await
+            .shutdown()
+            .with_subscriber(dispatch)
+            .await;
         let records = exporter.get_emitted_logs().expect("logs");
         let names: Vec<_> = records
             .iter()
@@ -1905,9 +2020,10 @@ mod tests {
     #[tokio::test]
     async fn membership_attestation_uses_two_step_installation_on_the_shared_router() {
         let store = identity_store();
-        let mut builder = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
+        let network = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
             .await
             .expect("bind");
+        let mut builder = network.prepare_session();
         let session = Arc::new(InMemorySession::new());
         session.set_master_key_for_space(
             SpaceId::from("space-a"),
@@ -1928,15 +2044,16 @@ mod tests {
             .install_membership_attestation_handler(&adapter, Arc::new(RejectingMembershipEndpoint))
             .expect("install membership attestation handler");
 
-        builder.spawn().shutdown().await;
+        spawn_session(network, builder).await.shutdown().await;
     }
 
     #[tokio::test]
     async fn membership_gossip_uses_the_same_identity_and_shared_router() {
         let store = identity_store();
-        let mut builder = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
+        let network = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
             .await
             .expect("bind");
+        let mut builder = network.prepare_session();
         let session = Arc::new(InMemorySession::new());
         session.set_master_key_for_space(
             SpaceId::from("space-a"),
@@ -1980,21 +2097,7 @@ mod tests {
             )
             .expect("install membership handler");
 
-        builder.spawn().shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn router_builder_take_reports_install_after_spawn() {
-        let store = identity_store();
-        let mut builder = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
-            .await
-            .expect("bind");
-        builder.router_builder.take();
-
-        assert!(matches!(
-            builder.take_router_builder(),
-            Err(IrohNodeError::InstallAfterSpawn)
-        ));
+        spawn_session(network, builder).await.shutdown().await;
     }
 
     #[tokio::test]
@@ -2006,15 +2109,17 @@ mod tests {
         let first = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
             .await
             .expect("first bind");
-        let first_id = first.endpoint.id();
-        let first_node = first.spawn();
+        let first_id = first.session_context.endpoint.id();
+        let first_session = first.prepare_session();
+        let first_node = spawn_session(first, first_session).await;
         first_node.shutdown().await;
 
         let second = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
             .await
             .expect("second bind");
-        assert_eq!(second.endpoint.id(), first_id);
-        second.spawn().shutdown().await;
+        assert_eq!(second.session_context.endpoint.id(), first_id);
+        let second_session = second.prepare_session();
+        spawn_session(second, second_session).await.shutdown().await;
     }
 
     #[derive(Default)]
@@ -2055,22 +2160,25 @@ mod tests {
     #[tokio::test]
     async fn invitation_discovery_and_peer_reachability_coexist_on_same_node() {
         let store = identity_store();
-        let mut builder = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
+        let network = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
             .await
             .expect("bind");
+        let mut builder = network.prepare_session();
 
         let _invitation = builder.install_pairing_invitation(
             Arc::new(FixedDeviceIdentity(DeviceId::new("device-coexist"))),
             Arc::new(InMemorySettings(StdMutex::new(Settings::default()))),
         );
 
-        let peer_reachability: Arc<dyn PeerReachabilityPort> = builder.install_peer_reachability(
-            Arc::new(EmptyPeerAddressRepo),
-            Arc::new(EmptyMemberRepo),
-            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
-            Arc::new(crate::security::Sha256IdentityFingerprintFactory),
-            Arc::new(FixedClock(1_700_000_000_000)),
-        );
+        let peer_reachability: Arc<dyn PeerReachabilityPort> = builder
+            .install_peer_reachability(
+                Arc::new(EmptyPeerAddressRepo),
+                Arc::new(EmptyMemberRepo),
+                Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+                Arc::new(crate::security::Sha256IdentityFingerprintFactory),
+                Arc::new(FixedClock(1_700_000_000_000)),
+            )
+            .expect("install peer reachability");
 
         // current_state before any dial is Unknown — proves the adapter
         // survived the type-erasure round trip through install_peer_reachability.
@@ -2079,9 +2187,51 @@ mod tests {
             .await;
         assert_eq!(unknown_state, uc_core::ports::ReachabilityState::Unknown,);
 
-        let node = builder.spawn();
+        let node = spawn_session(network, builder).await;
         assert!(node.accepts_protocol_for_test(PEER_REACHABILITY_ALPN).await);
         assert!(!node.accepts_protocol_for_test(LEGACY_CLIPBOARD_ALPN).await);
+        node.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn replaces_space_session_without_rebinding_endpoint() {
+        let store = identity_store();
+        let network = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
+            .await
+            .expect("bind");
+        let mut first = network.prepare_session();
+        first
+            .install_peer_reachability(
+                Arc::new(EmptyPeerAddressRepo),
+                Arc::new(EmptyMemberRepo),
+                Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+                Arc::new(crate::security::Sha256IdentityFingerprintFactory),
+                Arc::new(FixedClock(1_700_000_000_000)),
+            )
+            .expect("install first session");
+        let mut node = spawn_session(network, first).await;
+        let endpoint_id = node.session_context.endpoint.id();
+        assert!(node.accepts_protocol_for_test(PEER_REACHABILITY_ALPN).await);
+
+        let mut second = node.prepare_session();
+        second
+            .install_peer_reachability(
+                Arc::new(EmptyPeerAddressRepo),
+                Arc::new(EmptyMemberRepo),
+                Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+                Arc::new(crate::security::Sha256IdentityFingerprintFactory),
+                Arc::new(FixedClock(1_700_000_000_001)),
+            )
+            .expect("install second session");
+
+        node.quiesce_session().await.expect("quiesce first session");
+        assert!(!node.accepts_protocol_for_test(PEER_REACHABILITY_ALPN).await);
+        node.activate_session(second.finish())
+            .await
+            .expect("activate second session");
+
+        assert_eq!(node.session_context.endpoint.id(), endpoint_id);
+        assert!(node.accepts_protocol_for_test(PEER_REACHABILITY_ALPN).await);
         node.shutdown().await;
     }
 
@@ -2122,9 +2272,10 @@ mod tests {
         // survive the trait-object round trip and the router spawns /
         // shuts down cleanly when all three transports are installed.
         let store = identity_store();
-        let mut builder = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
+        let network = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
             .await
             .expect("bind");
+        let mut builder = network.prepare_session();
 
         let _invitation = builder.install_pairing_invitation(
             Arc::new(FixedDeviceIdentity(DeviceId::new("device-triple"))),
@@ -2132,21 +2283,25 @@ mod tests {
         );
 
         let peer_addr_repo: Arc<dyn PeerAddressRepositoryPort> = Arc::new(EmptyPeerAddressRepo);
-        let peer_reachability = builder.install_peer_reachability(
-            Arc::clone(&peer_addr_repo),
-            Arc::new(EmptyMemberRepo),
-            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
-            Arc::new(crate::security::Sha256IdentityFingerprintFactory),
-            Arc::new(FixedClock(1_700_000_000_000)),
-        );
+        let peer_reachability = builder
+            .install_peer_reachability(
+                Arc::clone(&peer_addr_repo),
+                Arc::new(EmptyMemberRepo),
+                Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+                Arc::new(crate::security::Sha256IdentityFingerprintFactory),
+                Arc::new(FixedClock(1_700_000_000_000)),
+            )
+            .expect("install peer reachability");
 
-        let ClipboardHandlers { dispatch, receiver } = builder.install_clipboard(
-            peer_addr_repo,
-            Arc::new(EmptyMemberRepo),
-            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
-            Arc::new(crate::security::Sha256IdentityFingerprintFactory),
-            peer_reachability,
-        );
+        let ClipboardHandlers { dispatch, receiver } = builder
+            .install_clipboard(
+                peer_addr_repo,
+                Arc::new(EmptyMemberRepo),
+                Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+                Arc::new(crate::security::Sha256IdentityFingerprintFactory),
+                peer_reachability,
+            )
+            .expect("install clipboard");
 
         // Dispatch against an unknown device — the repo is empty so we
         // hit the `Offline` short-circuit without touching the wire. This
@@ -2177,16 +2332,17 @@ mod tests {
         // Receiver's subscribe handle is ready for the ingest use case.
         let _inbound_rx = receiver.subscribe();
 
-        let node = builder.spawn();
+        let node = spawn_session(network, builder).await;
         node.shutdown().await;
     }
 
     #[tokio::test]
     async fn invitation_peer_reachability_clipboard_and_blobs_coexist_on_same_router() {
         let store = identity_store();
-        let mut builder = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
+        let network = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
             .await
             .expect("bind");
+        let mut builder = network.prepare_session();
 
         let _invitation = builder.install_pairing_invitation(
             Arc::new(FixedDeviceIdentity(DeviceId::new("device-quad"))),
@@ -2194,21 +2350,25 @@ mod tests {
         );
 
         let peer_addr_repo: Arc<dyn PeerAddressRepositoryPort> = Arc::new(EmptyPeerAddressRepo);
-        let peer_reachability = builder.install_peer_reachability(
-            Arc::clone(&peer_addr_repo),
-            Arc::new(EmptyMemberRepo),
-            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
-            Arc::new(crate::security::Sha256IdentityFingerprintFactory),
-            Arc::new(FixedClock(1_700_000_000_000)),
-        );
+        let peer_reachability = builder
+            .install_peer_reachability(
+                Arc::clone(&peer_addr_repo),
+                Arc::new(EmptyMemberRepo),
+                Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+                Arc::new(crate::security::Sha256IdentityFingerprintFactory),
+                Arc::new(FixedClock(1_700_000_000_000)),
+            )
+            .expect("install peer reachability");
 
-        let _clipboard = builder.install_clipboard(
-            peer_addr_repo,
-            Arc::new(EmptyMemberRepo),
-            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
-            Arc::new(crate::security::Sha256IdentityFingerprintFactory),
-            peer_reachability,
-        );
+        let _clipboard = builder
+            .install_clipboard(
+                peer_addr_repo,
+                Arc::new(EmptyMemberRepo),
+                Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+                Arc::new(crate::security::Sha256IdentityFingerprintFactory),
+                peer_reachability,
+            )
+            .expect("install clipboard");
 
         let tempdir = tempfile::tempdir().expect("tempdir");
         let BlobHandlers { blob_transfer } = builder
@@ -2227,7 +2387,7 @@ mod tests {
             .expect("publish through blob port");
         assert!(blob_transfer.has(&digest).await.expect("has digest"));
 
-        let node = builder.spawn();
+        let node = spawn_session(network, builder).await;
         node.shutdown().await;
     }
 
@@ -2684,9 +2844,12 @@ mod tests {
             .await
             .expect("bind endpoint");
 
-        tokio::time::timeout(Duration::from_secs(10), builder.endpoint.online())
-            .await
-            .expect("endpoint did not connect to protected relay");
-        builder.endpoint.close().await;
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            builder.session_context.endpoint.online(),
+        )
+        .await
+        .expect("endpoint did not connect to protected relay");
+        builder.session_context.endpoint.close().await;
     }
 }

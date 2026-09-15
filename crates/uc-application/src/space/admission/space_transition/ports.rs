@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 
+use crate::space::admission::protocol::JoinerActivationIntent;
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
     AdmissionChangeFacts, AdmissionSecurityCommitmentV1, AdmissionSpaceTransitionResultV2,
@@ -76,7 +77,23 @@ pub trait AdmissionSpaceTransitionPort: Send + Sync {
         transition: &AdmissionSpaceTransitionV2,
     ) -> Result<AdmissionSpaceTransitionStepV2, AdmissionSpaceTransitionError>;
 
+    async fn advance_admission(
+        &self,
+        transition: &AdmissionSpaceTransitionV2,
+        intent: JoinerActivationIntent,
+    ) -> Result<AdmissionSpaceTransitionStepV2, AdmissionSpaceTransitionError> {
+        if transition.attempt_id() != intent.admission_id() {
+            return Err(AdmissionSpaceTransitionError::Inconsistent);
+        }
+        self.advance(transition).await
+    }
+
     async fn discard_pre_activation(
+        &self,
+        transition: &AdmissionSpaceTransitionV2,
+    ) -> Result<(), AdmissionSpaceTransitionError>;
+
+    async fn terminate_admission(
         &self,
         transition: &AdmissionSpaceTransitionV2,
     ) -> Result<(), AdmissionSpaceTransitionError>;

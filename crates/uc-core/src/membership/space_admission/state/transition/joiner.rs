@@ -268,7 +268,31 @@ impl SpaceAdmissionAggregate {
         else {
             return Err(SpaceAdmissionAggregateError::InvalidTransition);
         };
+        let attempt_digest = self
+            .attempt_timeline
+            .map(|timeline| {
+                let SpaceAdmissionBodyV1::JoinRequest(request) =
+                    state.pending_exchange.request_envelope().body()
+                else {
+                    return Err(SpaceAdmissionAggregateError::InvalidInitialExchange);
+                };
+                AdmissionAttemptContractV2::new(
+                    self.admission_id,
+                    request.invitation_id(),
+                    peer_binding.local_peer_id(),
+                    peer_binding.remote_peer_id(),
+                    timeline.started_at_ms(),
+                    timeline.expires_at_ms(),
+                )
+                .map(|contract| contract.digest())
+                .map_err(|_| SpaceAdmissionAggregateError::InvalidAttemptTimeline)
+            })
+            .transpose()?;
         self.record_version = record_version;
+        if attempt_digest.is_some() {
+            self.format_version = SPACE_ADMISSION_RECORD_FORMAT_V2;
+        }
+        self.attempt_digest = attempt_digest;
         self.state = SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(
             SpaceAdmissionJoinerInitiated {
                 join_id: state.join_id,
@@ -785,6 +809,34 @@ impl SpaceAdmissionAggregate {
     }
 
     pub(crate) fn supersede(mut self) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        if self.attempt_timeline.is_none()
+            && self.attempt_digest.is_none()
+            && matches!(
+                &self.state,
+                SpaceAdmissionRecordState::Joiner(
+                    SpaceAdmissionJoinerState::Prepared(_)
+                        | SpaceAdmissionJoinerState::Committed(_)
+                        | SpaceAdmissionJoinerState::Applied(_)
+                        | SpaceAdmissionJoinerState::Activating(_)
+                        | SpaceAdmissionJoinerState::Cancelling(_)
+                )
+            )
+        {
+            return self.terminate_locally(SpaceAdmissionTerminationReason::Cancelled);
+        }
+        if self.attempt_digest.is_some()
+            && matches!(
+                &self.state,
+                SpaceAdmissionRecordState::Joiner(
+                    SpaceAdmissionJoinerState::Prepared(_)
+                        | SpaceAdmissionJoinerState::Committed(_)
+                        | SpaceAdmissionJoinerState::Applied(_)
+                        | SpaceAdmissionJoinerState::Activating(_)
+                )
+            )
+        {
+            return self.terminate_locally(SpaceAdmissionTerminationReason::Superseded);
+        }
         let record_version = self
             .record_version
             .checked_add(1)
@@ -823,6 +875,14 @@ impl SpaceAdmissionAggregate {
                     peer_binding: state.peer_binding,
                     continuation_credential: state.continuation_credential,
                     last_received: state.candidate_evidence,
+                })
+            }
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Cancelling(state)) => {
+                SpaceAdmissionSupersededState::Candidate(SpaceAdmissionSupersededTerminal {
+                    join_id: state.join_id,
+                    peer_binding: state.peer_binding,
+                    continuation_credential: state.continuation_credential,
+                    last_received: state.last_received,
                 })
             }
             _ => return Err(SpaceAdmissionAggregateError::UnsafeSupersession),

@@ -87,6 +87,8 @@ impl EngineRuntime for ProductionRuntime {
         operation: Operation,
         cancellation: CancellationToken,
     ) -> Result<OperationResult, EngineError> {
+        let join_started_at_ms =
+            matches!(&operation, Operation::JoinSpace(_)).then(|| self.clock.now_ms());
         match operation {
             Operation::QueryDeviceGroupChoices => {
                 return execute_query_device_group_choices(self.current_facade().await?.as_ref())
@@ -185,7 +187,10 @@ impl EngineRuntime for ProductionRuntime {
                     .await
                 }
                 Operation::JoinSpace(input) => {
-                    execute_join_space(self.current_facade().await?.as_ref(), input).await
+                    let started_at_ms =
+                        join_started_at_ms.ok_or_else(super::operation_unavailable_error)?;
+                    execute_join_space(self.current_facade().await?.as_ref(), input, started_at_ms)
+                        .await
                 }
                 Operation::IssueInvitation => {
                     execute_issue_invitation(self.current_facade().await?.as_ref()).await
@@ -508,7 +513,9 @@ impl EngineRuntime for ProductionRuntime {
         let result = if matches!(operation_kind, crate::OperationKind::ResetSpace) {
             operation.await
         } else {
+            // 会话交接已要求终止旧操作时，不允许同时完成的旧结果越过关闭边界。
             tokio::select! {
+                biased;
                 _ = session_cancellation.cancelled() => Err(super::operation_unavailable_error()),
                 result = operation => result,
             }
@@ -558,14 +565,17 @@ impl EngineRuntime for ProductionRuntime {
         use uc_core::ids::EntryId;
         use uc_core::ports::blob::BlobTicket;
 
-        let facade = self.current_facade().await?;
         match operation {
-            DevOperation::SeedText { text } => facade
+            DevOperation::SeedText { text } => self
+                .current_facade()
+                .await?
                 .seed_history_text(&text)
                 .await
                 .map(|entry_id| DevOperationResult::TextSeeded { entry_id })
                 .map_err(|error| operation_error_with_code(1903, "seed text", error)),
-            DevOperation::CaptureFilePaths { paths } => facade
+            DevOperation::CaptureFilePaths { paths } => self
+                .current_facade()
+                .await?
                 .capture_file_paths_for_diagnostics(paths)
                 .await
                 .map(|captured| {
@@ -591,7 +601,9 @@ impl EngineRuntime for ProductionRuntime {
                     })
                 })
                 .map_err(|error| operation_error_with_code(1904, "capture file paths", error)),
-            DevOperation::ListPairingInvitationAddresses => facade
+            DevOperation::ListPairingInvitationAddresses => self
+                .current_facade()
+                .await?
                 .list_pairing_invitation_addresses()
                 .await
                 .map(|addresses| {
@@ -608,7 +620,9 @@ impl EngineRuntime for ProductionRuntime {
                 .map_err(|error| {
                     operation_error_with_code(1905, "list invitation addresses", error)
                 }),
-            DevOperation::IssueInvitationForAddress { address } => facade
+            DevOperation::IssueInvitationForAddress { address } => self
+                .current_facade()
+                .await?
                 .issue_pairing_invitation_for_address(address)
                 .await
                 .map(|invitation| {
@@ -618,7 +632,9 @@ impl EngineRuntime for ProductionRuntime {
                     })
                 })
                 .map_err(|error| operation_error_with_code(1906, "issue invitation", error)),
-            DevOperation::PublishBlob { bytes } => facade
+            DevOperation::PublishBlob { bytes } => self
+                .current_facade()
+                .await?
                 .publish_blob(PublishBlobCommand {
                     plaintext: Bytes::from(bytes),
                     entry_id: None,
@@ -634,7 +650,9 @@ impl EngineRuntime for ProductionRuntime {
                     })
                 })
                 .map_err(|error| operation_error_with_code(1907, "publish blob", error)),
-            DevOperation::FetchBlob { ticket, entry_id } => facade
+            DevOperation::FetchBlob { ticket, entry_id } => self
+                .current_facade()
+                .await?
                 .fetch_blob(FetchBlobCommand {
                     ticket: BlobTicket::from_bytes(ticket),
                     entry_id: EntryId::from_string(entry_id),
@@ -655,6 +673,22 @@ impl EngineRuntime for ProductionRuntime {
                 .ok_or_else(|| {
                     EngineError::new(1911, crate::EngineErrorCategory::Unavailable, true)
                 }),
+            DevOperation::FailNextSessionHandover { point } => {
+                self.session_supervisor.fail_next_session_handover(point);
+                Ok(DevOperationResult::SessionHandoverFailureArmed)
+            }
+            DevOperation::QuerySessionHandoverDiagnostics => {
+                let diagnostics = self.session_supervisor.session_handover_diagnostics();
+                Ok(DevOperationResult::SessionHandoverDiagnostics {
+                    network_build_count: diagnostics.network_build_count,
+                    session_quiesce_failure_count: diagnostics.session_quiesce_failure_count,
+                    transition_completion_failure_count: diagnostics
+                        .transition_completion_failure_count,
+                    session_preparation_failure_count: diagnostics
+                        .session_preparation_failure_count,
+                    session_activation_failure_count: diagnostics.session_activation_failure_count,
+                })
+            }
             DevOperation::SetNetworkPartition {
                 blocked_endpoint_ids,
             } => Ok(DevOperationResult::NetworkPartitionUpdated {

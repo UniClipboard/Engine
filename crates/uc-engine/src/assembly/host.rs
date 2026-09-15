@@ -555,7 +555,7 @@ mod tests {
 
     use super::{wire_host_capabilities, EngineHostEventEmitter};
     use crate::assembly::deps::WiringError;
-    use crate::assembly::lifecycle::build_daemon_lifecycle;
+    use crate::assembly::lifecycle::{build_network_runtime, prepare_daemon_session};
 
     #[derive(Default)]
     struct TestSecureStorage(Mutex<HashMap<String, Vec<u8>>>);
@@ -849,39 +849,50 @@ mod tests {
             .await
             .unwrap();
 
-        let lifecycle = build_daemon_lifecycle(
+        let mut network = build_network_runtime(
             &wiring.wired.application,
             &wiring.wired.sync_engine,
-            "1.2.3",
-            #[cfg(feature = "lan-compat")]
-            wiring.wired.mobile_sync_ports.clone(),
             None,
             None,
             None,
             None,
         )
         .await
+        .unwrap_or_else(|error| panic!("network runtime assembly failed: {error:#}"));
+        let prepared = prepare_daemon_session(
+            &wiring.wired.application,
+            &wiring.wired.sync_engine,
+            "1.2.3",
+            #[cfg(feature = "lan-compat")]
+            wiring.wired.mobile_sync_ports.clone(),
+            network.prepare_session(),
+        )
+        .await
         .unwrap_or_else(|error| panic!("daemon lifecycle assembly failed: {error:#}"));
-        let membership_history_reachable = lifecycle
-            .sync_engine_assembly
-            .membership_history_exchange_is_reachable_for_test()
+        network
+            .activate_session(prepared.prepared_session)
+            .await
+            .unwrap();
+        let membership_history_reachable = network
+            .accepts_protocol_for_test(uc_infra::network::iroh::MEMBERSHIP_HISTORY_EXCHANGE_ALPN)
             .await;
-        let membership_branch_recovery_reachable = lifecycle
-            .sync_engine_assembly
-            .membership_branch_recovery_is_reachable_for_test()
+        let membership_branch_recovery_reachable = network
+            .accepts_protocol_for_test(uc_infra::network::iroh::MEMBERSHIP_BRANCH_RECOVERY_ALPN)
             .await;
-        let space_admission_reachable = lifecycle
-            .sync_engine_assembly
-            .space_admission_is_reachable_for_test()
+        let space_admission_reachable = network
+            .accepts_protocol_for_test(uc_infra::network::iroh::SPACE_ADMISSION_ALPN)
             .await;
-        let deprecated_removal_protocols_reachable = lifecycle
-            .sync_engine_assembly
-            .deprecated_removal_protocols_are_reachable_for_test()
-            .await;
-        lifecycle
-            .sync_engine_assembly
+        let (exchange, late, notice) = tokio::join!(
+            network.accepts_protocol_for_test(b"uniclipboard/removal-exchange/1"),
+            network.accepts_protocol_for_test(b"uniclipboard/removal-late/1"),
+            network.accepts_protocol_for_test(b"uniclipboard/removal-notice/1"),
+        );
+        let deprecated_removal_protocols_reachable = exchange || late || notice;
+        prepared
+            .session
             .shutdown(uc_core::FileTransferCancellationReason::Unknown)
             .await;
+        network.shutdown().await;
         task_registry
             .shutdown(std::time::Duration::from_millis(500))
             .await;

@@ -5,7 +5,10 @@ use super::super::space_admission_wire::{
 use super::super::trace_context::set_remote_parent;
 use super::credential::SpaceAdmissionChannelCredentialPort;
 use super::crypto::{calculate_mac, copy_credential, peer_id, random_nonce};
-use super::diagnostics::{record_server_completion, server_error_type, server_operation_span};
+use super::diagnostics::{
+    handler_failure, record_network_snapshot, server_completion, server_error_type,
+    server_operation_span, wire_failure,
+};
 use super::errors::{
     map_server_wire_error, HandlerError, CLOSE_AUTHENTICATION, CLOSE_BUSY,
     CLOSE_PEER_UPGRADE_REQUIRED, CLOSE_PROTOCOL,
@@ -24,6 +27,10 @@ use uc_application::deps::{
     SpaceAdmissionTransportError,
 };
 use uc_core::membership::{AdmissionChannelPeerId, AdmissionPeerBinding};
+use uc_observability_contract::diagnostics::connectivity::{
+    AdmissionExchangeFailure, AdmissionExchangeObservation, AdmissionExchangeSide,
+    AdmissionExchangeStep, AdmissionNetworkPoint,
+};
 mod authentication;
 use authentication::AuthenticatedRequest;
 const EXCHANGE_DEADLINE: Duration = Duration::from_secs(120);
@@ -73,13 +80,22 @@ impl IrohSpaceAdmissionHandler {
             wire,
             envelope,
             canonical_digest,
+            attempt_contract,
         } = self
             .authenticate(connection, deadline, connection_started)
             .await?;
         let span = server_operation_span();
         let _ = set_remote_parent(&span, wire.trace_context.as_ref());
         let started = std::time::Instant::now();
+        let mut progress =
+            span.in_scope(|| AdmissionExchangeObservation::begin(AdmissionExchangeSide::Sponsor));
         let result = tokio::time::timeout_at(deadline, async {
+            record_network_snapshot(
+                connection,
+                AdmissionExchangeSide::Sponsor,
+                AdmissionNetworkPoint::ExchangeStarted,
+            );
+            progress.start_step(AdmissionExchangeStep::HandleRequest);
             let endpoint_credential = if is_initial {
                 Some(copy_credential(&credential).map_err(|source| {
                     HandlerError::AuthenticationProof {
@@ -96,6 +112,7 @@ impl IrohSpaceAdmissionHandler {
                 envelope,
                 canonical_digest,
                 endpoint_credential,
+                attempt_contract,
             )
             .ok_or(HandlerError::Protocol)?;
             let reply = self
@@ -103,6 +120,7 @@ impl IrohSpaceAdmissionHandler {
                 .handle(message)
                 .await
                 .map_err(|_| HandlerError::Application)?;
+            progress.start_step(AdmissionExchangeStep::PrepareReply);
             let reply = reply.envelope().ok_or(HandlerError::Application)?;
             let canonical = reply
                 .encode_canonical_v1()
@@ -119,6 +137,7 @@ impl IrohSpaceAdmissionHandler {
                 &digest,
                 None,
             )?;
+            progress.start_step(AdmissionExchangeStep::SendReply);
             write_envelope(
                 &mut send,
                 FrameKind::Reply,
@@ -130,18 +149,33 @@ impl IrohSpaceAdmissionHandler {
                 },
             )
             .await
+            .inspect_err(|error| progress.fail(wire_failure(error)))
             .map_err(map_server_wire_error)?;
-            read_peer_acknowledgement(&mut receive).await?;
-            send.finish().map_err(|source| HandlerError::Transport {
-                source: anyhow::Error::new(source),
-            })?;
+            progress.start_step(AdmissionExchangeStep::ReceiveAcknowledgement);
+            read_peer_acknowledgement_observed(&mut receive, &mut progress).await?;
+            progress.start_step(AdmissionExchangeStep::FinishSend);
+            send.finish()
+                .inspect_err(|_| progress.fail(AdmissionExchangeFailure::ConnectionClosed))
+                .map_err(|source| HandlerError::Transport {
+                    source: anyhow::Error::new(source),
+                })?;
             Ok(())
         })
         .instrument(span.clone())
         .await
         .map_err(|_| HandlerError::Timeout)
         .and_then(|result| result);
-        span.in_scope(|| record_server_completion(started.elapsed(), result.as_ref().err()));
+        if let Err(error) = &result {
+            progress.fail(handler_failure(error));
+        }
+        span.in_scope(|| {
+            record_network_snapshot(
+                connection,
+                AdmissionExchangeSide::Sponsor,
+                AdmissionNetworkPoint::ExchangeFinished,
+            )
+        });
+        progress.finish(server_completion(started.elapsed(), result.as_ref().err()));
         drop(span);
         if result.is_ok() {
             let _ = tokio::time::timeout_at(deadline, send.stopped()).await;
@@ -150,15 +184,34 @@ impl IrohSpaceAdmissionHandler {
     }
 }
 
+pub(super) async fn read_peer_acknowledgement_observed<R>(
+    receive: &mut R,
+    progress: &mut AdmissionExchangeObservation,
+) -> Result<(), HandlerError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    read_ack(receive)
+        .await
+        .inspect_err(|error| progress.fail(wire_failure(error)))
+        .map_err(map_ack_wire_error)
+}
+
+#[cfg(test)]
 pub(super) async fn read_peer_acknowledgement<R>(receive: &mut R) -> Result<(), HandlerError>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    let ack: u8 = read_typed(receive, FrameKind::Ack, AUTH_FRAME_LIMIT)
-        .await
-        .map_err(map_ack_wire_error)?;
+    read_ack(receive).await.map_err(map_ack_wire_error)
+}
+
+async fn read_ack<R>(receive: &mut R) -> Result<(), WireError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let ack: u8 = read_typed(receive, FrameKind::Ack, AUTH_FRAME_LIMIT).await?;
     if ack != 1 {
-        return Err(HandlerError::Protocol);
+        return Err(WireError::InvalidPayload);
     }
     Ok(())
 }

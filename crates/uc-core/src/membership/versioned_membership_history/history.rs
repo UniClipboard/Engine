@@ -168,6 +168,32 @@ impl VersionedMembershipHistory {
             })
     }
 
+    pub fn admission_event_id_for(&self, member: MemberInstanceId) -> Option<MembershipEventId> {
+        self.events
+            .iter()
+            .find_map(|(event_id, event)| match &event.operation {
+                MembershipOperationV2::AddDevice { admission }
+                    if admission.facts.member_instance == member =>
+                {
+                    Some(*event_id)
+                }
+                MembershipOperationV2::AddDevice { .. }
+                | MembershipOperationV2::RemoveDevice { .. } => None,
+            })
+    }
+
+    pub fn removal_event_id_for(&self, member: MemberInstanceId) -> Option<MembershipEventId> {
+        self.events
+            .iter()
+            .find_map(|(event_id, event)| match event.operation {
+                MembershipOperationV2::RemoveDevice { member: removed } if removed == member => {
+                    Some(*event_id)
+                }
+                MembershipOperationV2::AddDevice { .. }
+                | MembershipOperationV2::RemoveDevice { .. } => None,
+            })
+    }
+
     pub fn current_position(
         &self,
     ) -> Result<BaseMembershipHistoryPosition, MembershipHistoryV2Error> {

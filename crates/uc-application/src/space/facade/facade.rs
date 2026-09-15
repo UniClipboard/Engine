@@ -101,6 +101,7 @@ impl SpaceFacade {
             runtime_adapters,
             peer_reachability_changed_events,
             admission_observations,
+            space_transition_changes,
         } = deps;
         let SpaceTransitionDeps {
             device_management_reset_data,
@@ -118,6 +119,7 @@ impl SpaceFacade {
             Arc::clone(&re_pairing_state)
                 as Arc<dyn crate::space::membership::ResolveRePairingPort>,
             admission_observations,
+            space_transition_changes,
         );
         let membership_initializer = application.initialize_membership();
         let membership_admission = application.query_membership_admission();
@@ -483,6 +485,7 @@ impl SpaceFacade {
     pub async fn join_space(
         &self,
         input: JoinSpaceInput,
+        started_at_ms: i64,
     ) -> Result<JoinSpaceResult, JoinSpaceError> {
         let space_admission = self
             .application
@@ -491,7 +494,7 @@ impl SpaceFacade {
             .as_ref()
             .map(SpaceApplication::space_admission)
             .ok_or(JoinSpaceError::Unavailable)?;
-        space_admission.start_join(input).await
+        space_admission.start_join_at(input, started_at_ms).await
     }
 
     pub async fn query_device_trust(

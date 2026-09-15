@@ -1,13 +1,25 @@
 #[test]
 fn pending_exchanges_decode_real_bytes_from_the_previous_v1_layout() {
     for (name, aggregate) in [
-        ("initiated", initiated_joiner_aggregate_fixture()),
-        ("prepared", joiner_prepared_aggregate_fixture()),
-        ("applied", joiner_applied_aggregate_fixture()),
-        ("cancelling", cancelling_joiner_aggregate_fixture()),
+        (
+            "initiated",
+            initiated_joiner_aggregate_fixture().into_legacy_persistence_fixture(),
+        ),
+        (
+            "prepared",
+            joiner_prepared_aggregate_fixture().into_legacy_persistence_fixture(),
+        ),
+        (
+            "applied",
+            joiner_applied_aggregate_fixture().into_legacy_persistence_fixture(),
+        ),
+        (
+            "cancelling",
+            cancelling_joiner_aggregate_fixture().into_legacy_persistence_fixture(),
+        ),
         (
             "active pending settlement",
-            active_pending_settlement_aggregate_fixture(),
+            active_pending_settlement_aggregate_fixture().into_legacy_persistence_fixture(),
         ),
     ] {
         let mut legacy = aggregate
@@ -19,7 +31,7 @@ fn pending_exchanges_decode_real_bytes_from_the_previous_v1_layout() {
         assert_eq!(decoded, aggregate, "{name}");
     }
 
-    let aggregate = initiated_joiner_aggregate_fixture();
+    let aggregate = initiated_joiner_aggregate_fixture().into_legacy_persistence_fixture();
     let current = aggregate.encode_persisted().expect("current bytes encode");
     let mut current_with_junk = current.clone();
     current_with_junk.push(0xaa);
@@ -44,6 +56,23 @@ fn pending_exchanges_decode_real_bytes_from_the_previous_v1_layout() {
         SpaceAdmissionAggregate::decode_persisted(&truncated_terminal),
         Err(crate::membership::SpaceAdmissionPersistenceError::InvalidEncoding)
     );
+}
+
+#[test]
+fn authenticated_join_round_trips_through_the_current_v2_record() {
+    let current_v2 = joiner_prepared_aggregate_fixture();
+    let encoded = current_v2.encode_persisted().expect("V2 record encodes");
+    let (format_version, _) = postcard::take_from_bytes::<u16>(&encoded)
+        .expect("V2 record starts with its format version");
+    assert_eq!(
+        format_version,
+        crate::membership::SPACE_ADMISSION_RECORD_FORMAT_V2
+    );
+
+    let decoded =
+        SpaceAdmissionAggregate::decode_persisted(&encoded).expect("V2 record remains readable");
+
+    assert_eq!(decoded, current_v2);
 }
 
 fn assert_admission_persistence_round_trip(aggregate: SpaceAdmissionAggregate) {

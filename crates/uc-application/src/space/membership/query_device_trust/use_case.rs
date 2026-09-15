@@ -13,7 +13,8 @@ use crate::space::membership::{MembershipLedger, VerifiedMembershipLedger};
 use super::{
     DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
     DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, LoadCurrentJoinStatusPort,
-    LoadDeviceTrustObservationsPort, PendingDeviceTrustChange, QueryDeviceTrustError,
+    LoadDeviceTrustObservationsPort, PairingConfirmationTarget, PendingDeviceTrustChange,
+    QueryDeviceTrustError,
 };
 
 pub(crate) struct QueryDeviceTrustUseCase {
@@ -37,17 +38,25 @@ impl QueryDeviceTrustUseCase {
 
     pub(crate) async fn execute(&self) -> Result<DeviceTrustStatus, QueryDeviceTrustError> {
         let snapshot = self.ledger.load_verified().await?;
-        self.query_snapshot(&snapshot).await
+        let status = self.query_snapshot(&snapshot).await?;
+        let latest = self.ledger.load_verified().await?;
+        if latest.record().revision == snapshot.record().revision {
+            return Ok(status);
+        }
+        self.query_snapshot(&latest).await
     }
 
     pub(crate) async fn query_snapshot(
         &self,
         snapshot: &VerifiedMembershipLedger,
     ) -> Result<DeviceTrustStatus, QueryDeviceTrustError> {
-        let current_join = self.current_join.load_current_join().await?;
         if snapshot.history().is_none() {
             let mut status = DeviceTrustStatus::no_current_space(snapshot.record().revision);
-            status.current_join = current_join;
+            status.current_join = self
+                .current_join
+                .load_admission_display(&[])
+                .await?
+                .current_join;
             return Ok(status);
         }
         let history = snapshot
@@ -65,6 +74,34 @@ impl QueryDeviceTrustUseCase {
             .record()
             .local_member_instance
             .ok_or(QueryDeviceTrustError::RecoveryRequired)?;
+        let confirmation_targets = history
+            .active_members()
+            .into_iter()
+            .filter(|member| *member != local_member_instance)
+            .filter_map(|member_instance_id| {
+                history
+                    .admission_event_id_for(member_instance_id)
+                    .map(|add_event_id| PairingConfirmationTarget {
+                        member_instance_id,
+                        add_event_id,
+                    })
+            })
+            .collect::<Vec<_>>();
+        let admission_display = self
+            .current_join
+            .load_admission_display(&confirmation_targets)
+            .await?;
+        let current_join = admission_display.current_join;
+        let mut pairing_confirmations = BTreeMap::new();
+        for observation in admission_display.pairing_confirmations {
+            if !confirmation_targets.contains(&observation.target)
+                || pairing_confirmations
+                    .insert(observation.target, observation.status)
+                    .is_some()
+            {
+                return Err(QueryDeviceTrustError::RecoveryRequired);
+            }
+        }
         let current_position = history
             .current_position()
             .map_err(|_| QueryDeviceTrustError::RecoveryRequired)?;
@@ -182,6 +219,16 @@ impl QueryDeviceTrustUseCase {
                 membership,
                 relationship,
                 sync_state,
+                pairing_confirmation: member
+                    .and_then(|member_instance_id| {
+                        history
+                            .admission_event_id_for(member_instance_id)
+                            .map(|add_event_id| PairingConfirmationTarget {
+                                member_instance_id,
+                                add_event_id,
+                            })
+                    })
+                    .and_then(|target| pairing_confirmations.get(&target).copied()),
             });
         }
 

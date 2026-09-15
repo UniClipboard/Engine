@@ -32,6 +32,7 @@ pub mod persistable_addr;
 mod protocol_router;
 pub mod relay_probe;
 pub(crate) mod runtime_consts;
+mod session_generation;
 pub mod space_admission;
 mod space_admission_wire;
 mod trace_context;
@@ -76,7 +77,8 @@ pub use network_partition::IrohNetworkPartitionGate;
 pub use node::{
     ActiveClipboardHandlers, ActiveClipboardPullHandlers, BlobHandlers, ClipboardHandlers,
     GroupUpdateHandlers, IrohNode, IrohNodeBuilder, IrohNodeConfig, IrohNodeError,
-    IrohRelayAccessToken, PairingInvitationHandlers, TransferProgressHandlers,
+    IrohRelayAccessToken, IrohSessionBuilder, PairingInvitationHandlers, PreparedIrohSession,
+    TransferProgressHandlers,
 };
 pub use peer_reachability_adapter::{
     IrohPeerReachabilityAdapter, IrohPeerReachabilityHandler, LEGACY_PEER_REACHABILITY_ALPN,

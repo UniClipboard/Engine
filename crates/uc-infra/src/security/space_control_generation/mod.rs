@@ -574,6 +574,7 @@ impl SpaceControlGeneration {
                 .ok_or_else(|| inconsistent(anyhow::anyhow!("branch ledger revision overflow")))?;
             ledger
                 .compare_and_commit(MembershipLedgerMutation {
+                    device_trust_changed: true,
                     expected_revision: current.revision,
                     expected_history_digest: current
                         .membership_history
@@ -816,6 +817,7 @@ impl SpaceControlGeneration {
                     use sha2::Digest as _;
                     sha2::Sha256::digest(history).into()
                 }),
+                device_trust_changed: true,
                 replacement: prepared.ledger(current.revision)?,
             })
             .await

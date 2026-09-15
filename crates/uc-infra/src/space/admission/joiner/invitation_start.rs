@@ -8,6 +8,7 @@ use uc_application::facade::JoinSpaceInput;
 use uc_core::membership::{
     AdmissionJoinerStartContext, AdmissionShortInvitationCode, JoinId, SpaceAdmissionId,
 };
+use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
 
 use crate::space::decode_invitation_entry;
 
@@ -26,35 +27,42 @@ impl PrepareJoinerInvitationPort for DefaultJoinerInvitationPreparation {
         &self,
         input: &JoinSpaceInput,
     ) -> Result<PreparedJoinerInvitation, PrepareJoinerInvitationError> {
-        match decode_invitation_entry(
-            input.invitation_code.as_str(),
-            chrono::Utc::now().timestamp_millis(),
-        ) {
-            Ok(Some(_)) => return Ok(PreparedJoinerInvitation::Full),
-            Ok(None) => {}
-            Err(_) => return Err(PrepareJoinerInvitationError::Invalid),
-        }
+        observe_local_result(LocalWorkStep::JoinerPrepareInvitation, async {
+            match decode_invitation_entry(
+                input.invitation_code.as_str(),
+                chrono::Utc::now().timestamp_millis(),
+            ) {
+                Ok(Some(_)) => return Ok(PreparedJoinerInvitation::Full),
+                Ok(None) => {}
+                Err(_) => return Err(PrepareJoinerInvitationError::Invalid),
+            }
 
-        let short_code = AdmissionShortInvitationCode::from_bytes(
-            input.invitation_code.as_str().as_bytes().to_vec(),
-        )
-        .map_err(|_| PrepareJoinerInvitationError::Invalid)?;
-        let context = postcard::to_stdvec(&JoinerStartContextV1 {
-            format_version: 1,
-            passphrase: input.passphrase.expose().as_bytes(),
-            preserve_unreadable_history: input.preserve_unreadable_history,
+            let short_code = AdmissionShortInvitationCode::from_bytes(
+                input.invitation_code.as_str().as_bytes().to_vec(),
+            )
+            .map_err(|_| PrepareJoinerInvitationError::Invalid)?;
+            let context = postcard::to_stdvec(&JoinerStartContextV1 {
+                format_version: 1,
+                passphrase: input.passphrase.expose().as_bytes(),
+                preserve_unreadable_history: input.preserve_unreadable_history,
+            })
+            .map_err(|error| {
+                PrepareJoinerInvitationError::unavailable(anyhow::Error::new(error))
+            })?;
+            let start_context =
+                AdmissionJoinerStartContext::from_bytes(context).map_err(|error| {
+                    PrepareJoinerInvitationError::unavailable(anyhow::Error::new(error))
+                })?;
+
+            let prepared = PreparedJoinerInvitation::short(
+                mint_admission_id(),
+                mint_join_id(),
+                start_context,
+                short_code,
+            );
+            Ok(prepared)
         })
-        .map_err(|error| PrepareJoinerInvitationError::unavailable(anyhow::Error::new(error)))?;
-        let start_context = AdmissionJoinerStartContext::from_bytes(context).map_err(|error| {
-            PrepareJoinerInvitationError::unavailable(anyhow::Error::new(error))
-        })?;
-
-        Ok(PreparedJoinerInvitation::short(
-            mint_admission_id(),
-            mint_join_id(),
-            start_context,
-            short_code,
-        ))
+        .await
     }
 }
 

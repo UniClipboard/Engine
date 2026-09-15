@@ -34,6 +34,8 @@ impl WakeSpaceMembershipMaintenancePort for WakeCounter {
     fn wake(&self) {
         self.0.fetch_add(1, Ordering::SeqCst);
     }
+
+    fn schedule_at(&self, _expires_at_ms: i64, _now_ms: i64) {}
 }
 
 #[test]
@@ -215,6 +217,10 @@ async fn sibling_summary_requests_verified_evidence_and_records_one_conflict() {
 impl LoadMembershipLedgerPort for MemoryLedgerRepository {
     async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
         Ok(self.loaded.lock().unwrap().clone())
+    }
+
+    fn current_revision(&self) -> Option<u64> {
+        self.loaded.lock().ok().map(|loaded| loaded.revision)
     }
 }
 

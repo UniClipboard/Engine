@@ -1446,6 +1446,7 @@ fn device_trust_debug_output_redacts_device_facts_and_change_ids() {
             group_relationship: uc_engine::DeviceGroupRelationshipSummary::Consistent,
             compatibility: uc_engine::DeviceCompatibilitySummary::Compatible,
             sync_relationship: uc_engine::DeviceSyncRelationshipSummary::Usable,
+            pairing_confirmation: None,
             available_actions: Vec::new(),
             blocked_reason: None,
         });
@@ -1453,6 +1454,49 @@ fn device_trust_debug_output_redacts_device_facts_and_change_ids() {
     assert!(!debug.contains("private-local-id"));
     assert!(!debug.contains("private-peer-id"));
     assert!(!debug.contains("Private MacBook"));
+}
+
+#[test]
+fn pairing_confirmation_is_optional_and_uses_stable_names() {
+    let mut relationship = uc_engine::DeviceTrustRelationshipSummary {
+        device_id: "peer".into(),
+        display_name: "Peer".into(),
+        is_local: false,
+        reachability: uc_engine::DeviceReachabilitySummary::Offline,
+        membership: uc_engine::DeviceMembershipSummary::Active,
+        group_relationship: uc_engine::DeviceGroupRelationshipSummary::Consistent,
+        compatibility: uc_engine::DeviceCompatibilitySummary::Compatible,
+        sync_relationship: uc_engine::DeviceSyncRelationshipSummary::Usable,
+        pairing_confirmation: None,
+        available_actions: Vec::new(),
+        blocked_reason: None,
+    };
+    let absent = serde_json::to_value(&relationship).expect("serializable relationship");
+    assert!(absent.get("pairing_confirmation").is_none());
+
+    for (status, expected) in [
+        (
+            uc_engine::PairingConfirmationSummary::AwaitingPeerConfirmation,
+            "awaiting_peer_confirmation",
+        ),
+        (
+            uc_engine::PairingConfirmationSummary::Unconfirmed,
+            "unconfirmed",
+        ),
+        (
+            uc_engine::PairingConfirmationSummary::Confirmed,
+            "confirmed",
+        ),
+    ] {
+        relationship.pairing_confirmation = Some(status);
+        let present = serde_json::to_value(&relationship).expect("serializable relationship");
+        assert_eq!(
+            present
+                .get("pairing_confirmation")
+                .and_then(|value| value.as_str()),
+            Some(expected)
+        );
+    }
 }
 
 #[test]
@@ -1632,6 +1676,39 @@ fn join_space_contract_returns_a_tagged_active_result_with_both_identities() {
             && joined_space.migrated_records == Some(42)
             && joined_space.preserved_unreadable_records == Some(3)
     ));
+}
+
+#[test]
+fn terminated_join_contract_uses_stable_status_and_reason_names() {
+    for (reason, expected) in [
+        (
+            uc_engine::JoinSpaceTerminationReasonSummary::Cancelled,
+            "cancelled",
+        ),
+        (
+            uc_engine::JoinSpaceTerminationReasonSummary::Expired,
+            "expired",
+        ),
+        (
+            uc_engine::JoinSpaceTerminationReasonSummary::Superseded,
+            "superseded",
+        ),
+    ] {
+        let status = uc_engine::JoinSpaceStatusSummary::Terminated {
+            join_id: "join-id".into(),
+            reason,
+        };
+        let encoded = serde_json::to_value(status).expect("serializable join status");
+
+        assert_eq!(
+            encoded.get("status").and_then(|value| value.as_str()),
+            Some("terminated")
+        );
+        assert_eq!(
+            encoded.get("reason").and_then(|value| value.as_str()),
+            Some(expected)
+        );
+    }
 }
 
 #[test]

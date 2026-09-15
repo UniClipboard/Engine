@@ -10,6 +10,7 @@ use super::{
 };
 use crate::db::pool::DbPool;
 use crate::space::RuntimeSpaceAccessAdapter;
+use uc_application::deps::{JoinerActivationIntent, ValidateJoinerActivationIntentPort};
 
 /// V3 control-generation 的唯一 manifest 生效与进程内重绑入口。
 ///
@@ -48,6 +49,8 @@ impl SpaceTransitionActivation {
         expected_source: &ActiveRuntimeManifestV3,
         prepared: &PreparedSpaceControlGeneration,
         target_access_state: &[u8],
+        intents: &dyn ValidateJoinerActivationIntentPort,
+        intent: JoinerActivationIntent,
     ) -> Result<SpaceTransitionActivationOutcome, SpaceTransitionActivationError> {
         let _guard = self.activation_lock.lock().await;
         let _lease = acquire_activation_lease(&self.profile_root)?;
@@ -69,6 +72,7 @@ impl SpaceTransitionActivation {
             .reopen_prepared(target, prepared.database_digest())
             .await
             .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
+        validate_intent(intents, intent).await?;
 
         let promotion = self
             .manifests
@@ -103,6 +107,8 @@ impl SpaceTransitionActivation {
         &self,
         target: &ActiveRuntimeManifestV3,
         target_access_state: &[u8],
+        intents: &dyn ValidateJoinerActivationIntentPort,
+        intent: JoinerActivationIntent,
     ) -> Result<SpaceTransitionActivationOutcome, SpaceTransitionActivationError> {
         let _guard = self.activation_lock.lock().await;
         let _lease = acquire_activation_lease(&self.profile_root)?;
@@ -111,6 +117,7 @@ impl SpaceTransitionActivation {
                 "cross-space recovery access state is missing"
             )));
         }
+        validate_intent(intents, intent).await?;
         let active = self
             .manifests
             .load_runtime()
@@ -129,9 +136,15 @@ impl SpaceTransitionActivation {
         &self,
         expected_source: &ActiveRuntimeManifestV3,
         prepared: &PreparedSpaceControlGeneration,
+        intents: &dyn ValidateJoinerActivationIntentPort,
+        intent: JoinerActivationIntent,
     ) -> Result<SpaceTransitionActivationOutcome, SpaceTransitionActivationError> {
-        self.activate_same_space_retained_control(expected_source, prepared)
-            .await
+        self.activate_same_space_retained_control(
+            expected_source,
+            prepared,
+            Some((intents, intent)),
+        )
+        .await
     }
 
     pub async fn activate_membership_branch(
@@ -139,7 +152,7 @@ impl SpaceTransitionActivation {
         expected_source: &ActiveRuntimeManifestV3,
         prepared: &PreparedSpaceControlGeneration,
     ) -> Result<SpaceTransitionActivationOutcome, SpaceTransitionActivationError> {
-        self.activate_same_space_retained_control(expected_source, prepared)
+        self.activate_same_space_retained_control(expected_source, prepared, None)
             .await
     }
 
@@ -147,6 +160,10 @@ impl SpaceTransitionActivation {
         &self,
         expected_source: &ActiveRuntimeManifestV3,
         prepared: &PreparedSpaceControlGeneration,
+        admission_intent: Option<(
+            &dyn ValidateJoinerActivationIntentPort,
+            JoinerActivationIntent,
+        )>,
     ) -> Result<SpaceTransitionActivationOutcome, SpaceTransitionActivationError> {
         let _guard = self.activation_lock.lock().await;
         let _lease = acquire_activation_lease(&self.profile_root)?;
@@ -166,6 +183,9 @@ impl SpaceTransitionActivation {
             .reopen_prepared(target, prepared.database_digest())
             .await
             .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
+        if let Some((intents, intent)) = admission_intent {
+            validate_intent(intents, intent).await?;
+        }
         let promotion = self
             .manifests
             .promote_v3_control_generation(expected_source, target)
@@ -194,6 +214,8 @@ impl SpaceTransitionActivation {
         &self,
         prepared: &PreparedSpaceControlGeneration,
         target_access_state: &[u8],
+        intents: &dyn ValidateJoinerActivationIntentPort,
+        intent: JoinerActivationIntent,
     ) -> Result<SpaceTransitionActivationOutcome, SpaceTransitionActivationError> {
         let _guard = self.activation_lock.lock().await;
         let _lease = acquire_activation_lease(&self.profile_root)?;
@@ -208,6 +230,7 @@ impl SpaceTransitionActivation {
             .reopen_prepared(target, prepared.database_digest())
             .await
             .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
+        validate_intent(intents, intent).await?;
         let promotion = self
             .manifests
             .promote_initial_v3(target)
@@ -237,6 +260,8 @@ impl SpaceTransitionActivation {
         &self,
         target: &ActiveRuntimeManifestV3,
         target_access_state: &[u8],
+        intents: &dyn ValidateJoinerActivationIntentPort,
+        intent: JoinerActivationIntent,
     ) -> Result<SpaceTransitionActivationOutcome, SpaceTransitionActivationError> {
         let _guard = self.activation_lock.lock().await;
         let _lease = acquire_activation_lease(&self.profile_root)?;
@@ -245,6 +270,7 @@ impl SpaceTransitionActivation {
                 "fresh recovery access state is missing"
             )));
         }
+        validate_intent(intents, intent).await?;
         self.validate_fresh_profile_layout(target)?;
         let active = self
             .manifests
@@ -264,23 +290,33 @@ impl SpaceTransitionActivation {
     pub async fn recover_same_space(
         &self,
         target: &ActiveRuntimeManifestV3,
+        intents: &dyn ValidateJoinerActivationIntentPort,
+        intent: JoinerActivationIntent,
     ) -> Result<SpaceTransitionActivationOutcome, SpaceTransitionActivationError> {
-        self.recover_retained_control(target).await
+        self.recover_retained_control(target, Some((intents, intent)))
+            .await
     }
 
     pub async fn recover_membership_branch(
         &self,
         target: &ActiveRuntimeManifestV3,
     ) -> Result<SpaceTransitionActivationOutcome, SpaceTransitionActivationError> {
-        self.recover_retained_control(target).await
+        self.recover_retained_control(target, None).await
     }
 
     async fn recover_retained_control(
         &self,
         target: &ActiveRuntimeManifestV3,
+        admission_intent: Option<(
+            &dyn ValidateJoinerActivationIntentPort,
+            JoinerActivationIntent,
+        )>,
     ) -> Result<SpaceTransitionActivationOutcome, SpaceTransitionActivationError> {
         let _guard = self.activation_lock.lock().await;
         let _lease = acquire_activation_lease(&self.profile_root)?;
+        if let Some((intents, intent)) = admission_intent {
+            validate_intent(intents, intent).await?;
+        }
         let active = self
             .manifests
             .load_runtime()
@@ -348,7 +384,7 @@ impl SpaceTransitionActivation {
         &self,
         target: &ActiveRuntimeManifestV3,
     ) -> Result<SpaceTransitionActivationOutcome, SpaceTransitionActivationError> {
-        self.recover_retained_control(target).await
+        self.recover_retained_control(target, None).await
     }
 
     pub async fn discard_prepared_control(
@@ -392,6 +428,51 @@ impl SpaceTransitionActivation {
         }
         self.control_generations
             .discard_prepared(prepared)
+            .map_err(|source| storage(anyhow::Error::new(source)))
+    }
+
+    /// 在与 manifest 提升相同的关口内隔离一个已经终止的准入目标。
+    pub async fn terminate_admission_target(
+        &self,
+        admission_id: [u8; 32],
+        expected_source: Option<&ActiveRuntimeManifestV3>,
+        target: &ActiveRuntimeManifestV3,
+        prepared_database_digest: &[u8; 32],
+    ) -> Result<(), SpaceTransitionActivationError> {
+        let _guard = self.activation_lock.lock().await;
+        let _lease = acquire_activation_lease(&self.profile_root)?;
+        let active = self
+            .manifests
+            .load_runtime()
+            .await
+            .map_err(map_manifest_error)?;
+        if active.as_ref() == Some(&ActiveRuntimeManifest::V3(target.clone())) {
+            self.manifests
+                .stop_admission_target(admission_id, target)
+                .await
+                .map_err(map_manifest_error)?;
+            self.control_pool
+                .detach_to_ephemeral_database()
+                .map_err(recovery)?;
+            self.space_access.stop_using_admission_target();
+            return Ok(());
+        }
+        let source_is_active = match (expected_source, active.as_ref()) {
+            (Some(source), Some(ActiveRuntimeManifest::V3(active))) => source == active,
+            (None, None) => true,
+            _ => false,
+        };
+        if !source_is_active {
+            // 另一个意图已经取得活动 manifest；旧目标不能再提升，也不能影响新目标。
+            return Ok(());
+        }
+        let prepared = self
+            .control_generations
+            .reopen_prepared(target, prepared_database_digest)
+            .await
+            .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
+        self.control_generations
+            .discard_prepared(&prepared)
             .map_err(|source| storage(anyhow::Error::new(source)))
     }
 
@@ -514,6 +595,19 @@ impl SpaceTransitionActivation {
             .parent()
             .ok_or_else(|| storage(anyhow::anyhow!("control generation parent is missing")))?;
         sync_directory(parent).map_err(|source| storage(anyhow::Error::new(source)))
+    }
+}
+
+async fn validate_intent(
+    intents: &dyn ValidateJoinerActivationIntentPort,
+    intent: JoinerActivationIntent,
+) -> Result<(), SpaceTransitionActivationError> {
+    match intents.validate(intent).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(inconsistent(anyhow::anyhow!(
+            "joiner activation intent is no longer current"
+        ))),
+        Err(source) => Err(recovery(anyhow::Error::new(source))),
     }
 }
 

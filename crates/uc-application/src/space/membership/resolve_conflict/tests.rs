@@ -43,6 +43,10 @@ impl LoadMembershipLedgerPort for MemoryLedger {
             .map(|record| record.clone())
             .map_err(|_| MembershipLedgerError::Unavailable)
     }
+
+    fn current_revision(&self) -> Option<u64> {
+        self.0.lock().ok().map(|record| record.revision)
+    }
 }
 
 #[async_trait]
@@ -381,6 +385,7 @@ async fn a_later_distinct_conflict_allows_another_explicit_branch_choice() {
     {
         let mut record = repository.0.lock().unwrap();
         let detected_at_revision = record.revision;
+        record.revision += 1;
         record.membership_conflicts.insert(
             second_conflict_id,
             MembershipConflictRecord {

@@ -7,6 +7,10 @@ use crate::space::admission::{
     CompletePendingSpaceTransitionError, CurrentJoinStatus, JoinedSpace,
     QueryPendingSpaceTransitionError,
 };
+use uc_observability_contract::diagnostics::connectivity::{
+    scope_pairing_work, AdmissionExchangeSide,
+};
+use uc_observability_contract::diagnostics::AdmissionObservationAction;
 
 use super::model::JoinerActivationMutation;
 
@@ -24,49 +28,62 @@ impl JoinerAdmissionService {
             }
         };
         let (aggregate, token) = loaded.into_parts();
-        let preparation = match aggregate.joiner_activation_preparation() {
-            Some(preparation) => preparation,
-            None => {
-                report.recovery_required_count += 1;
-                return (report, None);
-            }
-        };
-        let completed = match self
-            .execute_activation
-            .execute(aggregate.admission_id(), preparation)
+        self.observations
+            .scope(
+                *aggregate.admission_id().as_bytes(),
+                scope_pairing_work(
+                    AdmissionExchangeSide::Joiner,
+                    Some(AdmissionObservationAction::Settle),
+                    async {
+                        let preparation = match aggregate.joiner_activation_preparation() {
+                            Some(preparation) => preparation,
+                            None => {
+                                report.recovery_required_count += 1;
+                                return (report, None);
+                            }
+                        };
+                        let completed = match self
+                            .execute_activation
+                            .execute(aggregate.admission_id(), preparation)
+                            .await
+                        {
+                            Ok(completed) => completed,
+                            Err(ExecuteJoinerActivationError::Invalid { .. }) => {
+                                report.recovery_required_count += 1;
+                                return (report, None);
+                            }
+                            Err(ExecuteJoinerActivationError::Unavailable { .. }) => {
+                                report.deferred_count += 1;
+                                return (report, None);
+                            }
+                        };
+                        let (transition_result, pending_exchange, outcome) = completed.into_parts();
+                        let transition = match aggregate
+                            .activate_complete(transition_result, pending_exchange)
+                        {
+                            Ok(transition) => transition,
+                            Err(_) => {
+                                report.recovery_required_count += 1;
+                                return (report, None);
+                            }
+                        };
+                        match self
+                            .activation_state
+                            .commit(token, JoinerActivationMutation::new(transition))
+                            .await
+                        {
+                            Ok(()) => {
+                                report.advanced_count += 1;
+                                self.maintenance_wake.wake();
+                                return (report, Some(outcome));
+                            }
+                            Err(error) => record_state_error(&mut report, error),
+                        }
+                        (report, None)
+                    },
+                ),
+            )
             .await
-        {
-            Ok(completed) => completed,
-            Err(ExecuteJoinerActivationError::Invalid { .. }) => {
-                report.recovery_required_count += 1;
-                return (report, None);
-            }
-            Err(ExecuteJoinerActivationError::Unavailable { .. }) => {
-                report.deferred_count += 1;
-                return (report, None);
-            }
-        };
-        let (transition_result, pending_exchange, outcome) = completed.into_parts();
-        let transition = match aggregate.activate_complete(transition_result, pending_exchange) {
-            Ok(transition) => transition,
-            Err(_) => {
-                report.recovery_required_count += 1;
-                return (report, None);
-            }
-        };
-        match self
-            .activation_state
-            .commit(token, JoinerActivationMutation::new(transition))
-            .await
-        {
-            Ok(()) => {
-                report.advanced_count += 1;
-                self.maintenance_wake.wake();
-                return (report, Some(outcome));
-            }
-            Err(error) => record_state_error(&mut report, error),
-        }
-        (report, None)
     }
 }
 

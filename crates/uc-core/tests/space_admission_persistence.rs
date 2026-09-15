@@ -14,11 +14,36 @@ use uc_core::membership::{
     MembershipCredential, MembershipEventV2, MembershipOperationV2, PendingAdmissionExchange,
     PreparedAdmissionProofV1, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
     SpaceAdmissionMessageKind, SpaceAdmissionPersistenceError, SpaceAdmissionRoute,
-    SponsorAdmission, UnreadableHistoryPolicy, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
-    ED25519_SIGNATURE_ALGORITHM_V1, MEMBERSHIP_EVENT_FORMAT_V2,
+    SpaceAdmissionTerminationReason, SponsorAdmission, UnreadableHistoryPolicy,
+    ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
+    MEMBERSHIP_EVENT_FORMAT_V2,
 };
 use uc_core::pairing::invitation::FullInvitation;
 use uc_core::security::IdentityFingerprint;
+
+#[test]
+fn bounded_join_timeline_and_local_termination_survive_persistence() {
+    let joiner = initiated_joiner_fixture();
+    assert_eq!(joiner.expires_at_ms(), Some(301_000));
+
+    let expired = joiner
+        .terminate_if_expired(301_000)
+        .expect("expiry decision succeeds")
+        .expect("deadline is due")
+        .into_replacement();
+    let recovered = JoinerAdmission::decode_persisted(
+        &expired
+            .encode_persisted()
+            .expect("terminated record encodes"),
+    )
+    .expect("terminated record decodes");
+
+    assert_eq!(recovered.expires_at_ms(), Some(301_000));
+    assert_eq!(
+        recovered.termination_reason(),
+        Some(SpaceAdmissionTerminationReason::Expired)
+    );
+}
 
 #[test]
 fn joiner_short_invitation_resolution_is_at_most_once_and_persisted() {
@@ -30,6 +55,7 @@ fn joiner_short_invitation_resolution_is_at_most_once_and_persisted() {
         AdmissionSourceSnapshot::from_bytes(vec![0x73; 32]).expect("valid source snapshot"),
         AdmissionJoinerStartContext::from_bytes(vec![0x74; 64]).expect("valid start context"),
         AdmissionShortInvitationCode::from_bytes(b"ABCD-1234".to_vec()).expect("valid short code"),
+        1_000,
     )
     .expect("short invitation resolution should start")
     .into_replacement();
@@ -89,6 +115,7 @@ fn joiner_invitation_resolution_can_cancel_before_any_connection() {
         AdmissionSourceSnapshot::from_bytes(vec![0x76; 32]).expect("valid source snapshot"),
         AdmissionJoinerStartContext::from_bytes(vec![0x77; 64]).expect("valid start context"),
         AdmissionShortInvitationCode::from_bytes(b"CANCEL-ME".to_vec()).expect("valid short code"),
+        1_000,
     )
     .expect("ready resolution")
     .into_replacement();
@@ -162,7 +189,7 @@ fn persistence_rejects_unknown_version_and_corrupt_payload() {
     let mut unknown_version = initiated_joiner_fixture()
         .encode_persisted()
         .expect("initial Joiner state should encode");
-    unknown_version[0] = 2;
+    unknown_version[0] = 3;
 
     assert_eq!(
         JoinerAdmission::decode_persisted(&unknown_version),
@@ -219,6 +246,7 @@ fn initiated_joiner_fixture() -> JoinerAdmission {
             AdmissionRetryState::new(3, 42).expect("valid retry state fixture"),
         )
         .expect("JoinRequest expects Candidate"),
+        1_000,
     )
     .expect("complete initial Joiner fixture")
     .into_replacement()

@@ -9,9 +9,9 @@ use uc_application::deps::{
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    AdmissionContinuationCredential, AdmissionEncryptedPasswordEquivalent, AdmissionPeerBinding,
-    MembershipHistoryExchangeError, MembershipHistoryExchangePort, MembershipHistoryMessage,
-    SpaceAdmissionId, SpaceAdmissionRoute,
+    AdmissionAttemptTimeline, AdmissionContinuationCredential,
+    AdmissionEncryptedPasswordEquivalent, AdmissionPeerBinding, MembershipHistoryExchangeError,
+    MembershipHistoryExchangePort, MembershipHistoryMessage, SpaceAdmissionId, SpaceAdmissionRoute,
 };
 use uc_observability_contract::diagnostics::{
     describe_membership_exchange, describe_operation_failure, DiagnosticErrorType,
@@ -64,6 +64,7 @@ impl SpaceAdmissionTransportPort for GatedSpaceAdmissionTransport {
     async fn establish_initial(
         &self,
         admission_id: SpaceAdmissionId,
+        attempt_timeline: AdmissionAttemptTimeline,
         route: &SpaceAdmissionRoute,
         encrypted_password_equivalent: &AdmissionEncryptedPasswordEquivalent,
     ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError> {
@@ -71,7 +72,12 @@ impl SpaceAdmissionTransportPort for GatedSpaceAdmissionTransport {
             return Err(SpaceAdmissionTransportError::Deferred);
         }
         self.inner
-            .establish_initial(admission_id, route, encrypted_password_equivalent)
+            .establish_initial(
+                admission_id,
+                attempt_timeline,
+                route,
+                encrypted_password_equivalent,
+            )
             .await
     }
 

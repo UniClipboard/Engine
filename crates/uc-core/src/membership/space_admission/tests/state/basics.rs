@@ -2,6 +2,18 @@ fn join_request_envelope_fixture(
     admission_id: SpaceAdmissionId,
     message_id: AdmissionMessageId,
 ) -> SpaceAdmissionEnvelopeV1 {
+    join_request_envelope_fixture_with_version(
+        SpaceAdmissionProtocolVersion::V1,
+        admission_id,
+        message_id,
+    )
+}
+
+fn join_request_envelope_fixture_with_version(
+    protocol_version: SpaceAdmissionProtocolVersion,
+    admission_id: SpaceAdmissionId,
+    message_id: AdmissionMessageId,
+) -> SpaceAdmissionEnvelopeV1 {
     let device_id = DeviceId::new("joining-device");
     let credential = MembershipCredential::new(1, vec![0xe3; 32]);
     let signature = vec![0xe6; 64];
@@ -17,7 +29,8 @@ fn join_request_envelope_fixture(
         UnreadableHistoryPolicy::Discard,
     )
     .expect("complete JoinRequest fixture");
-    SpaceAdmissionEnvelopeV1::new(
+    SpaceAdmissionEnvelopeV1::new_with_version(
+        protocol_version,
         admission_id,
         AdmissionRole::Joiner,
         0,
@@ -26,6 +39,40 @@ fn join_request_envelope_fixture(
         SpaceAdmissionBodyV1::JoinRequest(request),
     )
     .expect("valid initial JoinRequest envelope fixture")
+}
+
+#[test]
+fn canonical_transport_envelope_preserves_v2_for_replies() {
+    let admission_id =
+        SpaceAdmissionId::from_bytes([0xd3; 32]).expect("non-zero admission id fixture");
+    let original = join_request_envelope_fixture_with_version(
+        SpaceAdmissionProtocolVersion::V2,
+        admission_id,
+        AdmissionMessageId::from_bytes([0xd4; 32]).expect("non-zero message id fixture"),
+    );
+
+    let encoded = original
+        .encode_canonical_v1()
+        .expect("typed envelope should encode");
+    let decoded = SpaceAdmissionEnvelopeV1::decode_canonical_v1(&encoded)
+        .expect("canonical envelope should decode");
+    let reply = SpaceAdmissionEnvelopeV1::reply_to(
+        &decoded,
+        AdmissionRole::Joiner,
+        1,
+        AdmissionMessageId::from_bytes([0xd5; 32]).expect("non-zero message id fixture"),
+        SpaceAdmissionBodyV1::CancelRequested,
+    )
+    .expect("reply should inherit the attempt protocol version");
+
+    assert_eq!(
+        decoded.header().protocol_version(),
+        SpaceAdmissionProtocolVersion::V2
+    );
+    assert_eq!(
+        reply.header().protocol_version(),
+        SpaceAdmissionProtocolVersion::V2
+    );
 }
 
 #[test]
@@ -73,6 +120,7 @@ fn new_joiner_aggregate_starts_with_all_required_durable_material() {
         AdmissionEncryptedPasswordEquivalent::from_bytes(vec![0xec; 64])
             .expect("bounded encrypted password fixture"),
         exchange,
+        1_000,
     )
     .expect("complete initial joiner state");
 
@@ -123,6 +171,7 @@ fn new_joiner_aggregate_rejects_an_exchange_for_another_admission() {
             AdmissionEncryptedPasswordEquivalent::from_bytes(vec![0xf3])
                 .expect("bounded encrypted password fixture"),
             exchange,
+            1_000,
         ),
         Err(SpaceAdmissionAggregateError::AdmissionMismatch)
     );
@@ -152,6 +201,7 @@ fn initiated_joiner_aggregate_fixture() -> SpaceAdmissionAggregate {
             AdmissionRetryState::new(0, 0).expect("valid initial retry state"),
         )
         .expect("JoinRequest expects Candidate"),
+        1_000,
     )
     .expect("complete initial joiner fixture")
     .into_replacement()
@@ -213,7 +263,7 @@ fn sponsor_candidate_aggregate_fixture() -> SpaceAdmissionAggregate {
     let join_request_evidence = join_request
         .evidence([0x43; 32])
         .expect("non-zero request digest fixture");
-    let sponsor = SpaceAdmissionAggregate::accept_join_request(
+    let sponsor = SpaceAdmissionAggregate::accept_join_request_with_timeline(
         admission_id,
         AdmissionInvitationClaim::from_bytes(vec![0x44; 32])
             .expect("bounded invitation claim fixture"),
@@ -227,6 +277,8 @@ fn sponsor_candidate_aggregate_fixture() -> SpaceAdmissionAggregate {
         .expect("distinct peer binding fixture"),
         AdmissionContinuationCredential::from_bytes(vec![0x48; 64])
             .expect("bounded continuation credential fixture"),
+        Some(AdmissionAttemptTimeline::start(1_000).expect("valid Sponsor timeline fixture")),
+        Some([0x4f; 32]),
     )
     .expect("complete accepted Sponsor fixture")
     .into_replacement();
@@ -317,7 +369,14 @@ fn sponsor_committed_aggregate_fixture() -> SpaceAdmissionAggregate {
 }
 
 fn sponsor_applied_aggregate_fixture() -> SpaceAdmissionAggregate {
-    let sponsor = sponsor_committed_aggregate_fixture();
+    sponsor_applied_from(sponsor_committed_aggregate_fixture())
+}
+
+fn sponsor_applied_with_deadline_fixture() -> SpaceAdmissionAggregate {
+    sponsor_applied_aggregate_fixture()
+}
+
+fn sponsor_applied_from(sponsor: SpaceAdmissionAggregate) -> SpaceAdmissionAggregate {
     let (commit_message_id, event_id, security_commitment_id) = match sponsor.state() {
         SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Committed(state)) => {
             let SpaceAdmissionBodyV1::Commit(commit) =

@@ -18,6 +18,7 @@ use uc_core::membership::{
     SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SponsorCandidatePreparation,
     VersionedMembershipHistory,
 };
+use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
 
 use super::base_snapshot::decode_sponsor_base_snapshot;
 use crate::space::admission::recovery_material::seal_recovery_material;
@@ -68,218 +69,242 @@ impl PrepareSponsorCandidatePort for DefaultSponsorCandidatePreparation {
         admission_id: SpaceAdmissionId,
         preparation: SponsorCandidatePreparation<'_>,
     ) -> Result<PreparedSponsorCandidate, PrepareSponsorCandidateError> {
-        // 基础快照既提供成员历史，也声明这段历史所属的谱系。两者必须一起验证，
-        // 防止把另一个 Space 或另一条历史分支的成员状态用于本次准入。
-        let snapshot = decode_sponsor_base_snapshot(preparation.base_snapshot())
+        observe_local_result(LocalWorkStep::SponsorPrepareCandidate, async {
+            // 基础快照既提供成员历史，也声明这段历史所属的谱系。两者必须一起验证，
+            // 防止把另一个 Space 或另一条历史分支的成员状态用于本次准入。
+            let snapshot =
+                decode_sponsor_base_snapshot(preparation.base_snapshot()).map_err(|error| {
+                    PrepareSponsorCandidateError::invalid(anyhow::Error::new(error))
+                })?;
+            let history = VersionedMembershipHistory::decode_persisted_v2(
+                &snapshot.membership_history,
+                self.history_verifier.as_ref(),
+            )
             .map_err(|error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)))?;
-        let history = VersionedMembershipHistory::decode_persisted_v2(
-            &snapshot.membership_history,
-            self.history_verifier.as_ref(),
-        )
-        .map_err(|error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)))?;
-        if history.lineage_id() != snapshot.lineage_id {
-            return Err(PrepareSponsorCandidateError::invalid(anyhow::anyhow!(
-                "the Sponsor base snapshot lineage is inconsistent"
-            )));
-        }
-        let request = match preparation.join_request().body() {
-            SpaceAdmissionBodyV1::JoinRequest(request) => request,
-            _ => {
+            if history.lineage_id() != snapshot.lineage_id {
                 return Err(PrepareSponsorCandidateError::invalid(anyhow::anyhow!(
-                    "the Sponsor Candidate input is not a JoinRequest"
+                    "the Sponsor base snapshot lineage is inconsistent"
                 )));
             }
-        };
-        // JoinRequest 中的身份事实由申请者自己的成员凭据签名。这里先证明申请者
-        // 确实持有对应私钥，再允许这些身份事实进入候选成员事件。
-        let identity_is_valid = self
-            .history_verifier
-            .verify(
-                request.membership_credential().signature_algorithm_version,
-                &request.membership_credential().public_key,
-                &request.identity_facts().signing_payload(),
-                request.identity_signature().as_bytes(),
-            )
-            .map_err(|error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)))?;
-        if !identity_is_valid {
-            return Err(PrepareSponsorCandidateError::invalid(anyhow::anyhow!(
-                "the JoinRequest identity signature is invalid"
-            )));
-        }
+            let request = match preparation.join_request().body() {
+                SpaceAdmissionBodyV1::JoinRequest(request) => request,
+                _ => {
+                    return Err(PrepareSponsorCandidateError::invalid(anyhow::anyhow!(
+                        "the Sponsor Candidate input is not a JoinRequest"
+                    )));
+                }
+            };
+            // JoinRequest 中的身份事实由申请者自己的成员凭据签名。这里先证明申请者
+            // 确实持有对应私钥，再允许这些身份事实进入候选成员事件。
+            let identity_is_valid = self
+                .history_verifier
+                .verify(
+                    request.membership_credential().signature_algorithm_version,
+                    &request.membership_credential().public_key,
+                    &request.identity_facts().signing_payload(),
+                    request.identity_signature().as_bytes(),
+                )
+                .map_err(|error| {
+                    PrepareSponsorCandidateError::invalid(anyhow::Error::new(error))
+                })?;
+            if !identity_is_valid {
+                return Err(PrepareSponsorCandidateError::invalid(anyhow::anyhow!(
+                    "the JoinRequest identity signature is invalid"
+                )));
+            }
 
-        // 候选事件代表当前成员授权新增设备，因此作者实例、成员凭据和最终签名
-        // 都必须来自 Sponsor 本机当前有效的成员身份。
-        let author = self
-            .signatures
-            .current_member_instance(&self.local_device_id)
-            .await
-            .map_err(|error| {
-                PrepareSponsorCandidateError::unavailable(anyhow::Error::new(error))
-            })?;
-        let author_credential = self
-            .signatures
-            .current_membership_credential(&self.local_device_id)
-            .await
-            .map_err(|error| {
-                PrepareSponsorCandidateError::unavailable(anyhow::Error::new(error))
-            })?;
-        let mut operation_id = [0u8; 16];
-        rand::rng().fill_bytes(&mut operation_id);
-        // 先固定 AddDevice 的业务事实和结果成员集合，暂不写入 MLS 承诺；这样安全层
-        // 可以基于稳定的候选摘要生成材料，又不会形成“事件摘要依赖自身承诺”的循环。
-        let draft = history
-            .create_unsigned_local_admission_event(
-                author,
-                &author_credential,
-                request.identity_facts().clone(),
-                request.membership_credential().clone(),
-                Sha256::digest(request.recovery_public_key().as_bytes()).into(),
-                operation_id,
-            )
-            .map_err(|error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)))?;
-        let candidate_core_digest = draft
-            .admission_candidate_core_digest(
-                *admission_id.as_bytes(),
-                request.key_package().as_bytes(),
-            )
-            .map_err(|error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)))?;
-        // 安全层需要为每个现有活跃成员生成密钥投递材料。收件人只能从已验证的
-        // 成员历史派生，不能由调用方另行提供或拼装。
-        let mut existing_recipients = Vec::new();
-        for member in history.active_members() {
-            let facts = history.admission_facts_for(member).ok_or_else(|| {
-                PrepareSponsorCandidateError::invalid(anyhow::anyhow!(
-                    "an active Sponsor member has no signed identity facts"
-                ))
-            })?;
-            let credential = history.credential_for(member).ok_or_else(|| {
-                PrepareSponsorCandidateError::invalid(anyhow::anyhow!(
-                    "an active Sponsor member has no historical credential"
-                ))
-            })?;
-            existing_recipients.push(SponsorAdmissionSecurityRecipient {
-                device_id: facts.device_id.clone(),
-                credential_id: credential.credential_id,
-            });
-        }
-        // 一次生成公开承诺、MLS Commit/Welcome、尚未激活的本地状态，以及现有
-        // 成员的内容密钥投递；candidate_core_digest 将这些结果绑定到本次准入事实。
-        let security = self
-            .security
-            .prepare_sponsor_admission_security(SponsorAdmissionSecurityRequest {
-                space_id: SpaceId::from_str(&snapshot.lineage_id),
-                attempt_id: *admission_id.as_bytes(),
-                base_history_position: history.current_position().map_err(|error| {
+            // 候选事件代表当前成员授权新增设备，因此作者实例、成员凭据和最终签名
+            // 都必须来自 Sponsor 本机当前有效的成员身份。
+            let author = self
+                .signatures
+                .current_member_instance(&self.local_device_id)
+                .await
+                .map_err(|error| {
+                    PrepareSponsorCandidateError::unavailable(anyhow::Error::new(error))
+                })?;
+            let author_credential = self
+                .signatures
+                .current_membership_credential(&self.local_device_id)
+                .await
+                .map_err(|error| {
+                    PrepareSponsorCandidateError::unavailable(anyhow::Error::new(error))
+                })?;
+            let mut operation_id = [0u8; 16];
+            rand::rng().fill_bytes(&mut operation_id);
+            // 先固定 AddDevice 的业务事实和结果成员集合，暂不写入 MLS 承诺；这样安全层
+            // 可以基于稳定的候选摘要生成材料，又不会形成“事件摘要依赖自身承诺”的循环。
+            let draft = history
+                .create_unsigned_local_admission_event(
+                    author,
+                    &author_credential,
+                    request.identity_facts().clone(),
+                    request.membership_credential().clone(),
+                    Sha256::digest(request.recovery_public_key().as_bytes()).into(),
+                    operation_id,
+                )
+                .map_err(|error| {
+                    PrepareSponsorCandidateError::invalid(anyhow::Error::new(error))
+                })?;
+            let candidate_core_digest = draft
+                .admission_candidate_core_digest(
+                    *admission_id.as_bytes(),
+                    request.key_package().as_bytes(),
+                )
+                .map_err(|error| {
+                    PrepareSponsorCandidateError::invalid(anyhow::Error::new(error))
+                })?;
+            // 安全层需要为每个现有活跃成员生成密钥投递材料。收件人只能从已验证的
+            // 成员历史派生，不能由调用方另行提供或拼装。
+            let mut existing_recipients = Vec::new();
+            for member in history.active_members() {
+                let facts = history.admission_facts_for(member).ok_or_else(|| {
+                    PrepareSponsorCandidateError::invalid(anyhow::anyhow!(
+                        "an active Sponsor member has no signed identity facts"
+                    ))
+                })?;
+                let credential = history.credential_for(member).ok_or_else(|| {
+                    PrepareSponsorCandidateError::invalid(anyhow::anyhow!(
+                        "an active Sponsor member has no historical credential"
+                    ))
+                })?;
+                existing_recipients.push(SponsorAdmissionSecurityRecipient {
+                    device_id: facts.device_id.clone(),
+                    credential_id: credential.credential_id,
+                });
+            }
+            // 一次生成公开承诺、MLS Commit/Welcome、尚未激活的本地状态，以及现有
+            // 成员的内容密钥投递；candidate_core_digest 将这些结果绑定到本次准入事实。
+            let security = self
+                .security
+                .prepare_sponsor_admission_security(SponsorAdmissionSecurityRequest {
+                    space_id: SpaceId::from_str(&snapshot.lineage_id),
+                    attempt_id: *admission_id.as_bytes(),
+                    base_history_position: history.current_position().map_err(|error| {
+                        PrepareSponsorCandidateError::invalid(anyhow::Error::new(error))
+                    })?,
+                    candidate_core_digest,
+                    candidate_identity: request.device_id().as_str().as_bytes().to_vec(),
+                    candidate_key_package: request.key_package().as_bytes().to_vec(),
+                    existing_recipients,
+                })
+                .await
+                .map_err(|error| {
+                    PrepareSponsorCandidateError::invalid(anyhow::Error::new(error))
+                })?;
+            // 把安全层的公开承诺写回先前的草案并由 Sponsor 签名。至此业务成员变更
+            // 与 MLS 群组变更成为同一个可验证事件。
+            let mut event = history
+                .finalize_unsigned_local_admission_event(
+                    draft,
+                    request.key_package().as_bytes(),
+                    &security.public_commitment,
+                )
+                .map_err(|error| {
+                    PrepareSponsorCandidateError::invalid(anyhow::Error::new(error))
+                })?;
+            // 逐成员 delivery 使用同一份 MLS 群组更新。将它绑定进签名历史事件，
+            // 使准入时离线的旧成员之后仅凭历史也能按因果顺序恢复安全状态。
+            let history_security_update = security
+                .existing_member_deliveries
+                .first()
+                .map(|delivery| delivery.payload.clone())
+                .ok_or_else(|| {
+                    PrepareSponsorCandidateError::invalid(anyhow::anyhow!(
+                        "Sponsor admission security produced no existing-member update"
+                    ))
+                })?;
+            if history_security_update.is_empty()
+                || security
+                    .existing_member_deliveries
+                    .iter()
+                    .any(|delivery| delivery.payload != history_security_update)
+            {
+                return Err(PrepareSponsorCandidateError::invalid(anyhow::anyhow!(
+                    "Sponsor admission security updates are inconsistent"
+                )));
+            }
+            event.security_update_payload = history_security_update;
+            event.signature = self
+                .signatures
+                .sign_current_member_payload(&event.signing_payload())
+                .await
+                .map_err(|error| {
+                    PrepareSponsorCandidateError::unavailable(anyhow::Error::new(error))
+                })?;
+            // Candidate 是发给 Joiner 的公开协议材料：基础历史、已签名事件、MLS
+            // Commit/Welcome 和后续路由。它不包含 Sponsor 尚未提交的私有 MLS 状态。
+            let candidate = AdmissionCandidateV1::new(
+                uc_core::membership::AdmissionSignedMembershipHistory::from_bytes(
+                    snapshot.membership_history,
+                )
+                .map_err(|error| {
                     PrepareSponsorCandidateError::invalid(anyhow::Error::new(error))
                 })?,
-                candidate_core_digest,
-                candidate_identity: request.device_id().as_str().as_bytes().to_vec(),
-                candidate_key_package: request.key_package().as_bytes().to_vec(),
-                existing_recipients,
-            })
-            .await
-            .map_err(|error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)))?;
-        // 把安全层的公开承诺写回先前的草案并由 Sponsor 签名。至此业务成员变更
-        // 与 MLS 群组变更成为同一个可验证事件。
-        let mut event = history
-            .finalize_unsigned_local_admission_event(
-                draft,
-                request.key_package().as_bytes(),
-                &security.public_commitment,
+                event,
+                security.public_commitment,
+                AdmissionMlsCommit::from_bytes(security.commit).map_err(|error| {
+                    PrepareSponsorCandidateError::invalid(anyhow::Error::new(error))
+                })?,
+                AdmissionMlsWelcome::from_bytes(security.welcome).map_err(|error| {
+                    PrepareSponsorCandidateError::invalid(anyhow::Error::new(error))
+                })?,
+                AdmissionContinuationRoute::from_bytes(self.continuation_route.clone()).map_err(
+                    |error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)),
+                )?,
             )
             .map_err(|error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)))?;
-        // 逐成员 delivery 使用同一份 MLS 群组更新。将它绑定进签名历史事件，
-        // 使准入时离线的旧成员之后仅凭历史也能按因果顺序恢复安全状态。
-        let history_security_update = security
-            .existing_member_deliveries
-            .first()
-            .map(|delivery| delivery.payload.clone())
-            .ok_or_else(|| {
-                PrepareSponsorCandidateError::invalid(anyhow::anyhow!(
-                    "Sponsor admission security produced no existing-member update"
-                ))
-            })?;
-        if history_security_update.is_empty()
-            || security
-                .existing_member_deliveries
-                .iter()
-                .any(|delivery| delivery.payload != history_security_update)
-        {
-            return Err(PrepareSponsorCandidateError::invalid(anyhow::anyhow!(
-                "Sponsor admission security updates are inconsistent"
-            )));
-        }
-        event.security_update_payload = history_security_update;
-        event.signature = self
-            .signatures
-            .sign_current_member_payload(&event.signing_payload())
-            .await
+            let candidate_reply = SpaceAdmissionEnvelopeV1::reply_to(
+                preparation.join_request(),
+                AdmissionRole::Sponsor,
+                0,
+                mint_message_id(),
+                SpaceAdmissionBodyV1::Candidate(candidate),
+            )
+            .map_err(|error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)))?;
+            // 恢复明文先把 sealed_recovery_material 留空，避免数据结构递归包含“密封后的
+            // 自己”；随后用 Joiner 的恢复公钥密封，并用 admission_id 做事务域隔离。
+            let recovery_plaintext = postcard::to_stdvec(&SponsorCandidateStagedV1 {
+                format_version: SPONSOR_CANDIDATE_STAGED_FORMAT_V1,
+                staged_state: security.staged_state.clone(),
+                target_protection_group_id: security.target_protection_group_id.clone(),
+                target_key_catalog: security.target_key_catalog.clone(),
+                existing_member_deliveries: security.existing_member_deliveries.clone(),
+                sealed_recovery_material: Vec::new(),
+            })
             .map_err(|error| {
                 PrepareSponsorCandidateError::unavailable(anyhow::Error::new(error))
             })?;
-        // Candidate 是发给 Joiner 的公开协议材料：基础历史、已签名事件、MLS
-        // Commit/Welcome 和后续路由。它不包含 Sponsor 尚未提交的私有 MLS 状态。
-        let candidate = AdmissionCandidateV1::new(
-            uc_core::membership::AdmissionSignedMembershipHistory::from_bytes(
-                snapshot.membership_history,
+            let sealed_recovery_material = seal_recovery_material(
+                admission_id.as_bytes(),
+                request.recovery_public_key().as_bytes(),
+                &recovery_plaintext,
             )
-            .map_err(|error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)))?,
-            event,
-            security.public_commitment,
-            AdmissionMlsCommit::from_bytes(security.commit).map_err(|error| {
-                PrepareSponsorCandidateError::invalid(anyhow::Error::new(error))
-            })?,
-            AdmissionMlsWelcome::from_bytes(security.welcome).map_err(|error| {
-                PrepareSponsorCandidateError::invalid(anyhow::Error::new(error))
-            })?,
-            AdmissionContinuationRoute::from_bytes(self.continuation_route.clone()).map_err(
-                |error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)),
-            )?,
-        )
-        .map_err(|error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)))?;
-        let candidate_reply = SpaceAdmissionEnvelopeV1::new(
-            admission_id,
-            AdmissionRole::Sponsor,
-            0,
-            mint_message_id(),
-            Some(preparation.join_request().header().message_id()),
-            SpaceAdmissionBodyV1::Candidate(candidate),
-        )
-        .map_err(|error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)))?;
-        // 恢复明文先把 sealed_recovery_material 留空，避免数据结构递归包含“密封后的
-        // 自己”；随后用 Joiner 的恢复公钥密封，并用 admission_id 做事务域隔离。
-        let recovery_plaintext = postcard::to_stdvec(&SponsorCandidateStagedV1 {
-            format_version: SPONSOR_CANDIDATE_STAGED_FORMAT_V1,
-            staged_state: security.staged_state.clone(),
-            target_protection_group_id: security.target_protection_group_id.clone(),
-            target_key_catalog: security.target_key_catalog.clone(),
-            existing_member_deliveries: security.existing_member_deliveries.clone(),
-            sealed_recovery_material: Vec::new(),
+            .map_err(|error| {
+                PrepareSponsorCandidateError::unavailable(anyhow::Error::new(error))
+            })?;
+            // Sponsor 本地暂存完整状态，供后续 Prepared -> Commit 阶段验证并正式提交。
+            // 对外 Candidate 与本地 staged state 一次返回，Application 无需编排内部步骤。
+            let staged = postcard::to_stdvec(&SponsorCandidateStagedV1 {
+                format_version: SPONSOR_CANDIDATE_STAGED_FORMAT_V1,
+                staged_state: security.staged_state,
+                target_protection_group_id: security.target_protection_group_id,
+                target_key_catalog: security.target_key_catalog,
+                existing_member_deliveries: security.existing_member_deliveries,
+                sealed_recovery_material,
+            })
+            .map_err(|error| {
+                PrepareSponsorCandidateError::unavailable(anyhow::Error::new(error))
+            })?;
+            let staged_security =
+                AdmissionStagedSecurityState::from_bytes(staged).map_err(|error| {
+                    PrepareSponsorCandidateError::invalid(anyhow::Error::new(error))
+                })?;
+            Ok(PreparedSponsorCandidate::new(
+                candidate_reply,
+                staged_security,
+            ))
         })
-        .map_err(|error| PrepareSponsorCandidateError::unavailable(anyhow::Error::new(error)))?;
-        let sealed_recovery_material = seal_recovery_material(
-            admission_id.as_bytes(),
-            request.recovery_public_key().as_bytes(),
-            &recovery_plaintext,
-        )
-        .map_err(|error| PrepareSponsorCandidateError::unavailable(anyhow::Error::new(error)))?;
-        // Sponsor 本地暂存完整状态，供后续 Prepared -> Commit 阶段验证并正式提交。
-        // 对外 Candidate 与本地 staged state 一次返回，Application 无需编排内部步骤。
-        let staged = postcard::to_stdvec(&SponsorCandidateStagedV1 {
-            format_version: SPONSOR_CANDIDATE_STAGED_FORMAT_V1,
-            staged_state: security.staged_state,
-            target_protection_group_id: security.target_protection_group_id,
-            target_key_catalog: security.target_key_catalog,
-            existing_member_deliveries: security.existing_member_deliveries,
-            sealed_recovery_material,
-        })
-        .map_err(|error| PrepareSponsorCandidateError::unavailable(anyhow::Error::new(error)))?;
-        let staged_security = AdmissionStagedSecurityState::from_bytes(staged)
-            .map_err(|error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)))?;
-        Ok(PreparedSponsorCandidate::new(
-            candidate_reply,
-            staged_security,
-        ))
+        .await
     }
 }
 

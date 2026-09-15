@@ -294,3 +294,115 @@ fn sponsor_committed_completes_applied_with_exact_complete_reply() {
         &[0x80; 32]
     );
 }
+
+#[test]
+fn sponsor_confirmation_uses_the_original_deadline_and_accepts_late_ack() {
+    let sponsor = sponsor_applied_with_deadline_fixture();
+    let summary = sponsor
+        .sponsor_pairing_confirmation()
+        .expect("new Sponsor Applied state has confirmation summary");
+    assert_eq!(
+        summary.status(),
+        SponsorPairingConfirmationStatus::AwaitingPeerConfirmation
+    );
+    assert_eq!(sponsor.expires_at_ms(), Some(301_000));
+
+    let expired = sponsor
+        .mark_sponsor_confirmation_unconfirmed(301_000)
+        .expect("deadline transition is valid")
+        .expect("awaiting confirmation expires at the original deadline")
+        .into_replacement();
+    assert_eq!(
+        expired
+            .sponsor_pairing_confirmation()
+            .expect("unconfirmed summary remains queryable")
+            .status(),
+        SponsorPairingConfirmationStatus::Unconfirmed
+    );
+
+    let complete_message_id = expired
+        .current_exact_reply()
+        .expect("unconfirmed state retains exact Complete reply")
+        .header()
+        .message_id();
+    let complete_ack_id =
+        AdmissionMessageId::from_bytes([0xb1; 32]).expect("non-zero message id fixture");
+    let complete_ack = SpaceAdmissionEnvelopeV1::new(
+        expired.admission_id(),
+        AdmissionRole::Joiner,
+        3,
+        complete_ack_id,
+        Some(complete_message_id),
+        SpaceAdmissionBodyV1::CompleteAck(
+            AdmissionCompleteAckV1::new(*expired.admission_id().as_bytes())
+                .expect("matching acknowledgement fixture"),
+        ),
+    )
+    .expect("valid late CompleteAck fixture");
+    let settled = SpaceAdmissionEnvelopeV1::new(
+        expired.admission_id(),
+        AdmissionRole::Sponsor,
+        3,
+        AdmissionMessageId::from_bytes([0xb2; 32]).expect("non-zero message id fixture"),
+        Some(complete_ack_id),
+        SpaceAdmissionBodyV1::Settled(
+            AdmissionSettledV1::new(*expired.admission_id().as_bytes())
+                .expect("matching settled fixture"),
+        ),
+    )
+    .expect("valid Settled fixture");
+
+    let confirmed = expired
+        .settle_complete_ack(complete_ack, [0xb3; 32], settled)
+        .expect("valid late CompleteAck confirms the relationship")
+        .into_replacement();
+    assert_eq!(
+        confirmed
+            .sponsor_pairing_confirmation()
+            .expect("confirmed summary remains queryable")
+            .status(),
+        SponsorPairingConfirmationStatus::Confirmed
+    );
+}
+
+#[test]
+fn sponsor_unfinished_states_expire_locally_and_committed_members_keep_revocation_proof() {
+    let candidate = SponsorAdmission::try_from_record(sponsor_candidate_aggregate_fixture())
+        .expect("candidate Sponsor fixture");
+    assert!(candidate
+        .terminate_if_expired(300_999)
+        .expect("deadline check")
+        .is_none());
+    let expired_candidate =
+        SponsorAdmission::try_from_record(sponsor_candidate_aggregate_fixture())
+            .expect("candidate Sponsor fixture")
+            .terminate_if_expired(301_000)
+            .expect("candidate expiry transition")
+            .expect("candidate expires at the shared deadline")
+            .into_replacement();
+    assert!(matches!(
+        expired_candidate.abandonment_cleanup(),
+        Some(SponsorAbandonmentCleanup::NotRequired)
+    ));
+
+    let expired_committed =
+        SponsorAdmission::try_from_record(sponsor_committed_aggregate_fixture())
+            .expect("committed Sponsor fixture")
+            .terminate_if_expired(301_000)
+            .expect("committed expiry transition")
+            .expect("committed Sponsor expires at the shared deadline")
+            .into_replacement();
+    assert!(matches!(
+        expired_committed.abandonment_cleanup(),
+        Some(SponsorAbandonmentCleanup::Known(_))
+    ));
+    let encoded = expired_committed
+        .encode_persisted()
+        .expect("expired Sponsor proof encodes");
+    let reopened = SponsorAdmission::decode_persisted(&encoded)
+        .expect("expired Sponsor proof survives restart");
+    assert!(matches!(
+        reopened.abandonment_cleanup(),
+        Some(SponsorAbandonmentCleanup::Known(_))
+    ));
+}

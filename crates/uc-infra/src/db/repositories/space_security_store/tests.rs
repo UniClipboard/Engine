@@ -3,11 +3,11 @@ use diesel::sql_types::{BigInt, Binary, Nullable, Text};
 use tempfile::{tempdir, TempDir};
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
-    BeginRevocationOutcome, BootstrapId, ContentKeyId, GroupEpoch, LegacyBootstrapRecord,
-    LegacyBootstrapRepositoryPort, LegacyBootstrapStage, LegacyBootstrapStatus, PendingGroupUpdate,
-    PreparedRevocationResolution, RevocationId, RevocationOutboxMessage, RevocationRecord,
-    RevocationRepositoryPort, RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState,
-    SpaceSecurityStateResetPort,
+    BeginRevocationOutcome, BootstrapId, ContentKeyId, GroupEpoch, GroupUpdateDispatchError,
+    LegacyBootstrapRecord, LegacyBootstrapRepositoryPort, LegacyBootstrapStage,
+    LegacyBootstrapStatus, PendingGroupUpdate, PreparedRevocationResolution, RevocationId,
+    RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort, RevocationStage,
+    RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceSecurityStateResetPort,
 };
 
 use super::DieselSpaceSecurityStore;
@@ -358,6 +358,171 @@ async fn pending_group_update_is_encrypted_and_survives_restart_until_acknowledg
         .unwrap()
         .pending_group_updates()
         .is_empty());
+}
+
+fn pending_update(recipient: &str, epoch: u64) -> PendingGroupUpdate {
+    PendingGroupUpdate::persistent(
+        DeviceId::new(recipient),
+        format!(r#"{{"version":1,"group_epoch":{epoch},"commit":[],"encrypted_key_catalog":[]}}"#)
+            .into_bytes(),
+    )
+}
+
+#[tokio::test]
+async fn delivery_failures_survive_restart_without_rewriting_space_material() {
+    let (repo, pool, _tempdir) = make_repo();
+    let space_id = SpaceId::from_str("space-sensitive");
+    let mut material = seed_current_space(&repo).await;
+    let first = pending_update("offline-peer", 1);
+    let second = pending_update("offline-peer", 2);
+    let available = pending_update("available-peer", 1);
+    material.add_pending_group_updates([first.clone(), second.clone(), available.clone()], 100);
+    repo.save_space_material(&material).await.unwrap();
+
+    let initial = repo.due_group_updates(&space_id, 100, None).await.unwrap();
+    assert_eq!(initial.len(), 3);
+
+    let before_failure = {
+        let mut conn = pool.get().unwrap();
+        diesel::sql_query(
+            "SELECT space_lookup_token, encrypted_payload FROM space_key_epoch_state LIMIT 1",
+        )
+        .get_result::<RawSpaceCiphertext>(&mut conn)
+        .unwrap()
+        .encrypted_payload
+    };
+    assert_eq!(
+        repo.record_group_update_failures(
+            &space_id,
+            &[(
+                first.update_id().to_owned(),
+                GroupUpdateDispatchError::Offline,
+            )],
+            100,
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    let after_failure = {
+        let mut conn = pool.get().unwrap();
+        diesel::sql_query(
+            "SELECT space_lookup_token, encrypted_payload FROM space_key_epoch_state LIMIT 1",
+        )
+        .get_result::<RawSpaceCiphertext>(&mut conn)
+        .unwrap()
+        .encrypted_payload
+    };
+    assert_eq!(before_failure, after_failure);
+
+    let reopened = reopen_repo(&pool);
+    let waiting = reopened
+        .due_group_updates(&space_id, 101, None)
+        .await
+        .unwrap();
+    assert_eq!(waiting, vec![available.clone()]);
+
+    let peer_online = reopened
+        .due_group_updates(&space_id, 101, Some(DeviceId::new("offline-peer")))
+        .await
+        .unwrap();
+    assert!(peer_online.contains(&first));
+    assert!(peer_online.contains(&second));
+}
+
+#[tokio::test]
+async fn rejected_delivery_stays_out_of_the_queue_after_unrelated_changes_and_restart() {
+    let (repo, pool, _tempdir) = make_repo();
+    let space_id = SpaceId::from_str("space-sensitive");
+    let mut material = seed_current_space(&repo).await;
+    let rejected = pending_update("rejected-peer", 1);
+    let later = pending_update("rejected-peer", 2);
+    let available = pending_update("available-peer", 1);
+    material.add_pending_group_updates([rejected.clone(), later.clone(), available.clone()], 100);
+    repo.save_space_material(&material).await.unwrap();
+    repo.due_group_updates(&space_id, 100, None).await.unwrap();
+    repo.record_group_update_failures(
+        &space_id,
+        &[(
+            rejected.update_id().to_owned(),
+            GroupUpdateDispatchError::Rejected,
+        )],
+        100,
+    )
+    .await
+    .unwrap();
+
+    let unrelated = pending_update("another-peer", 3);
+    material.add_pending_group_updates([unrelated.clone()], 200);
+    repo.save_space_material(&material).await.unwrap();
+    drop(repo);
+
+    let reopened = reopen_repo(&pool);
+    let due = reopened
+        .due_group_updates(&space_id, i64::MAX, Some(DeviceId::new("rejected-peer")))
+        .await
+        .unwrap();
+    assert!(!due.contains(&rejected));
+    assert!(!due.contains(&later));
+    assert!(due.contains(&available));
+    assert!(due.contains(&unrelated));
+}
+
+#[tokio::test]
+async fn delivery_reads_only_the_requested_space() {
+    let (repo, pool, _tempdir) = make_repo();
+    let first_space = SpaceId::from_str("first-space");
+    let second_space = SpaceId::from_str("second-space");
+    for (space_id, recipient) in [
+        (first_space.clone(), "first-peer"),
+        (second_space.clone(), "second-peer"),
+    ] {
+        let mut state = SpaceKeyState::legacy(space_id.clone());
+        state.mark_migrating().unwrap();
+        state
+            .mark_ready(
+                ContentKeyId::from_string(format!("content-key-{recipient}")).unwrap(),
+                uc_core::membership::ProtectionGroupId::generate(),
+            )
+            .unwrap();
+        let mut material = SpaceKeyMaterial::new(state, vec![1], vec![2], 1);
+        material.add_pending_group_updates([pending_update(recipient, 1)], 2);
+        repo.save_space_material(&material).await.unwrap();
+        assert_eq!(
+            repo.due_group_updates(&space_id, 3, None)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    let second_scope = super::encrypted_payload::space_lookup_token(
+        &MasterKey::from_bytes(&[0x5a; 32]).unwrap(),
+        &second_space,
+    )
+    .unwrap();
+    let mut conn = pool.get().unwrap();
+    diesel::sql_query(
+        "UPDATE group_update_delivery SET encrypted_metadata = x'010203' \
+         WHERE space_lookup_token = ?",
+    )
+    .bind::<Text, _>(second_scope)
+    .execute(&mut conn)
+    .unwrap();
+    drop(conn);
+
+    assert_eq!(
+        repo.due_group_updates(&first_space, 4, None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(repo
+        .due_group_updates(&second_space, 4, None)
+        .await
+        .is_err());
 }
 
 #[tokio::test]

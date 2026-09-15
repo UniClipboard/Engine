@@ -1,14 +1,14 @@
 //! 完成身份与请求证明校验后，才允许交接请求并接纳远端关联。
 use iroh::endpoint::Connection;
 use uc_core::membership::{
-    AdmissionChannelPeerId, AdmissionContinuationCredential, InvitationId, SpaceAdmissionId,
-    SpaceAdmissionProtocolVersion,
+    AdmissionAttemptContractV2, AdmissionChannelPeerId, AdmissionContinuationCredential,
+    InvitationId, SpaceAdmissionId, SpaceAdmissionProtocolVersion,
 };
 use uc_observability_contract::diagnostics::connectivity::complete_admission_authentication_failure;
 
 use super::super::super::space_admission_wire::{
     read_envelope, read_raw_with_limit, read_typed, write_typed, AuthenticatedEnvelopeV1,
-    ContinuationHelloV1, FrameKind, InitialHelloV1, OpaqueFinishV1, OpaqueResponseV1,
+    ContinuationHelloV1, FrameKind, InitialHelloV2, OpaqueFinishV1, OpaqueResponseV1,
     AUTH_FRAME_LIMIT, IO_DEADLINE,
 };
 use super::super::crypto::{peer_id, verify_mac};
@@ -30,6 +30,7 @@ pub(super) struct AuthenticatedRequest {
     pub(super) wire: AuthenticatedEnvelopeV1,
     pub(super) envelope: uc_core::membership::SpaceAdmissionEnvelopeV1,
     pub(super) canonical_digest: [u8; 32],
+    pub(super) attempt_contract: Option<AdmissionAttemptContractV2>,
 }
 
 impl IrohSpaceAdmissionHandler {
@@ -55,18 +56,20 @@ impl IrohSpaceAdmissionHandler {
             let (kind, payload) = read_raw_with_limit(&mut receive, AUTH_FRAME_LIMIT)
                 .await
                 .map_err(map_server_wire_error)?;
-            let (admission_id, credential, is_initial) = match kind {
+            let (admission_id, credential, is_initial, attempt_contract) = match kind {
                 FrameKind::InitialHello => {
-                    let hello: InitialHelloV1 =
+                    let (protocol_version, _) = postcard::take_from_bytes::<u16>(&payload)
+                        .map_err(|_| HandlerError::Protocol)?;
+                    diagnostic_stage = AuthenticationStep::InitialVersion;
+                    if protocol_version != SpaceAdmissionProtocolVersion::V2.as_u16() {
+                        return Err(HandlerError::PeerUpgradeRequired);
+                    }
+                    let hello: InitialHelloV2 =
                         postcard::from_bytes(&payload).map_err(|_| HandlerError::Protocol)?;
                     let admission_id = SpaceAdmissionId::from_bytes(hello.admission_id)
                         .ok_or(HandlerError::Protocol)?;
                     let invitation_id = InvitationId::from_bytes(hello.invitation_id)
                         .ok_or(HandlerError::Protocol)?;
-                    diagnostic_stage = AuthenticationStep::InitialVersion;
-                    if hello.protocol_version != SpaceAdmissionProtocolVersion::V1.as_u16() {
-                        return Err(HandlerError::Authentication);
-                    }
                     diagnostic_stage = AuthenticationStep::InitialIdentity;
                     if hello.joiner_peer_id != *remote_peer_id.as_bytes() {
                         return Err(HandlerError::Authentication);
@@ -78,13 +81,23 @@ impl IrohSpaceAdmissionHandler {
                         .await
                         .map_err(HandlerError::Credential)?;
                     diagnostic_stage = AuthenticationStep::InitialProof;
-                    let context = SpaceAdmissionAuthContext::new(
-                        SpaceAdmissionProtocolVersion::V1,
+                    let attempt_contract = AdmissionAttemptContractV2::new(
                         admission_id,
                         invitation_id,
                         remote_peer_id,
                         self.local_peer_id,
-                    );
+                        hello.attempt_started_at_ms,
+                        hello.attempt_expires_at_ms,
+                    )
+                    .map_err(|_| HandlerError::Authentication)?;
+                    let context = SpaceAdmissionAuthContext::with_attempt_contract(
+                        admission_id,
+                        invitation_id,
+                        remote_peer_id,
+                        self.local_peer_id,
+                        attempt_contract.digest(),
+                    )
+                    .ok_or(HandlerError::Authentication)?;
                     let ke1 =
                         SpaceAdmissionKe1::decode_from_transport(&hello.ke1).map_err(|source| {
                             HandlerError::AuthenticationProof {
@@ -126,7 +139,7 @@ impl IrohSpaceAdmissionHandler {
                         .map_err(|source| HandlerError::AuthenticationProof {
                             source: anyhow::Error::new(source),
                         })?;
-                    (admission_id, credential, true)
+                    (admission_id, credential, true, Some(attempt_contract))
                 }
                 FrameKind::ContinuationHello => {
                     let hello: ContinuationHelloV1 =
@@ -157,7 +170,7 @@ impl IrohSpaceAdmissionHandler {
                         None,
                         &hello.mac,
                     )?;
-                    (admission_id, credential, false)
+                    (admission_id, credential, false, None)
                 }
                 _ => return Err(HandlerError::Protocol),
             };
@@ -167,6 +180,9 @@ impl IrohSpaceAdmissionHandler {
                 read_envelope(&mut receive, FrameKind::Request)
                     .await
                     .map_err(map_request_wire_error)?;
+            if envelope.header().protocol_version() != SpaceAdmissionProtocolVersion::V2 {
+                return Err(HandlerError::PeerUpgradeRequired);
+            }
             diagnostic_stage = AuthenticationStep::RequestIdentity;
             if envelope.header().admission_id() != admission_id {
                 return Err(HandlerError::Authentication);
@@ -193,6 +209,7 @@ impl IrohSpaceAdmissionHandler {
                 wire,
                 envelope,
                 canonical_digest,
+                attempt_contract,
             ))
         })
         .await;
@@ -224,6 +241,7 @@ impl IrohSpaceAdmissionHandler {
             wire,
             envelope,
             canonical_digest,
+            attempt_contract,
         ) = authenticated;
         Ok(AuthenticatedRequest {
             send,
@@ -235,6 +253,7 @@ impl IrohSpaceAdmissionHandler {
             wire,
             envelope,
             canonical_digest,
+            attempt_contract,
         })
     }
 }

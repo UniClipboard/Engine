@@ -110,6 +110,8 @@ fn typescript_contract_exposes_join_upgrade_status() {
     let declarations = include_str!("../ohos/index.d.ts");
     for required in [
         "export interface OhJoinSpaceStatus",
+        "'terminated'",
+        "terminationReason?: 'cancelled' | 'expired' | 'superseded'",
         "peerUpgradeRequired: boolean",
         "joinSpace(",
         "cancelJoinSpace(joinId: string): Promise<OhJoinSpaceStatus>",

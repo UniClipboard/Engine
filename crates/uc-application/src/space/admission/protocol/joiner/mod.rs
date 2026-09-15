@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::space::membership::WakeSpaceMembershipMaintenancePort;
-use uc_core::ports::SettingsPort;
+use uc_core::ports::{ClockPort, SettingsPort};
 
 mod activate_complete;
 mod cancel_join;
@@ -12,12 +12,14 @@ mod handle_settled;
 mod resolve_invitation;
 mod start_join;
 
+use super::recovery::LoadedPendingAdmission;
 use crate::space::SpaceAdmissionObservationRegistry;
 
 pub use activate_complete::{
     CompletedJoinerActivation, ExecuteJoinerActivationError, ExecuteJoinerActivationPort,
-    JoinerActivationCommitToken, JoinerActivationMutation, JoinerActivationOutcome,
-    JoinerActivationStateError, JoinerActivationStatePort, LoadedJoinerActivation,
+    JoinerActivationCommitToken, JoinerActivationIntent, JoinerActivationMutation,
+    JoinerActivationOutcome, JoinerActivationStateError, JoinerActivationStatePort,
+    LoadedJoinerActivation, ValidateJoinerActivationIntentPort,
 };
 pub use cancel_join::{
     CurrentJoinAdmissionStatePort, JoinerCancellationCommitToken, JoinerCancellationMaterial,
@@ -43,6 +45,7 @@ pub use start_join::{
 
 pub(crate) struct JoinerAdmissionService {
     pub(super) settings: Arc<dyn SettingsPort>,
+    pub(super) clock: Arc<dyn ClockPort>,
     pub(super) prepare_invitation: Arc<dyn PrepareJoinerInvitationPort>,
     pub(super) resolve_invitation: Arc<dyn ResolveJoinerInvitationPort>,
     pub(super) start_material: Arc<dyn JoinerStartMaterialPort>,
@@ -55,13 +58,22 @@ pub(crate) struct JoinerAdmissionService {
     pub(super) activation_state: Arc<dyn JoinerActivationStatePort>,
     pub(super) execute_activation: Arc<dyn ExecuteJoinerActivationPort>,
     pub(super) maintenance_wake: Arc<dyn WakeSpaceMembershipMaintenancePort>,
+    pub(super) space_transition_changes: tokio::sync::watch::Sender<()>,
     pub(super) re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
     pub(super) observations: Arc<SpaceAdmissionObservationRegistry>,
+}
+
+pub(crate) enum JoinerReplyHandlingOutcome {
+    Continue(LoadedPendingAdmission),
+    AwaitingSpaceTransition,
+    PairingFinished,
+    NoImmediateWork,
 }
 
 impl JoinerAdmissionService {
     pub(crate) fn new(
         settings: Arc<dyn SettingsPort>,
+        clock: Arc<dyn ClockPort>,
         prepare_invitation: Arc<dyn PrepareJoinerInvitationPort>,
         resolve_invitation: Arc<dyn ResolveJoinerInvitationPort>,
         start_material: Arc<dyn JoinerStartMaterialPort>,
@@ -74,11 +86,13 @@ impl JoinerAdmissionService {
         activation_state: Arc<dyn JoinerActivationStatePort>,
         execute_activation: Arc<dyn ExecuteJoinerActivationPort>,
         maintenance_wake: Arc<dyn WakeSpaceMembershipMaintenancePort>,
+        space_transition_changes: tokio::sync::watch::Sender<()>,
         re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
         observations: Arc<SpaceAdmissionObservationRegistry>,
     ) -> Self {
         Self {
             settings,
+            clock,
             prepare_invitation,
             resolve_invitation,
             start_material,
@@ -91,6 +105,7 @@ impl JoinerAdmissionService {
             activation_state,
             execute_activation,
             maintenance_wake,
+            space_transition_changes,
             re_pairing,
             observations,
         }

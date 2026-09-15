@@ -12,7 +12,7 @@ impl SponsorAdmissionService {
         message: AuthenticatedSpaceAdmissionMessage,
     ) -> Result<SpaceAdmissionMessageReply, HandleAuthenticatedSpaceAdmissionMessageError> {
         let loaded = self.state.load(&message).await?;
-        let (peer_binding, complete_ack, canonical_digest, _) = message.into_parts();
+        let (peer_binding, complete_ack, canonical_digest, _, _) = message.into_parts();
         let evidence = complete_ack.evidence(canonical_digest).ok_or_else(|| {
             HandleAuthenticatedSpaceAdmissionMessageError::invalid(anyhow::anyhow!(
                 "the CompleteAck canonical digest is invalid"

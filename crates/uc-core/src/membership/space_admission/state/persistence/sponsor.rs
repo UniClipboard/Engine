@@ -71,6 +71,7 @@ impl PersistedSponsorAppliedV1 {
             )
             .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             saved_reply,
+            confirmation: None,
         })
     }
 }

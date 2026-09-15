@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+mod handle_abandonment;
 mod handle_applied;
 mod handle_authenticated_message;
 mod handle_complete_ack;

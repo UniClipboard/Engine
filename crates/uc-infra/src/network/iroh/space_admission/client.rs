@@ -1,6 +1,6 @@
 //! Joiner 负责建立初次或恢复连接，并交付已认证交换。
 use super::super::space_admission_wire::{
-    read_typed, write_typed, ContinuationHelloV1, FrameKind, InitialHelloV1, OpaqueFinishV1,
+    read_typed, write_typed, ContinuationHelloV1, FrameKind, InitialHelloV2, OpaqueFinishV1,
     OpaqueResponseV1, AUTH_FRAME_LIMIT,
 };
 use super::connection::{connect, open_stream};
@@ -18,8 +18,9 @@ use uc_application::deps::{
     AuthenticatedAdmissionExchangePort, SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
 };
 use uc_core::membership::{
-    AdmissionContinuationCredential, AdmissionEncryptedPasswordEquivalent, AdmissionPeerBinding,
-    InvitationId, SpaceAdmissionId, SpaceAdmissionProtocolVersion, SpaceAdmissionRoute,
+    AdmissionAttemptContractV2, AdmissionAttemptTimeline, AdmissionContinuationCredential,
+    AdmissionEncryptedPasswordEquivalent, AdmissionPeerBinding, InvitationId, SpaceAdmissionId,
+    SpaceAdmissionProtocolVersion, SpaceAdmissionRoute,
 };
 use uc_observability_contract::diagnostics::connectivity::complete_admission_connection_failure;
 use uc_observability_contract::diagnostics::{
@@ -42,6 +43,7 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
     async fn establish_initial(
         &self,
         admission_id: SpaceAdmissionId,
+        attempt_timeline: AdmissionAttemptTimeline,
         route: &SpaceAdmissionRoute,
         password: &AdmissionEncryptedPasswordEquivalent,
     ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError> {
@@ -63,13 +65,23 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
             let remote = peer_id(route.endpoint_addr.id.as_bytes())?;
             let binding = AdmissionPeerBinding::new(local, remote)
                 .ok_or(SpaceAdmissionTransportError::AuthenticationRejected)?;
-            let context = SpaceAdmissionAuthContext::new(
-                SpaceAdmissionProtocolVersion::V1,
+            let attempt_contract = AdmissionAttemptContractV2::new(
                 admission_id,
                 invitation_id,
                 local,
                 remote,
-            );
+                attempt_timeline.started_at_ms(),
+                attempt_timeline.expires_at_ms(),
+            )
+            .map_err(|_| SpaceAdmissionTransportError::AuthenticationRejected)?;
+            let context = SpaceAdmissionAuthContext::with_attempt_contract(
+                admission_id,
+                invitation_id,
+                local,
+                remote,
+                attempt_contract.digest(),
+            )
+            .ok_or(SpaceAdmissionTransportError::AuthenticationRejected)?;
             let (client, ke1) =
                 SpaceAdmissionAuth::start_client_with_password_equivalent(password, &context)
                     .map_err(|_| SpaceAdmissionTransportError::AuthenticationRejected)?;
@@ -84,11 +96,13 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
             write_typed(
                 &mut send,
                 FrameKind::InitialHello,
-                &InitialHelloV1 {
-                    protocol_version: SpaceAdmissionProtocolVersion::V1.as_u16(),
+                &InitialHelloV2 {
+                    protocol_version: SpaceAdmissionProtocolVersion::V2.as_u16(),
                     admission_id: *admission_id.as_bytes(),
                     invitation_id: *invitation_id.as_bytes(),
                     joiner_peer_id: *local.as_bytes(),
+                    attempt_started_at_ms: attempt_timeline.started_at_ms(),
+                    attempt_expires_at_ms: attempt_timeline.expires_at_ms(),
                     ke1: ke1.encode_for_transport(),
                 },
                 AUTH_FRAME_LIMIT,

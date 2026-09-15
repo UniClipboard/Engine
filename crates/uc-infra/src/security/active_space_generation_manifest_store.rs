@@ -15,6 +15,8 @@ const DEVICE_RESET_JOURNAL_FILE: &str = ".device-management-reset-v1";
 const DEVICE_RESET_JOURNAL_PURPOSE: &[u8] = b"device-management-reset-v1";
 const ENCRYPTION_PASSPHRASE_CHANGE_JOURNAL_FILE: &str = ".encryption-passphrase-change-v1";
 const ENCRYPTION_PASSPHRASE_CHANGE_JOURNAL_PURPOSE: &[u8] = b"encryption-passphrase-change-v1";
+const STOPPED_ADMISSION_TARGET_FILE: &str = ".stopped-admission-target-v1";
+const STOPPED_ADMISSION_TARGET_PURPOSE: &[u8] = b"stopped-admission-target-v1";
 const ACTIVE_RUNTIME_MANIFEST_FORMAT_V3: u16 = 3;
 const ACTIVE_RUNTIME_MANIFEST_DIGEST_DOMAIN_V3: &[u8] =
     b"uniclipboard/active-runtime-manifest/v3\0";
@@ -27,6 +29,38 @@ struct PersistedActiveRuntimeManifestV3 {
     profile_data_generation: [u8; 16],
     space_control_generation: [u8; 16],
     manifest_digest: [u8; 32],
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedStoppedAdmissionTargetV1 {
+    format_version: u16,
+    admission_id: [u8; 32],
+    space_id: String,
+    keyslot_generation: [u8; 16],
+    profile_data_generation: [u8; 16],
+    space_control_generation: [u8; 16],
+}
+
+impl PersistedStoppedAdmissionTargetV1 {
+    fn new(admission_id: [u8; 32], target: &ActiveRuntimeManifestV3) -> Self {
+        Self {
+            format_version: 1,
+            admission_id,
+            space_id: target.layout().space_id().as_ref().to_owned(),
+            keyslot_generation: *target.keyslot_generation(),
+            profile_data_generation: *target.layout().profile_data_generation(),
+            space_control_generation: *target.layout().space_control_generation(),
+        }
+    }
+
+    fn matches(&self, target: &ActiveRuntimeManifestV3) -> bool {
+        self.format_version == 1
+            && self.admission_id != [0; 32]
+            && self.space_id == target.layout().space_id().as_ref()
+            && self.keyslot_generation == *target.keyslot_generation()
+            && self.profile_data_generation == *target.layout().profile_data_generation()
+            && self.space_control_generation == *target.layout().space_control_generation()
+    }
 }
 
 impl PersistedActiveRuntimeManifestV3 {
@@ -245,6 +279,7 @@ pub struct ActiveSpaceGenerationManifestStore {
     path: PathBuf,
     reset_journal_path: PathBuf,
     encryption_passphrase_change_journal_path: PathBuf,
+    stopped_admission_target_path: PathBuf,
     keys: Arc<AdmissionKeyManager>,
     write_lock: Mutex<()>,
 }
@@ -253,6 +288,7 @@ impl ActiveSpaceGenerationManifestStore {
     pub fn new(base_dir: PathBuf, keys: Arc<AdmissionKeyManager>) -> Self {
         Self {
             path: base_dir.join(ACTIVE_GENERATION_MANIFEST_FILE),
+            stopped_admission_target_path: base_dir.join(STOPPED_ADMISSION_TARGET_FILE),
             reset_journal_path: base_dir.join(DEVICE_RESET_JOURNAL_FILE),
             encryption_passphrase_change_journal_path: base_dir
                 .join(ENCRYPTION_PASSPHRASE_CHANGE_JOURNAL_FILE),
@@ -619,6 +655,66 @@ impl ActiveSpaceGenerationManifestStore {
         replace_file_atomically(&temporary, &self.path)
             .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
         sync_parent_directory(parent).map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)
+    }
+
+    pub(crate) async fn stop_admission_target(
+        &self,
+        admission_id: [u8; 32],
+        target: &ActiveRuntimeManifestV3,
+    ) -> Result<(), ActiveSpaceGenerationManifestStoreError> {
+        if admission_id == [0; 32] {
+            return Err(ActiveSpaceGenerationManifestStoreError::Corrupt);
+        }
+        let stopped = PersistedStoppedAdmissionTargetV1::new(admission_id, target);
+        let plaintext = postcard::to_stdvec(&stopped)
+            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
+        let ciphertext = self
+            .keys
+            .seal_profile_payload(STOPPED_ADMISSION_TARGET_PURPOSE, &plaintext)
+            .map_err(map_key_error)?;
+        let _guard = self.write_lock.lock().await;
+        let parent = self
+            .stopped_admission_target_path
+            .parent()
+            .ok_or(ActiveSpaceGenerationManifestStoreError::Storage)?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+        let temporary = self.stopped_admission_target_path.with_extension("tmp");
+        let mut file = tokio::fs::File::create(&temporary)
+            .await
+            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+        file.write_all(&ciphertext)
+            .await
+            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+        file.sync_all()
+            .await
+            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+        drop(file);
+        replace_file_atomically(&temporary, &self.stopped_admission_target_path)
+            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+        sync_parent_directory(parent).map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)
+    }
+
+    pub(crate) async fn is_admission_target_stopped(
+        &self,
+        target: &ActiveRuntimeManifestV3,
+    ) -> Result<bool, ActiveSpaceGenerationManifestStoreError> {
+        let ciphertext = match tokio::fs::read(&self.stopped_admission_target_path).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
+        };
+        let plaintext = self
+            .keys
+            .open_profile_payload(STOPPED_ADMISSION_TARGET_PURPOSE, &ciphertext)
+            .map_err(map_key_error)?;
+        let stopped: PersistedStoppedAdmissionTargetV1 = postcard::from_bytes(&plaintext)
+            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
+        if stopped.format_version != 1 || stopped.admission_id == [0; 32] {
+            return Err(ActiveSpaceGenerationManifestStoreError::Corrupt);
+        }
+        Ok(stopped.matches(target))
     }
 
     pub async fn clear(&self) -> Result<(), ActiveSpaceGenerationManifestStoreError> {

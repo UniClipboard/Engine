@@ -1,5 +1,63 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceAdmissionTerminationReason {
+    Cancelled,
+    Expired,
+    Superseded,
+}
+
+#[derive(PartialEq, Eq)]
+pub struct SpaceAdmissionLocalJoinerTerminated {
+    pub(super) join_id: JoinId,
+    pub(super) local_join_ordinal: u64,
+    pub(super) reason: SpaceAdmissionTerminationReason,
+    pub(super) cleanup: Option<AdmissionCleanupObligation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionCommitKnowledge {
+    Unknown,
+    Known,
+}
+
+#[derive(PartialEq, Eq)]
+pub struct AdmissionCleanupObligation {
+    pub(super) commit_knowledge: AdmissionCommitKnowledge,
+    pub(super) member_binding: Option<AdmissionMemberBindingV2>,
+    pub(super) peer_binding: AdmissionPeerBinding,
+    pub(super) continuation_credential: AdmissionContinuationCredential,
+    pub(super) pending_exchange: Option<PendingAdmissionExchange>,
+    pub(super) local_space_transition: Option<AdmissionSpaceTransition>,
+}
+
+impl AdmissionCleanupObligation {
+    pub const fn commit_knowledge(&self) -> AdmissionCommitKnowledge {
+        self.commit_knowledge
+    }
+
+    pub const fn member_binding(&self) -> Option<&AdmissionMemberBindingV2> {
+        self.member_binding.as_ref()
+    }
+
+    pub const fn peer_binding(&self) -> AdmissionPeerBinding {
+        self.peer_binding
+    }
+
+    pub const fn continuation_credential(&self) -> &AdmissionContinuationCredential {
+        &self.continuation_credential
+    }
+
+    pub const fn pending_exchange(&self) -> Option<&PendingAdmissionExchange> {
+        self.pending_exchange.as_ref()
+    }
+
+    /// 终止前已经保存的本机切换计划；只用于幂等隔离该尝试的目标。
+    pub const fn local_space_transition(&self) -> Option<&AdmissionSpaceTransition> {
+        self.local_space_transition.as_ref()
+    }
+}
+
 #[derive(PartialEq, Eq)]
 pub struct SpaceAdmissionActivePendingSettlement {
     pub(super) join_id: JoinId,
@@ -77,6 +135,7 @@ pub struct SpaceAdmissionCompletedTerminal {
     pub(super) peer_binding: AdmissionPeerBinding,
     pub(super) continuation_credential: AdmissionContinuationCredential,
     pub(super) saved_reply: SavedAdmissionReply,
+    pub(super) confirmation: Option<SponsorPairingConfirmationSummary>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -85,6 +144,23 @@ pub struct SpaceAdmissionSponsorRejected {
     pub(super) continuation_credential: AdmissionContinuationCredential,
     pub(super) reason: SpaceAdmissionRejectionReason,
     pub(super) saved_reply: SavedAdmissionReply,
+    pub(super) abandonment_cleanup: Option<SponsorAbandonmentCleanup>,
+}
+
+#[derive(PartialEq, Eq)]
+pub struct SpaceAdmissionSponsorExpired {
+    pub(super) abandonment_cleanup: SponsorAbandonmentCleanup,
+}
+
+#[derive(PartialEq, Eq)]
+pub enum SponsorAbandonmentCleanup {
+    NotRequired,
+    Known(AdmissionMemberBindingV2),
+    Unknown {
+        attempt_digest: [u8; 32],
+        member_instance_id: MemberInstanceId,
+        add_event_id: MembershipEventId,
+    },
 }
 
 #[derive(PartialEq, Eq)]

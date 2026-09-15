@@ -6,10 +6,10 @@ use async_trait::async_trait;
 use super::*;
 
 #[derive(Clone)]
-struct RecordingStep {
-    name: &'static str,
-    calls: Arc<Mutex<Vec<&'static str>>>,
-    outcome: MembershipMaintenanceStepOutcome,
+pub(super) struct RecordingStep {
+    pub(super) name: &'static str,
+    pub(super) calls: Arc<Mutex<Vec<&'static str>>>,
+    pub(super) outcome: MembershipMaintenanceStepOutcome,
 }
 
 impl RecordingStep {
@@ -24,8 +24,8 @@ impl RecoverSpaceAdmissionsPort for RecordingStep {
     async fn recover_space_admissions(
         &self,
         _trigger: &MembershipMaintenanceTrigger,
-    ) -> MembershipMaintenanceStepOutcome {
-        self.record()
+    ) -> AdmissionMaintenanceOutcome {
+        AdmissionMaintenanceOutcome::Continue(self.record())
     }
 }
 
@@ -52,7 +52,10 @@ impl DeliverRestrictedMembershipPort for RecordingStep {
 
 #[async_trait]
 impl DeliverPendingGroupUpdatesPort for RecordingStep {
-    async fn deliver_pending_group_updates(&self) -> MembershipMaintenanceStepOutcome {
+    async fn deliver_pending_group_updates(
+        &self,
+        _: &MembershipMaintenanceTrigger,
+    ) -> MembershipMaintenanceStepOutcome {
         self.record()
     }
 }
@@ -80,7 +83,7 @@ impl ReconcileMembershipProjectionPort for RecordingStep {
     }
 }
 
-struct NoopNetworkActivity;
+pub(super) struct NoopNetworkActivity;
 
 impl MembershipNetworkActivityPort for NoopNetworkActivity {
     fn pause_network_work(&self) {}
@@ -90,6 +93,21 @@ impl MembershipNetworkActivityPort for NoopNetworkActivity {
 struct BlockingAdmission {
     started: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
+}
+
+struct YieldingAdmission {
+    calls: Arc<Mutex<Vec<&'static str>>>,
+}
+
+#[async_trait]
+impl RecoverSpaceAdmissionsPort for YieldingAdmission {
+    async fn recover_space_admissions(
+        &self,
+        _trigger: &MembershipMaintenanceTrigger,
+    ) -> AdmissionMaintenanceOutcome {
+        self.calls.lock().unwrap().push("admissions");
+        AdmissionMaintenanceOutcome::Yield(MembershipMaintenanceStepOutcome::Completed)
+    }
 }
 
 struct BlockingFirstRecordingAdmission {
@@ -104,13 +122,13 @@ impl RecoverSpaceAdmissionsPort for BlockingFirstRecordingAdmission {
     async fn recover_space_admissions(
         &self,
         _trigger: &MembershipMaintenanceTrigger,
-    ) -> MembershipMaintenanceStepOutcome {
+    ) -> AdmissionMaintenanceOutcome {
         self.calls.lock().unwrap().push("admissions");
         if self.first.swap(false, Ordering::SeqCst) {
             self.started.notify_one();
             self.release.notified().await;
         }
-        MembershipMaintenanceStepOutcome::Completed
+        AdmissionMaintenanceOutcome::Continue(MembershipMaintenanceStepOutcome::Completed)
     }
 }
 
@@ -123,7 +141,7 @@ impl RecoverSpaceAdmissionsPort for NonCooperativeAdmission {
     async fn recover_space_admissions(
         &self,
         _trigger: &MembershipMaintenanceTrigger,
-    ) -> MembershipMaintenanceStepOutcome {
+    ) -> AdmissionMaintenanceOutcome {
         self.started.notify_one();
         std::future::pending().await
     }
@@ -134,10 +152,10 @@ impl RecoverSpaceAdmissionsPort for BlockingAdmission {
     async fn recover_space_admissions(
         &self,
         _trigger: &MembershipMaintenanceTrigger,
-    ) -> MembershipMaintenanceStepOutcome {
+    ) -> AdmissionMaintenanceOutcome {
         self.started.notify_one();
         self.release.notified().await;
-        MembershipMaintenanceStepOutcome::Completed
+        AdmissionMaintenanceOutcome::Continue(MembershipMaintenanceStepOutcome::Completed)
     }
 }
 
@@ -194,6 +212,37 @@ async fn startup_runs_the_fixed_sequence_and_continues_after_deferred_work() {
     assert_eq!(report.completed_count, 6);
     assert_eq!(report.deferred_count, 1);
     assert_eq!(report.stable_failure_count, 0);
+}
+
+#[tokio::test]
+async fn session_transition_stops_the_current_maintenance_round_after_admission() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let step = |name| {
+        Arc::new(RecordingStep {
+            name,
+            calls: Arc::clone(&calls),
+            outcome: MembershipMaintenanceStepOutcome::Completed,
+        })
+    };
+    let maintain = MaintainSpaceMembershipUseCase::new(MaintainSpaceMembershipDeps {
+        admissions: Arc::new(YieldingAdmission {
+            calls: Arc::clone(&calls),
+        }),
+        effects: step("effects"),
+        conflicts: step("conflicts"),
+        group_update_delivery: step("group_updates"),
+        restricted_delivery: step("restricted"),
+        synchronization: step("synchronize"),
+        cleanup: step("cleanup"),
+    });
+
+    let report = maintain
+        .execute(MembershipMaintenanceTrigger::StateChanged)
+        .await;
+
+    assert_eq!(calls.lock().unwrap().as_slice(), &["admissions"]);
+    assert_eq!(report.completed_count, 1);
+    assert_eq!(report.deferred_count, 0);
 }
 
 #[tokio::test]
@@ -463,6 +512,90 @@ async fn pause_cancels_network_work_and_waits_for_the_current_commit_boundary() 
             "cleanup"
         ]
     );
+    runtime.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn admission_deadline_wakes_maintenance_at_the_exact_boundary() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let step = |name| {
+        Arc::new(RecordingStep {
+            name,
+            calls: Arc::clone(&calls),
+            outcome: MembershipMaintenanceStepOutcome::Completed,
+        })
+    };
+    let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
+        MaintainSpaceMembershipDeps {
+            admissions: step("admissions"),
+            effects: step("effects"),
+            conflicts: step("conflicts"),
+            group_update_delivery: step("group_updates"),
+            restricted_delivery: step("restricted"),
+            synchronization: step("synchronize"),
+            cleanup: step("cleanup"),
+        },
+    ));
+    let (_peer_reachability_tx, peer_reachability_rx) = tokio::sync::broadcast::channel(4);
+    let runtime = SpaceMembershipMaintenanceRuntime::start(
+        maintain,
+        peer_reachability_rx,
+        std::time::Duration::from_secs(3600),
+        Arc::new(NoopNetworkActivity),
+    );
+    wait_for_call_count(&calls, 7).await;
+    calls.lock().unwrap().clear();
+
+    runtime.activity().schedule_at(301_000, 1_000);
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_millis(299_999)).await;
+    tokio::task::yield_now().await;
+    assert!(calls.lock().unwrap().is_empty());
+
+    tokio::time::advance(std::time::Duration::from_millis(1)).await;
+    wait_for_call_count(&calls, 7).await;
+    assert_eq!(calls.lock().unwrap().first(), Some(&"admissions"));
+    runtime.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_later_admission_deadline_cannot_postpone_the_nearest_wake() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let step = |name| {
+        Arc::new(RecordingStep {
+            name,
+            calls: Arc::clone(&calls),
+            outcome: MembershipMaintenanceStepOutcome::Completed,
+        })
+    };
+    let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
+        MaintainSpaceMembershipDeps {
+            admissions: step("admissions"),
+            effects: step("effects"),
+            conflicts: step("conflicts"),
+            group_update_delivery: step("group_updates"),
+            restricted_delivery: step("restricted"),
+            synchronization: step("synchronize"),
+            cleanup: step("cleanup"),
+        },
+    ));
+    let (_peer_reachability_tx, peer_reachability_rx) = tokio::sync::broadcast::channel(4);
+    let runtime = SpaceMembershipMaintenanceRuntime::start(
+        maintain,
+        peer_reachability_rx,
+        std::time::Duration::from_secs(3600),
+        Arc::new(NoopNetworkActivity),
+    );
+    wait_for_call_count(&calls, 7).await;
+    calls.lock().unwrap().clear();
+
+    runtime.activity().schedule_at(2_000, 1_000);
+    runtime.activity().schedule_at(4_000, 1_000);
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_millis(1_000)).await;
+
+    wait_for_call_count(&calls, 7).await;
+    assert_eq!(calls.lock().unwrap().first(), Some(&"admissions"));
     runtime.shutdown().await;
 }
 

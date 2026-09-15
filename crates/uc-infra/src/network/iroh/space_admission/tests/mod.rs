@@ -12,9 +12,9 @@ use uc_application::deps::{
     SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
 };
 use uc_core::membership::{
-    AdmissionChannelPeerId, AdmissionContinuationCredential, AdmissionEncryptedPasswordEquivalent,
-    InvitationId, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionProtocolVersion,
-    SpaceAdmissionRoute,
+    AdmissionAttemptContractV2, AdmissionAttemptTimeline, AdmissionChannelPeerId,
+    AdmissionContinuationCredential, AdmissionEncryptedPasswordEquivalent, InvitationId,
+    SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionProtocolVersion, SpaceAdmissionRoute,
 };
 use uc_observability_contract::diagnostics::{
     operation_span, DiagnosticDomain, DiagnosticOperation, DiagnosticRole, DiagnosticSpanKind,
@@ -27,7 +27,7 @@ use crate::security::{
 
 use super::super::space_admission_wire::LARGE_MESSAGE_LIMIT;
 use super::super::space_admission_wire::{
-    read_raw_with_limit, read_typed, write_typed, ContinuationHelloV1, FrameKind, InitialHelloV1,
+    read_raw_with_limit, read_typed, write_typed, ContinuationHelloV1, FrameKind, InitialHelloV2,
     OpaqueFinishV1, OpaqueResponseV1, WireError, AUTH_FRAME_LIMIT, IO_DEADLINE,
 };
 use super::super::trace_context::set_remote_parent;
@@ -171,14 +171,14 @@ impl ProtocolHandler for LegacyLayoutHandler {
             .await
             .expect("legacy initial hello");
         assert_eq!(kind, FrameKind::InitialHello);
-        let hello: InitialHelloV1 = postcard::from_bytes(&payload).expect("legacy hello layout");
+        let hello: InitialHelloV2 = postcard::from_bytes(&payload).expect("current hello layout");
         let admission_id =
             SpaceAdmissionId::from_bytes(hello.admission_id).expect("legacy admission id");
         let invitation_id =
             InvitationId::from_bytes(hello.invitation_id).expect("legacy invitation id");
         assert_eq!(
             hello.protocol_version,
-            SpaceAdmissionProtocolVersion::V1.as_u16()
+            SpaceAdmissionProtocolVersion::V2.as_u16()
         );
         assert_eq!(hello.joiner_peer_id, *remote_peer_id.as_bytes());
         let material = self
@@ -186,13 +186,23 @@ impl ProtocolHandler for LegacyLayoutHandler {
             .resolve_initial(invitation_id, admission_id)
             .await
             .expect("legacy credential");
-        let context = SpaceAdmissionAuthContext::new(
-            SpaceAdmissionProtocolVersion::V1,
+        let attempt_contract = AdmissionAttemptContractV2::new(
             admission_id,
             invitation_id,
             remote_peer_id,
             self.local_peer_id,
-        );
+            hello.attempt_started_at_ms,
+            hello.attempt_expires_at_ms,
+        )
+        .expect("valid attempt contract");
+        let context = SpaceAdmissionAuthContext::with_attempt_contract(
+            admission_id,
+            invitation_id,
+            remote_peer_id,
+            self.local_peer_id,
+            attempt_contract.digest(),
+        )
+        .expect("valid authenticated attempt context");
         let ke1 = SpaceAdmissionKe1::decode_from_transport(&hello.ke1)
             .expect("legacy client authentication start");
         let (server, ke2) = SpaceAdmissionAuth::start_server(
@@ -242,7 +252,7 @@ impl HandleAuthenticatedSpaceAdmissionMessagePort for PersistingLoopbackEndpoint
         uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError,
     > {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        let (binding, envelope, digest, continuation) = message.into_parts();
+        let (binding, envelope, digest, continuation, attempt_contract) = message.into_parts();
         match envelope.body() {
             SpaceAdmissionBodyV1::JoinRequest(_) => {
                 let continuation = continuation.ok_or_else(|| {
@@ -254,7 +264,8 @@ impl HandleAuthenticatedSpaceAdmissionMessagePort for PersistingLoopbackEndpoint
                     Some(continuation.as_bytes().to_vec());
                 let admission_id = envelope.header().admission_id();
                 let predecessor = envelope.header().message_id();
-                let accepted = SponsorAdmission::accept_join_request(
+                let protocol_version = envelope.header().protocol_version();
+                let accepted = SponsorAdmission::accept_join_request_with_timeline(
                     admission_id,
                     AdmissionInvitationClaim::from_bytes(vec![0x41; 32]).map_err(
                         uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid,
@@ -273,10 +284,18 @@ impl HandleAuthenticatedSpaceAdmissionMessagePort for PersistingLoopbackEndpoint
                     )?,
                     binding,
                     continuation,
+                    attempt_contract
+                        .ok_or_else(|| {
+                            uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid(
+                                anyhow::anyhow!("fresh request missing attempt contract"),
+                            )
+                        })?
+                        .timeline(),
                 )
                 .map_err(uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid)?
                 .into_replacement();
-                let candidate = SpaceAdmissionEnvelopeV1::new(
+                let candidate = SpaceAdmissionEnvelopeV1::new_with_version(
+                    protocol_version,
                     admission_id,
                     AdmissionRole::Sponsor,
                     0,
@@ -341,12 +360,11 @@ impl HandleAuthenticatedSpaceAdmissionMessagePort for PersistingLoopbackEndpoint
                     .map_err(
                     uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid,
                 )?;
-                let commit = SpaceAdmissionEnvelopeV1::new(
-                    envelope.header().admission_id(),
+                let commit = SpaceAdmissionEnvelopeV1::reply_to(
+                    &envelope,
                     AdmissionRole::Sponsor,
                     1,
                     message_id(0x46),
-                    Some(envelope.header().message_id()),
                     SpaceAdmissionBodyV1::Commit(AdmissionCommitV1::new(
                         fixed,
                         AdmissionSignedMembershipHistory::from_bytes(history.as_bytes().to_vec()).map_err(uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid)?,
@@ -429,7 +447,8 @@ fn join_request(
         UnreadableHistoryPolicy::Discard,
     )
     .expect("JoinRequest");
-    SpaceAdmissionEnvelopeV1::new(
+    SpaceAdmissionEnvelopeV1::new_with_version(
+        SpaceAdmissionProtocolVersion::V2,
         admission_id,
         AdmissionRole::Joiner,
         0,
@@ -535,12 +554,11 @@ fn prepared_request(
         admission.membership_credential.credential_id,
         vec![0x91; 64],
     );
-    SpaceAdmissionEnvelopeV1::new(
-        admission_id,
+    SpaceAdmissionEnvelopeV1::reply_to(
+        candidate,
         AdmissionRole::Joiner,
         1,
         message_id(0x92),
-        Some(candidate.header().message_id()),
         SpaceAdmissionBodyV1::Prepared(AdmissionPreparedV1::new(proof)),
     )
     .expect("Prepared envelope")
@@ -548,4 +566,5 @@ fn prepared_request(
 
 mod crypto;
 mod diagnostics;
+mod exchange_progress;
 mod protocol;

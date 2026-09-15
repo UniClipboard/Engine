@@ -60,12 +60,17 @@ impl ProtocolRouterBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::iroh::session_generation::{
+        SessionProtocolHandlersBuilder, SessionProtocolRegistry, SessionProtocolRegistryError,
+    };
     use crate::network::iroh::LEGACY_PEER_REACHABILITY_ALPN;
     use iroh::{
-        endpoint::{ConnectOptions, Connection},
+        endpoint::{ConnectOptions, Connection, EndpointHooks},
         protocol::{AcceptError, ProtocolHandler},
         RelayMode,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use tokio::sync::Notify;
 
     #[derive(Debug)]
     struct Hold;
@@ -74,6 +79,171 @@ mod tests {
             connection.closed().await;
             Ok(())
         }
+    }
+
+    #[derive(Debug)]
+    struct CountAndHold {
+        accepted: Arc<AtomicUsize>,
+        shutdowns: Arc<AtomicUsize>,
+        started: Arc<Notify>,
+    }
+
+    impl ProtocolHandler for CountAndHold {
+        async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+            self.accepted.fetch_add(1, AtomicOrdering::SeqCst);
+            self.started.notify_one();
+            connection.closed().await;
+            Ok(())
+        }
+
+        async fn shutdown(&self) {
+            self.shutdowns.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_generation_handlers_are_closed_without_retiring_current_generation() {
+        const TEST_ALPN: &[u8] = b"uniclipboard/test-rejected-generation/1";
+
+        let registry = SessionProtocolRegistry::new();
+        let active_shutdowns = Arc::new(AtomicUsize::new(0));
+        let mut active_handlers = SessionProtocolHandlersBuilder::new();
+        active_handlers
+            .install(
+                [TEST_ALPN],
+                CountAndHold {
+                    accepted: Arc::new(AtomicUsize::new(0)),
+                    shutdowns: Arc::clone(&active_shutdowns),
+                    started: Arc::new(Notify::new()),
+                },
+            )
+            .unwrap();
+        let active = registry.publish(active_handlers.build()).await.unwrap();
+
+        let rejected_shutdowns = Arc::new(AtomicUsize::new(0));
+        let mut rejected_handlers = SessionProtocolHandlersBuilder::new();
+        rejected_handlers
+            .install(
+                [TEST_ALPN],
+                CountAndHold {
+                    accepted: Arc::new(AtomicUsize::new(0)),
+                    shutdowns: Arc::clone(&rejected_shutdowns),
+                    started: Arc::new(Notify::new()),
+                },
+            )
+            .unwrap();
+        let error = registry
+            .publish(rejected_handlers.build())
+            .await
+            .expect_err("second generation must be rejected while the first is active");
+        assert!(matches!(error, SessionProtocolRegistryError::AlreadyActive));
+
+        assert_eq!(rejected_shutdowns.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(active_shutdowns.load(AtomicOrdering::SeqCst), 0);
+
+        registry.quiesce(&active).await.unwrap();
+        assert_eq!(active_shutdowns.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn published_generation_replaces_retired_handler_without_restarting_router() {
+        const TEST_ALPN: &[u8] = b"uniclipboard/test-session-generation/1";
+
+        let registry = Arc::new(SessionProtocolRegistry::new());
+        let dispatcher = registry.dispatcher(TEST_ALPN);
+        let hooks = registry.endpoint_hooks();
+        let server = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .hooks(registry.endpoint_hooks())
+            .bind()
+            .await
+            .unwrap();
+        let client = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .unwrap();
+        let router = ProtocolRouterBuilder::new(server.clone())
+            .accept(TEST_ALPN, dispatcher)
+            .spawn();
+
+        assert!(matches!(
+            hooks.before_connect(&server.addr(), TEST_ALPN).await,
+            iroh::endpoint::BeforeConnectOutcome::Reject
+        ));
+        let unavailable = client.connect(server.addr(), TEST_ALPN).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), unavailable.closed())
+            .await
+            .unwrap();
+
+        let first_count = Arc::new(AtomicUsize::new(0));
+        let first_shutdowns = Arc::new(AtomicUsize::new(0));
+        let first_started = Arc::new(Notify::new());
+        let mut first_handlers = SessionProtocolHandlersBuilder::new();
+        first_handlers
+            .install(
+                [TEST_ALPN],
+                CountAndHold {
+                    accepted: Arc::clone(&first_count),
+                    shutdowns: Arc::clone(&first_shutdowns),
+                    started: Arc::clone(&first_started),
+                },
+            )
+            .unwrap();
+        let first = registry.publish(first_handlers.build()).await.unwrap();
+        assert!(matches!(
+            hooks.before_connect(&server.addr(), TEST_ALPN).await,
+            iroh::endpoint::BeforeConnectOutcome::Accept
+        ));
+        let first_connection = client.connect(server.addr(), TEST_ALPN).await.unwrap();
+        first_started.notified().await;
+
+        registry.quiesce(&first).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), first_connection.closed())
+            .await
+            .unwrap();
+        assert_eq!(first_shutdowns.load(AtomicOrdering::SeqCst), 1);
+        assert!(matches!(
+            hooks.before_connect(&server.addr(), TEST_ALPN).await,
+            iroh::endpoint::BeforeConnectOutcome::Reject
+        ));
+
+        let between_generations = client.connect(server.addr(), TEST_ALPN).await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            between_generations.closed(),
+        )
+        .await
+        .unwrap();
+
+        let second_count = Arc::new(AtomicUsize::new(0));
+        let second_shutdowns = Arc::new(AtomicUsize::new(0));
+        let second_started = Arc::new(Notify::new());
+        let mut second_handlers = SessionProtocolHandlersBuilder::new();
+        second_handlers
+            .install(
+                [TEST_ALPN],
+                CountAndHold {
+                    accepted: Arc::clone(&second_count),
+                    shutdowns: Arc::clone(&second_shutdowns),
+                    started: Arc::clone(&second_started),
+                },
+            )
+            .unwrap();
+        let second = registry.publish(second_handlers.build()).await.unwrap();
+        let second_connection = client.connect(server.addr(), TEST_ALPN).await.unwrap();
+        second_started.notified().await;
+
+        assert_eq!(first_count.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(second_count.load(AtomicOrdering::SeqCst), 1);
+
+        second_connection.close(0u32.into(), b"test_complete");
+        registry.quiesce(&second).await.unwrap();
+        assert_eq!(second_shutdowns.load(AtomicOrdering::SeqCst), 1);
+        client.close().await;
+        router.shutdown().await.unwrap();
     }
 
     #[tokio::test]

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -6,11 +7,13 @@ use crate::security::WrappedSpaceAdmissionDataKey;
 
 pub(in crate::space::admission) const SPACE_ADMISSION_REPOSITORY_FORMAT_V1: u16 = 1;
 pub(in crate::space::admission) const SPACE_ADMISSION_REPOSITORY_FORMAT_V2: u16 = 2;
+pub(super) const SPACE_ADMISSION_REPOSITORY_FORMAT_V3: u16 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::space::admission) struct StoredSpaceAdmissionV1 {
     pub(in crate::space::admission) wrapped_data_key: WrappedSpaceAdmissionDataKey,
-    pub(in crate::space::admission) encrypted_payload: Vec<u8>,
+    // rust-style: allow-qualified-path -- 可见性限定要求模块路径，不能使用导入别名
+    pub(in crate::space::admission) encrypted_payload: Arc<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +37,22 @@ pub(in crate::space::admission) struct PersistedSpaceAdmissionRepositoryV2 {
     pub(in crate::space::admission) records: BTreeMap<[u8; 32], StoredSpaceAdmissionV1>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct PersistedSpaceAdmissionMetadataV3 {
+    pub(super) format_version: u16,
+    pub(super) profile_generation: [u8; 16],
+    pub(super) next_local_join_ordinal: u64,
+    pub(super) current_local_join_id: Option<[u8; 32]>,
+    pub(super) latest_local_join_id: Option<[u8; 32]>,
+    pub(super) claimed_invitations: BTreeMap<[u8; 32], [u8; 32]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct PersistedSpaceAdmissionRecordV3 {
+    pub(super) admission_id: [u8; 32],
+    pub(super) stored: StoredSpaceAdmissionV1,
+}
+
 impl PersistedSpaceAdmissionRepositoryV2 {
     pub(super) fn fresh(profile_generation: [u8; 16]) -> Self {
         Self {
@@ -44,6 +63,19 @@ impl PersistedSpaceAdmissionRepositoryV2 {
             latest_local_join_id: None,
             claimed_invitations: BTreeMap::new(),
             records: BTreeMap::new(),
+        }
+    }
+}
+
+impl From<&PersistedSpaceAdmissionRepositoryV2> for PersistedSpaceAdmissionMetadataV3 {
+    fn from(state: &PersistedSpaceAdmissionRepositoryV2) -> Self {
+        Self {
+            format_version: SPACE_ADMISSION_REPOSITORY_FORMAT_V3,
+            profile_generation: state.profile_generation,
+            next_local_join_ordinal: state.next_local_join_ordinal,
+            current_local_join_id: state.current_local_join_id,
+            latest_local_join_id: state.latest_local_join_id,
+            claimed_invitations: state.claimed_invitations.clone(),
         }
     }
 }

@@ -257,7 +257,13 @@ impl SpaceAdmissionAggregate {
             )) => (None, None),
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
                 _,
-            )) => (None, None),
+            ))
+            | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(_)) => {
+                (None, None)
+            }
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorExpired(_)) => {
+                (None, None)
+            }
         }
     }
 }

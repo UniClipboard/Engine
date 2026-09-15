@@ -155,7 +155,16 @@ impl CurrentSpaceIdentityPort for CurrentSpaceResolver {
                 Ok(Some(SpaceId::from_str(&manifest.space_id)))
             }
             Some(ActiveRuntimeManifest::V3(manifest)) => {
-                Ok(Some(manifest.layout().space_id().clone()))
+                if self
+                    .generation_manifest
+                    .is_admission_target_stopped(&manifest)
+                    .await
+                    .map_err(map_generation_manifest_error)?
+                {
+                    Ok(None)
+                } else {
+                    Ok(Some(manifest.layout().space_id().clone()))
+                }
             }
             None => self.legacy_id.load().await,
         }

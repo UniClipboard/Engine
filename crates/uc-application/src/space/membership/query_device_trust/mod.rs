@@ -5,8 +5,10 @@ mod use_case;
 
 pub use error::QueryDeviceTrustError;
 pub use model::{
-    DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
-    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, PendingDeviceTrustChange,
+    AdmissionDisplayStatus, DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership,
+    DeviceTrustObservation, DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState,
+    PairingConfirmationObservation, PairingConfirmationStatus, PairingConfirmationTarget,
+    PendingDeviceTrustChange,
 };
 pub use ports::{LoadCurrentJoinStatusPort, LoadDeviceTrustObservationsPort};
 pub(crate) use use_case::QueryDeviceTrustUseCase;

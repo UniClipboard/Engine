@@ -752,12 +752,15 @@ impl IrohPeerReachabilityAdapter {
                     );
                 }
 
-                {
+                let should_broadcast = {
                     let mut last = self.last_state.lock().await;
-                    last.insert(*device, ReachabilityState::Online);
-                }
+                    last.insert(*device, ReachabilityState::Online)
+                        != Some(ReachabilityState::Online)
+                };
                 info!("dial_and_track: dial succeeded, peer marked Online");
-                self.broadcast(*device, ReachabilityState::Online, now);
+                if should_broadcast {
+                    self.broadcast(*device, ReachabilityState::Online, now);
+                }
                 Ok(ReachabilityState::Online)
             }
             Err((_error, category)) => {
@@ -2094,6 +2097,46 @@ mod tests {
 
         // Teardown.
         router_b.shutdown().await.expect("router_b shutdown clean");
+        endpoint_a.close().await;
+        drop(endpoint_b);
+    }
+
+    #[tokio::test]
+    async fn repeated_verification_does_not_repeat_online_event() {
+        let (endpoint_a, endpoint_b, b_blob, b_device_id, router_b) = setup_two_endpoints().await;
+        let repo = Arc::new(FakePeerAddressRepo::default());
+        repo.seed(record(&b_device_id, b_blob));
+        let adapter = build_adapter(endpoint_a.clone(), repo);
+        let mut subscriber = adapter.subscribe();
+
+        assert_eq!(
+            timeout(DIAL_BUDGET, adapter.verify_reachable(&b_device_id))
+                .await
+                .expect("first verification within budget")
+                .expect("first verification succeeds"),
+            ReachabilityState::Online
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(1), subscriber.recv())
+                .await
+                .expect("first transition is published")
+                .expect("event channel remains open")
+                .state,
+            ReachabilityState::Online
+        );
+        assert_eq!(
+            timeout(DIAL_BUDGET, adapter.verify_reachable(&b_device_id))
+                .await
+                .expect("second verification within budget")
+                .expect("second verification succeeds"),
+            ReachabilityState::Online
+        );
+        assert!(timeout(Duration::from_millis(200), subscriber.recv())
+            .await
+            .is_err());
+
+        adapter.disconnect_all().await;
+        router_b.shutdown().await.ok();
         endpoint_a.close().await;
         drop(endpoint_b);
     }

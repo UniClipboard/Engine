@@ -129,7 +129,7 @@ export interface OhJoinedSpace {
 }
 
 export interface OhJoinSpaceStatus {
-  status: 'active' | 'pending' | 'rejected'
+  status: 'active' | 'pending' | 'rejected' | 'terminated'
   joinId: string
   joinedSpace?: OhJoinedSpace
   targetSpaceId?: string
@@ -138,6 +138,7 @@ export interface OhJoinSpaceStatus {
   cancelRequested?: boolean
   peerUpgradeRequired: boolean
   rejectionReason?: string
+  terminationReason?: 'cancelled' | 'expired' | 'superseded'
 }
 
 export interface OhMembershipConvergence {

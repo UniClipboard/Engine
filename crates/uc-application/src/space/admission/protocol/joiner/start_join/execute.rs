@@ -1,24 +1,46 @@
 use super::super::JoinerAdmissionService;
 use super::{JoinerStartMutation, PreparedJoinerInvitation};
 use crate::space::admission::protocol::SpaceAdmissionProtocol;
-use crate::space::admission::{CurrentJoinStatus, JoinSpaceError, JoinSpaceInput, JoinSpaceResult};
+use crate::space::admission::{
+    CurrentJoinStatus, JoinSpaceError, JoinSpaceInput, JoinSpaceResult, JoinSpaceTerminationReason,
+};
 use uc_core::membership::{
-    AdmissionRetryState, JoinerAdmission, PendingAdmissionExchange, SpaceAdmissionMessageKind,
+    AdmissionRetryState, JoinerAdmission, PendingAdmissionExchange, SpaceAdmissionAggregateError,
+    SpaceAdmissionMessageKind,
 };
 use uc_core::ports::SettingsPort;
-use uc_observability_contract::diagnostics::SpaceAdmissionObservationOutcome;
+use uc_observability_contract::diagnostics::connectivity::{
+    scope_pairing_work, AdmissionExchangeSide,
+};
+use uc_observability_contract::diagnostics::{
+    DiagnosticErrorType, SpaceAdmissionObservationOutcome,
+};
 
 impl SpaceAdmissionProtocol {
-    pub(crate) async fn start_join(
+    pub(crate) async fn start_join_at(
         &self,
         input: JoinSpaceInput,
+        started_at_ms: i64,
     ) -> Result<JoinSpaceResult, JoinSpaceError> {
-        self.execute_exclusively(self.joiner.start(input)).await
+        let result = scope_pairing_work(
+            AdmissionExchangeSide::Joiner,
+            None,
+            self.execute_exclusively(self.joiner.start(input, started_at_ms)),
+        )
+        .await;
+        if result.is_ok() {
+            self.recovery.interrupt_current();
+        }
+        result
     }
 }
 
 impl JoinerAdmissionService {
-    async fn start(&self, input: JoinSpaceInput) -> Result<JoinSpaceResult, JoinSpaceError> {
+    async fn start(
+        &self,
+        input: JoinSpaceInput,
+        started_at_ms: i64,
+    ) -> Result<JoinSpaceResult, JoinSpaceError> {
         persist_device_name(self.settings.as_ref(), input.device_name.as_deref()).await?;
         let loaded = self.start_state.load().await?;
         let (
@@ -28,16 +50,27 @@ impl JoinerAdmissionService {
             requires_session_transition,
             commit_token,
         ) = loaded.into_parts();
-        let superseded_observation_material = current_join
-            .as_ref()
-            .map(|admission| *admission.admission_id().as_bytes());
+        let superseded_observation_material = current_join.as_ref().map(|admission| {
+            (
+                *admission.admission_id().as_bytes(),
+                admission.is_expired_at(started_at_ms) == Some(true),
+            )
+        });
         let superseded = current_join
-            .map(JoinerAdmission::supersede)
+            .map(|admission| {
+                if admission.is_expired_at(started_at_ms) == Some(true) {
+                    admission
+                        .terminate_if_expired(started_at_ms)?
+                        .ok_or(SpaceAdmissionAggregateError::InvalidTransition)
+                } else {
+                    admission.supersede()
+                }
+            })
             .transpose()
             .map_err(|_| JoinSpaceError::PreviousJoinCannotBeSuperseded)?;
 
         let prepared_invitation = self.prepare_invitation.prepare(&input).await?;
-        let (admission_id, join_id, transition) = match prepared_invitation {
+        let (admission_id, join_id, mut transition) = match prepared_invitation {
             PreparedJoinerInvitation::Full => {
                 let material = self.start_material.create(&input).await?;
                 let (
@@ -64,6 +97,7 @@ impl JoinerAdmissionService {
                     private_state,
                     encrypted_password_equivalent,
                     pending_exchange,
+                    started_at_ms,
                 )
                 .map_err(|_| JoinSpaceError::InvalidStartMaterial)?;
                 (admission_id, join_id, transition)
@@ -81,11 +115,25 @@ impl JoinerAdmissionService {
                     source_snapshot,
                     start_context,
                     short_code,
+                    started_at_ms,
                 )
                 .map_err(|_| JoinSpaceError::InvalidStartMaterial)?;
                 (admission_id, join_id, transition)
             }
         };
+        let expires_at_ms = transition
+            .replacement()
+            .expires_at_ms()
+            .ok_or(JoinSpaceError::InvalidStartMaterial)?;
+        let now_ms = self.clock.now_ms();
+        if now_ms >= expires_at_ms {
+            transition = transition
+                .into_replacement()
+                .terminate_if_expired(now_ms)
+                .map_err(|_| JoinSpaceError::InvalidStartMaterial)?
+                .ok_or(JoinSpaceError::InvalidStartMaterial)?;
+        }
+        let terminated = transition.replacement().termination_reason();
 
         self.start_state
             .commit(
@@ -93,15 +141,35 @@ impl JoinerAdmissionService {
                 JoinerStartMutation::new(transition, superseded),
             )
             .await?;
-        if let Some(material) = superseded_observation_material {
-            self.observations
-                .finish(material, SpaceAdmissionObservationOutcome::Cancelled);
+        if terminated.is_none() {
+            self.maintenance_wake.schedule_at(expires_at_ms, now_ms);
         }
-        self.observations.begin(*admission_id.as_bytes());
-        self.maintenance_wake.wake();
+        if let Some((material, expired)) = superseded_observation_material {
+            let outcome = if expired {
+                SpaceAdmissionObservationOutcome::Failed(DiagnosticErrorType::Timeout)
+            } else {
+                SpaceAdmissionObservationOutcome::Cancelled
+            };
+            self.observations.finish(material, outcome);
+        }
+        if terminated.is_none() {
+            self.observations.begin(*admission_id.as_bytes());
+        }
+        self.observations
+            .scope(*admission_id.as_bytes(), async {
+                self.maintenance_wake.wake();
+            })
+            .await;
 
-        Ok(JoinSpaceResult {
-            status: CurrentJoinStatus::Pending {
+        let status = match terminated {
+            Some(uc_core::membership::SpaceAdmissionTerminationReason::Expired) => {
+                CurrentJoinStatus::Terminated {
+                    join_id: *join_id.as_bytes(),
+                    reason: JoinSpaceTerminationReason::Expired,
+                }
+            }
+            Some(_) => return Err(JoinSpaceError::InvalidStartMaterial),
+            None => CurrentJoinStatus::Pending {
                 join_id: *join_id.as_bytes(),
                 target_space_id: None,
                 sponsor_device_id: None,
@@ -109,6 +177,9 @@ impl JoinerAdmissionService {
                 cancel_requested: false,
                 peer_upgrade_required: false,
             },
+        };
+        Ok(JoinSpaceResult {
+            status,
             requires_session_transition,
         })
     }

@@ -45,13 +45,13 @@ use uc_core::ids::{DeviceId, ProfileId, SpaceId};
 use uc_core::membership::{AdmissionReplayId, ProtectionGroupAdmission};
 use uc_core::membership::{
     BeginRevocationOutcome, BootstrapError, BootstrapId, GroupBootstrapPort, GroupBootstrapResult,
-    GroupEpoch, GroupRevocationPort, GroupRevocationResult, KeyEpochError, LegacyBootstrapRecord,
-    LegacyBootstrapRepositoryPort, LegacyBootstrapStage, LegacyBootstrapStatus, MemberProtection,
-    MemberProtectionStatus, MembershipCredential, PendingGroupUpdate, PreparedRevocationResolution,
-    ProtectionGroupId, RevocationId, RevocationOutboxMessage, RevocationRecord,
-    RevocationRepositoryPort, RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState,
-    SpaceProtectionError, SpaceProtectionMode, SpaceProtectionSnapshot, SpaceProtectionStatusPort,
-    SpaceSecurityMode,
+    GroupEpoch, GroupRevocationPort, GroupRevocationResult, GroupUpdateDispatchError,
+    KeyEpochError, LegacyBootstrapRecord, LegacyBootstrapRepositoryPort, LegacyBootstrapStage,
+    LegacyBootstrapStatus, MemberProtection, MemberProtectionStatus, MembershipCredential,
+    PendingGroupUpdate, PreparedRevocationResolution, ProtectionGroupId, RevocationId,
+    RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort, RevocationStage,
+    RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceProtectionError, SpaceProtectionMode,
+    SpaceProtectionSnapshot, SpaceProtectionStatusPort, SpaceSecurityMode,
 };
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::{SpaceAccessError, SpaceAccessStore};
@@ -684,6 +684,11 @@ impl RuntimeSpaceAccessAdapter {
             });
         }
         Ok(())
+    }
+
+    /// 停止使用已被终止准入提升的控制世代；持久停止事实由切换负责人先保存。
+    pub(crate) fn stop_using_admission_target(&self) {
+        self.session.clear();
     }
 
     async fn prepare_target_access(
@@ -1569,25 +1574,6 @@ impl RuntimeSpaceAccessAdapter {
         Ok(results)
     }
 
-    async fn pending_space_group_updates(&self) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
-        let repository = self.key_epoch_repository.as_ref();
-        let space_id = self
-            .session
-            .current_space_id()
-            .map_err(|error| KeyEpochError::Repository(error.into()))?;
-        let mut pending = repository
-            .load_space_material(&space_id)
-            .await?
-            .map(|material| material.pending_group_updates().to_vec())
-            .unwrap_or_default();
-        for record in repository.list_incomplete_revocations().await? {
-            if record.space_id() == &space_id {
-                pending.extend(self.pending_group_updates(record.revocation_id()).await?);
-            }
-        }
-        Ok(pending)
-    }
-
     async fn acknowledge_space_group_update(
         &self,
         update_id: &str,
@@ -1620,37 +1606,6 @@ impl RuntimeSpaceAccessAdapter {
             self.acknowledge_group_update(record.revocation_id(), update.recipient(), now_ms)
                 .await?;
             return Ok(true);
-        }
-        Ok(false)
-    }
-
-    async fn defer_space_group_update(
-        &self,
-        update_id: &str,
-        now_ms: i64,
-    ) -> Result<bool, KeyEpochError> {
-        let repository = self.key_epoch_repository.as_ref();
-        let space_id = self
-            .session
-            .current_space_id()
-            .map_err(|error| KeyEpochError::Repository(error.into()))?;
-        let Some(mut material) = repository.load_space_material(&space_id).await? else {
-            return Ok(false);
-        };
-        if material.defer_group_update(update_id, now_ms) {
-            repository.save_space_material(&material).await?;
-            return Ok(true);
-        }
-        for record in repository.list_incomplete_revocations().await? {
-            if record.space_id() == &space_id
-                && self
-                    .pending_group_updates(record.revocation_id())
-                    .await?
-                    .iter()
-                    .any(|update| update.update_id() == update_id)
-            {
-                return Ok(true);
-            }
         }
         Ok(false)
     }
@@ -2433,8 +2388,32 @@ impl GroupRevocationPort for RuntimeSpaceAccessAdapter {
         RuntimeSpaceAccessAdapter::resume_group_revocations(self, now_ms).await
     }
 
-    async fn pending_space_group_updates(&self) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
-        RuntimeSpaceAccessAdapter::pending_space_group_updates(self).await
+    async fn due_space_group_updates(
+        &self,
+        now_ms: i64,
+        online_peer: Option<DeviceId>,
+    ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|source| KeyEpochError::Repository(source.into()))?;
+        self.key_epoch_repository
+            .due_group_updates(&space_id, now_ms, online_peer)
+            .await
+    }
+
+    async fn record_space_group_update_failures(
+        &self,
+        failures: &[(String, GroupUpdateDispatchError)],
+        now_ms: i64,
+    ) -> Result<usize, KeyEpochError> {
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|source| KeyEpochError::Repository(source.into()))?;
+        self.key_epoch_repository
+            .record_group_update_failures(&space_id, failures, now_ms)
+            .await
     }
 
     async fn acknowledge_space_group_update(
@@ -2443,14 +2422,6 @@ impl GroupRevocationPort for RuntimeSpaceAccessAdapter {
         now_ms: i64,
     ) -> Result<bool, KeyEpochError> {
         RuntimeSpaceAccessAdapter::acknowledge_space_group_update(self, update_id, now_ms).await
-    }
-
-    async fn defer_space_group_update(
-        &self,
-        update_id: &str,
-        now_ms: i64,
-    ) -> Result<bool, KeyEpochError> {
-        RuntimeSpaceAccessAdapter::defer_space_group_update(self, update_id, now_ms).await
     }
 }
 
@@ -3721,6 +3692,18 @@ mod admission_tests {
                 &self,
                 space_id: &SpaceId,
             ) -> Result<Option<SpaceKeyMaterial>, KeyEpochError>;
+            async fn due_group_updates(
+                &self,
+                space_id: &SpaceId,
+                now_ms: i64,
+                online_peer: Option<DeviceId>,
+            ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError>;
+            async fn record_group_update_failures(
+                &self,
+                space_id: &SpaceId,
+                failures: &[(String, GroupUpdateDispatchError)],
+                now_ms: i64,
+            ) -> Result<usize, KeyEpochError>;
             async fn begin_revocation(
                 &self,
                 prepared: &RevocationRecord,
@@ -4072,6 +4055,45 @@ mod admission_tests {
             Arc::clone(vault),
         );
         adapter
+    }
+
+    #[tokio::test]
+    async fn recording_delivery_failures_does_not_load_or_save_large_material() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("batched-deferred-updates");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x62; 32]).unwrap(),
+        );
+        let failures = (0..8)
+            .map(|index| (format!("update-{index}"), GroupUpdateDispatchError::Offline))
+            .collect::<Vec<_>>();
+
+        let mut repository = MockRevocationRepository::new();
+        repository.expect_load_space_material().never();
+        repository.expect_save_space_material().never();
+        let expected_space_id = space_id.clone();
+        repository
+            .expect_record_group_update_failures()
+            .times(1)
+            .withf(move |candidate, failures, now_ms| {
+                candidate == &expected_space_id && failures.len() == 8 && *now_ms == 200
+            })
+            .returning(|_, failures, _| Ok(failures.len()));
+        let adapter = adapter(
+            &directory,
+            local_key_material(&directory, memory_secure_storage()),
+            session,
+            Arc::new(repository),
+        );
+
+        let recorded = adapter
+            .record_space_group_update_failures(&failures, 200)
+            .await
+            .unwrap();
+
+        assert_eq!(recorded, failures.len());
     }
 
     #[tokio::test]
@@ -5784,7 +5806,10 @@ mod admission_tests {
                 .revoke_group_member(&DeviceId::new("charlie"), &[DeviceId::new("bob")], 200)
                 .await
                 .unwrap();
-            let pending_updates = sponsor.pending_space_group_updates().await.unwrap();
+            let pending_updates = sponsor
+                .pending_group_updates(result.revocation_id().unwrap())
+                .await
+                .unwrap();
             assert_eq!(pending_updates.len(), 1);
             assert_eq!(pending_updates[0].recipient(), &DeviceId::new("bob"));
             assert_eq!(pending_updates[0].revocation_id(), result.revocation_id());

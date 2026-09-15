@@ -2,7 +2,7 @@ use uc_core::membership::{JoinerAdmission, SpaceAdmissionEnvelopeV1};
 
 use crate::space::admission::protocol::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryReport, AdmissionRecoveryService,
-    JoinerAdmissionService,
+    JoinerAdmissionService, JoinerReplyHandlingOutcome,
 };
 
 use super::PrepareJoinerAppliedError;
@@ -17,12 +17,12 @@ impl JoinerAdmissionService {
         reply: SpaceAdmissionEnvelopeV1,
         canonical_digest: [u8; 32],
         notify_upgrade_cleared: bool,
-    ) {
+    ) -> JoinerReplyHandlingOutcome {
         let transition = match aggregate.accept_commit(reply, canonical_digest) {
             Ok(transition) => transition,
             Err(_) => {
                 report.recovery_required_count += 1;
-                return;
+                return JoinerReplyHandlingOutcome::NoImmediateWork;
             }
         };
         let commit_result = recovery
@@ -32,7 +32,7 @@ impl JoinerAdmissionService {
             Ok(committed) => committed,
             Err(error) => {
                 recovery.record_state_error(report, error);
-                return;
+                return JoinerReplyHandlingOutcome::NoImmediateWork;
             }
         };
         report.advanced_count += 1;
@@ -41,7 +41,7 @@ impl JoinerAdmissionService {
             Some(preparation) => preparation,
             None => {
                 report.recovery_required_count += 1;
-                return;
+                return JoinerReplyHandlingOutcome::NoImmediateWork;
             }
         };
         let material = match self
@@ -52,26 +52,29 @@ impl JoinerAdmissionService {
             Ok(material) => material,
             Err(PrepareJoinerAppliedError::Invalid { .. }) => {
                 report.recovery_required_count += 1;
-                return;
+                return JoinerReplyHandlingOutcome::NoImmediateWork;
             }
             Err(PrepareJoinerAppliedError::Unavailable { .. }) => {
                 report.deferred_count += 1;
-                return;
+                return JoinerReplyHandlingOutcome::NoImmediateWork;
             }
         };
         let transition = match aggregate.apply_commit(material.into_pending_exchange()) {
             Ok(transition) => transition,
             Err(_) => {
                 report.recovery_required_count += 1;
-                return;
+                return JoinerReplyHandlingOutcome::NoImmediateWork;
             }
         };
         match recovery.commit_recovery(token, transition).await {
-            Ok(_) => {
+            Ok(loaded) => {
                 report.advanced_count += 1;
-                self.maintenance_wake.wake();
+                JoinerReplyHandlingOutcome::Continue(loaded)
             }
-            Err(error) => recovery.record_state_error(report, error),
+            Err(error) => {
+                recovery.record_state_error(report, error);
+                JoinerReplyHandlingOutcome::NoImmediateWork
+            }
         }
     }
 }

@@ -17,14 +17,18 @@ use super::*;
 #[derive(Clone)]
 struct MemoryLedgerRepository {
     loaded: Arc<Mutex<LoadedMembershipLedger>>,
+    load_calls: Arc<AtomicUsize>,
     commit_calls: Arc<AtomicUsize>,
+    last_device_trust_changed: Arc<Mutex<Option<bool>>>,
 }
 
 impl MemoryLedgerRepository {
     fn new(loaded: LoadedMembershipLedger) -> Self {
         Self {
             loaded: Arc::new(Mutex::new(loaded)),
+            load_calls: Arc::new(AtomicUsize::new(0)),
             commit_calls: Arc::new(AtomicUsize::new(0)),
+            last_device_trust_changed: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -32,10 +36,15 @@ impl MemoryLedgerRepository {
 #[async_trait]
 impl LoadMembershipLedgerPort for MemoryLedgerRepository {
     async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
+        self.load_calls.fetch_add(1, Ordering::SeqCst);
         self.loaded
             .lock()
             .map_err(|_| MembershipLedgerError::Unavailable)
             .map(|loaded| loaded.clone())
+    }
+
+    fn current_revision(&self) -> Option<u64> {
+        self.loaded.lock().ok().map(|loaded| loaded.revision)
     }
 }
 
@@ -46,6 +55,10 @@ impl CommitMembershipLedgerPort for MemoryLedgerRepository {
         mutation: MembershipLedgerMutation,
     ) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
         self.commit_calls.fetch_add(1, Ordering::SeqCst);
+        *self
+            .last_device_trust_changed
+            .lock()
+            .map_err(|_| MembershipLedgerError::Unavailable)? = Some(mutation.device_trust_changed);
         let mut loaded = self
             .loaded
             .lock()
@@ -75,6 +88,21 @@ impl HistoricalMembershipSignatureVerifier for AcceptingVerifier {
         _payload: &[u8],
         _signature: &[u8],
     ) -> Result<bool, HistoricalMembershipSignatureError> {
+        Ok(true)
+    }
+}
+
+struct CountingVerifier(AtomicUsize);
+
+impl HistoricalMembershipSignatureVerifier for CountingVerifier {
+    fn verify(
+        &self,
+        _signature_algorithm_version: u16,
+        _public_key: &[u8],
+        _payload: &[u8],
+        _signature: &[u8],
+    ) -> Result<bool, HistoricalMembershipSignatureError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
         Ok(true)
     }
 }
@@ -178,6 +206,122 @@ async fn no_current_space_has_no_authorized_scope() {
     let error = ledger.current_scope().await.unwrap_err();
 
     assert_eq!(error, CurrentSpaceMemberScopeError::NoCurrentSpace);
+}
+
+#[tokio::test]
+async fn repeated_queries_reuse_the_loaded_membership_snapshot() {
+    let repository = Arc::new(MemoryLedgerRepository::new(active_two_member_ledger()));
+    let ledger = MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    );
+
+    ledger.load_verified().await.unwrap();
+    ledger.load_verified().await.unwrap();
+
+    assert_eq!(repository.load_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn failed_reload_cannot_fall_back_to_an_older_query_snapshot() {
+    let repository = Arc::new(MemoryLedgerRepository::new(active_two_member_ledger()));
+    let ledger = MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    );
+
+    ledger.load_verified().await.unwrap();
+    repository.loaded.lock().unwrap().membership_history = Some(vec![0xFF]);
+    ledger.clear_cached_verified().unwrap();
+    assert!(matches!(
+        ledger.load_verified().await,
+        Err(MembershipLedgerError::Corrupt)
+    ));
+    assert!(matches!(
+        ledger.load_verified().await,
+        Err(MembershipLedgerError::Corrupt)
+    ));
+    assert_eq!(repository.load_calls.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn committed_membership_replaces_the_cached_query_snapshot() {
+    let repository = Arc::new(MemoryLedgerRepository::new(active_two_member_ledger()));
+    let ledger = MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    );
+
+    let before = ledger.load_verified().await.unwrap();
+    ledger
+        .compare_and_commit(|record| {
+            record.history_sync_cursor = Some(DeviceId::new("device-b"));
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let after = ledger.load_verified().await.unwrap();
+
+    assert_eq!(before.record().revision, 8);
+    assert_eq!(after.record().revision, 9);
+    assert_eq!(repository.load_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *repository.last_device_trust_changed.lock().unwrap(),
+        Some(false)
+    );
+}
+
+#[tokio::test]
+async fn relationship_change_marks_device_trust_as_changed() {
+    let repository = Arc::new(MemoryLedgerRepository::new(active_two_member_ledger()));
+    let ledger = MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    );
+
+    ledger
+        .compare_and_commit(|record| {
+            record
+                .peer_reconciliation
+                .get_mut(&DeviceId::new("device-b"))
+                .unwrap()
+                .relationship = MembershipHistoryRelationship::Diverged;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *repository.last_device_trust_changed.lock().unwrap(),
+        Some(true)
+    );
+}
+
+#[tokio::test]
+async fn unchanged_membership_history_reuses_its_verified_result() {
+    let repository = Arc::new(MemoryLedgerRepository::new(active_two_member_ledger()));
+    let verifier = Arc::new(CountingVerifier(AtomicUsize::new(0)));
+    let ledger = MembershipLedger::new(repository.clone(), repository.clone(), verifier.clone());
+
+    ledger.load_verified().await.unwrap();
+    let first_count = verifier.0.load(Ordering::SeqCst);
+    assert!(first_count > 0);
+
+    ledger
+        .compare_and_commit(|record| {
+            record.history_sync_cursor = Some(DeviceId::new("device-b"));
+            Ok(())
+        })
+        .await
+        .unwrap();
+    ledger.load_verified().await.unwrap();
+
+    assert_eq!(verifier.0.load(Ordering::SeqCst), first_count);
+    assert_eq!(repository.load_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -396,6 +540,7 @@ async fn memory_adapter_rejects_a_stale_history_digest() {
 
     let error = repository
         .compare_and_commit(MembershipLedgerMutation {
+            device_trust_changed: true,
             expected_revision: loaded.revision,
             expected_history_digest: Some([0; 32]),
             replacement,

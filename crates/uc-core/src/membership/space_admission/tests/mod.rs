@@ -11,30 +11,34 @@ use crate::membership::{
 use crate::security::IdentityFingerprint;
 
 use super::{
-    AdmissionAppliedV1, AdmissionArtifactError, AdmissionBaseSnapshot, AdmissionCandidateV1,
-    AdmissionChannelPeerId, AdmissionCommitV1, AdmissionCompleteAckV1, AdmissionCompleteV1,
-    AdmissionContinuationCredential, AdmissionContinuationRoute, AdmissionEffect,
-    AdmissionEncryptedPasswordEquivalent, AdmissionErrorCategory, AdmissionEvidenceRelation,
-    AdmissionExchangeBlockReason, AdmissionIdentitySignature, AdmissionInboundDecision,
-    AdmissionInboundExpectation, AdmissionInvitationClaim, AdmissionJoinRequestError,
-    AdmissionJoinRequestV1, AdmissionJoinerPrivateState, AdmissionKeyPackage,
-    AdmissionMessageEvidence, AdmissionMessageHeaderError, AdmissionMessageId, AdmissionMlsCommit,
-    AdmissionMlsWelcome, AdmissionPeerBinding, AdmissionPendingExchangeError,
-    AdmissionPendingRecovery, AdmissionPreparedV1, AdmissionProtocolMessageError,
+    AdmissionAbandonedV2, AdmissionAppliedV1, AdmissionArtifactError, AdmissionAttemptTimeline,
+    AdmissionBaseSnapshot, AdmissionCandidateV1, AdmissionChannelPeerId,
+    AdmissionCleanupObligation, AdmissionCommitKnowledge, AdmissionCommitV1,
+    AdmissionCompleteAckV1, AdmissionCompleteV1, AdmissionContinuationCredential,
+    AdmissionContinuationRoute, AdmissionEffect, AdmissionEncryptedPasswordEquivalent,
+    AdmissionErrorCategory, AdmissionEvidenceRelation, AdmissionExchangeBlockReason,
+    AdmissionIdentitySignature, AdmissionInboundDecision, AdmissionInboundExpectation,
+    AdmissionInvitationClaim, AdmissionJoinRequestError, AdmissionJoinRequestV1,
+    AdmissionJoinerPrivateState, AdmissionKeyPackage, AdmissionMessageEvidence,
+    AdmissionMessageHeaderError, AdmissionMessageId, AdmissionMlsCommit, AdmissionMlsWelcome,
+    AdmissionPeerBinding, AdmissionPendingExchangeError, AdmissionPendingRecovery,
+    AdmissionPreparedV1, AdmissionProtocolMessageError, AdmissionRecordPersistence,
     AdmissionRecoveryCategory, AdmissionRecoveryPublicKey, AdmissionReplayDecision,
     AdmissionReplayError, AdmissionRetryState, AdmissionRole, AdmissionSealedRecoveryMaterial,
     AdmissionSettledV1, AdmissionSignedMembershipHistory, AdmissionSourceSnapshot,
     AdmissionStagedSecurityState, AdmissionStagedTargetInput, InvitationId, JoinId,
-    PendingAdmissionExchange, SavedAdmissionReply, SpaceAdmissionActiveState,
+    JoinerAdmission, PendingAdmissionExchange, SavedAdmissionReply, SpaceAdmissionActiveState,
     SpaceAdmissionAggregate, SpaceAdmissionAggregateError, SpaceAdmissionBodyV1,
     SpaceAdmissionCompletionHelperState, SpaceAdmissionEnvelopeHeaderV1, SpaceAdmissionEnvelopeV1,
     SpaceAdmissionId, SpaceAdmissionJoinerChannelState, SpaceAdmissionJoinerState,
     SpaceAdmissionMessageKind, SpaceAdmissionProtocolVersion, SpaceAdmissionRecordState,
     SpaceAdmissionRejectedState, SpaceAdmissionRejectionReason, SpaceAdmissionRoute,
-    SpaceAdmissionSponsorState, SpaceAdmissionTerminalState, SponsorAdmission,
+    SpaceAdmissionSponsorState, SpaceAdmissionTerminalState, SpaceAdmissionTerminationReason,
+    SponsorAbandonmentCleanup, SponsorAdmission, SponsorPairingConfirmationStatus,
     UnreadableHistoryPolicy,
 };
 
+mod attempt;
 mod exchange;
 mod id;
 mod message;

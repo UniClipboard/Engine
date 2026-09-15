@@ -1,5 +1,6 @@
 mod credentials;
 mod digest;
+mod display;
 mod full_invitation;
 mod joiner;
 mod recovery;
@@ -24,6 +25,8 @@ pub use joiner::{
     DefaultJoinerCandidatePreparation, DefaultJoinerInvitationPreparation,
     DefaultJoinerStartMaterial,
 };
+#[cfg(feature = "test-util")]
+pub use repository::AdmissionRepositoryBenchmark;
 pub use repository::SqliteSpaceAdmissionState;
 pub use security::AdmissionSecurityTransitionAdapter;
 pub use sponsor::{

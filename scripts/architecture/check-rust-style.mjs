@@ -6,15 +6,18 @@ import { dirname, relative, resolve } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
-const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
+const SCRIPT_PATH = fileURLToPath(import.meta.url)
+const SCRIPT_DIR = dirname(SCRIPT_PATH)
 const REPOSITORY_ROOT = resolve(SCRIPT_DIR, '../..')
 const SOURCE_ROOTS = ['crates', 'bindings', 'compatibility', 'tests']
 const ALLOW_MARKER = /\/\/\s*rust-style:\s*allow-qualified-path\s*--\s*\S.+$/
+const FUNCTION_START = /(^|\n)\s*(pub(?:\s*\([^)]*\))?\s+)?(?:const\s+)?(?:unsafe\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\b/g
 
 function git(args) {
   const result = spawnSync('git', args, {
     cwd: REPOSITORY_ROOT,
     encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
   })
   if (result.status !== 0) {
     process.stderr.write(result.stderr ?? '')
@@ -58,6 +61,21 @@ function addedLinesFromDiff(input) {
     }
   }
   return additions
+}
+
+function changedFunctionLinesFromDiff(input) {
+  const changes = []
+  let path
+  for (const line of input.split('\n')) {
+    if (line.startsWith('+++ b/')) {
+      path = line.slice(6)
+      continue
+    }
+    const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/)
+    if (!path || !hunk) continue
+    changes.push({ path, line: Math.max(1, Number(hunk[1])) })
+  }
+  return changes
 }
 
 function untrackedRustFiles() {
@@ -140,7 +158,54 @@ function approvedException(lines, lineNumber) {
   return [lines[lineNumber - 1], lines[lineNumber - 2]].filter(Boolean).some(line => ALLOW_MARKER.test(line))
 }
 
-function violationsFor(path, selectedLines) {
+function lineNumberAt(source, offset) {
+  return source.slice(0, offset).split('\n').length
+}
+
+function closingBraceAt(source, openingBrace) {
+  let depth = 0
+  for (let index = openingBrace; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1
+    if (source[index] === '}') depth -= 1
+    if (depth === 0) return index
+  }
+  return null
+}
+
+function functionsIn(codeLines) {
+  const source = codeLines.join('\n')
+  const functions = []
+  for (const match of source.matchAll(FUNCTION_START)) {
+    const visibility = match[2]?.trim() ?? ''
+    const name = match[3]
+    const openingBrace = source.indexOf('{', match.index + match[0].length)
+    const declarationEnd = source.indexOf(';', match.index + match[0].length)
+    if (openingBrace === -1 || (declarationEnd !== -1 && declarationEnd < openingBrace)) continue
+    const closingBrace = closingBraceAt(source, openingBrace)
+    if (closingBrace === null) continue
+    functions.push({
+      body: source.slice(openingBrace + 1, closingBrace),
+      endLine: lineNumberAt(source, closingBrace),
+      name,
+      startLine: lineNumberAt(source, match.index + match[1].length),
+      visibility,
+    })
+  }
+  return functions
+}
+
+function forwardingMethod(functionInfo) {
+  if (functionInfo.visibility === 'pub') return null
+  const body = functionInfo.body.trim().replace(/^return\s+/, '').replace(/;\s*$/, '').trim()
+  if (body.includes(';')) return null
+  const forwarding = body.match(
+    /^self\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\([\s\S]*\)(?:\s*\.\s*await)?(?:\s*\?)?$/
+  )
+  if (!forwarding || forwarding[1] === functionInfo.name) return null
+  return forwarding[1]
+}
+
+function violationsFor(path, addedLines, changedFunctionLines) {
   const absolutePath = resolve(REPOSITORY_ROOT, path)
   if (!existsSync(absolutePath) || isTestPath(path)) return []
   const lines = readFileSync(absolutePath, 'utf8').split('\n')
@@ -148,13 +213,29 @@ function violationsFor(path, selectedLines) {
   const codeLines = lines.map(line => stripStringsAndComments(line, lexicalState))
   const testLines = testLineNumbers(lines, codeLines)
   const violations = []
-  for (const lineNumber of selectedLines) {
+  for (const lineNumber of addedLines) {
     const raw = lines[lineNumber - 1] ?? ''
     const code = codeLines[lineNumber - 1] ?? ''
     if (!/\bcrate\s*::/.test(code)) continue
     if (/^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+crate\s*::/.test(code)) continue
     if (testLines.has(lineNumber) || approvedException(lines, lineNumber)) continue
     violations.push({ path, line: lineNumber, source: raw.trim() })
+  }
+  const selected = new Set([...addedLines, ...changedFunctionLines])
+  for (const functionInfo of functionsIn(codeLines)) {
+    const selectedFunction = Array.from(
+      { length: functionInfo.endLine - functionInfo.startLine + 1 },
+      (_, index) => functionInfo.startLine + index
+    ).some(line => selected.has(line))
+    if (!selectedFunction || testLines.has(functionInfo.startLine)) continue
+    const target = forwardingMethod(functionInfo)
+    if (!target) continue
+    violations.push({
+      path,
+      line: functionInfo.startLine,
+      source: `${functionInfo.name} 只转调 ${target}`,
+      type: 'forwarding-method',
+    })
   }
   return violations
 }
@@ -165,37 +246,58 @@ function selectedFiles() {
     if (!existsSync(absolutePath)) throw new Error('用于检查的 Rust 文件不存在')
     const path = relative(REPOSITORY_ROOT, absolutePath)
     const lineCount = readFileSync(absolutePath, 'utf8').split('\n').length
-    return new Map([[path, Array.from({ length: lineCount }, (_, index) => index + 1)]])
+    const lines = Array.from({ length: lineCount }, (_, index) => index + 1)
+    return new Map([[path, { addedLines: lines, changedFunctionLines: lines }]])
   }
   const selected = new Map()
-  for (const addition of addedLinesFromDiff(diffText())) {
+  const diff = diffText()
+  for (const addition of addedLinesFromDiff(diff)) {
     if (!addition.path.endsWith('.rs')) continue
-    const lines = selected.get(addition.path) ?? []
-    lines.push(addition.line)
+    const lines = selected.get(addition.path) ?? { addedLines: [], changedFunctionLines: [] }
+    lines.addedLines.push(addition.line)
     selected.set(addition.path, lines)
+  }
+  for (const change of changedFunctionLinesFromDiff(diff)) {
+    if (!change.path.endsWith('.rs')) continue
+    const lines = selected.get(change.path) ?? { addedLines: [], changedFunctionLines: [] }
+    lines.changedFunctionLines.push(change.line)
+    selected.set(change.path, lines)
   }
   for (const path of untrackedRustFiles()) {
     const lineCount = readFileSync(resolve(REPOSITORY_ROOT, path), 'utf8').split('\n').length
-    selected.set(path, Array.from({ length: lineCount }, (_, index) => index + 1))
+    const lines = Array.from({ length: lineCount }, (_, index) => index + 1)
+    selected.set(path, { addedLines: lines, changedFunctionLines: lines })
   }
   return selected
 }
 
 function main() {
-  const violations = [...selectedFiles()].flatMap(([path, lines]) => violationsFor(path, lines))
+  const violations = [...selectedFiles()].flatMap(([path, lines]) =>
+    violationsFor(path, lines.addedLines, lines.changedFunctionLines)
+  )
   if (violations.length === 0) {
     process.stdout.write('Rust 编写规范检查通过\n')
     return
   }
   for (const violation of violations) {
+    if (violation.type === 'forwarding-method') {
+      process.stderr.write(
+        `ERROR ${violation.path}:${violation.line} 仓库内部方法不得只保留转调：${violation.source}\n`
+      )
+      continue
+    }
     process.stderr.write(
       `ERROR ${violation.path}:${violation.line} 正文请先集中引入名称：${violation.source}\n`
     )
   }
-  process.stderr.write(
-    '确有必要时，在前一行添加 rust-style: allow-qualified-path 并写明具体理由。\n'
-  )
+  if (violations.some(violation => violation.type !== 'forwarding-method')) {
+    process.stderr.write(
+      '确有必要时，在前一行添加 rust-style: allow-qualified-path 并写明具体理由。\n'
+    )
+  }
   process.exitCode = 1
 }
 
-main()
+if (resolve(process.argv[1] ?? '') === SCRIPT_PATH) main()
+
+export { changedFunctionLinesFromDiff }

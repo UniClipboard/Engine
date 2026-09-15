@@ -1,11 +1,15 @@
 use async_trait::async_trait;
 use uc_core::membership::{
-    AdmissionContinuationCredential, AdmissionEncryptedPasswordEquivalent, AdmissionPeerBinding,
-    JoinerAdmissionTransition, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionRoute,
+    AdmissionAttemptTimeline, AdmissionContinuationCredential,
+    AdmissionEncryptedPasswordEquivalent, AdmissionPeerBinding, JoinerAdmissionTransition,
+    SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionRoute, SponsorAdmissionTransition,
 };
 
 use super::AuthenticatedAdmissionReply;
-use super::{AdmissionRecoveryTrigger, LoadedPendingAdmission};
+use super::{
+    AdmissionRecoveryTrigger, LoadedAdmissionRecovery, LoadedPendingAdmission,
+    LoadedSponsorAbandonment, LoadedSponsorDeadline,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PendingAdmissionRecoveryStateError {
@@ -27,7 +31,8 @@ pub trait PendingAdmissionRecoveryStatePort: Send + Sync {
     async fn load(
         &self,
         trigger: AdmissionRecoveryTrigger,
-    ) -> Result<Vec<LoadedPendingAdmission>, PendingAdmissionRecoveryStateError>;
+        now_ms: i64,
+    ) -> Result<LoadedAdmissionRecovery, PendingAdmissionRecoveryStateError>;
 
     /// Commits the replacement and every declared admission effect as one
     /// durable result. Returning success after saving only the replacement is
@@ -37,6 +42,22 @@ pub trait PendingAdmissionRecoveryStatePort: Send + Sync {
         token: super::AdmissionRecoveryCommitToken,
         transition: JoinerAdmissionTransition,
     ) -> Result<LoadedPendingAdmission, PendingAdmissionRecoveryStateError>;
+
+    async fn commit_sponsor_deadline(
+        &self,
+        _token: super::AdmissionRecoveryCommitToken,
+        _transition: SponsorAdmissionTransition,
+    ) -> Result<LoadedSponsorDeadline, PendingAdmissionRecoveryStateError> {
+        Err(PendingAdmissionRecoveryStateError::Unavailable)
+    }
+
+    async fn commit_sponsor_abandonment(
+        &self,
+        _token: super::AdmissionRecoveryCommitToken,
+        _transition: SponsorAdmissionTransition,
+    ) -> Result<LoadedSponsorAbandonment, PendingAdmissionRecoveryStateError> {
+        Err(PendingAdmissionRecoveryStateError::Unavailable)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -78,6 +99,7 @@ pub trait SpaceAdmissionTransportPort: Send + Sync {
     async fn establish_initial(
         &self,
         admission_id: SpaceAdmissionId,
+        attempt_timeline: AdmissionAttemptTimeline,
         route: &SpaceAdmissionRoute,
         encrypted_password_equivalent: &AdmissionEncryptedPasswordEquivalent,
     ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError>;

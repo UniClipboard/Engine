@@ -405,6 +405,18 @@ pub enum JoinSpaceStatusSummary {
         join_id: String,
         reason: JoinSpaceRejectionReasonSummary,
     },
+    Terminated {
+        join_id: String,
+        reason: JoinSpaceTerminationReasonSummary,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinSpaceTerminationReasonSummary {
+    Cancelled,
+    Expired,
+    Superseded,
 }
 
 impl fmt::Debug for InvitationAvailability {
@@ -1123,8 +1135,18 @@ pub struct DeviceTrustRelationshipSummary {
     pub group_relationship: DeviceGroupRelationshipSummary,
     pub compatibility: DeviceCompatibilitySummary,
     pub sync_relationship: DeviceSyncRelationshipSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing_confirmation: Option<PairingConfirmationSummary>,
     pub available_actions: Vec<DeviceTrustActionSummary>,
     pub blocked_reason: Option<DeviceTrustUnavailableReasonSummary>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PairingConfirmationSummary {
+    AwaitingPeerConfirmation,
+    Unconfirmed,
+    Confirmed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

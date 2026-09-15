@@ -1,5 +1,48 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SponsorPairingConfirmationStatus {
+    AwaitingPeerConfirmation,
+    Unconfirmed,
+    Confirmed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct SponsorPairingConfirmationSummary {
+    pub(super) status: SponsorPairingConfirmationStatus,
+    pub(super) admission_id: SpaceAdmissionId,
+    pub(super) member_instance_id: MemberInstanceId,
+    pub(super) add_event_id: MembershipEventId,
+}
+
+impl SponsorPairingConfirmationSummary {
+    pub const fn status(self) -> SponsorPairingConfirmationStatus {
+        self.status
+    }
+
+    pub const fn admission_id(self) -> SpaceAdmissionId {
+        self.admission_id
+    }
+
+    pub const fn member_instance_id(self) -> MemberInstanceId {
+        self.member_instance_id
+    }
+
+    pub const fn add_event_id(self) -> MembershipEventId {
+        self.add_event_id
+    }
+
+    pub(super) const fn with_status(self, status: SponsorPairingConfirmationStatus) -> Self {
+        Self { status, ..self }
+    }
+}
+
+impl std::fmt::Debug for SponsorPairingConfirmationSummary {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SponsorPairingConfirmationSummary([REDACTED])")
+    }
+}
+
 #[derive(PartialEq, Eq)]
 pub struct SpaceAdmissionSponsorAccepted {
     pub(super) invitation_claim: AdmissionInvitationClaim,
@@ -65,6 +108,7 @@ pub struct SpaceAdmissionSponsorApplied {
     pub(super) activation_receipt: AdmissionActivationReceipt,
     pub(super) activated_security: AdmissionActivatedSecurityState,
     pub(super) saved_reply: SavedAdmissionReply,
+    pub(super) confirmation: Option<SponsorPairingConfirmationSummary>,
 }
 
 #[cfg(test)]
