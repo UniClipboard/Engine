@@ -156,7 +156,7 @@ mod tests {
         let first_connection = client.connect(server.addr(), TEST_ALPN).await.unwrap();
         first_started.notified().await;
 
-        registry.quiesce(first).await.unwrap();
+        registry.quiesce(&first).await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(1), first_connection.closed())
             .await
             .unwrap();
@@ -196,7 +196,7 @@ mod tests {
         assert_eq!(second_count.load(AtomicOrdering::SeqCst), 1);
 
         second_connection.close(0u32.into(), b"test_complete");
-        registry.quiesce(second).await.unwrap();
+        registry.quiesce(&second).await.unwrap();
         assert_eq!(second_shutdowns.load(AtomicOrdering::SeqCst), 1);
         client.close().await;
         router.shutdown().await.unwrap();

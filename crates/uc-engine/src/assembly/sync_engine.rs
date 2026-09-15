@@ -3,7 +3,7 @@
 //! 本模块选择并安装 Iroh、Infra 与观测 adapter，再通过一次性
 //! [`ApplicationNetworkBinding`] 取得 Router 必需的窄 endpoint。Space、
 //! Clipboard、Blob 与文件传输对象图及其关闭顺序均由 Application 持有；
-//! [`SyncEngineAssembly`] 只拥有共享 Iroh node 和进度翻译 worker。
+//! [`SyncSessionAssembly`] 只拥有当前 Space 会话的进度翻译 worker。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,6 +31,8 @@ use tracing::debug;
 /// 最终状态,不会因为正好落在 cooldown 窗口里被丢掉。
 const TRANSLATOR_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(200);
 
+use crate::assembly::deps::SyncEngineDeps;
+use crate::assembly::membership_events::MembershipLedgerAccess;
 use uc_application::deps::{
     ApplicationClipboardAdapters, ApplicationNetworkAdapters, ApplicationNetworkBinding,
     ApplicationSpaceAdapters, CurrentSpaceMemberScopePort, SpaceAdmissionAdapters,
@@ -46,20 +48,15 @@ use uc_core::ports::{
     ActiveClipboardDispatchPort, ActiveClipboardReceiverPort, ClipboardDispatchPort,
     ConnectionChannelPort, LocalIdentityPort, PeerReachabilityPort,
 };
-use uc_infra::network::iroh::transfer_progress_adapter::InboundProgressEvent;
-use uc_infra::network::iroh::{
-    encode_space_admission_route, ActiveClipboardHandlers, ActiveClipboardPullHandlers,
-    BlobHandlers, ClipboardHandlers, GroupUpdateHandlers, IrohIdentityStore, IrohNode,
-    IrohNodeBuilder, IrohNodeError, TransferProgressHandlers,
-};
-// Re-exported so external callers can parametrise the assembly without
-// having to `use uc_infra` themselves.
-use crate::assembly::deps::SyncEngineDeps;
-use crate::assembly::membership_events::MembershipLedgerAccess;
 use uc_infra::fs::{
     FsAtomicPublisher, FsDirectoryStagingCleaner, FsHiddenPathMarker, FsInboundFileTarget,
 };
-pub(crate) use uc_infra::network::iroh::IrohNodeConfig;
+use uc_infra::network::iroh::transfer_progress_adapter::InboundProgressEvent;
+use uc_infra::network::iroh::{
+    encode_space_admission_route, ActiveClipboardHandlers, ActiveClipboardPullHandlers,
+    BlobHandlers, ClipboardHandlers, GroupUpdateHandlers, IrohIdentityStore, IrohNodeError,
+    IrohSessionBuilder, PreparedIrohSession, TransferProgressHandlers,
+};
 use uc_infra::security::Sha256IdentityFingerprintFactory;
 use uc_infra::space::{
     DefaultJoinerActivationExecutor, DefaultJoinerActivationPreparation,
@@ -110,11 +107,7 @@ impl uc_core::ports::FindMobileDeviceByIdPort for UnavailableMobileDeviceLookup 
 }
 
 /// Engine 持有的网络生命周期 owner。
-pub struct SyncEngineAssembly {
-    /// The shared iroh node. Held privately so callers can't bind a second
-    /// node or install additional handlers after `spawn` — that would
-    /// fragment peer identity (§"共用网络栈" decision, Slice 1 planning).
-    iroh_node: IrohNode,
+pub struct SyncSessionAssembly {
     /// 反向"传输进度"翻译 worker 的 join handle。订阅
     /// `IrohTransferProgressAdapter` 的 inbound 流,将每帧 progress 翻译
     /// 为 `HostEvent::Transfer { direction: Sending, ... }` 并发到 emitter。
@@ -124,60 +117,25 @@ pub struct SyncEngineAssembly {
 
 /// Engine 完成网络装配后一次性交给 Application 的被动 adapter 集合。
 ///
-/// 该集合按值移交；`SyncEngineAssembly` 不保留 Clipboard 领域句柄。
+/// 该集合按值移交；`SyncSessionAssembly` 不保留 Clipboard 领域句柄。
 pub(crate) struct SyncApplicationAdapters {
     pub binding: ApplicationNetworkBinding,
     pub active_pull_client: Arc<dyn uc_core::ports::ActiveClipboardPullClientPort>,
 }
 
-pub(crate) struct SyncEngineAssemblyOutput {
-    pub network: SyncEngineAssembly,
+pub(crate) struct PreparedSyncSession {
+    pub session: SyncSessionAssembly,
     pub application: SyncApplicationAdapters,
+    pub prepared_session: PreparedIrohSession,
 }
 
-impl SyncEngineAssembly {
-    #[cfg(test)]
-    pub(crate) async fn membership_history_exchange_is_reachable_for_test(&self) -> bool {
-        self.iroh_node
-            .accepts_protocol_for_test(uc_infra::network::iroh::MEMBERSHIP_HISTORY_EXCHANGE_ALPN)
-            .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn membership_branch_recovery_is_reachable_for_test(&self) -> bool {
-        self.iroh_node
-            .accepts_protocol_for_test(uc_infra::network::iroh::MEMBERSHIP_BRANCH_RECOVERY_ALPN)
-            .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn space_admission_is_reachable_for_test(&self) -> bool {
-        self.iroh_node
-            .accepts_protocol_for_test(uc_infra::network::iroh::SPACE_ADMISSION_ALPN)
-            .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn deprecated_removal_protocols_are_reachable_for_test(&self) -> bool {
-        let (exchange, late, notice) = tokio::join!(
-            self.iroh_node
-                .accepts_protocol_for_test(b"uniclipboard/removal-exchange/1"),
-            self.iroh_node
-                .accepts_protocol_for_test(b"uniclipboard/removal-late/1"),
-            self.iroh_node
-                .accepts_protocol_for_test(b"uniclipboard/removal-notice/1"),
-        );
-        exchange || late || notice
-    }
-
-    /// 先停止 Engine 自有的进度翻译，再关闭共享 Iroh Router；Application
-    /// 领域运行期由独立的 `ApplicationRuntime` 负责停止。
+impl SyncSessionAssembly {
+    /// 停止当前 Space 会话的进度翻译；长期网络由监督器独立关闭。
     #[instrument(skip_all)]
     pub async fn shutdown(self, transfer_reason: FileTransferCancellationReason) {
         self.outbound_progress_translator
             .shutdown(transfer_reason)
             .await;
-        self.iroh_node.shutdown().await;
     }
 }
 
@@ -449,7 +407,7 @@ mod outbound_progress_tests {
 
 /// 网络与 Application endpoint 装配失败；启动调用方将其作为致命错误处理。
 #[derive(Debug, thiserror::Error)]
-pub enum SyncEngineAssemblyError {
+pub enum SyncSessionPreparationError {
     #[error(transparent)]
     IrohNode(#[from] IrohNodeError),
     #[error(transparent)]
@@ -464,26 +422,21 @@ pub enum SyncEngineAssemblyError {
 /// 从已完成的 Application factory 与 Engine adapter 构造共享 Iroh 网络。
 /// 该函数绑定 endpoint 并启动 Router，必须在 Tokio runtime 内调用。
 #[instrument(skip_all)]
-pub async fn build_sync_engine_assembly(
+pub async fn prepare_sync_session(
     application: &ApplicationAssembly,
     space_setup: &SyncEngineDeps,
     current_app_version: &str,
     #[cfg(feature = "lan-compat")] mobile_sync_ports: uc_mobile_lan::MobileSyncPorts,
-    iroh_config: IrohNodeConfig,
-) -> Result<SyncEngineAssemblyOutput, SyncEngineAssemblyError> {
+    mut builder: IrohSessionBuilder,
+) -> Result<PreparedSyncSession, SyncSessionPreparationError> {
     application
         .ensure_current_version(current_app_version)
         .await?;
-    // IdentityFingerprintFactory 无状态；这里直接构造具体实现，避免从
-    // trait object 下转型后再包装。
     let identity_store = Arc::new(IrohIdentityStore::new(
         Arc::clone(&space_setup.iroh_identity_storage),
         Arc::new(Sha256IdentityFingerprintFactory),
     ));
-
-    // 绑定共享 Iroh node 并安装邀请发现。Iroh Router 始终封装在
-    // `IrohNode` 内，不向 Application 泄漏具体 Iroh 类型。
-    let mut builder = IrohNodeBuilder::bind(&identity_store, iroh_config).await?;
+    // 当前 Space 的全部网络能力先完整准备，最后由监督器一次发布。
     let handlers = builder.install_pairing_invitation(
         Arc::clone(&space_setup.device_identity),
         Arc::clone(&space_setup.settings),
@@ -586,14 +539,14 @@ pub async fn build_sync_engine_assembly(
     let endpoint_addr_blob = builder.local_endpoint_addr_blob()?;
     let continuation_route =
         encode_space_admission_route(&endpoint_addr, None).map_err(|source| {
-            SyncEngineAssemblyError::ApplicationAssembly {
+            SyncSessionPreparationError::ApplicationAssembly {
                 source: anyhow::Error::new(source).context("failed to encode the admission route"),
             }
         })?;
     let identity_fingerprint = space_setup
         .fingerprint
         .from_public_key(endpoint_addr.id.as_bytes())
-        .map_err(|source| SyncEngineAssemblyError::ApplicationAssembly {
+        .map_err(|source| SyncSessionPreparationError::ApplicationAssembly {
             source: source.context("failed to derive the endpoint identity fingerprint"),
         })?;
     let historical_signatures = Arc::new(OpenMlsHistoricalSignatureVerifier);
@@ -840,7 +793,7 @@ pub async fn build_sync_engine_assembly(
         content_gate,
     )?;
 
-    let iroh_node = builder.spawn()?;
+    let prepared_session = builder.finish();
 
     // Translator worker:从 sender 端的反向通道收 InboundProgressEvent,
     // 翻译为 application 层 HostEvent(Sending 方向)发到 host_event_bus。
@@ -852,14 +805,14 @@ pub async fn build_sync_engine_assembly(
     );
 
     info!("Iroh adapters registered against the Application network binding");
-    Ok(SyncEngineAssemblyOutput {
-        network: SyncEngineAssembly {
-            iroh_node,
+    Ok(PreparedSyncSession {
+        session: SyncSessionAssembly {
             outbound_progress_translator,
         },
         application: SyncApplicationAdapters {
             binding: application_network,
             active_pull_client: active_clipboard_pull_client,
         },
+        prepared_session,
     })
 }

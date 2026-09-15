@@ -1,95 +1,28 @@
 //! Daemon-lifecycle composition-root entry.
 //!
-//! [`build_daemon_lifecycle`] accepts already-wired
-//! [`crate::assembly::deps::WiredDependencies`] as input and does **not** re-run
-//! `wire_dependencies` — sqlite pool / repos / settings / secure storage are
-//! wired once at process start and shared between the GUI shell and the
-//! daemon lifecycle. This entry only binds the iroh node + `SyncEngineAssembly`
-//! and runs the startup reconcile passes; it is the async/sync boundary of the
-//! assembly chain (iroh `Endpoint::bind` must run inside a tokio runtime).
+//! 长期网络与当前 Space 会话在这里分别装配。仓库、设置与安全存储仍在
+//! 进程启动时只装配一次，由两个生命周期共同使用。
 
 use std::sync::Arc;
 
 use anyhow::Context as _;
 
 use crate::assembly::deps::SyncEngineDeps;
-use crate::assembly::sync_engine::{
-    build_sync_engine_assembly, SyncApplicationAdapters, SyncEngineAssembly,
-    SyncEngineAssemblyOutput,
-};
+use crate::assembly::sync_engine::{prepare_sync_session, PreparedSyncSession};
+use crate::subsystems::reconcile::{reconcile_peer_addresses, reconcile_trusted_peers};
 use uc_application::facade::ApplicationAssembly;
+use uc_infra::network::iroh::{IrohIdentityStore, IrohNode, IrohNodeBuilder, IrohSessionBuilder};
+use uc_infra::security::Sha256IdentityFingerprintFactory;
 
-/// daemon-lifecycle 装配产出。
-///
-/// 不再持有 `deps` / `background` —— 那两块属于进程级 (sqlite pool /
-/// repos / blob worker), 由 caller 一次性 wire 后移交
-/// [`build_daemon_lifecycle`]。方案 C 后 daemon 在进程内只起一次, 装配
-/// 也只跑一次。本结构体的物理意义是 "async (tokio) 装配链路上需要 iroh
-/// bind 与 SyncEngineAssembly 的那一段"。
-pub struct DaemonLifecycle {
-    /// 完整 iroh assembly。持有 iroh node、pairing/peer_reachability/clipboard
-    /// handler、auto-spawned ingest loop。daemon shutdown 调
-    /// `sync_engine_assembly.shutdown()` 干净拆 router + abort ingest。
-    pub sync_engine_assembly: SyncEngineAssembly,
-    pub(crate) application_adapters: SyncApplicationAdapters,
-}
-
-/// 装 daemon-lifecycle 资源 —— iroh node bind、SyncEngineAssembly、startup
-/// reconcile。接受已 wire 好的进程级 [`crate::assembly::deps::WiredDependencies`] 作输入,
-/// **不** 再次跑 `wire_dependencies` —— sqlite pool / repos / settings / secure
-/// storage 在进程启动期 wire 一次后由 GUI shell 与 daemon-lifecycle 共用。
-/// 本函数是 async/sync 装配链的边界点 (iroh `Endpoint::bind` 必须在 tokio
-/// runtime 内执行)。
-///
-/// `startup::reconcile::reconcile_*` 在每次 daemon 启动时跑(治理性、失败只 log),
-/// 与 `build_sync_engine_assembly` 之前执行,确保 dispatch / peer_reachability /
-/// 重新配对路径一上线就是干净状态。
-///
-/// caller 必须在 tokio runtime 上下文中调用 —— `build_sync_engine_assembly`
-/// 内部 `Endpoint::bind` 会 spawn magicsock / relay / STUN actor。
-pub async fn build_daemon_lifecycle(
+/// 建立一次 Engine 活跃期内唯一的长期网络节点。
+pub async fn build_network_runtime(
     application: &ApplicationAssembly,
     space_setup: &SyncEngineDeps,
-    current_app_version: &str,
-    #[cfg(feature = "lan-compat")] mobile_sync_ports: uc_mobile_lan::MobileSyncPorts,
     rendezvous_base_url: Option<String>,
     relay_fallback_override: Option<bool>,
     iroh_bind_port_override: Option<u16>,
     network_partition_gate: Option<uc_infra::network::iroh::IrohNetworkPartitionGate>,
-) -> anyhow::Result<DaemonLifecycle> {
-    // 启动期 reconcile:把 peer_addr_repo / trusted_peer_repo 中
-    // member_repo 已不再持有的孤儿条目清掉,恢复设计意图的不变量
-    // `peer_addr ⊆ member`、`trusted_peer ⊆ member`。失败只 log 不阻断
-    // 启动 —— reconcile 是治理性的。
-    if let Err(err) = crate::subsystems::reconcile::reconcile_peer_addresses(
-        Arc::clone(&space_setup.member_repo),
-        Arc::clone(&space_setup.peer_addr_repo),
-    )
-    .await
-    {
-        tracing::warn!(
-            error = %err,
-            "peer_addr reconcile failed at boot; daemon continues with whatever orphans remain"
-        );
-    }
-    if let Err(err) = crate::subsystems::reconcile::reconcile_trusted_peers(
-        Arc::clone(&space_setup.member_repo),
-        Arc::clone(&space_setup.trusted_peer_repo),
-    )
-    .await
-    {
-        tracing::warn!(
-            error = %err,
-            "trusted_peer reconcile failed at boot; daemon continues with whatever orphans remain"
-        );
-    }
-
-    // Phase 94 NETSET-03:从 settings 读取 LAN-only Mode 偏好后翻译为
-    // `IrohNodeConfig`。`SettingsPort::load` 当前错误返回类型 `anyhow::Result`
-    // 不区分 NotFound vs Parse;`FileSettingsRepository::load` 已对 NotFound
-    // 兜底返回 `Settings::default()` (即 `allow_relay_fallback: true`)。
-    // 故此处只需对剩余 Parse/IO 错误硬失败 —— LAN-only 信任锚点不容许脏
-    // settings 撒谎。
+) -> anyhow::Result<IrohNode> {
     let prepared_network = application
         .prepare_network()
         .await
@@ -99,10 +32,6 @@ pub async fn build_daemon_lifecycle(
     let allow_overlay_network_addrs = prepared_network.allow_overlay_network_addrs;
     let custom_relay_urls = prepared_network.custom_relay_urls;
     let congestion_controller = prepared_network.congestion_controller;
-
-    // 【checker BLOCKER 4 — 单一取反点铁律】
-    // `disable_relays` 的值**只能**通过 `relay_policy_to_iroh_config` 取得,
-    // **不**在此处内联写 `let disable_relays = !allow_relay_fallback;`。
     let mut iroh_config = crate::assembly::network::relay_policy_to_iroh_config(
         allow_relay_fallback,
         allow_overlay_network_addrs,
@@ -114,8 +43,6 @@ pub async fn build_daemon_lifecycle(
         &mut iroh_config,
         &prepared_network.relay_credentials,
     );
-    // #900：从 env 读取直连可达性（固定 UDP 端口 + 广播公网地址）并写入。
-    // 必须在 `build_sync_engine_assembly`（首次 endpoint 快照/配对交换）之前。
     crate::assembly::network::apply_iroh_direct_reachability_from_env(&mut iroh_config);
     if let Some(port) = iroh_bind_port_override {
         iroh_config.bind_port = Some(port);
@@ -138,22 +65,59 @@ pub async fn build_daemon_lifecycle(
         iroh_config.congestion_controller,
     );
 
-    let SyncEngineAssemblyOutput {
-        network: sync_engine_assembly,
-        application: application_adapters,
-    } = build_sync_engine_assembly(
+    let identity_store = IrohIdentityStore::new(
+        Arc::clone(&space_setup.iroh_identity_storage),
+        Arc::new(Sha256IdentityFingerprintFactory),
+    );
+    let builder = IrohNodeBuilder::bind(&identity_store, iroh_config)
+        .await
+        .context("Iroh network bind failed")?;
+    Ok(builder.spawn())
+}
+
+/// 在既有长期网络上准备当前 Space 的完整能力，但暂不发布。
+pub async fn prepare_daemon_session(
+    application: &ApplicationAssembly,
+    space_setup: &SyncEngineDeps,
+    current_app_version: &str,
+    #[cfg(feature = "lan-compat")] mobile_sync_ports: uc_mobile_lan::MobileSyncPorts,
+    session_builder: IrohSessionBuilder,
+) -> anyhow::Result<PreparedSyncSession> {
+    // 启动期 reconcile:把 peer_addr_repo / trusted_peer_repo 中
+    // member_repo 已不再持有的孤儿条目清掉,恢复设计意图的不变量
+    // `peer_addr ⊆ member`、`trusted_peer ⊆ member`。失败只 log 不阻断
+    // 启动 —— reconcile 是治理性的。
+    if let Err(err) = reconcile_peer_addresses(
+        Arc::clone(&space_setup.member_repo),
+        Arc::clone(&space_setup.peer_addr_repo),
+    )
+    .await
+    {
+        tracing::warn!(
+            error = %err,
+            "peer_addr reconcile failed at boot; daemon continues with whatever orphans remain"
+        );
+    }
+    if let Err(err) = reconcile_trusted_peers(
+        Arc::clone(&space_setup.member_repo),
+        Arc::clone(&space_setup.trusted_peer_repo),
+    )
+    .await
+    {
+        tracing::warn!(
+            error = %err,
+            "trusted_peer reconcile failed at boot; daemon continues with whatever orphans remain"
+        );
+    }
+
+    prepare_sync_session(
         application,
         space_setup,
         current_app_version,
         #[cfg(feature = "lan-compat")]
         mobile_sync_ports,
-        iroh_config,
+        session_builder,
     )
     .await
-    .context("Slice 1+ assembly build failed")?;
-
-    Ok(DaemonLifecycle {
-        sync_engine_assembly,
-        application_adapters,
-    })
+    .context("Space session assembly failed")
 }

@@ -3573,7 +3573,7 @@ async fn two_device_hot_path_pairing_completes_within_one_second() {
             "http://127.0.0.1:1/v1/traces",
             "http://127.0.0.1:1/v1/logs",
         )),
-        Some("healthy") | None => {
+        Some("healthy" | "handover") | None => {
             let telemetry = telemetry.as_ref().expect("healthy OTLP receiver");
             assert!(uc_engine::init_test_tracing_with_otlp(
                 &format!("{}/v1/traces", telemetry.uri()),
@@ -3606,7 +3606,7 @@ async fn two_device_hot_path_pairing_completes_within_one_second() {
         .await
         .expect("shut down joiner");
     uc_engine::flush_test_tracing();
-    if let Some(mode) = benchmark_mode {
+    if let Some(mode) = benchmark_mode.as_deref().filter(|mode| *mode != "handover") {
         eprintln!(
             "UC_PAIRING_OBSERVABILITY_RESULT mode={mode} elapsed_us={}",
             elapsed.as_micros()
@@ -3648,6 +3648,19 @@ async fn two_device_hot_path_pairing_completes_within_one_second() {
     assert_eq!(trace_evidence.flow_ids.len(), 1);
     assert_eq!(trace_evidence.lifecycle_root_count, 1);
     assert_eq!(trace_evidence.admission_trace_ids.len(), 1);
+    if benchmark_mode.as_deref() == Some("handover") {
+        eprintln!(
+            "UC_PAIRING_HANDOVER_RESULT elapsed_us={} local_us={} network_us={}",
+            elapsed.as_micros(),
+            trace_evidence.local_elapsed.as_micros(),
+            trace_evidence.network_elapsed.as_micros(),
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "two-device end-to-end pairing took {elapsed:?}, budget 3s",
+        );
+        return;
+    }
     assert!(
         trace_evidence.local_elapsed < PAIRING_HOT_PATH_BUDGET,
         "two-device local pairing work took {:?}, network-related time {:?}, end-to-end {:?}, local budget {:?}",

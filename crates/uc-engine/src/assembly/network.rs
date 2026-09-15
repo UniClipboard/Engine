@@ -164,7 +164,7 @@ pub(crate) fn parse_iroh_direct_reachability(
 }
 
 /// 读取直连可达性 env 并写入 `cfg`。在每个 production daemon / CLI 入口
-/// （`build_daemon_lifecycle` / `build_cli_app_runtime`）紧跟
+/// （`build_network_runtime` / `build_cli_app_runtime`）紧跟
 /// `relay_policy_to_iroh_config` 之后调用——daemon 与 CLI 配对路径都要广播
 /// 同一个公网地址。让 `relay_policy_to_iroh_config` 保持纯（只吃 settings、
 /// 不碰 env）。

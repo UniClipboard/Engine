@@ -77,7 +77,8 @@ pub use network_partition::IrohNetworkPartitionGate;
 pub use node::{
     ActiveClipboardHandlers, ActiveClipboardPullHandlers, BlobHandlers, ClipboardHandlers,
     GroupUpdateHandlers, IrohNode, IrohNodeBuilder, IrohNodeConfig, IrohNodeError,
-    IrohRelayAccessToken, PairingInvitationHandlers, TransferProgressHandlers,
+    IrohRelayAccessToken, IrohSessionBuilder, PairingInvitationHandlers, PreparedIrohSession,
+    TransferProgressHandlers,
 };
 pub use peer_reachability_adapter::{
     IrohPeerReachabilityAdapter, IrohPeerReachabilityHandler, LEGACY_PEER_REACHABILITY_ALPN,

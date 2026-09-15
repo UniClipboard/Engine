@@ -145,7 +145,7 @@ impl SessionProtocolRegistry {
 
     pub(super) async fn quiesce(
         &self,
-        handle: SessionProtocolGenerationHandle,
+        handle: &SessionProtocolGenerationHandle,
     ) -> Result<(), SessionProtocolRegistryError> {
         {
             let mut state = self
