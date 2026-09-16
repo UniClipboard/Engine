@@ -16,6 +16,8 @@ use opentelemetry_sdk::trace::{
     SpanProcessor,
 };
 use opentelemetry_sdk::Resource;
+use uc_observability_contract::diagnostics::connectivity::CONNECTIVITY_TARGET;
+use uc_observability_contract::diagnostics::{LOCAL_DIAGNOSTIC_TARGET, TELEMETRY_TARGET};
 
 const REMOTE_QUEUE_CAPACITY: usize = 2_048;
 const REMOTE_BATCH_SIZE: usize = 512;
@@ -595,14 +597,13 @@ impl TrackedLogProcessor {
 impl LogProcessor for TrackedLogProcessor {
     fn emit(&self, data: &mut SdkLogRecord, instrumentation: &InstrumentationScope) {
         // 纯本地记录有独立合同；不送往远程，也不是一次远程隐私拒收。
-        if data
-            .target()
-            .is_some_and(|target| target == "uc.connectivity")
-        {
+        if data.target().is_some_and(|target| {
+            target == CONNECTIVITY_TARGET || target == LOCAL_DIAGNOSTIC_TARGET
+        }) {
             return;
         }
         let approved = data.body().is_none()
-            && data.target().is_some_and(|target| target == "uc.telemetry")
+            && data.target().is_some_and(|target| target == TELEMETRY_TARGET)
             // The official tracing bridge uses an empty scope here and maps the
             // record target to the exported OTLP scope.
             && instrumentation.name().is_empty()

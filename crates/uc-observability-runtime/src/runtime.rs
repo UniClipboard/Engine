@@ -6,6 +6,10 @@ use std::time::{Duration, Instant};
 use tracing_subscriber::filter::dynamic_filter_fn;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Layer;
+use uc_observability_contract::diagnostics::connectivity::CONNECTIVITY_TARGET;
+use uc_observability_contract::diagnostics::{
+    HEALTH_TARGET, LOCAL_DIAGNOSTIC_TARGET, TELEMETRY_TARGET,
+};
 
 use crate::config::ObservabilityConfig;
 use crate::filter::local_sink_enabled;
@@ -367,12 +371,11 @@ fn build_runtime(
     let global_telemetry_accepting = Arc::clone(&telemetry_accepting);
     let global_health_accepting = Arc::clone(&health_accepting);
     let engine_layer = layers.with_filter(dynamic_filter_fn(move |metadata, _| {
-        let accepting =
-            if metadata.target() == uc_observability_contract::diagnostics::HEALTH_TARGET {
-                &global_health_accepting
-            } else {
-                &global_telemetry_accepting
-            };
+        let accepting = if metadata.target() == HEALTH_TARGET {
+            &global_health_accepting
+        } else {
+            &global_telemetry_accepting
+        };
         accepting.load(Ordering::Acquire) && local_sink_enabled(metadata)
     }));
     let mut all_layers: Vec<HostLogLayer> = vec![Box::new(engine_layer)];
@@ -405,7 +408,7 @@ fn build_runtime(
 fn host_metadata_enabled(metadata: &tracing::Metadata<'_>) -> bool {
     if matches!(
         metadata.target(),
-        "uc.telemetry" | "uc.connectivity" | "observability.health"
+        TELEMETRY_TARGET | CONNECTIVITY_TARGET | LOCAL_DIAGNOSTIC_TARGET | HEALTH_TARGET
     ) {
         return false;
     }

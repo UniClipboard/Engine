@@ -1,3 +1,4 @@
+mod diagnostics;
 mod inventory;
 mod record;
 mod security_materials;

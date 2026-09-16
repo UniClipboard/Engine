@@ -1,7 +1,11 @@
 use uc_observability_contract::diagnostics::connectivity::CONNECTIVITY_TARGET;
-use uc_observability_contract::diagnostics::{HEALTH_TARGET, TELEMETRY_TARGET};
+use uc_observability_contract::diagnostics::{
+    HEALTH_TARGET, LOCAL_DIAGNOSTIC_TARGET, TELEMETRY_TARGET,
+};
 
 const DIAGNOSTIC_OWNER: &str = "uc_observability_contract::diagnostics";
+const LOCAL_DIAGNOSTIC_OWNER: &str =
+    "uc_observability_contract::diagnostics::profile_upgrade_backup";
 const RUNTIME_HEALTH_OWNER: &str = "uc_observability_runtime::remote_health";
 const CONNECTIVITY_OWNER: &str = "uc_observability_contract::diagnostics::connectivity";
 
@@ -37,6 +41,15 @@ const HEALTH_FIELDS: &[&str] = &[
     "task.join_error.count",
 ];
 
+const LOCAL_DIAGNOSTIC_FIELDS: &[&str] = &[
+    "event.name",
+    "backup_action",
+    "error_kind",
+    "io_error_kind",
+    "io_error_code",
+    "retryable",
+];
+
 pub(crate) fn remote_span_enabled(metadata: &tracing::Metadata<'_>) -> bool {
     metadata.is_span()
         && metadata.target() == TELEMETRY_TARGET
@@ -70,8 +83,16 @@ pub(crate) fn local_sink_enabled(metadata: &tracing::Metadata<'_>) -> bool {
         TELEMETRY_TARGET => remote_log_enabled(metadata),
         HEALTH_TARGET => health_log_enabled(metadata),
         CONNECTIVITY_TARGET => connectivity_log_enabled(metadata),
+        LOCAL_DIAGNOSTIC_TARGET => local_diagnostic_log_enabled(metadata),
         _ => false,
     }
+}
+
+pub(crate) fn local_diagnostic_log_enabled(metadata: &tracing::Metadata<'_>) -> bool {
+    metadata.is_event()
+        && metadata.target() == LOCAL_DIAGNOSTIC_TARGET
+        && metadata.module_path() == Some(LOCAL_DIAGNOSTIC_OWNER)
+        && fields_are_approved(metadata, LOCAL_DIAGNOSTIC_FIELDS)
 }
 
 pub(crate) fn connectivity_log_enabled(metadata: &tracing::Metadata<'_>) -> bool {
@@ -82,7 +103,9 @@ pub(crate) fn connectivity_log_enabled(metadata: &tracing::Metadata<'_>) -> bool
 }
 
 pub(crate) fn sdk_log_enabled(metadata: &tracing::Metadata<'_>) -> bool {
-    remote_log_enabled(metadata) || connectivity_log_enabled(metadata)
+    remote_log_enabled(metadata)
+        || connectivity_log_enabled(metadata)
+        || local_diagnostic_log_enabled(metadata)
 }
 
 fn fields_are_approved(metadata: &tracing::Metadata<'_>, approved: &[&str]) -> bool {

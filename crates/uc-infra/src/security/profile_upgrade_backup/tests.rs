@@ -2,6 +2,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::sync::{Arc, Mutex};
 
+#[cfg(windows)]
+use std::fs::OpenOptions;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
+
 use crate::security::{ProfileLifecycleRepository, ProfileStartupStorage};
 use diesel::connection::SimpleConnection;
 use diesel::{Connection, RunQueryDsl, SqliteConnection};
@@ -155,6 +160,18 @@ async fn startup_backup_preserves_old_sqlite_wal_files_and_security_materials() 
         b"runtime-only-token",
     )
     .unwrap();
+    let webview_cookie = fixture
+        .paths
+        .app_data_root_dir
+        .join("EBWebView/Default/Network/Cookies");
+    fs::create_dir_all(webview_cookie.parent().unwrap()).unwrap();
+    fs::write(&webview_cookie, b"regenerable-webview-state").unwrap();
+    #[cfg(windows)]
+    let _webview_cookie_lock = OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&webview_cookie)
+        .unwrap();
     fixture.prepare().await.unwrap();
 
     assert_eq!(fs::read(&fixture.paths.db_path).unwrap(), before);
@@ -184,6 +201,7 @@ async fn startup_backup_preserves_old_sqlite_wal_files_and_security_materials() 
     assert!(!destination.join(BACKUP_DIRECTORY).exists());
     assert!(!destination.join("logs").exists());
     assert!(!destination.join("daemon-startup.conn").exists());
+    assert!(!destination.join("EBWebView").exists());
     let mut old =
         SqliteConnection::establish(destination.join("uniclipboard.db").to_str().unwrap()).unwrap();
     #[derive(diesel::QueryableByName)]
