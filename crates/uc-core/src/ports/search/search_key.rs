@@ -4,7 +4,7 @@
 //! profile via HKDF-SHA256 (per architecture spec). uc-core only sees the
 //! opaque SearchKey output; no raw MasterKey bytes cross the port boundary.
 
-use crate::search::{RenderKey, SearchError, SearchKey};
+use crate::search::{RenderKey, SearchError, SearchKeyContext};
 use async_trait::async_trait;
 
 /// Port for deriving search subkeys from the currently-unlocked encryption session.
@@ -16,7 +16,7 @@ pub trait SearchKeyDerivationPort: Send + Sync {
     ///
     /// Returns `SearchError::SessionLocked` if no master key is available.
     /// The derivation uses HKDF-SHA256 scoped to the active profile.
-    async fn derive_search_key(&self) -> Result<SearchKey, SearchError>;
+    async fn derive_search_key(&self) -> Result<SearchKeyContext, SearchError>;
 
     /// Derive a RenderKey for the currently-unlocked encryption session.
     ///

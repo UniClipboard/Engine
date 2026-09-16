@@ -10,6 +10,7 @@ use tracing::error;
 use uc_application::facade::{
     AppFacade, UnlockSpaceError, UnlockSpaceInput as AppUnlockSpaceInput,
 };
+use uc_core::crypto::domain::Passphrase;
 
 pub async fn execute_unlock_space(
     facade: &AppFacade,
@@ -17,7 +18,7 @@ pub async fn execute_unlock_space(
 ) -> Result<OperationResult, EngineError> {
     let result = facade
         .unlock_space(AppUnlockSpaceInput {
-            passphrase: input.passphrase.expose().to_owned(),
+            passphrase: Passphrase::new(input.passphrase.expose()),
         })
         .await
         .map_err(map_unlock_space_error)?;
@@ -49,7 +50,7 @@ fn map_unlock_space_error(error: UnlockSpaceError) -> EngineError {
             EngineErrorCategory::Internal,
             false,
         ),
-        UnlockSpaceError::Internal(_) => {
+        UnlockSpaceError::Internal { .. } => {
             error!(error = %error, "unlock space failed");
             EngineError::new(
                 UNLOCK_SPACE_FAILED_CODE,
@@ -80,8 +81,9 @@ mod tests {
     #[test]
     fn corrupted_unlock_material_is_distinct_from_internal_failure() {
         let corrupted = map_unlock_space_error(UnlockSpaceError::CorruptedKeyMaterial);
-        let internal =
-            map_unlock_space_error(UnlockSpaceError::Internal("migration failed".into()));
+        let internal = map_unlock_space_error(UnlockSpaceError::Internal {
+            source: anyhow::anyhow!("migration failed"),
+        });
 
         assert_ne!(corrupted.code(), internal.code());
     }

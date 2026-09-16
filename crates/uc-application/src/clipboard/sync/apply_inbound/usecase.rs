@@ -4,8 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use moka::sync::Cache;
-use tracing::{debug, error, info, instrument, warn, Instrument};
-use uc_observability_contract::FlowId;
+use tracing::{debug, error, info, instrument, warn};
 
 use uc_core::clipboard::ActiveClipboardState;
 use uc_core::file_transfer::{OutboundProgressReporterPort, OutboundProgressStatus};
@@ -103,15 +102,16 @@ enum InboundApplyMode {
         resurface: ResurfacePorts,
     },
     StoreOnlyPull,
-    /// Inert apply path for tests and inert wiring: writes without any
-    /// materializer, live index or receive tracking.
+    /// Inert apply path for focused tests: writes without any materializer,
+    /// live index or receive tracking.
+    #[cfg(any(test, feature = "test-support"))]
     Test {
         write: Arc<dyn InboundWrite>,
         resurface: Option<ResurfacePorts>,
     },
 }
 
-pub struct InboundReceiveAttemptDeps {
+pub(crate) struct InboundReceiveAttemptDeps {
     pub get: Arc<dyn GetEntryAttemptPort>,
     pub begin: Arc<dyn BeginReceiveAttemptPort>,
     pub claim_commit: Arc<dyn ClaimReceiveCommitPort>,
@@ -121,7 +121,7 @@ pub struct InboundReceiveAttemptDeps {
     pub clock: Arc<dyn ClockPort>,
 }
 
-pub struct InboundApplyCommonDeps {
+pub(crate) struct InboundApplyCommonDeps {
     pub entry_repo: Arc<dyn FindEntryIdBySnapshotHashPort>,
     pub capture: Arc<dyn InboundCapture>,
     pub blob_materializer: Arc<dyn InboundBlobMaterializer>,
@@ -134,7 +134,7 @@ pub struct InboundApplyCommonDeps {
     pub entry_identity_coordinator: Arc<EntryIdentityCoordinator>,
 }
 
-pub struct InteractiveReceiveDeps {
+pub(crate) struct InteractiveReceiveDeps {
     pub common: InboundApplyCommonDeps,
     pub write: Arc<dyn InboundWrite>,
     pub provisional_receive: Arc<dyn FinalizeProvisionalReceivePort>,
@@ -145,7 +145,7 @@ pub struct InteractiveReceiveDeps {
     pub touch_entry: Arc<dyn TouchClipboardEntryPort>,
 }
 
-pub struct StoreOnlyPullDeps {
+pub(crate) struct StoreOnlyPullDeps {
     pub common: InboundApplyCommonDeps,
 }
 
@@ -188,6 +188,7 @@ impl ApplyInboundClipboardUseCase {
         match &self.mode {
             InboundApplyMode::InteractiveReceive { write, .. } => Some(write),
             InboundApplyMode::StoreOnlyPull => None,
+            #[cfg(any(test, feature = "test-support"))]
             InboundApplyMode::Test { write, .. } => Some(write),
         }
     }
@@ -205,6 +206,7 @@ impl ApplyInboundClipboardUseCase {
                 ..
             } => Some((active_register, mobile_consumability)),
             InboundApplyMode::StoreOnlyPull => None,
+            #[cfg(any(test, feature = "test-support"))]
             InboundApplyMode::Test { .. } => None,
         }
     }
@@ -213,11 +215,12 @@ impl ApplyInboundClipboardUseCase {
         match &self.mode {
             InboundApplyMode::InteractiveReceive { resurface, .. } => Some(resurface),
             InboundApplyMode::StoreOnlyPull => None,
+            #[cfg(any(test, feature = "test-support"))]
             InboundApplyMode::Test { resurface, .. } => resurface.as_ref(),
         }
     }
 
-    pub fn interactive_receive(deps: InteractiveReceiveDeps) -> Self {
+    pub(crate) fn interactive_receive(deps: InteractiveReceiveDeps) -> Self {
         let resurface = ResurfacePorts {
             rebuild: Arc::new(deps.snapshot_deps.into_reconstructor()),
             touch_entry: deps.touch_entry,
@@ -235,7 +238,7 @@ impl ApplyInboundClipboardUseCase {
         )
     }
 
-    pub fn store_only_pull(deps: StoreOnlyPullDeps) -> Self {
+    pub(crate) fn store_only_pull(deps: StoreOnlyPullDeps) -> Self {
         Self::from_common(deps.common, InboundApplyMode::StoreOnlyPull, None, None)
     }
 
@@ -285,6 +288,7 @@ impl ApplyInboundClipboardUseCase {
     /// Test-only construction for the inert apply-inbound path (no blob
     /// materializer, no live index). `#[doc(hidden)]` because external
     /// production callers must use `interactive_receive` / `store_only_pull`.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn new(
         entry_repo: Arc<dyn FindEntryIdBySnapshotHashPort>,
@@ -398,6 +402,7 @@ impl ApplyInboundClipboardUseCase {
     /// Test-only resurface seam, so focused tests can mock one method instead
     /// of standing up six repository ports. Production modes encode whether
     /// resurfacing exists in their constructors.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn with_resurface_ports(
         mut self,
@@ -883,13 +888,6 @@ impl ApplyInboundClipboardUseCase {
         }
     }
 
-    // 跨设备可观测性(PR2):
-    //   - `peer.device_id` 是 PR2 起的标准字段名,把发送方 device 摆到一级
-    //     span field;`from_device` 暂时保留兼容现有日志查询,Sentry tag
-    //     索引完全切换后会下线。
-    //   - `flow.id` 优先沿用 wire header 上带过来的对端 flow_id,实现
-    //     A 端 root flow.id == B 端 root flow.id;旧版 peer 没带时才本地生成。
-    //   - `flow.kind` 静态 `clipboard_sync`,方便按业务流过滤。
     pub async fn execute(
         &self,
         input: ApplyInboundInput,
@@ -911,12 +909,8 @@ impl ApplyInboundClipboardUseCase {
         name = "apply_inbound.execute",
         skip_all,
         fields(
-            from_device = %input.from_device,
-            peer.device_id = %input.from_device,
             snapshot_hash = %input.snapshot_hash,
             plaintext_len = input.plaintext.len(),
-            flow.id = tracing::field::Empty,
-            flow.kind = "clipboard_sync",
         )
     )]
     async fn execute_internal(
@@ -927,8 +921,6 @@ impl ApplyInboundClipboardUseCase {
         if let Some(readiness) = &self.receive_readiness {
             readiness.wait_ready().await;
         }
-        let flow_id = input.flow_id.clone().unwrap_or_else(FlowId::generate);
-        tracing::Span::current().record("flow.id", tracing::field::display(&flow_id));
         // 1. Decode V3 envelope. Decode failure is non-fatal — drop the
         // frame, keep the loop alive (peer may be on a newer wire).
         let (snapshot, blob_refs, file_set_manifest) =
@@ -971,7 +963,7 @@ impl ApplyInboundClipboardUseCase {
             .entry_repo
             .find_entry_id_by_snapshot_hash(&input.snapshot_hash)
             .await
-            .map_err(|e| ApplyInboundError::DedupQuery(e.to_string()))?;
+            .map_err(|error| ApplyInboundError::DedupQuery(error.into()))?;
         if let Some(existing_id) = existing.as_ref() {
             if self.is_entry_available(existing_id).await {
                 self.report_reused_outbound_transfers(&input.from_device, &blob_refs)
@@ -1132,7 +1124,7 @@ impl ApplyInboundClipboardUseCase {
                         self.emit_host_event(HostEvent::Transfer(
                             TransferHostEvent::StatusChanged {
                                 transfer_id: receiver_entry_id.as_ref().to_string(),
-                                entry_id: receiver_entry_id.as_ref().to_string(),
+                                entry_id: Some(receiver_entry_id.as_ref().to_string()),
                                 attempt_id: receive_attempt_id.clone(),
                                 status: if cancelled { "cancelled" } else { "failed" }.to_string(),
                                 reason: if cancelled {
@@ -1176,7 +1168,7 @@ impl ApplyInboundClipboardUseCase {
                         self.emit_host_event(HostEvent::Transfer(
                             TransferHostEvent::StatusChanged {
                                 transfer_id: receiver_entry_id.as_ref().to_string(),
-                                entry_id: receiver_entry_id.as_ref().to_string(),
+                                entry_id: Some(receiver_entry_id.as_ref().to_string()),
                                 attempt_id: receive_attempt_id.clone(),
                                 status: "failed".to_string(),
                                 reason: Some(err.to_string()),
@@ -1207,7 +1199,7 @@ impl ApplyInboundClipboardUseCase {
                 warn!(reason, "inbound dropped: blob materializer missing");
                 self.emit_host_event(HostEvent::Transfer(TransferHostEvent::StatusChanged {
                     transfer_id: receiver_entry_id.as_ref().to_string(),
-                    entry_id: receiver_entry_id.as_ref().to_string(),
+                    entry_id: Some(receiver_entry_id.as_ref().to_string()),
                     attempt_id: receive_attempt_id.clone(),
                     status: "failed".to_string(),
                     reason: Some(reason.clone()),
@@ -1466,7 +1458,7 @@ impl ApplyInboundClipboardUseCase {
                     has_receive_artifacts,
                 )
                 .await?;
-                return Err(ApplyInboundError::Capture(e.to_string()));
+                return Err(ApplyInboundError::Capture(e));
             }
         };
         if let Some(publication) = publication {
@@ -1533,14 +1525,14 @@ impl ApplyInboundClipboardUseCase {
             if let Some(write_port) = self.write_port().cloned() {
                 debug!(entry_id = %entry_id, "inbound: entry persisted, scheduling background OS clipboard write");
                 let entry_id_for_write = entry_id.clone();
-                let from_device_for_write = input.from_device;
                 let snapshot_hash_for_write = input.snapshot_hash.clone();
                 let origin_guard_key_for_write = snapshot_for_write.origin_guard_key();
-                // `.in_current_span()` keeps the spawned task under `apply_inbound.execute`
-                // so trace_id / from_device / snapshot_hash propagate into the failure event.
-                uc_observability_contract::spawn_supervised(
-                    "clipboard_sync.inbound_os_write",
-                    async move {
+                // 只延续在线关联，后台写入不延长原接收 span。
+                let observation =
+                    uc_observability_contract::diagnostics::ObservationContext::capture();
+                crate::support::task_supervision::spawn_supervised(
+                    uc_observability_contract::diagnostics::DiagnosticTaskKind::ClipboardInboundOsWrite,
+                    observation.scope(async move {
                         let snapshot_for_write = Arc::try_unwrap(snapshot_for_write)
                             .unwrap_or_else(|shared| (*shared).clone());
                         if let Err(e) = write_port
@@ -1552,14 +1544,12 @@ impl ApplyInboundClipboardUseCase {
                                 error_kind = "inbound_os_write_failed",
                                 error = %e,
                                 entry_id = %entry_id_for_write,
-                                from_device = %from_device_for_write,
                                 snapshot_hash = %snapshot_hash_for_write,
                                 origin_guard_key = %origin_guard_key_for_write,
                                 "inbound: OS clipboard background write failed after capture"
                             );
                         }
-                    }
-                    .in_current_span(),
+                    }),
                 );
             } else {
                 debug!(entry_id = %entry_id, "inbound: store-only mode persisted entry without writing the system clipboard");

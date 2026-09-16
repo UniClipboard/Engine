@@ -10,6 +10,12 @@ use async_trait::async_trait;
 /// Port for reclaiming on-disk residue and recording that the reclaim ran.
 #[async_trait]
 pub trait SearchIndexMaintenancePort: Send + Sync {
+    /// 当前具体索引实现的 schema/投影版本。
+    ///
+    /// Application 用它判断是否需要重建；版本知识留在具体存储 adapter，
+    /// 不泄漏到 Engine 的领域装配。
+    fn current_index_version(&self) -> &'static str;
+
     /// Reclaim on-disk residue left by dropped plaintext columns: checkpoint the
     /// write-ahead log, compact the database, and sweep any leftover rebuild
     /// scratch tables.

@@ -40,12 +40,13 @@ use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::PeerAddressRepositoryPort;
 
 use super::connect::connect_with_staggered_retry;
+use super::peer_address_resolver::PeerAddressResolver;
 use super::transfer_progress_wire::{
     self, transfer_id_from_bytes, transfer_id_to_bytes, ProgressFrame,
 };
 
 /// ALPN identifier for the reverse-direction transfer progress protocol.
-/// Disjoint from the forward clipboard / presence / blobs ALPNs so the
+/// Disjoint from the forward clipboard / peer_reachability / blobs ALPNs so the
 /// shared Router multiplexes correctly.
 pub const TRANSFER_PROGRESS_ALPN: &[u8] = b"uniclipboard/transfer-progress/1";
 
@@ -110,7 +111,7 @@ impl IrohTransferProgressAdapter {
             }),
             reporter: Arc::new(ReporterImpl {
                 endpoint,
-                peer_addr_repo,
+                peer_address_resolver: PeerAddressResolver::new(peer_addr_repo),
                 connections: Mutex::new(HashMap::new()),
             }),
         }
@@ -268,7 +269,7 @@ impl HandlerState {
 
 struct ReporterImpl {
     endpoint: Arc<Endpoint>,
-    peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    peer_address_resolver: PeerAddressResolver,
     /// Per-target connection cache, keyed by `DeviceId.as_str()` since the
     /// domain id type doesn't derive Hash. iroh `Connection` is internally
     /// `Arc<Inner>` so cloning is cheap; reusing a connection across
@@ -310,14 +311,12 @@ impl OutboundProgressReporterPort for ReporterImpl {
 
 impl ReporterImpl {
     async fn resolve_addr(&self, target: &DeviceId) -> Option<EndpointAddr> {
-        let record = self.peer_addr_repo.get(target).await.ok().flatten()?;
-        match postcard::from_bytes::<EndpointAddr>(&record.addr_blob) {
-            Ok(addr) => Some(addr),
-            Err(err) => {
+        match self.peer_address_resolver.resolve(target).await {
+            Ok(address) => address,
+            Err(error) => {
                 warn!(
-                    target = %target.as_str(),
-                    error = %err,
-                    "progress reporter: peer_addr_repo blob decode failed",
+                    error_kind = error.kind(),
+                    "progress reporter address resolution failed",
                 );
                 None
             }
@@ -348,6 +347,7 @@ impl ReporterImpl {
             addr,
             TRANSFER_PROGRESS_ALPN,
             "transfer-progress",
+            uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
         )
         .await
         .map_err(ReporterError::Dial)?;

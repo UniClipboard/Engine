@@ -4,3 +4,5 @@ pub(crate) mod encryption;
 pub(crate) mod settings;
 pub(crate) mod storage;
 pub(crate) mod upgrade;
+
+pub(crate) mod upgrade_backups;

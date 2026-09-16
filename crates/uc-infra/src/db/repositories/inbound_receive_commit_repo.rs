@@ -14,9 +14,7 @@ use uc_core::ports::{
 
 use super::clipboard_entry_repo::insert_entry_and_selection_rows;
 use super::clipboard_event_repo::insert_clipboard_event_rows;
-use super::entry_file_set_repo::{
-    derive_file_set_cipher, encode_file_set_rows, replace_entry_file_set_rows,
-};
+use super::entry_file_set_repo::{replace_entry_file_set_rows, EntryFileSetProtection};
 use super::entry_replace_repo::{
     prepare_entry_replacement, replace_entry_content_rows, PreparedEntryReplacement,
 };
@@ -28,11 +26,11 @@ use crate::db::models::snapshot_representation::NewSnapshotRepresentationRow;
 use crate::db::models::{NewClipboardEntryRow, NewClipboardEventRow, NewClipboardSelectionRow};
 use crate::db::ports::{DbExecutor, InsertMapper};
 use crate::db::schema::{directory_publish_log, entry_receive_attempt, receive_artifact_log};
+use crate::security::ContentProtection;
 
 pub struct DieselInboundReceiveCommitRepository<E> {
     executor: E,
-    derive_subkey: Arc<dyn DeriveSpaceSubkeyPort>,
-    current_profile: Arc<dyn CurrentProfilePort>,
+    file_set_protection: EntryFileSetProtection,
 }
 
 impl<E> DieselInboundReceiveCommitRepository<E> {
@@ -43,8 +41,14 @@ impl<E> DieselInboundReceiveCommitRepository<E> {
     ) -> Self {
         Self {
             executor,
-            derive_subkey,
-            current_profile,
+            file_set_protection: EntryFileSetProtection::legacy(derive_subkey, current_profile),
+        }
+    }
+
+    pub fn new_v3(executor: E, protection: Arc<ContentProtection>) -> Self {
+        Self {
+            executor,
+            file_set_protection: EntryFileSetProtection::v3(protection),
         }
     }
 }
@@ -213,17 +217,11 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
             .transpose()
             .map_err(|error| InboundReceiveCommitError::Backend(error.to_string()))?;
         let file_set_rows = if let Some(file_set) = file_set {
-            let cipher =
-                derive_file_set_cipher(self.derive_subkey.as_ref(), self.current_profile.as_ref())
-                    .await
-                    .map_err(|error| InboundReceiveCommitError::Backend(error.to_string()))?;
             Some(
-                encode_file_set_rows(
-                    &cipher,
-                    &uc_core::ids::EntryId::from(entry_id.as_str()),
-                    file_set,
-                )
-                .map_err(|error| InboundReceiveCommitError::Backend(error.to_string()))?,
+                self.file_set_protection
+                    .encode_rows(&uc_core::ids::EntryId::from(entry_id.as_str()), file_set)
+                    .await
+                    .map_err(|error| InboundReceiveCommitError::Backend(error.to_string()))?,
             )
         } else {
             None

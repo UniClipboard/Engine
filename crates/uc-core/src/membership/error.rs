@@ -21,119 +21,12 @@ pub enum MembershipError {
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum MembershipCandidateRepositoryError {
-    #[error("membership candidate storage is locked")]
-    Locked,
-    #[error("membership candidate storage is corrupt")]
-    Corrupt,
-    #[error("membership candidate repository failed: {0}")]
-    Repository(String),
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum VerifiedPeerPromotionError {
-    #[error("verified peer promotion storage is locked")]
-    Locked,
-    #[error("verified peer promotion storage is corrupt")]
-    Corrupt,
-    #[error("verified peer promotion failed: {0}")]
-    Repository(String),
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum MembershipAnnouncementRepositoryError {
-    #[error("membership announcement storage is locked")]
-    Locked,
-    #[error("membership announcement storage is corrupt")]
-    Corrupt,
-    #[error("membership announcement repository failed: {0}")]
-    Repository(String),
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum MembershipOutboxRepositoryError {
-    #[error("membership outbox storage is locked")]
-    Locked,
-    #[error("membership outbox storage is corrupt")]
-    Corrupt,
-    #[error("membership outbox repository failed: {0}")]
-    Repository(String),
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum AdmissionAttemptRepositoryError {
-    #[error("admission attempt storage is locked")]
-    Locked,
-    #[error("admission attempt storage is corrupt")]
-    Corrupt,
-    #[error("admission attempt already exists")]
-    AlreadyExists,
-    #[error("admission attempt was not found")]
-    NotFound,
-    #[error("admission attempt version conflicts with persisted state")]
-    VersionConflict,
-    #[error("the previous local join cannot be superseded")]
-    PreviousJoinCannotBeSuperseded,
-    #[error("admission attempt repository failed: {0}")]
-    Repository(String),
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-#[error("admission outbox delivery is temporarily unavailable")]
-pub struct AdmissionOutboxDeliveryError;
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum AdmissionSecurityTransitionError {
-    #[error("admission security state is invalid")]
-    InvalidState,
-    #[error("admission security commitment does not match")]
-    CommitmentMismatch,
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum AdmissionSpaceTransitionError {
-    #[error("unreadable history requires explicit confirmation")]
-    UnreadableHistoryRequiresConfirmation,
-    #[error("profile is locked")]
-    Locked,
-    #[error("space transition is unavailable")]
-    Unavailable,
-    #[error("space transition storage failed: {0}")]
-    Storage(String),
-    #[error("insufficient storage for space transition")]
-    InsufficientStorage,
-    #[error("space transition state is inconsistent")]
-    Inconsistent,
-    #[error("space transition requires recovery")]
-    RecoveryRequired,
-}
-
-impl AdmissionSpaceTransitionError {
-    /// Collapse any underlying storage failure into the `Storage` variant
-    /// while keeping the real error text — otherwise Windows-only
-    /// sqlite/diesel failures are invisible in diagnostics.
-    pub fn storage(context: impl std::fmt::Display) -> Self {
-        Self::Storage(context.to_string())
-    }
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum MembershipSecurityUpdateError {
     #[error("membership security state is unavailable")]
     Unavailable,
     #[error("membership security update is invalid")]
     Invalid,
     #[error("membership security update failed: {0}")]
-    Repository(String),
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum MembershipAppliedSecurityUpdateRepositoryError {
-    #[error("membership applied update storage is locked")]
-    Locked,
-    #[error("membership applied update storage is corrupt")]
-    Corrupt,
-    #[error("membership applied update repository failed: {0}")]
     Repository(String),
 }
 
@@ -182,27 +75,11 @@ pub enum MembershipAttestationEndpointError {
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum WorkspaceConvergenceRepositoryError {
-    #[error("workspace convergence storage is locked")]
-    Locked,
-    #[error("workspace convergence storage is corrupt")]
-    Corrupt,
-    #[error("workspace convergence repository failed: {0}")]
-    Repository(String),
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum CurrentMembershipIdentityError {
     #[error("current membership identity is unavailable")]
     Unavailable,
     #[error("current membership identity could not be loaded")]
     LoadFailed,
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum RelationshipStateResetError {
-    #[error("relationship state reset failed: {0}")]
-    Repository(String),
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -212,12 +89,8 @@ pub enum SpaceSecurityStateResetError {
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum CurrentMemberSignatureError {
-    #[error("current member signing state is unavailable")]
-    Unavailable,
-    #[error("current member signing state is invalid")]
-    InvalidState,
-    #[error("current member signing state could not be loaded: {0}")]
+pub enum RelationshipStateResetError {
+    #[error("relationship state reset failed: {0}")]
     Repository(String),
 }
 
@@ -239,4 +112,13 @@ pub enum MembershipHistoryExchangeError {
     Rejected,
     #[error("membership history exchange transport failed")]
     Transport,
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum MembershipInitializationError {
+    #[error("space membership initialization is unavailable")]
+    Unavailable,
+
+    #[error("space membership initialization state is inconsistent")]
+    Inconsistent,
 }

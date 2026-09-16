@@ -6,7 +6,7 @@ use thiserror::Error;
 ///
 /// 这些错误只表达“这次应用动作为什么不能继续”，
 /// 不承担底层存储实现或传输实现的细节语义。
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum FileTransferApplicationError {
     /// The process-wide transfer lifecycle no longer accepts new sessions.
     #[error("file transfer lifecycle is closed")]
@@ -15,14 +15,14 @@ pub enum FileTransferApplicationError {
     #[error("transfer `{transfer_id}` is already active with different metadata")]
     SessionConflict { transfer_id: String },
     /// 持久化历史事件失败。
-    #[error("file transfer event store failed: {0}")]
-    Store(String),
+    #[error("file transfer event store failed")]
+    Store(#[source] anyhow::Error),
     /// 向外发布事件失败。
-    #[error("file transfer event publishing failed: {0}")]
-    Publish(String),
+    #[error("file transfer event publishing failed")]
+    Publish(#[source] anyhow::Error),
     /// Receiver-side projection operation failed.
-    #[error("file transfer repository failed: {0}")]
-    Repository(String),
+    #[error("file transfer repository failed")]
+    Repository(#[source] anyhow::Error),
     /// 传输尚未开始，不能继续推进。
     #[error("transfer `{transfer_id}` has not been started")]
     TransferNotStarted { transfer_id: String },

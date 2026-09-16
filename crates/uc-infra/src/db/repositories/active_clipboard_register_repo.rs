@@ -7,10 +7,11 @@ use diesel::prelude::*;
 use tracing::{debug_span, warn};
 
 use super::active_clipboard_register_cipher::{
-    ActiveClipboardRegisterCipher, CONSUMABLE_HKDF_INFO,
+    ActiveClipboardRegisterCipher, V3ActiveClipboardRegisterCipher, CONSUMABLE_HKDF_INFO,
 };
 use crate::db::ports::DbExecutor;
 use crate::db::schema::active_clipboard_register;
+use crate::security::ContentProtection;
 use uc_core::clipboard::{ActiveClipboardState, MobileConsumableRef};
 use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::clipboard::{
@@ -39,8 +40,15 @@ struct NewRegisterRow {
 /// SQLite adapter implementing the active-clipboard register port.
 pub struct DieselActiveClipboardRegisterRepository<E> {
     executor: E,
-    derive_subkey: Arc<dyn DeriveSpaceSubkeyPort>,
-    current_profile: Arc<dyn CurrentProfilePort>,
+    protection: ActiveRegisterProtection,
+}
+
+enum ActiveRegisterProtection {
+    Legacy {
+        derive_subkey: Arc<dyn DeriveSpaceSubkeyPort>,
+        current_profile: Arc<dyn CurrentProfilePort>,
+    },
+    V3(V3ActiveClipboardRegisterCipher),
 }
 
 impl<E> DieselActiveClipboardRegisterRepository<E> {
@@ -51,21 +59,32 @@ impl<E> DieselActiveClipboardRegisterRepository<E> {
     ) -> Self {
         Self {
             executor,
-            derive_subkey,
-            current_profile,
+            protection: ActiveRegisterProtection::Legacy {
+                derive_subkey,
+                current_profile,
+            },
         }
     }
 
-    async fn cipher(&self) -> Result<ActiveClipboardRegisterCipher, ActiveClipboardRegisterError> {
-        let profile = self
-            .current_profile
-            .current_profile()
-            .await
-            .map_err(|err| {
-                ActiveClipboardRegisterError::Storage(format!("current profile unavailable: {err}"))
-            })?;
-        let key = self
-            .derive_subkey
+    pub fn new_v3(executor: E, protection: Arc<ContentProtection>) -> Self {
+        Self {
+            executor,
+            protection: ActiveRegisterProtection::V3(V3ActiveClipboardRegisterCipher::new(
+                protection,
+            )),
+        }
+    }
+}
+
+impl ActiveRegisterProtection {
+    async fn legacy_cipher(
+        derive_subkey: &dyn DeriveSpaceSubkeyPort,
+        current_profile: &dyn CurrentProfilePort,
+    ) -> Result<ActiveClipboardRegisterCipher, ActiveClipboardRegisterError> {
+        let profile = current_profile.current_profile().await.map_err(|err| {
+            ActiveClipboardRegisterError::Storage(format!("current profile unavailable: {err}"))
+        })?;
+        let key = derive_subkey
             .derive_subkey(profile.as_ref().as_bytes(), CONSUMABLE_HKDF_INFO)
             .await
             .map_err(|err| match err {
@@ -75,6 +94,38 @@ impl<E> DieselActiveClipboardRegisterRepository<E> {
                 )),
             })?;
         Ok(ActiveClipboardRegisterCipher::new(key))
+    }
+
+    async fn seal(
+        &self,
+        reference: &MobileConsumableRef,
+    ) -> Result<Vec<u8>, ActiveClipboardRegisterError> {
+        match self {
+            Self::Legacy {
+                derive_subkey,
+                current_profile,
+            } => Self::legacy_cipher(derive_subkey.as_ref(), current_profile.as_ref())
+                .await?
+                .seal(reference),
+            Self::V3(cipher) => cipher.seal(reference).await,
+        }
+        .map_err(|err| ActiveClipboardRegisterError::Storage(err.to_string()))
+    }
+
+    async fn open(
+        &self,
+        ciphertext: &[u8],
+    ) -> Result<MobileConsumableRef, ActiveClipboardRegisterError> {
+        match self {
+            Self::Legacy {
+                derive_subkey,
+                current_profile,
+            } => Self::legacy_cipher(derive_subkey.as_ref(), current_profile.as_ref())
+                .await?
+                .open(ciphertext),
+            Self::V3(cipher) => cipher.open(ciphertext).await,
+        }
+        .map_err(|err| ActiveClipboardRegisterError::Storage(err.to_string()))
     }
 }
 
@@ -93,13 +144,12 @@ impl<E: DbExecutor> AdvanceActiveClipboardPort for DieselActiveClipboardRegister
         );
         let consumable_ref_ciphertext = if mobile_consumable {
             Some(
-                self.cipher()
-                    .await?
+                self.protection
                     .seal(&MobileConsumableRef::new(
                         state.snapshot_hash.clone(),
                         state.entry_id.clone(),
                     ))
-                    .map_err(|err| ActiveClipboardRegisterError::Storage(err.to_string()))?,
+                    .await?,
             )
         } else {
             None
@@ -204,7 +254,7 @@ impl<E: DbExecutor> LoadMobileConsumableClipboardPort
         let Some(ciphertext) = ciphertext else {
             return Ok(None);
         };
-        match self.cipher().await?.open(&ciphertext) {
+        match self.protection.open(&ciphertext).await {
             Ok(reference) => Ok(Some(reference)),
             Err(err) => {
                 // The reference is a rebuildable shadow of the register: an
@@ -252,11 +302,7 @@ impl<E: DbExecutor> BackfillMobileConsumableClipboardPort
         &self,
         reference: &MobileConsumableRef,
     ) -> Result<bool, ActiveClipboardRegisterError> {
-        let ciphertext = self
-            .cipher()
-            .await?
-            .seal(reference)
-            .map_err(|err| ActiveClipboardRegisterError::Storage(err.to_string()))?;
+        let ciphertext = self.protection.seal(reference).await?;
         let snapshot_hash = reference.snapshot_hash.clone();
         let entry_id = reference.entry_id.as_ref().to_string();
         self.executor

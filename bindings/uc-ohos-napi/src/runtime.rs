@@ -5,9 +5,9 @@ use napi::bindgen_prelude::Buffer;
 use napi::Status;
 use napi_derive::napi;
 use uc_engine::{
-    CancelJoinSpaceInput, ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput,
-    DecideDeviceTrustChangeInput, DeviceTrustChoiceSummary, Engine, EngineConfig, EngineError,
-    EngineEvent, EngineState, EventStream, ExportEntryInput, HostFileHandle,
+    CancelJoinSpaceInput, ChangeEncryptionPassphraseInput, ChooseDeviceGroupInput,
+    ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig,
+    EngineError, EngineEvent, EngineState, EventStream, ExportEntryInput, HostFileHandle,
     InvitationAvailability, JoinSpaceInput, Operation, OperationResult, OperationTerminal,
     RecoverSessionInput, RefreshReason, RemoveMemberInput, RestoreClipboardInput, SecretString,
     SendFilesInput, SendImageInput, SendReportSummary, SendTextInput,
@@ -93,6 +93,30 @@ impl OhEngine {
     }
 
     #[napi]
+    pub async fn notify_connectivity_opportunity(&self, reason: String) -> napi::Result<()> {
+        let reason = match reason.as_str() {
+            "foreground" => uc_engine::ConnectivityOpportunity::Foreground,
+            "system_wake" => uc_engine::ConnectivityOpportunity::SystemWake,
+            "network_changed" => uc_engine::ConnectivityOpportunity::NetworkChanged,
+            _ => {
+                return Err(napi::Error::new(
+                    Status::InvalidArg,
+                    "invalid connectivity opportunity",
+                ))
+            }
+        };
+        match self
+            .engine
+            .execute(Operation::NotifyConnectivityOpportunity { reason })
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::ConnectivityOpportunityAccepted => Ok(()),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
     pub async fn recover_network(&self) -> napi::Result<()> {
         match self
             .engine
@@ -139,48 +163,42 @@ impl OhEngine {
     }
 
     #[napi]
-    pub async fn query_device_trust(&self) -> napi::Result<String> {
+    pub async fn query_device_group_choices(&self) -> napi::Result<String> {
         match self
             .engine
-            .execute(Operation::QueryDeviceTrust)
+            .execute(Operation::QueryDeviceGroupChoices)
             .await
             .map_err(engine_error)?
         {
-            OperationResult::DeviceTrust(snapshot) => device_trust_json(snapshot),
+            OperationResult::DeviceGroupChoices(summary) => {
+                serde_json::to_string(&summary).map_err(|_| unexpected_result())
+            }
             _ => Err(unexpected_result()),
         }
     }
 
     #[napi]
-    pub async fn decide_device_trust_change(
+    pub async fn choose_device_group(
         &self,
-        change_id: String,
-        choice: String,
+        issue_id: String,
+        choice_id: String,
+        expected_revision: i64,
         confirm_local_removal: bool,
     ) -> napi::Result<String> {
-        let choice = match choice.as_str() {
-            "apply_change" => DeviceTrustChoiceSummary::ApplyChange,
-            "keep_current_device_group" => DeviceTrustChoiceSummary::KeepCurrentDeviceGroup,
-            _ => {
-                return Err(napi::Error::new(
-                    Status::InvalidArg,
-                    "invalid device trust choice",
-                ))
-            }
-        };
+        let expected_revision = u64::try_from(expected_revision)
+            .map_err(|_| napi::Error::new(Status::InvalidArg, "invalid revision"))?;
         match self
             .engine
-            .execute(Operation::DecideDeviceTrustChange(
-                DecideDeviceTrustChangeInput {
-                    change_id,
-                    choice,
-                    confirm_local_removal,
-                },
-            ))
+            .execute(Operation::ChooseDeviceGroup(ChooseDeviceGroupInput {
+                issue_id,
+                choice_id,
+                expected_revision,
+                confirm_local_removal,
+            }))
             .await
             .map_err(engine_error)?
         {
-            OperationResult::DeviceTrustDecision(result) => {
+            OperationResult::DeviceGroupChosen(result) => {
                 serde_json::to_string(&result).map_err(|_| unexpected_result())
             }
             _ => Err(unexpected_result()),
@@ -195,7 +213,7 @@ impl OhEngine {
             .await
             .map_err(engine_error)?;
         match result {
-            OperationResult::WorkspaceConvergence(summary) => workspace_convergence(summary),
+            OperationResult::WorkspaceMembership(summary) => workspace_convergence(summary),
             _ => Err(unexpected_result()),
         }
     }
@@ -210,13 +228,39 @@ impl OhEngine {
         match result {
             OperationResult::InvitationIssued {
                 invitation_code,
+                full_invitation,
                 expires_at_ms,
                 availability,
             } => Ok(OhInvitationIssued {
                 invitation_code,
+                full_invitation,
                 expires_at_ms: expires_at_ms as f64,
                 availability: invitation_availability(availability).to_owned(),
             }),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn change_encryption_passphrase(
+        &self,
+        passphrase: String,
+        passphrase_confirmation: String,
+    ) -> napi::Result<()> {
+        let passphrase = Zeroizing::new(passphrase);
+        let passphrase_confirmation = Zeroizing::new(passphrase_confirmation);
+        match self
+            .engine
+            .execute(Operation::ChangeEncryptionPassphrase(
+                ChangeEncryptionPassphraseInput {
+                    passphrase: SecretString::new(passphrase.as_str()),
+                    passphrase_confirmation: SecretString::new(passphrase_confirmation.as_str()),
+                },
+            ))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::EncryptionPassphraseChanged => Ok(()),
             _ => Err(unexpected_result()),
         }
     }
@@ -407,7 +451,9 @@ impl OhEngine {
 
     #[napi]
     pub async fn suspend(&self) -> napi::Result<()> {
-        self.engine.suspend().await.map_err(engine_error)
+        let result = self.engine.suspend().await.map_err(engine_error);
+        crate::observability::schedule_flush_after_success(&result);
+        result
     }
 
     #[napi]
@@ -433,10 +479,13 @@ impl OhEngine {
 
     #[napi]
     pub async fn shutdown(&self, deadline_ms: u32) -> napi::Result<()> {
-        self.engine
+        let result = self
+            .engine
             .shutdown(Duration::from_millis(u64::from(deadline_ms)))
             .await
-            .map_err(engine_error)
+            .map_err(engine_error);
+        crate::observability::schedule_flush_after_success(&result);
+        result
     }
 }
 
@@ -488,6 +537,7 @@ fn workspace_convergence(
     })
 }
 
+#[cfg(test)]
 fn device_trust_json(summary: uc_engine::DeviceTrustSnapshotSummary) -> napi::Result<String> {
     serde_json::to_string(&summary).map_err(|_| unexpected_result())
 }
@@ -500,6 +550,7 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
         uc_engine::JoinSpaceStatusSummary::Active {
             join_id,
             joined_space,
+            peer_upgrade_required,
         } => OhJoinSpaceStatus {
             status: "active".to_owned(),
             join_id,
@@ -518,7 +569,9 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
             sponsor_device_id: None,
             sponsor_identity_fingerprint: None,
             cancel_requested: None,
+            peer_upgrade_required,
             rejection_reason: None,
+            termination_reason: None,
         },
         uc_engine::JoinSpaceStatusSummary::Pending {
             join_id,
@@ -526,6 +579,7 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
             sponsor_device_id,
             sponsor_identity_fingerprint,
             cancel_requested,
+            peer_upgrade_required,
         } => OhJoinSpaceStatus {
             status: "pending".to_owned(),
             join_id,
@@ -534,7 +588,9 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
             sponsor_device_id,
             sponsor_identity_fingerprint,
             cancel_requested: Some(cancel_requested),
+            peer_upgrade_required,
             rejection_reason: None,
+            termination_reason: None,
         },
         uc_engine::JoinSpaceStatusSummary::Rejected { join_id, reason } => OhJoinSpaceStatus {
             status: "rejected".to_owned(),
@@ -544,6 +600,7 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
             sponsor_device_id: None,
             sponsor_identity_fingerprint: None,
             cancel_requested: None,
+            peer_upgrade_required: false,
             rejection_reason: Some(
                 match reason {
                     uc_engine::JoinSpaceRejectionReasonSummary::InvitationUnavailable => {
@@ -571,6 +628,26 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
                     uc_engine::JoinSpaceRejectionReasonSummary::RemovedBeforeActivation => {
                         "removed_before_activation"
                     }
+                }
+                .to_owned(),
+            ),
+            termination_reason: None,
+        },
+        uc_engine::JoinSpaceStatusSummary::Terminated { join_id, reason } => OhJoinSpaceStatus {
+            status: "terminated".to_owned(),
+            join_id,
+            joined_space: None,
+            target_space_id: None,
+            sponsor_device_id: None,
+            sponsor_identity_fingerprint: None,
+            cancel_requested: None,
+            peer_upgrade_required: false,
+            rejection_reason: None,
+            termination_reason: Some(
+                match reason {
+                    uc_engine::JoinSpaceTerminationReasonSummary::Cancelled => "cancelled",
+                    uc_engine::JoinSpaceTerminationReasonSummary::Expired => "expired",
+                    uc_engine::JoinSpaceTerminationReasonSummary::Superseded => "superseded",
                 }
                 .to_owned(),
             ),
@@ -733,9 +810,12 @@ fn invalid_restore_mode() -> napi::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{count, device_trust_json, engine_error, map_event, workspace_convergence};
+    use super::{
+        count, device_trust_json, engine_error, join_space_status, map_event, workspace_convergence,
+    };
     use uc_engine::{
-        EngineError, EngineErrorCategory, EngineEvent, OperationTerminal, RefreshReason,
+        EngineError, EngineErrorCategory, EngineEvent, OperationResult, OperationTerminal,
+        RefreshReason,
     };
 
     #[test]
@@ -827,6 +907,38 @@ mod tests {
     }
 
     #[test]
+    fn join_status_preserves_the_peer_upgrade_prompt() {
+        let status = join_space_status(OperationResult::JoinSpace(
+            uc_engine::JoinSpaceStatusSummary::Pending {
+                join_id: "join-id".to_owned(),
+                target_space_id: None,
+                sponsor_device_id: None,
+                sponsor_identity_fingerprint: None,
+                cancel_requested: false,
+                peer_upgrade_required: true,
+            },
+        ))
+        .expect("join status must map");
+
+        assert!(status.peer_upgrade_required);
+    }
+
+    #[test]
+    fn join_status_preserves_local_termination() {
+        let status = join_space_status(OperationResult::JoinSpace(
+            uc_engine::JoinSpaceStatusSummary::Terminated {
+                join_id: "join-id".to_owned(),
+                reason: uc_engine::JoinSpaceTerminationReasonSummary::Expired,
+            },
+        ))
+        .expect("join status must map");
+
+        assert_eq!(status.status, "terminated");
+        assert_eq!(status.termination_reason.as_deref(), Some("expired"));
+        assert!(status.rejection_reason.is_none());
+    }
+
+    #[test]
     fn oversized_delivery_counts_are_rejected() {
         assert!(count(usize::MAX).is_err());
     }
@@ -869,15 +981,46 @@ mod tests {
 
     #[test]
     fn device_trust_json_keeps_complete_snapshot_fields() {
-        let json = device_trust_json(uc_engine::DeviceTrustSnapshotSummary::empty_unavailable(
-            "local-device".into(),
-        ))
-        .unwrap();
-        assert!(json.contains("local_device_id"));
-        assert!(json.contains("current_change"));
-        assert!(json.contains("devices"));
-        assert!(json.contains("recovery"));
-        assert!(json.contains("allowed_actions"));
-        assert!(json.contains("blocked_reason"));
+        let mut snapshot =
+            uc_engine::DeviceTrustSnapshotSummary::empty_unavailable("local-device".into());
+        snapshot
+            .devices
+            .push(uc_engine::DeviceTrustRelationshipSummary {
+                device_id: "peer-device".into(),
+                display_name: "Peer Device".into(),
+                is_local: false,
+                reachability: uc_engine::DeviceReachabilitySummary::Offline,
+                membership: uc_engine::DeviceMembershipSummary::Active,
+                group_relationship: uc_engine::DeviceGroupRelationshipSummary::Consistent,
+                compatibility: uc_engine::DeviceCompatibilitySummary::Compatible,
+                sync_relationship: uc_engine::DeviceSyncRelationshipSummary::Usable,
+                pairing_confirmation: Some(uc_engine::PairingConfirmationSummary::Unconfirmed),
+                available_actions: Vec::new(),
+                blocked_reason: None,
+            });
+        for (status, expected) in [
+            (
+                uc_engine::PairingConfirmationSummary::AwaitingPeerConfirmation,
+                "awaiting_peer_confirmation",
+            ),
+            (
+                uc_engine::PairingConfirmationSummary::Unconfirmed,
+                "unconfirmed",
+            ),
+            (
+                uc_engine::PairingConfirmationSummary::Confirmed,
+                "confirmed",
+            ),
+        ] {
+            snapshot.devices[0].pairing_confirmation = Some(status);
+            let json = device_trust_json(snapshot.clone()).unwrap();
+            assert!(json.contains("local_device_id"));
+            assert!(json.contains("current_change"));
+            assert!(json.contains("devices"));
+            assert!(json.contains("recovery"));
+            assert!(json.contains("allowed_actions"));
+            assert!(json.contains("blocked_reason"));
+            assert!(json.contains(&format!("\"pairing_confirmation\":\"{expected}\"")));
+        }
     }
 }

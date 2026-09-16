@@ -1,2 +1,3 @@
 -keep class uniffi.uc_engine_uniffi.** { *; }
 -keep class com.sun.jna.** { *; }
+-keep, includedescriptorclasses class org.rustls.platformverifier.** { *; }

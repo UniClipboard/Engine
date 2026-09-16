@@ -6,7 +6,7 @@
 //! own:
 //!
 //! * the source is a genuinely initialized installation — a real `KeySlot` and a
-//!   matching KEK produced by `DefaultSpaceAccessAdapter::initialize`. The bundle
+//!   matching KEK produced by `RuntimeSpaceAccessAdapter::initialize`. The bundle
 //!   is sealed with that KEK (no export password), so opening it requires the
 //!   space passphrase that derives the KEK — the contract this exercises;
 //! * the iroh device identity migrates as 0600 *files* (not a credential-store
@@ -31,7 +31,6 @@ use uc_core::ids::{ProfileId, SpaceId};
 use uc_core::ports::config_migration::{
     ConfigMigrationError, ConfigSourceMode, ExportConfigBundlePort, StageConfigImportPort,
 };
-use uc_core::ports::space::SpaceAccessStore;
 use uc_core::ports::{LocalIdentityPort, SecureStorageError, SecureStoragePort};
 use uc_infra::config_migration::staging::apply_pending_import;
 use uc_infra::config_migration::staging::StagingLayout;
@@ -39,10 +38,8 @@ use uc_infra::config_migration::{ConfigMigrationAdapter, ConfigMigrationPaths};
 use uc_infra::db::pool::{init_db_pool, DbPool};
 use uc_infra::fs::key_slot_store::JsonKeySlotStore;
 use uc_infra::network::iroh::IrohIdentityStore;
-use uc_infra::security::{
-    DefaultCurrentProfile, DefaultSpaceAccessAdapter, InMemorySession, KeyMaterialStore,
-    Sha256IdentityFingerprintFactory,
-};
+use uc_infra::security::{DefaultCurrentProfile, Sha256IdentityFingerprintFactory};
+use uc_infra::space::{InMemorySession, KeyMaterialStore, MigrationSpaceAccessAdapter};
 use uc_infra::SystemClock;
 #[derive(Default)]
 struct TestSecureStorage {
@@ -82,7 +79,7 @@ const IROH_IDENTITY_FILE: &str = "iroh-identity_v1.bin";
 const IROH_IDENTITY_BYTES: [u8; 32] = [0x5A; 32];
 
 const DEVICE_ID_TXT: &[u8] = b"550e8400-e29b-41d4-a716-446655440000";
-const SETUP_STATUS_JSON: &[u8] = b"{\"has_completed\":true,\"space_id\":null}";
+const CURRENT_SPACE_ID_BYTES: &[u8] = b"encrypted-current-space-id";
 const SETTINGS_JSON: &[u8] = b"{\"schema_version\":1}";
 
 /// A unique value committed into the source db so the round-trip can prove the
@@ -104,7 +101,7 @@ struct Source {
 }
 
 /// Build the source installation: a real sqlite db with a committed probe row,
-/// a *real* initialized keyslot + KEK (via `DefaultSpaceAccessAdapter`), real
+/// a *real* initialized keyslot + KEK (via `RuntimeSpaceAccessAdapter`), real
 /// vault/settings files, and an iroh identity file. Returns a fully-wired export
 /// adapter. `passphrase` is the space passphrase the KEK is derived from — the
 /// same passphrase later opens the exported bundle.
@@ -144,19 +141,27 @@ async fn build_source(passphrase: &Passphrase) -> Source {
         let keyslot_store = Arc::new(JsonKeySlotStore::new(vault_dir.clone()));
         let key_material = Arc::new(KeyMaterialStore::new(kek_storage.clone(), keyslot_store));
         let session = Arc::new(InMemorySession::new());
-        let space_access = DefaultSpaceAccessAdapter::new(
+        let space_access = MigrationSpaceAccessAdapter::new(
             key_material,
             Arc::new(DefaultCurrentProfile::new()),
             session,
         );
-        SpaceAccessStore::initialize(&space_access, &SpaceId::from("space"), passphrase)
-            .await
-            .unwrap();
+        uc_application::deps::InitializeSpacePort::initialize(
+            &space_access,
+            &SpaceId::from("space"),
+            passphrase,
+        )
+        .await
+        .unwrap();
     }
 
     // Remaining vault + settings + identity files (carried verbatim).
     std::fs::write(vault_dir.join("device_id.txt"), DEVICE_ID_TXT).unwrap();
-    std::fs::write(vault_dir.join(".setup_status"), SETUP_STATUS_JSON).unwrap();
+    std::fs::write(
+        vault_dir.join(".current-space-id-v1"),
+        CURRENT_SPACE_ID_BYTES,
+    )
+    .unwrap();
     std::fs::write(data_root.join("settings.json"), SETTINGS_JSON).unwrap();
     std::fs::write(
         iroh_identity_dir.join(IROH_IDENTITY_FILE),
@@ -373,8 +378,8 @@ async fn export_stage_apply_round_trip_lands_db_vault_identity_and_kek() {
         DEVICE_ID_TXT
     );
     assert_eq!(
-        std::fs::read(tgt.vault_dir.join(".setup_status")).unwrap(),
-        SETUP_STATUS_JSON
+        std::fs::read(tgt.vault_dir.join(".current-space-id-v1")).unwrap(),
+        CURRENT_SPACE_ID_BYTES
     );
     assert_eq!(std::fs::read(&tgt.settings_path).unwrap(), SETTINGS_JSON);
 

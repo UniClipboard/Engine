@@ -17,10 +17,15 @@
 //! [magic "UCFS" 4B][format_version 1B = 0x01][nonce 24B][ciphertext+tag]
 //! ```
 
+use std::sync::Arc;
+
 use uc_core::crypto::aad;
-use uc_core::ids::EntryId;
+use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
+use uc_core::ids::{EntryId, ProfileId};
 
 use crate::security::v1_aead::{decrypt_xchacha_raw, encrypt_xchacha_raw};
+use crate::security::ContentProtection;
+use crate::space::InMemorySession;
 
 /// UCFS envelope magic — "UCFS" (UniClipboard File Set).
 const FILE_SET_MAGIC: [u8; 4] = [0x55, 0x43, 0x46, 0x53];
@@ -37,6 +42,7 @@ const ORIGINAL_TEXT_AAD_SUFFIX: &[u8] = b"|original-text";
 const RELATIVE_PATH_AAD_SUFFIX: &[u8] = b"|relative-path";
 /// AAD suffix for the `root_name` column.
 const ROOT_NAME_AAD_SUFFIX: &[u8] = b"|root-name";
+pub(super) const FILE_SET_KEY_INFO: &[u8] = b"uniclipboard-file-set/v1";
 
 /// Bind an AAD to `(entry_id, line_index)` and one column, so a ciphertext
 /// sealed for one column of a row can never be opened as another column of
@@ -68,6 +74,120 @@ pub enum FileSetCipherError {
     // so the underlying utf-8 error must not carry it into logs.
     #[error("file-set path plaintext is not valid UTF-8")]
     InvalidUtf8,
+    #[error("V3 file-set path protection failed")]
+    V3 {
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+pub(crate) struct V3EntryFileSetPathCipher {
+    protection: Arc<ContentProtection>,
+}
+
+impl V3EntryFileSetPathCipher {
+    pub(crate) fn new(protection: Arc<ContentProtection>) -> Self {
+        Self { protection }
+    }
+
+    pub(crate) async fn seal_original_text(
+        &self,
+        entry_id: &EntryId,
+        line_index: i64,
+        plaintext: &str,
+    ) -> Result<Vec<u8>, FileSetCipherError> {
+        self.seal(entry_id, line_index, ORIGINAL_TEXT_AAD_SUFFIX, plaintext)
+            .await
+    }
+
+    pub(crate) async fn seal_relative_path(
+        &self,
+        entry_id: &EntryId,
+        line_index: i64,
+        plaintext: &str,
+    ) -> Result<Vec<u8>, FileSetCipherError> {
+        self.seal(entry_id, line_index, RELATIVE_PATH_AAD_SUFFIX, plaintext)
+            .await
+    }
+
+    pub(crate) async fn seal_root_name(
+        &self,
+        entry_id: &EntryId,
+        line_index: i64,
+        plaintext: &str,
+    ) -> Result<Vec<u8>, FileSetCipherError> {
+        self.seal(entry_id, line_index, ROOT_NAME_AAD_SUFFIX, plaintext)
+            .await
+    }
+
+    async fn seal(
+        &self,
+        entry_id: &EntryId,
+        line_index: i64,
+        suffix: &[u8],
+        plaintext: &str,
+    ) -> Result<Vec<u8>, FileSetCipherError> {
+        self.protection
+            .seal_for_active(
+                &Plaintext::new(plaintext.as_bytes().to_vec()),
+                &Aad::new(column_aad(entry_id, line_index, suffix)),
+            )
+            .await
+            .map(|ciphertext| ciphertext.into_bytes())
+            .map_err(|source| FileSetCipherError::V3 {
+                source: anyhow::Error::new(source).context("seal V3 file-set path"),
+            })
+    }
+
+    pub(crate) async fn open_original_text(
+        &self,
+        entry_id: &EntryId,
+        line_index: i64,
+        ciphertext: &[u8],
+    ) -> Result<String, FileSetCipherError> {
+        self.open(entry_id, line_index, ORIGINAL_TEXT_AAD_SUFFIX, ciphertext)
+            .await
+    }
+
+    pub(crate) async fn open_relative_path(
+        &self,
+        entry_id: &EntryId,
+        line_index: i64,
+        ciphertext: &[u8],
+    ) -> Result<String, FileSetCipherError> {
+        self.open(entry_id, line_index, RELATIVE_PATH_AAD_SUFFIX, ciphertext)
+            .await
+    }
+
+    pub(crate) async fn open_root_name(
+        &self,
+        entry_id: &EntryId,
+        line_index: i64,
+        ciphertext: &[u8],
+    ) -> Result<String, FileSetCipherError> {
+        self.open(entry_id, line_index, ROOT_NAME_AAD_SUFFIX, ciphertext)
+            .await
+    }
+
+    async fn open(
+        &self,
+        entry_id: &EntryId,
+        line_index: i64,
+        suffix: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<String, FileSetCipherError> {
+        let plaintext = self
+            .protection
+            .open(
+                &Ciphertext::new(ciphertext.to_vec()),
+                &Aad::new(column_aad(entry_id, line_index, suffix)),
+            )
+            .await
+            .map_err(|source| FileSetCipherError::V3 {
+                source: anyhow::Error::new(source).context("open V3 file-set path"),
+            })?;
+        String::from_utf8(plaintext.into_bytes()).map_err(|_| FileSetCipherError::InvalidUtf8)
+    }
 }
 
 /// AEAD codec holding a per-session 32-byte subkey.
@@ -83,6 +203,16 @@ pub struct EntryFileSetPathCipher {
 impl EntryFileSetPathCipher {
     pub fn new(key: [u8; 32]) -> Self {
         Self { key }
+    }
+
+    pub(crate) fn legacy_for_upgrade(
+        session: &InMemorySession,
+        profile_id: &ProfileId,
+    ) -> anyhow::Result<Self> {
+        session
+            .derive_stable_subkey(profile_id.as_ref().as_bytes(), FILE_SET_KEY_INFO)
+            .map(Self::new)
+            .map_err(|source| anyhow::Error::new(source).context("derive legacy file-set key"))
     }
 
     /// Seal `original_text` bound to `(entry_id, line_index)` and its column.

@@ -1,0 +1,751 @@
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use uc_core::ids::DeviceId;
+use uc_core::membership::{
+    AdmissionActivationReceipt, AdmissionChangeFacts, HistoricalMembershipSignatureError,
+    HistoricalMembershipSignatureVerifier, MembershipActivationBaselineV2, MembershipCredential,
+    MembershipEventId, MembershipEventV2, MembershipHistoryRelationship, MembershipOperationV2,
+    VersionedMembershipHistory, ED25519_SIGNATURE_ALGORITHM_V1, MEMBERSHIP_EVENT_FORMAT_V2,
+};
+use uc_core::ports::ReachabilityState;
+
+use super::*;
+use crate::space::admission::CurrentJoinStatus;
+use crate::space::membership::{
+    CommitMembershipLedgerPort, LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipLedger,
+    MembershipLedgerError, MembershipLedgerMutation,
+};
+
+struct MemoryLedgerRepository {
+    loaded: LoadedMembershipLedger,
+}
+
+#[async_trait]
+impl LoadMembershipLedgerPort for MemoryLedgerRepository {
+    async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
+        Ok(self.loaded.clone())
+    }
+}
+
+#[async_trait]
+impl CommitMembershipLedgerPort for MemoryLedgerRepository {
+    async fn compare_and_commit(
+        &self,
+        _mutation: MembershipLedgerMutation,
+    ) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
+        Err(MembershipLedgerError::Unavailable)
+    }
+}
+
+fn member_facts(device: &str, credential_byte: u8) -> (AdmissionChangeFacts, MembershipCredential) {
+    let device_id = DeviceId::new(device);
+    let credential =
+        MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![credential_byte; 32]);
+    let member_instance = credential.member_instance_id(&device_id);
+    (
+        AdmissionChangeFacts {
+            member_instance,
+            device_id,
+            device_name: device.to_owned(),
+            identity_fingerprint: uc_core::security::IdentityFingerprint::from_display_string(
+                "ABCD-EFGH-IJKL-MNOP",
+            )
+            .unwrap(),
+            transport_public_key: vec![1],
+            transport_address_blob: vec![2],
+            identity_signature: vec![3],
+        },
+        credential,
+    )
+}
+
+fn active_ledger() -> LoadedMembershipLedger {
+    let (local_facts, local_credential) = member_facts("device-a", 0x41);
+    let (peer_facts, peer_credential) = member_facts("device-b", 0x42);
+    let local_member = local_facts.member_instance;
+    let peer_device_id = peer_facts.device_id.clone();
+    let history = VersionedMembershipHistory::from_activation_baseline(
+        MembershipActivationBaselineV2::Established {
+            lineage_id: "space-a".to_owned(),
+            head_event_id: MembershipEventId::from_hex(&"11".repeat(32)).unwrap(),
+            head_depth: 0,
+            current_members: vec![
+                (local_facts.clone(), local_credential),
+                (peer_facts, peer_credential),
+            ],
+        },
+    )
+    .unwrap();
+    let mut loaded = LoadedMembershipLedger::no_current_space();
+    loaded.revision = 8;
+    loaded.lineage_id = Some("space-a".to_owned());
+    loaded.membership_history = Some(history.encode_persisted_v2().unwrap());
+    loaded.local_device_id = Some(local_facts.device_id);
+    loaded.local_member_instance = Some(local_member);
+    loaded.local_join_active = true;
+    loaded.peer_reconciliation.insert(
+        peer_device_id.clone(),
+        crate::space::membership::PeerReconciliationRecord {
+            peer_device_id,
+            relationship: MembershipHistoryRelationship::Consistent,
+            confirmed_position: None,
+            sync_state: Default::default(),
+            restricted_delivery: Vec::new(),
+            updated_at_ms: 1,
+        },
+    );
+    loaded
+}
+
+fn ledger_with_pending_local_removal() -> LoadedMembershipLedger {
+    let mut loaded = active_ledger();
+    let mut history = VersionedMembershipHistory::decode_persisted_v2(
+        loaded.membership_history.as_deref().unwrap(),
+        &AcceptingVerifier,
+    )
+    .unwrap();
+    let local_member = loaded.local_member_instance.unwrap();
+    let peer_device_id = DeviceId::new("device-b");
+    let peer_member = history
+        .effective_member_for_device(&peer_device_id)
+        .unwrap();
+    let peer_credential = history.credential_for(peer_member).unwrap().clone();
+    let mut removal = history
+        .create_unsigned_local_removal_event(
+            peer_member,
+            &peer_credential,
+            local_member,
+            [0x31; 16],
+            [0x32; 32],
+        )
+        .unwrap();
+    removal.signature = vec![0x33];
+    let mut incoming = history.clone();
+    incoming
+        .verify_and_receive_event(removal, &AcceptingVerifier)
+        .unwrap();
+    history
+        .merge_remote_history(&incoming, local_member, &AcceptingVerifier)
+        .unwrap();
+    loaded.membership_history = Some(history.encode_persisted_v2().unwrap());
+    loaded
+        .peer_reconciliation
+        .get_mut(&peer_device_id)
+        .unwrap()
+        .relationship = MembershipHistoryRelationship::PendingRemovalDecision;
+    loaded
+}
+
+struct AcceptingVerifier;
+
+impl HistoricalMembershipSignatureVerifier for AcceptingVerifier {
+    fn verify(
+        &self,
+        _signature_algorithm_version: u16,
+        _public_key: &[u8],
+        _payload: &[u8],
+        _signature: &[u8],
+    ) -> Result<bool, HistoricalMembershipSignatureError> {
+        Ok(true)
+    }
+}
+
+struct UnexpectedObservations;
+
+#[async_trait]
+impl LoadDeviceTrustObservationsPort for UnexpectedObservations {
+    async fn load(
+        &self,
+        _device_ids: &[uc_core::ids::DeviceId],
+    ) -> Result<Vec<DeviceTrustObservation>, QueryDeviceTrustError> {
+        panic!("empty status must not read device observations")
+    }
+}
+
+struct StaticObservations {
+    calls: Arc<Mutex<Vec<Vec<DeviceId>>>>,
+}
+
+struct AllOfflineObservations;
+
+#[async_trait]
+impl LoadDeviceTrustObservationsPort for AllOfflineObservations {
+    async fn load(
+        &self,
+        device_ids: &[DeviceId],
+    ) -> Result<Vec<DeviceTrustObservation>, QueryDeviceTrustError> {
+        Ok(device_ids
+            .iter()
+            .map(|device_id| DeviceTrustObservation {
+                device_id: device_id.clone(),
+                display_name: None,
+                reachability: ReachabilityState::Offline,
+            })
+            .collect())
+    }
+}
+
+struct StaticCurrentJoin(Option<CurrentJoinStatus>);
+
+struct StaticPairingConfirmation(PairingConfirmationObservation);
+
+struct LocalOnlyObservations;
+
+#[async_trait]
+impl LoadDeviceTrustObservationsPort for LocalOnlyObservations {
+    async fn load(
+        &self,
+        _device_ids: &[DeviceId],
+    ) -> Result<Vec<DeviceTrustObservation>, QueryDeviceTrustError> {
+        Ok(vec![DeviceTrustObservation {
+            device_id: DeviceId::new("device-a"),
+            display_name: Some("Local A".to_owned()),
+            reachability: ReachabilityState::Online,
+        }])
+    }
+}
+
+#[async_trait]
+impl LoadCurrentJoinStatusPort for StaticCurrentJoin {
+    async fn load_current_join(&self) -> Result<Option<CurrentJoinStatus>, QueryDeviceTrustError> {
+        Ok(self.0.clone())
+    }
+}
+
+#[async_trait]
+impl LoadCurrentJoinStatusPort for StaticPairingConfirmation {
+    async fn load_current_join(&self) -> Result<Option<CurrentJoinStatus>, QueryDeviceTrustError> {
+        Ok(None)
+    }
+
+    async fn load_admission_display(
+        &self,
+        targets: &[PairingConfirmationTarget],
+    ) -> Result<AdmissionDisplayStatus, QueryDeviceTrustError> {
+        Ok(AdmissionDisplayStatus {
+            current_join: None,
+            pairing_confirmations: targets
+                .contains(&self.0.target)
+                .then_some(self.0)
+                .into_iter()
+                .collect(),
+        })
+    }
+}
+
+#[async_trait]
+impl LoadDeviceTrustObservationsPort for StaticObservations {
+    async fn load(
+        &self,
+        device_ids: &[DeviceId],
+    ) -> Result<Vec<DeviceTrustObservation>, QueryDeviceTrustError> {
+        self.calls.lock().unwrap().push(device_ids.to_vec());
+        Ok(vec![
+            DeviceTrustObservation {
+                device_id: DeviceId::new("device-b"),
+                display_name: Some("Peer B".to_owned()),
+                reachability: ReachabilityState::Online,
+            },
+            DeviceTrustObservation {
+                device_id: DeviceId::new("device-a"),
+                display_name: Some("Local A".to_owned()),
+                reachability: ReachabilityState::Offline,
+            },
+        ])
+    }
+}
+
+#[tokio::test]
+async fn profile_without_a_space_returns_an_explicit_empty_status() {
+    let repository = Arc::new(MemoryLedgerRepository {
+        loaded: LoadedMembershipLedger::no_current_space(),
+    });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let query = QueryDeviceTrustUseCase::new(
+        ledger,
+        Arc::new(UnexpectedObservations),
+        Arc::new(StaticCurrentJoin(None)),
+    );
+
+    let status = query.execute().await.unwrap();
+
+    assert_eq!(status.revision, 0);
+    assert_eq!(
+        status.local_membership,
+        DeviceTrustMembership::NoCurrentSpace
+    );
+    assert!(status.local_device_id.is_none());
+    assert!(status.devices.is_empty());
+    assert!(status.current_change.is_none());
+}
+
+#[tokio::test]
+async fn removed_consistent_device_is_reported_offline_and_not_syncable() {
+    let mut loaded = active_ledger();
+    let mut history = VersionedMembershipHistory::decode_persisted_v2(
+        loaded.membership_history.as_deref().unwrap(),
+        &AcceptingVerifier,
+    )
+    .unwrap();
+    let local_device_id = DeviceId::new("device-a");
+    let local_member = history
+        .effective_member_for_device(&local_device_id)
+        .unwrap();
+    let local_credential = history.credential_for(local_member).unwrap().clone();
+    let peer_device_id = DeviceId::new("device-b");
+    let peer_member = history
+        .effective_member_for_device(&peer_device_id)
+        .unwrap();
+    let mut removal = history
+        .create_unsigned_local_removal_event(
+            local_member,
+            &local_credential,
+            peer_member,
+            [0x41; 16],
+            [0x42; 32],
+        )
+        .unwrap();
+    removal.signature = vec![0x43];
+    history
+        .verify_and_receive_event(removal, &AcceptingVerifier)
+        .unwrap();
+    loaded.membership_history = Some(history.encode_persisted_v2().unwrap());
+    loaded
+        .peer_reconciliation
+        .get_mut(&peer_device_id)
+        .unwrap()
+        .relationship = MembershipHistoryRelationship::Consistent;
+    let repository = Arc::new(MemoryLedgerRepository { loaded });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let query = QueryDeviceTrustUseCase::new(
+        ledger,
+        Arc::new(LocalOnlyObservations),
+        Arc::new(StaticCurrentJoin(None)),
+    );
+
+    let status = query.execute().await.unwrap();
+
+    let removed = status
+        .devices
+        .iter()
+        .find(|device| device.device_id == peer_device_id)
+        .unwrap();
+    assert_eq!(removed.membership, DeviceTrustMembership::Removed);
+    assert_eq!(removed.reachability, ReachabilityState::Offline);
+    assert_eq!(
+        removed.sync_state,
+        DeviceTrustSyncState::Paused(
+            crate::space::membership::SpaceMemberPauseReason::LocalMemberInactive
+        )
+    );
+}
+
+#[tokio::test]
+async fn active_status_combines_verified_members_with_one_observation_read() {
+    let repository = Arc::new(MemoryLedgerRepository {
+        loaded: active_ledger(),
+    });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let query = QueryDeviceTrustUseCase::new(
+        ledger,
+        Arc::new(StaticObservations {
+            calls: Arc::clone(&calls),
+        }),
+        Arc::new(StaticCurrentJoin(None)),
+    );
+
+    let status = query.execute().await.unwrap();
+
+    assert_eq!(status.revision, 8);
+    assert_eq!(status.local_device_id, Some(DeviceId::new("device-a")));
+    assert_eq!(status.local_membership, DeviceTrustMembership::Active);
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        &[vec![DeviceId::new("device-a"), DeviceId::new("device-b")]]
+    );
+    assert_eq!(status.devices.len(), 2);
+    assert_eq!(status.devices[0].device_id, DeviceId::new("device-a"));
+    assert_eq!(status.devices[0].display_name, "Local A");
+    assert_eq!(
+        status.devices[0].relationship,
+        DeviceTrustRelationship::Local
+    );
+    assert_eq!(status.devices[1].device_id, DeviceId::new("device-b"));
+    assert_eq!(status.devices[1].display_name, "Peer B");
+    assert_eq!(
+        status.devices[1].relationship,
+        DeviceTrustRelationship::ConfirmationPending
+    );
+    assert_eq!(status.devices[1].sync_state, DeviceTrustSyncState::Usable);
+}
+
+#[tokio::test]
+async fn pairing_confirmation_is_matched_to_the_exact_active_member() {
+    let mut loaded = active_ledger();
+    let mut history = VersionedMembershipHistory::decode_persisted_v2(
+        loaded.membership_history.as_deref().unwrap(),
+        &AcceptingVerifier,
+    )
+    .unwrap();
+    let (peer_facts, peer_credential) = member_facts("device-c", 0x43);
+    let peer_device_id = peer_facts.device_id.clone();
+    let member_instance_id = peer_facts.member_instance;
+    let author = loaded.local_member_instance.unwrap();
+    let author_credential = history.credential_for(author).unwrap();
+    let parent = history.current_head();
+    let operation = MembershipOperationV2::AddDevice {
+        admission: uc_core::membership::MembershipAdmissionV2 {
+            facts: peer_facts,
+            membership_credential: peer_credential,
+            resume_public_key_digest: [0x43; 32],
+            security_commitment_id: [0x44; 32],
+        },
+    };
+    let resulting_members_digest = history
+        .expected_resulting_members_digest(parent, &operation)
+        .unwrap();
+    let add_event = MembershipEventV2::new(
+        MEMBERSHIP_EVENT_FORMAT_V2,
+        "space-a".to_owned(),
+        parent,
+        parent.map(|id| history.depth(id).unwrap() + 1).unwrap_or(0),
+        [0x45; 16],
+        author,
+        author_credential.credential_id,
+        author_credential.signature_algorithm_version,
+        operation,
+        resulting_members_digest,
+        [0x44; 32],
+        vec![0x46],
+        Some([0x47; 32]),
+        vec![0x48],
+    );
+    let add_event_id = add_event.event_id();
+    let activation_receipt = AdmissionActivationReceipt::new(
+        1,
+        [0x49; 32],
+        add_event_id,
+        add_event.resulting_members_digest,
+        [0x44; 32],
+        member_instance_id,
+        vec![0x4a],
+    );
+    history
+        .verify_and_receive_event(add_event, &AcceptingVerifier)
+        .unwrap();
+    history
+        .verify_and_record_activation_receipt(activation_receipt, &AcceptingVerifier)
+        .unwrap();
+    loaded.membership_history = Some(history.encode_persisted_v2().unwrap());
+    loaded.peer_reconciliation.insert(
+        peer_device_id.clone(),
+        crate::space::membership::PeerReconciliationRecord {
+            peer_device_id: peer_device_id.clone(),
+            relationship: MembershipHistoryRelationship::Consistent,
+            confirmed_position: None,
+            sync_state: Default::default(),
+            restricted_delivery: Vec::new(),
+            updated_at_ms: 1,
+        },
+    );
+    let repository = Arc::new(MemoryLedgerRepository { loaded });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let query = QueryDeviceTrustUseCase::new(
+        ledger,
+        Arc::new(AllOfflineObservations),
+        Arc::new(StaticPairingConfirmation(PairingConfirmationObservation {
+            target: PairingConfirmationTarget {
+                member_instance_id,
+                add_event_id,
+            },
+            status: PairingConfirmationStatus::Unconfirmed,
+        })),
+    );
+
+    let status = query.execute().await.unwrap();
+    let peer = status
+        .devices
+        .iter()
+        .find(|device| device.device_id == peer_device_id)
+        .unwrap();
+    assert_eq!(
+        peer.pairing_confirmation,
+        Some(PairingConfirmationStatus::Unconfirmed)
+    );
+    assert_eq!(peer.sync_state, DeviceTrustSyncState::Usable);
+}
+
+#[tokio::test]
+async fn peer_that_confirmed_the_current_position_is_reported_consistent() {
+    let mut loaded = active_ledger();
+    let history = VersionedMembershipHistory::decode_persisted_v2(
+        loaded.membership_history.as_deref().unwrap(),
+        &AcceptingVerifier,
+    )
+    .unwrap();
+    let peer_device_id = DeviceId::new("device-b");
+    let peer = loaded
+        .peer_reconciliation
+        .get(&peer_device_id)
+        .cloned()
+        .unwrap();
+    loaded.peer_reconciliation.insert(
+        peer_device_id,
+        crate::space::membership::PeerReconciliationRecord {
+            confirmed_position: history.current_position().ok(),
+            ..peer
+        },
+    );
+    let repository = Arc::new(MemoryLedgerRepository { loaded });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let query = QueryDeviceTrustUseCase::new(
+        ledger,
+        Arc::new(StaticObservations {
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }),
+        Arc::new(StaticCurrentJoin(None)),
+    );
+
+    let status = query.execute().await.unwrap();
+
+    assert_eq!(
+        status.devices[1].relationship,
+        DeviceTrustRelationship::Consistent
+    );
+}
+
+#[tokio::test]
+async fn status_exposes_the_current_pending_removal_facts() {
+    let repository = Arc::new(MemoryLedgerRepository {
+        loaded: ledger_with_pending_local_removal(),
+    });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let query = QueryDeviceTrustUseCase::new(
+        ledger,
+        Arc::new(StaticObservations {
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }),
+        Arc::new(StaticCurrentJoin(None)),
+    );
+
+    let status = query.execute().await.unwrap();
+    let change = status.current_change.unwrap();
+
+    assert_eq!(change.proposed_by_device_id, DeviceId::new("device-b"));
+    assert_eq!(change.target_device_ids, vec![DeviceId::new("device-a")]);
+    assert!(change.includes_local_device);
+    assert!(change.apply_impact.usable_device_ids.is_empty());
+    assert_eq!(
+        change.apply_impact.member_device_ids,
+        vec![DeviceId::new("device-b")]
+    );
+    assert_eq!(
+        change.apply_impact.local_membership,
+        DeviceTrustMembership::Removed
+    );
+    assert_eq!(
+        change.keep_current_impact.usable_device_ids,
+        vec![DeviceId::new("device-a")]
+    );
+    assert_eq!(
+        change.keep_current_impact.paused_device_ids,
+        vec![DeviceId::new("device-b")]
+    );
+    assert_eq!(
+        change.keep_current_impact.local_membership,
+        DeviceTrustMembership::Active
+    );
+    let history = VersionedMembershipHistory::decode_persisted_v2(
+        &ledger_with_pending_local_removal()
+            .membership_history
+            .unwrap(),
+        &AcceptingVerifier,
+    )
+    .unwrap();
+    let event = history.event(change.change_id).unwrap();
+    assert!(matches!(
+        event.operation,
+        MembershipOperationV2::RemoveDevice { .. }
+    ));
+}
+
+#[tokio::test]
+async fn pending_peer_removal_previews_match_each_selected_history() {
+    let mut loaded = active_ledger();
+    let members = vec![
+        member_facts("device-a", 0x41),
+        member_facts("device-b", 0x42),
+        member_facts("device-c", 0x43),
+        member_facts("device-d", 0x44),
+    ];
+    let mut history = VersionedMembershipHistory::from_activation_baseline(
+        MembershipActivationBaselineV2::Established {
+            lineage_id: "space-a".to_owned(),
+            head_event_id: MembershipEventId::from_hex(&"11".repeat(32)).unwrap(),
+            head_depth: 0,
+            current_members: members.clone(),
+        },
+    )
+    .unwrap();
+    let local = members[0].0.member_instance;
+    let mut removal = history
+        .create_unsigned_local_removal_event(
+            members[1].0.member_instance,
+            &members[1].1,
+            members[2].0.member_instance,
+            [0x31; 16],
+            [0x32; 32],
+        )
+        .unwrap();
+    removal.signature = vec![0x33];
+    let removal_id = removal.event_id();
+    history
+        .verify_and_receive_remote_event_for_local_member(removal, local, &AcceptingVerifier)
+        .unwrap();
+    loaded.membership_history = Some(history.encode_persisted_v2().unwrap());
+    for (facts, _) in &members[1..] {
+        let mut peer = loaded.peer_reconciliation[&DeviceId::new("device-b")].clone();
+        peer.peer_device_id = facts.device_id.clone();
+        peer.relationship = if facts.device_id.as_str() == "device-b" {
+            MembershipHistoryRelationship::PendingRemovalDecision
+        } else {
+            MembershipHistoryRelationship::Consistent
+        };
+        loaded
+            .peer_reconciliation
+            .insert(facts.device_id.clone(), peer);
+    }
+    let repository = Arc::new(MemoryLedgerRepository { loaded });
+    let query = QueryDeviceTrustUseCase::new(
+        Arc::new(MembershipLedger::new(
+            repository.clone(),
+            repository,
+            Arc::new(AcceptingVerifier),
+        )),
+        Arc::new(AllOfflineObservations),
+        Arc::new(StaticCurrentJoin(None)),
+    );
+    let change = query.execute().await.unwrap().current_change.unwrap();
+    assert_eq!(
+        change.apply_impact.usable_device_ids,
+        ["device-a", "device-b", "device-d"].map(DeviceId::new)
+    );
+    assert_eq!(
+        change.apply_impact.paused_device_ids,
+        vec![DeviceId::new("device-c")]
+    );
+    assert_eq!(
+        change.keep_current_impact.usable_device_ids,
+        ["device-a", "device-c", "device-d"].map(DeviceId::new)
+    );
+    assert_eq!(
+        change.keep_current_impact.paused_device_ids,
+        vec![DeviceId::new("device-b")]
+    );
+    for (decision, preview) in [
+        (
+            uc_core::membership::RemovalDecision::Accept,
+            change.apply_impact,
+        ),
+        (
+            uc_core::membership::RemovalDecision::Reject,
+            change.keep_current_impact,
+        ),
+    ] {
+        let mut selected = history.clone();
+        let mut signed = selected
+            .create_unsigned_local_removal_decision(
+                removal_id,
+                local,
+                &members[0].1,
+                decision,
+                [0x71; 16],
+            )
+            .unwrap();
+        signed.signature = vec![0x72];
+        selected
+            .apply_signed_local_removal_decision(signed, local, &AcceptingVerifier)
+            .unwrap();
+        let mut actual = selected
+            .effective_members()
+            .into_iter()
+            .map(|member| {
+                selected
+                    .admission_facts_for(member)
+                    .unwrap()
+                    .device_id
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        actual.sort();
+        assert_eq!(preview.member_device_ids, actual);
+        assert!(preview
+            .usable_device_ids
+            .iter()
+            .all(|id| !preview.paused_device_ids.contains(id)));
+    }
+}
+
+#[tokio::test]
+async fn status_uses_the_current_join_projection_from_admission_state() {
+    let repository = Arc::new(MemoryLedgerRepository {
+        loaded: active_ledger(),
+    });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let query = QueryDeviceTrustUseCase::new(
+        ledger,
+        Arc::new(StaticObservations {
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }),
+        Arc::new(StaticCurrentJoin(Some(CurrentJoinStatus::Pending {
+            join_id: [0xa2; 16],
+            target_space_id: Some("target-space".to_owned()),
+            sponsor_device_id: None,
+            sponsor_identity_fingerprint: None,
+            cancel_requested: false,
+            peer_upgrade_required: false,
+        }))),
+    );
+
+    let status = query.execute().await.unwrap();
+
+    assert!(matches!(
+        status.current_join,
+        Some(crate::space::admission::CurrentJoinStatus::Pending {
+            join_id,
+            target_space_id: Some(ref target),
+            cancel_requested: false,
+            ..
+        }) if join_id == [0xa2; 16] && target == "target-space"
+    ));
+}

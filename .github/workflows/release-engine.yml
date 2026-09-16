@@ -122,7 +122,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           workspaces: . -> target
-          shared-key: engine-release-ios
+          shared-key: engine-release-ios-dev-host
 
       - name: Build iOS assets
         env:
@@ -149,18 +149,20 @@ jobs:
           ref: ${{ needs.prepare.outputs.commit }}
           fetch-depth: 0
 
-      - name: Install Android targets and build helper
+      - name: Install Android targets
         shell: bash
         run: |
           toolchain=$(rustup show active-toolchain | awk '{print $1}')
           rustup target add --toolchain "$toolchain" \
             aarch64-linux-android x86_64-linux-android
-          cargo install cargo-ndk --locked
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           workspaces: . -> target
-          shared-key: engine-release-android
+          shared-key: engine-release-android-dev-host
+
+      - name: Install Android build helper
+        run: cargo install cargo-ndk --version 4.1.2 --locked
 
       - name: Build Android assets
         env:
@@ -195,10 +197,12 @@ jobs:
 
       - name: Build HarmonyOS assets and signed acceptance HAP
         env:
-          RUSTC_WRAPPER: ''
+          RUSTC_WRAPPER: sccache
           UC_OHOS_DIST_DIR: ${{ runner.temp }}/engine-dist/ohos
-          UC_OHOS_TARGET_DIR: ${{ runner.temp }}/uc-ohos-target
-        run: tests/hosts/ohos/build-emulator.sh
+        run: >-
+          node scripts/release/with-isolated-source.mjs
+          /Volumes/ExternalSSD/cargo-targets/active
+          bash tests/hosts/ohos/build-emulator.sh
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -251,7 +255,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.prepare.outputs.tag }}
           COMMIT: ${{ needs.prepare.outputs.commit }}
-          PRERELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease }}
+          PRERELEASE: ${{ github.event_name == 'push' && contains(github.ref_name, '-rc.') || inputs.prerelease }}
           REVERIFY_EXISTING: ${{ github.event_name == 'workflow_dispatch' && inputs.reverify_existing_release }}
           ASSET_DIR: ${{ runner.temp }}/engine-dist/release-assets
         shell: bash

@@ -10,6 +10,7 @@ use tracing::error;
 use uc_application::facade::{
     AppFacade, InitializeSpaceError, InitializeSpaceInput as AppInitializeSpaceInput,
 };
+use uc_core::crypto::domain::Passphrase;
 
 pub async fn execute_create_space(
     facade: &AppFacade,
@@ -17,8 +18,8 @@ pub async fn execute_create_space(
 ) -> Result<OperationResult, EngineError> {
     let result = facade
         .initialize_space(AppInitializeSpaceInput {
-            passphrase: input.passphrase.expose().to_owned(),
-            passphrase_confirm: input.passphrase_confirmation.expose().to_owned(),
+            passphrase: Passphrase::new(input.passphrase.expose()),
+            passphrase_confirm: Passphrase::new(input.passphrase_confirmation.expose()),
             device_name: input.device_name,
         })
         .await
@@ -53,8 +54,8 @@ fn map_create_space_error(error: InitializeSpaceError) -> EngineError {
             EngineErrorCategory::Conflict,
             false,
         ),
-        InitializeSpaceError::StorageFailed(_) | InitializeSpaceError::Internal(_) => {
-            error!(error = %error, "create space failed");
+        InitializeSpaceError::StorageFailed { .. } | InitializeSpaceError::Internal { .. } => {
+            error!(error = ?error, "create space failed");
             EngineError::new(
                 CREATE_SPACE_FAILED_CODE,
                 EngineErrorCategory::Internal,

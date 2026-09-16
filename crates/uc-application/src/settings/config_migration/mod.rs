@@ -3,7 +3,7 @@
 //!
 //! Aggregates the export / preview / stage-import intents and enforces their
 //! business preconditions (initialized / unlocked / uninitialized) before
-//! delegating to the migration ports. Per `uc-application/AGENTS.md` §11.4
+//! delegating to the migration ports. Per `docs/design-docs/layers/application.md`
 //! external consumers reach the migration intents only through this facade.
 
 mod facade;

@@ -35,6 +35,16 @@ if (new Set(provenance.map(item => item.version)).size !== 1) {
 if (new Set(provenance.map(item => item.commit)).size !== 1) {
   throw new Error('platform artifacts do not share one source commit')
 }
+for (const platform of ['ios', 'android']) {
+  const profilePath = join(distRoot, platform, 'build-profile.txt')
+  if (!existsSync(profilePath)) {
+    throw new Error(`${platform} build profile is missing`)
+  }
+  const profile = readFileSync(profilePath, 'utf8').trim()
+  if (profile !== 'release') {
+    throw new Error(`${platform} build profile must be release`)
+  }
+}
 
 rmSync(releaseDirectory, { recursive: true, force: true })
 mkdirSync(releaseDirectory, { recursive: true })

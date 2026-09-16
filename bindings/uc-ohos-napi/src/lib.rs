@@ -1,6 +1,12 @@
 //! HarmonyOS N-API bindings for the public `uc-engine` interface.
 
+// HarmonyOS 网络启动的 Send 检查包含深层 netlink 类型，超过编译器默认递归深度。
+#![recursion_limit = "256"]
+
 mod host;
+mod local_diagnostics;
+mod observability;
+pub use local_diagnostics::*;
 mod runtime;
 
 use napi::bindgen_prelude::{Buffer, External};
@@ -14,6 +20,67 @@ pub use runtime::OhEngine;
 pub struct OhEngineConfig {
     pub app_version: String,
     pub profile_id: String,
+}
+
+#[napi(object)]
+pub struct OhHostDirectories {
+    pub private_data_directory: String,
+    pub cache_directory: String,
+    pub temporary_directory: String,
+}
+
+#[napi(object)]
+pub struct OhCollectorConfig {
+    pub trace_endpoint: String,
+    pub log_endpoint: String,
+    pub auth_header_name: Option<String>,
+    pub auth_header_value: Option<String>,
+}
+
+impl std::fmt::Debug for OhCollectorConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OhCollectorConfig(REDACTED)")
+    }
+}
+
+#[napi(object)]
+pub struct OhObservabilityConfig {
+    pub service_version: String,
+    pub environment: String,
+    pub app_channel: String,
+    pub remote_diagnostics_enabled: bool,
+    pub collector: Option<OhCollectorConfig>,
+}
+
+impl std::fmt::Debug for OhObservabilityConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OhObservabilityConfig(REDACTED)")
+    }
+}
+
+#[napi(object)]
+pub struct OhObservabilitySetup {
+    pub reused: bool,
+    pub remote: String,
+    pub local_file: String,
+    pub dropped_local_records: f64,
+}
+
+#[napi(object)]
+pub struct OhObservabilityHealth {
+    pub remote: String,
+    pub local_file: String,
+    pub dropped_local_records: f64,
+    pub dropped_remote_spans: f64,
+    pub dropped_remote_logs: f64,
+    pub failed_remote_span_batches: f64,
+    pub failed_remote_log_batches: f64,
+}
+
+#[napi(object)]
+pub struct OhObservabilitySignalSummary {
+    pub traces: String,
+    pub logs: String,
 }
 
 #[napi(object, object_to_js = false)]
@@ -100,6 +167,7 @@ pub struct OhActiveClipboard {
 #[napi(object)]
 pub struct OhInvitationIssued {
     pub invitation_code: String,
+    pub full_invitation: String,
     pub expires_at_ms: f64,
     pub availability: String,
 }
@@ -124,7 +192,9 @@ pub struct OhJoinSpaceStatus {
     pub sponsor_device_id: Option<String>,
     pub sponsor_identity_fingerprint: Option<String>,
     pub cancel_requested: Option<bool>,
+    pub peer_upgrade_required: bool,
     pub rejection_reason: Option<String>,
+    pub termination_reason: Option<String>,
 }
 
 #[napi(object)]
@@ -163,6 +233,41 @@ pub struct PreparedHost {
 #[napi]
 pub fn core_version() -> String {
     format!("v{}", env!("CARGO_PKG_VERSION"))
+}
+
+#[napi]
+pub fn install_process_observability(
+    config: OhObservabilityConfig,
+    directories: OhHostDirectories,
+) -> napi::Result<OhObservabilitySetup> {
+    observability::install(config, directories)
+}
+
+#[napi]
+pub fn query_process_observability_health() -> napi::Result<OhObservabilityHealth> {
+    observability::health()
+}
+
+#[napi]
+pub async fn flush_process_observability(
+    deadline_ms: u32,
+) -> napi::Result<OhObservabilitySignalSummary> {
+    tokio::task::spawn_blocking(move || {
+        observability::force_flush(std::time::Duration::from_millis(u64::from(deadline_ms)))
+    })
+    .await
+    .map_err(|_| observability::runtime_unavailable())?
+}
+
+#[napi]
+pub async fn shutdown_process_observability(
+    deadline_ms: u32,
+) -> napi::Result<OhObservabilitySignalSummary> {
+    tokio::task::spawn_blocking(move || {
+        observability::shutdown(std::time::Duration::from_millis(u64::from(deadline_ms)))
+    })
+    .await
+    .map_err(|_| observability::runtime_unavailable())?
 }
 
 #[napi]

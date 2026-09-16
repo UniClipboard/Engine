@@ -7,7 +7,7 @@
 //!
 //! 该类型与平台细节解耦：adapter 在 `uc-platform` 用 `network-interface`
 //! crate 探测，但本类型不携带 mac 地址、index、prefix 长度等运维信息——
-//! 那些在 v1 没有用户可感知的对应行为，按 `uc-core/AGENTS.md` §4.2 留在
+//! 那些在 v1 没有用户可感知的对应行为，按 `docs/design-docs/layers/core.md` §4.2 留在
 //! 实现细节里即可。
 
 use std::net::Ipv4Addr;

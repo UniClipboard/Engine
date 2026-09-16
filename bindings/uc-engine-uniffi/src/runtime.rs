@@ -12,14 +12,14 @@ use uc_engine::observability::{
     AnalyticsPort, DeviceType, Event, GroupIdentifyPayload, IdentifyPayload, Os, ReleaseOutcome,
 };
 use uc_engine::{
-    ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig,
-    ExportEntryInput, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
-    HostClipboard, HostClipboardRepresentation, HostClipboardSnapshot, HostDirectories,
-    HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage, JoinSpaceInput,
-    NetworkSettingsPatch, ObserveClipboardChangeInput, Operation, OperationResult,
-    RecoverSessionInput, RelayCredentialEdit, RemoveMemberInput, ResendEntryInput,
-    RestoreClipboardInput, SaveRelayInput, SaveRelayOutcome, SecretString, SendFilesInput,
-    SendImageInput, SendTextInput, SettingsPatch,
+    ChangeEncryptionPassphraseInput, ClipboardRestoreMode, ClipboardRestoreOutcome,
+    CreateSpaceInput, Engine, EngineConfig, ExportEntryInput, HostCapabilities,
+    HostCapabilityError, HostCapabilityErrorCategory, HostClipboard, HostClipboardRepresentation,
+    HostClipboardSnapshot, HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata,
+    HostSecureStorage, JoinSpaceInput, NetworkSettingsPatch, ObserveClipboardChangeInput,
+    Operation, OperationResult, RecoverSessionInput, RelayCredentialEdit, RemoveMemberInput,
+    ResendEntryInput, RestoreClipboardInput, SaveRelayInput, SaveRelayOutcome, SecretString,
+    SendFilesInput, SendImageInput, SendTextInput, SettingsPatch,
 };
 use zeroize::Zeroizing;
 
@@ -84,6 +84,34 @@ fn log_mobile_query_failure(operation: &'static str, error: &BindingError) {
                 "mobile query failed"
             )
         }
+        BindingError::ObservabilityConfigInvalid => {
+            warn!(
+                operation,
+                error_kind = "observability_config_invalid",
+                "mobile query failed"
+            )
+        }
+        BindingError::ObservabilityConfigConflict => {
+            warn!(
+                operation,
+                error_kind = "observability_config_conflict",
+                "mobile query failed"
+            )
+        }
+        BindingError::ObservabilityRuntimeUnavailable => {
+            warn!(
+                operation,
+                error_kind = "observability_runtime_unavailable",
+                "mobile query failed"
+            )
+        }
+        BindingError::ObservabilityNotInstalled => {
+            warn!(
+                operation,
+                error_kind = "observability_not_installed",
+                "mobile query failed"
+            )
+        }
         BindingError::UnexpectedResult => {
             warn!(
                 operation,
@@ -122,6 +150,7 @@ pub struct LocalDevice {
 #[derive(Clone, PartialEq, Eq, uniffi::Record)]
 pub struct InvitationIssued {
     pub invitation_code: String,
+    pub full_invitation: String,
     pub expires_at_ms: i64,
     pub availability: InvitationAvailability,
 }
@@ -131,6 +160,7 @@ impl std::fmt::Debug for InvitationIssued {
         formatter
             .debug_struct("InvitationIssued")
             .field("invitation_code", &"[REDACTED]")
+            .field("full_invitation", &"[REDACTED]")
             .field("expires_at_ms", &self.expires_at_ms)
             .field("availability", &self.availability)
             .finish()
@@ -167,11 +197,19 @@ pub enum JoinSpaceRejectionReason {
     RemovedBeforeActivation,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum JoinSpaceTerminationReason {
+    Cancelled,
+    Expired,
+    Superseded,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum JoinSpaceStatus {
     Active {
         join_id: String,
         joined_space: JoinedSpace,
+        peer_upgrade_required: bool,
     },
     Pending {
         join_id: String,
@@ -179,10 +217,15 @@ pub enum JoinSpaceStatus {
         sponsor_device_id: Option<String>,
         sponsor_identity_fingerprint: Option<String>,
         cancel_requested: bool,
+        peer_upgrade_required: bool,
     },
     Rejected {
         join_id: String,
         reason: JoinSpaceRejectionReason,
+    },
+    Terminated {
+        join_id: String,
+        reason: JoinSpaceTerminationReason,
     },
 }
 
@@ -212,10 +255,22 @@ pub struct NetworkRecoveryStatus {
     pub next_retry_in_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
 pub struct SpaceInvitation {
     pub invitation_code: String,
+    pub full_invitation: String,
     pub expires_at_ms: i64,
+}
+
+impl std::fmt::Debug for SpaceInvitation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SpaceInvitation")
+            .field("invitation_code", &"[REDACTED]")
+            .field("full_invitation", &"[REDACTED]")
+            .field("expires_at_ms", &self.expires_at_ms)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -317,7 +372,28 @@ pub struct RelaySaveResult {
     pub configured: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ConnectivityOpportunity {
+    Foreground,
+    SystemWake,
+    NetworkChanged,
+}
+
+impl From<ConnectivityOpportunity> for uc_engine::ConnectivityOpportunity {
+    fn from(reason: ConnectivityOpportunity) -> Self {
+        match reason {
+            ConnectivityOpportunity::Foreground => Self::Foreground,
+            ConnectivityOpportunity::SystemWake => Self::SystemWake,
+            ConnectivityOpportunity::NetworkChanged => Self::NetworkChanged,
+        }
+    }
+}
+
 enum WorkerCommand {
+    NotifyConnectivityOpportunity {
+        reason: ConnectivityOpportunity,
+        response: mpsc::Sender<Result<(), BindingError>>,
+    },
     RecoverSession {
         allow_secure_storage_unlock: bool,
         response: mpsc::Sender<Result<SessionRecovery, BindingError>>,
@@ -346,12 +422,13 @@ enum WorkerCommand {
     ListDevices {
         response: mpsc::Sender<Result<Vec<Device>, BindingError>>,
     },
-    QueryDeviceTrust {
+    QueryDeviceGroupChoices {
         response: mpsc::Sender<Result<String, BindingError>>,
     },
-    DecideDeviceTrustChange {
-        change_id: String,
-        choice: DeviceTrustChoice,
+    ChooseDeviceGroup {
+        issue_id: String,
+        choice_id: String,
+        expected_revision: u64,
         confirm_local_removal: bool,
         response: mpsc::Sender<Result<String, BindingError>>,
     },
@@ -377,6 +454,11 @@ enum WorkerCommand {
     },
     IssueInvitation {
         response: mpsc::Sender<Result<InvitationIssued, BindingError>>,
+    },
+    ChangeEncryptionPassphrase {
+        passphrase: Zeroizing<String>,
+        passphrase_confirmation: Zeroizing<String>,
+        response: mpsc::Sender<Result<(), BindingError>>,
     },
     JoinSpace {
         invitation_code: Zeroizing<String>,
@@ -677,11 +759,6 @@ impl MobileEngine {
         analytics: Option<(Arc<dyn BindingAnalyticsHost>, BindingAnalyticsContext)>,
     ) -> Result<Arc<Self>, BindingError> {
         let capabilities = host_capabilities(Arc::clone(&host), analytics)?;
-        let logs_dir = capabilities.directories().logs();
-        #[cfg(target_vendor = "apple")]
-        crate::apple::install_apple_tracing(logs_dir);
-        #[cfg(target_os = "android")]
-        crate::android::install_android_tracing(logs_dir);
         let config = EngineConfig::new(config.app_version).with_profile_id(config.profile_id);
         let (commands, requests) = tokio::sync::mpsc::unbounded_channel();
         let (lifecycle_commands, lifecycle_requests) = tokio::sync::mpsc::unbounded_channel();
@@ -769,6 +846,13 @@ impl MobileEngine {
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
+    pub fn notify_connectivity_opportunity(
+        &self,
+        reason: ConnectivityOpportunity,
+    ) -> Result<(), BindingError> {
+        self.request(|response| WorkerCommand::NotifyConnectivityOpportunity { reason, response })
+    }
+
     pub fn refresh_peer_connections(&self) -> Result<PeerConnectionRefresh, BindingError> {
         let commands = self.command_sender()?;
         let (response, result) = mpsc::channel();
@@ -810,19 +894,21 @@ impl MobileEngine {
         self.request(|response| WorkerCommand::ListDevices { response })
     }
 
-    pub fn query_device_trust(&self) -> Result<String, BindingError> {
-        self.request(|response| WorkerCommand::QueryDeviceTrust { response })
+    pub fn query_device_group_choices(&self) -> Result<String, BindingError> {
+        self.request(|response| WorkerCommand::QueryDeviceGroupChoices { response })
     }
 
-    pub fn decide_device_trust_change(
+    pub fn choose_device_group(
         &self,
-        change_id: String,
-        choice: DeviceTrustChoice,
+        issue_id: String,
+        choice_id: String,
+        expected_revision: u64,
         confirm_local_removal: bool,
     ) -> Result<String, BindingError> {
-        self.request(|response| WorkerCommand::DecideDeviceTrustChange {
-            change_id,
-            choice,
+        self.request(|response| WorkerCommand::ChooseDeviceGroup {
+            issue_id,
+            choice_id,
+            expected_revision,
             confirm_local_removal,
             response,
         })
@@ -885,6 +971,27 @@ impl MobileEngine {
         let (response, result) = mpsc::channel();
         commands
             .send(WorkerCommand::IssueInvitation { response })
+            .map_err(|_| BindingError::RuntimeUnavailable)?;
+        result
+            .recv()
+            .map_err(|_| BindingError::RuntimeUnavailable)?
+    }
+
+    pub fn change_encryption_passphrase(
+        &self,
+        passphrase: String,
+        passphrase_confirmation: String,
+    ) -> Result<(), BindingError> {
+        let passphrase = Zeroizing::new(passphrase);
+        let passphrase_confirmation = Zeroizing::new(passphrase_confirmation);
+        let commands = self.command_sender()?;
+        let (response, result) = mpsc::channel();
+        commands
+            .send(WorkerCommand::ChangeEncryptionPassphrase {
+                passphrase,
+                passphrase_confirmation,
+                response,
+            })
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
@@ -1266,6 +1373,7 @@ async fn run_worker_loop(
                                     )
                                     .await
                                     .map(|_| ());
+                                    crate::observability::schedule_flush_after_success(&result);
                                     let suspended = result.is_ok();
                                     if suspended {
                                         let _ = response.send(Ok(SessionRecovery {
@@ -1292,6 +1400,7 @@ async fn run_worker_loop(
                                     )
                                     .await
                                     .map(|_| ());
+                                    crate::observability::schedule_flush_after_success(&result);
                                     let _ = response.send(Err(BindingError::RuntimeUnavailable));
                                     shutdown_response = Some((shutdown, result));
                                     break 'worker;
@@ -1316,6 +1425,19 @@ async fn run_worker_loop(
                     .await
                     .map_err(BindingError::from)
                     .and_then(map_local_device);
+                let _ = response.send(result);
+            }
+            WorkerCommand::NotifyConnectivityOpportunity { reason, response } => {
+                let result = engine
+                    .execute(Operation::NotifyConnectivityOpportunity {
+                        reason: reason.into(),
+                    })
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(|result| match result {
+                        OperationResult::ConnectivityOpportunityAccepted => Ok(()),
+                        _ => Err(BindingError::UnexpectedResult),
+                    });
                 let _ = response.send(result);
             }
             WorkerCommand::RefreshPeerConnections { response } => {
@@ -1412,39 +1534,33 @@ async fn run_worker_loop(
                 }
                 let _ = response.send(result);
             }
-            WorkerCommand::QueryDeviceTrust { response } => {
+            WorkerCommand::QueryDeviceGroupChoices { response } => {
                 let result = engine
-                    .execute(Operation::QueryDeviceTrust)
+                    .execute(Operation::QueryDeviceGroupChoices)
                     .await
                     .map_err(BindingError::from)
-                    .and_then(map_device_trust);
+                    .and_then(map_device_group_choices);
                 let _ = response.send(result);
             }
-            WorkerCommand::DecideDeviceTrustChange {
-                change_id,
-                choice,
+            WorkerCommand::ChooseDeviceGroup {
+                issue_id,
+                choice_id,
+                expected_revision,
                 confirm_local_removal,
                 response,
             } => {
-                let choice = match choice {
-                    DeviceTrustChoice::ApplyChange => {
-                        uc_engine::DeviceTrustChoiceSummary::ApplyChange
-                    }
-                    DeviceTrustChoice::KeepCurrentDeviceGroup => {
-                        uc_engine::DeviceTrustChoiceSummary::KeepCurrentDeviceGroup
-                    }
-                };
                 let result = engine
-                    .execute(Operation::DecideDeviceTrustChange(
-                        uc_engine::DecideDeviceTrustChangeInput {
-                            change_id,
-                            choice,
+                    .execute(Operation::ChooseDeviceGroup(
+                        uc_engine::ChooseDeviceGroupInput {
+                            issue_id,
+                            choice_id,
+                            expected_revision,
                             confirm_local_removal,
                         },
                     ))
                     .await
                     .map_err(BindingError::from)
-                    .and_then(map_device_trust_decision);
+                    .and_then(map_device_group_choice_result);
                 let _ = response.send(result);
             }
             WorkerCommand::RemoveMember {
@@ -1506,6 +1622,25 @@ async fn run_worker_loop(
                     .await
                     .map_err(BindingError::from)
                     .and_then(map_invitation_issued);
+                let _ = response.send(result);
+            }
+            WorkerCommand::ChangeEncryptionPassphrase {
+                passphrase,
+                passphrase_confirmation,
+                response,
+            } => {
+                let result = engine
+                    .execute(Operation::ChangeEncryptionPassphrase(
+                        ChangeEncryptionPassphraseInput {
+                            passphrase: SecretString::new(passphrase.as_str()),
+                            passphrase_confirmation: SecretString::new(
+                                passphrase_confirmation.as_str(),
+                            ),
+                        },
+                    ))
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_encryption_passphrase_changed);
                 let _ = response.send(result);
             }
             WorkerCommand::JoinSpace {
@@ -1645,6 +1780,7 @@ async fn run_worker_loop(
             }
             WorkerCommand::Suspend { response } => {
                 let result = engine.suspend().await.map_err(BindingError::from);
+                crate::observability::schedule_flush_after_success(&result);
                 let _ = response.send(result);
             }
             WorkerCommand::Resume { response } => {
@@ -1653,6 +1789,7 @@ async fn run_worker_loop(
             }
             WorkerCommand::Shutdown { deadline, response } => {
                 let result = engine.shutdown(deadline).await.map_err(BindingError::from);
+                crate::observability::schedule_flush_after_success(&result);
                 shutdown_response = Some((response, result));
                 break;
             }
@@ -1883,6 +2020,7 @@ fn map_space_state(result: OperationResult) -> Result<SpaceState, BindingError> 
         space_id: state.space_id,
         current_invitation: state.current_invitation.map(|invitation| SpaceInvitation {
             invitation_code: invitation.invitation_code,
+            full_invitation: invitation.full_invitation,
             expires_at_ms: invitation.expires_at_ms,
         }),
         device_name: state.device_name,
@@ -1904,7 +2042,7 @@ fn map_devices(result: OperationResult) -> Result<Vec<Device>, BindingError> {
 fn map_workspace_convergence(
     result: OperationResult,
 ) -> Result<WorkspaceConvergence, BindingError> {
-    unpack_operation!(result, OperationResult::WorkspaceConvergence(summary) => {
+    unpack_operation!(result, OperationResult::WorkspaceMembership(summary) => {
         map_workspace_convergence_summary(summary)
     })
 }
@@ -1930,22 +2068,25 @@ fn map_workspace_convergence_summary(
     }
 }
 
-fn map_device_trust(result: uc_engine::OperationResult) -> Result<String, BindingError> {
+fn map_device_group_choices(result: OperationResult) -> Result<String, BindingError> {
     match result {
-        uc_engine::OperationResult::DeviceTrust(snapshot) => map_device_trust_snapshot(snapshot),
-        _ => Err(BindingError::UnexpectedResult),
-    }
-}
-
-fn map_device_trust_decision(result: uc_engine::OperationResult) -> Result<String, BindingError> {
-    match result {
-        uc_engine::OperationResult::DeviceTrustDecision(decision) => {
-            serde_json::to_string(&decision).map_err(|_| BindingError::UnexpectedResult)
+        OperationResult::DeviceGroupChoices(summary) => {
+            serde_json::to_string(&summary).map_err(|_| BindingError::UnexpectedResult)
         }
         _ => Err(BindingError::UnexpectedResult),
     }
 }
 
+fn map_device_group_choice_result(result: OperationResult) -> Result<String, BindingError> {
+    match result {
+        OperationResult::DeviceGroupChosen(summary) => {
+            serde_json::to_string(&summary).map_err(|_| BindingError::UnexpectedResult)
+        }
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+#[cfg(test)]
 fn map_device_trust_snapshot(
     snapshot: uc_engine::DeviceTrustSnapshotSummary,
 ) -> Result<String, BindingError> {
@@ -2001,13 +2142,19 @@ fn map_local_device(result: OperationResult) -> Result<LocalDevice, BindingError
 fn map_invitation_issued(result: OperationResult) -> Result<InvitationIssued, BindingError> {
     unpack_operation!(result, OperationResult::InvitationIssued {
         invitation_code,
+        full_invitation,
         expires_at_ms,
         availability,
     } => InvitationIssued {
         invitation_code,
+        full_invitation,
         expires_at_ms,
         availability: map_invitation_availability(availability),
     })
+}
+
+fn map_encryption_passphrase_changed(result: OperationResult) -> Result<(), BindingError> {
+    unpack_operation!(result, OperationResult::EncryptionPassphraseChanged => ())
 }
 
 fn map_join_space_status(result: OperationResult) -> Result<JoinSpaceStatus, BindingError> {
@@ -2018,6 +2165,7 @@ fn map_join_space_status(result: OperationResult) -> Result<JoinSpaceStatus, Bin
         uc_engine::JoinSpaceStatusSummary::Active {
             join_id,
             joined_space,
+            peer_upgrade_required,
         } => JoinSpaceStatus::Active {
             join_id,
             joined_space: JoinedSpace {
@@ -2029,6 +2177,7 @@ fn map_join_space_status(result: OperationResult) -> Result<JoinSpaceStatus, Bin
                 migrated_records: joined_space.migrated_records,
                 preserved_unreadable_records: joined_space.preserved_unreadable_records,
             },
+            peer_upgrade_required,
         },
         uc_engine::JoinSpaceStatusSummary::Pending {
             join_id,
@@ -2036,12 +2185,14 @@ fn map_join_space_status(result: OperationResult) -> Result<JoinSpaceStatus, Bin
             sponsor_device_id,
             sponsor_identity_fingerprint,
             cancel_requested,
+            peer_upgrade_required,
         } => JoinSpaceStatus::Pending {
             join_id,
             target_space_id,
             sponsor_device_id,
             sponsor_identity_fingerprint,
             cancel_requested,
+            peer_upgrade_required,
         },
         uc_engine::JoinSpaceStatusSummary::Rejected { join_id, reason } => {
             JoinSpaceStatus::Rejected {
@@ -2073,6 +2224,22 @@ fn map_join_space_status(result: OperationResult) -> Result<JoinSpaceStatus, Bin
                     }
                     uc_engine::JoinSpaceRejectionReasonSummary::RemovedBeforeActivation => {
                         JoinSpaceRejectionReason::RemovedBeforeActivation
+                    }
+                },
+            }
+        }
+        uc_engine::JoinSpaceStatusSummary::Terminated { join_id, reason } => {
+            JoinSpaceStatus::Terminated {
+                join_id,
+                reason: match reason {
+                    uc_engine::JoinSpaceTerminationReasonSummary::Cancelled => {
+                        JoinSpaceTerminationReason::Cancelled
+                    }
+                    uc_engine::JoinSpaceTerminationReasonSummary::Expired => {
+                        JoinSpaceTerminationReason::Expired
+                    }
+                    uc_engine::JoinSpaceTerminationReasonSummary::Superseded => {
+                        JoinSpaceTerminationReason::Superseded
                     }
                 },
             }
@@ -2243,22 +2410,27 @@ fn count_to_u64(value: usize) -> Result<u64, BindingError> {
     u64::try_from(value).map_err(|_| BindingError::UnexpectedResult)
 }
 
-fn host_capabilities(
-    host: Arc<dyn BindingHost>,
-    analytics: Option<(Arc<dyn BindingAnalyticsHost>, BindingAnalyticsContext)>,
-) -> Result<HostCapabilities, BindingError> {
+pub(crate) fn host_directories(
+    host: &Arc<dyn BindingHost>,
+) -> Result<HostDirectories, BindingError> {
     let cache_directory = host_path(host.cache_directory())?;
-    let directories = HostDirectories::new(
+    Ok(HostDirectories::new(
         host_path(host.private_data_directory())?,
         cache_directory.clone(),
         host_path(host.temporary_directory())?,
         cache_directory.join("logs"),
-    );
+    ))
+}
+
+fn host_capabilities(
+    host: Arc<dyn BindingHost>,
+    analytics: Option<(Arc<dyn BindingAnalyticsHost>, BindingAnalyticsContext)>,
+) -> Result<HostCapabilities, BindingError> {
+    let directories = host_directories(&host)?;
     for directory in [
         directories.private_data(),
         directories.cache(),
         directories.temporary(),
-        directories.logs(),
     ] {
         std::fs::create_dir_all(directory).map_err(|_| BindingError::HostIo)?;
     }
@@ -2533,20 +2705,53 @@ mod tests {
 
     #[test]
     fn device_trust_json_keeps_complete_snapshot_fields() {
-        let json = map_device_trust_snapshot(
-            uc_engine::DeviceTrustSnapshotSummary::empty_unavailable("local-device".into()),
-        )
-        .unwrap();
-        assert!(json.contains("local_device_id"));
-        assert!(json.contains("current_change"));
-        assert!(json.contains("devices"));
-        assert!(json.contains("recovery"));
-        assert!(json.contains("allowed_actions"));
-        assert!(json.contains("blocked_reason"));
+        let mut snapshot =
+            uc_engine::DeviceTrustSnapshotSummary::empty_unavailable("local-device".into());
+        snapshot
+            .devices
+            .push(uc_engine::DeviceTrustRelationshipSummary {
+                device_id: "peer-device".into(),
+                display_name: "Peer Device".into(),
+                is_local: false,
+                reachability: uc_engine::DeviceReachabilitySummary::Offline,
+                membership: uc_engine::DeviceMembershipSummary::Active,
+                group_relationship: uc_engine::DeviceGroupRelationshipSummary::Consistent,
+                compatibility: uc_engine::DeviceCompatibilitySummary::Compatible,
+                sync_relationship: uc_engine::DeviceSyncRelationshipSummary::Usable,
+                pairing_confirmation: Some(
+                    uc_engine::PairingConfirmationSummary::AwaitingPeerConfirmation,
+                ),
+                available_actions: Vec::new(),
+                blocked_reason: None,
+            });
+        for (status, expected) in [
+            (
+                uc_engine::PairingConfirmationSummary::AwaitingPeerConfirmation,
+                "awaiting_peer_confirmation",
+            ),
+            (
+                uc_engine::PairingConfirmationSummary::Unconfirmed,
+                "unconfirmed",
+            ),
+            (
+                uc_engine::PairingConfirmationSummary::Confirmed,
+                "confirmed",
+            ),
+        ] {
+            snapshot.devices[0].pairing_confirmation = Some(status);
+            let json = map_device_trust_snapshot(snapshot.clone()).unwrap();
+            assert!(json.contains("local_device_id"));
+            assert!(json.contains("current_change"));
+            assert!(json.contains("devices"));
+            assert!(json.contains("recovery"));
+            assert!(json.contains("allowed_actions"));
+            assert!(json.contains("blocked_reason"));
+            assert!(json.contains(&format!("\"pairing_confirmation\":\"{expected}\"")));
+        }
     }
 
     #[test]
-    fn join_space_mapping_preserves_history_counts() {
+    fn join_space_mapping_preserves_history_counts_and_upgrade_prompt() {
         let joined = map_join_space_status(OperationResult::JoinSpace(
             uc_engine::JoinSpaceStatusSummary::Active {
                 join_id: "join-id".into(),
@@ -2559,16 +2764,40 @@ mod tests {
                     migrated_records: Some(4),
                     preserved_unreadable_records: Some(2),
                 },
+                peer_upgrade_required: true,
             },
         ))
         .expect("join-space result must map");
 
         assert!(matches!(
             joined,
-            JoinSpaceStatus::Active { joined_space, .. }
+            JoinSpaceStatus::Active {
+                joined_space,
+                peer_upgrade_required: true,
+                ..
+            }
                 if joined_space.migrated_records == Some(4)
                     && joined_space.preserved_unreadable_records == Some(2)
         ));
+    }
+
+    #[test]
+    fn join_space_mapping_preserves_local_termination() {
+        let status = map_join_space_status(OperationResult::JoinSpace(
+            uc_engine::JoinSpaceStatusSummary::Terminated {
+                join_id: "join-id".into(),
+                reason: uc_engine::JoinSpaceTerminationReasonSummary::Expired,
+            },
+        ))
+        .expect("join-space result must map");
+
+        assert_eq!(
+            status,
+            JoinSpaceStatus::Terminated {
+                join_id: "join-id".into(),
+                reason: JoinSpaceTerminationReason::Expired,
+            }
+        );
     }
 
     #[test]
@@ -2756,6 +2985,7 @@ mod tests {
         ] {
             let invitation = map_invitation_issued(OperationResult::InvitationIssued {
                 invitation_code: "NEVER-SHOW".to_owned(),
+                full_invitation: "ucspace1_NEVER-SHOW-FULL".to_owned(),
                 expires_at_ms: 1,
                 availability: engine_availability,
             })
@@ -2899,7 +3129,7 @@ mod tests {
             map_engine_event(uc_engine::EngineEvent::TransferStatusChanged(
                 uc_engine::TransferStatusChanged {
                     transfer_id: "transfer-1".to_owned(),
-                    entry_id: "entry-1".to_owned(),
+                    entry_id: Some("entry-1".to_owned()),
                     attempt_id: Some("attempt-1".to_owned()),
                     status: "completed".to_owned(),
                     reason: None,
@@ -2907,7 +3137,7 @@ mod tests {
             )),
             BindingEvent::TransferStatusChanged {
                 transfer_id: "transfer-1".to_owned(),
-                entry_id: "entry-1".to_owned(),
+                entry_id: Some("entry-1".to_owned()),
                 attempt_id: Some("attempt-1".to_owned()),
                 status: "completed".to_owned(),
                 reason: None,

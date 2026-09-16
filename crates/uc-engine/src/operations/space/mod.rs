@@ -1,10 +1,13 @@
 pub(crate) mod cancel_invitation;
 pub(crate) mod cancel_join_space;
-pub(crate) mod clear_stale_admission;
 pub(crate) mod create_space;
+pub(crate) mod device_group_choice;
+pub(crate) mod encryption_passphrase;
 pub(crate) mod factory_reset;
 pub(crate) mod invitation;
 pub(crate) mod join_space;
+#[cfg(feature = "dev-tools")]
+pub(crate) mod membership_diagnostics;
 pub(crate) mod reset_space;
 pub(crate) mod session_recovery;
 pub(crate) mod setup_state;

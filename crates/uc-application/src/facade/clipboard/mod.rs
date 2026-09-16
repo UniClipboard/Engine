@@ -1,12 +1,12 @@
 //! Outbound clipboard dispatch and receive-management facade.
 
 mod cancel_entry_receive;
-mod facade;
+pub(crate) mod facade;
 
 pub use cancel_entry_receive::{CancelEntryReceiveError, CancelEntryReceiveOutcome};
 pub use facade::{
-    ClipboardSyncDeps, ClipboardSyncError, ClipboardSyncFacade, DispatchEntryInput,
-    DispatchEntryOutcome, DispatchEntryPerTarget,
+    ClipboardSyncError, ClipboardSyncFacade, DispatchEntryInput, DispatchEntryOutcome,
+    DispatchEntryPerTarget,
 };
 
 // 投递状态视图相关类型——外部 crate 通过 `ClipboardSyncFacade::get_entry_delivery_view`

@@ -1,0 +1,80 @@
+# Spec 030 成员分叉选择与复杂拓扑验证
+
+## Goal
+
+按 `docs/specs/030-membership-conflict-resolution-and-chaos-validation.md` 分阶段实现成员冲突识别、加密持久选择、可恢复 generation 切换、Engine/三端 contract，以及确定性复杂拓扑验证。
+
+## Test seams
+
+- Core：`MembershipConflictPolicy` 的纯领域输入输出。
+- Application：`MembershipLedger` 原子状态与唯一 `resolve_membership_conflict` 动作。
+- Infrastructure：恢复包验证和 generation transition 端口的真实持久化边界。
+- Engine/Bindings：公开 operation/result/error 的稳定映射。
+- Desktop E2E：只从 CLI/daemon 观察分支、安全状态和正文通信矩阵。
+
+## Phases
+
+- [x] Phase 1：Core 稳定 conflict/branch id、选择资格与转换矩阵。
+- [x] Phase 2：Ledger 加密 conflict record 与 Diverged 同 commit。
+- [x] Phase 3：Application 唯一 resolve use case、幂等选择与恢复调度。
+- [x] Phase 4：同 lineage branch generation transition 与恢复包 adapter。
+- [x] Phase 5：Engine、iOS、Android、HarmonyOS 统一设备组选择 contract，并清理旧四入口。
+- [ ] Phase 6：Desktop F0-F13、20 个固定 chaos seed 与 Spec 029 回归。
+- [ ] Phase 7：架构文档、代码审查、全量门禁与原子提交。
+
+## Current Slice
+
+Phase 6：Desktop F0-F13、20 个固定 chaos seed 与 Spec 029 回归（Phase 5 合并入口后的重新验证）。
+
+## Next Step
+
+F0–F7 已完成；双设备一秒热路径性能门禁与全链路脱敏 tracing 已建立，当前基线约 7.53 秒且未达标。下一切片可先设计准入往返/持久化优化，或按原计划进入 F8。
+
+## Constraints
+
+- 持久 conflict、intent、transition 和恢复材料均须在 MasterKey AEAD 边界内。
+- 不自动选赢家，不合并 sibling，不因 P2P 失败回退 LAN。
+- 所有依赖失败保留 source chain，日志不含敏感标识或负载。
+- 保留用户当前未提交修改；重叠前先核对。
+- 每次仓库修改都更新架构圣经维护记录。
+
+## Errors Encountered
+
+| Error | Attempt | Resolution |
+| --- | --- | --- |
+| 根目录计划仍属于 Spec 029 | 1 | 为 Spec 030 建立独立 `.planning` 目录，不覆盖原计划。 |
+| Ledger 原子测试把 `compare_and_commit` 返回值误当成 `VerifiedMembershipLedger` | 1 | 返回值实际是 `LoadedMembershipLedger`，断言直接读取字段。 |
+| resolve use case 无法从 membership 聚合导入 conflict status | 1 | 将 ledger conflict record/status 加入 membership 聚合公开导出。 |
+| 收窄 coordinator outcome re-export 后模块内测试找不到类型 | 1 | 仅在 `cfg(test)` 下重新导出 outcome，避免生产 unused import。 |
+| workspace 全量测试的 3 个既有 clipboard/search host-adapter 用例失败 | 1 | 成员套件与 all-target check 均通过；单独重跑首项仍返回 QueryHistory unavailable 1243，记录为本切片外既有失败，不误报全量通过。 |
+| `VerifiableGroupInfo` 无法从 OpenMLS prelude 解析 | 1 | 使用公开的 `openmls::messages::group_info::VerifiableGroupInfo` 显式导入。 |
+| 新增两阶段端口后测试替身缺少 GroupInfo 方法和 external commit | 1 | 补齐显式 begin/complete 输入与所有 passive/test adapter，实现阶段边界。 |
+| generation executor 首次真实测试缺少 legacy bootstrap repository | 1 | 复用同一 SQLite security store 同时实现 revocation 与 legacy bootstrap repository，建立真实 sponsor MLS。 |
+| Engine contract 红测启用 `dev-tools` 时同时编译到既有退役 membership removal / SpaceJoined 测试 | 1 | 新 contract 后续使用默认 feature 定向测试；既有 dev-tools 漂移作为独立问题记录，不误归因于 Phase 5。 |
+| workspace check 发现移动 probe host 对新 `OperationResult` 未穷举 | 1 | probe host 同步增加查询/选择命令和完整结果映射，使真实移动验收入口覆盖 Phase 5 contract。 |
+| F0 首次运行在共同基线断言失败 | 1 | A 准入 C 后 B 的反熵尚未完成；在 Partition 前有界等待 A/B/C 的 branch、head 与三成员视图完全一致。 |
+| F0 Heal 后只有一侧出现冲突 | 2 | 将单向证据 ACK 改成同一次往返双向交换完整签名证据，双方独立验证并原子保存冲突后同时隔离。 |
+| F1 移除历史生效但 MLS epoch 未前进 | 1 | 在新本机移除 effect payload 中保存事件与保留接收者，由可重启 SecurityApplied 阶段幂等调用可靠 MLS revocation。 |
+| F1 统一设备组查询持续 unavailable | 1 | Removed 成员事实已删除且 observation 缺失；查询仅为非 Active 历史设备合成 Offline，Active 缺失继续失败。 |
+| F1 保留成员 epoch 不收敛 | 1 | 统一 group-update 维护入口聚合 Space outbox 与撤销 stage outbox；确认按原 revocation 事务推进，避免双份状态。 |
+| F2 选择目标分支后未收敛 | 1 | 冲突与选择入口已成功，待检查恢复包请求、ACK 与 generation transition 的首个未推进阶段。 |
+| F2 GroupInfo 响应被截断 | 1 | 服务端 `finish()` 后等待 `stopped()`，确认对端完整读取响应后再结束 handler。 |
+| F2 transition 超过测试窗口 | 1 | Application 单轮连续推进所有成功阶段并逐步持久化，只有真实不可用才返回 Deferred。 |
+| F4 连续准入第六节点超时 | 1 | 六节点基线改为每次扩容后等待 branch/member 与 MLS epoch 收敛，再签发下一次邀请，避免把异步安全传播当成同步完成。 |
+| F4 区域内十二次决定导致 pending 传播超时 | 1 | 收窄到 F4 真正 seam：只要求 A/D 两个 bridge 端点各自形成三成员 sibling；不为单桥不变量强制其他区域副本完成无关用户决定。 |
+| F4 双向互删的 bridge 无法认证 | 1 | 调整分支成员集合，让 A/D 在两条 sibling 中都保持 Active；bridge 通过普通认证历史交换形成 conflict，而不是依赖 Removed↔Removed 受限投递。 |
+| F6 首轮无法确定未收敛阶段 | 1 | 通用 branch 等待器只报告超时；增加纯测试阶段标签，区分共同基线、目标分支和最终在线链恢复后再定位。 |
+| F6 多端接受同一移除未形成共同目标 | 2 | A/C/E 分别接受远端移除引入本机决定与 MLS 时序变量；改为 B/D 停机后两侧分别新增 G/H，普通新增自动收敛，只测试深链恢复。 |
+| F6 恢复后错误要求旧 MLS epoch | 3 | F 的 external commit 会让目标端 E 与 F 进入下一 epoch；改为读取恢复后的 E epoch，再断言在线链安全状态收敛。 |
+| F6 中间节点停机后 Sponsor 无法签发邀请 | 4 | `IssueSpaceInvitation` 返回可重试 1221；F6 不验收离线准入，改为两侧 sibling 与 epoch 先收敛，再停 B/D 执行选择恢复。 |
+| F6 冲突选择遇到可重试 unavailable 被驱动器终止 | 5 | `resolve_conflict` 与已有待定变更选择不一致；统一在 deadline 内重试 retryable EngineError，稳定错误仍立即失败。 |
+| F6 永久单链阻断目标 MLS commit 投递 | 6 | group update 是 target 对成员的定向安全投递，不由接收者路由；单链仅用于冲突发现与恢复，选择完成后恢复在线 A/C/E/F 直连，B/D 保持停机。 |
+| F6 分区后邀请签发遇到暂态 1221 | 7 | `join_through` 原先直接 `expect`；与其他稳定操作一致，在统一 deadline 内重试 retryable unavailable，超时和稳定错误仍失败。 |
+| F6 第二侧分区后邀请稳定 InvalidState | 8 | F 在 A→G 完成后持续 1221；共同基线在线时由 A/F 预签发邀请，分区后 G/H 使用既有邀请加入，避免把离线邀请资格混入 F6。 |
+| F6 安全状态收敛后首次正文发送未被接受 | 9 | MLS epoch 一致不代表 Heal 后的正文连接已刷新；与 F0/F1 一致，在正文矩阵前通过稳定 `RefreshPeerConnections` operation 刷新在线节点。 |
+| F6 Heal 后显式刷新仍有正文发送未接受 | 10 | 原断言未输出 hop 和发送报告；先增强红测诊断，获取精确 sender/receiver 与稳定拒绝分类后再修复。 |
+| F6 E→F 在 branch/epoch 收敛后仍为零目标 | 11 | 恢复 target 已接纳 recipient 的 external commit，但旧 sibling evidence 又把该 peer 标为 `Diverged`。TargetCommitted 现在同时完成 conflict/关系投影，ledger 证据入口以已提交 recovery session 作幂等屏障。 |
+| F7 三张邀请串行签发时后续 Sponsor 返回 1221 | 1 | 首张 invitation 的后台状态会让后续串行签发暂时不可用；三分支应从同一稳定基线并发签发，改用 `tokio::join!` 不把人为顺序混入验收。 |
+| F7 并发邀请后仍串行执行三次 join，其中一次超时 | 2 | 三 sibling 应同时从父 head 出发；改为三台 joiner 并发执行稳定 `JoinSpace` 流程，完成后再统一登记测试拓扑身份。 |
+| F7 带标签诊断确认共同基线 G 准入超过 60 秒 | 3 | 十 Engine 负载下普通准入观察偶发超过通用等待窗口；只将 E2E admission completion 窗口独立为 120 秒，branch/epoch/conflict 公平性断言继续使用 60 秒。 |
+| F7 共同基线连续使用 A 作 Sponsor 后签发返回 1221 | 4 | F7 不验收单 Sponsor 高频准入；改用已经 F6 验证的 A→B→C→D→E→F→G 链式来源，同时更符合不平衡树拓扑。 |

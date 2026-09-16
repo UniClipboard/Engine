@@ -13,6 +13,9 @@ use uc_core::ports::{PeerAddressError, PeerAddressRecord, PeerAddressRepositoryP
 use crate::db::ports::DbExecutor;
 
 use super::EncryptedRelationshipStore;
+use uc_observability_contract::diagnostics::connectivity::{
+    AddressRecordResult, NetworkRecorder, StoredAddressObservation,
+};
 
 pub struct DieselPeerAddressRepository<E> {
     store: Arc<EncryptedRelationshipStore<E>>,
@@ -20,6 +23,14 @@ pub struct DieselPeerAddressRepository<E> {
 
 impl<E> DieselPeerAddressRepository<E> {
     pub fn new(store: Arc<EncryptedRelationshipStore<E>>) -> Self {
+        use uc_observability_contract::diagnostics::connectivity::{
+            LocalDiagnosticSource, SourceCapability, SourceCollection,
+        };
+        NetworkRecorder::current().register_source(
+            LocalDiagnosticSource::AddressStorage,
+            SourceCapability::Supported,
+            SourceCollection::Enabled,
+        );
         Self { store }
     }
 }
@@ -30,17 +41,49 @@ where
     E: DbExecutor,
 {
     async fn get(&self, device: &DeviceId) -> Result<Option<PeerAddressRecord>, PeerAddressError> {
-        self.store
+        let result = self
+            .store
             .get_peer_address(device)
             .await
-            .map_err(|error| PeerAddressError::Internal(error.to_string()))
+            .map_err(|error| PeerAddressError::Internal(error.to_string()));
+        let observation = StoredAddressObservation::new(
+            device.as_str(),
+            result
+                .as_ref()
+                .ok()
+                .and_then(|record| record.as_ref())
+                .map(|record| record.addr_blob.as_slice()),
+        );
+        let outcome = match &result {
+            Ok(Some(record)) => AddressRecordResult::Loaded {
+                observed_at_ms: record.observed_at.timestamp_millis(),
+            },
+            Ok(None) => AddressRecordResult::Missing,
+            Err(_) => AddressRecordResult::ReadFailed,
+        };
+        NetworkRecorder::current().address_record(&observation, outcome);
+        result
     }
 
     async fn upsert(&self, record: &PeerAddressRecord) -> Result<(), PeerAddressError> {
-        self.store
+        let result = self
+            .store
             .save_peer_address(record)
             .await
-            .map_err(|error| PeerAddressError::Internal(error.to_string()))
+            .map_err(|error| PeerAddressError::Internal(error.to_string()));
+        let observation =
+            StoredAddressObservation::new(record.device_id.as_str(), Some(&record.addr_blob));
+        NetworkRecorder::current().address_record(
+            &observation,
+            if result.is_ok() {
+                AddressRecordResult::Saved {
+                    observed_at_ms: record.observed_at.timestamp_millis(),
+                }
+            } else {
+                AddressRecordResult::SaveFailed
+            },
+        );
+        result
     }
 
     async fn list(&self) -> Result<Vec<PeerAddressRecord>, PeerAddressError> {
@@ -89,12 +132,29 @@ mod tests {
 
     #[tokio::test]
     async fn upsert_then_get_roundtrip() {
+        use opentelemetry::logs::AnyValue;
+        use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+        use opentelemetry_sdk::logs::{InMemoryLogExporter, SdkLoggerProvider};
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::layer::SubscriberExt;
+        let exporter = InMemoryLogExporter::default();
+        let provider = SdkLoggerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber =
+            tracing_subscriber::registry().with(OpenTelemetryTracingBridge::new(&provider));
         let (repo, _tempdir) = make_repo();
         let rec = fixture_record("dev-a", b"iroh-addr-blob-a");
-        repo.upsert(&rec).await.unwrap();
+        repo.upsert(&rec).with_subscriber(subscriber).await.unwrap();
 
         let loaded = repo.get(&rec.device_id).await.unwrap().unwrap();
         assert_eq!(loaded, rec);
+        let rows = exporter.get_emitted_logs().expect("logs");
+        assert!(rows.iter().any(|row| row.record.attributes_iter().any(|(key, value)|
+            key.as_str() == "event.name" && matches!(value, AnyValue::String(value) if value.as_str() == "address.record.saved")
+        )), "真实存储成功必须留下经过编码的保存证据");
+        assert!(!format!("{rows:?}").contains("iroh-addr-blob-a"));
+        assert!(!format!("{rows:?}").contains("dev-a"));
     }
 
     #[tokio::test]

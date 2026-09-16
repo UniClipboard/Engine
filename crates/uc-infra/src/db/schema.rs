@@ -290,6 +290,7 @@ diesel::table! {
         source_device -> Nullable<Text>,
         payload_state -> Nullable<Text>,
         render_payload -> Nullable<Binary>,
+        protection_group_ref -> Nullable<Binary>,
     }
 }
 

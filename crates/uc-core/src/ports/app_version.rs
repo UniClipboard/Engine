@@ -7,7 +7,7 @@
 //! 端口语义保持极薄：
 //! * 版本字符串格式（如 semver）对端口透明，由 use case 负责解析与比较。
 //! * 不存在 = `None`（fresh install 或 P1 之前的老用户），由 use case 配合
-//!   `SetupStatusPort.has_completed` 做 fallback 推断。
+//!   当前 Space 身份做 fallback 推断。
 //! * 解析失败由 use case 处理，不在端口层报错。
 //!
 //! 持久化格式与具体落点（独立小文件 / settings 子键 / DB）属于 infra 实现细节。
@@ -31,7 +31,7 @@ pub enum AppVersionStateError {
 }
 
 /// 游标读写端口。"上次运行的应用版本"是 profile 范围内的事实，
-/// 实现应落在与 `SetupStatusPort` 同等粒度的 profile 数据目录下。
+/// 实现应落在 profile 数据目录下。
 #[async_trait]
 pub trait AppVersionStatePort: Send + Sync {
     /// 读取已记录的版本字符串。

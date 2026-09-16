@@ -21,6 +21,8 @@ const REPOSITORY_ROOT = realpathSync(resolve(SCRIPT_DIR, '../..'))
 
 const EXPECTED_PACKAGES = [
   'openmls-validation',
+  'uc-connectivity-host',
+  'uc-connectivity-relay',
   'uc-application',
   'uc-content-hash',
   'uc-core',
@@ -32,6 +34,7 @@ const EXPECTED_PACKAGES = [
   'uc-mobile-proto',
   'uc-mobile-probe-core',
   'uc-observability-contract',
+  'uc-observability-runtime',
   'uc-ohos-napi',
 ]
 
@@ -44,10 +47,11 @@ const INTERNAL_PACKAGES = new Set([
   'uc-mobile-lan',
   'uc-mobile-proto',
   'uc-observability-contract',
+  'uc-observability-runtime',
 ])
 
 const BINDING_PACKAGES = ['uc-engine-uniffi', 'uc-ohos-napi']
-const P2P_CONSUMERS = [...BINDING_PACKAGES, 'uc-mobile-probe-core']
+const P2P_CONSUMERS = [...BINDING_PACKAGES, 'uc-mobile-probe-core', 'uc-connectivity-host']
 const DESKTOP_OWNED_PACKAGES = new Set([
   'uc-app-paths',
   'uc-bootstrap',
@@ -85,6 +89,26 @@ function readSourceTree(relativeRoot) {
   return sources.join('\n')
 }
 
+function rustSourcesUnder(relativeRoot) {
+  const root = join(REPOSITORY_ROOT, relativeRoot)
+  const sources = []
+  const pending = [root]
+  while (pending.length > 0) {
+    const directory = pending.pop()
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) pending.push(path)
+      else if (entry.name.endsWith('.rs')) {
+        sources.push({
+          path: relative(REPOSITORY_ROOT, path),
+          source: readFileSync(path, 'utf8'),
+        })
+      }
+    }
+  }
+  return sources
+}
+
 function parseJson(input, source) {
   try {
     return JSON.parse(input)
@@ -100,6 +124,34 @@ function cargoMetadata() {
     { cwd: REPOSITORY_ROOT, encoding: 'utf8' }
   )
   return parseJson(output, 'cargo metadata')
+}
+
+function runCargoBuildStorageCheck() {
+  const checker = join(REPOSITORY_ROOT, 'scripts/architecture/check-cargo-build-storage.mjs')
+  const result = spawnSync(process.execPath, [checker], {
+    cwd: REPOSITORY_ROOT,
+    encoding: 'utf8',
+  })
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
+  if (result.status !== 0) {
+    process.stderr.write(output)
+    throw new Error('Cargo build storage validation did not pass')
+  }
+  process.stdout.write(output)
+}
+
+function runRustStyleCheck() {
+  const checker = join(REPOSITORY_ROOT, 'scripts/architecture/check-rust-style.mjs')
+  const result = spawnSync(process.execPath, [checker], {
+    cwd: REPOSITORY_ROOT,
+    encoding: 'utf8',
+  })
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
+  if (result.status !== 0) {
+    process.stderr.write(output)
+    throw new Error('Rust style validation did not pass')
+  }
+  process.stdout.write(output)
 }
 
 function packageByName(metadata, name) {
@@ -179,6 +231,38 @@ function runOpenMlsValidation() {
   process.stdout.write(`OK OpenMLS executable validation passed: ${passed[1]} tests\n`)
 }
 
+function runObservabilityPrivacyCheck() {
+  const checker = join(REPOSITORY_ROOT, 'scripts/architecture/check-observability-privacy.mjs')
+  for (const args of [['--self-test'], []]) {
+    const result = spawnSync(process.execPath, [checker, ...args], {
+      cwd: REPOSITORY_ROOT,
+      encoding: 'utf8',
+    })
+    const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
+    if (result.status !== 0) {
+      process.stderr.write(output)
+      throw new Error('observability privacy validation did not pass')
+    }
+    process.stdout.write(output)
+  }
+}
+
+function runCollectorPrivacyContract() {
+  const contract = join(
+    REPOSITORY_ROOT,
+    'tests/observability/collector/collector-privacy.test.mjs'
+  )
+  const result = spawnSync(process.execPath, ['--test', contract], {
+    cwd: REPOSITORY_ROOT,
+    encoding: 'utf8',
+  })
+  if (result.status !== 0) {
+    process.stderr.write(`${result.stdout ?? ''}${result.stderr ?? ''}`)
+    throw new Error('Collector privacy contract did not pass')
+  }
+  process.stdout.write('Collector privacy contract passed\n')
+}
+
 function checkLocalDependencies(metadata) {
   const problems = []
   for (const packageMetadata of metadata.packages) {
@@ -236,7 +320,7 @@ function checkPublicSurface(metadata, sources) {
       continue
     }
     for (const dependency of normalDependencies(packageMetadata)) {
-      if (packageMetadata.name === 'uc-mobile-probe-core' && INTERNAL_PACKAGES.has(dependency.name)) {
+      if (['uc-mobile-probe-core', 'uc-connectivity-host'].includes(packageMetadata.name) && INTERNAL_PACKAGES.has(dependency.name)) {
         addProblem(
           problems,
           'public surface',
@@ -249,6 +333,24 @@ function checkPublicSurface(metadata, sources) {
   for (const token of ['pub use engine::{Engine, EventStream};', 'pub use contract::*;']) {
     if (!sources.engine.includes(token)) {
       addProblem(problems, 'public surface', `uc-engine stable interface is missing ${token}`)
+    }
+  }
+  return problems
+}
+
+function checkApplicationDependencyInventory(sources) {
+  const problems = []
+  for (const field of [
+    'pub current_profile:',
+    'pub blob_cipher:',
+    'pub portable_current_space_identity:',
+  ]) {
+    if (sources.applicationDeps.includes(field)) {
+      addProblem(
+        problems,
+        'application dependency inventory',
+        `retired wiring-only field remains in Application dependency bundles: ${field}`
+      )
     }
   }
   return problems
@@ -367,12 +469,80 @@ function checkPlaintextScanner() {
   return problems
 }
 
+function checkProfileStorageGenerationOwnership(sources) {
+  const problems = []
+  const v3TransitionPath =
+    'crates/uc-infra/src/security/v3_admission_space_transition.rs'
+  const forbiddenV3Dependencies = [
+    'ProfileStorageUpgrade',
+    'profile_storage_upgrade',
+    'LegacyPayloadProtection',
+    'BlobCipherAdapter',
+    'EncryptedBlobStore',
+    'source_cipher',
+    'target_cipher',
+    'payload_rewrap',
+    'rewrap_finalized_source',
+    'ProfileContentKeyVault',
+    'ClipboardDispatch',
+    'EntryDelivery',
+    'Outbox',
+  ]
+  for (const marker of forbiddenV3Dependencies) {
+    if (sources.v3AdmissionTransition.includes(marker)) {
+      addProblem(
+        problems,
+        'profile storage generation ownership',
+        `${v3TransitionPath} depends on forbidden payload-upgrade knowledge: ${marker}`
+      )
+    }
+  }
+
+  const forbiddenCoordinatorDetails = [
+    'UpgradePhaseV1',
+    'TargetGenerationStager',
+    'PrimaryPayloadConverter',
+    'DerivedPayloadConverter',
+    'profile_storage_upgrade::',
+  ]
+  for (const [owner, source] of [
+    ['uc-application', sources.application],
+    ['uc-engine', sources.engineRuntime],
+  ]) {
+    for (const marker of forbiddenCoordinatorDetails) {
+      if (source.includes(marker)) {
+        addProblem(
+          problems,
+          'profile storage generation ownership',
+          `${owner} combines private profile-upgrade steps through ${marker}`
+        )
+      }
+    }
+  }
+
+  if (!sources.engineWiring.includes('.ensure_v3()')) {
+    addProblem(
+      problems,
+      'profile storage generation ownership',
+      'uc-engine must enter profile storage upgrade through the complete ensure_v3 operation'
+    )
+  }
+  for (const marker of ['ProfileContentKeyVault', 'profile_content_key_vault']) {
+    if (sources.network.includes(marker)) {
+      addProblem(
+        problems,
+        'profile storage generation ownership',
+        `network adapters depend on historical profile vault authority through ${marker}`
+      )
+    }
+  }
+  return problems
+}
+
 function checkCurrentPeerScopeOwnership() {
   const problems = []
   const scopedConsumers = [
     'crates/uc-application/src/facade/roster/facade.rs',
-    'crates/uc-application/src/space/convergence/connectivity/reachability.rs',
-    'crates/uc-application/src/space/convergence/connectivity/membership.rs',
     'crates/uc-application/src/clipboard/sync/dispatch_entry/target_selector.rs',
     'crates/uc-application/src/clipboard/sync/active_state/fanout.rs',
     'crates/uc-application/src/clipboard/sync/resend_entry.rs',
@@ -380,13 +550,13 @@ function checkCurrentPeerScopeOwnership() {
   for (const path of scopedConsumers) {
     const source = read(path)
     if (
-      !source.includes('CurrentWorkspacePeerScopePort') ||
+      !source.includes('CurrentSpaceMemberScopePort') ||
       !/\.snapshot\(\)\s*\.await/.test(source)
     ) {
       addProblem(
         problems,
         'current peer scope',
-        `${path} must consume one complete CurrentWorkspacePeerScopePort snapshot`
+        `${path} must consume one complete CurrentSpaceMemberScopePort snapshot`
       )
     }
   }
@@ -395,26 +565,17 @@ function checkCurrentPeerScopeOwnership() {
     addProblem(problems, 'current peer scope', 'the superseded device visibility gate was restored')
   }
 
-  const convergence = read('crates/uc-application/src/space/convergence/projection/current_scope.rs')
-  const implementationStart = convergence.indexOf(
-    'impl uc_core::membership::CurrentWorkspacePeerScopePort for WorkspaceConvergence'
-  )
-  const implementation = convergence.slice(implementationStart)
-  const appliedHistory = implementation.indexOf(
-    '.filter(|history| history.applied_head().is_some())'
-  )
-  const legacyFallback = implementation.indexOf('let Some(history) = history else')
+  const currentScope = read('crates/uc-application/src/space/membership/ledger/repository.rs')
   if (
-    implementationStart < 0 ||
-    appliedHistory < 0 ||
-    legacyFallback < 0 ||
-    appliedHistory > legacyFallback ||
-    implementation.slice(0, legacyFallback).includes('migrated_from_pre_adr_020')
+    !currentScope.includes('VersionedMembershipHistory::decode_persisted_v2') ||
+    !currentScope.includes('impl CurrentSpaceMemberScopePort for MembershipLedger') ||
+    currentScope.includes('CurrentWorkspacePeerScopePort') ||
+    currentScope.includes('MemberRepositoryPort')
   ) {
     addProblem(
       problems,
       'current peer scope',
-      'applied membership history must be selected before the legacy roster fallback'
+      'missing V2 membership history must fail closed without a legacy membership fallback'
     )
   }
 
@@ -441,6 +602,37 @@ function checkCurrentPeerScopeOwnership() {
         }
       }
     }
+  }
+  return problems
+}
+
+function checkMembershipConfirmationWatermarkOwnership(sources) {
+  const problems = []
+  const positiveAssignment = /\.confirmed_position\s*=\s*(?!None\b)[A-Za-z_]/g
+  const applicationAssignments = sources.application.match(positiveAssignment) ?? []
+  const authenticatedExchangeOwners = [
+    read('crates/uc-application/src/space/membership/synchronize_history/target_use_case.rs'),
+    read('crates/uc-application/src/space/membership/handle_history_message/use_case.rs'),
+  ].join('\n')
+  const ownerAssignments = authenticatedExchangeOwners.match(positiveAssignment) ?? []
+  if (applicationAssignments.length !== 2 || ownerAssignments.length !== 2) {
+    addProblem(
+      problems,
+      'membership confirmation watermark',
+      'positive confirmed_position assignment must remain exclusive to authenticated ACK/suffix owners'
+    )
+  }
+
+  const sponsorActivation = read('crates/uc-infra/src/space/admission/sponsor/complete.rs')
+  if (
+    !sponsorActivation.includes('confirmed_position: None') ||
+    /confirmed_position\s*:\s*Some\b/.test(sponsorActivation)
+  ) {
+    addProblem(
+      problems,
+      'membership confirmation watermark',
+      'Sponsor activation must create propagation debt instead of inferring peer confirmation'
+    )
   }
   return problems
 }
@@ -501,60 +693,1252 @@ function checkRetiredLegacyPairingRecovery() {
   return problems
 }
 
-function checkWorkspaceConvergenceInternalBoundaries() {
+function checkRetiredPairingTransport(sources) {
   const problems = []
-  const root = 'crates/uc-application/src/space/convergence'
-  const requiredDomainEntries = [
-    `${root}/admission/mod.rs`,
-    `${root}/membership/mod.rs`,
-    `${root}/projection/mod.rs`,
-    `${root}/connectivity/mod.rs`,
+  const retiredPaths = [
+    'crates/uc-core/src/pairing/session_message.rs',
+    'crates/uc-core/src/ports/pairing/mod.rs',
+    'crates/uc-core/src/ports/pairing/events.rs',
+    'crates/uc-core/src/ports/pairing/session.rs',
+    'crates/uc-infra/src/pairing/session.rs',
+    'crates/uc-infra/src/pairing/wire.rs',
   ]
-  for (const path of requiredDomainEntries) {
-    if (!existsSync(join(REPOSITORY_ROOT, path))) {
-      addProblem(problems, 'workspace convergence boundaries', `missing domain entry: ${path}`)
-    }
-  }
-
-  const retiredFlatPaths = [
-    `${root}/admission_transaction.rs`,
-    `${root}/group_update_delivery.rs`,
-    `${root}/legacy_upgrade.rs`,
-    `${root}/membership_connectivity.rs`,
-    `${root}/reachability.rs`,
-    `${root}/tests.rs`,
-  ]
-  for (const path of retiredFlatPaths) {
+  for (const path of retiredPaths) {
     if (existsSync(join(REPOSITORY_ROOT, path))) {
-      addProblem(problems, 'workspace convergence boundaries', `retired flat path remains: ${path}`)
+      addProblem(problems, 'retired pairing transport', `retired path remains: ${path}`)
     }
   }
 
-  const convergence = read(`${root}/mod.rs`)
-  const domainFlowMarkers = [
-    'impl ProfileWorkspaceConvergence',
-    'fn prepare_sponsor_candidate(',
-    'fn reconcile_membership_history(',
-    'fn decide_membership_removal_locked(',
-    'fn v2_current_peer_snapshot(',
+  for (const marker of [
+    'PairingSessionPort',
+    'PairingEventPort',
+    'PairingSessionMessage',
+    'PAIRING_ALPN',
+    '/uniclipboard/pairing/1',
+    '/uniclipboard/pairing/2',
+  ]) {
+    if (sources.runtime.includes(marker)) {
+      addProblem(problems, 'retired pairing transport', `retired runtime marker remains: ${marker}`)
+    }
+  }
+  return problems
+}
+
+function checkApplicationMembershipCutover() {
+  const problems = []
+  const requiredEntries = [
+    'crates/uc-application/src/space/application.rs',
+    'crates/uc-application/src/space/facade/mod.rs',
+    'crates/uc-application/src/facade/space_setup/mod.rs',
+    'crates/uc-application/src/space/admission/mod.rs',
+    'crates/uc-application/src/space/admission/protocol/mod.rs',
+    'crates/uc-application/src/space/lifecycle/mod.rs',
+    'crates/uc-application/src/space/lifecycle/session/mod.rs',
+    'crates/uc-application/src/space/membership/mod.rs',
+    'crates/uc-application/src/space/membership/ledger/mod.rs',
+    'crates/uc-application/src/space/membership/query_device_trust/mod.rs',
+    'crates/uc-application/src/space/membership/remove_space_member/mod.rs',
+    'crates/uc-application/src/space/membership/decide_device_trust_change/mod.rs',
+    'crates/uc-application/src/space/membership/synchronize_history/mod.rs',
+    'crates/uc-application/src/space/membership/handle_history_message/mod.rs',
+    'crates/uc-application/src/space/membership/maintenance/runtime.rs',
+    'crates/uc-application/src/space/connectivity/recovery/mod.rs',
   ]
-  for (const marker of domainFlowMarkers) {
-    if (convergence.includes(marker)) {
+  for (const path of requiredEntries) {
+    if (!existsSync(join(REPOSITORY_ROOT, path))) {
+      addProblem(problems, 'application membership cutover', `missing target entry: ${path}`)
+    }
+  }
+
+  const retiredPaths = [
+    'crates/uc-application/src/space/assembly.rs',
+    'crates/uc-application/src/space/current_membership_scope.rs',
+    'crates/uc-application/src/space/membership_state_coordinator.rs',
+    'crates/uc-application/src/space/membership_state_coordinator_tests.rs',
+    'crates/uc-application/src/space/membership_state',
+    'crates/uc-application/src/space/membership_convergence',
+    'crates/uc-application/src/space/membership_runtime',
+    'crates/uc-application/src/space/recover_pending_membership_effects',
+    'crates/uc-application/src/space/decide_membership_removal_legacy',
+    'crates/uc-application/src/space/query_workspace_membership_diagnostics',
+    'crates/uc-application/src/space/runtime.rs',
+    'crates/uc-application/src/facade/space_join',
+    'crates/uc-application/src/facade/space_membership',
+    'crates/uc-application/src/facade/space_setup/commands.rs',
+    'crates/uc-application/src/facade/space_setup/deps.rs',
+    'crates/uc-application/src/facade/space_setup/errors.rs',
+    'crates/uc-application/src/facade/space_setup/facade.rs',
+    'crates/uc-application/src/space/current_member_signing',
+    'crates/uc-application/src/space/current_space',
+    'crates/uc-application/src/space/decide_device_trust_change',
+    'crates/uc-application/src/space/handle_membership_history_message',
+    'crates/uc-application/src/space/initialize_space',
+    'crates/uc-application/src/space/lock_space_session',
+    'crates/uc-application/src/space/maintain_space_membership',
+    'crates/uc-application/src/space/membership_ledger',
+    'crates/uc-application/src/space/query_device_trust',
+    'crates/uc-application/src/space/query_membership_admission',
+    'crates/uc-application/src/space/query_space_access_state',
+    'crates/uc-application/src/space/query_space_setup_state',
+    'crates/uc-application/src/space/re_pairing',
+    'crates/uc-application/src/space/rebuild_space',
+    'crates/uc-application/src/space/recover_space_session',
+    'crates/uc-application/src/space/remove_space_member',
+    'crates/uc-application/src/space/reset_space',
+    'crates/uc-application/src/space/session',
+    'crates/uc-application/src/space/synchronize_membership_history',
+    'crates/uc-application/src/space/unlock_space',
+    'crates/uc-application/src/space/upgrade_space',
+    'crates/uc-application/src/space/admission/handle_space_admission_message',
+    'crates/uc-application/src/space/admission/outbox.rs',
+    'crates/uc-application/src/space/admission/cancel_space_join/use_case.rs',
+    'crates/uc-application/src/space/admission/complete_pending_space_transition/use_case.rs',
+    'crates/uc-application/src/space/admission/query_pending_space_transition/use_case.rs',
+    'crates/uc-application/src/space/membership/ledger/join_record.rs',
+    'crates/uc-core/src/membership/space_join_record.rs',
+  ]
+  for (const path of retiredPaths) {
+    if (existsSync(join(REPOSITORY_ROOT, path))) {
+      addProblem(problems, 'application membership cutover', `retired path remains: ${path}`)
+    }
+  }
+
+  const applicationSources = readSourceTree('crates/uc-application/src')
+  const forbiddenMarkers = [
+    'MembershipStateCoordinator',
+    'MembershipConvergence',
+    'SpaceModules',
+    'SpaceMembershipState',
+    'WorkspaceSnapshot',
+    'ContentExchangeGatePort',
+    'CurrentWorkspacePeerScopePort',
+    'SpaceJoinRecordStorePort',
+    'SpaceJoinRecord',
+    'AdmissionOutboxDeliveryPort',
+    'LegacySynchronizeMembershipHistoryUseCase',
+  ]
+  for (const marker of forbiddenMarkers) {
+    if (applicationSources.includes(marker)) {
       addProblem(
         problems,
-        'workspace convergence boundaries',
-        `domain flow remains in convergence/mod.rs: ${marker}`
+        'application membership cutover',
+        `retired application marker remains: ${marker}`
+      )
+    }
+  }
+
+  const facadeSurface = read('crates/uc-application/src/facade/mod.rs')
+  for (const marker of [
+    'MemberRosterFacade',
+    'SpaceMembershipMaintenanceRuntime',
+    'QueryDeviceTrustUseCase',
+    'RemoveSpaceMemberUseCase',
+    'DecideDeviceTrustChangeUseCase',
+    'MaintainSpaceMembershipUseCase',
+  ]) {
+    if (facadeSurface.includes(marker)) {
+      addProblem(
+        problems,
+        'application membership cutover',
+        `internal Space implementation is publicly re-exported: ${marker}`
+      )
+    }
+  }
+
+  const sensitiveTracingField = /(device(?:_id)?|peer|from_device|target|address|path|file(?:name)?)\s*=\s*%/
+  if (sensitiveTracingField.test(applicationSources)) {
+    addProblem(
+      problems,
+      'application membership cutover',
+      'application tracing contains a raw device, address, filename, or path field'
+    )
+  }
+  return problems
+}
+
+function checkSpaceModuleInterface() {
+  const problems = []
+  const spaceRoot = 'crates/uc-application/src/space'
+  const moduleSource = read(`${spaceRoot}/mod.rs`)
+  const allowedRootEntries = new Set([
+    'AGENTS.md',
+    'admission',
+    'adapters.rs',
+    'application.rs',
+    'application_tests.rs',
+    'connectivity',
+    'facade',
+    'lifecycle',
+    'membership',
+    'mod.rs',
+  ])
+  for (const entry of readdirSync(join(REPOSITORY_ROOT, spaceRoot))) {
+    if (!allowedRootEntries.has(entry)) {
+      addProblem(
+        problems,
+        'space module interface',
+        `${spaceRoot}/${entry} is outside the approved responsibility areas`
+      )
+    }
+  }
+  const publicChildModule = /^\s*pub(?:\(crate\))?\s+mod\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*;/gm
+  for (const match of moduleSource.matchAll(publicChildModule)) {
+    addProblem(
+      problems,
+      'space module interface',
+      `${spaceRoot}/mod.rs exposes child module ${match[1]}; export approved items instead`
+    )
+  }
+
+  const responsibilityRoots = ['admission', 'connectivity', 'facade', 'lifecycle', 'membership']
+  for (const responsibility of responsibilityRoots) {
+    const responsibilityModule = read(`${spaceRoot}/${responsibility}/mod.rs`)
+    for (const match of responsibilityModule.matchAll(publicChildModule)) {
+      addProblem(
+        problems,
+        'space module interface',
+        `${spaceRoot}/${responsibility}/mod.rs exposes child module ${match[1]}`
+      )
+    }
+  }
+
+  for (const { path, source } of rustSourcesUnder('crates/uc-application/src')) {
+    if (!path.startsWith(`${spaceRoot}/`) && /\bcrate::space::[a-z_][a-zA-Z0-9_]*::/.test(source)) {
+      addProblem(
+        problems,
+        'space module interface',
+        `${path} reaches through the space module interface`
+      )
+    }
+    if (path.startsWith(`${spaceRoot}/`) && source.includes('crate::facade::space_setup::')) {
+      addProblem(
+        problems,
+        'space module interface',
+        `${path} depends on the public space facade re-export`
+      )
+    }
+    for (const responsibility of responsibilityRoots) {
+      const responsibilityRoot = `${spaceRoot}/${responsibility}/`
+      const deepReference = new RegExp(
+        `\\bcrate::space::${responsibility}::[a-z_][a-zA-Z0-9_]*::`
+      )
+      if (!path.startsWith(responsibilityRoot) && deepReference.test(source)) {
+        addProblem(
+          problems,
+          'space module interface',
+          `${path} reaches through the ${responsibility} responsibility interface`
+        )
+      }
+    }
+  }
+  return problems
+}
+
+function checkSpaceAdmissionProtocolOwnership() {
+  const problems = []
+  const protocolRoot = 'crates/uc-application/src/space/admission/protocol'
+  const coreStateRoot = 'crates/uc-core/src/membership/space_admission/state'
+  const protocol = read(`${protocolRoot}/protocol.rs`)
+  const moduleSurface = read(`${protocolRoot}/mod.rs`)
+  const requiredRoleEntries = [
+    'joiner/mod.rs',
+    'joiner/start_join/execute.rs',
+    'joiner/handle_candidate/execute.rs',
+    'joiner/handle_commit/execute.rs',
+    'joiner/handle_complete/execute.rs',
+    'joiner/activate_complete/execute.rs',
+    'joiner/handle_settled/execute.rs',
+    'sponsor/mod.rs',
+    'sponsor/handle_authenticated_message/execute.rs',
+    'sponsor/handle_join_request/execute.rs',
+    'sponsor/handle_prepared/execute.rs',
+    'sponsor/handle_applied/execute.rs',
+    'sponsor/handle_complete_ack/execute.rs',
+    'sponsor/state/mod.rs',
+    'sponsor/state/error.rs',
+    'sponsor/state/model.rs',
+    'sponsor/state/ports.rs',
+    'recovery/mod.rs',
+    'recovery/recover_pending/execute.rs',
+  ]
+  for (const entry of requiredRoleEntries) {
+    if (!existsSync(join(REPOSITORY_ROOT, protocolRoot, entry))) {
+      addProblem(
+        problems,
+        'space admission protocol ownership',
+        `missing role-owned entry: ${protocolRoot}/${entry}`
+      )
+    }
+  }
+
+  const retiredSplitEntries = [
+    'joiner.rs',
+    'sponsor.rs',
+    'recovery.rs',
+    'start_join',
+    'handle_authenticated_message',
+    'recover_pending',
+  ]
+  for (const entry of retiredSplitEntries) {
+    if (existsSync(join(REPOSITORY_ROOT, protocolRoot, entry))) {
+      addProblem(
+        problems,
+        'space admission protocol ownership',
+        `split role entry must be removed: ${protocolRoot}/${entry}`
+      )
+    }
+  }
+
+  const roleSource = entry => {
+    const path = join(REPOSITORY_ROOT, protocolRoot, entry)
+    return existsSync(path) ? read(`${protocolRoot}/${entry}`) : ''
+  }
+  const joinerStart = roleSource('joiner/start_join/execute.rs')
+  const joinerCandidate = roleSource('joiner/handle_candidate/execute.rs')
+  const joinerCommit = roleSource('joiner/handle_commit/execute.rs')
+  const joinerComplete = roleSource('joiner/handle_complete/execute.rs')
+  const joinerActivation = roleSource('joiner/activate_complete/execute.rs')
+  const joinerSettled = roleSource('joiner/handle_settled/execute.rs')
+  const recovery = roleSource('recovery/recover_pending/execute.rs')
+  const sponsorMessage = roleSource('sponsor/handle_join_request/execute.rs')
+  const sponsorPrepared = roleSource('sponsor/handle_prepared/execute.rs')
+  const sponsorApplied = roleSource('sponsor/handle_applied/execute.rs')
+  const sponsorCompleteAck = roleSource('sponsor/handle_complete_ack/execute.rs')
+
+  for (const child of ['joiner', 'sponsor', 'recovery']) {
+    if (!moduleSurface.includes(`mod ${child};`)) {
+      addProblem(
+        problems,
+        'space admission protocol ownership',
+        `protocol must contain a private ${child} responsibility module`
+      )
+    }
+  }
+
+  for (const field of [
+    'joiner: JoinerAdmissionService',
+    'sponsor: SponsorAdmissionService',
+    'recovery: AdmissionRecoveryService',
+    'execution_lock: tokio::sync::Mutex<()>',
+  ]) {
+    if (!protocol.includes(field)) {
+      addProblem(
+        problems,
+        'space admission protocol ownership',
+        `SpaceAdmissionProtocol is missing ${field}`
+      )
+    }
+  }
+
+  for (const leakedDependency of [
+    'SettingsPort',
+    'JoinerStartMaterialPort',
+    'JoinerStartStatePort',
+    'PendingAdmissionRecoveryStatePort',
+    'SpaceAdmissionTransportPort',
+    'WakeSpaceMembershipMaintenancePort',
+    'SponsorAdmissionStatePort',
+    'PrepareSponsorCandidatePort',
+    'PrepareSponsorCommitPort',
+    'PrepareSponsorCompletePort',
+    'PrepareSponsorSettledPort',
+    'PrepareJoinerCandidatePort',
+    'PrepareJoinerAppliedPort',
+    'PrepareJoinerActivationPort',
+    'JoinerActivationStatePort',
+    'ExecuteJoinerActivationPort',
+  ]) {
+    if (protocol.includes(leakedDependency)) {
+      addProblem(
+        problems,
+        'space admission protocol ownership',
+        `SpaceAdmissionProtocol directly owns ${leakedDependency}`
+      )
+    }
+  }
+
+  for (const [source, owner, action] of [
+    [joinerStart, 'JoinerAdmissionService', 'start'],
+    [joinerCandidate, 'JoinerAdmissionService', 'handle_candidate'],
+    [joinerCommit, 'JoinerAdmissionService', 'handle_commit'],
+    [joinerComplete, 'JoinerAdmissionService', 'handle_complete'],
+    [joinerActivation, 'JoinerAdmissionService', 'recover_activation'],
+    [joinerSettled, 'JoinerAdmissionService', 'handle_settled'],
+    [sponsorMessage, 'SponsorAdmissionService', 'handle_join_request'],
+    [sponsorPrepared, 'SponsorAdmissionService', 'handle_prepared'],
+    [sponsorApplied, 'SponsorAdmissionService', 'handle_applied'],
+    [sponsorCompleteAck, 'SponsorAdmissionService', 'handle_complete_ack'],
+    [recovery, 'AdmissionRecoveryService', 'recover_pending'],
+  ]) {
+    if (!source.includes(`impl ${owner}`) || !source.includes(`async fn ${action}(`)) {
+      addProblem(
+        problems,
+        'space admission protocol ownership',
+        `${owner} must own ${action}`
+      )
+    }
+  }
+
+  for (const { path, source } of rustSourcesUnder('crates/uc-application/src')) {
+    if (path.endsWith('/tests.rs') || path.endsWith('/test_support.rs')) continue
+    if (/\bSpaceAdmissionAggregate\b/.test(source)) {
+      addProblem(
+        problems,
+        'space admission role capabilities',
+        `${path} exposes the complete admission record to Application`
+      )
+    }
+    if (/\bAdmissionRecordPersistence\b/.test(source)) {
+      addProblem(
+        problems,
+        'space admission role capabilities',
+        `${path} exposes admission persistence capability to Application`
+      )
+    }
+  }
+
+  const capabilityPath = `${coreStateRoot}/capability.rs`
+  if (!existsSync(join(REPOSITORY_ROOT, capabilityPath))) {
+    addProblem(
+      problems,
+      'space admission role capabilities',
+      `missing Core role capability module: ${capabilityPath}`
+    )
+  } else {
+    const capability = read(capabilityPath)
+    for (const role of ['JoinerAdmission', 'SponsorAdmission']) {
+      if (!capability.includes(`pub struct ${role}`)) {
+        addProblem(
+          problems,
+          'space admission role capabilities',
+          `${capabilityPath} is missing ${role}`
+        )
+      }
+    }
+  }
+
+  for (const role of ['joiner', 'sponsor', 'helper', 'terminal']) {
+    const transitionPath = `${coreStateRoot}/transition/${role}.rs`
+    const transition = read(transitionPath)
+    if (/\n\s*pub fn /.test(transition)) {
+      addProblem(
+        problems,
+        'space admission role capabilities',
+        `${transitionPath} still publishes raw Aggregate transitions`
+      )
+    }
+  }
+
+  return problems
+}
+
+function checkSpaceMembershipMaintenanceOwnership() {
+  const problems = []
+  const runtimePath = 'crates/uc-application/src/space/membership/maintenance/runtime.rs'
+  const portsPath = 'crates/uc-application/src/space/membership/maintenance/ports.rs'
+  const retiredWakePath =
+    'crates/uc-application/src/space/membership/remove_space_member/ports.rs'
+  const runtime = read(runtimePath)
+  const ports = read(portsPath)
+
+  for (const required of [
+    'SpaceMembershipMaintenanceRuntime',
+    'SpaceMembershipMaintenanceActivity',
+    'SpaceMembershipMaintenanceRuntimeError',
+  ]) {
+    if (!runtime.includes(required)) {
+      addProblem(
+        problems,
+        'space membership maintenance ownership',
+        `${runtimePath} is missing ${required}`
+      )
+    }
+  }
+
+  const spaceSources = readSourceTree('crates/uc-application/src/space')
+  for (const retired of [
+    'SpaceMembershipRuntime',
+    'SpaceMembershipActivity',
+    'SpaceMembershipRuntimeError',
+  ]) {
+    if (spaceSources.includes(retired)) {
+      addProblem(
+        problems,
+        'space membership maintenance ownership',
+        `retired broad runtime name remains: ${retired}`
+      )
+    }
+  }
+
+  if (!ports.includes('pub trait WakeSpaceMembershipMaintenancePort')) {
+    addProblem(
+      problems,
+      'space membership maintenance ownership',
+      `${portsPath} must own WakeSpaceMembershipMaintenancePort`
+    )
+  }
+  if (existsSync(join(REPOSITORY_ROOT, retiredWakePath))) {
+    addProblem(
+      problems,
+      'space membership maintenance ownership',
+      `retired wake-port path remains: ${retiredWakePath}`
+    )
+  }
+
+  return problems
+}
+
+function checkSpaceAdmissionPersistenceOwnership() {
+  const problems = []
+  const stateRoot = 'crates/uc-core/src/membership/space_admission/state'
+  const persistenceRoot = `${stateRoot}/persistence`
+  const requiredEntries = [
+    'mod.rs',
+    'aggregate.rs',
+    'initial.rs',
+    'invitation.rs',
+    'joiner.rs',
+    'sponsor.rs',
+    'terminal.rs',
+    'message.rs',
+    'value.rs',
+  ]
+
+  if (existsSync(join(REPOSITORY_ROOT, `${stateRoot}/persistence.rs`))) {
+    addProblem(
+      problems,
+      'space admission persistence ownership',
+      `${stateRoot}/persistence.rs must be replaced by role-owned persistence files`
+    )
+  }
+  for (const entry of requiredEntries) {
+    if (!existsSync(join(REPOSITORY_ROOT, persistenceRoot, entry))) {
+      addProblem(
+        problems,
+        'space admission persistence ownership',
+        `missing persistence responsibility file: ${persistenceRoot}/${entry}`
+      )
+    }
+  }
+  const joinerState = read(`${stateRoot}/joiner.rs`)
+  const initialPersistence = read(`${persistenceRoot}/initial.rs`)
+  if (!joinerState.includes('private_state: AdmissionJoinerPrivateState')) {
+    addProblem(
+      problems,
+      'space admission persistence ownership',
+      'Joiner Initiated must own its opaque private state'
+    )
+  }
+  if (!initialPersistence.includes('private_state: state.private_state.as_bytes().to_vec()')) {
+    addProblem(
+      problems,
+      'space admission persistence ownership',
+      'Joiner private state must be included in encrypted admission persistence'
+    )
+  }
+
+  return problems
+}
+
+function checkDualInvitationEntry() {
+  const problems = []
+  const invitationPortPath = 'crates/uc-core/src/ports/pairing_invitation.rs'
+  const invitationPort = read(invitationPortPath)
+  for (const required of [
+    'pub invitation_id: InvitationId',
+    'pub full_invitation: FullInvitation',
+  ]) {
+    if (!invitationPort.includes(required)) {
+      addProblem(
+        problems,
+        'dual invitation entry',
+        `${invitationPortPath} is missing ${required}`
+      )
+    }
+  }
+
+  const codecPath = 'crates/uc-infra/src/space/admission/full_invitation.rs'
+  const codec = read(codecPath)
+  for (const required of [
+    'FULL_INVITATION_PREFIX',
+    'decode_invitation_entry',
+    'InvitationId::from_bytes',
+  ]) {
+    if (!codec.includes(required)) {
+      addProblem(problems, 'dual invitation entry', `${codecPath} is missing ${required}`)
+    }
+  }
+
+  const joinerStatePath =
+    'crates/uc-core/src/membership/space_admission/state/joiner.rs'
+  const joinerTransitionPath =
+    'crates/uc-core/src/membership/space_admission/state/transition/joiner.rs'
+  const joinerState = read(joinerStatePath)
+  const joinerTransition = read(joinerTransitionPath)
+  for (const required of [
+    'SpaceAdmissionInvitationResolutionState',
+    'Ready {',
+    'Started',
+    'ResolvedInvitation',
+  ]) {
+    if (!joinerState.includes(required)) {
+      addProblem(problems, 'dual invitation entry', `${joinerStatePath} is missing ${required}`)
+    }
+  }
+  for (const required of [
+    'mark_invitation_resolution_started',
+    'save_resolved_invitation',
+    'reject_started_invitation_resolution',
+  ]) {
+    if (!joinerTransition.includes(required)) {
+      addProblem(
+        problems,
+        'dual invitation entry',
+        `${joinerTransitionPath} is missing ${required}`
+      )
+    }
+  }
+
+  const resolutionPath =
+    'crates/uc-application/src/space/admission/protocol/joiner/resolve_invitation/execute.rs'
+  const resolution = read(resolutionPath)
+  const startedCommit = resolution.indexOf('commit_recovery(token, transition).await')
+  const resolveOnce = resolution.indexOf('resolve_once(&short_code).await')
+  if (startedCommit < 0 || resolveOnce < 0 || startedCommit > resolveOnce) {
+    addProblem(
+      problems,
+      'dual invitation entry',
+      `${resolutionPath} must commit Started before resolving the short code`
+    )
+  }
+
+  const uniffiRuntimePath = 'bindings/uc-engine-uniffi/src/runtime.rs'
+  const uniffiRuntime = read(uniffiRuntimePath)
+  for (const required of [
+    '.field("invitation_code", &"[REDACTED]")',
+    '.field("full_invitation", &"[REDACTED]")',
+  ]) {
+    if (!uniffiRuntime.includes(required)) {
+      addProblem(problems, 'dual invitation entry', `${uniffiRuntimePath} is missing ${required}`)
+    }
+  }
+
+  for (const path of [
+    'crates/uc-infra/src/rendezvous/invitation_adapter.rs',
+    'crates/uc-infra/src/pairing/invitation_resolver.rs',
+  ]) {
+    if (/code\s*=\s*%code\.as_str\(\)/.test(read(path))) {
+      addProblem(problems, 'dual invitation entry', `${path} logs a full invitation code`)
+    }
+  }
+
+  return problems
+}
+
+function checkInfraSpaceAdmissionOwnership() {
+  const problems = []
+  const admissionRoot = 'crates/uc-infra/src/space/admission'
+  const requiredEntries = [
+    'mod.rs',
+    'full_invitation.rs',
+    'security/mod.rs',
+    'security/transition.rs',
+    'repository/mod.rs',
+    'repository/persisted.rs',
+    'repository/codec.rs',
+    'repository/token.rs',
+    'joiner/mod.rs',
+    'joiner/activation_state.rs',
+    'joiner/invitation_start.rs',
+    'joiner/start_state.rs',
+    'joiner/source_snapshot.rs',
+    'recovery/mod.rs',
+    'recovery/pending_state.rs',
+    'sponsor/mod.rs',
+    'sponsor/base_snapshot.rs',
+    'sponsor/state.rs',
+  ]
+  const retiredEntries = [
+    'crates/uc-infra/src/db/repositories/space_join_record_store.rs',
+    'crates/uc-infra/src/network/iroh/admission_completion_recovery_adapter.rs',
+    'crates/uc-infra/src/pairing/admission_outbox_delivery.rs',
+  ]
+
+  for (const entry of requiredEntries) {
+    if (!existsSync(join(REPOSITORY_ROOT, admissionRoot, entry))) {
+      addProblem(
+        problems,
+        'infra space admission ownership',
+        `missing role-owned admission implementation: ${admissionRoot}/${entry}`
+      )
+    }
+  }
+  for (const path of retiredEntries) {
+    if (existsSync(join(REPOSITORY_ROOT, path))) {
+      addProblem(problems, 'infra space admission ownership', `retired admission path remains: ${path}`)
+    }
+  }
+  if (
+    existsSync(join(REPOSITORY_ROOT, admissionRoot)) &&
+    readSourceTree(admissionRoot).includes('SpaceJoinRecord')
+  ) {
+    addProblem(
+      problems,
+      'infra space admission ownership',
+      'new admission implementation depends on retired SpaceJoinRecord types'
+    )
+  }
+
+  return problems
+}
+
+function checkInfraSpaceSecurityOwnership() {
+  const problems = []
+  const securityRoot = 'crates/uc-infra/src/space/security'
+  const requiredEntries = [
+    'mod.rs',
+    'access.rs',
+    'history_signature.rs',
+    'key_material.rs',
+    'membership_update.rs',
+    'mls_group.rs',
+    'peer_admission.rs',
+    'scope_identifier.rs',
+    'session.rs',
+    'session_rebind.rs',
+  ]
+  const retiredEntries = [
+    'crates/uc-infra/src/security/adapters/space_session_rebind.rs',
+    'crates/uc-infra/src/security/admission_security_transition.rs',
+    'crates/uc-infra/src/security/historical_signature_adapter.rs',
+    'crates/uc-infra/src/security/key_material.rs',
+    'crates/uc-infra/src/security/membership_security_update_adapter.rs',
+    'crates/uc-infra/src/security/mls_group.rs',
+    'crates/uc-infra/src/security/peer_admission_adapter.rs',
+    'crates/uc-infra/src/security/scope_identifier.rs',
+    'crates/uc-infra/src/security/session.rs',
+    'crates/uc-infra/src/security/space_access_adapter.rs',
+  ]
+
+  for (const entry of requiredEntries) {
+    if (!existsSync(join(REPOSITORY_ROOT, securityRoot, entry))) {
+      addProblem(
+        problems,
+        'infra space security ownership',
+        `missing Space security implementation: ${securityRoot}/${entry}`
+      )
+    }
+  }
+  for (const path of retiredEntries) {
+    if (existsSync(join(REPOSITORY_ROOT, path))) {
+      addProblem(problems, 'infra space security ownership', `retired security path remains: ${path}`)
+    }
+  }
+
+  return problems
+}
+
+function checkRetiredLegacySpaceTransition(sources) {
+  const problems = []
+  const legacyPath = 'crates/uc-infra/src/security/admission_space_transition.rs'
+  if (sources.legacySpaceTransitionPathPresent) {
+    addProblem(
+      problems,
+      'retired legacy Space transition',
+      `retired transition module remains: ${legacyPath}`
+    )
+  }
+  for (const marker of [
+    'mod admission_space_transition',
+    'pub use admission_space_transition',
+    'space_generation_directory',
+  ]) {
+    if (sources.infraSecurityModule.includes(marker)) {
+      addProblem(
+        problems,
+        'retired legacy Space transition',
+        `security module exposes retired transition knowledge through ${marker}`
+      )
+    }
+  }
+  for (const marker of [
+    'DurableAdmissionSpaceTransition',
+    'rewrap_finalized_source',
+    'source-backup-v1',
+  ]) {
+    if (sources.infraSecurityRuntime.includes(marker)) {
+      addProblem(
+        problems,
+        'retired legacy Space transition',
+        `Infra security source restores retired transition behavior through ${marker}`
+      )
+    }
+  }
+  for (const marker of ['space_generation_directory', 'space-generations', 'target.sqlite']) {
+    if (sources.runtimeStorage.includes(marker)) {
+      addProblem(
+        problems,
+        'retired legacy Space transition',
+        `Engine runtime storage reopens a retired V2 generation through ${marker}`
+      )
+    }
+  }
+  for (const required of ['ActiveRuntimeManifest::V2(_)', 'StorageUpgradeRequired']) {
+    if (!sources.runtimeStorage.includes(required)) {
+      addProblem(
+        problems,
+        'retired legacy Space transition',
+        `Engine runtime storage is missing the V2 fail-closed marker ${required}`
       )
     }
   }
   return problems
 }
 
+function checkObservabilityAssemblyInterface(sources) {
+  const problems = []
+  const runtimeAdapters = sources.spaceAdapters.match(
+    /pub struct SpaceRuntimeAdapters\s*\{(?<body>[^}]*)\}/s
+  )
+  if (!runtimeAdapters?.groups?.body) {
+    addProblem(
+      problems,
+      'observability assembly interface',
+      'Application does not own SpaceRuntimeAdapters'
+    )
+  } else {
+    const fields = [...runtimeAdapters.groups.body.matchAll(/pub\s+(\w+)\s*:/g)]
+      .map(match => match[1])
+      .sort()
+    if (JSON.stringify(fields) !== JSON.stringify(['admission', 'membership'])) {
+      addProblem(
+        problems,
+        'observability assembly interface',
+        `SpaceRuntimeAdapters must contain only admission and membership; found ${fields.join(', ')}`
+      )
+    }
+  }
+
+  for (const marker of ['AdmissionPortImplementations', 'ObservedAdmissionPorts']) {
+    if (sources.engineObservability.includes(marker)) {
+      addProblem(
+        problems,
+        'observability assembly interface',
+        `retired mirror bundle remains: ${marker}`
+      )
+    }
+  }
+
+  const admissionReexport = 'pub(crate) use admission::observe_admission_endpoint;'
+  const admissionReexports = sources.observabilityModule.match(
+    /pub\(crate\)\s+use\s+admission::/g
+  ) ?? []
+  if (
+    sources.observabilityModule.split(admissionReexport).length - 1 !== 1 ||
+    admissionReexports.length !== 1 ||
+    sources.syncEngine.split('observability::observe_admission_endpoint(').length - 1 !== 1
+  ) {
+    addProblem(
+      problems,
+      'observability assembly interface',
+      'Engine must decorate exactly one complete authenticated admission endpoint'
+    )
+  }
+
+  const membershipReexport = 'pub(crate) use membership::observe_membership;'
+  const membershipReexports = sources.observabilityModule.match(
+    /pub\(crate\)\s+use\s+membership::/g
+  ) ?? []
+  if (
+    sources.observabilityModule.split(membershipReexport).length - 1 !== 1 ||
+    membershipReexports.length !== 1 ||
+    sources.syncEngine.split('observability::observe_membership(').length - 1 !== 1
+  ) {
+    addProblem(
+      problems,
+      'observability assembly interface',
+      'Engine must expose and call exactly one membership observation entry'
+    )
+  }
+
+  if (/pub\(crate\)\s+struct\s+(?:Observed\w+|\w+ObservationPolicy)/.test(sources.engineObservability)) {
+    addProblem(
+      problems,
+      'observability assembly interface',
+      'concrete decorator or observation policy is crate-visible'
+    )
+  }
+  if (/Instant::now\(\)|target:\s*"(?:admission|membership)\.performance"/.test(sources.spaceApplication)) {
+    addProblem(
+      problems,
+      'observability assembly interface',
+      'Space Application assembly contains cross-layer performance observation'
+    )
+  }
+
+  return problems
+}
+
+function checkObservabilityCutover(sources) {
+  const problems = []
+  const admissionObservability = sources.engineAdmissionObservability.split('#[cfg(test)]')[0]
+  const membershipObservability = sources.engineMembershipObservability.split('#[cfg(test)]')[0]
+  const installCount = sources.observabilityRuntime.split('set_global_default').length - 1
+  if (installCount !== 1) {
+    addProblem(
+      problems,
+      'observability process ownership',
+      `process runtime must contain exactly one global subscriber install; found ${installCount}`
+    )
+  }
+  for (const [owner, source] of [
+    ['UniFFI binding', sources.uniffiRuntime],
+    ['HarmonyOS binding', sources.ohosRuntime],
+  ]) {
+    if (/set_global_default|\.try_init\(\)/.test(source)) {
+      addProblem(
+        problems,
+        'observability process ownership',
+        `${owner} installs a second tracing subscriber`
+      )
+    }
+  }
+
+  const retiredSurface = [
+    sources.core,
+    sources.application,
+    sources.network,
+    sources.engineRuntime,
+    sources.observabilityContract,
+    sources.observabilityRuntime,
+    sources.uniffiRuntime,
+    sources.ohosRuntime,
+  ].join('\n')
+  for (const marker of [
+    'uc_otlp',
+    'DispatchTiming',
+    'TraceMetadata',
+    'telemetry_enabled',
+    'admission_flow_id',
+    'admission_update_flow_id',
+  ]) {
+    if (retiredSurface.includes(marker)) {
+      addProblem(
+        problems,
+        'observability clean cutover',
+        `retired observability surface remains: ${marker}`
+      )
+    }
+  }
+
+  if (/operation_span|complete_operation|DiagnosticFlowId|target:\s*"uc\.telemetry"/.test(sources.application)) {
+    addProblem(
+      problems,
+      'observability application boundary',
+      'Application creates cross-layer diagnostic spans, timing completions, or flow identifiers'
+    )
+  }
+  if (/DiagnosticFlowId::derive|DiagnosticFlowPurpose/.test(admissionObservability)) {
+    addProblem(
+      problems,
+      'observability flow ownership',
+      'Engine derives a cross-step diagnostic flow from a business identifier'
+    )
+  }
+  const admissionRegistry = 'SpaceAdmissionObservationRegistry'
+  if (
+    !sources.admissionObservation.includes(`pub(crate) struct ${admissionRegistry}`) ||
+    !sources.applicationAssembly.includes(
+      `admission_observations: Arc<${admissionRegistry}>`
+    ) ||
+    !sources.admissionRecovery.includes('.observations') ||
+    sources.engineRuntime.includes(admissionRegistry) ||
+    sources.engineRuntime.includes('SpaceAdmissionObservationOutcome') ||
+    sources.engineRuntime.includes('AdmissionObservationAction') ||
+    sources.engineRuntime.includes('describe_admission_request') ||
+    sources.engineRuntime.includes('scope_admission_action') ||
+    sources.network.includes(admissionRegistry)
+  ) {
+    addProblem(
+      problems,
+      'observability flow ownership',
+      'only the complete Application Space admission owner may hold and use the opaque lifecycle registry'
+    )
+  }
+  for (const marker of [
+    'AdmissionRecoveryCommitToken',
+    'PendingAdmissionRecoveryStatePort',
+    'PrepareJoinerActivationPort',
+    'SpaceAdmissionTransportPort',
+    'SponsorAdmissionStatePort',
+    'SpaceAdmissionId',
+  ]) {
+    if (admissionObservability.includes(marker)) {
+      addProblem(
+        problems,
+        'observability admission boundary',
+        `Engine observability depends on an internal admission step through ${marker}`
+      )
+    }
+  }
+  for (const marker of [
+    'CommitMembershipLedgerPort',
+    'LoadMembershipLedgerPort',
+    'MembershipBranchRecoveryChannelPort',
+    'MembershipLedgerMutation',
+  ]) {
+    if (membershipObservability.includes(marker)) {
+      addProblem(
+        problems,
+        'observability membership boundary',
+        `Engine observability depends on an internal membership step through ${marker}`
+      )
+    }
+  }
+  if (/AdmissionStage|MembershipStage|query_\w*stage|PendingGroupUpdate\s*\.\s*update_id/.test(sources.engineRuntime)) {
+    addProblem(
+      problems,
+      'observability step boundary',
+      'Engine observes or reconstructs an Application or Core internal step'
+    )
+  }
+  return problems
+}
+
+function checkRetiredMembershipPersistence(sources) {
+  const problems = []
+  if (sources.retiredMembershipPersistencePathPresent) {
+    addProblem(
+      problems,
+      'retired membership persistence',
+      'retired membership repository adapter file remains'
+    )
+  }
+
+  for (const marker of [
+    'MembershipCandidateRepositoryPort',
+    'VerifiedPeerPromotionPort',
+    'MembershipAnnouncementRepositoryPort',
+    'MembershipOutboxRepositoryPort',
+    'MembershipAppliedSecurityUpdateRepositoryPort',
+    'MembershipCandidateRepositoryError',
+    'VerifiedPeerPromotionError',
+    'MembershipAnnouncementRepositoryError',
+    'MembershipOutboxRepositoryError',
+    'MembershipAppliedSecurityUpdateRepositoryError',
+    'RelationshipKind::Candidate',
+    'RelationshipKind::MembershipAnnouncement',
+    'RelationshipKind::MembershipOutbox',
+    'RelationshipKind::MembershipAppliedSecurityUpdate',
+  ]) {
+    if (sources.membershipPersistence.includes(marker)) {
+      addProblem(
+        problems,
+        'retired membership persistence',
+        `retired persistence marker remains: ${marker}`
+      )
+    }
+  }
+
+  return problems
+}
+
+function checkIrohPeerAddressResolution(sources) {
+  const problems = []
+  if (!sources.irohPeerAddressResolver.includes('struct PeerAddressResolver')) {
+    addProblem(problems, 'Iroh peer address resolution', 'private resolver is missing')
+  }
+  if (
+    /self\.peer_addr_repo\s*\.get\(/.test(sources.irohAddressConsumers) ||
+    /postcard::from_bytes(?:::\s*<EndpointAddr>)?\(&record\.addr_blob\)/.test(
+      sources.irohAddressConsumers
+    ) ||
+    /\.await\.ok\(\)\.flatten\(\)/.test(sources.irohAddressConsumers)
+  ) {
+    addProblem(
+      problems,
+      'Iroh peer address resolution',
+      'adapter bypasses PeerAddressResolver or collapses address failures'
+    )
+  }
+  return problems
+}
+
+function checkSessionSupervisorOwnership(sources) {
+  const problems = []
+  for (const marker of [
+    'struct SessionFactory',
+    'struct ProductionSession',
+    'impl ProductionSession',
+    'fn build_session(',
+  ]) {
+    if (sources.runtimeModule.includes(marker)) {
+      addProblem(
+        problems,
+        'session supervisor ownership',
+        `runtime parent retains session lifecycle implementation: ${marker}`
+      )
+    }
+  }
+  if (/ProductionRuntime::\w+/.test(sources.sessionSupervisor)) {
+    addProblem(
+      problems,
+      'session supervisor ownership',
+      'session supervisor calls back into ProductionRuntime'
+    )
+  }
+  return problems
+}
+
+function checkSpaceAccessConstructionModes(sources) {
+  const problems = []
+  for (const marker of [
+    'DefaultSpaceAccessAdapter',
+    'new_with_key_epoch_repository',
+    'new_with_security_repositories',
+    'RuntimeDependency',
+    'new_for_migration_test',
+  ]) {
+    if (sources.spaceAccess.includes(marker)) {
+      addProblem(
+        problems,
+        'Space access construction modes',
+        `retired Space access surface remains: ${marker}`
+      )
+    }
+  }
+  for (const field of [
+    'active_security_session',
+    'key_epoch_repository',
+    'legacy_bootstrap_repository',
+  ]) {
+    const optionalField = new RegExp(`${field}:\\s*Option<`)
+    if (optionalField.test(sources.spaceAccess)) {
+      addProblem(
+        problems,
+        'Space access construction modes',
+        `runtime dependency remains optional: ${field}`
+      )
+    }
+  }
+  if (!sources.engineSpaceAccessWiring.includes('RuntimeSpaceAccessAdapter::new(')) {
+    addProblem(
+      problems,
+      'Space access construction modes',
+      'Engine runtime does not construct the complete runtime adapter'
+    )
+  }
+  if (!sources.configMigration.includes('MigrationSpaceAccessAdapter::new(')) {
+    addProblem(
+      problems,
+      'Space access construction modes',
+      'config migration does not construct the migration-only adapter'
+    )
+  }
+  return problems
+}
+
+function checkMembershipHistoryOwnership(sources) {
+  const problems = []
+  if (sources.monolithicMembershipHistoryPresent) {
+    addProblem(problems, 'membership history ownership', 'retired monolithic history file must not return')
+  }
+  if (/\basync\s+fn\b|ReconcileMembershipEvidenceUseCase/.test(sources.membershipHistoryCore)) {
+    addProblem(problems, 'membership history ownership', 'Core history must contain rules, not application execution')
+  }
+  if (/\bpub(?:\([^)]*\))?\s+mod\s/.test(sources.membershipHistoryRoot)) {
+    addProblem(problems, 'membership history ownership', 'history implementation modules must remain private')
+  }
+  if (/exchange_conflict_evidence|legacy_description|target_recovery_completed/.test(sources.membershipLedger)) {
+    addProblem(problems, 'membership history ownership', 'evidence reconciliation belongs to its application use case, not the ledger')
+  }
+  if (!sources.membershipEvidenceOwner.includes('struct ReconcileMembershipEvidenceUseCase') ||
+      !sources.membershipEvidenceOwner.includes('async fn execute(')) {
+    addProblem(problems, 'membership history ownership', 'one complete evidence reconciliation use case is required')
+  }
+  return problems
+}
+
 function repositorySources() {
   return {
+    monolithicMembershipHistoryPresent: existsSync(join(REPOSITORY_ROOT, 'crates/uc-core/src/membership/versioned_membership_history.rs')),
+    membershipHistoryRoot: read('crates/uc-core/src/membership/versioned_membership_history/mod.rs'),
+    membershipHistoryCore: readSourceTree('crates/uc-core/src/membership/versioned_membership_history'),
+    membershipLedger: read('crates/uc-application/src/space/membership/ledger/repository.rs'),
+    membershipEvidenceOwner: read('crates/uc-application/src/space/membership/reconcile_history_evidence/use_case.rs'),
+    retiredMembershipPersistencePathPresent: [
+      'crates/uc-infra/src/db/repositories/membership_candidate_repo.rs',
+      'crates/uc-infra/src/db/repositories/membership_announcement_repo.rs',
+      'crates/uc-infra/src/db/repositories/membership_outbox_repo.rs',
+      'crates/uc-infra/src/db/repositories/membership_applied_security_update_repo.rs',
+    ].some(path => existsSync(join(REPOSITORY_ROOT, path))),
+    membershipPersistence: [
+      read('crates/uc-core/src/membership/ports.rs'),
+      read('crates/uc-core/src/membership/error.rs'),
+      read('crates/uc-core/src/membership/mod.rs'),
+      read('crates/uc-infra/src/db/repositories/mod.rs'),
+      read('crates/uc-infra/src/db/repositories/relationship_store.rs'),
+    ].join('\n'),
+    irohPeerAddressResolver: read(
+      'crates/uc-infra/src/network/iroh/peer_address_resolver.rs'
+    ),
+    irohAddressConsumers: [
+      'clipboard_dispatch_adapter.rs',
+      'connection_channel_adapter.rs',
+      'group_update_adapter.rs',
+      'membership_attestation_adapter.rs',
+      'membership_branch_recovery_adapter.rs',
+      'membership_history_exchange_adapter.rs',
+      'peer_reachability_adapter.rs',
+      'transfer_progress_adapter.rs',
+      'active_clipboard/dispatch_adapter.rs',
+      'active_clipboard/pull_client_adapter.rs',
+    ].map(path => read(`crates/uc-infra/src/network/iroh/${path}`)).join('\n'),
+    runtimeModule: read('crates/uc-engine/src/runtime/mod.rs'),
+    sessionSupervisor: read('crates/uc-engine/src/runtime/session_supervisor.rs'),
+    spaceAccess: read('crates/uc-infra/src/space/security/access.rs'),
+    configMigration: read('crates/uc-infra/src/config_migration/mod.rs'),
+    engineSpaceAccessWiring: read('crates/uc-engine/src/assembly/wire/infra.rs'),
+    legacySpaceTransitionPathPresent: existsSync(
+      join(REPOSITORY_ROOT, 'crates/uc-infra/src/security/admission_space_transition.rs')
+    ),
+    infraSecurityModule: read('crates/uc-infra/src/security/mod.rs'),
+    infraSecurityRuntime: readSourceTree('crates/uc-infra/src/security'),
+    runtimeStorage: read('crates/uc-engine/src/assembly/runtime_storage.rs'),
+    observabilityModule: read('crates/uc-engine/src/assembly/observability/mod.rs'),
+    engineObservability: readSourceTree('crates/uc-engine/src/assembly/observability'),
+    engineAdmissionObservability: read(
+      'crates/uc-engine/src/assembly/observability/admission.rs'
+    ),
+    engineMembershipObservability: read(
+      'crates/uc-engine/src/assembly/observability/membership.rs'
+    ),
+    observabilityContract: readSourceTree('crates/uc-observability-contract/src'),
+    observabilityRuntime: readSourceTree('crates/uc-observability-runtime/src'),
+    core: readSourceTree('crates/uc-core/src'),
+    syncEngine: read('crates/uc-engine/src/assembly/sync_engine.rs'),
     engine: read('crates/uc-engine/src/lib.rs'),
+    engineRuntime: readSourceTree('crates/uc-engine/src'),
+    engineWiring: read('crates/uc-engine/src/assembly/wire/mod.rs'),
+    applicationDeps: read('crates/uc-application/src/deps.rs'),
+    application: readSourceTree('crates/uc-application/src'),
+    applicationAssembly: read('crates/uc-application/src/application.rs'),
+    admissionObservation: read(
+      'crates/uc-application/src/space/admission/observation.rs'
+    ),
+    admissionRecovery: read(
+      'crates/uc-application/src/space/admission/protocol/recovery/recover_pending/execute.rs'
+    ),
+    spaceAdapters: read('crates/uc-application/src/space/adapters.rs'),
+    spaceApplication: read('crates/uc-application/src/space/application.rs'),
+    network: readSourceTree('crates/uc-infra/src/network'),
+    v3AdmissionTransition: read(
+      'crates/uc-infra/src/security/v3_admission_space_transition.rs'
+    ),
     uniffi: read('bindings/uc-engine-uniffi/src/lib.rs'),
     ohos: read('bindings/uc-ohos-napi/src/lib.rs'),
+    uniffiRuntime: readSourceTree('bindings/uc-engine-uniffi/src'),
+    ohosRuntime: readSourceTree('bindings/uc-ohos-napi/src'),
     iosPackaging: read('bindings/uc-engine-uniffi/scripts/build-ios-xcframework.sh'),
     androidPackaging: read('bindings/uc-engine-uniffi/scripts/build-android-aar.sh'),
     ohosPackaging: read('tests/hosts/ohos/build-emulator.sh'),
@@ -572,11 +1956,30 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkOpenMlsValidation(metadata),
     ...checkLocalDependencies(metadata),
     ...checkPublicSurface(metadata, sources),
+    ...checkApplicationDependencyInventory(sources),
     ...checkBindingProvenance(metadata, sources),
     ...checkLanIsolation(metadata, sources),
+    ...checkProfileStorageGenerationOwnership(sources),
     ...checkCurrentPeerScopeOwnership(),
-    ...checkWorkspaceConvergenceInternalBoundaries(),
+    ...checkMembershipConfirmationWatermarkOwnership(sources),
+    ...checkMembershipHistoryOwnership(sources),
+    ...checkApplicationMembershipCutover(),
+    ...checkSpaceModuleInterface(),
+    ...checkSpaceAdmissionProtocolOwnership(),
+    ...checkSpaceAdmissionPersistenceOwnership(),
+    ...checkInfraSpaceAdmissionOwnership(),
+    ...checkInfraSpaceSecurityOwnership(),
+    ...checkRetiredLegacySpaceTransition(sources),
+    ...checkRetiredMembershipPersistence(sources),
+    ...checkIrohPeerAddressResolution(sources),
+    ...checkSessionSupervisorOwnership(sources),
+    ...checkSpaceAccessConstructionModes(sources),
+    ...checkObservabilityAssemblyInterface(sources),
+    ...checkObservabilityCutover(sources),
+    ...checkDualInvitationEntry(),
+    ...checkSpaceMembershipMaintenanceOwnership(),
     ...checkRetiredLegacyPairingRecovery(),
+    ...checkRetiredPairingTransport(sources),
     ...(includePlaintext ? checkPlaintextScanner() : []),
   ]
 }
@@ -595,6 +1998,15 @@ function expectRejected(name, mutate, metadata, sources) {
 }
 
 function runNegativeFixtures(metadata, sources) {
+  expectRejected('membership workflow returned to Core', (_metadata, changed) => {
+    changed.membershipHistoryCore += '\nasync fn reconcile_evidence() {}\n'
+  }, metadata, sources)
+  expectRejected('membership evidence workflow returned to ledger', (_metadata, changed) => {
+    changed.membershipLedger += '\nfn exchange_conflict_evidence() {}\n'
+  }, metadata, sources)
+  expectRejected('public membership history implementation modules', (_metadata, changed) => {
+    changed.membershipHistoryRoot += '\npub mod archive;\n'
+  }, metadata, sources)
   expectRejected('repository-external local dependency', changed => {
     packageByName(changed, 'uc-engine').dependencies.push({
       name: 'uc-platform',
@@ -610,9 +2022,97 @@ function runNegativeFixtures(metadata, sources) {
   expectRejected('automatic LAN fallback', (_changed, changedSources) => {
     changedSources.runtime += '\nfn fallback_to_lan() {}\n'
   }, metadata, sources)
+  expectRejected('retired Application dependency inventory', (_changed, changedSources) => {
+    changedSources.applicationDeps += '\npub current_profile: RetiredWiringOnlyPort,\n'
+  }, metadata, sources)
+  expectRejected('retired membership persistence', (_changed, changedSources) => {
+    changedSources.membershipPersistence += '\ntrait MembershipCandidateRepositoryPort {}\n'
+  }, metadata, sources)
+  expectRejected('Iroh peer address resolver bypass', (_changed, changedSources) => {
+    changedSources.irohAddressConsumers +=
+      '\nasync fn bypass(&self, device: DeviceId) { self.peer_addr_repo.get(&device).await.ok().flatten(); }\n'
+  }, metadata, sources)
+  expectRejected('ProductionRuntime session builder', (_changed, changedSources) => {
+    changedSources.runtimeModule += '\nimpl ProductionRuntime { async fn build_session() {} }\n'
+  }, metadata, sources)
+  expectRejected('optional runtime Space access dependency', (_changed, changedSources) => {
+    changedSources.spaceAccess += '\nstruct Broken { active_security_session: Option<Session> }\n'
+  }, metadata, sources)
+  expectRejected('retired pairing transport', (_changed, changedSources) => {
+    changedSources.runtime += '\nconst PAIRING_ALPN: &[u8] = b"/uniclipboard/pairing/2";\n'
+  }, metadata, sources)
   expectRejected('missing OpenMLS validation target', changed => {
     const validation = packageByName(changed, 'openmls-validation')
     validation.targets = validation.targets.filter(target => !target.kind.includes('test'))
+  }, metadata, sources)
+  expectRejected('V3 CrossSpace payload rewrap dependency', (_changed, changedSources) => {
+    changedSources.v3AdmissionTransition += '\nuse crate::security::ProfileStorageUpgrade;\nfn payload_rewrap() {}\n'
+  }, metadata, sources)
+  expectRejected('Engine profile-upgrade phase orchestration', (_changed, changedSources) => {
+    changedSources.engineRuntime += '\nfn combine_upgrade_steps(_: TargetGenerationStager) {}\n'
+  }, metadata, sources)
+  expectRejected('historical vault used as network authority', (_changed, changedSources) => {
+    changedSources.network += '\nfn authorize_from_history(_: ProfileContentKeyVault) {}\n'
+  }, metadata, sources)
+  expectRejected('forged membership confirmation watermark', (_changed, changedSources) => {
+    changedSources.application +=
+      '\nfn infer_peer_confirmation(peer: &mut PeerReconciliationRecord, position: BaseMembershipHistoryPosition) { peer.confirmed_position = Some(position); }\n'
+  }, metadata, sources)
+  expectRejected('observability mirror bundle', (_changed, changedSources) => {
+    changedSources.engineObservability += '\nstruct ObservedAdmissionPorts;\n'
+  }, metadata, sources)
+  expectRejected('second admission observation entry', (_changed, changedSources) => {
+    changedSources.observabilityModule +=
+      '\npub(crate) use admission::observe_admission_again;\n'
+  }, metadata, sources)
+  expectRejected('public observation decorator', (_changed, changedSources) => {
+    changedSources.engineObservability += '\npub(crate) struct ObservedMembershipLeak;\n'
+  }, metadata, sources)
+  expectRejected('second binding subscriber', (_changed, changedSources) => {
+    changedSources.uniffiRuntime += '\nfn install_again() { tracing_subscriber::fmt().try_init(); }\n'
+  }, metadata, sources)
+  expectRejected('retired observability timing result', (_changed, changedSources) => {
+    changedSources.core += '\npub struct DispatchTiming;\n'
+  }, metadata, sources)
+  expectRejected('Application cross-layer trace completion', (_changed, changedSources) => {
+    changedSources.application += '\nfn observe() { complete_operation(result); }\n'
+  }, metadata, sources)
+  expectRejected('Engine Application-step observation', (_changed, changedSources) => {
+    changedSources.engineRuntime += '\nfn observe_step(_: AdmissionStage) {}\n'
+  }, metadata, sources)
+  expectRejected('Engine business identifier flow derivation', (_changed, changedSources) => {
+    changedSources.engineAdmissionObservability = changedSources.engineAdmissionObservability.replace(
+      '#[cfg(test)]',
+      'fn flow(id: &[u8]) { DiagnosticFlowId::derive(DiagnosticFlowPurpose::SpaceAdmission, id); }\n\n#[cfg(test)]'
+    )
+  }, metadata, sources)
+  expectRejected('Engine admission lifecycle registry', (_changed, changedSources) => {
+    changedSources.engineRuntime +=
+      '\nfn leak_admission_lifecycle(_: SpaceAdmissionObservationRegistry) {}\n'
+  }, metadata, sources)
+  expectRejected('Engine admission action semantics', (_changed, changedSources) => {
+    changedSources.engineRuntime += '\nfn leak_action(_: AdmissionObservationAction) {}\n'
+  }, metadata, sources)
+  expectRejected('retired legacy Space transition module', (_changed, changedSources) => {
+    changedSources.legacySpaceTransitionPathPresent = true
+  }, metadata, sources)
+  expectRejected('retired legacy Space transition export', (_changed, changedSources) => {
+    changedSources.infraSecurityModule += `
+mod admission_space_transition;
+pub use admission_space_transition::{space_generation_directory, DurableAdmissionSpaceTransition};
+`
+  }, metadata, sources)
+  expectRejected('retired legacy Space transition implementation', (_changed, changedSources) => {
+    changedSources.infraSecurityRuntime += `
+pub struct DurableAdmissionSpaceTransition;
+`
+  }, metadata, sources)
+  expectRejected('Engine V2 runtime storage bypass', (_changed, changedSources) => {
+    changedSources.runtimeStorage += `
+fn open_v2_generation(directory: &Path) {
+  let database = directory.join("space-generations").join("target.sqlite");
+}
+`
   }, metadata, sources)
 }
 
@@ -620,6 +2120,8 @@ function main() {
   if (realpathSync(process.cwd()) !== REPOSITORY_ROOT) {
     throw new Error(`run from repository root: ${REPOSITORY_ROOT}`)
   }
+  runCargoBuildStorageCheck()
+  runRustStyleCheck()
   const metadata = cargoMetadata()
   const sources = repositorySources()
   const problems = collectProblems(metadata, sources)
@@ -628,6 +2130,8 @@ function main() {
     process.exitCode = 1
     return
   }
+  runObservabilityPrivacyCheck()
+  runCollectorPrivacyContract()
   runOpenMlsValidation()
   runNegativeFixtures(metadata, sources)
   process.stdout.write('Engine repository preflight passed\n')

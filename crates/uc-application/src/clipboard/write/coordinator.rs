@@ -10,7 +10,7 @@
 //! `uc-app/src/usecases/clipboard/clipboard_write_coordinator.rs`. Moved
 //! here in Slice 2 Phase 3 (T0b) so `uc-application` use cases (e.g.
 //! `ApplyInboundClipboardUseCase`) can depend on it without a reverse
-//! `uc-application → uc-app` import (forbidden per `uc-app/AGENTS.md` §3).
+//! `uc-application → uc-app` import (forbidden per `docs/design-docs/layers/application.md`).
 //! The old path keeps a deprecated re-export shim until Slice 5 deletes
 //! `uc-app`.
 

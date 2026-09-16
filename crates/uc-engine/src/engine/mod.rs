@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) mod event_stream;
 mod in_flight;
+pub(crate) mod startup;
 
 use crate::runtime::ProductionRuntime;
 #[cfg(feature = "dev-tools")]
@@ -18,9 +19,11 @@ use crate::{
 pub use event_stream::EventStream;
 use event_stream::{event_channel, EventSender};
 use in_flight::InFlightOperations;
+pub use startup::{StartupProgress, StartupProgressInput};
 
 const INVALID_STATE_CODE: u32 = 1001;
 const OPERATION_CANCELLED_CODE: u32 = 1002;
+const SHUTDOWN_COMPLETION_MARGIN: Duration = Duration::from_millis(100);
 
 #[async_trait]
 pub(crate) trait EngineRuntime: Send + Sync {
@@ -61,10 +64,33 @@ impl Engine {
         config: EngineConfig,
         host: HostCapabilities,
     ) -> Result<(Self, EventStream), EngineError> {
+        let (input, _) = StartupProgress::channel();
+        Self::start_with_progress(config, host, input).await
+    }
+
+    /// 启动前交入只读进度通道；关闭观察者不影响本次启动。
+    pub async fn start_with_progress(
+        config: EngineConfig,
+        host: HostCapabilities,
+        progress: StartupProgressInput,
+    ) -> Result<(Self, EventStream), EngineError> {
+        let result = Self::start_runtime(config, host, &progress).await;
+        progress.finish(&result);
+        result
+    }
+
+    async fn start_runtime(
+        config: EngineConfig,
+        host: HostCapabilities,
+        progress: &StartupProgressInput,
+    ) -> Result<(Self, EventStream), EngineError> {
         const EVENT_CAPACITY: usize = 256;
 
         let (events, stream) = event_channel(EVENT_CAPACITY);
-        let runtime = Arc::new(ProductionRuntime::start(config, host, events.clone()).await?);
+        let runtime = Arc::new(
+            ProductionRuntime::start(config, host, events.clone(), Arc::clone(&progress.store))
+                .await?,
+        );
         let engine = Self {
             state: Mutex::new(EngineState::Running),
             lifecycle_gate: Mutex::new(()),
@@ -206,15 +232,15 @@ impl Engine {
             state: EngineState::ShuttingDown,
         });
 
-        let shutdown_result = match tokio::time::timeout(
-            remaining_until(deadline_at),
-            self.runtime.shutdown(remaining_until(deadline_at)),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(operation_cancelled_error()),
-        };
+        let shutdown_deadline = remaining_until(deadline_at);
+        let runtime_deadline = shutdown_deadline.saturating_sub(SHUTDOWN_COMPLETION_MARGIN);
+        let shutdown_result =
+            match tokio::time::timeout(shutdown_deadline, self.runtime.shutdown(runtime_deadline))
+                .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(operation_cancelled_error()),
+            };
 
         if let Err(error) = &shutdown_result {
             if !error.is_retryable() {
@@ -308,7 +334,7 @@ fn remaining_until(deadline: tokio::time::Instant) -> Duration {
 mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
 
     use async_trait::async_trait;
@@ -332,6 +358,7 @@ mod tests {
         fail_suspend: AtomicBool,
         fail_resume: AtomicBool,
         shutdown_calls: AtomicUsize,
+        shutdown_deadline: StdMutex<Option<Duration>>,
         fail_shutdown: AtomicBool,
     }
 
@@ -379,8 +406,9 @@ mod tests {
             Ok(())
         }
 
-        async fn shutdown(&self, _deadline: Duration) -> Result<(), EngineError> {
+        async fn shutdown(&self, deadline: Duration) -> Result<(), EngineError> {
             self.shutdown_calls.fetch_add(1, Ordering::SeqCst);
+            *self.shutdown_deadline.lock().unwrap() = Some(deadline);
             if self.fail_shutdown.load(Ordering::SeqCst) {
                 return Err(EngineError::new(9001, EngineErrorCategory::Internal, false));
             }
@@ -619,6 +647,17 @@ mod tests {
         );
         let error = engine.execute(Operation::ListDevices).await.unwrap_err();
         assert_eq!(error.category(), EngineErrorCategory::InvalidState);
+    }
+
+    #[tokio::test]
+    async fn shutdown_reserves_completion_time_outside_the_runtime_budget() {
+        let runtime = Arc::new(FakeRuntime::default());
+        let (engine, _events) = Engine::from_runtime(runtime.clone(), 8);
+
+        engine.shutdown(Duration::from_secs(1)).await.unwrap();
+
+        let runtime_deadline = runtime.shutdown_deadline.lock().unwrap().unwrap();
+        assert!(runtime_deadline <= Duration::from_millis(900));
     }
 
     #[tokio::test]

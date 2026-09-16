@@ -228,7 +228,7 @@ impl fmt::Debug for TransferProgress {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferStatusChanged {
     pub transfer_id: String,
-    pub entry_id: String,
+    pub entry_id: Option<String>,
     pub attempt_id: Option<String>,
     pub status: String,
     pub reason: Option<String>,
@@ -239,7 +239,7 @@ impl fmt::Debug for TransferStatusChanged {
         formatter
             .debug_struct("TransferStatusChanged")
             .field("has_transfer_id", &!self.transfer_id.is_empty())
-            .field("has_entry_id", &!self.entry_id.is_empty())
+            .field("has_entry_id", &self.entry_id.is_some())
             .field("has_attempt_id", &self.attempt_id.is_some())
             .field("status", &self.status)
             .field("has_reason", &self.reason.is_some())

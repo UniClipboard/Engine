@@ -1,0 +1,6246 @@
+//! 空间访问的基础设施适配器。
+//!
+//! Slice 3 - C8 起完全独立运行: 不再依赖任何已删除的 port trait
+//! (EncryptionPort / EncryptionSessionPort / KeyMaterialPort),
+//! 改用 uc-infra 内部具体类型 `KeyMaterialStore` + `InMemorySession`,
+//! AEAD 算法走 `crate::security::v1_aead` helper。
+//!
+//! 该 adapter 实现内层聚合 trait `SpaceAccessStore`,并把每个窄意图 port
+//! application/core intent ports are delegated through narrow implementations
+//! (ports.md §8.3);全部方法签名保持稳定。字节级行为与历史
+//! `EncryptionRepository` 一致——V1 加密协议 (Argon2id KDF +
+//! XChaCha20-Poly1305 wrap/unwrap) ironclad 保留。
+
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use tracing::{debug, error, info, info_span, warn, Instrument};
+use zeroize::Zeroize;
+
+use uc_application::deps::{
+    ActivateCompletionHelperAdmissionSecurityPort,
+    ActivateCompletionHelperAdmissionSecurityRequest, ActivateSponsorAdmissionSecurityPort,
+    ActivateSponsorAdmissionSecurityRequest, AdmissionSecurityTransitionError,
+    AdmissionSecurityTransitionInput, CurrentMemberSignatureError, CurrentMemberSignaturePort,
+    PrepareMembershipBranchRecoveryMaterialError, PrepareMembershipBranchRecoveryMaterialInput,
+    PrepareMembershipBranchRecoveryMaterialPort, PrepareMembershipBranchRecoveryRecipientError,
+    PrepareMembershipBranchRecoveryRecipientPort, PrepareSponsorAdmissionSecurityPort,
+    PreparedMemberSecurityDelivery, PreparedMembershipBranchRecoveryMaterial,
+    PreparedMembershipBranchRecoveryRecipient, ProfileKeyAccessProbe,
+    ProfileKeyAccessProbePortError, SponsorAdmissionSecurityRequest,
+    SponsorPreparedAdmissionSecurity,
+};
+use uc_core::crypto::domain::{ActiveSpace, Passphrase as DomainPassphrase};
+use uc_core::crypto::model::{EncryptionError, Passphrase as LegacyPassphrase};
+
+use crate::security::crypto_model::{EncryptedBlob, KeyScope, KeySlot, WrappedMasterKey};
+use crate::security::{v1_aead, Kek, MasterKey, ProfileContentKeyVault};
+use uc_core::ids::{DeviceId, ProfileId, SpaceId};
+#[cfg(test)]
+use uc_core::membership::{AdmissionReplayId, ProtectionGroupAdmission};
+use uc_core::membership::{
+    BeginRevocationOutcome, BootstrapError, BootstrapId, GroupBootstrapPort, GroupBootstrapResult,
+    GroupEpoch, GroupRevocationPort, GroupRevocationResult, GroupUpdateDispatchError,
+    KeyEpochError, LegacyBootstrapRecord, LegacyBootstrapRepositoryPort, LegacyBootstrapStage,
+    LegacyBootstrapStatus, MemberProtection, MemberProtectionStatus, MembershipCredential,
+    PendingGroupUpdate, PreparedRevocationResolution, ProtectionGroupId, RevocationId,
+    RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort, RevocationStage,
+    RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceProtectionError, SpaceProtectionMode,
+    SpaceProtectionSnapshot, SpaceProtectionStatusPort, SpaceSecurityMode,
+};
+use uc_core::ports::security::current_profile::CurrentProfilePort;
+use uc_core::ports::space::{SpaceAccessError, SpaceAccessStore};
+#[cfg(test)]
+use uc_core::space_access::{GroupAdmission, PreparedGroupJoin};
+use uc_core::space_access::{JoinOffer, PreparedAdmissionTargetAccess, ProofDerivedKey};
+
+use super::active_space_security_session::{
+    ActiveSpaceSecuritySession, ActiveSpaceSecuritySessionError,
+};
+use super::key_material::KeyMaterialStore;
+#[cfg(test)]
+use super::mls_group::PendingMlsJoin;
+use super::mls_group::{MlsClientState, MlsGroupEngine};
+use super::scope_identifier::scope_identifier;
+use super::session::InMemorySession;
+
+const MAX_STALLED_REVOCATION_ITERATIONS: usize = 3;
+
+#[derive(Serialize, Deserialize)]
+struct StagedMembershipBranchRecoveryRecipientV1 {
+    version: u8,
+    mls_state: Vec<u8>,
+    wrapping_key: Vec<u8>,
+    epoch: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct MembershipBranchRecoveryConfirmationV1 {
+    version: u8,
+    epoch: u64,
+    group_state_digest: [u8; 32],
+}
+
+/// `SpaceAccessStore` 默认实现(同时提供全部窄意图 port)。
+pub struct RuntimeSpaceAccessAdapter {
+    key_material: Arc<KeyMaterialStore>,
+    current_profile: Arc<dyn CurrentProfilePort>,
+    pub(super) session: Arc<InMemorySession>,
+    active_security_session: ActiveSpaceSecuritySession,
+    key_epoch_repository: Arc<dyn RevocationRepositoryPort>,
+    legacy_bootstrap_repository: Arc<dyn LegacyBootstrapRepositoryPort>,
+    /// 本进程内是否已经确认 keychain 中存在与本机 keyslot 匹配的 KEK。
+    ///
+    /// 一旦置位（`do_first_time_init` / `try_resume_session` /
+    /// `derive_master_key_for_proof` 成功，或 `unlock` 完成首次刷新写入后），
+    /// 后续的 profile key access probe 直接返回 `Available`，`unlock` 路径上
+    /// 的"刷新写入"也跳过——避免在 macOS 上重复触发 keychain 授权弹窗
+    /// （首次使用场景下原本会因 `try_resume_session` →
+    /// profile key access probe → `unlock.store_kek refresh` 三次独立访问
+    /// 而连弹三次）。
+    kek_observed: AtomicBool,
+}
+
+/// 只用于旧配置初始化的最小访问器，不具备运行期安全端口。
+pub struct MigrationSpaceAccessAdapter {
+    key_material: Arc<KeyMaterialStore>,
+    current_profile: Arc<dyn CurrentProfilePort>,
+    session: Arc<InMemorySession>,
+}
+
+impl RuntimeSpaceAccessAdapter {
+    /// 终止本 profile 的后台安全能力；GUI 锁定不得调用此入口。
+    pub fn close_security_session(&self) {
+        self.active_security_session.close();
+    }
+
+    pub fn new(
+        key_material: Arc<KeyMaterialStore>,
+        current_profile: Arc<dyn CurrentProfilePort>,
+        session: Arc<InMemorySession>,
+        key_epoch_repository: Arc<dyn RevocationRepositoryPort>,
+        legacy_bootstrap_repository: Arc<dyn LegacyBootstrapRepositoryPort>,
+        profile_content_key_vault: Arc<ProfileContentKeyVault>,
+    ) -> Self {
+        let active_security_session =
+            ActiveSpaceSecuritySession::new(Arc::clone(&session), profile_content_key_vault);
+        Self {
+            key_material,
+            current_profile,
+            session,
+            active_security_session,
+            key_epoch_repository,
+            legacy_bootstrap_repository,
+            kek_observed: AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) async fn prepare_encryption_passphrase_material(
+        &self,
+        passphrase: &DomainPassphrase,
+    ) -> Result<(KeySlot, Kek), SpaceAccessError> {
+        self.session
+            .current_space_id()
+            .map_err(map_encryption_error)?;
+        let master_key = self
+            .session
+            .get_master_key()
+            .map_err(map_encryption_error)?;
+        let profile = self
+            .current_profile
+            .current_profile()
+            .await
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let scope = key_scope_from_profile(&profile);
+        self.key_material
+            .load_keyslot(&scope)
+            .await
+            .map_err(map_encryption_error)?;
+        let draft = KeySlot::draft_v1(scope).map_err(map_encryption_error)?;
+        let legacy = LegacyPassphrase(passphrase.expose().to_owned());
+        let kek = v1_aead::derive_kek_argon2id(&legacy, &draft.salt, &draft.kdf)
+            .map_err(|error| map_and_log_kdf_error(error, "prepare_encryption_passphrase"))?;
+        let wrapped = v1_aead::wrap_master_key_xchacha(&kek, &master_key).map_err(|error| {
+            map_and_log_local_crypto_error(
+                error.to_string(),
+                "prepare_encryption_passphrase",
+                "wrap_master_key",
+            )
+        })?;
+        Ok((draft.finalize(WrappedMasterKey { blob: wrapped }), kek))
+    }
+
+    pub(crate) async fn install_encryption_passphrase_material(
+        &self,
+        keyslot: &KeySlot,
+        kek: &Kek,
+    ) -> Result<(), SpaceAccessError> {
+        let wrapped = keyslot
+            .wrapped_master_key
+            .as_ref()
+            .ok_or(SpaceAccessError::CorruptedKeyMaterial)?;
+        let unwrapped = v1_aead::unwrap_master_key_xchacha(kek, &wrapped.blob)
+            .map_err(|_| SpaceAccessError::CorruptedKeyMaterial)?;
+        if self
+            .session
+            .get_master_key()
+            .is_ok_and(|master_key| unwrapped != master_key)
+        {
+            return Err(SpaceAccessError::CorruptedKeyMaterial);
+        }
+        self.key_material
+            .store_keyslot(keyslot)
+            .await
+            .map_err(map_encryption_error)?;
+        self.key_material
+            .store_kek(&keyslot.scope, kek)
+            .await
+            .map_err(map_encryption_error)?;
+        let stored_keyslot = self
+            .key_material
+            .load_keyslot(&keyslot.scope)
+            .await
+            .map_err(map_encryption_error)?;
+        let stored_kek = self
+            .key_material
+            .load_kek(&keyslot.scope)
+            .await
+            .map_err(map_encryption_error)?;
+        let stored_wrapped = stored_keyslot
+            .wrapped_master_key
+            .as_ref()
+            .ok_or(SpaceAccessError::CorruptedKeyMaterial)?;
+        let stored_master = v1_aead::unwrap_master_key_xchacha(&stored_kek, &stored_wrapped.blob)
+            .map_err(|_| SpaceAccessError::CorruptedKeyMaterial)?;
+        if stored_master != unwrapped {
+            return Err(SpaceAccessError::CorruptedKeyMaterial);
+        }
+        self.kek_observed.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+
+impl MigrationSpaceAccessAdapter {
+    pub fn new(
+        key_material: Arc<KeyMaterialStore>,
+        current_profile: Arc<dyn CurrentProfilePort>,
+        session: Arc<InMemorySession>,
+    ) -> Self {
+        Self {
+            key_material,
+            current_profile,
+            session,
+        }
+    }
+}
+
+#[async_trait]
+impl uc_application::deps::InitializeSpacePort for MigrationSpaceAccessAdapter {
+    async fn initialize(
+        &self,
+        space_id: &SpaceId,
+        passphrase: &DomainPassphrase,
+    ) -> Result<ActiveSpace, SpaceAccessError> {
+        if self
+            .key_material
+            .keyslot_exists()
+            .await
+            .map_err(map_encryption_error)?
+        {
+            return Err(SpaceAccessError::AlreadyInitialized);
+        }
+        let profile = self
+            .current_profile
+            .current_profile()
+            .await
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let scope = key_scope_from_profile(&profile);
+        let draft = KeySlot::draft_v1(scope.clone())
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let legacy = LegacyPassphrase(passphrase.expose().to_owned());
+        let kek = v1_aead::derive_kek_argon2id(&legacy, &draft.salt, &draft.kdf)
+            .map_err(|error| map_and_log_kdf_error(error, "migration_initialize"))?;
+        let master_key = MasterKey::generate().map_err(map_encryption_error)?;
+        let blob = v1_aead::wrap_master_key_xchacha(&kek, &master_key).map_err(|error| {
+            map_and_log_local_crypto_error(
+                error.to_string(),
+                "migration_initialize",
+                "wrap_master_key",
+            )
+        })?;
+        let keyslot = draft.finalize(WrappedMasterKey { blob });
+
+        self.key_material
+            .store_kek(&scope, &kek)
+            .await
+            .map_err(map_encryption_error)?;
+        if let Err(error) = self.key_material.store_keyslot(&keyslot).await {
+            let _ = self.key_material.delete_keyslot(&scope).await;
+            let _ = self.key_material.delete_kek(&scope).await;
+            return Err(map_encryption_error(error));
+        }
+        self.session
+            .set_master_key_for_space(space_id.clone(), master_key);
+        Ok(ActiveSpace::new(space_id.clone()))
+    }
+}
+
+fn map_active_security_session_error(source: ActiveSpaceSecuritySessionError) -> SpaceAccessError {
+    SpaceAccessError::SecurityState {
+        source: anyhow::Error::new(source),
+    }
+}
+
+fn map_key_epoch_security_session_error(source: ActiveSpaceSecuritySessionError) -> KeyEpochError {
+    KeyEpochError::SecurityState {
+        source: anyhow::Error::new(source),
+    }
+}
+
+fn map_bootstrap_security_session_error(source: ActiveSpaceSecuritySessionError) -> BootstrapError {
+    BootstrapError::SecurityState {
+        source: anyhow::Error::new(source),
+    }
+}
+
+fn map_admission_security_session_error(
+    source: ActiveSpaceSecuritySessionError,
+) -> AdmissionSecurityTransitionError {
+    AdmissionSecurityTransitionError::SecurityState {
+        source: anyhow::Error::new(source),
+    }
+}
+
+fn map_recovery_security_session_error(
+    source: ActiveSpaceSecuritySessionError,
+) -> PrepareMembershipBranchRecoveryMaterialError {
+    PrepareMembershipBranchRecoveryMaterialError::SecurityState {
+        source: anyhow::Error::new(source),
+    }
+}
+
+/// Helper: 把端口返回的 `ProfileId` 包装成 key_material 使用的 `KeyScope`。
+///
+/// Slice 7 (U7) 过渡期间 `KeyScope` 仍是 uc-core 类型(磁盘 `KeySlotFile.scope`
+/// 字段依赖);Slice 7 Commit 2 搬到 uc-infra 后这个 helper 可简化或消失。
+fn key_scope_from_profile(profile: &ProfileId) -> KeyScope {
+    KeyScope {
+        profile_id: profile.as_ref().to_string(),
+    }
+}
+
+fn map_encryption_error(err: EncryptionError) -> SpaceAccessError {
+    match err {
+        EncryptionError::WrongPassphrase => SpaceAccessError::WrongPassphrase,
+        EncryptionError::CorruptedKeySlot
+        | EncryptionError::CorruptedBlob
+        | EncryptionError::UnsupportedKeySlotVersion
+        | EncryptionError::UnsupportedBlobVersion => SpaceAccessError::CorruptedKeyMaterial,
+        other => SpaceAccessError::Internal(other.to_string()),
+    }
+}
+
+fn map_aead_error_for_unwrap(err: v1_aead::AeadError) -> SpaceAccessError {
+    match err {
+        v1_aead::AeadError::DecryptFailed => SpaceAccessError::WrongPassphrase,
+        other => SpaceAccessError::Internal(other.to_string()),
+    }
+}
+
+/// 把 master-key unwrap 阶段的 AEAD 失败按"业务输入错 vs 系统级故障"分级
+/// 落 tracing event,再走 `map_aead_error_for_unwrap` 翻译到上层错误。
+///
+/// 三条调用路径语义统一:
+/// - `unlock`: KEK 由当前 passphrase 现派生,unwrap 失败 ⇒ 用户输错口令。
+/// - `try_resume_session`: KEK 直接读 keyring,unwrap 失败 ⇒ keyring 中
+///   KEK 与磁盘 keyslot 漂移(典型场景:在另一台设备上改了口令,本机
+///   keyring 没同步刷新)。仍是用户可恢复的输入路径——`load_kek` 拿到
+///   的 KEK 不是密码学库故障,只是不对的字节。
+/// - `derive_master_key_for_proof`: joiner 用本端 passphrase 派生 KEK 解
+///   sponsor 包来的 wrapped master key,unwrap 失败 ⇒ 双方口令不一致。
+///
+/// 三种场景的共同点是 `AeadError::DecryptFailed` 永远代表"业务输入侧
+/// 失败,UI 引导用户重输",不应作为 `error!` 级告警污染 Sentry 面板。
+/// 其余变体 (`InvalidKey` / `EncryptFailed` / 长度异常等) 才是密码学库
+/// 不该发生的故障,保留 `error!` 让 Sentry 抓到。
+fn map_and_log_unwrap_aead_error(err: v1_aead::AeadError, path: &'static str) -> SpaceAccessError {
+    match &err {
+        v1_aead::AeadError::DecryptFailed => {
+            warn!(
+                path,
+                "unwrap_master_key rejected: KEK does not match wrapped master key (passphrase mismatch or keyring/keyslot drift)"
+            );
+        }
+        other => {
+            error!(
+                path,
+                error = ?other,
+                "unwrap_master_key failed: unexpected AEAD failure"
+            );
+        }
+    }
+    map_aead_error_for_unwrap(err)
+}
+
+/// KDF (Argon2id) 失败属于密码学库底层故障——参数已由 keyslot 固定,
+/// 输入 passphrase 字节合法,这一步不该失败。走 `error!` + `Internal`。
+fn map_and_log_kdf_error(err: String, path: &'static str) -> SpaceAccessError {
+    error!(path, error = %err, "derive_kek_argon2id failed: unexpected KDF failure");
+    SpaceAccessError::Internal(err)
+}
+
+/// `wrap_master_key_xchacha` / `MasterKey::generate` 等"本地新建密钥物料"
+/// 路径上的失败同样属于密码学库底层故障。走 `error!` + `Internal`。
+fn map_and_log_local_crypto_error(
+    err: String,
+    path: &'static str,
+    op: &'static str,
+) -> SpaceAccessError {
+    error!(path, op, error = %err, "local crypto operation failed");
+    SpaceAccessError::Internal(err)
+}
+
+#[derive(Serialize, Deserialize)]
+struct AdmissionTargetAccessV1 {
+    version: u16,
+    target_space_id: String,
+    keyslot: KeySlot,
+    kek: Vec<u8>,
+    master_key: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PortableKeyCatalog {
+    version: u8,
+    pub(crate) state: SpaceKeyState,
+    pub(crate) key_catalog: Vec<u8>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct GroupEpochUpdate {
+    version: u8,
+    group_epoch: u64,
+    commit: Vec<u8>,
+    encrypted_key_catalog: Vec<u8>,
+}
+
+fn group_catalog_aad(space_id: &SpaceId, epoch: u64) -> Vec<u8> {
+    format!(
+        "uniclipboard-group-key-catalog/v1|{}|{}",
+        space_id.as_ref(),
+        epoch
+    )
+    .into_bytes()
+}
+
+fn membership_branch_recovery_confirmation_aad(space_id: &SpaceId, epoch: u64) -> Vec<u8> {
+    format!(
+        "uniclipboard-membership-branch-recovery-confirmation/v1|{}|{}",
+        space_id.as_ref(),
+        epoch
+    )
+    .into_bytes()
+}
+
+fn seal_membership_branch_recovery_confirmation(
+    wrapping_key: &MasterKey,
+    space_id: &SpaceId,
+    confirmation: &MembershipBranchRecoveryConfirmationV1,
+) -> Result<Vec<u8>, EncryptionError> {
+    let plaintext =
+        postcard::to_stdvec(confirmation).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+    let encrypted = v1_aead::encrypt_blob_xchacha(
+        wrapping_key,
+        &plaintext,
+        &membership_branch_recovery_confirmation_aad(space_id, confirmation.epoch),
+    )
+    .map_err(map_group_aead_error)?;
+    postcard::to_stdvec(&encrypted).map_err(|_| EncryptionError::KeyMaterialCorrupt)
+}
+
+fn open_membership_branch_recovery_confirmation(
+    wrapping_key: &MasterKey,
+    space_id: &SpaceId,
+    epoch: u64,
+    ciphertext: &[u8],
+) -> Result<MembershipBranchRecoveryConfirmationV1, EncryptionError> {
+    let encrypted: EncryptedBlob =
+        postcard::from_bytes(ciphertext).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+    let plaintext = v1_aead::decrypt_blob_xchacha(
+        wrapping_key,
+        &encrypted.nonce,
+        &encrypted.ciphertext,
+        &membership_branch_recovery_confirmation_aad(space_id, epoch),
+    )
+    .map_err(map_group_aead_error)?;
+    let confirmation: MembershipBranchRecoveryConfirmationV1 =
+        postcard::from_bytes(&plaintext).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+    if confirmation.version != 1 || confirmation.epoch != epoch {
+        return Err(EncryptionError::KeyMaterialCorrupt);
+    }
+    Ok(confirmation)
+}
+
+fn map_group_aead_error(error: v1_aead::AeadError) -> EncryptionError {
+    match error {
+        v1_aead::AeadError::DecryptFailed => EncryptionError::KeyMaterialCorrupt,
+        v1_aead::AeadError::InvalidKey | v1_aead::AeadError::EncryptFailed => {
+            EncryptionError::CryptoFailure
+        }
+    }
+}
+
+pub(super) fn seal_group_catalog(
+    wrapping_key: &MasterKey,
+    material: &SpaceKeyMaterial,
+) -> Result<Vec<u8>, EncryptionError> {
+    let portable = PortableKeyCatalog {
+        version: 1,
+        state: material.state().clone(),
+        key_catalog: material.key_catalog().to_vec(),
+    };
+    let plaintext =
+        serde_json::to_vec(&portable).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+    let encrypted = v1_aead::encrypt_blob_xchacha(
+        wrapping_key,
+        &plaintext,
+        &group_catalog_aad(
+            material.state().space_id(),
+            material.state().epoch().value(),
+        ),
+    )
+    .map_err(map_group_aead_error)?;
+    serde_json::to_vec(&encrypted).map_err(|_| EncryptionError::KeyMaterialCorrupt)
+}
+
+pub(super) fn open_group_catalog(
+    wrapping_key: &MasterKey,
+    space_id: &SpaceId,
+    epoch: u64,
+    ciphertext: &[u8],
+) -> Result<PortableKeyCatalog, EncryptionError> {
+    let encrypted: EncryptedBlob =
+        serde_json::from_slice(ciphertext).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+    let plaintext = v1_aead::decrypt_blob_xchacha(
+        wrapping_key,
+        &encrypted.nonce,
+        &encrypted.ciphertext,
+        &group_catalog_aad(space_id, epoch),
+    )
+    .map_err(map_group_aead_error)?;
+    let portable: PortableKeyCatalog =
+        serde_json::from_slice(&plaintext).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+    if portable.version != 1
+        || portable.state.space_id() != space_id
+        || portable.state.epoch() != GroupEpoch::new(epoch)
+    {
+        return Err(EncryptionError::KeyMaterialCorrupt);
+    }
+    Ok(portable)
+}
+
+impl RuntimeSpaceAccessAdapter {
+    // Stage 4 keeps production admission fail-closed until the data generation
+    // owner can invoke this only after manifest verification.
+    #[allow(dead_code)]
+    fn decode_prepared_target_access(
+        target_space_id: &SpaceId,
+        scope: &KeyScope,
+        encoded: &[u8],
+    ) -> Result<(KeySlot, Kek, MasterKey), SpaceAccessError> {
+        let mut state: AdmissionTargetAccessV1 =
+            serde_json::from_slice(encoded).map_err(|_| SpaceAccessError::CorruptedKeyMaterial)?;
+        if state.version != 1
+            || state.target_space_id != target_space_id.as_ref()
+            || &state.keyslot.scope != scope
+        {
+            state.kek.zeroize();
+            state.master_key.zeroize();
+            return Err(SpaceAccessError::CorruptedKeyMaterial);
+        }
+
+        let result = (|| {
+            let kek = Kek::from_bytes(&state.kek).map_err(map_encryption_error)?;
+            let master_key =
+                MasterKey::from_bytes(&state.master_key).map_err(map_encryption_error)?;
+            let wrapped = state
+                .keyslot
+                .wrapped_master_key
+                .as_ref()
+                .ok_or(SpaceAccessError::CorruptedKeyMaterial)?;
+            let unwrapped = v1_aead::unwrap_master_key_xchacha(&kek, &wrapped.blob)
+                .map_err(|_| SpaceAccessError::CorruptedKeyMaterial)?;
+            if unwrapped != master_key {
+                return Err(SpaceAccessError::CorruptedKeyMaterial);
+            }
+            Ok((state.keyslot.clone(), kek, master_key))
+        })();
+        state.kek.zeroize();
+        state.master_key.zeroize();
+        result
+    }
+
+    pub(crate) async fn prepared_target_session(
+        &self,
+        target_space_id: &SpaceId,
+        encoded: &[u8],
+    ) -> Result<Arc<InMemorySession>, SpaceAccessError> {
+        let profile = self
+            .current_profile
+            .current_profile()
+            .await
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let scope = key_scope_from_profile(&profile);
+        let (_, _, master_key) =
+            Self::decode_prepared_target_access(target_space_id, &scope, encoded)?;
+        let session = Arc::new(InMemorySession::new());
+        session.set_master_key_for_space(target_space_id.clone(), master_key);
+        Ok(session)
+    }
+
+    /// 为 SameSpace control generation 构造保留当前 MasterKey/keyslot 的隔离会话。
+    pub(crate) fn retained_control_session(
+        &self,
+        space_id: &SpaceId,
+    ) -> Result<Arc<InMemorySession>, SpaceAccessError> {
+        if self.session.current_space_id().ok().as_ref() != Some(space_id) {
+            return Err(SpaceAccessError::CorruptedKeyMaterial);
+        }
+        self.session
+            .get_master_key()
+            .map_err(map_encryption_error)?;
+        Ok(self.session.detached_clone())
+    }
+
+    /// 在 V3 manifest 已提升后安装目标 keyslot，并从当前 control pool 完整恢复
+    /// 目标安全状态、vault catalog 与活动 session。
+    ///
+    /// 该操作只用于 promoted 后的前向恢复：任一步失败都由同一 transition
+    /// 以相同 target access state 重试，不回滚到已失去 manifest 所有权的来源。
+    pub(crate) async fn activate_prepared_control_generation(
+        &self,
+        target_space_id: &SpaceId,
+        encoded: &[u8],
+    ) -> Result<(), SpaceAccessError> {
+        let profile = self
+            .current_profile
+            .current_profile()
+            .await
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let scope = key_scope_from_profile(&profile);
+        let (keyslot, kek, master_key) =
+            Self::decode_prepared_target_access(target_space_id, &scope, encoded)?;
+        self.key_material
+            .store_kek(&scope, &kek)
+            .await
+            .map_err(map_encryption_error)?;
+        self.key_material
+            .store_keyslot(&keyslot)
+            .await
+            .map_err(map_encryption_error)?;
+
+        let repository = self.key_epoch_repository.as_ref();
+        let active_security_session = &self.active_security_session;
+        let epoch = active_security_session
+            .restore_from_repository(target_space_id, master_key, repository)
+            .await
+            .map_err(map_active_security_session_error)?;
+        if epoch.is_none() {
+            return Err(SpaceAccessError::SecurityState {
+                source: anyhow::anyhow!("prepared control security material is missing"),
+            });
+        }
+        self.kek_observed.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// 在 SameSpace manifest 已提升后保留现有 keyslot，只从新 control pool
+    /// 恢复目标安全状态、vault catalog 与活动 session。
+    pub(crate) async fn activate_retained_control_generation(
+        &self,
+        space_id: &SpaceId,
+    ) -> Result<(), SpaceAccessError> {
+        if self.session.current_space_id().ok().as_ref() != Some(space_id) {
+            return Err(SpaceAccessError::CorruptedKeyMaterial);
+        }
+        let master_key = self
+            .session
+            .get_master_key()
+            .map_err(map_encryption_error)?;
+        let repository = self.key_epoch_repository.as_ref();
+        let active_security_session = &self.active_security_session;
+        let epoch = active_security_session
+            .restore_from_repository(space_id, master_key, repository)
+            .await
+            .map_err(map_active_security_session_error)?;
+        if epoch.is_none() {
+            return Err(SpaceAccessError::SecurityState {
+                source: anyhow::anyhow!("retained control security material is missing"),
+            });
+        }
+        Ok(())
+    }
+
+    /// 停止使用已被终止准入提升的控制世代；持久停止事实由切换负责人先保存。
+    pub(crate) fn stop_using_admission_target(&self) {
+        self.session.clear();
+    }
+
+    async fn prepare_target_access(
+        &self,
+        target_space_id: &SpaceId,
+        passphrase: &DomainPassphrase,
+    ) -> Result<PreparedAdmissionTargetAccess, SpaceAccessError> {
+        let profile = self
+            .current_profile
+            .current_profile()
+            .await
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let scope = key_scope_from_profile(&profile);
+        let keyslot_draft = KeySlot::draft_v1(scope).map_err(map_encryption_error)?;
+        let legacy = LegacyPassphrase(passphrase.expose().to_string());
+        let kek = v1_aead::derive_kek_argon2id(&legacy, &keyslot_draft.salt, &keyslot_draft.kdf)
+            .map_err(|error| map_and_log_kdf_error(error, "prepare_target_access"))?;
+        let master_key = MasterKey::generate().map_err(map_encryption_error)?;
+        let wrapped = v1_aead::wrap_master_key_xchacha(&kek, &master_key)
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let mut state = AdmissionTargetAccessV1 {
+            version: 1,
+            target_space_id: target_space_id.as_ref().to_owned(),
+            keyslot: keyslot_draft.finalize(WrappedMasterKey { blob: wrapped }),
+            kek: kek.as_bytes().to_vec(),
+            master_key: master_key.as_bytes().to_vec(),
+        };
+        let encoded = serde_json::to_vec(&state)
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()));
+        state.kek.zeroize();
+        state.master_key.zeroize();
+        encoded.map(PreparedAdmissionTargetAccess::from_bytes)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn prepare_group_join(
+        &self,
+        device_id: &DeviceId,
+    ) -> Result<PreparedGroupJoin, SpaceAccessError> {
+        let pending = MlsGroupEngine::prepare_join(device_id.as_str().as_bytes())
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let mut prepared =
+            PreparedGroupJoin::new(pending.key_package, pending.client_state.into_bytes());
+        if let Some(instance) = pending.member_instance {
+            prepared = prepared.with_member_instance(instance);
+        }
+        Ok(prepared)
+    }
+
+    #[cfg(test)]
+    pub(super) async fn admit_group_member_with_replay(
+        &self,
+        space_id: &SpaceId,
+        sponsor_device_id: &DeviceId,
+        joiner_device_id: &DeviceId,
+        existing_member_ids: &[DeviceId],
+        key_package: &[u8],
+        admission_replay: Option<(DeviceId, AdmissionReplayId)>,
+    ) -> Result<(GroupAdmission, Option<ProtectionGroupAdmission>), SpaceAccessError> {
+        let repository = self.key_epoch_repository.as_ref();
+        let current = match repository
+            .load_space_material(space_id)
+            .await
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?
+        {
+            Some(current) => current,
+            None if existing_member_ids.is_empty() => {
+                let sponsor_state = MlsGroupEngine::create_sponsor(
+                    space_id.as_ref().as_bytes(),
+                    sponsor_device_id.as_str().as_bytes(),
+                )
+                .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+                self.session
+                    .create_legacy_bootstrap_material(
+                        space_id,
+                        sponsor_state.into_bytes(),
+                        chrono::Utc::now().timestamp_millis(),
+                    )
+                    .map_err(map_encryption_error)?
+            }
+            None => return Err(SpaceAccessError::CorruptedKeyMaterial),
+        };
+        if current.group_state().is_empty() {
+            return Err(SpaceAccessError::CorruptedKeyMaterial);
+        }
+        let sponsor_state = MlsClientState::from_bytes(current.group_state().to_vec());
+        let admission = MlsGroupEngine::admit_member(
+            &sponsor_state,
+            joiner_device_id.as_str().as_bytes(),
+            key_package,
+        )
+        .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let epoch = GroupEpoch::new(admission.epoch);
+        let mut next = self
+            .session
+            .rotate_space_material(
+                &current,
+                admission.sponsor_state.into_bytes(),
+                epoch,
+                now_ms,
+            )
+            .map_err(map_encryption_error)?;
+        let encrypted_key_catalog =
+            seal_group_catalog(&admission.wrapping_key, &next).map_err(map_encryption_error)?;
+        let existing_member_update = serde_json::to_vec(&GroupEpochUpdate {
+            version: 1,
+            group_epoch: admission.epoch,
+            commit: admission.commit,
+            encrypted_key_catalog: encrypted_key_catalog.clone(),
+        })
+        .map_err(|_| SpaceAccessError::CorruptedKeyMaterial)?;
+        let existing_member_updates = existing_member_ids
+            .iter()
+            .cloned()
+            .map(|recipient| {
+                PendingGroupUpdate::persistent(recipient, existing_member_update.clone())
+            })
+            .collect::<Vec<_>>();
+        next.add_pending_group_updates(existing_member_updates.iter().cloned(), now_ms);
+        let group_admission = GroupAdmission {
+            welcome: admission.welcome,
+            encrypted_key_catalog,
+            existing_member_updates,
+            group_epoch: admission.epoch,
+        };
+        let replay_admission = if let Some((receiver, replay_id)) = admission_replay {
+            let protection_group_id = next
+                .state()
+                .protection_group_id()
+                .cloned()
+                .ok_or(SpaceAccessError::CorruptedKeyMaterial)?;
+            let cached = ProtectionGroupAdmission {
+                protection_group_id: protection_group_id.clone(),
+                admission: group_admission.clone(),
+            };
+            next.cache_group_admission(receiver, replay_id, cached.clone(), now_ms);
+            Some(cached)
+        } else {
+            None
+        };
+
+        // Validate the complete material before making the durable generation
+        // visible. The real session install after the write is then infallible
+        // for the same inputs.
+        let validator = InMemorySession::new();
+        validator.set_master_key_for_space(
+            space_id.clone(),
+            self.session
+                .get_master_key()
+                .map_err(map_encryption_error)?,
+        );
+        validator
+            .install_space_material(&next)
+            .map_err(map_encryption_error)?;
+        repository
+            .save_space_material(&next)
+            .await
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        self.active_security_session
+            .install_current_material(&next)
+            .await
+            .map_err(map_active_security_session_error)?;
+        Ok((group_admission, replay_admission))
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn admit_group_member(
+        &self,
+        space_id: &SpaceId,
+        sponsor_device_id: &DeviceId,
+        joiner_device_id: &DeviceId,
+        existing_member_ids: &[DeviceId],
+        key_package: &[u8],
+    ) -> Result<GroupAdmission, SpaceAccessError> {
+        self.admit_group_member_with_replay(
+            space_id,
+            sponsor_device_id,
+            joiner_device_id,
+            existing_member_ids,
+            key_package,
+            None,
+        )
+        .await
+        .map(|(admission, _)| admission)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn install_group_join(
+        &self,
+        space_id: &SpaceId,
+        passphrase: &DomainPassphrase,
+        pending: PreparedGroupJoin,
+        welcome: &[u8],
+        encrypted_key_catalog: &[u8],
+        group_epoch: u64,
+    ) -> Result<(), SpaceAccessError> {
+        let repository = self.key_epoch_repository.as_ref();
+        let (key_package, private_state) = pending.into_parts();
+        let completed = MlsGroupEngine::complete_join(
+            PendingMlsJoin::new(key_package, MlsClientState::from_bytes(private_state)),
+            space_id.as_ref().as_bytes(),
+            welcome,
+        )
+        .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        if completed.epoch != group_epoch {
+            return Err(SpaceAccessError::CorruptedKeyMaterial);
+        }
+        let portable = open_group_catalog(
+            &completed.wrapping_key,
+            space_id,
+            group_epoch,
+            encrypted_key_catalog,
+        )
+        .map_err(map_encryption_error)?;
+        let material = SpaceKeyMaterial::new(
+            portable.state,
+            completed.client_state.into_bytes(),
+            portable.key_catalog,
+            chrono::Utc::now().timestamp_millis(),
+        );
+
+        let profile = self
+            .current_profile
+            .current_profile()
+            .await
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let scope = key_scope_from_profile(&profile);
+        let previous = if self
+            .key_material
+            .keyslot_exists()
+            .await
+            .map_err(map_encryption_error)?
+        {
+            Some((
+                self.key_material
+                    .load_keyslot(&scope)
+                    .await
+                    .map_err(map_encryption_error)?,
+                self.key_material
+                    .load_kek(&scope)
+                    .await
+                    .map_err(map_encryption_error)?,
+            ))
+        } else {
+            None
+        };
+        let previous_session = self.session.snapshot();
+
+        let keyslot_draft = KeySlot::draft_v1(scope.clone()).map_err(map_encryption_error)?;
+        let legacy = LegacyPassphrase(passphrase.expose().to_string());
+        let kek = v1_aead::derive_kek_argon2id(&legacy, &keyslot_draft.salt, &keyslot_draft.kdf)
+            .map_err(|error| map_and_log_kdf_error(error, "install_group_join"))?;
+        let local_root = MasterKey::generate().map_err(map_encryption_error)?;
+        let wrapped = v1_aead::wrap_master_key_xchacha(&kek, &local_root)
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let keyslot = keyslot_draft.finalize(WrappedMasterKey { blob: wrapped });
+
+        if let Err(error) = self.key_material.store_kek(&scope, &kek).await {
+            return Err(map_encryption_error(error));
+        }
+        if let Err(error) = self.key_material.store_keyslot(&keyslot).await {
+            self.restore_join_install(&scope, previous, previous_session)
+                .await;
+            return Err(map_encryption_error(error));
+        }
+        let active_security_session = &self.active_security_session;
+        if let Err(error) = active_security_session
+            .activate(space_id, local_root, Some(&material))
+            .await
+        {
+            self.restore_join_install(&scope, previous, previous_session)
+                .await;
+            return Err(map_active_security_session_error(error));
+        }
+        if let Err(error) = repository.save_space_material(&material).await {
+            self.restore_join_install(&scope, previous, previous_session)
+                .await;
+            return Err(SpaceAccessError::SecurityState {
+                source: anyhow::Error::new(error),
+            });
+        }
+        self.kek_observed.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    async fn revoke_group_member(
+        &self,
+        target: &DeviceId,
+        retained_recipients: &[DeviceId],
+        now_ms: i64,
+    ) -> Result<GroupRevocationResult, KeyEpochError> {
+        let repository = self.key_epoch_repository.as_ref();
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|error| KeyEpochError::Repository(error.into()))?;
+        let Some(current) = repository.load_space_material(&space_id).await? else {
+            return Ok(GroupRevocationResult::LocalOnly);
+        };
+        if current.state().mode() != SpaceSecurityMode::Ready {
+            return Ok(GroupRevocationResult::LocalOnly);
+        }
+        if current.group_state().is_empty() {
+            return Err(KeyEpochError::StateIssue(
+                uc_core::membership::KeyEpochStateIssue::CorruptMaterial,
+            ));
+        }
+        if retained_recipients
+            .iter()
+            .any(|recipient| recipient == target)
+        {
+            return Err(KeyEpochError::RemovedMemberInOutbox);
+        }
+
+        let prepared = RevocationRecord::prepare_with_recipients(
+            RevocationId::generate(),
+            space_id.clone(),
+            target.clone(),
+            retained_recipients.to_vec(),
+            current.state().epoch(),
+            now_ms,
+        )?;
+        let (mut record, rebuilding_prepared) = match repository.begin_revocation(&prepared).await?
+        {
+            BeginRevocationOutcome::Begun(record) => (record, false),
+            BeginRevocationOutcome::Existing(record) => (record, true),
+        };
+
+        let mut stalled_iterations = 0;
+        loop {
+            let previous_status = record.status();
+            match record.status() {
+                RevocationStatus::Prepared => {
+                    let base = repository
+                        .load_space_material(&space_id)
+                        .await?
+                        .ok_or_else(|| {
+                            KeyEpochError::StateIssue(
+                                uc_core::membership::KeyEpochStateIssue::MissingMaterial,
+                            )
+                        })?;
+                    if base.state().epoch() < record.previous_epoch() {
+                        if rebuilding_prepared {
+                            record = repository
+                                .resolve_prepared_revocation(
+                                    record.revocation_id(),
+                                    PreparedRevocationResolution::RecoveryRequired(Some(base)),
+                                    now_ms,
+                                )
+                                .await?;
+                            return Self::group_revocation_result(repository, &record).await;
+                        }
+                        return Err(KeyEpochError::StateIssue(
+                            uc_core::membership::KeyEpochStateIssue::EpochMismatch,
+                        ));
+                    }
+                    if rebuilding_prepared && base.state().epoch() > record.previous_epoch() {
+                        record.rebase_prepared(base.state().epoch(), now_ms)?;
+                    }
+                    let target_is_active = match MlsGroupEngine::contains_active_member(
+                        &MlsClientState::from_bytes(base.group_state().to_vec()),
+                        target.as_str().as_bytes(),
+                    ) {
+                        Ok(active) => active,
+                        Err(_) if rebuilding_prepared => {
+                            record = repository
+                                .resolve_prepared_revocation(
+                                    record.revocation_id(),
+                                    PreparedRevocationResolution::RecoveryRequired(Some(base)),
+                                    now_ms,
+                                )
+                                .await?;
+                            return Self::group_revocation_result(repository, &record).await;
+                        }
+                        Err(error) => {
+                            return Err(KeyEpochError::Repository(error.into()));
+                        }
+                    };
+                    if !target_is_active {
+                        record = repository
+                            .resolve_prepared_revocation(
+                                record.revocation_id(),
+                                PreparedRevocationResolution::TargetAbsent(base),
+                                now_ms,
+                            )
+                            .await?;
+                        return Self::group_revocation_result(repository, &record).await;
+                    }
+                    let removal = MlsGroupEngine::remove_member(
+                        &MlsClientState::from_bytes(base.group_state().to_vec()),
+                        target.as_str().as_bytes(),
+                    )
+                    .map_err(|error| KeyEpochError::Repository(error.into()))?;
+                    if GroupEpoch::new(removal.epoch) != record.next_epoch() {
+                        return Err(KeyEpochError::StateIssue(
+                            uc_core::membership::KeyEpochStateIssue::EpochMismatch,
+                        ));
+                    }
+                    let next = self
+                        .session
+                        .rotate_space_material(
+                            &base,
+                            removal.sponsor_state.into_bytes(),
+                            record.next_epoch(),
+                            now_ms,
+                        )
+                        .map_err(|error| KeyEpochError::Repository(error.into()))?;
+                    let encrypted_key_catalog = seal_group_catalog(&removal.wrapping_key, &next)
+                        .map_err(|error| KeyEpochError::Repository(error.into()))?;
+                    let update = serde_json::to_vec(&GroupEpochUpdate {
+                        version: 1,
+                        group_epoch: removal.epoch,
+                        commit: removal.commit,
+                        encrypted_key_catalog,
+                    })
+                    .map_err(|error| KeyEpochError::Repository(error.into()))?;
+                    record.transition_to(RevocationStatus::Staged, now_ms)?;
+                    let stage = RevocationStage::new(
+                        record.clone(),
+                        next.state().clone(),
+                        next.group_state().to_vec(),
+                        next.key_catalog().to_vec(),
+                        record
+                            .retained_recipients()
+                            .iter()
+                            .cloned()
+                            .map(|recipient| {
+                                RevocationOutboxMessage::new(recipient, update.clone())
+                            })
+                            .collect(),
+                    )?;
+                    let validator = InMemorySession::new();
+                    validator.set_master_key_for_space(
+                        space_id.clone(),
+                        self.session
+                            .get_master_key()
+                            .map_err(|error| KeyEpochError::Repository(error.into()))?,
+                    );
+                    validator
+                        .install_space_material(&next)
+                        .map_err(|error| KeyEpochError::Repository(error.into()))?;
+                    if rebuilding_prepared {
+                        record = repository
+                            .resolve_prepared_revocation(
+                                record.revocation_id(),
+                                PreparedRevocationResolution::TargetPresent {
+                                    current_material: base.clone(),
+                                    stage,
+                                },
+                                now_ms,
+                            )
+                            .await?;
+                    } else if let Err(error) = repository.stage_revocation(&stage).await {
+                        return Err(error);
+                    }
+                    if rebuilding_prepared {
+                        let persisted = repository
+                            .get_revocation(record.revocation_id())
+                            .await?
+                            .ok_or_else(|| {
+                                KeyEpochError::StateIssue(
+                                    uc_core::membership::KeyEpochStateIssue::MissingRevocation,
+                                )
+                            })?;
+                        if persisted.status() == RevocationStatus::Prepared {
+                            record = repository
+                                .resolve_prepared_revocation(
+                                    record.revocation_id(),
+                                    PreparedRevocationResolution::RecoveryRequired(Some(base)),
+                                    now_ms,
+                                )
+                                .await?;
+                            return Self::group_revocation_result(repository, &record).await;
+                        }
+                    }
+                }
+                RevocationStatus::Staged => {
+                    record = repository
+                        .activate_revocation(record.revocation_id(), now_ms)
+                        .await?;
+                    let activated = repository
+                        .load_space_material(&space_id)
+                        .await?
+                        .ok_or_else(|| {
+                            KeyEpochError::StateIssue(
+                                uc_core::membership::KeyEpochStateIssue::MissingMaterial,
+                            )
+                        })?;
+                    self.active_security_session
+                        .install_current_material(&activated)
+                        .await
+                        .map_err(map_key_epoch_security_session_error)?;
+                }
+                RevocationStatus::Activated => {
+                    let activated = repository
+                        .load_space_material(&space_id)
+                        .await?
+                        .ok_or_else(|| {
+                            KeyEpochError::StateIssue(
+                                uc_core::membership::KeyEpochStateIssue::MissingMaterial,
+                            )
+                        })?;
+                    self.active_security_session
+                        .install_current_material(&activated)
+                        .await
+                        .map_err(map_key_epoch_security_session_error)?;
+                    record = repository
+                        .start_distribution(record.revocation_id(), now_ms)
+                        .await?;
+                }
+                RevocationStatus::Distributing | RevocationStatus::Complete => {
+                    return Self::group_revocation_result(repository, &record).await;
+                }
+                RevocationStatus::RecoveryRequired => {
+                    return Err(KeyEpochError::StateIssue(
+                        uc_core::membership::KeyEpochStateIssue::RecoveryRequired,
+                    ));
+                }
+            }
+            record = repository
+                .get_revocation(record.revocation_id())
+                .await?
+                .ok_or_else(|| {
+                    KeyEpochError::StateIssue(
+                        uc_core::membership::KeyEpochStateIssue::MissingRevocation,
+                    )
+                })?;
+            if record.status() == previous_status {
+                stalled_iterations += 1;
+                if stalled_iterations >= MAX_STALLED_REVOCATION_ITERATIONS {
+                    return Err(KeyEpochError::StateIssue(
+                        uc_core::membership::KeyEpochStateIssue::RecoveryRequired,
+                    ));
+                }
+            } else {
+                stalled_iterations = 0;
+            }
+        }
+    }
+
+    async fn acknowledge_group_update(
+        &self,
+        revocation_id: &RevocationId,
+        recipient: &DeviceId,
+        now_ms: i64,
+    ) -> Result<GroupRevocationResult, KeyEpochError> {
+        let repository = self.key_epoch_repository.as_ref();
+        let record = repository
+            .acknowledge_recipient(revocation_id, recipient, now_ms)
+            .await?;
+        Self::group_revocation_result(repository, &record).await
+    }
+
+    async fn apply_group_epoch_update(&self, payload: &[u8]) -> Result<GroupEpoch, KeyEpochError> {
+        use super::group_update_error::{failed_action, tag_action, GroupUpdateAction as Action};
+        let update: GroupEpochUpdate = serde_json::from_slice(payload)
+            .map_err(|source| failed_action(Action::DecodeUpdate, source))?;
+        if update.version != 1 {
+            return Err(KeyEpochError::StateIssue(
+                uc_core::membership::KeyEpochStateIssue::UnsupportedUpdate,
+            ));
+        }
+        let repository = self.key_epoch_repository.as_ref();
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|error| failed_action(Action::LoadState, error))?;
+        let current = repository
+            .load_space_material(&space_id)
+            .await
+            .map_err(|error| tag_action(Action::LoadState, error))?
+            .ok_or_else(|| {
+                KeyEpochError::StateIssue(uc_core::membership::KeyEpochStateIssue::MissingMaterial)
+            })?;
+        let update_epoch = GroupEpoch::new(update.group_epoch);
+        if current.state().epoch() >= update_epoch {
+            // Already at or beyond the update: a member that joined later
+            // (or already applied the commit) skips older updates from the
+            // continuous change chain. Idempotent and safe: applying an old
+            // commit to a newer group state would be out of order.
+            return Ok(update_epoch);
+        }
+        if current.state().epoch().next()? != update_epoch || current.group_state().is_empty() {
+            return Err(KeyEpochError::StateIssue(
+                uc_core::membership::KeyEpochStateIssue::OutOfOrderUpdate,
+            ));
+        }
+        let completed = MlsGroupEngine::apply_commit(
+            &MlsClientState::from_bytes(current.group_state().to_vec()),
+            space_id.as_ref().as_bytes(),
+            &update.commit,
+        )
+        .map_err(|error| failed_action(Action::ApplySecurityUpdate, error))?;
+        if GroupEpoch::new(completed.epoch) != update_epoch {
+            return Err(KeyEpochError::StateIssue(
+                uc_core::membership::KeyEpochStateIssue::EpochMismatch,
+            ));
+        }
+        let portable = open_group_catalog(
+            &completed.wrapping_key,
+            &space_id,
+            update.group_epoch,
+            &update.encrypted_key_catalog,
+        )
+        .map_err(|error| failed_action(Action::ApplySecurityUpdate, error))?;
+        let material = SpaceKeyMaterial::new(
+            portable.state,
+            completed.client_state.into_bytes(),
+            portable.key_catalog,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .with_pending_group_updates_from(&current);
+        let validator = InMemorySession::new();
+        validator.set_master_key_for_space(
+            space_id,
+            self.session
+                .get_master_key()
+                .map_err(|error| failed_action(Action::LoadState, error))?,
+        );
+        validator
+            .install_space_material(&material)
+            .map_err(|error| failed_action(Action::ValidateUpdate, error))?;
+        repository
+            .save_space_material(&material)
+            .await
+            .map_err(|error| tag_action(Action::PersistState, error))?;
+        self.active_security_session
+            .install_current_material(&material)
+            .await
+            .map_err(map_key_epoch_security_session_error)
+            .map_err(|error| tag_action(Action::InstallSecurityState, error))?;
+        Ok(update_epoch)
+    }
+
+    async fn pending_group_updates(
+        &self,
+        revocation_id: &RevocationId,
+    ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
+        let repository = self.key_epoch_repository.as_ref();
+        let Some(stage) = repository.load_staged_revocation(revocation_id).await? else {
+            return Ok(Vec::new());
+        };
+        let mut recipients = HashSet::new();
+        Ok(stage
+            .outbox()
+            .iter()
+            .filter(|message| !message.is_confirmed())
+            .filter(|message| recipients.insert(message.recipient().clone()))
+            .map(|message| {
+                PendingGroupUpdate::for_generation(
+                    revocation_id.clone(),
+                    GroupEpoch::new(message.generation()),
+                    message.recipient().clone(),
+                    message.payload().to_vec(),
+                )
+            })
+            .collect())
+    }
+
+    async fn query_group_revocation(
+        &self,
+        revocation_id: &RevocationId,
+    ) -> Result<Option<GroupRevocationResult>, KeyEpochError> {
+        let repository = self.key_epoch_repository.as_ref();
+        let Some(record) = repository.get_revocation(revocation_id).await? else {
+            return Ok(None);
+        };
+        Self::group_revocation_result(repository, &record)
+            .await
+            .map(Some)
+    }
+
+    async fn current_group_revocation(
+        &self,
+    ) -> Result<Option<GroupRevocationResult>, KeyEpochError> {
+        let repository = self.key_epoch_repository.as_ref();
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|error| KeyEpochError::Repository(error.into()))?;
+        let current = repository
+            .list_incomplete_revocations()
+            .await?
+            .into_iter()
+            .find(|record| record.space_id() == &space_id);
+        match current {
+            Some(record) => Self::group_revocation_result(repository, &record)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    async fn continue_group_revocation(
+        &self,
+        revocation_id: &RevocationId,
+        permanently_lost_device_ids: &[DeviceId],
+        now_ms: i64,
+    ) -> Result<GroupRevocationResult, KeyEpochError> {
+        let repository = self.key_epoch_repository.as_ref();
+        let record = repository
+            .get_revocation(revocation_id)
+            .await?
+            .ok_or_else(|| {
+                KeyEpochError::StateIssue(
+                    uc_core::membership::KeyEpochStateIssue::MissingRevocation,
+                )
+            })?;
+        if record.status() == RevocationStatus::Complete {
+            return Self::group_revocation_result(repository, &record).await;
+        }
+        let mut stage = repository
+            .load_staged_revocation(revocation_id)
+            .await?
+            .ok_or_else(|| {
+                KeyEpochError::StateIssue(uc_core::membership::KeyEpochStateIssue::MissingStage)
+            })?;
+        let pending = stage.pending_recipient_device_ids();
+        let mut unique = HashSet::new();
+        if permanently_lost_device_ids.is_empty()
+            || permanently_lost_device_ids
+                .iter()
+                .any(|device_id| !unique.insert(device_id.clone()) || !pending.contains(device_id))
+        {
+            return Err(KeyEpochError::PermanentLossRecipientNotPending);
+        }
+        let mut material = repository
+            .load_space_material(record.space_id())
+            .await?
+            .ok_or_else(|| {
+                KeyEpochError::StateIssue(uc_core::membership::KeyEpochStateIssue::MissingMaterial)
+            })?;
+        let mut already_absent = Vec::new();
+        let mut still_in_group = Vec::new();
+        for lost_device_id in permanently_lost_device_ids {
+            match MlsGroupEngine::contains_active_member(
+                &MlsClientState::from_bytes(material.group_state().to_vec()),
+                lost_device_id.as_str().as_bytes(),
+            ) {
+                Ok(true) => still_in_group.push(lost_device_id.clone()),
+                Ok(false) => already_absent.push(lost_device_id.clone()),
+                Err(_) => {
+                    stage.transition_to(RevocationStatus::RecoveryRequired, now_ms)?;
+                    let record = repository
+                        .commit_revocation_recovery(&stage, &material)
+                        .await?;
+                    return Self::group_revocation_result(repository, &record).await;
+                }
+            }
+        }
+        if !already_absent.is_empty() {
+            stage.finish_absent_recipients(&already_absent, now_ms)?;
+        }
+        for lost_device_id in still_in_group {
+            let removal = MlsGroupEngine::remove_member(
+                &MlsClientState::from_bytes(material.group_state().to_vec()),
+                lost_device_id.as_str().as_bytes(),
+            )
+            .map_err(|error| KeyEpochError::Repository(error.into()))?;
+            if GroupEpoch::new(removal.epoch) != material.state().epoch().next()? {
+                return Err(KeyEpochError::StateIssue(
+                    uc_core::membership::KeyEpochStateIssue::EpochMismatch,
+                ));
+            }
+            let next = self
+                .session
+                .rotate_space_material(
+                    &material,
+                    removal.sponsor_state.into_bytes(),
+                    GroupEpoch::new(removal.epoch),
+                    now_ms,
+                )
+                .map_err(|error| KeyEpochError::Repository(error.into()))?;
+            let encrypted_key_catalog = seal_group_catalog(&removal.wrapping_key, &next)
+                .map_err(|error| KeyEpochError::Repository(error.into()))?;
+            let update = serde_json::to_vec(&GroupEpochUpdate {
+                version: 1,
+                group_epoch: removal.epoch,
+                commit: removal.commit,
+                encrypted_key_catalog,
+            })
+            .map_err(|error| KeyEpochError::Repository(error.into()))?;
+            let outbox = stage
+                .record()
+                .retained_recipients()
+                .iter()
+                .filter(|recipient| !permanently_lost_device_ids.contains(recipient))
+                .cloned()
+                .map(|recipient| RevocationOutboxMessage::new(recipient, update.clone()))
+                .collect();
+            stage.append_recovery_generation(
+                &lost_device_id,
+                next.state().clone(),
+                next.group_state().to_vec(),
+                next.key_catalog().to_vec(),
+                outbox,
+                now_ms,
+            )?;
+            material = SpaceKeyMaterial::new(
+                next.state().clone(),
+                next.group_state().to_vec(),
+                next.key_catalog().to_vec(),
+                now_ms,
+            )
+            .with_pending_group_updates_from_excluding_many(&material, permanently_lost_device_ids);
+        }
+        if stage.record().status() != RevocationStatus::Complete {
+            let validator = InMemorySession::new();
+            validator.set_master_key_for_space(
+                material.state().space_id().clone(),
+                self.session
+                    .get_master_key()
+                    .map_err(|error| KeyEpochError::Repository(error.into()))?,
+            );
+            validator
+                .install_space_material(&material)
+                .map_err(|error| KeyEpochError::Repository(error.into()))?;
+        }
+        let record = repository
+            .commit_revocation_recovery(&stage, &material)
+            .await?;
+        if record.status() != RevocationStatus::RecoveryRequired {
+            self.active_security_session
+                .install_current_material(&material)
+                .await
+                .map_err(map_key_epoch_security_session_error)?;
+        }
+        Self::group_revocation_result(repository, &record).await
+    }
+
+    async fn resume_group_revocations(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<GroupRevocationResult>, KeyEpochError> {
+        let repository = self.key_epoch_repository.as_ref();
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|error| KeyEpochError::Repository(error.into()))?;
+        let records = repository
+            .list_incomplete_revocations()
+            .await?
+            .into_iter()
+            .filter(|record| record.space_id() == &space_id)
+            .collect::<Vec<_>>();
+        let mut results = Vec::with_capacity(records.len());
+        for mut record in records {
+            if record.status() == RevocationStatus::RecoveryRequired {
+                results.push(Self::group_revocation_result(repository, &record).await?);
+                continue;
+            }
+            if record.status() == RevocationStatus::Prepared {
+                match repository.load_space_material(record.space_id()).await {
+                    Ok(Some(_)) => {}
+                    Ok(None)
+                    | Err(
+                        KeyEpochError::DecryptionFailed
+                        | KeyEpochError::PersistedStateIntegrityFailed,
+                    ) => {
+                        record = repository
+                            .resolve_prepared_revocation(
+                                record.revocation_id(),
+                                PreparedRevocationResolution::RecoveryRequired(None),
+                                now_ms,
+                            )
+                            .await?;
+                        results.push(Self::group_revocation_result(repository, &record).await?);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            results.push(
+                self.revoke_group_member(
+                    record.target_device_id(),
+                    record.retained_recipients(),
+                    now_ms,
+                )
+                .await?,
+            );
+        }
+        Ok(results)
+    }
+
+    async fn acknowledge_space_group_update(
+        &self,
+        update_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, KeyEpochError> {
+        let repository = self.key_epoch_repository.as_ref();
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|error| KeyEpochError::Repository(error.into()))?;
+        let Some(mut material) = repository.load_space_material(&space_id).await? else {
+            return Ok(false);
+        };
+        if material.acknowledge_group_update(update_id, now_ms) {
+            repository.save_space_material(&material).await?;
+            return Ok(true);
+        }
+        for record in repository.list_incomplete_revocations().await? {
+            if record.space_id() != &space_id {
+                continue;
+            }
+            let Some(update) = self
+                .pending_group_updates(record.revocation_id())
+                .await?
+                .into_iter()
+                .find(|update| update.update_id() == update_id)
+            else {
+                continue;
+            };
+            self.acknowledge_group_update(record.revocation_id(), update.recipient(), now_ms)
+                .await?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    async fn group_revocation_result(
+        repository: &dyn RevocationRepositoryPort,
+        record: &RevocationRecord,
+    ) -> Result<GroupRevocationResult, KeyEpochError> {
+        let staged = repository
+            .load_staged_revocation(record.revocation_id())
+            .await?;
+        let pending_recipient_device_ids = if matches!(
+            record.status(),
+            RevocationStatus::Complete | RevocationStatus::RecoveryRequired
+        ) {
+            Vec::new()
+        } else if let Some(stage) = staged {
+            stage.pending_recipient_device_ids()
+        } else {
+            record.retained_recipients().to_vec()
+        };
+        Ok(GroupRevocationResult::Reliable {
+            revocation_id: record.revocation_id().clone(),
+            status: record.status(),
+            removed_device_ids: record.removed_device_ids(),
+            pending_recipient_device_ids,
+            updated_at_ms: record.updated_at_ms(),
+        })
+    }
+
+    #[cfg(test)]
+    async fn restore_join_install(
+        &self,
+        scope: &KeyScope,
+        previous: Option<(KeySlot, Kek)>,
+        previous_session: super::session::SessionSnapshot,
+    ) {
+        self.session.restore(previous_session);
+        match previous {
+            Some((keyslot, kek)) => {
+                if let Err(error) = self.key_material.store_kek(scope, &kek).await {
+                    error!(error = %error, "failed to restore previous KEK after join failure");
+                }
+                if let Err(error) = self.key_material.store_keyslot(&keyslot).await {
+                    error!(error = %error, "failed to restore previous keyslot after join failure");
+                }
+            }
+            None => {
+                if let Err(error) = self.key_material.delete_keyslot(scope).await {
+                    warn!(error = %error, "failed to remove staged keyslot after join failure");
+                }
+                if let Err(error) = self.key_material.delete_kek(scope).await {
+                    warn!(error = %error, "failed to remove staged KEK after join failure");
+                }
+            }
+        }
+    }
+
+    async fn activate_session(
+        &self,
+        space_id: &SpaceId,
+        master_key: MasterKey,
+    ) -> Result<(), SpaceAccessError> {
+        let repository = self.key_epoch_repository.as_ref();
+        let active_security_session = &self.active_security_session;
+        let restored_epoch = active_security_session
+            .restore_from_repository(space_id, master_key, repository)
+            .await
+            .map_err(map_active_security_session_error)?;
+        if let Some(group_epoch) = restored_epoch {
+            info!(group_epoch = group_epoch.value(), "空间会话安全材料已安装");
+        } else {
+            // 缺少记录表示既有 Legacy Space，不代表已经安全创建群组与 catalog。
+            info!("空间会话恢复未发现群组安全材料");
+        }
+        Ok(())
+    }
+
+    /// 私有 helper：执行首次初始化的核心步骤
+    /// （生成 KeySlot 草稿 → 派生 KEK → 生成 MasterKey → 包装 → 落盘 →
+    /// 写入会话 → 标记 Initialized）。任何中间步骤失败时按依赖反向回滚。
+    async fn do_first_time_init(
+        &self,
+        space_id: &SpaceId,
+        scope: &KeyScope,
+        passphrase: &DomainPassphrase,
+    ) -> Result<KeySlot, SpaceAccessError> {
+        const PATH: &str = "first_time_init";
+
+        let keyslot_draft = KeySlot::draft_v1(scope.clone())
+            .map_err(|e| map_and_log_local_crypto_error(e.to_string(), PATH, "draft_keyslot_v1"))?;
+        debug!("keyslot draft created");
+
+        let legacy = LegacyPassphrase(passphrase.expose().to_string());
+        let kek = v1_aead::derive_kek_argon2id(&legacy, &keyslot_draft.salt, &keyslot_draft.kdf)
+            .map_err(|e| map_and_log_kdf_error(e, PATH))?;
+        debug!("KEK derived");
+
+        let master_key = MasterKey::generate().map_err(|e| {
+            map_and_log_local_crypto_error(e.to_string(), PATH, "generate_master_key")
+        })?;
+        debug!("master key generated");
+
+        let blob = v1_aead::wrap_master_key_xchacha(&kek, &master_key)
+            .map_err(|e| map_and_log_local_crypto_error(e.to_string(), PATH, "wrap_master_key"))?;
+        debug!("master key wrapped");
+
+        let keyslot = keyslot_draft.finalize(WrappedMasterKey { blob });
+
+        if let Err(e) = self.key_material.store_kek(scope, &kek).await {
+            error!(path = PATH, error = %e, "store_kek failed");
+            return Err(map_encryption_error(e));
+        }
+        self.kek_observed.store(true, Ordering::Release);
+
+        if let Err(e) = self.key_material.store_keyslot(&keyslot).await {
+            error!(path = PATH, error = %e, "store_keyslot failed, rolling back KEK");
+            if let Err(err) = self.key_material.delete_keyslot(scope).await {
+                warn!(path = PATH, error = %err, "rollback delete_keyslot failed");
+            }
+            if let Err(err) = self.key_material.delete_kek(scope).await {
+                warn!(path = PATH, error = %err, "rollback delete_kek failed");
+            }
+            self.kek_observed.store(false, Ordering::Release);
+            return Err(map_encryption_error(e));
+        }
+
+        // session 写入是 in-memory 操作,不会失败——直接写。
+        // Phase C 起不再写 `.initialized_encryption` marker 文件;"已初始化"
+        // 真相由磁盘 keyslot 存在性 (`key_material.keyslot_exists()`) 回答,
+        // Profile readiness is committed by the current-Space identity owner.
+        if let Err(error) = self.activate_session(space_id, master_key).await {
+            self.session.clear();
+            if let Err(rollback_error) = self.key_material.delete_keyslot(scope).await {
+                warn!(path = PATH, error = %rollback_error, "rollback delete_keyslot failed");
+            }
+            if let Err(rollback_error) = self.key_material.delete_kek(scope).await {
+                warn!(path = PATH, error = %rollback_error, "rollback delete_kek failed");
+            }
+            self.kek_observed.store(false, Ordering::Release);
+            return Err(error);
+        }
+
+        Ok(keyslot)
+    }
+}
+
+#[async_trait]
+impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
+    async fn initialize(
+        &self,
+        space_id: &SpaceId,
+        passphrase: &DomainPassphrase,
+    ) -> Result<ActiveSpace, SpaceAccessError> {
+        const PATH: &str = "initialize";
+        let span = info_span!("infra.space_access.initialize", space_id = %space_id);
+        async {
+            info!("initializing new space");
+
+            if self.key_material.keyslot_exists().await.map_err(|e| {
+                error!(path = PATH, error = %e, "keyslot_exists probe failed");
+                SpaceAccessError::Internal(e.to_string())
+            })? {
+                info!(
+                    path = PATH,
+                    "initialize rejected: keyslot already exists on disk"
+                );
+                return Err(SpaceAccessError::AlreadyInitialized);
+            }
+
+            let profile = self.current_profile.current_profile().await.map_err(|e| {
+                error!(path = PATH, error = %e, "current_profile resolution failed");
+                SpaceAccessError::Internal(e.to_string())
+            })?;
+            let scope = key_scope_from_profile(&profile);
+            debug!(path = PATH, scope = %scope_identifier(&scope), "got key scope");
+
+            self.do_first_time_init(space_id, &scope, passphrase)
+                .await?;
+
+            info!("space initialized successfully");
+            Ok(ActiveSpace::new(space_id.clone()))
+        }
+        .instrument(span)
+        .await
+    }
+
+    async fn unlock(
+        &self,
+        space_id: &SpaceId,
+        passphrase: &DomainPassphrase,
+    ) -> Result<ActiveSpace, SpaceAccessError> {
+        const PATH: &str = "unlock";
+        let span = info_span!("infra.space_access.unlock", space_id = %space_id);
+        async {
+            info!("unlocking space with passphrase");
+
+            if !self.key_material.keyslot_exists().await.map_err(|e| {
+                error!(path = PATH, error = %e, "keyslot_exists probe failed");
+                SpaceAccessError::Internal(e.to_string())
+            })? {
+                info!(
+                    path = PATH,
+                    "unlock rejected: no keyslot on disk (not initialized)"
+                );
+                return Err(SpaceAccessError::NotInitialized);
+            }
+
+            let profile = self.current_profile.current_profile().await.map_err(|e| {
+                error!(path = PATH, error = %e, "current_profile resolution failed");
+                SpaceAccessError::Internal(e.to_string())
+            })?;
+            let scope = key_scope_from_profile(&profile);
+            debug!(path = PATH, scope = %scope_identifier(&scope), "got key scope");
+
+            let keyslot = self.key_material.load_keyslot(&scope).await.map_err(|e| {
+                warn!(path = PATH, error = %e, "load_keyslot failed");
+                map_encryption_error(e)
+            })?;
+
+            let wrapped_master_key = keyslot.wrapped_master_key.as_ref().ok_or_else(|| {
+                warn!(
+                    path = PATH,
+                    "keyslot on disk has no wrapped_master_key (corrupted key material)"
+                );
+                SpaceAccessError::CorruptedKeyMaterial
+            })?;
+
+            let legacy = LegacyPassphrase(passphrase.expose().to_string());
+            let kek = v1_aead::derive_kek_argon2id(&legacy, &keyslot.salt, &keyslot.kdf)
+                .map_err(|e| map_and_log_kdf_error(e, PATH))?;
+            debug!(path = PATH, "KEK derived from passphrase");
+
+            let master_key = v1_aead::unwrap_master_key_xchacha(&kek, &wrapped_master_key.blob)
+                .map_err(|e| map_and_log_unwrap_aead_error(e, PATH))?;
+            debug!(path = PATH, "master key unwrapped");
+
+            // 把派生出的 KEK 重新写入 keyring,保持 keyring 与最新口令对齐
+            // (让下次静默 startup 路径仍可命中)。失败仅 warn,不影响本次解锁。
+            //
+            // 优化:若本进程内已确认 keychain 中存在 KEK
+            // (`try_resume_session` / `do_first_time_init` /
+            // `derive_master_key_for_proof` 任一已置位 `kek_observed`),
+            // 此处 `unwrap` 已经成功——意味着本次派生出的 KEK 字节就是
+            // keychain 里那条记录的字节,再写一次没有信息增量,但在 macOS
+            // 上每次 set_secret 仍可能触发授权弹窗。因此跳过。
+            if self.kek_observed.load(Ordering::Acquire) {
+                debug!("skip store_kek refresh: KEK already observed in keychain this session");
+            } else if let Err(e) = self.key_material.store_kek(&scope, &kek).await {
+                warn!(error = %e, "store_kek refresh failed (non-fatal)");
+            } else {
+                self.kek_observed.store(true, Ordering::Release);
+            }
+
+            self.activate_session(space_id, master_key).await?;
+
+            info!("space unlocked successfully");
+            Ok(ActiveSpace::new(space_id.clone()))
+        }
+        .instrument(span)
+        .await
+    }
+
+    async fn is_unlocked(&self, _space_id: &SpaceId) -> bool {
+        self.session.is_ready()
+    }
+
+    async fn lock(&self, _space_id: &SpaceId) -> Result<(), SpaceAccessError> {
+        self.session.clear();
+        Ok(())
+    }
+
+    async fn try_resume_session(
+        &self,
+        space_id: &SpaceId,
+    ) -> Result<Option<ActiveSpace>, SpaceAccessError> {
+        const PATH: &str = "try_resume_session";
+        let span = info_span!("infra.space_access.try_resume_session", space_id = %space_id);
+        async {
+            info!("attempting silent session resume from keyring");
+
+            // session 已经在内存中(典型场景:用户刚 `initialize` 完成,前端
+            // setup 后的 onSetupComplete 回调又触发了一次 unlock flow
+            // → 这里)。已经有 master_key,没必要再走 load_kek + unwrap +
+            // set_master_key 这一整圈——尤其是 load_kek 在 macOS 上每次都可能
+            // 触发 keychain 授权弹窗。直接返回 Ok(Some) 表达"会话已就绪"。
+            if self.session.is_ready() {
+                info!("session already in-memory, skip keychain probe");
+                return Ok(Some(ActiveSpace::new(space_id.clone())));
+            }
+
+            if !self.key_material.keyslot_exists().await.map_err(|e| {
+                error!(path = PATH, error = %e, "keyslot_exists probe failed");
+                SpaceAccessError::Internal(e.to_string())
+            })? {
+                info!(path = PATH, "no keyslot on disk, no session to resume");
+                return Ok(None);
+            }
+
+            let profile = self.current_profile.current_profile().await.map_err(|e| {
+                error!(path = PATH, error = %e, "current_profile resolution failed");
+                SpaceAccessError::Internal(e.to_string())
+            })?;
+            let scope = key_scope_from_profile(&profile);
+            debug!(path = PATH, scope = %scope_identifier(&scope), "got key scope");
+
+            let keyslot = self.key_material.load_keyslot(&scope).await.map_err(|e| {
+                warn!(path = PATH, error = %e, "load_keyslot failed during resume");
+                map_encryption_error(e)
+            })?;
+            let wrapped_master_key = keyslot.wrapped_master_key.as_ref().ok_or_else(|| {
+                warn!(
+                    path = PATH,
+                    "keyslot on disk has no wrapped_master_key (corrupted key material)"
+                );
+                SpaceAccessError::CorruptedKeyMaterial
+            })?;
+
+            // 静默路径: 直接读 keyring 缓存的 KEK,不重新派生。
+            // load_kek 失败通常意味着 keyring 中没有这条 KEK——首次启动 /
+            // keyring 被清 / 跨设备 profile 迁移——属于业务正常路径,
+            // 上层会回退到要求用户重新输入口令走 unlock。warn 级别即可。
+            let kek = self.key_material.load_kek(&scope).await.map_err(|e| {
+                info!(
+                    path = PATH,
+                    error = %e,
+                    "load_kek from keyring failed; caller will fall back to passphrase unlock"
+                );
+                map_encryption_error(e)
+            })?;
+
+            let master_key = v1_aead::unwrap_master_key_xchacha(&kek, &wrapped_master_key.blob)
+                .map_err(|e| map_and_log_unwrap_aead_error(e, PATH))?;
+
+            // load_kek 成功 + unwrap 成功 ⇒ keychain 中 KEK 与本机 keyslot 匹配。
+            // 标记本进程已观察到该 KEK,后续 profile key access probe /
+            // unlock 路径无需再次访问 keychain。
+            self.kek_observed.store(true, Ordering::Release);
+
+            self.activate_session(space_id, master_key).await?;
+
+            info!("session resumed from keyring");
+            Ok(Some(ActiveSpace::new(space_id.clone())))
+        }
+        .instrument(span)
+        .await
+    }
+
+    async fn derive_subkey(&self, salt: &[u8], info: &[u8]) -> Result<[u8; 32], SpaceAccessError> {
+        const PATH: &str = "derive_subkey";
+        if !self.session.is_ready() {
+            warn!(path = PATH, "derive_subkey called while session not ready");
+            return Err(SpaceAccessError::NotUnlocked);
+        }
+        let okm = self.session.derive_stable_subkey(salt, info).map_err(|e| {
+            error!(path = PATH, error = %e, "derive stable session subkey failed");
+            map_encryption_error(e)
+        })?;
+        Ok(okm)
+    }
+
+    async fn current_session_proof_key(&self) -> Result<Option<ProofDerivedKey>, SpaceAccessError> {
+        const PATH: &str = "current_session_proof_key";
+        if !self.session.is_ready() {
+            return Ok(None);
+        }
+        let master_key = self.session.get_master_key().map_err(|e| {
+            error!(path = PATH, error = %e, "get_master_key from session failed");
+            map_encryption_error(e)
+        })?;
+        Ok(Some(ProofDerivedKey::from_bytes(master_key.into_bytes())))
+    }
+
+    async fn prepare_join_offer(
+        &self,
+        space_id: &SpaceId,
+        passphrase: &DomainPassphrase,
+    ) -> Result<JoinOffer, SpaceAccessError> {
+        const PATH: &str = "prepare_join_offer";
+        let span = info_span!("infra.space_access.prepare_join_offer", space_id = %space_id);
+        async {
+            info!("preparing sponsor join offer");
+
+            let already_initialized = self
+                .key_material
+                .keyslot_exists()
+                .await
+                .map_err(|e| {
+                    error!(path = PATH, error = %e, "keyslot_exists probe failed");
+                    SpaceAccessError::Internal(e.to_string())
+                })?;
+            debug!(path = PATH, already_initialized, "checked keyslot existence");
+
+            let profile = self
+                .current_profile
+                .current_profile()
+                .await
+                .map_err(|e| {
+                    error!(path = PATH, error = %e, "current_profile resolution failed");
+                    SpaceAccessError::Internal(e.to_string())
+                })?;
+            let scope = key_scope_from_profile(&profile);
+            debug!(path = PATH, scope = %scope_identifier(&scope), "got key scope");
+
+            // Branch A — 运行时已初始化的 sponsor 路径: 从 key_material 读已有 keyslot,
+            // 不重新生成 MasterKey。passphrase 参数此时不参与派生。
+            if already_initialized {
+                let _ = passphrase;
+                let keyslot = self
+                    .key_material
+                    .load_keyslot(&scope)
+                    .await
+                    .map_err(|e| {
+                        warn!(path = PATH, branch = "already_initialized", error = %e, "load_keyslot failed");
+                        map_encryption_error(e)
+                    })?;
+                let keyslot_blob = serde_json::to_vec(&keyslot).map_err(|e| {
+                    error!(
+                        path = PATH,
+                        branch = "already_initialized",
+                        error = %e,
+                        "serialize keyslot to wire blob failed"
+                    );
+                    SpaceAccessError::Internal(format!("serialize keyslot: {e}"))
+                })?;
+                let mut challenge_nonce = [0u8; 32];
+                rand::rng().fill_bytes(&mut challenge_nonce);
+                info!("sponsor join offer prepared (runtime, already initialized)");
+                return Ok(JoinOffer {
+                    space_id: space_id.clone(),
+                    keyslot_blob,
+                    challenge_nonce,
+                });
+            }
+
+            // Branch B — 首次 setup sponsor 路径: 未初始化,走完整 KEK 派生 +
+            // MasterKey 生成 + 包装 + 落盘 + 标记 Initialized。
+            let keyslot = self
+                .do_first_time_init(space_id, &scope, passphrase)
+                .await?;
+            let keyslot_blob = serde_json::to_vec(&keyslot).map_err(|e| {
+                error!(
+                    path = PATH,
+                    branch = "first_time_init",
+                    error = %e,
+                    "serialize freshly-initialized keyslot to wire blob failed"
+                );
+                SpaceAccessError::Internal(format!("serialize keyslot: {e}"))
+            })?;
+            let mut challenge_nonce = [0u8; 32];
+            rand::rng().fill_bytes(&mut challenge_nonce);
+
+            info!("sponsor join offer prepared");
+            Ok(JoinOffer {
+                space_id: space_id.clone(),
+                keyslot_blob,
+                challenge_nonce,
+            })
+        }
+        .instrument(span)
+        .await
+    }
+
+    async fn derive_master_key_for_proof(
+        &self,
+        offer: &JoinOffer,
+        passphrase: &DomainPassphrase,
+    ) -> Result<ProofDerivedKey, SpaceAccessError> {
+        const PATH: &str = "derive_master_key_for_proof";
+        let span = info_span!("infra.space_access.derive_master_key_for_proof", space_id = %offer.space_id);
+        async {
+            info!("deriving master key from pairing offer");
+
+            let keyslot: KeySlot = serde_json::from_slice(&offer.keyslot_blob).map_err(|e| {
+                warn!(
+                    path = PATH,
+                    error = %e,
+                    offer_blob_len = offer.keyslot_blob.len(),
+                    "failed to deserialize keyslot from offer blob (corrupted wire data)"
+                );
+                SpaceAccessError::CorruptedKeyMaterial
+            })?;
+            let scope = keyslot.scope.clone();
+            debug!(path = PATH, scope = %scope_identifier(&scope), "parsed keyslot from offer blob");
+
+            let wrapped_master_key = keyslot.wrapped_master_key.as_ref().ok_or_else(|| {
+                warn!(
+                    path = PATH,
+                    "offer keyslot has no wrapped_master_key (corrupted offer)"
+                );
+                SpaceAccessError::CorruptedKeyMaterial
+            })?;
+
+            let legacy = LegacyPassphrase(passphrase.expose().to_string());
+            let kek = v1_aead::derive_kek_argon2id(&legacy, &keyslot.salt, &keyslot.kdf)
+                .map_err(|e| map_and_log_kdf_error(e, PATH))?;
+            debug!(path = PATH, "KEK derived from passphrase and offer keyslot");
+
+            // 先 unwrap 验证 KEK + keyslot 真的匹配,再动本机持久状态。
+            // 之前的顺序是 store_kek → store_keyslot → unwrap, unwrap 失败时
+            // 走 delete_keyslot/delete_kek 回滚——但 store 是**覆盖式**写入,
+            // 此时本机原有 KEK / keyslot 已被替换,删除回滚等于把"已 setup
+            // 且能解锁"的设备打回未 setup 状态(switch_space/mod.rs 头注里
+            // 担心的"derive_master_key_for_proof 已经覆写了那种情况下设备
+            // 需要手动 factory_reset"就来源于此)。把 unwrap 抬到 store
+            // 之前,失败时直接返回, 本机原状一字不动。
+            let master_key = v1_aead::unwrap_master_key_xchacha(&kek, &wrapped_master_key.blob)
+                .map_err(|e| map_and_log_unwrap_aead_error(e, PATH))?;
+            debug!(path = PATH, "master key unwrapped");
+
+            // unwrap 已确认 KEK + keyslot 匹配, 再覆盖本机磁盘 / keyring。
+            // 此处仍有"store_keyslot 失败 → delete_kek 回滚把刚刚覆盖的本机
+            // 原 KEK 一并删掉"的窄窗口(需要 keyring/磁盘真实 IO 失败),
+            // 影响远小于 unwrap 失败这条常见路径, 留作后续单独修复。
+            if let Err(e) = self.key_material.store_kek(&scope, &kek).await {
+                error!(path = PATH, error = %e, "store_kek failed");
+                return Err(map_encryption_error(e));
+            }
+            self.kek_observed.store(true, Ordering::Release);
+
+            if let Err(e) = self.key_material.store_keyslot(&keyslot).await {
+                error!(path = PATH, error = %e, "store_keyslot failed, rolling back KEK");
+                if let Err(err) = self.key_material.delete_keyslot(&scope).await {
+                    warn!(path = PATH, error = %err, "rollback delete_keyslot failed");
+                }
+                if let Err(err) = self.key_material.delete_kek(&scope).await {
+                    warn!(path = PATH, error = %err, "rollback delete_kek failed");
+                }
+                self.kek_observed.store(false, Ordering::Release);
+                return Err(map_encryption_error(e));
+            }
+
+            // 把字节注入会话(让 sponsor 后续 verify 走 fallback 路径),
+            // 同时包装一份成不透明凭据返回 joiner 侧调用方。
+            // Phase C 起不再写 `.initialized_encryption` marker 文件;
+            // "本机已初始化" 的真相由磁盘 keyslot 文件存在性回答。
+            self.activate_session(&offer.space_id, master_key.clone()).await?;
+            let derived = ProofDerivedKey::from_bytes(master_key.into_bytes());
+
+            info!("master key derivation completed");
+            Ok(derived)
+        }
+        .instrument(span)
+        .await
+    }
+}
+
+impl RuntimeSpaceAccessAdapter {
+    async fn probe_profile_key_access(
+        &self,
+    ) -> Result<ProfileKeyAccessProbe, ProfileKeyAccessProbePortError> {
+        const PATH: &str = "probe_profile_key_access";
+        let span = info_span!("infra.space_access.probe_profile_key_access");
+        async {
+            if self.kek_observed.load(Ordering::Acquire) {
+                debug!(path = PATH, "kek_observed cached, skip keychain probe");
+                return Ok(ProfileKeyAccessProbe::Available);
+            }
+
+            let profile = self.current_profile.current_profile().await.map_err(|error| {
+                error!(path = PATH, error = %error, "current_profile resolution failed");
+                ProfileKeyAccessProbePortError
+            })?;
+            let scope = key_scope_from_profile(&profile);
+
+            match self.key_material.load_kek(&scope).await {
+                Ok(_) => {
+                    self.kek_observed.store(true, Ordering::Release);
+                    debug!(path = PATH, "profile key access verified");
+                    Ok(ProfileKeyAccessProbe::Available)
+                }
+                Err(EncryptionError::PermissionDenied) => {
+                    info!(path = PATH, "profile key access denied");
+                    Ok(ProfileKeyAccessProbe::PermissionDenied)
+                }
+                Err(EncryptionError::KeyringError(message)) => {
+                    warn!(path = PATH, error = %message, "profile key store temporarily unavailable");
+                    Ok(ProfileKeyAccessProbe::TemporarilyUnavailable)
+                }
+                Err(EncryptionError::KeyNotFound) => {
+                    info!(path = PATH, "profile key is missing");
+                    Ok(ProfileKeyAccessProbe::Missing)
+                }
+                Err(error) => {
+                    error!(path = PATH, error = %error, "unexpected profile key access failure");
+                    Err(ProfileKeyAccessProbePortError)
+                }
+            }
+        }
+        .instrument(span)
+        .await
+    }
+}
+
+// ---- Intent ports ----
+//
+// The single adapter satisfies every narrow space-access intent port by
+// delegating to its aggregate-store methods (UFCS disambiguates the same-named
+// methods). The composition root coerces one
+// `Arc<RuntimeSpaceAccessAdapter>` into each port (see ports.md §8.3).
+//
+// These impls live in a private submodule so the narrow port traits do not
+// leak into other method-resolution scopes (they share method names with the
+// aggregate store); trait-impl coherence still applies crate-wide.
+mod intent_ports {
+    use super::*;
+    use uc_application::deps::{
+        InitializeSpacePort, IsSpaceUnlockedPort, LockSpacePort, ProbeProfileKeyAccessPort,
+        ResumeSpaceSessionPort,
+    };
+    use uc_core::ports::space::{
+        CurrentSessionProofKeyPort, DeriveProofKeyPort, DeriveSpaceSubkeyPort,
+        PrepareAdmissionTargetAccessPort, PrepareJoinOfferPort,
+    };
+
+    #[async_trait]
+    impl PrepareAdmissionTargetAccessPort for RuntimeSpaceAccessAdapter {
+        async fn prepare_target_access(
+            &self,
+            target_space_id: &SpaceId,
+            passphrase: &DomainPassphrase,
+        ) -> Result<PreparedAdmissionTargetAccess, SpaceAccessError> {
+            RuntimeSpaceAccessAdapter::prepare_target_access(self, target_space_id, passphrase)
+                .await
+        }
+    }
+
+    #[async_trait]
+    impl InitializeSpacePort for RuntimeSpaceAccessAdapter {
+        async fn initialize(
+            &self,
+            space_id: &SpaceId,
+            passphrase: &DomainPassphrase,
+        ) -> Result<ActiveSpace, SpaceAccessError> {
+            SpaceAccessStore::initialize(self, space_id, passphrase).await
+        }
+    }
+
+    #[async_trait]
+    impl IsSpaceUnlockedPort for RuntimeSpaceAccessAdapter {
+        async fn is_unlocked(&self, space_id: &SpaceId) -> bool {
+            SpaceAccessStore::is_unlocked(self, space_id).await
+        }
+    }
+
+    #[async_trait]
+    impl LockSpacePort for RuntimeSpaceAccessAdapter {
+        async fn lock(&self, space_id: &SpaceId) -> Result<(), SpaceAccessError> {
+            SpaceAccessStore::lock(self, space_id).await
+        }
+    }
+
+    #[async_trait]
+    impl ResumeSpaceSessionPort for RuntimeSpaceAccessAdapter {
+        async fn try_resume_session(
+            &self,
+            space_id: &SpaceId,
+        ) -> Result<Option<ActiveSpace>, SpaceAccessError> {
+            SpaceAccessStore::try_resume_session(self, space_id).await
+        }
+    }
+
+    #[async_trait]
+    impl ProbeProfileKeyAccessPort for RuntimeSpaceAccessAdapter {
+        async fn probe_profile_key_access(
+            &self,
+        ) -> Result<ProfileKeyAccessProbe, ProfileKeyAccessProbePortError> {
+            RuntimeSpaceAccessAdapter::probe_profile_key_access(self).await
+        }
+    }
+
+    #[async_trait]
+    impl DeriveSpaceSubkeyPort for RuntimeSpaceAccessAdapter {
+        async fn derive_subkey(
+            &self,
+            salt: &[u8],
+            info: &[u8],
+        ) -> Result<[u8; 32], SpaceAccessError> {
+            SpaceAccessStore::derive_subkey(self, salt, info).await
+        }
+    }
+
+    #[async_trait]
+    impl CurrentSessionProofKeyPort for RuntimeSpaceAccessAdapter {
+        async fn current_session_proof_key(
+            &self,
+        ) -> Result<Option<ProofDerivedKey>, SpaceAccessError> {
+            SpaceAccessStore::current_session_proof_key(self).await
+        }
+    }
+
+    #[async_trait]
+    impl PrepareJoinOfferPort for RuntimeSpaceAccessAdapter {
+        async fn prepare_join_offer(
+            &self,
+            space_id: &SpaceId,
+            passphrase: &DomainPassphrase,
+        ) -> Result<JoinOffer, SpaceAccessError> {
+            SpaceAccessStore::prepare_join_offer(self, space_id, passphrase).await
+        }
+    }
+
+    #[async_trait]
+    impl DeriveProofKeyPort for RuntimeSpaceAccessAdapter {
+        async fn derive_master_key_for_proof(
+            &self,
+            offer: &JoinOffer,
+            passphrase: &DomainPassphrase,
+        ) -> Result<ProofDerivedKey, SpaceAccessError> {
+            SpaceAccessStore::derive_master_key_for_proof(self, offer, passphrase).await
+        }
+    }
+}
+
+#[async_trait]
+impl GroupRevocationPort for RuntimeSpaceAccessAdapter {
+    async fn revoke_group_member(
+        &self,
+        target: &DeviceId,
+        retained_recipients: &[DeviceId],
+        now_ms: i64,
+    ) -> Result<GroupRevocationResult, KeyEpochError> {
+        RuntimeSpaceAccessAdapter::revoke_group_member(self, target, retained_recipients, now_ms)
+            .await
+    }
+
+    async fn acknowledge_group_update(
+        &self,
+        revocation_id: &RevocationId,
+        recipient: &DeviceId,
+        now_ms: i64,
+    ) -> Result<GroupRevocationResult, KeyEpochError> {
+        RuntimeSpaceAccessAdapter::acknowledge_group_update(self, revocation_id, recipient, now_ms)
+            .await
+    }
+
+    async fn apply_group_epoch_update(&self, payload: &[u8]) -> Result<GroupEpoch, KeyEpochError> {
+        RuntimeSpaceAccessAdapter::apply_group_epoch_update(self, payload).await
+    }
+
+    async fn pending_group_updates(
+        &self,
+        revocation_id: &RevocationId,
+    ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
+        RuntimeSpaceAccessAdapter::pending_group_updates(self, revocation_id).await
+    }
+
+    async fn query_group_revocation(
+        &self,
+        revocation_id: &RevocationId,
+    ) -> Result<Option<GroupRevocationResult>, KeyEpochError> {
+        RuntimeSpaceAccessAdapter::query_group_revocation(self, revocation_id).await
+    }
+
+    async fn current_group_revocation(
+        &self,
+    ) -> Result<Option<GroupRevocationResult>, KeyEpochError> {
+        RuntimeSpaceAccessAdapter::current_group_revocation(self).await
+    }
+
+    async fn continue_group_revocation(
+        &self,
+        revocation_id: &RevocationId,
+        permanently_lost_device_ids: &[DeviceId],
+        now_ms: i64,
+    ) -> Result<GroupRevocationResult, KeyEpochError> {
+        RuntimeSpaceAccessAdapter::continue_group_revocation(
+            self,
+            revocation_id,
+            permanently_lost_device_ids,
+            now_ms,
+        )
+        .await
+    }
+
+    async fn resume_group_revocations(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<GroupRevocationResult>, KeyEpochError> {
+        RuntimeSpaceAccessAdapter::resume_group_revocations(self, now_ms).await
+    }
+
+    async fn due_space_group_updates(
+        &self,
+        now_ms: i64,
+        online_peer: Option<DeviceId>,
+    ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|source| KeyEpochError::Repository(source.into()))?;
+        self.key_epoch_repository
+            .due_group_updates(&space_id, now_ms, online_peer)
+            .await
+    }
+
+    async fn record_space_group_update_failures(
+        &self,
+        failures: &[(String, GroupUpdateDispatchError)],
+        now_ms: i64,
+    ) -> Result<usize, KeyEpochError> {
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|source| KeyEpochError::Repository(source.into()))?;
+        self.key_epoch_repository
+            .record_group_update_failures(&space_id, failures, now_ms)
+            .await
+    }
+
+    async fn acknowledge_space_group_update(
+        &self,
+        update_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, KeyEpochError> {
+        RuntimeSpaceAccessAdapter::acknowledge_space_group_update(self, update_id, now_ms).await
+    }
+}
+
+fn bootstrap_result(record: LegacyBootstrapRecord) -> Result<GroupBootstrapResult, BootstrapError> {
+    match record.status() {
+        LegacyBootstrapStatus::AwaitingReadmission => {
+            Ok(GroupBootstrapResult::AwaitingReadmission {
+                bootstrap_id: record.bootstrap_id().clone(),
+                pending_members: record.pending_readmission().len(),
+            })
+        }
+        LegacyBootstrapStatus::Complete => Ok(GroupBootstrapResult::Complete {
+            bootstrap_id: record.bootstrap_id().clone(),
+        }),
+        LegacyBootstrapStatus::RecoveryRequired => Ok(GroupBootstrapResult::RecoveryRequired {
+            bootstrap_id: record.bootstrap_id().clone(),
+        }),
+        LegacyBootstrapStatus::Prepared | LegacyBootstrapStatus::Staged => {
+            Err(BootstrapError::InvalidRecord)
+        }
+    }
+}
+
+#[async_trait]
+impl GroupBootstrapPort for RuntimeSpaceAccessAdapter {
+    async fn bootstrap_legacy_space(
+        &self,
+        sponsor: &DeviceId,
+        retained_members: &[DeviceId],
+        now_ms: i64,
+    ) -> Result<GroupBootstrapResult, BootstrapError> {
+        let repository = self.legacy_bootstrap_repository.as_ref();
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|_| BootstrapError::CryptographicState)?;
+        let prepared = LegacyBootstrapRecord::prepare(
+            BootstrapId::generate(),
+            space_id.clone(),
+            sponsor.clone(),
+            retained_members.to_vec(),
+            now_ms,
+        )?;
+        let record = repository.begin_legacy_bootstrap(&prepared).await?;
+        let bootstrap_id = record.bootstrap_id().clone();
+        let material = match record.status() {
+            LegacyBootstrapStatus::Prepared => {
+                let sponsor_state = MlsGroupEngine::create_sponsor(
+                    space_id.as_ref().as_bytes(),
+                    record.sponsor_device_id().as_str().as_bytes(),
+                )
+                .map_err(|_| BootstrapError::CryptographicState)?;
+                let material = self
+                    .session
+                    .create_legacy_bootstrap_material_in_group(
+                        &space_id,
+                        ProtectionGroupId::from_string(record.bootstrap_id().as_str())
+                            .map_err(|_| BootstrapError::InvalidBootstrapId)?,
+                        sponsor_state.into_bytes(),
+                        now_ms,
+                    )
+                    .map_err(|_| BootstrapError::CryptographicState)?;
+                let mut staged_record = record;
+                staged_record.transition_to(LegacyBootstrapStatus::Staged, now_ms)?;
+                let stage = LegacyBootstrapStage::new(staged_record, material.clone())?;
+                repository.stage_legacy_bootstrap(&stage).await?;
+                material
+            }
+            LegacyBootstrapStatus::Staged => repository
+                .load_legacy_bootstrap_stage(record.bootstrap_id())
+                .await?
+                .ok_or(BootstrapError::InvalidStage)?
+                .material()
+                .clone(),
+            LegacyBootstrapStatus::AwaitingReadmission
+            | LegacyBootstrapStatus::Complete
+            | LegacyBootstrapStatus::RecoveryRequired => return bootstrap_result(record),
+        };
+        let activated = repository
+            .activate_legacy_bootstrap(&bootstrap_id, now_ms)
+            .await?;
+        self.active_security_session
+            .install_current_material(&material)
+            .await
+            .map_err(map_bootstrap_security_session_error)?;
+        bootstrap_result(activated)
+    }
+
+    async fn acknowledge_legacy_readmission(
+        &self,
+        bootstrap_id: &BootstrapId,
+        member: &DeviceId,
+        now_ms: i64,
+    ) -> Result<GroupBootstrapResult, BootstrapError> {
+        let repository = self.legacy_bootstrap_repository.as_ref();
+        bootstrap_result(
+            repository
+                .acknowledge_legacy_readmission(bootstrap_id, member, now_ms)
+                .await?,
+        )
+    }
+
+    async fn withdraw_legacy_readmission(
+        &self,
+        bootstrap_id: &BootstrapId,
+        member: &DeviceId,
+        now_ms: i64,
+    ) -> Result<GroupBootstrapResult, BootstrapError> {
+        let repository = self.legacy_bootstrap_repository.as_ref();
+        bootstrap_result(
+            repository
+                .acknowledge_legacy_readmission(bootstrap_id, member, now_ms)
+                .await?,
+        )
+    }
+
+    async fn query_legacy_bootstrap(
+        &self,
+        bootstrap_id: &BootstrapId,
+    ) -> Result<Option<GroupBootstrapResult>, BootstrapError> {
+        let repository = self.legacy_bootstrap_repository.as_ref();
+        repository
+            .get_legacy_bootstrap(bootstrap_id)
+            .await?
+            .map(bootstrap_result)
+            .transpose()
+    }
+
+    async fn resume_legacy_bootstraps(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<GroupBootstrapResult>, BootstrapError> {
+        let repository = self.legacy_bootstrap_repository.as_ref();
+        let active_space_id = self
+            .session
+            .current_space_id()
+            .map_err(|_| BootstrapError::CryptographicState)?;
+        let records = repository
+            .list_incomplete_legacy_bootstraps_for_space(&active_space_id)
+            .await?;
+        let active_material = self
+            .key_epoch_repository
+            .load_space_material(&active_space_id)
+            .await
+            .map_err(|error| BootstrapError::Repository(error.to_string()))?;
+        let mut results = Vec::with_capacity(records.len());
+        for record in records {
+            if active_material.as_ref().is_some_and(|material| {
+                material.state().mode() == SpaceSecurityMode::Ready
+                    && material
+                        .state()
+                        .protection_group_id()
+                        .is_some_and(|group_id| group_id.as_str() != record.bootstrap_id().as_str())
+            }) {
+                continue;
+            }
+            match record.status() {
+                LegacyBootstrapStatus::Prepared | LegacyBootstrapStatus::Staged => {
+                    results.push(
+                        self.bootstrap_legacy_space(
+                            record.sponsor_device_id(),
+                            record.pending_readmission(),
+                            now_ms,
+                        )
+                        .await?,
+                    );
+                }
+                LegacyBootstrapStatus::AwaitingReadmission => {
+                    results.push(bootstrap_result(record)?);
+                }
+                LegacyBootstrapStatus::Complete | LegacyBootstrapStatus::RecoveryRequired => {
+                    results.push(bootstrap_result(record)?);
+                }
+            }
+        }
+        Ok(results)
+    }
+}
+
+#[async_trait]
+impl SpaceProtectionStatusPort for RuntimeSpaceAccessAdapter {
+    async fn query_space_protection(
+        &self,
+        members: &[DeviceId],
+    ) -> Result<SpaceProtectionSnapshot, SpaceProtectionError> {
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|_| SpaceProtectionError::Unavailable)?;
+        let key_epoch_repository = self.key_epoch_repository.as_ref();
+        let material = key_epoch_repository
+            .load_space_material(&space_id)
+            .await
+            .map_err(|error| SpaceProtectionError::Repository(error.to_string()))?;
+        let legacy_bootstrap = self
+            .legacy_bootstrap_repository
+            .list_non_complete_legacy_bootstraps_for_space(&space_id)
+            .await
+            .map_err(|error| SpaceProtectionError::Repository(error.to_string()))?
+            .into_iter()
+            .find(|record| {
+                material.as_ref().is_none_or(|material| {
+                    material.state().mode() != SpaceSecurityMode::Ready
+                        || material
+                            .state()
+                            .protection_group_id()
+                            .is_none_or(|group_id| {
+                                group_id.as_str() == record.bootstrap_id().as_str()
+                            })
+                })
+            });
+        let mode = match (material.as_ref(), legacy_bootstrap.as_ref()) {
+            (_, Some(record)) if record.status() == LegacyBootstrapStatus::RecoveryRequired => {
+                SpaceProtectionMode::Migrating
+            }
+            (Some(material), _) => material.state().mode().into(),
+            (None, Some(_)) => SpaceProtectionMode::Migrating,
+            (None, None) => SpaceProtectionMode::Legacy,
+        };
+        let active_group = if mode == SpaceProtectionMode::Ready {
+            let material = material.as_ref().ok_or(SpaceProtectionError::Corrupted)?;
+            if material.group_state().is_empty() {
+                return Err(SpaceProtectionError::Corrupted);
+            }
+            Some(MlsClientState::from_bytes(material.group_state().to_vec()))
+        } else {
+            None
+        };
+        let member_status =
+            |member: &DeviceId| -> Result<MemberProtectionStatus, SpaceProtectionError> {
+                if legacy_bootstrap.as_ref().is_some_and(|record| {
+                    record.status() == LegacyBootstrapStatus::AwaitingReadmission
+                        && record
+                            .pending_readmission()
+                            .iter()
+                            .any(|pending| pending == member)
+                }) {
+                    return Ok(MemberProtectionStatus::AwaitingReadmission);
+                }
+                match mode {
+                    SpaceProtectionMode::Legacy => Ok(MemberProtectionStatus::LegacyUnprotected),
+                    SpaceProtectionMode::Migrating => Ok(MemberProtectionStatus::RecoveryRequired),
+                    SpaceProtectionMode::Ready => {
+                        let group = active_group
+                            .as_ref()
+                            .ok_or(SpaceProtectionError::Corrupted)?;
+                        let is_active = MlsGroupEngine::contains_active_member(
+                            group,
+                            member.as_str().as_bytes(),
+                        )
+                        .map_err(|_| SpaceProtectionError::Corrupted)?;
+                        Ok(if is_active {
+                            MemberProtectionStatus::Protected
+                        } else {
+                            MemberProtectionStatus::RequiresReadmission
+                        })
+                    }
+                }
+            };
+        let members = members
+            .iter()
+            .map(|device_id| {
+                Ok(MemberProtection {
+                    device_id: device_id.clone(),
+                    status: member_status(device_id)?,
+                })
+            })
+            .collect::<Result<Vec<_>, SpaceProtectionError>>()?;
+        Ok(SpaceProtectionSnapshot { mode, members })
+    }
+}
+
+#[async_trait]
+impl CurrentMemberSignaturePort for RuntimeSpaceAccessAdapter {
+    async fn current_member_epoch(&self) -> Result<u64, CurrentMemberSignatureError> {
+        let group = self.current_member_group_state().await?;
+        MlsGroupEngine::current_epoch(&group).map_err(|_| CurrentMemberSignatureError::InvalidState)
+    }
+
+    async fn current_membership_credential(
+        &self,
+        device_id: &DeviceId,
+    ) -> Result<MembershipCredential, CurrentMemberSignatureError> {
+        let group = self.current_member_group_state().await?;
+        let public_key = MlsGroupEngine::signing_public_key(&group)
+            .map_err(|_| CurrentMemberSignatureError::InvalidState)?;
+        let credential = MembershipCredential::new(
+            uc_core::membership::ED25519_SIGNATURE_ALGORITHM_V1,
+            public_key,
+        );
+        let current_instance =
+            MlsGroupEngine::current_member_instance(&group, device_id.as_str().as_bytes())
+                .map_err(|_| CurrentMemberSignatureError::InvalidState)?;
+        if credential.member_instance_id(device_id) != current_instance {
+            return Err(CurrentMemberSignatureError::InvalidState);
+        }
+        Ok(credential)
+    }
+
+    async fn current_member_instance(
+        &self,
+        device_id: &DeviceId,
+    ) -> Result<uc_core::membership::MemberInstanceId, CurrentMemberSignatureError> {
+        let group = self.current_member_group_state().await?;
+        MlsGroupEngine::current_member_instance(&group, device_id.as_str().as_bytes())
+            .map_err(|_| CurrentMemberSignatureError::InvalidState)
+    }
+
+    async fn sign_current_member_payload(
+        &self,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, CurrentMemberSignatureError> {
+        let group = self.current_member_group_state().await?;
+        MlsGroupEngine::sign_member_payload(&group, payload)
+            .map_err(|_| CurrentMemberSignatureError::InvalidState)
+    }
+
+    async fn verify_current_member_payload(
+        &self,
+        member: &DeviceId,
+        payload: &[u8],
+        signature: &[u8],
+    ) -> Result<bool, CurrentMemberSignatureError> {
+        let group = self.current_member_group_state().await?;
+        MlsGroupEngine::verify_member_payload(
+            &group,
+            member.as_str().as_bytes(),
+            payload,
+            signature,
+        )
+        .map_err(|_| CurrentMemberSignatureError::InvalidState)
+    }
+
+    async fn verify_member_instance_payload(
+        &self,
+        member: &DeviceId,
+        member_instance: uc_core::membership::MemberInstanceId,
+        payload: &[u8],
+        signature: &[u8],
+    ) -> Result<bool, CurrentMemberSignatureError> {
+        let group = self.current_member_group_state().await?;
+        MlsGroupEngine::verify_member_instance_payload(
+            &group,
+            member.as_str().as_bytes(),
+            member_instance,
+            payload,
+            signature,
+        )
+        .map_err(|_| CurrentMemberSignatureError::InvalidState)
+    }
+}
+
+#[async_trait]
+impl PrepareSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
+    async fn prepare_sponsor_admission_security(
+        &self,
+        mut request: SponsorAdmissionSecurityRequest,
+    ) -> Result<SponsorPreparedAdmissionSecurity, AdmissionSecurityTransitionError> {
+        let repository = self.key_epoch_repository.as_ref();
+        let current = repository
+            .load_space_material(&request.space_id)
+            .await
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?
+            .ok_or(AdmissionSecurityTransitionError::InvalidState)?;
+        if current.state().mode() != SpaceSecurityMode::Ready || current.group_state().is_empty() {
+            return Err(AdmissionSecurityTransitionError::InvalidState);
+        }
+
+        request.existing_recipients.sort_by(|left, right| {
+            left.credential_id
+                .cmp(&right.credential_id)
+                .then_with(|| left.device_id.as_str().cmp(right.device_id.as_str()))
+        });
+        if request.existing_recipients.windows(2).any(|pair| {
+            pair[0].credential_id == pair[1].credential_id || pair[0].device_id == pair[1].device_id
+        }) {
+            return Err(AdmissionSecurityTransitionError::InvalidState);
+        }
+
+        let admission = MlsGroupEngine::admit_member(
+            &MlsClientState::from_bytes(current.group_state().to_vec()),
+            &request.candidate_identity,
+            &request.candidate_key_package,
+        )
+        .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        let target_epoch = GroupEpoch::new(admission.epoch);
+        let mut next = self
+            .session
+            .rotate_space_material(
+                &current,
+                admission.sponsor_state.as_bytes().to_vec(),
+                target_epoch,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        let target_key_catalog = super::export_admission_content_key_catalog(&next)
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        let encrypted_key_catalog = seal_group_catalog(&admission.wrapping_key, &next)
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        let group_update = GroupEpochUpdate {
+            version: 1,
+            group_epoch: admission.epoch,
+            commit: admission.commit.clone(),
+            encrypted_key_catalog,
+        };
+        let update_payload = serde_json::to_vec(&group_update)
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        let existing_member_deliveries = request
+            .existing_recipients
+            .iter()
+            .map(|recipient| PreparedMemberSecurityDelivery {
+                recipient: recipient.device_id.clone(),
+                credential_id: recipient.credential_id,
+                payload: update_payload.clone(),
+            })
+            .collect::<Vec<_>>();
+        next.add_pending_group_updates(
+            request.existing_recipients.iter().map(|recipient| {
+                PendingGroupUpdate::persistent(recipient.device_id.clone(), update_payload.clone())
+            }),
+            chrono::Utc::now().timestamp_millis(),
+        );
+        let target_key_catalog_bytes = target_key_catalog
+            .encode()
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        let admission_bundle_digest = admission_bundle_digest(
+            request.candidate_core_digest,
+            &admission.welcome,
+            &target_key_catalog_bytes,
+            &existing_member_deliveries,
+        );
+        let transition_input = AdmissionSecurityTransitionInput {
+            attempt_id: request.attempt_id,
+            base_history_position: request.base_history_position,
+            candidate_core_digest: request.candidate_core_digest,
+            key_catalog_digest: target_key_catalog.digest(),
+            admission_bundle_digest,
+        };
+        let public_commitment = MlsGroupEngine::derive_public_admission_commitment(
+            &admission.sponsor_state,
+            transition_input.attempt_id,
+            transition_input.base_history_position,
+            transition_input.candidate_core_digest,
+            &admission.commit,
+            transition_input.key_catalog_digest,
+            transition_input.admission_bundle_digest,
+        )
+        .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        let target_protection_group_id = next
+            .state()
+            .protection_group_id()
+            .ok_or(AdmissionSecurityTransitionError::InvalidState)?
+            .as_str()
+            .to_owned();
+
+        Ok(SponsorPreparedAdmissionSecurity {
+            staged_state: postcard::to_stdvec(&next)
+                .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?,
+            commit: admission.commit,
+            welcome: admission.welcome,
+            public_commitment,
+            target_protection_group_id,
+            target_key_catalog,
+            existing_member_deliveries,
+        })
+    }
+}
+
+#[async_trait]
+impl ActivateSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
+    async fn activate_sponsor_admission_security(
+        &self,
+        request: ActivateSponsorAdmissionSecurityRequest,
+    ) -> Result<(), AdmissionSecurityTransitionError> {
+        let repository = self.key_epoch_repository.as_ref();
+        let staged: SpaceKeyMaterial = postcard::from_bytes(&request.staged_state)
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        if staged.state().space_id() != &request.space_id
+            || staged.state().epoch().value() != request.expected_commitment.target_epoch
+        {
+            return Err(AdmissionSecurityTransitionError::InvalidState);
+        }
+        let catalog = super::export_admission_content_key_catalog(&staged)
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        let expected = &request.expected_commitment;
+        let rederived = MlsGroupEngine::derive_public_admission_commitment(
+            &MlsClientState::from_bytes(staged.group_state().to_vec()),
+            expected.attempt_id,
+            expected.base_history_position.clone(),
+            expected.candidate_core_digest,
+            &request.commit,
+            catalog.digest(),
+            expected.admission_bundle_digest,
+        )
+        .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        if &rederived != expected {
+            return Err(AdmissionSecurityTransitionError::CommitmentMismatch);
+        }
+        if repository
+            .load_space_material(&request.space_id)
+            .await
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?
+            .as_ref()
+            .is_some_and(|current| current == &staged)
+        {
+            info!(
+                group_epoch = staged.state().epoch().value(),
+                pending_group_update_count = staged.pending_group_updates().len(),
+                "Sponsor 安全状态激活命中幂等持久状态"
+            );
+            self.active_security_session
+                .install_current_material(&staged)
+                .await
+                .map_err(map_admission_security_session_error)?;
+            return Ok(());
+        }
+        repository
+            .save_space_material(&staged)
+            .await
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        info!(
+            group_epoch = staged.state().epoch().value(),
+            pending_group_update_count = staged.pending_group_updates().len(),
+            "Sponsor 安全状态已持久化"
+        );
+        self.active_security_session
+            .install_current_material(&staged)
+            .await
+            .map_err(map_admission_security_session_error)?;
+        info!(
+            group_epoch = staged.state().epoch().value(),
+            "Sponsor 安全状态已安装到活动会话"
+        );
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ActivateCompletionHelperAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
+    async fn activate_completion_helper_admission_security(
+        &self,
+        request: ActivateCompletionHelperAdmissionSecurityRequest,
+    ) -> Result<(), AdmissionSecurityTransitionError> {
+        let repository = self.key_epoch_repository.as_ref();
+        let delivery = request
+            .existing_member_deliveries
+            .iter()
+            .filter(|delivery| {
+                delivery.recipient == request.helper_device_id
+                    && delivery.credential_id == request.helper_credential_id
+            })
+            .collect::<Vec<_>>();
+        if delivery.len() != 1 {
+            return Err(AdmissionSecurityTransitionError::InvalidState);
+        }
+        let expected = &request.expected_commitment;
+        let bundle_digest = admission_bundle_digest(
+            request.candidate_core_digest,
+            &request.security_welcome,
+            &request.target_key_catalog,
+            &request.existing_member_deliveries,
+        );
+        if expected.attempt_id != request.attempt_id
+            || expected.candidate_core_digest != request.candidate_core_digest
+            || expected.admission_bundle_digest != bundle_digest
+        {
+            return Err(AdmissionSecurityTransitionError::CommitmentMismatch);
+        }
+
+        let update: GroupEpochUpdate = serde_json::from_slice(&delivery[0].payload)
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        if update.version != 1
+            || update.group_epoch != expected.target_epoch
+            || update.commit != request.security_commit
+        {
+            return Err(AdmissionSecurityTransitionError::CommitmentMismatch);
+        }
+        let current = repository
+            .load_space_material(&request.space_id)
+            .await
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?
+            .ok_or(AdmissionSecurityTransitionError::InvalidState)?;
+        let target_epoch = GroupEpoch::new(expected.target_epoch);
+        let material = if current.state().epoch() == target_epoch {
+            current
+        } else {
+            if current
+                .state()
+                .epoch()
+                .next()
+                .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?
+                != target_epoch
+                || current.group_state().is_empty()
+            {
+                return Err(AdmissionSecurityTransitionError::InvalidState);
+            }
+            let completed = MlsGroupEngine::apply_commit(
+                &MlsClientState::from_bytes(current.group_state().to_vec()),
+                request.space_id.as_ref().as_bytes(),
+                &update.commit,
+            )
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            if completed.epoch != expected.target_epoch {
+                return Err(AdmissionSecurityTransitionError::CommitmentMismatch);
+            }
+            let portable = open_group_catalog(
+                &completed.wrapping_key,
+                &request.space_id,
+                update.group_epoch,
+                &update.encrypted_key_catalog,
+            )
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            SpaceKeyMaterial::new(
+                portable.state,
+                completed.client_state.into_bytes(),
+                portable.key_catalog,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .with_pending_group_updates_from(&current)
+        };
+
+        let catalog = super::export_admission_content_key_catalog(&material)
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        if catalog
+            .encode()
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?
+            != request.target_key_catalog
+        {
+            return Err(AdmissionSecurityTransitionError::CommitmentMismatch);
+        }
+        let rederived = MlsGroupEngine::derive_public_admission_commitment(
+            &MlsClientState::from_bytes(material.group_state().to_vec()),
+            expected.attempt_id,
+            expected.base_history_position.clone(),
+            expected.candidate_core_digest,
+            &request.security_commit,
+            catalog.digest(),
+            bundle_digest,
+        )
+        .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        if &rederived != expected {
+            return Err(AdmissionSecurityTransitionError::CommitmentMismatch);
+        }
+
+        let validator = InMemorySession::new();
+        validator.set_master_key_for_space(
+            request.space_id.clone(),
+            self.session
+                .get_master_key()
+                .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?,
+        );
+        validator
+            .install_space_material(&material)
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        repository
+            .save_space_material(&material)
+            .await
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        self.active_security_session
+            .install_current_material(&material)
+            .await
+            .map_err(map_admission_security_session_error)
+    }
+}
+
+fn admission_bundle_digest(
+    candidate_core_digest: [u8; 32],
+    welcome: &[u8],
+    target_key_catalog: &[u8],
+    deliveries: &[PreparedMemberSecurityDelivery],
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"uniclipboard/admission-bundle/v1\0");
+    hasher.update(candidate_core_digest);
+    append_digest_field(&mut hasher, welcome);
+    append_digest_field(&mut hasher, target_key_catalog);
+    hasher.update((deliveries.len() as u64).to_be_bytes());
+    for delivery in deliveries {
+        hasher.update(delivery.credential_id.as_bytes());
+        append_digest_field(&mut hasher, &delivery.payload);
+    }
+    hasher.finalize().into()
+}
+
+fn append_digest_field(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
+#[async_trait]
+impl PrepareMembershipBranchRecoveryRecipientPort for RuntimeSpaceAccessAdapter {
+    async fn prepare_membership_branch_recovery_recipient(
+        &self,
+        group_info: Vec<u8>,
+    ) -> Result<
+        PreparedMembershipBranchRecoveryRecipient,
+        PrepareMembershipBranchRecoveryRecipientError,
+    > {
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|source| recovery_recipient_unavailable(anyhow::Error::new(source)))?;
+        let repository = self.key_epoch_repository.as_ref();
+        let material = repository
+            .load_space_material(&space_id)
+            .await
+            .map_err(|source| recovery_recipient_unavailable(anyhow::Error::new(source)))?
+            .ok_or_else(|| {
+                recovery_recipient_unavailable(anyhow::anyhow!("space security state unavailable"))
+            })?;
+        if material.state().mode() != SpaceSecurityMode::Ready || material.group_state().is_empty()
+        {
+            return Err(recovery_recipient_invalid(anyhow::anyhow!(
+                "space security state is invalid"
+            )));
+        }
+        let prepared = MlsGroupEngine::prepare_external_recovery(
+            &MlsClientState::from_bytes(material.group_state().to_vec()),
+            &group_info,
+        )
+        .map_err(|source| recovery_recipient_invalid(anyhow::Error::new(source)))?;
+        let staged = StagedMembershipBranchRecoveryRecipientV1 {
+            version: 1,
+            mls_state: prepared.recipient_state.into_bytes(),
+            wrapping_key: prepared.wrapping_key.as_bytes().to_vec(),
+            epoch: prepared.epoch,
+        };
+        let staged_mls_state = postcard::to_stdvec(&staged)
+            .map_err(|source| recovery_recipient_invalid(anyhow::Error::new(source)))?;
+        Ok(PreparedMembershipBranchRecoveryRecipient {
+            external_commit: prepared.commit,
+            staged_mls_state,
+        })
+    }
+}
+
+#[async_trait]
+impl PrepareMembershipBranchRecoveryMaterialPort for RuntimeSpaceAccessAdapter {
+    async fn export_membership_branch_recovery_group_info(
+        &self,
+    ) -> Result<Vec<u8>, PrepareMembershipBranchRecoveryMaterialError> {
+        let (_, material) = self.load_membership_branch_recovery_material().await?;
+        MlsGroupEngine::export_external_recovery_group_info(&MlsClientState::from_bytes(
+            material.group_state().to_vec(),
+        ))
+        .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))
+    }
+
+    async fn prepare_membership_branch_recovery_material(
+        &self,
+        input: PrepareMembershipBranchRecoveryMaterialInput,
+    ) -> Result<
+        PreparedMembershipBranchRecoveryMaterial,
+        PrepareMembershipBranchRecoveryMaterialError,
+    > {
+        let (space_id, material) = self.load_membership_branch_recovery_material().await?;
+        let completed = MlsGroupEngine::apply_commit(
+            &MlsClientState::from_bytes(material.group_state().to_vec()),
+            space_id.as_ref().as_bytes(),
+            &input.external_commit,
+        )
+        .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        let expected_epoch = material
+            .state()
+            .epoch()
+            .next()
+            .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        if completed.epoch != expected_epoch.value() {
+            return Err(recovery_material_invalid(anyhow::anyhow!(
+                "MLS recovery epoch does not advance current space material"
+            )));
+        }
+        let local_signing_public = MlsGroupEngine::signing_public_key(&MlsClientState::from_bytes(
+            material.group_state().to_vec(),
+        ))
+        .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        let mut next = self
+            .session
+            .rotate_space_material(
+                &material,
+                completed.client_state.into_bytes(),
+                expected_epoch,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        let encrypted_content_key_catalog = seal_group_catalog(&completed.wrapping_key, &next)
+            .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        let group_update = serde_json::to_vec(&GroupEpochUpdate {
+            version: 1,
+            group_epoch: completed.epoch,
+            commit: input.external_commit.clone(),
+            encrypted_key_catalog: encrypted_content_key_catalog.clone(),
+        })
+        .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        let mut recipients = Vec::new();
+        for member in input.target_history.active_members() {
+            if member == input.recipient_member {
+                continue;
+            }
+            let credential = input.target_history.credential_for(member).ok_or_else(|| {
+                recovery_material_invalid(anyhow::anyhow!(
+                    "active target member has no membership credential"
+                ))
+            })?;
+            if credential.public_key == local_signing_public {
+                continue;
+            }
+            let facts = input
+                .target_history
+                .admission_facts_for(member)
+                .ok_or_else(|| {
+                    recovery_material_invalid(anyhow::anyhow!(
+                        "active target member has no admission facts"
+                    ))
+                })?;
+            recipients.push(PendingGroupUpdate::persistent(
+                facts.device_id.clone(),
+                group_update.clone(),
+            ));
+        }
+        next.add_pending_group_updates(recipients, chrono::Utc::now().timestamp_millis());
+        let confirmation = MembershipBranchRecoveryConfirmationV1 {
+            version: 1,
+            epoch: completed.epoch,
+            group_state_digest: Sha256::digest(next.group_state()).into(),
+        };
+        let sealed_mls_recovery_material = seal_membership_branch_recovery_confirmation(
+            &completed.wrapping_key,
+            &space_id,
+            &confirmation,
+        )
+        .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        let target_staged_space_material = postcard::to_stdvec(&next)
+            .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+
+        Ok(PreparedMembershipBranchRecoveryMaterial {
+            target_staged_space_material,
+            sealed_mls_recovery_material,
+            encrypted_content_key_catalog,
+        })
+    }
+
+    async fn commit_membership_branch_recovery_material(
+        &self,
+        target_staged_space_material: Vec<u8>,
+    ) -> Result<(), PrepareMembershipBranchRecoveryMaterialError> {
+        let staged: SpaceKeyMaterial = postcard::from_bytes(&target_staged_space_material)
+            .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        validate_membership_branch_recovery_material(&staged)?;
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|source| recovery_material_unavailable(anyhow::Error::new(source)))?;
+        if staged.state().space_id() != &space_id {
+            return Err(recovery_material_invalid(anyhow::anyhow!(
+                "staged recovery material belongs to another space"
+            )));
+        }
+        let repository = self.key_epoch_repository.as_ref();
+        let current = repository
+            .load_space_material(&space_id)
+            .await
+            .map_err(|source| recovery_material_unavailable(anyhow::Error::new(source)))?
+            .ok_or_else(|| {
+                recovery_material_unavailable(anyhow::anyhow!("space security state unavailable"))
+            })?;
+        if current == staged {
+            self.active_security_session
+                .install_current_material(&staged)
+                .await
+                .map_err(map_recovery_security_session_error)?;
+            return Ok(());
+        }
+        let expected_epoch = current
+            .state()
+            .epoch()
+            .next()
+            .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        if staged.state().epoch() != expected_epoch {
+            return Err(recovery_material_invalid(anyhow::anyhow!(
+                "staged recovery material is stale or conflicts with current state"
+            )));
+        }
+        let validator = InMemorySession::new();
+        validator.set_master_key_for_space(
+            space_id,
+            self.session
+                .get_master_key()
+                .map_err(|source| recovery_material_unavailable(anyhow::Error::new(source)))?,
+        );
+        validator
+            .install_space_material(&staged)
+            .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        repository
+            .save_space_material(&staged)
+            .await
+            .map_err(|source| recovery_material_unavailable(anyhow::Error::new(source)))?;
+        self.active_security_session
+            .install_current_material(&staged)
+            .await
+            .map_err(map_recovery_security_session_error)
+    }
+}
+
+impl RuntimeSpaceAccessAdapter {
+    pub(crate) fn prepare_recovered_membership_branch_material(
+        &self,
+        recipient_staged_mls_state: &[u8],
+        sealed_mls_recovery_material: &[u8],
+        encrypted_content_key_catalog: &[u8],
+    ) -> Result<SpaceKeyMaterial, EncryptionError> {
+        let staged: StagedMembershipBranchRecoveryRecipientV1 =
+            postcard::from_bytes(recipient_staged_mls_state)
+                .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        if staged.version != 1 || staged.epoch == 0 {
+            return Err(EncryptionError::KeyMaterialCorrupt);
+        }
+        let space_id = self.session.current_space_id()?;
+        let wrapping_key = MasterKey::from_bytes(&staged.wrapping_key)?;
+        open_membership_branch_recovery_confirmation(
+            &wrapping_key,
+            &space_id,
+            staged.epoch,
+            sealed_mls_recovery_material,
+        )?;
+        let portable = open_group_catalog(
+            &wrapping_key,
+            &space_id,
+            staged.epoch,
+            encrypted_content_key_catalog,
+        )?;
+        let material = SpaceKeyMaterial::new(
+            portable.state,
+            staged.mls_state,
+            portable.key_catalog,
+            // 恢复材料必须由密封包确定性地产生，重试时才能证明目标世代保存的是同一值。
+            0,
+        );
+        MlsGroupEngine::validate_state(
+            &MlsClientState::from_bytes(material.group_state().to_vec()),
+            space_id.as_ref().as_bytes(),
+        )
+        .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        super::export_admission_content_key_catalog(&material)?;
+        Ok(material)
+    }
+
+    async fn load_membership_branch_recovery_material(
+        &self,
+    ) -> Result<(SpaceId, SpaceKeyMaterial), PrepareMembershipBranchRecoveryMaterialError> {
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|source| recovery_material_unavailable(anyhow::Error::new(source)))?;
+        let repository = self.key_epoch_repository.as_ref();
+        let material = repository
+            .load_space_material(&space_id)
+            .await
+            .map_err(|source| recovery_material_unavailable(anyhow::Error::new(source)))?
+            .ok_or_else(|| {
+                recovery_material_unavailable(anyhow::anyhow!("space security state unavailable"))
+            })?;
+        validate_membership_branch_recovery_material(&material)?;
+        Ok((space_id, material))
+    }
+}
+
+fn validate_membership_branch_recovery_material(
+    material: &SpaceKeyMaterial,
+) -> Result<(), PrepareMembershipBranchRecoveryMaterialError> {
+    if material.state().mode() != SpaceSecurityMode::Ready || material.group_state().is_empty() {
+        return Err(recovery_material_invalid(anyhow::anyhow!(
+            "space security state is invalid"
+        )));
+    }
+    MlsGroupEngine::validate_state(
+        &MlsClientState::from_bytes(material.group_state().to_vec()),
+        material.state().space_id().as_ref().as_bytes(),
+    )
+    .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+    super::export_admission_content_key_catalog(material)
+        .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+    Ok(())
+}
+
+fn recovery_material_unavailable(
+    source: anyhow::Error,
+) -> PrepareMembershipBranchRecoveryMaterialError {
+    PrepareMembershipBranchRecoveryMaterialError::Unavailable { source }
+}
+
+fn recovery_material_invalid(
+    source: anyhow::Error,
+) -> PrepareMembershipBranchRecoveryMaterialError {
+    PrepareMembershipBranchRecoveryMaterialError::Invalid { source }
+}
+
+fn recovery_recipient_unavailable(
+    source: anyhow::Error,
+) -> PrepareMembershipBranchRecoveryRecipientError {
+    PrepareMembershipBranchRecoveryRecipientError::Unavailable { source }
+}
+
+fn recovery_recipient_invalid(
+    source: anyhow::Error,
+) -> PrepareMembershipBranchRecoveryRecipientError {
+    PrepareMembershipBranchRecoveryRecipientError::Invalid { source }
+}
+
+impl RuntimeSpaceAccessAdapter {
+    async fn current_member_group_state(
+        &self,
+    ) -> Result<MlsClientState, CurrentMemberSignatureError> {
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|_| CurrentMemberSignatureError::Unavailable)?;
+        let repository = self.key_epoch_repository.as_ref();
+        let material = repository
+            .load_space_material(&space_id)
+            .await
+            .map_err(|error| CurrentMemberSignatureError::Repository(error.to_string()))?
+            .ok_or(CurrentMemberSignatureError::Unavailable)?;
+        if material.state().mode() != SpaceSecurityMode::Ready || material.group_state().is_empty()
+        {
+            return Err(CurrentMemberSignatureError::InvalidState);
+        }
+        Ok(MlsClientState::from_bytes(material.group_state().to_vec()))
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use std::collections::HashMap;
+    use std::error::Error as _;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use tempfile::{tempdir, TempDir};
+    use uc_core::crypto::domain::Passphrase;
+    use uc_core::membership::{
+        BeginRevocationOutcome, BootstrapError, BootstrapId, ContentKeyId, ContentKeyPurpose,
+        GroupBootstrapPort, GroupBootstrapResult, KeyEpochError, LegacyBootstrapRecord,
+        LegacyBootstrapRepositoryPort, LegacyBootstrapStage, LegacyBootstrapStatus,
+        PreparedRevocationResolution, RevocationId, RevocationRecord, RevocationStage,
+        RevocationStatus,
+    };
+    use uc_core::ports::{SecureStorageError, SecureStoragePort};
+
+    use super::*;
+    use crate::db::executor::DieselSqliteExecutor;
+    use crate::db::pool::init_db_pool;
+    use crate::db::repositories::DieselSpaceSecurityStore;
+    use crate::fs::key_slot_store::JsonKeySlotStore;
+    use crate::security::DefaultCurrentProfile;
+
+    mockall::mock! {
+        SecureStorage {}
+
+        impl SecureStoragePort for SecureStorage {
+            fn get(&self, key: &str) -> Result<Option<Vec<u8>>, SecureStorageError>;
+            fn set(&self, key: &str, value: &[u8]) -> Result<(), SecureStorageError>;
+            fn delete(&self, key: &str) -> Result<(), SecureStorageError>;
+        }
+    }
+
+    fn security_session_failure() -> ActiveSpaceSecuritySessionError {
+        ActiveSpaceSecuritySessionError::Session {
+            source: anyhow::anyhow!("injected security session failure"),
+        }
+    }
+
+    #[test]
+    fn security_session_error_mappings_preserve_classification_and_source() {
+        let space_access = map_active_security_session_error(security_session_failure());
+        assert!(matches!(
+            space_access,
+            SpaceAccessError::SecurityState { .. }
+        ));
+        assert!(space_access.source().is_some());
+
+        let key_epoch = map_key_epoch_security_session_error(security_session_failure());
+        assert!(matches!(key_epoch, KeyEpochError::SecurityState { .. }));
+        assert!(key_epoch.source().is_some());
+
+        let bootstrap = map_bootstrap_security_session_error(security_session_failure());
+        assert!(matches!(bootstrap, BootstrapError::SecurityState { .. }));
+        assert!(bootstrap.source().is_some());
+
+        let admission = map_admission_security_session_error(security_session_failure());
+        assert!(matches!(
+            admission,
+            AdmissionSecurityTransitionError::SecurityState { .. }
+        ));
+        assert!(admission.source().is_some());
+
+        let recovery = map_recovery_security_session_error(security_session_failure());
+        assert!(matches!(
+            recovery,
+            PrepareMembershipBranchRecoveryMaterialError::SecurityState { .. }
+        ));
+        assert!(recovery.source().is_some());
+    }
+
+    struct MemoryLegacyBootstrapRepository {
+        record: Mutex<Option<LegacyBootstrapRecord>>,
+        stage: Mutex<Option<LegacyBootstrapStage>>,
+    }
+
+    impl MemoryLegacyBootstrapRepository {
+        fn new() -> Self {
+            Self {
+                record: Mutex::new(None),
+                stage: Mutex::new(None),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LegacyBootstrapRepositoryPort for MemoryLegacyBootstrapRepository {
+        async fn begin_legacy_bootstrap(
+            &self,
+            prepared: &LegacyBootstrapRecord,
+        ) -> Result<LegacyBootstrapRecord, BootstrapError> {
+            let mut record = self.record.lock().unwrap();
+            if let Some(existing) = record.as_ref() {
+                return Ok(existing.clone());
+            }
+            *record = Some(prepared.clone());
+            Ok(prepared.clone())
+        }
+
+        async fn stage_legacy_bootstrap(
+            &self,
+            stage: &LegacyBootstrapStage,
+        ) -> Result<(), BootstrapError> {
+            *self.record.lock().unwrap() = Some(stage.record().clone());
+            *self.stage.lock().unwrap() = Some(stage.clone());
+            Ok(())
+        }
+
+        async fn activate_legacy_bootstrap(
+            &self,
+            bootstrap_id: &BootstrapId,
+            now_ms: i64,
+        ) -> Result<LegacyBootstrapRecord, BootstrapError> {
+            let mut record = self.record.lock().unwrap();
+            let current = record.as_mut().ok_or(BootstrapError::InvalidRecord)?;
+            if current.bootstrap_id() != bootstrap_id {
+                return Err(BootstrapError::InvalidRecord);
+            }
+            if current.status() == LegacyBootstrapStatus::Staged {
+                let status = if current.pending_readmission().is_empty() {
+                    LegacyBootstrapStatus::Complete
+                } else {
+                    LegacyBootstrapStatus::AwaitingReadmission
+                };
+                current.transition_to(status, now_ms)?;
+            }
+            Ok(current.clone())
+        }
+
+        async fn load_legacy_bootstrap_stage(
+            &self,
+            bootstrap_id: &BootstrapId,
+        ) -> Result<Option<LegacyBootstrapStage>, BootstrapError> {
+            Ok(self
+                .stage
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|stage| stage.record().bootstrap_id() == bootstrap_id)
+                .cloned())
+        }
+
+        async fn get_legacy_bootstrap(
+            &self,
+            bootstrap_id: &BootstrapId,
+        ) -> Result<Option<LegacyBootstrapRecord>, BootstrapError> {
+            Ok(self
+                .record
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|record| record.bootstrap_id() == bootstrap_id)
+                .cloned())
+        }
+
+        async fn list_incomplete_legacy_bootstraps_for_space(
+            &self,
+            space_id: &SpaceId,
+        ) -> Result<Vec<LegacyBootstrapRecord>, BootstrapError> {
+            Ok(self
+                .record
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|record| record.space_id() == space_id && !record.status().is_terminal())
+                .cloned()
+                .collect())
+        }
+
+        async fn list_non_complete_legacy_bootstraps_for_space(
+            &self,
+            space_id: &SpaceId,
+        ) -> Result<Vec<LegacyBootstrapRecord>, BootstrapError> {
+            Ok(self
+                .record
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|record| {
+                    record.space_id() == space_id
+                        && record.status() != LegacyBootstrapStatus::Complete
+                })
+                .cloned()
+                .collect())
+        }
+
+        async fn acknowledge_legacy_readmission(
+            &self,
+            bootstrap_id: &BootstrapId,
+            member: &DeviceId,
+            now_ms: i64,
+        ) -> Result<LegacyBootstrapRecord, BootstrapError> {
+            let mut record = self.record.lock().unwrap();
+            let current = record.as_mut().ok_or(BootstrapError::InvalidRecord)?;
+            if current.bootstrap_id() != bootstrap_id {
+                return Err(BootstrapError::InvalidRecord);
+            }
+            current.mark_readmitted(member, now_ms)?;
+            Ok(current.clone())
+        }
+    }
+
+    fn memory_secure_storage() -> Arc<MockSecureStorage> {
+        let values = Arc::new(Mutex::new(HashMap::<String, Vec<u8>>::new()));
+        let mut mock = MockSecureStorage::new();
+        let get_values = values.clone();
+        mock.expect_get()
+            .returning(move |key| Ok(get_values.lock().unwrap().get(key).cloned()));
+        let set_values = values.clone();
+        mock.expect_set().returning(move |key, value| {
+            set_values
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), value.to_vec());
+            Ok(())
+        });
+        mock.expect_delete().returning(move |key| {
+            values.lock().unwrap().remove(key);
+            Ok(())
+        });
+        Arc::new(mock)
+    }
+
+    mockall::mock! {
+        RevocationRepository {}
+
+        #[async_trait]
+        impl RevocationRepositoryPort for RevocationRepository {
+            async fn save_space_material(
+                &self,
+                material: &SpaceKeyMaterial,
+            ) -> Result<(), KeyEpochError>;
+            async fn load_space_material(
+                &self,
+                space_id: &SpaceId,
+            ) -> Result<Option<SpaceKeyMaterial>, KeyEpochError>;
+            async fn due_group_updates(
+                &self,
+                space_id: &SpaceId,
+                now_ms: i64,
+                online_peer: Option<DeviceId>,
+            ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError>;
+            async fn record_group_update_failures(
+                &self,
+                space_id: &SpaceId,
+                failures: &[(String, GroupUpdateDispatchError)],
+                now_ms: i64,
+            ) -> Result<usize, KeyEpochError>;
+            async fn begin_revocation(
+                &self,
+                prepared: &RevocationRecord,
+            ) -> Result<BeginRevocationOutcome, KeyEpochError>;
+            async fn get_revocation(
+                &self,
+                revocation_id: &RevocationId,
+            ) -> Result<Option<RevocationRecord>, KeyEpochError>;
+            async fn list_incomplete_revocations(
+                &self,
+            ) -> Result<Vec<RevocationRecord>, KeyEpochError>;
+            async fn stage_revocation(
+                &self,
+                stage: &RevocationStage,
+            ) -> Result<(), KeyEpochError>;
+            async fn load_staged_revocation(
+                &self,
+                revocation_id: &RevocationId,
+            ) -> Result<Option<RevocationStage>, KeyEpochError>;
+            async fn resolve_prepared_revocation(
+                &self,
+                revocation_id: &RevocationId,
+                resolution: PreparedRevocationResolution,
+                now_ms: i64,
+            ) -> Result<RevocationRecord, KeyEpochError>;
+            async fn commit_revocation_recovery(
+                &self,
+                stage: &RevocationStage,
+                material: &SpaceKeyMaterial,
+            ) -> Result<RevocationRecord, KeyEpochError>;
+            async fn activate_revocation(
+                &self,
+                revocation_id: &RevocationId,
+                now_ms: i64,
+            ) -> Result<RevocationRecord, KeyEpochError>;
+            async fn start_distribution(
+                &self,
+                revocation_id: &RevocationId,
+                now_ms: i64,
+            ) -> Result<RevocationRecord, KeyEpochError>;
+            async fn acknowledge_recipient(
+                &self,
+                revocation_id: &RevocationId,
+                recipient: &DeviceId,
+                now_ms: i64,
+            ) -> Result<RevocationRecord, KeyEpochError>;
+        }
+    }
+
+    fn memory_revocation_repository_with_stage_persistence(
+        initial_material: Option<SpaceKeyMaterial>,
+        persist_stage: bool,
+    ) -> (
+        Arc<MockRevocationRepository>,
+        Arc<AtomicBool>,
+        Arc<AtomicUsize>,
+    ) {
+        let material = Arc::new(Mutex::new(initial_material));
+        let record = Arc::new(Mutex::new(None::<RevocationRecord>));
+        let stage = Arc::new(Mutex::new(None::<RevocationStage>));
+        let fail_saves = Arc::new(AtomicBool::new(false));
+        let stage_calls = Arc::new(AtomicUsize::new(0));
+        let mut mock = MockRevocationRepository::new();
+
+        let save_material = material.clone();
+        let save_failures = fail_saves.clone();
+        mock.expect_save_space_material().returning(move |value| {
+            if save_failures.load(Ordering::Acquire) {
+                return Err(KeyEpochError::Repository(anyhow::anyhow!(
+                    "injected save failure"
+                )));
+            }
+            *save_material.lock().unwrap() = Some(value.clone());
+            Ok(())
+        });
+
+        let load_material = material.clone();
+        mock.expect_load_space_material()
+            .returning(move |space_id| {
+                Ok(load_material
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .filter(|value| value.state().space_id() == space_id)
+                    .cloned())
+            });
+
+        let begin_record = record.clone();
+        mock.expect_begin_revocation().returning(move |prepared| {
+            let mut current = begin_record.lock().unwrap();
+            if let Some(existing) = current.as_ref() {
+                return Ok(BeginRevocationOutcome::Existing(existing.clone()));
+            }
+            *current = Some(prepared.clone());
+            Ok(BeginRevocationOutcome::Begun(prepared.clone()))
+        });
+
+        let get_record = record.clone();
+        mock.expect_get_revocation()
+            .returning(move |revocation_id| {
+                Ok(get_record
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .filter(|value| value.revocation_id() == revocation_id)
+                    .cloned())
+            });
+
+        let list_record = record.clone();
+        mock.expect_list_incomplete_revocations()
+            .returning(move || {
+                Ok(list_record
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|value| value.status() != RevocationStatus::Complete)
+                    .cloned()
+                    .collect())
+            });
+
+        let staged_record = record.clone();
+        let staged_value = stage.clone();
+        let recorded_stage_calls = stage_calls.clone();
+        mock.expect_stage_revocation().returning(move |value| {
+            let call = recorded_stage_calls.fetch_add(1, Ordering::AcqRel) + 1;
+            if persist_stage {
+                *staged_record.lock().unwrap() = Some(value.record().clone());
+                *staged_value.lock().unwrap() = Some(value.clone());
+            } else if call > 3 {
+                return Err(KeyEpochError::Repository(anyhow::anyhow!(
+                    "test repository observed excessive staging retries"
+                )));
+            }
+            Ok(())
+        });
+
+        let load_stage = stage.clone();
+        mock.expect_load_staged_revocation()
+            .returning(move |revocation_id| {
+                Ok(load_stage
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .filter(|value| value.record().revocation_id() == revocation_id)
+                    .cloned())
+            });
+
+        let resolution_material = material.clone();
+        let resolution_record = record.clone();
+        let resolution_stage = stage.clone();
+        let resolved_stage_calls = stage_calls.clone();
+        mock.expect_resolve_prepared_revocation().returning(
+            move |revocation_id, resolution, now_ms| {
+                let mut current = resolution_record.lock().unwrap();
+                let record = current
+                    .as_mut()
+                    .filter(|record| record.revocation_id() == revocation_id)
+                    .ok_or_else(|| {
+                        KeyEpochError::StateIssue(
+                            uc_core::membership::KeyEpochStateIssue::MissingRevocation,
+                        )
+                    })?;
+                match resolution {
+                    PreparedRevocationResolution::TargetAbsent(verified) => {
+                        if resolution_material.lock().unwrap().as_ref() != Some(&verified) {
+                            return Err(KeyEpochError::StateIssue(
+                                uc_core::membership::KeyEpochStateIssue::StateChanged,
+                            ));
+                        }
+                        record.transition_to(RevocationStatus::Complete, now_ms)?;
+                    }
+                    PreparedRevocationResolution::TargetPresent {
+                        current_material,
+                        stage,
+                    } => {
+                        if resolution_material.lock().unwrap().as_ref() != Some(&current_material) {
+                            return Err(KeyEpochError::StateIssue(
+                                uc_core::membership::KeyEpochStateIssue::StateChanged,
+                            ));
+                        }
+                        resolved_stage_calls.fetch_add(1, Ordering::AcqRel);
+                        if !persist_stage {
+                            return Ok(record.clone());
+                        }
+                        *record = stage.record().clone();
+                        *resolution_stage.lock().unwrap() = Some(stage);
+                    }
+                    PreparedRevocationResolution::RecoveryRequired(_) => {
+                        record.transition_to(RevocationStatus::RecoveryRequired, now_ms)?;
+                    }
+                }
+                Ok(record.clone())
+            },
+        );
+
+        let recovery_material = material.clone();
+        let recovery_record = record.clone();
+        let recovery_stage = stage.clone();
+        mock.expect_commit_revocation_recovery()
+            .returning(move |value, next_material| {
+                *recovery_material.lock().unwrap() = Some(next_material.clone());
+                *recovery_record.lock().unwrap() = Some(value.record().clone());
+                *recovery_stage.lock().unwrap() =
+                    if value.record().status() == RevocationStatus::Complete {
+                        None
+                    } else {
+                        Some(value.clone())
+                    };
+                Ok(value.record().clone())
+            });
+
+        let activate_material = material.clone();
+        let activate_record = record.clone();
+        let activate_stage = stage.clone();
+        mock.expect_activate_revocation()
+            .returning(move |revocation_id, now_ms| {
+                let mut current = activate_stage.lock().unwrap();
+                let value = current
+                    .as_mut()
+                    .filter(|value| value.record().revocation_id() == revocation_id)
+                    .ok_or_else(|| {
+                        KeyEpochError::StateIssue(
+                            uc_core::membership::KeyEpochStateIssue::MissingStage,
+                        )
+                    })?;
+                value.transition_to(RevocationStatus::Activated, now_ms)?;
+                let activated = value.record().clone();
+                *activate_material.lock().unwrap() = Some(SpaceKeyMaterial::new(
+                    value.next_space_state().clone(),
+                    value.group_state().to_vec(),
+                    value.key_catalog().to_vec(),
+                    now_ms,
+                ));
+                *activate_record.lock().unwrap() = Some(activated.clone());
+                Ok(activated)
+            });
+
+        let distribution_record = record.clone();
+        let distribution_stage = stage.clone();
+        mock.expect_start_distribution()
+            .returning(move |revocation_id, now_ms| {
+                let mut current = distribution_stage.lock().unwrap();
+                let value = current
+                    .as_mut()
+                    .filter(|value| value.record().revocation_id() == revocation_id)
+                    .ok_or_else(|| {
+                        KeyEpochError::StateIssue(
+                            uc_core::membership::KeyEpochStateIssue::MissingStage,
+                        )
+                    })?;
+                value.transition_to(RevocationStatus::Distributing, now_ms)?;
+                if value.all_recipients_confirmed() {
+                    value.transition_to(RevocationStatus::Complete, now_ms)?;
+                }
+                let distributing = value.record().clone();
+                *distribution_record.lock().unwrap() = Some(distributing.clone());
+                if distributing.status() == RevocationStatus::Complete {
+                    *current = None;
+                }
+                Ok(distributing)
+            });
+
+        let acknowledge_record = record;
+        let acknowledge_stage = stage;
+        mock.expect_acknowledge_recipient()
+            .returning(move |revocation_id, recipient, now_ms| {
+                let mut current = acknowledge_stage.lock().unwrap();
+                let value = current
+                    .as_mut()
+                    .filter(|value| value.record().revocation_id() == revocation_id)
+                    .ok_or_else(|| {
+                        KeyEpochError::StateIssue(
+                            uc_core::membership::KeyEpochStateIssue::MissingStage,
+                        )
+                    })?;
+                value.acknowledge_recipient(recipient, now_ms)?;
+                if value.all_recipients_confirmed() {
+                    value.transition_to(RevocationStatus::Complete, now_ms)?;
+                }
+                let acknowledged = value.record().clone();
+                *acknowledge_record.lock().unwrap() = Some(acknowledged.clone());
+                if acknowledged.status() == RevocationStatus::Complete {
+                    *current = None;
+                }
+                Ok(acknowledged)
+            });
+
+        (Arc::new(mock), fail_saves, stage_calls)
+    }
+
+    fn memory_revocation_repository(
+        initial_material: Option<SpaceKeyMaterial>,
+    ) -> (Arc<MockRevocationRepository>, Arc<AtomicBool>) {
+        let (repository, fail_saves, _) =
+            memory_revocation_repository_with_stage_persistence(initial_material, true);
+        (repository, fail_saves)
+    }
+
+    fn local_key_material(
+        directory: &TempDir,
+        secure_storage: Arc<MockSecureStorage>,
+    ) -> Arc<KeyMaterialStore> {
+        Arc::new(KeyMaterialStore::new(
+            secure_storage,
+            Arc::new(JsonKeySlotStore::new(directory.path().to_path_buf())),
+        ))
+    }
+
+    fn profile_content_key_vault(directory: &TempDir) -> Arc<ProfileContentKeyVault> {
+        Arc::new(ProfileContentKeyVault::new(
+            directory.path().join("profile-content-vault"),
+            memory_secure_storage(),
+            [0x61; 16],
+        ))
+    }
+
+    fn adapter(
+        directory: &TempDir,
+        key_material: Arc<KeyMaterialStore>,
+        session: Arc<InMemorySession>,
+        repository: Arc<MockRevocationRepository>,
+    ) -> RuntimeSpaceAccessAdapter {
+        adapter_with_vault(directory, key_material, session, repository).0
+    }
+
+    fn adapter_with_vault(
+        directory: &TempDir,
+        key_material: Arc<KeyMaterialStore>,
+        session: Arc<InMemorySession>,
+        repository: Arc<MockRevocationRepository>,
+    ) -> (RuntimeSpaceAccessAdapter, Arc<ProfileContentKeyVault>) {
+        let vault = profile_content_key_vault(directory);
+        let adapter = adapter_with_existing_vault(key_material, session, repository, &vault);
+        (adapter, vault)
+    }
+
+    fn adapter_with_existing_vault(
+        key_material: Arc<KeyMaterialStore>,
+        session: Arc<InMemorySession>,
+        repository: Arc<MockRevocationRepository>,
+        vault: &Arc<ProfileContentKeyVault>,
+    ) -> RuntimeSpaceAccessAdapter {
+        let adapter = RuntimeSpaceAccessAdapter::new(
+            key_material,
+            Arc::new(DefaultCurrentProfile::new()),
+            session,
+            repository,
+            Arc::new(MemoryLegacyBootstrapRepository::new()),
+            Arc::clone(vault),
+        );
+        adapter
+    }
+
+    #[tokio::test]
+    async fn recording_delivery_failures_does_not_load_or_save_large_material() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("batched-deferred-updates");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x62; 32]).unwrap(),
+        );
+        let failures = (0..8)
+            .map(|index| (format!("update-{index}"), GroupUpdateDispatchError::Offline))
+            .collect::<Vec<_>>();
+
+        let mut repository = MockRevocationRepository::new();
+        repository.expect_load_space_material().never();
+        repository.expect_save_space_material().never();
+        let expected_space_id = space_id.clone();
+        repository
+            .expect_record_group_update_failures()
+            .times(1)
+            .withf(move |candidate, failures, now_ms| {
+                candidate == &expected_space_id && failures.len() == 8 && *now_ms == 200
+            })
+            .returning(|_, failures, _| Ok(failures.len()));
+        let adapter = adapter(
+            &directory,
+            local_key_material(&directory, memory_secure_storage()),
+            session,
+            Arc::new(repository),
+        );
+
+        let recorded = adapter
+            .record_space_group_update_failures(&failures, 200)
+            .await
+            .unwrap();
+
+        assert_eq!(recorded, failures.len());
+    }
+
+    #[tokio::test]
+    async fn legacy_bootstrap_creates_a_real_sponsor_group_and_waits_for_readmission() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("legacy-bootstrap-space");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x7a; 32]).unwrap(),
+        );
+        let bootstrap_repository = Arc::new(MemoryLegacyBootstrapRepository::new());
+        let key_epoch_repository: Arc<dyn RevocationRepositoryPort> =
+            Arc::new(MockRevocationRepository::new());
+        let adapter = RuntimeSpaceAccessAdapter::new(
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::new(DefaultCurrentProfile::new()),
+            Arc::clone(&session),
+            key_epoch_repository,
+            bootstrap_repository.clone(),
+            profile_content_key_vault(&directory),
+        );
+        let sponsor = DeviceId::new("sponsor-device");
+        let retained = DeviceId::new("retained-device");
+
+        let result = adapter
+            .bootstrap_legacy_space(&sponsor, &[retained.clone()], 100)
+            .await
+            .unwrap();
+        let bootstrap_id = match result {
+            GroupBootstrapResult::AwaitingReadmission {
+                bootstrap_id,
+                pending_members,
+            } => {
+                assert_eq!(pending_members, 1);
+                bootstrap_id
+            }
+            other => panic!("unexpected bootstrap result: {other:?}"),
+        };
+        let stage = bootstrap_repository
+            .load_legacy_bootstrap_stage(&bootstrap_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stage
+                .material()
+                .state()
+                .protection_group_id()
+                .map(|id| id.as_str()),
+            Some(bootstrap_id.as_str())
+        );
+        assert!(MlsGroupEngine::contains_active_member(
+            &MlsClientState::from_bytes(stage.material().group_state().to_vec()),
+            sponsor.as_str().as_bytes(),
+        )
+        .unwrap());
+        assert!(!MlsGroupEngine::contains_active_member(
+            &MlsClientState::from_bytes(stage.material().group_state().to_vec()),
+            retained.as_str().as_bytes(),
+        )
+        .unwrap());
+        assert_eq!(
+            session
+                .current_content_key(&space_id, ContentKeyPurpose::Content)
+                .unwrap()
+                .epoch(),
+            GroupEpoch::new(1)
+        );
+
+        assert!(matches!(
+            adapter
+                .acknowledge_legacy_readmission(&bootstrap_id, &retained, 110)
+                .await
+                .unwrap(),
+            GroupBootstrapResult::Complete { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn withdrawing_legacy_readmission_removes_the_pending_member() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("legacy-bootstrap-withdrawal");
+        session.set_master_key_for_space(space_id, MasterKey::from_bytes(&[0x7b; 32]).unwrap());
+        let bootstrap_repository = Arc::new(MemoryLegacyBootstrapRepository::new());
+        let key_epoch_repository: Arc<dyn RevocationRepositoryPort> =
+            Arc::new(MockRevocationRepository::new());
+        let adapter = RuntimeSpaceAccessAdapter::new(
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::new(DefaultCurrentProfile::new()),
+            Arc::clone(&session),
+            key_epoch_repository,
+            bootstrap_repository.clone(),
+            profile_content_key_vault(&directory),
+        );
+        let sponsor = DeviceId::new("sponsor-device");
+        let removed = DeviceId::new("legacy-device");
+        let bootstrap_id = match adapter
+            .bootstrap_legacy_space(&sponsor, &[removed.clone()], 100)
+            .await
+            .unwrap()
+        {
+            GroupBootstrapResult::AwaitingReadmission { bootstrap_id, .. } => bootstrap_id,
+            other => panic!("unexpected bootstrap result: {other:?}"),
+        };
+
+        let result = adapter
+            .withdraw_legacy_readmission(&bootstrap_id, &removed, 110)
+            .await
+            .unwrap();
+
+        assert!(matches!(result, GroupBootstrapResult::Complete { .. }));
+        let record = bootstrap_repository
+            .get_legacy_bootstrap(&bootstrap_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(record.pending_readmission().is_empty());
+    }
+
+    #[tokio::test]
+    async fn protection_status_ignores_a_superseded_local_bootstrap_after_convergence() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("legacy-convergence-space");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x32; 32]).unwrap(),
+        );
+        let bootstrap_repository = Arc::new(MemoryLegacyBootstrapRepository::new());
+        let (key_epoch_repository, _) = memory_revocation_repository(None);
+        let key_epoch_port: Arc<dyn RevocationRepositoryPort> = key_epoch_repository.clone();
+        let adapter = RuntimeSpaceAccessAdapter::new(
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::new(DefaultCurrentProfile::new()),
+            Arc::clone(&session),
+            key_epoch_port,
+            bootstrap_repository,
+            profile_content_key_vault(&directory),
+        );
+        let sponsor = DeviceId::new("device-b");
+        let retained = DeviceId::new("device-c");
+        adapter
+            .bootstrap_legacy_space(&sponsor, &[retained], 100)
+            .await
+            .unwrap();
+
+        let winning_state = MlsGroupEngine::create_sponsor(
+            space_id.as_ref().as_bytes(),
+            sponsor.as_str().as_bytes(),
+        )
+        .unwrap();
+        let winning_material = session
+            .create_legacy_bootstrap_material_in_group(
+                &space_id,
+                ProtectionGroupId::from_string("000-winning-group").unwrap(),
+                winning_state.into_bytes(),
+                200,
+            )
+            .unwrap();
+        key_epoch_repository
+            .save_space_material(&winning_material)
+            .await
+            .unwrap();
+        session.install_space_material(&winning_material).unwrap();
+
+        let snapshot = adapter
+            .query_space_protection(&[sponsor, retained])
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.mode, SpaceProtectionMode::Ready);
+        assert_eq!(
+            snapshot.members[1].status,
+            MemberProtectionStatus::RequiresReadmission
+        );
+    }
+
+    fn sponsor_fixture_with_stage_persistence(
+        persist_stage: bool,
+    ) -> (
+        RuntimeSpaceAccessAdapter,
+        Arc<InMemorySession>,
+        Arc<MockRevocationRepository>,
+        SpaceId,
+        TempDir,
+        Arc<AtomicUsize>,
+    ) {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("space-group-admission");
+        let local_root = MasterKey::from_bytes(&[0x11; 32]).unwrap();
+        session.set_master_key_for_space(space_id.clone(), local_root);
+        let sponsor_state =
+            MlsGroupEngine::create_sponsor(space_id.as_ref().as_bytes(), b"alice").unwrap();
+        let material = session
+            .create_legacy_bootstrap_material(&space_id, sponsor_state.into_bytes(), 1)
+            .unwrap();
+        session.install_space_material(&material).unwrap();
+        let (repository, _, stage_calls) =
+            memory_revocation_repository_with_stage_persistence(Some(material), persist_stage);
+        let key_material = local_key_material(&directory, memory_secure_storage());
+        (
+            adapter(
+                &directory,
+                key_material,
+                session.clone(),
+                repository.clone(),
+            ),
+            session,
+            repository,
+            space_id,
+            directory,
+            stage_calls,
+        )
+    }
+
+    fn sponsor_fixture() -> (
+        RuntimeSpaceAccessAdapter,
+        Arc<InMemorySession>,
+        Arc<MockRevocationRepository>,
+        SpaceId,
+        TempDir,
+    ) {
+        let (adapter, session, repository, space_id, directory, _) =
+            sponsor_fixture_with_stage_persistence(true);
+        (adapter, session, repository, space_id, directory)
+    }
+
+    #[tokio::test]
+    async fn restart_finishes_prepared_revocation_when_target_is_already_absent() {
+        let (sponsor, _session, repository, space_id, _directory) = sponsor_fixture();
+        let material = repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let prepared = RevocationRecord::prepare(
+            RevocationId::from_string("prepared-absent-target-restart").unwrap(),
+            space_id,
+            DeviceId::new("already-absent-device"),
+            material.state().epoch(),
+            100,
+        )
+        .unwrap();
+        repository.begin_revocation(&prepared).await.unwrap();
+
+        let recovered = sponsor.resume_group_revocations(200).await.unwrap();
+
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].status(), Some(RevocationStatus::Complete));
+        assert_eq!(
+            repository
+                .load_space_material(prepared.space_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .state()
+                .epoch(),
+            material.state().epoch()
+        );
+        assert!(sponsor
+            .resume_group_revocations(201)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn restart_rebuilds_prepared_revocation_from_a_later_current_epoch() {
+        let (sponsor, _session, repository, space_id, _directory) = sponsor_fixture();
+        let target = DeviceId::new("target-device");
+        let retained = DeviceId::new("retained-device");
+        let target_join = sponsor.prepare_group_join(&target).await.unwrap();
+        sponsor
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &target,
+                &[],
+                &target_join.key_package,
+            )
+            .await
+            .unwrap();
+        let prepared_material = repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let prepared = RevocationRecord::prepare_with_recipients(
+            RevocationId::from_string("prepared-later-current-epoch").unwrap(),
+            space_id.clone(),
+            target.clone(),
+            vec![retained.clone()],
+            prepared_material.state().epoch(),
+            100,
+        )
+        .unwrap();
+        repository.begin_revocation(&prepared).await.unwrap();
+        let retained_join = sponsor.prepare_group_join(&retained).await.unwrap();
+        sponsor
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &retained,
+                &[],
+                &retained_join.key_package,
+            )
+            .await
+            .unwrap();
+        let current_epoch = repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state()
+            .epoch();
+
+        let recovered = sponsor.resume_group_revocations(200).await.unwrap();
+
+        assert_eq!(recovered[0].status(), Some(RevocationStatus::Distributing));
+        let activated_epoch = repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state()
+            .epoch();
+        assert_eq!(activated_epoch, current_epoch.next().unwrap());
+        let repeated = sponsor.resume_group_revocations(201).await.unwrap();
+        assert_eq!(repeated[0].status(), Some(RevocationStatus::Distributing));
+        assert_eq!(
+            repository
+                .load_space_material(&space_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state()
+                .epoch(),
+            activated_epoch
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_prepared_rebuild_persists_recovery_required_without_retrying() {
+        let (sponsor, _session, repository, space_id, _directory, stage_calls) =
+            sponsor_fixture_with_stage_persistence(false);
+        let joining = sponsor
+            .prepare_group_join(&DeviceId::new("target-device"))
+            .await
+            .unwrap();
+        sponsor
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &DeviceId::new("target-device"),
+                &[],
+                &joining.key_package,
+            )
+            .await
+            .unwrap();
+        let material = repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let prepared = RevocationRecord::prepare(
+            RevocationId::from_string("prepared-rebuild-failure").unwrap(),
+            space_id,
+            DeviceId::new("target-device"),
+            material.state().epoch(),
+            100,
+        )
+        .unwrap();
+        repository.begin_revocation(&prepared).await.unwrap();
+
+        let recovered = sponsor.resume_group_revocations(200).await.unwrap();
+
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(
+            recovered[0].status(),
+            Some(RevocationStatus::RecoveryRequired)
+        );
+        assert_eq!(stage_calls.load(Ordering::Acquire), 1);
+        let repeated = sponsor.resume_group_revocations(201).await.unwrap();
+        assert_eq!(
+            repeated[0].status(),
+            Some(RevocationStatus::RecoveryRequired)
+        );
+        assert_eq!(stage_calls.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn unreadable_group_marks_prepared_revocation_recovery_required() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("prepared-unreadable-group");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x35; 32]).unwrap(),
+        );
+        let mut state = SpaceKeyState::legacy(space_id.clone());
+        state.mark_migrating().unwrap();
+        state
+            .mark_ready(ContentKeyId::generate(), ProtectionGroupId::generate())
+            .unwrap();
+        let material = SpaceKeyMaterial::new(
+            state,
+            b"unreadable-group-state".to_vec(),
+            b"key-catalog".to_vec(),
+            100,
+        );
+        let (repository, _) = memory_revocation_repository(Some(material.clone()));
+        let prepared = RevocationRecord::prepare(
+            RevocationId::from_string("prepared-unreadable-group").unwrap(),
+            space_id,
+            DeviceId::new("target-device"),
+            material.state().epoch(),
+            100,
+        )
+        .unwrap();
+        repository.begin_revocation(&prepared).await.unwrap();
+        let adapter = adapter(
+            &directory,
+            local_key_material(&directory, memory_secure_storage()),
+            session,
+            repository,
+        );
+
+        let recovered = adapter.resume_group_revocations(200).await.unwrap();
+
+        assert_eq!(
+            recovered[0].status(),
+            Some(RevocationStatus::RecoveryRequired)
+        );
+        assert_eq!(
+            adapter.resume_group_revocations(201).await.unwrap()[0].status(),
+            Some(RevocationStatus::RecoveryRequired)
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_material_marks_prepared_revocation_recovery_required() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("prepared-unavailable-material");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x36; 32]).unwrap(),
+        );
+        let prepared = RevocationRecord::prepare(
+            RevocationId::from_string("prepared-unavailable-material").unwrap(),
+            space_id,
+            DeviceId::new("target-device"),
+            GroupEpoch::new(1),
+            100,
+        )
+        .unwrap();
+        let listed = prepared.clone();
+        let mut resolved = prepared.clone();
+        resolved
+            .transition_to(RevocationStatus::RecoveryRequired, 200)
+            .unwrap();
+        let returned = resolved.clone();
+        let mut repository = MockRevocationRepository::new();
+        repository
+            .expect_list_incomplete_revocations()
+            .times(1)
+            .return_once(|| Ok(vec![listed]));
+        repository
+            .expect_load_space_material()
+            .times(1)
+            .return_once(|_| Err(KeyEpochError::DecryptionFailed));
+        repository
+            .expect_resolve_prepared_revocation()
+            .times(1)
+            .withf(|_, resolution, _| {
+                matches!(
+                    resolution,
+                    PreparedRevocationResolution::RecoveryRequired(None)
+                )
+            })
+            .return_once(move |_, _, _| Ok(returned));
+        repository
+            .expect_load_staged_revocation()
+            .times(1)
+            .return_once(|_| Ok(None));
+        let adapter = adapter(
+            &directory,
+            local_key_material(&directory, memory_secure_storage()),
+            session,
+            Arc::new(repository),
+        );
+
+        let recovered = adapter.resume_group_revocations(200).await.unwrap();
+
+        assert_eq!(
+            recovered[0].status(),
+            Some(RevocationStatus::RecoveryRequired)
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_group_revocations_ignores_incomplete_records_from_another_space() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        session.set_master_key_for_space(
+            SpaceId::from("active-space"),
+            MasterKey::from_bytes(&[0x37; 32]).unwrap(),
+        );
+        let other_space_record = RevocationRecord::prepare(
+            RevocationId::from_string("other-space-prepared").unwrap(),
+            SpaceId::from("other-space"),
+            DeviceId::new("target-device"),
+            GroupEpoch::new(1),
+            100,
+        )
+        .unwrap();
+        let mut repository = MockRevocationRepository::new();
+        repository
+            .expect_list_incomplete_revocations()
+            .times(1)
+            .return_once(move || Ok(vec![other_space_record]));
+        let adapter = adapter(
+            &directory,
+            local_key_material(&directory, memory_secure_storage()),
+            session,
+            Arc::new(repository),
+        );
+
+        assert!(adapter
+            .resume_group_revocations(200)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn corrupt_group_update_retains_decoder_source_with_safe_stage_context() {
+        let directory = tempdir().unwrap();
+        let adapter = adapter(
+            &directory,
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::new(InMemorySession::new()),
+            Arc::new(MockRevocationRepository::new()),
+        );
+        let error = adapter
+            .apply_group_epoch_update(br#"{"version":"PRIVATE_UPDATE_VALUE"}"#)
+            .await
+            .unwrap_err();
+        let source = std::error::Error::source(&error).expect("decode source");
+        assert!(
+            source.to_string().contains("decode_update"),
+            "失败必须保留具体操作上下文"
+        );
+        let mut current = Some(source);
+        let mut decoder_found = false;
+        while let Some(error) = current {
+            decoder_found |= error.is::<serde_json::Error>();
+            current = error.source();
+        }
+        assert!(decoder_found);
+        assert!(!error.to_string().contains("PRIVATE_UPDATE_VALUE"));
+        assert!(!format!("{error:?}").contains("PRIVATE_UPDATE_VALUE"));
+    }
+
+    #[tokio::test]
+    async fn transient_material_load_error_keeps_prepared_revocation_retryable() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("prepared-transient-material-error");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x38; 32]).unwrap(),
+        );
+        let prepared = RevocationRecord::prepare(
+            RevocationId::from_string("prepared-transient-material-error").unwrap(),
+            space_id,
+            DeviceId::new("target-device"),
+            GroupEpoch::new(1),
+            100,
+        )
+        .unwrap();
+        let mut repository = MockRevocationRepository::new();
+        repository
+            .expect_list_incomplete_revocations()
+            .times(1)
+            .return_once(move || Ok(vec![prepared]));
+        repository
+            .expect_load_space_material()
+            .times(1)
+            .return_once(|_| {
+                Err(KeyEpochError::Repository(anyhow::anyhow!(
+                    "temporary storage failure"
+                )))
+            });
+        repository.expect_resolve_prepared_revocation().never();
+        let adapter = adapter(
+            &directory,
+            local_key_material(&directory, memory_secure_storage()),
+            session,
+            Arc::new(repository),
+        );
+
+        assert!(matches!(
+            adapter.resume_group_revocations(200).await,
+            Err(KeyEpochError::Repository(message)) if message.to_string() == "temporary storage failure"
+        ));
+    }
+
+    #[tokio::test]
+    async fn current_revocation_snapshot_survives_repository_restart() {
+        let directory = tempdir().unwrap();
+        let database_url = directory.path().join("current-revocation-restart.sqlite");
+        let pool = init_db_pool(database_url.to_str().unwrap()).unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("space-revocation-restart");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x41; 32]).unwrap(),
+        );
+        let repository = Arc::new(DieselSpaceSecurityStore::new(
+            DieselSqliteExecutor::new(pool.clone()),
+            session.as_ref().clone(),
+        ));
+        let record = RevocationRecord::prepare_with_recipients(
+            RevocationId::from_string("revocation-restart").unwrap(),
+            space_id,
+            DeviceId::new("dev-removed"),
+            vec![DeviceId::new("dev-c"), DeviceId::new("dev-d")],
+            GroupEpoch::new(1),
+            123,
+        )
+        .unwrap();
+        repository.begin_revocation(&record).await.unwrap();
+        drop(repository);
+
+        let reopened: Arc<dyn RevocationRepositoryPort> = Arc::new(DieselSpaceSecurityStore::new(
+            DieselSqliteExecutor::new(pool),
+            session.as_ref().clone(),
+        ));
+        let restarted = RuntimeSpaceAccessAdapter::new(
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::new(DefaultCurrentProfile::new()),
+            session,
+            reopened,
+            Arc::new(MemoryLegacyBootstrapRepository::new()),
+            profile_content_key_vault(&directory),
+        );
+
+        let current = restarted.current_group_revocation().await.unwrap().unwrap();
+
+        assert_eq!(
+            current.revocation_id().map(RevocationId::as_str),
+            Some("revocation-restart")
+        );
+        assert_eq!(current.removed_device_ids(), [DeviceId::new("dev-removed")]);
+        assert_eq!(
+            current.pending_recipient_device_ids(),
+            [DeviceId::new("dev-c"), DeviceId::new("dev-d")]
+        );
+        assert_eq!(current.pending_recipients(), 2);
+        assert_eq!(current.updated_at_ms(), 123);
+    }
+
+    #[tokio::test]
+    async fn current_member_signature_port_uses_persisted_current_group() {
+        let (adapter, _session, _repository, _space_id, _directory) = sponsor_fixture();
+        let payload = b"member-attestation-transcript";
+
+        let signature = adapter.sign_current_member_payload(payload).await.unwrap();
+        let device_id = DeviceId::new("alice");
+        let credential = adapter
+            .current_membership_credential(&device_id)
+            .await
+            .unwrap();
+
+        assert_eq!(adapter.current_member_epoch().await.unwrap(), 1);
+        assert_eq!(
+            credential.member_instance_id(&device_id),
+            adapter.current_member_instance(&device_id).await.unwrap()
+        );
+        assert!(adapter
+            .verify_current_member_payload(&device_id, payload, &signature)
+            .await
+            .unwrap());
+        assert!(!adapter
+            .verify_current_member_payload(&DeviceId::new("missing"), payload, &signature)
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn sponsor_admission_preparation_is_complete_and_has_no_active_side_effect() {
+        use uc_application::deps::{
+            ActivateSponsorAdmissionSecurityPort, ActivateSponsorAdmissionSecurityRequest,
+            PrepareSponsorAdmissionSecurityPort, SponsorAdmissionSecurityRecipient,
+            SponsorAdmissionSecurityRequest,
+        };
+        use uc_core::membership::{
+            BaseMembershipHistoryPosition, MembershipCredential, ED25519_SIGNATURE_ALGORITHM_V1,
+        };
+
+        let (adapter, session, repository, space_id, _directory) = sponsor_fixture();
+        let before = repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let before_epoch = session
+            .current_content_key(&space_id, ContentKeyPurpose::Content)
+            .unwrap()
+            .epoch();
+        let joiner = DeviceId::new("joiner-device");
+        let pending = adapter.prepare_group_join(&joiner).await.unwrap();
+        let retained = DeviceId::new("retained-device");
+        let retained_credential =
+            MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x61; 32]);
+
+        let prepared = adapter
+            .prepare_sponsor_admission_security(SponsorAdmissionSecurityRequest {
+                space_id: space_id.clone(),
+                attempt_id: [0x62; 32],
+                base_history_position: BaseMembershipHistoryPosition {
+                    event_id: None,
+                    depth: 0,
+                    history_digest: [0x63; 32],
+                },
+                candidate_core_digest: [0x64; 32],
+                candidate_identity: joiner.as_str().as_bytes().to_vec(),
+                candidate_key_package: pending.key_package.clone(),
+                existing_recipients: vec![SponsorAdmissionSecurityRecipient {
+                    device_id: retained.clone(),
+                    credential_id: retained_credential.credential_id,
+                }],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(prepared.existing_member_deliveries.len(), 1);
+        assert_eq!(prepared.existing_member_deliveries[0].recipient, retained);
+        assert!(!prepared.existing_member_deliveries[0].payload.is_empty());
+        assert_eq!(
+            prepared.public_commitment.key_catalog_digest,
+            prepared.target_key_catalog.digest()
+        );
+        assert_eq!(
+            prepared.public_commitment.target_epoch,
+            before.state().epoch().value() + 1
+        );
+        assert_eq!(
+            repository
+                .load_space_material(&space_id)
+                .await
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            session
+                .current_content_key(&space_id, ContentKeyPurpose::Content)
+                .unwrap()
+                .epoch(),
+            before_epoch
+        );
+
+        adapter
+            .activate_sponsor_admission_security(ActivateSponsorAdmissionSecurityRequest {
+                space_id: space_id.clone(),
+                staged_state: prepared.staged_state.clone(),
+                commit: prepared.commit.clone(),
+                expected_commitment: prepared.public_commitment.clone(),
+            })
+            .await
+            .unwrap();
+        let activated = repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            activated.state().epoch().value(),
+            prepared.public_commitment.target_epoch
+        );
+        assert_eq!(activated.pending_group_updates().len(), 1);
+        assert_eq!(activated.pending_group_updates()[0].recipient(), &retained);
+        assert_eq!(
+            session
+                .current_content_key(&space_id, ContentKeyPurpose::Content)
+                .unwrap()
+                .epoch(),
+            GroupEpoch::new(prepared.public_commitment.target_epoch)
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_helper_applies_only_its_bound_admission_update() {
+        use uc_application::deps::{
+            ActivateCompletionHelperAdmissionSecurityPort,
+            ActivateCompletionHelperAdmissionSecurityRequest, ActivateSponsorAdmissionSecurityPort,
+            ActivateSponsorAdmissionSecurityRequest, PrepareSponsorAdmissionSecurityPort,
+            SponsorAdmissionSecurityRecipient, SponsorAdmissionSecurityRequest,
+        };
+        use uc_core::membership::{
+            BaseMembershipHistoryPosition, MembershipCredential, ED25519_SIGNATURE_ALGORITHM_V1,
+        };
+
+        let (adapter, session, repository, space_id, _directory) = sponsor_fixture();
+        let helper = DeviceId::new("completion-helper");
+        let helper_credential =
+            MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x71; 32]);
+        let pending = adapter
+            .prepare_group_join(&DeviceId::new("joiner-device"))
+            .await
+            .unwrap();
+        let attempt_id = [0x72; 32];
+        let candidate_core_digest = [0x73; 32];
+        let prepared = adapter
+            .prepare_sponsor_admission_security(SponsorAdmissionSecurityRequest {
+                space_id: space_id.clone(),
+                attempt_id,
+                base_history_position: BaseMembershipHistoryPosition {
+                    event_id: None,
+                    depth: 0,
+                    history_digest: [0x74; 32],
+                },
+                candidate_core_digest,
+                candidate_identity: b"joiner-device".to_vec(),
+                candidate_key_package: pending.key_package,
+                existing_recipients: vec![SponsorAdmissionSecurityRecipient {
+                    device_id: helper.clone(),
+                    credential_id: helper_credential.credential_id,
+                }],
+            })
+            .await
+            .unwrap();
+
+        adapter
+            .activate_sponsor_admission_security(ActivateSponsorAdmissionSecurityRequest {
+                space_id: space_id.clone(),
+                staged_state: prepared.staged_state.clone(),
+                commit: prepared.commit.clone(),
+                expected_commitment: prepared.public_commitment.clone(),
+            })
+            .await
+            .unwrap();
+
+        adapter
+            .activate_completion_helper_admission_security(
+                ActivateCompletionHelperAdmissionSecurityRequest {
+                    space_id: space_id.clone(),
+                    attempt_id,
+                    helper_device_id: helper,
+                    helper_credential_id: helper_credential.credential_id,
+                    candidate_core_digest,
+                    security_commit: prepared.commit,
+                    security_welcome: prepared.welcome,
+                    target_key_catalog: prepared.target_key_catalog.encode().unwrap(),
+                    existing_member_deliveries: prepared.existing_member_deliveries,
+                    expected_commitment: prepared.public_commitment.clone(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            repository
+                .load_space_material(&space_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state()
+                .epoch()
+                .value(),
+            prepared.public_commitment.target_epoch
+        );
+        assert_eq!(
+            session
+                .current_content_key(&space_id, ContentKeyPurpose::Content)
+                .unwrap()
+                .epoch(),
+            GroupEpoch::new(prepared.public_commitment.target_epoch)
+        );
+    }
+
+    #[tokio::test]
+    async fn revocation_without_space_material_requires_legacy_bootstrap() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("legacy-space-without-group-material");
+        session.set_master_key_for_space(space_id, MasterKey::from_bytes(&[0x31; 32]).unwrap());
+        let (repository, _) = memory_revocation_repository(None);
+        let adapter = adapter(
+            &directory,
+            local_key_material(&directory, memory_secure_storage()),
+            session,
+            repository,
+        );
+
+        let result = adapter
+            .revoke_group_member(&DeviceId::new("removed-device"), &[], 100)
+            .await
+            .unwrap();
+
+        assert_eq!(result, GroupRevocationResult::LocalOnly);
+    }
+
+    #[tokio::test]
+    async fn revocation_rejects_ready_material_without_group_state_as_corrupted() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("ready-space-without-group-state");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x32; 32]).unwrap(),
+        );
+        let mut state = SpaceKeyState::legacy(space_id);
+        state.mark_migrating().unwrap();
+        state
+            .mark_ready(ContentKeyId::generate(), ProtectionGroupId::generate())
+            .unwrap();
+        let material = SpaceKeyMaterial::new(state, Vec::new(), vec![0x01], 100);
+        let (repository, _) = memory_revocation_repository(Some(material));
+        let adapter = adapter(
+            &directory,
+            local_key_material(&directory, memory_secure_storage()),
+            session,
+            repository,
+        );
+
+        let error = adapter
+            .revoke_group_member(&DeviceId::new("removed-device"), &[], 100)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            KeyEpochError::StateIssue(uc_core::membership::KeyEpochStateIssue::CorruptMaterial)
+        ));
+    }
+
+    #[tokio::test]
+    async fn first_group_admission_bootstraps_a_single_member_legacy_space() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("new-space-before-first-pairing");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x33; 32]).unwrap(),
+        );
+        let (repository, _) = memory_revocation_repository(None);
+        let adapter = adapter(
+            &directory,
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::clone(&session),
+            Arc::clone(&repository),
+        );
+        let sponsor = DeviceId::new("sponsor-device");
+        let joiner = DeviceId::new("joiner-device");
+        let pending = adapter.prepare_group_join(&joiner).await.unwrap();
+
+        adapter
+            .admit_group_member(&space_id, &sponsor, &joiner, &[], &pending.key_package)
+            .await
+            .unwrap();
+
+        let material = repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(material.state().mode(), SpaceSecurityMode::Ready);
+        let group = MlsClientState::from_bytes(material.group_state().to_vec());
+        assert!(
+            MlsGroupEngine::contains_active_member(&group, sponsor.as_str().as_bytes()).unwrap()
+        );
+        assert!(
+            MlsGroupEngine::contains_active_member(&group, joiner.as_str().as_bytes()).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn group_admission_does_not_bootstrap_a_legacy_space_with_existing_members() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("legacy-space-with-existing-members");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x34; 32]).unwrap(),
+        );
+        let (repository, _) = memory_revocation_repository(None);
+        let adapter = adapter(
+            &directory,
+            local_key_material(&directory, memory_secure_storage()),
+            session,
+            repository,
+        );
+        let pending = adapter
+            .prepare_group_join(&DeviceId::new("joiner-device"))
+            .await
+            .unwrap();
+
+        let error = adapter
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("sponsor-device"),
+                &DeviceId::new("joiner-device"),
+                &[DeviceId::new("existing-device")],
+                &pending.key_package,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, SpaceAccessError::CorruptedKeyMaterial));
+    }
+
+    #[tokio::test]
+    async fn activate_session_without_material_keeps_legacy_key_state() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("legacy-space");
+        let mut repository = MockRevocationRepository::new();
+        repository
+            .expect_load_space_material()
+            .times(1)
+            .returning(|_| Ok(None));
+        repository.expect_save_space_material().never();
+        let adapter = adapter(
+            &directory,
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::clone(&session),
+            Arc::new(repository),
+        );
+
+        adapter
+            .activate_session(&space_id, MasterKey::from_bytes(&[0x11; 32]).unwrap())
+            .await
+            .unwrap();
+
+        let current = session
+            .current_content_key(&space_id, ContentKeyPurpose::Content)
+            .unwrap();
+        assert_eq!(current.content_key_id(), &ContentKeyId::legacy_v1());
+        assert_eq!(current.epoch(), GroupEpoch::new(0));
+    }
+
+    #[tokio::test]
+    async fn activate_session_repository_failure_restores_old_session_and_source() {
+        use std::error::Error as _;
+
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let old_space = SpaceId::from("old-space");
+        session.set_master_key_for_space(
+            old_space.clone(),
+            MasterKey::from_bytes(&[0x21; 32]).unwrap(),
+        );
+        let mut repository = MockRevocationRepository::new();
+        repository
+            .expect_load_space_material()
+            .times(1)
+            .returning(|_| {
+                Err(KeyEpochError::Repository(anyhow::anyhow!(
+                    "injected failure"
+                )))
+            });
+        let adapter = adapter(
+            &directory,
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::clone(&session),
+            Arc::new(repository),
+        );
+
+        let error = adapter
+            .activate_session(
+                &SpaceId::from("target-space"),
+                MasterKey::from_bytes(&[0x41; 32]).unwrap(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, SpaceAccessError::SecurityState { .. }));
+        assert!(error.source().is_some());
+        assert_eq!(session.current_space_id().unwrap(), old_space);
+    }
+
+    #[tokio::test]
+    async fn activate_session_installs_catalog_and_preserves_old_session_on_vault_conflict() {
+        use std::error::Error as _;
+
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let old_space = SpaceId::from("old-space");
+        session.set_master_key_for_space(
+            old_space.clone(),
+            MasterKey::from_bytes(&[0x21; 32]).unwrap(),
+        );
+        let target_space = SpaceId::from("target-space");
+        let material_builder = InMemorySession::new();
+        material_builder.set_master_key_for_space(
+            target_space.clone(),
+            MasterKey::from_bytes(&[0x31; 32]).unwrap(),
+        );
+        let target_material = material_builder
+            .create_migrated_space_material(&target_space, 100)
+            .unwrap();
+        let conflicting_state = SpaceKeyState::ready_for_admission(
+            SpaceId::from("historical-space"),
+            target_material.state().epoch(),
+            target_material.state().current_content_key_id().clone(),
+            ProtectionGroupId::generate(),
+        )
+        .unwrap();
+        let conflicting_material = SpaceKeyMaterial::new(
+            conflicting_state,
+            target_material.group_state().to_vec(),
+            target_material.key_catalog().to_vec(),
+            99,
+        );
+        let mut repository = MockRevocationRepository::new();
+        repository
+            .expect_load_space_material()
+            .withf(move |space_id| space_id == &target_space)
+            .times(1)
+            .return_once(move |_| Ok(Some(target_material)));
+        let (adapter, vault) = adapter_with_vault(
+            &directory,
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::clone(&session),
+            Arc::new(repository),
+        );
+        vault
+            .install_verified_space_material(&conflicting_material)
+            .await
+            .unwrap();
+
+        let error = adapter
+            .activate_session(
+                &SpaceId::from("target-space"),
+                MasterKey::from_bytes(&[0x41; 32]).unwrap(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, SpaceAccessError::SecurityState { .. }));
+        assert!(error.source().is_some());
+        assert_eq!(session.current_space_id().unwrap(), old_space);
+    }
+
+    #[tokio::test]
+    async fn group_join_uses_distinct_local_root_and_cold_restores_shared_catalog() {
+        let (sponsor, sponsor_session, _, space_id, _sponsor_dir) = sponsor_fixture();
+        let joiner_dir = tempdir().unwrap();
+        let joiner_storage = memory_secure_storage();
+        let joiner_key_material = local_key_material(&joiner_dir, joiner_storage);
+        let joiner_session = Arc::new(InMemorySession::new());
+        let (joiner_repository, _) = memory_revocation_repository(None);
+        let (joiner, joiner_vault) = adapter_with_vault(
+            &joiner_dir,
+            joiner_key_material.clone(),
+            joiner_session.clone(),
+            joiner_repository.clone(),
+        );
+        let pending = joiner
+            .prepare_group_join(&DeviceId::new("joiner-device"))
+            .await
+            .unwrap();
+        let admission = sponsor
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &DeviceId::new("joiner-device"),
+                &[],
+                &pending.key_package,
+            )
+            .await
+            .unwrap();
+        joiner
+            .install_group_join(
+                &space_id,
+                &Passphrase::new("correct horse battery staple"),
+                pending,
+                &admission.welcome,
+                &admission.encrypted_key_catalog,
+                admission.group_epoch,
+            )
+            .await
+            .unwrap();
+
+        assert_ne!(
+            sponsor_session.get_master_key().unwrap(),
+            joiner_session.get_master_key().unwrap()
+        );
+        assert_eq!(
+            sponsor_session.legacy_content_key().unwrap(),
+            joiner_session.legacy_content_key().unwrap()
+        );
+        let sponsor_current = sponsor_session
+            .current_content_key(&space_id, ContentKeyPurpose::Content)
+            .unwrap();
+        let joiner_current = joiner_session
+            .current_content_key(&space_id, ContentKeyPurpose::Content)
+            .unwrap();
+        assert_eq!(sponsor_current.epoch(), GroupEpoch::new(2));
+        assert_eq!(sponsor_current.key(), joiner_current.key());
+
+        // 冷恢复先结束旧运行期，不能同时持有两个活动安全会话。
+        joiner_session.clear();
+        let restored_session = Arc::new(InMemorySession::new());
+        let restored = adapter_with_existing_vault(
+            joiner_key_material,
+            restored_session.clone(),
+            joiner_repository,
+            &joiner_vault,
+        );
+        SpaceAccessStore::unlock(
+            &restored,
+            &space_id,
+            &Passphrase::new("correct horse battery staple"),
+        )
+        .await
+        .unwrap();
+        let restored_current = restored_session
+            .current_content_key(&space_id, ContentKeyPurpose::Content)
+            .unwrap();
+        assert_eq!(restored_current.key(), sponsor_current.key());
+    }
+
+    #[tokio::test]
+    async fn failed_group_install_restores_previous_local_state() {
+        use std::error::Error as _;
+
+        let (sponsor, _, _, target_space, _sponsor_dir) = sponsor_fixture();
+        let joiner_dir = tempdir().unwrap();
+        let joiner_storage = memory_secure_storage();
+        let joiner_key_material = local_key_material(&joiner_dir, joiner_storage);
+        let joiner_session = Arc::new(InMemorySession::new());
+        let (joiner_repository, fail_saves) = memory_revocation_repository(None);
+        let joiner = adapter(
+            &joiner_dir,
+            joiner_key_material.clone(),
+            joiner_session.clone(),
+            joiner_repository.clone(),
+        );
+        let old_space = SpaceId::from("old-space");
+        SpaceAccessStore::initialize(
+            &joiner,
+            &old_space,
+            &Passphrase::new("old passphrase remains valid"),
+        )
+        .await
+        .unwrap();
+        let old_root = joiner_session.get_master_key().unwrap();
+        let old_slot = joiner_key_material
+            .load_keyslot(&KeyScope {
+                profile_id: "default".into(),
+            })
+            .await
+            .unwrap();
+
+        let pending = joiner
+            .prepare_group_join(&DeviceId::new("joiner-device"))
+            .await
+            .unwrap();
+        let admission = sponsor
+            .admit_group_member(
+                &target_space,
+                &DeviceId::new("alice"),
+                &DeviceId::new("joiner-device"),
+                &[],
+                &pending.key_package,
+            )
+            .await
+            .unwrap();
+        fail_saves.store(true, Ordering::Release);
+        let error = joiner
+            .install_group_join(
+                &target_space,
+                &Passphrase::new("new passphrase is not committed"),
+                pending,
+                &admission.welcome,
+                &admission.encrypted_key_catalog,
+                admission.group_epoch,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, SpaceAccessError::SecurityState { .. }));
+        assert!(error.source().is_some());
+
+        assert_eq!(joiner_session.current_space_id().unwrap(), old_space);
+        assert_eq!(joiner_session.get_master_key().unwrap(), old_root);
+        assert_eq!(
+            joiner_key_material
+                .load_keyslot(&KeyScope {
+                    profile_id: "default".into(),
+                })
+                .await
+                .unwrap(),
+            old_slot
+        );
+    }
+
+    #[tokio::test]
+    async fn preparing_target_access_does_not_replace_the_active_space() {
+        use uc_core::ports::space::PrepareAdmissionTargetAccessPort;
+
+        let directory = tempdir().unwrap();
+        let secure_storage = memory_secure_storage();
+        let key_material = local_key_material(&directory, secure_storage);
+        let session = Arc::new(InMemorySession::new());
+        let (repository, _) = memory_revocation_repository(None);
+        let adapter = adapter(
+            &directory,
+            key_material.clone(),
+            session.clone(),
+            repository,
+        );
+        let source_space = SpaceId::from("source-space");
+        SpaceAccessStore::initialize(
+            &adapter,
+            &source_space,
+            &Passphrase::new("source passphrase"),
+        )
+        .await
+        .unwrap();
+        let source_root = session.get_master_key().unwrap();
+        let scope = KeyScope {
+            profile_id: "default".into(),
+        };
+        let source_slot = key_material.load_keyslot(&scope).await.unwrap();
+        let source_kek = key_material.load_kek(&scope).await.unwrap();
+
+        let prepared = PrepareAdmissionTargetAccessPort::prepare_target_access(
+            &adapter,
+            &SpaceId::from("target-space"),
+            &Passphrase::new("target passphrase"),
+        )
+        .await
+        .unwrap();
+
+        assert!(!prepared.as_bytes().is_empty());
+        assert_eq!(session.current_space_id().unwrap(), source_space);
+        assert_eq!(session.get_master_key().unwrap(), source_root);
+        assert_eq!(
+            key_material.load_keyslot(&scope).await.unwrap(),
+            source_slot
+        );
+        assert_eq!(key_material.load_kek(&scope).await.unwrap(), source_kek);
+    }
+
+    #[tokio::test]
+    async fn reliable_revocation_activates_a_new_epoch_for_retained_members_only() {
+        let (sponsor, sponsor_session, repository, space_id, _sponsor_dir) = sponsor_fixture();
+        let bob = sponsor
+            .prepare_group_join(&DeviceId::new("bob"))
+            .await
+            .unwrap();
+        sponsor
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &DeviceId::new("bob"),
+                &[],
+                &bob.key_package,
+            )
+            .await
+            .unwrap();
+        let charlie = sponsor
+            .prepare_group_join(&DeviceId::new("charlie"))
+            .await
+            .unwrap();
+        sponsor
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &DeviceId::new("charlie"),
+                &[DeviceId::new("bob")],
+                &charlie.key_package,
+            )
+            .await
+            .unwrap();
+        let before = sponsor_session
+            .current_content_key(&space_id, ContentKeyPurpose::Content)
+            .unwrap();
+
+        let result = sponsor
+            .revoke_group_member(&DeviceId::new("charlie"), &[DeviceId::new("bob")], 100)
+            .await
+            .unwrap();
+
+        assert_eq!(result.status(), Some(RevocationStatus::Distributing));
+        assert_eq!(result.pending_recipients(), 1);
+        let current = sponsor.current_group_revocation().await.unwrap().unwrap();
+        assert_eq!(current.revocation_id(), result.revocation_id());
+        assert_eq!(current.removed_device_ids(), [DeviceId::new("charlie")]);
+        assert_eq!(
+            current.pending_recipient_device_ids(),
+            [DeviceId::new("bob")]
+        );
+        assert_eq!(current.pending_recipients(), 1);
+        assert_eq!(current.updated_at_ms(), 100);
+        let after = sponsor_session
+            .current_content_key(&space_id, ContentKeyPurpose::Content)
+            .unwrap();
+        assert_eq!(after.epoch(), before.epoch().next().unwrap());
+        assert_ne!(after.key(), before.key());
+        let stage = repository
+            .load_staged_revocation(result.revocation_id().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stage.outbox().len(), 1);
+        assert_eq!(stage.outbox()[0].recipient(), &DeviceId::new("bob"));
+    }
+
+    #[tokio::test]
+    async fn permanent_loss_recovery_advances_the_same_revocation_in_order() {
+        let (sponsor, sponsor_session, _repository, space_id, _sponsor_dir) = sponsor_fixture();
+        for (device, retained) in [
+            ("bob", Vec::new()),
+            ("charlie", vec![DeviceId::new("bob")]),
+            ("dave", vec![DeviceId::new("bob"), DeviceId::new("charlie")]),
+        ] {
+            let pending = sponsor
+                .prepare_group_join(&DeviceId::new(device))
+                .await
+                .unwrap();
+            sponsor
+                .admit_group_member(
+                    &space_id,
+                    &DeviceId::new("alice"),
+                    &DeviceId::new(device),
+                    &retained,
+                    &pending.key_package,
+                )
+                .await
+                .unwrap();
+        }
+        let removal = sponsor
+            .revoke_group_member(
+                &DeviceId::new("charlie"),
+                &[DeviceId::new("bob"), DeviceId::new("dave")],
+                100,
+            )
+            .await
+            .unwrap();
+        let revocation_id = removal.revocation_id().unwrap().clone();
+        let before_epoch = sponsor_session
+            .current_content_key(&space_id, ContentKeyPurpose::Content)
+            .unwrap()
+            .epoch();
+
+        assert!(matches!(
+            sponsor
+                .continue_group_revocation(&revocation_id, &[DeviceId::new("alice")], 120,)
+                .await,
+            Err(KeyEpochError::PermanentLossRecipientNotPending)
+        ));
+        let recovered = sponsor
+            .continue_group_revocation(&revocation_id, &[DeviceId::new("bob")], 130)
+            .await
+            .unwrap();
+
+        assert_eq!(recovered.revocation_id(), Some(&revocation_id));
+        assert_eq!(
+            recovered.removed_device_ids(),
+            [DeviceId::new("charlie"), DeviceId::new("bob")]
+        );
+        assert_eq!(
+            recovered.pending_recipient_device_ids(),
+            [DeviceId::new("dave")]
+        );
+        assert_eq!(
+            sponsor_session
+                .current_content_key(&space_id, ContentKeyPurpose::Content)
+                .unwrap()
+                .epoch(),
+            before_epoch.next().unwrap()
+        );
+        let pending = sponsor.pending_group_updates(&revocation_id).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].recipient(), &DeviceId::new("dave"));
+        let first_update_id = pending[0].update_id().to_owned();
+        let after_first_ack = sponsor
+            .acknowledge_group_update(&revocation_id, &DeviceId::new("dave"), 140)
+            .await
+            .unwrap();
+        assert_eq!(
+            after_first_ack.status(),
+            Some(RevocationStatus::Distributing)
+        );
+        let next_pending = sponsor.pending_group_updates(&revocation_id).await.unwrap();
+        assert_eq!(next_pending.len(), 1);
+        assert_eq!(next_pending[0].recipient(), &DeviceId::new("dave"));
+        assert_ne!(next_pending[0].update_id(), first_update_id);
+        let complete = sponsor
+            .acknowledge_group_update(&revocation_id, &DeviceId::new("dave"), 150)
+            .await
+            .unwrap();
+        assert_eq!(complete.status(), Some(RevocationStatus::Complete));
+    }
+
+    #[tokio::test]
+    async fn permanent_loss_recovery_requires_group_rebuild_when_current_group_is_unreadable() {
+        let directory = tempdir().unwrap();
+        let space_id = SpaceId::from("corrupt-recovery-space");
+        let mut record = RevocationRecord::prepare_with_recipients(
+            RevocationId::from_string("corrupt-recovery-revocation").unwrap(),
+            space_id.clone(),
+            DeviceId::new("removed-device"),
+            vec![DeviceId::new("lost-device")],
+            GroupEpoch::new(1),
+            100,
+        )
+        .unwrap();
+        record.transition_to(RevocationStatus::Staged, 101).unwrap();
+        let mut state = SpaceKeyState::legacy(space_id.clone());
+        state.mark_migrating().unwrap();
+        state
+            .mark_ready(
+                ContentKeyId::from_string("current-1").unwrap(),
+                ProtectionGroupId::generate(),
+            )
+            .unwrap();
+        state
+            .rotate(ContentKeyId::from_string("current-2").unwrap())
+            .unwrap();
+        let mut stage = RevocationStage::new(
+            record,
+            state.clone(),
+            b"corrupt-group-state".to_vec(),
+            b"key-catalog".to_vec(),
+            vec![RevocationOutboxMessage::new(
+                DeviceId::new("lost-device"),
+                vec![1],
+            )],
+        )
+        .unwrap();
+        stage
+            .transition_to(RevocationStatus::Activated, 102)
+            .unwrap();
+        stage
+            .transition_to(RevocationStatus::Distributing, 103)
+            .unwrap();
+        let active_record = stage.record().clone();
+        let material = SpaceKeyMaterial::new(
+            state,
+            b"corrupt-group-state".to_vec(),
+            b"key-catalog".to_vec(),
+            103,
+        );
+        let revocation_id = active_record.revocation_id().clone();
+
+        let mut repository = MockRevocationRepository::new();
+        repository
+            .expect_get_revocation()
+            .times(1)
+            .returning(move |_| Ok(Some(active_record.clone())));
+        repository
+            .expect_load_staged_revocation()
+            .times(2)
+            .returning(move |_| Ok(Some(stage.clone())));
+        repository
+            .expect_load_space_material()
+            .times(1)
+            .returning(move |_| Ok(Some(material.clone())));
+        repository
+            .expect_commit_revocation_recovery()
+            .times(1)
+            .withf(|stage, _| stage.record().status() == RevocationStatus::RecoveryRequired)
+            .returning(|stage, _| Ok(stage.record().clone()));
+        let adapter = adapter(
+            &directory,
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::new(InMemorySession::new()),
+            Arc::new(repository),
+        );
+
+        let result = adapter
+            .continue_group_revocation(&revocation_id, &[DeviceId::new("lost-device")], 104)
+            .await
+            .unwrap();
+
+        assert_eq!(result.status(), Some(RevocationStatus::RecoveryRequired));
+        assert!(result.pending_recipient_device_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reliable_revocation_stops_when_repository_state_does_not_advance() {
+        let (sponsor, _session, _repository, space_id, _directory, stage_calls) =
+            sponsor_fixture_with_stage_persistence(false);
+        let charlie = sponsor
+            .prepare_group_join(&DeviceId::new("charlie"))
+            .await
+            .unwrap();
+        sponsor
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &DeviceId::new("charlie"),
+                &[],
+                &charlie.key_package,
+            )
+            .await
+            .unwrap();
+
+        let error = sponsor
+            .revoke_group_member(&DeviceId::new("charlie"), &[], 100)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            KeyEpochError::StateIssue(uc_core::membership::KeyEpochStateIssue::RecoveryRequired)
+        ));
+        assert_eq!(stage_calls.load(Ordering::Acquire), 3);
+    }
+
+    #[tokio::test]
+    async fn retained_device_applies_admission_then_revocation_epoch_updates() {
+        use crate::clipboard::chunked_transfer::TransferCipherAdapter;
+        use uc_core::ports::TransferCipherPort;
+
+        for missing_admission in [false, true] {
+            let (sponsor, sponsor_session, repository, space_id, _sponsor_dir) = sponsor_fixture();
+            let bob_dir = tempdir().unwrap();
+            let bob_session = Arc::new(InMemorySession::new());
+            let (bob_repository, _) = memory_revocation_repository(None);
+            let bob = adapter(
+                &bob_dir,
+                local_key_material(&bob_dir, memory_secure_storage()),
+                bob_session.clone(),
+                bob_repository.clone(),
+            );
+            let bob_pending = bob.prepare_group_join(&DeviceId::new("bob")).await.unwrap();
+            let bob_admission = sponsor
+                .admit_group_member(
+                    &space_id,
+                    &DeviceId::new("alice"),
+                    &DeviceId::new("bob"),
+                    &[],
+                    &bob_pending.key_package,
+                )
+                .await
+                .unwrap();
+            bob.install_group_join(
+                &space_id,
+                &Passphrase::new("shared passphrase for bob"),
+                bob_pending,
+                &bob_admission.welcome,
+                &bob_admission.encrypted_key_catalog,
+                bob_admission.group_epoch,
+            )
+            .await
+            .unwrap();
+            let bob_outbound_update = PendingGroupUpdate::persistent(
+                DeviceId::new("dave"),
+                b"bob-pending-update".to_vec(),
+            );
+            let mut bob_material = bob_repository
+                .load_space_material(&space_id)
+                .await
+                .unwrap()
+                .unwrap();
+            bob_material.add_pending_group_updates([bob_outbound_update.clone()], 150);
+            bob_repository
+                .save_space_material(&bob_material)
+                .await
+                .unwrap();
+
+            let charlie_pending = sponsor
+                .prepare_group_join(&DeviceId::new("charlie"))
+                .await
+                .unwrap();
+            let charlie_admission = sponsor
+                .admit_group_member(
+                    &space_id,
+                    &DeviceId::new("alice"),
+                    &DeviceId::new("charlie"),
+                    &[DeviceId::new("bob")],
+                    &charlie_pending.key_package,
+                )
+                .await
+                .unwrap();
+            let admission_update = charlie_admission.existing_member_updates[0].payload();
+            if !missing_admission {
+                bob.apply_group_epoch_update(admission_update)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    bob.apply_group_epoch_update(admission_update)
+                        .await
+                        .unwrap(),
+                    GroupEpoch::new(charlie_admission.group_epoch)
+                );
+                assert_eq!(
+                    bob_repository
+                        .load_space_material(&space_id)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .pending_group_updates(),
+                    &[bob_outbound_update]
+                );
+            }
+
+            let result = sponsor
+                .revoke_group_member(&DeviceId::new("charlie"), &[DeviceId::new("bob")], 200)
+                .await
+                .unwrap();
+            let pending_updates = sponsor
+                .pending_group_updates(result.revocation_id().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(pending_updates.len(), 1);
+            assert_eq!(pending_updates[0].recipient(), &DeviceId::new("bob"));
+            assert_eq!(pending_updates[0].revocation_id(), result.revocation_id());
+            let stage = repository
+                .load_staged_revocation(result.revocation_id().unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            let sender = TransferCipherAdapter::new(sponsor_session.clone());
+            let receiver = TransferCipherAdapter::new(bob_session.clone());
+            let old_message = receiver
+                .encrypt(b"old sender payload")
+                .await
+                .expect("old encrypt");
+            let new_message = sender
+                .encrypt(b"new sender payload")
+                .await
+                .expect("new encrypt");
+            assert_eq!(
+                sender
+                    .decrypt(&old_message)
+                    .await
+                    .expect("new receives old"),
+                b"old sender payload"
+            );
+            assert!(
+                receiver.decrypt(&new_message).await.is_err(),
+                "缺少更新时不能接受新密钥的内容"
+            );
+            if missing_admission {
+                assert!(matches!(
+                    bob.apply_group_epoch_update(stage.outbox()[0].payload())
+                        .await,
+                    Err(KeyEpochError::StateIssue(
+                        uc_core::membership::KeyEpochStateIssue::OutOfOrderUpdate
+                    ))
+                ));
+                bob.apply_group_epoch_update(admission_update)
+                    .await
+                    .expect("补回前序更新");
+                bob.apply_group_epoch_update(admission_update)
+                    .await
+                    .expect("重复更新幂等");
+            }
+            bob.apply_group_epoch_update(stage.outbox()[0].payload())
+                .await
+                .unwrap();
+            assert_eq!(
+                receiver
+                    .decrypt(&new_message)
+                    .await
+                    .expect("更新后接收成功"),
+                b"new sender payload"
+            );
+            let reverse = receiver
+                .encrypt(b"recovered reverse payload")
+                .await
+                .expect("reverse encrypt");
+            assert_eq!(
+                sender.decrypt(&reverse).await.expect("反向接收成功"),
+                b"recovered reverse payload"
+            );
+
+            let sponsor_key = sponsor_session
+                .current_content_key(&space_id, ContentKeyPurpose::Content)
+                .unwrap();
+            let bob_key = bob_session
+                .current_content_key(&space_id, ContentKeyPurpose::Content)
+                .unwrap();
+            assert_eq!(bob_key.epoch(), sponsor_key.epoch());
+            assert_eq!(bob_key.key(), sponsor_key.key());
+        }
+    }
+
+    #[tokio::test]
+    async fn joiner_relays_admission_update_after_sponsor_stops() {
+        let (sponsor_b, _sponsor_session, _repository, space_id, _sponsor_dir) = sponsor_fixture();
+
+        let device_a_dir = tempdir().unwrap();
+        let device_a_session = Arc::new(InMemorySession::new());
+        let (device_a_repository, _) = memory_revocation_repository(None);
+        let device_a = adapter(
+            &device_a_dir,
+            local_key_material(&device_a_dir, memory_secure_storage()),
+            Arc::clone(&device_a_session),
+            Arc::clone(&device_a_repository),
+        );
+        let device_a_id = DeviceId::new("device-a");
+        let device_a_pending = sponsor_b.prepare_group_join(&device_a_id).await.unwrap();
+        let device_a_admission = sponsor_b
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &device_a_id,
+                &[],
+                &device_a_pending.key_package,
+            )
+            .await
+            .unwrap();
+        device_a
+            .install_group_join(
+                &space_id,
+                &Passphrase::new("shared passphrase for device a"),
+                device_a_pending,
+                &device_a_admission.welcome,
+                &device_a_admission.encrypted_key_catalog,
+                device_a_admission.group_epoch,
+            )
+            .await
+            .unwrap();
+
+        let device_c_dir = tempdir().unwrap();
+        let device_c_session = Arc::new(InMemorySession::new());
+        let (device_c_repository, _) = memory_revocation_repository(None);
+        let device_c = adapter(
+            &device_c_dir,
+            local_key_material(&device_c_dir, memory_secure_storage()),
+            device_c_session,
+            device_c_repository,
+        );
+        let device_c_id = DeviceId::new("device-c");
+        let device_c_pending = device_c.prepare_group_join(&device_c_id).await.unwrap();
+        let device_c_admission = sponsor_b
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &device_c_id,
+                std::slice::from_ref(&device_a_id),
+                &device_c_pending.key_package,
+            )
+            .await
+            .unwrap();
+        device_c
+            .install_group_join(
+                &space_id,
+                &Passphrase::new("shared passphrase for device c"),
+                device_c_pending,
+                &device_c_admission.welcome,
+                &device_c_admission.encrypted_key_catalog,
+                device_c_admission.group_epoch,
+            )
+            .await
+            .unwrap();
+        let relayed_update = device_c_admission.existing_member_updates[0]
+            .payload()
+            .to_vec();
+
+        drop(sponsor_b);
+
+        assert_eq!(
+            device_a
+                .apply_group_epoch_update(&relayed_update)
+                .await
+                .unwrap(),
+            GroupEpoch::new(device_c_admission.group_epoch)
+        );
+        let payload = b"member-attestation-after-relayed-update";
+        let signature = device_c.sign_current_member_payload(payload).await.unwrap();
+        assert!(device_a
+            .verify_current_member_payload(&device_c_id, payload, &signature)
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn target_recovery_material_is_prepared_without_side_effects_and_committed_idempotently()
+    {
+        use std::error::Error as _;
+
+        let (sponsor, _sponsor_session, sponsor_repository, space_id, _sponsor_dir) =
+            sponsor_fixture();
+        let recipient_dir = tempdir().unwrap();
+        let recipient_session = Arc::new(InMemorySession::new());
+        let (recipient_repository, _) = memory_revocation_repository(None);
+        let recipient = adapter(
+            &recipient_dir,
+            local_key_material(&recipient_dir, memory_secure_storage()),
+            recipient_session,
+            Arc::clone(&recipient_repository),
+        );
+        let recipient_device = DeviceId::new("recovery-recipient");
+        let pending = recipient
+            .prepare_group_join(&recipient_device)
+            .await
+            .unwrap();
+        let admission = sponsor
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &recipient_device,
+                &[],
+                &pending.key_package,
+            )
+            .await
+            .unwrap();
+        recipient
+            .install_group_join(
+                &space_id,
+                &Passphrase::new("shared recovery passphrase"),
+                pending,
+                &admission.welcome,
+                &admission.encrypted_key_catalog,
+                admission.group_epoch,
+            )
+            .await
+            .unwrap();
+
+        let contender_dir = tempdir().unwrap();
+        let contender_session = Arc::new(InMemorySession::new());
+        let (contender_repository, _) = memory_revocation_repository(None);
+        let contender = adapter(
+            &contender_dir,
+            local_key_material(&contender_dir, memory_secure_storage()),
+            contender_session,
+            Arc::clone(&contender_repository),
+        );
+        let contender_device = DeviceId::new("recovery-contender");
+        let contender_pending = contender
+            .prepare_group_join(&contender_device)
+            .await
+            .unwrap();
+        let contender_admission = sponsor
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &contender_device,
+                std::slice::from_ref(&DeviceId::new("recovery-recipient")),
+                &contender_pending.key_package,
+            )
+            .await
+            .unwrap();
+        recipient
+            .apply_group_epoch_update(contender_admission.existing_member_updates[0].payload())
+            .await
+            .unwrap();
+        contender
+            .install_group_join(
+                &space_id,
+                &Passphrase::new("shared contender passphrase"),
+                contender_pending,
+                &contender_admission.welcome,
+                &contender_admission.encrypted_key_catalog,
+                contender_admission.group_epoch,
+            )
+            .await
+            .unwrap();
+
+        let before = sponsor_repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let group_info = sponsor
+            .export_membership_branch_recovery_group_info()
+            .await
+            .unwrap();
+        let recipient_recovery = recipient
+            .prepare_membership_branch_recovery_recipient(group_info.clone())
+            .await
+            .unwrap();
+        let contender_recovery = contender
+            .prepare_membership_branch_recovery_recipient(group_info)
+            .await
+            .unwrap();
+        let recipient_material = recipient_repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let recipient_credential = MembershipCredential::new(
+            uc_core::membership::ED25519_SIGNATURE_ALGORITHM_V1,
+            MlsGroupEngine::signing_public_key(&MlsClientState::from_bytes(
+                recipient_material.group_state().to_vec(),
+            ))
+            .unwrap(),
+        );
+        let contender_material = contender_repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let contender_credential = MembershipCredential::new(
+            uc_core::membership::ED25519_SIGNATURE_ALGORITHM_V1,
+            MlsGroupEngine::signing_public_key(&MlsClientState::from_bytes(
+                contender_material.group_state().to_vec(),
+            ))
+            .unwrap(),
+        );
+        let recipient_member = recipient_credential.member_instance_id(&recipient_device);
+        let contender_member = contender_credential.member_instance_id(&contender_device);
+        let history = uc_core::membership::VersionedMembershipHistory::from_activation_baseline(
+            uc_core::membership::MembershipActivationBaselineV2::Established {
+                lineage_id: space_id.as_ref().to_owned(),
+                head_event_id: uc_core::membership::MembershipEventId::from_hex(&"11".repeat(32))
+                    .unwrap(),
+                head_depth: 0,
+                current_members: vec![
+                    (
+                        uc_core::membership::AdmissionChangeFacts {
+                            member_instance: recipient_member,
+                            device_id: recipient_device,
+                            device_name: "Recovery recipient".to_owned(),
+                            identity_fingerprint:
+                                uc_core::security::IdentityFingerprint::from_display_string(
+                                    "ABCD-EFGH-IJKL-MNOP",
+                                )
+                                .unwrap(),
+                            transport_public_key: vec![1],
+                            transport_address_blob: vec![2],
+                            identity_signature: vec![3],
+                        },
+                        recipient_credential,
+                    ),
+                    (
+                        uc_core::membership::AdmissionChangeFacts {
+                            member_instance: contender_member,
+                            device_id: contender_device.clone(),
+                            device_name: "Recovery contender".to_owned(),
+                            identity_fingerprint:
+                                uc_core::security::IdentityFingerprint::from_display_string(
+                                    "QRST-UVWX-YZAB-CDEF",
+                                )
+                                .unwrap(),
+                            transport_public_key: vec![4],
+                            transport_address_blob: vec![5],
+                            identity_signature: vec![6],
+                        },
+                        contender_credential,
+                    ),
+                ],
+            },
+        )
+        .unwrap();
+        let target_branch_id =
+            uc_core::membership::MembershipConflictPolicy::branch_id(&history).unwrap();
+        let prepared = sponsor
+            .prepare_membership_branch_recovery_material(
+                PrepareMembershipBranchRecoveryMaterialInput {
+                    conflict_id: uc_core::membership::MembershipConflictId::from_bytes([0x51; 32]),
+                    target_branch_id,
+                    recipient_member,
+                    target_history: history.clone(),
+                    external_commit: recipient_recovery.external_commit,
+                },
+            )
+            .await
+            .unwrap();
+        let conflicting = sponsor
+            .prepare_membership_branch_recovery_material(
+                PrepareMembershipBranchRecoveryMaterialInput {
+                    conflict_id: uc_core::membership::MembershipConflictId::from_bytes([0x51; 32]),
+                    target_branch_id,
+                    recipient_member,
+                    target_history: history,
+                    external_commit: contender_recovery.external_commit,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sponsor_repository
+                .load_space_material(&space_id)
+                .await
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        assert!(!prepared.sealed_mls_recovery_material.is_empty());
+        assert!(!prepared.encrypted_content_key_catalog.is_empty());
+        let staged: SpaceKeyMaterial =
+            postcard::from_bytes(&prepared.target_staged_space_material).unwrap();
+        assert_eq!(
+            staged.pending_group_updates().len(),
+            before.pending_group_updates().len() + 1
+        );
+        assert!(staged
+            .pending_group_updates()
+            .iter()
+            .any(|update| update.recipient() == &contender_device));
+        let recovered = recipient
+            .prepare_recovered_membership_branch_material(
+                &recipient_recovery.staged_mls_state,
+                &prepared.sealed_mls_recovery_material,
+                &prepared.encrypted_content_key_catalog,
+            )
+            .unwrap();
+        assert_eq!(
+            recovered.state().epoch(),
+            before.state().epoch().next().unwrap()
+        );
+        assert_ne!(recovered.group_state(), before.group_state());
+
+        sponsor
+            .commit_membership_branch_recovery_material(
+                prepared.target_staged_space_material.clone(),
+            )
+            .await
+            .unwrap();
+        sponsor
+            .commit_membership_branch_recovery_material(prepared.target_staged_space_material)
+            .await
+            .unwrap();
+        let committed = sponsor_repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            committed.state().epoch(),
+            before.state().epoch().next().unwrap()
+        );
+
+        let conflict = sponsor
+            .commit_membership_branch_recovery_material(conflicting.target_staged_space_material)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            conflict,
+            PrepareMembershipBranchRecoveryMaterialError::Invalid { .. }
+        ));
+        assert!(conflict.source().is_some());
+
+        let error = sponsor
+            .commit_membership_branch_recovery_material(vec![0x00])
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            PrepareMembershipBranchRecoveryMaterialError::Invalid { .. }
+        ));
+        assert!(error.source().is_some());
+    }
+}

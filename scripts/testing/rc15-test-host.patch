@@ -1,0 +1,10 @@
+diff --git a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,5 +1,6 @@
+ [workspace]
+ members = [
++  "tests/hosts/connectivity",
+   "crates/uc-engine",
+   "crates/uc-core",
+   "crates/uc-application",

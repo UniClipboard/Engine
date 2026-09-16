@@ -11,7 +11,7 @@ mod events;
 #[allow(clippy::module_inception)]
 mod invitation;
 
-pub use code::InvitationCode;
+pub use code::{FullInvitation, InvitationCode, InvitationCredentialError};
 pub use error::{ConsumeError, RevokeError};
 pub use events::InvitationEvent;
 pub use invitation::{InvitationState, PairingInvitation};

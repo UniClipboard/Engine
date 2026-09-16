@@ -146,7 +146,7 @@ impl FileTransferLifecycle {
                 self.privacy_maintenance
                     .ensure_file_transfer_privacy_maintenance()
                     .await
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
                 self.receive_reconcile.execute().await?;
                 self.reconcile_on_startup().await?;
                 sweep_inbound_staging(Arc::clone(&self.save_dir_resolver), &self.file_cache_dir)
@@ -154,7 +154,7 @@ impl FileTransferLifecycle {
                 Ok(())
             })
             .await
-            .map_err(|error| ReceiveReadinessError::Recovery(error.to_string()))
+            .map_err(ReceiveReadinessError::Recovery)
     }
 
     /// Spawn a periodic timeout sweep.
@@ -175,9 +175,11 @@ impl FileTransferLifecycle {
 
         tokio::spawn(
             async move {
-                readiness.wait_ready().await;
-                let mut interval = tokio::time::interval(SWEEP_INTERVAL);
                 let mut cancel = cancel;
+                if !wait_until_ready_or_cancel(readiness.as_ref(), &mut cancel).await {
+                    return;
+                }
+                let mut interval = tokio::time::interval(SWEEP_INTERVAL);
 
                 loop {
                     tokio::select! {
@@ -255,7 +257,7 @@ impl FileTransferLifecycle {
 
                         bus.emit_or_warn(HostEvent::Transfer(TransferHostEvent::StatusChanged {
                             transfer_id: t.transfer_id.clone(),
-                            entry_id: t.entry_id.clone(),
+                            entry_id: Some(t.entry_id.clone()),
                             attempt_id: None,
                             status: "failed".to_string(),
                             reason: Some(reason.to_string()),
@@ -285,7 +287,7 @@ impl FileTransferLifecycle {
             Ok(targets) => targets,
             Err(err) => {
                 warn!(error = %err, "Startup reconciliation failed");
-                return Err(anyhow::anyhow!(err.to_string()));
+                return Err(anyhow::Error::new(err));
             }
         };
 
@@ -305,7 +307,7 @@ impl FileTransferLifecycle {
             self.host_event_bus.emit_or_warn(HostEvent::Transfer(
                 TransferHostEvent::StatusChanged {
                     transfer_id: t.transfer_id.clone(),
-                    entry_id: t.entry_id.clone(),
+                    entry_id: Some(t.entry_id.clone()),
                     attempt_id: None,
                     status: "failed".to_string(),
                     reason: Some(reason.to_string()),
@@ -313,6 +315,28 @@ impl FileTransferLifecycle {
             ));
         }
         Ok(())
+    }
+}
+
+async fn wait_until_ready_or_cancel(
+    readiness: &ReceiveReadinessCoordinator,
+    cancel: &mut tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    loop {
+        if *cancel.borrow() {
+            return false;
+        }
+        if readiness.is_ready() {
+            return true;
+        }
+        tokio::select! {
+            _ = readiness.wait_ready() => return true,
+            changed = cancel.changed() => {
+                if changed.is_err() || *cancel.borrow() {
+                    return false;
+                }
+            }
+        }
     }
 }
 
@@ -434,5 +458,26 @@ async fn cleanup_cached_path(cached_path: &str) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn timeout_sweep_can_stop_before_receive_becomes_ready() {
+        let readiness = Arc::new(ReceiveReadinessCoordinator::new());
+        let (cancel, mut receiver) = tokio::sync::watch::channel(false);
+        cancel.send(true).expect("cancellation receiver is alive");
+
+        let stopped = tokio::time::timeout(
+            Duration::from_millis(100),
+            wait_until_ready_or_cancel(readiness.as_ref(), &mut receiver),
+        )
+        .await
+        .expect("cancellation must not wait for receive readiness");
+
+        assert!(!stopped);
     }
 }

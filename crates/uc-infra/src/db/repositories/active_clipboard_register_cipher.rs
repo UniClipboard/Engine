@@ -1,8 +1,13 @@
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use uc_core::clipboard::MobileConsumableRef;
-use uc_core::ids::EntryId;
+use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
+use uc_core::ids::{EntryId, ProfileId};
 
 use crate::security::v1_aead::{decrypt_xchacha_raw, encrypt_xchacha_raw};
+use crate::security::ContentProtection;
+use crate::space::InMemorySession;
 
 const MAGIC: [u8; 4] = *b"UCAR";
 const FORMAT_VERSION: u8 = 1;
@@ -45,6 +50,61 @@ pub enum ActiveRegisterCipherError {
     Decrypt,
     #[error("active-register consumable payload is invalid")]
     Deserialize,
+    #[error("V3 active-register protection failed")]
+    V3 {
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+pub(crate) struct V3ActiveClipboardRegisterCipher {
+    protection: Arc<ContentProtection>,
+}
+
+impl V3ActiveClipboardRegisterCipher {
+    pub(crate) fn new(protection: Arc<ContentProtection>) -> Self {
+        Self { protection }
+    }
+
+    pub(crate) async fn seal(
+        &self,
+        reference: &MobileConsumableRef,
+    ) -> Result<Vec<u8>, ActiveRegisterCipherError> {
+        let plaintext = postcard::to_stdvec(&ConsumableRefPayload {
+            snapshot_hash: reference.snapshot_hash.clone(),
+            entry_id: reference.entry_id.as_ref().to_string(),
+        })
+        .map_err(|_| ActiveRegisterCipherError::Serialize)?;
+        self.protection
+            .seal_for_active(&Plaintext::new(plaintext), &Aad::new(AAD.to_vec()))
+            .await
+            .map(|ciphertext| ciphertext.into_bytes())
+            .map_err(|source| ActiveRegisterCipherError::V3 {
+                source: anyhow::Error::new(source).context("seal V3 active register"),
+            })
+    }
+
+    pub(crate) async fn open(
+        &self,
+        ciphertext: &[u8],
+    ) -> Result<MobileConsumableRef, ActiveRegisterCipherError> {
+        let plaintext = self
+            .protection
+            .open(
+                &Ciphertext::new(ciphertext.to_vec()),
+                &Aad::new(AAD.to_vec()),
+            )
+            .await
+            .map_err(|source| ActiveRegisterCipherError::V3 {
+                source: anyhow::Error::new(source).context("open V3 active register"),
+            })?;
+        let payload: ConsumableRefPayload = postcard::from_bytes(plaintext.as_bytes())
+            .map_err(|_| ActiveRegisterCipherError::Deserialize)?;
+        Ok(MobileConsumableRef {
+            snapshot_hash: payload.snapshot_hash,
+            entry_id: EntryId::from(payload.entry_id.as_str()),
+        })
+    }
 }
 
 pub struct ActiveClipboardRegisterCipher {
@@ -54,6 +114,18 @@ pub struct ActiveClipboardRegisterCipher {
 impl ActiveClipboardRegisterCipher {
     pub fn new(key: [u8; 32]) -> Self {
         Self { key }
+    }
+
+    pub(crate) fn legacy_for_upgrade(
+        session: &InMemorySession,
+        profile_id: &ProfileId,
+    ) -> anyhow::Result<Self> {
+        session
+            .derive_stable_subkey(profile_id.as_ref().as_bytes(), CONSUMABLE_HKDF_INFO)
+            .map(Self::new)
+            .map_err(|source| {
+                anyhow::Error::new(source).context("derive legacy active-register key")
+            })
     }
 
     pub fn seal(

@@ -160,16 +160,3 @@ pub trait BeginReceiveFailurePort: Send + Sync {
         now_ms: i64,
     ) -> Result<BeginReceiveFailureOutcome, AttemptError>;
 }
-
-/// Remove settled receive authority and projections after artifact cleanup.
-#[async_trait]
-pub trait DeleteReceiveStateForEntryPort: Send + Sync {
-    async fn delete_receive_state_for_entry(&self, entry_id: &str) -> Result<bool, AttemptError>;
-}
-
-/// Purge old terminal attempts that never produced an entry and have no pending artifacts.
-#[async_trait]
-pub trait PurgeTerminalOrphanAttemptsPort: Send + Sync {
-    async fn purge_terminal_orphan_attempts(&self, older_than_ms: i64)
-        -> Result<u32, AttemptError>;
-}

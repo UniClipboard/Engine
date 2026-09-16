@@ -35,7 +35,7 @@ pub(crate) async fn execute_query_peer_connections(
 pub(crate) async fn execute_refresh_peer_connections(
     facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
-    let report = facade.refresh_presence().await.map_err(|_| {
+    let report = facade.refresh_peer_reachability().await.map_err(|_| {
         EngineError::new(
             REFRESH_PEER_CONNECTIONS_FAILED_CODE,
             EngineErrorCategory::Unavailable,
@@ -48,7 +48,7 @@ pub(crate) async fn execute_refresh_peer_connections(
             total: report.total as u32,
             online: report.online as u32,
             offline: report.offline as u32,
-            errors: report.errors.len() as u32,
+            errors: report.errors as u32,
         },
     ))
 }

@@ -17,13 +17,8 @@
 use async_trait::async_trait;
 
 use crate::crypto::domain::{ActiveSpace, Passphrase};
-use crate::ids::{DeviceId, SessionId, SpaceId};
-use crate::membership::MembershipCredential;
-use crate::pairing::InvitationCode;
-use crate::space_access::{
-    AdmissionOffer, GroupAdmission, JoinOffer, PreparedAdmissionOffer,
-    PreparedAdmissionTargetAccess, PreparedGroupJoin, ProofDerivedKey,
-};
+use crate::ids::SpaceId;
+use crate::space_access::{JoinOffer, PreparedAdmissionTargetAccess, ProofDerivedKey};
 
 /// 业务语义级的空间访问失败。
 ///
@@ -50,6 +45,13 @@ pub enum SpaceAccessError {
     /// 持久化的密钥物料损坏或版本不支持——属于数据层故障，不可恢复。
     #[error("space key material corrupted or unsupported")]
     CorruptedKeyMaterial,
+
+    /// 已验证的 Space 安全状态无法完成耐久 catalog 与活动会话安装。
+    #[error("space security state could not be activated")]
+    SecurityState {
+        #[source]
+        source: anyhow::Error,
+    },
 
     /// 其它内部故障（底层 IO / 算法实现异常等）。
     #[error("space access internal error: {0}")]
@@ -98,14 +100,6 @@ pub trait SpaceAccessStore: Send + Sync {
     /// 清除内存会话——持久化密钥物料不受影响,后续仍可 `unlock`。
     async fn lock(&self, space_id: &SpaceId) -> Result<(), SpaceAccessError>;
 
-    /// 工厂重置: 删除指定空间的全部持久化密钥物料 (磁盘 keyslot + keyring KEK)
-    /// 并清空内存会话。`encryption_state` 持久化标记由调用方单独处理
-    /// (avoid 让本 port 跨越 EncryptionStatePort 边界)。
-    ///
-    /// 用途: setup 流程"重置"操作 / 测试清理。删除"keyslot 不存在"或
-    /// "KEK 不存在"等情况视作幂等成功,不报错。
-    async fn factory_reset(&self, space_id: &SpaceId) -> Result<(), SpaceAccessError>;
-
     /// 静默尝试从持久化层（keyring 缓存）恢复会话——startup 路径专用。
     ///
     /// 行为：
@@ -120,18 +114,6 @@ pub trait SpaceAccessStore: Send + Sync {
         &self,
         space_id: &SpaceId,
     ) -> Result<Option<ActiveSpace>, SpaceAccessError>;
-
-    /// 探测 keyring 当前是否能在静默下读出本空间的 KEK。
-    ///
-    /// 用途：macOS Keychain "Always Allow" 引导流程——首次访问会弹权限
-    /// 提示框,用户授予 "Always Allow" 后再次调用应静默成功。
-    ///
-    /// 行为：
-    /// - `Ok(true)`：keyring 静默命中,无需用户授权；
-    /// - `Ok(false)`：权限被拒绝 / keyring 暂时不可用——调用方应当作"未授予 Always Allow"对待；
-    /// - `Err(NotInitialized)`：本空间从未初始化,keyring 里没有 KEK;
-    /// - `Err(Internal)`：其他不可恢复错误。
-    async fn verify_keychain_access(&self) -> Result<bool, SpaceAccessError>;
 
     /// 从当前会话派生 32 字节子密钥（HKDF-SHA256,IKM = MasterKey）。
     ///
@@ -192,22 +174,6 @@ pub trait SpaceAccessStore: Send + Sync {
 // (ports.md §8.3); `SpaceAccessStore` above remains the inner aggregate the
 // impls delegate to (ports.md §12).
 
-/// Create the key material for a space for the first time.
-#[async_trait]
-pub trait InitializeSpacePort: Send + Sync {
-    /// Generate fresh key material for `space_id`, protect it with
-    /// `passphrase`, persist it, and leave the in-memory session unlocked.
-    /// Returns an [`ActiveSpace`] credential on success.
-    ///
-    /// Returns [`SpaceAccessError::AlreadyInitialized`] when the space already
-    /// has persisted key material.
-    async fn initialize(
-        &self,
-        space_id: &SpaceId,
-        passphrase: &Passphrase,
-    ) -> Result<ActiveSpace, SpaceAccessError>;
-}
-
 /// Prepare target-local access material without changing the active space.
 #[async_trait]
 pub trait PrepareAdmissionTargetAccessPort: Send + Sync {
@@ -216,93 +182,6 @@ pub trait PrepareAdmissionTargetAccessPort: Send + Sync {
         target_space_id: &SpaceId,
         passphrase: &Passphrase,
     ) -> Result<PreparedAdmissionTargetAccess, SpaceAccessError>;
-}
-
-/// Unlock an already-initialized space with its passphrase.
-#[async_trait]
-pub trait UnlockSpacePort: Send + Sync {
-    /// Unlock `space_id` by unwrapping its persisted key material with
-    /// `passphrase`, leaving the session unlocked and returning an
-    /// [`ActiveSpace`] credential.
-    ///
-    /// Returns [`SpaceAccessError::WrongPassphrase`] on passphrase mismatch
-    /// and [`SpaceAccessError::NotInitialized`] when the space has no
-    /// persisted material.
-    async fn unlock(
-        &self,
-        space_id: &SpaceId,
-        passphrase: &Passphrase,
-    ) -> Result<ActiveSpace, SpaceAccessError>;
-}
-
-/// Query whether a space session is currently unlocked.
-#[async_trait]
-pub trait IsSpaceUnlockedPort: Send + Sync {
-    /// Return whether `space_id` currently holds an unlocked in-memory session.
-    async fn is_unlocked(&self, space_id: &SpaceId) -> bool;
-}
-
-/// Clear the in-memory session of a space.
-#[async_trait]
-pub trait LockSpacePort: Send + Sync {
-    /// Drop the in-memory key material for `space_id`. Persisted material is
-    /// untouched, so the space can be unlocked again afterwards. Idempotent.
-    async fn lock(&self, space_id: &SpaceId) -> Result<(), SpaceAccessError>;
-}
-
-/// Wipe all persisted key material for a space.
-#[async_trait]
-pub trait FactoryResetSpacePort: Send + Sync {
-    /// Delete every persisted key artifact for `space_id` and clear the
-    /// in-memory session. Deleting material that is already absent is treated
-    /// as idempotent success.
-    async fn factory_reset(&self, space_id: &SpaceId) -> Result<(), SpaceAccessError>;
-}
-
-/// Silently restore a previously unlocked session without a passphrase.
-#[async_trait]
-pub trait ResumeSpaceSessionPort: Send + Sync {
-    /// Attempt to restore the session for `space_id` from persisted key
-    /// material without prompting for a passphrase.
-    ///
-    /// - Returns `Ok(None)` when the space was never initialized (not an
-    ///   error; the caller decides whether first-time setup is needed).
-    /// - Returns `Ok(Some(ActiveSpace))` when the session is restored.
-    /// - Returns an error when persisted material exists but is unreadable,
-    ///   corrupted, or access is denied.
-    ///
-    /// Unlike [`UnlockSpacePort::unlock`] this takes no passphrase; when the
-    /// silent path cannot recover the key the caller falls back to a
-    /// passphrase unlock.
-    async fn try_resume_session(
-        &self,
-        space_id: &SpaceId,
-    ) -> Result<Option<ActiveSpace>, SpaceAccessError>;
-}
-
-/// Rebind an already-unlocked local profile to a new standalone space while
-/// retaining its existing local key material.
-#[async_trait]
-pub trait AdoptIsolatedSpacePort: Send + Sync {
-    async fn adopt_isolated_space(
-        &self,
-        space_id: &SpaceId,
-    ) -> Result<ActiveSpace, SpaceAccessError>;
-}
-
-/// Probe whether the persistent secret store can silently yield a space's
-/// wrapping key.
-#[async_trait]
-pub trait VerifyKeychainAccessPort: Send + Sync {
-    /// Check whether the wrapping key can be read from the persistent secret
-    /// store without further user authorization.
-    ///
-    /// - `Ok(true)`: the key is silently available.
-    /// - `Ok(false)`: access is denied or the store is temporarily
-    ///   unavailable; treat as "authorization not granted".
-    /// - `Err(NotInitialized)`: the space has no persisted wrapping key.
-    /// - `Err(Internal)`: any other unrecoverable failure.
-    async fn verify_keychain_access(&self) -> Result<bool, SpaceAccessError>;
 }
 
 /// Derive a purpose-scoped 32-byte subkey from the unlocked session.
@@ -360,81 +239,4 @@ pub trait DeriveProofKeyPort: Send + Sync {
         offer: &JoinOffer,
         passphrase: &Passphrase,
     ) -> Result<ProofDerivedKey, SpaceAccessError>;
-}
-
-/// Prepare a password-and-invitation-bound admission challenge without
-/// exposing a content key or a local keyslot.
-#[async_trait]
-pub trait PrepareAdmissionOfferPort: Send + Sync {
-    async fn prepare_admission_offer(
-        &self,
-        space_id: &SpaceId,
-        invitation: &InvitationCode,
-        pairing_session_id: &SessionId,
-    ) -> Result<PreparedAdmissionOffer, SpaceAccessError>;
-}
-
-/// Derive the joiner's one-shot admission proof credential. This operation is
-/// side-effect free: it must not install key material or unlock a Space.
-#[async_trait]
-pub trait DeriveAdmissionProofKeyPort: Send + Sync {
-    async fn derive_admission_proof_key(
-        &self,
-        offer: &AdmissionOffer,
-        passphrase: &Passphrase,
-        invitation: &InvitationCode,
-        pairing_session_id: &SessionId,
-    ) -> Result<ProofDerivedKey, SpaceAccessError>;
-}
-
-/// Owns the opaque MLS member-add flow and the encrypted content-key catalog.
-/// Protocol state and key material never cross this boundary in plaintext.
-#[async_trait]
-pub trait GroupAdmissionPort: Send + Sync {
-    async fn prepare_group_join(
-        &self,
-        device_id: &DeviceId,
-    ) -> Result<PreparedGroupJoin, SpaceAccessError>;
-
-    /// Read the public membership credential bound to a prepared join. The
-    /// private signer remains inside the opaque prepared state.
-    async fn prepared_join_membership_credential(
-        &self,
-        _pending: &PreparedGroupJoin,
-    ) -> Result<MembershipCredential, SpaceAccessError> {
-        Err(SpaceAccessError::Internal(
-            "prepared join credential is unavailable".to_owned(),
-        ))
-    }
-
-    /// Sign pre-admission facts with the exact member signer stored in the
-    /// prepared join. This does not activate a group or install a Space.
-    async fn sign_prepared_join_payload(
-        &self,
-        _pending: &PreparedGroupJoin,
-        _payload: &[u8],
-    ) -> Result<Vec<u8>, SpaceAccessError> {
-        Err(SpaceAccessError::Internal(
-            "prepared join signing is unavailable".to_owned(),
-        ))
-    }
-
-    async fn admit_group_member(
-        &self,
-        space_id: &SpaceId,
-        sponsor_device_id: &DeviceId,
-        joiner_device_id: &DeviceId,
-        existing_member_ids: &[DeviceId],
-        key_package: &[u8],
-    ) -> Result<GroupAdmission, SpaceAccessError>;
-
-    async fn install_group_join(
-        &self,
-        space_id: &SpaceId,
-        passphrase: &Passphrase,
-        pending: PreparedGroupJoin,
-        welcome: &[u8],
-        encrypted_key_catalog: &[u8],
-        group_epoch: u64,
-    ) -> Result<(), SpaceAccessError>;
 }

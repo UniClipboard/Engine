@@ -261,6 +261,7 @@ pub struct CreatePairingRequest {
     pub sponsor_device_name: String,
     pub sponsor_endpoint_id: String,
     pub sponsor_ticket: String,
+    pub code_length: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl_secs: Option<u32>,
 }
@@ -317,9 +318,11 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/pairings"))
-            .and(body_partial_json(json!({ "sponsorDeviceId": "d" })))
+            .and(body_partial_json(
+                json!({ "sponsorDeviceId": "d", "codeLength": 6 }),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "code": "ABCD-EFGH",
+                "code": "000-001",
                 "expiresAtMs": 1_700_000_000_000_i64,
             })))
             .expect(1)
@@ -333,11 +336,12 @@ mod tests {
                 sponsor_device_name: "n".into(),
                 sponsor_endpoint_id: "e".into(),
                 sponsor_ticket: "t".into(),
+                code_length: crate::pairing::code_mint::INVITATION_CODE_LENGTH,
                 ttl_secs: None,
             })
             .await
             .expect("ok");
-        assert_eq!(resp.code, "ABCD-EFGH");
+        assert_eq!(resp.code, "000-001");
         assert_eq!(resp.expires_at_ms, 1_700_000_000_000);
     }
 
@@ -357,6 +361,7 @@ mod tests {
                 sponsor_device_name: "n".into(),
                 sponsor_endpoint_id: "e".into(),
                 sponsor_ticket: "t".into(),
+                code_length: crate::pairing::code_mint::INVITATION_CODE_LENGTH,
                 ttl_secs: None,
             })
             .await
@@ -384,6 +389,7 @@ mod tests {
                 sponsor_device_name: "n".into(),
                 sponsor_endpoint_id: "e".into(),
                 sponsor_ticket: "t".into(),
+                code_length: crate::pairing::code_mint::INVITATION_CODE_LENGTH,
                 ttl_secs: None,
             })
             .await
@@ -404,7 +410,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/pairings/resolve"))
-            .and(body_partial_json(json!({ "code": "CODE-9999" })))
+            .and(body_partial_json(json!({ "code": "000-001" })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "sponsorTicket": "opaque-ticket-bytes",
                 "sponsorEndpointId": "ignored",
@@ -413,7 +419,7 @@ mod tests {
             .mount(&server)
             .await;
         let client = RendezvousClient::with_base_url(server.uri());
-        let resp = client.resolve_pairing("CODE-9999").await.expect("ok");
+        let resp = client.resolve_pairing("000-001").await.expect("ok");
         assert_eq!(resp.sponsor_ticket, "opaque-ticket-bytes");
     }
 
@@ -450,12 +456,12 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/pairings/consume"))
-            .and(body_partial_json(json!({ "code": "X" })))
+            .and(body_partial_json(json!({ "code": "000-001" })))
             .respond_with(ResponseTemplate::new(204))
             .mount(&server)
             .await;
         let client = RendezvousClient::with_base_url(server.uri());
-        client.consume_pairing("X").await.expect("ok");
+        client.consume_pairing("000-001").await.expect("ok");
     }
 
     #[tokio::test]

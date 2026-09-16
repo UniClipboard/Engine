@@ -1,0 +1,4 @@
+interface:
+  display_name: "Uni 模块深度审查"
+  short_description: "独立审查调用者复杂度、模块深度、所有权与依赖装配"
+  default_prompt: "使用 $uni-module-depth-audit 独立审查当前仓库的模块深度，并按共享 finding contract 输出报告。"

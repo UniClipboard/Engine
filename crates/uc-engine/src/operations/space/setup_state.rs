@@ -42,6 +42,7 @@ pub async fn execute_query_setup_state(facade: &AppFacade) -> Result<OperationRe
             .current_invitation
             .map(|invitation| SetupInvitationSummary {
                 invitation_code: invitation.code.as_str().to_string(),
+                full_invitation: invitation.full_invitation.into_string(),
                 expires_at_ms: invitation.expires_at.timestamp_millis(),
             }),
         device_name: state.device_name,

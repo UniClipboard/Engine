@@ -1,17 +1,22 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use uc_core::crypto::aad;
-use uc_core::ids::EntryId;
+use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
+use uc_core::ids::{EntryId, ProfileId};
 use uc_core::ports::{ReceiveArtifact, ReceiveArtifactOwnership};
 
 use crate::security::v1_aead::{decrypt_xchacha_raw, encrypt_xchacha_raw};
+use crate::security::ContentProtection;
+use crate::space::InMemorySession;
 
 const MAGIC: [u8; 4] = *b"UCAR";
 const FORMAT_VERSION: u8 = 1;
 const NONCE_LEN: usize = 24;
 const HEADER_LEN: usize = MAGIC.len() + 1 + NONCE_LEN;
+pub(super) const ARTIFACT_KEY_INFO: &[u8] = b"uniclipboard-receive-artifact-log/v1";
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ReceiveArtifactCipherError {
@@ -29,6 +34,11 @@ pub(crate) enum ReceiveArtifactCipherError {
     Serialize,
     #[error("receive artifact deserialization failed")]
     Deserialize,
+    #[error("V3 receive artifact protection failed")]
+    V3 {
+        #[source]
+        source: anyhow::Error,
+    },
     #[cfg(windows)]
     #[error("receive artifact path encoding is invalid")]
     InvalidPath,
@@ -46,9 +56,102 @@ pub(crate) struct ReceiveArtifactCipher {
     key: [u8; 32],
 }
 
+pub(crate) struct V3ReceiveArtifactCipher {
+    protection: Arc<ContentProtection>,
+}
+
+impl V3ReceiveArtifactCipher {
+    pub(crate) fn new(protection: Arc<ContentProtection>) -> Self {
+        Self { protection }
+    }
+
+    pub(crate) async fn seal(
+        &self,
+        entry_id: &str,
+        attempt_id: &str,
+        artifacts: &[ReceiveArtifact],
+    ) -> Result<Vec<u8>, ReceiveArtifactCipherError> {
+        let encoded = artifacts
+            .iter()
+            .map(|artifact| {
+                Ok(EncodedArtifact {
+                    item_id: artifact.item_id.clone(),
+                    staged_path: encode_path(&artifact.staged_path),
+                    final_path: encode_path(&artifact.final_path),
+                    ownership: match artifact.ownership {
+                        ReceiveArtifactOwnership::ManagedStaging => 0,
+                        ReceiveArtifactOwnership::UserDestination => 1,
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, ReceiveArtifactCipherError>>()?;
+        let plaintext =
+            postcard::to_stdvec(&encoded).map_err(|_| ReceiveArtifactCipherError::Serialize)?;
+        let aad = Aad::new(aad::for_receive_artifact_log(
+            &EntryId::from(entry_id),
+            attempt_id,
+        ));
+        self.protection
+            .seal_for_active(&Plaintext::new(plaintext), &aad)
+            .await
+            .map(|ciphertext| ciphertext.into_bytes())
+            .map_err(|source| ReceiveArtifactCipherError::V3 {
+                source: anyhow::Error::new(source).context("seal V3 receive artifacts"),
+            })
+    }
+
+    pub(crate) async fn open(
+        &self,
+        entry_id: &str,
+        attempt_id: &str,
+        ciphertext: &[u8],
+    ) -> Result<Vec<ReceiveArtifact>, ReceiveArtifactCipherError> {
+        let aad = Aad::new(aad::for_receive_artifact_log(
+            &EntryId::from(entry_id),
+            attempt_id,
+        ));
+        let plaintext = self
+            .protection
+            .open(&Ciphertext::new(ciphertext.to_vec()), &aad)
+            .await
+            .map_err(|source| ReceiveArtifactCipherError::V3 {
+                source: anyhow::Error::new(source).context("open V3 receive artifacts"),
+            })?;
+        let encoded: Vec<EncodedArtifact> = postcard::from_bytes(plaintext.as_bytes())
+            .map_err(|_| ReceiveArtifactCipherError::Deserialize)?;
+        encoded
+            .into_iter()
+            .map(|artifact| {
+                Ok(ReceiveArtifact {
+                    item_id: artifact.item_id,
+                    staged_path: decode_path(artifact.staged_path)?,
+                    final_path: decode_path(artifact.final_path)?,
+                    ownership: match artifact.ownership {
+                        0 => ReceiveArtifactOwnership::ManagedStaging,
+                        1 => ReceiveArtifactOwnership::UserDestination,
+                        _ => return Err(ReceiveArtifactCipherError::Deserialize),
+                    },
+                })
+            })
+            .collect()
+    }
+}
+
 impl ReceiveArtifactCipher {
     pub(crate) fn new(key: [u8; 32]) -> Self {
         Self { key }
+    }
+
+    pub(crate) fn legacy_for_upgrade(
+        session: &InMemorySession,
+        profile_id: &ProfileId,
+    ) -> anyhow::Result<Self> {
+        session
+            .derive_stable_subkey(profile_id.as_ref().as_bytes(), ARTIFACT_KEY_INFO)
+            .map(Self::new)
+            .map_err(|source| {
+                anyhow::Error::new(source).context("derive legacy receive-artifact key")
+            })
     }
 
     pub(crate) fn seal(

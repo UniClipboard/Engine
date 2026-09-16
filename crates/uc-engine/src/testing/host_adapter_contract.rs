@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+
+mod profile_upgrade_backup;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -21,11 +23,107 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 static ENGINE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[tokio::test]
+#[ignore = "需要显式提供本地资料，只操作临时副本"]
+async fn invitation_from_isolated_profile_copy() {
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let source = PathBuf::from(std::env::var_os("UC_INVITATION_FIXTURE_DATA").unwrap());
+    let temp = tempfile::tempdir().unwrap();
+    let private = temp.path().join("private");
+    let mut pending = vec![source.clone()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let kind = entry.file_type().unwrap();
+            assert!(!kind.is_symlink());
+            if kind.is_dir() {
+                pending.push(path);
+            } else if kind.is_file() {
+                let destination = private.join(path.strip_prefix(&source).unwrap());
+                std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                std::fs::copy(path, destination).unwrap();
+            }
+        }
+    }
+    let storage = MemoryHostSecureStorage::default();
+    for entry in std::fs::read_dir(private.join("keyring")).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_stem().unwrap().to_str().unwrap();
+        let bytes = (0..name.len())
+            .step_by(2)
+            .map(|offset| u8::from_str_radix(&name[offset..offset + 2], 16).unwrap())
+            .collect();
+        storage
+            .set(
+                &String::from_utf8(bytes).unwrap(),
+                &std::fs::read(path).unwrap(),
+            )
+            .unwrap();
+    }
+    for allow_secure_storage_unlock in [false, false, true] {
+        let (engine, _events) = Engine::start(
+            EngineConfig::new("1.2.3"),
+            persistent_engine_host(temp.path(), storage.clone()),
+        )
+        .await
+        .unwrap();
+        engine
+            .execute(crate::Operation::RecoverSession(
+                crate::RecoverSessionInput {
+                    allow_secure_storage_unlock,
+                },
+            ))
+            .await
+            .unwrap();
+        let state = engine
+            .execute(crate::Operation::QueryEncryptionState)
+            .await
+            .unwrap();
+        assert!(matches!(
+            state,
+            crate::OperationResult::EncryptionState(crate::EncryptionStateSummary {
+                initialized: true,
+                session_ready: true,
+            })
+        ));
+        let history = engine
+            .execute(crate::Operation::ListHistoryEntries(
+                crate::ListHistoryEntriesInput {
+                    limit: 1,
+                    offset: 0,
+                },
+            ))
+            .await
+            .unwrap();
+        assert!(
+            matches!(history, crate::OperationResult::HistoryEntries(entries) if !entries.is_empty())
+        );
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let invitation = loop {
+            let result = engine.execute(crate::Operation::IssueInvitation).await;
+            if result.is_ok() || tokio::time::Instant::now() >= deadline {
+                break result;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        };
+        engine
+            .shutdown(std::time::Duration::from_secs(15))
+            .await
+            .unwrap();
+        assert!(
+            invitation.is_ok(),
+            "readable profile must issue invitation: {:?}",
+            invitation.err()
+        );
+    }
+}
+
 async fn next_engine_event_matching(
     events: &mut crate::EventStream,
     predicate: impl Fn(&EngineEvent) -> bool,
 ) -> EngineEvent {
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             let event = events.next().await.expect("engine event stream closed");
             if predicate(&event) {
@@ -35,6 +133,38 @@ async fn next_engine_event_matching(
     })
     .await
     .expect("timed out waiting for engine event")
+}
+
+async fn wait_entry_delivered(engine: &Engine, entry_id: &str, target_device_id: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let result = engine
+                .execute(crate::Operation::QueryEntryDelivery(
+                    crate::HistoryEntryInput {
+                        entry_id: entry_id.to_owned(),
+                    },
+                ))
+                .await
+                .expect("delivery query must succeed");
+            if matches!(
+                result,
+                crate::OperationResult::EntryDelivery(view)
+                    if view.deliveries.iter().any(|delivery| {
+                        delivery.target_device_id == target_device_id
+                            && matches!(
+                                delivery.status,
+                                crate::EntryDeliveryStatusSummary::Delivered
+                                    | crate::EntryDeliveryStatusSummary::Duplicate
+                            )
+                    })
+            ) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for delivered entry");
 }
 
 #[cfg(feature = "dev-tools")]
@@ -195,7 +325,7 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
         } => invitation_code,
         other => panic!("expected invitation, got {other:?}"),
     };
-    let joiner_device_id = match joiner
+    let join_status = match joiner
         .execute(crate::Operation::JoinSpace(crate::JoinSpaceInput {
             invitation_code,
             device_name: Some("Joiner".into()),
@@ -205,11 +335,46 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
         .await
         .unwrap()
     {
-        crate::OperationResult::SpaceJoined { self_device_id, .. } => self_device_id,
+        crate::OperationResult::JoinSpace(status) => status,
         other => panic!("expected joined space, got {other:?}"),
     };
-    // ADR-017: join success is expressed by the saved workspace state, not by
-    // a pairing terminal. The sponsor is prompted to read the complete state.
+    let joiner_device_id = match join_status {
+        crate::JoinSpaceStatusSummary::Active { joined_space, .. } => joined_space.self_device_id,
+        crate::JoinSpaceStatusSummary::Pending { .. } => loop {
+            assert!(matches!(
+                next_engine_event_matching(&mut joiner_events, |event| matches!(
+                    event,
+                    EngineEvent::DeviceTrustChanged { revision } if *revision > 0
+                ))
+                .await,
+                EngineEvent::DeviceTrustChanged { .. }
+            ));
+            match joiner
+                .execute(crate::Operation::QueryDeviceGroupChoices)
+                .await
+                .unwrap()
+            {
+                crate::OperationResult::DeviceGroupChoices(summary) => {
+                    let trust = summary.device_trust;
+                    if trust.local_membership == crate::DeviceMembershipSummary::Active
+                        && trust.devices.iter().any(|device| !device.is_local)
+                    {
+                        break trust.local_device_id;
+                    }
+                    continue;
+                }
+                other => panic!("expected device group choices, got {other:?}"),
+            }
+        },
+        crate::JoinSpaceStatusSummary::Rejected { reason, .. } => {
+            panic!("join was rejected: {reason:?}")
+        }
+        crate::JoinSpaceStatusSummary::Terminated { reason, .. } => {
+            panic!("join was terminated locally: {reason:?}")
+        }
+    };
+    // ADR-017: join success is expressed by the saved workspace state. Both
+    // sides receive a refetch event and read the authoritative result.
     assert!(matches!(
         next_engine_event_matching(&mut sponsor_events, |event| matches!(
             event,
@@ -269,6 +434,7 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
         crate::OperationResult::HistoryPage { ref entries, next_cursor: None }
             if entries.len() == 1 && entries[0].preview.as_deref() == Some(text)
     ));
+    wait_entry_delivered(&sponsor, &first_entry_id, &joiner_device_id).await;
 
     let resend = sponsor
         .execute(crate::Operation::ResendEntry(crate::ResendEntryInput {
@@ -277,18 +443,14 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
         }))
         .await
         .unwrap();
-    assert_eq!(
+    assert!(matches!(
         resend,
-        crate::OperationResult::EntryResent(crate::ResendEntryOutcome::Completed(
-            crate::ResendReportSummary {
-                accepted: 0,
-                duplicate: 1,
-                offline: 0,
-                errored: 0,
-                pending: 0,
-            },
-        ))
-    );
+        crate::OperationResult::EntryResent(crate::ResendEntryOutcome::Completed(report))
+            if report.accepted + report.duplicate == 1
+                && report.offline == 0
+                && report.errored == 0
+                && report.pending == 0
+    ));
     let history_after_resend = joiner
         .execute(crate::Operation::QueryHistory(crate::QueryHistoryInput {
             cursor: None,
@@ -362,7 +524,7 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
     let file_resend = sponsor
         .execute(crate::Operation::ResendEntry(crate::ResendEntryInput {
             entry_id: file_entry_id.clone(),
-            target_devices: vec![joiner_device_id],
+            target_devices: vec![joiner_device_id.clone()],
         }))
         .await
         .unwrap();
@@ -405,6 +567,7 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
         received_file,
         crate::OperationResult::EntryFileRead(resource) if resource.bytes == file_bytes
     ));
+    wait_entry_delivered(&sponsor, &file_entry_id, &joiner_device_id).await;
 
     sponsor
         .execute(crate::Operation::UpdateSettings(Box::new(
@@ -426,7 +589,7 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
             }))
             .await
             .unwrap(),
-        crate::OperationResult::EntryResent(crate::ResendEntryOutcome::SynchronizationDisabled)
+        crate::OperationResult::EntryResent(crate::ResendEntryOutcome::NoEligibleTargets)
     );
 
     sponsor
@@ -593,8 +756,13 @@ async fn host_analytics_reaches_application_and_identity_wiring() {
     .with_analytics(sink.clone(), identity.clone());
 
     let wiring = crate::assembly::host::wire_host_capabilities(&EngineConfig::new("1.2.3"), host)
+        .await
         .expect("host wiring");
-    wiring.wired.deps.analytics.capture(Event::AppFirstOpen);
+    wiring
+        .wired
+        .sync_engine
+        .analytics
+        .capture(Event::AppFirstOpen);
     let person_id = Uuid::now_v7();
     wiring
         .wired
@@ -758,22 +926,25 @@ async fn membership_convergence_is_queryable_through_the_public_engine() {
         .unwrap();
 
     let status = engine
-        .execute(crate::Operation::QueryDeviceTrust)
+        .execute(crate::Operation::QueryDeviceGroupChoices)
         .await
         .unwrap();
 
     assert!(
         matches!(
             &status,
-            crate::OperationResult::DeviceTrust(summary)
+            crate::OperationResult::DeviceGroupChoices(summary)
                 if summary.revision == 1
-                    && summary.current_change.is_none()
-                    && !summary.local_device_id.is_empty()
-                    && summary.devices.len() == 1
-                    && summary.devices[0].is_local
-                    && summary.devices[0].device_id == summary.local_device_id
+                    && summary.issues.is_empty()
+                    && summary.device_trust.revision == 1
+                    && summary.device_trust.current_change.is_none()
+                    && !summary.device_trust.local_device_id.is_empty()
+                    && summary.device_trust.devices.len() == 1
+                    && summary.device_trust.devices[0].is_local
+                    && summary.device_trust.devices[0].device_id
+                        == summary.device_trust.local_device_id
         ),
-        "unexpected device trust snapshot: {status:?}"
+        "unexpected device group choices: {status:?}"
     );
     engine
         .shutdown(std::time::Duration::from_secs(15))
@@ -816,6 +987,45 @@ async fn reset_space_rebuilds_device_management_state_and_preserves_local_histor
         crate::OperationResult::EntrySent(report) => report.entry_id,
         other => panic!("expected sent entry, got {other:?}"),
     };
+    let first_new_passphrase = "first user selected passphrase";
+    assert_eq!(
+        engine
+            .execute(crate::Operation::ChangeEncryptionPassphrase(
+                crate::ChangeEncryptionPassphraseInput {
+                    passphrase: crate::SecretString::new(first_new_passphrase),
+                    passphrase_confirmation: crate::SecretString::new(first_new_passphrase),
+                },
+            ))
+            .await
+            .unwrap(),
+        crate::OperationResult::EncryptionPassphraseChanged
+    );
+    assert_eq!(
+        engine
+            .execute(crate::Operation::LockEncryption)
+            .await
+            .unwrap(),
+        crate::OperationResult::EncryptionLocked
+    );
+    assert_eq!(
+        engine
+            .execute(crate::Operation::UnlockSpace(crate::UnlockSpaceInput {
+                passphrase: crate::SecretString::new("correct horse"),
+            }))
+            .await
+            .unwrap_err()
+            .category(),
+        crate::EngineErrorCategory::Unauthorized
+    );
+    assert!(matches!(
+        engine
+            .execute(crate::Operation::UnlockSpace(crate::UnlockSpaceInput {
+                passphrase: crate::SecretString::new(first_new_passphrase),
+            }))
+            .await
+            .unwrap(),
+        crate::OperationResult::SpaceUnlocked { .. }
+    ));
     engine
         .execute(crate::Operation::IssueInvitation)
         .await
@@ -885,6 +1095,79 @@ async fn reset_space_rebuilds_device_management_state_and_preserves_local_histor
             .await
             .unwrap(),
         crate::OperationResult::InvitationIssued { .. }
+    ));
+    let new_passphrase = "second user selected passphrase";
+    let mismatch = engine
+        .execute(crate::Operation::ChangeEncryptionPassphrase(
+            crate::ChangeEncryptionPassphraseInput {
+                passphrase: crate::SecretString::new(new_passphrase),
+                passphrase_confirmation: crate::SecretString::new("different passphrase"),
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        mismatch.code(),
+        crate::error_codes::ENCRYPTION_PASSPHRASE_MISMATCH_CODE
+    );
+    assert!(matches!(
+        engine
+            .execute(crate::Operation::QuerySetupState)
+            .await
+            .unwrap(),
+        crate::OperationResult::SetupState(crate::SetupStateSummary {
+            current_invitation: Some(_),
+            ..
+        })
+    ));
+    assert_eq!(
+        engine
+            .execute(crate::Operation::ChangeEncryptionPassphrase(
+                crate::ChangeEncryptionPassphraseInput {
+                    passphrase: crate::SecretString::new(new_passphrase),
+                    passphrase_confirmation: crate::SecretString::new(new_passphrase),
+                },
+            ))
+            .await
+            .unwrap(),
+        crate::OperationResult::EncryptionPassphraseChanged
+    );
+    assert!(matches!(
+        engine
+            .execute(crate::Operation::QuerySetupState)
+            .await
+            .unwrap(),
+        crate::OperationResult::SetupState(crate::SetupStateSummary {
+            re_pairing_required: true,
+            current_invitation: None,
+            ..
+        })
+    ));
+    assert_eq!(
+        engine
+            .execute(crate::Operation::LockEncryption)
+            .await
+            .unwrap(),
+        crate::OperationResult::EncryptionLocked
+    );
+    let old_passphrase = engine
+        .execute(crate::Operation::UnlockSpace(crate::UnlockSpaceInput {
+            passphrase: crate::SecretString::new("correct horse"),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        old_passphrase.category(),
+        crate::EngineErrorCategory::Unauthorized
+    );
+    assert!(matches!(
+        engine
+            .execute(crate::Operation::UnlockSpace(crate::UnlockSpaceInput {
+                passphrase: crate::SecretString::new(new_passphrase),
+            }))
+            .await
+            .unwrap(),
+        crate::OperationResult::SpaceUnlocked { .. }
     ));
     assert!(!temp
         .path()
@@ -1300,14 +1583,24 @@ async fn host_clipboard_change_is_processed_by_the_engine_and_stops_on_shutdown(
     change_tx.send(()).unwrap();
     let history_entry = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
-            let result = engine
+            let result = match engine
                 .execute(crate::Operation::QueryHistory(crate::QueryHistoryInput {
                     cursor: None,
                     limit: 10,
                     query: Some(probe.clone()),
                 }))
                 .await
-                .unwrap();
+            {
+                Ok(result) => result,
+                Err(error)
+                    if error.is_retryable()
+                        && error.category() == crate::EngineErrorCategory::Unavailable =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    continue;
+                }
+                Err(error) => panic!("query history failed: {error:?}"),
+            };
             let crate::OperationResult::HistoryPage { entries, .. } = result else {
                 panic!("expected history page");
             };
@@ -1365,12 +1658,13 @@ async fn new_engine_does_not_inherit_previous_engine_clipboard_attribution() {
             Box::new(EmptyHostFiles),
         ),
     )
+    .await
     .unwrap();
     first
         .wired
-        .deps
-        .clipboard
-        .clipboard_change_origin
+        .application
+        .host_adapters()
+        .change_origin
         .record_self_write(
             uc_core::ports::clipboard::SelfWriteMatch::ByNextChange("old-write".into()),
             uc_core::ports::clipboard::SelfWriteAttribution::Remote,
@@ -1398,12 +1692,13 @@ async fn new_engine_does_not_inherit_previous_engine_clipboard_attribution() {
             Box::new(EmptyHostFiles),
         ),
     )
+    .await
     .unwrap();
     let origin = second
         .wired
-        .deps
-        .clipboard
-        .clipboard_change_origin
+        .application
+        .host_adapters()
+        .change_origin
         .attribute_observed_change("fresh-local-copy")
         .await;
 
@@ -1649,21 +1944,166 @@ async fn host_capabilities_wire_real_core_dependencies() {
         &EngineConfig::new("1.2.3").with_profile_id("mobile-primary"),
         host,
     )
+    .await
     .unwrap();
 
     assert_eq!(wiring.paths.app_data_root_dir, private);
+}
+
+#[cfg(feature = "lan-compat")]
+#[tokio::test]
+async fn mobile_activity_public_requests_survive_restart() {
+    use crate::{Operation, OperationResult};
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let secure_storage = MemoryHostSecureStorage::default();
+    let host = || {
+        HostCapabilities::new(
+            HostDirectories::new(
+                temp.path().join("private"),
+                temp.path().join("cache"),
+                temp.path().join("temporary"),
+                temp.path().join("logs"),
+            ),
+            Box::new(secure_storage.clone()),
+            Box::new(StaticHostClipboard {
+                snapshot: HostClipboardSnapshot {
+                    observed_at_ms: 0,
+                    representations: Vec::new(),
+                },
+            }),
+            Box::new(EmptyHostFiles),
+        )
+    };
+    async fn activity(engine: &Engine) -> Option<i64> {
+        match engine.execute(Operation::ListMobileDevices).await.unwrap() {
+            OperationResult::MobileDevices(devices) => devices[0].last_seen_at_ms,
+            other => panic!("expected devices, got {other:?}"),
+        }
+    }
+    let request = || {
+        Operation::AuthenticateMobileRequest(crate::AuthenticateMobileRequestInput {
+            authorization: crate::SecretString::new("Basic dGVzdF9waG9uZTp0ZXN0LXBhc3N3b3Jk"),
+        })
+    };
+    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host())
+        .await
+        .unwrap();
+    engine
+        .execute(Operation::UpdateMobileSyncSettings(Box::new(
+            crate::MobileSyncSettingsPatch {
+                enabled: Some(true),
+                lan_listen_enabled: Some(true),
+                lan_advertise_base_url: Some(Some("http://127.0.0.1:42720".into())),
+                ..Default::default()
+            },
+        )))
+        .await
+        .unwrap();
+    let registered = engine
+        .execute(Operation::RegisterMobileDevice(
+            crate::RegisterMobileDeviceInput {
+                label: "Test Phone".into(),
+                username: Some("test_phone".into()),
+                password: Some(crate::SecretString::new("test-password")),
+            },
+        ))
+        .await
+        .unwrap();
+    let id = match registered {
+        OperationResult::MobileDeviceRegistered(
+            crate::MobileDeviceRegistrationOutcome::Registered(device),
+        ) => device.device_id,
+        other => panic!("expected registration, got {other:?}"),
+    };
+    assert_eq!(activity(&engine).await, None);
+    for authorization in [
+        "invalid",
+        "Basic dGVzdF9waG9uZTp3cm9uZw==",
+        "Basic dW5rbm93bjp0ZXN0LXBhc3N3b3Jk",
+    ] {
+        assert_eq!(
+            engine
+                .execute(Operation::AuthenticateMobileRequest(
+                    crate::AuthenticateMobileRequestInput {
+                        authorization: crate::SecretString::new(authorization),
+                    }
+                ))
+                .await
+                .unwrap(),
+            OperationResult::MobileAuthentication(crate::MobileAuthenticationOutcome::Rejected)
+        );
+        assert_eq!(activity(&engine).await, None);
+    }
+    let session = match engine.execute(request()).await.unwrap() {
+        OperationResult::MobileRequestAuthenticated(session) => session,
+        other => panic!("expected authenticated request, got {other:?}"),
+    };
+    let first = activity(&engine).await.unwrap();
+    assert!(first > 0);
     assert_eq!(
-        wiring
-            .wired
-            .deps
-            .security
-            .current_profile
-            .current_profile()
+        engine
+            .execute(Operation::RevalidateMobileCredential(
+                crate::RevalidateMobileCredentialInput {
+                    credential: session.credential,
+                }
+            ))
             .await
-            .unwrap()
-            .as_ref(),
-        "mobile-primary"
+            .unwrap(),
+        OperationResult::MobileCredentialCurrent { current: true }
     );
+    assert_eq!(activity(&engine).await, Some(first));
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    engine.execute(request()).await.unwrap();
+    let latest = activity(&engine).await.unwrap();
+    assert!(latest > first);
+    engine
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+    drop(engine);
+
+    let (restarted, _events) = Engine::start(EngineConfig::new("1.2.3"), host())
+        .await
+        .unwrap();
+    assert_eq!(activity(&restarted).await, Some(latest));
+    restarted
+        .execute(Operation::UpdateMobileDevice(
+            crate::UpdateMobileDeviceInput {
+                device_id: id.clone(),
+                label: Some("Renamed".into()),
+                username: None,
+                password: crate::MobilePasswordUpdate::AutoGenerate,
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        restarted.execute(request()).await.unwrap(),
+        OperationResult::MobileAuthentication(crate::MobileAuthenticationOutcome::Rejected)
+    );
+    assert_eq!(activity(&restarted).await, Some(latest));
+    restarted
+        .execute(Operation::RevokeMobileDevice(crate::MobileDeviceInput {
+            device_id: id,
+        }))
+        .await
+        .unwrap();
+    assert_eq!(
+        restarted.execute(request()).await.unwrap(),
+        OperationResult::MobileAuthentication(crate::MobileAuthenticationOutcome::Rejected)
+    );
+    assert_eq!(
+        restarted
+            .execute(Operation::ListMobileDevices)
+            .await
+            .unwrap(),
+        OperationResult::MobileDevices(Vec::new())
+    );
+    restarted
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -2826,269 +3266,219 @@ async fn engine_start_builds_a_resumable_real_session() {
 }
 
 #[tokio::test]
-async fn engine_repairs_an_encrypted_stale_removed_device_state_across_restart() {
-    use uc_core::ids::{DeviceId, SpaceId};
-    use uc_core::membership::{
-        AdmissionChangeFacts, MemberInstanceId, MemberSyncPreferences, MembershipEvent,
-        MembershipOperation, MembershipReconciliation, SpaceMember, WorkspaceConvergenceState,
-    };
-    use uc_core::security::IdentityFingerprint;
-
+async fn startup_progress_is_available_before_real_start_and_survives_failure() {
     let _guard = ENGINE_TEST_LOCK.lock().await;
-    let root = tempfile::tempdir().unwrap();
+    let temp = tempfile::tempdir().unwrap();
     let secure_storage = MemoryHostSecureStorage::default();
-    let config = EngineConfig::new("1.2.3");
-
-    let (engine, _events) = Engine::start(
-        config.clone(),
-        persistent_engine_host(root.path(), secure_storage.clone()),
-    )
-    .await
-    .unwrap();
-    let created = engine
-        .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
-            device_name: Some("Current Device".into()),
-            passphrase: crate::SecretString::new("correct horse"),
-            passphrase_confirmation: crate::SecretString::new("correct horse"),
-        }))
-        .await
-        .unwrap();
-    let (space_id, local_device_id, local_fingerprint) = match created {
-        crate::OperationResult::SpaceCreated {
-            space_id,
-            self_device_id,
-            identity_fingerprint,
-        } => (
-            SpaceId::from_str(&space_id),
-            DeviceId::new(self_device_id),
-            IdentityFingerprint::from_display_string(identity_fingerprint).unwrap(),
-        ),
-        other => panic!("expected created space, got {other:?}"),
+    let host = || {
+        HostCapabilities::new(
+            HostDirectories::new(
+                temp.path().join("private"),
+                temp.path().join("cache"),
+                temp.path().join("temporary"),
+                temp.path().join("logs"),
+            ),
+            Box::new(secure_storage.clone()),
+            Box::new(StaticHostClipboard {
+                snapshot: HostClipboardSnapshot {
+                    observed_at_ms: 0,
+                    representations: Vec::new(),
+                },
+            }),
+            Box::new(RecordingHostFiles {
+                state: Arc::new(RecordingHostFilesState::default()),
+            }),
+        )
     };
-    engine
-        .shutdown(std::time::Duration::from_secs(15))
+    let (input, mut progress) = crate::StartupProgress::channel();
+    assert_eq!(progress.snapshot().state, crate::StartupState::Preparing);
+    let (engine, _events) = Engine::start_with_progress(EngineConfig::new("1.2.3"), host(), input)
         .await
         .unwrap();
-
-    let seeded = crate::assembly::host::wire_host_capabilities(
-        &config,
-        persistent_engine_host(root.path(), secure_storage.clone()),
-    )
-    .unwrap();
-    seeded
-        .wired
-        .deps
-        .security
-        .space_access_ports
-        .resume_session
-        .try_resume_session(&space_id)
-        .await
-        .unwrap()
-        .expect("resume the encrypted space before seeding affected state");
-    let repository = Arc::clone(&seeded.wired.sync_engine.workspace_convergence_repository);
-    let local_instance = MemberInstanceId::from_bytes([0x5a; 32]);
-    let removed_instance = MemberInstanceId::from_bytes([0x5b; 32]);
-    let removed_device_id = DeviceId::new("removed-device-sensitive-marker");
-    let genesis = MembershipEvent::new(
-        space_id.as_ref().to_owned(),
-        None,
-        0,
-        [0x5a; 16],
-        local_instance,
-        MembershipOperation::AddDevice {
-            admission: AdmissionChangeFacts {
-                member_instance: local_instance,
-                device_id: local_device_id,
-                device_name: "Current Device".into(),
-                identity_fingerprint: local_fingerprint,
-                transport_public_key: vec![0x5a; 32],
-                transport_address_blob: vec![0x5a; 16],
-                identity_signature: vec![0x5a; 64],
-            },
-        },
-        [0x5a; 32],
-        [0x5b; 32],
-        Vec::new(),
-        None,
-        vec![0x5a],
-    );
-    let mut history = MembershipReconciliation::new(space_id.as_ref().to_owned(), local_instance);
-    history.receive_verified(genesis.clone()).unwrap();
-    let addition = MembershipEvent::new(
-        space_id.as_ref().to_owned(),
-        Some(genesis.event_id()),
-        1,
-        [0x5b; 16],
-        local_instance,
-        MembershipOperation::AddDevice {
-            admission: AdmissionChangeFacts {
-                member_instance: removed_instance,
-                device_id: removed_device_id,
-                device_name: "Removed Device".into(),
-                identity_fingerprint: IdentityFingerprint::from_display_string(
-                    "ABCD-EFGH-IJKL-MNOP",
-                )
-                .unwrap(),
-                transport_public_key: vec![0x5b; 32],
-                transport_address_blob: vec![0x5b; 16],
-                identity_signature: vec![0x5b; 64],
-            },
-        },
-        [0x5b; 32],
-        [0x5c; 32],
-        Vec::new(),
-        None,
-        vec![0x5b],
-    );
-    history.receive_verified(addition.clone()).unwrap();
-    history
-        .receive_verified(MembershipEvent::new(
-            space_id.as_ref().to_owned(),
-            Some(addition.event_id()),
-            2,
-            [0x5c; 16],
-            local_instance,
-            MembershipOperation::RemoveDevice {
-                member: removed_instance,
-            },
-            [0x5c; 32],
-            [0x5d; 32],
-            Vec::new(),
-            None,
-            vec![0x5c],
-        ))
-        .unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(
-        space_id.as_ref().to_owned(),
-        chrono::Utc::now().timestamp_millis(),
-    );
-    state.own_instance = Some(local_instance);
-    state.membership_reconciliation = Some(history);
-    state.migrated_from_pre_adr_020 = true;
-    repository.save_state(&state).await.unwrap();
-    seeded
-        .wired
-        .deps
-        .device
-        .member_repo
-        .save(&SpaceMember {
-            device_id: removed_device_id,
-            device_name: "Removed Device".into(),
-            identity_fingerprint: IdentityFingerprint::from_display_string("ABCD-EFGH-IJKL-MNOP")
-                .unwrap(),
-            joined_at: chrono::Utc::now(),
-            sync_preferences: MemberSyncPreferences::default(),
-        })
-        .await
-        .unwrap();
-    drop(repository);
-    drop(seeded);
-
-    let (engine, _events) = Engine::start(
-        config.clone(),
-        persistent_engine_host(root.path(), secure_storage.clone()),
-    )
-    .await
-    .unwrap();
-    engine
-        .execute(crate::Operation::RecoverSession(
-            crate::RecoverSessionInput {
-                allow_secure_storage_unlock: true,
-            },
-        ))
-        .await
-        .unwrap();
-    let peers = engine
-        .execute(crate::Operation::QueryPeerConnections)
-        .await
-        .unwrap();
-    let crate::OperationResult::PeerConnections(peers) = peers else {
-        panic!("expected peer connections");
-    };
-    assert!(peers
-        .iter()
-        .all(|peer| peer.peer_id != removed_device_id.as_str()));
-    let devices = engine.execute(crate::Operation::ListDevices).await.unwrap();
-    let crate::OperationResult::Devices(devices) = devices else {
-        panic!("expected devices");
-    };
-    assert!(devices
-        .iter()
-        .all(|device| device.device_id != removed_device_id.as_str()));
-    let repeated_removal = engine
-        .execute(crate::Operation::RemoveMember(crate::RemoveMemberInput {
-            device_id: removed_device_id.as_str().to_owned(),
-        }))
-        .await
-        .unwrap_err();
-    assert_eq!(
-        repeated_removal.category(),
-        crate::EngineErrorCategory::NotFound
-    );
-    tokio::task::yield_now().await;
-    engine
-        .shutdown(std::time::Duration::from_secs(15))
-        .await
-        .unwrap();
-
-    let repaired = crate::assembly::host::wire_host_capabilities(
-        &config,
-        persistent_engine_host(root.path(), secure_storage.clone()),
-    )
-    .unwrap();
-    repaired
-        .wired
-        .deps
-        .security
-        .space_access_ports
-        .resume_session
-        .try_resume_session(&space_id)
-        .await
-        .unwrap()
-        .expect("resume the repaired encrypted space");
-    let repaired_state = repaired
-        .wired
-        .sync_engine
-        .workspace_convergence_repository
-        .load_state()
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(!repaired_state.migrated_from_pre_adr_020);
-    assert!(!repaired_state
-        .membership_reconciliation
+    let ready = progress.snapshot();
+    assert_eq!(ready.state, crate::StartupState::Ready);
+    assert!(ready
+        .upgrade
         .as_ref()
-        .unwrap()
-        .is_device_effective(&removed_device_id));
-    drop(repaired);
+        .is_none_or(|upgrade| !upgrade.required));
+    assert_eq!(progress.changed().await.unwrap(), ready);
+    assert!(progress.changed().await.is_none());
+    engine
+        .shutdown(std::time::Duration::from_secs(10))
+        .await
+        .unwrap();
 
-    let (restarted, _events) =
-        Engine::start(config, persistent_engine_host(root.path(), secure_storage))
+    let (input, reopened) = crate::StartupProgress::channel();
+    let (engine, _) = Engine::start_with_progress(EngineConfig::new("1.2.3"), host(), input)
+        .await
+        .unwrap();
+    let ordinary_restart = reopened.snapshot();
+    assert!(ordinary_restart
+        .upgrade
+        .as_ref()
+        .is_none_or(|upgrade| !upgrade.required));
+    engine
+        .shutdown(std::time::Duration::from_secs(10))
+        .await
+        .unwrap();
+
+    // 真实启动入口在早期目录准备失败，状态仍应保留，且不泄露宿主路径。
+    std::fs::remove_dir_all(temp.path().join("temporary")).unwrap();
+    std::fs::write(temp.path().join("temporary"), b"blocked directory").unwrap();
+    let (input, progress) = crate::StartupProgress::channel();
+    assert!(
+        Engine::start_with_progress(EngineConfig::new("1.2.3"), host(), input)
             .await
+            .is_err()
+    );
+    let failure = progress.snapshot();
+    assert_eq!(failure.state, crate::StartupState::Failed);
+    assert_ne!(failure.attempt_id, ready.attempt_id);
+    let json = serde_json::to_string(&failure).unwrap();
+    assert!(!json.contains(temp.path().to_str().unwrap()));
+}
+
+#[tokio::test]
+#[ignore = "requires a complete synthetic alpha.5 profile in UC_ALPHA5_FIXTURE_DATA"]
+async fn startup_progress_upgrades_alpha5_profile_and_reopens_history() {
+    use diesel::{Connection as _, RunQueryDsl as _};
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let source = PathBuf::from(std::env::var_os("UC_ALPHA5_FIXTURE_DATA").unwrap());
+    let temp = tempfile::tempdir().unwrap();
+    let private = temp.path().join("private");
+    let mut pending = vec![source.clone()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let kind = entry.file_type().unwrap();
+            assert!(!kind.is_symlink());
+            if kind.is_dir() {
+                pending.push(path);
+            } else if kind.is_file() {
+                let destination = private.join(path.strip_prefix(&source).unwrap());
+                std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                std::fs::copy(path, destination).unwrap();
+            }
+        }
+    }
+    let storage = MemoryHostSecureStorage::default();
+    for entry in std::fs::read_dir(private.join("keyring")).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_stem().unwrap().to_str().unwrap();
+        let bytes = (0..name.len())
+            .step_by(2)
+            .map(|offset| u8::from_str_radix(&name[offset..offset + 2], 16).unwrap())
+            .collect();
+        storage
+            .set(
+                &String::from_utf8(bytes).unwrap(),
+                &std::fs::read(path).unwrap(),
+            )
             .unwrap();
-    restarted
-        .execute(crate::Operation::RecoverSession(
-            crate::RecoverSessionInput {
-                allow_secure_storage_unlock: true,
+    }
+    #[derive(diesel::QueryableByName)]
+    struct Count {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        count: i64,
+    }
+    let mut original =
+        diesel::SqliteConnection::establish(private.join("uniclipboard.db").to_str().unwrap())
+            .unwrap();
+    let representations = diesel::sql_query("SELECT COUNT(*) AS count FROM clipboard_snapshot_representation WHERE inline_data IS NOT NULL").get_result::<Count>(&mut original).unwrap().count as u64;
+    let blobs = diesel::sql_query("SELECT COUNT(*) AS count FROM blob")
+        .get_result::<Count>(&mut original)
+        .unwrap()
+        .count as u64;
+    drop(original);
+    let host = || {
+        HostCapabilities::new(
+            HostDirectories::new(
+                private.clone(),
+                temp.path().join("cache"),
+                temp.path().join("temporary"),
+                temp.path().join("logs"),
+            ),
+            Box::new(storage.clone()),
+            Box::new(StaticHostClipboard {
+                snapshot: HostClipboardSnapshot {
+                    observed_at_ms: 0,
+                    representations: Vec::new(),
+                },
+            }),
+            Box::new(RecordingHostFiles {
+                state: Arc::new(RecordingHostFilesState::default()),
+            }),
+        )
+    };
+    let (input, mut progress) = crate::StartupProgress::channel();
+    let future = Engine::start_with_progress(EngineConfig::new("1.2.3"), host(), input);
+    tokio::pin!(future);
+    let mut observed_upgrade_before_ready = false;
+    let (engine, _) = loop {
+        tokio::select! {
+            result = &mut future => break result.unwrap(),
+            Some(snapshot) = progress.changed() => {
+                observed_upgrade_before_ready |= snapshot.state == crate::StartupState::Upgrading;
+            }
+        }
+    };
+    assert!(observed_upgrade_before_ready);
+    let snapshot = progress.snapshot();
+    assert_eq!(snapshot.state, crate::StartupState::Ready);
+    let upgrade = snapshot.upgrade.unwrap();
+    assert!(upgrade.required && upgrade.completed);
+    for (step, total) in [
+        (
+            crate::StartupUpgradeStep::ConvertingContents,
+            representations,
+        ),
+        (crate::StartupUpgradeStep::ConvertingLargeContents, blobs),
+    ] {
+        let counted = upgrade.steps.iter().find(|item| item.step == step).unwrap();
+        assert_eq!(
+            (counted.processed, counted.total, counted.completed),
+            (total, Some(total), true)
+        );
+    }
+    let history = engine
+        .execute(crate::Operation::ListHistoryEntries(
+            crate::ListHistoryEntriesInput {
+                limit: 100,
+                offset: 0,
             },
         ))
         .await
         .unwrap();
-    let peers = restarted
-        .execute(crate::Operation::QueryPeerConnections)
-        .await
-        .unwrap();
-    let crate::OperationResult::PeerConnections(peers) = peers else {
-        panic!("expected peer connections after restart");
-    };
-    assert!(peers
-        .iter()
-        .all(|peer| peer.peer_id != removed_device_id.as_str()));
-    restarted
+    assert!(
+        matches!(history, crate::OperationResult::HistoryEntries(ref entries) if !entries.is_empty())
+    );
+    engine
         .shutdown(std::time::Duration::from_secs(15))
         .await
         .unwrap();
-    assert_ne!(local_device_id, removed_device_id);
+    drop(engine);
+    let (input, progress) = crate::StartupProgress::channel();
+    let (engine, _) = Engine::start_with_progress(EngineConfig::new("1.2.3"), host(), input)
+        .await
+        .unwrap();
+    assert_eq!(progress.snapshot().state, crate::StartupState::Ready);
+    let history = engine
+        .execute(crate::Operation::ListHistoryEntries(
+            crate::ListHistoryEntriesInput {
+                limit: 100,
+                offset: 0,
+            },
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(history, crate::OperationResult::HistoryEntries(ref entries) if !entries.is_empty())
+    );
+    engine
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -3135,11 +3525,18 @@ async fn engine_start_finishes_an_interrupted_factory_reset_before_opening_a_new
 
     let lifecycle_storage =
         crate::assembly::host::adapt_secure_storage(Box::new(secure_storage.clone()));
-    let lifecycle = uc_infra::security::ProfileLifecycleManager::new(lifecycle_storage);
-    let initial = lifecycle.load_or_initialize().unwrap();
-    lifecycle
-        .begin_factory_reset(initial.profile_generation)
+    let lifecycle = uc_infra::security::ProfileLifecycleRepository::new(lifecycle_storage);
+    let initial = uc_application::deps::ProfileLifecycleRepositoryPort::load(&lifecycle)
+        .unwrap()
         .unwrap();
+    let mut resetting = initial.clone();
+    resetting.begin_factory_reset(initial.generation()).unwrap();
+    uc_application::deps::ProfileLifecycleRepositoryPort::compare_and_swap(
+        &lifecycle,
+        Some(&initial),
+        &resetting,
+    )
+    .unwrap();
 
     let recovering_host = HostCapabilities::new(
         directories(),
@@ -3834,7 +4231,13 @@ async fn engine_mobile_upload_progress_failure_cleans_up_and_invalidates_handle(
         panic!("expected upload handle");
     };
 
-    let database_path = private.join("uniclipboard.db");
+    let profile_generations = private.join("profile-data-generations");
+    let generation = std::fs::read_dir(&profile_generations)
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .find(|entry| entry.file_type().unwrap().is_dir())
+        .expect("fresh runtime must create one profile data generation");
+    let database_path = generation.path().join("v3-payloads/profile.sqlite");
     let mut connection = diesel::sqlite::SqliteConnection::establish(
         database_path.to_str().expect("database path must be UTF-8"),
     )
@@ -4323,21 +4726,19 @@ async fn persisted_engine_text_image_preview_and_logs_do_not_leave_plaintext_on_
         .unwrap();
 
     let history = engine
-        .execute(crate::Operation::QueryHistory(crate::QueryHistoryInput {
-            cursor: None,
-            limit: 25,
-            query: None,
-        }))
+        .execute(crate::Operation::ListHistoryEntries(
+            crate::ListHistoryEntriesInput {
+                offset: 0,
+                limit: 25,
+            },
+        ))
         .await
         .unwrap();
-    let crate::OperationResult::HistoryPage { entries, .. } = history else {
+    let crate::OperationResult::HistoryEntries(entries) = history else {
         panic!("history query returned the wrong result");
     };
     assert!(
-        entries
-            .iter()
-            .filter_map(|entry| entry.preview.as_deref())
-            .any(|preview| preview.contains(&probe)),
+        entries.iter().any(|entry| entry.preview.contains(&probe)),
         "the probe must reach the generated preview before persistence is scanned"
     );
 

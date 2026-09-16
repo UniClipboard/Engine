@@ -61,10 +61,10 @@
 //! Production wires the concrete types via the blanket impls in
 //! [`ports`].
 
+use anyhow::Error as SourceError;
 use bytes::Bytes;
 use thiserror::Error;
 use uc_core::ids::{DeviceId, EntryId};
-use uc_observability_contract::FlowId;
 
 use crate::clipboard::write::ClipboardWriteIntent;
 
@@ -84,9 +84,9 @@ pub use materializer::{
     FileCacheBlobMaterializer, InboundBlobFetcher, InboundFileSetManifest, InboundFileSetMember,
 };
 pub use ports::{InboundCapture, InboundWrite};
-pub use usecase::{
-    ApplyInboundClipboardUseCase, InboundApplyCommonDeps, InboundReceiveAttemptDeps,
-    InteractiveReceiveDeps, StoreOnlyPullDeps,
+pub use usecase::ApplyInboundClipboardUseCase;
+pub(crate) use usecase::{
+    InboundApplyCommonDeps, InboundReceiveAttemptDeps, InteractiveReceiveDeps, StoreOnlyPullDeps,
 };
 
 /// Caller-supplied input mapped from the facade's public `InboundNotice`.
@@ -99,7 +99,6 @@ pub struct ApplyInboundInput {
     pub from_device: DeviceId,
     pub snapshot_hash: String,
     pub plaintext: Bytes,
-    pub flow_id: Option<FlowId>,
     /// Write intent for the [`ApplyOutcome::Resurfaced`] branch only — the
     /// fresh-content branch always writes as `RemotePush`.
     ///
@@ -158,10 +157,10 @@ pub enum ApplyOutcome {
 
 #[derive(Debug, Error)]
 pub enum ApplyInboundError {
-    #[error("dedup query failed: {0}")]
-    DedupQuery(String),
-    #[error("capture pipeline failed: {0}")]
-    Capture(String),
+    #[error("dedup query failed")]
+    DedupQuery(#[source] SourceError),
+    #[error("capture pipeline failed")]
+    Capture(#[source] SourceError),
     #[error("clipboard write failed: {0}")]
     WriteCoordinator(String),
     #[error("internal: {0}")]

@@ -1,27 +1,19 @@
 use std::sync::Arc;
 
-use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::{SearchCoordinator, SearchFacade, SearchRuntimeDeps};
+use super::coordinator::SearchCoordinatorDeps;
+use super::{SearchCoordinator, SearchFacade, SearchShutdownError};
 
-#[derive(Debug, Error)]
-pub enum SearchRuntimeError {
-    #[error("search coordinator failed: {0}")]
-    Coordinator(String),
-    #[error("search coordinator task failed: {0}")]
-    Task(String),
-}
-
-pub struct SearchRuntime {
+pub(super) struct SearchRuntime {
     facade: Arc<SearchFacade>,
     cancel: CancellationToken,
     task: Option<JoinHandle<anyhow::Result<()>>>,
 }
 
 impl SearchRuntime {
-    pub fn start(deps: SearchRuntimeDeps) -> Self {
+    pub(super) fn start(deps: SearchCoordinatorDeps) -> Self {
         let search_index = Arc::clone(&deps.search_index);
         let coordinator = Arc::new(SearchCoordinator::new(deps));
         let facade = Arc::new(SearchFacade::with_runtime(
@@ -38,19 +30,19 @@ impl SearchRuntime {
         }
     }
 
-    pub fn facade(&self) -> Arc<SearchFacade> {
+    pub(super) fn facade(&self) -> Arc<SearchFacade> {
         Arc::clone(&self.facade)
     }
 
-    pub async fn shutdown(mut self) -> Result<(), SearchRuntimeError> {
+    pub(super) async fn shutdown(mut self) -> Result<(), SearchShutdownError> {
         self.cancel.cancel();
         let Some(task) = self.task.take() else {
             return Ok(());
         };
         match task.await {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(SearchRuntimeError::Coordinator(error.to_string())),
-            Err(error) => Err(SearchRuntimeError::Task(error.to_string())),
+            Ok(Err(source)) => Err(SearchShutdownError::Coordinator { source }),
+            Err(source) => Err(SearchShutdownError::Task { source }),
         }
     }
 }

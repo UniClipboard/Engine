@@ -1,0 +1,31 @@
+# Findings
+
+- Current `InvitationCode` is an unconstrained opaque string, but all production issuance uses an 8-character Crockford code displayed as `XXXX-XXXX`.
+- Current `IssuedInvitation` carries only code, expiry, and origin; no 256-bit invitation identity or full token exists.
+- Cloud and mDNS currently publish only a Sponsor endpoint ticket under the short code.
+- Core admission already has a redacted 256-bit `InvitationId` required by JoinRequest.
+- Core admission has no unresolved-invitation Joiner state.
+- OPAQUE is specified but not yet a dependency; it belongs after invitation resolution is made coherent.
+- `PairingInvitationIssuer` currently creates the Core invitation only after Infra returns a short code, then stores it in an Application holder keyed only by that code.
+- `IssuePairingInvitationResult` currently exposes only short code, expiry, and availability through Engine and bindings.
+- The rendezvous service already stores `sponsorTicket` as opaque text and mDNS already transports an opaque ticket, so both channels can carry a versioned full invitation without a server schema change.
+- Existing dependencies already include postcard and URL-safe base64, so the full invitation codec needs no new package.
+- The Sponsor holder must index one invitation by both `InvitationId` and short code; current Core `PairingInvitation` has no `InvitationId` field.
+- Phase 1 can add and return the full invitation without changing the existing short-code transport, so current pairing behavior remains runnable while the new canonical form is introduced.
+- The full invitation can use `postcard` plus URL-safe base64 with an explicit prefix/version; the opaque Sponsor endpoint ticket is already available at issuance.
+- End-to-end tamper rejection can rely on the random 256-bit id and Sponsor holder binding: changing id, route, or expiry cannot match the Sponsor's in-memory invitation. Local decoding still rejects malformed/version/size errors.
+- Current `InvitationCode` derives Debug and several touched Infra logs print the full short code; the new work must make both invitation forms redacted and remove full-code logging in changed paths.
+- Product rule confirmed on 2026-08-29: cloud lookup consumes a short code on its first use even if pairing does not complete.
+- Therefore short-code lookup cannot be restart-retried after dispatch; a crash or lost response between cloud consumption and local full-invitation commit is terminal for that invitation.
+- The new admission path cannot reuse `PairingSessionPort::dial_by_invitation` because it combines lookup and dial; resolution must return and durably commit the full invitation first.
+- Phase 4 has no `opaque-ke` dependency or `space_admission_auth` module yet; `uc-infra::security` is the correct public technical seam and already owns concrete cryptography.
+- Spec 028 fixes `opaque-ke = 4.0.1`, Ristretto255/SHA-512, Argon2id, and requires correct-password, wrong-password, identifier-binding, corrupt-record, and zeroization evidence.
+- Existing `zeroize`, `rand`, `hkdf`, `hmac`, and `sha2` dependencies are available in Infra; tests must not leak third-party OPAQUE types into Application/Core.
+- RFC 9807 §10.11 specifies that the OPRF key acts as the secret salt for the OPAQUE KSF; the protocol must not invent or persist an additional Argon2 salt. With the fixed SHA-512 ciphersuite, the KSF output is 64 bytes.
+- The existing OPAQUE transcript context already rejects independent changes to `SpaceAdmissionId`, `InvitationId`, Joiner peer id, and Sponsor peer id. `SpaceAdmissionProtocolVersion` currently exposes only `V1`, so a valid cross-version mismatch cannot yet be constructed.
+- `opaque-ke` exposes fixed-length `ServerRegistration::serialize/deserialize`; the Infra boundary can therefore add its own marker/version/exact-length envelope without exposing third-party types. The resulting bytes remain sensitive and must only cross a MasterKey AEAD boundary.
+- For the fixed Ristretto255/SHA-512 suite, `ServerSetup` serializes to 128 bytes (64-byte OPRF seed, 32-byte private key, 32-byte dummy public key). Restoring this exact setup is required for an existing registration to remain usable after Sponsor restart.
+- RFC 9807 Appendix C's Ristretto255/SHA-512 byte vectors use `KSF: Identity`, while the product ciphersuite intentionally fixes Argon2id. Validation must therefore keep two layers: reproduce the official Identity-KSF vector against the pinned library, and separately exercise the production Argon2id seam; changing production to Identity would be a security regression.
+- Joiner start material remains one deep Infra operation by accepting the stable local `DeviceId`; it creates the complete signed JoinRequest plus versioned OpenMLS/recovery private state and an invitation-bound OPAQUE password equivalent without exposing intermediate cryptographic steps to Application.
+- Phase 5 exposed a protocol gap: the typed JoinRequest previously omitted device name, identity fingerprint, transport public key, and transport address, so a Sponsor Candidate adapter could not construct a valid AddDevice fact without inventing data. These facts must travel as the signed `AdmissionChangeFacts` owned by Core.
+- `SpaceAdmissionTransportPort::establish_initial` does not receive `InvitationId` separately even though OPAQUE context requires it. The opaque `SpaceAdmissionRoute` therefore owns one versioned Infra dial mirror containing the invitation id and serialized `EndpointAddr`; Application still cannot interpret transport fields.

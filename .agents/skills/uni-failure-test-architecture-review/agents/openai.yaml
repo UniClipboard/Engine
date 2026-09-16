@@ -1,0 +1,4 @@
+interface:
+  display_name: "Uni 故障测试架构复盘"
+  short_description: "基于新增故障测试追溯共同架构根因、责任断点与验证缺口"
+  default_prompt: "使用 $uni-failure-test-architecture-review 回顾本次新增故障测试发现的问题，并分析共同架构根因。"

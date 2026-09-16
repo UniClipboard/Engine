@@ -40,7 +40,7 @@
 //!
 //! ## Visibility
 //!
-//! `pub(crate)`. Per `uc-application/AGENTS.md` §11.4, the adapter is not exposed
+//! `pub(crate)`. Per `docs/design-docs/layers/application.md`, the adapter is not exposed
 //! to external crates; bootstrap passes the ports in via `MobileSyncFacadeDeps`
 //! when assembling `MobileSyncFacade`, and the facade constructs this adapter
 //! internally to inject into the use case.

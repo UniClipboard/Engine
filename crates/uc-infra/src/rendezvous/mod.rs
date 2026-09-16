@@ -9,7 +9,7 @@
 //!   [`uc_core::ports::PairingInvitationPort`]. Maps [`RendezvousHttpError`]
 //!   onto domain errors (`InvitationError`, `ConsumeInvitationError`).
 //!
-//! Joiner-side dial flow lives in `crate::pairing::session`, which also
+//! Joiner-side invitation resolution lives in `crate::pairing::invitation_resolver`, which
 //! consumes [`RendezvousClient`] (for the `/v1/pairings/resolve` call).
 
 pub mod client;

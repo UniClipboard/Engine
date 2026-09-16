@@ -2,12 +2,13 @@
 //!
 //! Migrated out of `uc-app` so daemon/tauri composition roots no longer reach
 //! into `uc-app::usecases` for clipboard history. Per
-//! `uc-application/AGENTS.md` §11.4 every type here stays `pub(crate)` —
+//! `docs/design-docs/layers/application.md` every type here stays `pub(crate)` —
 //! external callers reach them exclusively through `ClipboardHistoryFacade`.
 
 pub(crate) mod cleanup;
 pub(crate) mod clear_history;
 pub(crate) mod delete_entry;
+pub(crate) mod file_references;
 pub(crate) mod get_entry_detail;
 pub(crate) mod get_entry_resource;
 pub(crate) mod list_entry_projections;

@@ -17,7 +17,12 @@ pub async fn execute_cancel_invitation(facade: &AppFacade) -> Result<OperationRe
                 EngineErrorCategory::Conflict,
                 false,
             ),
-            CancelInvitationError::Internal(_) => {
+            CancelInvitationError::Unavailable { .. } => EngineError::new(
+                CANCEL_INVITATION_UNAVAILABLE_CODE,
+                EngineErrorCategory::Unavailable,
+                true,
+            ),
+            CancelInvitationError::Internal { .. } => {
                 error!(error = %error, "cancel invitation failed");
                 EngineError::new(
                     CANCEL_INVITATION_FAILED_CODE,

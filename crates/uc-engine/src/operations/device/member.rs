@@ -5,34 +5,34 @@ use crate::error_codes::*;
 use base64::Engine as _;
 use tracing::{error, info};
 use uc_application::facade::{
-    ActionUnavailableReason, AppFacade, ContentTypesPatch as AppContentTypesPatch,
-    CurrentJoinStatus, DeviceCompatibility, DeviceMembership, DeviceTrustAction, DeviceTrustChoice,
-    DeviceTrustDecisionResult, DeviceTrustImpact, DeviceTrustSnapshot, GroupRelationship,
+    AppFacade, ContentTypesPatch as AppContentTypesPatch, CurrentJoinStatus, DeviceTrustMembership,
+    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, JoinSpaceTerminationReason,
     MemberProtectionStatusView, MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch,
-    MemberSyncPreferencesView, RecoveryAvailability, RosterError, SpaceProtectionModeView,
-    SpaceProtectionView, SyncRelationship,
+    MemberSyncPreferencesView, PairingConfirmationStatus, RemoveSpaceMemberError, RosterError,
+    SpaceProtectionModeView, SpaceProtectionView,
 };
+#[cfg(test)]
 use uc_core::membership::WorkspaceSnapshot;
 use uc_core::ports::ReachabilityState;
 
 use crate::{
-    ContentTypesPatch, ContentTypesSummary, DecideDeviceTrustChangeInput,
-    DeviceCompatibilitySummary, DeviceGroupRelationshipSummary, DeviceMembershipSummary,
-    DeviceReachabilitySummary, DeviceSummary, DeviceSyncRelationshipSummary,
-    DeviceTrustActionSummary, DeviceTrustChangeSummary, DeviceTrustChoiceSummary,
-    DeviceTrustDecisionSummary, DeviceTrustImpactSummary, DeviceTrustRecoverySummary,
-    DeviceTrustRelationshipSummary, DeviceTrustSnapshotSummary,
-    DeviceTrustUnavailableReasonSummary, EngineError, EngineErrorCategory,
-    JoinSpaceRejectionReasonSummary, JoinSpaceStatusSummary, JoinedSpaceSummary,
-    MemberProtectionStatusSummary, MemberProtectionSummary, MemberSyncPreferencesPatch,
-    MemberSyncPreferencesSummary, OperationResult, PendingInboundMemberSummary,
-    QueryMemberSyncPreferencesInput, RemoveMemberInput, SpaceProtectionModeSummary,
-    SpaceProtectionSummary, UpdateMemberSyncPreferencesInput,
+    ContentTypesPatch, ContentTypesSummary, DeviceCompatibilitySummary,
+    DeviceGroupRelationshipSummary, DeviceMembershipSummary, DeviceReachabilitySummary,
+    DeviceSummary, DeviceSyncRelationshipSummary, DeviceTrustChangeSummary,
+    DeviceTrustChoiceSummary, DeviceTrustImpactSummary, DeviceTrustRecoverySummary,
+    DeviceTrustRelationshipSummary, DeviceTrustSnapshotSummary, EngineError, EngineErrorCategory,
+    JoinSpaceRejectionReasonSummary, JoinSpaceStatusSummary, JoinSpaceTerminationReasonSummary,
+    JoinedSpaceSummary, MemberProtectionStatusSummary, MemberProtectionSummary,
+    MemberSyncPreferencesPatch, MemberSyncPreferencesSummary, OperationResult,
+    PairingConfirmationSummary, PendingInboundMemberSummary, QueryMemberSyncPreferencesInput,
+    RemoveMemberInput, SpaceProtectionModeSummary, SpaceProtectionSummary,
+    UpdateMemberSyncPreferencesInput,
+};
+#[cfg(test)]
+use crate::{
     WorkspaceConvergenceFailureCategorySummary, WorkspaceConvergencePhaseSummary,
     WorkspaceConvergenceSummary,
 };
-#[cfg(feature = "dev-tools")]
-use crate::{DecideMembershipRemovalInput, MembershipRemovalDecision};
 
 pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult, EngineError> {
     let encryption = facade.encryption_state().await.map_err(|_| {
@@ -81,100 +81,6 @@ pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult,
     Ok(OperationResult::Devices(devices))
 }
 
-#[cfg(feature = "dev-tools")]
-pub async fn execute_query_workspace_convergence(
-    facade: &AppFacade,
-) -> Result<OperationResult, EngineError> {
-    let snapshot = facade
-        .workspace_convergence()
-        .await
-        .map_err(map_roster_error)?;
-    Ok(OperationResult::WorkspaceConvergence(
-        workspace_convergence_summary(snapshot),
-    ))
-}
-
-pub async fn execute_query_profile_device_trust(
-    convergence: &uc_application::facade::ProfileWorkspaceConvergence,
-) -> Result<OperationResult, EngineError> {
-    let snapshot = convergence
-        .query_device_trust()
-        .await
-        .map_err(map_workspace_convergence_error)?;
-    Ok(OperationResult::DeviceTrust(device_trust_snapshot(
-        snapshot,
-    )))
-}
-
-pub async fn execute_decide_device_trust_change(
-    facade: &AppFacade,
-    input: DecideDeviceTrustChangeInput,
-) -> Result<OperationResult, EngineError> {
-    let change_id =
-        uc_core::membership::MembershipEventId::from_hex(&input.change_id).ok_or_else(|| {
-            EngineError::new(
-                MEMBER_INVALID_INPUT_CODE,
-                EngineErrorCategory::InvalidInput,
-                false,
-            )
-        })?;
-    let choice = match input.choice {
-        DeviceTrustChoiceSummary::ApplyChange => DeviceTrustChoice::ApplyChange,
-        DeviceTrustChoiceSummary::KeepCurrentDeviceGroup => {
-            DeviceTrustChoice::KeepCurrentDeviceGroup
-        }
-    };
-    let result = facade
-        .decide_device_trust_change(change_id, choice, input.confirm_local_removal)
-        .await
-        .map_err(map_roster_error)?;
-    Ok(OperationResult::DeviceTrustDecision(device_trust_decision(
-        result,
-    )))
-}
-
-fn device_trust_decision(result: DeviceTrustDecisionResult) -> DeviceTrustDecisionSummary {
-    match result {
-        DeviceTrustDecisionResult::Applied {
-            change_id,
-            snapshot,
-        } => DeviceTrustDecisionSummary::Applied {
-            change_id: change_id.to_hex(),
-            snapshot: Box::new(device_trust_snapshot(snapshot)),
-        },
-        DeviceTrustDecisionResult::KeptCurrentDeviceGroup {
-            change_id,
-            snapshot,
-        } => DeviceTrustDecisionSummary::KeptCurrentDeviceGroup {
-            change_id: change_id.to_hex(),
-            snapshot: Box::new(device_trust_snapshot(snapshot)),
-        },
-        DeviceTrustDecisionResult::AlreadyCompleted {
-            change_id,
-            completed_choice,
-            snapshot,
-        } => DeviceTrustDecisionSummary::AlreadyCompleted {
-            change_id: change_id.to_hex(),
-            completed_choice: device_trust_choice(completed_choice),
-            snapshot: Box::new(device_trust_snapshot(snapshot)),
-        },
-        DeviceTrustDecisionResult::StateChanged {
-            current_change_id,
-            snapshot,
-        } => DeviceTrustDecisionSummary::StateChanged {
-            current_change_id: current_change_id.map(|change_id| change_id.to_hex()),
-            snapshot: Box::new(device_trust_snapshot(snapshot)),
-        },
-        DeviceTrustDecisionResult::LocalDeviceConfirmationRequired {
-            change_id,
-            snapshot,
-        } => DeviceTrustDecisionSummary::LocalDeviceConfirmationRequired {
-            change_id: change_id.to_hex(),
-            snapshot: Box::new(device_trust_snapshot(snapshot)),
-        },
-    }
-}
-
 pub async fn execute_query_member_sync_preferences(
     facade: &AppFacade,
     input: QueryMemberSyncPreferencesInput,
@@ -204,41 +110,13 @@ pub async fn execute_remove_member(
     input: RemoveMemberInput,
 ) -> Result<OperationResult, EngineError> {
     validate_device_id(&input.device_id)?;
-    let snapshot = facade
-        .remove_member(&input.device_id)
+    let result = facade
+        .remove_space_member(&uc_core::DeviceId::new(input.device_id))
         .await
-        .map_err(map_roster_error)?;
-    Ok(OperationResult::WorkspaceConvergence(
-        workspace_convergence_summary(snapshot),
-    ))
-}
-
-#[cfg(feature = "dev-tools")]
-pub async fn execute_decide_membership_removal(
-    facade: &AppFacade,
-    input: DecideMembershipRemovalInput,
-) -> Result<OperationResult, EngineError> {
-    let removal_event_id = uc_core::membership::MembershipEventId::from_hex(
-        &input.removal_event_id,
-    )
-    .ok_or_else(|| {
-        EngineError::new(
-            MEMBER_INVALID_INPUT_CODE,
-            EngineErrorCategory::InvalidInput,
-            false,
-        )
-    })?;
-    let decision = match input.decision {
-        MembershipRemovalDecision::Accept => uc_core::membership::RemovalDecision::Accept,
-        MembershipRemovalDecision::Reject => uc_core::membership::RemovalDecision::Reject,
-    };
-    let snapshot = facade
-        .decide_membership_removal(removal_event_id, decision)
-        .await
-        .map_err(map_roster_error)?;
-    Ok(OperationResult::WorkspaceConvergence(
-        workspace_convergence_summary(snapshot),
-    ))
+        .map_err(map_remove_space_member_error)?;
+    Ok(OperationResult::DeviceTrust(device_trust_snapshot(
+        result.status,
+    )))
 }
 
 pub async fn execute_query_space_protection(
@@ -281,6 +159,7 @@ fn space_protection_summary(result: SpaceProtectionView) -> SpaceProtectionSumma
     SpaceProtectionSummary { mode, members }
 }
 
+#[cfg(test)]
 pub(crate) fn workspace_convergence_summary(
     snapshot: WorkspaceSnapshot,
 ) -> WorkspaceConvergenceSummary {
@@ -352,10 +231,19 @@ pub(crate) fn workspace_convergence_summary(
     }
 }
 
-pub(crate) fn device_trust_snapshot(snapshot: DeviceTrustSnapshot) -> DeviceTrustSnapshotSummary {
+pub(crate) fn device_trust_snapshot(snapshot: DeviceTrustStatus) -> DeviceTrustSnapshotSummary {
+    let impact = |impact: uc_application::facade::DeviceTrustImpact| DeviceTrustImpactSummary {
+        usable_device_ids: device_ids(impact.usable_device_ids),
+        paused_device_ids: device_ids(impact.paused_device_ids),
+        local_device_outcome: device_membership(impact.local_membership),
+        requires_rejoin_device_ids: device_ids(impact.requires_rejoin_device_ids),
+    };
     DeviceTrustSnapshotSummary {
         revision: snapshot.revision,
-        local_device_id: snapshot.local_device_id.to_string(),
+        local_device_id: snapshot
+            .local_device_id
+            .map(|device_id| device_id.to_string())
+            .unwrap_or_default(),
         local_membership: device_membership(snapshot.local_membership),
         current_change: snapshot
             .current_change
@@ -364,14 +252,13 @@ pub(crate) fn device_trust_snapshot(snapshot: DeviceTrustSnapshot) -> DeviceTrus
                 proposed_by_device_id: change.proposed_by_device_id.to_string(),
                 target_device_ids: device_ids(change.target_device_ids),
                 includes_local_device: change.includes_local_device,
-                apply_impact: device_trust_impact(change.apply_impact),
-                keep_current_impact: device_trust_impact(change.keep_current_impact),
-                allowed_choices: change
-                    .allowed_choices
-                    .into_iter()
-                    .map(device_trust_choice)
-                    .collect(),
-                blocked_reason: change.blocked_reason.map(device_trust_unavailable_reason),
+                apply_impact: impact(change.apply_impact),
+                keep_current_impact: impact(change.keep_current_impact),
+                allowed_choices: vec![
+                    DeviceTrustChoiceSummary::ApplyChange,
+                    DeviceTrustChoiceSummary::KeepCurrentDeviceGroup,
+                ],
+                blocked_reason: None,
             }),
         current_join: snapshot.current_join.map(join_space_status),
         pending_inbound_member: snapshot.pending_inbound_member.map(|member| {
@@ -393,64 +280,80 @@ pub(crate) fn device_trust_snapshot(snapshot: DeviceTrustSnapshot) -> DeviceTrus
                     ReachabilityState::Unknown => DeviceReachabilitySummary::Unknown,
                 },
                 membership: device_membership(device.membership),
-                group_relationship: match device.group_relationship {
-                    GroupRelationship::Consistent => DeviceGroupRelationshipSummary::Consistent,
-                    GroupRelationship::PendingLocalDecision => {
+                group_relationship: match device.relationship {
+                    DeviceTrustRelationship::Local | DeviceTrustRelationship::Consistent => {
+                        DeviceGroupRelationshipSummary::Consistent
+                    }
+                    DeviceTrustRelationship::ConfirmationPending => {
+                        DeviceGroupRelationshipSummary::ConfirmationPending
+                    }
+                    DeviceTrustRelationship::PendingLocalDecision => {
                         DeviceGroupRelationshipSummary::PendingLocalDecision
                     }
-                    GroupRelationship::Diverged => DeviceGroupRelationshipSummary::Diverged,
-                    GroupRelationship::Unverifiable => DeviceGroupRelationshipSummary::Unverifiable,
-                    GroupRelationship::Unknown => DeviceGroupRelationshipSummary::Unknown,
+                    DeviceTrustRelationship::Diverged => DeviceGroupRelationshipSummary::Diverged,
+                    DeviceTrustRelationship::Invalid => {
+                        DeviceGroupRelationshipSummary::Unverifiable
+                    }
+                    DeviceTrustRelationship::UpgradeRequired | DeviceTrustRelationship::Unknown => {
+                        DeviceGroupRelationshipSummary::Unknown
+                    }
                 },
-                compatibility: match device.compatibility {
-                    DeviceCompatibility::Compatible => DeviceCompatibilitySummary::Compatible,
-                    DeviceCompatibility::UpgradeRequired => {
+                compatibility: match device.relationship {
+                    DeviceTrustRelationship::UpgradeRequired => {
                         DeviceCompatibilitySummary::UpgradeRequired
                     }
-                    DeviceCompatibility::Unknown => DeviceCompatibilitySummary::Unknown,
+                    DeviceTrustRelationship::Unknown => DeviceCompatibilitySummary::Unknown,
+                    _ => DeviceCompatibilitySummary::Compatible,
                 },
-                sync_relationship: match device.sync_relationship {
-                    SyncRelationship::Usable => DeviceSyncRelationshipSummary::Usable,
-                    SyncRelationship::WaitingForLocalDecision => {
-                        DeviceSyncRelationshipSummary::WaitingForLocalDecision
+                sync_relationship: device_sync_relationship(device.sync_state, device.is_local),
+                pairing_confirmation: device.pairing_confirmation.map(|status| match status {
+                    PairingConfirmationStatus::AwaitingPeerConfirmation => {
+                        PairingConfirmationSummary::AwaitingPeerConfirmation
                     }
-                    SyncRelationship::PausedGroupDiverged => {
-                        DeviceSyncRelationshipSummary::PausedGroupDiverged
+                    PairingConfirmationStatus::Unconfirmed => {
+                        PairingConfirmationSummary::Unconfirmed
                     }
-                    SyncRelationship::PausedUpgradeRequired => {
-                        DeviceSyncRelationshipSummary::PausedUpgradeRequired
-                    }
-                    SyncRelationship::PausedUnverifiable => {
-                        DeviceSyncRelationshipSummary::PausedUnverifiable
-                    }
-                    SyncRelationship::RemovedLocalDevice => {
-                        DeviceSyncRelationshipSummary::RemovedLocalDevice
-                    }
-                    SyncRelationship::RemovedPeerDevice => {
-                        DeviceSyncRelationshipSummary::RemovedPeerDevice
-                    }
-                    SyncRelationship::Unknown => DeviceSyncRelationshipSummary::Unknown,
-                },
-                available_actions: device
-                    .available_actions
-                    .into_iter()
-                    .map(device_trust_action)
-                    .collect(),
-                blocked_reason: device.blocked_reason.map(device_trust_unavailable_reason),
+                    PairingConfirmationStatus::Confirmed => PairingConfirmationSummary::Confirmed,
+                }),
+                available_actions: Vec::new(),
+                blocked_reason: None,
             })
             .collect(),
-        recovery: match snapshot.recovery {
-            RecoveryAvailability::NotAvailableInThisVersion => {
-                DeviceTrustRecoverySummary::NotAvailableInThisVersion
-            }
-        },
-        allowed_actions: snapshot
-            .allowed_actions
-            .into_iter()
-            .map(device_trust_action)
-            .collect(),
-        blocked_reason: snapshot.blocked_reason.map(device_trust_unavailable_reason),
-        updated_at_ms: snapshot.updated_at_ms,
+        recovery: DeviceTrustRecoverySummary::NotAvailableInThisVersion,
+        allowed_actions: Vec::new(),
+        blocked_reason: None,
+        updated_at_ms: 0,
+    }
+}
+
+fn device_sync_relationship(
+    state: DeviceTrustSyncState,
+    is_local: bool,
+) -> DeviceSyncRelationshipSummary {
+    use uc_application::deps::SpaceMemberPauseReason;
+
+    match state {
+        DeviceTrustSyncState::Usable => DeviceSyncRelationshipSummary::Usable,
+        DeviceTrustSyncState::Paused(SpaceMemberPauseReason::PendingLocalDecision) => {
+            DeviceSyncRelationshipSummary::WaitingForLocalDecision
+        }
+        DeviceTrustSyncState::Paused(SpaceMemberPauseReason::Diverged) => {
+            DeviceSyncRelationshipSummary::PausedGroupDiverged
+        }
+        DeviceTrustSyncState::Paused(SpaceMemberPauseReason::UpgradeRequired) => {
+            DeviceSyncRelationshipSummary::PausedUpgradeRequired
+        }
+        DeviceTrustSyncState::Paused(SpaceMemberPauseReason::LocalMemberInactive) if is_local => {
+            DeviceSyncRelationshipSummary::RemovedLocalDevice
+        }
+        DeviceTrustSyncState::Paused(SpaceMemberPauseReason::LocalMemberInactive) => {
+            DeviceSyncRelationshipSummary::RemovedPeerDevice
+        }
+        DeviceTrustSyncState::Paused(
+            SpaceMemberPauseReason::Invalid
+            | SpaceMemberPauseReason::RelationshipUnconfirmed
+            | SpaceMemberPauseReason::EffectPending,
+        ) => DeviceSyncRelationshipSummary::PausedUnverifiable,
     }
 }
 
@@ -459,6 +362,7 @@ pub(crate) fn join_space_status(status: CurrentJoinStatus) -> JoinSpaceStatusSum
         CurrentJoinStatus::Active {
             join_id,
             joined_space,
+            peer_upgrade_required,
         } => JoinSpaceStatusSummary::Active {
             join_id: encode_join_id(join_id),
             joined_space: JoinedSpaceSummary {
@@ -476,6 +380,7 @@ pub(crate) fn join_space_status(status: CurrentJoinStatus) -> JoinSpaceStatusSum
                 migrated_records: joined_space.migrated_records,
                 preserved_unreadable_records: joined_space.preserved_unreadable_records,
             },
+            peer_upgrade_required,
         },
         CurrentJoinStatus::Pending {
             join_id,
@@ -483,6 +388,7 @@ pub(crate) fn join_space_status(status: CurrentJoinStatus) -> JoinSpaceStatusSum
             sponsor_device_id,
             sponsor_identity_fingerprint,
             cancel_requested,
+            peer_upgrade_required,
         } => JoinSpaceStatusSummary::Pending {
             join_id: encode_join_id(join_id),
             target_space_id,
@@ -490,36 +396,49 @@ pub(crate) fn join_space_status(status: CurrentJoinStatus) -> JoinSpaceStatusSum
             sponsor_identity_fingerprint: sponsor_identity_fingerprint
                 .map(|fingerprint| fingerprint.as_display().to_string()),
             cancel_requested,
+            peer_upgrade_required,
         },
         CurrentJoinStatus::Rejected { join_id, reason } => JoinSpaceStatusSummary::Rejected {
             join_id: encode_join_id(join_id),
             reason: match reason {
-                uc_core::membership::AdmissionRejectionReasonV1::InvitationUnavailable => {
+                uc_core::membership::SpaceAdmissionRejectionReason::InvitationUnavailable => {
                     JoinSpaceRejectionReasonSummary::InvitationUnavailable
                 }
-                uc_core::membership::AdmissionRejectionReasonV1::AuthenticationRejected => {
+                uc_core::membership::SpaceAdmissionRejectionReason::AuthenticationRejected => {
                     JoinSpaceRejectionReasonSummary::AuthenticationRejected
                 }
-                uc_core::membership::AdmissionRejectionReasonV1::IdentityConflict => {
+                uc_core::membership::SpaceAdmissionRejectionReason::IdentityConflict => {
                     JoinSpaceRejectionReasonSummary::IdentityConflict
                 }
-                uc_core::membership::AdmissionRejectionReasonV1::BaseHistoryChanged => {
+                uc_core::membership::SpaceAdmissionRejectionReason::BaseHistoryChanged => {
                     JoinSpaceRejectionReasonSummary::BaseHistoryChanged
                 }
-                uc_core::membership::AdmissionRejectionReasonV1::JoinerHistoryAhead => {
+                uc_core::membership::SpaceAdmissionRejectionReason::JoinerHistoryAhead => {
                     JoinSpaceRejectionReasonSummary::JoinerHistoryAhead
                 }
-                uc_core::membership::AdmissionRejectionReasonV1::HistoryConflict => {
+                uc_core::membership::SpaceAdmissionRejectionReason::HistoryConflict => {
                     JoinSpaceRejectionReasonSummary::HistoryConflict
                 }
-                uc_core::membership::AdmissionRejectionReasonV1::PeerUpgradeRequired => {
+                uc_core::membership::SpaceAdmissionRejectionReason::PeerUpgradeRequired => {
                     JoinSpaceRejectionReasonSummary::PeerUpgradeRequired
                 }
-                uc_core::membership::AdmissionRejectionReasonV1::Cancelled => {
+                uc_core::membership::SpaceAdmissionRejectionReason::Cancelled => {
                     JoinSpaceRejectionReasonSummary::Cancelled
                 }
-                uc_core::membership::AdmissionRejectionReasonV1::RemovedBeforeActivation => {
+                uc_core::membership::SpaceAdmissionRejectionReason::RemovedBeforeActivation => {
                     JoinSpaceRejectionReasonSummary::RemovedBeforeActivation
+                }
+            },
+        },
+        CurrentJoinStatus::Terminated { join_id, reason } => JoinSpaceStatusSummary::Terminated {
+            join_id: encode_join_id(join_id),
+            reason: match reason {
+                JoinSpaceTerminationReason::Cancelled => {
+                    JoinSpaceTerminationReasonSummary::Cancelled
+                }
+                JoinSpaceTerminationReason::Expired => JoinSpaceTerminationReasonSummary::Expired,
+                JoinSpaceTerminationReason::Superseded => {
+                    JoinSpaceTerminationReasonSummary::Superseded
                 }
             },
         },
@@ -537,75 +456,12 @@ fn device_ids(device_ids: Vec<uc_core::DeviceId>) -> Vec<String> {
         .collect()
 }
 
-fn device_trust_impact(impact: DeviceTrustImpact) -> DeviceTrustImpactSummary {
-    DeviceTrustImpactSummary {
-        usable_device_ids: device_ids(impact.usable_device_ids),
-        paused_device_ids: device_ids(impact.paused_device_ids),
-        local_device_outcome: device_membership(impact.local_device_outcome),
-        requires_rejoin_device_ids: device_ids(impact.requires_rejoin_device_ids),
-    }
-}
-
-fn device_membership(membership: DeviceMembership) -> DeviceMembershipSummary {
+pub(crate) fn device_membership(membership: DeviceTrustMembership) -> DeviceMembershipSummary {
     match membership {
-        DeviceMembership::Active => DeviceMembershipSummary::Active,
-        DeviceMembership::Removed => DeviceMembershipSummary::Removed,
-        DeviceMembership::Unavailable => DeviceMembershipSummary::Unavailable,
-        DeviceMembership::Unknown => DeviceMembershipSummary::Unknown,
-    }
-}
-
-fn device_trust_choice(choice: DeviceTrustChoice) -> DeviceTrustChoiceSummary {
-    match choice {
-        DeviceTrustChoice::ApplyChange => DeviceTrustChoiceSummary::ApplyChange,
-        DeviceTrustChoice::KeepCurrentDeviceGroup => {
-            DeviceTrustChoiceSummary::KeepCurrentDeviceGroup
-        }
-    }
-}
-
-fn device_trust_action(action: DeviceTrustAction) -> DeviceTrustActionSummary {
-    match action {
-        DeviceTrustAction::ApplyCurrentChange => DeviceTrustActionSummary::ApplyCurrentChange,
-        DeviceTrustAction::KeepCurrentDeviceGroup => {
-            DeviceTrustActionSummary::KeepCurrentDeviceGroup
-        }
-        DeviceTrustAction::ConfirmApplyRemovesLocalDevice => {
-            DeviceTrustActionSummary::ConfirmApplyRemovesLocalDevice
-        }
-        DeviceTrustAction::RejoinDeviceGroup => DeviceTrustActionSummary::RejoinDeviceGroup,
-        DeviceTrustAction::UpdateThisDevice => DeviceTrustActionSummary::UpdateThisDevice,
-    }
-}
-
-fn device_trust_unavailable_reason(
-    reason: ActionUnavailableReason,
-) -> DeviceTrustUnavailableReasonSummary {
-    match reason {
-        ActionUnavailableReason::NoCurrentChange => {
-            DeviceTrustUnavailableReasonSummary::NoCurrentChange
-        }
-        ActionUnavailableReason::ChangeNoLongerCurrent => {
-            DeviceTrustUnavailableReasonSummary::ChangeNoLongerCurrent
-        }
-        ActionUnavailableReason::LocalDeviceConfirmationRequired => {
-            DeviceTrustUnavailableReasonSummary::LocalDeviceConfirmationRequired
-        }
-        ActionUnavailableReason::LocalDeviceRemoved => {
-            DeviceTrustUnavailableReasonSummary::LocalDeviceRemoved
-        }
-        ActionUnavailableReason::RecoveryNotAvailableInThisVersion => {
-            DeviceTrustUnavailableReasonSummary::RecoveryNotAvailableInThisVersion
-        }
-        ActionUnavailableReason::PeerUpgradeRequired => {
-            DeviceTrustUnavailableReasonSummary::PeerUpgradeRequired
-        }
-        ActionUnavailableReason::DeviceFactsUnverifiable => {
-            DeviceTrustUnavailableReasonSummary::DeviceFactsUnverifiable
-        }
-        ActionUnavailableReason::EngineUnavailable => {
-            DeviceTrustUnavailableReasonSummary::EngineUnavailable
-        }
+        DeviceTrustMembership::Active => DeviceMembershipSummary::Active,
+        DeviceTrustMembership::Removed => DeviceMembershipSummary::Removed,
+        DeviceTrustMembership::PendingActivation => DeviceMembershipSummary::Unavailable,
+        DeviceTrustMembership::NoCurrentSpace => DeviceMembershipSummary::Unknown,
     }
 }
 
@@ -751,29 +607,37 @@ fn map_roster_error(error: RosterError) -> EngineError {
     EngineError::new(code, category, retryable)
 }
 
-fn map_workspace_convergence_error(
-    error: uc_application::facade::WorkspaceConvergenceError,
-) -> EngineError {
+fn map_remove_space_member_error(error: RemoveSpaceMemberError) -> EngineError {
     match error {
-        uc_application::facade::WorkspaceConvergenceError::Locked
-        | uc_application::facade::WorkspaceConvergenceError::Repository(
-            uc_core::membership::WorkspaceConvergenceRepositoryError::Locked,
-        ) => EngineError::new(
+        RemoveSpaceMemberError::Locked | RemoveSpaceMemberError::Unavailable => EngineError::new(
             QUERY_WORKSPACE_CONVERGENCE_UNAVAILABLE_CODE,
             EngineErrorCategory::Unavailable,
             false,
         ),
-        uc_application::facade::WorkspaceConvergenceError::Repository(
-            uc_core::membership::WorkspaceConvergenceRepositoryError::Corrupt,
-        ) => EngineError::new(
-            QUERY_WORKSPACE_CONVERGENCE_CORRUPT_CODE,
-            EngineErrorCategory::InvalidState,
+        RemoveSpaceMemberError::RecoveryRequired | RemoveSpaceMemberError::StateChanged => {
+            EngineError::new(
+                QUERY_WORKSPACE_CONVERGENCE_CORRUPT_CODE,
+                EngineErrorCategory::InvalidState,
+                false,
+            )
+        }
+        RemoveSpaceMemberError::TargetNotFound => {
+            EngineError::new(MEMBER_NOT_FOUND_CODE, EngineErrorCategory::NotFound, false)
+        }
+        RemoveSpaceMemberError::SelfTarget => EngineError::new(
+            MEMBER_INVALID_INPUT_CODE,
+            EngineErrorCategory::InvalidInput,
             false,
         ),
-        _ => EngineError::new(
+        RemoveSpaceMemberError::LocalMemberRemoved => EngineError::new(
             QUERY_WORKSPACE_CONVERGENCE_FAILED_CODE,
             EngineErrorCategory::InvalidState,
             false,
+        ),
+        RemoveSpaceMemberError::CommittedButPending { .. } => EngineError::new(
+            QUERY_WORKSPACE_CONVERGENCE_FAILED_CODE,
+            EngineErrorCategory::InvalidState,
+            true,
         ),
     }
 }
@@ -782,6 +646,193 @@ fn map_workspace_convergence_error(
 mod tests {
     use super::*;
     use uc_core::membership::{WorkspaceFailureCategory, WorkspacePhase};
+
+    fn handoff_pending_removal(includes_local_device: bool) -> DeviceTrustStatus {
+        use uc_application::deps::SpaceMemberPauseReason;
+        use uc_application::facade::{DeviceTrustDevice, PendingDeviceTrustChange};
+        use uc_core::{membership::MembershipEventId, DeviceId};
+
+        let members = |ids: &[&str]| {
+            ids.iter()
+                .map(|id| uc_application::deps::MembershipConflictMember {
+                    device: uc_core::membership::MembershipConflictDevice {
+                        device_id: DeviceId::new(*id),
+                        display_name: (*id).to_owned(),
+                    },
+                    active: true,
+                })
+                .collect()
+        };
+
+        DeviceTrustStatus {
+            revision: 30,
+            local_device_id: Some(DeviceId::new("d")),
+            local_membership: DeviceTrustMembership::Active,
+            current_change: Some(PendingDeviceTrustChange {
+                change_id: MembershipEventId::from_hex(&"11".repeat(32)).unwrap(),
+                proposed_by_device_id: DeviceId::new("b"),
+                target_device_ids: vec![DeviceId::new(if includes_local_device {
+                    "d"
+                } else {
+                    "c"
+                })],
+                includes_local_device,
+                explanation: uc_core::membership::MembershipConflictExplanation::unknown(),
+                apply_impact: uc_application::facade::DeviceTrustImpact {
+                    members: members(&["a", "b", if includes_local_device { "c" } else { "d" }]),
+                    pending_confirmation_device_ids: Vec::new(),
+                    member_device_ids: ["a", "b", if includes_local_device { "c" } else { "d" }]
+                        .map(DeviceId::new)
+                        .to_vec(),
+                    usable_device_ids: if includes_local_device {
+                        Vec::new()
+                    } else {
+                        ["a", "b", "d"].map(DeviceId::new).to_vec()
+                    },
+                    paused_device_ids: vec![DeviceId::new(if includes_local_device {
+                        "d"
+                    } else {
+                        "c"
+                    })],
+                    local_membership: if includes_local_device {
+                        DeviceTrustMembership::Removed
+                    } else {
+                        DeviceTrustMembership::Active
+                    },
+                    requires_rejoin_device_ids: vec![DeviceId::new(if includes_local_device {
+                        "d"
+                    } else {
+                        "c"
+                    })],
+                },
+                keep_current_impact: uc_application::facade::DeviceTrustImpact {
+                    members: members(&["a", "b", "c", "d"]),
+                    pending_confirmation_device_ids: Vec::new(),
+                    member_device_ids: ["a", "b", "c", "d"].map(DeviceId::new).to_vec(),
+                    usable_device_ids: ["a", "c", "d"].map(DeviceId::new).to_vec(),
+                    paused_device_ids: vec![DeviceId::new("b")],
+                    local_membership: DeviceTrustMembership::Active,
+                    requires_rejoin_device_ids: Vec::new(),
+                },
+            }),
+            current_join: None,
+            pending_inbound_member: None,
+            devices: ["a", "b", "c", "d"]
+                .into_iter()
+                .map(|id| DeviceTrustDevice {
+                    device_id: DeviceId::new(id),
+                    display_name: id.to_owned(),
+                    is_local: id == "d",
+                    reachability: ReachabilityState::Offline,
+                    membership: DeviceTrustMembership::Active,
+                    relationship: if id == "b" {
+                        DeviceTrustRelationship::PendingLocalDecision
+                    } else if id == "d" {
+                        DeviceTrustRelationship::Local
+                    } else {
+                        DeviceTrustRelationship::Consistent
+                    },
+                    sync_state: if id == "b" {
+                        DeviceTrustSyncState::Paused(SpaceMemberPauseReason::PendingLocalDecision)
+                    } else {
+                        DeviceTrustSyncState::Usable
+                    },
+                    pairing_confirmation: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn handoff_apply_preview_excludes_the_removed_peer() {
+        let summary = device_trust_snapshot(handoff_pending_removal(false));
+        let change = summary.current_change.unwrap();
+        assert!(
+            change
+                .apply_impact
+                .usable_device_ids
+                .iter()
+                .all(|id| !change.target_device_ids.contains(id)),
+            "接受移除后，继续同步名单仍含移除目标：{:?}",
+            change.apply_impact.usable_device_ids
+        );
+    }
+
+    #[test]
+    fn handoff_apply_preview_marks_local_removal() {
+        let summary = device_trust_snapshot(handoff_pending_removal(true));
+        assert_eq!(
+            summary
+                .current_change
+                .unwrap()
+                .apply_impact
+                .local_device_outcome,
+            DeviceMembershipSummary::Removed
+        );
+    }
+
+    #[test]
+    fn join_status_preserves_the_peer_upgrade_prompt() {
+        let summary = join_space_status(CurrentJoinStatus::Pending {
+            join_id: [0x31; 16],
+            target_space_id: None,
+            sponsor_device_id: None,
+            sponsor_identity_fingerprint: None,
+            cancel_requested: false,
+            peer_upgrade_required: true,
+        });
+
+        assert!(matches!(
+            summary,
+            JoinSpaceStatusSummary::Pending {
+                peer_upgrade_required: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn terminated_join_status_is_not_reported_as_pending_or_rejected() {
+        let summary = join_space_status(CurrentJoinStatus::Terminated {
+            join_id: [0x41; 16],
+            reason: JoinSpaceTerminationReason::Expired,
+        });
+
+        assert_eq!(
+            summary,
+            JoinSpaceStatusSummary::Terminated {
+                join_id: "QUFBQUFBQUFBQUFBQUFBQQ".to_owned(),
+                reason: JoinSpaceTerminationReasonSummary::Expired,
+            }
+        );
+    }
+
+    #[test]
+    fn pairing_confirmation_is_presentation_only() {
+        let mut status = handoff_pending_removal(false);
+        let device = status
+            .devices
+            .iter_mut()
+            .find(|device| device.device_id.as_str() == "a")
+            .expect("fixture device");
+        let original_sync_state = device.sync_state;
+        device.pairing_confirmation = Some(PairingConfirmationStatus::Unconfirmed);
+
+        let summary = device_trust_snapshot(status);
+        let device = summary
+            .devices
+            .iter()
+            .find(|device| device.device_id == "a")
+            .expect("mapped device");
+        assert_eq!(
+            device.pairing_confirmation,
+            Some(PairingConfirmationSummary::Unconfirmed)
+        );
+        assert_eq!(
+            device.sync_relationship,
+            device_sync_relationship(original_sync_state, false)
+        );
+    }
 
     #[test]
     fn roster_failures_keep_stable_categories_and_distinct_codes() {

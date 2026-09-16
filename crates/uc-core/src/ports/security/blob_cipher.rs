@@ -1,8 +1,8 @@
 //! 业务 blob 加解密 port。
 //!
-//! 在"已解锁的空间"上做数据面加解密——调用方出示 `ActiveSpace` 作为
-//! 解锁凭据，adapter 内部按空间查找会话中的密钥物料。签名里不出现
-//! MasterKey / 算法标签 / 版本号等基础设施概念。
+//! 对本机持久业务负载执行加解密。调用方只提供负载和业务实体 AAD；
+//! adapter 独占活动写入上下文与密文自描述读取规则。签名里不出现 Space、
+//! MasterKey、算法标签或版本号等上下文选择能力。
 //!
 //! 合并了原先 `EncryptionPort::{encrypt_blob, decrypt_blob}` 的职责。
 //! 传输分片场景（chunked + 内置压缩 + per-chunk wire-format AAD）已经
@@ -11,7 +11,7 @@
 
 use async_trait::async_trait;
 
-use crate::crypto::domain::{Aad, ActiveSpace, Ciphertext, Plaintext};
+use crate::crypto::domain::{Aad, Ciphertext, Plaintext};
 
 /// 业务语义级的数据加解密失败。
 ///
@@ -20,20 +20,46 @@ use crate::crypto::domain::{Aad, ActiveSpace, Ciphertext, Plaintext};
 /// 归到 `InvalidCiphertext`，由 adapter 在日志里补更细的信息。
 #[derive(Debug, thiserror::Error)]
 pub enum BlobCipherError {
-    /// `ActiveSpace` 所对应的会话已经不再持有密钥（例如被 lock 过）。
-    ///
-    /// 正常情况下拿到 `ActiveSpace` 意味着已解锁；出现此错误通常代表
-    /// 调用方把句柄抱过了 lock 边界——调用方应重新走 `UnlockSpacePort::unlock`。
+    /// 当前持久内容保护上下文不可用，例如会话已经被锁定。
     #[error("space session is no longer unlocked")]
-    NotUnlocked,
+    NotUnlocked {
+        #[source]
+        source: anyhow::Error,
+    },
 
     /// 密文本身损坏 / AAD 不匹配 / 解包失败——数据层故障。
     #[error("invalid ciphertext or aad mismatch")]
-    InvalidCiphertext,
+    InvalidCiphertext {
+        #[source]
+        source: anyhow::Error,
+    },
 
     /// 其它内部失败（底层算法库、IO 等）。
-    #[error("blob cipher internal error: {0}")]
-    Internal(String),
+    #[error("blob cipher internal error")]
+    Internal {
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+impl BlobCipherError {
+    pub fn not_unlocked(source: impl Into<anyhow::Error>) -> Self {
+        Self::NotUnlocked {
+            source: source.into(),
+        }
+    }
+
+    pub fn invalid_ciphertext(source: impl Into<anyhow::Error>) -> Self {
+        Self::InvalidCiphertext {
+            source: source.into(),
+        }
+    }
+
+    pub fn internal(source: impl Into<anyhow::Error>) -> Self {
+        Self::Internal {
+            source: source.into(),
+        }
+    }
 }
 
 /// 业务 blob 加解密 port。
@@ -41,20 +67,37 @@ pub enum BlobCipherError {
 /// 方法契约：
 /// - 加密成功返回 `Ciphertext`——不透明字节，包含 adapter 自描述的 nonce / tag 布局。
 /// - 解密成功返回 `Plaintext`——drop 时自动清零。
-/// - AAD 由调用方按业务规则构造（条目 id / 空间 id 等），adapter 原样写入 AEAD。
+/// - AAD 由调用方按业务实体规则构造，adapter 负责把它绑定到不可由调用方
+///   选择的持久保护上下文。
 #[async_trait]
 pub trait BlobCipherPort: Send + Sync {
     async fn encrypt(
         &self,
-        space: &ActiveSpace,
         plaintext: &Plaintext,
         aad: &Aad,
     ) -> Result<Ciphertext, BlobCipherError>;
 
     async fn decrypt(
         &self,
-        space: &ActiveSpace,
         ciphertext: &Ciphertext,
         aad: &Aad,
     ) -> Result<Plaintext, BlobCipherError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+
+    use super::*;
+
+    #[test]
+    fn stable_error_variants_preserve_their_source() {
+        for error in [
+            BlobCipherError::not_unlocked(anyhow::anyhow!("locked")),
+            BlobCipherError::invalid_ciphertext(anyhow::anyhow!("invalid")),
+            BlobCipherError::internal(anyhow::anyhow!("internal")),
+        ] {
+            assert!(error.source().is_some());
+        }
+    }
 }

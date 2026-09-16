@@ -260,7 +260,10 @@ fn collect_recent_log_files(
     for entry in entries {
         let entry = entry.map_err(|err| DiagnosticsFacadeError::Export(err.to_string()))?;
         let path = entry.path();
-        if !path.is_file() {
+        let file_type = entry
+            .file_type()
+            .map_err(|err| DiagnosticsFacadeError::Export(err.to_string()))?;
+        if !file_type.is_file() {
             continue;
         }
         let Some(name) = path
@@ -289,22 +292,23 @@ fn collect_recent_log_files(
 }
 
 fn is_supported_log_file(name: &str) -> bool {
-    [
+    let desktop_log = [
         "uniclipboard-gui.json.",
         "uniclipboard-daemon.json.",
         "uniclipboard-cli.json.",
     ]
     .iter()
-    .any(|prefix| name.starts_with(prefix))
+    .any(|prefix| name.starts_with(prefix));
+    desktop_log || uc_observability_contract::diagnostics::managed_log_file_date(name).is_some()
 }
 
 fn rolling_name_is_in_window(name: &str, since: DateTime<Utc>) -> bool {
-    let Some(date_part) = name.rsplit('.').next() else {
-        return false;
-    };
-    let Ok(date) = chrono::NaiveDate::parse_from_str(date_part, "%Y-%m-%d") else {
-        return false;
-    };
+    let date = uc_observability_contract::diagnostics::managed_log_file_date(name).or_else(|| {
+        name.rsplit('.')
+            .next()
+            .and_then(|value| chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").ok())
+    });
+    let Some(date) = date else { return false };
     date >= since.date_naive()
 }
 
@@ -382,7 +386,20 @@ mod tests {
         fs::write(logs.join("uniclipboard-gui.json.2099-01-01"), b"gui").expect("write gui");
         fs::write(logs.join("uniclipboard-daemon.json.2099-01-01"), b"daemon")
             .expect("write daemon");
+        fs::write(logs.join("engine.2099-01-01.jsonl"), b"{\"engine\":true}\n")
+            .expect("write engine");
+        fs::write(logs.join("engine.latest.jsonl"), b"ignore").expect("write similar engine");
         fs::write(logs.join("other.log"), b"ignore").expect("write other");
+        #[cfg(unix)]
+        {
+            fs::write(temp.path().join("private.txt"), b"PRIVATE_LINK_TARGET")
+                .expect("write private target");
+            std::os::unix::fs::symlink(
+                temp.path().join("private.txt"),
+                logs.join("engine.2099-01-02.jsonl"),
+            )
+            .expect("create log-shaped symlink");
+        }
 
         let result = facade
             .export_logs_to_dir(Some(24), downloads)
@@ -392,6 +409,7 @@ mod tests {
         assert_eq!(
             result.included_files,
             vec![
+                "engine.2099-01-01.jsonl".to_string(),
                 "uniclipboard-daemon.json.2099-01-01".to_string(),
                 "uniclipboard-gui.json.2099-01-01".to_string(),
             ]
@@ -400,6 +418,9 @@ mod tests {
         let mut zip = zip::ZipArchive::new(file).expect("zip");
         assert!(zip.by_name("manifest.json").is_ok());
         assert!(zip.by_name("logs/uniclipboard-gui.json.2099-01-01").is_ok());
+        assert!(zip.by_name("logs/engine.2099-01-01.jsonl").is_ok());
+        assert!(zip.by_name("logs/engine.latest.jsonl").is_err());
+        assert!(zip.by_name("logs/engine.2099-01-02.jsonl").is_err());
         assert!(zip.by_name("logs/other.log").is_err());
     }
 }

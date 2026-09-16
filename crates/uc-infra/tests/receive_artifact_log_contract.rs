@@ -8,8 +8,8 @@ use uc_core::ids::ProfileId;
 use uc_core::ports::security::current_profile::{CurrentProfileError, CurrentProfilePort};
 use uc_core::ports::space::{DeriveSpaceSubkeyPort, SpaceAccessError};
 use uc_core::ports::{
-    GetReceiveArtifactRecordPort, ListUnsettledReceiveArtifactsPort, ReceiveArtifact,
-    ReceiveArtifactLogError, ReceiveArtifactOwnership, ReceiveArtifactPhase, ReceiveArtifactRecord,
+    ListUnsettledReceiveArtifactsPort, ReceiveArtifact, ReceiveArtifactLogError,
+    ReceiveArtifactOwnership, ReceiveArtifactPhase, ReceiveArtifactRecord,
     ReceiveArtifactResolution, RecordReceiveArtifactsPort,
 };
 use uc_infra::db::executor::DieselSqliteExecutor;
@@ -90,12 +90,6 @@ async fn encrypted_artifacts_round_trip_and_unsettled_query_is_exact() {
     repo.record_receive_artifacts(&landed).await.unwrap();
 
     assert_eq!(
-        repo.get_receive_artifact_record("entry-1", "a1")
-            .await
-            .unwrap(),
-        Some(pending.clone())
-    );
-    assert_eq!(
         repo.list_unsettled_receive_artifacts().await.unwrap(),
         vec![pending]
     );
@@ -113,7 +107,7 @@ async fn encrypted_artifacts_round_trip_and_unsettled_query_is_exact() {
 }
 
 #[tokio::test]
-async fn invalid_artifact_phase_is_rejected() {
+async fn invalid_unsettled_artifact_phase_is_rejected() {
     let (repo, writer, _directory) = setup();
     repo.record_receive_artifacts(&record("entry-1", "a1", ReceiveArtifactResolution::Pending))
         .await
@@ -128,7 +122,7 @@ async fn invalid_artifact_phase_is_rejected() {
         .unwrap();
 
     assert!(matches!(
-        repo.get_receive_artifact_record("entry-1", "a1").await,
+        repo.list_unsettled_receive_artifacts().await,
         Err(ReceiveArtifactLogError::InvalidValue(value)) if value == "unknown"
     ));
 }

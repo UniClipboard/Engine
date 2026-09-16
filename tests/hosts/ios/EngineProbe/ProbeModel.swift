@@ -81,7 +81,7 @@ final class ProbeModel {
     }
 
     func queryDeviceTrust() async {
-        _ = await run(["command": "query_device_trust"])
+        _ = await run(["command": "query_device_group_choices"])
     }
 
     func sendText() async {
@@ -360,7 +360,7 @@ final class ProbeModel {
             "pending_count", "waiting_for_peer_count", "waiting_for_update_count",
             "version_incompatible_count", "blocked_count", "rejected_count", "accepted",
             "duplicate", "offline", "errored", "pending", "target_count", "outcome",
-            "pending_recipients",
+            "pending_recipients", "traces", "logs",
         ]
         let evidence = result.filter { allowed.contains($0.key) }
         guard let data = try? JSONSerialization.data(

@@ -1,6 +1,6 @@
 //! [`MobileSyncFacade`] —— 移动端同步功能的应用层入口(P5a.6 起接真实现)。
 //!
-//! 按 `uc-application/AGENTS.md` §11.4, 外部 crate(bootstrap / daemon /
+//! 按 `docs/design-docs/layers/application.md`, 外部 crate(bootstrap / daemon /
 //! tauri / cli)只能通过本目录下的 [`MobileSyncFacade`] 访问 mobile sync
 //! 用例;所有底层 `*UseCase` 类型保持 `pub(crate)`, 不向外暴露。
 //!
@@ -16,7 +16,7 @@
 //! | [`MobileSyncFacade::get_settings`] | `GetMobileSyncSettingsUseCase` | 读 enabled + LAN URL + install methods |
 //! | [`MobileSyncFacade::update_settings`] | `UpdateMobileSyncSettingsUseCase` | 写 enabled / lan 字段, 装入 lifecycle 时 listener 即时生效 |
 //! | [`MobileSyncFacade::list_lan_interfaces`] | `ListLanInterfacesUseCase` | 列出可作为二维码 URL 的 RFC1918 网卡 |
-//! | [`MobileSyncFacade::authenticate_basic`] | `AuthenticateBasicAuthUseCase` | LAN HTTP 路由用:校验 Basic Auth 头 |
+//! | [`MobileSyncFacade::authenticate_basic`] | `AuthenticateMobileRequestUseCase` | 验证请求并记录活动 |
 //! | [`MobileSyncFacade::get_latest_sync_doc`] | `GetLatestMobileSyncDocUseCase` | `GET /SyncClipboard.json` |
 //! | [`MobileSyncFacade::put_sync_doc`] | `ApplyIncomingMobileClipUseCase` (`SyncDoc`) | `PUT /SyncClipboard.json` |
 //! | [`MobileSyncFacade::get_clipboard_file`] | `GetMobileSyncFileUseCase` | `GET /file/{name}` |
@@ -63,6 +63,7 @@ use crate::facade::file_upload::{
 };
 use crate::facade::outbound_adapter::ClipboardOutboundFanOutAdapter;
 use crate::usecases::apply_incoming::{MobileActivationAnnouncePort, MobileInboundFanOutPort};
+use crate::usecases::authenticate_request::AuthenticateMobileRequestUseCase;
 use crate::usecases::{
     apply_incoming::ApplyIncomingMobileClipUseCase,
     authenticate_basic::AuthenticateBasicAuthUseCase, get_file::GetMobileSyncFileUseCase,
@@ -72,10 +73,12 @@ use crate::usecases::{
     register_device::RegisterMobileShortcutDeviceUseCase, revoke_device::RevokeMobileDeviceUseCase,
     update_device::UpdateMobileDeviceUseCase, update_settings::UpdateMobileSyncSettingsUseCase,
 };
+#[cfg(test)]
+use uc_application::deps::test_support::ApplyInboundClipboardUseCase;
 use uc_application::facade::file_transfer::FileTransferFacade;
 use uc_application::facade::ActiveClipboardFacade;
-use uc_application::facade::ApplyInboundClipboardUseCase;
 use uc_application::facade::ClipboardOutboundFacade;
+use uc_application::facade::InboundClipboardApplyPort;
 
 // ── 对外类型 re-export ─────────────────────────────────────────────────
 
@@ -122,7 +125,7 @@ pub use crate::usecases::update_settings::{
 /// error type is declared here. It still translates the core-layer
 /// [`MobileDeviceError`](uc_core::mobile_sync::MobileDeviceError) into an
 /// application-level type instead of leaking it across the crate boundary
-/// (per `uc-application/AGENTS.md` §13.1/§13.2, and mirroring
+/// (per `docs/design-docs/layers/application.md`, and mirroring
 /// [`AuthenticateBasicAuthError`] et al.).
 #[derive(Debug, thiserror::Error)]
 pub enum IsDeviceCredentialCurrentError {
@@ -193,7 +196,7 @@ pub struct MobileSyncFacadeDeps {
     pub endpoint_info: Arc<dyn MobileSyncEndpointInfoPort>,
     pub lan_interface_probe: Arc<dyn LanInterfaceProbePort>,
     pub settings: Arc<dyn SettingsPort>,
-    pub apply_inbound: Arc<ApplyInboundClipboardUseCase>,
+    pub apply_inbound: Arc<dyn InboundClipboardApplyPort>,
     pub incoming_buffer: Arc<IncomingMobileBuffer>,
     /// `MobileFileStagingPort` 实例(P5a.3.5):File 类型入站时把裸字节物
     /// 化到 cache_dir,产出可拼 file-list rep 的 `file:///...` URI。
@@ -239,7 +242,7 @@ pub struct MobileSyncFacadeDeps {
     /// use case，分别 emit `mobile_device_registered` /
     /// `mobile_auth_failed` / `mobile_clipboard_synced`。
     ///
-    /// 装配处直接复用 `AppDeps.analytics`（bootstrap 已包了一层
+    /// 装配处直接复用 `ApplicationDeps.analytics`（bootstrap 已包了一层
     /// `GatedAnalyticsSink`，运行时按用户 `usage_analytics_enabled` 切换
     /// noop / 真实 sink）。测试装配传 `NoopAnalyticsSink`。
     pub analytics: Arc<dyn AnalyticsPort>,
@@ -277,7 +280,7 @@ pub struct MobileSyncFacade {
     get_settings: GetMobileSyncSettingsUseCase,
     update_settings: UpdateMobileSyncSettingsUseCase,
     list_lan_interfaces: ListLanInterfacesUseCase,
-    authenticate_basic: AuthenticateBasicAuthUseCase,
+    authenticate_basic: AuthenticateMobileRequestUseCase,
     apply_incoming: Arc<ApplyIncomingMobileClipUseCase>,
     get_latest_doc: GetLatestMobileSyncDocUseCase,
     get_file: GetMobileSyncFileUseCase,
@@ -380,10 +383,14 @@ impl MobileSyncFacade {
             ),
             update_settings: UpdateMobileSyncSettingsUseCase::new(settings),
             list_lan_interfaces: ListLanInterfacesUseCase::new(lan_interface_probe),
-            authenticate_basic: AuthenticateBasicAuthUseCase::new(
-                devices.find_by_username.clone(),
-                password_hasher,
-                analytics.clone(),
+            authenticate_basic: AuthenticateMobileRequestUseCase::new(
+                AuthenticateBasicAuthUseCase::new(
+                    devices.find_by_username.clone(),
+                    password_hasher,
+                    analytics.clone(),
+                ),
+                devices.activity,
+                clock,
             ),
             apply_incoming,
             get_latest_doc: GetLatestMobileSyncDocUseCase::new(snapshot_port.clone()),
@@ -487,8 +494,7 @@ impl MobileSyncFacade {
         self.list_lan_interfaces.execute().await
     }
 
-    /// 校验 LAN HTTP 请求的 `Authorization: basic ...` 头。详见
-    /// [`AuthenticateBasicAuthUseCase`](crate::usecases::authenticate_basic::AuthenticateBasicAuthUseCase)。
+    /// 校验 LAN HTTP 请求并记录活动。定时凭据复查不调用此入口。
     pub async fn authenticate_basic(
         &self,
         input: AuthenticateBasicAuthInput,
@@ -780,12 +786,32 @@ mod tests {
     /// `InMemoryDeviceRepo` so all consumers see the same backing store.
     fn device_ports_from(repo: Arc<InMemoryDeviceRepo>) -> MobileDevicePorts {
         MobileDevicePorts {
+            activity: repo.clone(),
             find_by_username: repo.clone(),
             find_by_id: repo.clone(),
             list: repo.clone(),
             save: repo.clone(),
             delete: repo.clone(),
             update: repo,
+        }
+    }
+
+    #[async_trait]
+    impl crate::RecordMobileDeviceActivityPort for InMemoryDeviceRepo {
+        async fn record_activity(
+            &self,
+            id: &MobileDeviceId,
+            at_ms: i64,
+        ) -> Result<bool, uc_core::ports::mobile_sync::MobileActivityError> {
+            let mut devices = self.devices.lock().unwrap();
+            let Some(device) = devices.iter_mut().find(|device| device.device_id == *id) else {
+                return Ok(false);
+            };
+            if device.last_seen_at_ms.is_some_and(|last| last >= at_ms) {
+                return Ok(false);
+            }
+            device.last_seen_at_ms = Some(at_ms);
+            Ok(true)
         }
     }
 
@@ -1240,6 +1266,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.device.username, "mobile_alice");
+        assert_eq!(
+            local.list_devices().await.unwrap()[0].last_seen_at_ms,
+            Some(1_000)
+        );
 
         // 错密码 → 401
         let bad = format!(

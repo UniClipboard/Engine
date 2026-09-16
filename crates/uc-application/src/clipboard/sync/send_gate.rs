@@ -22,26 +22,20 @@ use tracing::{debug, info, warn};
 
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::DeviceId;
-use uc_core::membership::ContentExchangeGatePort;
 use uc_core::MemberRepositoryPort;
+
+use crate::deps::CurrentSpaceMemberScope;
 
 /// Reads a peer's per-device sync preferences to decide whether outbound
 /// active-clipboard state to it should be sent.
 #[derive(Clone)]
 pub(crate) struct MemberSendGate {
     member_repo: Arc<dyn MemberRepositoryPort>,
-    content_gate: Option<Arc<dyn ContentExchangeGatePort>>,
 }
 
 impl MemberSendGate {
-    pub(crate) fn new_with_content_gate(
-        member_repo: Arc<dyn MemberRepositoryPort>,
-        content_gate: Arc<dyn ContentExchangeGatePort>,
-    ) -> Self {
-        Self {
-            member_repo,
-            content_gate: Some(content_gate),
-        }
+    pub(crate) fn new(member_repo: Arc<dyn MemberRepositoryPort>) -> Self {
+        Self { member_repo }
     }
 
     /// Full outbound gate (issue #1017 D2): `send_enabled` ∧
@@ -56,22 +50,23 @@ impl MemberSendGate {
     ///
     /// Fails open on a member-repo miss / error so a transient glitch can't
     /// silently stop propagation.
-    pub(crate) async fn is_send_allowed(
+    pub(crate) async fn is_send_allowed_with_scope(
         &self,
         peer: &DeviceId,
         categories: &ClipboardContentCategorySet,
+        scope: &CurrentSpaceMemberScope,
     ) -> bool {
-        if let Some(content_gate) = &self.content_gate {
-            if content_gate.is_locally_removed(peer).await {
-                info!(device = %peer.as_str(), reason = "content_exchange_blocked", "active state send gate: skipping peer while content exchange is blocked");
-                return false;
-            }
+        if !scope.usable_peer_device_ids.contains(peer) {
+            info!(
+                reason = "membership_scope_blocked",
+                "active state send gate: skipping unavailable peer"
+            );
+            return false;
         }
         match self.member_repo.get(peer).await {
             Ok(Some(member)) => {
                 if !member.sync_preferences.send_enabled {
                     debug!(
-                        device = %peer.as_str(),
                         reason = "send_disabled_by_user",
                         "active state send gate: skipping peer per per-device sync preferences"
                     );
@@ -79,10 +74,6 @@ impl MemberSendGate {
                 }
                 if !categories.allowed_by(&member.sync_preferences.send_content_types) {
                     info!(
-                        device = %peer.as_str(),
-                        categories = %categories.labels(),
-                        denied = %categories
-                            .denied_labels(&member.sync_preferences.send_content_types),
                         reason = "content_type_disabled_by_user",
                         "active state send gate: skipping peer per per-device content_types filter"
                     );
@@ -91,15 +82,11 @@ impl MemberSendGate {
                 true
             }
             Ok(None) => {
-                warn!(
-                    device = %peer.as_str(),
-                    "active state send gate: peer missing in member repo; failing open"
-                );
+                warn!("active state send gate: peer missing in member repo; failing open");
                 true
             }
             Err(err) => {
                 warn!(
-                    device = %peer.as_str(),
                     error = %err,
                     "active state send gate: member repo lookup failed; failing open"
                 );
@@ -115,7 +102,40 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::Utc;
+    use std::io::{self, Write};
+    use std::sync::Mutex;
 
+    use crate::deps::CurrentSpaceMemberScope;
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CapturedLogWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLogs {
+        type Writer = CapturedLogWriter;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            CapturedLogWriter(Arc::clone(&self.0))
+        }
+    }
+
+    impl CapturedLogs {
+        fn output(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
     use uc_core::clipboard::ClipboardContentCategory;
     use uc_core::membership::{MembershipError, SpaceMember};
     use uc_core::settings::model::ContentTypes;
@@ -160,10 +180,62 @@ mod tests {
     }
 
     fn gate(member: Option<SpaceMember>) -> MemberSendGate {
-        MemberSendGate {
-            member_repo: Arc::new(StubRepo { member }),
-            content_gate: None,
+        MemberSendGate::new(Arc::new(StubRepo { member }))
+    }
+
+    fn allowed_scope() -> CurrentSpaceMemberScope {
+        CurrentSpaceMemberScope {
+            revision: 1,
+            local_member_active: true,
+            usable_peer_device_ids: vec![DeviceId::new("peer")],
+            paused_peer_devices: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn peer_outside_final_scope_is_denied_before_preferences() {
+        let gate = MemberSendGate::new(Arc::new(StubRepo {
+            member: Some(member_with(true, ContentTypes::default())),
+        }));
+        let scope = CurrentSpaceMemberScope {
+            usable_peer_device_ids: Vec::new(),
+            ..allowed_scope()
+        };
+
+        assert!(
+            !gate
+                .is_send_allowed_with_scope(
+                    &DeviceId::new("peer"),
+                    &category_set(ClipboardContentCategory::Text),
+                    &scope,
+                )
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn send_gate_logs_do_not_expose_the_peer_device_id() {
+        use tracing::instrument::WithSubscriber;
+
+        let gate = gate(Some(member_with(false, ContentTypes::default())));
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(logs.clone())
+            .finish();
+
+        let _ = gate
+            .is_send_allowed_with_scope(
+                &DeviceId::new("sensitive-peer-device"),
+                &ClipboardContentCategorySet::empty(),
+                &allowed_scope(),
+            )
+            .with_subscriber(subscriber)
+            .await;
+
+        assert!(!logs.output().contains("sensitive-peer-device"));
     }
 
     fn category_set(c: ClipboardContentCategory) -> ClipboardContentCategorySet {
@@ -176,7 +248,10 @@ mod tests {
     async fn send_disabled_blocks() {
         let g = gate(Some(member_with(false, ContentTypes::default())));
         let cats = category_set(ClipboardContentCategory::Text);
-        assert!(!g.is_send_allowed(&DeviceId::new("peer"), &cats).await);
+        assert!(
+            !g.is_send_allowed_with_scope(&DeviceId::new("peer"), &cats, &allowed_scope())
+                .await
+        );
     }
 
     #[tokio::test]
@@ -185,14 +260,20 @@ mod tests {
         ct.image = false;
         let g = gate(Some(member_with(true, ct)));
         let cats = category_set(ClipboardContentCategory::Image);
-        assert!(!g.is_send_allowed(&DeviceId::new("peer"), &cats).await);
+        assert!(
+            !g.is_send_allowed_with_scope(&DeviceId::new("peer"), &cats, &allowed_scope())
+                .await
+        );
     }
 
     #[tokio::test]
     async fn allowed_when_enabled_and_category_permitted() {
         let g = gate(Some(member_with(true, ContentTypes::default())));
         let cats = category_set(ClipboardContentCategory::Text);
-        assert!(g.is_send_allowed(&DeviceId::new("peer"), &cats).await);
+        assert!(
+            g.is_send_allowed_with_scope(&DeviceId::new("peer"), &cats, &allowed_scope())
+                .await
+        );
     }
 
     #[tokio::test]
@@ -204,13 +285,19 @@ mod tests {
         ct.image = false;
         let g = gate(Some(member_with(true, ct)));
         let cats = ClipboardContentCategorySet::empty();
-        assert!(g.is_send_allowed(&DeviceId::new("peer"), &cats).await);
+        assert!(
+            g.is_send_allowed_with_scope(&DeviceId::new("peer"), &cats, &allowed_scope())
+                .await
+        );
     }
 
     #[tokio::test]
     async fn unknown_peer_fails_open() {
         let g = gate(None);
         let cats = category_set(ClipboardContentCategory::Text);
-        assert!(g.is_send_allowed(&DeviceId::new("peer"), &cats).await);
+        assert!(
+            g.is_send_allowed_with_scope(&DeviceId::new("peer"), &cats, &allowed_scope())
+                .await
+        );
     }
 }

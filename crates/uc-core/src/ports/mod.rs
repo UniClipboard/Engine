@@ -29,6 +29,7 @@ pub mod config_migration;
 pub mod connection_channel;
 pub mod device_identity;
 pub mod directory_publish_log;
+pub mod engine_version;
 pub mod entry_receive_attempt;
 pub mod errors;
 pub mod file_transfer;
@@ -40,12 +41,9 @@ pub mod inbound_file_target;
 pub mod inbound_receive_commit;
 pub mod local_identity;
 pub mod mobile_sync;
-pub mod observability;
-pub mod pairing;
 pub mod pairing_invitation;
 pub mod peer_address;
-pub mod presence;
-pub mod profile_lifecycle;
+pub mod peer_reachability;
 pub mod receive_artifact_log;
 pub mod search;
 pub mod security;
@@ -58,6 +56,7 @@ pub use app_version::{AppVersionStateError, AppVersionStatePort};
 pub use cache_fs::{CacheFsPort, DirEntry as CacheFsDirEntry};
 pub use clipboard_event::*;
 pub use clock::*;
+pub use engine_version::{EngineVersionStateError, EngineVersionStatePort};
 pub use first_sync_state::{FirstSyncStateError, FirstSyncStatePort};
 pub use hash::*;
 pub use timer::TimerPort;
@@ -79,10 +78,9 @@ pub use directory_publish_log::{
 };
 pub use entry_receive_attempt::{
     AttemptError, AttemptState, BeginReceiveAttemptPort, BeginReceiveFailureOutcome,
-    BeginReceiveFailurePort, BeginReceiveOutcome, ClaimReceiveCommitPort,
-    DeleteReceiveStateForEntryPort, EntryReceiveAttempt, GetEntryAttemptPort,
-    ListNonTerminalAttemptsPort, PurgeTerminalOrphanAttemptsPort,
-    RequestReceiveCancellationOutcome, RequestReceiveCancellationPort,
+    BeginReceiveFailurePort, BeginReceiveOutcome, ClaimReceiveCommitPort, EntryReceiveAttempt,
+    GetEntryAttemptPort, ListNonTerminalAttemptsPort, RequestReceiveCancellationOutcome,
+    RequestReceiveCancellationPort,
 };
 pub use errors::AppDirsError;
 pub use file_transfer::{
@@ -99,7 +97,7 @@ pub use file_transfer::{
 pub use hidden_path::MarkHiddenPort;
 pub use host_event::{
     ClipboardHostEvent, ClipboardOriginKind, DeliveryHostEvent, EmitError, HostEvent,
-    HostEventEmitterPort, TransferHostEvent,
+    HostEventEmitterPort, MembershipHostEvent, TransferHostEvent,
 };
 pub use inbound_file_target::{ReserveInboundFileTargetPort, ResolveInboundSaveDirPort};
 pub use inbound_receive_commit::{
@@ -115,27 +113,19 @@ pub use mobile_sync::{
     MobileFileStagingPort, MobileLanLifecyclePort, MobileLanTarget, MobileSyncEndpointInfoPort,
     PasswordHasherError, PasswordHasherPort, SaveMobileDevicePort, UpdateMobileDevicePort,
 };
-pub use observability::{extract_trace, OptionalTrace, TraceMetadata, TraceParseError};
-pub use pairing::{
-    DialError, DialOutcome, DiscoveryChannel, PairingEventPort, PairingSessionEvent,
-    PairingSessionId, PairingSessionPort, SessionError,
-};
 pub use pairing_invitation::{
     CodeOrigin, ConsumeInvitationError, InvitationCode, InvitationError, IssuedInvitation,
     PairingInvitationAddressCandidate, PairingInvitationAddressQueryPort,
     PairingInvitationByAddressPort, PairingInvitationPort,
 };
 pub use peer_address::{PeerAddressError, PeerAddressRecord, PeerAddressRepositoryPort};
-pub use presence::{PresenceError, PresenceEvent, PresencePort, ReachabilityState};
-pub use profile_lifecycle::{
-    ClearProfileStatePort, FactoryResetPhaseV1, ProfileFactoryResetCapabilityError,
-    ProfileLifecycleError, ProfileLifecycleMarkerV1, ProfileLifecyclePort, StopProfileRuntimePort,
-    WipeProfileKeysPort, PROFILE_LIFECYCLE_MARKER_FORMAT_V1,
+pub use peer_reachability::{
+    PeerReachabilityChanged, PeerReachabilityError, PeerReachabilityPort, ReachabilityState,
 };
 pub use receive_artifact_log::{
-    CleanupReceiveArtifactsPort, GetReceiveArtifactRecordPort, ListUnsettledReceiveArtifactsPort,
-    ReceiveArtifact, ReceiveArtifactLogError, ReceiveArtifactOwnership, ReceiveArtifactPhase,
-    ReceiveArtifactRecord, ReceiveArtifactResolution, RecordReceiveArtifactsPort,
+    CleanupReceiveArtifactsPort, ListUnsettledReceiveArtifactsPort, ReceiveArtifact,
+    ReceiveArtifactLogError, ReceiveArtifactOwnership, ReceiveArtifactPhase, ReceiveArtifactRecord,
+    ReceiveArtifactResolution, RecordReceiveArtifactsPort,
 };
 pub use search::maintenance::SearchIndexMaintenancePort;
 pub use search::search_index::SearchIndexPort;
@@ -144,4 +134,3 @@ pub use security::secure_storage::{SecureStorageError, SecureStoragePort};
 pub use security::transfer_cipher::{TransferCipherError, TransferCipherPort};
 pub use security::{BlobCipherError, BlobCipherPort};
 pub use settings::{SettingsMigrationPort, SettingsPort};
-pub use setup::SetupStatusPort;

@@ -1,5 +1,4 @@
-//! Concrete SHA-256 + Base32 derivation behind `IdentityFingerprintFactoryPort`
-//! and `ShortCodeGeneratorPort`.
+//! `IdentityFingerprintFactoryPort` 背后的 SHA-256 + Base32 派生实现。
 //!
 //! The value object (`IdentityFingerprint`) and its format errors live in
 //! `uc_core::security` — this module only implements the algorithm.
@@ -8,12 +7,10 @@
 //!
 //! - Identity fingerprint: `Base32( SHA-256("uc-identity-fp-v1" || pub_key)[0..10] )`
 //!   → 16 chars grouped as `ABCD-EFGH-IJKL-MNOP`
-//! - Short code: `Base32( SHA-256("uc-pairing-transcript-v1" || session || nonces || pubkeys || version)[0..5] )`
-//!   → 8 chars (first group of Base32 output)
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use uc_core::ports::security::{IdentityFingerprintFactoryPort, ShortCodeGeneratorPort};
+use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::security::IdentityFingerprint;
 
 /// Derivation-time failure for the Ed25519 → fingerprint pipeline.
@@ -53,52 +50,6 @@ fn derive_identity_fingerprint(
         .expect("16-char alphanumeric Base32 output is always a valid fingerprint"))
 }
 
-/// Generator for transcript-bound short codes shown to the user during pairing.
-///
-/// Keyed off the live pairing transcript, not a fixed fingerprint, so an
-/// attacker cannot stage a confirmation UI before the handshake completes.
-#[derive(Debug, Clone)]
-pub struct ShortCodeGenerator {
-    _private: (),
-}
-
-impl ShortCodeGenerator {
-    /// Generate a short pairing confirmation code.
-    ///
-    /// ```text
-    /// transcript = "uc-pairing-transcript-v1" ||
-    ///              session_id ||
-    ///              nonce_initiator ||
-    ///              nonce_responder ||
-    ///              initiator_pubkey ||
-    ///              responder_pubkey ||
-    ///              protocol_version
-    /// short_code = Base32(SHA-256(transcript)[0..5])[..8]
-    /// ```
-    pub fn generate(
-        session_id: &str,
-        nonce_initiator: &[u8],
-        nonce_responder: &[u8],
-        initiator_pubkey: &[u8],
-        responder_pubkey: &[u8],
-        protocol_version: &str,
-    ) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(b"uc-pairing-transcript-v1");
-        hasher.update(session_id.as_bytes());
-        hasher.update(nonce_initiator);
-        hasher.update(nonce_responder);
-        hasher.update(initiator_pubkey);
-        hasher.update(responder_pubkey);
-        hasher.update(protocol_version.as_bytes());
-        let hash = hasher.finalize();
-
-        let truncated = &hash[0..5];
-        let encoded = base32::encode(base32::Alphabet::Rfc4648 { padding: false }, truncated);
-        encoded.chars().take(8).collect()
-    }
-}
-
 /// SHA-256 + Base32 implementation of `IdentityFingerprintFactoryPort`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Sha256IdentityFingerprintFactory;
@@ -107,31 +58,6 @@ impl IdentityFingerprintFactoryPort for Sha256IdentityFingerprintFactory {
     fn from_public_key(&self, public_key: &[u8]) -> anyhow::Result<IdentityFingerprint> {
         derive_identity_fingerprint(public_key)
             .map_err(|err| anyhow::anyhow!("identity fingerprint derivation failed: {err}"))
-    }
-}
-
-/// SHA-256 + Base32 implementation of `ShortCodeGeneratorPort`.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct Sha256ShortCodeGenerator;
-
-impl ShortCodeGeneratorPort for Sha256ShortCodeGenerator {
-    fn generate(
-        &self,
-        session_id: &str,
-        nonce_initiator: &[u8],
-        nonce_responder: &[u8],
-        initiator_pubkey: &[u8],
-        responder_pubkey: &[u8],
-        protocol_version: &str,
-    ) -> anyhow::Result<String> {
-        Ok(ShortCodeGenerator::generate(
-            session_id,
-            nonce_initiator,
-            nonce_responder,
-            initiator_pubkey,
-            responder_pubkey,
-            protocol_version,
-        ))
     }
 }
 

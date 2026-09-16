@@ -9,11 +9,6 @@
 //! * peer-online resync (after a peer comes online — send our current
 //!   register to it so both ends converge via LWW).
 //!
-//! Two entry points share the same gate + dispatch step so they cannot drift:
-//!
-//! * [`send_active_state_to`] — single-target gated send.
-//! * [`fan_out_active_state`] — multi-target fan-out built on top of it.
-//!
 //! The full outbound gate (issue #1017 D2) is applied in the single-target
 //! step: `send_enabled` ∧ `send_content_types`, threaded via the activation's
 //! content category set.
@@ -24,36 +19,29 @@ use tracing::{debug, warn};
 
 use uc_core::clipboard::{ActiveClipboardState, ClipboardContentCategorySet};
 use uc_core::ids::DeviceId;
-use uc_core::membership::CurrentWorkspacePeerScopePort;
 use uc_core::ports::clipboard::ActiveClipboardDispatchPort;
-use uc_core::ports::{PeerAddressRepositoryPort, PresencePort, ReachabilityState};
+use uc_core::ports::{PeerAddressRepositoryPort, PeerReachabilityPort, ReachabilityState};
+
+use crate::deps::{CurrentSpaceMemberScope, CurrentSpaceMemberScopePort};
 
 use super::super::send_gate::MemberSendGate;
 
-/// Send `state` to a single `target` under the full outbound gate (issue
-/// #1017 D2): `send_enabled` ∧ `send_content_types` (the latter via
-/// `categories`). A gate-rejected target is silently skipped; a dispatch
-/// failure is isolated and logged at `debug` (the register is convergent, so
-/// a missed send is recovered by a later advance or another peer-online
-/// resync).
-///
-/// This is the single gate+dispatch step every 0xC3 origination path shares.
-/// It does *not* consult the peer-address roster or the echo-suppression rule
-/// (`state.activated_by`); that selection is the caller's concern —
-/// [`fan_out_active_state`] applies both before delegating here.
-pub(crate) async fn send_active_state_to(
+pub(crate) async fn send_active_state_to_with_scope(
     dispatch: &Arc<dyn ActiveClipboardDispatchPort>,
     send_gate: &MemberSendGate,
     target: &DeviceId,
     state: &ActiveClipboardState,
     categories: &ClipboardContentCategorySet,
+    scope: &CurrentSpaceMemberScope,
 ) {
-    if !send_gate.is_send_allowed(target, categories).await {
+    if !send_gate
+        .is_send_allowed_with_scope(target, categories, scope)
+        .await
+    {
         return;
     }
     if let Err(err) = dispatch.dispatch(target, state).await {
         debug!(
-            device = %target.as_str(),
             error = %err,
             "active state send: per-peer dispatch failed (isolated)"
         );
@@ -65,7 +53,7 @@ pub(crate) async fn send_active_state_to(
 /// The roster is the set of peers we hold an address for
 /// (`peer_addr_repo.list()`), so a peer with no address is silently skipped
 /// (offline / never reachable). The device that activated the state
-/// (`state.activated_by`) is never echoed back to, and a peer the presence
+/// (`state.activated_by`) is never echoed back to, and a peer the peer_reachability
 /// tracker already reports `Offline` is skipped without dialing. Each surviving
 /// target is gated by the full outbound gate (`send_enabled` ∧
 /// `send_content_types`, the latter via `categories`). Per-peer dispatch
@@ -74,17 +62,14 @@ pub(crate) async fn send_active_state_to(
 pub(crate) async fn fan_out_active_state(
     dispatch: &Arc<dyn ActiveClipboardDispatchPort>,
     peer_addr_repo: &Arc<dyn PeerAddressRepositoryPort>,
-    peer_scope: &Arc<dyn CurrentWorkspacePeerScopePort>,
-    presence: &Arc<dyn PresencePort>,
+    peer_scope: &Arc<dyn CurrentSpaceMemberScopePort>,
+    peer_reachability: &Arc<dyn PeerReachabilityPort>,
     send_gate: &MemberSendGate,
     state: &ActiveClipboardState,
     categories: &ClipboardContentCategorySet,
 ) {
     let scope = match peer_scope.snapshot().await {
-        Ok(snapshot) => snapshot
-            .peer_device_ids
-            .into_iter()
-            .collect::<std::collections::HashSet<_>>(),
+        Ok(snapshot) => snapshot,
         Err(err) => {
             warn!(error = ?err, "active state fan-out skipped: current peer scope unavailable");
             return;
@@ -100,29 +85,27 @@ pub(crate) async fn fan_out_active_state(
 
     for record in records {
         let target = record.device_id;
-        if !scope.contains(&target) {
+        if !scope.usable_peer_device_ids.contains(&target) {
             continue;
         }
         // Never echo the state back to the device that activated it.
         if target == state.activated_by {
             continue;
         }
-        // Skip peers the presence tracker already knows are offline (mirrors the
+        // Skip peers the peer_reachability tracker already knows are offline (mirrors the
         // 0xC1 dispatch preflight): the roster can carry stale/ghost members,
         // and dialing each costs a multi-second connect timeout. `Unknown` is
         // deliberately NOT pre-filtered — the dispatch adapter marks peers
         // offline on its own dial failures, so an unprobed peer still gets one
         // real attempt rather than being silently dropped.
         if matches!(
-            presence.current_state(&target).await,
+            peer_reachability.current_state(&target).await,
             ReachabilityState::Offline
         ) {
-            debug!(
-                device = %target.as_str(),
-                "active state fan-out: skipping peer known offline (deferred)"
-            );
+            debug!("active state fan-out: skipping peer known offline (deferred)");
             continue;
         }
-        send_active_state_to(dispatch, send_gate, &target, state, categories).await;
+        send_active_state_to_with_scope(dispatch, send_gate, &target, state, categories, &scope)
+            .await;
     }
 }

@@ -128,6 +128,16 @@ impl SettingsFacade {
         }
     }
 
+    pub(crate) async fn prepare_network_settings(
+        &self,
+    ) -> Result<uc_core::settings::model::Settings, SettingsFacadeError> {
+        self.relay_configuration.recover().await?;
+        self.settings
+            .load()
+            .await
+            .map_err(|error| SettingsFacadeError::Load(error.to_string()))
+    }
+
     /// 注入中继诊断端口。Production daemon 会通过 bootstrap 调用,
     /// webserver / 单元测试可以不装配,此时 [`Self::probe_relay_url`]
     /// 会返回 [`SettingsFacadeError::RelayProbeUnavailable`]。

@@ -8,14 +8,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
 
-use uc_core::crypto::domain::{Aad, ActiveSpace, Ciphertext};
+use uc_core::crypto::domain::{Aad, Ciphertext};
 use uc_core::ids::SpaceId;
 use uc_core::ports::clipboard::BlobMigrationRepoPort;
 use uc_core::ports::security::{BlobCipherError, BlobCipherPort, KeyMigrationPort, MigrationRunId};
-use uc_core::ports::setup::{
-    LegacyMigrationRecoveryError, LegacyMigrationRecoveryPort, SetupStatusPort,
-};
-use uc_core::setup::SetupStatus;
+use uc_core::ports::setup::{LegacyMigrationRecoveryError, LegacyMigrationRecoveryPort};
 use uc_observability_contract::analytics::AnalyticsFacade;
 use uuid::Uuid;
 
@@ -31,7 +28,8 @@ enum LegacyMigrationPhaseV1 {
     },
     HandshakeDone {
         run_id: MigrationRunId,
-        target_space_id: SpaceId,
+        #[serde(rename = "target_space_id")]
+        _target_space_id: SpaceId,
         #[serde(default)]
         sponsor_space_person_id: Option<Uuid>,
         #[serde(default)]
@@ -39,12 +37,26 @@ enum LegacyMigrationPhaseV1 {
     },
     Swapped {
         run_id: MigrationRunId,
-        target_space_id: SpaceId,
+        #[serde(rename = "target_space_id")]
+        _target_space_id: SpaceId,
         #[serde(default)]
         sponsor_space_person_id: Option<Uuid>,
         #[serde(default)]
         preserved_unreadable_records: u64,
     },
+}
+
+/// 备份只复用历史格式解析，不执行历史恢复动作。
+pub(crate) fn decode_legacy_migration_run_id(
+    bytes: &[u8],
+) -> Result<Option<MigrationRunId>, serde_json::Error> {
+    serde_json::from_slice::<Option<LegacyMigrationPhaseV1>>(bytes).map(|phase| {
+        phase.map(|phase| match phase {
+            LegacyMigrationPhaseV1::Prepared { run_id, .. }
+            | LegacyMigrationPhaseV1::HandshakeDone { run_id, .. }
+            | LegacyMigrationPhaseV1::Swapped { run_id, .. } => run_id,
+        })
+    })
 }
 
 async fn read_legacy_phase(
@@ -78,7 +90,6 @@ pub(crate) async fn legacy_migration_run_id(
 
 pub struct FileLegacyMigrationRecovery {
     state_file_path: PathBuf,
-    setup_status: Arc<dyn SetupStatusPort>,
     key_migration: Arc<dyn KeyMigrationPort>,
     blob_migration_repo: Arc<dyn BlobMigrationRepoPort>,
     blob_cipher: Arc<dyn BlobCipherPort>,
@@ -88,7 +99,6 @@ pub struct FileLegacyMigrationRecovery {
 impl FileLegacyMigrationRecovery {
     pub fn with_defaults(
         base_dir: PathBuf,
-        setup_status: Arc<dyn SetupStatusPort>,
         key_migration: Arc<dyn KeyMigrationPort>,
         blob_migration_repo: Arc<dyn BlobMigrationRepoPort>,
         blob_cipher: Arc<dyn BlobCipherPort>,
@@ -96,7 +106,6 @@ impl FileLegacyMigrationRecovery {
     ) -> Self {
         Self {
             state_file_path: base_dir.join(DEFAULT_MIGRATION_STATE_FILE),
-            setup_status,
             key_migration,
             blob_migration_repo,
             blob_cipher,
@@ -148,7 +157,6 @@ impl FileLegacyMigrationRecovery {
         &self,
         expected_unreadable: u64,
     ) -> Result<(), LegacyMigrationRecoveryError> {
-        let active = ActiveSpace::new(SpaceId::from_str("space"));
         let mut unreadable = 0_u64;
         for (event_id, representation_id) in self
             .blob_migration_repo
@@ -170,11 +178,11 @@ impl FileLegacyMigrationRecovery {
             ));
             match self
                 .blob_cipher
-                .decrypt(&active, &Ciphertext::new(bytes), &aad)
+                .decrypt(&Ciphertext::new(bytes), &aad)
                 .await
             {
                 Ok(_) => {}
-                Err(BlobCipherError::InvalidCiphertext) => unreadable += 1,
+                Err(BlobCipherError::InvalidCiphertext { .. }) => unreadable += 1,
                 Err(_) => return Err(LegacyMigrationRecoveryError::RecoveryRequired),
             }
         }
@@ -188,7 +196,6 @@ impl FileLegacyMigrationRecovery {
         &self,
         run_id: &MigrationRunId,
     ) -> Result<(), LegacyMigrationRecoveryError> {
-        let active = ActiveSpace::new(SpaceId::from_str("space"));
         for record in self
             .blob_migration_repo
             .list_records()
@@ -210,7 +217,7 @@ impl FileLegacyMigrationRecovery {
                 .map_err(|_| LegacyMigrationRecoveryError::RecoveryRequired)?;
             let ciphertext = self
                 .blob_cipher
-                .encrypt(&active, &plaintext, &aad)
+                .encrypt(&plaintext, &aad)
                 .await
                 .map_err(|_| LegacyMigrationRecoveryError::RecoveryRequired)?;
             self.blob_migration_repo
@@ -240,7 +247,6 @@ impl FileLegacyMigrationRecovery {
     async fn finish_target(
         &self,
         run_id: &MigrationRunId,
-        target_space_id: &SpaceId,
         sponsor_space_person_id: Option<Uuid>,
         preserved_unreadable_records: u64,
         needs_rewrap: bool,
@@ -251,14 +257,6 @@ impl FileLegacyMigrationRecovery {
         }
         self.verify_main_records(preserved_unreadable_records)
             .await?;
-        self.setup_status
-            .set_status(&SetupStatus {
-                has_completed: true,
-                space_id: Some(target_space_id.clone()),
-                re_pairing_required: true,
-            })
-            .await
-            .map_err(internal)?;
         match sponsor_space_person_id {
             Some(person_id) => self.analytics.adopt_from_sponsor(person_id),
             None => self.analytics.release_to_solo(),
@@ -294,13 +292,12 @@ impl LegacyMigrationRecoveryPort for FileLegacyMigrationRecovery {
             }
             LegacyMigrationPhaseV1::HandshakeDone {
                 run_id,
-                target_space_id,
+                _target_space_id: _,
                 sponsor_space_person_id,
                 preserved_unreadable_records,
             } => {
                 self.finish_target(
                     &run_id,
-                    &target_space_id,
                     sponsor_space_person_id,
                     preserved_unreadable_records,
                     true,
@@ -309,13 +306,12 @@ impl LegacyMigrationRecoveryPort for FileLegacyMigrationRecovery {
             }
             LegacyMigrationPhaseV1::Swapped {
                 run_id,
-                target_space_id,
+                _target_space_id: _,
                 sponsor_space_person_id,
                 preserved_unreadable_records,
             } => {
                 self.finish_target(
                     &run_id,
-                    &target_space_id,
                     sponsor_space_person_id,
                     preserved_unreadable_records,
                     false,
@@ -335,7 +331,6 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
     use uc_core::crypto::domain::Plaintext;
-    use uc_core::ids::SpaceId;
     use uc_core::ids::{EventId, RepresentationId};
     use uc_core::ports::clipboard::{BlobMigrationRepoError, MigrationRecord};
     use uc_core::ports::security::{BlobCipherError, KeyMigrationError, MigrationRunId};
@@ -471,7 +466,6 @@ mod tests {
     impl BlobCipherPort for RecoveryBlobCipher {
         async fn encrypt(
             &self,
-            _space: &ActiveSpace,
             plaintext: &Plaintext,
             _aad: &Aad,
         ) -> Result<Ciphertext, BlobCipherError> {
@@ -480,31 +474,20 @@ mod tests {
 
         async fn decrypt(
             &self,
-            _space: &ActiveSpace,
             ciphertext: &Ciphertext,
             _aad: &Aad,
         ) -> Result<Plaintext, BlobCipherError> {
             if ciphertext.as_bytes() == b"unreadable" {
-                return Err(BlobCipherError::InvalidCiphertext);
+                return Err(BlobCipherError::invalid_ciphertext(anyhow::anyhow!(
+                    "test recovery ciphertext is unreadable"
+                )));
             }
             Ok(Plaintext::new(ciphertext.as_bytes().to_vec()))
         }
     }
 
     #[derive(Default)]
-    struct RecoverySetupStatus(Mutex<SetupStatus>);
-
-    #[async_trait]
-    impl SetupStatusPort for RecoverySetupStatus {
-        async fn get_status(&self) -> anyhow::Result<SetupStatus> {
-            Ok(self.0.lock().unwrap().clone())
-        }
-
-        async fn set_status(&self, status: &SetupStatus) -> anyhow::Result<()> {
-            *self.0.lock().unwrap() = status.clone();
-            Ok(())
-        }
-    }
+    struct RecoveryMarker;
 
     fn record(ciphertext: &[u8]) -> MigrationRecord {
         MigrationRecord {
@@ -522,7 +505,7 @@ mod tests {
         FileLegacyMigrationRecovery,
         Arc<RecoveryBlobRepo>,
         Arc<RecoveryKeyMigration>,
-        Arc<RecoverySetupStatus>,
+        Arc<RecoveryMarker>,
     ) {
         let blobs = Arc::new(RecoveryBlobRepo::default());
         *blobs.backup.lock().unwrap() = backup;
@@ -536,16 +519,15 @@ mod tests {
             ));
         }
         let keys = Arc::new(RecoveryKeyMigration::default());
-        let setup = Arc::new(RecoverySetupStatus::default());
+        let marker = Arc::new(RecoveryMarker::default());
         let recovery = FileLegacyMigrationRecovery::with_defaults(
             directory.path().to_path_buf(),
-            setup.clone(),
             keys.clone(),
             blobs.clone(),
             Arc::new(RecoveryBlobCipher),
             Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
         );
-        (recovery, blobs, keys, setup)
+        (recovery, blobs, keys, marker)
     }
 
     async fn write_legacy_state(directory: &tempfile::TempDir, json: &str) {
@@ -594,15 +576,12 @@ mod tests {
             r#"{"kind":"handshake_done","run_id":"run-legacy","target_space_id":"target-space","preserved_unreadable_records":0}"#,
         )
         .await;
-        let (recovery, blobs, _, setup) =
+        let (recovery, blobs, _, marker) =
             recovery_fixture(&directory, vec![record(b"target")], Some(b"old"));
 
         recovery.recover().await.unwrap();
 
-        assert_eq!(
-            setup.0.lock().unwrap().space_id,
-            Some(SpaceId::from_str("target-space"))
-        );
+        let _ = marker;
         assert_eq!(
             blobs
                 .main
@@ -623,15 +602,12 @@ mod tests {
             r#"{"kind":"swapped","run_id":"run-legacy","target_space_id":"target-space","preserved_unreadable_records":0}"#,
         )
         .await;
-        let (recovery, blobs, _, setup) =
+        let (recovery, blobs, _, marker) =
             recovery_fixture(&directory, vec![record(b"target")], Some(b"target"));
 
         recovery.recover().await.unwrap();
 
-        assert_eq!(
-            setup.0.lock().unwrap().space_id,
-            Some(SpaceId::from_str("target-space"))
-        );
+        let _ = marker;
         assert!(blobs.backup.lock().unwrap().is_empty());
     }
 
@@ -639,7 +615,7 @@ mod tests {
     async fn corrupt_or_inconsistent_state_preserves_all_artifacts() {
         let directory = tempfile::tempdir().unwrap();
         write_legacy_state(&directory, "not-json").await;
-        let (recovery, blobs, keys, setup) =
+        let (recovery, blobs, keys, marker) =
             recovery_fixture(&directory, vec![record(b"backup")], Some(b"source"));
 
         assert!(matches!(
@@ -648,7 +624,7 @@ mod tests {
         ));
         assert_eq!(blobs.backup.lock().unwrap().len(), 1);
         assert!(keys.discarded.lock().unwrap().is_empty());
-        assert_eq!(*setup.0.lock().unwrap(), SetupStatus::default());
+        let _ = marker;
         assert!(directory.path().join(DEFAULT_MIGRATION_STATE_FILE).exists());
 
         write_legacy_state(

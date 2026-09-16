@@ -10,7 +10,8 @@
 mod reconcile;
 
 pub use reconcile::{
-    ActiveClipboardReconcileDeps, ActiveClipboardReconcileFacade, ActiveClipboardReconcileOutcome,
+    ActiveClipboardReconcileDeps, ActiveClipboardReconcileError, ActiveClipboardReconcileFacade,
+    ActiveClipboardReconcileOutcome,
 };
 
 use std::{
@@ -34,7 +35,6 @@ use tracing::{debug, instrument, warn};
 
 use uc_core::clipboard::{ActiveClipboardState, ClipboardContentCategorySet};
 use uc_core::ids::{DeviceId, EntryId};
-use uc_core::membership::{ContentExchangeGatePort, CurrentWorkspacePeerScopePort};
 use uc_core::ports::clipboard::{
     ActiveClipboardDispatchPort, ActiveClipboardPullClientPort, ActiveClipboardPullServePort,
     ActiveClipboardReceiverPort, AdvanceActiveClipboardPort, CheckEntryAvailabilityPort,
@@ -43,11 +43,14 @@ use uc_core::ports::clipboard::{
     LoadActiveClipboardPort, TouchClipboardEntryPort, UpdateRepresentationProcessingResultPort,
 };
 use uc_core::ports::security::TransferCipherPort;
-use uc_core::ports::space::IsSpaceUnlockedPort;
 use uc_core::ports::{
-    ClockPort, DeviceIdentityPort, PeerAddressRepositoryPort, PresencePort, SettingsPort,
+    ClockPort, DeviceIdentityPort, PeerAddressRepositoryPort, PeerReachabilityPort, SettingsPort,
 };
 use uc_core::{blob::ports::BlobReaderPort, MemberRepositoryPort};
+
+use crate::deps::CurrentSpaceMemberScopePort;
+
+use crate::space::IsSpaceUnlockedPort;
 
 use crate::clipboard::inbound::{
     InboundClipboardApplyInput, InboundClipboardApplyOutcome, InboundClipboardApplyPort,
@@ -114,12 +117,11 @@ pub struct ActiveClipboardDeps {
     pub advance_register: Arc<dyn AdvanceActiveClipboardPort>,
     pub mobile_consumability: MobileConsumabilityProbe,
     pub member_repo: Arc<dyn MemberRepositoryPort>,
-    pub content_gate: Arc<dyn ContentExchangeGatePort>,
     pub peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-    pub peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
+    pub peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
     /// Presence stream for the peer-online resync worker: an "online"
     /// transition triggers a resend of the current register to that peer.
-    pub presence: Arc<dyn PresencePort>,
+    pub peer_reachability: Arc<dyn PeerReachabilityPort>,
     pub entry_lookup: Arc<dyn FindEntryIdBySnapshotHashPort>,
     /// Live availability query. When set, a hash match against a partial entry
     /// is pulled and completed before converging instead of writing its
@@ -211,11 +213,10 @@ pub struct ActiveClipboardFacade {
     inbound_uc: Arc<ApplyInboundActiveClipboardStateUseCase>,
     dispatch: Arc<dyn ActiveClipboardDispatchPort>,
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-    peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
+    peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
     member_repo: Arc<dyn MemberRepositoryPort>,
     settings: Arc<dyn SettingsPort>,
-    presence: Arc<dyn PresencePort>,
-    content_gate: Arc<dyn ContentExchangeGatePort>,
+    peer_reachability: Arc<dyn PeerReachabilityPort>,
     load_register: Arc<dyn LoadActiveClipboardPort>,
     reconstructor: SnapshotReconstructor,
     local_advancer: LocalActiveRegisterAdvancer,
@@ -236,10 +237,7 @@ impl ActiveClipboardFacade {
             Arc::clone(&deps.clock),
             mobile_consumability.clone(),
         );
-        let send_gate = MemberSendGate::new_with_content_gate(
-            Arc::clone(&deps.member_repo),
-            Arc::clone(&deps.content_gate),
-        );
+        let send_gate = MemberSendGate::new(Arc::clone(&deps.member_repo));
 
         let (converged_tx, _) = broadcast::channel::<ActiveClipboardConvergedEvent>(16);
 
@@ -249,14 +247,13 @@ impl ActiveClipboardFacade {
             Arc::clone(&deps.load_register),
             deps.advance_register,
             Arc::clone(&deps.member_repo),
-            Arc::clone(&deps.content_gate),
             deps.entry_lookup,
             reconstructor.clone(),
             deps.coordinator,
             Arc::clone(&deps.dispatch),
             Arc::clone(&deps.peer_addr_repo),
             Arc::clone(&deps.peer_scope),
-            Arc::clone(&deps.presence),
+            Arc::clone(&deps.peer_reachability),
             deps.clock,
             mobile_consumability,
             converged_tx,
@@ -273,7 +270,7 @@ impl ActiveClipboardFacade {
                 cipher: Arc::clone(&deps.transfer_cipher),
                 receive_gate: MemberReceiveGate::new(
                     Arc::clone(&deps.member_repo),
-                    Arc::clone(&deps.content_gate),
+                    Arc::clone(&deps.peer_scope),
                 ),
                 apply: pull_apply,
             });
@@ -291,8 +288,7 @@ impl ActiveClipboardFacade {
             peer_scope: deps.peer_scope,
             member_repo: deps.member_repo,
             settings: deps.settings,
-            presence: deps.presence,
-            content_gate: deps.content_gate,
+            peer_reachability: deps.peer_reachability,
             load_register: deps.load_register,
             reconstructor,
             local_advancer,
@@ -338,7 +334,7 @@ impl ActiveClipboardFacade {
             &self.dispatch,
             &self.peer_addr_repo,
             &self.peer_scope,
-            &self.presence,
+            &self.peer_reachability,
             &self.send_gate,
             &state,
             &categories,
@@ -384,13 +380,12 @@ impl ActiveClipboardFacade {
 
     fn peer_online_resync_worker(&self) -> PeerOnlineResyncWorker {
         PeerOnlineResyncWorker::new(
-            Arc::clone(&self.presence),
+            Arc::clone(&self.peer_reachability),
             Arc::clone(&self.load_register),
             self.reconstructor.clone(),
             Arc::clone(&self.dispatch),
             Arc::clone(&self.peer_scope),
             Arc::clone(&self.member_repo),
-            Arc::clone(&self.content_gate),
         )
     }
 
@@ -404,9 +399,8 @@ impl ActiveClipboardFacade {
             Arc::clone(&self.dispatch),
             Arc::clone(&self.peer_addr_repo),
             Arc::clone(&self.peer_scope),
-            Arc::clone(&self.presence),
+            Arc::clone(&self.peer_reachability),
             Arc::clone(&self.member_repo),
-            Arc::clone(&self.content_gate),
         )
     }
 
@@ -737,6 +731,7 @@ impl InboundPulledContentStore for PulledContentStore {
         from_device: &DeviceId,
         snapshot_hash: &str,
         transfer_envelope: Vec<u8>,
+        receive_permit: &crate::clipboard::sync::receive_gate::MemberReceivePermit,
     ) -> Result<InboundPulledContentStoreOutcome, InboundPulledContentStoreError> {
         // Decrypt first because categories are inside the encrypted V3
         // envelope. Decode and enforce the receive allowlist before invoking
@@ -751,8 +746,7 @@ impl InboundPulledContentStore for PulledContentStore {
         let categories = ClipboardContentCategorySet::from_snapshot(&snapshot);
         if !self
             .receive_gate
-            .is_receive_category_allowed(from_device, &categories)
-            .await
+            .is_receive_category_allowed(receive_permit, &categories)
         {
             return Ok(InboundPulledContentStoreOutcome::RejectedByReceivePolicy);
         }
@@ -766,7 +760,7 @@ impl InboundPulledContentStore for PulledContentStore {
                 from_device: from_device.as_str().to_string(),
                 snapshot_hash: snapshot_hash.to_string(),
                 plaintext: plaintext.into(),
-                flow_id: None,
+                provisional: None,
                 // Store-only path: this apply's write port is a no-op (the
                 // convergence tail below owns the authoritative OS write), so
                 // the intent never reaches the clipboard. `RemotePush` states
@@ -864,9 +858,17 @@ mod pull_store_tests {
     struct AllowAllContent;
 
     #[async_trait]
-    impl ContentExchangeGatePort for AllowAllContent {
-        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
-            false
+    impl crate::deps::CurrentSpaceMemberScopePort for AllowAllContent {
+        async fn snapshot(
+            &self,
+        ) -> Result<crate::deps::CurrentSpaceMemberScope, crate::deps::CurrentSpaceMemberScopeError>
+        {
+            Ok(crate::deps::CurrentSpaceMemberScope {
+                revision: 1,
+                local_member_active: true,
+                usable_peer_device_ids: vec![DeviceId::new("peer-text-disabled")],
+                paused_peer_devices: Vec::new(),
+            })
         }
     }
 
@@ -897,20 +899,25 @@ mod pull_store_tests {
         };
         let (plaintext, snapshot_hash) =
             encode_snapshot_to_v3_bytes(&snapshot).expect("encode text envelope");
+        let receive_gate =
+            MemberReceiveGate::new(Arc::new(TextDeniedMemberRepo), Arc::new(AllowAllContent));
+        let peer = DeviceId::new("peer-text-disabled");
+        let receive_permit = receive_gate
+            .authorize(&peer)
+            .await
+            .expect("device-level receive is allowed");
         let store = PulledContentStore {
             cipher: Arc::new(PlaintextCipher(plaintext.to_vec())),
-            receive_gate: MemberReceiveGate::new(
-                Arc::new(TextDeniedMemberRepo),
-                Arc::new(AllowAllContent),
-            ),
+            receive_gate,
             apply: Arc::new(ApplyNeverCalled),
         };
 
         let outcome = store
             .store(
-                &DeviceId::new("peer-text-disabled"),
+                &peer,
                 &snapshot_hash,
                 b"encrypted-envelope".to_vec(),
+                &receive_permit,
             )
             .await
             .expect("policy rejection is not a storage error");

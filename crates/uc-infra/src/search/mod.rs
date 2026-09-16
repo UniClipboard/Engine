@@ -15,6 +15,12 @@ pub mod search_key_derivation;
 pub mod sqlite_index;
 pub mod text_extractor;
 pub mod tokenizer;
+mod v3_protection;
+
+#[cfg(test)]
+mod sqlite_v3_tests;
+#[cfg(test)]
+mod v3_protection_tests;
 
 pub use constants::*;
 pub use pipeline::*;
@@ -24,3 +30,4 @@ pub use search_key_derivation::*;
 pub use sqlite_index::*;
 pub use text_extractor::*;
 pub use tokenizer::*;
+pub use v3_protection::*;

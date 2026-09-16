@@ -51,6 +51,16 @@ fn ios_probe_supports_device_and_simulator_archives() {
 }
 
 #[test]
+fn ios_project_paths_do_not_depend_on_the_generated_target_directory() {
+    let root = workspace_root();
+    let project = read(root.join("tests/hosts/ios/project.rb"));
+
+    assert!(project.contains("workspace_root = File.expand_path(\"../../..\", __dir__)"));
+    assert!(project.contains("new_group(\"EngineProbe\", source_directory, :absolute)"));
+    assert!(!project.contains("$(SRCROOT)/../../"));
+}
+
+#[test]
 fn ios_simulator_commands_publish_pollable_redacted_evidence() {
     let root = workspace_root();
     let model = read(root.join("tests/hosts/ios/EngineProbe/ProbeModel.swift"));
@@ -69,6 +79,7 @@ fn ios_simulator_commands_publish_pollable_redacted_evidence() {
     assert!(command.contains("probe-result.json"));
     assert!(command.contains("uuidgen"));
     assert!(command.contains("request_id"));
+    assert!(model.contains("\"traces\", \"logs\""));
     assert!(!model.contains("invitation_code\", \"device_ids"));
 }
 
@@ -138,15 +149,15 @@ fn ios_and_android_probe_member_removal_through_the_shared_contract() {
 
     for command in [
         "RemoveMember",
-        "QueryDeviceTrust",
-        "DecideDeviceTrustChange",
+        "QueryDeviceGroupChoices",
+        "ChooseDeviceGroup",
     ] {
         assert!(source.contains(command), "missing command: {command}");
     }
-    assert!(source.contains("OperationResult::DeviceTrust"));
-    assert!(source.contains("OperationResult::DeviceTrustDecision"));
-    assert!(ios_model.contains("query_device_trust"));
-    assert!(ios_view.contains("Device trust"));
+    assert!(source.contains("OperationResult::DeviceGroupChoices"));
+    assert!(source.contains("OperationResult::DeviceGroupChosen"));
+    assert!(ios_model.contains("query_device_group_choices"));
+    assert!(ios_view.contains("Device group choices"));
 }
 
 #[test]
@@ -169,4 +180,16 @@ fn android_pairing_keeps_the_probe_alive_with_a_data_sync_service() {
     assert!(!receiver.contains("startForegroundService"));
     assert!(service.contains("startForeground"));
     assert!(!service.contains("ProbeBridge"));
+}
+
+#[test]
+fn mobile_probe_uses_the_engine_process_observability_contract() {
+    let root = workspace_root();
+    let source = read(root.join("tests/hosts/uc-mobile-probe-core/src/lib.rs"));
+
+    assert!(source.contains("ProcessObservabilityRuntime::install"));
+    assert!(source.contains("LocalLogConfig::new(directories.logs())"));
+    assert!(source.contains("ProbeCommand::ShutdownProcessObservability"));
+    assert!(!source.contains("tracing_subscriber::fmt()"));
+    assert!(!source.contains("try_init()"));
 }

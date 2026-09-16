@@ -79,7 +79,9 @@ fn decode_space_material(
         || mode_name(state.mode()) != row.security_mode
         || material.updated_at_ms() != row.updated_at_ms
     {
-        return Err(backend("space key material row integrity mismatch"));
+        return Err(KeyEpochError::StateIssue(
+            uc_core::membership::KeyEpochStateIssue::CorruptMaterial,
+        ));
     }
     Ok(material)
 }

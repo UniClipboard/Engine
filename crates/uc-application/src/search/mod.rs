@@ -2,8 +2,10 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
+pub(crate) mod assembly;
 pub(crate) mod coordinator;
 pub(crate) mod live_index;
+pub(crate) mod mutation_gate;
 pub(crate) mod projection;
 pub(crate) mod query;
 pub(crate) mod runtime;
@@ -16,12 +18,24 @@ use uc_core::search::{ContentType, QueryOperator, SearchError, SearchQuery, Time
 
 use crate::search::query::SearchClipboardEntriesUseCase;
 
+pub use assembly::SearchAssembly;
 use coordinator::{ManualRebuildResult, SearchCoordinator};
-pub use coordinator::{
-    SearchCoordinatorDeps as SearchRuntimeDeps, SearchRebuildProgressView, SearchStatusSnapshot,
-};
+pub use coordinator::{SearchRebuildProgressView, SearchStatusSnapshot};
 pub use projection::SearchProjectionBuilder;
-pub use runtime::{SearchRuntime, SearchRuntimeError};
+
+#[derive(Debug, Error)]
+pub enum SearchShutdownError {
+    #[error("search coordinator failed")]
+    Coordinator {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("search coordinator task failed")]
+    Task {
+        #[source]
+        source: tokio::task::JoinError,
+    },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchQueryInput {
@@ -460,6 +474,8 @@ pub fn map_search_error(error: SearchError) -> SearchFacadeError {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
+
     use super::*;
 
     fn browse_query() -> SearchQuery {
@@ -510,5 +526,23 @@ mod tests {
         let mut timed = browse_query();
         timed.time_range = Some(TimeRangeFilter::Today);
         assert!(!is_pure_browse(&timed));
+    }
+
+    #[tokio::test]
+    async fn shutdown_errors_preserve_typed_sources_without_exposing_details() {
+        let coordinator = SearchShutdownError::Coordinator {
+            source: anyhow::Error::new(std::io::Error::other("private coordinator detail")),
+        };
+        assert!(coordinator.source().is_some());
+        assert!(!coordinator
+            .to_string()
+            .contains("private coordinator detail"));
+
+        let source = tokio::spawn(async { panic!("private task detail") })
+            .await
+            .expect_err("panic must produce a join error");
+        let task = SearchShutdownError::Task { source };
+        assert!(task.source().is_some());
+        assert!(!task.to_string().contains("private task detail"));
     }
 }

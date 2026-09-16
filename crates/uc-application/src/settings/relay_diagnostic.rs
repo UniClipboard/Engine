@@ -3,7 +3,7 @@
 //! 这是 application 层为"网络设置诊断"动作定义的内部 trait。它**不属于**
 //! `uc-core` —— "测试某个 iroh relay 是否可达"是一个技术诊断动作,不是设备
 //! 之间的领域关系,放进 core 会让 core 知道"relay"这个传输层概念(参见
-//! `uc-core/AGENTS.md` §6.2)。
+//! `docs/design-docs/layers/core.md` §6.2)。
 //!
 //! 依赖方向:
 //!

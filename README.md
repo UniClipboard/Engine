@@ -245,7 +245,7 @@ engine.shutdown(Duration::from_secs(2)).await?;
 event_task.await?;
 ```
 
-宿主适配器分别实现 `HostSecureStorage`、`HostClipboard` 和 `HostFileAccess`。所有业务动作都通过 `Engine::execute(Operation)` 发起，结果只使用 crate 根导出的稳定类型。完整操作和事件说明见 [uc-engine 跨平台核心接口](docs/specs/uc-engine-interface.md)。
+宿主适配器分别实现 `HostSecureStorage`、`HostClipboard` 和 `HostFileAccess`。所有业务动作都通过 `Engine::execute(Operation)` 发起，结果只使用 crate 根导出的稳定类型。完整操作和事件说明见 [uc-engine 跨平台核心接口](docs/design-docs/uc-engine-interface.md)。
 
 ## iOS 集成
 
@@ -435,7 +435,7 @@ if (!recovery.unlocked) {
 
 ### 配对新设备
 
-已在空间中的设备签发一次邀请，新设备使用邀请码加入。邀请只能使用一次，也可以在被使用前取消。配对结果由操作返回；状态变化后应用重新查询 Engine 的完整设备关系，不应自行维护另一套成员状态。[规格 023](docs/specs/023-durable-membership-proof-and-admission-activation.md)定义了待实施的更严格边界：双方保存并确认同一成员历史和安全状态后才成功，等待流程由 Engine 自动恢复。
+已在空间中的设备签发一次邀请，新设备使用邀请码加入。邀请只能使用一次，也可以在被使用前取消。配对结果由操作返回；状态变化后应用重新查询 Engine 的完整设备关系，不应自行维护另一套成员状态。[规格 023](docs/exec-plans/completed/023-durable-membership-proof-and-admission-activation.md)记录了已落地的严格边界：双方保存并确认同一成员历史和安全状态后才成功，等待流程由 Engine 自动恢复；当前准入 wire/runtime 以规格 028 为准。
 
 ### 发送内容
 
@@ -453,6 +453,8 @@ if (!recovery.unlocked) {
 宿主先让用户选择目标位置并登记可写句柄，再把条目编号和句柄传给 Engine。Engine 只看到句柄，不读取或持久化用户选择的目标路径；写完后调用宿主的完成写入方法。
 
 ## 生成移动产物
+
+两端脚本默认生成正式产物。设置 `UC_ENGINE_UNIFFI_BUILD_PROFILE=dev` 可生成本地调试产物；只接受 `dev` 或 `release`。还可以把另一个 Engine 源码目录作为脚本的第一个参数，使用当前打包工具构建该目录中的固定版本。正式发布只接受标记为 `release` 的 iOS 与 Android 产物。
 
 ### iOS
 
@@ -554,12 +556,12 @@ node scripts/release/verify-release-bundle.mjs <release-assets-directory>
 
 - [UniClipboard 架构圣经](docs/architecture/architecture-bible.md)
 - [文档索引](docs/README.md)
-- [项目愿景](VISION.md)
-- [Port 定义](docs/specs/ports.md)
-- [uc-engine 跨平台核心接口](docs/specs/uc-engine-interface.md)
+- [项目愿景](docs/PRODUCT_SENSE.md)
+- [Port 定义](docs/design-docs/ports.md)
+- [uc-engine 跨平台核心接口](docs/design-docs/uc-engine-interface.md)
 - [密文持久化规则](docs/security/encrypted-persistence.md)
 - [发布完整性](docs/security/release-integrity.md)
-- [迁移历史映射](docs/migration/source-history-map.md)
+- [迁移历史映射](docs/references/source-history-map.md)
 - [贡献和维护规则](AGENTS.md)
 
 ## 许可证

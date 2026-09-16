@@ -4,7 +4,7 @@
 //!
 //! When a peer `Q` becomes reachable it may hold a stale (or empty) view of
 //! the active clipboard — it was offline while the register last advanced.
-//! This worker reacts to "peer online" presence transitions and sends `Q` our
+//! This worker reacts to "peer online" peer_reachability transitions and sends `Q` our
 //! current register so the two ends converge under LWW. The resync is
 //! **symmetric**: `Q` runs the same worker and sends us *its* register; the
 //! LWW order picks the winner on both sides. There is no ack or handshake —
@@ -27,7 +27,7 @@
 //!
 //! ## Convergence scope (D6)
 //!
-//! Presence transitions only fire for **directly-connected** peers (presence
+//! Presence transitions only fire for **directly-connected** peers (peer_reachability
 //! is driven by the local endpoint's dial/connection state). A peer reachable
 //! only through a relay chain is not observed here, so its resync is
 //! best-effort and not guaranteed — consistent with the no-retry posture of
@@ -45,15 +45,16 @@ use tracing::{debug, info, instrument, warn};
 
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::DeviceId;
-use uc_core::membership::{ContentExchangeGatePort, CurrentWorkspacePeerScopePort};
 use uc_core::ports::clipboard::{ActiveClipboardDispatchPort, LoadActiveClipboardPort};
-use uc_core::ports::presence::{PresenceEvent, ReachabilityState};
-use uc_core::ports::PresencePort;
+use uc_core::ports::peer_reachability::{PeerReachabilityChanged, ReachabilityState};
+use uc_core::ports::PeerReachabilityPort;
 use uc_core::MemberRepositoryPort;
+
+use crate::deps::CurrentSpaceMemberScopePort;
 
 use super::super::send_gate::MemberSendGate;
 use super::super::snapshot_from_entry::SnapshotReconstructor;
-use super::fanout::send_active_state_to;
+use super::fanout::send_active_state_to_with_scope;
 
 /// Debounce window for coalescing a burst of peer-online transitions into one
 /// resync per device (D7). Distinct from the restore broadcast's 300ms window:
@@ -63,31 +64,30 @@ const PEER_ONLINE_RESYNC_DEBOUNCE: Duration = Duration::from_millis(1_500);
 
 /// Dependencies for the peer-online resync worker.
 pub(crate) struct PeerOnlineResyncWorker {
-    presence: Arc<dyn PresencePort>,
+    peer_reachability: Arc<dyn PeerReachabilityPort>,
     load_register: Arc<dyn LoadActiveClipboardPort>,
     reconstructor: SnapshotReconstructor,
     dispatch: Arc<dyn ActiveClipboardDispatchPort>,
-    peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
+    peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
     send_gate: MemberSendGate,
 }
 
 impl PeerOnlineResyncWorker {
     pub(crate) fn new(
-        presence: Arc<dyn PresencePort>,
+        peer_reachability: Arc<dyn PeerReachabilityPort>,
         load_register: Arc<dyn LoadActiveClipboardPort>,
         reconstructor: SnapshotReconstructor,
         dispatch: Arc<dyn ActiveClipboardDispatchPort>,
-        peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
+        peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
-        content_gate: Arc<dyn ContentExchangeGatePort>,
     ) -> Self {
         Self {
-            presence,
+            peer_reachability,
             load_register,
             reconstructor,
             dispatch,
-            peer_scope,
-            send_gate: MemberSendGate::new_with_content_gate(member_repo, content_gate),
+            peer_scope: Arc::clone(&peer_scope),
+            send_gate: MemberSendGate::new(member_repo),
         }
     }
 
@@ -98,7 +98,7 @@ impl PeerOnlineResyncWorker {
 
     #[instrument(name = "active_state.peer_online_resync_loop", skip_all)]
     pub(crate) async fn run(self) {
-        let mut rx = self.presence.subscribe();
+        let mut rx = self.peer_reachability.subscribe();
         loop {
             // Block until the first online transition (or all senders drop →
             // exit). Non-online transitions (offline / unknown) are not a
@@ -139,10 +139,12 @@ impl PeerOnlineResyncWorker {
         }
     }
 
-    /// Pull the next presence event that is an *online* transition, skipping
+    /// Pull the next peer_reachability event that is an *online* transition, skipping
     /// offline / unknown transitions and lag gaps. Returns `None` when the
     /// subscription is closed.
-    async fn recv_next_online(rx: &mut broadcast::Receiver<PresenceEvent>) -> Option<DeviceId> {
+    async fn recv_next_online(
+        rx: &mut broadcast::Receiver<PeerReachabilityChanged>,
+    ) -> Option<DeviceId> {
         loop {
             match rx.recv().await {
                 Ok(event) if event.state == ReachabilityState::Online => {
@@ -151,7 +153,7 @@ impl PeerOnlineResyncWorker {
                 // Offline / Unknown transitions are not a resync trigger.
                 Ok(_) => continue,
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
-                    // A missed online transition self-heals: presence
+                    // A missed online transition self-heals: peer_reachability
                     // re-emits, or the peer's own resync reaches us.
                     warn!(missed, "peer-online resync: presence receiver lagged");
                     continue;
@@ -201,27 +203,23 @@ impl PeerOnlineResyncWorker {
             }
         };
 
+        let scope = match self.peer_scope.snapshot().await {
+            Ok(scope) => scope,
+            Err(_) => return,
+        };
         for target in targets {
-            let is_current = self
-                .peer_scope
-                .snapshot()
-                .await
-                .map(|scope| scope.peer_device_ids.contains(&target))
-                .unwrap_or(false);
-            if !is_current {
-                continue;
-            }
             // Never resend the state to the device that activated it: it is
             // already the source of truth for this activation.
             if target == state.activated_by {
                 continue;
             }
-            send_active_state_to(
+            send_active_state_to_with_scope(
                 &self.dispatch,
                 &self.send_gate,
                 &target,
                 &state,
                 &categories,
+                &scope,
             )
             .await;
         }
@@ -237,6 +235,9 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
 
+    use crate::deps::{
+        CurrentSpaceMemberScope, CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort,
+    };
     use uc_core::blob::ports::BlobReaderPort;
     use uc_core::clipboard::{
         ActiveClipboardState, ClipboardEntry, ClipboardRepositoryError, ClipboardSelection,
@@ -244,7 +245,6 @@ mod tests {
         PersistedClipboardRepresentation, SelectionPolicyVersion,
     };
     use uc_core::ids::{DeviceId, EntryId, EventId, FormatId, RepresentationId};
-    use uc_core::membership::ContentExchangeGatePort;
     use uc_core::membership::{MembershipError, SpaceMember};
     use uc_core::ports::clipboard::{
         ActiveClipboardDispatchError, ActiveClipboardRegisterError, ClipboardPayloadResolverPort,
@@ -258,40 +258,41 @@ mod tests {
 
     /// Presence port whose `subscribe()` hands out receivers attached to a
     /// caller-controlled broadcast sender.
-    struct FakePresence {
-        tx: broadcast::Sender<PresenceEvent>,
+    struct FakePeerReachability {
+        tx: broadcast::Sender<PeerReachabilityChanged>,
     }
-    impl FakePresence {
-        fn new() -> (Arc<Self>, broadcast::Sender<PresenceEvent>) {
+    impl FakePeerReachability {
+        fn new() -> (Arc<Self>, broadcast::Sender<PeerReachabilityChanged>) {
             let (tx, _) = broadcast::channel(16);
             (Arc::new(Self { tx: tx.clone() }), tx)
         }
     }
     #[async_trait]
-    impl PresencePort for FakePresence {
+    impl PeerReachabilityPort for FakePeerReachability {
         async fn ensure_reachable(
             &self,
             _device: &DeviceId,
-        ) -> Result<ReachabilityState, uc_core::ports::presence::PresenceError> {
+        ) -> Result<ReachabilityState, uc_core::ports::peer_reachability::PeerReachabilityError>
+        {
             Ok(ReachabilityState::Online)
         }
         async fn current_state(&self, _device: &DeviceId) -> ReachabilityState {
             ReachabilityState::Unknown
         }
-        fn subscribe(&self) -> broadcast::Receiver<PresenceEvent> {
+        fn subscribe(&self) -> broadcast::Receiver<PeerReachabilityChanged> {
             self.tx.subscribe()
         }
     }
 
-    fn online(device: &str) -> PresenceEvent {
-        PresenceEvent {
+    fn online(device: &str) -> PeerReachabilityChanged {
+        PeerReachabilityChanged {
             device_id: DeviceId::new(device),
             state: ReachabilityState::Online,
             at: Utc::now(),
         }
     }
-    fn offline(device: &str) -> PresenceEvent {
-        PresenceEvent {
+    fn offline(device: &str) -> PeerReachabilityChanged {
+        PeerReachabilityChanged {
             device_id: DeviceId::new(device),
             state: ReachabilityState::Offline,
             at: Utc::now(),
@@ -352,21 +353,17 @@ mod tests {
         }
     }
 
-    struct BlockedUpgradePeer;
+    struct BlockedPeerScope;
 
     #[async_trait]
-    impl ContentExchangeGatePort for BlockedUpgradePeer {
-        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
-            true
-        }
-    }
-
-    struct AllowAllContent;
-
-    #[async_trait]
-    impl ContentExchangeGatePort for AllowAllContent {
-        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
-            false
+    impl CurrentSpaceMemberScopePort for BlockedPeerScope {
+        async fn snapshot(&self) -> Result<CurrentSpaceMemberScope, CurrentSpaceMemberScopeError> {
+            Ok(CurrentSpaceMemberScope {
+                revision: 1,
+                local_member_active: true,
+                usable_peer_device_ids: Vec::new(),
+                paused_peer_devices: Vec::new(),
+            })
         }
     }
 
@@ -498,21 +495,20 @@ mod tests {
         register: Option<ActiveClipboardState>,
     ) -> (
         PeerOnlineResyncWorker,
-        broadcast::Sender<PresenceEvent>,
+        broadcast::Sender<PeerReachabilityChanged>,
         Arc<DispatchSpy>,
     ) {
-        let (presence, presence_tx) = FakePresence::new();
+        let (peer_reachability, peer_reachability_tx) = FakePeerReachability::new();
         let dispatch = Arc::new(DispatchSpy::default());
         let worker = PeerOnlineResyncWorker::new(
-            presence,
+            peer_reachability,
             Arc::new(FixedRegister(register)),
             reconstructor(),
             Arc::clone(&dispatch) as Arc<dyn ActiveClipboardDispatchPort>,
             Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
             Arc::new(AllowAllMembers),
-            Arc::new(AllowAllContent),
         );
-        (worker, presence_tx, dispatch)
+        (worker, peer_reachability_tx, dispatch)
     }
 
     // A debounce window plus a slice of slack — keep tests above the 1.5s
@@ -555,21 +551,20 @@ mod tests {
 
     #[tokio::test]
     async fn upgrade_required_peer_does_not_receive_resync() {
-        let (presence, presence_tx) = FakePresence::new();
+        let (peer_reachability, peer_reachability_tx) = FakePeerReachability::new();
         let dispatch = Arc::new(DispatchSpy::default());
         let worker = PeerOnlineResyncWorker::new(
-            presence,
+            peer_reachability,
             Arc::new(FixedRegister(Some(state("blake3v1:aa", "self")))),
             reconstructor(),
             Arc::clone(&dispatch) as Arc<dyn ActiveClipboardDispatchPort>,
-            Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
+            Arc::new(BlockedPeerScope),
             Arc::new(AllowAllMembers),
-            Arc::new(BlockedUpgradePeer),
         );
         let handle = worker.spawn();
         tokio::task::yield_now().await;
 
-        presence_tx.send(online("peer-1")).unwrap();
+        peer_reachability_tx.send(online("peer-1")).unwrap();
         tokio::time::sleep(past_window()).await;
 
         assert!(

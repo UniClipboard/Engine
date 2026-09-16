@@ -6,7 +6,7 @@
 //! migration. The old path keeps a deprecated re-export shim until Slice 5 /
 //! `uc-app` retirement.
 //!
-//! Per `uc-application/AGENTS.md` §11.4 this is technically a
+//! Per `docs/design-docs/layers/application.md` this is technically a
 //! `Coordinator` (not a `UseCase` / `Facade`), but it is one of the
 //! "明确 Coordinator" exceptions named in §18 because it genuinely
 //! coordinates a single write boundary across multiple downstream ports

@@ -12,7 +12,7 @@
 use anyhow::Result;
 
 use crate::search::document::{SearchDocument, SearchPosting};
-use crate::search::key::SearchKey;
+use crate::search::key::SearchKeyContext;
 use crate::search::pipeline_input::SearchPipelineInput;
 
 pub trait SearchPipelinePort: Send + Sync {
@@ -23,13 +23,13 @@ pub trait SearchPipelinePort: Send + Sync {
     fn build_postings(
         &self,
         input: &SearchPipelineInput,
-        search_key: &SearchKey,
+        search_key: &SearchKeyContext,
     ) -> Result<Vec<SearchPosting>>;
 
     /// Convenience: build both document and postings in one call.
     fn build(
         &self,
         input: &SearchPipelineInput,
-        search_key: &SearchKey,
+        search_key: &SearchKeyContext,
     ) -> Result<(SearchDocument, Vec<SearchPosting>)>;
 }

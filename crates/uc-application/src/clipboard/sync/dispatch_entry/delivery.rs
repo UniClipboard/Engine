@@ -9,10 +9,9 @@
 //! emit-before-write surfaces a stale snapshot to the detail view.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use tokio::task::{JoinError, JoinSet};
-use tracing::{debug, info, warn, Instrument};
+use tracing::{debug, info, warn};
 
 use uc_core::clipboard::{DeliveryFailureReason, EntryDeliveryRecord, EntryDeliveryStatus};
 use uc_core::ids::EntryId;
@@ -60,7 +59,7 @@ pub(crate) fn classify_dispatch_result(
 ) -> ProcessedDispatchResult {
     match joined {
         Ok((device_id, Ok(DispatchAck::Accepted))) => {
-            debug!(device_id = %device_id.as_str(), "dispatch → Accepted");
+            debug!("dispatch accepted");
             let delivery_record = entry_id.map(|eid| EntryDeliveryRecord {
                 entry_id: eid.clone(),
                 target_device_id: device_id,
@@ -78,7 +77,7 @@ pub(crate) fn classify_dispatch_result(
             }
         }
         Ok((device_id, Ok(DispatchAck::DuplicateIgnored))) => {
-            debug!(device_id = %device_id.as_str(), "dispatch → DuplicateIgnored");
+            debug!("dispatch duplicate ignored");
             let delivery_record = entry_id.map(|eid| EntryDeliveryRecord {
                 entry_id: eid.clone(),
                 target_device_id: device_id,
@@ -96,7 +95,7 @@ pub(crate) fn classify_dispatch_result(
             }
         }
         Ok((device_id, Err(ClipboardDispatchError::Offline))) => {
-            debug!(device_id = %device_id.as_str(), "dispatch → Offline (unreachable)");
+            debug!("dispatch deferred because peer is offline");
             let delivery_record = entry_id.map(|eid| EntryDeliveryRecord {
                 entry_id: eid.clone(),
                 target_device_id: device_id,
@@ -114,7 +113,7 @@ pub(crate) fn classify_dispatch_result(
             }
         }
         Ok((device_id, Err(err))) => {
-            warn!(device_id = %device_id.as_str(), error = %err, "dispatch failed");
+            warn!(error = %err, "dispatch failed");
             let (failure_reason, reason_detail) = match &err {
                 // Offline is handled in the previous arm (Unreachable); this
                 // arm only fires for the non-Offline error variants.
@@ -193,7 +192,6 @@ impl DeliveryRecorder {
                 warn!(
                     error = %err,
                     entry_id = %record.entry_id,
-                    target_device_id = %record.target_device_id,
                     "failed to record entry delivery"
                 );
                 continue;
@@ -223,10 +221,10 @@ pub(crate) fn spawn_deferred_drain(
     snapshot_hash: String,
 ) {
     let deferred_count = set.len();
-    uc_observability_contract::spawn_supervised(
-        "clipboard_sync.deferred_drain",
-        async move {
-            let started = Instant::now();
+    let observation = uc_observability_contract::diagnostics::ObservationContext::capture();
+    crate::support::task_supervision::spawn_supervised(
+        uc_observability_contract::diagnostics::DiagnosticTaskKind::ClipboardDeferredDrain,
+        observation.scope(async move {
             let mut accepted = 0usize;
             let mut duplicate = 0usize;
             let mut offline = 0usize;
@@ -250,17 +248,89 @@ pub(crate) fn spawn_deferred_drain(
                 duplicate,
                 offline,
                 errored,
-                bg_duration_ms = started.elapsed().as_millis() as u64,
                 "dispatch: deferred fan-out completed"
             );
-        }
-        .in_current_span(),
+        }),
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn deferred_delivery_does_not_keep_the_returned_operation_open() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tracing_subscriber::{layer::SubscriberExt, registry::LookupSpan, Layer};
+        struct Closed(Arc<AtomicBool>);
+        impl<S: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Closed {
+            fn on_close(
+                &self,
+                id: tracing::Id,
+                context: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if context
+                    .span(&id)
+                    .is_some_and(|span| span.name() == "foreground")
+                {
+                    self.0.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+        struct Repo(Arc<tokio::sync::Notify>);
+        #[async_trait::async_trait]
+        impl EntryDeliveryRepositoryPort for Repo {
+            async fn record_attempt(
+                &self,
+                _: &EntryDeliveryRecord,
+            ) -> Result<(), uc_core::clipboard::EntryDeliveryError> {
+                self.0.notify_one();
+                Ok(())
+            }
+            async fn list_by_entry(
+                &self,
+                _: &EntryId,
+            ) -> Result<Vec<EntryDeliveryRecord>, uc_core::clipboard::EntryDeliveryError>
+            {
+                Ok(vec![])
+            }
+        }
+        let closed = Arc::new(AtomicBool::new(false));
+        let _subscriber = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(Closed(closed.clone())),
+        );
+        let settled = Arc::new(tokio::sync::Notify::new());
+        let recorder = Arc::new(DeliveryRecorder::new(
+            Arc::new(Repo(settled.clone())),
+            Arc::new(crate::facade::HostEventBus::new()),
+        ));
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async move {
+            let _ = wait.await;
+            (dev("peer"), Ok(DispatchAck::Accepted))
+        });
+        let root = tracing::info_span!("foreground");
+        root.in_scope(|| {
+            spawn_deferred_drain(
+                tasks,
+                Some(eid()),
+                Arc::new(super::super::test_support::FixedClock(0)),
+                recorder,
+                "test".into(),
+            )
+        });
+        drop(root);
+        let closed_before_settlement = closed.load(Ordering::SeqCst);
+        release.send(()).expect("release delivery");
+        tokio::time::timeout(std::time::Duration::from_secs(1), settled.notified())
+            .await
+            .expect("delivery is still recorded");
+        assert!(
+            closed_before_settlement,
+            "background settlement must not extend the returned operation"
+        );
+    }
     use uc_core::ids::DeviceId;
 
     fn dev(id: &str) -> DeviceId {

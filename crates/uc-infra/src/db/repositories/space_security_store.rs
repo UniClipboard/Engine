@@ -1,14 +1,20 @@
+mod delivery;
 mod encrypted_payload;
 mod legacy_bootstrap;
 mod revocation;
 mod space_material;
+
+#[cfg(feature = "test-util")]
+mod benchmark;
+#[cfg(feature = "test-util")]
+pub use benchmark::GroupUpdateDeliveryBenchmark;
 
 #[cfg(test)]
 mod tests;
 
 use uc_core::membership::KeyEpochError;
 
-use crate::security::InMemorySession;
+use crate::space::InMemorySession;
 
 pub struct DieselSpaceSecurityStore<E> {
     executor: E,
@@ -21,12 +27,29 @@ impl<E> DieselSpaceSecurityStore<E> {
     }
 }
 
-fn backend(error: impl std::fmt::Display) -> KeyEpochError {
-    KeyEpochError::Repository(error.to_string())
+fn backend(error: impl Into<anyhow::Error>) -> KeyEpochError {
+    KeyEpochError::Repository(error.into())
 }
 
 fn epoch_to_i64(epoch: u64) -> Result<i64, KeyEpochError> {
-    i64::try_from(epoch).map_err(|_| backend("group epoch exceeds SQLite range"))
+    i64::try_from(epoch).map_err(backend)
 }
 
-pub(crate) use encrypted_payload::space_lookup_token;
+#[cfg(test)]
+mod failure_contract_tests {
+    use super::*;
+    #[test]
+    fn backend_failure_retains_its_source_without_public_private_text() {
+        let error = backend(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "PRIVATE_STORAGE_PATH",
+        ));
+        let source = std::error::Error::source(&error).expect("真实存储错误不能被字符串化");
+        let source = source
+            .downcast_ref::<std::io::Error>()
+            .expect("原始 I/O 来源");
+        assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(!error.to_string().contains("PRIVATE_STORAGE_PATH"));
+        assert!(!format!("{error:?}").contains("PRIVATE_STORAGE_PATH"));
+    }
+}

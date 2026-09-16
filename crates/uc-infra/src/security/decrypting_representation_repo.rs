@@ -21,8 +21,8 @@ use uc_core::{
         ClipboardRepositoryError, MimeType, PayloadAvailability, PersistedClipboardRepresentation,
     },
     crypto::aad,
-    crypto::domain::{Aad, ActiveSpace, Ciphertext},
-    ids::{EventId, RepresentationId, SpaceId},
+    crypto::domain::{Aad, Ciphertext},
+    ids::{EventId, RepresentationId},
     ports::{security::BlobCipherPort, ClipboardRepresentationStore},
     BlobId,
 };
@@ -40,10 +40,6 @@ impl DecryptingClipboardRepresentationRepository {
     ) -> Self {
         Self { inner, blob_cipher }
     }
-}
-
-fn placeholder_active_space() -> ActiveSpace {
-    ActiveSpace::new(SpaceId::from("space"))
 }
 
 #[async_trait]
@@ -64,11 +60,10 @@ impl ClipboardRepresentationStore for DecryptingClipboardRepresentationRepositor
 
         let decrypted_inline_data = if let Some(ref encrypted_bytes) = rep.inline_data {
             let aad = aad::for_inline(event_id, representation_id);
-            let active = placeholder_active_space();
             let ciphertext = Ciphertext::new(encrypted_bytes.clone());
             let plaintext = self
                 .blob_cipher
-                .decrypt(&active, &ciphertext, &Aad::from(aad.as_slice()))
+                .decrypt(&ciphertext, &Aad::from(aad.as_slice()))
                 .await
                 .context("failed to decrypt inline_data")?;
 
@@ -178,14 +173,13 @@ impl ClipboardRepresentationStore for DecryptingClipboardRepresentationRepositor
         let mut decrypted_count = 0usize;
         let mut decrypted_bytes = 0usize;
         let mut result = Vec::with_capacity(reps.len());
-        let active = placeholder_active_space();
         for rep in reps {
             if let Some(ref encrypted_bytes) = rep.inline_data {
                 let aad = aad::for_inline(event_id, &rep.id);
                 let ciphertext = Ciphertext::new(encrypted_bytes.clone());
                 match self
                     .blob_cipher
-                    .decrypt(&active, &ciphertext, &Aad::from(aad.as_slice()))
+                    .decrypt(&ciphertext, &Aad::from(aad.as_slice()))
                     .await
                 {
                     Ok(plaintext) => {

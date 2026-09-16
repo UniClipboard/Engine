@@ -1,17 +1,18 @@
+use std::collections::BTreeMap;
+
 use sha2::{Digest, Sha256};
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     AdmissionActivationReceipt, AdmissionChangeFacts, AdmissionContentKeyCatalogV1,
-    AdmissionContentKeyEntryV1, AdmissionSecurityCommitmentV1, BaseMembershipHistoryPositionV1,
+    AdmissionContentKeyEntryV1, AdmissionSecurityCommitmentV1, BaseMembershipHistoryPosition,
     HistoricalMembershipSignatureError, HistoricalMembershipSignatureVerifier,
-    LegacyCheckpointAttestationV2, LegacyPrefixCheckpointV2, MembershipActivationBaselineV2,
-    MembershipAdmissionV2, MembershipCredential, MembershipDecision, MembershipDecisionV1Evidence,
-    MembershipDecisionV2, MembershipEvent, MembershipEventId, MembershipEventV1Evidence,
-    MembershipEventV2, MembershipHistoryMessage, MembershipOperation, MembershipOperationV2,
-    RemovalDecision, VersionedMembershipDecision, VersionedMembershipEvent,
+    MembershipActivationBaselineV2, MembershipAdmissionV2, MembershipBranchId,
+    MembershipBranchRecoveryError, MembershipBranchRecoveryPackageV1,
+    MembershipBranchTransitionPhaseV1, MembershipBranchTransitionV1, MembershipConflictChoice,
+    MembershipConflictId, MembershipConflictPolicy, MembershipCredential, MembershipDecisionV2,
+    MembershipEventId, MembershipEventV2, MembershipOperationV2, RemovalDecision,
     VersionedMembershipHistory, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
-    ED25519_SIGNATURE_ALGORITHM_V1, LEGACY_CHECKPOINT_ATTESTATION_FORMAT_V2,
-    LEGACY_PREFIX_CHECKPOINT_FORMAT_V2, MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
+    ED25519_SIGNATURE_ALGORITHM_V1, MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
     MEMBERSHIP_DECISION_FORMAT_V2, MEMBERSHIP_EVENT_FORMAT_V2,
 };
 
@@ -70,6 +71,94 @@ fn admission(device: &str, credential: MembershipCredential) -> MembershipAdmiss
         resume_public_key_digest: [7; 32],
         security_commitment_id: [8; 32],
     }
+}
+
+#[test]
+fn single_member_root_round_trips_without_legacy_history() {
+    let verifier = DeterministicSignatureVerifier;
+    let mut local = admission("device-a", credential(1));
+    local.facts.identity_signature =
+        verifier.sign(&local.membership_credential, &local.facts.signing_payload());
+    let history = VersionedMembershipHistory::new_single_member_root(
+        LINEAGE.to_owned(),
+        local.facts.clone(),
+        local.membership_credential.clone(),
+    )
+    .expect("single-member V2 root is valid");
+    let encoded = history.encode_persisted_v2().expect("V2 root encodes");
+    let reopened = VersionedMembershipHistory::decode_persisted_v2(&encoded, &verifier)
+        .expect("V2 root reopens");
+
+    assert_eq!(
+        reopened.active_members(),
+        [local.facts.member_instance].into()
+    );
+    assert_eq!(
+        reopened.admission_facts_for(local.facts.member_instance),
+        Some(&local.facts)
+    );
+}
+
+#[test]
+fn admission_candidate_draft_binds_the_later_security_commitment() {
+    let verifier = DeterministicSignatureVerifier;
+    let mut local = admission("device-a", credential(1));
+    local.facts.identity_signature =
+        verifier.sign(&local.membership_credential, &local.facts.signing_payload());
+    let history = VersionedMembershipHistory::new_single_member_root(
+        LINEAGE.to_owned(),
+        local.facts.clone(),
+        local.membership_credential.clone(),
+    )
+    .expect("valid root");
+    let candidate = admission("device-b", credential(2));
+    let key_package = vec![0x31; 48];
+    let draft = history
+        .create_unsigned_local_admission_event(
+            local.facts.member_instance,
+            &local.membership_credential,
+            candidate.facts,
+            candidate.membership_credential,
+            [0x32; 32],
+            [0x33; 16],
+        )
+        .expect("valid candidate draft");
+    let attempt_id = [0x34; 32];
+    let candidate_core_digest = draft
+        .admission_candidate_core_digest(attempt_id, &key_package)
+        .expect("candidate digest");
+    let commitment = AdmissionSecurityCommitmentV1::new(
+        ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
+        LINEAGE.to_owned(),
+        b"group".to_vec(),
+        attempt_id,
+        history.current_position().expect("current position"),
+        candidate_core_digest,
+        1,
+        0,
+        1,
+        [0x35; 32],
+        [0x36; 32],
+        [0x37; 32],
+        [0x38; 32],
+        [0x39; 32],
+    )
+    .expect("valid commitment");
+
+    let event = history
+        .finalize_unsigned_local_admission_event(draft, &key_package, &commitment)
+        .expect("commitment binds to draft");
+    let MembershipOperationV2::AddDevice { admission } = event.operation else {
+        panic!("candidate remains AddDevice");
+    };
+    assert_eq!(
+        admission.security_commitment_id,
+        commitment.security_commitment_id
+    );
+    assert_eq!(
+        event.security_state_digest,
+        commitment.security_commitment_id
+    );
 }
 
 fn event(
@@ -220,6 +309,825 @@ fn history_with_a_and_b(
 }
 
 #[test]
+fn canonical_history_formats_remain_byte_stable() {
+    let (history, author, _, genesis, _) = history_with_a_and_b(true);
+    let verifier = DeterministicSignatureVerifier;
+    let mut base = VersionedMembershipHistory::new(LINEAGE.to_owned());
+    base.verify_and_receive_event(genesis, &verifier).unwrap();
+    let bytes = [
+        history.encode_persisted_v2().unwrap(),
+        postcard::to_stdvec(
+            &history
+                .export_conflict_evidence_pages_v2(author.facts.clone())
+                .unwrap(),
+        )
+        .unwrap(),
+        postcard::to_stdvec(
+            &history
+                .export_suffix_pages_v4(author.facts, base.current_position().unwrap())
+                .unwrap(),
+        )
+        .unwrap(),
+    ];
+    let hashes = bytes.map(|bytes| format!("{:x}", Sha256::digest(bytes)));
+    assert_eq!(
+        hashes,
+        [
+            "7da394e93b254dc4f009046f9e10ce35b41aa92d24ca732f167a6f61884af4b3",
+            "3f0e6116e992a88ddcfb534fbb51262e9848eb33deeda2f6b9eca0201f0945b2",
+            "7da2fdfa05341dc8f5cc05c9f88c551f6f09429c334f60756ef20c0c4c10f48e",
+        ]
+    );
+}
+
+#[test]
+fn sibling_histories_produce_order_independent_conflict_and_branch_ids() {
+    let verifier = DeterministicSignatureVerifier;
+    let (base, a, _, _, add_b) = history_with_a_and_b(true);
+    let c = admission("device-c", credential(3));
+    let d = admission("device-d", credential(4));
+    let mut left = base.clone();
+    let mut right = base;
+    let left_event = event(
+        &left,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::AddDevice { admission: c },
+        3,
+        &verifier,
+    );
+    let right_event = event(
+        &right,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::AddDevice { admission: d },
+        4,
+        &verifier,
+    );
+    left.verify_and_receive_event(left_event.clone(), &verifier)
+        .expect("left sibling verifies");
+    right
+        .verify_and_receive_event(right_event.clone(), &verifier)
+        .expect("right sibling verifies");
+
+    let observed_left_first =
+        MembershipConflictPolicy::describe(&left, &right, a.facts.member_instance)
+            .expect("siblings form a conflict");
+    let observed_right_first =
+        MembershipConflictPolicy::describe(&right, &left, a.facts.member_instance)
+            .expect("arrival order does not matter");
+    let explanation =
+        MembershipConflictPolicy::explain(&left, &right, a.facts.member_instance).unwrap();
+    assert_eq!(
+        explanation.reason,
+        uc_core::membership::MembershipConflictReason::DivergedHistory
+    );
+    assert!(explanation.details_complete);
+    assert!(explanation
+        .changes
+        .iter()
+        .all(|change| change.kind == uc_core::membership::MembershipChangeKind::AddedDevice));
+    assert_eq!(
+        explanation.changes[0].target.device_id,
+        DeviceId::new("device-c")
+    );
+    assert_eq!(
+        explanation.changes[1].target.device_id,
+        DeviceId::new("device-d")
+    );
+    let reversed =
+        MembershipConflictPolicy::explain(&right, &left, a.facts.member_instance).unwrap();
+    assert_eq!(reversed.reason, explanation.reason);
+    assert_eq!(reversed.changes[0].target, explanation.changes[1].target);
+
+    assert_eq!(
+        observed_left_first.conflict_id,
+        observed_right_first.conflict_id
+    );
+    assert_eq!(
+        observed_left_first.branch_ids(),
+        observed_right_first.branch_ids()
+    );
+    assert_eq!(
+        observed_left_first.choice_for(observed_left_first.local_branch_id),
+        Some(MembershipConflictChoice::ActiveMemberRecovery)
+    );
+    let legacy =
+        MembershipConflictPolicy::legacy_description(&left, &right, a.facts.member_instance)
+            .unwrap();
+    assert!(
+        MembershipConflictPolicy::matches_persisted_branch(&left, legacy.local_branch_id).unwrap()
+    );
+    let recipient = left
+        .effective_member_for_device(&DeviceId::new("device-b"))
+        .unwrap();
+    let unsigned = MembershipBranchRecoveryPackageV1::new_unsigned(
+        legacy.conflict_id,
+        legacy.local_branch_id,
+        recipient,
+        a.facts.member_instance,
+        2000,
+        [0x91; 32],
+        left.encode_persisted_v2().unwrap(),
+        vec![0x92],
+        vec![0x93],
+    )
+    .unwrap();
+    let signature = verifier.sign(
+        &a.membership_credential,
+        &unsigned.authorization_signing_payload(),
+    );
+    let legacy_package = unsigned.with_authorization_signature(signature);
+    let previous_position = left.current_position().unwrap();
+    left.verify_and_receive_event(right_event, &verifier)
+        .unwrap();
+    right
+        .verify_and_receive_event(left_event, &verifier)
+        .unwrap();
+    assert_eq!(
+        left.current_position().unwrap().event_id,
+        previous_position.event_id
+    );
+    assert_ne!(
+        left.current_position().unwrap().history_digest,
+        previous_position.history_digest
+    );
+    let after = MembershipConflictPolicy::describe(&left, &right, a.facts.member_instance).unwrap();
+    assert_eq!(after.conflict_id, observed_left_first.conflict_id);
+    assert_eq!(after.branch_ids(), observed_left_first.branch_ids());
+    assert_eq!(
+        MembershipConflictPolicy::explain(&left, &right, a.facts.member_instance).unwrap(),
+        explanation
+    );
+    assert!(
+        !MembershipConflictPolicy::matches_persisted_branch(&left, legacy.local_branch_id).unwrap()
+    );
+    assert!(legacy_package
+        .validate(
+            legacy.conflict_id,
+            legacy.local_branch_id,
+            recipient,
+            1000,
+            &verifier
+        )
+        .is_ok());
+}
+
+#[test]
+fn twenty_fixed_conflict_chaos_seeds_preserve_model_invariants() {
+    let verifier = DeterministicSignatureVerifier;
+    let (base, a, _, _, add_b) = history_with_a_and_b(true);
+    let mut left = base.clone();
+    let mut right = base;
+    let left_admission = admission("device-chaos-left", credential(0x31));
+    let right_admission = admission("device-chaos-right", credential(0x32));
+    let left_event = event(
+        &left,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::AddDevice {
+            admission: left_admission.clone(),
+        },
+        0x31,
+        &verifier,
+    );
+    let right_event = event(
+        &right,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::AddDevice {
+            admission: right_admission.clone(),
+        },
+        0x32,
+        &verifier,
+    );
+    left.verify_and_receive_event(left_event.clone(), &verifier)
+        .expect("left chaos branch verifies");
+    left.verify_and_record_activation_receipt(
+        activation_receipt(&left_event, &left_admission, &verifier),
+        &verifier,
+    )
+    .expect("left chaos activation verifies");
+    right
+        .verify_and_receive_event(right_event.clone(), &verifier)
+        .expect("right chaos branch verifies");
+    right
+        .verify_and_record_activation_receipt(
+            activation_receipt(&right_event, &right_admission, &verifier),
+            &verifier,
+        )
+        .expect("right chaos activation verifies");
+
+    for seed in [
+        0x0000_0000_0000_0001,
+        0x0000_0000_0000_0002,
+        0x0000_0000_0000_0003,
+        0x0000_0000_0000_0005,
+        0x0000_0000_0000_0008,
+        0x0000_0000_0000_000d,
+        0x0000_0000_0000_0015,
+        0x0000_0000_0000_0022,
+        0x0000_0000_0000_0037,
+        0x0000_0000_0000_0059,
+        0x9e37_79b9_7f4a_7c15,
+        0xbf58_476d_1ce4_e5b9,
+        0x94d0_49bb_1331_11eb,
+        0xd1b5_4a32_d192_ed03,
+        0x8538_eb54_0f1c_6f43,
+        0xda94_2042_e4dd_58b5,
+        0xa24b_aed4_963e_e407,
+        0x9fb2_1c65_1e98_df25,
+        0xc13f_a9a9_02a6_328f,
+        0x91e1_0da5_c79e_7b1d,
+    ] {
+        run_conflict_chaos_seed(seed, &left, &right, a.facts.member_instance);
+    }
+}
+
+fn run_conflict_chaos_seed(
+    seed: u64,
+    left: &VersionedMembershipHistory,
+    right: &VersionedMembershipHistory,
+    local_member: uc_core::membership::MemberInstanceId,
+) {
+    let expected = MembershipConflictPolicy::describe(left, right, local_member)
+        .expect("chaos fixture contains one selectable conflict");
+    let expected_branches = expected.branch_ids();
+    assert_ne!(left.active_members(), right.active_members());
+    assert_eq!(left.active_members().len(), right.active_members().len());
+
+    let mut deliveries = [false, true, false, true, true, false, true, false];
+    let mut state = seed;
+    for index in (1..deliveries.len()).rev() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let selected = (state as usize) % (index + 1);
+        deliveries.swap(index, selected);
+    }
+
+    let mut observed = BTreeMap::new();
+    for remote_first in deliveries {
+        let description = if remote_first {
+            MembershipConflictPolicy::describe(right, left, local_member)
+        } else {
+            MembershipConflictPolicy::describe(left, right, local_member)
+        }
+        .expect("every delivery order describes the same conflict");
+        assert_eq!(description.conflict_id, expected.conflict_id);
+        assert_eq!(description.branch_ids(), expected_branches);
+        observed
+            .entry(description.conflict_id)
+            .or_insert_with(|| description.branch_ids());
+    }
+    assert_eq!(observed.len(), 1, "duplicates never create another issue");
+
+    let target_branch = expected_branches[(seed as usize) & 1];
+    assert_eq!(
+        expected.choice_for(target_branch),
+        Some(MembershipConflictChoice::ActiveMemberRecovery)
+    );
+    let transition_id =
+        MembershipBranchTransitionV1::derive_id(expected.conflict_id, target_branch);
+    assert_eq!(
+        transition_id,
+        MembershipBranchTransitionV1::derive_id(expected.conflict_id, target_branch)
+    );
+    let mut source_generation = [0u8; 16];
+    source_generation[..8].copy_from_slice(&seed.to_be_bytes());
+    source_generation[15] = 1;
+    let mut target_generation = source_generation;
+    target_generation[15] = 2;
+    let mut transition = MembershipBranchTransitionV1::new(
+        transition_id,
+        expected.conflict_id,
+        target_branch,
+        source_generation,
+        target_generation,
+    )
+    .expect("seed produces a valid control-generation transition");
+    for phase in [
+        MembershipBranchTransitionPhaseV1::SourceBackedUp,
+        MembershipBranchTransitionPhaseV1::TargetVerified,
+        MembershipBranchTransitionPhaseV1::TargetStaged,
+        MembershipBranchTransitionPhaseV1::Promoted,
+        MembershipBranchTransitionPhaseV1::RuntimeRestored,
+        MembershipBranchTransitionPhaseV1::Completed,
+    ] {
+        transition = transition
+            .advance(phase)
+            .expect("chaos scheduling cannot skip a durable phase");
+    }
+    assert!(transition
+        .advance(MembershipBranchTransitionPhaseV1::Prepared)
+        .is_none());
+}
+
+#[test]
+fn conflict_choice_distinguishes_active_removed_and_absent_member_instances() {
+    let verifier = DeterministicSignatureVerifier;
+    let (base, a, b, _, add_b) = history_with_a_and_b(true);
+    let c = admission("device-c", credential(3));
+    let mut removed_branch = base.clone();
+    let mut active_branch = base;
+    let removal = event(
+        &removed_branch,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::RemoveDevice {
+            member: b.facts.member_instance,
+        },
+        3,
+        &verifier,
+    );
+    let addition = event(
+        &active_branch,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::AddDevice { admission: c },
+        4,
+        &verifier,
+    );
+    removed_branch
+        .verify_and_receive_event(removal, &verifier)
+        .expect("removal sibling verifies");
+    active_branch
+        .verify_and_receive_event(addition, &verifier)
+        .expect("addition sibling verifies");
+
+    let conflict = MembershipConflictPolicy::describe(
+        &active_branch,
+        &removed_branch,
+        b.facts.member_instance,
+    )
+    .expect("the removed member can inspect both choices");
+    assert_eq!(
+        conflict.choice_for(conflict.local_branch_id),
+        Some(MembershipConflictChoice::ActiveMemberRecovery)
+    );
+    assert_eq!(
+        conflict.choice_for(conflict.remote_branch_id),
+        Some(MembershipConflictChoice::RePairingRequired)
+    );
+
+    let absent = credential(9).member_instance_id(&DeviceId::new("absent"));
+    assert_eq!(
+        MembershipConflictPolicy::describe(&active_branch, &removed_branch, absent),
+        Err(uc_core::membership::MembershipConflictPolicyError::InvalidConflict)
+    );
+}
+
+#[test]
+fn same_or_ancestor_history_is_not_a_selectable_conflict() {
+    let verifier = DeterministicSignatureVerifier;
+    let (base, a, _, _, add_b) = history_with_a_and_b(true);
+    assert_eq!(
+        MembershipConflictPolicy::describe(&base, &base, a.facts.member_instance),
+        Err(uc_core::membership::MembershipConflictPolicyError::InvalidConflict)
+    );
+
+    let c = admission("device-c", credential(3));
+    let mut descendant = base.clone();
+    let addition = event(
+        &descendant,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::AddDevice { admission: c },
+        3,
+        &verifier,
+    );
+    descendant
+        .verify_and_receive_event(addition, &verifier)
+        .expect("descendant verifies");
+    assert_eq!(
+        MembershipConflictPolicy::describe(&base, &descendant, a.facts.member_instance),
+        Err(uc_core::membership::MembershipConflictPolicyError::InvalidConflict)
+    );
+}
+
+#[test]
+fn membership_branch_transition_advances_one_phase_and_never_retargets() {
+    let transition = MembershipBranchTransitionV1::new(
+        [0x91; 32],
+        MembershipConflictId::from_bytes([0x81; 32]),
+        MembershipBranchId::from_bytes([0x82; 32]),
+        [0x11; 16],
+        [0x12; 16],
+    )
+    .expect("different generations form a valid transition");
+    let backed_up = transition
+        .advance(MembershipBranchTransitionPhaseV1::SourceBackedUp)
+        .expect("the immediate successor is valid");
+
+    assert_eq!(
+        backed_up.phase(),
+        MembershipBranchTransitionPhaseV1::SourceBackedUp
+    );
+    assert!(backed_up
+        .advance(MembershipBranchTransitionPhaseV1::TargetStaged)
+        .is_none());
+    assert!(transition
+        .advance(MembershipBranchTransitionPhaseV1::Completed)
+        .is_none());
+
+    let mut current = backed_up;
+    for phase in [
+        MembershipBranchTransitionPhaseV1::TargetVerified,
+        MembershipBranchTransitionPhaseV1::TargetStaged,
+        MembershipBranchTransitionPhaseV1::Promoted,
+        MembershipBranchTransitionPhaseV1::RuntimeRestored,
+        MembershipBranchTransitionPhaseV1::Completed,
+    ] {
+        current = current
+            .advance(phase)
+            .expect("each persisted phase advances");
+    }
+    assert!(current
+        .advance(MembershipBranchTransitionPhaseV1::Prepared)
+        .is_none());
+}
+
+#[test]
+fn membership_branch_transition_id_is_stable_for_both_recovery_roles() {
+    let conflict_id = MembershipConflictId::from_bytes([0x91; 32]);
+    let target_branch_id = MembershipBranchId::from_bytes([0x92; 32]);
+
+    let first = MembershipBranchTransitionV1::derive_id(conflict_id, target_branch_id);
+    let repeated = MembershipBranchTransitionV1::derive_id(conflict_id, target_branch_id);
+    let other = MembershipBranchTransitionV1::derive_id(
+        conflict_id,
+        MembershipBranchId::from_bytes([0x93; 32]),
+    );
+
+    assert_ne!(first, [0; 32]);
+    assert_eq!(first, repeated);
+    assert_ne!(first, other);
+}
+
+#[test]
+fn branch_recovery_package_binds_recipient_branch_expiry_and_authorization() {
+    let verifier = DeterministicSignatureVerifier;
+    let (history, author, recipient, _, _) = history_with_a_and_b(true);
+    let conflict_id = MembershipConflictId::from_bytes([0xa1; 32]);
+    let branch_id = MembershipConflictPolicy::branch_id(&history).expect("branch id");
+    let unsigned = MembershipBranchRecoveryPackageV1::new_unsigned(
+        conflict_id,
+        branch_id,
+        recipient.facts.member_instance,
+        author.facts.member_instance,
+        2_000,
+        [0xa2; 32],
+        history.encode_persisted_v2().unwrap(),
+        vec![0xa3],
+        vec![0xa4],
+    )
+    .expect("package shape is valid");
+    let signature = verifier.sign(
+        &author.membership_credential,
+        &unsigned.authorization_signing_payload(),
+    );
+    let package = unsigned.with_authorization_signature(signature);
+
+    assert!(package
+        .validate(
+            conflict_id,
+            branch_id,
+            recipient.facts.member_instance,
+            1_000,
+            &verifier,
+        )
+        .is_ok());
+    assert_eq!(
+        package.validate(
+            conflict_id,
+            branch_id,
+            author.facts.member_instance,
+            1_000,
+            &verifier,
+        ),
+        Err(MembershipBranchRecoveryError::WrongRecipient)
+    );
+    assert_eq!(
+        package.validate(
+            MembershipConflictId::from_bytes([0xb1; 32]),
+            branch_id,
+            recipient.facts.member_instance,
+            1_000,
+            &verifier,
+        ),
+        Err(MembershipBranchRecoveryError::WrongConflict)
+    );
+    assert_eq!(
+        package.validate(
+            conflict_id,
+            MembershipBranchId::from_bytes([0xb2; 32]),
+            recipient.facts.member_instance,
+            1_000,
+            &verifier,
+        ),
+        Err(MembershipBranchRecoveryError::WrongBranch)
+    );
+    assert_eq!(
+        package.validate(
+            conflict_id,
+            branch_id,
+            recipient.facts.member_instance,
+            2_000,
+            &verifier,
+        ),
+        Err(MembershipBranchRecoveryError::Expired)
+    );
+    let damaged = package.clone().with_authorization_signature(vec![0xff]);
+    assert_eq!(
+        damaged.validate(
+            conflict_id,
+            branch_id,
+            recipient.facts.member_instance,
+            1_000,
+            &verifier,
+        ),
+        Err(MembershipBranchRecoveryError::Unauthorized)
+    );
+}
+
+#[test]
+fn v4_suffix_exports_only_records_after_the_receiver_position() {
+    let verifier = DeterministicSignatureVerifier;
+    let (target, a, b, genesis, add_b) = history_with_a_and_b(true);
+    let mut receiver = VersionedMembershipHistory::new(LINEAGE.to_owned());
+    receiver
+        .verify_and_receive_event(genesis, &verifier)
+        .expect("receiver accepts the shared ancestor");
+    let base = receiver.current_position().expect("base position");
+    let mut sender_facts = a.facts.clone();
+    sender_facts.identity_signature =
+        verifier.sign(&a.membership_credential, &sender_facts.signing_payload());
+
+    let pages = target
+        .export_suffix_pages_v4(sender_facts, base.clone())
+        .expect("sender exports a bounded suffix");
+
+    assert_eq!(pages.len(), 2, "suffix contains AddDevice and its receipt");
+    assert!(pages.iter().all(|page| page.base_position() == &base));
+    assert_eq!(
+        pages[0].target_position(),
+        &target.current_position().unwrap()
+    );
+    let proven_sender = receiver
+        .apply_suffix_pages_v4(&pages, a.facts.member_instance, &verifier)
+        .expect("receiver applies the verified suffix");
+    assert_eq!(proven_sender.current_position(), target.current_position());
+    assert_eq!(receiver.current_position(), target.current_position());
+    assert!(receiver.active_members().contains(&b.facts.member_instance));
+    assert_eq!(pages[0].page_index(), 0);
+    assert_eq!(pages[0].page_count(), 2);
+    assert_eq!(pages[0].transfer_id(), pages[1].transfer_id());
+    assert_eq!(add_b.parent_event_id, base.event_id);
+}
+
+#[test]
+fn local_removal_event_is_bound_to_the_current_history_and_author() {
+    let (history, a, b, _, add_b) = history_with_a_and_b(true);
+
+    let removal = history
+        .create_unsigned_local_removal_event(
+            a.facts.member_instance,
+            &a.membership_credential,
+            b.facts.member_instance,
+            [3; 16],
+            [4; 32],
+        )
+        .expect("active member can remove another effective member");
+
+    assert_eq!(removal.parent_event_id, Some(add_b.event_id()));
+    assert_eq!(removal.parent_depth, add_b.parent_depth + 1);
+    assert_eq!(removal.author_member_instance_id, a.facts.member_instance);
+    assert_eq!(removal.security_state_digest, [4; 32]);
+    assert!(matches!(
+        removal.operation,
+        MembershipOperationV2::RemoveDevice { member }
+            if member == b.facts.member_instance
+    ));
+    assert!(removal.signature.is_empty());
+}
+
+#[test]
+fn suffix_preserves_verified_receiver_side_branches_and_local_decisions() {
+    let verifier = DeterministicSignatureVerifier;
+    let (mut common, a, b, _, add_b) = history_with_a_and_b(true);
+    let c = admission("device-c", credential(3));
+    let add_c = event(
+        &common,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::AddDevice {
+            admission: c.clone(),
+        },
+        61,
+        &verifier,
+    );
+    common
+        .verify_and_receive_event(add_c.clone(), &verifier)
+        .unwrap();
+    common
+        .verify_and_record_activation_receipt(activation_receipt(&add_c, &c, &verifier), &verifier)
+        .unwrap();
+    let old_removal = event(
+        &common,
+        Some(add_c.event_id()),
+        &b,
+        MembershipOperationV2::RemoveDevice {
+            member: c.facts.member_instance,
+        },
+        62,
+        &verifier,
+    );
+    let incoming_removal = event(
+        &common,
+        Some(add_c.event_id()),
+        &a,
+        MembershipOperationV2::RemoveDevice {
+            member: b.facts.member_instance,
+        },
+        63,
+        &verifier,
+    );
+    let mut receiver = common.clone();
+    receiver
+        .verify_and_receive_remote_event_for_local_member(
+            old_removal.clone(),
+            c.facts.member_instance,
+            &verifier,
+        )
+        .unwrap();
+    let mut rejection = receiver
+        .create_unsigned_local_removal_decision(
+            old_removal.event_id(),
+            c.facts.member_instance,
+            &c.membership_credential,
+            RemovalDecision::Reject,
+            [64; 16],
+        )
+        .unwrap();
+    rejection.signature = verifier.sign(&c.membership_credential, &rejection.signing_payload());
+    receiver
+        .apply_signed_local_removal_decision(rejection.clone(), c.facts.member_instance, &verifier)
+        .unwrap();
+    let mut sender = common;
+    sender
+        .verify_and_receive_event(incoming_removal, &verifier)
+        .unwrap();
+    let mut sender_facts = a.facts.clone();
+    sender_facts.identity_signature =
+        verifier.sign(&a.membership_credential, &sender_facts.signing_payload());
+    let pages = sender
+        .export_suffix_pages_v4(sender_facts, receiver.current_position().unwrap())
+        .unwrap();
+
+    receiver
+        .apply_suffix_pages_v4(&pages, c.facts.member_instance, &verifier)
+        .expect("合法的接收方旁支和已签决定不能使增量被误判为无效");
+    assert_eq!(
+        receiver.decision_for(old_removal.event_id(), c.facts.member_instance),
+        Some(&rejection)
+    );
+    assert!(receiver.active_members().contains(&c.facts.member_instance));
+}
+
+#[test]
+fn suffix_cannot_apply_records_outside_the_sender_proof() {
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct ProofFrame {
+        baseline_digest: [u8; 32],
+        events: Vec<MembershipEventId>,
+        activation_receipts: Vec<MembershipEventId>,
+        decisions: Vec<(MembershipEventId, uc_core::membership::MemberInstanceId)>,
+    }
+    // 独立生成恶意但格式正确的发送端承诺，不借用接收方的校验结果。
+    #[derive(serde::Serialize)]
+    enum RecordFrame {
+        Event(MembershipEventV2),
+        ActivationReceipt(AdmissionActivationReceipt),
+    }
+    let verifier = DeterministicSignatureVerifier;
+    let (sender, a, _, genesis, _) = history_with_a_and_b(true);
+    let mut receiver = VersionedMembershipHistory::new(LINEAGE.to_owned());
+    receiver
+        .verify_and_receive_event(genesis.clone(), &verifier)
+        .unwrap();
+    let base = receiver.current_position().unwrap();
+    let mut facts = a.facts.clone();
+    facts.identity_signature = verifier.sign(&a.membership_credential, &facts.signing_payload());
+    let pages = sender
+        .export_suffix_pages_v4(facts.clone(), base.clone())
+        .unwrap();
+    let mut frames = pages
+        .iter()
+        .map(|p| serde_json::to_value(p).unwrap())
+        .collect::<Vec<_>>();
+    let mut proof: ProofFrame = serde_json::from_value(frames[0]["sender_proof"].clone()).unwrap();
+    proof.events = vec![genesis.event_id()];
+    proof.activation_receipts.clear();
+    let records = frames
+        .iter()
+        .map(|p| {
+            if let Some(event) = p["events"].as_array().unwrap().first() {
+                RecordFrame::Event(serde_json::from_value(event.clone()).unwrap())
+            } else {
+                RecordFrame::ActivationReceipt(
+                    serde_json::from_value(p["activation_receipts"][0].clone()).unwrap(),
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    let encoded =
+        postcard::to_stdvec(&(4u16, LINEAGE, &base, &base, &facts, &records, &proof)).unwrap();
+    let mut hash = Sha256::new();
+    hash.update(b"uniclipboard/membership-history-suffix/v4\0");
+    hash.update((encoded.len() as u64).to_be_bytes());
+    hash.update(encoded);
+    let transfer: [u8; 32] = hash.finalize().into();
+    for page in &mut frames {
+        page["target_position"] = serde_json::to_value(&base).unwrap();
+        page["transfer_id"] = serde_json::to_value(transfer).unwrap();
+    }
+    frames[0]["sender_proof"] = serde_json::to_value(proof).unwrap();
+    let malicious = frames
+        .into_iter()
+        .map(|p| {
+            serde_json::from_value::<uc_core::membership::MembershipHistorySuffixPageV4>(p).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let before = receiver.encode_persisted_v2().unwrap();
+    assert!(
+        receiver
+            .apply_suffix_pages_v4(&malicious, a.facts.member_instance, &verifier)
+            .is_err(),
+        "发送者不得在已验证范围外夹带更新"
+    );
+    assert_eq!(receiver.encode_persisted_v2().unwrap(), before);
+}
+
+#[test]
+fn local_removal_event_rejects_self_or_non_member_targets() {
+    let (history, a, _, _, _) = history_with_a_and_b(true);
+
+    for target in [
+        a.facts.member_instance,
+        credential(9).member_instance_id(&DeviceId::new("x")),
+    ] {
+        assert_eq!(
+            history.create_unsigned_local_removal_event(
+                a.facts.member_instance,
+                &a.membership_credential,
+                target,
+                [3; 16],
+                [4; 32],
+            ),
+            Err(uc_core::membership::MembershipHistoryV2Error::InvalidOperation)
+        );
+    }
+}
+
+#[test]
+fn effective_member_is_resolved_only_from_current_signed_history() {
+    let verifier = DeterministicSignatureVerifier;
+    let (mut history, a, b, _, add_b) = history_with_a_and_b(true);
+
+    assert_eq!(
+        history.effective_member_for_device(&a.facts.device_id),
+        Some(a.facts.member_instance)
+    );
+    assert_eq!(
+        history.effective_member_for_device(&b.facts.device_id),
+        Some(b.facts.member_instance)
+    );
+    assert_eq!(
+        history.effective_member_for_device(&DeviceId::new("missing")),
+        None
+    );
+
+    let removal = event(
+        &history,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::RemoveDevice {
+            member: b.facts.member_instance,
+        },
+        3,
+        &verifier,
+    );
+    history
+        .verify_and_receive_event(removal, &verifier)
+        .expect("signed removal applies");
+
+    assert_eq!(
+        history.effective_member_for_device(&b.facts.device_id),
+        None
+    );
+}
+
+#[test]
 fn remote_v2_removal_waits_for_the_local_decision_and_preserves_each_branch() {
     let verifier = DeterministicSignatureVerifier;
     let (mut author_history, a, b, _, add_b) = history_with_a_and_b(true);
@@ -262,22 +1170,18 @@ fn remote_v2_removal_waits_for_the_local_decision_and_preserves_each_branch() {
         Some(removal.event_id())
     );
 
-    let mut acceptance = MembershipDecisionV2::new(
-        MEMBERSHIP_DECISION_FORMAT_V2,
-        LINEAGE.to_owned(),
-        removal.event_id(),
-        b.facts.member_instance,
-        b.membership_credential.credential_id,
-        b.membership_credential.signature_algorithm_version,
-        RemovalDecision::Accept,
-        Some(add_b.event_id()),
-        removal.resulting_members_digest,
-        [4; 16],
-        Vec::new(),
-    );
+    let mut acceptance = accepting_history
+        .create_unsigned_local_removal_decision(
+            removal.event_id(),
+            b.facts.member_instance,
+            &b.membership_credential,
+            RemovalDecision::Accept,
+            [4; 16],
+        )
+        .expect("acceptance is valid at the pending removal");
     acceptance.signature = verifier.sign(&b.membership_credential, &acceptance.signing_payload());
     accepting_history
-        .verify_and_record_local_decision(acceptance, b.facts.member_instance, &verifier)
+        .apply_signed_local_removal_decision(acceptance, b.facts.member_instance, &verifier)
         .expect("acceptance advances the local branch");
     assert!(!accepting_history
         .effective_members()
@@ -295,22 +1199,18 @@ fn remote_v2_removal_waits_for_the_local_decision_and_preserves_each_branch() {
     rejecting_history
         .merge_remote_history(&author_history, b.facts.member_instance, &verifier)
         .expect("the same removal verifies on the rejecting branch");
-    let mut rejection = MembershipDecisionV2::new(
-        MEMBERSHIP_DECISION_FORMAT_V2,
-        LINEAGE.to_owned(),
-        removal.event_id(),
-        b.facts.member_instance,
-        b.membership_credential.credential_id,
-        b.membership_credential.signature_algorithm_version,
-        RemovalDecision::Reject,
-        Some(add_b.event_id()),
-        add_b.resulting_members_digest,
-        [5; 16],
-        Vec::new(),
-    );
+    let mut rejection = rejecting_history
+        .create_unsigned_local_removal_decision(
+            removal.event_id(),
+            b.facts.member_instance,
+            &b.membership_credential,
+            RemovalDecision::Reject,
+            [5; 16],
+        )
+        .expect("rejection is valid at the pending removal");
     rejection.signature = verifier.sign(&b.membership_credential, &rejection.signing_payload());
     rejecting_history
-        .verify_and_record_local_decision(rejection, b.facts.member_instance, &verifier)
+        .apply_signed_local_removal_decision(rejection, b.facts.member_instance, &verifier)
         .expect("rejection preserves the local branch");
     assert!(rejecting_history
         .effective_members()
@@ -334,6 +1234,67 @@ fn remote_v2_removal_waits_for_the_local_decision_and_preserves_each_branch() {
     assert!(
         rejecting_history.removal_choices_diverge(a.facts.member_instance, b.facts.member_instance)
     );
+}
+
+#[test]
+fn remote_removal_received_for_each_local_member_stays_pending_at_the_parent_head() {
+    let verifier = DeterministicSignatureVerifier;
+    let (mut base, a, b, _, add_b) = history_with_a_and_b(true);
+    let c = admission("device-c", credential(3));
+    let add_c = event(
+        &base,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::AddDevice {
+            admission: c.clone(),
+        },
+        3,
+        &verifier,
+    );
+    base.verify_and_receive_event(add_c.clone(), &verifier)
+        .expect("third member is active in the common history");
+    let common_head = base
+        .current_position()
+        .expect("common head exists")
+        .event_id;
+    let common_members = base.effective_members();
+    let removal = event(
+        &base,
+        Some(add_c.event_id()),
+        &a,
+        MembershipOperationV2::RemoveDevice {
+            member: c.facts.member_instance,
+        },
+        4,
+        &verifier,
+    );
+
+    for local_member in [b.facts.member_instance, c.facts.member_instance] {
+        let mut receiver = base.clone();
+
+        assert_eq!(
+            receiver
+                .verify_and_receive_remote_event_for_local_member(
+                    removal.clone(),
+                    local_member,
+                    &verifier,
+                )
+                .expect("remote removal verifies"),
+            uc_core::membership::MembershipHistoryV2ReceiveOutcome::Applied
+        );
+        assert_eq!(
+            receiver
+                .current_position()
+                .expect("head remains applied")
+                .event_id,
+            common_head
+        );
+        assert_eq!(receiver.effective_members(), common_members);
+        assert_eq!(
+            receiver.pending_removal_decision(local_member),
+            Some(removal.event_id())
+        );
+    }
 }
 
 #[test]
@@ -739,8 +1700,7 @@ fn history_exchange_splits_pages_before_the_encoded_frame_limit() {
 
     assert_eq!(pages.len(), 2);
     assert!(pages.iter().all(|page| {
-        let frame = postcard::to_stdvec(&MembershipHistoryMessage::HistoryPageV2(page.clone()))
-            .expect("history frame encodes");
+        let frame = postcard::to_stdvec(page).expect("history frame encodes");
         frame.len() + 1 <= MAX_MEMBERSHIP_HISTORY_FRAME_SIZE
     }));
     assert_eq!(
@@ -799,111 +1759,6 @@ fn history_exchange_rejects_a_record_larger_than_one_frame() {
 }
 
 #[test]
-fn completion_recovery_challenge_binds_all_three_members_and_transport_identities() {
-    use uc_core::membership::{
-        AdmissionAttemptId, AdmissionCompletionRecoveryChallengeV1,
-        AdmissionCompletionRecoveryHelloV1, AdmissionCompletionRecoveryTransportBindingV1,
-        AdmissionCompletionRecoveryValidationError, MemberInstanceId,
-    };
-
-    let hello = AdmissionCompletionRecoveryHelloV1::new(
-        AdmissionAttemptId::from_bytes([0x91; 32]),
-        LINEAGE.to_owned(),
-        MembershipEventId::from_hex(&"92".repeat(32)).unwrap(),
-        MemberInstanceId::from_bytes([0x93; 32]),
-        MemberInstanceId::from_bytes([0x94; 32]),
-        MemberInstanceId::from_bytes([0x95; 32]),
-        vec![0x96; 32],
-    )
-    .unwrap();
-    let binding = AdmissionCompletionRecoveryTransportBindingV1 {
-        joiner_transport_identity_digest: [0x97; 32],
-        helper_transport_identity_digest: [0x98; 32],
-    };
-    let challenge = AdmissionCompletionRecoveryChallengeV1::new(
-        &hello,
-        binding,
-        7,
-        [0x99; 32],
-        [0x9e; 32],
-        [0x9f; 32],
-        credential(9).credential_id,
-        BaseMembershipHistoryPositionV1 {
-            event_id: Some(MembershipEventId::from_hex(&"9a".repeat(32)).unwrap()),
-            depth: 12,
-            history_digest: [0x9b; 32],
-        },
-    )
-    .unwrap();
-
-    let original = challenge.signing_payload();
-    let mut changed_counter = challenge.clone();
-    changed_counter.challenge_counter += 1;
-    assert_ne!(changed_counter.signing_payload(), original);
-    let mut changed_joiner_transport = challenge.clone();
-    changed_joiner_transport
-        .transport_binding
-        .joiner_transport_identity_digest = [0x9c; 32];
-    assert_ne!(changed_joiner_transport.signing_payload(), original);
-
-    let mut changed_helper = hello;
-    changed_helper.helper_member_instance = MemberInstanceId::from_bytes([0x9d; 32]);
-    assert_ne!(changed_helper.digest(), challenge.hello_digest);
-
-    let mut unknown_version = challenge;
-    unknown_version.format_version += 1;
-    assert_eq!(
-        unknown_version.validate(),
-        Err(AdmissionCompletionRecoveryValidationError::UpgradeRequired)
-    );
-}
-
-#[test]
-fn completion_recovery_response_binds_the_exact_commit_receipt_and_helper_delivery() {
-    use uc_core::membership::{
-        AdmissionCompletionRecoveryBundleV1, AdmissionCompletionRecoveryResponseV1,
-        AdmissionCompletionRecoveryValidationError, SponsorAdmissionSecurityDelivery,
-    };
-
-    let bundle = AdmissionCompletionRecoveryBundleV1 {
-        format_version: 1,
-        candidate_event: vec![1],
-        candidate_key_package: vec![2],
-        security_commitment: vec![3],
-        security_commit: vec![4],
-        security_welcome: vec![5],
-        target_protection_group_id: "protection-group".to_owned(),
-        target_key_catalog: vec![6],
-        existing_member_deliveries: vec![SponsorAdmissionSecurityDelivery {
-            recipient: DeviceId::new("device-helper"),
-            credential_id: credential(9).credential_id,
-            payload: vec![7],
-        }],
-        activation_receipt: vec![8],
-        resume_public_key: vec![9; 32],
-    };
-    let response =
-        AdmissionCompletionRecoveryResponseV1::new([0xa1; 32], [0xa2; 32], bundle).unwrap();
-    let original = response.signing_payload();
-
-    let mut changed_receipt = response.clone();
-    changed_receipt.bundle.activation_receipt.push(0xff);
-    assert_ne!(changed_receipt.signing_payload(), original);
-    let mut changed_delivery = response;
-    changed_delivery.bundle.existing_member_deliveries[0]
-        .payload
-        .push(0xfe);
-    assert_ne!(changed_delivery.signing_payload(), original);
-
-    let mut unknown_version = changed_delivery;
-    unknown_version.format_version += 1;
-    assert_eq!(
-        unknown_version.validate(),
-        Err(AdmissionCompletionRecoveryValidationError::UpgradeRequired)
-    );
-}
-
-#[test]
 fn active_rejecting_member_can_deliver_its_decision_to_the_accepted_branch() {
     let verifier = DeterministicSignatureVerifier;
     let (mut base, a, b, _, add_b) = history_with_a_and_b(true);
@@ -957,7 +1812,7 @@ fn active_rejecting_member_can_deliver_its_decision_to_the_accepted_branch() {
     );
     rejection.signature = verifier.sign(&c.membership_credential, &rejection.signing_payload());
     rejected
-        .verify_and_record_local_decision(rejection.clone(), c.facts.member_instance, &verifier)
+        .apply_signed_local_removal_decision(rejection.clone(), c.facts.member_instance, &verifier)
         .expect("C keeps the parent branch");
 
     assert!(rejected.is_authorized_decision_delivery_of(&accepted, c.facts.member_instance));
@@ -1143,190 +1998,6 @@ fn removed_member_can_sign_its_decision_from_the_removals_exact_parent() {
 }
 
 #[test]
-fn v1_evidence_accepts_only_the_exact_reconstructed_payload_and_original_id() {
-    let a = admission("device-a", credential(1));
-    let semantic_event = MembershipEvent::new(
-        LINEAGE.to_owned(),
-        None,
-        0,
-        [1; 16],
-        a.facts.member_instance,
-        MembershipOperation::AddDevice {
-            admission: a.facts.clone(),
-        },
-        [2; 32],
-        [3; 32],
-        vec![4],
-        Some([5; 32]),
-        vec![6],
-    );
-
-    let evidence = MembershipEventV1Evidence::new(
-        semantic_event.clone(),
-        semantic_event.signing_payload(),
-        semantic_event.signature.clone(),
-        semantic_event.event_id(),
-    )
-    .expect("exact V1 evidence verifies");
-    assert!(matches!(
-        VersionedMembershipEvent::V1Evidence(evidence),
-        VersionedMembershipEvent::V1Evidence(_)
-    ));
-
-    let mut altered_payload = semantic_event.signing_payload();
-    altered_payload[0] ^= 1;
-    assert_eq!(
-        MembershipEventV1Evidence::new(
-            semantic_event.clone(),
-            altered_payload,
-            semantic_event.signature.clone(),
-            semantic_event.event_id(),
-        ),
-        Err(uc_core::membership::MembershipHistoryV2Error::InvalidLegacyEvidence)
-    );
-}
-
-#[test]
-fn v1_decision_evidence_preserves_the_exact_signed_record() {
-    let a = admission("device-a", credential(1));
-    let removal_event_id =
-        MembershipEventId::from_hex(&"11".repeat(32)).expect("test removal event id is valid");
-    let semantic_decision = MembershipDecision::new(
-        LINEAGE.to_owned(),
-        removal_event_id,
-        a.facts.member_instance,
-        RemovalDecision::Accept,
-        Some(removal_event_id),
-        [2; 32],
-        [3; 16],
-        vec![4],
-    );
-
-    let evidence = MembershipDecisionV1Evidence::new(
-        semantic_decision.clone(),
-        semantic_decision.signing_payload(),
-        semantic_decision.signature.clone(),
-        semantic_decision.decision_id(),
-    )
-    .expect("exact V1 decision evidence verifies");
-    assert!(matches!(
-        VersionedMembershipDecision::V1Evidence(evidence),
-        VersionedMembershipDecision::V1Evidence(_)
-    ));
-
-    let different_id = MembershipDecision::new(
-        LINEAGE.to_owned(),
-        removal_event_id,
-        a.facts.member_instance,
-        RemovalDecision::Reject,
-        Some(removal_event_id),
-        [2; 32],
-        [3; 16],
-        vec![4],
-    )
-    .decision_id();
-    assert_eq!(
-        MembershipDecisionV1Evidence::new(
-            semantic_decision.clone(),
-            semantic_decision.signing_payload(),
-            semantic_decision.signature.clone(),
-            different_id,
-        ),
-        Err(uc_core::membership::MembershipHistoryV2Error::InvalidLegacyEvidence)
-    );
-}
-
-#[test]
-fn legacy_checkpoint_identity_is_independent_of_member_input_order() {
-    let a = admission("device-a", credential(1));
-    let c = admission("device-c", credential(3));
-    let head = MembershipEventId::from_hex(&"22".repeat(32)).expect("test head is valid");
-
-    let first = LegacyPrefixCheckpointV2::new(
-        LEGACY_PREFIX_CHECKPOINT_FORMAT_V2,
-        LINEAGE.to_owned(),
-        head,
-        7,
-        [4; 32],
-        [5; 32],
-        [6; 32],
-        vec![
-            (c.facts.member_instance, c.membership_credential.clone()),
-            (a.facts.member_instance, a.membership_credential.clone()),
-        ],
-    )
-    .expect("checkpoint inputs are valid");
-    let second = LegacyPrefixCheckpointV2::new(
-        LEGACY_PREFIX_CHECKPOINT_FORMAT_V2,
-        LINEAGE.to_owned(),
-        head,
-        7,
-        [4; 32],
-        [5; 32],
-        [6; 32],
-        vec![
-            (a.facts.member_instance, a.membership_credential.clone()),
-            (c.facts.member_instance, c.membership_credential.clone()),
-        ],
-    )
-    .expect("checkpoint inputs are valid");
-
-    assert_eq!(first, second);
-    assert_eq!(first.checkpoint_id, second.checkpoint_id);
-}
-
-#[test]
-fn checkpoint_attestations_are_additive_and_do_not_change_checkpoint_identity() {
-    let verifier = DeterministicSignatureVerifier;
-    let a = admission("device-a", credential(1));
-    let c = admission("device-c", credential(3));
-    let head = MembershipEventId::from_hex(&"22".repeat(32)).expect("test head is valid");
-    let checkpoint = LegacyPrefixCheckpointV2::new(
-        LEGACY_PREFIX_CHECKPOINT_FORMAT_V2,
-        LINEAGE.to_owned(),
-        head,
-        7,
-        [4; 32],
-        [5; 32],
-        [6; 32],
-        vec![
-            (a.facts.member_instance, a.membership_credential.clone()),
-            (c.facts.member_instance, c.membership_credential.clone()),
-        ],
-    )
-    .expect("checkpoint inputs are valid");
-
-    let mut a_attestation = LegacyCheckpointAttestationV2::new(
-        LEGACY_CHECKPOINT_ATTESTATION_FORMAT_V2,
-        checkpoint.checkpoint_id,
-        a.facts.member_instance,
-        a.membership_credential.credential_id,
-        Vec::new(),
-    );
-    a_attestation.signature =
-        verifier.sign(&a.membership_credential, &a_attestation.signing_payload());
-    let mut c_attestation = LegacyCheckpointAttestationV2::new(
-        LEGACY_CHECKPOINT_ATTESTATION_FORMAT_V2,
-        checkpoint.checkpoint_id,
-        c.facts.member_instance,
-        c.membership_credential.credential_id,
-        Vec::new(),
-    );
-    c_attestation.signature =
-        verifier.sign(&c.membership_credential, &c_attestation.signing_payload());
-
-    a_attestation
-        .verify(&checkpoint, &verifier)
-        .expect("A can attest the checkpoint");
-    c_attestation
-        .verify(&checkpoint, &verifier)
-        .expect("C can attest the checkpoint");
-    assert_ne!(a_attestation, c_attestation);
-    assert_eq!(a_attestation.checkpoint_id, checkpoint.checkpoint_id);
-    assert_eq!(c_attestation.checkpoint_id, checkpoint.checkpoint_id);
-}
-
-#[test]
 fn admission_security_commitment_has_a_canonical_public_identity() {
     let head = MembershipEventId::from_hex(&"22".repeat(32)).expect("test head is valid");
     let commitment = AdmissionSecurityCommitmentV1::new(
@@ -1334,7 +2005,7 @@ fn admission_security_commitment_has_a_canonical_public_identity() {
         LINEAGE.to_owned(),
         vec![1, 2],
         [3; 32],
-        BaseMembershipHistoryPositionV1 {
+        BaseMembershipHistoryPosition {
             event_id: Some(head),
             depth: 7,
             history_digest: [4; 32],
@@ -1396,23 +2067,19 @@ fn admission_security_commitment_has_a_canonical_public_identity() {
 }
 
 #[test]
-fn verified_and_legacy_migrations_create_explicit_activation_baselines() {
+fn established_members_create_an_explicit_activation_baseline() {
     let verifier = DeterministicSignatureVerifier;
     let a = admission("device-a", credential(1));
     let c = admission("device-c", credential(3));
     let d = admission("device-d", credential(4));
     let head = MembershipEventId::from_hex(&"22".repeat(32)).expect("test head is valid");
-    let current_credentials = vec![
-        (a.facts.member_instance, a.membership_credential.clone()),
-        (c.facts.member_instance, c.membership_credential.clone()),
-    ];
     let current_members = vec![
         (a.facts.clone(), a.membership_credential.clone()),
         (c.facts.clone(), c.membership_credential.clone()),
     ];
 
     let mut fully_verified = VersionedMembershipHistory::from_activation_baseline(
-        MembershipActivationBaselineV2::FullyVerifiedMigration {
+        MembershipActivationBaselineV2::Established {
             lineage_id: LINEAGE.to_owned(),
             head_event_id: head,
             head_depth: 7,
@@ -1441,30 +2108,6 @@ fn verified_and_legacy_migrations_create_explicit_activation_baselines() {
     fully_verified
         .verify_and_receive_event(add_d, &verifier)
         .expect("V2 history continues from fully verified migration head");
-
-    let checkpoint = LegacyPrefixCheckpointV2::new(
-        LEGACY_PREFIX_CHECKPOINT_FORMAT_V2,
-        LINEAGE.to_owned(),
-        head,
-        7,
-        [4; 32],
-        [5; 32],
-        [6; 32],
-        current_credentials,
-    )
-    .expect("legacy checkpoint is valid");
-    let legacy = VersionedMembershipHistory::from_activation_baseline(
-        MembershipActivationBaselineV2::LegacyAccepted { checkpoint },
-    )
-    .expect("legacy accepted baseline is valid");
-    assert_eq!(legacy.active_members().len(), 2);
-    assert_eq!(
-        legacy.device_for_member(
-            &c.facts.member_instance,
-            &[DeviceId::new("device-a"), DeviceId::new("device-c")]
-        ),
-        Some(DeviceId::new("device-c"))
-    );
 }
 
 #[test]
@@ -1758,31 +2401,13 @@ fn same_device_rejoins_as_a_new_instance_without_losing_old_credential() {
 
 #[test]
 fn canonical_records_reject_tampered_identity_after_loading() {
-    let a = admission("device-a", credential(1));
     let head = MembershipEventId::from_hex(&"22".repeat(32)).expect("test head is valid");
-    let mut checkpoint = LegacyPrefixCheckpointV2::new(
-        LEGACY_PREFIX_CHECKPOINT_FORMAT_V2,
-        LINEAGE.to_owned(),
-        head,
-        7,
-        [4; 32],
-        [5; 32],
-        [6; 32],
-        vec![(a.facts.member_instance, a.membership_credential.clone())],
-    )
-    .expect("checkpoint inputs are valid");
-    checkpoint.checkpoint_id[0] ^= 1;
-    assert_eq!(
-        checkpoint.validate(),
-        Err(uc_core::membership::MembershipHistoryV2Error::InvalidLegacyEvidence)
-    );
-
     let mut commitment = AdmissionSecurityCommitmentV1::new(
         ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
         LINEAGE.to_owned(),
         vec![1],
         [2; 32],
-        BaseMembershipHistoryPositionV1 {
+        BaseMembershipHistoryPosition {
             event_id: Some(head),
             depth: 7,
             history_digest: [3; 32],

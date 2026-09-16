@@ -13,8 +13,8 @@ use tracing::{debug, trace};
 use uc_core::{
     clipboard::{ClipboardEvent, PersistedClipboardRepresentation},
     crypto::aad,
-    crypto::domain::{Aad, ActiveSpace, Plaintext},
-    ids::{EventId, SpaceId},
+    crypto::domain::{Aad, Plaintext},
+    ids::EventId,
     ports::{security::BlobCipherPort, ClipboardEventWriterPort},
 };
 
@@ -40,9 +40,6 @@ impl ClipboardEventWriterPort for EncryptingClipboardEventWriter {
         event: &ClipboardEvent,
         representations: &Vec<PersistedClipboardRepresentation>,
     ) -> Result<()> {
-        // 单空间模型下用占位 ActiveSpace,adapter 当前不按 SpaceId 路由。
-        let active = ActiveSpace::new(SpaceId::from("space"));
-
         let mut encrypted_reps = Vec::with_capacity(representations.len());
         let mut encrypted_count = 0usize;
         let mut total_plaintext_bytes = 0usize;
@@ -55,7 +52,7 @@ impl ClipboardEventWriterPort for EncryptingClipboardEventWriter {
                 let plaintext_len = plaintext.len();
                 let ciphertext = self
                     .blob_cipher
-                    .encrypt(&active, &plaintext, &Aad::from(aad.as_slice()))
+                    .encrypt(&plaintext, &Aad::from(aad.as_slice()))
                     .await
                     .context("failed to encrypt inline_data")?;
                 let encrypted_bytes = ciphertext.into_bytes();

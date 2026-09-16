@@ -1,7 +1,18 @@
 use std::fmt;
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
+
+use crate::observability::{
+    DeploymentEnvironment, ObservabilityConfig, ObservabilityResource, OperatingSystem,
+    OtlpHttpConfig, ProcessObservabilityHandle, ProcessObservabilityRuntime,
+};
+use uc_observability_contract::diagnostics::{
+    complete_operation, DiagnosticDomain, DiagnosticOperation, DiagnosticRole, OperationCompletion,
+};
+
+static TEST_TRACING_INIT: Once = Once::new();
+static TEST_OBSERVABILITY: OnceLock<ProcessObservabilityHandle> = OnceLock::new();
 
 /// Initialize the tracing subscriber for integration tests.
 ///
@@ -11,8 +22,10 @@ use std::sync::Once;
 /// test logs through it. Call this at the start of every test that needs
 /// engine or adapter logs during diagnosis.
 pub fn init_test_tracing() {
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
+    TEST_TRACING_INIT.call_once(|| {
+        if install_test_otlp() {
+            return;
+        }
         let result = tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
@@ -20,23 +33,165 @@ pub fn init_test_tracing() {
             )
             .with_test_writer()
             .try_init();
-        if result.is_err() {
-            eprintln!(
-                "init_test_tracing: a subscriber was already installed; \
-                 RUST_LOG may not apply to this test process"
-            );
-        }
+        let _ = result;
     });
+}
+
+/// 为单进程端到端测试安装显式的本机 OTLP 接收端。
+pub fn init_test_tracing_with_otlp(trace_endpoint: &str, log_endpoint: &str) -> bool {
+    let trace_endpoint = trace_endpoint.to_owned();
+    let log_endpoint = log_endpoint.to_owned();
+    TEST_TRACING_INIT.call_once(move || {
+        let _ = install_test_otlp_endpoints(&trace_endpoint, &log_endpoint);
+    });
+    TEST_OBSERVABILITY.get().is_some()
+}
+
+/// 为性能对照安装不含远程发送的同一进程运行时。
+pub fn init_test_tracing_without_remote() -> bool {
+    TEST_TRACING_INIT.call_once(|| {
+        let _ = install_test_observability(None);
+    });
+    TEST_OBSERVABILITY.get().is_some()
+}
+
+fn install_test_otlp() -> bool {
+    let Ok(trace_endpoint) = std::env::var("UC_TEST_OTLP_TRACE_ENDPOINT") else {
+        return false;
+    };
+    let Ok(log_endpoint) = std::env::var("UC_TEST_OTLP_LOG_ENDPOINT") else {
+        return false;
+    };
+    install_test_otlp_endpoints(&trace_endpoint, &log_endpoint)
+}
+
+fn install_test_otlp_endpoints(trace_endpoint: &str, log_endpoint: &str) -> bool {
+    let Ok(remote) = OtlpHttpConfig::new_loopback(trace_endpoint, log_endpoint) else {
+        return false;
+    };
+    install_test_observability(Some(remote))
+}
+
+fn install_test_observability(remote: Option<OtlpHttpConfig>) -> bool {
+    let Ok(resource) = ObservabilityResource::new(
+        env!("CARGO_PKG_VERSION"),
+        DeploymentEnvironment::Test,
+        current_os(),
+        "test",
+    ) else {
+        return false;
+    };
+    let mut config = ObservabilityConfig::new(resource);
+    if let Some(remote) = remote {
+        config = config.with_remote(remote);
+    }
+    let Ok(Ok(installed)) = std::thread::Builder::new()
+        .name("uc-test-observability-install".to_owned())
+        .spawn(move || ProcessObservabilityRuntime::install(config))
+        .and_then(|worker| {
+            worker
+                .join()
+                .map_err(|_| std::io::Error::other("observability install panicked"))
+        })
+    else {
+        return false;
+    };
+    TEST_OBSERVABILITY.set(installed.handle()).is_ok()
+}
+
+/// 在测试进程退出前刷新真实 OTLP batch；未配置远程接收端时为 no-op。
+pub fn flush_test_tracing() {
+    if let Some(handle) = TEST_OBSERVABILITY.get() {
+        let _ = handle.force_flush(std::time::Duration::from_secs(10));
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum TestDiagnosticCompletion {
+    ProfileStorageUpgrade,
+    SessionLifecycle,
+}
+
+pub fn emit_test_diagnostic_completion(completion: TestDiagnosticCompletion) {
+    let (domain, operation) = match completion {
+        TestDiagnosticCompletion::ProfileStorageUpgrade => (
+            DiagnosticDomain::Storage,
+            DiagnosticOperation::ProfileStorageUpgrade,
+        ),
+        TestDiagnosticCompletion::SessionLifecycle => (
+            DiagnosticDomain::Runtime,
+            DiagnosticOperation::SessionLifecycle,
+        ),
+    };
+    complete_operation(OperationCompletion::succeeded(
+        domain,
+        operation,
+        DiagnosticRole::Local,
+        std::time::Duration::from_millis(1),
+    ));
+}
+
+fn current_os() -> OperatingSystem {
+    if cfg!(target_os = "ios") {
+        OperatingSystem::Ios
+    } else if cfg!(target_os = "android") {
+        OperatingSystem::Android
+    } else if cfg!(target_os = "macos") {
+        OperatingSystem::Macos
+    } else if cfg!(target_os = "windows") {
+        OperatingSystem::Windows
+    } else if cfg!(target_os = "linux") {
+        OperatingSystem::Linux
+    } else {
+        OperatingSystem::Other
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionHandoverFailurePoint {
+    SessionQuiesce,
+    TransitionCompletion,
+    SessionPreparation,
+    SessionActivation,
 }
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum DevOperation {
-    SeedText { text: String },
-    CaptureFilePaths { paths: Vec<PathBuf> },
+    SeedText {
+        text: String,
+    },
+    CaptureFilePaths {
+        paths: Vec<PathBuf>,
+    },
     ListPairingInvitationAddresses,
-    IssueInvitationForAddress { address: IpAddr },
-    PublishBlob { bytes: Vec<u8> },
-    FetchBlob { ticket: Vec<u8>, entry_id: String },
+    IssueInvitationForAddress {
+        address: IpAddr,
+    },
+    PublishBlob {
+        bytes: Vec<u8>,
+    },
+    FetchBlob {
+        ticket: Vec<u8>,
+        entry_id: String,
+    },
+    QueryNetworkEndpointId,
+    FailNextSessionHandover {
+        point: SessionHandoverFailurePoint,
+    },
+    QuerySessionHandoverDiagnostics,
+    SetNetworkPartition {
+        blocked_endpoint_ids: Vec<[u8; 32]>,
+    },
+    RejectNewConnections {
+        endpoint_ids: Vec<[u8; 32]>,
+        peer_reachability: bool,
+    },
+    QueryRejectedConnectionCount,
+    QueryPeerReachabilityConnections,
+    RetainOnePeerReachabilityConnection,
+    SuppressConnectivityOpportunities {
+        suppressed: bool,
+    },
 }
 
 impl fmt::Debug for DevOperation {
@@ -48,6 +203,15 @@ impl fmt::Debug for DevOperation {
             Self::IssueInvitationForAddress { .. } => "issue_invitation_for_address",
             Self::PublishBlob { .. } => "publish_blob",
             Self::FetchBlob { .. } => "fetch_blob",
+            Self::QueryNetworkEndpointId => "query_network_endpoint_id",
+            Self::FailNextSessionHandover { .. } => "fail_next_session_handover",
+            Self::QuerySessionHandoverDiagnostics => "query_session_handover_diagnostics",
+            Self::SetNetworkPartition { .. } => "set_network_partition",
+            Self::RejectNewConnections { .. } => "reject_new_connections",
+            Self::QueryRejectedConnectionCount => "query_rejected_connection_count",
+            Self::QueryPeerReachabilityConnections => "query_peer_reachability_connections",
+            Self::RetainOnePeerReachabilityConnection => "retain_one_peer_reachability_connection",
+            Self::SuppressConnectivityOpportunities { .. } => "suppress_connectivity_opportunities",
         };
         formatter
             .debug_struct("DevOperation")
@@ -170,6 +334,28 @@ pub enum DevOperationResult {
         plaintext_hash: Vec<u8>,
         digest: Vec<u8>,
     },
+    NetworkEndpointId([u8; 32]),
+    SessionHandoverFailureArmed,
+    SessionHandoverDiagnostics {
+        network_build_count: usize,
+        session_quiesce_failure_count: usize,
+        transition_completion_failure_count: usize,
+        session_preparation_failure_count: usize,
+        session_activation_failure_count: usize,
+    },
+    ConnectivityOpportunitiesUpdated,
+    PeerReachabilityConnections {
+        incoming: usize,
+        outgoing: usize,
+        registered_tasks: usize,
+        admitted_transports: u64,
+    },
+    RejectedConnectionCount {
+        count: u64,
+    },
+    NetworkPartitionUpdated {
+        blocked_peer_count: usize,
+    },
 }
 
 impl fmt::Debug for DevOperationResult {
@@ -181,6 +367,13 @@ impl fmt::Debug for DevOperationResult {
             Self::InvitationIssued(_) => "invitation_issued",
             Self::BlobPublished(_) => "blob_published",
             Self::BlobFetched { .. } => "blob_fetched",
+            Self::NetworkEndpointId(_) => "network_endpoint_id",
+            Self::SessionHandoverFailureArmed => "session_handover_failure_armed",
+            Self::SessionHandoverDiagnostics { .. } => "session_handover_diagnostics",
+            Self::RejectedConnectionCount { .. } => "rejected_connection_count",
+            Self::PeerReachabilityConnections { .. } => "peer_reachability_connections",
+            Self::ConnectivityOpportunitiesUpdated => "connectivity_opportunities_updated",
+            Self::NetworkPartitionUpdated { .. } => "network_partition_updated",
         };
         formatter
             .debug_struct("DevOperationResult")

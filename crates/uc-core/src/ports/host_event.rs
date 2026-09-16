@@ -47,7 +47,8 @@ pub enum ClipboardHostEvent {
 pub enum TransferHostEvent {
     StatusChanged {
         transfer_id: String,
-        entry_id: String,
+        // 临时接收尚未认领或因内容重复被丢弃时，没有历史记录归属。
+        entry_id: Option<String>,
         attempt_id: Option<String>,
         status: String,
         reason: Option<String>,
@@ -76,12 +77,22 @@ pub enum DeliveryHostEvent {
     },
 }
 
+/// Membership subsystem events for the host.
+#[derive(Debug, Clone)]
+pub enum MembershipHostEvent {
+    /// The authoritative membership ledger committed a new revision.
+    LedgerCommitted { revision: u64 },
+    /// 当前加入结果已经变化，宿主必须重新读取完整快照。
+    AdmissionChanged,
+}
+
 /// Unified host event envelope.
 #[derive(Debug, Clone)]
 pub enum HostEvent {
     Clipboard(ClipboardHostEvent),
     Transfer(TransferHostEvent),
     Delivery(DeliveryHostEvent),
+    Membership(MembershipHostEvent),
 }
 
 /// Error returned when emitting a host event fails.

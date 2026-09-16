@@ -1,6 +1,6 @@
 pub mod domain;
 
 pub use domain::{
-    AdmissionOffer, GroupAdmission, JoinOffer, PreparedAdmissionOffer,
-    PreparedAdmissionTargetAccess, PreparedGroupJoin, ProofDerivedKey, SpaceAccessProofArtifact,
+    GroupAdmission, JoinOffer, PreparedAdmissionTargetAccess, PreparedGroupJoin, ProofDerivedKey,
+    SpaceAccessProofArtifact,
 };

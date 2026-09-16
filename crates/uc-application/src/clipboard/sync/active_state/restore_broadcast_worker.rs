@@ -26,12 +26,12 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::{debug, instrument, warn};
 
-use uc_core::membership::{ContentExchangeGatePort, CurrentWorkspacePeerScopePort};
 use uc_core::ports::clipboard::ActiveClipboardDispatchPort;
-use uc_core::ports::{PeerAddressRepositoryPort, PresencePort, SettingsPort};
+use uc_core::ports::{PeerAddressRepositoryPort, PeerReachabilityPort, SettingsPort};
 use uc_core::MemberRepositoryPort;
 
 use crate::clipboard::write::RestoreBroadcastRequest;
+use crate::deps::CurrentSpaceMemberScopePort;
 
 use super::super::send_gate::MemberSendGate;
 use super::fanout::fan_out_active_state;
@@ -45,8 +45,8 @@ pub(crate) struct RestoreBroadcastWorker {
     settings: Arc<dyn SettingsPort>,
     dispatch: Arc<dyn ActiveClipboardDispatchPort>,
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-    peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
-    presence: Arc<dyn PresencePort>,
+    peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
+    peer_reachability: Arc<dyn PeerReachabilityPort>,
     send_gate: MemberSendGate,
 }
 
@@ -56,19 +56,18 @@ impl RestoreBroadcastWorker {
         settings: Arc<dyn SettingsPort>,
         dispatch: Arc<dyn ActiveClipboardDispatchPort>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
-        presence: Arc<dyn PresencePort>,
+        peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
+        peer_reachability: Arc<dyn PeerReachabilityPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
-        content_gate: Arc<dyn ContentExchangeGatePort>,
     ) -> Self {
         Self {
             rx,
             settings,
             dispatch,
             peer_addr_repo,
-            peer_scope,
-            presence,
-            send_gate: MemberSendGate::new_with_content_gate(member_repo, content_gate),
+            peer_scope: Arc::clone(&peer_scope),
+            peer_reachability,
+            send_gate: MemberSendGate::new(member_repo),
         }
     }
 
@@ -141,7 +140,7 @@ impl RestoreBroadcastWorker {
             &self.dispatch,
             &self.peer_addr_repo,
             &self.peer_scope,
-            &self.presence,
+            &self.peer_reachability,
             &self.send_gate,
             &request.state,
             &request.categories,
@@ -160,20 +159,18 @@ mod tests {
     use chrono::Utc;
     use tokio::sync::mpsc::unbounded_channel;
 
+    use crate::deps::{
+        CurrentSpaceMemberScope, CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort,
+    };
     use uc_core::clipboard::{
         ActiveClipboardState, ClipboardContentCategory, ClipboardContentCategorySet,
     };
     use uc_core::ids::{DeviceId, EntryId};
-    use uc_core::membership::{
-        ContentExchangeGatePort, CurrentWorkspaceLocalMembership, CurrentWorkspacePeerScopeError,
-        CurrentWorkspacePeerScopePort, CurrentWorkspacePeerScopeSource,
-        CurrentWorkspacePeerSnapshot,
-    };
     use uc_core::membership::{MembershipError, SpaceMember};
     use uc_core::ports::clipboard::ActiveClipboardDispatchError;
     use uc_core::ports::{
-        PeerAddressError, PeerAddressRecord, PresenceError, PresenceEvent, PresencePort,
-        ReachabilityState,
+        PeerAddressError, PeerAddressRecord, PeerReachabilityChanged, PeerReachabilityError,
+        PeerReachabilityPort, ReachabilityState,
     };
     use uc_core::settings::model::Settings;
     use uc_core::MemberSyncPreferences;
@@ -181,19 +178,19 @@ mod tests {
     /// Presence fake reporting every device with a fixed reachability. The
     /// broadcast tests want their roster peer reachable, so `Online` is the
     /// default; `Offline` exercises the fan-out skip.
-    struct StaticPresence(ReachabilityState);
+    struct StaticPeerReachability(ReachabilityState);
     #[async_trait]
-    impl PresencePort for StaticPresence {
+    impl PeerReachabilityPort for StaticPeerReachability {
         async fn ensure_reachable(
             &self,
             _device: &DeviceId,
-        ) -> Result<ReachabilityState, PresenceError> {
+        ) -> Result<ReachabilityState, PeerReachabilityError> {
             Ok(self.0)
         }
         async fn current_state(&self, _device: &DeviceId) -> ReachabilityState {
             self.0
         }
-        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<PresenceEvent> {
+        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<PeerReachabilityChanged> {
             tokio::sync::broadcast::channel(1).1
         }
     }
@@ -288,36 +285,16 @@ mod tests {
         }
     }
 
-    struct BlockedUpgradePeer;
-
-    #[async_trait]
-    impl ContentExchangeGatePort for BlockedUpgradePeer {
-        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
-            true
-        }
-    }
-
-    struct AllowAllContent;
-
-    #[async_trait]
-    impl ContentExchangeGatePort for AllowAllContent {
-        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
-            false
-        }
-    }
-
     struct FixedPeerScope(Vec<DeviceId>);
 
     #[async_trait]
-    impl CurrentWorkspacePeerScopePort for FixedPeerScope {
-        async fn snapshot(
-            &self,
-        ) -> Result<CurrentWorkspacePeerSnapshot, CurrentWorkspacePeerScopeError> {
-            Ok(CurrentWorkspacePeerSnapshot {
+    impl CurrentSpaceMemberScopePort for FixedPeerScope {
+        async fn snapshot(&self) -> Result<CurrentSpaceMemberScope, CurrentSpaceMemberScopeError> {
+            Ok(CurrentSpaceMemberScope {
                 revision: 1,
-                source: CurrentWorkspacePeerScopeSource::CurrentHistory,
-                local_membership: CurrentWorkspaceLocalMembership::Active,
-                peer_device_ids: self.0.clone(),
+                local_member_active: true,
+                usable_peer_device_ids: self.0.clone(),
+                paused_peer_devices: Vec::new(),
             })
         }
     }
@@ -338,7 +315,7 @@ mod tests {
 
     fn build_worker(
         sync_on_restore: bool,
-        presence: ReachabilityState,
+        peer_reachability: ReachabilityState,
     ) -> (
         RestoreBroadcastWorker,
         tokio::sync::mpsc::UnboundedSender<RestoreBroadcastRequest>,
@@ -354,9 +331,8 @@ mod tests {
                 device: DeviceId::new("peer-1"),
             }),
             Arc::new(FixedPeerScope(vec![DeviceId::new("peer-1")])),
-            Arc::new(StaticPresence(presence)),
+            Arc::new(StaticPeerReachability(peer_reachability)),
             Arc::new(AllowAllMembers),
-            Arc::new(AllowAllContent),
         );
         (worker, tx, dispatch)
     }
@@ -375,9 +351,8 @@ mod tests {
                 device: DeviceId::new("peer-1"),
             }),
             Arc::new(FixedPeerScope(vec![])),
-            Arc::new(StaticPresence(ReachabilityState::Online)),
+            Arc::new(StaticPeerReachability(ReachabilityState::Online)),
             Arc::new(AllowAllMembers),
-            Arc::new(AllowAllContent),
         );
         let handle = worker.spawn();
 
@@ -432,10 +407,9 @@ mod tests {
             Arc::new(OnePeerAddrRepo {
                 device: DeviceId::new("peer-1"),
             }),
-            Arc::new(FixedPeerScope(vec![DeviceId::new("peer-1")])),
-            Arc::new(StaticPresence(ReachabilityState::Online)),
+            Arc::new(FixedPeerScope(vec![])),
+            Arc::new(StaticPeerReachability(ReachabilityState::Online)),
             Arc::new(AllowAllMembers),
-            Arc::new(BlockedUpgradePeer),
         );
         let handle = worker.spawn();
 

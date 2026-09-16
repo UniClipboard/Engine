@@ -21,7 +21,7 @@
 //! 只断"bind 不 panic"这一条**弱**不等式；具体 Relay 候选行为留给 Tier C
 //! 抓包验证。
 //!
-//! 见：`.planning/research/PITFALLS.md` Pitfall 8 + 094-CONTEXT.md D-C1。
+//! 见：`.planning/research/PITFALLS.md` Pitfall 8 + `094-CONTEXT.md` D-C1。
 
 use std::time::Duration;
 
@@ -30,7 +30,7 @@ use iroh_mdns_address_lookup::MdnsAddressLookup;
 
 const TEST_ALPN: &[u8] = b"uniclipboard/lan-only-test/0";
 
-/// loopback bind helper —— 与 `iroh_presence_probe.rs:17-29` 同模式。
+/// loopback bind helper —— 与 `iroh_peer_reachability_probe.rs:17-29` 同模式。
 async fn bind_with_relay_mode(mode: RelayMode) -> Endpoint {
     Endpoint::builder(iroh::endpoint::presets::N0)
         .alpns(vec![TEST_ALPN.to_vec()])

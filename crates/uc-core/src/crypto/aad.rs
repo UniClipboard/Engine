@@ -102,6 +102,9 @@ pub fn for_blob(blob_id: &BlobId) -> Vec<u8> {
 /// AAD format version for V2 blob storage (binary format with zstd compression).
 const AAD_BLOB_V2_VERSION: &str = "v2";
 
+/// V3 profile blob 的 AAD 格式版本。
+const AAD_BLOB_V3_VERSION: &str = "v3";
+
 /// Generates AAD for V2 blob storage encryption/decryption.
 ///
 /// # Format
@@ -122,6 +125,15 @@ const AAD_BLOB_V2_VERSION: &str = "v2";
 pub fn for_blob_v2(blob_id: &BlobId) -> Vec<u8> {
     format!(
         "{AAD_NAMESPACE}:blob:{AAD_BLOB_V2_VERSION}|{}",
+        blob_id.as_ref()
+    )
+    .into_bytes()
+}
+
+/// 为 V3 profile blob 生成与旧 UCBL 格式域分离的业务 AAD。
+pub fn for_blob_v3(blob_id: &BlobId) -> Vec<u8> {
+    format!(
+        "{AAD_NAMESPACE}:blob:{AAD_BLOB_V3_VERSION}|{}",
         blob_id.as_ref()
     )
     .into_bytes()
@@ -241,4 +253,23 @@ pub fn for_chunk_transfer(transfer_id: &[u8; 16], chunk_index: u32) -> Vec<u8> {
     aad.extend_from_slice(transfer_id);
     aad.extend_from_slice(&chunk_index.to_le_bytes());
     aad
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blob_versions_are_domain_separated() {
+        let blob_id = BlobId::from("same-blob");
+
+        let v1 = for_blob(&blob_id);
+        let v2 = for_blob_v2(&blob_id);
+        let v3 = for_blob_v3(&blob_id);
+
+        assert_ne!(v1, v2);
+        assert_ne!(v1, v3);
+        assert_ne!(v2, v3);
+        assert_eq!(v3, b"uc:blob:v3|same-blob");
+    }
 }

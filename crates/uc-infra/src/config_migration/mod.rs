@@ -33,7 +33,7 @@ mod tests {
     //! End-to-end adapter tests: export → preview → stage against real ports.
     //!
     //! The source is a *genuinely initialized* installation — a real `KeySlot`
-    //! and matching KEK produced by `DefaultSpaceAccessAdapter::initialize`. The
+    //! and matching KEK produced by `RuntimeSpaceAccessAdapter::initialize`. The
     //! export seals the bundle with that KEK (no export password), so opening it
     //! requires the space passphrase that derives the KEK ([`FIXTURE_PASSPHRASE`]).
 
@@ -45,20 +45,18 @@ mod tests {
         ConfigMigrationError, ConfigSourceMode, ExportConfigBundlePort, PreviewConfigImportPort,
         StageConfigImportPort,
     };
-    use uc_core::ports::space::SpaceAccessStore;
     use uc_core::ports::{ClockPort, LocalIdentityPort, SecureStorageError, SecureStoragePort};
     use uc_core::security::IdentityFingerprint;
 
     use super::staging::{
-        PendingImportMarker, SecretsFile, StagingLayout, DEVICE_ID_MEMBER, IROH_IDENTITY_PREFIX,
-        KEYSLOT_MEMBER, SETUP_STATUS_MEMBER,
+        PendingImportMarker, SecretsFile, StagingLayout, CURRENT_SPACE_ID_MEMBER, DEVICE_ID_MEMBER,
+        IROH_IDENTITY_PREFIX, KEYSLOT_MEMBER,
     };
     use super::{ConfigMigrationAdapter, ConfigMigrationPaths};
     use crate::db::pool::init_db_pool;
     use crate::fs::key_slot_store::JsonKeySlotStore;
-    use crate::security::{
-        DefaultCurrentProfile, DefaultSpaceAccessAdapter, InMemorySession, KeyMaterialStore,
-    };
+    use crate::security::DefaultCurrentProfile;
+    use crate::space::{InMemorySession, KeyMaterialStore, MigrationSpaceAccessAdapter};
 
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -141,12 +139,12 @@ mod tests {
                 secure_storage.clone(),
                 Arc::new(JsonKeySlotStore::new(vault.clone())),
             ));
-            let space_access = DefaultSpaceAccessAdapter::new(
+            let space_access = MigrationSpaceAccessAdapter::new(
                 key_material,
                 Arc::new(DefaultCurrentProfile::new()),
                 Arc::new(InMemorySession::new()),
             );
-            SpaceAccessStore::initialize(
+            uc_application::deps::InitializeSpacePort::initialize(
                 &space_access,
                 &SpaceId::from("space"),
                 &Passphrase::from(FIXTURE_PASSPHRASE),
@@ -162,8 +160,8 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            vault.join(".setup_status"),
-            b"{\"has_completed\":true,\"space_id\":null}",
+            vault.join(".current-space-id-v1"),
+            b"encrypted-current-space-id",
         )
         .unwrap();
         std::fs::write(data_root.join("settings.json"), b"{\"schema_version\":1}").unwrap();
@@ -295,13 +293,13 @@ mod tests {
         assert!(staged_identity.exists());
         assert_eq!(std::fs::read(staged_identity).unwrap(), vec![7u8; 32]);
 
-        // The setup-status marker travels through the bundle into staging so a
+        // The current-Space identity travels through the bundle into staging so a
         // later apply keeps the installation flagged as initialized.
-        let staged_setup_status = layout.staging_dir().join(SETUP_STATUS_MEMBER);
-        assert!(staged_setup_status.exists());
+        let staged_current_space_id = layout.staging_dir().join(CURRENT_SPACE_ID_MEMBER);
+        assert!(staged_current_space_id.exists());
         assert_eq!(
-            std::fs::read(staged_setup_status).unwrap(),
-            b"{\"has_completed\":true,\"space_id\":null}"
+            std::fs::read(staged_current_space_id).unwrap(),
+            b"encrypted-current-space-id"
         );
     }
 

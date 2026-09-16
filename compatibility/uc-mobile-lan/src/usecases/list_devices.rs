@@ -15,7 +15,7 @@
 //!
 //! 2. **排序由 use case 决定**：repository port 不承诺顺序（不同 adapter
 //!    自由实现），UI 期望"最近活跃在前，新登记在前"——这是应用语义而非
-//!    存储语义，按 `uc-application/AGENTS.md` §4.1（编排不重定义业务真相）
+//!    存储语义，按 `docs/design-docs/layers/application.md`（编排不重定义业务真相）
 //!    的反向解读，这种"展示性排序"本就属于编排层。
 //!
 //! 现阶段只有一个使用者（设置页 + CLI list 命令），summary 类型还住在

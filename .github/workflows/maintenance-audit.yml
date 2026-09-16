@@ -1,0 +1,500 @@
+name: Maintenance Audit
+
+on:
+  schedule:
+    # 每周一 09:00（Asia/Shanghai）。GitHub Actions cron 使用 UTC。
+    - cron: "0 1 * * 1"
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: 只运行一个专项，或运行全部专项并汇总
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - module_depth
+          - failure_recovery
+          - runtime_resilience
+          - observability
+          - security_contract
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maintenance-audit-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  responses_api_preflight:
+    name: Responses API preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate streaming response contract
+        env:
+          CODEX_API_ENDPOINT: ${{ secrets.CODEX_API_ENDPOINT }}
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+        run: |
+          if [ -z "$CODEX_API_ENDPOINT" ] || [ -z "$CODEX_API_KEY" ]; then
+            echo "::error::CODEX_API_ENDPOINT and CODEX_API_KEY must be available to this repository."
+            exit 1
+          fi
+
+          response_body="$(mktemp)"
+          response_headers="$(mktemp)"
+          http_status="$({
+            curl \
+              --silent \
+              --show-error \
+              --max-time 60 \
+              --output "$response_body" \
+              --dump-header "$response_headers" \
+              --write-out "%{http_code}" \
+              --header "Authorization: Bearer $CODEX_API_KEY" \
+              --header "Content-Type: application/json" \
+              --data '{"model":"gpt-5.6-sol","input":"Respond only with OK.","stream":true,"store":false}' \
+              "$CODEX_API_ENDPOINT"
+          } || true)"
+          content_type="$(sed -n 's/^[Cc]ontent-[Tt]ype:[[:space:]]*//p' "$response_headers" | tail -n 1 | tr -d '\r')"
+
+          echo "Responses API HTTP status: ${http_status:-unavailable}"
+          echo "Responses API Content-Type: ${content_type:-unavailable}"
+
+          if [[ ! "$http_status" =~ ^2[0-9][0-9]$ ]]; then
+            error_type="$(jq -r '.error.type // .error.code // .type // "unknown"' "$response_body" 2>/dev/null || true)"
+            echo "::error::Responses API preflight failed with HTTP ${http_status:-unavailable}; error type: ${error_type:-unknown}."
+            exit 1
+          fi
+
+          if ! grep -Eq '(^event:[[:space:]]*response.completed|"type"[[:space:]]*:[[:space:]]*"response.completed")' "$response_body"; then
+            echo "::error::Responses API stream ended without response.completed. Verify that CODEX_API_ENDPOINT is the full Responses API URL and that the upstream supports Responses API SSE."
+            exit 1
+          fi
+
+          echo "Responses API streaming contract verified."
+
+  audit:
+    name: Audit / ${{ matrix.lane }}
+    needs: responses_api_preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      AUDIT_PROMPT: |
+        运行仓库 skill `${{ matrix.skill }}`，并且本 session 只运行这一个 skill。
+
+        这是定时全仓维护审查。请严格遵循 skill 及其共享 finding contract：
+        - scope.mode 必须是 `full`；
+        - run_id 必须是 `${{ github.run_id }}-${{ github.run_attempt }}`；
+        - head_ref 必须是 `${{ github.sha }}`，base_ref 为 null；
+        - 将 UTF-8 JSON artifact 写入 `audit-artifacts/${{ matrix.lane }}.json`；
+        - lane 必须是 `${{ matrix.lane }}`；
+        - 如实记录 completed、partial 或 blocked，以及所有 skipped 检查；
+        - 定时 runner 未提供设备、运行时 profile 或 Release bundle 时，将对应检查记为 skipped；
+          这些预期环境缺口本身不阻止 status=completed；只有适用于本次仓库静态审查的检查
+          未能完成时才使用 partial；
+        - 不实现修复，不修改其他仓库文件，不创建 Issue 或 PR，不访问远端业务系统；
+        - 最终回复只简短确认 artifact 路径和执行状态，不在回复中复制完整报告。
+    strategy:
+      fail-fast: false
+      # 共享的自定义 Responses API 接入按单路顺序执行，避免审查请求相互争抢容量。
+      max-parallel: 1
+      matrix:
+        include:
+          - lane: module_depth
+            skill: uni-module-depth-audit
+          - lane: failure_recovery
+            skill: uni-failure-recovery-audit
+          - lane: runtime_resilience
+            skill: uni-runtime-resilience-audit
+          - lane: observability
+            skill: uni-observability-audit
+          - lane: security_contract
+            skill: uni-security-contract-audit
+
+    steps:
+      - name: Create unprivileged audit user
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane }}
+        run: |
+          sudo adduser --system --home /home/uni-auditor --shell /bin/bash --group uni-auditor
+          sudo usermod -a -G uni-auditor runner
+          sudo usermod -a -G runner uni-auditor
+
+      - name: Check out repository
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane }}
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare restricted audit workspace
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane }}
+        run: |
+          mkdir -p audit-artifacts
+          sudo chown -R runner:uni-auditor "$GITHUB_WORKSPACE"
+          sudo chmod -R g+rX "$GITHUB_WORKSPACE"
+          sudo chmod -R g+rwX audit-artifacts
+          sudo find audit-artifacts -type d -exec chmod g+s {} +
+
+          # sudo 为低权限用户使用受限 PATH。仅暴露 runner 预装 Rust 工具链的
+          # 只读执行面，并让该用户使用自己的可写 Cargo home。
+          sudo install -d -o uni-auditor -g uni-auditor /home/uni-auditor/.cargo
+          sudo chmod g+rx /home/runner /home/runner/.rustup
+          for tool in cargo rustc rustdoc rustfmt cargo-fmt clippy-driver cargo-clippy; do
+            tool_path="$(rustup which "$tool")"
+            sudo chmod g+rX "$tool_path"
+            sudo ln -sf "$tool_path" "/usr/local/bin/$tool"
+          done
+          sudo -u uni-auditor -- cargo --version
+
+      - name: Run ${{ matrix.skill }} (attempt 1)
+        id: audit_attempt_1
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane }}
+        continue-on-error: true
+        uses: openai/codex-action@v1
+        with:
+          responses-api-endpoint: ${{ secrets.CODEX_API_ENDPOINT || 'https://api.openai.com/v1/responses' }}
+          openai-api-key: ${{ secrets.CODEX_API_KEY }}
+          safety-strategy: unprivileged-user
+          codex-user: uni-auditor
+          model: gpt-5.6-sol
+          # 仓库与产物目录的 Unix 权限是写入边界；避免低权限账户再次嵌套
+          # bubblewrap，后者在托管 runner 上会于工具执行前发生挂载失败。
+          sandbox: danger-full-access
+          prompt: ${{ env.AUDIT_PROMPT }}
+
+      - name: Verify audit attempt 1 output
+        id: audit_output_1
+        if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane) }}
+        continue-on-error: true
+        env:
+          ACTION_OUTCOME: ${{ steps.audit_attempt_1.outcome }}
+          ARTIFACT: audit-artifacts/${{ matrix.lane }}.json
+        run: |
+          if [[ "$ACTION_OUTCOME" != "success" || ! -s "$ARTIFACT" ]]; then
+            echo "::error::Codex attempt 1 did not produce a usable lane artifact."
+            exit 1
+          fi
+
+      - name: Back off before audit attempt 2
+        if: ${{ steps.audit_output_1.outcome == 'failure' }}
+        env:
+          ARTIFACT: audit-artifacts/${{ matrix.lane }}.json
+        run: |
+          rm -f "$ARTIFACT"
+          sleep 60
+
+      - name: Run ${{ matrix.skill }} (attempt 2)
+        id: audit_attempt_2
+        if: ${{ steps.audit_output_1.outcome == 'failure' }}
+        continue-on-error: true
+        uses: openai/codex-action@v1
+        with:
+          responses-api-endpoint: ${{ secrets.CODEX_API_ENDPOINT || 'https://api.openai.com/v1/responses' }}
+          openai-api-key: ${{ secrets.CODEX_API_KEY }}
+          safety-strategy: unprivileged-user
+          codex-user: uni-auditor
+          model: gpt-5.6-terra
+          sandbox: danger-full-access
+          prompt: ${{ env.AUDIT_PROMPT }}
+
+      - name: Verify audit attempt 2 output
+        id: audit_output_2
+        if: ${{ always() && steps.audit_output_1.outcome == 'failure' }}
+        continue-on-error: true
+        env:
+          ACTION_OUTCOME: ${{ steps.audit_attempt_2.outcome }}
+          ARTIFACT: audit-artifacts/${{ matrix.lane }}.json
+        run: |
+          if [[ "$ACTION_OUTCOME" != "success" || ! -s "$ARTIFACT" ]]; then
+            echo "::error::Codex attempt 2 did not produce a usable lane artifact."
+            exit 1
+          fi
+
+      - name: Back off before audit attempt 3
+        if: ${{ steps.audit_output_2.outcome == 'failure' }}
+        env:
+          ARTIFACT: audit-artifacts/${{ matrix.lane }}.json
+        run: |
+          rm -f "$ARTIFACT"
+          sleep 60
+
+      - name: Run ${{ matrix.skill }} (attempt 3)
+        id: audit_attempt_3
+        if: ${{ steps.audit_output_2.outcome == 'failure' }}
+        continue-on-error: true
+        uses: openai/codex-action@v1
+        with:
+          responses-api-endpoint: ${{ secrets.CODEX_API_ENDPOINT || 'https://api.openai.com/v1/responses' }}
+          openai-api-key: ${{ secrets.CODEX_API_KEY }}
+          safety-strategy: unprivileged-user
+          codex-user: uni-auditor
+          model: gpt-5.6-luna
+          sandbox: danger-full-access
+          prompt: ${{ env.AUDIT_PROMPT }}
+
+      - name: Verify audit attempt 3 output
+        id: audit_output_3
+        if: ${{ always() && steps.audit_output_2.outcome == 'failure' }}
+        continue-on-error: true
+        env:
+          ACTION_OUTCOME: ${{ steps.audit_attempt_3.outcome }}
+          ARTIFACT: audit-artifacts/${{ matrix.lane }}.json
+        run: |
+          if [[ "$ACTION_OUTCOME" != "success" || ! -s "$ARTIFACT" ]]; then
+            echo "::error::Codex attempt 3 did not produce a usable lane artifact."
+            exit 1
+          fi
+
+      - name: Require a usable audit artifact
+        if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane) }}
+        env:
+          ATTEMPT_1: ${{ steps.audit_output_1.outcome }}
+          ATTEMPT_2: ${{ steps.audit_output_2.outcome }}
+          ATTEMPT_3: ${{ steps.audit_output_3.outcome }}
+        run: |
+          if [[ "$ATTEMPT_1" != "success" && "$ATTEMPT_2" != "success" && "$ATTEMPT_3" != "success" ]]; then
+            echo "::error::All Codex audit attempts failed to produce an artifact (attempts: $ATTEMPT_1, $ATTEMPT_2, $ATTEMPT_3)."
+            exit 1
+          fi
+
+      - name: Validate lane artifact
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane }}
+        env:
+          ARTIFACT: audit-artifacts/${{ matrix.lane }}.json
+          EXPECTED_LANE: ${{ matrix.lane }}
+          EXPECTED_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+          EXPECTED_HEAD_REF: ${{ github.sha }}
+        run: |
+          jq -e \
+            --arg lane "$EXPECTED_LANE" \
+            --arg run_id "$EXPECTED_RUN_ID" \
+            --arg head_ref "$EXPECTED_HEAD_REF" \
+            '
+              .schema_version == 1 and
+              .run_id == $run_id and
+              .lane == $lane and
+              (.status == "completed" or .status == "partial" or .status == "blocked") and
+              .scope.mode == "full" and
+              (.scope | has("base_ref")) and
+              .scope.base_ref == null and
+              .scope.head_ref == $head_ref and
+              (.scope.paths_reviewed | type == "array") and
+              (.scope.excluded | type == "array") and
+              (.sources_of_truth | type == "array") and
+              (.checks | type == "array") and
+              (.findings | type == "array") and
+              (.handoff | type == "array") and
+              .redaction.reviewed == true
+            ' "$ARTIFACT" > /dev/null
+
+      - name: Require complete lane coverage
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane }}
+        env:
+          ARTIFACT: audit-artifacts/${{ matrix.lane }}.json
+        run: jq -e '.status == "completed"' "$ARTIFACT" > /dev/null
+
+      - name: Upload lane artifact
+        if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.lane == 'all' || inputs.lane == matrix.lane) }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: uni-maintenance-audit-lane-${{ matrix.lane }}
+          path: audit-artifacts/${{ matrix.lane }}.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  report:
+    name: Aggregate developer report
+    if: ${{ always() && needs.responses_api_preflight.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.lane == 'all') }}
+    needs:
+      - responses_api_preflight
+      - audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      REPORT_PROMPT: |
+        运行仓库 skill `uni-audit-report`，并且本 session 只运行这一个 skill。
+
+        只汇总 `audit-input/` 中已有的专项 JSON artifacts，不读取源码重新审查，
+        不补做缺失 lane，不执行 cargo、测试或架构检查。参数如下：
+        - run_id：`${{ github.run_id }}-${{ github.run_attempt }}`；
+        - 预期 lane：`module_depth`、`failure_recovery`、`runtime_resilience`、`observability`、`security_contract`；
+        - 机器可读输出：`audit-output/maintenance-audit.json`；
+        - 开发者 Markdown 输出：`audit-output/maintenance-audit.md`；
+        - 专项 matrix job 结果：`${{ needs.audit.result }}`。
+
+        报告必须优先展示覆盖状态与最高风险，区分“lane 执行状态”和“finding 风险等级”，
+        保留原始 lane、finding id、证据、skipped 项与冲突结论的可追溯性。缺失或无效
+        artifact 必须标为 coverage 问题，不得当作通过。除上述两个输出文件外不要修改仓库。
+
+    steps:
+      - name: Create unprivileged audit user
+        run: |
+          sudo adduser --system --home /home/uni-auditor --shell /bin/bash --group uni-auditor
+          sudo usermod -a -G uni-auditor runner
+          sudo usermod -a -G runner uni-auditor
+
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prepare report directories
+        run: mkdir -p audit-input audit-output
+
+      - name: Download lane artifacts
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: uni-maintenance-audit-lane-*
+          path: audit-input
+          merge-multiple: true
+
+      - name: Prepare restricted report workspace
+        run: |
+          sudo chown -R runner:uni-auditor "$GITHUB_WORKSPACE"
+          sudo chmod -R g+rX "$GITHUB_WORKSPACE"
+          sudo chmod -R g+rwX audit-output
+          sudo find audit-output -type d -exec chmod g+s {} +
+
+      - name: Run uni-audit-report (attempt 1)
+        id: report_attempt_1
+        continue-on-error: true
+        uses: openai/codex-action@v1
+        with:
+          responses-api-endpoint: ${{ secrets.CODEX_API_ENDPOINT || 'https://api.openai.com/v1/responses' }}
+          openai-api-key: ${{ secrets.CODEX_API_KEY }}
+          safety-strategy: unprivileged-user
+          codex-user: uni-auditor
+          model: gpt-5.6-sol
+          sandbox: danger-full-access
+          prompt: ${{ env.REPORT_PROMPT }}
+
+      - name: Verify report attempt 1 output
+        id: report_output_1
+        if: ${{ always() }}
+        continue-on-error: true
+        env:
+          ACTION_OUTCOME: ${{ steps.report_attempt_1.outcome }}
+        run: |
+          if [[ "$ACTION_OUTCOME" != "success" || ! -s audit-output/maintenance-audit.md ]]; then
+            echo "::error::Codex report attempt 1 did not produce usable outputs."
+            exit 1
+          fi
+          jq -e '.' audit-output/maintenance-audit.json > /dev/null
+
+      - name: Back off before report attempt 2
+        if: ${{ steps.report_output_1.outcome == 'failure' }}
+        run: |
+          rm -f audit-output/maintenance-audit.json audit-output/maintenance-audit.md
+          sleep 60
+
+      - name: Run uni-audit-report (attempt 2)
+        id: report_attempt_2
+        if: ${{ steps.report_output_1.outcome == 'failure' }}
+        continue-on-error: true
+        uses: openai/codex-action@v1
+        with:
+          responses-api-endpoint: ${{ secrets.CODEX_API_ENDPOINT || 'https://api.openai.com/v1/responses' }}
+          openai-api-key: ${{ secrets.CODEX_API_KEY }}
+          safety-strategy: unprivileged-user
+          codex-user: uni-auditor
+          model: gpt-5.6-terra
+          sandbox: danger-full-access
+          prompt: ${{ env.REPORT_PROMPT }}
+
+      - name: Verify report attempt 2 output
+        id: report_output_2
+        if: ${{ always() && steps.report_output_1.outcome == 'failure' }}
+        continue-on-error: true
+        env:
+          ACTION_OUTCOME: ${{ steps.report_attempt_2.outcome }}
+        run: |
+          if [[ "$ACTION_OUTCOME" != "success" || ! -s audit-output/maintenance-audit.md ]]; then
+            echo "::error::Codex report attempt 2 did not produce usable outputs."
+            exit 1
+          fi
+          jq -e '.' audit-output/maintenance-audit.json > /dev/null
+
+      - name: Back off before report attempt 3
+        if: ${{ steps.report_output_2.outcome == 'failure' }}
+        run: |
+          rm -f audit-output/maintenance-audit.json audit-output/maintenance-audit.md
+          sleep 60
+
+      - name: Run uni-audit-report (attempt 3)
+        id: report_attempt_3
+        if: ${{ steps.report_output_2.outcome == 'failure' }}
+        continue-on-error: true
+        uses: openai/codex-action@v1
+        with:
+          responses-api-endpoint: ${{ secrets.CODEX_API_ENDPOINT || 'https://api.openai.com/v1/responses' }}
+          openai-api-key: ${{ secrets.CODEX_API_KEY }}
+          safety-strategy: unprivileged-user
+          codex-user: uni-auditor
+          model: gpt-5.6-luna
+          sandbox: danger-full-access
+          prompt: ${{ env.REPORT_PROMPT }}
+
+      - name: Verify report attempt 3 output
+        id: report_output_3
+        if: ${{ always() && steps.report_output_2.outcome == 'failure' }}
+        continue-on-error: true
+        env:
+          ACTION_OUTCOME: ${{ steps.report_attempt_3.outcome }}
+        run: |
+          if [[ "$ACTION_OUTCOME" != "success" || ! -s audit-output/maintenance-audit.md ]]; then
+            echo "::error::Codex report attempt 3 did not produce usable outputs."
+            exit 1
+          fi
+          jq -e '.' audit-output/maintenance-audit.json > /dev/null
+
+      - name: Require usable aggregate outputs
+        if: ${{ always() }}
+        env:
+          ATTEMPT_1: ${{ steps.report_output_1.outcome }}
+          ATTEMPT_2: ${{ steps.report_output_2.outcome }}
+          ATTEMPT_3: ${{ steps.report_output_3.outcome }}
+        run: |
+          if [[ "$ATTEMPT_1" != "success" && "$ATTEMPT_2" != "success" && "$ATTEMPT_3" != "success" ]]; then
+            echo "::error::All Codex report attempts failed to produce outputs (attempts: $ATTEMPT_1, $ATTEMPT_2, $ATTEMPT_3)."
+            exit 1
+          fi
+
+      - name: Validate aggregate outputs
+        run: |
+          test -s audit-output/maintenance-audit.md
+          jq -e '.' audit-output/maintenance-audit.json > /dev/null
+
+      - name: Publish developer summary
+        if: ${{ always() }}
+        env:
+          LANE_JOB_RESULT: ${{ needs.audit.result }}
+          DOWNLOAD_OUTCOME: ${{ steps.download.outcome }}
+        run: |
+          {
+            echo "# Uni 定时维护审查"
+            echo
+            echo "- 专项 jobs：\`$LANE_JOB_RESULT\`"
+            echo "- Artifact 下载：\`$DOWNLOAD_OUTCOME\`"
+            echo "- Run ID：\`${{ github.run_id }}-${{ github.run_attempt }}\`"
+            echo "- Commit：\`${{ github.sha }}\`"
+            echo
+            if [[ -s audit-output/maintenance-audit.md ]]; then
+              cat audit-output/maintenance-audit.md
+            else
+              echo "> 汇总报告未生成。请查看本 job 与各专项 job 日志，并下载仍然可用的原始 artifacts。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload aggregate report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: uni-maintenance-audit-report
+          path: audit-output/
+          if-no-files-found: warn
+          retention-days: 90

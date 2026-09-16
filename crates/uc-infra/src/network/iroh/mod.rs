@@ -6,7 +6,6 @@
 
 pub mod active_clipboard;
 mod addr_filter;
-pub mod admission_completion_recovery_adapter;
 pub mod blobs;
 pub mod clipboard_dispatch_adapter;
 pub mod clipboard_receiver_adapter;
@@ -14,16 +13,29 @@ pub mod clipboard_wire;
 mod conn_path;
 mod connect;
 pub mod connection_channel_adapter;
+mod connection_diagnostics;
 pub mod group_update_adapter;
 pub mod identity_store;
 pub mod membership_attestation_adapter;
+mod membership_branch_recovery_adapter;
+pub(crate) mod membership_branch_recovery_wire;
 pub mod membership_history_exchange_adapter;
 mod net_recovery;
+mod network_partition;
 pub mod node;
+mod observed_address_lookup;
+mod observed_connections;
+mod peer_address_resolver;
+pub mod peer_reachability_adapter;
+mod peer_reachability_protocol;
 pub mod persistable_addr;
-pub mod presence_adapter;
+mod protocol_router;
 pub mod relay_probe;
 pub(crate) mod runtime_consts;
+mod session_generation;
+pub mod space_admission;
+mod space_admission_wire;
+mod trace_context;
 pub mod transfer_progress_adapter;
 
 #[cfg(test)]
@@ -48,10 +60,6 @@ pub use active_clipboard::{
     ACTIVE_CLIPBOARD_PULL_ALPN,
 };
 pub(crate) use addr_filter::filter_endpoint_addr;
-pub use admission_completion_recovery_adapter::{
-    IrohAdmissionCompletionRecoveryAdapter, IrohAdmissionCompletionRecoveryHandler,
-    ADMISSION_COMPLETION_RECOVERY_ALPN,
-};
 pub use blobs::{IrohBlobTransferAdapter, BLOBS_ALPN};
 pub use clipboard_dispatch_adapter::{IrohClipboardDispatchAdapter, CLIPBOARD_ALPN};
 pub use clipboard_receiver_adapter::{IrohClipboardReceiverAdapter, IrohClipboardReceiverHandler};
@@ -59,18 +67,29 @@ pub(crate) use connect::connect_with_staggered_retry;
 pub use connection_channel_adapter::IrohConnectionChannelAdapter;
 pub use group_update_adapter::{IrohGroupUpdateAdapter, IrohGroupUpdateHandler, GROUP_UPDATE_ALPN};
 pub use identity_store::{IrohIdentityStore, IDENTITY_STORE_KEY};
+pub use membership_branch_recovery_adapter::IrohMembershipBranchRecoveryChannel;
+pub use membership_branch_recovery_wire::MEMBERSHIP_BRANCH_RECOVERY_ALPN;
 pub use membership_history_exchange_adapter::{
     IrohMembershipHistoryExchangeAdapter, IrohMembershipHistoryExchangeHandler,
     MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
 };
-pub use net_recovery::NetworkRecoveryObservation;
+pub use network_partition::IrohNetworkPartitionGate;
 pub use node::{
     ActiveClipboardHandlers, ActiveClipboardPullHandlers, BlobHandlers, ClipboardHandlers,
     GroupUpdateHandlers, IrohNode, IrohNodeBuilder, IrohNodeConfig, IrohNodeError,
-    IrohRelayAccessToken, PairingHandlers, TransferProgressHandlers,
+    IrohRelayAccessToken, IrohSessionBuilder, PairingInvitationHandlers, PreparedIrohSession,
+    TransferProgressHandlers,
 };
-pub use presence_adapter::{IrohPresenceAdapter, IrohPresenceHandler, PRESENCE_ALPN};
+pub use peer_reachability_adapter::{
+    IrohPeerReachabilityAdapter, IrohPeerReachabilityHandler, LEGACY_PEER_REACHABILITY_ALPN,
+    PEER_REACHABILITY_ALPN,
+};
 pub use relay_probe::{
     IrohRelayProbeAdapter, RelayProbeError as IrohRelayProbeError,
     RelayProbeReport as IrohRelayProbeReport,
+};
+pub use space_admission::{
+    encode_space_admission_route, IrohSpaceAdmissionHandler, IrohSpaceAdmissionTransport,
+    SpaceAdmissionChannelCredentialError, SpaceAdmissionChannelCredentialPort,
+    SponsorOpaqueMaterial, SPACE_ADMISSION_ALPN,
 };

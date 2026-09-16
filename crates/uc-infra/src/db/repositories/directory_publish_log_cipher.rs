@@ -1,16 +1,21 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use uc_core::crypto::aad;
-use uc_core::ids::EntryId;
+use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
+use uc_core::ids::{EntryId, ProfileId};
 
 use crate::security::v1_aead::{decrypt_xchacha_raw, encrypt_xchacha_raw};
+use crate::security::ContentProtection;
+use crate::space::InMemorySession;
 
 const MAGIC: [u8; 4] = *b"UCDP";
 const FORMAT_VERSION: u8 = 1;
 const NONCE_LEN: usize = 24;
 const HEADER_LEN: usize = MAGIC.len() + 1 + NONCE_LEN;
+pub(super) const PUBLISH_LOG_KEY_INFO: &[u8] = b"uniclipboard-directory-publish-log/v1";
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PublishLogCipherError {
@@ -28,6 +33,11 @@ pub(crate) enum PublishLogCipherError {
     Serialize,
     #[error("directory publish log root map deserialization failed")]
     Deserialize,
+    #[error("V3 directory publish log protection failed")]
+    V3 {
+        #[source]
+        source: anyhow::Error,
+    },
     #[cfg(windows)]
     #[error("directory publish log path encoding is invalid for this platform")]
     InvalidPathEncoding,
@@ -48,9 +58,82 @@ pub(crate) struct DirectoryPublishLogCipher {
     key: [u8; 32],
 }
 
+pub(crate) struct V3DirectoryPublishLogCipher {
+    protection: Arc<ContentProtection>,
+}
+
+impl V3DirectoryPublishLogCipher {
+    pub(crate) fn new(protection: Arc<ContentProtection>) -> Self {
+        Self { protection }
+    }
+
+    pub(crate) async fn seal(
+        &self,
+        entry_id: &EntryId,
+        attempt_id: &str,
+        root_map: &[(PathBuf, PathBuf)],
+    ) -> Result<Vec<u8>, PublishLogCipherError> {
+        let payload = EncodedRootMap {
+            roots: root_map
+                .iter()
+                .map(|(staged, final_path)| Ok((encode_path(staged)?, encode_path(final_path)?)))
+                .collect::<Result<Vec<_>, PublishLogCipherError>>()?,
+        };
+        let plaintext =
+            postcard::to_stdvec(&payload).map_err(|_| PublishLogCipherError::Serialize)?;
+        self.protection
+            .seal_for_active(
+                &Plaintext::new(plaintext),
+                &Aad::new(aad::for_directory_publish_log(entry_id, attempt_id)),
+            )
+            .await
+            .map(|ciphertext| ciphertext.into_bytes())
+            .map_err(|source| PublishLogCipherError::V3 {
+                source: anyhow::Error::new(source).context("seal V3 directory publish log"),
+            })
+    }
+
+    pub(crate) async fn open(
+        &self,
+        entry_id: &EntryId,
+        attempt_id: &str,
+        ciphertext: &[u8],
+    ) -> Result<Vec<(PathBuf, PathBuf)>, PublishLogCipherError> {
+        let plaintext = self
+            .protection
+            .open(
+                &Ciphertext::new(ciphertext.to_vec()),
+                &Aad::new(aad::for_directory_publish_log(entry_id, attempt_id)),
+            )
+            .await
+            .map_err(|source| PublishLogCipherError::V3 {
+                source: anyhow::Error::new(source).context("open V3 directory publish log"),
+            })?;
+        let payload: EncodedRootMap = postcard::from_bytes(plaintext.as_bytes())
+            .map_err(|_| PublishLogCipherError::Deserialize)?;
+        payload
+            .roots
+            .into_iter()
+            .map(|(staged, final_path)| Ok((decode_path(staged)?, decode_path(final_path)?)))
+            .collect()
+    }
+}
+
 impl DirectoryPublishLogCipher {
     pub(crate) fn new(key: [u8; 32]) -> Self {
         Self { key }
+    }
+
+    pub(crate) fn legacy_for_upgrade(
+        session: &InMemorySession,
+        profile_id: &ProfileId,
+    ) -> anyhow::Result<Self> {
+        session
+            .derive_stable_subkey(profile_id.as_ref().as_bytes(), PUBLISH_LOG_KEY_INFO)
+            .map(Self::new)
+            .map_err(|source| {
+                anyhow::Error::new(source).context("derive legacy directory-publish key")
+            })
     }
 
     pub(crate) fn seal(

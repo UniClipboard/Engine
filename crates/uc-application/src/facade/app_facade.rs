@@ -1,6 +1,6 @@
 //! `AppFacade` — Slice 1 cross-domain aggregator.
 //!
-//! Per `uc-application/AGENTS.md` §11.4 external consumers reach the
+//! Per `docs/design-docs/layers/application.md` external consumers reach the
 //! application layer exclusively through a facade. `AppFacade` is the
 //! single outward-facing type; internally it just groups sub-facades,
 //! each constructed from its own `*Deps` bundle, so adding a new
@@ -29,40 +29,114 @@ use std::sync::Arc;
 
 use thiserror::Error;
 use tokio::sync::broadcast;
+use uc_core::membership::{MembershipBranchId, MembershipConflictId, MembershipEventId};
 
 use crate::clipboard::sync::V3BlobRef;
 use crate::facade::config_migration::ConfigMigrationFacade;
-use crate::facade::roster::{MemberSummary, PeerSnapshotView, RosterError};
+use crate::facade::roster::{
+    MemberSummary, PeerReachabilityRefreshReport, PeerSnapshotView, RosterError,
+};
+use crate::space::PeerConnectionError;
+
+pub use crate::space::{DeviceGroupChoicesView, QueryDeviceGroupChoicesError};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceGroupIssue {
+    PendingChange(MembershipEventId),
+    BranchConflict(MembershipConflictId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceGroupChoice {
+    ApplyPendingChange,
+    KeepCurrentGroup,
+    Branch(MembershipBranchId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChooseDeviceGroup {
+    pub issue: DeviceGroupIssue,
+    pub choice: DeviceGroupChoice,
+    pub expected_revision: u64,
+    pub confirm_local_removal: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChooseDeviceGroupResult {
+    PendingChange(crate::facade::DecideDeviceTrustChangeResult),
+    BranchConflict(crate::facade::ResolveMembershipConflictResult),
+    StateChanged { current_revision: u64 },
+    InvalidChoice,
+}
+
+#[derive(Debug, Error)]
+pub enum ChooseDeviceGroupError {
+    #[error("处理待定成员变更失败")]
+    PendingChange {
+        #[source]
+        source: crate::facade::DecideDeviceTrustChangeError,
+    },
+    #[error("处理成员分支冲突失败")]
+    BranchConflict {
+        #[source]
+        source: crate::facade::ResolveMembershipConflictError,
+    },
+    #[error("查询当前设备组选择失败")]
+    Query {
+        #[source]
+        source: QueryDeviceGroupChoicesError,
+    },
+}
+
+#[cfg(test)]
+mod device_group_choice_error_tests {
+    use std::error::Error as _;
+
+    use super::{ChooseDeviceGroupError, QueryDeviceGroupChoicesError};
+
+    #[test]
+    fn dependency_error_keeps_stable_classification_and_source() {
+        let error = ChooseDeviceGroupError::Query {
+            source: QueryDeviceGroupChoicesError::DeviceTrust {
+                source: crate::facade::QueryDeviceTrustError::Unavailable,
+            },
+        };
+
+        assert!(matches!(error, ChooseDeviceGroupError::Query { .. }));
+        assert!(error.source().is_some());
+        assert!(error.source().and_then(std::error::Error::source).is_some());
+    }
+}
+use crate::clipboard::active::ActiveClipboardFacade;
+use crate::clipboard::history::maintenance_runtime::HistoryMaintenanceRuntime;
+use crate::device::query_local_device::QueryLocalDeviceUseCase;
 use crate::facade::settings::{GeneralSettingsPatch, SettingsPatch};
-use crate::facade::space_setup::{EnsureReachableAllError, EnsureReachableAllReport};
 use crate::facade::space_setup::{
     InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
-    IssuePairingInvitationResult, PairingInvitationAddressCandidate, QuerySetupStateError,
-    RedeemPairingInvitationError, RedeemPairingInvitationInput, RedeemPairingInvitationResult,
-    SetupStateView, TryResumeSessionError, UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
+    IssuePairingInvitationResult, PairingInvitationAddressCandidate,
+    QueryPairingInvitationAddressesError, QuerySetupStateError, SetupStateView, UnlockSpaceError,
+    UnlockSpaceInput, UnlockSpaceResult,
 };
 use crate::facade::upgrade::UpgradeFacade;
 use crate::facade::{
-    BlobTransferError, BlobTransferFacade, ClipboardCaptureFacade, ClipboardHistoryFacade,
-    ClipboardOutboundFacade, ClipboardRestoreError, ClipboardRestoreFacade, ClipboardSyncError,
-    ClipboardSyncFacade, DeviceFacade, DiagnosticsFacade, DispatchEntryOutcome, EncryptionFacade,
-    EncryptionFacadeError, EncryptionStateView, FetchBlobCommand, FetchBlobResult,
-    FetchBlobToPathCommand, FetchBlobToPathResult, HistoryMaintenanceRuntime, MemberRosterFacade,
-    PublishBlobCommand, PublishBlobPathCommand, PublishBlobResult, ResendEntryCommand,
-    ResendEntryError, ResendReport, ResourceFacade, SearchFacade, SearchFacadeError,
-    SearchPageView, SearchQueryInput, SearchRebuildAcceptedView, SearchStatusView, SettingsFacade,
-    SettingsFacadeError, SpaceFacade, StorageFacade,
+    BlobTransferError, BlobTransferFacade, ChangeEncryptionPassphraseError, ClipboardCaptureFacade,
+    ClipboardHistoryFacade, ClipboardOutboundFacade, ClipboardRestoreError, ClipboardRestoreFacade,
+    ClipboardSyncError, ClipboardSyncFacade, DiagnosticsFacade, DispatchEntryOutcome,
+    FetchBlobCommand, FetchBlobResult, FetchBlobToPathCommand, FetchBlobToPathResult,
+    LocalDeviceInfo, ProbeProfileKeyAccessError, PublishBlobCommand, PublishBlobPathCommand,
+    PublishBlobResult, QuerySpaceAccessStateError, ResendEntryCommand, ResendEntryError,
+    ResendReport, ResourceFacade, SearchFacade, SearchFacadeError, SearchPageView,
+    SearchQueryInput, SearchRebuildAcceptedView, SearchStatusView, SettingsFacade,
+    SettingsFacadeError, SpaceAccessState, SpaceFacade, StorageFacade,
 };
-use crate::space::admission::coordinator::SpaceAdmissionCoordinator;
-use crate::space::convergence::network_recovery::{
-    NetworkRecoveryFacade, NetworkRecoveryRequestError, NetworkRecoveryStatus,
+use crate::profile::probe_profile_key_access::ProbeProfileKeyAccessUseCase;
+use crate::space::{
+    LockSpaceSessionError, NetworkRecoveryFacade, NetworkRecoveryRequestError,
+    NetworkRecoveryStatus, RecoverSpaceSessionError, RecoverSpaceSessionResult,
 };
-use crate::space::lifecycle::session::{
-    build_space_session_coordinator, RecoverSpaceSessionResult, SpaceSessionAccessDeps,
-    SpaceSessionActivityDeps, SpaceSessionCoordinator, SpaceSessionError,
-};
+use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::DeviceId;
-use uc_core::ports::{PresenceError, PresenceEvent, ReachabilityState};
+use uc_core::ports::{PeerReachabilityChanged, ReachabilityState};
 use uc_core::ClipboardChangeOrigin;
 use uc_core::SystemClipboardSnapshot;
 
@@ -72,10 +146,7 @@ use uc_core::SystemClipboardSnapshot;
 /// 因此运行期拿到的对象始终可以立即处理所有稳定 Engine 动作。
 pub struct AppFacade {
     space: Arc<SpaceFacade>,
-    space_session: Arc<SpaceSessionCoordinator>,
-    space_admission: Arc<SpaceAdmissionCoordinator>,
-    member_roster: Arc<MemberRosterFacade>,
-    encryption: Arc<EncryptionFacade>,
+    probe_profile_key_access: Arc<ProbeProfileKeyAccessUseCase>,
     resource: Arc<ResourceFacade>,
     clipboard_history: Arc<ClipboardHistoryFacade>,
     clipboard_capture: Arc<ClipboardCaptureFacade>,
@@ -84,10 +155,11 @@ pub struct AppFacade {
     file_transfer: Arc<crate::facade::file_transfer::FileTransferFacade>,
     clipboard_outbound: Arc<ClipboardOutboundFacade>,
     clipboard_restore: Arc<ClipboardRestoreFacade>,
+    active_clipboard: Arc<ActiveClipboardFacade>,
     search: Arc<SearchFacade>,
     settings: Arc<SettingsFacade>,
     diagnostics: Arc<DiagnosticsFacade>,
-    device: Arc<DeviceFacade>,
+    query_local_device: Arc<QueryLocalDeviceUseCase>,
     storage: Arc<StorageFacade>,
     config_migration: Arc<ConfigMigrationFacade>,
     upgrade: Arc<UpgradeFacade>,
@@ -106,23 +178,10 @@ impl AppFacade {
     ///
     /// Bootstrap builds each sub-facade from its own `*Deps` bundle and
     /// hands them here — the aggregator never sees raw ports.
-    pub fn new(parts: AppFacadeParts) -> Self {
-        let space_session = build_space_session_coordinator(
-            Arc::clone(&parts.space),
-            Arc::clone(&parts.search),
-            parts.space_session_activity,
-            parts.space_session_access,
-        );
-        let space_admission = Arc::new(SpaceAdmissionCoordinator::new(
-            Arc::clone(&parts.space),
-            Arc::clone(&parts.settings),
-        ));
+    pub(crate) fn new(parts: AppFacadeParts) -> Self {
         Self {
             space: parts.space,
-            space_session,
-            space_admission,
-            member_roster: parts.member_roster,
-            encryption: parts.encryption,
+            probe_profile_key_access: parts.probe_profile_key_access,
             resource: parts.resource,
             clipboard_history: parts.clipboard_history,
             clipboard_capture: parts.clipboard_capture,
@@ -131,10 +190,11 @@ impl AppFacade {
             file_transfer: parts.file_transfer,
             clipboard_outbound: parts.clipboard_outbound,
             clipboard_restore: parts.clipboard_restore,
+            active_clipboard: parts.active_clipboard,
             search: parts.search,
             settings: parts.settings,
             diagnostics: parts.diagnostics,
-            device: parts.device,
+            query_local_device: parts.query_local_device,
             storage: parts.storage,
             config_migration: parts.config_migration,
             upgrade: parts.upgrade,
@@ -276,7 +336,7 @@ impl AppFacade {
         &self,
         input: InitializeSpaceInput,
     ) -> Result<InitializeSpaceResult, InitializeSpaceError> {
-        self.space_session.initialize_space(input).await
+        self.space.initialize_space(input).await
     }
 
     /// A2: unlock a space through the top-level application facade.
@@ -284,43 +344,172 @@ impl AppFacade {
         &self,
         input: UnlockSpaceInput,
     ) -> Result<UnlockSpaceResult, UnlockSpaceError> {
-        self.space_session.unlock_space(input).await
+        self.space.unlock_space(input).await
     }
 
     pub async fn recover_space_session(
         &self,
-        allow_secure_storage_unlock: bool,
-    ) -> Result<RecoverSpaceSessionResult, SpaceSessionError> {
-        self.space_session
-            .recover_session(allow_secure_storage_unlock)
-            .await
+    ) -> Result<RecoverSpaceSessionResult, RecoverSpaceSessionError> {
+        self.space.recover_space_session().await
     }
 
-    pub async fn lock_space_session(&self) -> Result<(), SpaceSessionError> {
-        self.space_session.lock_space().await
+    pub async fn lock_space_session(&self) -> Result<(), LockSpaceSessionError> {
+        self.space.lock_space_session().await
     }
 
     pub async fn join_space(
         &self,
         input: crate::facade::JoinSpaceInput,
+        started_at_ms: i64,
     ) -> Result<crate::facade::JoinSpaceResult, crate::facade::JoinSpaceError> {
-        self.space_admission.join_space(input).await
+        self.space.join_space(input, started_at_ms).await
     }
 
-    pub async fn deliver_join_completion_ack(
+    pub async fn query_device_trust(
         &self,
-        pending: crate::facade::PendingJoinerCompleteAck,
-    ) -> Result<(), RedeemPairingInvitationError> {
-        self.space.deliver_join_completion_ack(pending).await
+    ) -> Result<crate::facade::DeviceTrustStatus, crate::facade::QueryDeviceTrustError> {
+        self.space.query_device_trust().await
+    }
+
+    pub fn notify_connectivity_opportunity(
+        &self,
+        reason: crate::space::ConnectivityOpportunity,
+    ) -> Result<(), crate::space::PeerConnectionError> {
+        self.space.notify_connectivity_opportunity(reason)
+    }
+
+    pub async fn refresh_peer_reachability(
+        &self,
+    ) -> Result<PeerReachabilityRefreshReport, PeerConnectionError> {
+        self.space.refresh_peer_reachability().await
+    }
+
+    pub async fn remove_space_member(
+        &self,
+        target: &DeviceId,
+    ) -> Result<crate::facade::RemoveSpaceMemberResult, crate::facade::RemoveSpaceMemberError> {
+        self.space.remove_space_member(target).await
+    }
+
+    pub async fn decide_device_trust_change(
+        &self,
+        input: crate::facade::DecideDeviceTrustChange,
+    ) -> Result<
+        crate::facade::DecideDeviceTrustChangeResult,
+        crate::facade::DecideDeviceTrustChangeError,
+    > {
+        self.space.decide_device_trust_change(input).await
+    }
+
+    pub async fn query_membership_conflicts(
+        &self,
+    ) -> Result<crate::facade::MembershipConflictsView, crate::facade::QueryMembershipConflictsError>
+    {
+        self.space.query_membership_conflicts().await
+    }
+
+    pub async fn resolve_membership_conflict(
+        &self,
+        input: crate::facade::ResolveMembershipConflictInput,
+    ) -> Result<
+        crate::facade::ResolveMembershipConflictResult,
+        crate::facade::ResolveMembershipConflictError,
+    > {
+        self.space.resolve_membership_conflict(input).await
+    }
+
+    /// 向产品层提供唯一的设备组选择查询；内部差异不会要求调用方分别编排。
+    pub async fn query_device_group_choices(
+        &self,
+    ) -> Result<DeviceGroupChoicesView, QueryDeviceGroupChoicesError> {
+        self.space.query_device_group_choices().await
+    }
+
+    pub async fn query_membership_diagnostics(
+        &self,
+    ) -> Result<
+        crate::facade::MembershipDiagnosticsView,
+        crate::facade::QueryMembershipDiagnosticsError,
+    > {
+        self.space.query_membership_diagnostics().await
+    }
+
+    /// 校验查询版本后，把统一选择路由到内部对应流程。
+    pub async fn choose_device_group(
+        &self,
+        input: ChooseDeviceGroup,
+    ) -> Result<ChooseDeviceGroupResult, ChooseDeviceGroupError> {
+        let current = self
+            .query_device_group_choices()
+            .await
+            .map_err(|source| ChooseDeviceGroupError::Query { source })?;
+        if current.revision != input.expected_revision {
+            return Ok(ChooseDeviceGroupResult::StateChanged {
+                current_revision: current.revision,
+            });
+        }
+        match (input.issue, input.choice) {
+            (DeviceGroupIssue::PendingChange(change_id), DeviceGroupChoice::ApplyPendingChange) => {
+                self.space
+                    .decide_device_trust_change(crate::facade::DecideDeviceTrustChange {
+                        change_id,
+                        choice: crate::facade::DeviceTrustChangeChoice::ApplyChange,
+                        confirm_local_removal: input.confirm_local_removal,
+                    })
+                    .await
+                    .map(ChooseDeviceGroupResult::PendingChange)
+                    .map_err(|source| ChooseDeviceGroupError::PendingChange { source })
+            }
+            (DeviceGroupIssue::PendingChange(change_id), DeviceGroupChoice::KeepCurrentGroup) => {
+                self.space
+                    .decide_device_trust_change(crate::facade::DecideDeviceTrustChange {
+                        change_id,
+                        choice: crate::facade::DeviceTrustChangeChoice::KeepCurrentDeviceGroup,
+                        confirm_local_removal: input.confirm_local_removal,
+                    })
+                    .await
+                    .map(ChooseDeviceGroupResult::PendingChange)
+                    .map_err(|source| ChooseDeviceGroupError::PendingChange { source })
+            }
+            (
+                DeviceGroupIssue::BranchConflict(conflict_id),
+                DeviceGroupChoice::Branch(target_branch_id),
+            ) => self
+                .space
+                .resolve_membership_conflict(crate::facade::ResolveMembershipConflictInput {
+                    conflict_id,
+                    target_branch_id,
+                })
+                .await
+                .map(ChooseDeviceGroupResult::BranchConflict)
+                .map_err(|source| ChooseDeviceGroupError::BranchConflict { source }),
+            _ => Ok(ChooseDeviceGroupResult::InvalidChoice),
+        }
+    }
+
+    pub async fn cancel_space_join(
+        &self,
+        join_id: [u8; 16],
+    ) -> Result<crate::facade::CurrentJoinStatus, crate::facade::CancelSpaceJoinError> {
+        self.space.cancel_space_join(join_id).await
+    }
+
+    pub async fn has_pending_space_transition(
+        &self,
+    ) -> Result<bool, crate::facade::QueryPendingSpaceTransitionError> {
+        self.space.has_pending_space_transition().await
+    }
+
+    pub async fn complete_pending_space_transition(
+        &self,
+    ) -> Result<crate::facade::CurrentJoinStatus, crate::facade::CompletePendingSpaceTransitionError>
+    {
+        self.space.complete_pending_space_transition().await
     }
 
     /// Read setup state through the top-level application facade.
     pub async fn query_setup_state(&self) -> Result<SetupStateView, QuerySetupStateError> {
         self.space.query_setup_state().await
-    }
-
-    pub async fn factory_reset_space(&self) -> Result<(), crate::facade::FactoryResetError> {
-        self.space_session.factory_reset().await
     }
 
     pub async fn reset_space(&self) -> Result<(), crate::facade::ResetSpaceError> {
@@ -334,15 +523,11 @@ impl AppFacade {
     }
 
     /// 尝试静默恢复空间会话。
-    pub async fn try_resume_session(&self) -> Result<bool, TryResumeSessionError> {
-        self.space.try_resume_session().await
-    }
-
-    /// 刷新成员在线状态。
-    pub async fn refresh_presence(
-        &self,
-    ) -> Result<EnsureReachableAllReport, EnsureReachableAllError> {
-        self.space.refresh_presence().await
+    pub async fn try_resume_session(&self) -> Result<bool, RecoverSpaceSessionError> {
+        self.space
+            .recover_space_session()
+            .await
+            .map(|result| result.resumed)
     }
 
     pub async fn recover_network(&self) -> Result<(), NetworkRecoveryRequestError> {
@@ -353,30 +538,21 @@ impl AppFacade {
         self.network_recovery.status().await
     }
 
-    /// 列出已配对 peer 的 `DeviceId`(本机已过滤)。供 desktop keepalive
-    /// 调度器用来发现新 peer / 收回已删除 peer。Thin wrapper over
-    /// [`SpaceFacade::list_paired_peer_device_ids`].
-    pub async fn list_paired_peer_device_ids(
-        &self,
-    ) -> Result<Vec<DeviceId>, EnsureReachableAllError> {
-        self.space.list_paired_peer_device_ids().await
-    }
-
-    /// 对单个 peer 触发一次 `ensure_reachable`。供 desktop keepalive 调度
-    /// 器在退避到期时按需拨号。Thin wrapper over
-    /// [`SpaceFacade::ensure_reachable_one`].
-    pub async fn ensure_reachable_one(
-        &self,
-        device: &DeviceId,
-    ) -> Result<ReachabilityState, PresenceError> {
-        self.space.ensure_reachable_one(device).await
-    }
-
     /// B1:签发配对邀请。
     pub async fn issue_pairing_invitation(
         &self,
     ) -> Result<IssuePairingInvitationResult, IssuePairingInvitationError> {
-        self.space_admission.issue_invitation().await
+        self.space.issue_pairing_invitation().await
+    }
+
+    pub async fn change_encryption_passphrase(
+        &self,
+        passphrase: &Passphrase,
+        passphrase_confirmation: &Passphrase,
+    ) -> Result<(), ChangeEncryptionPassphraseError> {
+        self.space
+            .change_encryption_passphrase(passphrase, passphrase_confirmation)
+            .await
     }
 
     /// 按指定本机地址签发配对邀请。
@@ -384,47 +560,32 @@ impl AppFacade {
         &self,
         selected_ip: IpAddr,
     ) -> Result<IssuePairingInvitationResult, IssuePairingInvitationError> {
-        self.space_admission
-            .issue_invitation_for_address(selected_ip)
+        self.space
+            .issue_pairing_invitation_for_address(selected_ip)
             .await
     }
 
     /// 列出当前可用于配对邀请的本机地址。
     pub async fn list_pairing_invitation_addresses(
         &self,
-    ) -> Result<Vec<PairingInvitationAddressCandidate>, IssuePairingInvitationError> {
-        self.space_admission.list_invitation_addresses().await
-    }
-
-    /// B2:兑换配对邀请。
-    pub async fn redeem_pairing_invitation(
-        &self,
-        input: RedeemPairingInvitationInput,
-    ) -> Result<RedeemPairingInvitationResult, RedeemPairingInvitationError> {
-        let result = self.space_admission.redeem_invitation(input).await?;
-        self.space_session
-            .recover_session(true)
-            .await
-            .map_err(|error| {
-                RedeemPairingInvitationError::Internal(format!("activate paired space: {error}"))
-            })?;
-        Ok(result)
+    ) -> Result<Vec<PairingInvitationAddressCandidate>, QueryPairingInvitationAddressesError> {
+        self.space.list_pairing_invitation_addresses().await
     }
 
     pub async fn cancel_invitation(&self) -> Result<(), crate::facade::CancelInvitationError> {
-        self.space_admission.cancel_invitation().await
+        self.space.cancel_invitation().await
     }
 
     /// 列出对外成员摘要。外部调用只经过 `AppFacade`,不直接依赖 roster 子 facade。
     pub async fn list_members(&self) -> Result<Vec<MemberSummary>, RosterError> {
-        self.member_roster.list_members().await
+        self.space.list_members().await
     }
 
-    /// 列出带 presence 的 roster entry。
+    /// 列出带 peer_reachability 的 roster entry。
     pub async fn list_roster_entries(
         &self,
     ) -> Result<Vec<crate::facade::roster::RosterEntry>, RosterError> {
-        self.member_roster.list_with_presence().await
+        self.space.list_roster_entries().await
     }
 
     /// 发送一个剪贴板快照到在线 peer。
@@ -433,7 +594,7 @@ impl AppFacade {
     /// - `None` —— 全 fan-out（向所有 trusted online peer）;
     /// - `Some(list)` —— 仅向指定 device 集合 fan-out;空列表合法,表示零目标。
     ///
-    /// 不绕过 `is_send_allowed` / member gating / presence 这三层 use case
+    /// 不绕过 `is_send_allowed` / member gating / peer_reachability 这三层 use case
     /// 内部检查,filter 在它们之后生效。
     pub async fn dispatch_clipboard_snapshot(
         &self,
@@ -494,6 +655,30 @@ impl AppFacade {
         cmd: ResendEntryCommand,
     ) -> Result<ResendReport, ResendEntryError> {
         self.clipboard_outbound.resend_entry(cmd).await
+    }
+
+    pub async fn current_active_clipboard(
+        &self,
+    ) -> Result<
+        Option<uc_core::clipboard::ActiveClipboardState>,
+        uc_core::ports::clipboard::ActiveClipboardRegisterError,
+    > {
+        self.active_clipboard.current().await
+    }
+
+    #[cfg(feature = "lan-compat")]
+    pub fn active_clipboard_for_lan_compatibility(&self) -> Arc<ActiveClipboardFacade> {
+        Arc::clone(&self.active_clipboard)
+    }
+
+    #[cfg(feature = "lan-compat")]
+    pub fn clipboard_outbound_for_lan_compatibility(&self) -> Arc<ClipboardOutboundFacade> {
+        Arc::clone(&self.clipboard_outbound)
+    }
+
+    #[cfg(feature = "lan-compat")]
+    pub fn file_transfer_for_lan_compatibility(&self) -> Arc<crate::facade::FileTransferFacade> {
+        Arc::clone(&self.file_transfer)
     }
 
     /// 发布 blob。
@@ -595,18 +780,16 @@ impl AppFacade {
     }
 
     /// 查询加密/初始化状态。
-    pub async fn encryption_state(&self) -> Result<EncryptionStateView, EncryptionFacadeError> {
-        self.encryption.state().await
+    pub async fn encryption_state(&self) -> Result<SpaceAccessState, QuerySpaceAccessStateError> {
+        self.space.query_space_access_state().await
     }
 
-    pub async fn verify_secure_storage_access(&self) -> Result<bool, EncryptionFacadeError> {
-        self.encryption.verify_keychain_access().await
+    pub async fn verify_secure_storage_access(&self) -> Result<bool, ProbeProfileKeyAccessError> {
+        self.probe_profile_key_access.execute().await
     }
 
-    pub async fn local_device_info(
-        &self,
-    ) -> Result<crate::facade::LocalDeviceInfoView, crate::facade::DeviceFacadeError> {
-        self.device.local_device_info().await
+    pub async fn local_device_info(&self) -> LocalDeviceInfo {
+        self.query_local_device.execute().await
     }
 
     pub async fn settings(&self) -> Result<crate::facade::SettingsView, SettingsFacadeError> {
@@ -676,7 +859,7 @@ impl AppFacade {
         &self,
         device_id: &str,
     ) -> Result<crate::facade::MemberSyncPreferencesView, RosterError> {
-        self.member_roster.get_sync_preferences(device_id).await
+        self.space.member_sync_preferences(device_id).await
     }
 
     pub async fn update_member_sync_preferences(
@@ -684,59 +867,15 @@ impl AppFacade {
         device_id: &str,
         patch: crate::facade::MemberSyncPreferencesPatch,
     ) -> Result<crate::facade::MemberSyncPreferencesView, RosterError> {
-        self.member_roster
-            .update_sync_preferences(device_id, patch)
+        self.space
+            .update_member_sync_preferences(device_id, patch)
             .await
-    }
-
-    pub async fn remove_member(
-        &self,
-        device_id: &str,
-    ) -> Result<crate::facade::WorkspaceSnapshot, RosterError> {
-        self.member_roster.submit_member_removal(device_id).await
-    }
-
-    pub async fn decide_membership_removal(
-        &self,
-        removal_event_id: uc_core::membership::MembershipEventId,
-        decision: uc_core::membership::RemovalDecision,
-    ) -> Result<crate::facade::WorkspaceSnapshot, RosterError> {
-        self.member_roster
-            .decide_membership_removal(removal_event_id, decision)
-            .await
-    }
-
-    pub async fn workspace_convergence(
-        &self,
-    ) -> Result<crate::facade::WorkspaceSnapshot, RosterError> {
-        self.member_roster.query_workspace_convergence().await
-    }
-
-    pub async fn device_trust(&self) -> Result<crate::facade::DeviceTrustSnapshot, RosterError> {
-        self.member_roster.query_device_trust().await
-    }
-
-    pub async fn decide_device_trust_change(
-        &self,
-        change_id: uc_core::membership::MembershipEventId,
-        choice: crate::facade::DeviceTrustChoice,
-        confirm_local_removal: bool,
-    ) -> Result<crate::facade::DeviceTrustDecisionResult, RosterError> {
-        self.member_roster
-            .decide_device_trust_change(change_id, choice, confirm_local_removal)
-            .await
-    }
-
-    pub fn subscribe_workspace_convergence(
-        &self,
-    ) -> broadcast::Receiver<crate::facade::WorkspaceSnapshot> {
-        self.member_roster.subscribe_workspace_convergence()
     }
 
     pub async fn space_protection(
         &self,
     ) -> Result<crate::facade::SpaceProtectionView, RosterError> {
-        self.member_roster.query_space_protection().await
+        self.space.space_protection().await
     }
 
     pub async fn diagnostics_status(
@@ -812,7 +951,6 @@ impl AppFacade {
                     theme_overrides_dark: None,
                     language: None,
                     update_channel: None,
-                    telemetry_enabled: None,
                     usage_analytics_enabled: None,
                     debug_mode: None,
                 }),
@@ -831,55 +969,59 @@ impl AppFacade {
 
     /// 列出对外 peer 快照。外部调用只经过 `AppFacade`,不直接依赖 roster 子 facade。
     pub async fn list_peer_snapshots(&self) -> Result<Vec<PeerSnapshotView>, RosterError> {
-        self.member_roster.list_peer_snapshots().await
+        self.space.list_peer_snapshots().await
     }
 
     /// 订阅成员在线状态变化。外部拿到的是 application 事件,不暴露 core 事件类型。
-    pub fn subscribe_peer_presence_events(&self) -> Result<AppPresenceSubscription, RosterError> {
-        let inner = self.member_roster.subscribe_presence_events();
-        Ok(AppPresenceSubscription { inner })
+    pub fn subscribe_peer_reachability_events(
+        &self,
+    ) -> Result<AppPeerReachabilitySubscription, RosterError> {
+        let inner = self.space.subscribe_peer_reachability_events();
+        Ok(AppPeerReachabilitySubscription { inner })
     }
 }
 
-/// application 层 presence 事件。
+/// application 层 peer_reachability 事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppPresenceEvent {
+pub struct AppPeerReachabilityEvent {
     pub device_id: String,
     pub state: String,
     pub at_ms: i64,
 }
 
-/// application 层 presence 订阅错误。
+/// application 层 peer_reachability 订阅错误。
 #[derive(Debug, Error)]
-pub enum AppPresenceSubscriptionError {
-    #[error("presence event receiver lagged by {0} messages")]
+pub enum AppPeerReachabilitySubscriptionError {
+    #[error("peer reachability receiver lagged by {0} messages")]
     Lagged(u64),
-    #[error("presence event receiver closed")]
+    #[error("peer reachability receiver closed")]
     Closed,
 }
 
-/// application 层 presence 订阅句柄。
-pub struct AppPresenceSubscription {
-    inner: broadcast::Receiver<PresenceEvent>,
+/// application 层 peer_reachability 订阅句柄。
+pub struct AppPeerReachabilitySubscription {
+    inner: broadcast::Receiver<PeerReachabilityChanged>,
 }
 
-impl AppPresenceSubscription {
-    pub async fn recv(&mut self) -> Result<AppPresenceEvent, AppPresenceSubscriptionError> {
+impl AppPeerReachabilitySubscription {
+    pub async fn recv(
+        &mut self,
+    ) -> Result<AppPeerReachabilityEvent, AppPeerReachabilitySubscriptionError> {
         self.inner
             .recv()
             .await
-            .map(presence_event_to_app)
+            .map(peer_reachability_event_to_app)
             .map_err(|err| match err {
                 broadcast::error::RecvError::Lagged(skipped) => {
-                    AppPresenceSubscriptionError::Lagged(skipped)
+                    AppPeerReachabilitySubscriptionError::Lagged(skipped)
                 }
-                broadcast::error::RecvError::Closed => AppPresenceSubscriptionError::Closed,
+                broadcast::error::RecvError::Closed => AppPeerReachabilitySubscriptionError::Closed,
             })
     }
 }
 
-fn presence_event_to_app(event: PresenceEvent) -> AppPresenceEvent {
-    AppPresenceEvent {
+fn peer_reachability_event_to_app(event: PeerReachabilityChanged) -> AppPeerReachabilityEvent {
+    AppPeerReachabilityEvent {
         device_id: event.device_id.as_str().to_string(),
         state: reachability_state_to_string(event.state),
         at_ms: event.at.timestamp_millis(),
@@ -895,12 +1037,9 @@ fn reachability_state_to_string(state: ReachabilityState) -> String {
     .to_string()
 }
 
-pub struct AppFacadeParts {
+pub(crate) struct AppFacadeParts {
     pub space: Arc<SpaceFacade>,
-    pub space_session_activity: SpaceSessionActivityDeps,
-    pub space_session_access: SpaceSessionAccessDeps,
-    pub member_roster: Arc<MemberRosterFacade>,
-    pub encryption: Arc<EncryptionFacade>,
+    pub probe_profile_key_access: Arc<ProbeProfileKeyAccessUseCase>,
     pub resource: Arc<ResourceFacade>,
     pub clipboard_history: Arc<ClipboardHistoryFacade>,
     pub clipboard_capture: Arc<ClipboardCaptureFacade>,
@@ -909,10 +1048,11 @@ pub struct AppFacadeParts {
     pub file_transfer: Arc<crate::facade::file_transfer::FileTransferFacade>,
     pub clipboard_outbound: Arc<ClipboardOutboundFacade>,
     pub clipboard_restore: Arc<ClipboardRestoreFacade>,
+    pub active_clipboard: Arc<ActiveClipboardFacade>,
     pub search: Arc<SearchFacade>,
     pub settings: Arc<SettingsFacade>,
     pub diagnostics: Arc<DiagnosticsFacade>,
-    pub device: Arc<DeviceFacade>,
+    pub query_local_device: Arc<QueryLocalDeviceUseCase>,
     pub storage: Arc<StorageFacade>,
     pub config_migration: Arc<ConfigMigrationFacade>,
     pub upgrade: Arc<UpgradeFacade>,

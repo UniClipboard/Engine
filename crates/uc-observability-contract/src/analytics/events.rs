@@ -499,8 +499,8 @@ pub struct SyncEventProps {
 
 /// `sync_deferred` 的 properties。
 ///
-/// 该事件表示"这次不应计入同步尝试失败率"。典型场景：发送前 presence 已经
-/// 知道目标设备离线，后续 dispatch 仍然不可达。代码仍可尝试发送以防 presence
+/// 该事件表示"这次不应计入同步尝试失败率"。典型场景：发送前 peer_reachability 已经
+/// 知道目标设备离线，后续 dispatch 仍然不可达。代码仍可尝试发送以防 peer_reachability
 /// 过期，但产品分析上这是预期不可用，不是失败。
 ///
 /// 不带 `transport_type`：deferred 时本次根本没有发生真实发送，记录任何

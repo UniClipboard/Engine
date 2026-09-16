@@ -4,16 +4,18 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
-use uc_core::app_dirs::AppPaths;
-use uc_core::ports::{
-    ClearProfileStatePort, ProfileFactoryResetCapabilityError, SecureStoragePort,
+use uc_application::deps::{
+    ClearProfileStatePort, ProfileFactoryResetCapabilityError, ProfileGeneration,
     WipeProfileKeysPort,
 };
+use uc_core::app_dirs::AppPaths;
+use uc_core::ports::SecureStoragePort;
 
 use crate::db::pool::DbPool;
 
 use super::admission_key_manager::AdmissionKeyManager;
 use super::key_migration_adapter::DefaultKeyMigrationAdapter;
+use super::profile_content_key_vault::PROFILE_CONTENT_VAULT_KEY_NAME;
 
 pub struct ProfileKeyWiper {
     admission_keys: AdmissionKeyManager,
@@ -87,19 +89,35 @@ impl ProfileKeyWiper {
         }
         Ok(())
     }
+
+    fn wipe_profile_content_vault_key(&self) -> Result<(), ProfileFactoryResetCapabilityError> {
+        self.secure_storage
+            .delete(PROFILE_CONTENT_VAULT_KEY_NAME)
+            .map_err(|_| capability_error())?;
+        if self
+            .secure_storage
+            .get(PROFILE_CONTENT_VAULT_KEY_NAME)
+            .map_err(|_| capability_error())?
+            .is_some()
+        {
+            return Err(capability_error());
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl WipeProfileKeysPort for ProfileKeyWiper {
     async fn wipe_and_verify_profile_keys(
         &self,
-        profile_generation: [u8; 16],
+        profile_generation: ProfileGeneration,
     ) -> Result<(), ProfileFactoryResetCapabilityError> {
-        if self.admission_keys.profile_generation() != profile_generation {
+        if self.admission_keys.profile_generation() != profile_generation.into_bytes() {
             return Err(capability_error());
         }
         self.wipe_active_space_keys()?;
         self.wipe_migration_key().await?;
+        self.wipe_profile_content_vault_key()?;
         remove_path_if_present(&self.network_identity_dir)?;
         if self.network_identity_dir.exists() {
             return Err(capability_error());
@@ -212,6 +230,13 @@ impl ProfileStateCleaner {
             self.paths.file_cache_dir.clone(),
             self.paths.cache_dir.clone(),
             self.paths.app_data_root_dir.join("space-generations"),
+            self.paths
+                .app_data_root_dir
+                .join("profile-data-generations"),
+            self.paths
+                .app_data_root_dir
+                .join("space-control-generations"),
+            self.paths.app_data_root_dir.join("profile-storage-upgrade"),
             self.paths.app_data_root_dir.join("iroh-blobs"),
             self.paths.app_data_root_dir.join("iroh-identity"),
             self.paths.app_data_root_dir.join("import-staging"),
@@ -231,7 +256,6 @@ impl ProfileStateCleaner {
 impl ClearProfileStatePort for ProfileStateCleaner {
     async fn clear_and_verify_profile_state(
         &self,
-        _profile_generation: [u8; 16],
     ) -> Result<(), ProfileFactoryResetCapabilityError> {
         self.clear_database()?;
         self.database
@@ -273,12 +297,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use diesel::{Connection, RunQueryDsl, SqliteConnection};
+    use uc_application::deps::{ClearProfileStatePort, WipeProfileKeysPort};
     use uc_core::app_dirs::AppPaths;
     use uc_core::ports::security::secure_storage::{SecureStorageError, SecureStoragePort};
     use uc_core::ports::security::MigrationRunId;
-    use uc_core::ports::{ClearProfileStatePort, WipeProfileKeysPort};
 
-    use super::{ProfileKeyWiper, ProfileStateCleaner};
+    use super::{ProfileGeneration, ProfileKeyWiper, ProfileStateCleaner};
 
     #[derive(Default)]
     struct MemorySecureStorage(Mutex<BTreeMap<String, Vec<u8>>>);
@@ -316,6 +340,9 @@ mod tests {
         storage
             .set("profile_admission_master_key:v1", &[0x55; 32])
             .unwrap();
+        storage
+            .set("profile_content_vault_key:v1", &[0x56; 32])
+            .unwrap();
         let run_id = MigrationRunId::new("reset-migration");
         let migration_key_name = format!("migration_key:v1:{}", run_id.as_str());
         storage.set(&migration_key_name, &[0x66; 32]).unwrap();
@@ -339,7 +366,7 @@ mod tests {
         );
 
         wiper
-            .wipe_and_verify_profile_keys([0x77; 16])
+            .wipe_and_verify_profile_keys(ProfileGeneration::from_bytes([0x77; 16]))
             .await
             .unwrap();
 
@@ -347,6 +374,10 @@ mod tests {
         assert!(!keyslot_path.exists());
         assert!(storage
             .get("profile_admission_master_key:v1")
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .get("profile_content_vault_key:v1")
             .unwrap()
             .is_none());
         assert!(storage.get(&migration_key_name).unwrap().is_none());
@@ -383,6 +414,15 @@ mod tests {
             b"generation",
         )
         .unwrap();
+        for relative in [
+            "profile-data-generations/p1/profile.sqlite",
+            "space-control-generations/c1/control.sqlite",
+            "profile-storage-upgrade/.journal-v1",
+        ] {
+            let path = paths.app_data_root_dir.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"generation-state").unwrap();
+        }
 
         std::fs::create_dir_all(paths.db_path.parent().unwrap()).unwrap();
         let mut connection = SqliteConnection::establish(paths.db_path.to_str().unwrap()).unwrap();
@@ -398,10 +438,7 @@ mod tests {
         let pool = crate::db::pool::init_db_pool(paths.db_path.to_str().unwrap()).unwrap();
         let cleaner = ProfileStateCleaner::new(pool, paths.clone(), paths.db_path.clone());
 
-        cleaner
-            .clear_and_verify_profile_state([0x44; 16])
-            .await
-            .unwrap();
+        cleaner.clear_and_verify_profile_state().await.unwrap();
 
         assert!(!paths.db_path.exists());
         assert!(!paths.vault_dir.exists());
@@ -409,6 +446,18 @@ mod tests {
         assert!(!paths.cache_dir.exists());
         assert!(!paths.file_cache_dir.exists());
         assert!(!paths.app_data_root_dir.join("space-generations").exists());
+        assert!(!paths
+            .app_data_root_dir
+            .join("profile-data-generations")
+            .exists());
+        assert!(!paths
+            .app_data_root_dir
+            .join("space-control-generations")
+            .exists());
+        assert!(!paths
+            .app_data_root_dir
+            .join("profile-storage-upgrade")
+            .exists());
         assert!(!paths.app_data_root_dir.join("import-staging").exists());
         assert!(!paths.app_data_root_dir.join("pending-import.json").exists());
         let reopened_pool = crate::db::pool::init_db_pool(paths.db_path.to_str().unwrap()).unwrap();

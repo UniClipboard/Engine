@@ -3,21 +3,19 @@
 //! `ClipboardInboundRuntime`.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use bytes::Bytes;
 use tracing::instrument;
 
 use uc_core::ids::{DeviceId, EntryId};
-use uc_core::membership::{ContentExchangeGatePort, CurrentWorkspacePeerScopePort};
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::{
     CancelDirectoryAttemptTransfersPort, CleanupDirectoryStagingPort, ClipboardDispatchPort,
     ClipboardHeader, ClockPort, CommitInboundReceivePort, DeviceIdentityPort, DispatchAck,
     EntryDeliveryRepositoryPort, FindMobileDeviceByIdPort, FirstSyncStatePort,
     GetDirectoryPublishRecordPort, GetEntryAttemptPort, GetEntryReceiveProgressPort,
-    ListNonTerminalAttemptsPort, LocalIdentityPort, PeerAddressRepositoryPort, PresencePort,
-    RequestReceiveCancellationPort, SettingsPort,
+    ListNonTerminalAttemptsPort, LocalIdentityPort, PeerAddressRepositoryPort,
+    PeerReachabilityPort, RequestReceiveCancellationPort, SettingsPort,
 };
 use uc_core::MemberRepositoryPort;
 use uc_core::{ClipboardChangeOrigin, SystemClipboardSnapshot};
@@ -34,6 +32,7 @@ use crate::clipboard::sync::{
     encode_snapshot_to_v3_bytes, DispatchClipboardEntryInput, DispatchClipboardEntryUseCase,
     DispatchOutcome, DispatchPerTarget, DispatchSyncError,
 };
+use crate::deps::CurrentSpaceMemberScopePort;
 use crate::facade::blob_transfer::{BlobTransferFacade, SharedHostEventEmitter};
 use crate::facade::clipboard::cancel_entry_receive::{
     CancelEntryReceiveError, CancelEntryReceiveOutcome, CancelEntryReceiveUseCase,
@@ -43,15 +42,12 @@ use uc_core::ports::clipboard::GetClipboardEntryPort;
 use uc_core::ports::ClipboardEventRepositoryPort;
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 
-/// Construction bundle, mirrors `MemberRosterDeps` pattern so bootstrap
-/// wiring stays consistent across facades.
-pub struct ClipboardSyncDeps {
+/// Clipboard 领域内部构造输入，不进入公开 facade 白名单。
+pub(crate) struct ClipboardSyncDeps {
     pub peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     pub member_repo: Arc<dyn MemberRepositoryPort>,
-    /// 已保存成员移除意图对发送路径的硬限制。
-    pub removal_gate: Arc<dyn ContentExchangeGatePort>,
-    pub peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
-    pub presence: Arc<dyn PresencePort>,
+    pub peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
+    pub peer_reachability: Arc<dyn PeerReachabilityPort>,
     pub transfer_cipher: Arc<dyn TransferCipherPort>,
     pub clipboard_dispatch: Arc<dyn ClipboardDispatchPort>,
     pub device_identity: Arc<dyn DeviceIdentityPort>,
@@ -100,7 +96,7 @@ pub struct DispatchEntryInput {
     /// (still runs encrypt so callers see a well-formed report).
     ///
     /// **Iron rule**: this filter narrows candidates only. It does NOT
-    /// bypass `is_send_allowed` / member gating / presence — those checks
+    /// bypass `is_send_allowed` / member gating / peer_reachability — those checks
     /// still apply per peer (see `dispatch_entry.rs` module doc).
     pub target_filter: Option<Vec<DeviceId>>,
 }
@@ -171,7 +167,6 @@ struct DispatchVersions {
 
 pub(crate) struct ClipboardSyncDispatch<'a> {
     facade: &'a ClipboardSyncFacade,
-    source_started_at: Option<Instant>,
 }
 
 impl ClipboardSyncFacade {
@@ -193,11 +188,11 @@ impl ClipboardSyncFacade {
         crate::clipboard::sync::sweep_inbound_staging(dirs).await
     }
 
-    pub fn new(deps: ClipboardSyncDeps) -> Self {
-        let dispatch_uc = Arc::new(DispatchClipboardEntryUseCase::new_with_removal_gate(
+    pub(crate) fn new(deps: ClipboardSyncDeps) -> Self {
+        let dispatch_uc = Arc::new(DispatchClipboardEntryUseCase::new_with_scope(
             Arc::clone(&deps.peer_addr_repo),
             Arc::clone(&deps.member_repo),
-            Arc::clone(&deps.presence),
+            Arc::clone(&deps.peer_reachability),
             Arc::clone(&deps.transfer_cipher),
             Arc::clone(&deps.clipboard_dispatch),
             Arc::clone(&deps.device_identity),
@@ -208,7 +203,6 @@ impl ClipboardSyncFacade {
             Arc::clone(&deps.first_sync_state),
             Arc::clone(&deps.entry_delivery_repo),
             Arc::clone(&deps.host_event_bus),
-            Arc::clone(&deps.removal_gate),
             Arc::clone(&deps.peer_scope),
         ));
         let view_uc = Arc::new(GetEntryDeliveryViewUseCase::new(
@@ -231,17 +225,11 @@ impl ClipboardSyncFacade {
         }
     }
 
-    pub(crate) fn dispatch_context(
-        &self,
-        source_started_at: Option<Instant>,
-    ) -> ClipboardSyncDispatch<'_> {
-        ClipboardSyncDispatch {
-            facade: self,
-            source_started_at,
-        }
+    pub(crate) fn dispatch_context(&self) -> ClipboardSyncDispatch<'_> {
+        ClipboardSyncDispatch { facade: self }
     }
 
-    pub fn with_entry_receive_cancellation(
+    pub(crate) fn with_entry_receive_cancellation(
         mut self,
         get_attempt: Arc<dyn GetEntryAttemptPort>,
         request_cancel: Arc<dyn RequestReceiveCancellationPort>,
@@ -357,7 +345,6 @@ impl ClipboardSyncFacade {
                 // raw-bytes 路径不与某条 entry 绑定,跳过 delivery 落盘。
                 entry_id: None,
                 target_filter: input.target_filter,
-                source_started_at: None,
             })
             .await?;
         Ok(lift_outcome(internal))
@@ -375,7 +362,6 @@ impl ClipboardSyncFacade {
         categories: ClipboardContentCategorySet,
         entry_id: Option<EntryId>,
         target_filter: Option<Vec<DeviceId>>,
-        source_started_at: Option<Instant>,
     ) -> Result<DispatchEntryOutcome, ClipboardSyncError> {
         let internal = self
             .dispatch_uc
@@ -387,7 +373,6 @@ impl ClipboardSyncFacade {
                 categories,
                 entry_id,
                 target_filter,
-                source_started_at,
             })
             .await?;
         Ok(lift_outcome(internal))
@@ -412,7 +397,7 @@ impl ClipboardSyncFacade {
         entry_id: Option<EntryId>,
         target_filter: Option<Vec<DeviceId>>,
     ) -> Result<DispatchEntryOutcome, ClipboardSyncError> {
-        self.dispatch_context(None)
+        self.dispatch_context()
             .dispatch_snapshot(snapshot, origin, entry_id, target_filter)
             .await
     }
@@ -430,7 +415,7 @@ impl ClipboardSyncFacade {
         entry_id: Option<EntryId>,
         target_filter: Option<Vec<DeviceId>>,
     ) -> Result<DispatchEntryOutcome, ClipboardSyncError> {
-        self.dispatch_context(None)
+        self.dispatch_context()
             .dispatch_snapshot_with_blob_refs(snapshot, blob_refs, origin, entry_id, target_filter)
             .await
     }
@@ -449,7 +434,7 @@ impl ClipboardSyncFacade {
         entry_id: Option<EntryId>,
         target_filter: Option<Vec<DeviceId>>,
     ) -> Result<DispatchEntryOutcome, ClipboardSyncError> {
-        self.dispatch_context(None)
+        self.dispatch_context()
             .dispatch_snapshot_with_blob_refs_and_file_set(
                 snapshot,
                 blob_refs,
@@ -496,7 +481,6 @@ impl ClipboardSyncDispatch<'_> {
                 categories,
                 entry_id,
                 target_filter,
-                self.source_started_at,
             )
             .await
     }
@@ -525,7 +509,6 @@ impl ClipboardSyncDispatch<'_> {
                 categories,
                 entry_id,
                 target_filter,
-                self.source_started_at,
             )
             .await
     }
@@ -559,7 +542,6 @@ impl ClipboardSyncDispatch<'_> {
                 categories,
                 entry_id,
                 target_filter,
-                self.source_started_at,
             )
             .await
     }
@@ -602,7 +584,7 @@ fn lift_per_target(internal: DispatchPerTarget) -> DispatchEntryPerTarget {
 //
 // * Use `mockall::mock!` for ports asserted via call counts + return
 //   values: `PeerAddressRepositoryPort`, `TransferCipherPort`,
-//   `ClipboardDispatchPort`, `PresencePort`, `DeviceIdentityPort`,
+//   `ClipboardDispatchPort`, `PeerReachabilityPort`, `DeviceIdentityPort`,
 //   `LocalIdentityPort`, `SettingsPort`.
 // * Trivial sync `FixedClock` stays hand-written (4 lines).
 
@@ -617,7 +599,7 @@ mod tests {
     use uc_core::ports::{
         ClipboardDispatchError, ClipboardHeader, ConnectionChannel, DispatchAck, DispatchReport,
         FirstSyncStateError, LocalIdentityError, PeerAddressError, PeerAddressRecord,
-        PresenceError, PresenceEvent, ReachabilityState, SyncPayload,
+        PeerReachabilityChanged, PeerReachabilityError, ReachabilityState, SyncPayload,
     };
     use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
@@ -656,15 +638,15 @@ mod tests {
     }
 
     mockall::mock! {
-        pub Presence {}
+        pub PeerReachability {}
         #[async_trait]
-        impl PresencePort for Presence {
+        impl PeerReachabilityPort for PeerReachability {
             async fn ensure_reachable(
                 &self,
                 device: &DeviceId,
-            ) -> Result<ReachabilityState, PresenceError>;
+            ) -> Result<ReachabilityState, PeerReachabilityError>;
             async fn current_state(&self, device: &DeviceId) -> ReachabilityState;
-            fn subscribe(&self) -> broadcast::Receiver<PresenceEvent>;
+            fn subscribe(&self) -> broadcast::Receiver<PeerReachabilityChanged>;
         }
     }
 
@@ -696,7 +678,6 @@ mod tests {
     fn dispatch_report(outcome: Result<DispatchAck, ClipboardDispatchError>) -> DispatchReport {
         DispatchReport {
             transport: ConnectionChannel::Direct,
-            timing: uc_core::ports::DispatchTiming::default(),
             outcome,
         }
     }
@@ -897,8 +878,8 @@ mod tests {
         m
     }
 
-    fn make_presence_unknown() -> MockPresence {
-        let mut m = MockPresence::new();
+    fn make_peer_reachability_unknown() -> MockPeerReachability {
+        let mut m = MockPeerReachability::new();
         m.expect_current_state()
             .returning(|_| ReachabilityState::Unknown);
         m
@@ -940,7 +921,7 @@ mod tests {
     /// Wire the outbound facade with the given mock ports.
     fn build_facade(
         peer_addr_repo: MockPeerAddrRepo,
-        presence: MockPresence,
+        peer_reachability: MockPeerReachability,
         cipher: MockCipher,
         dispatch: MockDispatch,
         device_identity: MockDeviceId_,
@@ -950,9 +931,8 @@ mod tests {
         ClipboardSyncFacade::new(ClipboardSyncDeps {
             peer_addr_repo: Arc::new(peer_addr_repo),
             member_repo: Arc::new(make_member_repo_all_enabled()),
-            removal_gate: Arc::new(crate::clipboard::sync::dispatch_entry::AllowAllRemovalTargets),
             peer_scope: Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
-            presence: Arc::new(presence),
+            peer_reachability: Arc::new(peer_reachability),
             transfer_cipher: Arc::new(cipher),
             clipboard_dispatch: Arc::new(dispatch),
             device_identity: Arc::new(device_identity),
@@ -984,7 +964,7 @@ mod tests {
             .times(1)
             .returning(|| Ok(vec![record("peer-a")]));
 
-        let presence = make_presence_unknown();
+        let peer_reachability = make_peer_reachability_unknown();
 
         let mut cipher = MockCipher::new();
         cipher
@@ -1001,7 +981,7 @@ mod tests {
 
         let facade = build_facade(
             repo,
-            presence,
+            peer_reachability,
             cipher,
             dispatch,
             make_device_identity("self"),
@@ -1039,7 +1019,7 @@ mod tests {
             .times(1)
             .returning(|| Ok(vec![record("peer-a")]));
 
-        let presence = make_presence_unknown();
+        let peer_reachability = make_peer_reachability_unknown();
 
         let mut cipher = MockCipher::new();
         // Encrypt gets the V3 envelope bytes, not the raw text. We just
@@ -1067,7 +1047,7 @@ mod tests {
 
         let facade = build_facade(
             repo,
-            presence,
+            peer_reachability,
             cipher,
             dispatch,
             make_device_identity("self"),
@@ -1116,7 +1096,7 @@ mod tests {
             .times(1)
             .returning(|| Ok(vec![record("peer-a"), record("peer-b")]));
 
-        let presence = make_presence_unknown();
+        let peer_reachability = make_peer_reachability_unknown();
 
         let mut cipher = MockCipher::new();
         cipher
@@ -1133,7 +1113,7 @@ mod tests {
 
         let facade = build_facade(
             repo,
-            presence,
+            peer_reachability,
             cipher,
             dispatch,
             make_device_identity("self"),

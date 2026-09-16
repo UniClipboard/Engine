@@ -12,19 +12,21 @@ use uc_core::ports::security::current_profile::{CurrentProfileError, CurrentProf
 use uc_core::ports::space::{DeriveSpaceSubkeyPort, SpaceAccessError};
 use uc_core::ports::{
     BeginReceiveAttemptPort, BeginReceiveFailurePort, ClaimReceiveCommitPort,
-    CommitInboundReceivePort, CompletedReceiveArtifacts, GetEntryAttemptPort,
-    InboundReceiveCommitError, InboundReceiveRecord, InboundReceiveSettlement,
+    CommitInboundReceivePort, CompletedReceiveArtifacts, DeleteClipboardEntryWithReceiveStatePort,
+    GetEntryAttemptPort, InboundReceiveCommitError, InboundReceiveRecord, InboundReceiveSettlement,
     NoEntryReceiveArtifacts, PartialReceiveArtifacts, PartialReceiveTerminal, ReceiveArtifact,
     ReceiveArtifactOwnership, ReceiveArtifactPhase, ReceiveArtifactRecord,
     ReceiveArtifactResolution, RecordReceiveArtifactsPort, RequestReceiveCancellationPort,
 };
 use uc_core::SnapshotHash;
 use uc_infra::db::executor::DieselSqliteExecutor;
+use uc_infra::db::mappers::clipboard_entry_mapper::ClipboardEntryRowMapper;
+use uc_infra::db::mappers::clipboard_selection_mapper::ClipboardSelectionRowMapper;
 use uc_infra::db::pool::init_db_pool;
 use uc_infra::db::ports::DbExecutor;
 use uc_infra::db::repositories::{
-    DieselEntryReceiveAttemptRepository, DieselInboundReceiveCommitRepository,
-    DieselReceiveArtifactLogRepository,
+    DieselClipboardEntryRepository, DieselEntryReceiveAttemptRepository,
+    DieselInboundReceiveCommitRepository, DieselReceiveArtifactLogRepository,
 };
 use uc_infra::db::schema::{clipboard_entry, entry_receive_attempt, receive_artifact_log};
 
@@ -83,6 +85,112 @@ fn record(entry_id: &str) -> InboundReceiveRecord {
         representations,
         selection,
     }
+}
+
+#[tokio::test]
+async fn settlement_resolves_and_entry_delete_clears_receive_state() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("receive-state-cleanup.sqlite");
+    let pool = init_db_pool(database.to_str().unwrap()).unwrap();
+    let subkey: Arc<dyn DeriveSpaceSubkeyPort> = Arc::new(FixedSubkey);
+    let profile: Arc<dyn CurrentProfilePort> = Arc::new(FixedProfile);
+    let attempts =
+        DieselEntryReceiveAttemptRepository::new(DieselSqliteExecutor::new(pool.clone()));
+    let artifacts = DieselReceiveArtifactLogRepository::new(
+        DieselSqliteExecutor::new(pool.clone()),
+        subkey.clone(),
+        profile.clone(),
+    );
+    let commit = DieselInboundReceiveCommitRepository::new(
+        DieselSqliteExecutor::new(pool.clone()),
+        subkey,
+        profile,
+    );
+    let entries = DieselClipboardEntryRepository::new(
+        DieselSqliteExecutor::new(pool.clone()),
+        ClipboardEntryRowMapper,
+        ClipboardSelectionRowMapper,
+        ClipboardEntryRowMapper,
+    );
+    let reader = DieselSqliteExecutor::new(pool);
+
+    attempts
+        .begin_first_receive("entry", "attempt", 1)
+        .await
+        .unwrap();
+    assert!(attempts
+        .claim_receive_commit("entry", "attempt", 2)
+        .await
+        .unwrap());
+    artifacts
+        .record_receive_artifacts(&ReceiveArtifactRecord {
+            entry_id: "entry".to_owned(),
+            attempt_id: "attempt".to_owned(),
+            phase: ReceiveArtifactPhase::Preparing,
+            resolution: ReceiveArtifactResolution::Pending,
+            artifacts: vec![ReceiveArtifact {
+                item_id: "item".to_owned(),
+                staged_path: "/tmp/staged".into(),
+                final_path: "/tmp/final".into(),
+                ownership: ReceiveArtifactOwnership::ManagedStaging,
+            }],
+            updated_at_ms: 2,
+        })
+        .await
+        .unwrap();
+
+    commit
+        .commit_inbound_receive(&InboundReceiveSettlement::Complete {
+            record: record("entry"),
+            attempt_id: "attempt".to_owned(),
+            file_set: None,
+            artifacts: CompletedReceiveArtifacts::Landed,
+            now_ms: 3,
+        })
+        .await
+        .unwrap();
+
+    reader
+        .run(|conn| {
+            assert_eq!(
+                entry_receive_attempt::table
+                    .select(entry_receive_attempt::attempt_state)
+                    .first::<String>(conn)?,
+                "completed"
+            );
+            assert_eq!(
+                receive_artifact_log::table
+                    .select(receive_artifact_log::resolution)
+                    .first::<String>(conn)?,
+                "landed"
+            );
+            Ok(())
+        })
+        .unwrap();
+
+    entries
+        .delete_entry_with_receive_state(&EntryId::from("entry"), &EventId::from("event-entry"))
+        .await
+        .unwrap();
+
+    reader
+        .run(|conn| {
+            assert_eq!(clipboard_entry::table.count().get_result::<i64>(conn)?, 0);
+            assert_eq!(
+                entry_receive_attempt::table
+                    .count()
+                    .get_result::<i64>(conn)?,
+                0
+            );
+            assert_eq!(
+                receive_artifact_log::table
+                    .count()
+                    .get_result::<i64>(conn)?,
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[tokio::test]

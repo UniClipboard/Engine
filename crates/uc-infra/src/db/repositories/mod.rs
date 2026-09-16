@@ -1,6 +1,5 @@
 pub(crate) mod active_clipboard_register_cipher;
 mod active_clipboard_register_repo;
-mod admission_attempt_store;
 mod blob_reference_repo;
 mod blob_repo;
 mod clipboard_entry_repo;
@@ -16,10 +15,6 @@ mod entry_receive_attempt_repo;
 mod entry_replace_repo;
 mod file_transfer_repo;
 mod inbound_receive_commit_repo;
-mod membership_announcement_repo;
-mod membership_applied_security_update_repo;
-mod membership_candidate_repo;
-mod membership_outbox_repo;
 mod migration_repo;
 #[cfg(feature = "lan-compat")]
 mod mobile_device_repo;
@@ -27,15 +22,16 @@ mod peer_address_repo;
 pub(crate) mod receive_artifact_cipher;
 mod receive_artifact_log_repo;
 mod relationship_store;
+#[cfg(test)]
+pub(crate) use relationship_store::test_relationship_store;
+mod history_file_references;
 mod representation_repo;
 mod space_member_repo;
 mod space_security_store;
 mod thumbnail_repo;
 mod trusted_peer_repo;
-mod workspace_convergence_store;
 
 pub use active_clipboard_register_repo::*;
-pub use admission_attempt_store::DieselAdmissionAttemptStore;
 pub use blob_reference_repo::*;
 pub use blob_repo::*;
 pub use clipboard_entry_repo::*;
@@ -48,11 +44,8 @@ pub use entry_file_set_repo::*;
 pub use entry_receive_attempt_repo::*;
 pub use entry_replace_repo::*;
 pub use file_transfer_repo::*;
+pub use history_file_references::*;
 pub use inbound_receive_commit_repo::*;
-pub use membership_announcement_repo::*;
-pub use membership_applied_security_update_repo::*;
-pub use membership_candidate_repo::*;
-pub use membership_outbox_repo::*;
 pub use migration_repo::*;
 #[cfg(feature = "lan-compat")]
 pub use mobile_device_repo::*;
@@ -64,4 +57,3 @@ pub use space_member_repo::*;
 pub use space_security_store::*;
 pub use thumbnail_repo::*;
 pub use trusted_peer_repo::*;
-pub use workspace_convergence_store::DieselWorkspaceConvergenceStore;

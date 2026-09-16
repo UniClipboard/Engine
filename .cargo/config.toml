@@ -1,5 +1,13 @@
 [build]
+# 降低本地构建峰值；可用 cargo build -j N 或 CARGO_BUILD_JOBS 覆盖。
+jobs = 2
 rustflags = ["--cfg", "tokio_unstable"]
+
+[env]
+# libtest 默认串行，避免多个真实网络拓扑场景叠加。
+# 可用 cargo test -- --test-threads=N 或 RUST_TEST_THREADS 覆盖。
+# 仅限制测试用例并发，不限制单个测试内部线程或 CPU 核数。
+RUST_TEST_THREADS = { value = "1", force = false }
 
 [target.x86_64-pc-windows-gnu]
 linker = "x86_64-w64-mingw32-gcc"

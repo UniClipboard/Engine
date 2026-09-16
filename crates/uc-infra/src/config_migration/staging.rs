@@ -14,7 +14,7 @@
 //!   db/uniclipboard.db     # consistent snapshot to install as the live db
 //!   vault/keyslot.json     # keyslot to install into the vault dir
 //!   vault/device_id.txt
-//!   vault/.setup_status    # "is initialized" marker; copy back into vault dir
+//!   vault/.current-space-id-v1    # "is initialized" marker; copy back into vault dir
 //!   iroh-identity/*        # 0600 device-identity files; copy into identity dir
 //!   settings.json
 //!   secrets.json           # { "secrets": { "<key>": "<base64>" , ... } }; KEK only
@@ -187,14 +187,12 @@ pub const KEYSLOT_MEMBER: &str = "vault/keyslot.json";
 /// Member path of the device id inside the bundle / staging area.
 pub const DEVICE_ID_MEMBER: &str = "vault/device_id.txt";
 
-/// Member path of the setup-status marker inside the bundle / staging area.
+/// Member path of the current-Space identity inside the bundle / staging area.
 ///
-/// `FileSetupStatusRepository` persists `SetupStatus { has_completed, space_id }`
-/// to `vault_dir/.setup_status`. The facade reads `has_completed` as its
-/// "is this installation initialized" source of truth, so the marker must
-/// travel with the bundle — without it, an imported installation that holds all
-/// its data would still be treated as uninitialized and re-prompt setup.
-pub const SETUP_STATUS_MEMBER: &str = "vault/.setup_status";
+/// The encrypted portable current-Space identity travels with the bundle so an
+/// imported installation retains the same Space identity without copying a
+/// generation manifest that points at source-only generation directories.
+pub const CURRENT_SPACE_ID_MEMBER: &str = "vault/.current-space-id-v1";
 
 /// Member path of settings inside the bundle / staging area.
 pub const SETTINGS_MEMBER: &str = "settings.json";
@@ -296,8 +294,8 @@ pub fn apply_pending_import(
     )?;
     copy_member(
         &staging_dir,
-        SETUP_STATUS_MEMBER,
-        &vault_dir.join(".setup_status"),
+        CURRENT_SPACE_ID_MEMBER,
+        &vault_dir.join(".current-space-id-v1"),
     )?;
     copy_dir_members(&staging_dir, IROH_IDENTITY_PREFIX, iroh_identity_dir)?;
     copy_member_if_present(&staging_dir, SETTINGS_MEMBER, settings_path)?;

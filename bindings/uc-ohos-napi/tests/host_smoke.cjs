@@ -8,7 +8,11 @@ async function main() {
   assert.ok(addonPath, 'UC_OHOS_NAPI_NODE must point to the built N-API module');
 
   const addon = require(addonPath);
-  assert.equal(addon.coreVersion(), 'v0.20.0-rc.11');
+  assert.equal(addon.coreVersion(), 'v1.1.0-rc.16');
+  assert.equal(typeof addon.installProcessObservability, 'function');
+  assert.equal(typeof addon.queryProcessObservabilityHealth, 'function');
+  assert.equal(typeof addon.flushProcessObservability, 'function');
+  assert.equal(typeof addon.shutdownProcessObservability, 'function');
   assert.equal(typeof addon.prepareHost, 'function');
   assert.equal(typeof addon.startEngine, 'function');
 
@@ -111,6 +115,35 @@ async function main() {
   };
 
   try {
+    const observabilityConfig = {
+      serviceVersion: '1.2.3',
+      environment: 'test',
+      appChannel: 'test',
+      remoteDiagnosticsEnabled: false,
+    };
+    const hostDirectories = {
+      privateDataDirectory: host.privateDataDirectory,
+      cacheDirectory: host.cacheDirectory,
+      temporaryDirectory: host.temporaryDirectory,
+    };
+    const setup = addon.installProcessObservability(observabilityConfig, hostDirectories);
+    assert.equal(setup.reused, false);
+    assert.equal(setup.remote, 'disabled');
+    assert.equal(setup.localFile, 'ready');
+    const health = addon.queryProcessObservabilityHealth();
+    assert.equal(health.remote, setup.remote);
+    assert.equal(health.localFile, setup.localFile);
+    for (const counter of [
+      health.droppedLocalRecords,
+      health.droppedRemoteSpans,
+      health.droppedRemoteLogs,
+      health.failedRemoteSpanBatches,
+      health.failedRemoteLogBatches,
+    ]) {
+      assert.equal(Number.isSafeInteger(counter), true);
+      assert.ok(counter >= 0);
+    }
+
     const preparedHost = addon.prepareHost(host);
     const engine = await addon.startEngine(
       { appVersion: '1.2.3', profileId: 'ohos-host-smoke' },
@@ -131,7 +164,7 @@ async function main() {
     assert.match(invitation.availability, /^(cross_network|same_local_network)$/);
 
     await assert.rejects(
-      engine.joinSpace(invitation.invitationCode, '  ', 'correct horse battery staple'),
+      engine.joinSpace(invitation.invitationCode, '  ', 'correct horse battery staple', false),
       /UC_ENGINE:\d+:invalid_input:false/
     );
 
@@ -184,6 +217,15 @@ async function main() {
     await waitForState(engine, 'running');
     await engine.shutdown(5_000);
 
+    const reusedSetup = addon.installProcessObservability(observabilityConfig, hostDirectories);
+    assert.equal(reusedSetup.reused, true);
+    assert.throws(
+      () => addon.installProcessObservability(
+        { ...observabilityConfig, appChannel: 'development' },
+        hostDirectories
+      ),
+      /OHOS_OBSERVABILITY_CONFIG_CONFLICT/
+    );
     const restarted = await addon.startEngine(
       { appVersion: '1.2.3', profileId: 'ohos-host-smoke' },
       addon.prepareHost(host)
@@ -205,7 +247,11 @@ async function main() {
     assert.deepEqual(restartOutput.bytes, Buffer.from(restartText));
     assert.equal(restartOutput.finished, true);
     await restarted.shutdown(5_000);
+    const shutdown = await addon.shutdownProcessObservability(1_000);
+    assert.match(shutdown.traces, /^(completed|failed|timed_out)$/);
+    assert.match(shutdown.logs, /^(completed|failed|timed_out)$/);
   } finally {
+    await addon.shutdownProcessObservability(100).catch(() => {});
     fs.rmSync(root, { recursive: true, force: true });
   }
 }

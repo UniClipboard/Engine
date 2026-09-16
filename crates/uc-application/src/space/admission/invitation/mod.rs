@@ -5,11 +5,27 @@
 //! stack) so the new Slice 1 invitation flow doesn't pollute the legacy
 //! namespace on the way to its eventual removal (Slice 5).
 //!
-//! All types here are `pub(crate)` per `uc-application/AGENTS.md` §11.4:
+//! All types here are `pub(crate)` per `docs/design-docs/layers/application.md`:
 //! the holder is a cross-use-case flow-state component, not an external
 //! boundary. External callers interact with invitations exclusively
-//! through [`crate::facade::space_setup::SpaceFacade`].
+//! through [`crate::space::SpaceFacade`].
 
-pub(crate) mod holder;
+mod cancel;
+mod holder;
+mod issue;
+mod issue_for_address;
+mod query_addresses;
 
-pub(crate) use holder::InMemoryPairingInvitationHolder;
+mod issuer;
+
+pub use cancel::CancelInvitationError;
+pub use query_addresses::{
+    PairingInvitationAddressCandidate, QueryPairingInvitationAddressesError,
+};
+
+pub(in crate::space) use cancel::CancelPairingInvitationUseCase;
+pub(in crate::space) use holder::InMemoryPairingInvitationHolder;
+pub(in crate::space) use issue::IssuePairingInvitationUseCase;
+pub(in crate::space) use issue_for_address::IssuePairingInvitationForAddressUseCase;
+pub(in crate::space) use issuer::PairingInvitationIssuer;
+pub(in crate::space) use query_addresses::QueryPairingInvitationAddressesUseCase;

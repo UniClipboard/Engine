@@ -1,27 +1,41 @@
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr};
+use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use uc_core::membership::{
-    CurrentWorkspaceLocalMembership, CurrentWorkspacePeerScopePort, GroupRevocationPort,
-    GroupUpdateDispatchError, GroupUpdateDispatchPort, MemberRepositoryPort, PeerAdmissionPort,
+    GroupRevocationPort, GroupUpdateDispatchError, GroupUpdateDispatchPort, KeyEpochError,
     PendingGroupUpdate,
 };
-use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::PeerAddressRepositoryPort;
+use uc_observability_contract::diagnostics::{
+    complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
+    DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
+};
 
 use super::connect_with_staggered_retry;
+use super::peer_address_resolver::PeerAddressResolver;
+use super::trace_context::{inject_current, set_remote_parent, WireTraceContext};
+use crate::space::group_update_failure_detail;
 
 pub const GROUP_UPDATE_ALPN: &[u8] = b"uniclipboard/group-update/1";
 const MAX_UPDATE_SIZE: usize = 4 * 1024 * 1024;
+const MAX_WIRE_SIZE: usize = MAX_UPDATE_SIZE + 1024;
+const WIRE_LAYOUT_MARKER: &[u8; 4] = b"UCT1";
 const GROUP_UPDATE_IO_TIMEOUT: Duration = Duration::from_secs(10);
 const ACK_ACCEPTED: u8 = 1;
 const ACK_REJECTED: u8 = 2;
+
+#[derive(Serialize, Deserialize)]
+struct WireGroupUpdateRequest {
+    trace_context: Option<WireTraceContext>,
+    payload: Vec<u8>,
+}
 
 async fn run_outbound_io_phase<T, E>(
     timeout: Duration,
@@ -35,15 +49,11 @@ async fn run_outbound_io_phase<T, E>(
 
 pub struct IrohGroupUpdateAdapter {
     endpoint: Arc<Endpoint>,
-    peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    peer_address_resolver: PeerAddressResolver,
     handler_state: Arc<HandlerState>,
 }
 
 struct HandlerState {
-    member_repo: Arc<dyn MemberRepositoryPort>,
-    peer_admission: Arc<dyn PeerAdmissionPort>,
-    current_peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
-    fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     group_revocation: Arc<dyn GroupRevocationPort>,
 }
 
@@ -51,22 +61,20 @@ impl IrohGroupUpdateAdapter {
     pub fn new(
         endpoint: Arc<Endpoint>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
-        peer_admission: Arc<dyn PeerAdmissionPort>,
-        current_peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
-        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         group_revocation: Arc<dyn GroupRevocationPort>,
     ) -> Self {
+        use uc_observability_contract::diagnostics::connectivity::{
+            LocalDiagnosticSource, NetworkRecorder, SourceCapability, SourceCollection,
+        };
+        NetworkRecorder::current().register_source(
+            LocalDiagnosticSource::MembershipUpdates,
+            SourceCapability::Supported,
+            SourceCollection::Enabled,
+        );
         Self {
             endpoint,
-            peer_addr_repo,
-            handler_state: Arc::new(HandlerState {
-                member_repo,
-                peer_admission,
-                current_peer_scope,
-                fingerprint_factory,
-                group_revocation,
-            }),
+            peer_address_resolver: PeerAddressResolver::new(peer_addr_repo),
+            handler_state: Arc::new(HandlerState { group_revocation }),
         }
     }
 
@@ -77,11 +85,13 @@ impl IrohGroupUpdateAdapter {
     }
 
     async fn resolve_addr(&self, update: &PendingGroupUpdate) -> Option<EndpointAddr> {
-        match self.peer_addr_repo.get(update.recipient()).await {
-            Ok(Some(record)) => postcard::from_bytes(&record.addr_blob).ok(),
-            Ok(None) => None,
+        match self.peer_address_resolver.resolve(update.recipient()).await {
+            Ok(address) => address,
             Err(error) => {
-                warn!(error = %error, "group update address lookup failed");
+                warn!(
+                    error_kind = error.kind(),
+                    "group update address resolution failed"
+                );
                 None
             }
         }
@@ -97,6 +107,7 @@ impl GroupUpdateDispatchPort for IrohGroupUpdateAdapter {
         if update.payload().len() > MAX_UPDATE_SIZE {
             return Err(GroupUpdateDispatchError::Transport);
         }
+        let request = encode_request(update.payload())?;
         let addr = self
             .resolve_addr(update)
             .await
@@ -106,19 +117,20 @@ impl GroupUpdateDispatchPort for IrohGroupUpdateAdapter {
             addr,
             GROUP_UPDATE_ALPN,
             "group-update",
+            uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
         )
         .await
         .map_err(|_| GroupUpdateDispatchError::Offline)?;
         let (mut send, mut recv) =
             run_outbound_io_phase(GROUP_UPDATE_IO_TIMEOUT, connection.open_bi()).await?;
-        let length = u32::try_from(update.payload().len())
-            .map_err(|_| GroupUpdateDispatchError::Transport)?;
+        let length =
+            u32::try_from(request.len()).map_err(|_| GroupUpdateDispatchError::Transport)?;
         run_outbound_io_phase(
             GROUP_UPDATE_IO_TIMEOUT,
             send.write_all(&length.to_be_bytes()),
         )
         .await?;
-        run_outbound_io_phase(GROUP_UPDATE_IO_TIMEOUT, send.write_all(update.payload())).await?;
+        run_outbound_io_phase(GROUP_UPDATE_IO_TIMEOUT, send.write_all(&request)).await?;
         send.finish()
             .map_err(|_| GroupUpdateDispatchError::Transport)?;
         let mut ack = [0u8; 1];
@@ -146,15 +158,14 @@ impl std::fmt::Debug for IrohGroupUpdateHandler {
 
 impl ProtocolHandler for IrohGroupUpdateHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let peer_device_id = self
-            .state
-            .resolve_device(connection.remote_id().as_bytes())
-            .await;
         let (mut send, mut recv) =
             match tokio::time::timeout(GROUP_UPDATE_IO_TIMEOUT, connection.accept_bi()).await {
                 Ok(Ok(streams)) => streams,
-                Ok(Err(error)) => {
-                    debug!(error = %error, "group update stream accept failed");
+                Ok(Err(_)) => {
+                    debug!(
+                        error_kind = "stream_accept",
+                        "group update stream accept failed"
+                    );
                     return Ok(());
                 }
                 Err(_) => {
@@ -162,20 +173,6 @@ impl ProtocolHandler for IrohGroupUpdateHandler {
                     return Ok(());
                 }
             };
-        let Some(peer_device_id) = peer_device_id else {
-            emit_ack(&mut send, ACK_REJECTED).await;
-            let _ = connection.closed().await;
-            return Ok(());
-        };
-        if !self.state.may_deliver_recovery(&peer_device_id).await {
-            warn!(
-                peer = %peer_device_id.as_str(),
-                "group update: peer is not admitted by current space protection"
-            );
-            emit_ack(&mut send, ACK_REJECTED).await;
-            let _ = connection.closed().await;
-            return Ok(());
-        }
         let mut length = [0u8; 4];
         if !matches!(
             tokio::time::timeout(GROUP_UPDATE_IO_TIMEOUT, recv.read_exact(&mut length)).await,
@@ -186,74 +183,131 @@ impl ProtocolHandler for IrohGroupUpdateHandler {
             return Ok(());
         }
         let length = u32::from_be_bytes(length) as usize;
-        if length == 0 || length > MAX_UPDATE_SIZE {
+        if length == 0 || length > MAX_WIRE_SIZE {
             emit_ack(&mut send, ACK_REJECTED).await;
             let _ = connection.closed().await;
             return Ok(());
         }
-        let mut payload = vec![0u8; length];
+        let mut request = vec![0u8; length];
         if !matches!(
-            tokio::time::timeout(GROUP_UPDATE_IO_TIMEOUT, recv.read_exact(&mut payload)).await,
+            tokio::time::timeout(GROUP_UPDATE_IO_TIMEOUT, recv.read_exact(&mut request)).await,
             Ok(Ok(_))
         ) {
             emit_ack(&mut send, ACK_REJECTED).await;
             let _ = connection.closed().await;
             return Ok(());
         }
-        let ack = if self
+        let request = match decode_request(&request) {
+            Ok(request) => request,
+            Err(_) => {
+                emit_ack(&mut send, ACK_REJECTED).await;
+                let _ = connection.closed().await;
+                return Ok(());
+            }
+        };
+        let span = operation_span(OperationContext {
+            domain: DiagnosticDomain::SpaceMembership,
+            operation: DiagnosticOperation::MembershipGroupUpdate,
+            role: DiagnosticRole::Member,
+            kind: DiagnosticSpanKind::Server,
+        });
+        let started = Instant::now();
+        let applied = self
             .state
             .group_revocation
-            .apply_group_epoch_update(&payload)
-            .await
-            .is_ok()
-        {
+            .apply_group_epoch_update(&request.payload)
+            .await;
+        if applied.is_ok() {
+            let _ = set_remote_parent(&span, request.trace_context.as_ref());
+        }
+        let ack = if applied.is_ok() {
             ACK_ACCEPTED
         } else {
             ACK_REJECTED
         };
         emit_ack(&mut send, ack).await;
+        span.in_scope(|| {
+            let completion = match &applied {
+                Ok(_) => OperationCompletion::succeeded(
+                    DiagnosticDomain::SpaceMembership,
+                    DiagnosticOperation::MembershipGroupUpdate,
+                    DiagnosticRole::Member,
+                    started.elapsed(),
+                ),
+                Err(error) => OperationCompletion::failed(
+                    DiagnosticDomain::SpaceMembership,
+                    DiagnosticOperation::MembershipGroupUpdate,
+                    DiagnosticRole::Member,
+                    group_update_apply_error_type(error),
+                    started.elapsed(),
+                ),
+            };
+            uc_observability_contract::diagnostics::connectivity::NetworkRecorder::current().in_connection_scope(
+                *connection.remote_id().as_bytes(), connection.stable_id() as u64, || {
+                    if let Err(error) = &applied {
+                        uc_observability_contract::diagnostics::connectivity::complete_group_update_failure(
+                            group_update_failure_detail(error), completion);
+                    } else { complete_operation(completion); }
+                });
+        });
+        drop(span);
         let _ = connection.closed().await;
         Ok(())
     }
 }
 
-impl HandlerState {
-    async fn resolve_device(&self, public_key: &[u8; 32]) -> Option<uc_core::ids::DeviceId> {
-        let fingerprint = self.fingerprint_factory.from_public_key(public_key).ok()?;
-        let members = match self.member_repo.list().await {
-            Ok(members) => members,
-            Err(error) => {
-                warn!(error = %error, "group update member lookup failed");
-                return None;
-            }
-        };
-        members
-            .into_iter()
-            .find(|member| member.identity_fingerprint == fingerprint)
-            .map(|member| member.device_id)
-    }
-
-    async fn is_admitted(&self, device_id: &uc_core::ids::DeviceId) -> bool {
-        match self.peer_admission.is_admitted(device_id).await {
-            Ok(admitted) => admitted,
-            Err(error) => {
-                warn!(error = %error, peer = %device_id.as_str(), "group update: peer admission check failed");
-                false
-            }
+fn group_update_apply_error_type(error: &KeyEpochError) -> DiagnosticErrorType {
+    match error {
+        KeyEpochError::Repository(_) | KeyEpochError::StateIssue(_) => DiagnosticErrorType::Storage,
+        KeyEpochError::SecurityState { .. }
+        | KeyEpochError::DecryptionFailed
+        | KeyEpochError::PersistedStateIntegrityFailed => DiagnosticErrorType::Security,
+        KeyEpochError::SpaceNotReady => DiagnosticErrorType::Unavailable,
+        KeyEpochError::EpochOverflow => DiagnosticErrorType::Internal,
+        KeyEpochError::InvalidContentKeyId
+        | KeyEpochError::InvalidProtectionGroupId
+        | KeyEpochError::ContentKeyReuse
+        | KeyEpochError::InvalidSpaceSecurityTransition { .. }
+        | KeyEpochError::InvalidRevocationStage
+        | KeyEpochError::InvalidRevocationRecord
+        | KeyEpochError::RemovedMemberInOutbox
+        | KeyEpochError::RevocationRecipientNotFound
+        | KeyEpochError::PermanentLossRecipientNotPending
+        | KeyEpochError::InvalidRevocationId
+        | KeyEpochError::InvalidRevocationTransition { .. } => {
+            DiagnosticErrorType::AuthenticationFailed
         }
     }
+}
 
-    async fn may_deliver_recovery(&self, device_id: &uc_core::ids::DeviceId) -> bool {
-        if self.is_admitted(device_id).await {
-            return true;
-        }
-        matches!(
-            self.current_peer_scope.snapshot().await,
-            Ok(snapshot)
-                if snapshot.local_membership == CurrentWorkspaceLocalMembership::Active
-                    && snapshot.peer_device_ids.contains(device_id)
-        )
+fn encode_request(payload: &[u8]) -> Result<Vec<u8>, GroupUpdateDispatchError> {
+    if payload.is_empty() || payload.len() > MAX_UPDATE_SIZE {
+        return Err(GroupUpdateDispatchError::Transport);
     }
+    let mut encoded = WIRE_LAYOUT_MARKER.to_vec();
+    encoded.extend(
+        postcard::to_stdvec(&WireGroupUpdateRequest {
+            trace_context: inject_current(),
+            payload: payload.to_vec(),
+        })
+        .map_err(|_| GroupUpdateDispatchError::Transport)?,
+    );
+    if encoded.len() > MAX_WIRE_SIZE {
+        return Err(GroupUpdateDispatchError::Transport);
+    }
+    Ok(encoded)
+}
+
+fn decode_request(encoded: &[u8]) -> Result<WireGroupUpdateRequest, GroupUpdateDispatchError> {
+    let body = encoded
+        .strip_prefix(WIRE_LAYOUT_MARKER)
+        .ok_or(GroupUpdateDispatchError::Transport)?;
+    let request: WireGroupUpdateRequest =
+        postcard::from_bytes(body).map_err(|_| GroupUpdateDispatchError::Transport)?;
+    if request.payload.is_empty() || request.payload.len() > MAX_UPDATE_SIZE {
+        return Err(GroupUpdateDispatchError::Transport);
+    }
+    Ok(request)
 }
 
 async fn emit_ack(send: &mut iroh::endpoint::SendStream, ack: u8) {
@@ -271,21 +325,16 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
-    use chrono::Utc;
     use iroh::{RelayMode, SecretKey};
     use mockall::mock;
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use tracing_subscriber::layer::SubscriberExt;
     use uc_core::ids::DeviceId;
-    use uc_core::membership::{
-        CurrentWorkspaceLocalMembership, CurrentWorkspacePeerScopeError,
-        CurrentWorkspacePeerScopePort, CurrentWorkspacePeerScopeSource,
-        CurrentWorkspacePeerSnapshot, GroupEpoch, GroupRevocationResult, KeyEpochError,
-        MemberRepositoryPort, MembershipError, RevocationId, SpaceMember,
-    };
+    use uc_core::membership::{GroupEpoch, GroupRevocationResult, KeyEpochError, RevocationId};
     use uc_core::ports::{PeerAddressError, PeerAddressRecord};
-    use uc_core::MemberSyncPreferences;
 
     use super::*;
-    use crate::security::Sha256IdentityFingerprintFactory;
 
     mock! {
         GroupRevocation {}
@@ -298,28 +347,13 @@ mod tests {
             async fn pending_group_updates(&self, revocation_id: &RevocationId) -> Result<Vec<PendingGroupUpdate>, KeyEpochError>;
             async fn query_group_revocation(&self, revocation_id: &RevocationId) -> Result<Option<GroupRevocationResult>, KeyEpochError>;
             async fn resume_group_revocations(&self, now_ms: i64) -> Result<Vec<GroupRevocationResult>, KeyEpochError>;
-            async fn pending_space_group_updates(&self) -> Result<Vec<PendingGroupUpdate>, KeyEpochError>;
+            async fn due_space_group_updates(&self, now_ms: i64, online_peer: Option<DeviceId>) -> Result<Vec<PendingGroupUpdate>, KeyEpochError>;
+            async fn record_space_group_update_failures(&self, failures: &[(String, GroupUpdateDispatchError)], now_ms: i64) -> Result<usize, KeyEpochError>;
             async fn acknowledge_space_group_update(&self, update_id: &str, now_ms: i64) -> Result<bool, KeyEpochError>;
         }
     }
 
     struct NoPeerAddresses;
-
-    struct FixedPeerScope(Vec<DeviceId>);
-
-    #[async_trait]
-    impl CurrentWorkspacePeerScopePort for FixedPeerScope {
-        async fn snapshot(
-            &self,
-        ) -> Result<CurrentWorkspacePeerSnapshot, CurrentWorkspacePeerScopeError> {
-            Ok(CurrentWorkspacePeerSnapshot {
-                revision: 1,
-                source: CurrentWorkspacePeerScopeSource::CurrentHistory,
-                local_membership: CurrentWorkspaceLocalMembership::Active,
-                peer_device_ids: self.0.clone(),
-            })
-        }
-    }
 
     #[async_trait]
     impl PeerAddressRepositoryPort for NoPeerAddresses {
@@ -337,18 +371,6 @@ mod tests {
         }
         async fn remove(&self, _device: &DeviceId) -> Result<(), PeerAddressError> {
             Ok(())
-        }
-    }
-
-    mock! {
-        Members {}
-
-        #[async_trait]
-        impl MemberRepositoryPort for Members {
-            async fn get(&self, device_id: &DeviceId) -> Result<Option<SpaceMember>, MembershipError>;
-            async fn list(&self) -> Result<Vec<SpaceMember>, MembershipError>;
-            async fn save(&self, member: &SpaceMember) -> Result<(), MembershipError>;
-            async fn remove(&self, device_id: &DeviceId) -> Result<bool, MembershipError>;
         }
     }
 
@@ -374,20 +396,6 @@ mod tests {
         panic!("endpoint never published direct addresses");
     }
 
-    fn member_for(seed: [u8; 32], device_id: &str) -> SpaceMember {
-        let key = SecretKey::from_bytes(&seed);
-        let identity_fingerprint = Sha256IdentityFingerprintFactory
-            .from_public_key(key.public().as_bytes())
-            .expect("derive fingerprint");
-        SpaceMember {
-            device_id: DeviceId::new(device_id),
-            device_name: "Test Device".to_owned(),
-            identity_fingerprint,
-            joined_at: Utc::now(),
-            sync_preferences: MemberSyncPreferences::default(),
-        }
-    }
-
     #[tokio::test]
     async fn outbound_io_timeout_maps_to_transport_failure() {
         let error = run_outbound_io_phase(
@@ -400,8 +408,114 @@ mod tests {
         assert_eq!(error, GroupUpdateDispatchError::Transport);
     }
 
+    #[test]
+    fn group_update_request_has_an_explicit_private_layout() {
+        let encoded = encode_request(b"MLS").expect("request encodes");
+
+        assert!(encoded.starts_with(WIRE_LAYOUT_MARKER));
+        let decoded = decode_request(&encoded).expect("request decodes");
+        assert_eq!(decoded.payload, b"MLS");
+        assert!(decoded.trace_context.is_none());
+        assert!(decode_request(b"MLS").is_err());
+        assert_eq!(
+            group_update_apply_error_type(&KeyEpochError::Repository(anyhow::anyhow!(
+                "PRIVATE_STORAGE_ERROR"
+            ))),
+            DiagnosticErrorType::Storage
+        );
+    }
+
+    #[test]
+    fn valid_group_update_context_creates_a_real_server_parent() {
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer()
+                .with_tracer(provider.tracer("group-update-trace-test"))
+                .with_context_activation(true),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            let client = operation_span(OperationContext {
+                domain: DiagnosticDomain::SpaceMembership,
+                operation: DiagnosticOperation::MembershipGroupUpdate,
+                role: DiagnosticRole::Member,
+                kind: DiagnosticSpanKind::Client,
+            });
+            let _client_entered = client.enter();
+            let encoded = encode_request(b"MLS").expect("request encodes");
+            let request = decode_request(&encoded).expect("request decodes");
+            let server = operation_span(OperationContext {
+                domain: DiagnosticDomain::SpaceMembership,
+                operation: DiagnosticOperation::MembershipGroupUpdate,
+                role: DiagnosticRole::Member,
+                kind: DiagnosticSpanKind::Server,
+            });
+            assert!(set_remote_parent(&server, request.trace_context.as_ref()));
+            let _server_entered = server.enter();
+        });
+        provider.force_flush().expect("trace flush");
+
+        let spans = exporter.get_finished_spans().expect("finished spans");
+        assert_eq!(spans.len(), 2);
+        let client = spans
+            .iter()
+            .find(|span| span.parent_span_id == opentelemetry::trace::SpanId::INVALID)
+            .expect("client span");
+        let server = spans
+            .iter()
+            .find(|span| span.parent_span_id == client.span_context.span_id())
+            .expect("server span");
+        assert_eq!(
+            server.span_context.trace_id(),
+            client.span_context.trace_id()
+        );
+    }
+
     #[tokio::test]
-    async fn known_but_unadmitted_peer_is_rejected_before_epoch_update() {
+    async fn storage_failure_is_rejected_and_keeps_its_local_cause() {
+        use opentelemetry::logs::AnyValue;
+        use opentelemetry::InstrumentationScope;
+        use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+        use opentelemetry_sdk::error::OTelSdkResult;
+        use opentelemetry_sdk::logs::{LogProcessor, SdkLogRecord, SdkLoggerProvider};
+        use tracing_subscriber::{layer::SubscriberExt, Layer};
+        #[derive(Debug)]
+        struct Probe(Arc<std::sync::Mutex<Option<(&'static str, &'static str)>>>);
+        impl LogProcessor for Probe {
+            fn emit(&self, data: &mut SdkLogRecord, _: &InstrumentationScope) {
+                let field = |name: &str| {
+                    data.attributes_iter()
+                        .find_map(|(key, value)| match value {
+                            AnyValue::String(value) if key.as_str() == name => Some(value.as_str()),
+                            _ => None,
+                        })
+                        .unwrap_or_default()
+                };
+                if let Some(detail) = uc_observability_contract::diagnostics::connectivity::take_local_completion_detail(
+                    field("uc.domain"), field("uc.operation"), field("uc.role"), field("uc.outcome")) {
+                    *self.0.lock().expect("capture") = Some(detail.local_fields());
+                }
+            }
+            fn force_flush(&self) -> OTelSdkResult {
+                Ok(())
+            }
+            fn shutdown_with_timeout(&self, _: Duration) -> OTelSdkResult {
+                Ok(())
+            }
+        }
+        let details = Arc::new(std::sync::Mutex::new(None));
+        let logs = SdkLoggerProvider::builder()
+            .with_log_processor(Probe(details.clone()))
+            .build();
+        let subscriber = tracing_subscriber::registry().with(
+            OpenTelemetryTracingBridge::new(&logs).with_filter(
+                tracing_subscriber::filter::filter_fn(|meta| meta.target() == "uc.telemetry"),
+            ),
+        );
+        let _scope = tracing::subscriber::set_default(subscriber);
         let sender_seed = [0x45u8; 32];
         let receiver_seed = [0x46u8; 32];
         let receiver = endpoint(receiver_seed).await;
@@ -409,20 +523,23 @@ mod tests {
         let sender = endpoint(sender_seed).await;
         wait_for_direct_addrs(&sender).await;
 
-        let mut members = MockMembers::new();
-        members
-            .expect_list()
-            .times(1)
-            .return_once(move || Ok(vec![member_for(sender_seed, "revoked-member")]));
         let mut group_revocation = MockGroupRevocation::new();
-        group_revocation.expect_apply_group_epoch_update().times(0);
+        group_revocation
+            .expect_apply_group_epoch_update()
+            .times(1)
+            .withf(|payload| payload == b"MLS")
+            .returning(|_| {
+                Err(KeyEpochError::Repository(
+                    std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "PRIVATE_STORAGE_PATH",
+                    )
+                    .into(),
+                ))
+            });
         let adapter = IrohGroupUpdateAdapter::new(
             Arc::clone(&receiver),
             Arc::new(NoPeerAddresses),
-            Arc::new(members),
-            Arc::new(crate::network::iroh::StaticPeerAdmission(false)),
-            Arc::new(FixedPeerScope(Vec::new())),
-            Arc::new(Sha256IdentityFingerprintFactory),
             Arc::new(group_revocation),
         );
         let router = iroh::protocol::Router::builder((*receiver).clone())
@@ -434,14 +551,19 @@ mod tests {
             .await
             .expect("dial receiver");
         let (mut send, mut recv) = connection.open_bi().await.expect("open stream");
-        send.write_all(&(3u32).to_be_bytes())
+        let request = encode_request(b"MLS").expect("encode request");
+        send.write_all(&(request.len() as u32).to_be_bytes())
             .await
             .expect("write length");
-        send.write_all(b"MLS").await.expect("write payload");
+        send.write_all(&request).await.expect("write payload");
         send.finish().expect("finish request");
         let mut ack = [0u8; 1];
         recv.read_exact(&mut ack).await.expect("read rejection ack");
         assert_eq!(ack[0], ACK_REJECTED);
+        assert_eq!(
+            *details.lock().expect("details"),
+            Some(("unknown", "permission_denied"))
+        );
 
         router.shutdown().await.ok();
         sender.close().await;
@@ -456,11 +578,6 @@ mod tests {
         let sender = endpoint(sender_seed).await;
         wait_for_direct_addrs(&sender).await;
 
-        let mut members = MockMembers::new();
-        members
-            .expect_list()
-            .times(1)
-            .return_once(move || Ok(vec![member_for(sender_seed, "relay-member")]));
         let mut group_revocation = MockGroupRevocation::new();
         group_revocation
             .expect_apply_group_epoch_update()
@@ -470,10 +587,6 @@ mod tests {
         let adapter = IrohGroupUpdateAdapter::new(
             Arc::clone(&receiver),
             Arc::new(NoPeerAddresses),
-            Arc::new(members),
-            Arc::new(crate::network::iroh::StaticPeerAdmission(false)),
-            Arc::new(FixedPeerScope(vec![DeviceId::new("relay-member")])),
-            Arc::new(Sha256IdentityFingerprintFactory),
             Arc::new(group_revocation),
         );
         let router = iroh::protocol::Router::builder((*receiver).clone())
@@ -485,10 +598,54 @@ mod tests {
             .await
             .expect("dial receiver");
         let (mut send, mut recv) = connection.open_bi().await.expect("open stream");
-        send.write_all(&(3u32).to_be_bytes())
+        let request = encode_request(b"MLS").expect("encode request");
+        send.write_all(&(request.len() as u32).to_be_bytes())
             .await
             .expect("write length");
-        send.write_all(b"MLS").await.expect("write payload");
+        send.write_all(&request).await.expect("write payload");
+        send.finish().expect("finish request");
+        let mut ack = [0u8; 1];
+        recv.read_exact(&mut ack).await.expect("read accepted ack");
+        assert_eq!(ack[0], ACK_ACCEPTED);
+
+        router.shutdown().await.ok();
+        sender.close().await;
+    }
+
+    #[tokio::test]
+    async fn unknown_relay_may_deliver_a_cryptographically_valid_recovery_update() {
+        let sender_seed = [0x49u8; 32];
+        let receiver_seed = [0x4au8; 32];
+        let receiver = endpoint(receiver_seed).await;
+        wait_for_direct_addrs(&receiver).await;
+        let sender = endpoint(sender_seed).await;
+        wait_for_direct_addrs(&sender).await;
+
+        let mut group_revocation = MockGroupRevocation::new();
+        group_revocation
+            .expect_apply_group_epoch_update()
+            .times(1)
+            .withf(|payload| payload == b"MLS")
+            .returning(|_| Ok(GroupEpoch::new(2)));
+        let adapter = IrohGroupUpdateAdapter::new(
+            Arc::clone(&receiver),
+            Arc::new(NoPeerAddresses),
+            Arc::new(group_revocation),
+        );
+        let router = iroh::protocol::Router::builder((*receiver).clone())
+            .accept(GROUP_UPDATE_ALPN, adapter.handler())
+            .spawn();
+
+        let connection = sender
+            .connect(receiver.addr(), GROUP_UPDATE_ALPN)
+            .await
+            .expect("dial receiver");
+        let (mut send, mut recv) = connection.open_bi().await.expect("open stream");
+        let request = encode_request(b"MLS").expect("encode request");
+        send.write_all(&(request.len() as u32).to_be_bytes())
+            .await
+            .expect("write length");
+        send.write_all(&request).await.expect("write payload");
         send.finish().expect("finish request");
         let mut ack = [0u8; 1];
         recv.read_exact(&mut ack).await.expect("read accepted ack");

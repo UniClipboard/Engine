@@ -21,25 +21,13 @@
 //! have an address blob for" and avoids iterating ghost entries in
 //! `member_repo` that never completed pairing.
 //!
-//! Per-target preflight (#886) consults `PresencePort::current_state`
-//! once before spawning the dial: `Offline` short-circuits to a
-//! `SyncDeferred { peer_known_offline }` event without touching the
-//! wire, every other state (`Online`, `Unknown`) falls through to the
-//! dispatch port. The dispatch adapter is the only writer of the
-//! Offline verdict — it calls `PresencePort::mark_offline` on its own
-//! dial failures, which arms a sticky window inside the presence
-//! adapter that this preflight reads. Concentrating the "I just learned
-//! this peer is unreachable" signal on the presence port keeps every
-//! consumer (roster view, fan-out skip, future mobile-sync /
-//! file-transfer paths) reading the same truth source instead of each
-//! growing its own cache (the use case kept one before #886 and the
-//! split caused state divergence — see the issue for the post-mortem).
+//! Per-target preflight reads `PeerReachabilityPort::current_state` without
+//! network I/O. Confirmed `Offline` defers this operation; all other states
+//! proceed to dispatch. Only the reachability adapter settles connection
+//! evidence. A content dial failure requests a background recheck and does
+//! not invalidate an admitted peer connection or replay the failed send.
 //!
-//! `Unknown` is intentionally not pre-filtered: presence's outbound
-//! probes populate `last_state`, so a peer that always dials us first
-//! (accept-only) stays `Unknown` until the dispatch adapter actually
-//! reaches it. Dropping `Unknown` peers in the preflight would silently
-//! exclude a valid direct-delivery attempt.
+//! `Unknown` is not proof of a failed connection and is not pre-filtered.
 //!
 //! ## Concurrency
 //!
@@ -50,16 +38,15 @@
 //! closures return immediately, so the expectation Mutex never blocks
 //! anything observable. Hand-written fakes are reserved for cases that
 //! genuinely need them (broadcast `subscribe + emit`; see
-//! `ingest_inbound.rs::tests` and Phase 1 `roster/facade.rs::FakePresence`).
+//! `ingest_inbound.rs::tests` and Phase 1 `roster/facade.rs::FakePeerReachability`).
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::task::JoinSet;
-use tracing::{info, info_span, instrument, Instrument};
-use uc_observability_contract::FlowId;
+use tracing::info;
 
 /// 主流程等 fan-out join 的硬上限。超过此时长后,剩余仍在跑的 peer task 会被
 /// move 到后台 spawn 继续 join,delivery 写盘与 host event emit 都在后台完成
@@ -103,12 +90,11 @@ use uc_core::clipboard::{
     ClipboardContentCategory, ClipboardContentCategorySet, EntryDeliveryRecord,
 };
 use uc_core::ids::{DeviceId, EntryId};
-use uc_core::membership::ContentExchangeGatePort;
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::{
     ClipboardDispatchError, ClipboardDispatchPort, ClockPort, ConnectionChannel,
     DeviceIdentityPort, DispatchAck, EntryDeliveryRepositoryPort, FirstSyncStatePort,
-    LocalIdentityPort, PeerAddressRepositoryPort, PresencePort, SettingsPort, SyncPayload,
+    LocalIdentityPort, PeerAddressRepositoryPort, PeerReachabilityPort, SettingsPort, SyncPayload,
 };
 use uc_core::MemberRepositoryPort;
 use uc_observability_contract::analytics::{
@@ -222,9 +208,6 @@ pub(crate) struct DispatchClipboardEntryInput {
     ///
     /// `Some(vec![])` 是合法的"无目标"语义,与差集派生空集等价,不报错。
     pub target_filter: Option<Vec<DeviceId>>,
-    /// Monotonic time at which the source clipboard change was observed.
-    /// Manual resends have no new source observation and leave this empty.
-    pub source_started_at: Option<Instant>,
 }
 
 /// One target's dispatch result. `Ok` + `DispatchAck` when the peer
@@ -324,64 +307,56 @@ pub(crate) struct DispatchClipboardEntryUseCase {
 }
 
 #[cfg(test)]
-pub(crate) struct AllowAllRemovalTargets;
-
-#[cfg(test)]
-#[async_trait::async_trait]
-impl ContentExchangeGatePort for AllowAllRemovalTargets {
-    async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
-        false
-    }
-}
-
-#[cfg(test)]
 pub(crate) struct AllTestPeerScope;
 
 #[cfg(test)]
+fn all_test_peer_ids() -> Vec<DeviceId> {
+    [
+        "peer-a",
+        "peer-accept-only",
+        "peer-b",
+        "peer-c",
+        "peer-dup",
+        "peer-glitch",
+        "peer-io",
+        "peer-mute",
+        "peer-no-text",
+        "peer-off",
+        "peer-ok",
+        "peer-on",
+        "peer-orphan",
+        "peer-policy",
+        "peer-rej",
+        "peer-rejecty",
+        "peer-slow",
+        "peer-strict",
+        "peer-v2",
+        "peer-1",
+        "peer-2",
+        "peer-p",
+        "peer-rebroadcast",
+        "peer-fast",
+        "peer-slow",
+        "peer-removed",
+        "peer-retained",
+    ]
+    .into_iter()
+    .map(DeviceId::new)
+    .collect()
+}
+
+#[cfg(test)]
 #[async_trait::async_trait]
-impl uc_core::membership::CurrentWorkspacePeerScopePort for AllTestPeerScope {
+impl crate::deps::CurrentSpaceMemberScopePort for AllTestPeerScope {
     async fn snapshot(
         &self,
-    ) -> Result<
-        uc_core::membership::CurrentWorkspacePeerSnapshot,
-        uc_core::membership::CurrentWorkspacePeerScopeError,
-    > {
-        Ok(uc_core::membership::CurrentWorkspacePeerSnapshot {
+    ) -> Result<crate::deps::CurrentSpaceMemberScope, crate::deps::CurrentSpaceMemberScopeError>
+    {
+        Ok(crate::deps::CurrentSpaceMemberScope {
             revision: 1,
-            source: uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory,
-            local_membership: uc_core::membership::CurrentWorkspaceLocalMembership::Active,
-            peer_device_ids: [
-                "peer-a",
-                "peer-accept-only",
-                "peer-b",
-                "peer-c",
-                "peer-dup",
-                "peer-glitch",
-                "peer-io",
-                "peer-mute",
-                "peer-no-text",
-                "peer-off",
-                "peer-ok",
-                "peer-on",
-                "peer-orphan",
-                "peer-policy",
-                "peer-rej",
-                "peer-rejecty",
-                "peer-slow",
-                "peer-strict",
-                "peer-v2",
-                "peer-1",
-                "peer-2",
-                "peer-p",
-                "peer-rebroadcast",
-                "peer-fast",
-                "peer-slow",
-                "peer-removed",
-                "peer-retained",
-            ]
-            .into_iter()
-            .map(DeviceId::new)
-            .collect(),
+            local_member_active: true,
+            usable_peer_device_ids: all_test_peer_ids(),
+            paused_peer_devices: Vec::new(),
         })
     }
 }
@@ -395,7 +370,7 @@ impl DispatchClipboardEntryUseCase {
     pub(crate) fn new(
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
-        presence: Arc<dyn PresencePort>,
+        peer_reachability: Arc<dyn PeerReachabilityPort>,
         transfer_cipher: Arc<dyn TransferCipherPort>,
         clipboard_dispatch: Arc<dyn ClipboardDispatchPort>,
         device_identity: Arc<dyn DeviceIdentityPort>,
@@ -407,10 +382,10 @@ impl DispatchClipboardEntryUseCase {
         entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
         host_event_bus: SharedHostEventEmitter,
     ) -> Self {
-        Self::new_with_removal_gate(
+        Self::new_with_scope(
             peer_addr_repo,
             member_repo,
-            presence,
+            peer_reachability,
             transfer_cipher,
             clipboard_dispatch,
             device_identity,
@@ -421,16 +396,15 @@ impl DispatchClipboardEntryUseCase {
             first_sync_state,
             entry_delivery_repo,
             host_event_bus,
-            Arc::new(AllowAllRemovalTargets),
             Arc::new(AllTestPeerScope),
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new_with_removal_gate(
+    pub(crate) fn new_with_scope(
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
-        presence: Arc<dyn PresencePort>,
+        peer_reachability: Arc<dyn PeerReachabilityPort>,
         transfer_cipher: Arc<dyn TransferCipherPort>,
         clipboard_dispatch: Arc<dyn ClipboardDispatchPort>,
         device_identity: Arc<dyn DeviceIdentityPort>,
@@ -441,24 +415,18 @@ impl DispatchClipboardEntryUseCase {
         first_sync_state: Arc<dyn FirstSyncStatePort>,
         entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
         host_event_bus: SharedHostEventEmitter,
-        removal_gate: Arc<dyn ContentExchangeGatePort>,
-        peer_scope: Arc<dyn uc_core::membership::CurrentWorkspacePeerScopePort>,
+        peer_scope: Arc<dyn crate::deps::CurrentSpaceMemberScopePort>,
     ) -> Self {
         let header_clock = Arc::clone(&clock);
         Self {
             cipher: transfer_cipher,
             device_identity,
             clock,
-            selector: TargetSelector::new_with_removal_gate(
-                peer_addr_repo,
-                member_repo,
-                removal_gate,
-                peer_scope,
-            ),
+            selector: TargetSelector::new_with_scope(peer_addr_repo, member_repo, peer_scope),
             header_factory: OutboundHeaderFactory::new(settings, local_identity, header_clock),
             dispatcher: Arc::new(PerPeerDispatcher::new(
                 clipboard_dispatch,
-                presence,
+                peer_reachability,
                 analytics,
                 first_sync_state,
             )),
@@ -476,21 +444,10 @@ impl DispatchClipboardEntryUseCase {
     //   - 每个目标 peer 进 child span(见下 `peer.dispatch`)而不是把
     //     `peer.device_id` 钉在 root —— 扇出 N 个 peer 时 root 只有一个,
     //     钉上会丢失末次写入以外的信息。
-    #[instrument(
-        skip_all,
-        fields(
-            snapshot_hash = %input.snapshot_hash,
-            flow.id = tracing::field::Empty,
-            flow.kind = "clipboard_sync",
-            fanout.candidates = tracing::field::Empty,
-        ),
-    )]
     pub(crate) async fn execute(
         &self,
         input: DispatchClipboardEntryInput,
     ) -> Result<DispatchOutcome, DispatchSyncError> {
-        let flow_id = FlowId::generate();
-        tracing::Span::current().record("flow.id", tracing::field::display(&flow_id));
         // 1. Encrypt once. A locked session surfaces here — let it
         //    short-circuit so we don't spam the dispatch wire with retries.
         let ciphertext = match self.cipher.encrypt(&input.plaintext).await {
@@ -512,10 +469,7 @@ impl DispatchClipboardEntryUseCase {
         //    fan-out (see `PerPeerDispatcher`).
         let local_device = self.device_identity.current_device_id();
         let candidates = self.selector.select(&input, &local_device).await?;
-        let header = self
-            .header_factory
-            .build(&input, &flow_id, &local_device)
-            .await;
+        let header = self.header_factory.build(&input, &local_device).await;
 
         if candidates.is_empty() {
             info!("dispatch: no paired peers; skipping fan-out");
@@ -532,15 +486,12 @@ impl DispatchClipboardEntryUseCase {
             });
         }
 
-        tracing::Span::current().record("fanout.candidates", candidates.len());
-
         // 4. Fan out: one task per target, each driving `dispatch_one`
-        //    (presence preflight + dispatch + per-peer telemetry) inside its
+        //    (peer_reachability preflight + dispatch + per-peer telemetry) inside its
         //    own `peer.dispatch` child span carrying `flow.id`, so Sentry
         //    can join the outbound dispatch with the inbound ingest.
         let payload_type = payload_type_from_categories(&input.categories);
         let payload_size_bucket = PayloadSizeBucket::from_bytes(input.plaintext.len() as u64);
-        let source_started_at = input.source_started_at;
         let header = Arc::new(header);
         let mut set: JoinSet<PeerDispatchResult> = JoinSet::new();
         for device_id in &candidates {
@@ -550,27 +501,18 @@ impl DispatchClipboardEntryUseCase {
                 ciphertext: ciphertext.clone(),
             };
             let device_id = *device_id;
-            let child_span = info_span!(
-                "peer.dispatch",
-                peer.device_id = %device_id.as_str(),
-                flow.id = %flow_id,
-                flow.kind = "clipboard_sync",
-            );
-            set.spawn(
-                async move {
-                    dispatcher
-                        .dispatch_one(
-                            device_id,
-                            header,
-                            payload,
-                            payload_type,
-                            payload_size_bucket,
-                            source_started_at,
-                        )
-                        .await
-                }
-                .instrument(child_span),
-            );
+            let observation = uc_observability_contract::diagnostics::ObservationContext::capture();
+            set.spawn(observation.scope(async move {
+                dispatcher
+                    .dispatch_one(
+                        device_id,
+                        header,
+                        payload,
+                        payload_type,
+                        payload_size_bucket,
+                    )
+                    .await
+            }));
         }
 
         // 5. Drain within the fan-out deadline; classify + fold each
@@ -660,14 +602,14 @@ impl DispatchClipboardEntryUseCase {
 // * Use a hand-written fake **only** when ergonomics demand it:
 //     - `subscribe()` returning a non-Clone `broadcast::Receiver` plus an
 //       `emit(...)` helper to drive the test (see `roster/facade.rs` ::
-//       `FakePresence` for the canonical example), or
+//       `FakePeerReachability` for the canonical example), or
 //     - wall-time concurrency assertions where mockall's internal
 //       `Mutex<FnMut>` would serialise concurrent `.returning()` closures
 //       (Phase 1 T6's `SleepyPresence`).
 //
 // For this file: the dispatch use case calls 2 async ports + read-only
 // ports; no broadcast emit, no wall-time concurrency assertion. Most ports
-// are mocked with `mockall::mock!`. `PresencePort::current_state` is read
+// are mocked with `mockall::mock!`. `PeerReachabilityPort::current_state` is read
 // only for telemetry classification and never filters dispatch candidates.
 
 #[cfg(test)]
@@ -682,10 +624,10 @@ mod tests {
     use uc_core::clipboard::{DeliveryFailureReason, EntryDeliveryStatus};
     use uc_core::ports::security::{TransferCipherError, TransferCipherPort};
     use uc_core::ports::{
-        ClipboardHeader, ClockPort, DeviceIdentityPort, DispatchReport, DispatchTiming,
-        FirstSyncStateError, LocalIdentityError, LocalIdentityPort, PeerAddressError,
-        PeerAddressRecord, PeerAddressRepositoryPort, PresenceError, PresenceEvent, PresencePort,
-        ReachabilityState, SettingsPort,
+        ClipboardHeader, ClockPort, DeviceIdentityPort, DispatchReport, FirstSyncStateError,
+        LocalIdentityError, LocalIdentityPort, PeerAddressError, PeerAddressRecord,
+        PeerAddressRepositoryPort, PeerReachabilityChanged, PeerReachabilityError,
+        PeerReachabilityPort, ReachabilityState, SettingsPort,
     };
     use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
@@ -753,7 +695,6 @@ mod tests {
     fn dispatch_report(outcome: Result<DispatchAck, ClipboardDispatchError>) -> DispatchReport {
         DispatchReport {
             transport: ConnectionChannel::Direct,
-            timing: DispatchTiming::default(),
             outcome,
         }
     }
@@ -869,13 +810,13 @@ mod tests {
         }
     }
 
-    struct StaticPresence(ReachabilityState);
+    struct StaticPeerReachability(ReachabilityState);
     #[async_trait]
-    impl PresencePort for StaticPresence {
+    impl PeerReachabilityPort for StaticPeerReachability {
         async fn ensure_reachable(
             &self,
             _device: &DeviceId,
-        ) -> Result<ReachabilityState, PresenceError> {
+        ) -> Result<ReachabilityState, PeerReachabilityError> {
             Ok(self.0)
         }
 
@@ -883,7 +824,7 @@ mod tests {
             self.0
         }
 
-        fn subscribe(&self) -> broadcast::Receiver<PresenceEvent> {
+        fn subscribe(&self) -> broadcast::Receiver<PeerReachabilityChanged> {
             let (_tx, rx) = broadcast::channel(1);
             rx
         }
@@ -985,10 +926,10 @@ mod tests {
         analytics: Arc<dyn AnalyticsPort>,
         first_sync_state: Arc<dyn FirstSyncStatePort>,
     ) -> DispatchClipboardEntryUseCase {
-        build_uc_with_presence_and_first_sync_state(
+        build_uc_with_peer_reachability_and_first_sync_state(
             peer_addr_repo,
             member_repo,
-            Arc::new(StaticPresence(ReachabilityState::Unknown)),
+            Arc::new(StaticPeerReachability(ReachabilityState::Unknown)),
             cipher,
             dispatch,
             device_identity,
@@ -1000,10 +941,10 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn build_uc_with_presence_and_first_sync_state(
+    fn build_uc_with_peer_reachability_and_first_sync_state(
         peer_addr_repo: MockPeerAddrRepo,
         member_repo: MockMemberRepo,
-        presence: Arc<dyn PresencePort>,
+        peer_reachability: Arc<dyn PeerReachabilityPort>,
         cipher: MockCipher,
         dispatch: MockDispatch,
         device_identity: MockDeviceId_,
@@ -1015,7 +956,7 @@ mod tests {
         DispatchClipboardEntryUseCase::new(
             Arc::new(peer_addr_repo),
             Arc::new(member_repo),
-            presence,
+            peer_reachability,
             Arc::new(cipher),
             Arc::new(dispatch),
             Arc::new(device_identity),
@@ -1145,7 +1086,6 @@ mod tests {
             // 默认无 filter:历史 verdict 都是"对 peer_addr_repo 全 fan-out"
             // 语义。专门验证 ADR-005 §2.5 resend 路径的 verdict 自行构造 Some。
             target_filter: None,
-            source_started_at: None,
         }
     }
 
@@ -1201,7 +1141,7 @@ mod tests {
     /// instead of silently dropping it pre-flight; the other peer still
     /// gets the frame. This is the key contract change that fixes the
     /// "no online peers; skipping fan-out" silent regression where our
-    /// local presence cache was empty because the peer dialed us first
+    /// local peer_reachability cache was empty because the peer dialed us first
     /// (accept-side only updates the peer's cache, not ours).
     #[tokio::test]
     async fn unreachable_peer_is_reported_offline_after_dispatch_attempt() {
@@ -1677,7 +1617,6 @@ mod tests {
             categories,
             entry_id: None,
             target_filter: None,
-            source_started_at: None,
         };
 
         let outcome = uc.execute(text_input).await.expect("dispatch ok");
@@ -1894,11 +1833,9 @@ mod tests {
 
     /// Presence reports Offline ⇒ fan-out task skips the dial entirely
     /// and fires `SyncDeferred` directly. The dispatch port must NOT be
-    /// invoked — re-dialing a peer the presence layer has already
+    /// invoked — re-dialing a peer the peer_reachability layer has already
     /// concluded unreachable would burn FAN_OUT_DEADLINE for no gain
-    /// (the presence verdict itself comes from a real dial via
-    /// `dial_and_track`, plus the dispatch adapter's `mark_offline`
-    /// writeback on its own failures).
+    /// (the reachability verdict comes from authenticated connection checks).
     ///
     /// `attempted - deferred` remains the dashboard's "user-perceived
     /// attempts" denominator, so the SyncAttempted event still fires
@@ -1922,10 +1859,10 @@ mod tests {
         dispatch.expect_dispatch().times(0);
 
         let analytics = Arc::new(CapturingAnalyticsSink::default());
-        let uc = build_uc_with_presence_and_first_sync_state(
+        let uc = build_uc_with_peer_reachability_and_first_sync_state(
             repo,
             make_member_repo_all_enabled(),
-            Arc::new(StaticPresence(ReachabilityState::Offline)),
+            Arc::new(StaticPeerReachability(ReachabilityState::Offline)),
             cipher,
             dispatch,
             make_device_identity("self-device"),
@@ -2010,7 +1947,6 @@ mod tests {
             categories,
             entry_id: None,
             target_filter: None,
-            source_started_at: None,
         };
 
         uc.execute(file_input).await.expect("dispatch ok");
@@ -2158,7 +2094,7 @@ mod tests {
         let uc = DispatchClipboardEntryUseCase::new(
             Arc::new(repo),
             Arc::new(make_member_repo_all_enabled()),
-            Arc::new(StaticPresence(ReachabilityState::Unknown)),
+            Arc::new(StaticPeerReachability(ReachabilityState::Unknown)),
             Arc::new(cipher),
             Arc::new(dispatch),
             Arc::new(make_device_identity("self-device")),
@@ -2261,7 +2197,7 @@ mod tests {
         let uc = DispatchClipboardEntryUseCase::new(
             Arc::new(repo),
             Arc::new(make_member_repo_all_enabled()),
-            Arc::new(StaticPresence(ReachabilityState::Unknown)),
+            Arc::new(StaticPeerReachability(ReachabilityState::Unknown)),
             Arc::new(cipher),
             Arc::new(dispatch),
             Arc::new(make_device_identity("self-device")),
@@ -2319,7 +2255,7 @@ mod tests {
         let uc = DispatchClipboardEntryUseCase::new(
             Arc::new(repo),
             Arc::new(make_member_repo_all_enabled()),
-            Arc::new(StaticPresence(ReachabilityState::Unknown)),
+            Arc::new(StaticPeerReachability(ReachabilityState::Unknown)),
             Arc::new(cipher),
             Arc::new(dispatch),
             Arc::new(make_device_identity("self-device")),
@@ -2417,7 +2353,7 @@ mod tests {
         let uc = DispatchClipboardEntryUseCase::new(
             Arc::new(repo),
             Arc::new(make_member_repo_all_enabled()),
-            Arc::new(StaticPresence(ReachabilityState::Unknown)),
+            Arc::new(StaticPeerReachability(ReachabilityState::Unknown)),
             Arc::new(cipher),
             Arc::new(dispatch),
             Arc::new(make_device_identity("self-device")),
@@ -2565,7 +2501,7 @@ mod tests {
         let uc = DispatchClipboardEntryUseCase::new(
             Arc::new(repo),
             Arc::new(make_member_repo_all_enabled()),
-            Arc::new(StaticPresence(ReachabilityState::Unknown)),
+            Arc::new(StaticPeerReachability(ReachabilityState::Unknown)),
             Arc::new(cipher),
             Arc::new(dispatch),
             Arc::new(make_device_identity("self-device")),
@@ -2651,7 +2587,7 @@ mod tests {
         let uc = DispatchClipboardEntryUseCase::new(
             Arc::new(repo),
             Arc::new(make_member_repo_all_enabled()),
-            Arc::new(StaticPresence(ReachabilityState::Unknown)),
+            Arc::new(StaticPeerReachability(ReachabilityState::Unknown)),
             Arc::new(cipher),
             Arc::new(dispatch),
             Arc::new(make_device_identity("self-device")),
@@ -2729,13 +2665,12 @@ mod tests {
         );
     }
 
-    // ── presence-gated preflight (post-#886) ─────────────────────────────
+    // ── peer_reachability-gated preflight (post-#886) ─────────────────────────────
     //
     // After #886 the use case has no local negative cache: the only
-    // short-circuit signal is `PresencePort::current_state == Offline`.
-    // The dispatch adapter owns the writer side — it calls
-    // `mark_offline` on its own dial failure, which arms a sticky
-    // window inside the presence adapter that this preflight reads.
+    // short-circuit signal is `PeerReachabilityPort::current_state == Offline`.
+    // Background reachability checks own Offline; dispatch failures only
+    // request a recheck and do not change this projection.
     //
     // "Offline short-circuits + fires SyncDeferred" is already covered
     // by `known_offline_skips_dispatch_and_fires_deferred` above. The
@@ -2747,7 +2682,7 @@ mod tests {
     /// silently filtering `Unknown` would exclude peers that only ever
     /// dial us first.
     #[tokio::test]
-    async fn presence_unknown_falls_through_to_dispatch_port() {
+    async fn peer_reachability_unknown_falls_through_to_dispatch_port() {
         let mut repo = MockPeerAddrRepo::new();
         repo.expect_list()
             .times(1)
@@ -2766,10 +2701,10 @@ mod tests {
             .times(1)
             .returning(|_, _, _| dispatch_report(Ok(DispatchAck::Accepted)));
 
-        let uc = build_uc_with_presence_and_first_sync_state(
+        let uc = build_uc_with_peer_reachability_and_first_sync_state(
             repo,
             make_member_repo_all_enabled(),
-            Arc::new(StaticPresence(ReachabilityState::Unknown)),
+            Arc::new(StaticPeerReachability(ReachabilityState::Unknown)),
             cipher,
             dispatch,
             make_device_identity("self-device"),
@@ -2787,11 +2722,11 @@ mod tests {
     /// `PeerRejected` is a wire-level refusal (version mismatch, locked
     /// space, ...) on a peer that is fully reachable. It must NOT
     /// short-circuit the next dispatch: the dispatch adapter does not
-    /// call `mark_offline` on a rejected ack (only on dial failure), so
-    /// `presence.current_state` stays `Unknown`/`Online` and the next
+    /// call `report_communication_failure` on a rejected ack (only on dial failure), so
+    /// `peer_reachability.current_state` stays `Unknown`/`Online` and the next
     /// execute() must dial the port again. Pre-#886 the use-case-local
     /// cache stamped only on `Offline`/`Io` to guarantee this; post-#886
-    /// the invariant falls out of "presence is the only short-circuit
+    /// the invariant falls out of "peer_reachability is the only short-circuit
     /// source" — this test pins it in place against accidental
     /// regression.
     #[tokio::test]

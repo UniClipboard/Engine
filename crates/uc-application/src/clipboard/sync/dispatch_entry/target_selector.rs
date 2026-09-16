@@ -21,17 +21,17 @@ use std::sync::Arc;
 use tracing::{info, warn};
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::DeviceId;
-use uc_core::membership::{ContentExchangeGatePort, CurrentWorkspacePeerScopePort};
 use uc_core::ports::PeerAddressRepositoryPort;
 use uc_core::MemberRepositoryPort;
+
+use crate::deps::CurrentSpaceMemberScopePort;
 
 use super::{DispatchClipboardEntryInput, DispatchSyncError};
 
 pub(crate) struct TargetSelector {
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     member_repo: Arc<dyn MemberRepositoryPort>,
-    removal_gate: Arc<dyn ContentExchangeGatePort>,
-    peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
+    peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
 }
 
 impl TargetSelector {
@@ -40,24 +40,21 @@ impl TargetSelector {
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
     ) -> Self {
-        Self::new_with_removal_gate(
+        Self::new_with_scope(
             peer_addr_repo,
             member_repo,
-            Arc::new(super::AllowAllRemovalTargets),
             Arc::new(super::AllTestPeerScope),
         )
     }
 
-    pub(crate) fn new_with_removal_gate(
+    pub(crate) fn new_with_scope(
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
-        removal_gate: Arc<dyn ContentExchangeGatePort>,
-        peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
+        peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
     ) -> Self {
         Self {
             peer_addr_repo,
             member_repo,
-            removal_gate,
             peer_scope,
         }
     }
@@ -83,7 +80,7 @@ impl TargetSelector {
             if record.device_id == *local_device {
                 continue;
             }
-            if !scope.peer_device_ids.contains(&record.device_id) {
+            if !scope.usable_peer_device_ids.contains(&record.device_id) {
                 continue;
             }
             // ADR-005 §2.5 resend: `target_filter` narrows the fan-out
@@ -93,17 +90,6 @@ impl TargetSelector {
                 if !filter.iter().any(|d| d == &record.device_id) {
                     continue;
                 }
-            }
-            if self
-                .removal_gate
-                .is_locally_removed(&record.device_id)
-                .await
-            {
-                info!(
-                    reason = "locally_removed",
-                    "dispatch: skipping locally removed peer"
-                );
-                continue;
             }
             if !self
                 .is_send_allowed(&record.device_id, &input.categories)
@@ -137,7 +123,6 @@ impl TargetSelector {
             Ok(Some(member)) => {
                 if !member.sync_preferences.send_enabled {
                     info!(
-                        device_id = %device_id.as_str(),
                         reason = "send_disabled_by_user",
                         "dispatch: skipping peer per per-device sync preferences"
                     );
@@ -145,10 +130,6 @@ impl TargetSelector {
                 }
                 if !categories.allowed_by(&member.sync_preferences.send_content_types) {
                     info!(
-                        device_id = %device_id.as_str(),
-                        categories = %categories.labels(),
-                        denied = %categories
-                            .denied_labels(&member.sync_preferences.send_content_types),
                         reason = "content_type_disabled_by_user",
                         "dispatch: skipping peer per per-device content_types filter"
                     );
@@ -157,15 +138,11 @@ impl TargetSelector {
                 true
             }
             Ok(None) => {
-                warn!(
-                    device_id = %device_id.as_str(),
-                    "dispatch: peer in addr repo but missing from member repo; failing open"
-                );
+                warn!("dispatch: peer in addr repo but missing from member repo; failing open");
                 true
             }
             Err(err) => {
                 warn!(
-                    device_id = %device_id.as_str(),
                     error = %err,
                     "dispatch: member repo lookup failed; failing open"
                 );
@@ -189,14 +166,25 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct RemovedTarget {
+    struct ExcludingScope {
         device_id: DeviceId,
     }
 
     #[async_trait::async_trait]
-    impl uc_core::membership::ContentExchangeGatePort for RemovedTarget {
-        async fn is_locally_removed(&self, device_id: &DeviceId) -> bool {
-            *device_id == self.device_id
+    impl crate::deps::CurrentSpaceMemberScopePort for ExcludingScope {
+        async fn snapshot(
+            &self,
+        ) -> Result<crate::deps::CurrentSpaceMemberScope, crate::deps::CurrentSpaceMemberScopeError>
+        {
+            Ok(crate::deps::CurrentSpaceMemberScope {
+                revision: 1,
+                local_member_active: true,
+                usable_peer_device_ids: vec![DeviceId::new("peer-retained")]
+                    .into_iter()
+                    .filter(|device_id| device_id != &self.device_id)
+                    .collect(),
+                paused_peer_devices: Vec::new(),
+            })
         }
     }
 
@@ -205,13 +193,12 @@ mod tests {
         member_repo: MockMemberRepo,
         removed_device_id: &str,
     ) -> TargetSelector {
-        TargetSelector::new_with_removal_gate(
+        TargetSelector::new_with_scope(
             Arc::new(peer_addr_repo),
             Arc::new(member_repo),
-            Arc::new(RemovedTarget {
+            Arc::new(ExcludingScope {
                 device_id: dev(removed_device_id),
             }),
-            Arc::new(super::super::AllTestPeerScope),
         )
     }
 

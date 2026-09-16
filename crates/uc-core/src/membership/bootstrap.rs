@@ -401,7 +401,7 @@ pub trait GroupBootstrapPort: Send + Sync {
     ) -> Result<Vec<GroupBootstrapResult>, BootstrapError>;
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum BootstrapError {
     #[error("invalid legacy bootstrap id")]
     InvalidBootstrapId,
@@ -427,8 +427,11 @@ pub enum BootstrapError {
     #[error("legacy bootstrap could not create cryptographic material")]
     CryptographicState,
 
-    #[error("legacy bootstrap could not install activated session material")]
-    SessionMaterial,
+    #[error("legacy bootstrap security state could not be installed")]
+    SecurityState {
+        #[source]
+        source: anyhow::Error,
+    },
 
     #[error("legacy bootstrap repository failure: {0}")]
     Repository(String),
@@ -458,11 +461,11 @@ mod tests {
             .mark_ready(ContentKeyId::generate(), ProtectionGroupId::generate())
             .unwrap();
 
-        assert_eq!(
+        assert!(matches!(
             LegacyBootstrapStage::new(record, SpaceKeyMaterial::new(state, Vec::new(), vec![1], 2))
                 .unwrap_err(),
             BootstrapError::InvalidStage
-        );
+        ));
     }
 
     #[test]
@@ -479,10 +482,10 @@ mod tests {
             .transition_to(LegacyBootstrapStatus::Staged, 2)
             .unwrap();
 
-        assert_eq!(
+        assert!(matches!(
             record.transition_to(LegacyBootstrapStatus::Complete, 3),
             Err(BootstrapError::ReadmissionPending)
-        );
+        ));
     }
 
     #[test]

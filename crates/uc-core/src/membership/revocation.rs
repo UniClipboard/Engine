@@ -945,6 +945,21 @@ impl SpaceKeyMaterial {
         removed
     }
 
+    /// 将本轮未送达的欠账移到队尾，使后续轮次不会被同一批离线设备饿饿。
+    pub fn defer_group_update(&mut self, update_id: &str, now_ms: i64) -> bool {
+        let Some(index) = self
+            .pending_group_updates
+            .iter()
+            .position(|update| update.update_id() == update_id)
+        else {
+            return false;
+        };
+        let update = self.pending_group_updates.remove(index);
+        self.pending_group_updates.push(update);
+        self.updated_at_ms = now_ms;
+        true
+    }
+
     pub fn with_pending_group_updates_from(mut self, previous: &Self) -> Self {
         self.pending_group_updates = previous.pending_group_updates.clone();
         self.pending_group_admission_replays = previous.pending_group_admission_replays.clone();
@@ -1295,7 +1310,22 @@ impl TryFrom<RawRevocationRecord> for RevocationRecord {
     }
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyEpochStateIssue {
+    MissingMaterial,
+    CorruptMaterial,
+    EpochMismatch,
+    MissingRevocation,
+    MissingStage,
+    RecoveryRequired,
+    UnsupportedUpdate,
+    OutOfOrderUpdate,
+    UnsupportedOperation,
+    InvalidStage,
+    StateChanged,
+}
+
+#[derive(Error)]
 pub enum KeyEpochError {
     #[error("group epoch overflow")]
     EpochOverflow,
@@ -1330,6 +1360,12 @@ pub enum KeyEpochError {
     #[error("persisted security state failed integrity validation")]
     PersistedStateIntegrityFailed,
 
+    #[error("current space security state could not be installed")]
+    SecurityState {
+        #[source]
+        source: anyhow::Error,
+    },
+
     #[error("removed member cannot receive the staged revocation")]
     RemovedMemberInOutbox,
 
@@ -1348,8 +1384,17 @@ pub enum KeyEpochError {
         to: RevocationStatus,
     },
 
-    #[error("key epoch repository failure: {0}")]
-    Repository(String),
+    #[error("key epoch repository failure")]
+    Repository(#[source] anyhow::Error),
+
+    #[error("key epoch state rejected: {0:?}")]
+    StateIssue(KeyEpochStateIssue),
+}
+
+impl std::fmt::Debug for KeyEpochError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, formatter)
+    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,21 @@
 use super::*;
 
+struct ApplicationSpaceUnlockAdapter {
+    inner: Arc<uc_infra::space::RuntimeSpaceAccessAdapter>,
+}
+
+#[async_trait::async_trait]
+impl uc_application::deps::UnlockSpacePort for ApplicationSpaceUnlockAdapter {
+    async fn unlock(
+        &self,
+        space_id: &uc_core::ids::SpaceId,
+        passphrase: &uc_core::crypto::domain::Passphrase,
+    ) -> Result<uc_core::crypto::domain::ActiveSpace, uc_core::ports::space::SpaceAccessError> {
+        uc_core::ports::space::SpaceAccessStore::unlock(self.inner.as_ref(), space_id, passphrase)
+            .await
+    }
+}
+
 /// Create SQLite database connection pool
 pub(super) fn create_db_pool(db_path: &PathBuf) -> WiringResult<DbPool> {
     if db_path.as_os_str() != ":memory:" {
@@ -22,10 +38,11 @@ pub(super) fn build_space_access_ports(
     current_profile: &Arc<dyn uc_core::ports::security::current_profile::CurrentProfilePort>,
     session: &Arc<InMemorySession>,
     db_executor: &Arc<DieselSqliteExecutor>,
+    profile_content_key_vault: &Arc<ProfileContentKeyVault>,
 ) -> (
     SpaceAccessPorts,
-    Arc<uc_infra::security::DefaultSpaceAccessAdapter>,
-    Arc<dyn uc_core::membership::CurrentMemberSignaturePort>,
+    Arc<uc_infra::space::RuntimeSpaceAccessAdapter>,
+    Arc<dyn uc_application::deps::CurrentMemberSignaturePort>,
     Arc<dyn uc_core::membership::SpaceSecurityStateResetPort>,
 ) {
     let security_repository = Arc::new(DieselSpaceSecurityStore::new(
@@ -38,34 +55,52 @@ pub(super) fn build_space_access_ports(
         security_repository.clone();
     let space_security_reset: Arc<dyn uc_core::membership::SpaceSecurityStateResetPort> =
         security_repository.clone();
-    let space_access_adapter = Arc::new(
-        uc_infra::security::DefaultSpaceAccessAdapter::new_with_security_repositories(
-            key_material.clone(),
-            current_profile.clone(),
-            session.clone(),
-            key_epoch_repository,
-            legacy_bootstrap_repository,
-        ),
-    );
-    let current_member_signatures: Arc<dyn uc_core::membership::CurrentMemberSignaturePort> =
+    let space_access_adapter = Arc::new(uc_infra::space::RuntimeSpaceAccessAdapter::new(
+        key_material.clone(),
+        current_profile.clone(),
+        session.clone(),
+        key_epoch_repository,
+        legacy_bootstrap_repository,
+        Arc::clone(profile_content_key_vault),
+    ));
+    let current_member_signatures: Arc<dyn uc_application::deps::CurrentMemberSignaturePort> =
         space_access_adapter.clone();
+    let unlock = Arc::new(ApplicationSpaceUnlockAdapter {
+        inner: Arc::clone(&space_access_adapter),
+    });
+    let rebind = Arc::new(uc_infra::space::SpaceSessionRebindAdapter::new(Arc::clone(
+        session,
+    )));
+    let space_access_ports = SpaceAccessPorts {
+        adopt_isolated_space: rebind,
+        initialize: space_access_adapter.clone(),
+        unlock,
+        is_unlocked: space_access_adapter.clone(),
+        lock: space_access_adapter.clone(),
+        resume_session: space_access_adapter.clone(),
+        derive_subkey: space_access_adapter.clone(),
+        prepare_admission_target_access: space_access_adapter.clone(),
+        prepare_sponsor_admission_security: space_access_adapter.clone(),
+        activate_sponsor_admission_security: space_access_adapter.clone(),
+        activate_completion_helper_admission_security: space_access_adapter.clone(),
+        prepare_membership_branch_recovery_recipient: space_access_adapter.clone(),
+        prepare_membership_branch_recovery_material: space_access_adapter.clone(),
+        group_revocation: space_access_adapter.clone(),
+        group_bootstrap: space_access_adapter.clone(),
+        space_protection: space_access_adapter.clone(),
+    };
     (
-        SpaceAccessPorts::from_adapter(Arc::clone(&space_access_adapter)),
+        space_access_ports,
         space_access_adapter,
         current_member_signatures,
         space_security_reset,
     )
 }
 pub(super) fn build_peer_admission_port(
-    session: &Arc<InMemorySession>,
-    db_executor: &Arc<DieselSqliteExecutor>,
+    membership_ledger: Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
 ) -> Arc<dyn uc_core::membership::PeerAdmissionPort> {
-    let repository: Arc<dyn uc_core::membership::RevocationRepositoryPort> = Arc::new(
-        DieselSpaceSecurityStore::new(db_executor.clone(), session.as_ref().clone()),
-    );
-    Arc::new(uc_infra::security::MlsPeerAdmissionAdapter::new(
-        session.clone(),
-        repository,
+    Arc::new(uc_infra::space::MlsPeerAdmissionAdapter::new(
+        membership_ledger,
     ))
 }
 
@@ -73,19 +108,36 @@ pub(super) fn build_search_assembly(
     db_pool_for_search: DbPool,
     space_access_ports: &SpaceAccessPorts,
     current_profile: &Arc<dyn uc_core::ports::security::current_profile::CurrentProfilePort>,
+    payload_runtime: &crate::assembly::platform::ProfilePayloadRuntime,
 ) -> SearchAssembly {
-    let search_key_derivation: Arc<dyn SearchKeyDerivationPort> =
-        Arc::new(HkdfSearchKeyDerivation::new(
-            space_access_ports.derive_subkey.clone(),
-            current_profile.clone(),
-        ));
-    // One concrete adapter, coerced into both the index port and the maintenance
-    // port (ports.md §8.3: one Arc behind several narrow ports).
-    let sqlite_search_index = Arc::new(SqliteSearchIndex::new(
-        db_pool_for_search,
-        current_profile.clone(),
-        search_key_derivation.clone(),
-    ));
+    let (search_key_derivation, sqlite_search_index): (
+        Arc<dyn SearchKeyDerivationPort>,
+        Arc<SqliteSearchIndex>,
+    ) = match payload_runtime.search() {
+        Some(protection) => {
+            let derivation: Arc<dyn SearchKeyDerivationPort> =
+                Arc::new(V3SearchKeyDerivation::new(Arc::clone(protection)));
+            let index = Arc::new(SqliteSearchIndex::new_v3(
+                db_pool_for_search,
+                current_profile.clone(),
+                Arc::clone(protection),
+            ));
+            (derivation, index)
+        }
+        None => {
+            let derivation: Arc<dyn SearchKeyDerivationPort> =
+                Arc::new(HkdfSearchKeyDerivation::new(
+                    space_access_ports.derive_subkey.clone(),
+                    current_profile.clone(),
+                ));
+            let index = Arc::new(SqliteSearchIndex::new(
+                db_pool_for_search,
+                current_profile.clone(),
+                Arc::clone(&derivation),
+            ));
+            (derivation, index)
+        }
+    };
     let search_index: Arc<dyn SearchIndexPort> = sqlite_search_index.clone();
     let search_maintenance: Arc<dyn SearchIndexMaintenancePort> = sqlite_search_index;
     let search_pipeline = Arc::new(SearchPipeline::new());
@@ -101,12 +153,11 @@ pub(super) fn build_search_assembly(
 /// adapter shared by the decorators and the transfer cipher; all share the one
 pub(super) fn build_cipher_decorators(
     session: &Arc<InMemorySession>,
+    blob_cipher: &Arc<dyn uc_core::ports::security::BlobCipherPort>,
     clipboard_event_repo: &Arc<dyn ClipboardEventWriterPort>,
     representation_repo: &Arc<dyn ClipboardRepresentationStore>,
 ) -> CipherDecorators {
-    // BlobCipherPort — business AEAD adapter shared by the decorators.
-    let blob_cipher: Arc<dyn uc_core::ports::security::BlobCipherPort> =
-        Arc::new(uc_infra::security::BlobCipherAdapter::new(session.clone()));
+    let blob_cipher = Arc::clone(blob_cipher);
 
     // TransferCipherPort — uc-application clipboard_sync encrypts/decrypts V3
     // network bytes through this port, sharing the same InMemorySession.
@@ -192,25 +243,23 @@ pub(super) fn build_blob_processing_assembly(
     })
 }
 
-/// Build the whole-installation config-migration facade (export / import preview
-/// / staged import). Assembled in the sync wiring context because its inputs
-/// (secure storage, db pool, local identity, filesystem layout, profile) are not
-/// reconstructable from the abstract `AppDeps` ports; the composed facade travels
-/// on `AppDeps.config_migration`.
+/// Build the passive config-migration capabilities. The Application Settings
+/// assembly owns construction of the facade and its workflow ordering.
 ///
 /// The local-identity port reads the device fingerprint for the export manifest
 /// from the same dedicated identity storage used by the running node. Single-user mode
-pub(super) fn build_config_migration_facade(
+pub(super) fn build_config_migration_deps(
     secure_storage: &Arc<dyn SecureStoragePort>,
     iroh_identity_storage: &Arc<dyn SecureStoragePort>,
     db_pool_for_config_migration: DbPool,
     clock: &Arc<dyn ClockPort>,
-    setup_status: &Arc<dyn SetupStatusPort>,
+    current_space_identity: &Arc<dyn CurrentSpaceIdentityPort>,
+    portable_current_space_identity: &Arc<dyn PortableCurrentSpaceIdentityPort>,
     space_access_ports: &SpaceAccessPorts,
     app_version: String,
     source_mode: ConfigSourceMode,
     migration_paths: ConfigMigrationPaths,
-) -> Arc<ConfigMigrationFacade> {
+) -> ConfigMigrationDeps {
     let config_migration_profile = ProfileId::from("default");
     let config_migration_local_identity: Arc<dyn LocalIdentityPort> =
         Arc::new(IrohIdentityStore::new(
@@ -229,23 +278,26 @@ pub(super) fn build_config_migration_facade(
         )
         .with_app_version(app_version),
     );
-    Arc::new(ConfigMigrationFacade::new(ConfigMigrationDeps {
+    ConfigMigrationDeps {
         export_bundle: config_migration_adapter.clone(),
         preview_import: config_migration_adapter.clone(),
         stage_import: config_migration_adapter.clone(),
-        setup_status: setup_status.clone(),
+        current_space_identity: current_space_identity.clone(),
+        portable_current_space_identity: portable_current_space_identity.clone(),
         is_unlocked: space_access_ports.is_unlocked.clone(),
-    }))
+    }
 }
 
 pub(super) fn create_infra_layer(
     db_pool: DbPool,
+    control_db_pool: DbPool,
     vault_path: &PathBuf,
     settings_path: &PathBuf,
     app_data_root: &PathBuf,
     secure_storage: Arc<dyn SecureStoragePort>,
 ) -> WiringResult<InfraLayer> {
     let db_executor = Arc::new(DieselSqliteExecutor::new(db_pool));
+    let control_db_executor = Arc::new(DieselSqliteExecutor::new(control_db_pool));
 
     let entry_row_mapper = ClipboardEntryRowMapper;
     let selection_row_mapper = ClipboardSelectionRowMapper;
@@ -340,13 +392,18 @@ pub(super) fn create_infra_layer(
 
     let settings_repo: Arc<dyn SettingsPort> = Arc::new(FileSettingsRepository::new(settings_path));
 
-    let setup_status: Arc<dyn SetupStatusPort> =
-        Arc::new(FileSetupStatusRepository::with_defaults(vault_path.clone()));
+    let vault_layout = VaultLayout::new(vault_path.clone());
+    let space_rebuild_progress: Arc<dyn SpaceRebuildProgressPort> = Arc::new(
+        uc_infra::space::FileSpaceRebuildProgress::new(vault_layout.space_rebuild_progress_path()),
+    );
 
     // 升级游标——独立小文件，落在 app_data_root 顶层（与 vault/keyring/settings.json
     // 同级），不污染 vault/。schema_version=1，写入走 tempfile + rename 原子化。
     let app_version_state: Arc<dyn AppVersionStatePort> = Arc::new(
         FileAppVersionStateRepository::with_defaults(app_data_root.clone()),
+    );
+    let engine_version_state: Arc<dyn uc_core::ports::EngineVersionStatePort> = Arc::new(
+        uc_infra::FileEngineVersionStateRepository::with_defaults(app_data_root.clone()),
     );
 
     // 首次同步事件去重 flag——独立小文件 first-sync-state.json，与升级游标同级。
@@ -355,11 +412,6 @@ pub(super) fn create_infra_layer(
     let first_sync_state: Arc<dyn FirstSyncStatePort> = Arc::new(
         FileFirstSyncStateRepository::with_defaults(app_data_root.clone()),
     );
-
-    // Switch-space backup 表 + 主表 inline_data 批量 IO；常态业务代码不
-    // Legacy migration recovery consumes these only through profile convergence.
-    let blob_migration_repo: Arc<dyn uc_core::ports::clipboard::BlobMigrationRepoPort> =
-        Arc::new(DieselBlobMigrationRepository::new(Arc::clone(&db_executor)));
 
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock);
     let hash: Arc<dyn ContentHashPort> = Arc::new(Blake3Hasher);
@@ -373,11 +425,12 @@ pub(super) fn create_infra_layer(
     // ports are exposed upward.
     #[cfg(feature = "lan-compat")]
     let mobile_device_repo_arc = Arc::new(DieselMobileDeviceRepository::new(
-        Arc::clone(&db_executor),
+        Arc::clone(&control_db_executor),
         MobileDeviceRowMapper,
     ));
     #[cfg(feature = "lan-compat")]
     let mobile_device_ports = uc_mobile_lan::MobileDevicePorts {
+        activity: mobile_device_repo_arc.clone(),
         find_by_username: mobile_device_repo_arc.clone(),
         find_by_id: mobile_device_repo_arc.clone(),
         list: mobile_device_repo_arc.clone(),
@@ -399,17 +452,18 @@ pub(super) fn create_infra_layer(
         clipboard_event_reader_repo,
         entry_delivery_repo,
         db_executor,
+        control_db_executor,
         representation_repo,
         selection_repo,
         blob_reference_repo,
-        blob_migration_repo,
         blob_repository,
         thumbnail_repo,
         thumbnail_generator,
         key_material,
         settings_repo,
-        setup_status,
+        space_rebuild_progress,
         app_version_state,
+        engine_version_state,
         first_sync_state,
         clock,
         hash,

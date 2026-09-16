@@ -37,7 +37,7 @@ pub enum FirstSyncStateError {
 }
 
 /// 首次同步事件去重端口。"是否已 fire 过 first_*"是 profile 范围内的事实，
-/// 实现应落在与 `SetupStatusPort` / `AppVersionStatePort` 同等粒度的 profile 数据目录下。
+/// 实现应落在与 `AppVersionStatePort` 同等粒度的 profile 数据目录下。
 ///
 /// 三个 method 互相独立：`mark_first_sync_attempted` 与
 /// `mark_first_sync_succeeded` 各自管理一个 flag，failure 路径上首次 attempt

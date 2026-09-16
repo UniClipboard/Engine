@@ -29,17 +29,19 @@ use uc_core::search::error::SearchError;
 use uc_core::search::query::{QueryOperator, SearchQuery, TimeRangeFilter};
 use uc_core::search::result::{RebuildProgress, RebuildStage, SearchResult, SearchResultsPage};
 use uc_core::search::tag::{SearchTagCount, TagId};
+use uc_core::search::SearchProtectionRef;
 
 use crate::db::pool::DbPool;
 use crate::db::schema::{search_document, search_entry_tag, search_index_meta, search_posting};
-use crate::search::constants::CURRENT_INDEX_VERSION;
-use crate::search::render_payload::RenderPayloadCodec;
+use crate::search::constants::{CURRENT_INDEX_VERSION, V3_INDEX_VERSION};
+use crate::search::render_payload::{RenderFields, RenderPayloadCodec};
 use crate::search::rows::{
     NewSearchDocumentRow, NewSearchEntryTagRow, NewSearchIndexMetaRow, NewSearchPostingRow,
     SearchDocumentRow, SearchIndexMetaRow,
 };
 use crate::search::search_key_derivation::term_tag;
 use crate::search::tokenizer::SearchTokenizer;
+use crate::search::{SearchGroupRef, V3SearchProtection};
 
 /// Owned, query-derived filter inputs shared by both search paths.
 ///
@@ -51,6 +53,18 @@ struct FilterParams {
     extensions: Vec<String>,
     source_devices: Vec<String>,
     time_range: Option<TimeRangeFilter>,
+}
+
+#[derive(Clone)]
+struct PreparedSearchEntry {
+    document: NewSearchDocumentRow,
+    postings: Vec<NewSearchPostingRow>,
+    tags: Vec<NewSearchEntryTagRow>,
+}
+
+enum SearchRenderStrategy {
+    Legacy(RenderPayloadCodec),
+    V3(Arc<V3SearchProtection>),
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -76,7 +90,7 @@ impl ActiveRebuild {
     ///
     /// Temp table names are deterministic from the profile ID (hex-encoded bytes so
     /// the names are safe SQL identifiers regardless of profile ID content).
-    pub fn new(profile_id: &str) -> Self {
+    pub fn new(profile_id: &str, target_version: &str) -> Self {
         // Hex-encode profile_id bytes for a safe SQL identifier suffix.
         let safe_suffix: String = profile_id
             .bytes()
@@ -91,7 +105,7 @@ impl ActiveRebuild {
             temp_document_table: format!("tmp_search_document_rebuild_{safe_suffix}"),
             temp_posting_table: format!("tmp_search_posting_rebuild_{safe_suffix}"),
             temp_entry_tag_table: format!("tmp_search_entry_tag_rebuild_{safe_suffix}"),
-            target_version: CURRENT_INDEX_VERSION.to_string(),
+            target_version: target_version.to_string(),
         }
     }
 }
@@ -109,7 +123,7 @@ impl ActiveRebuild {
 pub struct SqliteSearchIndex {
     pool: DbPool,
     current_profile: Arc<dyn CurrentProfilePort>,
-    search_key_derivation: Arc<dyn SearchKeyDerivationPort>,
+    protection: SearchProtectionStrategy,
     /// Active rebuild state, shared between the rebuild coordinator and the
     /// live write/delete helpers that must mirror into temp tables.
     rebuild_state: Arc<std::sync::RwLock<Option<ActiveRebuild>>>,
@@ -124,6 +138,20 @@ pub struct SqliteSearchIndex {
     pub pause_before_finalize: Option<Arc<tokio::sync::Semaphore>>,
 }
 
+enum SearchProtectionStrategy {
+    Legacy(Arc<dyn SearchKeyDerivationPort>),
+    V3(Arc<V3SearchProtection>),
+}
+
+impl SearchProtectionStrategy {
+    fn index_version(&self) -> &'static str {
+        match self {
+            Self::Legacy(_) => CURRENT_INDEX_VERSION,
+            Self::V3(_) => V3_INDEX_VERSION,
+        }
+    }
+}
+
 impl SqliteSearchIndex {
     /// Create a new `SqliteSearchIndex`.
     pub fn new(
@@ -134,7 +162,24 @@ impl SqliteSearchIndex {
         Self {
             pool,
             current_profile,
-            search_key_derivation,
+            protection: SearchProtectionStrategy::Legacy(search_key_derivation),
+            rebuild_state: Arc::new(std::sync::RwLock::new(None)),
+            #[cfg(test)]
+            fail_after_n_entries: None,
+            #[cfg(test)]
+            pause_before_finalize: None,
+        }
+    }
+
+    pub fn new_v3(
+        pool: DbPool,
+        current_profile: Arc<dyn CurrentProfilePort>,
+        protection: Arc<V3SearchProtection>,
+    ) -> Self {
+        Self {
+            pool,
+            current_profile,
+            protection: SearchProtectionStrategy::V3(protection),
             rebuild_state: Arc::new(std::sync::RwLock::new(None)),
             #[cfg(test)]
             fail_after_n_entries: None,
@@ -156,6 +201,124 @@ impl SqliteSearchIndex {
             .current_profile()
             .await
             .map_err(|e| SearchError::Internal(format!("failed to get current profile: {e}")))
+    }
+
+    /// 在进入同步 SQLite 边界前完成密钥解析、上下文校验与 render 加密。
+    ///
+    /// posting 的 tag 与保护组引用由同一次 Application key context 产生；V3
+    /// 在落库前再次读取活动 context，拒绝空间切换期间产生的混合写入。
+    async fn prepare_entry(
+        &self,
+        profile_id: &str,
+        document: &SearchDocument,
+        postings: &[SearchPosting],
+    ) -> Result<PreparedSearchEntry, SearchError> {
+        if postings
+            .iter()
+            .any(|posting| posting.entry_id != document.entry_id)
+        {
+            return Err(SearchError::Internal(
+                "search postings do not belong to the document".to_owned(),
+            ));
+        }
+
+        let document_row = match &self.protection {
+            SearchProtectionStrategy::Legacy(derivation) => {
+                if postings
+                    .iter()
+                    .any(|posting| posting.protection_ref.is_some())
+                {
+                    return Err(SearchError::Internal(
+                        "legacy search write contains a protection reference".to_owned(),
+                    ));
+                }
+                let render_key = derivation.derive_render_key().await?;
+                NewSearchDocumentRow::from_domain(
+                    &RenderPayloadCodec::new(render_key),
+                    profile_id,
+                    document,
+                )
+                .map_err(|e| SearchError::Internal(format!("prepare search row failed: {e}")))?
+            }
+            SearchProtectionStrategy::V3(protection) => {
+                let posting_ref = Self::posting_protection_ref(postings)?;
+                let active = protection.active_key_context().await.map_err(|e| {
+                    SearchError::Internal(format!("resolve V3 search context failed: {e}"))
+                })?;
+                let active_ref = active.protection_ref().ok_or_else(|| {
+                    SearchError::Internal(
+                        "V3 search context has no protection reference".to_owned(),
+                    )
+                })?;
+                if posting_ref
+                    .as_ref()
+                    .is_some_and(|value| value != active_ref)
+                {
+                    return Err(SearchError::Internal(
+                        "search protection context changed before persistence".to_owned(),
+                    ));
+                }
+                let fields = RenderFields::new(
+                    document.text_preview.clone(),
+                    document.file_names.clone(),
+                    document.link_urls.clone(),
+                    document.file_paths.clone(),
+                    document.char_count,
+                );
+                let render_payload = protection
+                    .seal_render(&document.entry_id, &fields)
+                    .await
+                    .map_err(|e| {
+                        SearchError::Internal(format!("seal V3 search render failed: {e}"))
+                    })?;
+                let sealed_context = protection.active_key_context().await.map_err(|e| {
+                    SearchError::Internal(format!("recheck V3 search context failed: {e}"))
+                })?;
+                if sealed_context.protection_ref() != Some(active_ref) {
+                    return Err(SearchError::Internal(
+                        "search protection context changed while sealing".to_owned(),
+                    ));
+                }
+                NewSearchDocumentRow::from_domain_with_render(
+                    profile_id,
+                    document,
+                    render_payload,
+                    Some(active_ref.as_bytes().to_vec()),
+                    V3_INDEX_VERSION,
+                )
+                .map_err(|e| SearchError::Internal(format!("prepare V3 search row failed: {e}")))?
+            }
+        };
+
+        Ok(PreparedSearchEntry {
+            document: document_row,
+            postings: postings
+                .iter()
+                .map(|posting| NewSearchPostingRow::from_domain(profile_id, posting))
+                .collect(),
+            tags: NewSearchEntryTagRow::rows_for_document(profile_id, document),
+        })
+    }
+
+    fn posting_protection_ref(
+        postings: &[SearchPosting],
+    ) -> Result<Option<SearchProtectionRef>, SearchError> {
+        let mut protection_ref = None;
+        for posting in postings {
+            let current = posting.protection_ref.as_ref().ok_or_else(|| {
+                SearchError::Internal("V3 search posting has no protection reference".to_owned())
+            })?;
+            match &protection_ref {
+                Some(expected) if expected != current => {
+                    return Err(SearchError::Internal(
+                        "search postings contain mixed protection references".to_owned(),
+                    ));
+                }
+                None => protection_ref = Some(current.clone()),
+                Some(_) => {}
+            }
+        }
+        Ok(protection_ref)
     }
 
     /// Return a clone of the active rebuild state only when `profile_id` matches.
@@ -181,8 +344,12 @@ impl SqliteSearchIndex {
     /// Ensure a `search_index_meta` row exists for `profile_id`.
     ///
     /// If the row is missing, inserts a fresh seed row via `NewSearchIndexMetaRow::seed`.
-    fn ensure_meta_row(conn: &mut SqliteConnection, profile_id: &str) -> Result<(), SearchError> {
-        let seed = NewSearchIndexMetaRow::seed(profile_id);
+    fn ensure_meta_row(
+        conn: &mut SqliteConnection,
+        profile_id: &str,
+        index_version: &str,
+    ) -> Result<(), SearchError> {
+        let seed = NewSearchIndexMetaRow::seed(profile_id, index_version);
         let inserted = diesel::insert_into(search_index_meta::table)
             .values(&seed)
             .on_conflict(search_index_meta::profile_id)
@@ -214,6 +381,53 @@ impl SqliteSearchIndex {
         Ok(row.to_domain())
     }
 
+    fn require_ready_version(
+        conn: &mut SqliteConnection,
+        profile_id: &str,
+        index_version: &str,
+    ) -> Result<(), SearchError> {
+        Self::ensure_meta_row(conn, profile_id, index_version)?;
+        let meta = Self::load_meta(conn, profile_id)?;
+        if meta.search_blocked {
+            return Err(SearchError::IndexNotReady);
+        }
+        if meta.index_version != index_version {
+            warn!(
+                profile_id,
+                stored_version = %meta.index_version,
+                current_version = index_version,
+                "index version mismatch — blocking search"
+            );
+            Self::mark_blocked(conn, profile_id)?;
+            return Err(SearchError::IndexNotReady);
+        }
+        Ok(())
+    }
+
+    /// 读取 V12 文档实际涉及的保护组引用。任何空值或非法长度都代表索引
+    /// 尚未完成 V12 重建，查询必须 fail closed，不能退回 V11 key。
+    fn load_v3_group_refs(
+        conn: &mut SqliteConnection,
+        profile_id: &str,
+    ) -> Result<Vec<SearchGroupRef>, SearchError> {
+        use crate::db::schema::search_document::dsl;
+
+        let refs = dsl::search_document
+            .filter(dsl::profile_id.eq(profile_id))
+            .select(dsl::protection_group_ref)
+            .distinct()
+            .load::<Option<Vec<u8>>>(conn)
+            .map_err(|e| {
+                SearchError::Internal(format!("load search protection refs failed: {e}"))
+            })?;
+        refs.into_iter()
+            .map(|value| {
+                let value = value.ok_or(SearchError::IndexNotReady)?;
+                SearchGroupRef::from_bytes(&value).map_err(|_| SearchError::IndexNotReady)
+            })
+            .collect()
+    }
+
     /// Upsert a `search_document` row and replace all `search_posting` rows for the entry.
     ///
     /// Runs inside a single transaction:
@@ -223,12 +437,10 @@ impl SqliteSearchIndex {
     fn upsert_active_entry(
         conn: &mut SqliteConnection,
         profile_id: &str,
-        codec: &RenderPayloadCodec,
-        document: &SearchDocument,
-        postings: &[SearchPosting],
+        entry: &PreparedSearchEntry,
     ) -> Result<(), SearchError> {
         conn.transaction::<(), diesel::result::Error, _>(|tx| {
-            let entry_id_str = document.entry_id.to_string();
+            let entry_id_str = &entry.document.entry_id;
 
             // 1. Delete existing postings for this entry.
             diesel::delete(
@@ -239,22 +451,14 @@ impl SqliteSearchIndex {
             .execute(tx)?;
 
             // 2. Upsert (insert or replace) the document row.
-            let doc_row = NewSearchDocumentRow::from_domain(codec, profile_id, document)
-                .map_err(|_e| diesel::result::Error::RollbackTransaction)?;
-
             diesel::replace_into(search_document::table)
-                .values(&doc_row)
+                .values(&entry.document)
                 .execute(tx)?;
 
             // 3. Insert new postings.
-            let posting_rows: Vec<NewSearchPostingRow> = postings
-                .iter()
-                .map(|p| NewSearchPostingRow::from_domain(profile_id, p))
-                .collect();
-
-            if !posting_rows.is_empty() {
+            if !entry.postings.is_empty() {
                 diesel::insert_into(search_posting::table)
-                    .values(&posting_rows)
+                    .values(&entry.postings)
                     .execute(tx)?;
             }
 
@@ -266,10 +470,9 @@ impl SqliteSearchIndex {
             )
             .execute(tx)?;
 
-            let tag_rows = NewSearchEntryTagRow::rows_for_document(profile_id, document);
-            if !tag_rows.is_empty() {
+            if !entry.tags.is_empty() {
                 diesel::insert_into(search_entry_tag::table)
-                    .values(&tag_rows)
+                    .values(&entry.tags)
                     .execute(tx)?;
             }
 
@@ -474,6 +677,7 @@ impl SqliteSearchIndex {
         conn: &mut SqliteConnection,
         profile_id: &str,
         term_tags: &[Vec<u8>],
+        required_term_count: usize,
         operator: &QueryOperator,
     ) -> Result<HashMap<String, u32>, SearchError> {
         if term_tags.is_empty() {
@@ -503,14 +707,13 @@ impl SqliteSearchIndex {
 
         // AND semantics mirror SQL: HAVING COUNT(DISTINCT term_tag) = term_count
         // OR  semantics mirror SQL: HAVING COUNT(DISTINCT term_tag) >= 1
-        let term_count = term_tags.len();
         let mut result: HashMap<String, u32> = HashMap::new();
 
         for (entry_id, matched_tags) in per_entry {
             let distinct_hit_count = matched_tags.len();
             let include = match operator {
                 // AND: entry must contain all queried terms.
-                QueryOperator::And => distinct_hit_count == term_count,
+                QueryOperator::And => distinct_hit_count == required_term_count,
                 // OR: entry must contain at least one term.
                 QueryOperator::Or => distinct_hit_count >= 1,
             };
@@ -658,12 +861,14 @@ impl SqliteSearchIndex {
         conn: &mut SqliteConnection,
         profile_id: &str,
         term_tags: &[Vec<u8>],
+        required_term_count: usize,
         operator: &QueryOperator,
         filters: &FilterParams,
         limit: usize,
         offset: usize,
     ) -> Result<(Vec<SearchDocumentRow>, u32, bool), SearchError> {
-        let hits = Self::query_candidate_hits(conn, profile_id, term_tags, operator)?;
+        let hits =
+            Self::query_candidate_hits(conn, profile_id, term_tags, required_term_count, operator)?;
         if hits.is_empty() {
             return Ok((vec![], 0, false));
         }
@@ -775,16 +980,11 @@ impl SqliteSearchIndex {
     ///
     /// Document rows carry an empty tag set; the membership is fetched here in one
     /// batched query scoped to the page window (at most `limit` entries).
-    fn hydrate_results(
-        conn: &mut SqliteConnection,
-        profile_id: &str,
-        codec: &RenderPayloadCodec,
+    async fn hydrate_results(
+        renderer: SearchRenderStrategy,
         page_rows: Vec<SearchDocumentRow>,
+        tags_by_entry: HashMap<String, Vec<TagId>>,
     ) -> Result<(Vec<SearchResult>, Vec<EntryId>), SearchError> {
-        let page_entry_ids: Vec<String> =
-            page_rows.iter().map(|doc| doc.entry_id.clone()).collect();
-        let tags_by_entry = Self::load_tags_for_entries(conn, profile_id, &page_entry_ids)?;
-
         let mut items = Vec::with_capacity(page_rows.len());
         let mut corrupted: Vec<EntryId> = Vec::new();
 
@@ -797,7 +997,31 @@ impl SqliteSearchIndex {
             // render-payload decode failure does NOT drop the row — it comes back
             // with blanked render fields and the entry id is collected for repair,
             // so `items` stays in lockstep with the already-counted total.
-            let decoded = doc.to_domain(codec).map_err(|e| {
+            let decoded = match &renderer {
+                SearchRenderStrategy::Legacy(codec) => doc.to_domain(codec),
+                SearchRenderStrategy::V3(protection) => {
+                    let entry_id: EntryId = doc.entry_id.clone().into();
+                    let (fields, render_corrupted) = match &doc.render_payload {
+                        Some(payload) => match protection.open_render(&entry_id, payload).await {
+                            Ok(fields) => (fields, false),
+                            Err(error) if error.runtime_closed() => {
+                                return Err(SearchError::SessionLocked)
+                            }
+                            Err(error) => {
+                                warn!(
+                                    entry_id = %doc.entry_id,
+                                    error = %error,
+                                    "V3 search render payload decode failed"
+                                );
+                                (RenderFields::default(), true)
+                            }
+                        },
+                        None => (RenderFields::default(), true),
+                    };
+                    doc.to_domain_with_render_fields(fields, render_corrupted)
+                }
+            }
+            .map_err(|e| {
                 SearchError::Internal(format!("failed to decode search row {}: {e}", doc.entry_id))
             })?;
             if decoded.render_corrupted {
@@ -906,6 +1130,7 @@ impl SqliteSearchIndex {
                 source_device TEXT,
                 payload_state TEXT,
                 render_payload BLOB,
+                protection_group_ref BLOB,
                 PRIMARY KEY (profile_id, entry_id)
             )",
             doc_table = state.temp_document_table
@@ -943,6 +1168,16 @@ impl SqliteSearchIndex {
             .execute(conn)
             .map_err(|e| SearchError::Internal(format!("create temp posting table failed: {e}")))?;
 
+        // 替换单条记录时按条目定位，避免逐条扫描整个重建暂存表。
+        diesel::sql_query(format!(
+            "CREATE INDEX {}_entry ON {} (profile_id, entry_id)",
+            state.temp_posting_table, state.temp_posting_table
+        ))
+        .execute(conn)
+        .map_err(|e| {
+            SearchError::Internal(format!("create temp posting entry index failed: {e}"))
+        })?;
+
         diesel::sql_query(&create_entry_tag)
             .execute(conn)
             .map_err(|e| SearchError::Internal(format!("create temp tag table failed: {e}")))?;
@@ -974,109 +1209,106 @@ impl SqliteSearchIndex {
         }
     }
 
-    /// Write one `(SearchDocument, Vec<SearchPosting>)` pair into the rebuild temp tables.
-    ///
-    /// Deletes any existing staged postings for `(profile_id, entry_id)` first,
-    /// then inserts the document row and new postings. This makes the function
-    /// idempotent and ensures mid-rebuild `index_entry()` mirrors replace correctly.
-    fn insert_temp_entry(
+    /// 整批替换暂存条目；实时镜像传入单条，重建传入有界批次，失败整批回滚。
+    fn insert_temp_entries(
         conn: &mut SqliteConnection,
         state: &ActiveRebuild,
-        codec: &RenderPayloadCodec,
-        document: &SearchDocument,
-        postings: &[SearchPosting],
+        entries: &[PreparedSearchEntry],
     ) -> Result<(), SearchError> {
-        let profile_id = &state.profile_id;
-        let entry_id_str = document.entry_id.to_string();
+        conn.transaction::<(), diesel::result::Error, _>(|conn| {
+            for entry in entries {
+                let profile_id = &state.profile_id;
+                let entry_id_str = &entry.document.entry_id;
 
-        // Delete existing temp postings for this entry (idempotent upsert).
-        let del_postings = format!(
-            "DELETE FROM {post_table} WHERE profile_id = ? AND entry_id = ?",
-            post_table = state.temp_posting_table
-        );
-        diesel::sql_query(&del_postings)
-            .bind::<diesel::sql_types::Text, _>(profile_id)
-            .bind::<diesel::sql_types::Text, _>(&entry_id_str)
-            .execute(conn)
-            .map_err(|e| SearchError::Internal(format!("delete temp postings failed: {e}")))?;
+                // Delete existing temp postings for this entry (idempotent upsert).
+                let del_postings = format!(
+                    "DELETE FROM {post_table} WHERE profile_id = ? AND entry_id = ?",
+                    post_table = state.temp_posting_table
+                );
+                diesel::sql_query(&del_postings)
+                    .bind::<diesel::sql_types::Text, _>(profile_id)
+                    .bind::<diesel::sql_types::Text, _>(&entry_id_str)
+                    .execute(conn)?;
 
-        // Build document values for INSERT OR REPLACE (render fields sealed by codec).
-        let doc_row = NewSearchDocumentRow::from_domain(codec, profile_id, document)
-            .map_err(|e| SearchError::Internal(format!("from_domain failed: {e}")))?;
+                let doc_row = &entry.document;
 
-        let insert_doc = format!(
-            "INSERT OR REPLACE INTO {doc_table}
+                let insert_doc = format!(
+                    "INSERT OR REPLACE INTO {doc_table}
              (profile_id, entry_id, event_id, active_time_ms, captured_at_ms,
               file_type, file_extensions, mime_type, indexed_at_ms, index_version,
-              source_device, payload_state, render_payload)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            doc_table = state.temp_document_table
-        );
-        diesel::sql_query(&insert_doc)
-            .bind::<diesel::sql_types::Text, _>(&doc_row.profile_id)
-            .bind::<diesel::sql_types::Text, _>(&doc_row.entry_id)
-            .bind::<diesel::sql_types::Text, _>(&doc_row.event_id)
-            .bind::<diesel::sql_types::BigInt, _>(doc_row.active_time_ms)
-            .bind::<diesel::sql_types::BigInt, _>(doc_row.captured_at_ms)
-            .bind::<diesel::sql_types::Text, _>(&doc_row.file_type)
-            .bind::<diesel::sql_types::Text, _>(&doc_row.file_extensions)
-            .bind::<diesel::sql_types::Text, _>(&doc_row.mime_type)
-            .bind::<diesel::sql_types::BigInt, _>(doc_row.indexed_at_ms)
-            .bind::<diesel::sql_types::Text, _>(&doc_row.index_version)
-            .bind::<diesel::sql_types::Nullable<diesel::sql_types::Text>, _>(&doc_row.source_device)
-            .bind::<diesel::sql_types::Nullable<diesel::sql_types::Text>, _>(&doc_row.payload_state)
-            .bind::<diesel::sql_types::Nullable<diesel::sql_types::Binary>, _>(
-                &doc_row.render_payload,
-            )
-            .execute(conn)
-            .map_err(|e| SearchError::Internal(format!("insert temp doc failed: {e}")))?;
+              source_device, payload_state, render_payload, protection_group_ref)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    doc_table = state.temp_document_table
+                );
+                diesel::sql_query(&insert_doc)
+                    .bind::<diesel::sql_types::Text, _>(&doc_row.profile_id)
+                    .bind::<diesel::sql_types::Text, _>(&doc_row.entry_id)
+                    .bind::<diesel::sql_types::Text, _>(&doc_row.event_id)
+                    .bind::<diesel::sql_types::BigInt, _>(doc_row.active_time_ms)
+                    .bind::<diesel::sql_types::BigInt, _>(doc_row.captured_at_ms)
+                    .bind::<diesel::sql_types::Text, _>(&doc_row.file_type)
+                    .bind::<diesel::sql_types::Text, _>(&doc_row.file_extensions)
+                    .bind::<diesel::sql_types::Text, _>(&doc_row.mime_type)
+                    .bind::<diesel::sql_types::BigInt, _>(doc_row.indexed_at_ms)
+                    .bind::<diesel::sql_types::Text, _>(&doc_row.index_version)
+                    .bind::<diesel::sql_types::Nullable<diesel::sql_types::Text>, _>(
+                        &doc_row.source_device,
+                    )
+                    .bind::<diesel::sql_types::Nullable<diesel::sql_types::Text>, _>(
+                        &doc_row.payload_state,
+                    )
+                    .bind::<diesel::sql_types::Nullable<diesel::sql_types::Binary>, _>(
+                        &doc_row.render_payload,
+                    )
+                    .bind::<diesel::sql_types::Nullable<diesel::sql_types::Binary>, _>(
+                        &doc_row.protection_group_ref,
+                    )
+                    .execute(conn)?;
 
-        // Insert postings.
-        for posting in postings {
-            let post_row = NewSearchPostingRow::from_domain(profile_id, posting);
-            let insert_posting = format!(
-                "INSERT OR REPLACE INTO {post_table}
+                // 写入该条记录的词项。
+                for post_row in &entry.postings {
+                    let insert_posting = format!(
+                        "INSERT OR REPLACE INTO {post_table}
                  (profile_id, term_tag, entry_id, field_mask, term_freq)
                  VALUES (?, ?, ?, ?, ?)",
-                post_table = state.temp_posting_table
-            );
-            diesel::sql_query(&insert_posting)
-                .bind::<diesel::sql_types::Text, _>(&post_row.profile_id)
-                .bind::<diesel::sql_types::Binary, _>(&post_row.term_tag)
-                .bind::<diesel::sql_types::Text, _>(&post_row.entry_id)
-                .bind::<diesel::sql_types::Integer, _>(post_row.field_mask)
-                .bind::<diesel::sql_types::Integer, _>(post_row.term_freq)
-                .execute(conn)
-                .map_err(|e| SearchError::Internal(format!("insert temp posting failed: {e}")))?;
-        }
+                        post_table = state.temp_posting_table
+                    );
+                    diesel::sql_query(&insert_posting)
+                        .bind::<diesel::sql_types::Text, _>(&post_row.profile_id)
+                        .bind::<diesel::sql_types::Binary, _>(&post_row.term_tag)
+                        .bind::<diesel::sql_types::Text, _>(&post_row.entry_id)
+                        .bind::<diesel::sql_types::Integer, _>(post_row.field_mask)
+                        .bind::<diesel::sql_types::Integer, _>(post_row.term_freq)
+                        .execute(conn)?;
+                }
 
-        // Replace temp tag membership for this entry (mirror of document.tags).
-        let del_tags = format!(
-            "DELETE FROM {tag_table} WHERE profile_id = ? AND entry_id = ?",
-            tag_table = state.temp_entry_tag_table
-        );
-        diesel::sql_query(&del_tags)
-            .bind::<diesel::sql_types::Text, _>(profile_id)
-            .bind::<diesel::sql_types::Text, _>(&entry_id_str)
-            .execute(conn)
-            .map_err(|e| SearchError::Internal(format!("delete temp tags failed: {e}")))?;
+                // Replace temp tag membership for this entry (mirror of document.tags).
+                let del_tags = format!(
+                    "DELETE FROM {tag_table} WHERE profile_id = ? AND entry_id = ?",
+                    tag_table = state.temp_entry_tag_table
+                );
+                diesel::sql_query(&del_tags)
+                    .bind::<diesel::sql_types::Text, _>(profile_id)
+                    .bind::<diesel::sql_types::Text, _>(&entry_id_str)
+                    .execute(conn)?;
 
-        for tag_row in NewSearchEntryTagRow::rows_for_document(profile_id, document) {
-            let insert_tag = format!(
-                "INSERT OR REPLACE INTO {tag_table}
+                for tag_row in &entry.tags {
+                    let insert_tag = format!(
+                        "INSERT OR REPLACE INTO {tag_table}
                  (profile_id, entry_id, tag_id)
                  VALUES (?, ?, ?)",
-                tag_table = state.temp_entry_tag_table
-            );
-            diesel::sql_query(&insert_tag)
-                .bind::<diesel::sql_types::Text, _>(&tag_row.profile_id)
-                .bind::<diesel::sql_types::Text, _>(&tag_row.entry_id)
-                .bind::<diesel::sql_types::Text, _>(&tag_row.tag_id)
-                .execute(conn)
-                .map_err(|e| SearchError::Internal(format!("insert temp tag failed: {e}")))?;
-        }
-
-        Ok(())
+                        tag_table = state.temp_entry_tag_table
+                    );
+                    diesel::sql_query(&insert_tag)
+                        .bind::<diesel::sql_types::Text, _>(&tag_row.profile_id)
+                        .bind::<diesel::sql_types::Text, _>(&tag_row.entry_id)
+                        .bind::<diesel::sql_types::Text, _>(&tag_row.tag_id)
+                        .execute(conn)?;
+                }
+            }
+            Ok(())
+        })
+        .map_err(|e| SearchError::Internal(format!("insert temp entry transaction failed: {e}")))
     }
 
     /// Delete an entry from the rebuild temp tables.
@@ -1177,10 +1409,12 @@ impl SqliteSearchIndex {
                 "INSERT INTO search_document
                  (profile_id, entry_id, event_id, active_time_ms, captured_at_ms,
                   file_type, file_extensions, mime_type, indexed_at_ms,
-                  index_version, source_device, payload_state, render_payload)
+                  index_version, source_device, payload_state, render_payload,
+                  protection_group_ref)
                  SELECT profile_id, entry_id, event_id, active_time_ms, captured_at_ms,
                         file_type, file_extensions, mime_type, indexed_at_ms,
-                        index_version, source_device, payload_state, render_payload
+                        index_version, source_device, payload_state, render_payload,
+                        protection_group_ref
                  FROM {doc_table}",
                 doc_table = state.temp_document_table
             );
@@ -1230,12 +1464,10 @@ impl SearchIndexPort for SqliteSearchIndex {
     ) -> Result<(), SearchError> {
         let profile_id = self.current_profile_id().await?.into_inner();
         let pool = self.pool.clone();
-
-        // Derive the render key once for this write. A locked session fails here
-        // with `SessionLocked` — the live-index caller already skips locked-state
-        // writes, so this is a redundant guard, not a new failure mode.
-        let render_key = self.search_key_derivation.derive_render_key().await?;
-        let codec = RenderPayloadCodec::new(render_key);
+        let index_version = self.protection.index_version();
+        let prepared = self
+            .prepare_entry(&profile_id, &document, &postings)
+            .await?;
 
         // Check for active rebuild before entering spawn_blocking. A clone is cheap;
         // TOCTOU is acceptable here — if rebuild finishes between check and temp write,
@@ -1249,18 +1481,16 @@ impl SearchIndexPort for SqliteSearchIndex {
                 .get()
                 .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
 
-            Self::ensure_meta_row(&mut conn, &profile_id)?;
+            Self::ensure_meta_row(&mut conn, &profile_id, index_version)?;
 
             // 1. Always write to the active tables first.
-            Self::upsert_active_entry(&mut conn, &profile_id, &codec, &document, &postings)?;
+            Self::upsert_active_entry(&mut conn, &profile_id, &prepared)?;
 
             // 2. If a rebuild is active for this profile, mirror into temp tables.
             if let Some(rebuild_state) = maybe_rebuild {
                 // Best-effort: if temp table was already dropped (rebuild completed
                 // between our check and this write), log and continue.
-                if let Err(e) =
-                    Self::insert_temp_entry(&mut conn, &rebuild_state, &codec, &document, &postings)
-                {
+                if let Err(e) = Self::insert_temp_entries(&mut conn, &rebuild_state, std::slice::from_ref(&prepared)) {
                     warn!(error = %e, "failed to mirror index_entry into rebuild temp tables (best-effort)");
                 }
             }
@@ -1276,6 +1506,7 @@ impl SearchIndexPort for SqliteSearchIndex {
         let profile_id = self.current_profile_id().await?.into_inner();
         let pool = self.pool.clone();
         let entry_id = entry_id.clone();
+        let index_version = self.protection.index_version();
 
         let maybe_rebuild = self.active_rebuild_for_profile(&profile_id).await;
 
@@ -1284,7 +1515,7 @@ impl SearchIndexPort for SqliteSearchIndex {
                 .get()
                 .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
 
-            Self::ensure_meta_row(&mut conn, &profile_id)?;
+            Self::ensure_meta_row(&mut conn, &profile_id, index_version)?;
 
             // 1. Always delete from active tables first.
             Self::delete_active_entry(&mut conn, &profile_id, &entry_id)?;
@@ -1311,29 +1542,74 @@ impl SearchIndexPort for SqliteSearchIndex {
     async fn search(&self, query: SearchQuery) -> Result<SearchResultsPage, SearchError> {
         let profile_id = self.current_profile_id().await?.into_inner();
         let pool = self.pool.clone();
+        let index_version = self.protection.index_version();
 
         // Normalize query terms before entering spawn_blocking.
         let terms = Self::normalize_query_terms(&query)?;
         let is_filter_only = terms.is_empty();
 
-        // Derive search key and compute HMAC tags only when there are terms.
-        let term_tags: Vec<Vec<u8>> = if !is_filter_only {
-            let search_key = self.search_key_derivation.derive_search_key().await?;
-            terms
-                .iter()
-                .map(|t| term_tag(&search_key, t))
-                .collect::<Result<_, _>>()
-                .map_err(|e| SearchError::Internal(format!("term_tag computation failed: {e}")))?
-        } else {
-            vec![]
+        let (term_tags, required_term_count, renderer) = match &self.protection {
+            SearchProtectionStrategy::Legacy(derivation) => {
+                let tags = if is_filter_only {
+                    Vec::new()
+                } else {
+                    let search_key = derivation.derive_search_key().await?;
+                    terms
+                        .iter()
+                        .map(|term| term_tag(search_key.key(), term))
+                        .collect::<Result<_, _>>()
+                        .map_err(|e| {
+                            SearchError::Internal(format!("term_tag computation failed: {e}"))
+                        })?
+                };
+                let render_key = derivation.derive_render_key().await?;
+                (
+                    tags,
+                    terms.len(),
+                    SearchRenderStrategy::Legacy(RenderPayloadCodec::new(render_key)),
+                )
+            }
+            SearchProtectionStrategy::V3(protection) => {
+                // SQLite 只负责枚举索引中实际存在的 opaque group ref；vault
+                // 解析与多组 query alternatives 在异步密码边界外完成。
+                let refs = {
+                    let pool = pool.clone();
+                    let profile_id = profile_id.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let mut conn = pool
+                            .get()
+                            .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
+                        Self::require_ready_version(&mut conn, &profile_id, V3_INDEX_VERSION)?;
+                        Self::load_v3_group_refs(&mut conn, &profile_id)
+                    })
+                    .await
+                    .map_err(|e| SearchError::Internal(format!("spawn_blocking error: {e}")))??
+                };
+                let query_tags = protection
+                    .query_terms(&refs, &terms)
+                    .await
+                    .map_err(|error| match error {
+                        crate::search::V3SearchProtectionError::InvalidGroupReferences {
+                            ..
+                        } => SearchError::IndexNotReady,
+                        other if other.runtime_closed() => SearchError::SessionLocked,
+                        other => SearchError::Internal(format!(
+                            "prepare V3 search query failed: {other}"
+                        )),
+                    })?;
+                let tags = query_tags
+                    .alternatives_by_term()
+                    .iter()
+                    .flatten()
+                    .cloned()
+                    .collect();
+                (
+                    tags,
+                    terms.len(),
+                    SearchRenderStrategy::V3(Arc::clone(protection)),
+                )
+            }
         };
-
-        // Derive the render key unconditionally — every returned row's render
-        // fields live in an encrypted payload, so even filter-only browse must
-        // decrypt to render previews. A locked session fails here with
-        // `SessionLocked` (defense-in-depth behind the handler's 423 pre-check).
-        let render_key = self.search_key_derivation.derive_render_key().await?;
-        let codec = RenderPayloadCodec::new(render_key);
 
         let operator = query.operator.clone();
         // Pre-encode `content_type` to its stored snake_case string form once, so
@@ -1359,31 +1635,13 @@ impl SearchIndexPort for SqliteSearchIndex {
         let limit = query.limit as usize;
         let offset = query.offset as usize;
 
-        tokio::task::spawn_blocking(move || {
+        let query_profile_id = profile_id.clone();
+        let (page_rows, tags_by_entry, total, has_more) = tokio::task::spawn_blocking(move || {
             let mut conn = pool
                 .get()
                 .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
 
-            // 1. Ensure/load meta.
-            Self::ensure_meta_row(&mut conn, &profile_id)?;
-            let meta = Self::load_meta(&mut conn, &profile_id)?;
-
-            // 2. Blocked guard.
-            if meta.search_blocked {
-                return Err(SearchError::IndexNotReady);
-            }
-
-            // 3. Version mismatch guard.
-            if meta.index_version != CURRENT_INDEX_VERSION {
-                warn!(
-                    profile_id = %profile_id,
-                    stored_version = %meta.index_version,
-                    current_version = CURRENT_INDEX_VERSION,
-                    "index version mismatch — blocking search"
-                );
-                Self::mark_blocked(&mut conn, &profile_id)?;
-                return Err(SearchError::IndexNotReady);
-            }
+            Self::require_ready_version(&mut conn, &query_profile_id, index_version)?;
 
             // 4. Resolve the current page of document rows + authoritative total.
             //    Filter-only browse pushes filtering, ordering, and pagination
@@ -1391,12 +1649,13 @@ impl SearchIndexPort for SqliteSearchIndex {
             //    keyword path ranks the bounded posting-candidate set in memory.
             let (page_rows, total, has_more) = if is_filter_only {
                 debug!("filter-only search — SQL push-down");
-                Self::filter_only_page(&mut conn, &profile_id, &filters, limit, offset)?
+                Self::filter_only_page(&mut conn, &query_profile_id, &filters, limit, offset)?
             } else {
                 Self::term_page(
                     &mut conn,
-                    &profile_id,
+                    &query_profile_id,
                     &term_tags,
+                    required_term_count,
                     &operator,
                     &filters,
                     limit,
@@ -1404,32 +1663,33 @@ impl SearchIndexPort for SqliteSearchIndex {
                 )?
             };
 
-            // 5. Hydrate the page's tags from `search_entry_tag` and map to
-            //    domain results (shared by both paths). Decrypt render payloads;
-            //    rows whose payload fails to decode come back blanked and their
-            //    ids are collected for a re-projection repair upstream.
-            let (items, corrupted_entry_ids) =
-                Self::hydrate_results(&mut conn, &profile_id, &codec, page_rows)?;
-
-            if !corrupted_entry_ids.is_empty() {
-                warn!(
-                    profile_id = %profile_id,
-                    corrupted = corrupted_entry_ids.len(),
-                    "search page contained rows with undecodable render payloads"
-                );
-            }
-
-            debug!(total, returned = items.len(), has_more, "search completed");
-
-            Ok(SearchResultsPage {
-                items,
-                total,
-                has_more,
-                corrupted_entry_ids,
-            })
+            let page_entry_ids = page_rows
+                .iter()
+                .map(|document| document.entry_id.clone())
+                .collect::<Vec<_>>();
+            let tags_by_entry =
+                Self::load_tags_for_entries(&mut conn, &query_profile_id, &page_entry_ids)?;
+            Ok((page_rows, tags_by_entry, total, has_more))
         })
         .await
-        .map_err(|e| SearchError::Internal(format!("spawn_blocking error: {e}")))?
+        .map_err(|e| SearchError::Internal(format!("spawn_blocking error: {e}")))??;
+
+        let (items, corrupted_entry_ids) =
+            Self::hydrate_results(renderer, page_rows, tags_by_entry).await?;
+        if !corrupted_entry_ids.is_empty() {
+            warn!(
+                profile_id = %profile_id,
+                corrupted = corrupted_entry_ids.len(),
+                "search page contained rows with undecodable render payloads"
+            );
+        }
+        debug!(total, returned = items.len(), has_more, "search completed");
+        Ok(SearchResultsPage {
+            items,
+            total,
+            has_more,
+            corrupted_entry_ids,
+        })
     }
 
     /// Full index rebuild using temp-table workspace.
@@ -1459,11 +1719,7 @@ impl SearchIndexPort for SqliteSearchIndex {
         let pool = self.pool.clone();
         let rebuild_state_arc = self.rebuild_state.clone();
         let total = entries.len() as u32;
-
-        // Derive the render key once for the whole rebuild run; a locked session
-        // fails the entire rebuild here (it is a no-op to rebuild while locked).
-        let render_key = self.search_key_derivation.derive_render_key().await?;
-        let codec = RenderPayloadCodec::new(render_key);
+        let index_version = self.protection.index_version();
 
         // ─── Step 1: set blocked and record start time ────────────────────────
         {
@@ -1474,7 +1730,7 @@ impl SearchIndexPort for SqliteSearchIndex {
                 let mut conn = p
                     .get()
                     .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
-                Self::ensure_meta_row(&mut conn, &pid)?;
+                Self::ensure_meta_row(&mut conn, &pid, index_version)?;
                 use crate::db::schema::search_index_meta::dsl;
                 diesel::update(dsl::search_index_meta.filter(dsl::profile_id.eq(&pid)))
                     .set((
@@ -1499,7 +1755,7 @@ impl SearchIndexPort for SqliteSearchIndex {
             .await;
 
         // ─── Step 3: create temp tables and register active rebuild ───────────
-        let rebuild_info = ActiveRebuild::new(&profile_id);
+        let rebuild_info = ActiveRebuild::new(&profile_id, index_version);
         {
             let rid = rebuild_info.clone();
             let p = pool.clone();
@@ -1537,22 +1793,36 @@ impl SearchIndexPort for SqliteSearchIndex {
         #[cfg(test)]
         let fault_limit = self.fail_after_n_entries;
 
-        for (document, postings) in &entries {
-            let rid = rebuild_info.clone();
-            let p = pool.clone();
-            let doc = document.clone();
-            let post = postings.clone();
-            let codec = codec.clone();
-            if let Err(e) = tokio::task::spawn_blocking(move || {
-                let mut conn = p
-                    .get()
-                    .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
-                Self::insert_temp_entry(&mut conn, &rid, &codec, &doc, &post)
-            })
-            .await
-            .map_err(|e| SearchError::Internal(format!("spawn_blocking error: {e}")))
-            .and_then(|r| r)
-            {
+        // 加密准备不持有数据库事务；每批仅占用一次阻塞任务和一次提交。
+        for batch in entries.chunks(100) {
+            #[cfg(test)]
+            let batch = match fault_limit {
+                Some(limit) => {
+                    &batch[..batch
+                        .len()
+                        .min(limit.saturating_sub(indexed as usize).max(1))]
+                }
+                None => batch,
+            };
+            let write_result = async {
+                let mut prepared = Vec::with_capacity(batch.len());
+                for (document, postings) in batch {
+                    prepared.push(self.prepare_entry(&profile_id, document, postings).await?);
+                }
+                let rid = rebuild_info.clone();
+                let p = pool.clone();
+                tokio::task::spawn_blocking(move || {
+                    let mut conn = p
+                        .get()
+                        .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
+                    Self::insert_temp_entries(&mut conn, &rid, &prepared)
+                })
+                .await
+                .map_err(|e| SearchError::Internal(format!("spawn_blocking error: {e}")))
+                .and_then(|result| result)
+            }
+            .await;
+            if let Err(e) = write_result {
                 // Failure path: emit Failed, clear state, drop tables, leave blocked.
                 {
                     let mut guard = rebuild_state_arc.write().expect("rebuild_state poisoned");
@@ -1576,7 +1846,7 @@ impl SearchIndexPort for SqliteSearchIndex {
                 return Err(e);
             }
 
-            indexed += 1;
+            indexed += batch.len() as u32;
 
             // Test-only: trigger failure after N entries.
             #[cfg(test)]
@@ -1698,13 +1968,14 @@ impl SearchIndexPort for SqliteSearchIndex {
     async fn get_index_meta(&self) -> Result<SearchIndexMeta, SearchError> {
         let profile_id = self.current_profile_id().await?.into_inner();
         let pool = self.pool.clone();
+        let index_version = self.protection.index_version();
 
         tokio::task::spawn_blocking(move || {
             let mut conn = pool
                 .get()
                 .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
 
-            Self::ensure_meta_row(&mut conn, &profile_id)?;
+            Self::ensure_meta_row(&mut conn, &profile_id, index_version)?;
             Self::load_meta(&mut conn, &profile_id)
         })
         .await
@@ -1726,13 +1997,14 @@ impl SearchIndexPort for SqliteSearchIndex {
         let pool = self.pool.clone();
         let entry_id = entry_id.clone();
         let maybe_rebuild = self.active_rebuild_for_profile(&profile_id).await;
+        let index_version = self.protection.index_version();
 
         tokio::task::spawn_blocking(move || {
             let mut conn = pool
                 .get()
                 .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
 
-            Self::ensure_meta_row(&mut conn, &profile_id)?;
+            Self::ensure_meta_row(&mut conn, &profile_id, index_version)?;
 
             // 1. Always update the active table first. Only the favorited row is
             //    touched, leaving rule-derived tags (e.g. `link`) intact.
@@ -1787,6 +2059,10 @@ impl SearchIndexPort for SqliteSearchIndex {
 
 #[async_trait]
 impl SearchIndexMaintenancePort for SqliteSearchIndex {
+    fn current_index_version(&self) -> &'static str {
+        self.protection.index_version()
+    }
+
     #[instrument(
         name = "search_index.purge_plaintext_residue",
         level = "info",
@@ -1839,12 +2115,13 @@ impl SearchIndexMaintenancePort for SqliteSearchIndex {
     async fn mark_plaintext_purge_done(&self, ts_ms: i64) -> Result<(), SearchError> {
         let profile_id = self.current_profile_id().await?.into_inner();
         let pool = self.pool.clone();
+        let index_version = self.protection.index_version();
 
         tokio::task::spawn_blocking(move || {
             let mut conn = pool
                 .get()
                 .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
-            Self::ensure_meta_row(&mut conn, &profile_id)?;
+            Self::ensure_meta_row(&mut conn, &profile_id, index_version)?;
             use crate::db::schema::search_index_meta::dsl;
             diesel::update(dsl::search_index_meta.filter(dsl::profile_id.eq(&profile_id)))
                 .set(dsl::plaintext_purge_done_ms.eq(ts_ms))
@@ -2003,7 +2280,7 @@ mod tests {
     use tempfile::{tempdir, TempDir};
     use uc_core::ports::security::current_profile::CurrentProfileError;
     use uc_core::search::document::ContentType;
-    use uc_core::search::key::{RenderKey, SearchKey};
+    use uc_core::search::key::{RenderKey, SearchKey, SearchKeyContext};
     use uc_core::search::tag::TagId;
 
     const TEST_PROFILE: &str = "default";
@@ -2029,8 +2306,8 @@ mod tests {
     struct FixedKey;
     #[async_trait]
     impl SearchKeyDerivationPort for FixedKey {
-        async fn derive_search_key(&self) -> Result<SearchKey, SearchError> {
-            Ok(SearchKey([7u8; 32]))
+        async fn derive_search_key(&self) -> Result<SearchKeyContext, SearchError> {
+            Ok(SearchKeyContext::legacy(SearchKey([7u8; 32])))
         }
         async fn derive_render_key(&self) -> Result<RenderKey, SearchError> {
             Ok(RenderKey(TEST_RENDER_KEY))
@@ -2042,7 +2319,7 @@ mod tests {
     struct LockedKey;
     #[async_trait]
     impl SearchKeyDerivationPort for LockedKey {
-        async fn derive_search_key(&self) -> Result<SearchKey, SearchError> {
+        async fn derive_search_key(&self) -> Result<SearchKeyContext, SearchError> {
             Err(SearchError::SessionLocked)
         }
         async fn derive_render_key(&self) -> Result<RenderKey, SearchError> {
@@ -2107,6 +2384,160 @@ mod tests {
             payload_state: None,
             char_count: None,
         }
+    }
+
+    #[tokio::test]
+    async fn rebuild_batch_failure_rolls_back_staged_documents() {
+        let (index, pool, _dir) = make_index();
+        let state = ActiveRebuild::new(TEST_PROFILE, CURRENT_INDEX_VERSION);
+        let mut conn = pool.get().unwrap();
+        SqliteSearchIndex::create_rebuild_tables(&mut conn, &state).unwrap();
+        let first = index
+            .prepare_entry(TEST_PROFILE, &make_doc("first-entry", vec![]), &[])
+            .await
+            .unwrap();
+        let doc = make_doc("failed-entry", vec![]);
+        let mut prepared = index.prepare_entry(TEST_PROFILE, &doc, &[]).await.unwrap();
+        prepared.postings.push(NewSearchPostingRow {
+            profile_id: TEST_PROFILE.to_owned(),
+            entry_id: "failed-entry".to_owned(),
+            term_tag: vec![1; 32],
+            field_mask: 1,
+            term_freq: 0,
+        });
+        assert!(
+            SqliteSearchIndex::insert_temp_entries(&mut conn, &state, &[first, prepared]).is_err()
+        );
+        #[derive(QueryableByName)]
+        struct Count {
+            #[diesel(sql_type = diesel::sql_types::BigInt)]
+            count: i64,
+        }
+        let count = diesel::sql_query(format!(
+            "SELECT COUNT(*) AS count FROM {}",
+            state.temp_document_table
+        ))
+        .get_result::<Count>(&mut conn)
+        .unwrap();
+        assert_eq!(count.count, 0, "失败批次不能留下已经写入的前一条记录");
+    }
+
+    #[tokio::test]
+    async fn rebuild_failure_can_retry_without_partial_results() {
+        let (mut index, _pool, _dir) = make_index();
+        index.fail_after_n_entries = Some(1);
+        let entries = vec![(make_doc("retry-entry", vec![]), vec![])];
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        assert!(index.rebuild(entries.clone(), tx).await.is_err());
+        assert!(index.get_index_meta().await.unwrap().search_blocked);
+        assert!(index.rebuild_state.read().unwrap().is_none());
+        index.fail_after_n_entries = None;
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        index.rebuild(entries, tx).await.unwrap();
+        assert!(!index.get_index_meta().await.unwrap().search_blocked);
+        assert_eq!(index.search(filter_only_query()).await.unwrap().total, 1);
+    }
+
+    #[tokio::test]
+    async fn rebuild_failed_batch_reports_only_committed_progress_and_retries() {
+        let (index, _pool, _dir) = make_index();
+        let valid: Vec<_> = (0..205)
+            .map(|i| (make_doc(&format!("batch-{i}"), vec![]), vec![]))
+            .collect();
+        let mut invalid = valid.clone();
+        invalid[149].1.push(SearchPosting {
+            entry_id: "batch-149".into(),
+            term_tag: vec![1; 32],
+            field_mask: 1,
+            term_freq: 0,
+            protection_ref: None,
+        });
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        assert!(index.rebuild(invalid, tx).await.is_err());
+        let mut failed = None;
+        while let Some(event) = rx.recv().await {
+            if event.stage == RebuildStage::Failed {
+                failed = Some(event.indexed);
+            }
+        }
+        assert_eq!(failed, Some(100), "失败批次不得报告未提交的进度");
+        assert!(index.get_index_meta().await.unwrap().search_blocked);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        index.rebuild(valid, tx).await.unwrap();
+        let mut indexed = Vec::new();
+        while let Some(event) = rx.recv().await {
+            if event.stage == RebuildStage::Indexing {
+                indexed.push(event.indexed);
+            }
+        }
+        assert_eq!(indexed, vec![100, 200, 205]);
+        assert_eq!(index.search(filter_only_query()).await.unwrap().total, 205);
+    }
+
+    #[tokio::test]
+    async fn rebuild_preserves_many_postings_and_frequencies() {
+        let (index, pool, _dir) = make_index();
+        let postings: Vec<_> = (0u32..257)
+            .map(|i| SearchPosting {
+                entry_id: "many-terms".into(),
+                term_tag: i.to_le_bytes().repeat(8),
+                field_mask: 1,
+                term_freq: i + 1,
+                protection_ref: None,
+            })
+            .collect();
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        index
+            .rebuild(vec![(make_doc("many-terms", vec![]), postings)], tx)
+            .await
+            .unwrap();
+        let rows = search_posting::table
+            .select(search_posting::term_freq)
+            .order(search_posting::term_freq)
+            .load::<i32>(&mut pool.get().unwrap())
+            .unwrap();
+        assert_eq!(rows, (1..=257).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn rebuild_preserves_live_update_and_delete_before_finalize() {
+        let (mut index, _pool, _dir) = make_index();
+        let resume = Arc::new(tokio::sync::Semaphore::new(0));
+        index.pause_before_finalize = Some(resume.clone());
+        let index = Arc::new(index);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let worker_index = index.clone();
+        let worker = tokio::spawn(async move {
+            worker_index
+                .rebuild(
+                    vec![
+                        (make_doc("updated", vec![]), vec![]),
+                        (make_doc("deleted", vec![]), vec![]),
+                    ],
+                    tx,
+                )
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let progress = rx.recv().await.unwrap();
+                if progress.stage == RebuildStage::Indexing && progress.indexed == 2 {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let mut updated = make_doc("updated", vec![TagId::new("favorite")]);
+        updated.text_preview = Some("更新后的内容".to_owned());
+        index.index_entry(updated, vec![]).await.unwrap();
+        index.remove_entry(&EntryId::from("deleted")).await.unwrap();
+        resume.add_permits(1);
+        worker.await.unwrap().unwrap();
+        let page = index.search(filter_only_query()).await.unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].text_preview.as_deref(), Some("更新后的内容"));
+        assert_eq!(page.items[0].tags, vec![TagId::new("favorite")]);
     }
 
     /// Load all `(entry_id, tag_id)` membership rows for the test profile, sorted.
@@ -2567,6 +2998,7 @@ mod tests {
                     source_device: None,
                     payload_state: None,
                     render_payload: Some(render_payload),
+                    protection_group_ref: None,
                 }
             })
             .collect();

@@ -1,5 +1,6 @@
 mod config;
 mod config_migration;
+mod device_group_presentation;
 mod diagnostics;
 mod error;
 pub mod error_codes;
@@ -10,11 +11,13 @@ pub mod observability;
 mod operation;
 mod result;
 mod settings;
+mod startup;
 mod upgrade;
 mod value;
 
 pub use config::*;
 pub use config_migration::*;
+pub use device_group_presentation::*;
 pub use diagnostics::*;
 pub use error::*;
 pub use event::*;
@@ -23,5 +26,6 @@ pub use lifecycle::*;
 pub use operation::*;
 pub use result::*;
 pub use settings::*;
+pub use startup::*;
 pub use upgrade::*;
 pub use value::*;

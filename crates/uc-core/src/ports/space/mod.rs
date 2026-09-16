@@ -3,11 +3,8 @@ mod persistence;
 mod proof;
 
 pub use access::{
-    AdoptIsolatedSpacePort, CurrentSessionProofKeyPort, DeriveAdmissionProofKeyPort,
-    DeriveProofKeyPort, DeriveSpaceSubkeyPort, FactoryResetSpacePort, GroupAdmissionPort,
-    InitializeSpacePort, IsSpaceUnlockedPort, LockSpacePort, PrepareAdmissionOfferPort,
-    PrepareAdmissionTargetAccessPort, PrepareJoinOfferPort, ResumeSpaceSessionPort,
-    SpaceAccessError, SpaceAccessStore, UnlockSpacePort, VerifyKeychainAccessPort,
+    CurrentSessionProofKeyPort, DeriveProofKeyPort, DeriveSpaceSubkeyPort,
+    PrepareAdmissionTargetAccessPort, PrepareJoinOfferPort, SpaceAccessError, SpaceAccessStore,
 };
 pub use persistence::*;
 pub use proof::*;

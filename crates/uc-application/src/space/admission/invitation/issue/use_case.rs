@@ -1,0 +1,531 @@
+//! B1 · `IssuePairingInvitationUseCase`.
+//!
+//! Sponsor-side flow:
+//!
+//! 1. Delegate to [`PairingInvitationPort::issue_invitation`] — the
+//!    rendezvous adapter owns the code format, TTL and transport.
+//! 2. Sample `now` from [`ClockPort`] and construct the domain aggregate
+//!    via [`PairingInvitation::issue`] so the invariants (state, events)
+//!    stay in core.
+//! 3. Park the aggregate in the application-layer
+//!    [`InMemoryPairingInvitationHolder`]; P7e's sponsor-side `Incoming`
+//!    subscriber will look it up by code and call `consume`.
+//!
+//! The aggregate's `InvitationEvent::Issued` is intentionally **not**
+//! surfaced through an event bus in this slice — no subscriber needs it
+//! yet, and §14.3 of `docs/design-docs/layers/application.md` forbids emitting events
+//! with no consumer.
+//!
+//! [`InMemoryPairingInvitationHolder`]:
+//!     crate::pairing_invitation::InMemoryPairingInvitationHolder
+
+use std::sync::Arc;
+
+use tracing::instrument;
+
+use uc_core::ports::pairing_invitation::{IssuedInvitation, PairingInvitationPort};
+
+use crate::space::admission::invitation::issuer::map_invitation_error;
+use crate::space::admission::invitation::PairingInvitationIssuer;
+use crate::space::facade::{IssuePairingInvitationError, IssuePairingInvitationResult};
+
+pub(crate) struct IssuePairingInvitationUseCase {
+    pairing_invitation: Arc<dyn PairingInvitationPort>,
+    issuer: Arc<PairingInvitationIssuer>,
+}
+
+impl IssuePairingInvitationUseCase {
+    pub(crate) fn new(
+        pairing_invitation: Arc<dyn PairingInvitationPort>,
+        issuer: Arc<PairingInvitationIssuer>,
+    ) -> Self {
+        Self {
+            pairing_invitation,
+            issuer,
+        }
+    }
+
+    #[instrument(skip_all)]
+    pub(crate) async fn execute(
+        &self,
+    ) -> Result<IssuePairingInvitationResult, IssuePairingInvitationError> {
+        let admission_generation = self.issuer.begin().await?;
+
+        let issued: IssuedInvitation = self
+            .pairing_invitation
+            .issue_invitation()
+            .await
+            .map_err(map_invitation_error)?;
+        self.issuer.finish(issued, admission_generation).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::net::IpAddr;
+    use std::sync::Mutex as StdMutex;
+
+    use async_trait::async_trait;
+    use chrono::{DateTime, Duration, Utc};
+
+    use uc_core::ids::DeviceId;
+    use uc_core::membership::{InvitationId, MembershipAdmissionDecision};
+    use uc_core::pairing::invitation::{FullInvitation, InvitationCode, InvitationState};
+    use uc_core::ports::pairing_invitation::{
+        CodeOrigin, InvitationError, PairingInvitationByAddressPort,
+    };
+    use uc_core::ports::{ClockPort, DeviceIdentityPort};
+    use uc_observability_contract::analytics::{
+        AnalyticsFacade, Event, InvitationCodeSource, PairingMethod,
+    };
+
+    use crate::space::admission::invitation::holder::InMemoryPairingInvitationHolder;
+    use crate::space::admission::invitation::issue_for_address::IssuePairingInvitationForAddressUseCase;
+    use crate::space::membership::{
+        MembershipAdmissionSnapshot, QueryMembershipAdmissionError, QueryMembershipAdmissionPort,
+    };
+
+    struct FixedMembershipAdmissionGate(MembershipAdmissionDecision);
+
+    #[async_trait]
+    impl QueryMembershipAdmissionPort for FixedMembershipAdmissionGate {
+        async fn query_membership_admission(
+            &self,
+            _invitation_generation: Option<u64>,
+        ) -> Result<MembershipAdmissionSnapshot, QueryMembershipAdmissionError> {
+            Ok(MembershipAdmissionSnapshot {
+                current_generation: 0,
+                decision: self.0,
+            })
+        }
+    }
+
+    /// Test fake `AnalyticsPort` that records every captured `Event` for
+    /// later inspection. Mirrors the joiner-side `CapturingAnalyticsSink`.
+    #[derive(Default)]
+    struct CapturingAnalyticsSink {
+        captured: StdMutex<Vec<Event>>,
+    }
+    impl CapturingAnalyticsSink {
+        fn events(&self) -> Vec<Event> {
+            self.captured.lock().unwrap().clone()
+        }
+    }
+    impl uc_observability_contract::analytics::AnalyticsPort for CapturingAnalyticsSink {
+        fn capture(&self, event: Event) {
+            self.captured.lock().unwrap().push(event);
+        }
+    }
+
+    fn wrap_facade(sink: Arc<CapturingAnalyticsSink>) -> Arc<dyn AnalyticsFacade> {
+        Arc::new(
+            uc_observability_contract::analytics::DefaultAnalyticsFacade::new(
+                sink as Arc<dyn uc_observability_contract::analytics::AnalyticsPort>,
+                Arc::new(uc_observability_contract::analytics::NoopAnalyticsIdentity),
+            ),
+        )
+    }
+
+    // ---------- Fakes ----------
+
+    struct FakeInvitationPort {
+        next: StdMutex<FakeOutcome>,
+        calls: StdMutex<u32>,
+        selected_calls: StdMutex<Vec<IpAddr>>,
+    }
+
+    enum FakeOutcome {
+        Ok(IssuedInvitation),
+        Err(InvitationError),
+    }
+
+    impl FakeInvitationPort {
+        fn with_ok(code: &str, expires_at: DateTime<Utc>) -> Self {
+            Self::with_origin(code, expires_at, CodeOrigin::DirectoryIssued)
+        }
+
+        fn with_origin(code: &str, expires_at: DateTime<Utc>, code_origin: CodeOrigin) -> Self {
+            let invitation_id = InvitationId::from_bytes([0x61; 32]).expect("valid invitation id");
+            let full_invitation =
+                FullInvitation::new(format!("ucspace1_{code}")).expect("valid full invitation");
+            Self {
+                next: StdMutex::new(FakeOutcome::Ok(IssuedInvitation {
+                    invitation_id,
+                    code: InvitationCode::new(code),
+                    full_invitation,
+                    expires_at,
+                    code_origin,
+                })),
+                calls: StdMutex::new(0),
+                selected_calls: StdMutex::new(Vec::new()),
+            }
+        }
+        fn with_err(err: InvitationError) -> Self {
+            Self {
+                next: StdMutex::new(FakeOutcome::Err(err)),
+                calls: StdMutex::new(0),
+                selected_calls: StdMutex::new(Vec::new()),
+            }
+        }
+        fn calls(&self) -> u32 {
+            *self.calls.lock().unwrap()
+        }
+        fn selected_calls(&self) -> Vec<IpAddr> {
+            self.selected_calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl PairingInvitationPort for FakeInvitationPort {
+        async fn issue_invitation(&self) -> Result<IssuedInvitation, InvitationError> {
+            *self.calls.lock().unwrap() += 1;
+            let out = std::mem::replace(
+                &mut *self.next.lock().unwrap(),
+                FakeOutcome::Err(InvitationError::Internal("already consumed".into())),
+            );
+            match out {
+                FakeOutcome::Ok(v) => Ok(v),
+                FakeOutcome::Err(e) => Err(e),
+            }
+        }
+
+        async fn consume_invitation(
+            &self,
+            _code: &InvitationCode,
+        ) -> Result<(), uc_core::ports::ConsumeInvitationError> {
+            // B1 use case never drives consume directly.
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl PairingInvitationByAddressPort for FakeInvitationPort {
+        async fn issue_invitation_for_address(
+            &self,
+            selected_ip: IpAddr,
+        ) -> Result<IssuedInvitation, InvitationError> {
+            self.selected_calls.lock().unwrap().push(selected_ip);
+            let out = std::mem::replace(
+                &mut *self.next.lock().unwrap(),
+                FakeOutcome::Err(InvitationError::Internal("already consumed".into())),
+            );
+            match out {
+                FakeOutcome::Ok(v) => Ok(v),
+                FakeOutcome::Err(e) => Err(e),
+            }
+        }
+    }
+
+    struct FixedDeviceIdentity(DeviceId);
+    impl DeviceIdentityPort for FixedDeviceIdentity {
+        fn current_device_id(&self) -> DeviceId {
+            self.0.clone()
+        }
+    }
+
+    struct FixedClock(i64);
+    impl ClockPort for FixedClock {
+        fn now_ms(&self) -> i64 {
+            self.0
+        }
+    }
+
+    // ---------- Harness ----------
+
+    struct Harness {
+        uc: IssuePairingInvitationUseCase,
+        by_address: IssuePairingInvitationForAddressUseCase,
+        invitation_port: Arc<FakeInvitationPort>,
+        holder: Arc<InMemoryPairingInvitationHolder>,
+        analytics: Arc<CapturingAnalyticsSink>,
+    }
+
+    fn expires_at() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-04-20T10:05:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn issued_at_ms() -> i64 {
+        DateTime::parse_from_rfc3339("2026-04-20T10:00:00Z")
+            .unwrap()
+            .timestamp_millis()
+    }
+
+    /// Assert that the analytics sink saw exactly one `PairingStarted`
+    /// event with the v1 fixed `PairingMethod::Code`. Slice 8b' funnel
+    /// anchor — fired from `execute()` entry. Use on the *failure* paths
+    /// where issuance never completes (no `pairing_invitation_issued`).
+    fn assert_pairing_started(analytics: &Arc<CapturingAnalyticsSink>) {
+        let events = analytics.events();
+        assert_eq!(
+            events.len(),
+            1,
+            "failed issuance must fire exactly one PairingStarted"
+        );
+        match &events[0] {
+            Event::PairingStarted { method } => {
+                assert_eq!(*method, PairingMethod::Code);
+            }
+            other => panic!("expected PairingStarted, got {other:?}"),
+        }
+    }
+
+    /// Assert the *success* path emits `[PairingStarted, PairingInvitationIssued]`,
+    /// the second carrying the expected code source and LAN-only flag.
+    fn assert_started_then_issued(
+        analytics: &Arc<CapturingAnalyticsSink>,
+        expected_source: InvitationCodeSource,
+        expected_lan_only: bool,
+    ) {
+        let events = analytics.events();
+        assert_eq!(
+            events.len(),
+            2,
+            "successful issuance fires [PairingStarted, PairingInvitationIssued], got {events:?}"
+        );
+        assert!(
+            matches!(
+                events[0],
+                Event::PairingStarted {
+                    method: PairingMethod::Code
+                }
+            ),
+            "first event should be PairingStarted, got {:?}",
+            events[0]
+        );
+        match &events[1] {
+            Event::PairingInvitationIssued {
+                code_source,
+                lan_only_mode,
+            } => {
+                assert_eq!(*code_source, expected_source);
+                assert_eq!(*lan_only_mode, expected_lan_only);
+            }
+            other => panic!("expected PairingInvitationIssued, got {other:?}"),
+        }
+    }
+
+    fn build_harness(port: Arc<FakeInvitationPort>) -> Harness {
+        let device_identity: Arc<dyn DeviceIdentityPort> =
+            Arc::new(FixedDeviceIdentity(DeviceId::new("sponsor-1")));
+        let clock: Arc<dyn ClockPort> = Arc::new(FixedClock(issued_at_ms()));
+        let holder = Arc::new(InMemoryPairingInvitationHolder::new());
+        let analytics = Arc::new(CapturingAnalyticsSink::default());
+        let analytics_facade = wrap_facade(analytics.clone());
+        let issuer = Arc::new(PairingInvitationIssuer::new(
+            device_identity,
+            clock,
+            holder.clone(),
+            analytics_facade,
+            Arc::new(FixedMembershipAdmissionGate(
+                MembershipAdmissionDecision::Allowed,
+            )),
+        ));
+        let uc = IssuePairingInvitationUseCase::new(
+            port.clone() as Arc<dyn PairingInvitationPort>,
+            Arc::clone(&issuer),
+        );
+        let by_address = IssuePairingInvitationForAddressUseCase::new(
+            port.clone() as Arc<dyn PairingInvitationByAddressPort>,
+            issuer,
+        );
+        Harness {
+            uc,
+            by_address,
+            invitation_port: port,
+            holder,
+            analytics,
+        }
+    }
+
+    // ---------- Tests ----------
+
+    #[tokio::test]
+    async fn happy_path_returns_port_result_and_parks_aggregate() {
+        let port = Arc::new(FakeInvitationPort::with_ok("ABCD-1234", expires_at()));
+        let h = build_harness(port);
+
+        let result = h.uc.execute().await.unwrap();
+
+        assert_eq!(result.code.as_str(), "ABCD-1234");
+        assert_eq!(result.full_invitation.as_str(), "ucspace1_ABCD-1234");
+        assert_eq!(result.expires_at, expires_at());
+        assert_eq!(
+            result.availability,
+            crate::space::facade::InvitationAvailability::CrossNetwork
+        );
+        assert_eq!(h.invitation_port.calls(), 1);
+
+        let stored = h
+            .holder
+            .get_for_test(&InvitationCode::new("ABCD-1234"))
+            .await
+            .expect("aggregate parked");
+        assert_eq!(stored.code().as_str(), "ABCD-1234");
+        assert_eq!(stored.invitation_id().as_bytes(), &[0x61; 32]);
+        assert_eq!(stored.full_invitation(), &result.full_invitation);
+        assert_eq!(stored.issuer_device_id().as_str(), "sponsor-1");
+        match stored.state() {
+            InvitationState::Pending { expires_at: e } => assert_eq!(*e, expires_at()),
+            other => panic!("expected Pending, got {other:?}"),
+        }
+        assert_eq!(stored.issued_at().timestamp_millis(), issued_at_ms());
+
+        // Funnel anchor + issuance outcome: a directory-issued code.
+        assert_started_then_issued(&h.analytics, InvitationCodeSource::DirectoryIssued, false);
+    }
+
+    #[tokio::test]
+    async fn pending_removal_prevents_issuing_an_invitation() {
+        let port = Arc::new(FakeInvitationPort::with_ok("ABCD-1234", expires_at()));
+        let device_identity: Arc<dyn DeviceIdentityPort> =
+            Arc::new(FixedDeviceIdentity(DeviceId::new("sponsor-1")));
+        let clock: Arc<dyn ClockPort> = Arc::new(FixedClock(issued_at_ms()));
+        let holder = Arc::new(InMemoryPairingInvitationHolder::new());
+        let analytics = Arc::new(CapturingAnalyticsSink::default());
+        let issuer = Arc::new(PairingInvitationIssuer::new(
+            device_identity,
+            clock,
+            holder.clone(),
+            wrap_facade(analytics.clone()),
+            Arc::new(FixedMembershipAdmissionGate(
+                MembershipAdmissionDecision::AwaitingConvergence,
+            )),
+        ));
+        let uc = IssuePairingInvitationUseCase::new(
+            port.clone() as Arc<dyn PairingInvitationPort>,
+            issuer,
+        );
+
+        assert!(matches!(
+            uc.execute().await,
+            Err(IssuePairingInvitationError::MembershipReconciliationInProgress)
+        ));
+        assert_eq!(port.calls(), 0);
+        assert_eq!(holder.len().await, 0);
+        assert_pairing_started(&analytics);
+    }
+
+    #[tokio::test]
+    async fn locally_minted_invitation_requires_the_same_local_network() {
+        let port = Arc::new(FakeInvitationPort::with_origin(
+            "LOCAL-1234",
+            expires_at(),
+            CodeOrigin::LocallyMintedDirectoryUnreachable,
+        ));
+        let h = build_harness(port);
+
+        let result = h.uc.execute().await.unwrap();
+
+        assert_eq!(
+            result.availability,
+            crate::space::facade::InvitationAvailability::SameLocalNetwork
+        );
+    }
+
+    #[tokio::test]
+    async fn selected_address_path_calls_selected_port_and_parks_aggregate() {
+        let selected_ip = "100.79.191.42".parse().unwrap();
+        let port = Arc::new(FakeInvitationPort::with_ok("ADDR-0001", expires_at()));
+        let h = build_harness(port);
+
+        let result = h.by_address.execute(selected_ip).await.unwrap();
+
+        assert_eq!(result.code.as_str(), "ADDR-0001");
+        assert_eq!(h.invitation_port.calls(), 0);
+        assert_eq!(h.invitation_port.selected_calls(), vec![selected_ip]);
+        assert!(h
+            .holder
+            .get_for_test(&InvitationCode::new("ADDR-0001"))
+            .await
+            .is_some());
+        assert_started_then_issued(&h.analytics, InvitationCodeSource::DirectoryIssued, false);
+    }
+
+    #[tokio::test]
+    async fn maps_network_not_started_and_does_not_park() {
+        let port = Arc::new(FakeInvitationPort::with_err(
+            InvitationError::NetworkNotStarted,
+        ));
+        let h = build_harness(port);
+
+        let err = h.uc.execute().await.unwrap_err();
+        assert!(matches!(
+            err,
+            IssuePairingInvitationError::NetworkNotStarted
+        ));
+        assert_eq!(
+            h.holder.len().await,
+            0,
+            "failure path must not park anything"
+        );
+        // Even an early-dial failure leaves the funnel anchor.
+        assert_pairing_started(&h.analytics);
+    }
+
+    #[tokio::test]
+    async fn maps_service_unavailable() {
+        let port = Arc::new(FakeInvitationPort::with_err(
+            InvitationError::ServiceUnavailable,
+        ));
+        let h = build_harness(port);
+
+        let err = h.uc.execute().await.unwrap_err();
+        assert!(matches!(
+            err,
+            IssuePairingInvitationError::ServiceUnavailable
+        ));
+        assert_pairing_started(&h.analytics);
+    }
+
+    #[tokio::test]
+    async fn maps_internal_with_message() {
+        let port = Arc::new(FakeInvitationPort::with_err(InvitationError::Internal(
+            "boom".into(),
+        )));
+        let h = build_harness(port);
+
+        let err = h.uc.execute().await.unwrap_err();
+        match err {
+            IssuePairingInvitationError::Internal(m) => assert_eq!(m, "boom"),
+            other => panic!("expected Internal, got {other:?}"),
+        }
+        assert_pairing_started(&h.analytics);
+    }
+
+    #[tokio::test]
+    async fn second_issue_with_same_code_overwrites_holder_entry() {
+        // The fake returns only one Ok; to exercise overwrite we rebuild
+        // with two Oks of the same code but different expiries.
+        let first_expiry = expires_at();
+        let second_expiry = expires_at() + Duration::minutes(5);
+
+        let port = Arc::new(FakeInvitationPort::with_ok("SAME", first_expiry));
+        let h = build_harness(port.clone());
+        h.uc.execute().await.unwrap();
+
+        // Second issue: reset the fake port's next outcome.
+        *port.next.lock().unwrap() = FakeOutcome::Ok(IssuedInvitation {
+            invitation_id: InvitationId::from_bytes([0x62; 32]).expect("valid invitation id"),
+            code: InvitationCode::new("SAME"),
+            full_invitation: FullInvitation::new("ucspace1_SAME-2").expect("valid full invitation"),
+            expires_at: second_expiry,
+            code_origin: CodeOrigin::DirectoryIssued,
+        });
+        h.uc.execute().await.unwrap();
+
+        assert_eq!(h.holder.len().await, 1, "overwrite, not two entries");
+        let stored = h
+            .holder
+            .get_for_test(&InvitationCode::new("SAME"))
+            .await
+            .unwrap();
+        match stored.state() {
+            InvitationState::Pending { expires_at: e } => assert_eq!(*e, second_expiry),
+            other => panic!("expected Pending, got {other:?}"),
+        }
+    }
+}

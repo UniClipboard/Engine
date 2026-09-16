@@ -13,7 +13,7 @@
 //!
 //! ## OTLP 不联动（Pitfall 6 防御）
 //!
-//! 本模块**禁止**引用 `general.telemetry_enabled` 或任何 OTLP 配置 ——
+//! 本模块**禁止**引用宿主远程诊断许可或任何 OTLP 配置 ——
 //! 网络策略与遥测开关独立。
 //!
 //! ## D-A1 物理位置 + D-B3 启动日志规范
@@ -67,6 +67,7 @@ pub fn relay_policy_to_iroh_config(
         // `apply_iroh_direct_reachability_from_env` 在 daemon / CLI 入口处填充。
         bind_port: None,
         public_addr: None,
+        network_partition_gate: None,
     }
 }
 
@@ -163,7 +164,7 @@ pub(crate) fn parse_iroh_direct_reachability(
 }
 
 /// 读取直连可达性 env 并写入 `cfg`。在每个 production daemon / CLI 入口
-/// （`build_daemon_lifecycle` / `build_cli_app_runtime`）紧跟
+/// （`build_network_runtime` / `build_cli_app_runtime`）紧跟
 /// `relay_policy_to_iroh_config` 之后调用——daemon 与 CLI 配对路径都要广播
 /// 同一个公网地址。让 `relay_policy_to_iroh_config` 保持纯（只吃 settings、
 /// 不碰 env）。

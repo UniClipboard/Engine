@@ -26,7 +26,7 @@ use crate::transfer::blob::{
 use crate::transfer::file::facade::{
     BeginReceiverTransfer, FileTransferFacade, ReceiverTransferRegistration,
 };
-use crate::transfer::file::session::FileTransferSession;
+use crate::transfer::file::session::ReceiverTransferHandle;
 
 /// 共享的 host event 总线。
 ///
@@ -36,7 +36,7 @@ use crate::transfer::file::session::FileTransferSession;
 /// fan-out 到所有已注册下游,装配顺序无关。
 pub type SharedHostEventEmitter = Arc<HostEventBus>;
 
-pub struct BlobTransferDeps {
+pub(crate) struct BlobTransferDeps {
     pub hash: Arc<dyn ContentHashPort>,
     pub blob_transfer: Arc<dyn BlobTransferPort>,
     pub blob_reference: Arc<dyn BlobReferenceRepositoryPort>,
@@ -253,7 +253,7 @@ struct InflightFetch {
     /// 也撕掉(只 break caller 没用 —— actor 还会继续下载完整 blob)。
     ticket: BlobTicket,
     /// The same session used by fetch progress and terminal settlement.
-    session: Option<Arc<FileTransferSession>>,
+    session: Option<Arc<ReceiverTransferHandle>>,
     /// Directory receive attempt that owns this member fetch.
     attempt_id: Option<String>,
     /// 反向上报通道。`cancel_inbound_transfer` 在撕 QUIC connection
@@ -282,7 +282,7 @@ pub struct BlobTransferFacade {
 }
 
 impl BlobTransferFacade {
-    pub fn new(deps: BlobTransferDeps) -> Self {
+    pub(crate) fn new(deps: BlobTransferDeps) -> Self {
         let publish_uc = Arc::new(PublishBlobUseCase::new(
             Arc::clone(&deps.hash),
             Arc::clone(&deps.blob_transfer),
@@ -310,7 +310,7 @@ impl BlobTransferFacade {
         &self,
         ctx: &FetchTransferContext,
         cached_path: String,
-    ) -> Result<Option<Arc<FileTransferSession>>, BlobTransferError> {
+    ) -> Result<Option<Arc<ReceiverTransferHandle>>, BlobTransferError> {
         let Some(facade) = self.file_transfer.as_ref() else {
             return Ok(None);
         };
@@ -334,7 +334,7 @@ impl BlobTransferFacade {
     async fn existing_lifecycle(
         &self,
         ctx: &FetchTransferContext,
-    ) -> Result<Option<Arc<FileTransferSession>>, BlobTransferError> {
+    ) -> Result<Option<Arc<ReceiverTransferHandle>>, BlobTransferError> {
         let Some(facade) = self.file_transfer.as_ref() else {
             return Ok(None);
         };
@@ -859,7 +859,7 @@ impl BlobTransferFacade {
     async fn build_progress_sink(
         &self,
         ctx: Option<&FetchTransferContext>,
-        session: Option<Arc<FileTransferSession>>,
+        session: Option<Arc<ReceiverTransferHandle>>,
         outbound: Option<OutboundReportContext>,
     ) -> Option<Arc<dyn BlobProgressSink>> {
         let ctx = ctx?;
@@ -930,7 +930,7 @@ fn flip_cancel_reason_perspective(
 
 struct FileTransferProgressSink {
     fallback_bus: Option<SharedHostEventEmitter>,
-    session: Option<Arc<FileTransferSession>>,
+    session: Option<Arc<ReceiverTransferHandle>>,
     transfer_id: String,
     entry_id: String,
     attempt_id: Option<String>,

@@ -12,6 +12,10 @@ use crate::clipboard::history::views::{
 };
 use crate::facade::clipboard_history::ClipboardHistoryFacade;
 
+#[cfg(test)]
+#[path = "maintenance_runtime_tests.rs"]
+mod tests;
+
 const HISTORY_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(300);
 
 #[async_trait]
@@ -61,10 +65,14 @@ impl HistoryMaintenanceRuntime {
         maintenance: Arc<dyn HistoryMaintenance>,
         interval: Duration,
     ) -> Self {
-        run_history_maintenance_once(maintenance.as_ref()).await;
+        // 启动只等待文件引用安全检查，配额与保留策略由同一受管任务继续执行。
+        let initial = reconcile_history_once(maintenance.as_ref()).await;
         let cancel = CancellationToken::new();
         let task_cancel = cancel.clone();
         let task = tokio::spawn(async move {
+            if !task_cancel.is_cancelled() {
+                complete_history_maintenance(maintenance.as_ref(), initial).await;
+            }
             run_history_maintenance_loop(maintenance, interval, task_cancel).await;
         });
         Self {
@@ -142,17 +150,30 @@ impl HistoryMaintenanceSummary {
 }
 
 async fn run_history_maintenance_once(maintenance: &dyn HistoryMaintenance) {
+    let summary = reconcile_history_once(maintenance).await;
+    complete_history_maintenance(maintenance, summary).await;
+}
+
+async fn reconcile_history_once(maintenance: &dyn HistoryMaintenance) -> HistoryMaintenanceSummary {
     let mut summary = HistoryMaintenanceSummary::default();
     match maintenance.reconcile_missing_files().await {
         Ok(result) => summary.reconcile = Some(result),
         Err(_) => {
             summary.reconcile_failed = true;
             warn!("history reconciliation failed; skipping remaining maintenance passes");
-            summary.log();
-            return;
         }
     }
+    summary
+}
 
+async fn complete_history_maintenance(
+    maintenance: &dyn HistoryMaintenance,
+    mut summary: HistoryMaintenanceSummary,
+) {
+    if summary.reconcile_failed {
+        summary.log();
+        return;
+    }
     match maintenance.cleanup_expired_files().await {
         Ok(result) => summary.cleanup = Some(result),
         Err(_) => {
