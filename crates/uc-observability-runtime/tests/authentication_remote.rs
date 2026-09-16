@@ -2,6 +2,7 @@ use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use prost::Message;
 use std::time::Duration;
 use uc_observability_contract::diagnostics::connectivity::*;
+use uc_observability_contract::diagnostics::record_profile_upgrade_backup_failure;
 use uc_observability_runtime::*;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -48,6 +49,12 @@ async fn one_authentication_completion_has_local_detail_but_only_the_v1_remote_s
     );
     ConnectionObservation::begin(ConnectionPurpose::Admission, [0x41; 32])
         .finish(ConnectionOutcome::Connected);
+    record_profile_upgrade_backup_failure(
+        "capture_profile_files",
+        "permission_denied",
+        Some("PermissionDenied"),
+        Some(5),
+    );
     assert_eq!(
         handle.force_flush(Duration::from_secs(5)).logs,
         SignalResult::Completed
@@ -90,7 +97,7 @@ async fn one_authentication_completion_has_local_detail_but_only_the_v1_remote_s
         .map(|l| serde_json::from_str(l).expect("JSON"))
         .filter(|row: &serde_json::Value| row["target"] != "uc.diagnostics")
         .collect();
-    assert_eq!(local.len(), 4);
+    assert_eq!(local.len(), 5);
     assert!(local[2]["run_id"].as_str().is_some());
     assert!(local[2]["peer_ref"].as_str().is_some());
     assert!(!output.contains("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"));
@@ -104,5 +111,14 @@ async fn one_authentication_completion_has_local_detail_but_only_the_v1_remote_s
         local[1]["fields"]["close.reason"],
         "remote_application_closed"
     );
+    assert_eq!(
+        local[4]["fields"]["event.name"],
+        "profile_upgrade.backup.failed"
+    );
+    assert_eq!(local[4]["fields"]["backup_action"], "capture_profile_files");
+    assert_eq!(local[4]["fields"]["error_kind"], "permission_denied");
+    assert_eq!(local[4]["fields"]["io_error_kind"], "PermissionDenied");
+    assert_eq!(local[4]["fields"]["io_error_code"], 5);
+    assert_eq!(local[4]["fields"]["retryable"], true);
     handle.shutdown(Duration::from_secs(5));
 }

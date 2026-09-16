@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use uc_observability_contract::diagnostics::connectivity::*;
+use uc_observability_contract::diagnostics::record_profile_upgrade_backup_failure;
 use uc_observability_runtime::*;
 
 #[derive(Clone, Default)]
@@ -53,6 +54,12 @@ fn one_process_can_keep_host_logs_and_route_engine_records_only_to_the_common_ru
         AuthenticationFailure::ContinuationCredential(CredentialFailure::RecordMissing),
         Duration::from_millis(3),
     );
+    record_profile_upgrade_backup_failure(
+        "capture_profile_files",
+        "permission_denied",
+        Some("PermissionDenied"),
+        Some(5),
+    );
     drop(entered);
     drop(host_span);
     assert_eq!(
@@ -77,9 +84,14 @@ fn one_process_can_keep_host_logs_and_route_engine_records_only_to_the_common_ru
             .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON"))
             .filter(|row| row["target"] != "uc.diagnostics")
             .count(),
-        1
+        2
     );
     assert!(engine_output.contains("record_missing"));
+    assert!(engine_output.contains("profile_upgrade.backup.failed"));
+    assert!(engine_output.contains("capture_profile_files"));
+    assert!(engine_output.contains("permission_denied"));
+    assert!(engine_output.contains("PermissionDenied"));
+    assert!(engine_output.contains("\"io_error_code\":5"));
     assert!(!engine_output.contains("host event"));
     assert!(matches!(
         ProcessObservabilityRuntime::install(config.clone()),

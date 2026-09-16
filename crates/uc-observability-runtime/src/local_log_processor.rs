@@ -9,6 +9,8 @@ use opentelemetry::InstrumentationScope;
 use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::logs::{LogProcessor, SdkLogRecord};
 use serde_json::{json, Map, Value};
+use uc_observability_contract::diagnostics::connectivity::CONNECTIVITY_TARGET;
+use uc_observability_contract::diagnostics::{LOCAL_DIAGNOSTIC_TARGET, TELEMETRY_TARGET};
 
 use crate::local_capture::source_for;
 use crate::local_file::LocalFileRuntime;
@@ -36,10 +38,10 @@ impl LocalLogProcessor {
 
 impl LogProcessor for LocalLogProcessor {
     fn emit(&self, data: &mut SdkLogRecord, scope: &InstrumentationScope) {
-        if data
-            .target()
-            .is_none_or(|target| !matches!(target.as_ref(), "uc.telemetry" | "uc.connectivity"))
-        {
+        if data.target().is_none_or(|target| {
+            !matches!(target.as_ref(), TELEMETRY_TARGET | CONNECTIVITY_TARGET)
+                && target.as_ref() != LOCAL_DIAGNOSTIC_TARGET
+        }) {
             return;
         }
         let Some(mut record) = decode_record(data, scope, &self.recording) else {
@@ -76,7 +78,8 @@ impl LogProcessor for LocalLogProcessor {
     }
 
     fn event_enabled(&self, _level: Severity, target: &str, _name: Option<&str>) -> bool {
-        matches!(target, "uc.telemetry" | "uc.connectivity")
+        matches!(target, TELEMETRY_TARGET | CONNECTIVITY_TARGET)
+            || target == LOCAL_DIAGNOSTIC_TARGET
     }
 }
 
@@ -100,7 +103,7 @@ fn decode_record(
         _ => return None,
     };
     let target = data.target()?.as_ref();
-    if target == "uc.telemetry" && !log_is_approved(data) {
+    if target == TELEMETRY_TARGET && !log_is_approved(data) {
         return None;
     }
     let mut fields = Map::new();
@@ -108,13 +111,14 @@ fn decode_record(
         let value = match value {
             AnyValue::String(value) => Value::String(value.to_string()),
             AnyValue::Int(value) => json!(value),
+            AnyValue::Boolean(value) => json!(value),
             _ => return None,
         };
         if fields.insert(key.to_string(), value).is_some() {
             return None;
         }
     }
-    if target == "uc.connectivity" {
+    if target == CONNECTIVITY_TARGET {
         if fields.len() != 2 {
             return None;
         }

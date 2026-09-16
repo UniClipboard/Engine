@@ -1,5 +1,6 @@
 use uc_application::deps::ProfileUpgradeBackupError;
 use uc_core::ports::SecureStorageError;
+use uc_observability_contract::diagnostics::record_profile_upgrade_backup_failure;
 
 use crate::security::ProfileBackupArchiveError;
 
@@ -16,14 +17,11 @@ pub(super) fn record_backup_failure(
         .unwrap_or(fallback_action);
     let io = find_source::<std::io::Error>(error);
     let io_kind = io.map(|source| format!("{:?}", source.kind()));
-    tracing::error!(
-        target: "uc_infra::security::profile_upgrade_backup",
+    record_profile_upgrade_backup_failure(
         backup_action,
-        error_kind = classify_error(error),
-        io_error_kind = io_kind.as_deref(),
-        io_error_code = io.and_then(std::io::Error::raw_os_error),
-        retryable = true,
-        "profile upgrade backup step failed"
+        classify_error(error),
+        io_kind.as_deref(),
+        io.and_then(std::io::Error::raw_os_error),
     );
 }
 
