@@ -100,9 +100,14 @@ impl V3AdmissionSpaceTransition {
             transition.profile_data_generation,
             transition.source_control_generation,
         )
-        .map_err(|_| AdmissionSpaceTransitionError::Inconsistent)?;
-        ActiveRuntimeManifestV3::new(layout, transition.source_keyslot_generation)
-            .ok_or(AdmissionSpaceTransitionError::Inconsistent)
+        .map_err(AdmissionSpaceTransitionError::inconsistent)?;
+        ActiveRuntimeManifestV3::new(layout, transition.source_keyslot_generation).ok_or_else(
+            || {
+                AdmissionSpaceTransitionError::missing(
+                    "source runtime manifest cannot be reconstructed",
+                )
+            },
+        )
     }
 
     fn target_manifest(
@@ -113,9 +118,14 @@ impl V3AdmissionSpaceTransition {
             transition.profile_data_generation,
             transition.target_control_generation,
         )
-        .map_err(|_| AdmissionSpaceTransitionError::Inconsistent)?;
-        ActiveRuntimeManifestV3::new(layout, transition.target_keyslot_generation)
-            .ok_or(AdmissionSpaceTransitionError::Inconsistent)
+        .map_err(AdmissionSpaceTransitionError::inconsistent)?;
+        ActiveRuntimeManifestV3::new(layout, transition.target_keyslot_generation).ok_or_else(
+            || {
+                AdmissionSpaceTransitionError::missing(
+                    "target runtime manifest cannot be reconstructed",
+                )
+            },
+        )
     }
 
     fn same_space_source_manifest(
@@ -126,9 +136,14 @@ impl V3AdmissionSpaceTransition {
             transition.profile_data_generation,
             transition.source_control_generation,
         )
-        .map_err(|_| AdmissionSpaceTransitionError::Inconsistent)?;
-        ActiveRuntimeManifestV3::new(layout, transition.retained_keyslot_generation)
-            .ok_or(AdmissionSpaceTransitionError::Inconsistent)
+        .map_err(AdmissionSpaceTransitionError::inconsistent)?;
+        ActiveRuntimeManifestV3::new(layout, transition.retained_keyslot_generation).ok_or_else(
+            || {
+                AdmissionSpaceTransitionError::missing(
+                    "retained runtime manifest cannot be reconstructed",
+                )
+            },
+        )
     }
 
     fn same_space_target_manifest(
@@ -139,9 +154,14 @@ impl V3AdmissionSpaceTransition {
             transition.profile_data_generation,
             transition.target_control_generation,
         )
-        .map_err(|_| AdmissionSpaceTransitionError::Inconsistent)?;
-        ActiveRuntimeManifestV3::new(layout, transition.retained_keyslot_generation)
-            .ok_or(AdmissionSpaceTransitionError::Inconsistent)
+        .map_err(AdmissionSpaceTransitionError::inconsistent)?;
+        ActiveRuntimeManifestV3::new(layout, transition.retained_keyslot_generation).ok_or_else(
+            || {
+                AdmissionSpaceTransitionError::missing(
+                    "same-space target runtime manifest cannot be reconstructed",
+                )
+            },
+        )
     }
 
     fn fresh_target_manifest(
@@ -152,9 +172,14 @@ impl V3AdmissionSpaceTransition {
             transition.profile_data_generation,
             transition.target_control_generation,
         )
-        .map_err(|_| AdmissionSpaceTransitionError::Inconsistent)?;
-        ActiveRuntimeManifestV3::new(layout, transition.target_keyslot_generation)
-            .ok_or(AdmissionSpaceTransitionError::Inconsistent)
+        .map_err(AdmissionSpaceTransitionError::inconsistent)?;
+        ActiveRuntimeManifestV3::new(layout, transition.target_keyslot_generation).ok_or_else(
+            || {
+                AdmissionSpaceTransitionError::missing(
+                    "fresh-space target runtime manifest cannot be reconstructed",
+                )
+            },
+        )
     }
 
     async fn proof(
@@ -208,7 +233,9 @@ impl V3AdmissionSpaceTransition {
                     .map_err(map_activation_error)?;
             }
             Some(ActiveRuntimeManifest::V2(_)) | Some(ActiveRuntimeManifest::V3(_)) | None => {
-                return Err(AdmissionSpaceTransitionError::Inconsistent);
+                return Err(AdmissionSpaceTransitionError::missing(
+                    "active runtime manifest does not match the transition",
+                ));
             }
         }
         Ok(())
@@ -245,7 +272,9 @@ impl V3AdmissionSpaceTransition {
                     .map_err(map_activation_error)?;
             }
             Some(ActiveRuntimeManifest::V2(_)) | Some(ActiveRuntimeManifest::V3(_)) | None => {
-                return Err(AdmissionSpaceTransitionError::Inconsistent);
+                return Err(AdmissionSpaceTransitionError::missing(
+                    "active runtime manifest does not match the transition",
+                ));
             }
         }
         Ok(())
@@ -291,7 +320,9 @@ impl V3AdmissionSpaceTransition {
                     .map_err(map_activation_error)?;
             }
             Some(ActiveRuntimeManifest::V2(_)) | Some(ActiveRuntimeManifest::V3(_)) => {
-                return Err(AdmissionSpaceTransitionError::Inconsistent);
+                return Err(AdmissionSpaceTransitionError::missing(
+                    "active runtime manifest does not match the transition",
+                ));
             }
         }
         Ok(())
@@ -308,7 +339,9 @@ impl V3AdmissionSpaceTransition {
             .then_some(AdmissionSpaceTransitionStepV2::Advanced(
                 AdmissionSpaceTransitionV2::CrossSpaceControl(next),
             ))
-            .ok_or(AdmissionSpaceTransitionError::Inconsistent)
+            .ok_or_else(|| {
+                AdmissionSpaceTransitionError::missing("transition phase cannot advance")
+            })
     }
 
     fn same_space_advanced(
@@ -322,7 +355,9 @@ impl V3AdmissionSpaceTransition {
             .then_some(AdmissionSpaceTransitionStepV2::Advanced(
                 AdmissionSpaceTransitionV2::SameSpaceControl(next),
             ))
-            .ok_or(AdmissionSpaceTransitionError::Inconsistent)
+            .ok_or_else(|| {
+                AdmissionSpaceTransitionError::missing("transition phase cannot advance")
+            })
     }
 
     async fn advance_same_space(
@@ -331,7 +366,9 @@ impl V3AdmissionSpaceTransition {
         intent: Option<JoinerActivationIntent>,
     ) -> Result<AdmissionSpaceTransitionStepV2, AdmissionSpaceTransitionError> {
         if !transition.validate() {
-            return Err(AdmissionSpaceTransitionError::Inconsistent);
+            return Err(AdmissionSpaceTransitionError::missing(
+                "space control transition checkpoint is invalid",
+            ));
         }
         match transition.phase {
             SameSpaceControlTransitionPhaseV3::TargetPrepared => Self::same_space_advanced(
@@ -341,7 +378,9 @@ impl V3AdmissionSpaceTransition {
             SameSpaceControlTransitionPhaseV3::ActivationStarted => {
                 self.continue_same_space_activation(
                     transition,
-                    intent.ok_or(AdmissionSpaceTransitionError::Inconsistent)?,
+                    intent.ok_or_else(|| {
+                        AdmissionSpaceTransitionError::missing("activation intent is missing")
+                    })?,
                 )
                 .await?;
                 Self::same_space_advanced(
@@ -356,7 +395,9 @@ impl V3AdmissionSpaceTransition {
                     .recover_same_space(
                         &target,
                         self.activation_intents.as_ref(),
-                        intent.ok_or(AdmissionSpaceTransitionError::Inconsistent)?,
+                        intent.ok_or_else(|| {
+                            AdmissionSpaceTransitionError::missing("activation intent is missing")
+                        })?,
                     )
                     .await
                     .map_err(map_activation_error)?;
@@ -371,7 +412,11 @@ impl V3AdmissionSpaceTransition {
             }
             SameSpaceControlTransitionPhaseV3::CleanupPending => {
                 let result = SameSpaceControlTransitionResultV3::from_cleanup_pending(transition)
-                    .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
+                    .ok_or_else(|| {
+                    AdmissionSpaceTransitionError::missing(
+                        "cleanup-pending transition cannot be finalized",
+                    )
+                })?;
                 Ok(AdmissionSpaceTransitionStepV2::Finished(
                     AdmissionSpaceTransitionResultV2::SameSpaceControl(result),
                 ))
@@ -390,7 +435,9 @@ impl V3AdmissionSpaceTransition {
             .then_some(AdmissionSpaceTransitionStepV2::Advanced(
                 AdmissionSpaceTransitionV2::FreshControl(next),
             ))
-            .ok_or(AdmissionSpaceTransitionError::Inconsistent)
+            .ok_or_else(|| {
+                AdmissionSpaceTransitionError::missing("transition phase cannot advance")
+            })
     }
 
     async fn advance_fresh(
@@ -399,7 +446,9 @@ impl V3AdmissionSpaceTransition {
         intent: Option<JoinerActivationIntent>,
     ) -> Result<AdmissionSpaceTransitionStepV2, AdmissionSpaceTransitionError> {
         if !transition.validate() {
-            return Err(AdmissionSpaceTransitionError::Inconsistent);
+            return Err(AdmissionSpaceTransitionError::missing(
+                "space control transition checkpoint is invalid",
+            ));
         }
         match transition.phase {
             FreshSpaceControlTransitionPhaseV3::TargetPrepared => Self::fresh_advanced(
@@ -409,7 +458,9 @@ impl V3AdmissionSpaceTransition {
             FreshSpaceControlTransitionPhaseV3::ActivationStarted => {
                 self.continue_fresh_activation(
                     transition,
-                    intent.ok_or(AdmissionSpaceTransitionError::Inconsistent)?,
+                    intent.ok_or_else(|| {
+                        AdmissionSpaceTransitionError::missing("activation intent is missing")
+                    })?,
                 )
                 .await?;
                 Self::fresh_advanced(
@@ -424,7 +475,9 @@ impl V3AdmissionSpaceTransition {
                         &target,
                         &transition.target_access_state,
                         self.activation_intents.as_ref(),
-                        intent.ok_or(AdmissionSpaceTransitionError::Inconsistent)?,
+                        intent.ok_or_else(|| {
+                            AdmissionSpaceTransitionError::missing("activation intent is missing")
+                        })?,
                     )
                     .await
                     .map_err(map_activation_error)?;
@@ -435,7 +488,11 @@ impl V3AdmissionSpaceTransition {
             }
             FreshSpaceControlTransitionPhaseV3::CleanupPending => {
                 let result = FreshSpaceControlTransitionResultV3::from_cleanup_pending(transition)
-                    .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
+                    .ok_or_else(|| {
+                        AdmissionSpaceTransitionError::missing(
+                            "cleanup-pending transition cannot be finalized",
+                        )
+                    })?;
                 Ok(AdmissionSpaceTransitionStepV2::Finished(
                     AdmissionSpaceTransitionResultV2::FreshControl(result),
                 ))
@@ -449,7 +506,9 @@ impl V3AdmissionSpaceTransition {
         intent: Option<JoinerActivationIntent>,
     ) -> Result<AdmissionSpaceTransitionStepV2, AdmissionSpaceTransitionError> {
         if !transition.validate() {
-            return Err(AdmissionSpaceTransitionError::Inconsistent);
+            return Err(AdmissionSpaceTransitionError::missing(
+                "space control transition checkpoint is invalid",
+            ));
         }
         match transition.phase {
             CrossSpaceControlTransitionPhaseV3::TargetPrepared => Self::advanced(
@@ -459,7 +518,9 @@ impl V3AdmissionSpaceTransition {
             CrossSpaceControlTransitionPhaseV3::ActivationStarted => {
                 self.continue_activation(
                     transition,
-                    intent.ok_or(AdmissionSpaceTransitionError::Inconsistent)?,
+                    intent.ok_or_else(|| {
+                        AdmissionSpaceTransitionError::missing("activation intent is missing")
+                    })?,
                 )
                 .await?;
                 Self::advanced(
@@ -475,7 +536,9 @@ impl V3AdmissionSpaceTransition {
                         &target,
                         &transition.target_access_state,
                         self.activation_intents.as_ref(),
-                        intent.ok_or(AdmissionSpaceTransitionError::Inconsistent)?,
+                        intent.ok_or_else(|| {
+                            AdmissionSpaceTransitionError::missing("activation intent is missing")
+                        })?,
                     )
                     .await
                     .map_err(map_activation_error)?;
@@ -490,7 +553,11 @@ impl V3AdmissionSpaceTransition {
             }
             CrossSpaceControlTransitionPhaseV3::CleanupPending => {
                 let result = CrossSpaceControlTransitionResultV3::from_cleanup_pending(transition)
-                    .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
+                    .ok_or_else(|| {
+                        AdmissionSpaceTransitionError::missing(
+                            "cleanup-pending transition cannot be finalized",
+                        )
+                    })?;
                 Ok(AdmissionSpaceTransitionStepV2::Finished(
                     AdmissionSpaceTransitionResultV2::CrossSpaceControl(result),
                 ))
@@ -513,9 +580,11 @@ impl AdmissionSpaceTransitionPort for V3AdmissionSpaceTransition {
         let target_control_generation =
             self.generation(input.attempt_id.as_bytes(), b"target-control");
         if active.is_none() {
-            let profile_data_generation = self
-                .fresh_profile_data_generation
-                .ok_or(AdmissionSpaceTransitionError::Unavailable)?;
+            let profile_data_generation = self.fresh_profile_data_generation.ok_or_else(|| {
+                AdmissionSpaceTransitionError::unavailable(anyhow::anyhow!(
+                    "fresh profile data generation is not configured"
+                ))
+            })?;
             let target_keyslot_generation =
                 self.generation(input.attempt_id.as_bytes(), b"target-keyslot");
             let target_layout = ActiveRuntimeLayout::new(
@@ -523,9 +592,13 @@ impl AdmissionSpaceTransitionPort for V3AdmissionSpaceTransition {
                 profile_data_generation,
                 target_control_generation,
             )
-            .map_err(|_| AdmissionSpaceTransitionError::Inconsistent)?;
+            .map_err(AdmissionSpaceTransitionError::inconsistent)?;
             let target = ActiveRuntimeManifestV3::new(target_layout, target_keyslot_generation)
-                .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
+                .ok_or_else(|| {
+                    AdmissionSpaceTransitionError::missing(
+                        "target runtime manifest cannot be reconstructed",
+                    )
+                })?;
             let prepared = self
                 .control_generations
                 .prepare_admission(input, &target)
@@ -548,9 +621,15 @@ impl AdmissionSpaceTransitionPort for V3AdmissionSpaceTransition {
         let source = match active {
             Some(ActiveRuntimeManifest::V3(manifest)) => manifest,
             Some(ActiveRuntimeManifest::V2(_)) => {
-                return Err(AdmissionSpaceTransitionError::Unavailable)
+                return Err(AdmissionSpaceTransitionError::unavailable(anyhow::anyhow!(
+                    "legacy space manifest is not usable for admission"
+                )))
             }
-            None => return Err(AdmissionSpaceTransitionError::Inconsistent),
+            None => {
+                return Err(AdmissionSpaceTransitionError::missing(
+                    "active runtime manifest is missing after preparation",
+                ))
+            }
         };
         if source.layout().space_id().as_ref() == input.target_space_id {
             let target_layout = ActiveRuntimeLayout::new(
@@ -558,9 +637,13 @@ impl AdmissionSpaceTransitionPort for V3AdmissionSpaceTransition {
                 *source.layout().profile_data_generation(),
                 target_control_generation,
             )
-            .map_err(|_| AdmissionSpaceTransitionError::Inconsistent)?;
+            .map_err(AdmissionSpaceTransitionError::inconsistent)?;
             let target = ActiveRuntimeManifestV3::new(target_layout, *source.keyslot_generation())
-                .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
+                .ok_or_else(|| {
+                    AdmissionSpaceTransitionError::missing(
+                        "target runtime manifest cannot be reconstructed",
+                    )
+                })?;
             let prepared = self
                 .control_generations
                 .prepare_same_space_admission(input, &source, &target)
@@ -587,9 +670,13 @@ impl AdmissionSpaceTransitionPort for V3AdmissionSpaceTransition {
             *source.layout().profile_data_generation(),
             target_control_generation,
         )
-        .map_err(|_| AdmissionSpaceTransitionError::Inconsistent)?;
+        .map_err(AdmissionSpaceTransitionError::inconsistent)?;
         let target = ActiveRuntimeManifestV3::new(target_layout, target_keyslot_generation)
-            .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
+            .ok_or_else(|| {
+                AdmissionSpaceTransitionError::missing(
+                    "target runtime manifest cannot be reconstructed",
+                )
+            })?;
         let prepared = self
             .control_generations
             .prepare_admission(input, &target)
@@ -625,7 +712,9 @@ impl AdmissionSpaceTransitionPort for V3AdmissionSpaceTransition {
             return self.advance_fresh(transition, None).await;
         }
         let AdmissionSpaceTransitionV2::CrossSpaceControl(transition) = transition else {
-            return Err(AdmissionSpaceTransitionError::Inconsistent);
+            return Err(AdmissionSpaceTransitionError::missing(
+                "space control transition kind is not supported",
+            ));
         };
         self.advance_cross_space(transition, None).await
     }
@@ -636,7 +725,9 @@ impl AdmissionSpaceTransitionPort for V3AdmissionSpaceTransition {
         intent: JoinerActivationIntent,
     ) -> Result<AdmissionSpaceTransitionStepV2, AdmissionSpaceTransitionError> {
         if transition.attempt_id() != intent.admission_id() {
-            return Err(AdmissionSpaceTransitionError::Inconsistent);
+            return Err(AdmissionSpaceTransitionError::missing(
+                "activation intent does not belong to the transition attempt",
+            ));
         }
         if let AdmissionSpaceTransitionV2::SameSpaceControl(transition) = transition {
             return self.advance_same_space(transition, Some(intent)).await;
@@ -645,7 +736,9 @@ impl AdmissionSpaceTransitionPort for V3AdmissionSpaceTransition {
             return self.advance_fresh(transition, Some(intent)).await;
         }
         let AdmissionSpaceTransitionV2::CrossSpaceControl(transition) = transition else {
-            return Err(AdmissionSpaceTransitionError::Inconsistent);
+            return Err(AdmissionSpaceTransitionError::missing(
+                "space control transition kind is not supported",
+            ));
         };
         self.advance_cross_space(transition, Some(intent)).await
     }
@@ -658,7 +751,9 @@ impl AdmissionSpaceTransitionPort for V3AdmissionSpaceTransition {
             if transition.phase != FreshSpaceControlTransitionPhaseV3::TargetPrepared
                 || !transition.validate()
             {
-                return Err(AdmissionSpaceTransitionError::Inconsistent);
+                return Err(AdmissionSpaceTransitionError::missing(
+                    "space control transition is not discardable before activation",
+                ));
             }
             let target = Self::fresh_target_manifest(transition)?;
             let proof = self
@@ -676,7 +771,9 @@ impl AdmissionSpaceTransitionPort for V3AdmissionSpaceTransition {
             if transition.phase != SameSpaceControlTransitionPhaseV3::TargetPrepared
                 || !transition.validate()
             {
-                return Err(AdmissionSpaceTransitionError::Inconsistent);
+                return Err(AdmissionSpaceTransitionError::missing(
+                    "space control transition is not discardable before activation",
+                ));
             }
             let source = Self::same_space_source_manifest(transition)?;
             let target = Self::same_space_target_manifest(transition)?;
@@ -692,12 +789,16 @@ impl AdmissionSpaceTransitionPort for V3AdmissionSpaceTransition {
                 .map_err(map_activation_error);
         }
         let AdmissionSpaceTransitionV2::CrossSpaceControl(transition) = transition else {
-            return Err(AdmissionSpaceTransitionError::Inconsistent);
+            return Err(AdmissionSpaceTransitionError::missing(
+                "space control transition kind is not supported",
+            ));
         };
         if transition.phase != CrossSpaceControlTransitionPhaseV3::TargetPrepared
             || !transition.validate()
         {
-            return Err(AdmissionSpaceTransitionError::Inconsistent);
+            return Err(AdmissionSpaceTransitionError::missing(
+                "space control transition is not discardable before activation",
+            ));
         }
         let source = Self::source_manifest(transition)?;
         let proof = self.proof(transition).await?;
@@ -750,7 +851,9 @@ impl AdmissionSpaceTransitionPort for V3AdmissionSpaceTransition {
                     .await
                     .map_err(map_activation_error)
             }
-            _ => Err(AdmissionSpaceTransitionError::Inconsistent),
+            _ => Err(AdmissionSpaceTransitionError::missing(
+                "legacy space control transition is not supported",
+            )),
         }
     }
 }
@@ -759,12 +862,12 @@ fn map_manifest_error(
     error: super::ActiveSpaceGenerationManifestStoreError,
 ) -> AdmissionSpaceTransitionError {
     match error {
-        super::ActiveSpaceGenerationManifestStoreError::Storage => {
-            AdmissionSpaceTransitionError::Storage
+        super::ActiveSpaceGenerationManifestStoreError::Storage { .. } => {
+            AdmissionSpaceTransitionError::storage(error)
         }
         super::ActiveSpaceGenerationManifestStoreError::Corrupt
         | super::ActiveSpaceGenerationManifestStoreError::UnsupportedVersion => {
-            AdmissionSpaceTransitionError::Inconsistent
+            AdmissionSpaceTransitionError::inconsistent(error)
         }
     }
 }
@@ -773,23 +876,31 @@ fn map_control_generation_error(
     error: SpaceControlGenerationError,
 ) -> AdmissionSpaceTransitionError {
     match error {
-        SpaceControlGenerationError::Busy { .. } => AdmissionSpaceTransitionError::Unavailable,
-        SpaceControlGenerationError::Inconsistent { .. } => {
-            AdmissionSpaceTransitionError::Inconsistent
+        SpaceControlGenerationError::Busy { .. } => {
+            AdmissionSpaceTransitionError::unavailable(error)
         }
-        SpaceControlGenerationError::Storage { .. } => AdmissionSpaceTransitionError::Storage,
+        SpaceControlGenerationError::Inconsistent { .. } => {
+            AdmissionSpaceTransitionError::inconsistent(error)
+        }
+        SpaceControlGenerationError::Storage { .. } => {
+            AdmissionSpaceTransitionError::storage(error)
+        }
     }
 }
 
 fn map_activation_error(error: SpaceTransitionActivationError) -> AdmissionSpaceTransitionError {
     match error {
-        SpaceTransitionActivationError::Busy { .. } => AdmissionSpaceTransitionError::Unavailable,
-        SpaceTransitionActivationError::Inconsistent { .. } => {
-            AdmissionSpaceTransitionError::Inconsistent
+        SpaceTransitionActivationError::Busy { .. } => {
+            AdmissionSpaceTransitionError::unavailable(error)
         }
-        SpaceTransitionActivationError::Storage { .. } => AdmissionSpaceTransitionError::Storage,
+        SpaceTransitionActivationError::Inconsistent { .. } => {
+            AdmissionSpaceTransitionError::inconsistent(error)
+        }
+        SpaceTransitionActivationError::Storage { .. } => {
+            AdmissionSpaceTransitionError::storage(error)
+        }
         SpaceTransitionActivationError::Recovery { .. } => {
-            AdmissionSpaceTransitionError::RecoveryRequired
+            AdmissionSpaceTransitionError::recovery_required(error)
         }
     }
 }

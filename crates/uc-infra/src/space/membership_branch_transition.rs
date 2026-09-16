@@ -92,7 +92,7 @@ fn map_manifest_error(
     error: ActiveSpaceGenerationManifestStoreError,
 ) -> PrepareMembershipBranchTransitionError {
     match error {
-        ActiveSpaceGenerationManifestStoreError::Storage => {
+        ActiveSpaceGenerationManifestStoreError::Storage { .. } => {
             PrepareMembershipBranchTransitionError::Unavailable {
                 source: anyhow::Error::new(error),
             }

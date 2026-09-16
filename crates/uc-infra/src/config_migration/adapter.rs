@@ -317,10 +317,12 @@ fn map_archive_err(err: ArchiveError) -> ConfigMigrationError {
 
 fn map_db_snapshot_err(err: DbSnapshotError) -> ConfigMigrationError {
     match err {
-        DbSnapshotError::Connection | DbSnapshotError::Query => ConfigMigrationError::Internal {
-            details: "database snapshot failed".to_string(),
-        },
-        DbSnapshotError::Io => ConfigMigrationError::Io {
+        DbSnapshotError::Connection { .. } | DbSnapshotError::Query { .. } => {
+            ConfigMigrationError::Internal {
+                details: "database snapshot failed".to_string(),
+            }
+        }
+        DbSnapshotError::Io { .. } => ConfigMigrationError::Io {
             details: "database snapshot file io failed".to_string(),
         },
     }

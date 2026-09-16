@@ -668,7 +668,9 @@ fn map_manifest_error(
     source: ActiveSpaceGenerationManifestStoreError,
 ) -> SpaceTransitionActivationError {
     match source {
-        ActiveSpaceGenerationManifestStoreError::Storage => storage(anyhow::Error::new(source)),
+        ActiveSpaceGenerationManifestStoreError::Storage { .. } => {
+            storage(anyhow::Error::new(source))
+        }
         ActiveSpaceGenerationManifestStoreError::Corrupt
         | ActiveSpaceGenerationManifestStoreError::UnsupportedVersion => {
             inconsistent(anyhow::Error::new(source))
