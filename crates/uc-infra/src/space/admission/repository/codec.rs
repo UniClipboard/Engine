@@ -71,8 +71,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                 self.clear_read_cache();
                 return self.load_v3_state_on(conn, metadata);
             }
-            let legacy = self.open_legacy_state(&row.encrypted_payload)?;
-            conn.transaction::<_, SpaceAdmissionStateStoreError, _>(|conn| {
+            conn.immediate_transaction::<_, SpaceAdmissionStateStoreError, _>(|conn| {
                 let current =
                     load_repository_row(conn)?.ok_or(SpaceAdmissionStateStoreError::Conflict)?;
                 if let Some(metadata) = self.try_open_metadata(&current.encrypted_payload)? {
@@ -80,9 +79,6 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                     return self.load_v3_state_on(conn, metadata);
                 }
                 let current_legacy = self.open_legacy_state(&current.encrypted_payload)?;
-                if current_legacy != legacy {
-                    return Err(SpaceAdmissionStateStoreError::Conflict);
-                }
                 self.persist_v3_state_on(conn, &current_legacy)?;
                 self.clear_read_cache();
                 Ok(current_legacy)

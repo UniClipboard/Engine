@@ -170,6 +170,8 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         conn: &mut SqliteConnection,
         now_ms: i64,
     ) -> Result<LoadedRecoveryIndex, SpaceAdmissionStateStoreError> {
+        // Legacy migration must acquire write eligibility before the recovery read transaction.
+        self.load_metadata_on(conn)?;
         conn.transaction(|conn| {
             if self.load_metadata_on(conn)?.is_none() {
                 return Ok(LoadedRecoveryIndex {

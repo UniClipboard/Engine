@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -42,6 +42,69 @@ impl SecureStoragePort for MemoryStorage {
 
     fn delete(&self, key: &str) -> Result<(), SecureStorageError> {
         self.0.lock().unwrap().remove(key);
+        Ok(())
+    }
+}
+
+struct ConcurrentWriterStorage {
+    values: Mutex<HashMap<String, Vec<u8>>>,
+    replacement_payload: Mutex<Option<Vec<u8>>>,
+    reads: AtomicUsize,
+    interference_attempted: AtomicBool,
+    database: PathBuf,
+}
+
+impl ConcurrentWriterStorage {
+    fn new(database: PathBuf) -> Self {
+        Self {
+            values: Mutex::new(HashMap::new()),
+            replacement_payload: Mutex::new(None),
+            reads: AtomicUsize::new(0),
+            interference_attempted: AtomicBool::new(false),
+            database,
+        }
+    }
+
+    fn replace_payload_on_third_read(&self, payload: Vec<u8>) {
+        *self.replacement_payload.lock().unwrap() = Some(payload);
+    }
+
+    fn reset_reads(&self) {
+        self.reads.store(0, Ordering::SeqCst);
+    }
+}
+
+impl SecureStoragePort for ConcurrentWriterStorage {
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
+        let read = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+        if read == 3 {
+            self.interference_attempted.store(true, Ordering::SeqCst);
+            let mut connection =
+                SqliteConnection::establish(self.database.to_str().ok_or_else(|| {
+                    SecureStorageError::Other("test database path is invalid".to_owned())
+                })?)
+                .map_err(|error| SecureStorageError::Other(error.to_string()))?;
+            if let Some(payload) = self.replacement_payload.lock().unwrap().clone() {
+                let _ = sql_query(
+                    "UPDATE admission_repository_state SET encrypted_payload = ? WHERE singleton_id = 1",
+                )
+                .bind::<Binary, _>(payload)
+                .execute(&mut connection);
+            }
+        }
+        Ok(self.values.lock().unwrap().get(key).cloned())
+    }
+
+    fn set(&self, key: &str, value: &[u8]) -> Result<(), SecureStorageError> {
+        self.values
+            .lock()
+            .unwrap()
+            .insert(key.to_owned(), value.to_vec());
+        Ok(())
+    }
+
+    fn delete(&self, key: &str) -> Result<(), SecureStorageError> {
+        self.values.lock().unwrap().remove(key);
         Ok(())
     }
 }
@@ -144,6 +207,50 @@ async fn activation_query_migrates_legacy_state_and_ignores_unrelated_record_pay
         .await
         .unwrap();
     assert!(loaded.is_none());
+}
+
+#[tokio::test]
+async fn concurrent_database_write_does_not_abort_legacy_activation_query() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("profile.sqlite");
+    let pool = init_db_pool(database.to_str().unwrap()).unwrap();
+    let mut connection = SqliteConnection::establish(database.to_str().unwrap()).unwrap();
+    let storage = Arc::new(ConcurrentWriterStorage::new(database));
+    let keys = Arc::new(AdmissionKeyManager::new(storage.clone(), [0x31; 16]));
+    let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+        directory.path().join("vault"),
+        keys.clone(),
+    ));
+    let repository = SqliteSpaceAdmissionState::new(
+        DieselSqliteExecutor::new(pool),
+        keys.clone(),
+        manifests,
+        Arc::new(UnusedMembership),
+    );
+    let state = PersistedSpaceAdmissionRepositoryV2::fresh([0x31; 16]);
+    let bytes = postcard::to_stdvec(&state).unwrap();
+    let encrypted = keys
+        .seal_profile_payload(b"space-admission-repository-v1", &bytes)
+        .unwrap();
+    let mut replacement_state = state.clone();
+    replacement_state.next_local_join_ordinal = 1;
+    let replacement_bytes = postcard::to_stdvec(&replacement_state).unwrap();
+    let replacement = keys
+        .seal_profile_payload(b"space-admission-repository-v1", &replacement_bytes)
+        .unwrap();
+    sql_query(
+        "INSERT INTO admission_repository_state (singleton_id, encrypted_payload) VALUES (1, ?)",
+    )
+    .bind::<Binary, _>(encrypted)
+    .execute(&mut connection)
+    .unwrap();
+    storage.replace_payload_on_third_read(replacement);
+    storage.reset_reads();
+
+    let loaded = JoinerActivationStatePort::load(&repository).await;
+
+    assert!(storage.interference_attempted.load(Ordering::SeqCst));
+    assert!(loaded.is_ok());
 }
 
 #[test]
