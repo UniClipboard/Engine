@@ -22,6 +22,7 @@ use crate::security::profile_backup_archive::{
 };
 use crate::security::{ProfileArchiveReceipt, ProfileBackupArchive, ProfileBackupSource};
 
+use super::diagnostics::{record_backup_failure, with_backup_action};
 use super::inventory::{excluded_paths, has_profile};
 use super::record::{
     publish_file_record, read_file_record, read_file_record_path, read_record_path,
@@ -40,6 +41,23 @@ pub struct ProfileUpgradeBackupStore {
 }
 
 impl ProfileUpgradeBackupStore {
+    fn record_result<T>(
+        action: &'static str,
+        result: Result<T, ProfileUpgradeBackupError>,
+    ) -> Result<T, ProfileUpgradeBackupError> {
+        if let Err(error) = &result {
+            record_backup_failure(action, error);
+        }
+        result
+    }
+
+    pub(super) fn record_action<T>(
+        action: &'static str,
+        result: Result<T, ProfileUpgradeBackupError>,
+    ) -> Result<T, ProfileUpgradeBackupError> {
+        result.map_err(|error| with_backup_action(action, error))
+    }
+
     pub fn new(
         paths: AppPaths,
         profile: String,
@@ -105,25 +123,32 @@ impl ProfileUpgradeBackupPort for ProfileUpgradeBackupStore {
     }
 
     fn read_source(&self) -> Result<ProfileUpgradeSource, ProfileUpgradeBackupError> {
-        if !has_profile(&self.paths)? {
-            return Ok(ProfileUpgradeSource {
-                has_data: false,
-                source_product: None,
-                source_engine: None,
-            });
-        }
-        let source = self.source()?;
-        Ok(ProfileUpgradeSource {
-            has_data: true,
-            source_product: source.product_version,
-            source_engine: source.engine_version,
-        })
+        Self::record_result(
+            "read_source",
+            (|| {
+                if !has_profile(&self.paths)? {
+                    return Ok(ProfileUpgradeSource {
+                        has_data: false,
+                        source_product: None,
+                        source_engine: None,
+                    });
+                }
+                let source = self.source()?;
+                Ok(ProfileUpgradeSource {
+                    has_data: true,
+                    source_product: source.product_version,
+                    source_engine: source.engine_version,
+                })
+            })(),
+        )
     }
 
     fn read_prepared_target(
         &self,
     ) -> Result<Option<ProfileUpgradeVersions>, ProfileUpgradeBackupError> {
-        Ok(read_file_record(&self.directory())?.map(|record| record.target()))
+        let result =
+            read_file_record(&self.directory()).map(|record| record.map(|record| record.target()));
+        Self::record_result("read_prepared_target", result)
     }
 
     async fn capture_verified(
@@ -132,9 +157,11 @@ impl ProfileUpgradeBackupPort for ProfileUpgradeBackupStore {
     ) -> Result<(), ProfileUpgradeBackupError> {
         let store = self.clone();
         let target = target.clone();
-        tokio::task::spawn_blocking(move || store.capture(&target))
-            .await
-            .map_err(backup_error)?
+        let result = match tokio::task::spawn_blocking(move || store.capture(&target)).await {
+            Ok(result) => result,
+            Err(error) => Err(backup_error(error)),
+        };
+        Self::record_result("capture_profile", result)
     }
 
     async fn verify_prepared(
@@ -143,9 +170,11 @@ impl ProfileUpgradeBackupPort for ProfileUpgradeBackupStore {
     ) -> Result<(), ProfileUpgradeBackupError> {
         let store = self.clone();
         let target = target.clone();
-        tokio::task::spawn_blocking(move || store.verify(&target))
-            .await
-            .map_err(backup_error)?
+        let result = match tokio::task::spawn_blocking(move || store.verify(&target)).await {
+            Ok(result) => result,
+            Err(error) => Err(backup_error(error)),
+        };
+        Self::record_result("verify_profile", result)
     }
 
     async fn preserve_security_materials(
@@ -154,9 +183,12 @@ impl ProfileUpgradeBackupPort for ProfileUpgradeBackupStore {
     ) -> Result<(), ProfileUpgradeBackupError> {
         let store = self.clone();
         let target = target.clone();
-        tokio::task::spawn_blocking(move || store.preserve_secrets(&target))
-            .await
-            .map_err(backup_error)?
+        let result =
+            match tokio::task::spawn_blocking(move || store.preserve_secrets(&target)).await {
+                Ok(result) => result,
+                Err(error) => Err(backup_error(error)),
+            };
+        Self::record_result("preserve_security_materials", result)
     }
 }
 
@@ -197,42 +229,59 @@ impl ProfileUpgradeBackupStore {
     }
 
     fn capture(&self, target: &ProfileUpgradeVersions) -> Result<(), ProfileUpgradeBackupError> {
-        let _lease = self.lease()?;
+        let _lease = Self::record_action("acquire_lease", self.lease())?;
         // 取消后的旧任务可能刚完成发布；持锁重新读取，不覆盖它保留的原始资料。
-        if read_file_record(&self.directory())?.is_some_and(|record| &record.target() == target) {
-            return self.verify(target);
+        if Self::record_action("read_prepared_record", read_file_record(&self.directory()))?
+            .is_some_and(|record| &record.target() == target)
+        {
+            return Self::record_action("verify_prepared_profile", self.verify(target));
         }
-        let root = resolve_source_root(&self.paths.app_data_root_dir).map_err(backup_error)?;
+        let root = Self::record_action(
+            "resolve_profile_root",
+            resolve_source_root(&self.paths.app_data_root_dir).map_err(backup_error),
+        )?;
         let directory = self.directory();
         let archive = ProfileBackupArchive::new(directory.clone());
-        let source = self.source()?;
-        let receipt = archive
-            .capture_selected(&root, source.clone(), &excluded_paths(&self.paths, &root))
-            .map_err(backup_error)?;
+        let source = Self::record_action("read_source_versions", self.source())?;
+        let receipt = Self::record_action(
+            "capture_profile_files",
+            archive
+                .capture_selected(&root, source.clone(), &excluded_paths(&self.paths, &root))
+                .map_err(backup_error),
+        )?;
         // 待处理内容可能是唯一副本，即使位于独立缓存根也必须随同保留。
         let spool_receipt = match fs::symlink_metadata(&self.paths.spool_dir) {
-            Ok(_) => Some(
+            Ok(_) => Some(Self::record_action(
+                "capture_pending_files",
                 archive
                     .capture(&self.paths.spool_dir, source.clone())
-                    .map_err(backup_error)?,
-            ),
+                    .map_err(backup_error),
+            )?),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(backup_error(error)),
+            Err(error) => {
+                return Self::record_action("inspect_pending_files", Err(backup_error(error)))
+            }
         };
-        if self.source()? != source {
-            return Err(backup_error(io::Error::other(
-                "profile backup source changed",
-            )));
+        if Self::record_action("confirm_source_versions", self.source())? != source {
+            return Self::record_action(
+                "confirm_source_versions",
+                Err(backup_error(io::Error::other(
+                    "profile backup source changed",
+                ))),
+            );
         }
-        publish_file_record(
-            &directory,
-            &FileBackupRecord {
-                schema: 3,
-                target_product: target.product.clone(),
-                target_engine: target.engine.clone(),
-                receipt,
-                spool_receipt,
-            },
+        Self::record_action(
+            "publish_file_record",
+            publish_file_record(
+                &directory,
+                &FileBackupRecord {
+                    schema: 3,
+                    target_product: target.product.clone(),
+                    target_engine: target.engine.clone(),
+                    receipt,
+                    spool_receipt,
+                },
+            ),
         )
     }
 
@@ -353,22 +402,40 @@ impl ProfileUpgradeBackupStore {
         &self,
         target: &ProfileUpgradeVersions,
     ) -> Result<(), ProfileUpgradeBackupError> {
-        let record = read_file_record(&self.directory())?
-            .ok_or_else(|| backup_error(io::Error::other("profile upgrade backup is missing")))?;
+        let record = Self::record_action(
+            "read_prepared_record",
+            read_file_record(&self.directory()).and_then(|record| {
+                record.ok_or_else(|| {
+                    backup_error(io::Error::other("profile upgrade backup is missing"))
+                })
+            }),
+        )?;
         if &record.target() != target {
-            return Err(backup_error(io::Error::other(
-                "profile upgrade backup target changed",
-            )));
+            return Self::record_action(
+                "validate_backup_target",
+                Err(backup_error(io::Error::other(
+                    "profile upgrade backup target changed",
+                ))),
+            );
         }
         let archive = ProfileBackupArchive::new(self.directory());
-        archive.verify(&record.receipt).map_err(backup_error)?;
+        Self::record_action(
+            "verify_profile_archive",
+            archive.verify(&record.receipt).map_err(backup_error),
+        )?;
         if let Some(receipt) = &record.spool_receipt {
             if receipt.source != record.receipt.source {
-                return Err(backup_error(io::Error::other(
-                    "profile backup sources do not match",
-                )));
+                return Self::record_action(
+                    "validate_pending_archive_source",
+                    Err(backup_error(io::Error::other(
+                        "profile backup sources do not match",
+                    ))),
+                );
             }
-            archive.verify(receipt).map_err(backup_error)?;
+            Self::record_action(
+                "verify_pending_archive",
+                archive.verify(receipt).map_err(backup_error),
+            )?;
         }
         Ok(())
     }

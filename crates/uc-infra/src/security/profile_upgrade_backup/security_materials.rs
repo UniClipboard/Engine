@@ -14,34 +14,56 @@ impl ProfileUpgradeBackupStore {
         &self,
         target: &ProfileUpgradeVersions,
     ) -> Result<(), ProfileUpgradeBackupError> {
-        let _lease = self.lease()?;
-        self.verify(target)?;
-        let files = read_file_record(&self.directory())?
-            .ok_or_else(|| backup_error(io::Error::other("file backup record is missing")))?;
-        if let Some(existing) = read_record(&self.directory(), self.secure_storage.as_ref())? {
+        let _lease = Self::record_action("acquire_lease", self.lease())?;
+        Self::record_action("verify_prepared_profile", self.verify(target))?;
+        let files = Self::record_action(
+            "read_prepared_record",
+            read_file_record(&self.directory()).and_then(|record| {
+                record
+                    .ok_or_else(|| backup_error(io::Error::other("file backup record is missing")))
+            }),
+        )?;
+        if let Some(existing) = Self::record_action(
+            "read_security_record",
+            read_record(&self.directory(), self.secure_storage.as_ref()),
+        )? {
             if existing.files.receipt == files.receipt
                 && existing.files.spool_receipt == files.spool_receipt
                 && existing.files.target() == files.target()
             {
-                self.prune_locked()?;
+                Self::record_action("prune_backups", self.prune_locked())?;
                 return Ok(());
             }
         }
         // 只给未变化的文件现场补充安全材料；不能将新资料的密钥配给旧文件。
-        self.verify_source_files(&files)?;
-        let secrets = read_secrets(&self.paths, &self.profile, self.secure_storage.as_ref())?;
-        self.verify_source_files(&files)?;
-        if secrets != read_secrets(&self.paths, &self.profile, self.secure_storage.as_ref())? {
-            return Err(backup_error(io::Error::other(
-                "profile backup secrets changed",
-            )));
-        }
-        publish_record(
-            &self.directory(),
-            self.secure_storage.as_ref(),
-            &SecurityBackupRecord { files, secrets },
+        Self::record_action("verify_source_files", self.verify_source_files(&files))?;
+        let secrets = Self::record_action(
+            "read_security_materials",
+            read_secrets(&self.paths, &self.profile, self.secure_storage.as_ref()),
         )?;
-        self.prune_locked()
+        Self::record_action("reverify_source_files", self.verify_source_files(&files))?;
+        if secrets
+            != Self::record_action(
+                "confirm_security_materials",
+                read_secrets(&self.paths, &self.profile, self.secure_storage.as_ref()),
+            )?
+        {
+            return Self::record_action(
+                "confirm_security_materials",
+                Err(backup_error(io::Error::other(
+                    "profile backup secrets changed",
+                ))),
+            );
+        }
+        Self::record_action(
+            "publish_security_record",
+            publish_record(
+                &self.directory(),
+                self.secure_storage.as_ref(),
+                &SecurityBackupRecord { files, secrets },
+            ),
+        )?;
+        Self::record_action("prune_backups", self.prune_locked())
     }
 
     fn verify_source_files(
