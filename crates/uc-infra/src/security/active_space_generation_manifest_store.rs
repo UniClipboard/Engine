@@ -268,11 +268,36 @@ impl Drop for EncryptionPassphraseChangeJournal {
 #[derive(Debug, thiserror::Error)]
 pub enum ActiveSpaceGenerationManifestStoreError {
     #[error("active space generation manifest storage is unavailable")]
-    Storage,
+    Storage {
+        #[source]
+        source: anyhow::Error,
+    },
     #[error("active space generation manifest is corrupt")]
     Corrupt,
     #[error("active space generation manifest version is not active yet")]
     UnsupportedVersion,
+}
+
+impl ActiveSpaceGenerationManifestStoreError {
+    /// Keep the capability failure (io, secure storage, ...) that made the
+    /// manifest unavailable, so callers can classify the real reason instead of
+    /// only learning that storage failed.
+    fn storage<E>(source: E) -> Self
+    where
+        E: Into<anyhow::Error>,
+    {
+        Self::Storage {
+            source: source.into(),
+        }
+    }
+
+    /// The configured manifest path has no parent directory, so its containing
+    /// directory can neither be created nor synced.
+    fn missing_parent() -> Self {
+        Self::storage(anyhow::anyhow!(
+            "space generation manifest path has no parent directory"
+        ))
+    }
 }
 
 pub struct ActiveSpaceGenerationManifestStore {
@@ -301,12 +326,13 @@ impl ActiveSpaceGenerationManifestStore {
         &self,
     ) -> Result<Option<EncryptionPassphraseChangeJournal>, ActiveSpaceGenerationManifestStoreError>
     {
-        let ciphertext =
-            match tokio::fs::read(&self.encryption_passphrase_change_journal_path).await {
-                Ok(bytes) => bytes,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
-            };
+        let ciphertext = match tokio::fs::read(&self.encryption_passphrase_change_journal_path)
+            .await
+        {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(ActiveSpaceGenerationManifestStoreError::storage(source)),
+        };
         let plaintext = zeroize::Zeroizing::new(
             self.keys
                 .open_profile_payload(ENCRYPTION_PASSPHRASE_CHANGE_JOURNAL_PURPOSE, &ciphertext)
@@ -331,10 +357,10 @@ impl ActiveSpaceGenerationManifestStore {
         let parent = self
             .encryption_passphrase_change_journal_path
             .parent()
-            .ok_or(ActiveSpaceGenerationManifestStoreError::Storage)?;
+            .ok_or_else(ActiveSpaceGenerationManifestStoreError::missing_parent)?;
         tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::storage)?;
         let plaintext = zeroize::Zeroizing::new(
             serde_json::to_vec(journal)
                 .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?,
@@ -348,17 +374,17 @@ impl ActiveSpaceGenerationManifestStore {
             .with_extension("tmp");
         let mut file = tokio::fs::File::create(&temporary)
             .await
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::storage)?;
         file.write_all(&ciphertext)
             .await
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::storage)?;
         file.sync_all()
             .await
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::storage)?;
         drop(file);
         replace_file_atomically(&temporary, &self.encryption_passphrase_change_journal_path)
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
-        sync_parent_directory(parent).map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)
+            .map_err(ActiveSpaceGenerationManifestStoreError::storage)?;
+        sync_parent_directory(parent).map_err(ActiveSpaceGenerationManifestStoreError::storage)
     }
 
     pub(crate) async fn clear_encryption_passphrase_change_journal(
@@ -370,12 +396,12 @@ impl ActiveSpaceGenerationManifestStore {
                 let parent = self
                     .encryption_passphrase_change_journal_path
                     .parent()
-                    .ok_or(ActiveSpaceGenerationManifestStoreError::Storage)?;
+                    .ok_or_else(ActiveSpaceGenerationManifestStoreError::missing_parent)?;
                 sync_parent_directory(parent)
-                    .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)
+                    .map_err(ActiveSpaceGenerationManifestStoreError::storage)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(_) => Err(ActiveSpaceGenerationManifestStoreError::Storage),
+            Err(source) => Err(ActiveSpaceGenerationManifestStoreError::storage(source)),
         }
     }
 
@@ -386,7 +412,7 @@ impl ActiveSpaceGenerationManifestStore {
         let ciphertext = match tokio::fs::read(&self.path).await {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
+            Err(source) => return Err(ActiveSpaceGenerationManifestStoreError::storage(source)),
         };
         self.decode(&ciphertext).map(Some)
     }
@@ -398,7 +424,7 @@ impl ActiveSpaceGenerationManifestStore {
         let ciphertext = match tokio::fs::read(&self.path).await {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
+            Err(source) => return Err(ActiveSpaceGenerationManifestStoreError::storage(source)),
         };
         self.decode_runtime(&ciphertext).map(Some)
     }
@@ -410,7 +436,7 @@ impl ActiveSpaceGenerationManifestStore {
         let ciphertext = match std::fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
+            Err(source) => return Err(ActiveSpaceGenerationManifestStoreError::storage(source)),
         };
         self.decode(&ciphertext).map(Some)
     }
@@ -422,7 +448,7 @@ impl ActiveSpaceGenerationManifestStore {
         let ciphertext = match std::fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
+            Err(source) => return Err(ActiveSpaceGenerationManifestStoreError::storage(source)),
         };
         self.decode_runtime(&ciphertext).map(Some)
     }
@@ -434,7 +460,7 @@ impl ActiveSpaceGenerationManifestStore {
         let ciphertext = match std::fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
+            Err(source) => return Err(ActiveSpaceGenerationManifestStoreError::storage(source)),
         };
         let plaintext = self.open_manifest(&ciphertext)?;
         let format_version = manifest_format_version(&plaintext)?;
@@ -512,7 +538,7 @@ impl ActiveSpaceGenerationManifestStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(V3ManifestPromotionOutcome::SourceChanged);
             }
-            Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
+            Err(source) => return Err(ActiveSpaceGenerationManifestStoreError::storage(source)),
         };
         let plaintext = self.open_manifest(&ciphertext)?;
         match manifest_format_version(&plaintext)? {
@@ -566,7 +592,7 @@ impl ActiveSpaceGenerationManifestStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(V3ManifestPromotionOutcome::SourceChanged);
             }
-            Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
+            Err(source) => return Err(ActiveSpaceGenerationManifestStoreError::storage(source)),
         };
         let plaintext = self.open_manifest(&ciphertext)?;
         if manifest_format_version(&plaintext)? != ACTIVE_RUNTIME_MANIFEST_FORMAT_V3 {
@@ -608,7 +634,7 @@ impl ActiveSpaceGenerationManifestStore {
                 });
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
+            Err(source) => return Err(ActiveSpaceGenerationManifestStoreError::storage(source)),
         }
         let persisted = PersistedActiveRuntimeManifestV3::from_manifest(target);
         let plaintext = postcard::to_stdvec(&persisted)
@@ -633,10 +659,10 @@ impl ActiveSpaceGenerationManifestStore {
         let parent = self
             .path
             .parent()
-            .ok_or(ActiveSpaceGenerationManifestStoreError::Storage)?;
+            .ok_or_else(ActiveSpaceGenerationManifestStoreError::missing_parent)?;
         tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::storage)?;
         let ciphertext = self
             .keys
             .seal_profile_payload(ACTIVE_GENERATION_MANIFEST_PURPOSE, plaintext)
@@ -644,17 +670,17 @@ impl ActiveSpaceGenerationManifestStore {
         let temporary = self.path.with_extension("tmp");
         let mut file = tokio::fs::File::create(&temporary)
             .await
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::storage)?;
         file.write_all(&ciphertext)
             .await
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::storage)?;
         file.sync_all()
             .await
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::storage)?;
         drop(file);
         replace_file_atomically(&temporary, &self.path)
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
-        sync_parent_directory(parent).map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)
+            .map_err(ActiveSpaceGenerationManifestStoreError::storage)?;
+        sync_parent_directory(parent).map_err(ActiveSpaceGenerationManifestStoreError::storage)
     }
 
     pub(crate) async fn stop_admission_target(
@@ -676,24 +702,24 @@ impl ActiveSpaceGenerationManifestStore {
         let parent = self
             .stopped_admission_target_path
             .parent()
-            .ok_or(ActiveSpaceGenerationManifestStoreError::Storage)?;
+            .ok_or_else(ActiveSpaceGenerationManifestStoreError::missing_parent)?;
         tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::storage)?;
         let temporary = self.stopped_admission_target_path.with_extension("tmp");
         let mut file = tokio::fs::File::create(&temporary)
             .await
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::storage)?;
         file.write_all(&ciphertext)
             .await
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::storage)?;
         file.sync_all()
             .await
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::storage)?;
         drop(file);
         replace_file_atomically(&temporary, &self.stopped_admission_target_path)
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
-        sync_parent_directory(parent).map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)
+            .map_err(ActiveSpaceGenerationManifestStoreError::storage)?;
+        sync_parent_directory(parent).map_err(ActiveSpaceGenerationManifestStoreError::storage)
     }
 
     pub(crate) async fn is_admission_target_stopped(
@@ -703,7 +729,7 @@ impl ActiveSpaceGenerationManifestStore {
         let ciphertext = match tokio::fs::read(&self.stopped_admission_target_path).await {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
+            Err(source) => return Err(ActiveSpaceGenerationManifestStoreError::storage(source)),
         };
         let plaintext = self
             .keys
@@ -724,12 +750,12 @@ impl ActiveSpaceGenerationManifestStore {
                 let parent = self
                     .path
                     .parent()
-                    .ok_or(ActiveSpaceGenerationManifestStoreError::Storage)?;
+                    .ok_or_else(ActiveSpaceGenerationManifestStoreError::missing_parent)?;
                 sync_parent_directory(parent)
-                    .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)
+                    .map_err(ActiveSpaceGenerationManifestStoreError::storage)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(_) => Err(ActiveSpaceGenerationManifestStoreError::Storage),
+            Err(source) => Err(ActiveSpaceGenerationManifestStoreError::storage(source)),
         }
     }
 
@@ -740,7 +766,7 @@ impl ActiveSpaceGenerationManifestStore {
         let ciphertext = match tokio::fs::read(&self.reset_journal_path).await {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(ActiveSpaceGenerationManifestStoreError::Storage),
+            Err(source) => return Err(ActiveSpaceGenerationManifestStoreError::storage(source)),
         };
         let plaintext = self
             .keys
@@ -765,10 +791,10 @@ impl ActiveSpaceGenerationManifestStore {
         let parent = self
             .reset_journal_path
             .parent()
-            .ok_or(ActiveSpaceGenerationManifestStoreError::Storage)?;
+            .ok_or_else(ActiveSpaceGenerationManifestStoreError::missing_parent)?;
         tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::storage)?;
         let plaintext = postcard::to_stdvec(journal)
             .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
         let ciphertext = self
@@ -778,17 +804,17 @@ impl ActiveSpaceGenerationManifestStore {
         let temporary = self.reset_journal_path.with_extension("tmp");
         let mut file = tokio::fs::File::create(&temporary)
             .await
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::storage)?;
         file.write_all(&ciphertext)
             .await
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::storage)?;
         file.sync_all()
             .await
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::storage)?;
         drop(file);
         replace_file_atomically(&temporary, &self.reset_journal_path)
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)?;
-        sync_parent_directory(parent).map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)
+            .map_err(ActiveSpaceGenerationManifestStoreError::storage)?;
+        sync_parent_directory(parent).map_err(ActiveSpaceGenerationManifestStoreError::storage)
     }
 
     pub(crate) async fn clear_device_reset_journal(
@@ -800,12 +826,12 @@ impl ActiveSpaceGenerationManifestStore {
                 let parent = self
                     .reset_journal_path
                     .parent()
-                    .ok_or(ActiveSpaceGenerationManifestStoreError::Storage)?;
+                    .ok_or_else(ActiveSpaceGenerationManifestStoreError::missing_parent)?;
                 sync_parent_directory(parent)
-                    .map_err(|_| ActiveSpaceGenerationManifestStoreError::Storage)
+                    .map_err(ActiveSpaceGenerationManifestStoreError::storage)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(_) => Err(ActiveSpaceGenerationManifestStoreError::Storage),
+            Err(source) => Err(ActiveSpaceGenerationManifestStoreError::storage(source)),
         }
     }
 }
@@ -863,7 +889,7 @@ fn map_key_error(error: AdmissionKeyError) -> ActiveSpaceGenerationManifestStore
         AdmissionKeyError::Corrupt | AdmissionKeyError::OpenFailed => {
             ActiveSpaceGenerationManifestStoreError::Corrupt
         }
-        AdmissionKeyError::SecureStorage => ActiveSpaceGenerationManifestStoreError::Storage,
+        AdmissionKeyError::SecureStorage => ActiveSpaceGenerationManifestStoreError::storage(error),
     }
 }
 

@@ -227,7 +227,9 @@ fn map_manifest_error(
     source: ActiveSpaceGenerationManifestStoreError,
 ) -> AdvanceMembershipBranchTransitionError {
     match source {
-        ActiveSpaceGenerationManifestStoreError::Storage => unavailable(anyhow::Error::new(source)),
+        ActiveSpaceGenerationManifestStoreError::Storage { .. } => {
+            unavailable(anyhow::Error::new(source))
+        }
         ActiveSpaceGenerationManifestStoreError::Corrupt
         | ActiveSpaceGenerationManifestStoreError::UnsupportedVersion => {
             invalid(anyhow::Error::new(source))

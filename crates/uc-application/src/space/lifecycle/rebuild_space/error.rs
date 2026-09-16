@@ -58,22 +58,41 @@ pub enum SpaceMembershipRebuildError {
     Inconsistent,
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum SpaceRebuildTransitionError {
     #[error("space rebuild data transition is unavailable")]
-    Unavailable,
+    Unavailable {
+        #[source]
+        source: anyhow::Error,
+    },
 
     #[error("space rebuild data transition storage failed")]
-    Storage,
+    Storage {
+        #[source]
+        source: anyhow::Error,
+    },
 
     #[error("insufficient storage for space rebuild")]
     InsufficientStorage,
 
     #[error("space rebuild data transition is inconsistent")]
-    Inconsistent,
+    Inconsistent {
+        #[source]
+        source: anyhow::Error,
+    },
 
     #[error("space rebuild data transition requires recovery")]
-    RecoveryRequired,
+    RecoveryRequired {
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+impl SpaceRebuildTransitionError {
+    anyhow_error_constructor!(unavailable, Unavailable);
+    anyhow_error_constructor!(storage, Storage);
+    anyhow_error_constructor!(inconsistent, Inconsistent);
+    anyhow_error_constructor!(recovery_required, RecoveryRequired);
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
