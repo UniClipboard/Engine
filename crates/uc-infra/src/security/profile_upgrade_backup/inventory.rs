@@ -79,6 +79,7 @@ pub(super) fn excluded_paths(paths: &AppPaths, root: &Path) -> Vec<PathBuf> {
         "daemon-run.json",
         "daemon-last-exit.json",
         ".uniclipd-handover.json",
+        "EBWebView",
     ]
     .into_iter()
     .map(|name| root.join(name))
