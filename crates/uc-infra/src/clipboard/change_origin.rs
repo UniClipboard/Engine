@@ -9,11 +9,32 @@ use uc_core::ClipboardChangeOrigin;
 /// In-memory [`SelfWriteLedgerPort`] implementation.
 ///
 /// Attribution is event-driven: a content-keyed record is consumed the moment a
-/// change with the matching hash is observed, and a next-change fallback is
-/// consumed by the very next observed change. The per-record `expires_at` is a
+/// change with the matching hash is observed, and a next-change fallback absorbs
+/// the next change(s) of the same content kind. The per-record `expires_at` is a
 /// pure garbage-collection backstop — it reclaims a record whose echo never
 /// arrives (identical content, or a failed write), and never overrides the
 /// next-event consumption above.
+///
+/// A single programmatic write can legitimately surface as MORE than one watcher
+/// event: a platform may re-encode the bytes between write and echo (Windows
+/// PNG→DIB→PNG), the OS may deliver two change notifications for one atomic
+/// write, or an external clipboard manager may re-assert the content right
+/// after the write. Under a strictly one-shot fallback, the first event consumed
+/// every guard and the second was mis-attributed as a fresh `LocalCapture`,
+/// which then dispatched back to the sender — the A↔B↔A image echo loop. To
+/// attribute the whole echo set of one write instead of exactly one event:
+///
+/// - the next-change fallback carries an **echo budget** — two credits for
+///   remote pushes (whose re-encoded echo the content hash provably cannot
+///   match), one for local restores (fast, never re-encoded);
+/// - a content match consumes one credit of the *paired* fallback (same guard
+///   key) instead of deleting it, so a second, re-encoded echo is still caught;
+/// - the fallback only absorbs changes of the **same content kind** (the
+///   `image:` / `text:` / … prefix), so an unrelated copy of another kind can
+///   no longer steal it;
+/// - after the first credit is spent, the remaining credit lives only
+///   [`ECHO_TAIL_TTL`] — long enough for the second OS event of the same write,
+///   short enough that a later unrelated user copy is not swallowed.
 ///
 /// Records store only the local-vs-remote [`SelfWriteAttribution`], not a
 /// synthesized [`ClipboardChangeOrigin`]: the attribution is the real datum the
@@ -22,33 +43,46 @@ use uc_core::ClipboardChangeOrigin;
 /// applied once, at read time.
 pub(crate) struct InMemorySelfWriteLedger {
     state: Mutex<OriginStore>,
+    echo_tail: Duration,
 }
 
 /// A content-keyed self-write: matched when a later change carries `snapshot_hash`.
+/// Single-consume by design — an identical hash observed twice is either a
+/// deliberate identical re-copy (text re-copied past the watcher's re-dedup
+/// window, which must resurface as a local capture) or a duplicate event the
+/// watcher should already have collapsed.
 struct ContentRecord {
     snapshot_hash: String,
     attribution: SelfWriteAttribution,
     expires_at: Instant,
 }
 
-/// A next-change fallback: matched by the very next observed change whose hash
-/// did not resolve against a content record (covers bytes re-encoded between
-/// write and echo, where no content key can be relied on).
+/// A next-change fallback for one programmatic write: absorbs re-encoded echoes
+/// whose hash the content record can never match. `budget` caps how many OS
+/// change events of the same content kind this fallback absorbs before it is
+/// retired; see the module docs for why one is not enough for remote pushes.
 struct NextChangeRecord {
     /// Content guard key of the write this fallback backs. Pairs the fallback to
     /// its write so a content match retires exactly the redundant one (not a
     /// concurrent write's), and keys arm-time de-duplication. Never consulted
-    /// when the fallback is consumed by an unmatched change — consumption stays
-    /// content-agnostic to catch re-encoded echoes under an unknown hash.
+    /// when the fallback is consumed by an unmatched change — consumption is
+    /// kind-scoped instead, to catch re-encoded echoes under an unknown hash
+    /// while ignoring unrelated content of a different kind.
     guard_key: String,
+    /// Content kind of `guard_key` (`image:` / `text:` / `files:` /
+    /// `rich-text:`, or `None` for bare snapshot hashes). A fallback only
+    /// matches an observed change of the same kind.
+    kind: Option<String>,
     attribution: SelfWriteAttribution,
     expires_at: Instant,
+    budget: u8,
 }
 
 struct OriginStore {
     /// FIFO of pending next-change fallbacks. A queue (not a single slot) so two
     /// concurrent writes do not clobber each other's fallback — same-attribution
-    /// fallbacks are interchangeable, so consuming the front is always correct.
+    /// fallbacks are interchangeable, so consuming the front of a kind-matching
+    /// prefix is always correct.
     next_changes: VecDeque<NextChangeRecord>,
     content_records: VecDeque<ContentRecord>,
 }
@@ -58,6 +92,38 @@ const CONTENT_RECORD_MAX: usize = 256;
 /// Cap on pending next-change fallbacks; oldest evicted past this. Far above the
 /// realistic number of in-flight programmatic writes — a runaway backstop only.
 const NEXT_CHANGE_MAX: usize = 64;
+
+/// Fallback echo budget for a REMOTE programmatic write. The first credit is
+/// the re-encoded echo itself; the second covers the observed double-event
+/// shapes (a second OS change notification, a clipboard manager re-asserting
+/// right after the write). One-shot attribution turned that second event into a
+/// LocalCapture that bounced back to the sender, so remote pushes get two.
+const REMOTE_ECHO_BUDGET: u8 = 2;
+
+/// Fallback echo budget for a LOCAL programmatic write. Local echoes are fast
+/// and never OS-re-encoded; the historical one-shot semantics are preserved so
+/// a leftover fallback cannot swallow the user's next copy.
+const LOCAL_ECHO_BUDGET: u8 = 1;
+
+/// How long a fallback's remaining credit survives after its first echo is
+/// consumed. The second OS event of the same write arrives essentially
+/// together with the first; a later, unrelated same-kind copy must fall
+/// through to `LocalCapture`.
+const ECHO_TAIL_TTL: Duration = Duration::from_secs(5);
+
+fn fallback_budget(attribution: SelfWriteAttribution) -> u8 {
+    match attribution {
+        SelfWriteAttribution::Local => LOCAL_ECHO_BUDGET,
+        SelfWriteAttribution::Remote => REMOTE_ECHO_BUDGET,
+    }
+}
+
+/// Content-kind prefix of a key produced by `origin_guard_key()` /
+/// `meaningful_origin_key()`: `image:` / `text:` / `files:` / `rich-text:`,
+/// or `None` for bare snapshot hashes (which carry no prefix).
+fn kind_of(key: &str) -> Option<&str> {
+    key.split_once(':').map(|(prefix, _)| prefix)
+}
 
 fn attribution_to_origin(attribution: SelfWriteAttribution) -> ClipboardChangeOrigin {
     match attribution {
@@ -70,11 +136,19 @@ fn attribution_to_origin(attribution: SelfWriteAttribution) -> ClipboardChangeOr
 
 impl InMemorySelfWriteLedger {
     pub(crate) fn new() -> Self {
+        Self::with_echo_tail(ECHO_TAIL_TTL)
+    }
+
+    /// Construct with a custom tail TTL for the fallback's last echo credit.
+    /// Intended for tests that exercise tail expiry without literally waiting
+    /// [`ECHO_TAIL_TTL`]; production uses [`Self::new`].
+    pub(crate) fn with_echo_tail(echo_tail: Duration) -> Self {
         Self {
             state: Mutex::new(OriginStore {
                 next_changes: VecDeque::new(),
                 content_records: VecDeque::new(),
             }),
+            echo_tail,
         }
     }
 
@@ -110,6 +184,19 @@ impl InMemorySelfWriteLedger {
             store.content_records.pop_front();
         }
     }
+
+    /// Spend one credit of the fallback at `idx`; removes the record once its
+    /// budget is exhausted, otherwise shortens its lifetime to the echo tail so
+    /// the remaining credit only absorbs the same write's follow-up event.
+    fn consume_fallback_credit(store: &mut OriginStore, idx: usize, now: Instant, tail: Duration) {
+        let record = &mut store.next_changes[idx];
+        record.budget = record.budget.saturating_sub(1);
+        if record.budget == 0 {
+            store.next_changes.remove(idx);
+        } else {
+            record.expires_at = record.expires_at.min(now + tail);
+        }
+    }
 }
 
 #[async_trait]
@@ -142,22 +229,27 @@ impl SelfWriteLedgerPort for InMemorySelfWriteLedger {
                 );
                 // De-duplicate by (guard_key, attribution). One write may arm
                 // its fallback more than once — the same snapshot written twice
-                // coalesces into a single OS echo, so a duplicate fallback would
-                // linger past that lone echo and swallow the next genuine change.
-                // Same key+attribution is the same write, so refreshing the
-                // existing record's backstop is correct; a different key (a
-                // concurrent write) keeps its own independent fallback.
-                if let Some(idx) = state
+                // coalesces into a single OS echo, so a duplicated fallback
+                // would linger past that lone echo and swallow the next genuine
+                // change. Same key+attribution is the same write, so refreshing
+                // the existing record's backstop and resetting its echo budget
+                // is correct; a different key (a concurrent write) keeps its own
+                // independent fallback.
+                let kind = kind_of(&guard_key).map(str::to_owned);
+                if let Some(existing) = state
                     .next_changes
-                    .iter()
-                    .position(|r| r.guard_key == guard_key && r.attribution == attribution)
+                    .iter_mut()
+                    .find(|r| r.guard_key == guard_key && r.attribution == attribution)
                 {
-                    state.next_changes[idx].expires_at = expires_at;
+                    existing.expires_at = expires_at;
+                    existing.budget = fallback_budget(attribution);
                 } else {
                     state.next_changes.push_back(NextChangeRecord {
                         guard_key,
+                        kind,
                         attribution,
                         expires_at,
+                        budget: fallback_budget(attribution),
                     });
                     while state.next_changes.len() > NEXT_CHANGE_MAX {
                         state.next_changes.pop_front();
@@ -178,16 +270,18 @@ impl SelfWriteLedgerPort for InMemorySelfWriteLedger {
             .position(|r| r.snapshot_hash == snapshot_hash)
         {
             if let Some(stored) = state.content_records.remove(idx) {
-                // The content match resolved this write's echo, so the fallback
-                // paired to the SAME write is now redundant and would otherwise
-                // misclassify the next genuine user action. Match by guard_key
-                // (the paired write's content key), not merely attribution, so a
-                // concurrent write's independent fallback — which may still need
-                // to absorb a re-encoded echo — survives.
+                // The content match resolved one echo of this write. Spend one
+                // credit of the fallback paired to the SAME write (same guard
+                // key, same attribution) instead of deleting it: the OS may
+                // deliver a second, re-encoded change event for this very write,
+                // and that event must still be attributed rather than becoming
+                // a LocalCapture that bounces back to the sender. Pairing by
+                // guard_key (not merely attribution) keeps a concurrent write's
+                // independent fallback untouched.
                 if let Some(fidx) = state.next_changes.iter().position(|r| {
                     r.guard_key == snapshot_hash && r.attribution == stored.attribution
                 }) {
-                    state.next_changes.remove(fidx);
+                    Self::consume_fallback_credit(&mut state, fidx, now, self.echo_tail);
                 }
                 debug!(
                     snapshot_hash = %snapshot_hash,
@@ -198,15 +292,24 @@ impl SelfWriteLedgerPort for InMemorySelfWriteLedger {
             }
         }
 
-        // Pruning above already dropped expired fallbacks, so the front (if any)
-        // is live.
-        if let Some(stored) = state.next_changes.pop_front() {
+        // Pruning above already dropped expired fallbacks, so any remaining
+        // record is live. Absorb the change with the first kind-matching
+        // fallback (FIFO within the kind): a re-encoded image echo must not be
+        // consumed by a pending text fallback, nor vice versa.
+        let observed_kind = kind_of(snapshot_hash);
+        if let Some(idx) = state
+            .next_changes
+            .iter()
+            .position(|r| r.kind.as_deref() == observed_kind)
+        {
+            let attribution = state.next_changes[idx].attribution;
+            Self::consume_fallback_credit(&mut state, idx, now, self.echo_tail);
             debug!(
                 snapshot_hash = %snapshot_hash,
-                ?stored.attribution,
+                ?attribution,
                 "self_write_ledger next-change fallback matched"
             );
-            return attribution_to_origin(stored.attribution);
+            return attribution_to_origin(attribution);
         }
 
         debug!(
@@ -239,7 +342,8 @@ mod tests {
             ledger.attribute_observed_change("h1").await,
             ClipboardChangeOrigin::remote_push_anonymous()
         );
-        // Consumed: a second observation of the same hash is a fresh capture.
+        // Content records stay single-consume: a second observation of the same
+        // hash is a fresh capture (e.g. a deliberate identical re-copy).
         assert_eq!(
             ledger.attribute_observed_change("h1").await,
             ClipboardChangeOrigin::LocalCapture
@@ -272,7 +376,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn next_change_fallback_matches_any_hash() {
+    async fn next_change_fallback_matches_reencoded_hash() {
         let ledger = InMemorySelfWriteLedger::new();
         ledger
             .record_self_write(
@@ -286,17 +390,81 @@ mod tests {
             ledger.attribute_observed_change("re-encoded-hash").await,
             ClipboardChangeOrigin::remote_push_anonymous()
         );
-        // Consumed once.
+    }
+
+    #[tokio::test]
+    async fn remote_fallback_absorbs_two_echoes_then_retires() {
+        // The echo-set shape the loop fix targets: a remote write whose OS
+        // delivers TWO change events — the second re-encoded under an unknown
+        // hash. Both must attribute to RemotePush; only a third, unrelated
+        // change resolves to a fresh local capture.
+        let ledger = InMemorySelfWriteLedger::new();
+        ledger
+            .record_self_write(
+                SelfWriteMatch::ByNextChange("h1".into()),
+                SelfWriteAttribution::Remote,
+                LONG,
+            )
+            .await;
         assert_eq!(
-            ledger.attribute_observed_change("anything").await,
+            ledger.attribute_observed_change("h1-reencoded-1").await,
+            ClipboardChangeOrigin::remote_push_anonymous()
+        );
+        assert_eq!(
+            ledger.attribute_observed_change("h1-reencoded-2").await,
+            ClipboardChangeOrigin::remote_push_anonymous()
+        );
+        assert_eq!(
+            ledger.attribute_observed_change("unrelated").await,
             ClipboardChangeOrigin::LocalCapture
         );
     }
 
     #[tokio::test]
-    async fn content_match_clears_one_paired_fallback() {
+    async fn content_match_keeps_paired_fallback_for_second_echo() {
+        // The echo-set shape with a content hit first: echo #1 carries the
+        // exact write hash (content match), echo #2 is the re-encoded variant.
+        // The content match spends one credit of the paired fallback, so echo
+        // #2 still attributes as RemotePush instead of bouncing as a
+        // LocalCapture.
         let ledger = InMemorySelfWriteLedger::new();
-        // One write arms both a content record and its next-change fallback.
+        ledger
+            .record_self_write(
+                SelfWriteMatch::ByContent("h1".into()),
+                SelfWriteAttribution::Remote,
+                LONG,
+            )
+            .await;
+        ledger
+            .record_self_write(
+                SelfWriteMatch::ByNextChange("h1".into()),
+                SelfWriteAttribution::Remote,
+                LONG,
+            )
+            .await;
+
+        assert_eq!(
+            ledger.attribute_observed_change("h1").await,
+            ClipboardChangeOrigin::remote_push_anonymous()
+        );
+        assert_eq!(
+            ledger.attribute_observed_change("h1-reencoded").await,
+            ClipboardChangeOrigin::remote_push_anonymous()
+        );
+        // Budget exhausted: a genuine, unrelated copy resolves to a fresh
+        // capture.
+        assert_eq!(
+            ledger.attribute_observed_change("unrelated").await,
+            ClipboardChangeOrigin::LocalCapture
+        );
+    }
+
+    #[tokio::test]
+    async fn content_match_clears_one_paired_fallback_for_local_write() {
+        // Local restores keep one-shot semantics: the content match exhausts
+        // the paired fallback's budget of one, so it cannot linger and swallow
+        // the user's next genuine copy.
+        let ledger = InMemorySelfWriteLedger::new();
         ledger
             .record_self_write(
                 SelfWriteMatch::ByContent("h1".into()),
@@ -312,8 +480,6 @@ mod tests {
             )
             .await;
 
-        // Content matched (no re-encode), so the paired fallback must be dropped
-        // and NOT linger to swallow the user's next genuine copy.
         assert_eq!(
             ledger.attribute_observed_change("h1").await,
             ClipboardChangeOrigin::LocalRestore
@@ -321,6 +487,56 @@ mod tests {
         assert_eq!(
             ledger.attribute_observed_change("a-real-user-copy").await,
             ClipboardChangeOrigin::LocalCapture
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_tail_expires_after_first_echo() {
+        // After the first echo is consumed, the remaining credit lives only
+        // ECHO_TAIL_TTL — a later same-kind change is a genuine user copy.
+        let ledger = InMemorySelfWriteLedger::with_echo_tail(Duration::ZERO);
+        ledger
+            .record_self_write(
+                SelfWriteMatch::ByNextChange("h1".into()),
+                SelfWriteAttribution::Remote,
+                LONG,
+            )
+            .await;
+        assert_eq!(
+            ledger.attribute_observed_change("echo-1").await,
+            ClipboardChangeOrigin::remote_push_anonymous()
+        );
+        // Tail expired immediately (zero TTL): the leftover credit is gone.
+        assert_eq!(
+            ledger.attribute_observed_change("a-real-user-copy").await,
+            ClipboardChangeOrigin::LocalCapture
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_only_absorbs_same_content_kind() {
+        // An image write's fallback must not be consumed by an unrelated text
+        // change that arrives before the echo, and vice versa.
+        let ledger = InMemorySelfWriteLedger::new();
+        ledger
+            .record_self_write(
+                SelfWriteMatch::ByNextChange("image:guard-h".into()),
+                SelfWriteAttribution::Remote,
+                LONG,
+            )
+            .await;
+
+        assert_eq!(
+            ledger
+                .attribute_observed_change("text:unrelated-copy")
+                .await,
+            ClipboardChangeOrigin::LocalCapture
+        );
+        assert_eq!(
+            ledger
+                .attribute_observed_change("image:reencoded-echo")
+                .await,
+            ClipboardChangeOrigin::remote_push_anonymous()
         );
     }
 
@@ -362,13 +578,14 @@ mod tests {
             )
             .await;
 
-        // write1 echoes back unchanged (content match) → drops one fallback.
+        // write1 echoes back unchanged (content match) → spends one credit of
+        // write1's paired fallback; write2's fallback is untouched.
         assert_eq!(
             ledger.attribute_observed_change("h1").await,
             ClipboardChangeOrigin::remote_push_anonymous()
         );
         // write2 echoes back RE-ENCODED (hash differs) → must still resolve to
-        // remote via the surviving fallback, not LocalCapture.
+        // remote, not LocalCapture.
         assert_eq!(
             ledger.attribute_observed_change("h2-reencoded").await,
             ClipboardChangeOrigin::remote_push_anonymous()
@@ -379,9 +596,9 @@ mod tests {
     /// apply followed by an active-state rebroadcast) arms two content records
     /// and two fallbacks under one attribution. The OS coalesces the two
     /// identical writes into a single observed echo, so only one content match
-    /// fires. Under the old design the second fallback leaked and the next
-    /// genuine user copy — arbitrary unrelated content — was swallowed as a
-    /// RemotePush echo, producing zero capture entries.
+    /// fires. The fallback's echo budget is bounded: after the coalesced echo
+    /// the budget is spent, and a genuine, unrelated user copy resolves to a
+    /// fresh capture.
     #[tokio::test]
     async fn double_write_same_content_does_not_leak_fallback() {
         let ledger = InMemorySelfWriteLedger::new();
@@ -421,8 +638,14 @@ mod tests {
             ledger.attribute_observed_change("h").await,
             ClipboardChangeOrigin::remote_push_anonymous()
         );
-        // A genuine, unrelated user copy must resolve to a fresh capture, NOT be
-        // eaten by a leaked fallback from the duplicated write.
+        // The remaining echo credit may absorb one more event of the same
+        // write's echo set…
+        assert_eq!(
+            ledger.attribute_observed_change("h-reencoded").await,
+            ClipboardChangeOrigin::remote_push_anonymous()
+        );
+        // …but a genuine, unrelated user copy must resolve to a fresh capture,
+        // NOT be eaten by a leaked fallback from the duplicated write.
         assert_eq!(
             ledger.attribute_observed_change("a-real-user-copy").await,
             ClipboardChangeOrigin::LocalCapture
