@@ -82,7 +82,9 @@ impl InitialSpaceActivationPort for V3InitialSpaceActivation {
 
 fn map_manifest_error(error: ActiveSpaceGenerationManifestStoreError) -> CurrentSpaceIdentityError {
     match error {
-        ActiveSpaceGenerationManifestStoreError::Storage => CurrentSpaceIdentityError::Unavailable,
+        ActiveSpaceGenerationManifestStoreError::Storage { .. } => {
+            CurrentSpaceIdentityError::Unavailable
+        }
         ActiveSpaceGenerationManifestStoreError::Corrupt
         | ActiveSpaceGenerationManifestStoreError::UnsupportedVersion => {
             CurrentSpaceIdentityError::Inconsistent

@@ -850,6 +850,8 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 ## 文档维护记录
 
+- 2026-09-16：准入 Space transition 的失败分类保留完整来源链。`DbSnapshotError` 三个 variant 改为携带具体 `std::io::Error`/`diesel::result::Error`/连接池错误，`ActiveSpaceGenerationManifestStoreError::Storage`、`AdmissionSpaceTransitionError` 与 `SpaceRebuildTransitionError` 的能力失败 variant 改为携带 `#[source] source: anyhow::Error`，Infra 与 Engine 的映射不再用 `map_err(|_| ...)` 丢弃底层 io、diesel 或安全存储原因；调用方沿来源链分类（权限不足、空间不足、只读事务等），纯判断 variant（`Locked`、`UnreadableHistoryRequiresConfirmation`、`InsufficientStorage`）保持无来源。稳定失败分类、公开入口、持久化格式与分层均未改变。
+
 - 2026-09-15：v1.1.0-rc.16 同步工作区、HarmonyOS 包与宿主检查版本，发布所有权及设备验收边界不变。
 
 - 2026-09-14：设备列表只显示有效本机时新增修改加密口令流程，不要求处于升级重建状态。口令由用户自定义，产品一次提交新口令及再次输入值；两次不一致、仍显示其他设备或成员状态无法确认时均在修改前拒绝。能力及公开入口统一使用“修改加密口令”命名，不与重新配对状态混用。现有 MasterKey 与历史内容保持不变，受保护恢复记录保证中断后只向前完成；移动绑定公开相同动作，既有重新配对提醒仍由实际新设备加入结束。

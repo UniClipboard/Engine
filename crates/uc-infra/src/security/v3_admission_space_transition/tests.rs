@@ -33,8 +33,9 @@ use crate::fs::key_slot_store::JsonKeySlotStore;
 use crate::security::active_space_generation_manifest_store::V3ManifestPromotionOutcome;
 use crate::security::{
     ActiveRuntimeManifest, ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore,
-    AdmissionKeyManager, DefaultCurrentProfile, MasterKey, ProfileContentKeyVault,
-    ProfileRuntimeLayout, SpaceControlGeneration, SpaceTransitionActivation,
+    ActiveSpaceGenerationManifestStoreError, AdmissionKeyManager, DefaultCurrentProfile, MasterKey,
+    ProfileContentKeyVault, ProfileRuntimeLayout, SpaceControlGeneration,
+    SpaceControlGenerationError, SpaceTransitionActivation, SpaceTransitionActivationError,
 };
 use crate::space::{
     prepare_registration, CurrentSpaceResolver, InMemorySession, KeyMaterialStore,
@@ -201,10 +202,12 @@ async fn v3_cross_space_switches_only_the_control_generation() {
     let profile_before_legacy_rejection = std::fs::read(source_layout.profile_database()).unwrap();
     let blob_before_legacy_rejection =
         std::fs::read(source_layout.blob_root().join("history.ucbl")).unwrap();
-    assert_eq!(
-        transitions.advance(&legacy_checkpoint).await.unwrap_err(),
-        AdmissionSpaceTransitionError::Inconsistent
-    );
+    let error = transitions.advance(&legacy_checkpoint).await.unwrap_err();
+    assert!(matches!(
+        error,
+        AdmissionSpaceTransitionError::Inconsistent { .. }
+    ));
+    assert!(std::error::Error::source(&error).is_some());
     assert_eq!(
         manifests.load_runtime().await.unwrap(),
         manifest_before_legacy_rejection
@@ -278,13 +281,15 @@ async fn v3_cross_space_switches_only_the_control_generation() {
         panic!("transition changed format");
     };
     activation_intents.0.store(false, Ordering::SeqCst);
-    assert_eq!(
-        transitions
-            .advance_admission(&transition, activation_intent(&transition))
-            .await
-            .unwrap_err(),
-        AdmissionSpaceTransitionError::Inconsistent
-    );
+    let error = transitions
+        .advance_admission(&transition, activation_intent(&transition))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        AdmissionSpaceTransitionError::Inconsistent { .. }
+    ));
+    assert!(std::error::Error::source(&error).is_some());
     assert_eq!(
         manifests.load_runtime().await.unwrap(),
         Some(ActiveRuntimeManifest::V3(source.clone()))
@@ -798,4 +803,91 @@ fn relationships() -> Vec<AdmissionChangeFacts> {
         }
     })
     .collect()
+}
+
+/// A failed dependency or storage capability must keep its cause when it is
+/// classified into the Application port error; callers classify the chain
+/// (permission denied, storage full, ...) instead of only learning that the
+/// transition failed.
+#[test]
+fn capability_failures_keep_their_source_when_mapped_to_the_port_error() {
+    use super::{map_activation_error, map_control_generation_error, map_manifest_error};
+
+    let manifest = map_manifest_error(ActiveSpaceGenerationManifestStoreError::Storage {
+        source: anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "manifest denied",
+        )),
+    });
+    assert!(matches!(
+        manifest,
+        AdmissionSpaceTransitionError::Storage { .. }
+    ));
+    assert!(std::error::Error::source(&manifest).is_some());
+    assert!(source_chain_has_io_kind(
+        &manifest,
+        std::io::ErrorKind::PermissionDenied
+    ));
+
+    let generation = map_control_generation_error(SpaceControlGenerationError::Storage {
+        source: anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::StorageFull,
+            "generation full",
+        )),
+    });
+    assert!(matches!(
+        generation,
+        AdmissionSpaceTransitionError::Storage { .. }
+    ));
+    assert!(source_chain_has_io_kind(
+        &generation,
+        std::io::ErrorKind::StorageFull
+    ));
+
+    let activation = map_activation_error(SpaceTransitionActivationError::Recovery {
+        source: anyhow::Error::new(std::io::Error::other("activation recovery cause")),
+    });
+    assert!(matches!(
+        activation,
+        AdmissionSpaceTransitionError::RecoveryRequired { .. }
+    ));
+    assert!(source_chain_has_io_kind(
+        &activation,
+        std::io::ErrorKind::Other
+    ));
+
+    let busy = map_activation_error(SpaceTransitionActivationError::Busy {
+        source: anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "activation busy",
+        )),
+    });
+    assert!(matches!(
+        busy,
+        AdmissionSpaceTransitionError::Unavailable { .. }
+    ));
+    assert!(source_chain_has_io_kind(
+        &busy,
+        std::io::ErrorKind::PermissionDenied
+    ));
+}
+
+fn source_chain_has_io_kind(
+    error: &AdmissionSpaceTransitionError,
+    kind: std::io::ErrorKind,
+) -> bool {
+    let source = match error {
+        AdmissionSpaceTransitionError::Unavailable { source }
+        | AdmissionSpaceTransitionError::Storage { source }
+        | AdmissionSpaceTransitionError::Inconsistent { source }
+        | AdmissionSpaceTransitionError::RecoveryRequired { source } => source,
+        AdmissionSpaceTransitionError::UnreadableHistoryRequiresConfirmation
+        | AdmissionSpaceTransitionError::Locked
+        | AdmissionSpaceTransitionError::InsufficientStorage => return false,
+    };
+    source.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == kind)
+    })
 }

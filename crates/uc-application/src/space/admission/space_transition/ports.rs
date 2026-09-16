@@ -1,5 +1,7 @@
 use async_trait::async_trait;
+use thiserror::Error;
 
+use crate::error::anyhow_error_constructor;
 use crate::space::admission::protocol::JoinerActivationIntent;
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
@@ -7,22 +9,54 @@ use uc_core::membership::{
     AdmissionSpaceTransitionV2, PendingGroupUpdate,
 };
 
-#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+/// Stable classification of an admission Space transition failure.
+///
+/// Variants that report a failed dependency, storage or recovery capability keep
+/// that failure as their source; callers must classify the chain instead of
+/// dropping it. Variants that express a pure judgement (`Locked`,
+/// `UnreadableHistoryRequiresConfirmation`, `InsufficientStorage`) intentionally
+/// carry no source.
+#[derive(Debug, Error)]
 pub enum AdmissionSpaceTransitionError {
     #[error("unreadable history requires explicit confirmation")]
     UnreadableHistoryRequiresConfirmation,
     #[error("profile is locked")]
     Locked,
-    #[error("space transition is unavailable")]
-    Unavailable,
-    #[error("space transition storage failed")]
-    Storage,
     #[error("insufficient storage for space transition")]
     InsufficientStorage,
+    #[error("space transition is unavailable")]
+    Unavailable {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("space transition storage failed")]
+    Storage {
+        #[source]
+        source: anyhow::Error,
+    },
     #[error("space transition state is inconsistent")]
-    Inconsistent,
+    Inconsistent {
+        #[source]
+        source: anyhow::Error,
+    },
     #[error("space transition requires recovery")]
-    RecoveryRequired,
+    RecoveryRequired {
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+impl AdmissionSpaceTransitionError {
+    anyhow_error_constructor!(pub unavailable, Unavailable);
+    anyhow_error_constructor!(pub storage, Storage);
+    anyhow_error_constructor!(pub inconsistent, Inconsistent);
+    anyhow_error_constructor!(pub recovery_required, RecoveryRequired);
+
+    /// State a transition step requires is absent, so the transition cannot
+    /// continue. `context` names the missing material or checkpoint.
+    pub fn missing(context: &'static str) -> Self {
+        Self::inconsistent(anyhow::anyhow!(context))
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -83,7 +117,9 @@ pub trait AdmissionSpaceTransitionPort: Send + Sync {
         intent: JoinerActivationIntent,
     ) -> Result<AdmissionSpaceTransitionStepV2, AdmissionSpaceTransitionError> {
         if transition.attempt_id() != intent.admission_id() {
-            return Err(AdmissionSpaceTransitionError::Inconsistent);
+            return Err(AdmissionSpaceTransitionError::missing(
+                "activation intent does not belong to the transition attempt",
+            ));
         }
         self.advance(transition).await
     }

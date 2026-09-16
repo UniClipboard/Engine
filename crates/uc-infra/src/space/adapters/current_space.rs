@@ -221,7 +221,9 @@ fn map_generation_manifest_error(
     error: ActiveSpaceGenerationManifestStoreError,
 ) -> CurrentSpaceIdentityError {
     match error {
-        ActiveSpaceGenerationManifestStoreError::Storage => CurrentSpaceIdentityError::Unavailable,
+        ActiveSpaceGenerationManifestStoreError::Storage { .. } => {
+            CurrentSpaceIdentityError::Unavailable
+        }
         ActiveSpaceGenerationManifestStoreError::Corrupt
         | ActiveSpaceGenerationManifestStoreError::UnsupportedVersion => {
             CurrentSpaceIdentityError::Inconsistent

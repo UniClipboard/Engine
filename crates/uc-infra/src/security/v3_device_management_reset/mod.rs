@@ -57,9 +57,12 @@ impl V3DeviceManagementReset {
             journal.profile_data_generation,
             journal.target_control_generation,
         )
-        .map_err(|_| AdmissionSpaceTransitionError::Inconsistent)?;
-        ActiveRuntimeManifestV3::new(layout, journal.source_keyslot_generation)
-            .ok_or(AdmissionSpaceTransitionError::Inconsistent)
+        .map_err(AdmissionSpaceTransitionError::inconsistent)?;
+        ActiveRuntimeManifestV3::new(layout, journal.source_keyslot_generation).ok_or_else(|| {
+            AdmissionSpaceTransitionError::missing(
+                "target runtime manifest cannot be reconstructed",
+            )
+        })
     }
 
     fn source_manifest(
@@ -70,9 +73,12 @@ impl V3DeviceManagementReset {
             journal.profile_data_generation,
             journal.source_control_generation,
         )
-        .map_err(|_| AdmissionSpaceTransitionError::Inconsistent)?;
-        ActiveRuntimeManifestV3::new(layout, journal.source_keyslot_generation)
-            .ok_or(AdmissionSpaceTransitionError::Inconsistent)
+        .map_err(AdmissionSpaceTransitionError::inconsistent)?;
+        ActiveRuntimeManifestV3::new(layout, journal.source_keyslot_generation).ok_or_else(|| {
+            AdmissionSpaceTransitionError::missing(
+                "source runtime manifest cannot be reconstructed",
+            )
+        })
     }
 
     fn allocate_target_generation(source: &ActiveRuntimeManifestV3) -> [u8; 16] {
@@ -137,19 +143,24 @@ impl DeviceManagementResetDataPort for V3DeviceManagementReset {
         target_space_id: &SpaceId,
     ) -> Result<(), AdmissionSpaceTransitionError> {
         let _guard = self.operation_lock.lock().await;
-        let active = self
-            .active_runtime()
-            .await?
-            .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
+        let active = self.active_runtime().await?.ok_or_else(|| {
+            AdmissionSpaceTransitionError::missing("active runtime manifest is missing")
+        })?;
         let ActiveRuntimeManifest::V3(source) = active else {
-            return Err(AdmissionSpaceTransitionError::Unavailable);
+            return Err(AdmissionSpaceTransitionError::unavailable(anyhow::anyhow!(
+                "legacy space manifest is not usable for device reset"
+            )));
         };
         if source.layout().space_id() == target_space_id {
             return Ok(());
         }
         let mut journal = match self.journal().await? {
             Some(journal) if Self::journal_matches(&journal, &source, target_space_id) => journal,
-            Some(_) => return Err(AdmissionSpaceTransitionError::Inconsistent),
+            Some(_) => {
+                return Err(AdmissionSpaceTransitionError::missing(
+                    "reset journal does not belong to the current active space",
+                ))
+            }
             None => {
                 let journal = DeviceManagementResetJournalV3 {
                     format_version: 3,
@@ -189,7 +200,9 @@ impl DeviceManagementResetDataPort for V3DeviceManagementReset {
             DeviceManagementResetPhaseV3::Staged => Ok(()),
             DeviceManagementResetPhaseV3::Promoted
             | DeviceManagementResetPhaseV3::CleanupPending => {
-                Err(AdmissionSpaceTransitionError::Inconsistent)
+                Err(AdmissionSpaceTransitionError::missing(
+                    "device reset journal already passed preparation",
+                ))
             }
         }
     }
@@ -204,12 +217,13 @@ impl DeviceManagementResetDataPort for V3DeviceManagementReset {
         }) {
             return Ok(());
         }
-        let mut journal = self
-            .journal()
-            .await?
-            .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
+        let mut journal = self.journal().await?.ok_or_else(|| {
+            AdmissionSpaceTransitionError::missing("device reset journal is missing")
+        })?;
         if journal.target_space_id != target_space_id.as_ref() {
-            return Err(AdmissionSpaceTransitionError::Inconsistent);
+            return Err(AdmissionSpaceTransitionError::missing(
+                "device reset journal targets a different space",
+            ));
         }
         let target = Self::target_manifest(&journal)?;
         match journal.phase {
@@ -220,31 +234,31 @@ impl DeviceManagementResetDataPort for V3DeviceManagementReset {
                     .map_err(map_generation_error)?;
                 let database = ProfileRuntimeLayout::v3(&self.profile_root, &target);
                 self.control_pool
-                    .replace_database(
-                        database
-                            .control_database()
-                            .to_str()
-                            .ok_or(AdmissionSpaceTransitionError::Storage)?,
-                    )
-                    .map_err(|_| AdmissionSpaceTransitionError::RecoveryRequired)?;
+                    .replace_database(database.control_database().to_str().ok_or_else(|| {
+                        AdmissionSpaceTransitionError::storage(anyhow::anyhow!(
+                            "control database path is not valid UTF-8"
+                        ))
+                    })?)
+                    .map_err(AdmissionSpaceTransitionError::recovery_required)?;
                 journal.phase = DeviceManagementResetPhaseV3::Staged;
                 self.save_journal(&journal).await
             }
             DeviceManagementResetPhaseV3::Staged => {
                 let database = ProfileRuntimeLayout::v3(&self.profile_root, &target);
                 self.control_pool
-                    .replace_database(
-                        database
-                            .control_database()
-                            .to_str()
-                            .ok_or(AdmissionSpaceTransitionError::Storage)?,
-                    )
-                    .map_err(|_| AdmissionSpaceTransitionError::RecoveryRequired)
+                    .replace_database(database.control_database().to_str().ok_or_else(|| {
+                        AdmissionSpaceTransitionError::storage(anyhow::anyhow!(
+                            "control database path is not valid UTF-8"
+                        ))
+                    })?)
+                    .map_err(AdmissionSpaceTransitionError::recovery_required)
             }
             DeviceManagementResetPhaseV3::Allocated
             | DeviceManagementResetPhaseV3::Promoted
             | DeviceManagementResetPhaseV3::CleanupPending => {
-                Err(AdmissionSpaceTransitionError::Inconsistent)
+                Err(AdmissionSpaceTransitionError::missing(
+                    "device reset journal is not in a stageable phase",
+                ))
             }
         }
     }
@@ -264,11 +278,13 @@ impl DeviceManagementResetDataPort for V3DeviceManagementReset {
                         matches!(active, ActiveRuntimeManifest::V3(manifest) if manifest.layout().space_id() == target_space_id)
                     })
                     .then_some(())
-                    .ok_or(AdmissionSpaceTransitionError::Inconsistent);
+                    .ok_or_else(|| AdmissionSpaceTransitionError::missing("device reset is neither journalled nor already active"));
             }
         };
         if journal.target_space_id != target_space_id.as_ref() {
-            return Err(AdmissionSpaceTransitionError::Inconsistent);
+            return Err(AdmissionSpaceTransitionError::missing(
+                "device reset journal targets a different space",
+            ));
         }
         let source = Self::source_manifest(&journal)?;
         let target = Self::target_manifest(&journal)?;
@@ -283,7 +299,9 @@ impl DeviceManagementResetDataPort for V3DeviceManagementReset {
             }
             Some(ActiveRuntimeManifest::V3(active)) if active == source => {
                 if journal.phase != DeviceManagementResetPhaseV3::Staged {
-                    return Err(AdmissionSpaceTransitionError::Inconsistent);
+                    return Err(AdmissionSpaceTransitionError::missing(
+                        "device reset journal is not staged",
+                    ));
                 }
                 let prepared = self
                     .control_generations
@@ -297,7 +315,9 @@ impl DeviceManagementResetDataPort for V3DeviceManagementReset {
                 journal.phase = DeviceManagementResetPhaseV3::Promoted;
                 self.save_journal(&journal).await
             }
-            _ => Err(AdmissionSpaceTransitionError::Inconsistent),
+            _ => Err(AdmissionSpaceTransitionError::missing(
+                "active runtime manifest does not match the device reset journal",
+            )),
         }
     }
 
@@ -314,22 +334,28 @@ impl DeviceManagementResetDataPort for V3DeviceManagementReset {
                     matches!(active, ActiveRuntimeManifest::V3(manifest) if manifest.layout().space_id() == target_space_id)
                 })
                 .then_some(())
-                .ok_or(AdmissionSpaceTransitionError::Inconsistent);
+                .ok_or_else(|| AdmissionSpaceTransitionError::missing("device reset is neither journalled nor already active"));
         };
         if journal.target_space_id != target_space_id.as_ref() {
-            return Err(AdmissionSpaceTransitionError::Inconsistent);
+            return Err(AdmissionSpaceTransitionError::missing(
+                "device reset journal targets a different space",
+            ));
         }
         let source = Self::source_manifest(&journal)?;
         let target = Self::target_manifest(&journal)?;
         if self.active_runtime().await? != Some(ActiveRuntimeManifest::V3(target.clone())) {
-            return Err(AdmissionSpaceTransitionError::Inconsistent);
+            return Err(AdmissionSpaceTransitionError::missing(
+                "active runtime manifest is not the reset target",
+            ));
         }
         if journal.phase == DeviceManagementResetPhaseV3::Promoted {
             journal.phase = DeviceManagementResetPhaseV3::CleanupPending;
             self.save_journal(&journal).await?;
         }
         if journal.phase != DeviceManagementResetPhaseV3::CleanupPending {
-            return Err(AdmissionSpaceTransitionError::Inconsistent);
+            return Err(AdmissionSpaceTransitionError::missing(
+                "device reset journal is not cleanup pending",
+            ));
         }
         self.activation
             .cleanup_source_control_generation(&source, &target)
@@ -346,33 +372,43 @@ fn map_manifest_error(
     error: ActiveSpaceGenerationManifestStoreError,
 ) -> AdmissionSpaceTransitionError {
     match error {
-        ActiveSpaceGenerationManifestStoreError::Storage => AdmissionSpaceTransitionError::Storage,
+        ActiveSpaceGenerationManifestStoreError::Storage { .. } => {
+            AdmissionSpaceTransitionError::storage(error)
+        }
         ActiveSpaceGenerationManifestStoreError::Corrupt
         | ActiveSpaceGenerationManifestStoreError::UnsupportedVersion => {
-            AdmissionSpaceTransitionError::Inconsistent
+            AdmissionSpaceTransitionError::inconsistent(error)
         }
     }
 }
 
 fn map_generation_error(error: SpaceControlGenerationError) -> AdmissionSpaceTransitionError {
     match error {
-        SpaceControlGenerationError::Busy { .. } => AdmissionSpaceTransitionError::Unavailable,
-        SpaceControlGenerationError::Inconsistent { .. } => {
-            AdmissionSpaceTransitionError::Inconsistent
+        SpaceControlGenerationError::Busy { .. } => {
+            AdmissionSpaceTransitionError::unavailable(error)
         }
-        SpaceControlGenerationError::Storage { .. } => AdmissionSpaceTransitionError::Storage,
+        SpaceControlGenerationError::Inconsistent { .. } => {
+            AdmissionSpaceTransitionError::inconsistent(error)
+        }
+        SpaceControlGenerationError::Storage { .. } => {
+            AdmissionSpaceTransitionError::storage(error)
+        }
     }
 }
 
 fn map_activation_error(error: SpaceTransitionActivationError) -> AdmissionSpaceTransitionError {
     match error {
-        SpaceTransitionActivationError::Busy { .. } => AdmissionSpaceTransitionError::Unavailable,
-        SpaceTransitionActivationError::Inconsistent { .. } => {
-            AdmissionSpaceTransitionError::Inconsistent
+        SpaceTransitionActivationError::Busy { .. } => {
+            AdmissionSpaceTransitionError::unavailable(error)
         }
-        SpaceTransitionActivationError::Storage { .. } => AdmissionSpaceTransitionError::Storage,
+        SpaceTransitionActivationError::Inconsistent { .. } => {
+            AdmissionSpaceTransitionError::inconsistent(error)
+        }
+        SpaceTransitionActivationError::Storage { .. } => {
+            AdmissionSpaceTransitionError::storage(error)
+        }
         SpaceTransitionActivationError::Recovery { .. } => {
-            AdmissionSpaceTransitionError::RecoveryRequired
+            AdmissionSpaceTransitionError::recovery_required(error)
         }
     }
 }

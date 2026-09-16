@@ -43,12 +43,12 @@ impl SpaceRebuildTransitionPort for SpaceRebuildTransition {
             .current_space_identity
             .current_space_id()
             .await
-            .map_err(|_| SpaceRebuildTransitionError::Storage)?;
+            .map_err(SpaceRebuildTransitionError::storage)?;
         let pending = self
             .progress
             .load_target()
             .await
-            .map_err(|_| SpaceRebuildTransitionError::Storage)?;
+            .map_err(SpaceRebuildTransitionError::storage)?;
 
         if let Some(space_id) = pending {
             let already_committed = current_space_id.as_ref() == Some(&space_id);
@@ -68,7 +68,7 @@ impl SpaceRebuildTransitionPort for SpaceRebuildTransition {
         self.progress
             .store_target(&space_id)
             .await
-            .map_err(|_| SpaceRebuildTransitionError::Storage)?;
+            .map_err(SpaceRebuildTransitionError::storage)?;
         self.data
             .prepare_device_management_reset(&space_id)
             .await
@@ -106,33 +106,36 @@ impl SpaceRebuildTransitionPort for SpaceRebuildTransition {
         self.re_pairing_state
             .require_after_relationship_reset()
             .await
-            .map_err(|_| SpaceRebuildTransitionError::Storage)?;
+            .map_err(SpaceRebuildTransitionError::storage)?;
         self.progress
             .clear_target()
             .await
-            .map_err(|_| SpaceRebuildTransitionError::Storage)
+            .map_err(SpaceRebuildTransitionError::storage)
     }
 }
 
 fn map_data_error(error: AdmissionSpaceTransitionError) -> SpaceRebuildTransitionError {
     match error {
-        AdmissionSpaceTransitionError::Locked | AdmissionSpaceTransitionError::Unavailable => {
-            SpaceRebuildTransitionError::Unavailable
+        error @ (AdmissionSpaceTransitionError::Locked
+        | AdmissionSpaceTransitionError::Unavailable { .. }) => {
+            SpaceRebuildTransitionError::unavailable(error)
         }
-        AdmissionSpaceTransitionError::Storage => SpaceRebuildTransitionError::Storage,
+        error @ AdmissionSpaceTransitionError::Storage { .. } => {
+            SpaceRebuildTransitionError::storage(error)
+        }
         AdmissionSpaceTransitionError::InsufficientStorage => {
             SpaceRebuildTransitionError::InsufficientStorage
         }
-        AdmissionSpaceTransitionError::Inconsistent
-        | AdmissionSpaceTransitionError::UnreadableHistoryRequiresConfirmation => {
-            SpaceRebuildTransitionError::Inconsistent
+        error @ (AdmissionSpaceTransitionError::Inconsistent { .. }
+        | AdmissionSpaceTransitionError::UnreadableHistoryRequiresConfirmation) => {
+            SpaceRebuildTransitionError::inconsistent(error)
         }
-        AdmissionSpaceTransitionError::RecoveryRequired => {
-            SpaceRebuildTransitionError::RecoveryRequired
+        error @ AdmissionSpaceTransitionError::RecoveryRequired { .. } => {
+            SpaceRebuildTransitionError::recovery_required(error)
         }
     }
 }
 
-fn map_security_error(_error: SpaceSecurityStateResetError) -> SpaceRebuildTransitionError {
-    SpaceRebuildTransitionError::Storage
+fn map_security_error(error: SpaceSecurityStateResetError) -> SpaceRebuildTransitionError {
+    SpaceRebuildTransitionError::storage(error)
 }

@@ -137,10 +137,10 @@ mod tests {
         let ports = MaintenanceOnlySpaceTransitionPorts;
         let transition = fresh_transition();
 
-        assert_eq!(
+        assert!(matches!(
             ports.preflight_source_history(false).await,
             Err(AdmissionSpaceTransitionError::Locked)
-        );
+        ));
         assert!(matches!(
             ports.prepare_if_needed(&preparation()).await,
             Err(AdmissionSpaceTransitionError::Locked)
@@ -149,10 +149,10 @@ mod tests {
             ports.advance(&transition).await,
             Err(AdmissionSpaceTransitionError::Locked)
         ));
-        assert_eq!(
+        assert!(matches!(
             ports.discard_pre_activation(&transition).await,
             Err(AdmissionSpaceTransitionError::Locked)
-        );
+        ));
     }
 
     #[tokio::test]
@@ -160,22 +160,22 @@ mod tests {
         let ports = MaintenanceOnlySpaceTransitionPorts;
         let target = SpaceId::from_str("maintenance-target");
 
-        assert_eq!(
+        assert!(matches!(
             ports.prepare_device_management_reset(&target).await,
             Err(AdmissionSpaceTransitionError::Locked)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             ports.stage_device_management_reset_mutations(&target).await,
             Err(AdmissionSpaceTransitionError::Locked)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             ports.promote_device_management_reset(&target).await,
             Err(AdmissionSpaceTransitionError::Locked)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             ports.finalize_device_management_reset(&target).await,
             Err(AdmissionSpaceTransitionError::Locked)
-        );
+        ));
     }
 
     #[tokio::test]
