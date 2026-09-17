@@ -86,11 +86,14 @@ impl ProductionRuntime {
         &self,
         input: SendFilesInput,
         cancellation: &CancellationToken,
+        session_cancellation: &CancellationToken,
     ) -> Result<OperationResult, EngineError> {
         if input.files.is_empty() {
             return Err(send_invalid_input_error());
         }
-        let imported = self.import_host_files(&input.files, cancellation).await?;
+        let imported = self
+            .import_host_files(&input.files, cancellation, session_cancellation)
+            .await?;
         let uri_list = imported
             .iter()
             .map(|file| {
@@ -159,6 +162,7 @@ impl ProductionRuntime {
         &self,
         handles: &[crate::HostFileHandle],
         cancellation: &CancellationToken,
+        session_cancellation: &CancellationToken,
     ) -> Result<Vec<ImportedHostFile>, EngineError> {
         let import_root = self.file_cache_dir.join("engine-imports");
         std::fs::create_dir_all(&import_root).map_err(|error| {
@@ -173,7 +177,7 @@ impl ProductionRuntime {
 
         let mut imported = Vec::with_capacity(handles.len());
         for (index, handle) in handles.iter().enumerate() {
-            if cancellation.is_cancelled() {
+            if cancellation.is_cancelled() || session_cancellation.is_cancelled() {
                 cleanup_failed_import(&operation_dir);
                 return Err(operation_unavailable_error());
             }
@@ -196,6 +200,7 @@ impl ProductionRuntime {
                 metadata.size_bytes,
                 &path,
                 cancellation,
+                session_cancellation,
             ) {
                 cleanup_failed_import(&operation_dir);
                 return Err(error);
@@ -311,6 +316,7 @@ fn copy_host_file(
     size_bytes: u64,
     destination: &Path,
     cancellation: &CancellationToken,
+    session_cancellation: &CancellationToken,
 ) -> Result<(), EngineError> {
     let mut output = OpenOptions::new()
         .create_new(true)
@@ -322,7 +328,7 @@ fn copy_host_file(
         })?;
     let mut offset = 0_u64;
     while offset < size_bytes {
-        if cancellation.is_cancelled() {
+        if cancellation.is_cancelled() || session_cancellation.is_cancelled() {
             return Err(operation_unavailable_error());
         }
         let remaining = size_bytes - offset;
