@@ -5,7 +5,8 @@ use iroh::TransportAddr;
 use sha2::Digest;
 use std::sync::{Arc, Mutex, TryLockError};
 use std::time::Duration;
-use tokio::task::JoinSet;
+use tokio::task::{JoinError, JoinSet};
+use tokio::time::{timeout_at, Instant};
 use uc_observability_contract::diagnostics::connectivity::{
     ConnectionCloseReason, ConnectionDirection, NetworkPathKind, NetworkRecorder, ObserverFailure,
     PathObservationKind,
@@ -16,6 +17,19 @@ const MAX_OBSERVERS: usize = 4096;
 struct State {
     closed: bool,
     tasks: JoinSet<()>,
+    failures: Vec<JoinError>,
+}
+
+impl State {
+    fn reap_finished(&mut self) {
+        while let Some(result) = self.tasks.try_join_next() {
+            if let Err(error) = result {
+                // 首次异常后不再登记观察任务，失败记录由节点保留且总量有界。
+                self.closed = true;
+                self.failures.push(error);
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -36,29 +50,43 @@ impl ObservedConnections {
             state: Arc::new(Mutex::new(State {
                 closed: false,
                 tasks: JoinSet::new(),
+                failures: Vec::new(),
             })),
             recorder,
         }
     }
 
-    pub(super) async fn shutdown(&self) {
-        let mut tasks = {
+    pub(super) async fn shutdown(&self, deadline: Option<Instant>) -> Vec<JoinError> {
+        let deadline = deadline.unwrap_or_else(|| Instant::now() + Duration::from_millis(500));
+        let (mut tasks, mut failures) = {
             let mut state = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.closed = true;
-            std::mem::take(&mut state.tasks)
+            (
+                std::mem::take(&mut state.tasks),
+                std::mem::take(&mut state.failures),
+            )
         };
-        if tokio::time::timeout(Duration::from_millis(500), async {
-            while tasks.join_next().await.is_some() {}
+        if timeout_at(deadline, async {
+            while let Some(result) = tasks.join_next().await {
+                if let Err(error) = result {
+                    failures.push(error);
+                }
+            }
         })
         .await
         .is_err()
         {
             tasks.abort_all();
-            while tasks.join_next().await.is_some() {}
+            while let Some(result) = tasks.join_next().await {
+                if let Err(error) = result {
+                    failures.push(error);
+                }
+            }
         }
+        failures
     }
 }
 
@@ -81,7 +109,7 @@ impl EndpointHooks for ObservedConnections {
                     return AfterHandshakeOutcome::accept();
                 }
             };
-            while state.tasks.try_join_next().is_some() {}
+            state.reap_finished();
             if state.closed || state.tasks.len() >= MAX_OBSERVERS {
                 self.recorder.connection_observer_unavailable(
                     peer,
@@ -167,5 +195,64 @@ fn close_reason(reason: &iroh::endpoint::ConnectionError) -> ConnectionCloseReas
         ConnectionError::Reset => ConnectionCloseReason::RemoteReset,
         ConnectionError::VersionMismatch => ConnectionCloseReason::VersionMismatch,
         _ => ConnectionCloseReason::TransportFailed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Arc, Duration, Instant, NetworkRecorder, ObservedConnections};
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_deadline_does_not_start_another_observer_grace_period() {
+        let observers = ObservedConnections::new(NetworkRecorder::default());
+        observers
+            .state
+            .lock()
+            .unwrap()
+            .tasks
+            .spawn(std::future::pending());
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(10);
+        tokio::time::advance(Duration::from_millis(20)).await;
+        let failures = observers.shutdown(Some(deadline)).await;
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].is_cancelled());
+        assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn reaped_observer_failure_remains_visible_at_shutdown() {
+        let observers = ObservedConnections::new(NetworkRecorder::default());
+        let (started, ready) = tokio::sync::oneshot::channel();
+        observers.state.lock().unwrap().tasks.spawn(async move {
+            let _ = started.send(());
+            panic!("PRIVATE_OBSERVER_FAILURE");
+        });
+        ready.await.unwrap();
+        tokio::task::yield_now().await;
+        {
+            let mut state = observers.state.lock().unwrap();
+            state.reap_finished();
+            assert!(state.closed);
+            assert_eq!(state.tasks.len(), 0);
+        }
+        let failures = observers.shutdown(None).await;
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].is_panic());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn forced_observer_exit_is_reported_after_resources_are_released() {
+        let observers = ObservedConnections::new(NetworkRecorder::default());
+        let resource = Arc::new(());
+        let held = Arc::clone(&resource);
+        observers.state.lock().unwrap().tasks.spawn(async move {
+            let _held = held;
+            std::future::pending::<()>().await;
+        });
+        let failures = observers.shutdown(None).await;
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].is_cancelled());
+        assert_eq!(Arc::strong_count(&resource), 1);
     }
 }
