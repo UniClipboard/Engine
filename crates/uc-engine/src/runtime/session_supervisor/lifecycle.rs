@@ -87,10 +87,8 @@ where
     Drain: Future<Output = Result<(), EngineError>>,
     Stop: Future<Output = Result<(), LifecycleError>>,
 {
+    drain_operations.await.map_err(anyhow::Error::new)?;
     let mut errors = Vec::new();
-    if let Err(error) = drain_operations.await {
-        errors.push(error.into());
-    }
     if let Err(error) = stop_session.await {
         errors.push(error.primary.context("stop current session"));
         errors.extend(
@@ -116,7 +114,7 @@ mod tests {
     use uc_core::TaskRegistry;
 
     #[tokio::test]
-    async fn operation_drain_failure_still_notifies_and_reports_session_stop() {
+    async fn operation_drain_failure_keeps_the_session_available_to_in_flight_work() {
         let stop_called = AtomicBool::new(false);
         let result = super::drain_operations_and_stop_session(
             async {
@@ -137,11 +135,9 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(stop_called.load(Ordering::SeqCst));
-        let report = result.downcast::<LifecycleError>().unwrap();
-        assert_eq!(report.additional.len(), 2);
+        assert!(!stop_called.load(Ordering::SeqCst));
         assert_eq!(
-            super::lifecycle_error(report).category(),
+            result.downcast_ref::<EngineError>().unwrap().category(),
             EngineErrorCategory::DeadlineExceeded
         );
     }
