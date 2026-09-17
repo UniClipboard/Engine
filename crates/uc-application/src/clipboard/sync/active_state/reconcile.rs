@@ -267,7 +267,9 @@ mod tests {
     #[async_trait]
     impl LoadActiveClipboardPort for LoadErrors {
         async fn load(&self) -> Result<Option<ActiveClipboardState>, ActiveClipboardRegisterError> {
-            Err(ActiveClipboardRegisterError::Storage("load boom".into()))
+            Err(ActiveClipboardRegisterError::Storage(anyhow::anyhow!(
+                "load boom"
+            )))
         }
     }
 
@@ -288,9 +290,9 @@ mod tests {
     #[async_trait]
     impl ResetActiveClipboardPort for ResetErrors {
         async fn reset(&self) -> Result<(), ActiveClipboardRegisterError> {
-            Err(ActiveClipboardRegisterError::Storage(
-                "reset boom".to_owned(),
-            ))
+            Err(ActiveClipboardRegisterError::Storage(anyhow::anyhow!(
+                "reset boom"
+            )))
         }
     }
 

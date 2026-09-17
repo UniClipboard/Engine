@@ -86,6 +86,8 @@ pub enum ClipboardBackgroundError {
 pub trait ClipboardBackgroundPort: Send + Sync {
     async fn start(&self, task_registry: Arc<TaskRegistry>)
         -> Result<(), ClipboardBackgroundError>;
+    async fn suspend(&self);
+    async fn resume(&self);
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -574,6 +576,10 @@ mod tests {
 
     #[async_trait]
     impl ClipboardBackgroundPort for BackgroundProbe {
+        async fn suspend(&self) {}
+
+        async fn resume(&self) {}
+
         async fn start(
             &self,
             _task_registry: Arc<TaskRegistry>,
@@ -588,7 +594,7 @@ mod tests {
         let background = BackgroundProbe(AtomicBool::new(false));
         let result = start_background_after_reconcile(
             Err(ActiveClipboardReconcileError::LoadRegister {
-                source: ActiveClipboardRegisterError::Storage("unavailable".to_owned()),
+                source: ActiveClipboardRegisterError::Storage(anyhow::anyhow!("unavailable")),
             }),
             &background,
             Arc::new(TaskRegistry::new()),
