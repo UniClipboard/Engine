@@ -20,7 +20,7 @@ use uc_core::membership::{
     MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
-use uc_core::ports::PeerAddressRepositoryPort;
+use uc_core::ports::{ClockPort, PeerAddressRepositoryPort};
 use uc_observability_contract::diagnostics::{
     complete_operation, describe_membership_exchange, describe_operation_failure, operation_span,
     DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation, DiagnosticRole, DiagnosticSpanKind,
@@ -29,6 +29,7 @@ use uc_observability_contract::diagnostics::{
 
 use super::connect_with_staggered_retry;
 use super::peer_address_resolver::PeerAddressResolver;
+use super::persistable_addr::{observed_stable_remote_addr, persist_observed_stable_addr};
 use super::trace_context::{inject_current, set_remote_parent, WireTraceContext};
 
 pub const MEMBERSHIP_HISTORY_EXCHANGE_ALPN: &[u8] = b"uniclipboard/membership-history/4";
@@ -48,16 +49,21 @@ struct WireMembershipHistoryRequest {
 pub struct IrohMembershipHistoryExchangeAdapter {
     endpoint: Arc<Endpoint>,
     peer_address_resolver: PeerAddressResolver,
+    peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    clock: Arc<dyn ClockPort>,
 }
 
 impl IrohMembershipHistoryExchangeAdapter {
     pub fn new(
         endpoint: Arc<Endpoint>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+        clock: Arc<dyn ClockPort>,
     ) -> Self {
         Self {
             endpoint,
-            peer_address_resolver: PeerAddressResolver::new(peer_addr_repo),
+            peer_address_resolver: PeerAddressResolver::new(Arc::clone(&peer_addr_repo)),
+            peer_addr_repo,
+            clock,
         }
     }
 
@@ -127,8 +133,19 @@ impl MembershipHistoryExchangePort for IrohMembershipHistoryExchangeAdapter {
         if accepted != ACCEPTED {
             return Err(transport_failure(DiagnosticErrorType::DecodeFailed));
         }
-        let response = read_message(&mut receive).await?;
-        decode_message(&response)
+        let response = decode_message(&read_message(&mut receive).await?)?;
+        if let Some(addr) =
+            observed_stable_remote_addr(&self.endpoint, connection.remote_id()).await
+        {
+            persist_observed_stable_addr(
+                self.peer_addr_repo.as_ref(),
+                self.clock.as_ref(),
+                recipient,
+                addr,
+            )
+            .await;
+        }
+        Ok(response)
     }
 }
 

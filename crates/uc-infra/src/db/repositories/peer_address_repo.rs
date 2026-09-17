@@ -109,6 +109,7 @@ mod tests {
     use crate::db::pool::init_db_pool;
     use crate::db::repositories::relationship_store::test_relationship_store;
     use chrono::{TimeZone, Utc};
+    use iroh::{EndpointAddr, RelayUrl, SecretKey, TransportAddr};
     use tempfile::{tempdir, TempDir};
 
     fn make_repo() -> (
@@ -230,5 +231,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn stable_relay_hint_survives_repository_reconstruction() {
+        let tempdir = tempdir().unwrap();
+        let database_url = tempdir.path().join("peer-address-restart.sqlite");
+        let endpoint_id = SecretKey::generate().public();
+        let relay: RelayUrl = "https://relay.example.com/".parse().unwrap();
+        let expected_addr = EndpointAddr::from_parts(endpoint_id, [TransportAddr::Relay(relay)]);
+        let expected = PeerAddressRecord {
+            device_id: DeviceId::new("restart-peer"),
+            addr_blob: postcard::to_stdvec(&expected_addr).unwrap(),
+            observed_at: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+        };
+
+        {
+            let pool = init_db_pool(database_url.to_str().unwrap()).unwrap();
+            let repo = DieselPeerAddressRepository::new(test_relationship_store(pool));
+            repo.upsert(&expected).await.unwrap();
+        }
+
+        let pool = init_db_pool(database_url.to_str().unwrap()).unwrap();
+        let repo = DieselPeerAddressRepository::new(test_relationship_store(pool));
+        let loaded = repo.get(&expected.device_id).await.unwrap().unwrap();
+
+        assert_eq!(loaded, expected);
+        assert_eq!(
+            postcard::from_bytes::<EndpointAddr>(&loaded.addr_blob).unwrap(),
+            expected_addr
+        );
     }
 }

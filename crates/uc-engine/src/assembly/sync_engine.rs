@@ -447,8 +447,10 @@ pub async fn prepare_sync_session(
         Arc::clone(&space_setup.settings),
         Arc::clone(&space_setup.fingerprint),
     );
-    let membership_history_exchange_adapter =
-        builder.build_membership_history_exchange_adapter(Arc::clone(&space_setup.peer_addr_repo));
+    let membership_history_exchange_adapter = builder.build_membership_history_exchange_adapter(
+        Arc::clone(&space_setup.peer_addr_repo),
+        Arc::clone(&space_setup.clock),
+    );
     let membership_branch_recovery_channel =
         builder.build_membership_branch_recovery_channel(Arc::clone(&space_setup.peer_addr_repo));
     let membership_transport = builder.build_membership_gossip_transport(

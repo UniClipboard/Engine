@@ -1335,10 +1335,12 @@ impl IrohSessionBuilder {
     pub fn build_membership_history_exchange_adapter(
         &self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+        clock: Arc<dyn ClockPort>,
     ) -> Arc<IrohMembershipHistoryExchangeAdapter> {
         Arc::new(IrohMembershipHistoryExchangeAdapter::new(
             Arc::clone(&self.context.endpoint),
             peer_addr_repo,
+            clock,
         ))
     }
 
