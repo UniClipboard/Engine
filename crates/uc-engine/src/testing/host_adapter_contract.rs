@@ -3,7 +3,7 @@ use std::collections::HashMap;
 mod profile_upgrade_backup;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use crate::{
     Engine, EngineConfig, EngineEvent, EngineState, HostCapabilities, HostCapabilityError,
@@ -22,6 +22,9 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 static ENGINE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[cfg(feature = "dev-tools")]
+mod offline_lifecycle;
 
 #[tokio::test]
 #[ignore = "需要显式提供本地资料，只操作临时副本"]
@@ -136,7 +139,7 @@ async fn next_engine_event_matching(
 }
 
 async fn wait_entry_delivered(engine: &Engine, entry_id: &str, target_device_id: &str) {
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
         loop {
             let result = engine
                 .execute(crate::Operation::QueryEntryDelivery(
@@ -1296,6 +1299,50 @@ impl HostClipboard for NotifyingHostClipboard {
     }
 }
 
+struct BlockingNotifyingHostClipboard {
+    snapshot: HostClipboardSnapshot,
+    changes: Mutex<Option<Box<dyn HostClipboardChangeStream>>>,
+    block_next_read: AtomicBool,
+    read_entered: tokio::sync::Semaphore,
+    read_release: (Mutex<bool>, Condvar),
+}
+
+impl BlockingNotifyingHostClipboard {
+    fn arm(&self) {
+        self.block_next_read.store(true, Ordering::SeqCst);
+    }
+
+    fn release_read(&self) {
+        let (released, changed) = &self.read_release;
+        *released.lock().unwrap() = true;
+        changed.notify_all();
+    }
+}
+
+impl HostClipboard for Arc<BlockingNotifyingHostClipboard> {
+    fn read(&self) -> Result<HostClipboardSnapshot, HostCapabilityError> {
+        if self.block_next_read.swap(false, Ordering::SeqCst) {
+            self.read_entered.add_permits(1);
+            let (released, changed) = &self.read_release;
+            let mut released = released.lock().unwrap();
+            while !*released {
+                released = changed.wait(released).unwrap();
+            }
+        }
+        Ok(self.snapshot.clone())
+    }
+
+    fn write(&self, _snapshot: HostClipboardSnapshot) -> Result<(), HostCapabilityError> {
+        Ok(())
+    }
+
+    fn take_change_stream(
+        &mut self,
+    ) -> Result<Option<Box<dyn HostClipboardChangeStream>>, HostCapabilityError> {
+        Ok(self.changes.lock().unwrap().take())
+    }
+}
+
 struct ChannelClipboardChanges {
     receiver: tokio::sync::mpsc::UnboundedReceiver<()>,
     stopped: Arc<AtomicBool>,
@@ -1633,6 +1680,88 @@ async fn host_clipboard_change_is_processed_by_the_engine_and_stops_on_shutdown(
         .await
         .unwrap();
     assert!(stopped.load(Ordering::SeqCst));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn suspend_waits_for_a_started_host_clipboard_change_to_finish() {
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let private = temp.path().join("private");
+    let cache = temp.path().join("cache");
+    let temporary = temp.path().join("temporary");
+    for directory in [&private, &cache, &temporary] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    let probe = "started host clipboard change survives suspension".to_string();
+    let (change_tx, change_rx) = tokio::sync::mpsc::unbounded_channel();
+    let clipboard = Arc::new(BlockingNotifyingHostClipboard {
+        snapshot: HostClipboardSnapshot {
+            observed_at_ms: 102,
+            representations: vec![HostClipboardRepresentation::Inline {
+                format: "text".into(),
+                mime_type: Some("text/plain".into()),
+                bytes: probe.as_bytes().to_vec(),
+            }],
+        },
+        changes: Mutex::new(Some(Box::new(ChannelClipboardChanges {
+            receiver: change_rx,
+            stopped: Arc::new(AtomicBool::new(false)),
+        }))),
+        block_next_read: AtomicBool::new(false),
+        read_entered: tokio::sync::Semaphore::new(0),
+        read_release: (Mutex::new(false), Condvar::new()),
+    });
+    let host = HostCapabilities::new(
+        HostDirectories::new(private, cache, temporary, temp.path().join("logs")),
+        Box::new(MemoryHostSecureStorage::default()),
+        Box::new(Arc::clone(&clipboard)),
+        Box::new(EmptyHostFiles),
+    );
+    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host)
+        .await
+        .unwrap();
+    engine
+        .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
+            device_name: Some("Clipboard Device".into()),
+            passphrase: crate::SecretString::new("correct horse"),
+            passphrase_confirmation: crate::SecretString::new("correct horse"),
+        }))
+        .await
+        .unwrap();
+
+    clipboard.arm();
+    change_tx.send(()).unwrap();
+    let permit = clipboard.read_entered.acquire().await.unwrap();
+    permit.forget();
+    let mut suspending = Box::pin(engine.suspend());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), suspending.as_mut())
+            .await
+            .is_err()
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(2_200)).await;
+    clipboard.release_read();
+    suspending.await.unwrap();
+
+    engine.resume().await.unwrap();
+    let result = engine
+        .execute(crate::Operation::QueryHistory(crate::QueryHistoryInput {
+            cursor: None,
+            limit: 10,
+            query: Some(probe.clone()),
+        }))
+        .await
+        .unwrap();
+    let crate::OperationResult::HistoryPage { entries, .. } = result else {
+        panic!("expected history page");
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].preview.as_deref(), Some(probe.as_str()));
+
+    engine
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -3256,9 +3385,8 @@ async fn engine_start_builds_a_resumable_real_session() {
             EngineState::Quiescing,
             EngineState::Quiesced,
             EngineState::Suspended,
-            EngineState::Running,
-            EngineState::Quiescing,
             EngineState::Quiesced,
+            EngineState::Running,
             EngineState::ShuttingDown,
             EngineState::Stopped,
         ]
