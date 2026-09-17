@@ -21,6 +21,8 @@ const legacyBinary = options.get('--legacy-host')
 let relay
 const repeat = Number(options.get('--repeat') ?? 3)
 assert(Number.isInteger(repeat) && repeat > 0)
+// 多进程状态读取会跨过截止点少量时间；只给观测过程留余量，不改变 Engine 的二十秒预算。
+const offlineObservationGrace = 250
 const evidence = resolve(options.get('--evidence') ?? 'target/connection-recovery-evidence')
 mkdirSync(evidence, { recursive: true, mode: 0o700 })
 const runId = `ucr${process.pid}`
@@ -202,7 +204,7 @@ async function offline(isolated, budget) {
       return expected.every(peer => peers.some(row => row.peer_id === peer.id && !row.connected))
     }))
     return results.every(Boolean)
-  }, budget, 'silent disconnection exceeded its deadline')
+  }, budget + offlineObservationGrace, 'silent disconnection exceeded its deadline')
 }
 
 async function online(group, budget) {
