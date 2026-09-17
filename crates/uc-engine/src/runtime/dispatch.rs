@@ -79,7 +79,6 @@ use crate::operations::space::unlock::execute_unlock_space;
 use crate::{EngineError, EngineErrorCategory, Operation, OperationResult};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
 use uc_application::facade::NetworkRecoveryRequestError;
 
 #[async_trait]
@@ -768,17 +767,6 @@ impl EngineRuntime for ProductionRuntime {
     }
 
     async fn shutdown(&self, deadline: Option<Instant>) -> Result<(), EngineError> {
-        self.security_lifecycle.close_security_session();
-        self.network_recovery.shutdown().await;
-        self.session_supervisor.suspend(deadline).await?;
-        self.session_supervisor.clear_factory();
-        self.session_supervisor.close_file_transfers().await?;
-        super::task_shutdown::shutdown_tasks(&self.task_registry, deadline).await;
-        if let Err(error) = std::fs::remove_dir_all(&self.clipboard_import_root) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                warn!(error = %error, "failed to remove host clipboard imports");
-            }
-        }
-        Ok(())
+        super::shutdown::shutdown(self, deadline).await
     }
 }
