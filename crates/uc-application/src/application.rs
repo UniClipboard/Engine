@@ -1,11 +1,11 @@
 //! Application 顶层对象图与运行期所有权。
 //!
 //! Engine 只选择具体 adapter；本模块统一构造稳定 facade，并持有 Search、
-//! Clipboard 与历史维护的启动、关闭顺序。
+//! Clipboard 与历史维护的启动及完整关闭。
 
 use crate::clipboard::inbound::ClipboardReceiverPort;
 use std::sync::Arc;
-use std::time::Duration;
+use tokio::time::Instant;
 
 use uc_core::clipboard::ClipboardIntegrationMode;
 use uc_core::file_transfer::OutboundProgressReporterPort;
@@ -35,8 +35,12 @@ use crate::facade::app_facade::{AppFacade, AppFacadeParts};
 use crate::facade::blob_transfer::BlobTransferFacade;
 use crate::facade::clipboard::facade::ClipboardSyncDeps;
 use crate::facade::clipboard::ClipboardSyncFacade;
-use crate::facade::clipboard_history::{HistoryMaintenanceRuntime, HistoryMaintenanceRuntimeError};
+use crate::facade::clipboard_history::HistoryMaintenanceRuntime;
 use crate::facade::clipboard_write::RestoreBroadcastTrigger;
+use crate::runtime_lifecycle::{
+    LifecycleError, RuntimeLifecycle, RuntimeLifecycleParticipants, RuntimeLifecyclePort,
+    TransitionContext,
+};
 use crate::search::{SearchAssembly, SearchShutdownError};
 use crate::settings::SettingsAssembly;
 use crate::space::{
@@ -46,6 +50,10 @@ use crate::space::{
 use crate::transfer::blob::facade::BlobTransferDeps;
 use crate::transfer::file::assembly::FileTransferAssembly;
 use crate::transfer::file::assembly::{FileTransferAssemblyDeps, ReceiveCancellationDeps};
+use crate::transfer::file::timeout_runtime::FileTransferTimeoutRuntime;
+
+mod shutdown;
+use shutdown::ApplicationShutdown;
 
 /// Engine 在 Iroh builder 上选择完成的 Space adapter。
 pub struct ApplicationSpaceAdapters {
@@ -196,16 +204,21 @@ pub enum ApplicationStartError {
         #[source]
         source: ActiveClipboardStartError,
         search_rollback: Option<SearchShutdownError>,
+        space_rollback: Option<Arc<LifecycleError>>,
     },
     #[error("active clipboard restore source attachment failed")]
     ActiveClipboardRestore {
         #[source]
         source: ActiveClipboardLifecycleError,
         search_rollback: Option<SearchShutdownError>,
+        active_clipboard_rollback: Option<LifecycleError>,
+        space_rollback: Option<Arc<LifecycleError>>,
     },
     #[error("Space session activity was already bound")]
     SpaceActivityAlreadyBound {
         search_rollback: Option<SearchShutdownError>,
+        active_clipboard_rollback: Option<LifecycleError>,
+        space_rollback: Option<Arc<LifecycleError>>,
     },
 }
 
@@ -268,6 +281,18 @@ impl ApplicationAssembly {
 
     pub fn host_event_bus(&self) -> Arc<crate::facade::HostEventBus> {
         Arc::clone(&self.deps.host_event_bus)
+    }
+
+    pub fn runtime_lifecycle(
+        &self,
+        session_work: Arc<dyn RuntimeLifecyclePort>,
+        local_resources: Arc<dyn RuntimeLifecyclePort>,
+    ) -> Arc<RuntimeLifecycle> {
+        Arc::new(RuntimeLifecycle::new(RuntimeLifecycleParticipants {
+            session_work,
+            local_work: Arc::new(self.clone()),
+            local_resources,
+        }))
     }
 
     pub fn subscribe_space_transition_changes(&self) -> tokio::sync::watch::Receiver<()> {
@@ -525,21 +550,24 @@ impl ApplicationAssembly {
             Ok(runtime) => runtime,
             Err(source) => {
                 let search_rollback = search.shutdown().await.err();
-                space.on_shutdown().await;
+                let space_rollback = space.on_shutdown().await.err();
                 return Err(ApplicationStartError::ActiveClipboard {
                     source,
                     search_rollback,
+                    space_rollback,
                 });
             }
         };
         let (restore_tx, restore_rx) = tokio::sync::mpsc::unbounded_channel();
         if let Err(source) = active_clipboard.attach_restore_broadcast(restore_rx) {
-            active_clipboard.shutdown().await;
+            let active_clipboard_rollback = active_clipboard.shutdown().await.err();
             let search_rollback = search.shutdown().await.err();
-            space.on_shutdown().await;
+            let space_rollback = space.on_shutdown().await.err();
             return Err(ApplicationStartError::ActiveClipboardRestore {
                 source,
                 search_rollback,
+                active_clipboard_rollback,
+                space_rollback,
             });
         }
         if !space.bind_session_activity(
@@ -547,10 +575,14 @@ impl ApplicationAssembly {
             self.file_transfer.facade()
                 as Arc<dyn crate::transfer::receive::reconciliation::EnsureReceiveReadyPort>,
         ) {
-            active_clipboard.shutdown().await;
+            let active_clipboard_rollback = active_clipboard.shutdown().await.err();
             let search_rollback = search.shutdown().await.err();
-            space.on_shutdown().await;
-            return Err(ApplicationStartError::SpaceActivityAlreadyBound { search_rollback });
+            let space_rollback = space.on_shutdown().await.err();
+            return Err(ApplicationStartError::SpaceActivityAlreadyBound {
+                search_rollback,
+                active_clipboard_rollback,
+                space_rollback,
+            });
         }
 
         let clipboard = self.clipboard.start_session(ClipboardSessionDeps {
@@ -607,15 +639,29 @@ impl ApplicationAssembly {
         Ok(ApplicationRuntime {
             facade,
             inbound_clipboard,
-            owners: tokio::sync::Mutex::new(Some(ApplicationRuntimeOwners {
+            owners: Arc::new(tokio::sync::Mutex::new(Some(ApplicationRuntimeOwners {
                 history_maintenance,
                 file_transfer_timeout,
                 search,
                 space,
                 clipboard,
                 active_clipboard,
-            })),
+            }))),
+            shutdown: ApplicationShutdown::default(),
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeLifecyclePort for ApplicationAssembly {
+    async fn suspend(&self, _context: &TransitionContext) -> anyhow::Result<()> {
+        self.clipboard.suspend_background().await;
+        Ok(())
+    }
+
+    async fn resume(&self, _context: &TransitionContext) -> anyhow::Result<()> {
+        self.clipboard.resume_background().await;
+        Ok(())
     }
 }
 
@@ -623,7 +669,8 @@ impl ApplicationAssembly {
 pub struct ApplicationRuntime {
     facade: Arc<AppFacade>,
     inbound_clipboard: Arc<dyn InboundClipboardApplyPort>,
-    owners: tokio::sync::Mutex<Option<ApplicationRuntimeOwners>>,
+    owners: Arc<tokio::sync::Mutex<Option<ApplicationRuntimeOwners>>>,
+    shutdown: ApplicationShutdown,
 }
 
 struct ApplicationRuntimeOwners {
@@ -633,32 +680,6 @@ struct ApplicationRuntimeOwners {
     space: Arc<SpaceFacade>,
     clipboard: ClipboardSession,
     active_clipboard: ActiveClipboardSession,
-}
-
-struct FileTransferTimeoutRuntime {
-    cancel: tokio::sync::watch::Sender<bool>,
-    handle: tokio::task::JoinHandle<()>,
-}
-
-impl FileTransferTimeoutRuntime {
-    fn start(
-        file_transfer: Arc<crate::facade::FileTransferFacade>,
-        blob_transfer: Arc<BlobTransferFacade>,
-    ) -> Self {
-        let (cancel, receiver) = tokio::sync::watch::channel(false);
-        let handle = file_transfer.spawn_timeout_sweep(receiver, blob_transfer);
-        Self { cancel, handle }
-    }
-
-    async fn shutdown(mut self) {
-        let _ = self.cancel.send(true);
-        if tokio::time::timeout(Duration::from_secs(1), &mut self.handle)
-            .await
-            .is_err()
-        {
-            self.handle.abort();
-        }
-    }
 }
 
 impl ApplicationRuntime {
@@ -694,20 +715,16 @@ impl ApplicationRuntime {
         Arc::clone(&self.inbound_clipboard)
     }
 
-    pub async fn shutdown(&self) -> ApplicationShutdownReport {
-        let Some(owners) = self.owners.lock().await.take() else {
-            return ApplicationShutdownReport {
-                history: None,
-                search: None,
-            };
-        };
-        let history = owners.history_maintenance.shutdown().await.err();
-        owners.file_transfer_timeout.shutdown().await;
-        owners.clipboard.shutdown().await;
-        owners.active_clipboard.shutdown().await;
-        let search = owners.search.shutdown().await.err();
-        owners.space.on_shutdown().await;
-        ApplicationShutdownReport { history, search }
+    pub async fn shutdown(&self, deadline: Option<Instant>) -> Result<(), Arc<LifecycleError>> {
+        let owners = Arc::clone(&self.owners);
+        self.shutdown
+            .run(async move {
+                let Some(owners) = owners.lock().await.take() else {
+                    return Ok(());
+                };
+                owners.shutdown(deadline).await
+            })
+            .await
     }
 }
 
@@ -720,12 +737,6 @@ pub enum ApplicationRuntimeError {
         #[source]
         source: LocalClipboardProcessError,
     },
-}
-
-/// 关闭会尝试所有领域；报告保留每个下层的类型化失败。
-pub struct ApplicationShutdownReport {
-    pub history: Option<HistoryMaintenanceRuntimeError>,
-    pub search: Option<SearchShutdownError>,
 }
 
 #[cfg(test)]
@@ -754,6 +765,7 @@ mod tests {
         let error = ApplicationStartError::ActiveClipboard {
             source: ActiveClipboardStartError::BackgroundNotReady,
             search_rollback: None,
+            space_rollback: None,
         };
 
         assert!(error.source().is_some());

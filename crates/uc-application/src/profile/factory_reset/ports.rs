@@ -1,3 +1,4 @@
+use crate::runtime_lifecycle::LifecycleError;
 use async_trait::async_trait;
 
 use super::{
@@ -17,7 +18,7 @@ pub trait ProfileLifecycleRepositoryPort: Send + Sync {
 
 #[async_trait]
 pub trait StopProfileRuntimePort: Send + Sync {
-    async fn stop_profile_runtime(&self) -> Result<(), ProfileFactoryResetCapabilityError>;
+    async fn stop_profile_runtime(&self) -> Result<(), LifecycleError>;
 }
 
 #[async_trait]
