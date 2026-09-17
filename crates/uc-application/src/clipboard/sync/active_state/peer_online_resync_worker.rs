@@ -41,6 +41,7 @@ use tokio::sync::broadcast;
 #[cfg(test)]
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
 use uc_core::clipboard::ClipboardContentCategorySet;
@@ -93,17 +94,22 @@ impl PeerOnlineResyncWorker {
 
     #[cfg(test)]
     fn spawn(self) -> JoinHandle<()> {
-        tokio::spawn(self.run())
+        tokio::spawn(self.run(CancellationToken::new()))
     }
 
     #[instrument(name = "active_state.peer_online_resync_loop", skip_all)]
-    pub(crate) async fn run(self) {
+    pub(crate) async fn run(self, cancel: CancellationToken) {
         let mut rx = self.peer_reachability.subscribe();
         loop {
             // Block until the first online transition (or all senders drop →
             // exit). Non-online transitions (offline / unknown) are not a
             // resync trigger and are ignored.
-            let first = match Self::recv_next_online(&mut rx).await {
+            let first = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                first = Self::recv_next_online(&mut rx) => first,
+            };
+            let first = match first {
                 Some(device) => device,
                 None => {
                     info!("peer-online resync worker: presence subscription closed; exiting");
@@ -119,6 +125,7 @@ impl PeerOnlineResyncWorker {
             loop {
                 tokio::select! {
                     biased;
+                    _ = cancel.cancelled() => return,
                     maybe = Self::recv_next_online(&mut rx) => match maybe {
                         Some(device) => {
                             pending.insert(device);
@@ -531,6 +538,22 @@ mod tests {
             "no register → nothing to resend"
         );
         handle.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_during_debounce_does_not_dispatch_pending_state() {
+        let (worker, tx, dispatch) = build(Some(state("blake3v1:aa", "self")));
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(worker.run(cancel.clone()));
+        tokio::task::yield_now().await;
+        tx.send(online("peer-1")).unwrap();
+        tokio::task::yield_now().await;
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_millis(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(dispatch.sent.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

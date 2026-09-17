@@ -24,6 +24,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 #[cfg(test)]
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument, warn};
 
 use uc_core::ports::clipboard::ActiveClipboardDispatchPort;
@@ -73,14 +74,19 @@ impl RestoreBroadcastWorker {
 
     #[cfg(test)]
     fn spawn(self) -> JoinHandle<()> {
-        tokio::spawn(self.run())
+        tokio::spawn(self.run(CancellationToken::new()))
     }
 
     #[instrument(name = "active_state.restore_broadcast_loop", skip_all)]
-    pub(crate) async fn run(mut self) {
+    pub(crate) async fn run(mut self, cancel: CancellationToken) {
         loop {
             // Block until the next offer (or all senders drop → exit).
-            let mut latest = match self.rx.recv().await {
+            let latest = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                latest = self.rx.recv() => latest,
+            };
+            let mut latest = match latest {
                 Some(req) => req,
                 None => {
                     debug!("restore broadcast worker: all senders dropped; exiting");
@@ -95,6 +101,7 @@ impl RestoreBroadcastWorker {
             loop {
                 tokio::select! {
                     biased;
+                    _ = cancel.cancelled() => return,
                     maybe = self.rx.recv() => match maybe {
                         Some(req) => {
                             latest = req;
@@ -361,6 +368,21 @@ mod tests {
 
         assert!(dispatch.sent.lock().unwrap().is_empty());
         handle.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_during_debounce_does_not_broadcast_pending_restore() {
+        let (worker, tx, dispatch) = build_worker(true, ReachabilityState::Online);
+        let cancel = CancellationToken::new();
+        tx.send(request("blake3v1:aa")).unwrap();
+        let task = tokio::spawn(worker.run(cancel.clone()));
+        tokio::task::yield_now().await;
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_millis(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(dispatch.sent.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -21,6 +21,7 @@ pub(crate) mod resend_entry;
 pub(crate) mod send_gate;
 pub(crate) mod snapshot_from_entry;
 pub(crate) mod sync_runtime;
+mod work;
 
 pub(crate) use dispatch_entry::{
     DispatchClipboardEntryInput, DispatchClipboardEntryUseCase, DispatchOutcome, DispatchPerTarget,
