@@ -1,12 +1,8 @@
-use std::collections::HashMap;
 use std::ffi::{c_char, CStr, CString};
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::ptr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use serde::Deserialize;
@@ -18,8 +14,7 @@ use uc_engine::{
         OperatingSystem, ProcessObservabilityHandle, ProcessObservabilityRuntime,
     },
     CreateSpaceInput, Engine, EngineConfig, EngineError, EngineEvent, ExportEntryInput,
-    HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory, HostClipboard,
-    HostClipboardSnapshot, HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata,
+    HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory, HostDirectories,
     HostSecureStorage, JoinSpaceInput, Operation, OperationResult, QueryHistoryInput,
     RemoveMemberInput, ResendEntryInput, SecretString, SendFilesInput, SendImageInput,
     SendTextInput, UnlockSpaceInput,
@@ -27,6 +22,13 @@ use uc_engine::{
 
 #[cfg(target_os = "android")]
 mod android;
+mod clipboard;
+mod file_access;
+mod lifecycle_scenario;
+mod secure_storage;
+
+use clipboard::ProbeClipboard;
+use file_access::ProbeFiles;
 
 #[cfg(target_vendor = "apple")]
 const KEYCHAIN_SERVICE: &str = "app.uniclipboard.engine-probe";
@@ -94,7 +96,33 @@ enum ProbeCommand {
     ResendEntry {
         entry_id: String,
     },
-    Suspend,
+    Suspend {
+        #[serde(default)]
+        deadline_ms: Option<u64>,
+    },
+    SuspendDuringClipboardRead {
+        block_ms: u64,
+        deadline_ms: u64,
+    },
+    SuspendDuringClipboardWrite {
+        block_ms: u64,
+        deadline_ms: u64,
+    },
+    SuspendDuringFileRead {
+        block_ms: u64,
+        deadline_ms: u64,
+    },
+    SuspendDuringFileWrite {
+        block_ms: u64,
+        deadline_ms: u64,
+    },
+    SuspendDuringStartup {
+        block_ms: u64,
+        deadline_ms: u64,
+    },
+    VerifyStaleClipboardChangeAfterSuspend {
+        deadline_ms: u64,
+    },
     Resume,
     EventSummary,
     Shutdown,
@@ -160,125 +188,6 @@ struct EventSummary {
     last_re_pairing_scope: Option<String>,
 }
 
-#[derive(Clone)]
-struct RegisteredFile {
-    path: PathBuf,
-    display_name: String,
-    mime_type: Option<String>,
-}
-
-#[derive(Clone, Default)]
-struct ProbeFiles {
-    next_handle: Arc<AtomicU64>,
-    files: Arc<Mutex<HashMap<String, RegisteredFile>>>,
-}
-
-impl ProbeFiles {
-    fn register(
-        &self,
-        path: PathBuf,
-        display_name: String,
-        mime_type: Option<String>,
-    ) -> HostFileHandle {
-        let handle = format!(
-            "probe-file-{}",
-            self.next_handle.fetch_add(1, Ordering::Relaxed)
-        );
-        lock_unpoisoned(&self.files).insert(
-            handle.clone(),
-            RegisteredFile {
-                path,
-                display_name,
-                mime_type,
-            },
-        );
-        HostFileHandle::new(handle)
-    }
-
-    fn lookup(&self, handle: &HostFileHandle) -> Result<RegisteredFile, HostCapabilityError> {
-        lock_unpoisoned(&self.files)
-            .get(handle.as_str())
-            .cloned()
-            .ok_or_else(|| host_error(HostCapabilityErrorCategory::InvalidHandle))
-    }
-}
-
-impl HostFileAccess for ProbeFiles {
-    fn metadata(&self, handle: &HostFileHandle) -> Result<HostFileMetadata, HostCapabilityError> {
-        let file = self.lookup(handle)?;
-        let metadata = std::fs::metadata(&file.path)
-            .map_err(|_| host_error(HostCapabilityErrorCategory::Io))?;
-        Ok(HostFileMetadata {
-            display_name: file.display_name,
-            size_bytes: metadata.len(),
-            mime_type: file.mime_type,
-        })
-    }
-
-    fn read_chunk(
-        &self,
-        handle: &HostFileHandle,
-        offset: u64,
-        max_bytes: u32,
-    ) -> Result<Vec<u8>, HostCapabilityError> {
-        let file = self.lookup(handle)?;
-        let mut input =
-            File::open(file.path).map_err(|_| host_error(HostCapabilityErrorCategory::Io))?;
-        input
-            .seek(SeekFrom::Start(offset))
-            .map_err(|_| host_error(HostCapabilityErrorCategory::Io))?;
-        let mut bytes = vec![0; max_bytes as usize];
-        let read = input
-            .read(&mut bytes)
-            .map_err(|_| host_error(HostCapabilityErrorCategory::Io))?;
-        bytes.truncate(read);
-        Ok(bytes)
-    }
-
-    fn write_chunk(
-        &self,
-        handle: &HostFileHandle,
-        offset: u64,
-        bytes: &[u8],
-    ) -> Result<(), HostCapabilityError> {
-        let file = self.lookup(handle)?;
-        let mut output = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(file.path)
-            .map_err(|_| host_error(HostCapabilityErrorCategory::Io))?;
-        output
-            .seek(SeekFrom::Start(offset))
-            .and_then(|_| output.write_all(bytes))
-            .map_err(|_| host_error(HostCapabilityErrorCategory::Io))
-    }
-
-    fn finish_write(&self, handle: &HostFileHandle) -> Result<(), HostCapabilityError> {
-        let file = self.lookup(handle)?;
-        OpenOptions::new()
-            .write(true)
-            .open(file.path)
-            .and_then(|output| output.sync_all())
-            .map_err(|_| host_error(HostCapabilityErrorCategory::Io))
-    }
-}
-
-struct ProbeClipboard;
-
-impl HostClipboard for ProbeClipboard {
-    fn read(&self) -> Result<HostClipboardSnapshot, HostCapabilityError> {
-        Ok(HostClipboardSnapshot {
-            observed_at_ms: 0,
-            representations: Vec::new(),
-        })
-    }
-
-    fn write(&self, _snapshot: HostClipboardSnapshot) -> Result<(), HostCapabilityError> {
-        Ok(())
-    }
-}
-
 #[cfg(target_vendor = "apple")]
 struct KeychainStorage;
 
@@ -324,20 +233,24 @@ impl HostSecureStorage for UnavailableSecureStorage {
     }
 }
 
+#[derive(Clone)]
+struct ProbeStartConfig {
+    engine: EngineConfig,
+    directories: HostDirectories,
+}
+
+#[derive(Default)]
 struct ProbeState {
     engine: Option<Arc<Engine>>,
+    start_config: Option<ProbeStartConfig>,
     observability: Option<ProcessObservabilityHandle>,
     files: ProbeFiles,
+    clipboard: ProbeClipboard,
     events: Arc<Mutex<EventSummary>>,
 }
 
 async fn run_probe(mut requests: mpsc::UnboundedReceiver<ProbeRequest>) {
-    let mut state = ProbeState {
-        engine: None,
-        observability: None,
-        files: ProbeFiles::default(),
-        events: Arc::new(Mutex::new(EventSummary::default())),
-    };
+    let mut state = ProbeState::default();
     while let Some(request) = requests.recv().await {
         let response = execute_command(&mut state, request.command).await;
         let _ = request.response.send(response);
@@ -386,21 +299,21 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
                 Err(_) => return probe_error("observability_install_failed"),
             };
             state.observability = Some(observability);
+            let engine_config = EngineConfig::new(app_version);
+            let start_config = ProbeStartConfig {
+                engine: engine_config.clone(),
+                directories: directories.clone(),
+            };
             let host = HostCapabilities::new(
                 directories,
                 host_secure_storage(),
-                Box::new(ProbeClipboard),
+                Box::new(state.clipboard.clone()),
                 Box::new(state.files.clone()),
             );
-            match Engine::start(EngineConfig::new(app_version), host).await {
-                Ok((engine, mut stream)) => {
-                    let events = Arc::clone(&state.events);
-                    tokio::spawn(async move {
-                        while let Some(event) = stream.next().await {
-                            record_event(&events, event);
-                        }
-                    });
-                    state.engine = Some(Arc::new(engine));
+            match Engine::start(engine_config, host).await {
+                Ok((engine, stream)) => {
+                    state.start_config = Some(start_config);
+                    store_engine(state, engine, stream);
                     json!({"ok": true, "kind": "started"})
                 }
                 Err(error) => engine_error(error),
@@ -561,16 +474,51 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
             )
             .await
         }
-        ProbeCommand::Suspend => match state.engine.as_ref() {
+        ProbeCommand::Suspend { deadline_ms } => match state.engine.as_ref() {
             Some(engine) => {
-                let result = engine.suspend().await;
+                let started_at = Instant::now();
+                let result = match deadline_ms {
+                    Some(deadline_ms) => {
+                        engine
+                            .suspend_with_deadline(Duration::from_millis(deadline_ms))
+                            .await
+                    }
+                    None => engine.suspend().await,
+                };
                 flush_observability_after_success(state.observability.as_ref(), &result);
-                lifecycle_response(result, "suspended")
+                lifecycle_response(result, "suspended", started_at.elapsed())
             }
             None => probe_error("not_started"),
         },
+        ProbeCommand::SuspendDuringClipboardRead {
+            block_ms,
+            deadline_ms,
+        } => lifecycle_scenario::suspend_during_clipboard_read(state, block_ms, deadline_ms).await,
+        ProbeCommand::SuspendDuringClipboardWrite {
+            block_ms,
+            deadline_ms,
+        } => lifecycle_scenario::suspend_during_clipboard_write(state, block_ms, deadline_ms).await,
+        ProbeCommand::SuspendDuringFileRead {
+            block_ms,
+            deadline_ms,
+        } => lifecycle_scenario::suspend_during_file_read(state, block_ms, deadline_ms).await,
+        ProbeCommand::SuspendDuringFileWrite {
+            block_ms,
+            deadline_ms,
+        } => lifecycle_scenario::suspend_during_file_write(state, block_ms, deadline_ms).await,
+        ProbeCommand::SuspendDuringStartup {
+            block_ms,
+            deadline_ms,
+        } => lifecycle_scenario::suspend_during_startup(state, block_ms, deadline_ms).await,
+        ProbeCommand::VerifyStaleClipboardChangeAfterSuspend { deadline_ms } => {
+            lifecycle_scenario::verify_stale_clipboard_change_after_suspend(state, deadline_ms)
+                .await
+        }
         ProbeCommand::Resume => match state.engine.as_ref() {
-            Some(engine) => lifecycle_response(engine.resume().await, "resumed"),
+            Some(engine) => {
+                let started_at = Instant::now();
+                lifecycle_response(engine.resume().await, "resumed", started_at.elapsed())
+            }
             None => probe_error("not_started"),
         },
         ProbeCommand::EventSummary => {
@@ -592,9 +540,10 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
         }
         ProbeCommand::Shutdown => match state.engine.take() {
             Some(engine) => {
+                let started_at = Instant::now();
                 let result = engine.shutdown(Duration::from_secs(15)).await;
                 flush_observability_after_success(state.observability.as_ref(), &result);
-                lifecycle_response(result, "shutdown")
+                lifecycle_response(result, "shutdown", started_at.elapsed())
             }
             None => probe_error("not_started"),
         },
@@ -1460,11 +1409,25 @@ fn mobile_sync_apply_outcome(
     }
 }
 
-fn lifecycle_response(result: Result<(), EngineError>, kind: &str) -> Value {
-    match result {
+fn lifecycle_response(result: Result<(), EngineError>, kind: &str, elapsed: Duration) -> Value {
+    let mut response = match result {
         Ok(()) => json!({"ok": true, "kind": kind}),
         Err(error) => engine_error(error),
+    };
+    if let Some(response) = response.as_object_mut() {
+        response.insert("elapsed_ms".to_owned(), json!(elapsed.as_millis()));
     }
+    response
+}
+
+fn store_engine(state: &mut ProbeState, engine: Engine, mut stream: uc_engine::EventStream) {
+    let events = Arc::clone(&state.events);
+    tokio::spawn(async move {
+        while let Some(event) = stream.next().await {
+            record_event(&events, event);
+        }
+    });
+    state.engine = Some(Arc::new(engine));
 }
 
 #[allow(unreachable_patterns)]
@@ -1502,6 +1465,15 @@ fn record_event(summary: &Arc<Mutex<EventSummary>>, event: EngineEvent) {
         EngineEvent::Fatal { .. } => summary.fatal_errors += 1,
         // 全工作区检查会合并 uc-engine 的 dev-tools；移动宿主忽略开发事件。
         _ => {}
+    }
+}
+
+fn engine_error_kind(error: &EngineError) -> &'static str {
+    match error.category() {
+        uc_engine::EngineErrorCategory::DeadlineExceeded => "deadline_exceeded",
+        uc_engine::EngineErrorCategory::InvalidState => "invalid_state",
+        uc_engine::EngineErrorCategory::Unavailable => "unavailable",
+        _ => "engine_error",
     }
 }
 
@@ -1593,16 +1565,98 @@ fn string_to_c_string(value: String) -> *mut c_char {
 mod tests {
     use super::*;
 
+    #[test]
+    fn lifecycle_response_reports_host_visible_elapsed_time() {
+        let response = lifecycle_response(Ok(()), "suspended", Duration::from_millis(37));
+
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["kind"], "suspended");
+        assert_eq!(response["elapsed_ms"], 37);
+    }
+
     #[tokio::test]
     async fn query_active_clipboard_command_reaches_the_engine_boundary() {
         let command: ProbeCommand = serde_json::from_str(r#"{"command":"query_active_clipboard"}"#)
             .expect("query-active command must deserialize");
-        let mut state = ProbeState {
-            engine: None,
-            observability: None,
-            files: ProbeFiles::default(),
-            events: Arc::new(Mutex::new(EventSummary::default())),
-        };
+        let mut state = ProbeState::default();
+
+        let response = execute_command(&mut state, command).await;
+
+        assert_eq!(response, probe_error("not_started"));
+    }
+
+    #[tokio::test]
+    async fn busy_clipboard_lifecycle_command_reaches_the_engine_boundary() {
+        let command: ProbeCommand = serde_json::from_str(
+            r#"{"command":"suspend_during_clipboard_read","block_ms":10,"deadline_ms":100}"#,
+        )
+        .expect("busy clipboard lifecycle command must deserialize");
+        let mut state = ProbeState::default();
+
+        let response = execute_command(&mut state, command).await;
+
+        assert_eq!(response, probe_error("not_started"));
+    }
+
+    #[tokio::test]
+    async fn busy_clipboard_write_command_reaches_the_engine_boundary() {
+        let command: ProbeCommand = serde_json::from_str(
+            r#"{"command":"suspend_during_clipboard_write","block_ms":10,"deadline_ms":100}"#,
+        )
+        .expect("busy clipboard write command must deserialize");
+        let mut state = ProbeState::default();
+
+        let response = execute_command(&mut state, command).await;
+
+        assert_eq!(response, probe_error("not_started"));
+    }
+
+    #[tokio::test]
+    async fn busy_file_read_command_reaches_the_engine_boundary() {
+        let command: ProbeCommand = serde_json::from_str(
+            r#"{"command":"suspend_during_file_read","block_ms":10,"deadline_ms":100}"#,
+        )
+        .expect("busy file read command must deserialize");
+        let mut state = ProbeState::default();
+
+        let response = execute_command(&mut state, command).await;
+
+        assert_eq!(response, probe_error("not_started"));
+    }
+
+    #[tokio::test]
+    async fn busy_file_write_command_reaches_the_engine_boundary() {
+        let command: ProbeCommand = serde_json::from_str(
+            r#"{"command":"suspend_during_file_write","block_ms":10,"deadline_ms":100}"#,
+        )
+        .expect("busy file write command must deserialize");
+        let mut state = ProbeState::default();
+
+        let response = execute_command(&mut state, command).await;
+
+        assert_eq!(response, probe_error("not_started"));
+    }
+
+    #[tokio::test]
+    async fn busy_startup_command_reaches_the_engine_boundary() {
+        let command: ProbeCommand = serde_json::from_str(
+            r#"{"command":"suspend_during_startup","block_ms":10,"deadline_ms":100}"#,
+        )
+        .expect("busy startup command must deserialize");
+        let mut state = ProbeState::default();
+
+        let response = execute_command(&mut state, command).await;
+
+        assert_eq!(response, probe_error("not_started"));
+    }
+
+    #[tokio::test]
+    async fn stale_clipboard_change_command_reaches_the_engine_boundary() {
+        let command: ProbeCommand = serde_json::from_str(
+            r#"{"command":"verify_stale_clipboard_change_after_suspend","deadline_ms":100}"#,
+        )
+        .expect("stale clipboard change command must deserialize");
+        let mut state = ProbeState::default();
 
         let response = execute_command(&mut state, command).await;
 
@@ -1614,12 +1668,7 @@ mod tests {
         let command: ProbeCommand =
             serde_json::from_str(r#"{"command":"query_device_group_choices"}"#)
                 .expect("device group choices command must deserialize");
-        let mut state = ProbeState {
-            engine: None,
-            observability: None,
-            files: ProbeFiles::default(),
-            events: Arc::new(Mutex::new(EventSummary::default())),
-        };
+        let mut state = ProbeState::default();
 
         let response = execute_command(&mut state, command).await;
 
@@ -1633,12 +1682,7 @@ mod tests {
         for source in commands {
             let command: ProbeCommand =
                 serde_json::from_str(source).expect("member removal command must deserialize");
-            let mut state = ProbeState {
-                engine: None,
-                observability: None,
-                files: ProbeFiles::default(),
-                events: Arc::new(Mutex::new(EventSummary::default())),
-            };
+            let mut state = ProbeState::default();
 
             assert_eq!(
                 execute_command(&mut state, command).await,
