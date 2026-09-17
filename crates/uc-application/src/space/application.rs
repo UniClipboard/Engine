@@ -246,6 +246,7 @@ impl SpaceApplication {
             membership_announcement,
             device_trust_observations,
             membership_history_transport,
+            verified_peer_address_refresh,
             membership_branch_recovery_channel,
             membership_branch_recovery_recipient,
             membership_branch_transition,
@@ -306,6 +307,7 @@ impl SpaceApplication {
             Arc::clone(&ledger),
             Arc::clone(&current_scope),
             membership_history_transport,
+            verified_peer_address_refresh,
             Arc::clone(&clock),
             deferred_maintenance_wake.clone(),
         ));

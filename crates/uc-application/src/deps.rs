@@ -126,7 +126,7 @@ pub use crate::space::{
     PrepareMembershipBranchTransitionError, PrepareMembershipBranchTransitionInput,
     PrepareMembershipBranchTransitionPort, PrepareSpaceAdmissionCredentialsPort,
     PreparedMembershipBranchRecoveryMaterial, PreparedMembershipBranchRecoveryRecipient,
-    QueryDeviceTrustError, ReconcileMembershipProjectionPort,
+    QueryDeviceTrustError, ReconcileMembershipProjectionPort, RefreshVerifiedPeerAddressPort,
     SpaceAdmissionCredentialPreparationError, SpaceRebuildProgressError, SpaceRebuildProgressPort,
     SpaceSessionRebindError, UnlockSpacePort,
 };

@@ -8,7 +8,7 @@ use uc_core::ports::ClockPort;
 
 use super::{
     CurrentSpaceMemberScopePort, HandleMembershipHistoryMessageUseCase, MembershipLedger,
-    MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger,
+    MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, RefreshVerifiedPeerAddressPort,
     SynchronizeMembershipHistoryUseCase, SynchronizeMembershipMaintenancePort,
     WakeSpaceMembershipMaintenancePort,
 };
@@ -24,6 +24,7 @@ impl MembershipHistoryAntiEntropy {
         ledger: Arc<MembershipLedger>,
         current_scope: Arc<dyn CurrentSpaceMemberScopePort>,
         transport: Arc<dyn MembershipHistoryExchangePort>,
+        address_refresh: Arc<dyn RefreshVerifiedPeerAddressPort>,
         clock: Arc<dyn ClockPort>,
         maintenance_wake: Arc<dyn WakeSpaceMembershipMaintenancePort>,
     ) -> Self {
@@ -36,6 +37,7 @@ impl MembershipHistoryAntiEntropy {
                 ledger,
                 current_scope,
                 transport,
+                address_refresh,
                 clock,
             ),
         }

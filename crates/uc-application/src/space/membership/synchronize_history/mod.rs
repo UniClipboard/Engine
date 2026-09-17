@@ -1,10 +1,12 @@
 mod error;
 mod model;
-mod target_use_case;
+mod ports;
+mod use_case;
 
 pub(crate) use error::SynchronizeMembershipHistoryError;
 pub use model::{MembershipSyncReport, MembershipSyncTarget};
-pub(crate) use target_use_case::SynchronizeMembershipHistoryUseCase;
+pub use ports::RefreshVerifiedPeerAddressPort;
+pub(crate) use use_case::SynchronizeMembershipHistoryUseCase;
 
 #[cfg(test)]
 mod tests;

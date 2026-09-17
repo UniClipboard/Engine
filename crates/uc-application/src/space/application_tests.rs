@@ -57,6 +57,11 @@ struct PassivePorts {
     join_commits: AtomicUsize,
 }
 
+#[async_trait]
+impl RefreshVerifiedPeerAddressPort for PassivePorts {
+    async fn refresh_verified_peer_address(&self, _peer: &uc_core::ids::DeviceId) {}
+}
+
 impl HistoricalMembershipSignatureVerifier for PassivePorts {
     fn verify(
         &self,
@@ -836,6 +841,7 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
                 membership_announcement: passive.clone(),
                 device_trust_observations: passive.clone(),
                 membership_history_transport: passive.clone(),
+                verified_peer_address_refresh: passive.clone(),
                 membership_branch_recovery_channel: passive.clone(),
                 membership_branch_recovery_recipient: passive.clone(),
                 membership_branch_transition: passive.clone(),

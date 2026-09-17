@@ -10,8 +10,8 @@ use iroh::{Endpoint, EndpointAddr};
 use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 use uc_application::deps::{
-    RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
-    RestrictedMembershipDeliveryPort,
+    RefreshVerifiedPeerAddressPort, RestrictedMembershipDelivery,
+    RestrictedMembershipDeliveryError, RestrictedMembershipDeliveryPort,
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
@@ -134,18 +134,26 @@ impl MembershipHistoryExchangePort for IrohMembershipHistoryExchangeAdapter {
             return Err(transport_failure(DiagnosticErrorType::DecodeFailed));
         }
         let response = decode_message(&read_message(&mut receive).await?)?;
-        if let Some(addr) =
-            observed_stable_remote_addr(&self.endpoint, connection.remote_id()).await
-        {
-            persist_observed_stable_addr(
-                self.peer_addr_repo.as_ref(),
-                self.clock.as_ref(),
-                recipient,
-                addr,
-            )
-            .await;
-        }
         Ok(response)
+    }
+}
+
+#[async_trait]
+impl RefreshVerifiedPeerAddressPort for IrohMembershipHistoryExchangeAdapter {
+    async fn refresh_verified_peer_address(&self, peer: &DeviceId) {
+        let Some(address) = self.resolve_addr(peer).await else {
+            return;
+        };
+        let Some(observed) = observed_stable_remote_addr(&self.endpoint, address.id).await else {
+            return;
+        };
+        persist_observed_stable_addr(
+            self.peer_addr_repo.as_ref(),
+            self.clock.as_ref(),
+            peer,
+            observed,
+        )
+        .await;
     }
 }
 

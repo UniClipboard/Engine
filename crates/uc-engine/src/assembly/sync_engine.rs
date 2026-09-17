@@ -667,6 +667,7 @@ pub async fn prepare_sync_session(
             Arc::clone(&peer_reachability),
         )),
         membership_history_transport: membership_history_transport.clone(),
+        verified_peer_address_refresh: membership_history_exchange_adapter.clone(),
         membership_branch_recovery_channel,
         membership_branch_recovery_recipient: Arc::clone(
             &space_setup

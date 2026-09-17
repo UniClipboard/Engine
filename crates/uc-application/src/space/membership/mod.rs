@@ -84,6 +84,7 @@ pub use resolve_conflict::{
     ResolveMembershipConflictInput, ResolveMembershipConflictResult,
 };
 pub use signing::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
+pub use synchronize_history::RefreshVerifiedPeerAddressPort;
 
 pub(super) use anti_entropy::MembershipHistoryAntiEntropy;
 pub(super) use decide_device_trust_change::DecideDeviceTrustChangeUseCase;
