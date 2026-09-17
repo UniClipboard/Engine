@@ -1,22 +1,11 @@
+mod build_support;
+
+use build_support::{git, source_state, BUILD_INPUTS};
 use std::{
     env,
     io::{self, Write},
     path::Path,
-    process::Command,
 };
-
-fn git(root: &Path, args: &[&str]) -> Option<String> {
-    let result = Command::new("git")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .ok()?;
-    result
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&result.stdout).trim().to_owned())
-}
 
 fn valid_commit(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -32,13 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for name in ["UC_ENGINE_SOURCE_COMMIT", "UC_ENGINE_SOURCE_STATE"] {
         writeln!(output, "cargo:rerun-if-env-changed={name}")?;
     }
-    for path in [
-        "crates",
-        "bindings",
-        "compatibility",
-        "Cargo.toml",
-        "Cargo.lock",
-    ] {
+    for path in BUILD_INPUTS {
         writeln!(
             output,
             "cargo:rerun-if-changed={}",
@@ -79,16 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .filter(|state| matches!(state.as_str(), "clean" | "modified" | "unknown"))
             .unwrap_or_else(|| "unknown".into())
     } else {
-        git(root, &["status", "--porcelain"])
-            .map(|status| {
-                if status.is_empty() {
-                    "clean"
-                } else {
-                    "modified"
-                }
-                .to_owned()
-            })
-            .unwrap_or_else(|| "unknown".into())
+        source_state(root)
     };
     writeln!(
         output,
