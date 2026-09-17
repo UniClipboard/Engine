@@ -17,7 +17,8 @@ use super::*;
 use crate::space::membership::{
     CommitMembershipLedgerPort, CurrentSpaceMemberScope, CurrentSpaceMemberScopeError,
     CurrentSpaceMemberScopePort, LoadMembershipLedgerPort, LoadedMembershipLedger,
-    MembershipLedger, MembershipLedgerError, MembershipLedgerMutation, PausedSpaceMember,
+    MembershipLedger, MembershipLedgerError, MembershipLedgerMutation,
+    MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, PausedSpaceMember,
     PeerReconciliationRecord, SpaceMemberPauseReason, SynchronizeMembershipMaintenancePort,
 };
 
@@ -404,6 +405,46 @@ async fn authenticated_non_member_cannot_receive_full_membership_history() {
         SynchronizeMembershipHistoryError::CurrentScopeUnavailable
     ));
     assert!(transport.recipients.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn known_peer_contact_bypasses_persisted_retry_deadline() {
+    let peer = DeviceId::new("device-b");
+    let mut loaded = active_ledger();
+    let peer_record = loaded.peer_reconciliation.get_mut(&peer).unwrap();
+    peer_record.sync_state.retry_attempt = 10;
+    peer_record.sync_state.next_attempt_at_ms = 310_000;
+    let repository = Arc::new(MemoryLedgerRepository(Mutex::new(loaded)));
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    ));
+    let transport = Arc::new(SwitchableTransport {
+        offline: AtomicBool::new(false),
+        recipients: Mutex::new(Vec::new()),
+    });
+    let synchronize = SynchronizeMembershipHistoryUseCase::new(
+        ledger,
+        Arc::new(FixedScope(vec![peer.clone()])),
+        transport.clone(),
+        Arc::new(ClockAt(10_000)),
+    );
+
+    let outcome = synchronize
+        .synchronize_membership(&MembershipMaintenanceTrigger::PeerContact(peer.clone()))
+        .await;
+
+    assert_eq!(outcome, MembershipMaintenanceStepOutcome::Completed);
+    assert_eq!(
+        transport.recipients.lock().unwrap().as_slice(),
+        &[peer.clone()]
+    );
+    let persisted = repository.load().await.unwrap();
+    let peer_record = persisted.peer_reconciliation.get(&peer).unwrap();
+    assert!(peer_record.confirmed_position.is_some());
+    assert_eq!(peer_record.sync_state.retry_attempt, 0);
+    assert_eq!(peer_record.sync_state.next_attempt_at_ms, 0);
 }
 
 #[tokio::test]

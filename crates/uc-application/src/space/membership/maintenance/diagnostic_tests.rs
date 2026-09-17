@@ -125,6 +125,7 @@ async fn blocked_updates_explain_queue_wait_and_coalesced_wakes_without_changing
     let runtime = SpaceMembershipMaintenanceRuntime::start(
         maintain,
         receiver,
+        tokio::sync::broadcast::channel(1).1,
         Duration::from_secs(3600),
         Arc::new(NoopNetworkActivity),
     );

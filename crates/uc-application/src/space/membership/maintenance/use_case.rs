@@ -42,6 +42,24 @@ impl MaintainSpaceMembershipUseCase {
         let _guard = self.execution_lock.lock().await;
         waiting.finish(LocalWorkOutcome::Ok);
         let mut report = MembershipMaintenanceReport::default();
+        if matches!(trigger, MembershipMaintenanceTrigger::PeerContact(_)) {
+            if !record(
+                &mut report,
+                LocalWorkStep::MaintenanceSynchronization,
+                self.deps.synchronization.synchronize_membership(&trigger),
+            )
+            .await
+            {
+                return report;
+            }
+            record(
+                &mut report,
+                LocalWorkStep::MaintenanceCleanup,
+                self.deps.cleanup.reconcile_membership_projection(),
+            )
+            .await;
+            return report;
+        }
         let full_round = matches!(
             trigger,
             MembershipMaintenanceTrigger::Startup

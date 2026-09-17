@@ -801,6 +801,7 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
     )));
     let passive = Arc::new(PassivePorts::default());
     let (_peer_reachability_tx, peer_reachability_rx) = tokio::sync::broadcast::channel(4);
+    let (_known_peer_contact_tx, known_peer_contact_rx) = tokio::sync::broadcast::channel(4);
     let mut application = SpaceApplication::build_for_test(
         SpaceRuntimeAdapters {
             admission: SpaceAdmissionAdapters {
@@ -856,6 +857,7 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
         passive.clone(),
         Arc::new(crate::facade::HostEventBus::new()),
         peer_reachability_rx,
+        known_peer_contact_rx,
         passive.clone(),
     );
 

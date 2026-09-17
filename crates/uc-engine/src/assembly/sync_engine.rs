@@ -460,6 +460,7 @@ pub async fn prepare_sync_session(
         Arc::clone(&space_setup.peer_admission),
         Arc::clone(&space_setup.fingerprint),
     );
+    let (known_peer_contact_tx, known_peer_contacts) = broadcast::channel(64);
     // Presence is installed before the convergence owner is assembled so the
     // owner can expose reachability as an independent product fact.
     let peer_reachability: Arc<dyn PeerReachabilityPort> = builder.install_peer_reachability(
@@ -468,6 +469,7 @@ pub async fn prepare_sync_session(
         Arc::clone(&space_setup.peer_admission),
         Arc::clone(&space_setup.fingerprint),
         Arc::clone(&space_setup.clock),
+        known_peer_contact_tx,
     )?;
     // Phase 96 INDIC-01:连接通道单一真相源。复用同一 endpoint +
     // peer_addr_repo,纯读 adapter 不装 ALPN handler。
@@ -752,6 +754,7 @@ pub async fn prepare_sync_session(
             space_security_reset: Arc::clone(&space_setup.space_security_reset),
             runtime: space_runtime,
             peer_reachability_changed_events: peer_reachability.subscribe(),
+            known_peer_contacts,
         },
         clipboard,
     });

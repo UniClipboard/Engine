@@ -117,6 +117,36 @@ struct BlockingFirstRecordingAdmission {
     first: std::sync::atomic::AtomicBool,
 }
 
+struct BlockingFirstContactSynchronization {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    triggers: Arc<Mutex<Vec<MembershipMaintenanceTrigger>>>,
+    first_contact: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl SynchronizeMembershipMaintenancePort for BlockingFirstContactSynchronization {
+    async fn periodic_synchronization_required(
+        &self,
+    ) -> Result<bool, MembershipMaintenanceStepOutcome> {
+        Ok(true)
+    }
+
+    async fn synchronize_membership(
+        &self,
+        trigger: &MembershipMaintenanceTrigger,
+    ) -> MembershipMaintenanceStepOutcome {
+        self.triggers.lock().unwrap().push(trigger.clone());
+        if matches!(trigger, MembershipMaintenanceTrigger::PeerContact(_))
+            && self.first_contact.swap(false, Ordering::SeqCst)
+        {
+            self.started.notify_one();
+            self.release.notified().await;
+        }
+        MembershipMaintenanceStepOutcome::Completed
+    }
+}
+
 #[async_trait]
 impl RecoverSpaceAdmissionsPort for BlockingFirstRecordingAdmission {
     async fn recover_space_admissions(
@@ -353,6 +383,39 @@ async fn peer_online_runs_targeted_network_work_and_local_projection() {
 }
 
 #[tokio::test]
+async fn peer_contact_only_confirms_contacted_membership_and_local_projection() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let step = |name| {
+        Arc::new(RecordingStep {
+            name,
+            calls: Arc::clone(&calls),
+            outcome: MembershipMaintenanceStepOutcome::Completed,
+        })
+    };
+    let maintain = MaintainSpaceMembershipUseCase::new(MaintainSpaceMembershipDeps {
+        admissions: step("admissions"),
+        effects: step("effects"),
+        conflicts: step("conflicts"),
+        group_update_delivery: step("group_updates"),
+        restricted_delivery: step("restricted"),
+        synchronization: step("synchronize"),
+        cleanup: step("cleanup"),
+    });
+
+    let report = maintain
+        .execute(MembershipMaintenanceTrigger::PeerContact(
+            uc_core::ids::DeviceId::new("device-b"),
+        ))
+        .await;
+
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        &["synchronize", "cleanup"]
+    );
+    assert_eq!(report.completed_count, 2);
+}
+
+#[tokio::test]
 async fn periodic_retries_history_when_synchronization_is_still_required() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let step = |name| {
@@ -401,6 +464,122 @@ async fn wait_for_call_count(calls: &Arc<Mutex<Vec<&'static str>>>, expected: us
     panic!("maintenance call count did not reach {expected}");
 }
 
+fn inactive_known_peer_contacts() -> tokio::sync::broadcast::Receiver<KnownPeerContact> {
+    tokio::sync::broadcast::channel(1).1
+}
+
+#[tokio::test]
+async fn known_peer_contact_wakes_targeted_membership_confirmation() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let step = |name| {
+        Arc::new(RecordingStep {
+            name,
+            calls: Arc::clone(&calls),
+            outcome: MembershipMaintenanceStepOutcome::Completed,
+        })
+    };
+    let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
+        MaintainSpaceMembershipDeps {
+            admissions: step("admissions"),
+            effects: step("effects"),
+            conflicts: step("conflicts"),
+            group_update_delivery: step("group_updates"),
+            restricted_delivery: step("restricted"),
+            synchronization: step("synchronize"),
+            cleanup: step("cleanup"),
+        },
+    ));
+    let (_peer_reachability_tx, peer_reachability_rx) = tokio::sync::broadcast::channel(4);
+    let (known_peer_contact_tx, known_peer_contact_rx) = tokio::sync::broadcast::channel(4);
+    let runtime = SpaceMembershipMaintenanceRuntime::start(
+        maintain,
+        peer_reachability_rx,
+        known_peer_contact_rx,
+        std::time::Duration::from_secs(3600),
+        Arc::new(NoopNetworkActivity),
+    );
+    wait_for_call_count(&calls, 7).await;
+
+    let _ = known_peer_contact_tx.send(KnownPeerContact {
+        device_id: uc_core::ids::DeviceId::new("device-b"),
+    });
+
+    wait_for_call_count(&calls, 9).await;
+    assert_eq!(
+        &calls.lock().unwrap().as_slice()[7..],
+        &["synchronize", "cleanup"]
+    );
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn repeated_known_peer_contacts_are_coalesced_and_run_serially() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let step = |name| {
+        Arc::new(RecordingStep {
+            name,
+            calls: Arc::clone(&calls),
+            outcome: MembershipMaintenanceStepOutcome::Completed,
+        })
+    };
+    let triggers = Arc::new(Mutex::new(Vec::new()));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
+        MaintainSpaceMembershipDeps {
+            admissions: step("admissions"),
+            effects: step("effects"),
+            conflicts: step("conflicts"),
+            group_update_delivery: step("group_updates"),
+            restricted_delivery: step("restricted"),
+            synchronization: Arc::new(BlockingFirstContactSynchronization {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+                triggers: Arc::clone(&triggers),
+                first_contact: std::sync::atomic::AtomicBool::new(true),
+            }),
+            cleanup: step("cleanup"),
+        },
+    ));
+    let (_peer_reachability_tx, peer_reachability_rx) = tokio::sync::broadcast::channel(4);
+    let (known_peer_contact_tx, known_peer_contact_rx) = tokio::sync::broadcast::channel(8);
+    let runtime = SpaceMembershipMaintenanceRuntime::start(
+        maintain,
+        peer_reachability_rx,
+        known_peer_contact_rx,
+        std::time::Duration::from_secs(3600),
+        Arc::new(NoopNetworkActivity),
+    );
+    wait_for_call_count(&calls, 6).await;
+
+    let device_b = uc_core::ids::DeviceId::new("device-b");
+    let device_c = uc_core::ids::DeviceId::new("device-c");
+    let _ = known_peer_contact_tx.send(KnownPeerContact {
+        device_id: device_b.clone(),
+    });
+    started.notified().await;
+    for device_id in [device_b.clone(), device_b.clone(), device_c.clone()] {
+        let _ = known_peer_contact_tx.send(KnownPeerContact { device_id });
+    }
+    release.notify_one();
+
+    for _ in 0..100 {
+        if triggers.lock().unwrap().len() >= 4 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        &triggers.lock().unwrap().as_slice()[1..],
+        &[
+            MembershipMaintenanceTrigger::PeerContact(device_b.clone()),
+            MembershipMaintenanceTrigger::PeerContact(device_b),
+            MembershipMaintenanceTrigger::PeerContact(device_c),
+        ]
+    );
+    runtime.shutdown().await;
+}
+
 #[tokio::test]
 async fn runtime_pause_resume_peer_reachability_and_shutdown_share_one_lifecycle() {
     let calls = Arc::new(Mutex::new(Vec::new()));
@@ -426,6 +605,7 @@ async fn runtime_pause_resume_peer_reachability_and_shutdown_share_one_lifecycle
     let runtime = SpaceMembershipMaintenanceRuntime::start(
         maintain,
         peer_reachability_rx,
+        inactive_known_peer_contacts(),
         std::time::Duration::from_secs(3600),
         Arc::new(NoopNetworkActivity),
     );
@@ -487,6 +667,7 @@ async fn pause_cancels_network_work_and_waits_for_the_current_commit_boundary() 
     let runtime = SpaceMembershipMaintenanceRuntime::start(
         maintain,
         peer_reachability_rx,
+        inactive_known_peer_contacts(),
         std::time::Duration::from_secs(3600),
         network.clone(),
     );
@@ -540,6 +721,7 @@ async fn admission_deadline_wakes_maintenance_at_the_exact_boundary() {
     let runtime = SpaceMembershipMaintenanceRuntime::start(
         maintain,
         peer_reachability_rx,
+        inactive_known_peer_contacts(),
         std::time::Duration::from_secs(3600),
         Arc::new(NoopNetworkActivity),
     );
@@ -583,6 +765,7 @@ async fn a_later_admission_deadline_cannot_postpone_the_nearest_wake() {
     let runtime = SpaceMembershipMaintenanceRuntime::start(
         maintain,
         peer_reachability_rx,
+        inactive_known_peer_contacts(),
         std::time::Duration::from_secs(3600),
         Arc::new(NoopNetworkActivity),
     );
@@ -627,6 +810,7 @@ async fn shutdown_uses_one_five_second_budget_without_aborting_the_active_round(
     let runtime = SpaceMembershipMaintenanceRuntime::start(
         maintain,
         peer_reachability_rx,
+        inactive_known_peer_contacts(),
         std::time::Duration::from_secs(3600),
         Arc::new(NoopNetworkActivity),
     );
@@ -674,6 +858,7 @@ async fn online_events_for_different_peers_are_not_overwritten_during_a_round() 
     let runtime = SpaceMembershipMaintenanceRuntime::start(
         maintain,
         peer_reachability_rx,
+        inactive_known_peer_contacts(),
         std::time::Duration::from_secs(3600),
         Arc::new(NoopNetworkActivity),
     );

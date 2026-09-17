@@ -787,7 +787,8 @@ impl SynchronizeMembershipMaintenancePort for SynchronizeMembershipHistoryUseCas
         trigger: &MembershipMaintenanceTrigger,
     ) -> MembershipMaintenanceStepOutcome {
         let target = match trigger {
-            MembershipMaintenanceTrigger::PeerOnline(peer) => {
+            MembershipMaintenanceTrigger::PeerContact(peer)
+            | MembershipMaintenanceTrigger::PeerOnline(peer) => {
                 MembershipSyncTarget::AuthenticatedPeer(peer.clone())
             }
             MembershipMaintenanceTrigger::Startup
@@ -800,6 +801,7 @@ impl SynchronizeMembershipMaintenancePort for SynchronizeMembershipHistoryUseCas
             MembershipMaintenanceTrigger::Resume => MembershipRecoveryTrigger::Resume,
             MembershipMaintenanceTrigger::Periodic => MembershipRecoveryTrigger::Retry,
             MembershipMaintenanceTrigger::StateChanged => MembershipRecoveryTrigger::StateChanged,
+            MembershipMaintenanceTrigger::PeerContact(_) => MembershipRecoveryTrigger::PeerContact,
             MembershipMaintenanceTrigger::PeerOnline(_) => MembershipRecoveryTrigger::PeerOnline,
         };
         match scope_membership_recovery_trigger(observation_trigger, self.execute(target)).await {

@@ -154,7 +154,7 @@ pub use membership::{
 pub use membership::{
     AdmissionMaintenanceOutcome, BeginMembershipBranchRecoveryInput,
     DeliverRestrictedMembershipPort, IssueMembershipBranchRecoveryError,
-    IssueMembershipBranchRecoveryInput, IssueMembershipBranchRecoveryPort,
+    IssueMembershipBranchRecoveryInput, IssueMembershipBranchRecoveryPort, KnownPeerContact,
     MembershipBranchRecoveryChannelError, MembershipBranchRecoveryChannelPort,
     MembershipBranchRecoveryCommit, MembershipBranchRecoveryRequest,
     MembershipMaintenanceStepOutcome, MembershipNetworkActivityPort,

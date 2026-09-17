@@ -44,7 +44,7 @@ pub use ledger::{
 pub(crate) use maintenance::PreparedSpaceMembershipMaintenanceRuntime;
 pub use maintenance::{
     AdmissionMaintenanceOutcome, DeliverPendingGroupUpdatesPort, DeliverRestrictedMembershipPort,
-    MembershipNetworkActivityPort, ReconcileMembershipProjectionPort,
+    KnownPeerContact, MembershipNetworkActivityPort, ReconcileMembershipProjectionPort,
     RecoverMembershipConflictsPort, RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
 };
 pub use query_device_trust::{

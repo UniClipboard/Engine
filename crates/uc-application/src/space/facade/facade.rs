@@ -100,6 +100,7 @@ impl SpaceFacade {
             transition,
             runtime_adapters,
             peer_reachability_changed_events,
+            known_peer_contacts,
             admission_observations,
             space_transition_changes,
         } = deps;
@@ -116,6 +117,7 @@ impl SpaceFacade {
             &app_deps,
             runtime_adapters,
             peer_reachability_changed_events,
+            known_peer_contacts,
             Arc::clone(&re_pairing_state)
                 as Arc<dyn crate::space::membership::ResolveRePairingPort>,
             admission_observations,

@@ -9,6 +9,7 @@ pub enum RecoveryTrigger {
     Resume,
     Periodic,
     StateChanged,
+    PeerContact,
     PeerOnline,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

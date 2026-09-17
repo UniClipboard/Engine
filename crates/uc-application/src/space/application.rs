@@ -147,6 +147,7 @@ impl SpaceApplication {
         application: &ApplicationDeps,
         adapters: SpaceRuntimeAdapters,
         peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
+        known_peer_contacts: broadcast::Receiver<super::membership::KnownPeerContact>,
         re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
         admission_observations: Arc<SpaceAdmissionObservationRegistry>,
         space_transition_changes: tokio::sync::watch::Sender<()>,
@@ -159,6 +160,7 @@ impl SpaceApplication {
                 space_transition_changes,
             ),
             peer_reachability_changed_events,
+            known_peer_contacts,
             re_pairing,
         )
     }
@@ -172,6 +174,7 @@ impl SpaceApplication {
         settings: Arc<dyn uc_core::ports::SettingsPort>,
         host_event_bus: Arc<crate::facade::HostEventBus>,
         peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
+        known_peer_contacts: broadcast::Receiver<super::membership::KnownPeerContact>,
         re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
     ) -> Self {
         Self::build_from_deps(
@@ -186,6 +189,7 @@ impl SpaceApplication {
                 space_transition_changes: tokio::sync::watch::channel(()).0,
             },
             peer_reachability_changed_events,
+            known_peer_contacts,
             re_pairing,
         )
     }
@@ -193,6 +197,7 @@ impl SpaceApplication {
     fn build_from_deps(
         deps: SpaceApplicationDeps,
         peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
+        known_peer_contacts: broadcast::Receiver<super::membership::KnownPeerContact>,
         re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
     ) -> Self {
         let SpaceApplicationDeps {
@@ -388,6 +393,7 @@ impl SpaceApplication {
         let prepared_runtime = SpaceMembershipMaintenanceRuntime::prepare(
             maintain,
             peer_reachability_changed_events,
+            known_peer_contacts,
             Duration::from_secs(30),
             membership_network_activity,
             ledger.subscribe_history_changes(),

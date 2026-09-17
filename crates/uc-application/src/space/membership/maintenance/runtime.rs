@@ -103,6 +103,7 @@ pub(crate) struct SpaceMembershipMaintenanceRuntime {
 pub(crate) struct PreparedSpaceMembershipMaintenanceRuntime {
     maintain: Arc<MaintainSpaceMembershipUseCase>,
     peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
+    known_peer_contacts: broadcast::Receiver<super::KnownPeerContact>,
     periodic_interval: Duration,
     network_activity: Arc<dyn MembershipNetworkActivityPort>,
     activity: SpaceMembershipMaintenanceActivity,
@@ -120,6 +121,7 @@ impl SpaceMembershipMaintenanceRuntime {
     pub(crate) fn prepare(
         maintain: Arc<MaintainSpaceMembershipUseCase>,
         peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
+        known_peer_contacts: broadcast::Receiver<super::KnownPeerContact>,
         periodic_interval: Duration,
         network_activity: Arc<dyn MembershipNetworkActivityPort>,
         history_changes: tokio::sync::watch::Receiver<()>,
@@ -129,6 +131,7 @@ impl SpaceMembershipMaintenanceRuntime {
         PreparedSpaceMembershipMaintenanceRuntime {
             maintain,
             peer_reachability_changed_events,
+            known_peer_contacts,
             periodic_interval,
             network_activity,
             activity,
@@ -141,12 +144,14 @@ impl SpaceMembershipMaintenanceRuntime {
     pub(crate) fn start(
         maintain: Arc<MaintainSpaceMembershipUseCase>,
         peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
+        known_peer_contacts: broadcast::Receiver<super::KnownPeerContact>,
         periodic_interval: Duration,
         network_activity: Arc<dyn MembershipNetworkActivityPort>,
     ) -> Self {
         Self::start_prepared(Self::prepare(
             maintain,
             peer_reachability_changed_events,
+            known_peer_contacts,
             periodic_interval,
             network_activity,
             tokio::sync::watch::channel(()).1,
@@ -157,6 +162,7 @@ impl SpaceMembershipMaintenanceRuntime {
         let PreparedSpaceMembershipMaintenanceRuntime {
             maintain,
             peer_reachability_changed_events: mut reachability_changes,
+            known_peer_contacts: mut peer_contacts,
             periodic_interval,
             network_activity,
             activity,
@@ -166,6 +172,7 @@ impl SpaceMembershipMaintenanceRuntime {
         let task = tokio::spawn(async move {
             let mut paused = false;
             let mut peer_reachability_open = true;
+            let mut peer_contacts_open = true;
             let mut history_open = true;
             let mut active_round = Some(spawn_round(
                 Arc::clone(&maintain),
@@ -262,6 +269,18 @@ impl SpaceMembershipMaintenanceRuntime {
                         }
                         Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
                         Err(broadcast::error::RecvError::Closed) => peer_reachability_open = false,
+                    },
+                    contact = peer_contacts.recv(), if !paused && peer_contacts_open => match contact {
+                        Ok(contact) => {
+                            schedule_round(
+                                &maintain,
+                                &mut active_round,
+                                &mut queued_triggers,
+                                ScheduledRound::new(MembershipMaintenanceTrigger::PeerContact(contact.device_id)),
+                            );
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => peer_contacts_open = false,
                     },
                     _ = periodic.tick(), if !paused => {
                         schedule_round(
@@ -376,6 +395,7 @@ impl ScheduledRound {
             MembershipMaintenanceTrigger::Resume => RecoveryTrigger::Resume,
             MembershipMaintenanceTrigger::Periodic => RecoveryTrigger::Periodic,
             MembershipMaintenanceTrigger::StateChanged => RecoveryTrigger::StateChanged,
+            MembershipMaintenanceTrigger::PeerContact(_) => RecoveryTrigger::PeerContact,
             MembershipMaintenanceTrigger::PeerOnline(_) => RecoveryTrigger::PeerOnline,
         };
         Self {
