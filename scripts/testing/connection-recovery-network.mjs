@@ -483,11 +483,15 @@ async function run() {
     return
   }
   if (mode === 'relay') await until(async () => nodes.every(node => net(node, 'ss', '-Hnt', 'state', 'established').includes(':19090')), 20_000, 'test hosts did not connect to the configured relay')
+  if (mode === 'legacy') {
+    await legacyPairingIsRejected(nodes[0], nodes[1])
+    for (const node of nodes) await node.stop()
+    return
+  }
   await paired(nodes)
   const [a, b, c] = nodes
   await transfer(a, b, 'baseline')
   if (c) await transfer(a, c, 'baseline')
-  if (mode === 'legacy') { await legacyScenarios(a, b); for (const node of nodes) await node.stop(); return }
   if (mode === 'relay') { await relayScenarios(a, b); for (const node of nodes) await node.stop(); return }
   for (let iteration = 0; iteration < repeat; iteration++) {
     for (const node of nodes) { await node.drain(); node.events = [] }
@@ -581,23 +585,26 @@ async function run() {
   for (const node of nodes) await node.stop()
 }
 
-async function legacyScenarios(a, b) {
-  for (let iteration = 0; iteration < repeat; iteration++) {
-    for (const node of nodes) { await node.drain(); node.events = [] }
-    await scenario(`E09-side-${legacySide}-${iteration}`, async () => {
-      const deadline = performance.now() + 22_000
-      while (performance.now() < deadline) {
-        await online(nodes, 1000)
-        await delay(100)
-      }
-      await transfer(a, b, `legacy-healthy-${iteration}`)
-      const activated = partition(b, true)
-      await offline(b, 70_000 - (performance.now() - activated))
-      partition(b, false)
-      await online(nodes, 92_000)
-      await transfer(a, b, `legacy-healed-${iteration}`)
-    })
-  }
+async function legacyPairingIsRejected(sponsor, joiner) {
+  assert.equal(legacySide, 0, 'legacy incompatibility validation requires the legacy sponsor')
+  const created = await sponsor.call('create', { name: sponsor.label })
+  sponsor.id = created.device
+  const invitation = await sponsor.call('invite')
+  const initial = await joiner.call('join', { invitation: invitation.invitation, name: joiner.label })
+  assert.equal(initial.status, 'pending')
+  await scenario('E09-legacy-pairing-rejected', async () => {
+    await until(async () => {
+      const choices = await joiner.call('eligibility')
+      const current = choices.device_trust.current_join
+      if (!current || current.status === 'pending') return false
+      assert.equal(current.status, 'rejected')
+      assert(
+        ['authentication_rejected', 'peer_upgrade_required'].includes(current.reason),
+        'legacy pairing ended with an unexpected result',
+      )
+      return true
+    }, 20_000, 'legacy pairing did not reach a stable rejection')
+  })
 }
 
 async function startRelay() {
