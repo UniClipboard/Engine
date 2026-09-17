@@ -10,10 +10,10 @@ mod runtime;
 pub use runtime::{
     ActiveClipboard, ConnectivityOpportunity, Device, EntryNotResendableReason,
     InvitationAvailability, InvitationIssued, JoinSpaceRejectionReason, JoinSpaceStatus,
-    JoinSpaceTerminationReason, JoinedSpace, LocalDevice, MobileEngine, PeerConnectionRefresh,
-    RelaySaveResult, ResendEntryOutcome, SendReport, SessionRecovery, SpaceCreated,
-    SpaceInvitation, SpaceState, WorkspaceConvergence, WorkspaceConvergenceFailureCategory,
-    WorkspaceConvergencePhase,
+    JoinSpaceTerminationReason, JoinedSpace, LocalDevice, MobileEngine, MobileStartupLifecycle,
+    PeerConnectionRefresh, RelaySaveResult, ResendEntryOutcome, SendReport, SessionRecovery,
+    SpaceCreated, SpaceInvitation, SpaceState, WorkspaceConvergence,
+    WorkspaceConvergenceFailureCategory, WorkspaceConvergencePhase,
 };
 
 uniffi::setup_scaffolding!();
