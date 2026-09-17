@@ -75,3 +75,4 @@ Application 按收到的连接通知记录会话内修订。网络尝试超时�
 原自动连接验收见[原执行记录](../exec-plans/completed/2026-09-11-automatic-peer-connections.md)，活性与恢复改动见[本次执行记录](../exec-plans/completed/2026-09-12-connection-liveness-and-recovery.md)。
 专用入口为 `bash scripts/testing/run-connection-recovery-e2e.sh --suite all --repeat 3`，独立网络部分必须在支持命名空间和 nftables 的 Linux 环境执行。
 自动验收只查询在线状态，不能通过刷新或发送促成连接；连接后再验证当前成员资格及实际内容传送。
+其中已知设备联系场景使用三台独立进程：第三台设备经中间成员加入，使等待方已知但尚未确认该成员；随后第三台设备更换固定端口，测试同时阻断等待方的本地发现和主动发起，只允许换址设备主动联系。验收必须独立证明旧端口关闭、防火墙规则实际命中、20 秒内自动上线，并在上线后完成双向传送；默认连续运行三次。

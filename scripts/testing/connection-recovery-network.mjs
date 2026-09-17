@@ -14,7 +14,7 @@ for (let i = 2; i < process.argv.length; i += 2) options.set(process.argv[i], pr
 const binary = resolve(options.get('--host') ?? 'target/debug/uc-connectivity-host')
 const only = options.get('--case')
 const mode = options.get('--mode') ?? 'direct'
-assert(['direct', 'legacy', 'relay'].includes(mode))
+assert(['direct', 'known-peer', 'legacy', 'relay'].includes(mode))
 const legacySide = Number(options.get('--legacy-side') ?? 1)
 const relayBinary = options.get('--relay')
 const legacyBinary = options.get('--legacy-host')
@@ -65,6 +65,7 @@ function processResources(node) {
 
 class Host {
   constructor(index) {
+    this.index = index
     this.label = String.fromCharCode(65 + index)
     this.namespace = `${runId}${this.label}`
     this.root = join(root, this.label)
@@ -75,6 +76,8 @@ class Host {
     this.resources = []
     this.secureStorage = undefined
     this.child = undefined
+    this.bindPort = mode === 'known-peer' ? 21_000 + index : undefined
+    this.commands = []
   }
   async start() {
     const selected = mode === 'legacy' && this.label === String.fromCharCode(65 + legacySide) ? resolve(legacyBinary) : binary
@@ -95,7 +98,7 @@ class Host {
         pending.reject(new Error('test host exited before replying'))
       }
     })
-    const ready = await this.raw({ root: this.root, rendezvous: `http://10.233.0.1:${server.address().port}`, secure_storage: this.secureStorage, relay: mode === 'relay' })
+    const ready = await this.raw({ root: this.root, rendezvous: `http://10.233.0.1:${server.address().port}`, secure_storage: this.secureStorage, relay: mode === 'relay', bind_port: this.bindPort })
     assert.equal(ready.ready, true)
     this.version = ready.version
   }
@@ -108,6 +111,7 @@ class Host {
     })
   }
   async call(command, fields = {}) {
+    this.commands.push(command)
     const result = await this.raw({ command, ...fields })
     assert(!result.error, `${this.label} ${command} failed (code ${result.code ?? 'unavailable'})`)
     return result.ok
@@ -131,6 +135,17 @@ class Host {
     await this.call('shutdown')
     if (this.child.exitCode === null) await once(this.child, 'exit')
     assert.equal(this.child.exitCode, 0)
+  }
+  async reset() {
+    await this.stop()
+    this.secureStorage = undefined
+    this.id = undefined
+    this.events = []
+    this.commands = []
+    this.partitionedAt = undefined
+    this.bindPort = 21_000 + this.index
+    rmSync(this.root, { recursive: true, force: true })
+    await this.start()
   }
 }
 
@@ -161,6 +176,12 @@ async function paired(group) {
       return Boolean(node.id)
     }, 120_000, 'paired identity unavailable')
   }
+  await usable(group)
+  await online(group, 20_000)
+  return created
+}
+
+async function usable(group) {
   for (const node of group) {
     await until(async () => {
       const response = await node.raw({ command: 'eligibility' })
@@ -170,7 +191,6 @@ async function paired(group) {
       return group.filter(peer => peer !== node).every(peer => choices.device_trust.devices.some(device => device.device_id === peer.id && device.sync_relationship === 'usable'))
     }, 120_000, 'ordinary communication eligibility did not converge')
   }
-  await online(group, 20_000)
 }
 
 async function offline(isolated, budget) {
@@ -243,6 +263,70 @@ function partition(node, blocked) {
   return activated
 }
 
+function blockDiscovery(node) {
+  nft(node, 'add', 'table', 'inet', 'uc_discovery')
+  nft(node, 'add', 'chain', 'inet', 'uc_discovery', 'input', '{ type filter hook input priority -75; policy accept; }')
+  nft(node, 'add', 'rule', 'inet', 'uc_discovery', 'input', 'udp', 'dport', '5353', 'counter', 'drop')
+  nft(node, 'add', 'chain', 'inet', 'uc_discovery', 'output', '{ type filter hook output priority -75; policy accept; }')
+  nft(node, 'add', 'rule', 'inet', 'uc_discovery', 'output', 'udp', 'dport', '5353', 'counter', 'drop')
+  try {
+    net(node, 'node', '-e', "const d=require('dgram');const s=d.createSocket('udp4');s.send('probe',5353,'10.233.0.1',()=>s.close())")
+  } catch {}
+  const rules = JSON.parse(net(node, 'nft', '-j', 'list', 'table', 'inet', 'uc_discovery'))
+  const dropped = rules.nftables.flatMap(row => row.rule?.expr ?? []).reduce((total, expr) => total + (expr.counter?.packets ?? 0), 0)
+  assert(dropped > 0, 'discovery drop rules were not exercised')
+  faults.push({ node: node.label, action: 'discovery_blocked', at_ms: Math.round(performance.now()), verified_dropped_packets: dropped, public_discovery_disabled: true })
+}
+
+function unblockDiscovery(node) {
+  net(node, 'nft', 'delete', 'table', 'inet', 'uc_discovery')
+  faults.push({ node: node.label, action: 'discovery_restored', at_ms: Math.round(performance.now()) })
+}
+
+function udpPortBound(node, port) {
+  return net(node, 'ss', '-H', '-l', '-u', '-n', `sport = :${port}`).trim().length > 0
+}
+
+function blockPeerPair(left, right) {
+  for (const [node, peer] of [[left, right], [right, left]]) {
+    const peerIp = `10.233.0.${peer.index + 11}`
+    nft(node, 'add', 'table', 'inet', 'uc_pair')
+    nft(node, 'add', 'chain', 'inet', 'uc_pair', 'input', '{ type filter hook input priority -80; policy accept; }')
+    nft(node, 'add', 'rule', 'inet', 'uc_pair', 'input', 'ip', 'saddr', peerIp, 'counter', 'drop')
+    nft(node, 'add', 'chain', 'inet', 'uc_pair', 'output', '{ type filter hook output priority -80; policy accept; }')
+    nft(node, 'add', 'rule', 'inet', 'uc_pair', 'output', 'ip', 'daddr', peerIp, 'counter', 'drop')
+  }
+  try { net(left, 'ping', '-c', '1', '-W', '1', `10.233.0.${right.index + 11}`); assert.fail('peer isolation did not block the probe') }
+  catch (error) { if (error.code === 'ERR_ASSERTION') throw error }
+  const rules = JSON.parse(net(left, 'nft', '-j', 'list', 'table', 'inet', 'uc_pair'))
+  const dropped = rules.nftables.flatMap(row => row.rule?.expr ?? []).reduce((total, expr) => total + (expr.counter?.packets ?? 0), 0)
+  assert(dropped > 0, 'peer isolation counters remained empty')
+  faults.push({ node: `${left.label}-${right.label}`, action: 'peer_pair_blocked', at_ms: Math.round(performance.now()), verified_dropped_packets: dropped })
+}
+
+function unblockPeerPair(left, right) {
+  for (const node of [left, right]) net(node, 'nft', 'delete', 'table', 'inet', 'uc_pair')
+  faults.push({ node: `${left.label}-${right.label}`, action: 'peer_pair_restored', at_ms: Math.round(performance.now()) })
+}
+
+function blockOutboundInitiation(node, peer) {
+  const peerIp = `10.233.0.${peer.index + 11}`
+  nft(node, 'add', 'table', 'inet', 'uc_initiator')
+  nft(node, 'add', 'chain', 'inet', 'uc_initiator', 'output', '{ type filter hook output priority -90; policy accept; }')
+  nft(node, 'add', 'rule', 'inet', 'uc_initiator', 'output', 'ip', 'daddr', peerIp, 'ct', 'state', 'new', 'counter', 'drop')
+  try { net(node, 'ping', '-c', '1', '-W', '1', peerIp); assert.fail('outbound initiation rule did not block the probe') }
+  catch (error) { if (error.code === 'ERR_ASSERTION') throw error }
+  const rules = JSON.parse(net(node, 'nft', '-j', 'list', 'table', 'inet', 'uc_initiator'))
+  const dropped = rules.nftables.flatMap(row => row.rule?.expr ?? []).reduce((total, expr) => total + (expr.counter?.packets ?? 0), 0)
+  assert(dropped > 0, 'outbound initiation counters remained empty')
+  faults.push({ node: `${node.label}->${peer.label}`, action: 'outbound_initiation_blocked', at_ms: Math.round(performance.now()), verified_dropped_packets: dropped })
+}
+
+function unblockOutboundInitiation(node, peer) {
+  net(node, 'nft', 'delete', 'table', 'inet', 'uc_initiator')
+  faults.push({ node: `${node.label}->${peer.label}`, action: 'outbound_initiation_restored', at_ms: Math.round(performance.now()) })
+}
+
 async function scenario(id, action) {
   if (only && !id.startsWith(only)) return
   const started = new Date().toISOString()
@@ -267,6 +351,94 @@ async function handleRendezvousRequest(request, response) {
   response.end(JSON.stringify(result))
 }
 
+async function knownPeerRecoveryScenarios(a, b, c) {
+  for (let iteration = 0; iteration < repeat; iteration++) {
+    if (iteration > 0) {
+      for (const node of nodes) await node.reset()
+    }
+    const created = await paired([a, b])
+    await transfer(a, b, `known-peer-baseline-${iteration}`)
+
+    blockPeerPair(a, c)
+    const invitation = await b.call('invite')
+    await c.call('join', { invitation: invitation.invitation, name: c.label })
+    await until(async () => {
+      const response = await c.raw({ command: 'setup' })
+      return response.ok?.has_completed && response.ok?.space_id === created.space
+    }, 120_000, 'third member pairing did not finish')
+    await until(async () => {
+      const peers = await b.call('peers')
+      c.id = peers.find(peer => peer.device_name === c.label)?.peer_id
+      return Boolean(c.id)
+    }, 120_000, 'third member identity unavailable')
+    await usable([b, c])
+    await until(async () => {
+      const response = await a.raw({ command: 'eligibility' })
+      if (response.error && response.code === 1211) return false
+      assert(!response.error, 'membership lag precondition query failed')
+      const target = response.ok.device_trust.devices.find(device => device.device_id === c.id)
+      return Boolean(target && target.sync_relationship !== 'usable')
+    }, 120_000, 'isolated new member did not become a known pending peer')
+
+    const oldPort = c.bindPort
+    await c.stop()
+    await until(async () => (await b.call('peers')).some(peer => peer.peer_id === c.id && !peer.connected), 20_000, 'third member did not disconnect before the directed recovery')
+    blockOutboundInitiation(a, c)
+    unblockPeerPair(a, c)
+
+    blockDiscovery(a)
+    let discoveryBlocked = true
+    let outboundInitiationBlocked = true
+    try {
+      c.bindPort = 22_000 + iteration
+      assert(!udpPortBound(c, oldPort), 'the previous fixed UDP port is still listening')
+      const commandBaselines = new Map(nodes.map(node => [node, node.commands.length]))
+      const contactStarted = performance.now()
+      await scenario(`E13-known-peer-contact-${iteration}`, async () => {
+        await c.start()
+        assert(udpPortBound(c, c.bindPort), 'the replacement fixed UDP port is not listening')
+        assert(!udpPortBound(c, oldPort), 'the previous fixed UDP port became reachable again')
+        const remaining = 20_000 - (performance.now() - contactStarted)
+        assert(remaining > 0, 'host restart exhausted the automatic recovery budget')
+        await online([c, a], remaining)
+        const onlineAt = performance.now()
+        assert(onlineAt - contactStarted <= 20_000, 'automatic known-peer recovery exceeded 20 seconds')
+        const [cConnections, aConnections] = await Promise.all([
+          c.call('connections'),
+          a.call('connections'),
+        ])
+        assert(cConnections.outgoing > 0, 'the restarted device did not initiate the recovered connection')
+        assert(aConnections.incoming > 0, 'the waiting device did not retain the inbound recovered connection')
+        const forbidden = new Set(['opportunity', 'recover', 'send', 'suspend', 'resume'])
+        for (const node of [c, a]) {
+          assert(!node.commands.slice(commandBaselines.get(node)).some(command => forbidden.has(command)), 'the scenario used a forbidden recovery trigger before Online')
+        }
+        records.at(-1).proof = {
+          old_port_closed: true,
+          replacement_port_bound: true,
+          discovery_blocked: true,
+          public_discovery_disabled: true,
+          initiator_outbound: true,
+          receiver_inbound: true,
+          automatic_online_within_ms: Math.round(onlineAt - contactStarted),
+          forbidden_triggers_used: false,
+        }
+        await transfer(c, a, `known-peer-recovered-${iteration}`)
+        records.at(-1).proof.bidirectional_transfer = true
+      })
+    } finally {
+      if (discoveryBlocked) {
+        unblockDiscovery(a)
+        discoveryBlocked = false
+      }
+      if (outboundInitiationBlocked) {
+        unblockOutboundInitiation(a, c)
+        outboundInitiationBlocked = false
+      }
+    }
+  }
+}
+
 async function run() {
   assert.equal(process.platform, 'linux', 'Linux network namespaces are required')
   command('nft', ['--version'])
@@ -285,7 +457,7 @@ async function run() {
   server.listen(0, '10.233.0.1')
   await once(server, 'listening')
   if (mode === 'relay') await startRelay()
-  for (let index = 0; index < (mode === 'direct' ? 3 : 2); index++) {
+  for (let index = 0; index < (mode === 'direct' || mode === 'known-peer' ? 3 : 2); index++) {
     const node = new Host(index)
     nodes.push(node)
     ip('netns', 'add', node.namespace)
@@ -303,6 +475,12 @@ async function run() {
       await node.stop()
       await node.start()
     }
+  }
+  if (mode === 'known-peer') {
+    const [a, b, c] = nodes
+    await knownPeerRecoveryScenarios(a, b, c)
+    for (const node of nodes) await node.stop()
+    return
   }
   if (mode === 'relay') await until(async () => nodes.every(node => net(node, 'ss', '-Hnt', 'state', 'established').includes(':19090')), 20_000, 'test hosts did not connect to the configured relay')
   await paired(nodes)
