@@ -939,9 +939,15 @@ impl ProductionSessionFactory {
         {
             Ok(runtime) => Arc::new(runtime),
             Err(error) => {
-                sync_session
-                    .shutdown(uc_core::FileTransferCancellationReason::Unknown)
-                    .await;
+                if let Err(rollback) = sync_session
+                    .shutdown(uc_core::FileTransferCancellationReason::Unknown, None)
+                    .await
+                {
+                    return Err(session_runtime_error(
+                        "application runtime and session rollback",
+                        format_args!("{error}; {rollback}"),
+                    ));
+                }
                 return Err(session_runtime_error("application runtime", error));
             }
         };
@@ -1029,8 +1035,15 @@ impl ProductionSession {
             error!("application runtime stopped with error");
         }
         let stopping = LocalWorkObservation::begin(LocalWorkStep::SessionStopNetwork);
-        self.sync_session.shutdown(transfer_reason).await;
-        stopping.finish(LocalWorkOutcome::Ok);
+        let network_shutdown = self.sync_session.shutdown(transfer_reason, None).await;
+        stopping.finish(if network_shutdown.is_err() {
+            LocalWorkOutcome::Error
+        } else {
+            LocalWorkOutcome::Ok
+        });
+        if network_shutdown.is_err() {
+            error!("network session stopped with error");
+        }
         info!("Engine session 网络会话任务已停止");
     }
 }
