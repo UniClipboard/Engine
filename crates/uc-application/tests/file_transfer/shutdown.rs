@@ -176,6 +176,13 @@ async fn cancelling_the_close_waiter_still_finishes_every_session() {
         async move { facade.close().await }
     });
     store.entered.notified().await;
+    timeout(Duration::from_secs(1), async {
+        while store.attempts.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     closing.abort();
     assert!(closing.await.unwrap_err().is_cancelled());
     release.send(()).unwrap();

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use tokio::task::JoinSet;
 use tracing::Instrument;
 use uc_core::FileTransferCancellationReason;
 use uc_observability_contract::diagnostics::ObservationContext;
@@ -27,14 +28,16 @@ pub(super) async fn cancel_active(
                 let _creation = registry.lock_creation().await;
                 let sessions = registry.snapshot().await;
                 let mut errors = Vec::new();
+                let mut cancellations = JoinSet::new();
                 for session in sessions {
                     let observation = ObservationContext::capture();
-                    // 单个收尾异常不能跳过其他传输；每次调用仍等待完整能力结束。
-                    let result = tokio::spawn(
+                    cancellations.spawn(
                         observation
                             .scope(async move { session.cancel(reason).await }.in_current_span()),
-                    )
-                    .await;
+                    );
+                }
+                // 先通知全部传输，再统一等待并收集结果，单个慢收尾不阻止其他传输开始停止。
+                while let Some(result) = cancellations.join_next().await {
                     match result {
                         Ok(Ok(_))
                         | Ok(Err(FileTransferApplicationError::TransferAlreadyFinished {
