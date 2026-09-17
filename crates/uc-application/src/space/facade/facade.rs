@@ -2,6 +2,8 @@
 //! trust, roster, reset, and session actions. Network adapters receive the two
 //! authenticated endpoints exposed here; all workflow state remains private.
 
+mod shutdown;
+
 use crate::facade::roster::PeerReachabilityRefreshReport;
 use crate::space::PeerConnectionError;
 
@@ -17,6 +19,7 @@ use super::deps::{SpaceAdmissionDeps, SpaceFacadeDeps, SpaceSessionDeps, SpaceTr
 use super::errors::IssuePairingInvitationError;
 use crate::facade::roster::{MemberRosterDeps, MemberRosterFacade};
 use crate::facade::search::SearchFacade;
+use crate::runtime_lifecycle::LifecycleError;
 use crate::space::admission::{
     CancelInvitationError, CancelPairingInvitationUseCase, CompletePendingSpaceTransitionError,
     InMemoryPairingInvitationHolder, IssuePairingInvitationForAddressUseCase,
@@ -91,6 +94,7 @@ pub struct SpaceFacade {
     space_admission_endpoint: Arc<dyn crate::deps::HandleAuthenticatedSpaceAdmissionMessagePort>,
     pairing_configuration: Mutex<()>,
     application: Mutex<Option<SpaceApplication>>,
+    shutdown_result: Mutex<Option<Result<(), Arc<LifecycleError>>>>,
 }
 
 impl SpaceFacade {
@@ -331,6 +335,7 @@ impl SpaceFacade {
             space_admission_endpoint,
             pairing_configuration: Mutex::new(()),
             application: Mutex::new(Some(application)),
+            shutdown_result: Mutex::new(None),
         }
     }
 
@@ -791,21 +796,5 @@ impl SpaceFacade {
         &self,
     ) -> tokio::sync::broadcast::Receiver<uc_core::ports::PeerReachabilityChanged> {
         self.member_roster.subscribe_peer_reachability_events()
-    }
-
-    /// F2 · Tear down facade-owned background work cleanly on app exit.
-    ///
-    /// Slice 4 P5c: 历史上还会调 `network_control.stop_network()`,libp2p 走
-    /// 完后 iroh router 由 `SyncEngineAssembly::shutdown` 直接收口,本入口
-    /// 现在只剩 abort 入站 pairing orchestrator——让它的 `subscribe` receiver
-    /// 立刻 drop,底层 adapter 才能释放事件 channel。
-    #[instrument(skip_all)]
-    pub async fn on_shutdown(&self) {
-        if self.connections.shutdown().await.is_err() {
-            tracing::warn!(error.type = "join_failed", "peer connection coordinator shutdown failed");
-        }
-        if let Some(application) = self.application.lock().await.take() {
-            application.shutdown().await;
-        }
     }
 }

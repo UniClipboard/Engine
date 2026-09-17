@@ -546,9 +546,10 @@ impl SpaceApplication {
         self.ledger.clone()
     }
 
-    pub(crate) async fn shutdown(mut self) {
+    pub(crate) async fn shutdown(mut self) -> anyhow::Result<()> {
         if let Some(runtime) = self.runtime.take() {
-            runtime.shutdown().await;
+            runtime.shutdown().await?;
         }
+        Ok(())
     }
 }
