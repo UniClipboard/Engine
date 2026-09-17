@@ -200,6 +200,9 @@ fn map_outbound_payload_error(err: OutboundPayloadError, entry_id: &EntryId) -> 
 
 fn map_dispatch_sync_error(err: DispatchSyncError) -> ResendEntryError {
     match err {
+        DispatchSyncError::Stopped => {
+            ResendEntryError::Dispatch("clipboard dispatch stopped".into())
+        }
         DispatchSyncError::LockedSpace => {
             ResendEntryError::Dispatch("encryption session locked".to_string())
         }

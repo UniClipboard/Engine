@@ -321,6 +321,7 @@ impl ClipboardAssembly {
             inbound,
             peer_reachability: session.peer_reachability,
             known_peers: session.known_peers,
+            member_scope: session.member_scope,
             entries: Arc::clone(&self.deps.clipboard.entry_ports.list),
             events: Arc::clone(&self.deps.clipboard.clipboard_event_reader_repo),
             deliveries: session.deliveries,

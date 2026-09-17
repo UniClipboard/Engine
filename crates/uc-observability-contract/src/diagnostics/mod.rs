@@ -533,6 +533,7 @@ pub enum DiagnosticErrorType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticTaskKind {
+    ClipboardDeliveryRecord,
     ClipboardInboundOsWrite,
     ActiveClipboardConverge,
     ClipboardDeferredDrain,
@@ -543,6 +544,7 @@ pub enum DiagnosticTaskKind {
 impl DiagnosticTaskKind {
     fn as_str(self) -> &'static str {
         match self {
+            Self::ClipboardDeliveryRecord => "clipboard_delivery_record",
             Self::ClipboardInboundOsWrite => "clipboard_inbound_os_write",
             Self::ActiveClipboardConverge => "active_clipboard_converge",
             Self::ClipboardDeferredDrain => "clipboard_deferred_drain",
