@@ -14,7 +14,7 @@ pub struct StartupProgress {
     receiver: watch::Receiver<StartupSnapshot>,
 }
 
-/// 只能交给一次启动；丢弃输入或启动 future 会结算为 Interrupted。
+/// 只能交给一次启动；未使用的输入直接结算为 Interrupted，已接受的启动在完整收尾后结算。
 pub struct StartupProgressInput {
     pub(crate) store: Arc<StartupProgressStore>,
 }
