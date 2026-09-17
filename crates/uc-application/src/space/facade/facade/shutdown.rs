@@ -22,14 +22,19 @@ impl SpaceFacade {
         if let Some(result) = cached.as_ref() {
             return result.clone();
         }
+        let application = self.application.lock().await.take();
+        let (connections, application) = tokio::join!(self.connections.shutdown(), async move {
+            match application {
+                Some(application) => application.shutdown().await,
+                None => Ok(()),
+            }
+        },);
         let mut errors = Vec::new();
-        if let Err(source) = self.connections.shutdown().await {
+        if let Err(source) = connections {
             errors.push(anyhow::Error::new(source).context("stop peer connections"));
         }
-        if let Some(application) = self.application.lock().await.take() {
-            if let Err(source) = application.shutdown().await {
-                errors.push(source.context("stop membership maintenance"));
-            }
+        if let Err(source) = application {
+            errors.push(source.context("stop membership maintenance"));
         }
         let result = LifecycleError::from_errors(errors).map_err(Arc::new);
         *cached = Some(result.clone());
