@@ -51,6 +51,9 @@ fn connectivity_diagnostics_survive_the_export_file_without_private_fields() {
         .filter(|row: &serde_json::Value| row["target"] != "uc.diagnostics")
         .collect();
     assert_eq!(rows.len(), 5);
+    assert!(rows
+        .iter()
+        .all(|row| row["environment"] == "test" && row["app_channel"] == "test"));
     assert_eq!(rows[0]["fields"]["uc.outcome"], "deferred");
     assert_eq!(rows[0]["fields"]["trigger"], "resume");
     assert_eq!(rows[0]["fields"]["error.reason"], "authentication_rejected");

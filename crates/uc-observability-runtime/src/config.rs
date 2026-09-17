@@ -114,6 +114,7 @@ fn validated_app_channel(value: &str) -> Result<&'static str, ConfigError> {
         "test" => Ok("test"),
         "alpha" => Ok("alpha"),
         "beta" => Ok("beta"),
+        "rc" => Ok("rc"),
         "stable" => Ok("stable"),
         "production" => Ok("production"),
         _ => Err(ConfigError::InvalidAppChannel),
@@ -443,6 +444,23 @@ mod tests {
                 ),
                 Err(ConfigError::InvalidAppChannel)
             ));
+        }
+        for channel in [
+            "development",
+            "test",
+            "alpha",
+            "beta",
+            "rc",
+            "stable",
+            "production",
+        ] {
+            assert!(ObservabilityResource::new(
+                "1.2.3",
+                DeploymentEnvironment::Test,
+                OperatingSystem::Other,
+                channel,
+            )
+            .is_ok());
         }
 
         let resource = ObservabilityResource::new(

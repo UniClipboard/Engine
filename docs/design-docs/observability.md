@@ -394,7 +394,8 @@ UniFFI 的导出准备是同步入口，宿主必须使用已有后台执行队�
 跨日时按最旧优先清理；单条记录会使总量超限时整条丢弃。目录不可写时降级到其余输出，不影响业务。文件名解析只有诊断合同一份
 事实来源；诊断导出先有界刷新当前文件队列，再识别该严格命名。
 
-Resource 中 namespace、service name 和 schema version 固定；environment、OS 与 app channel 使用固定枚举。`service.version` 只接受
+Resource 中 namespace、service name 和 schema version 固定；environment、OS 与 app channel 使用固定枚举。app channel 只接受
+development、test、alpha、beta、rc、stable、production；`service.version` 只接受
 SemVer，预发布标记只允许 alpha、beta、rc，并可选再加一段数字；build metadata 不发送；`host.arch` 由运行时从固定架构集合取得，不接受宿主输入。
 绑定配置的 Debug 输出整体隐藏。
 
