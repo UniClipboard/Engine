@@ -62,17 +62,21 @@ impl RuntimeLifecycle {
             .await
     }
 
-    pub async fn transition(
+    pub(crate) async fn transition(
         self: &Arc<Self>,
         target: LifecycleTarget,
         deadline: Option<Instant>,
     ) -> Result<(), LifecycleError> {
-        self.transition_with_cancellation(target, deadline, CancellationToken::new())
+        let owner = Arc::clone(self);
+        let cancellation = CancellationToken::new();
+        // 执行任务持有负责人；丢弃等待者不会取消已接受的转换或资源收尾。
+        tokio::spawn(async move { owner.execute(target, deadline, cancellation).await })
             .await
+            .map_err(LifecycleError::from_task_failure)?
     }
 
     /// 撤销恢复目标只阻止下一项能力；已经开始的动作及必要收尾仍完整等待。
-    pub async fn transition_with_cancellation(
+    pub(crate) async fn transition_with_cancellation(
         self: &Arc<Self>,
         target: LifecycleTarget,
         deadline: Option<Instant>,
@@ -82,10 +86,7 @@ impl RuntimeLifecycle {
         // 执行任务持有负责人；丢弃等待者不会取消已接受的转换或资源收尾。
         tokio::spawn(async move { owner.execute(target, deadline, cancellation).await })
             .await
-            .map_err(|source| LifecycleError {
-                primary: source.into(),
-                additional: Vec::new(),
-            })?
+            .map_err(LifecycleError::from_task_failure)?
     }
 
     async fn execute(

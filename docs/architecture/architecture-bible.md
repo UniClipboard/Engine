@@ -851,6 +851,8 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 ## 文档维护记录
 
 - 2026-09-18：v1.1.0-rc.17 同步工作区、HarmonyOS 包与宿主检查版本，发布所有权及设备验收边界不变。
+- 2026-09-17：运行生命周期门面只公开暂停、恢复和最终关闭，不再公开内部参与者合同、转换上下文、通用转换入口或内部失败容器。共同期限现在直接约束每次参与者调用，超时返回前终止该调用任务；参与者异常只保留固定失败分类，不携带内部异常内容，普通能力失败仍保留原始原因。负责人、业务顺序、持久格式和安全边界不变。
+
 - 2026-09-17：Application 新增运行生命周期统一负责人，固定会话工作、本地工作和本地资源三类完整能力的暂停、恢复、失败清理与最终关闭顺序。当前切片只建立内部合同和验证，尚未接入生产组装；公开产品动作、持久格式和安全边界不变。
 
 - 2026-09-16：准入 Space transition 的失败分类保留完整来源链。`DbSnapshotError` 三个 variant 改为携带具体 `std::io::Error`/`diesel::result::Error`/连接池错误，`ActiveSpaceGenerationManifestStoreError::Storage`、`AdmissionSpaceTransitionError` 与 `SpaceRebuildTransitionError` 的能力失败 variant 改为携带 `#[source] source: anyhow::Error`，Infra 与 Engine 的映射不再用 `map_err(|_| ...)` 丢弃底层 io、diesel 或安全存储原因；调用方沿来源链分类（权限不足、空间不足、只读事务等），纯判断 variant（`Locked`、`UnreadableHistoryRequiresConfirmation`、`InsufficientStorage`）保持无来源。稳定失败分类、公开入口、持久化格式与分层均未改变。

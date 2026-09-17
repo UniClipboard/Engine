@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use tokio::sync::Notify;
 use tokio::time::{timeout, Instant};
 
+use super::error::{LifecycleDeadlineElapsed, LifecycleTaskFailure};
 use super::{
     LifecycleTarget, RuntimeLifecycle, RuntimeLifecycleParticipants, RuntimeLifecyclePort,
     TransitionContext,
@@ -29,6 +30,8 @@ struct Participant {
     resume_release: Notify,
     stopping: Notify,
     release: Notify,
+    suspend_completed: AtomicBool,
+    resume_completed: AtomicBool,
 }
 
 impl Participant {
@@ -46,6 +49,8 @@ impl Participant {
             resume_release: Notify::new(),
             stopping: Notify::new(),
             release: Notify::new(),
+            suspend_completed: AtomicBool::new(false),
+            resume_completed: AtomicBool::new(false),
         })
     }
 }
@@ -61,6 +66,7 @@ impl RuntimeLifecyclePort for Participant {
             self.stopping.notify_one();
             self.release.notified().await;
         }
+        self.suspend_completed.store(true, Ordering::SeqCst);
         if self.fail_suspend.load(Ordering::SeqCst) {
             return Err(std::io::Error::other("stop failure").into());
         }
@@ -80,6 +86,7 @@ impl RuntimeLifecyclePort for Participant {
             self.starting.notify_one();
             self.resume_release.notified().await;
         }
+        self.resume_completed.store(true, Ordering::SeqCst);
         if self.fail_resume.load(Ordering::SeqCst) {
             return Err(std::io::Error::other("start failure").into());
         }
@@ -194,6 +201,54 @@ async fn slow_session_does_not_delay_local_stop_notification() {
         .unwrap()
         .unwrap();
     assert_eq!(fixture.names(), ["session", "local", "resources"]);
+}
+
+#[tokio::test]
+async fn suspend_deadline_cancels_the_participant_task_before_returning() {
+    let fixture = Fixture::new();
+    fixture.activate().await;
+    fixture.session.block_suspend.store(true, Ordering::SeqCst);
+    let error = timeout(
+        Duration::from_secs(1),
+        fixture
+            .coordinator
+            .suspend(Some(Instant::now() + Duration::from_millis(20))),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(error
+        .primary
+        .downcast_ref::<LifecycleDeadlineElapsed>()
+        .is_some());
+    assert!(!fixture.session.suspend_completed.load(Ordering::SeqCst));
+    fixture.session.release.notify_one();
+    tokio::task::yield_now().await;
+    assert!(!fixture.session.suspend_completed.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn resume_deadline_cancels_the_participant_task_before_returning() {
+    let fixture = Fixture::new();
+    fixture.resources.block_resume.store(true, Ordering::SeqCst);
+    let error = timeout(
+        Duration::from_secs(1),
+        fixture.coordinator.resume(
+            Some(Instant::now() + Duration::from_millis(20)),
+            tokio_util::sync::CancellationToken::new(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(error
+        .primary
+        .downcast_ref::<LifecycleDeadlineElapsed>()
+        .is_some());
+    assert!(!fixture.resources.resume_completed.load(Ordering::SeqCst));
+    fixture.resources.resume_release.notify_one();
+    tokio::task::yield_now().await;
+    assert!(!fixture.resources.resume_completed.load(Ordering::SeqCst));
 }
 
 #[tokio::test]

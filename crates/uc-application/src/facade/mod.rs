@@ -35,9 +35,7 @@ pub use crate::profile::factory_reset::{
     ProfileFactoryResetRequest,
 };
 pub use crate::profile::probe_profile_key_access::ProbeProfileKeyAccessError;
-pub use crate::runtime_lifecycle::{
-    LifecycleError, RuntimeLifecycle, RuntimeLifecyclePort, TransitionContext,
-};
+pub use crate::runtime_lifecycle::RuntimeLifecycle;
 pub use crate::space::{
     CancelSpaceJoinError, CurrentJoinStatus, DecideDeviceTrustChange, DecideDeviceTrustChangeError,
     DecideDeviceTrustChangeResult, DeviceGroupChoiceImpact, DeviceTrustChangeChoice,
