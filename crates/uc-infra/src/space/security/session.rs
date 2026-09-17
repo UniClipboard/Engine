@@ -7,6 +7,7 @@
 //! 不再走 dyn trait 间接层。
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use hkdf::Hkdf;
@@ -28,6 +29,15 @@ use super::content_key_catalog::{
     decode as decode_content_key_catalog, encode as encode_content_key_catalog,
     PersistedContentKeyCatalog, PersistedContentKeyEntry,
 };
+
+tokio::task_local! {
+    static TRANSACTION_MASTER_KEY: TransactionMasterKey;
+}
+
+struct TransactionMasterKey {
+    generation: Arc<()>,
+    key: MasterKey,
+}
 
 #[derive(Clone, Debug)]
 struct State {
@@ -148,9 +158,35 @@ pub(crate) struct SessionSnapshot {
 pub(crate) struct SessionTransaction<'a> {
     session: &'a InMemorySession,
     previous: Option<SessionSnapshot>,
+    candidate_master_key: Option<MasterKey>,
 }
 
 impl SessionTransaction<'_> {
+    /// 只允许当前恢复动作使用尚未提交的候选密钥读取原有密文。
+    ///
+    /// task-local 能力不会被普通并发任务继承；共享 session 的所有公开读取在
+    /// transaction 提交前仍保持不可用。
+    pub(crate) async fn with_candidate_master_key<F>(&self, work: F) -> F::Output
+    where
+        F: Future,
+    {
+        let Some(key) = self.candidate_master_key.clone() else {
+            return work.await;
+        };
+        let Some(previous) = self.previous.as_ref() else {
+            return work.await;
+        };
+        TRANSACTION_MASTER_KEY
+            .scope(
+                TransactionMasterKey {
+                    generation: Arc::clone(&previous.generation),
+                    key,
+                },
+                work,
+            )
+            .await
+    }
+
     pub(crate) fn commit(
         mut self,
         vault: &ProfileContentKeyVault,
@@ -253,10 +289,18 @@ impl InMemorySession {
 
     pub fn get_master_key(&self) -> Result<MasterKey, EncryptionError> {
         let state = self.lock_state();
+        if state.pending_material.is_some() {
+            return TRANSACTION_MASTER_KEY
+                .try_with(|candidate| {
+                    if Arc::ptr_eq(&candidate.generation, &state.generation) {
+                        Ok(candidate.key.clone())
+                    } else {
+                        Err(EncryptionError::NotInitialized)
+                    }
+                })
+                .unwrap_or(Err(EncryptionError::NotInitialized));
+        }
         state
-            .pending_material
-            .as_ref()
-            .unwrap_or(&state.material)
             .master_key
             .as_ref()
             .cloned()
@@ -341,10 +385,12 @@ impl InMemorySession {
         if let Some((space_id, key)) = target {
             Self::set_space_key(&mut pending, space_id, key);
         }
+        let candidate_master_key = pending.master_key.clone();
         state.pending_material = Some(pending);
         Ok(SessionTransaction {
             session: self,
             previous: Some(previous),
+            candidate_master_key,
         })
     }
 

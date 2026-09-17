@@ -488,6 +488,7 @@ async fn prepared_security_material_is_not_visible_before_atomic_commit() {
         .unwrap();
 
     assert!(!session.is_ready());
+    assert!(session.get_master_key().is_err());
     assert!(session.current_space_id().is_err());
     assert!(session
         .derive_stable_subkey(b"profile", b"relationships")
@@ -503,6 +504,36 @@ async fn prepared_security_material_is_not_visible_before_atomic_commit() {
     assert!(session
         .derive_stable_subkey(b"profile", b"relationships")
         .is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_the_transaction_restore_action_can_read_the_candidate_master_key() {
+    let session = Arc::new(InMemorySession::new());
+    session.set_master_key_for_space(
+        SpaceId::from("space-a"),
+        MasterKey::from_bytes(&[32; 32]).unwrap(),
+    );
+    let transaction = session
+        .begin_transaction(Some((
+            SpaceId::from("space-b"),
+            MasterKey::from_bytes(&[33; 32]).unwrap(),
+        )))
+        .unwrap();
+
+    let scoped_session = Arc::clone(&session);
+    let concurrent_session = Arc::clone(&session);
+    let (scoped, concurrent) = transaction
+        .with_candidate_master_key(async move {
+            let scoped = scoped_session.get_master_key();
+            let concurrent = tokio::spawn(async move { concurrent_session.get_master_key() })
+                .await
+                .unwrap();
+            (scoped, concurrent)
+        })
+        .await;
+
+    assert_eq!(scoped.unwrap().as_bytes(), &[33; 32]);
+    assert!(concurrent.is_err());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

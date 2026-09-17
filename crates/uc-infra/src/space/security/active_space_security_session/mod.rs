@@ -74,8 +74,8 @@ impl ActiveSpaceSecuritySession {
             .session
             .begin_transaction(Some((space_id.clone(), master_key)))
             .map_err(session_error)?;
-        let material = repository
-            .load_space_material(space_id)
+        let material = transaction
+            .with_candidate_master_key(repository.load_space_material(space_id))
             .await
             .map_err(|source| ActiveSpaceSecuritySessionError::Repository {
                 source: anyhow::Error::new(source),
