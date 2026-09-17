@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::future::pending;
+use std::future::{pending, Future};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -1319,11 +1319,11 @@ async fn run_worker_loop(
         .await;
     }
 
-    let shutdown_response = tokio::select! {
-        biased;
-        response = worker_lifecycle::run(Arc::clone(&engine), lifecycle_requests) => response,
-        () = run_operations(&engine, requests) => Vec::new(),
-    };
+    let shutdown_response = run_until_lifecycle_finishes(
+        worker_lifecycle::run(Arc::clone(&engine), lifecycle_requests),
+        run_operations(&engine, requests),
+    )
+    .await;
     let result =
         worker_shutdown::finish_shutdown(engine.shutdown_until_complete(), event_task, events)
             .await;
@@ -1331,6 +1331,19 @@ async fn run_worker_loop(
         let _ = response.send(result.clone());
     }
     result
+}
+
+async fn run_until_lifecycle_finishes<T>(
+    lifecycle: impl Future<Output = T>,
+    operations: impl Future<Output = ()>,
+) -> T {
+    tokio::pin!(lifecycle);
+    tokio::pin!(operations);
+    tokio::select! {
+        biased;
+        response = &mut lifecycle => response,
+        () = &mut operations => lifecycle.await,
+    }
 }
 
 async fn run_operations(
@@ -2576,6 +2589,28 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ordinary_requests_ending_does_not_drop_a_slow_lifecycle_reply() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let lifecycle_started = Arc::clone(&started);
+        let lifecycle_release = Arc::clone(&release);
+        let result = tokio::spawn(run_until_lifecycle_finishes(
+            async move {
+                lifecycle_started.notify_one();
+                lifecycle_release.notified().await;
+                42
+            },
+            async {},
+        ));
+
+        started.notified().await;
+        tokio::task::yield_now().await;
+        assert!(!result.is_finished());
+        release.notify_one();
+        assert_eq!(result.await.unwrap(), 42);
+    }
 
     #[test]
     fn relay_node_changes_preserve_other_configured_nodes() {
