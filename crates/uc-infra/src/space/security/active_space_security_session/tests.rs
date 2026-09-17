@@ -469,6 +469,42 @@ async fn failed_or_cancelled_activation_cannot_resurrect_a_cleared_session() {
     assert!(!session.is_ready());
 }
 
+#[tokio::test]
+async fn prepared_security_material_is_not_visible_before_atomic_commit() {
+    let (_directory, session, vault, active) = active_fixture();
+    active
+        .activate(
+            &SpaceId::from("space-a"),
+            MasterKey::from_bytes(&[32; 32]).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+    let transaction = session
+        .begin_transaction(Some((
+            SpaceId::from("space-b"),
+            MasterKey::from_bytes(&[33; 32]).unwrap(),
+        )))
+        .unwrap();
+
+    assert!(!session.is_ready());
+    assert!(session.current_space_id().is_err());
+    assert!(session
+        .derive_stable_subkey(b"profile", b"relationships")
+        .is_err());
+
+    transaction.commit(&vault).unwrap();
+
+    assert!(session.is_ready());
+    assert_eq!(
+        session.current_space_id().unwrap(),
+        SpaceId::from("space-b")
+    );
+    assert!(session
+        .derive_stable_subkey(b"profile", b"relationships")
+        .is_ok());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_cold_load_finishing_after_clear_does_not_repopulate_reuse() {
     use std::sync::atomic::Ordering;

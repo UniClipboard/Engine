@@ -13,6 +13,7 @@
 //! `KeyScopePort` → `CurrentProfilePort`(Slice 7 U7 候选 B),返回
 //! `uc_core::ids::ProfileId` 值对象。
 
+use anyhow::Error;
 use std::fmt;
 
 /// Passphrase provided by user. Only used to derive KEK inside use cases.
@@ -32,7 +33,7 @@ impl Passphrase {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum EncryptionError {
     #[error("encryption is not initialized")]
     NotInitialized,
@@ -91,4 +92,39 @@ pub enum EncryptionError {
 
     #[error("unsupported version for key material")]
     UnsupportedVersion, // keyslot/blob 版本不支持
+
+    #[error("key material access failed")]
+    KeyMaterialAccessFailed {
+        #[source]
+        source: Error,
+    },
+}
+
+impl fmt::Debug for EncryptionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // 底层访问失败可能携带宿主信息，不通过默认 Debug 展开来源。
+        fmt::Display::fmt(self, formatter)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+    use std::io;
+
+    use super::EncryptionError;
+
+    #[test]
+    fn key_material_access_failure_retains_source_without_displaying_it() {
+        let error = EncryptionError::KeyMaterialAccessFailed {
+            source: io::Error::other("private host payload").into(),
+        };
+        assert!(error
+            .source()
+            .unwrap()
+            .downcast_ref::<io::Error>()
+            .is_some());
+        assert!(!format!("{error:?}").contains("private"));
+        assert!(!format!("{error}").contains("private"));
+    }
 }
