@@ -216,6 +216,12 @@ pub enum ActiveClipboardLifecycleError {
     RestoreBroadcastAlreadyAttached,
 }
 
+#[derive(Debug, Error)]
+#[error("required active clipboard worker stopped unexpectedly: {worker}")]
+struct RequiredActiveClipboardWorkerStopped {
+    worker: &'static str,
+}
+
 type RestoreWorkerFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 type RestoreWorkerStarter = Arc<
     dyn Fn(UnboundedReceiver<RestoreBroadcastRequest>, CancellationToken) -> RestoreWorkerFuture
@@ -272,9 +278,16 @@ impl ActiveClipboardWorkerSupervisor {
                     }
                 },
                 joined = workers.join_next(), if !workers.is_empty() => {
-                    if let Some(Err(source)) = joined {
-                        errors.push(source.into());
-                        self.cancel.cancel();
+                    match joined {
+                        Some(Ok(worker)) => {
+                            errors.push(RequiredActiveClipboardWorkerStopped { worker }.into());
+                            self.cancel.cancel();
+                        }
+                        Some(Err(source)) => {
+                            errors.push(source.into());
+                            self.cancel.cancel();
+                        }
+                        None => {}
                     }
                 }
             }
@@ -301,7 +314,10 @@ mod lifecycle_tests {
     use tokio::task::JoinSet;
     use tokio_util::sync::CancellationToken;
 
-    use super::{ActiveClipboardLifecycle, ActiveClipboardLifecycleError, RestoreWorkerStarter};
+    use super::{
+        ActiveClipboardLifecycle, ActiveClipboardLifecycleError,
+        RequiredActiveClipboardWorkerStopped, RestoreWorkerStarter,
+    };
     use std::sync::Barrier;
 
     struct StopProbe(Arc<AtomicBool>);
@@ -453,6 +469,34 @@ mod lifecycle_tests {
         lifecycle.attach_restore_broadcast(receiver).unwrap();
         lifecycle.shutdown().await.unwrap();
         assert!(!started.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn required_worker_early_return_stops_the_group_and_is_reported() {
+        let release = Arc::new(Notify::new());
+        let worker_release = Arc::clone(&release);
+        let mut workers = JoinSet::new();
+        workers.spawn(async move {
+            worker_release.notified().await;
+            "inbound"
+        });
+        let starter: RestoreWorkerStarter =
+            Arc::new(move |_rx, cancel| Box::pin(async move { cancel.cancelled().await }));
+        let cancel = CancellationToken::new();
+        let (commands, receiver) = mpsc::unbounded_channel();
+        let lifecycle =
+            ActiveClipboardLifecycle::start(workers, starter, commands, receiver, cancel.clone());
+
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), cancel.cancelled())
+            .await
+            .unwrap();
+        let error = lifecycle.shutdown().await.unwrap_err();
+        let stopped = error
+            .primary
+            .downcast_ref::<RequiredActiveClipboardWorkerStopped>()
+            .unwrap();
+        assert_eq!(stopped.worker, "inbound");
     }
 
     #[tokio::test]
