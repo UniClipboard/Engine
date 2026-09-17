@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{info, info_span, warn, Instrument};
 
@@ -164,7 +165,7 @@ impl FileTransferLifecycle {
     /// partial cache artifacts on disk.
     pub fn spawn_timeout_sweep(
         &self,
-        cancel: tokio::sync::watch::Receiver<bool>,
+        cancel: watch::Receiver<bool>,
         blob_transfer: Arc<BlobTransferFacade>,
     ) -> JoinHandle<()> {
         let list_expired = Arc::clone(&self.list_expired);
@@ -182,14 +183,19 @@ impl FileTransferLifecycle {
                 let mut interval = tokio::time::interval(SWEEP_INTERVAL);
 
                 loop {
+                    if sweep_cancelled(&cancel) {
+                        return;
+                    }
                     tokio::select! {
-                        _ = interval.tick() => {},
-                        _ = cancel.changed() => {
-                            if *cancel.borrow() {
+                        biased;
+                        changed = cancel.changed() => {
+                            if changed.is_err() || *cancel.borrow() {
                                 info!("File transfer timeout sweep shutting down");
                                 return;
                             }
+                            continue;
                         }
+                        _ = interval.tick() => {},
                     }
 
                     let now_ms = clock.now_ms();
@@ -217,6 +223,9 @@ impl FileTransferLifecycle {
                     );
 
                     for t in &expired {
+                        if sweep_cancelled(&cancel) {
+                            return;
+                        }
                         if matches!(t.status, TrackedFileTransferStatus::Transferring) {
                             match blob_transfer
                                 .cancel_inbound_transfer(
@@ -318,24 +327,29 @@ impl FileTransferLifecycle {
     }
 }
 
+fn sweep_cancelled(cancel: &watch::Receiver<bool>) -> bool {
+    *cancel.borrow() || cancel.has_changed().is_err()
+}
+
 async fn wait_until_ready_or_cancel(
     readiness: &ReceiveReadinessCoordinator,
-    cancel: &mut tokio::sync::watch::Receiver<bool>,
+    cancel: &mut watch::Receiver<bool>,
 ) -> bool {
     loop {
-        if *cancel.borrow() {
+        if sweep_cancelled(cancel) {
             return false;
         }
         if readiness.is_ready() {
             return true;
         }
         tokio::select! {
-            _ = readiness.wait_ready() => return true,
+            biased;
             changed = cancel.changed() => {
                 if changed.is_err() || *cancel.borrow() {
                     return false;
                 }
             }
+            _ = readiness.wait_ready() => return true,
         }
     }
 }
@@ -464,6 +478,16 @@ async fn cleanup_cached_path(cached_path: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn closed_stop_channel_rejects_work_even_when_receive_is_ready() {
+        let readiness = ReceiveReadinessCoordinator::new();
+        readiness.mark_ready();
+        let (cancel, mut receiver) = watch::channel(false);
+        drop(cancel);
+        assert!(!wait_until_ready_or_cancel(&readiness, &mut receiver).await);
+        assert!(sweep_cancelled(&receiver));
+    }
 
     #[tokio::test]
     async fn timeout_sweep_can_stop_before_receive_becomes_ready() {

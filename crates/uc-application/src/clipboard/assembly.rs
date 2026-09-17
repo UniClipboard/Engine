@@ -312,7 +312,7 @@ impl ClipboardAssembly {
             transfer_cipher: Arc::clone(&self.deps.security.transfer_cipher),
             settings: Arc::clone(&self.deps.settings),
             clock: Arc::clone(&self.deps.system.clock),
-            apply: Arc::clone(&apply_inbound),
+            apply: Arc::clone(&apply_inbound) as Arc<dyn InboundClipboardApplyPort>,
             events: session.inbound_events,
         });
         let sync = Arc::new(ClipboardSyncRuntime::start(ClipboardSyncRuntimeDeps {

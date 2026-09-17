@@ -868,6 +868,8 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 - 2026-09-17：剪贴板发送在网络动作前保存逐目标待送事实，最终结果覆盖同一记录；进程中断或目标暂时不可达后可按当前开关、成员资格和内容状态恢复。取消、撤权、同步关闭和内容失效保持终止优先，旧意图不会复活；现有记录格式直接表达最终状态，不新增平行恢复队列。
 
+- 2026-09-17：文件接收由文件传输负责人统一封闭新会话、取消全部已登记会话并等待结束；超时清理将停止置于定时工作之前，停止信号发送方退出同样视为停止。单个会话取消失败不会遗弃其余收尾，首个失败保留来源；公开入口和持久格式不变。
+
 - 2026-09-16：准入 Space transition 的失败分类保留完整来源链。`DbSnapshotError` 三个 variant 改为携带具体 `std::io::Error`/`diesel::result::Error`/连接池错误，`ActiveSpaceGenerationManifestStoreError::Storage`、`AdmissionSpaceTransitionError` 与 `SpaceRebuildTransitionError` 的能力失败 variant 改为携带 `#[source] source: anyhow::Error`，Infra 与 Engine 的映射不再用 `map_err(|_| ...)` 丢弃底层 io、diesel 或安全存储原因；调用方沿来源链分类（权限不足、空间不足、只读事务等），纯判断 variant（`Locked`、`UnreadableHistoryRequiresConfirmation`、`InsufficientStorage`）保持无来源。稳定失败分类、公开入口、持久化格式与分层均未改变。
 
 - 2026-09-16：自写回显归因从一次性消费改为按单次写入的回显集。远程推送的 next-change fallback 拥有两次同内容类别吸收预算，内容命中消耗配对 fallback 的一次预算而非删除，且首次回显后剩余预算只保留 5 秒；本地恢复保持一次性语义。该修改补齐“一次程序化写入产生多个系统事件”时的归因，避免第二个事件被误判为本地捕获并回传对端形成 A↔B 图片回环；不改变分层、公开接口或持久化格式。
