@@ -51,6 +51,7 @@ use crate::transfer::blob::facade::BlobTransferDeps;
 use crate::transfer::file::assembly::FileTransferAssembly;
 use crate::transfer::file::assembly::{FileTransferAssemblyDeps, ReceiveCancellationDeps};
 use crate::transfer::file::timeout_runtime::FileTransferTimeoutRuntime;
+use crate::transfer::receive::reconciliation::EnsureReceiveReadyPort;
 
 mod shutdown;
 use shutdown::ApplicationShutdown;
@@ -549,39 +550,42 @@ impl ApplicationAssembly {
         {
             Ok(runtime) => runtime,
             Err(source) => {
-                let search_rollback = search.shutdown().await.err();
-                let space_rollback = space.on_shutdown().await.err();
+                let (search_rollback, space_rollback) =
+                    tokio::join!(search.shutdown(), space.on_shutdown());
                 return Err(ApplicationStartError::ActiveClipboard {
                     source,
-                    search_rollback,
-                    space_rollback,
+                    search_rollback: search_rollback.err(),
+                    space_rollback: space_rollback.err(),
                 });
             }
         };
         let (restore_tx, restore_rx) = tokio::sync::mpsc::unbounded_channel();
         if let Err(source) = active_clipboard.attach_restore_broadcast(restore_rx) {
-            let active_clipboard_rollback = active_clipboard.shutdown().await.err();
-            let search_rollback = search.shutdown().await.err();
-            let space_rollback = space.on_shutdown().await.err();
+            let (active_clipboard_rollback, search_rollback, space_rollback) = tokio::join!(
+                active_clipboard.shutdown(),
+                search.shutdown(),
+                space.on_shutdown(),
+            );
             return Err(ApplicationStartError::ActiveClipboardRestore {
                 source,
-                search_rollback,
-                active_clipboard_rollback,
-                space_rollback,
+                search_rollback: search_rollback.err(),
+                active_clipboard_rollback: active_clipboard_rollback.err(),
+                space_rollback: space_rollback.err(),
             });
         }
         if !space.bind_session_activity(
             search.facade(),
-            self.file_transfer.facade()
-                as Arc<dyn crate::transfer::receive::reconciliation::EnsureReceiveReadyPort>,
+            self.file_transfer.facade() as Arc<dyn EnsureReceiveReadyPort>,
         ) {
-            let active_clipboard_rollback = active_clipboard.shutdown().await.err();
-            let search_rollback = search.shutdown().await.err();
-            let space_rollback = space.on_shutdown().await.err();
+            let (active_clipboard_rollback, search_rollback, space_rollback) = tokio::join!(
+                active_clipboard.shutdown(),
+                search.shutdown(),
+                space.on_shutdown(),
+            );
             return Err(ApplicationStartError::SpaceActivityAlreadyBound {
-                search_rollback,
-                active_clipboard_rollback,
-                space_rollback,
+                search_rollback: search_rollback.err(),
+                active_clipboard_rollback: active_clipboard_rollback.err(),
+                space_rollback: space_rollback.err(),
             });
         }
 
