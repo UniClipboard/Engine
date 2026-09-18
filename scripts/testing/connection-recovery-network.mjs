@@ -623,7 +623,10 @@ function blockDirect(node) {
   nft(node, 'add', 'rule', 'inet', 'uc_direct', 'output', 'meta', 'l4proto', 'udp', 'counter', 'drop')
   net(node, 'node', '-e', "const s=require('dgram').createSocket('udp4');s.send('probe',19091,'10.233.0.1',()=>s.close())")
   const rules = JSON.parse(net(node, 'nft', '-j', 'list', 'table', 'inet', 'uc_direct'))
-  assert(rules.nftables.some(row => row.rule?.expr?.some(expr => expr.counter?.packets > 0)), 'direct-path drop rule was not exercised')
+  const dropped = rules.nftables.flatMap(row => row.rule?.expr ?? []).reduce((total, expr) => total + (expr.counter?.packets ?? 0), 0)
+  assert(dropped > 0, 'direct-path drop rule was not exercised')
+  faults.push({ node: node.label, action: 'direct_paths_blocked', at_ms: Math.round(performance.now()), verified_dropped_packets: dropped })
+  return dropped
 }
 
 async function relayScenarios(a, b) {
@@ -643,7 +646,7 @@ async function relayScenarios(a, b) {
     })
   }
   for (const node of nodes) await node.stop()
-  for (const node of nodes) blockDirect(node)
+  const directDropPackets = nodes.reduce((total, node) => total + blockDirect(node), 0)
   for (const node of nodes) await node.start()
   await until(async () => nodes.every(node => net(node, 'ss', '-Hnt', 'state', 'established').includes(':19090')), 20_000, 'test hosts did not connect to the local relay')
   await online(nodes, 20_000)
@@ -651,15 +654,36 @@ async function relayScenarios(a, b) {
   for (let iteration = 0; iteration < repeat; iteration++) {
     for (const node of nodes) { await node.drain(); node.events = [] }
     await scenario(`E10-relay-only-${iteration}`, async () => {
+      const recoveryBaseline = nodes.reduce((total, node) => total + node.recoveries, 0)
+      const proof = records.at(-1).proof = {
+        direct_paths_blocked: directDropPackets > 0,
+        direct_drop_packets: directDropPackets,
+        both_relay_transports_ready: false,
+        bidirectional_transfer: false,
+      }
       await stopRelay()
       await offline(b, 20_000)
       await startRelay()
-      await online(nodes, 20_000)
+      await until(async () => nodes.every(node => net(node, 'ss', '-Hnt', 'state', 'established').includes(':19090')), 20_000, 'test hosts did not reconnect to the local relay')
+      const relayReadyAt = performance.now()
+      proof.both_relay_transports_ready = true
+      const deadline = relayReadyAt + 3000
+      const remaining = deadline - performance.now()
+      assert(remaining > 0, 'relay transport observation exhausted the three-second recovery budget')
+      await online(nodes, remaining)
+      const onlineAt = performance.now()
+      proof.relay_transport_ready_to_online_ms = Math.round(onlineAt - relayReadyAt)
       await transfer(a, b, `relay-only-healed-${iteration}`)
+      const transferAt = performance.now()
+      proof.relay_transport_ready_to_bidirectional_transfer_ms = Math.round(transferAt - relayReadyAt)
+      proof.bidirectional_transfer = true
       for (const node of nodes) {
         await node.drain()
         assert(!node.events.some(event => event.kind === 'recovery'), 'relay loss caused whole-session recovery')
       }
+      proof.whole_session_recovery_count = nodes.reduce((total, node) => total + node.recoveries, 0) - recoveryBaseline
+      assert.equal(proof.whole_session_recovery_count, 0, 'relay loss caused whole-session recovery')
+      assert(transferAt <= deadline, 'relay-only bidirectional recovery exceeded three seconds')
     })
   }
 }
@@ -723,6 +747,6 @@ finally {
   rmSync(root, { recursive: true, force: true })
   const binaries = [binary, legacyBinary, relayBinary].filter(Boolean).map(path => ({ sha256: createHash('sha256').update(readFileSync(path)).digest('hex') }))
   if (!cleaned) failed = true
-  writeFileSync(join(evidence, `${mode}${mode === 'legacy' ? `-${legacySide}` : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v1', binaries, faults, records, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, failure_reasons: node.failureReasons, network_facts: node.networkFacts })) }, null, 2), { mode: 0o600 })
+  writeFileSync(join(evidence, `${mode}${mode === 'legacy' ? `-${legacySide}` : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v2', binaries, faults, records, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, failure_reasons: node.failureReasons, network_facts: node.networkFacts })) }, null, 2), { mode: 0o600 })
 }
 process.exitCode = failed ? 1 : 0

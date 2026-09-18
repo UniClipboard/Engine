@@ -14,4 +14,5 @@
 - [配对内部处理与排队诊断](2026-09-13-pairing-local-work-diagnostics.md)
 - [Engine 空闲重复工作与准入存储性能修复](2026-09-13-engine-idle-work-and-admission-performance.md)
 - [已知设备联系驱动的成员恢复与地址更新](2026-09-17-known-peer-contact-recovery.md)（实施中）
+- [只走中转时三秒内恢复双向连接](2026-09-18-relay-only-three-second-recovery.md)（核心实施与二十轮验收完成；现有旧版配对基线阻塞完整套件收口）
 计划完成时先更新稳定设计/ADR 和验收证据，再移入 `../completed/`。

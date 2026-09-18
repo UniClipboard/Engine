@@ -784,8 +784,10 @@ impl IrohSessionBuilder {
         let recovery = stream::unfold(observations, |mut receiver| async move {
             use super::net_recovery::NetworkRecoveryObservation;
             let hint = match receiver.recv().await {
-                Ok(NetworkRecoveryObservation::LocalRelayRecovered)
-                | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                Ok(NetworkRecoveryObservation::LocalRelayRecovered) => {
+                    uc_application::deps::ConnectionHint::RelayRecovered
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     uc_application::deps::ConnectionHint::NetworkChanged
                 }
                 Ok(NetworkRecoveryObservation::CommunicationFailed(device)) => {
