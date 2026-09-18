@@ -168,7 +168,7 @@ async fn blocked_updates_explain_queue_wait_and_coalesced_wakes_without_changing
     })
     .await
     .expect("两轮完成");
-    runtime.shutdown().await;
+    runtime.shutdown().await.unwrap();
     let events = capture.0.lock().expect("capture");
     let queued = events
         .iter()
