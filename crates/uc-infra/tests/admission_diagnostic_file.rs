@@ -8,7 +8,7 @@ use uc_application::deps::*;
 use uc_core::membership::{
     AdmissionChannelPeerId, AdmissionContinuationCredential, AdmissionMessageId,
     AdmissionPeerBinding, AdmissionRole, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1,
-    SpaceAdmissionId, SpaceAdmissionRoute,
+    SpaceAdmissionId, SpaceAdmissionProtocolVersion, SpaceAdmissionRoute,
 };
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use uc_infra::db::{executor::DieselSqliteExecutor, pool::init_db_pool};
@@ -179,7 +179,8 @@ async fn missing_stored_credential_produces_diagnosable_client_and_server_record
                 .expect(
                     "the physical connection should be established before authentication fails",
                 );
-            let request = SpaceAdmissionEnvelopeV1::new(
+            let request = SpaceAdmissionEnvelopeV1::new_with_version(
+                SpaceAdmissionProtocolVersion::V2,
                 admission_id,
                 AdmissionRole::Joiner,
                 1,

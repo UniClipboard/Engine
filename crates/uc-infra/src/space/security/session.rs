@@ -111,6 +111,7 @@ struct SessionState {
     lease: Option<ProfileKeyReadLease>,
     closed: bool,
     allow_reuse: bool,
+    provisional: bool,
 }
 
 impl std::ops::Deref for SessionState {
@@ -132,6 +133,7 @@ impl SessionState {
             lease: None,
             closed: false,
             allow_reuse: true,
+            provisional: false,
         }
     }
 }
@@ -139,6 +141,7 @@ impl SessionState {
 pub(crate) struct SessionSnapshot {
     material: State,
     generation: Arc<()>,
+    provisional: bool,
 }
 
 /// 异步激活的回滚责任留在 Infra；取消也不能留下临时装入的目标密钥。
@@ -170,6 +173,7 @@ impl SessionTransaction<'_> {
                 }
             })?);
         }
+        state.provisional = false;
         self.previous = None;
         drop(state);
         self.session.ready.notify_waiters();
@@ -209,8 +213,11 @@ impl InMemorySession {
 
     pub fn is_ready(&self) -> bool {
         match self.state.lock() {
-            Ok(state) => state.master_key.is_some(),
-            Err(poisoned) => poisoned.into_inner().master_key.is_some(),
+            Ok(state) => state.master_key.is_some() && !state.provisional,
+            Err(poisoned) => {
+                let state = poisoned.into_inner();
+                state.master_key.is_some() && !state.provisional
+            }
         }
     }
 
@@ -307,9 +314,11 @@ impl InMemorySession {
         let previous = SessionSnapshot {
             material: state.material.clone(),
             generation: state.generation.clone(),
+            provisional: state.provisional,
         };
         if let Some((space_id, key)) = target {
             Self::set_space_key(&mut state, space_id, key);
+            state.provisional = true;
         }
         Ok(SessionTransaction {
             session: self,
@@ -584,6 +593,7 @@ impl InMemorySession {
             SessionSnapshot {
                 material: state.material.clone(),
                 generation: state.generation.clone(),
+                provisional: state.provisional,
             }
         }
     }
@@ -592,6 +602,7 @@ impl InMemorySession {
         let mut state = self.lock_state();
         if !state.closed && Arc::ptr_eq(&state.generation, &snapshot.generation) {
             state.material = snapshot.material;
+            state.provisional = snapshot.provisional;
         }
     }
 
@@ -740,6 +751,7 @@ impl InMemorySession {
         state.current_content_key_id = None;
         state.current_epoch = None;
         state.content_keys.clear();
+        state.provisional = false;
     }
 }
 
@@ -779,6 +791,22 @@ mod tests {
 
     fn key(seed: u8) -> MasterKey {
         MasterKey::from_bytes(&[seed; 32]).unwrap()
+    }
+
+    #[test]
+    fn target_transaction_stays_unavailable_until_commit() {
+        let session = InMemorySession::new();
+        let transaction = session
+            .begin_transaction(Some((SpaceId::from_str("space-a"), key(1))))
+            .unwrap();
+
+        assert!(!session.is_ready());
+        assert!(session.get_master_key().is_ok());
+
+        drop(transaction);
+
+        assert!(!session.is_ready());
+        assert!(session.current_space_id().is_err());
     }
 
     #[test]

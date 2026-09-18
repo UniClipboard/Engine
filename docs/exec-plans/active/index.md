@@ -2,6 +2,7 @@
 
 这里包含设计中、实施中、待实现或暂时阻塞的工作。状态以各文件开头为准。
 
+- [统一运行生命周期](2026-09-12-unified-runtime-lifecycle.md)（实施中）
 - [034 确定性虚拟 Peer Network 测试套件](034-deterministic-virtual-peer-network-test-suite.md)
 - [038 双设备配对本机耗时压缩到一秒](038-pairing-local-latency-budget.md)（实施中）
 - [039 历史本地调试记录逐项收口](039-local-debug-inventory-cleanup.md)
