@@ -21,7 +21,7 @@ use crate::deps::{
     CurrentSpaceIdentityPort, InitialSpaceActivationPort, RePairingStateStorePort,
     SpaceAccessPorts, SpaceRebuildProgressPort,
 };
-use crate::space::SpaceRuntimeAdapters;
+use crate::space::{KnownPeerContact, SpaceRuntimeAdapters};
 
 pub(crate) struct SpaceSessionDeps {
     pub space_access: SpaceAccessPorts,
@@ -66,6 +66,7 @@ pub(crate) struct SpaceFacadeDeps {
     pub runtime_adapters: SpaceRuntimeAdapters,
     pub peer_reachability_changed_events:
         broadcast::Receiver<uc_core::ports::PeerReachabilityChanged>,
+    pub known_peer_contacts: broadcast::Receiver<KnownPeerContact>,
     pub admission_observations: Arc<crate::space::SpaceAdmissionObservationRegistry>,
     pub space_transition_changes: tokio::sync::watch::Sender<()>,
 }

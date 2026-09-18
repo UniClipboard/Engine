@@ -22,6 +22,7 @@ mod facade;
 mod lifecycle;
 mod membership;
 pub use membership::{DeviceGroupChoicesView, QueryDeviceGroupChoicesError, RosterEntry};
+pub use membership::{MembershipReadiness, QueryMembershipReadinessError};
 pub(crate) use membership::{QueryMemberRosterError, QueryMemberRosterUseCase};
 
 // Caller-facing facade contract.
@@ -53,6 +54,7 @@ pub use lifecycle::{
     RecoverSpaceSessionResult, ResetSpaceError, SpaceAccessState, UnlockSpaceError,
 };
 pub use lifecycle::{CurrentInvitation, QuerySetupStateError, SetupStateView};
+pub use membership::RefreshVerifiedPeerAddressPort;
 pub use membership::{
     AdmissionAbandonmentRevocationTarget, AdmissionRevocationPort, AdmissionRevocationResult,
     AdmissionRevocationTarget, MembershipCommitReceipt, RemoveSpaceMemberError,
@@ -154,7 +156,7 @@ pub use membership::{
 pub use membership::{
     AdmissionMaintenanceOutcome, BeginMembershipBranchRecoveryInput,
     DeliverRestrictedMembershipPort, IssueMembershipBranchRecoveryError,
-    IssueMembershipBranchRecoveryInput, IssueMembershipBranchRecoveryPort,
+    IssueMembershipBranchRecoveryInput, IssueMembershipBranchRecoveryPort, KnownPeerContact,
     MembershipBranchRecoveryChannelError, MembershipBranchRecoveryChannelPort,
     MembershipBranchRecoveryCommit, MembershipBranchRecoveryRequest,
     MembershipMaintenanceStepOutcome, MembershipNetworkActivityPort,

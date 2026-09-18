@@ -70,6 +70,7 @@ node --version > "$evidence/node-version.txt"
 runner=(node "$repo/scripts/testing/connection-recovery-network.mjs" --host "$target/debug/uc-connectivity-host" --repeat "$repeat" --evidence "$evidence")
 if ((EUID != 0)); then runner=(sudo -- "${runner[@]}"); fi
 "${runner[@]}" --mode direct
+"${runner[@]}" --mode known-peer
 "${runner[@]}" --mode relay --relay "$target/debug/uc-connectivity-relay"
 for side in 0 1; do
   "${runner[@]}" --mode legacy --legacy-host "$target/rc15/debug/uc-connectivity-host" --legacy-side "$side"

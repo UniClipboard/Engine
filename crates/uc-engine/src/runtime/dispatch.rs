@@ -72,6 +72,7 @@ use crate::operations::space::invitation::execute_issue_invitation;
 use crate::operations::space::join_space::execute_join_space;
 #[cfg(feature = "dev-tools")]
 use crate::operations::space::membership_diagnostics::execute_query_membership_diagnostics;
+use crate::operations::space::membership_readiness::execute_query_membership_readiness;
 use crate::operations::space::session_recovery::execute_recover_session;
 use crate::operations::space::setup_state::execute_query_setup_state;
 use crate::operations::space::unlock::execute_unlock_space;
@@ -92,6 +93,10 @@ impl EngineRuntime for ProductionRuntime {
         match operation {
             Operation::QueryDeviceGroupChoices => {
                 return execute_query_device_group_choices(self.current_facade().await?.as_ref())
+                    .await;
+            }
+            Operation::QueryMembershipReadiness => {
+                return execute_query_membership_readiness(self.current_facade().await?.as_ref())
                     .await;
             }
             Operation::ChooseDeviceGroup(input) => {
@@ -367,6 +372,7 @@ impl EngineRuntime for ProductionRuntime {
                 Operation::QueryEncryptionState => {
                     execute_query_encryption_state(self.current_facade().await?.as_ref()).await
                 }
+                Operation::QueryMembershipReadiness => Err(super::operation_unavailable_error()),
                 Operation::LockEncryption => {
                     execute_lock_encryption(self.current_facade().await?.as_ref()).await
                 }

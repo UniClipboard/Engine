@@ -17,7 +17,8 @@ use super::*;
 use crate::space::membership::{
     CommitMembershipLedgerPort, CurrentSpaceMemberScope, CurrentSpaceMemberScopeError,
     CurrentSpaceMemberScopePort, LoadMembershipLedgerPort, LoadedMembershipLedger,
-    MembershipLedger, MembershipLedgerError, MembershipLedgerMutation, PausedSpaceMember,
+    MembershipLedger, MembershipLedgerError, MembershipLedgerMutation,
+    MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, PausedSpaceMember,
     PeerReconciliationRecord, SpaceMemberPauseReason, SynchronizeMembershipMaintenancePort,
 };
 
@@ -156,6 +157,37 @@ struct SwitchableTransport {
 struct ConcurrentTransport {
     active: AtomicUsize,
     max_active: AtomicUsize,
+}
+
+#[derive(Default)]
+struct RecordingAddressRefresh {
+    peers: Mutex<Vec<DeviceId>>,
+}
+
+#[async_trait]
+impl RefreshVerifiedPeerAddressPort for RecordingAddressRefresh {
+    async fn refresh_verified_peer_address(&self, peer: &DeviceId) {
+        self.peers.lock().unwrap().push(peer.clone());
+    }
+}
+
+fn test_address_refresh() -> Arc<RecordingAddressRefresh> {
+    Arc::new(RecordingAddressRefresh::default())
+}
+
+struct InvalidSummaryTransport;
+
+#[async_trait]
+impl MembershipHistoryExchangePort for InvalidSummaryTransport {
+    async fn exchange_membership_history(
+        &self,
+        _recipient: &DeviceId,
+        _message: MembershipHistoryMessage,
+    ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
+        Ok(MembershipHistoryMessage::AckV3(
+            MembershipHistoryAckV3::Invalid,
+        ))
+    }
 }
 
 #[async_trait]
@@ -312,6 +344,7 @@ async fn all_current_peers_are_sorted_deduplicated_and_independently_deferred() 
         ledger,
         Arc::new(UnsortedScope),
         transport.clone(),
+        test_address_refresh(),
         Arc::new(FixedClock),
     );
 
@@ -348,6 +381,7 @@ async fn unconfirmed_current_member_is_included_in_membership_history_sync() {
         ledger,
         Arc::new(PausedUnknownScope),
         transport.clone(),
+        test_address_refresh(),
         Arc::new(FixedClock),
     );
 
@@ -389,6 +423,7 @@ async fn authenticated_non_member_cannot_receive_full_membership_history() {
         ledger,
         Arc::new(EmptyScope),
         transport.clone(),
+        test_address_refresh(),
         Arc::new(FixedClock),
     );
 
@@ -407,6 +442,76 @@ async fn authenticated_non_member_cannot_receive_full_membership_history() {
 }
 
 #[tokio::test]
+async fn known_peer_contact_bypasses_persisted_retry_deadline() {
+    let peer = DeviceId::new("device-b");
+    let mut loaded = active_ledger();
+    let peer_record = loaded.peer_reconciliation.get_mut(&peer).unwrap();
+    peer_record.sync_state.retry_attempt = 10;
+    peer_record.sync_state.next_attempt_at_ms = 310_000;
+    let repository = Arc::new(MemoryLedgerRepository(Mutex::new(loaded)));
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    ));
+    let transport = Arc::new(SwitchableTransport {
+        offline: AtomicBool::new(false),
+        recipients: Mutex::new(Vec::new()),
+    });
+    let address_refresh = Arc::new(RecordingAddressRefresh::default());
+    let synchronize = SynchronizeMembershipHistoryUseCase::new(
+        ledger,
+        Arc::new(FixedScope(vec![peer.clone()])),
+        transport.clone(),
+        address_refresh.clone(),
+        Arc::new(ClockAt(10_000)),
+    );
+
+    let outcome = synchronize
+        .synchronize_membership(&MembershipMaintenanceTrigger::PeerContact(peer.clone()))
+        .await;
+
+    assert_eq!(outcome, MembershipMaintenanceStepOutcome::Completed);
+    assert_eq!(
+        transport.recipients.lock().unwrap().as_slice(),
+        &[peer.clone()]
+    );
+    let persisted = repository.load().await.unwrap();
+    let peer_record = persisted.peer_reconciliation.get(&peer).unwrap();
+    assert!(peer_record.confirmed_position.is_some());
+    assert_eq!(peer_record.sync_state.retry_attempt, 0);
+    assert_eq!(peer_record.sync_state.next_attempt_at_ms, 0);
+    assert_eq!(address_refresh.peers.lock().unwrap().as_slice(), &[peer]);
+}
+
+#[tokio::test]
+async fn invalid_membership_reply_does_not_refresh_verified_peer_address() {
+    let peer = DeviceId::new("device-b");
+    let repository = Arc::new(MemoryLedgerRepository(Mutex::new(active_ledger())));
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let address_refresh = Arc::new(RecordingAddressRefresh::default());
+    let synchronize = SynchronizeMembershipHistoryUseCase::new(
+        ledger,
+        Arc::new(FixedScope(vec![peer.clone()])),
+        Arc::new(InvalidSummaryTransport),
+        address_refresh.clone(),
+        Arc::new(FixedClock),
+    );
+
+    let report = synchronize
+        .execute(MembershipSyncTarget::AuthenticatedPeer(peer))
+        .await
+        .unwrap();
+
+    assert_eq!(report.stable_failure_count, 1);
+    assert!(address_refresh.peers.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn periodic_round_is_required_until_every_peer_confirms_the_current_position() {
     let repository = Arc::new(MemoryLedgerRepository(Mutex::new(active_ledger())));
     let ledger = Arc::new(MembershipLedger::new(
@@ -420,6 +525,7 @@ async fn periodic_round_is_required_until_every_peer_confirms_the_current_positi
         Arc::new(RecordingTransport {
             recipients: Mutex::new(Vec::new()),
         }),
+        test_address_refresh(),
         Arc::new(FixedClock),
     );
 
@@ -460,6 +566,7 @@ async fn persistent_cursor_eventually_selects_two_hundred_pending_peers() {
         Arc::new(RecordingTransport {
             recipients: Mutex::new(Vec::new()),
         }),
+        test_address_refresh(),
         Arc::new(FixedClock),
     );
     let mut selected = std::collections::BTreeSet::new();
@@ -494,6 +601,7 @@ async fn clock_rollback_makes_persisted_retry_due_immediately() {
         Arc::new(RecordingTransport {
             recipients: Mutex::new(Vec::new()),
         }),
+        test_address_refresh(),
         Arc::new(ClockAt(9_000)),
     );
 
@@ -522,6 +630,7 @@ async fn deferred_attempt_survives_restart_and_retries_when_due() {
         ledger,
         Arc::new(FixedScope(vec![peer.clone()])),
         transport.clone(),
+        test_address_refresh(),
         Arc::new(ClockAt(10_000)),
     );
 
@@ -547,6 +656,7 @@ async fn deferred_attempt_survives_restart_and_retries_when_due() {
         restarted_ledger,
         Arc::new(FixedScope(vec![peer.clone()])),
         transport.clone(),
+        test_address_refresh(),
         Arc::new(ClockAt(11_000)),
     );
 
@@ -589,6 +699,7 @@ async fn retry_counter_overflow_fails_closed_without_committing_partial_state() 
             offline: AtomicBool::new(true),
             recipients: Mutex::new(Vec::new()),
         }),
+        test_address_refresh(),
         Arc::new(ClockAt(10_000)),
     );
 
@@ -641,6 +752,7 @@ async fn round_uses_the_fixed_concurrency_bound() {
         ledger,
         Arc::new(FixedScope(peers)),
         transport.clone(),
+        test_address_refresh(),
         Arc::new(FixedClock),
     );
 
@@ -670,6 +782,7 @@ async fn equal_summary_completes_without_sending_history_pages() {
         ledger,
         Arc::new(FixedScope(vec![peer.clone()])),
         transport.clone(),
+        test_address_refresh(),
         Arc::new(FixedClock),
     );
 
@@ -773,6 +886,7 @@ async fn old_history_reply_cannot_clear_a_new_branch_divergence() {
         ledger.clone(),
         Arc::new(FixedScope(vec![peer.clone()])),
         transport,
+        test_address_refresh(),
         Arc::new(FixedClock),
     );
     synchronize
@@ -843,6 +957,7 @@ async fn invalid_current_peer_recovers_only_after_complete_verified_evidence() {
             ledger.clone(),
             ledger.clone(),
             Arc::new(CompleteEvidenceTransport(evidence)),
+            test_address_refresh(),
             Arc::new(FixedClock),
         );
         let report = synchronize
@@ -899,6 +1014,7 @@ async fn round_batch_limit_preserves_unselected_peer_debt_for_the_next_round() {
         ledger,
         Arc::new(FixedScope(peers.clone())),
         transport,
+        test_address_refresh(),
         Arc::new(FixedClock),
     );
 

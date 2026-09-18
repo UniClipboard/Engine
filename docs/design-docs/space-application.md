@@ -162,7 +162,7 @@ activity，持有唯一暂停、恢复和失败补偿顺序。Search 与 receive
 | `membership/decide_device_trust_change/` | `use_case.rs`, `model.rs`, `error.rs` | 接受或拒绝远端移除变化 |
 | `membership/handle_history_message/` | `use_case.rs`, `model.rs`, `error.rs` | 入站成员历史分页和 ACK |
 | `membership/recover_conflict/` | `use_case.rs`, `issuer.rs`, `ports.rs`, `tests.rs` | 两阶段恢复握手、恢复包验证与七阶段 generation transition 的唯一编排 |
-| `membership/synchronize_history/` | `target_use_case.rs`, `model.rs`, `error.rs` | 出站成员历史同步 |
+| `membership/synchronize_history/` | `use_case.rs`, `model.rs`, `error.rs` | 出站成员历史同步 |
 | `membership/maintenance/` | `use_case.rs`, `runtime.rs`, `ports.rs`, `model.rs` | 固定恢复顺序与唯一后台生命周期 |
 
 ### 支撑模块
@@ -253,8 +253,8 @@ flowchart TD
 #### `UnlockSpaceUseCase`
 
 - **入口**：`Passphrase -> SpaceId`，facade 包装成 `UnlockSpaceResult`。
-- **职责/作用**：读取当前 Space、解锁密钥材料、执行版本升级和数据 readiness。
-- **关系**：`PostSessionReadiness` 调 `UpgradeSpaceUseCase`、移动内容回填和成员资料读取；facade 随后恢复 session activity 并唤醒维护。
+- **职责/作用**：读取当前 Space、解锁密钥材料、执行版本升级和数据 readiness；成员资料在本次解锁返回前必须已经可读。
+- **关系**：`PostSessionReadiness` 调 `UpgradeSpaceUseCase`、移动内容回填，并立即请求和等待一轮成员维护后读取成员资料；facade 随后只恢复其余 session activity，不再重复唤醒维护。
 - **重点关注**：错误要区分未初始化、密码错误、密钥损坏和内部失败；不创建或猜测 Space。
 
 #### `LockSpaceSessionUseCase`
@@ -267,8 +267,8 @@ flowchart TD
 #### `RecoverSpaceSessionUseCase`
 
 - **入口**：无输入，返回 `RecoverSpaceSessionResult { unlocked, resumed }`。
-- **职责/作用**：尝试用已保存钥匙恢复已有 Space session；成功后完成 readiness 并恢复活动。
-- **关系**：facade 在 `resumed = true` 时唤醒成员维护。
+- **职责/作用**：尝试用已保存钥匙恢复已有 Space session；成功后完成 readiness 并恢复活动。readiness 会等待本次必要的成员维护完成，因此正常启动不依赖周期任务。
+- **关系**：解锁与自动恢复共用 `PostSessionReadiness`；成员维护运行期负责串行当前轮与本次立即轮，facade 不再另行唤醒同一工作。
 - **重点关注**：无当前 Space 或无可恢复 session 是明确的未恢复结果，不等于错误；密钥损坏和 keyring miss 必须保留稳定分类。
 
 #### `QuerySpaceAccessStateUseCase`

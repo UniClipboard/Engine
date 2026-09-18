@@ -24,6 +24,7 @@ use crate::space::membership::QueryDeviceTrustUseCase;
 use crate::space::membership::QueryMembershipAdmissionUseCase;
 use crate::space::membership::QueryMembershipConflictStatusPort;
 use crate::space::membership::QueryMembershipDiagnosticsUseCase;
+use crate::space::membership::QueryMembershipReadinessUseCase;
 use crate::space::membership::RecoverMembershipConflictUseCase;
 use crate::space::membership::RemoveSpaceMemberUseCase;
 use crate::space::membership::ResolveMembershipConflictUseCase;
@@ -133,6 +134,7 @@ pub(crate) struct SpaceApplication {
     decide_device_trust_change: Arc<DecideDeviceTrustChangeUseCase>,
     resolve_membership_conflict: Arc<ResolveMembershipConflictUseCase>,
     query_membership_diagnostics: Arc<QueryMembershipDiagnosticsUseCase>,
+    query_membership_readiness: Arc<QueryMembershipReadinessUseCase>,
     issue_membership_branch_recovery: Arc<IssueMembershipBranchRecoveryUseCase>,
     space_admission: Arc<SpaceAdmissionProtocol>,
     membership_history_endpoint: Arc<MembershipHistoryAntiEntropy>,
@@ -147,6 +149,7 @@ impl SpaceApplication {
         application: &ApplicationDeps,
         adapters: SpaceRuntimeAdapters,
         peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
+        known_peer_contacts: broadcast::Receiver<super::membership::KnownPeerContact>,
         re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
         admission_observations: Arc<SpaceAdmissionObservationRegistry>,
         space_transition_changes: tokio::sync::watch::Sender<()>,
@@ -159,6 +162,7 @@ impl SpaceApplication {
                 space_transition_changes,
             ),
             peer_reachability_changed_events,
+            known_peer_contacts,
             re_pairing,
         )
     }
@@ -172,6 +176,7 @@ impl SpaceApplication {
         settings: Arc<dyn uc_core::ports::SettingsPort>,
         host_event_bus: Arc<crate::facade::HostEventBus>,
         peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
+        known_peer_contacts: broadcast::Receiver<super::membership::KnownPeerContact>,
         re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
     ) -> Self {
         Self::build_from_deps(
@@ -186,6 +191,7 @@ impl SpaceApplication {
                 space_transition_changes: tokio::sync::watch::channel(()).0,
             },
             peer_reachability_changed_events,
+            known_peer_contacts,
             re_pairing,
         )
     }
@@ -193,6 +199,7 @@ impl SpaceApplication {
     fn build_from_deps(
         deps: SpaceApplicationDeps,
         peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
+        known_peer_contacts: broadcast::Receiver<super::membership::KnownPeerContact>,
         re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
     ) -> Self {
         let SpaceApplicationDeps {
@@ -241,6 +248,7 @@ impl SpaceApplication {
             membership_announcement,
             device_trust_observations,
             membership_history_transport,
+            verified_peer_address_refresh,
             membership_branch_recovery_channel,
             membership_branch_recovery_recipient,
             membership_branch_transition,
@@ -279,6 +287,9 @@ impl SpaceApplication {
         let query_membership_admission =
             Arc::new(QueryMembershipAdmissionUseCase::new(Arc::clone(&ledger)));
         let current_scope: Arc<dyn CurrentSpaceMemberScopePort> = ledger.clone();
+        let query_membership_readiness = Arc::new(QueryMembershipReadinessUseCase::new(
+            Arc::clone(&current_scope),
+        ));
         let deferred_maintenance_wake = Arc::new(DeferredMaintenanceWake::new());
         let membership_activation = Arc::new(RePairingAwareMembershipActivation::new(
             activate_membership_effect,
@@ -301,6 +312,7 @@ impl SpaceApplication {
             Arc::clone(&ledger),
             Arc::clone(&current_scope),
             membership_history_transport,
+            verified_peer_address_refresh,
             Arc::clone(&clock),
             deferred_maintenance_wake.clone(),
         ));
@@ -388,6 +400,7 @@ impl SpaceApplication {
         let prepared_runtime = SpaceMembershipMaintenanceRuntime::prepare(
             maintain,
             peer_reachability_changed_events,
+            known_peer_contacts,
             Duration::from_secs(30),
             membership_network_activity,
             ledger.subscribe_history_changes(),
@@ -426,6 +439,7 @@ impl SpaceApplication {
             decide_device_trust_change,
             resolve_membership_conflict,
             query_membership_diagnostics,
+            query_membership_readiness,
             issue_membership_branch_recovery,
             space_admission,
             membership_history_endpoint,
@@ -488,6 +502,10 @@ impl SpaceApplication {
 
     pub(crate) fn query_membership_diagnostics(&self) -> Arc<QueryMembershipDiagnosticsUseCase> {
         Arc::clone(&self.query_membership_diagnostics)
+    }
+
+    pub(crate) fn query_membership_readiness(&self) -> Arc<QueryMembershipReadinessUseCase> {
+        Arc::clone(&self.query_membership_readiness)
     }
 
     pub(crate) fn membership_branch_recovery_endpoint(

@@ -1,3 +1,5 @@
+//! 成员历史同步流程负责人。
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +18,8 @@ use uc_observability_contract::diagnostics::{
 };
 
 use crate::space::membership::{
-    CurrentSpaceMemberScopePort, MembershipLedger, MembershipLedgerError, PeerReconciliationRecord,
+    CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort, MembershipLedger,
+    MembershipLedgerError, PeerHistorySyncOutcome, PeerReconciliationRecord,
     ReconcileMembershipEvidenceUseCase,
 };
 use crate::space::membership::{
@@ -24,7 +27,10 @@ use crate::space::membership::{
     SynchronizeMembershipMaintenancePort,
 };
 
-use super::{MembershipSyncReport, MembershipSyncTarget, SynchronizeMembershipHistoryError};
+use super::{
+    MembershipSyncReport, MembershipSyncTarget, RefreshVerifiedPeerAddressPort,
+    SynchronizeMembershipHistoryError,
+};
 
 const TOTAL_SYNC_BUDGET: Duration = Duration::from_secs(10);
 const MAX_PEERS_PER_ROUND: usize = 8;
@@ -43,6 +49,7 @@ pub(crate) struct SynchronizeMembershipHistoryUseCase {
     evidence: ReconcileMembershipEvidenceUseCase,
     current_scope: Arc<dyn CurrentSpaceMemberScopePort>,
     transport: Arc<dyn MembershipHistoryExchangePort>,
+    address_refresh: Arc<dyn RefreshVerifiedPeerAddressPort>,
     clock: Arc<dyn ClockPort>,
     execution_lock: tokio::sync::Mutex<()>,
     peer_locks: tokio::sync::Mutex<BTreeMap<DeviceId, Arc<tokio::sync::Mutex<()>>>>,
@@ -54,6 +61,7 @@ impl SynchronizeMembershipHistoryUseCase {
         ledger: Arc<MembershipLedger>,
         current_scope: Arc<dyn CurrentSpaceMemberScopePort>,
         transport: Arc<dyn MembershipHistoryExchangePort>,
+        address_refresh: Arc<dyn RefreshVerifiedPeerAddressPort>,
         clock: Arc<dyn ClockPort>,
     ) -> Self {
         Self {
@@ -61,6 +69,7 @@ impl SynchronizeMembershipHistoryUseCase {
             ledger,
             current_scope,
             transport,
+            address_refresh,
             clock,
             execution_lock: tokio::sync::Mutex::new(()),
             peer_locks: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -343,8 +352,7 @@ impl SynchronizeMembershipHistoryUseCase {
                     .ok_or(MembershipLedgerError::Corrupt)?;
                 let delay = retry_delay_ms(peer_record.sync_state.retry_attempt);
                 peer_record.sync_state.next_attempt_at_ms = now_ms.saturating_add(delay);
-                peer_record.sync_state.last_attempt_outcome =
-                    crate::space::membership::PeerHistorySyncOutcome::Deferred;
+                peer_record.sync_state.last_attempt_outcome = PeerHistorySyncOutcome::Deferred;
                 Ok(())
             })
             .await
@@ -370,6 +378,26 @@ impl SynchronizeMembershipHistoryUseCase {
             )
         };
         let _guard = peer_lock.lock().await;
+        let result = self
+            .synchronize_peer_history(peer, history, sender, position, lineage_id, proof)
+            .await;
+        if result.is_ok() {
+            self.address_refresh
+                .refresh_verified_peer_address(peer)
+                .await;
+        }
+        result
+    }
+
+    async fn synchronize_peer_history(
+        &self,
+        peer: &DeviceId,
+        history: Arc<uc_core::membership::VersionedMembershipHistory>,
+        sender: Arc<uc_core::membership::AdmissionChangeFacts>,
+        position: uc_core::membership::BaseMembershipHistoryPosition,
+        lineage_id: Arc<String>,
+        proof: HistoryProofRequirement,
+    ) -> Result<(), PeerSyncError> {
         if matches!(proof, HistoryProofRequirement::Complete) {
             return self
                 .exchange_complete_evidence(peer, &history, &sender, position)
@@ -616,9 +644,9 @@ impl SynchronizeMembershipHistoryUseCase {
                             current.sync_state.pending_since_revision = None;
                             current.sync_state.last_attempt_outcome =
                                 if confirmed_position.is_some() {
-                                    crate::space::membership::PeerHistorySyncOutcome::Acked
+                                    PeerHistorySyncOutcome::Acked
                                 } else {
-                                    crate::space::membership::PeerHistorySyncOutcome::StableRejected
+                                    PeerHistorySyncOutcome::StableRejected
                                 };
                         })
                         .or_insert(PeerReconciliationRecord {
@@ -728,14 +756,13 @@ impl SynchronizeMembershipMaintenancePort for SynchronizeMembershipHistoryUseCas
     ) -> Result<bool, MembershipMaintenanceStepOutcome> {
         let scope = match self.current_scope.snapshot().await {
             Ok(scope) => scope,
-            Err(crate::space::membership::CurrentSpaceMemberScopeError::NoCurrentSpace) => {
+            Err(CurrentSpaceMemberScopeError::NoCurrentSpace) => {
                 return Ok(false);
             }
             Err(
-                crate::space::membership::CurrentSpaceMemberScopeError::Locked
-                | crate::space::membership::CurrentSpaceMemberScopeError::Unavailable,
+                CurrentSpaceMemberScopeError::Locked | CurrentSpaceMemberScopeError::Unavailable,
             ) => return Err(MembershipMaintenanceStepOutcome::Deferred),
-            Err(crate::space::membership::CurrentSpaceMemberScopeError::RecoveryRequired) => {
+            Err(CurrentSpaceMemberScopeError::RecoveryRequired) => {
                 return Err(MembershipMaintenanceStepOutcome::Corrupt);
             }
         };
@@ -787,7 +814,8 @@ impl SynchronizeMembershipMaintenancePort for SynchronizeMembershipHistoryUseCas
         trigger: &MembershipMaintenanceTrigger,
     ) -> MembershipMaintenanceStepOutcome {
         let target = match trigger {
-            MembershipMaintenanceTrigger::PeerOnline(peer) => {
+            MembershipMaintenanceTrigger::PeerContact(peer)
+            | MembershipMaintenanceTrigger::PeerOnline(peer) => {
                 MembershipSyncTarget::AuthenticatedPeer(peer.clone())
             }
             MembershipMaintenanceTrigger::Startup
@@ -800,6 +828,7 @@ impl SynchronizeMembershipMaintenancePort for SynchronizeMembershipHistoryUseCas
             MembershipMaintenanceTrigger::Resume => MembershipRecoveryTrigger::Resume,
             MembershipMaintenanceTrigger::Periodic => MembershipRecoveryTrigger::Retry,
             MembershipMaintenanceTrigger::StateChanged => MembershipRecoveryTrigger::StateChanged,
+            MembershipMaintenanceTrigger::PeerContact(_) => MembershipRecoveryTrigger::PeerContact,
             MembershipMaintenanceTrigger::PeerOnline(_) => MembershipRecoveryTrigger::PeerOnline,
         };
         match scope_membership_recovery_trigger(observation_trigger, self.execute(target)).await {

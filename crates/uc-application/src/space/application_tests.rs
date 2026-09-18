@@ -57,6 +57,11 @@ struct PassivePorts {
     join_commits: AtomicUsize,
 }
 
+#[async_trait]
+impl RefreshVerifiedPeerAddressPort for PassivePorts {
+    async fn refresh_verified_peer_address(&self, _peer: &uc_core::ids::DeviceId) {}
+}
+
 impl HistoricalMembershipSignatureVerifier for PassivePorts {
     fn verify(
         &self,
@@ -801,6 +806,7 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
     )));
     let passive = Arc::new(PassivePorts::default());
     let (_peer_reachability_tx, peer_reachability_rx) = tokio::sync::broadcast::channel(4);
+    let (_known_peer_contact_tx, known_peer_contact_rx) = tokio::sync::broadcast::channel(4);
     let mut application = SpaceApplication::build_for_test(
         SpaceRuntimeAdapters {
             admission: SpaceAdmissionAdapters {
@@ -835,6 +841,7 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
                 membership_announcement: passive.clone(),
                 device_trust_observations: passive.clone(),
                 membership_history_transport: passive.clone(),
+                verified_peer_address_refresh: passive.clone(),
                 membership_branch_recovery_channel: passive.clone(),
                 membership_branch_recovery_recipient: passive.clone(),
                 membership_branch_transition: passive.clone(),
@@ -856,6 +863,7 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
         passive.clone(),
         Arc::new(crate::facade::HostEventBus::new()),
         peer_reachability_rx,
+        known_peer_contact_rx,
         passive.clone(),
     );
 

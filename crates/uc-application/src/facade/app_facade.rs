@@ -36,6 +36,10 @@ use crate::facade::config_migration::ConfigMigrationFacade;
 use crate::facade::roster::{
     MemberSummary, PeerReachabilityRefreshReport, PeerSnapshotView, RosterError,
 };
+use crate::facade::{
+    MembershipDiagnosticsView, MembershipReadiness, QueryMembershipDiagnosticsError,
+    QueryMembershipReadinessError,
+};
 use crate::space::PeerConnectionError;
 
 pub use crate::space::{DeviceGroupChoicesView, QueryDeviceGroupChoicesError};
@@ -427,11 +431,14 @@ impl AppFacade {
 
     pub async fn query_membership_diagnostics(
         &self,
-    ) -> Result<
-        crate::facade::MembershipDiagnosticsView,
-        crate::facade::QueryMembershipDiagnosticsError,
-    > {
+    ) -> Result<MembershipDiagnosticsView, QueryMembershipDiagnosticsError> {
         self.space.query_membership_diagnostics().await
+    }
+
+    pub async fn query_membership_readiness(
+        &self,
+    ) -> Result<MembershipReadiness, QueryMembershipReadinessError> {
+        self.space.query_membership_readiness().await
     }
 
     /// 校验查询版本后，把统一选择路由到内部对应流程。

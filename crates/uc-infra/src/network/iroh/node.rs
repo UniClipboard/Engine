@@ -37,7 +37,9 @@ use iroh_mdns_address_lookup::MdnsAddressLookup;
 use noq_proto::congestion::{Bbr3Config, CubicConfig};
 use tracing::instrument::WithSubscriber;
 use tracing::{debug, info, instrument, warn};
-use uc_application::deps::{CurrentMemberSignaturePort, IssueMembershipBranchRecoveryPort};
+use uc_application::deps::{
+    CurrentMemberSignaturePort, IssueMembershipBranchRecoveryPort, KnownPeerContact,
+};
 use uc_core::settings::model::CongestionController;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -1154,6 +1156,7 @@ impl IrohSessionBuilder {
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         clock: Arc<dyn ClockPort>,
+        known_peer_contact_tx: tokio::sync::broadcast::Sender<KnownPeerContact>,
     ) -> Result<Arc<dyn PeerReachabilityPort>, IrohNodeError> {
         // Build the adapter first so the handler shares its `last_state`
         // and broadcast `Sender` — that's what makes inbound dials flip a
@@ -1166,6 +1169,7 @@ impl IrohSessionBuilder {
             peer_admission,
             fingerprint_factory,
             clock,
+            known_peer_contact_tx,
             Arc::clone(&self.context.demand_recovery),
             Arc::clone(&self.context.network_recovery_observations),
         );
@@ -1331,10 +1335,12 @@ impl IrohSessionBuilder {
     pub fn build_membership_history_exchange_adapter(
         &self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+        clock: Arc<dyn ClockPort>,
     ) -> Arc<IrohMembershipHistoryExchangeAdapter> {
         Arc::new(IrohMembershipHistoryExchangeAdapter::new(
             Arc::clone(&self.context.endpoint),
             peer_addr_repo,
+            clock,
         ))
     }
 
@@ -2177,6 +2183,7 @@ mod tests {
                 Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
                 Arc::new(crate::security::Sha256IdentityFingerprintFactory),
                 Arc::new(FixedClock(1_700_000_000_000)),
+                tokio::sync::broadcast::channel(1).0,
             )
             .expect("install peer reachability");
 
@@ -2207,6 +2214,7 @@ mod tests {
                 Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
                 Arc::new(crate::security::Sha256IdentityFingerprintFactory),
                 Arc::new(FixedClock(1_700_000_000_000)),
+                tokio::sync::broadcast::channel(1).0,
             )
             .expect("install first session");
         let mut node = spawn_session(network, first).await;
@@ -2221,6 +2229,7 @@ mod tests {
                 Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
                 Arc::new(crate::security::Sha256IdentityFingerprintFactory),
                 Arc::new(FixedClock(1_700_000_000_001)),
+                tokio::sync::broadcast::channel(1).0,
             )
             .expect("install second session");
 
@@ -2290,6 +2299,7 @@ mod tests {
                 Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
                 Arc::new(crate::security::Sha256IdentityFingerprintFactory),
                 Arc::new(FixedClock(1_700_000_000_000)),
+                tokio::sync::broadcast::channel(1).0,
             )
             .expect("install peer reachability");
 
@@ -2357,6 +2367,7 @@ mod tests {
                 Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
                 Arc::new(crate::security::Sha256IdentityFingerprintFactory),
                 Arc::new(FixedClock(1_700_000_000_000)),
+                tokio::sync::broadcast::channel(1).0,
             )
             .expect("install peer reachability");
 

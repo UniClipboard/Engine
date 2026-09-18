@@ -51,7 +51,11 @@
 //! [`PeerAddressRepositoryPort`]: uc_core::ports::PeerAddressRepositoryPort
 //! [`PeerAddressRecord`]: uc_core::ports::PeerAddressRecord
 
-use iroh::{EndpointAddr, TransportAddr};
+use chrono::{TimeZone, Utc};
+use iroh::endpoint::TransportAddrUsage;
+use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
+use uc_core::ids::DeviceId;
+use uc_core::ports::{ClockPort, PeerAddressRecord, PeerAddressRepositoryPort};
 
 /// Convert a freshly observed [`EndpointAddr`] into the form we want to
 /// persist for a paired peer: NodeId + relay hint, with ephemeral
@@ -74,13 +78,111 @@ pub fn to_persistable_addr(addr: EndpointAddr) -> EndpointAddr {
     EndpointAddr::from_parts(id, kept)
 }
 
+/// 从一次已经建立的连接观察中提取可长期保存的远端提示。
+///
+/// 只有当前正在使用的 relay 才足以证明本次可达；动态 IP 和未参与本次连接的
+/// 旧 relay 都不能覆盖已有记录。没有这种提示时返回 `None`。
+pub(super) fn stable_remote_addr(
+    id: EndpointId,
+    addrs: impl IntoIterator<Item = (TransportAddr, bool)>,
+) -> Option<EndpointAddr> {
+    let relays = addrs
+        .into_iter()
+        .filter_map(|(addr, active)| {
+            (active && matches!(addr, TransportAddr::Relay(_))).then_some(addr)
+        })
+        .collect::<Vec<_>>();
+    (!relays.is_empty()).then(|| EndpointAddr::from_parts(id, relays))
+}
+
+pub(super) async fn observed_stable_remote_addr(
+    endpoint: &Endpoint,
+    id: EndpointId,
+) -> Option<EndpointAddr> {
+    let info = endpoint.remote_info(id).await?;
+    stable_remote_addr(
+        info.id(),
+        info.into_addrs().map(|addr| {
+            let active = matches!(addr.usage(), TransportAddrUsage::Active);
+            (addr.into_addr(), active)
+        }),
+    )
+}
+
+pub(super) async fn persist_observed_stable_addr(
+    repository: &dyn PeerAddressRepositoryPort,
+    clock: &dyn ClockPort,
+    device: &DeviceId,
+    addr: EndpointAddr,
+) {
+    let Ok(addr_blob) = postcard::to_stdvec(&addr) else {
+        return;
+    };
+    let Some(observed_at) = Utc.timestamp_millis_opt(clock.now_ms()).single() else {
+        return;
+    };
+    let _ = repository
+        .upsert(&PeerAddressRecord {
+            device_id: device.clone(),
+            addr_blob,
+            observed_at,
+        })
+        .await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+    use std::sync::{Arc, Mutex};
 
+    use async_trait::async_trait;
     use iroh::{EndpointId, RelayUrl, SecretKey};
+    use uc_core::ids::DeviceId;
+    use uc_core::ports::{
+        ClockPort, PeerAddressError, PeerAddressRecord, PeerAddressRepositoryPort,
+    };
+
+    #[derive(Default)]
+    struct RecordingRepository {
+        saved: Mutex<Option<PeerAddressRecord>>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl PeerAddressRepositoryPort for RecordingRepository {
+        async fn get(
+            &self,
+            _device: &DeviceId,
+        ) -> Result<Option<PeerAddressRecord>, PeerAddressError> {
+            Ok(None)
+        }
+
+        async fn upsert(&self, record: &PeerAddressRecord) -> Result<(), PeerAddressError> {
+            if self.fail {
+                return Err(PeerAddressError::Internal("injected".to_owned()));
+            }
+            *self.saved.lock().unwrap() = Some(record.clone());
+            Ok(())
+        }
+
+        async fn list(&self) -> Result<Vec<PeerAddressRecord>, PeerAddressError> {
+            Ok(Vec::new())
+        }
+
+        async fn remove(&self, _device: &DeviceId) -> Result<(), PeerAddressError> {
+            Ok(())
+        }
+    }
+
+    struct FixedClock;
+
+    impl ClockPort for FixedClock {
+        fn now_ms(&self) -> i64 {
+            1_700_000_000_000
+        }
+    }
 
     fn test_id() -> EndpointId {
         SecretKey::generate().public()
@@ -154,5 +256,54 @@ mod tests {
             .addrs
             .iter()
             .all(|a| matches!(a, TransportAddr::Relay(_))));
+    }
+
+    #[test]
+    fn stable_remote_addr_keeps_only_active_relays() {
+        let id = test_id();
+        let active_relay: RelayUrl = "https://active-relay.example.com/".parse().unwrap();
+        let inactive_relay: RelayUrl = "https://old-relay.example.com/".parse().unwrap();
+
+        let persisted = stable_remote_addr(
+            id,
+            [
+                (TransportAddr::Ip(lan_addr(50754)), true),
+                (TransportAddr::Relay(inactive_relay), false),
+                (TransportAddr::Relay(active_relay.clone()), true),
+            ],
+        )
+        .expect("an active relay is a stable remote hint");
+
+        assert_eq!(persisted.id, id);
+        assert_eq!(persisted.addrs.len(), 1);
+        assert!(persisted
+            .addrs
+            .contains(&TransportAddr::Relay(active_relay)));
+        assert!(stable_remote_addr(id, [(TransportAddr::Ip(lan_addr(50754)), true)]).is_none());
+    }
+
+    #[tokio::test]
+    async fn stable_remote_hint_is_saved_with_the_observation_time_and_failure_is_best_effort() {
+        let id = test_id();
+        let relay: RelayUrl = "https://active-relay.example.com/".parse().unwrap();
+        let addr = EndpointAddr::from_parts(id, [TransportAddr::Relay(relay)]);
+        let device = DeviceId::new("device-b");
+        let repository = Arc::new(RecordingRepository::default());
+
+        persist_observed_stable_addr(repository.as_ref(), &FixedClock, &device, addr.clone()).await;
+
+        let saved = repository.saved.lock().unwrap().clone().unwrap();
+        assert_eq!(saved.device_id, device);
+        assert_eq!(saved.observed_at.timestamp_millis(), 1_700_000_000_000);
+        assert_eq!(
+            postcard::from_bytes::<EndpointAddr>(&saved.addr_blob).unwrap(),
+            addr
+        );
+
+        let failing = RecordingRepository {
+            saved: Mutex::new(None),
+            fail: true,
+        };
+        persist_observed_stable_addr(&failing, &FixedClock, &device, EndpointAddr::new(id)).await;
     }
 }

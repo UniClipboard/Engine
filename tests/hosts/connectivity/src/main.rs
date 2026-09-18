@@ -244,6 +244,13 @@ async fn main() -> Result<()> {
     let config = EngineConfig::new("1.1.0")
         .with_rendezvous_base_url(string(&start, "rendezvous")?)
         .with_test_relay_fallback(start["relay"].as_bool().unwrap_or(false));
+    #[cfg(feature = "current-engine")]
+    let config = match start["bind_port"].as_u64() {
+        Some(port) => config.with_test_iroh_bind_port(
+            u16::try_from(port).context("test bind port is out of range")?,
+        ),
+        None => config,
+    };
     let (engine, mut events) = Engine::start(config, host).await?;
     let recorded = Arc::new(Mutex::new(Vec::new()));
     let event_task = tokio::spawn({

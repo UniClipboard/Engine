@@ -11,6 +11,7 @@ tokio::task_local! {
 pub enum MembershipRecoveryTrigger {
     Startup,
     Resume,
+    PeerContact,
     PeerOnline,
     Retry,
     StateChanged,
@@ -31,6 +32,7 @@ pub(super) fn recovery_name() -> &'static str {
     {
         MembershipRecoveryTrigger::Startup => "membership.recover.startup",
         MembershipRecoveryTrigger::Resume => "membership.recover.resume",
+        MembershipRecoveryTrigger::PeerContact => "membership.recover.peer_contact",
         MembershipRecoveryTrigger::PeerOnline => "membership.recover.peer_online",
         MembershipRecoveryTrigger::Retry => "membership.recover.retry",
         MembershipRecoveryTrigger::StateChanged => "membership.recover.state_changed",

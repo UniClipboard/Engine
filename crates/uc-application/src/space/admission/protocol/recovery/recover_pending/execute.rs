@@ -751,6 +751,11 @@ impl RecoverSpaceAdmissionsPort for SpaceAdmissionProtocol {
         trigger: &MembershipMaintenanceTrigger,
     ) -> AdmissionMaintenanceOutcome {
         let trigger = match trigger {
+            MembershipMaintenanceTrigger::PeerContact(_) => {
+                return AdmissionMaintenanceOutcome::Continue(
+                    MembershipMaintenanceStepOutcome::Completed,
+                );
+            }
             MembershipMaintenanceTrigger::Startup => AdmissionRecoveryTrigger::Startup,
             MembershipMaintenanceTrigger::Resume => AdmissionRecoveryTrigger::Resume,
             MembershipMaintenanceTrigger::Periodic => AdmissionRecoveryTrigger::Periodic,

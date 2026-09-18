@@ -206,7 +206,7 @@ TraceId 伪造。产品 analytics 不携带两者。
 ## 跨设备传播
 
 完整成员同步由 Application 的 SynchronizeMembershipHistoryUseCase 持有不透明恢复作用域，固定入口为
-membership.recover.{startup|resume|peer_online|retry|state_changed|requested}。现有维护触发者提供原因，不向 Engine 暴露目标身份或内部步骤。
+membership.recover.{startup|resume|peer_online|peer_contact|retry|state_changed|requested}。现有维护触发者提供原因，不向 Engine 暴露目标身份或内部步骤。
 已完成、部分完成、等待、失败与损坏分别按现有完整报告分类；只有已经记录的分歧证据/关系才标为 conflict，不把普通传输失败猜成冲突。
 没有目标和实际工作时不导出该业务节点，也不生成指向被省略节点的日志。该作用域只覆盖本次在线执行，不跨重启持有。
 

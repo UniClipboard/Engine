@@ -17,6 +17,7 @@ use tokio::sync::{broadcast, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, instrument, warn};
 
+use uc_application::deps::KnownPeerContact;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{MemberRepositoryPort, PeerAdmissionPort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
@@ -50,6 +51,7 @@ pub const LEGACY_PEER_REACHABILITY_ALPN: &[u8] = peer_reachability_protocol::LEG
 /// members flipping state on an unlock); lagging subscribers recover via
 /// [`PeerReachabilityPort::current_state`] per the broadcast contract.
 const EVENT_CHANNEL_CAPACITY: usize = 64;
+const KNOWN_PEER_CONTACT_CHANNEL_CAPACITY: usize = 64;
 const PEER_ADMISSION_IO_TIMEOUT: Duration = Duration::from_secs(5);
 const ADMISSION_CONFIRMATION_REQUEST: u8 = 1;
 const ADMISSION_ACCEPTED: u8 = 1;
@@ -150,6 +152,7 @@ struct HandlerState {
     inbound_connections: Arc<Mutex<HashMap<usize, (DeviceId, Connection)>>>,
     accepting: AtomicBool,
     event_tx: broadcast::Sender<PeerReachabilityChanged>,
+    known_peer_contact_tx: broadcast::Sender<KnownPeerContact>,
     clock: Arc<dyn ClockPort>,
 }
 
@@ -301,6 +304,10 @@ impl ProtocolHandler for IrohPeerReachabilityHandler {
         if let Some(device_id) = admitted_device {
             let before = self.state.observations.lock().await.begin(device_id);
             if !self.state.is_admitted(&device_id).await {
+                let _ = self
+                    .state
+                    .known_peer_contact_tx
+                    .send(KnownPeerContact { device_id });
                 warn!(error.type = "peer_rejected", "presence accept: peer is not admitted by current space protection");
                 reject_admission(send, &connection).await;
                 return Ok(());
@@ -502,6 +509,7 @@ impl IrohPeerReachabilityAdapter {
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         clock: Arc<dyn ClockPort>,
     ) -> Self {
+        let (known_peer_contact_tx, _) = broadcast::channel(KNOWN_PEER_CONTACT_CHANNEL_CAPACITY);
         Self::build(
             endpoint,
             peer_addr_repo,
@@ -509,6 +517,7 @@ impl IrohPeerReachabilityAdapter {
             peer_admission,
             fingerprint_factory,
             clock,
+            known_peer_contact_tx,
             None,
             None,
         )
@@ -521,6 +530,7 @@ impl IrohPeerReachabilityAdapter {
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         clock: Arc<dyn ClockPort>,
+        known_peer_contact_tx: broadcast::Sender<KnownPeerContact>,
         demand_recovery: Arc<DemandRecoveryCoordinator>,
         network_recovery_observations: Arc<NetworkRecoveryObservationSource>,
     ) -> Self {
@@ -531,6 +541,7 @@ impl IrohPeerReachabilityAdapter {
             peer_admission,
             fingerprint_factory,
             clock,
+            known_peer_contact_tx,
             Some(demand_recovery),
             Some(network_recovery_observations),
         )
@@ -543,6 +554,7 @@ impl IrohPeerReachabilityAdapter {
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         clock: Arc<dyn ClockPort>,
+        known_peer_contact_tx: broadcast::Sender<KnownPeerContact>,
         demand_recovery: Option<Arc<DemandRecoveryCoordinator>>,
         network_recovery_observations: Option<Arc<NetworkRecoveryObservationSource>>,
     ) -> Self {
@@ -561,6 +573,7 @@ impl IrohPeerReachabilityAdapter {
             inbound_connections,
             accepting: AtomicBool::new(true),
             event_tx: event_tx.clone(),
+            known_peer_contact_tx,
             clock: Arc::clone(&clock),
         });
         Self {
@@ -585,6 +598,11 @@ impl IrohPeerReachabilityAdapter {
         IrohPeerReachabilityHandler {
             state: Arc::clone(&self.handler_state),
         }
+    }
+
+    #[cfg(test)]
+    fn subscribe_known_peer_contacts(&self) -> broadcast::Receiver<KnownPeerContact> {
+        self.handler_state.known_peer_contact_tx.subscribe()
     }
 
     fn now(&self) -> DateTime<Utc> {
@@ -2422,6 +2440,7 @@ mod tests {
             b_member_repo_dyn,
         );
         let mut subscriber = b_adapter.subscribe();
+        let mut contacts = b_adapter.subscribe_known_peer_contacts();
 
         // Before any inbound dial, B has no opinion on A's reachability.
         assert_eq!(
@@ -2455,6 +2474,12 @@ mod tests {
             .expect("event channel open");
         assert_eq!(event.device_id, a_device_id);
         assert_eq!(event.state, ReachabilityState::Online);
+        assert!(
+            timeout(Duration::from_millis(100), contacts.recv())
+                .await
+                .is_err(),
+            "an admitted peer must use the Online path without a contact recovery hint",
+        );
 
         assert_eq!(
             b_adapter.current_state(&a_device_id).await,
@@ -2558,6 +2583,7 @@ mod tests {
             false,
         );
         let mut subscriber = b_adapter.subscribe();
+        let mut contacts = b_adapter.subscribe_known_peer_contacts();
         let router_b = Router::builder((*endpoint_b).clone())
             .accept(PEER_REACHABILITY_ALPN, b_adapter.handler())
             .spawn();
@@ -2573,6 +2599,11 @@ mod tests {
             request_admission_confirmation(&conn).await,
             ADMISSION_REJECTED
         );
+        let contact = timeout(Duration::from_secs(1), contacts.recv())
+            .await
+            .expect("known peer contact arrives")
+            .expect("known peer contact channel open");
+        assert_eq!(contact.device_id, a_device_id);
         assert!(
             timeout(Duration::from_millis(500), subscriber.recv())
                 .await
@@ -2608,6 +2639,7 @@ mod tests {
             Arc::new(MemMemberRepo::default()) as Arc<dyn MemberRepositoryPort>,
         );
         let mut subscriber = b_adapter.subscribe();
+        let mut contacts = b_adapter.subscribe_known_peer_contacts();
 
         let router_b = Router::builder((*endpoint_b).clone())
             .accept(PEER_REACHABILITY_ALPN, b_adapter.handler())
@@ -2632,6 +2664,12 @@ mod tests {
         assert!(
             no_event.is_err(),
             "unknown peer must not produce a peer_reachability event",
+        );
+        assert!(
+            timeout(Duration::from_millis(100), contacts.recv())
+                .await
+                .is_err(),
+            "unknown peer must not produce a known-peer contact",
         );
 
         // No DeviceId was ever associated with A, so any current_state

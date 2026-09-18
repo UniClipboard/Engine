@@ -219,6 +219,7 @@ pub fn approved_operation_name(operation: &str, role: &str, name: &str) -> bool 
             name,
             "membership.recover.startup"
                 | "membership.recover.resume"
+                | "membership.recover.peer_contact"
                 | "membership.recover.peer_online"
                 | "membership.recover.retry"
                 | "membership.recover.state_changed"

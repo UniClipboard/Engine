@@ -1,11 +1,17 @@
 use uc_core::ids::DeviceId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownPeerContact {
+    pub device_id: DeviceId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MembershipMaintenanceTrigger {
     Startup,
     Resume,
     Periodic,
     StateChanged,
+    PeerContact(DeviceId),
     PeerOnline(DeviceId),
 }
 

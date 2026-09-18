@@ -20,6 +20,7 @@ pub trait MembershipNetworkActivityPort: Send + Sync {
 enum RuntimeCommand {
     Pause(oneshot::Sender<()>),
     Resume(oneshot::Sender<()>),
+    PrepareSession(ScheduledRound),
     StateChanged(ScheduledRound),
     Deadline(tokio::time::Instant),
     Shutdown(oneshot::Sender<()>),
@@ -59,6 +60,25 @@ impl SpaceMembershipMaintenanceActivity {
             })
     }
 
+    pub async fn prepare_for_session(&self) -> Result<(), SpaceMembershipMaintenanceRuntimeError> {
+        let (completed, receiver) = oneshot::channel();
+        let round = ScheduledRound::new(MembershipMaintenanceTrigger::StateChanged)
+            .with_completion(completed);
+        self.commands
+            .send(RuntimeCommand::PrepareSession(round))
+            .map_err(|error| {
+                if let RuntimeCommand::PrepareSession(round) = error.0 {
+                    round
+                        .observation
+                        .not_executed(MaintenanceDisposition::Closed);
+                }
+                SpaceMembershipMaintenanceRuntimeError::Closed
+            })?;
+        receiver
+            .await
+            .map_err(|_| SpaceMembershipMaintenanceRuntimeError::Closed)
+    }
+
     pub fn request_deadline(
         &self,
         remaining: Duration,
@@ -93,6 +113,12 @@ impl crate::space::lifecycle::MembershipSessionActivityPort for SpaceMembershipM
     async fn resume(&self) -> Result<(), String> {
         self.resume().await.map_err(|error| error.to_string())
     }
+
+    async fn prepare_for_session(&self) -> Result<(), String> {
+        self.prepare_for_session()
+            .await
+            .map_err(|error| error.to_string())
+    }
 }
 
 pub(crate) struct SpaceMembershipMaintenanceRuntime {
@@ -103,6 +129,7 @@ pub(crate) struct SpaceMembershipMaintenanceRuntime {
 pub(crate) struct PreparedSpaceMembershipMaintenanceRuntime {
     maintain: Arc<MaintainSpaceMembershipUseCase>,
     peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
+    known_peer_contacts: broadcast::Receiver<super::KnownPeerContact>,
     periodic_interval: Duration,
     network_activity: Arc<dyn MembershipNetworkActivityPort>,
     activity: SpaceMembershipMaintenanceActivity,
@@ -120,6 +147,7 @@ impl SpaceMembershipMaintenanceRuntime {
     pub(crate) fn prepare(
         maintain: Arc<MaintainSpaceMembershipUseCase>,
         peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
+        known_peer_contacts: broadcast::Receiver<super::KnownPeerContact>,
         periodic_interval: Duration,
         network_activity: Arc<dyn MembershipNetworkActivityPort>,
         history_changes: tokio::sync::watch::Receiver<()>,
@@ -129,6 +157,7 @@ impl SpaceMembershipMaintenanceRuntime {
         PreparedSpaceMembershipMaintenanceRuntime {
             maintain,
             peer_reachability_changed_events,
+            known_peer_contacts,
             periodic_interval,
             network_activity,
             activity,
@@ -141,12 +170,14 @@ impl SpaceMembershipMaintenanceRuntime {
     pub(crate) fn start(
         maintain: Arc<MaintainSpaceMembershipUseCase>,
         peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
+        known_peer_contacts: broadcast::Receiver<super::KnownPeerContact>,
         periodic_interval: Duration,
         network_activity: Arc<dyn MembershipNetworkActivityPort>,
     ) -> Self {
         Self::start_prepared(Self::prepare(
             maintain,
             peer_reachability_changed_events,
+            known_peer_contacts,
             periodic_interval,
             network_activity,
             tokio::sync::watch::channel(()).1,
@@ -157,6 +188,7 @@ impl SpaceMembershipMaintenanceRuntime {
         let PreparedSpaceMembershipMaintenanceRuntime {
             maintain,
             peer_reachability_changed_events: mut reachability_changes,
+            known_peer_contacts: mut peer_contacts,
             periodic_interval,
             network_activity,
             activity,
@@ -166,6 +198,7 @@ impl SpaceMembershipMaintenanceRuntime {
         let task = tokio::spawn(async move {
             let mut paused = false;
             let mut peer_reachability_open = true;
+            let mut peer_contacts_open = true;
             let mut history_open = true;
             let mut active_round = Some(spawn_round(
                 Arc::clone(&maintain),
@@ -203,6 +236,16 @@ impl SpaceMembershipMaintenanceRuntime {
                                 ));
                             }
                             let _ = completed.send(());
+                        }
+                        Some(RuntimeCommand::PrepareSession(round)) => {
+                            network_activity.resume_network_work();
+                            paused = false;
+                            schedule_round(
+                                &maintain,
+                                &mut active_round,
+                                &mut queued_triggers,
+                                round,
+                            );
                         }
                         Some(RuntimeCommand::StateChanged(round)) if !paused => {
                             schedule_round(
@@ -262,6 +305,18 @@ impl SpaceMembershipMaintenanceRuntime {
                         }
                         Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
                         Err(broadcast::error::RecvError::Closed) => peer_reachability_open = false,
+                    },
+                    contact = peer_contacts.recv(), if !paused && peer_contacts_open => match contact {
+                        Ok(contact) => {
+                            schedule_round(
+                                &maintain,
+                                &mut active_round,
+                                &mut queued_triggers,
+                                ScheduledRound::new(MembershipMaintenanceTrigger::PeerContact(contact.device_id)),
+                            );
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => peer_contacts_open = false,
                     },
                     _ = periodic.tick(), if !paused => {
                         schedule_round(
@@ -327,6 +382,7 @@ fn spawn_round(
         let ScheduledRound {
             trigger,
             mut observation,
+            completed,
         } = round;
         observation.start();
         let report = observation.scope(maintain.execute(trigger)).await;
@@ -340,6 +396,9 @@ fn spawn_round(
             LocalWorkOutcome::Ok
         };
         observation.finish(outcome);
+        if let Some(completed) = completed {
+            let _ = completed.send(());
+        }
     })
 }
 
@@ -352,7 +411,7 @@ fn schedule_round(
     if active_round.is_some() {
         if let Some(existing) = queued_triggers
             .iter()
-            .find(|existing| existing.trigger == round.trigger)
+            .find(|existing| round.completed.is_none() && existing.trigger == round.trigger)
         {
             round.observation.coalesce(&existing.observation);
         } else {
@@ -367,6 +426,7 @@ fn schedule_round(
 struct ScheduledRound {
     trigger: MembershipMaintenanceTrigger,
     observation: MaintenanceObservation,
+    completed: Option<oneshot::Sender<()>>,
 }
 
 impl ScheduledRound {
@@ -376,12 +436,19 @@ impl ScheduledRound {
             MembershipMaintenanceTrigger::Resume => RecoveryTrigger::Resume,
             MembershipMaintenanceTrigger::Periodic => RecoveryTrigger::Periodic,
             MembershipMaintenanceTrigger::StateChanged => RecoveryTrigger::StateChanged,
+            MembershipMaintenanceTrigger::PeerContact(_) => RecoveryTrigger::PeerContact,
             MembershipMaintenanceTrigger::PeerOnline(_) => RecoveryTrigger::PeerOnline,
         };
         Self {
             trigger,
             observation: MaintenanceObservation::request(reason),
+            completed: None,
         }
+    }
+
+    fn with_completion(mut self, completed: oneshot::Sender<()>) -> Self {
+        self.completed = Some(completed);
+        self
     }
 }
 

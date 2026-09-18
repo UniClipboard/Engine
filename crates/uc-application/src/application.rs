@@ -39,11 +39,9 @@ use crate::facade::clipboard_history::{HistoryMaintenanceRuntime, HistoryMainten
 use crate::facade::clipboard_write::RestoreBroadcastTrigger;
 use crate::search::{SearchAssembly, SearchShutdownError};
 use crate::settings::SettingsAssembly;
-use crate::space::SpaceAdmissionObservationRegistry;
-use crate::space::SpaceFacade;
 use crate::space::{
-    SpaceAdmissionDeps, SpaceFacadeDeps, SpaceRuntimeAdapters, SpaceSessionDeps,
-    SpaceTransitionDeps,
+    KnownPeerContact, SpaceAdmissionDeps, SpaceAdmissionObservationRegistry, SpaceFacade,
+    SpaceFacadeDeps, SpaceRuntimeAdapters, SpaceSessionDeps, SpaceTransitionDeps,
 };
 use crate::transfer::blob::facade::BlobTransferDeps;
 use crate::transfer::file::assembly::FileTransferAssembly;
@@ -69,6 +67,7 @@ pub struct ApplicationSpaceAdapters {
     pub runtime: SpaceRuntimeAdapters,
     pub peer_reachability_changed_events:
         tokio::sync::broadcast::Receiver<uc_core::ports::PeerReachabilityChanged>,
+    pub known_peer_contacts: tokio::sync::broadcast::Receiver<KnownPeerContact>,
 }
 
 /// Engine 在共享 Iroh node 上选择完成的 Clipboard adapter。
@@ -368,6 +367,7 @@ impl ApplicationAssembly {
             space_security_reset,
             runtime,
             peer_reachability_changed_events,
+            known_peer_contacts,
         } = space;
         let re_pairing_state_store = Arc::clone(&runtime.admission.re_pairing_state_store);
         let space = Arc::new(SpaceFacade::new_dormant(SpaceFacadeDeps {
@@ -407,6 +407,7 @@ impl ApplicationAssembly {
             },
             runtime_adapters: runtime,
             peer_reachability_changed_events,
+            known_peer_contacts,
             admission_observations: Arc::clone(&self.admission_observations),
             space_transition_changes: self.space_transition_changes.clone(),
         }));
