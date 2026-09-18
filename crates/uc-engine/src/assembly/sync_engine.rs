@@ -5,44 +5,25 @@
 //! Clipboard、Blob 与文件传输对象图及其关闭顺序均由 Application 持有；
 //! [`SyncSessionAssembly`] 只拥有当前 Space 会话的进度翻译 worker。
 
-use std::collections::HashMap;
+mod outbound_progress;
+
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use uc_application::deps::ClipboardReceiverPort;
+use tokio::sync::broadcast;
+use tokio::time::Instant;
 
 use tracing::{info, instrument};
 
-use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio::task::JoinHandle;
-use tracing::debug;
-
-/// 反向 progress 翻译器对前端 emit 的硬上限(<=5/sec per transfer)。
-///
-/// 防御性节流——即便 peer 端(可能是旧版本、可能跑没修过的代码)以
-/// 100+/sec 速率从反向 ALPN 通道发 progress 帧过来,本机译者也只把
-/// 它转为最多 5/sec 的 host event 推给前端,避免 WebKit native 堆被
-/// 高频 WS 帧冲爆(详见 findings.md 2026-05-23 Phase 4 vmmap 取证)。
-///
-/// 与 `uc-infra::network::iroh::blobs::PROGRESS_REPORT_INTERVAL` 是两条
-/// 独立的防线:一个保护"我作为接收方时不要给对端发太快",一个保护
-/// "我作为发送方时不要把对端发来的高频中转给前端"。两条都设 200ms。
-///
-/// **终态帧(Completed/Failed/Cancelled)永远绕过节流**,确保前端立刻看到
-/// 最终状态,不会因为正好落在 cooldown 窗口里被丢掉。
-const TRANSLATOR_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(200);
+use outbound_progress::OutboundProgressRuntime;
 
 use crate::assembly::deps::SyncEngineDeps;
 use crate::assembly::membership_events::MembershipLedgerAccess;
 use uc_application::deps::{
     ApplicationClipboardAdapters, ApplicationNetworkAdapters, ApplicationNetworkBinding,
-    ApplicationSpaceAdapters, CurrentSpaceMemberScopePort, SpaceAdmissionAdapters,
-    SpaceMembershipAdapters, SpaceRuntimeAdapters,
+    ApplicationSpaceAdapters, ClipboardReceiverPort, CurrentSpaceMemberScopePort, LifecycleError,
+    SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters,
 };
 use uc_application::facade::ApplicationAssembly;
-use uc_application::facade::{HostEvent, HostEventBus, TransferHostEvent};
-use uc_core::file_transfer::{
-    FileTransferCancellationReason, FileTransferDirection, OutboundProgressStatus,
-};
+use uc_core::file_transfer::FileTransferCancellationReason;
 use uc_core::membership::ContentExchangeGatePort;
 use uc_core::ports::{
     ActiveClipboardDispatchPort, ActiveClipboardReceiverPort, ClipboardDispatchPort,
@@ -51,7 +32,6 @@ use uc_core::ports::{
 use uc_infra::fs::{
     FsAtomicPublisher, FsDirectoryStagingCleaner, FsHiddenPathMarker, FsInboundFileTarget,
 };
-use uc_infra::network::iroh::transfer_progress_adapter::InboundProgressEvent;
 use uc_infra::network::iroh::{
     encode_space_admission_route, ActiveClipboardHandlers, ActiveClipboardPullHandlers,
     BlobHandlers, ClipboardHandlers, GroupUpdateHandlers, IrohIdentityStore, IrohNodeError,
@@ -132,276 +112,20 @@ pub(crate) struct PreparedSyncSession {
 impl SyncSessionAssembly {
     /// 停止当前 Space 会话的进度翻译；长期网络由监督器独立关闭。
     #[instrument(skip_all)]
-    pub async fn shutdown(self, transfer_reason: FileTransferCancellationReason) {
-        self.outbound_progress_translator
+    pub async fn shutdown(
+        self,
+        transfer_reason: FileTransferCancellationReason,
+        _deadline: Option<Instant>,
+    ) -> Result<(), LifecycleError> {
+        let mut errors = Vec::new();
+        if let Err(error) = self
+            .outbound_progress_translator
             .shutdown(transfer_reason)
-            .await;
-    }
-}
-
-/// 把接收端推回的进度帧翻译成 `HostEvent::Transfer` 发给 emitter。
-///
-/// 每帧:
-/// * 先发一条 `Progress { direction: Sending }`,前端用它更新 sender 端
-///   transfer 进度条 + 文案。
-/// * 终态(`Completed` / `Failed`)再补一条 `StatusChanged`,前端把
-///   `entryStatusById[transfer_id]` 切到对应状态,UI 退出 transferring。
-///
-/// transfer_id 字段直接复用帧里的 sender 端 entry_id —— sender 本地
-/// entry_id == transfer_id 是发送侧的协议约定(同接收侧约定对称)。
-struct OutboundProgressRuntime {
-    commands: mpsc::UnboundedSender<OutboundProgressCommand>,
-    task: JoinHandle<()>,
-}
-
-enum OutboundProgressCommand {
-    Shutdown {
-        reason: FileTransferCancellationReason,
-        done: oneshot::Sender<()>,
-    },
-}
-
-struct ActiveOutboundProgress {
-    peer_id: String,
-    bytes_transferred: u64,
-    total_bytes: Option<u64>,
-}
-
-fn forward_outbound_progress(
-    bus: &HostEventBus,
-    last_progress_emit: &mut HashMap<String, Instant>,
-    active: &mut HashMap<String, ActiveOutboundProgress>,
-    event: InboundProgressEvent,
-) {
-    let terminal = match &event.status {
-        OutboundProgressStatus::InProgress => None,
-        OutboundProgressStatus::Completed => Some(("completed", None)),
-        OutboundProgressStatus::Failed => {
-            Some(("failed", Some("receiver fetch failed".to_string())))
-        }
-        OutboundProgressStatus::Cancelled { reason } => {
-            Some(("cancelled", Some(reason.as_str().to_string())))
-        }
-    };
-
-    // Terminal frames bypass throttling so the host receives the final bytes and state.
-    let should_emit_progress = if terminal.is_some() {
-        true
-    } else {
-        let now = Instant::now();
-        match last_progress_emit.get(&event.transfer_id) {
-            Some(previous) if now.duration_since(*previous) < TRANSLATOR_PROGRESS_MIN_INTERVAL => {
-                false
-            }
-            _ => {
-                last_progress_emit.insert(event.transfer_id.clone(), now);
-                true
-            }
-        }
-    };
-
-    if should_emit_progress {
-        bus.emit_or_warn(HostEvent::Transfer(TransferHostEvent::Progress {
-            transfer_id: event.transfer_id.clone(),
-            entry_id: Some(event.transfer_id.clone()),
-            attempt_id: None,
-            peer_id: event.from_device.as_str().to_string(),
-            direction: FileTransferDirection::Sending,
-            bytes_transferred: event.bytes_transferred,
-            total_bytes: event.total_bytes,
-        }));
-    }
-
-    if let Some((status, reason)) = terminal {
-        // Terminal frames remove active tracking before shutdown can cancel it again.
-        last_progress_emit.remove(&event.transfer_id);
-        active.remove(&event.transfer_id);
-        bus.emit_or_warn(HostEvent::Transfer(TransferHostEvent::StatusChanged {
-            transfer_id: event.transfer_id.clone(),
-            entry_id: Some(event.transfer_id),
-            attempt_id: None,
-            status: status.to_string(),
-            reason,
-        }));
-    } else {
-        active.insert(
-            event.transfer_id,
-            ActiveOutboundProgress {
-                peer_id: event.from_device.as_str().to_owned(),
-                bytes_transferred: event.bytes_transferred,
-                total_bytes: event.total_bytes,
-            },
-        );
-    }
-}
-
-impl OutboundProgressRuntime {
-    fn spawn(mut rx: broadcast::Receiver<InboundProgressEvent>, bus: Arc<HostEventBus>) -> Self {
-        let (commands, mut command_rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(async move {
-            // Track each transfer's last host progress event for the 5/sec limit.
-            // Terminal frames remove their entries so long-running sessions do not grow unbounded.
-            let mut last_progress_emit: HashMap<String, Instant> = HashMap::new();
-            let mut active = HashMap::<String, ActiveOutboundProgress>::new();
-            loop {
-                tokio::select! {
-                    command = command_rx.recv() => match command {
-                        Some(OutboundProgressCommand::Shutdown { reason, done }) => {
-                            while let Ok(event) = rx.try_recv() {
-                                forward_outbound_progress(&bus, &mut last_progress_emit, &mut active, event);
-                            }
-                            for (transfer_id, progress) in active.drain() {
-                                bus.emit_or_warn(HostEvent::Transfer(TransferHostEvent::Progress {
-                                    entry_id: Some(transfer_id.clone()),
-                                    transfer_id: transfer_id.clone(),
-                                    attempt_id: None,
-                                    peer_id: progress.peer_id,
-                                    direction: FileTransferDirection::Sending,
-                                    bytes_transferred: progress.bytes_transferred,
-                                    total_bytes: progress.total_bytes,
-                                }));
-                                bus.emit_or_warn(HostEvent::Transfer(TransferHostEvent::StatusChanged {
-                                    entry_id: Some(transfer_id.clone()),
-                                    transfer_id,
-                                    attempt_id: None,
-                                    status: "cancelled".to_owned(),
-                                    reason: Some(reason.as_str().to_owned()),
-                                }));
-                            }
-                            let _ = done.send(());
-                            return;
-                        }
-                        None => return,
-                    },
-                    received = rx.recv() => match received {
-                    Ok(event) => forward_outbound_progress(&bus, &mut last_progress_emit, &mut active, event),
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        debug!(
-                            skipped = n,
-                            "outbound progress translator: lagged; some frames skipped"
-                        );
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        break;
-                    }
-                }}
-            }
-        });
-        Self { commands, task }
-    }
-
-    async fn shutdown(self, reason: FileTransferCancellationReason) {
-        let (done, received) = oneshot::channel();
-        if self
-            .commands
-            .send(OutboundProgressCommand::Shutdown { reason, done })
-            .is_ok()
+            .await
         {
-            let _ = received.await;
+            errors.push(anyhow::Error::new(error).context("stop outbound progress worker"));
         }
-        let _ = self.task.await;
-    }
-}
-
-#[cfg(test)]
-mod outbound_progress_tests {
-    use std::sync::{Arc, Mutex};
-
-    use super::*;
-    use uc_application::facade::{EmitError, HostEventEmitterPort};
-    use uc_core::ids::DeviceId;
-
-    #[derive(Default)]
-    struct Recorder(Mutex<Vec<HostEvent>>);
-
-    impl HostEventEmitterPort for Recorder {
-        fn emit(&self, event: HostEvent) -> Result<(), EmitError> {
-            self.0
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(event);
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn network_recovery_finishes_each_active_outbound_transfer_once() {
-        let (events, _) = broadcast::channel(4);
-        let bus = Arc::new(HostEventBus::new());
-        let recorder = Arc::new(Recorder::default());
-        bus.register(
-            "test",
-            Arc::clone(&recorder) as Arc<dyn HostEventEmitterPort>,
-        );
-        let runtime = OutboundProgressRuntime::spawn(events.subscribe(), bus);
-
-        events
-            .send(InboundProgressEvent {
-                from_device: DeviceId::new("peer-a"),
-                transfer_id: "transfer-a".to_owned(),
-                bytes_transferred: 12,
-                total_bytes: Some(20),
-                status: OutboundProgressStatus::InProgress,
-            })
-            .unwrap_or_else(|error| panic!("send progress: {error}"));
-        events
-            .send(InboundProgressEvent {
-                from_device: DeviceId::new("peer-a"),
-                transfer_id: "transfer-a".to_owned(),
-                bytes_transferred: 12,
-                total_bytes: Some(20),
-                status: OutboundProgressStatus::InProgress,
-            })
-            .unwrap_or_else(|error| panic!("send progress: {error}"));
-        tokio::task::yield_now().await;
-
-        runtime
-            .shutdown(FileTransferCancellationReason::ConnectivityRecovery)
-            .await;
-
-        let events = recorder
-            .0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let terminals = events.iter().filter(|event| matches!(event,
-            HostEvent::Transfer(TransferHostEvent::StatusChanged { transfer_id, status, reason, .. })
-            if transfer_id == "transfer-a" && status == "cancelled" && reason.as_deref() == Some("connectivity_recovery")
-        )).count();
-        assert_eq!(terminals, 1);
-    }
-
-    #[tokio::test]
-    async fn network_recovery_does_not_repeat_an_existing_outbound_terminal() {
-        let (events, _) = broadcast::channel(4);
-        let bus = Arc::new(HostEventBus::new());
-        let recorder = Arc::new(Recorder::default());
-        bus.register(
-            "test",
-            Arc::clone(&recorder) as Arc<dyn HostEventEmitterPort>,
-        );
-        let runtime = OutboundProgressRuntime::spawn(events.subscribe(), bus);
-
-        events
-            .send(InboundProgressEvent {
-                from_device: DeviceId::new("peer-a"),
-                transfer_id: "transfer-a".to_owned(),
-                bytes_transferred: 20,
-                total_bytes: Some(20),
-                status: OutboundProgressStatus::Completed,
-            })
-            .unwrap_or_else(|error| panic!("send terminal: {error}"));
-        runtime
-            .shutdown(FileTransferCancellationReason::ConnectivityRecovery)
-            .await;
-
-        let events = recorder
-            .0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let terminals = events.iter().filter(|event| matches!(event,
-            HostEvent::Transfer(TransferHostEvent::StatusChanged { transfer_id, .. }) if transfer_id == "transfer-a"
-        )).count();
-        assert_eq!(terminals, 1);
+        LifecycleError::from_errors(errors)
     }
 }
 
