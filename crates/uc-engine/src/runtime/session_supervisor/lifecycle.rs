@@ -3,9 +3,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Weak;
 
 use async_trait::async_trait;
-use uc_application::facade::{
-    LifecycleError, NetworkRecoveryRequestError, RuntimeLifecyclePort, TransitionContext,
-};
+use uc_application::deps::{LifecycleError, RuntimeLifecyclePort, TransitionContext};
+use uc_application::facade::NetworkRecoveryRequestError;
 use uc_core::{FileTransferCancellationReason, TaskShutdownReport};
 
 use super::SessionSupervisor;

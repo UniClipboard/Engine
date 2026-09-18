@@ -4,7 +4,7 @@ use tokio::time::Instant;
 use tracing::info;
 #[cfg(feature = "lan-compat")]
 use tracing::warn;
-use uc_application::facade::LifecycleError;
+use uc_application::deps::LifecycleError;
 use uc_core::FileTransferCancellationReason;
 use uc_observability_contract::diagnostics::connectivity::{
     LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,

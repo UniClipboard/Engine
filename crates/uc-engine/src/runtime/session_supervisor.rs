@@ -11,10 +11,11 @@ use tokio::sync::{Mutex, Notify};
 use tokio::time::{timeout_at, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, Instrument};
+use uc_application::deps::LifecycleError;
 use uc_application::facade::{
     AppFacade, ApplicationAssembly, ApplicationRuntime, ClipboardInboundEvent,
     ClipboardInboundEventAction, ClipboardInboundEventPort, CompletePendingSpaceTransitionError,
-    LifecycleError, RecoverSpaceSessionError, RuntimeLifecycle,
+    RecoverSpaceSessionError, RuntimeLifecycle,
 };
 use uc_core::{FileTransferCancellationReason, TaskRegistry};
 use uc_infra::fs::{FsAtomicPublisher, FsHiddenPathMarker, FsInboundFileTarget};
