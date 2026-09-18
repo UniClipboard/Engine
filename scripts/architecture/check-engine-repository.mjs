@@ -611,7 +611,7 @@ function checkMembershipConfirmationWatermarkOwnership(sources) {
   const positiveAssignment = /\.confirmed_position\s*=\s*(?!None\b)[A-Za-z_]/g
   const applicationAssignments = sources.application.match(positiveAssignment) ?? []
   const authenticatedExchangeOwners = [
-    read('crates/uc-application/src/space/membership/synchronize_history/target_use_case.rs'),
+    read('crates/uc-application/src/space/membership/synchronize_history/use_case.rs'),
     read('crates/uc-application/src/space/membership/handle_history_message/use_case.rs'),
   ].join('\n')
   const ownerAssignments = authenticatedExchangeOwners.match(positiveAssignment) ?? []

@@ -153,6 +153,7 @@ impl LocalRecordingState {
         record["host_version"] = json!(self.resource.service_version);
         record["platform"] = json!(self.resource.os.as_str());
         record["environment"] = json!(self.resource.environment.as_str());
+        record["app_channel"] = json!(self.resource.app_channel);
         record["source_commit"] = json!(env!("UC_OBSERVABILITY_SOURCE_COMMIT"));
         record["source_state"] = json!(env!("UC_OBSERVABILITY_SOURCE_STATE"));
         if let Some(peer) =
@@ -399,5 +400,30 @@ impl LocalRecordingState {
         ) {
             connections.remove(&key);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LocalRecordingState;
+    use crate::{DeploymentEnvironment, ObservabilityResource, OperatingSystem};
+    use serde_json::json;
+
+    #[test]
+    fn local_record_contains_environment_and_app_channel() {
+        let resource = ObservabilityResource::new(
+            "1.2.3-beta.1",
+            DeploymentEnvironment::Production,
+            OperatingSystem::Windows,
+            "beta",
+        )
+        .expect("valid resource");
+        let recording = LocalRecordingState::new(&resource, None);
+        let mut record = json!({ "fields": {} });
+
+        recording.annotate(&mut record);
+
+        assert_eq!(record["environment"], "production");
+        assert_eq!(record["app_channel"], "beta");
     }
 }
