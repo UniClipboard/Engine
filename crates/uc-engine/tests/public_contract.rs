@@ -1730,6 +1730,8 @@ fn lifecycle_contract_only_allows_documented_transitions() {
     assert!(EngineState::Running.can_transition_to(EngineState::Quiescing));
     assert!(EngineState::Quiescing.can_transition_to(EngineState::Quiesced));
     assert!(EngineState::Quiesced.can_transition_to(EngineState::Suspended));
+    assert!(EngineState::Suspended.can_transition_to(EngineState::Quiesced));
+    assert!(EngineState::Quiesced.can_transition_to(EngineState::Running));
     assert!(EngineState::Suspended.can_transition_to(EngineState::Running));
     assert!(EngineState::Running.can_transition_to(EngineState::ShuttingDown));
     assert!(EngineState::Suspended.can_transition_to(EngineState::ShuttingDown));
