@@ -186,4 +186,48 @@ mod tests {
         release.send(()).unwrap();
         engine.shutdown(1000).unwrap();
     }
+
+    #[test]
+    fn unavailable_shutdown_channel_can_be_retried() {
+        let (commands, requests) = tokio::sync::mpsc::unbounded_channel();
+        let (lifecycle_commands, lifecycle_requests) = tokio::sync::mpsc::unbounded_channel();
+        drop(requests);
+        drop(lifecycle_requests);
+        let worker = std::thread::spawn(|| Ok(()));
+        let engine = MobileEngine {
+            commands: Mutex::new(Some(commands)),
+            lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
+            shutdown_pending: AtomicBool::new(false),
+            events: Arc::new(EventQueue::new(1)),
+            worker: WorkerJoin::new(worker),
+        };
+
+        assert_eq!(engine.shutdown(1000), Err(BindingError::RuntimeUnavailable));
+        assert!(!engine
+            .shutdown_pending
+            .load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn disconnected_reply_after_event_close_joins_the_completed_worker() {
+        let (commands, requests) = tokio::sync::mpsc::unbounded_channel();
+        let (lifecycle_commands, mut lifecycle_requests) = tokio::sync::mpsc::unbounded_channel();
+        let events = Arc::new(EventQueue::new(1));
+        let worker_events = Arc::clone(&events);
+        let worker = std::thread::spawn(move || {
+            drop(requests);
+            let _ = lifecycle_requests.blocking_recv();
+            worker_events.close();
+            Ok(())
+        });
+        let engine = MobileEngine {
+            commands: Mutex::new(Some(commands)),
+            lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
+            shutdown_pending: AtomicBool::new(false),
+            events,
+            worker: WorkerJoin::new(worker),
+        };
+
+        engine.shutdown(1000).unwrap();
+    }
 }

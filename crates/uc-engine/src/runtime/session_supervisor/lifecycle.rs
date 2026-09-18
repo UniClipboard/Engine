@@ -3,6 +3,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Weak;
 
 use async_trait::async_trait;
+use tokio::task::JoinHandle;
 use uc_application::deps::{LifecycleError, RuntimeLifecyclePort, TransitionContext};
 use uc_application::facade::NetworkRecoveryRequestError;
 use uc_core::{FileTransferCancellationReason, TaskShutdownReport};
@@ -51,9 +52,10 @@ impl RuntimeLifecyclePort for SessionWork {
         let context = context.clone();
         // 共同期限可以结束调用方等待，但已经取得的会话必须由原负责人完整交接。
         // 外层期限取消本次等待时，独立任务继续持有 owner 和生命周期锁；后继重试会在同一锁后接续。
-        tokio::spawn(async move { suspend_owned(owner, context).await })
-            .await
-            .map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?
+        join_owned(tokio::spawn(
+            async move { suspend_owned(owner, context).await },
+        ))
+        .await
     }
 
     async fn resume(&self, _context: &TransitionContext) -> anyhow::Result<()> {
@@ -65,6 +67,11 @@ impl RuntimeLifecyclePort for SessionWork {
             .store(true, Ordering::Release);
         Ok(())
     }
+}
+
+async fn join_owned(task: JoinHandle<anyhow::Result<()>>) -> anyhow::Result<()> {
+    task.await
+        .map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?
 }
 
 async fn suspend_owned(
@@ -214,5 +221,18 @@ mod tests {
             lifecycle_error(error),
             EngineError::new(1108, EngineErrorCategory::Internal, false)
         );
+    }
+
+    #[tokio::test]
+    async fn owned_suspend_task_failure_is_a_stable_internal_error() {
+        let error = super::join_owned(tokio::spawn(async {
+            panic!("private session lifecycle failure");
+        }))
+        .await
+        .unwrap_err();
+        let error = error.downcast_ref::<EngineError>().unwrap();
+        assert_eq!(error.code(), 1108);
+        assert_eq!(error.category(), EngineErrorCategory::Internal);
+        assert!(error.is_retryable());
     }
 }
