@@ -65,6 +65,7 @@ fn classify_error(error: &(dyn std::error::Error + 'static)) -> &'static str {
             SecureStorageError::PermissionDenied(_) => "permission_denied",
             SecureStorageError::Corrupt(_) => "invalid_protection_record",
             SecureStorageError::Other(_) => "protection_storage",
+            SecureStorageError::AccessFailed(_) => "protection_storage",
         };
     }
     if find_source::<serde_json::Error>(error).is_some()
@@ -113,6 +114,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tracing::field::{Field, Visit};
     use tracing_subscriber::prelude::*;
+    use uc_core::ports::SecureStorageAccessFailure;
 
     struct Fields(BTreeMap<String, String>);
     impl Visit for Fields {
@@ -213,5 +215,18 @@ mod tests {
 
         assert_eq!(fields["error_kind"], "permission_denied");
         assert!(!format!("{fields:?}").contains("private-account"));
+    }
+
+    #[test]
+    fn secure_storage_access_failure_has_a_stable_safe_classification() {
+        let fields = capture(ProfileUpgradeBackupError {
+            source: SecureStorageError::AccessFailed(SecureStorageAccessFailure::new(
+                std::io::Error::other("private host payload"),
+            ))
+            .into(),
+        });
+
+        assert_eq!(fields["error_kind"], "protection_storage");
+        assert!(!format!("{fields:?}").contains("private host payload"));
     }
 }

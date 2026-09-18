@@ -4,15 +4,11 @@
 //! 已删除)；唯一消费者是 `RuntimeSpaceAccessAdapter`,后者通过 Arc 共享。
 
 use std::sync::Arc;
-use tokio::task::spawn_blocking;
-use uc_core::{
-    crypto::model::EncryptionError,
-    ports::{SecureStorageError, SecureStoragePort},
-};
+use uc_core::{crypto::model::EncryptionError, ports::SecureStoragePort};
 
 use crate::fs::key_slot_store::KeySlotStore;
 use crate::security::crypto_model::{KeyScope, KeySlot, KeySlotFile};
-use crate::security::Kek;
+use crate::security::{Kek, SecureStorageAccess};
 
 use super::scope_identifier::scope_identifier;
 
@@ -20,7 +16,7 @@ use super::scope_identifier::scope_identifier;
 mod tests;
 
 pub struct KeyMaterialStore {
-    secure_storage: Arc<dyn SecureStoragePort>,
+    secure_storage: SecureStorageAccess,
     keyslot_store: Arc<dyn KeySlotStore>,
 }
 
@@ -30,7 +26,7 @@ impl KeyMaterialStore {
         keyslot_store: Arc<dyn KeySlotStore>,
     ) -> Self {
         Self {
-            secure_storage,
+            secure_storage: SecureStorageAccess::new(secure_storage),
             keyslot_store,
         }
     }
@@ -40,52 +36,36 @@ fn kek_key(scope: &KeyScope) -> String {
     format!("kek:v1:{}", scope_identifier(scope))
 }
 
-fn map_storage_error(err: SecureStorageError) -> EncryptionError {
-    match err {
-        SecureStorageError::PermissionDenied(_) => EncryptionError::PermissionDenied,
-        SecureStorageError::Corrupt(_) => EncryptionError::KeyMaterialCorrupt,
-        SecureStorageError::Unavailable(msg) | SecureStorageError::Other(msg) => {
-            EncryptionError::KeyringError(msg)
-        }
-    }
-}
-
 impl KeyMaterialStore {
     pub async fn load_kek(&self, scope: &KeyScope) -> Result<Kek, EncryptionError> {
         let key = kek_key(scope);
-        let storage = Arc::clone(&self.secure_storage);
-        let secret = spawn_blocking(move || storage.get(&key))
-            .await
-            .map_err(|source| EncryptionError::KeyMaterialAccessFailed {
-                source: source.into(),
-            })?
-            .map_err(map_storage_error)?
-            .ok_or(EncryptionError::KeyNotFound)?;
+        let secret = self
+            .secure_storage
+            .execute(move |storage| storage.get(&key)?.ok_or(EncryptionError::KeyNotFound))
+            .await?;
         Kek::from_bytes(&secret)
             .map_err(|e| EncryptionError::KeyringError(format!("invalid KEK material: {e}")))
     }
 
     pub async fn store_kek(&self, scope: &KeyScope, kek: &Kek) -> Result<(), EncryptionError> {
         let key = kek_key(scope);
-        let storage = Arc::clone(&self.secure_storage);
         let kek = kek.clone();
-        spawn_blocking(move || storage.set(&key, kek.as_bytes()))
+        self.secure_storage
+            .execute(move |storage| {
+                storage.set(&key, kek.as_bytes())?;
+                Ok(())
+            })
             .await
-            .map_err(|source| EncryptionError::KeyMaterialAccessFailed {
-                source: source.into(),
-            })?
-            .map_err(map_storage_error)
     }
 
     pub async fn delete_kek(&self, scope: &KeyScope) -> Result<(), EncryptionError> {
         let key = kek_key(scope);
-        let storage = Arc::clone(&self.secure_storage);
-        spawn_blocking(move || storage.delete(&key))
+        self.secure_storage
+            .execute(move |storage| {
+                storage.delete(&key)?;
+                Ok(())
+            })
             .await
-            .map_err(|source| EncryptionError::KeyMaterialAccessFailed {
-                source: source.into(),
-            })?
-            .map_err(map_storage_error)
     }
 
     pub async fn load_keyslot(&self, scope: &KeyScope) -> Result<KeySlot, EncryptionError> {

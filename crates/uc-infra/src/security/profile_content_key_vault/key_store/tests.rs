@@ -4,7 +4,7 @@ use std::thread::{self, ThreadId};
 use tokio::task::JoinError;
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
-use super::{load_existing, load_or_create, ProfileContentKeyVaultError};
+use super::{load_existing, load_or_create, ProfileContentKeyVaultError, SecureStorageAccess};
 
 #[derive(Default)]
 struct Storage {
@@ -36,8 +36,9 @@ impl SecureStoragePort for Storage {
 #[tokio::test]
 async fn key_installation_and_readback_run_outside_the_runtime_thread() {
     let storage = Arc::new(Storage::default());
-    let installed = load_or_create(storage.clone()).await.unwrap();
-    let read = load_existing(storage.clone()).await.unwrap();
+    let access = SecureStorageAccess::new(storage.clone());
+    let installed = load_or_create(access.clone()).await.unwrap();
+    let read = load_existing(access).await.unwrap();
     assert_eq!(installed, read);
     let threads = storage.threads.lock().unwrap();
     assert_eq!(threads.len(), 4);
@@ -52,7 +53,9 @@ async fn host_read_and_write_panics_keep_their_source_without_exposing_payloads(
             panic_on_set: !panic_on_get,
             ..Storage::default()
         });
-        let error = load_or_create(storage).await.unwrap_err();
+        let error = load_or_create(SecureStorageAccess::new(storage))
+            .await
+            .unwrap_err();
         assert!(!format!("{error:?}").contains("private"));
         assert!(!format!("{error}").contains("private"));
         let ProfileContentKeyVaultError::SecureStorage { source } = error else {

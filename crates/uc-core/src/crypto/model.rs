@@ -16,6 +16,8 @@
 use anyhow::Error;
 use std::fmt;
 
+use crate::ports::SecureStorageError;
+
 /// Passphrase provided by user. Only used to derive KEK inside use cases.
 /// Avoid storing this beyond the unlock/initialize flow.
 #[derive(Clone)]
@@ -107,10 +109,27 @@ impl fmt::Debug for EncryptionError {
     }
 }
 
+impl From<SecureStorageError> for EncryptionError {
+    fn from(source: SecureStorageError) -> Self {
+        match source {
+            SecureStorageError::PermissionDenied(_) => Self::PermissionDenied,
+            SecureStorageError::Corrupt(_) => Self::KeyMaterialCorrupt,
+            SecureStorageError::Unavailable(message) | SecureStorageError::Other(message) => {
+                Self::KeyringError(message)
+            }
+            SecureStorageError::AccessFailed(failure) => Self::KeyMaterialAccessFailed {
+                source: failure.into_source(),
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error;
     use std::io;
+
+    use crate::ports::{SecureStorageAccessFailure, SecureStorageError};
 
     use super::EncryptionError;
 
@@ -126,5 +145,27 @@ mod tests {
             .is_some());
         assert!(!format!("{error:?}").contains("private"));
         assert!(!format!("{error}").contains("private"));
+    }
+
+    #[test]
+    fn secure_storage_failures_use_stable_encryption_classifications() {
+        assert!(matches!(
+            EncryptionError::from(SecureStorageError::PermissionDenied("private".into())),
+            EncryptionError::PermissionDenied
+        ));
+        assert!(matches!(
+            EncryptionError::from(SecureStorageError::Corrupt("private".into())),
+            EncryptionError::KeyMaterialCorrupt
+        ));
+
+        let error = EncryptionError::from(SecureStorageError::AccessFailed(
+            SecureStorageAccessFailure::new(io::Error::other("private host payload")),
+        ));
+        assert!(error
+            .source()
+            .unwrap()
+            .downcast_ref::<io::Error>()
+            .is_some());
+        assert!(!format!("{error:?}").contains("private"));
     }
 }

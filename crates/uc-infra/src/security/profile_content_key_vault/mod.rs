@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use uc_core::membership::{ContentKeyId, GroupEpoch, SpaceKeyMaterial};
 use uc_core::ports::SecureStoragePort;
 
-use super::MasterKey;
+use super::{MasterKey, SecureStorageAccess};
 pub(super) use key_store::VAULT_KEY_NAME as PROFILE_CONTENT_VAULT_KEY_NAME;
 pub(crate) use model::ProfileSearchCatalog;
 pub use model::{InstalledProfileCatalog, ProfileContentKeyVaultError, ResolvedProfileContentKey};
@@ -39,7 +39,7 @@ impl ProfileContentKeyVault {
         Self {
             persistence: Arc::new(VaultPersistence::new(
                 vault_directory,
-                secure_storage,
+                SecureStorageAccess::new(secure_storage),
                 profile_generation,
             )),
             io_lock: Arc::new(Mutex::new(())),

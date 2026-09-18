@@ -1,4 +1,6 @@
+use anyhow::Error;
 use uc_core::membership::{ContentKeyId, GroupEpoch, ProtectionGroupId};
+use uc_core::ports::SecureStorageError;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::super::MasterKey;
@@ -41,6 +43,18 @@ pub enum ProfileContentKeyVaultError {
     EpochMismatch,
     #[error("profile content key vault capacity was exceeded")]
     CapacityExceeded,
+}
+
+impl From<SecureStorageError> for ProfileContentKeyVaultError {
+    fn from(source: SecureStorageError) -> Self {
+        let source = match source {
+            SecureStorageError::AccessFailed(failure) => failure.into_source(),
+            source => Error::new(source),
+        };
+        Self::SecureStorage {
+            source: source.context("access profile content vault key"),
+        }
+    }
 }
 
 impl fmt::Debug for ProfileContentKeyVaultError {

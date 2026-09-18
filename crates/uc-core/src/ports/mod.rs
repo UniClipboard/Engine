@@ -130,7 +130,9 @@ pub use receive_artifact_log::{
 pub use search::maintenance::SearchIndexMaintenancePort;
 pub use search::search_index::SearchIndexPort;
 pub use search::search_key::SearchKeyDerivationPort;
-pub use security::secure_storage::{SecureStorageError, SecureStoragePort};
+pub use security::secure_storage::{
+    SecureStorageAccessFailure, SecureStorageError, SecureStoragePort,
+};
 pub use security::transfer_cipher::{TransferCipherError, TransferCipherPort};
 pub use security::{BlobCipherError, BlobCipherPort};
 pub use settings::{SettingsMigrationPort, SettingsPort};

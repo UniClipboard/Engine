@@ -1438,6 +1438,37 @@ function checkInfraSpaceSecurityOwnership() {
   return problems
 }
 
+function checkSecureStorageBlockingOwnership(sources) {
+  const problems = []
+  if (!sources.secureStorageAccess.includes('spawn_blocking')) {
+    addProblem(
+      problems,
+      'secure storage blocking ownership',
+      'SecureStorageAccess must remain the blocking execution owner'
+    )
+  }
+  for (const [name, source] of [
+    ['Space key material', sources.spaceKeyMaterial],
+    ['profile content vault key store', sources.profileContentVaultKeyStore],
+  ]) {
+    if (source.includes('spawn_blocking')) {
+      addProblem(
+        problems,
+        'secure storage blocking ownership',
+        `${name} must execute synchronous storage through SecureStorageAccess`
+      )
+    }
+    if (/map_storage_error|map_err\(access_error\)/.test(source)) {
+      addProblem(
+        problems,
+        'secure storage blocking ownership',
+        `${name} must use typed error conversion instead of call-site storage mapping`
+      )
+    }
+  }
+  return problems
+}
+
 function checkRetiredLegacySpaceTransition(sources) {
   const problems = []
   const legacyPath = 'crates/uc-infra/src/security/admission_space_transition.rs'
@@ -1904,6 +1935,11 @@ function repositorySources() {
     ),
     infraSecurityModule: read('crates/uc-infra/src/security/mod.rs'),
     infraSecurityRuntime: readSourceTree('crates/uc-infra/src/security'),
+    secureStorageAccess: read('crates/uc-infra/src/security/secure_storage_access.rs'),
+    profileContentVaultKeyStore: read(
+      'crates/uc-infra/src/security/profile_content_key_vault/key_store.rs'
+    ),
+    spaceKeyMaterial: read('crates/uc-infra/src/space/security/key_material.rs'),
     runtimeStorage: read('crates/uc-engine/src/assembly/runtime_storage.rs'),
     observabilityModule: read('crates/uc-engine/src/assembly/observability/mod.rs'),
     engineObservability: readSourceTree('crates/uc-engine/src/assembly/observability'),
@@ -1969,6 +2005,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkSpaceAdmissionPersistenceOwnership(),
     ...checkInfraSpaceAdmissionOwnership(),
     ...checkInfraSpaceSecurityOwnership(),
+    ...checkSecureStorageBlockingOwnership(sources),
     ...checkRetiredLegacySpaceTransition(sources),
     ...checkRetiredMembershipPersistence(sources),
     ...checkIrohPeerAddressResolution(sources),
@@ -2040,6 +2077,9 @@ function runNegativeFixtures(metadata, sources) {
   }, metadata, sources)
   expectRejected('retired pairing transport', (_changed, changedSources) => {
     changedSources.runtime += '\nconst PAIRING_ALPN: &[u8] = b"/uniclipboard/pairing/2";\n'
+  }, metadata, sources)
+  expectRejected('scattered secure storage blocking access', (_changed, changedSources) => {
+    changedSources.spaceKeyMaterial += '\nasync fn bypass() { spawn_blocking(|| true).await; }\n'
   }, metadata, sources)
   expectRejected('missing OpenMLS validation target', changed => {
     const validation = packageByName(changed, 'openmls-validation')

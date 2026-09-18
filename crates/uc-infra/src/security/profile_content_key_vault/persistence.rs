@@ -1,16 +1,18 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
+
+#[cfg(test)]
 use std::sync::Arc;
 
 use hkdf::Hkdf;
 use sha2::Sha256;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use uc_core::ports::SecureStoragePort;
 use zeroize::Zeroizing;
 
 use crate::fs::file_lock::try_lock_exclusive;
 
 use super::super::crypto_model::EncryptedBlob;
+use super::super::SecureStorageAccess;
 use super::super::{v1_aead, MasterKey};
 use super::model::{PersistedVault, ProfileContentKeyVaultError, MAX_VAULT_PLAINTEXT_BYTES};
 use super::{catalog, key_store};
@@ -24,7 +26,7 @@ const MAX_ENCRYPTED_VAULT_BYTES: usize = 8 * 1024 * 1024;
 
 pub(super) struct VaultPersistence {
     path: PathBuf,
-    secure_storage: Arc<dyn SecureStoragePort>,
+    secure_storage: SecureStorageAccess,
     profile_generation: [u8; 16],
     #[cfg(test)]
     pub(super) after_store: std::sync::Mutex<Option<StoreProbe>>,
@@ -50,7 +52,7 @@ pub(super) enum StoreProbe {
 impl VaultPersistence {
     pub(super) fn new(
         directory: PathBuf,
-        secure_storage: Arc<dyn SecureStoragePort>,
+        secure_storage: SecureStorageAccess,
         profile_generation: [u8; 16],
     ) -> Self {
         Self {
@@ -99,7 +101,7 @@ impl VaultPersistence {
         })?;
         let aad = self.aad();
         validate_framing(&encrypted, &aad)?;
-        let key = key_store::load_existing(Arc::clone(&self.secure_storage)).await?;
+        let key = key_store::load_existing(self.secure_storage.clone()).await?;
         let plaintext = Zeroizing::new(
             v1_aead::decrypt_blob_xchacha(&key, &encrypted.nonce, &encrypted.ciphertext, &aad)
                 .map_err(|source| ProfileContentKeyVaultError::Corrupt {
@@ -122,7 +124,7 @@ impl VaultPersistence {
         &self,
         vault: &PersistedVault,
     ) -> Result<MasterKey, ProfileContentKeyVaultError> {
-        let key = key_store::load_or_create(Arc::clone(&self.secure_storage)).await?;
+        let key = key_store::load_or_create(self.secure_storage.clone()).await?;
         let plaintext = Zeroizing::new(postcard::to_stdvec(vault).map_err(|source| {
             ProfileContentKeyVaultError::InvalidMaterial {
                 source: anyhow::Error::new(source).context("encode profile content key vault"),

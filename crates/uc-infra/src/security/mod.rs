@@ -24,6 +24,7 @@ mod profile_startup_storage;
 mod profile_storage_upgrade;
 mod profile_upgrade_backup;
 mod secrets;
+mod secure_storage_access;
 mod space_admission_auth;
 mod space_control_generation;
 mod space_transition_activation;
@@ -78,6 +79,7 @@ pub use profile_storage_upgrade::{
 };
 pub use profile_upgrade_backup::ProfileUpgradeBackupStore;
 pub(crate) use secrets::{Kek, MasterKey};
+pub(crate) use secure_storage_access::SecureStorageAccess;
 pub use space_admission_auth::{
     SpaceAdmissionAuth, SpaceAdmissionAuthContext, SpaceAdmissionAuthError,
     SpaceAdmissionClientState, SpaceAdmissionContinuationCredential, SpaceAdmissionKe1,
