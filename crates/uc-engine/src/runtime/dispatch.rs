@@ -4,6 +4,7 @@ use crate::{
     DevOperationResult,
 };
 use std::time::Duration;
+use tokio::time::Instant;
 
 #[cfg(feature = "dev-tools")]
 use super::operation_error_with_code;
@@ -753,21 +754,24 @@ impl EngineRuntime for ProductionRuntime {
         }
     }
 
-    async fn suspend(&self) -> Result<(), EngineError> {
+    async fn suspend(&self, _deadline: Option<Instant>) -> Result<(), EngineError> {
         self.session_supervisor.suspend().await
     }
 
-    async fn resume(&self) -> Result<(), EngineError> {
+    async fn resume(&self, _cancellation: CancellationToken) -> Result<(), EngineError> {
         self.session_supervisor.resume().await
     }
 
-    async fn shutdown(&self, deadline: Duration) -> Result<(), EngineError> {
+    async fn shutdown(&self, deadline: Option<Instant>) -> Result<(), EngineError> {
         self.security_lifecycle.close_security_session();
         self.network_recovery.shutdown().await;
-        self.suspend().await?;
+        self.session_supervisor.suspend().await?;
         self.session_supervisor.clear_factory();
         self.session_supervisor.close_file_transfers().await?;
-        super::task_shutdown::shutdown_tasks(&self.task_registry, deadline).await;
+        let budget = deadline
+            .map(|value| value.saturating_duration_since(Instant::now()))
+            .unwrap_or(Duration::from_secs(30));
+        super::task_shutdown::shutdown_tasks(&self.task_registry, budget).await;
         if let Err(error) = std::fs::remove_dir_all(&self.clipboard_import_root) {
             if error.kind() != std::io::ErrorKind::NotFound {
                 warn!(error = %error, "failed to remove host clipboard imports");
