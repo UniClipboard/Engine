@@ -15,9 +15,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::{error, warn};
-use uc_application::deps::{ProfileUpgradeBackupPort, StopProfileRuntimePort};
+use uc_application::deps::{LifecycleError, ProfileUpgradeBackupPort, StopProfileRuntimePort};
 use uc_application::facade::{
-    AppFacade, ApplicationRuntime, LifecycleError, NetworkRecoveryEvent, ProfileFactoryResetFacade,
+    AppFacade, ApplicationRuntime, NetworkRecoveryEvent, ProfileFactoryResetFacade,
     ProfileFactoryResetOutcome, ProfileFactoryResetRequest,
 };
 use uc_core::ports::ClockPort;
