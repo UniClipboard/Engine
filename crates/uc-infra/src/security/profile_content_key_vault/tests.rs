@@ -9,7 +9,11 @@ use uc_core::membership::{
 };
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
+use super::persistence::StoreProbe;
 use super::{ProfileContentKeyVault, ProfileContentKeyVaultError, PROFILE_CONTENT_VAULT_KEY_NAME};
+
+mod lease;
+mod secure_access;
 
 #[derive(Default)]
 struct MemorySecureStorage(
@@ -90,6 +94,123 @@ fn ready_material(
         serde_json::to_vec(&catalog).unwrap(),
         1,
     )
+}
+
+#[tokio::test]
+async fn suspension_releases_ownership_and_resume_reads_external_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Arc::new(MemorySecureStorage::default());
+    let vault = ProfileContentKeyVault::new(directory.path().to_owned(), storage.clone(), [3; 16]);
+    let material = ready_material("space", "group", "key-first", 1, 0x31);
+    vault
+        .install_verified_space_material(&material)
+        .await
+        .unwrap();
+    let old_lease = vault.begin_read_reuse().unwrap();
+    vault
+        .resolve(
+            &ContentKeyId::from_string("key-first").unwrap(),
+            GroupEpoch::new(1),
+        )
+        .await
+        .unwrap();
+    let other = ProfileContentKeyVault::new(directory.path().to_owned(), storage, [3; 16]);
+    let second = ready_material("other-space", "other-group", "key-second", 2, 0x32);
+    assert!(other
+        .install_verified_space_material(&second)
+        .await
+        .is_err());
+
+    vault.suspend().await;
+    assert!(matches!(
+        vault.begin_read_reuse(),
+        Err(ProfileContentKeyVaultError::Closed)
+    ));
+    assert!(matches!(
+        vault
+            .resolve(
+                &ContentKeyId::from_string("key-first").unwrap(),
+                GroupEpoch::new(1)
+            )
+            .await,
+        Err(ProfileContentKeyVaultError::Closed)
+    ));
+    other
+        .install_verified_space_material(&second)
+        .await
+        .unwrap();
+    vault.resume().await.unwrap();
+    let _new_lease = vault.begin_read_reuse().unwrap();
+    drop(old_lease);
+    let resolved = vault
+        .resolve(
+            &ContentKeyId::from_string("key-second").unwrap(),
+            GroupEpoch::new(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resolved.key.as_bytes(), &[0x32; 32]);
+    assert!(other
+        .install_verified_space_material(&second)
+        .await
+        .is_err());
+
+    vault.close();
+    assert!(matches!(
+        vault.resume().await,
+        Err(ProfileContentKeyVaultError::Closed)
+    ));
+    assert!(matches!(
+        vault.begin_read_reuse(),
+        Err(ProfileContentKeyVaultError::Closed)
+    ));
+}
+
+#[tokio::test]
+async fn suspension_waits_for_active_vault_write_and_rejects_late_work() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Arc::new(MemorySecureStorage::default());
+    let vault = Arc::new(ProfileContentKeyVault::new(
+        directory.path().to_owned(),
+        storage,
+        [4; 16],
+    ));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *vault.persistence.after_store.lock().unwrap() = Some(StoreProbe::Pause {
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+    });
+    let writing = tokio::spawn({
+        let vault = Arc::clone(&vault);
+        async move {
+            vault
+                .install_verified_space_material(&ready_material("space", "group", "key", 1, 0x31))
+                .await
+        }
+    });
+    entered.notified().await;
+    let suspending = tokio::spawn({
+        let vault = Arc::clone(&vault);
+        async move { vault.suspend().await }
+    });
+    tokio::task::yield_now().await;
+    assert!(!suspending.is_finished());
+    release.notify_one();
+    writing.await.unwrap().unwrap();
+    suspending.await.unwrap();
+    assert!(matches!(
+        vault
+            .install_verified_space_material(&ready_material("space", "group", "key", 1, 0x31))
+            .await,
+        Err(ProfileContentKeyVaultError::Closed)
+    ));
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(directory.path().join("profile-content-key-vault.lease"))
+        .unwrap();
+    file.try_lock().unwrap();
 }
 
 #[tokio::test]
@@ -490,7 +611,7 @@ async fn uncertain_commit_and_cancelled_store_reload_the_committed_catalog() {
         *vault.persistence.after_store.lock().unwrap() = Some(if cancel {
             StoreProbe::Pause {
                 entered: entered.clone(),
-                release,
+                release: release.clone(),
             }
         } else {
             StoreProbe::Fail
@@ -507,13 +628,15 @@ async fn uncertain_commit_and_cancelled_store_reload_the_committed_catalog() {
             entered.notified().await;
             write.abort();
             assert!(write.await.unwrap_err().is_cancelled());
+            release.notify_one();
+            drop(vault.io_lock.lock().await);
         } else {
             assert!(matches!(
                 write.await.unwrap(),
                 Err(ProfileContentKeyVaultError::Storage { .. })
             ));
         }
-        // 磁盘已有新组，但安装未报告成功；下一次读取必须重新认证而非使用旧缓存。
+        // 失败重新认证；取消等待则由实际安装完成后发布新目录，均不能返回旧缓存。
         let before = storage.1.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
             vault
@@ -526,7 +649,7 @@ async fn uncertain_commit_and_cancelled_store_reload_the_committed_catalog() {
         );
         assert_eq!(
             storage.1.load(std::sync::atomic::Ordering::SeqCst) - before,
-            1
+            if cancel { 0 } else { 1 }
         );
     }
 }

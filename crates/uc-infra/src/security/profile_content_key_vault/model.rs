@@ -1,4 +1,6 @@
+use anyhow::Error;
 use uc_core::membership::{ContentKeyId, GroupEpoch, ProtectionGroupId};
+use uc_core::ports::SecureStorageError;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::super::MasterKey;
@@ -9,7 +11,7 @@ pub(super) const MAX_GROUPS: usize = 128;
 pub(super) const MAX_ENTRIES_PER_GROUP: usize = 1024;
 pub(super) const MAX_TOTAL_ENTRIES: usize = 4096;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum ProfileContentKeyVaultError {
     #[error("profile content key runtime is closed")]
     Closed,
@@ -41,6 +43,24 @@ pub enum ProfileContentKeyVaultError {
     EpochMismatch,
     #[error("profile content key vault capacity was exceeded")]
     CapacityExceeded,
+}
+
+impl From<SecureStorageError> for ProfileContentKeyVaultError {
+    fn from(source: SecureStorageError) -> Self {
+        let source = match source {
+            SecureStorageError::AccessFailed(failure) => failure.into_source(),
+            source => Error::new(source),
+        };
+        Self::SecureStorage {
+            source: source.context("access profile content vault key"),
+        }
+    }
+}
+
+impl fmt::Debug for ProfileContentKeyVaultError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,3 +186,4 @@ pub(super) fn corrupt(context: &'static str) -> ProfileContentKeyVaultError {
         source: anyhow::anyhow!(context),
     }
 }
+use std::fmt;

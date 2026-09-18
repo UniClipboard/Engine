@@ -4,7 +4,7 @@ use tokio::sync::Mutex;
 use uc_core::ids::SpaceId;
 use uc_core::membership::{GroupEpoch, RevocationRepositoryPort, SpaceKeyMaterial};
 
-use crate::security::{MasterKey, ProfileContentKeyVault};
+use crate::security::{MasterKey, ProfileContentKeyVault, ProfileContentKeyVaultError};
 
 use super::InMemorySession;
 
@@ -74,8 +74,8 @@ impl ActiveSpaceSecuritySession {
             .session
             .begin_transaction(Some((space_id.clone(), master_key)))
             .map_err(session_error)?;
-        let material = repository
-            .load_space_material(space_id)
+        let material = transaction
+            .with_candidate_master_key(repository.load_space_material(space_id))
             .await
             .map_err(|source| ActiveSpaceSecuritySessionError::Repository {
                 source: anyhow::Error::new(source),
@@ -109,16 +109,16 @@ impl ActiveSpaceSecuritySession {
         material: &SpaceKeyMaterial,
     ) -> Result<(), ActiveSpaceSecuritySessionError> {
         let _guard = self.activation_lock.lock().await;
-        let transaction = self
-            .session
-            .begin_transaction(None)
-            .map_err(session_error)?;
         let current_space_id = self.session.current_space_id().map_err(session_error)?;
         if material.state().space_id() != &current_space_id {
             return Err(ActiveSpaceSecuritySessionError::InvalidMaterial {
                 source: anyhow::anyhow!("security material does not belong to the active space"),
             });
         }
+        let transaction = self
+            .session
+            .begin_transaction(None)
+            .map_err(session_error)?;
         self.vault
             .install_verified_space_material(material)
             .await
@@ -132,6 +132,16 @@ impl ActiveSpaceSecuritySession {
     pub(crate) fn close(&self) {
         self.session.close();
         self.vault.close();
+    }
+
+    pub(crate) async fn suspend(&self) {
+        let _guard = self.activation_lock.lock().await;
+        self.vault.suspend().await;
+        self.session.clear();
+    }
+
+    pub(crate) async fn resume(&self) -> Result<(), ProfileContentKeyVaultError> {
+        self.vault.resume().await
     }
 }
 

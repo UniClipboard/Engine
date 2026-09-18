@@ -13,7 +13,10 @@
 //! `KeyScopePort` → `CurrentProfilePort`(Slice 7 U7 候选 B),返回
 //! `uc_core::ids::ProfileId` 值对象。
 
+use anyhow::Error;
 use std::fmt;
+
+use crate::ports::SecureStorageError;
 
 /// Passphrase provided by user. Only used to derive KEK inside use cases.
 /// Avoid storing this beyond the unlock/initialize flow.
@@ -32,7 +35,7 @@ impl Passphrase {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum EncryptionError {
     #[error("encryption is not initialized")]
     NotInitialized,
@@ -91,4 +94,78 @@ pub enum EncryptionError {
 
     #[error("unsupported version for key material")]
     UnsupportedVersion, // keyslot/blob 版本不支持
+
+    #[error("key material access failed")]
+    KeyMaterialAccessFailed {
+        #[source]
+        source: Error,
+    },
+}
+
+impl fmt::Debug for EncryptionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // 底层访问失败可能携带宿主信息，不通过默认 Debug 展开来源。
+        fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl From<SecureStorageError> for EncryptionError {
+    fn from(source: SecureStorageError) -> Self {
+        match source {
+            SecureStorageError::PermissionDenied(_) => Self::PermissionDenied,
+            SecureStorageError::Corrupt(_) => Self::KeyMaterialCorrupt,
+            SecureStorageError::Unavailable(message) | SecureStorageError::Other(message) => {
+                Self::KeyringError(message)
+            }
+            SecureStorageError::AccessFailed(failure) => Self::KeyMaterialAccessFailed {
+                source: failure.into_source(),
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+    use std::io;
+
+    use crate::ports::{SecureStorageAccessFailure, SecureStorageError};
+
+    use super::EncryptionError;
+
+    #[test]
+    fn key_material_access_failure_retains_source_without_displaying_it() {
+        let error = EncryptionError::KeyMaterialAccessFailed {
+            source: io::Error::other("private host payload").into(),
+        };
+        assert!(error
+            .source()
+            .unwrap()
+            .downcast_ref::<io::Error>()
+            .is_some());
+        assert!(!format!("{error:?}").contains("private"));
+        assert!(!format!("{error}").contains("private"));
+    }
+
+    #[test]
+    fn secure_storage_failures_use_stable_encryption_classifications() {
+        assert!(matches!(
+            EncryptionError::from(SecureStorageError::PermissionDenied("private".into())),
+            EncryptionError::PermissionDenied
+        ));
+        assert!(matches!(
+            EncryptionError::from(SecureStorageError::Corrupt("private".into())),
+            EncryptionError::KeyMaterialCorrupt
+        ));
+
+        let error = EncryptionError::from(SecureStorageError::AccessFailed(
+            SecureStorageAccessFailure::new(io::Error::other("private host payload")),
+        ));
+        assert!(error
+            .source()
+            .unwrap()
+            .downcast_ref::<io::Error>()
+            .is_some());
+        assert!(!format!("{error:?}").contains("private"));
+    }
 }
