@@ -33,7 +33,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync::broadcast;
-use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
 use uc_core::clipboard::{ActiveClipboardState, ClipboardContentCategorySet};
@@ -232,10 +232,15 @@ impl ApplyInboundActiveClipboardStateUseCase {
     /// Spawn the inbound loop. Takes `Arc<Self>` so the spawned task owns the
     /// use case's dependencies without moving them out of the owning facade.
     #[instrument(name = "active_state.inbound_loop", skip_all)]
-    pub(crate) async fn run(self: Arc<Self>) {
+    pub(crate) async fn run(self: Arc<Self>, cancel: CancellationToken) {
         let mut rx = self.receiver.subscribe();
         loop {
-            match rx.recv().await {
+            let inbound = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                inbound = rx.recv() => inbound,
+            };
+            match inbound {
                 Ok(inbound) => self.handle_one(inbound).await,
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
                     warn!(
@@ -505,20 +510,18 @@ impl ApplyInboundActiveClipboardStateUseCase {
             .mobile_consumability
             .is_mobile_consumable(&local_entry_id)
             .await;
-        self.spawn_write_then_converge(snapshot, advance_state, categories, mobile_consumable);
+        self.write_then_converge(snapshot, advance_state, categories, mobile_consumable)
+            .await;
     }
 
-    /// Spawn the OS write; on success advance the register (SQL CAS enforces
-    /// LWW) and re-broadcast the same-key state to allowed peers. `categories`
-    /// is the activation's content category set, threaded into the outbound
-    /// gate (`send_content_types`) of the shared fan-out.
-    fn spawn_write_then_converge(
+    /// 系统写入、状态推进及重新通知作为同一次完整动作，由接收循环等待结束。
+    async fn write_then_converge(
         &self,
         snapshot: uc_core::SystemClipboardSnapshot,
         state: ActiveClipboardState,
         categories: ClipboardContentCategorySet,
         mobile_consumable: bool,
-    ) -> JoinHandle<()> {
+    ) {
         let coordinator = Arc::clone(&self.coordinator);
         let advance_register = Arc::clone(&self.advance_register);
         let dispatch = Arc::clone(&self.dispatch);
@@ -528,69 +531,64 @@ impl ApplyInboundActiveClipboardStateUseCase {
         let send_gate = self.send_gate.clone();
         let converged_tx = self.converged_tx.clone();
 
-        crate::support::task_supervision::spawn_supervised(
-            uc_observability_contract::diagnostics::DiagnosticTaskKind::ActiveClipboardConverge,
-            async move {
-                // The active-clipboard write is a remote-originated push: use the
-                // RemotePush intent so the OS-write origin guard matches the bulk
-                // inbound path (avoids the watcher re-capturing our own write).
-                if let Err(err) = coordinator
-                    .write(snapshot, ClipboardWriteIntent::RemotePush)
-                    .await
-                {
-                    warn!(
-                        error = %err,
-                        snapshot_hash = %state.snapshot_hash,
-                        "active state inbound: OS write failed; not advancing register or re-broadcasting"
-                    );
-                    return;
-                }
+        // The active-clipboard write is a remote-originated push: use the
+        // RemotePush intent so the OS-write origin guard matches the bulk
+        // inbound path (avoids the watcher re-capturing our own write).
+        if let Err(err) = coordinator
+            .write(snapshot, ClipboardWriteIntent::RemotePush)
+            .await
+        {
+            warn!(
+                error = %err,
+                snapshot_hash = %state.snapshot_hash,
+                "active state inbound: OS write failed; not advancing register or re-broadcasting"
+            );
+            return;
+        }
 
-                // OS write succeeded → advance the register. The SQL CAS is the
-                // authoritative LWW arbiter; `advanced == false` means a
-                // concurrent local/inbound write already moved the register past
-                // this state, in which case we must NOT re-broadcast (loop-safe).
-                match advance_register.advance(&state, mobile_consumable).await {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        debug!(
-                            snapshot_hash = %state.snapshot_hash,
-                            "active state inbound: register did not advance (lost LWW race); skipping re-broadcast"
-                        );
-                        return;
-                    }
-                    Err(err) => {
-                        warn!(
-                            error = %err,
-                            snapshot_hash = %state.snapshot_hash,
-                            "active state inbound: register advance failed; skipping re-broadcast"
-                        );
-                        return;
-                    }
-                }
+        // OS write succeeded → advance the register. The SQL CAS is the
+        // authoritative LWW arbiter; `advanced == false` means a
+        // concurrent local/inbound write already moved the register past
+        // this state, in which case we must NOT re-broadcast (loop-safe).
+        match advance_register.advance(&state, mobile_consumable).await {
+            Ok(true) => {}
+            Ok(false) => {
+                debug!(
+                    snapshot_hash = %state.snapshot_hash,
+                    "active state inbound: register did not advance (lost LWW race); skipping re-broadcast"
+                );
+                return;
+            }
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    snapshot_hash = %state.snapshot_hash,
+                    "active state inbound: register advance failed; skipping re-broadcast"
+                );
+                return;
+            }
+        }
 
-                // Notify subscribers that this entry converged (e.g. resurface
-                // worker bumps active_time_ms + notifies the frontend).
-                let _ = converged_tx.send(ActiveClipboardConvergedEvent {
-                    entry_id: state.entry_id.clone(),
-                });
+        // Notify subscribers that this entry converged (e.g. resurface
+        // worker bumps active_time_ms + notifies the frontend).
+        let _ = converged_tx.send(ActiveClipboardConvergedEvent {
+            entry_id: state.entry_id.clone(),
+        });
 
-                // Re-broadcast the converged state to every allowed peer through
-                // the shared fan-out (full outbound gate: send_enabled ∧
-                // send_content_types, the latter via the activation's category
-                // set). Same implementation as the restore broadcast path.
-                fan_out_active_state(
-                    &dispatch,
-                    &peer_addr_repo,
-                    &peer_scope,
-                    &peer_reachability,
-                    &send_gate,
-                    &state,
-                    &categories,
-                )
-                .await;
-            },
+        // Re-broadcast the converged state to every allowed peer through
+        // the shared fan-out (full outbound gate: send_enabled ∧
+        // send_content_types, the latter via the activation's category
+        // set). Same implementation as the restore broadcast path.
+        fan_out_active_state(
+            &dispatch,
+            &peer_addr_repo,
+            &peer_scope,
+            &peer_reachability,
+            &send_gate,
+            &state,
+            &categories,
         )
+        .await;
     }
 }
 
@@ -608,6 +606,9 @@ impl ApplyInboundActiveClipboardStateUseCase {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[path = "lifecycle.rs"]
+    mod lifecycle;
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 

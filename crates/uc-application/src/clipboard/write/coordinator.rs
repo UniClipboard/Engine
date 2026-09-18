@@ -14,12 +14,14 @@
 //! The old path keeps a deprecated re-export shim until Slice 5 deletes
 //! `uc-app`.
 
-use anyhow::Result;
+use anyhow::{Error, Result};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex as AsyncMutex;
+use tokio::task::spawn_blocking;
 use tracing::Instrument;
-use tracing::{error, info, info_span, warn};
+use tracing::{error, info, info_span, warn, Span};
 
 use uc_core::clipboard::SystemClipboardSnapshot;
 use uc_core::ports::clipboard::{
@@ -76,6 +78,7 @@ pub enum ClipboardWriteIntent {
 /// `write(snapshot, intent)` is the ONLY caller of `snapshot.origin_guard_key()`.
 /// Callers build the snapshot and choose the intent; the coordinator handles
 /// all guard lifecycle operations.
+#[derive(Clone)]
 pub struct ClipboardWriteCoordinator {
     system_clipboard: Arc<dyn SystemClipboardPort>,
     clipboard_change_origin: Arc<dyn SelfWriteLedgerPort>,
@@ -83,19 +86,28 @@ pub struct ClipboardWriteCoordinator {
     /// genuinely concurrent clipboard writes, replacing the overly broad
     /// `has_pending_origin()` check that conflated attribution guards with
     /// active write operations.
-    writing: AtomicBool,
+    writing: Arc<AtomicBool>,
+    serial: Arc<AsyncMutex<()>>,
     /// Number of consecutive OS-write failures since the last success.
     /// Reset to 0 on any successful write; reset to 0 when the circuit trips
     /// (so the next post-cooldown window starts clean).
-    consecutive_failures: AtomicU32,
+    consecutive_failures: Arc<AtomicU32>,
     /// `Some(instant)` while the breaker is open — incoming writes are
     /// rejected without touching the OS clipboard or registering a guard.
     /// `None` means the circuit is closed (normal operation).
-    circuit_open_until: Mutex<Option<Instant>>,
+    circuit_open_until: Arc<Mutex<Option<Instant>>>,
     /// How long the breaker stays open after tripping. Per-instance so
     /// tests can use a millisecond-scale value while production uses the
     /// `DEFAULT_CIRCUIT_OPEN_DURATION` constant.
     cooldown: Duration,
+}
+
+struct WritingGuard<'a>(&'a AtomicBool);
+
+impl Drop for WritingGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl ClipboardWriteCoordinator {
@@ -122,9 +134,10 @@ impl ClipboardWriteCoordinator {
         Self {
             system_clipboard,
             clipboard_change_origin,
-            writing: AtomicBool::new(false),
-            consecutive_failures: AtomicU32::new(0),
-            circuit_open_until: Mutex::new(None),
+            writing: Arc::new(AtomicBool::new(false)),
+            serial: Arc::new(AsyncMutex::new(())),
+            consecutive_failures: Arc::new(AtomicU32::new(0)),
+            circuit_open_until: Arc::new(Mutex::new(None)),
             cooldown,
         }
     }
@@ -233,10 +246,19 @@ impl ClipboardWriteCoordinator {
         snapshot: SystemClipboardSnapshot,
         intent: ClipboardWriteIntent,
     ) -> Result<()> {
-        self.writing.store(true, Ordering::Release);
-        let result = self.write_inner(snapshot, intent).await;
-        self.writing.store(false, Ordering::Release);
-        result
+        let owner = self.clone();
+        // 调用方停止等待后，已接受的写入仍持有顺序锁，直到来源记录清理完成。
+        tokio::spawn(
+            async move {
+                let _serial = owner.serial.lock().await;
+                owner.writing.store(true, Ordering::Release);
+                let _writing = WritingGuard(&owner.writing);
+                owner.write_inner(snapshot, intent).await
+            }
+            .in_current_span(),
+        )
+        .await
+        .map_err(|source| Error::new(source).context("clipboard write worker failed"))?
     }
 
     async fn write_inner(
@@ -294,7 +316,14 @@ impl ClipboardWriteCoordinator {
             // Attempt the write. Log and unwind the guard on failure so subsequent
             // writes start from a clean slate (and so outages surface in Seq/stdout
             // instead of being hidden in the `Err` bubbling back up the call chain).
-            if let Err(err) = self.system_clipboard.write_snapshot(snapshot) {
+            let clipboard = Arc::clone(&self.system_clipboard);
+            let span = Span::current();
+            let written =
+                spawn_blocking(move || span.in_scope(|| clipboard.write_snapshot(snapshot)))
+                    .await
+                    .map_err(|source| Error::new(source).context("system clipboard writer failed"))
+                    .and_then(|result| result);
+            if let Err(err) = written {
                 // Unwind the just-armed content record so a later unrelated
                 // change is not mis-attributed to this failed write.
                 self.clipboard_change_origin
@@ -386,6 +415,9 @@ mod tests {
     use async_trait::async_trait;
     use mockall::mock;
     use std::sync::atomic::AtomicU32;
+    use tokio::sync::{oneshot, Notify};
+    use tokio::task::JoinError;
+    use tokio::time::timeout;
     use uc_core::clipboard::ClipboardChangeOrigin;
     use uc_core::ids::{FormatId, RepresentationId};
     use uc_core::{MimeType, ObservedClipboardRepresentation};
@@ -436,6 +468,119 @@ mod tests {
             .expect_attribute_observed_change()
             .returning(|_| ClipboardChangeOrigin::LocalCapture);
         origin
+    }
+
+    #[tokio::test]
+    async fn host_panic_preserves_its_source_and_releases_the_writing_state() {
+        let mut clipboard = MockSystemClipboard::new();
+        clipboard
+            .expect_write_snapshot()
+            .times(1)
+            .returning(|_| panic!("private callback payload"));
+        let coordinator =
+            ClipboardWriteCoordinator::new(Arc::new(clipboard), Arc::new(permissive_origin_mock()));
+        let error = coordinator
+            .write(make_snapshot(), ClipboardWriteIntent::RemotePush)
+            .await
+            .unwrap_err();
+        assert!(error
+            .chain()
+            .filter_map(|source| source.downcast_ref::<JoinError>())
+            .any(JoinError::is_panic));
+        assert!(!error.to_string().contains("private"));
+        assert!(!coordinator.writing.load(Ordering::SeqCst));
+    }
+
+    struct HeldFirstWrite {
+        calls: AtomicU32,
+        entered: Notify,
+        release: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    impl SystemClipboardPort for HeldFirstWrite {
+        fn read_snapshot(&self) -> Result<SystemClipboardSnapshot> {
+            panic!("unexpected read");
+        }
+
+        fn write_snapshot(&self, _snapshot: SystemClipboardSnapshot) -> Result<()> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                let release = self.release.lock().unwrap().take().unwrap();
+                self.entered.notify_one();
+                release.blocking_recv().unwrap();
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_waiter_keeps_the_started_write_and_its_order() {
+        let (release, blocked) = oneshot::channel();
+        let clipboard = Arc::new(HeldFirstWrite {
+            calls: AtomicU32::new(0),
+            entered: Notify::new(),
+            release: Mutex::new(Some(blocked)),
+        });
+        let coordinator = Arc::new(ClipboardWriteCoordinator::new(
+            clipboard.clone(),
+            Arc::new(permissive_origin_mock()),
+        ));
+        let first = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move {
+                coordinator
+                    .write(make_snapshot(), ClipboardWriteIntent::RemotePush)
+                    .await
+            }
+        });
+        clipboard.entered.notified().await;
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let writing = coordinator.is_write_in_progress();
+        let mut second =
+            Box::pin(coordinator.write(make_snapshot(), ClipboardWriteIntent::LocalRestore));
+        let premature = timeout(Duration::from_millis(20), second.as_mut()).await;
+        let calls = clipboard.calls.load(Ordering::SeqCst);
+        release.send(()).unwrap();
+        assert!(writing);
+        assert!(premature.is_err());
+        assert_eq!(calls, 1);
+        second.await.unwrap();
+        assert_eq!(clipboard.calls.load(Ordering::SeqCst), 2);
+        assert!(!coordinator.is_write_in_progress());
+    }
+
+    #[tokio::test]
+    async fn concurrent_writes_wait_for_the_previous_complete_write() {
+        let (release, blocked) = oneshot::channel();
+        let clipboard = Arc::new(HeldFirstWrite {
+            calls: AtomicU32::new(0),
+            entered: Notify::new(),
+            release: Mutex::new(Some(blocked)),
+        });
+        let coordinator = Arc::new(ClipboardWriteCoordinator::new(
+            clipboard.clone(),
+            Arc::new(permissive_origin_mock()),
+        ));
+        let first = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move {
+                coordinator
+                    .write(make_snapshot(), ClipboardWriteIntent::RemotePush)
+                    .await
+            }
+        });
+        clipboard.entered.notified().await;
+        let mut second =
+            Box::pin(coordinator.write(make_snapshot(), ClipboardWriteIntent::LocalRestore));
+        let premature = timeout(Duration::from_millis(20), second.as_mut()).await;
+        let before_release = clipboard.calls.load(Ordering::SeqCst);
+        release.send(()).unwrap();
+        first.await.unwrap().unwrap();
+        assert!(premature.is_err());
+        assert_eq!(before_release, 1);
+        second.await.unwrap();
+        assert_eq!(clipboard.calls.load(Ordering::SeqCst), 2);
+        assert!(!coordinator.writing.load(Ordering::SeqCst));
     }
 
     /// 5 consecutive OS failures must trip the breaker, after which the

@@ -63,6 +63,7 @@
 
 use anyhow::Error as SourceError;
 use bytes::Bytes;
+use std::fmt;
 use thiserror::Error;
 use uc_core::ids::{DeviceId, EntryId};
 
@@ -155,8 +156,12 @@ pub enum ApplyOutcome {
     DecodeFailed { reason: String },
 }
 
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum ApplyInboundError {
+    #[error("clipboard receive stopped")]
+    Stopped,
+    #[error("clipboard receive worker failed")]
+    WorkFailed(#[source] SourceError),
     #[error("dedup query failed")]
     DedupQuery(#[source] SourceError),
     #[error("capture pipeline failed")]
@@ -165,4 +170,10 @@ pub enum ApplyInboundError {
     WriteCoordinator(String),
     #[error("internal: {0}")]
     Internal(String),
+}
+
+impl fmt::Debug for ApplyInboundError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
 }
