@@ -1,22 +1,29 @@
 use std::future::Future;
+use std::sync::atomic::AtomicBool;
 #[cfg(feature = "dev-tools")]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+#[cfg(feature = "dev-tools")]
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::{Mutex, Notify};
+use tokio::time::{timeout_at, Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn, Instrument};
+use tracing::{error, Instrument};
+use uc_application::deps::LifecycleError;
 use uc_application::facade::{
-    AppFacade, ApplicationRuntime, ClipboardInboundEvent, ClipboardInboundEventAction,
-    ClipboardInboundEventPort, CompletePendingSpaceTransitionError,
+    AppFacade, ApplicationAssembly, ApplicationRuntime, ClipboardInboundEvent,
+    ClipboardInboundEventAction, ClipboardInboundEventPort, CompletePendingSpaceTransitionError,
+    RecoverSpaceSessionError, RuntimeLifecycle,
 };
-use uc_core::TaskRegistry;
+use uc_core::{FileTransferCancellationReason, TaskRegistry};
 use uc_infra::fs::{FsAtomicPublisher, FsHiddenPathMarker, FsInboundFileTarget};
 use uc_infra::network::iroh::{IrohNode, IrohSessionBuilder, PreparedIrohSession};
+use uc_infra::space::RuntimeSpaceAccessAdapter;
 use uc_observability_contract::diagnostics::connectivity::{
-    observe_local_result, record_session_lock_wait, LocalWorkObservation, LocalWorkOutcome,
-    LocalWorkStep,
+    observe_local_result, record_session_lock_wait, LocalWorkStep, SessionTransition,
+    SessionTransitionResult,
 };
 use uc_observability_contract::diagnostics::{
     complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
@@ -29,11 +36,13 @@ use crate::assembly::facade::build_mobile_sync_facade;
 use crate::assembly::lifecycle::{build_network_runtime, prepare_daemon_session};
 use crate::assembly::sync_engine::SyncSessionAssembly;
 use crate::engine::event_stream::EventSender;
+use crate::operations::space::reset_space::execute_reset_space;
 use crate::subsystems::peer_keepalive::spawn_peer_reachability_event_task;
 #[cfg(feature = "dev-tools")]
 use crate::SessionHandoverFailurePoint;
 use crate::{
-    EngineEvent, InboundNoticeActionSummary, InboundNoticeEvent, InboundRepresentationSummary,
+    ActiveClipboardChanged, EngineEvent, InboundNoticeActionSummary, InboundNoticeEvent,
+    InboundRepresentationSummary, RefreshReason,
 };
 
 use super::{operation_error_with_code, operation_unavailable_error};
@@ -136,6 +145,12 @@ fn space_transition_error(
     }
 }
 
+mod lifecycle;
+mod recovery;
+mod shutdown;
+pub(super) use lifecycle::lifecycle_error;
+use lifecycle::SessionWork;
+
 struct ProductionSessionFactory {
     wired: WiredDependencies,
     #[cfg(feature = "lan-compat")]
@@ -179,6 +194,8 @@ pub(super) struct SessionSupervisor {
     operations: SessionOperationGate,
     #[cfg(feature = "dev-tools")]
     test_control: Arc<SessionHandoverTestControl>,
+    session_recovery_enabled: AtomicBool,
+    coordinator: Arc<RuntimeLifecycle>,
 }
 
 pub(super) struct SessionOperationLease {
@@ -295,7 +312,10 @@ fn session_lifecycle_error_type(error: &EngineError) -> DiagnosticErrorType {
 }
 
 impl SessionSupervisor {
-    pub(super) fn new(application: uc_application::facade::ApplicationAssembly) -> Self {
+    pub(super) fn new(
+        application: ApplicationAssembly,
+        security: Arc<RuntimeSpaceAccessAdapter>,
+    ) -> Arc<Self> {
         use uc_observability_contract::diagnostics::connectivity::{
             LocalDiagnosticSource, NetworkRecorder, SourceCapability, SourceCollection,
         };
@@ -304,18 +324,21 @@ impl SessionSupervisor {
             SourceCapability::Partial,
             SourceCollection::Enabled,
         );
-        Self {
+        Arc::new_cyclic(|owner| Self {
             runtime: Mutex::new(SessionRuntimeState {
                 network: None,
                 session: None,
             }),
             factory: StdMutex::new(None),
-            application,
+            application: application.clone(),
             lifecycle: Mutex::new(()),
             operations: SessionOperationGate::new_open(),
             #[cfg(feature = "dev-tools")]
             test_control: Arc::new(SessionHandoverTestControl::default()),
-        }
+            session_recovery_enabled: AtomicBool::new(false),
+            coordinator: application
+                .runtime_lifecycle(Arc::new(SessionWork(owner.clone())), security),
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -432,20 +455,6 @@ impl SessionSupervisor {
         }
     }
 
-    pub(super) async fn rebuild_session(&self) -> Result<(), EngineError> {
-        observe_runtime_operation(DiagnosticOperation::SessionRecovery, async {
-            let _lifecycle = self.lifecycle.lock().await;
-            self.operations.close_and_wait(None).await?;
-            self.stop_current_session(
-                uc_core::FileTransferCancellationReason::ConnectivityRecovery,
-            )
-            .await?;
-            self.shutdown_network().await?;
-            self.install_new_session(false).await
-        })
-        .await
-    }
-
     pub(super) async fn transition_pending_session(&self) -> Result<Option<u64>, EngineError> {
         let waiting = Instant::now();
         let _lifecycle = self.lifecycle.lock().await;
@@ -497,7 +506,7 @@ impl SessionSupervisor {
         }
         observe_session_lifecycle(async {
             record_session_lock_wait(waited);
-            self.operations.close_and_wait(None).await?;
+            self.operations.close_and_wait(None, None).await?;
             match facade.has_pending_space_transition().await {
                 Ok(true) => {}
                 Ok(false) => {
@@ -523,8 +532,9 @@ impl SessionSupervisor {
                 .take()
                 .ok_or_else(super::operation_unavailable_error)?;
             session
-                .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
-                .await;
+                .shutdown(FileTransferCancellationReason::ConnectivityRecovery, None)
+                .await
+                .map_err(lifecycle_error)?;
             let completed = self
                 .complete_pending_space_transition(&facade, "complete runtime space transition")
                 .await;
@@ -561,7 +571,7 @@ impl SessionSupervisor {
     ) -> Result<OperationResult, EngineError> {
         let _lifecycle = self.lifecycle.lock().await;
         self.operations
-            .close_and_wait(Some(current_operation))
+            .close_and_wait(Some(current_operation), None)
             .await?;
         self.quiesce_network_session().await?;
         let session = self
@@ -573,8 +583,9 @@ impl SessionSupervisor {
             .ok_or_else(super::operation_unavailable_error)?;
         let facade = Arc::clone(&session.facade);
         session
-            .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
-            .await;
+            .shutdown(FileTransferCancellationReason::ConnectivityRecovery, None)
+            .await
+            .map_err(lifecycle_error)?;
         let transfer_result = self
             .application
             .cancel_active_file_transfers(
@@ -591,7 +602,7 @@ impl SessionSupervisor {
             };
         }
 
-        let result = crate::operations::space::reset_space::execute_reset_space(&facade).await;
+        let result = execute_reset_space(&facade).await;
         let install_result = self.install_new_session(result.is_ok()).await;
         match (result, install_result) {
             (Ok(result), Ok(())) => Ok(result),
@@ -605,9 +616,7 @@ impl SessionSupervisor {
                     .map(|session| Arc::clone(&session.facade))
                     .ok_or_else(super::operation_unavailable_error)?;
                 match facade.has_committed_device_management_reset().await {
-                    Ok(true) => {
-                        crate::operations::space::reset_space::execute_reset_space(&facade).await
-                    }
+                    Ok(true) => execute_reset_space(&facade).await,
                     Ok(false) | Err(_) => Err(error),
                 }
             }
@@ -615,36 +624,25 @@ impl SessionSupervisor {
         }
     }
 
-    pub(super) async fn suspend(&self) -> Result<(), EngineError> {
-        observe_session_request(
-            uc_observability_contract::diagnostics::connectivity::SessionTransition::Suspend,
-            async {
-                let _lifecycle = self.lifecycle.lock().await;
-                self.operations.close_and_wait(None).await?;
-                self.stop_current_session(uc_core::FileTransferCancellationReason::Unknown)
-                    .await?;
-                self.shutdown_network().await?;
-                Ok(uc_observability_contract::diagnostics::connectivity::SessionTransitionResult::Completed)
-            },
-        )
+    pub(super) async fn suspend(&self, deadline: Option<Instant>) -> Result<(), EngineError> {
+        observe_session_request(SessionTransition::Suspend, async {
+            self.coordinator
+                .suspend(deadline)
+                .await
+                .map_err(lifecycle_error)?;
+            Ok(SessionTransitionResult::Completed)
+        })
         .await
     }
 
-    pub(super) async fn resume(&self) -> Result<(), EngineError> {
-        observe_session_request(
-            uc_observability_contract::diagnostics::connectivity::SessionTransition::Resume,
-            async {
-                let _lifecycle = self.lifecycle.lock().await;
-                if self.runtime.lock().await.session.is_some() {
-                    return Ok(uc_observability_contract::diagnostics::connectivity::SessionTransitionResult::Skipped);
-                }
-                observe_runtime_operation(
-                    DiagnosticOperation::SessionLifecycle,
-                    self.install_new_session(false),
-                )
-                .await.map(|()| uc_observability_contract::diagnostics::connectivity::SessionTransitionResult::Completed)
-            },
-        )
+    pub(super) async fn resume(&self, cancellation: CancellationToken) -> Result<(), EngineError> {
+        observe_session_request(SessionTransition::Resume, async {
+            self.coordinator
+                .resume(None, cancellation)
+                .await
+                .map_err(lifecycle_error)?;
+            Ok(SessionTransitionResult::Completed)
+        })
         .await
     }
 
@@ -655,22 +653,36 @@ impl SessionSupervisor {
             .map_err(|error| operation_error_with_code(1104, "close file transfers", error))
     }
 
+    pub(super) async fn stop(&self, deadline: Option<Instant>) -> Result<(), LifecycleError> {
+        self.coordinator.stop(deadline).await
+    }
+
+    fn configured_factory(&self) -> Option<Arc<ProductionSessionFactory>> {
+        self.factory
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     async fn stop_current_session(
         &self,
-        reason: uc_core::FileTransferCancellationReason,
-    ) -> Result<(), EngineError> {
-        self.quiesce_network_session().await?;
+        reason: FileTransferCancellationReason,
+        deadline: Option<Instant>,
+    ) -> Result<(), LifecycleError> {
+        let mut errors = Vec::new();
+        if let Err(error) = self.quiesce_network_session().await {
+            errors.push(error.into());
+        }
         let session = self.runtime.lock().await.session.take();
         if let Some(session) = session {
-            session.shutdown(reason).await;
-            self.application
-                .cancel_active_file_transfers(reason)
-                .await
-                .map_err(|error| {
-                    operation_error_with_code(1104, "cancel active file transfers", error)
-                })?;
+            if let Err(error) = session.shutdown(reason, deadline).await {
+                errors.push(error.into());
+            }
         }
-        Ok(())
+        if let Err(error) = self.application.cancel_active_file_transfers(reason).await {
+            errors.push(anyhow::Error::new(error).context("cancel active file transfers"));
+        }
+        LifecycleError::from_errors(errors)
     }
 
     async fn quiesce_network_session(&self) -> Result<(), EngineError> {
@@ -695,7 +707,7 @@ impl SessionSupervisor {
             .map_err(|error| session_runtime_error("quiesce p2p session", error))
     }
 
-    async fn shutdown_network(&self) -> Result<(), EngineError> {
+    async fn shutdown_network(&self, deadline: Option<Instant>) -> Result<(), EngineError> {
         let network = {
             let mut runtime = self.runtime.lock().await;
             if runtime.session.is_some() {
@@ -704,7 +716,10 @@ impl SessionSupervisor {
             runtime.network.take()
         };
         if let Some(network) = network {
-            network.shutdown().await;
+            network
+                .shutdown_at(deadline)
+                .await
+                .map_err(|error| session_runtime_error("p2p network shutdown", error))?;
         }
         Ok(())
     }
@@ -760,10 +775,14 @@ impl SessionSupervisor {
             .consume()
         {
             prepared.network_session.shutdown().await;
-            prepared
+            if prepared
                 .session
-                .shutdown(uc_core::FileTransferCancellationReason::Unknown)
-                .await;
+                .shutdown(uc_core::FileTransferCancellationReason::Unknown, None)
+                .await
+                .is_err()
+            {
+                tracing::warn!("prepared session cleanup failed after injected activation failure");
+            }
             return Err(session_runtime_error(
                 "activate p2p session",
                 "injected session activation failure",
@@ -773,10 +792,14 @@ impl SessionSupervisor {
         let Some(network) = runtime.network.as_mut() else {
             drop(runtime);
             prepared.network_session.shutdown().await;
-            prepared
+            if prepared
                 .session
-                .shutdown(uc_core::FileTransferCancellationReason::Unknown)
-                .await;
+                .shutdown(uc_core::FileTransferCancellationReason::Unknown, None)
+                .await
+                .is_err()
+            {
+                tracing::warn!("prepared session cleanup failed after network became unavailable");
+            }
             return Err(operation_unavailable_error());
         };
         let activation = network
@@ -785,10 +808,14 @@ impl SessionSupervisor {
             .map_err(|error| session_runtime_error("activate p2p session", error));
         if let Err(error) = activation {
             drop(runtime);
-            prepared
+            if prepared
                 .session
-                .shutdown(uc_core::FileTransferCancellationReason::Unknown)
-                .await;
+                .shutdown(uc_core::FileTransferCancellationReason::Unknown, None)
+                .await
+                .is_err()
+            {
+                tracing::warn!("prepared session cleanup failed after activation failure");
+            }
             return Err(error);
         }
         runtime.session = Some(prepared.session);
@@ -797,10 +824,7 @@ impl SessionSupervisor {
 
     async fn install_new_session(&self, resume_space_activities: bool) -> Result<(), EngineError> {
         let factory = self
-            .factory
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+            .configured_factory()
             .ok_or_else(super::operation_unavailable_error)?;
         observe_local_result(
             LocalWorkStep::SessionPrepare,
@@ -809,13 +833,15 @@ impl SessionSupervisor {
         .await?;
         let mut resume_space_activities = resume_space_activities;
         let facade = self.current_facade().await?;
-        if facade
-            .has_pending_space_transition()
-            .await
-            .map_err(|error| {
-                operation_error_with_code(1103, "inspect pending space transition", error)
-            })?
-        {
+        let pending_transition = match facade.has_pending_space_transition().await {
+            Ok(pending) => pending,
+            Err(error) => {
+                let primary =
+                    operation_error_with_code(1103, "inspect pending space transition", error);
+                return Err(self.shutdown_after_failure(primary).await);
+            }
+        };
+        if pending_transition {
             self.quiesce_network_session().await?;
             let session = self
                 .runtime
@@ -825,8 +851,9 @@ impl SessionSupervisor {
                 .take()
                 .ok_or_else(operation_unavailable_error)?;
             session
-                .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
-                .await;
+                .shutdown(FileTransferCancellationReason::ConnectivityRecovery, None)
+                .await
+                .map_err(lifecycle_error)?;
             self.complete_pending_space_transition(&facade, "recover pending space transition")
                 .await?;
             observe_local_result(
@@ -837,28 +864,27 @@ impl SessionSupervisor {
             resume_space_activities = true;
         }
         let facade = self.current_facade().await?;
-        let recovered = observe_local_result(
+        let unlocked = match observe_local_result(
             LocalWorkStep::SessionRecover,
             facade.recover_space_session(),
         )
-        .await;
-        if let Err(error) = &recovered {
-            tracing::warn!(
-                error_kind = recover_space_session_error_kind(error),
-                "space session recovery failed; runtime remains locked"
-            );
-        }
-        if resume_space_activities {
-            let recovered = recovered.map_err(|error| {
-                operation_error_with_code(1103, "activate transitioned space session", error)
-            })?;
-            if !recovered.unlocked {
-                return Err(operation_error_with_code(
-                    1103,
-                    "activate transitioned space session",
-                    "the transitioned space could not be unlocked",
-                ));
+        .await
+        {
+            Ok(recovered) => recovered.unlocked,
+            // 缺少缓存口令是正常锁定；存储故障和损坏不能降级为恢复成功。
+            Err(RecoverSpaceSessionError::KeyringMiss) if !resume_space_activities => false,
+            Err(error) => {
+                let primary = operation_error_with_code(1103, "recover local session", error);
+                return Err(self.shutdown_after_failure(primary).await);
             }
+        };
+        if resume_space_activities && !unlocked {
+            let primary = operation_error_with_code(
+                1103,
+                "activate transitioned space session",
+                "the transitioned space could not be unlocked",
+            );
+            return Err(self.shutdown_after_failure(primary).await);
         }
         self.operations.reopen();
         Ok(())
@@ -939,10 +965,19 @@ impl ProductionSessionFactory {
         {
             Ok(runtime) => Arc::new(runtime),
             Err(error) => {
-                sync_session
-                    .shutdown(uc_core::FileTransferCancellationReason::Unknown)
-                    .await;
-                return Err(session_runtime_error("application runtime", error));
+                let primary = session_runtime_error("application runtime", error);
+                prepared_session.shutdown().await;
+                let additional = sync_session
+                    .shutdown(FileTransferCancellationReason::Unknown, None)
+                    .await
+                    .err()
+                    .map(anyhow::Error::new)
+                    .into_iter()
+                    .collect();
+                return Err(lifecycle_error(LifecycleError {
+                    primary: primary.into(),
+                    additional,
+                }));
             }
         };
         let facade = application_runtime.facade();
@@ -964,13 +999,14 @@ impl ProductionSessionFactory {
             .spawn(move |cancel| async move {
                 loop {
                     tokio::select! {
+                        biased;
                         _ = cancel.cancelled() => return,
                         change = active_clipboard_changes.recv() => match change {
                             Ok(state) => active_clipboard_events
                                 .send(engine_event_for_active_clipboard(&state)),
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                active_clipboard_events.send(crate::EngineEvent::RefreshRequired {
-                                    reason: crate::RefreshReason::ConsumerLagged,
+                                active_clipboard_events.send(EngineEvent::RefreshRequired {
+                                    reason: RefreshReason::ConsumerLagged,
                                 });
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
@@ -994,59 +1030,10 @@ impl ProductionSessionFactory {
     }
 }
 
-impl ProductionSession {
-    async fn shutdown(self, transfer_reason: uc_core::FileTransferCancellationReason) {
-        info!("Engine session 开始关闭");
-        #[cfg(feature = "lan-compat")]
-        if self
-            .mobile_sync
-            .shutdown_mobile_file_uploads()
-            .await
-            .is_err()
-        {
-            warn!("mobile file upload shutdown finished with an error");
-        }
-        let stopping = LocalWorkObservation::begin(LocalWorkStep::SessionStopTasks);
-        let stopped =
-            super::task_shutdown::shutdown_tasks(&self.tasks, Duration::from_millis(500)).await;
-        stopping.finish(
-            if stopped.timed_out_count > 0 || stopped.join_error_count > 0 {
-                LocalWorkOutcome::Error
-            } else {
-                LocalWorkOutcome::Ok
-            },
-        );
-        info!("Engine session 网络观测任务已停止");
-        let stopping = LocalWorkObservation::begin(LocalWorkStep::SessionStopApplication);
-        let application_shutdown = self.application.shutdown().await;
-        stopping.finish(
-            if application_shutdown.history.is_some() || application_shutdown.search.is_some() {
-                LocalWorkOutcome::Error
-            } else {
-                LocalWorkOutcome::Ok
-            },
-        );
-        info!("Engine session Application runtime 已停止");
-        if application_shutdown.history.is_some() {
-            warn!(
-                error_kind = "history",
-                "history maintenance stopped with an error"
-            );
-        }
-        if application_shutdown.search.is_some() {
-            error!(error_kind = "search", "search runtime stopped with error");
-        }
-        let stopping = LocalWorkObservation::begin(LocalWorkStep::SessionStopNetwork);
-        self.sync_session.shutdown(transfer_reason).await;
-        stopping.finish(LocalWorkOutcome::Ok);
-        info!("Engine session 网络会话任务已停止");
-    }
-}
-
 fn engine_event_for_active_clipboard(
     state: &uc_core::clipboard::ActiveClipboardState,
-) -> crate::EngineEvent {
-    crate::EngineEvent::ActiveClipboardChanged(crate::ActiveClipboardChanged {
+) -> EngineEvent {
+    EngineEvent::ActiveClipboardChanged(ActiveClipboardChanged {
         snapshot_hash: state.snapshot_hash.clone(),
         entry_id: state.entry_id.as_str().to_string(),
         activated_at_ms: state.activated_at_ms,
@@ -1081,35 +1068,6 @@ impl ClipboardInboundEventPort for EngineClipboardInboundEvents {
                 },
                 at_ms: event.at_ms,
             }));
-    }
-}
-
-fn recover_space_session_error_kind(
-    error: &uc_application::facade::RecoverSpaceSessionError,
-) -> &'static str {
-    use uc_application::facade::RecoverSpaceSessionError;
-
-    match error {
-        RecoverSpaceSessionError::CurrentSpace(_) => "current_space",
-        RecoverSpaceSessionError::KeyringMiss => "keyring_miss",
-        RecoverSpaceSessionError::CorruptedKeyMaterial => "corrupted_key_material",
-        RecoverSpaceSessionError::Activity(_) => "activity",
-        RecoverSpaceSessionError::Internal(_) => "internal",
-    }
-}
-
-#[async_trait::async_trait]
-impl uc_application::facade::RebuildNetworkSessionPort for SessionSupervisor {
-    async fn rebuild_network_session(
-        &self,
-    ) -> Result<(), uc_application::facade::RebuildNetworkSessionError> {
-        self.rebuild_session().await.map_err(|error| {
-            if error.is_retryable() {
-                uc_application::facade::RebuildNetworkSessionError::Retryable
-            } else {
-                uc_application::facade::RebuildNetworkSessionError::Permanent
-            }
-        })
     }
 }
 
@@ -1157,6 +1115,7 @@ impl SessionOperationGate {
     async fn close_and_wait(
         &self,
         current_operation: Option<SessionOperationLease>,
+        deadline: Option<Instant>,
     ) -> Result<(), EngineError> {
         observe_local_result(LocalWorkStep::SessionDrainOperations, async {
             if current_operation
@@ -1175,16 +1134,23 @@ impl SessionOperationGate {
                 state.cancellation.clone()
             };
             drop(current_operation);
+            let grace = Instant::now() + SESSION_OPERATION_GRACE;
             let drained = observe_local_result(
                 LocalWorkStep::SessionDrainGrace,
-                tokio::time::timeout(SESSION_OPERATION_GRACE, self.wait_for_drain()),
+                timeout_at(
+                    deadline.map_or(grace, |end| end.min(grace)),
+                    self.wait_for_drain(),
+                ),
             )
             .await;
             if drained.is_err() {
                 cancellation.cancel();
                 if observe_local_result(
                     LocalWorkStep::SessionDrainCancellation,
-                    tokio::time::timeout(SESSION_OPERATION_GRACE, self.wait_for_drain()),
+                    timeout_at(
+                        deadline.unwrap_or_else(|| Instant::now() + SESSION_OPERATION_GRACE),
+                        self.wait_for_drain(),
+                    ),
                 )
                 .await
                 .is_err()
@@ -1193,6 +1159,11 @@ impl SessionOperationGate {
                         error_kind = "session_operation_drain_timeout",
                         "session operation did not stop after cancellation"
                     );
+                    return Err(EngineError::new(
+                        1106,
+                        EngineErrorCategory::DeadlineExceeded,
+                        true,
+                    ));
                 }
             }
             Ok(())
@@ -1394,7 +1365,7 @@ mod tests {
 
         assert_eq!(
             engine_event_for_active_clipboard(&state),
-            crate::EngineEvent::ActiveClipboardChanged(crate::ActiveClipboardChanged {
+            EngineEvent::ActiveClipboardChanged(ActiveClipboardChanged {
                 snapshot_hash: "hash-1".into(),
                 entry_id: "entry-1".into(),
                 activated_at_ms: 42,
@@ -1409,7 +1380,7 @@ mod tests {
         let lease = gate.acquire().expect("new gate accepts an operation");
         let closing = tokio::spawn({
             let gate = Arc::clone(&gate);
-            async move { gate.close_and_wait(None).await }
+            async move { gate.close_and_wait(None, None).await }
         });
         tokio::task::yield_now().await;
         assert!(gate.acquire().is_err());
@@ -1423,19 +1394,23 @@ mod tests {
         }
     }
 
-    // 流程：会话关闭后仍有操作忽略取消信号；等待两段固定期限后关闭必须继续完成。
+    // 忽略取消的工作仍持有资源时，关闭不能报告成功，且继续拒绝新工作。
     #[tokio::test(start_paused = true)]
     async fn closed_gate_stops_waiting_when_an_operation_ignores_cancellation() {
         let gate = Arc::new(SessionOperationGate::new_open());
         let _lease = gate.acquire().expect("new gate accepts an operation");
 
-        tokio::time::timeout(
+        let error = tokio::time::timeout(
             SESSION_OPERATION_GRACE.saturating_mul(2) + Duration::from_millis(1),
-            gate.close_and_wait(None),
+            gate.close_and_wait(None, None),
         )
         .await
         .expect("gate close must remain bounded after cancellation")
-        .expect("gate close must accept no current operation");
+        .expect_err("active operations prevent successful suspension");
+        assert_eq!(error.category(), EngineErrorCategory::DeadlineExceeded);
+        assert!(gate.acquire().is_err());
+        drop(_lease);
+        gate.close_and_wait(None, None).await.unwrap();
     }
 
     #[tokio::test]
@@ -1445,7 +1420,7 @@ mod tests {
         let other = gate.acquire().expect("concurrent operation acquires lease");
         let closing = tokio::spawn({
             let gate = Arc::clone(&gate);
-            async move { gate.close_and_wait(Some(transition)).await }
+            async move { gate.close_and_wait(Some(transition), None).await }
         });
 
         tokio::task::yield_now().await;
@@ -1454,5 +1429,19 @@ mod tests {
 
         drop(other);
         closing.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shared_deadline_limits_both_drain_and_cancellation_waits() {
+        let gate = SessionOperationGate::new_open();
+        let lease = gate.acquire().unwrap();
+        let started = Instant::now();
+        let deadline = Some(started + Duration::from_millis(10));
+        let error = gate.close_and_wait(None, deadline).await.unwrap_err();
+        assert_eq!(error.category(), EngineErrorCategory::DeadlineExceeded);
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(gate.acquire().is_err());
+        drop(lease);
+        gate.close_and_wait(None, deadline).await.unwrap();
     }
 }

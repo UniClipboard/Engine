@@ -889,5 +889,5 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
 
     assert!(application.start_runtime());
     assert!(!application.start_runtime());
-    application.shutdown().await;
+    application.shutdown().await.unwrap();
 }

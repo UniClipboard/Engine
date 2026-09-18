@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use diesel::prelude::*;
-use tracing::{debug_span, warn};
+use tracing::{debug_span, warn, Instrument};
 
 use super::active_clipboard_register_cipher::{
     ActiveClipboardRegisterCipher, V3ActiveClipboardRegisterCipher, CONSUMABLE_HKDF_INFO,
@@ -21,6 +21,8 @@ use uc_core::ports::clipboard::{
 };
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::{DeriveSpaceSubkeyPort, SpaceAccessError};
+
+mod storage;
 
 /// Fixed primary key for the single register row (the table is pinned to a
 /// single row via a `CHECK (id = 1)` constraint).
@@ -39,7 +41,7 @@ struct NewRegisterRow {
 
 /// SQLite adapter implementing the active-clipboard register port.
 pub struct DieselActiveClipboardRegisterRepository<E> {
-    executor: E,
+    executor: Arc<E>,
     protection: ActiveRegisterProtection,
 }
 
@@ -58,7 +60,7 @@ impl<E> DieselActiveClipboardRegisterRepository<E> {
         current_profile: Arc<dyn CurrentProfilePort>,
     ) -> Self {
         Self {
-            executor,
+            executor: Arc::new(executor),
             protection: ActiveRegisterProtection::Legacy {
                 derive_subkey,
                 current_profile,
@@ -68,7 +70,7 @@ impl<E> DieselActiveClipboardRegisterRepository<E> {
 
     pub fn new_v3(executor: E, protection: Arc<ContentProtection>) -> Self {
         Self {
-            executor,
+            executor: Arc::new(executor),
             protection: ActiveRegisterProtection::V3(V3ActiveClipboardRegisterCipher::new(
                 protection,
             )),
@@ -81,17 +83,18 @@ impl ActiveRegisterProtection {
         derive_subkey: &dyn DeriveSpaceSubkeyPort,
         current_profile: &dyn CurrentProfilePort,
     ) -> Result<ActiveClipboardRegisterCipher, ActiveClipboardRegisterError> {
-        let profile = current_profile.current_profile().await.map_err(|err| {
-            ActiveClipboardRegisterError::Storage(format!("current profile unavailable: {err}"))
-        })?;
+        let profile = current_profile
+            .current_profile()
+            .await
+            .map_err(|source| ActiveClipboardRegisterError::Storage(source.into()))?;
         let key = derive_subkey
             .derive_subkey(profile.as_ref().as_bytes(), CONSUMABLE_HKDF_INFO)
             .await
             .map_err(|err| match err {
                 SpaceAccessError::NotUnlocked => ActiveClipboardRegisterError::NotUnlocked,
-                other => ActiveClipboardRegisterError::Storage(format!(
-                    "derive active-register consumable key: {other}"
-                )),
+                other => ActiveClipboardRegisterError::Storage(
+                    anyhow::Error::new(other).context("derive active-register consumable key"),
+                ),
             })?;
         Ok(ActiveClipboardRegisterCipher::new(key))
     }
@@ -109,7 +112,7 @@ impl ActiveRegisterProtection {
                 .seal(reference),
             Self::V3(cipher) => cipher.seal(reference).await,
         }
-        .map_err(|err| ActiveClipboardRegisterError::Storage(err.to_string()))
+        .map_err(|source| ActiveClipboardRegisterError::Storage(source.into()))
     }
 
     async fn open(
@@ -125,12 +128,14 @@ impl ActiveRegisterProtection {
                 .open(ciphertext),
             Self::V3(cipher) => cipher.open(ciphertext).await,
         }
-        .map_err(|err| ActiveClipboardRegisterError::Storage(err.to_string()))
+        .map_err(|source| ActiveClipboardRegisterError::Storage(source.into()))
     }
 }
 
 #[async_trait]
-impl<E: DbExecutor> AdvanceActiveClipboardPort for DieselActiveClipboardRegisterRepository<E> {
+impl<E: DbExecutor + 'static> AdvanceActiveClipboardPort
+    for DieselActiveClipboardRegisterRepository<E>
+{
     async fn advance(
         &self,
         state: &ActiveClipboardState,
@@ -163,85 +168,77 @@ impl<E: DbExecutor> AdvanceActiveClipboardPort for DieselActiveClipboardRegister
             consumable_ref_ciphertext,
         };
 
-        span.in_scope(|| {
-            self.executor.run(move |conn| {
-                // Atomic conditional write: read the current LWW key, then
-                // insert/overwrite only when the incoming value supersedes
-                // it. Wrapping SELECT-then-UPSERT in a transaction keeps the
-                // compare-and-set atomic so an LWW-loser is a true no-op.
-                conn.transaction::<bool, diesel::result::Error, _>(|conn| {
-                    let current: Option<(i64, String)> = active_clipboard_register::table
-                        .filter(active_clipboard_register::id.eq(REGISTER_ROW_ID))
-                        .select((
-                            active_clipboard_register::activated_at_ms,
-                            active_clipboard_register::activated_by,
-                        ))
-                        .first::<(i64, String)>(conn)
-                        .optional()?;
+        self.run(move |conn| {
+            // 比较和写入在同一事务内，较旧状态不改变登记。
+            conn.transaction::<bool, diesel::result::Error, _>(|conn| {
+                let current: Option<(i64, String)> = active_clipboard_register::table
+                    .filter(active_clipboard_register::id.eq(REGISTER_ROW_ID))
+                    .select((
+                        active_clipboard_register::activated_at_ms,
+                        active_clipboard_register::activated_by,
+                    ))
+                    .first::<(i64, String)>(conn)
+                    .optional()?;
 
-                    // Mirrors `ActiveClipboardState::supersedes`: a strictly
-                    // newer timestamp wins; on a tie the lexicographically
-                    // greater `activated_by` wins; an exact-key duplicate is
-                    // a no-op.
-                    let should_advance = match &current {
-                        None => true,
-                        Some((cur_ts, cur_by)) => {
-                            row.activated_at_ms > *cur_ts
-                                || (row.activated_at_ms == *cur_ts && row.activated_by > *cur_by)
-                        }
-                    };
-                    if !should_advance {
-                        return Ok(false);
+                // 与领域规则一致：先比较时间，再比较激活者；重复键不更新。
+                let should_advance = match &current {
+                    None => true,
+                    Some((cur_ts, cur_by)) => {
+                        row.activated_at_ms > *cur_ts
+                            || (row.activated_at_ms == *cur_ts && row.activated_by > *cur_by)
                     }
+                };
+                if !should_advance {
+                    return Ok(false);
+                }
 
-                    if current.is_none() {
-                        diesel::insert_into(active_clipboard_register::table)
-                            .values(&row)
-                            .execute(conn)?;
-                    } else if let Some(ciphertext) = &row.consumable_ref_ciphertext {
-                        diesel::update(
-                            active_clipboard_register::table
-                                .filter(active_clipboard_register::id.eq(REGISTER_ROW_ID)),
-                        )
-                        .set((
-                            active_clipboard_register::snapshot_hash.eq(&row.snapshot_hash),
-                            active_clipboard_register::entry_id.eq(&row.entry_id),
-                            active_clipboard_register::activated_at_ms.eq(row.activated_at_ms),
-                            active_clipboard_register::activated_by.eq(&row.activated_by),
-                            active_clipboard_register::consumable_ref_ciphertext.eq(ciphertext),
-                        ))
+                if current.is_none() {
+                    diesel::insert_into(active_clipboard_register::table)
+                        .values(&row)
                         .execute(conn)?;
-                    } else {
-                        diesel::update(
-                            active_clipboard_register::table
-                                .filter(active_clipboard_register::id.eq(REGISTER_ROW_ID)),
-                        )
-                        .set((
-                            active_clipboard_register::snapshot_hash.eq(&row.snapshot_hash),
-                            active_clipboard_register::entry_id.eq(&row.entry_id),
-                            active_clipboard_register::activated_at_ms.eq(row.activated_at_ms),
-                            active_clipboard_register::activated_by.eq(&row.activated_by),
-                        ))
-                        .execute(conn)?;
-                    }
-                    Ok(true)
-                })
-                .map_err(|e| anyhow::anyhow!(e.to_string()))
+                } else if let Some(ciphertext) = &row.consumable_ref_ciphertext {
+                    diesel::update(
+                        active_clipboard_register::table
+                            .filter(active_clipboard_register::id.eq(REGISTER_ROW_ID)),
+                    )
+                    .set((
+                        active_clipboard_register::snapshot_hash.eq(&row.snapshot_hash),
+                        active_clipboard_register::entry_id.eq(&row.entry_id),
+                        active_clipboard_register::activated_at_ms.eq(row.activated_at_ms),
+                        active_clipboard_register::activated_by.eq(&row.activated_by),
+                        active_clipboard_register::consumable_ref_ciphertext.eq(ciphertext),
+                    ))
+                    .execute(conn)?;
+                } else {
+                    diesel::update(
+                        active_clipboard_register::table
+                            .filter(active_clipboard_register::id.eq(REGISTER_ROW_ID)),
+                    )
+                    .set((
+                        active_clipboard_register::snapshot_hash.eq(&row.snapshot_hash),
+                        active_clipboard_register::entry_id.eq(&row.entry_id),
+                        active_clipboard_register::activated_at_ms.eq(row.activated_at_ms),
+                        active_clipboard_register::activated_by.eq(&row.activated_by),
+                    ))
+                    .execute(conn)?;
+                }
+                Ok(true)
             })
+            .map_err(Into::into)
         })
-        .map_err(|e| ActiveClipboardRegisterError::Storage(e.to_string()))
+        .instrument(span)
+        .await
     }
 }
 
 #[async_trait]
-impl<E: DbExecutor> LoadMobileConsumableClipboardPort
+impl<E: DbExecutor + 'static> LoadMobileConsumableClipboardPort
     for DieselActiveClipboardRegisterRepository<E>
 {
     async fn load_mobile_consumable(
         &self,
     ) -> Result<Option<MobileConsumableRef>, ActiveClipboardRegisterError> {
         let ciphertext: Option<Vec<u8>> = self
-            .executor
             .run(move |conn| {
                 Ok(active_clipboard_register::table
                     .filter(active_clipboard_register::id.eq(REGISTER_ROW_ID))
@@ -250,7 +247,7 @@ impl<E: DbExecutor> LoadMobileConsumableClipboardPort
                     .optional()?
                     .flatten())
             })
-            .map_err(|err| ActiveClipboardRegisterError::Storage(err.to_string()))?;
+            .await?;
         let Some(ciphertext) = ciphertext else {
             return Ok(None);
         };
@@ -270,19 +267,25 @@ impl<E: DbExecutor> LoadMobileConsumableClipboardPort
                 // backfill may have replaced the column with a valid envelope
                 // between the read above and this clear, and that value must
                 // survive.
-                if let Err(clear_err) = self.executor.run(move |conn| {
-                    diesel::update(
-                        active_clipboard_register::table
-                            .filter(active_clipboard_register::id.eq(REGISTER_ROW_ID))
-                            .filter(
-                                active_clipboard_register::consumable_ref_ciphertext
-                                    .eq(&ciphertext),
-                            ),
-                    )
-                    .set(active_clipboard_register::consumable_ref_ciphertext.eq(None::<Vec<u8>>))
-                    .execute(conn)?;
-                    Ok(())
-                }) {
+                if let Err(clear_err) = self
+                    .run(move |conn| {
+                        diesel::update(
+                            active_clipboard_register::table
+                                .filter(active_clipboard_register::id.eq(REGISTER_ROW_ID))
+                                .filter(
+                                    active_clipboard_register::consumable_ref_ciphertext
+                                        .eq(&ciphertext),
+                                ),
+                        )
+                        .set(
+                            active_clipboard_register::consumable_ref_ciphertext
+                                .eq(None::<Vec<u8>>),
+                        )
+                        .execute(conn)?;
+                        Ok(())
+                    })
+                    .await
+                {
                     warn!(
                         error = %clear_err,
                         "failed to discard unreadable mobile-consumable ciphertext"
@@ -295,7 +298,7 @@ impl<E: DbExecutor> LoadMobileConsumableClipboardPort
 }
 
 #[async_trait]
-impl<E: DbExecutor> BackfillMobileConsumableClipboardPort
+impl<E: DbExecutor + 'static> BackfillMobileConsumableClipboardPort
     for DieselActiveClipboardRegisterRepository<E>
 {
     async fn backfill_mobile_consumable_if_current(
@@ -305,43 +308,43 @@ impl<E: DbExecutor> BackfillMobileConsumableClipboardPort
         let ciphertext = self.protection.seal(reference).await?;
         let snapshot_hash = reference.snapshot_hash.clone();
         let entry_id = reference.entry_id.as_ref().to_string();
-        self.executor
-            .run(move |conn| {
-                let changed = diesel::update(
-                    active_clipboard_register::table
-                        .filter(active_clipboard_register::id.eq(REGISTER_ROW_ID))
-                        .filter(active_clipboard_register::consumable_ref_ciphertext.is_null())
-                        .filter(active_clipboard_register::snapshot_hash.eq(snapshot_hash))
-                        .filter(active_clipboard_register::entry_id.eq(entry_id)),
-                )
-                .set(active_clipboard_register::consumable_ref_ciphertext.eq(ciphertext))
-                .execute(conn)?;
-                Ok(changed == 1)
-            })
-            .map_err(|err| ActiveClipboardRegisterError::Storage(err.to_string()))
+        self.run(move |conn| {
+            let changed = diesel::update(
+                active_clipboard_register::table
+                    .filter(active_clipboard_register::id.eq(REGISTER_ROW_ID))
+                    .filter(active_clipboard_register::consumable_ref_ciphertext.is_null())
+                    .filter(active_clipboard_register::snapshot_hash.eq(snapshot_hash))
+                    .filter(active_clipboard_register::entry_id.eq(entry_id)),
+            )
+            .set(active_clipboard_register::consumable_ref_ciphertext.eq(ciphertext))
+            .execute(conn)?;
+            Ok(changed == 1)
+        })
+        .await
     }
 }
 
 #[async_trait]
-impl<E: DbExecutor> LoadActiveClipboardPort for DieselActiveClipboardRegisterRepository<E> {
+impl<E: DbExecutor + 'static> LoadActiveClipboardPort
+    for DieselActiveClipboardRegisterRepository<E>
+{
     async fn load(&self) -> Result<Option<ActiveClipboardState>, ActiveClipboardRegisterError> {
         let span = debug_span!("infra.sqlite.active_clipboard_register.load");
-        let row: Option<(String, String, i64, String)> = span
-            .in_scope(|| {
-                self.executor.run(move |conn| {
-                    Ok(active_clipboard_register::table
-                        .filter(active_clipboard_register::id.eq(REGISTER_ROW_ID))
-                        .select((
-                            active_clipboard_register::snapshot_hash,
-                            active_clipboard_register::entry_id,
-                            active_clipboard_register::activated_at_ms,
-                            active_clipboard_register::activated_by,
-                        ))
-                        .first::<(String, String, i64, String)>(conn)
-                        .optional()?)
-                })
+        let row: Option<(String, String, i64, String)> = self
+            .run(move |conn| {
+                Ok(active_clipboard_register::table
+                    .filter(active_clipboard_register::id.eq(REGISTER_ROW_ID))
+                    .select((
+                        active_clipboard_register::snapshot_hash,
+                        active_clipboard_register::entry_id,
+                        active_clipboard_register::activated_at_ms,
+                        active_clipboard_register::activated_by,
+                    ))
+                    .first::<(String, String, i64, String)>(conn)
+                    .optional()?)
             })
-            .map_err(|e| ActiveClipboardRegisterError::Storage(e.to_string()))?;
+            .instrument(span)
+            .await?;
 
         Ok(
             row.map(|(snapshot_hash, entry_id, activated_at_ms, activated_by)| {
@@ -357,28 +360,29 @@ impl<E: DbExecutor> LoadActiveClipboardPort for DieselActiveClipboardRegisterRep
 }
 
 #[async_trait]
-impl<E: DbExecutor> ResetActiveClipboardPort for DieselActiveClipboardRegisterRepository<E> {
+impl<E: DbExecutor + 'static> ResetActiveClipboardPort
+    for DieselActiveClipboardRegisterRepository<E>
+{
     async fn reset(&self) -> Result<(), ActiveClipboardRegisterError> {
         let span = debug_span!("infra.sqlite.active_clipboard_register.reset");
-        span.in_scope(|| {
-            self.executor.run(move |conn| {
-                // Unconditional clear: delete the single row regardless of its
-                // LWW key. Deleting an absent row affects zero rows and still
-                // succeeds, so the operation is idempotent.
-                diesel::delete(
-                    active_clipboard_register::table
-                        .filter(active_clipboard_register::id.eq(REGISTER_ROW_ID)),
-                )
-                .execute(conn)?;
-                Ok(())
-            })
+        self.run(move |conn| {
+            // 无条件清除登记；空登记重复清除仍成功。
+            diesel::delete(
+                active_clipboard_register::table
+                    .filter(active_clipboard_register::id.eq(REGISTER_ROW_ID)),
+            )
+            .execute(conn)?;
+            Ok(())
         })
-        .map_err(|e| ActiveClipboardRegisterError::Storage(e.to_string()))
+        .instrument(span)
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
+    mod lifecycle;
+
     use super::*;
     use crate::db::executor::DieselSqliteExecutor;
     use crate::db::pool::init_db_pool;

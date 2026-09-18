@@ -7,6 +7,7 @@
 //! 不再走 dyn trait 间接层。
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use hkdf::Hkdf;
@@ -28,6 +29,15 @@ use super::content_key_catalog::{
     decode as decode_content_key_catalog, encode as encode_content_key_catalog,
     PersistedContentKeyCatalog, PersistedContentKeyEntry,
 };
+
+tokio::task_local! {
+    static TRANSACTION_MASTER_KEY: TransactionMasterKey;
+}
+
+struct TransactionMasterKey {
+    generation: Arc<()>,
+    key: MasterKey,
+}
 
 #[derive(Clone, Debug)]
 struct State {
@@ -107,6 +117,7 @@ pub struct InMemorySession {
 
 struct SessionState {
     material: State,
+    pending_material: Option<State>,
     generation: Arc<()>,
     lease: Option<ProfileKeyReadLease>,
     closed: bool,
@@ -128,6 +139,7 @@ impl SessionState {
     fn new(material: State) -> Self {
         Self {
             material,
+            pending_material: None,
             generation: Arc::new(()),
             lease: None,
             closed: false,
@@ -137,6 +149,7 @@ impl SessionState {
 }
 
 pub(crate) struct SessionSnapshot {
+    #[cfg(test)]
     material: State,
     generation: Arc<()>,
 }
@@ -145,9 +158,35 @@ pub(crate) struct SessionSnapshot {
 pub(crate) struct SessionTransaction<'a> {
     session: &'a InMemorySession,
     previous: Option<SessionSnapshot>,
+    candidate_master_key: Option<MasterKey>,
 }
 
 impl SessionTransaction<'_> {
+    /// 只允许当前恢复动作使用尚未提交的候选密钥读取原有密文。
+    ///
+    /// task-local 能力不会被普通并发任务继承；共享 session 的所有公开读取在
+    /// transaction 提交前仍保持不可用。
+    pub(crate) async fn with_candidate_master_key<F>(&self, work: F) -> F::Output
+    where
+        F: Future,
+    {
+        let Some(key) = self.candidate_master_key.clone() else {
+            return work.await;
+        };
+        let Some(previous) = self.previous.as_ref() else {
+            return work.await;
+        };
+        TRANSACTION_MASTER_KEY
+            .scope(
+                TransactionMasterKey {
+                    generation: Arc::clone(&previous.generation),
+                    key,
+                },
+                work,
+            )
+            .await
+    }
+
     pub(crate) fn commit(
         mut self,
         vault: &ProfileContentKeyVault,
@@ -158,7 +197,13 @@ impl SessionTransaction<'_> {
             .previous
             .as_ref()
             .is_some_and(|previous| Arc::ptr_eq(&previous.generation, &state.generation));
-        if !valid || state.closed || state.master_key.is_none() {
+        if !valid
+            || state.closed
+            || state
+                .pending_material
+                .as_ref()
+                .is_none_or(|material| material.master_key.is_none())
+        {
             return Err(ActiveSpaceSecuritySessionError::Session {
                 source: anyhow::Error::new(EncryptionError::NotInitialized),
             });
@@ -170,6 +215,12 @@ impl SessionTransaction<'_> {
                 }
             })?);
         }
+        let pending = state.pending_material.take().ok_or_else(|| {
+            ActiveSpaceSecuritySessionError::Session {
+                source: anyhow::Error::new(EncryptionError::NotInitialized),
+            }
+        })?;
+        state.material = pending;
         self.previous = None;
         drop(state);
         self.session.ready.notify_waiters();
@@ -180,7 +231,10 @@ impl SessionTransaction<'_> {
 impl Drop for SessionTransaction<'_> {
     fn drop(&mut self) {
         if let Some(previous) = self.previous.take() {
-            self.session.restore(previous);
+            let mut state = self.session.lock_state();
+            if !state.closed && Arc::ptr_eq(&state.generation, &previous.generation) {
+                state.pending_material = None;
+            }
         }
     }
 }
@@ -209,8 +263,11 @@ impl InMemorySession {
 
     pub fn is_ready(&self) -> bool {
         match self.state.lock() {
-            Ok(state) => state.master_key.is_some(),
-            Err(poisoned) => poisoned.into_inner().master_key.is_some(),
+            Ok(state) => state.pending_material.is_none() && state.master_key.is_some(),
+            Err(poisoned) => {
+                let state = poisoned.into_inner();
+                state.pending_material.is_none() && state.master_key.is_some()
+            }
         }
     }
 
@@ -231,7 +288,19 @@ impl InMemorySession {
     }
 
     pub fn get_master_key(&self) -> Result<MasterKey, EncryptionError> {
-        self.lock_state()
+        let state = self.lock_state();
+        if state.pending_material.is_some() {
+            return TRANSACTION_MASTER_KEY
+                .try_with(|candidate| {
+                    if Arc::ptr_eq(&candidate.generation, &state.generation) {
+                        Ok(candidate.key.clone())
+                    } else {
+                        Err(EncryptionError::NotInitialized)
+                    }
+                })
+                .unwrap_or(Err(EncryptionError::NotInitialized));
+        }
+        state
             .master_key
             .as_ref()
             .cloned()
@@ -304,16 +373,24 @@ impl InMemorySession {
         if state.closed {
             return Err(EncryptionError::NotInitialized);
         }
+        if state.pending_material.is_some() {
+            return Err(EncryptionError::NotInitialized);
+        }
         let previous = SessionSnapshot {
+            #[cfg(test)]
             material: state.material.clone(),
             generation: state.generation.clone(),
         };
+        let mut pending = state.material.clone();
         if let Some((space_id, key)) = target {
-            Self::set_space_key(&mut state, space_id, key);
+            Self::set_space_key(&mut pending, space_id, key);
         }
+        let candidate_master_key = pending.master_key.clone();
+        state.pending_material = Some(pending);
         Ok(SessionTransaction {
             session: self,
             previous: Some(previous),
+            candidate_master_key,
         })
     }
 
@@ -489,6 +566,10 @@ impl InMemorySession {
         }
 
         let mut state = self.lock_state();
+        let state = match &mut state.pending_material {
+            Some(pending) => pending,
+            None => &mut state.material,
+        };
         if state.master_key.is_none()
             || state.space_id.as_ref() != Some(material.state().space_id())
         {
@@ -588,10 +669,12 @@ impl InMemorySession {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn restore(&self, snapshot: SessionSnapshot) {
         let mut state = self.lock_state();
         if !state.closed && Arc::ptr_eq(&state.generation, &snapshot.generation) {
             state.material = snapshot.material;
+            state.pending_material = None;
         }
     }
 
@@ -601,6 +684,9 @@ impl InMemorySession {
         purpose: ContentKeyPurpose,
     ) -> Result<ResolvedContentKey, EncryptionError> {
         let state = self.lock_state();
+        if state.pending_material.is_some() {
+            return Err(EncryptionError::NotInitialized);
+        }
         if state.space_id.as_ref() != Some(space_id) {
             return Err(EncryptionError::NotInitialized);
         }
@@ -615,6 +701,9 @@ impl InMemorySession {
         &self,
     ) -> Result<ActiveContentProtectionKey, EncryptionError> {
         let state = self.lock_state();
+        if state.pending_material.is_some() {
+            return Err(EncryptionError::NotInitialized);
+        }
         let protection_group_id = state
             .protection_group_id
             .as_ref()
@@ -641,14 +730,22 @@ impl InMemorySession {
     }
 
     pub(crate) fn current_space_id(&self) -> Result<SpaceId, EncryptionError> {
-        self.lock_state()
+        let state = self.lock_state();
+        if state.pending_material.is_some() {
+            return Err(EncryptionError::NotInitialized);
+        }
+        state
             .space_id
             .clone()
             .ok_or(EncryptionError::NotInitialized)
     }
 
     pub(crate) fn legacy_content_key(&self) -> Result<MasterKey, EncryptionError> {
-        self.lock_state()
+        let state = self.lock_state();
+        if state.pending_material.is_some() {
+            return Err(EncryptionError::NotInitialized);
+        }
+        state
             .content_keys
             .get(&ContentKeyId::legacy_v1())
             .map(|entry| entry.key.clone())
@@ -662,6 +759,9 @@ impl InMemorySession {
         purpose: ContentKeyPurpose,
     ) -> Result<ResolvedContentKey, EncryptionError> {
         let state = self.lock_state();
+        if state.pending_material.is_some() {
+            return Err(EncryptionError::NotInitialized);
+        }
         if state.space_id.as_ref() != Some(space_id) {
             return Err(EncryptionError::NotInitialized);
         }
@@ -674,6 +774,9 @@ impl InMemorySession {
         info: &[u8],
     ) -> Result<[u8; 32], EncryptionError> {
         let state = self.lock_state();
+        if state.pending_material.is_some() {
+            return Err(EncryptionError::NotInitialized);
+        }
         let legacy_key = state
             .content_keys
             .get(&ContentKeyId::legacy_v1())
@@ -733,6 +836,7 @@ impl InMemorySession {
     }
     fn clear_state(state: &mut SessionState) {
         state.generation = Arc::new(());
+        state.pending_material = None;
         state.lease = None;
         state.master_key = None;
         state.space_id = None;
@@ -779,6 +883,22 @@ mod tests {
 
     fn key(seed: u8) -> MasterKey {
         MasterKey::from_bytes(&[seed; 32]).unwrap()
+    }
+
+    #[test]
+    fn target_transaction_stays_unavailable_until_commit() {
+        let session = InMemorySession::new();
+        let transaction = session
+            .begin_transaction(Some((SpaceId::from_str("space-a"), key(1))))
+            .unwrap();
+
+        assert!(!session.is_ready());
+        assert!(session.get_master_key().is_err());
+
+        drop(transaction);
+
+        assert!(!session.is_ready());
+        assert!(session.current_space_id().is_err());
     }
 
     #[test]

@@ -9,6 +9,7 @@ pub mod deps;
 pub(crate) mod error;
 pub mod facade;
 pub(crate) mod profile;
+pub(crate) mod runtime_lifecycle;
 
 pub(crate) mod clipboard;
 pub(crate) mod device;

@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use tokio::time::Instant;
 
 use tracing::Instrument;
 use uc_core::{TaskRegistry, TaskShutdownReport};
@@ -8,7 +8,10 @@ use uc_observability_contract::diagnostics::{
     OperationCompletion, OperationContext,
 };
 
-pub(super) async fn shutdown_tasks(tasks: &TaskRegistry, deadline: Duration) -> TaskShutdownReport {
+pub(super) async fn shutdown_tasks(
+    tasks: &TaskRegistry,
+    deadline: Option<Instant>,
+) -> TaskShutdownReport {
     let started = Instant::now();
     let span = operation_span(OperationContext {
         domain: DiagnosticDomain::Runtime,
@@ -16,7 +19,7 @@ pub(super) async fn shutdown_tasks(tasks: &TaskRegistry, deadline: Duration) -> 
         role: DiagnosticRole::Local,
         kind: DiagnosticSpanKind::Internal,
     });
-    let report = tasks.shutdown(deadline).instrument(span.clone()).await;
+    let report = tasks.shutdown_at(deadline).instrument(span.clone()).await;
     record_task_shutdown(
         report.completed_count,
         report.timed_out_count,
@@ -65,6 +68,7 @@ mod tests {
     };
     use opentelemetry_proto::tonic::common::v1::{any_value::Value, KeyValue};
     use prost::Message;
+    use std::time::Duration;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -101,13 +105,13 @@ mod tests {
                 })
                 .await
         );
-        let report = shutdown_tasks(&normal, Duration::from_secs(1)).await;
+        let report = shutdown_tasks(&normal, Some(Instant::now() + Duration::from_secs(1))).await;
         assert_eq!(report.completed_count, 1);
         assert_eq!(report.timed_out_count, 0);
         let slow = TaskRegistry::new();
         assert!(slow.spawn(|_| std::future::pending()).await);
         assert_eq!(
-            shutdown_tasks(&slow, Duration::from_millis(10))
+            shutdown_tasks(&slow, Some(Instant::now() + Duration::from_millis(10)))
                 .await
                 .timed_out_count,
             1
@@ -119,7 +123,7 @@ mod tests {
                 .await
         );
         assert_eq!(
-            shutdown_tasks(&panicked, Duration::from_secs(1))
+            shutdown_tasks(&panicked, Some(Instant::now() + Duration::from_secs(1)))
                 .await
                 .join_error_count,
             1

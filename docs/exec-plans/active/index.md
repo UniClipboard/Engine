@@ -15,4 +15,6 @@
 - [Engine 空闲重复工作与准入存储性能修复](2026-09-13-engine-idle-work-and-admission-performance.md)
 - [已知设备联系驱动的成员恢复与地址更新](2026-09-17-known-peer-contact-recovery.md)（实施中）
 - [只走中转时三秒内恢复双向连接](2026-09-18-relay-only-three-second-recovery.md)（核心实施与二十轮验收完成；现有旧版配对基线阻塞完整套件收口）
+- [统一暂停、恢复与中断恢复](2026-09-12-unified-runtime-lifecycle.md)（实施中，剩余设备与产品宿主验收未完成；包含已有后台问题修复记录入口）
+
 计划完成时先更新稳定设计/ADR 和验收证据，再移入 `../completed/`。

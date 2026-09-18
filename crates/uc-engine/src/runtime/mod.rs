@@ -7,6 +7,7 @@ mod lan_compatibility;
 #[cfg(feature = "lan-compat")]
 mod mobile_upload;
 mod session_supervisor;
+mod shutdown;
 mod task_shutdown;
 
 use std::io::Write as _;
@@ -14,10 +15,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
-use uc_application::deps::{
-    ProfileFactoryResetCapabilityError, ProfileUpgradeBackupPort, StopProfileRuntimePort,
-};
+use uc_application::deps::{LifecycleError, ProfileUpgradeBackupPort};
 use uc_application::facade::{
     AppFacade, ApplicationRuntime, NetworkRecoveryEvent, ProfileFactoryResetFacade,
     ProfileFactoryResetOutcome, ProfileFactoryResetRequest,
@@ -33,10 +33,10 @@ use crate::assembly::mobile_lan::MobileLanEndpointUpdater;
 use crate::engine::event_stream::EventSender;
 use crate::{
     EngineConfig, EngineError, EngineErrorCategory, EngineEvent, HostCapabilities, HostFileAccess,
-    RefreshReason,
+    NetworkRecoveryPhaseSummary, NetworkRecoveryStatusSummary, RefreshReason,
 };
 use host_clipboard::{spawn_host_clipboard_change_task, HostClipboardChangeRuntime};
-use session_supervisor::SessionSupervisor;
+use session_supervisor::{lifecycle_error, SessionSupervisor};
 const START_FAILED_CODE: u32 = 1101;
 const OPERATION_UNAVAILABLE_CODE: u32 = 1103;
 
@@ -71,26 +71,6 @@ impl Drop for StartupSecurityGuard {
     }
 }
 
-struct ProductionProfileRuntimeStopper {
-    security_lifecycle: Arc<uc_infra::space::RuntimeSpaceAccessAdapter>,
-    session_supervisor: Arc<SessionSupervisor>,
-    tasks: Arc<TaskRegistry>,
-}
-
-#[async_trait::async_trait]
-impl StopProfileRuntimePort for ProductionProfileRuntimeStopper {
-    async fn stop_profile_runtime(&self) -> Result<(), ProfileFactoryResetCapabilityError> {
-        self.security_lifecycle.close_security_session();
-        self.session_supervisor
-            .suspend()
-            .await
-            .map_err(|_| ProfileFactoryResetCapabilityError)?;
-        self.session_supervisor.clear_factory();
-        task_shutdown::shutdown_tasks(&self.tasks, Duration::from_millis(500)).await;
-        Ok(())
-    }
-}
-
 fn re_pairing_scope_for_setup_state(
     state: &uc_application::facade::SetupStateView,
 ) -> Option<crate::RePairingScope> {
@@ -99,25 +79,25 @@ fn re_pairing_scope_for_setup_state(
         .then_some(crate::RePairingScope::AllDevices)
 }
 
-fn network_recovery_summary(event: NetworkRecoveryEvent) -> crate::NetworkRecoveryStatusSummary {
+fn network_recovery_summary(event: NetworkRecoveryEvent) -> NetworkRecoveryStatusSummary {
     match event {
-        NetworkRecoveryEvent::Started => crate::NetworkRecoveryStatusSummary {
-            phase: crate::NetworkRecoveryPhaseSummary::Recovering,
+        NetworkRecoveryEvent::Started => NetworkRecoveryStatusSummary {
+            phase: NetworkRecoveryPhaseSummary::Recovering,
             retryable: false,
             next_retry_in_ms: None,
         },
-        NetworkRecoveryEvent::RetryScheduled { delay } => crate::NetworkRecoveryStatusSummary {
-            phase: crate::NetworkRecoveryPhaseSummary::RetryScheduled,
+        NetworkRecoveryEvent::RetryScheduled { delay } => NetworkRecoveryStatusSummary {
+            phase: NetworkRecoveryPhaseSummary::RetryScheduled,
             retryable: true,
             next_retry_in_ms: Some(delay.as_millis().min(u128::from(u64::MAX)) as u64),
         },
-        NetworkRecoveryEvent::Succeeded => crate::NetworkRecoveryStatusSummary {
-            phase: crate::NetworkRecoveryPhaseSummary::Idle,
+        NetworkRecoveryEvent::Succeeded => NetworkRecoveryStatusSummary {
+            phase: NetworkRecoveryPhaseSummary::Idle,
             retryable: false,
             next_retry_in_ms: None,
         },
-        NetworkRecoveryEvent::Failed { retryable } => crate::NetworkRecoveryStatusSummary {
-            phase: crate::NetworkRecoveryPhaseSummary::Failed,
+        NetworkRecoveryEvent::Failed { retryable } => NetworkRecoveryStatusSummary {
+            phase: NetworkRecoveryPhaseSummary::Failed,
             retryable,
             next_retry_in_ms: None,
         },
@@ -133,6 +113,7 @@ async fn spawn_network_recovery_events(
         .spawn(move |cancel| async move {
             loop {
                 tokio::select! {
+                    biased;
                     _ = cancel.cancelled() => return,
                     change = changes.recv() => match change {
                         Ok(change) => events.send(crate::EngineEvent::NetworkRecoveryChanged(network_recovery_summary(change))),
@@ -189,17 +170,19 @@ impl ProductionRuntime {
         let security_lifecycle = Arc::clone(&wired.sync_engine.security_lifecycle);
         let mut security_guard = StartupSecurityGuard(Some(Arc::clone(&security_lifecycle)));
         let host_adapters = wired.application.host_adapters();
-        let session_supervisor = Arc::new(SessionSupervisor::new(wired.application.clone()));
+        let session_supervisor =
+            SessionSupervisor::new(wired.application.clone(), Arc::clone(&security_lifecycle));
         let task_registry = Arc::new(TaskRegistry::new());
-        let profile_runtime: Arc<dyn StopProfileRuntimePort> =
-            Arc::new(ProductionProfileRuntimeStopper {
-                security_lifecycle: Arc::clone(&security_lifecycle),
-                session_supervisor: Arc::clone(&session_supervisor),
-                tasks: Arc::clone(&task_registry),
-            });
+        let profile_runtime = Arc::new(shutdown::ProfileRuntimeStopper::new(
+            Arc::clone(&security_lifecycle),
+            Arc::clone(&session_supervisor),
+            Arc::clone(&task_registry),
+        ));
+        let profile_runtime_port: Arc<dyn uc_application::deps::StopProfileRuntimePort> =
+            profile_runtime.clone();
         let profile_reset = Arc::new(ProfileFactoryResetFacade::new(
             Arc::clone(&wired.profile_reset.lifecycle_repository),
-            profile_runtime,
+            profile_runtime_port,
             Arc::clone(&wired.profile_reset.keys),
             Arc::clone(&wired.profile_reset.state),
         ));
@@ -234,12 +217,26 @@ impl ProductionRuntime {
             network_partition_gate.clone(),
             Arc::clone(&network_recovery),
         );
-        wired
-            .application
-            .start_process_runtime(Arc::clone(&task_registry))
-            .await
-            .map_err(|error| startup_error("clipboard background", error))?;
-        session_supervisor.resume().await?;
+        let started = async {
+            wired
+                .application
+                .start_process_runtime(Arc::clone(&task_registry))
+                .await
+                .map_err(|error| startup_error("clipboard background", error))?;
+            session_supervisor.resume(CancellationToken::new()).await
+        }
+        .await;
+        if let Err(primary) = started {
+            if let Err(rollback) =
+                shutdown::shutdown_failed_start(&network_recovery, &profile_runtime).await
+            {
+                return Err(lifecycle_error(LifecycleError {
+                    primary: primary.into(),
+                    additional: vec![rollback.into()],
+                }));
+            }
+            return Err(primary);
+        }
         spawn_space_transition_watcher(
             Arc::clone(&session_supervisor),
             wired.application.subscribe_space_transition_changes(),
@@ -320,6 +317,7 @@ async fn spawn_space_transition_watcher(
             loop {
                 if !check_required {
                     tokio::select! {
+                        biased;
                         _ = cancel.cancelled() => return,
                         changed = changes.changed() => {
                             if changed.is_err() {
@@ -331,7 +329,12 @@ async fn spawn_space_transition_watcher(
                     continue;
                 }
                 check_required = false;
-                match supervisor.transition_pending_session().await {
+                let transition = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return,
+                    result = supervisor.transition_pending_session() => result,
+                };
+                match transition {
                     Ok(Some(revision)) => {
                         events.send(EngineEvent::DeviceTrustChanged { revision });
                         events.send(EngineEvent::RefreshRequired {
@@ -394,6 +397,14 @@ fn operation_error_with_code(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "dev-tools")]
+    use crate::engine::{event_stream::event_channel, EngineRuntime, StartupProgress};
+    #[cfg(feature = "dev-tools")]
+    use crate::testing::empty_engine_host;
+    #[cfg(feature = "dev-tools")]
+    use crate::{CreateSpaceInput, Operation, SecretString};
+    #[cfg(feature = "dev-tools")]
+    use tokio_util::sync::CancellationToken;
     use uc_application::facade::{
         ClipboardOutboundOutcome, SearchFacadeError, SearchPageView, SearchResultView,
         StorageFacadeError, StorageStatsView,
@@ -408,6 +419,42 @@ mod tests {
     use crate::operations::settings::storage::{map_storage_error, storage_stats_result};
     use crate::runtime::host_operations::send_report_result;
     use crate::{EntrySummary, OperationResult, QueryHistoryInput, StorageStatsSummary};
+
+    #[cfg(feature = "dev-tools")]
+    #[tokio::test]
+    async fn production_profile_reset_finishes_shutdown_before_deleting_state() {
+        let root = tempfile::tempdir().unwrap();
+        let (events, _stream) = event_channel(32);
+        let (progress, _) = StartupProgress::channel();
+        let runtime = ProductionRuntime::start(
+            EngineConfig::new("1.2.3"),
+            empty_engine_host(root.path()),
+            events,
+            Arc::clone(&progress.store),
+        )
+        .await
+        .unwrap();
+        runtime
+            .execute(
+                Operation::CreateSpace(CreateSpaceInput {
+                    device_name: Some("reset-test".to_owned()),
+                    passphrase: SecretString::new("test-passphrase"),
+                    passphrase_confirmation: SecretString::new("test-passphrase"),
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        runtime
+            .profile_reset
+            .execute(ProfileFactoryResetRequest::Start)
+            .await
+            .unwrap();
+        runtime
+            .shutdown(Some(tokio::time::Instant::now() + Duration::from_secs(15)))
+            .await
+            .unwrap();
+    }
 
     #[test]
     fn network_recovery_events_expose_only_stable_status() {

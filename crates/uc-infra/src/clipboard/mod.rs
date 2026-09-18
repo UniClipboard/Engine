@@ -1,3 +1,4 @@
+mod background_activity;
 mod background_blob_worker;
 mod background_runtime;
 mod broadcasting_advance;

@@ -53,6 +53,7 @@ pub use crate::profile::startup::{
     ProfileStartupStoragePort, ProfileUpgradeBackupEntry, ProfileUpgradeBackupError,
     ProfileUpgradeBackupPort, ProfileUpgradeSource, ProfileUpgradeVersions,
 };
+pub use crate::runtime_lifecycle::{LifecycleError, RuntimeLifecyclePort, TransitionContext};
 use crate::search::mutation_gate::{CoordinatedSearchIndex, SearchMutationGate};
 pub use crate::space::{
     ActivateCompletionHelperAdmissionSecurityPort,

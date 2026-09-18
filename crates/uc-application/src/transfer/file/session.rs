@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 
 use tokio::sync::Mutex;
@@ -16,7 +17,7 @@ use crate::transfer::file::facade::BeginReceiverTransfer;
 pub(crate) struct ReceiverTransferHandleRegistry {
     create_gate: Mutex<()>,
     sessions: Mutex<HashMap<String, Arc<ReceiverTransferHandle>>>,
-    closed: Mutex<bool>,
+    closed: AtomicBool,
 }
 
 impl ReceiverTransferHandleRegistry {
@@ -29,7 +30,7 @@ impl ReceiverTransferHandleRegistry {
     }
 
     pub(crate) async fn ensure_open(&self) -> Result<(), FileTransferApplicationError> {
-        if *self.closed.lock().await {
+        if self.closed.load(Ordering::Acquire) {
             Err(FileTransferApplicationError::LifecycleClosed)
         } else {
             Ok(())
@@ -57,9 +58,8 @@ impl ReceiverTransferHandleRegistry {
         }
     }
 
-    pub(crate) async fn close_and_snapshot(&self) -> Vec<Arc<ReceiverTransferHandle>> {
-        *self.closed.lock().await = true;
-        self.sessions.lock().await.values().cloned().collect()
+    pub(crate) fn close(&self) {
+        self.closed.store(true, Ordering::Release);
     }
 
     pub(crate) async fn snapshot(&self) -> Vec<Arc<ReceiverTransferHandle>> {

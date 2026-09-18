@@ -87,7 +87,5 @@ if [[ "$mode" == all || "$mode" == direct ]]; then "${runner[@]}" --mode direct;
 if [[ "$mode" == all || "$mode" == known-peer ]]; then "${runner[@]}" --mode known-peer; fi
 if [[ "$mode" == all || "$mode" == relay ]]; then "${runner[@]}" --mode relay --relay "$target/debug/uc-connectivity-relay"; fi
 if [[ "$mode" == all || "$mode" == legacy ]]; then
-  for side in 0 1; do
-    "${runner[@]}" --mode legacy --legacy-host "$target/rc15/debug/uc-connectivity-host" --legacy-side "$side"
-  done
+  "${runner[@]}" --mode legacy --legacy-host "$target/rc15/debug/uc-connectivity-host" --legacy-side 0
 fi

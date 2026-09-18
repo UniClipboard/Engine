@@ -1,5 +1,8 @@
 mod catalog;
+mod key_store;
+mod lifecycle;
 mod model;
+mod operation;
 mod persistence;
 mod read_state;
 
@@ -11,19 +14,19 @@ use tokio::sync::Mutex;
 use uc_core::membership::{ContentKeyId, GroupEpoch, SpaceKeyMaterial};
 use uc_core::ports::SecureStoragePort;
 
-use super::MasterKey;
+use super::{MasterKey, SecureStorageAccess};
+pub(super) use key_store::VAULT_KEY_NAME as PROFILE_CONTENT_VAULT_KEY_NAME;
 pub(crate) use model::ProfileSearchCatalog;
 pub use model::{InstalledProfileCatalog, ProfileContentKeyVaultError, ResolvedProfileContentKey};
 use persistence::VaultPersistence;
-pub(in crate::security) use persistence::VAULT_KEY_NAME as PROFILE_CONTENT_VAULT_KEY_NAME;
 pub(crate) use read_state::ProfileKeyReadLease;
 use read_state::{lock, InvalidateOnDrop, ReadState, ReadView};
 
 /// Profile 历史密钥的唯一目录所有者；安装、并发读视图和清理均在模块内完成。
 /// GUI 授权不参与本模块的后台安全运行期。
 pub struct ProfileContentKeyVault {
-    persistence: VaultPersistence,
-    io_lock: Mutex<()>,
+    persistence: Arc<VaultPersistence>,
+    io_lock: Arc<Mutex<()>>,
     reads: Arc<StateMutex<ReadState>>,
 }
 
@@ -34,49 +37,31 @@ impl ProfileContentKeyVault {
         profile_generation: [u8; 16],
     ) -> Self {
         Self {
-            persistence: VaultPersistence::new(vault_directory, secure_storage, profile_generation),
-            io_lock: Mutex::new(()),
+            persistence: Arc::new(VaultPersistence::new(
+                vault_directory,
+                SecureStorageAccess::new(secure_storage),
+                profile_generation,
+            )),
+            io_lock: Arc::new(Mutex::new(())),
             reads: Arc::new(StateMutex::new(ReadState::default())),
         }
-    }
-
-    pub(crate) fn begin_read_reuse(
-        &self,
-    ) -> Result<ProfileKeyReadLease, ProfileContentKeyVaultError> {
-        ProfileKeyReadLease::begin(&self.reads)
-    }
-
-    pub(crate) fn close(&self) {
-        lock(&self.reads).close();
-    }
-
-    // 租约与 generation 在同一临界区捕获；清理后重建的运行期不得
-    // 接收持有旧租约的加载结果，否则可能出现有缓存却没有排他租约。
-    fn operation_lease(
-        &self,
-    ) -> Result<(Arc<std::fs::File>, Arc<()>), ProfileContentKeyVaultError> {
-        {
-            let state = lock(&self.reads);
-            state.check_open()?;
-            if let Some(file) = &state.lease {
-                return Ok((file.clone(), state.generation.clone()));
-            }
-        }
-        let file = Arc::new(self.persistence.acquire_lease()?);
-        let mut state = lock(&self.reads);
-        state.check_open()?;
-        if state.reusable {
-            state.lease = Some(file.clone());
-        }
-        Ok((file, state.generation.clone()))
     }
 
     pub async fn install_verified_space_material(
         &self,
         material: &SpaceKeyMaterial,
     ) -> Result<InstalledProfileCatalog, ProfileContentKeyVaultError> {
+        let material = material.clone();
+        self.run_owned(move |owner| async move { owner.install_material(&material).await })
+            .await
+    }
+
+    async fn install_material(
+        &self,
+        material: &SpaceKeyMaterial,
+    ) -> Result<InstalledProfileCatalog, ProfileContentKeyVaultError> {
         let _io = self.io_lock.lock().await;
-        let (_lease, generation) = self.operation_lease()?;
+        let (_lease, generation) = self.operation_lease().await?;
         let group = catalog::group_from_verified_material(material)?;
         let mut vault = self
             .persistence
@@ -104,9 +89,9 @@ impl ProfileContentKeyVault {
         Ok(summary)
     }
 
-    async fn with_catalog<T>(
+    async fn with_catalog<T: Send + 'static>(
         &self,
-        read: impl Fn(&ReadView) -> Result<T, ProfileContentKeyVaultError>,
+        read: impl FnOnce(&ReadView) -> Result<T, ProfileContentKeyVaultError> + Send + 'static,
     ) -> Result<T, ProfileContentKeyVaultError> {
         {
             let state = lock(&self.reads);
@@ -115,8 +100,16 @@ impl ProfileContentKeyVault {
                 return read(view);
             }
         }
+        self.run_owned(move |owner| async move { owner.load_catalog(read).await })
+            .await
+    }
+
+    async fn load_catalog<T>(
+        &self,
+        read: impl FnOnce(&ReadView) -> Result<T, ProfileContentKeyVaultError>,
+    ) -> Result<T, ProfileContentKeyVaultError> {
         let _io = self.io_lock.lock().await;
-        let (_lease, generation) = self.operation_lease()?;
+        let (_lease, generation) = self.operation_lease().await?;
         {
             let state = lock(&self.reads);
             if let Some(view) = &state.view {
@@ -139,7 +132,8 @@ impl ProfileContentKeyVault {
         content_key_id: &ContentKeyId,
         epoch: GroupEpoch,
     ) -> Result<ResolvedProfileContentKey, ProfileContentKeyVaultError> {
-        self.with_catalog(|view| view.resolve(content_key_id, epoch))
+        let content_key_id = content_key_id.clone();
+        self.with_catalog(move |view| view.resolve(&content_key_id, epoch))
             .await
     }
 

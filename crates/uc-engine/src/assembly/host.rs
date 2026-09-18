@@ -890,9 +890,10 @@ mod tests {
         let deprecated_removal_protocols_reachable = exchange || late || notice;
         prepared
             .session
-            .shutdown(uc_core::FileTransferCancellationReason::Unknown)
-            .await;
-        network.shutdown().await;
+            .shutdown(uc_core::FileTransferCancellationReason::Unknown, None)
+            .await
+            .unwrap();
+        network.shutdown().await.unwrap();
         task_registry
             .shutdown(std::time::Duration::from_millis(500))
             .await;

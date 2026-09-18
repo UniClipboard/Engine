@@ -556,6 +556,23 @@ async fn retry_never_sleeps_forever_and_healthy_connection_is_reused() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn shutdown_discards_a_queued_resume_before_starting_another_dial() {
+    let (owner, _, presence) = fixture();
+    owner.start().await;
+    settle().await;
+    owner.pause().await.unwrap();
+    let calls = presence.calls.load(Ordering::SeqCst);
+
+    let (send, receive) = oneshot::channel();
+    owner.send(Command::Resume(send)).unwrap();
+    owner.cancel.cancel();
+    owner.shutdown().await.unwrap();
+
+    assert!(receive.await.is_err());
+    assert_eq!(presence.calls.load(Ordering::SeqCst), calls);
+}
+
+#[tokio::test(start_paused = true)]
 async fn shutdown_cancels_work_and_rejects_late_opportunities() {
     let (owner, _, peer_reachability) = fixture();
     peer_reachability.blocked.store(true, Ordering::SeqCst);

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use thiserror::Error;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -46,8 +46,8 @@ impl HistoryMaintenance for ClipboardHistoryFacade {
 
 #[derive(Debug, Error)]
 pub enum HistoryMaintenanceRuntimeError {
-    #[error("history maintenance task failed: {0}")]
-    Task(String),
+    #[error("history maintenance task failed")]
+    Task(#[source] JoinError),
 }
 
 pub struct HistoryMaintenanceRuntime {
@@ -71,7 +71,7 @@ impl HistoryMaintenanceRuntime {
         let task_cancel = cancel.clone();
         let task = tokio::spawn(async move {
             if !task_cancel.is_cancelled() {
-                complete_history_maintenance(maintenance.as_ref(), initial).await;
+                complete_history_maintenance(maintenance.as_ref(), initial, &task_cancel).await;
             }
             run_history_maintenance_loop(maintenance, interval, task_cancel).await;
         });
@@ -86,8 +86,7 @@ impl HistoryMaintenanceRuntime {
         let Some(task) = self.task.take() else {
             return Ok(());
         };
-        task.await
-            .map_err(|error| HistoryMaintenanceRuntimeError::Task(error.to_string()))
+        task.await.map_err(HistoryMaintenanceRuntimeError::Task)
     }
 }
 
@@ -109,7 +108,7 @@ async fn run_history_maintenance_loop(
             _ = cancel.cancelled() => break,
             _ = tokio::time::sleep(interval) => {}
         }
-        run_history_maintenance_once(maintenance.as_ref()).await;
+        run_history_maintenance_once(maintenance.as_ref(), &cancel).await;
     }
     info!("history maintenance stopped");
 }
@@ -149,9 +148,15 @@ impl HistoryMaintenanceSummary {
     }
 }
 
-async fn run_history_maintenance_once(maintenance: &dyn HistoryMaintenance) {
+async fn run_history_maintenance_once(
+    maintenance: &dyn HistoryMaintenance,
+    cancel: &CancellationToken,
+) {
+    if cancel.is_cancelled() {
+        return;
+    }
     let summary = reconcile_history_once(maintenance).await;
-    complete_history_maintenance(maintenance, summary).await;
+    complete_history_maintenance(maintenance, summary, cancel).await;
 }
 
 async fn reconcile_history_once(maintenance: &dyn HistoryMaintenance) -> HistoryMaintenanceSummary {
@@ -169,8 +174,9 @@ async fn reconcile_history_once(maintenance: &dyn HistoryMaintenance) -> History
 async fn complete_history_maintenance(
     maintenance: &dyn HistoryMaintenance,
     mut summary: HistoryMaintenanceSummary,
+    cancel: &CancellationToken,
 ) {
-    if summary.reconcile_failed {
+    if summary.reconcile_failed || cancel.is_cancelled() {
         summary.log();
         return;
     }
@@ -182,6 +188,10 @@ async fn complete_history_maintenance(
         }
     }
 
+    if cancel.is_cancelled() {
+        summary.log();
+        return;
+    }
     match maintenance.enforce_retention_policy().await {
         Ok(result) => summary.retention = Some(result),
         Err(_) => {

@@ -1,29 +1,42 @@
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) mod event_stream;
 mod in_flight;
+mod lifecycle;
+#[cfg(test)]
+mod lifecycle_tests;
+mod operation;
+#[cfg(test)]
+mod operation_tests;
+mod shutdown;
+#[cfg(test)]
+mod shutdown_tests;
 pub(crate) mod startup;
+mod startup_control;
+mod startup_owner;
 
 use crate::runtime::ProductionRuntime;
 #[cfg(feature = "dev-tools")]
 use crate::{DevOperation, DevOperationResult};
 use crate::{
-    EngineConfig, EngineError, EngineErrorCategory, EngineEvent, EngineState, HostCapabilities,
-    LifecycleAction, Operation, OperationResult, OperationTerminal,
+    EngineConfig, EngineError, EngineErrorCategory, EngineState, HostCapabilities, Operation,
+    OperationResult, OperationTerminal,
 };
 pub use event_stream::EventStream;
 use event_stream::{event_channel, EventSender};
 use in_flight::InFlightOperations;
+use lifecycle::TransitionQueue;
 pub use startup::{StartupProgress, StartupProgressInput};
+pub use startup_control::{StartupLifecycle, StartupLifecycleInput};
 
 const INVALID_STATE_CODE: u32 = 1001;
 const OPERATION_CANCELLED_CODE: u32 = 1002;
-const SHUTDOWN_COMPLETION_MARGIN: Duration = Duration::from_millis(100);
 
 #[async_trait]
 pub(crate) trait EngineRuntime: Send + Sync {
@@ -46,17 +59,20 @@ pub(crate) trait EngineRuntime: Send + Sync {
         ))
     }
 
-    async fn suspend(&self) -> Result<(), EngineError>;
-    async fn resume(&self) -> Result<(), EngineError>;
-    async fn shutdown(&self, deadline: Duration) -> Result<(), EngineError>;
+    async fn suspend(&self, deadline: Option<Instant>) -> Result<(), EngineError>;
+    async fn resume(&self, cancellation: CancellationToken) -> Result<(), EngineError>;
+    async fn shutdown(&self, deadline: Option<Instant>) -> Result<(), EngineError>;
 }
 
 pub struct Engine {
-    state: Mutex<EngineState>,
-    lifecycle_gate: Mutex<()>,
+    state: Arc<Mutex<EngineState>>,
+    lifecycle_gate: Arc<Mutex<()>>,
+    lifecycle_requests: Arc<TransitionQueue>,
+    shutdown_gate: Arc<Mutex<()>>,
+    stop_requested: Arc<AtomicBool>,
     runtime: Arc<dyn EngineRuntime>,
     events: EventSender,
-    operations: InFlightOperations,
+    operations: Arc<InFlightOperations>,
 }
 
 impl Engine {
@@ -74,15 +90,25 @@ impl Engine {
         host: HostCapabilities,
         progress: StartupProgressInput,
     ) -> Result<(Self, EventStream), EngineError> {
-        let result = Self::start_runtime(config, host, &progress).await;
-        progress.finish(&result);
-        result
+        let (lifecycle, _) = StartupLifecycle::channel();
+        Self::start_with_lifecycle(config, host, progress, lifecycle).await
+    }
+
+    /// 启动前接受宿主生命周期通知；构造完成后先处理已接收的通知再交出实例。
+    pub async fn start_with_lifecycle(
+        config: EngineConfig,
+        host: HostCapabilities,
+        progress: StartupProgressInput,
+        lifecycle: StartupLifecycleInput,
+    ) -> Result<(Self, EventStream), EngineError> {
+        Self::start_owned(config, host, progress, lifecycle).await
     }
 
     async fn start_runtime(
         config: EngineConfig,
         host: HostCapabilities,
         progress: &StartupProgressInput,
+        requests: Arc<TransitionQueue>,
     ) -> Result<(Self, EventStream), EngineError> {
         const EVENT_CAPACITY: usize = 256;
 
@@ -92,15 +118,19 @@ impl Engine {
                 .await?,
         );
         let engine = Self {
-            state: Mutex::new(EngineState::Running),
-            lifecycle_gate: Mutex::new(()),
+            state: Arc::new(Mutex::new(EngineState::Running)),
+            lifecycle_gate: Arc::new(Mutex::new(())),
+            lifecycle_requests: requests,
+            shutdown_gate: Arc::new(Mutex::new(())),
+            stop_requested: Arc::new(AtomicBool::new(false)),
             runtime,
             events,
-            operations: InFlightOperations::new(),
+            operations: Arc::new(InFlightOperations::new()),
         };
-        engine.events.send(EngineEvent::StateChanged {
-            state: EngineState::Running,
-        });
+        let startup_handoff = engine.bind_lifecycle(true);
+        startup_handoff
+            .await
+            .map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?;
         Ok((engine, stream))
     }
 
@@ -109,201 +139,45 @@ impl Engine {
     where
         R: EngineRuntime + 'static,
     {
-        let (events, stream) = event_channel(event_capacity);
-        (
-            Self {
-                state: Mutex::new(EngineState::Running),
-                lifecycle_gate: Mutex::new(()),
-                runtime,
-                events,
-                operations: InFlightOperations::new(),
-            },
-            stream,
+        Self::from_runtime_with_queue(
+            runtime,
+            event_capacity,
+            Arc::new(TransitionQueue::default()),
         )
+    }
+
+    #[cfg(test)]
+    fn from_runtime_with_queue<R>(
+        runtime: Arc<R>,
+        event_capacity: usize,
+        requests: Arc<TransitionQueue>,
+    ) -> (Self, EventStream)
+    where
+        R: EngineRuntime + 'static,
+    {
+        let (events, stream) = event_channel(event_capacity);
+        let engine = Self {
+            state: Arc::new(Mutex::new(EngineState::Running)),
+            lifecycle_gate: Arc::new(Mutex::new(())),
+            lifecycle_requests: requests,
+            shutdown_gate: Arc::new(Mutex::new(())),
+            stop_requested: Arc::new(AtomicBool::new(false)),
+            runtime,
+            events,
+            operations: Arc::new(InFlightOperations::new()),
+        };
+        let _ = engine.bind_lifecycle(false);
+        (engine, stream)
     }
 
     pub async fn lifecycle_state(&self) -> EngineState {
         *self.state.lock().await
     }
+}
 
-    pub async fn execute(&self, operation: Operation) -> Result<OperationResult, EngineError> {
-        let registered = {
-            let _lifecycle = self.lifecycle_gate.lock().await;
-            if !self.state.lock().await.accepts_operations() {
-                return Err(invalid_state_error());
-            }
-            self.operations.register("operation").await
-        };
-
-        let result = tokio::select! {
-            _ = registered.cancellation.cancelled() => Err(operation_cancelled_error()),
-            result = self.runtime.execute(operation, registered.cancellation.clone()) => result,
-        };
-
-        let should_emit_terminal = self.operations.finish(&registered.id).await;
-        if should_emit_terminal {
-            self.events.send(EngineEvent::OperationFinished {
-                operation_id: registered.id.clone(),
-                terminal: terminal_for_result(&result),
-            });
-        }
-
-        result
-    }
-
-    #[cfg(feature = "dev-tools")]
-    pub async fn execute_dev(
-        &self,
-        operation: DevOperation,
-    ) -> Result<DevOperationResult, EngineError> {
-        let registered = {
-            let _lifecycle = self.lifecycle_gate.lock().await;
-            if !self.state.lock().await.accepts_operations() {
-                return Err(invalid_state_error());
-            }
-            self.operations.register("dev-operation").await
-        };
-
-        let result = tokio::select! {
-            _ = registered.cancellation.cancelled() => Err(operation_cancelled_error()),
-            result = self.runtime.execute_dev(operation, registered.cancellation.clone()) => result,
-        };
-
-        let should_emit_terminal = self.operations.finish(&registered.id).await;
-        if should_emit_terminal {
-            self.events.send(EngineEvent::OperationFinished {
-                operation_id: registered.id.clone(),
-                terminal: terminal_for_result(&result),
-            });
-        }
-        result
-    }
-
-    pub async fn quiesce(&self, deadline: Duration) -> Result<(), EngineError> {
-        let _lifecycle = self.lifecycle_gate.lock().await;
-        self.quiesce_locked(deadline).await
-    }
-
-    pub async fn suspend(&self) -> Result<(), EngineError> {
-        let _lifecycle = self.lifecycle_gate.lock().await;
-        let lifecycle = *self.state.lock().await;
-        match lifecycle {
-            EngineState::Running => self.quiesce_locked(Duration::ZERO).await?,
-            EngineState::Quiesced => {}
-            _ => return Err(invalid_state_error()),
-        }
-
-        self.report_lifecycle_result(LifecycleAction::Suspend, self.runtime.suspend().await)?;
-        *self.state.lock().await = EngineState::Suspended;
-        self.events.send(EngineEvent::StateChanged {
-            state: EngineState::Suspended,
-        });
-        Ok(())
-    }
-
-    pub async fn resume(&self) -> Result<(), EngineError> {
-        let _lifecycle = self.lifecycle_gate.lock().await;
-        if *self.state.lock().await != EngineState::Suspended {
-            return Err(invalid_state_error());
-        }
-
-        self.report_lifecycle_result(LifecycleAction::Resume, self.runtime.resume().await)?;
-        *self.state.lock().await = EngineState::Running;
-        self.events.send(EngineEvent::StateChanged {
-            state: EngineState::Running,
-        });
-        Ok(())
-    }
-
-    pub async fn shutdown(&self, deadline: Duration) -> Result<(), EngineError> {
-        let _lifecycle = self.lifecycle_gate.lock().await;
-        let deadline_at = tokio::time::Instant::now() + deadline;
-        let lifecycle = *self.state.lock().await;
-        match lifecycle {
-            EngineState::Running => {
-                self.quiesce_locked(remaining_until(deadline_at)).await?;
-            }
-            EngineState::Quiesced | EngineState::Suspended => {}
-            _ => return Err(invalid_state_error()),
-        }
-
-        *self.state.lock().await = EngineState::ShuttingDown;
-        self.events.send(EngineEvent::StateChanged {
-            state: EngineState::ShuttingDown,
-        });
-
-        let shutdown_deadline = remaining_until(deadline_at);
-        let runtime_deadline = shutdown_deadline.saturating_sub(SHUTDOWN_COMPLETION_MARGIN);
-        let shutdown_result =
-            match tokio::time::timeout(shutdown_deadline, self.runtime.shutdown(runtime_deadline))
-                .await
-            {
-                Ok(result) => result,
-                Err(_) => Err(operation_cancelled_error()),
-            };
-
-        if let Err(error) = &shutdown_result {
-            if !error.is_retryable() {
-                self.events.send(EngineEvent::Fatal {
-                    error: error.clone(),
-                });
-            }
-        }
-        *self.state.lock().await = EngineState::Stopped;
-        self.events.send(EngineEvent::StateChanged {
-            state: EngineState::Stopped,
-        });
-        self.events.close();
-        shutdown_result
-    }
-
-    async fn quiesce_locked(&self, deadline: Duration) -> Result<(), EngineError> {
-        {
-            let mut state = self.state.lock().await;
-            if *state != EngineState::Running {
-                return Err(invalid_state_error());
-            }
-            *state = EngineState::Quiescing;
-        }
-        self.events.send(EngineEvent::StateChanged {
-            state: EngineState::Quiescing,
-        });
-
-        let drained = self.operations.wait_until_empty(deadline).await;
-        if !drained {
-            self.cancel_in_flight().await;
-        }
-
-        *self.state.lock().await = EngineState::Quiesced;
-        self.events.send(EngineEvent::StateChanged {
-            state: EngineState::Quiesced,
-        });
-        Ok(())
-    }
-
-    async fn cancel_in_flight(&self) {
-        let cancelled = self.operations.cancel_all().await;
-
-        for operation_id in cancelled {
-            self.events.send(EngineEvent::OperationFinished {
-                operation_id,
-                terminal: OperationTerminal::Cancelled,
-            });
-        }
-    }
-
-    fn report_lifecycle_result(
-        &self,
-        action: LifecycleAction,
-        result: Result<(), EngineError>,
-    ) -> Result<(), EngineError> {
-        if let Err(error) = &result {
-            self.events.send(EngineEvent::LifecycleFailed {
-                action,
-                error: error.clone(),
-            });
-        }
-        result
+impl Drop for Engine {
+    fn drop(&mut self) {
+        self.lifecycle_requests.abandon_owner();
     }
 }
 
@@ -326,12 +200,10 @@ fn terminal_for_result<T>(result: &Result<T, EngineError>) -> OperationTerminal 
     }
 }
 
-fn remaining_until(deadline: tokio::time::Instant) -> Duration {
-    deadline.saturating_duration_since(tokio::time::Instant::now())
-}
-
 #[cfg(test)]
 mod tests {
+    mod resume_failure;
+
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
@@ -339,6 +211,7 @@ mod tests {
 
     use async_trait::async_trait;
     use tokio::sync::Notify;
+    use tokio::time::Instant;
     use tokio_util::sync::CancellationToken;
 
     use crate::{
@@ -349,7 +222,7 @@ mod tests {
     use super::{Engine, EngineRuntime};
 
     #[derive(Default)]
-    struct FakeRuntime {
+    pub(super) struct FakeRuntime {
         execute_calls: AtomicUsize,
         block_operations: AtomicBool,
         operation_started: Notify,
@@ -357,9 +230,12 @@ mod tests {
         resume_calls: AtomicUsize,
         fail_suspend: AtomicBool,
         fail_resume: AtomicBool,
-        shutdown_calls: AtomicUsize,
-        shutdown_deadline: StdMutex<Option<Duration>>,
-        fail_shutdown: AtomicBool,
+        pub(super) shutdown_calls: AtomicUsize,
+        pub(super) shutdown_deadline: StdMutex<Option<Duration>>,
+        pub(super) fail_shutdown: AtomicBool,
+        pub(super) block_shutdown: AtomicBool,
+        pub(super) shutdown_started: Notify,
+        pub(super) shutdown_release: Notify,
     }
 
     #[async_trait]
@@ -382,7 +258,7 @@ mod tests {
             Ok(OperationResult::Devices(Vec::new()))
         }
 
-        async fn suspend(&self) -> Result<(), EngineError> {
+        async fn suspend(&self, _deadline: Option<Instant>) -> Result<(), EngineError> {
             self.suspend_calls.fetch_add(1, Ordering::SeqCst);
             if self.fail_suspend.load(Ordering::SeqCst) {
                 return Err(EngineError::new(
@@ -394,7 +270,7 @@ mod tests {
             Ok(())
         }
 
-        async fn resume(&self) -> Result<(), EngineError> {
+        async fn resume(&self, _cancellation: CancellationToken) -> Result<(), EngineError> {
             self.resume_calls.fetch_add(1, Ordering::SeqCst);
             if self.fail_resume.load(Ordering::SeqCst) {
                 return Err(EngineError::new(
@@ -406,9 +282,14 @@ mod tests {
             Ok(())
         }
 
-        async fn shutdown(&self, deadline: Duration) -> Result<(), EngineError> {
+        async fn shutdown(&self, deadline: Option<Instant>) -> Result<(), EngineError> {
             self.shutdown_calls.fetch_add(1, Ordering::SeqCst);
-            *self.shutdown_deadline.lock().unwrap() = Some(deadline);
+            *self.shutdown_deadline.lock().unwrap() =
+                deadline.map(|end| end.saturating_duration_since(Instant::now()));
+            if self.block_shutdown.load(Ordering::SeqCst) {
+                self.shutdown_started.notify_one();
+                self.shutdown_release.notified().await;
+            }
             if self.fail_shutdown.load(Ordering::SeqCst) {
                 return Err(EngineError::new(9001, EngineErrorCategory::Internal, false));
             }
@@ -478,7 +359,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn shutdown_does_not_wait_for_an_abandoned_operation_future() {
+    async fn abandoned_waiter_cancels_cooperative_work_before_shutdown() {
         let runtime = Arc::new(FakeRuntime {
             block_operations: AtomicBool::new(true),
             ..FakeRuntime::default()
@@ -553,7 +434,7 @@ mod tests {
         assert_eq!(runtime.execute_calls.load(Ordering::SeqCst), 1);
 
         let mut states = Vec::new();
-        while states.len() < 4 {
+        while states.len() < 5 {
             if let Some(EngineEvent::StateChanged { state }) = events.next().await {
                 states.push(state);
             }
@@ -564,6 +445,7 @@ mod tests {
                 EngineState::Quiescing,
                 EngineState::Quiesced,
                 EngineState::Suspended,
+                EngineState::Quiesced,
                 EngineState::Running,
             ]
         );
@@ -638,12 +520,7 @@ mod tests {
         .expect("event stream remained open after shutdown");
         assert_eq!(
             states,
-            vec![
-                EngineState::Quiescing,
-                EngineState::Quiesced,
-                EngineState::ShuttingDown,
-                EngineState::Stopped,
-            ]
+            vec![EngineState::ShuttingDown, EngineState::Stopped,]
         );
         let error = engine.execute(Operation::ListDevices).await.unwrap_err();
         assert_eq!(error.category(), EngineErrorCategory::InvalidState);
@@ -658,28 +535,5 @@ mod tests {
 
         let runtime_deadline = runtime.shutdown_deadline.lock().unwrap().unwrap();
         assert!(runtime_deadline <= Duration::from_millis(900));
-    }
-
-    #[tokio::test]
-    async fn shutdown_failure_is_reported_before_stream_closes() {
-        let runtime = Arc::new(FakeRuntime {
-            fail_shutdown: AtomicBool::new(true),
-            ..FakeRuntime::default()
-        });
-        let (engine, mut events) = Engine::from_runtime(runtime, 8);
-
-        let error = engine
-            .shutdown(Duration::from_millis(50))
-            .await
-            .unwrap_err();
-        assert_eq!(error.category(), EngineErrorCategory::Internal);
-
-        let mut fatal = None;
-        while let Some(event) = events.next().await {
-            if let EngineEvent::Fatal { error } = event {
-                fatal = Some(error);
-            }
-        }
-        assert_eq!(fatal, Some(error));
     }
 }
