@@ -1,16 +1,29 @@
 //! Intent port for advancing the cross-device active-clipboard register.
 
 use async_trait::async_trait;
+use std::fmt;
 
 use crate::clipboard::{ActiveClipboardState, MobileConsumableRef};
 
 /// Error surface for active-clipboard register persistence.
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum ActiveClipboardRegisterError {
     #[error("active clipboard register is unavailable while the space is locked")]
     NotUnlocked,
-    #[error("active clipboard register storage failure: {0}")]
-    Storage(String),
+    #[error("active clipboard register storage failure")]
+    Storage(#[source] anyhow::Error),
+}
+
+impl fmt::Debug for ActiveClipboardRegisterError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl From<anyhow::Error> for ActiveClipboardRegisterError {
+    fn from(source: anyhow::Error) -> Self {
+        Self::Storage(source)
+    }
 }
 
 /// Conditionally advance the single-row active-clipboard register.
