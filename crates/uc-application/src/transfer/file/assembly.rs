@@ -164,10 +164,10 @@ impl FileTransferAssembly {
         Arc::clone(&self.facade)
     }
 
-    pub fn interactive_receive(
+    pub(crate) fn interactive_receive(
         &self,
         deps: InteractiveReceiveIntentDeps,
-    ) -> Arc<dyn InboundClipboardApplyPort> {
+    ) -> Arc<ApplyInboundClipboardUseCase> {
         Arc::new(ApplyInboundClipboardUseCase::interactive_receive(
             InteractiveReceiveDeps {
                 common: self.common_receive_deps(deps.common),
