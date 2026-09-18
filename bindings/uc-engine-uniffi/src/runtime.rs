@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::future::{pending, Future};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -519,6 +520,7 @@ enum WorkerCommand {
 pub struct MobileEngine {
     commands: Mutex<Option<tokio::sync::mpsc::UnboundedSender<WorkerCommand>>>,
     lifecycle_commands: Mutex<Option<tokio::sync::mpsc::UnboundedSender<LifecycleCommand>>>,
+    shutdown_pending: AtomicBool,
     events: Arc<EventQueue>,
     worker: WorkerJoin,
 }
@@ -784,6 +786,7 @@ impl MobileEngine {
             Ok(Ok(())) => Ok(Arc::new(Self {
                 commands: Mutex::new(Some(commands)),
                 lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
+                shutdown_pending: AtomicBool::new(false),
                 events,
                 worker: WorkerJoin::new(worker),
             })),
@@ -2760,6 +2763,7 @@ mod tests {
         let engine = MobileEngine {
             commands: Mutex::new(Some(commands)),
             lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
+            shutdown_pending: AtomicBool::new(false),
             events,
             worker: WorkerJoin::new(worker),
         };
@@ -2799,6 +2803,7 @@ mod tests {
         let engine = Arc::new(MobileEngine {
             commands: Mutex::new(Some(commands)),
             lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
+            shutdown_pending: AtomicBool::new(false),
             events,
             worker: WorkerJoin::new(worker),
         });

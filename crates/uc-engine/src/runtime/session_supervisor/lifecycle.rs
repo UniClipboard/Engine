@@ -48,23 +48,12 @@ pub(in super::super) fn lifecycle_error(error: LifecycleError) -> EngineError {
 impl RuntimeLifecyclePort for SessionWork {
     async fn suspend(&self, context: &TransitionContext) -> anyhow::Result<()> {
         let owner = self.0.upgrade().ok_or_else(operation_unavailable_error)?;
-        let _lifecycle = owner.lifecycle.lock().await;
-        owner
-            .session_recovery_enabled
-            .store(false, Ordering::Release);
-        let mut errors = Vec::new();
-        if let Err(error) = drain_operations_and_stop_session(
-            owner.operations.close_and_wait(None, context.deadline()),
-            owner.stop_current_session(FileTransferCancellationReason::Unknown, context.deadline()),
-        )
-        .await
-        {
-            errors.push(error.context("stop current session work"));
-        }
-        if let Err(error) = owner.shutdown_network(context.deadline()).await {
-            errors.push(error.into());
-        }
-        LifecycleError::from_errors(errors).map_err(Into::into)
+        let context = context.clone();
+        // 共同期限可以结束调用方等待，但已经取得的会话必须由原负责人完整交接。
+        // 外层期限取消本次等待时，独立任务继续持有 owner 和生命周期锁；后继重试会在同一锁后接续。
+        tokio::spawn(async move { suspend_owned(owner, context).await })
+            .await
+            .map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?
     }
 
     async fn resume(&self, _context: &TransitionContext) -> anyhow::Result<()> {
@@ -76,6 +65,29 @@ impl RuntimeLifecyclePort for SessionWork {
             .store(true, Ordering::Release);
         Ok(())
     }
+}
+
+async fn suspend_owned(
+    owner: std::sync::Arc<SessionSupervisor>,
+    context: TransitionContext,
+) -> anyhow::Result<()> {
+    let _lifecycle = owner.lifecycle.lock().await;
+    owner
+        .session_recovery_enabled
+        .store(false, Ordering::Release);
+    let mut errors = Vec::new();
+    if let Err(error) = drain_operations_and_stop_session(
+        owner.operations.close_and_wait(None, context.deadline()),
+        owner.stop_current_session(FileTransferCancellationReason::Unknown, context.deadline()),
+    )
+    .await
+    {
+        errors.push(error.context("stop current session work"));
+    }
+    if let Err(error) = owner.shutdown_network(context.deadline()).await {
+        errors.push(error.into());
+    }
+    LifecycleError::from_errors(errors).map_err(Into::into)
 }
 
 async fn drain_operations_and_stop_session<Drain, Stop>(

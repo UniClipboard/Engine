@@ -35,6 +35,7 @@ mod tests {
     };
     use crate::runtime::worker_join::WorkerJoin;
     use crate::runtime::EventQueue;
+    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
 
     #[test]
@@ -56,6 +57,7 @@ mod tests {
         let engine = MobileEngine {
             commands: Mutex::new(Some(commands)),
             lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
+            shutdown_pending: AtomicBool::new(false),
             events: Arc::new(EventQueue::new(1)),
             worker: WorkerJoin::new(worker),
         };

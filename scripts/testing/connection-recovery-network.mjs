@@ -396,21 +396,23 @@ async function knownPeerRecoveryScenarios(a, b, c) {
       assert(!udpPortBound(c, oldPort), 'the previous fixed UDP port is still listening')
       const commandBaselines = new Map(nodes.map(node => [node, node.commands.length]))
       const contactStarted = performance.now()
+      const deadline = contactStarted + 20_000
       await scenario(`E13-known-peer-contact-${iteration}`, async () => {
         await c.start()
         assert(udpPortBound(c, c.bindPort), 'the replacement fixed UDP port is not listening')
         assert(!udpPortBound(c, oldPort), 'the previous fixed UDP port became reachable again')
-        const remaining = 20_000 - (performance.now() - contactStarted)
+        const remaining = deadline - performance.now()
         assert(remaining > 0, 'host restart exhausted the automatic recovery budget')
         await online([c, a], remaining)
         const onlineAt = performance.now()
         assert(onlineAt - contactStarted <= 20_000, 'automatic known-peer recovery exceeded 20 seconds')
-        const [cConnections, aConnections] = await Promise.all([
-          c.call('connections'),
-          a.call('connections'),
-        ])
-        assert(cConnections.outgoing > 0, 'the restarted device did not initiate the recovered connection')
-        assert(aConnections.incoming > 0, 'the waiting device did not retain the inbound recovered connection')
+        await until(async () => {
+          const [cConnections, aConnections] = await Promise.all([
+            c.call('connections'),
+            a.call('connections'),
+          ])
+          return cConnections.outgoing > 0 && aConnections.incoming > 0
+        }, deadline - performance.now(), 'the recovered connection direction did not become observable')
         const forbidden = new Set(['opportunity', 'recover', 'send', 'suspend', 'resume'])
         for (const node of [c, a]) {
           assert(!node.commands.slice(commandBaselines.get(node)).some(command => forbidden.has(command)), 'the scenario used a forbidden recovery trigger before Online')
