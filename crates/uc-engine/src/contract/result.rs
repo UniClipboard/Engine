@@ -32,6 +32,19 @@ pub enum NetworkRecoveryPhaseSummary {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MembershipReadinessStateSummary {
+    Ready,
+    Locked,
+    Recovering,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipReadinessSummary {
+    pub state: MembershipReadinessStateSummary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkRecoveryStatusSummary {
     pub phase: NetworkRecoveryPhaseSummary,
     pub retryable: bool,
@@ -510,6 +523,7 @@ pub enum OperationResult {
     },
     ReceiveReadiness(ReceiveReadinessSummary),
     EncryptionState(EncryptionStateSummary),
+    MembershipReadiness(MembershipReadinessSummary),
     EncryptionLocked,
     SecureStorageAccess {
         granted: bool,
@@ -782,6 +796,9 @@ impl fmt::Debug for OperationResult {
             Self::EncryptionState(state) => debug
                 .field("kind", &"encryption_state")
                 .field("state", state),
+            Self::MembershipReadiness(readiness) => debug
+                .field("kind", &"membership_readiness")
+                .field("readiness", readiness),
             Self::EncryptionLocked => debug.field("kind", &"encryption_locked"),
             Self::SecureStorageAccess { granted } => debug
                 .field("kind", &"secure_storage_access")

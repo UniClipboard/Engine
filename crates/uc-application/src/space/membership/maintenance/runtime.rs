@@ -20,6 +20,7 @@ pub trait MembershipNetworkActivityPort: Send + Sync {
 enum RuntimeCommand {
     Pause(oneshot::Sender<()>),
     Resume(oneshot::Sender<()>),
+    PrepareSession(ScheduledRound),
     StateChanged(ScheduledRound),
     Deadline(tokio::time::Instant),
     Shutdown(oneshot::Sender<()>),
@@ -59,6 +60,25 @@ impl SpaceMembershipMaintenanceActivity {
             })
     }
 
+    pub async fn prepare_for_session(&self) -> Result<(), SpaceMembershipMaintenanceRuntimeError> {
+        let (completed, receiver) = oneshot::channel();
+        let round = ScheduledRound::new(MembershipMaintenanceTrigger::StateChanged)
+            .with_completion(completed);
+        self.commands
+            .send(RuntimeCommand::PrepareSession(round))
+            .map_err(|error| {
+                if let RuntimeCommand::PrepareSession(round) = error.0 {
+                    round
+                        .observation
+                        .not_executed(MaintenanceDisposition::Closed);
+                }
+                SpaceMembershipMaintenanceRuntimeError::Closed
+            })?;
+        receiver
+            .await
+            .map_err(|_| SpaceMembershipMaintenanceRuntimeError::Closed)
+    }
+
     pub fn request_deadline(
         &self,
         remaining: Duration,
@@ -92,6 +112,12 @@ impl crate::space::lifecycle::MembershipSessionActivityPort for SpaceMembershipM
 
     async fn resume(&self) -> Result<(), String> {
         self.resume().await.map_err(|error| error.to_string())
+    }
+
+    async fn prepare_for_session(&self) -> Result<(), String> {
+        self.prepare_for_session()
+            .await
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -210,6 +236,16 @@ impl SpaceMembershipMaintenanceRuntime {
                                 ));
                             }
                             let _ = completed.send(());
+                        }
+                        Some(RuntimeCommand::PrepareSession(round)) => {
+                            network_activity.resume_network_work();
+                            paused = false;
+                            schedule_round(
+                                &maintain,
+                                &mut active_round,
+                                &mut queued_triggers,
+                                round,
+                            );
                         }
                         Some(RuntimeCommand::StateChanged(round)) if !paused => {
                             schedule_round(
@@ -346,6 +382,7 @@ fn spawn_round(
         let ScheduledRound {
             trigger,
             mut observation,
+            completed,
         } = round;
         observation.start();
         let report = observation.scope(maintain.execute(trigger)).await;
@@ -359,6 +396,9 @@ fn spawn_round(
             LocalWorkOutcome::Ok
         };
         observation.finish(outcome);
+        if let Some(completed) = completed {
+            let _ = completed.send(());
+        }
     })
 }
 
@@ -371,7 +411,7 @@ fn schedule_round(
     if active_round.is_some() {
         if let Some(existing) = queued_triggers
             .iter()
-            .find(|existing| existing.trigger == round.trigger)
+            .find(|existing| round.completed.is_none() && existing.trigger == round.trigger)
         {
             round.observation.coalesce(&existing.observation);
         } else {
@@ -386,6 +426,7 @@ fn schedule_round(
 struct ScheduledRound {
     trigger: MembershipMaintenanceTrigger,
     observation: MaintenanceObservation,
+    completed: Option<oneshot::Sender<()>>,
 }
 
 impl ScheduledRound {
@@ -401,7 +442,13 @@ impl ScheduledRound {
         Self {
             trigger,
             observation: MaintenanceObservation::request(reason),
+            completed: None,
         }
+    }
+
+    fn with_completion(mut self, completed: oneshot::Sender<()>) -> Self {
+        self.completed = Some(completed);
+        self
     }
 }
 

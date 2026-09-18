@@ -8,6 +8,7 @@ pub(crate) mod invitation;
 pub(crate) mod join_space;
 #[cfg(feature = "dev-tools")]
 pub(crate) mod membership_diagnostics;
+pub(crate) mod membership_readiness;
 pub(crate) mod reset_space;
 pub(crate) mod session_recovery;
 pub(crate) mod setup_state;

@@ -24,6 +24,7 @@ use crate::space::membership::QueryDeviceTrustUseCase;
 use crate::space::membership::QueryMembershipAdmissionUseCase;
 use crate::space::membership::QueryMembershipConflictStatusPort;
 use crate::space::membership::QueryMembershipDiagnosticsUseCase;
+use crate::space::membership::QueryMembershipReadinessUseCase;
 use crate::space::membership::RecoverMembershipConflictUseCase;
 use crate::space::membership::RemoveSpaceMemberUseCase;
 use crate::space::membership::ResolveMembershipConflictUseCase;
@@ -133,6 +134,7 @@ pub(crate) struct SpaceApplication {
     decide_device_trust_change: Arc<DecideDeviceTrustChangeUseCase>,
     resolve_membership_conflict: Arc<ResolveMembershipConflictUseCase>,
     query_membership_diagnostics: Arc<QueryMembershipDiagnosticsUseCase>,
+    query_membership_readiness: Arc<QueryMembershipReadinessUseCase>,
     issue_membership_branch_recovery: Arc<IssueMembershipBranchRecoveryUseCase>,
     space_admission: Arc<SpaceAdmissionProtocol>,
     membership_history_endpoint: Arc<MembershipHistoryAntiEntropy>,
@@ -285,6 +287,9 @@ impl SpaceApplication {
         let query_membership_admission =
             Arc::new(QueryMembershipAdmissionUseCase::new(Arc::clone(&ledger)));
         let current_scope: Arc<dyn CurrentSpaceMemberScopePort> = ledger.clone();
+        let query_membership_readiness = Arc::new(QueryMembershipReadinessUseCase::new(
+            Arc::clone(&current_scope),
+        ));
         let deferred_maintenance_wake = Arc::new(DeferredMaintenanceWake::new());
         let membership_activation = Arc::new(RePairingAwareMembershipActivation::new(
             activate_membership_effect,
@@ -434,6 +439,7 @@ impl SpaceApplication {
             decide_device_trust_change,
             resolve_membership_conflict,
             query_membership_diagnostics,
+            query_membership_readiness,
             issue_membership_branch_recovery,
             space_admission,
             membership_history_endpoint,
@@ -496,6 +502,10 @@ impl SpaceApplication {
 
     pub(crate) fn query_membership_diagnostics(&self) -> Arc<QueryMembershipDiagnosticsUseCase> {
         Arc::clone(&self.query_membership_diagnostics)
+    }
+
+    pub(crate) fn query_membership_readiness(&self) -> Arc<QueryMembershipReadinessUseCase> {
+        Arc::clone(&self.query_membership_readiness)
     }
 
     pub(crate) fn membership_branch_recovery_endpoint(

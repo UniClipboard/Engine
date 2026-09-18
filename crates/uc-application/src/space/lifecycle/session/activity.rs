@@ -16,6 +16,7 @@ trait SearchSessionActivityPort: Send + Sync {
 pub trait MembershipSessionActivityPort: Send + Sync {
     async fn pause(&self) -> Result<(), String>;
     async fn resume(&self) -> Result<(), String>;
+    async fn prepare_for_session(&self) -> Result<(), String>;
 }
 
 #[async_trait]
@@ -229,6 +230,10 @@ mod tests {
 
         async fn resume(&self) -> Result<(), String> {
             self.resumes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn prepare_for_session(&self) -> Result<(), String> {
             Ok(())
         }
     }

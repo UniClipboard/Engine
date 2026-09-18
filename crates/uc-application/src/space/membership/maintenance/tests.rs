@@ -634,6 +634,60 @@ async fn runtime_pause_resume_peer_reachability_and_shutdown_share_one_lifecycle
 }
 
 #[tokio::test]
+async fn session_preparation_waits_for_an_immediate_maintenance_round() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let step = |name| {
+        Arc::new(RecordingStep {
+            name,
+            calls: Arc::clone(&calls),
+            outcome: MembershipMaintenanceStepOutcome::Completed,
+        })
+    };
+    let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
+        MaintainSpaceMembershipDeps {
+            admissions: Arc::new(BlockingFirstRecordingAdmission {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+                calls: Arc::clone(&calls),
+                first: std::sync::atomic::AtomicBool::new(true),
+            }),
+            effects: step("effects"),
+            conflicts: step("conflicts"),
+            group_update_delivery: step("group_updates"),
+            restricted_delivery: step("restricted"),
+            synchronization: step("synchronize"),
+            cleanup: step("cleanup"),
+        },
+    ));
+    let (_peer_reachability_tx, peer_reachability_rx) = tokio::sync::broadcast::channel(4);
+    let runtime = SpaceMembershipMaintenanceRuntime::start(
+        maintain,
+        peer_reachability_rx,
+        inactive_known_peer_contacts(),
+        std::time::Duration::from_secs(3600),
+        Arc::new(NoopNetworkActivity),
+    );
+    started.notified().await;
+
+    let activity = runtime.activity();
+    let preparation = tokio::spawn(async move { activity.prepare_for_session().await });
+    tokio::task::yield_now().await;
+    assert!(!preparation.is_finished());
+
+    release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(1), preparation)
+        .await
+        .expect("session preparation should not wait for the periodic interval")
+        .expect("session preparation task should complete")
+        .expect("membership runtime should remain available");
+    assert_eq!(calls.lock().unwrap().len(), 14);
+
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
 async fn pause_cancels_network_work_and_waits_for_the_current_commit_boundary() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let step = |name| {

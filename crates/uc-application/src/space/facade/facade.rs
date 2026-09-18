@@ -52,7 +52,10 @@ use crate::space::lifecycle::{
 use crate::space::lifecycle::{
     RecoverSpaceSessionError, RecoverSpaceSessionResult, RecoverSpaceSessionUseCase,
 };
-use crate::space::membership::RePairingState;
+use crate::space::membership::{
+    MembershipReadiness, QueryMembershipReadinessError, QueryMembershipReadinessUseCase,
+    RePairingState,
+};
 use crate::transfer::receive::reconciliation::EnsureReceiveReadyPort;
 use uc_core::ids::DeviceId;
 
@@ -75,6 +78,7 @@ pub struct SpaceFacade {
     recover_space_session: Arc<RecoverSpaceSessionUseCase>,
     change_encryption_passphrase: Arc<ChangeEncryptionPassphraseUseCase>,
     query_space_access_state: Arc<QuerySpaceAccessStateUseCase>,
+    query_membership_readiness: Arc<QueryMembershipReadinessUseCase>,
     query_space_setup_state: Arc<QuerySpaceSetupStateUseCase>,
     current_member_scope: Arc<dyn crate::space::membership::CurrentSpaceMemberScopePort>,
     member_roster: MemberRosterFacade,
@@ -133,6 +137,7 @@ impl SpaceFacade {
         let space_admission_endpoint = application.space_admission_endpoint();
         let membership_session_activity = application.membership_session_activity();
         let membership_maintenance = application.membership_maintenance_wake();
+        let query_membership_readiness = application.query_membership_readiness();
         let application_activity = Arc::new(DeferredSpaceSessionActivity::new());
         let SpaceSessionDeps {
             space_access,
@@ -145,7 +150,7 @@ impl SpaceFacade {
             encryption_passphrase_change,
         } = session;
         let activity = combine_space_session_activity(
-            membership_session_activity,
+            Arc::clone(&membership_session_activity),
             Arc::clone(&application_activity)
                 as Arc<dyn crate::space::lifecycle::SpaceSessionActivityPort>,
         );
@@ -273,6 +278,7 @@ impl SpaceFacade {
         let session_readiness = Arc::new(PostSessionReadiness::new(
             Arc::clone(&upgrade_space),
             Arc::clone(&mobile_consumable_backfill),
+            membership_session_activity,
             Arc::clone(&member_repo),
         ));
         let unlock_space = Arc::new(UnlockSpaceUseCase::new(
@@ -313,6 +319,7 @@ impl SpaceFacade {
             recover_space_session,
             change_encryption_passphrase,
             query_space_access_state,
+            query_membership_readiness,
             query_space_setup_state,
             current_member_scope: peer_scope,
             member_roster,
@@ -390,17 +397,19 @@ impl SpaceFacade {
     pub async fn recover_space_session(
         &self,
     ) -> Result<RecoverSpaceSessionResult, RecoverSpaceSessionError> {
-        let result = self.recover_space_session.execute().await?;
-        if result.resumed {
-            self.membership_maintenance.wake();
-        }
-        Ok(result)
+        self.recover_space_session.execute().await
     }
 
     pub async fn query_space_access_state(
         &self,
     ) -> Result<SpaceAccessState, QuerySpaceAccessStateError> {
         self.query_space_access_state.execute().await
+    }
+
+    pub async fn query_membership_readiness(
+        &self,
+    ) -> Result<MembershipReadiness, QueryMembershipReadinessError> {
+        self.query_membership_readiness.execute().await
     }
 
     /// A1 · Create the encrypted space on a fresh device. On success the
@@ -436,7 +445,6 @@ impl SpaceFacade {
             .resume_after_session_ready()
             .await
             .map_err(|error| UnlockSpaceError::internal(anyhow::anyhow!(error)))?;
-        self.membership_maintenance.wake();
         Ok(UnlockSpaceResult { space_id })
     }
 
