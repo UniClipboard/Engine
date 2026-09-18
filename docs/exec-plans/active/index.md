@@ -2,7 +2,6 @@
 
 这里包含设计中、实施中、待实现或暂时阻塞的工作。状态以各文件开头为准。
 
-- [统一运行生命周期](2026-09-12-unified-runtime-lifecycle.md)（实施中）
 - [034 确定性虚拟 Peer Network 测试套件](034-deterministic-virtual-peer-network-test-suite.md)
 - [038 双设备配对本机耗时压缩到一秒](038-pairing-local-latency-budget.md)（实施中）
 - [039 历史本地调试记录逐项收口](039-local-debug-inventory-cleanup.md)
@@ -15,4 +14,6 @@
 - [配对内部处理与排队诊断](2026-09-13-pairing-local-work-diagnostics.md)
 - [Engine 空闲重复工作与准入存储性能修复](2026-09-13-engine-idle-work-and-admission-performance.md)
 - [已知设备联系驱动的成员恢复与地址更新](2026-09-17-known-peer-contact-recovery.md)（实施中）
+- [统一暂停、恢复与中断恢复](2026-09-12-unified-runtime-lifecycle.md)（实施中，剩余设备与产品宿主验收未完成；包含已有后台问题修复记录入口）
+
 计划完成时先更新稳定设计/ADR 和验收证据，再移入 `../completed/`。
