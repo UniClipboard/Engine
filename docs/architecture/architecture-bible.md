@@ -898,6 +898,8 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 - 2026-09-17：HarmonyOS 暂停将宿主预算传给 Engine，等待超时不宣称收尾完成；关闭改用完整等待入口，仅在资源真实释放后销毁运行期与观测装配。平台层不编排或推断内部会话步骤。
 
+- 2026-09-17：移动验收宿主以真实剪贴板、文件访问和安全存储边界运行启动、暂停、恢复与关闭场景；iOS 与 Android 脚本只构建、安装并触发同一探针，不复制产品逻辑。实体设备执行属于设备验收，未运行时明确记为跳过。
+
 - 2026-09-16：准入 Space transition 的失败分类保留完整来源链。`DbSnapshotError` 三个 variant 改为携带具体 `std::io::Error`/`diesel::result::Error`/连接池错误，`ActiveSpaceGenerationManifestStoreError::Storage`、`AdmissionSpaceTransitionError` 与 `SpaceRebuildTransitionError` 的能力失败 variant 改为携带 `#[source] source: anyhow::Error`，Infra 与 Engine 的映射不再用 `map_err(|_| ...)` 丢弃底层 io、diesel 或安全存储原因；调用方沿来源链分类（权限不足、空间不足、只读事务等），纯判断 variant（`Locked`、`UnreadableHistoryRequiresConfirmation`、`InsufficientStorage`）保持无来源。稳定失败分类、公开入口、持久化格式与分层均未改变。
 
 - 2026-09-16：自写回显归因从一次性消费改为按单次写入的回显集。远程推送的 next-change fallback 拥有两次同内容类别吸收预算，内容命中消耗配对 fallback 的一次预算而非删除，且首次回显后剩余预算只保留 5 秒；本地恢复保持一次性语义。该修改补齐“一次程序化写入产生多个系统事件”时的归因，避免第二个事件被误判为本地捕获并回传对端形成 A↔B 图片回环；不改变分层、公开接口或持久化格式。
