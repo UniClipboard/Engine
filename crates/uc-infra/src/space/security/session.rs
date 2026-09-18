@@ -893,7 +893,7 @@ mod tests {
             .unwrap();
 
         assert!(!session.is_ready());
-        assert!(session.get_master_key().is_ok());
+        assert!(session.get_master_key().is_err());
 
         drop(transaction);
 

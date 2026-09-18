@@ -35,7 +35,7 @@ use uc_application::deps::{
     ProfileKeyAccessProbePortError, SponsorAdmissionSecurityRequest,
     SponsorPreparedAdmissionSecurity,
 };
-use uc_application::facade::{RuntimeLifecyclePort, TransitionContext};
+use uc_application::deps::{RuntimeLifecyclePort, TransitionContext};
 use uc_core::crypto::domain::{ActiveSpace, Passphrase as DomainPassphrase};
 use uc_core::crypto::model::{EncryptionError, Passphrase as LegacyPassphrase};
 
