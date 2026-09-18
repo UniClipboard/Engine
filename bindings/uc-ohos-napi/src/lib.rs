@@ -277,9 +277,15 @@ pub fn prepare_host(env: Env, mut host: OhHost) -> napi::Result<External<Prepare
 }
 
 #[napi]
+pub fn create_startup_lifecycle() -> runtime::OhStartupLifecycle {
+    runtime::OhStartupLifecycle::new()
+}
+
+#[napi]
 pub async fn start_engine(
     config: OhEngineConfig,
     mut prepared_host: External<PreparedHost>,
+    lifecycle: &runtime::OhStartupLifecycle,
 ) -> napi::Result<OhEngine> {
     let host = prepared_host.host.take().ok_or_else(|| {
         napi::Error::new(
@@ -287,7 +293,7 @@ pub async fn start_engine(
             "OHOS_HOST_ALREADY_CONSUMED".to_owned(),
         )
     })?;
-    OhEngine::start(config, host).await
+    OhEngine::start(config, host, lifecycle).await
 }
 
 #[cfg(target_env = "ohos")]

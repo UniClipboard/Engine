@@ -11,7 +11,8 @@ use uc_engine::{
     EngineError, EngineEvent, EngineState, EventStream, ExportEntryInput, HostFileHandle,
     InvitationAvailability, JoinSpaceInput, Operation, OperationResult, OperationTerminal,
     RecoverSessionInput, RefreshReason, RemoveMemberInput, RestoreClipboardInput, SecretString,
-    SendFilesInput, SendImageInput, SendReportSummary, SendTextInput,
+    SendFilesInput, SendImageInput, SendReportSummary, SendTextInput, StartupLifecycle,
+    StartupLifecycleInput, StartupProgress,
 };
 use zeroize::Zeroizing;
 
@@ -27,13 +28,64 @@ pub struct OhEngine {
     events: tokio::sync::Mutex<EventStream>,
 }
 
+#[napi]
+pub struct OhStartupLifecycle {
+    input: std::sync::Mutex<Option<StartupLifecycleInput>>,
+    control: StartupLifecycle,
+}
+
+impl OhStartupLifecycle {
+    pub(crate) fn new() -> Self {
+        let (input, control) = StartupLifecycle::channel();
+        Self {
+            input: std::sync::Mutex::new(Some(input)),
+            control,
+        }
+    }
+
+    fn take_input(&self) -> napi::Result<StartupLifecycleInput> {
+        self.input
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .ok_or_else(|| {
+                napi::Error::new(
+                    Status::InvalidArg,
+                    "OHOS_STARTUP_LIFECYCLE_ALREADY_CONSUMED",
+                )
+            })
+    }
+}
+
+#[napi]
+impl OhStartupLifecycle {
+    #[napi]
+    pub async fn suspend_with_deadline(&self, deadline_ms: u32) -> napi::Result<()> {
+        self.control
+            .suspend_with_deadline(Duration::from_millis(u64::from(deadline_ms)))
+            .await
+            .map_err(engine_error)
+    }
+
+    #[napi]
+    pub async fn resume(&self) -> napi::Result<()> {
+        self.control.resume().await.map_err(engine_error)
+    }
+}
+
 impl OhEngine {
-    pub(crate) async fn start(config: OhEngineConfig, host: OhHost) -> napi::Result<Self> {
+    pub(crate) async fn start(
+        config: OhEngineConfig,
+        host: OhHost,
+        lifecycle: &OhStartupLifecycle,
+    ) -> napi::Result<Self> {
         let capabilities = host::capabilities(host)?;
         let config = EngineConfig::new(config.app_version).with_profile_id(config.profile_id);
-        let (engine, events) = Engine::start(config, capabilities)
-            .await
-            .map_err(engine_error)?;
+        let (progress, _) = StartupProgress::channel();
+        let (engine, events) =
+            Engine::start_with_lifecycle(config, capabilities, progress, lifecycle.take_input()?)
+                .await
+                .map_err(engine_error)?;
         Ok(Self {
             engine: Arc::new(engine),
             events: tokio::sync::Mutex::new(events),
@@ -494,6 +546,17 @@ impl OhEngine {
         let result = self
             .engine
             .shutdown(Duration::from_millis(u64::from(deadline_ms)))
+            .await
+            .map_err(engine_error);
+        schedule_flush_after_success(&result);
+        result
+    }
+
+    #[napi]
+    pub async fn shutdown_until_complete(&self) -> napi::Result<()> {
+        let result = self
+            .engine
+            .shutdown_until_complete()
             .await
             .map_err(engine_error);
         schedule_flush_after_success(&result);

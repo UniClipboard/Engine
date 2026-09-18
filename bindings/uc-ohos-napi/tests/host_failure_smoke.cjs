@@ -63,7 +63,8 @@ async function main() {
     await assert.rejects(
       addon.startEngine(
         { appVersion: '1.2.3', profileId: 'ohos-host-failure-smoke' },
-        preparedHost
+        preparedHost,
+        addon.createStartupLifecycle()
       ),
       /UC_ENGINE:\d+:unavailable:true/
     );

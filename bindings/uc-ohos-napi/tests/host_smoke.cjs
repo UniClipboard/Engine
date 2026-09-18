@@ -147,7 +147,8 @@ async function main() {
     const preparedHost = addon.prepareHost(host);
     const engine = await addon.startEngine(
       { appVersion: '1.2.3', profileId: 'ohos-host-smoke' },
-      preparedHost
+      preparedHost,
+      addon.createStartupLifecycle()
     );
     const created = await engine.createSpace(
       'ohos-host-smoke',
@@ -228,7 +229,8 @@ async function main() {
     );
     const restarted = await addon.startEngine(
       { appVersion: '1.2.3', profileId: 'ohos-host-smoke' },
-      addon.prepareHost(host)
+      addon.prepareHost(host),
+      addon.createStartupLifecycle()
     );
     await assert.rejects(
       restarted.createSpace('ohos-host-smoke', 'correct horse battery staple'),

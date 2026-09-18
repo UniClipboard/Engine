@@ -295,8 +295,10 @@ fn ohos_system_lifecycle_uses_the_single_engine_runtime() {
     assert!(runtime.contains("export const engineRuntime"));
     assert!(runtime.contains("recoverSession(true)"));
     assert!(runtime.contains("lifecycleState()"));
-    assert!(runtime.contains("await active.suspend()"));
+    assert!(runtime.contains("startupLifecycle?.suspendWithDeadline(2_000)"));
+    assert!(runtime.contains("await active.suspendWithDeadline(2_000)"));
     assert!(runtime.contains("await active.resume()"));
+    assert!(runtime.contains("await active.shutdownUntilComplete()"));
     assert!(runtime.contains("Lifecycle transition failed"));
     assert!(ability.contains("onBackground(): void"));
     assert!(ability.contains("engineRuntime.onBackground()"));

@@ -1,5 +1,5 @@
 import engine from 'libuc_ohos_napi.so';
-import type { OhEngine, OhMemberRemoval } from 'libuc_ohos_napi.so';
+import type { OhEngine, OhMemberRemoval, OhStartupLifecycle } from 'libuc_ohos_napi.so';
 import { common } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
 import { picker } from '@kit.CoreFileKit';
@@ -25,6 +25,8 @@ class EngineRuntime {
   private readonly files = new FileHandleRegistry();
   private readonly privateStorage = new PrivateStorageProbe();
   private activeEngine?: OhEngine;
+  private startupLifecycle?: OhStartupLifecycle;
+  private startupFinished?: Promise<void>;
   private identityDeviceId?: string;
   private version: string = 'Loading';
   private status: string = 'Checking unified core';
@@ -33,10 +35,13 @@ class EngineRuntime {
   private memberRemovalState: string = 'none';
 
   async start(context: common.UIAbilityContext): Promise<EngineRuntimeSnapshot> {
-    if (this.activeEngine !== undefined) {
+    if (this.activeEngine !== undefined || this.startupLifecycle !== undefined) {
       return this.snapshot();
     }
 
+    let finishStartup: () => void = () => {};
+    const startupFinished = new Promise<void>((resolve) => { finishStartup = resolve; });
+    this.startupFinished = startupFinished;
     try {
       this.version = engine.coreVersion();
       this.storage.verifyAccess();
@@ -54,9 +59,12 @@ class EngineRuntime {
         }
       );
       const preparedHost = engine.prepareHost(createEngineHost(context, this.storage, this.files));
+      const startupLifecycle = engine.createStartupLifecycle();
+      this.startupLifecycle = startupLifecycle;
       const active = await engine.startEngine(
         { appVersion: '1.0.0', profileId: 'ohos-system-host-probe' },
-        preparedHost
+        preparedHost,
+        startupLifecycle
       );
       const recovery = await active.recoverSession(true);
       if (recovery.unlocked && !recovery.resumed) {
@@ -73,12 +81,19 @@ class EngineRuntime {
       this.convergenceState = (await active.queryMembershipConvergence()).state;
       this.applyMemberRemoval(await active.queryMemberRemoval());
       this.activeEngine = active;
+      this.startupLifecycle = undefined;
       this.status = 'Ready';
       this.details = '';
       return this.snapshot();
     } catch (error) {
+      this.startupLifecycle = undefined;
       this.fail('Native core failed to load', error as Object);
       throw new Error(String(error));
+    } finally {
+      finishStartup();
+      if (this.startupFinished === startupFinished) {
+        this.startupFinished = undefined;
+      }
     }
   }
 
@@ -91,10 +106,13 @@ class EngineRuntime {
   }
 
   async shutdown(): Promise<void> {
+    await this.startupFinished;
     const active = this.activeEngine;
-    this.activeEngine = undefined;
     if (active !== undefined) {
-      await active.shutdown(5_000);
+      await active.shutdownUntilComplete();
+      if (this.activeEngine === active) {
+        this.activeEngine = undefined;
+      }
     }
     await engine.shutdownProcessObservability(1_000);
   }
@@ -166,17 +184,22 @@ class EngineRuntime {
   private async transitionToBackground(): Promise<void> {
     const active = this.activeEngine;
     if (active === undefined) {
+      await this.startupLifecycle?.suspendWithDeadline(2_000);
       return;
     }
     const state = await active.lifecycleState();
     if (state === 'running' || state === 'quiesced') {
-      await active.suspend();
+      await active.suspendWithDeadline(2_000);
     }
   }
 
   private async transitionToForeground(): Promise<void> {
     const active = this.activeEngine;
-    if (active === undefined || await active.lifecycleState() !== 'suspended') {
+    if (active === undefined) {
+      await this.startupLifecycle?.resume();
+      return;
+    }
+    if (await active.lifecycleState() !== 'suspended') {
       return;
     }
     await active.resume();
