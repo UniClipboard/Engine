@@ -7,4 +7,3 @@
 pub(crate) mod host_event_bus;
 pub(crate) mod host_event_publisher;
 pub(crate) mod outbound_entry_cache;
-pub(crate) mod task_supervision;

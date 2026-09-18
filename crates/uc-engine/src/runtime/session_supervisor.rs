@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn, Instrument};
+use tracing::{error, info, Instrument};
 use uc_application::facade::{
     AppFacade, ApplicationRuntime, ClipboardInboundEvent, ClipboardInboundEventAction,
     ClipboardInboundEventPort, CompletePendingSpaceTransitionError,
@@ -1018,23 +1018,15 @@ impl ProductionSession {
         );
         info!("Engine session 网络观测任务已停止");
         let stopping = LocalWorkObservation::begin(LocalWorkStep::SessionStopApplication);
-        let application_shutdown = self.application.shutdown().await;
-        stopping.finish(
-            if application_shutdown.history.is_some() || application_shutdown.search.is_some() {
-                LocalWorkOutcome::Error
-            } else {
-                LocalWorkOutcome::Ok
-            },
-        );
+        let application_shutdown = self.application.shutdown(None).await;
+        stopping.finish(if application_shutdown.is_err() {
+            LocalWorkOutcome::Error
+        } else {
+            LocalWorkOutcome::Ok
+        });
         info!("Engine session Application runtime 已停止");
-        if application_shutdown.history.is_some() {
-            warn!(
-                error_kind = "history",
-                "history maintenance stopped with an error"
-            );
-        }
-        if application_shutdown.search.is_some() {
-            error!(error_kind = "search", "search runtime stopped with error");
+        if application_shutdown.is_err() {
+            error!("application runtime stopped with error");
         }
         let stopping = LocalWorkObservation::begin(LocalWorkStep::SessionStopNetwork);
         self.sync_session.shutdown(transfer_reason).await;

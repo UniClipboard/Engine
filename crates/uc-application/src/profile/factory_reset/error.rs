@@ -1,3 +1,5 @@
+use crate::runtime_lifecycle::LifecycleError;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ProfileFactoryResetError {
     #[error(transparent)]
@@ -7,7 +9,10 @@ pub enum ProfileFactoryResetError {
     #[error("profile lifecycle state is missing")]
     LifecycleMissing,
     #[error("profile runtime could not be stopped")]
-    StopRuntime,
+    StopRuntime {
+        #[source]
+        source: LifecycleError,
+    },
     #[error("profile keys could not be wiped")]
     WipeKeys,
     #[error("profile state could not be cleared")]

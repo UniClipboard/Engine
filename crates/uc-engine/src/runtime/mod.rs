@@ -15,11 +15,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::{error, warn};
-use uc_application::deps::{
-    ProfileFactoryResetCapabilityError, ProfileUpgradeBackupPort, StopProfileRuntimePort,
-};
+use uc_application::deps::{ProfileUpgradeBackupPort, StopProfileRuntimePort};
 use uc_application::facade::{
-    AppFacade, ApplicationRuntime, NetworkRecoveryEvent, ProfileFactoryResetFacade,
+    AppFacade, ApplicationRuntime, LifecycleError, NetworkRecoveryEvent, ProfileFactoryResetFacade,
     ProfileFactoryResetOutcome, ProfileFactoryResetRequest,
 };
 use uc_core::ports::ClockPort;
@@ -79,12 +77,15 @@ struct ProductionProfileRuntimeStopper {
 
 #[async_trait::async_trait]
 impl StopProfileRuntimePort for ProductionProfileRuntimeStopper {
-    async fn stop_profile_runtime(&self) -> Result<(), ProfileFactoryResetCapabilityError> {
+    async fn stop_profile_runtime(&self) -> Result<(), LifecycleError> {
         self.security_lifecycle.close_security_session();
         self.session_supervisor
             .suspend()
             .await
-            .map_err(|_| ProfileFactoryResetCapabilityError)?;
+            .map_err(|source| LifecycleError {
+                primary: source.into(),
+                additional: Vec::new(),
+            })?;
         self.session_supervisor.clear_factory();
         task_shutdown::shutdown_tasks(&self.tasks, Duration::from_millis(500)).await;
         Ok(())
