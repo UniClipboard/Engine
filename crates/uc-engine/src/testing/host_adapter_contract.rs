@@ -1744,17 +1744,30 @@ async fn suspend_waits_for_a_started_host_clipboard_change_to_finish() {
     suspending.await.unwrap();
 
     engine.resume().await.unwrap();
-    let result = engine
-        .execute(crate::Operation::QueryHistory(crate::QueryHistoryInput {
-            cursor: None,
-            limit: 10,
-            query: Some(probe.clone()),
-        }))
-        .await
-        .unwrap();
-    let crate::OperationResult::HistoryPage { entries, .. } = result else {
-        panic!("expected history page");
-    };
+    let entries = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match engine
+                .execute(crate::Operation::QueryHistory(crate::QueryHistoryInput {
+                    cursor: None,
+                    limit: 10,
+                    query: Some(probe.clone()),
+                }))
+                .await
+            {
+                Ok(crate::OperationResult::HistoryPage { entries, .. }) => break entries,
+                Ok(other) => panic!("expected history page, got {other:?}"),
+                Err(error)
+                    if error.is_retryable()
+                        && error.category() == crate::EngineErrorCategory::Unavailable =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                Err(error) => panic!("query history failed: {error:?}"),
+            }
+        }
+    })
+    .await
+    .expect("history search did not recover after resume");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].preview.as_deref(), Some(probe.as_str()));
 

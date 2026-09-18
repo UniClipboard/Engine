@@ -13,7 +13,7 @@ use crate::{
     CreateSpaceInput, DeviceMembershipSummary, DeviceReachabilitySummary, Engine, EngineConfig,
     EngineEvent, EngineState, HistoryEntryInput, HostCapabilities, HostClipboardSnapshot,
     HostDirectories, HostFileHandle, JoinSpaceInput, JoinSpaceStatusSummary, Operation,
-    OperationResult, QueryHistoryInput, SecretString, SendFilesInput, SendTextInput,
+    OperationResult, QueryHistoryInput, RefreshReason, SecretString, SendFilesInput, SendTextInput,
 };
 
 #[path = "offline_lifecycle/crash.rs"]
@@ -151,7 +151,26 @@ async fn peer_restart_does_not_block_local_work_and_recovers_an_offline_file() {
     else {
         panic!("expected join result");
     };
-    assert!(!matches!(status, JoinSpaceStatusSummary::Rejected { .. }));
+    match status {
+        JoinSpaceStatusSummary::Active { .. } => {}
+        JoinSpaceStatusSummary::Pending { .. } => {
+            next_engine_event_matching(&mut local_events, |event| {
+                matches!(
+                    event,
+                    EngineEvent::RefreshRequired {
+                        reason: RefreshReason::StateInvalidated
+                    }
+                )
+            })
+            .await;
+        }
+        JoinSpaceStatusSummary::Rejected { reason, .. } => {
+            panic!("join was rejected: {reason:?}");
+        }
+        JoinSpaceStatusSummary::Terminated { reason, .. } => {
+            panic!("join was terminated: {reason:?}");
+        }
+    }
     let peer_id = timeout(Duration::from_secs(20), async {
         loop {
             next_engine_event_matching(&mut local_events, |event| {
