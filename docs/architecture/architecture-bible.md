@@ -877,6 +877,8 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 - 2026-09-17：成员维护由自身负责人持有共享工作与停止边界；停止后拒绝新请求并等待已开始的维护与记录完成，单个调用方取消不终止共享维护，任务异常由负责人保留。暂停期间的提示合并到恢复后处理，不向调用方泄露内部步骤。
 
+- 2026-09-17：空间会话提供唯一完整关闭动作，统一停止连接维护、成员维护与网络恢复并等待三者完成；任一失败不跳过其它收尾，全部失败合并保留，重复关闭结果稳定。上层不再拼接三个内部负责人的关闭步骤。
+
 - 2026-09-16：准入 Space transition 的失败分类保留完整来源链。`DbSnapshotError` 三个 variant 改为携带具体 `std::io::Error`/`diesel::result::Error`/连接池错误，`ActiveSpaceGenerationManifestStoreError::Storage`、`AdmissionSpaceTransitionError` 与 `SpaceRebuildTransitionError` 的能力失败 variant 改为携带 `#[source] source: anyhow::Error`，Infra 与 Engine 的映射不再用 `map_err(|_| ...)` 丢弃底层 io、diesel 或安全存储原因；调用方沿来源链分类（权限不足、空间不足、只读事务等），纯判断 variant（`Locked`、`UnreadableHistoryRequiresConfirmation`、`InsufficientStorage`）保持无来源。稳定失败分类、公开入口、持久化格式与分层均未改变。
 
 - 2026-09-16：自写回显归因从一次性消费改为按单次写入的回显集。远程推送的 next-change fallback 拥有两次同内容类别吸收预算，内容命中消耗配对 fallback 的一次预算而非删除，且首次回显后剩余预算只保留 5 秒；本地恢复保持一次性语义。该修改补齐“一次程序化写入产生多个系统事件”时的归因，避免第二个事件被误判为本地捕获并回传对端形成 A↔B 图片回环；不改变分层、公开接口或持久化格式。
