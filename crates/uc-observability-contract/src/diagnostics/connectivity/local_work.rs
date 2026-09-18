@@ -12,6 +12,7 @@ use super::{emit_local, millis, record::LocalEvent, AdmissionExchangeSide, Obser
 tokio::task_local! {
     static PAIRING_WORK: PairingWork;
     static WORK_ACTIVE: ();
+    static BLOB_PUBLISH_ACTIVE: ();
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -51,6 +52,10 @@ pub fn scope_pairing_work<T>(
             .scope(PAIRING_WORK.scope(PairingWork { side, message }, work))
             .await
     }
+}
+
+pub fn scope_blob_publish<T>(work: impl Future<Output = T>) -> impl Future<Output = T> {
+    BLOB_PUBLISH_ACTIVE.scope((), work)
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -98,6 +103,12 @@ pub enum LocalWorkStep {
     SessionPrepare,
     SessionRecover,
     SessionStart,
+    BlobPlaintextHash,
+    BlobCompress,
+    BlobEncrypt,
+    BlobStorePublish,
+    BlobReferenceSave,
+    BlobTicketIssue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,6 +308,23 @@ pub fn observe_local_sync_result<T, E>(
     result
 }
 
+pub fn observe_blob_publish_sync_result<T, E>(
+    step: LocalWorkStep,
+    work: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    if BLOB_PUBLISH_ACTIVE.try_with(|_| ()).is_err() {
+        return work();
+    }
+    let observation = LocalWorkObservation::begin(step);
+    let result = work();
+    observation.finish(if result.is_ok() {
+        LocalWorkOutcome::Ok
+    } else {
+        LocalWorkOutcome::Error
+    });
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::decode_local_record;
@@ -320,6 +348,33 @@ mod tests {
             let mut invalid = valid.clone();
             invalid["record"][field] = value;
             assert!(decode_local_record(name, &invalid.to_string(), "WARN").is_none());
+        }
+    }
+
+    #[test]
+    fn blob_publish_steps_are_accepted_by_the_closed_local_contract() {
+        for step in [
+            "blob_plaintext_hash",
+            "blob_compress",
+            "blob_encrypt",
+            "blob_store_publish",
+            "blob_reference_save",
+            "blob_ticket_issue",
+        ] {
+            let record = json!({
+                "kind": "local_work",
+                "record": {
+                    "event": "finished",
+                    "step": step,
+                    "pairing": null,
+                    "maintenance": null,
+                    "duration_ms": 12,
+                    "outcome": "ok"
+                }
+            });
+            let decoded = decode_local_record("runtime.work.finished", &record.to_string(), "INFO")
+                .expect("blob publish step should be accepted");
+            assert_eq!(decoded["step"], step);
         }
     }
 }

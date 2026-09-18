@@ -1095,6 +1095,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 | 日期 | 主题 | 长期结论 |
 | --- | --- | --- |
+| 2026-09-18 | 大图发送前本地准备 | `PublishBlobUseCase` 继续完整负责超过内联上限的内存内容发布；调用方只提交一次内容。普通模式以固定、脱敏的本地工作区分明文哈希、压缩、分块加密、blob store 发布、引用保存和 ticket 生成，不扩大 facade、port、结果或协议。开发配置只优化 Infra 热路径，发布配置和持久格式不变。实施与设备验收见[执行计划](../exec-plans/active/2026-09-18-large-image-publish-latency.md)。 |
 | 2026-09-11 | 已配对设备自动连接设计 | [自动连接与恢复 Spec](../exec-plans/completed/2026-09-11-automatic-peer-connections.md)记录研究基线中主动 presence 依赖刷新、后台缺少持续连接负责人的代码事实，定义事件触发、周期兜底、生命周期与多场景验收要求。已完成：Application 统一自动与手动连接；实际 Mac/iOS 模拟器六种场景和双向传输通过，未运行实体平台明确跳过。 |
 | 2026-09-11 | 本地采集关闭边界 | 本地采集负责人在同一采集锁内维护不可逆关闭状态，拒绝已通过外层检查但在关闭后才到达的开启请求；关闭前有、无活动采集均适用，调用方无需补偿或重试。公开接口、持久格式与架构所有权不变。 |
 | 2026-09-11 | 接收拒收调查 | [接收调查计划](../exec-plans/active/042-clipboard-receive-rejection.md)通过队列信封携带不透明的首次失败观测；Application 仍负责接收处理，Infra 按原回执完成并仅附加本地固定详情。保存错误保留来源，Engine 与线协议不扩面。现场根因与手机双向恢复尚未确认。 |

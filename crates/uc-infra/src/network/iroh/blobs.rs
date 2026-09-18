@@ -24,6 +24,9 @@ use tracing::{debug, info, instrument, warn};
 use uc_core::ports::blob::{
     BlobDigest, BlobError, BlobProgressSink, BlobTicket, BlobTransferPort, TagReason,
 };
+use uc_observability_contract::diagnostics::connectivity::{
+    LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
+};
 
 /// Minimum wall-clock interval between two `BlobProgressSink::report` calls.
 ///
@@ -204,13 +207,19 @@ impl BlobTransferPort for IrohBlobTransferAdapter {
         let bytes = ciphertext.len() as u64;
         let started = Instant::now();
         let tag_name = Self::tag_name(&reason);
-        let haf = self
+        let observation = LocalWorkObservation::begin(LocalWorkStep::BlobStorePublish);
+        let publish_result = self
             .store
             .blobs()
             .add_bytes(ciphertext)
             .with_named_tag(tag_name.as_bytes())
-            .await
-            .map_err(|e| BlobError::Internal(e.to_string()))?;
+            .await;
+        observation.finish(if publish_result.is_ok() {
+            LocalWorkOutcome::Ok
+        } else {
+            LocalWorkOutcome::Error
+        });
+        let haf = publish_result.map_err(|e| BlobError::Internal(e.to_string()))?;
         info!(
             bytes,
             add_bytes_ms = started.elapsed().as_millis() as u64,

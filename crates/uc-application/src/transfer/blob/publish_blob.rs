@@ -11,6 +11,9 @@ use uc_core::ports::blob::{
 };
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::ContentHashPort;
+use uc_observability_contract::diagnostics::connectivity::{
+    scope_blob_publish, LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
+};
 
 /// Input variants for publishing in-memory content and files from disk.
 ///
@@ -83,9 +86,15 @@ impl PublishBlobUseCase {
         let bytes = plaintext.len() as u64;
 
         let hash_start = Instant::now();
+        let observation = LocalWorkObservation::begin(LocalWorkStep::BlobPlaintextHash);
+        let hash_result = self.hash.hash_bytes(&plaintext);
+        observation.finish(if hash_result.is_ok() {
+            LocalWorkOutcome::Ok
+        } else {
+            LocalWorkOutcome::Error
+        });
         let plaintext_hash = PlaintextHash::from_bytes(
-            self.hash
-                .hash_bytes(&plaintext)
+            hash_result
                 .map_err(|e| PublishBlobError::Hash(e.to_string()))?
                 .bytes,
         );
@@ -97,9 +106,7 @@ impl PublishBlobUseCase {
         // to a raw file with identical bytes, so this path must never reuse it.
         // Disk files use execute_path below and retain the explicit raw-file
         // exception.
-        let encrypted = self
-            .transfer_cipher
-            .encrypt(&plaintext)
+        let encrypted = scope_blob_publish(self.transfer_cipher.encrypt(&plaintext))
             .await
             .map_err(|e| PublishBlobError::Cipher(e.to_string()))?;
         //
@@ -121,18 +128,25 @@ impl PublishBlobUseCase {
         let publish_ms = publish_start.elapsed().as_millis() as u64;
 
         let save_ref_start = Instant::now();
-        self.blob_reference
-            .save(plaintext_hash, digest)
-            .await
-            .map_err(|e| PublishBlobError::Reference(e.to_string()))?;
+        let observation = LocalWorkObservation::begin(LocalWorkStep::BlobReferenceSave);
+        let save_result = self.blob_reference.save(plaintext_hash, digest).await;
+        observation.finish(if save_result.is_ok() {
+            LocalWorkOutcome::Ok
+        } else {
+            LocalWorkOutcome::Error
+        });
+        save_result.map_err(|e| PublishBlobError::Reference(e.to_string()))?;
         let save_ref_ms = save_ref_start.elapsed().as_millis() as u64;
 
         let ticket_start = Instant::now();
-        let ticket = self
-            .blob_transfer
-            .issue_ticket(&digest)
-            .await
-            .map_err(|e| PublishBlobError::Transfer(e.to_string()))?;
+        let observation = LocalWorkObservation::begin(LocalWorkStep::BlobTicketIssue);
+        let ticket_result = self.blob_transfer.issue_ticket(&digest).await;
+        observation.finish(if ticket_result.is_ok() {
+            LocalWorkOutcome::Ok
+        } else {
+            LocalWorkOutcome::Error
+        });
+        let ticket = ticket_result.map_err(|e| PublishBlobError::Transfer(e.to_string()))?;
         let ticket_ms = ticket_start.elapsed().as_millis() as u64;
 
         info!(
