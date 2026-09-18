@@ -125,6 +125,8 @@ fn uniffi_binding_declares_mobile_analytics_host_contract() {
         .expect("binding public contract must be readable");
     let runtime = fs::read_to_string(binding_root.join("runtime.rs"))
         .expect("binding runtime must be readable");
+    let startup_lifecycle = fs::read_to_string(binding_root.join("runtime/startup_lifecycle.rs"))
+        .expect("binding startup lifecycle contract must be readable");
 
     for required in [
         "pub trait BindingAnalyticsHost",
@@ -145,6 +147,18 @@ fn uniffi_binding_declares_mobile_analytics_host_contract() {
         runtime.contains("pub fn start_with_analytics"),
         "mobile binding must offer an analytics-enabled constructor without removing the compatible constructor"
     );
+    for required in [
+        "pub fn start_with_lifecycle",
+        "pub fn start_with_analytics_and_lifecycle",
+        "pub struct MobileStartupLifecycle",
+    ] {
+        assert!(
+            runtime.contains(required)
+                || public_contract.contains(required)
+                || startup_lifecycle.contains(required),
+            "mobile binding startup lifecycle contract missing {required}"
+        );
+    }
 }
 
 #[test]
