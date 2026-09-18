@@ -122,6 +122,7 @@ fn session_runtime_error(context: &'static str, error: impl std::fmt::Display) -
     )
 }
 
+#[cfg(any(test, feature = "dev-tools"))]
 fn retryable_space_transition_runtime_error(
     context: &'static str,
     error: impl std::fmt::Display,
