@@ -76,10 +76,11 @@ use crate::operations::space::membership_readiness::execute_query_membership_rea
 use crate::operations::space::session_recovery::execute_recover_session;
 use crate::operations::space::setup_state::execute_query_setup_state;
 use crate::operations::space::unlock::execute_unlock_space;
-use crate::{EngineError, Operation, OperationResult};
+use crate::{EngineError, EngineErrorCategory, Operation, OperationResult};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
+use uc_application::facade::NetworkRecoveryRequestError;
 
 #[async_trait]
 impl EngineRuntime for ProductionRuntime {
@@ -129,11 +130,16 @@ impl EngineRuntime for ProductionRuntime {
                     .await
                     .map(|()| OperationResult::NetworkRecovered)
                     .map_err(|error| match error {
-                        uc_application::facade::NetworkRecoveryRequestError::Stopped => {
+                        NetworkRecoveryRequestError::Stopped => {
                             super::operation_unavailable_error()
                         }
-                        uc_application::facade::NetworkRecoveryRequestError::Rebuild(_) => {
-                            EngineError::new(1105, crate::EngineErrorCategory::Unavailable, true)
+                        NetworkRecoveryRequestError::Rebuild(source) => EngineError::new(
+                            1105,
+                            EngineErrorCategory::Unavailable,
+                            source.is_retryable(),
+                        ),
+                        NetworkRecoveryRequestError::Task(_) => {
+                            EngineError::new(1108, EngineErrorCategory::Internal, false)
                         }
                     });
             }

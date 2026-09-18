@@ -1104,11 +1104,8 @@ impl uc_application::facade::RebuildNetworkSessionPort for SessionSupervisor {
         &self,
     ) -> Result<(), uc_application::facade::RebuildNetworkSessionError> {
         self.rebuild_session().await.map_err(|error| {
-            if error.is_retryable() {
-                uc_application::facade::RebuildNetworkSessionError::Retryable
-            } else {
-                uc_application::facade::RebuildNetworkSessionError::Permanent
-            }
+            let retryable = error.is_retryable();
+            uc_application::facade::RebuildNetworkSessionError::new(error, retryable)
         })
     }
 }
