@@ -89,7 +89,8 @@ async fn production_node_restarts_ten_times_with_stable_identity_and_released_po
 
         tokio::time::timeout(Duration::from_secs(30), builder.spawn().shutdown())
             .await
-            .expect("production shutdown exceeded 30 seconds");
+            .expect("production shutdown exceeded 30 seconds")
+            .expect("production shutdown failed");
 
         let released = UdpSocket::bind((Ipv4Addr::LOCALHOST, port))
             .expect("shutdown must release the fixed UDP port");
