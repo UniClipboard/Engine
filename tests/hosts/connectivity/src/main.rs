@@ -134,7 +134,7 @@ async fn operation(engine: &Engine, request: &Value) -> Result<Value> {
         return Ok(json!(true));
     }
     if command == "shutdown" {
-        engine.shutdown(Duration::from_secs(15)).await?;
+        engine.shutdown_until_complete().await?;
         return Ok(json!(true));
     }
     let op = match command {
@@ -318,7 +318,7 @@ async fn main() -> Result<()> {
         }
     }
     if !shut_down {
-        engine.shutdown(Duration::from_secs(15)).await?;
+        engine.shutdown_until_complete().await?;
     }
     event_task.await?;
     observability.shutdown(Duration::from_secs(2));
