@@ -173,12 +173,6 @@ async fn peer_restart_does_not_block_local_work_and_recovers_an_offline_file() {
     }
     let peer_id = timeout(Duration::from_secs(20), async {
         loop {
-            next_engine_event_matching(&mut local_events, |event| {
-                matches!(
-                    event, EngineEvent::DeviceTrustChanged { revision } if *revision > 0
-                )
-            })
-            .await;
             let OperationResult::DeviceGroupChoices(summary) = local
                 .execute(Operation::QueryDeviceGroupChoices)
                 .await
