@@ -893,7 +893,7 @@ mod tests {
             .shutdown(uc_core::FileTransferCancellationReason::Unknown, None)
             .await
             .unwrap();
-        network.shutdown().await;
+        network.shutdown().await.unwrap();
         task_registry
             .shutdown(std::time::Duration::from_millis(500))
             .await;
