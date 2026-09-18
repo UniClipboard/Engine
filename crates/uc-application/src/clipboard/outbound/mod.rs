@@ -465,6 +465,17 @@ pub struct ClipboardOutboundFacade {
     existing_entry_delivery: Arc<dyn ExistingLocalEntryDeliveryRunner>,
 }
 
+#[async_trait]
+impl ClipboardOutboundPort for ClipboardOutboundFacade {
+    async fn dispatch_capture(
+        &self,
+        input: ClipboardOutboundInput,
+        target_filter: Option<Vec<DeviceId>>,
+    ) -> Result<ClipboardOutboundOutcome, ClipboardOutboundError> {
+        self.dispatcher.dispatch_capture(input, target_filter).await
+    }
+}
+
 impl ClipboardOutboundFacade {
     /// Production constructor — bootstrap assembles
     /// [`ClipboardOutboundDeps`] once and the facade builds both the

@@ -10,17 +10,24 @@
 
 use std::sync::Arc;
 
+use tokio::sync::oneshot;
 use tokio::task::{JoinError, JoinSet};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, Instrument};
 
 use uc_core::clipboard::{DeliveryFailureReason, EntryDeliveryRecord, EntryDeliveryStatus};
-use uc_core::ids::EntryId;
+use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::{ClipboardDispatchError, ClockPort, DispatchAck, EntryDeliveryRepositoryPort};
+use uc_observability_contract::diagnostics::{DiagnosticTaskKind, ObservationContext};
 
 use crate::facade::blob_transfer::SharedHostEventEmitter;
 use crate::facade::host_event::{DeliveryHostEvent, HostEvent};
 
+use super::super::work::OwnedWork;
 use super::{DispatchPerTarget, PeerDispatchResult};
+
+#[cfg(test)]
+#[path = "delivery/lifecycle_tests.rs"]
+mod lifecycle_tests;
 
 /// Outcome bucket for [`classify_dispatch_result`]. `Panicked` rolls up
 /// into `Errored` at the call site because `DispatchOutcome` has no
@@ -171,6 +178,48 @@ pub(crate) struct DeliveryRecorder {
 }
 
 impl DeliveryRecorder {
+    pub(super) async fn record_pending(
+        &self,
+        entry_id: &EntryId,
+        target_device_id: DeviceId,
+        now_ms: i64,
+    ) -> Result<(), uc_core::clipboard::EntryDeliveryError> {
+        self.entry_delivery_repo
+            .record_attempt(&EntryDeliveryRecord {
+                entry_id: entry_id.clone(),
+                target_device_id,
+                status: EntryDeliveryStatus::Pending,
+                reason_detail: None,
+                updated_at_ms: now_ms,
+            })
+            .await
+    }
+
+    pub(super) async fn flush_owned(
+        self: &Arc<Self>,
+        work: OwnedWork,
+        records: Vec<EntryDeliveryRecord>,
+    ) {
+        if records.is_empty() {
+            return;
+        }
+        let recorder = Arc::clone(self);
+        let (finished, completion) = oneshot::channel();
+        let observation = ObservationContext::capture();
+        work.spawn(
+            DiagnosticTaskKind::ClipboardDeliveryRecord,
+            observation.scope(
+                async move {
+                    recorder.flush(&records).await;
+                    let _ = finished.send(());
+                }
+                .in_current_span(),
+            ),
+        );
+        // 异常由工作负责人保存；已收到的对端回执不因记录失败改写。
+        let _ = completion.await;
+    }
+
     pub(crate) fn new(
         entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
         host_event_bus: SharedHostEventEmitter,
@@ -206,14 +255,10 @@ impl DeliveryRecorder {
     }
 }
 
-/// Drive the post-deadline leftover tasks to completion on a detached
-/// task: classify each settle, record it immediately (per-settle, NOT
-/// batched, so an early-settling peer's badge isn't held hostage by a
-/// staggered-retry long-tail), and log a per-bucket summary when drained.
-///
-/// Best-effort RECORD-ONLY: a peer that finally settles Offline / Errored
-/// after the deadline is recorded as such. This continuation never retries.
-pub(crate) fn spawn_deferred_drain(
+/// 前台期限后继续等待已发出的对端结果，每条完成即记录并通知，不重试发送。
+/// 工作许可归同一发送负责人；暂停必须等待这里的记录与异常处理结束。
+pub(super) fn spawn_deferred_drain(
+    work: OwnedWork,
     mut set: JoinSet<PeerDispatchResult>,
     entry_id: Option<EntryId>,
     clock: Arc<dyn ClockPort>,
@@ -221,9 +266,9 @@ pub(crate) fn spawn_deferred_drain(
     snapshot_hash: String,
 ) {
     let deferred_count = set.len();
-    let observation = uc_observability_contract::diagnostics::ObservationContext::capture();
-    crate::support::task_supervision::spawn_supervised(
-        uc_observability_contract::diagnostics::DiagnosticTaskKind::ClipboardDeferredDrain,
+    let observation = ObservationContext::capture();
+    work.spawn(
+        DiagnosticTaskKind::ClipboardDeferredDrain,
         observation.scope(async move {
             let mut accepted = 0usize;
             let mut duplicate = 0usize;
@@ -256,6 +301,7 @@ pub(crate) fn spawn_deferred_drain(
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::work::WorkOwner;
     use super::*;
 
     #[tokio::test]
@@ -311,8 +357,10 @@ mod tests {
             (dev("peer"), Ok(DispatchAck::Accepted))
         });
         let root = tracing::info_span!("foreground");
+        let owner = WorkOwner::default();
         root.in_scope(|| {
             spawn_deferred_drain(
+                owner.begin().unwrap(),
                 tasks,
                 Some(eid()),
                 Arc::new(super::super::test_support::FixedClock(0)),

@@ -11,9 +11,13 @@ use crate::db::ports::DbExecutor;
 use crate::db::schema::clipboard_entry_delivery;
 use async_trait::async_trait;
 use diesel::query_dsl::methods::FilterDsl;
+use diesel::result::{DatabaseErrorKind, Error as DieselError};
 use diesel::ExpressionMethods;
 use diesel::RunQueryDsl;
-use tracing::instrument;
+use diesel::SqliteConnection;
+use std::sync::Arc;
+use tokio::task::spawn_blocking;
+use tracing::{instrument, Span};
 use uc_core::clipboard::{
     DeliveryFailureReason, EntryDeliveryError, EntryDeliveryRecord, EntryDeliveryStatus,
 };
@@ -21,12 +25,30 @@ use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::EntryDeliveryRepositoryPort;
 
 pub struct DieselEntryDeliveryRepository<E> {
-    executor: E,
+    executor: Arc<E>,
 }
 
 impl<E> DieselEntryDeliveryRepository<E> {
     pub fn new(executor: E) -> Self {
-        Self { executor }
+        Self {
+            executor: Arc::new(executor),
+        }
+    }
+}
+
+impl<E: DbExecutor + 'static> DieselEntryDeliveryRepository<E> {
+    async fn run<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&mut SqliteConnection) -> anyhow::Result<T> + Send + 'static,
+    ) -> Result<T, EntryDeliveryError> {
+        let executor = Arc::clone(&self.executor);
+        let span = Span::current();
+        spawn_blocking(move || span.in_scope(|| executor.run(operation)))
+            .await
+            .map_err(|source| EntryDeliveryError::Storage {
+                source: source.into(),
+            })?
+            .map_err(translate_storage_error)
     }
 }
 
@@ -34,6 +56,7 @@ impl<E> DieselEntryDeliveryRepository<E> {
 mod status_codec {
     use super::*;
 
+    pub const PENDING: &str = "pending";
     pub const DELIVERED: &str = "delivered";
     pub const DUPLICATE: &str = "duplicate";
     pub const UNREACHABLE: &str = "unreachable";
@@ -49,6 +72,7 @@ mod status_codec {
 
     pub fn encode(status: &EntryDeliveryStatus) -> &'static str {
         match status {
+            EntryDeliveryStatus::Pending => PENDING,
             EntryDeliveryStatus::Delivered => DELIVERED,
             EntryDeliveryStatus::Duplicate => DUPLICATE,
             EntryDeliveryStatus::Unreachable => UNREACHABLE,
@@ -65,6 +89,7 @@ mod status_codec {
 
     pub fn decode(raw: &str) -> Result<EntryDeliveryStatus, EntryDeliveryError> {
         match raw {
+            PENDING => Ok(EntryDeliveryStatus::Pending),
             DELIVERED => Ok(EntryDeliveryStatus::Delivered),
             DUPLICATE => Ok(EntryDeliveryStatus::Duplicate),
             UNREACHABLE | LEGACY_FAILED_OFFLINE => Ok(EntryDeliveryStatus::Unreachable),
@@ -84,9 +109,7 @@ mod status_codec {
             FAILED_INTERNAL => Ok(EntryDeliveryStatus::Failed {
                 reason: DeliveryFailureReason::Internal,
             }),
-            other => Err(EntryDeliveryError::Storage(format!(
-                "unknown delivery status code: {other}"
-            ))),
+            _ => Err(EntryDeliveryError::InvalidStatus),
         }
     }
 }
@@ -104,7 +127,7 @@ fn row_to_record(row: EntryDeliveryRow) -> Result<EntryDeliveryRecord, EntryDeli
 #[async_trait]
 impl<E> EntryDeliveryRepositoryPort for DieselEntryDeliveryRepository<E>
 where
-    E: DbExecutor,
+    E: DbExecutor + 'static,
 {
     #[instrument(
         name = "infra.sqlite.upsert_entry_delivery",
@@ -125,15 +148,13 @@ where
             updated_at_ms: record.updated_at_ms,
         };
 
-        let entry_id_for_err = record.entry_id.to_string();
-        self.executor
-            .run(move |conn| {
-                diesel::replace_into(clipboard_entry_delivery::table)
-                    .values(&new_row)
-                    .execute(conn)?;
-                Ok(())
-            })
-            .map_err(|err| translate_storage_error(err, &entry_id_for_err))
+        self.run(move |conn| {
+            diesel::replace_into(clipboard_entry_delivery::table)
+                .values(&new_row)
+                .execute(conn)?;
+            Ok(())
+        })
+        .await
     }
 
     #[instrument(
@@ -150,15 +171,13 @@ where
         entry_id: &EntryId,
     ) -> Result<Vec<EntryDeliveryRecord>, EntryDeliveryError> {
         let entry_id_str = entry_id.to_string();
-        let entry_id_for_err = entry_id_str.clone();
         let rows: Vec<EntryDeliveryRow> = self
-            .executor
             .run(move |conn| {
                 Ok(clipboard_entry_delivery::table
                     .filter(clipboard_entry_delivery::entry_id.eq(&entry_id_str))
                     .load::<EntryDeliveryRow>(conn)?)
             })
-            .map_err(|err| translate_storage_error(err, &entry_id_for_err))?;
+            .await?;
 
         rows.into_iter().map(row_to_record).collect()
     }
@@ -166,14 +185,19 @@ where
 
 /// 把底层错误翻译为领域错误。FK violation 反映"引用了不存在的 entry",
 /// 其它一律按 Storage 归类。
-fn translate_storage_error(err: anyhow::Error, entry_id: &str) -> EntryDeliveryError {
-    let msg = err.to_string();
-    // SQLite 的外键违反字符串里会包含 "FOREIGN KEY constraint failed",
-    // diesel 把它包成 DatabaseError(ForeignKeyViolation, ...)。两种渠道都覆盖。
-    if msg.contains("FOREIGN KEY") || msg.to_ascii_lowercase().contains("foreign key") {
-        EntryDeliveryError::EntryNotFound(entry_id.to_string())
+fn translate_storage_error(source: anyhow::Error) -> EntryDeliveryError {
+    if source.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<DieselError>(),
+            Some(DieselError::DatabaseError(
+                DatabaseErrorKind::ForeignKeyViolation,
+                _
+            ))
+        )
+    }) {
+        EntryDeliveryError::EntryNotFound { source }
     } else {
-        EntryDeliveryError::Storage(msg)
+        EntryDeliveryError::Storage { source }
     }
 }
 
@@ -185,7 +209,15 @@ mod tests {
     use crate::db::pool::init_db_pool;
     use crate::db::ports::DbExecutor;
     use crate::db::schema::{clipboard_entry, clipboard_event};
+    use diesel::connection::SimpleConnection;
+    use std::error::Error as StdError;
+    use std::io::{Error as IoError, ErrorKind};
+    use std::sync::mpsc;
+    use std::time::Duration;
     use tempfile::{tempdir, TempDir};
+    use tokio::sync::oneshot;
+    use tokio::task::{spawn_blocking, JoinError};
+    use tokio::time::timeout;
 
     type Repo = DieselEntryDeliveryRepository<DieselSqliteExecutor>;
 
@@ -245,6 +277,115 @@ mod tests {
         }
     }
 
+    struct FailingExecutor {
+        panics: bool,
+    }
+
+    impl DbExecutor for FailingExecutor {
+        fn run<T>(
+            &self,
+            _: impl FnOnce(&mut SqliteConnection) -> anyhow::Result<T>,
+        ) -> anyhow::Result<T> {
+            if self.panics {
+                panic!("private executor payload");
+            }
+            Err(IoError::new(ErrorKind::PermissionDenied, "private FOREIGN KEY text").into())
+        }
+    }
+
+    #[tokio::test]
+    async fn storage_error_keeps_its_source_without_matching_private_text() {
+        let repo = DieselEntryDeliveryRepository::new(FailingExecutor { panics: false });
+        let error = repo
+            .list_by_entry(&EntryId::from("entry"))
+            .await
+            .unwrap_err();
+        assert!(StdError::source(&error).is_some());
+        assert!(!format!("{error:?}").contains("private"));
+        let EntryDeliveryError::Storage { source } = error else {
+            panic!("must classify by the original type")
+        };
+        assert_eq!(
+            source.downcast_ref::<IoError>().unwrap().kind(),
+            ErrorKind::PermissionDenied
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_panic_keeps_its_source_and_safe_summary() {
+        let repo = DieselEntryDeliveryRepository::new(FailingExecutor { panics: true });
+        let error = repo
+            .list_by_entry(&EntryId::from("entry"))
+            .await
+            .unwrap_err();
+        assert!(StdError::source(&error).is_some());
+        assert!(!format!("{error:?}").contains("private"));
+        let EntryDeliveryError::Storage { source } = error else {
+            panic!("expected storage failure")
+        };
+        assert!(source.downcast_ref::<JoinError>().unwrap().is_panic());
+    }
+
+    #[tokio::test]
+    async fn invalid_persisted_status_does_not_disclose_its_value() {
+        let (repo, executor, _directory) = make_repo();
+        seed_entry(&executor, "entry");
+        repo.record_attempt(&make_record(
+            "entry",
+            "peer",
+            EntryDeliveryStatus::Delivered,
+        ))
+        .await
+        .unwrap();
+        executor
+            .run(|conn| {
+                diesel::update(clipboard_entry_delivery::table)
+                    .set(clipboard_entry_delivery::status.eq("private invalid status"))
+                    .execute(conn)?;
+                Ok(())
+            })
+            .unwrap();
+        let error = repo
+            .list_by_entry(&EntryId::from("entry"))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, EntryDeliveryError::InvalidStatus));
+        assert!(!format!("{error:?}").contains("private"));
+    }
+
+    #[tokio::test]
+    async fn database_write_contention_does_not_block_runtime_notifications() {
+        let (repo, seed, _directory) = make_repo();
+        seed_entry(&seed, "held-entry");
+        let (entered, blocked) = oneshot::channel();
+        let (release, wait) = mpsc::channel();
+        let holder = spawn_blocking(move || {
+            seed.run(|conn| {
+                conn.batch_execute("BEGIN IMMEDIATE")?;
+                entered.send(()).unwrap();
+                // 回归失败时也释放真实锁，避免测试遗留阻塞线程。
+                let _ = wait.recv_timeout(Duration::from_secs(2));
+                conn.batch_execute("COMMIT")?;
+                Ok(())
+            })
+        });
+        blocked.await.unwrap();
+        let record = make_record("held-entry", "peer", EntryDeliveryStatus::Delivered);
+        let mut write = Box::pin(repo.record_attempt(&record));
+        let during_contention = timeout(Duration::from_millis(20), write.as_mut()).await;
+        let _ = release.send(());
+        holder.await.unwrap().unwrap();
+        assert!(
+            during_contention.is_err(),
+            "runtime must remain responsive while the database waits"
+        );
+        write.await.unwrap();
+        assert_eq!(
+            repo.list_by_entry(&record.entry_id).await.unwrap(),
+            vec![record]
+        );
+    }
+
     #[test]
     fn decode_legacy_failed_offline_as_unreachable() {
         let status = status_codec::decode("failed_offline").unwrap();
@@ -257,6 +398,16 @@ mod tests {
         assert_eq!(encoded, "unreachable");
         let decoded = status_codec::decode(encoded).unwrap();
         assert!(matches!(decoded, EntryDeliveryStatus::Unreachable));
+    }
+
+    #[test]
+    fn pending_delivery_round_trips() {
+        let encoded = status_codec::encode(&EntryDeliveryStatus::Pending);
+        assert_eq!(encoded, "pending");
+        assert_eq!(
+            status_codec::decode(encoded).unwrap(),
+            EntryDeliveryStatus::Pending
+        );
     }
 
     #[test]
@@ -304,7 +455,7 @@ mod tests {
         repo.record_attempt(&make_record(
             "entry-1",
             "peer-A",
-            EntryDeliveryStatus::Delivered,
+            EntryDeliveryStatus::Pending,
         ))
         .await
         .unwrap();
@@ -363,8 +514,14 @@ mod tests {
             ))
             .await;
         match result {
-            Err(EntryDeliveryError::EntryNotFound(id)) => {
-                assert_eq!(id, "ghost-entry");
+            Err(EntryDeliveryError::EntryNotFound { source }) => {
+                assert!(source.chain().any(|cause| matches!(
+                    cause.downcast_ref::<DieselError>(),
+                    Some(DieselError::DatabaseError(
+                        DatabaseErrorKind::ForeignKeyViolation,
+                        _
+                    ))
+                )));
             }
             other => panic!("预期 EntryNotFound,实际 {other:?}"),
         }
