@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 use uc_application::deps::{LifecycleError, ProfileUpgradeBackupPort, StopProfileRuntimePort};
 use uc_application::facade::{
@@ -80,14 +81,18 @@ impl StopProfileRuntimePort for ProductionProfileRuntimeStopper {
     async fn stop_profile_runtime(&self) -> Result<(), LifecycleError> {
         self.security_lifecycle.close_security_session();
         self.session_supervisor
-            .suspend()
+            .suspend(None)
             .await
             .map_err(|source| LifecycleError {
                 primary: source.into(),
                 additional: Vec::new(),
             })?;
         self.session_supervisor.clear_factory();
-        task_shutdown::shutdown_tasks(&self.tasks, Duration::from_millis(500)).await;
+        task_shutdown::shutdown_tasks(
+            &self.tasks,
+            Some(tokio::time::Instant::now() + Duration::from_millis(500)),
+        )
+        .await;
         Ok(())
     }
 }
@@ -190,7 +195,8 @@ impl ProductionRuntime {
         let security_lifecycle = Arc::clone(&wired.sync_engine.security_lifecycle);
         let mut security_guard = StartupSecurityGuard(Some(Arc::clone(&security_lifecycle)));
         let host_adapters = wired.application.host_adapters();
-        let session_supervisor = Arc::new(SessionSupervisor::new(wired.application.clone()));
+        let session_supervisor =
+            SessionSupervisor::new(wired.application.clone(), Arc::clone(&security_lifecycle));
         let task_registry = Arc::new(TaskRegistry::new());
         let profile_runtime: Arc<dyn StopProfileRuntimePort> =
             Arc::new(ProductionProfileRuntimeStopper {
@@ -240,7 +246,7 @@ impl ProductionRuntime {
             .start_process_runtime(Arc::clone(&task_registry))
             .await
             .map_err(|error| startup_error("clipboard background", error))?;
-        session_supervisor.resume().await?;
+        session_supervisor.resume(CancellationToken::new()).await?;
         spawn_space_transition_watcher(
             Arc::clone(&session_supervisor),
             wired.application.subscribe_space_transition_changes(),
