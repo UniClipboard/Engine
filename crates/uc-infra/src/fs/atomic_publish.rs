@@ -130,14 +130,24 @@ fn probe_no_replace(probe_dir: &Path) -> bool {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
 fn rename_no_replace(source: &Path, destination: &Path) -> Result<(), PublishError> {
+    rename_no_replace_io(source, destination).map_err(classify_os_error)
+}
+
+/// 同步文件流程复用相同原子操作，并保留系统错误来源。
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+pub(crate) fn rename_no_replace_io(source: &Path, destination: &Path) -> std::io::Result<()> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
     let to_c = |path: &Path| {
-        CString::new(path.as_os_str().as_bytes())
-            .map_err(|_| PublishError::Io("path contains an interior NUL".to_string()))
+        CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "path contains an interior NUL",
+            )
+        })
     };
     let source = to_c(source)?;
     let destination = to_c(destination)?;
@@ -146,17 +156,20 @@ fn rename_no_replace(source: &Path, destination: &Path) -> Result<(), PublishErr
     if rc == 0 {
         return Ok(());
     }
-    Err(classify_os_error(std::io::Error::last_os_error()))
+    Err(std::io::Error::last_os_error())
 }
 
 /// Mobile Unix targets currently have no verified native no-replace primitive.
 /// Refuse publication rather than emulating errno or silently replacing data.
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+#[cfg(all(
+    unix,
+    not(any(target_os = "linux", target_os = "android", target_os = "macos"))
+))]
 fn rename_no_replace(_source: &Path, _destination: &Path) -> Result<(), PublishError> {
     Err(PublishError::Unsupported)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 unsafe fn rename_excl_syscall(
     source: *const libc::c_char,
     destination: *const libc::c_char,
@@ -266,6 +279,25 @@ fn describe_io(err: &std::io::Error) -> String {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[test]
+    fn synchronous_publication_preserves_existing_archive_and_original_error() {
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("partial");
+        let destination = tmp.path().join("archive");
+        std::fs::write(&source, b"new backup").unwrap();
+        std::fs::write(&destination, b"retained backup").unwrap();
+        let error = rename_no_replace_io(&source, &destination).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(error.raw_os_error().is_some());
+        assert_eq!(std::fs::read(&source).unwrap(), b"new backup");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"retained backup");
+        std::fs::remove_file(&destination).unwrap();
+        rename_no_replace_io(&source, &destination).unwrap();
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"new backup");
+    }
 
     fn publisher() -> FsAtomicPublisher {
         FsAtomicPublisher

@@ -143,7 +143,11 @@ pub(super) fn publish_record(
         .sync_all()
         .map_err(backup_error)?;
     let pending = directory.join(format!("{}.pointer", Uuid::new_v4()));
-    fs::hard_link(&path, &pending).map_err(backup_error)?;
+    // 指针只复制已落盘的小记录；不依赖 Android 沙箱禁止的硬链接。
+    let mut input = open_regular_file(&path).map_err(backup_error)?;
+    let mut output = private_new_file(&pending).map_err(backup_error)?;
+    io::copy(&mut input, &mut output).map_err(backup_error)?;
+    output.sync_all().map_err(backup_error)?;
     fs::rename(&pending, directory.join("security-current")).map_err(backup_error)?;
     sync_directory(directory).map_err(backup_error)?;
     let reopened = read_record(directory, storage)?
@@ -192,7 +196,11 @@ pub(super) fn publish_file_record(
     file.write_all(&bytes).map_err(backup_error)?;
     file.sync_all().map_err(backup_error)?;
     let pending = directory.join(format!("{}.pointer", Uuid::new_v4()));
-    fs::hard_link(&path, &pending).map_err(backup_error)?;
+    // 指针只复制已落盘的小记录；不依赖 Android 沙箱禁止的硬链接。
+    let mut input = open_regular_file(&path).map_err(backup_error)?;
+    let mut output = private_new_file(&pending).map_err(backup_error)?;
+    io::copy(&mut input, &mut output).map_err(backup_error)?;
+    output.sync_all().map_err(backup_error)?;
     fs::rename(pending, directory.join("current")).map_err(backup_error)?;
     sync_directory(directory).map_err(backup_error)?;
     let reopened = read_file_record(directory)?

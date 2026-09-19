@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
+#[cfg(target_os = "android")]
+use crate::fs::atomic_publish::rename_no_replace_io;
+
 use super::error::invalid_archive;
 use super::tree::read_tree;
 use super::{
@@ -67,10 +70,15 @@ impl ProfileBackupArchive {
         if verified_source != source || verified_digest != first_digest {
             return Err(ProfileBackupArchiveError::StateChanged);
         }
-        // 硬链接发布具有“不覆盖既有目标”的语义；未完成文件不作为已验证归档返回。
-        fs::hard_link(&pending, self.path(id))?;
-        sync_directory(&directory)?;
-        fs::remove_file(&pending)?;
+        // Android 应用沙箱禁止硬链接；使用同样拒绝覆盖的原子重命名。
+        #[cfg(target_os = "android")]
+        rename_no_replace_io(&pending, &self.path(id))?;
+        #[cfg(not(target_os = "android"))]
+        {
+            fs::hard_link(&pending, self.path(id))?;
+            sync_directory(&directory)?;
+            fs::remove_file(&pending)?;
+        }
         sync_directory(&directory)?;
         Ok(ProfileArchiveReceipt {
             archive_id: *id.as_bytes(),
