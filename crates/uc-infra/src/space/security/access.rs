@@ -39,7 +39,9 @@ use uc_application::deps::{RuntimeLifecyclePort, TransitionContext};
 use uc_core::crypto::domain::{ActiveSpace, Passphrase as DomainPassphrase};
 use uc_core::crypto::model::{EncryptionError, Passphrase as LegacyPassphrase};
 
-use crate::security::crypto_model::{EncryptedBlob, KeyScope, KeySlot, WrappedMasterKey};
+use crate::security::crypto_model::{
+    validate_kdf, EncryptedBlob, KeyScope, KeySlot, WrappedMasterKey,
+};
 use crate::security::{v1_aead, Kek, MasterKey, ProfileContentKeyVault};
 use uc_core::ids::{DeviceId, ProfileId, SpaceId};
 #[cfg(test)]
@@ -2073,6 +2075,10 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
                 );
                 SpaceAccessError::CorruptedKeyMaterial
             })?;
+            if validate_kdf(&keyslot.kdf).is_err() {
+                warn!(path = PATH, "offer keyslot KDF parameters are unsupported or excessive");
+                return Err(SpaceAccessError::CorruptedKeyMaterial);
+            }
             let scope = keyslot.scope.clone();
             debug!(path = PATH, scope = %scope_identifier(&scope), "parsed keyslot from offer blob");
 
@@ -5429,6 +5435,40 @@ mod admission_tests {
             source_slot
         );
         assert_eq!(key_material.load_kek(&scope).await.unwrap(), source_kek);
+    }
+
+    #[tokio::test]
+    async fn join_offer_rejects_excessive_kdf_parameters_before_derivation() {
+        use crate::security::crypto_model::MAX_KDF_PARALLELISM;
+        use uc_core::ports::space::DeriveProofKeyPort;
+
+        let (sponsor, _, _, space_id, _sponsor_dir) = sponsor_fixture();
+        let mut offer = sponsor
+            .prepare_join_offer(&space_id, &Passphrase::new("correct horse battery staple"))
+            .await
+            .unwrap();
+        let mut slot: KeySlot = serde_json::from_slice(&offer.keyslot_blob).unwrap();
+        slot.kdf.params.mem_kib = 8 * (MAX_KDF_PARALLELISM + 1);
+        slot.kdf.params.iters = 1;
+        slot.kdf.params.parallelism = MAX_KDF_PARALLELISM + 1;
+        offer.keyslot_blob = serde_json::to_vec(&slot).unwrap();
+
+        let joiner_dir = tempdir().unwrap();
+        let joiner = adapter(
+            &joiner_dir,
+            local_key_material(&joiner_dir, memory_secure_storage()),
+            Arc::new(InMemorySession::new()),
+            memory_revocation_repository(None).0,
+        );
+        let error = DeriveProofKeyPort::derive_master_key_for_proof(
+            &joiner,
+            &offer,
+            &Passphrase::new("correct horse battery staple"),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, SpaceAccessError::CorruptedKeyMaterial));
     }
 
     #[tokio::test]

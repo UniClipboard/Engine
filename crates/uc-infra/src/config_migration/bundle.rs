@@ -36,7 +36,7 @@ use rand::TryRngCore;
 use uc_core::crypto::domain::Passphrase;
 use zeroize::Zeroize;
 
-use crate::security::crypto_model::{MAX_KDF_ITERS, MAX_KDF_MEM_KIB, MAX_KDF_PARALLELISM};
+use crate::security::crypto_model::kdf_cost_is_bounded;
 
 /// Magic prefix identifying a `.ucbundle` file.
 pub const MAGIC: &[u8; 8] = b"UCBUNDLE";
@@ -176,10 +176,7 @@ pub fn parse_header(bytes: &[u8]) -> Result<(BundleHeader, usize), BundleError> 
     // Bound the KDF parameters before they reach `derive_key`: derivation runs
     // ahead of the AEAD tag check, so an out-of-range memory cost in a hostile
     // header would otherwise allocate before authentication can reject it.
-    if !(8..=MAX_KDF_MEM_KIB).contains(&mem_kib)
-        || !(1..=MAX_KDF_ITERS).contains(&iters)
-        || !(1..=MAX_KDF_PARALLELISM).contains(&parallelism)
-    {
+    if !kdf_cost_is_bounded(mem_kib, iters, parallelism) {
         return Err(BundleError::Incompatible(format!(
             "key-derivation parameters out of range (mem_kib={mem_kib}, iters={iters}, parallelism={parallelism})"
         )));
@@ -455,5 +452,18 @@ mod tests {
         let bundle = seal(&pw, cheap(), b"abc").unwrap();
         let (_, offset) = parse_header(&bundle).unwrap();
         assert_eq!(offset, HEADER_LEN);
+    }
+
+    #[test]
+    fn header_rejects_excessive_combined_kdf_work() {
+        let mut bundle = seal(&Passphrase::from("pw"), cheap(), b"abc").unwrap();
+        bundle[11..15].copy_from_slice(&(128_u32 * 1024).to_le_bytes());
+        bundle[15..19].copy_from_slice(&5_u32.to_le_bytes());
+        bundle[19..23].copy_from_slice(&4_u32.to_le_bytes());
+
+        assert!(matches!(
+            parse_header(&bundle),
+            Err(BundleError::Incompatible(_))
+        ));
     }
 }

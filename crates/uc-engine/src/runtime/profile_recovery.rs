@@ -273,14 +273,16 @@ impl RecoverableRuntime {
                             runtime,
                             recovered: true,
                         };
-                        self.publish_summary(&bootstrap, |summary| {
-                            summary.state = ProfileRecoveryState::Recovered;
-                            summary.can_submit_passphrase = false;
-                            summary.restart_required = false;
-                            summary.background_ready = true;
-                            summary.cleanup_pending = self.recovery.cleanup_pending();
-                            summary.losses.clear();
-                        });
+                        if self.lock_ready_summary_override().is_none() {
+                            self.publish_summary(&bootstrap, |summary| {
+                                summary.state = ProfileRecoveryState::Recovered;
+                                summary.can_submit_passphrase = false;
+                                summary.restart_required = false;
+                                summary.background_ready = true;
+                                summary.cleanup_pending = self.recovery.cleanup_pending();
+                                summary.losses.clear();
+                            });
+                        }
                         Ok(result)
                     }
                     Err(ProfileKeyRecoveryError::WrongPassphrase) => {
@@ -519,5 +521,67 @@ fn ready_summary(recovered: bool, cleanup_pending: bool) -> ProfileRecoverySumma
         background_ready: true,
         cleanup_pending,
         losses: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovery_storage_errors_keep_stable_public_categories() {
+        for (source, expected) in [
+            (
+                SecureStorageError::Unavailable("unavailable".to_owned()),
+                HostCapabilityErrorCategory::Unavailable,
+            ),
+            (
+                SecureStorageError::PermissionDenied("denied".to_owned()),
+                HostCapabilityErrorCategory::PermissionDenied,
+            ),
+            (
+                SecureStorageError::Other("other".to_owned()),
+                HostCapabilityErrorCategory::Io,
+            ),
+        ] {
+            let error = HostCapabilityError::from(source);
+            assert_eq!(error.category(), expected);
+        }
+    }
+
+    #[test]
+    fn recovery_failures_keep_stable_engine_categories_and_retryability() {
+        let cases = [
+            (
+                ProfileKeyRecoveryError::WrongPassphrase,
+                UNLOCK_SPACE_UNAUTHORIZED_CODE,
+                EngineErrorCategory::Unauthorized,
+                false,
+            ),
+            (
+                ProfileKeyRecoveryError::Corrupt,
+                UNLOCK_SPACE_CORRUPTED_CODE,
+                EngineErrorCategory::Internal,
+                false,
+            ),
+            (
+                ProfileKeyRecoveryError::Unsupported,
+                PROFILE_RECOVERY_UNSUPPORTED_CODE,
+                EngineErrorCategory::Unavailable,
+                false,
+            ),
+            (
+                ProfileKeyRecoveryError::Storage(anyhow::anyhow!("storage")),
+                PROFILE_RECOVERY_PERSISTENCE_FAILED_CODE,
+                EngineErrorCategory::Unavailable,
+                true,
+            ),
+        ];
+        for (source, code, category, retryable) in cases {
+            let error = EngineError::from(source);
+            assert_eq!(error.code(), code);
+            assert_eq!(error.category(), category);
+            assert_eq!(error.is_retryable(), retryable);
+        }
     }
 }

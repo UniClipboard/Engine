@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use uc_engine::{
-    ChangeEncryptionPassphraseInput, CreateSpaceInput, Engine, EngineConfig, HistoryEntryInput,
-    Operation, OperationResult, ProfileRecoveryLoss, ProfileRecoveryState, SecretString,
-    SendTextInput, StartupProgress, StartupState, UnlockSpaceInput,
+    ChangeEncryptionPassphraseInput, CreateSpaceInput, Engine, EngineConfig, EngineEvent,
+    HistoryEntryInput, Operation, OperationResult, ProfileRecoveryLoss, ProfileRecoveryState,
+    SecretString, SendTextInput, StartupProgress, StartupState, UnlockSpaceInput,
 };
 
 use super::{startup::host, MemorySecureStorage};
@@ -218,6 +218,95 @@ async fn committed_space_creation_is_not_reported_as_failed_when_recovery_refres
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovered_event_is_not_published_after_the_committed_unlock_refresh_fails() {
+    let root = tempfile::tempdir().unwrap();
+    let storage = MemorySecureStorage::default();
+    let (_entry, kek_name) = create_profile(root.path(), &storage).await;
+    storage.values().remove(&kek_name);
+
+    let (engine, mut events) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host(root.path(), Box::new(storage.clone())),
+    )
+    .await
+    .unwrap();
+    let current_reads = storage.kek_reads.load(std::sync::atomic::Ordering::SeqCst);
+    storage
+        .fail_kek_read_at
+        .store(current_reads + 6, std::sync::atomic::Ordering::SeqCst);
+
+    let unlock = engine
+        .execute(Operation::UnlockSpace(UnlockSpaceInput {
+            passphrase: SecretString::new(PASSPHRASE),
+        }))
+        .await;
+    assert!(
+        unlock.is_ok(),
+        "unlock failed after {} secure storage reads: {unlock:?}",
+        storage.kek_reads.load(std::sync::atomic::Ordering::SeqCst)
+    );
+
+    let mut states = Vec::new();
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(100), events.next()).await
+    {
+        if let EngineEvent::ProfileRecoveryChanged(summary) = event {
+            states.push(summary.state);
+        }
+    }
+    assert_eq!(states.last(), Some(&ProfileRecoveryState::Failed));
+    let OperationResult::ProfileRecovery(summary) = engine
+        .execute(Operation::QueryProfileRecovery)
+        .await
+        .unwrap()
+    else {
+        panic!("expected recovery summary")
+    };
+    assert_eq!(summary.state, ProfileRecoveryState::Failed);
+    assert!(summary.background_ready);
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_unlock_write_failure_leaves_recovery_retryable() {
+    let root = tempfile::tempdir().unwrap();
+    let storage = MemorySecureStorage::default();
+    let (_entry, kek_name) = create_profile(root.path(), &storage).await;
+    storage.values().remove(&kek_name);
+
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host(root.path(), Box::new(storage.clone())),
+    )
+    .await
+    .unwrap();
+    storage
+        .fail_kek_writes
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let error = engine
+        .execute(Operation::UnlockSpace(UnlockSpaceInput {
+            passphrase: SecretString::new(PASSPHRASE),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), 1223);
+    assert!(error.is_retryable());
+
+    let OperationResult::ProfileRecovery(summary) = engine
+        .execute(Operation::QueryProfileRecovery)
+        .await
+        .unwrap()
+    else {
+        panic!("expected failed recovery summary")
+    };
+    assert_eq!(summary.state, ProfileRecoveryState::Failed);
+    assert!(summary.can_submit_passphrase);
+    assert!(!summary.restart_required);
+    assert!(!summary.background_ready);
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runtime_key_removal_is_repaired_before_restart() {
     let root = tempfile::tempdir().unwrap();
     let storage = MemorySecureStorage::default();
@@ -413,6 +502,56 @@ async fn legacy_keyring_loss_without_userdata_copy_reports_partial_recovery() {
         panic!("expected partial recovery after restart")
     };
     assert_eq!(summary.state, ProfileRecoveryState::PartiallyRecoverable);
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_material_lost_while_waiting_for_passphrase_ends_in_partial_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    let storage = MemorySecureStorage::default();
+    let (_entry, kek_name) = create_profile(root.path(), &storage).await;
+    storage.values().remove(&kek_name);
+
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host(root.path(), Box::new(storage)),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        engine
+            .execute(Operation::QueryEncryptionState)
+            .await
+            .unwrap(),
+        OperationResult::EncryptionState(state) if state.initialized && !state.session_ready
+    ));
+    assert!(engine
+        .execute(Operation::SendText(SendTextInput {
+            text: "recovery runtime stays restricted".into(),
+            target_devices: Vec::new(),
+        }))
+        .await
+        .is_err());
+    std::fs::remove_file(root.path().join("private/vault/profile-secrets-v1")).unwrap();
+
+    let error = engine
+        .execute(Operation::UnlockSpace(UnlockSpaceInput {
+            passphrase: SecretString::new(PASSPHRASE),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), 1221);
+    assert!(!error.is_retryable());
+    let OperationResult::ProfileRecovery(summary) = engine
+        .execute(Operation::QueryProfileRecovery)
+        .await
+        .unwrap()
+    else {
+        panic!("expected partial recovery summary")
+    };
+    assert_eq!(summary.state, ProfileRecoveryState::PartiallyRecoverable);
+    assert!(!summary.can_submit_passphrase);
+    assert!(!summary.losses.is_empty());
     engine.shutdown(Duration::from_secs(15)).await.unwrap();
 }
 

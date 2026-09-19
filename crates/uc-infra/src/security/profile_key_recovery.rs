@@ -220,23 +220,23 @@ impl ProfileKeyRecoveryStore {
             return Ok(ProfileRecoveryPreparation::Ready);
         }
         let keyslot = self.material.load_keyslot(&self.scope).await?;
+        let losses = self.legacy_material_losses()?;
+        if !losses.is_empty() {
+            return Ok(ProfileRecoveryPreparation::AwaitingPassphrase { losses });
+        }
         match self.material.load_kek(&self.scope).await {
             Ok(kek) => {
                 let Some(wrapped) = keyslot.wrapped_master_key.as_ref() else {
                     return Err(ProfileKeyRecoveryError::Corrupt);
                 };
                 if v1_aead::unwrap_master_key_xchacha(&kek, &wrapped.blob).is_err() {
-                    return Ok(ProfileRecoveryPreparation::AwaitingPassphrase {
-                        losses: self.legacy_material_losses()?,
-                    });
+                    return Ok(ProfileRecoveryPreparation::AwaitingPassphrase { losses });
                 }
                 self.activate_or_migrate(&kek)?;
                 Ok(ProfileRecoveryPreparation::Ready)
             }
             Err(EncryptionError::KeyNotFound | EncryptionError::KeyMaterialCorrupt) => {
-                Ok(ProfileRecoveryPreparation::AwaitingPassphrase {
-                    losses: self.legacy_material_losses()?,
-                })
+                Ok(ProfileRecoveryPreparation::AwaitingPassphrase { losses })
             }
             Err(error) => Err(error.into()),
         }
@@ -897,6 +897,78 @@ mod tests {
         }
     }
 
+    async fn active_recovery_fixture() -> (
+        tempfile::TempDir,
+        Arc<MemoryStorage>,
+        AppPaths,
+        String,
+        ProfileKeyRecoveryStore,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Arc::new(MemoryStorage::default());
+        let backing: Arc<dyn SecureStoragePort> = storage.clone();
+        let paths = test_paths(&directory);
+        let profile_id = uc_core::ids::ProfileId::new().into_inner();
+        let scope = KeyScope {
+            profile_id: profile_id.clone(),
+        };
+        let material = KeyMaterialStore::new(
+            Arc::clone(&backing),
+            Arc::new(JsonKeySlotStore::new(paths.vault_dir.clone())),
+        );
+        let draft = KeySlot::draft_v1(scope.clone()).unwrap();
+        let legacy = LegacyPassphrase("migration passphrase".to_owned());
+        let kek = v1_aead::derive_kek_argon2id(&legacy, &draft.salt, &draft.kdf).unwrap();
+        let master = MasterKey::generate().unwrap();
+        let wrapped = v1_aead::wrap_master_key_xchacha(&kek, &master).unwrap();
+        material
+            .store_keyslot(&draft.finalize(WrappedMasterKey { blob: wrapped }))
+            .await
+            .unwrap();
+        material.store_kek(&scope, &kek).await.unwrap();
+        storage
+            .set(PROFILE_ADMISSION_KEY_NAME, &[0x41; 32])
+            .unwrap();
+        let recovery = ProfileKeyRecoveryStore::new(paths.clone(), profile_id.clone(), backing);
+        assert_eq!(
+            recovery.prepare_startup().await.unwrap(),
+            ProfileRecoveryPreparation::Ready
+        );
+        (directory, storage, paths, profile_id, recovery)
+    }
+
+    #[test]
+    fn recovery_error_conversion_preserves_failure_classes() {
+        assert!(matches!(
+            ProfileKeyRecoveryError::from(SecureStorageError::Unavailable("storage".to_owned())),
+            ProfileKeyRecoveryError::Storage(_)
+        ));
+        assert!(matches!(
+            ProfileKeyRecoveryError::from(std::io::Error::other("io")),
+            ProfileKeyRecoveryError::Storage(_)
+        ));
+        assert!(matches!(
+            ProfileKeyRecoveryError::from(EncryptionError::WrongPassphrase),
+            ProfileKeyRecoveryError::WrongPassphrase
+        ));
+        assert!(matches!(
+            ProfileKeyRecoveryError::from(EncryptionError::UnsupportedKdfAlgorithm),
+            ProfileKeyRecoveryError::Unsupported
+        ));
+        assert!(matches!(
+            ProfileKeyRecoveryError::from(EncryptionError::CorruptedKeySlot),
+            ProfileKeyRecoveryError::Corrupt
+        ));
+        assert!(matches!(
+            ProfileKeyRecoveryError::from(EncryptionError::KeyNotFound),
+            ProfileKeyRecoveryError::Storage(_)
+        ));
+        assert!(matches!(
+            ProfileKeyRecoveryError::from(v1_aead::AeadError::DecryptFailed),
+            ProfileKeyRecoveryError::Storage(_)
+        ));
+    }
+
     #[tokio::test]
     async fn legacy_secrets_are_verified_before_their_keyring_entries_are_removed() {
         let directory = tempfile::tempdir().unwrap();
@@ -973,6 +1045,55 @@ mod tests {
             assert_eq!(restarted.get(&name).unwrap(), Some(value));
             assert!(storage.get(&name).unwrap().is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn automatic_migration_stops_when_protected_history_has_lost_legacy_material() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Arc::new(MemoryStorage::default());
+        let backing: Arc<dyn SecureStoragePort> = storage.clone();
+        let paths = test_paths(&directory);
+        let profile_id = uc_core::ids::ProfileId::new().into_inner();
+        let scope = KeyScope {
+            profile_id: profile_id.clone(),
+        };
+        let material = KeyMaterialStore::new(
+            Arc::clone(&backing),
+            Arc::new(JsonKeySlotStore::new(paths.vault_dir.clone())),
+        );
+        let draft = KeySlot::draft_v1(scope.clone()).unwrap();
+        let legacy = LegacyPassphrase("migration passphrase".to_owned());
+        let kek = v1_aead::derive_kek_argon2id(&legacy, &draft.salt, &draft.kdf).unwrap();
+        let master = MasterKey::generate().unwrap();
+        let wrapped = v1_aead::wrap_master_key_xchacha(&kek, &master).unwrap();
+        material
+            .store_keyslot(&draft.finalize(WrappedMasterKey { blob: wrapped }))
+            .await
+            .unwrap();
+        material.store_kek(&scope, &kek).await.unwrap();
+        storage
+            .set(PROFILE_LIFECYCLE_MARKER_NAME, &[0x31; 32])
+            .unwrap();
+        storage.set(IDENTITY_STORE_KEY, &[0x32; 32]).unwrap();
+        std::fs::create_dir_all(&paths.vault_dir).unwrap();
+        std::fs::write(
+            paths.vault_dir.join("profile-content-key-vault-v1.json"),
+            b"protected history marker",
+        )
+        .unwrap();
+
+        let recovery = ProfileKeyRecoveryStore::new(paths, profile_id, backing);
+        assert_eq!(
+            recovery.prepare_startup().await.unwrap(),
+            ProfileRecoveryPreparation::AwaitingPassphrase {
+                losses: ProfileRecoveryLosses {
+                    local_history: true,
+                    local_control_state: false,
+                    device_identity: false,
+                },
+            }
+        );
+        assert!(!recovery.vault_file().exists());
     }
 
     #[tokio::test]
@@ -1067,6 +1188,59 @@ mod tests {
         assert_eq!(completed.get(UPGRADE_BACKUP_KEY).unwrap(), Some(expected));
         assert!(storage.get(UPGRADE_BACKUP_KEY).unwrap().is_none());
         assert!(!completed.cleanup_pending());
+    }
+
+    #[tokio::test]
+    async fn managed_mutations_restore_memory_when_the_recovery_file_cannot_be_replaced() {
+        let (_directory, _storage, _paths, _profile_id, recovery) = active_recovery_fixture().await;
+        let original = recovery.get(PROFILE_ADMISSION_KEY_NAME).unwrap().unwrap();
+        let interrupted = recovery.vault_file().with_extension("preparing");
+        std::fs::create_dir(&interrupted).unwrap();
+
+        assert!(recovery
+            .set(PROFILE_ADMISSION_KEY_NAME, &[0x52; 32])
+            .is_err());
+        assert_eq!(
+            recovery.get(PROFILE_ADMISSION_KEY_NAME).unwrap(),
+            Some(original.clone())
+        );
+        assert!(recovery.delete(PROFILE_ADMISSION_KEY_NAME).is_err());
+        assert_eq!(
+            recovery.get(PROFILE_ADMISSION_KEY_NAME).unwrap(),
+            Some(original)
+        );
+    }
+
+    #[tokio::test]
+    async fn active_recovery_fails_closed_when_its_file_disappears() {
+        let (_directory, _storage, _paths, _profile_id, recovery) = active_recovery_fixture().await;
+        std::fs::remove_file(recovery.vault_file()).unwrap();
+
+        assert!(matches!(
+            recovery.get(PROFILE_ADMISSION_KEY_NAME),
+            Err(SecureStorageError::Corrupt(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn automatic_activation_rejects_invalid_kek_and_unopenable_recovery_file() {
+        let (_directory, storage, paths, profile_id, recovery) = active_recovery_fixture().await;
+        let kek_name = format!("kek:v1:profile:{profile_id}");
+        drop(recovery);
+        storage.set(&kek_name, &[0x61; 3]).unwrap();
+        let invalid_kek =
+            ProfileKeyRecoveryStore::new(paths.clone(), profile_id.clone(), storage.clone());
+        assert!(matches!(
+            invalid_kek.get(PROFILE_ADMISSION_KEY_NAME),
+            Err(SecureStorageError::Corrupt(_))
+        ));
+
+        storage.set(&kek_name, &[0x62; 32]).unwrap();
+        let unopenable = ProfileKeyRecoveryStore::new(paths, profile_id, storage);
+        assert!(matches!(
+            unopenable.get(PROFILE_ADMISSION_KEY_NAME),
+            Err(SecureStorageError::Corrupt(_))
+        ));
     }
 
     #[test]

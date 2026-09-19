@@ -92,6 +92,7 @@ async fn keyslot_rejects_unbounded_kdf_parameters_before_derivation() {
         (MAX_KDF_MEM_KIB + 1, 3, 4),
         (128 * 1024, MAX_KDF_ITERS + 1, 4),
         (128 * 1024, 3, MAX_KDF_PARALLELISM + 1),
+        (128 * 1024, 5, 4),
     ] {
         let root = tempfile::tempdir().unwrap();
         let scope = KeyScope {

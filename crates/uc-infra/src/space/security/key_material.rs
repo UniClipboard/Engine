@@ -7,9 +7,7 @@ use std::sync::Arc;
 use uc_core::{crypto::model::EncryptionError, ports::SecureStoragePort};
 
 use crate::fs::key_slot_store::KeySlotStore;
-use crate::security::crypto_model::{
-    KeyScope, KeySlot, KeySlotFile, MAX_KDF_ITERS, MAX_KDF_MEM_KIB, MAX_KDF_PARALLELISM,
-};
+use crate::security::crypto_model::{validate_kdf, KeyScope, KeySlot, KeySlotFile};
 use crate::security::{Kek, SecureStorageAccess};
 
 use super::scope_identifier::scope_identifier;
@@ -135,27 +133,9 @@ impl KeyMaterialStore {
         if file.version != "V1" {
             return Err(EncryptionError::UnsupportedKeySlotVersion);
         }
-        if file.kdf.alg != "Argon2id" {
-            return Err(EncryptionError::UnsupportedKdfAlgorithm);
-        }
+        validate_kdf(&file.kdf)?;
         file.wrapped_master_key.validate_basic()?;
         if file.salt.len() < 8 {
-            return Err(EncryptionError::CorruptedKeySlot);
-        }
-        if !(8..=MAX_KDF_MEM_KIB).contains(&file.kdf.params.mem_kib)
-            || !(1..=MAX_KDF_ITERS).contains(&file.kdf.params.iters)
-            || !(1..=MAX_KDF_PARALLELISM).contains(&file.kdf.params.parallelism)
-        {
-            return Err(EncryptionError::CorruptedKeySlot);
-        }
-        if argon2::Params::new(
-            file.kdf.params.mem_kib,
-            file.kdf.params.iters,
-            file.kdf.params.parallelism,
-            Some(32),
-        )
-        .is_err()
-        {
             return Err(EncryptionError::CorruptedKeySlot);
         }
         Ok(file.into())

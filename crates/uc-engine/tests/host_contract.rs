@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use uc_engine::{
@@ -124,6 +124,9 @@ struct MemorySecureStorage {
     values: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     removed_values: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     fail_reads: Arc<AtomicBool>,
+    kek_reads: Arc<AtomicUsize>,
+    fail_kek_read_at: Arc<AtomicUsize>,
+    fail_kek_writes: Arc<AtomicBool>,
 }
 
 impl MemorySecureStorage {
@@ -144,6 +147,15 @@ impl MemorySecureStorage {
 
 impl HostSecureStorage for MemorySecureStorage {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, HostCapabilityError> {
+        if key.starts_with("kek:v1:") {
+            let read = self.kek_reads.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.fail_kek_read_at.load(Ordering::SeqCst) == read {
+                return Err(HostCapabilityError::new(
+                    HostCapabilityErrorCategory::Unavailable,
+                    "secure storage read failure injected by recovery test",
+                ));
+            }
+        }
         if self.fail_reads.load(Ordering::SeqCst) && key.starts_with("kek:v1:") {
             return Err(HostCapabilityError::new(
                 HostCapabilityErrorCategory::Unavailable,
@@ -154,6 +166,12 @@ impl HostSecureStorage for MemorySecureStorage {
     }
 
     fn set(&self, key: &str, value: &[u8]) -> Result<(), HostCapabilityError> {
+        if key.starts_with("kek:v1:") && self.fail_kek_writes.load(Ordering::SeqCst) {
+            return Err(HostCapabilityError::new(
+                HostCapabilityErrorCategory::Unavailable,
+                "secure storage write failure injected by recovery test",
+            ));
+        }
         self.values().insert(key.to_owned(), value.to_vec());
         Ok(())
     }
