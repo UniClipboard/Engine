@@ -8,4 +8,6 @@ pub(crate) use activity::{
     MembershipSessionActivityPort, SpaceSessionActivityPort,
 };
 pub use ports::{IsSpaceUnlockedPort, ResumeSpaceSessionPort};
+#[cfg(test)]
+pub(crate) use recovery::LockGeneration;
 pub(crate) use recovery::{SpaceSessionRecovery, SpaceSessionRecoveryPort};

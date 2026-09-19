@@ -12,9 +12,16 @@ use super::{SpaceActivityError, SpaceSessionActivityPort};
 #[async_trait]
 pub(crate) trait SpaceSessionRecoveryPort: Send + Sync {
     async fn request_activation(&self) -> Result<(), SpaceActivityError>;
-    async fn pause_for_lock(&self) -> Result<(), SpaceActivityError>;
-    async fn restore_after_failed_lock(&self) -> Result<(), anyhow::Error>;
+    async fn pause_for_lock(&self) -> Result<LockGeneration, SpaceActivityError>;
+    async fn finish_successful_lock(&self, generation: LockGeneration);
+    async fn restore_after_failed_lock(
+        &self,
+        generation: LockGeneration,
+    ) -> Result<(), anyhow::Error>;
 }
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct LockGeneration(u64);
 
 pub(crate) struct SpaceSessionRecovery {
     activity: Arc<dyn SpaceSessionActivityPort>,
@@ -27,6 +34,8 @@ pub(crate) struct SpaceSessionRecovery {
 struct RecoveryState {
     activation: Option<ActivationTask>,
     active: bool,
+    lock_generation: u64,
+    locking: Option<LockGeneration>,
 }
 
 struct ActivationTask {
@@ -76,6 +85,9 @@ impl SpaceSessionRecoveryPort for SpaceSessionRecovery {
         let mut state = self.state.lock().await;
         if self.closed.load(Ordering::Acquire) {
             return Err(SpaceActivityError::Unavailable);
+        }
+        if state.locking.is_some() {
+            return Ok(());
         }
         if state.active {
             return Ok(());
@@ -130,18 +142,49 @@ impl SpaceSessionRecoveryPort for SpaceSessionRecovery {
         Ok(())
     }
 
-    async fn pause_for_lock(&self) -> Result<(), SpaceActivityError> {
+    async fn pause_for_lock(&self) -> Result<LockGeneration, SpaceActivityError> {
         let mut state = self.state.lock().await;
-        cancel_activation(&mut state).await?;
+        if state.locking.is_some() {
+            return Err(SpaceActivityError::Unavailable);
+        }
+        state.lock_generation = state.lock_generation.wrapping_add(1);
+        let generation = LockGeneration(state.lock_generation);
+        state.locking = Some(generation);
+        if let Err(error) = cancel_activation(&mut state).await {
+            clear_matching_lock(&mut state, generation);
+            return Err(error);
+        }
         state.active = false;
-        self.activity.pause_for_lock().await
+        if let Err(error) = self.activity.pause_for_lock().await {
+            clear_matching_lock(&mut state, generation);
+            return Err(error);
+        }
+        Ok(generation)
     }
 
-    async fn restore_after_failed_lock(&self) -> Result<(), anyhow::Error> {
+    async fn finish_successful_lock(&self, generation: LockGeneration) {
         let mut state = self.state.lock().await;
-        self.activity.restore_after_failed_lock().await?;
-        state.active = true;
-        Ok(())
+        clear_matching_lock(&mut state, generation);
+    }
+
+    async fn restore_after_failed_lock(
+        &self,
+        generation: LockGeneration,
+    ) -> Result<(), anyhow::Error> {
+        let mut state = self.state.lock().await;
+        if state.locking != Some(generation) {
+            return Ok(());
+        }
+        let restoration = self.activity.restore_after_failed_lock().await;
+        state.active = restoration.is_ok();
+        clear_matching_lock(&mut state, generation);
+        restoration
+    }
+}
+
+fn clear_matching_lock(state: &mut RecoveryState, generation: LockGeneration) {
+    if state.locking == Some(generation) {
+        state.locking = None;
     }
 }
 
@@ -171,6 +214,7 @@ mod tests {
         activations: AtomicUsize,
         failures_before_success: usize,
         pauses: AtomicUsize,
+        restores: AtomicUsize,
         block_activation: bool,
         entered: Notify,
     }
@@ -181,6 +225,7 @@ mod tests {
                 activations: AtomicUsize::new(0),
                 failures_before_success: 0,
                 pauses: AtomicUsize::new(0),
+                restores: AtomicUsize::new(0),
                 block_activation: false,
                 entered: Notify::new(),
             })
@@ -191,6 +236,7 @@ mod tests {
                 activations: AtomicUsize::new(0),
                 failures_before_success: 0,
                 pauses: AtomicUsize::new(0),
+                restores: AtomicUsize::new(0),
                 block_activation: true,
                 entered: Notify::new(),
             })
@@ -217,6 +263,7 @@ mod tests {
         }
 
         async fn restore_after_failed_lock(&self) -> Result<(), anyhow::Error> {
+            self.restores.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -240,6 +287,7 @@ mod tests {
             activations: AtomicUsize::new(0),
             failures_before_success: 2,
             pauses: AtomicUsize::new(0),
+            restores: AtomicUsize::new(0),
             block_activation: false,
             entered: Notify::new(),
         });
@@ -279,13 +327,74 @@ mod tests {
 
         recovery.request_activation().await.unwrap();
         activity.entered.notified().await;
-        timeout(Duration::from_secs(1), recovery.pause_for_lock())
+        let generation = timeout(Duration::from_secs(1), recovery.pause_for_lock())
             .await
             .unwrap()
             .unwrap();
 
         assert_eq!(activity.activations.load(Ordering::SeqCst), 1);
         assert_eq!(activity.pauses.load(Ordering::SeqCst), 1);
+        recovery.finish_successful_lock(generation).await;
+        recovery.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn activation_remains_deferred_until_lock_finishes() {
+        let activity = RecordingActivity::succeeds();
+        let recovery = SpaceSessionRecovery::new(activity.clone());
+
+        let generation = recovery.pause_for_lock().await.unwrap();
+        recovery.request_activation().await.unwrap();
+        tokio::task::yield_now().await;
+
+        assert_eq!(activity.activations.load(Ordering::SeqCst), 0);
+
+        recovery.finish_successful_lock(generation).await;
+        recovery.request_activation().await.unwrap();
+        activity.entered.notified().await;
+
+        assert_eq!(activity.activations.load(Ordering::SeqCst), 1);
+        recovery.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_failed_lock_does_not_restore_during_newer_lock() {
+        let activity = RecordingActivity::succeeds();
+        let recovery = SpaceSessionRecovery::new(activity.clone());
+
+        let stale = recovery.pause_for_lock().await.unwrap();
+        recovery.finish_successful_lock(stale).await;
+        let current = recovery.pause_for_lock().await.unwrap();
+        recovery.restore_after_failed_lock(stale).await.unwrap();
+        recovery.request_activation().await.unwrap();
+        tokio::task::yield_now().await;
+
+        assert_eq!(activity.activations.load(Ordering::SeqCst), 0);
+        assert_eq!(activity.restores.load(Ordering::SeqCst), 0);
+
+        recovery.restore_after_failed_lock(current).await.unwrap();
+        recovery.request_activation().await.unwrap();
+        tokio::task::yield_now().await;
+
+        assert_eq!(activity.activations.load(Ordering::SeqCst), 0);
+        assert_eq!(activity.restores.load(Ordering::SeqCst), 1);
+        recovery.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn overlapping_lock_pause_is_rejected() {
+        let activity = RecordingActivity::succeeds();
+        let recovery = SpaceSessionRecovery::new(activity.clone());
+
+        let generation = recovery.pause_for_lock().await.unwrap();
+
+        assert!(matches!(
+            recovery.pause_for_lock().await,
+            Err(SpaceActivityError::Unavailable)
+        ));
+        assert_eq!(activity.pauses.load(Ordering::SeqCst), 1);
+
+        recovery.finish_successful_lock(generation).await;
         recovery.shutdown().await.unwrap();
     }
 

@@ -340,6 +340,8 @@ mod tests {
     use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
 
+    use crate::space::lifecycle::session::LockGeneration;
+
     // ---------- Fakes ----------
 
     struct NoopRecovery;
@@ -350,11 +352,16 @@ mod tests {
             Ok(())
         }
 
-        async fn pause_for_lock(&self) -> Result<(), crate::space::SpaceActivityError> {
-            Ok(())
+        async fn pause_for_lock(&self) -> Result<LockGeneration, crate::space::SpaceActivityError> {
+            Ok(LockGeneration::default())
         }
 
-        async fn restore_after_failed_lock(&self) -> Result<(), anyhow::Error> {
+        async fn finish_successful_lock(&self, _generation: LockGeneration) {}
+
+        async fn restore_after_failed_lock(
+            &self,
+            _generation: LockGeneration,
+        ) -> Result<(), anyhow::Error> {
             Ok(())
         }
     }
