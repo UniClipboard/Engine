@@ -23,6 +23,9 @@ use uc_core::ports::{
 };
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 use uc_core::{ClipboardChangeOrigin, SystemClipboardSnapshot};
+use uc_observability_contract::diagnostics::connectivity::{
+    LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
+};
 
 use crate::clipboard::sync::apply_inbound::{
     compute_file_set_component, InboundFileSetManifest, InboundFileSetMember,
@@ -232,6 +235,8 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
         let entry_id = EntryId::from(input.entry_id.as_str());
         let display_metadata = file_display_metadata(&input.snapshot);
 
+        let resolution_observation =
+            LocalWorkObservation::begin(LocalWorkStep::ClipboardFileSetResolve);
         let resolution = if input.origin == ClipboardChangeOrigin::LocalCapture {
             resolve_outbound_file_set(
                 self.entry_file_set_repo.as_ref(),
@@ -242,6 +247,7 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
         } else {
             OutboundFileSetResolution::NotFileClass
         };
+        resolution_observation.finish(LocalWorkOutcome::Ok);
         let (resolved_paths, from_manifest, expected_digests, directory_members) = match resolution
         {
             OutboundFileSetResolution::NotFileClass => (Vec::new(), false, Vec::new(), None),
@@ -279,6 +285,9 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
 
         let mut file_candidates = Vec::with_capacity(resolved_paths.len());
         let mut total_file_metadata_bytes: u64 = 0;
+        let mut metadata_observation = Some(LocalWorkObservation::begin(
+            LocalWorkStep::ClipboardFileMetadataRead,
+        ));
         for path in resolved_paths {
             match tokio::fs::metadata(&path).await {
                 Ok(meta) => {
@@ -299,6 +308,9 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
                         entry_id = %entry_id_str,
                         "outbound: file-set member unreadable at dispatch; skipping dispatch (all-or-nothing)"
                     );
+                    if let Some(observation) = metadata_observation.take() {
+                        observation.finish(LocalWorkOutcome::Error);
+                    }
                     return Ok(ClipboardOutboundOutcome::Skipped {
                         reason: "file_set_member_unavailable".to_string(),
                     });
@@ -309,7 +321,12 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
                 ),
             }
         }
+        if let Some(observation) = metadata_observation {
+            observation.finish(LocalWorkOutcome::Ok);
+        }
         let planner = OutboundSyncPlanner::new(Arc::clone(&self.settings));
+        let planning_observation =
+            LocalWorkObservation::begin(LocalWorkStep::ClipboardOutboundPlan);
         let plan = planner
             .plan(
                 input.snapshot,
@@ -318,6 +335,7 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
                 extracted_paths_count,
             )
             .await;
+        planning_observation.finish(LocalWorkOutcome::Ok);
         let Some(mut clipboard_intent) = plan.clipboard else {
             info!(
                 entry_id = %entry_id_str,
@@ -942,12 +960,22 @@ pub(crate) async fn publish_oversized_inline_blob_refs(
         // them — `snapshot_hash()` is invoked downstream during V3 encode
         // and must reflect the real image content for cross-device dedup
         // to match.
+        let hash_observation =
+            LocalWorkObservation::begin(LocalWorkStep::ClipboardImageContentHash);
         let _ = rep.content_hash();
+        hash_observation.finish(LocalWorkOutcome::Ok);
 
         let size_bytes = rep_bytes.len() as u64;
-        let plaintext = rep
-            .take_inline_bytes()
-            .map_err(|err| ClipboardOutboundError::Internal(err.to_string()))?;
+        let payload_observation =
+            LocalWorkObservation::begin(LocalWorkStep::ClipboardImagePayloadTake);
+        let plaintext_result = rep.take_inline_bytes();
+        payload_observation.finish(if plaintext_result.is_ok() {
+            LocalWorkOutcome::Ok
+        } else {
+            LocalWorkOutcome::Error
+        });
+        let plaintext =
+            plaintext_result.map_err(|err| ClipboardOutboundError::Internal(err.to_string()))?;
 
         let result = blob_transfer
             .publish_blob(PublishBlobCommand {
@@ -1075,9 +1103,15 @@ mod tests {
     impl OutboundBlobPublishGateway for SuccessfulFilePublishGateway {
         async fn publish_blob(
             &self,
-            _command: PublishBlobCommand,
+            command: PublishBlobCommand,
         ) -> Result<PublishBlobResult, BlobTransferError> {
-            unreachable!("file log test publishes a path only")
+            Ok(PublishBlobResult {
+                ticket: uc_core::ports::blob::BlobTicket::from_bytes(vec![1, 2, 3]),
+                entry_id: command.entry_id.expect("entry id"),
+                plaintext_hash: uc_core::ports::blob::PlaintextHash::from_bytes([4; 32]),
+                digest: uc_core::ports::blob::BlobDigest::from_bytes([5; 32]),
+                reused_existing: false,
+            })
         }
 
         async fn publish_blob_path(
@@ -1155,6 +1189,44 @@ mod tests {
             !logs.contains(&source_path.display().to_string()),
             "source path leaked into outbound logs: {logs}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn oversized_image_records_hash_and_payload_take_for_representative_jpeg() {
+        let writer = CapturedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_ansi(false)
+            .finish();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        let mut snapshot = SystemClipboardSnapshot {
+            ts_ms: 1_700_000_000_000,
+            representations: vec![ObservedClipboardRepresentation::new(
+                RepresentationId::new(),
+                FormatId::from("jpeg"),
+                Some(MimeType("image/jpeg".to_string())),
+                vec![0xAB; 8_990_993],
+            )],
+            file_content_digests: Vec::new(),
+            file_set_v1_component: None,
+        };
+
+        let blob_refs = publish_oversized_inline_blob_refs(
+            &SuccessfulFilePublishGateway,
+            &mut snapshot,
+            &EntryId::from("representative-image-entry"),
+        )
+        .await
+        .expect("representative JPEG should publish");
+
+        assert_eq!(blob_refs.len(), 1);
+        assert_eq!(blob_refs[0].size_bytes, 8_990_993);
+        assert_eq!(snapshot.representations[0].inline_bytes(), Some(&[][..]));
+        let logs = writer.dump();
+        assert!(logs.contains("clipboard_image_content_hash"));
+        assert!(logs.contains("clipboard_image_payload_take"));
     }
 
     /// Stub runner — every `dispatch_capture` test gets one of these so

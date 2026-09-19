@@ -16,6 +16,9 @@ use uc_core::ports::{
     ClockPort, DeviceIdentityPort, EntryDeliveryRepositoryPort, PeerAddressRepositoryPort,
     PeerReachabilityPort, SettingsPort,
 };
+use uc_observability_contract::diagnostics::connectivity::{
+    LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
+};
 
 use crate::clipboard::inbound::ClipboardInboundRuntime;
 use crate::clipboard::outbound::{
@@ -85,7 +88,10 @@ impl ClipboardSyncRuntime {
         input: ClipboardOutboundInput,
         target_filter: Option<Vec<DeviceId>>,
     ) -> Result<ClipboardOutboundOutcome, ClipboardOutboundError> {
+        let gate_observation =
+            LocalWorkObservation::begin(LocalWorkStep::ClipboardDeliveryGateWait);
         let _gate = self.delivery_gate.lock().await;
+        gate_observation.finish(LocalWorkOutcome::Ok);
         if self.stopping.load(Ordering::Acquire) {
             return Ok(ClipboardOutboundOutcome::Skipped {
                 reason: "runtime_stopped".to_owned(),
@@ -116,7 +122,14 @@ impl ClipboardSyncRuntime {
 }
 
 async fn automatic_sync_enabled(settings: &dyn SettingsPort) -> bool {
-    match settings.load().await {
+    let observation = LocalWorkObservation::begin(LocalWorkStep::ClipboardSyncSettingsLoad);
+    let result = settings.load().await;
+    observation.finish(if result.is_ok() {
+        LocalWorkOutcome::Ok
+    } else {
+        LocalWorkOutcome::Error
+    });
+    match result {
         Ok(settings) => settings.sync.sync_enabled && settings.sync.auto_sync_enabled,
         Err(_) => {
             warn!(

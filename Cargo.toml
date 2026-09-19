@@ -66,6 +66,11 @@ opt-level = 3
 [profile.dev.package.miniz_oxide]
 opt-level = 3
 
+# 移动端开发构建会走完整的加密 blob 流程。保持 Infra 优化，避免大图在
+# 仅由开发配置放大的压缩、分块和本地发布阶段耗费数秒。
+[profile.dev.package.uc-infra]
+opt-level = 3
+
 [profile.release]
 panic = "abort"
 codegen-units = 1
