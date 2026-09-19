@@ -170,6 +170,29 @@ async fn wait_entry_delivered(engine: &Engine, entry_id: &str, target_device_id:
     .expect("timed out waiting for delivered entry");
 }
 
+async fn wait_receive_ready(engine: &Engine) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let readiness = engine
+                .execute(crate::Operation::QueryReceiveReadiness)
+                .await
+                .expect("receive readiness query must succeed");
+            if matches!(
+                readiness,
+                crate::OperationResult::ReceiveReadiness(crate::ReceiveReadinessSummary {
+                    ready: true,
+                    degraded: false,
+                })
+            ) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for receive readiness");
+}
+
 #[cfg(feature = "dev-tools")]
 type EnginePairingTicketVault = Arc<Mutex<Option<String>>>;
 
@@ -2729,16 +2752,7 @@ async fn engine_start_builds_a_resumable_real_session() {
             .unwrap(),
         crate::OperationResult::SecureStorageAccess { granted: true }
     );
-    assert_eq!(
-        engine
-            .execute(crate::Operation::QueryReceiveReadiness)
-            .await
-            .unwrap(),
-        crate::OperationResult::ReceiveReadiness(crate::ReceiveReadinessSummary {
-            ready: true,
-            degraded: false,
-        })
-    );
+    wait_receive_ready(&engine).await;
     assert_eq!(
         engine
             .execute(crate::Operation::LockEncryption)
@@ -2775,16 +2789,7 @@ async fn engine_start_builds_a_resumable_real_session() {
             .unwrap(),
         crate::OperationResult::SpaceUnlocked { .. }
     ));
-    assert_eq!(
-        engine
-            .execute(crate::Operation::QueryReceiveReadiness)
-            .await
-            .unwrap(),
-        crate::OperationResult::ReceiveReadiness(crate::ReceiveReadinessSummary {
-            ready: true,
-            degraded: false,
-        })
-    );
+    wait_receive_ready(&engine).await;
     let invitation = engine
         .execute(crate::Operation::IssueInvitation)
         .await

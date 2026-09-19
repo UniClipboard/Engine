@@ -3,30 +3,30 @@ use std::sync::Arc;
 use uc_core::ports::space::SpaceAccessError;
 
 use crate::space::lifecycle::CurrentSpaceIdentityPort;
-use crate::space::lifecycle::PostSessionReadiness;
-use crate::space::lifecycle::{ResumeSpaceSessionPort, SpaceSessionActivityPort};
+use crate::space::lifecycle::ResumeSpaceSessionPort;
+use crate::space::lifecycle::{LocalSessionReadiness, SpaceSessionRecoveryPort};
 
 use super::{RecoverSpaceSessionError, RecoverSpaceSessionResult};
 
 pub(crate) struct RecoverSpaceSessionUseCase {
     current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
     resume_session: Arc<dyn ResumeSpaceSessionPort>,
-    readiness: Arc<PostSessionReadiness>,
-    activity: Arc<dyn SpaceSessionActivityPort>,
+    readiness: Arc<LocalSessionReadiness>,
+    recovery: Arc<dyn SpaceSessionRecoveryPort>,
 }
 
 impl RecoverSpaceSessionUseCase {
     pub(crate) fn new(
         current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
         resume_session: Arc<dyn ResumeSpaceSessionPort>,
-        readiness: Arc<PostSessionReadiness>,
-        activity: Arc<dyn SpaceSessionActivityPort>,
+        readiness: Arc<LocalSessionReadiness>,
+        recovery: Arc<dyn SpaceSessionRecoveryPort>,
     ) -> Self {
         Self {
             current_space_identity,
             resume_session,
             readiness,
-            activity,
+            recovery,
         }
     }
 
@@ -61,8 +61,7 @@ impl RecoverSpaceSessionUseCase {
             .complete_after_resume()
             .await
             .map_err(RecoverSpaceSessionError::Internal)?;
-        self.activity.resume_after_session_ready().await?;
-
+        self.recovery.request_activation().await?;
         Ok(RecoverSpaceSessionResult {
             unlocked: true,
             resumed: true,

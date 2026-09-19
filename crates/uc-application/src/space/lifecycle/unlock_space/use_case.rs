@@ -6,16 +6,19 @@ use uc_core::ids::SpaceId;
 use uc_core::ports::space::SpaceAccessError;
 use uc_observability_contract::analytics::{AnalyticsFacade, Event, UnlockFailureReason};
 
-use crate::space::lifecycle::{CurrentSpaceIdentityPort, PrepareSpaceAdmissionCredentialsPort};
+use crate::space::lifecycle::{
+    CurrentSpaceIdentityPort, PrepareSpaceAdmissionCredentialsPort, SpaceSessionRecoveryPort,
+};
 
 use super::error::UnlockSpaceError;
 use super::ports::UnlockSpacePort;
-use super::readiness::PostSessionReadiness;
+use super::readiness::LocalSessionReadiness;
 
 pub(crate) struct UnlockSpaceUseCase {
     space_access: Arc<dyn UnlockSpacePort>,
     current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
-    readiness: Arc<PostSessionReadiness>,
+    readiness: Arc<LocalSessionReadiness>,
+    recovery: Arc<dyn SpaceSessionRecoveryPort>,
     admission_credentials: Arc<dyn PrepareSpaceAdmissionCredentialsPort>,
     analytics: Arc<dyn AnalyticsFacade>,
 }
@@ -24,7 +27,8 @@ impl UnlockSpaceUseCase {
     pub(crate) fn new(
         space_access: Arc<dyn UnlockSpacePort>,
         current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
-        readiness: Arc<PostSessionReadiness>,
+        readiness: Arc<LocalSessionReadiness>,
+        recovery: Arc<dyn SpaceSessionRecoveryPort>,
         admission_credentials: Arc<dyn PrepareSpaceAdmissionCredentialsPort>,
         analytics: Arc<dyn AnalyticsFacade>,
     ) -> Self {
@@ -32,6 +36,7 @@ impl UnlockSpaceUseCase {
             space_access,
             current_space_identity,
             readiness,
+            recovery,
             admission_credentials,
             analytics,
         }
@@ -52,6 +57,10 @@ impl UnlockSpaceUseCase {
             .complete_after_unlock()
             .await
             .map_err(|message| UnlockSpaceError::internal(anyhow::anyhow!(message)))?;
+        self.recovery
+            .request_activation()
+            .await
+            .map_err(|error| UnlockSpaceError::internal(anyhow::Error::new(error)))?;
 
         Ok(space_id)
     }

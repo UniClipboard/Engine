@@ -546,7 +546,20 @@ async fn offline_member_does_not_block_another_members_restart() {
     wait_online(&pair.engines[0], &c_id).await;
     wait_online(&c, &pair.ids[0]).await;
     c.shutdown(SHUTDOWN_TIMEOUT).await.unwrap();
-    let c = c_host.start_with_relay_fallback(false).await;
+    let c = tokio::time::timeout(
+        Duration::from_secs(5),
+        c_host.start_with_relay_fallback(false),
+    )
+    .await
+    .expect("an offline member must not delay local startup readiness");
+    let OperationResult::Devices(devices) = c.execute(Operation::ListDevices).await.unwrap() else {
+        panic!("expected the locally restored device list");
+    };
+    assert_eq!(
+        devices.len(),
+        3,
+        "all local device records must remain readable"
+    );
     tokio::join!(
         wait_online(&pair.engines[0], &c_id),
         wait_online(&c, &pair.ids[0])

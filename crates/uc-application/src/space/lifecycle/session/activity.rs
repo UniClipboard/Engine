@@ -17,7 +17,7 @@ trait SearchSessionActivityPort: Send + Sync {
 pub trait MembershipSessionActivityPort: Send + Sync {
     async fn pause(&self) -> anyhow::Result<()>;
     async fn resume(&self) -> anyhow::Result<()>;
-    async fn prepare_for_session(&self) -> Result<(), String>;
+    fn wake(&self) -> anyhow::Result<()>;
 }
 
 #[async_trait]
@@ -78,6 +78,8 @@ pub enum SpaceActivityError {
     Receive(String),
     #[error("membership activation failed")]
     Membership(#[source] anyhow::Error),
+    #[error("space session activity task failed")]
+    Task(#[source] tokio::task::JoinError),
 }
 
 impl fmt::Debug for SpaceActivityError {
@@ -88,6 +90,7 @@ impl fmt::Debug for SpaceActivityError {
             Self::Search(_) => "SpaceActivityError::Search",
             Self::Receive(_) => "SpaceActivityError::Receive",
             Self::Membership(_) => "SpaceActivityError::Membership",
+            Self::Task(_) => "SpaceActivityError::Task",
         })
     }
 }
@@ -172,6 +175,9 @@ impl SpaceSessionActivityPort for CombinedSpaceSessionActivity {
         self.membership
             .resume()
             .await
+            .map_err(SpaceActivityError::Membership)?;
+        self.membership
+            .wake()
             .map_err(SpaceActivityError::Membership)
     }
 
@@ -251,6 +257,7 @@ mod tests {
 
     struct RecordingMembership {
         pauses: AtomicUsize,
+        wakes: AtomicUsize,
         resumes: AtomicUsize,
     }
 
@@ -266,7 +273,8 @@ mod tests {
             Ok(())
         }
 
-        async fn prepare_for_session(&self) -> Result<(), String> {
+        fn wake(&self) -> anyhow::Result<()> {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -293,6 +301,7 @@ mod tests {
     async fn failed_application_pause_restores_membership_before_returning() {
         let membership = Arc::new(RecordingMembership {
             pauses: AtomicUsize::new(0),
+            wakes: AtomicUsize::new(0),
             resumes: AtomicUsize::new(0),
         });
         let application = Arc::new(FailingApplicationActivity(AtomicUsize::new(0)));
@@ -303,6 +312,22 @@ mod tests {
         assert_eq!(membership.pauses.load(Ordering::SeqCst), 1);
         assert_eq!(membership.resumes.load(Ordering::SeqCst), 1);
         assert_eq!(application.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn remote_membership_recovery_is_woken_after_local_activity_resumes() {
+        let membership = Arc::new(RecordingMembership {
+            pauses: AtomicUsize::new(0),
+            wakes: AtomicUsize::new(0),
+            resumes: AtomicUsize::new(0),
+        });
+        let application = Arc::new(FailingApplicationActivity(AtomicUsize::new(0)));
+        let activity = combine_space_session_activity(membership.clone(), application);
+
+        activity.resume_after_session_ready().await.unwrap();
+
+        assert_eq!(membership.wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(membership.resumes.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

@@ -1,26 +1,26 @@
 use std::sync::Arc;
 
 use crate::space::lifecycle::CurrentSpaceIdentityPort;
-use crate::space::lifecycle::SpaceSessionActivityPort;
+use crate::space::lifecycle::SpaceSessionRecoveryPort;
 
 use super::{LockSpacePort, LockSpaceSessionError};
 
 pub(crate) struct LockSpaceSessionUseCase {
     current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
     lock: Arc<dyn LockSpacePort>,
-    activity: Arc<dyn SpaceSessionActivityPort>,
+    recovery: Arc<dyn SpaceSessionRecoveryPort>,
 }
 
 impl LockSpaceSessionUseCase {
     pub(crate) fn new(
         current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
         lock: Arc<dyn LockSpacePort>,
-        activity: Arc<dyn SpaceSessionActivityPort>,
+        recovery: Arc<dyn SpaceSessionRecoveryPort>,
     ) -> Self {
         Self {
             current_space_identity,
             lock,
-            activity,
+            recovery,
         }
     }
 
@@ -32,12 +32,13 @@ impl LockSpaceSessionUseCase {
             .map_err(|error| LockSpaceSessionError::CurrentSpace(error.to_string()))?
             .ok_or(LockSpaceSessionError::NotInitialized)?;
 
-        self.activity.pause_for_lock().await?;
+        let lock_generation = self.recovery.pause_for_lock().await?;
         if self.lock.lock(&space_id).await.is_ok() {
+            self.recovery.finish_successful_lock(lock_generation).await;
             return Ok(());
         }
-        self.activity
-            .restore_after_failed_lock()
+        self.recovery
+            .restore_after_failed_lock(lock_generation)
             .await
             .map_err(LockSpaceSessionError::RecoveryFailed)?;
         Err(LockSpaceSessionError::LockFailed)
