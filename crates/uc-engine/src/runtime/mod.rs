@@ -6,6 +6,7 @@ mod host_operations;
 mod lan_compatibility;
 #[cfg(feature = "lan-compat")]
 mod mobile_upload;
+mod profile_recovery;
 mod session_supervisor;
 mod shutdown;
 mod task_shutdown;
@@ -31,11 +32,13 @@ use crate::assembly::host::{
 #[cfg(feature = "lan-compat")]
 use crate::assembly::mobile_lan::MobileLanEndpointUpdater;
 use crate::engine::event_stream::EventSender;
+use crate::error_codes::PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE;
 use crate::{
     EngineConfig, EngineError, EngineErrorCategory, EngineEvent, HostCapabilities, HostFileAccess,
     NetworkRecoveryPhaseSummary, NetworkRecoveryStatusSummary, RefreshReason,
 };
 use host_clipboard::{spawn_host_clipboard_change_task, HostClipboardChangeRuntime};
+pub(crate) use profile_recovery::RecoverableRuntime;
 use session_supervisor::{lifecycle_error, SessionSupervisor};
 const START_FAILED_CODE: u32 = 1101;
 const OPERATION_UNAVAILABLE_CODE: u32 = 1103;
@@ -153,6 +156,8 @@ impl ProductionRuntime {
         #[cfg(feature = "dev-tools")]
         let network_partition_gate = uc_infra::network::iroh::IrohNetworkPartitionGate::default();
         let emitter = Arc::new(EngineHostEventEmitter::new(events.clone()));
+        let wiring =
+            wire_host_capabilities_with_emitter(&config, host, emitter, progress.clone()).await;
         let HostWiring {
             wired,
             paths,
@@ -161,9 +166,10 @@ impl ProductionRuntime {
             files,
             profile_upgrade_backups,
             clipboard_changes,
-        } = wire_host_capabilities_with_emitter(&config, host, emitter, progress.clone())
-            .await
-            .map_err(|error| startup_error("dependency wiring", error))?;
+        } = match wiring {
+            Ok(wiring) => wiring,
+            Err(error) => return Err(startup_error("dependency wiring", error)),
+        };
 
         progress.starting_services();
 
@@ -369,13 +375,37 @@ async fn spawn_space_transition_watcher(
         .await;
 }
 
-fn startup_error(context: &'static str, error: impl std::fmt::Display) -> EngineError {
+fn startup_error(
+    context: &'static str,
+    error: impl std::error::Error + Send + Sync + 'static,
+) -> EngineError {
     let _ = writeln!(
         std::io::stderr().lock(),
         "uc-engine startup failed [{context}]: {error}"
     );
     error!(context, error = %error, "engine startup failed");
+    if error_chain_contains::<uc_infra::security::ProfileUpgradeBackupRecordKeyMissing>(&error) {
+        return EngineError::new(
+            PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE,
+            EngineErrorCategory::Unavailable,
+            false,
+        );
+    }
     EngineError::new(START_FAILED_CODE, EngineErrorCategory::Unavailable, true)
+}
+
+fn error_chain_contains<T>(error: &(dyn std::error::Error + 'static)) -> bool
+where
+    T: std::error::Error + 'static,
+{
+    let mut current = Some(error);
+    while let Some(source) = current {
+        if source.downcast_ref::<T>().is_some() {
+            return true;
+        }
+        current = source.source();
+    }
+    false
 }
 
 fn operation_unavailable_error() -> EngineError {
@@ -419,6 +449,20 @@ mod tests {
     use crate::operations::settings::storage::{map_storage_error, storage_stats_result};
     use crate::runtime::host_operations::send_report_result;
     use crate::{EntrySummary, OperationResult, QueryHistoryInput, StorageStatsSummary};
+
+    #[test]
+    fn missing_upgrade_backup_key_has_a_stable_non_retryable_startup_result() {
+        let error = startup_error(
+            "dependency wiring",
+            uc_infra::security::ProfileUpgradeBackupRecordKeyMissing,
+        );
+        assert_eq!(
+            error.code(),
+            crate::error_codes::PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE
+        );
+        assert_eq!(error.category(), EngineErrorCategory::Unavailable);
+        assert!(!error.is_retryable());
+    }
 
     #[cfg(feature = "dev-tools")]
     #[tokio::test]

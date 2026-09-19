@@ -9,6 +9,9 @@ use uc_engine::{
     HostFileHandle, HostFileMetadata, HostSecureStorage,
 };
 
+#[path = "host_contract/key_loss.rs"]
+mod key_loss;
+
 #[path = "host_contract/startup.rs"]
 mod startup;
 

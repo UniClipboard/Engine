@@ -3671,7 +3671,17 @@ async fn engine_start_finishes_an_interrupted_factory_reset_before_opening_a_new
 
     let lifecycle_storage =
         crate::assembly::host::adapt_secure_storage(Box::new(secure_storage.clone()));
-    let lifecycle = uc_infra::security::ProfileLifecycleRepository::new(lifecycle_storage);
+    let paths = crate::assembly::host::derive_app_paths(&directories());
+    let recovery_storage = Arc::new(uc_infra::security::ProfileKeyRecoveryStore::new(
+        paths.vault_dir,
+        "default".to_owned(),
+        lifecycle_storage,
+    ));
+    assert_eq!(
+        recovery_storage.prepare_startup().await.unwrap(),
+        uc_infra::security::ProfileRecoveryPreparation::Ready
+    );
+    let lifecycle = uc_infra::security::ProfileLifecycleRepository::new(recovery_storage);
     let initial = uc_application::deps::ProfileLifecycleRepositoryPort::load(&lifecycle)
         .unwrap()
         .unwrap();

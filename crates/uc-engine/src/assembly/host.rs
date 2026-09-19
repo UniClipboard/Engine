@@ -36,7 +36,7 @@ use crate::{
 };
 
 struct HostSecureStorageAdapter {
-    host: Box<dyn HostSecureStorage>,
+    host: Arc<dyn HostSecureStorage>,
 }
 
 impl SecureStoragePort for HostSecureStorageAdapter {
@@ -66,7 +66,16 @@ fn map_secure_storage_error(error: HostCapabilityError) -> SecureStorageError {
     }
 }
 
+#[cfg(test)]
 pub fn adapt_secure_storage(host: Box<dyn HostSecureStorage>) -> Arc<dyn SecureStoragePort> {
+    Arc::new(HostSecureStorageAdapter {
+        host: Arc::from(host),
+    })
+}
+
+pub(crate) fn adapt_shared_secure_storage(
+    host: Arc<dyn HostSecureStorage>,
+) -> Arc<dyn SecureStoragePort> {
     Arc::new(HostSecureStorageAdapter { host })
 }
 
@@ -447,7 +456,7 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
 ) -> WiringResult<HostWiring> {
     let (directories, secure_storage, mut clipboard, files, analytics) = host.into_parts();
     let paths = derive_app_paths(&directories);
-    let secure_storage = adapt_secure_storage(secure_storage);
+    let secure_storage = adapt_shared_secure_storage(secure_storage);
     let app_data_root = paths.app_data_root_dir.clone();
     let profile_upgrade_backups: Arc<dyn ProfileUpgradeBackupPort> =
         Arc::new(ProfileUpgradeBackupStore::new(

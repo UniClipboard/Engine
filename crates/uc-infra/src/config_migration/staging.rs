@@ -15,6 +15,7 @@
 //!   vault/keyslot.json     # keyslot to install into the vault dir
 //!   vault/device_id.txt
 //!   vault/.current-space-id-v1    # "is initialized" marker; copy back into vault dir
+//!   vault/profile-secrets-v1      # encrypted independent profile secrets
 //!   iroh-identity/*        # 0600 device-identity files; copy into identity dir
 //!   settings.json
 //!   secrets.json           # { "secrets": { "<key>": "<base64>" , ... } }; KEK only
@@ -33,6 +34,8 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 use uc_core::ports::SecureStoragePort;
+
+use crate::security::PROFILE_SECRET_FILE_NAME;
 
 use super::archive::BundleArchive;
 use super::secret_keys::SECRETS_MEMBER;
@@ -194,6 +197,9 @@ pub const DEVICE_ID_MEMBER: &str = "vault/device_id.txt";
 /// generation manifest that points at source-only generation directories.
 pub const CURRENT_SPACE_ID_MEMBER: &str = "vault/.current-space-id-v1";
 
+/// Member path of the encrypted independent profile-secret store.
+pub const PROFILE_SECRETS_MEMBER: &str = "vault/profile-secrets-v1";
+
 /// Member path of settings inside the bundle / staging area.
 pub const SETTINGS_MEMBER: &str = "settings.json";
 
@@ -296,6 +302,11 @@ pub fn apply_pending_import(
         &staging_dir,
         CURRENT_SPACE_ID_MEMBER,
         &vault_dir.join(".current-space-id-v1"),
+    )?;
+    copy_member_if_present(
+        &staging_dir,
+        PROFILE_SECRETS_MEMBER,
+        &vault_dir.join(PROFILE_SECRET_FILE_NAME),
     )?;
     copy_dir_members(&staging_dir, IROH_IDENTITY_PREFIX, iroh_identity_dir)?;
     copy_member_if_present(&staging_dir, SETTINGS_MEMBER, settings_path)?;

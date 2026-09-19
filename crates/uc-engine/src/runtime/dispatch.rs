@@ -76,7 +76,10 @@ use crate::operations::space::membership_readiness::execute_query_membership_rea
 use crate::operations::space::session_recovery::execute_recover_session;
 use crate::operations::space::setup_state::execute_query_setup_state;
 use crate::operations::space::unlock::execute_unlock_space;
-use crate::{EngineError, EngineErrorCategory, Operation, OperationResult};
+use crate::{
+    EngineError, EngineErrorCategory, Operation, OperationResult, ProfileRecoveryState,
+    ProfileRecoverySummary,
+};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use uc_application::facade::NetworkRecoveryRequestError;
@@ -376,6 +379,16 @@ impl EngineRuntime for ProductionRuntime {
                 }
                 Operation::QueryEncryptionState => {
                     execute_query_encryption_state(self.current_facade().await?.as_ref()).await
+                }
+                Operation::QueryProfileRecovery => {
+                    Ok(OperationResult::ProfileRecovery(ProfileRecoverySummary {
+                        state: ProfileRecoveryState::NotRequired,
+                        can_submit_passphrase: false,
+                        restart_required: false,
+                        background_ready: true,
+                        cleanup_pending: false,
+                        losses: Vec::new(),
+                    }))
                 }
                 Operation::QueryMembershipReadiness => Err(super::operation_unavailable_error()),
                 Operation::LockEncryption => {

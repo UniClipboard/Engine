@@ -7,6 +7,7 @@ pub enum StartupState {
     Preparing,
     Upgrading,
     StartingServices,
+    RecoveryAvailable,
     Ready,
     Failed,
     Interrupted,
@@ -14,7 +15,10 @@ pub enum StartupState {
 
 impl StartupState {
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Ready | Self::Failed | Self::Interrupted)
+        matches!(
+            self,
+            Self::Ready | Self::RecoveryAvailable | Self::Failed | Self::Interrupted
+        )
     }
 }
 

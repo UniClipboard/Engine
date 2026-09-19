@@ -21,7 +21,7 @@ pub(crate) mod startup;
 mod startup_control;
 mod startup_owner;
 
-use crate::runtime::ProductionRuntime;
+use crate::runtime::RecoverableRuntime;
 #[cfg(feature = "dev-tools")]
 use crate::{DevOperation, DevOperationResult};
 use crate::{
@@ -114,7 +114,7 @@ impl Engine {
 
         let (events, stream) = event_channel(EVENT_CAPACITY);
         let runtime = Arc::new(
-            ProductionRuntime::start(config, host, events.clone(), Arc::clone(&progress.store))
+            RecoverableRuntime::start(config, host, events.clone(), Arc::clone(&progress.store))
                 .await?,
         );
         let engine = Self {

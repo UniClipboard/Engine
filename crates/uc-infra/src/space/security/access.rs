@@ -1835,44 +1835,15 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
             let scope = key_scope_from_profile(&profile);
             debug!(path = PATH, scope = %scope_identifier(&scope), "got key scope");
 
-            let keyslot = self.key_material.load_keyslot(&scope).await.map_err(|e| {
-                warn!(path = PATH, error = %e, "load_keyslot failed");
-                map_encryption_error(e)
-            })?;
-
-            let wrapped_master_key = keyslot.wrapped_master_key.as_ref().ok_or_else(|| {
-                warn!(
-                    path = PATH,
-                    "keyslot on disk has no wrapped_master_key (corrupted key material)"
-                );
-                SpaceAccessError::CorruptedKeyMaterial
-            })?;
-
-            let legacy = LegacyPassphrase(passphrase.expose().to_string());
-            let kek = v1_aead::derive_kek_argon2id(&legacy, &keyslot.salt, &keyslot.kdf)
-                .map_err(|e| map_and_log_kdf_error(e, PATH))?;
-            debug!(path = PATH, "KEK derived from passphrase");
-
-            let master_key = v1_aead::unwrap_master_key_xchacha(&kek, &wrapped_master_key.blob)
-                .map_err(|e| map_and_log_unwrap_aead_error(e, PATH))?;
-            debug!(path = PATH, "master key unwrapped");
-
-            // 把派生出的 KEK 重新写入 keyring,保持 keyring 与最新口令对齐
-            // (让下次静默 startup 路径仍可命中)。失败仅 warn,不影响本次解锁。
-            //
-            // 优化:若本进程内已确认 keychain 中存在 KEK
-            // (`try_resume_session` / `do_first_time_init` /
-            // `derive_master_key_for_proof` 任一已置位 `kek_observed`),
-            // 此处 `unwrap` 已经成功——意味着本次派生出的 KEK 字节就是
-            // keychain 里那条记录的字节,再写一次没有信息增量,但在 macOS
-            // 上每次 set_secret 仍可能触发授权弹窗。因此跳过。
-            if self.kek_observed.load(Ordering::Acquire) {
-                debug!("skip store_kek refresh: KEK already observed in keychain this session");
-            } else if let Err(e) = self.key_material.store_kek(&scope, &kek).await {
-                warn!(error = %e, "store_kek refresh failed (non-fatal)");
-            } else {
-                self.kek_observed.store(true, Ordering::Release);
-            }
+            let master_key = match self
+                .key_material
+                .authenticate_and_restore_kek(&scope, passphrase)
+                .await
+            {
+                Ok(master_key) => master_key,
+                Err(error) => return Err(map_encryption_error(error)),
+            };
+            self.kek_observed.store(true, Ordering::Release);
 
             self.activate_session(space_id, master_key).await?;
 
