@@ -47,6 +47,7 @@ use uc_observability_contract::analytics::{
 
 use crate::space::lifecycle::{
     CurrentSpaceIdentityPort, InitialSpaceActivationPort, PrepareSpaceAdmissionCredentialsPort,
+    SpaceSessionRecoveryPort,
 };
 
 use super::{
@@ -67,6 +68,7 @@ pub(crate) struct InitializeSpaceUseCase {
     settings: Arc<dyn SettingsPort>,
     clock: Arc<dyn ClockPort>,
     analytics: Arc<dyn AnalyticsFacade>,
+    recovery: Arc<dyn SpaceSessionRecoveryPort>,
 }
 
 impl InitializeSpaceUseCase {
@@ -84,6 +86,7 @@ impl InitializeSpaceUseCase {
         settings: Arc<dyn SettingsPort>,
         clock: Arc<dyn ClockPort>,
         analytics: Arc<dyn AnalyticsFacade>,
+        recovery: Arc<dyn SpaceSessionRecoveryPort>,
     ) -> Self {
         Self {
             space_access,
@@ -99,6 +102,7 @@ impl InitializeSpaceUseCase {
             settings,
             clock,
             analytics,
+            recovery,
         }
     }
 
@@ -234,6 +238,11 @@ impl InitializeSpaceUseCase {
             duration_ms_since_setup_started,
         });
 
+        self.recovery
+            .request_activation()
+            .await
+            .map_err(|error| InitializeSpaceError::internal(anyhow::Error::new(error)))?;
+
         Ok(InitializeSpaceResult {
             space_id,
             self_device_id: device_id,
@@ -332,6 +341,23 @@ mod tests {
     use uc_core::settings::model::Settings;
 
     // ---------- Fakes ----------
+
+    struct NoopRecovery;
+
+    #[async_trait]
+    impl SpaceSessionRecoveryPort for NoopRecovery {
+        async fn request_activation(&self) -> Result<(), crate::space::SpaceActivityError> {
+            Ok(())
+        }
+
+        async fn pause_for_lock(&self) -> Result<(), crate::space::SpaceActivityError> {
+            Ok(())
+        }
+
+        async fn restore_after_failed_lock(&self) -> Result<(), anyhow::Error> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn security_state_failure_maps_to_internal_with_its_source() {
@@ -784,6 +810,7 @@ mod tests {
             settings.clone(),
             clock,
             facade,
+            Arc::new(NoopRecovery),
         );
         Harness {
             uc,

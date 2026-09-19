@@ -22,6 +22,7 @@ impl SpaceFacade {
         if let Some(result) = cached.as_ref() {
             return result.clone();
         }
+        let recovery = self.session_recovery.shutdown().await;
         let application = self.application.lock().await.take();
         let (connections, application) = tokio::join!(self.connections.shutdown(), async move {
             match application {
@@ -30,6 +31,9 @@ impl SpaceFacade {
             }
         },);
         let mut errors = Vec::new();
+        if let Err(source) = recovery {
+            errors.push(anyhow::Error::new(source).context("stop session recovery"));
+        }
         if let Err(source) = connections {
             errors.push(anyhow::Error::new(source).context("stop peer connections"));
         }

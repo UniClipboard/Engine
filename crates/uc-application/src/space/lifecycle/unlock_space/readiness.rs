@@ -3,26 +3,23 @@ use std::sync::Arc;
 use uc_core::MemberRepositoryPort;
 
 use crate::clipboard::write::MobileConsumableBackfill;
-use crate::space::lifecycle::{MembershipSessionActivityPort, UpgradeSpaceUseCase};
+use crate::space::lifecycle::UpgradeSpaceUseCase;
 
-pub(crate) struct PostSessionReadiness {
+pub(crate) struct LocalSessionReadiness {
     upgrade_space: Arc<UpgradeSpaceUseCase>,
     mobile_consumable_backfill: Arc<dyn MobileConsumableBackfill>,
-    membership_activity: Arc<dyn MembershipSessionActivityPort>,
     member_repo: Arc<dyn MemberRepositoryPort>,
 }
 
-impl PostSessionReadiness {
+impl LocalSessionReadiness {
     pub(crate) fn new(
         upgrade_space: Arc<UpgradeSpaceUseCase>,
         mobile_consumable_backfill: Arc<dyn MobileConsumableBackfill>,
-        membership_activity: Arc<dyn MembershipSessionActivityPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
     ) -> Self {
         Self {
             upgrade_space,
             mobile_consumable_backfill,
-            membership_activity,
             member_repo,
         }
     }
@@ -42,8 +39,6 @@ impl PostSessionReadiness {
             .map_err(|error| error.to_string())?;
 
         self.mobile_consumable_backfill.backfill_best_effort().await;
-
-        self.membership_activity.prepare_for_session().await?;
 
         self.member_repo
             .list()

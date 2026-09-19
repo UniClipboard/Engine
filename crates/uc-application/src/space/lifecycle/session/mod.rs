@@ -1,5 +1,6 @@
 mod activity;
 mod ports;
+mod recovery;
 
 pub use activity::SpaceActivityError;
 pub(crate) use activity::{
@@ -7,3 +8,4 @@ pub(crate) use activity::{
     MembershipSessionActivityPort, SpaceSessionActivityPort,
 };
 pub use ports::{IsSpaceUnlockedPort, ResumeSpaceSessionPort};
+pub(crate) use recovery::{SpaceSessionRecovery, SpaceSessionRecoveryPort};

@@ -50,7 +50,8 @@ pub(super) use reset_space::ports::PendingSpaceInvitationResetPort;
 pub(super) use reset_space::{QueryCommittedDeviceManagementResetUseCase, ResetSpaceUseCase};
 pub(super) use session::{
     build_space_session_activity, combine_space_session_activity, DeferredSpaceSessionActivity,
-    MembershipSessionActivityPort, SpaceSessionActivityPort,
+    MembershipSessionActivityPort, SpaceSessionActivityPort, SpaceSessionRecovery,
+    SpaceSessionRecoveryPort,
 };
-pub(super) use unlock_space::{PostSessionReadiness, UnlockSpaceUseCase};
+pub(super) use unlock_space::{LocalSessionReadiness, UnlockSpaceUseCase};
 pub(super) use upgrade_space::UpgradeSpaceUseCase;

@@ -117,18 +117,24 @@ flowchart LR
 
 Engine 继续选择 Iroh、具体 Infra transition/recovery adapter、宿主能力和观测 decorator，并在注入前完成
 decorator 包装。Application 只接收这些最终能力：`SpaceFacade` 在内部组合成员、搜索与接收的 session
-activity，持有唯一暂停、恢复和失败补偿顺序。Search 与 receive 在启动装配阶段通过 facade 一次绑定；Engine
+activity，并由 `SpaceSessionRecovery` 持有唯一激活、重试、暂停、恢复和关闭顺序。Search 与 receive 在启动装配阶段通过 facade 一次绑定；Engine
 不持有 activity、内部依赖 bundle 或成员 runtime handle，绑定完成前的 lifecycle activity 明确返回
 `Unavailable`。
+
+创建、解锁和已保存会话恢复只在本地资料可读后向 `SpaceSessionRecovery` 提交一次激活请求，
+不等待远端设备上线或成员维护完成。恢复负责人会合并重复请求，并在本地活动暂时启动失败时按有上限的
+间隔继续尝试；锁定与关闭会先取消并等待旧激活任务。成员维护只接收恢复与非阻塞唤醒，远端欠账和
+连接失败继续由成员维护和连接协调者各自重试。Engine 与产品调用方只提交原有完整动作，不再拼接第二步。
 
 ### 生命周期与查询
 
 | 目录 | 主要文件 | 职责 |
 | --- | --- | --- |
 | `lifecycle/initialize_space/` | `use_case.rs`, `ports.rs`, `model.rs`, `error.rs` | 新建 Space 并建立本机单成员起点 |
-| `lifecycle/unlock_space/` | `use_case.rs`, `readiness.rs`, `ports.rs`, `error.rs` | 解锁现有 Space 并完成数据就绪 |
-| `lifecycle/lock_space_session/` | `use_case.rs`, `ports.rs`, `error.rs` | 暂停活动后锁定，失败时恢复 |
-| `lifecycle/recover_space_session/` | `use_case.rs`, `model.rs`, `error.rs` | 从已保存钥匙恢复会话和后台活动 |
+| `lifecycle/unlock_space/` | `use_case.rs`, `readiness.rs`, `ports.rs`, `error.rs` | 解锁现有 Space，完成本地资料就绪并提交后台激活 |
+| `lifecycle/session/` | `activity.rs`, `recovery.rs`, `ports.rs` | 合并并重试后台激活，串行锁定暂停、失败恢复与关闭 |
+| `lifecycle/lock_space_session/` | `use_case.rs`, `ports.rs`, `error.rs` | 通过会话恢复负责人停止活动后锁定，失败时恢复 |
+| `lifecycle/recover_space_session/` | `use_case.rs`, `model.rs`, `error.rs` | 从已保存钥匙恢复本地会话并提交后台激活 |
 | `lifecycle/query_space_access_state/` | `use_case.rs`, `model.rs`, `error.rs` | 查询是否已有 Space、会话是否 ready |
 | `lifecycle/query_space_setup_state/` | `use_case.rs`, `model.rs`, `error.rs` | 查询 setup UI 所需的 Space、邀请、设备名和 re-pairing 状态 |
 | `lifecycle/change_encryption_passphrase/` | `use_case.rs`, `ports.rs`, `error.rs` | 设备列表只显示有效本机时修改为用户自定义口令；不要求重新配对状态 |
@@ -247,28 +253,28 @@ flowchart TD
 
 - **入口**：`InitializeSpaceRequest -> InitializeSpaceResult`，公开由 `SpaceFacade::initialize_space` 转换输入。
 - **职责/作用**：全新 profile 创建加密 Space；校验密码确认，保存设备名，创建 Space，确保本机身份，保存本机 `SpaceMember`，初始化单成员历史与安全组，最后激活当前 Space。
-- **关系**：调用 `InitializeSpaceMembershipUseCase` 建立 ledger 根；facade 成功后恢复 session activity 并唤醒成员维护。
+- **关系**：调用 `InitializeSpaceMembershipUseCase` 建立 ledger 根；本地事实提交后由 use case 向唯一会话恢复负责人提交后台激活。
 - **重点关注**：它是“原子意图”而非跨 adapter 数据库事务，失败恢复依赖各 port 幂等；当前 Space 已存在时必须早退；敏感输入不得降级成普通字符串或日志字段。
 
 #### `UnlockSpaceUseCase`
 
 - **入口**：`Passphrase -> SpaceId`，facade 包装成 `UnlockSpaceResult`。
 - **职责/作用**：读取当前 Space、解锁密钥材料、执行版本升级和数据 readiness；成员资料在本次解锁返回前必须已经可读。
-- **关系**：`PostSessionReadiness` 调 `UpgradeSpaceUseCase`、移动内容回填，并立即请求和等待一轮成员维护后读取成员资料；facade 随后只恢复其余 session activity，不再重复唤醒维护。
+- **关系**：`LocalSessionReadiness` 只调用 `UpgradeSpaceUseCase`、移动内容回填并读取成员资料；随后向唯一会话恢复负责人提交后台激活，不等待远端维护。
 - **重点关注**：错误要区分未初始化、密码错误、密钥损坏和内部失败；不创建或猜测 Space。
 
 #### `LockSpaceSessionUseCase`
 
 - **入口**：无输入，返回 `()` 或 `LockSpaceSessionError`。
 - **职责/作用**：取得当前 Space，先暂停成员/接收/搜索活动，再锁定 Space。
-- **关系**：使用 `SpaceSessionActivityPort`；lock 失败时调用 `restore_after_failed_lock`。
+- **关系**：使用 `SpaceSessionRecoveryPort` 取消并等待后台激活；lock 失败时由同一负责人恢复活动。
 - **重点关注**：顺序不可反转；半暂停失败必须恢复已暂停部分；不能在本 case 外再拼一套暂停流程。
 
 #### `RecoverSpaceSessionUseCase`
 
 - **入口**：无输入，返回 `RecoverSpaceSessionResult { unlocked, resumed }`。
-- **职责/作用**：尝试用已保存钥匙恢复已有 Space session；成功后完成 readiness 并恢复活动。readiness 会等待本次必要的成员维护完成，因此正常启动不依赖周期任务。
-- **关系**：解锁与自动恢复共用 `PostSessionReadiness`；成员维护运行期负责串行当前轮与本次立即轮，facade 不再另行唤醒同一工作。
+- **职责/作用**：尝试用已保存钥匙恢复已有 Space session；成功后完成本地 readiness，并提交一次后台活动激活。
+- **关系**：解锁与自动恢复共用 `LocalSessionReadiness`；会话恢复负责人启动本地活动并非阻塞唤醒成员维护，成员与连接运行期继续负责远端延期。
 - **重点关注**：无当前 Space 或无可恢复 session 是明确的未恢复结果，不等于错误；密钥损坏和 keyring miss 必须保留稳定分类。
 
 #### `QuerySpaceAccessStateUseCase`
