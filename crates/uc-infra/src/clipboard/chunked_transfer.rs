@@ -36,7 +36,8 @@ use uc_core::crypto::model::EncryptionError;
 use uc_core::membership::{ContentKeyId, ContentKeyPurpose, GroupEpoch};
 use uc_core::ports::{TransferCipherError, TransferCipherPort};
 use uc_observability_contract::diagnostics::connectivity::{
-    describe_clipboard_receive_failure, ClipboardReceiveFailure,
+    describe_clipboard_receive_failure, observe_blob_publish_sync_result, ClipboardReceiveFailure,
+    LocalWorkStep,
 };
 use uuid::Uuid;
 
@@ -437,8 +438,10 @@ impl TransferCipherPort for TransferCipherAdapter {
 
         let (data_to_encrypt, compression_algo) = if plaintext.len() > COMPRESSION_THRESHOLD {
             let _guard = info_span!("transfer.compress", input_len = plaintext.len()).entered();
-            let compressed = compress_zstd(plaintext, ZSTD_LEVEL)
-                .map_err(|e| TransferCipherError::Internal(format!("compression failed: {e}")))?;
+            let compressed = observe_blob_publish_sync_result(LocalWorkStep::BlobCompress, || {
+                compress_zstd(plaintext, ZSTD_LEVEL)
+            })
+            .map_err(|e| TransferCipherError::Internal(format!("compression failed: {e}")))?;
 
             if compressed.len() < plaintext.len() {
                 (compressed, 1u8)
@@ -453,17 +456,19 @@ impl TransferCipherPort for TransferCipherAdapter {
         {
             let _guard =
                 info_span!("transfer.chunked_encrypt", data_len = data_to_encrypt.len()).entered();
-            encode_v4_to(
-                &mut buf,
-                resolved.key(),
-                &space_id,
-                resolved.content_key_id(),
-                resolved.epoch(),
-                &transfer_id,
-                &data_to_encrypt,
-                compression_algo,
-                uncompressed_len,
-            )
+            observe_blob_publish_sync_result(LocalWorkStep::BlobEncrypt, || {
+                encode_v4_to(
+                    &mut buf,
+                    resolved.key(),
+                    &space_id,
+                    resolved.content_key_id(),
+                    resolved.epoch(),
+                    &transfer_id,
+                    &data_to_encrypt,
+                    compression_algo,
+                    uncompressed_len,
+                )
+            })
             .map_err(map_chunked_error_for_encrypt)?;
         }
         Ok(buf)
@@ -759,6 +764,10 @@ mod tests {
     use uc_core::ids::SpaceId;
 
     use super::*;
+
+    mod blob_publish_observability_tests {
+        include!("chunked_transfer/blob_publish_observability_tests.rs");
+    }
 
     fn ready_session() -> (Arc<InMemorySession>, MasterKey) {
         let root = MasterKey::from_bytes(&[11u8; 32]).unwrap();

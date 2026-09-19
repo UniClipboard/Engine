@@ -16,8 +16,8 @@ pub use admission_network::{
     record_admission_network_snapshot, AdmissionNetworkPoint, AdmissionNetworkSnapshot,
 };
 pub use local_work::{
-    observe_local_result, observe_local_sync_result, scope_pairing_work, LocalWorkObservation,
-    LocalWorkOutcome, LocalWorkStep,
+    observe_blob_publish_sync_result, observe_local_result, observe_local_sync_result,
+    scope_blob_publish, scope_pairing_work, LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
 };
 pub use maintenance::{
     record_pending_group_updates, MaintenanceDisposition, MaintenanceObservation,

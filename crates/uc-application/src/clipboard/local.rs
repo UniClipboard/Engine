@@ -9,6 +9,9 @@ use async_trait::async_trait;
 use thiserror::Error;
 use uc_core::ids::{DeviceId, EntryId};
 use uc_core::{ClipboardChangeOrigin, SystemClipboardSnapshot};
+use uc_observability_contract::diagnostics::connectivity::{
+    LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
+};
 
 use crate::clipboard::outbound::{
     ClipboardOutboundError, ClipboardOutboundInput, ClipboardOutboundOutcome,
@@ -180,14 +183,20 @@ impl LocalClipboardProcessor {
         let index = if deduplicated {
             LocalClipboardIndexStatus::NotAttempted
         } else {
-            match self
+            let observation = LocalWorkObservation::begin(LocalWorkStep::ClipboardLiveIndex);
+            let result = self
                 .live_index
                 .index_capture(ClipboardLiveIndexInput {
                     entry_id: entry_id.clone(),
                     snapshot: Arc::clone(&shared_snapshot),
                 })
-                .await
-            {
+                .await;
+            observation.finish(if result.is_ok() {
+                LocalWorkOutcome::Ok
+            } else {
+                LocalWorkOutcome::Error
+            });
+            match result {
                 Ok(ClipboardLiveIndexOutcome::Indexed) => LocalClipboardIndexStatus::Indexed,
                 Ok(ClipboardLiveIndexOutcome::Skipped { reason }) => {
                     LocalClipboardIndexStatus::Skipped { reason }
