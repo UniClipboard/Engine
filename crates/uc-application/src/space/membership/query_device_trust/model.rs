@@ -53,6 +53,7 @@ pub struct PairingConfirmationObservation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionDisplayStatus {
     pub current_join: Option<CurrentJoinStatus>,
+    pub pending_inbound_member: Option<PendingInboundMember>,
     pub pairing_confirmations: Vec<PairingConfirmationObservation>,
 }
 

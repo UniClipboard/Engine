@@ -191,13 +191,7 @@ impl SpaceAdmissionAggregate {
                 confirmation,
             },
         ));
-        Ok(AdmissionTransition::new(
-            self,
-            &[
-                AdmissionEffect::ActivateSecurity,
-                AdmissionEffect::PublishMembership,
-            ],
-        ))
+        Ok(AdmissionTransition::new(self, &[]))
     }
 
     pub(crate) fn settle_complete_ack(
@@ -280,7 +274,13 @@ impl SpaceAdmissionAggregate {
                 confirmation,
             },
         ));
-        Ok(AdmissionTransition::new(self, &[]))
+        Ok(AdmissionTransition::new(
+            self,
+            &[
+                AdmissionEffect::ActivateSecurity,
+                AdmissionEffect::PublishMembership,
+            ],
+        ))
     }
 
     pub(crate) fn mark_sponsor_confirmation_unconfirmed(
@@ -430,7 +430,7 @@ impl SpaceAdmissionAggregate {
             .attempt_digest
             .ok_or(SpaceAdmissionAggregateError::InvalidAbandonmentRequest)?;
         if abandonment.header().admission_id() != self.admission_id
-            || abandonment.header().protocol_version() != SpaceAdmissionProtocolVersion::V2
+            || abandonment.header().protocol_version() != SpaceAdmissionProtocolVersion::CURRENT
             || abandonment.kind() != SpaceAdmissionMessageKind::Abandonment
             || abandonment.header().sender_role() != AdmissionRole::Joiner
             || abandonment.header().sender_sequence() != 4
@@ -541,7 +541,7 @@ impl SpaceAdmissionAggregate {
             return Err(SpaceAdmissionAggregateError::InvalidAbandonmentRequest);
         };
         if abandoned_reply.header().admission_id() != self.admission_id
-            || abandoned_reply.header().protocol_version() != SpaceAdmissionProtocolVersion::V2
+            || abandoned_reply.header().protocol_version() != SpaceAdmissionProtocolVersion::CURRENT
             || abandoned_reply.header().sender_role() != AdmissionRole::Sponsor
             || abandoned_reply.kind() != SpaceAdmissionMessageKind::Abandoned
             || abandoned_reply.header().sender_sequence() != 4

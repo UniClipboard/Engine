@@ -53,7 +53,10 @@ impl SponsorAdmissionService {
         })?;
         let settled = self
             .prepare_settled
-            .prepare(aggregate.admission_id(), preparation, &complete_ack)
+            .prepare(aggregate.admission_id(), &preparation, &complete_ack)
+            .await?;
+        self.activate_admission
+            .activate(preparation.activated_security())
             .await?;
         let transition =
             aggregate.settle_complete_ack(complete_ack, canonical_digest, settled.into_reply())?;

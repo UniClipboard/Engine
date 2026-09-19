@@ -21,7 +21,9 @@ impl JoinerAdmissionService {
         let preparation = match aggregate.joiner_complete_preparation() {
             Some(preparation) => preparation,
             None => {
-                report.recovery_required_count += 1;
+                recovery
+                    .save_joiner_history_conflict(report, aggregate, token)
+                    .await;
                 return JoinerReplyHandlingOutcome::NoImmediateWork;
             }
         };
@@ -32,7 +34,9 @@ impl JoinerAdmissionService {
         {
             Ok(activation) => activation,
             Err(PrepareJoinerActivationError::Invalid { .. }) => {
-                report.recovery_required_count += 1;
+                recovery
+                    .save_joiner_history_conflict(report, aggregate, token)
+                    .await;
                 return JoinerReplyHandlingOutcome::NoImmediateWork;
             }
             Err(PrepareJoinerActivationError::Unavailable { .. }) => {

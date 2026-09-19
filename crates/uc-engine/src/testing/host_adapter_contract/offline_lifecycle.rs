@@ -153,7 +153,7 @@ async fn peer_restart_does_not_block_local_work_and_recovers_an_offline_file() {
     };
     match status {
         JoinSpaceStatusSummary::Active { .. } => {}
-        JoinSpaceStatusSummary::Pending { .. } => {
+        JoinSpaceStatusSummary::Pending { .. } | JoinSpaceStatusSummary::Processing { .. } => {
             next_engine_event_matching(&mut local_events, |event| {
                 matches!(
                     event,

@@ -4,10 +4,11 @@ use async_trait::async_trait;
 use rand::RngCore;
 use serde::Deserialize;
 use uc_application::deps::{
-    AdmissionSpaceTransitionPort, AdmissionSpaceTransitionPreparationV2,
-    AdmissionSpaceTransitionStepV2, CompletedJoinerActivation, ExecuteJoinerActivationError,
-    ExecuteJoinerActivationPort, JoinerActivationIntent, JoinerActivationOutcome,
-    PrepareJoinerActivationError, PrepareJoinerActivationPort, PreparedJoinerActivation,
+    AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
+    AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionStepV2,
+    CompletedJoinerActivation, ExecuteJoinerActivationError, ExecuteJoinerActivationPort,
+    JoinerActivationIntent, JoinerActivationOutcome, PrepareJoinerActivationError,
+    PrepareJoinerActivationPort, PreparedJoinerActivation,
 };
 use uc_core::membership::{
     AdmissionCompleteAckV1, AdmissionCompletionV1, AdmissionRetryState, AdmissionSpaceTransition,
@@ -21,6 +22,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::space::admission::digest::completion_digest;
 use crate::space::admission::recovery_material::open_recovery_material;
+use crate::space::security::mls_group::{MlsClientState, MlsGroupEngine};
 
 use super::super::sponsor::{activation_receipt_digest, SponsorCandidateStagedV1};
 
@@ -150,6 +152,15 @@ impl PrepareJoinerActivationPort for DefaultJoinerActivationPreparation {
                     "the staged Joiner target format is unsupported",
                 ));
             }
+            MlsGroupEngine::validate_state(
+                &MlsClientState::from_bytes(staged.mls_state.clone()),
+                commit
+                    .exact_candidate()
+                    .security_commitment()
+                    .lineage_id
+                    .as_bytes(),
+            )
+            .map_err(|error| PrepareJoinerActivationError::invalid(anyhow::Error::new(error)))?;
             let recovery = open_recovery_material(
                 admission_id.as_bytes(),
                 &staged.recovery_secret,
@@ -215,9 +226,7 @@ impl PrepareJoinerActivationPort for DefaultJoinerActivationPreparation {
                     preserve_unreadable_history: staged.preserve_unreadable_history,
                 })
                 .await
-                .map_err(|error| {
-                    PrepareJoinerActivationError::unavailable(anyhow::Error::new(error))
-                })?;
+                .map_err(map_activation_preparation_error)?;
             if transition.attempt_id().as_bytes() != admission_id.as_bytes()
                 || transition.target_space_id() != candidate.security_commitment().lineage_id
                 || !transition.is_initial()
@@ -418,6 +427,34 @@ fn validate_completion(
 
 fn invalid_plan(message: &'static str) -> PrepareJoinerActivationError {
     PrepareJoinerActivationError::invalid(anyhow::anyhow!(message))
+}
+
+fn map_activation_preparation_error(
+    error: AdmissionSpaceTransitionError,
+) -> PrepareJoinerActivationError {
+    match error {
+        AdmissionSpaceTransitionError::Inconsistent { .. } => {
+            PrepareJoinerActivationError::invalid(anyhow::Error::new(error))
+        }
+        _ => PrepareJoinerActivationError::unavailable(anyhow::Error::new(error)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inconsistent_transition_preparation_is_not_retryable() {
+        let error = map_activation_preparation_error(AdmissionSpaceTransitionError::inconsistent(
+            anyhow::anyhow!("inconsistent target relationships"),
+        ));
+
+        assert!(matches!(
+            error,
+            PrepareJoinerActivationError::Invalid { .. }
+        ));
+    }
 }
 
 fn invalid_execution(message: &'static str) -> ExecuteJoinerActivationError {

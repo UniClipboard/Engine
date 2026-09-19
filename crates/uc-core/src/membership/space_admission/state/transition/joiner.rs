@@ -167,6 +167,27 @@ impl SpaceAdmissionAggregate {
         Ok(AdmissionTransition::new(self, &[]))
     }
 
+    pub(crate) fn reject_history_conflict(
+        mut self,
+        join_id: JoinId,
+    ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        if matches!(self.state, SpaceAdmissionRecordState::Terminal(_)) {
+            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        }
+        let record_version = self
+            .record_version
+            .checked_add(1)
+            .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
+        self.record_version = record_version;
+        self.state = SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+            SpaceAdmissionRejectedState::LocalJoiner(SpaceAdmissionLocalJoinerRejected {
+                join_id,
+                reason: SpaceAdmissionRejectionReason::HistoryConflict,
+            }),
+        ));
+        Ok(AdmissionTransition::new(self, &[]))
+    }
+
     pub(crate) fn reject_peer_upgrade(
         mut self,
     ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {

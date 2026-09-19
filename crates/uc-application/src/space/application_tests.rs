@@ -487,7 +487,7 @@ impl PrepareSponsorSettledPort for PassivePorts {
     async fn prepare(
         &self,
         _admission_id: SpaceAdmissionId,
-        _preparation: SponsorSettlementPreparation<'_>,
+        _preparation: &SponsorSettlementPreparation<'_>,
         _complete_ack: &SpaceAdmissionEnvelopeV1,
     ) -> Result<PreparedSponsorSettled, PrepareSponsorSettledError> {
         unreachable!()

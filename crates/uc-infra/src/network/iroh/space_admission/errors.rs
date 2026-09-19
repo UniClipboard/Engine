@@ -1,3 +1,4 @@
+use std::time::Duration;
 use uc_application::deps::SpaceAdmissionTransportError;
 
 use super::super::space_admission_wire::WireError;
@@ -83,4 +84,19 @@ pub(super) fn map_application_close_code(code: u64) -> Option<SpaceAdmissionTran
         code if code == u64::from(CLOSE_BUSY) => Some(SpaceAdmissionTransportError::Deferred),
         _ => None,
     }
+}
+
+pub(super) async fn application_close_error(
+    connection: &iroh::endpoint::Connection,
+) -> Option<SpaceAdmissionTransportError> {
+    let close_reason = match connection.close_reason() {
+        Some(reason) => Some(reason),
+        None => tokio::time::timeout(Duration::from_millis(100), connection.closed())
+            .await
+            .ok(),
+    };
+    let Some(iroh::endpoint::ConnectionError::ApplicationClosed(close)) = close_reason else {
+        return None;
+    };
+    map_application_close_code(close.error_code.into_inner())
 }

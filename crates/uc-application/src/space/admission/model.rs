@@ -37,6 +37,13 @@ pub enum CurrentJoinStatus {
         cancel_requested: bool,
         peer_upgrade_required: bool,
     },
+    Processing {
+        join_id: [u8; 16],
+        target_space_id: String,
+        sponsor_device_id: uc_core::DeviceId,
+        sponsor_identity_fingerprint: uc_core::security::IdentityFingerprint,
+        peer_upgrade_required: bool,
+    },
     Rejected {
         join_id: [u8; 16],
         reason: uc_core::membership::SpaceAdmissionRejectionReason,

@@ -439,7 +439,7 @@ fn authenticated_join_request(
     let credential = MembershipCredential::new(1, vec![admission_byte + 2; 32]);
     let signature = vec![admission_byte + 5; 64];
     let envelope = SpaceAdmissionEnvelopeV1::new_with_version(
-        SpaceAdmissionProtocolVersion::V2,
+        SpaceAdmissionProtocolVersion::CURRENT,
         admission_id,
         AdmissionRole::Joiner,
         0,

@@ -18,13 +18,17 @@ use super::id::{AdmissionMessageId, InvitationId, SpaceAdmissionId};
 pub enum SpaceAdmissionProtocolVersion {
     V1,
     V2,
+    V3,
 }
 
 impl SpaceAdmissionProtocolVersion {
+    pub const CURRENT: Self = Self::V3;
+
     pub const fn from_u16(value: u16) -> Option<Self> {
         match value {
             1 => Some(Self::V1),
             2 => Some(Self::V2),
+            3 => Some(Self::V3),
             _ => None,
         }
     }
@@ -33,6 +37,7 @@ impl SpaceAdmissionProtocolVersion {
         match self {
             Self::V1 => 1,
             Self::V2 => 2,
+            Self::V3 => 3,
         }
     }
 }

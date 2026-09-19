@@ -63,11 +63,26 @@ pub struct SponsorCompletePreparation<'a> {
 
 pub struct SponsorSettlementPreparation<'a> {
     complete_reply: &'a SpaceAdmissionEnvelopeV1,
+    committed_history: &'a AdmissionSignedMembershipHistory,
+    activation_receipt: &'a AdmissionActivationReceipt,
+    activated_security: &'a AdmissionActivatedSecurityState,
 }
 
 impl SponsorSettlementPreparation<'_> {
     pub const fn complete_reply(&self) -> &SpaceAdmissionEnvelopeV1 {
         self.complete_reply
+    }
+
+    pub const fn committed_history(&self) -> &AdmissionSignedMembershipHistory {
+        self.committed_history
+    }
+
+    pub const fn activation_receipt(&self) -> &AdmissionActivationReceipt {
+        self.activation_receipt
+    }
+
+    pub const fn activated_security(&self) -> &AdmissionActivatedSecurityState {
+        self.activated_security
     }
 }
 
@@ -511,6 +526,9 @@ impl SpaceAdmissionAggregate {
         };
         Some(SponsorSettlementPreparation {
             complete_reply: state.saved_reply.exact_reply_envelope(),
+            committed_history: &state.committed_history,
+            activation_receipt: &state.activation_receipt,
+            activated_security: &state.activated_security,
         })
     }
 

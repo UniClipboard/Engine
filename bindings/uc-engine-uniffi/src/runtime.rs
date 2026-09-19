@@ -228,6 +228,13 @@ pub enum JoinSpaceStatus {
         cancel_requested: bool,
         peer_upgrade_required: bool,
     },
+    Processing {
+        join_id: String,
+        target_space_id: String,
+        sponsor_device_id: String,
+        sponsor_identity_fingerprint: String,
+        peer_upgrade_required: bool,
+    },
     Rejected {
         join_id: String,
         reason: JoinSpaceRejectionReason,
@@ -2206,6 +2213,19 @@ fn map_join_space_status(result: OperationResult) -> Result<JoinSpaceStatus, Bin
             cancel_requested,
             peer_upgrade_required,
         },
+        uc_engine::JoinSpaceStatusSummary::Processing {
+            join_id,
+            target_space_id,
+            sponsor_device_id,
+            sponsor_identity_fingerprint,
+            peer_upgrade_required,
+        } => JoinSpaceStatus::Processing {
+            join_id,
+            target_space_id,
+            sponsor_device_id,
+            sponsor_identity_fingerprint,
+            peer_upgrade_required,
+        },
         uc_engine::JoinSpaceStatusSummary::Rejected { join_id, reason } => {
             JoinSpaceStatus::Rejected {
                 join_id,
@@ -2839,6 +2859,31 @@ mod tests {
             JoinSpaceStatus::Terminated {
                 join_id: "join-id".into(),
                 reason: JoinSpaceTerminationReason::Expired,
+            }
+        );
+    }
+
+    #[test]
+    fn join_space_mapping_preserves_processing_state() {
+        let status = map_join_space_status(OperationResult::JoinSpace(
+            uc_engine::JoinSpaceStatusSummary::Processing {
+                join_id: "join-id".into(),
+                target_space_id: "space-id".into(),
+                sponsor_device_id: "sponsor-id".into(),
+                sponsor_identity_fingerprint: "sponsor-fingerprint".into(),
+                peer_upgrade_required: false,
+            },
+        ))
+        .expect("processing join-space result must map");
+
+        assert_eq!(
+            status,
+            JoinSpaceStatus::Processing {
+                join_id: "join-id".into(),
+                target_space_id: "space-id".into(),
+                sponsor_device_id: "sponsor-id".into(),
+                sponsor_identity_fingerprint: "sponsor-fingerprint".into(),
+                peer_upgrade_required: false,
             }
         );
     }

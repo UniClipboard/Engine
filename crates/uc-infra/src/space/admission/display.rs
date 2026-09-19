@@ -5,6 +5,7 @@ use uc_application::deps::{
 };
 use uc_application::facade::{
     CurrentJoinStatus, JoinSpaceTerminationReason as ApplicationTerminationReason,
+    PendingInboundMember,
 };
 use uc_core::membership::{
     AdmissionSpaceTransitionResultV2, JoinerAdmission, SpaceAdmissionTerminationReason,
@@ -53,56 +54,78 @@ impl<E: DbExecutor + Send + Sync> LoadCurrentJoinStatusPort for SqliteSpaceAdmis
         &self,
         targets: &[PairingConfirmationTarget],
     ) -> Result<AdmissionDisplayStatus, QueryDeviceTrustError> {
-        let (current_join, pairing_confirmations) =
-            self.executor
-                .run(|conn| {
-                    let state = self.load_state_on(conn).map_err(into_anyhow)?;
-                    let current_join = state
-                        .current_local_join_id
-                        .or(state.latest_local_join_id)
-                        .map(|admission_id| {
-                            let stored = state.records.get(&admission_id).ok_or_else(|| {
-                                into_anyhow(SpaceAdmissionStateStoreError::Corrupt)
-                            })?;
-                            let record = self
-                                .open_record(admission_id, stored)
-                                .map_err(into_anyhow)?;
-                            JoinerAdmission::try_from_record(record)
-                                .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))
-                        })
-                        .transpose()?;
-                    let mut confirmations = Vec::new();
-                    for (admission_id, stored) in &state.records {
-                        let aggregate = self
-                            .open_record(*admission_id, stored)
+        let (current_join, pending_inbound_member, pairing_confirmations) = self
+            .executor
+            .run(|conn| {
+                let state = self.load_state_on(conn).map_err(into_anyhow)?;
+                let current_join = state
+                    .current_local_join_id
+                    .or(state.latest_local_join_id)
+                    .map(|admission_id| {
+                        let stored = state
+                            .records
+                            .get(&admission_id)
+                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                        let record = self
+                            .open_record(admission_id, stored)
                             .map_err(into_anyhow)?;
-                        let Some(sponsor) = SponsorAdmission::try_from_record(aggregate) else {
-                            continue;
-                        };
-                        let Some(summary) = sponsor.pairing_confirmation() else {
-                            continue;
-                        };
-                        let target = PairingConfirmationTarget {
-                            member_instance_id: summary.member_instance_id(),
-                            add_event_id: summary.add_event_id(),
-                        };
-                        if targets.contains(&target) {
-                            confirmations.push(PairingConfirmationObservation {
-                                target,
-                                status: map_pairing_confirmation_status(summary.status()),
-                            });
+                        JoinerAdmission::try_from_record(record)
+                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))
+                    })
+                    .transpose()?;
+                let mut confirmations = Vec::new();
+                let mut pending_inbound_member = None;
+                for (admission_id, stored) in &state.records {
+                    let aggregate = self
+                        .open_record(*admission_id, stored)
+                        .map_err(into_anyhow)?;
+                    let Some(sponsor) = SponsorAdmission::try_from_record(aggregate) else {
+                        continue;
+                    };
+                    if let Some(preparation) = sponsor.sponsor_settlement_preparation() {
+                        if pending_inbound_member.is_some() {
+                            return Err(into_anyhow(SpaceAdmissionStateStoreError::Corrupt));
                         }
+                        let history = VersionedMembershipHistory::decode_persisted_v2(
+                            preparation.committed_history().as_bytes(),
+                            &OpenMlsHistoricalSignatureVerifier,
+                        )
+                        .map_err(|_| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                        let facts = history
+                            .admission_facts_for(
+                                preparation.activation_receipt().joiner_member_instance_id,
+                            )
+                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                        pending_inbound_member = Some(PendingInboundMember {
+                            device_id: facts.device_id.clone(),
+                            display_name: facts.device_name.clone(),
+                        });
                     }
-                    Ok((current_join, confirmations))
-                })
-                .map_err(map_executor_error)
-                .map_err(map_query_error)?;
+                    let Some(summary) = sponsor.pairing_confirmation() else {
+                        continue;
+                    };
+                    let target = PairingConfirmationTarget {
+                        member_instance_id: summary.member_instance_id(),
+                        add_event_id: summary.add_event_id(),
+                    };
+                    if targets.contains(&target) {
+                        confirmations.push(PairingConfirmationObservation {
+                            target,
+                            status: map_pairing_confirmation_status(summary.status()),
+                        });
+                    }
+                }
+                Ok((current_join, pending_inbound_member, confirmations))
+            })
+            .map_err(map_executor_error)
+            .map_err(map_query_error)?;
         let current_join = match current_join {
             Some(admission) => Some(self.project_current_join(admission).await?),
             None => None,
         };
         Ok(AdmissionDisplayStatus {
             current_join,
+            pending_inbound_member,
             pairing_confirmations,
         })
     }
@@ -162,6 +185,15 @@ impl<E: DbExecutor + Send + Sync> SqliteSpaceAdmissionState<E> {
         let sponsor_facts = history
             .admission_facts_for(sponsor_member)
             .ok_or(QueryDeviceTrustError::RecoveryRequired)?;
+        if !admission.is_active_settled() {
+            return Ok(CurrentJoinStatus::Processing {
+                join_id,
+                target_space_id: history.lineage_id().to_owned(),
+                sponsor_device_id: sponsor_facts.device_id.clone(),
+                sponsor_identity_fingerprint: sponsor_facts.identity_fingerprint.clone(),
+                peer_upgrade_required,
+            });
+        }
         let transition = admission
             .active_transition_result()
             .and_then(|result| AdmissionSpaceTransitionResultV2::decode(result.as_bytes()));

@@ -35,6 +35,8 @@ use crate::assembly::deps::WiredDependencies;
 use crate::assembly::facade::build_mobile_sync_facade;
 use crate::assembly::lifecycle::{build_network_runtime, prepare_daemon_session};
 use crate::assembly::sync_engine::SyncSessionAssembly;
+#[cfg(feature = "dev-tools")]
+use crate::dev::JoinerFinalConfirmationGate;
 use crate::engine::event_stream::EventSender;
 use crate::operations::space::reset_space::execute_reset_space;
 use crate::subsystems::peer_keepalive::spawn_peer_reachability_event_task;
@@ -163,6 +165,8 @@ struct ProductionSessionFactory {
     iroh_bind_port_override: Option<u16>,
     #[cfg(feature = "dev-tools")]
     network_partition_gate: uc_infra::network::iroh::IrohNetworkPartitionGate,
+    #[cfg(feature = "dev-tools")]
+    joiner_final_confirmation_gate: Arc<JoinerFinalConfirmationGate>,
     #[cfg(feature = "dev-tools")]
     test_control: Arc<SessionHandoverTestControl>,
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
@@ -354,6 +358,9 @@ impl SessionSupervisor {
         iroh_bind_port_override: Option<u16>,
         #[cfg(feature = "dev-tools")]
         network_partition_gate: uc_infra::network::iroh::IrohNetworkPartitionGate,
+        #[cfg(feature = "dev-tools")] joiner_final_confirmation_gate: Arc<
+            JoinerFinalConfirmationGate,
+        >,
         network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
     ) {
         let factory = Arc::new(ProductionSessionFactory {
@@ -367,6 +374,8 @@ impl SessionSupervisor {
             iroh_bind_port_override,
             #[cfg(feature = "dev-tools")]
             network_partition_gate,
+            #[cfg(feature = "dev-tools")]
+            joiner_final_confirmation_gate,
             #[cfg(feature = "dev-tools")]
             test_control: Arc::clone(&self.test_control),
             network_recovery,
@@ -939,6 +948,8 @@ impl ProductionSessionFactory {
             &self.app_version,
             #[cfg(feature = "lan-compat")]
             wired.mobile_sync_ports.clone(),
+            #[cfg(feature = "dev-tools")]
+            Arc::clone(&self.joiner_final_confirmation_gate),
             session_builder,
         )
         .await

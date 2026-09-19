@@ -35,6 +35,7 @@ use super::super::trace_context::{inject_current, WireTraceContext};
 use uc_observability_contract::diagnostics::connectivity::{AuthenticationFailure, ProofFailure};
 use uc_observability_contract::diagnostics::DiagnosticErrorType;
 
+use super::connection::{connect, open_stream};
 use super::crypto::{calculate_mac, peer_id, verify_mac};
 use super::diagnostics::{record_client_completion, server_error_type};
 use super::errors::{
@@ -156,6 +157,26 @@ struct LegacyLayoutHandler {
     credentials: Arc<LoopbackCredentials>,
 }
 
+#[derive(Debug)]
+struct LegacyVersionHandler;
+
+impl ProtocolHandler for LegacyVersionHandler {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        let (_send, mut receive) = connection.accept_bi().await.expect("legacy stream");
+        let (kind, payload) = read_raw_with_limit(&mut receive, AUTH_FRAME_LIMIT)
+            .await
+            .expect("current initial hello");
+        assert_eq!(kind, FrameKind::InitialHello);
+        let hello: InitialHelloV2 = postcard::from_bytes(&payload).expect("current hello layout");
+        assert_eq!(
+            hello.protocol_version,
+            SpaceAdmissionProtocolVersion::CURRENT.as_u16()
+        );
+        connection.close(CLOSE_PEER_UPGRADE_REQUIRED.into(), b"peer_upgrade_required");
+        Ok(())
+    }
+}
+
 impl std::fmt::Debug for LegacyLayoutHandler {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("LegacyLayoutHandler(REDACTED)")
@@ -178,7 +199,7 @@ impl ProtocolHandler for LegacyLayoutHandler {
             InvitationId::from_bytes(hello.invitation_id).expect("legacy invitation id");
         assert_eq!(
             hello.protocol_version,
-            SpaceAdmissionProtocolVersion::V2.as_u16()
+            SpaceAdmissionProtocolVersion::CURRENT.as_u16()
         );
         assert_eq!(hello.joiner_peer_id, *remote_peer_id.as_bytes());
         let material = self
@@ -448,7 +469,7 @@ fn join_request(
     )
     .expect("JoinRequest");
     SpaceAdmissionEnvelopeV1::new_with_version(
-        SpaceAdmissionProtocolVersion::V2,
+        SpaceAdmissionProtocolVersion::CURRENT,
         admission_id,
         AdmissionRole::Joiner,
         0,

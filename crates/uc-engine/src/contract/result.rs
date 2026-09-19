@@ -415,6 +415,13 @@ pub enum JoinSpaceStatusSummary {
         cancel_requested: bool,
         peer_upgrade_required: bool,
     },
+    Processing {
+        join_id: String,
+        target_space_id: String,
+        sponsor_device_id: String,
+        sponsor_identity_fingerprint: String,
+        peer_upgrade_required: bool,
+    },
     Rejected {
         join_id: String,
         reason: JoinSpaceRejectionReasonSummary,

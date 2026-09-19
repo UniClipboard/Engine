@@ -208,8 +208,8 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 导入暂存和受管缓存。完成后旧 Engine 会话失效，宿主必须重新创建 Engine；启动遇到未完成清理时会续完
 清理并返回可重试的 unavailable，宿主随后再次创建 Engine。`QuerySetupState` 不返回内部服务状态。
 
-规格 023 的稳定产品外形已经接入：`JoinSpace` 返回 Active、Pending、Rejected 三类结果并公开稳定
-`join_id`，Pending/Active 的 `peer_upgrade_required` 表示这次加入仍需对端升级，首次请求不兼容则以 Rejected 的稳定原因明确返回。
+规格 023 的稳定产品外形已经接入：`JoinSpace` 返回 Active、Pending、Processing、Rejected 四类结果并公开稳定
+`join_id`。Pending 表示加入已经保存但尚未完成本机准备，Processing 表示本机准备完成并等待最终确认收尾；两者跨重启和重复查询都返回同一个 `join_id`，宿主不另存加入编号或推断后台阶段。Pending、Processing 与 Active 的 `peer_upgrade_required` 表示这次加入仍需对端升级，首次请求不兼容则以 Rejected 的稳定原因明确返回。
 提示不会把已经正式提交或本机已激活的加入回滚成失败；对端升级上线后立即继续同一请求并在成功推进时清除。提示出现、清除或
 明确拒绝保存成功后发送 `RefreshRequired { StateInvalidated }`，宿主随后通过 `QueryDeviceGroupChoices` 重新读取完整事实；普通内部推进
 和重复旧端错误不发送。`CancelJoinSpace(join_id)`
@@ -221,17 +221,15 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 `WorkspaceConvergenceChanged` 事件继续只用于 dev-tools。
 对端因自己的另一项准入而暂时忙碌时，当前 JoinSpace 保持同一 Pending 并由 Engine 重试，不变成 Rejected。
 取消请求只与发起方正式提交竞争：取消先保存时返回 Rejected 且没有成员新增；正式提交先保存时取消已经
-太晚，同一请求继续保持 Pending 直到 Active，不自动生成成员移除。用户仍要退出时从另一台当前成员设备
+太晚，同一请求继续保持 Processing 直到 Active，不自动生成成员移除。用户仍要退出时从另一台当前成员设备
 另行使用现有明确移除。
-公开的旧空间迁移进度操作已经删除，空间切换只表现为同一 JoinSpace Pending。`QuerySetupState` 继续只负责
+公开的旧空间迁移进度操作已经删除，空间切换只表现为同一条 JoinSpace 从 Pending 进入 Processing 再到 Active。`QuerySetupState` 继续只负责
 设置、设备名和邀请。profile 级负责人已经在没有活动 Space 时常驻，保存和恢复加入、取消、终态、revision
 与 ordinal，并组合零或一个完整活动 Space；Engine 只路由产品动作，不保存内部阶段。同一 profile 的入站
 和本机加入共享一个准入槽，Fresh Pending 没有活动 Space 时仍能执行彻底重置。
 
-生产加入统一使用 Candidate、Prepared、Commit、Applied、Complete。加入方先验证并保存完整历史和目标
-安全状态，邀请方随后正式提交；双方保存同一应用回执后，邀请方发送 Complete，加入方完成本机激活后
-返回 CompleteAck。跨 Space 时 JoinSpace 先返回 Pending，Engine 排空来源会话、完成前向切换并重建同一
-CompleteAck；发送失败不回滚 Active，下次启动继续发送。
+生产加入统一使用 Candidate、Prepared、Commit、Applied、Complete、CompleteAck、Settled。加入方先验证并保存完整历史和目标
+安全状态；邀请方收到 Applied 后只保存待确认资料并发送 Complete，不写正式成员。加入方完成本机准备后返回 CompleteAck，邀请方验证该确认后才在唯一提交点写入正式成员并返回 Settled。跨 Space 时 JoinSpace 先返回 Pending，本机准备后为 Processing；CompleteAck 或 Settled 丢失时从 Engine 保存的同一尝试重发，收到 Settled 并保存后才返回 Active。
 
 同一 Space 重新加入时，邀请方历史可以比本机已保存历史更新，但必须完整包含本机已经确认的连续历史；
 缺少记录、倒退或分叉都返回 Rejected，不覆盖本机事实。普通成员上线只交换新版完整历史，不再发送旧版

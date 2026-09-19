@@ -190,6 +190,8 @@ struct StaticCurrentJoin(Option<CurrentJoinStatus>);
 
 struct StaticPairingConfirmation(PairingConfirmationObservation);
 
+struct StaticPendingInboundMember(crate::space::admission::PendingInboundMember);
+
 struct LocalOnlyObservations;
 
 #[async_trait]
@@ -225,11 +227,30 @@ impl LoadCurrentJoinStatusPort for StaticPairingConfirmation {
     ) -> Result<AdmissionDisplayStatus, QueryDeviceTrustError> {
         Ok(AdmissionDisplayStatus {
             current_join: None,
+            pending_inbound_member: None,
             pairing_confirmations: targets
                 .contains(&self.0.target)
                 .then_some(self.0)
                 .into_iter()
                 .collect(),
+        })
+    }
+}
+
+#[async_trait]
+impl LoadCurrentJoinStatusPort for StaticPendingInboundMember {
+    async fn load_current_join(&self) -> Result<Option<CurrentJoinStatus>, QueryDeviceTrustError> {
+        Ok(None)
+    }
+
+    async fn load_admission_display(
+        &self,
+        _targets: &[PairingConfirmationTarget],
+    ) -> Result<AdmissionDisplayStatus, QueryDeviceTrustError> {
+        Ok(AdmissionDisplayStatus {
+            current_join: None,
+            pending_inbound_member: Some(self.0.clone()),
+            pairing_confirmations: Vec::new(),
         })
     }
 }
@@ -748,4 +769,35 @@ async fn status_uses_the_current_join_projection_from_admission_state() {
             ..
         }) if join_id == [0xa2; 16] && target == "target-space"
     ));
+}
+
+#[tokio::test]
+async fn status_keeps_a_pending_inbound_member_out_of_the_formal_device_list() {
+    let repository = Arc::new(MemoryLedgerRepository {
+        loaded: active_ledger(),
+    });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let pending = crate::space::admission::PendingInboundMember {
+        device_id: DeviceId::new("device-pending"),
+        display_name: "Pending device".to_owned(),
+    };
+    let query = QueryDeviceTrustUseCase::new(
+        ledger,
+        Arc::new(StaticObservations {
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }),
+        Arc::new(StaticPendingInboundMember(pending.clone())),
+    );
+
+    let status = query.execute().await.unwrap();
+
+    assert_eq!(status.pending_inbound_member, Some(pending));
+    assert!(status
+        .devices
+        .iter()
+        .all(|device| device.device_id != DeviceId::new("device-pending")));
 }

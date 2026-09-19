@@ -31,6 +31,8 @@ use crate::assembly::host::{
 };
 #[cfg(feature = "lan-compat")]
 use crate::assembly::mobile_lan::MobileLanEndpointUpdater;
+#[cfg(feature = "dev-tools")]
+use crate::dev::JoinerFinalConfirmationGate;
 use crate::engine::event_stream::EventSender;
 use crate::error_codes::PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE;
 use crate::{
@@ -62,6 +64,8 @@ pub(crate) struct ProductionRuntime {
     events: EventSender,
     #[cfg(feature = "dev-tools")]
     network_partition_gate: uc_infra::network::iroh::IrohNetworkPartitionGate,
+    #[cfg(feature = "dev-tools")]
+    joiner_final_confirmation_gate: Arc<JoinerFinalConfirmationGate>,
 }
 
 // 启动过程中还没有 ProductionRuntime；失败或取消也要封口已有安全会话。
@@ -157,6 +161,8 @@ impl ProductionRuntime {
         let iroh_bind_port_override = config.test_iroh_bind_port_override();
         #[cfg(feature = "dev-tools")]
         let network_partition_gate = uc_infra::network::iroh::IrohNetworkPartitionGate::default();
+        #[cfg(feature = "dev-tools")]
+        let joiner_final_confirmation_gate = Arc::new(JoinerFinalConfirmationGate::default());
         let emitter = Arc::new(EngineHostEventEmitter::new(events.clone()));
         let wiring = wire_host_capabilities_with_emitter(
             &config,
@@ -230,6 +236,8 @@ impl ProductionRuntime {
             iroh_bind_port_override,
             #[cfg(feature = "dev-tools")]
             network_partition_gate.clone(),
+            #[cfg(feature = "dev-tools")]
+            Arc::clone(&joiner_final_confirmation_gate),
             Arc::clone(&network_recovery),
         );
         let started = async {
@@ -301,6 +309,8 @@ impl ProductionRuntime {
             events,
             #[cfg(feature = "dev-tools")]
             network_partition_gate,
+            #[cfg(feature = "dev-tools")]
+            joiner_final_confirmation_gate,
         })
     }
 

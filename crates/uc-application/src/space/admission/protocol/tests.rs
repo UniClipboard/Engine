@@ -6,7 +6,8 @@ use uc_core::membership::{
 use super::sponsor::HandleAuthenticatedSpaceAdmissionMessagePort;
 use super::test_support::{
     authenticated_abandonment, authenticated_applied, authenticated_complete_ack,
-    authenticated_join_request, authenticated_join_request_started_at, authenticated_prepared,
+    authenticated_join_request, authenticated_join_request_started_at,
+    authenticated_join_request_with_claimed_transport, authenticated_prepared,
     authenticated_prepared_with_peers, ProtocolEvent, SpaceAdmissionProtocolTestPair,
 };
 use crate::space::membership::{
@@ -272,6 +273,19 @@ async fn sponsor_rejects_a_future_attempt_before_consuming_the_invitation() {
 }
 
 #[tokio::test]
+async fn sponsor_rejects_a_join_request_that_claims_another_transport_identity() {
+    let pair = SpaceAdmissionProtocolTestPair::fresh().await;
+
+    assert!(matches!(
+        pair.sponsor()
+            .handle(authenticated_join_request_with_claimed_transport(0x55))
+            .await,
+        Err(super::HandleAuthenticatedSpaceAdmissionMessageError::Invalid { .. })
+    ));
+    assert!(pair.events().is_empty());
+}
+
+#[tokio::test]
 async fn complete_ack_is_saved_before_the_sponsor_returns_settled() {
     let pair = SpaceAdmissionProtocolTestPair::fresh().await;
     let candidate = pair
@@ -324,10 +338,59 @@ async fn complete_ack_is_saved_before_the_sponsor_returns_settled() {
             ProtocolEvent::SponsorSavedCandidate,
             ProtocolEvent::SponsorSavedCommitted,
             ProtocolEvent::SponsorSavedApplied,
+            ProtocolEvent::SponsorMembershipActivated,
             ProtocolEvent::SponsorSavedCompleted,
             ProtocolEvent::AdmissionRecoveryWoken,
         ]
     );
+}
+
+#[tokio::test]
+async fn sponsor_publishes_membership_only_after_complete_ack() {
+    let pair = SpaceAdmissionProtocolTestPair::fresh().await;
+    let candidate = pair
+        .sponsor()
+        .handle(authenticated_join_request())
+        .await
+        .expect("JoinRequest should produce Candidate");
+    let prepared = authenticated_prepared(
+        candidate
+            .envelope()
+            .expect("Candidate reply must be available"),
+    );
+    pair.seed_sponsor(candidate.into_admission());
+    let commit = pair
+        .sponsor()
+        .handle(prepared)
+        .await
+        .expect("Prepared should produce Commit");
+    let applied = authenticated_applied(commit.envelope().expect("Commit reply must be available"));
+    pair.seed_sponsor(commit.into_admission());
+
+    let complete = pair
+        .sponsor()
+        .handle(applied)
+        .await
+        .expect("Applied should produce Complete");
+
+    assert!(!pair
+        .events()
+        .contains(&ProtocolEvent::SponsorMembershipActivated));
+
+    let complete_ack = authenticated_complete_ack(
+        complete
+            .envelope()
+            .expect("Complete reply must be available"),
+    );
+    pair.seed_sponsor(complete.into_admission());
+    pair.sponsor()
+        .handle(complete_ack)
+        .await
+        .expect("CompleteAck should publish the member and produce Settled");
+
+    assert!(pair
+        .events()
+        .contains(&ProtocolEvent::SponsorMembershipActivated));
 }
 
 #[tokio::test]
@@ -472,10 +535,73 @@ async fn duplicate_complete_ack_replays_settled_without_a_new_commit() {
             ProtocolEvent::SponsorSavedCandidate,
             ProtocolEvent::SponsorSavedCommitted,
             ProtocolEvent::SponsorSavedApplied,
+            ProtocolEvent::SponsorMembershipActivated,
             ProtocolEvent::SponsorSavedCompleted,
             ProtocolEvent::AdmissionRecoveryWoken,
             ProtocolEvent::AdmissionRecoveryWoken,
         ]
+    );
+}
+
+#[tokio::test]
+async fn complete_ack_retry_finishes_after_the_member_commit_won_a_state_race() {
+    let pair = SpaceAdmissionProtocolTestPair::fresh().await;
+    let candidate = pair
+        .sponsor()
+        .handle(authenticated_join_request())
+        .await
+        .expect("JoinRequest should produce Candidate");
+    let prepared = authenticated_prepared(
+        candidate
+            .envelope()
+            .expect("Candidate reply must be available"),
+    );
+    pair.seed_sponsor(candidate.into_admission());
+    let commit = pair
+        .sponsor()
+        .handle(prepared)
+        .await
+        .expect("Prepared should produce Commit");
+    let applied = authenticated_applied(commit.envelope().expect("Commit reply must be available"));
+    pair.seed_sponsor(commit.into_admission());
+    let complete = pair
+        .sponsor()
+        .handle(applied)
+        .await
+        .expect("Applied should produce Complete");
+    let first_ack = authenticated_complete_ack(
+        complete
+            .envelope()
+            .expect("Complete reply must be available"),
+    );
+    let retry_ack = authenticated_complete_ack(
+        complete
+            .envelope()
+            .expect("Complete reply must be available"),
+    );
+    pair.seed_sponsor(complete.into_admission());
+    pair.fail_next_sponsor_settlement_commit();
+
+    assert!(pair.sponsor().handle(first_ack).await.is_err());
+    let settled = pair
+        .sponsor()
+        .handle(retry_ack)
+        .await
+        .expect("the same CompleteAck should finish the pending settlement");
+
+    assert_eq!(
+        settled
+            .envelope()
+            .expect("Settled reply must be available")
+            .kind(),
+        SpaceAdmissionMessageKind::Settled
+    );
+    assert_eq!(
+        pair.events()
+            .iter()
+            .filter(|event| **event == ProtocolEvent::SponsorMembershipActivated)
+            .count(),
+        1
     );
 }
 

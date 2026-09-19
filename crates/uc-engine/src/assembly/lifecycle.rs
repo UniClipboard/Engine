@@ -9,6 +9,8 @@ use anyhow::Context as _;
 
 use crate::assembly::deps::SyncEngineDeps;
 use crate::assembly::sync_engine::{prepare_sync_session, PreparedSyncSession};
+#[cfg(feature = "dev-tools")]
+use crate::dev::JoinerFinalConfirmationGate;
 use crate::subsystems::reconcile::{reconcile_peer_addresses, reconcile_trusted_peers};
 use uc_application::facade::ApplicationAssembly;
 use uc_infra::network::iroh::{IrohIdentityStore, IrohNode, IrohNodeBuilder, IrohSessionBuilder};
@@ -81,6 +83,7 @@ pub async fn prepare_daemon_session(
     space_setup: &SyncEngineDeps,
     current_app_version: &str,
     #[cfg(feature = "lan-compat")] mobile_sync_ports: uc_mobile_lan::MobileSyncPorts,
+    #[cfg(feature = "dev-tools")] joiner_final_confirmation_gate: Arc<JoinerFinalConfirmationGate>,
     session_builder: IrohSessionBuilder,
 ) -> anyhow::Result<PreparedSyncSession> {
     // 启动期 reconcile:把 peer_addr_repo / trusted_peer_repo 中
@@ -116,6 +119,8 @@ pub async fn prepare_daemon_session(
         current_app_version,
         #[cfg(feature = "lan-compat")]
         mobile_sync_ports,
+        #[cfg(feature = "dev-tools")]
+        joiner_final_confirmation_gate,
         session_builder,
     )
     .await

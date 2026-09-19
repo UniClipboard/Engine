@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use uc_core::membership::{
@@ -7,8 +7,9 @@ use uc_core::membership::{
 };
 use uc_core::ports::ReachabilityState;
 
-use crate::space::membership::SpaceMemberPauseReason;
-use crate::space::membership::{MembershipLedger, VerifiedMembershipLedger};
+use crate::space::membership::{
+    MembershipEffectPhase, MembershipLedger, SpaceMemberPauseReason, VerifiedMembershipLedger,
+};
 
 use super::{
     DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
@@ -92,6 +93,7 @@ impl QueryDeviceTrustUseCase {
             .load_admission_display(&confirmation_targets)
             .await?;
         let current_join = admission_display.current_join;
+        let pending_inbound_member = admission_display.pending_inbound_member;
         let mut pairing_confirmations = BTreeMap::new();
         for observation in admission_display.pairing_confirmations {
             if !confirmation_targets.contains(&observation.target)
@@ -105,6 +107,13 @@ impl QueryDeviceTrustUseCase {
         let current_position = history
             .current_position()
             .map_err(|_| QueryDeviceTrustError::RecoveryRequired)?;
+        let pending_effect_device_ids = snapshot
+            .record()
+            .current_effects(history)
+            .into_iter()
+            .filter(|(_, effect)| effect.phase < MembershipEffectPhase::Activated)
+            .flat_map(|(_, effect)| effect.affected_device_ids.iter().cloned())
+            .collect::<BTreeSet<_>>();
 
         let mut device_ids = history
             .active_members()
@@ -164,11 +173,15 @@ impl QueryDeviceTrustUseCase {
                     DeviceTrustMembership::Active
                 } else if history.active_members().contains(&local_member_instance) {
                     DeviceTrustMembership::PendingActivation
+                } else if pending_effect_device_ids.contains(device_id) {
+                    DeviceTrustMembership::PendingActivation
                 } else {
                     DeviceTrustMembership::Removed
                 }
             } else if member.is_some_and(|member| history.active_members().contains(&member)) {
                 DeviceTrustMembership::Active
+            } else if pending_effect_device_ids.contains(device_id) {
+                DeviceTrustMembership::PendingActivation
             } else {
                 DeviceTrustMembership::Removed
             };
@@ -241,12 +254,14 @@ impl QueryDeviceTrustUseCase {
                 DeviceTrustMembership::Active
             } else if history.active_members().contains(&local_member_instance) {
                 DeviceTrustMembership::PendingActivation
+            } else if pending_effect_device_ids.contains(&local_device_id) {
+                DeviceTrustMembership::PendingActivation
             } else {
                 DeviceTrustMembership::Removed
             },
             current_change,
             current_join,
-            pending_inbound_member: None,
+            pending_inbound_member,
             devices,
         })
     }

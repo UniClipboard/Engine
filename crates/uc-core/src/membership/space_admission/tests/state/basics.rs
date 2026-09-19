@@ -42,11 +42,11 @@ fn join_request_envelope_fixture_with_version(
 }
 
 #[test]
-fn canonical_transport_envelope_preserves_v2_for_replies() {
+fn canonical_transport_envelope_preserves_the_current_version_for_replies() {
     let admission_id =
         SpaceAdmissionId::from_bytes([0xd3; 32]).expect("non-zero admission id fixture");
     let original = join_request_envelope_fixture_with_version(
-        SpaceAdmissionProtocolVersion::V2,
+        SpaceAdmissionProtocolVersion::CURRENT,
         admission_id,
         AdmissionMessageId::from_bytes([0xd4; 32]).expect("non-zero message id fixture"),
     );
@@ -67,11 +67,11 @@ fn canonical_transport_envelope_preserves_v2_for_replies() {
 
     assert_eq!(
         decoded.header().protocol_version(),
-        SpaceAdmissionProtocolVersion::V2
+        SpaceAdmissionProtocolVersion::CURRENT
     );
     assert_eq!(
         reply.header().protocol_version(),
-        SpaceAdmissionProtocolVersion::V2
+        SpaceAdmissionProtocolVersion::CURRENT
     );
 }
 

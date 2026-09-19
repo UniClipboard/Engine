@@ -366,7 +366,8 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
     };
     let joiner_device_id = match join_status {
         crate::JoinSpaceStatusSummary::Active { joined_space, .. } => joined_space.self_device_id,
-        crate::JoinSpaceStatusSummary::Pending { .. } => loop {
+        crate::JoinSpaceStatusSummary::Pending { .. }
+        | crate::JoinSpaceStatusSummary::Processing { .. } => loop {
             assert!(matches!(
                 next_engine_event_matching(&mut joiner_events, |event| matches!(
                     event,
@@ -409,6 +410,28 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
         .await,
         EngineEvent::DeviceTrustChanged { .. }
     ));
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match sponsor
+                .execute(crate::Operation::QueryDeviceGroupChoices)
+                .await
+            {
+                Ok(crate::OperationResult::DeviceGroupChoices(summary))
+                    if summary.device_trust.devices.iter().any(|device| {
+                        device.device_id == joiner_device_id
+                            && device.membership == crate::DeviceMembershipSummary::Active
+                    }) =>
+                {
+                    break;
+                }
+                Ok(crate::OperationResult::DeviceGroupChoices(_)) | Err(_) => {}
+                Ok(other) => panic!("expected device group choices, got {other:?}"),
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("Sponsor must publish the confirmed Joiner");
 
     assert!(matches!(
         sponsor
@@ -462,21 +485,29 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
     ));
     wait_entry_delivered(&sponsor, &first_entry_id, &joiner_device_id).await;
 
-    let resend = sponsor
-        .execute(crate::Operation::ResendEntry(crate::ResendEntryInput {
-            entry_id: first_entry_id,
-            target_devices: vec![joiner_device_id.clone()],
-        }))
-        .await
-        .unwrap();
-    assert!(matches!(
-        resend,
-        crate::OperationResult::EntryResent(crate::ResendEntryOutcome::Completed(report))
-            if report.accepted + report.duplicate == 1
-                && report.offline == 0
-                && report.errored == 0
-                && report.pending == 0
-    ));
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if matches!(
+                sponsor
+                    .execute(crate::Operation::ResendEntry(crate::ResendEntryInput {
+                        entry_id: first_entry_id.clone(),
+                        target_devices: vec![joiner_device_id.clone()],
+                    }))
+                    .await,
+                Ok(crate::OperationResult::EntryResent(
+                    crate::ResendEntryOutcome::Completed(report)
+                )) if report.accepted + report.duplicate == 1
+                    && report.offline == 0
+                    && report.errored == 0
+                    && report.pending == 0
+            ) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("resend must converge after the confirmed member becomes available");
     let history_after_resend = joiner
         .execute(crate::Operation::QueryHistory(crate::QueryHistoryInput {
             cursor: None,

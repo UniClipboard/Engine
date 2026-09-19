@@ -162,6 +162,11 @@ impl PrepareSponsorCandidatePort for DefaultSponsorCandidatePreparation {
                         "an active Sponsor member has no signed identity facts"
                     ))
                 })?;
+                // 重新加入的设备会在同一个群组变更中替换旧实例，旧实例不再接收
+                // 这次变更，也不能继续作为目标 Space 的当前控制关系。
+                if facts.device_id == request.device_id() {
+                    continue;
+                }
                 let credential = history.credential_for(member).ok_or_else(|| {
                     PrepareSponsorCandidateError::invalid(anyhow::anyhow!(
                         "an active Sponsor member has no historical credential"

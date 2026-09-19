@@ -602,6 +602,31 @@ async fn complete_is_saved_as_an_activation_plan_before_local_activation() {
 }
 
 #[tokio::test]
+async fn invalid_activation_is_saved_as_a_terminal_rejection() {
+    let pair = SpaceAdmissionProtocolTestPair::receiving_invalid_activation().await;
+    pair.joiner()
+        .start_join_at(join_input("invalid-activation"), 1_000)
+        .await
+        .expect("the join request should be saved before recovery");
+
+    let report = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    assert_eq!(report.rejected_count, 1);
+    assert_eq!(report.deferred_count, 0);
+    assert_eq!(
+        pair.saved_join().rejection_reason(),
+        Some(uc_core::membership::SpaceAdmissionRejectionReason::HistoryConflict)
+    );
+    assert!(pair.events().ends_with(&[
+        ProtocolEvent::JoinerAppliedExchanged,
+        ProtocolEvent::JoinerSavedRejected,
+    ]));
+}
+
+#[tokio::test]
 async fn saved_activation_waits_for_the_explicit_lifecycle_transition() {
     let pair = SpaceAdmissionProtocolTestPair::receiving_complete().await;
     pair.joiner()

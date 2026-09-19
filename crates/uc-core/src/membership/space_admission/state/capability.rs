@@ -498,6 +498,15 @@ impl JoinerAdmission {
             .map(JoinerAdmissionTransition::from_transition)
     }
 
+    pub fn reject_history_conflict(
+        self,
+    ) -> Result<JoinerAdmissionTransition, SpaceAdmissionAggregateError> {
+        let join_id = self.join_id();
+        self.record
+            .reject_history_conflict(join_id)
+            .map(JoinerAdmissionTransition::from_transition)
+    }
+
     pub fn reject_peer_upgrade(
         self,
     ) -> Result<JoinerAdmissionTransition, SpaceAdmissionAggregateError> {

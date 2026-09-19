@@ -6,6 +6,7 @@ use super::super::space_admission_wire::{
 use super::connection::{connect, open_stream};
 use super::crypto::{calculate_mac, copy_credential, peer_id, random_nonce};
 use super::diagnostics::record_client_completion;
+use super::errors::application_close_error;
 use super::exchange::EstablishedExchange;
 use super::route::decode_route;
 use crate::security::{SpaceAdmissionAuth, SpaceAdmissionAuthContext, SpaceAdmissionKe2};
@@ -97,7 +98,7 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
                 &mut send,
                 FrameKind::InitialHello,
                 &InitialHelloV2 {
-                    protocol_version: SpaceAdmissionProtocolVersion::V2.as_u16(),
+                    protocol_version: SpaceAdmissionProtocolVersion::CURRENT.as_u16(),
                     admission_id: *admission_id.as_bytes(),
                     invitation_id: *invitation_id.as_bytes(),
                     joiner_peer_id: *local.as_bytes(),
@@ -110,9 +111,14 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
             .await
             .map_err(|_| SpaceAdmissionTransportError::Unavailable)?;
             let response: OpaqueResponseV1 =
-                read_typed(&mut receive, FrameKind::OpaqueResponse, AUTH_FRAME_LIMIT)
-                    .await
-                    .map_err(|_| SpaceAdmissionTransportError::AuthenticationRejected)?;
+                match read_typed(&mut receive, FrameKind::OpaqueResponse, AUTH_FRAME_LIMIT).await {
+                    Ok(response) => response,
+                    Err(_) => {
+                        return Err(application_close_error(&connection)
+                            .await
+                            .unwrap_or(SpaceAdmissionTransportError::AuthenticationRejected));
+                    }
+                };
             if response.sponsor_peer_id != *remote.as_bytes() {
                 return Err(SpaceAdmissionTransportError::AuthenticationRejected);
             }

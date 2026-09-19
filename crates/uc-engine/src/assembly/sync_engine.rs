@@ -17,6 +17,8 @@ use outbound_progress::OutboundProgressRuntime;
 
 use crate::assembly::deps::SyncEngineDeps;
 use crate::assembly::membership_events::MembershipLedgerAccess;
+#[cfg(feature = "dev-tools")]
+use crate::dev::{GatedJoinerActivation, JoinerFinalConfirmationGate};
 use uc_application::deps::{
     ApplicationClipboardAdapters, ApplicationNetworkAdapters, ApplicationNetworkBinding,
     ApplicationSpaceAdapters, ClipboardReceiverPort, CurrentSpaceMemberScopePort, LifecycleError,
@@ -151,6 +153,7 @@ pub async fn prepare_sync_session(
     space_setup: &SyncEngineDeps,
     current_app_version: &str,
     #[cfg(feature = "lan-compat")] mobile_sync_ports: uc_mobile_lan::MobileSyncPorts,
+    #[cfg(feature = "dev-tools")] joiner_final_confirmation_gate: Arc<JoinerFinalConfirmationGate>,
     mut builder: IrohSessionBuilder,
 ) -> Result<PreparedSyncSession, SyncSessionPreparationError> {
     application
@@ -369,10 +372,20 @@ pub async fn prepare_sync_session(
                 )),
                 joiner_activation_state: space_setup.admission_state.clone()
                     as Arc<dyn uc_application::deps::JoinerActivationStatePort>,
-                execute_joiner_activation: Arc::new(DefaultJoinerActivationExecutor::new(
-                    Arc::clone(&space_setup.admission_space_transition),
-                    historical_signatures.clone(),
-                )),
+                execute_joiner_activation: {
+                    let activation = Arc::new(DefaultJoinerActivationExecutor::new(
+                        Arc::clone(&space_setup.admission_space_transition),
+                        historical_signatures.clone(),
+                    ))
+                        as Arc<dyn uc_application::deps::ExecuteJoinerActivationPort>;
+                    #[cfg(feature = "dev-tools")]
+                    let activation = Arc::new(GatedJoinerActivation::new(
+                        activation,
+                        Arc::clone(&joiner_final_confirmation_gate),
+                    ))
+                        as Arc<dyn uc_application::deps::ExecuteJoinerActivationPort>;
+                    activation
+                },
                 current_join_status: space_setup.admission_state.clone()
                     as Arc<dyn uc_application::deps::LoadCurrentJoinStatusPort>,
             }

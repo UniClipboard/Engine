@@ -25,6 +25,7 @@ pub trait LoadCurrentJoinStatusPort: Send + Sync {
     ) -> Result<AdmissionDisplayStatus, QueryDeviceTrustError> {
         Ok(AdmissionDisplayStatus {
             current_join: self.load_current_join().await?,
+            pending_inbound_member: None,
             pairing_confirmations: Vec::new(),
         })
     }

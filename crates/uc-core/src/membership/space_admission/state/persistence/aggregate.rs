@@ -222,127 +222,125 @@ impl SpaceAdmissionAggregate {
             return decode_record_v2(bytes);
         }
         let persisted = decode_record_with_legacy_pending_exchange(bytes)?;
-        if persisted.format_version != SPACE_ADMISSION_RECORD_FORMAT_V1 {
-            return Err(SpaceAdmissionPersistenceError::UnsupportedVersion);
-        }
-        let admission_id = SpaceAdmissionId::from_bytes(persisted.admission_id)
-            .ok_or(SpaceAdmissionPersistenceError::InvalidState)?;
-        let state = match persisted.state {
-            PersistedSpaceAdmissionStateV1::JoinerResolvingInvitation(state) => {
-                SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvingInvitation(
-                    state.into_domain()?,
-                ))
-            }
-            PersistedSpaceAdmissionStateV1::JoinerResolvedInvitation(state) => {
-                SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvedInvitation(
-                    state.into_domain()?,
-                ))
-            }
-            PersistedSpaceAdmissionStateV1::JoinerInitiated(state) => {
-                SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(
-                    state.into_domain(admission_id)?,
-                ))
-            }
-            PersistedSpaceAdmissionStateV1::JoinerCandidate(state) => {
-                SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Candidate(
-                    state.into_domain(admission_id)?,
-                ))
-            }
-            PersistedSpaceAdmissionStateV1::JoinerPrepared(state) => {
-                SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Prepared(
-                    state.into_domain(admission_id)?,
-                ))
-            }
-            PersistedSpaceAdmissionStateV1::SponsorAccepted(state) => {
-                SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Accepted(
-                    state.into_domain(admission_id)?,
-                ))
-            }
-            PersistedSpaceAdmissionStateV1::SponsorCandidate(state) => {
-                SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Candidate(
-                    state.into_domain(admission_id)?,
-                ))
-            }
-            PersistedSpaceAdmissionStateV1::JoinerCommitted(state) => {
-                SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Committed(
-                    state.into_domain(admission_id)?,
-                ))
-            }
-            PersistedSpaceAdmissionStateV1::JoinerApplied(state) => {
-                SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Applied(
-                    state.into_domain(admission_id)?,
-                ))
-            }
-            PersistedSpaceAdmissionStateV1::JoinerActivating(state) => {
-                SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Activating(
-                    state.into_domain(admission_id)?,
-                ))
-            }
-            PersistedSpaceAdmissionStateV1::JoinerCancelling(state) => {
-                SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Cancelling(
-                    state.into_domain(admission_id)?,
-                ))
-            }
-            PersistedSpaceAdmissionStateV1::SponsorCommitted(state) => {
-                SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Committed(
-                    state.into_domain(admission_id)?,
-                ))
-            }
-            PersistedSpaceAdmissionStateV1::SponsorApplied(state) => {
-                SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Applied(
-                    state.into_domain(admission_id)?,
-                ))
-            }
-            PersistedSpaceAdmissionStateV1::CompletionHelperChallenged(state) => {
-                SpaceAdmissionRecordState::CompletionHelper(
-                    SpaceAdmissionCompletionHelperState::Challenged(state.into_domain()?),
-                )
-            }
-            PersistedSpaceAdmissionStateV1::CompletionHelperApplied(state) => {
-                SpaceAdmissionRecordState::CompletionHelper(
-                    SpaceAdmissionCompletionHelperState::Applied(state.into_domain(admission_id)?),
-                )
-            }
-            PersistedSpaceAdmissionStateV1::ActivePendingSettlement(state) => {
-                SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Active(
-                    SpaceAdmissionActiveState::PendingSettlement(state.into_domain(admission_id)?),
-                ))
-            }
-            PersistedSpaceAdmissionStateV1::ActiveSettled(state) => {
-                SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Active(
-                    SpaceAdmissionActiveState::Settled(state.into_domain()?),
-                ))
-            }
-            PersistedSpaceAdmissionStateV1::Completed(state) => {
-                SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Completed(
-                    state.into_domain(admission_id)?,
-                ))
-            }
-            PersistedSpaceAdmissionStateV1::Superseded(state) => {
-                SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Superseded(
-                    state.into_domain()?,
-                ))
-            }
-            PersistedSpaceAdmissionStateV1::Rejected(state) => SpaceAdmissionRecordState::Terminal(
-                SpaceAdmissionTerminalState::Rejected(state.into_domain(admission_id)?),
-            ),
-            PersistedSpaceAdmissionStateV1::RecoveryRequired(category) => {
-                SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
-                    SpaceAdmissionRecoveryRequiredTerminal {
-                        category: decode_recovery_category(category)?,
-                    },
-                ))
-            }
-        };
-        Ok(Self {
-            format_version: persisted.format_version,
-            record_version: persisted.record_version,
-            admission_id,
-            attempt_timeline: None,
-            attempt_digest: None,
-            state,
-        })
+        decode_record_v1(persisted)
     }
+}
+
+fn decode_record_v1(
+    persisted: PersistedSpaceAdmissionRecordV1,
+) -> Result<SpaceAdmissionAggregate, SpaceAdmissionPersistenceError> {
+    if persisted.format_version != SPACE_ADMISSION_RECORD_FORMAT_V1 {
+        return Err(SpaceAdmissionPersistenceError::UnsupportedVersion);
+    }
+    let admission_id = SpaceAdmissionId::from_bytes(persisted.admission_id)
+        .ok_or(SpaceAdmissionPersistenceError::InvalidState)?;
+    let state = match persisted.state {
+        PersistedSpaceAdmissionStateV1::JoinerResolvingInvitation(state) => {
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvingInvitation(
+                state.into_domain()?,
+            ))
+        }
+        PersistedSpaceAdmissionStateV1::JoinerResolvedInvitation(state) => {
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvedInvitation(
+                state.into_domain()?,
+            ))
+        }
+        PersistedSpaceAdmissionStateV1::JoinerInitiated(state) => {
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(
+                state.into_domain(admission_id)?,
+            ))
+        }
+        PersistedSpaceAdmissionStateV1::JoinerCandidate(state) => {
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Candidate(
+                state.into_domain(admission_id)?,
+            ))
+        }
+        PersistedSpaceAdmissionStateV1::JoinerPrepared(state) => SpaceAdmissionRecordState::Joiner(
+            SpaceAdmissionJoinerState::Prepared(state.into_domain(admission_id)?),
+        ),
+        PersistedSpaceAdmissionStateV1::SponsorAccepted(state) => {
+            SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Accepted(
+                state.into_domain(admission_id)?,
+            ))
+        }
+        PersistedSpaceAdmissionStateV1::SponsorCandidate(state) => {
+            SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Candidate(
+                state.into_domain(admission_id)?,
+            ))
+        }
+        PersistedSpaceAdmissionStateV1::JoinerCommitted(state) => {
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Committed(
+                state.into_domain(admission_id)?,
+            ))
+        }
+        PersistedSpaceAdmissionStateV1::JoinerApplied(state) => SpaceAdmissionRecordState::Joiner(
+            SpaceAdmissionJoinerState::Applied(state.into_domain(admission_id)?),
+        ),
+        PersistedSpaceAdmissionStateV1::JoinerActivating(state) => {
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Activating(
+                state.into_domain(admission_id)?,
+            ))
+        }
+        PersistedSpaceAdmissionStateV1::JoinerCancelling(state) => {
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Cancelling(
+                state.into_domain(admission_id)?,
+            ))
+        }
+        PersistedSpaceAdmissionStateV1::SponsorCommitted(state) => {
+            SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Committed(
+                state.into_domain(admission_id)?,
+            ))
+        }
+        PersistedSpaceAdmissionStateV1::SponsorApplied(state) => {
+            SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Applied(
+                state.into_domain(admission_id)?,
+            ))
+        }
+        PersistedSpaceAdmissionStateV1::CompletionHelperChallenged(state) => {
+            SpaceAdmissionRecordState::CompletionHelper(
+                SpaceAdmissionCompletionHelperState::Challenged(state.into_domain()?),
+            )
+        }
+        PersistedSpaceAdmissionStateV1::CompletionHelperApplied(state) => {
+            SpaceAdmissionRecordState::CompletionHelper(
+                SpaceAdmissionCompletionHelperState::Applied(state.into_domain(admission_id)?),
+            )
+        }
+        PersistedSpaceAdmissionStateV1::ActivePendingSettlement(state) => {
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Active(
+                SpaceAdmissionActiveState::PendingSettlement(state.into_domain(admission_id)?),
+            ))
+        }
+        PersistedSpaceAdmissionStateV1::ActiveSettled(state) => {
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Active(
+                SpaceAdmissionActiveState::Settled(state.into_domain()?),
+            ))
+        }
+        PersistedSpaceAdmissionStateV1::Completed(state) => SpaceAdmissionRecordState::Terminal(
+            SpaceAdmissionTerminalState::Completed(state.into_domain(admission_id)?),
+        ),
+        PersistedSpaceAdmissionStateV1::Superseded(state) => SpaceAdmissionRecordState::Terminal(
+            SpaceAdmissionTerminalState::Superseded(state.into_domain()?),
+        ),
+        PersistedSpaceAdmissionStateV1::Rejected(state) => SpaceAdmissionRecordState::Terminal(
+            SpaceAdmissionTerminalState::Rejected(state.into_domain(admission_id)?),
+        ),
+        PersistedSpaceAdmissionStateV1::RecoveryRequired(category) => {
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
+                SpaceAdmissionRecoveryRequiredTerminal {
+                    category: decode_recovery_category(category)?,
+                },
+            ))
+        }
+    };
+    Ok(SpaceAdmissionAggregate {
+        format_version: persisted.format_version,
+        record_version: persisted.record_version,
+        admission_id,
+        attempt_timeline: None,
+        attempt_digest: None,
+        state,
+    })
 }
 
 fn encode_record_v2(
@@ -392,14 +390,12 @@ fn decode_record_v2(
             if !remaining.is_empty() {
                 return Err(SpaceAdmissionPersistenceError::InvalidEncoding);
             }
-            let legacy = postcard::to_stdvec(&PersistedSpaceAdmissionRecordV1 {
+            let aggregate = decode_record_v1(PersistedSpaceAdmissionRecordV1 {
                 format_version: SPACE_ADMISSION_RECORD_FORMAT_V1,
                 record_version: persisted.record_version,
                 admission_id: persisted.admission_id,
                 state,
-            })
-            .map_err(|_| SpaceAdmissionPersistenceError::InvalidEncoding)?;
-            let aggregate = SpaceAdmissionAggregate::decode_persisted(&legacy)?;
+            })?;
             if !is_attempt_timeline_v2_state(&aggregate.state) {
                 return Err(SpaceAdmissionPersistenceError::InvalidState);
             }

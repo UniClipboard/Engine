@@ -426,6 +426,25 @@ impl AdmissionRecoveryService {
         }
     }
 
+    pub(in super::super::super) async fn save_joiner_history_conflict(
+        &self,
+        report: &mut AdmissionRecoveryReport,
+        aggregate: JoinerAdmission,
+        token: AdmissionRecoveryCommitToken,
+    ) {
+        let transition = match aggregate.reject_history_conflict() {
+            Ok(transition) => transition,
+            Err(_) => {
+                report.recovery_required_count += 1;
+                return;
+            }
+        };
+        match self.commit_recovery_and_notify(token, transition).await {
+            Ok(_) => report.rejected_count += 1,
+            Err(error) => self.record_state_error(report, error),
+        }
+    }
+
     async fn commit_joiner_reply(
         &self,
         joiner: &JoinerAdmissionService,

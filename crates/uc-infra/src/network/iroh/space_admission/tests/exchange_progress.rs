@@ -203,7 +203,7 @@ async fn actual_client_exchange_reports_reply_failures_and_preserves_trace_resul
             std::future::pending::<()>().await;
         });
         let request = SpaceAdmissionEnvelopeV1::new_with_version(
-            SpaceAdmissionProtocolVersion::V2,
+            SpaceAdmissionProtocolVersion::CURRENT,
             admission_id(),
             AdmissionRole::Joiner,
             1,

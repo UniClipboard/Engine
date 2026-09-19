@@ -273,13 +273,7 @@ fn sponsor_committed_completes_applied_with_exact_complete_reply() {
         )
         .expect("Committed Sponsor completes Applied");
 
-    assert_eq!(
-        applied.effects(),
-        &[
-            AdmissionEffect::ActivateSecurity,
-            AdmissionEffect::PublishMembership,
-        ]
-    );
+    assert!(applied.effects().is_empty());
     assert_eq!(applied.record_version(), 3);
     let state = match applied.state() {
         SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Applied(state)) => state,
@@ -354,8 +348,15 @@ fn sponsor_confirmation_uses_the_original_deadline_and_accepts_late_ack() {
 
     let confirmed = expired
         .settle_complete_ack(complete_ack, [0xb3; 32], settled)
-        .expect("valid late CompleteAck confirms the relationship")
-        .into_replacement();
+        .expect("valid late CompleteAck confirms the relationship");
+    assert_eq!(
+        confirmed.effects(),
+        &[
+            AdmissionEffect::ActivateSecurity,
+            AdmissionEffect::PublishMembership,
+        ]
+    );
+    let confirmed = confirmed.into_replacement();
     assert_eq!(
         confirmed
             .sponsor_pairing_confirmation()

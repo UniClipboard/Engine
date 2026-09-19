@@ -278,6 +278,63 @@ async fn rejected_join_remains_queryable_after_it_becomes_terminal() {
     ));
 }
 
+#[test]
+fn unrecoverable_activation_remains_queryable_as_a_failed_join_after_restart() {
+    std::thread::Builder::new()
+        .name("mobile-stack-budget".to_owned())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let fixture = Fixture::new();
+                    let loaded = JoinerStartStatePort::load(&fixture.store).await.unwrap();
+                    let (ordinal, snapshot, _, _, token) = loaded.into_parts();
+                    JoinerStartStatePort::commit(
+                        &fixture.store,
+                        token,
+                        JoinerStartMutation::new(
+                            start_join_transition(0x73, 0x74, ordinal, snapshot),
+                            None,
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                    let pending = PendingAdmissionRecoveryStatePort::load(
+                        &fixture.store,
+                        AdmissionRecoveryTrigger::StateChanged,
+                        0,
+                    )
+                    .await
+                    .unwrap()
+                    .into_pending_admissions();
+                    let (joiner, token) = pending.into_iter().next().unwrap().into_parts();
+                    let join_id = *joiner.join_id().as_bytes();
+                    let failed = joiner.reject_history_conflict().unwrap();
+                    PendingAdmissionRecoveryStatePort::commit(&fixture.store, token, failed)
+                        .await
+                        .unwrap();
+
+                    let status = LoadCurrentJoinStatusPort::load_current_join(&fixture.reopen())
+                        .await
+                        .unwrap();
+
+                    assert!(matches!(
+                        status,
+                        Some(uc_application::facade::CurrentJoinStatus::Rejected {
+                            join_id: actual_join_id,
+                            reason: SpaceAdmissionRejectionReason::HistoryConflict,
+                        }) if actual_join_id == join_id
+                    ));
+                });
+        })
+        .unwrap()
+        .join()
+        .expect("failure persistence should fit the mobile worker stack budget");
+}
+
 #[tokio::test]
 async fn stale_joiner_start_token_cannot_overwrite_new_state() {
     let fixture = Fixture::new();

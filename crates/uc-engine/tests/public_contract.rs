@@ -1731,6 +1731,23 @@ fn terminated_join_contract_uses_stable_status_and_reason_names() {
 }
 
 #[test]
+fn processing_join_contract_is_distinct_from_pending_and_active() {
+    let status = uc_engine::JoinSpaceStatusSummary::Processing {
+        join_id: "join-id".into(),
+        target_space_id: "space-1".into(),
+        sponsor_device_id: "sponsor-1".into(),
+        sponsor_identity_fingerprint: "sponsor-fingerprint".into(),
+        peer_upgrade_required: false,
+    };
+    let encoded = serde_json::to_value(status).expect("serializable join status");
+
+    assert_eq!(
+        encoded.get("status").and_then(|value| value.as_str()),
+        Some("processing")
+    );
+}
+
+#[test]
 fn lifecycle_contract_rejects_operations_outside_running_state() {
     assert!(EngineState::Running.accepts_operations());
     for state in [

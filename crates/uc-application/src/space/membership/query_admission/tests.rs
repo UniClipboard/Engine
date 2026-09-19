@@ -5,16 +5,17 @@ use async_trait::async_trait;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     AdmissionChangeFacts, HistoricalMembershipSignatureError,
-    HistoricalMembershipSignatureVerifier, MembershipAdmissionDecision, MembershipCredential,
-    VersionedMembershipHistory, ED25519_SIGNATURE_ALGORITHM_V1,
+    HistoricalMembershipSignatureVerifier, MembershipActivationBaselineV2,
+    MembershipAdmissionDecision, MembershipCredential, MembershipEventId,
+    MembershipHistoryRelationship, VersionedMembershipHistory, ED25519_SIGNATURE_ALGORITHM_V1,
 };
 
 use super::*;
 use crate::space::membership::{
     CommitMembershipLedgerPort, LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipLedger,
-    MembershipLedgerError, MembershipLedgerMutation, PeerReconciliationRecord,
+    MembershipLedgerError, MembershipLedgerMutation, PeerHistorySyncOutcome,
+    PeerReconciliationRecord,
 };
-use uc_core::membership::MembershipHistoryRelationship;
 
 struct CountingRepository {
     loaded: LoadedMembershipLedger,
@@ -53,16 +54,16 @@ impl HistoricalMembershipSignatureVerifier for AcceptingVerifier {
     }
 }
 
-fn active_ledger() -> LoadedMembershipLedger {
-    let device_id = DeviceId::new("device-a");
-    let credential = MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x41; 32]);
+fn member_facts(device: &str, credential_byte: u8) -> (AdmissionChangeFacts, MembershipCredential) {
+    let device_id = DeviceId::new(device);
+    let credential =
+        MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![credential_byte; 32]);
     let member_instance = credential.member_instance_id(&device_id);
-    let history = VersionedMembershipHistory::new_single_member_root(
-        "space-a".to_owned(),
+    (
         AdmissionChangeFacts {
             member_instance,
-            device_id: device_id.clone(),
-            device_name: "Device A".to_owned(),
+            device_id,
+            device_name: device.to_owned(),
             identity_fingerprint: uc_core::security::IdentityFingerprint::from_display_string(
                 "ABCD-EFGH-IJKL-MNOP",
             )
@@ -73,14 +74,43 @@ fn active_ledger() -> LoadedMembershipLedger {
         },
         credential,
     )
+}
+
+fn active_ledger() -> LoadedMembershipLedger {
+    let (local_facts, local_credential) = member_facts("device-a", 0x41);
+    let (peer_facts, peer_credential) = member_facts("device-b", 0x42);
+    let local_member = local_facts.member_instance;
+    let peer_device_id = peer_facts.device_id.clone();
+    let history = VersionedMembershipHistory::from_activation_baseline(
+        MembershipActivationBaselineV2::Established {
+            lineage_id: "space-a".to_owned(),
+            head_event_id: MembershipEventId::from_hex(&"11".repeat(32)).unwrap(),
+            head_depth: 0,
+            current_members: vec![
+                (local_facts.clone(), local_credential),
+                (peer_facts, peer_credential),
+            ],
+        },
+    )
     .unwrap();
     let mut loaded = LoadedMembershipLedger::no_current_space();
     loaded.revision = 7;
     loaded.lineage_id = Some("space-a".to_owned());
     loaded.membership_history = Some(history.encode_persisted_v2().unwrap());
-    loaded.local_device_id = Some(device_id);
-    loaded.local_member_instance = Some(member_instance);
+    loaded.local_device_id = Some(local_facts.device_id);
+    loaded.local_member_instance = Some(local_member);
     loaded.local_join_active = true;
+    loaded.peer_reconciliation.insert(
+        peer_device_id.clone(),
+        PeerReconciliationRecord {
+            peer_device_id,
+            relationship: MembershipHistoryRelationship::Consistent,
+            confirmed_position: None,
+            sync_state: Default::default(),
+            restricted_delivery: Vec::new(),
+            updated_at_ms: 1,
+        },
+    );
     loaded
 }
 
@@ -133,4 +163,68 @@ async fn relationship_for_a_non_member_does_not_block_a_new_invitation() {
     let snapshot = query.query_membership_admission(Some(7)).await.unwrap();
 
     assert_eq!(snapshot.decision, MembershipAdmissionDecision::Allowed);
+}
+
+#[tokio::test]
+async fn offline_peer_awaiting_the_latest_history_does_not_block_a_new_invitation() {
+    let mut loaded = active_ledger();
+    let peer = loaded
+        .peer_reconciliation
+        .get_mut(&DeviceId::new("device-b"))
+        .unwrap();
+    peer.confirmed_position = None;
+    peer.sync_state.pending_since_revision = Some(7);
+    peer.sync_state.retry_attempt = 3;
+    peer.sync_state.next_attempt_at_ms = 60_000;
+    peer.sync_state.last_attempt_outcome = PeerHistorySyncOutcome::Deferred;
+    let repository = Arc::new(CountingRepository {
+        loaded,
+        loads: AtomicUsize::new(0),
+    });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let query = QueryMembershipAdmissionUseCase::new(ledger);
+
+    let snapshot = query.query_membership_admission(Some(7)).await.unwrap();
+
+    assert_eq!(snapshot.decision, MembershipAdmissionDecision::Allowed);
+}
+
+#[tokio::test]
+async fn unsafe_active_peer_relationships_block_a_new_invitation() {
+    for relationship in [
+        MembershipHistoryRelationship::Unknown,
+        MembershipHistoryRelationship::PendingRemovalDecision,
+        MembershipHistoryRelationship::Diverged,
+        MembershipHistoryRelationship::Invalid,
+        MembershipHistoryRelationship::UpgradeRequired,
+    ] {
+        let mut loaded = active_ledger();
+        loaded
+            .peer_reconciliation
+            .get_mut(&DeviceId::new("device-b"))
+            .unwrap()
+            .relationship = relationship;
+        let repository = Arc::new(CountingRepository {
+            loaded,
+            loads: AtomicUsize::new(0),
+        });
+        let ledger = Arc::new(MembershipLedger::new(
+            repository.clone(),
+            repository,
+            Arc::new(AcceptingVerifier),
+        ));
+        let query = QueryMembershipAdmissionUseCase::new(ledger);
+
+        let snapshot = query.query_membership_admission(Some(7)).await.unwrap();
+
+        assert_eq!(
+            snapshot.decision,
+            MembershipAdmissionDecision::AwaitingConvergence,
+            "relationship {relationship:?} must keep admission closed"
+        );
+    }
 }

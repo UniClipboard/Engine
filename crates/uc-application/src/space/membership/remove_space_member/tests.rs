@@ -295,11 +295,11 @@ async fn removal_commits_all_local_facts_once_before_returning_success() {
         .iter()
         .find(|device| device.device_id == DeviceId::new("device-b"))
         .unwrap();
-    assert_eq!(removed.membership, DeviceTrustMembership::Removed);
+    assert_eq!(removed.membership, DeviceTrustMembership::PendingActivation);
     assert_eq!(
         removed.sync_state,
         DeviceTrustSyncState::Paused(
-            crate::space::membership::SpaceMemberPauseReason::LocalMemberInactive
+            crate::space::membership::SpaceMemberPauseReason::PendingLocalDecision
         )
     );
     let persisted = repository.load().await.unwrap();

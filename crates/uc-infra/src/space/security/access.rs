@@ -135,6 +135,61 @@ impl RuntimeSpaceAccessAdapter {
         self.active_security_session.close();
     }
 
+    /// 仅供完整回归构造旧版本曾允许写入的同设备重复 MLS 叶。
+    #[cfg(feature = "test-util")]
+    pub async fn seed_legacy_duplicate_group_members_for_test(
+        &self,
+        device_id: &DeviceId,
+        additional_members: usize,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            additional_members > 0,
+            "duplicate member count must be positive"
+        );
+        let space_id = self.session.current_space_id()?;
+        let mut material = self
+            .key_epoch_repository
+            .load_space_material(&space_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("space security material is missing"))?;
+        for _ in 0..additional_members {
+            let pending = MlsGroupEngine::prepare_join(device_id.as_str().as_bytes())?;
+            let admission = MlsGroupEngine::admit_member(
+                &MlsClientState::from_bytes(material.group_state().to_vec()),
+                device_id.as_str().as_bytes(),
+                &pending.key_package,
+            )?;
+            material = self.session.rotate_space_material(
+                &material,
+                admission.sponsor_state.into_bytes(),
+                GroupEpoch::new(admission.epoch),
+                chrono::Utc::now().timestamp_millis(),
+            )?;
+        }
+        self.key_epoch_repository
+            .save_space_material(&material)
+            .await?;
+        self.active_security_session
+            .install_current_material(&material)
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(feature = "test-util")]
+    pub async fn group_member_count_for_test(&self, device_id: &DeviceId) -> anyhow::Result<usize> {
+        let space_id = self.session.current_space_id()?;
+        let material = self
+            .key_epoch_repository
+            .load_space_material(&space_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("space security material is missing"))?;
+        MlsGroupEngine::matching_member_count(
+            &MlsClientState::from_bytes(material.group_state().to_vec()),
+            device_id.as_str().as_bytes(),
+        )
+        .map_err(anyhow::Error::new)
+    }
+
     pub fn new(
         key_material: Arc<KeyMaterialStore>,
         current_profile: Arc<dyn CurrentProfilePort>,
@@ -2792,7 +2847,7 @@ impl PrepareSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
             return Err(AdmissionSecurityTransitionError::InvalidState);
         }
 
-        let admission = MlsGroupEngine::admit_member(
+        let admission = MlsGroupEngine::admit_or_replace_member(
             &MlsClientState::from_bytes(current.group_state().to_vec()),
             &request.candidate_identity,
             &request.candidate_key_package,

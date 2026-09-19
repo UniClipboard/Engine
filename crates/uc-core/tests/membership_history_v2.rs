@@ -2527,3 +2527,67 @@ fn admission_content_key_catalog_is_canonical_and_rejects_incomplete_history() {
     )
     .is_err());
 }
+
+#[test]
+fn activating_a_new_instance_for_the_same_device_replaces_the_old_active_instance() {
+    let verifier = DeterministicSignatureVerifier;
+    let (mut history, a, old_b, _, add_b) = history_with_a_and_b(true);
+    let replacement = admission("device-b", credential(9));
+    assert_ne!(
+        old_b.facts.member_instance,
+        replacement.facts.member_instance
+    );
+
+    history
+        .create_unsigned_local_admission_event(
+            a.facts.member_instance,
+            &a.membership_credential,
+            replacement.facts.clone(),
+            replacement.membership_credential.clone(),
+            [9; 32],
+            [9; 16],
+        )
+        .expect("the current member may prepare a replacement for the same device");
+    let add_again = event(
+        &history,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::AddDevice {
+            admission: replacement.clone(),
+        },
+        9,
+        &verifier,
+    );
+    history
+        .verify_and_receive_event(add_again.clone(), &verifier)
+        .expect("the replacement event is retained before activation");
+    assert!(history
+        .active_members()
+        .contains(&old_b.facts.member_instance));
+    assert!(!history
+        .active_members()
+        .contains(&replacement.facts.member_instance));
+
+    history
+        .verify_and_record_activation_receipt(
+            activation_receipt(&add_again, &replacement, &verifier),
+            &verifier,
+        )
+        .expect("the replacement activation receipt verifies");
+
+    let matching = history
+        .active_members()
+        .into_iter()
+        .filter(|member| {
+            history
+                .admission_facts_for(*member)
+                .is_some_and(|facts| facts.device_id == old_b.facts.device_id)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(matching, vec![replacement.facts.member_instance]);
+    assert_eq!(
+        history.credential_for(old_b.facts.member_instance),
+        Some(&old_b.membership_credential),
+        "replacement must retain the old credential for history verification"
+    );
+}

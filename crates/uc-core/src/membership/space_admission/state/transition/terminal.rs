@@ -256,7 +256,7 @@ impl SpaceAdmissionAggregate {
         else {
             return Err(SpaceAdmissionAggregateError::InvalidTransition);
         };
-        if abandoned.header().protocol_version() != SpaceAdmissionProtocolVersion::V2
+        if abandoned.header().protocol_version() != SpaceAdmissionProtocolVersion::CURRENT
             || abandoned.kind() != SpaceAdmissionMessageKind::Abandoned
             || !matches!(
                 abandoned.header().sender_role(),
@@ -350,7 +350,7 @@ fn cleanup_obligation(
     let message_id = AdmissionMessageId::from_bytes(attempt_digest)
         .ok_or(SpaceAdmissionAggregateError::InvalidAttemptTimeline)?;
     let request = SpaceAdmissionEnvelopeV1::new_with_version(
-        SpaceAdmissionProtocolVersion::V2,
+        SpaceAdmissionProtocolVersion::CURRENT,
         admission_id,
         AdmissionRole::Joiner,
         4,

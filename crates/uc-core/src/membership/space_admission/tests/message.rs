@@ -10,9 +10,17 @@ fn protocol_version_distinguishes_legacy_and_attempt_contract_versions() {
         SpaceAdmissionProtocolVersion::from_u16(2),
         Some(SpaceAdmissionProtocolVersion::V2)
     );
-    assert_eq!(SpaceAdmissionProtocolVersion::V2.as_u16(), 2);
+    assert_eq!(
+        SpaceAdmissionProtocolVersion::from_u16(3),
+        Some(SpaceAdmissionProtocolVersion::V3)
+    );
+    assert_eq!(
+        SpaceAdmissionProtocolVersion::CURRENT,
+        SpaceAdmissionProtocolVersion::V3
+    );
+    assert_eq!(SpaceAdmissionProtocolVersion::CURRENT.as_u16(), 3);
     assert!(SpaceAdmissionProtocolVersion::from_u16(0).is_none());
-    assert!(SpaceAdmissionProtocolVersion::from_u16(3).is_none());
+    assert!(SpaceAdmissionProtocolVersion::from_u16(4).is_none());
 }
 
 #[test]

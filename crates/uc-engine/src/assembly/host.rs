@@ -893,6 +893,8 @@ mod tests {
             "1.2.3",
             #[cfg(feature = "lan-compat")]
             wiring.wired.mobile_sync_ports.clone(),
+            #[cfg(feature = "dev-tools")]
+            Arc::new(crate::dev::JoinerFinalConfirmationGate::default()),
             network.prepare_session(),
         )
         .await

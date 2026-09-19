@@ -25,8 +25,7 @@ use super::super::space_admission_wire::{
 use super::super::trace_context::inject_current;
 use super::crypto::{calculate_mac, random_nonce, verify_mac};
 use super::diagnostics::{client_completion, io_failure, record_network_snapshot, wire_failure};
-use super::errors::{map_application_close_code, map_reply_wire_error};
-use std::time::Duration;
+use super::errors::{application_close_error, map_reply_wire_error};
 
 pub(super) struct EstablishedExchange {
     connection: Connection,
@@ -90,7 +89,7 @@ impl AuthenticatedAdmissionExchangePort for EstablishedExchange {
                 AdmissionNetworkPoint::ExchangeStarted,
             );
             progress.start_step(AdmissionExchangeStep::PrepareRequest);
-            if request.header().protocol_version() != SpaceAdmissionProtocolVersion::V2 {
+            if request.header().protocol_version() != SpaceAdmissionProtocolVersion::CURRENT {
                 progress.fail(AdmissionExchangeFailure::PeerUpgradeRequired);
                 return Err(SpaceAdmissionTransportError::PeerUpgradeRequired);
             }
@@ -211,39 +210,23 @@ async fn read_authenticated_reply(
             progress.fail(wire_failure(&error));
             Err(map_reply_wire_error(error))
         }
-        Err(error) => {
-            let close_reason = match connection.close_reason() {
-                Some(reason) => Some(reason),
-                None => tokio::time::timeout(Duration::from_millis(100), connection.closed())
-                    .await
-                    .ok(),
-            };
-            match close_reason {
-                Some(iroh::endpoint::ConnectionError::ApplicationClosed(close)) => {
-                    match map_application_close_code(close.error_code.into_inner()) {
-                        Some(mapped) => {
-                            match mapped {
-                                SpaceAdmissionTransportError::AuthenticationRejected => {
-                                    progress.fail(AdmissionExchangeFailure::AuthenticationRejected)
-                                }
-                                SpaceAdmissionTransportError::PeerUpgradeRequired => {
-                                    progress.fail(AdmissionExchangeFailure::PeerUpgradeRequired)
-                                }
-                                _ => progress.fail(AdmissionExchangeFailure::ConnectionClosed),
-                            }
-                            Err(mapped)
-                        }
-                        None => {
-                            progress.fail(wire_failure(&error));
-                            Err(map_reply_wire_error(error))
-                        }
+        Err(error) => match application_close_error(connection).await {
+            Some(mapped) => {
+                match mapped {
+                    SpaceAdmissionTransportError::AuthenticationRejected => {
+                        progress.fail(AdmissionExchangeFailure::AuthenticationRejected)
                     }
+                    SpaceAdmissionTransportError::PeerUpgradeRequired => {
+                        progress.fail(AdmissionExchangeFailure::PeerUpgradeRequired)
+                    }
+                    _ => progress.fail(AdmissionExchangeFailure::ConnectionClosed),
                 }
-                _ => {
-                    progress.fail(wire_failure(&error));
-                    Err(map_reply_wire_error(error))
-                }
+                Err(mapped)
             }
-        }
+            None => {
+                progress.fail(wire_failure(&error));
+                Err(map_reply_wire_error(error))
+            }
+        },
     }
 }

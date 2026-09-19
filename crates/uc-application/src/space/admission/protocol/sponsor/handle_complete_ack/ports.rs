@@ -10,7 +10,7 @@ pub trait PrepareSponsorSettledPort: Send + Sync {
     async fn prepare(
         &self,
         admission_id: SpaceAdmissionId,
-        preparation: SponsorSettlementPreparation<'_>,
+        preparation: &SponsorSettlementPreparation<'_>,
         complete_ack: &SpaceAdmissionEnvelopeV1,
     ) -> Result<PreparedSponsorSettled, PrepareSponsorSettledError>;
 }

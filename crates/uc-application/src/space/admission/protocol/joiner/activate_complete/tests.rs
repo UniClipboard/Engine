@@ -28,10 +28,11 @@ async fn protocol_queries_and_completes_the_saved_activation_as_one_action() {
 
     assert!(matches!(
         status,
-        CurrentJoinStatus::Active {
-            joined_space,
+        CurrentJoinStatus::Processing {
+            target_space_id,
+            sponsor_device_id: _,
             ..
-        } if joined_space.space_id == "target-space"
+        } if target_space_id == "target-space"
     ));
     assert!(!pair
         .joiner()

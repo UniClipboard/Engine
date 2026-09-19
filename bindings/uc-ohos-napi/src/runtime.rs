@@ -667,6 +667,24 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
             rejection_reason: None,
             termination_reason: None,
         },
+        uc_engine::JoinSpaceStatusSummary::Processing {
+            join_id,
+            target_space_id,
+            sponsor_device_id,
+            sponsor_identity_fingerprint,
+            peer_upgrade_required,
+        } => OhJoinSpaceStatus {
+            status: "processing".to_owned(),
+            join_id,
+            joined_space: None,
+            target_space_id: Some(target_space_id),
+            sponsor_device_id: Some(sponsor_device_id),
+            sponsor_identity_fingerprint: Some(sponsor_identity_fingerprint),
+            cancel_requested: None,
+            peer_upgrade_required,
+            rejection_reason: None,
+            termination_reason: None,
+        },
         uc_engine::JoinSpaceStatusSummary::Rejected { join_id, reason } => OhJoinSpaceStatus {
             status: "rejected".to_owned(),
             join_id,
@@ -996,6 +1014,25 @@ mod tests {
         .expect("join status must map");
 
         assert!(status.peer_upgrade_required);
+    }
+
+    #[test]
+    fn join_status_preserves_processing_state() {
+        let status = join_space_status(OperationResult::JoinSpace(
+            uc_engine::JoinSpaceStatusSummary::Processing {
+                join_id: "join-id".to_owned(),
+                target_space_id: "space-id".to_owned(),
+                sponsor_device_id: "sponsor-id".to_owned(),
+                sponsor_identity_fingerprint: "sponsor-fingerprint".to_owned(),
+                peer_upgrade_required: false,
+            },
+        ))
+        .expect("processing join status must map");
+
+        assert_eq!(status.status, "processing");
+        assert_eq!(status.target_space_id.as_deref(), Some("space-id"));
+        assert_eq!(status.sponsor_device_id.as_deref(), Some("sponsor-id"));
+        assert!(status.cancel_requested.is_none());
     }
 
     #[test]

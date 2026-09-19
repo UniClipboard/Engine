@@ -376,7 +376,10 @@ async fn confirmed_acceptance_commits_the_decision_and_stops_local_access() {
         other => panic!("expected applied result, got {other:?}"),
     };
     assert_eq!(status.revision, 9);
-    assert_eq!(status.local_membership, DeviceTrustMembership::Removed);
+    assert_eq!(
+        status.local_membership,
+        DeviceTrustMembership::PendingActivation
+    );
     assert_eq!(repository.commits.load(Ordering::SeqCst), 1);
     assert_eq!(wake.0.load(Ordering::SeqCst), 1);
     let persisted = repository.load().await.unwrap();

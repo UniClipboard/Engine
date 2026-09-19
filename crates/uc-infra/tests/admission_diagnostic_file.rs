@@ -180,7 +180,7 @@ async fn missing_stored_credential_produces_diagnosable_client_and_server_record
                     "the physical connection should be established before authentication fails",
                 );
             let request = SpaceAdmissionEnvelopeV1::new_with_version(
-                SpaceAdmissionProtocolVersion::V2,
+                SpaceAdmissionProtocolVersion::CURRENT,
                 admission_id,
                 AdmissionRole::Joiner,
                 1,

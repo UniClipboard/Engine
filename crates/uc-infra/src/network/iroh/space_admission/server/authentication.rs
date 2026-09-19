@@ -61,7 +61,7 @@ impl IrohSpaceAdmissionHandler {
                     let (protocol_version, _) = postcard::take_from_bytes::<u16>(&payload)
                         .map_err(|_| HandlerError::Protocol)?;
                     diagnostic_stage = AuthenticationStep::InitialVersion;
-                    if protocol_version != SpaceAdmissionProtocolVersion::V2.as_u16() {
+                    if protocol_version != SpaceAdmissionProtocolVersion::CURRENT.as_u16() {
                         return Err(HandlerError::PeerUpgradeRequired);
                     }
                     let hello: InitialHelloV2 =
@@ -180,7 +180,7 @@ impl IrohSpaceAdmissionHandler {
                 read_envelope(&mut receive, FrameKind::Request)
                     .await
                     .map_err(map_request_wire_error)?;
-            if envelope.header().protocol_version() != SpaceAdmissionProtocolVersion::V2 {
+            if envelope.header().protocol_version() != SpaceAdmissionProtocolVersion::CURRENT {
                 return Err(HandlerError::PeerUpgradeRequired);
             }
             diagnostic_stage = AuthenticationStep::RequestIdentity;

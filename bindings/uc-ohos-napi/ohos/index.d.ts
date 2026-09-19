@@ -129,7 +129,7 @@ export interface OhJoinedSpace {
 }
 
 export interface OhJoinSpaceStatus {
-  status: 'active' | 'pending' | 'rejected' | 'terminated'
+  status: 'active' | 'pending' | 'processing' | 'rejected' | 'terminated'
   joinId: string
   joinedSpace?: OhJoinedSpace
   targetSpaceId?: string

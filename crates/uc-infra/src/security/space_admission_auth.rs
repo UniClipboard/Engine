@@ -393,7 +393,7 @@ impl SpaceAdmissionAuthContext {
             return None;
         }
         Some(Self {
-            protocol_version: SpaceAdmissionProtocolVersion::V2,
+            protocol_version: SpaceAdmissionProtocolVersion::CURRENT,
             admission_id,
             invitation_id,
             joiner_peer_id,
@@ -593,4 +593,30 @@ fn derive_continuation_credential(
         .map_err(anyhow::Error::new)
         .context("expand OPAQUE continuation credential")?;
     Ok(SpaceAdmissionContinuationCredential(credential))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attempt_context_is_bound_to_the_current_protocol_version() {
+        let context = SpaceAdmissionAuthContext::with_attempt_contract(
+            SpaceAdmissionId::from_bytes([0x11; 32]).expect("admission id"),
+            InvitationId::from_bytes([0x12; 32]).expect("invitation id"),
+            AdmissionChannelPeerId::from_bytes([0x13; 32]).expect("joiner peer"),
+            AdmissionChannelPeerId::from_bytes([0x14; 32]).expect("sponsor peer"),
+            [0x15; 32],
+        )
+        .expect("attempt context");
+        let encoded = context.encode();
+        let version_offset = b"uniclipboard/space-admission/opaque/v1".len();
+
+        assert_eq!(
+            &encoded[version_offset..version_offset + 2],
+            &SpaceAdmissionProtocolVersion::CURRENT
+                .as_u16()
+                .to_be_bytes()
+        );
+    }
 }

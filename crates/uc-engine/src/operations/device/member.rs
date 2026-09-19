@@ -398,6 +398,19 @@ pub(crate) fn join_space_status(status: CurrentJoinStatus) -> JoinSpaceStatusSum
             cancel_requested,
             peer_upgrade_required,
         },
+        CurrentJoinStatus::Processing {
+            join_id,
+            target_space_id,
+            sponsor_device_id,
+            sponsor_identity_fingerprint,
+            peer_upgrade_required,
+        } => JoinSpaceStatusSummary::Processing {
+            join_id: encode_join_id(join_id),
+            target_space_id,
+            sponsor_device_id: sponsor_device_id.to_string(),
+            sponsor_identity_fingerprint: sponsor_identity_fingerprint.as_display().to_string(),
+            peer_upgrade_required,
+        },
         CurrentJoinStatus::Rejected { join_id, reason } => JoinSpaceStatusSummary::Rejected {
             join_id: encode_join_id(join_id),
             reason: match reason {
@@ -788,6 +801,28 @@ mod tests {
                 peer_upgrade_required: true,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn final_confirmation_wait_is_reported_as_processing() {
+        let summary = join_space_status(CurrentJoinStatus::Processing {
+            join_id: [0x32; 16],
+            target_space_id: "space-a".to_owned(),
+            sponsor_device_id: uc_core::DeviceId::new("sponsor"),
+            sponsor_identity_fingerprint:
+                uc_core::security::IdentityFingerprint::from_display_string("ABCD-EFGH-IJKL-MNOP")
+                    .expect("fingerprint"),
+            peer_upgrade_required: false,
+        });
+
+        assert!(matches!(
+            summary,
+            JoinSpaceStatusSummary::Processing {
+                ref target_space_id,
+                ref sponsor_device_id,
+                ..
+            } if target_space_id == "space-a" && sponsor_device_id == "sponsor"
         ));
     }
 

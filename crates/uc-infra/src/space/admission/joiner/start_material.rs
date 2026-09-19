@@ -151,7 +151,7 @@ impl DefaultJoinerStartMaterial {
             )
             .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
             let join_request = SpaceAdmissionEnvelopeV1::new_with_version(
-                SpaceAdmissionProtocolVersion::V2,
+                SpaceAdmissionProtocolVersion::CURRENT,
                 admission_id,
                 AdmissionRole::Joiner,
                 0,

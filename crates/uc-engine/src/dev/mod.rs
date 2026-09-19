@@ -11,6 +11,10 @@ use uc_observability_contract::diagnostics::{
     complete_operation, DiagnosticDomain, DiagnosticOperation, DiagnosticRole, OperationCompletion,
 };
 
+mod admission_settlement;
+
+pub(crate) use admission_settlement::{GatedJoinerActivation, JoinerFinalConfirmationGate};
+
 static TEST_TRACING_INIT: Once = Once::new();
 static TEST_OBSERVABILITY: OnceLock<ProcessObservabilityHandle> = OnceLock::new();
 
@@ -175,6 +179,16 @@ pub enum DevOperation {
         entry_id: String,
     },
     QueryNetworkEndpointId,
+    SeedLegacyDuplicateGroupMembers {
+        device_id: String,
+        additional_members: usize,
+    },
+    QueryGroupMemberCount {
+        device_id: String,
+    },
+    ArmJoinerFinalConfirmationPause,
+    WaitForJoinerFinalConfirmationPause,
+    ReleaseJoinerFinalConfirmationPause,
     FailNextSessionHandover {
         point: SessionHandoverFailurePoint,
     },
@@ -204,6 +218,11 @@ impl fmt::Debug for DevOperation {
             Self::PublishBlob { .. } => "publish_blob",
             Self::FetchBlob { .. } => "fetch_blob",
             Self::QueryNetworkEndpointId => "query_network_endpoint_id",
+            Self::SeedLegacyDuplicateGroupMembers { .. } => "seed_legacy_duplicate_group_members",
+            Self::QueryGroupMemberCount { .. } => "query_group_member_count",
+            Self::ArmJoinerFinalConfirmationPause => "arm_joiner_final_confirmation_pause",
+            Self::WaitForJoinerFinalConfirmationPause => "wait_for_joiner_final_confirmation_pause",
+            Self::ReleaseJoinerFinalConfirmationPause => "release_joiner_final_confirmation_pause",
             Self::FailNextSessionHandover { .. } => "fail_next_session_handover",
             Self::QuerySessionHandoverDiagnostics => "query_session_handover_diagnostics",
             Self::SetNetworkPartition { .. } => "set_network_partition",
@@ -335,6 +354,13 @@ pub enum DevOperationResult {
         digest: Vec<u8>,
     },
     NetworkEndpointId([u8; 32]),
+    LegacyDuplicateGroupMembersSeeded,
+    GroupMemberCount {
+        count: usize,
+    },
+    JoinerFinalConfirmationPauseArmed,
+    JoinerFinalConfirmationPauseEntered,
+    JoinerFinalConfirmationPauseReleased,
     SessionHandoverFailureArmed,
     SessionHandoverDiagnostics {
         network_build_count: usize,
@@ -368,6 +394,13 @@ impl fmt::Debug for DevOperationResult {
             Self::BlobPublished(_) => "blob_published",
             Self::BlobFetched { .. } => "blob_fetched",
             Self::NetworkEndpointId(_) => "network_endpoint_id",
+            Self::LegacyDuplicateGroupMembersSeeded => "legacy_duplicate_group_members_seeded",
+            Self::GroupMemberCount { .. } => "group_member_count",
+            Self::JoinerFinalConfirmationPauseArmed => "joiner_final_confirmation_pause_armed",
+            Self::JoinerFinalConfirmationPauseEntered => "joiner_final_confirmation_pause_entered",
+            Self::JoinerFinalConfirmationPauseReleased => {
+                "joiner_final_confirmation_pause_released"
+            }
             Self::SessionHandoverFailureArmed => "session_handover_failure_armed",
             Self::SessionHandoverDiagnostics { .. } => "session_handover_diagnostics",
             Self::RejectedConnectionCount { .. } => "rejected_connection_count",

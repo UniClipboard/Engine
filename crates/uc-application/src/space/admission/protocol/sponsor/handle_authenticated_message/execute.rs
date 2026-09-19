@@ -39,6 +39,8 @@ impl HandleAuthenticatedSpaceAdmissionMessagePort for SpaceAdmissionProtocol {
                 || contract.invitation_id() != request.invitation_id()
                 || contract.joiner_peer_id() != binding.remote_peer_id()
                 || contract.sponsor_peer_id() != binding.local_peer_id()
+                || request.identity_facts().transport_public_key.as_slice()
+                    != binding.remote_peer_id().as_bytes()
             {
                 return Err(HandleAuthenticatedSpaceAdmissionMessageError::invalid(
                     anyhow::anyhow!("the shared attempt binding does not match the request"),

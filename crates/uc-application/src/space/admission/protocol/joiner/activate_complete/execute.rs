@@ -4,8 +4,7 @@ use crate::space::admission::protocol::{
     SpaceAdmissionProtocol,
 };
 use crate::space::admission::{
-    CompletePendingSpaceTransitionError, CurrentJoinStatus, JoinedSpace,
-    QueryPendingSpaceTransitionError,
+    CompletePendingSpaceTransitionError, CurrentJoinStatus, QueryPendingSpaceTransitionError,
 };
 use uc_observability_contract::diagnostics::connectivity::{
     scope_pairing_work, AdmissionExchangeSide,
@@ -120,17 +119,11 @@ impl SpaceAdmissionProtocol {
                     CompletePendingSpaceTransitionError::JoinNotActive
                 }
             })?;
-            Ok(CurrentJoinStatus::Active {
+            Ok(CurrentJoinStatus::Processing {
                 join_id: outcome.join_id,
-                joined_space: JoinedSpace {
-                    sponsor_device_id: outcome.sponsor_device_id,
-                    sponsor_identity_fingerprint: outcome.sponsor_identity_fingerprint,
-                    space_id: outcome.space_id,
-                    self_device_id: outcome.self_device_id,
-                    self_identity_fingerprint: outcome.self_identity_fingerprint,
-                    migrated_records: outcome.migrated_records,
-                    preserved_unreadable_records: outcome.preserved_unreadable_records,
-                },
+                target_space_id: outcome.space_id,
+                sponsor_device_id: outcome.sponsor_device_id,
+                sponsor_identity_fingerprint: outcome.sponsor_identity_fingerprint,
                 peer_upgrade_required: false,
             })
         })

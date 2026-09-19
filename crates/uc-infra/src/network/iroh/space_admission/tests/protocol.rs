@@ -131,6 +131,106 @@ async fn new_client_maps_a_real_legacy_layout_server_to_peer_upgrade_required() 
 }
 
 #[tokio::test]
+async fn new_joiner_rejects_an_old_sponsor_before_authentication() {
+    let sponsor = bound_endpoint().await;
+    wait_for_direct_addrs(&sponsor).await;
+    let joiner = bound_endpoint().await;
+    wait_for_direct_addrs(&joiner).await;
+    let invitation = InvitationId::from_bytes([0x63; 32]).expect("invitation id");
+    let admission = SpaceAdmissionId::from_bytes([0x64; 32]).expect("admission id");
+    let derived = SpaceAdmissionAuth::derive_password_equivalent(b"legacy-version", invitation);
+    let password = AdmissionEncryptedPasswordEquivalent::from_bytes(derived.as_bytes().to_vec())
+        .expect("password equivalent");
+    let route = SpaceAdmissionRoute::from_bytes(
+        encode_space_admission_route(&sponsor.addr(), Some(invitation)).expect("route encoding"),
+    )
+    .expect("route");
+    let router = Router::builder((*sponsor).clone())
+        .accept(SPACE_ADMISSION_ALPN, LegacyVersionHandler)
+        .spawn();
+
+    let result = IrohSpaceAdmissionTransport::new(joiner.clone())
+        .establish_initial(
+            admission,
+            AdmissionAttemptTimeline::start(1_000).expect("valid attempt timeline"),
+            &route,
+            &password,
+        )
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(SpaceAdmissionTransportError::PeerUpgradeRequired)
+    ));
+    router.shutdown().await.expect("router shutdown");
+    joiner.close().await;
+    sponsor.close().await;
+}
+
+#[tokio::test]
+async fn new_sponsor_rejects_an_old_joiner_before_consuming_credentials() {
+    let sponsor = bound_endpoint().await;
+    wait_for_direct_addrs(&sponsor).await;
+    let joiner = bound_endpoint().await;
+    wait_for_direct_addrs(&joiner).await;
+    let credentials = Arc::new(LoopbackCredentials {
+        initial: Mutex::new(None),
+        continuation: Mutex::new(None),
+    });
+    let endpoint = Arc::new(HangingLoopbackEndpoint {
+        calls: AtomicUsize::new(0),
+        entered: Notify::new(),
+    });
+    let handler = Arc::new(
+        IrohSpaceAdmissionHandler::new(&sponsor, endpoint.clone(), credentials).expect("handler"),
+    );
+    let router = Router::builder((*sponsor).clone())
+        .accept(SPACE_ADMISSION_ALPN, handler)
+        .spawn();
+    let connection = connect(&joiner, sponsor.addr())
+        .await
+        .expect("connect to sponsor");
+    let (mut send, mut receive) = open_stream(&connection).await.expect("open stream");
+    write_typed(
+        &mut send,
+        FrameKind::InitialHello,
+        &InitialHelloV2 {
+            protocol_version: SpaceAdmissionProtocolVersion::V2.as_u16(),
+            admission_id: [0x65; 32],
+            invitation_id: [0x66; 32],
+            joiner_peer_id: *peer_id(joiner.id().as_bytes())
+                .expect("joiner peer")
+                .as_bytes(),
+            attempt_started_at_ms: 1_000,
+            attempt_expires_at_ms: 301_000,
+            ke1: vec![0x67],
+        },
+        AUTH_FRAME_LIMIT,
+    )
+    .await
+    .expect("legacy hello");
+
+    let response = read_typed::<_, OpaqueResponseV1>(
+        &mut receive,
+        FrameKind::OpaqueResponse,
+        AUTH_FRAME_LIMIT,
+    )
+    .await;
+    let close = connection.closed().await;
+
+    assert!(response.is_err());
+    assert!(matches!(
+        close,
+        iroh::endpoint::ConnectionError::ApplicationClosed(ref close)
+            if close.error_code.into_inner() == u64::from(CLOSE_PEER_UPGRADE_REQUIRED)
+    ));
+    assert_eq!(endpoint.calls.load(Ordering::SeqCst), 0);
+    router.shutdown().await.expect("router shutdown");
+    joiner.close().await;
+    sponsor.close().await;
+}
+
+#[tokio::test]
 async fn stalled_authenticated_endpoint_records_one_server_timeout() {
     let exporter = InMemorySpanExporter::default();
     let log_exporter = InMemoryLogExporter::default();

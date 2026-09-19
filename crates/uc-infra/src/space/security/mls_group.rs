@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use openmls::{
     group::MlsGroup,
     messages::group_info::VerifiableGroupInfo,
@@ -341,6 +343,14 @@ impl MlsGroupEngine {
         if !group.is_active() {
             return Err(MlsGroupError::InvalidState);
         }
+        let mut identities = BTreeSet::new();
+        for member in group.members() {
+            let credential = BasicCredential::try_from(member.credential)
+                .map_err(|_| MlsGroupError::InvalidState)?;
+            if !identities.insert(credential.identity().to_vec()) {
+                return Err(MlsGroupError::InvalidState);
+            }
+        }
         Ok(())
     }
 
@@ -391,6 +401,23 @@ impl MlsGroupEngine {
         expected_device_identity: &[u8],
         key_package: &[u8],
     ) -> Result<MlsAdmission, MlsGroupError> {
+        Self::admit_member_inner(sponsor_state, expected_device_identity, key_package, false)
+    }
+
+    pub(crate) fn admit_or_replace_member(
+        sponsor_state: &MlsClientState,
+        expected_device_identity: &[u8],
+        key_package: &[u8],
+    ) -> Result<MlsAdmission, MlsGroupError> {
+        Self::admit_member_inner(sponsor_state, expected_device_identity, key_package, true)
+    }
+
+    fn admit_member_inner(
+        sponsor_state: &MlsClientState,
+        expected_device_identity: &[u8],
+        key_package: &[u8],
+        replace_existing: bool,
+    ) -> Result<MlsAdmission, MlsGroupError> {
         let (provider, stored) = restore(sponsor_state)?;
         let signer = restore_signer(&provider, &stored)?;
         let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
@@ -406,9 +433,39 @@ impl MlsGroupEngine {
         if credential.identity() != expected_device_identity {
             return Err(MlsGroupError::IdentityMismatch);
         }
-        let (commit, welcome, _) = group
-            .add_members(&provider, &signer, &[key_package])
-            .map_err(|_| MlsGroupError::Protocol)?;
+        let existing = group
+            .members()
+            .filter_map(|member| {
+                let credential = BasicCredential::try_from(member.credential).ok()?;
+                (credential.identity() == expected_device_identity).then_some(member.index)
+            })
+            .collect::<Vec<_>>();
+        let (commit, welcome) = match existing.as_slice() {
+            [_, ..] if replace_existing => {
+                if existing.contains(&group.own_leaf_index()) {
+                    return Err(MlsGroupError::IdentityMismatch);
+                }
+                for target in existing {
+                    group
+                        .propose_remove_member(&provider, &signer, target)
+                        .map_err(|_| MlsGroupError::Protocol)?;
+                }
+                group
+                    .propose_add_member(&provider, &signer, &key_package)
+                    .map_err(|_| MlsGroupError::Protocol)?;
+                let (commit, welcome, _) = group
+                    .commit_to_pending_proposals(&provider, &signer)
+                    .map_err(|_| MlsGroupError::Protocol)?;
+                let welcome = welcome.ok_or(MlsGroupError::Protocol)?;
+                (commit, welcome)
+            }
+            _ => {
+                let (commit, welcome, _) = group
+                    .add_members(&provider, &signer, &[key_package])
+                    .map_err(|_| MlsGroupError::Protocol)?;
+                (commit, welcome)
+            }
+        };
         group
             .merge_pending_commit(&provider)
             .map_err(|_| MlsGroupError::Protocol)?;
@@ -493,18 +550,18 @@ impl MlsGroupEngine {
         let mut group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
             .map_err(|_| MlsGroupError::Protocol)?
             .ok_or(MlsGroupError::InvalidState)?;
-        let target = group
+        let targets = group
             .members()
-            .find_map(|member| {
+            .filter_map(|member| {
                 let credential = BasicCredential::try_from(member.credential).ok()?;
                 (credential.identity() == target_device_identity).then_some(member.index)
             })
-            .ok_or(MlsGroupError::IdentityMismatch)?;
-        if target == group.own_leaf_index() {
+            .collect::<Vec<_>>();
+        if targets.is_empty() || targets.contains(&group.own_leaf_index()) {
             return Err(MlsGroupError::IdentityMismatch);
         }
         let (commit, _, _) = group
-            .remove_members(&provider, &signer, &[target])
+            .remove_members(&provider, &signer, &targets)
             .map_err(|_| MlsGroupError::Protocol)?;
         group
             .merge_pending_commit(&provider)
@@ -540,6 +597,25 @@ impl MlsGroupEngine {
                 .is_ok_and(|credential| credential.identity() == expected_device_identity)
         });
         Ok(contains_member)
+    }
+
+    #[cfg(feature = "test-util")]
+    pub(crate) fn matching_member_count(
+        client_state: &MlsClientState,
+        expected_device_identity: &[u8],
+    ) -> Result<usize, MlsGroupError> {
+        let (provider, stored) = restore(client_state)?;
+        let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
+        let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
+            .map_err(|_| MlsGroupError::Protocol)?
+            .ok_or(MlsGroupError::InvalidState)?;
+        Ok(group
+            .members()
+            .filter(|member| {
+                BasicCredential::try_from(member.credential.clone())
+                    .is_ok_and(|credential| credential.identity() == expected_device_identity)
+            })
+            .count())
     }
 
     pub(crate) fn sign_member_payload(
@@ -1052,6 +1128,72 @@ mod tests {
             MlsGroupEngine::admit_member(&sponsor, b"mallory", &pending.key_package),
             Err(MlsGroupError::IdentityMismatch)
         ));
+    }
+
+    #[test]
+    fn readmission_replaces_the_previous_leaf_for_the_same_device() {
+        let sponsor = MlsGroupEngine::create_sponsor(b"space-a", b"alice").unwrap();
+        let first_pending = MlsGroupEngine::prepare_join(b"bob").unwrap();
+        let first =
+            MlsGroupEngine::admit_member(&sponsor, b"bob", &first_pending.key_package).unwrap();
+        let second_pending = MlsGroupEngine::prepare_join(b"bob").unwrap();
+        let duplicate =
+            MlsGroupEngine::admit_member(&first.sponsor_state, b"bob", &second_pending.key_package)
+                .unwrap();
+        assert!(MlsGroupEngine::validate_state(&duplicate.sponsor_state, b"space-a").is_err());
+
+        let returning_pending = MlsGroupEngine::prepare_join(b"bob").unwrap();
+        let repaired = MlsGroupEngine::admit_or_replace_member(
+            &duplicate.sponsor_state,
+            b"bob",
+            &returning_pending.key_package,
+        )
+        .unwrap();
+
+        MlsGroupEngine::complete_join(returning_pending, b"space-a", &repaired.welcome).unwrap();
+        let (provider, stored) = restore(&repaired.sponsor_state).unwrap();
+        let group_id = stored.group_id.unwrap();
+        let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
+            .unwrap()
+            .unwrap();
+        let bob_count = group
+            .members()
+            .filter(|member| {
+                BasicCredential::try_from(member.credential.clone())
+                    .is_ok_and(|credential| credential.identity() == b"bob")
+            })
+            .count();
+
+        assert_eq!(bob_count, 1);
+        assert_eq!(repaired.epoch, duplicate.epoch + 1);
+    }
+
+    #[test]
+    fn removal_clears_every_legacy_leaf_for_the_same_device() {
+        let sponsor = MlsGroupEngine::create_sponsor(b"space-a", b"alice").unwrap();
+        let first_pending = MlsGroupEngine::prepare_join(b"bob").unwrap();
+        let first =
+            MlsGroupEngine::admit_member(&sponsor, b"bob", &first_pending.key_package).unwrap();
+        let second_pending = MlsGroupEngine::prepare_join(b"bob").unwrap();
+        let duplicate =
+            MlsGroupEngine::admit_member(&first.sponsor_state, b"bob", &second_pending.key_package)
+                .unwrap();
+
+        let removed = MlsGroupEngine::remove_member(&duplicate.sponsor_state, b"bob").unwrap();
+        let (provider, stored) = restore(&removed.sponsor_state).unwrap();
+        let group_id = stored.group_id.unwrap();
+        let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
+            .unwrap()
+            .unwrap();
+        let bob_count = group
+            .members()
+            .filter(|member| {
+                BasicCredential::try_from(member.credential.clone())
+                    .is_ok_and(|credential| credential.identity() == b"bob")
+            })
+            .count();
+
+        assert_eq!(bob_count, 0);
     }
 
     #[test]

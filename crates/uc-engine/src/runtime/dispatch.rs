@@ -708,9 +708,47 @@ impl EngineRuntime for ProductionRuntime {
                 .network_partition_gate
                 .local_endpoint_id()
                 .map(DevOperationResult::NetworkEndpointId)
-                .ok_or_else(|| {
-                    EngineError::new(1911, crate::EngineErrorCategory::Unavailable, true)
+                .ok_or_else(|| EngineError::new(1911, EngineErrorCategory::Unavailable, true)),
+            DevOperation::SeedLegacyDuplicateGroupMembers {
+                device_id,
+                additional_members,
+            } => self
+                .security_lifecycle
+                .seed_legacy_duplicate_group_members_for_test(
+                    &uc_core::ids::DeviceId::new(device_id),
+                    additional_members,
+                )
+                .await
+                .map(|()| DevOperationResult::LegacyDuplicateGroupMembersSeeded)
+                .map_err(|error| {
+                    operation_error_with_code(1912, "seed legacy duplicate group members", error)
                 }),
+            DevOperation::QueryGroupMemberCount { device_id } => self
+                .security_lifecycle
+                .group_member_count_for_test(&uc_core::ids::DeviceId::new(device_id))
+                .await
+                .map(|count| DevOperationResult::GroupMemberCount { count })
+                .map_err(|error| {
+                    operation_error_with_code(1913, "query group member count", error)
+                }),
+            DevOperation::ArmJoinerFinalConfirmationPause => {
+                if !self.joiner_final_confirmation_gate.arm() {
+                    return Err(EngineError::new(1914, EngineErrorCategory::Conflict, false));
+                }
+                Ok(DevOperationResult::JoinerFinalConfirmationPauseArmed)
+            }
+            DevOperation::WaitForJoinerFinalConfirmationPause => {
+                self.joiner_final_confirmation_gate
+                    .wait_until_entered()
+                    .await;
+                Ok(DevOperationResult::JoinerFinalConfirmationPauseEntered)
+            }
+            DevOperation::ReleaseJoinerFinalConfirmationPause => {
+                if !self.joiner_final_confirmation_gate.release() {
+                    return Err(EngineError::new(1915, EngineErrorCategory::Conflict, false));
+                }
+                Ok(DevOperationResult::JoinerFinalConfirmationPauseReleased)
+            }
             DevOperation::FailNextSessionHandover { point } => {
                 self.session_supervisor.fail_next_session_handover(point);
                 Ok(DevOperationResult::SessionHandoverFailureArmed)
