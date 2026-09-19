@@ -765,8 +765,9 @@ mod tests {
 
     use super::*;
 
-    #[path = "../blob_publish_observability_tests.rs"]
-    mod blob_publish_observability_tests;
+    mod blob_publish_observability_tests {
+        include!("chunked_transfer/blob_publish_observability_tests.rs");
+    }
 
     fn ready_session() -> (Arc<InMemorySession>, MasterKey) {
         let root = MasterKey::from_bytes(&[11u8; 32]).unwrap();
