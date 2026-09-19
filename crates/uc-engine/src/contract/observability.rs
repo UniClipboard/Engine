@@ -21,6 +21,6 @@ pub use uc_observability_runtime::{
     ObservabilityResource, OperatingSystem, OtlpHttpConfig, ProcessObservabilityHandle,
     ProcessObservabilityRuntime, SecretHeaderValue, SetupStatus as ObservabilitySetupStatus,
     ShutdownSummary as ObservabilityShutdownSummary, SignalResult as ObservabilitySignalResult,
-    SourceCapability, SourceCollection, SourceCoverage, StopCaptureResult, LOCAL_LOG_MAX_BYTES,
-    LOCAL_LOG_RETENTION_DAYS,
+    SourceCapability, SourceCollection, SourceCoverage, StopCaptureResult, SystemLogFormat,
+    LOCAL_LOG_MAX_BYTES, LOCAL_LOG_RETENTION_DAYS,
 };

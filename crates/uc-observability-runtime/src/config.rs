@@ -276,6 +276,18 @@ pub struct LocalLogConfig {
     pub(crate) directory: PathBuf,
 }
 
+/// 非 Apple、非 Android 平台的系统诊断输出格式。
+///
+/// 本地诊断文件始终使用 JSONL，不受此选项影响。Apple OSLog 与 Android
+/// Logcat 继续使用各自的原生输出层。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemLogFormat {
+    Disabled,
+    Json,
+    HumanReadable,
+    HumanReadableAnsi,
+}
+
 impl LocalLogConfig {
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         Self {
@@ -298,6 +310,7 @@ pub struct ObservabilityConfig {
     pub resource: ObservabilityResource,
     pub local_logs: Option<LocalLogConfig>,
     pub remote: Option<OtlpHttpConfig>,
+    pub system_log_format: SystemLogFormat,
 }
 
 impl ObservabilityConfig {
@@ -306,6 +319,7 @@ impl ObservabilityConfig {
             resource,
             local_logs: None,
             remote: None,
+            system_log_format: SystemLogFormat::Json,
         }
     }
 
@@ -318,6 +332,11 @@ impl ObservabilityConfig {
         self.remote = Some(config);
         self
     }
+
+    pub fn with_system_log_format(mut self, format: SystemLogFormat) -> Self {
+        self.system_log_format = format;
+        self
+    }
 }
 
 impl fmt::Debug for ObservabilityConfig {
@@ -327,6 +346,7 @@ impl fmt::Debug for ObservabilityConfig {
             .field("resource", &self.resource)
             .field("local_logs", &self.local_logs)
             .field("remote", &self.remote)
+            .field("system_log_format", &self.system_log_format)
             .finish()
     }
 }

@@ -22,6 +22,7 @@ fn observability_contract_is_available_through_engine() {
     let _ = uc_engine::observability::diagnostics::managed_log_file_date(
         "uniclipboard-daemon.json.2026-09-11",
     );
+    let _ = uc_engine::observability::SystemLogFormat::HumanReadable;
 }
 
 #[test]

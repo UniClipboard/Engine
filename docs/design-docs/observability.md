@@ -147,13 +147,15 @@ handler 创建。强行交给 Engine 会迫使 Core/Application message 增加 c
 - 共享 Resource；
 - trace provider 与 OTLP/HTTP exporter；
 - log provider 与 tracing logs bridge；
-- Apple OSLog、Android Logcat 与其他平台的通用 JSON 系统输出 fallback；
+- Apple OSLog、Android Logcat，以及其他平台由宿主选择关闭、JSON 或人类可读格式的系统输出；
 - 有界 JSONL；
 - batch、flush、shutdown 和健康结果。
 
 宿主先安装运行时，再创建任意 Engine。相同配置重复安装返回复用结果，不同配置明确失败。远程构造或发送失败只使远程能力降级，
 不改变 Engine 启动和业务结果。业务线程只尝试把记录放入有界容量门和官方 batch processor；容量门发生争用或队列满时立即丢弃
 并计数，不等待锁或网络。关闭线程串行封口后再等待后台发送，因此关闭后不会接受新记录。
+非 Apple、非 Android 宿主通过 `SystemLogFormat` 选择系统输出；默认 JSON 保持兼容，交互终端可选择带 ANSI 颜色的人类可读格式，重定向场景可选择无色人类可读格式，也可明确关闭。
+格式选择只作用于已经通过 Engine 白名单的系统输出，本地持久化仍固定为 JSONL，宿主日志层仍不能接收 Engine 或网络原始记录。
 容量门与 exporter wrapper 只统计发送前丢弃总数和最终发送失败，不复制官方批处理、线程或刷新逻辑。发送前丢弃包括格式拒绝、
 锁争用、队列已满和运行时已关闭，首个原因使用不同固定分类记录；累计字段不冒充单独的队列满计数。`health()` 还返回失败批次数
 和本地文件丢弃数；每类首次故障写一条无正文的本地健康记录，且不递归进入远程 exporter。

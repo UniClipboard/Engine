@@ -367,7 +367,7 @@ fn build_runtime(
     let (telemetry, remote) = TelemetryRuntime::new(&config, local_file.clone());
     let telemetry_accepting = telemetry.accepting();
     layers.extend(telemetry.layers());
-    layers.push(system_layer());
+    layers.extend(system_layer(config.system_log_format));
     let global_telemetry_accepting = Arc::clone(&telemetry_accepting);
     let global_health_accepting = Arc::clone(&health_accepting);
     let engine_layer = layers.with_filter(dynamic_filter_fn(move |metadata, _| {
