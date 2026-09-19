@@ -103,6 +103,14 @@ pub enum LocalWorkStep {
     SessionPrepare,
     SessionRecover,
     SessionStart,
+    ClipboardFileSetResolve,
+    ClipboardFileMetadataRead,
+    ClipboardOutboundPlan,
+    ClipboardLiveIndex,
+    ClipboardDeliveryGateWait,
+    ClipboardSyncSettingsLoad,
+    ClipboardImageContentHash,
+    ClipboardImagePayloadTake,
     BlobPlaintextHash,
     BlobCompress,
     BlobEncrypt,
@@ -352,8 +360,16 @@ mod tests {
     }
 
     #[test]
-    fn blob_publish_steps_are_accepted_by_the_closed_local_contract() {
+    fn clipboard_outbound_steps_are_accepted_by_the_closed_local_contract() {
         for step in [
+            "clipboard_file_set_resolve",
+            "clipboard_file_metadata_read",
+            "clipboard_outbound_plan",
+            "clipboard_live_index",
+            "clipboard_delivery_gate_wait",
+            "clipboard_sync_settings_load",
+            "clipboard_image_content_hash",
+            "clipboard_image_payload_take",
             "blob_plaintext_hash",
             "blob_compress",
             "blob_encrypt",

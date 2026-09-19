@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use std::collections::HashMap;
 use std::error::Error;
+use std::io::{self, Write};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -26,6 +27,49 @@ use uc_core::{ClipboardChangeOrigin, SystemClipboardSnapshot};
 
 struct NeverDispatch;
 
+#[derive(Clone, Default)]
+struct CapturedWriter(Arc<Mutex<Vec<u8>>>);
+
+impl CapturedWriter {
+    fn output(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+impl Write for CapturedWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedWriter {
+    type Writer = CapturedWriter;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+struct SkippingOutbound;
+
+#[async_trait]
+impl ClipboardOutboundPort for SkippingOutbound {
+    async fn dispatch_capture(
+        &self,
+        _: ClipboardOutboundInput,
+        _: Option<Vec<DeviceId>>,
+    ) -> Result<ClipboardOutboundOutcome, ClipboardOutboundError> {
+        Ok(ClipboardOutboundOutcome::Skipped {
+            reason: "test".to_owned(),
+        })
+    }
+}
+
 #[async_trait]
 impl ClipboardOutboundPort for NeverDispatch {
     async fn dispatch_capture(
@@ -35,6 +79,69 @@ impl ClipboardOutboundPort for NeverDispatch {
     ) -> Result<ClipboardOutboundOutcome, ClipboardOutboundError> {
         panic!("stopped runtime dispatched clipboard content");
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn local_dispatch_records_real_delivery_gate_wait() {
+    let deps = recovery_deps(
+        true,
+        Vec::new(),
+        HashMap::new(),
+        Arc::new(Deliveries {
+            records: Mutex::new(HashMap::new()),
+        }),
+        Arc::new(RecordingDispatch {
+            commands: Mutex::new(Vec::new()),
+            result: DispatchResult::Delivered,
+        }),
+    );
+    let gate = Arc::clone(&deps.delivery_gate);
+    let held = Arc::clone(&gate).lock_owned().await;
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        drop(held);
+    });
+    let runtime = ClipboardSyncRuntime {
+        outbound: Arc::new(SkippingOutbound),
+        settings: Arc::clone(&deps.settings),
+        inbound: tokio::sync::Mutex::new(None),
+        delivery_gate: gate,
+        recovery: OfflineDeliveryRecovery {
+            cancel: CancellationToken::new(),
+            task: tokio::sync::Mutex::new(None),
+            deps: Arc::new(deps),
+        },
+        stopping: AtomicBool::new(false),
+        shutdown_result: tokio::sync::Mutex::new(None),
+    };
+    let logs = CapturedWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    runtime
+        .dispatch_local_capture_to_targets(
+            ClipboardOutboundInput {
+                entry_id: "entry".to_owned(),
+                snapshot: SystemClipboardSnapshot {
+                    representations: Vec::new(),
+                    ts_ms: 0,
+                    file_content_digests: Vec::new(),
+                    file_set_v1_component: None,
+                },
+                origin: ClipboardChangeOrigin::LocalCapture,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    release.await.unwrap();
+
+    let output = logs.output();
+    assert!(output.contains("clipboard_delivery_gate_wait"));
+    assert!(output.contains("clipboard_sync_settings_load"));
 }
 
 #[tokio::test]
