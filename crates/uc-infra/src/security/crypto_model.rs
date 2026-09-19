@@ -15,6 +15,11 @@ use rand::{rngs::OsRng, TryRngCore};
 use serde::{Deserialize, Serialize};
 use uc_core::crypto::model::EncryptionError;
 
+/// 从持久资料读取的 Argon2 参数必须在认证前限制资源消耗。
+pub(crate) const MAX_KDF_MEM_KIB: u32 = 1024 * 1024;
+pub(crate) const MAX_KDF_ITERS: u32 = 1024;
+pub(crate) const MAX_KDF_PARALLELISM: u32 = 256;
+
 /// 单 profile 下 KEK/KeySlot 的作用域键。
 ///
 /// Slice 7 (U7 候选 B) 起从 uc-core 搬到 uc-infra——`KeyScopePort` 已改名

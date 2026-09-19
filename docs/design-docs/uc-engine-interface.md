@@ -51,6 +51,7 @@ crate 根只保留稳定名称的统一导出，内部按职责分为七层：
 | `DeviceTrustChanged { revision }` | 正式设备组状态已经变化；宿主重新调用 `QueryDeviceGroupChoices` 读取完整事实与待处理选择 |
 | `WorkspaceConvergenceChanged` | 仅 `dev-tools` 的内部收敛诊断事件；不进入正式宿主和发布产物 |
 | `NetworkRecoveryChanged` | 网络会话恢复开始、等待下一次尝试、成功或最终失败的稳定状态变化 |
+| `ProfileRecoveryChanged` | 资料密钥恢复状态发生变化；宿主仍可通过查询重新取得完整快照 |
 | `RePairingRequired { scope }` | 旧资料独立化完成，需要产品提示重新配对；`all_devices` 表示全部旧设备关系均须重新建立 |
 | `RefreshRequired` | 宿主必须重新查询当前状态 |
 | `OperationFinished` | 一次操作进入成功、失败或取消终态 |
@@ -120,6 +121,7 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | --- | --- |
 | `CreateSpace` | 创建空间、设备身份和加密存储 |
 | `UnlockSpace` | 使用口令恢复当前空间会话 |
+| `QueryProfileRecovery` | 查询是否等待口令、正在恢复、已经恢复、只能部分恢复或恢复失败，以及后台是否真正可用 |
 | `RecoverSession` | 按宿主策略从系统安全存储恢复加密与空间会话 |
 | `ChangeEncryptionPassphrase` | 当前设备列表只显示有效本机时，把加密口令修改为用户输入并再次确认的新口令，同时撤销此前签发的邀请 |
 | `JoinSpace` | 接受完整长邀请或可手输短码，发起或继续同一次空间加入，返回 Active、Pending 或 Rejected，并携带稳定 `join_id` |
@@ -191,6 +193,10 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `SendFiles` | 从宿主句柄分块导入文件，并按现有文件协议发送 |
 
 `RecoverSession` 的 `allow_secure_storage_unlock` 由宿主根据当前运行环境决定。值为 `false` 时核心不得尝试从系统安全存储恢复密钥；值为 `true` 时，核心统一完成加密会话、空间会话、搜索和接收能力恢复。
+
+当资料和 keyslot 仍在，但自动解锁材料缺失或错误时，`Engine::start` 返回可用的受限实例，启动进度为 `RecoveryAvailable`。此时 `QueryProfileRecovery`、`QueryEncryptionState`、`UnlockSpace` 和生命周期关闭可用，业务数据库、网络、搜索、收发与历史操作返回 `PROFILE_RECOVERY_REQUIRED`；`session_ready` 必须为 `false`。宿主继续用 `UnlockSpace` 提交原口令。错误口令返回 `UNLOCK_SPACE_UNAUTHORIZED_CODE` 且不写入；正确口令恢复原密钥、启动完整后台并报告 `Recovered`。缺少旧独立密钥副本时报告 `PartiallyRecoverable` 及稳定影响类别，不返回已经解锁。损坏、不支持格式和保存失败分别使用原损坏分类、`PROFILE_RECOVERY_UNSUPPORTED_CODE` 和 `PROFILE_RECOVERY_PERSISTENCE_FAILED_CODE`，其他启动错误保持原分类。恢复口令通过后若完整后台启动或后续解锁失败，状态必须进入 `Failed`，`can_submit_passphrase=false`、`restart_required=true`；同一进程不得复用已经消费的宿主能力，宿主重启 Engine 后继续。旧升级备份存在但其保护材料在 userdata 与系统安全存储中都永久缺失时返回稳定的 `PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE`，不得生成替代材料或绕过备份门槛。
+
+正常启动和恢复完成后的系统安全存储只保留当前资料的一条自动解锁材料；独立随机密钥位于 userdata 的加密文件中。完整 userdata 加当前口令可以在空安全存储环境恢复，导出与导入会携带该密文文件。`FactoryResetSpace` 同时清除两处副本。宿主不得把 GUI 内容锁定解释为此处的真实密钥恢复状态。
 
 单设备修改加密口令采用一个产品动作。产品收集用户自定义的新口令和再次输入值，一并交给 `ChangeEncryptionPassphrase`；两次输入不一致时不修改任何资料。成功后旧口令不能解锁或通过新配对认证，此前签发的邀请失效，新口令在重启后继续有效。该能力不要求 `re_pairing_required`，只允许 Space 已解锁、本机成员有效且当前设备列表范围只含本机；存在正常或暂停的其他设备、成员恢复中或成员资料不可确认时均拒绝。它保留现有 MasterKey 和历史内容，不触发批量重加密；已有的重新配对提示仍由新设备实际加入结束。iOS、Android 和 HarmonyOS 绑定公开相同的修改动作，不承担资格判断或恢复。
 

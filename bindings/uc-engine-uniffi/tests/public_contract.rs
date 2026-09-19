@@ -287,7 +287,7 @@ impl BindingHost for MemoryHost {
     fn secure_storage_get(&self, key: String) -> Result<Option<Vec<u8>>, HostBindingError> {
         let gate = {
             let mut gate = lock(&self.secure_read_gate);
-            if gate.as_ref().is_some_and(|gate| gate.matches(&key)) {
+            if gate.as_mut().is_some_and(|gate| gate.matches(&key)) {
                 gate.take()
             } else {
                 None

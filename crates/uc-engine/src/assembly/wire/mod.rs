@@ -74,9 +74,10 @@ use uc_infra::security::{
     ActiveSpaceGenerationManifestStore, AdmissionKeyManager, Blake3Hasher,
     DecryptingClipboardRepresentationRepository, EncryptingClipboardEventWriter,
     EncryptingInboundReceiveCommit, ProfileContentKeyVault, ProfileLifecycleRepository,
-    ProfileStorageUpgrade, ProfileStorageUpgradeOutcome, Sha256IdentityFingerprintFactory,
-    SpaceControlGeneration, SpaceTransitionActivation, V3AdmissionSpaceTransition,
-    V3DeviceManagementReset, V3InitialSpaceActivation, V3MembershipBranchTransition,
+    ProfilePassphraseRecoveryPort, ProfileStorageUpgrade, ProfileStorageUpgradeOutcome,
+    Sha256IdentityFingerprintFactory, SpaceControlGeneration, SpaceTransitionActivation,
+    V3AdmissionSpaceTransition, V3DeviceManagementReset, V3InitialSpaceActivation,
+    V3MembershipBranchTransition,
 };
 use uc_infra::settings::repository::FileSettingsRepository;
 use uc_infra::space::{
@@ -177,6 +178,7 @@ pub struct CoreWiringInputs {
     pub analytics_facade: Arc<dyn AnalyticsFacade>,
     pub host_event_emitter: Arc<dyn HostEventEmitterPort>,
     pub startup_progress: Arc<dyn uc_infra::security::StorageUpgradeObserver>,
+    pub profile_key_recovery: Arc<dyn ProfilePassphraseRecoveryPort>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -331,6 +333,7 @@ pub async fn wire_dependencies_from_inputs(
         analytics_facade,
         host_event_emitter,
         startup_progress,
+        profile_key_recovery,
     } = inputs;
     let profile_reset_paths = paths.clone();
     let profile_reset_profile_id = profile_id.inner().to_owned();
@@ -480,6 +483,7 @@ pub async fn wire_dependencies_from_inputs(
         Arc::clone(&space_access_adapter),
         Arc::clone(&admission_credentials),
         Arc::clone(&active_generation_manifest_store),
+        profile_key_recovery,
     ));
     encryption_passphrase_change
         .recover_pending()

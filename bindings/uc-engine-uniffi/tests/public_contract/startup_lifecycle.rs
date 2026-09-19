@@ -30,6 +30,7 @@ fn mobile_startup_accepts_a_pause_before_the_engine_is_returned() {
     let (release, proceed) = mpsc::channel();
     *lock(&host.secure_read_gate) = Some(ReadGate {
         key_prefix: "profile_content_vault_key:v1",
+        matches_before_wait: 0,
         entered,
         release: proceed,
     });

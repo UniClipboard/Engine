@@ -141,6 +141,14 @@ impl StartupProgressStore {
     pub(crate) fn starting_services(&self) {
         self.update(|snapshot| snapshot.state = StartupState::StartingServices);
     }
+
+    pub(crate) fn recovery_available(&self) {
+        self.update(|snapshot| {
+            snapshot.state = StartupState::RecoveryAvailable;
+            snapshot.failure = None;
+            snapshot.allowed_actions.retry = false;
+        });
+    }
 }
 
 impl StartupProgressInput {

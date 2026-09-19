@@ -248,7 +248,7 @@ pub trait HostFileAccess: Send + Sync {
 
 pub struct HostCapabilities {
     directories: HostDirectories,
-    secure_storage: Box<dyn HostSecureStorage>,
+    pub(crate) secure_storage: Arc<dyn HostSecureStorage>,
     clipboard: Box<dyn HostClipboard>,
     files: Box<dyn HostFileAccess>,
     analytics: HostAnalyticsCapabilities,
@@ -277,7 +277,7 @@ impl HostCapabilities {
     ) -> Self {
         Self {
             directories,
-            secure_storage,
+            secure_storage: Arc::from(secure_storage),
             clipboard,
             files,
             analytics: HostAnalyticsCapabilities::default(),
@@ -304,6 +304,10 @@ impl HostCapabilities {
         self.secure_storage.as_ref()
     }
 
+    pub(crate) fn replace_secure_storage(&mut self, storage: Arc<dyn HostSecureStorage>) {
+        self.secure_storage = storage;
+    }
+
     pub fn clipboard(&self) -> &dyn HostClipboard {
         self.clipboard.as_ref()
     }
@@ -316,7 +320,7 @@ impl HostCapabilities {
         self,
     ) -> (
         HostDirectories,
-        Box<dyn HostSecureStorage>,
+        Arc<dyn HostSecureStorage>,
         Box<dyn HostClipboard>,
         Box<dyn HostFileAccess>,
         HostAnalyticsCapabilities,

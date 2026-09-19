@@ -9,6 +9,9 @@ use uc_engine::{
     HostFileHandle, HostFileMetadata, HostSecureStorage,
 };
 
+#[path = "host_contract/key_loss.rs"]
+mod key_loss;
+
 #[path = "host_contract/startup.rs"]
 mod startup;
 
@@ -119,12 +122,20 @@ async fn suspended_engine_releases_profile_lease_and_can_resume() {
 #[derive(Clone, Default)]
 struct MemorySecureStorage {
     values: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    removed_values: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     fail_reads: Arc<AtomicBool>,
 }
 
 impl MemorySecureStorage {
     fn values(&self) -> MutexGuard<'_, HashMap<String, Vec<u8>>> {
         match self.values.lock() {
+            Ok(values) => values,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn removed_values(&self) -> MutexGuard<'_, HashMap<String, Vec<u8>>> {
+        match self.removed_values.lock() {
             Ok(values) => values,
             Err(poisoned) => poisoned.into_inner(),
         }
@@ -148,7 +159,9 @@ impl HostSecureStorage for MemorySecureStorage {
     }
 
     fn delete(&self, key: &str) -> Result<(), HostCapabilityError> {
-        self.values().remove(key);
+        if let Some(value) = self.values().remove(key) {
+            self.removed_values().insert(key.to_owned(), value);
+        }
         Ok(())
     }
 }

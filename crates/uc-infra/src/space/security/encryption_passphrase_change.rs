@@ -8,13 +8,17 @@ use uc_core::crypto::domain::Passphrase;
 
 use super::RuntimeSpaceAccessAdapter;
 use crate::db::ports::DbExecutor;
-use crate::security::{ActiveSpaceGenerationManifestStore, EncryptionPassphraseChangeJournal, Kek};
+use crate::security::{
+    ActiveSpaceGenerationManifestStore, EncryptionPassphraseChangeJournal, Kek,
+    ProfilePassphraseRecoveryPort,
+};
 use crate::space::{prepare_registration, SqliteSpaceAdmissionCredentials};
 
 pub struct EncryptionPassphraseChange<E> {
     access: Arc<RuntimeSpaceAccessAdapter>,
     credentials: Arc<SqliteSpaceAdmissionCredentials<E>>,
     manifests: Arc<ActiveSpaceGenerationManifestStore>,
+    profile_recovery: Arc<dyn ProfilePassphraseRecoveryPort>,
     operation_lock: tokio::sync::Mutex<()>,
 }
 
@@ -23,11 +27,13 @@ impl<E> EncryptionPassphraseChange<E> {
         access: Arc<RuntimeSpaceAccessAdapter>,
         credentials: Arc<SqliteSpaceAdmissionCredentials<E>>,
         manifests: Arc<ActiveSpaceGenerationManifestStore>,
+        profile_recovery: Arc<dyn ProfilePassphraseRecoveryPort>,
     ) -> Self {
         Self {
             access,
             credentials,
             manifests,
+            profile_recovery,
             operation_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -43,10 +49,22 @@ impl<E: DbExecutor> EncryptionPassphraseChange<E> {
             .await
             .map_err(recovery)?;
         let kek = Kek::from_bytes(&journal.kek).map_err(recovery)?;
+        if let Err(error) = self
+            .profile_recovery
+            .prepare_passphrase_change(kek.as_bytes())
+        {
+            return Err(recovery(error));
+        }
         self.access
             .install_encryption_passphrase_material(&journal.keyslot, &kek)
             .await
             .map_err(recovery)?;
+        if let Err(error) = self
+            .profile_recovery
+            .finish_passphrase_change(kek.as_bytes())
+        {
+            return Err(recovery(error));
+        }
         self.manifests
             .clear_encryption_passphrase_change_journal()
             .await
@@ -122,10 +140,12 @@ fn unavailable(error: impl Into<anyhow::Error>) -> ApplyEncryptionPassphraseChan
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use uc_application::deps::{LoadedMembershipLedger, MembershipLedgerError};
+    use uc_core::app_dirs::AppPaths;
     use uc_core::ids::SpaceId;
     use uc_core::membership::{
         ActiveSpaceGenerationManifestV2, AdmissionChannelPeerId, InvitationId,
@@ -171,6 +191,45 @@ mod tests {
 
     struct EmptyLedger;
 
+    struct MemoryProfilePassphraseRecovery;
+
+    impl ProfilePassphraseRecoveryPort for MemoryProfilePassphraseRecovery {
+        fn prepare_passphrase_change(
+            &self,
+            _kek: &[u8],
+        ) -> Result<(), crate::security::ProfileKeyRecoveryError> {
+            Ok(())
+        }
+
+        fn finish_passphrase_change(
+            &self,
+            _kek: &[u8],
+        ) -> Result<(), crate::security::ProfileKeyRecoveryError> {
+            Ok(())
+        }
+    }
+
+    struct FailFinishOnce(AtomicBool);
+
+    impl ProfilePassphraseRecoveryPort for FailFinishOnce {
+        fn prepare_passphrase_change(
+            &self,
+            _kek: &[u8],
+        ) -> Result<(), crate::security::ProfileKeyRecoveryError> {
+            Ok(())
+        }
+
+        fn finish_passphrase_change(
+            &self,
+            _kek: &[u8],
+        ) -> Result<(), crate::security::ProfileKeyRecoveryError> {
+            if self.0.swap(false, Ordering::AcqRel) {
+                return Err(crate::security::ProfileKeyRecoveryError::Corrupt);
+            }
+            Ok(())
+        }
+    }
+
     #[async_trait]
     impl uc_application::deps::LoadMembershipLedgerPort for EmptyLedger {
         async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
@@ -182,11 +241,13 @@ mod tests {
 
     struct Fixture {
         _directory: tempfile::TempDir,
-        root: std::path::PathBuf,
+        paths: AppPaths,
         secure_storage: Arc<dyn SecureStoragePort>,
         manifests: Arc<ActiveSpaceGenerationManifestStore>,
         credentials: Arc<SqliteSpaceAdmissionCredentials<Executor>>,
         access: Arc<RuntimeSpaceAccessAdapter>,
+        profile_recovery: Arc<dyn ProfilePassphraseRecoveryPort>,
+        current_profile: Arc<DefaultCurrentProfile>,
         session: Arc<InMemorySession>,
         space_id: SpaceId,
     }
@@ -196,6 +257,10 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let root = directory.path().join("profile");
             std::fs::create_dir_all(&root).unwrap();
+            let paths = AppPaths::with_base_data_local_dir(root);
+            let current_profile = Arc::new(DefaultCurrentProfile::new());
+            let profile_recovery: Arc<dyn ProfilePassphraseRecoveryPort> =
+                Arc::new(MemoryProfilePassphraseRecovery);
             let secure_storage: Arc<dyn SecureStoragePort> =
                 Arc::new(MemorySecureStorage::default());
             let keys = Arc::new(AdmissionKeyManager::new(
@@ -203,7 +268,7 @@ mod tests {
                 [0x31; 16],
             ));
             let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
-                root.join("vault"),
+                paths.vault_dir.clone(),
                 Arc::clone(&keys),
             ));
             manifests
@@ -219,7 +284,7 @@ mod tests {
                 .await
                 .unwrap();
             let executor = Arc::new(DieselSqliteExecutor::new(
-                init_db_pool(root.join("control.sqlite").to_str().unwrap()).unwrap(),
+                init_db_pool(paths.db_path.to_str().unwrap()).unwrap(),
             ));
             let session = Arc::new(InMemorySession::new());
             let security_store = Arc::new(DieselSpaceSecurityStore::new(
@@ -229,14 +294,14 @@ mod tests {
             let access = Arc::new(RuntimeSpaceAccessAdapter::new(
                 Arc::new(KeyMaterialStore::new(
                     Arc::clone(&secure_storage),
-                    Arc::new(JsonKeySlotStore::new(root.join("vault"))),
+                    Arc::new(JsonKeySlotStore::new(paths.vault_dir.clone())),
                 )),
-                Arc::new(DefaultCurrentProfile::new()),
+                current_profile.clone(),
                 Arc::clone(&session),
                 security_store.clone() as Arc<dyn RevocationRepositoryPort>,
                 security_store as Arc<dyn LegacyBootstrapRepositoryPort>,
                 Arc::new(ProfileContentKeyVault::new(
-                    root.join("content-keys"),
+                    paths.app_data_root_dir.join("content-keys"),
                     Arc::clone(&secure_storage),
                     [0x35; 16],
                 )),
@@ -265,11 +330,13 @@ mod tests {
                 .unwrap();
             Self {
                 _directory: directory,
-                root,
+                paths,
                 secure_storage,
                 manifests,
                 credentials,
                 access,
+                profile_recovery,
+                current_profile,
                 session,
                 space_id,
             }
@@ -278,7 +345,7 @@ mod tests {
         fn restarted_access(&self) -> Arc<RuntimeSpaceAccessAdapter> {
             let session = Arc::new(InMemorySession::new());
             let executor = Arc::new(DieselSqliteExecutor::new(
-                init_db_pool(self.root.join("control.sqlite").to_str().unwrap()).unwrap(),
+                init_db_pool(self.paths.db_path.to_str().unwrap()).unwrap(),
             ));
             let security_store = Arc::new(DieselSpaceSecurityStore::new(
                 executor,
@@ -287,14 +354,14 @@ mod tests {
             Arc::new(RuntimeSpaceAccessAdapter::new(
                 Arc::new(KeyMaterialStore::new(
                     Arc::clone(&self.secure_storage),
-                    Arc::new(JsonKeySlotStore::new(self.root.join("vault"))),
+                    Arc::new(JsonKeySlotStore::new(self.paths.vault_dir.clone())),
                 )),
-                Arc::new(DefaultCurrentProfile::new()),
+                self.current_profile.clone(),
                 session,
                 security_store.clone() as Arc<dyn RevocationRepositoryPort>,
                 security_store as Arc<dyn LegacyBootstrapRepositoryPort>,
                 Arc::new(ProfileContentKeyVault::new(
-                    self.root.join("content-keys"),
+                    self.paths.app_data_root_dir.join("content-keys"),
                     Arc::clone(&self.secure_storage),
                     [0x35; 16],
                 )),
@@ -344,6 +411,7 @@ mod tests {
             Arc::clone(&fixture.access),
             Arc::clone(&fixture.credentials),
             Arc::clone(&fixture.manifests),
+            Arc::clone(&fixture.profile_recovery),
         );
 
         change
@@ -411,6 +479,7 @@ mod tests {
             Arc::clone(&restarted),
             Arc::clone(&fixture.credentials),
             Arc::clone(&fixture.manifests),
+            Arc::clone(&fixture.profile_recovery),
         );
 
         recovery.recover_pending().await.unwrap();
@@ -432,5 +501,43 @@ mod tests {
             )
             .await
         );
+    }
+
+    #[tokio::test]
+    async fn journal_remains_until_recovery_vault_finishes_passphrase_change() {
+        let fixture = Fixture::new().await;
+        let recovery: Arc<dyn ProfilePassphraseRecoveryPort> =
+            Arc::new(FailFinishOnce(AtomicBool::new(true)));
+        let change = EncryptionPassphraseChange::new(
+            Arc::clone(&fixture.access),
+            Arc::clone(&fixture.credentials),
+            Arc::clone(&fixture.manifests),
+            recovery,
+        );
+
+        assert!(change
+            .apply_encryption_passphrase_change(&Passphrase::new("resumed-passphrase"))
+            .await
+            .is_err());
+        assert!(fixture
+            .manifests
+            .load_encryption_passphrase_change_journal()
+            .await
+            .unwrap()
+            .is_some());
+
+        change.recover_pending().await.unwrap();
+        assert!(fixture
+            .manifests
+            .load_encryption_passphrase_change_journal()
+            .await
+            .unwrap()
+            .is_none());
+        fixture.access.lock(&fixture.space_id).await.unwrap();
+        fixture
+            .access
+            .unlock(&fixture.space_id, &Passphrase::new("resumed-passphrase"))
+            .await
+            .unwrap();
     }
 }

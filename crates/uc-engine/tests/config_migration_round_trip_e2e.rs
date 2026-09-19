@@ -80,6 +80,7 @@ const IROH_IDENTITY_BYTES: [u8; 32] = [0x5A; 32];
 
 const DEVICE_ID_TXT: &[u8] = b"550e8400-e29b-41d4-a716-446655440000";
 const CURRENT_SPACE_ID_BYTES: &[u8] = b"encrypted-current-space-id";
+const PROFILE_SECRETS_BYTES: &[u8] = b"encrypted-profile-secrets";
 const SETTINGS_JSON: &[u8] = b"{\"schema_version\":1}";
 
 /// A unique value committed into the source db so the round-trip can prove the
@@ -162,6 +163,7 @@ async fn build_source(passphrase: &Passphrase) -> Source {
         CURRENT_SPACE_ID_BYTES,
     )
     .unwrap();
+    std::fs::write(vault_dir.join("profile-secrets-v1"), PROFILE_SECRETS_BYTES).unwrap();
     std::fs::write(data_root.join("settings.json"), SETTINGS_JSON).unwrap();
     std::fs::write(
         iroh_identity_dir.join(IROH_IDENTITY_FILE),
@@ -380,6 +382,10 @@ async fn export_stage_apply_round_trip_lands_db_vault_identity_and_kek() {
     assert_eq!(
         std::fs::read(tgt.vault_dir.join(".current-space-id-v1")).unwrap(),
         CURRENT_SPACE_ID_BYTES
+    );
+    assert_eq!(
+        std::fs::read(tgt.vault_dir.join("profile-secrets-v1")).unwrap(),
+        PROFILE_SECRETS_BYTES
     );
     assert_eq!(std::fs::read(&tgt.settings_path).unwrap(), SETTINGS_JSON);
 

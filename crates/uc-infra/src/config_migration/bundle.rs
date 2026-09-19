@@ -36,6 +36,8 @@ use rand::TryRngCore;
 use uc_core::crypto::domain::Passphrase;
 use zeroize::Zeroize;
 
+use crate::security::crypto_model::{MAX_KDF_ITERS, MAX_KDF_MEM_KIB, MAX_KDF_PARALLELISM};
+
 /// Magic prefix identifying a `.ucbundle` file.
 pub const MAGIC: &[u8; 8] = b"UCBUNDLE";
 
@@ -59,22 +61,6 @@ const HEADER_LEN: usize = 8 + 2 + 1 + 4 + 4 + 4 + SALT_LEN + NONCE_LEN;
 /// from driving an unbounded allocation. Exceeding it is reported as
 /// incompatible rather than attempted.
 const MAX_SEALED_LEN: u64 = 2 * 1024 * 1024 * 1024;
-
-/// Upper bound on the Argon2 memory cost we will honour from a bundle header.
-///
-/// The header is authenticated as AAD, but the KDF runs *before* the AEAD tag
-/// can be checked (the derived key is needed to verify the tag), and preview is
-/// ungated — so a hostile header could otherwise drive an unbounded Argon2
-/// allocation during an unauthenticated read. 1 GiB is 8× the production
-/// baseline (128 MiB), well above any value we emit, yet bounds the blast
-/// radius. Higher values are rejected as incompatible.
-const MAX_KDF_MEM_KIB: u32 = 1024 * 1024;
-
-/// Upper bound on the Argon2 time cost (iterations) honoured from a header.
-const MAX_KDF_ITERS: u32 = 1024;
-
-/// Upper bound on the Argon2 degree of parallelism honoured from a header.
-const MAX_KDF_PARALLELISM: u32 = 256;
 
 /// Argon2id cost parameters recorded in the header and used for derivation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

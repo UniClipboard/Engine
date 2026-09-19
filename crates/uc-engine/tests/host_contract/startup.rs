@@ -52,7 +52,7 @@ impl HostSecureStorage for HeldSecureStorage {
     }
 }
 
-fn host(root: &Path, storage: Box<dyn HostSecureStorage>) -> HostCapabilities {
+pub(super) fn host(root: &Path, storage: Box<dyn HostSecureStorage>) -> HostCapabilities {
     HostCapabilities::new(
         HostDirectories::new(
             root.join("private"),

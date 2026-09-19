@@ -23,7 +23,7 @@ use super::crypto_model::EncryptedBlob;
 use super::secrets::MasterKey;
 use super::v1_aead;
 
-const KEYRING_PREFIX: &str = "migration_key:v1:";
+pub(super) const KEYRING_PREFIX: &str = "migration_key:v1:";
 
 pub struct DefaultKeyMigrationAdapter {
     secure_storage: Arc<dyn SecureStoragePort>,
