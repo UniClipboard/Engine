@@ -17,11 +17,24 @@ use uc_engine::DeviceTrustSnapshotSummary;
 #[test]
 fn observability_contract_is_available_through_engine() {
     fn accepts_analytics_port<T: uc_engine::observability::analytics::AnalyticsPort + ?Sized>() {}
+    fn accepts_rc_17_struct_literal(
+        resource: uc_engine::observability::ObservabilityResource,
+    ) -> uc_engine::observability::ObservabilityConfig {
+        uc_engine::observability::ObservabilityConfig {
+            resource,
+            local_logs: None,
+            remote: None,
+        }
+    }
 
     accepts_analytics_port::<dyn uc_engine::observability::analytics::AnalyticsPort>();
+    let _ = accepts_rc_17_struct_literal;
     let _ = uc_engine::observability::diagnostics::managed_log_file_date(
         "uniclipboard-daemon.json.2026-09-11",
     );
+    let _ = uc_engine::observability::SystemLogFormat::HumanReadable;
+    let _ = uc_engine::observability::ProcessObservabilityRuntime::install_with_system_log_format;
+    let _ = uc_engine::observability::ProcessObservabilityRuntime::install_with_host_layers_and_system_log_format;
 }
 
 #[test]

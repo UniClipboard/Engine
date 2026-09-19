@@ -21,7 +21,7 @@ thiserror = "2"
 tracing = "0.1"
 tracing-log = { version = "0.2", default-features = false, features = ["log-tracer", "std"] }
 tracing-opentelemetry = { version = "=0.33.0", default-features = false }
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "registry", "std"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "fmt", "json", "registry", "std"] }
 uc-observability-contract = { path = "../uc-observability-contract" }
 url = "2"
 uuid = { version = "1", features = ["v4", "fast-rng"] }

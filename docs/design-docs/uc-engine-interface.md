@@ -79,6 +79,9 @@ Rust 宿主需要实现产品分析能力或识别受管诊断文件时，通过
 传入标准 `HostLogLayer`。共同运行时负责分组过滤：核心诊断及底层原始网络输出不会绕行到宿主层。
 不允许在已有安装上追加或替换宿主层；相同配置的普通安装仍可复用。这个入口仅负责进程日志组合，
 不暴露配对、成员或存储内部步骤，也不替宿主授予远程诊断许可。
+需要同时选择非默认系统输出格式时，宿主改用
+`ProcessObservabilityRuntime::install_with_host_layers_and_system_log_format`，在同一次安装中提交
+`HostLogLayer` 与 `SystemLogFormat`；不得拆成两次安装。
 
 `ProcessObservabilityHandle::health` 返回当前本地和远程状态、丢弃数量及失败批次；初始安装结果不能代替运行后的健康查询。
 移动暂停和单个 Engine 关闭只调用有界 `force_flush`，恢复继续复用同一运行时。只有宿主确认进程最终退出时才调用 `shutdown`；
