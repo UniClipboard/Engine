@@ -29,6 +29,7 @@ pub enum ConnectivityOpportunity {
 /// 仅表示重新检查的机会；不能据此授予成员资格或直接设置在线。
 pub enum ConnectionHint {
     NetworkChanged,
+    RelayRecovered,
     PeerAddressChanged(DeviceId),
     CommunicationFailed(DeviceId),
 }

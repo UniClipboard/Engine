@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -15,10 +16,15 @@ impl MobileEngine {
             })?;
         // 停止普通请求，但失败或等待超时后仍保留生命周期通道供继续收尾。
         lock(&self.commands).take();
-        if !lock(&self.events.state).closed {
-            if let Err(error) = self.request_shutdown(deadline) {
-                if !lock(&self.events.state).closed {
-                    return Err(error);
+        if !lock(&self.events.state).closed && !self.shutdown_pending.swap(true, Ordering::AcqRel) {
+            match self.request_shutdown(deadline) {
+                Ok(false) => {}
+                Ok(true) => return Err(wait_timeout()),
+                Err(error) => {
+                    self.shutdown_pending.store(false, Ordering::Release);
+                    if !lock(&self.events.state).closed {
+                        return Err(error);
+                    }
                 }
             }
         }
@@ -29,18 +35,18 @@ impl MobileEngine {
         Ok(())
     }
 
-    fn request_shutdown(&self, deadline: Instant) -> Result<(), BindingError> {
+    /// `true` 表示请求已接受，但调用方的等待预算先耗尽。
+    fn request_shutdown(&self, deadline: Instant) -> Result<bool, BindingError> {
         let commands = self.lifecycle_sender()?;
         let (response, result) = mpsc::channel();
         commands
             .send(LifecycleCommand::Shutdown { deadline, response })
             .map_err(|_| BindingError::RuntimeUnavailable)?;
-        result
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .map_err(|error| match error {
-                RecvTimeoutError::Timeout => wait_timeout(),
-                RecvTimeoutError::Disconnected => BindingError::RuntimeUnavailable,
-            })?
+        match result.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(result) => result.map(|()| false),
+            Err(RecvTimeoutError::Timeout) => Ok(true),
+            Err(RecvTimeoutError::Disconnected) => Err(BindingError::RuntimeUnavailable),
+        }
     }
 
     pub(super) fn join_worker(&self, deadline: Duration) -> Result<(), BindingError> {
@@ -62,6 +68,7 @@ mod tests {
     use crate::runtime::worker_join::WorkerJoin;
     use crate::runtime::EventQueue;
     use crate::{BindingError, BindingErrorCategory};
+    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
 
     #[test]
@@ -88,6 +95,7 @@ mod tests {
         let engine = MobileEngine {
             commands: Mutex::new(Some(commands)),
             lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
+            shutdown_pending: AtomicBool::new(false),
             events,
             worker: WorkerJoin::new(worker),
         };
@@ -127,6 +135,7 @@ mod tests {
         let engine = MobileEngine {
             commands: Mutex::new(Some(commands)),
             lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
+            shutdown_pending: AtomicBool::new(false),
             events,
             worker: WorkerJoin::new(worker),
         };
@@ -163,6 +172,7 @@ mod tests {
         let engine = MobileEngine {
             commands: Mutex::new(Some(commands)),
             lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
+            shutdown_pending: AtomicBool::new(false),
             events,
             worker: WorkerJoin::new(worker),
         };
@@ -174,6 +184,50 @@ mod tests {
             })
         ));
         release.send(()).unwrap();
+        engine.shutdown(1000).unwrap();
+    }
+
+    #[test]
+    fn unavailable_shutdown_channel_can_be_retried() {
+        let (commands, requests) = tokio::sync::mpsc::unbounded_channel();
+        let (lifecycle_commands, lifecycle_requests) = tokio::sync::mpsc::unbounded_channel();
+        drop(requests);
+        drop(lifecycle_requests);
+        let worker = std::thread::spawn(|| Ok(()));
+        let engine = MobileEngine {
+            commands: Mutex::new(Some(commands)),
+            lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
+            shutdown_pending: AtomicBool::new(false),
+            events: Arc::new(EventQueue::new(1)),
+            worker: WorkerJoin::new(worker),
+        };
+
+        assert_eq!(engine.shutdown(1000), Err(BindingError::RuntimeUnavailable));
+        assert!(!engine
+            .shutdown_pending
+            .load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn disconnected_reply_after_event_close_joins_the_completed_worker() {
+        let (commands, requests) = tokio::sync::mpsc::unbounded_channel();
+        let (lifecycle_commands, mut lifecycle_requests) = tokio::sync::mpsc::unbounded_channel();
+        let events = Arc::new(EventQueue::new(1));
+        let worker_events = Arc::clone(&events);
+        let worker = std::thread::spawn(move || {
+            drop(requests);
+            let _ = lifecycle_requests.blocking_recv();
+            worker_events.close();
+            Ok(())
+        });
+        let engine = MobileEngine {
+            commands: Mutex::new(Some(commands)),
+            lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
+            shutdown_pending: AtomicBool::new(false),
+            events,
+            worker: WorkerJoin::new(worker),
+        };
+
         engine.shutdown(1000).unwrap();
     }
 }

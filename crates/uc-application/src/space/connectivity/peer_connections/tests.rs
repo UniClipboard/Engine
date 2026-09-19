@@ -91,11 +91,7 @@ impl PeerReachabilityPort for PeerReachability {
     }
 }
 
-fn fixture() -> (
-    Arc<PeerConnectionCoordinator>,
-    Arc<Scope>,
-    Arc<PeerReachability>,
-) {
+fn dependencies() -> (Arc<Scope>, Arc<PeerReachability>) {
     let scope = Arc::new(Scope {
         peers: Mutex::new(vec![DeviceId::new("peer")]),
         changes: watch::channel(()).0,
@@ -113,12 +109,39 @@ fn fixture() -> (
         active: AtomicUsize::new(0),
         maximum: AtomicUsize::new(0),
     });
+    (scope, peer_reachability)
+}
+
+fn fixture() -> (
+    Arc<PeerConnectionCoordinator>,
+    Arc<Scope>,
+    Arc<PeerReachability>,
+) {
+    let (scope, peer_reachability) = dependencies();
     let owner = PeerConnectionCoordinator::new(
         scope.clone(),
         peer_reachability.clone(),
         Box::pin(futures::stream::pending()),
     );
     (owner, scope, peer_reachability)
+}
+
+fn fixture_with_hints(
+    capacity: usize,
+) -> (
+    Arc<PeerConnectionCoordinator>,
+    Arc<Scope>,
+    Arc<PeerReachability>,
+    mpsc::Sender<Result<ConnectionHint, anyhow::Error>>,
+) {
+    let (scope, peer_reachability) = dependencies();
+    let (sender, receiver) = mpsc::channel(capacity);
+    let hints = futures::stream::unfold(receiver, |mut receiver| async {
+        receiver.recv().await.map(|event| (event, receiver))
+    });
+    let owner =
+        PeerConnectionCoordinator::new(scope.clone(), peer_reachability.clone(), Box::pin(hints));
+    (owner, scope, peer_reachability, sender)
 }
 
 async fn settle() {
@@ -295,6 +318,160 @@ async fn burst_during_a_dial_is_bounded_and_coalesced() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn relay_recovery_replaces_a_stale_in_flight_attempt() {
+    let (owner, _, peer_reachability, sender) = fixture_with_hints(4);
+    peer_reachability.blocked.store(true, Ordering::SeqCst);
+
+    owner.start().await;
+    settle().await;
+    assert_eq!(peer_reachability.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(peer_reachability.active.load(Ordering::SeqCst), 1);
+
+    sender
+        .send(Ok(ConnectionHint::RelayRecovered))
+        .await
+        .unwrap();
+    settle().await;
+    assert_eq!(
+        peer_reachability.active.load(Ordering::SeqCst),
+        0,
+        "the stale attempt must be cancelled when the relay recovers"
+    );
+
+    tokio::time::advance(Duration::from_millis(251)).await;
+    settle().await;
+    assert_eq!(peer_reachability.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(peer_reachability.active.load(Ordering::SeqCst), 1);
+    assert_eq!(peer_reachability.maximum.load(Ordering::SeqCst), 1);
+
+    owner.shutdown().await.unwrap();
+    assert_eq!(peer_reachability.active.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn repeated_relay_recovery_hints_keep_one_replacement_attempt() {
+    let (owner, _, peer_reachability, sender) = fixture_with_hints(1024);
+    peer_reachability.blocked.store(true, Ordering::SeqCst);
+
+    owner.start().await;
+    settle().await;
+    for _ in 0..1000 {
+        sender.try_send(Ok(ConnectionHint::RelayRecovered)).unwrap();
+    }
+    settle().await;
+    tokio::time::advance(Duration::from_millis(251)).await;
+    settle().await;
+
+    assert_eq!(peer_reachability.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(peer_reachability.active.load(Ordering::SeqCst), 1);
+    assert_eq!(peer_reachability.maximum.load(Ordering::SeqCst), 1);
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn fresh_online_after_relay_recovery_prevents_a_redundant_replacement() {
+    let (owner, _, peer_reachability, sender) = fixture_with_hints(4);
+    peer_reachability.blocked.store(true, Ordering::SeqCst);
+
+    owner.start().await;
+    settle().await;
+    sender
+        .send(Ok(ConnectionHint::RelayRecovered))
+        .await
+        .unwrap();
+    settle().await;
+    peer_reachability
+        .events
+        .send(PeerReachabilityChanged {
+            device_id: DeviceId::new("peer"),
+            state: ReachabilityState::Online,
+            at: chrono::Utc::now(),
+        })
+        .unwrap();
+    settle().await;
+    tokio::time::advance(Duration::from_millis(251)).await;
+    settle().await;
+
+    assert_eq!(peer_reachability.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(peer_reachability.active.load(Ordering::SeqCst), 0);
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn relay_recovery_resets_the_retry_backoff() {
+    let (owner, _, peer_reachability, sender) = fixture_with_hints(4);
+
+    owner.start().await;
+    settle().await;
+    for _ in 0..6 {
+        tokio::time::advance(Duration::from_secs(80)).await;
+        settle().await;
+    }
+    let before = peer_reachability.calls.load(Ordering::SeqCst);
+    sender
+        .send(Ok(ConnectionHint::RelayRecovered))
+        .await
+        .unwrap();
+    settle().await;
+    tokio::time::advance(Duration::from_millis(251)).await;
+    settle().await;
+    assert_eq!(peer_reachability.calls.load(Ordering::SeqCst), before + 1);
+
+    tokio::time::advance(Duration::from_millis(1201)).await;
+    settle().await;
+    assert_eq!(
+        peer_reachability.calls.load(Ordering::SeqCst),
+        before + 2,
+        "a failed replacement must restart from the first retry interval"
+    );
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn relay_recovery_replacement_is_discarded_when_paused() {
+    let (owner, _, peer_reachability, sender) = fixture_with_hints(4);
+    peer_reachability.blocked.store(true, Ordering::SeqCst);
+
+    owner.start().await;
+    settle().await;
+    sender
+        .send(Ok(ConnectionHint::RelayRecovered))
+        .await
+        .unwrap();
+    settle().await;
+    owner.pause().await.unwrap();
+    tokio::time::advance(Duration::from_secs(80)).await;
+    settle().await;
+
+    assert_eq!(peer_reachability.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(peer_reachability.active.load(Ordering::SeqCst), 0);
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn relay_recovery_replacement_is_discarded_when_peer_is_removed() {
+    let (owner, scope, peer_reachability, sender) = fixture_with_hints(4);
+    peer_reachability.blocked.store(true, Ordering::SeqCst);
+
+    owner.start().await;
+    settle().await;
+    sender
+        .send(Ok(ConnectionHint::RelayRecovered))
+        .await
+        .unwrap();
+    settle().await;
+    scope.peers.lock().await.clear();
+    scope.changes.send_replace(());
+    settle().await;
+    tokio::time::advance(Duration::from_secs(80)).await;
+    settle().await;
+
+    assert_eq!(peer_reachability.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(peer_reachability.active.load(Ordering::SeqCst), 0);
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
 async fn manual_refresh_joins_automatic_dial_and_waiter_cancellation_is_local() {
     let (owner, _, peer_reachability) = fixture();
     peer_reachability.blocked.store(true, Ordering::SeqCst);
@@ -435,12 +612,7 @@ async fn scope_failure_is_closed_and_keeps_its_source_then_recovers_without_a_no
 
 #[tokio::test(start_paused = true)]
 async fn environment_hints_reset_backoff_but_unknown_discovery_does_not() {
-    let (_, scope, peer_reachability) = fixture();
-    let (sender, receiver) = mpsc::channel(4);
-    let hints = futures::stream::unfold(receiver, |mut receiver| async {
-        receiver.recv().await.map(|event| (event, receiver))
-    });
-    let owner = PeerConnectionCoordinator::new(scope, peer_reachability.clone(), Box::pin(hints));
+    let (owner, _, peer_reachability, sender) = fixture_with_hints(4);
     owner.start().await;
     settle().await;
     for _ in 0..6 {

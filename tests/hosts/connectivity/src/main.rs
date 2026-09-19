@@ -95,6 +95,18 @@ fn respond(mut value: Value) -> Result<()> {
 
 const PASSPHRASE: &str = "connection-recovery-synthetic-passphrase";
 
+#[cfg(feature = "current-engine")]
+async fn shutdown_engine(engine: &Engine) -> Result<()> {
+    engine.shutdown_until_complete().await?;
+    Ok(())
+}
+
+#[cfg(not(feature = "current-engine"))]
+async fn shutdown_engine(engine: &Engine) -> Result<()> {
+    engine.shutdown(Duration::from_secs(15)).await?;
+    Ok(())
+}
+
 async fn operation(engine: &Engine, request: &Value) -> Result<Value> {
     let command = string(request, "command")?;
     #[cfg(feature = "current-engine")]
@@ -134,7 +146,7 @@ async fn operation(engine: &Engine, request: &Value) -> Result<Value> {
         return Ok(json!(true));
     }
     if command == "shutdown" {
-        engine.shutdown(Duration::from_secs(15)).await?;
+        shutdown_engine(engine).await?;
         return Ok(json!(true));
     }
     let op = match command {
@@ -318,7 +330,7 @@ async fn main() -> Result<()> {
         }
     }
     if !shut_down {
-        engine.shutdown(Duration::from_secs(15)).await?;
+        shutdown_engine(&engine).await?;
     }
     event_task.await?;
     observability.shutdown(Duration::from_secs(2));

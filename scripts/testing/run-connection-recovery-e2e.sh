@@ -1,17 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+usage() {
+  echo "Usage: $0 [--suite all|local|network] [--repeat N] [--mode all|direct|known-peer|relay|legacy] [--case PREFIX]"
+}
+
 suite=all
 repeat=3
+mode=all
+case_prefix=
 while (($#)); do
   case "$1" in
     --suite) suite=$2; shift 2 ;;
     --repeat) repeat=$2; shift 2 ;;
-    *) echo "Unknown argument: $1" >&2; exit 2 ;;
+    --mode) mode=$2; shift 2 ;;
+    --case) case_prefix=$2; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
 [[ "$repeat" =~ ^[1-9][0-9]*$ ]] || exit 2
 [[ "$suite" == all || "$suite" == local || "$suite" == network ]] || exit 2
+[[ "$mode" == all || "$mode" == direct || "$mode" == known-peer || "$mode" == relay || "$mode" == legacy ]] || exit 2
+[[ "$suite" != local || "$mode" == all ]] || { echo '--mode only applies to network validation.' >&2; exit 2; }
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$repo"
 
@@ -43,10 +54,12 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
-git archive "$legacy_revision" | tar -x -C "$legacy"
-cp -R tests/hosts/connectivity "$legacy/tests/hosts/connectivity"
-git -C "$legacy" apply "$repo/scripts/testing/rc15-test-host.patch"
-CARGO_TARGET_DIR="$target/rc15" cargo build --manifest-path "$legacy/Cargo.toml" -p uc-connectivity-host --no-default-features --offline
+if [[ "$mode" == all || "$mode" == legacy ]]; then
+  git archive "$legacy_revision" | tar -x -C "$legacy"
+  cp -R tests/hosts/connectivity "$legacy/tests/hosts/connectivity"
+  git -C "$legacy" apply "$repo/scripts/testing/rc15-test-host.patch"
+  CARGO_TARGET_DIR="$target/rc15" cargo build --manifest-path "$legacy/Cargo.toml" -p uc-connectivity-host --no-default-features --offline
+fi
 
 git rev-parse HEAD > "$evidence/current-revision.txt"
 printf '%s\n' "$legacy_revision" > "$evidence/legacy-revision.txt"
@@ -68,8 +81,11 @@ NODE
 rustc --version > "$evidence/rust-version.txt"
 node --version > "$evidence/node-version.txt"
 runner=(node "$repo/scripts/testing/connection-recovery-network.mjs" --host "$target/debug/uc-connectivity-host" --repeat "$repeat" --evidence "$evidence")
+if [[ -n "$case_prefix" ]]; then runner+=(--case "$case_prefix"); fi
 if ((EUID != 0)); then runner=(sudo -- "${runner[@]}"); fi
-"${runner[@]}" --mode direct
-"${runner[@]}" --mode known-peer
-"${runner[@]}" --mode relay --relay "$target/debug/uc-connectivity-relay"
-"${runner[@]}" --mode legacy --legacy-host "$target/rc15/debug/uc-connectivity-host" --legacy-side 0
+if [[ "$mode" == all || "$mode" == direct ]]; then "${runner[@]}" --mode direct; fi
+if [[ "$mode" == all || "$mode" == known-peer ]]; then "${runner[@]}" --mode known-peer; fi
+if [[ "$mode" == all || "$mode" == relay ]]; then "${runner[@]}" --mode relay --relay "$target/debug/uc-connectivity-relay"; fi
+if [[ "$mode" == all || "$mode" == legacy ]]; then
+  "${runner[@]}" --mode legacy --legacy-host "$target/rc15/debug/uc-connectivity-host" --legacy-side 0
+fi

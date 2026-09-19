@@ -15,6 +15,7 @@ Engine 只装配能力与转换稳定操作。成员资格仍由已验证成员�
 - 每个网络会话启动时订阅变化并读取当前成员；后上线的对端同样可主动连接，不区分 Sponsor/Joiner。
 - 真正锁定、暂停与关闭清空在途连接工作；恢复后重读当前范围。GUI 隐藏不等同于安全会话撤销。
 - 当前成员范围提交、既有连接状态变化、本机 Iroh 地址变化、同一 mDNS 实例发现已知目标，均可唤醒连接维护。
+- 本机中转从不可用恢复为可用时，Infra 保留这一独立事实交给连接负责人。连接负责人清除故障期间累积的等待；若目标仍有基于旧网络条件的尝试，则先取消旧尝试，再经同一 250ms 合并窗口安排一次新确认。重复恢复事实仍只保留一次后继工作，成员移除、暂停和关闭优先且不会重启已取消任务。
 - 宿主用 `Operation::NotifyConnectivityOpportunity { reason }` 报告 `Foreground`、`SystemWake`、`NetworkChanged`。
   `ConnectivityOpportunityAccepted` 只表示已接受机会，不表示对端已在线。Running 状态不能误用 `Engine::resume`。
 - 机会合并窗口为 250ms，重复机会不推迟已有到期任务，单目标启动间隔至少 1 秒；在途机会最多形成一次后续尝试。
@@ -75,5 +76,6 @@ Application 只有在当前成员的完整历史同步通过业务校验并提�
 
 原自动连接验收见[原执行记录](../exec-plans/completed/2026-09-11-automatic-peer-connections.md)，活性与恢复改动见[本次执行记录](../exec-plans/completed/2026-09-12-connection-liveness-and-recovery.md)。
 专用入口为 `bash scripts/testing/run-connection-recovery-e2e.sh --suite all --repeat 3`，独立网络部分必须在支持命名空间和 nftables 的 Linux 环境执行。
+只走中转的三秒恢复门使用 `bash scripts/testing/run-connection-recovery-e2e.sh --suite network --mode relay --case E10-relay-only --repeat 20`：测试先用内核规则阻断并计数全部 UDP 直连，中转重启后等两端都重新建立中转连接，再从较晚完成时刻起要求三秒内双方 Online 且完成双向精确内容传送。中转故障期间的离线识别单独计时，不计入三秒。
 自动验收只查询在线状态，不能通过刷新或发送促成连接；连接后再验证当前成员资格及实际内容传送。
 其中已知设备联系场景使用三台独立进程：第三台设备经中间成员加入，使等待方已知但尚未确认该成员；随后第三台设备更换固定端口，测试同时阻断等待方的本地发现和主动发起，只允许换址设备主动联系。验收必须独立证明旧端口关闭、防火墙规则实际命中、20 秒内自动上线，并在上线后完成双向传送；默认连续运行三次。

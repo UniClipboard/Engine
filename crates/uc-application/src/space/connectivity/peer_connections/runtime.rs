@@ -186,6 +186,7 @@ impl ConnectionRuntime {
                 }
                 hint = self.hints.next(), if hints_open => match hint {
                     Some(Ok(ConnectionHint::NetworkChanged)) if !self.paused => { self.opportunity(None, "network_changed"); next_scope = Instant::now(); }
+                    Some(Ok(ConnectionHint::RelayRecovered)) if !self.paused => { self.relay_recovered(); next_scope = Instant::now(); }
                     Some(Ok(ConnectionHint::PeerAddressChanged(device))) if !self.paused => self.opportunity(Some(device), "peer_discovered"),
                     Some(Ok(ConnectionHint::CommunicationFailed(device))) if !self.paused => self.opportunity(Some(device), "communication_failed"),
                     Some(Err(source)) => {
@@ -293,6 +294,21 @@ impl ConnectionRuntime {
         }
     }
 
+    fn relay_recovered(&mut self) {
+        let now = Instant::now();
+        for peer in self.peers.values_mut() {
+            peer.failures = 0;
+            peer.next_trigger = "relay_recovered";
+            if let Some(cancel) = &peer.in_flight {
+                peer.rerun = true;
+                cancel.cancel();
+            } else {
+                let at = now + COALESCE;
+                peer.due = Some(peer.due.map_or(at, |due| due.min(at)));
+            }
+        }
+    }
+
     fn peer_reachability_changed(&mut self, event: PeerReachabilityChanged) {
         let awaiting_refresh = self
             .refreshes
@@ -391,7 +407,16 @@ impl ConnectionRuntime {
         }
         peer.in_flight = None;
         if matches!(result, DialResult::Cancelled) {
-            return;
+            if peer.rerun {
+                peer.rerun = false;
+                peer.due = Some(Instant::now() + COALESCE);
+                return;
+            }
+            if peer.online && peer.observation_revision != peer.started_observation_revision {
+                result = DialResult::State(ReachabilityState::Online);
+            } else {
+                return;
+            }
         }
         // 超时发生在适配器之外；仍应保留本次尝试开始后收到的更新成功。
         // 后续离线通知会清除 online，旧缓存也没有新的修订，二者都不能掩盖失败。

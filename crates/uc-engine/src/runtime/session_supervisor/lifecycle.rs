@@ -3,6 +3,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Weak;
 
 use async_trait::async_trait;
+use tokio::task::JoinHandle;
 use uc_application::deps::{LifecycleError, RuntimeLifecyclePort, TransitionContext};
 use uc_application::facade::NetworkRecoveryRequestError;
 use uc_core::{FileTransferCancellationReason, TaskShutdownReport};
@@ -48,23 +49,13 @@ pub(in super::super) fn lifecycle_error(error: LifecycleError) -> EngineError {
 impl RuntimeLifecyclePort for SessionWork {
     async fn suspend(&self, context: &TransitionContext) -> anyhow::Result<()> {
         let owner = self.0.upgrade().ok_or_else(operation_unavailable_error)?;
-        let _lifecycle = owner.lifecycle.lock().await;
-        owner
-            .session_recovery_enabled
-            .store(false, Ordering::Release);
-        let mut errors = Vec::new();
-        if let Err(error) = drain_operations_and_stop_session(
-            owner.operations.close_and_wait(None, context.deadline()),
-            owner.stop_current_session(FileTransferCancellationReason::Unknown, context.deadline()),
-        )
+        let context = context.clone();
+        // 共同期限可以结束调用方等待，但已经取得的会话必须由原负责人完整交接。
+        // 外层期限取消本次等待时，独立任务继续持有 owner 和生命周期锁；后继重试会在同一锁后接续。
+        join_owned(tokio::spawn(
+            async move { suspend_owned(owner, context).await },
+        ))
         .await
-        {
-            errors.push(error.context("stop current session work"));
-        }
-        if let Err(error) = owner.shutdown_network(context.deadline()).await {
-            errors.push(error.into());
-        }
-        LifecycleError::from_errors(errors).map_err(Into::into)
     }
 
     async fn resume(&self, _context: &TransitionContext) -> anyhow::Result<()> {
@@ -76,6 +67,34 @@ impl RuntimeLifecyclePort for SessionWork {
             .store(true, Ordering::Release);
         Ok(())
     }
+}
+
+async fn join_owned(task: JoinHandle<anyhow::Result<()>>) -> anyhow::Result<()> {
+    task.await
+        .map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?
+}
+
+async fn suspend_owned(
+    owner: std::sync::Arc<SessionSupervisor>,
+    context: TransitionContext,
+) -> anyhow::Result<()> {
+    let _lifecycle = owner.lifecycle.lock().await;
+    owner
+        .session_recovery_enabled
+        .store(false, Ordering::Release);
+    let mut errors = Vec::new();
+    if let Err(error) = drain_operations_and_stop_session(
+        owner.operations.close_and_wait(None, context.deadline()),
+        owner.stop_current_session(FileTransferCancellationReason::Unknown, context.deadline()),
+    )
+    .await
+    {
+        errors.push(error.context("stop current session work"));
+    }
+    if let Err(error) = owner.shutdown_network(context.deadline()).await {
+        errors.push(error.into());
+    }
+    LifecycleError::from_errors(errors).map_err(Into::into)
 }
 
 async fn drain_operations_and_stop_session<Drain, Stop>(
@@ -202,5 +221,18 @@ mod tests {
             lifecycle_error(error),
             EngineError::new(1108, EngineErrorCategory::Internal, false)
         );
+    }
+
+    #[tokio::test]
+    async fn owned_suspend_task_failure_is_a_stable_internal_error() {
+        let error = super::join_owned(tokio::spawn(async {
+            panic!("private session lifecycle failure");
+        }))
+        .await
+        .unwrap_err();
+        let error = error.downcast_ref::<EngineError>().unwrap();
+        assert_eq!(error.code(), 1108);
+        assert_eq!(error.category(), EngineErrorCategory::Internal);
+        assert!(error.is_retryable());
     }
 }
