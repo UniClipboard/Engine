@@ -4,15 +4,16 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use uc_infra::security::{
-    ProfileKeyRecoveryError, ProfileKeyRecoveryStore, ProfileRecoveryOutcome,
-    ProfileRecoveryPreparation,
+    ProfileKeyRecoveryError, ProfileKeyRecoveryStore, ProfileRecoveryLosses,
+    ProfileRecoveryOutcome, ProfileRecoveryPreparation,
 };
 
 use super::ProductionRuntime;
-use crate::assembly::host::{adapt_shared_secure_storage, derive_app_paths};
+use crate::assembly::host::{derive_app_paths, profile_key_recovery_store};
 use crate::engine::event_stream::EventSender;
 use crate::engine::startup::StartupProgressStore;
 use crate::engine::EngineRuntime;
@@ -49,6 +50,7 @@ struct RecoveryBootstrap {
 pub(crate) struct RecoverableRuntime {
     mode: RwLock<RuntimeMode>,
     recovery: Arc<ProfileKeyRecoveryStore>,
+    ready_summary_override: StdMutex<Option<ProfileRecoverySummary>>,
     events: EventSender,
 }
 
@@ -60,12 +62,7 @@ impl RecoverableRuntime {
         progress: Arc<StartupProgressStore>,
     ) -> Result<Self, EngineError> {
         let paths = derive_app_paths(host.directories());
-        let backing = adapt_shared_secure_storage(Arc::clone(&host.secure_storage));
-        let recovery = Arc::new(ProfileKeyRecoveryStore::new(
-            paths.vault_dir,
-            config.profile_id().to_owned(),
-            backing,
-        ));
+        let recovery = profile_key_recovery_store(&config, &paths, &host);
         let mode = match recovery.prepare_startup().await? {
             ProfileRecoveryPreparation::Ready => {
                 host.replace_secure_storage(Arc::new(RecoveryHostStorage {
@@ -76,29 +73,29 @@ impl RecoverableRuntime {
                         ProductionRuntime::start(
                             config,
                             host,
+                            paths,
                             events.clone(),
                             Arc::clone(&progress),
+                            Arc::clone(&recovery),
                         )
                         .await?,
                     ),
                     recovered: false,
                 }
             }
-            ProfileRecoveryPreparation::AwaitingPassphrase {
-                independent_material_missing,
-            } => {
+            ProfileRecoveryPreparation::AwaitingPassphrase { losses } => {
                 progress.recovery_available();
                 let summary = ProfileRecoverySummary {
-                    state: if independent_material_missing {
+                    state: if !losses.is_empty() {
                         ProfileRecoveryState::PartiallyRecoverable
                     } else {
                         ProfileRecoveryState::AwaitingPassphrase
                     },
-                    can_submit_passphrase: true,
+                    can_submit_passphrase: losses.is_empty(),
                     restart_required: false,
                     background_ready: false,
                     cleanup_pending: false,
-                    losses: losses(independent_material_missing),
+                    losses: public_losses(losses),
                 };
                 events.send(EngineEvent::ProfileRecoveryChanged(summary.clone()));
                 RuntimeMode::Recovery(Arc::new(RecoveryBootstrap {
@@ -112,6 +109,7 @@ impl RecoverableRuntime {
         Ok(Self {
             mode: RwLock::new(mode),
             recovery,
+            ready_summary_override: StdMutex::new(None),
             events,
         })
     }
@@ -128,23 +126,17 @@ impl RecoverableRuntime {
         cancellation: CancellationToken,
     ) -> Result<OperationResult, EngineError> {
         if matches!(operation, Operation::QueryProfileRecovery) {
-            return Ok(OperationResult::ProfileRecovery(ProfileRecoverySummary {
-                state: if recovered {
-                    ProfileRecoveryState::Recovered
-                } else {
-                    ProfileRecoveryState::NotRequired
-                },
-                can_submit_passphrase: false,
-                restart_required: false,
-                background_ready: true,
-                cleanup_pending: self.recovery.cleanup_pending(),
-                losses: Vec::new(),
-            }));
+            let summary = self
+                .lock_ready_summary_override()
+                .clone()
+                .unwrap_or_else(|| ready_summary(recovered, self.recovery.cleanup_pending()));
+            return Ok(OperationResult::ProfileRecovery(summary));
         }
         let kind = operation.kind();
         let result = runtime.execute(operation, cancellation).await?;
         if matches!(kind, OperationKind::FactoryResetSpace) {
             self.recovery.forget_after_factory_reset();
+            *self.lock_ready_summary_override() = None;
             return Ok(result);
         }
         if matches!(
@@ -152,10 +144,36 @@ impl RecoverableRuntime {
             OperationKind::CreateSpace
                 | OperationKind::JoinSpace
                 | OperationKind::UnlockSpace
-                | OperationKind::ChangeEncryptionPassphrase
                 | OperationKind::ResetSpace
         ) {
-            self.recovery.refresh_after_authentication().await?;
+            match self.recovery.refresh_after_authentication().await {
+                Ok(()) => {
+                    if self.lock_ready_summary_override().take().is_some() {
+                        self.events
+                            .send(EngineEvent::ProfileRecoveryChanged(ready_summary(
+                                recovered,
+                                self.recovery.cleanup_pending(),
+                            )));
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "profile recovery refresh failed after committed operation"
+                    );
+                    let summary = ProfileRecoverySummary {
+                        state: ProfileRecoveryState::Failed,
+                        can_submit_passphrase: false,
+                        restart_required: false,
+                        background_ready: true,
+                        cleanup_pending: self.recovery.cleanup_pending(),
+                        losses: Vec::new(),
+                    };
+                    *self.lock_ready_summary_override() = Some(summary.clone());
+                    self.events
+                        .send(EngineEvent::ProfileRecoveryChanged(summary));
+                }
+            }
         }
         Ok(result)
     }
@@ -196,11 +214,12 @@ impl RecoverableRuntime {
                 });
                 let passphrase = Passphrase::new(input.passphrase.expose());
                 match self.recovery.recover(&passphrase).await {
-                    Ok(ProfileRecoveryOutcome::PartiallyRecoverable) => {
+                    Ok(ProfileRecoveryOutcome::PartiallyRecoverable(losses)) => {
                         self.publish_summary(&bootstrap, |summary| {
                             summary.state = ProfileRecoveryState::PartiallyRecoverable;
+                            summary.can_submit_passphrase = false;
                             summary.restart_required = false;
-                            summary.losses = losses(true);
+                            summary.losses = public_losses(losses);
                         });
                         Err(EngineError::new(
                             PROFILE_RECOVERY_PARTIAL_CODE,
@@ -214,14 +233,17 @@ impl RecoverableRuntime {
                             self.publish_restart_required(&bootstrap);
                             return Err(recovery_unavailable());
                         };
+                        let paths = derive_app_paths(host.directories());
                         host.replace_secure_storage(Arc::new(RecoveryHostStorage {
                             inner: Arc::clone(&self.recovery),
                         }));
                         let runtime = match ProductionRuntime::start(
                             config,
                             host,
+                            paths,
                             self.events.clone(),
                             Arc::clone(&bootstrap.progress),
+                            Arc::clone(&self.recovery),
                         )
                         .await
                         {
@@ -309,6 +331,12 @@ impl RecoverableRuntime {
             summary.background_ready = false;
         });
     }
+
+    fn lock_ready_summary_override(&self) -> StdMutexGuard<'_, Option<ProfileRecoverySummary>> {
+        self.ready_summary_override
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 impl RecoveryBootstrap {
@@ -359,7 +387,9 @@ impl EngineRuntime for RecoverableRuntime {
                 // Once the original deadline has elapsed, cleanup must run without reusing that
                 // stale deadline or it can leave the production runtime only partly suspended.
                 let cleanup_deadline = deadline.filter(|deadline| *deadline > Instant::now());
-                runtime.suspend(cleanup_deadline).await
+                runtime.suspend(cleanup_deadline).await?;
+                self.recovery.suspend();
+                Ok(())
             }
             RuntimeMode::Recovery(_) => Ok(()),
         }
@@ -374,7 +404,11 @@ impl EngineRuntime for RecoverableRuntime {
 
     async fn shutdown(&self, deadline: Option<Instant>) -> Result<(), EngineError> {
         match self.mode().await {
-            RuntimeMode::Ready { runtime, .. } => runtime.shutdown(deadline).await,
+            RuntimeMode::Ready { runtime, .. } => {
+                runtime.shutdown(deadline).await?;
+                self.recovery.suspend();
+                Ok(())
+            }
             RuntimeMode::Recovery(_) => Ok(()),
         }
     }
@@ -459,14 +493,31 @@ fn restart_required_error(error: EngineError) -> EngineError {
     EngineError::new(error.code(), error.category(), false)
 }
 
-fn losses(missing: bool) -> Vec<ProfileRecoveryLoss> {
-    if missing {
-        vec![
-            ProfileRecoveryLoss::LocalHistory,
-            ProfileRecoveryLoss::LocalControlState,
-            ProfileRecoveryLoss::DeviceIdentity,
-        ]
-    } else {
-        Vec::new()
+fn public_losses(losses: ProfileRecoveryLosses) -> Vec<ProfileRecoveryLoss> {
+    let mut result = Vec::new();
+    if losses.local_history {
+        result.push(ProfileRecoveryLoss::LocalHistory);
+    }
+    if losses.local_control_state {
+        result.push(ProfileRecoveryLoss::LocalControlState);
+    }
+    if losses.device_identity {
+        result.push(ProfileRecoveryLoss::DeviceIdentity);
+    }
+    result
+}
+
+fn ready_summary(recovered: bool, cleanup_pending: bool) -> ProfileRecoverySummary {
+    ProfileRecoverySummary {
+        state: if recovered {
+            ProfileRecoveryState::Recovered
+        } else {
+            ProfileRecoveryState::NotRequired
+        },
+        can_submit_passphrase: false,
+        restart_required: false,
+        background_ready: true,
+        cleanup_pending,
+        losses: Vec::new(),
     }
 }

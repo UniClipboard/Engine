@@ -102,6 +102,7 @@ pub(crate) use profile_content_key_vault::ProfileKeyReadLease;
 
 mod profile_key_recovery;
 pub use profile_key_recovery::{
-    ProfileKeyRecoveryError, ProfileKeyRecoveryStore, ProfileRecoveryOutcome,
-    ProfileRecoveryPreparation, PROFILE_SECRET_FILE_NAME,
+    ProfileKeyRecoveryError, ProfileKeyRecoveryStore, ProfilePassphraseRecoveryPort,
+    ProfileRecoveryLosses, ProfileRecoveryOutcome, ProfileRecoveryPreparation,
+    PROFILE_SECRET_FILE_NAME,
 };

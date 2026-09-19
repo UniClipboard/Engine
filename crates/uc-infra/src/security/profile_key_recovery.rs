@@ -5,9 +5,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
+use uc_core::app_dirs::AppPaths;
 use uc_core::crypto::domain::Passphrase;
 use uc_core::crypto::model::EncryptionError;
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
+use zeroize::Zeroize;
 
 use super::admission_key_manager::PROFILE_ADMISSION_KEY_NAME;
 use super::crypto_model::{EncryptedBlob, KeyScope};
@@ -15,7 +17,8 @@ use super::key_migration_adapter::{DefaultKeyMigrationAdapter, KEYRING_PREFIX};
 use super::profile_content_key_vault::PROFILE_CONTENT_VAULT_KEY_NAME;
 use super::profile_lifecycle::PROFILE_LIFECYCLE_MARKER_NAME;
 use super::profile_upgrade_backup::PROFILE_UPGRADE_BACKUP_RECORD_KEY;
-use super::{v1_aead, MasterKey};
+use super::{v1_aead, Kek, MasterKey};
+use crate::fs::durability::{replace_file, sync_directory};
 use crate::fs::key_slot_store::JsonKeySlotStore;
 use crate::migration_state::{decode_legacy_migration_run_id, DEFAULT_MIGRATION_STATE_FILE};
 use crate::network::iroh::IDENTITY_STORE_KEY;
@@ -37,13 +40,26 @@ const MANAGED_KEYS: [&str; 5] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProfileRecoveryPreparation {
     Ready,
-    AwaitingPassphrase { independent_material_missing: bool },
+    AwaitingPassphrase { losses: ProfileRecoveryLosses },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProfileRecoveryLosses {
+    pub local_history: bool,
+    pub local_control_state: bool,
+    pub device_identity: bool,
+}
+
+impl ProfileRecoveryLosses {
+    pub const fn is_empty(self) -> bool {
+        !self.local_history && !self.local_control_state && !self.device_identity
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProfileRecoveryOutcome {
     Ready,
-    PartiallyRecoverable,
+    PartiallyRecoverable(ProfileRecoveryLosses),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -97,6 +113,8 @@ impl From<v1_aead::AeadError> for ProfileKeyRecoveryError {
 struct ProfileSecretFile {
     format_version: u16,
     wrapped_root: EncryptedBlob,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_wrapped_root: Option<EncryptedBlob>,
     encrypted_payload: EncryptedBlob,
 }
 
@@ -110,8 +128,17 @@ struct ProfileSecretPayload {
 struct ActiveVault {
     root: MasterKey,
     wrapped_root: EncryptedBlob,
+    pending_wrapped_root: Option<EncryptedBlob>,
     cleanup_authorized: bool,
     secrets: BTreeMap<String, Vec<u8>>,
+}
+
+impl Drop for ActiveVault {
+    fn drop(&mut self) {
+        for secret in self.secrets.values_mut() {
+            secret.zeroize();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -128,23 +155,41 @@ pub struct ProfileKeyRecoveryStore {
     scope: KeyScope,
     kek_name: String,
     file: PathBuf,
-    vault: PathBuf,
+    paths: AppPaths,
     state: Mutex<RecoveryState>,
 }
 
+pub trait ProfilePassphraseRecoveryPort: Send + Sync {
+    fn prepare_passphrase_change(&self, kek: &[u8]) -> Result<(), ProfileKeyRecoveryError>;
+    fn finish_passphrase_change(&self, kek: &[u8]) -> Result<(), ProfileKeyRecoveryError>;
+}
+
+impl ProfilePassphraseRecoveryPort for ProfileKeyRecoveryStore {
+    fn prepare_passphrase_change(&self, kek: &[u8]) -> Result<(), ProfileKeyRecoveryError> {
+        let kek = Kek::from_bytes(kek)?;
+        self.prepare_passphrase_change(&kek)
+    }
+
+    fn finish_passphrase_change(&self, kek: &[u8]) -> Result<(), ProfileKeyRecoveryError> {
+        let kek = Kek::from_bytes(kek)?;
+        self.finish_passphrase_change(&kek)
+    }
+}
+
 impl ProfileKeyRecoveryStore {
-    pub fn new(vault: PathBuf, profile_id: String, backing: Arc<dyn SecureStoragePort>) -> Self {
+    pub fn new(paths: AppPaths, profile_id: String, backing: Arc<dyn SecureStoragePort>) -> Self {
         let kek_name = format!("kek:v1:profile:{profile_id}");
+        let file = paths.vault_dir.join(PROFILE_SECRET_FILE_NAME);
         Self {
             material: KeyMaterialStore::new(
                 Arc::clone(&backing),
-                Arc::new(JsonKeySlotStore::new(vault.clone())),
+                Arc::new(JsonKeySlotStore::new(paths.vault_dir.clone())),
             ),
             backing,
             scope: KeyScope { profile_id },
             kek_name,
-            file: vault.join(PROFILE_SECRET_FILE_NAME),
-            vault,
+            file,
+            paths,
             state: Mutex::new(RecoveryState::default()),
         }
     }
@@ -157,6 +202,11 @@ impl ProfileKeyRecoveryStore {
         let mut state = self.lock_state();
         state.active = None;
         state.cleanup_pending = false;
+    }
+
+    /// Removes decrypted profile secrets from memory after the runtime suspends.
+    pub fn suspend(&self) {
+        self.lock_state().active = None;
     }
 
     pub fn cleanup_pending(&self) -> bool {
@@ -177,8 +227,7 @@ impl ProfileKeyRecoveryStore {
                 };
                 if v1_aead::unwrap_master_key_xchacha(&kek, &wrapped.blob).is_err() {
                     return Ok(ProfileRecoveryPreparation::AwaitingPassphrase {
-                        independent_material_missing: !self.file.exists()
-                            && self.required_legacy_material_missing()?,
+                        losses: self.legacy_material_losses()?,
                     });
                 }
                 self.activate_or_migrate(&kek)?;
@@ -186,8 +235,7 @@ impl ProfileKeyRecoveryStore {
             }
             Err(EncryptionError::KeyNotFound | EncryptionError::KeyMaterialCorrupt) => {
                 Ok(ProfileRecoveryPreparation::AwaitingPassphrase {
-                    independent_material_missing: !self.file.exists()
-                        && self.required_legacy_material_missing()?,
+                    losses: self.legacy_material_losses()?,
                 })
             }
             Err(error) => Err(error.into()),
@@ -198,15 +246,17 @@ impl ProfileKeyRecoveryStore {
         &self,
         passphrase: &Passphrase,
     ) -> Result<ProfileRecoveryOutcome, ProfileKeyRecoveryError> {
-        drop(
-            self.material
-                .authenticate_and_restore_kek(&self.scope, passphrase)
-                .await?,
-        );
-        let kek = self.material.load_kek(&self.scope).await?;
-        if !self.file.exists() && self.required_legacy_material_missing()? {
-            return Ok(ProfileRecoveryOutcome::PartiallyRecoverable);
+        let (_master, kek) = self
+            .material
+            .authenticate_kek(&self.scope, passphrase)
+            .await?;
+        let losses = self.legacy_material_losses()?;
+        if !losses.is_empty() {
+            return Ok(ProfileRecoveryOutcome::PartiallyRecoverable(losses));
         }
+        self.material
+            .persist_authenticated_kek(&self.scope, &kek)
+            .await?;
         self.activate_or_migrate(&kek)?;
         self.authorize_cleanup()?;
         self.cleanup_legacy_entries()?;
@@ -234,6 +284,70 @@ impl ProfileKeyRecoveryStore {
         Ok(())
     }
 
+    pub(crate) fn prepare_passphrase_change(
+        &self,
+        kek: &super::Kek,
+    ) -> Result<(), ProfileKeyRecoveryError> {
+        let mut state = self.lock_state();
+        let Some(active) = &mut state.active else {
+            return Err(ProfileKeyRecoveryError::Corrupt);
+        };
+        if wrapped_root_matches(kek, &active.wrapped_root, &active.root) {
+            return Ok(());
+        }
+        if let Some(pending) = &active.pending_wrapped_root {
+            if wrapped_root_matches(kek, pending, &active.root) {
+                return Ok(());
+            }
+            return Err(ProfileKeyRecoveryError::Corrupt);
+        }
+        let pending = v1_aead::wrap_master_key_xchacha(kek, &active.root)?;
+        let file = encode_file(
+            &active.root,
+            active.wrapped_root.clone(),
+            Some(pending.clone()),
+            active.cleanup_authorized,
+            &active.secrets,
+        )?;
+        self.write_file(&file)?;
+        self.verify_file(kek, &active.secrets, active.cleanup_authorized)?;
+        active.pending_wrapped_root = Some(pending);
+        Ok(())
+    }
+
+    pub(crate) fn finish_passphrase_change(
+        &self,
+        kek: &super::Kek,
+    ) -> Result<(), ProfileKeyRecoveryError> {
+        let mut state = self.lock_state();
+        let Some(active) = &mut state.active else {
+            return Err(ProfileKeyRecoveryError::Corrupt);
+        };
+        if active.pending_wrapped_root.is_none()
+            && wrapped_root_matches(kek, &active.wrapped_root, &active.root)
+        {
+            return Ok(());
+        }
+        let Some(pending) = active.pending_wrapped_root.clone() else {
+            return Err(ProfileKeyRecoveryError::Corrupt);
+        };
+        if !wrapped_root_matches(kek, &pending, &active.root) {
+            return Err(ProfileKeyRecoveryError::Corrupt);
+        }
+        let file = encode_file(
+            &active.root,
+            pending.clone(),
+            None,
+            active.cleanup_authorized,
+            &active.secrets,
+        )?;
+        self.write_file(&file)?;
+        self.verify_file(kek, &active.secrets, active.cleanup_authorized)?;
+        active.wrapped_root = pending;
+        active.pending_wrapped_root = None;
+        Ok(())
+    }
+
     fn activate_or_migrate(&self, kek: &super::Kek) -> Result<(), ProfileKeyRecoveryError> {
         if self.file.exists() {
             self.activate_existing(kek)?;
@@ -255,10 +369,7 @@ impl ProfileKeyRecoveryStore {
 
     fn activate_existing(&self, kek: &super::Kek) -> Result<(), ProfileKeyRecoveryError> {
         let mut file = self.read_file()?;
-        let mut root = match v1_aead::unwrap_master_key_xchacha(kek, &file.wrapped_root) {
-            Ok(root) => root,
-            Err(_) => return Err(ProfileKeyRecoveryError::Corrupt),
-        };
+        let mut root = unwrap_file_root(kek, &file)?;
         let mut payload = decode_payload(&root, &file.encrypted_payload)?;
         let mut merged = false;
         for name in self.managed_names()? {
@@ -278,14 +389,12 @@ impl ProfileKeyRecoveryStore {
             self.write_file(&encode_file(
                 &root,
                 file.wrapped_root.clone(),
+                file.pending_wrapped_root.clone(),
                 payload.cleanup_authorized,
                 &payload.secrets,
             )?)?;
             file = self.read_file()?;
-            root = match v1_aead::unwrap_master_key_xchacha(kek, &file.wrapped_root) {
-                Ok(root) => root,
-                Err(_) => return Err(ProfileKeyRecoveryError::Corrupt),
-            };
+            root = unwrap_file_root(kek, &file)?;
             let verified = decode_payload(&root, &file.encrypted_payload)?;
             if verified.cleanup_authorized != payload.cleanup_authorized
                 || verified.secrets != payload.secrets
@@ -297,6 +406,7 @@ impl ProfileKeyRecoveryStore {
         self.lock_state().active = Some(ActiveVault {
             root,
             wrapped_root: file.wrapped_root,
+            pending_wrapped_root: file.pending_wrapped_root,
             cleanup_authorized: payload.cleanup_authorized,
             secrets: payload.secrets,
         });
@@ -314,6 +424,7 @@ impl ProfileKeyRecoveryStore {
         self.write_file(&encode_file(
             &root,
             wrapped_root.clone(),
+            None,
             cleanup_authorized,
             &secrets,
         )?)?;
@@ -329,6 +440,7 @@ impl ProfileKeyRecoveryStore {
         self.lock_state().active = Some(ActiveVault {
             root: verified_root,
             wrapped_root: reread.wrapped_root,
+            pending_wrapped_root: reread.pending_wrapped_root,
             cleanup_authorized: verified.cleanup_authorized,
             secrets: verified.secrets,
         });
@@ -344,11 +456,13 @@ impl ProfileKeyRecoveryStore {
         let file = encode_file(
             &active.root,
             wrapped_root.clone(),
+            None,
             active.cleanup_authorized,
             &active.secrets,
         )?;
         self.write_file(&file)?;
         active.wrapped_root = wrapped_root;
+        active.pending_wrapped_root = None;
         Ok(true)
     }
 
@@ -363,6 +477,7 @@ impl ProfileKeyRecoveryStore {
         let file = encode_file(
             &active.root,
             active.wrapped_root.clone(),
+            active.pending_wrapped_root.clone(),
             true,
             &active.secrets,
         )?;
@@ -399,25 +514,33 @@ impl ProfileKeyRecoveryStore {
         Ok(secrets)
     }
 
-    fn required_legacy_material_missing(&self) -> Result<bool, ProfileKeyRecoveryError> {
-        let protected_profile = self.vault.join(".active-space-manifest-v2").try_exists()?;
+    fn legacy_material_losses(&self) -> Result<ProfileRecoveryLosses, ProfileKeyRecoveryError> {
+        if self.file.exists() {
+            return Ok(ProfileRecoveryLosses::default());
+        }
+        let protected_profile = self
+            .paths
+            .vault_dir
+            .join(".active-space-manifest-v2")
+            .try_exists()?;
         let protected_history = self
-            .vault
+            .paths
+            .vault_dir
             .join("profile-content-key-vault-v1.json")
             .try_exists()?;
-        for (name, needed) in [
-            (PROFILE_ADMISSION_KEY_NAME, protected_profile),
-            (
-                PROFILE_LIFECYCLE_MARKER_NAME,
-                protected_profile || protected_history,
-            ),
-            (PROFILE_CONTENT_VAULT_KEY_NAME, protected_history),
-        ] {
-            if needed && self.backing.get(name)?.is_none() {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        let lifecycle_missing = (protected_profile || protected_history)
+            && self.backing.get(PROFILE_LIFECYCLE_MARKER_NAME)?.is_none();
+        let local_control_state = protected_profile
+            && (lifecycle_missing || self.backing.get(PROFILE_ADMISSION_KEY_NAME)?.is_none());
+        let local_history = protected_history
+            && (lifecycle_missing || self.backing.get(PROFILE_CONTENT_VAULT_KEY_NAME)?.is_none());
+        let device_identity = (protected_profile || protected_history)
+            && self.backing.get(IDENTITY_STORE_KEY)?.is_none();
+        Ok(ProfileRecoveryLosses {
+            local_history,
+            local_control_state,
+            device_identity,
+        })
     }
 
     fn cleanup_legacy_entries(&self) -> Result<bool, ProfileKeyRecoveryError> {
@@ -449,7 +572,7 @@ impl ProfileKeyRecoveryStore {
             .into_iter()
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        let state_file = self.vault.join(DEFAULT_MIGRATION_STATE_FILE);
+        let state_file = self.paths.vault_dir.join(DEFAULT_MIGRATION_STATE_FILE);
         let bytes = match fs::read(&state_file) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(names),
@@ -475,6 +598,7 @@ impl ProfileKeyRecoveryStore {
         let file = match encode_file(
             &active.root,
             active.wrapped_root.clone(),
+            active.pending_wrapped_root.clone(),
             active.cleanup_authorized,
             &active.secrets,
         ) {
@@ -508,7 +632,7 @@ impl ProfileKeyRecoveryStore {
     }
 
     fn write_file(&self, file: &ProfileSecretFile) -> Result<(), ProfileKeyRecoveryError> {
-        fs::create_dir_all(&self.vault)?;
+        fs::create_dir_all(&self.paths.vault_dir)?;
         let bytes = match serde_json::to_vec(file) {
             Ok(bytes) => bytes,
             Err(source) => return Err(ProfileKeyRecoveryError::Storage(source.into())),
@@ -524,11 +648,23 @@ impl ProfileKeyRecoveryStore {
             .open(&temporary)?;
         output.write_all(&bytes)?;
         output.sync_all()?;
-        fs::rename(&temporary, &self.file)?;
-        OpenOptions::new()
-            .read(true)
-            .open(&self.vault)?
-            .sync_all()?;
+        replace_file(&temporary, &self.file)?;
+        sync_directory(&self.paths.vault_dir)?;
+        Ok(())
+    }
+
+    fn verify_file(
+        &self,
+        kek: &super::Kek,
+        secrets: &BTreeMap<String, Vec<u8>>,
+        cleanup_authorized: bool,
+    ) -> Result<(), ProfileKeyRecoveryError> {
+        let file = self.read_file()?;
+        let root = unwrap_file_root(kek, &file)?;
+        let payload = decode_payload(&root, &file.encrypted_payload)?;
+        if payload.cleanup_authorized != cleanup_authorized || payload.secrets != *secrets {
+            return Err(ProfileKeyRecoveryError::Corrupt);
+        }
         Ok(())
     }
 
@@ -644,6 +780,7 @@ fn is_managed_key(key: &str) -> bool {
 fn encode_file(
     root: &MasterKey,
     wrapped_root: EncryptedBlob,
+    pending_wrapped_root: Option<EncryptedBlob>,
     cleanup_authorized: bool,
     secrets: &BTreeMap<String, Vec<u8>>,
 ) -> Result<ProfileSecretFile, ProfileKeyRecoveryError> {
@@ -658,8 +795,29 @@ fn encode_file(
     Ok(ProfileSecretFile {
         format_version: FORMAT_VERSION,
         wrapped_root,
+        pending_wrapped_root,
         encrypted_payload: v1_aead::encrypt_blob_xchacha(root, &payload, PAYLOAD_AAD)?,
     })
+}
+
+fn wrapped_root_matches(kek: &super::Kek, wrapped: &EncryptedBlob, expected: &MasterKey) -> bool {
+    v1_aead::unwrap_master_key_xchacha(kek, wrapped).is_ok_and(|root| root == *expected)
+}
+
+fn unwrap_file_root(
+    kek: &super::Kek,
+    file: &ProfileSecretFile,
+) -> Result<MasterKey, ProfileKeyRecoveryError> {
+    if let Ok(root) = v1_aead::unwrap_master_key_xchacha(kek, &file.wrapped_root) {
+        return Ok(root);
+    }
+    let Some(pending) = &file.pending_wrapped_root else {
+        return Err(ProfileKeyRecoveryError::Corrupt);
+    };
+    match v1_aead::unwrap_master_key_xchacha(kek, pending) {
+        Ok(root) => Ok(root),
+        Err(_) => Err(ProfileKeyRecoveryError::Corrupt),
+    }
 }
 
 fn decode_payload(
@@ -705,6 +863,10 @@ mod tests {
 
     const UPGRADE_BACKUP_KEY: &str = "profile_upgrade_backup_record_key:v1";
 
+    fn test_paths(directory: &tempfile::TempDir) -> AppPaths {
+        AppPaths::with_base_data_local_dir(directory.path().to_path_buf())
+    }
+
     #[derive(Default)]
     struct MemoryStorage {
         values: Mutex<BTreeMap<String, Vec<u8>>>,
@@ -740,12 +902,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let storage = Arc::new(MemoryStorage::default());
         let backing: Arc<dyn SecureStoragePort> = storage.clone();
+        let paths = test_paths(&directory);
+        let profile_id = uc_core::ids::ProfileId::new().into_inner();
         let scope = KeyScope {
-            profile_id: "default".to_owned(),
+            profile_id: profile_id.clone(),
         };
         let material = KeyMaterialStore::new(
             Arc::clone(&backing),
-            Arc::new(JsonKeySlotStore::new(directory.path().to_path_buf())),
+            Arc::new(JsonKeySlotStore::new(paths.vault_dir.clone())),
         );
         let draft = KeySlot::draft_v1(scope.clone()).unwrap();
         let legacy = LegacyPassphrase("migration passphrase".to_owned());
@@ -767,11 +931,7 @@ mod tests {
             storage.set(name, value).unwrap();
         }
 
-        let recovery = ProfileKeyRecoveryStore::new(
-            directory.path().to_path_buf(),
-            "default".to_owned(),
-            backing,
-        );
+        let recovery = ProfileKeyRecoveryStore::new(paths.clone(), profile_id.clone(), backing);
         assert_eq!(
             recovery.prepare_startup().await.unwrap(),
             ProfileRecoveryPreparation::Ready
@@ -803,11 +963,7 @@ mod tests {
         }
 
         storage.fail_delete.store(false, Ordering::Release);
-        let restarted = ProfileKeyRecoveryStore::new(
-            directory.path().to_path_buf(),
-            "default".to_owned(),
-            storage.clone(),
-        );
+        let restarted = ProfileKeyRecoveryStore::new(paths, profile_id, storage.clone());
         assert_eq!(
             restarted.prepare_startup().await.unwrap(),
             ProfileRecoveryPreparation::Ready
@@ -824,12 +980,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let storage = Arc::new(MemoryStorage::default());
         let backing: Arc<dyn SecureStoragePort> = storage.clone();
+        let paths = test_paths(&directory);
+        let profile_id = uc_core::ids::ProfileId::new().into_inner();
         let scope = KeyScope {
-            profile_id: "default".to_owned(),
+            profile_id: profile_id.clone(),
         };
         let material = KeyMaterialStore::new(
             Arc::clone(&backing),
-            Arc::new(JsonKeySlotStore::new(directory.path().to_path_buf())),
+            Arc::new(JsonKeySlotStore::new(paths.vault_dir.clone())),
         );
         let draft = KeySlot::draft_v1(scope.clone()).unwrap();
         let legacy = LegacyPassphrase("migration passphrase".to_owned());
@@ -853,11 +1011,8 @@ mod tests {
         {
             storage.set(name, &[index as u8 + 1; 32]).unwrap();
         }
-        let original = ProfileKeyRecoveryStore::new(
-            directory.path().to_path_buf(),
-            "default".to_owned(),
-            Arc::clone(&backing),
-        );
+        let original =
+            ProfileKeyRecoveryStore::new(paths.clone(), profile_id.clone(), Arc::clone(&backing));
         assert_eq!(
             original.prepare_startup().await.unwrap(),
             ProfileRecoveryPreparation::Ready
@@ -869,17 +1024,15 @@ mod tests {
                 .unwrap(),
             ProfileRecoveryOutcome::Ready
         );
+        let recovery_file = original.vault_file().to_owned();
         drop(original);
 
         let expected = vec![9; 32];
         storage.set(UPGRADE_BACKUP_KEY, &expected).unwrap();
-        let interrupted_path = directory.path().join("profile-secrets-v1.preparing");
+        let interrupted_path = recovery_file.with_extension("preparing");
         std::fs::create_dir(&interrupted_path).unwrap();
-        let interrupted = ProfileKeyRecoveryStore::new(
-            directory.path().to_path_buf(),
-            "default".to_owned(),
-            Arc::clone(&backing),
-        );
+        let interrupted =
+            ProfileKeyRecoveryStore::new(paths.clone(), profile_id.clone(), Arc::clone(&backing));
         assert!(interrupted.prepare_startup().await.is_err());
         assert_eq!(
             storage.get(UPGRADE_BACKUP_KEY).unwrap(),
@@ -888,11 +1041,8 @@ mod tests {
         std::fs::remove_dir(&interrupted_path).unwrap();
 
         storage.fail_delete.store(true, Ordering::Release);
-        let pending_cleanup = ProfileKeyRecoveryStore::new(
-            directory.path().to_path_buf(),
-            "default".to_owned(),
-            Arc::clone(&backing),
-        );
+        let pending_cleanup =
+            ProfileKeyRecoveryStore::new(paths.clone(), profile_id.clone(), Arc::clone(&backing));
         assert_eq!(
             pending_cleanup.prepare_startup().await.unwrap(),
             ProfileRecoveryPreparation::Ready
@@ -909,11 +1059,7 @@ mod tests {
         drop(pending_cleanup);
 
         storage.fail_delete.store(false, Ordering::Release);
-        let completed = ProfileKeyRecoveryStore::new(
-            directory.path().to_path_buf(),
-            "default".to_owned(),
-            storage.clone(),
-        );
+        let completed = ProfileKeyRecoveryStore::new(paths, profile_id, storage.clone());
         assert_eq!(
             completed.prepare_startup().await.unwrap(),
             ProfileRecoveryPreparation::Ready
@@ -921,5 +1067,72 @@ mod tests {
         assert_eq!(completed.get(UPGRADE_BACKUP_KEY).unwrap(), Some(expected));
         assert!(storage.get(UPGRADE_BACKUP_KEY).unwrap().is_none());
         assert!(!completed.cleanup_pending());
+    }
+
+    #[test]
+    fn passphrase_change_file_survives_restart_at_each_persisted_phase() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage: Arc<dyn SecureStoragePort> = Arc::new(MemoryStorage::default());
+        let profile_id = uc_core::ids::ProfileId::new().into_inner();
+        let paths = test_paths(&directory);
+        let old_kek = Kek::from_bytes(&[0x51; 32]).unwrap();
+        let new_kek = Kek::from_bytes(&[0x52; 32]).unwrap();
+        let secrets = BTreeMap::from([(PROFILE_ADMISSION_KEY_NAME.to_owned(), vec![0x53; 32])]);
+
+        let original =
+            ProfileKeyRecoveryStore::new(paths.clone(), profile_id.clone(), Arc::clone(&storage));
+        original
+            .create_and_activate(&old_kek, secrets.clone(), true)
+            .unwrap();
+        original.prepare_passphrase_change(&new_kek).unwrap();
+        drop(original);
+
+        let before_keyslot_change =
+            ProfileKeyRecoveryStore::new(paths.clone(), profile_id.clone(), Arc::clone(&storage));
+        before_keyslot_change.activate_existing(&old_kek).unwrap();
+        drop(before_keyslot_change);
+
+        let after_keyslot_change =
+            ProfileKeyRecoveryStore::new(paths.clone(), profile_id.clone(), Arc::clone(&storage));
+        after_keyslot_change.activate_existing(&new_kek).unwrap();
+        after_keyslot_change
+            .finish_passphrase_change(&new_kek)
+            .unwrap();
+        drop(after_keyslot_change);
+
+        let completed = ProfileKeyRecoveryStore::new(paths, profile_id, storage);
+        assert!(completed.activate_existing(&old_kek).is_err());
+        completed.activate_existing(&new_kek).unwrap();
+        assert_eq!(
+            completed.get(PROFILE_ADMISSION_KEY_NAME).unwrap(),
+            Some(vec![0x53; 32])
+        );
+    }
+
+    #[test]
+    fn suspended_vault_reopens_from_persisted_material() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Arc::new(MemoryStorage::default());
+        let backing: Arc<dyn SecureStoragePort> = storage.clone();
+        let profile_id = uc_core::ids::ProfileId::new().into_inner();
+        let paths = test_paths(&directory);
+        let kek = Kek::from_bytes(&[0x61; 32]).unwrap();
+        let expected = vec![0x62; 32];
+        let recovery = ProfileKeyRecoveryStore::new(paths, profile_id, backing);
+        recovery
+            .create_and_activate(
+                &kek,
+                BTreeMap::from([(PROFILE_CONTENT_VAULT_KEY_NAME.to_owned(), expected.clone())]),
+                true,
+            )
+            .unwrap();
+        storage.set(&recovery.kek_name, kek.as_bytes()).unwrap();
+
+        recovery.suspend();
+
+        assert_eq!(
+            recovery.get(PROFILE_CONTENT_VAULT_KEY_NAME).unwrap(),
+            Some(expected)
+        );
     }
 }

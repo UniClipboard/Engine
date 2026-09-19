@@ -146,8 +146,10 @@ impl ProductionRuntime {
     pub(crate) async fn start(
         config: EngineConfig,
         host: HostCapabilities,
+        paths: uc_core::app_dirs::AppPaths,
         events: EventSender,
         progress: Arc<crate::engine::startup::StartupProgressStore>,
+        profile_key_recovery: Arc<uc_infra::security::ProfileKeyRecoveryStore>,
     ) -> Result<Self, EngineError> {
         let app_version = config.app_version().to_string();
         let rendezvous_base_url = config.rendezvous_base_url_override();
@@ -156,8 +158,15 @@ impl ProductionRuntime {
         #[cfg(feature = "dev-tools")]
         let network_partition_gate = uc_infra::network::iroh::IrohNetworkPartitionGate::default();
         let emitter = Arc::new(EngineHostEventEmitter::new(events.clone()));
-        let wiring =
-            wire_host_capabilities_with_emitter(&config, host, emitter, progress.clone()).await;
+        let wiring = wire_host_capabilities_with_emitter(
+            &config,
+            host,
+            paths,
+            emitter,
+            progress.clone(),
+            profile_key_recovery,
+        )
+        .await;
         let HostWiring {
             wired,
             paths,
@@ -428,6 +437,8 @@ fn operation_error_with_code(
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "dev-tools")]
+    use crate::assembly::host::profile_key_recovery_store;
+    #[cfg(feature = "dev-tools")]
     use crate::engine::{event_stream::event_channel, EngineRuntime, StartupProgress};
     #[cfg(feature = "dev-tools")]
     use crate::testing::empty_engine_host;
@@ -470,11 +481,17 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (events, _stream) = event_channel(32);
         let (progress, _) = StartupProgress::channel();
+        let host = empty_engine_host(root.path());
+        let config = EngineConfig::new("1.2.3");
+        let paths = crate::assembly::host::derive_app_paths(host.directories());
+        let profile_key_recovery = profile_key_recovery_store(&config, &paths, &host);
         let runtime = ProductionRuntime::start(
-            EngineConfig::new("1.2.3"),
-            empty_engine_host(root.path()),
+            config,
+            host,
+            paths,
             events,
             Arc::clone(&progress.store),
+            profile_key_recovery,
         )
         .await
         .unwrap();

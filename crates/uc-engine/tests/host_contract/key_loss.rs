@@ -1,11 +1,12 @@
+#[cfg(feature = "dev-tools")]
 use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
 
 use uc_engine::{
     ChangeEncryptionPassphraseInput, CreateSpaceInput, Engine, EngineConfig, HistoryEntryInput,
-    Operation, OperationResult, ProfileRecoveryState, SecretString, SendTextInput, StartupProgress,
-    StartupState, UnlockSpaceInput,
+    Operation, OperationResult, ProfileRecoveryLoss, ProfileRecoveryState, SecretString,
+    SendTextInput, StartupProgress, StartupState, UnlockSpaceInput,
 };
 
 use super::{startup::host, MemorySecureStorage};
@@ -164,7 +165,7 @@ async fn wrong_unlock_key_recovers_with_original_passphrase() {
 
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
-        host(root.path(), Box::new(storage)),
+        host(root.path(), Box::new(storage.clone())),
     )
     .await
     .expect("wrong automatic unlock material must leave recovery accessible");
@@ -175,6 +176,44 @@ async fn wrong_unlock_key_recovers_with_original_passphrase() {
         .await
         .unwrap();
     assert_history(&engine, entry, "history before key loss").await;
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn committed_space_creation_is_not_reported_as_failed_when_recovery_refresh_fails() {
+    let root = tempfile::tempdir().unwrap();
+    let storage = MemorySecureStorage::default();
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host(root.path(), Box::new(storage)),
+    )
+    .await
+    .unwrap();
+    let interrupted_write = root
+        .path()
+        .join("private/vault/profile-secrets-v1.preparing");
+    std::fs::create_dir_all(&interrupted_write).unwrap();
+
+    engine
+        .execute(Operation::CreateSpace(CreateSpaceInput {
+            device_name: Some("refresh failure".into()),
+            passphrase: SecretString::new(PASSPHRASE),
+            passphrase_confirmation: SecretString::new(PASSPHRASE),
+        }))
+        .await
+        .unwrap();
+
+    let OperationResult::ProfileRecovery(summary) = engine
+        .execute(Operation::QueryProfileRecovery)
+        .await
+        .unwrap()
+    else {
+        panic!("expected recovery summary")
+    };
+    assert_eq!(summary.state, ProfileRecoveryState::Failed);
+    assert!(!summary.can_submit_passphrase);
+    assert!(!summary.restart_required);
+    assert!(summary.background_ready);
     engine.shutdown(Duration::from_secs(15)).await.unwrap();
 }
 
@@ -323,7 +362,7 @@ async fn legacy_keyring_loss_without_userdata_copy_reports_partial_recovery() {
 
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
-        host(root.path(), Box::new(storage)),
+        host(root.path(), Box::new(storage.clone())),
     )
     .await
     .unwrap();
@@ -336,12 +375,89 @@ async fn legacy_keyring_loss_without_userdata_copy_reports_partial_recovery() {
     };
     assert_eq!(summary.state, ProfileRecoveryState::PartiallyRecoverable);
     assert!(!summary.losses.is_empty());
+    assert!(!summary.can_submit_passphrase);
     assert!(engine
         .execute(Operation::UnlockSpace(UnlockSpaceInput {
             passphrase: SecretString::new(PASSPHRASE),
         }))
         .await
         .is_err());
+    let OperationResult::ProfileRecovery(summary) = engine
+        .execute(Operation::QueryProfileRecovery)
+        .await
+        .unwrap()
+    else {
+        panic!("expected terminal partial recovery summary")
+    };
+    assert_eq!(summary.state, ProfileRecoveryState::PartiallyRecoverable);
+    assert!(!summary.can_submit_passphrase);
+    assert!(storage.values().is_empty());
+    assert!(!root
+        .path()
+        .join("private/vault/profile-secrets-v1")
+        .exists());
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+    drop(engine);
+
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host(root.path(), Box::new(storage)),
+    )
+    .await
+    .unwrap();
+    let OperationResult::ProfileRecovery(summary) = engine
+        .execute(Operation::QueryProfileRecovery)
+        .await
+        .unwrap()
+    else {
+        panic!("expected partial recovery after restart")
+    };
+    assert_eq!(summary.state, ProfileRecoveryState::PartiallyRecoverable);
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_legacy_device_identity_reports_only_identity_loss() {
+    let root = tempfile::tempdir().unwrap();
+    let storage = MemorySecureStorage::default();
+    let (_entry, _kek_name) = create_profile(root.path(), &storage).await;
+    std::fs::remove_file(root.path().join("private/vault/profile-secrets-v1")).unwrap();
+    storage.values().clear();
+    let retained = storage
+        .removed_values()
+        .iter()
+        .filter(|(name, _)| name.as_str() != "iroh-identity:v1")
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect::<Vec<_>>();
+    storage.values().extend(retained);
+
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host(root.path(), Box::new(storage.clone())),
+    )
+    .await
+    .unwrap();
+    let OperationResult::ProfileRecovery(summary) = engine
+        .execute(Operation::QueryProfileRecovery)
+        .await
+        .unwrap()
+    else {
+        panic!("expected identity loss recovery summary")
+    };
+    assert_eq!(summary.state, ProfileRecoveryState::PartiallyRecoverable);
+    assert_eq!(summary.losses, vec![ProfileRecoveryLoss::DeviceIdentity]);
+    assert!(!summary.can_submit_passphrase);
+    assert!(engine
+        .execute(Operation::UnlockSpace(UnlockSpaceInput {
+            passphrase: SecretString::new(PASSPHRASE),
+        }))
+        .await
+        .is_err());
+    assert!(!storage.values().contains_key("iroh-identity:v1"));
+    assert!(!root
+        .path()
+        .join("private/vault/profile-secrets-v1")
+        .exists());
     engine.shutdown(Duration::from_secs(15)).await.unwrap();
 }
 

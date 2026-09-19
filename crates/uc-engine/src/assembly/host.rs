@@ -291,6 +291,19 @@ pub fn derive_app_paths(directories: &HostDirectories) -> AppPaths {
     })
 }
 
+pub(crate) fn profile_key_recovery_store(
+    config: &EngineConfig,
+    paths: &AppPaths,
+    host: &HostCapabilities,
+) -> Arc<uc_infra::security::ProfileKeyRecoveryStore> {
+    let backing = adapt_shared_secure_storage(Arc::clone(&host.secure_storage));
+    Arc::new(uc_infra::security::ProfileKeyRecoveryStore::new(
+        paths.clone(),
+        config.profile_id().to_owned(),
+        backing,
+    ))
+}
+
 fn adapt_system_clipboard_layer(
     host: Box<dyn HostClipboard>,
     files: Arc<dyn HostFileAccess>,
@@ -439,11 +452,15 @@ pub async fn wire_host_capabilities(
     host: HostCapabilities,
 ) -> WiringResult<HostWiring> {
     let (progress, _) = crate::StartupProgress::channel();
+    let paths = derive_app_paths(host.directories());
+    let profile_key_recovery = profile_key_recovery_store(config, &paths, &host);
     wire_host_capabilities_with_emitter(
         config,
         host,
+        paths,
         Arc::new(NoopHostEventEmitter),
         progress.store.clone(),
+        profile_key_recovery,
     )
     .await
 }
@@ -451,11 +468,12 @@ pub async fn wire_host_capabilities(
 pub(crate) async fn wire_host_capabilities_with_emitter(
     config: &EngineConfig,
     host: HostCapabilities,
+    paths: AppPaths,
     host_event_emitter: Arc<dyn HostEventEmitterPort>,
     startup_progress: Arc<StartupProgressStore>,
+    profile_key_recovery: Arc<uc_infra::security::ProfileKeyRecoveryStore>,
 ) -> WiringResult<HostWiring> {
     let (directories, secure_storage, mut clipboard, files, analytics) = host.into_parts();
-    let paths = derive_app_paths(&directories);
     let secure_storage = adapt_shared_secure_storage(secure_storage);
     let app_data_root = paths.app_data_root_dir.clone();
     let profile_upgrade_backups: Arc<dyn ProfileUpgradeBackupPort> =
@@ -526,6 +544,7 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
         )),
         host_event_emitter,
         startup_progress,
+        profile_key_recovery,
     })
     .await?;
 
