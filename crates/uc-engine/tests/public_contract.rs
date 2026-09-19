@@ -34,6 +34,7 @@ fn observability_contract_is_available_through_engine() {
     );
     let _ = uc_engine::observability::SystemLogFormat::HumanReadable;
     let _ = uc_engine::observability::ProcessObservabilityRuntime::install_with_system_log_format;
+    let _ = uc_engine::observability::ProcessObservabilityRuntime::install_with_host_layers_and_system_log_format;
 }
 
 #[test]

@@ -861,6 +861,8 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 ## 文档维护记录
 
+- 2026-09-19：进程观测运行时补充同时接收宿主日志层与系统日志格式的单次安装入口，桌面宿主无需在保留自身日志和选择 Engine 系统输出格式之间取舍；subscriber 所有权、过滤边界、默认 JSON 行为和 `ObservabilityConfig` 公开字段保持不变。
+
 - 2026-09-19：系统日志格式改由 `ProcessObservabilityRuntime::install_with_system_log_format` 显式传入，既有安装入口继续默认 JSON；`ObservabilityConfig` 保持原有公开字段集合，避免破坏 1.1.0-rc.17 struct literal 调用方。输出格式、隐私过滤和平台边界不变。
 
 - 2026-09-19：非 Apple、非 Android 宿主可在进程观测安装时选择关闭、JSON、无色人类可读或带 ANSI 颜色的人类可读 Engine 系统日志格式，默认继续使用 JSON；本地诊断文件仍固定为 JSONL，系统输出继续只接收 Engine 批准的事件，宿主层不能绕过既有 Engine 与网络隐私过滤。Apple OSLog、Android Logcat、业务流程和重试责任不变。

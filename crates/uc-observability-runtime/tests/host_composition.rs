@@ -49,10 +49,14 @@ fn system_console_child() {
         .expect("resource"),
     )
     .with_local_logs(LocalLogConfig::new(directory));
-    let handle =
-        ProcessObservabilityRuntime::install_with_system_log_format(config.clone(), format)
-            .expect("install")
-            .handle();
+    let host_layer: HostLogLayer = Box::new(tracing_subscriber::layer::Identity::new());
+    let handle = ProcessObservabilityRuntime::install_with_host_layers_and_system_log_format(
+        config.clone(),
+        vec![host_layer],
+        format,
+    )
+    .expect("install")
+    .handle();
     assert!(matches!(
         ProcessObservabilityRuntime::install_with_system_log_format(config.clone(), format),
         Ok(InstallOutcome::Reused(_))

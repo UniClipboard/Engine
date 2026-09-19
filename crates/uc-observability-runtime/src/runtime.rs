@@ -52,6 +52,15 @@ impl ProcessObservabilityRuntime {
         Self::install_configured(config, SystemLogFormat::Json, host_layers)
     }
 
+    /// 在首次安装时同时选择系统诊断输出格式并保留宿主日志层。
+    pub fn install_with_host_layers_and_system_log_format(
+        config: ObservabilityConfig,
+        host_layers: Vec<HostLogLayer>,
+        system_log_format: SystemLogFormat,
+    ) -> Result<InstallOutcome, InstallError> {
+        Self::install_configured(config, system_log_format, host_layers)
+    }
+
     fn install_configured(
         config: ObservabilityConfig,
         system_log_format: SystemLogFormat,

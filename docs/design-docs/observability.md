@@ -154,7 +154,7 @@ handler 创建。强行交给 Engine 会迫使 Core/Application message 增加 c
 宿主先安装运行时，再创建任意 Engine。相同配置重复安装返回复用结果，不同配置明确失败。远程构造或发送失败只使远程能力降级，
 不改变 Engine 启动和业务结果。业务线程只尝试把记录放入有界容量门和官方 batch processor；容量门发生争用或队列满时立即丢弃
 并计数，不等待锁或网络。关闭线程串行封口后再等待后台发送，因此关闭后不会接受新记录。
-非 Apple、非 Android 宿主通过 `ProcessObservabilityRuntime::install_with_system_log_format` 和 `SystemLogFormat` 选择系统输出；既有 `install` 与 `install_with_host_layers` 入口默认 JSON，以保持 `ObservabilityConfig` 的公开 struct literal 源码兼容。交互终端可选择带 ANSI 颜色的人类可读格式，重定向场景可选择无色人类可读格式，也可明确关闭。
+非 Apple、非 Android 宿主通过 `ProcessObservabilityRuntime::install_with_system_log_format` 和 `SystemLogFormat` 选择系统输出；需要同时保留宿主日志层时使用 `install_with_host_layers_and_system_log_format`。既有 `install` 与 `install_with_host_layers` 入口默认 JSON，以保持 `ObservabilityConfig` 的公开 struct literal 源码兼容。交互终端可选择带 ANSI 颜色的人类可读格式，重定向场景可选择无色人类可读格式，也可明确关闭。
 格式选择只作用于已经通过 Engine 白名单的系统输出，本地持久化仍固定为 JSONL，宿主日志层仍不能接收 Engine 或网络原始记录。
 容量门与 exporter wrapper 只统计发送前丢弃总数和最终发送失败，不复制官方批处理、线程或刷新逻辑。发送前丢弃包括格式拒绝、
 锁争用、队列已满和运行时已关闭，首个原因使用不同固定分类记录；累计字段不冒充单独的队列满计数。`health()` 还返回失败批次数
@@ -336,7 +336,8 @@ SDK TraceId/SpanId 位于顶层，缺失时省略。远程关闭不影响本地�
 抑制时仍能记录健康结果。两个入口的 target 集合互斥，不会重复写入同一记录。
 
 桌面等已有日志输出的宿主使用 `ProcessObservabilityRuntime::install_with_host_layers` 在一次安装中
-提交标准 tracing Layer。共同运行时将核心记录与宿主记录分组过滤；宿主层不能接收核心合同事件、
+提交标准 tracing Layer；需要非默认系统输出格式时改用 `install_with_host_layers_and_system_log_format`，
+仍由同一次安装同时提交格式和宿主层。共同运行时将核心记录与宿主记录分组过滤；宿主层不能接收核心合同事件、
 核心普通模块或网络依赖的原始诊断，不会复制核心文件记录或通过旧上传层外发本地详情。该能力由
 `uc-engine::observability` 重导出，只用于进程装配，不涉及业务阶段查询。额外宿主层只能首次提供，
 后续带新宿主层的安装请求明确失败；普通相同配置安装仍可复用。核心远程输出仍需要明确配置。
