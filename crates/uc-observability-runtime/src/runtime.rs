@@ -11,7 +11,7 @@ use uc_observability_contract::diagnostics::{
     HEALTH_TARGET, LOCAL_DIAGNOSTIC_TARGET, TELEMETRY_TARGET,
 };
 
-use crate::config::ObservabilityConfig;
+use crate::config::{ObservabilityConfig, SystemLogFormat};
 use crate::filter::local_sink_enabled;
 use crate::local_file::LocalFileRuntime;
 use crate::status::{
@@ -33,7 +33,14 @@ pub struct ProcessObservabilityRuntime;
 
 impl ProcessObservabilityRuntime {
     pub fn install(config: ObservabilityConfig) -> Result<InstallOutcome, InstallError> {
-        Self::install_with_host_layers(config, Vec::new())
+        Self::install_configured(config, SystemLogFormat::Json, Vec::new())
+    }
+
+    pub fn install_with_system_log_format(
+        config: ObservabilityConfig,
+        system_log_format: SystemLogFormat,
+    ) -> Result<InstallOutcome, InstallError> {
+        Self::install_configured(config, system_log_format, Vec::new())
     }
 
     /// 在同一个进程 subscriber 中保留宿主日志输出。宿主层仅可在首次安装时提供，
@@ -42,11 +49,22 @@ impl ProcessObservabilityRuntime {
         config: ObservabilityConfig,
         host_layers: Vec<HostLogLayer>,
     ) -> Result<InstallOutcome, InstallError> {
+        Self::install_configured(config, SystemLogFormat::Json, host_layers)
+    }
+
+    fn install_configured(
+        config: ObservabilityConfig,
+        system_log_format: SystemLogFormat,
+        host_layers: Vec<HostLogLayer>,
+    ) -> Result<InstallOutcome, InstallError> {
         let _install_guard = INSTALL_GUARD
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(installed) = INSTALLED.get() {
-            if installed.config == config && host_layers.is_empty() {
+            if installed.config == config
+                && installed.system_log_format == system_log_format
+                && host_layers.is_empty()
+            {
                 return Ok(InstallOutcome::Reused(ProcessObservabilityHandle {
                     state: Arc::clone(installed),
                 }));
@@ -54,7 +72,7 @@ impl ProcessObservabilityRuntime {
             return Err(InstallError::AlreadyInstalled);
         }
 
-        let (state, subscriber) = build_runtime(config, host_layers);
+        let (state, subscriber) = build_runtime(config, system_log_format, host_layers);
         tracing::subscriber::set_global_default(subscriber)
             .map_err(|_| InstallError::SubscriberAlreadyInstalled)?;
         let _ = tracing_log::LogTracer::init();
@@ -339,6 +357,7 @@ impl ProcessObservabilityHandle {
 
 struct RuntimeState {
     config: ObservabilityConfig,
+    system_log_format: SystemLogFormat,
     telemetry: TelemetryRuntime,
     health: ObservabilityHealth,
     local_file: Option<Arc<LocalFileRuntime>>,
@@ -349,6 +368,7 @@ struct RuntimeState {
 
 fn build_runtime(
     config: ObservabilityConfig,
+    system_log_format: SystemLogFormat,
     host_layers: Vec<HostLogLayer>,
 ) -> (Arc<RuntimeState>, impl tracing::Subscriber + Send + Sync) {
     let health_accepting = Arc::new(AtomicBool::new(true));
@@ -367,7 +387,7 @@ fn build_runtime(
     let (telemetry, remote) = TelemetryRuntime::new(&config, local_file.clone());
     let telemetry_accepting = telemetry.accepting();
     layers.extend(telemetry.layers());
-    layers.extend(system_layer(config.system_log_format));
+    layers.extend(system_layer(system_log_format));
     let global_telemetry_accepting = Arc::clone(&telemetry_accepting);
     let global_health_accepting = Arc::clone(&health_accepting);
     let engine_layer = layers.with_filter(dynamic_filter_fn(move |metadata, _| {
@@ -387,6 +407,7 @@ fn build_runtime(
     let subscriber = tracing_subscriber::registry().with(all_layers);
     let state = Arc::new(RuntimeState {
         config,
+        system_log_format,
         telemetry,
         health: ObservabilityHealth {
             remote,
@@ -771,7 +792,7 @@ mod tests {
                 .expect("资源配置"),
             )
             .with_local_logs(LocalLogConfig::new(directory.path()));
-            let (state, _subscriber) = build_runtime(config, Vec::new());
+            let (state, _subscriber) = build_runtime(config, SystemLogFormat::Json, Vec::new());
             let handle = ProcessObservabilityHandle { state };
             if initially_active {
                 handle

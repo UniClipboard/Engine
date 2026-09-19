@@ -310,7 +310,6 @@ pub struct ObservabilityConfig {
     pub resource: ObservabilityResource,
     pub local_logs: Option<LocalLogConfig>,
     pub remote: Option<OtlpHttpConfig>,
-    pub system_log_format: SystemLogFormat,
 }
 
 impl ObservabilityConfig {
@@ -319,7 +318,6 @@ impl ObservabilityConfig {
             resource,
             local_logs: None,
             remote: None,
-            system_log_format: SystemLogFormat::Json,
         }
     }
 
@@ -332,11 +330,6 @@ impl ObservabilityConfig {
         self.remote = Some(config);
         self
     }
-
-    pub fn with_system_log_format(mut self, format: SystemLogFormat) -> Self {
-        self.system_log_format = format;
-        self
-    }
 }
 
 impl fmt::Debug for ObservabilityConfig {
@@ -346,7 +339,6 @@ impl fmt::Debug for ObservabilityConfig {
             .field("resource", &self.resource)
             .field("local_logs", &self.local_logs)
             .field("remote", &self.remote)
-            .field("system_log_format", &self.system_log_format)
             .finish()
     }
 }

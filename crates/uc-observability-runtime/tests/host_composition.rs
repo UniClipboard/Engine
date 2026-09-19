@@ -48,11 +48,24 @@ fn system_console_child() {
         )
         .expect("resource"),
     )
-    .with_local_logs(LocalLogConfig::new(directory))
-    .with_system_log_format(format);
-    let handle = ProcessObservabilityRuntime::install(config)
-        .expect("install")
-        .handle();
+    .with_local_logs(LocalLogConfig::new(directory));
+    let handle =
+        ProcessObservabilityRuntime::install_with_system_log_format(config.clone(), format)
+            .expect("install")
+            .handle();
+    assert!(matches!(
+        ProcessObservabilityRuntime::install_with_system_log_format(config.clone(), format),
+        Ok(InstallOutcome::Reused(_))
+    ));
+    let conflicting_format = if format == SystemLogFormat::Disabled {
+        SystemLogFormat::Json
+    } else {
+        SystemLogFormat::Disabled
+    };
+    assert!(matches!(
+        ProcessObservabilityRuntime::install_with_system_log_format(config, conflicting_format),
+        Err(InstallError::AlreadyInstalled)
+    ));
     complete_admission_authentication_failure(
         AuthenticationFailure::ContinuationCredential(CredentialFailure::RecordMissing),
         Duration::from_millis(3),
