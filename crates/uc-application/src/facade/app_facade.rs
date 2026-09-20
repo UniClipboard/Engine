@@ -114,7 +114,10 @@ mod device_group_choice_error_tests {
 use crate::clipboard::active::ActiveClipboardFacade;
 use crate::clipboard::history::maintenance_runtime::HistoryMaintenanceRuntime;
 use crate::device::query_local_device::QueryLocalDeviceUseCase;
-use crate::facade::settings::{GeneralSettingsPatch, SettingsPatch};
+use crate::facade::settings::{
+    GeneralSettingsPatch, RelayConfigurationEntry, RelayConfigurationMutation,
+    RelayConfigurationRejection, SettingsPatch,
+};
 use crate::facade::space_setup::{
     InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
     IssuePairingInvitationResult, PairingInvitationAddressCandidate,
@@ -824,6 +827,20 @@ impl AppFacade {
         edit: crate::facade::settings::RelayCredentialEdit,
     ) -> Result<crate::facade::settings::RelaySaveView, SettingsFacadeError> {
         self.settings.save_relay(patch, edit).await
+    }
+
+    pub async fn list_relays(&self) -> Result<Vec<RelayConfigurationEntry>, SettingsFacadeError> {
+        self.settings.list_relays().await
+    }
+
+    pub async fn mutate_relays(
+        &self,
+        mutation: RelayConfigurationMutation,
+    ) -> Result<
+        Result<Vec<RelayConfigurationEntry>, RelayConfigurationRejection>,
+        SettingsFacadeError,
+    > {
+        self.settings.mutate_relays(mutation).await
     }
 
     pub fn relay_credential_status(
