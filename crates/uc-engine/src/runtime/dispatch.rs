@@ -206,7 +206,11 @@ impl EngineRuntime for ProductionRuntime {
                         .await
                 }
                 Operation::IssueInvitation => {
-                    execute_issue_invitation(self.current_facade().await?.as_ref()).await
+                    execute_issue_invitation(
+                        self.current_facade().await?.as_ref(),
+                        self.analytics.as_ref(),
+                    )
+                    .await
                 }
                 Operation::CancelInvitation => {
                     execute_cancel_invitation(self.current_facade().await?.as_ref()).await

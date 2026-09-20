@@ -78,11 +78,6 @@ impl PairingInvitationIssuer {
                 InvitationAvailability::SameLocalNetwork,
             ),
         };
-        self.analytics.capture(Event::PairingInvitationIssued {
-            code_source,
-            lan_only_mode,
-        });
-
         let issued_at = self.now_utc()?;
         let device_id = self.device_identity.current_device_id();
         let (invitation, _) = PairingInvitation::issue(
@@ -95,6 +90,10 @@ impl PairingInvitationIssuer {
             admission_generation,
         );
         self.holder.insert(invitation).await;
+        self.analytics.capture(Event::PairingInvitationIssued {
+            code_source,
+            lan_only_mode,
+        });
 
         Ok(IssuePairingInvitationResult {
             code: issued.code,
