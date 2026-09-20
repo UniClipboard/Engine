@@ -6,14 +6,15 @@
 use tracing::error;
 use uc_application::facade::{AppFacade, IssuePairingInvitationError};
 
+use crate::error_codes::{
+    INVITATION_DIRECTORY_INVALID_RESPONSE_CODE, INVITATION_DIRECTORY_REJECTED_CODE,
+    INVITATION_DIRECTORY_TRANSPORT_FAILED_CODE, INVITATION_FAILED_CODE,
+    INVITATION_INVALID_INPUT_CODE, INVITATION_INVALID_STATE_CODE,
+    INVITATION_LOCAL_PUBLICATION_FAILED_CODE, INVITATION_NO_LOCAL_ADDRESS_CODE,
+    INVITATION_RECONCILIATION_PENDING_CODE, INVITATION_RECOVERY_REQUIRED_CODE,
+    INVITATION_UNAVAILABLE_CODE,
+};
 use crate::{EngineError, EngineErrorCategory, InvitationAvailability, OperationResult};
-
-const INVITATION_INVALID_STATE_CODE: u32 = 1221;
-const INVITATION_INVALID_INPUT_CODE: u32 = 1222;
-const INVITATION_UNAVAILABLE_CODE: u32 = 1223;
-const INVITATION_FAILED_CODE: u32 = 1224;
-const INVITATION_RECONCILIATION_PENDING_CODE: u32 = 1225;
-const INVITATION_RECOVERY_REQUIRED_CODE: u32 = 1226;
 
 pub async fn execute_issue_invitation(facade: &AppFacade) -> Result<OperationResult, EngineError> {
     let invitation = facade
@@ -40,6 +41,31 @@ fn map_issue_invitation_error(error: IssuePairingInvitationError) -> EngineError
         IssuePairingInvitationError::NetworkNotStarted => EngineError::new(
             INVITATION_INVALID_STATE_CODE,
             EngineErrorCategory::InvalidState,
+            true,
+        ),
+        IssuePairingInvitationError::NoPublishableAddress { .. } => EngineError::new(
+            INVITATION_NO_LOCAL_ADDRESS_CODE,
+            EngineErrorCategory::Unavailable,
+            true,
+        ),
+        IssuePairingInvitationError::LocalPublicationFailed { .. } => EngineError::new(
+            INVITATION_LOCAL_PUBLICATION_FAILED_CODE,
+            EngineErrorCategory::Unavailable,
+            true,
+        ),
+        IssuePairingInvitationError::DirectoryTransportFailed { .. } => EngineError::new(
+            INVITATION_DIRECTORY_TRANSPORT_FAILED_CODE,
+            EngineErrorCategory::Unavailable,
+            true,
+        ),
+        IssuePairingInvitationError::DirectoryRejected { .. } => EngineError::new(
+            INVITATION_DIRECTORY_REJECTED_CODE,
+            EngineErrorCategory::InvalidState,
+            false,
+        ),
+        IssuePairingInvitationError::DirectoryInvalidResponse { .. } => EngineError::new(
+            INVITATION_DIRECTORY_INVALID_RESPONSE_CODE,
+            EngineErrorCategory::Unavailable,
             true,
         ),
         IssuePairingInvitationError::MembershipReconciliationInProgress => EngineError::new(
@@ -105,6 +131,61 @@ mod tests {
             assert_eq!(error.code(), code);
             assert_eq!(error.category(), EngineErrorCategory::InvalidState);
             assert_eq!(error.is_retryable(), retryable);
+        }
+    }
+
+    #[test]
+    fn invitation_publication_failures_keep_stable_public_codes() {
+        let cases = [
+            (
+                IssuePairingInvitationError::NoPublishableAddress {
+                    source: anyhow::anyhow!("private address detail"),
+                },
+                1227,
+                EngineErrorCategory::Unavailable,
+                true,
+            ),
+            (
+                IssuePairingInvitationError::LocalPublicationFailed {
+                    source: anyhow::anyhow!("private socket detail"),
+                },
+                1228,
+                EngineErrorCategory::Unavailable,
+                true,
+            ),
+            (
+                IssuePairingInvitationError::DirectoryTransportFailed {
+                    source: anyhow::anyhow!("private transport detail"),
+                },
+                1229,
+                EngineErrorCategory::Unavailable,
+                true,
+            ),
+            (
+                IssuePairingInvitationError::DirectoryRejected {
+                    source: anyhow::anyhow!("private response detail"),
+                },
+                1230,
+                EngineErrorCategory::InvalidState,
+                false,
+            ),
+            (
+                IssuePairingInvitationError::DirectoryInvalidResponse {
+                    source: anyhow::anyhow!("private response body"),
+                },
+                1231,
+                EngineErrorCategory::Unavailable,
+                true,
+            ),
+        ];
+
+        for (source, code, category, retryable) in cases {
+            let error = map_issue_invitation_error(source);
+            assert_eq!(error.code(), code);
+            assert_eq!(error.category(), category);
+            assert_eq!(error.is_retryable(), retryable);
+            let public = error.to_string();
+            assert!(!public.contains("private"));
         }
     }
 }

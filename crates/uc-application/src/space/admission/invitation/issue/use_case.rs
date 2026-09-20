@@ -482,6 +482,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preserves_directory_rejection_source() {
+        let port = Arc::new(FakeInvitationPort::with_err(
+            InvitationError::DirectoryRejected {
+                source: anyhow::anyhow!("original directory failure"),
+            },
+        ));
+        let h = build_harness(port);
+
+        let error = h.uc.execute().await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            IssuePairingInvitationError::DirectoryRejected { .. }
+        ));
+        let source = std::error::Error::source(&error).expect("source is preserved");
+        assert_eq!(source.to_string(), "original directory failure");
+    }
+
+    #[tokio::test]
     async fn maps_internal_with_message() {
         let port = Arc::new(FakeInvitationPort::with_err(InvitationError::Internal(
             "boom".into(),

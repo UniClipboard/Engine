@@ -136,6 +136,21 @@ fn map_membership_admission_decision(
 pub(crate) fn map_invitation_error(error: InvitationError) -> IssuePairingInvitationError {
     match error {
         InvitationError::NetworkNotStarted => IssuePairingInvitationError::NetworkNotStarted,
+        InvitationError::NoPublishableAddress { source } => {
+            IssuePairingInvitationError::NoPublishableAddress { source }
+        }
+        InvitationError::LocalPublicationFailed { source } => {
+            IssuePairingInvitationError::LocalPublicationFailed { source }
+        }
+        InvitationError::DirectoryTransportFailed { source } => {
+            IssuePairingInvitationError::DirectoryTransportFailed { source }
+        }
+        InvitationError::DirectoryRejected { source } => {
+            IssuePairingInvitationError::DirectoryRejected { source }
+        }
+        InvitationError::DirectoryInvalidResponse { source } => {
+            IssuePairingInvitationError::DirectoryInvalidResponse { source }
+        }
         InvitationError::ServiceUnavailable => IssuePairingInvitationError::ServiceUnavailable,
         InvitationError::AddressNotAvailable(ip) => {
             IssuePairingInvitationError::AddressNotAvailable(ip)

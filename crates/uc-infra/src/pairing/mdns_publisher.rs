@@ -194,8 +194,11 @@ fn enumerate_publish_addrs() -> Vec<IpAddr> {
             .map(|i| i.addr.ip())
             .filter(|ip| !ip.is_loopback())
             .collect(),
-        Err(err) => {
-            warn!(error = %err, "if-addrs enumerate failed; mDNS publisher will run without local addresses");
+        Err(_err) => {
+            warn!(
+                failure_stage = "address_enumeration",
+                "if-addrs enumerate failed; mDNS publisher will run without local addresses"
+            );
             Vec::new()
         }
     }

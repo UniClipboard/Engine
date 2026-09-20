@@ -64,6 +64,8 @@ pub struct RendezvousPairingInvitationAdapter {
     /// expired without being consumed still gets released — no
     /// background timer needed.
     publishers: Mutex<HashMap<InvitationCode, (PublisherHandle, DateTime<Utc>)>>,
+    #[cfg(test)]
+    force_local_publication_failure: bool,
 }
 
 impl RendezvousPairingInvitationAdapter {
@@ -79,7 +81,15 @@ impl RendezvousPairingInvitationAdapter {
             settings,
             rendezvous,
             publishers: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            force_local_publication_failure: false,
         }
+    }
+
+    #[cfg(test)]
+    fn with_local_publication_failure(mut self) -> Self {
+        self.force_local_publication_failure = true;
+        self
     }
 
     async fn load_settings(&self) -> Result<Settings, InvitationError> {
@@ -171,12 +181,10 @@ impl RendezvousPairingInvitationAdapter {
                 // live, so surface the failure instead of returning an
                 // undialable code.
                 warn!(
-                    error = %err,
+                    failure_stage = "local_publication",
                     "mDNS publisher start failed in LAN-only mode; this invitation cannot be discovered",
                 );
-                return Err(InvitationError::Internal(format!(
-                    "mDNS publisher start failed in LAN-only mode: {err}"
-                )));
+                return Err(map_local_publication_failure(err, None));
             }
             return build_issued_invitation(
                 invitation_id,
@@ -187,24 +195,23 @@ impl RendezvousPairingInvitationAdapter {
             );
         }
 
-        let (code, cloud_ok) = match self.rendezvous.create_pairing(&req).await {
+        let (code, mut directory_failure) = match self.rendezvous.create_pairing(&req).await {
             Ok(parsed) => {
                 let code = InvitationCode::new(parsed.code);
                 Utc.timestamp_millis_opt(parsed.expires_at_ms)
                     .single()
-                    .ok_or_else(|| {
-                        InvitationError::Internal(format!(
-                            "rendezvous returned invalid expires_at_ms: {}",
-                            parsed.expires_at_ms
-                        ))
+                    .ok_or_else(|| InvitationError::DirectoryInvalidResponse {
+                        source: anyhow::Error::msg("directory returned an invalid expiry"),
                     })?;
                 if parsed.expires_at_ms < expires_at.timestamp_millis() {
-                    return Err(InvitationError::Internal(
-                        "rendezvous expiry precedes the full invitation expiry".to_owned(),
-                    ));
+                    return Err(InvitationError::DirectoryInvalidResponse {
+                        source: anyhow::Error::msg(
+                            "directory expiry precedes the invitation expiry",
+                        ),
+                    });
                 }
                 debug!(%expires_at, "cloud channel issued invitation");
-                (code, true)
+                (code, None)
             }
             Err(err) => {
                 // Cloud unreachable: local mint + mDNS only.
@@ -216,21 +223,21 @@ impl RendezvousPairingInvitationAdapter {
                 }
                 let code = InvitationCode::new(mint_invitation_code());
                 warn!(
-                    error = %err,
+                    failure_stage = "directory_transport",
                     "cloud channel unreachable; minted invitation locally — only LAN joiners will resolve",
                 );
-                (code, false)
+                (code, Some(anyhow::Error::new(err)))
             }
         };
 
         // ── LAN channel (best-effort, window-scoped) ───────────────────
-        if let Err(err) = self
+        if let Err(local_error) = self
             .start_mdns_publisher(&code, &endpoint_id, full_invitation.as_str(), expires_at)
             .await
         {
             warn!(
-                error = %err,
-                cloud_ok,
+                failure_stage = "local_publication",
+                directory_available = directory_failure.is_none(),
                 "mDNS publisher start failed; LAN joiners will not resolve via this code",
             );
             // If the cloud channel also failed (local-mint fallback), mDNS
@@ -238,14 +245,12 @@ impl RendezvousPairingInvitationAdapter {
             // port contract requires `Ok` only when at least one channel is
             // live, so surface the failure. When `cloud_ok` is true the cloud
             // channel still resolves the code, so the warning above suffices.
-            if !cloud_ok {
-                return Err(InvitationError::Internal(format!(
-                    "all discovery channels failed: cloud unreachable and mDNS start failed: {err}"
-                )));
+            if let Some(source) = directory_failure.take() {
+                return Err(map_local_publication_failure(local_error, Some(source)));
             }
         }
 
-        let code_origin = if cloud_ok {
+        let code_origin = if directory_failure.is_none() {
             CodeOrigin::DirectoryIssued
         } else {
             CodeOrigin::LocallyMintedDirectoryUnreachable
@@ -273,6 +278,11 @@ impl RendezvousPairingInvitationAdapter {
         full_invitation: &str,
         expires_at: DateTime<Utc>,
     ) -> Result<(), String> {
+        #[cfg(test)]
+        if self.force_local_publication_failure {
+            return Err("injected local publication failure".to_owned());
+        }
+
         // Sweep stale handles before inserting; a sponsor that has
         // issued multiple codes without consuming them otherwise leaks
         // multicast sockets until process exit.
@@ -355,17 +365,13 @@ fn encode_mdns_ticket(full_invitation: &str) -> Result<String, String> {
 }
 
 /// Cloud-side errors we treat as "try LAN-only instead." Transport
-/// failures, 5xx responses, and parse errors all qualify — they indicate
-/// the service is unreachable or misbehaving, not that the request was
-/// semantically wrong. 4xx codes (Conflict / NotFound on create — which
-/// shouldn't normally happen) surface as Internal so the anomaly is
-/// visible in logs.
+/// failures and 5xx responses qualify. A malformed success response does
+/// not: the directory may already have accepted the ticket, so minting a
+/// different local code could advertise inconsistent credentials.
 fn is_cloud_recoverable(err: &RendezvousHttpError) -> bool {
     matches!(
         err,
-        RendezvousHttpError::Transport(_)
-            | RendezvousHttpError::ServiceUnavailable(_)
-            | RendezvousHttpError::Parse(_)
+        RendezvousHttpError::Transport { .. } | RendezvousHttpError::ServiceUnavailable(_)
     )
 }
 
@@ -392,7 +398,9 @@ fn serialize_filtered_endpoint_ticket(
 ) -> Result<(String, String), InvitationError> {
     let addr = filter_endpoint_addr(addr, allow_overlay);
     if addr.addrs.is_empty() {
-        return Err(InvitationError::NetworkNotStarted);
+        return Err(InvitationError::NoPublishableAddress {
+            source: anyhow::Error::msg("endpoint has no address after product filtering"),
+        });
     }
     serialize_endpoint_addr(addr)
 }
@@ -522,7 +530,7 @@ impl PairingInvitationByAddressPort for RendezvousPairingInvitationAdapter {
 fn map_create_err(err: RendezvousHttpError) -> InvitationError {
     match err {
         // Transport + 5xx both mean "try again later" from the caller's POV.
-        RendezvousHttpError::Transport(_) | RendezvousHttpError::ServiceUnavailable(_) => {
+        RendezvousHttpError::Transport { .. } | RendezvousHttpError::ServiceUnavailable(_) => {
             InvitationError::ServiceUnavailable
         }
         // A create call hitting 404/410/409 would mean the rendezvous API
@@ -530,15 +538,27 @@ fn map_create_err(err: RendezvousHttpError) -> InvitationError {
         // Report as Internal so the anomaly is visible in logs.
         RendezvousHttpError::NotFound
         | RendezvousHttpError::Gone
-        | RendezvousHttpError::Conflict => {
-            InvitationError::Internal(format!("rendezvous create: unexpected {err}"))
-        }
-        RendezvousHttpError::Unexpected { status, slug } => InvitationError::Internal(format!(
-            "rendezvous rejected create ({status}, slug={slug})"
-        )),
-        RendezvousHttpError::Parse(msg) => {
-            InvitationError::Internal(format!("rendezvous response parse: {msg}"))
-        }
+        | RendezvousHttpError::Conflict
+        | RendezvousHttpError::Unexpected { .. } => InvitationError::DirectoryRejected {
+            source: anyhow::Error::new(err),
+        },
+        RendezvousHttpError::Parse { .. } => InvitationError::DirectoryInvalidResponse {
+            source: anyhow::Error::new(err),
+        },
+    }
+}
+
+fn map_local_publication_failure(
+    local_error: String,
+    directory_failure: Option<anyhow::Error>,
+) -> InvitationError {
+    match directory_failure {
+        Some(source) => InvitationError::DirectoryTransportFailed {
+            source: source.context("local invitation publication also failed"),
+        },
+        None => InvitationError::LocalPublicationFailed {
+            source: anyhow::Error::msg(local_error),
+        },
     }
 }
 
@@ -551,14 +571,14 @@ fn map_consume_err(err: RendezvousHttpError) -> ConsumeInvitationError {
         RendezvousHttpError::NotFound
         | RendezvousHttpError::Gone
         | RendezvousHttpError::Conflict => ConsumeInvitationError::NotFound,
-        RendezvousHttpError::Transport(_) | RendezvousHttpError::ServiceUnavailable(_) => {
+        RendezvousHttpError::Transport { .. } | RendezvousHttpError::ServiceUnavailable(_) => {
             ConsumeInvitationError::ServiceUnavailable
         }
         RendezvousHttpError::Unexpected { status, slug } => ConsumeInvitationError::Internal(
             format!("rendezvous rejected consume ({status}, slug={slug})"),
         ),
-        RendezvousHttpError::Parse(msg) => {
-            ConsumeInvitationError::Internal(format!("rendezvous response parse: {msg}"))
+        RendezvousHttpError::Parse { .. } => {
+            ConsumeInvitationError::Internal("rendezvous response parse failed".to_owned())
         }
     }
 }
@@ -916,7 +936,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn issue_invitation_maps_4xx_to_internal_with_slug() {
+    async fn issue_invitation_classifies_directory_rejection() {
         let ep = loopback_endpoint().await;
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -933,21 +953,11 @@ mod tests {
             server.uri(),
         );
         let err = adapter.issue_invitation().await.unwrap_err();
-        let msg = match err {
-            InvitationError::Internal(m) => m,
-            other => panic!("expected Internal, got {other:?}"),
-        };
-        assert!(msg.contains("invalid_request"), "msg was {msg}");
-        assert!(msg.contains("400"));
+        assert!(matches!(err, InvitationError::DirectoryRejected { .. }));
     }
 
     #[tokio::test]
-    async fn issue_invitation_falls_back_to_local_mint_on_malformed_response() {
-        // A malformed 2xx body surfaces as a Parse error, which
-        // `is_cloud_recoverable` treats as "service misbehaving" → fall back
-        // to local mint rather than failing the issue. (A 4xx with a slug
-        // still maps to Internal — see
-        // `issue_invitation_maps_4xx_to_internal_with_slug`.)
+    async fn issue_invitation_rejects_malformed_success_response() {
         let ep = loopback_endpoint().await;
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -961,14 +971,14 @@ mod tests {
             InMemorySettings::with_device_name(Some("mac")),
             server.uri(),
         );
-        let before = Utc::now();
-        let issued = adapter
-            .issue_invitation()
-            .await
-            .expect("malformed response is recoverable: falls back to local mint");
-        let after = Utc::now();
+        let error = adapter.issue_invitation().await.expect_err(
+            "the server may have registered the ticket, so a different local code is unsafe",
+        );
 
-        assert_locally_minted(&issued, before, after);
+        assert!(matches!(
+            error,
+            InvitationError::DirectoryInvalidResponse { .. }
+        ));
     }
 
     #[tokio::test]
@@ -990,6 +1000,58 @@ mod tests {
         let after = Utc::now();
 
         assert_locally_minted(&issued, before, after);
+    }
+
+    #[tokio::test]
+    async fn issue_invitation_classifies_transport_when_local_publication_also_fails() {
+        let ep = loopback_endpoint().await;
+        let adapter = make_adapter(
+            ep,
+            InMemorySettings::with_device_name(Some("device")),
+            "http://127.0.0.1:1",
+        )
+        .with_local_publication_failure();
+
+        let error = adapter.issue_invitation().await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            InvitationError::DirectoryTransportFailed { .. }
+        ));
+        assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[test]
+    fn local_publication_failure_has_its_own_stage() {
+        let error =
+            map_local_publication_failure("private socket and interface detail".to_owned(), None);
+
+        assert!(matches!(
+            error,
+            InvitationError::LocalPublicationFailed { .. }
+        ));
+        assert_eq!(error.to_string(), "local invitation publication failed");
+        assert_eq!(format!("{error:?}"), "LocalPublicationFailed");
+    }
+
+    #[test]
+    fn no_publishable_address_has_a_stable_private_error() {
+        let addr = EndpointAddr::from_parts(
+            SecretKey::generate().public(),
+            [TransportAddr::Ip(
+                "169.254.1.2:61743".parse::<SocketAddr>().unwrap(),
+            )],
+        );
+
+        let error = serialize_filtered_endpoint_ticket(addr, false).unwrap_err();
+
+        assert!(matches!(
+            error,
+            InvitationError::NoPublishableAddress { .. }
+        ));
+        assert_eq!(format!("{error:?}"), "NoPublishableAddress");
+        assert!(!error.to_string().contains("169.254"));
+        assert!(std::error::Error::source(&error).is_some());
     }
 
     #[tokio::test]
@@ -1026,10 +1088,10 @@ mod tests {
             server.uri(),
         );
         let err = adapter.issue_invitation().await.unwrap_err();
-        assert!(
-            matches!(err, InvitationError::Internal(ref m) if m.contains("expires_at_ms")),
-            "got {err:?}"
-        );
+        assert!(matches!(
+            err,
+            InvitationError::DirectoryInvalidResponse { .. }
+        ));
     }
 
     #[tokio::test]
@@ -1056,7 +1118,10 @@ mod tests {
             .await
             .expect_err("directory alias cannot expire before the full invitation");
 
-        assert!(matches!(error, InvitationError::Internal(_)));
+        assert!(matches!(
+            error,
+            InvitationError::DirectoryInvalidResponse { .. }
+        ));
     }
 
     // ── consume_invitation ───────────────────────────────────────────────

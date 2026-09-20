@@ -32,7 +32,7 @@ impl QueryPairingInvitationAddressesUseCase {
 
 fn map_error(error: InvitationError) -> QueryPairingInvitationAddressesError {
     match error {
-        InvitationError::NetworkNotStarted => {
+        InvitationError::NetworkNotStarted | InvitationError::NoPublishableAddress { .. } => {
             QueryPairingInvitationAddressesError::NetworkNotStarted
         }
         InvitationError::ServiceUnavailable => {
@@ -43,6 +43,14 @@ fn map_error(error: InvitationError) -> QueryPairingInvitationAddressesError {
         }
         InvitationError::Internal(message) => {
             QueryPairingInvitationAddressesError::Internal(message)
+        }
+        InvitationError::LocalPublicationFailed { .. }
+        | InvitationError::DirectoryTransportFailed { .. }
+        | InvitationError::DirectoryRejected { .. }
+        | InvitationError::DirectoryInvalidResponse { .. } => {
+            QueryPairingInvitationAddressesError::Internal(
+                "unexpected invitation issuance failure while listing addresses".to_owned(),
+            )
         }
     }
 }
@@ -74,6 +82,7 @@ mod tests {
                 Err(InvitationError::Internal(message)) => {
                     Err(InvitationError::Internal(message.clone()))
                 }
+                Err(_) => unreachable!("this fake only supports cloneable error variants"),
             }
         }
     }
