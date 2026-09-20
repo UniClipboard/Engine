@@ -1,0 +1,62 @@
+# t-0010 唯一空间负责人进度
+
+## 2026-09-20
+
+- 已运行 planning-with-files session catchup；没有发现未同步会话输出。
+- 已读取 planning-with-files、to-spec、implement、tdd、uni-rust-development 技能说明。
+- 已确认测试边界由用户验收要求给定：空间负责人维护入口与入站成员历史入口。
+- 已创建独立规划目录 `.planning/2026-09-20-t0010-single-space-owner/`。
+- 已阅读根架构、执行计划约定、核心信念、工程原则、Rust 规范和错误处理规则。
+- 已确认正式计划位置为 `docs/exec-plans/active/`，跨层恢复责任必须在 active plan 中落盘。
+- 已阅读安全、Application 分层、Space 代码地图、成员历史职责和相关历史计划。
+- 已确认新负责人应位于 Application；保留准入聚合和成员 ledger 各自事实所有权，只统一运行资格与调度。
+- 基线检查发现一个此前已开始但未完成的 rebase；它会改写用户要求保留的 `2d994c8a`。已记录，下一步终止该 rebase 后重新核对分支。
+- 已终止该 rebase，分支恢复为 `hp/uni/t-0010-android`，HEAD 精确为 `2d994c8a4fb971e7c651d87c6b0f702b36458a4e`；原提交未改写。
+- 恢复后除本任务独立规划目录外，Git 工作区没有其他未提交文件。
+- 当前阶段：Phase 0 规格、计划和基线。
+- 尚未修改生产代码，尚未运行 Cargo 测试。
+- 用户随后明确要求先 rebase；已 fetch `origin/main` 并重放原提交。第一次尝试被外部操作中止；第二次仅合并架构圣经的两处维护记录后成功。新 HEAD `d64a9046`，父提交 `af25532c`。
+- 已检查 `origin/main` 是祖先、重放差异无空白问题、冲突标记已清除；独立规划目录仍是唯一未跟踪内容。继续 Phase 0。
+- 已核对最新 active plan 约定、成员历史与 Space Application 现有边界，并确认入站历史独立于后台维护；规格需要同时覆盖两个入口。
+- Phase 0 完成：正式规格已加入 `docs/exec-plans/active/2026-09-20-single-space-work-owner.md`，索引和架构圣经维护记录已同步。计划将 Phase 1 标为进行中。
+- 已定位第一个红灯 seam：维护用例收到“未终结配对、本轮暂时失败”后，现有实现仍继续全部普通维护步骤。
+- 已新增红灯测试 `unfinished_pairing_with_transient_network_failure_excludes_ordinary_maintenance`。
+- 定向执行结果符合预期：测试失败，实际调用 `admissions, restricted, effects, conflicts, group_updates, synchronize, cleanup`，期望只有 `admissions`；共 960 项被过滤，红灯耗时 0.01 秒。
+- 已按阶段性交付要求更新 `.herdr-project/uni-t-0010/report.md`，记录规格路径、六个阶段和首个红灯证据。
+- Phase 1 最小实现已开始：新增从持久恢复摘要派生的 `SpaceWorkMode`，删除 `Continue/Yield` 枚举语义；Pairing 与 NeedsAttention 均阻止普通维护。
+- 首个红灯已转绿：1 项通过，960 项过滤；最终确认暂时失败只记录准入步骤。
+- 第二个红灯固定了 `PeerContact` 绕行：当前实际只调用 `synchronize, cleanup`，没有先裁决 Pairing。移动裁决后该测试转绿。
+- 首次运行 19 项维护测试时，1 项旧断言仍期望 PeerContact 不经过准入裁决；实现行为正确，已把断言更新为 `admissions, synchronize, cleanup`，等待复测。
+- 维护测试整组复测通过：19 项通过，0 失败；其中两次预期 panic 由运行期失败保留测试捕获，测试结果为通过。
+- 准入恢复定向测试通过：27 项通过，0 失败，覆盖离线认证、取消、升级阻塞、空间切换、最终结算和重启恢复。
+- Phase 1 完成：持久记录派生 Pairing/Active/NeedsAttention；所有后台触发（含 PeerContact）先经过同一裁决；Pairing 暂时失败不运行普通维护，终态后的下一轮恢复完整维护。
+- Phase 1 最终定向验证：维护测试 20 项通过；持久 pending join 模式测试 1 项通过；未新增持久字段或协议消息。
+- 当前进入 Phase 2：先为 Pairing 下的入站成员历史写红灯测试。
+- 已定位 Phase 2 的公开 seam：网络入站由 `MembershipHistoryAntiEntropy` 转入 `HandleMembershipHistoryMessageUseCase`，目前与准入协议分开装配且会直接读写 ledger。
+- 已确认最终实现不能只做一次模式查询；裁决与消息处理需要处于同一个空间串行边界内，避免查询后配对状态改变。
+- 已核对 Core 传输错误：当前没有“配对进行中”的可重试分类，应用失败还会统一变成永久拒绝；Phase 2 将先用公开网络端点测试固定正确结果，再调整契约与装配。
+- 已列出准入并发约束：本地动作与入站 Sponsor 消息共享动作锁，后台恢复有独立可中断锁。为避免一次性重写，Phase 2 先建立可测试且可删除的持久模式查询适配，Phase 4 再收口为单一事件负责人。
+- 已确定可重试网络兼容方案：在现有 framing 增加 BUSY 响应；旧客户端会按传输失败重试，新客户端得到明确配对占用结果，双方都不会继续写入历史。
+- Phase 2 首个红灯已运行：`pairing_rejects_inbound_history_as_retryable_before_ledger_access` 失败，当前实际 `Err(Rejected)`，期望 `Err(PairingInProgress)`；963 项过滤，耗时 0.26 秒。测试还要求 ledger 读取和提交均为零。
+- Phase 2 入站门禁已转绿：同名测试 1 项通过，配对时在 ledger 读取前返回 `PairingInProgress`；模式从现有持久准入恢复记录派生。
+- 网络兼容红灯 `history_busy_status_is_retryable_for_new_clients` 先实际得到 `Transport`、期望 `PairingInProgress`；加入 BUSY framing 后转绿。新版明确延期，旧版把未知字节按传输失败延期，不会误作永久拒绝。
+- 入站历史整组 21 项通过；出站历史整组 15 项通过。核对后确认其中的 RelationshipUnconfirmed 是正式提交后的正常历史核对，不是候选传播。
+- 后台维护整组 20 项通过、1 项独占日志测试按标记跳过；准入协议整组 65 项通过，覆盖取消中断、重启恢复、最终确认迟到/重复、提交竞态与旧版本升级拒绝。
+- Phase 3 标记完成：直接复用并复核当前分支已有 `d64a9046` 的最终确认唯一提交与三设备不可见测试，不重复实现。
+- 严格自查发现“查询模式后再处理”的竞态；已改为持有贯穿完整动作的共享许可。本地加入/取消/完成、Sponsor 入站、后台维护和入站历史共用同一串行边界，同时保留后台离线恢复可被取消中断的既有能力。
+- 并发回归 `ordinary_work_permit_serializes_a_new_pairing_request` 通过：普通动作结束前新配对不落库，许可释放后请求继续。
+- 三设备 E2E `pending_join_is_not_published_before_final_confirmation` 通过（55.98 秒）：Sponsor 重启、第三设备在线并主动联系时仍看不到候选，最终确认后才三端收敛并完成双向内容传输。
+- `uc-application` 全部库测试通过：964 项通过、1 项按标记跳过、0 失败，耗时 22.32 秒；覆盖本轮共享许可、准入恢复、历史收发和普通维护，也覆盖其他 Application 回归。
+- 已进入 Phase 4 的统一唤醒切片：定位到 Runtime 仍向普通维护泄露 PeerOnline/PeerContact 及设备身份，下一步先把重复联系人测试改为只允许一个通用 StateChanged 轮次。
+- Phase 4 统一唤醒红灯符合预期：不同设备联系实际排入 `PeerContact(device-b/device-c)`；改为统一状态变化后转绿，并删除普通维护中的 PeerContact/PeerOnline 特例、定向同步和上线绕过退避。
+- 维护、历史同步和准入恢复三组定向测试分别 18、15、21 项通过；外部上线、联系和显式变化现在只合并为通用唤醒，启动、恢复和周期只保留为负责人内部扫描原因。
+- 配对交换的暂时失败现在推进同一加密记录内既有重试进度；新红灯先证明次数仍为 0，修复后验证重启可读的下次时间、过早唤醒零联网、到期恰好重试。准入恢复 22 项通过。
+- 设备信任查询新增独立维护健康：自动重试返回持久下次时间，稳定历史拒绝返回明确原因和“处理设备信任”动作。Application 11 项与 Engine 映射测试通过；产品展示留给下游接入，不再要求产品猜测。
+- 严格只读复核发现共享许可覆盖了配对网络等待，会阻塞本机取消/重新加入。已把许可移动到配对恢复完成之后、普通维护之前并在锁内重新读取状态；新增回归证明本机动作可打断配对恢复，同时普通动作仍阻止新配对并发落库。
+- Core 准入测试 102 项通过；重试错误分类和内部方法可见性也已按复核修正。Phase 4 完成，进入 Phase 5 全量验证与本地提交。
+- Phase 5 严格复核修正了共享许可覆盖配对网络等待的问题；新增回归证明本机取消可及时中断恢复，普通维护开始后新配对仍会等待。
+- `uc-application` 全部库测试 966 项通过、1 项按原标记跳过；入站历史 21 项、设备信任 11 项、Core 准入 102 项均通过。
+- 三设备 `pending_join_is_not_published_before_final_confirmation` 再次通过：最终确认前第三设备不可见，确认后才三端收敛并双向传输。
+- `cargo metadata`、workspace 全目标编译、格式、Rust 规则、架构仓库、观测隐私和差异检查全部通过；临时诊断探针搜索无残留。
+- 全仓长组并行运行两次分别遇到文件恢复等待超时、剪贴板接收计数时序抖动；两项使用相同完整功能配置精确复跑通过，后续串行全仓运行也都通过。串行成员端到端长组另有一次“移除后同设备重加”偶发失败，精确复跑通过。
+- Phase 5 完成；未运行 Android/Windows 实体设备验收，未操作真实用户资料。
