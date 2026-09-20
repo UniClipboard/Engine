@@ -14,8 +14,8 @@ use uc_engine_uniffi::{
     BindingCollectorConfig, BindingConfig, BindingDeploymentEnvironment, BindingEngineState,
     BindingError, BindingErrorCategory, BindingEvent, BindingFileMetadata, BindingHost,
     BindingObservabilityConfig, BindingObservabilitySetupStatus, BindingObservabilitySignalResult,
-    BindingOperationTerminal, HostBindingError, InvitationIssued, MobileEngine,
-    MobileStartupLifecycle, SendReport,
+    BindingOperationTerminal, CustomRelayMutationRejection, HostBindingError, InvitationIssued,
+    MobileEngine, MobileStartupLifecycle, SendReport,
 };
 
 static ENGINE_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -975,6 +975,143 @@ fn pairing_methods_return_invitation_data_and_stable_join_errors() {
             ..
         }
     ));
+
+    engine
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
+        .expect("binding engine must shut down within the deadline");
+}
+
+#[test]
+fn custom_relay_methods_preserve_authoritative_results_and_stable_errors() {
+    let _test_guard = engine_test_guard();
+    let root = tempfile::tempdir().expect("temporary host root must be available");
+    let host = Arc::new(MemoryHost::new(root.path()));
+    let engine = MobileEngine::start(
+        BindingConfig {
+            app_version: "1.2.3".to_owned(),
+            profile_id: "binding-custom-relays".to_owned(),
+        },
+        host,
+    )
+    .expect("binding engine must start");
+
+    assert!(engine
+        .query_custom_relays()
+        .expect("default relay list")
+        .is_empty());
+
+    let added = engine
+        .add_custom_relay(
+            "  https://relay-a.example  ".to_owned(),
+            "private-relay-token".to_owned(),
+        )
+        .expect("add relay with credential");
+    assert_eq!(added.rejection, None);
+    assert_eq!(added.relays.len(), 1);
+    assert_eq!(added.relays[0].url, "https://relay-a.example/");
+    assert!(added.relays[0].credential_configured);
+    let added_debug = format!("{added:?}");
+    assert!(!added_debug.contains("relay-a"));
+    assert!(!added_debug.contains("private-relay-token"));
+
+    let queried = engine.query_custom_relays().expect("query saved relays");
+    assert_eq!(queried, added.relays);
+    assert!(!format!("{queried:?}").contains("relay-a"));
+
+    let second = engine
+        .add_custom_relay("https://relay-b.example".to_owned(), String::new())
+        .expect("add relay without credential");
+    assert_eq!(second.relays.len(), 2);
+    assert!(!second.relays[1].credential_configured);
+
+    let edited = engine
+        .edit_custom_relay(
+            "https://relay-b.example/".to_owned(),
+            "https://relay-c.example".to_owned(),
+            String::new(),
+        )
+        .expect("edit relay without adding a credential");
+    assert_eq!(edited.rejection, None);
+    assert_eq!(edited.relays[1].url, "https://relay-c.example/");
+    assert!(!edited.relays[1].credential_configured);
+
+    let duplicate = engine
+        .edit_custom_relay(
+            "https://relay-c.example".to_owned(),
+            "https://relay-a.example".to_owned(),
+            String::new(),
+        )
+        .expect("duplicate relay is a business rejection");
+    assert!(duplicate.relays.is_empty());
+    assert_eq!(
+        duplicate.rejection,
+        Some(CustomRelayMutationRejection::Duplicate)
+    );
+
+    let invalid = engine
+        .add_custom_relay("not a relay URL".to_owned(), String::new())
+        .expect("invalid URL is a business rejection");
+    assert_eq!(
+        invalid.rejection,
+        Some(CustomRelayMutationRejection::InvalidUrl)
+    );
+
+    let missing = engine
+        .delete_custom_relay("https://missing-relay.example".to_owned())
+        .expect("missing relay is a business rejection");
+    assert_eq!(
+        missing.rejection,
+        Some(CustomRelayMutationRejection::NotFound)
+    );
+
+    let malformed_token = "private\nrelay-token";
+    let error = engine
+        .add_custom_relay(
+            "https://invalid-token.example".to_owned(),
+            malformed_token.to_owned(),
+        )
+        .expect_err("malformed token must be invalid input");
+    assert!(matches!(
+        error,
+        BindingError::Engine {
+            code: 1395,
+            category: BindingErrorCategory::InvalidInput,
+            retryable: false,
+        }
+    ));
+    assert!(!format!("{error:?}").contains(malformed_token));
+
+    let removed = engine
+        .delete_custom_relay("https://relay-a.example".to_owned())
+        .expect("delete configured relay");
+    assert_eq!(removed.rejection, None);
+    assert_eq!(removed.relays.len(), 1);
+    assert_eq!(removed.relays[0].url, "https://relay-c.example/");
+
+    let legacy_added = engine
+        .save_custom_relay(
+            "https://legacy-target.example".to_owned(),
+            String::new(),
+            None,
+        )
+        .expect("legacy add");
+    assert!(!legacy_added.configured);
+    let legacy_edited = engine
+        .save_custom_relay(
+            "https://legacy-edited.example".to_owned(),
+            String::new(),
+            Some("https://legacy-target.example/".to_owned()),
+        )
+        .expect("legacy edit");
+    assert!(!legacy_edited.configured);
+    let legacy_deleted = engine
+        .save_custom_relay(
+            String::new(),
+            String::new(),
+            Some("https://legacy-edited.example".to_owned()),
+        )
+        .expect("legacy delete");
+    assert!(!legacy_deleted.configured);
 
     engine
         .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)

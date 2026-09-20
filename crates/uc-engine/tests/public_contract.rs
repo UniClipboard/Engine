@@ -407,6 +407,18 @@ fn settings_contract_preserves_updates_and_probe_outcomes_without_debugging_user
         OperationKind::QuerySettings
     );
     assert_eq!(
+        Operation::QueryCustomRelays.kind(),
+        OperationKind::QueryCustomRelays
+    );
+    let mutate_relay = Operation::MutateCustomRelay(uc_engine::CustomRelayMutation::Add {
+        url: "https://private-relay.example".into(),
+        access_token: Some(SecretString::new("private-relay-token")),
+    });
+    assert_eq!(mutate_relay.kind(), OperationKind::MutateCustomRelay);
+    let mutation_debug = format!("{mutate_relay:?}");
+    assert!(!mutation_debug.contains("private-relay.example"));
+    assert!(!mutation_debug.contains("private-relay-token"));
+    assert_eq!(
         Operation::UpdateSettings(Box::default()).kind(),
         OperationKind::UpdateSettings
     );
@@ -458,6 +470,13 @@ fn settings_contract_preserves_updates_and_probe_outcomes_without_debugging_user
 
     let values = [
         OperationResult::Settings(Box::new(settings)),
+        OperationResult::CustomRelays(vec![uc_engine::CustomRelaySummary {
+            url: "https://private-relay.example".into(),
+            credential_configured: true,
+        }]),
+        OperationResult::CustomRelayMutated(uc_engine::CustomRelayMutationOutcome::Rejected {
+            reason: uc_engine::CustomRelayRejection::Duplicate,
+        }),
         OperationResult::SettingsUpdated(uc_engine::SettingsUpdateOutcome::Rejected {
             reason: "private validation detail".into(),
         }),
