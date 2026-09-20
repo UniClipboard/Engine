@@ -530,7 +530,7 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
         } else {
             uc_core::ports::ConfigSourceMode::Installed
         },
-        iroh_identity_dir: app_data_root.join("iroh-identity"),
+        iroh_identity_dir: paths.iroh_identity_dir(),
         iroh_blob_store_dir: app_data_root.join("iroh-blobs"),
         system_clipboard: adapt_system_clipboard_layer(
             clipboard,

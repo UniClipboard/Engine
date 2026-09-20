@@ -42,6 +42,10 @@ impl AppPaths {
         self.app_data_root_dir.join(".daemon-token")
     }
 
+    pub fn iroh_identity_dir(&self) -> PathBuf {
+        self.app_data_root_dir.join("iroh-identity")
+    }
+
     pub fn daemon_pid_path(&self) -> PathBuf {
         self.app_data_root_dir.join(".daemon-pid")
     }

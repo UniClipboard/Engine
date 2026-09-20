@@ -238,7 +238,7 @@ impl ProfileStateCleaner {
                 .join("space-control-generations"),
             self.paths.app_data_root_dir.join("profile-storage-upgrade"),
             self.paths.app_data_root_dir.join("iroh-blobs"),
-            self.paths.app_data_root_dir.join("iroh-identity"),
+            self.paths.iroh_identity_dir(),
             self.paths.app_data_root_dir.join("import-staging"),
             self.paths.app_data_root_dir.join("pending-import.json"),
             self.paths.app_data_root_dir.join("upgrade-cursor.json"),

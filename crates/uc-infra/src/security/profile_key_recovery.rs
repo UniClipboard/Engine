@@ -23,6 +23,7 @@ use crate::fs::key_slot_store::JsonKeySlotStore;
 use crate::migration_state::{decode_legacy_migration_run_id, DEFAULT_MIGRATION_STATE_FILE};
 use crate::network::iroh::IDENTITY_STORE_KEY;
 use crate::space::KeyMaterialStore;
+use crate::FileSecureStorage;
 
 pub const PROFILE_SECRET_FILE_NAME: &str = "profile-secrets-v1";
 const FORMAT_VERSION: u16 = 1;
@@ -562,8 +563,11 @@ impl ProfileKeyRecoveryStore {
             && (lifecycle_missing || self.backing.get(PROFILE_ADMISSION_KEY_NAME)?.is_none());
         let local_history = protected_history
             && (lifecycle_missing || self.backing.get(PROFILE_CONTENT_VAULT_KEY_NAME)?.is_none());
+        let current_identity = FileSecureStorage::with_base_dir(self.paths.iroh_identity_dir())
+            .get(IDENTITY_STORE_KEY)?;
         let device_identity = (protected_profile || protected_history)
-            && self.backing.get(IDENTITY_STORE_KEY)?.is_none();
+            && self.backing.get(IDENTITY_STORE_KEY)?.is_none()
+            && current_identity.is_none();
         Ok(ProfileRecoveryLosses {
             local_history,
             local_control_state,
@@ -1141,6 +1145,56 @@ mod tests {
             }
         );
         assert!(!recovery.vault_file().exists());
+    }
+
+    #[tokio::test]
+    async fn current_file_identity_is_not_reported_as_lost_legacy_material() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Arc::new(MemoryStorage::default());
+        let backing: Arc<dyn SecureStoragePort> = storage.clone();
+        let paths = test_paths(&directory);
+        let profile_id = uc_core::ids::ProfileId::new().into_inner();
+        let scope = KeyScope {
+            profile_id: profile_id.clone(),
+        };
+        let material = KeyMaterialStore::new(
+            Arc::clone(&backing),
+            Arc::new(JsonKeySlotStore::new(paths.vault_dir.clone())),
+        );
+        let draft = KeySlot::draft_v1(scope.clone()).unwrap();
+        let legacy = LegacyPassphrase("migration passphrase".to_owned());
+        let kek = v1_aead::derive_kek_argon2id(&legacy, &draft.salt, &draft.kdf).unwrap();
+        let master = MasterKey::generate().unwrap();
+        let wrapped = v1_aead::wrap_master_key_xchacha(&kek, &master).unwrap();
+        material
+            .store_keyslot(&draft.finalize(WrappedMasterKey { blob: wrapped }))
+            .await
+            .unwrap();
+        material.store_kek(&scope, &kek).await.unwrap();
+        storage
+            .set(PROFILE_LIFECYCLE_MARKER_NAME, &[0x31; 32])
+            .unwrap();
+        storage
+            .set(PROFILE_ADMISSION_KEY_NAME, &[0x32; 32])
+            .unwrap();
+        storage
+            .set(PROFILE_CONTENT_VAULT_KEY_NAME, &[0x33; 32])
+            .unwrap();
+        std::fs::create_dir_all(&paths.vault_dir).unwrap();
+        std::fs::write(
+            paths.vault_dir.join("profile-content-key-vault-v1.json"),
+            b"protected history marker",
+        )
+        .unwrap();
+        FileSecureStorage::with_base_dir(paths.iroh_identity_dir())
+            .set(IDENTITY_STORE_KEY, &[0x34; 32])
+            .unwrap();
+
+        let recovery = ProfileKeyRecoveryStore::new(paths, profile_id, backing);
+        assert_eq!(
+            recovery.prepare_startup().await.unwrap(),
+            ProfileRecoveryPreparation::Ready
+        );
     }
 
     #[tokio::test]
