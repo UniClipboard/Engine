@@ -320,6 +320,10 @@ impl SynchronizeMembershipHistoryUseCase {
                     self.commit_deferred_attempt(&peer).await?;
                     report.deferred_peer_count += 1;
                 }
+                Err(PeerSyncError::ExchangeRejected) => {
+                    self.commit_stable_rejection(&peer).await?;
+                    report.stable_failure_count += 1;
+                }
                 Err(PeerSyncError::Stable) => report.stable_failure_count += 1,
                 Err(PeerSyncError::Superseded) => report.deferred_peer_count += 1,
             }
@@ -354,6 +358,29 @@ impl SynchronizeMembershipHistoryUseCase {
                 let delay = retry_delay_ms(peer_record.sync_state.retry_attempt);
                 peer_record.sync_state.next_attempt_at_ms = now_ms.saturating_add(delay);
                 peer_record.sync_state.last_attempt_outcome = PeerHistorySyncOutcome::Deferred;
+                Ok(())
+            })
+            .await
+            .map(|_| ())
+            .map_err(map_ledger_error)
+    }
+
+    async fn commit_stable_rejection(
+        &self,
+        peer: &DeviceId,
+    ) -> Result<(), SynchronizeMembershipHistoryError> {
+        let _guard = self.ledger_commit_lock.lock().await;
+        let peer = peer.clone();
+        self.ledger
+            .compare_and_commit(|record| {
+                let peer_record = record
+                    .peer_reconciliation
+                    .get_mut(&peer)
+                    .ok_or(MembershipLedgerError::RecoveryRequired)?;
+                peer_record.sync_state.retry_attempt = 0;
+                peer_record.sync_state.next_attempt_at_ms = 0;
+                peer_record.sync_state.last_attempt_outcome =
+                    PeerHistorySyncOutcome::StableRejected;
                 Ok(())
             })
             .await
@@ -704,6 +731,7 @@ fn membership_ack_kind(ack: &uc_core::membership::MembershipHistoryAckV3) -> &'s
 
 enum PeerSyncError {
     Deferred,
+    ExchangeRejected,
     Stable,
     Superseded,
 }
@@ -735,7 +763,7 @@ fn map_exchange_error(error: MembershipHistoryExchangeError) -> PeerSyncError {
         MembershipHistoryExchangeError::Offline
         | MembershipHistoryExchangeError::PairingInProgress
         | MembershipHistoryExchangeError::Transport => PeerSyncError::Deferred,
-        MembershipHistoryExchangeError::Rejected => PeerSyncError::Stable,
+        MembershipHistoryExchangeError::Rejected => PeerSyncError::ExchangeRejected,
     }
 }
 

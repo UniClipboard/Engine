@@ -111,6 +111,15 @@ fn space_work_event_kind(value: &str) -> Result<uc_engine::DevSpaceWorkEventKind
         "membership_history_sync_started" => {
             Ok(uc_engine::DevSpaceWorkEventKind::MembershipHistorySyncStarted)
         }
+        "membership_history_sync_retryable_failure" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::MembershipHistorySyncRetryableFailure)
+        }
+        "membership_history_sync_needs_attention" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::MembershipHistorySyncNeedsAttention)
+        }
+        "membership_history_sync_reply_received" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::MembershipHistorySyncReplyReceived)
+        }
         _ => bail!("unknown Space work event kind"),
     }
 }
@@ -132,6 +141,15 @@ fn space_work_event_json(event: uc_engine::DevSpaceWorkEvent) -> Value {
         }
         uc_engine::DevSpaceWorkEventKind::MembershipHistorySyncStarted => {
             "membership_history_sync_started"
+        }
+        uc_engine::DevSpaceWorkEventKind::MembershipHistorySyncRetryableFailure => {
+            "membership_history_sync_retryable_failure"
+        }
+        uc_engine::DevSpaceWorkEventKind::MembershipHistorySyncNeedsAttention => {
+            "membership_history_sync_needs_attention"
+        }
+        uc_engine::DevSpaceWorkEventKind::MembershipHistorySyncReplyReceived => {
+            "membership_history_sync_reply_received"
         }
     };
     json!({ "sequence": event.sequence, "kind": kind })
@@ -192,6 +210,39 @@ async fn operation(engine: &Engine, request: &Value) -> Result<Value> {
             bail!("final confirmation failure arm result expected")
         };
         return Ok(json!({ "after_sequence": after_sequence }));
+    }
+    #[cfg(feature = "current-engine")]
+    if command == "arm_membership_history_failures" {
+        let failure = match string(request, "failure")? {
+            "retryable" => uc_engine::DevMembershipHistoryFailure::Retryable,
+            "needs_attention" => uc_engine::DevMembershipHistoryFailure::NeedsAttention,
+            _ => bail!("unknown membership history failure kind"),
+        };
+        let count = request["count"]
+            .as_u64()
+            .and_then(|count| usize::try_from(count).ok())
+            .context("missing or invalid membership history failure count")?;
+        let uc_engine::DevOperationResult::MembershipHistoryFailuresArmed { after_sequence } =
+            engine
+                .execute_dev(uc_engine::DevOperation::ArmMembershipHistoryFailures {
+                    failure,
+                    count,
+                })
+                .await?
+        else {
+            bail!("membership history failures arm result expected")
+        };
+        return Ok(json!({ "after_sequence": after_sequence }));
+    }
+    #[cfg(feature = "current-engine")]
+    if command == "clear_membership_history_failures" {
+        let uc_engine::DevOperationResult::MembershipHistoryFailuresCleared { remaining } = engine
+            .execute_dev(uc_engine::DevOperation::ClearMembershipHistoryFailures)
+            .await?
+        else {
+            bail!("membership history failures clear result expected")
+        };
+        return Ok(json!({ "remaining": remaining }));
     }
     #[cfg(feature = "current-engine")]
     if command == "wait_space_work_event" {

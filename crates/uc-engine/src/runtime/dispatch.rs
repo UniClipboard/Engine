@@ -759,6 +759,23 @@ impl EngineRuntime for ProductionRuntime {
                     },
                 )
                 .ok_or_else(|| EngineError::new(1916, EngineErrorCategory::Conflict, false)),
+            DevOperation::ArmMembershipHistoryFailures { failure, count } => self
+                .joiner_final_confirmation_gate
+                .space_work_control()
+                .arm_membership_history_failures(failure, count)
+                .map(
+                    |after_sequence| DevOperationResult::MembershipHistoryFailuresArmed {
+                        after_sequence,
+                    },
+                )
+                .ok_or_else(|| EngineError::new(1917, EngineErrorCategory::Conflict, false)),
+            DevOperation::ClearMembershipHistoryFailures => {
+                let remaining = self
+                    .joiner_final_confirmation_gate
+                    .space_work_control()
+                    .clear_membership_history_failures();
+                Ok(DevOperationResult::MembershipHistoryFailuresCleared { remaining })
+            }
             DevOperation::WaitForSpaceWorkEvent {
                 after_sequence,
                 kind,

@@ -19,7 +19,8 @@ use crate::space::membership::{
     CurrentSpaceMemberScopePort, LoadMembershipLedgerPort, LoadedMembershipLedger,
     MembershipLedger, MembershipLedgerError, MembershipLedgerMutation,
     MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, PausedSpaceMember,
-    PeerReconciliationRecord, SpaceMemberPauseReason, SynchronizeMembershipMaintenancePort,
+    PeerHistorySyncOutcome, PeerReconciliationRecord, SpaceMemberPauseReason,
+    SynchronizeMembershipMaintenancePort,
 };
 
 struct MemoryLedgerRepository(Mutex<LoadedMembershipLedger>);
@@ -177,6 +178,8 @@ fn test_address_refresh() -> Arc<RecordingAddressRefresh> {
 
 struct InvalidSummaryTransport;
 
+struct RejectingTransport;
+
 #[async_trait]
 impl MembershipHistoryExchangePort for InvalidSummaryTransport {
     async fn exchange_membership_history(
@@ -187,6 +190,17 @@ impl MembershipHistoryExchangePort for InvalidSummaryTransport {
         Ok(MembershipHistoryMessage::AckV3(
             MembershipHistoryAckV3::Invalid,
         ))
+    }
+}
+
+#[async_trait]
+impl MembershipHistoryExchangePort for RejectingTransport {
+    async fn exchange_membership_history(
+        &self,
+        _recipient: &DeviceId,
+        _message: MembershipHistoryMessage,
+    ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
+        Err(MembershipHistoryExchangeError::Rejected)
     }
 }
 
@@ -506,6 +520,39 @@ async fn invalid_membership_reply_does_not_refresh_verified_peer_address() {
 
     assert_eq!(report.stable_failure_count, 1);
     assert!(address_refresh.peers.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn stable_transport_rejection_is_persisted_for_health_queries() {
+    let peer = DeviceId::new("device-b");
+    let repository = Arc::new(MemoryLedgerRepository(Mutex::new(active_ledger())));
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    ));
+    let synchronize = SynchronizeMembershipHistoryUseCase::new(
+        ledger,
+        Arc::new(FixedScope(vec![peer.clone()])),
+        Arc::new(RejectingTransport),
+        test_address_refresh(),
+        Arc::new(FixedClock),
+    );
+
+    let report = synchronize
+        .execute(MembershipSyncTarget::AllCurrentPeers)
+        .await
+        .unwrap();
+
+    assert_eq!(report.stable_failure_count, 1);
+    let persisted = repository.load().await.unwrap();
+    let peer_record = persisted.peer_reconciliation.get(&peer).unwrap();
+    assert_eq!(
+        peer_record.sync_state.last_attempt_outcome,
+        PeerHistorySyncOutcome::StableRejected
+    );
+    assert_eq!(peer_record.sync_state.retry_attempt, 0);
+    assert_eq!(peer_record.sync_state.next_attempt_at_ms, 0);
 }
 
 #[tokio::test]

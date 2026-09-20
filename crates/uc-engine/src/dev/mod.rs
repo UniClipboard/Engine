@@ -21,12 +21,21 @@ pub(crate) use space_work::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DevMembershipHistoryFailure {
+    Retryable,
+    NeedsAttention,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DevSpaceWorkEventKind {
     FinalConfirmationConnectionFailed,
     FinalConfirmationRetryStarted,
     FinalConfirmationReplyReceived,
     OrdinaryMemberUpdateStarted,
     MembershipHistorySyncStarted,
+    MembershipHistorySyncRetryableFailure,
+    MembershipHistorySyncNeedsAttention,
+    MembershipHistorySyncReplyReceived,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -210,6 +219,11 @@ pub enum DevOperation {
     WaitForJoinerFinalConfirmationPause,
     ReleaseJoinerFinalConfirmationPause,
     ArmFinalConfirmationConnectionFailure,
+    ArmMembershipHistoryFailures {
+        failure: DevMembershipHistoryFailure,
+        count: usize,
+    },
+    ClearMembershipHistoryFailures,
     WaitForSpaceWorkEvent {
         after_sequence: u64,
         kind: DevSpaceWorkEventKind,
@@ -252,6 +266,8 @@ impl fmt::Debug for DevOperation {
             Self::ArmFinalConfirmationConnectionFailure => {
                 "arm_final_confirmation_connection_failure"
             }
+            Self::ArmMembershipHistoryFailures { .. } => "arm_membership_history_failures",
+            Self::ClearMembershipHistoryFailures => "clear_membership_history_failures",
             Self::WaitForSpaceWorkEvent { .. } => "wait_for_space_work_event",
             Self::QuerySpaceWorkEvents => "query_space_work_events",
             Self::FailNextSessionHandover { .. } => "fail_next_session_handover",
@@ -395,6 +411,12 @@ pub enum DevOperationResult {
     FinalConfirmationConnectionFailureArmed {
         after_sequence: u64,
     },
+    MembershipHistoryFailuresArmed {
+        after_sequence: u64,
+    },
+    MembershipHistoryFailuresCleared {
+        remaining: usize,
+    },
     SpaceWorkEvent(DevSpaceWorkEvent),
     SpaceWorkEvents(Vec<DevSpaceWorkEvent>),
     SessionHandoverFailureArmed,
@@ -440,6 +462,8 @@ impl fmt::Debug for DevOperationResult {
             Self::FinalConfirmationConnectionFailureArmed { .. } => {
                 "final_confirmation_connection_failure_armed"
             }
+            Self::MembershipHistoryFailuresArmed { .. } => "membership_history_failures_armed",
+            Self::MembershipHistoryFailuresCleared { .. } => "membership_history_failures_cleared",
             Self::SpaceWorkEvent(_) => "space_work_event",
             Self::SpaceWorkEvents(_) => "space_work_events",
             Self::SessionHandoverFailureArmed => "session_handover_failure_armed",

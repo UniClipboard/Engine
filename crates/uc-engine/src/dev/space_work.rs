@@ -15,7 +15,7 @@ use uc_core::membership::{
     SpaceAdmissionMessageKind, SpaceAdmissionRoute,
 };
 
-use super::{DevSpaceWorkEvent, DevSpaceWorkEventKind};
+use super::{DevMembershipHistoryFailure, DevSpaceWorkEvent, DevSpaceWorkEventKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FinalConfirmationFailureState {
@@ -28,6 +28,7 @@ enum FinalConfirmationFailureState {
 
 struct State {
     final_confirmation: FinalConfirmationFailureState,
+    membership_history_failure: Option<MembershipHistoryFailurePlan>,
     next_sequence: u64,
     events: Vec<DevSpaceWorkEvent>,
 }
@@ -36,6 +37,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             final_confirmation: FinalConfirmationFailureState::Idle,
+            membership_history_failure: None,
             next_sequence: 1,
             events: Vec::new(),
         }
@@ -52,6 +54,41 @@ pub(crate) struct SpaceWorkTestControl {
 }
 
 impl SpaceWorkTestControl {
+    pub(crate) fn arm_membership_history_failures(
+        &self,
+        failure: DevMembershipHistoryFailure,
+        count: usize,
+    ) -> Option<u64> {
+        let mut state = self.lock_state();
+        if count == 0 || state.membership_history_failure.is_some() {
+            return None;
+        }
+        state.membership_history_failure = Some(MembershipHistoryFailurePlan {
+            failure,
+            remaining: count,
+        });
+        Some(state.next_sequence.saturating_sub(1))
+    }
+
+    pub(crate) fn clear_membership_history_failures(&self) -> usize {
+        let mut state = self.lock_state();
+        state
+            .membership_history_failure
+            .take()
+            .map_or(0, |plan| plan.remaining)
+    }
+
+    fn take_membership_history_failure(&self) -> Option<DevMembershipHistoryFailure> {
+        let mut state = self.lock_state();
+        let plan = state.membership_history_failure.as_mut()?;
+        let failure = plan.failure;
+        plan.remaining = plan.remaining.saturating_sub(1);
+        if plan.remaining == 0 {
+            state.membership_history_failure = None;
+        }
+        Some(failure)
+    }
+
     pub(crate) fn arm_final_confirmation_connection_failure(&self) -> Option<u64> {
         let mut state = self.lock_state();
         if state.final_confirmation != FinalConfirmationFailureState::Idle {
@@ -155,6 +192,12 @@ impl SpaceWorkTestControl {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+}
+
+#[derive(Clone, Copy)]
+struct MembershipHistoryFailurePlan {
+    failure: DevMembershipHistoryFailure,
+    remaining: usize,
 }
 
 fn push_event(state: &mut State, kind: DevSpaceWorkEventKind) {
@@ -312,9 +355,29 @@ impl MembershipHistoryExchangePort for RecordedMembershipHistoryExchange {
     ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
         self.control
             .record(DevSpaceWorkEventKind::MembershipHistorySyncStarted);
-        self.inner
+        if let Some(failure) = self.control.take_membership_history_failure() {
+            return match failure {
+                DevMembershipHistoryFailure::Retryable => {
+                    self.control
+                        .record(DevSpaceWorkEventKind::MembershipHistorySyncRetryableFailure);
+                    Err(MembershipHistoryExchangeError::Offline)
+                }
+                DevMembershipHistoryFailure::NeedsAttention => {
+                    self.control
+                        .record(DevSpaceWorkEventKind::MembershipHistorySyncNeedsAttention);
+                    Err(MembershipHistoryExchangeError::Rejected)
+                }
+            };
+        }
+        let result = self
+            .inner
             .exchange_membership_history(recipient, message)
-            .await
+            .await;
+        if result.is_ok() {
+            self.control
+                .record(DevSpaceWorkEventKind::MembershipHistorySyncReplyReceived);
+        }
+        result
     }
 }
 
@@ -377,6 +440,41 @@ mod tests {
             .is_some());
         assert!(control
             .arm_final_confirmation_connection_failure()
+            .is_none());
+    }
+
+    #[test]
+    fn membership_history_failures_are_counted_and_then_recover() {
+        let control = SpaceWorkTestControl::default();
+        let baseline = control
+            .arm_membership_history_failures(DevMembershipHistoryFailure::Retryable, 2)
+            .expect("test failures can be armed");
+
+        assert_eq!(
+            control.take_membership_history_failure(),
+            Some(DevMembershipHistoryFailure::Retryable)
+        );
+        assert!(control
+            .arm_membership_history_failures(DevMembershipHistoryFailure::NeedsAttention, 1)
+            .is_none());
+        assert_eq!(
+            control.take_membership_history_failure(),
+            Some(DevMembershipHistoryFailure::Retryable)
+        );
+        assert_eq!(control.take_membership_history_failure(), None);
+        assert_eq!(baseline, 0);
+        assert!(control
+            .arm_membership_history_failures(DevMembershipHistoryFailure::NeedsAttention, 1)
+            .is_some());
+        assert_eq!(control.clear_membership_history_failures(), 1);
+        assert_eq!(control.clear_membership_history_failures(), 0);
+    }
+
+    #[test]
+    fn membership_history_failure_count_must_be_positive() {
+        let control = SpaceWorkTestControl::default();
+        assert!(control
+            .arm_membership_history_failures(DevMembershipHistoryFailure::Retryable, 0)
             .is_none());
     }
 }
