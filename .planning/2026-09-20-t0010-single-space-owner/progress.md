@@ -60,3 +60,20 @@
 - `cargo metadata`、workspace 全目标编译、格式、Rust 规则、架构仓库、观测隐私和差异检查全部通过；临时诊断探针搜索无残留。
 - 全仓长组并行运行两次分别遇到文件恢复等待超时、剪贴板接收计数时序抖动；两项使用相同完整功能配置精确复跑通过，后续串行全仓运行也都通过。串行成员端到端长组另有一次“移除后同设备重加”偶发失败，精确复跑通过。
 - Phase 5 完成；未运行 Android/Windows 实体设备验收，未操作真实用户资料。
+
+## 2026-09-21
+
+- t-0028 已接入 Processing 与维护健康结果，但缺少可重复的独立进程红绿测试能力；Phase 6 开始。
+- 本阶段测试 seam 已由用户确认：独立测试进程的完整配对入口，以及进程私有的有序测试观测；不向正式产品暴露调试开关。
+- 已运行 planning session catchup，工作区在 `b52d37d3` 上干净；旧行为基线为 `d64a9046`，当前行为提交为 `3bb57184`。
+- 已读取 implement、TDD、诊断、Uni Rust、严格复核和原子提交规则，以及 Application、Space、admission protocol、Infra 的局部维护约束。
+- 当前正在盘点现有 admission test support、独立进程宿主与 dev-tools 边界，先确定最小红灯场景。
+- 已确认复用路线：扩展现有 dev-only 最终确认 gate，并通过 connectivity host 的私有管道提供 arm/wait/query；不新增正式 API 或环境变量。
+- 已定位观测边界：最终确认在 admission continuation transport，普通更新在 group update dispatch，历史同步在 membership history exchange；准备先写控制器红灯测试，再接入真实装配与独立进程命令。
+- 已实现进程私有的一次性最终确认建连失败、有序事件等待/查询，以及 connectivity host 三条命令；测试宿主编译通过。
+- 当前 E2E 通过：首次最终确认失败、按持久时间重试、收到回复并完成加入；重试前普通更新和历史同步为零。
+- 隔离旧提交 `d64a9046` 使用同一测试能力稳定失败，实际顺序为失败 → 普通更新 → 三次历史同步 → 重试；临时 worktree 已移除，2.7GB 独立构建缓存已移入废纸篓。
+- Engine dev-tools 库测试 244 项通过、4 项按原标记跳过；Application 关键维护回归通过；connectivity host 编译通过。
+- 严格复核修正了“网络回复成功”被写成“流程成功”的事件命名；最终完成继续以公开状态验收。
+- 最终门禁通过：workspace 全目标编译、格式、Rust 规则、Engine 仓库边界、观测隐私和差异检查全部通过；当前 E2E 在最终命名调整后再次通过。
+- Phase 6 完成，等待本地原子提交和通知协调者让 t-0028 继续接入。

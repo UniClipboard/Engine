@@ -96,3 +96,13 @@
 
 - 仓库架构检查原先只接受准入内部的 `Mutex<()>` 字段，无法表达本轮跨配对、普通维护和入站历史的共享许可。检查已改为要求共享所有权字段、许可实现和持有式加锁标记，避免新边界以后被退回为只保护准入内部。
 - 全仓并行测试在高负载下分别出现文件恢复等待超时和剪贴板接收计数提前读取；两项相同配置精确复跑通过，串行全仓运行中也通过。成员端到端长组串行执行时，同设备重加测试一次失败，精确复跑通过。这些失败未集中在本轮改动路径，按真实结果保留，未伪装为单次全绿。
+
+## Phase 6 Desktop 独立进程验收 seam
+
+- Engine 的 `dev-tools` 已有进程内 `JoinerFinalConfirmationGate`，它在加入方完成本地激活、保存 `CompleteAck` 前暂停；独立 `uc-connectivity-host` 只通过继承的 stdin/stdout 控制，已经满足“指定测试进程、无全局环境、无真实资料”的边界。
+- 最小扩展点是同一 dev-only 控制对象：激活完成后把下一次 continuation `resume` 标记为最终确认连接；第一次返回 `Deferred`，后续让真实 transport 执行。这样故障发生在连接阶段，而不是通过固定延时碰运气。
+- 普通成员更新与历史同步的可靠观测应放在 Engine 已有 adapter decorator 边界：分别记录 `GroupUpdateDispatchPort` 与 `MembershipHistoryExchangePort` 的实际网络调用；最终确认则记录 admission transport 的失败、重试和成功。所有事件共享单调序号。
+- `MaintainSpaceMembershipUseCase` 已有当前修复的关键规则：admission 未允许普通维护时直接结束本轮。Application 单测 `unfinished_pairing_with_transient_network_failure_excludes_ordinary_maintenance` 证明普通步骤调用为零，但 Desktop 还需要上述独立进程能力复现同一真实顺序。
+- 同一 Engine E2E 测试能力应用到 `d64a9046` 后得到确定红灯：事件 1 为最终确认连接失败，事件 2 为普通成员更新，事件 3–5 为成员历史同步，事件 6 才开始最终确认重试。
+- 当前行为得到确定绿灯：最终确认首次失败后，下一项配对事件就是最终确认重试，随后收到回复；失败与重试之间普通成员更新和历史同步均为零，最终两端正式成员数收敛。
+- 严格复核修正了事件命名：transport 成功只证明已收到最终确认回复，不能替代 Application 随后的状态提交，所以公开测试事件使用 `final_confirmation_reply_received`，最终完成仍必须查询产品状态。

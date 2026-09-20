@@ -8,6 +8,8 @@ use uc_application::deps::{
 };
 use uc_core::membership::{JoinerActivationPreparation, SpaceAdmissionId};
 
+use super::SpaceWorkTestControl;
+
 const IDLE: u8 = 0;
 const ARMED: u8 = 1;
 const ENTERED: u8 = 2;
@@ -17,6 +19,7 @@ pub(crate) struct JoinerFinalConfirmationGate {
     state: AtomicU8,
     entered: Notify,
     released: Notify,
+    space_work: Arc<SpaceWorkTestControl>,
 }
 
 impl JoinerFinalConfirmationGate {
@@ -46,6 +49,10 @@ impl JoinerFinalConfirmationGate {
         }
         self.released.notify_waiters();
         true
+    }
+
+    pub(crate) fn space_work_control(&self) -> Arc<SpaceWorkTestControl> {
+        Arc::clone(&self.space_work)
     }
 
     async fn pause_if_armed(&self) {
@@ -90,6 +97,7 @@ impl ExecuteJoinerActivationPort for GatedJoinerActivation {
     ) -> Result<CompletedJoinerActivation, ExecuteJoinerActivationError> {
         let completed = self.inner.execute(admission_id, preparation).await?;
         self.gate.pause_if_armed().await;
+        self.gate.space_work.final_confirmation_ready();
         Ok(completed)
     }
 

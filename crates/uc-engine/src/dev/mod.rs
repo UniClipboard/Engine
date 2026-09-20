@@ -12,8 +12,28 @@ use uc_observability_contract::diagnostics::{
 };
 
 mod admission_settlement;
+mod space_work;
 
 pub(crate) use admission_settlement::{GatedJoinerActivation, JoinerFinalConfirmationGate};
+pub(crate) use space_work::{
+    ControlledSpaceAdmissionTransport, RecordedGroupUpdateDispatch,
+    RecordedMembershipHistoryExchange, SpaceWorkTestControl,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DevSpaceWorkEventKind {
+    FinalConfirmationConnectionFailed,
+    FinalConfirmationRetryStarted,
+    FinalConfirmationReplyReceived,
+    OrdinaryMemberUpdateStarted,
+    MembershipHistorySyncStarted,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DevSpaceWorkEvent {
+    pub sequence: u64,
+    pub kind: DevSpaceWorkEventKind,
+}
 
 static TEST_TRACING_INIT: Once = Once::new();
 static TEST_OBSERVABILITY: OnceLock<ProcessObservabilityHandle> = OnceLock::new();
@@ -189,6 +209,12 @@ pub enum DevOperation {
     ArmJoinerFinalConfirmationPause,
     WaitForJoinerFinalConfirmationPause,
     ReleaseJoinerFinalConfirmationPause,
+    ArmFinalConfirmationConnectionFailure,
+    WaitForSpaceWorkEvent {
+        after_sequence: u64,
+        kind: DevSpaceWorkEventKind,
+    },
+    QuerySpaceWorkEvents,
     FailNextSessionHandover {
         point: SessionHandoverFailurePoint,
     },
@@ -223,6 +249,11 @@ impl fmt::Debug for DevOperation {
             Self::ArmJoinerFinalConfirmationPause => "arm_joiner_final_confirmation_pause",
             Self::WaitForJoinerFinalConfirmationPause => "wait_for_joiner_final_confirmation_pause",
             Self::ReleaseJoinerFinalConfirmationPause => "release_joiner_final_confirmation_pause",
+            Self::ArmFinalConfirmationConnectionFailure => {
+                "arm_final_confirmation_connection_failure"
+            }
+            Self::WaitForSpaceWorkEvent { .. } => "wait_for_space_work_event",
+            Self::QuerySpaceWorkEvents => "query_space_work_events",
             Self::FailNextSessionHandover { .. } => "fail_next_session_handover",
             Self::QuerySessionHandoverDiagnostics => "query_session_handover_diagnostics",
             Self::SetNetworkPartition { .. } => "set_network_partition",
@@ -361,6 +392,11 @@ pub enum DevOperationResult {
     JoinerFinalConfirmationPauseArmed,
     JoinerFinalConfirmationPauseEntered,
     JoinerFinalConfirmationPauseReleased,
+    FinalConfirmationConnectionFailureArmed {
+        after_sequence: u64,
+    },
+    SpaceWorkEvent(DevSpaceWorkEvent),
+    SpaceWorkEvents(Vec<DevSpaceWorkEvent>),
     SessionHandoverFailureArmed,
     SessionHandoverDiagnostics {
         network_build_count: usize,
@@ -401,6 +437,11 @@ impl fmt::Debug for DevOperationResult {
             Self::JoinerFinalConfirmationPauseReleased => {
                 "joiner_final_confirmation_pause_released"
             }
+            Self::FinalConfirmationConnectionFailureArmed { .. } => {
+                "final_confirmation_connection_failure_armed"
+            }
+            Self::SpaceWorkEvent(_) => "space_work_event",
+            Self::SpaceWorkEvents(_) => "space_work_events",
             Self::SessionHandoverFailureArmed => "session_handover_failure_armed",
             Self::SessionHandoverDiagnostics { .. } => "session_handover_diagnostics",
             Self::RejectedConnectionCount { .. } => "rejected_connection_count",

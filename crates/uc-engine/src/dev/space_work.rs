@@ -1,0 +1,382 @@
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use async_trait::async_trait;
+use tokio::sync::Notify;
+use uc_application::deps::{
+    AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply, SpaceAdmissionTransportError,
+    SpaceAdmissionTransportPort,
+};
+use uc_core::ids::DeviceId;
+use uc_core::membership::{
+    AdmissionAttemptTimeline, AdmissionContinuationCredential,
+    AdmissionEncryptedPasswordEquivalent, AdmissionPeerBinding, GroupUpdateDispatchError,
+    GroupUpdateDispatchPort, MembershipHistoryExchangeError, MembershipHistoryExchangePort,
+    MembershipHistoryMessage, PendingGroupUpdate, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
+    SpaceAdmissionMessageKind, SpaceAdmissionRoute,
+};
+
+use super::{DevSpaceWorkEvent, DevSpaceWorkEventKind};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FinalConfirmationFailureState {
+    Idle,
+    Armed,
+    FailNextConnection,
+    AwaitingRetry,
+    RetryInFlight,
+}
+
+struct State {
+    final_confirmation: FinalConfirmationFailureState,
+    next_sequence: u64,
+    events: Vec<DevSpaceWorkEvent>,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            final_confirmation: FinalConfirmationFailureState::Idle,
+            next_sequence: 1,
+            events: Vec::new(),
+        }
+    }
+}
+
+/// 只在 `dev-tools` 构建中存在的单进程配对验收控制器。
+///
+/// 它不保存业务标识或消息材料，只记录测试关心的动作种类和严格递增序号。
+#[derive(Default)]
+pub(crate) struct SpaceWorkTestControl {
+    state: Mutex<State>,
+    changed: Notify,
+}
+
+impl SpaceWorkTestControl {
+    pub(crate) fn arm_final_confirmation_connection_failure(&self) -> Option<u64> {
+        let mut state = self.lock_state();
+        if state.final_confirmation != FinalConfirmationFailureState::Idle {
+            return None;
+        }
+        state.final_confirmation = FinalConfirmationFailureState::Armed;
+        Some(state.next_sequence.saturating_sub(1))
+    }
+
+    pub(crate) fn final_confirmation_ready(&self) {
+        let mut state = self.lock_state();
+        if state.final_confirmation == FinalConfirmationFailureState::Armed {
+            state.final_confirmation = FinalConfirmationFailureState::FailNextConnection;
+        }
+    }
+
+    pub(crate) fn begin_continuation_connection(&self) -> ContinuationTestAction {
+        let mut state = self.lock_state();
+        match state.final_confirmation {
+            FinalConfirmationFailureState::FailNextConnection => {
+                push_event(
+                    &mut state,
+                    DevSpaceWorkEventKind::FinalConfirmationConnectionFailed,
+                );
+                state.final_confirmation = FinalConfirmationFailureState::AwaitingRetry;
+                drop(state);
+                self.changed.notify_waiters();
+                ContinuationTestAction::Fail
+            }
+            FinalConfirmationFailureState::AwaitingRetry => {
+                push_event(
+                    &mut state,
+                    DevSpaceWorkEventKind::FinalConfirmationRetryStarted,
+                );
+                state.final_confirmation = FinalConfirmationFailureState::RetryInFlight;
+                drop(state);
+                self.changed.notify_waiters();
+                ContinuationTestAction::TrackRetry
+            }
+            _ => ContinuationTestAction::PassThrough,
+        }
+    }
+
+    pub(crate) fn retry_connection_failed(&self) {
+        let mut state = self.lock_state();
+        if state.final_confirmation == FinalConfirmationFailureState::RetryInFlight {
+            state.final_confirmation = FinalConfirmationFailureState::AwaitingRetry;
+        }
+    }
+
+    pub(crate) fn retry_exchange_finished(&self, kind: SpaceAdmissionMessageKind, succeeded: bool) {
+        let mut state = self.lock_state();
+        if state.final_confirmation != FinalConfirmationFailureState::RetryInFlight {
+            return;
+        }
+        if kind == SpaceAdmissionMessageKind::CompleteAck && succeeded {
+            push_event(
+                &mut state,
+                DevSpaceWorkEventKind::FinalConfirmationReplyReceived,
+            );
+            state.final_confirmation = FinalConfirmationFailureState::Idle;
+            drop(state);
+            self.changed.notify_waiters();
+        } else {
+            state.final_confirmation = FinalConfirmationFailureState::AwaitingRetry;
+        }
+    }
+
+    pub(crate) fn record(&self, kind: DevSpaceWorkEventKind) {
+        let mut state = self.lock_state();
+        push_event(&mut state, kind);
+        drop(state);
+        self.changed.notify_waiters();
+    }
+
+    pub(crate) fn events(&self) -> Vec<DevSpaceWorkEvent> {
+        let state = self.lock_state();
+        let mut events = Vec::with_capacity(state.events.len());
+        events.extend(state.events.iter().cloned());
+        events
+    }
+
+    pub(crate) async fn wait_for_event(
+        &self,
+        after_sequence: u64,
+        kind: DevSpaceWorkEventKind,
+    ) -> DevSpaceWorkEvent {
+        loop {
+            let notified = self.changed.notified();
+            if let Some(event) = self.lock_state().events.iter().find_map(|event| {
+                (event.sequence > after_sequence && event.kind == kind).then(|| event.clone())
+            }) {
+                return event;
+            }
+            notified.await;
+        }
+    }
+
+    fn lock_state(&self) -> MutexGuard<'_, State> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+fn push_event(state: &mut State, kind: DevSpaceWorkEventKind) {
+    let sequence = state.next_sequence;
+    state.next_sequence = state.next_sequence.saturating_add(1);
+    state.events.push(DevSpaceWorkEvent { sequence, kind });
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ContinuationTestAction {
+    PassThrough,
+    Fail,
+    TrackRetry,
+}
+
+pub(crate) struct ControlledSpaceAdmissionTransport {
+    inner: Arc<dyn SpaceAdmissionTransportPort>,
+    control: Arc<SpaceWorkTestControl>,
+}
+
+impl ControlledSpaceAdmissionTransport {
+    pub(crate) fn new(
+        inner: Arc<dyn SpaceAdmissionTransportPort>,
+        control: Arc<SpaceWorkTestControl>,
+    ) -> Self {
+        Self { inner, control }
+    }
+}
+
+#[async_trait]
+impl SpaceAdmissionTransportPort for ControlledSpaceAdmissionTransport {
+    async fn establish_initial(
+        &self,
+        admission_id: SpaceAdmissionId,
+        attempt_timeline: AdmissionAttemptTimeline,
+        route: &SpaceAdmissionRoute,
+        encrypted_password_equivalent: &AdmissionEncryptedPasswordEquivalent,
+    ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError> {
+        self.inner
+            .establish_initial(
+                admission_id,
+                attempt_timeline,
+                route,
+                encrypted_password_equivalent,
+            )
+            .await
+    }
+
+    async fn resume(
+        &self,
+        admission_id: SpaceAdmissionId,
+        route: &SpaceAdmissionRoute,
+        peer_binding: AdmissionPeerBinding,
+        continuation_credential: &AdmissionContinuationCredential,
+    ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError> {
+        let action = self.control.begin_continuation_connection();
+        if action == ContinuationTestAction::Fail {
+            return Err(SpaceAdmissionTransportError::Deferred);
+        }
+        let exchange = self
+            .inner
+            .resume(admission_id, route, peer_binding, continuation_credential)
+            .await;
+        match exchange {
+            Ok(exchange) if action == ContinuationTestAction::TrackRetry => {
+                Ok(Box::new(TrackedAdmissionExchange {
+                    inner: exchange,
+                    control: Arc::clone(&self.control),
+                }))
+            }
+            Ok(exchange) => Ok(exchange),
+            Err(error) => {
+                if action == ContinuationTestAction::TrackRetry {
+                    self.control.retry_connection_failed();
+                }
+                Err(error)
+            }
+        }
+    }
+}
+
+struct TrackedAdmissionExchange {
+    inner: Box<dyn AuthenticatedAdmissionExchangePort>,
+    control: Arc<SpaceWorkTestControl>,
+}
+
+#[async_trait]
+impl AuthenticatedAdmissionExchangePort for TrackedAdmissionExchange {
+    fn peer_binding(&self) -> AdmissionPeerBinding {
+        self.inner.peer_binding()
+    }
+
+    fn take_newly_established_continuation(&mut self) -> Option<AdmissionContinuationCredential> {
+        self.inner.take_newly_established_continuation()
+    }
+
+    async fn exchange(
+        self: Box<Self>,
+        request: &SpaceAdmissionEnvelopeV1,
+    ) -> Result<AuthenticatedAdmissionReply, SpaceAdmissionTransportError> {
+        let kind = request.kind();
+        let TrackedAdmissionExchange { inner, control } = *self;
+        let result = inner.exchange(request).await;
+        control.retry_exchange_finished(kind, result.is_ok());
+        result
+    }
+}
+
+pub(crate) struct RecordedGroupUpdateDispatch {
+    inner: Arc<dyn GroupUpdateDispatchPort>,
+    control: Arc<SpaceWorkTestControl>,
+}
+
+impl RecordedGroupUpdateDispatch {
+    pub(crate) fn new(
+        inner: Arc<dyn GroupUpdateDispatchPort>,
+        control: Arc<SpaceWorkTestControl>,
+    ) -> Self {
+        Self { inner, control }
+    }
+}
+
+#[async_trait]
+impl GroupUpdateDispatchPort for RecordedGroupUpdateDispatch {
+    async fn dispatch_group_update(
+        &self,
+        update: &PendingGroupUpdate,
+    ) -> Result<(), GroupUpdateDispatchError> {
+        self.control
+            .record(DevSpaceWorkEventKind::OrdinaryMemberUpdateStarted);
+        self.inner.dispatch_group_update(update).await
+    }
+}
+
+pub(crate) struct RecordedMembershipHistoryExchange {
+    inner: Arc<dyn MembershipHistoryExchangePort>,
+    control: Arc<SpaceWorkTestControl>,
+}
+
+impl RecordedMembershipHistoryExchange {
+    pub(crate) fn new(
+        inner: Arc<dyn MembershipHistoryExchangePort>,
+        control: Arc<SpaceWorkTestControl>,
+    ) -> Self {
+        Self { inner, control }
+    }
+}
+
+#[async_trait]
+impl MembershipHistoryExchangePort for RecordedMembershipHistoryExchange {
+    async fn exchange_membership_history(
+        &self,
+        recipient: &DeviceId,
+        message: MembershipHistoryMessage,
+    ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
+        self.control
+            .record(DevSpaceWorkEventKind::MembershipHistorySyncStarted);
+        self.inner
+            .exchange_membership_history(recipient, message)
+            .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn one_failure_is_followed_by_an_observable_retry() {
+        let control = SpaceWorkTestControl::default();
+        let baseline = control
+            .arm_final_confirmation_connection_failure()
+            .expect("test failure can be armed");
+        control.final_confirmation_ready();
+
+        assert_eq!(
+            control.begin_continuation_connection(),
+            ContinuationTestAction::Fail
+        );
+        assert_eq!(
+            control.begin_continuation_connection(),
+            ContinuationTestAction::TrackRetry
+        );
+        control.retry_exchange_finished(SpaceAdmissionMessageKind::CompleteAck, true);
+
+        let events = control.events();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    event.kind == DevSpaceWorkEventKind::FinalConfirmationConnectionFailed
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![
+                DevSpaceWorkEventKind::FinalConfirmationConnectionFailed,
+                DevSpaceWorkEventKind::FinalConfirmationRetryStarted,
+                DevSpaceWorkEventKind::FinalConfirmationReplyReceived,
+            ]
+        );
+        assert_eq!(
+            control
+                .wait_for_event(
+                    baseline,
+                    DevSpaceWorkEventKind::FinalConfirmationReplyReceived,
+                )
+                .await,
+            events[2]
+        );
+    }
+
+    #[test]
+    fn failure_cannot_be_armed_twice() {
+        let control = SpaceWorkTestControl::default();
+        assert!(control
+            .arm_final_confirmation_connection_failure()
+            .is_some());
+        assert!(control
+            .arm_final_confirmation_connection_failure()
+            .is_none());
+    }
+}

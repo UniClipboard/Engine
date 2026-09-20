@@ -749,6 +749,30 @@ impl EngineRuntime for ProductionRuntime {
                 }
                 Ok(DevOperationResult::JoinerFinalConfirmationPauseReleased)
             }
+            DevOperation::ArmFinalConfirmationConnectionFailure => self
+                .joiner_final_confirmation_gate
+                .space_work_control()
+                .arm_final_confirmation_connection_failure()
+                .map(
+                    |after_sequence| DevOperationResult::FinalConfirmationConnectionFailureArmed {
+                        after_sequence,
+                    },
+                )
+                .ok_or_else(|| EngineError::new(1916, EngineErrorCategory::Conflict, false)),
+            DevOperation::WaitForSpaceWorkEvent {
+                after_sequence,
+                kind,
+            } => Ok(DevOperationResult::SpaceWorkEvent(
+                self.joiner_final_confirmation_gate
+                    .space_work_control()
+                    .wait_for_event(after_sequence, kind)
+                    .await,
+            )),
+            DevOperation::QuerySpaceWorkEvents => Ok(DevOperationResult::SpaceWorkEvents(
+                self.joiner_final_confirmation_gate
+                    .space_work_control()
+                    .events(),
+            )),
             DevOperation::FailNextSessionHandover { point } => {
                 self.session_supervisor.fail_next_session_handover(point);
                 Ok(DevOperationResult::SessionHandoverFailureArmed)

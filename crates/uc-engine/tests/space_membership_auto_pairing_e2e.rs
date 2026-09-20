@@ -4984,6 +4984,51 @@ async fn release_joiner_final_confirmation_pause(engine: &Engine) {
     );
 }
 
+async fn arm_final_confirmation_connection_failure(engine: &Engine) -> u64 {
+    let result = engine
+        .execute_dev(uc_engine::DevOperation::ArmFinalConfirmationConnectionFailure)
+        .await
+        .expect("arm one final confirmation connection failure");
+    let uc_engine::DevOperationResult::FinalConfirmationConnectionFailureArmed { after_sequence } =
+        result
+    else {
+        panic!("unexpected final confirmation failure arm result");
+    };
+    after_sequence
+}
+
+async fn wait_for_space_work_event(
+    engine: &Engine,
+    after_sequence: u64,
+    kind: uc_engine::DevSpaceWorkEventKind,
+) -> uc_engine::DevSpaceWorkEvent {
+    let result = tokio::time::timeout(
+        ADMISSION_WAIT_TIMEOUT,
+        engine.execute_dev(uc_engine::DevOperation::WaitForSpaceWorkEvent {
+            after_sequence,
+            kind,
+        }),
+    )
+    .await
+    .expect("Space work event was not observed")
+    .expect("wait for Space work event");
+    let uc_engine::DevOperationResult::SpaceWorkEvent(event) = result else {
+        panic!("unexpected Space work event result");
+    };
+    event
+}
+
+async fn query_space_work_events(engine: &Engine) -> Vec<uc_engine::DevSpaceWorkEvent> {
+    let result = engine
+        .execute_dev(uc_engine::DevOperation::QuerySpaceWorkEvents)
+        .await
+        .expect("query Space work events");
+    let uc_engine::DevOperationResult::SpaceWorkEvents(events) = result else {
+        panic!("unexpected Space work events result");
+    };
+    events
+}
+
 struct SessionHandoverDiagnostics {
     network_build_count: usize,
     session_quiesce_failure_count: usize,
@@ -5503,6 +5548,78 @@ async fn pending_join_is_not_published_before_final_confirmation() {
         .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("shutdown joined device");
+}
+
+// 最终确认首次建连暂时失败后，只能按持久时间重试配对；普通成员维护不得插队。
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn final_confirmation_retry_precedes_ordinary_membership_network_work() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let sponsor_harness = DeviceHarness::new(rendezvous.uri());
+    let joiner_harness = DeviceHarness::new(rendezvous.uri());
+    let sponsor = Arc::new(sponsor_harness.start().await);
+    let joiner = Arc::new(joiner_harness.start().await);
+    let (space_id, _) = create_space(&sponsor, "Sponsor").await;
+    let invitation = issue_invitation(&sponsor).await;
+    let baseline = arm_final_confirmation_connection_failure(&joiner).await;
+
+    let joining_engine = Arc::clone(&joiner);
+    let joining_space_id = space_id.clone();
+    let joining = tokio::spawn(async move {
+        join_with_invitation(
+            &joining_engine,
+            "Retrying Joiner",
+            &joining_space_id,
+            invitation,
+        )
+        .await
+    });
+
+    let failed = wait_for_space_work_event(
+        &joiner,
+        baseline,
+        uc_engine::DevSpaceWorkEventKind::FinalConfirmationConnectionFailed,
+    )
+    .await;
+    let retry = wait_for_space_work_event(
+        &joiner,
+        failed.sequence,
+        uc_engine::DevSpaceWorkEventKind::FinalConfirmationRetryStarted,
+    )
+    .await;
+    let events_before_retry = query_space_work_events(&joiner).await;
+    assert!(
+        events_before_retry.iter().all(|event| {
+            event.sequence <= failed.sequence
+                || event.sequence >= retry.sequence
+                || !matches!(
+                    event.kind,
+                    uc_engine::DevSpaceWorkEventKind::OrdinaryMemberUpdateStarted
+                        | uc_engine::DevSpaceWorkEventKind::MembershipHistorySyncStarted
+                )
+        }),
+        "ordinary membership network work ran before the final confirmation retry: {events_before_retry:?}"
+    );
+    let succeeded = wait_for_space_work_event(
+        &joiner,
+        retry.sequence,
+        uc_engine::DevSpaceWorkEventKind::FinalConfirmationReplyReceived,
+    )
+    .await;
+    assert!(failed.sequence < retry.sequence);
+    assert!(retry.sequence < succeeded.sequence);
+
+    joining.await.expect("Joiner task must not panic");
+    wait_for_active_member_count(&sponsor, 2).await;
+    wait_for_active_member_count(&joiner, 2).await;
+    sponsor
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shutdown Sponsor");
+    joiner
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shutdown Joiner");
 }
 
 // Joiner 已保存最终确认、但请求尚未送达时重启，必须从持久状态继续同一加入。

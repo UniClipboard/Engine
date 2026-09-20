@@ -93,6 +93,50 @@ fn respond(mut value: Value) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "current-engine")]
+fn space_work_event_kind(value: &str) -> Result<uc_engine::DevSpaceWorkEventKind> {
+    match value {
+        "final_confirmation_connection_failed" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::FinalConfirmationConnectionFailed)
+        }
+        "final_confirmation_retry_started" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::FinalConfirmationRetryStarted)
+        }
+        "final_confirmation_reply_received" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::FinalConfirmationReplyReceived)
+        }
+        "ordinary_member_update_started" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::OrdinaryMemberUpdateStarted)
+        }
+        "membership_history_sync_started" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::MembershipHistorySyncStarted)
+        }
+        _ => bail!("unknown Space work event kind"),
+    }
+}
+
+#[cfg(feature = "current-engine")]
+fn space_work_event_json(event: uc_engine::DevSpaceWorkEvent) -> Value {
+    let kind = match event.kind {
+        uc_engine::DevSpaceWorkEventKind::FinalConfirmationConnectionFailed => {
+            "final_confirmation_connection_failed"
+        }
+        uc_engine::DevSpaceWorkEventKind::FinalConfirmationRetryStarted => {
+            "final_confirmation_retry_started"
+        }
+        uc_engine::DevSpaceWorkEventKind::FinalConfirmationReplyReceived => {
+            "final_confirmation_reply_received"
+        }
+        uc_engine::DevSpaceWorkEventKind::OrdinaryMemberUpdateStarted => {
+            "ordinary_member_update_started"
+        }
+        uc_engine::DevSpaceWorkEventKind::MembershipHistorySyncStarted => {
+            "membership_history_sync_started"
+        }
+    };
+    json!({ "sequence": event.sequence, "kind": kind })
+}
+
 const PASSPHRASE: &str = "connection-recovery-synthetic-passphrase";
 
 #[cfg(feature = "current-engine")]
@@ -136,6 +180,47 @@ async fn operation(engine: &Engine, request: &Value) -> Result<Value> {
             })
             .await?;
         return Ok(json!(true));
+    }
+    #[cfg(feature = "current-engine")]
+    if command == "arm_complete_ack_failure" {
+        let uc_engine::DevOperationResult::FinalConfirmationConnectionFailureArmed {
+            after_sequence,
+        } = engine
+            .execute_dev(uc_engine::DevOperation::ArmFinalConfirmationConnectionFailure)
+            .await?
+        else {
+            bail!("final confirmation failure arm result expected")
+        };
+        return Ok(json!({ "after_sequence": after_sequence }));
+    }
+    #[cfg(feature = "current-engine")]
+    if command == "wait_space_work_event" {
+        let after_sequence = request["after_sequence"]
+            .as_u64()
+            .context("missing Space work event sequence")?;
+        let kind = space_work_event_kind(string(request, "kind")?)?;
+        let uc_engine::DevOperationResult::SpaceWorkEvent(event) = engine
+            .execute_dev(uc_engine::DevOperation::WaitForSpaceWorkEvent {
+                after_sequence,
+                kind,
+            })
+            .await?
+        else {
+            bail!("Space work event expected")
+        };
+        return Ok(space_work_event_json(event));
+    }
+    #[cfg(feature = "current-engine")]
+    if command == "space_work_events" {
+        let uc_engine::DevOperationResult::SpaceWorkEvents(events) = engine
+            .execute_dev(uc_engine::DevOperation::QuerySpaceWorkEvents)
+            .await?
+        else {
+            bail!("Space work events expected")
+        };
+        return Ok(Value::Array(
+            events.into_iter().map(space_work_event_json).collect(),
+        ));
     }
     if command == "suspend" {
         engine.suspend().await?;

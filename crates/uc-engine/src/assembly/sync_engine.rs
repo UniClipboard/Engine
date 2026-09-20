@@ -18,7 +18,10 @@ use outbound_progress::OutboundProgressRuntime;
 use crate::assembly::deps::SyncEngineDeps;
 use crate::assembly::membership_events::MembershipLedgerAccess;
 #[cfg(feature = "dev-tools")]
-use crate::dev::{GatedJoinerActivation, JoinerFinalConfirmationGate};
+use crate::dev::{
+    ControlledSpaceAdmissionTransport, GatedJoinerActivation, JoinerFinalConfirmationGate,
+    RecordedGroupUpdateDispatch, RecordedMembershipHistoryExchange,
+};
 use uc_application::deps::{
     ApplicationClipboardAdapters, ApplicationNetworkAdapters, ApplicationNetworkBinding,
     ApplicationSpaceAdapters, ClipboardReceiverPort, CurrentSpaceMemberScopePort, LifecycleError,
@@ -287,10 +290,24 @@ pub async fn prepare_sync_session(
             Arc::clone(&membership_network_gate),
             builder.space_admission_transport(),
         ));
+    #[cfg(feature = "dev-tools")]
+    let admission_transport: Arc<dyn uc_application::deps::SpaceAdmissionTransportPort> =
+        Arc::new(ControlledSpaceAdmissionTransport::new(
+            admission_transport,
+            joiner_final_confirmation_gate.space_work_control(),
+        ));
     let membership_history_transport = Arc::new(GatedMembershipHistoryExchange::new(
         Arc::clone(&membership_network_gate),
         Arc::clone(&membership_history_exchange_adapter),
     ));
+    #[cfg(feature = "dev-tools")]
+    let membership_history_synchronization_transport =
+        Arc::new(RecordedMembershipHistoryExchange::new(
+            membership_history_transport.clone(),
+            joiner_final_confirmation_gate.space_work_control(),
+        ));
+    #[cfg(not(feature = "dev-tools"))]
+    let membership_history_synchronization_transport = membership_history_transport.clone();
     let membership_security = Arc::new(DefaultMembershipSecurityUpdateAdapter::new(
         Arc::clone(&space_setup.membership_session),
         Arc::clone(&space_setup.current_member_signatures),
@@ -403,7 +420,7 @@ pub async fn prepare_sync_session(
             Arc::clone(&space_setup.member_repo),
             Arc::clone(&peer_reachability),
         )),
-        membership_history_transport: membership_history_transport.clone(),
+        membership_history_transport: membership_history_synchronization_transport,
         verified_peer_address_refresh: membership_history_exchange_adapter.clone(),
         membership_branch_recovery_channel,
         membership_branch_recovery_recipient: Arc::clone(
@@ -435,7 +452,16 @@ pub async fn prepare_sync_session(
         ))),
         restricted_membership_delivery: membership_history_transport,
         group_update_store: Arc::clone(&space_setup.space_access.group_revocation),
-        group_update_dispatch,
+        group_update_dispatch: {
+            #[cfg(feature = "dev-tools")]
+            let dispatch = Arc::new(RecordedGroupUpdateDispatch::new(
+                group_update_dispatch,
+                joiner_final_confirmation_gate.space_work_control(),
+            ));
+            #[cfg(not(feature = "dev-tools"))]
+            let dispatch = group_update_dispatch;
+            dispatch
+        },
         apply_membership_projection: Arc::clone(&space_setup.membership_projection),
         membership_network_activity: membership_network_gate,
     });
