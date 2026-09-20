@@ -41,6 +41,7 @@ async fn invitation_from_isolated_profile_copy() {
             let kind = entry.file_type().unwrap();
             assert!(!kind.is_symlink());
             if kind.is_dir() {
+                std::fs::create_dir_all(private.join(path.strip_prefix(&source).unwrap())).unwrap();
                 pending.push(path);
             } else if kind.is_file() {
                 let destination = private.join(path.strip_prefix(&source).unwrap());
