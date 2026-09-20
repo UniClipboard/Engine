@@ -35,7 +35,7 @@ impl ProfileStartupStoragePort for ProfileStartupStorage {
             &self.paths.db_path,
             &self.paths.vault_dir,
             &self.paths.settings_path,
-            &self.paths.app_data_root_dir.join("iroh-identity"),
+            &self.paths.iroh_identity_dir(),
             self.secure_storage.as_ref(),
         )
         .map_err(storage_error)

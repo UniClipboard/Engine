@@ -36,6 +36,8 @@ use rand::TryRngCore;
 use uc_core::crypto::domain::Passphrase;
 use zeroize::Zeroize;
 
+use crate::security::crypto_model::kdf_cost_is_bounded;
+
 /// Magic prefix identifying a `.ucbundle` file.
 pub const MAGIC: &[u8; 8] = b"UCBUNDLE";
 
@@ -60,22 +62,6 @@ const HEADER_LEN: usize = 8 + 2 + 1 + 4 + 4 + 4 + SALT_LEN + NONCE_LEN;
 /// incompatible rather than attempted.
 const MAX_SEALED_LEN: u64 = 2 * 1024 * 1024 * 1024;
 
-/// Upper bound on the Argon2 memory cost we will honour from a bundle header.
-///
-/// The header is authenticated as AAD, but the KDF runs *before* the AEAD tag
-/// can be checked (the derived key is needed to verify the tag), and preview is
-/// ungated — so a hostile header could otherwise drive an unbounded Argon2
-/// allocation during an unauthenticated read. 1 GiB is 8× the production
-/// baseline (128 MiB), well above any value we emit, yet bounds the blast
-/// radius. Higher values are rejected as incompatible.
-const MAX_KDF_MEM_KIB: u32 = 1024 * 1024;
-
-/// Upper bound on the Argon2 time cost (iterations) honoured from a header.
-const MAX_KDF_ITERS: u32 = 1024;
-
-/// Upper bound on the Argon2 degree of parallelism honoured from a header.
-const MAX_KDF_PARALLELISM: u32 = 256;
-
 /// Argon2id cost parameters recorded in the header and used for derivation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Argon2Params {
@@ -97,6 +83,16 @@ impl Argon2Params {
             parallelism: 4,
         }
     }
+}
+
+fn validate_bundle_kdf(kdf: &Argon2Params) -> Result<(), BundleError> {
+    if kdf_cost_is_bounded(kdf.mem_kib, kdf.iters, kdf.parallelism) {
+        return Ok(());
+    }
+    Err(BundleError::Incompatible(format!(
+        "key-derivation parameters out of range (mem_kib={}, iters={}, parallelism={})",
+        kdf.mem_kib, kdf.iters, kdf.parallelism
+    )))
 }
 
 /// Parsed plaintext header of a `.ucbundle`.
@@ -190,14 +186,11 @@ pub fn parse_header(bytes: &[u8]) -> Result<(BundleHeader, usize), BundleError> 
     // Bound the KDF parameters before they reach `derive_key`: derivation runs
     // ahead of the AEAD tag check, so an out-of-range memory cost in a hostile
     // header would otherwise allocate before authentication can reject it.
-    if !(8..=MAX_KDF_MEM_KIB).contains(&mem_kib)
-        || !(1..=MAX_KDF_ITERS).contains(&iters)
-        || !(1..=MAX_KDF_PARALLELISM).contains(&parallelism)
-    {
-        return Err(BundleError::Incompatible(format!(
-            "key-derivation parameters out of range (mem_kib={mem_kib}, iters={iters}, parallelism={parallelism})"
-        )));
-    }
+    validate_bundle_kdf(&Argon2Params {
+        mem_kib,
+        iters,
+        parallelism,
+    })?;
     let mut salt = [0u8; SALT_LEN];
     salt.copy_from_slice(&bytes[o..o + SALT_LEN]);
     o += SALT_LEN;
@@ -251,6 +244,7 @@ pub fn seal(
     kdf: Argon2Params,
     archive: &[u8],
 ) -> Result<Vec<u8>, BundleError> {
+    validate_bundle_kdf(&kdf)?;
     let mut salt = [0u8; SALT_LEN];
     OsRng
         .try_fill_bytes(&mut salt)
@@ -283,6 +277,7 @@ pub fn seal_with_key(
     kdf: Argon2Params,
     archive: &[u8],
 ) -> Result<Vec<u8>, BundleError> {
+    validate_bundle_kdf(&kdf)?;
     let mut nonce = [0u8; NONCE_LEN];
     OsRng
         .try_fill_bytes(&mut nonce)
@@ -469,5 +464,46 @@ mod tests {
         let bundle = seal(&pw, cheap(), b"abc").unwrap();
         let (_, offset) = parse_header(&bundle).unwrap();
         assert_eq!(offset, HEADER_LEN);
+    }
+
+    #[test]
+    fn header_rejects_excessive_combined_kdf_work() {
+        let mut bundle = seal(&Passphrase::from("pw"), cheap(), b"abc").unwrap();
+        bundle[11..15].copy_from_slice(&(128_u32 * 1024).to_le_bytes());
+        bundle[15..19].copy_from_slice(&5_u32.to_le_bytes());
+        bundle[19..23].copy_from_slice(&4_u32.to_le_bytes());
+
+        assert!(matches!(
+            parse_header(&bundle),
+            Err(BundleError::Incompatible(_))
+        ));
+    }
+
+    #[test]
+    fn seal_rejects_kdf_parameters_that_open_would_reject() {
+        let excessive = Argon2Params {
+            mem_kib: 1,
+            iters: u32::MAX,
+            parallelism: 1,
+        };
+
+        assert!(matches!(
+            seal(&Passphrase::from("pw"), excessive, b"abc"),
+            Err(BundleError::Incompatible(_))
+        ));
+    }
+
+    #[test]
+    fn seal_with_key_rejects_excessive_combined_kdf_work() {
+        let excessive = Argon2Params {
+            mem_kib: 128 * 1024,
+            iters: 5,
+            parallelism: 4,
+        };
+
+        assert!(matches!(
+            seal_with_key(&[0x71; KEY_LEN], &[0x72; SALT_LEN], excessive, b"abc"),
+            Err(BundleError::Incompatible(_))
+        ));
     }
 }

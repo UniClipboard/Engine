@@ -77,7 +77,7 @@ pub use profile_storage_upgrade::{
     StorageUpgradeFailure, StorageUpgradeObserver, StorageUpgradeProgressOutcome,
     StorageUpgradeSnapshot, StorageUpgradeStep, StorageUpgradeStepProgress, StorageUpgradeUnit,
 };
-pub use profile_upgrade_backup::ProfileUpgradeBackupStore;
+pub use profile_upgrade_backup::{ProfileUpgradeBackupRecordKeyMissing, ProfileUpgradeBackupStore};
 pub(crate) use secrets::{Kek, MasterKey};
 pub(crate) use secure_storage_access::SecureStorageAccess;
 pub use space_admission_auth::{
@@ -99,3 +99,10 @@ pub use v3_initial_space_activation::V3InitialSpaceActivation;
 pub use v3_membership_branch_transition::V3MembershipBranchTransition;
 
 pub(crate) use profile_content_key_vault::ProfileKeyReadLease;
+
+mod profile_key_recovery;
+pub use profile_key_recovery::{
+    ProfileKeyRecoveryError, ProfileKeyRecoveryStore, ProfilePassphraseRecoveryPort,
+    ProfileRecoveryLosses, ProfileRecoveryOutcome, ProfileRecoveryPreparation,
+    PROFILE_SECRET_FILE_NAME,
+};

@@ -15,6 +15,7 @@
 //!   vault/keyslot.json     # keyslot to install into the vault dir
 //!   vault/device_id.txt
 //!   vault/.current-space-id-v1    # "is initialized" marker; copy back into vault dir
+//!   vault/profile-secrets-v1      # encrypted independent profile secrets
 //!   iroh-identity/*        # 0600 device-identity files; copy into identity dir
 //!   settings.json
 //!   secrets.json           # { "secrets": { "<key>": "<base64>" , ... } }; KEK only
@@ -33,6 +34,8 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 use uc_core::ports::SecureStoragePort;
+
+use crate::security::PROFILE_SECRET_FILE_NAME;
 
 use super::archive::BundleArchive;
 use super::secret_keys::SECRETS_MEMBER;
@@ -194,6 +197,9 @@ pub const DEVICE_ID_MEMBER: &str = "vault/device_id.txt";
 /// generation manifest that points at source-only generation directories.
 pub const CURRENT_SPACE_ID_MEMBER: &str = "vault/.current-space-id-v1";
 
+/// Member path of the encrypted independent profile-secret store.
+pub const PROFILE_SECRETS_MEMBER: &str = "vault/profile-secrets-v1";
+
 /// Member path of settings inside the bundle / staging area.
 pub const SETTINGS_MEMBER: &str = "settings.json";
 
@@ -297,6 +303,11 @@ pub fn apply_pending_import(
         CURRENT_SPACE_ID_MEMBER,
         &vault_dir.join(".current-space-id-v1"),
     )?;
+    copy_member_or_remove(
+        &staging_dir,
+        PROFILE_SECRETS_MEMBER,
+        &vault_dir.join(PROFILE_SECRET_FILE_NAME),
+    )?;
     copy_dir_members(&staging_dir, IROH_IDENTITY_PREFIX, iroh_identity_dir)?;
     copy_member_if_present(&staging_dir, SETTINGS_MEMBER, settings_path)?;
     copy_dir_members(
@@ -329,6 +340,26 @@ fn copy_member_if_present(
     ensure_parent(dest)?;
     std::fs::copy(source, dest).map_err(|_| PendingImportError::CopyMember)?;
     Ok(())
+}
+
+fn copy_member_or_remove(
+    staging_dir: &Path,
+    member: &str,
+    dest: &Path,
+) -> Result<(), PendingImportError> {
+    let source = staging_dir.join(member);
+    if source.exists() {
+        ensure_parent(dest)?;
+        return match std::fs::copy(source, dest) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(PendingImportError::CopyMember),
+        };
+    }
+    match std::fs::remove_file(dest) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(PendingImportError::CopyMember),
+    }
 }
 
 fn copy_dir_members(
@@ -401,7 +432,34 @@ pub enum PendingImportError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    use uc_core::ports::{SecureStorageError, SecureStoragePort};
+
     use super::*;
+
+    #[derive(Default)]
+    struct MemorySecureStorage(Mutex<BTreeMap<String, Vec<u8>>>);
+
+    impl SecureStoragePort for MemorySecureStorage {
+        fn get(&self, key: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
+            Ok(self.0.lock().unwrap().get(key).cloned())
+        }
+
+        fn set(&self, key: &str, value: &[u8]) -> Result<(), SecureStorageError> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(key.to_owned(), value.to_vec());
+            Ok(())
+        }
+
+        fn delete(&self, key: &str) -> Result<(), SecureStorageError> {
+            self.0.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
 
     #[test]
     fn secrets_file_round_trips_base64() {
@@ -470,5 +528,49 @@ mod tests {
 
         assert!(!staged_member_path(dir.path(), "stale.txt").exists());
         assert!(staged_member_path(dir.path(), "manifest.json").exists());
+    }
+
+    #[test]
+    fn apply_removes_live_profile_secrets_when_bundle_omits_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_root = dir.path().join("data");
+        let vault_dir = dir.path().join("vault");
+        let db_path = dir.path().join("db.sqlite");
+        let settings_path = dir.path().join("settings.json");
+        let identity_dir = dir.path().join("identity");
+        let live_profile_secrets = vault_dir.join(PROFILE_SECRET_FILE_NAME);
+        std::fs::create_dir_all(&vault_dir).unwrap();
+        std::fs::write(&live_profile_secrets, b"stale").unwrap();
+
+        let mut archive = BundleArchive::new();
+        archive.insert(DB_MEMBER, b"database".to_vec());
+        archive.insert(KEYSLOT_MEMBER, b"keyslot".to_vec());
+        archive.insert(DEVICE_ID_MEMBER, b"device".to_vec());
+        archive.insert(CURRENT_SPACE_ID_MEMBER, b"space".to_vec());
+        archive.insert(
+            SECRETS_MEMBER,
+            SecretsFile::from_raw(Vec::new()).to_json_bytes().unwrap(),
+        );
+        let marker = PendingImportMarker {
+            schema_ver: PENDING_IMPORT_SCHEMA_VER,
+            staging_dir: STAGING_DIR_NAME.to_owned(),
+            has_kek: false,
+            staged_at_unix_ms: 1,
+        };
+        StagingLayout::new(&data_root)
+            .write(&archive, &marker)
+            .unwrap();
+
+        apply_pending_import(
+            &data_root,
+            &db_path,
+            &vault_dir,
+            &settings_path,
+            &identity_dir,
+            &MemorySecureStorage::default(),
+        )
+        .unwrap();
+
+        assert!(!live_profile_secrets.exists());
     }
 }

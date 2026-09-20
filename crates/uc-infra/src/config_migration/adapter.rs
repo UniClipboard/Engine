@@ -23,7 +23,7 @@ use uc_core::ports::config_migration::{
 };
 use uc_core::ports::{ClockPort, LocalIdentityPort, SecureStoragePort};
 
-use crate::security::crypto_model::KeySlotFile;
+use crate::security::{crypto_model::KeySlotFile, PROFILE_SECRET_FILE_NAME};
 
 use super::archive::{ArchiveError, BundleArchive};
 use super::bundle::{self, Argon2Params, BundleError};
@@ -33,7 +33,7 @@ use super::secret_keys::{migratable_secret_keys, MigratableSecretKind, SECRETS_M
 use super::staging::{
     PendingImportMarker, SecretsFile, StagingError, StagingLayout, CURRENT_SPACE_ID_MEMBER,
     DB_MEMBER, DEVICE_ID_MEMBER, IROH_IDENTITY_PREFIX, KEYSLOT_MEMBER, PENDING_IMPORT_SCHEMA_VER,
-    SETTINGS_MEMBER, STAGING_DIR_NAME, UI_STATE_PREFIX,
+    PROFILE_SECRETS_MEMBER, SETTINGS_MEMBER, STAGING_DIR_NAME, UI_STATE_PREFIX,
 };
 
 /// Raw secure-storage entries collected for a bundle, paired with the
@@ -424,6 +424,8 @@ impl ExportConfigBundlePort for ConfigMigrationAdapter {
         let device_id = Self::read_required(&self.paths.vault_dir.join("device_id.txt"))?;
         let current_space_id =
             Self::read_required(&self.paths.vault_dir.join(".current-space-id-v1"))?;
+        let profile_secrets =
+            Self::read_optional(&self.paths.vault_dir.join(PROFILE_SECRET_FILE_NAME))?;
         let settings = Self::read_optional(&self.paths.settings_path)?;
 
         // 5. Device fingerprint (human-confirmable identity) + timestamp.
@@ -444,6 +446,9 @@ impl ExportConfigBundlePort for ConfigMigrationAdapter {
         archive.insert(KEYSLOT_MEMBER, keyslot);
         archive.insert(DEVICE_ID_MEMBER, device_id);
         archive.insert(CURRENT_SPACE_ID_MEMBER, current_space_id);
+        if let Some(profile_secrets) = profile_secrets {
+            archive.insert(PROFILE_SECRETS_MEMBER, profile_secrets);
+        }
         if let Some(settings) = settings {
             archive.insert(SETTINGS_MEMBER, settings);
         }

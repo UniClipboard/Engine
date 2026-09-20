@@ -3669,9 +3669,26 @@ async fn engine_start_finishes_an_interrupted_factory_reset_before_opening_a_new
         .unwrap();
     drop(engine);
 
-    let lifecycle_storage =
-        crate::assembly::host::adapt_secure_storage(Box::new(secure_storage.clone()));
-    let lifecycle = uc_infra::security::ProfileLifecycleRepository::new(lifecycle_storage);
+    let recovery_host = HostCapabilities::new(
+        directories(),
+        Box::new(secure_storage.clone()),
+        Box::new(StaticHostClipboard {
+            snapshot: HostClipboardSnapshot {
+                observed_at_ms: 0,
+                representations: Vec::new(),
+            },
+        }),
+        Box::new(EmptyHostFiles),
+    );
+    let config = EngineConfig::new("1.2.3");
+    let paths = crate::assembly::host::derive_app_paths(recovery_host.directories());
+    let recovery_storage =
+        crate::assembly::host::profile_key_recovery_store(&config, &paths, &recovery_host);
+    assert_eq!(
+        recovery_storage.prepare_startup().await.unwrap(),
+        uc_infra::security::ProfileRecoveryPreparation::Ready
+    );
+    let lifecycle = uc_infra::security::ProfileLifecycleRepository::new(recovery_storage);
     let initial = uc_application::deps::ProfileLifecycleRepositoryPort::load(&lifecycle)
         .unwrap()
         .unwrap();

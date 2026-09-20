@@ -7,10 +7,13 @@ use std::sync::Arc;
 use uc_core::{crypto::model::EncryptionError, ports::SecureStoragePort};
 
 use crate::fs::key_slot_store::KeySlotStore;
-use crate::security::crypto_model::{KeyScope, KeySlot, KeySlotFile};
+use crate::security::crypto_model::{validate_kdf, KeyScope, KeySlot, KeySlotFile};
 use crate::security::{Kek, SecureStorageAccess};
 
 use super::scope_identifier::scope_identifier;
+use crate::security::{v1_aead, MasterKey};
+use uc_core::crypto::domain::Passphrase;
+use uc_core::crypto::model::Passphrase as LegacyPassphrase;
 
 #[cfg(test)]
 mod tests;
@@ -43,8 +46,10 @@ impl KeyMaterialStore {
             .secure_storage
             .execute(move |storage| storage.get(&key)?.ok_or(EncryptionError::KeyNotFound))
             .await?;
-        Kek::from_bytes(&secret)
-            .map_err(|e| EncryptionError::KeyringError(format!("invalid KEK material: {e}")))
+        match Kek::from_bytes(&secret) {
+            Ok(kek) => Ok(kek),
+            Err(_) => Err(EncryptionError::KeyMaterialCorrupt),
+        }
     }
 
     pub async fn store_kek(&self, scope: &KeyScope, kek: &Kek) -> Result<(), EncryptionError> {
@@ -56,6 +61,58 @@ impl KeyMaterialStore {
                 Ok(())
             })
             .await
+    }
+
+    pub(crate) async fn authenticate_and_restore_kek(
+        &self,
+        scope: &KeyScope,
+        passphrase: &Passphrase,
+    ) -> Result<MasterKey, EncryptionError> {
+        let (master, kek) = self.authenticate_kek(scope, passphrase).await?;
+        self.persist_authenticated_kek(scope, &kek).await?;
+        Ok(master)
+    }
+
+    pub(crate) async fn authenticate_kek(
+        &self,
+        scope: &KeyScope,
+        passphrase: &Passphrase,
+    ) -> Result<(MasterKey, Kek), EncryptionError> {
+        let slot = self.load_keyslot(scope).await?;
+        let wrapped = slot
+            .wrapped_master_key
+            .as_ref()
+            .ok_or(EncryptionError::CorruptedKeySlot)?;
+        let legacy = LegacyPassphrase(passphrase.expose().to_owned());
+        let kek = match v1_aead::derive_kek_argon2id(&legacy, &slot.salt, &slot.kdf) {
+            Ok(kek) => kek,
+            Err(_) => return Err(EncryptionError::KdfFailed),
+        };
+        let master = match v1_aead::unwrap_master_key_xchacha(&kek, &wrapped.blob) {
+            Ok(master) => master,
+            Err(_) => return Err(EncryptionError::WrongPassphrase),
+        };
+        Ok((master, kek))
+    }
+
+    pub(crate) async fn persist_authenticated_kek(
+        &self,
+        scope: &KeyScope,
+        kek: &Kek,
+    ) -> Result<(), EncryptionError> {
+        // Never trust a process-local observation after explicit authentication.
+        match self.load_kek(scope).await {
+            Ok(existing) if existing.as_bytes() == kek.as_bytes() => {}
+            Ok(_) | Err(EncryptionError::KeyNotFound | EncryptionError::KeyMaterialCorrupt) => {
+                self.store_kek(scope, &kek).await?
+            }
+            Err(error) => return Err(error),
+        }
+        let persisted = self.load_kek(scope).await?;
+        if persisted.as_bytes() != kek.as_bytes() {
+            return Err(EncryptionError::KeyMaterialCorrupt);
+        }
+        Ok(())
     }
 
     pub async fn delete_kek(&self, scope: &KeyScope) -> Result<(), EncryptionError> {
@@ -73,6 +130,14 @@ impl KeyMaterialStore {
         if &file.scope != scope {
             return Err(EncryptionError::KeyMaterialCorrupt);
         }
+        if file.version != "V1" {
+            return Err(EncryptionError::UnsupportedKeySlotVersion);
+        }
+        validate_kdf(&file.kdf)?;
+        file.wrapped_master_key.validate_basic()?;
+        if file.salt.len() < 8 {
+            return Err(EncryptionError::CorruptedKeySlot);
+        }
         Ok(file.into())
     }
 
@@ -88,7 +153,10 @@ impl KeyMaterialStore {
     }
 
     pub async fn store_keyslot(&self, keyslot: &KeySlot) -> Result<(), EncryptionError> {
-        let file = KeySlotFile::try_from(keyslot).map_err(|_| EncryptionError::CorruptedKeySlot)?;
+        let file = match KeySlotFile::try_from(keyslot) {
+            Ok(file) => file,
+            Err(_) => return Err(EncryptionError::CorruptedKeySlot),
+        };
         self.keyslot_store.store(&file).await
     }
 

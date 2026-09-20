@@ -11,11 +11,12 @@ use zeroize::Zeroizing;
 use super::inventory::SecretValue;
 use super::security_stream::{ArchiveReader, ArchiveWriter};
 use super::store::backup_error;
+use super::ProfileUpgradeBackupRecordKeyMissing;
 use crate::security::profile_backup_archive::tree::open_regular_file;
 use crate::security::profile_backup_archive::{private_new_file, sync_directory};
 use crate::security::{MasterKey, ProfileArchiveReceipt};
 
-pub(super) const RECORD_KEY: &str = "profile_upgrade_backup_record_key:v1";
+pub(crate) const RECORD_KEY: &str = "profile_upgrade_backup_record_key:v1";
 const MAX_RECORD_BYTES: u64 = 256 * 1024;
 
 #[derive(Serialize, Deserialize)]
@@ -63,15 +64,24 @@ pub(super) fn read_bounded(
 }
 
 fn load_key(storage: &dyn SecureStoragePort) -> Result<MasterKey, ProfileUpgradeBackupError> {
-    let bytes = Zeroizing::new(
-        storage
-            .get(RECORD_KEY)
-            .map_err(backup_error)?
-            .ok_or_else(|| {
-                backup_error(io::Error::other("profile backup record key is missing"))
-            })?,
-    );
-    MasterKey::from_bytes(&bytes).map_err(backup_error)
+    let bytes = match storage.get(RECORD_KEY) {
+        Ok(bytes) => bytes,
+        Err(error) => return Err(backup_error(error)),
+    };
+    let Some(bytes) = bytes else {
+        return Err(missing_record_key());
+    };
+    let bytes = Zeroizing::new(bytes);
+    match MasterKey::from_bytes(&bytes) {
+        Ok(key) => Ok(key),
+        Err(error) => Err(backup_error(error)),
+    }
+}
+
+fn missing_record_key() -> ProfileUpgradeBackupError {
+    ProfileUpgradeBackupError {
+        source: ProfileUpgradeBackupRecordKeyMissing.into(),
+    }
 }
 
 pub(super) fn read_record(
@@ -117,9 +127,7 @@ pub(super) fn publish_record(
     // 已有安全材料记录缺钥时不能生成替代值；原样文件记录不依赖此密钥。
     if storage.get(RECORD_KEY).map_err(backup_error)?.is_none() {
         if fs::symlink_metadata(directory.join("security-current")).is_ok() {
-            return Err(backup_error(io::Error::other(
-                "profile backup record key is missing",
-            )));
+            return Err(missing_record_key());
         }
         let key = MasterKey::generate().map_err(backup_error)?;
         storage

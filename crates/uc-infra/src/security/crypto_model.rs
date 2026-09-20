@@ -15,6 +15,42 @@ use rand::{rngs::OsRng, TryRngCore};
 use serde::{Deserialize, Serialize};
 use uc_core::crypto::model::EncryptionError;
 
+/// 从持久资料读取的 Argon2 参数必须在认证前限制资源消耗。
+pub(crate) const MAX_KDF_MEM_KIB: u32 = 1024 * 1024;
+pub(crate) const MAX_KDF_ITERS: u32 = 1024;
+pub(crate) const MAX_KDF_PARALLELISM: u32 = 256;
+/// At most 512 MiB of total Argon2 memory filling. This admits the production
+/// default (128 MiB x 3) while rejecting individually valid combinations that
+/// can keep a device allocating or filling memory for an excessive duration.
+pub(crate) const MAX_KDF_WORK_KIB: u64 = 512 * 1024;
+
+pub(crate) fn kdf_cost_is_bounded(mem_kib: u32, iters: u32, parallelism: u32) -> bool {
+    (8..=MAX_KDF_MEM_KIB).contains(&mem_kib)
+        && (1..=MAX_KDF_ITERS).contains(&iters)
+        && (1..=MAX_KDF_PARALLELISM).contains(&parallelism)
+        && u64::from(mem_kib) * u64::from(iters) <= MAX_KDF_WORK_KIB
+}
+
+pub(crate) fn validate_kdf(kdf: &KdfParams) -> Result<(), EncryptionError> {
+    if kdf.alg != "Argon2id" {
+        return Err(EncryptionError::UnsupportedKdfAlgorithm);
+    }
+    if !kdf_cost_is_bounded(kdf.params.mem_kib, kdf.params.iters, kdf.params.parallelism) {
+        return Err(EncryptionError::CorruptedKeySlot);
+    }
+    if argon2::Params::new(
+        kdf.params.mem_kib,
+        kdf.params.iters,
+        kdf.params.parallelism,
+        Some(32),
+    )
+    .is_err()
+    {
+        return Err(EncryptionError::CorruptedKeySlot);
+    }
+    Ok(())
+}
+
 /// 单 profile 下 KEK/KeySlot 的作用域键。
 ///
 /// Slice 7 (U7 候选 B) 起从 uc-core 搬到 uc-infra——`KeyScopePort` 已改名

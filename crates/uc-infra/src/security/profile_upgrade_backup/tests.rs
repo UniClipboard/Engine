@@ -21,7 +21,7 @@ use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
 use super::inventory::{read_secrets, BACKUP_DIRECTORY};
 use super::record::{self, read_file_record};
-use super::ProfileUpgradeBackupStore;
+use super::{ProfileUpgradeBackupRecordKeyMissing, ProfileUpgradeBackupStore};
 use crate::app_version_state::DEFAULT_FILE_NAME;
 use crate::fs::VaultLayout;
 use crate::security::ProfileBackupArchive;
@@ -536,7 +536,23 @@ async fn missing_security_record_key_does_not_prevent_file_verification_or_resto
         .verify_prepared(&fixture.target())
         .await
         .unwrap();
-    assert!(fixture.prepare().await.is_err());
+    let error = fixture.prepare().await.unwrap_err();
+    let mut source: &(dyn std::error::Error + 'static) = &error;
+    let mut classified = false;
+    loop {
+        if source
+            .downcast_ref::<ProfileUpgradeBackupRecordKeyMissing>()
+            .is_some()
+        {
+            classified = true;
+            break;
+        }
+        let Some(next) = source.source() else {
+            break;
+        };
+        source = next;
+    }
+    assert!(classified);
     assert!(fixture.storage.get(record::RECORD_KEY).unwrap().is_none());
     let destination = fixture.temporary.path().join("no-security-record-key");
     ProfileBackupArchive::new(fixture.backup.directory())
