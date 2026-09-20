@@ -95,6 +95,13 @@ const OPTIONAL_RETIRED_TABLES: &[&str] = &[
     "relationship_legacy_space_member",
     "relationship_legacy_trusted_peer",
 ];
+// 旧版 V3 活动库在常规迁移前尚不存在的另一库归属表。
+const LATER_FORBIDDEN_TABLES: &[&str] = &[
+    "group_update_delivery",
+    "group_update_source",
+    "admission_recovery_summary",
+    "admission_repository_record",
+];
 
 impl TargetGenerationStager {
     pub(super) fn new(root: PathBuf, source_pool: DbPool, keys: Arc<AdmissionKeyManager>) -> Self {
@@ -202,7 +209,11 @@ impl TargetGenerationStager {
                 *journal.target_space_control_generation(),
             )
             .map_err(map_credential_upgrade_error)?,
-            None => ensure_tables_empty(&paths.control_database, &["space_admission_credentials"])?,
+            None => ensure_tables_empty(
+                &paths.control_database,
+                &["space_admission_credentials"],
+                &[],
+            )?,
         }
         let profile_database_digest = file_digest(&paths.profile_database)?;
         let control_database_digest = file_digest(&paths.control_database)?;
@@ -303,17 +314,28 @@ impl TargetGenerationStager {
     pub(super) fn verify_runtime_row_ownership(
         &self,
         journal: &UpgradeJournalV1,
+        allow_later_missing: bool,
     ) -> Result<(), ProfileStorageUpgradeError> {
         let paths = self.paths(journal);
+        let optional_missing = if allow_later_missing {
+            LATER_FORBIDDEN_TABLES
+        } else {
+            &[]
+        };
         ensure_tables_empty(
             &paths.payload_output.join(PROFILE_DATABASE_FILE),
             SPACE_CONTROL_TABLES,
+            optional_missing,
         )?;
         let mut control_forbidden =
             Vec::with_capacity(PROFILE_DATA_TABLES.len() + PROFILE_COORDINATION_TABLES.len());
         control_forbidden.extend_from_slice(PROFILE_DATA_TABLES);
         control_forbidden.extend_from_slice(PROFILE_COORDINATION_TABLES);
-        ensure_tables_empty(&paths.control_database, &control_forbidden)
+        ensure_tables_empty(
+            &paths.control_database,
+            &control_forbidden,
+            optional_missing,
+        )
     }
 
     fn source_revision(&self) -> Result<u64, ProfileStorageUpgradeError> {
@@ -412,7 +434,11 @@ struct CountRow {
     count: i64,
 }
 
-fn ensure_tables_empty(path: &Path, tables: &[&str]) -> Result<(), ProfileStorageUpgradeError> {
+fn ensure_tables_empty(
+    path: &Path,
+    tables: &[&str],
+    optional_missing: &[&str],
+) -> Result<(), ProfileStorageUpgradeError> {
     let database = path
         .to_str()
         .ok_or_else(|| ProfileStorageUpgradeError::Corrupt {
@@ -428,7 +454,7 @@ fn ensure_tables_empty(path: &Path, tables: &[&str]) -> Result<(), ProfileStorag
     let actual = load_table_names(&mut connection)?;
     for table in tables {
         if !actual.contains(*table) {
-            if OPTIONAL_RETIRED_TABLES.contains(table) {
+            if OPTIONAL_RETIRED_TABLES.contains(table) || optional_missing.contains(table) {
                 continue;
             }
             return Err(ProfileStorageUpgradeError::Corrupt {
@@ -671,7 +697,7 @@ mod tests {
         .execute(&mut pool.get().unwrap())
         .unwrap();
 
-        assert!(ensure_tables_empty(&database, SPACE_CONTROL_TABLES).is_err());
+        assert!(ensure_tables_empty(&database, SPACE_CONTROL_TABLES, &[]).is_err());
     }
 
     #[test]
@@ -687,7 +713,7 @@ mod tests {
         .execute(&mut pool.get().unwrap())
         .unwrap();
 
-        assert!(ensure_tables_empty(&database, SPACE_CONTROL_TABLES).is_err());
+        assert!(ensure_tables_empty(&database, SPACE_CONTROL_TABLES, &[]).is_err());
     }
 
     #[test]
@@ -712,7 +738,7 @@ mod tests {
         .unwrap();
         drop(pool);
 
-        ensure_tables_empty(&database, &forbidden).unwrap();
+        ensure_tables_empty(&database, &forbidden, &[]).unwrap();
     }
 
     #[test]
@@ -794,8 +820,8 @@ mod tests {
             .copied()
             .collect();
         separate_database(&control, &excluded).unwrap();
-        ensure_tables_empty(&profile, SPACE_CONTROL_TABLES).unwrap();
-        ensure_tables_empty(&control, &excluded).unwrap();
+        ensure_tables_empty(&profile, SPACE_CONTROL_TABLES, &[]).unwrap();
+        ensure_tables_empty(&control, &excluded, &[]).unwrap();
         assert_eq!(std::fs::read(&source).unwrap(), before);
     }
 }

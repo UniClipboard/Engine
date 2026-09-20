@@ -33,7 +33,7 @@ impl RuntimeGenerationValidator {
         let profile = paths.payload_output.join("profile.sqlite");
         validate_database(&profile)?;
         validate_database(&paths.control_database)?;
-        target.verify_runtime_row_ownership(journal)?;
+        target.verify_runtime_row_ownership(journal, false)?;
         target.verify_source_revision(journal)?;
         Ok(VerifiedRuntimeGeneration {
             profile_schema_digest: schema_digest(&profile)?,
@@ -72,7 +72,7 @@ impl RuntimeGenerationValidator {
         let profile = paths.payload_output.join("profile.sqlite");
         validate_database(&profile)?;
         validate_database(&paths.control_database)?;
-        target.verify_runtime_row_ownership(journal)?;
+        target.verify_runtime_row_ownership(journal, true)?;
         if require_original_schema
             && (journal.verified_profile_schema_digest() != Some(schema_digest(&profile)?)
                 || journal.verified_control_schema_digest()

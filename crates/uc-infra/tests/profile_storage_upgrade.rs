@@ -3,10 +3,10 @@ use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use diesel::RunQueryDsl;
+use diesel::{connection::SimpleConnection, Connection as _, RunQueryDsl};
 use uc_application::deps::{
     CurrentSpaceIdentityPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
-    MembershipLedgerError,
+    MembershipLedgerError, ProfileLifecycleRepositoryPort,
 };
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::{ProfileId, SpaceId};
@@ -20,8 +20,8 @@ use uc_infra::fs::key_slot_store::JsonKeySlotStore;
 use uc_infra::network::iroh::SpaceAdmissionChannelCredentialPort;
 use uc_infra::security::{
     ActiveSpaceGenerationManifestStore, AdmissionKeyManager, DefaultCurrentProfile,
-    ProfileContentKeyVault, ProfileRuntimeLayout, ProfileStorageUpgrade,
-    ProfileStorageUpgradeError, ProfileStorageUpgradeOutcome,
+    ProfileContentKeyVault, ProfileLifecycleRepository, ProfileRuntimeLayout,
+    ProfileStorageUpgrade, ProfileStorageUpgradeError, ProfileStorageUpgradeOutcome,
 };
 use uc_infra::space::{
     CurrentSpaceResolver, InMemorySession, KeyMaterialStore, RuntimeSpaceAccessAdapter,
@@ -120,6 +120,138 @@ async fn alpha5_runtime_fixture_reaches_legacy_ready() {
         outcome,
         ProfileStorageUpgradeOutcome::LegacyReady { .. } | ProfileStorageUpgradeOutcome::Upgraded
     ));
+}
+
+#[tokio::test]
+#[ignore = "requires a copied isolated alpha.10 archive payload in UC_ALPHA10_FIXTURE_DATA"]
+async fn alpha10_archive_recovers_with_test_credentials() {
+    let source = PathBuf::from(std::env::var_os("UC_ALPHA10_FIXTURE_DATA").unwrap());
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("userdata");
+    for (file, bytes) in regular_files(&source) {
+        let destination = root.join(file.strip_prefix(&source).unwrap());
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::write(destination, bytes).unwrap();
+    }
+    let secure_storage = Arc::new(MemorySecureStorage::default());
+    for entry in std::fs::read_dir(root.join("keyring")).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry
+            .path()
+            .file_stem()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let key = String::from_utf8(hex::decode(name).unwrap()).unwrap();
+        secure_storage
+            .set(&key, &std::fs::read(entry.path()).unwrap())
+            .unwrap();
+    }
+    let generation = ProfileLifecycleRepository::new(secure_storage.clone())
+        .load()
+        .unwrap()
+        .unwrap()
+        .generation()
+        .into_bytes();
+    let vault_path = root.join("vault");
+    let keys = Arc::new(AdmissionKeyManager::new(secure_storage.clone(), generation));
+    let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+        vault_path.clone(),
+        keys.clone(),
+    ));
+    let vault = Arc::new(ProfileContentKeyVault::new(
+        vault_path.clone(),
+        secure_storage.clone(),
+        generation,
+    ));
+    let current_space = Arc::new(CurrentSpaceResolver::new(
+        manifests.clone(),
+        vault_path.join(".current-space-id-v1"),
+        keys.clone(),
+    ));
+    let upgrade = || {
+        ProfileStorageUpgrade::for_runtime(
+            root.clone(),
+            root.join("uniclipboard.db"),
+            vault_path.join("blobs"),
+            ProfileId::from("default"),
+            secure_storage.clone(),
+            vault_path.clone(),
+            vault.clone(),
+            keys.clone(),
+            manifests.clone(),
+            current_space.clone(),
+        )
+    };
+    let active = manifests.load_v3_sync().unwrap().unwrap();
+    let layout = ProfileRuntimeLayout::v3(&root, &active);
+    let history_before = table_count(layout.profile_database(), "clipboard_event");
+    let entries_before = table_count(layout.profile_database(), "clipboard_entry");
+    let members_before = table_count(layout.control_database(), "membership_ledger_state");
+    let relationships_before = table_count(layout.control_database(), "encrypted_relationship");
+    assert!(root.join("profile-storage-upgrade/.journal-v1").is_file());
+    for (database, table) in [
+        (layout.profile_database(), "group_update_delivery"),
+        (layout.profile_database(), "group_update_source"),
+        (layout.control_database(), "admission_recovery_summary"),
+        (layout.control_database(), "admission_repository_record"),
+    ] {
+        assert!(!table_exists(database, table));
+    }
+    assert!(history_before > 0);
+    assert_eq!(
+        upgrade().ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::UpToDate
+    );
+    assert_eq!(
+        upgrade().ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::UpToDate
+    );
+    assert!(!root.join("profile-storage-upgrade/.journal-v1").exists());
+    let profile_pool = init_db_pool(layout.profile_database().to_str().unwrap()).unwrap();
+    let control_pool = init_db_pool(layout.control_database().to_str().unwrap()).unwrap();
+    assert_eq!(
+        table_count(layout.profile_database(), "clipboard_event"),
+        history_before
+    );
+    assert_eq!(
+        table_count(layout.profile_database(), "clipboard_entry"),
+        entries_before
+    );
+    assert_eq!(
+        table_count(layout.control_database(), "membership_ledger_state"),
+        members_before
+    );
+    assert_eq!(
+        table_count(layout.control_database(), "encrypted_relationship"),
+        relationships_before
+    );
+    assert_eq!(
+        table_count(layout.profile_database(), "group_update_delivery"),
+        0
+    );
+    assert_eq!(
+        table_count(layout.control_database(), "admission_recovery_summary"),
+        0
+    );
+    drop((profile_pool, control_pool));
+    assert_eq!(
+        upgrade().ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::UpToDate
+    );
+    assert_eq!(
+        table_count(layout.profile_database(), "clipboard_event"),
+        history_before
+    );
+    assert_eq!(
+        table_count(layout.control_database(), "membership_ledger_state"),
+        members_before
+    );
+    assert_eq!(
+        table_count(layout.control_database(), "encrypted_relationship"),
+        relationships_before
+    );
 }
 
 #[async_trait::async_trait]
@@ -1197,13 +1329,256 @@ struct CountRow {
 }
 
 fn table_count(database: &Path, table: &str) -> i64 {
-    use diesel::Connection as _;
     let mut connection =
         diesel::sqlite::SqliteConnection::establish(database.to_str().unwrap()).unwrap();
     diesel::sql_query(format!("SELECT COUNT(*) AS count FROM \"{table}\""))
         .get_result::<CountRow>(&mut connection)
         .unwrap()
         .count
+}
+
+fn table_exists(database: &Path, table: &str) -> bool {
+    let mut connection =
+        diesel::sqlite::SqliteConnection::establish(database.to_str().unwrap()).unwrap();
+    diesel::sql_query(
+        "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = ?",
+    )
+    .bind::<diesel::sql_types::Text, _>(table)
+    .get_result::<CountRow>(&mut connection)
+    .unwrap()
+    .count
+        == 1
+}
+
+struct PromotedProfile {
+    _directory: tempfile::TempDir,
+    root: PathBuf,
+    storage: Arc<MemorySecureStorage>,
+    keys: Arc<AdmissionKeyManager>,
+    manifests: Arc<ActiveSpaceGenerationManifestStore>,
+}
+
+impl PromotedProfile {
+    fn upgrade(&self) -> ProfileStorageUpgrade {
+        new_upgrade(
+            &self.root,
+            self.storage.clone(),
+            self.keys.clone(),
+            self.manifests.clone(),
+        )
+    }
+
+    fn layout(&self) -> ProfileRuntimeLayout {
+        let active = self.manifests.load_v3_sync().unwrap().unwrap();
+        ProfileRuntimeLayout::v3(&self.root, &active)
+    }
+}
+
+async fn promoted_profile() -> PromotedProfile {
+    promoted_profile_with_storage(Arc::new(MemorySecureStorage::default())).await
+}
+
+async fn promoted_profile_with_storage(storage: Arc<MemorySecureStorage>) -> PromotedProfile {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("profile");
+    let keys = Arc::new(AdmissionKeyManager::new(storage.clone(), [0xD1; 16]));
+    let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+        root.join("vault"),
+        keys.clone(),
+    ));
+    let source = ActiveSpaceGenerationManifestV2::new(
+        "old-space".to_owned(),
+        [0xD2; 16],
+        [0xD3; 16],
+        [0xD4; 16],
+    )
+    .unwrap();
+    manifests.promote(&source).await.unwrap();
+    let upgrade = new_upgrade(&root, storage.clone(), keys.clone(), manifests.clone());
+    let source_database = root.join("source.sqlite");
+    let mut connection =
+        diesel::sqlite::SqliteConnection::establish(source_database.to_str().unwrap()).unwrap();
+    diesel::sql_query("INSERT INTO clipboard_event (event_id, captured_at_ms, source_device, snapshot_hash) VALUES ('retained-event', 1, 'device', 'hash')")
+        .execute(&mut connection).unwrap();
+    drop(connection);
+    for _ in 0..10 {
+        match upgrade.ensure_v3().await.unwrap() {
+            ProfileStorageUpgradeOutcome::Pending => {}
+            ProfileStorageUpgradeOutcome::Upgraded => break,
+            other => panic!("unexpected upgrade result: {other:?}"),
+        }
+    }
+    assert!(manifests.load_v3_sync().unwrap().is_some());
+    drop(upgrade);
+    PromotedProfile {
+        _directory: directory,
+        root,
+        storage,
+        keys,
+        manifests,
+    }
+}
+
+fn omit_new_forbidden_tables(layout: &ProfileRuntimeLayout) {
+    let mut profile =
+        diesel::sqlite::SqliteConnection::establish(layout.profile_database().to_str().unwrap())
+            .unwrap();
+    profile
+        .batch_execute(
+            "DROP TRIGGER invalidate_revocation_delivery_summary_after_delete;
+        DROP TRIGGER invalidate_revocation_delivery_summary_after_update;
+        DROP TRIGGER invalidate_space_delivery_summary_after_delete;
+        DROP TRIGGER invalidate_space_delivery_summary_after_update;
+        DROP TABLE group_update_source;
+        DROP TABLE group_update_delivery;
+        DELETE FROM __diesel_schema_migrations WHERE version = '20260913000003';",
+        )
+        .unwrap();
+    let mut control =
+        diesel::sqlite::SqliteConnection::establish(layout.control_database().to_str().unwrap())
+            .unwrap();
+    control.batch_execute("DROP TRIGGER invalidate_admission_recovery_summary_after_delete;
+        DROP TRIGGER invalidate_admission_recovery_summary_after_update;
+        DROP TABLE admission_recovery_summary;
+        DROP TABLE admission_repository_record;
+        DELETE FROM __diesel_schema_migrations WHERE version IN ('20260913000001', '20260913000002');").unwrap();
+}
+
+#[tokio::test]
+async fn promoted_legacy_v3_without_later_forbidden_tables_recovers_and_migrates() {
+    let profile = promoted_profile().await;
+    let layout = profile.layout();
+    omit_new_forbidden_tables(&layout);
+
+    assert_eq!(
+        profile.upgrade().ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Pending
+    );
+    assert_eq!(
+        profile.upgrade().ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::UpToDate
+    );
+    let profile_pool = init_db_pool(layout.profile_database().to_str().unwrap()).unwrap();
+    let control_pool = init_db_pool(layout.control_database().to_str().unwrap()).unwrap();
+    assert_eq!(table_count(layout.profile_database(), "clipboard_event"), 1);
+    assert_eq!(
+        table_count(layout.profile_database(), "group_update_delivery"),
+        0
+    );
+    assert_eq!(
+        table_count(layout.control_database(), "admission_recovery_summary"),
+        0
+    );
+    drop((profile_pool, control_pool));
+    assert_eq!(
+        profile.upgrade().ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::UpToDate
+    );
+    assert_eq!(table_count(layout.profile_database(), "clipboard_event"), 1);
+}
+
+#[tokio::test]
+async fn promoted_v3_with_existing_empty_forbidden_tables_recovers() {
+    let profile = promoted_profile().await;
+    assert_eq!(
+        profile.upgrade().ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::Pending
+    );
+    assert_eq!(
+        profile.upgrade().ensure_v3().await.unwrap(),
+        ProfileStorageUpgradeOutcome::UpToDate
+    );
+}
+
+#[tokio::test]
+async fn promoted_v3_rejects_rows_in_existing_forbidden_tables() {
+    let profile = promoted_profile().await;
+    let layout = profile.layout();
+    omit_new_forbidden_tables(&layout);
+    let mut connection =
+        diesel::sqlite::SqliteConnection::establish(layout.profile_database().to_str().unwrap())
+            .unwrap();
+    connection.batch_execute("CREATE TABLE group_update_delivery (lookup_token BLOB PRIMARY KEY NOT NULL, space_lookup_token TEXT NOT NULL, encrypted_metadata BLOB NOT NULL, encrypted_payload BLOB NOT NULL);
+        INSERT INTO group_update_delivery VALUES (X'01', 'old-space', X'02', X'03');").unwrap();
+    assert!(matches!(
+        profile.upgrade().ensure_v3().await.unwrap_err(),
+        ProfileStorageUpgradeError::Corrupt { .. }
+    ));
+}
+
+#[tokio::test]
+async fn promoted_v3_rejects_missing_required_forbidden_table() {
+    let profile = promoted_profile().await;
+    let layout = profile.layout();
+    omit_new_forbidden_tables(&layout);
+    let mut connection =
+        diesel::sqlite::SqliteConnection::establish(layout.profile_database().to_str().unwrap())
+            .unwrap();
+    connection
+        .batch_execute("DROP TABLE encrypted_relationship;")
+        .unwrap();
+    assert!(matches!(
+        profile.upgrade().ensure_v3().await.unwrap_err(),
+        ProfileStorageUpgradeError::Corrupt { .. }
+    ));
+}
+
+#[tokio::test]
+async fn promoted_v3_rejects_foreign_key_violations() {
+    let profile = promoted_profile().await;
+    let layout = profile.layout();
+    omit_new_forbidden_tables(&layout);
+    let mut connection =
+        diesel::sqlite::SqliteConnection::establish(layout.profile_database().to_str().unwrap())
+            .unwrap();
+    connection
+        .batch_execute(
+            "PRAGMA foreign_keys = OFF;
+        INSERT INTO clipboard_snapshot_representation (id, event_id, format_id, size_bytes)
+        VALUES ('orphan', 'missing-event', 'text', 1);",
+        )
+        .unwrap();
+    assert!(matches!(
+        profile.upgrade().ensure_v3().await.unwrap_err(),
+        ProfileStorageUpgradeError::Corrupt { .. }
+    ));
+}
+
+#[tokio::test]
+async fn promoted_v3_rejects_damaged_database() {
+    let profile = promoted_profile().await;
+    let layout = profile.layout();
+    omit_new_forbidden_tables(&layout);
+    std::fs::write(layout.profile_database(), b"not a sqlite database").unwrap();
+    assert!(matches!(
+        profile.upgrade().ensure_v3().await.unwrap_err(),
+        ProfileStorageUpgradeError::Corrupt { .. }
+    ));
+}
+
+#[tokio::test]
+async fn promoted_v3_rejects_tampered_manifest() {
+    let profile = promoted_profile().await;
+    let manifest = named_file(&profile.root, ".active-space-manifest-v2");
+    let mut bytes = std::fs::read(&manifest).unwrap();
+    *bytes.last_mut().unwrap() ^= 1;
+    std::fs::write(manifest, bytes).unwrap();
+    assert!(profile.upgrade().ensure_v3().await.is_err());
+}
+
+#[tokio::test]
+async fn promoted_v3_rejects_authenticated_journal_for_another_generation() {
+    let storage = Arc::new(MemorySecureStorage::default());
+    let profile = promoted_profile_with_storage(storage.clone()).await;
+    let other = promoted_profile_with_storage(storage).await;
+    omit_new_forbidden_tables(&profile.layout());
+    let journal = "profile-storage-upgrade/.journal-v1";
+    std::fs::copy(other.root.join(journal), profile.root.join(journal)).unwrap();
+
+    assert!(matches!(
+        profile.upgrade().ensure_v3().await.unwrap_err(),
+        ProfileStorageUpgradeError::SourceChanged
+    ));
 }
 
 #[tokio::test]
