@@ -4,7 +4,10 @@ use tracing::instrument;
 
 use uc_core::ports::SettingsPort;
 
-use crate::facade::settings::relay_configuration::{RelayConfiguration, RelayConfigurationError};
+use crate::facade::settings::relay_configuration::{
+    RelayConfiguration, RelayConfigurationEntry, RelayConfigurationError,
+    RelayConfigurationMutation, RelayConfigurationRejection,
+};
 use crate::facade::settings::relay_diagnostic::{
     RelayDiagnosticPort, RelayProbeError, RelayProbeReport,
 };
@@ -159,6 +162,23 @@ impl SettingsFacade {
         Ok(RelayCredentialStatusView {
             configured: self.relay_configuration.credential_status(url)?,
         })
+    }
+
+    pub async fn list_relays(&self) -> Result<Vec<RelayConfigurationEntry>, SettingsFacadeError> {
+        self.relay_configuration.list().await.map_err(Into::into)
+    }
+
+    pub async fn mutate_relays(
+        &self,
+        mutation: RelayConfigurationMutation,
+    ) -> Result<
+        Result<Vec<RelayConfigurationEntry>, RelayConfigurationRejection>,
+        SettingsFacadeError,
+    > {
+        self.relay_configuration
+            .mutate(mutation)
+            .await
+            .map_err(Into::into)
     }
 
     /// 对一个候选中继 URL 发起一次可达性探测。

@@ -13,14 +13,13 @@ use uc_engine::observability::{
 };
 use uc_engine::{
     ChangeEncryptionPassphraseInput, ClipboardRestoreMode, ClipboardRestoreOutcome,
-    CreateSpaceInput, Engine, EngineConfig, ExportEntryInput, HostCapabilities,
-    HostCapabilityError, HostCapabilityErrorCategory, HostClipboard, HostClipboardRepresentation,
-    HostClipboardSnapshot, HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata,
-    HostSecureStorage, JoinSpaceInput, NetworkSettingsPatch, ObserveClipboardChangeInput,
-    Operation, OperationResult, RecoverSessionInput, RelayCredentialEdit, RemoveMemberInput,
-    ResendEntryInput, RestoreClipboardInput, SaveRelayInput, SaveRelayOutcome, SecretString,
-    SendFilesInput, SendImageInput, SendTextInput, SettingsPatch, StartupLifecycleInput,
-    StartupProgress,
+    CreateSpaceInput, CustomRelayMutation, CustomRelayMutationOutcome, CustomRelayRejection,
+    Engine, EngineConfig, ExportEntryInput, HostCapabilities, HostCapabilityError,
+    HostCapabilityErrorCategory, HostClipboard, HostClipboardRepresentation, HostClipboardSnapshot,
+    HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage,
+    JoinSpaceInput, ObserveClipboardChangeInput, Operation, OperationResult, RecoverSessionInput,
+    RemoveMemberInput, ResendEntryInput, RestoreClipboardInput, SecretString, SendFilesInput,
+    SendImageInput, SendTextInput, StartupLifecycleInput, StartupProgress,
 };
 use zeroize::Zeroizing;
 
@@ -382,6 +381,44 @@ pub struct RelaySaveResult {
     pub configured: bool,
 }
 
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CustomRelay {
+    pub url: String,
+    pub credential_configured: bool,
+}
+
+impl std::fmt::Debug for CustomRelay {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CustomRelay")
+            .field("credential_configured", &self.credential_configured)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum CustomRelayMutationRejection {
+    InvalidUrl,
+    Duplicate,
+    NotFound,
+}
+
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CustomRelayMutationResult {
+    pub relays: Vec<CustomRelay>,
+    pub rejection: Option<CustomRelayMutationRejection>,
+}
+
+impl std::fmt::Debug for CustomRelayMutationResult {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CustomRelayMutationResult")
+            .field("relay_count", &self.relays.len())
+            .field("rejection", &self.rejection)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum ConnectivityOpportunity {
     Foreground,
@@ -419,6 +456,13 @@ enum WorkerCommand {
         access_token: Zeroizing<String>,
         previous_url: Option<String>,
         response: mpsc::Sender<Result<RelaySaveResult, BindingError>>,
+    },
+    QueryCustomRelays {
+        response: mpsc::Sender<Result<Vec<CustomRelay>, BindingError>>,
+    },
+    MutateCustomRelay {
+        mutation: CustomRelayMutation,
+        response: mpsc::Sender<Result<CustomRelayMutationResult, BindingError>>,
     },
     RecoverNetwork {
         response: mpsc::Sender<Result<(), BindingError>>,
@@ -900,6 +944,44 @@ impl MobileEngine {
             previous_url,
             response,
         })
+    }
+
+    pub fn query_custom_relays(&self) -> Result<Vec<CustomRelay>, BindingError> {
+        self.request(|response| WorkerCommand::QueryCustomRelays { response })
+    }
+
+    pub fn add_custom_relay(
+        &self,
+        url: String,
+        access_token: String,
+    ) -> Result<CustomRelayMutationResult, BindingError> {
+        let mutation = CustomRelayMutation::Add {
+            url,
+            access_token: relay_token(access_token),
+        };
+        self.request(|response| WorkerCommand::MutateCustomRelay { mutation, response })
+    }
+
+    pub fn edit_custom_relay(
+        &self,
+        previous_url: String,
+        url: String,
+        access_token: String,
+    ) -> Result<CustomRelayMutationResult, BindingError> {
+        let mutation = CustomRelayMutation::Edit {
+            previous_url,
+            url,
+            access_token: relay_token(access_token),
+        };
+        self.request(|response| WorkerCommand::MutateCustomRelay { mutation, response })
+    }
+
+    pub fn delete_custom_relay(
+        &self,
+        url: String,
+    ) -> Result<CustomRelayMutationResult, BindingError> {
+        let mutation = CustomRelayMutation::Delete { url };
+        self.request(|response| WorkerCommand::MutateCustomRelay { mutation, response })
     }
 
     pub fn recover_network(&self) -> Result<(), BindingError> {
@@ -1411,45 +1493,41 @@ async fn run_operations(
                 response,
             } => {
                 let url = std::mem::take(&mut *url);
+                let mutation = match previous_url.filter(|previous| !previous.is_empty()) {
+                    Some(previous_url) if url.is_empty() => {
+                        CustomRelayMutation::Delete { url: previous_url }
+                    }
+                    Some(previous_url) => CustomRelayMutation::Edit {
+                        previous_url,
+                        url,
+                        access_token: relay_token(access_token.to_string()),
+                    },
+                    None => CustomRelayMutation::Add {
+                        url,
+                        access_token: relay_token(access_token.to_string()),
+                    },
+                };
                 let result = engine
-                    .execute(Operation::QuerySettings)
+                    .execute(Operation::MutateCustomRelay(mutation))
                     .await
                     .map_err(BindingError::from)
-                    .and_then(map_custom_relay_urls)
-                    .and_then(|current_urls| {
-                        next_custom_relay_urls(&current_urls, &url, previous_url.as_deref())
-                    });
-                let result = match result {
-                    Ok(custom_relay_urls) => {
-                        let credential = if url.is_empty() {
-                            RelayCredentialEdit::Delete {
-                                url: previous_url.unwrap_or_default(),
-                            }
-                        } else if access_token.is_empty() {
-                            RelayCredentialEdit::Keep { url: url.clone() }
-                        } else {
-                            RelayCredentialEdit::Set {
-                                url: url.clone(),
-                                access_token: SecretString::new(access_token.as_str()),
-                            }
-                        };
-                        engine
-                            .execute(Operation::SaveRelay(Box::new(SaveRelayInput {
-                                settings: SettingsPatch {
-                                    network: Some(NetworkSettingsPatch {
-                                        custom_relay_urls: Some(custom_relay_urls),
-                                        ..Default::default()
-                                    }),
-                                    ..Default::default()
-                                },
-                                credential,
-                            })))
-                            .await
-                            .map_err(BindingError::from)
-                            .and_then(map_relay_save_result)
-                    }
-                    Err(error) => Err(error),
-                };
+                    .and_then(map_legacy_relay_save);
+                let _ = response.send(result);
+            }
+            WorkerCommand::QueryCustomRelays { response } => {
+                let result = engine
+                    .execute(Operation::QueryCustomRelays)
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_custom_relays);
+                let _ = response.send(result);
+            }
+            WorkerCommand::MutateCustomRelay { mutation, response } => {
+                let result = engine
+                    .execute(Operation::MutateCustomRelay(mutation))
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_custom_relay_mutation);
                 let _ = response.send(result);
             }
             WorkerCommand::RecoverNetwork { response } => {
@@ -2193,14 +2271,61 @@ fn map_peer_connection_refresh(
     })
 }
 
-fn map_relay_save_result(result: OperationResult) -> Result<RelaySaveResult, BindingError> {
+fn relay_token(value: String) -> Option<SecretString> {
+    (!value.is_empty()).then(|| SecretString::new(value))
+}
+
+fn map_custom_relays(result: OperationResult) -> Result<Vec<CustomRelay>, BindingError> {
     match result {
-        OperationResult::RelaySaved(SaveRelayOutcome::Saved { settings, .. }) => {
-            Ok(RelaySaveResult {
-                configured: !settings.network.custom_relay_urls.is_empty(),
+        OperationResult::CustomRelays(relays) => Ok(relays
+            .into_iter()
+            .map(|relay| CustomRelay {
+                url: relay.url,
+                credential_configured: relay.credential_configured,
+            })
+            .collect()),
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_custom_relay_mutation(
+    result: OperationResult,
+) -> Result<CustomRelayMutationResult, BindingError> {
+    match result {
+        OperationResult::CustomRelayMutated(CustomRelayMutationOutcome::Saved { relays }) => {
+            Ok(CustomRelayMutationResult {
+                relays: relays
+                    .into_iter()
+                    .map(|relay| CustomRelay {
+                        url: relay.url,
+                        credential_configured: relay.credential_configured,
+                    })
+                    .collect(),
+                rejection: None,
             })
         }
-        OperationResult::RelaySaved(SaveRelayOutcome::Rejected { .. }) => {
+        OperationResult::CustomRelayMutated(CustomRelayMutationOutcome::Rejected { reason }) => {
+            Ok(CustomRelayMutationResult {
+                relays: Vec::new(),
+                rejection: Some(match reason {
+                    CustomRelayRejection::InvalidUrl => CustomRelayMutationRejection::InvalidUrl,
+                    CustomRelayRejection::Duplicate => CustomRelayMutationRejection::Duplicate,
+                    CustomRelayRejection::NotFound => CustomRelayMutationRejection::NotFound,
+                }),
+            })
+        }
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_legacy_relay_save(result: OperationResult) -> Result<RelaySaveResult, BindingError> {
+    match result {
+        OperationResult::CustomRelayMutated(CustomRelayMutationOutcome::Saved { relays }) => {
+            Ok(RelaySaveResult {
+                configured: !relays.is_empty(),
+            })
+        }
+        OperationResult::CustomRelayMutated(CustomRelayMutationOutcome::Rejected { .. }) => {
             Err(BindingError::Engine {
                 code: 0,
                 category: BindingErrorCategory::InvalidInput,
@@ -2208,58 +2333,6 @@ fn map_relay_save_result(result: OperationResult) -> Result<RelaySaveResult, Bin
             })
         }
         _ => Err(BindingError::UnexpectedResult),
-    }
-}
-
-fn map_custom_relay_urls(result: OperationResult) -> Result<Vec<String>, BindingError> {
-    match result {
-        OperationResult::Settings(settings) => Ok(settings.network.custom_relay_urls),
-        _ => Err(BindingError::UnexpectedResult),
-    }
-}
-
-fn next_custom_relay_urls(
-    current_urls: &[String],
-    url: &str,
-    previous_url: Option<&str>,
-) -> Result<Vec<String>, BindingError> {
-    let mut next_urls = current_urls.to_vec();
-    match previous_url.filter(|previous_url| !previous_url.is_empty()) {
-        None if url.is_empty() => Ok(next_urls),
-        None => {
-            if next_urls.iter().any(|configured| configured == url) {
-                return Err(BindingError::Engine {
-                    code: 0,
-                    category: BindingErrorCategory::InvalidInput,
-                    retryable: false,
-                });
-            }
-            next_urls.push(url.to_owned());
-            Ok(next_urls)
-        }
-        Some(previous_url) => {
-            let index = next_urls
-                .iter()
-                .position(|configured| configured == previous_url)
-                .ok_or(BindingError::Engine {
-                    code: 0,
-                    category: BindingErrorCategory::InvalidInput,
-                    retryable: false,
-                })?;
-            if url.is_empty() {
-                next_urls.remove(index);
-            } else {
-                if url != previous_url && next_urls.iter().any(|configured| configured == url) {
-                    return Err(BindingError::Engine {
-                        code: 0,
-                        category: BindingErrorCategory::InvalidInput,
-                        retryable: false,
-                    });
-                }
-                next_urls[index] = url.to_owned();
-            }
-            Ok(next_urls)
-        }
     }
 }
 
@@ -2613,39 +2686,6 @@ mod tests {
         assert!(!result.is_finished());
         release.notify_one();
         assert_eq!(result.await.unwrap(), 42);
-    }
-
-    #[test]
-    fn relay_node_changes_preserve_other_configured_nodes() {
-        let initial = vec!["https://relay-a.example.com".to_owned()];
-
-        let with_second = next_custom_relay_urls(&initial, "https://relay-b.example.com", None)
-            .expect("adding a relay node must keep existing nodes");
-        assert_eq!(
-            with_second,
-            vec![
-                "https://relay-a.example.com".to_owned(),
-                "https://relay-b.example.com".to_owned(),
-            ]
-        );
-
-        let updated = next_custom_relay_urls(
-            &with_second,
-            "https://relay-c.example.com",
-            Some("https://relay-a.example.com"),
-        )
-        .expect("editing a relay node must keep the other nodes");
-        assert_eq!(
-            updated,
-            vec![
-                "https://relay-c.example.com".to_owned(),
-                "https://relay-b.example.com".to_owned(),
-            ]
-        );
-
-        let removed = next_custom_relay_urls(&updated, "", Some("https://relay-c.example.com"))
-            .expect("removing a relay node must keep the other nodes");
-        assert_eq!(removed, vec!["https://relay-b.example.com".to_owned()]);
     }
 
     #[test]

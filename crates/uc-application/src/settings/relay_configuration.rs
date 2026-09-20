@@ -1,12 +1,59 @@
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 use tokio::sync::Mutex;
 use uc_core::{ports::SettingsPort, settings::model::Settings};
 
 use super::{
-    models::{apply_settings_patch, validate_settings, SettingsPatch},
+    models::{apply_settings_patch, validate_settings, NetworkSettingsPatch, SettingsPatch},
     RelayAccessToken, RelayCredentialEdit, RelayCredentials, RelayCredentialsError,
 };
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct RelayConfigurationEntry {
+    pub url: String,
+    pub credential_configured: bool,
+}
+
+impl fmt::Debug for RelayConfigurationEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RelayConfigurationEntry")
+            .field("credential_configured", &self.credential_configured)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum RelayConfigurationMutation {
+    Add {
+        url: String,
+        access_token: Option<RelayAccessToken>,
+    },
+    Edit {
+        previous_url: String,
+        url: String,
+        access_token: Option<RelayAccessToken>,
+    },
+    Delete {
+        url: String,
+    },
+}
+
+impl fmt::Debug for RelayConfigurationMutation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RelayConfigurationMutation([REDACTED])")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RelayConfigurationRejection {
+    #[error("invalid relay URL")]
+    InvalidUrl,
+    #[error("relay URL is already configured")]
+    Duplicate,
+    #[error("relay URL is no longer configured")]
+    NotFound,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum RelayConfigurationError {
@@ -74,7 +121,17 @@ impl RelayConfiguration {
         let previous_relay_urls = existing.network.custom_relay_urls.clone();
         let merged = apply_settings_patch(existing.clone(), patch);
         validate_settings(&merged).map_err(RelayConfigurationError::Invalid)?;
+        self.commit(existing, previous_relay_urls, merged, edit)
+            .await
+    }
 
+    async fn commit(
+        &self,
+        existing: Settings,
+        previous_relay_urls: Vec<String>,
+        merged: Settings,
+        edit: Option<&RelayCredentialEdit>,
+    ) -> Result<RelayConfigurationUpdate, RelayConfigurationError> {
         let relay_urls_changed = previous_relay_urls != merged.network.custom_relay_urls;
         let credentials = self.credentials.clone();
         let configured_before_save = match (&credentials, edit) {
@@ -120,6 +177,122 @@ impl RelayConfiguration {
             settings: merged,
             configured_before_save,
         })
+    }
+
+    pub async fn list(&self) -> Result<Vec<RelayConfigurationEntry>, RelayConfigurationError> {
+        let _guard = self.mutation_gate.lock().await;
+        self.recover_locked().await?;
+        let settings = self
+            .settings
+            .load()
+            .await
+            .map_err(|error| RelayConfigurationError::Load(error.to_string()))?;
+        let credentials = self
+            .credentials
+            .as_ref()
+            .ok_or(RelayConfigurationError::CredentialsUnavailable)?;
+        canonical_entries(&settings.network.custom_relay_urls, credentials)
+    }
+
+    pub async fn mutate(
+        &self,
+        mutation: RelayConfigurationMutation,
+    ) -> Result<
+        Result<Vec<RelayConfigurationEntry>, RelayConfigurationRejection>,
+        RelayConfigurationError,
+    > {
+        let _guard = self.mutation_gate.lock().await;
+        self.recover_locked().await?;
+        let existing = self
+            .settings
+            .load()
+            .await
+            .map_err(|error| RelayConfigurationError::Load(error.to_string()))?;
+        let credentials = self
+            .credentials
+            .as_ref()
+            .ok_or(RelayConfigurationError::CredentialsUnavailable)?;
+        let mut urls = match canonical_urls(&existing.network.custom_relay_urls) {
+            Ok(urls) => urls,
+            Err(rejection) => return Ok(Err(rejection)),
+        };
+        let edit = match mutation {
+            RelayConfigurationMutation::Add { url, access_token } => {
+                let url = match canonical_url(&url) {
+                    Ok(url) => url,
+                    Err(error) => return Ok(Err(error)),
+                };
+                if urls.contains(&url) {
+                    return Ok(Err(RelayConfigurationRejection::Duplicate));
+                }
+                urls.push(url.clone());
+                access_token.map_or(
+                    RelayCredentialEdit::Keep { url: url.clone() },
+                    |access_token| RelayCredentialEdit::Set { url, access_token },
+                )
+            }
+            RelayConfigurationMutation::Edit {
+                previous_url,
+                url,
+                access_token,
+            } => {
+                let previous_url = match canonical_url(&previous_url) {
+                    Ok(url) => url,
+                    Err(error) => return Ok(Err(error)),
+                };
+                let url = match canonical_url(&url) {
+                    Ok(url) => url,
+                    Err(error) => return Ok(Err(error)),
+                };
+                let Some(index) = urls
+                    .iter()
+                    .position(|configured| configured == &previous_url)
+                else {
+                    return Ok(Err(RelayConfigurationRejection::NotFound));
+                };
+                if url != previous_url && urls.contains(&url) {
+                    return Ok(Err(RelayConfigurationRejection::Duplicate));
+                }
+                urls[index] = url.clone();
+                match access_token.or(credentials.load(&previous_url)?) {
+                    Some(access_token) => RelayCredentialEdit::Set { url, access_token },
+                    None => RelayCredentialEdit::Keep { url },
+                }
+            }
+            RelayConfigurationMutation::Delete { url } => {
+                let url = match canonical_url(&url) {
+                    Ok(url) => url,
+                    Err(error) => return Ok(Err(error)),
+                };
+                let Some(index) = urls.iter().position(|configured| configured == &url) else {
+                    return Ok(Err(RelayConfigurationRejection::NotFound));
+                };
+                urls.remove(index);
+                RelayCredentialEdit::Delete { url }
+            }
+        };
+        let patch = SettingsPatch {
+            network: Some(NetworkSettingsPatch {
+                custom_relay_urls: Some(urls),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let saved = self.apply_locked(existing, patch, Some(&edit)).await?;
+        canonical_entries(&saved.settings.network.custom_relay_urls, credentials).map(Ok)
+    }
+
+    async fn apply_locked(
+        &self,
+        existing: Settings,
+        patch: SettingsPatch,
+        edit: Option<&RelayCredentialEdit>,
+    ) -> Result<RelayConfigurationUpdate, RelayConfigurationError> {
+        let previous_relay_urls = existing.network.custom_relay_urls.clone();
+        let merged = apply_settings_patch(existing.clone(), patch);
+        validate_settings(&merged).map_err(RelayConfigurationError::Invalid)?;
+        self.commit(existing, previous_relay_urls, merged, edit)
+            .await
     }
 
     pub fn credential_status(&self, relay_url: &str) -> Result<bool, RelayConfigurationError> {
@@ -174,6 +347,46 @@ impl RelayConfiguration {
     }
 }
 
+fn canonical_url(raw: &str) -> Result<String, RelayConfigurationRejection> {
+    let url = url::Url::parse(raw.trim()).map_err(|_| RelayConfigurationRejection::InvalidUrl)?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(RelayConfigurationRejection::InvalidUrl);
+    }
+    Ok(url.to_string())
+}
+
+fn canonical_urls(urls: &[String]) -> Result<Vec<String>, RelayConfigurationRejection> {
+    let mut result = Vec::with_capacity(urls.len());
+    for raw in urls {
+        let url = canonical_url(raw)?;
+        if !result.contains(&url) {
+            result.push(url);
+        }
+    }
+    Ok(result)
+}
+
+fn canonical_entries(
+    urls: &[String],
+    credentials: &RelayCredentials,
+) -> Result<Vec<RelayConfigurationEntry>, RelayConfigurationError> {
+    let urls = canonical_urls(urls)
+        .map_err(|_| RelayConfigurationError::Invalid("invalid custom relay URL".to_string()))?;
+    urls.into_iter()
+        .map(|url| {
+            let credential_configured = credentials.is_configured(&url)?;
+            Ok(RelayConfigurationEntry {
+                url,
+                credential_configured,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -189,7 +402,8 @@ mod tests {
 
     use super::{
         super::{NetworkSettingsPatch, SettingsPatch},
-        RelayAccessToken, RelayConfiguration, RelayCredentialEdit, RelayCredentials,
+        RelayAccessToken, RelayConfiguration, RelayConfigurationMutation,
+        RelayConfigurationRejection, RelayCredentialEdit, RelayCredentials,
     };
 
     #[derive(Default)]
@@ -364,6 +578,123 @@ mod tests {
         assert_eq!(
             credentials.load(relay).unwrap().unwrap().expose_secret(),
             "old-relay-token"
+        );
+    }
+
+    #[tokio::test]
+    async fn authoritative_list_is_empty_for_default_settings() {
+        let configuration = RelayConfiguration::new(Arc::new(InMemorySettings::default()))
+            .with_credentials(RelayCredentials::new(Arc::new(
+                InMemorySecureStorage::default(),
+            )));
+
+        assert!(configuration.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn authoritative_mutations_normalize_reject_duplicates_and_return_full_list() {
+        let settings = Arc::new(InMemorySettings::default());
+        let credentials = RelayCredentials::new(Arc::new(InMemorySecureStorage::default()));
+        let configuration = RelayConfiguration::new(settings).with_credentials(credentials.clone());
+        let token = RelayAccessToken::new("secret-token".to_string()).unwrap();
+
+        let added = configuration
+            .mutate(RelayConfigurationMutation::Add {
+                url: " https://relay.example.com ".to_string(),
+                access_token: Some(token),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].url, "https://relay.example.com/");
+        assert!(added[0].credential_configured);
+
+        let two_relays = configuration
+            .mutate(RelayConfigurationMutation::Add {
+                url: "https://relay-two.example.com".to_string(),
+                access_token: None,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(two_relays.len(), 2);
+        assert!(!two_relays[1].credential_configured);
+
+        let duplicate = configuration
+            .mutate(RelayConfigurationMutation::Add {
+                url: "https://relay.example.com/".to_string(),
+                access_token: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(duplicate, Err(RelayConfigurationRejection::Duplicate));
+
+        let edited = configuration
+            .mutate(RelayConfigurationMutation::Edit {
+                previous_url: "https://relay.example.com".to_string(),
+                url: "https://new-relay.example.com".to_string(),
+                access_token: None,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(edited[0].url, "https://new-relay.example.com/");
+        assert!(edited[0].credential_configured);
+        assert_eq!(edited[1].url, "https://relay-two.example.com/");
+        assert_eq!(
+            credentials
+                .load("https://new-relay.example.com/")
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "secret-token"
+        );
+
+        let deleted = configuration
+            .mutate(RelayConfigurationMutation::Delete {
+                url: "https://new-relay.example.com".to_string(),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(deleted[0].url, "https://relay-two.example.com/");
+
+        let invalid = configuration
+            .mutate(RelayConfigurationMutation::Add {
+                url: "ftp://relay.example.com".to_string(),
+                access_token: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(invalid, Err(RelayConfigurationRejection::InvalidUrl));
+    }
+
+    #[tokio::test]
+    async fn stale_edit_does_not_overwrite_current_configuration() {
+        let mut value = Settings::default();
+        value.network.custom_relay_urls = vec!["https://current.example.com/".to_string()];
+        let settings = Arc::new(InMemorySettings {
+            value: Mutex::new(value),
+        });
+        let configuration = RelayConfiguration::new(settings.clone()).with_credentials(
+            RelayCredentials::new(Arc::new(InMemorySecureStorage::default())),
+        );
+
+        let result = configuration
+            .mutate(RelayConfigurationMutation::Edit {
+                previous_url: "https://stale.example.com/".to_string(),
+                url: "https://replacement.example.com/".to_string(),
+                access_token: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result, Err(RelayConfigurationRejection::NotFound));
+        assert_eq!(
+            settings.load().await.unwrap().network.custom_relay_urls,
+            vec!["https://current.example.com/".to_string()]
         );
     }
 }

@@ -7,16 +7,78 @@ use uc_application::facade::AppFacade;
 use uc_core::settings::model::ShortcutKey;
 
 use crate::{
-    CongestionControllerSummary, EngineError, EngineErrorCategory, FileSyncSettingsSummary,
-    GeneralSettingsSummary, NetworkSettingsSummary, OperationResult, PairingSettingsSummary,
-    QuickPanelDoubleTapModifierSummary, QuickPanelPositionSummary, QuickPanelSettingsSummary,
-    RelayCredentialEdit, RelayCredentialInput, RelayCredentialStatus, RelayProbeCredential,
-    RelayProbeInput, RelayProbeOutcome, RetentionPolicySummary, RetentionRulePatch,
-    RetentionRuleSummary, RuleEvaluationSummary, SaveRelayInput, SaveRelayOutcome,
-    SecuritySettingsSummary, SettingsContentTypes, SettingsContentTypesPatch, SettingsPatch,
-    SettingsSummary, SettingsUpdateOutcome, ShortcutKeySummary, StartupModeSummary,
+    CongestionControllerSummary, CustomRelayMutation, CustomRelayMutationOutcome,
+    CustomRelayRejection, CustomRelaySummary, EngineError, EngineErrorCategory,
+    FileSyncSettingsSummary, GeneralSettingsSummary, NetworkSettingsSummary, OperationResult,
+    PairingSettingsSummary, QuickPanelDoubleTapModifierSummary, QuickPanelPositionSummary,
+    QuickPanelSettingsSummary, RelayCredentialEdit, RelayCredentialInput, RelayCredentialStatus,
+    RelayProbeCredential, RelayProbeInput, RelayProbeOutcome, RetentionPolicySummary,
+    RetentionRulePatch, RetentionRuleSummary, RuleEvaluationSummary, SaveRelayInput,
+    SaveRelayOutcome, SecuritySettingsSummary, SettingsContentTypes, SettingsContentTypesPatch,
+    SettingsPatch, SettingsSummary, SettingsUpdateOutcome, ShortcutKeySummary, StartupModeSummary,
     SyncFrequencySummary, SyncSettingsSummary, ThemeSummary, UpdateChannelSummary,
 };
+
+pub(crate) async fn execute_query_custom_relays(
+    facade: &AppFacade,
+) -> Result<OperationResult, EngineError> {
+    let relays = facade.list_relays().await.map_err(map_save_relay_error)?;
+    Ok(OperationResult::CustomRelays(
+        relays.into_iter().map(map_custom_relay).collect(),
+    ))
+}
+
+pub(crate) async fn execute_mutate_custom_relay(
+    facade: &AppFacade,
+    mutation: CustomRelayMutation,
+) -> Result<OperationResult, EngineError> {
+    let mutation = match mutation {
+        CustomRelayMutation::Add { url, access_token } => app::RelayConfigurationMutation::Add {
+            url,
+            access_token: access_token
+                .map(|token| app::RelayAccessToken::new(token.expose().to_string()))
+                .transpose()
+                .map_err(|_| internal_error(SAVE_RELAY_FAILED_CODE))?,
+        },
+        CustomRelayMutation::Edit {
+            previous_url,
+            url,
+            access_token,
+        } => app::RelayConfigurationMutation::Edit {
+            previous_url,
+            url,
+            access_token: access_token
+                .map(|token| app::RelayAccessToken::new(token.expose().to_string()))
+                .transpose()
+                .map_err(|_| internal_error(SAVE_RELAY_FAILED_CODE))?,
+        },
+        CustomRelayMutation::Delete { url } => app::RelayConfigurationMutation::Delete { url },
+    };
+    let outcome = match facade
+        .mutate_relays(mutation)
+        .await
+        .map_err(map_save_relay_error)?
+    {
+        Ok(relays) => CustomRelayMutationOutcome::Saved {
+            relays: relays.into_iter().map(map_custom_relay).collect(),
+        },
+        Err(reason) => CustomRelayMutationOutcome::Rejected {
+            reason: match reason {
+                app::RelayConfigurationRejection::InvalidUrl => CustomRelayRejection::InvalidUrl,
+                app::RelayConfigurationRejection::Duplicate => CustomRelayRejection::Duplicate,
+                app::RelayConfigurationRejection::NotFound => CustomRelayRejection::NotFound,
+            },
+        },
+    };
+    Ok(OperationResult::CustomRelayMutated(outcome))
+}
+
+fn map_custom_relay(entry: app::RelayConfigurationEntry) -> CustomRelaySummary {
+    CustomRelaySummary {
+        url: entry.url,
+        credential_configured: entry.credential_configured,
+    }
+}
 
 pub(crate) async fn execute_query_settings(
     facade: &AppFacade,

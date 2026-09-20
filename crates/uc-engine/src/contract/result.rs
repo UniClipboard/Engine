@@ -5,13 +5,14 @@ use serde::{Deserialize, Serialize};
 use super::{EngineError, ResendEntryOutcome, SendReportSummary};
 use crate::{
     ConfigExportOutcome, ConfigImportPreviewOutcome, ConfigImportStageOutcome,
-    DebugModeUpdateSummary, DiagnosticLogsExportSummary, DiagnosticsStatusSummary,
-    MobileAuthenticatedSession, MobileAuthenticationOutcome, MobileDeviceRegistrationOutcome,
-    MobileDeviceRevokeOutcome, MobileDeviceSummary, MobileDeviceUpdateOutcome,
-    MobileFileUploadHandle, MobileLanInterfaceSummary, MobileSyncDocument,
-    MobileSyncDocumentApplyOutcome, MobileSyncFileReadOutcome, MobileSyncSettingsSummary,
-    MobileSyncSettingsUpdateOutcome, RelayCredentialStatus, RelayProbeOutcome, SaveRelayOutcome,
-    SettingsSummary, SettingsUpdateOutcome, UpgradeStatusSummary,
+    CustomRelayMutationOutcome, CustomRelaySummary, DebugModeUpdateSummary,
+    DiagnosticLogsExportSummary, DiagnosticsStatusSummary, MobileAuthenticatedSession,
+    MobileAuthenticationOutcome, MobileDeviceRegistrationOutcome, MobileDeviceRevokeOutcome,
+    MobileDeviceSummary, MobileDeviceUpdateOutcome, MobileFileUploadHandle,
+    MobileLanInterfaceSummary, MobileSyncDocument, MobileSyncDocumentApplyOutcome,
+    MobileSyncFileReadOutcome, MobileSyncSettingsSummary, MobileSyncSettingsUpdateOutcome,
+    RelayCredentialStatus, RelayProbeOutcome, SaveRelayOutcome, SettingsSummary,
+    SettingsUpdateOutcome, UpgradeStatusSummary,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -483,6 +484,8 @@ pub enum OperationResult {
     NetworkRecovered,
     NetworkRecoveryStatus(NetworkRecoveryStatusSummary),
     Settings(Box<SettingsSummary>),
+    CustomRelays(Vec<CustomRelaySummary>),
+    CustomRelayMutated(CustomRelayMutationOutcome),
     SettingsUpdated(SettingsUpdateOutcome),
     RelaySaved(SaveRelayOutcome),
     RelayProbed(RelayProbeOutcome),
@@ -705,6 +708,12 @@ impl fmt::Debug for OperationResult {
                 .field("kind", &"network_recovery_status")
                 .field("status", status),
             Self::Settings(_) => debug.field("kind", &"settings"),
+            Self::CustomRelays(relays) => debug
+                .field("kind", &"custom_relays")
+                .field("relay_count", &relays.len()),
+            Self::CustomRelayMutated(outcome) => debug
+                .field("kind", &"custom_relay_mutated")
+                .field("outcome", outcome),
             Self::SettingsUpdated(outcome) => debug
                 .field("kind", &"settings_updated")
                 .field("outcome", outcome),
