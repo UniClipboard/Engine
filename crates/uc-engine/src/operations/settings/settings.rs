@@ -32,28 +32,7 @@ pub(crate) async fn execute_mutate_custom_relay(
     facade: &AppFacade,
     mutation: CustomRelayMutation,
 ) -> Result<OperationResult, EngineError> {
-    let mutation = match mutation {
-        CustomRelayMutation::Add { url, access_token } => app::RelayConfigurationMutation::Add {
-            url,
-            access_token: access_token
-                .map(|token| app::RelayAccessToken::new(token.expose().to_string()))
-                .transpose()
-                .map_err(|_| internal_error(SAVE_RELAY_FAILED_CODE))?,
-        },
-        CustomRelayMutation::Edit {
-            previous_url,
-            url,
-            access_token,
-        } => app::RelayConfigurationMutation::Edit {
-            previous_url,
-            url,
-            access_token: access_token
-                .map(|token| app::RelayAccessToken::new(token.expose().to_string()))
-                .transpose()
-                .map_err(|_| internal_error(SAVE_RELAY_FAILED_CODE))?,
-        },
-        CustomRelayMutation::Delete { url } => app::RelayConfigurationMutation::Delete { url },
-    };
+    let mutation = map_custom_relay_mutation(mutation)?;
     let outcome = match facade
         .mutate_relays(mutation)
         .await
@@ -71,6 +50,40 @@ pub(crate) async fn execute_mutate_custom_relay(
         },
     };
     Ok(OperationResult::CustomRelayMutated(outcome))
+}
+
+fn map_custom_relay_mutation(
+    mutation: CustomRelayMutation,
+) -> Result<app::RelayConfigurationMutation, EngineError> {
+    Ok(match mutation {
+        CustomRelayMutation::Add { url, access_token } => app::RelayConfigurationMutation::Add {
+            url,
+            access_token: access_token
+                .map(|token| app::RelayAccessToken::new(token.expose().to_string()))
+                .transpose()
+                .map_err(|_| invalid_relay_token_error())?,
+        },
+        CustomRelayMutation::Edit {
+            previous_url,
+            url,
+            access_token,
+        } => app::RelayConfigurationMutation::Edit {
+            previous_url,
+            url,
+            access_token: access_token
+                .map(|token| app::RelayAccessToken::new(token.expose().to_string()))
+                .transpose()
+                .map_err(|_| invalid_relay_token_error())?,
+        },
+        CustomRelayMutation::Delete { url } => app::RelayConfigurationMutation::Delete { url },
+    })
+}
+
+fn invalid_relay_token_error() -> EngineError {
+    map_relay_credential_error(
+        app::SettingsFacadeError::RelayCredentialInvalidToken,
+        SAVE_RELAY_FAILED_CODE,
+    )
 }
 
 fn map_custom_relay(entry: app::RelayConfigurationEntry) -> CustomRelaySummary {
@@ -713,5 +726,34 @@ mod tests {
 
         assert_eq!(error.code(), SAVE_RELAY_FAILED_CODE);
         assert_eq!(error.category(), EngineErrorCategory::Internal);
+    }
+
+    #[test]
+    fn add_rejects_malformed_relay_access_token_as_invalid_input() {
+        let error = map_custom_relay_mutation(CustomRelayMutation::Add {
+            url: "https://relay.example".to_string(),
+            access_token: Some(crate::SecretString::new("malformed\n token")),
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code(), SAVE_RELAY_FAILED_CODE);
+        assert_eq!(error.category(), EngineErrorCategory::InvalidInput);
+        assert!(!error.is_retryable());
+        assert!(!format!("{error:?}").contains("malformed"));
+    }
+
+    #[test]
+    fn edit_rejects_malformed_relay_access_token_as_invalid_input() {
+        let error = map_custom_relay_mutation(CustomRelayMutation::Edit {
+            previous_url: "https://old-relay.example".to_string(),
+            url: "https://relay.example".to_string(),
+            access_token: Some(crate::SecretString::new("malformed\n token")),
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code(), SAVE_RELAY_FAILED_CODE);
+        assert_eq!(error.category(), EngineErrorCategory::InvalidInput);
+        assert!(!error.is_retryable());
+        assert!(!format!("{error:?}").contains("malformed"));
     }
 }

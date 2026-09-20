@@ -1493,25 +1493,36 @@ async fn run_operations(
                 response,
             } => {
                 let url = std::mem::take(&mut *url);
-                let mutation = match previous_url.filter(|previous| !previous.is_empty()) {
-                    Some(previous_url) if url.is_empty() => {
-                        CustomRelayMutation::Delete { url: previous_url }
-                    }
-                    Some(previous_url) => CustomRelayMutation::Edit {
-                        previous_url,
-                        url,
-                        access_token: relay_token(access_token.to_string()),
-                    },
-                    None => CustomRelayMutation::Add {
-                        url,
-                        access_token: relay_token(access_token.to_string()),
-                    },
-                };
-                let result = engine
-                    .execute(Operation::MutateCustomRelay(mutation))
-                    .await
-                    .map_err(BindingError::from)
-                    .and_then(map_legacy_relay_save);
+                let (mutation, credential_url) =
+                    match previous_url.filter(|previous| !previous.is_empty()) {
+                        Some(previous_url) if url.is_empty() => {
+                            (CustomRelayMutation::Delete { url: previous_url }, None)
+                        }
+                        Some(previous_url) => (
+                            CustomRelayMutation::Edit {
+                                previous_url,
+                                url: url.clone(),
+                                access_token: relay_token(access_token.to_string()),
+                            },
+                            Some(url),
+                        ),
+                        None => (
+                            CustomRelayMutation::Add {
+                                url: url.clone(),
+                                access_token: relay_token(access_token.to_string()),
+                            },
+                            Some(url),
+                        ),
+                    };
+                let result = map_legacy_relay_save(
+                    &engine,
+                    engine
+                        .execute(Operation::MutateCustomRelay(mutation))
+                        .await
+                        .map_err(BindingError::from),
+                    credential_url,
+                )
+                .await;
                 let _ = response.send(result);
             }
             WorkerCommand::QueryCustomRelays { response } => {
@@ -2318,12 +2329,38 @@ fn map_custom_relay_mutation(
     }
 }
 
-fn map_legacy_relay_save(result: OperationResult) -> Result<RelaySaveResult, BindingError> {
+async fn map_legacy_relay_save(
+    engine: &Engine,
+    result: Result<OperationResult, BindingError>,
+    credential_url: Option<String>,
+) -> Result<RelaySaveResult, BindingError> {
+    let result = result?;
+    let configured = match (&result, credential_url) {
+        (
+            OperationResult::CustomRelayMutated(CustomRelayMutationOutcome::Saved { .. }),
+            Some(url),
+        ) => match engine
+            .execute(Operation::QueryRelayCredential(
+                uc_engine::RelayCredentialInput { url },
+            ))
+            .await
+            .map_err(BindingError::from)?
+        {
+            OperationResult::RelayCredentialStatus(status) => status.configured,
+            _ => return Err(BindingError::UnexpectedResult),
+        },
+        _ => false,
+    };
+    finish_legacy_relay_save(result, configured)
+}
+
+fn finish_legacy_relay_save(
+    result: OperationResult,
+    configured: bool,
+) -> Result<RelaySaveResult, BindingError> {
     match result {
-        OperationResult::CustomRelayMutated(CustomRelayMutationOutcome::Saved { relays }) => {
-            Ok(RelaySaveResult {
-                configured: !relays.is_empty(),
-            })
+        OperationResult::CustomRelayMutated(CustomRelayMutationOutcome::Saved { .. }) => {
+            Ok(RelaySaveResult { configured })
         }
         OperationResult::CustomRelayMutated(CustomRelayMutationOutcome::Rejected { .. }) => {
             Err(BindingError::Engine {
@@ -2733,6 +2770,27 @@ mod tests {
             assert!(json.contains("blocked_reason"));
             assert!(json.contains(&format!("\"pairing_confirmation\":\"{expected}\"")));
         }
+    }
+
+    #[test]
+    fn legacy_relay_save_does_not_report_another_relays_credential() {
+        let relays = vec![
+            uc_engine::CustomRelaySummary {
+                url: "https://other-relay.example/".to_string(),
+                credential_configured: true,
+            },
+            uc_engine::CustomRelaySummary {
+                url: "https://target-relay.example/".to_string(),
+                credential_configured: false,
+            },
+        ];
+        let result = finish_legacy_relay_save(
+            OperationResult::CustomRelayMutated(CustomRelayMutationOutcome::Saved { relays }),
+            false,
+        )
+        .expect("legacy relay save must map");
+
+        assert!(!result.configured);
     }
 
     #[test]
