@@ -561,6 +561,8 @@ async fn missing_legacy_device_identity_reports_only_identity_loss() {
     let storage = MemorySecureStorage::default();
     let (_entry, _kek_name) = create_profile(root.path(), &storage).await;
     std::fs::remove_file(root.path().join("private/vault/profile-secrets-v1")).unwrap();
+    let paths = uc_core::app_dirs::AppPaths::with_base_data_local_dir(root.path().join("private"));
+    std::fs::remove_dir_all(paths.iroh_identity_dir()).unwrap();
     storage.values().clear();
     let retained = storage
         .removed_values()
@@ -569,6 +571,7 @@ async fn missing_legacy_device_identity_reports_only_identity_loss() {
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect::<Vec<_>>();
     storage.values().extend(retained);
+    assert!(!storage.values().contains_key("iroh-identity:v1"));
 
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
