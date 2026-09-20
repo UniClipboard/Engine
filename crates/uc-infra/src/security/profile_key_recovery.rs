@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -122,6 +122,8 @@ struct ProfileSecretFile {
 struct ProfileSecretPayload {
     format_version: u16,
     cleanup_authorized: bool,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    removed_names: BTreeSet<String>,
     secrets: BTreeMap<String, Vec<u8>>,
 }
 
@@ -130,6 +132,7 @@ struct ActiveVault {
     wrapped_root: EncryptedBlob,
     pending_wrapped_root: Option<EncryptedBlob>,
     cleanup_authorized: bool,
+    removed_names: BTreeSet<String>,
     secrets: BTreeMap<String, Vec<u8>>,
 }
 
@@ -307,10 +310,16 @@ impl ProfileKeyRecoveryStore {
             active.wrapped_root.clone(),
             Some(pending.clone()),
             active.cleanup_authorized,
+            &active.removed_names,
             &active.secrets,
         )?;
         self.write_file(&file)?;
-        self.verify_file(kek, &active.secrets, active.cleanup_authorized)?;
+        self.verify_file(
+            kek,
+            &active.secrets,
+            &active.removed_names,
+            active.cleanup_authorized,
+        )?;
         active.pending_wrapped_root = Some(pending);
         Ok(())
     }
@@ -339,10 +348,16 @@ impl ProfileKeyRecoveryStore {
             pending.clone(),
             None,
             active.cleanup_authorized,
+            &active.removed_names,
             &active.secrets,
         )?;
         self.write_file(&file)?;
-        self.verify_file(kek, &active.secrets, active.cleanup_authorized)?;
+        self.verify_file(
+            kek,
+            &active.secrets,
+            &active.removed_names,
+            active.cleanup_authorized,
+        )?;
         active.wrapped_root = pending;
         active.pending_wrapped_root = None;
         Ok(())
@@ -373,7 +388,7 @@ impl ProfileKeyRecoveryStore {
         let mut payload = decode_payload(&root, &file.encrypted_payload)?;
         let mut merged = false;
         for name in self.managed_names()? {
-            if payload.secrets.contains_key(&name) {
+            if payload.secrets.contains_key(&name) || payload.removed_names.contains(&name) {
                 continue;
             }
             let Some(value) = self.backing.get(&name)? else {
@@ -391,12 +406,14 @@ impl ProfileKeyRecoveryStore {
                 file.wrapped_root.clone(),
                 file.pending_wrapped_root.clone(),
                 payload.cleanup_authorized,
+                &payload.removed_names,
                 &payload.secrets,
             )?)?;
             file = self.read_file()?;
             root = unwrap_file_root(kek, &file)?;
             let verified = decode_payload(&root, &file.encrypted_payload)?;
             if verified.cleanup_authorized != payload.cleanup_authorized
+                || verified.removed_names != payload.removed_names
                 || verified.secrets != payload.secrets
             {
                 return Err(ProfileKeyRecoveryError::Corrupt);
@@ -408,6 +425,7 @@ impl ProfileKeyRecoveryStore {
             wrapped_root: file.wrapped_root,
             pending_wrapped_root: file.pending_wrapped_root,
             cleanup_authorized: payload.cleanup_authorized,
+            removed_names: payload.removed_names,
             secrets: payload.secrets,
         });
         Ok(())
@@ -426,6 +444,7 @@ impl ProfileKeyRecoveryStore {
             wrapped_root.clone(),
             None,
             cleanup_authorized,
+            &BTreeSet::new(),
             &secrets,
         )?)?;
         let reread = self.read_file()?;
@@ -434,7 +453,10 @@ impl ProfileKeyRecoveryStore {
             Err(_) => return Err(ProfileKeyRecoveryError::Corrupt),
         };
         let verified = decode_payload(&verified_root, &reread.encrypted_payload)?;
-        if verified.secrets != secrets || verified.cleanup_authorized != cleanup_authorized {
+        if verified.secrets != secrets
+            || !verified.removed_names.is_empty()
+            || verified.cleanup_authorized != cleanup_authorized
+        {
             return Err(ProfileKeyRecoveryError::Corrupt);
         }
         self.lock_state().active = Some(ActiveVault {
@@ -442,6 +464,7 @@ impl ProfileKeyRecoveryStore {
             wrapped_root: reread.wrapped_root,
             pending_wrapped_root: reread.pending_wrapped_root,
             cleanup_authorized: verified.cleanup_authorized,
+            removed_names: verified.removed_names,
             secrets: verified.secrets,
         });
         Ok(())
@@ -458,6 +481,7 @@ impl ProfileKeyRecoveryStore {
             wrapped_root.clone(),
             None,
             active.cleanup_authorized,
+            &active.removed_names,
             &active.secrets,
         )?;
         self.write_file(&file)?;
@@ -479,12 +503,16 @@ impl ProfileKeyRecoveryStore {
             active.wrapped_root.clone(),
             active.pending_wrapped_root.clone(),
             true,
+            &active.removed_names,
             &active.secrets,
         )?;
         self.write_file(&file)?;
         let reread = self.read_file()?;
         let verified = decode_payload(&active.root, &reread.encrypted_payload)?;
-        if !verified.cleanup_authorized || verified.secrets != active.secrets {
+        if !verified.cleanup_authorized
+            || verified.removed_names != active.removed_names
+            || verified.secrets != active.secrets
+        {
             return Err(ProfileKeyRecoveryError::Corrupt);
         }
         active.cleanup_authorized = true;
@@ -600,6 +628,7 @@ impl ProfileKeyRecoveryStore {
             active.wrapped_root.clone(),
             active.pending_wrapped_root.clone(),
             active.cleanup_authorized,
+            &active.removed_names,
             &active.secrets,
         ) {
             Ok(file) => file,
@@ -657,12 +686,16 @@ impl ProfileKeyRecoveryStore {
         &self,
         kek: &super::Kek,
         secrets: &BTreeMap<String, Vec<u8>>,
+        removed_names: &BTreeSet<String>,
         cleanup_authorized: bool,
     ) -> Result<(), ProfileKeyRecoveryError> {
         let file = self.read_file()?;
         let root = unwrap_file_root(kek, &file)?;
         let payload = decode_payload(&root, &file.encrypted_payload)?;
-        if payload.cleanup_authorized != cleanup_authorized || payload.secrets != *secrets {
+        if payload.cleanup_authorized != cleanup_authorized
+            || payload.removed_names != *removed_names
+            || payload.secrets != *secrets
+        {
             return Err(ProfileKeyRecoveryError::Corrupt);
         }
         Ok(())
@@ -737,6 +770,7 @@ impl SecureStoragePort for ProfileKeyRecoveryStore {
             let mut state = self.lock_state();
             if let Some(active) = &mut state.active {
                 let previous = active.secrets.insert(key.to_owned(), value.to_vec());
+                let was_removed = active.removed_names.remove(key);
                 if let Err(error) = self.persist_active(active) {
                     match previous {
                         Some(previous) => {
@@ -745,6 +779,9 @@ impl SecureStoragePort for ProfileKeyRecoveryStore {
                         None => {
                             active.secrets.remove(key);
                         }
+                    }
+                    if was_removed {
+                        active.removed_names.insert(key.to_owned());
                     }
                     return Err(error);
                 }
@@ -760,9 +797,13 @@ impl SecureStoragePort for ProfileKeyRecoveryStore {
             let mut state = self.lock_state();
             if let Some(active) = &mut state.active {
                 let previous = active.secrets.remove(key);
+                let newly_removed = active.removed_names.insert(key.to_owned());
                 if let Err(error) = self.persist_active(active) {
                     if let Some(previous) = previous {
                         active.secrets.insert(key.to_owned(), previous);
+                    }
+                    if newly_removed {
+                        active.removed_names.remove(key);
                     }
                     return Err(error);
                 }
@@ -782,11 +823,13 @@ fn encode_file(
     wrapped_root: EncryptedBlob,
     pending_wrapped_root: Option<EncryptedBlob>,
     cleanup_authorized: bool,
+    removed_names: &BTreeSet<String>,
     secrets: &BTreeMap<String, Vec<u8>>,
 ) -> Result<ProfileSecretFile, ProfileKeyRecoveryError> {
     let payload = match serde_json::to_vec(&ProfileSecretPayload {
         format_version: FORMAT_VERSION,
         cleanup_authorized,
+        removed_names: removed_names.clone(),
         secrets: secrets.clone(),
     }) {
         Ok(payload) => payload,
@@ -842,6 +885,10 @@ fn decode_payload(
             .secrets
             .keys()
             .any(|key| !is_managed_key(key.as_str()))
+        || payload
+            .removed_names
+            .iter()
+            .any(|key| !is_managed_key(key.as_str()) || payload.secrets.contains_key(key))
     {
         return Err(ProfileKeyRecoveryError::Corrupt);
     }
@@ -1209,6 +1256,49 @@ mod tests {
             recovery.get(PROFILE_ADMISSION_KEY_NAME).unwrap(),
             Some(original)
         );
+    }
+
+    #[tokio::test]
+    async fn authorized_vault_delete_is_not_undone_by_stale_legacy_storage() {
+        let (_directory, storage, paths, profile_id, recovery) = active_recovery_fixture().await;
+        recovery
+            .recover(&Passphrase::new("migration passphrase"))
+            .await
+            .unwrap();
+        storage
+            .set(PROFILE_ADMISSION_KEY_NAME, &[0x65; 32])
+            .unwrap();
+
+        recovery.delete(PROFILE_ADMISSION_KEY_NAME).unwrap();
+        drop(recovery);
+
+        let restarted =
+            ProfileKeyRecoveryStore::new(paths.clone(), profile_id.clone(), storage.clone());
+        assert_eq!(
+            restarted.prepare_startup().await.unwrap(),
+            ProfileRecoveryPreparation::Ready
+        );
+        assert_eq!(restarted.get(PROFILE_ADMISSION_KEY_NAME).unwrap(), None);
+        assert_eq!(storage.get(PROFILE_ADMISSION_KEY_NAME).unwrap(), None);
+
+        storage
+            .set(PROFILE_ADMISSION_KEY_NAME, &[0x66; 32])
+            .unwrap();
+        let interrupted = restarted.vault_file().with_extension("preparing");
+        std::fs::create_dir(&interrupted).unwrap();
+        assert!(restarted
+            .set(PROFILE_ADMISSION_KEY_NAME, &[0x67; 32])
+            .is_err());
+        std::fs::remove_dir(&interrupted).unwrap();
+        drop(restarted);
+
+        let final_restart = ProfileKeyRecoveryStore::new(paths, profile_id, storage.clone());
+        assert_eq!(
+            final_restart.prepare_startup().await.unwrap(),
+            ProfileRecoveryPreparation::Ready
+        );
+        assert_eq!(final_restart.get(PROFILE_ADMISSION_KEY_NAME).unwrap(), None);
+        assert_eq!(storage.get(PROFILE_ADMISSION_KEY_NAME).unwrap(), None);
     }
 
     #[tokio::test]
