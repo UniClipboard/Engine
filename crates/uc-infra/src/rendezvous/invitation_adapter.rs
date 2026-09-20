@@ -47,6 +47,11 @@ use super::client::{CreatePairingRequest, RendezvousClient, RendezvousHttpError}
 /// Matches the typical TTL the rendezvous service returns for back-compat.
 const LOCAL_MINT_TTL: ChronoDuration = ChronoDuration::seconds(300);
 
+/// 在线目录登记比完整邀请多保留一分钟，避免客户端与目录服务的轻微时钟偏差
+/// 把结构正确的成功响应误判为到期时间无效。完整邀请仍只在
+/// [`LOCAL_MINT_TTL`] 窗口内有效，额外时间不会延长准入期限。
+const DIRECTORY_REGISTRATION_TTL: ChronoDuration = ChronoDuration::seconds(360);
+
 /// Rendezvous-backed adapter for [`PairingInvitationPort`].
 ///
 /// Maintains a per-code map of live mDNS publisher handles so
@@ -157,7 +162,7 @@ impl RendezvousPairingInvitationAdapter {
             sponsor_endpoint_id: endpoint_id.clone(),
             sponsor_ticket: full_invitation.as_str().to_owned(),
             code_length: crate::pairing::code_mint::INVITATION_CODE_LENGTH,
-            ttl_secs: Some(LOCAL_MINT_TTL.num_seconds() as u32),
+            ttl_secs: Some(DIRECTORY_REGISTRATION_TTL.num_seconds() as u32),
         };
 
         // ── Cloud channel (best-effort, gated by LAN-only mode) ────────
@@ -200,15 +205,13 @@ impl RendezvousPairingInvitationAdapter {
                 let code = InvitationCode::new(parsed.code);
                 Utc.timestamp_millis_opt(parsed.expires_at_ms)
                     .single()
-                    .ok_or_else(|| InvitationError::DirectoryInvalidResponse {
-                        source: anyhow::Error::msg("directory returned an invalid expiry"),
+                    .ok_or_else(|| {
+                        invalid_directory_response(DirectoryResponseError::ExpiryOutOfRange)
                     })?;
                 if parsed.expires_at_ms < expires_at.timestamp_millis() {
-                    return Err(InvitationError::DirectoryInvalidResponse {
-                        source: anyhow::Error::msg(
-                            "directory expiry precedes the invitation expiry",
-                        ),
-                    });
+                    return Err(invalid_directory_response(
+                        DirectoryResponseError::ExpiryPrecedesInvitation,
+                    ));
                 }
                 debug!(%expires_at, "cloud channel issued invitation");
                 (code, None)
@@ -344,6 +347,40 @@ fn build_issued_invitation(
         expires_at,
         code_origin,
     })
+}
+
+#[derive(Debug, thiserror::Error)]
+enum DirectoryResponseError {
+    #[error("directory response body could not be parsed")]
+    Parse {
+        #[source]
+        source: RendezvousHttpError,
+    },
+    #[error("directory response expiry is out of range")]
+    ExpiryOutOfRange,
+    #[error("directory response expiry precedes the invitation expiry")]
+    ExpiryPrecedesInvitation,
+}
+
+impl DirectoryResponseError {
+    fn diagnostic_reason(&self) -> &'static str {
+        match self {
+            Self::Parse { .. } => "body_parse_failed",
+            Self::ExpiryOutOfRange => "expiry_out_of_range",
+            Self::ExpiryPrecedesInvitation => "expiry_precedes_invitation",
+        }
+    }
+}
+
+fn invalid_directory_response(source: DirectoryResponseError) -> InvitationError {
+    warn!(
+        failure_stage = "directory_response",
+        failure_reason = source.diagnostic_reason(),
+        "rendezvous create response failed validation"
+    );
+    InvitationError::DirectoryInvalidResponse {
+        source: anyhow::Error::new(source),
+    }
 }
 
 fn mint_invitation_id() -> uc_core::membership::InvitationId {
@@ -542,9 +579,9 @@ fn map_create_err(err: RendezvousHttpError) -> InvitationError {
         | RendezvousHttpError::Unexpected { .. } => InvitationError::DirectoryRejected {
             source: anyhow::Error::new(err),
         },
-        RendezvousHttpError::Parse { .. } => InvitationError::DirectoryInvalidResponse {
-            source: anyhow::Error::new(err),
-        },
+        RendezvousHttpError::Parse { .. } => {
+            invalid_directory_response(DirectoryResponseError::Parse { source: err })
+        }
     }
 }
 
@@ -590,6 +627,7 @@ fn map_consume_err(err: RendezvousHttpError) -> ConsumeInvitationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::net::SocketAddr;
     use std::sync::Mutex as StdMutex;
 
@@ -597,10 +635,43 @@ mod tests {
     use chrono::DateTime;
     use iroh::{EndpointAddr, SecretKey, TransportAddr};
     use serde_json::json;
+    use tracing::Level;
     use uc_core::ids::DeviceId;
     use uc_core::settings::model::Settings;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[derive(Clone, Default)]
+    struct CapturedWriter(Arc<StdMutex<Vec<u8>>>);
+
+    impl CapturedWriter {
+        fn dump(&self) -> String {
+            String::from_utf8(self.0.lock().expect("lock captured logs").clone())
+                .expect("captured logs should be UTF-8")
+        }
+    }
+
+    impl Write for CapturedWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("lock captured logs")
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedWriter {
+        type Writer = CapturedWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
 
     struct FakeDeviceIdentity(DeviceId);
     impl DeviceIdentityPort for FakeDeviceIdentity {
@@ -878,6 +949,7 @@ mod tests {
                 "sponsorDeviceId": "device-a",
                 "sponsorDeviceName": "mac",
                 "codeLength": 6,
+                "ttlSecs": 360,
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "code": "ABCD-EFGH",
@@ -958,6 +1030,14 @@ mod tests {
 
     #[tokio::test]
     async fn issue_invitation_rejects_malformed_success_response() {
+        let writer = CapturedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_ansi(false)
+            .with_max_level(Level::WARN)
+            .finish();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
         let ep = loopback_endpoint().await;
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -979,6 +1059,10 @@ mod tests {
             error,
             InvitationError::DirectoryInvalidResponse { .. }
         ));
+        let logs = writer.dump();
+        assert!(logs.contains("failure_stage=\"directory_response\""));
+        assert!(logs.contains("failure_reason=\"body_parse_failed\""));
+        assert!(!logs.contains("not-json"));
     }
 
     #[tokio::test]
@@ -1122,6 +1206,34 @@ mod tests {
             error,
             InvitationError::DirectoryInvalidResponse { .. }
         ));
+    }
+
+    #[test]
+    fn invalid_directory_response_preserves_source_and_logs_safe_reason() {
+        let writer = CapturedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_ansi(false)
+            .with_max_level(Level::WARN)
+            .finish();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        let error = invalid_directory_response(DirectoryResponseError::ExpiryPrecedesInvitation);
+
+        assert!(matches!(
+            error,
+            InvitationError::DirectoryInvalidResponse { .. }
+        ));
+        let source = std::error::Error::source(&error).expect("validation source");
+        assert_eq!(
+            source.to_string(),
+            "directory response expiry precedes the invitation expiry"
+        );
+        let logs = writer.dump();
+        assert!(logs.contains("failure_stage=\"directory_response\""));
+        assert!(logs.contains("failure_reason=\"expiry_precedes_invitation\""));
+        assert!(!logs.contains("invitation expiry precedes"));
     }
 
     // ── consume_invitation ───────────────────────────────────────────────
