@@ -7,16 +7,91 @@ use uc_application::facade::AppFacade;
 use uc_core::settings::model::ShortcutKey;
 
 use crate::{
-    CongestionControllerSummary, EngineError, EngineErrorCategory, FileSyncSettingsSummary,
-    GeneralSettingsSummary, NetworkSettingsSummary, OperationResult, PairingSettingsSummary,
-    QuickPanelDoubleTapModifierSummary, QuickPanelPositionSummary, QuickPanelSettingsSummary,
-    RelayCredentialEdit, RelayCredentialInput, RelayCredentialStatus, RelayProbeCredential,
-    RelayProbeInput, RelayProbeOutcome, RetentionPolicySummary, RetentionRulePatch,
-    RetentionRuleSummary, RuleEvaluationSummary, SaveRelayInput, SaveRelayOutcome,
-    SecuritySettingsSummary, SettingsContentTypes, SettingsContentTypesPatch, SettingsPatch,
-    SettingsSummary, SettingsUpdateOutcome, ShortcutKeySummary, StartupModeSummary,
+    CongestionControllerSummary, CustomRelayMutation, CustomRelayMutationOutcome,
+    CustomRelayRejection, CustomRelaySummary, EngineError, EngineErrorCategory,
+    FileSyncSettingsSummary, GeneralSettingsSummary, NetworkSettingsSummary, OperationResult,
+    PairingSettingsSummary, QuickPanelDoubleTapModifierSummary, QuickPanelPositionSummary,
+    QuickPanelSettingsSummary, RelayCredentialEdit, RelayCredentialInput, RelayCredentialStatus,
+    RelayProbeCredential, RelayProbeInput, RelayProbeOutcome, RetentionPolicySummary,
+    RetentionRulePatch, RetentionRuleSummary, RuleEvaluationSummary, SaveRelayInput,
+    SaveRelayOutcome, SecuritySettingsSummary, SettingsContentTypes, SettingsContentTypesPatch,
+    SettingsPatch, SettingsSummary, SettingsUpdateOutcome, ShortcutKeySummary, StartupModeSummary,
     SyncFrequencySummary, SyncSettingsSummary, ThemeSummary, UpdateChannelSummary,
 };
+
+pub(crate) async fn execute_query_custom_relays(
+    facade: &AppFacade,
+) -> Result<OperationResult, EngineError> {
+    let relays = facade.list_relays().await.map_err(map_save_relay_error)?;
+    Ok(OperationResult::CustomRelays(
+        relays.into_iter().map(map_custom_relay).collect(),
+    ))
+}
+
+pub(crate) async fn execute_mutate_custom_relay(
+    facade: &AppFacade,
+    mutation: CustomRelayMutation,
+) -> Result<OperationResult, EngineError> {
+    let mutation = map_custom_relay_mutation(mutation)?;
+    let outcome = match facade
+        .mutate_relays(mutation)
+        .await
+        .map_err(map_save_relay_error)?
+    {
+        Ok(relays) => CustomRelayMutationOutcome::Saved {
+            relays: relays.into_iter().map(map_custom_relay).collect(),
+        },
+        Err(reason) => CustomRelayMutationOutcome::Rejected {
+            reason: match reason {
+                app::RelayConfigurationRejection::InvalidUrl => CustomRelayRejection::InvalidUrl,
+                app::RelayConfigurationRejection::Duplicate => CustomRelayRejection::Duplicate,
+                app::RelayConfigurationRejection::NotFound => CustomRelayRejection::NotFound,
+            },
+        },
+    };
+    Ok(OperationResult::CustomRelayMutated(outcome))
+}
+
+fn map_custom_relay_mutation(
+    mutation: CustomRelayMutation,
+) -> Result<app::RelayConfigurationMutation, EngineError> {
+    Ok(match mutation {
+        CustomRelayMutation::Add { url, access_token } => app::RelayConfigurationMutation::Add {
+            url,
+            access_token: access_token
+                .map(|token| app::RelayAccessToken::new(token.expose().to_string()))
+                .transpose()
+                .map_err(|_| invalid_relay_token_error())?,
+        },
+        CustomRelayMutation::Edit {
+            previous_url,
+            url,
+            access_token,
+        } => app::RelayConfigurationMutation::Edit {
+            previous_url,
+            url,
+            access_token: access_token
+                .map(|token| app::RelayAccessToken::new(token.expose().to_string()))
+                .transpose()
+                .map_err(|_| invalid_relay_token_error())?,
+        },
+        CustomRelayMutation::Delete { url } => app::RelayConfigurationMutation::Delete { url },
+    })
+}
+
+fn invalid_relay_token_error() -> EngineError {
+    map_relay_credential_error(
+        app::SettingsFacadeError::RelayCredentialInvalidToken,
+        SAVE_RELAY_FAILED_CODE,
+    )
+}
+
+fn map_custom_relay(entry: app::RelayConfigurationEntry) -> CustomRelaySummary {
+    CustomRelaySummary {
+        url: entry.url,
+        credential_configured: entry.credential_configured,
+    }
+}
 
 pub(crate) async fn execute_query_settings(
     facade: &AppFacade,
@@ -651,5 +726,34 @@ mod tests {
 
         assert_eq!(error.code(), SAVE_RELAY_FAILED_CODE);
         assert_eq!(error.category(), EngineErrorCategory::Internal);
+    }
+
+    #[test]
+    fn add_rejects_malformed_relay_access_token_as_invalid_input() {
+        let error = map_custom_relay_mutation(CustomRelayMutation::Add {
+            url: "https://relay.example".to_string(),
+            access_token: Some(crate::SecretString::new("malformed\n token")),
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code(), SAVE_RELAY_FAILED_CODE);
+        assert_eq!(error.category(), EngineErrorCategory::InvalidInput);
+        assert!(!error.is_retryable());
+        assert!(!format!("{error:?}").contains("malformed"));
+    }
+
+    #[test]
+    fn edit_rejects_malformed_relay_access_token_as_invalid_input() {
+        let error = map_custom_relay_mutation(CustomRelayMutation::Edit {
+            previous_url: "https://old-relay.example".to_string(),
+            url: "https://relay.example".to_string(),
+            access_token: Some(crate::SecretString::new("malformed\n token")),
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code(), SAVE_RELAY_FAILED_CODE);
+        assert_eq!(error.category(), EngineErrorCategory::InvalidInput);
+        assert!(!error.is_retryable());
+        assert!(!format!("{error:?}").contains("malformed"));
     }
 }

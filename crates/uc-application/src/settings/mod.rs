@@ -30,7 +30,10 @@ pub use models::{
     SettingsPatch, SettingsView, ShortcutKeyView, StartupModeView, SyncFrequencyView,
     SyncSettingsPatch, SyncSettingsView, ThemeView, UpdateChannelView,
 };
-pub use relay_configuration::RelayConfiguration;
+pub use relay_configuration::{
+    RelayConfiguration, RelayConfigurationEntry, RelayConfigurationMutation,
+    RelayConfigurationRejection,
+};
 pub use relay_credentials::{
     RelayAccessToken, RelayCredentialEdit, RelayCredentials, RelayCredentialsError,
     RelayProbeCredential,

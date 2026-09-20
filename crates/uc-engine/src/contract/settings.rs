@@ -3,6 +3,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::SecretString;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeSummary {
@@ -458,6 +460,71 @@ pub struct RelayCredentialStatus {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomRelaySummary {
+    pub url: String,
+    pub credential_configured: bool,
+}
+
+impl fmt::Debug for CustomRelaySummary {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CustomRelaySummary")
+            .field("credential_configured", &self.credential_configured)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum CustomRelayMutation {
+    Add {
+        url: String,
+        access_token: Option<SecretString>,
+    },
+    Edit {
+        previous_url: String,
+        url: String,
+        access_token: Option<SecretString>,
+    },
+    Delete {
+        url: String,
+    },
+}
+
+impl fmt::Debug for CustomRelayMutation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CustomRelayMutation([REDACTED])")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CustomRelayRejection {
+    InvalidUrl,
+    Duplicate,
+    NotFound,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CustomRelayMutationOutcome {
+    Saved { relays: Vec<CustomRelaySummary> },
+    Rejected { reason: CustomRelayRejection },
+}
+
+impl fmt::Debug for CustomRelayMutationOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Saved { relays } => formatter
+                .debug_struct("CustomRelayMutationOutcome::Saved")
+                .field("relay_count", &relays.len())
+                .finish(),
+            Self::Rejected { reason } => formatter
+                .debug_struct("CustomRelayMutationOutcome::Rejected")
+                .field("reason", reason)
+                .finish(),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SaveRelayOutcome {
     Saved {
         settings: Box<SettingsSummary>,
@@ -514,7 +581,8 @@ impl fmt::Debug for RelayProbeOutcome {
 #[cfg(test)]
 mod relay_contract_tests {
     use super::{
-        RelayCredentialEdit, RelayProbeCredential, RelayProbeInput, SaveRelayInput, SettingsPatch,
+        CustomRelayMutationOutcome, CustomRelaySummary, RelayCredentialEdit, RelayProbeCredential,
+        RelayProbeInput, SaveRelayInput, SettingsPatch,
     };
 
     #[test]
@@ -539,5 +607,20 @@ mod relay_contract_tests {
             assert!(!output.contains("password"));
             assert!(!output.contains(token));
         }
+    }
+
+    #[test]
+    fn relay_outputs_never_expose_urls_in_debug_output() {
+        let url = "https://relay.example.com/private";
+        let summary = CustomRelaySummary {
+            url: url.to_string(),
+            credential_configured: true,
+        };
+        let outcome = CustomRelayMutationOutcome::Saved {
+            relays: vec![summary.clone()],
+        };
+
+        assert!(!format!("{outcome:?}").contains(url));
+        assert!(!format!("{summary:?}").contains(url));
     }
 }

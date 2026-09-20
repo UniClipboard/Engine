@@ -517,7 +517,7 @@ mod tests {
             .expect("store token");
 
         let loaded = credentials
-            .load("https://relay-a.example.com")
+            .load("  https://relay-a.example.com/  ")
             .expect("load token")
             .expect("configured token");
         assert_eq!(loaded.expose_secret(), TOKEN);
