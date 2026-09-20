@@ -1,6 +1,6 @@
 use super::{
-    AdmissionRecoveryCommitToken, AdmissionRecoveryDisposition, AdmissionRecoveryReport,
-    AdmissionRecoveryTrigger, LoadedPendingAdmission,
+    AdmissionRecoveryCommitToken, AdmissionRecoveryReport, AdmissionRecoveryTrigger,
+    LoadedPendingAdmission,
 };
 use crate::space::admission::protocol::test_support::{
     ProtocolEvent, SpaceAdmissionProtocolTestPair,
@@ -8,6 +8,7 @@ use crate::space::admission::protocol::test_support::{
 use crate::space::admission::JoinSpaceInput;
 use crate::space::membership::{
     MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, RecoverSpaceAdmissionsPort,
+    SpaceWorkMode,
 };
 use uc_core::membership::AdmissionRecordPersistence;
 
@@ -51,6 +52,7 @@ async fn pending_join_recovery_requests_an_initial_channel_after_the_join_was_sa
         .await;
 
     assert_eq!(report.deferred_count, 1);
+    assert_eq!(report.work_mode, SpaceWorkMode::Pairing);
     assert_eq!(pair.active_joiner_observation_count(), 0);
     assert_eq!(
         pair.events(),
@@ -59,6 +61,7 @@ async fn pending_join_recovery_requests_an_initial_channel_after_the_join_was_sa
             ProtocolEvent::JoinerSavedJoinRequest,
             ProtocolEvent::AdmissionRecoveryWoken,
             ProtocolEvent::JoinerInitialChannelRequested,
+            ProtocolEvent::JoinerSavedRetry,
         ]
     );
     let diagnostics = std::fs::read_to_string(output_file.path()).expect("diagnostics");
@@ -66,6 +69,59 @@ async fn pending_join_recovery_requests_an_initial_channel_after_the_join_was_sa
         diagnostics.contains("deferred") && diagnostics.contains("state_changed"),
         "deferred recovery must explain why it remains pending"
     );
+}
+
+#[tokio::test]
+async fn transient_failure_persists_the_next_attempt_and_early_wakes_do_not_retry() {
+    let pair = SpaceAdmissionProtocolTestPair::fresh().await;
+    pair.joiner()
+        .start_join_at(join_input("persisted-retry"), 1_000)
+        .await
+        .expect("join is saved");
+
+    let first = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+    assert_eq!(first.deferred_count, 1);
+    let saved_retry = *pair
+        .saved_join()
+        .pending_exchange()
+        .expect("failed exchange remains pending")
+        .retry_state();
+    assert_eq!(saved_retry.attempt_count(), 1);
+    assert!(saved_retry.next_attempt_at_ms() > 1_000);
+    let attempts_after_failure = pair
+        .events()
+        .iter()
+        .filter(|event| matches!(event, ProtocolEvent::JoinerInitialChannelRequested))
+        .count();
+
+    let early = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+    assert_eq!(early.work_mode, SpaceWorkMode::Pairing);
+    assert_eq!(early.deferred_count, 0);
+    let attempts_after_early_wake = pair
+        .events()
+        .iter()
+        .filter(|event| matches!(event, ProtocolEvent::JoinerInitialChannelRequested))
+        .count();
+    assert_eq!(attempts_after_early_wake, attempts_after_failure);
+
+    pair.set_now_ms(saved_retry.next_attempt_at_ms());
+    let due = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+    assert_eq!(due.deferred_count, 1);
+    let attempts_after_due_wake = pair
+        .events()
+        .iter()
+        .filter(|event| matches!(event, ProtocolEvent::JoinerInitialChannelRequested))
+        .count();
+    assert_eq!(attempts_after_due_wake, attempts_after_failure + 1);
 }
 
 #[tokio::test]
@@ -98,7 +154,7 @@ async fn recovery_persists_expiry_before_attempting_more_network_work() {
         .await;
 
     assert_eq!(at_deadline.terminated_count, 1, "report: {at_deadline:?}");
-    assert_eq!(pair.admission_status_invalidation_count(), 1);
+    assert_eq!(pair.admission_status_invalidation_count(), 2);
     assert_eq!(
         pair.take_created_join().termination_reason(),
         Some(uc_core::membership::SpaceAdmissionTerminationReason::Expired)
@@ -263,6 +319,7 @@ async fn initial_authentication_is_saved_before_the_original_join_request_is_exc
             ProtocolEvent::JoinerInitialChannelRequested,
             ProtocolEvent::JoinerAuthenticatedChannelSaved,
             ProtocolEvent::JoinerJoinRequestExchanged,
+            ProtocolEvent::JoinerSavedRetry,
         ]
     );
 }
@@ -340,9 +397,7 @@ async fn prepared_join_keeps_its_exact_request_until_the_upgraded_peer_recovers(
     pair.require_upgrade_once_more();
     let repeated = pair
         .joiner()
-        .recover_pending(AdmissionRecoveryTrigger::PeerOnline(
-            uc_core::DeviceId::new("still-old-peer"),
-        ))
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
         .await;
     assert_eq!(repeated.peer_upgrade_required_count, 1);
     assert_eq!(repeated.recovery_required_count, 0);
@@ -351,9 +406,7 @@ async fn prepared_join_keeps_its_exact_request_until_the_upgraded_peer_recovers(
 
     let resumed = pair
         .joiner()
-        .recover_pending(AdmissionRecoveryTrigger::PeerOnline(
-            uc_core::DeviceId::new("upgraded-peer"),
-        ))
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
         .await;
 
     assert_eq!(resumed.peer_upgrade_required_count, 0);
@@ -390,9 +443,7 @@ async fn applied_join_stays_pending_until_the_upgraded_peer_can_complete_it() {
 
     let resumed = pair
         .joiner()
-        .recover_pending(AdmissionRecoveryTrigger::PeerOnline(
-            uc_core::DeviceId::new("upgraded-peer"),
-        ))
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
         .await;
 
     assert_eq!(resumed.peer_upgrade_required_count, 0);
@@ -479,9 +530,7 @@ async fn active_join_remains_active_while_final_settlement_waits_for_a_peer_upgr
 
     let resumed = pair
         .joiner()
-        .recover_pending(AdmissionRecoveryTrigger::PeerOnline(
-            uc_core::DeviceId::new("upgraded-peer"),
-        ))
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
         .await;
 
     assert_eq!(resumed.peer_upgrade_required_count, 0);
@@ -517,6 +566,7 @@ async fn candidate_is_saved_without_scheduling_another_maintenance_wake() {
             ProtocolEvent::JoinerJoinRequestExchanged,
             ProtocolEvent::JoinerSavedCandidate,
             ProtocolEvent::JoinerSavedPrepared,
+            ProtocolEvent::JoinerSavedRetry,
         ]
     );
 }
@@ -551,6 +601,7 @@ async fn candidate_and_commit_are_advanced_in_one_recovery() {
             ProtocolEvent::JoinerSavedCommitted,
             ProtocolEvent::JoinerSavedApplied,
             ProtocolEvent::JoinerContinuationChannelRequested,
+            ProtocolEvent::JoinerSavedRetry,
         ]
     );
 }
@@ -568,7 +619,7 @@ async fn maintenance_yields_after_the_activation_plan_is_saved() {
         .await;
 
     assert_eq!(outcome.step(), MembershipMaintenanceStepOutcome::Completed);
-    assert!(!outcome.should_continue());
+    assert!(!outcome.allows_ordinary_membership());
     assert!(pair
         .joiner()
         .has_pending_space_transition()
@@ -590,10 +641,7 @@ async fn complete_is_saved_as_an_activation_plan_before_local_activation() {
 
     assert_eq!(report.advanced_count, 6);
     assert_eq!(report.recovery_required_count, 0);
-    assert_eq!(
-        report.disposition,
-        AdmissionRecoveryDisposition::YieldMaintenance
-    );
+    assert_eq!(report.work_mode, SpaceWorkMode::Pairing);
     assert!(pair.events().ends_with(&[
         ProtocolEvent::JoinerContinuationChannelRequested,
         ProtocolEvent::JoinerAppliedExchanged,
@@ -708,10 +756,7 @@ async fn settled_is_saved_and_finishes_joiner_recovery() {
 
     assert_eq!(report.advanced_count, 1);
     assert_eq!(report.recovery_required_count, 0);
-    assert_eq!(
-        report.disposition,
-        AdmissionRecoveryDisposition::YieldMaintenance
-    );
+    assert_eq!(report.work_mode, SpaceWorkMode::Pairing);
     assert!(pair.events().ends_with(&[
         ProtocolEvent::JoinerContinuationChannelRequested,
         ProtocolEvent::JoinerCompleteAckExchanged,

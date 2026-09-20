@@ -1019,13 +1019,27 @@ function checkSpaceAdmissionProtocolOwnership() {
     'joiner: JoinerAdmissionService',
     'sponsor: SponsorAdmissionService',
     'recovery: AdmissionRecoveryService',
-    'execution_lock: tokio::sync::Mutex<()>',
+    'execution_lock: Arc<Mutex<()>>',
   ]) {
     if (!protocol.includes(field)) {
       addProblem(
         problems,
         'space admission protocol ownership',
         `SpaceAdmissionProtocol is missing ${field}`
+      )
+    }
+  }
+
+  for (const ownershipMarker of [
+    'impl AcquireSpaceWorkPermitPort for SpaceAdmissionProtocol',
+    'acquire_space_work_permit',
+    'lock_owned()',
+  ]) {
+    if (!protocol.includes(ownershipMarker)) {
+      addProblem(
+        problems,
+        'space admission protocol ownership',
+        `SpaceAdmissionProtocol is missing shared work ownership marker: ${ownershipMarker}`
       )
     }
   }

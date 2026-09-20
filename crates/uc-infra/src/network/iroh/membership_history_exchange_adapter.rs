@@ -39,6 +39,26 @@ const REQUEST_LAYOUT_MARKER: &[u8; 4] = b"UCT1";
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const ACCEPTED: u8 = 1;
 const REJECTED: u8 = 2;
+const BUSY: u8 = 3;
+
+fn decode_response_status(status: u8) -> Result<(), MembershipHistoryExchangeError> {
+    if status == BUSY {
+        return Err(MembershipHistoryExchangeError::PairingInProgress);
+    }
+    if status == REJECTED {
+        return Err(MembershipHistoryExchangeError::Rejected);
+    }
+    if status != ACCEPTED {
+        return Err(transport_failure(DiagnosticErrorType::DecodeFailed));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerExchangeOutcome {
+    Completed,
+    PairingInProgress,
+}
 
 #[derive(Serialize, Deserialize)]
 struct WireMembershipHistoryRequest {
@@ -126,13 +146,7 @@ impl MembershipHistoryExchangePort for IrohMembershipHistoryExchangeAdapter {
             .map_err(|_| transport_failure(DiagnosticErrorType::Timeout))?
             .map_err(|_| transport_failure(DiagnosticErrorType::StreamFailed))?;
         write_message(&mut send, &payload).await?;
-        let accepted = read_byte(&mut receive).await?;
-        if accepted == REJECTED {
-            return Err(MembershipHistoryExchangeError::Rejected);
-        }
-        if accepted != ACCEPTED {
-            return Err(transport_failure(DiagnosticErrorType::DecodeFailed));
-        }
+        decode_response_status(read_byte(&mut receive).await?)?;
         let response = decode_message(&read_message(&mut receive).await?)?;
         Ok(response)
     }
@@ -195,6 +209,7 @@ impl RestrictedMembershipDeliveryPort for IrohMembershipHistoryExchangeAdapter {
                 Err(RestrictedMembershipDeliveryError::Rejected)
             }
             Err(MembershipHistoryExchangeError::Offline)
+            | Err(MembershipHistoryExchangeError::PairingInProgress)
             | Err(MembershipHistoryExchangeError::Transport) => {
                 Err(RestrictedMembershipDeliveryError::Deferred)
             }
@@ -257,12 +272,19 @@ impl ProtocolHandler for IrohMembershipHistoryExchangeHandler {
         uc_observability_contract::diagnostics::scope_operation_diagnostics(async {
             let result = async {
                 describe_membership_exchange(request_purpose(&request.message), true);
-                let response = self
+                let response = match self
                     .state
                     .endpoint
                     .handle_membership_history_exchange(&source_device, request.message)
                     .await
-                    .map_err(|error| history_endpoint_error_type(&error))?;
+                {
+                    Ok(response) => response,
+                    Err(MembershipHistoryExchangeError::PairingInProgress) => {
+                        busy(&mut send).await;
+                        return Ok(ServerExchangeOutcome::PairingInProgress);
+                    }
+                    Err(error) => return Err(history_endpoint_error_type(&error)),
+                };
                 let payload =
                     encode_message(&response).map_err(|_| DiagnosticErrorType::DecodeFailed)?;
                 send.write_all(&[ACCEPTED])
@@ -270,14 +292,24 @@ impl ProtocolHandler for IrohMembershipHistoryExchangeHandler {
                     .map_err(|_| DiagnosticErrorType::StreamFailed)?;
                 write_message(&mut send, &payload)
                     .await
-                    .map_err(|_| DiagnosticErrorType::StreamFailed)
+                    .map_err(|_| DiagnosticErrorType::StreamFailed)?;
+                Ok(ServerExchangeOutcome::Completed)
             }
             .instrument(span.clone())
             .await;
             if result.is_err() {
                 reject(&mut send).await;
             }
-            span.in_scope(|| record_server_completion(started.elapsed(), result.as_ref().err()));
+            span.in_scope(|| match &result {
+                Ok(ServerExchangeOutcome::PairingInProgress) => record_server_completion(
+                    started.elapsed(),
+                    Some(&DiagnosticErrorType::Unavailable),
+                ),
+                Ok(ServerExchangeOutcome::Completed) => {
+                    record_server_completion(started.elapsed(), None)
+                }
+                Err(error) => record_server_completion(started.elapsed(), Some(error)),
+            });
         })
         .await;
         drop(span);
@@ -288,7 +320,8 @@ impl ProtocolHandler for IrohMembershipHistoryExchangeHandler {
 
 fn history_endpoint_error_type(error: &MembershipHistoryExchangeError) -> DiagnosticErrorType {
     match error {
-        MembershipHistoryExchangeError::Offline => DiagnosticErrorType::Unavailable,
+        MembershipHistoryExchangeError::Offline
+        | MembershipHistoryExchangeError::PairingInProgress => DiagnosticErrorType::Unavailable,
         MembershipHistoryExchangeError::Rejected => DiagnosticErrorType::PeerRejected,
         MembershipHistoryExchangeError::Transport => DiagnosticErrorType::StreamFailed,
     }
@@ -527,6 +560,11 @@ async fn reject(send: &mut iroh::endpoint::SendStream) {
     let _ = send.finish();
 }
 
+async fn busy(send: &mut iroh::endpoint::SendStream) {
+    let _ = send.write_all(&[BUSY]).await;
+    let _ = send.finish();
+}
+
 #[cfg(test)]
 mod tests {
     #[tokio::test]
@@ -593,9 +631,17 @@ mod tests {
     use uc_core::security::IdentityFingerprint;
 
     use super::{
-        checked_message_length, decode_message, decode_request, encode_message, encode_request,
-        introduced_device, MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
+        checked_message_length, decode_message, decode_request, decode_response_status,
+        encode_message, encode_request, introduced_device, BUSY, MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
     };
+
+    #[test]
+    fn history_busy_status_is_retryable_for_new_clients() {
+        assert_eq!(
+            decode_response_status(BUSY),
+            Err(uc_core::membership::MembershipHistoryExchangeError::PairingInProgress)
+        );
+    }
 
     #[test]
     fn history_frame_length_accepts_the_boundary_and_rejects_oversize_before_allocation() {

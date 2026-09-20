@@ -206,6 +206,14 @@ impl PendingAdmissionExchange {
         &self.retry_state
     }
 
+    pub(crate) fn record_failure(
+        &mut self,
+        next_attempt_at_ms: i64,
+    ) -> Result<(), AdmissionPendingExchangeError> {
+        self.retry_state = self.retry_state.after_failure(next_attempt_at_ms)?;
+        Ok(())
+    }
+
     pub(crate) const fn block_reason(&self) -> Option<AdmissionExchangeBlockReason> {
         self.block_reason
     }

@@ -73,7 +73,8 @@ pub use membership::{
 };
 pub use membership::{
     DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
-    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState,
+    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, MembershipMaintenanceHealth,
+    MembershipMaintenanceHealthPhase, MembershipMaintenanceProblem, MembershipMaintenanceRecovery,
     PairingConfirmationObservation, PairingConfirmationStatus, PairingConfirmationTarget,
     PendingDeviceTrustChange, QueryDeviceTrustError,
 };

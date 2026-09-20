@@ -8,7 +8,8 @@ use uc_application::facade::{
     AppFacade, ContentTypesPatch as AppContentTypesPatch, CurrentJoinStatus, DeviceTrustMembership,
     DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, JoinSpaceTerminationReason,
     MemberProtectionStatusView, MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch,
-    MemberSyncPreferencesView, PairingConfirmationStatus, RemoveSpaceMemberError, RosterError,
+    MemberSyncPreferencesView, MembershipMaintenanceHealthPhase, MembershipMaintenanceProblem,
+    MembershipMaintenanceRecovery, PairingConfirmationStatus, RemoveSpaceMemberError, RosterError,
     SpaceProtectionModeView, SpaceProtectionView,
 };
 #[cfg(test)]
@@ -23,7 +24,9 @@ use crate::{
     DeviceTrustRelationshipSummary, DeviceTrustSnapshotSummary, EngineError, EngineErrorCategory,
     JoinSpaceRejectionReasonSummary, JoinSpaceStatusSummary, JoinSpaceTerminationReasonSummary,
     JoinedSpaceSummary, MemberProtectionStatusSummary, MemberProtectionSummary,
-    MemberSyncPreferencesPatch, MemberSyncPreferencesSummary, OperationResult,
+    MemberSyncPreferencesPatch, MemberSyncPreferencesSummary,
+    MembershipMaintenanceHealthPhaseSummary, MembershipMaintenanceHealthSummary,
+    MembershipMaintenanceProblemSummary, MembershipMaintenanceRecoverySummary, OperationResult,
     PairingConfirmationSummary, PendingInboundMemberSummary, QueryMemberSyncPreferencesInput,
     RemoveMemberInput, SpaceProtectionModeSummary, SpaceProtectionSummary,
     UpdateMemberSyncPreferencesInput,
@@ -267,6 +270,36 @@ pub(crate) fn device_trust_snapshot(snapshot: DeviceTrustStatus) -> DeviceTrustS
                 display_name: member.display_name,
             }
         }),
+        maintenance_health: MembershipMaintenanceHealthSummary {
+            phase: match snapshot.maintenance_health.phase {
+                MembershipMaintenanceHealthPhase::Healthy => {
+                    MembershipMaintenanceHealthPhaseSummary::Healthy
+                }
+                MembershipMaintenanceHealthPhase::Retrying => {
+                    MembershipMaintenanceHealthPhaseSummary::Retrying
+                }
+                MembershipMaintenanceHealthPhase::NeedsAttention => {
+                    MembershipMaintenanceHealthPhaseSummary::NeedsAttention
+                }
+            },
+            reason: snapshot
+                .maintenance_health
+                .reason
+                .map(|reason| match reason {
+                    MembershipMaintenanceProblem::MembershipHistoryRejected => {
+                        MembershipMaintenanceProblemSummary::MembershipHistoryRejected
+                    }
+                }),
+            recovery: snapshot
+                .maintenance_health
+                .recovery
+                .map(|recovery| match recovery {
+                    MembershipMaintenanceRecovery::ResolveDeviceTrust => {
+                        MembershipMaintenanceRecoverySummary::ResolveDeviceTrust
+                    }
+                }),
+            next_retry_at_ms: snapshot.maintenance_health.next_retry_at_ms,
+        },
         devices: snapshot
             .devices
             .into_iter()
@@ -730,6 +763,7 @@ mod tests {
             }),
             current_join: None,
             pending_inbound_member: None,
+            maintenance_health: uc_application::facade::MembershipMaintenanceHealth::healthy(),
             devices: ["a", "b", "c", "d"]
                 .into_iter()
                 .map(|id| DeviceTrustDevice {
@@ -781,6 +815,39 @@ mod tests {
                 .apply_impact
                 .local_device_outcome,
             DeviceMembershipSummary::Removed
+        );
+    }
+
+    #[test]
+    fn membership_maintenance_health_keeps_retry_and_recovery_details() {
+        let mut retrying = handoff_pending_removal(false);
+        retrying.maintenance_health =
+            uc_application::facade::MembershipMaintenanceHealth::retrying(60_000);
+        let retrying = device_trust_snapshot(retrying).maintenance_health;
+        assert_eq!(
+            retrying.phase,
+            MembershipMaintenanceHealthPhaseSummary::Retrying
+        );
+        assert_eq!(retrying.next_retry_at_ms, Some(60_000));
+
+        let mut attention = handoff_pending_removal(false);
+        attention.maintenance_health =
+            uc_application::facade::MembershipMaintenanceHealth::needs_attention(
+                MembershipMaintenanceProblem::MembershipHistoryRejected,
+                MembershipMaintenanceRecovery::ResolveDeviceTrust,
+            );
+        let attention = device_trust_snapshot(attention).maintenance_health;
+        assert_eq!(
+            attention.phase,
+            MembershipMaintenanceHealthPhaseSummary::NeedsAttention
+        );
+        assert_eq!(
+            attention.reason,
+            Some(MembershipMaintenanceProblemSummary::MembershipHistoryRejected)
+        );
+        assert_eq!(
+            attention.recovery,
+            Some(MembershipMaintenanceRecoverySummary::ResolveDeviceTrust)
         );
     }
 

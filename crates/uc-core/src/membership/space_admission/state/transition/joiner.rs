@@ -1,6 +1,51 @@
 use super::*;
 
 impl SpaceAdmissionAggregate {
+    pub(crate) fn defer_pending_exchange(
+        mut self,
+        next_attempt_at_ms: i64,
+    ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        let record_version = self
+            .record_version
+            .checked_add(1)
+            .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
+        let exchange = match &mut self.state {
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(state)) => {
+                &mut state.pending_exchange
+            }
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Prepared(state)) => {
+                &mut state.pending_exchange
+            }
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Applied(state)) => {
+                &mut state.pending_exchange
+            }
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Cancelling(state)) => {
+                &mut state.pending_exchange
+            }
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Active(
+                SpaceAdmissionActiveState::PendingSettlement(state),
+            )) => &mut state.pending_exchange,
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state)) => {
+                state
+                    .cleanup
+                    .as_mut()
+                    .and_then(|cleanup| cleanup.pending_exchange.as_mut())
+                    .ok_or(SpaceAdmissionAggregateError::InvalidTransition)?
+            }
+            _ => return Err(SpaceAdmissionAggregateError::InvalidTransition),
+        };
+        exchange
+            .record_failure(next_attempt_at_ms)
+            .map_err(|error| match error {
+                AdmissionPendingExchangeError::RetryCountOverflow => {
+                    SpaceAdmissionAggregateError::CounterOverflow
+                }
+                _ => SpaceAdmissionAggregateError::InvalidRetryState,
+            })?;
+        self.record_version = record_version;
+        Ok(AdmissionTransition::new(self, &[]))
+    }
+
     pub(crate) fn start_resolved_join(
         mut self,
         private_state: AdmissionJoinerPrivateState,

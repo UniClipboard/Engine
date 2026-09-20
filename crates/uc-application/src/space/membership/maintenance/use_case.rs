@@ -5,10 +5,11 @@ use uc_observability_contract::diagnostics::connectivity::{
 };
 
 use super::{
-    DeliverPendingGroupUpdatesPort, DeliverRestrictedMembershipPort, MembershipMaintenanceReport,
-    MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger,
-    ReconcileMembershipProjectionPort, RecoverMembershipConflictsPort,
-    RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort, SynchronizeMembershipMaintenancePort,
+    AcquireSpaceWorkPermitPort, DeliverPendingGroupUpdatesPort, DeliverRestrictedMembershipPort,
+    MembershipMaintenanceReport, MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger,
+    QuerySpaceWorkModeError, ReconcileMembershipProjectionPort, RecoverMembershipConflictsPort,
+    RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort, SpaceWorkMode,
+    SynchronizeMembershipMaintenancePort,
 };
 
 pub(crate) struct MaintainSpaceMembershipDeps {
@@ -24,13 +25,27 @@ pub(crate) struct MaintainSpaceMembershipDeps {
 pub(crate) struct MaintainSpaceMembershipUseCase {
     deps: MaintainSpaceMembershipDeps,
     execution_lock: tokio::sync::Mutex<()>,
+    work_permit: Option<Arc<dyn AcquireSpaceWorkPermitPort>>,
 }
 
 impl MaintainSpaceMembershipUseCase {
+    #[cfg(test)]
     pub(crate) fn new(deps: MaintainSpaceMembershipDeps) -> Self {
         Self {
             deps,
             execution_lock: tokio::sync::Mutex::new(()),
+            work_permit: None,
+        }
+    }
+
+    pub(crate) fn new_coordinated(
+        deps: MaintainSpaceMembershipDeps,
+        work_permit: Arc<dyn AcquireSpaceWorkPermitPort>,
+    ) -> Self {
+        Self {
+            deps,
+            execution_lock: tokio::sync::Mutex::new(()),
+            work_permit: Some(work_permit),
         }
     }
 
@@ -42,31 +57,7 @@ impl MaintainSpaceMembershipUseCase {
         let _guard = self.execution_lock.lock().await;
         waiting.finish(LocalWorkOutcome::Ok);
         let mut report = MembershipMaintenanceReport::default();
-        if matches!(trigger, MembershipMaintenanceTrigger::PeerContact(_)) {
-            if !record(
-                &mut report,
-                LocalWorkStep::MaintenanceSynchronization,
-                self.deps.synchronization.synchronize_membership(&trigger),
-            )
-            .await
-            {
-                return report;
-            }
-            record(
-                &mut report,
-                LocalWorkStep::MaintenanceCleanup,
-                self.deps.cleanup.reconcile_membership_projection(),
-            )
-            .await;
-            return report;
-        }
-        let full_round = matches!(
-            trigger,
-            MembershipMaintenanceTrigger::Startup
-                | MembershipMaintenanceTrigger::Resume
-                | MembershipMaintenanceTrigger::StateChanged
-        );
-        let peer_online = matches!(trigger, MembershipMaintenanceTrigger::PeerOnline(_));
+        let full_round = !matches!(trigger, MembershipMaintenanceTrigger::Periodic);
         let periodic = matches!(trigger, MembershipMaintenanceTrigger::Periodic);
 
         let observation = LocalWorkObservation::begin(LocalWorkStep::MaintenanceAdmissions);
@@ -76,28 +67,44 @@ impl MaintainSpaceMembershipUseCase {
             .recover_space_admissions(&trigger)
             .await;
         observation.finish(diagnostic_outcome(admissions.step()));
-        if !record_outcome(&mut report, admissions.step()) || !admissions.should_continue() {
-            return report;
-        }
-        if !peer_online
-            && !record(
-                &mut report,
-                LocalWorkStep::MaintenanceRestricted,
-                self.deps
-                    .restricted_delivery
-                    .deliver_restricted_membership(),
-            )
-            .await
+        if !record_outcome(&mut report, admissions.step())
+            || !admissions.allows_ordinary_membership()
         {
             return report;
         }
-        if !peer_online
-            && !record(
-                &mut report,
-                LocalWorkStep::MaintenanceEffects,
-                self.deps.effects.recover_membership_effects(),
-            )
-            .await
+        let _work_permit = if let Some(work_permit) = self.work_permit.as_ref() {
+            match work_permit.acquire_space_work_permit().await {
+                Ok(permit) if permit.mode() == SpaceWorkMode::Active => Some(permit),
+                Ok(_) => return report,
+                Err(QuerySpaceWorkModeError::Unavailable) => {
+                    report.deferred_count += 1;
+                    return report;
+                }
+                Err(QuerySpaceWorkModeError::NeedsAttention) => {
+                    report.corrupt_count += 1;
+                    return report;
+                }
+            }
+        } else {
+            None
+        };
+        if !record(
+            &mut report,
+            LocalWorkStep::MaintenanceRestricted,
+            self.deps
+                .restricted_delivery
+                .deliver_restricted_membership(),
+        )
+        .await
+        {
+            return report;
+        }
+        if !record(
+            &mut report,
+            LocalWorkStep::MaintenanceEffects,
+            self.deps.effects.recover_membership_effects(),
+        )
+        .await
         {
             return report;
         }
@@ -121,18 +128,6 @@ impl MaintainSpaceMembershipUseCase {
         {
             return report;
         }
-        if peer_online
-            && !record(
-                &mut report,
-                LocalWorkStep::MaintenanceRestricted,
-                self.deps
-                    .restricted_delivery
-                    .deliver_restricted_membership(),
-            )
-            .await
-        {
-            return report;
-        }
         let should_synchronize = if periodic {
             let observation =
                 LocalWorkObservation::begin(LocalWorkStep::MaintenanceSynchronizationCheck);
@@ -153,7 +148,7 @@ impl MaintainSpaceMembershipUseCase {
                 }
             }
         } else {
-            full_round || peer_online
+            full_round
         };
         if should_synchronize {
             if !record(

@@ -139,7 +139,8 @@ impl MembershipHistoryExchangePort for ObservedMembershipHistoryExchange {
 
 fn history_exchange_completion(error: &MembershipHistoryExchangeError) -> MembershipCompletionKind {
     match error {
-        MembershipHistoryExchangeError::Offline => {
+        MembershipHistoryExchangeError::Offline
+        | MembershipHistoryExchangeError::PairingInProgress => {
             MembershipCompletionKind::Failed(DiagnosticErrorType::Unavailable)
         }
         MembershipHistoryExchangeError::Rejected => MembershipCompletionKind::Rejected,

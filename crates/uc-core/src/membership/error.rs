@@ -108,6 +108,8 @@ pub enum GroupUpdateDispatchError {
 pub enum MembershipHistoryExchangeError {
     #[error("membership history recipient is offline")]
     Offline,
+    #[error("space pairing is still in progress")]
+    PairingInProgress,
     #[error("membership history exchange was rejected")]
     Rejected,
     #[error("membership history exchange transport failed")]

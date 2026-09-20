@@ -111,6 +111,7 @@ impl SynchronizeMembershipHistoryUseCase {
                 let peers = self.select_due_peers(peers).await?;
                 self.execute_peers(peers, Some(TOTAL_SYNC_BUDGET)).await
             }
+            #[cfg(test)]
             MembershipSyncTarget::AuthenticatedPeer(peer) => {
                 if !self.current_sync_peers().await?.contains(&peer) {
                     return Err(SynchronizeMembershipHistoryError::CurrentScopeUnavailable);
@@ -731,9 +732,9 @@ fn retry_is_due(record: &PeerReconciliationRecord, now_ms: i64) -> bool {
 
 fn map_exchange_error(error: MembershipHistoryExchangeError) -> PeerSyncError {
     match error {
-        MembershipHistoryExchangeError::Offline | MembershipHistoryExchangeError::Transport => {
-            PeerSyncError::Deferred
-        }
+        MembershipHistoryExchangeError::Offline
+        | MembershipHistoryExchangeError::PairingInProgress
+        | MembershipHistoryExchangeError::Transport => PeerSyncError::Deferred,
         MembershipHistoryExchangeError::Rejected => PeerSyncError::Stable,
     }
 }
@@ -813,23 +814,12 @@ impl SynchronizeMembershipMaintenancePort for SynchronizeMembershipHistoryUseCas
         &self,
         trigger: &MembershipMaintenanceTrigger,
     ) -> MembershipMaintenanceStepOutcome {
-        let target = match trigger {
-            MembershipMaintenanceTrigger::PeerContact(peer)
-            | MembershipMaintenanceTrigger::PeerOnline(peer) => {
-                MembershipSyncTarget::AuthenticatedPeer(peer.clone())
-            }
-            MembershipMaintenanceTrigger::Startup
-            | MembershipMaintenanceTrigger::Resume
-            | MembershipMaintenanceTrigger::Periodic
-            | MembershipMaintenanceTrigger::StateChanged => MembershipSyncTarget::AllCurrentPeers,
-        };
+        let target = MembershipSyncTarget::AllCurrentPeers;
         let observation_trigger = match trigger {
             MembershipMaintenanceTrigger::Startup => MembershipRecoveryTrigger::Startup,
             MembershipMaintenanceTrigger::Resume => MembershipRecoveryTrigger::Resume,
             MembershipMaintenanceTrigger::Periodic => MembershipRecoveryTrigger::Retry,
             MembershipMaintenanceTrigger::StateChanged => MembershipRecoveryTrigger::StateChanged,
-            MembershipMaintenanceTrigger::PeerContact(_) => MembershipRecoveryTrigger::PeerContact,
-            MembershipMaintenanceTrigger::PeerOnline(_) => MembershipRecoveryTrigger::PeerOnline,
         };
         match scope_membership_recovery_trigger(observation_trigger, self.execute(target)).await {
             Ok(report) if report.stable_failure_count > 0 => {

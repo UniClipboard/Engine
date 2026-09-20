@@ -17,9 +17,10 @@ use super::use_case::{remember_completed_inbound_transfer, MAX_COMPLETED_INBOUND
 use super::*;
 mod handoff_reproduction;
 use crate::space::membership::{
-    CommitMembershipLedgerPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
-    MembershipEffectKind, MembershipEffectPhase, MembershipLedger, MembershipLedgerError,
-    MembershipLedgerMutation, PeerReconciliationRecord, WakeSpaceMembershipMaintenancePort,
+    AcquireSpaceWorkPermitPort, CommitMembershipLedgerPort, LoadMembershipLedgerPort,
+    LoadedMembershipLedger, MembershipEffectKind, MembershipEffectPhase, MembershipLedger,
+    MembershipLedgerError, MembershipLedgerMutation, PeerReconciliationRecord,
+    QuerySpaceWorkModeError, SpaceWorkMode, SpaceWorkPermit, WakeSpaceMembershipMaintenancePort,
 };
 
 struct MemoryLedgerRepository {
@@ -29,6 +30,50 @@ struct MemoryLedgerRepository {
 }
 
 struct WakeCounter(AtomicUsize);
+
+pub(super) struct FixedSpaceWorkMode(SpaceWorkMode);
+
+impl FixedSpaceWorkMode {
+    pub(super) fn active() -> Self {
+        Self(SpaceWorkMode::Active)
+    }
+}
+
+#[async_trait]
+impl AcquireSpaceWorkPermitPort for FixedSpaceWorkMode {
+    async fn acquire_space_work_permit(&self) -> Result<SpaceWorkPermit, QuerySpaceWorkModeError> {
+        Ok(SpaceWorkPermit::unlocked(self.0))
+    }
+}
+
+struct CountingLedgerRepository {
+    loaded: Mutex<LoadedMembershipLedger>,
+    loads: AtomicUsize,
+    commits: AtomicUsize,
+}
+
+#[async_trait]
+impl LoadMembershipLedgerPort for CountingLedgerRepository {
+    async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
+        self.loads.fetch_add(1, Ordering::SeqCst);
+        Ok(self.loaded.lock().unwrap().clone())
+    }
+
+    fn current_revision(&self) -> Option<u64> {
+        self.loaded.lock().ok().map(|loaded| loaded.revision)
+    }
+}
+
+#[async_trait]
+impl CommitMembershipLedgerPort for CountingLedgerRepository {
+    async fn compare_and_commit(
+        &self,
+        _mutation: MembershipLedgerMutation,
+    ) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
+        self.commits.fetch_add(1, Ordering::SeqCst);
+        Err(MembershipLedgerError::Unavailable)
+    }
+}
 
 impl WakeSpaceMembershipMaintenancePort for WakeCounter {
     fn wake(&self) {
@@ -64,6 +109,39 @@ fn completed_inbound_transfer_retention_is_bounded_and_keeps_the_latest_ack() {
     assert!(record
         .completed_inbound_transfers
         .contains_key(&(source, latest_transfer_id)));
+}
+
+#[tokio::test]
+async fn pairing_rejects_inbound_history_as_retryable_before_ledger_access() {
+    let (loaded, peer_device_id, pages) = two_page_extension();
+    let repository = Arc::new(CountingLedgerRepository {
+        loaded: Mutex::new(loaded),
+        loads: AtomicUsize::new(0),
+        commits: AtomicUsize::new(0),
+    });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    ));
+    let handler = HandleMembershipHistoryMessageUseCase::new_with_work_mode(
+        ledger,
+        Arc::new(FixedSpaceWorkMode(SpaceWorkMode::Pairing)),
+    );
+
+    let result = uc_core::membership::MembershipHistoryExchangeEndpointPort::handle_membership_history_exchange(
+        &handler,
+        &peer_device_id,
+        pages[0].clone(),
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(uc_core::membership::MembershipHistoryExchangeError::PairingInProgress)
+    );
+    assert_eq!(repository.loads.load(Ordering::SeqCst), 0);
+    assert_eq!(repository.commits.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -731,7 +809,11 @@ async fn final_page_commit_failure_preserves_staged_state_and_does_not_wake_main
         Arc::new(AcceptingVerifier),
     ));
     let wake = Arc::new(WakeCounter(AtomicUsize::new(0)));
-    let handler = HandleMembershipHistoryMessageUseCase::new_with_wake(ledger, wake.clone());
+    let handler = HandleMembershipHistoryMessageUseCase::new_with_wake(
+        ledger,
+        wake.clone(),
+        Arc::new(FixedSpaceWorkMode::active()),
+    );
     let source = AuthenticatedMember::new(peer_device_id.clone());
 
     handler.execute(&source, pages[0].clone()).await.unwrap();

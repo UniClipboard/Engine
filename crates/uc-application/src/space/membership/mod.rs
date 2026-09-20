@@ -44,16 +44,18 @@ pub use ledger::{
 };
 pub(crate) use maintenance::PreparedSpaceMembershipMaintenanceRuntime;
 pub use maintenance::{
-    AdmissionMaintenanceOutcome, DeliverPendingGroupUpdatesPort, DeliverRestrictedMembershipPort,
-    KnownPeerContact, MembershipNetworkActivityPort, ReconcileMembershipProjectionPort,
-    RecoverMembershipConflictsPort, RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
+    AcquireSpaceWorkPermitPort, AdmissionMaintenanceOutcome, DeliverPendingGroupUpdatesPort,
+    DeliverRestrictedMembershipPort, KnownPeerContact, MembershipNetworkActivityPort,
+    QuerySpaceWorkModeError, ReconcileMembershipProjectionPort, RecoverMembershipConflictsPort,
+    RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort, SpaceWorkMode, SpaceWorkPermit,
 };
 pub use query_device_trust::{
     AdmissionDisplayStatus, DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership,
     DeviceTrustObservation, DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState,
-    LoadCurrentJoinStatusPort, LoadDeviceTrustObservationsPort, PairingConfirmationObservation,
-    PairingConfirmationStatus, PairingConfirmationTarget, PendingDeviceTrustChange,
-    QueryDeviceTrustError,
+    LoadCurrentJoinStatusPort, LoadDeviceTrustObservationsPort, MembershipMaintenanceHealth,
+    MembershipMaintenanceHealthPhase, MembershipMaintenanceProblem, MembershipMaintenanceRecovery,
+    PairingConfirmationObservation, PairingConfirmationStatus, PairingConfirmationTarget,
+    PendingDeviceTrustChange, QueryDeviceTrustError,
 };
 pub(super) use query_diagnostics::QueryMembershipDiagnosticsUseCase;
 pub use query_diagnostics::{MembershipDiagnosticsView, QueryMembershipDiagnosticsError};

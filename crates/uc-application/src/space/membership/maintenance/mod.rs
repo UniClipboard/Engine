@@ -5,10 +5,11 @@ mod use_case;
 
 pub use model::{
     AdmissionMaintenanceOutcome, KnownPeerContact, MembershipMaintenanceReport,
-    MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger,
+    MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, QuerySpaceWorkModeError,
+    SpaceWorkMode, SpaceWorkPermit,
 };
 pub use ports::{
-    DeliverPendingGroupUpdatesPort, DeliverRestrictedMembershipPort,
+    AcquireSpaceWorkPermitPort, DeliverPendingGroupUpdatesPort, DeliverRestrictedMembershipPort,
     ReconcileMembershipProjectionPort, RecoverMembershipConflictsPort,
     RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort, SynchronizeMembershipMaintenancePort,
     WakeSpaceMembershipMaintenancePort,

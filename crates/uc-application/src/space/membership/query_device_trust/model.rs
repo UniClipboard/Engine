@@ -57,6 +57,63 @@ pub struct AdmissionDisplayStatus {
     pub pairing_confirmations: Vec<PairingConfirmationObservation>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MembershipMaintenanceHealthPhase {
+    Healthy,
+    Retrying,
+    NeedsAttention,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MembershipMaintenanceProblem {
+    MembershipHistoryRejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MembershipMaintenanceRecovery {
+    ResolveDeviceTrust,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MembershipMaintenanceHealth {
+    pub phase: MembershipMaintenanceHealthPhase,
+    pub reason: Option<MembershipMaintenanceProblem>,
+    pub recovery: Option<MembershipMaintenanceRecovery>,
+    pub next_retry_at_ms: Option<i64>,
+}
+
+impl MembershipMaintenanceHealth {
+    pub const fn healthy() -> Self {
+        Self {
+            phase: MembershipMaintenanceHealthPhase::Healthy,
+            reason: None,
+            recovery: None,
+            next_retry_at_ms: None,
+        }
+    }
+
+    pub const fn retrying(next_retry_at_ms: i64) -> Self {
+        Self {
+            phase: MembershipMaintenanceHealthPhase::Retrying,
+            reason: None,
+            recovery: None,
+            next_retry_at_ms: Some(next_retry_at_ms),
+        }
+    }
+
+    pub const fn needs_attention(
+        reason: MembershipMaintenanceProblem,
+        recovery: MembershipMaintenanceRecovery,
+    ) -> Self {
+        Self {
+            phase: MembershipMaintenanceHealthPhase::NeedsAttention,
+            reason: Some(reason),
+            recovery: Some(recovery),
+            next_retry_at_ms: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceTrustObservation {
     pub device_id: DeviceId,
@@ -106,6 +163,7 @@ pub struct DeviceTrustStatus {
     pub current_change: Option<PendingDeviceTrustChange>,
     pub current_join: Option<CurrentJoinStatus>,
     pub pending_inbound_member: Option<PendingInboundMember>,
+    pub maintenance_health: MembershipMaintenanceHealth,
     pub devices: Vec<DeviceTrustDevice>,
 }
 
@@ -118,6 +176,7 @@ impl DeviceTrustStatus {
             current_change: None,
             current_join: None,
             pending_inbound_member: None,
+            maintenance_health: MembershipMaintenanceHealth::healthy(),
             devices: Vec::new(),
         }
     }

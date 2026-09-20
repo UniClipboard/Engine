@@ -1,17 +1,20 @@
 use std::sync::Arc;
 
+use uc_core::ids::DeviceId;
 use uc_core::membership::{
     plan_membership_history_reconciliation, MembershipConflictEvidenceRequestV3,
-    MembershipDecisionV2, MembershipEventV2, MembershipHistoryAckV3, MembershipHistoryMessage,
-    MembershipHistoryReconciliationPlan, MembershipHistoryRelationship,
+    MembershipDecisionV2, MembershipEventV2, MembershipHistoryAckV3,
+    MembershipHistoryExchangeEndpointPort, MembershipHistoryExchangeError,
+    MembershipHistoryMessage, MembershipHistoryReconciliationPlan, MembershipHistoryRelationship,
     MembershipHistorySuffixRequestV3, MembershipOperationV2, VersionedMembershipHistory,
     MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
 };
 
 use crate::space::membership::{
-    InboundMembershipTransfer as LedgerInboundTransfer, LoadedMembershipLedger,
-    MembershipEffectKind, MembershipEffectPhase, MembershipLedger, MembershipLedgerError,
-    PeerReconciliationRecord, PendingMembershipEffect, ReconcileMembershipEvidenceUseCase,
+    AcquireSpaceWorkPermitPort, InboundMembershipTransfer as LedgerInboundTransfer,
+    LoadedMembershipLedger, MembershipEffectKind, MembershipEffectPhase, MembershipLedger,
+    MembershipLedgerError, PeerReconciliationRecord, PendingMembershipEffect,
+    QuerySpaceWorkModeError, ReconcileMembershipEvidenceUseCase, SpaceWorkMode,
     WakeSpaceMembershipMaintenancePort,
 };
 
@@ -24,28 +27,40 @@ pub(crate) struct HandleMembershipHistoryMessageUseCase {
     evidence: ReconcileMembershipEvidenceUseCase,
     execution_lock: tokio::sync::Mutex<()>,
     maintenance_wake: Option<Arc<dyn WakeSpaceMembershipMaintenancePort>>,
+    work_mode: Arc<dyn AcquireSpaceWorkPermitPort>,
 }
 
 impl HandleMembershipHistoryMessageUseCase {
     #[cfg(test)]
     pub(crate) fn new(ledger: Arc<MembershipLedger>) -> Self {
+        Self::new_with_work_mode(ledger, Arc::new(super::tests::FixedSpaceWorkMode::active()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_work_mode(
+        ledger: Arc<MembershipLedger>,
+        work_mode: Arc<dyn AcquireSpaceWorkPermitPort>,
+    ) -> Self {
         Self {
             evidence: ReconcileMembershipEvidenceUseCase::new(ledger.clone()),
             ledger,
             execution_lock: tokio::sync::Mutex::new(()),
             maintenance_wake: None,
+            work_mode,
         }
     }
 
     pub(crate) fn new_with_wake(
         ledger: Arc<MembershipLedger>,
         maintenance_wake: Arc<dyn WakeSpaceMembershipMaintenancePort>,
+        work_mode: Arc<dyn AcquireSpaceWorkPermitPort>,
     ) -> Self {
         Self {
             evidence: ReconcileMembershipEvidenceUseCase::new(ledger.clone()),
             ledger,
             execution_lock: tokio::sync::Mutex::new(()),
             maintenance_wake: Some(maintenance_wake),
+            work_mode,
         }
     }
 
@@ -63,6 +78,27 @@ impl HandleMembershipHistoryMessageUseCase {
         source: &AuthenticatedMember,
         message: MembershipHistoryMessage,
     ) -> Result<MembershipHistoryMessage, HandleMembershipHistoryMessageError> {
+        let work_permit = self
+            .work_mode
+            .acquire_space_work_permit()
+            .await
+            .map_err(|error| match error {
+                QuerySpaceWorkModeError::Unavailable => {
+                    HandleMembershipHistoryMessageError::Unavailable
+                }
+                QuerySpaceWorkModeError::NeedsAttention => {
+                    HandleMembershipHistoryMessageError::RecoveryRequired
+                }
+            })?;
+        match work_permit.mode() {
+            SpaceWorkMode::Active => {}
+            SpaceWorkMode::Pairing => {
+                return Err(HandleMembershipHistoryMessageError::PairingInProgress)
+            }
+            SpaceWorkMode::NeedsAttention => {
+                return Err(HandleMembershipHistoryMessageError::RecoveryRequired)
+            }
+        }
         let page = match message {
             MembershipHistoryMessage::SummaryV3(summary) => {
                 let snapshot = self
@@ -714,16 +750,20 @@ fn map_ledger_error(error: MembershipLedgerError) -> HandleMembershipHistoryMess
 }
 
 #[async_trait::async_trait]
-impl uc_core::membership::MembershipHistoryExchangeEndpointPort
-    for HandleMembershipHistoryMessageUseCase
-{
+impl MembershipHistoryExchangeEndpointPort for HandleMembershipHistoryMessageUseCase {
     async fn handle_membership_history_exchange(
         &self,
-        source_device_id: &uc_core::ids::DeviceId,
+        source_device_id: &DeviceId,
         message: MembershipHistoryMessage,
-    ) -> Result<MembershipHistoryMessage, uc_core::membership::MembershipHistoryExchangeError> {
-        self.execute(&AuthenticatedMember::new(source_device_id.clone()), message)
-            .await
-            .map_err(|_| uc_core::membership::MembershipHistoryExchangeError::Rejected)
+    ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
+        let result = self
+            .execute(&AuthenticatedMember::new(source_device_id.clone()), message)
+            .await;
+        result.map_err(|error| match error {
+            HandleMembershipHistoryMessageError::PairingInProgress => {
+                MembershipHistoryExchangeError::PairingInProgress
+            }
+            _ => MembershipHistoryExchangeError::Rejected,
+        })
     }
 }

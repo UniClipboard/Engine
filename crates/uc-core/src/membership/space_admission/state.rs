@@ -26,8 +26,8 @@ use super::attempt::{
 };
 use super::exchange::{
     AdmissionErrorCategory, AdmissionExchangeBlockReason, AdmissionInboundDecision,
-    AdmissionInboundExpectation, AdmissionMessageEvidence, AdmissionRetryState,
-    PendingAdmissionExchange, SavedAdmissionReply,
+    AdmissionInboundExpectation, AdmissionMessageEvidence, AdmissionPendingExchangeError,
+    AdmissionRetryState, PendingAdmissionExchange, SavedAdmissionReply,
 };
 use super::id::{AdmissionMessageId, JoinId, SpaceAdmissionId};
 use super::message::{

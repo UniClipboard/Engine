@@ -1,8 +1,10 @@
+#[cfg(test)]
 use uc_core::ids::DeviceId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MembershipSyncTarget {
     AllCurrentPeers,
+    #[cfg(test)]
     AuthenticatedPeer(DeviceId),
 }
 

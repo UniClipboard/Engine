@@ -308,14 +308,6 @@ impl SpaceApplication {
             recover_membership_effects.clone(),
             deferred_maintenance_wake.clone(),
         ));
-        let membership_history_endpoint = Arc::new(MembershipHistoryAntiEntropy::new(
-            Arc::clone(&ledger),
-            Arc::clone(&current_scope),
-            membership_history_transport,
-            verified_peer_address_refresh,
-            Arc::clone(&clock),
-            deferred_maintenance_wake.clone(),
-        ));
         let joiner_admission = JoinerAdmissionService::new(
             settings,
             Arc::clone(&clock),
@@ -356,6 +348,15 @@ impl SpaceApplication {
             sponsor_admission,
             admission_recovery,
         ));
+        let membership_history_endpoint = Arc::new(MembershipHistoryAntiEntropy::new(
+            Arc::clone(&ledger),
+            Arc::clone(&current_scope),
+            membership_history_transport,
+            verified_peer_address_refresh,
+            Arc::clone(&clock),
+            deferred_maintenance_wake.clone(),
+            space_admission.clone(),
+        ));
         let deliver_restricted_membership = Arc::new(DeliverRestrictedMembershipUseCase::new(
             Arc::clone(&ledger),
             restricted_membership_delivery,
@@ -380,7 +381,7 @@ impl SpaceApplication {
             branch_recovery_signatures,
             Arc::clone(&clock),
         ));
-        let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
+        let maintain = Arc::new(MaintainSpaceMembershipUseCase::new_coordinated(
             MaintainSpaceMembershipDeps {
                 admissions: space_admission.clone(),
                 effects: Arc::clone(&recover_membership_effects)
@@ -396,6 +397,7 @@ impl SpaceApplication {
                     ),
                 ),
             },
+            space_admission.clone(),
         ));
         let prepared_runtime = SpaceMembershipMaintenanceRuntime::prepare(
             maintain,

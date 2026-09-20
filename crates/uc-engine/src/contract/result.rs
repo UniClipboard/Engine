@@ -1221,6 +1221,38 @@ pub struct PendingInboundMemberSummary {
     pub display_name: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MembershipMaintenanceHealthPhaseSummary {
+    #[default]
+    Healthy,
+    Retrying,
+    NeedsAttention,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MembershipMaintenanceProblemSummary {
+    MembershipHistoryRejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MembershipMaintenanceRecoverySummary {
+    ResolveDeviceTrust,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MembershipMaintenanceHealthSummary {
+    pub phase: MembershipMaintenanceHealthPhaseSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<MembershipMaintenanceProblemSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<MembershipMaintenanceRecoverySummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_retry_at_ms: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceTrustSnapshotSummary {
     pub revision: u64,
@@ -1229,6 +1261,8 @@ pub struct DeviceTrustSnapshotSummary {
     pub current_change: Option<DeviceTrustChangeSummary>,
     pub current_join: Option<JoinSpaceStatusSummary>,
     pub pending_inbound_member: Option<PendingInboundMemberSummary>,
+    #[serde(default)]
+    pub maintenance_health: MembershipMaintenanceHealthSummary,
     pub devices: Vec<DeviceTrustRelationshipSummary>,
     pub recovery: DeviceTrustRecoverySummary,
     pub allowed_actions: Vec<DeviceTrustActionSummary>,
@@ -1245,6 +1279,7 @@ impl DeviceTrustSnapshotSummary {
             current_change: None,
             current_join: None,
             pending_inbound_member: None,
+            maintenance_health: MembershipMaintenanceHealthSummary::default(),
             devices: Vec::new(),
             recovery: DeviceTrustRecoverySummary::NotAvailableInThisVersion,
             allowed_actions: Vec::new(),

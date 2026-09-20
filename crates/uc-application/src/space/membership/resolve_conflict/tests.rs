@@ -90,6 +90,7 @@ impl QueryMembershipConflictStatusPort for FixedQuery {
             current_change: None,
             current_join: None,
             pending_inbound_member: None,
+            maintenance_health: crate::space::membership::MembershipMaintenanceHealth::healthy(),
             devices: Vec::new(),
         })
     }

@@ -2,6 +2,7 @@ use async_trait::async_trait;
 
 use super::{
     AdmissionMaintenanceOutcome, MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger,
+    QuerySpaceWorkModeError, SpaceWorkPermit,
 };
 
 pub trait WakeSpaceMembershipMaintenancePort: Send + Sync {
@@ -27,6 +28,11 @@ pub trait RecoverSpaceAdmissionsPort: Send + Sync {
         &self,
         trigger: &MembershipMaintenanceTrigger,
     ) -> AdmissionMaintenanceOutcome;
+}
+
+#[async_trait]
+pub trait AcquireSpaceWorkPermitPort: Send + Sync {
+    async fn acquire_space_work_permit(&self) -> Result<SpaceWorkPermit, QuerySpaceWorkModeError>;
 }
 
 #[async_trait]

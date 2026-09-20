@@ -80,6 +80,8 @@ pub enum SpaceAdmissionAggregateError {
     InvalidInitialExchange,
     #[error("the admission record version cannot be incremented")]
     RecordVersionOverflow,
+    #[error("the admission retry state cannot be advanced")]
+    InvalidRetryState,
     #[error("the admission transition is not valid from the current state")]
     InvalidTransition,
     #[error("the admission attempt timeline is invalid")]
@@ -140,7 +142,7 @@ impl SpaceAdmissionAggregateError {
             Self::UnsafeCancellation | Self::TooLateCommitted => {
                 AdmissionErrorCategory::UnsafeCancellation
             }
-            Self::RecordVersionOverflow | Self::CounterOverflow => {
+            Self::RecordVersionOverflow | Self::InvalidRetryState | Self::CounterOverflow => {
                 AdmissionErrorCategory::RecoveryRequired
             }
             Self::InvalidInitialExchange

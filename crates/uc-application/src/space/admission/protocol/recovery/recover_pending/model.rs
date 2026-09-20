@@ -1,5 +1,6 @@
-use uc_core::ids::DeviceId;
 use uc_core::membership::{JoinerAdmission, SpaceAdmissionEnvelopeV1, SponsorAdmission};
+
+use crate::space::membership::SpaceWorkMode;
 
 /// 是什么事情唤醒了恢复流程
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -12,8 +13,6 @@ pub enum AdmissionRecoveryTrigger {
     Periodic,
     /// 刚保存了新的加入状态， 需要立即继续
     StateChanged,
-    /// 观察到设备重新可达
-    PeerOnline(DeviceId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -30,15 +29,8 @@ pub struct AdmissionRecoveryReport {
     pub peer_upgrade_required_count: usize,
     /// 状态损坏或违反规则，必须进入恢复处理的数量
     pub recovery_required_count: usize,
-    /// 本次准入推进结束后，成员维护是否可以继续执行普通同步
-    pub(crate) disposition: AdmissionRecoveryDisposition,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum AdmissionRecoveryDisposition {
-    #[default]
-    ContinueMaintenance,
-    YieldMaintenance,
+    /// 本轮从同一份持久准入记录派生的 Space 工作状态
+    pub(crate) work_mode: SpaceWorkMode,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -112,6 +104,10 @@ impl LoadedPendingAdmission {
     pub fn into_parts(self) -> (JoinerAdmission, AdmissionRecoveryCommitToken) {
         (self.aggregate, self.commit_token)
     }
+
+    pub(crate) fn aggregate(&self) -> &JoinerAdmission {
+        &self.aggregate
+    }
 }
 
 impl LoadedSponsorDeadline {
@@ -179,6 +175,10 @@ impl LoadedAdmissionRecovery {
         self.pending_admissions.is_empty()
             && self.sponsor_deadlines.is_empty()
             && self.sponsor_abandonments.is_empty()
+    }
+
+    pub fn pairing_in_progress(&self) -> bool {
+        !self.pending_admissions.is_empty() || self.sponsor_confirmation_pending
     }
 
     pub fn len(&self) -> usize {

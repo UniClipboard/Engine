@@ -43,13 +43,14 @@ pub use crate::space::{
     DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, JoinSpaceError,
     JoinSpaceInput, JoinSpaceResult, JoinSpaceTerminationReason, JoinedSpace,
     LockSpaceSessionError, MembershipCommitReceipt, MembershipConflictStatus,
-    MembershipDiagnosticsView, MembershipReadiness, NetworkRecoveryEvent, NetworkRecoveryFacade,
-    NetworkRecoveryPhase, NetworkRecoveryRequestError, NetworkRecoveryStatus,
-    PairingConfirmationStatus, PendingDeviceTrustChange, PendingInboundMember,
-    QueryDeviceTrustError, QueryMembershipDiagnosticsError, QueryMembershipReadinessError,
-    QuerySpaceAccessStateError, RebuildNetworkSessionError, RebuildNetworkSessionPort,
-    RecoverSpaceSessionError, RecoverSpaceSessionResult, RemoveSpaceMemberError,
-    RemoveSpaceMemberResult, SpaceAccessState,
+    MembershipDiagnosticsView, MembershipMaintenanceHealth, MembershipMaintenanceHealthPhase,
+    MembershipMaintenanceProblem, MembershipMaintenanceRecovery, MembershipReadiness,
+    NetworkRecoveryEvent, NetworkRecoveryFacade, NetworkRecoveryPhase, NetworkRecoveryRequestError,
+    NetworkRecoveryStatus, PairingConfirmationStatus, PendingDeviceTrustChange,
+    PendingInboundMember, QueryDeviceTrustError, QueryMembershipDiagnosticsError,
+    QueryMembershipReadinessError, QuerySpaceAccessStateError, RebuildNetworkSessionError,
+    RebuildNetworkSessionPort, RecoverSpaceSessionError, RecoverSpaceSessionResult,
+    RemoveSpaceMemberError, RemoveSpaceMemberResult, SpaceAccessState,
 };
 
 pub use crate::clipboard::active::{ActiveClipboardFacade, ActiveClipboardReconcileOutcome};

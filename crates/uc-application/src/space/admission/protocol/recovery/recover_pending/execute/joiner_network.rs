@@ -1,4 +1,4 @@
-use super::super::model::{AdmissionRecoveryDisposition, AdmissionRecoveryReport};
+use super::super::model::AdmissionRecoveryReport;
 use super::super::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryTrigger, AuthenticatedAdmissionExchangePort,
     AuthenticatedAdmissionReply, LoadedPendingAdmission, SpaceAdmissionTransportError,
@@ -40,18 +40,15 @@ impl AdmissionRecoveryService {
                     }
                     JoinerReplyHandlingOutcome::Continue(_) => {
                         joiner.maintenance_wake.wake();
-                        report.disposition = AdmissionRecoveryDisposition::YieldMaintenance;
                         break 'pending_admissions;
                     }
                     JoinerReplyHandlingOutcome::AwaitingSpaceTransition => {
-                        report.disposition = AdmissionRecoveryDisposition::YieldMaintenance;
                         break 'pending_admissions;
                     }
                     JoinerReplyHandlingOutcome::PairingFinished => {
                         // 最终确认已经持久化，先结束当前维护轮次，让调用方立即观察到配对完成。
                         // 普通成员维护由下一轮继续，不能再次插入准入协议内部。
                         joiner.maintenance_wake.wake();
-                        report.disposition = AdmissionRecoveryDisposition::YieldMaintenance;
                         break 'pending_admissions;
                     }
                     JoinerReplyHandlingOutcome::NoImmediateWork => break,
@@ -310,7 +307,8 @@ impl AdmissionRecoveryService {
                 )
             }
             Err(error) => {
-                report.deferred_count += 1;
+                self.save_deferred_retry(report, aggregate, commit_token)
+                    .await;
                 (
                     JoinerReplyHandlingOutcome::NoImmediateWork,
                     Some(RecoveryDecision::Deferred(Some(

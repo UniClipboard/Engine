@@ -8,13 +8,15 @@ use uc_core::membership::{
 use uc_core::ports::ReachabilityState;
 
 use crate::space::membership::{
-    MembershipEffectPhase, MembershipLedger, SpaceMemberPauseReason, VerifiedMembershipLedger,
+    LoadedMembershipLedger, MembershipEffectPhase, MembershipLedger, PeerHistorySyncOutcome,
+    SpaceMemberPauseReason, VerifiedMembershipLedger,
 };
 
 use super::{
     DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
     DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, LoadCurrentJoinStatusPort,
-    LoadDeviceTrustObservationsPort, PairingConfirmationTarget, PendingDeviceTrustChange,
+    LoadDeviceTrustObservationsPort, MembershipMaintenanceHealth, MembershipMaintenanceProblem,
+    MembershipMaintenanceRecovery, PairingConfirmationTarget, PendingDeviceTrustChange,
     QueryDeviceTrustError,
 };
 
@@ -247,6 +249,8 @@ impl QueryDeviceTrustUseCase {
 
         let current_change =
             pending_change(history, local_member_instance, &devices, snapshot.record())?;
+        let maintenance_health =
+            membership_maintenance_health(history, local_member_instance, snapshot.record())?;
         Ok(DeviceTrustStatus {
             revision: snapshot.record().revision,
             local_device_id: Some(local_device_id),
@@ -262,9 +266,53 @@ impl QueryDeviceTrustUseCase {
             current_change,
             current_join,
             pending_inbound_member,
+            maintenance_health,
             devices,
         })
     }
+}
+
+fn membership_maintenance_health(
+    history: &VersionedMembershipHistory,
+    local_member: MemberInstanceId,
+    record: &LoadedMembershipLedger,
+) -> Result<MembershipMaintenanceHealth, QueryDeviceTrustError> {
+    let active_peer_device_ids = history
+        .active_members()
+        .into_iter()
+        .filter(|member| *member != local_member)
+        .map(|member| {
+            history
+                .admission_facts_for(member)
+                .map(|facts| facts.device_id.clone())
+                .ok_or(QueryDeviceTrustError::RecoveryRequired)
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let active_peer_records = record
+        .peer_reconciliation
+        .values()
+        .filter(|peer| active_peer_device_ids.contains(&peer.peer_device_id));
+    let mut next_retry_at_ms = None;
+    for peer in active_peer_records {
+        match peer.sync_state.last_attempt_outcome {
+            PeerHistorySyncOutcome::StableRejected => {
+                return Ok(MembershipMaintenanceHealth::needs_attention(
+                    MembershipMaintenanceProblem::MembershipHistoryRejected,
+                    MembershipMaintenanceRecovery::ResolveDeviceTrust,
+                ));
+            }
+            PeerHistorySyncOutcome::Deferred => {
+                let candidate = peer.sync_state.next_attempt_at_ms;
+                next_retry_at_ms =
+                    Some(next_retry_at_ms.map_or(candidate, |current: i64| current.min(candidate)));
+            }
+            PeerHistorySyncOutcome::Never | PeerHistorySyncOutcome::Acked => {}
+        }
+    }
+    Ok(next_retry_at_ms.map_or_else(
+        MembershipMaintenanceHealth::healthy,
+        MembershipMaintenanceHealth::retrying,
+    ))
 }
 
 fn pending_change(

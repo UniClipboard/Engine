@@ -416,6 +416,15 @@ impl JoinerAdmission {
         self.record.pending_exchange()
     }
 
+    pub fn defer_pending_exchange(
+        self,
+        next_attempt_at_ms: i64,
+    ) -> Result<JoinerAdmissionTransition, SpaceAdmissionAggregateError> {
+        self.record
+            .defer_pending_exchange(next_attempt_at_ms)
+            .map(JoinerAdmissionTransition::from_transition)
+    }
+
     pub fn peer_upgrade_required(&self) -> bool {
         self.record.peer_upgrade_required()
     }

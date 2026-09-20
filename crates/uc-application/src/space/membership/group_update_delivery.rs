@@ -41,15 +41,11 @@ impl DeliverPendingGroupUpdatesUseCase {
 impl DeliverPendingGroupUpdatesPort for DeliverPendingGroupUpdatesUseCase {
     async fn deliver_pending_group_updates(
         &self,
-        trigger: &MembershipMaintenanceTrigger,
+        _trigger: &MembershipMaintenanceTrigger,
     ) -> MembershipMaintenanceStepOutcome {
-        let online_peer = match trigger {
-            MembershipMaintenanceTrigger::PeerOnline(peer) => Some(*peer),
-            _ => None,
-        };
         let pending = match self
             .store
-            .due_space_group_updates(self.clock.now_ms(), online_peer)
+            .due_space_group_updates(self.clock.now_ms(), None)
             .await
         {
             Ok(pending) => pending,

@@ -11,9 +11,33 @@ use super::test_support::{
     authenticated_prepared_with_peers, ProtocolEvent, SpaceAdmissionProtocolTestPair,
 };
 use crate::space::membership::{
-    AdmissionMaintenanceOutcome, MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger,
-    RecoverSpaceAdmissionsPort,
+    AcquireSpaceWorkPermitPort, AdmissionMaintenanceOutcome, MembershipMaintenanceStepOutcome,
+    MembershipMaintenanceTrigger, RecoverSpaceAdmissionsPort, SpaceWorkMode,
 };
+
+#[tokio::test]
+async fn ordinary_work_permit_serializes_a_new_pairing_request() {
+    let pair = SpaceAdmissionProtocolTestPair::fresh().await;
+    let permit = pair
+        .sponsor()
+        .acquire_space_work_permit()
+        .await
+        .expect("active space should grant ordinary work");
+    assert_eq!(permit.mode(), SpaceWorkMode::Active);
+    let request = pair.sponsor().handle(authenticated_join_request());
+    tokio::pin!(request);
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut request)
+            .await
+            .is_err()
+    );
+    drop(permit);
+
+    request
+        .await
+        .expect("pairing request should continue after ordinary work finishes");
+}
 
 #[tokio::test]
 async fn candidate_abandonment_is_saved_before_reply_and_duplicate_replays_it() {
@@ -645,7 +669,10 @@ async fn applied_is_saved_before_the_sponsor_returns_complete() {
         pair.sponsor()
             .recover_space_admissions(&MembershipMaintenanceTrigger::StateChanged)
             .await,
-        AdmissionMaintenanceOutcome::Yield(MembershipMaintenanceStepOutcome::Completed)
+        AdmissionMaintenanceOutcome::new(
+            crate::space::membership::SpaceWorkMode::Pairing,
+            MembershipMaintenanceStepOutcome::Completed,
+        )
     );
 }
 

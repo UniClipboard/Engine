@@ -7,10 +7,10 @@ use uc_core::membership::{
 use uc_core::ports::ClockPort;
 
 use super::{
-    CurrentSpaceMemberScopePort, HandleMembershipHistoryMessageUseCase, MembershipLedger,
-    MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, RefreshVerifiedPeerAddressPort,
-    SynchronizeMembershipHistoryUseCase, SynchronizeMembershipMaintenancePort,
-    WakeSpaceMembershipMaintenancePort,
+    AcquireSpaceWorkPermitPort, CurrentSpaceMemberScopePort, HandleMembershipHistoryMessageUseCase,
+    MembershipLedger, MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger,
+    RefreshVerifiedPeerAddressPort, SynchronizeMembershipHistoryUseCase,
+    SynchronizeMembershipMaintenancePort, WakeSpaceMembershipMaintenancePort,
 };
 
 /// 成员历史反熵的唯一应用层负责人；调用方不需要拼装收发、ACK 与重试步骤。
@@ -27,11 +27,13 @@ impl MembershipHistoryAntiEntropy {
         address_refresh: Arc<dyn RefreshVerifiedPeerAddressPort>,
         clock: Arc<dyn ClockPort>,
         maintenance_wake: Arc<dyn WakeSpaceMembershipMaintenancePort>,
+        work_mode: Arc<dyn AcquireSpaceWorkPermitPort>,
     ) -> Self {
         Self {
             inbound: HandleMembershipHistoryMessageUseCase::new_with_wake(
                 Arc::clone(&ledger),
                 maintenance_wake,
+                work_mode,
             ),
             outbound: SynchronizeMembershipHistoryUseCase::new(
                 ledger,

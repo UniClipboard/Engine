@@ -102,6 +102,7 @@ pub(super) enum ProtocolEvent {
     JoinerSavedResolvedInvitation,
     JoinerRejectedConsumedInvitation,
     JoinerSavedJoinRequest,
+    JoinerSavedRetry,
     JoinerRejectedPeerUpgrade,
     JoinerPeerUpgradeBlocked,
     JoinerSavedRejected,
@@ -703,7 +704,12 @@ impl PendingAdmissionRecoveryStatePort for RecordingJoinerStartState {
         let terminal_resolution_event = (aggregate.is_terminal()
             && aggregate.record_version() == 2)
             .then_some((ProtocolEvent::JoinerRejectedConsumedInvitation, 0x28));
-        let (event, next_token_byte) = if let Some(event) = resolution_event
+        let saved_retry = aggregate
+            .pending_exchange()
+            .is_some_and(|exchange| exchange.retry_state().attempt_count() > 0)
+            .then_some((ProtocolEvent::JoinerSavedRetry, 0x32));
+        let (event, next_token_byte) = if let Some(event) = saved_retry
+            .or(resolution_event)
             .or(peer_upgrade_rejection)
             .or(local_termination)
             .or(terminal_resolution_event)

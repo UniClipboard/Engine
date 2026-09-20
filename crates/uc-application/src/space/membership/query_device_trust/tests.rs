@@ -412,6 +412,73 @@ async fn active_status_combines_verified_members_with_one_observation_read() {
         DeviceTrustRelationship::ConfirmationPending
     );
     assert_eq!(status.devices[1].sync_state, DeviceTrustSyncState::Usable);
+    assert_eq!(
+        status.maintenance_health,
+        MembershipMaintenanceHealth::healthy()
+    );
+}
+
+#[tokio::test]
+async fn deferred_history_sync_exposes_its_persisted_retry_time() {
+    let mut loaded = active_ledger();
+    let peer = loaded
+        .peer_reconciliation
+        .get_mut(&DeviceId::new("device-b"))
+        .unwrap();
+    peer.sync_state.retry_attempt = 3;
+    peer.sync_state.next_attempt_at_ms = 60_000;
+    peer.sync_state.last_attempt_outcome =
+        crate::space::membership::PeerHistorySyncOutcome::Deferred;
+    let repository = Arc::new(MemoryLedgerRepository { loaded });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let query = QueryDeviceTrustUseCase::new(
+        ledger,
+        Arc::new(AllOfflineObservations),
+        Arc::new(StaticCurrentJoin(None)),
+    );
+
+    let status = query.execute().await.unwrap();
+
+    assert_eq!(
+        status.maintenance_health,
+        MembershipMaintenanceHealth::retrying(60_000)
+    );
+}
+
+#[tokio::test]
+async fn stable_history_rejection_exposes_a_reason_and_recovery_action() {
+    let mut loaded = active_ledger();
+    loaded
+        .peer_reconciliation
+        .get_mut(&DeviceId::new("device-b"))
+        .unwrap()
+        .sync_state
+        .last_attempt_outcome = crate::space::membership::PeerHistorySyncOutcome::StableRejected;
+    let repository = Arc::new(MemoryLedgerRepository { loaded });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let query = QueryDeviceTrustUseCase::new(
+        ledger,
+        Arc::new(AllOfflineObservations),
+        Arc::new(StaticCurrentJoin(None)),
+    );
+
+    let status = query.execute().await.unwrap();
+
+    assert_eq!(
+        status.maintenance_health,
+        MembershipMaintenanceHealth::needs_attention(
+            MembershipMaintenanceProblem::MembershipHistoryRejected,
+            MembershipMaintenanceRecovery::ResolveDeviceTrust,
+        )
+    );
 }
 
 #[tokio::test]

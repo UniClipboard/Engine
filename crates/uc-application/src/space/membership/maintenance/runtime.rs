@@ -318,19 +318,19 @@ impl SpaceMembershipMaintenanceRuntime {
                                 &maintain,
                                 &mut active_round,
                                 &mut queued_triggers,
-                                ScheduledRound::new(MembershipMaintenanceTrigger::PeerOnline(event.device_id)),
+                                ScheduledRound::new(MembershipMaintenanceTrigger::StateChanged),
                             );
                         }
                         Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
                         Err(broadcast::error::RecvError::Closed) => peer_reachability_open = false,
                     },
                     contact = peer_contacts.recv(), if !paused && peer_contacts_open => match contact {
-                        Ok(contact) => {
+                        Ok(_contact) => {
                             schedule_round(
                                 &maintain,
                                 &mut active_round,
                                 &mut queued_triggers,
-                                ScheduledRound::new(MembershipMaintenanceTrigger::PeerContact(contact.device_id)),
+                                ScheduledRound::new(MembershipMaintenanceTrigger::StateChanged),
                             );
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {}
@@ -447,8 +447,6 @@ impl ScheduledRound {
             MembershipMaintenanceTrigger::Resume => RecoveryTrigger::Resume,
             MembershipMaintenanceTrigger::Periodic => RecoveryTrigger::Periodic,
             MembershipMaintenanceTrigger::StateChanged => RecoveryTrigger::StateChanged,
-            MembershipMaintenanceTrigger::PeerContact(_) => RecoveryTrigger::PeerContact,
-            MembershipMaintenanceTrigger::PeerOnline(_) => RecoveryTrigger::PeerOnline,
         };
         Self {
             trigger,

@@ -103,7 +103,7 @@ impl RecoverSpaceAdmissionsPort for RecordingStep {
         &self,
         _trigger: &MembershipMaintenanceTrigger,
     ) -> AdmissionMaintenanceOutcome {
-        AdmissionMaintenanceOutcome::Continue(self.record())
+        AdmissionMaintenanceOutcome::new(SpaceWorkMode::Active, self.record())
     }
 }
 
@@ -177,6 +177,47 @@ struct YieldingAdmission {
     calls: Arc<Mutex<Vec<&'static str>>>,
 }
 
+struct DeferredPairingAdmission {
+    calls: Arc<Mutex<Vec<&'static str>>>,
+}
+
+struct PairingThenActiveAdmission {
+    calls: Arc<Mutex<Vec<&'static str>>>,
+    pairing: std::sync::atomic::AtomicBool,
+}
+
+struct BlockingPairingAdmission {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+struct SharedWorkPermit {
+    lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+#[async_trait]
+impl AcquireSpaceWorkPermitPort for SharedWorkPermit {
+    async fn acquire_space_work_permit(&self) -> Result<SpaceWorkPermit, QuerySpaceWorkModeError> {
+        let guard = Arc::clone(&self.lock).lock_owned().await;
+        Ok(SpaceWorkPermit::guarded(SpaceWorkMode::Active, guard))
+    }
+}
+
+#[async_trait]
+impl RecoverSpaceAdmissionsPort for BlockingPairingAdmission {
+    async fn recover_space_admissions(
+        &self,
+        _trigger: &MembershipMaintenanceTrigger,
+    ) -> AdmissionMaintenanceOutcome {
+        self.started.notify_one();
+        self.release.notified().await;
+        AdmissionMaintenanceOutcome::new(
+            SpaceWorkMode::Pairing,
+            MembershipMaintenanceStepOutcome::Deferred,
+        )
+    }
+}
+
 #[async_trait]
 impl RecoverSpaceAdmissionsPort for YieldingAdmission {
     async fn recover_space_admissions(
@@ -184,7 +225,40 @@ impl RecoverSpaceAdmissionsPort for YieldingAdmission {
         _trigger: &MembershipMaintenanceTrigger,
     ) -> AdmissionMaintenanceOutcome {
         self.calls.lock().unwrap().push("admissions");
-        AdmissionMaintenanceOutcome::Yield(MembershipMaintenanceStepOutcome::Completed)
+        AdmissionMaintenanceOutcome::new(
+            SpaceWorkMode::Pairing,
+            MembershipMaintenanceStepOutcome::Completed,
+        )
+    }
+}
+
+#[async_trait]
+impl RecoverSpaceAdmissionsPort for DeferredPairingAdmission {
+    async fn recover_space_admissions(
+        &self,
+        _trigger: &MembershipMaintenanceTrigger,
+    ) -> AdmissionMaintenanceOutcome {
+        self.calls.lock().unwrap().push("admissions");
+        AdmissionMaintenanceOutcome::new(
+            SpaceWorkMode::Pairing,
+            MembershipMaintenanceStepOutcome::Deferred,
+        )
+    }
+}
+
+#[async_trait]
+impl RecoverSpaceAdmissionsPort for PairingThenActiveAdmission {
+    async fn recover_space_admissions(
+        &self,
+        _trigger: &MembershipMaintenanceTrigger,
+    ) -> AdmissionMaintenanceOutcome {
+        self.calls.lock().unwrap().push("admissions");
+        let mode = if self.pairing.swap(false, Ordering::SeqCst) {
+            SpaceWorkMode::Pairing
+        } else {
+            SpaceWorkMode::Active
+        };
+        AdmissionMaintenanceOutcome::new(mode, MembershipMaintenanceStepOutcome::Completed)
     }
 }
 
@@ -195,15 +269,15 @@ struct BlockingFirstRecordingAdmission {
     first: std::sync::atomic::AtomicBool,
 }
 
-struct BlockingFirstContactSynchronization {
+struct BlockingFirstChangeSynchronization {
     started: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
     triggers: Arc<Mutex<Vec<MembershipMaintenanceTrigger>>>,
-    first_contact: std::sync::atomic::AtomicBool,
+    first_change: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
-impl SynchronizeMembershipMaintenancePort for BlockingFirstContactSynchronization {
+impl SynchronizeMembershipMaintenancePort for BlockingFirstChangeSynchronization {
     async fn periodic_synchronization_required(
         &self,
     ) -> Result<bool, MembershipMaintenanceStepOutcome> {
@@ -215,8 +289,8 @@ impl SynchronizeMembershipMaintenancePort for BlockingFirstContactSynchronizatio
         trigger: &MembershipMaintenanceTrigger,
     ) -> MembershipMaintenanceStepOutcome {
         self.triggers.lock().unwrap().push(trigger.clone());
-        if matches!(trigger, MembershipMaintenanceTrigger::PeerContact(_))
-            && self.first_contact.swap(false, Ordering::SeqCst)
+        if matches!(trigger, MembershipMaintenanceTrigger::StateChanged)
+            && self.first_change.swap(false, Ordering::SeqCst)
         {
             self.started.notify_one();
             self.release.notified().await;
@@ -236,7 +310,10 @@ impl RecoverSpaceAdmissionsPort for BlockingFirstRecordingAdmission {
             self.started.notify_one();
             self.release.notified().await;
         }
-        AdmissionMaintenanceOutcome::Continue(MembershipMaintenanceStepOutcome::Completed)
+        AdmissionMaintenanceOutcome::new(
+            SpaceWorkMode::Active,
+            MembershipMaintenanceStepOutcome::Completed,
+        )
     }
 }
 
@@ -248,7 +325,10 @@ impl RecoverSpaceAdmissionsPort for BlockingAdmission {
     ) -> AdmissionMaintenanceOutcome {
         self.started.notify_one();
         self.release.notified().await;
-        AdmissionMaintenanceOutcome::Continue(MembershipMaintenanceStepOutcome::Completed)
+        AdmissionMaintenanceOutcome::new(
+            SpaceWorkMode::Active,
+            MembershipMaintenanceStepOutcome::Completed,
+        )
     }
 }
 
@@ -339,6 +419,136 @@ async fn session_transition_stops_the_current_maintenance_round_after_admission(
 }
 
 #[tokio::test]
+async fn unfinished_pairing_with_transient_network_failure_excludes_ordinary_maintenance() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let step = |name| {
+        Arc::new(RecordingStep {
+            name,
+            calls: Arc::clone(&calls),
+            outcome: MembershipMaintenanceStepOutcome::Completed,
+        })
+    };
+    let maintain = MaintainSpaceMembershipUseCase::new(MaintainSpaceMembershipDeps {
+        admissions: Arc::new(DeferredPairingAdmission {
+            calls: Arc::clone(&calls),
+        }),
+        effects: step("effects"),
+        conflicts: step("conflicts"),
+        group_update_delivery: step("group_updates"),
+        restricted_delivery: step("restricted"),
+        synchronization: step("synchronize"),
+        cleanup: step("cleanup"),
+    });
+
+    let report = maintain
+        .execute(MembershipMaintenanceTrigger::StateChanged)
+        .await;
+
+    assert_eq!(calls.lock().unwrap().as_slice(), &["admissions"]);
+    assert_eq!(report.deferred_count, 1);
+    assert_eq!(report.completed_count, 0);
+}
+
+#[tokio::test]
+async fn local_admission_actions_can_interrupt_pairing_recovery_before_ordinary_work() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let step = |name| {
+        Arc::new(RecordingStep {
+            name,
+            calls: Arc::clone(&calls),
+            outcome: MembershipMaintenanceStepOutcome::Completed,
+        })
+    };
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let work_lock = Arc::new(tokio::sync::Mutex::new(()));
+    let maintain = Arc::new(MaintainSpaceMembershipUseCase::new_coordinated(
+        MaintainSpaceMembershipDeps {
+            admissions: Arc::new(BlockingPairingAdmission {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            }),
+            effects: step("effects"),
+            conflicts: step("conflicts"),
+            group_update_delivery: step("group_updates"),
+            restricted_delivery: step("restricted"),
+            synchronization: step("synchronize"),
+            cleanup: step("cleanup"),
+        },
+        Arc::new(SharedWorkPermit {
+            lock: Arc::clone(&work_lock),
+        }),
+    ));
+    let round = tokio::spawn(async move {
+        maintain
+            .execute(MembershipMaintenanceTrigger::StateChanged)
+            .await
+    });
+    started.notified().await;
+
+    let local_action = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        Arc::clone(&work_lock).lock_owned(),
+    )
+    .await
+    .expect("local admission action must not wait for pairing network recovery");
+    release.notify_one();
+    let report = round.await.unwrap();
+    drop(local_action);
+
+    assert_eq!(report.deferred_count, 1);
+    assert!(calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn ordinary_maintenance_resumes_after_pairing_reaches_its_terminal_state() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let step = |name| {
+        Arc::new(RecordingStep {
+            name,
+            calls: Arc::clone(&calls),
+            outcome: MembershipMaintenanceStepOutcome::Completed,
+        })
+    };
+    let maintain = MaintainSpaceMembershipUseCase::new(MaintainSpaceMembershipDeps {
+        admissions: Arc::new(PairingThenActiveAdmission {
+            calls: Arc::clone(&calls),
+            pairing: std::sync::atomic::AtomicBool::new(true),
+        }),
+        effects: step("effects"),
+        conflicts: step("conflicts"),
+        group_update_delivery: step("group_updates"),
+        restricted_delivery: step("restricted"),
+        synchronization: step("synchronize"),
+        cleanup: step("cleanup"),
+    });
+
+    let pairing = maintain
+        .execute(MembershipMaintenanceTrigger::StateChanged)
+        .await;
+    assert_eq!(calls.lock().unwrap().as_slice(), &["admissions"]);
+    assert_eq!(pairing.completed_count, 1);
+
+    let active = maintain
+        .execute(MembershipMaintenanceTrigger::StateChanged)
+        .await;
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        &[
+            "admissions",
+            "admissions",
+            "restricted",
+            "effects",
+            "conflicts",
+            "group_updates",
+            "synchronize",
+            "cleanup"
+        ]
+    );
+    assert_eq!(active.completed_count, 7);
+}
+
+#[tokio::test]
 async fn deferred_projection_is_revisited_by_periodic_maintenance() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let step = |name, outcome| {
@@ -406,7 +616,7 @@ async fn corrupt_step_stops_later_permission_expanding_work() {
 }
 
 #[tokio::test]
-async fn peer_online_runs_targeted_network_work_and_local_projection() {
+async fn state_change_runs_complete_ordinary_maintenance() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let step = |name| {
         Arc::new(RecordingStep {
@@ -426,56 +636,22 @@ async fn peer_online_runs_targeted_network_work_and_local_projection() {
     });
 
     let report = maintain
-        .execute(MembershipMaintenanceTrigger::PeerOnline(
-            uc_core::ids::DeviceId::new("device-b"),
-        ))
+        .execute(MembershipMaintenanceTrigger::StateChanged)
         .await;
 
     assert_eq!(
         calls.lock().unwrap().as_slice(),
         &[
             "admissions",
+            "restricted",
+            "effects",
             "conflicts",
             "group_updates",
-            "restricted",
             "synchronize",
             "cleanup"
         ]
     );
-    assert_eq!(report.completed_count, 6);
-}
-
-#[tokio::test]
-async fn peer_contact_only_confirms_contacted_membership_and_local_projection() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let step = |name| {
-        Arc::new(RecordingStep {
-            name,
-            calls: Arc::clone(&calls),
-            outcome: MembershipMaintenanceStepOutcome::Completed,
-        })
-    };
-    let maintain = MaintainSpaceMembershipUseCase::new(MaintainSpaceMembershipDeps {
-        admissions: step("admissions"),
-        effects: step("effects"),
-        conflicts: step("conflicts"),
-        group_update_delivery: step("group_updates"),
-        restricted_delivery: step("restricted"),
-        synchronization: step("synchronize"),
-        cleanup: step("cleanup"),
-    });
-
-    let report = maintain
-        .execute(MembershipMaintenanceTrigger::PeerContact(
-            uc_core::ids::DeviceId::new("device-b"),
-        ))
-        .await;
-
-    assert_eq!(
-        calls.lock().unwrap().as_slice(),
-        &["synchronize", "cleanup"]
-    );
-    assert_eq!(report.completed_count, 2);
+    assert_eq!(report.completed_count, 7);
 }
 
 #[tokio::test]
@@ -532,7 +708,7 @@ fn inactive_known_peer_contacts() -> tokio::sync::broadcast::Receiver<KnownPeerC
 }
 
 #[tokio::test]
-async fn known_peer_contact_wakes_targeted_membership_confirmation() {
+async fn known_peer_contact_wakes_one_complete_maintenance_round() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let step = |name| {
         Arc::new(RecordingStep {
@@ -567,16 +743,24 @@ async fn known_peer_contact_wakes_targeted_membership_confirmation() {
         device_id: uc_core::ids::DeviceId::new("device-b"),
     });
 
-    wait_for_call_count(&calls, 9).await;
+    wait_for_call_count(&calls, 14).await;
     assert_eq!(
         &calls.lock().unwrap().as_slice()[7..],
-        &["synchronize", "cleanup"]
+        &[
+            "admissions",
+            "restricted",
+            "effects",
+            "conflicts",
+            "group_updates",
+            "synchronize",
+            "cleanup"
+        ]
     );
     runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn repeated_known_peer_contacts_are_coalesced_and_run_serially() {
+async fn peer_contacts_submit_one_generic_change_wake_and_coalesce_while_running() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let step = |name| {
         Arc::new(RecordingStep {
@@ -595,11 +779,11 @@ async fn repeated_known_peer_contacts_are_coalesced_and_run_serially() {
             conflicts: step("conflicts"),
             group_update_delivery: step("group_updates"),
             restricted_delivery: step("restricted"),
-            synchronization: Arc::new(BlockingFirstContactSynchronization {
+            synchronization: Arc::new(BlockingFirstChangeSynchronization {
                 started: Arc::clone(&started),
                 release: Arc::clone(&release),
                 triggers: Arc::clone(&triggers),
-                first_contact: std::sync::atomic::AtomicBool::new(true),
+                first_change: std::sync::atomic::AtomicBool::new(true),
             }),
             cleanup: step("cleanup"),
         },
@@ -615,19 +799,19 @@ async fn repeated_known_peer_contacts_are_coalesced_and_run_serially() {
     );
     wait_for_call_count(&calls, 6).await;
 
+    let activity = runtime.activity();
+    activity.request_state_changed().unwrap();
+    started.notified().await;
+
     let device_b = uc_core::ids::DeviceId::new("device-b");
     let device_c = uc_core::ids::DeviceId::new("device-c");
-    let _ = known_peer_contact_tx.send(KnownPeerContact {
-        device_id: device_b.clone(),
-    });
-    started.notified().await;
     for device_id in [device_b.clone(), device_b.clone(), device_c.clone()] {
         let _ = known_peer_contact_tx.send(KnownPeerContact { device_id });
     }
     release.notify_one();
 
     for _ in 0..100 {
-        if triggers.lock().unwrap().len() >= 4 {
+        if triggers.lock().unwrap().len() >= 3 {
             break;
         }
         tokio::task::yield_now().await;
@@ -635,9 +819,8 @@ async fn repeated_known_peer_contacts_are_coalesced_and_run_serially() {
     assert_eq!(
         &triggers.lock().unwrap().as_slice()[1..],
         &[
-            MembershipMaintenanceTrigger::PeerContact(device_b.clone()),
-            MembershipMaintenanceTrigger::PeerContact(device_b),
-            MembershipMaintenanceTrigger::PeerContact(device_c),
+            MembershipMaintenanceTrigger::StateChanged,
+            MembershipMaintenanceTrigger::StateChanged,
         ]
     );
     runtime.shutdown().await.unwrap();
@@ -956,7 +1139,7 @@ async fn dropping_the_owner_or_shutdown_waiter_keeps_the_round_owned_until_compl
 }
 
 #[tokio::test]
-async fn online_events_for_different_peers_are_not_overwritten_during_a_round() {
+async fn online_events_for_different_peers_coalesce_into_one_change_wake() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let step = |name| {
         Arc::new(RecordingStep {
@@ -1001,7 +1184,7 @@ async fn online_events_for_different_peers_are_not_overwritten_during_a_round() 
     }
     release.notify_one();
 
-    wait_for_call_count(&calls, 19).await;
+    wait_for_call_count(&calls, 14).await;
 
     assert_eq!(
         calls.lock().unwrap().as_slice(),
@@ -1014,15 +1197,10 @@ async fn online_events_for_different_peers_are_not_overwritten_during_a_round() 
             "synchronize",
             "cleanup",
             "admissions",
+            "restricted",
+            "effects",
             "conflicts",
             "group_updates",
-            "restricted",
-            "synchronize",
-            "cleanup",
-            "admissions",
-            "conflicts",
-            "group_updates",
-            "restricted",
             "synchronize",
             "cleanup",
         ]
