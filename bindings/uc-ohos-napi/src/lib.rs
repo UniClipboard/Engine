@@ -195,6 +195,9 @@ pub struct OhJoinSpaceStatus {
     pub peer_upgrade_required: bool,
     pub rejection_reason: Option<String>,
     pub termination_reason: Option<String>,
+    pub attention_reason: Option<String>,
+    pub attention_recovery: Option<String>,
+    pub next_retry_at_ms: Option<f64>,
 }
 
 #[napi(object)]

@@ -12,6 +12,34 @@ pub trait AdmissionRecordPersistence {
     fn encode_persisted(&self) -> Result<Vec<u8>, SpaceAdmissionPersistenceError>;
 }
 
+impl SpaceAdmissionAggregate {
+    /// 仍有必须先完成的配对收尾时，不允许开启另一条准入事实。
+    pub fn has_unsettled_admission_work(&self) -> bool {
+        if !self.is_terminal() || self.pending_exchange().is_some() {
+            return true;
+        }
+        match &self.state {
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+                SpaceAdmissionRejectedState::Sponsor(state),
+            )) => matches!(
+                state.abandonment_cleanup,
+                Some(SponsorAbandonmentCleanup::Known(_))
+                    | Some(SponsorAbandonmentCleanup::Unknown { .. })
+            ),
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorExpired(
+                state,
+            )) => matches!(
+                state.abandonment_cleanup,
+                SponsorAbandonmentCleanup::Known(_) | SponsorAbandonmentCleanup::Unknown { .. }
+            ),
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
+                _,
+            )) => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(PartialEq, Eq)]
 pub struct JoinerAdmission {
     record: SpaceAdmissionAggregate,
@@ -104,6 +132,25 @@ impl SponsorAdmissionTransition {
 }
 
 impl JoinerAdmission {
+    /// 旧流程已经越过本机可安全放弃的阶段，但缺少判断远端提交结果的证据。
+    pub const fn needs_attention(&self) -> bool {
+        matches!(
+            &self.record.state,
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(_))
+        ) || (self.record.attempt_timeline.is_none()
+            && self.record.attempt_digest.is_none()
+            && matches!(
+                &self.record.state,
+                SpaceAdmissionRecordState::Joiner(
+                    SpaceAdmissionJoinerState::Prepared(_)
+                        | SpaceAdmissionJoinerState::Committed(_)
+                        | SpaceAdmissionJoinerState::Applied(_)
+                        | SpaceAdmissionJoinerState::Activating(_)
+                        | SpaceAdmissionJoinerState::Cancelling(_)
+                )
+            ))
+    }
+
     pub fn start_resolving_invitation(
         admission_id: SpaceAdmissionId,
         join_id: JoinId,
@@ -245,6 +292,29 @@ impl JoinerAdmission {
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
                 SpaceAdmissionRejectedState::Joiner(state),
             )) => Some(state.reason),
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state)) => {
+                match state.reason {
+                    SpaceAdmissionTerminationReason::ActivationRejected => {
+                        Some(SpaceAdmissionRejectionReason::HistoryConflict)
+                    }
+                    SpaceAdmissionTerminationReason::CompletionRejected => {
+                        Some(SpaceAdmissionRejectionReason::CompletionInvalid)
+                    }
+                    SpaceAdmissionTerminationReason::MembershipHistoryRejected => {
+                        Some(SpaceAdmissionRejectionReason::MembershipHistoryInvalid)
+                    }
+                    SpaceAdmissionTerminationReason::SecurityMaterialRejected => {
+                        Some(SpaceAdmissionRejectionReason::SecurityMaterialInvalid)
+                    }
+                    SpaceAdmissionTerminationReason::RelationshipRejected => {
+                        Some(SpaceAdmissionRejectionReason::RelationshipConflict)
+                    }
+                    SpaceAdmissionTerminationReason::ActivationStateRejected => {
+                        Some(SpaceAdmissionRejectionReason::ActivationStateInvalid)
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
@@ -252,7 +322,15 @@ impl JoinerAdmission {
     pub const fn termination_reason(&self) -> Option<SpaceAdmissionTerminationReason> {
         match &self.record.state {
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state)) => {
-                Some(state.reason)
+                match state.reason {
+                    SpaceAdmissionTerminationReason::ActivationRejected
+                    | SpaceAdmissionTerminationReason::CompletionRejected
+                    | SpaceAdmissionTerminationReason::MembershipHistoryRejected
+                    | SpaceAdmissionTerminationReason::SecurityMaterialRejected
+                    | SpaceAdmissionTerminationReason::RelationshipRejected
+                    | SpaceAdmissionTerminationReason::ActivationStateRejected => None,
+                    reason => Some(reason),
+                }
             }
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Superseded(_)) => {
                 Some(SpaceAdmissionTerminationReason::Superseded)
@@ -298,21 +376,6 @@ impl JoinerAdmission {
                         | SpaceAdmissionJoinerState::Committed(_)
                         | SpaceAdmissionJoinerState::Applied(_)
                         | SpaceAdmissionJoinerState::Activating(_)
-                )
-            )
-        {
-            return true;
-        }
-        if self.record.attempt_timeline.is_none()
-            && self.record.attempt_digest.is_none()
-            && matches!(
-                &self.record.state,
-                SpaceAdmissionRecordState::Joiner(
-                    SpaceAdmissionJoinerState::Prepared(_)
-                        | SpaceAdmissionJoinerState::Committed(_)
-                        | SpaceAdmissionJoinerState::Applied(_)
-                        | SpaceAdmissionJoinerState::Activating(_)
-                        | SpaceAdmissionJoinerState::Cancelling(_)
                 )
             )
         {
@@ -507,12 +570,12 @@ impl JoinerAdmission {
             .map(JoinerAdmissionTransition::from_transition)
     }
 
-    pub fn reject_history_conflict(
+    pub fn reject_activation(
         self,
+        reason: SpaceAdmissionRejectionReason,
     ) -> Result<JoinerAdmissionTransition, SpaceAdmissionAggregateError> {
-        let join_id = self.join_id();
         self.record
-            .reject_history_conflict(join_id)
+            .reject_activation(reason)
             .map(JoinerAdmissionTransition::from_transition)
     }
 
@@ -858,6 +921,17 @@ impl SponsorAdmission {
             )) => Some(&state.abandonment_cleanup),
             _ => None,
         }
+    }
+
+    pub const fn is_failed(&self) -> bool {
+        matches!(
+            &self.record.state,
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+                SpaceAdmissionRejectedState::Sponsor(_),
+            )) | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorExpired(
+                _
+            ))
+        )
     }
 
     pub fn accept_abandonment(

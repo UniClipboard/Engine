@@ -192,6 +192,8 @@ struct StaticPairingConfirmation(PairingConfirmationObservation);
 
 struct StaticPendingInboundMember(crate::space::admission::PendingInboundMember);
 
+struct StaticInboundPairings(Vec<crate::space::admission::InboundPairing>);
+
 struct LocalOnlyObservations;
 
 #[async_trait]
@@ -227,6 +229,7 @@ impl LoadCurrentJoinStatusPort for StaticPairingConfirmation {
     ) -> Result<AdmissionDisplayStatus, QueryDeviceTrustError> {
         Ok(AdmissionDisplayStatus {
             current_join: None,
+            inbound_pairings: Vec::new(),
             pending_inbound_member: None,
             pairing_confirmations: targets
                 .contains(&self.0.target)
@@ -249,7 +252,27 @@ impl LoadCurrentJoinStatusPort for StaticPendingInboundMember {
     ) -> Result<AdmissionDisplayStatus, QueryDeviceTrustError> {
         Ok(AdmissionDisplayStatus {
             current_join: None,
+            inbound_pairings: Vec::new(),
             pending_inbound_member: Some(self.0.clone()),
+            pairing_confirmations: Vec::new(),
+        })
+    }
+}
+
+#[async_trait]
+impl LoadCurrentJoinStatusPort for StaticInboundPairings {
+    async fn load_current_join(&self) -> Result<Option<CurrentJoinStatus>, QueryDeviceTrustError> {
+        Ok(None)
+    }
+
+    async fn load_admission_display(
+        &self,
+        _targets: &[PairingConfirmationTarget],
+    ) -> Result<AdmissionDisplayStatus, QueryDeviceTrustError> {
+        Ok(AdmissionDisplayStatus {
+            current_join: None,
+            inbound_pairings: self.0.clone(),
+            pending_inbound_member: None,
             pairing_confirmations: Vec::new(),
         })
     }
@@ -867,4 +890,45 @@ async fn status_keeps_a_pending_inbound_member_out_of_the_formal_device_list() {
         .devices
         .iter()
         .all(|device| device.device_id != DeviceId::new("device-pending")));
+}
+
+#[tokio::test]
+async fn status_keeps_multiple_inbound_pairings_out_of_the_formal_device_list() {
+    let repository = Arc::new(MemoryLedgerRepository {
+        loaded: active_ledger(),
+    });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let pairings = vec![
+        crate::space::admission::InboundPairing {
+            pairing_id: [0x31; 32],
+            device_id: Some(DeviceId::new("device-pending-a")),
+            display_name: Some("Pending A".to_owned()),
+            status: crate::space::admission::InboundPairingStatus::AwaitingConfirmation,
+        },
+        crate::space::admission::InboundPairing {
+            pairing_id: [0x32; 32],
+            device_id: Some(DeviceId::new("device-pending-b")),
+            display_name: Some("Pending B".to_owned()),
+            status: crate::space::admission::InboundPairingStatus::ConfirmationMissed,
+        },
+    ];
+    let query = QueryDeviceTrustUseCase::new(
+        ledger,
+        Arc::new(StaticObservations {
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }),
+        Arc::new(StaticInboundPairings(pairings.clone())),
+    );
+
+    let status = query.execute().await.unwrap();
+
+    assert_eq!(status.inbound_pairings, pairings);
+    assert!(status.devices.iter().all(|device| {
+        device.device_id != DeviceId::new("device-pending-a")
+            && device.device_id != DeviceId::new("device-pending-b")
+    }));
 }

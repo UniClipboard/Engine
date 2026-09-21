@@ -396,6 +396,9 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
         crate::JoinSpaceStatusSummary::Rejected { reason, .. } => {
             panic!("join was rejected: {reason:?}")
         }
+        crate::JoinSpaceStatusSummary::NeedsAttention { .. } => {
+            panic!("join requires explicit recovery")
+        }
         crate::JoinSpaceStatusSummary::Terminated { reason, .. } => {
             panic!("join was terminated locally: {reason:?}")
         }
@@ -4143,6 +4146,7 @@ async fn engine_mobile_upload_owns_transfer_lifecycle_events() {
         }))
         .await
         .unwrap();
+    wait_receive_ready(&engine).await;
     drain_engine_events(&mut events).await;
 
     let upload = engine

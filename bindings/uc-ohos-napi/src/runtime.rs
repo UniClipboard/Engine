@@ -647,6 +647,9 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
             peer_upgrade_required,
             rejection_reason: None,
             termination_reason: None,
+            attention_reason: None,
+            attention_recovery: None,
+            next_retry_at_ms: None,
         },
         uc_engine::JoinSpaceStatusSummary::Pending {
             join_id,
@@ -666,6 +669,9 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
             peer_upgrade_required,
             rejection_reason: None,
             termination_reason: None,
+            attention_reason: None,
+            attention_recovery: None,
+            next_retry_at_ms: None,
         },
         uc_engine::JoinSpaceStatusSummary::Processing {
             join_id,
@@ -684,6 +690,43 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
             peer_upgrade_required,
             rejection_reason: None,
             termination_reason: None,
+            attention_reason: None,
+            attention_recovery: None,
+            next_retry_at_ms: None,
+        },
+        uc_engine::JoinSpaceStatusSummary::NeedsAttention {
+            join_id,
+            reason,
+            recovery,
+            next_retry_at_ms,
+        } => OhJoinSpaceStatus {
+            status: "needs_attention".to_owned(),
+            join_id,
+            joined_space: None,
+            target_space_id: None,
+            sponsor_device_id: None,
+            sponsor_identity_fingerprint: None,
+            cancel_requested: None,
+            peer_upgrade_required: false,
+            rejection_reason: None,
+            termination_reason: None,
+            attention_reason: Some(
+                match reason {
+                    uc_engine::JoinSpaceAttentionReasonSummary::OutcomeCannotBeProven => {
+                        "outcome_cannot_be_proven"
+                    }
+                }
+                .to_owned(),
+            ),
+            attention_recovery: Some(
+                match recovery {
+                    uc_engine::JoinSpaceAttentionRecoverySummary::PreserveDataAndContactSupport => {
+                        "preserve_data_and_contact_support"
+                    }
+                }
+                .to_owned(),
+            ),
+            next_retry_at_ms: next_retry_at_ms.map(|value| value as f64),
         },
         uc_engine::JoinSpaceStatusSummary::Rejected { join_id, reason } => OhJoinSpaceStatus {
             status: "rejected".to_owned(),
@@ -714,6 +757,21 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
                     uc_engine::JoinSpaceRejectionReasonSummary::HistoryConflict => {
                         "history_conflict"
                     }
+                    uc_engine::JoinSpaceRejectionReasonSummary::CompletionInvalid => {
+                        "completion_invalid"
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::MembershipHistoryInvalid => {
+                        "membership_history_invalid"
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::SecurityMaterialInvalid => {
+                        "security_material_invalid"
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::RelationshipConflict => {
+                        "relationship_conflict"
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::ActivationStateInvalid => {
+                        "activation_state_invalid"
+                    }
                     uc_engine::JoinSpaceRejectionReasonSummary::PeerUpgradeRequired => {
                         "peer_upgrade_required"
                     }
@@ -725,6 +783,9 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
                 .to_owned(),
             ),
             termination_reason: None,
+            attention_reason: None,
+            attention_recovery: None,
+            next_retry_at_ms: None,
         },
         uc_engine::JoinSpaceStatusSummary::Terminated { join_id, reason } => OhJoinSpaceStatus {
             status: "terminated".to_owned(),
@@ -744,6 +805,9 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
                 }
                 .to_owned(),
             ),
+            attention_reason: None,
+            attention_recovery: None,
+            next_retry_at_ms: None,
         },
     })
 }
@@ -1033,6 +1097,31 @@ mod tests {
         assert_eq!(status.target_space_id.as_deref(), Some("space-id"));
         assert_eq!(status.sponsor_device_id.as_deref(), Some("sponsor-id"));
         assert!(status.cancel_requested.is_none());
+    }
+
+    #[test]
+    fn join_status_preserves_attention_recovery_contract() {
+        let status = join_space_status(OperationResult::JoinSpace(
+            uc_engine::JoinSpaceStatusSummary::NeedsAttention {
+                join_id: "join-id".to_owned(),
+                reason: uc_engine::JoinSpaceAttentionReasonSummary::OutcomeCannotBeProven,
+                recovery:
+                    uc_engine::JoinSpaceAttentionRecoverySummary::PreserveDataAndContactSupport,
+                next_retry_at_ms: None,
+            },
+        ))
+        .expect("attention join status must map");
+
+        assert_eq!(status.status, "needs_attention");
+        assert_eq!(
+            status.attention_reason.as_deref(),
+            Some("outcome_cannot_be_proven")
+        );
+        assert_eq!(
+            status.attention_recovery.as_deref(),
+            Some("preserve_data_and_contact_support")
+        );
+        assert!(status.next_retry_at_ms.is_none());
     }
 
     #[test]

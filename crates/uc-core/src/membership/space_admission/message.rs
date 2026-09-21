@@ -19,16 +19,18 @@ pub enum SpaceAdmissionProtocolVersion {
     V1,
     V2,
     V3,
+    V4,
 }
 
 impl SpaceAdmissionProtocolVersion {
-    pub const CURRENT: Self = Self::V3;
+    pub const CURRENT: Self = Self::V4;
 
     pub const fn from_u16(value: u16) -> Option<Self> {
         match value {
             1 => Some(Self::V1),
             2 => Some(Self::V2),
             3 => Some(Self::V3),
+            4 => Some(Self::V4),
             _ => None,
         }
     }
@@ -38,6 +40,7 @@ impl SpaceAdmissionProtocolVersion {
             Self::V1 => 1,
             Self::V2 => 2,
             Self::V3 => 3,
+            Self::V4 => 4,
         }
     }
 }
@@ -244,6 +247,11 @@ pub enum SpaceAdmissionRejectionReason {
     BaseHistoryChanged,
     JoinerHistoryAhead,
     HistoryConflict,
+    CompletionInvalid,
+    MembershipHistoryInvalid,
+    SecurityMaterialInvalid,
+    RelationshipConflict,
+    ActivationStateInvalid,
     PeerUpgradeRequired,
     Cancelled,
     RemovedBeforeActivation,
@@ -601,6 +609,7 @@ pub enum AdmissionAbandonmentReasonV2 {
     Cancelled,
     Expired,
     Superseded,
+    Rejected,
 }
 
 #[derive(Clone, PartialEq, Eq)]

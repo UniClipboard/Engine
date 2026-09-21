@@ -336,9 +336,15 @@ impl SpaceAdmissionAggregate {
                     &state.saved_reply,
                 )?)
             }
-            // 已写入完成关系的 Sponsor 到期后进入 Unconfirmed，仍允许迟到确认。
+            // Applied 只保存待最终确认资料，尚未到正式成员提交点。
+            // 期限到达后丢弃本次未启用资料，不创建成员撤销。
+            SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Applied(_))
+                if self.attempt_digest.is_some() =>
+            {
+                SponsorAbandonmentCleanup::NotRequired
+            }
             SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Applied(_)) => {
-                return Ok(None);
+                return Err(SpaceAdmissionAggregateError::UnsafeCancellation);
             }
             _ => return Ok(None),
         };
@@ -510,6 +516,7 @@ impl SpaceAdmissionAggregate {
                     attempt_digest,
                     confirmation,
                     body.member_binding(),
+                    false,
                 )?;
                 (state.peer_binding, state.continuation_credential, cleanup)
             }
@@ -532,6 +539,7 @@ impl SpaceAdmissionAggregate {
                     attempt_digest,
                     confirmation,
                     body.member_binding(),
+                    true,
                 )?;
                 (state.peer_binding, state.continuation_credential, cleanup)
             }
@@ -617,6 +625,7 @@ fn sponsor_applied_abandonment_cleanup(
     attempt_digest: [u8; 32],
     confirmation: SponsorPairingConfirmationSummary,
     claimed: Option<&AdmissionMemberBindingV2>,
+    formally_committed: bool,
 ) -> Result<SponsorAbandonmentCleanup, SpaceAdmissionAggregateError> {
     if let Some(binding) = claimed {
         if binding.attempt_digest() != &attempt_digest
@@ -625,6 +634,9 @@ fn sponsor_applied_abandonment_cleanup(
         {
             return Err(SpaceAdmissionAggregateError::InvalidAbandonmentRequest);
         }
+    }
+    if !formally_committed {
+        return Ok(SponsorAbandonmentCleanup::NotRequired);
     }
     Ok(SponsorAbandonmentCleanup::Unknown {
         attempt_digest,

@@ -212,25 +212,32 @@ impl SpaceAdmissionAggregate {
         Ok(AdmissionTransition::new(self, &[]))
     }
 
-    pub(crate) fn reject_history_conflict(
-        mut self,
-        join_id: JoinId,
+    pub(crate) fn reject_activation(
+        self,
+        reason: SpaceAdmissionRejectionReason,
     ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
-        if matches!(self.state, SpaceAdmissionRecordState::Terminal(_)) {
-            return Err(SpaceAdmissionAggregateError::InvalidTransition);
-        }
-        let record_version = self
-            .record_version
-            .checked_add(1)
-            .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
-        self.record_version = record_version;
-        self.state = SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
-            SpaceAdmissionRejectedState::LocalJoiner(SpaceAdmissionLocalJoinerRejected {
-                join_id,
-                reason: SpaceAdmissionRejectionReason::HistoryConflict,
-            }),
-        ));
-        Ok(AdmissionTransition::new(self, &[]))
+        let termination = match reason {
+            SpaceAdmissionRejectionReason::HistoryConflict => {
+                SpaceAdmissionTerminationReason::ActivationRejected
+            }
+            SpaceAdmissionRejectionReason::CompletionInvalid => {
+                SpaceAdmissionTerminationReason::CompletionRejected
+            }
+            SpaceAdmissionRejectionReason::MembershipHistoryInvalid => {
+                SpaceAdmissionTerminationReason::MembershipHistoryRejected
+            }
+            SpaceAdmissionRejectionReason::SecurityMaterialInvalid => {
+                SpaceAdmissionTerminationReason::SecurityMaterialRejected
+            }
+            SpaceAdmissionRejectionReason::RelationshipConflict => {
+                SpaceAdmissionTerminationReason::RelationshipRejected
+            }
+            SpaceAdmissionRejectionReason::ActivationStateInvalid => {
+                SpaceAdmissionTerminationReason::ActivationStateRejected
+            }
+            _ => return Err(SpaceAdmissionAggregateError::InvalidTransition),
+        };
+        self.terminate_locally(termination)
     }
 
     pub(crate) fn reject_peer_upgrade(

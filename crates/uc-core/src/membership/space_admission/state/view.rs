@@ -283,6 +283,7 @@ impl SpaceAdmissionAggregate {
                     SpaceAdmissionSponsorState::Accepted(_)
                         | SpaceAdmissionSponsorState::Candidate(_)
                         | SpaceAdmissionSponsorState::Committed(_)
+                        | SpaceAdmissionSponsorState::Applied(_)
                 )
             )
     }

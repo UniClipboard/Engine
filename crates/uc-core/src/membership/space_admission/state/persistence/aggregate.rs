@@ -705,6 +705,12 @@ const fn encode_local_termination_reason(
         SpaceAdmissionTerminationReason::Cancelled => Ok(0),
         SpaceAdmissionTerminationReason::Expired => Ok(1),
         SpaceAdmissionTerminationReason::Superseded => Ok(2),
+        SpaceAdmissionTerminationReason::ActivationRejected => Ok(3),
+        SpaceAdmissionTerminationReason::CompletionRejected => Ok(4),
+        SpaceAdmissionTerminationReason::MembershipHistoryRejected => Ok(5),
+        SpaceAdmissionTerminationReason::SecurityMaterialRejected => Ok(6),
+        SpaceAdmissionTerminationReason::RelationshipRejected => Ok(7),
+        SpaceAdmissionTerminationReason::ActivationStateRejected => Ok(8),
     }
 }
 
@@ -715,6 +721,12 @@ const fn decode_local_termination_reason(
         0 => Ok(SpaceAdmissionTerminationReason::Cancelled),
         1 => Ok(SpaceAdmissionTerminationReason::Expired),
         2 => Ok(SpaceAdmissionTerminationReason::Superseded),
+        3 => Ok(SpaceAdmissionTerminationReason::ActivationRejected),
+        4 => Ok(SpaceAdmissionTerminationReason::CompletionRejected),
+        5 => Ok(SpaceAdmissionTerminationReason::MembershipHistoryRejected),
+        6 => Ok(SpaceAdmissionTerminationReason::SecurityMaterialRejected),
+        7 => Ok(SpaceAdmissionTerminationReason::RelationshipRejected),
+        8 => Ok(SpaceAdmissionTerminationReason::ActivationStateRejected),
         _ => Err(SpaceAdmissionPersistenceError::InvalidState),
     }
 }

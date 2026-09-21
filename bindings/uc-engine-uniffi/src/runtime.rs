@@ -201,6 +201,11 @@ pub enum JoinSpaceRejectionReason {
     BaseHistoryChanged,
     JoinerHistoryAhead,
     HistoryConflict,
+    CompletionInvalid,
+    MembershipHistoryInvalid,
+    SecurityMaterialInvalid,
+    RelationshipConflict,
+    ActivationStateInvalid,
     PeerUpgradeRequired,
     Cancelled,
     RemovedBeforeActivation,
@@ -211,6 +216,16 @@ pub enum JoinSpaceTerminationReason {
     Cancelled,
     Expired,
     Superseded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum JoinSpaceAttentionReason {
+    OutcomeCannotBeProven,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum JoinSpaceAttentionRecovery {
+    PreserveDataAndContactSupport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -234,6 +249,12 @@ pub enum JoinSpaceStatus {
         sponsor_device_id: String,
         sponsor_identity_fingerprint: String,
         peer_upgrade_required: bool,
+    },
+    NeedsAttention {
+        join_id: String,
+        reason: JoinSpaceAttentionReason,
+        recovery: JoinSpaceAttentionRecovery,
+        next_retry_at_ms: Option<i64>,
     },
     Rejected {
         join_id: String,
@@ -2226,6 +2247,25 @@ fn map_join_space_status(result: OperationResult) -> Result<JoinSpaceStatus, Bin
             sponsor_identity_fingerprint,
             peer_upgrade_required,
         },
+        uc_engine::JoinSpaceStatusSummary::NeedsAttention {
+            join_id,
+            reason,
+            recovery,
+            next_retry_at_ms,
+        } => JoinSpaceStatus::NeedsAttention {
+            join_id,
+            reason: match reason {
+                uc_engine::JoinSpaceAttentionReasonSummary::OutcomeCannotBeProven => {
+                    JoinSpaceAttentionReason::OutcomeCannotBeProven
+                }
+            },
+            recovery: match recovery {
+                uc_engine::JoinSpaceAttentionRecoverySummary::PreserveDataAndContactSupport => {
+                    JoinSpaceAttentionRecovery::PreserveDataAndContactSupport
+                }
+            },
+            next_retry_at_ms,
+        },
         uc_engine::JoinSpaceStatusSummary::Rejected { join_id, reason } => {
             JoinSpaceStatus::Rejected {
                 join_id,
@@ -2247,6 +2287,21 @@ fn map_join_space_status(result: OperationResult) -> Result<JoinSpaceStatus, Bin
                     }
                     uc_engine::JoinSpaceRejectionReasonSummary::HistoryConflict => {
                         JoinSpaceRejectionReason::HistoryConflict
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::CompletionInvalid => {
+                        JoinSpaceRejectionReason::CompletionInvalid
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::MembershipHistoryInvalid => {
+                        JoinSpaceRejectionReason::MembershipHistoryInvalid
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::SecurityMaterialInvalid => {
+                        JoinSpaceRejectionReason::SecurityMaterialInvalid
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::RelationshipConflict => {
+                        JoinSpaceRejectionReason::RelationshipConflict
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::ActivationStateInvalid => {
+                        JoinSpaceRejectionReason::ActivationStateInvalid
                     }
                     uc_engine::JoinSpaceRejectionReasonSummary::PeerUpgradeRequired => {
                         JoinSpaceRejectionReason::PeerUpgradeRequired
@@ -2884,6 +2939,30 @@ mod tests {
                 sponsor_device_id: "sponsor-id".into(),
                 sponsor_identity_fingerprint: "sponsor-fingerprint".into(),
                 peer_upgrade_required: false,
+            }
+        );
+    }
+
+    #[test]
+    fn join_space_mapping_preserves_attention_recovery_contract() {
+        let status = map_join_space_status(OperationResult::JoinSpace(
+            uc_engine::JoinSpaceStatusSummary::NeedsAttention {
+                join_id: "join-id".into(),
+                reason: uc_engine::JoinSpaceAttentionReasonSummary::OutcomeCannotBeProven,
+                recovery:
+                    uc_engine::JoinSpaceAttentionRecoverySummary::PreserveDataAndContactSupport,
+                next_retry_at_ms: None,
+            },
+        ))
+        .expect("attention join-space result must map");
+
+        assert_eq!(
+            status,
+            JoinSpaceStatus::NeedsAttention {
+                join_id: "join-id".into(),
+                reason: JoinSpaceAttentionReason::OutcomeCannotBeProven,
+                recovery: JoinSpaceAttentionRecovery::PreserveDataAndContactSupport,
+                next_retry_at_ms: None,
             }
         );
     }

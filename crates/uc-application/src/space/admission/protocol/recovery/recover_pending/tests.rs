@@ -361,7 +361,7 @@ async fn authenticated_old_layout_is_persisted_as_an_explicit_upgrade_rejection(
 }
 
 #[tokio::test]
-async fn prepared_join_keeps_its_exact_request_until_the_upgraded_peer_recovers() {
+async fn prepared_join_expires_instead_of_reopening_after_its_deadline() {
     let pair = SpaceAdmissionProtocolTestPair::upgrade_once_on_prepared().await;
     pair.joiner()
         .start_join_at(join_input("upgrade-prepared"), 1_000)
@@ -404,6 +404,7 @@ async fn prepared_join_keeps_its_exact_request_until_the_upgraded_peer_recovers(
     assert_eq!(pair.active_joiner_observation_count(), 0);
     assert_eq!(pair.admission_status_invalidation_count(), after_block);
 
+    pair.set_now_ms(301_000);
     let resumed = pair
         .joiner()
         .recover_pending(AdmissionRecoveryTrigger::StateChanged)
@@ -411,9 +412,12 @@ async fn prepared_join_keeps_its_exact_request_until_the_upgraded_peer_recovers(
 
     assert_eq!(resumed.peer_upgrade_required_count, 0);
     assert_eq!(resumed.recovery_required_count, 0);
-    assert_eq!(pair.active_joiner_observation_count(), 1);
+    assert_eq!(pair.active_joiner_observation_count(), 0);
     assert_eq!(pair.admission_status_invalidation_count(), after_block + 1);
-    assert!(!pair.saved_join().peer_upgrade_required());
+    assert_eq!(
+        pair.saved_join().termination_reason(),
+        Some(uc_core::membership::SpaceAdmissionTerminationReason::Expired)
+    );
 }
 
 #[tokio::test]
@@ -666,12 +670,103 @@ async fn invalid_activation_is_saved_as_a_terminal_rejection() {
     assert_eq!(report.deferred_count, 0);
     assert_eq!(
         pair.saved_join().rejection_reason(),
-        Some(uc_core::membership::SpaceAdmissionRejectionReason::HistoryConflict)
+        Some(uc_core::membership::SpaceAdmissionRejectionReason::RelationshipConflict)
+    );
+    assert_eq!(
+        pair.saved_join()
+            .pending_exchange()
+            .expect("terminal rejection must remain deliverable to the Sponsor")
+            .request_envelope()
+            .kind(),
+        uc_core::membership::SpaceAdmissionMessageKind::Abandonment
     );
     assert!(pair.events().ends_with(&[
         ProtocolEvent::JoinerAppliedExchanged,
         ProtocolEvent::JoinerSavedRejected,
     ]));
+
+    let delivered = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    assert_eq!(delivered.advanced_count, 1);
+    assert!(pair
+        .events()
+        .contains(&ProtocolEvent::JoinerAbandonmentExchanged));
+    assert!(pair.saved_join().pending_exchange().is_none());
+    assert_eq!(
+        pair.saved_join().rejection_reason(),
+        Some(uc_core::membership::SpaceAdmissionRejectionReason::RelationshipConflict)
+    );
+}
+
+#[tokio::test]
+async fn lost_rejection_notification_retries_from_the_saved_terminal_result() {
+    let pair =
+        SpaceAdmissionProtocolTestPair::receiving_invalid_activation_with_lost_abandonment().await;
+    pair.joiner()
+        .start_join_at(join_input("lost-rejection-notification"), 1_000)
+        .await
+        .expect("the join request should be saved before recovery");
+
+    let rejected = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+    assert_eq!(rejected.rejected_count, 1);
+
+    let lost = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+    assert_eq!(lost.deferred_count, 1);
+    let saved_retry = *pair
+        .saved_join()
+        .pending_exchange()
+        .expect("the terminal notification remains pending")
+        .retry_state();
+    assert_eq!(saved_retry.attempt_count(), 1);
+    let attempts_after_loss = pair
+        .events()
+        .iter()
+        .filter(|event| matches!(event, ProtocolEvent::JoinerAbandonmentExchanged))
+        .count();
+    assert_eq!(attempts_after_loss, 1);
+
+    let early = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+    assert_eq!(early.advanced_count, 0);
+    assert_eq!(early.deferred_count, 0);
+    assert_eq!(
+        pair.events()
+            .iter()
+            .filter(|event| matches!(event, ProtocolEvent::JoinerAbandonmentExchanged))
+            .count(),
+        attempts_after_loss
+    );
+
+    pair.set_now_ms(saved_retry.next_attempt_at_ms());
+    let delivered = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    assert_eq!(delivered.advanced_count, 1);
+    assert!(pair.saved_join().pending_exchange().is_none());
+    assert_eq!(
+        pair.events()
+            .iter()
+            .filter(|event| matches!(event, ProtocolEvent::JoinerAbandonmentExchanged))
+            .count(),
+        2
+    );
+    assert_eq!(
+        pair.saved_join().rejection_reason(),
+        Some(uc_core::membership::SpaceAdmissionRejectionReason::RelationshipConflict)
+    );
 }
 
 #[tokio::test]

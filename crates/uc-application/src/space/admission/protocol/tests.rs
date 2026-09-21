@@ -1,6 +1,5 @@
 use uc_core::membership::{
     AdmissionRecordPersistence, SpaceAdmissionMessageKind, SponsorAbandonmentCleanup,
-    SponsorPairingConfirmationStatus,
 };
 
 use super::sponsor::HandleAuthenticatedSpaceAdmissionMessagePort;
@@ -37,6 +36,20 @@ async fn ordinary_work_permit_serializes_a_new_pairing_request() {
     request
         .await
         .expect("pairing request should continue after ordinary work finishes");
+}
+
+#[tokio::test]
+async fn ambiguous_saved_pairing_blocks_ordinary_work_with_needs_attention() {
+    let pair = SpaceAdmissionProtocolTestPair::fresh().await;
+    pair.mark_sponsor_recovery_required();
+
+    let permit = pair
+        .sponsor()
+        .acquire_space_work_permit()
+        .await
+        .expect("the saved ambiguity should have a stable work mode");
+
+    assert_eq!(permit.mode(), SpaceWorkMode::NeedsAttention);
 }
 
 #[tokio::test]
@@ -187,7 +200,7 @@ async fn late_abandonment_for_an_older_stage_cannot_end_the_advanced_attempt() {
 }
 
 #[tokio::test]
-async fn applied_abandonment_without_claimed_binding_keeps_a_lookup_target() {
+async fn applied_abandonment_discards_only_uncommitted_preparation() {
     let pair = SpaceAdmissionProtocolTestPair::fresh().await;
     let candidate = pair
         .sponsor()
@@ -229,20 +242,17 @@ async fn applied_abandonment_without_claimed_binding_keeps_a_lookup_target() {
 
     assert!(matches!(
         abandoned.abandonment_cleanup(),
-        Some(SponsorAbandonmentCleanup::Unknown { .. })
+        Some(SponsorAbandonmentCleanup::NotRequired)
     ));
     pair.seed_sponsor(abandoned);
 
     let recovery = pair.recover_sponsor().await;
 
-    assert_eq!(recovery.advanced_count, 1);
+    assert_eq!(recovery.advanced_count, 0);
     assert_eq!(recovery.deferred_count, 0);
     assert_eq!(recovery.recovery_required_count, 0);
     assert!(pair.sponsor_abandonment_cleanup_complete());
-    assert!(pair.events().ends_with(&[
-        ProtocolEvent::SponsorMemberRevoked,
-        ProtocolEvent::SponsorAbandonmentCleanupCompleted,
-    ]));
+    assert!(!pair.events().contains(&ProtocolEvent::SponsorMemberRevoked));
 }
 
 #[tokio::test]
@@ -418,7 +428,7 @@ async fn sponsor_publishes_membership_only_after_complete_ack() {
 }
 
 #[tokio::test]
-async fn sponsor_keeps_the_member_unconfirmed_and_accepts_a_late_complete_ack() {
+async fn sponsor_expires_an_uncommitted_candidate_and_rejects_a_late_complete_ack() {
     let pair = SpaceAdmissionProtocolTestPair::fresh().await;
     let candidate = pair
         .sponsor()
@@ -454,21 +464,14 @@ async fn sponsor_keeps_the_member_unconfirmed_and_accepts_a_late_complete_ack() 
     let report = pair.recover_sponsor().await;
 
     assert_eq!(report.advanced_count, 1);
-    assert_eq!(
-        pair.sponsor_confirmation_status(),
-        Some(SponsorPairingConfirmationStatus::Unconfirmed)
-    );
+    assert!(pair.sponsor_is_terminal());
+    assert!(pair.sponsor_abandonment_cleanup_complete());
 
-    let settled = pair
-        .sponsor()
-        .handle(late_ack)
-        .await
-        .expect("late CompleteAck should still settle the exact admission");
-    pair.seed_sponsor(settled.into_admission());
-    assert_eq!(
-        pair.sponsor_confirmation_status(),
-        Some(SponsorPairingConfirmationStatus::Confirmed)
-    );
+    let late = pair.sponsor().handle(late_ack).await;
+    assert!(late.is_err());
+    assert!(!pair
+        .events()
+        .contains(&ProtocolEvent::SponsorMembershipActivated));
 }
 
 #[tokio::test]
@@ -490,7 +493,27 @@ async fn sponsor_unfinished_attempt_ends_itself_at_the_shared_deadline() {
 }
 
 #[tokio::test]
-async fn duplicate_complete_ack_replays_settled_without_a_new_commit() {
+async fn due_sponsor_candidate_still_excludes_ordinary_membership_work() {
+    let pair = SpaceAdmissionProtocolTestPair::fresh().await;
+    let candidate = pair
+        .sponsor()
+        .handle(authenticated_join_request())
+        .await
+        .expect("JoinRequest should produce Candidate");
+    pair.seed_sponsor(candidate.into_admission());
+    pair.set_now_ms(301_000);
+
+    let permit = pair
+        .sponsor()
+        .acquire_space_work_permit()
+        .await
+        .expect("the due candidate should remain queryable before recovery ends it");
+
+    assert_eq!(permit.mode(), SpaceWorkMode::Pairing);
+}
+
+#[tokio::test]
+async fn duplicate_complete_ack_replays_settled_after_the_deadline_without_rollback() {
     let pair = SpaceAdmissionProtocolTestPair::fresh().await;
     let candidate = pair
         .sponsor()
@@ -537,6 +560,11 @@ async fn duplicate_complete_ack_replays_settled_without_a_new_commit() {
         .header()
         .message_id();
     pair.seed_sponsor(settled.into_admission());
+    pair.set_now_ms(301_000);
+
+    let after_deadline = pair.recover_sponsor().await;
+    assert_eq!(after_deadline.advanced_count, 0);
+    assert_eq!(after_deadline.terminated_count, 0);
 
     let replay = pair
         .sponsor()

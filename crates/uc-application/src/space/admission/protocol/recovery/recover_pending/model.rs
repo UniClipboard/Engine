@@ -73,6 +73,8 @@ pub struct LoadedAdmissionRecovery {
     next_deadline_ms: Option<i64>,
     /// 邀请方仍在等待加入方的最终确认
     sponsor_confirmation_pending: bool,
+    /// 旧记录缺少安全自动收尾所需的持久证据
+    needs_attention: bool,
 }
 
 pub struct AuthenticatedAdmissionReply {
@@ -143,6 +145,7 @@ impl LoadedAdmissionRecovery {
         sponsor_abandonments: Vec<LoadedSponsorAbandonment>,
         next_deadline_ms: Option<i64>,
         sponsor_confirmation_pending: bool,
+        needs_attention: bool,
     ) -> Self {
         Self {
             pending_admissions,
@@ -150,6 +153,7 @@ impl LoadedAdmissionRecovery {
             sponsor_abandonments,
             next_deadline_ms,
             sponsor_confirmation_pending,
+            needs_attention,
         }
     }
 
@@ -161,6 +165,7 @@ impl LoadedAdmissionRecovery {
         Vec<LoadedSponsorAbandonment>,
         Option<i64>,
         bool,
+        bool,
     ) {
         (
             self.pending_admissions,
@@ -168,6 +173,7 @@ impl LoadedAdmissionRecovery {
             self.sponsor_abandonments,
             self.next_deadline_ms,
             self.sponsor_confirmation_pending,
+            self.needs_attention,
         )
     }
 
@@ -175,16 +181,30 @@ impl LoadedAdmissionRecovery {
         self.pending_admissions.is_empty()
             && self.sponsor_deadlines.is_empty()
             && self.sponsor_abandonments.is_empty()
+            && !self.needs_attention
     }
 
     pub fn pairing_in_progress(&self) -> bool {
-        !self.pending_admissions.is_empty() || self.sponsor_confirmation_pending
+        !self.pending_admissions.is_empty()
+            || !self.sponsor_deadlines.is_empty()
+            || self.sponsor_confirmation_pending
+    }
+
+    pub fn work_mode(&self) -> SpaceWorkMode {
+        if self.needs_attention {
+            SpaceWorkMode::NeedsAttention
+        } else if self.pairing_in_progress() {
+            SpaceWorkMode::Pairing
+        } else {
+            SpaceWorkMode::Active
+        }
     }
 
     pub fn len(&self) -> usize {
         self.pending_admissions.len()
             + self.sponsor_deadlines.len()
             + self.sponsor_abandonments.len()
+            + usize::from(self.needs_attention)
     }
 
     pub fn into_pending_admissions(self) -> Vec<LoadedPendingAdmission> {

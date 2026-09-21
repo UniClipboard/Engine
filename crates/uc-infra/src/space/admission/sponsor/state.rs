@@ -90,6 +90,7 @@ impl<E: DbExecutor + Send + Sync> SponsorAdmissionStatePort for SqliteSpaceAdmis
                             token,
                         ));
                     }
+                    ensure_no_unsettled_attempt(self, &state)?;
                     let invitation_id =
                         join_request_invitation_id(message.envelope()).map_err(into_anyhow)?;
                     if state.claimed_invitations.contains_key(&invitation_id) {
@@ -151,6 +152,7 @@ impl<E: DbExecutor + Send + Sync> SponsorAdmissionStatePort for SqliteSpaceAdmis
                                 .map_err(into_anyhow)?;
                             state.records.insert(admission_id, sealed);
                         } else {
+                            ensure_no_unsettled_attempt(self, &state)?;
                             let preparation =
                                 replacement.sponsor_candidate_preparation().ok_or_else(|| {
                                     into_anyhow(SpaceAdmissionStateStoreError::Corrupt)
@@ -191,6 +193,21 @@ impl<E: DbExecutor + Send + Sync> SponsorAdmissionStatePort for SqliteSpaceAdmis
         })
         .await
     }
+}
+
+fn ensure_no_unsettled_attempt<E: DbExecutor>(
+    store: &SqliteSpaceAdmissionState<E>,
+    state: &super::super::repository::PersistedSpaceAdmissionRepositoryV2,
+) -> Result<(), anyhow::Error> {
+    for (admission_id, stored) in &state.records {
+        let record = store
+            .open_record(*admission_id, stored)
+            .map_err(into_anyhow)?;
+        if record.has_unsettled_admission_work() {
+            return Err(into_anyhow(SpaceAdmissionStateStoreError::Conflict));
+        }
+    }
+    Ok(())
 }
 
 fn join_request_invitation_id(

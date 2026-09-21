@@ -95,6 +95,7 @@ impl QueryDeviceTrustUseCase {
             .load_admission_display(&confirmation_targets)
             .await?;
         let current_join = admission_display.current_join;
+        let inbound_pairings = admission_display.inbound_pairings;
         let pending_inbound_member = admission_display.pending_inbound_member;
         let mut pairing_confirmations = BTreeMap::new();
         for observation in admission_display.pairing_confirmations {
@@ -265,6 +266,7 @@ impl QueryDeviceTrustUseCase {
             },
             current_change,
             current_join,
+            inbound_pairings,
             pending_inbound_member,
             maintenance_health,
             devices,

@@ -236,6 +236,7 @@ struct RecordingSponsorState {
     events: Arc<Mutex<Vec<ProtocolEvent>>>,
     current: Mutex<Option<SponsorAdmission>>,
     fail_next_settlement_commit: AtomicBool,
+    needs_attention: AtomicBool,
 }
 
 struct FixedSponsorCandidate;
@@ -270,6 +271,7 @@ enum TransportMode {
     AuthenticateThenCandidateAndCommit,
     AuthenticateThenCandidateCommitAndComplete,
     AuthenticateThenCandidateCommitAndInvalidActivation,
+    AuthenticateThenCandidateCommitInvalidActivationAndLoseAbandonmentOnce,
     UpgradeOnceOnPrepared,
     UpgradeOnceOnApplied,
     UpgradeOnceOnCancel,
@@ -293,6 +295,7 @@ impl TransportMode {
             self,
             Self::AuthenticateThenCandidateCommitAndComplete
                 | Self::AuthenticateThenCandidateCommitAndInvalidActivation
+                | Self::AuthenticateThenCandidateCommitInvalidActivationAndLoseAbandonmentOnce
                 | Self::UpgradeOnceOnPrepared
                 | Self::UpgradeOnceOnApplied
                 | Self::UpgradeOnceOnCancel
@@ -309,6 +312,7 @@ struct RecordingSpaceAdmissionTransport {
     events: Arc<Mutex<Vec<ProtocolEvent>>>,
     mode: TransportMode,
     upgrade_pending: Arc<AtomicBool>,
+    abandonment_failure_pending: Arc<AtomicBool>,
 }
 
 struct ExchangeThenDeferred {
@@ -320,6 +324,7 @@ struct ExchangeThenDeferred {
     settled_reply: bool,
     upgrade_on: Option<SpaceAdmissionMessageKind>,
     upgrade_pending: Arc<AtomicBool>,
+    abandonment_failure_pending: Arc<AtomicBool>,
     authentication_rejected: bool,
 }
 
@@ -661,6 +666,7 @@ impl PendingAdmissionRecoveryStatePort for RecordingJoinerStartState {
             Vec::new(),
             None,
             false,
+            false,
         ))
     }
 
@@ -883,12 +889,14 @@ impl SpaceAdmissionTransportPort for RecordingSpaceAdmissionTransport {
                     | TransportMode::AuthenticateThenCandidateAndCommit
                     | TransportMode::AuthenticateThenCandidateCommitAndComplete
                     | TransportMode::AuthenticateThenCandidateCommitAndInvalidActivation
+                    | TransportMode::AuthenticateThenCandidateCommitInvalidActivationAndLoseAbandonmentOnce
             ) || self.mode.upgrade_on().is_some(),
             commit_reply: false,
             complete_reply: false,
             settled_reply: false,
             upgrade_on: self.mode.upgrade_on(),
             upgrade_pending: Arc::clone(&self.upgrade_pending),
+            abandonment_failure_pending: Arc::clone(&self.abandonment_failure_pending),
             authentication_rejected: matches!(self.mode, TransportMode::AuthenticateThenReject),
         }))
     }
@@ -905,6 +913,7 @@ impl SpaceAdmissionTransportPort for RecordingSpaceAdmissionTransport {
             TransportMode::AuthenticateThenCandidateAndCommit
                 | TransportMode::AuthenticateThenCandidateCommitAndComplete
                 | TransportMode::AuthenticateThenCandidateCommitAndInvalidActivation
+                | TransportMode::AuthenticateThenCandidateCommitInvalidActivationAndLoseAbandonmentOnce
         ) && self.mode.upgrade_on().is_none()
         {
             return Err(SpaceAdmissionTransportError::Deferred);
@@ -922,6 +931,7 @@ impl SpaceAdmissionTransportPort for RecordingSpaceAdmissionTransport {
             settled_reply: self.mode.supports_complete_protocol(),
             upgrade_on: self.mode.upgrade_on(),
             upgrade_pending: Arc::clone(&self.upgrade_pending),
+            abandonment_failure_pending: Arc::clone(&self.abandonment_failure_pending),
             authentication_rejected: false,
         }))
     }
@@ -1083,6 +1093,12 @@ impl AuthenticatedAdmissionExchangePort for ExchangeThenDeferred {
                 .lock()
                 .expect("event recorder is available")
                 .push(ProtocolEvent::JoinerAbandonmentExchanged);
+            if self
+                .abandonment_failure_pending
+                .swap(false, Ordering::SeqCst)
+            {
+                return Err(SpaceAdmissionTransportError::Deferred);
+            }
             let request_digest: [u8; 32] = Sha256::digest(
                 request
                     .encode_canonical_v1()
@@ -1251,7 +1267,14 @@ impl PendingAdmissionRecoveryStatePort for RecordingSponsorState {
     ) -> Result<LoadedAdmissionRecovery, PendingAdmissionRecoveryStateError> {
         let current = self.current.lock().expect("sponsor state is available");
         let Some(current) = current.as_ref() else {
-            return Ok(LoadedAdmissionRecovery::default());
+            return Ok(LoadedAdmissionRecovery::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                None,
+                false,
+                self.needs_attention.load(Ordering::SeqCst),
+            ));
         };
         let is_abandonment = current.abandonment_cleanup().is_some_and(|cleanup| {
             !matches!(
@@ -1275,6 +1298,7 @@ impl PendingAdmissionRecoveryStatePort for RecordingSponsorState {
                 Vec::new(),
                 next_deadline,
                 awaiting_confirmation,
+                self.needs_attention.load(Ordering::SeqCst),
             ));
         }
         let persisted = current
@@ -1295,6 +1319,7 @@ impl PendingAdmissionRecoveryStatePort for RecordingSponsorState {
                 vec![LoadedSponsorAbandonment::new(reopened, token)],
                 None,
                 false,
+                self.needs_attention.load(Ordering::SeqCst),
             )
         } else {
             LoadedAdmissionRecovery::new(
@@ -1303,6 +1328,7 @@ impl PendingAdmissionRecoveryStatePort for RecordingSponsorState {
                 Vec::new(),
                 None,
                 false,
+                self.needs_attention.load(Ordering::SeqCst),
             )
         })
     }
@@ -1619,9 +1645,10 @@ impl PrepareJoinerActivationPort for FixedJoinerActivation {
         );
         assert_eq!(complete.kind(), SpaceAdmissionMessageKind::Complete);
         if self.reject_preparation {
-            return Err(PrepareJoinerActivationError::invalid(anyhow::anyhow!(
-                "invalid activation fixture"
-            )));
+            return Err(PrepareJoinerActivationError::invalid_for(
+                uc_core::membership::SpaceAdmissionRejectionReason::RelationshipConflict,
+                anyhow::anyhow!("invalid activation fixture"),
+            ));
         }
         Ok(PreparedJoinerActivation::new(
             uc_core::membership::AdmissionSpaceTransition::from_bytes(vec![0xb8; 128])
@@ -1750,6 +1777,14 @@ impl SpaceAdmissionProtocolTestPair {
         .await
     }
 
+    pub(super) async fn receiving_invalid_activation_with_lost_abandonment() -> Self {
+        Self::with_mode(
+            None,
+            TransportMode::AuthenticateThenCandidateCommitInvalidActivationAndLoseAbandonmentOnce,
+        )
+        .await
+    }
+
     pub(super) async fn upgrade_once_on_prepared() -> Self {
         Self::with_mode(None, TransportMode::UpgradeOnceOnPrepared).await
     }
@@ -1781,6 +1816,10 @@ impl SpaceAdmissionProtocolTestPair {
     ) -> Self {
         let events = Arc::new(Mutex::new(Vec::new()));
         let upgrade_pending = Arc::new(AtomicBool::new(mode.upgrade_on().is_some()));
+        let abandonment_failure_pending = Arc::new(AtomicBool::new(matches!(
+            mode,
+            TransportMode::AuthenticateThenCandidateCommitInvalidActivationAndLoseAbandonmentOnce
+        )));
         let admission_status_invalidations = Arc::new(AtomicUsize::new(0));
         let clock = Arc::new(FixedAdmissionClock(AtomicI64::new(1_000)));
         let (space_transition_wake, space_transition_changes) = tokio::sync::watch::channel(());
@@ -1804,12 +1843,14 @@ impl SpaceAdmissionProtocolTestPair {
             events: Arc::clone(&events),
             current: Mutex::new(None),
             fail_next_settlement_commit: AtomicBool::new(false),
+            needs_attention: AtomicBool::new(false),
         });
         let joiner_activation = Arc::new(FixedJoinerActivation {
             events: Arc::clone(&events),
             reject_preparation: matches!(
                 mode,
                 TransportMode::AuthenticateThenCandidateCommitAndInvalidActivation
+                    | TransportMode::AuthenticateThenCandidateCommitInvalidActivationAndLoseAbandonmentOnce
             ),
         });
         let sponsor_complete = Arc::new(FixedSponsorComplete {
@@ -1862,6 +1903,7 @@ impl SpaceAdmissionProtocolTestPair {
                         events: Arc::clone(&events),
                         mode,
                         upgrade_pending: Arc::clone(&upgrade_pending),
+                        abandonment_failure_pending: Arc::clone(&abandonment_failure_pending),
                     }),
                     Arc::clone(&host_events),
                     clock.clone(),
@@ -1913,6 +1955,7 @@ impl SpaceAdmissionProtocolTestPair {
                         events: Arc::clone(&events),
                         mode: TransportMode::DeferInitial,
                         upgrade_pending: Arc::new(AtomicBool::new(false)),
+                        abandonment_failure_pending: Arc::new(AtomicBool::new(false)),
                     }),
                     host_events,
                     clock.clone(),
@@ -1963,20 +2006,16 @@ impl SpaceAdmissionProtocolTestPair {
             .store(true, Ordering::SeqCst);
     }
 
+    pub(super) fn mark_sponsor_recovery_required(&self) {
+        self.sponsor_state
+            .needs_attention
+            .store(true, Ordering::SeqCst);
+    }
+
     pub(super) async fn recover_sponsor(&self) -> AdmissionRecoveryReport {
         self.sponsor
             .recover_pending(AdmissionRecoveryTrigger::Periodic)
             .await
-    }
-
-    pub(super) fn sponsor_confirmation_status(&self) -> Option<SponsorPairingConfirmationStatus> {
-        self.sponsor_state
-            .current
-            .lock()
-            .expect("sponsor state is available")
-            .as_ref()
-            .and_then(SponsorAdmission::pairing_confirmation)
-            .map(|summary| summary.status())
     }
 
     pub(super) fn sponsor_is_terminal(&self) -> bool {

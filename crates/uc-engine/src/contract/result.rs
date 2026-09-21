@@ -394,9 +394,26 @@ pub enum JoinSpaceRejectionReasonSummary {
     BaseHistoryChanged,
     JoinerHistoryAhead,
     HistoryConflict,
+    CompletionInvalid,
+    MembershipHistoryInvalid,
+    SecurityMaterialInvalid,
+    RelationshipConflict,
+    ActivationStateInvalid,
     PeerUpgradeRequired,
     Cancelled,
     RemovedBeforeActivation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinSpaceAttentionReasonSummary {
+    OutcomeCannotBeProven,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinSpaceAttentionRecoverySummary {
+    PreserveDataAndContactSupport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -421,6 +438,12 @@ pub enum JoinSpaceStatusSummary {
         sponsor_device_id: String,
         sponsor_identity_fingerprint: String,
         peer_upgrade_required: bool,
+    },
+    NeedsAttention {
+        join_id: String,
+        reason: JoinSpaceAttentionReasonSummary,
+        recovery: JoinSpaceAttentionRecoverySummary,
+        next_retry_at_ms: Option<i64>,
     },
     Rejected {
         join_id: String,
@@ -1221,6 +1244,23 @@ pub struct PendingInboundMemberSummary {
     pub display_name: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundPairingStatusSummary {
+    AwaitingConfirmation,
+    ConfirmationMissed,
+    NeedsAttention,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundPairingSummary {
+    pub pairing_id: String,
+    pub device_id: Option<String>,
+    pub display_name: Option<String>,
+    pub status: InboundPairingStatusSummary,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MembershipMaintenanceHealthPhaseSummary {
@@ -1260,6 +1300,8 @@ pub struct DeviceTrustSnapshotSummary {
     pub local_membership: DeviceMembershipSummary,
     pub current_change: Option<DeviceTrustChangeSummary>,
     pub current_join: Option<JoinSpaceStatusSummary>,
+    #[serde(default)]
+    pub inbound_pairings: Vec<InboundPairingSummary>,
     pub pending_inbound_member: Option<PendingInboundMemberSummary>,
     #[serde(default)]
     pub maintenance_health: MembershipMaintenanceHealthSummary,
@@ -1278,6 +1320,7 @@ impl DeviceTrustSnapshotSummary {
             local_membership: DeviceMembershipSummary::Unavailable,
             current_change: None,
             current_join: None,
+            inbound_pairings: Vec::new(),
             pending_inbound_member: None,
             maintenance_health: MembershipMaintenanceHealthSummary::default(),
             devices: Vec::new(),

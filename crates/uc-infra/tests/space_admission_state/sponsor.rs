@@ -213,6 +213,26 @@ async fn one_invitation_cannot_start_two_sponsor_admissions() {
 }
 
 #[tokio::test]
+async fn unsettled_sponsor_attempt_blocks_a_new_invitation_attempt() {
+    let fixture = Fixture::new();
+    let store = sponsor_store(&fixture);
+    let first_message = authenticated_join_request(0x71, 0x72);
+    let first = SponsorAdmissionStatePort::load(&store, &first_message)
+        .await
+        .unwrap();
+    let (token, mutation) = accepted_mutation(first_message, first);
+    SponsorAdmissionStatePort::commit(&store, token, mutation)
+        .await
+        .unwrap();
+
+    let second_message = authenticated_join_request(0x73, 0x74);
+    assert!(matches!(
+        SponsorAdmissionStatePort::load(&store, &second_message).await,
+        Err(SponsorAdmissionStateError::StateChanged { .. })
+    ));
+}
+
+#[tokio::test]
 async fn sponsor_payload_does_not_expose_invitation_or_membership_history() {
     let fixture = Fixture::new();
     let store = sponsor_store(&fixture);
@@ -376,7 +396,7 @@ async fn sponsor_abandonment_cleanup_survives_restart_and_commits_once() {
         PendingAdmissionRecoveryStatePort::load(&reopened, AdmissionRecoveryTrigger::Startup, 0)
             .await
             .expect("pending abandonment loads after restart");
-    let (_, _, mut pending, _, _) = recovery.into_parts();
+    let (_, _, mut pending, _, _, _) = recovery.into_parts();
     assert_eq!(pending.len(), 1);
     let (abandoned, recovery_token) = pending.pop().expect("one pending abandonment").into_parts();
     let completed = abandoned

@@ -312,7 +312,9 @@ fn unrecoverable_activation_remains_queryable_as_a_failed_join_after_restart() {
                     .into_pending_admissions();
                     let (joiner, token) = pending.into_iter().next().unwrap().into_parts();
                     let join_id = *joiner.join_id().as_bytes();
-                    let failed = joiner.reject_history_conflict().unwrap();
+                    let failed = joiner
+                        .reject_activation(SpaceAdmissionRejectionReason::HistoryConflict)
+                        .unwrap();
                     PendingAdmissionRecoveryStatePort::commit(&fixture.store, token, failed)
                         .await
                         .unwrap();

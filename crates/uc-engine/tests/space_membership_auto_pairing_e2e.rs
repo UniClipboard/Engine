@@ -5252,6 +5252,9 @@ async fn wait_for_completed_join(
             }
             JoinSpaceStatusSummary::Pending { .. } => {}
             JoinSpaceStatusSummary::Processing { .. } => {}
+            JoinSpaceStatusSummary::NeedsAttention { .. } => {
+                panic!("admission requires explicit recovery")
+            }
         }
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -5981,6 +5984,7 @@ fn join_status_id(status: &JoinSpaceStatusSummary) -> &str {
         JoinSpaceStatusSummary::Active { join_id, .. }
         | JoinSpaceStatusSummary::Pending { join_id, .. }
         | JoinSpaceStatusSummary::Processing { join_id, .. }
+        | JoinSpaceStatusSummary::NeedsAttention { join_id, .. }
         | JoinSpaceStatusSummary::Rejected { join_id, .. }
         | JoinSpaceStatusSummary::Terminated { join_id, .. } => join_id,
     }

@@ -15,7 +15,8 @@ use uc_core::membership::{
     AdmissionSpaceTransitionResult, AdmissionSpaceTransitionV2,
     HistoricalMembershipSignatureVerifier, MembershipOperationV2, PendingAdmissionExchange,
     PendingGroupUpdate, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
-    SpaceAdmissionMessageKind, SpaceAdmissionRoute, VersionedMembershipHistory,
+    SpaceAdmissionMessageKind, SpaceAdmissionRejectionReason, SpaceAdmissionRoute,
+    VersionedMembershipHistory,
 };
 use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -84,21 +85,25 @@ impl PrepareJoinerActivationPort for DefaultJoinerActivationPreparation {
         observe_local_result(LocalWorkStep::JoinerPrepareActivation, async {
             let commit = match preparation.exact_commit().body() {
                 SpaceAdmissionBodyV1::Commit(commit) => commit,
-                _ => return Err(invalid_plan("the saved Joiner message is not Commit")),
+                _ => return Err(invalid_state("the saved Joiner message is not Commit")),
             };
             let applied = match preparation.applied_request().body() {
                 SpaceAdmissionBodyV1::Applied(applied) => applied,
-                _ => return Err(invalid_plan("the saved Joiner request is not Applied")),
+                _ => return Err(invalid_state("the saved Joiner request is not Applied")),
             };
             let completion = match complete.body() {
                 SpaceAdmissionBodyV1::Complete(complete) => complete.completion(),
-                _ => return Err(invalid_plan("the Joiner activation input is not Complete")),
+                _ => {
+                    return Err(invalid_completion(
+                        "the Joiner activation input is not Complete",
+                    ))
+                }
             };
             if complete.header().admission_id() != admission_id
                 || complete.header().predecessor_message_id()
                     != Some(preparation.applied_request().header().message_id())
             {
-                return Err(invalid_plan(
+                return Err(invalid_completion(
                     "the Complete envelope is not bound to Applied",
                 ));
             }
@@ -108,25 +113,25 @@ impl PrepareJoinerActivationPort for DefaultJoinerActivationPreparation {
                 commit.target_membership_history().as_bytes(),
                 self.history_verifier.as_ref(),
             )
-            .map_err(|error| PrepareJoinerActivationError::invalid(anyhow::Error::new(error)))?;
+            .map_err(|error| invalid_membership(error))?;
             history
                 .verify_and_record_activation_receipt(
                     receipt.clone(),
                     self.history_verifier.as_ref(),
                 )
-                .map_err(|error| {
-                    PrepareJoinerActivationError::invalid(anyhow::Error::new(error))
-                })?;
-            if history
-                .current_position()
-                .map_err(|error| PrepareJoinerActivationError::invalid(anyhow::Error::new(error)))?
+                .map_err(invalid_membership)?;
+            if history.current_position().map_err(invalid_membership)?
                 != completion.completed_history_position
             {
-                return Err(invalid_plan("the Complete history position is invalid"));
+                return Err(invalid_membership_message(
+                    "the Complete history position is invalid",
+                ));
             }
             let sponsor_credential = history
                 .credential_for(completion.completed_by_member_instance_id)
-                .ok_or_else(|| invalid_plan("the Complete signer is not in membership history"))?;
+                .ok_or_else(|| {
+                    invalid_membership_message("the Complete signer is not in membership history")
+                })?;
             if sponsor_credential.credential_id != completion.completed_by_credential_id
                 || !self
                     .history_verifier
@@ -136,19 +141,18 @@ impl PrepareJoinerActivationPort for DefaultJoinerActivationPreparation {
                         &completion.signing_payload(),
                         &completion.signature,
                     )
-                    .map_err(|error| {
-                        PrepareJoinerActivationError::invalid(anyhow::Error::new(error))
-                    })?
+                    .map_err(invalid_membership)?
             {
-                return Err(invalid_plan("the Complete signature is invalid"));
+                return Err(invalid_membership_message(
+                    "the Complete signature is invalid",
+                ));
             }
 
             let mut staged: OwnedJoinerStagedTargetV2 =
-                postcard::from_bytes(preparation.staged_target().as_bytes()).map_err(|error| {
-                    PrepareJoinerActivationError::invalid(anyhow::Error::new(error))
-                })?;
+                postcard::from_bytes(preparation.staged_target().as_bytes())
+                    .map_err(invalid_security)?;
             if staged.format_version != JOINER_STAGED_TARGET_FORMAT_V2 {
-                return Err(invalid_plan(
+                return Err(invalid_security_message(
                     "the staged Joiner target format is unsupported",
                 ));
             }
@@ -160,19 +164,17 @@ impl PrepareJoinerActivationPort for DefaultJoinerActivationPreparation {
                     .lineage_id
                     .as_bytes(),
             )
-            .map_err(|error| PrepareJoinerActivationError::invalid(anyhow::Error::new(error)))?;
+            .map_err(invalid_security)?;
             let recovery = open_recovery_material(
                 admission_id.as_bytes(),
                 &staged.recovery_secret,
                 commit.sealed_recovery_material().as_bytes(),
             )
-            .map_err(|error| PrepareJoinerActivationError::invalid(anyhow::Error::new(error)))?;
+            .map_err(invalid_security)?;
             let sponsor: SponsorCandidateStagedV1 =
-                postcard::from_bytes(&recovery).map_err(|error| {
-                    PrepareJoinerActivationError::invalid(anyhow::Error::new(error))
-                })?;
+                postcard::from_bytes(&recovery).map_err(invalid_security)?;
             if sponsor.format_version != 1 {
-                return Err(invalid_plan(
+                return Err(invalid_security_message(
                     "the recovered Sponsor security format is unsupported",
                 ));
             }
@@ -182,7 +184,11 @@ impl PrepareJoinerActivationPort for DefaultJoinerActivationPreparation {
                     admission.facts.device_id.clone(),
                     admission.facts.member_instance,
                 ),
-                _ => return Err(invalid_plan("the Candidate event is not AddDevice")),
+                _ => {
+                    return Err(invalid_security_message(
+                        "the Candidate event is not AddDevice",
+                    ))
+                }
             };
             let target_relationships = history
                 .active_members()
@@ -231,16 +237,15 @@ impl PrepareJoinerActivationPort for DefaultJoinerActivationPreparation {
                 || transition.target_space_id() != candidate.security_commitment().lineage_id
                 || !transition.is_initial()
             {
-                return Err(invalid_plan(
+                return Err(invalid_state(
                     "the prepared Space transition is inconsistent",
                 ));
             }
             let encoded = transition
                 .encode()
-                .ok_or_else(|| invalid_plan("the prepared Space transition cannot be encoded"))?;
-            let transition = AdmissionSpaceTransition::from_bytes(encoded).map_err(|error| {
-                PrepareJoinerActivationError::invalid(anyhow::Error::new(error))
-            })?;
+                .ok_or_else(|| invalid_state("the prepared Space transition cannot be encoded"))?;
+            let transition = AdmissionSpaceTransition::from_bytes(encoded)
+                .map_err(|error| invalid_state_error(error))?;
             Ok(PreparedJoinerActivation::new(transition))
         })
         .await
@@ -418,15 +423,64 @@ fn validate_completion(
         || completion.security_commitment_id
             != candidate.security_commitment().security_commitment_id
     {
-        return Err(invalid_plan(
+        return Err(invalid_completion(
             "the Complete facts differ from Applied and Commit",
         ));
     }
     Ok(())
 }
 
-fn invalid_plan(message: &'static str) -> PrepareJoinerActivationError {
-    PrepareJoinerActivationError::invalid(anyhow::anyhow!(message))
+fn invalid_completion(message: &'static str) -> PrepareJoinerActivationError {
+    invalid_for(SpaceAdmissionRejectionReason::CompletionInvalid, message)
+}
+
+fn invalid_membership_message(message: &'static str) -> PrepareJoinerActivationError {
+    invalid_for(
+        SpaceAdmissionRejectionReason::MembershipHistoryInvalid,
+        message,
+    )
+}
+
+fn invalid_membership(error: impl Into<anyhow::Error>) -> PrepareJoinerActivationError {
+    PrepareJoinerActivationError::invalid_for(
+        SpaceAdmissionRejectionReason::MembershipHistoryInvalid,
+        error,
+    )
+}
+
+fn invalid_security_message(message: &'static str) -> PrepareJoinerActivationError {
+    invalid_for(
+        SpaceAdmissionRejectionReason::SecurityMaterialInvalid,
+        message,
+    )
+}
+
+fn invalid_security(error: impl Into<anyhow::Error>) -> PrepareJoinerActivationError {
+    PrepareJoinerActivationError::invalid_for(
+        SpaceAdmissionRejectionReason::SecurityMaterialInvalid,
+        error,
+    )
+}
+
+fn invalid_state(message: &'static str) -> PrepareJoinerActivationError {
+    invalid_for(
+        SpaceAdmissionRejectionReason::ActivationStateInvalid,
+        message,
+    )
+}
+
+fn invalid_state_error(error: impl Into<anyhow::Error>) -> PrepareJoinerActivationError {
+    PrepareJoinerActivationError::invalid_for(
+        SpaceAdmissionRejectionReason::ActivationStateInvalid,
+        error,
+    )
+}
+
+fn invalid_for(
+    reason: SpaceAdmissionRejectionReason,
+    message: &'static str,
+) -> PrepareJoinerActivationError {
+    PrepareJoinerActivationError::invalid_for(reason, anyhow::anyhow!(message))
 }
 
 fn map_activation_preparation_error(
@@ -434,7 +488,10 @@ fn map_activation_preparation_error(
 ) -> PrepareJoinerActivationError {
     match error {
         AdmissionSpaceTransitionError::Inconsistent { .. } => {
-            PrepareJoinerActivationError::invalid(anyhow::Error::new(error))
+            PrepareJoinerActivationError::invalid_for(
+                SpaceAdmissionRejectionReason::RelationshipConflict,
+                anyhow::Error::new(error),
+            )
         }
         _ => PrepareJoinerActivationError::unavailable(anyhow::Error::new(error)),
     }
@@ -452,8 +509,38 @@ mod tests {
 
         assert!(matches!(
             error,
-            PrepareJoinerActivationError::Invalid { .. }
+            PrepareJoinerActivationError::Invalid {
+                reason: SpaceAdmissionRejectionReason::RelationshipConflict,
+                ..
+            }
         ));
+    }
+
+    #[test]
+    fn invalid_activation_boundaries_keep_safe_stable_categories() {
+        for (error, expected) in [
+            (
+                invalid_completion("private completion detail"),
+                SpaceAdmissionRejectionReason::CompletionInvalid,
+            ),
+            (
+                invalid_membership_message("private history detail"),
+                SpaceAdmissionRejectionReason::MembershipHistoryInvalid,
+            ),
+            (
+                invalid_security_message("private material detail"),
+                SpaceAdmissionRejectionReason::SecurityMaterialInvalid,
+            ),
+            (
+                invalid_state("private state detail"),
+                SpaceAdmissionRejectionReason::ActivationStateInvalid,
+            ),
+        ] {
+            assert!(matches!(
+                error,
+                PrepareJoinerActivationError::Invalid { reason, .. } if reason == expected
+            ));
+        }
     }
 }
 

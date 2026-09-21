@@ -30,9 +30,10 @@ pub use adapters::{SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntime
 pub(crate) use admission::SpaceAdmissionObservationRegistry;
 pub use admission::{
     CancelInvitationError, CancelSpaceJoinError, CompletePendingSpaceTransitionError,
-    CurrentJoinStatus, JoinSpaceError, JoinSpaceInput, JoinSpaceResult, JoinSpaceTerminationReason,
-    JoinedSpace, PairingInvitationAddressCandidate, PendingInboundMember,
-    QueryPairingInvitationAddressesError, QueryPendingSpaceTransitionError,
+    CurrentJoinStatus, InboundPairing, InboundPairingStatus, JoinSpaceAttentionReason,
+    JoinSpaceAttentionRecovery, JoinSpaceError, JoinSpaceInput, JoinSpaceResult,
+    JoinSpaceTerminationReason, JoinedSpace, PairingInvitationAddressCandidate,
+    PendingInboundMember, QueryPairingInvitationAddressesError, QueryPendingSpaceTransitionError,
 };
 pub use connectivity::{
     ConnectionHint, ConnectivityOpportunity, NetworkRecoveryEvent, NetworkRecoveryFacade,
@@ -167,6 +168,7 @@ pub use membership::{
     PrepareMembershipBranchTransitionInput, PrepareMembershipBranchTransitionPort,
     PreparedMembershipBranchRecoveryMaterial, PreparedMembershipBranchRecoveryRecipient,
     ReconcileMembershipProjectionPort, RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
+    SpaceWorkMode,
 };
 pub use membership::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
 

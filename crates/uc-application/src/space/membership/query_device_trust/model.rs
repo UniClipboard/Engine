@@ -2,7 +2,7 @@ use uc_core::ids::DeviceId;
 use uc_core::membership::{MemberInstanceId, MembershipEventId};
 use uc_core::ports::ReachabilityState;
 
-use crate::space::admission::{CurrentJoinStatus, PendingInboundMember};
+use crate::space::admission::{CurrentJoinStatus, InboundPairing, PendingInboundMember};
 use crate::space::membership::SpaceMemberPauseReason;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +53,7 @@ pub struct PairingConfirmationObservation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionDisplayStatus {
     pub current_join: Option<CurrentJoinStatus>,
+    pub inbound_pairings: Vec<InboundPairing>,
     pub pending_inbound_member: Option<PendingInboundMember>,
     pub pairing_confirmations: Vec<PairingConfirmationObservation>,
 }
@@ -162,6 +163,7 @@ pub struct DeviceTrustStatus {
     pub local_membership: DeviceTrustMembership,
     pub current_change: Option<PendingDeviceTrustChange>,
     pub current_join: Option<CurrentJoinStatus>,
+    pub inbound_pairings: Vec<InboundPairing>,
     pub pending_inbound_member: Option<PendingInboundMember>,
     pub maintenance_health: MembershipMaintenanceHealth,
     pub devices: Vec<DeviceTrustDevice>,
@@ -175,6 +177,7 @@ impl DeviceTrustStatus {
             local_membership: DeviceTrustMembership::NoCurrentSpace,
             current_change: None,
             current_join: None,
+            inbound_pairings: Vec::new(),
             pending_inbound_member: None,
             maintenance_health: MembershipMaintenanceHealth::healthy(),
             devices: Vec::new(),

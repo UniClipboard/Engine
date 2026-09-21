@@ -357,7 +357,7 @@ fn legacy_joiner_can_still_cancel_locally_without_inventing_a_deadline() {
 }
 
 #[test]
-fn legacy_post_decision_joiners_can_be_ended_for_a_new_intent() {
+fn legacy_post_decision_joiners_require_attention_before_a_new_intent() {
     for (name, aggregate) in [
         ("prepared", joiner_prepared_aggregate_fixture()),
         ("committed", joiner_committed_aggregate_fixture()),
@@ -372,25 +372,28 @@ fn legacy_post_decision_joiners_can_be_ended_for_a_new_intent() {
                 .unwrap_or_else(|error| panic!("{name} legacy fixture encodes: {error}")),
         )
         .unwrap_or_else(|error| panic!("{name} legacy fixture decodes: {error}"));
-        assert!(legacy.can_terminate_locally(), "{name}");
-        let ended = legacy
-            .supersede()
-            .unwrap_or_else(|error| panic!("{name} legacy Joiner can end: {error}"))
-            .into_replacement();
-
-        assert!(ended.is_terminal(), "{name}");
-        assert_eq!(
-            ended.termination_reason(),
-            Some(SpaceAdmissionTerminationReason::Cancelled),
-            "{name}"
-        );
-        let encoded = ended
-            .encode_persisted()
-            .unwrap_or_else(|error| panic!("{name} terminal result encodes: {error}"));
-        let decoded = JoinerAdmission::decode_persisted(&encoded)
-            .unwrap_or_else(|error| panic!("{name} terminal result decodes: {error}"));
-        assert!(decoded.is_terminal(), "{name}");
+        assert!(legacy.needs_attention(), "{name}");
+        assert!(!legacy.can_terminate_locally(), "{name}");
+        assert!(matches!(
+            legacy.supersede(),
+            Err(SpaceAdmissionAggregateError::UnsafeCancellation)
+        ));
     }
+}
+
+#[test]
+fn legacy_active_join_keeps_its_committed_result_instead_of_entering_attention() {
+    let legacy = active_pending_settlement_aggregate_fixture().into_legacy_persistence_fixture();
+    let reopened = JoinerAdmission::decode_persisted(
+        &legacy
+            .encode_persisted()
+            .expect("legacy active result encodes"),
+    )
+    .expect("legacy active result decodes");
+
+    assert!(reopened.is_active());
+    assert!(!reopened.needs_attention());
+    assert!(!reopened.can_terminate_locally());
 }
 
 #[test]

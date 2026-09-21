@@ -129,7 +129,7 @@ pub use crate::space::{
     PreparedMembershipBranchRecoveryMaterial, PreparedMembershipBranchRecoveryRecipient,
     QueryDeviceTrustError, ReconcileMembershipProjectionPort, RefreshVerifiedPeerAddressPort,
     SpaceAdmissionCredentialPreparationError, SpaceRebuildProgressError, SpaceRebuildProgressPort,
-    SpaceSessionRebindError, UnlockSpacePort,
+    SpaceSessionRebindError, SpaceWorkMode, UnlockSpacePort,
 };
 pub use crate::space::{SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters};
 pub use crate::transfer::file::assembly::ReceiveCancellationDeps;

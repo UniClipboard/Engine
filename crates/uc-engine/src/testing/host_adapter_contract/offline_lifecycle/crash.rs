@@ -128,7 +128,7 @@ async fn interrupted_file_transfer_recovers_after_receiver_process_restart() {
             state: Arc::new(RecordingHostFilesState::default()),
         }),
     );
-    let (sender, mut sender_events) = Engine::start(sender_config, sender_host).await.unwrap();
+    let (sender, _sender_events) = Engine::start(sender_config, sender_host).await.unwrap();
     let sender = Arc::new(sender);
 
     receiver
@@ -160,26 +160,26 @@ async fn interrupted_file_transfer_recovers_after_receiver_process_restart() {
     assert!(!matches!(status, JoinSpaceStatusSummary::Rejected { .. }));
     let receiver_id = timeout(Duration::from_secs(20), async {
         loop {
-            next_engine_event_matching(&mut sender_events, |event| {
-                matches!(event, EngineEvent::DeviceTrustChanged { revision } if *revision > 0)
-            })
-            .await;
-            let OperationResult::DeviceGroupChoices(summary) = sender
-                .execute(Operation::QueryDeviceGroupChoices)
-                .await
-                .unwrap()
-            else {
-                panic!("expected membership");
-            };
-            if summary.device_trust.local_membership == DeviceMembershipSummary::Active {
-                if let Some(peer) = summary
-                    .device_trust
-                    .devices
-                    .iter()
-                    .find(|device| !device.is_local)
-                {
-                    break peer.device_id.clone();
+            match sender.execute(Operation::QueryDeviceGroupChoices).await {
+                Ok(OperationResult::DeviceGroupChoices(summary)) => {
+                    if summary.device_trust.local_membership == DeviceMembershipSummary::Active
+                        && matches!(
+                            summary.device_trust.current_join,
+                            Some(JoinSpaceStatusSummary::Active { .. })
+                        )
+                    {
+                        if let Some(peer) = summary
+                            .device_trust
+                            .devices
+                            .iter()
+                            .find(|device| !device.is_local)
+                        {
+                            break peer.device_id.clone();
+                        }
+                    }
                 }
+                Err(_) => {}
+                Ok(_) => panic!("expected membership"),
             }
             sleep(Duration::from_millis(20)).await;
         }

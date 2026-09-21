@@ -14,10 +14,10 @@ use uc_core::membership::{
     JoinId, JoinerAdmission, JoinerInvitationResolution, MemberInstanceId, MembershipAdmissionV2,
     MembershipCredential, MembershipEventV2, MembershipOperationV2, PendingAdmissionExchange,
     PreparedAdmissionProofV1, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
-    SpaceAdmissionMessageKind, SpaceAdmissionPersistenceError, SpaceAdmissionRoute,
-    SpaceAdmissionTerminationReason, SponsorAdmission, UnreadableHistoryPolicy,
-    ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
-    MEMBERSHIP_EVENT_FORMAT_V2,
+    SpaceAdmissionMessageKind, SpaceAdmissionPersistenceError, SpaceAdmissionRejectionReason,
+    SpaceAdmissionRoute, SpaceAdmissionTerminationReason, SponsorAdmission,
+    UnreadableHistoryPolicy, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
+    ED25519_SIGNATURE_ALGORITHM_V1, MEMBERSHIP_EVENT_FORMAT_V2,
 };
 use uc_core::pairing::invitation::FullInvitation;
 use uc_core::security::IdentityFingerprint;
@@ -151,7 +151,7 @@ fn current_joiner_record_decodes_with_mobile_worker_stack_budget() {
             let applied = JoinerAdmission::decode_persisted(&encoded)
                 .expect("applied Joiner state should decode within the mobile stack budget");
             let rejected = applied
-                .reject_history_conflict()
+                .reject_activation(SpaceAdmissionRejectionReason::HistoryConflict)
                 .expect("invalid activation should produce a terminal result")
                 .into_replacement();
             let encoded = rejected

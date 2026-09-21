@@ -14,7 +14,7 @@ use crate::space::membership::{
 };
 use uc_core::membership::{
     AdmissionRecoveryCategory, JoinerAdmission, SpaceAdmissionMessageKind,
-    SpaceAdmissionRejectionReason, SponsorAbandonmentCleanup, SponsorPairingConfirmationStatus,
+    SpaceAdmissionRejectionReason, SponsorAbandonmentCleanup,
 };
 use uc_observability_contract::diagnostics::connectivity::{
     record_admission_recovery_decision, ExchangeFailure, LocalWorkObservation, LocalWorkOutcome,
@@ -148,29 +148,21 @@ impl AdmissionRecoveryService {
                 return report;
             }
         };
-        if recovery.pairing_in_progress() {
-            report.work_mode = SpaceWorkMode::Pairing;
-        }
+        report.work_mode = recovery.work_mode();
         let (
             loaded,
             sponsor_deadlines,
             sponsor_abandonments,
             next_deadline_ms,
             _sponsor_confirmation_pending,
+            _needs_attention,
         ) = recovery.into_parts();
         if let Some(deadline_ms) = next_deadline_ms {
             joiner.maintenance_wake.schedule_at(deadline_ms, now_ms);
         }
         for loaded in sponsor_deadlines {
             let (aggregate, token) = loaded.into_parts();
-            let awaiting_confirmation = aggregate.pairing_confirmation().is_some_and(|summary| {
-                summary.status() == SponsorPairingConfirmationStatus::AwaitingPeerConfirmation
-            });
-            let transition = if awaiting_confirmation {
-                aggregate.mark_confirmation_unconfirmed(now_ms)
-            } else {
-                aggregate.terminate_if_expired(now_ms)
-            };
+            let transition = aggregate.terminate_if_expired(now_ms);
             match transition {
                 Ok(Some(transition)) => {
                     match self
@@ -477,13 +469,14 @@ impl AdmissionRecoveryService {
         }
     }
 
-    pub(in super::super::super) async fn save_joiner_history_conflict(
+    pub(in super::super::super) async fn save_joiner_activation_rejection(
         &self,
         report: &mut AdmissionRecoveryReport,
         aggregate: JoinerAdmission,
         token: AdmissionRecoveryCommitToken,
+        reason: SpaceAdmissionRejectionReason,
     ) {
-        let transition = match aggregate.reject_history_conflict() {
+        let transition = match aggregate.reject_activation(reason) {
             Ok(transition) => transition,
             Err(_) => {
                 report.recovery_required_count += 1;

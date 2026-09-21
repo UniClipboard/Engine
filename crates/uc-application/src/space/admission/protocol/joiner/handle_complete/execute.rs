@@ -22,7 +22,12 @@ impl JoinerAdmissionService {
             Some(preparation) => preparation,
             None => {
                 recovery
-                    .save_joiner_history_conflict(report, aggregate, token)
+                    .save_joiner_activation_rejection(
+                        report,
+                        aggregate,
+                        token,
+                        uc_core::membership::SpaceAdmissionRejectionReason::ActivationStateInvalid,
+                    )
                     .await;
                 return JoinerReplyHandlingOutcome::NoImmediateWork;
             }
@@ -33,9 +38,9 @@ impl JoinerAdmissionService {
             .await
         {
             Ok(activation) => activation,
-            Err(PrepareJoinerActivationError::Invalid { .. }) => {
+            Err(PrepareJoinerActivationError::Invalid { reason, .. }) => {
                 recovery
-                    .save_joiner_history_conflict(report, aggregate, token)
+                    .save_joiner_activation_rejection(report, aggregate, token, reason)
                     .await;
                 return JoinerReplyHandlingOutcome::NoImmediateWork;
             }

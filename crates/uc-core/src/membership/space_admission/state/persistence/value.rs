@@ -58,6 +58,11 @@ pub(super) const fn encode_rejection_reason(reason: SpaceAdmissionRejectionReaso
         SpaceAdmissionRejectionReason::PeerUpgradeRequired => 7,
         SpaceAdmissionRejectionReason::Cancelled => 8,
         SpaceAdmissionRejectionReason::RemovedBeforeActivation => 9,
+        SpaceAdmissionRejectionReason::CompletionInvalid => 10,
+        SpaceAdmissionRejectionReason::MembershipHistoryInvalid => 11,
+        SpaceAdmissionRejectionReason::SecurityMaterialInvalid => 12,
+        SpaceAdmissionRejectionReason::RelationshipConflict => 13,
+        SpaceAdmissionRejectionReason::ActivationStateInvalid => 14,
     }
 }
 
@@ -74,6 +79,11 @@ pub(super) fn decode_rejection_reason(
         7 => Ok(SpaceAdmissionRejectionReason::PeerUpgradeRequired),
         8 => Ok(SpaceAdmissionRejectionReason::Cancelled),
         9 => Ok(SpaceAdmissionRejectionReason::RemovedBeforeActivation),
+        10 => Ok(SpaceAdmissionRejectionReason::CompletionInvalid),
+        11 => Ok(SpaceAdmissionRejectionReason::MembershipHistoryInvalid),
+        12 => Ok(SpaceAdmissionRejectionReason::SecurityMaterialInvalid),
+        13 => Ok(SpaceAdmissionRejectionReason::RelationshipConflict),
+        14 => Ok(SpaceAdmissionRejectionReason::ActivationStateInvalid),
         _ => Err(SpaceAdmissionPersistenceError::InvalidState),
     }
 }

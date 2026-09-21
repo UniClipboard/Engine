@@ -1,5 +1,14 @@
 pub(super) mod codec;
 mod persisted;
+// rust-style: allow-qualified-path -- 仅向相邻准入实现开放内部仓储格式，不扩大正式接口
+pub(in crate::space::admission) use persisted::PersistedSpaceAdmissionRepositoryV2;
+#[cfg(test)]
+// rust-style: allow-qualified-path -- 仅向相邻准入测试开放内部仓储夹具，不扩大正式接口
+pub(in crate::space::admission) fn fresh_test_repository_state(
+    profile_generation: [u8; 16],
+) -> PersistedSpaceAdmissionRepositoryV2 {
+    PersistedSpaceAdmissionRepositoryV2::fresh(profile_generation)
+}
 mod recovery_index;
 pub(super) mod token;
 

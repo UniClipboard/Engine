@@ -6,11 +6,12 @@ use base64::Engine as _;
 use tracing::{error, info};
 use uc_application::facade::{
     AppFacade, ContentTypesPatch as AppContentTypesPatch, CurrentJoinStatus, DeviceTrustMembership,
-    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, JoinSpaceTerminationReason,
-    MemberProtectionStatusView, MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch,
-    MemberSyncPreferencesView, MembershipMaintenanceHealthPhase, MembershipMaintenanceProblem,
-    MembershipMaintenanceRecovery, PairingConfirmationStatus, RemoveSpaceMemberError, RosterError,
-    SpaceProtectionModeView, SpaceProtectionView,
+    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, InboundPairingStatus,
+    JoinSpaceTerminationReason, MemberProtectionStatusView,
+    MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch, MemberSyncPreferencesView,
+    MembershipMaintenanceHealthPhase, MembershipMaintenanceProblem, MembershipMaintenanceRecovery,
+    PairingConfirmationStatus, RemoveSpaceMemberError, RosterError, SpaceProtectionModeView,
+    SpaceProtectionView,
 };
 #[cfg(test)]
 use uc_core::membership::WorkspaceSnapshot;
@@ -22,9 +23,10 @@ use crate::{
     DeviceSummary, DeviceSyncRelationshipSummary, DeviceTrustChangeSummary,
     DeviceTrustChoiceSummary, DeviceTrustImpactSummary, DeviceTrustRecoverySummary,
     DeviceTrustRelationshipSummary, DeviceTrustSnapshotSummary, EngineError, EngineErrorCategory,
-    JoinSpaceRejectionReasonSummary, JoinSpaceStatusSummary, JoinSpaceTerminationReasonSummary,
-    JoinedSpaceSummary, MemberProtectionStatusSummary, MemberProtectionSummary,
-    MemberSyncPreferencesPatch, MemberSyncPreferencesSummary,
+    InboundPairingStatusSummary, InboundPairingSummary, JoinSpaceAttentionReasonSummary,
+    JoinSpaceAttentionRecoverySummary, JoinSpaceRejectionReasonSummary, JoinSpaceStatusSummary,
+    JoinSpaceTerminationReasonSummary, JoinedSpaceSummary, MemberProtectionStatusSummary,
+    MemberProtectionSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesSummary,
     MembershipMaintenanceHealthPhaseSummary, MembershipMaintenanceHealthSummary,
     MembershipMaintenanceProblemSummary, MembershipMaintenanceRecoverySummary, OperationResult,
     PairingConfirmationSummary, PendingInboundMemberSummary, QueryMemberSyncPreferencesInput,
@@ -264,6 +266,28 @@ pub(crate) fn device_trust_snapshot(snapshot: DeviceTrustStatus) -> DeviceTrustS
                 blocked_reason: None,
             }),
         current_join: snapshot.current_join.map(join_space_status),
+        inbound_pairings: snapshot
+            .inbound_pairings
+            .into_iter()
+            .map(|pairing| InboundPairingSummary {
+                pairing_id: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(pairing.pairing_id),
+                device_id: pairing.device_id.map(|device_id| device_id.to_string()),
+                display_name: pairing.display_name,
+                status: match pairing.status {
+                    InboundPairingStatus::AwaitingConfirmation => {
+                        InboundPairingStatusSummary::AwaitingConfirmation
+                    }
+                    InboundPairingStatus::ConfirmationMissed => {
+                        InboundPairingStatusSummary::ConfirmationMissed
+                    }
+                    InboundPairingStatus::NeedsAttention => {
+                        InboundPairingStatusSummary::NeedsAttention
+                    }
+                    InboundPairingStatus::Failed => InboundPairingStatusSummary::Failed,
+                },
+            })
+            .collect(),
         pending_inbound_member: snapshot.pending_inbound_member.map(|member| {
             PendingInboundMemberSummary {
                 device_id: member.device_id.to_string(),
@@ -444,6 +468,25 @@ pub(crate) fn join_space_status(status: CurrentJoinStatus) -> JoinSpaceStatusSum
             sponsor_identity_fingerprint: sponsor_identity_fingerprint.as_display().to_string(),
             peer_upgrade_required,
         },
+        CurrentJoinStatus::NeedsAttention {
+            join_id,
+            reason,
+            recovery,
+            next_retry_at_ms,
+        } => JoinSpaceStatusSummary::NeedsAttention {
+            join_id: encode_join_id(join_id),
+            reason: match reason {
+                uc_application::facade::JoinSpaceAttentionReason::OutcomeCannotBeProven => {
+                    JoinSpaceAttentionReasonSummary::OutcomeCannotBeProven
+                }
+            },
+            recovery: match recovery {
+                uc_application::facade::JoinSpaceAttentionRecovery::PreserveDataAndContactSupport => {
+                    JoinSpaceAttentionRecoverySummary::PreserveDataAndContactSupport
+                }
+            },
+            next_retry_at_ms,
+        },
         CurrentJoinStatus::Rejected { join_id, reason } => JoinSpaceStatusSummary::Rejected {
             join_id: encode_join_id(join_id),
             reason: match reason {
@@ -464,6 +507,21 @@ pub(crate) fn join_space_status(status: CurrentJoinStatus) -> JoinSpaceStatusSum
                 }
                 uc_core::membership::SpaceAdmissionRejectionReason::HistoryConflict => {
                     JoinSpaceRejectionReasonSummary::HistoryConflict
+                }
+                uc_core::membership::SpaceAdmissionRejectionReason::CompletionInvalid => {
+                    JoinSpaceRejectionReasonSummary::CompletionInvalid
+                }
+                uc_core::membership::SpaceAdmissionRejectionReason::MembershipHistoryInvalid => {
+                    JoinSpaceRejectionReasonSummary::MembershipHistoryInvalid
+                }
+                uc_core::membership::SpaceAdmissionRejectionReason::SecurityMaterialInvalid => {
+                    JoinSpaceRejectionReasonSummary::SecurityMaterialInvalid
+                }
+                uc_core::membership::SpaceAdmissionRejectionReason::RelationshipConflict => {
+                    JoinSpaceRejectionReasonSummary::RelationshipConflict
+                }
+                uc_core::membership::SpaceAdmissionRejectionReason::ActivationStateInvalid => {
+                    JoinSpaceRejectionReasonSummary::ActivationStateInvalid
                 }
                 uc_core::membership::SpaceAdmissionRejectionReason::PeerUpgradeRequired => {
                     JoinSpaceRejectionReasonSummary::PeerUpgradeRequired
@@ -660,13 +718,16 @@ fn map_remove_space_member_error(error: RemoveSpaceMemberError) -> EngineError {
             EngineErrorCategory::Unavailable,
             false,
         ),
-        RemoveSpaceMemberError::RecoveryRequired | RemoveSpaceMemberError::StateChanged => {
-            EngineError::new(
-                QUERY_WORKSPACE_CONVERGENCE_CORRUPT_CODE,
-                EngineErrorCategory::InvalidState,
-                false,
-            )
-        }
+        RemoveSpaceMemberError::RecoveryRequired => EngineError::new(
+            QUERY_WORKSPACE_CONVERGENCE_CORRUPT_CODE,
+            EngineErrorCategory::InvalidState,
+            false,
+        ),
+        RemoveSpaceMemberError::StateChanged => EngineError::new(
+            QUERY_WORKSPACE_CONVERGENCE_FAILED_CODE,
+            EngineErrorCategory::InvalidState,
+            true,
+        ),
         RemoveSpaceMemberError::TargetNotFound => {
             EngineError::new(MEMBER_NOT_FOUND_CODE, EngineErrorCategory::NotFound, false)
         }
@@ -762,6 +823,7 @@ mod tests {
                 },
             }),
             current_join: None,
+            inbound_pairings: Vec::new(),
             pending_inbound_member: None,
             maintenance_health: uc_application::facade::MembershipMaintenanceHealth::healthy(),
             devices: ["a", "b", "c", "d"]
@@ -852,6 +914,42 @@ mod tests {
     }
 
     #[test]
+    fn inbound_pairings_are_exposed_separately_from_formal_devices() {
+        let mut status = handoff_pending_removal(false);
+        status.inbound_pairings = vec![
+            uc_application::facade::InboundPairing {
+                pairing_id: [0x44; 32],
+                device_id: Some(uc_core::DeviceId::new("pending")),
+                display_name: Some("Pending".to_owned()),
+                status: InboundPairingStatus::ConfirmationMissed,
+            },
+            uc_application::facade::InboundPairing {
+                pairing_id: [0x45; 32],
+                device_id: None,
+                display_name: None,
+                status: InboundPairingStatus::Failed,
+            },
+        ];
+
+        let summary = device_trust_snapshot(status);
+
+        assert_eq!(summary.inbound_pairings.len(), 2);
+        assert_eq!(
+            summary.inbound_pairings[0].status,
+            InboundPairingStatusSummary::ConfirmationMissed
+        );
+        assert_eq!(
+            summary.inbound_pairings[1].status,
+            InboundPairingStatusSummary::Failed
+        );
+        assert!(summary.inbound_pairings[1].device_id.is_none());
+        assert!(summary
+            .devices
+            .iter()
+            .all(|device| device.device_id != "pending"));
+    }
+
+    #[test]
     fn join_status_preserves_the_peer_upgrade_prompt() {
         let summary = join_space_status(CurrentJoinStatus::Pending {
             join_id: [0x31; 16],
@@ -890,6 +988,27 @@ mod tests {
                 ref sponsor_device_id,
                 ..
             } if target_space_id == "space-a" && sponsor_device_id == "sponsor"
+        ));
+    }
+
+    #[test]
+    fn join_needing_attention_has_a_stable_public_status() {
+        let summary = join_space_status(CurrentJoinStatus::NeedsAttention {
+            join_id: [0x41; 16],
+            reason: uc_application::facade::JoinSpaceAttentionReason::OutcomeCannotBeProven,
+            recovery:
+                uc_application::facade::JoinSpaceAttentionRecovery::PreserveDataAndContactSupport,
+            next_retry_at_ms: None,
+        });
+
+        assert!(matches!(
+            summary,
+            JoinSpaceStatusSummary::NeedsAttention {
+                join_id,
+                reason: JoinSpaceAttentionReasonSummary::OutcomeCannotBeProven,
+                recovery: JoinSpaceAttentionRecoverySummary::PreserveDataAndContactSupport,
+                next_retry_at_ms: None,
+            } if join_id == encode_join_id([0x41; 16])
         ));
     }
 
@@ -966,6 +1085,15 @@ mod tests {
         assert!(!failed.is_retryable());
         assert_eq!(invalid_input.category(), EngineErrorCategory::InvalidInput);
         assert_eq!(target_not_found.category(), EngineErrorCategory::NotFound);
+    }
+
+    #[test]
+    fn concurrent_member_change_is_retryable_instead_of_reported_as_corruption() {
+        let error = map_remove_space_member_error(RemoveSpaceMemberError::StateChanged);
+
+        assert_eq!(error.code(), QUERY_WORKSPACE_CONVERGENCE_FAILED_CODE);
+        assert_eq!(error.category(), EngineErrorCategory::InvalidState);
+        assert!(error.is_retryable());
     }
 
     #[test]

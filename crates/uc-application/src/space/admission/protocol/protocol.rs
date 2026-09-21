@@ -4,7 +4,7 @@ use std::sync::Arc;
 use super::{AdmissionRecoveryService, JoinerAdmissionService, SponsorAdmissionService};
 use super::{AdmissionRecoveryTrigger, PendingAdmissionRecoveryStateError};
 use crate::space::membership::{
-    AcquireSpaceWorkPermitPort, QuerySpaceWorkModeError, SpaceWorkMode, SpaceWorkPermit,
+    AcquireSpaceWorkPermitPort, QuerySpaceWorkModeError, SpaceWorkPermit,
 };
 use tokio::sync::Mutex;
 use uc_observability_contract::diagnostics::connectivity::{
@@ -62,11 +62,7 @@ impl AcquireSpaceWorkPermitPort for SpaceAdmissionProtocol {
                     QuerySpaceWorkModeError::Unavailable
                 }
             })?;
-        let mode = if loaded.pairing_in_progress() {
-            SpaceWorkMode::Pairing
-        } else {
-            SpaceWorkMode::Active
-        };
+        let mode = loaded.work_mode();
         Ok(SpaceWorkPermit::guarded(mode, guard))
     }
 }

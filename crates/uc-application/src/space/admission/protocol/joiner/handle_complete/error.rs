@@ -2,6 +2,7 @@
 pub enum PrepareJoinerActivationError {
     #[error("joiner activation plan is invalid")]
     Invalid {
+        reason: uc_core::membership::SpaceAdmissionRejectionReason,
         #[source]
         source: anyhow::Error,
     },
@@ -15,6 +16,17 @@ pub enum PrepareJoinerActivationError {
 impl PrepareJoinerActivationError {
     pub fn invalid<E: Into<anyhow::Error>>(source: E) -> Self {
         Self::Invalid {
+            reason: uc_core::membership::SpaceAdmissionRejectionReason::HistoryConflict,
+            source: source.into(),
+        }
+    }
+
+    pub fn invalid_for<E: Into<anyhow::Error>>(
+        reason: uc_core::membership::SpaceAdmissionRejectionReason,
+        source: E,
+    ) -> Self {
+        Self::Invalid {
+            reason,
             source: source.into(),
         }
     }

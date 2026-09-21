@@ -1748,6 +1748,22 @@ fn processing_join_contract_is_distinct_from_pending_and_active() {
 }
 
 #[test]
+fn join_attention_contract_carries_reason_recovery_and_no_fake_retry() {
+    let status = uc_engine::JoinSpaceStatusSummary::NeedsAttention {
+        join_id: "join-id".into(),
+        reason: uc_engine::JoinSpaceAttentionReasonSummary::OutcomeCannotBeProven,
+        recovery: uc_engine::JoinSpaceAttentionRecoverySummary::PreserveDataAndContactSupport,
+        next_retry_at_ms: None,
+    };
+    let encoded = serde_json::to_value(status).expect("serializable join status");
+
+    assert_eq!(encoded["status"], "needs_attention");
+    assert_eq!(encoded["reason"], "outcome_cannot_be_proven");
+    assert_eq!(encoded["recovery"], "preserve_data_and_contact_support");
+    assert!(encoded["next_retry_at_ms"].is_null());
+}
+
+#[test]
 fn lifecycle_contract_rejects_operations_outside_running_state() {
     assert!(EngineState::Running.accepts_operations());
     for state in [

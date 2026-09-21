@@ -16,6 +16,7 @@ impl QueryMembershipConflictStatusPort for QueryStatus {
             local_membership: DeviceTrustMembership::Active,
             current_change: None,
             current_join: None,
+            inbound_pairings: Vec::new(),
             pending_inbound_member: None,
             maintenance_health: crate::space::membership::MembershipMaintenanceHealth::healthy(),
             devices: Vec::new(),

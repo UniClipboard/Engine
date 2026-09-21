@@ -12,9 +12,11 @@ use super::codec::{map_key_error, EncryptedRecordRow};
 use super::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissionState};
 use crate::db::ports::DbExecutor;
 
-const RECOVERY_SUMMARY_FORMAT_V2: u16 = 2;
+const RECOVERY_SUMMARY_FORMAT_V3: u16 = 3;
+const LEGACY_RECOVERY_SUMMARY_FORMAT_V2: u16 = 2;
 const RECOVERY_INDEX_BATCH_SIZE: i32 = 64;
-const RECOVERY_SUMMARY_MARKER: [u8; 8] = *b"UCARSV2\0";
+const RECOVERY_SUMMARY_MARKER: [u8; 8] = *b"UCARSV3\0";
+const LEGACY_RECOVERY_SUMMARY_MARKER_V2: [u8; 8] = *b"UCARSV2\0";
 
 #[derive(QueryableByName)]
 struct RecoverySummaryRow {
@@ -69,6 +71,7 @@ pub(crate) struct LoadedRecoveryIndex {
     pub(crate) sponsor_abandonments: Vec<SponsorAdmission>,
     pub(crate) next_deadline_ms: Option<i64>,
     pub(crate) sponsor_confirmation_pending: bool,
+    pub(crate) needs_attention: bool,
 }
 
 impl RecoverySummaryRow {
@@ -135,7 +138,7 @@ impl RecoverySummary {
                     && !aggregate.has_expirable_sponsor()));
         Ok(Self {
             marker: RECOVERY_SUMMARY_MARKER,
-            format_version: RECOVERY_SUMMARY_FORMAT_V2,
+            format_version: RECOVERY_SUMMARY_FORMAT_V3,
             role,
             admission_id: *aggregate.admission_id().as_bytes(),
             expires_at_ms,
@@ -180,6 +183,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                     sponsor_abandonments: Vec::new(),
                     next_deadline_ms: None,
                     sponsor_confirmation_pending: false,
+                    needs_attention: false,
                 });
             }
             let mut cursor: Option<Vec<u8>> = None;
@@ -188,6 +192,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             let mut sponsor_abandonments = Vec::new();
             let mut next_deadline_ms: Option<i64> = None;
             let mut sponsor_confirmation_pending = false;
+            let mut needs_attention = false;
             loop {
                 let rows = load_summary_batch(conn, cursor.as_deref())?;
                 if rows.is_empty() {
@@ -212,6 +217,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                     {
                         return Err(SpaceAdmissionStateStoreError::Corrupt);
                     }
+                    needs_attention |= summary.legacy_no_deadline;
                     if let Some(deadline) =
                         summary.expires_at_ms.filter(|deadline| *deadline > now_ms)
                     {
@@ -262,6 +268,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                 sponsor_abandonments,
                 next_deadline_ms,
                 sponsor_confirmation_pending,
+                needs_attention,
             })
         })
     }
@@ -279,17 +286,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             .map_err(map_key_error)?
             .open_compact(encrypted)
             .map_err(map_key_error)?;
-        if let Ok(summary) = postcard::from_bytes::<RecoverySummary>(&plaintext) {
-            if summary.marker == RECOVERY_SUMMARY_MARKER
-                && summary.format_version == RECOVERY_SUMMARY_FORMAT_V2
-            {
-                return Ok(Some(summary));
-            }
-            return Err(SpaceAdmissionStateStoreError::Corrupt);
-        }
-        postcard::from_bytes::<LegacyRecoverySummaryV1>(&plaintext)
-            .map(|_| None)
-            .map_err(|_| SpaceAdmissionStateStoreError::Corrupt)
+        decode_recovery_summary(&plaintext)
     }
 
     fn load_recovery_aggregate(
@@ -331,6 +328,50 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         .bind::<Binary, _>(encrypted)
         .execute(conn)?;
         Ok(())
+    }
+}
+
+fn decode_recovery_summary(
+    plaintext: &[u8],
+) -> Result<Option<RecoverySummary>, SpaceAdmissionStateStoreError> {
+    if let Ok(summary) = postcard::from_bytes::<RecoverySummary>(plaintext) {
+        if summary.marker == RECOVERY_SUMMARY_MARKER
+            && summary.format_version == RECOVERY_SUMMARY_FORMAT_V3
+        {
+            return Ok(Some(summary));
+        }
+        if summary.marker == LEGACY_RECOVERY_SUMMARY_MARKER_V2
+            && summary.format_version == LEGACY_RECOVERY_SUMMARY_FORMAT_V2
+        {
+            return Ok(None);
+        }
+        return Err(SpaceAdmissionStateStoreError::Corrupt);
+    }
+    postcard::from_bytes::<LegacyRecoverySummaryV1>(plaintext)
+        .map(|_| None)
+        .map_err(|_| SpaceAdmissionStateStoreError::Corrupt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn previous_recovery_summary_is_rebuilt_instead_of_treated_as_corrupt() {
+        let legacy = RecoverySummary {
+            marker: LEGACY_RECOVERY_SUMMARY_MARKER_V2,
+            format_version: LEGACY_RECOVERY_SUMMARY_FORMAT_V2,
+            role: RecoveryRecordRole::Sponsor,
+            admission_id: [0x41; 32],
+            expires_at_ms: Some(301_000),
+            legacy_no_deadline: false,
+            action: RecoveryAction::SponsorConfirmation,
+            content_token: [0x42; 32],
+        };
+        let encoded = postcard::to_stdvec(&legacy).expect("旧恢复摘要可编码");
+        assert!(decode_recovery_summary(&encoded)
+            .expect("旧恢复摘要应触发重建")
+            .is_none());
     }
 }
 

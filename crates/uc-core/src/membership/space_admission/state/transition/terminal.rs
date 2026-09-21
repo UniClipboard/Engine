@@ -10,27 +10,6 @@ impl SpaceAdmissionAggregate {
             .record_version
             .checked_add(1)
             .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
-        if self.attempt_timeline.is_none() && self.attempt_digest.is_none() {
-            let legacy_cancelling_join_id = match &self.state {
-                SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Cancelling(state)) => {
-                    Some(state.join_id)
-                }
-                _ => None,
-            };
-            if let Some(join_id) = legacy_cancelling_join_id {
-                self.record_version = record_version;
-                self.state =
-                    SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
-                        SpaceAdmissionRejectedState::LocalJoiner(
-                            SpaceAdmissionLocalJoinerRejected {
-                                join_id,
-                                reason: SpaceAdmissionRejectionReason::Cancelled,
-                            },
-                        ),
-                    ));
-                return Ok(AdmissionTransition::new(self, &[]));
-            }
-        }
         let has_authenticated_attempt = self.attempt_digest.is_some();
         let (join_id, local_join_ordinal, cleanup) = match self.state {
             SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvingInvitation(
@@ -131,26 +110,6 @@ impl SpaceAdmissionAggregate {
                 )?;
                 cleanup.local_space_transition = Some(local_space_transition);
                 (state.join_id, state.local_join_ordinal, Some(cleanup))
-            }
-            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Prepared(state))
-                if self.attempt_timeline.is_none() =>
-            {
-                (state.join_id, state.local_join_ordinal, None)
-            }
-            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Committed(state))
-                if self.attempt_timeline.is_none() =>
-            {
-                (state.join_id, state.local_join_ordinal, None)
-            }
-            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Applied(state))
-                if self.attempt_timeline.is_none() =>
-            {
-                (state.join_id, state.local_join_ordinal, None)
-            }
-            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Activating(state))
-                if self.attempt_timeline.is_none() =>
-            {
-                (state.join_id, state.local_join_ordinal, None)
             }
             _ => return Err(SpaceAdmissionAggregateError::UnsafeCancellation),
         };
@@ -343,6 +302,14 @@ fn cleanup_obligation(
         SpaceAdmissionTerminationReason::Cancelled => AdmissionAbandonmentReasonV2::Cancelled,
         SpaceAdmissionTerminationReason::Expired => AdmissionAbandonmentReasonV2::Expired,
         SpaceAdmissionTerminationReason::Superseded => AdmissionAbandonmentReasonV2::Superseded,
+        SpaceAdmissionTerminationReason::ActivationRejected
+        | SpaceAdmissionTerminationReason::CompletionRejected
+        | SpaceAdmissionTerminationReason::MembershipHistoryRejected
+        | SpaceAdmissionTerminationReason::SecurityMaterialRejected
+        | SpaceAdmissionTerminationReason::RelationshipRejected
+        | SpaceAdmissionTerminationReason::ActivationStateRejected => {
+            AdmissionAbandonmentReasonV2::Rejected
+        }
     };
     let body =
         AdmissionAbandonmentV2::new(attempt_digest, member_binding.clone(), abandonment_reason)
