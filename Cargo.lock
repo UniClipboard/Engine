@@ -7025,8 +7025,10 @@ version = "1.1.0-rc.18"
 dependencies = [
  "anyhow",
  "serde_json",
+ "tempfile",
  "tokio",
  "uc-engine",
+ "wiremock",
 ]
 
 [[package]]

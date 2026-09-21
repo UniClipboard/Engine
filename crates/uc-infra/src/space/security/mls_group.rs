@@ -14,6 +14,7 @@ use openmls_traits::{
     OpenMlsProvider,
 };
 use sha2::{Digest, Sha256};
+use uc_core::ids::DeviceId;
 use uc_core::membership::{
     AdmissionSecurityCommitmentV1, BaseMembershipHistoryPosition, MembershipCredential,
     ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
@@ -243,6 +244,28 @@ impl std::fmt::Debug for CompletedMlsJoin {
 pub(crate) struct MlsGroupEngine;
 
 impl MlsGroupEngine {
+    pub(crate) fn local_device_id(
+        client_state: &MlsClientState,
+    ) -> Result<DeviceId, MlsGroupError> {
+        let (provider, stored) = restore(client_state)?;
+        if stored.signer_public.is_empty() {
+            return Err(MlsGroupError::InvalidState);
+        }
+        let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
+        let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
+            .map_err(|_| MlsGroupError::Protocol)?
+            .ok_or(MlsGroupError::InvalidState)?;
+        let member = group
+            .members()
+            .find(|member| member.signature_key.as_slice() == stored.signer_public)
+            .ok_or(MlsGroupError::InvalidState)?;
+        let credential = BasicCredential::try_from(member.credential)
+            .map_err(|_| MlsGroupError::InvalidState)?;
+        let device_id = std::str::from_utf8(credential.identity())
+            .map_err(|_| MlsGroupError::IdentityMismatch)?;
+        Ok(DeviceId::new(device_id))
+    }
+
     /// 导出不含成员私钥的签名 GroupInfo，供已有成员从 sibling 状态发起
     /// external commit。ratchet tree 作为 GroupInfo 扩展携带。
     pub(crate) fn export_external_recovery_group_info(
@@ -1044,6 +1067,35 @@ mod tests {
         BaseMembershipHistoryPosition, HistoricalMembershipSignatureVerifier, MembershipEventId,
         ED25519_SIGNATURE_ALGORITHM_V1,
     };
+
+    #[test]
+    fn local_device_id_comes_from_the_active_local_leaf() {
+        let sponsor = MlsGroupEngine::create_sponsor(b"space-a", b"alice").unwrap();
+        let pending = MlsGroupEngine::prepare_join(b"bob").unwrap();
+        let admission =
+            MlsGroupEngine::admit_member(&sponsor, b"bob", &pending.key_package).unwrap();
+        let joined =
+            MlsGroupEngine::complete_join(pending, b"space-a", &admission.welcome).unwrap();
+
+        assert_eq!(
+            MlsGroupEngine::local_device_id(&admission.sponsor_state).unwrap(),
+            DeviceId::new("alice")
+        );
+        assert_eq!(
+            MlsGroupEngine::local_device_id(&joined.client_state).unwrap(),
+            DeviceId::new("bob")
+        );
+    }
+
+    #[test]
+    fn pending_join_has_no_active_local_device_id() {
+        let pending = MlsGroupEngine::prepare_join(b"bob").unwrap();
+
+        assert!(matches!(
+            MlsGroupEngine::local_device_id(&pending.client_state),
+            Err(MlsGroupError::InvalidState)
+        ));
+    }
 
     #[test]
     fn external_recovery_replaces_the_existing_leaf_without_sharing_private_state() {

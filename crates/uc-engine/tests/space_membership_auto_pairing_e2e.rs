@@ -34,6 +34,7 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 const PASSPHRASE: &str = "space-membership-e2e-passphrase";
 const WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 const ADMISSION_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
+const SPACE_DEVICE_UPDATE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 const EXPIRES_AT_MS: i64 = 2_000_000_000_000;
 const PAIRING_HOT_PATH_BUDGET: Duration = Duration::from_secs(1);
@@ -5070,6 +5071,24 @@ async fn query_space_device_update(engine: &Engine) -> uc_engine::SpaceDeviceUpd
     summary.device_trust.space_device_update
 }
 
+async fn wait_for_space_device_update(
+    engine: &Engine,
+    phase: uc_engine::SpaceDeviceUpdatePhaseSummary,
+) -> uc_engine::SpaceDeviceUpdateStatusSummary {
+    let deadline = tokio::time::Instant::now() + SPACE_DEVICE_UPDATE_WAIT_TIMEOUT;
+    loop {
+        let status = query_space_device_update(engine).await;
+        if status.phase == phase {
+            return status;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "space device update did not reach {phase:?}: {status:?}"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
 async fn wait_for_space_work_event(
     engine: &Engine,
     after_sequence: u64,
@@ -5827,6 +5846,14 @@ async fn membership_history_retryable_failure_exposes_deadline_and_recovers() {
         ]
     );
     assert!(failed.sequence < recovered.sequence);
+    let completed = wait_for_space_device_update(
+        &sponsor,
+        uc_engine::SpaceDeviceUpdatePhaseSummary::Completed,
+    )
+    .await;
+    assert_eq!(completed.reason, None);
+    assert_eq!(completed.recovery, None);
+    assert_eq!(completed.next_retry_at_ms, None);
 
     sponsor.shutdown(SHUTDOWN_TIMEOUT).await.unwrap();
     joiner.shutdown(SHUTDOWN_TIMEOUT).await.unwrap();
@@ -5899,6 +5926,14 @@ async fn membership_history_rejection_exposes_recovery_and_can_recover() {
         after_recovery.device_trust.maintenance_health.reason,
         Some(uc_engine::MembershipMaintenanceProblemSummary::MembershipHistoryRejected)
     );
+    let completed = wait_for_space_device_update(
+        &sponsor,
+        uc_engine::SpaceDeviceUpdatePhaseSummary::Completed,
+    )
+    .await;
+    assert_eq!(completed.reason, None);
+    assert_eq!(completed.recovery, None);
+    assert_eq!(completed.next_retry_at_ms, None);
     let events = query_space_work_events(&sponsor).await;
     assert_eq!(
         events

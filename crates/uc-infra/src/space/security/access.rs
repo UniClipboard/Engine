@@ -1681,6 +1681,38 @@ impl RuntimeSpaceAccessAdapter {
         Ok(false)
     }
 
+    async fn settle_redundant_local_group_updates(
+        &self,
+        space_id: &SpaceId,
+        now_ms: i64,
+    ) -> Result<usize, KeyEpochError> {
+        let repository = self.key_epoch_repository.as_ref();
+        let Some(mut material) = repository.load_space_material(space_id).await? else {
+            return Ok(0);
+        };
+        let local_device_id = MlsGroupEngine::local_device_id(&MlsClientState::from_bytes(
+            material.group_state().to_vec(),
+        ))
+        .map_err(|_| KeyEpochError::PersistedStateIntegrityFailed)?;
+        let redundant = material
+            .pending_group_updates()
+            .iter()
+            .filter(|update| update.recipient() == &local_device_id)
+            .map(|update| update.update_id().to_owned())
+            .collect::<Vec<_>>();
+        let mut settled = 0;
+        for update_id in redundant {
+            if material.acknowledge_group_update(&update_id, now_ms) {
+                settled += 1;
+            }
+        }
+        if settled > 0 {
+            repository.save_space_material(&material).await?;
+            tracing::info!(settled_count = settled, "已收敛本机冗余安全资料投递");
+        }
+        Ok(settled)
+    }
+
     async fn group_revocation_result(
         repository: &dyn RevocationRepositoryPort,
         record: &RevocationRecord,
@@ -2443,6 +2475,8 @@ impl GroupRevocationPort for RuntimeSpaceAccessAdapter {
             .session
             .current_space_id()
             .map_err(|source| KeyEpochError::Repository(source.into()))?;
+        self.settle_redundant_local_group_updates(&space_id, now_ms)
+            .await?;
         self.key_epoch_repository
             .due_group_updates(&space_id, now_ms, online_peer)
             .await
@@ -2469,6 +2503,8 @@ impl GroupRevocationPort for RuntimeSpaceAccessAdapter {
             .session
             .current_space_id()
             .map_err(|source| KeyEpochError::Repository(source.into()))?;
+        self.settle_redundant_local_group_updates(&space_id, chrono::Utc::now().timestamp_millis())
+            .await?;
         self.key_epoch_repository
             .group_update_delivery_status(&space_id)
             .await
@@ -2896,10 +2932,27 @@ impl PrepareSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
                 payload: update_payload.clone(),
             })
             .collect::<Vec<_>>();
+        let sponsor_device_id = MlsGroupEngine::local_device_id(&admission.sponsor_state)
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        let sponsor_recipient_count = request
+            .existing_recipients
+            .iter()
+            .filter(|recipient| recipient.device_id == sponsor_device_id)
+            .count();
+        if sponsor_recipient_count != 1 {
+            return Err(AdmissionSecurityTransitionError::InvalidState);
+        }
         next.add_pending_group_updates(
-            request.existing_recipients.iter().map(|recipient| {
-                PendingGroupUpdate::persistent(recipient.device_id.clone(), update_payload.clone())
-            }),
+            request
+                .existing_recipients
+                .iter()
+                .filter(|recipient| recipient.device_id != sponsor_device_id)
+                .map(|recipient| {
+                    PendingGroupUpdate::persistent(
+                        recipient.device_id.clone(),
+                        update_payload.clone(),
+                    )
+                }),
             chrono::Utc::now().timestamp_millis(),
         );
         let target_key_catalog_bytes = target_key_catalog
@@ -4876,6 +4929,9 @@ mod admission_tests {
         let retained = DeviceId::new("retained-device");
         let retained_credential =
             MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x61; 32]);
+        let sponsor = DeviceId::new("alice");
+        let sponsor_credential =
+            MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x62; 32]);
 
         let prepared = adapter
             .prepare_sponsor_admission_security(SponsorAdmissionSecurityRequest {
@@ -4889,16 +4945,21 @@ mod admission_tests {
                 candidate_core_digest: [0x64; 32],
                 candidate_identity: joiner.as_str().as_bytes().to_vec(),
                 candidate_key_package: pending.key_package.clone(),
-                existing_recipients: vec![SponsorAdmissionSecurityRecipient {
-                    device_id: retained.clone(),
-                    credential_id: retained_credential.credential_id,
-                }],
+                existing_recipients: vec![
+                    SponsorAdmissionSecurityRecipient {
+                        device_id: sponsor.clone(),
+                        credential_id: sponsor_credential.credential_id,
+                    },
+                    SponsorAdmissionSecurityRecipient {
+                        device_id: retained.clone(),
+                        credential_id: retained_credential.credential_id,
+                    },
+                ],
             })
             .await
             .unwrap();
 
-        assert_eq!(prepared.existing_member_deliveries.len(), 1);
-        assert_eq!(prepared.existing_member_deliveries[0].recipient, retained);
+        assert_eq!(prepared.existing_member_deliveries.len(), 2);
         assert!(!prepared.existing_member_deliveries[0].payload.is_empty());
         assert_eq!(
             prepared.public_commitment.key_catalog_digest,
@@ -4939,11 +5000,50 @@ mod admission_tests {
             .unwrap()
             .unwrap();
         assert_eq!(
+            MlsGroupEngine::local_device_id(&MlsClientState::from_bytes(
+                activated.group_state().to_vec(),
+            ))
+            .unwrap(),
+            sponsor
+        );
+        assert_eq!(
             activated.state().epoch().value(),
             prepared.public_commitment.target_epoch
         );
         assert_eq!(activated.pending_group_updates().len(), 1);
         assert_eq!(activated.pending_group_updates()[0].recipient(), &retained);
+        let retained_update_id = activated.pending_group_updates()[0].update_id().to_owned();
+        assert!(adapter
+            .acknowledge_space_group_update(&retained_update_id, 1)
+            .await
+            .unwrap());
+        let mut legacy = repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        legacy.add_pending_group_updates(
+            [PendingGroupUpdate::persistent(
+                sponsor.clone(),
+                prepared.existing_member_deliveries[0].payload.clone(),
+            )],
+            2,
+        );
+        repository.save_space_material(&legacy).await.unwrap();
+        assert_eq!(
+            adapter
+                .settle_redundant_local_group_updates(&space_id, 3)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .pending_group_updates()
+            .is_empty());
         assert_eq!(
             session
                 .current_content_key(&space_id, ContentKeyPurpose::Content)
@@ -4966,6 +5066,9 @@ mod admission_tests {
         };
 
         let (adapter, session, repository, space_id, _directory) = sponsor_fixture();
+        let sponsor = DeviceId::new("alice");
+        let sponsor_credential =
+            MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x70; 32]);
         let helper = DeviceId::new("completion-helper");
         let helper_credential =
             MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x71; 32]);
@@ -4987,10 +5090,16 @@ mod admission_tests {
                 candidate_core_digest,
                 candidate_identity: b"joiner-device".to_vec(),
                 candidate_key_package: pending.key_package,
-                existing_recipients: vec![SponsorAdmissionSecurityRecipient {
-                    device_id: helper.clone(),
-                    credential_id: helper_credential.credential_id,
-                }],
+                existing_recipients: vec![
+                    SponsorAdmissionSecurityRecipient {
+                        device_id: sponsor,
+                        credential_id: sponsor_credential.credential_id,
+                    },
+                    SponsorAdmissionSecurityRecipient {
+                        device_id: helper.clone(),
+                        credential_id: helper_credential.credential_id,
+                    },
+                ],
             })
             .await
             .unwrap();
