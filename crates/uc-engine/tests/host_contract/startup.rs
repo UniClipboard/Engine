@@ -22,6 +22,9 @@ mod targets;
 #[path = "startup/control.rs"]
 mod control;
 
+#[path = "startup/admission_recovery.rs"]
+mod admission_recovery;
+
 #[cfg(feature = "dev-tools")]
 #[path = "startup/failure.rs"]
 mod failure;

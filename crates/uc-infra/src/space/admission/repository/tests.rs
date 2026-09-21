@@ -6,16 +6,20 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_trait::async_trait;
+use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::Binary;
 use uc_application::deps::{
-    JoinerActivationStatePort, LoadMembershipLedgerPort, LoadedMembershipLedger,
-    MembershipLedgerError,
+    AdmissionReadFailureCategory, AdmissionRecoveryTrigger, JoinerActivationStatePort,
+    LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipLedgerError,
+    PendingAdmissionRecoveryStatePort,
 };
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
-use super::persisted::{PersistedSpaceAdmissionRepositoryV2, StoredSpaceAdmissionV1};
+use super::persisted::{
+    PersistedSpaceAdmissionMetadataV3, PersistedSpaceAdmissionRepositoryV2, StoredSpaceAdmissionV1,
+};
 use super::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissionState};
 use crate::db::executor::DieselSqliteExecutor;
 use crate::db::pool::init_db_pool;
@@ -171,11 +175,116 @@ impl Fixture {
             .keys
             .seal_profile_payload(b"space-admission-repository-v1", &bytes)
             .unwrap();
+        self.write_encrypted(encrypted);
+    }
+
+    fn write_encrypted(&mut self, encrypted: Vec<u8>) {
         sql_query("INSERT INTO admission_repository_state (singleton_id, encrypted_payload) VALUES (1, ?) ON CONFLICT(singleton_id) DO UPDATE SET encrypted_payload = excluded.encrypted_payload")
             .bind::<Binary, _>(encrypted)
             .execute(&mut self.connection)
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn public_admission_read_classifies_current_and_legacy_decode_failures() {
+    let mut fixture = Fixture::new();
+    let state = PersistedSpaceAdmissionRepositoryV2::fresh([0x31; 16]);
+    fixture
+        .repository
+        .save_state_on(&mut fixture.connection, &state)
+        .unwrap();
+    let invalid_current = fixture
+        .keys
+        .seal_profile_payload_compact(b"space-admission-repository-metadata-v3", &[0xff])
+        .unwrap();
+    fixture.write_encrypted(invalid_current);
+    let error = PendingAdmissionRecoveryStatePort::load(
+        &fixture.repository,
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .err()
+    .expect("invalid current metadata");
+    assert_eq!(
+        error.category(),
+        AdmissionReadFailureCategory::CurrentMetadataInvalid
+    );
+    assert!(std::error::Error::source(&error).is_some());
+
+    let invalid_legacy = fixture
+        .keys
+        .seal_profile_payload(b"space-admission-repository-v1", &[0xff])
+        .unwrap();
+    fixture.write_encrypted(invalid_legacy);
+    let error = PendingAdmissionRecoveryStatePort::load(
+        &fixture.repository,
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .err()
+    .expect("invalid legacy repository");
+    assert_eq!(
+        error.category(),
+        AdmissionReadFailureCategory::LegacyFallbackInvalid
+    );
+}
+
+#[tokio::test]
+async fn public_admission_read_classifies_generation_and_migration_failure() {
+    let mut fixture = Fixture::new();
+    let state = PersistedSpaceAdmissionRepositoryV2::fresh([0x31; 16]);
+    let mut metadata = PersistedSpaceAdmissionMetadataV3::from(&state);
+    metadata.profile_generation = [0x32; 16];
+    let encrypted = fixture
+        .keys
+        .seal_profile_payload_compact(
+            b"space-admission-repository-metadata-v3",
+            &postcard::to_stdvec(&metadata).unwrap(),
+        )
+        .unwrap();
+    fixture.write_encrypted(encrypted);
+    let error = PendingAdmissionRecoveryStatePort::load(
+        &fixture.repository,
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .err()
+    .expect("generation mismatch");
+    assert_eq!(
+        error.category(),
+        AdmissionReadFailureCategory::GenerationMismatch
+    );
+
+    fixture.write_state(&state);
+    fixture.connection.batch_execute(
+        "CREATE TRIGGER reject_admission_migration BEFORE INSERT ON admission_repository_record BEGIN SELECT RAISE(ABORT, 'rejected'); END;",
+    ).unwrap();
+    // 旧仓库包含记录时，转换必须写入正文行。
+    let mut state = state;
+    state.records.insert(
+        [0x41; 32],
+        StoredSpaceAdmissionV1 {
+            wrapped_data_key: fixture.keys.create_wrapped_attempt_key([0x41; 32]).unwrap(),
+            encrypted_payload: vec![0x51].into(),
+        },
+    );
+    fixture.write_state(&state);
+    let error = PendingAdmissionRecoveryStatePort::load(
+        &fixture.repository,
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .err()
+    .expect("legacy migration failed");
+    assert_eq!(
+        error.category(),
+        AdmissionReadFailureCategory::LegacyMigrationFailed
+    );
 }
 
 #[tokio::test]
@@ -407,7 +516,9 @@ fn repository_reads_reject_changed_key_and_corrupted_ciphertext() {
     fixture.storage.set(key_name, &[0x99; 32]).unwrap();
     assert!(matches!(
         fixture.repository.load_state_on(&mut fixture.connection),
-        Err(SpaceAdmissionStateStoreError::Corrupt)
+        Err(SpaceAdmissionStateStoreError::ReadInvalid(
+            AdmissionReadFailureCategory::AuthenticationMismatch
+        ))
     ));
     assert!(fixture.repository.read_cache.lock().unwrap().is_none());
     fixture.storage.set(key_name, &original_key).unwrap();
@@ -423,7 +534,9 @@ fn repository_reads_reject_changed_key_and_corrupted_ciphertext() {
         .unwrap();
     assert!(matches!(
         fixture.repository.load_state_on(&mut fixture.connection),
-        Err(SpaceAdmissionStateStoreError::Corrupt)
+        Err(SpaceAdmissionStateStoreError::ReadInvalid(
+            AdmissionReadFailureCategory::LegacyFallbackInvalid
+        ))
     ));
     assert!(fixture.repository.read_cache.lock().unwrap().is_none());
 }
@@ -731,7 +844,7 @@ async fn recovery_summary_tracks_changes_and_rollbacks_without_reading_other_rec
     fixture.repository.record_reads.store(0, Ordering::SeqCst);
     assert!(PendingAdmissionRecoveryStatePort::load(
         &fixture.repository,
-        AdmissionRecoveryTrigger::Startup,
+        AdmissionRecoveryTrigger::Periodic,
         0
     )
     .await
@@ -786,6 +899,9 @@ async fn recovery_summary_rejects_corruption_and_locked_keys() {
             0
         )
         .await,
-        Err(PendingAdmissionRecoveryStateError::RecoveryRequired)
+        Err(PendingAdmissionRecoveryStateError::ReadFailure {
+            category: AdmissionReadFailureCategory::DerivedSummaryInvalid,
+            ..
+        })
     ));
 }

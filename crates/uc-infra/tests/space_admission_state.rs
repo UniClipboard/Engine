@@ -7,9 +7,10 @@ use diesel::sql_query;
 use diesel::sql_types::Binary;
 use tempfile::TempDir;
 use uc_application::deps::{
-    AdmissionRecoveryTrigger, JoinerStartMutation, JoinerStartStateError, JoinerStartStatePort,
-    LoadCurrentJoinStatusPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
-    MembershipLedgerError, PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
+    AdmissionReadFailureCategory, AdmissionRecoveryTrigger, JoinerStartMutation,
+    JoinerStartStateError, JoinerStartStatePort, LoadCurrentJoinStatusPort,
+    LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipLedgerError,
+    PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
@@ -494,6 +495,95 @@ async fn corrupt_repository_payload_requires_recovery() {
         JoinerStartStatePort::load(&fixture.store).await,
         Err(JoinerStartStateError::RecoveryRequired)
     ));
+}
+
+#[tokio::test]
+async fn admission_read_distinguishes_missing_and_mismatched_credential() {
+    let fixture = Fixture::new();
+    commit_fresh_join(&fixture, 0xb3, 0xb4).await;
+    let key = "profile_admission_master_key:v1";
+    let original = fixture.secure_storage.get(key).unwrap().unwrap();
+    fixture.secure_storage.delete(key).unwrap();
+    let missing = PendingAdmissionRecoveryStatePort::load(
+        &fixture.reopen(),
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .err()
+    .expect("missing key must fail");
+    assert_eq!(
+        missing.category(),
+        AdmissionReadFailureCategory::CredentialMissing
+    );
+    assert!(std::error::Error::source(&missing).is_some());
+    assert!(fixture.secure_storage.get(key).unwrap().is_none());
+
+    fixture.secure_storage.set(key, &[0x99; 32]).unwrap();
+    let mismatch = PendingAdmissionRecoveryStatePort::load(
+        &fixture.reopen(),
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .err()
+    .expect("mismatched key must fail");
+    assert_eq!(
+        mismatch.category(),
+        AdmissionReadFailureCategory::AuthenticationMismatch
+    );
+    assert!(std::error::Error::source(&mismatch).is_some());
+    fixture.secure_storage.set(key, &original).unwrap();
+    assert!(PendingAdmissionRecoveryStatePort::load(
+        &fixture.reopen(),
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .is_ok());
+}
+
+#[tokio::test]
+async fn admission_read_rejects_missing_record_and_corrupt_summary() {
+    let fixture = Fixture::new();
+    commit_fresh_join(&fixture, 0xb5, 0xb6).await;
+    fixture.execute("DELETE FROM admission_repository_record");
+    let missing = PendingAdmissionRecoveryStatePort::load(
+        &fixture.reopen(),
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .err()
+    .expect("missing record must fail");
+    assert_eq!(
+        missing.category(),
+        AdmissionReadFailureCategory::RecordRelationIncomplete
+    );
+
+    let fixture = Fixture::new();
+    commit_fresh_join(&fixture, 0xb7, 0xb8).await;
+    PendingAdmissionRecoveryStatePort::load(
+        &fixture.reopen(),
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .ok()
+    .expect("healthy summary creation");
+    fixture.execute("UPDATE admission_recovery_summary SET encrypted_payload = X'FF'");
+    let summary = PendingAdmissionRecoveryStatePort::load(
+        &fixture.reopen(),
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .err()
+    .expect("invalid derived summary must fail");
+    assert_eq!(
+        summary.category(),
+        AdmissionReadFailureCategory::DerivedSummaryInvalid
+    );
 }
 
 #[tokio::test]
