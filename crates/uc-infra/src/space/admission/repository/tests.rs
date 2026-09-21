@@ -142,6 +142,16 @@ struct PayloadRow {
     encrypted_payload: Vec<u8>,
 }
 
+#[derive(QueryableByName)]
+struct RecoverySummaryPayloadRow {
+    #[diesel(sql_type = Binary)]
+    lookup_token: Vec<u8>,
+    #[diesel(sql_type = Binary)]
+    content_token: Vec<u8>,
+    #[diesel(sql_type = Binary)]
+    encrypted_payload: Vec<u8>,
+}
+
 impl Fixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
@@ -183,6 +193,26 @@ impl Fixture {
             .bind::<Binary, _>(encrypted)
             .execute(&mut self.connection)
             .unwrap();
+    }
+
+    fn save_pending_v3(&mut self, id: u8) {
+        let mut state = PersistedSpaceAdmissionRepositoryV2::fresh([0x31; 16]);
+        let pending = pending_join_for_recovery(id);
+        state
+            .records
+            .insert([id; 32], self.repository.seal_new_record(&pending).unwrap());
+        self.repository
+            .save_state_on(&mut self.connection, &state)
+            .unwrap();
+    }
+
+    fn recovery_summary_row(&mut self) -> RecoverySummaryPayloadRow {
+        sql_query(
+            "SELECT lookup_token, content_token, encrypted_payload \
+             FROM admission_recovery_summary LIMIT 1",
+        )
+        .get_result(&mut self.connection)
+        .unwrap()
     }
 }
 
@@ -285,6 +315,165 @@ async fn public_admission_read_classifies_generation_and_migration_failure() {
         error.category(),
         AdmissionReadFailureCategory::LegacyMigrationFailed
     );
+}
+
+#[tokio::test]
+async fn public_admission_read_rejects_incomplete_legacy_and_current_relations() {
+    let mut fixture = Fixture::new();
+    let mut legacy = PersistedSpaceAdmissionRepositoryV2::fresh([0x32; 16]);
+    fixture.write_state(&legacy);
+    let error = PendingAdmissionRecoveryStatePort::load(
+        &fixture.repository,
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .err()
+    .expect("legacy generation mismatch must fail");
+    assert_eq!(
+        error.category(),
+        AdmissionReadFailureCategory::GenerationMismatch
+    );
+
+    legacy.profile_generation = [0x31; 16];
+    legacy.current_local_join_id = Some([0x41; 32]);
+    fixture.write_state(&legacy);
+    let error = PendingAdmissionRecoveryStatePort::load(
+        &fixture.repository,
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .err()
+    .expect("legacy record relation must fail");
+    assert_eq!(
+        error.category(),
+        AdmissionReadFailureCategory::RecordRelationIncomplete
+    );
+
+    let mut fixture = Fixture::new();
+    let mut metadata = PersistedSpaceAdmissionMetadataV3::from(
+        &PersistedSpaceAdmissionRepositoryV2::fresh([0x31; 16]),
+    );
+    metadata.latest_local_join_id = Some([0x42; 32]);
+    let encrypted = fixture
+        .keys
+        .seal_profile_payload_compact(
+            b"space-admission-repository-metadata-v3",
+            &postcard::to_stdvec(&metadata).unwrap(),
+        )
+        .unwrap();
+    fixture.write_encrypted(encrypted);
+    let error = PendingAdmissionRecoveryStatePort::load(
+        &fixture.repository,
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .err()
+    .expect("current record relation must fail");
+    assert_eq!(
+        error.category(),
+        AdmissionReadFailureCategory::RecordRelationIncomplete
+    );
+}
+
+#[tokio::test]
+async fn public_admission_read_rejects_record_envelope_corruption() {
+    for corruption in ["ciphertext", "encoding", "content_token"] {
+        let mut fixture = Fixture::new();
+        fixture.save_pending_v3(0x51);
+        match corruption {
+            "ciphertext" => {
+                sql_query("UPDATE admission_repository_record SET encrypted_payload = X'010203'")
+                    .execute(&mut fixture.connection)
+                    .unwrap();
+            }
+            "encoding" => {
+                let encrypted = fixture
+                    .keys
+                    .seal_profile_payload_compact(b"space-admission-repository-record-v3", &[0xff])
+                    .unwrap();
+                sql_query("UPDATE admission_repository_record SET encrypted_payload = ?")
+                    .bind::<Binary, _>(encrypted)
+                    .execute(&mut fixture.connection)
+                    .unwrap();
+            }
+            "content_token" => {
+                sql_query("UPDATE admission_repository_record SET content_token = zeroblob(32)")
+                    .execute(&mut fixture.connection)
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let error = PendingAdmissionRecoveryStatePort::load(
+            &fixture.repository,
+            AdmissionRecoveryTrigger::Startup,
+            0,
+        )
+        .await
+        .err()
+        .expect("record envelope corruption must fail");
+        assert_eq!(
+            error.category(),
+            AdmissionReadFailureCategory::RecordRelationIncomplete,
+            "unexpected category for {corruption}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn public_admission_read_rejects_invalid_summary_format_and_relation() {
+    for corruption in ["format", "relation"] {
+        let mut fixture = Fixture::new();
+        fixture.save_pending_v3(0x61);
+        PendingAdmissionRecoveryStatePort::load(
+            &fixture.repository,
+            AdmissionRecoveryTrigger::Startup,
+            0,
+        )
+        .await
+        .unwrap();
+        let row = fixture.recovery_summary_row();
+        let mut purpose = b"space-admission-recovery-summary-v1".to_vec();
+        purpose.extend_from_slice(&row.lookup_token);
+        purpose.extend_from_slice(&row.content_token);
+        let mut plaintext = fixture
+            .keys
+            .profile_payload_reader(&purpose)
+            .unwrap()
+            .open_compact(&row.encrypted_payload)
+            .unwrap();
+        match corruption {
+            "format" => plaintext[0] ^= 1,
+            "relation" => {
+                let last = plaintext.len() - 1;
+                plaintext[last] ^= 1;
+            }
+            _ => unreachable!(),
+        }
+        let encrypted = fixture
+            .keys
+            .seal_profile_payload_compact(&purpose, &plaintext)
+            .unwrap();
+        sql_query("UPDATE admission_recovery_summary SET encrypted_payload = ?")
+            .bind::<Binary, _>(encrypted)
+            .execute(&mut fixture.connection)
+            .unwrap();
+        let error = PendingAdmissionRecoveryStatePort::load(
+            &fixture.repository,
+            AdmissionRecoveryTrigger::Periodic,
+            0,
+        )
+        .await
+        .err()
+        .expect("summary corruption must fail");
+        assert_eq!(
+            error.category(),
+            AdmissionReadFailureCategory::DerivedSummaryInvalid,
+            "unexpected category for {corruption}"
+        );
+    }
 }
 
 #[tokio::test]

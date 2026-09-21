@@ -7,10 +7,10 @@ use diesel::sql_query;
 use diesel::sql_types::Binary;
 use tempfile::TempDir;
 use uc_application::deps::{
-    AdmissionReadFailureCategory, AdmissionRecoveryTrigger, JoinerStartMutation,
-    JoinerStartStateError, JoinerStartStatePort, LoadCurrentJoinStatusPort,
-    LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipLedgerError,
-    PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
+    AdmissionReadFailureCategory, AdmissionRecoveryAction, AdmissionRecoveryStage,
+    AdmissionRecoveryTrigger, JoinerStartMutation, JoinerStartStateError, JoinerStartStatePort,
+    LoadCurrentJoinStatusPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
+    MembershipLedgerError, PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
@@ -593,6 +593,85 @@ async fn admission_read_rejects_missing_record_and_corrupt_summary() {
     );
     let summary_source = std::error::Error::source(&summary).expect("store error source");
     assert!(summary_source.source().is_some(), "summary source chain");
+}
+
+#[test]
+fn admission_read_categories_expose_stable_recovery_guidance() {
+    use AdmissionReadFailureCategory as Category;
+    use AdmissionRecoveryAction as Action;
+    use AdmissionRecoveryStage as Stage;
+
+    let cases = [
+        (
+            Category::CredentialMissing,
+            Stage::Credential,
+            Action::RestoreCredential,
+        ),
+        (
+            Category::AuthenticationMismatch,
+            Stage::Credential,
+            Action::ChooseBackup,
+        ),
+        (
+            Category::CurrentMetadataInvalid,
+            Stage::RepositoryMetadata,
+            Action::ChooseBackup,
+        ),
+        (
+            Category::GenerationMismatch,
+            Stage::RepositoryMetadata,
+            Action::ChooseBackup,
+        ),
+        (
+            Category::LegacyFallbackInvalid,
+            Stage::LegacyRepository,
+            Action::ChooseBackup,
+        ),
+        (
+            Category::LegacyMigrationFailed,
+            Stage::LegacyRepository,
+            Action::ChooseBackup,
+        ),
+        (
+            Category::RecordRelationIncomplete,
+            Stage::RepositoryRecord,
+            Action::ChooseBackup,
+        ),
+        (
+            Category::DerivedSummaryInvalid,
+            Stage::RecoverySummary,
+            Action::RebuildDerivedState,
+        ),
+        (
+            Category::OtherStorageError,
+            Stage::Storage,
+            Action::ExportDiagnostics,
+        ),
+    ];
+    for (category, expected_stage, expected_action) in cases {
+        assert_eq!(category.guidance(), (expected_stage, expected_action));
+    }
+}
+
+#[tokio::test]
+async fn admission_read_classifies_unexpected_database_failure_as_other_storage() {
+    let fixture = Fixture::new();
+    fixture.execute("DROP TABLE admission_repository_state");
+
+    let error = PendingAdmissionRecoveryStatePort::load(
+        &fixture.store,
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .err()
+    .expect("database failure must be classified");
+
+    assert_eq!(
+        error.category(),
+        AdmissionReadFailureCategory::OtherStorageError
+    );
+    assert!(std::error::Error::source(&error).is_some());
 }
 
 #[tokio::test]

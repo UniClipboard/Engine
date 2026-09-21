@@ -26,6 +26,7 @@ static ENGINE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(
 #[cfg(feature = "dev-tools")]
 mod offline_lifecycle;
 
+#[cfg(not(coverage))]
 fn isolated_profile_copy(
     environment_variable: &str,
 ) -> (tempfile::TempDir, MemoryHostSecureStorage) {
@@ -68,6 +69,7 @@ fn isolated_profile_copy(
 }
 
 #[tokio::test]
+#[cfg(not(coverage))]
 #[ignore = "需要显式提供本地资料，只操作临时副本"]
 async fn invitation_from_isolated_profile_copy() {
     let _guard = ENGINE_TEST_LOCK.lock().await;
@@ -136,6 +138,7 @@ async fn invitation_from_isolated_profile_copy() {
 }
 
 #[tokio::test]
+#[cfg(not(coverage))]
 #[ignore = "需要显式提供损坏资料，只操作临时副本"]
 async fn unreadable_admission_from_isolated_profile_copy_is_stable() {
     let _guard = ENGINE_TEST_LOCK.lock().await;
