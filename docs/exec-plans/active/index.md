@@ -9,6 +9,7 @@
 - [043 升级前备份与软件版本回退](043-pre-upgrade-profile-backup.md)（实施中：启动前备份及恢复出厂清理已接入，完整版本回退尚未完成）
 - [043 Engine 网络运行期与 Space 会话安全交接](043-engine-network-runtime-and-space-session-handover.md)（实施中，对应 Issue #68）
 - [历史可读时的邀请失败](2026-09-12-invitation-admission-recovery.md)
+- [升级后准入读取受限恢复](2026-09-21-admission-read-recovery.md)（实施中）
 - [本地产物准备](local-artifacts-preparation.md)
 - [配对通信等待诊断](2026-09-12-admission-exchange-diagnostics.md)
 - [配对内部处理与排队诊断](2026-09-13-pairing-local-work-diagnostics.md)
