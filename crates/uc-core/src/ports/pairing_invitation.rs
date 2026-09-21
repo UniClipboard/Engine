@@ -17,6 +17,7 @@
 //! on it. Joiner-side dial lives on
 //! 新准入 transport 与 invitation discovery 分离，解析结果直接交给 Application。
 
+use std::fmt;
 use std::net::IpAddr;
 
 use async_trait::async_trait;
@@ -83,12 +84,47 @@ pub struct PairingInvitationAddressCandidate {
 }
 
 /// Errors produced while issuing an invitation.
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum InvitationError {
     /// Adapter couldn't reach its transport (e.g. local network endpoint
     /// not started). Surfaced to UI as "start network first".
     #[error("network is not started")]
     NetworkNotStarted,
+
+    /// The running endpoint has no address that is safe to publish.
+    #[error("no publishable local address is available")]
+    NoPublishableAddress {
+        #[source]
+        source: anyhow::Error,
+    },
+
+    /// The local-network advertisement could not be started.
+    #[error("local invitation publication failed")]
+    LocalPublicationFailed {
+        #[source]
+        source: anyhow::Error,
+    },
+
+    /// The directory could not be reached and local publication also failed.
+    #[error("invitation directory transport failed")]
+    DirectoryTransportFailed {
+        #[source]
+        source: anyhow::Error,
+    },
+
+    /// The directory understood the request but refused it.
+    #[error("invitation directory rejected the request")]
+    DirectoryRejected {
+        #[source]
+        source: anyhow::Error,
+    },
+
+    /// The directory returned a successful status with unusable content.
+    #[error("invitation directory returned an invalid response")]
+    DirectoryInvalidResponse {
+        #[source]
+        source: anyhow::Error,
+    },
 
     /// Every discovery channel the adapter could publish through is
     /// currently unable to accept an announcement. For adapters that
@@ -102,12 +138,29 @@ pub enum InvitationError {
     /// The caller-selected address is not currently available for issuance —
     /// either it never appeared in the candidate set, or it was dropped by
     /// the address filter (overlay-network rules, link-local, fake-ip).
-    #[error("requested address is not available: {0}")]
+    #[error("requested address is not available")]
     AddressNotAvailable(IpAddr),
 
     /// Unexpected adapter-side failure; message is for logs only.
     #[error("internal invitation error: {0}")]
     Internal(String),
+}
+
+impl fmt::Debug for InvitationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self {
+            Self::NetworkNotStarted => "NetworkNotStarted",
+            Self::NoPublishableAddress { .. } => "NoPublishableAddress",
+            Self::LocalPublicationFailed { .. } => "LocalPublicationFailed",
+            Self::DirectoryTransportFailed { .. } => "DirectoryTransportFailed",
+            Self::DirectoryRejected { .. } => "DirectoryRejected",
+            Self::DirectoryInvalidResponse { .. } => "DirectoryInvalidResponse",
+            Self::ServiceUnavailable => "ServiceUnavailable",
+            Self::AddressNotAvailable(_) => "AddressNotAvailable",
+            Self::Internal(_) => "Internal",
+        };
+        formatter.write_str(kind)
+    }
 }
 
 /// Errors produced while marking an invitation consumed on its discovery

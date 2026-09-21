@@ -9,11 +9,11 @@ pub mod port;
 pub use context::{AnalyticsEventContext, DeviceType, Os};
 pub use events::{
     CaptureOrigin, DialogOpenSource, Direction, DismissSource, Event, FailureReason, InstallKind,
-    InvitationCodeSource, LatencyBucket, MobileAuthFailureKind, NameLengthBucket,
-    NotificationDeliveryStatus, PairingDiscoveryChannel, PairingFailureReason, PairingMethod,
-    PayloadSizeBucket, PayloadType, SetupEntry, SyncDeferReason, SyncDeferredProps, SyncEventProps,
-    SyncFailureStage, TransportType, UnlockFailureReason, UpdateAction, UpdateActionOutcome,
-    UpdateCheckOutcome, UpdateCheckSource, UpdateFailureKind, UpdatePhase,
+    InvitationCodeSource, InvitationIssueErrorCategory, LatencyBucket, MobileAuthFailureKind,
+    NameLengthBucket, NotificationDeliveryStatus, PairingDiscoveryChannel, PairingFailureReason,
+    PairingMethod, PayloadSizeBucket, PayloadType, SetupEntry, SyncDeferReason, SyncDeferredProps,
+    SyncEventProps, SyncFailureStage, TransportType, UnlockFailureReason, UpdateAction,
+    UpdateActionOutcome, UpdateCheckOutcome, UpdateCheckSource, UpdateFailureKind, UpdatePhase,
 };
 pub use facade::{
     AnalyticsFacade, DefaultAnalyticsFacade, NoopAnalyticsFacade, ResetIdentityError,

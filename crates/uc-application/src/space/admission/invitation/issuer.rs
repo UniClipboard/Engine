@@ -78,11 +78,6 @@ impl PairingInvitationIssuer {
                 InvitationAvailability::SameLocalNetwork,
             ),
         };
-        self.analytics.capture(Event::PairingInvitationIssued {
-            code_source,
-            lan_only_mode,
-        });
-
         let issued_at = self.now_utc()?;
         let device_id = self.device_identity.current_device_id();
         let (invitation, _) = PairingInvitation::issue(
@@ -95,6 +90,10 @@ impl PairingInvitationIssuer {
             admission_generation,
         );
         self.holder.insert(invitation).await;
+        self.analytics.capture(Event::PairingInvitationIssued {
+            code_source,
+            lan_only_mode,
+        });
 
         Ok(IssuePairingInvitationResult {
             code: issued.code,
@@ -136,6 +135,21 @@ fn map_membership_admission_decision(
 pub(crate) fn map_invitation_error(error: InvitationError) -> IssuePairingInvitationError {
     match error {
         InvitationError::NetworkNotStarted => IssuePairingInvitationError::NetworkNotStarted,
+        InvitationError::NoPublishableAddress { source } => {
+            IssuePairingInvitationError::NoPublishableAddress { source }
+        }
+        InvitationError::LocalPublicationFailed { source } => {
+            IssuePairingInvitationError::LocalPublicationFailed { source }
+        }
+        InvitationError::DirectoryTransportFailed { source } => {
+            IssuePairingInvitationError::DirectoryTransportFailed { source }
+        }
+        InvitationError::DirectoryRejected { source } => {
+            IssuePairingInvitationError::DirectoryRejected { source }
+        }
+        InvitationError::DirectoryInvalidResponse { source } => {
+            IssuePairingInvitationError::DirectoryInvalidResponse { source }
+        }
         InvitationError::ServiceUnavailable => IssuePairingInvitationError::ServiceUnavailable,
         InvitationError::AddressNotAvailable(ip) => {
             IssuePairingInvitationError::AddressNotAvailable(ip)
