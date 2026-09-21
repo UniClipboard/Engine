@@ -84,7 +84,9 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
             self.executor
                 .run(|conn| {
                     conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                        let mut state = self.load_state_on(conn).map_err(into_anyhow)?;
+                        let mut state = self
+                            .load_state_in_transaction_on(conn)
+                            .map_err(into_anyhow)?;
                         let admission_id = *replacement.admission_id().as_bytes();
                         let stored =
                             state.records.get(&admission_id).cloned().ok_or_else(|| {
@@ -137,7 +139,9 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
             self.executor
                 .run(|conn| {
                     conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                        let mut state = self.load_state_on(conn).map_err(into_anyhow)?;
+                        let mut state = self
+                            .load_state_in_transaction_on(conn)
+                            .map_err(into_anyhow)?;
                         let admission_id = *replacement.admission_id().as_bytes();
                         let stored =
                             state.records.get(&admission_id).cloned().ok_or_else(|| {
@@ -185,7 +189,9 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
             self.executor
                 .run(|conn| {
                     conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                        let mut state = self.load_state_on(conn).map_err(into_anyhow)?;
+                        let mut state = self
+                            .load_state_in_transaction_on(conn)
+                            .map_err(into_anyhow)?;
                         let admission_id = *replacement.admission_id().as_bytes();
                         let stored =
                             state.records.get(&admission_id).cloned().ok_or_else(|| {

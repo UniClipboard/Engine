@@ -416,6 +416,40 @@ async fn recovery_commit_advances_record_and_rejects_old_token() {
 }
 
 #[tokio::test]
+async fn recovery_commit_preserves_repository_read_failure_classification() {
+    let fixture = Fixture::new();
+    commit_fresh_join(&fixture, 0x93, 0x94).await;
+    let mut pending = PendingAdmissionRecoveryStatePort::load(
+        &fixture.store,
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .unwrap()
+    .into_pending_admissions();
+    let (aggregate, token) = pending.pop().unwrap().into_parts();
+    let transition = aggregate
+        .with_authenticated_channel(peer_binding(), continuation())
+        .unwrap();
+    fixture.execute(
+        "UPDATE admission_repository_state SET encrypted_payload = X'FF' WHERE singleton_id = 1",
+    );
+
+    let error = PendingAdmissionRecoveryStatePort::commit(&fixture.store, token, transition)
+        .await
+        .err()
+        .expect("repository read failure must be preserved");
+
+    assert_eq!(
+        error.category(),
+        AdmissionReadFailureCategory::LegacyFallbackInvalid,
+        "unexpected commit failure: {error:?}"
+    );
+    let source = std::error::Error::source(&error).expect("store error source");
+    assert!(source.source().is_some(), "repository source chain");
+}
+
+#[tokio::test]
 async fn short_code_is_removed_before_the_single_resolution_request() {
     let fixture = Fixture::new();
     let loaded = JoinerStartStatePort::load(&fixture.store).await.unwrap();

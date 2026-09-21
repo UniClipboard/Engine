@@ -70,7 +70,9 @@ impl<E: DbExecutor + Send + Sync> JoinerActivationStatePort for SqliteSpaceAdmis
             self.executor
                 .run(|conn| {
                     conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                        let mut state = self.load_state_on(conn).map_err(into_anyhow)?;
+                        let mut state = self
+                            .load_state_in_transaction_on(conn)
+                            .map_err(into_anyhow)?;
                         let admission_id = *replacement.admission_id().as_bytes();
                         if state.current_local_join_id != Some(admission_id) {
                             return Err(into_anyhow(SpaceAdmissionStateStoreError::Conflict));

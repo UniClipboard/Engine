@@ -83,22 +83,43 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             conn.immediate_transaction::<_, SpaceAdmissionStateStoreError, _>(|conn| {
                 let current =
                     load_repository_row(conn)?.ok_or(SpaceAdmissionStateStoreError::Conflict)?;
-                if let Some(metadata) = self.try_open_metadata(&current.encrypted_payload)? {
-                    self.clear_read_cache();
-                    return self.load_v3_state_on(conn, metadata);
-                }
-                let current_legacy = self.open_legacy_state(&current.encrypted_payload)?;
-                self.persist_v3_state_on(conn, &current_legacy)
-                    .map_err(|source| {
-                        SpaceAdmissionStateStoreError::read_invalid(
-                            AdmissionReadFailureCategory::LegacyMigrationFailed,
-                            source,
-                        )
-                    })?;
-                self.clear_read_cache();
-                Ok(current_legacy)
+                self.open_or_migrate_state_on(conn, current)
             })
         })
+    }
+
+    // rust-style: allow-qualified-path -- 事务写入由 admission 相邻模块持有，读取仍由仓库统一实现
+    pub(in crate::space::admission) fn load_state_in_transaction_on(
+        &self,
+        conn: &mut SqliteConnection,
+    ) -> Result<PersistedSpaceAdmissionRepositoryV2, SpaceAdmissionStateStoreError> {
+        let Some(row) = load_repository_row(conn)? else {
+            self.clear_read_cache();
+            return Ok(PersistedSpaceAdmissionRepositoryV2::fresh(
+                self.keys.profile_generation(),
+            ));
+        };
+        self.open_or_migrate_state_on(conn, row)
+    }
+
+    fn open_or_migrate_state_on(
+        &self,
+        conn: &mut SqliteConnection,
+        row: EncryptedRepositoryRow,
+    ) -> Result<PersistedSpaceAdmissionRepositoryV2, SpaceAdmissionStateStoreError> {
+        if let Some(metadata) = self.try_open_metadata(&row.encrypted_payload)? {
+            self.clear_read_cache();
+            return self.load_v3_state_on(conn, metadata);
+        }
+        let legacy = self.open_legacy_state(&row.encrypted_payload)?;
+        self.persist_v3_state_on(conn, &legacy).map_err(|source| {
+            SpaceAdmissionStateStoreError::read_invalid(
+                AdmissionReadFailureCategory::LegacyMigrationFailed,
+                source,
+            )
+        })?;
+        self.clear_read_cache();
+        Ok(legacy)
     }
 
     // rust-style: allow-qualified-path -- 可见性必须覆盖 repository 的相邻 joiner 模块
