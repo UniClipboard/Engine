@@ -7,11 +7,12 @@ use diesel::sql_query;
 use diesel::sql_types::Binary;
 use tempfile::TempDir;
 use uc_application::deps::{
-    AdmissionReadFailureCategory, AdmissionRecoveryAction, AdmissionRecoveryStage,
-    AdmissionRecoveryTrigger, JoinerStartMutation, JoinerStartStateError, JoinerStartStatePort,
-    LoadCurrentJoinStatusPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
-    MembershipLedgerError, PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
+    AdmissionReadFailureCategory, AdmissionRecoveryTrigger, JoinerStartMutation,
+    JoinerStartStateError, JoinerStartStatePort, LoadCurrentJoinStatusPort,
+    LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipLedgerError,
+    PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
 };
+use uc_application::facade::{AdmissionRecoveryAction, AdmissionRecoveryStage};
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     ActiveSpaceGenerationManifestV2, AdmissionAttemptContractV2, AdmissionChangeFacts,
