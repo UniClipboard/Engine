@@ -155,7 +155,7 @@ fn map_activation_error(error: SpaceAdmissionStateStoreError) -> JoinerActivatio
     match &error {
         SpaceAdmissionStateStoreError::Locked => JoinerActivationStateError::locked(error),
         SpaceAdmissionStateStoreError::Conflict => JoinerActivationStateError::state_changed(error),
-        SpaceAdmissionStateStoreError::Corrupt => {
+        SpaceAdmissionStateStoreError::Corrupt | SpaceAdmissionStateStoreError::ReadInvalid(_) => {
             JoinerActivationStateError::recovery_required(error)
         }
         SpaceAdmissionStateStoreError::Unavailable => {

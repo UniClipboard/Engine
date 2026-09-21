@@ -154,7 +154,7 @@ impl<E: DbExecutor + Send + Sync> CommitMembershipLedgerPort for SqliteMembershi
 fn map_key_error(error: AdmissionKeyError) -> MembershipLedgerError {
     match error {
         AdmissionKeyError::SecureStorage => MembershipLedgerError::Locked,
-        AdmissionKeyError::Corrupt | AdmissionKeyError::OpenFailed => {
+        AdmissionKeyError::Missing | AdmissionKeyError::Corrupt | AdmissionKeyError::OpenFailed => {
             MembershipLedgerError::Corrupt
         }
     }

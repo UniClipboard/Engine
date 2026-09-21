@@ -22,14 +22,14 @@ use crate::error_codes::{
     PROFILE_RECOVERY_REQUIRED_CODE, PROFILE_RECOVERY_UNSUPPORTED_CODE, UNLOCK_SPACE_CORRUPTED_CODE,
     UNLOCK_SPACE_UNAUTHORIZED_CODE,
 };
+use crate::{
+    AdmissionRecoverySummary, EncryptionStateSummary, EngineConfig, EngineError,
+    EngineErrorCategory, EngineEvent, HostCapabilities, HostCapabilityError,
+    HostCapabilityErrorCategory, HostSecureStorage, Operation, OperationKind, OperationResult,
+    ProfileRecoveryLoss, ProfileRecoveryState, ProfileRecoverySummary,
+};
 #[cfg(feature = "dev-tools")]
 use crate::{DevOperation, DevOperationResult};
-use crate::{
-    EncryptionStateSummary, EngineConfig, EngineError, EngineErrorCategory, EngineEvent,
-    HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory, HostSecureStorage,
-    Operation, OperationKind, OperationResult, ProfileRecoveryLoss, ProfileRecoveryState,
-    ProfileRecoverySummary,
-};
 
 #[derive(Clone)]
 enum RuntimeMode {
@@ -38,6 +38,7 @@ enum RuntimeMode {
         recovered: bool,
     },
     Recovery(Arc<RecoveryBootstrap>),
+    AdmissionRecovery(AdmissionRecoverySummary),
 }
 
 struct RecoveryBootstrap {
@@ -68,19 +69,30 @@ impl RecoverableRuntime {
                 host.replace_secure_storage(Arc::new(RecoveryHostStorage {
                     inner: Arc::clone(&recovery),
                 }));
-                RuntimeMode::Ready {
-                    runtime: Arc::new(
-                        ProductionRuntime::start(
-                            config,
-                            host,
-                            paths,
-                            events.clone(),
-                            Arc::clone(&progress),
-                            Arc::clone(&recovery),
-                        )
-                        .await?,
-                    ),
-                    recovered: false,
+                match ProductionRuntime::start(
+                    config,
+                    host,
+                    paths,
+                    events.clone(),
+                    Arc::clone(&progress),
+                    Arc::clone(&recovery),
+                )
+                .await
+                {
+                    Ok(runtime) => RuntimeMode::Ready {
+                        runtime: Arc::new(runtime),
+                        recovered: false,
+                    },
+                    Err(error) => match error.admission_recovery() {
+                        Some(admission) => {
+                            progress.recovery_available();
+                            events.send(EngineEvent::ProfileRecoveryChanged(admission_summary(
+                                admission.clone(),
+                            )));
+                            RuntimeMode::AdmissionRecovery(admission)
+                        }
+                        None => return Err(error),
+                    },
                 }
             }
             ProfileRecoveryPreparation::AwaitingPassphrase { losses } => {
@@ -96,6 +108,7 @@ impl RecoverableRuntime {
                     background_ready: false,
                     cleanup_pending: false,
                     losses: public_losses(losses),
+                    admission: None,
                 };
                 events.send(EngineEvent::ProfileRecoveryChanged(summary.clone()));
                 RuntimeMode::Recovery(Arc::new(RecoveryBootstrap {
@@ -168,6 +181,7 @@ impl RecoverableRuntime {
                         background_ready: true,
                         cleanup_pending: self.recovery.cleanup_pending(),
                         losses: Vec::new(),
+                        admission: None,
                     };
                     *self.lock_ready_summary_override() = Some(summary.clone());
                     self.events
@@ -365,6 +379,18 @@ impl EngineRuntime for RecoverableRuntime {
                 self.execute_recovery(bootstrap, operation, cancellation)
                     .await
             }
+            RuntimeMode::AdmissionRecovery(admission) => match operation {
+                Operation::QueryProfileRecovery => Ok(OperationResult::ProfileRecovery(
+                    admission_summary(admission),
+                )),
+                Operation::QueryEncryptionState => {
+                    Ok(OperationResult::EncryptionState(EncryptionStateSummary {
+                        initialized: true,
+                        session_ready: false,
+                    }))
+                }
+                _ => Err(recovery_unavailable()),
+            },
         }
     }
 
@@ -378,7 +404,9 @@ impl EngineRuntime for RecoverableRuntime {
             RuntimeMode::Ready { runtime, .. } => {
                 runtime.execute_dev(operation, cancellation).await
             }
-            RuntimeMode::Recovery(_) => Err(recovery_unavailable()),
+            RuntimeMode::Recovery(_) | RuntimeMode::AdmissionRecovery(_) => {
+                Err(recovery_unavailable())
+            }
         }
     }
 
@@ -393,14 +421,14 @@ impl EngineRuntime for RecoverableRuntime {
                 self.recovery.suspend();
                 Ok(())
             }
-            RuntimeMode::Recovery(_) => Ok(()),
+            RuntimeMode::Recovery(_) | RuntimeMode::AdmissionRecovery(_) => Ok(()),
         }
     }
 
     async fn resume(&self, cancellation: CancellationToken) -> Result<(), EngineError> {
         match self.mode().await {
             RuntimeMode::Ready { runtime, .. } => runtime.resume(cancellation).await,
-            RuntimeMode::Recovery(_) => Ok(()),
+            RuntimeMode::Recovery(_) | RuntimeMode::AdmissionRecovery(_) => Ok(()),
         }
     }
 
@@ -411,7 +439,7 @@ impl EngineRuntime for RecoverableRuntime {
                 self.recovery.suspend();
                 Ok(())
             }
-            RuntimeMode::Recovery(_) => Ok(()),
+            RuntimeMode::Recovery(_) | RuntimeMode::AdmissionRecovery(_) => Ok(()),
         }
     }
 }
@@ -521,6 +549,19 @@ fn ready_summary(recovered: bool, cleanup_pending: bool) -> ProfileRecoverySumma
         background_ready: true,
         cleanup_pending,
         losses: Vec::new(),
+        admission: None,
+    }
+}
+
+fn admission_summary(admission: AdmissionRecoverySummary) -> ProfileRecoverySummary {
+    ProfileRecoverySummary {
+        state: ProfileRecoveryState::AdmissionRecoveryRequired,
+        can_submit_passphrase: false,
+        restart_required: false,
+        background_ready: false,
+        cleanup_pending: false,
+        losses: Vec::new(),
+        admission: Some(admission),
     }
 }
 

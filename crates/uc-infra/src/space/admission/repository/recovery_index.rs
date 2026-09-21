@@ -3,6 +3,7 @@ use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::{Binary, Integer, Nullable};
 use serde::{Deserialize, Serialize};
+use uc_application::deps::AdmissionReadFailureCategory;
 use uc_core::membership::{
     AdmissionRole, JoinerAdmission, SpaceAdmissionAggregate, SponsorAdmission,
     SponsorPairingConfirmationStatus,
@@ -11,6 +12,7 @@ use uc_core::membership::{
 use super::codec::{map_key_error, EncryptedRecordRow};
 use super::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissionState};
 use crate::db::ports::DbExecutor;
+use crate::security::AdmissionKeyError;
 
 const RECOVERY_SUMMARY_FORMAT_V2: u16 = 2;
 const RECOVERY_INDEX_BATCH_SIZE: i32 = 64;
@@ -169,9 +171,17 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         &self,
         conn: &mut SqliteConnection,
         now_ms: i64,
+        verify_repository: bool,
     ) -> Result<LoadedRecoveryIndex, SpaceAdmissionStateStoreError> {
         // Legacy migration must acquire write eligibility before the recovery read transaction.
-        self.load_metadata_on(conn)?;
+        if verify_repository {
+            let state = self.load_state_on(conn)?;
+            for (admission_id, record) in &state.records {
+                self.open_record(*admission_id, record)?;
+            }
+        } else {
+            self.load_metadata_on(conn)?;
+        }
         conn.transaction(|conn| {
             if self.load_metadata_on(conn)?.is_none() {
                 return Ok(LoadedRecoveryIndex {
@@ -210,7 +220,9 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                         || self.record_lookup_token(summary.admission_id)?.as_slice()
                             != row.lookup_token.as_slice()
                     {
-                        return Err(SpaceAdmissionStateStoreError::Corrupt);
+                        return Err(SpaceAdmissionStateStoreError::ReadInvalid(
+                            AdmissionReadFailureCategory::DerivedSummaryInvalid,
+                        ));
                     }
                     if let Some(deadline) =
                         summary.expires_at_ms.filter(|deadline| *deadline > now_ms)
@@ -278,18 +290,31 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             .profile_payload_reader(&row.purpose())
             .map_err(map_key_error)?
             .open_compact(encrypted)
-            .map_err(map_key_error)?;
+            .map_err(|error| match error {
+                AdmissionKeyError::Corrupt | AdmissionKeyError::OpenFailed => {
+                    SpaceAdmissionStateStoreError::ReadInvalid(
+                        AdmissionReadFailureCategory::DerivedSummaryInvalid,
+                    )
+                }
+                other => map_key_error(other),
+            })?;
         if let Ok(summary) = postcard::from_bytes::<RecoverySummary>(&plaintext) {
             if summary.marker == RECOVERY_SUMMARY_MARKER
                 && summary.format_version == RECOVERY_SUMMARY_FORMAT_V2
             {
                 return Ok(Some(summary));
             }
-            return Err(SpaceAdmissionStateStoreError::Corrupt);
+            return Err(SpaceAdmissionStateStoreError::ReadInvalid(
+                AdmissionReadFailureCategory::DerivedSummaryInvalid,
+            ));
         }
         postcard::from_bytes::<LegacyRecoverySummaryV1>(&plaintext)
             .map(|_| None)
-            .map_err(|_| SpaceAdmissionStateStoreError::Corrupt)
+            .map_err(|_| {
+                SpaceAdmissionStateStoreError::ReadInvalid(
+                    AdmissionReadFailureCategory::DerivedSummaryInvalid,
+                )
+            })
     }
 
     fn load_recovery_aggregate(

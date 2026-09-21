@@ -15,6 +15,8 @@ pub(super) const PROFILE_ADMISSION_KEY_NAME: &str = "profile_admission_master_ke
 pub enum AdmissionKeyError {
     #[error("profile admission key storage is unavailable")]
     SecureStorage,
+    #[error("profile admission key is missing")]
+    Missing,
     #[error("profile admission key is corrupt")]
     Corrupt,
     #[error("attempt data key could not be opened")]
@@ -114,6 +116,15 @@ impl AdmissionKeyManager {
         MasterKey::from_bytes(&persisted).map_err(|_| AdmissionKeyError::Corrupt)
     }
 
+    fn existing_profile_key(&self) -> Result<MasterKey, AdmissionKeyError> {
+        let bytes = self
+            .secure_storage
+            .get(PROFILE_ADMISSION_KEY_NAME)
+            .map_err(|_| AdmissionKeyError::SecureStorage)?
+            .ok_or(AdmissionKeyError::Missing)?;
+        MasterKey::from_bytes(&bytes).map_err(|_| AdmissionKeyError::Corrupt)
+    }
+
     pub(crate) const fn profile_generation(&self) -> [u8; 16] {
         self.profile_generation
     }
@@ -193,7 +204,7 @@ impl AdmissionKeyManager {
         purpose: &[u8],
     ) -> Result<ProfilePayloadReader, AdmissionKeyError> {
         Ok(ProfilePayloadReader {
-            key: self.profile_key()?,
+            key: self.existing_profile_key()?,
             aad: self.profile_payload_aad(purpose),
         })
     }

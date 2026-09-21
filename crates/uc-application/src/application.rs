@@ -44,8 +44,9 @@ use crate::runtime_lifecycle::{
 use crate::search::{SearchAssembly, SearchShutdownError};
 use crate::settings::SettingsAssembly;
 use crate::space::{
-    KnownPeerContact, SpaceAdmissionDeps, SpaceAdmissionObservationRegistry, SpaceFacade,
-    SpaceFacadeDeps, SpaceRuntimeAdapters, SpaceSessionDeps, SpaceTransitionDeps,
+    AdmissionReadFailureCategory, KnownPeerContact, PendingAdmissionRecoveryStateError,
+    SpaceAdmissionDeps, SpaceAdmissionObservationRegistry, SpaceFacade, SpaceFacadeDeps,
+    SpaceRuntimeAdapters, SpaceSessionDeps, SpaceTransitionDeps,
 };
 use crate::transfer::blob::facade::BlobTransferDeps;
 use crate::transfer::file::assembly::FileTransferAssembly;
@@ -198,6 +199,11 @@ impl ApplicationNetworkBinding {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApplicationStartError {
+    #[error("admission state requires restricted recovery")]
+    AdmissionRead {
+        #[source]
+        source: PendingAdmissionRecoveryStateError,
+    },
     #[error("Space application runtime was unavailable")]
     SpaceRuntimeUnavailable,
     #[error("active clipboard startup failed")]
@@ -221,6 +227,15 @@ pub enum ApplicationStartError {
         active_clipboard_rollback: Option<LifecycleError>,
         space_rollback: Option<Arc<LifecycleError>>,
     },
+}
+
+impl ApplicationStartError {
+    pub fn admission_failure(&self) -> Option<AdmissionReadFailureCategory> {
+        match self {
+            Self::AdmissionRead { source } => Some(source.category()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -530,7 +545,11 @@ impl ApplicationAssembly {
             active_pull_adapters,
             is_unlocked,
         } = network;
-        if !space.start_application_runtime().await {
+        if !space
+            .start_application_runtime()
+            .await
+            .map_err(|source| ApplicationStartError::AdmissionRead { source })?
+        {
             return Err(ApplicationStartError::SpaceRuntimeUnavailable);
         }
         let search = SearchAssembly::start(&self.deps);

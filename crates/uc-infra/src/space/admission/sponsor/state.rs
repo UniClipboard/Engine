@@ -220,7 +220,7 @@ fn map_sponsor_error(error: SpaceAdmissionStateStoreError) -> SponsorAdmissionSt
     match &error {
         SpaceAdmissionStateStoreError::Locked => SponsorAdmissionStateError::locked(error),
         SpaceAdmissionStateStoreError::Conflict => SponsorAdmissionStateError::state_changed(error),
-        SpaceAdmissionStateStoreError::Corrupt => {
+        SpaceAdmissionStateStoreError::Corrupt | SpaceAdmissionStateStoreError::ReadInvalid(_) => {
             SponsorAdmissionStateError::recovery_required(error)
         }
         SpaceAdmissionStateStoreError::Unavailable => {

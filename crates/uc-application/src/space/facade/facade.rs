@@ -24,7 +24,7 @@ use crate::space::admission::{
     CancelInvitationError, CancelPairingInvitationUseCase, CompletePendingSpaceTransitionError,
     InMemoryPairingInvitationHolder, IssuePairingInvitationForAddressUseCase,
     IssuePairingInvitationUseCase, JoinSpaceError, JoinSpaceInput, JoinSpaceResult,
-    PairingInvitationAddressCandidate, PairingInvitationIssuer,
+    PairingInvitationAddressCandidate, PairingInvitationIssuer, PendingAdmissionRecoveryStateError,
     QueryPairingInvitationAddressesError, QueryPairingInvitationAddressesUseCase,
     QueryPendingSpaceTransitionError, SpaceAdmissionProtocol,
 };
@@ -371,7 +371,10 @@ impl SpaceFacade {
 
     /// 在网络 handler 已绑定且 Router ready 后启动 Space 后台恢复。
     /// 返回 `false` 表示 runtime 已启动或 facade 已关闭。
-    pub async fn start_application_runtime(&self) -> bool {
+    pub async fn start_application_runtime(
+        &self,
+    ) -> Result<bool, PendingAdmissionRecoveryStateError> {
+        self.space_admission.verify_startup_readiness().await?;
         let mut application = self.application.lock().await;
         let started = application
             .as_mut()
@@ -379,7 +382,7 @@ impl SpaceFacade {
         if started {
             self.connections.start().await;
         }
-        started
+        Ok(started)
     }
 
     /// 绑定 Search 与 receive 的完整 Space session activity。

@@ -33,8 +33,9 @@ pub use join_space::{JoinSpaceError, JoinSpaceInput, JoinSpaceResult};
 pub use model::{CurrentJoinStatus, JoinSpaceTerminationReason, JoinedSpace, PendingInboundMember};
 pub(crate) use observation::SpaceAdmissionObservationRegistry;
 pub use protocol::{
-    ActivateSponsorAdmissionError, ActivateSponsorAdmissionPort, AdmissionRecoveryCommitToken,
-    AdmissionRecoveryReport, AdmissionRecoveryTrigger, AuthenticatedAdmissionExchangePort,
+    ActivateSponsorAdmissionError, ActivateSponsorAdmissionPort, AdmissionReadFailureCategory,
+    AdmissionRecoveryAction, AdmissionRecoveryCommitToken, AdmissionRecoveryReport,
+    AdmissionRecoveryStage, AdmissionRecoveryTrigger, AuthenticatedAdmissionExchangePort,
     AuthenticatedAdmissionReply, AuthenticatedSpaceAdmissionMessage, CommittedSponsorAdmission,
     CompletedJoinerActivation, CurrentJoinAdmissionStatePort, ExecuteJoinerActivationError,
     ExecuteJoinerActivationPort, HandleAuthenticatedSpaceAdmissionMessageError,

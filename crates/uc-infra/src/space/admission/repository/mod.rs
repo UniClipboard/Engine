@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::db::ports::DbExecutor;
 use crate::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
+use uc_application::deps::AdmissionReadFailureCategory;
 use uc_application::deps::LoadMembershipLedgerPort;
 use uc_core::membership::{AdmissionContinuationCredential, SpaceAdmissionId};
 
@@ -56,10 +57,24 @@ pub(super) enum SpaceAdmissionStateStoreError {
     Locked,
     #[error("space admission state is corrupt")]
     Corrupt,
+    #[error("space admission repository read requires recovery")]
+    ReadInvalid(AdmissionReadFailureCategory),
     #[error("space admission state changed")]
     Conflict,
     #[error("space admission state storage is unavailable")]
     Unavailable,
+}
+
+impl SpaceAdmissionStateStoreError {
+    // rust-style: allow-qualified-path -- 方法需由相邻 recovery 模块读取，限制在 admission 范围
+    pub(in crate::space::admission) fn read_category(self) -> AdmissionReadFailureCategory {
+        match self {
+            Self::ReadInvalid(category) => category,
+            Self::Locked | Self::Corrupt | Self::Conflict | Self::Unavailable => {
+                AdmissionReadFailureCategory::OtherStorageError
+            }
+        }
+    }
 }
 
 impl From<diesel::result::Error> for SpaceAdmissionStateStoreError {
@@ -97,9 +112,11 @@ impl CredentialLoadError {
             Self::RecordMissing => CredentialFailure::RecordMissing,
             Self::CredentialMissing => CredentialFailure::CredentialMissing,
             Self::State(SpaceAdmissionStateStoreError::Locked) => CredentialFailure::Locked,
-            Self::State(SpaceAdmissionStateStoreError::Corrupt) | Self::Invalid { .. } => {
-                CredentialFailure::Corrupt
-            }
+            Self::State(
+                SpaceAdmissionStateStoreError::Corrupt
+                | SpaceAdmissionStateStoreError::ReadInvalid(_),
+            )
+            | Self::Invalid { .. } => CredentialFailure::Corrupt,
             Self::State(SpaceAdmissionStateStoreError::Conflict) => {
                 CredentialFailure::RecoveryRequired
             }

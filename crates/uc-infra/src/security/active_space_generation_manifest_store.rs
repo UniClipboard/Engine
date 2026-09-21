@@ -886,7 +886,7 @@ fn replace_file_atomically(
 
 fn map_key_error(error: AdmissionKeyError) -> ActiveSpaceGenerationManifestStoreError {
     match error {
-        AdmissionKeyError::Corrupt | AdmissionKeyError::OpenFailed => {
+        AdmissionKeyError::Missing | AdmissionKeyError::Corrupt | AdmissionKeyError::OpenFailed => {
             ActiveSpaceGenerationManifestStoreError::Corrupt
         }
         AdmissionKeyError::SecureStorage => ActiveSpaceGenerationManifestStoreError::storage(error),

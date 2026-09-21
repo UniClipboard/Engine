@@ -26,7 +26,8 @@ pub(crate) use joiner::{JoinerAdmissionService, JoinerReplyHandlingOutcome};
 pub(crate) use protocol::SpaceAdmissionProtocol;
 pub(crate) use recovery::AdmissionRecoveryService;
 pub use recovery::{
-    AdmissionRecoveryCommitToken, AdmissionRecoveryReport, AdmissionRecoveryTrigger,
+    AdmissionReadFailureCategory, AdmissionRecoveryAction, AdmissionRecoveryCommitToken,
+    AdmissionRecoveryReport, AdmissionRecoveryStage, AdmissionRecoveryTrigger,
     AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply, LoadedAdmissionRecovery,
     LoadedPendingAdmission, LoadedSponsorAbandonment, LoadedSponsorDeadline,
     PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,

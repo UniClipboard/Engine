@@ -33,7 +33,9 @@ use uc_observability_contract::diagnostics::{
 use crate::assembly::deps::WiredDependencies;
 #[cfg(feature = "lan-compat")]
 use crate::assembly::facade::build_mobile_sync_facade;
-use crate::assembly::lifecycle::{build_network_runtime, prepare_daemon_session};
+use crate::assembly::lifecycle::{
+    build_network_runtime, prepare_daemon_session, reconcile_session_peers,
+};
 use crate::assembly::sync_engine::SyncSessionAssembly;
 use crate::engine::event_stream::EventSender;
 use crate::operations::space::reset_space::execute_reset_space;
@@ -41,8 +43,8 @@ use crate::subsystems::peer_keepalive::spawn_peer_reachability_event_task;
 #[cfg(feature = "dev-tools")]
 use crate::SessionHandoverFailurePoint;
 use crate::{
-    ActiveClipboardChanged, EngineEvent, InboundNoticeActionSummary, InboundNoticeEvent,
-    InboundRepresentationSummary, RefreshReason,
+    ActiveClipboardChanged, AdmissionRecoverySummary, EngineEvent, InboundNoticeActionSummary,
+    InboundNoticeEvent, InboundRepresentationSummary, RefreshReason,
 };
 
 use super::{operation_error_with_code, operation_unavailable_error};
@@ -966,7 +968,14 @@ impl ProductionSessionFactory {
         {
             Ok(runtime) => Arc::new(runtime),
             Err(error) => {
-                let primary = session_runtime_error("application runtime", error);
+                let admission = error
+                    .admission_failure()
+                    .map(AdmissionRecoverySummary::from);
+                let mut primary = session_runtime_error("application runtime", error);
+                if let Some(summary) = admission {
+                    error!(category = ?summary.category, stage = ?summary.stage, "admission startup requires recovery");
+                    primary = primary.with_admission_recovery(summary);
+                }
                 prepared_session.shutdown().await;
                 let additional = sync_session
                     .shutdown(FileTransferCancellationReason::Unknown, None)
@@ -981,6 +990,7 @@ impl ProductionSessionFactory {
                 }));
             }
         };
+        reconcile_session_peers(&wired.sync_engine).await;
         let facade = application_runtime.facade();
         #[cfg(feature = "lan-compat")]
         let mobile_sync = build_mobile_sync_facade(

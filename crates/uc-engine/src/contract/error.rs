@@ -36,6 +36,8 @@ pub struct EngineError {
     code: u32,
     category: EngineErrorCategory,
     retryable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    admission_recovery: Option<super::AdmissionRecoverySummary>,
 }
 
 impl EngineError {
@@ -44,6 +46,7 @@ impl EngineError {
             code,
             category,
             retryable,
+            admission_recovery: None,
         }
     }
 
@@ -57,6 +60,18 @@ impl EngineError {
 
     pub fn is_retryable(&self) -> bool {
         self.retryable
+    }
+
+    pub(crate) fn with_admission_recovery(
+        mut self,
+        summary: super::AdmissionRecoverySummary,
+    ) -> Self {
+        self.admission_recovery = Some(summary);
+        self
+    }
+
+    pub(crate) fn admission_recovery(&self) -> Option<super::AdmissionRecoverySummary> {
+        self.admission_recovery.clone()
     }
 }
 

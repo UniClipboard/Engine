@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use uc_application::deps::{
-    AdmissionRecoveryCommitToken, AdmissionRecoveryTrigger, LoadedAdmissionRecovery,
-    LoadedPendingAdmission, LoadedSponsorAbandonment, LoadedSponsorDeadline,
-    PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
+    AdmissionReadFailureCategory, AdmissionRecoveryCommitToken, AdmissionRecoveryTrigger,
+    LoadedAdmissionRecovery, LoadedPendingAdmission, LoadedSponsorAbandonment,
+    LoadedSponsorDeadline, PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
 };
 use uc_core::membership::{
     AdmissionRecordPersistence, JoinerAdmissionTransition, SponsorAdmissionTransition,
@@ -22,14 +22,18 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
     #[tracing::instrument(name = "space_admission.recovery_state.load", skip_all, err)]
     async fn load(
         &self,
-        _trigger: AdmissionRecoveryTrigger,
+        trigger: AdmissionRecoveryTrigger,
         now_ms: i64,
     ) -> Result<LoadedAdmissionRecovery, PendingAdmissionRecoveryStateError> {
         observe_local_result(LocalWorkStep::JoinerStateLoad, async {
             self.executor
                 .run(|conn| {
                     let index = self
-                        .load_recovery_index_on(conn, now_ms)
+                        .load_recovery_index_on(
+                            conn,
+                            now_ms,
+                            trigger == AdmissionRecoveryTrigger::Startup,
+                        )
                         .map_err(into_anyhow)?;
                     let profile_generation = self.keys.profile_generation();
                     let pending = index
@@ -64,8 +68,7 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                         index.sponsor_confirmation_pending,
                     ))
                 })
-                .map_err(map_executor_error)
-                .map_err(map_recovery_error)
+                .map_err(map_read_error)
         })
         .await
     }
@@ -231,6 +234,12 @@ fn recovery_commit_token(
 
 fn map_recovery_error(error: SpaceAdmissionStateStoreError) -> PendingAdmissionRecoveryStateError {
     match error {
+        SpaceAdmissionStateStoreError::ReadInvalid(_) => {
+            PendingAdmissionRecoveryStateError::ReadFailure {
+                category: error.read_category(),
+                source: anyhow::Error::new(error),
+            }
+        }
         SpaceAdmissionStateStoreError::Locked => PendingAdmissionRecoveryStateError::Locked,
         SpaceAdmissionStateStoreError::Conflict => PendingAdmissionRecoveryStateError::StateChanged,
         SpaceAdmissionStateStoreError::Corrupt => {
@@ -239,5 +248,19 @@ fn map_recovery_error(error: SpaceAdmissionStateStoreError) -> PendingAdmissionR
         SpaceAdmissionStateStoreError::Unavailable => {
             PendingAdmissionRecoveryStateError::Unavailable
         }
+    }
+}
+
+fn map_read_error(source: anyhow::Error) -> PendingAdmissionRecoveryStateError {
+    match source.downcast_ref::<SpaceAdmissionStateStoreError>() {
+        Some(SpaceAdmissionStateStoreError::Locked) => PendingAdmissionRecoveryStateError::Locked,
+        Some(error) => PendingAdmissionRecoveryStateError::ReadFailure {
+            category: error.read_category(),
+            source,
+        },
+        None => PendingAdmissionRecoveryStateError::ReadFailure {
+            category: AdmissionReadFailureCategory::OtherStorageError,
+            source,
+        },
     }
 }

@@ -1,6 +1,10 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+pub use uc_application::facade::{
+    AdmissionReadFailureCategory as AdmissionRecoveryCategory, AdmissionRecoveryAction,
+    AdmissionRecoveryStage,
+};
 
 use super::{EngineError, ResendEntryOutcome, SendReportSummary};
 use crate::{
@@ -1048,6 +1052,25 @@ pub enum ProfileRecoveryState {
     Recovered,
     PartiallyRecoverable,
     Failed,
+    AdmissionRecoveryRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionRecoverySummary {
+    pub category: AdmissionRecoveryCategory,
+    pub stage: AdmissionRecoveryStage,
+    pub action: AdmissionRecoveryAction,
+}
+
+impl From<uc_application::facade::AdmissionReadFailureCategory> for AdmissionRecoverySummary {
+    fn from(value: uc_application::facade::AdmissionReadFailureCategory) -> Self {
+        let (stage, action) = value.guidance();
+        Self {
+            category: value,
+            stage,
+            action,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1058,6 +1081,8 @@ pub struct ProfileRecoverySummary {
     pub background_ready: bool,
     pub cleanup_pending: bool,
     pub losses: Vec<ProfileRecoveryLoss>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<AdmissionRecoverySummary>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -396,6 +396,7 @@ impl EngineRuntime for ProductionRuntime {
                         background_ready: true,
                         cleanup_pending: false,
                         losses: Vec::new(),
+                        admission: None,
                     }))
                 }
                 Operation::QueryMembershipReadiness => Err(super::operation_unavailable_error()),

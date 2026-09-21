@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use uc_core::membership::{
     AdmissionAttemptTimeline, AdmissionContinuationCredential,
     AdmissionEncryptedPasswordEquivalent, AdmissionPeerBinding, JoinerAdmissionTransition,
@@ -11,8 +12,72 @@ use super::{
     LoadedSponsorAbandonment, LoadedSponsorDeadline,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+/// 无法区分密钥不匹配与密文认证失败时使用同一类别。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionReadFailureCategory {
+    CredentialMissing,
+    AuthenticationMismatch,
+    CurrentMetadataInvalid,
+    LegacyFallbackInvalid,
+    LegacyMigrationFailed,
+    RecordRelationIncomplete,
+    DerivedSummaryInvalid,
+    GenerationMismatch,
+    OtherStorageError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionRecoveryAction {
+    RestoreCredential,
+    ChooseBackup,
+    RebuildDerivedState,
+    ExportDiagnostics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionRecoveryStage {
+    Credential,
+    RepositoryMetadata,
+    LegacyRepository,
+    RepositoryRecord,
+    RecoverySummary,
+    Storage,
+}
+
+impl AdmissionReadFailureCategory {
+    pub fn guidance(self) -> (AdmissionRecoveryStage, AdmissionRecoveryAction) {
+        use AdmissionReadFailureCategory as Category;
+        use AdmissionRecoveryAction as Action;
+        use AdmissionRecoveryStage as Stage;
+        match self {
+            Category::CredentialMissing => (Stage::Credential, Action::RestoreCredential),
+            Category::AuthenticationMismatch => (Stage::Credential, Action::ChooseBackup),
+            Category::CurrentMetadataInvalid | Category::GenerationMismatch => {
+                (Stage::RepositoryMetadata, Action::ChooseBackup)
+            }
+            Category::LegacyFallbackInvalid | Category::LegacyMigrationFailed => {
+                (Stage::LegacyRepository, Action::ChooseBackup)
+            }
+            Category::RecordRelationIncomplete => (Stage::RepositoryRecord, Action::ChooseBackup),
+            Category::DerivedSummaryInvalid => {
+                (Stage::RecoverySummary, Action::RebuildDerivedState)
+            }
+            Category::OtherStorageError => (Stage::Storage, Action::ExportDiagnostics),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum PendingAdmissionRecoveryStateError {
+    #[error("pending admission state requires restricted recovery")]
+    ReadFailure {
+        category: AdmissionReadFailureCategory,
+        #[source]
+        source: anyhow::Error,
+    },
     #[error("pending admission recovery state is locked")]
     Locked,
 
@@ -24,6 +89,17 @@ pub enum PendingAdmissionRecoveryStateError {
 
     #[error("pending admission recovery state is corrupt")]
     RecoveryRequired,
+}
+
+impl PendingAdmissionRecoveryStateError {
+    pub fn category(&self) -> AdmissionReadFailureCategory {
+        match self {
+            Self::ReadFailure { category, .. } => *category,
+            Self::Locked | Self::Unavailable | Self::StateChanged | Self::RecoveryRequired => {
+                AdmissionReadFailureCategory::OtherStorageError
+            }
+        }
+    }
 }
 
 #[async_trait]

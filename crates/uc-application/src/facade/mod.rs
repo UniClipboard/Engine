@@ -37,6 +37,7 @@ pub use crate::profile::factory_reset::{
 pub use crate::profile::probe_profile_key_access::ProbeProfileKeyAccessError;
 pub use crate::runtime_lifecycle::RuntimeLifecycle;
 pub use crate::space::{
+    AdmissionReadFailureCategory, AdmissionRecoveryAction, AdmissionRecoveryStage,
     CancelSpaceJoinError, CurrentJoinStatus, DecideDeviceTrustChange, DecideDeviceTrustChangeError,
     DecideDeviceTrustChangeResult, DeviceGroupChoiceImpact, DeviceTrustChangeChoice,
     DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,

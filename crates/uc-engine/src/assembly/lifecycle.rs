@@ -83,6 +83,20 @@ pub async fn prepare_daemon_session(
     #[cfg(feature = "lan-compat")] mobile_sync_ports: uc_mobile_lan::MobileSyncPorts,
     session_builder: IrohSessionBuilder,
 ) -> anyhow::Result<PreparedSyncSession> {
+    prepare_sync_session(
+        application,
+        space_setup,
+        current_app_version,
+        #[cfg(feature = "lan-compat")]
+        mobile_sync_ports,
+        session_builder,
+    )
+    .await
+    .context("Space session assembly failed")
+}
+
+/// 资料校验通过后才整理成员关系，受限恢复不触碰这些记录。
+pub async fn reconcile_session_peers(space_setup: &SyncEngineDeps) {
     // 启动期 reconcile:把 peer_addr_repo / trusted_peer_repo 中
     // member_repo 已不再持有的孤儿条目清掉,恢复设计意图的不变量
     // `peer_addr ⊆ member`、`trusted_peer ⊆ member`。失败只 log 不阻断
@@ -109,15 +123,4 @@ pub async fn prepare_daemon_session(
             "trusted_peer reconcile failed at boot; daemon continues with whatever orphans remain"
         );
     }
-
-    prepare_sync_session(
-        application,
-        space_setup,
-        current_app_version,
-        #[cfg(feature = "lan-compat")]
-        mobile_sync_ports,
-        session_builder,
-    )
-    .await
-    .context("Space session assembly failed")
 }

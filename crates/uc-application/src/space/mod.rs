@@ -90,8 +90,9 @@ pub use admission::{
     SponsorPreparedSecurityTransition,
 };
 pub use admission::{
-    ActivateSponsorAdmissionError, ActivateSponsorAdmissionPort, AdmissionRecoveryCommitToken,
-    AdmissionRecoveryReport, AdmissionRecoveryTrigger, AuthenticatedAdmissionExchangePort,
+    ActivateSponsorAdmissionError, ActivateSponsorAdmissionPort, AdmissionReadFailureCategory,
+    AdmissionRecoveryAction, AdmissionRecoveryCommitToken, AdmissionRecoveryReport,
+    AdmissionRecoveryStage, AdmissionRecoveryTrigger, AuthenticatedAdmissionExchangePort,
     AuthenticatedAdmissionReply, AuthenticatedSpaceAdmissionMessage, CommittedSponsorAdmission,
     CompletedJoinerActivation, CurrentJoinAdmissionStatePort, ExecuteJoinerActivationError,
     ExecuteJoinerActivationPort, HandleAuthenticatedSpaceAdmissionMessageError,

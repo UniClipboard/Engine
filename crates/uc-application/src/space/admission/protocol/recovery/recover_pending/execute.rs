@@ -97,6 +97,20 @@ impl JoinerRecoveryObservation {
 const MAX_IMMEDIATE_EXCHANGES_PER_ADMISSION: usize = 4;
 
 impl SpaceAdmissionProtocol {
+    pub(crate) async fn verify_startup_readiness(
+        &self,
+    ) -> Result<(), PendingAdmissionRecoveryStateError> {
+        match self
+            .recovery
+            .state
+            .load(AdmissionRecoveryTrigger::Startup, self.recovery.now_ms())
+            .await
+        {
+            Ok(_) | Err(PendingAdmissionRecoveryStateError::Locked) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     pub(crate) async fn recover_pending(
         &self,
         trigger: AdmissionRecoveryTrigger,
@@ -531,6 +545,9 @@ fn record_recovery_load_error(
     error: &PendingAdmissionRecoveryStateError,
 ) {
     let decision = match error {
+        PendingAdmissionRecoveryStateError::ReadFailure { .. } => {
+            RecoveryDecision::RequiresRecovery(Some(RecoveryProblem::CorruptState))
+        }
         PendingAdmissionRecoveryStateError::RecoveryRequired => {
             RecoveryDecision::RequiresRecovery(Some(RecoveryProblem::CorruptState))
         }
@@ -550,6 +567,9 @@ fn record_recovery_load_error(
         decision,
     );
     let outcome = match error {
+        PendingAdmissionRecoveryStateError::ReadFailure { .. } => {
+            SpaceAdmissionObservationOutcome::Failed(DiagnosticErrorType::Corrupt)
+        }
         PendingAdmissionRecoveryStateError::RecoveryRequired => {
             SpaceAdmissionObservationOutcome::Failed(DiagnosticErrorType::Corrupt)
         }
