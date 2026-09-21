@@ -21,6 +21,9 @@ mod lease;
 #[path = "host_contract/stale_callback.rs"]
 mod stale_callback;
 
+#[path = "host_contract/search_compound_words.rs"]
+mod search_compound_words;
+
 use lease::{find_lease, open_lease};
 
 #[tokio::test(flavor = "multi_thread")]
