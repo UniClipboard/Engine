@@ -146,6 +146,18 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
             .map_err(backend)?
     }
 
+    async fn group_update_delivery_status(
+        &self,
+        space_id: &SpaceId,
+    ) -> Result<uc_core::membership::GroupUpdateDeliveryStatus, KeyEpochError> {
+        // 先复用投递读取维护同一份加密索引，再只读取其汇总状态。
+        self.due_group_updates(space_id, i64::MIN, None).await?;
+        let key = self.session.get_master_key().map_err(backend)?;
+        self.executor
+            .run(|conn| Ok(self.load_group_update_delivery_status_on(conn, &key, space_id)?))
+            .map_err(backend)
+    }
+
     async fn begin_revocation(
         &self,
         prepared: &RevocationRecord,

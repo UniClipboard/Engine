@@ -34,6 +34,7 @@ pub use clipboard_receive::{
 };
 mod connection;
 mod group_update;
+mod membership_history;
 mod network_recovery;
 mod physical;
 mod record;
@@ -41,8 +42,12 @@ mod source;
 pub use source::{LocalDiagnosticSource, SourceCapability, SourceCollection};
 
 pub use authentication::complete_group_update_failure;
+pub use authentication::complete_membership_history_failure;
 pub use group_update::{
     GroupUpdateFailureDetail, GroupUpdatePhase, GroupUpdateReason, GroupUpdateSource,
+};
+pub use membership_history::{
+    MembershipHistoryFailureDetail, MembershipHistoryFailurePhase, MembershipHistoryFailureReason,
 };
 
 pub use network_recovery::{

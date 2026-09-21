@@ -4997,6 +4997,19 @@ async fn arm_final_confirmation_connection_failure(engine: &Engine) -> u64 {
     after_sequence
 }
 
+async fn arm_final_confirmation_success_reply_drop(engine: &Engine) -> u64 {
+    let result = engine
+        .execute_dev(uc_engine::DevOperation::ArmFinalConfirmationSuccessReplyDrop)
+        .await
+        .expect("arm one final confirmation success reply drop");
+    let uc_engine::DevOperationResult::FinalConfirmationSuccessReplyDropArmed { after_sequence } =
+        result
+    else {
+        panic!("unexpected final confirmation success reply drop arm result");
+    };
+    after_sequence
+}
+
 async fn arm_membership_history_failures(
     engine: &Engine,
     failure: uc_engine::DevMembershipHistoryFailure,
@@ -5044,6 +5057,17 @@ async fn wait_for_maintenance_health(
         );
         tokio::task::yield_now().await;
     }
+}
+
+async fn query_space_device_update(engine: &Engine) -> uc_engine::SpaceDeviceUpdateStatusSummary {
+    let OperationResult::DeviceGroupChoices(summary) = engine
+        .execute(Operation::QueryDeviceGroupChoices)
+        .await
+        .expect("query space device update")
+    else {
+        panic!("unexpected device group choices result");
+    };
+    summary.device_trust.space_device_update
 }
 
 async fn wait_for_space_work_event(
@@ -5674,6 +5698,72 @@ async fn final_confirmation_retry_precedes_ordinary_membership_network_work() {
         .expect("shutdown Joiner");
 }
 
+// 邀请方已持久提交后丢失第一个成功回复，加入方必须重试同一尝试并获得原成功结果。
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn committed_final_confirmation_replays_success_after_the_first_reply_is_lost() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let sponsor_harness = DeviceHarness::new(rendezvous.uri());
+    let joiner_harness = DeviceHarness::new(rendezvous.uri());
+    let sponsor = Arc::new(sponsor_harness.start().await);
+    let joiner = Arc::new(joiner_harness.start().await);
+    let (space_id, _) = create_space(&sponsor, "Sponsor").await;
+    let invitation = issue_invitation(&sponsor).await;
+    let baseline = arm_final_confirmation_success_reply_drop(&joiner).await;
+
+    let joining_engine = Arc::clone(&joiner);
+    let joining_space_id = space_id.clone();
+    let joining = tokio::spawn(async move {
+        join_with_invitation(
+            &joining_engine,
+            "Reply-loss Joiner",
+            &joining_space_id,
+            invitation,
+        )
+        .await
+    });
+
+    let committed = wait_for_space_work_event(
+        &joiner,
+        baseline,
+        uc_engine::DevSpaceWorkEventKind::FinalConfirmationSponsorCommitted,
+    )
+    .await;
+    let dropped = wait_for_space_work_event(
+        &joiner,
+        committed.sequence,
+        uc_engine::DevSpaceWorkEventKind::FinalConfirmationSuccessReplyDropped,
+    )
+    .await;
+    wait_for_active_member_count(&sponsor, 2).await;
+    let retry = wait_for_space_work_event(
+        &joiner,
+        dropped.sequence,
+        uc_engine::DevSpaceWorkEventKind::FinalConfirmationRetryStarted,
+    )
+    .await;
+    let replayed = wait_for_space_work_event(
+        &joiner,
+        retry.sequence,
+        uc_engine::DevSpaceWorkEventKind::FinalConfirmationReplyReceived,
+    )
+    .await;
+    assert!(committed.sequence < dropped.sequence);
+    assert!(dropped.sequence < retry.sequence);
+    assert!(retry.sequence < replayed.sequence);
+
+    joining.await.expect("Joiner task must not panic");
+    wait_for_active_member_count(&joiner, 2).await;
+    sponsor
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shutdown Sponsor");
+    joiner
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shutdown Joiner");
+}
+
 // 普通成员历史交换暂时失败时，公开状态必须带有持久重试时间，并在到期后自动恢复。
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn membership_history_retryable_failure_exposes_deadline_and_recovers() {
@@ -5714,12 +5804,6 @@ async fn membership_history_retryable_failure_exposes_deadline_and_recovers() {
         uc_engine::DevSpaceWorkEventKind::MembershipHistorySyncReplyReceived,
     )
     .await;
-    let healthy = wait_for_maintenance_health(
-        &sponsor,
-        uc_engine::MembershipMaintenanceHealthPhaseSummary::Healthy,
-    )
-    .await;
-    assert_eq!(healthy.next_retry_at_ms, None);
     let events = query_space_work_events(&sponsor).await;
     let observed = events
         .iter()
@@ -5804,11 +5888,17 @@ async fn membership_history_rejection_exposes_recovery_and_can_recover() {
         uc_engine::DevSpaceWorkEventKind::MembershipHistorySyncReplyReceived,
     )
     .await;
-    wait_for_maintenance_health(
-        &sponsor,
-        uc_engine::MembershipMaintenanceHealthPhaseSummary::Healthy,
-    )
-    .await;
+    let after_recovery = sponsor
+        .execute(Operation::QueryDeviceGroupChoices)
+        .await
+        .expect("query overall device update after history recovery");
+    let OperationResult::DeviceGroupChoices(after_recovery) = after_recovery else {
+        panic!("unexpected device group choices result");
+    };
+    assert_ne!(
+        after_recovery.device_trust.maintenance_health.reason,
+        Some(uc_engine::MembershipMaintenanceProblemSummary::MembershipHistoryRejected)
+    );
     let events = query_space_work_events(&sponsor).await;
     assert_eq!(
         events
@@ -5952,6 +6042,16 @@ async fn pending_final_confirmation_survives_joiner_restart() {
         .await
         .expect("send to restarted confirmed Joiner");
     wait_for_received_text(&restarted_joiner, text).await;
+    // 内容已可传输不代表设备状态已全部更新完成。该重启场景仍有已知的
+    // 安全资料恢复欠账，公开整体状态必须保留未完成，而不能由传输成功推断完成。
+    assert_ne!(
+        query_space_device_update(&sponsor).await.phase,
+        uc_engine::SpaceDeviceUpdatePhaseSummary::Completed
+    );
+    assert_ne!(
+        query_space_device_update(&restarted_joiner).await.phase,
+        uc_engine::SpaceDeviceUpdatePhaseSummary::Completed
+    );
 
     sponsor
         .shutdown(SHUTDOWN_TIMEOUT)

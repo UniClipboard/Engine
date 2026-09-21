@@ -267,7 +267,7 @@ async fn removal_commits_all_local_facts_once_before_returning_success() {
         repository.clone(),
         Arc::new(AcceptingVerifier),
     ));
-    let query = Arc::new(QueryDeviceTrustUseCase::new(
+    let query = Arc::new(QueryDeviceTrustUseCase::new_for_tests(
         Arc::clone(&ledger),
         Arc::new(OfflineObservations),
         Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
@@ -347,7 +347,7 @@ async fn one_persistence_conflict_is_retried_from_a_fresh_snapshot() {
         repository.clone(),
         Arc::new(AcceptingVerifier),
     ));
-    let query = Arc::new(QueryDeviceTrustUseCase::new(
+    let query = Arc::new(QueryDeviceTrustUseCase::new_for_tests(
         Arc::clone(&ledger),
         Arc::new(OfflineObservations),
         Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
@@ -381,7 +381,7 @@ async fn replaying_an_old_admission_revocation_does_not_remove_the_repaired_inst
         repository.clone(),
         Arc::new(AcceptingVerifier),
     ));
-    let query = Arc::new(QueryDeviceTrustUseCase::new(
+    let query = Arc::new(QueryDeviceTrustUseCase::new_for_tests(
         Arc::clone(&ledger),
         Arc::new(OfflineObservations),
         Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
@@ -449,7 +449,7 @@ async fn abandoned_admission_lookup_resolves_to_the_exact_original_member() {
         repository.clone(),
         Arc::new(AcceptingVerifier),
     ));
-    let query = Arc::new(QueryDeviceTrustUseCase::new(
+    let query = Arc::new(QueryDeviceTrustUseCase::new_for_tests(
         Arc::clone(&ledger),
         Arc::new(OfflineObservations),
         Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
@@ -505,7 +505,7 @@ async fn exact_revocation_rejects_wrong_space_and_unknown_add_without_committing
         repository.clone(),
         Arc::new(AcceptingVerifier),
     ));
-    let query = Arc::new(QueryDeviceTrustUseCase::new(
+    let query = Arc::new(QueryDeviceTrustUseCase::new_for_tests(
         Arc::clone(&ledger),
         Arc::new(OfflineObservations),
         Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
@@ -563,7 +563,7 @@ async fn exact_revocation_reports_pending_local_effects_after_the_remove_is_save
         repository.clone(),
         Arc::new(AcceptingVerifier),
     ));
-    let query = Arc::new(QueryDeviceTrustUseCase::new(
+    let query = Arc::new(QueryDeviceTrustUseCase::new_for_tests(
         Arc::clone(&ledger),
         Arc::new(OfflineObservations),
         Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
@@ -612,7 +612,7 @@ async fn exact_revocation_without_the_current_member_credential_never_reports_re
         repository.clone(),
         Arc::new(AcceptingVerifier),
     ));
-    let query = Arc::new(QueryDeviceTrustUseCase::new(
+    let query = Arc::new(QueryDeviceTrustUseCase::new_for_tests(
         Arc::clone(&ledger),
         Arc::new(OfflineObservations),
         Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),

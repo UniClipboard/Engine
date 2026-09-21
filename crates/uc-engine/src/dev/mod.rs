@@ -29,6 +29,8 @@ pub enum DevMembershipHistoryFailure {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DevSpaceWorkEventKind {
     FinalConfirmationConnectionFailed,
+    FinalConfirmationSponsorCommitted,
+    FinalConfirmationSuccessReplyDropped,
     FinalConfirmationRetryStarted,
     FinalConfirmationReplyReceived,
     OrdinaryMemberUpdateStarted,
@@ -219,6 +221,7 @@ pub enum DevOperation {
     WaitForJoinerFinalConfirmationPause,
     ReleaseJoinerFinalConfirmationPause,
     ArmFinalConfirmationConnectionFailure,
+    ArmFinalConfirmationSuccessReplyDrop,
     ArmMembershipHistoryFailures {
         failure: DevMembershipHistoryFailure,
         count: usize,
@@ -265,6 +268,9 @@ impl fmt::Debug for DevOperation {
             Self::ReleaseJoinerFinalConfirmationPause => "release_joiner_final_confirmation_pause",
             Self::ArmFinalConfirmationConnectionFailure => {
                 "arm_final_confirmation_connection_failure"
+            }
+            Self::ArmFinalConfirmationSuccessReplyDrop => {
+                "arm_final_confirmation_success_reply_drop"
             }
             Self::ArmMembershipHistoryFailures { .. } => "arm_membership_history_failures",
             Self::ClearMembershipHistoryFailures => "clear_membership_history_failures",
@@ -411,6 +417,9 @@ pub enum DevOperationResult {
     FinalConfirmationConnectionFailureArmed {
         after_sequence: u64,
     },
+    FinalConfirmationSuccessReplyDropArmed {
+        after_sequence: u64,
+    },
     MembershipHistoryFailuresArmed {
         after_sequence: u64,
     },
@@ -461,6 +470,9 @@ impl fmt::Debug for DevOperationResult {
             }
             Self::FinalConfirmationConnectionFailureArmed { .. } => {
                 "final_confirmation_connection_failure_armed"
+            }
+            Self::FinalConfirmationSuccessReplyDropArmed { .. } => {
+                "final_confirmation_success_reply_drop_armed"
             }
             Self::MembershipHistoryFailuresArmed { .. } => "membership_history_failures_armed",
             Self::MembershipHistoryFailuresCleared { .. } => "membership_history_failures_cleared",

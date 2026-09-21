@@ -1,10 +1,11 @@
 use std::time::Duration;
+
 use uc_observability_contract::diagnostics::connectivity::*;
 use uc_observability_contract::diagnostics::*;
 use uc_observability_runtime::*;
 
 #[test]
-fn member_update_detail_is_consumed_once_into_the_actual_local_file() {
+fn history_failure_exports_a_safe_stage_error_chain_and_call_path() {
     let directory = tempfile::tempdir().expect("logs");
     let handle = ProcessObservabilityRuntime::install(
         ObservabilityConfig::new(
@@ -20,57 +21,60 @@ fn member_update_detail_is_consumed_once_into_the_actual_local_file() {
     )
     .expect("install")
     .handle();
-    let completion = || {
+    complete_membership_history_failure(
+        MembershipHistoryFailureDetail {
+            phase: MembershipHistoryFailurePhase::ExchangeHistory,
+            reason: MembershipHistoryFailureReason::Transport,
+        },
         OperationCompletion::failed(
             DiagnosticDomain::SpaceMembership,
-            DiagnosticOperation::MembershipGroupUpdate,
+            DiagnosticOperation::MembershipHistorySync,
             DiagnosticRole::Member,
-            DiagnosticErrorType::Storage,
+            DiagnosticErrorType::StreamFailed,
             Duration::from_millis(4),
-        )
-    };
-    complete_group_update_failure(
-        GroupUpdateFailureDetail {
-            phase: GroupUpdatePhase::PersistState,
-            reason: GroupUpdateReason::PermissionDenied,
-            source: GroupUpdateSource::Io,
-        },
-        completion(),
+        ),
     );
-    complete_operation(completion());
     assert_eq!(
         handle.force_flush(Duration::from_secs(2)).logs,
         SignalResult::Completed
     );
-    let rows: Vec<serde_json::Value> = managed_log_files(directory.path())
+    let rows = managed_log_files(directory.path())
         .expect("files")
         .iter()
         .flat_map(|file| {
             std::fs::read_to_string(file)
                 .expect("content")
                 .lines()
-                .map(|line| serde_json::from_str(line).expect("JSON"))
-                .filter(|row: &serde_json::Value| row["target"] != "uc.diagnostics")
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON"))
+                .filter(|row| row["target"] != "uc.diagnostics")
                 .collect::<Vec<_>>()
         })
-        .collect();
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0]["fields"]["error.phase"], "persist_state");
-    assert_eq!(rows[0]["fields"]["error.reason"], "permission_denied");
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["fields"]["error.phase"], "exchange_history");
+    assert_eq!(rows[0]["fields"]["error.reason"], "transport");
     assert_eq!(
         rows[0]["fields"]["error.chain"],
         serde_json::json!([
             "space_device_update",
-            "persist_state",
-            "io",
-            "permission_denied"
+            "membership_history",
+            "exchange_history",
+            "transport"
         ])
     );
     assert_eq!(
         rows[0]["fields"]["error.call_path"],
         rows[0]["fields"]["error.chain"]
     );
-    assert!(rows[1]["fields"].get("error.phase").is_none());
-    assert_eq!(rows[0]["run_id"], rows[1]["run_id"]);
+    let serialized = serde_json::to_string(&rows).expect("serialize rows");
+    for forbidden in [
+        "device_id",
+        "invitation",
+        "credential",
+        "signature",
+        "secret",
+    ] {
+        assert!(!serialized.contains(forbidden));
+    }
     handle.shutdown(Duration::from_secs(2));
 }

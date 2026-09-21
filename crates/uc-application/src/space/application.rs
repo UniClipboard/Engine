@@ -30,8 +30,8 @@ use crate::space::membership::RemoveSpaceMemberUseCase;
 use crate::space::membership::ResolveMembershipConflictUseCase;
 use crate::space::membership::{
     CurrentSpaceMemberScopePort, DeliverRestrictedMembershipUseCase,
-    InitializeSpaceMembershipUseCase, MembershipLedger, RePairingAwareMembershipActivation,
-    RecoverMembershipEffectsUseCase,
+    InitializeSpaceMembershipUseCase, LoadSecurityDeviceUpdateStatusPort, MembershipLedger,
+    RePairingAwareMembershipActivation, RecoverMembershipEffectsUseCase,
 };
 use crate::space::membership::{
     MaintainSpaceMembershipDeps, MaintainSpaceMembershipUseCase, SpaceMembershipMaintenanceRuntime,
@@ -270,10 +270,16 @@ impl SpaceApplication {
             commit_membership_ledger,
             Arc::clone(&historical_membership_signatures),
         ));
+        let deliver_group_updates = Arc::new(DeliverPendingGroupUpdatesUseCase::new(
+            group_update_store,
+            group_update_dispatch,
+            Arc::clone(&clock),
+        ));
         let query_device_trust = Arc::new(QueryDeviceTrustUseCase::new(
             Arc::clone(&ledger),
             device_trust_observations,
             current_join_status,
+            Arc::clone(&deliver_group_updates) as Arc<dyn LoadSecurityDeviceUpdateStatusPort>,
         ));
         let initialize_membership = Arc::new(InitializeSpaceMembershipUseCase::new(
             Arc::clone(&ledger),
@@ -360,11 +366,6 @@ impl SpaceApplication {
         let deliver_restricted_membership = Arc::new(DeliverRestrictedMembershipUseCase::new(
             Arc::clone(&ledger),
             restricted_membership_delivery,
-        ));
-        let deliver_group_updates = Arc::new(DeliverPendingGroupUpdatesUseCase::new(
-            group_update_store,
-            group_update_dispatch,
-            Arc::clone(&clock),
         ));
         let recover_membership_conflicts = Arc::new(RecoverMembershipConflictUseCase::new(
             Arc::clone(&ledger),

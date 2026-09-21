@@ -74,10 +74,10 @@ pub use membership::{
 };
 pub use membership::{
     DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
-    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, MembershipMaintenanceHealth,
-    MembershipMaintenanceHealthPhase, MembershipMaintenanceProblem, MembershipMaintenanceRecovery,
+    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState,
     PairingConfirmationObservation, PairingConfirmationStatus, PairingConfirmationTarget,
-    PendingDeviceTrustChange, QueryDeviceTrustError,
+    PendingDeviceTrustChange, QueryDeviceTrustError, SpaceDeviceUpdatePhase,
+    SpaceDeviceUpdateProblem, SpaceDeviceUpdateRecovery, SpaceDeviceUpdateStatus,
 };
 
 // Assembly contract re-exported by `crate::deps`.

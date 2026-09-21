@@ -3,11 +3,12 @@ use diesel::sql_types::{BigInt, Binary, Nullable, Text};
 use tempfile::{tempdir, TempDir};
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
-    BeginRevocationOutcome, BootstrapId, ContentKeyId, GroupEpoch, GroupUpdateDispatchError,
-    LegacyBootstrapRecord, LegacyBootstrapRepositoryPort, LegacyBootstrapStage,
-    LegacyBootstrapStatus, PendingGroupUpdate, PreparedRevocationResolution, RevocationId,
-    RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort, RevocationStage,
-    RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceSecurityStateResetPort,
+    BeginRevocationOutcome, BootstrapId, ContentKeyId, GroupEpoch, GroupUpdateDeliveryStatus,
+    GroupUpdateDispatchError, LegacyBootstrapRecord, LegacyBootstrapRepositoryPort,
+    LegacyBootstrapStage, LegacyBootstrapStatus, PendingGroupUpdate, PreparedRevocationResolution,
+    RevocationId, RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort,
+    RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState,
+    SpaceSecurityStateResetPort,
 };
 
 use super::DieselSpaceSecurityStore;
@@ -379,6 +380,13 @@ async fn delivery_failures_survive_restart_without_rewriting_space_material() {
     material.add_pending_group_updates([first.clone(), second.clone(), available.clone()], 100);
     repo.save_space_material(&material).await.unwrap();
 
+    assert_eq!(
+        repo.group_update_delivery_status(&space_id).await.unwrap(),
+        GroupUpdateDeliveryStatus::Pending {
+            next_attempt_at_ms: 0
+        }
+    );
+
     let initial = repo.due_group_updates(&space_id, 100, None).await.unwrap();
     assert_eq!(initial.len(), 3);
 
@@ -414,6 +422,12 @@ async fn delivery_failures_survive_restart_without_rewriting_space_material() {
         .encrypted_payload
     };
     assert_eq!(before_failure, after_failure);
+    assert_eq!(
+        repo.group_update_delivery_status(&space_id).await.unwrap(),
+        GroupUpdateDeliveryStatus::Pending {
+            next_attempt_at_ms: 0
+        }
+    );
 
     let reopened = reopen_repo(&pool);
     let waiting = reopened
@@ -428,6 +442,35 @@ async fn delivery_failures_survive_restart_without_rewriting_space_material() {
         .unwrap();
     assert!(peer_online.contains(&first));
     assert!(peer_online.contains(&second));
+}
+
+#[tokio::test]
+async fn delivery_status_exposes_the_persisted_retry_deadline() {
+    let (repo, _pool, _tempdir) = make_repo();
+    let space_id = SpaceId::from_str("space-sensitive");
+    let mut material = seed_current_space(&repo).await;
+    let pending = pending_update("offline-peer", 1);
+    material.add_pending_group_updates([pending.clone()], 100);
+    repo.save_space_material(&material).await.unwrap();
+    repo.due_group_updates(&space_id, 100, None).await.unwrap();
+
+    repo.record_group_update_failures(
+        &space_id,
+        &[(
+            pending.update_id().to_owned(),
+            GroupUpdateDispatchError::Offline,
+        )],
+        100,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        repo.group_update_delivery_status(&space_id).await.unwrap(),
+        GroupUpdateDeliveryStatus::Pending {
+            next_attempt_at_ms: 30_100
+        }
+    );
 }
 
 #[tokio::test]
@@ -451,6 +494,11 @@ async fn rejected_delivery_stays_out_of_the_queue_after_unrelated_changes_and_re
     )
     .await
     .unwrap();
+
+    assert_eq!(
+        repo.group_update_delivery_status(&space_id).await.unwrap(),
+        GroupUpdateDeliveryStatus::Rejected
+    );
 
     let unrelated = pending_update("another-peer", 3);
     material.add_pending_group_updates([unrelated.clone()], 200);

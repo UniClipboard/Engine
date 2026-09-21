@@ -74,7 +74,7 @@ async fn concurrent_membership_updates_cannot_split_a_device_group_query() {
         repository.clone(),
         Arc::new(EmptyInputs),
     ));
-    let trust = Arc::new(QueryDeviceTrustUseCase::new(
+    let trust = Arc::new(QueryDeviceTrustUseCase::new_for_tests(
         ledger.clone(),
         Arc::new(EmptyInputs),
         Arc::new(EmptyInputs),

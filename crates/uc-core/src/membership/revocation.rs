@@ -398,6 +398,14 @@ pub struct PendingGroupUpdate {
     payload: Vec<u8>,
 }
 
+/// 空间安全资料投递的持久状态摘要。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupUpdateDeliveryStatus {
+    Completed,
+    Pending { next_attempt_at_ms: i64 },
+    Rejected,
+}
+
 impl PendingGroupUpdate {
     pub fn new(revocation_id: RevocationId, recipient: DeviceId, payload: Vec<u8>) -> Self {
         Self {

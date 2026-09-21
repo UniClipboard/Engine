@@ -302,7 +302,7 @@ async fn accepting_local_removal_requires_explicit_confirmation_before_writing()
         repository.clone(),
         Arc::new(AcceptingVerifier),
     ));
-    let query = Arc::new(QueryDeviceTrustUseCase::new(
+    let query = Arc::new(QueryDeviceTrustUseCase::new_for_tests(
         Arc::clone(&ledger),
         Arc::new(OfflineObservations),
         Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
@@ -348,7 +348,7 @@ async fn confirmed_acceptance_commits_the_decision_and_stops_local_access() {
         repository.clone(),
         Arc::new(AcceptingVerifier),
     ));
-    let query = Arc::new(QueryDeviceTrustUseCase::new(
+    let query = Arc::new(QueryDeviceTrustUseCase::new_for_tests(
         Arc::clone(&ledger),
         Arc::new(OfflineObservations),
         Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
@@ -427,7 +427,7 @@ async fn rejection_keeps_local_membership_and_diverges_only_the_proposer() {
         repository.clone(),
         Arc::new(AcceptingVerifier),
     ));
-    let query = Arc::new(QueryDeviceTrustUseCase::new(
+    let query = Arc::new(QueryDeviceTrustUseCase::new_for_tests(
         Arc::clone(&ledger),
         Arc::new(OfflineObservations),
         Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
@@ -528,7 +528,7 @@ async fn handoff_rejecting_removal_does_not_require_a_second_keep_choice() {
         repository.clone(),
         Arc::new(AcceptingVerifier),
     ));
-    let query = Arc::new(QueryDeviceTrustUseCase::new(
+    let query = Arc::new(QueryDeviceTrustUseCase::new_for_tests(
         ledger.clone(),
         Arc::new(OfflineObservations),
         Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
@@ -618,7 +618,7 @@ async fn repeated_decision_returns_the_original_result_without_a_second_commit()
         repository.clone(),
         Arc::new(AcceptingVerifier),
     ));
-    let query = Arc::new(QueryDeviceTrustUseCase::new(
+    let query = Arc::new(QueryDeviceTrustUseCase::new_for_tests(
         Arc::clone(&ledger),
         Arc::new(OfflineObservations),
         Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
@@ -667,7 +667,7 @@ async fn one_decision_conflict_is_retried_from_a_fresh_snapshot() {
         repository.clone(),
         Arc::new(AcceptingVerifier),
     ));
-    let query = Arc::new(QueryDeviceTrustUseCase::new(
+    let query = Arc::new(QueryDeviceTrustUseCase::new_for_tests(
         Arc::clone(&ledger),
         Arc::new(OfflineObservations),
         Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),

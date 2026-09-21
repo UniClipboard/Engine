@@ -59,43 +59,57 @@ pub struct AdmissionDisplayStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MembershipMaintenanceHealthPhase {
-    Healthy,
-    Retrying,
+pub enum SpaceDeviceUpdatePhase {
+    Updating,
+    Completed,
+    RetryableFailure,
     NeedsAttention,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MembershipMaintenanceProblem {
-    MembershipHistoryRejected,
+pub enum SpaceDeviceUpdateProblem {
+    DeviceStateRejected,
+    DeviceRelationshipConflict,
+    DeviceSecurityUpdateRejected,
+    DeviceUpgradeRequired,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MembershipMaintenanceRecovery {
-    ResolveDeviceTrust,
+pub enum SpaceDeviceUpdateRecovery {
+    ReviewDevices,
+    UpdateApp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MembershipMaintenanceHealth {
-    pub phase: MembershipMaintenanceHealthPhase,
-    pub reason: Option<MembershipMaintenanceProblem>,
-    pub recovery: Option<MembershipMaintenanceRecovery>,
+pub struct SpaceDeviceUpdateStatus {
+    pub phase: SpaceDeviceUpdatePhase,
+    pub reason: Option<SpaceDeviceUpdateProblem>,
+    pub recovery: Option<SpaceDeviceUpdateRecovery>,
     pub next_retry_at_ms: Option<i64>,
 }
 
-impl MembershipMaintenanceHealth {
-    pub const fn healthy() -> Self {
+impl SpaceDeviceUpdateStatus {
+    pub const fn updating() -> Self {
         Self {
-            phase: MembershipMaintenanceHealthPhase::Healthy,
+            phase: SpaceDeviceUpdatePhase::Updating,
             reason: None,
             recovery: None,
             next_retry_at_ms: None,
         }
     }
 
-    pub const fn retrying(next_retry_at_ms: i64) -> Self {
+    pub const fn completed() -> Self {
         Self {
-            phase: MembershipMaintenanceHealthPhase::Retrying,
+            phase: SpaceDeviceUpdatePhase::Completed,
+            reason: None,
+            recovery: None,
+            next_retry_at_ms: None,
+        }
+    }
+
+    pub const fn retryable_failure(next_retry_at_ms: i64) -> Self {
+        Self {
+            phase: SpaceDeviceUpdatePhase::RetryableFailure,
             reason: None,
             recovery: None,
             next_retry_at_ms: Some(next_retry_at_ms),
@@ -103,11 +117,11 @@ impl MembershipMaintenanceHealth {
     }
 
     pub const fn needs_attention(
-        reason: MembershipMaintenanceProblem,
-        recovery: MembershipMaintenanceRecovery,
+        reason: SpaceDeviceUpdateProblem,
+        recovery: SpaceDeviceUpdateRecovery,
     ) -> Self {
         Self {
-            phase: MembershipMaintenanceHealthPhase::NeedsAttention,
+            phase: SpaceDeviceUpdatePhase::NeedsAttention,
             reason: Some(reason),
             recovery: Some(recovery),
             next_retry_at_ms: None,
@@ -165,7 +179,7 @@ pub struct DeviceTrustStatus {
     pub current_join: Option<CurrentJoinStatus>,
     pub inbound_pairings: Vec<InboundPairing>,
     pub pending_inbound_member: Option<PendingInboundMember>,
-    pub maintenance_health: MembershipMaintenanceHealth,
+    pub space_device_update: SpaceDeviceUpdateStatus,
     pub devices: Vec<DeviceTrustDevice>,
 }
 
@@ -179,7 +193,7 @@ impl DeviceTrustStatus {
             current_join: None,
             inbound_pairings: Vec::new(),
             pending_inbound_member: None,
-            maintenance_health: MembershipMaintenanceHealth::healthy(),
+            space_device_update: SpaceDeviceUpdateStatus::completed(),
             devices: Vec::new(),
         }
     }

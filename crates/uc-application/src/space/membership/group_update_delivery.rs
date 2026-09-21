@@ -5,11 +5,14 @@ use uc_observability_contract::diagnostics::connectivity::{
 };
 
 use uc_core::membership::{
-    GroupRevocationPort, GroupUpdateDispatchError, GroupUpdateDispatchPort, KeyEpochError,
+    GroupRevocationPort, GroupUpdateDeliveryStatus, GroupUpdateDispatchError,
+    GroupUpdateDispatchPort, KeyEpochError,
 };
 
 use super::{
-    DeliverPendingGroupUpdatesPort, MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger,
+    DeliverPendingGroupUpdatesPort, LoadSecurityDeviceUpdateStatusPort,
+    MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, QueryDeviceTrustError,
+    SpaceDeviceUpdateProblem, SpaceDeviceUpdateRecovery, SpaceDeviceUpdateStatus,
 };
 
 const MAX_UPDATES_PER_ROUND: usize = 8;
@@ -21,6 +24,44 @@ pub(crate) struct DeliverPendingGroupUpdatesUseCase {
     store: Arc<dyn GroupRevocationPort>,
     dispatch: Arc<dyn GroupUpdateDispatchPort>,
     clock: Arc<dyn uc_core::ports::ClockPort>,
+}
+
+#[async_trait::async_trait]
+impl LoadSecurityDeviceUpdateStatusPort for DeliverPendingGroupUpdatesUseCase {
+    async fn load_security_device_update_status(
+        &self,
+    ) -> Result<SpaceDeviceUpdateStatus, QueryDeviceTrustError> {
+        let status = self
+            .store
+            .space_group_update_delivery_status()
+            .await
+            .map_err(map_query_error)?;
+        Ok(match status {
+            GroupUpdateDeliveryStatus::Completed => SpaceDeviceUpdateStatus::completed(),
+            GroupUpdateDeliveryStatus::Pending { next_attempt_at_ms }
+                if next_attempt_at_ms > self.clock.now_ms() =>
+            {
+                SpaceDeviceUpdateStatus::retryable_failure(next_attempt_at_ms)
+            }
+            GroupUpdateDeliveryStatus::Pending { .. } => SpaceDeviceUpdateStatus::updating(),
+            GroupUpdateDeliveryStatus::Rejected => SpaceDeviceUpdateStatus::needs_attention(
+                SpaceDeviceUpdateProblem::DeviceSecurityUpdateRejected,
+                SpaceDeviceUpdateRecovery::ReviewDevices,
+            ),
+        })
+    }
+}
+
+fn map_query_error(error: KeyEpochError) -> QueryDeviceTrustError {
+    match error {
+        KeyEpochError::Repository(_)
+        | KeyEpochError::StateIssue(_)
+        | KeyEpochError::SecurityState { .. }
+        | KeyEpochError::SpaceNotReady => QueryDeviceTrustError::Dependency {
+            source: anyhow::Error::new(error),
+        },
+        _ => QueryDeviceTrustError::RecoveryRequired,
+    }
 }
 
 impl DeliverPendingGroupUpdatesUseCase {
@@ -230,6 +271,12 @@ mod tests {
             let count = deferred.len();
             pending.extend(deferred);
             Ok(count)
+        }
+
+        async fn space_group_update_delivery_status(
+            &self,
+        ) -> Result<GroupUpdateDeliveryStatus, KeyEpochError> {
+            Ok(GroupUpdateDeliveryStatus::Completed)
         }
 
         async fn acknowledge_space_group_update(

@@ -104,10 +104,10 @@ pub use protection::{
 };
 pub use revocation::{
     AdmissionReplayId, ContentKeyId, ContentKeyPurpose, GroupEpoch, GroupRevocationResult,
-    KeyEpochError, KeyEpochStateIssue, PendingGroupUpdate, PreparedRevocationResolution,
-    ProtectionGroupAdmission, ProtectionGroupId, RevocationId, RevocationOutboxMessage,
-    RevocationRecord, RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState,
-    SpaceSecurityMode,
+    GroupUpdateDeliveryStatus, KeyEpochError, KeyEpochStateIssue, PendingGroupUpdate,
+    PreparedRevocationResolution, ProtectionGroupAdmission, ProtectionGroupId, RevocationId,
+    RevocationOutboxMessage, RevocationRecord, RevocationStage, RevocationStatus, SpaceKeyMaterial,
+    SpaceKeyState, SpaceSecurityMode,
 };
 pub use space_admission::{
     AdmissionAbandonedV2, AdmissionAbandonmentReasonV2, AdmissionAbandonmentV2,

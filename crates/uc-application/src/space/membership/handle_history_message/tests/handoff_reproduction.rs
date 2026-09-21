@@ -18,7 +18,7 @@ impl QueryMembershipConflictStatusPort for QueryStatus {
             current_join: None,
             inbound_pairings: Vec::new(),
             pending_inbound_member: None,
-            maintenance_health: crate::space::membership::MembershipMaintenanceHealth::healthy(),
+            space_device_update: crate::space::membership::SpaceDeviceUpdateStatus::completed(),
             devices: Vec::new(),
         })
     }

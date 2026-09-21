@@ -20,8 +20,10 @@ use super::{DevMembershipHistoryFailure, DevSpaceWorkEvent, DevSpaceWorkEventKin
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FinalConfirmationFailureState {
     Idle,
-    Armed,
+    ConnectionFailureArmed,
+    SuccessReplyDropArmed,
     FailNextConnection,
+    DropNextSuccessReply,
     AwaitingRetry,
     RetryInFlight,
 }
@@ -94,14 +96,36 @@ impl SpaceWorkTestControl {
         if state.final_confirmation != FinalConfirmationFailureState::Idle {
             return None;
         }
-        state.final_confirmation = FinalConfirmationFailureState::Armed;
+        state.final_confirmation = FinalConfirmationFailureState::ConnectionFailureArmed;
+        Some(state.next_sequence.saturating_sub(1))
+    }
+
+    pub(crate) fn arm_final_confirmation_success_reply_drop(&self) -> Option<u64> {
+        let mut state = self.lock_state();
+        if state.final_confirmation != FinalConfirmationFailureState::Idle {
+            return None;
+        }
+        state.final_confirmation = FinalConfirmationFailureState::SuccessReplyDropArmed;
         Some(state.next_sequence.saturating_sub(1))
     }
 
     pub(crate) fn final_confirmation_ready(&self) {
         let mut state = self.lock_state();
-        if state.final_confirmation == FinalConfirmationFailureState::Armed {
-            state.final_confirmation = FinalConfirmationFailureState::FailNextConnection;
+        state.final_confirmation = match state.final_confirmation {
+            FinalConfirmationFailureState::ConnectionFailureArmed => {
+                FinalConfirmationFailureState::FailNextConnection
+            }
+            FinalConfirmationFailureState::SuccessReplyDropArmed => {
+                FinalConfirmationFailureState::DropNextSuccessReply
+            }
+            current => current,
+        };
+    }
+
+    fn reply_drop_connection_failed(&self) {
+        let mut state = self.lock_state();
+        if state.final_confirmation == FinalConfirmationFailureState::DropNextSuccessReply {
+            state.final_confirmation = FinalConfirmationFailureState::AwaitingRetry;
         }
     }
 
@@ -128,8 +152,33 @@ impl SpaceWorkTestControl {
                 self.changed.notify_waiters();
                 ContinuationTestAction::TrackRetry
             }
+            FinalConfirmationFailureState::DropNextSuccessReply => {
+                ContinuationTestAction::DropSuccessReply
+            }
             _ => ContinuationTestAction::PassThrough,
         }
+    }
+
+    fn drop_success_reply(&self, kind: SpaceAdmissionMessageKind, succeeded: bool) -> bool {
+        let mut state = self.lock_state();
+        if state.final_confirmation != FinalConfirmationFailureState::DropNextSuccessReply {
+            return false;
+        }
+        state.final_confirmation = FinalConfirmationFailureState::AwaitingRetry;
+        if kind != SpaceAdmissionMessageKind::CompleteAck || !succeeded {
+            return false;
+        }
+        push_event(
+            &mut state,
+            DevSpaceWorkEventKind::FinalConfirmationSponsorCommitted,
+        );
+        push_event(
+            &mut state,
+            DevSpaceWorkEventKind::FinalConfirmationSuccessReplyDropped,
+        );
+        drop(state);
+        self.changed.notify_waiters();
+        true
     }
 
     pub(crate) fn retry_connection_failed(&self) {
@@ -211,6 +260,7 @@ pub(crate) enum ContinuationTestAction {
     PassThrough,
     Fail,
     TrackRetry,
+    DropSuccessReply,
 }
 
 pub(crate) struct ControlledSpaceAdmissionTransport {
@@ -262,16 +312,24 @@ impl SpaceAdmissionTransportPort for ControlledSpaceAdmissionTransport {
             .resume(admission_id, route, peer_binding, continuation_credential)
             .await;
         match exchange {
-            Ok(exchange) if action == ContinuationTestAction::TrackRetry => {
+            Ok(exchange)
+                if matches!(
+                    action,
+                    ContinuationTestAction::TrackRetry | ContinuationTestAction::DropSuccessReply
+                ) =>
+            {
                 Ok(Box::new(TrackedAdmissionExchange {
                     inner: exchange,
                     control: Arc::clone(&self.control),
+                    action,
                 }))
             }
             Ok(exchange) => Ok(exchange),
             Err(error) => {
                 if action == ContinuationTestAction::TrackRetry {
                     self.control.retry_connection_failed();
+                } else if action == ContinuationTestAction::DropSuccessReply {
+                    self.control.reply_drop_connection_failed();
                 }
                 Err(error)
             }
@@ -282,6 +340,7 @@ impl SpaceAdmissionTransportPort for ControlledSpaceAdmissionTransport {
 struct TrackedAdmissionExchange {
     inner: Box<dyn AuthenticatedAdmissionExchangePort>,
     control: Arc<SpaceWorkTestControl>,
+    action: ContinuationTestAction,
 }
 
 #[async_trait]
@@ -299,9 +358,20 @@ impl AuthenticatedAdmissionExchangePort for TrackedAdmissionExchange {
         request: &SpaceAdmissionEnvelopeV1,
     ) -> Result<AuthenticatedAdmissionReply, SpaceAdmissionTransportError> {
         let kind = request.kind();
-        let TrackedAdmissionExchange { inner, control } = *self;
+        let TrackedAdmissionExchange {
+            inner,
+            control,
+            action,
+        } = *self;
         let result = inner.exchange(request).await;
-        control.retry_exchange_finished(kind, result.is_ok());
+        if action == ContinuationTestAction::DropSuccessReply
+            && control.drop_success_reply(kind, result.is_ok())
+        {
+            return Err(SpaceAdmissionTransportError::Deferred);
+        }
+        if action == ContinuationTestAction::TrackRetry {
+            control.retry_exchange_finished(kind, result.is_ok());
+        }
         result
     }
 }
@@ -429,6 +499,46 @@ mod tests {
                 )
                 .await,
             events[2]
+        );
+    }
+
+    #[tokio::test]
+    async fn one_success_reply_is_dropped_only_after_the_sponsor_commit() {
+        let control = SpaceWorkTestControl::default();
+        let baseline = control
+            .arm_final_confirmation_success_reply_drop()
+            .expect("test reply drop can be armed");
+        control.final_confirmation_ready();
+
+        assert_eq!(
+            control.begin_continuation_connection(),
+            ContinuationTestAction::DropSuccessReply
+        );
+        assert!(control.drop_success_reply(SpaceAdmissionMessageKind::CompleteAck, true));
+        assert_eq!(
+            control.begin_continuation_connection(),
+            ContinuationTestAction::TrackRetry
+        );
+        control.retry_exchange_finished(SpaceAdmissionMessageKind::CompleteAck, true);
+
+        let events = control.events();
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![
+                DevSpaceWorkEventKind::FinalConfirmationSponsorCommitted,
+                DevSpaceWorkEventKind::FinalConfirmationSuccessReplyDropped,
+                DevSpaceWorkEventKind::FinalConfirmationRetryStarted,
+                DevSpaceWorkEventKind::FinalConfirmationReplyReceived,
+            ]
+        );
+        assert_eq!(
+            control
+                .wait_for_event(
+                    baseline,
+                    DevSpaceWorkEventKind::FinalConfirmationSuccessReplyDropped,
+                )
+                .await,
+            events[1]
         );
     }
 

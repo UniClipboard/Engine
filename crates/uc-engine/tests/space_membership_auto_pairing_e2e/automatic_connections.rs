@@ -65,18 +65,15 @@ async fn wait_online_within(engine: &Engine, peer_id: &str, budget: Duration) {
 pub(super) async fn wait_eligible(engine: &Engine, peer_id: &str) {
     let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
     loop {
-        let OperationResult::DeviceGroupChoices(summary) = engine
-            .execute(Operation::QueryDeviceGroupChoices)
-            .await
-            .unwrap()
-        else {
-            panic!("device group choices expected")
-        };
-        if summary.device_trust.devices.iter().any(|device| {
-            device.device_id == peer_id
-                && device.sync_relationship == uc_engine::DeviceSyncRelationshipSummary::Usable
-        }) {
-            return;
+        if let Ok(OperationResult::DeviceGroupChoices(summary)) =
+            engine.execute(Operation::QueryDeviceGroupChoices).await
+        {
+            if summary.device_trust.devices.iter().any(|device| {
+                device.device_id == peer_id
+                    && device.sync_relationship == uc_engine::DeviceSyncRelationshipSummary::Usable
+            }) {
+                return;
+            }
         }
         assert!(
             tokio::time::Instant::now() < deadline,

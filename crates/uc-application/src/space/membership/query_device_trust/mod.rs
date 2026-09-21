@@ -7,10 +7,11 @@ pub use error::QueryDeviceTrustError;
 pub use model::{
     AdmissionDisplayStatus, DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership,
     DeviceTrustObservation, DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState,
-    MembershipMaintenanceHealth, MembershipMaintenanceHealthPhase, MembershipMaintenanceProblem,
-    MembershipMaintenanceRecovery, PairingConfirmationObservation, PairingConfirmationStatus,
-    PairingConfirmationTarget, PendingDeviceTrustChange,
+    PairingConfirmationObservation, PairingConfirmationStatus, PairingConfirmationTarget,
+    PendingDeviceTrustChange, SpaceDeviceUpdatePhase, SpaceDeviceUpdateProblem,
+    SpaceDeviceUpdateRecovery, SpaceDeviceUpdateStatus,
 };
+pub(crate) use ports::LoadSecurityDeviceUpdateStatusPort;
 pub use ports::{LoadCurrentJoinStatusPort, LoadDeviceTrustObservationsPort};
 pub(crate) use use_case::QueryDeviceTrustUseCase;
 

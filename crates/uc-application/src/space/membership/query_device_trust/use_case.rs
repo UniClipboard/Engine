@@ -15,15 +15,16 @@ use crate::space::membership::{
 use super::{
     DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
     DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, LoadCurrentJoinStatusPort,
-    LoadDeviceTrustObservationsPort, MembershipMaintenanceHealth, MembershipMaintenanceProblem,
-    MembershipMaintenanceRecovery, PairingConfirmationTarget, PendingDeviceTrustChange,
-    QueryDeviceTrustError,
+    LoadDeviceTrustObservationsPort, LoadSecurityDeviceUpdateStatusPort, PairingConfirmationTarget,
+    PendingDeviceTrustChange, QueryDeviceTrustError, SpaceDeviceUpdatePhase,
+    SpaceDeviceUpdateProblem, SpaceDeviceUpdateRecovery, SpaceDeviceUpdateStatus,
 };
 
 pub(crate) struct QueryDeviceTrustUseCase {
     ledger: Arc<MembershipLedger>,
     observations: Arc<dyn LoadDeviceTrustObservationsPort>,
     current_join: Arc<dyn LoadCurrentJoinStatusPort>,
+    security_updates: Arc<dyn LoadSecurityDeviceUpdateStatusPort>,
 }
 
 impl QueryDeviceTrustUseCase {
@@ -31,12 +32,28 @@ impl QueryDeviceTrustUseCase {
         ledger: Arc<MembershipLedger>,
         observations: Arc<dyn LoadDeviceTrustObservationsPort>,
         current_join: Arc<dyn LoadCurrentJoinStatusPort>,
+        security_updates: Arc<dyn LoadSecurityDeviceUpdateStatusPort>,
     ) -> Self {
         Self {
             ledger,
             observations,
             current_join,
+            security_updates,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_tests(
+        ledger: Arc<MembershipLedger>,
+        observations: Arc<dyn LoadDeviceTrustObservationsPort>,
+        current_join: Arc<dyn LoadCurrentJoinStatusPort>,
+    ) -> Self {
+        Self::new(
+            ledger,
+            observations,
+            current_join,
+            Arc::new(CompletedSecurityUpdates),
+        )
     }
 
     pub(crate) async fn execute(&self) -> Result<DeviceTrustStatus, QueryDeviceTrustError> {
@@ -250,8 +267,18 @@ impl QueryDeviceTrustUseCase {
 
         let current_change =
             pending_change(history, local_member_instance, &devices, snapshot.record())?;
-        let maintenance_health =
-            membership_maintenance_health(history, local_member_instance, snapshot.record())?;
+        let security_updates = self
+            .security_updates
+            .load_security_device_update_status()
+            .await?;
+        let space_device_update = space_device_update_status(
+            history,
+            local_member_instance,
+            snapshot.record(),
+            &devices,
+            !pending_effect_device_ids.is_empty(),
+            security_updates,
+        )?;
         Ok(DeviceTrustStatus {
             revision: snapshot.record().revision,
             local_device_id: Some(local_device_id),
@@ -268,17 +295,23 @@ impl QueryDeviceTrustUseCase {
             current_join,
             inbound_pairings,
             pending_inbound_member,
-            maintenance_health,
+            space_device_update,
             devices,
         })
     }
 }
 
-fn membership_maintenance_health(
+fn space_device_update_status(
     history: &VersionedMembershipHistory,
     local_member: MemberInstanceId,
     record: &LoadedMembershipLedger,
-) -> Result<MembershipMaintenanceHealth, QueryDeviceTrustError> {
+    devices: &[DeviceTrustDevice],
+    has_pending_effects: bool,
+    security_updates: SpaceDeviceUpdateStatus,
+) -> Result<SpaceDeviceUpdateStatus, QueryDeviceTrustError> {
+    if security_updates.phase == SpaceDeviceUpdatePhase::NeedsAttention {
+        return Ok(security_updates);
+    }
     let active_peer_device_ids = history
         .active_members()
         .into_iter()
@@ -290,17 +323,19 @@ fn membership_maintenance_health(
                 .ok_or(QueryDeviceTrustError::RecoveryRequired)
         })
         .collect::<Result<BTreeSet<_>, _>>()?;
-    let active_peer_records = record
-        .peer_reconciliation
-        .values()
-        .filter(|peer| active_peer_device_ids.contains(&peer.peer_device_id));
     let mut next_retry_at_ms = None;
-    for peer in active_peer_records {
+    let mut history_update_pending = false;
+    for peer_device_id in &active_peer_device_ids {
+        let Some(peer) = record.peer_reconciliation.get(peer_device_id) else {
+            history_update_pending = true;
+            continue;
+        };
+        history_update_pending |= !peer.restricted_delivery.is_empty();
         match peer.sync_state.last_attempt_outcome {
             PeerHistorySyncOutcome::StableRejected => {
-                return Ok(MembershipMaintenanceHealth::needs_attention(
-                    MembershipMaintenanceProblem::MembershipHistoryRejected,
-                    MembershipMaintenanceRecovery::ResolveDeviceTrust,
+                return Ok(SpaceDeviceUpdateStatus::needs_attention(
+                    SpaceDeviceUpdateProblem::DeviceStateRejected,
+                    SpaceDeviceUpdateRecovery::ReviewDevices,
                 ));
             }
             PeerHistorySyncOutcome::Deferred => {
@@ -308,13 +343,70 @@ fn membership_maintenance_health(
                 next_retry_at_ms =
                     Some(next_retry_at_ms.map_or(candidate, |current: i64| current.min(candidate)));
             }
-            PeerHistorySyncOutcome::Never | PeerHistorySyncOutcome::Acked => {}
+            PeerHistorySyncOutcome::Never => history_update_pending = true,
+            PeerHistorySyncOutcome::Acked => {}
         }
     }
-    Ok(next_retry_at_ms.map_or_else(
-        MembershipMaintenanceHealth::healthy,
-        MembershipMaintenanceHealth::retrying,
-    ))
+    for device in devices
+        .iter()
+        .filter(|device| device.membership != DeviceTrustMembership::Removed)
+    {
+        match device.relationship {
+            DeviceTrustRelationship::PendingLocalDecision
+            | DeviceTrustRelationship::Diverged
+            | DeviceTrustRelationship::Invalid => {
+                return Ok(SpaceDeviceUpdateStatus::needs_attention(
+                    SpaceDeviceUpdateProblem::DeviceRelationshipConflict,
+                    SpaceDeviceUpdateRecovery::ReviewDevices,
+                ));
+            }
+            DeviceTrustRelationship::UpgradeRequired => {
+                return Ok(SpaceDeviceUpdateStatus::needs_attention(
+                    SpaceDeviceUpdateProblem::DeviceUpgradeRequired,
+                    SpaceDeviceUpdateRecovery::UpdateApp,
+                ));
+            }
+            DeviceTrustRelationship::Local
+            | DeviceTrustRelationship::Consistent
+            | DeviceTrustRelationship::ConfirmationPending
+            | DeviceTrustRelationship::Unknown => {}
+        }
+    }
+    if let Some(next_retry_at_ms) = next_retry_at_ms {
+        return Ok(SpaceDeviceUpdateStatus::retryable_failure(next_retry_at_ms));
+    }
+    if security_updates.phase == SpaceDeviceUpdatePhase::RetryableFailure {
+        return Ok(security_updates);
+    }
+    let relationship_update_pending = devices.iter().any(|device| {
+        device.membership == DeviceTrustMembership::PendingActivation
+            || matches!(
+                device.relationship,
+                DeviceTrustRelationship::ConfirmationPending | DeviceTrustRelationship::Unknown
+            )
+    });
+    if has_pending_effects
+        || history_update_pending
+        || relationship_update_pending
+        || security_updates.phase == SpaceDeviceUpdatePhase::Updating
+    {
+        Ok(SpaceDeviceUpdateStatus::updating())
+    } else {
+        Ok(SpaceDeviceUpdateStatus::completed())
+    }
+}
+
+#[cfg(test)]
+struct CompletedSecurityUpdates;
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl LoadSecurityDeviceUpdateStatusPort for CompletedSecurityUpdates {
+    async fn load_security_device_update_status(
+        &self,
+    ) -> Result<SpaceDeviceUpdateStatus, QueryDeviceTrustError> {
+        Ok(SpaceDeviceUpdateStatus::completed())
+    }
 }
 
 fn pending_change(

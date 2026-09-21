@@ -52,10 +52,10 @@ pub use maintenance::{
 pub use query_device_trust::{
     AdmissionDisplayStatus, DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership,
     DeviceTrustObservation, DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState,
-    LoadCurrentJoinStatusPort, LoadDeviceTrustObservationsPort, MembershipMaintenanceHealth,
-    MembershipMaintenanceHealthPhase, MembershipMaintenanceProblem, MembershipMaintenanceRecovery,
-    PairingConfirmationObservation, PairingConfirmationStatus, PairingConfirmationTarget,
-    PendingDeviceTrustChange, QueryDeviceTrustError,
+    LoadCurrentJoinStatusPort, LoadDeviceTrustObservationsPort, PairingConfirmationObservation,
+    PairingConfirmationStatus, PairingConfirmationTarget, PendingDeviceTrustChange,
+    QueryDeviceTrustError, SpaceDeviceUpdatePhase, SpaceDeviceUpdateProblem,
+    SpaceDeviceUpdateRecovery, SpaceDeviceUpdateStatus,
 };
 pub(super) use query_diagnostics::QueryMembershipDiagnosticsUseCase;
 pub use query_diagnostics::{MembershipDiagnosticsView, QueryMembershipDiagnosticsError};
@@ -109,6 +109,7 @@ pub(super) use maintenance::{
 #[cfg(test)]
 pub(super) use query_admission::{MembershipAdmissionSnapshot, QueryMembershipAdmissionError};
 pub(super) use query_admission::{QueryMembershipAdmissionPort, QueryMembershipAdmissionUseCase};
+pub(crate) use query_device_trust::LoadSecurityDeviceUpdateStatusPort;
 pub(super) use query_device_trust::QueryDeviceTrustUseCase;
 pub(super) use re_pairing::{RePairingState, ResolveRePairingPort};
 pub(super) use recover_conflict::IssueMembershipBranchRecoveryUseCase;

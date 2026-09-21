@@ -12,6 +12,10 @@ use uc_core::membership::{
     GroupUpdateDispatchError, GroupUpdateDispatchPort, MembershipHistoryExchangeError,
     MembershipHistoryExchangePort, MembershipHistoryMessage, PendingGroupUpdate,
 };
+use uc_observability_contract::diagnostics::connectivity::{
+    complete_membership_history_failure, MembershipHistoryFailureDetail,
+    MembershipHistoryFailurePhase, MembershipHistoryFailureReason,
+};
 use uc_observability_contract::diagnostics::{
     complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
     DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
@@ -64,8 +68,16 @@ fn record_membership_completion(
     elapsed: Duration,
     result: Result<(), MembershipCompletionKind>,
 ) {
+    complete_operation(membership_completion(operation, elapsed, result));
+}
+
+fn membership_completion(
+    operation: MembershipOperation,
+    elapsed: Duration,
+    result: Result<(), MembershipCompletionKind>,
+) -> OperationCompletion {
     let operation = operation.diagnostic_operation();
-    let completion = match result {
+    match result {
         Ok(()) => OperationCompletion::succeeded(
             DiagnosticDomain::SpaceMembership,
             operation,
@@ -91,8 +103,7 @@ fn record_membership_completion(
             error,
             elapsed,
         ),
-    };
-    complete_operation(completion);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -122,19 +133,48 @@ impl MembershipHistoryExchangePort for ObservedMembershipHistoryExchange {
                 .instrument(span.clone())
                 .await;
             span.in_scope(|| {
-                record_membership_completion(
+                let completion = membership_completion(
                     MembershipOperation::HistoryExchange,
                     started.elapsed(),
                     result
                         .as_ref()
                         .map(|_| ())
                         .map_err(history_exchange_completion),
-                )
+                );
+                if let Err(error) = &result {
+                    complete_membership_history_failure(history_failure_detail(error), completion);
+                } else {
+                    complete_operation(completion);
+                }
             });
             result
         })
         .await
     }
+}
+
+fn history_failure_detail(
+    error: &MembershipHistoryExchangeError,
+) -> MembershipHistoryFailureDetail {
+    let (phase, reason) = match error {
+        MembershipHistoryExchangeError::Offline => (
+            MembershipHistoryFailurePhase::ConnectPeer,
+            MembershipHistoryFailureReason::PeerOffline,
+        ),
+        MembershipHistoryExchangeError::PairingInProgress => (
+            MembershipHistoryFailurePhase::ExchangeHistory,
+            MembershipHistoryFailureReason::PairingInProgress,
+        ),
+        MembershipHistoryExchangeError::Rejected => (
+            MembershipHistoryFailurePhase::ExchangeHistory,
+            MembershipHistoryFailureReason::PeerRejected,
+        ),
+        MembershipHistoryExchangeError::Transport => (
+            MembershipHistoryFailurePhase::ExchangeHistory,
+            MembershipHistoryFailureReason::Transport,
+        ),
+    };
+    MembershipHistoryFailureDetail { phase, reason }
 }
 
 fn history_exchange_completion(error: &MembershipHistoryExchangeError) -> MembershipCompletionKind {
@@ -231,8 +271,10 @@ impl GroupUpdateDispatchPort for ObservedGroupUpdateDispatch {
 #[cfg(test)]
 mod tests {
     use super::{
-        history_exchange_completion, MembershipCompletionKind, MembershipHistoryExchangeError,
+        history_exchange_completion, history_failure_detail, MembershipCompletionKind,
+        MembershipHistoryExchangeError,
     };
+    use uc_observability_contract::diagnostics::connectivity::LocalCompletionDetail;
     use uc_observability_contract::diagnostics::DiagnosticErrorType;
 
     #[test]
@@ -249,5 +291,23 @@ mod tests {
             history_exchange_completion(&MembershipHistoryExchangeError::Transport),
             MembershipCompletionKind::Failed(DiagnosticErrorType::StreamFailed)
         ));
+    }
+
+    #[test]
+    fn history_exchange_diagnostics_keep_a_safe_stage_and_call_path() {
+        let detail = LocalCompletionDetail::MembershipHistory(history_failure_detail(
+            &MembershipHistoryExchangeError::Transport,
+        ));
+
+        assert_eq!(detail.local_fields(), ("exchange_history", "transport"));
+        assert_eq!(
+            detail.source_chain(),
+            Some([
+                "space_device_update",
+                "membership_history",
+                "exchange_history",
+                "transport",
+            ])
+        );
     }
 }

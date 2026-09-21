@@ -13,9 +13,9 @@ use super::gossip::{SpaceMembershipCandidate, VerifiedMembershipPeer};
 use super::member::SpaceMember;
 use super::membership_history::MembershipHistoryMessage;
 use super::revocation::{
-    GroupEpoch, GroupRevocationResult, KeyEpochError, PendingGroupUpdate,
-    PreparedRevocationResolution, RevocationId, RevocationRecord, RevocationStage,
-    SpaceKeyMaterial,
+    GroupEpoch, GroupRevocationResult, GroupUpdateDeliveryStatus, KeyEpochError,
+    PendingGroupUpdate, PreparedRevocationResolution, RevocationId, RevocationRecord,
+    RevocationStage, SpaceKeyMaterial,
 };
 use crate::security::IdentityFingerprint;
 
@@ -186,6 +186,11 @@ pub trait RevocationRepositoryPort: Send + Sync {
         now_ms: i64,
     ) -> Result<usize, KeyEpochError>;
 
+    async fn group_update_delivery_status(
+        &self,
+        space_id: &SpaceId,
+    ) -> Result<GroupUpdateDeliveryStatus, KeyEpochError>;
+
     async fn begin_revocation(
         &self,
         prepared: &RevocationRecord,
@@ -299,6 +304,10 @@ pub trait GroupRevocationPort: Send + Sync {
         failures: &[(String, GroupUpdateDispatchError)],
         now_ms: i64,
     ) -> Result<usize, KeyEpochError>;
+
+    async fn space_group_update_delivery_status(
+        &self,
+    ) -> Result<GroupUpdateDeliveryStatus, KeyEpochError>;
 
     async fn acknowledge_space_group_update(
         &self,

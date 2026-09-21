@@ -331,7 +331,9 @@ mod tests {
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
     use tracing_subscriber::layer::SubscriberExt;
     use uc_core::ids::DeviceId;
-    use uc_core::membership::{GroupEpoch, GroupRevocationResult, KeyEpochError, RevocationId};
+    use uc_core::membership::{
+        GroupEpoch, GroupRevocationResult, GroupUpdateDeliveryStatus, KeyEpochError, RevocationId,
+    };
     use uc_core::ports::{PeerAddressError, PeerAddressRecord};
 
     use super::*;
@@ -349,6 +351,7 @@ mod tests {
             async fn resume_group_revocations(&self, now_ms: i64) -> Result<Vec<GroupRevocationResult>, KeyEpochError>;
             async fn due_space_group_updates(&self, now_ms: i64, online_peer: Option<DeviceId>) -> Result<Vec<PendingGroupUpdate>, KeyEpochError>;
             async fn record_space_group_update_failures(&self, failures: &[(String, GroupUpdateDispatchError)], now_ms: i64) -> Result<usize, KeyEpochError>;
+            async fn space_group_update_delivery_status(&self) -> Result<GroupUpdateDeliveryStatus, KeyEpochError>;
             async fn acknowledge_space_group_update(&self, update_id: &str, now_ms: i64) -> Result<bool, KeyEpochError>;
         }
     }

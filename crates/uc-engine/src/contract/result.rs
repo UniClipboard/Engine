@@ -1293,6 +1293,43 @@ pub struct MembershipMaintenanceHealthSummary {
     pub next_retry_at_ms: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SpaceDeviceUpdatePhaseSummary {
+    #[default]
+    Updating,
+    Completed,
+    RetryableFailure,
+    NeedsAttention,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpaceDeviceUpdateProblemSummary {
+    DeviceStateRejected,
+    DeviceRelationshipConflict,
+    DeviceSecurityUpdateRejected,
+    DeviceUpgradeRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpaceDeviceUpdateRecoverySummary {
+    ReviewDevices,
+    UpdateApp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SpaceDeviceUpdateStatusSummary {
+    pub phase: SpaceDeviceUpdatePhaseSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<SpaceDeviceUpdateProblemSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<SpaceDeviceUpdateRecoverySummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_retry_at_ms: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceTrustSnapshotSummary {
     pub revision: u64,
@@ -1303,6 +1340,9 @@ pub struct DeviceTrustSnapshotSummary {
     #[serde(default)]
     pub inbound_pairings: Vec<InboundPairingSummary>,
     pub pending_inbound_member: Option<PendingInboundMemberSummary>,
+    #[serde(default)]
+    pub space_device_update: SpaceDeviceUpdateStatusSummary,
+    /// Desktop/Mobile 迁移期兼容字段；只由 `space_device_update` 投影。
     #[serde(default)]
     pub maintenance_health: MembershipMaintenanceHealthSummary,
     pub devices: Vec<DeviceTrustRelationshipSummary>,
@@ -1322,6 +1362,7 @@ impl DeviceTrustSnapshotSummary {
             current_join: None,
             inbound_pairings: Vec::new(),
             pending_inbound_member: None,
+            space_device_update: SpaceDeviceUpdateStatusSummary::default(),
             maintenance_health: MembershipMaintenanceHealthSummary::default(),
             devices: Vec::new(),
             recovery: DeviceTrustRecoverySummary::NotAvailableInThisVersion,

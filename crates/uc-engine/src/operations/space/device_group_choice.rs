@@ -18,9 +18,10 @@ pub async fn execute_query_device_group_choices(
     let view = facade.query_device_group_choices().await.map_err(|error| {
         tracing::debug!(
             error_kind = query_error_kind(&error),
+            error_stage = "load_space_device_state",
             "device group choice query failed"
         );
-        unavailable()
+        query_error(&error)
     })?;
     let local = view
         .device_trust
@@ -189,6 +190,31 @@ fn unavailable() -> EngineError {
     EngineError::new(1211, EngineErrorCategory::Unavailable, true)
 }
 
+fn query_error(error: &uc_application::facade::QueryDeviceGroupChoicesError) -> EngineError {
+    use uc_application::facade::{QueryDeviceGroupChoicesError, QueryDeviceTrustError};
+
+    match error {
+        QueryDeviceGroupChoicesError::DeviceTrust {
+            source: QueryDeviceTrustError::Locked,
+        }
+        | QueryDeviceGroupChoicesError::MembershipConflict {
+            source: uc_application::facade::QueryMembershipConflictsError::Locked { .. },
+        } => EngineError::new(1212, EngineErrorCategory::InvalidState, false),
+        QueryDeviceGroupChoicesError::DeviceTrust {
+            source: QueryDeviceTrustError::RecoveryRequired,
+        }
+        | QueryDeviceGroupChoicesError::MembershipConflict {
+            source: uc_application::facade::QueryMembershipConflictsError::RecoveryRequired { .. },
+        } => EngineError::new(1213, EngineErrorCategory::InvalidState, false),
+        QueryDeviceGroupChoicesError::DeviceTrust {
+            source: QueryDeviceTrustError::Unavailable | QueryDeviceTrustError::Dependency { .. },
+        }
+        | QueryDeviceGroupChoicesError::MembershipConflict {
+            source: uc_application::facade::QueryMembershipConflictsError::Unavailable { .. },
+        } => unavailable(),
+    }
+}
+
 fn query_error_kind(error: &uc_application::facade::QueryDeviceGroupChoicesError) -> &'static str {
     use uc_application::facade::QueryDeviceGroupChoicesError;
 
@@ -238,5 +264,34 @@ fn choose_error_kind(error: &uc_application::facade::ChooseDeviceGroupError) -> 
             }
         },
         ChooseDeviceGroupError::Query { source } => query_error_kind(source),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uc_application::facade::{QueryDeviceGroupChoicesError, QueryDeviceTrustError};
+
+    #[test]
+    fn public_query_errors_distinguish_retry_from_user_recovery() {
+        let unavailable = QueryDeviceGroupChoicesError::DeviceTrust {
+            source: QueryDeviceTrustError::Unavailable,
+        };
+        let recovery = QueryDeviceGroupChoicesError::DeviceTrust {
+            source: QueryDeviceTrustError::RecoveryRequired,
+        };
+        let locked = QueryDeviceGroupChoicesError::DeviceTrust {
+            source: QueryDeviceTrustError::Locked,
+        };
+
+        let unavailable = query_error(&unavailable);
+        assert_eq!(unavailable.code(), 1211);
+        assert!(unavailable.is_retryable());
+        let recovery = query_error(&recovery);
+        assert_eq!(recovery.code(), 1213);
+        assert!(!recovery.is_retryable());
+        let locked = query_error(&locked);
+        assert_eq!(locked.code(), 1212);
+        assert!(!locked.is_retryable());
     }
 }

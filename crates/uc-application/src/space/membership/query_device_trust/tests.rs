@@ -169,6 +169,17 @@ struct StaticObservations {
 
 struct AllOfflineObservations;
 
+struct StaticSecurityUpdates(SpaceDeviceUpdateStatus);
+
+#[async_trait]
+impl LoadSecurityDeviceUpdateStatusPort for StaticSecurityUpdates {
+    async fn load_security_device_update_status(
+        &self,
+    ) -> Result<SpaceDeviceUpdateStatus, QueryDeviceTrustError> {
+        Ok(self.0)
+    }
+}
+
 #[async_trait]
 impl LoadDeviceTrustObservationsPort for AllOfflineObservations {
     async fn load(
@@ -310,7 +321,7 @@ async fn profile_without_a_space_returns_an_explicit_empty_status() {
         repository,
         Arc::new(AcceptingVerifier),
     ));
-    let query = QueryDeviceTrustUseCase::new(
+    let query = QueryDeviceTrustUseCase::new_for_tests(
         ledger,
         Arc::new(UnexpectedObservations),
         Arc::new(StaticCurrentJoin(None)),
@@ -370,7 +381,7 @@ async fn removed_consistent_device_is_reported_offline_and_not_syncable() {
         repository,
         Arc::new(AcceptingVerifier),
     ));
-    let query = QueryDeviceTrustUseCase::new(
+    let query = QueryDeviceTrustUseCase::new_for_tests(
         ledger,
         Arc::new(LocalOnlyObservations),
         Arc::new(StaticCurrentJoin(None)),
@@ -404,7 +415,7 @@ async fn active_status_combines_verified_members_with_one_observation_read() {
         Arc::new(AcceptingVerifier),
     ));
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let query = QueryDeviceTrustUseCase::new(
+    let query = QueryDeviceTrustUseCase::new_for_tests(
         ledger,
         Arc::new(StaticObservations {
             calls: Arc::clone(&calls),
@@ -436,8 +447,89 @@ async fn active_status_combines_verified_members_with_one_observation_read() {
     );
     assert_eq!(status.devices[1].sync_state, DeviceTrustSyncState::Usable);
     assert_eq!(
-        status.maintenance_health,
-        MembershipMaintenanceHealth::healthy()
+        status.space_device_update,
+        SpaceDeviceUpdateStatus::updating()
+    );
+}
+
+#[tokio::test]
+async fn space_device_update_is_complete_only_after_every_required_fact_converges() {
+    let mut loaded = active_ledger();
+    let history = VersionedMembershipHistory::decode_persisted_v2(
+        loaded.membership_history.as_deref().unwrap(),
+        &AcceptingVerifier,
+    )
+    .unwrap();
+    let peer_device_id = DeviceId::new("device-b");
+    let peer = loaded.peer_reconciliation.remove(&peer_device_id).unwrap();
+    loaded.peer_reconciliation.insert(
+        peer_device_id.clone(),
+        crate::space::membership::PeerReconciliationRecord {
+            confirmed_position: history.current_position().ok(),
+            ..peer
+        },
+    );
+    let peer = loaded.peer_reconciliation.get_mut(&peer_device_id).unwrap();
+    peer.sync_state.last_attempt_outcome = crate::space::membership::PeerHistorySyncOutcome::Acked;
+    let repository = Arc::new(MemoryLedgerRepository { loaded });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let query = QueryDeviceTrustUseCase::new_for_tests(
+        ledger,
+        Arc::new(AllOfflineObservations),
+        Arc::new(StaticCurrentJoin(None)),
+    );
+
+    let status = query.execute().await.unwrap();
+
+    assert_eq!(
+        status.space_device_update,
+        SpaceDeviceUpdateStatus::completed()
+    );
+}
+
+#[tokio::test]
+async fn pending_security_device_update_prevents_overall_completion() {
+    let mut loaded = active_ledger();
+    let history = VersionedMembershipHistory::decode_persisted_v2(
+        loaded.membership_history.as_deref().unwrap(),
+        &AcceptingVerifier,
+    )
+    .unwrap();
+    let peer_device_id = DeviceId::new("device-b");
+    let peer = loaded.peer_reconciliation.remove(&peer_device_id).unwrap();
+    loaded.peer_reconciliation.insert(
+        peer_device_id.clone(),
+        crate::space::membership::PeerReconciliationRecord {
+            confirmed_position: history.current_position().ok(),
+            ..peer
+        },
+    );
+    let peer = loaded.peer_reconciliation.get_mut(&peer_device_id).unwrap();
+    peer.sync_state.last_attempt_outcome = crate::space::membership::PeerHistorySyncOutcome::Acked;
+    let repository = Arc::new(MemoryLedgerRepository { loaded });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let query = QueryDeviceTrustUseCase::new(
+        ledger,
+        Arc::new(AllOfflineObservations),
+        Arc::new(StaticCurrentJoin(None)),
+        Arc::new(StaticSecurityUpdates(
+            SpaceDeviceUpdateStatus::retryable_failure(60_000),
+        )),
+    );
+
+    let status = query.execute().await.unwrap();
+
+    assert_eq!(
+        status.space_device_update,
+        SpaceDeviceUpdateStatus::retryable_failure(60_000)
     );
 }
 
@@ -458,7 +550,7 @@ async fn deferred_history_sync_exposes_its_persisted_retry_time() {
         repository,
         Arc::new(AcceptingVerifier),
     ));
-    let query = QueryDeviceTrustUseCase::new(
+    let query = QueryDeviceTrustUseCase::new_for_tests(
         ledger,
         Arc::new(AllOfflineObservations),
         Arc::new(StaticCurrentJoin(None)),
@@ -467,8 +559,8 @@ async fn deferred_history_sync_exposes_its_persisted_retry_time() {
     let status = query.execute().await.unwrap();
 
     assert_eq!(
-        status.maintenance_health,
-        MembershipMaintenanceHealth::retrying(60_000)
+        status.space_device_update,
+        SpaceDeviceUpdateStatus::retryable_failure(60_000)
     );
 }
 
@@ -487,7 +579,7 @@ async fn stable_history_rejection_exposes_a_reason_and_recovery_action() {
         repository,
         Arc::new(AcceptingVerifier),
     ));
-    let query = QueryDeviceTrustUseCase::new(
+    let query = QueryDeviceTrustUseCase::new_for_tests(
         ledger,
         Arc::new(AllOfflineObservations),
         Arc::new(StaticCurrentJoin(None)),
@@ -496,10 +588,41 @@ async fn stable_history_rejection_exposes_a_reason_and_recovery_action() {
     let status = query.execute().await.unwrap();
 
     assert_eq!(
-        status.maintenance_health,
-        MembershipMaintenanceHealth::needs_attention(
-            MembershipMaintenanceProblem::MembershipHistoryRejected,
-            MembershipMaintenanceRecovery::ResolveDeviceTrust,
+        status.space_device_update,
+        SpaceDeviceUpdateStatus::needs_attention(
+            SpaceDeviceUpdateProblem::DeviceStateRejected,
+            SpaceDeviceUpdateRecovery::ReviewDevices,
+        )
+    );
+}
+
+#[tokio::test]
+async fn relationship_conflict_requires_attention_even_without_history_failure() {
+    let mut loaded = ledger_with_pending_local_removal();
+    let peer = loaded
+        .peer_reconciliation
+        .get_mut(&DeviceId::new("device-b"))
+        .unwrap();
+    peer.sync_state.last_attempt_outcome = crate::space::membership::PeerHistorySyncOutcome::Acked;
+    let repository = Arc::new(MemoryLedgerRepository { loaded });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let query = QueryDeviceTrustUseCase::new_for_tests(
+        ledger,
+        Arc::new(AllOfflineObservations),
+        Arc::new(StaticCurrentJoin(None)),
+    );
+
+    let status = query.execute().await.unwrap();
+
+    assert_eq!(
+        status.space_device_update,
+        SpaceDeviceUpdateStatus::needs_attention(
+            SpaceDeviceUpdateProblem::DeviceRelationshipConflict,
+            SpaceDeviceUpdateRecovery::ReviewDevices,
         )
     );
 }
@@ -579,7 +702,7 @@ async fn pairing_confirmation_is_matched_to_the_exact_active_member() {
         repository,
         Arc::new(AcceptingVerifier),
     ));
-    let query = QueryDeviceTrustUseCase::new(
+    let query = QueryDeviceTrustUseCase::new_for_tests(
         ledger,
         Arc::new(AllOfflineObservations),
         Arc::new(StaticPairingConfirmation(PairingConfirmationObservation {
@@ -631,7 +754,7 @@ async fn peer_that_confirmed_the_current_position_is_reported_consistent() {
         repository,
         Arc::new(AcceptingVerifier),
     ));
-    let query = QueryDeviceTrustUseCase::new(
+    let query = QueryDeviceTrustUseCase::new_for_tests(
         ledger,
         Arc::new(StaticObservations {
             calls: Arc::new(Mutex::new(Vec::new())),
@@ -657,7 +780,7 @@ async fn status_exposes_the_current_pending_removal_facts() {
         repository,
         Arc::new(AcceptingVerifier),
     ));
-    let query = QueryDeviceTrustUseCase::new(
+    let query = QueryDeviceTrustUseCase::new_for_tests(
         ledger,
         Arc::new(StaticObservations {
             calls: Arc::new(Mutex::new(Vec::new())),
@@ -753,7 +876,7 @@ async fn pending_peer_removal_previews_match_each_selected_history() {
             .insert(facts.device_id.clone(), peer);
     }
     let repository = Arc::new(MemoryLedgerRepository { loaded });
-    let query = QueryDeviceTrustUseCase::new(
+    let query = QueryDeviceTrustUseCase::new_for_tests(
         Arc::new(MembershipLedger::new(
             repository.clone(),
             repository,
@@ -833,7 +956,7 @@ async fn status_uses_the_current_join_projection_from_admission_state() {
         repository,
         Arc::new(AcceptingVerifier),
     ));
-    let query = QueryDeviceTrustUseCase::new(
+    let query = QueryDeviceTrustUseCase::new_for_tests(
         ledger,
         Arc::new(StaticObservations {
             calls: Arc::new(Mutex::new(Vec::new())),
@@ -875,7 +998,7 @@ async fn status_keeps_a_pending_inbound_member_out_of_the_formal_device_list() {
         device_id: DeviceId::new("device-pending"),
         display_name: "Pending device".to_owned(),
     };
-    let query = QueryDeviceTrustUseCase::new(
+    let query = QueryDeviceTrustUseCase::new_for_tests(
         ledger,
         Arc::new(StaticObservations {
             calls: Arc::new(Mutex::new(Vec::new())),
@@ -916,7 +1039,7 @@ async fn status_keeps_multiple_inbound_pairings_out_of_the_formal_device_list() 
             status: crate::space::admission::InboundPairingStatus::ConfirmationMissed,
         },
     ];
-    let query = QueryDeviceTrustUseCase::new(
+    let query = QueryDeviceTrustUseCase::new_for_tests(
         ledger,
         Arc::new(StaticObservations {
             calls: Arc::new(Mutex::new(Vec::new())),

@@ -759,6 +759,16 @@ impl EngineRuntime for ProductionRuntime {
                     },
                 )
                 .ok_or_else(|| EngineError::new(1916, EngineErrorCategory::Conflict, false)),
+            DevOperation::ArmFinalConfirmationSuccessReplyDrop => self
+                .joiner_final_confirmation_gate
+                .space_work_control()
+                .arm_final_confirmation_success_reply_drop()
+                .map(
+                    |after_sequence| DevOperationResult::FinalConfirmationSuccessReplyDropArmed {
+                        after_sequence,
+                    },
+                )
+                .ok_or_else(|| EngineError::new(1918, EngineErrorCategory::Conflict, false)),
             DevOperation::ArmMembershipHistoryFailures { failure, count } => self
                 .joiner_final_confirmation_gate
                 .space_work_control()

@@ -99,6 +99,12 @@ fn space_work_event_kind(value: &str) -> Result<uc_engine::DevSpaceWorkEventKind
         "final_confirmation_connection_failed" => {
             Ok(uc_engine::DevSpaceWorkEventKind::FinalConfirmationConnectionFailed)
         }
+        "final_confirmation_sponsor_committed" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::FinalConfirmationSponsorCommitted)
+        }
+        "final_confirmation_success_reply_dropped" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::FinalConfirmationSuccessReplyDropped)
+        }
         "final_confirmation_retry_started" => {
             Ok(uc_engine::DevSpaceWorkEventKind::FinalConfirmationRetryStarted)
         }
@@ -129,6 +135,12 @@ fn space_work_event_json(event: uc_engine::DevSpaceWorkEvent) -> Value {
     let kind = match event.kind {
         uc_engine::DevSpaceWorkEventKind::FinalConfirmationConnectionFailed => {
             "final_confirmation_connection_failed"
+        }
+        uc_engine::DevSpaceWorkEventKind::FinalConfirmationSponsorCommitted => {
+            "final_confirmation_sponsor_committed"
+        }
+        uc_engine::DevSpaceWorkEventKind::FinalConfirmationSuccessReplyDropped => {
+            "final_confirmation_success_reply_dropped"
         }
         uc_engine::DevSpaceWorkEventKind::FinalConfirmationRetryStarted => {
             "final_confirmation_retry_started"
@@ -208,6 +220,18 @@ async fn operation(engine: &Engine, request: &Value) -> Result<Value> {
             .await?
         else {
             bail!("final confirmation failure arm result expected")
+        };
+        return Ok(json!({ "after_sequence": after_sequence }));
+    }
+    #[cfg(feature = "current-engine")]
+    if command == "arm_complete_ack_success_reply_drop" {
+        let uc_engine::DevOperationResult::FinalConfirmationSuccessReplyDropArmed {
+            after_sequence,
+        } = engine
+            .execute_dev(uc_engine::DevOperation::ArmFinalConfirmationSuccessReplyDrop)
+            .await?
+        else {
+            bail!("final confirmation success reply drop arm result expected")
         };
         return Ok(json!({ "after_sequence": after_sequence }));
     }
