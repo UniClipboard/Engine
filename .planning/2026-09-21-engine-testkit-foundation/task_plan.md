@@ -17,10 +17,10 @@
 
 - [x] Phase 0A：读取架构、文档规则、现有测试能力和 0040 调查报告。
 - [x] Phase 0B：完成正式 spec、执行计划、索引与架构记录并自检。
-- [ ] Phase 1A：建立 `uc-testkit` 最小完整切片和自测试。
-- [ ] Phase 1B：接入 nextest 分组、本地命令和非破坏 CI。
-- [ ] Phase 1C：运行成功/故意失败示范、相关回归与仓库门禁。
-- [ ] Phase 1D：更新计划证据、报告并创建本地原子提交。
+- [x] Phase 1A：建立 `uc-testkit` 最小完整切片和自测试。
+- [x] Phase 1B：接入 nextest 分组、本地命令和非破坏 CI。
+- [x] Phase 1C：运行成功/故意失败示范、相关回归与仓库门禁。
+- [x] Phase 1D：更新计划证据、报告并创建本地原子提交。
 
 ## Ownership
 

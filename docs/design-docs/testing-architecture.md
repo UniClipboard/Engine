@@ -2,9 +2,9 @@
 
 ## 状态
 
-- 状态：已批准，基础设施待实施
+- 状态：已实施，后续按场景渐进采用
 - 日期：2026-09-21
-- 实施记录：[044 Engine testkit 基础](../exec-plans/active/044-engine-testkit-foundation.md)
+- 实施记录：[044 Engine testkit 基础](../exec-plans/completed/044-engine-testkit-foundation.md)
 - 后续领域场景计划：[034 确定性虚拟 Peer Network](../exec-plans/active/034-deterministic-virtual-peer-network-test-suite.md)
 
 # 1. Overview
@@ -217,7 +217,7 @@ impl Scenario {
 
 # 6. Implementation Plan
 
-实施步骤和状态由 [044 执行计划](../exec-plans/active/044-engine-testkit-foundation.md) 维护。本设计只固定长期边界。
+实施步骤和状态由 [044 执行计划](../exec-plans/completed/044-engine-testkit-foundation.md) 维护。本设计只固定长期边界。
 
 # 7. Edge Cases
 
@@ -284,16 +284,16 @@ Implementation: 后续可增加 panic hook 集成；V1 不用全局 hook 改变�
 
 # 9. Acceptance Criteria
 
-- [ ] `uc-testkit` 不依赖任何产品 crate，生产 crate 不依赖 `uc-testkit`。
-- [ ] 成功和故意失败示范真实执行并生成 JSON 与摘要。
-- [ ] 失败示范在 1 秒内结束，并包含未满足条件、最后事件、阶段耗时、seed、复现命令和工件位置。
-- [ ] 临时目录、端口和清理结果自测试通过。
-- [ ] `.config/nextest.toml` 能区分六类测试边界，未迁移的组明确使用现有脚本或保留为空映射。
-- [ ] `run-test-group.sh fast` 实际运行非零测试并生成 JUnit。
-- [ ] 现有 `cargo test` 入口仍可运行。
-- [ ] CI 新入口不删除或放宽任何现有门禁。
-- [ ] 报告不包含设备名、地址、邀请、令牌、正文或真实临时路径。
-- [ ] 仓库静态检查与相关测试通过；设备和真实网络未执行时明确记为跳过。
+- [x] `uc-testkit` 不依赖任何产品 crate，生产 crate 不依赖 `uc-testkit`。
+- [x] 成功和故意失败示范真实执行并生成 JSON 与摘要。
+- [x] 失败示范在 1 秒内结束，并包含未满足条件、最后事件、阶段耗时、seed、复现命令和工件位置。
+- [x] 临时目录、端口和清理结果自测试通过。
+- [x] `.config/nextest.toml` 能区分六类测试边界，未迁移的组明确使用现有脚本或保留为空映射。
+- [x] `run-test-group.sh fast` 实际运行非零测试并生成 JUnit。
+- [x] 现有 `cargo test` 入口仍可运行。
+- [x] CI 新入口不删除或放宽任何现有门禁。
+- [x] 报告不包含设备名、地址、邀请、令牌、正文或真实临时路径。
+- [x] 仓库静态检查与相关测试通过；设备和真实网络未执行时明确记为跳过。
 
 # 10. Risks and Trade-offs
 
@@ -307,4 +307,4 @@ Implementation: 后续可增加 panic hook 集成；V1 不用全局 hook 改变�
 
 - 仓库未提供 `CONTEXT.md`；若后续新增，应核对其测试命名和 CI 约束是否需要回写本文。
 - 真实网络和 device 目前由脚本/workflow 管理；是否在未来统一生成同一 `ScenarioReport` schema，留到首批迁移后按实际需要决定。
-- nextest 固定版本由实施时按当前 Rust 1.95 兼容版本验证后写入 CI；升级策略随工具链更新维护。
+- nextest 已固定为 `0.9.145` 并在当前 Rust 1.95 工具链实跑；升级策略随工具链更新维护。

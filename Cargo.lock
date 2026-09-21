@@ -7337,6 +7337,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "uc-testkit"
+version = "1.1.0-rc.18"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "ucd-trie"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

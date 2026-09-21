@@ -2,7 +2,7 @@
 
 ## 状态
 
-- 状态：待实施
+- 状态：已完成
 - 日期：2026-09-21
 - 完整负责人：`uc-testkit::Scenario`
 - 唯一调用：测试用稳定名称、固定 seed、预算和复现命令创建场景，最后提交一次成功或失败结果
@@ -79,9 +79,9 @@ docs/architecture/architecture-bible.md
 
 ### Phase 1：testkit 最小切片
 
-- [ ] 新增 workspace crate 和最小模块。
-- [ ] 场景身份、seed、预算、阶段、事件等待、失败分类、目录/端口 lease、报告和清理结果可用。
-- [ ] 添加 testkit 自测试。
+- [x] 新增 workspace crate 和最小模块。
+- [x] 场景身份、seed、预算、阶段、事件等待、失败分类、目录/端口 lease、报告和清理结果可用。
+- [x] 添加 testkit 自测试。
 
 出口：`cargo test -p uc-testkit --locked` 通过；没有产品 crate 依赖。
 
@@ -89,9 +89,9 @@ docs/architecture/architecture-bible.md
 
 ### Phase 2：示范与报告
 
-- [ ] 成功示范产生 passed JSON 和摘要。
-- [ ] 故意失败示范在短预算内产生 failed JSON 和摘要，验证后以成功退出保留 CI 可运行性。
-- [ ] 工件不含真实临时路径或自由产品 payload。
+- [x] 成功示范产生 passed JSON 和摘要。
+- [x] 故意失败示范在短预算内产生 failed JSON 和摘要，验证后以成功退出保留 CI 可运行性。
+- [x] 工件不含真实临时路径或自由产品 payload。
 
 出口：实际读取 JSON，字段和失败分类满足设计；工件路径可复现。
 
@@ -99,10 +99,10 @@ docs/architecture/architecture-bible.md
 
 ### Phase 3：nextest 与本地入口
 
-- [ ] 安装并验证固定 cargo-nextest 版本。
-- [ ] 增加 `.config/nextest.toml`、六类边界和 JUnit。
-- [ ] 增加 `run-test-group.sh`，fast 组运行非零测试。
-- [ ] real-network/device 组只转交现有入口或明确要求参数，不自动运行设备。
+- [x] 安装并验证固定 cargo-nextest 版本。
+- [x] 增加 `.config/nextest.toml`、六类边界和 JUnit。
+- [x] 增加 `run-test-group.sh`，fast 组运行非零测试。
+- [x] real-network/device 组只转交现有入口或明确要求参数，不自动运行设备。
 
 出口：fast 组成功，JUnit 可解析；cargo test 同一自测试仍通过。
 
@@ -110,9 +110,9 @@ docs/architecture/architecture-bible.md
 
 ### Phase 4：非破坏 CI
 
-- [ ] PR workflow 新增独立 testkit job。
-- [ ] 固定工具版本并上传 JUnit/JSON 工件。
-- [ ] 不修改 checks、coverage、connection-recovery 的成功条件。
+- [x] PR workflow 新增独立 testkit job。
+- [x] 固定工具版本并上传 JUnit/JSON 工件。
+- [x] 不修改 checks、coverage、connection-recovery 的成功条件。
 
 出口：workflow 语法/仓库检查通过；本地无法证明远程 CI 时明确记录未运行。
 
@@ -120,10 +120,10 @@ docs/architecture/architecture-bible.md
 
 ### Phase 5：完整验证与本地提交
 
-- [ ] 相关测试、成功/失败示范和一个现有快速回归通过。
-- [ ] 根 AGENTS 交付检查通过。
-- [ ] 更新本文实际时长、工件位置、跳过项和后续迁移建议。
-- [ ] 创建一个本地原子提交，不推送。
+- [x] 相关测试、成功/失败示范和一个现有快速回归通过。
+- [x] 根 AGENTS 交付检查通过。
+- [x] 更新本文实际时长、工件位置、跳过项和后续迁移建议。
+- [x] 创建一个本地原子提交，不推送。
 
 ## 6. CI 分组配置
 
@@ -149,6 +149,13 @@ docs/architecture/architecture-bible.md
 | 日期 | 阶段 | 结果 |
 | --- | --- | --- |
 | 2026-09-21 | Phase 0 输入 | 完成；仓库未找到 `CONTEXT.md`，本机未安装 cargo-nextest。 |
+| 2026-09-21 | Phase 0 规格 | 完成；设计、执行计划、索引、架构圣经和 Markdown 链接自检通过。 |
+| 2026-09-21 | Phase 1-2 | 完成；`cargo test -p uc-testkit --locked` 3 项通过，成功与故意失败示范均生成 JSON/摘要；故意失败约 47 ms。 |
+| 2026-09-21 | Phase 3 | 完成；固定 cargo-nextest `0.9.145`，`fast` 运行 3 项并生成 JUnit，完整统一入口约 1.7 秒。 |
+| 2026-09-21 | Phase 4 | 完成配置；PR workflow 新增独立 `testkit` job，远程 CI 未触发。 |
+| 2026-09-21 | Phase 5 | 完成；workspace all-target check 约 183 秒，现有 `uc-engine/public_contract` 48 项通过、约 293 秒，仓库 preflight 通过。真实网络与设备均跳过。 |
+
+验证期间共享外置构建盘一度因一次未限定 package 的 nextest test discovery 写满；确认没有使用本工作区 target 的活动进程后，仅清理本工作区约 7.2 GiB 可再生产物，并改用 `-p uc-testkit` 完成配置验证。未切换到临时构建目录。
 
 ## 9. 下一阶段候选迁移
 
