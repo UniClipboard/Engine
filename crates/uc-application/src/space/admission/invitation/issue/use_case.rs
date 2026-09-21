@@ -424,6 +424,31 @@ mod tests {
             result.availability,
             crate::space::facade::InvitationAvailability::SameLocalNetwork
         );
+        assert_started_then_issued(&h.analytics, InvitationCodeSource::LocallyMinted, false);
+    }
+
+    #[tokio::test]
+    async fn successful_port_result_does_not_record_success_when_finalization_fails() {
+        let port = Arc::new(FakeInvitationPort::with_ok("ABCD-1234", expires_at()));
+        let holder = Arc::new(InMemoryPairingInvitationHolder::new());
+        let analytics = Arc::new(CapturingAnalyticsSink::default());
+        let issuer = Arc::new(PairingInvitationIssuer::new(
+            Arc::new(FixedDeviceIdentity(DeviceId::new("sponsor-1"))),
+            Arc::new(FixedClock(i64::MAX)),
+            holder.clone(),
+            wrap_facade(analytics.clone()),
+            Arc::new(FixedMembershipAdmissionGate(
+                MembershipAdmissionDecision::Allowed,
+            )),
+        ));
+        let use_case = IssuePairingInvitationUseCase::new(port, issuer);
+
+        assert!(matches!(
+            use_case.execute().await,
+            Err(IssuePairingInvitationError::Internal(_))
+        ));
+        assert_eq!(holder.len().await, 0);
+        assert_pairing_started(&analytics);
     }
 
     #[tokio::test]
@@ -479,6 +504,25 @@ mod tests {
             IssuePairingInvitationError::ServiceUnavailable
         ));
         assert_pairing_started(&h.analytics);
+    }
+
+    #[tokio::test]
+    async fn preserves_directory_rejection_source() {
+        let port = Arc::new(FakeInvitationPort::with_err(
+            InvitationError::DirectoryRejected {
+                source: anyhow::anyhow!("original directory failure"),
+            },
+        ));
+        let h = build_harness(port);
+
+        let error = h.uc.execute().await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            IssuePairingInvitationError::DirectoryRejected { .. }
+        ));
+        let source = std::error::Error::source(&error).expect("source is preserved");
+        assert_eq!(source.to_string(), "original directory failure");
     }
 
     #[tokio::test]
