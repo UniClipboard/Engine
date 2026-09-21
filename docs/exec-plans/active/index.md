@@ -8,6 +8,7 @@
 - [041 可导出的连接故障调查记录](041-exportable-connection-diagnostics.md)（含 Engine、手机、桌面宿主及联合验收，进度见正文）
 - [043 升级前备份与软件版本回退](043-pre-upgrade-profile-backup.md)（实施中：启动前备份及恢复出厂清理已接入，完整版本回退尚未完成）
 - [043 Engine 网络运行期与 Space 会话安全交接](043-engine-network-runtime-and-space-session-handover.md)（实施中，对应 Issue #68）
+- [045 确定性成员恢复高价值场景](045-deterministic-membership-recovery-scenarios.md)（实施中）
 - [历史可读时的邀请失败](2026-09-12-invitation-admission-recovery.md)
 - [本地产物准备](local-artifacts-preparation.md)
 - [配对通信等待诊断](2026-09-12-admission-exchange-diagnostics.md)
