@@ -2,7 +2,7 @@
 
 ## 状态
 
-- 状态：实施中
+- 状态：已完成
 - 日期：2026-09-21
 - 完整负责人：既有 `SpaceAdmissionProtocol`、`MaintainSpaceMembershipUseCase`、成员历史证据与设备信任用例
 - 唯一调用：测试场景提交一个业务动作或一次明确维护触发，再读取公开 Application 投影判断终态
@@ -36,11 +36,14 @@
 ## 3. 架构边界与目录职责
 
 ```text
-crates/uc-application/src/space/testing/
-  scenario.rs       使用 uc-testkit 统一身份、预算、事件与工件
-  admission.rs      受控协议交换和可重建持久 fixture
-  membership.rs     维护轮次、公开投影与固定 seed fixture
-  scenarios.rs      五个端到端业务场景，不保存业务状态
+crates/uc-application/src/test_support/membership_scenario.rs
+  使用 uc-testkit 统一身份、预算、失败分类与工件
+
+crates/uc-application/src/space/admission/protocol/stage2_scenarios.rs
+  最终确认重试、三设备确认可见性和持久重建场景
+
+crates/uc-application/src/space/membership/**/stage2_scenario.rs
+  旧候选收敛与设备状态恢复场景
 ```
 
 实际实现可在不扩大职责的前提下合并小文件。测试模块只组合既有负责人：
@@ -87,30 +90,30 @@ crates/uc-application/src/space/testing/
 
 ### Phase 1：最小端到端场景
 
-- [ ] 先实现 `final-confirmation-retry`，测试先于任何 test-only seam 修改。
-- [ ] 用受控消息与维护入口证明失败、重试和不插队。
-- [ ] 读取生成的 JSON/摘要并核对失败工件字段。
+- [x] 先实现 `final-confirmation-retry`，测试先于任何 test-only seam 修改。
+- [x] 用受控消息与维护入口证明失败、重试和不插队。
+- [x] 读取生成的 JSON/摘要并核对失败工件字段。
 
 回退：删除新测试模块和 dev-dependency；生产代码不需回退。
 
 ### Phase 2：其余四场景
 
-- [ ] 逐一加入候选收敛、三设备可见性、设备状态恢复和持久重建。
-- [ ] 每次只增加当前场景所需的最窄 `cfg(test)` fixture 能力。
-- [ ] 每个场景独立复现且总耗时小于 10 秒。
+- [x] 逐一加入候选收敛、三设备可见性、设备状态恢复和持久重建。
+- [x] 每次只增加当前场景所需的最窄 `cfg(test)` fixture 能力。
+- [x] 每个场景独立复现且总耗时小于 10 秒。
 
 ### Phase 3：双轨与稳定性
 
-- [ ] 五个新场景与对应旧测试各连续运行至少 20 次，比较最终业务结果。
-- [ ] 五场景整体连续运行 100 轮，无随机失败。
-- [ ] 旧测试源码和默认 `cargo test` 入口保持不变。
+- [x] 五个新场景与对应旧测试各连续运行至少 20 次，比较最终业务结果。
+- [x] 五场景整体连续运行 100 轮，无随机失败。
+- [x] 旧测试源码和默认 `cargo test` 入口保持不变。
 
 ### Phase 4：完整验证与提交
 
-- [ ] 运行 `uc-testkit` 自测、新场景、相关旧测试和旧 cargo test 入口。
-- [ ] 运行 workspace all-target check、fmt、Rust style、Engine repository、隐私和 `git diff --check`。
-- [ ] 记录命令、次数、耗时、工件和未达标项。
-- [ ] 按 branch-name-guard 检查后创建范围清晰的本地原子提交；不推送、不创建 PR。
+- [x] 运行 `uc-testkit` 自测、新场景、相关旧测试和旧 cargo test 入口。
+- [x] 运行 workspace all-target check、fmt、Rust style、Engine repository、隐私和 `git diff --check`。
+- [x] 记录命令、次数、耗时、工件和未达标项。
+- [x] 按 branch-name-guard 检查后创建范围清晰的本地原子提交；不推送、不创建 PR。
 
 ## 7. 失败分类
 
@@ -135,16 +138,26 @@ crates/uc-application/src/space/testing/
 
 ## 9. 验收标准
 
-- [ ] 五个场景都调用既有 Application 真实负责人并断言最终公开状态。
-- [ ] 使用固定 seed、可控时间、可控消息，无固定 sleep、环境变量、机器路径和真实网络。
-- [ ] 每个场景生成 JSON 与摘要，失败包含复现命令和工件位置。
-- [ ] 对应旧测试双轨至少 20 次，最终业务结果一致。
-- [ ] 五场景总耗时小于 10 秒，连续 100 轮无随机失败。
-- [ ] cargo test 与 nextest 双轨可运行，旧测试权威地位不变。
-- [ ] 静态、架构与隐私检查通过；真实网络、远程 CI 和设备明确记为跳过。
+- [x] 五个场景都调用既有 Application 真实负责人并断言最终公开状态。
+- [x] 使用固定 seed、可控时间、可控消息，无固定 sleep、环境变量、机器路径和真实网络。
+- [x] 每个场景生成 JSON 与摘要，失败包含复现命令和工件位置。
+- [x] 对应旧测试双轨至少 20 次，最终业务结果一致。
+- [x] 五场景总耗时小于 10 秒，连续 100 轮无随机失败。
+- [x] cargo test 与 nextest 双轨可运行，旧测试权威地位不变。
+- [x] 静态、架构与隐私检查通过；真实网络、远程 CI 和设备明确记为跳过。
 
 ## 10. 进度记录
 
 | 日期 | 阶段 | 结果 |
 | --- | --- | --- |
 | 2026-09-21 | Phase 0 | 完成场景到既有负责人的映射；确认只需 test-only 支撑，不改变生产行为。 |
+| 2026-09-21 | Phase 1-2 | 五个固定 seed 场景完成；nextest 实际测试耗时 0.180 秒，全部生成 JSON 与文本工件。 |
+| 2026-09-21 | Phase 3 | 新旧 13 项测试双轨 20 轮全部通过，合计 12.00 秒；五个新场景 100 轮全部通过，合计 58.98 秒。 |
+| 2026-09-21 | Phase 4 | `uc-testkit` 3 项通过（6.28 秒）；`uc-application --lib` 959 项通过、1 项既有忽略（22.04 秒）；workspace all-target check 通过（149.40 秒）；格式、Rust 风格、仓库架构、隐私和 diff 检查通过。 |
+
+## 11. 未执行与兼容结论
+
+- 远程 CI、真实网络和设备测试未执行，均记为跳过，不记为通过。
+- 未读取或修改 t-0010 工作区，未复制、迁移或重写其测试。
+- 未改变产品行为、生产公开接口、持久格式或设备协议；唯一新增入口是 `cfg(test)`、crate-private 的持久准入 fixture 重建能力。
+- 既有测试和 `cargo test` 仍为权威入口；nextest 只增加确定性场景的快速分组，不替换原门禁。

@@ -3,6 +3,7 @@
 这里保留已完成、已由后续方案取代或仅供历史追溯的实施记录。它们不自动代表当前架构事实。
 
 - [044 Engine testkit、测试分组与结构化报告基础](044-engine-testkit-foundation.md)（框架、nextest 分组、结构化工件与非破坏 CI 入口完成；真实网络、设备和远程 CI 跳过）
+- [045 确定性成员恢复高价值场景](045-deterministic-membership-recovery-scenarios.md)（五个固定 seed 场景、20 轮新旧双轨和 100 轮稳定性验收完成；远程 CI、真实网络和设备跳过）
 
 - [资料密钥丢失恢复与旧设备迁移](2026-09-19-profile-key-recovery.md)（Engine 实现与本地验收完成；Desktop、实体平台和旧版本程序回退验收跳过）
 
