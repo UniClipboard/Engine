@@ -522,6 +522,45 @@ impl SqliteSearchIndex {
         .map_err(|e| SearchError::Internal(format!("delete_active_entry failed: {e}")))
     }
 
+    /// 只更新活动表中已有文档的活跃时间；词项、标签和渲染负载保持不变。
+    /// 文档不存在时不写入任何行。
+    fn set_active_entry_active_time(
+        conn: &mut SqliteConnection,
+        profile_id: &str,
+        entry_id: &EntryId,
+        active_time_ms: i64,
+    ) -> Result<(), SearchError> {
+        diesel::update(
+            search_document::table
+                .filter(search_document::profile_id.eq(profile_id))
+                .filter(search_document::entry_id.eq(entry_id.to_string())),
+        )
+        .set(search_document::active_time_ms.eq(active_time_ms))
+        .execute(conn)
+        .map(|_| ())
+        .map_err(|e| SearchError::Internal(format!("set_active_entry_active_time failed: {e}")))
+    }
+
+    /// 重建进行中时，把同一活跃时间写入临时文档表，避免切换后排序回退。
+    fn set_temp_entry_active_time(
+        conn: &mut SqliteConnection,
+        state: &ActiveRebuild,
+        entry_id: &EntryId,
+        active_time_ms: i64,
+    ) -> Result<(), SearchError> {
+        let update_doc = format!(
+            "UPDATE {doc_table} SET active_time_ms = ? WHERE profile_id = ? AND entry_id = ?",
+            doc_table = state.temp_document_table
+        );
+        diesel::sql_query(&update_doc)
+            .bind::<diesel::sql_types::BigInt, _>(active_time_ms)
+            .bind::<diesel::sql_types::Text, _>(&state.profile_id)
+            .bind::<diesel::sql_types::Text, _>(entry_id.to_string())
+            .execute(conn)
+            .map(|_| ())
+            .map_err(|e| SearchError::Internal(format!("set_temp_entry_active_time failed: {e}")))
+    }
+
     /// Add or remove only the favorited tag membership row for `entry_id` in the
     /// active table, leaving all rule-derived tags (e.g. `link`) untouched.
     /// Idempotent in both directions.
@@ -2026,6 +2065,48 @@ impl SearchIndexPort for SqliteSearchIndex {
         .map_err(|e| SearchError::Internal(format!("spawn_blocking error: {e}")))?
     }
 
+    #[instrument(
+        name = "search_index.set_entry_active_time",
+        level = "debug",
+        skip(self),
+        fields(entry_id = %entry_id, active_time_ms)
+    )]
+    async fn set_entry_active_time(
+        &self,
+        entry_id: &EntryId,
+        active_time_ms: i64,
+    ) -> Result<(), SearchError> {
+        let profile_id = self.current_profile_id().await?.into_inner();
+        let pool = self.pool.clone();
+        let entry_id = entry_id.clone();
+        let maybe_rebuild = self.active_rebuild_for_profile(&profile_id).await;
+
+        tokio::task::spawn_blocking(move || {
+            let mut conn = pool
+                .get()
+                .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
+
+            // 1. 先更新活动表。
+            Self::set_active_entry_active_time(&mut conn, &profile_id, &entry_id, active_time_ms)?;
+
+            // 2. 重建进行中时同步到临时表（尽力而为，与收藏标签镜像一致）。
+            if let Some(rebuild_state) = maybe_rebuild {
+                if let Err(e) = Self::set_temp_entry_active_time(
+                    &mut conn,
+                    &rebuild_state,
+                    &entry_id,
+                    active_time_ms,
+                ) {
+                    warn!(error = %e, "failed to mirror active time into rebuild temp tables (best-effort)");
+                }
+            }
+
+            Ok(())
+        })
+        .await
+        .map_err(|e| SearchError::Internal(format!("spawn_blocking error: {e}")))?
+    }
+
     #[instrument(name = "search_index.list_tags", level = "debug", skip(self))]
     async fn list_tags(&self) -> Result<Vec<SearchTagCount>, SearchError> {
         let profile_id = self.current_profile_id().await?.into_inner();
@@ -2562,6 +2643,135 @@ mod tests {
             .unwrap();
         ids.sort();
         ids
+    }
+
+    fn make_doc_at(entry_id: &str, active_time_ms: i64, tags: Vec<TagId>) -> SearchDocument {
+        let mut doc = make_doc(entry_id, tags);
+        doc.active_time_ms = active_time_ms;
+        doc
+    }
+
+    async fn browse_order(index: &SqliteSearchIndex) -> Vec<String> {
+        index
+            .search(filter_only_query())
+            .await
+            .unwrap()
+            .items
+            .iter()
+            .map(|item| item.entry_id.to_string())
+            .collect()
+    }
+
+    /// 重复复制只推进条目的活跃时间；索引副本跟随后，浏览顺序才会把它排到最前。
+    #[tokio::test]
+    async fn set_entry_active_time_moves_entry_to_front_of_browse() {
+        let (index, _pool, _dir) = make_index();
+        index
+            .index_entry(make_doc_at("a", 1, vec![]), vec![])
+            .await
+            .unwrap();
+        index
+            .index_entry(make_doc_at("b", 2, vec![]), vec![])
+            .await
+            .unwrap();
+        index
+            .index_entry(make_doc_at("c", 3, vec![]), vec![])
+            .await
+            .unwrap();
+        assert_eq!(browse_order(&index).await, ["c", "b", "a"]);
+
+        index
+            .set_entry_active_time(&EntryId::from("a"), 10)
+            .await
+            .unwrap();
+
+        assert_eq!(browse_order(&index).await, ["a", "c", "b"]);
+    }
+
+    #[tokio::test]
+    async fn set_entry_active_time_keeps_tags_and_render_metadata() {
+        let (index, _pool, _dir) = make_index();
+        let mut doc = make_doc_at("a", 1, vec![TagId::new("link")]);
+        doc.text_preview = Some("保持不变".to_owned());
+        index.index_entry(doc, vec![]).await.unwrap();
+        index
+            .set_entry_favorite_tag(&EntryId::from("a"), true)
+            .await
+            .unwrap();
+
+        index
+            .set_entry_active_time(&EntryId::from("a"), 10)
+            .await
+            .unwrap();
+
+        let page = index.search(filter_only_query()).await.unwrap();
+        assert_eq!(page.total, 1);
+        let item = &page.items[0];
+        assert_eq!(item.active_time_ms, 10);
+        assert_eq!(item.text_preview.as_deref(), Some("保持不变"));
+        let mut tags = item.tags.clone();
+        tags.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        assert_eq!(tags, vec![TagId::favorited(), TagId::new("link")]);
+    }
+
+    #[tokio::test]
+    async fn set_entry_active_time_ignores_unknown_entry() {
+        let (index, _pool, _dir) = make_index();
+        index
+            .index_entry(make_doc_at("a", 1, vec![]), vec![])
+            .await
+            .unwrap();
+
+        index
+            .set_entry_active_time(&EntryId::from("missing"), 10)
+            .await
+            .unwrap();
+
+        let page = index.search(filter_only_query()).await.unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].entry_id.to_string(), "a");
+        assert_eq!(page.items[0].active_time_ms, 1);
+    }
+
+    /// 重建已暂存旧时间之后发生的重新浮出，必须在切换后仍然生效。
+    #[tokio::test]
+    async fn rebuild_preserves_active_time_update_before_finalize() {
+        let (mut index, _pool, _dir) = make_index();
+        let resume = Arc::new(tokio::sync::Semaphore::new(0));
+        index.pause_before_finalize = Some(resume.clone());
+        let index = Arc::new(index);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let worker_index = index.clone();
+        let worker = tokio::spawn(async move {
+            worker_index
+                .rebuild(
+                    vec![
+                        (make_doc_at("old", 1, vec![]), vec![]),
+                        (make_doc_at("recent", 2, vec![]), vec![]),
+                    ],
+                    tx,
+                )
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let progress = rx.recv().await.unwrap();
+                if progress.stage == RebuildStage::Indexing && progress.indexed == 2 {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        index
+            .set_entry_active_time(&EntryId::from("old"), 10)
+            .await
+            .unwrap();
+        resume.add_permits(1);
+        worker.await.unwrap().unwrap();
+
+        assert_eq!(browse_order(&index).await, ["old", "recent"]);
     }
 
     #[tokio::test]

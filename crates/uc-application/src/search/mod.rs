@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
+pub(crate) mod active_time_mirror;
 pub(crate) mod assembly;
 pub(crate) mod coordinator;
 pub(crate) mod live_index;

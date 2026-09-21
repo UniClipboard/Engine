@@ -55,6 +55,7 @@ use crate::facade::{
     ClipboardSyncFacade, HostEventBus, ResourceFacade,
 };
 use crate::runtime_lifecycle::LifecycleError;
+use crate::search::active_time_mirror::SearchMirroredTouch;
 use crate::search::live_index::{
     ClipboardLiveIndexDeps, ClipboardLiveIndexPort, ClipboardLiveIndexer,
 };
@@ -179,7 +180,13 @@ pub struct ClipboardAssembly {
 
 impl ClipboardAssembly {
     pub fn build(deps: ClipboardAssemblyDeps) -> Self {
-        let application = deps.application;
+        let mut application = deps.application;
+        // 本装配内的采集、入站、恢复与活动状态流程都从这里取得 touch 能力；
+        // 在入口统一包装一次，任何重新浮出都会同步搜索索引中的排序时间。
+        application.clipboard.entry_ports.touch = Arc::new(SearchMirroredTouch::new(
+            Arc::clone(&application.clipboard.entry_ports.touch),
+            Arc::clone(&application.search.search_index),
+        ));
         let entry_identity = Arc::new(EntryIdentityCoordinator::new());
         let write_coordinator = Arc::new(ClipboardWriteCoordinator::new(
             Arc::clone(&application.clipboard.system_clipboard),

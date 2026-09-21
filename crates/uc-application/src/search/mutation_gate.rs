@@ -83,6 +83,17 @@ impl SearchIndexPort for CoordinatedSearchIndex {
         self.inner.set_entry_favorite_tag(entry_id, favorited).await
     }
 
+    async fn set_entry_active_time(
+        &self,
+        entry_id: &EntryId,
+        active_time_ms: i64,
+    ) -> Result<(), SearchError> {
+        let _guard = self.gate.begin_update().await;
+        self.inner
+            .set_entry_active_time(entry_id, active_time_ms)
+            .await
+    }
+
     async fn list_tags(&self) -> Result<Vec<SearchTagCount>, SearchError> {
         self.inner.list_tags().await
     }

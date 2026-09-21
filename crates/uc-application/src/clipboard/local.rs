@@ -180,6 +180,8 @@ impl LocalClipboardProcessor {
         }
 
         let shared_snapshot = Arc::new(snapshot);
+        // 重复内容已在索引中，文档、词项和标签无需重建；排序用的活跃时间由
+        // touch 能力在重新浮出时同步到索引，这里不再重复写入。
         let index = if deduplicated {
             LocalClipboardIndexStatus::NotAttempted
         } else {
