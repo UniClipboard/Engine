@@ -71,6 +71,21 @@ pub trait SearchIndexPort: Send + Sync {
         Ok(())
     }
 
+    /// 将已有文档的活跃时间同步为条目的权威值，使浏览与搜索排序跟随“重新浮出”。
+    ///
+    /// 条目表中的活跃时间是唯一事实来源；索引只保存一份用于排序的副本。
+    /// 重复复制、恢复等动作只推进条目表，调用方通过本方法把同一个值写入索引，
+    /// 无需重建文档、词项或标签。索引中不存在该条目时为空操作；不维护排序副本的
+    /// 适配器保留默认空实现。
+    async fn set_entry_active_time(
+        &self,
+        entry_id: &EntryId,
+        active_time_ms: i64,
+    ) -> Result<(), SearchError> {
+        let _ = (entry_id, active_time_ms);
+        Ok(())
+    }
+
     /// List every tag present in the index with the count of entries carrying
     /// it. Filter-only over the membership table: it needs no search key and is
     /// available while the session is locked. Lock-based visibility of custom

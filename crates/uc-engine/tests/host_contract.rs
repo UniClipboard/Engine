@@ -21,6 +21,9 @@ mod lease;
 #[path = "host_contract/stale_callback.rs"]
 mod stale_callback;
 
+#[path = "host_contract/resurface_order.rs"]
+mod resurface_order;
+
 use lease::{find_lease, open_lease};
 
 #[tokio::test(flavor = "multi_thread")]
