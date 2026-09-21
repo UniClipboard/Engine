@@ -26,14 +26,10 @@ static ENGINE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(
 #[cfg(feature = "dev-tools")]
 mod offline_lifecycle;
 
-#[tokio::test]
-#[ignore = "需要显式提供本地资料，只操作临时副本"]
-async fn invitation_from_isolated_profile_copy() {
-    let _guard = ENGINE_TEST_LOCK.lock().await;
-    let source = PathBuf::from(std::env::var_os("UC_INVITATION_FIXTURE_DATA").unwrap());
-    let minimum_history_entries = std::env::var("UC_INVITATION_FIXTURE_MIN_HISTORY")
-        .map(|value| value.parse::<usize>().unwrap())
-        .unwrap_or(1);
+fn isolated_profile_copy(
+    environment_variable: &str,
+) -> (tempfile::TempDir, MemoryHostSecureStorage) {
+    let source = PathBuf::from(std::env::var_os(environment_variable).unwrap());
     let temp = tempfile::tempdir().unwrap();
     let private = temp.path().join("private");
     let mut pending = vec![source.clone()];
@@ -68,6 +64,17 @@ async fn invitation_from_isolated_profile_copy() {
             )
             .unwrap();
     }
+    (temp, storage)
+}
+
+#[tokio::test]
+#[ignore = "需要显式提供本地资料，只操作临时副本"]
+async fn invitation_from_isolated_profile_copy() {
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let minimum_history_entries = std::env::var("UC_INVITATION_FIXTURE_MIN_HISTORY")
+        .map(|value| value.parse::<usize>().unwrap())
+        .unwrap_or(1);
+    let (temp, storage) = isolated_profile_copy("UC_INVITATION_FIXTURE_DATA");
     for allow_secure_storage_unlock in [false, false, true] {
         let (engine, _events) = Engine::start(
             EngineConfig::new("1.2.3"),
@@ -125,6 +132,87 @@ async fn invitation_from_isolated_profile_copy() {
             "readable profile must issue invitation: {:?}",
             invitation.err()
         );
+    }
+}
+
+#[tokio::test]
+#[ignore = "需要显式提供损坏资料，只操作临时副本"]
+async fn unreadable_admission_from_isolated_profile_copy_is_stable() {
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let (temp, storage) = isolated_profile_copy("UC_ADMISSION_RECOVERY_FIXTURE_DATA");
+    for _ in 0..3 {
+        let (input, progress) = crate::StartupProgress::channel();
+        let (engine, _events) = Engine::start_with_progress(
+            EngineConfig::new("1.2.3"),
+            persistent_engine_host(temp.path(), storage.clone()),
+            input,
+        )
+        .await
+        .unwrap();
+        let startup = progress.snapshot();
+        assert_eq!(startup.state, crate::StartupState::RecoveryAvailable);
+        assert!(!startup.allowed_actions.retry);
+        assert!(!temp
+            .path()
+            .join("private/profile-storage-upgrade/.journal-v1")
+            .exists());
+        let crate::OperationResult::ProfileRecovery(summary) = engine
+            .execute(crate::Operation::QueryProfileRecovery)
+            .await
+            .unwrap()
+        else {
+            panic!("expected admission recovery summary")
+        };
+        assert_eq!(
+            summary.state,
+            crate::ProfileRecoveryState::AdmissionRecoveryRequired
+        );
+        assert!(!summary.background_ready);
+        let admission = summary.admission.unwrap();
+        assert_eq!(
+            admission.category,
+            crate::AdmissionRecoveryCategory::LegacyFallbackInvalid
+        );
+        assert_eq!(
+            admission.stage,
+            crate::AdmissionRecoveryStage::LegacyRepository
+        );
+        assert_eq!(
+            admission.action,
+            crate::AdmissionRecoveryAction::ChooseBackup
+        );
+        assert!(engine
+            .execute(crate::Operation::IssueInvitation)
+            .await
+            .is_err());
+        assert!(engine
+            .execute(crate::Operation::JoinSpace(crate::JoinSpaceInput {
+                invitation_code: "TEST-CODE".into(),
+                device_name: None,
+                passphrase: crate::SecretString::new("test-passphrase"),
+                preserve_unreadable_history: false,
+            }))
+            .await
+            .is_err());
+        assert!(engine
+            .execute(crate::Operation::SendText(crate::SendTextInput {
+                text: "must remain restricted".into(),
+                target_devices: Vec::new(),
+            }))
+            .await
+            .is_err());
+        assert!(engine
+            .execute(crate::Operation::QueryDeviceGroupChoices)
+            .await
+            .is_err());
+        assert!(engine
+            .execute(crate::Operation::QueryMembershipReadiness)
+            .await
+            .is_err());
+        engine
+            .shutdown(std::time::Duration::from_secs(15))
+            .await
+            .unwrap();
     }
 }
 
