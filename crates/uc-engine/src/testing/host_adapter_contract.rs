@@ -31,6 +31,9 @@ mod offline_lifecycle;
 async fn invitation_from_isolated_profile_copy() {
     let _guard = ENGINE_TEST_LOCK.lock().await;
     let source = PathBuf::from(std::env::var_os("UC_INVITATION_FIXTURE_DATA").unwrap());
+    let minimum_history_entries = std::env::var("UC_INVITATION_FIXTURE_MIN_HISTORY")
+        .map(|value| value.parse::<usize>().unwrap())
+        .unwrap_or(1);
     let temp = tempfile::tempdir().unwrap();
     let private = temp.path().join("private");
     let mut pending = vec![source.clone()];
@@ -100,9 +103,11 @@ async fn invitation_from_isolated_profile_copy() {
             ))
             .await
             .unwrap();
-        assert!(
-            matches!(history, crate::OperationResult::HistoryEntries(entries) if !entries.is_empty())
-        );
+        assert!(matches!(
+            history,
+            crate::OperationResult::HistoryEntries(entries)
+                if entries.len() >= minimum_history_entries
+        ));
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
         let invitation = loop {
             let result = engine.execute(crate::Operation::IssueInvitation).await;

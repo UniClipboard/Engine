@@ -1,17 +1,149 @@
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use diesel::connection::SimpleConnection;
 use diesel::sql_types::Binary;
 use diesel::{Connection, RunQueryDsl};
 use uc_engine::{
-    CreateSpaceInput, Engine, EngineConfig, JoinSpaceInput, Operation, OperationResult,
-    SecretString, SendTextInput, StartupProgress, StartupState,
+    CreateSpaceInput, DeviceMembershipSummary, Engine, EngineConfig, JoinSpaceInput,
+    ListHistoryEntriesInput, Operation, OperationResult, SecretString, SendTextInput,
+    StartupProgress, StartupState,
 };
 
 use super::{host, MemorySecureStorage};
 
+fn runtime_database(root: &Path, generation_directory: &str, relative: &str) -> PathBuf {
+    let databases = std::fs::read_dir(root.join("private").join(generation_directory))
+        .unwrap()
+        .map(Result::unwrap)
+        .filter(|entry| entry.file_type().unwrap().is_dir())
+        .map(|entry| entry.path().join(relative))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    assert_eq!(databases.len(), 1, "expected one active runtime database");
+    databases.into_iter().next().unwrap()
+}
+
+fn runtime_databases(root: &Path) -> (PathBuf, PathBuf) {
+    (
+        runtime_database(
+            root,
+            "profile-data-generations",
+            "v3-payloads/profile.sqlite",
+        ),
+        runtime_database(root, "space-control-generations", "control.sqlite"),
+    )
+}
+
+fn omit_later_runtime_tables(profile_database: &Path, control_database: &Path) {
+    let mut profile =
+        diesel::sqlite::SqliteConnection::establish(profile_database.to_str().unwrap()).unwrap();
+    profile
+        .batch_execute(
+            "DROP TRIGGER invalidate_revocation_delivery_summary_after_delete;
+             DROP TRIGGER invalidate_revocation_delivery_summary_after_update;
+             DROP TRIGGER invalidate_space_delivery_summary_after_delete;
+             DROP TRIGGER invalidate_space_delivery_summary_after_update;
+             DROP TABLE group_update_source;
+             DROP TABLE group_update_delivery;
+             DELETE FROM __diesel_schema_migrations WHERE version = '20260913000003';",
+        )
+        .unwrap();
+    let mut control =
+        diesel::sqlite::SqliteConnection::establish(control_database.to_str().unwrap()).unwrap();
+    control
+        .batch_execute(
+            "DROP TRIGGER invalidate_admission_recovery_summary_after_delete;
+             DROP TRIGGER invalidate_admission_recovery_summary_after_update;
+             DROP TABLE admission_recovery_summary;
+             DROP TABLE admission_repository_record;
+             DELETE FROM __diesel_schema_migrations
+             WHERE version IN ('20260913000001', '20260913000002');",
+        )
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unreadable_admission_metadata_starts_restricted_recovery() {
+async fn healthy_legacy_v3_without_later_tables_starts_normally_and_preserves_state() {
+    let root = tempfile::tempdir().unwrap();
+    let storage = MemorySecureStorage::default();
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host(root.path(), Box::new(storage.clone())),
+    )
+    .await
+    .unwrap();
+    engine
+        .execute(Operation::CreateSpace(CreateSpaceInput {
+            device_name: Some("legacy upgrade test".into()),
+            passphrase: SecretString::new("test-passphrase"),
+            passphrase_confirmation: SecretString::new("test-passphrase"),
+        }))
+        .await
+        .unwrap();
+    let OperationResult::EntrySent(sent) = engine
+        .execute(Operation::SendText(SendTextInput {
+            text: "history retained through legacy upgrade".into(),
+            target_devices: Vec::new(),
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected saved history entry")
+    };
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+    drop(engine);
+
+    let (profile_database, control_database) = runtime_databases(root.path());
+    omit_later_runtime_tables(&profile_database, &control_database);
+
+    for restart in 0..2 {
+        let (input, progress) = StartupProgress::channel();
+        let (engine, _events) = Engine::start_with_progress(
+            EngineConfig::new("2.0.0"),
+            host(root.path(), Box::new(storage.clone())),
+            input,
+        )
+        .await
+        .expect("healthy legacy profile must start normally");
+        let snapshot = progress.snapshot();
+        assert_eq!(snapshot.state, StartupState::Ready);
+        if restart == 1 {
+            assert!(!snapshot
+                .upgrade
+                .as_ref()
+                .is_some_and(|upgrade| upgrade.required));
+        }
+        let OperationResult::HistoryEntries(entries) = engine
+            .execute(Operation::ListHistoryEntries(ListHistoryEntriesInput {
+                limit: 10,
+                offset: 0,
+            }))
+            .await
+            .unwrap()
+        else {
+            panic!("expected readable history")
+        };
+        assert!(entries.iter().any(|entry| entry.entry_id == sent.entry_id));
+        let OperationResult::DeviceGroupChoices(choices) = engine
+            .execute(Operation::QueryDeviceGroupChoices)
+            .await
+            .unwrap()
+        else {
+            panic!("expected readable member state")
+        };
+        assert_eq!(
+            choices.device_trust.local_membership,
+            DeviceMembershipSummary::Active
+        );
+        assert_eq!(choices.device_trust.devices.len(), 1);
+        engine.shutdown(Duration::from_secs(15)).await.unwrap();
+        drop(engine);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_table_compatibility_does_not_bypass_unreadable_admission_metadata() {
     let root = tempfile::tempdir().unwrap();
     let storage = MemorySecureStorage::default();
     let (engine, _events) = Engine::start(
@@ -31,13 +163,8 @@ async fn unreadable_admission_metadata_starts_restricted_recovery() {
     engine.shutdown(Duration::from_secs(15)).await.unwrap();
     drop(engine);
 
-    let generations = root.path().join("private/profile-data-generations");
-    let generation = std::fs::read_dir(generations)
-        .unwrap()
-        .map(Result::unwrap)
-        .find(|entry| entry.file_type().unwrap().is_dir())
-        .unwrap();
-    let database = generation.path().join("v3-payloads/profile.sqlite");
+    let (database, control_database) = runtime_databases(root.path());
+    omit_later_runtime_tables(&database, &control_database);
     let mut connection =
         diesel::sqlite::SqliteConnection::establish(database.to_str().unwrap()).unwrap();
     connection
