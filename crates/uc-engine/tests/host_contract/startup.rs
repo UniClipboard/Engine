@@ -24,6 +24,7 @@ mod control;
 
 #[path = "startup/admission_recovery.rs"]
 mod admission_recovery;
+pub(super) use admission_recovery::runtime_database;
 
 #[cfg(feature = "dev-tools")]
 #[path = "startup/failure.rs"]

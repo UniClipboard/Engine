@@ -94,14 +94,31 @@ impl From<PersistedSpaceAdmissionRepositoryV1> for PersistedSpaceAdmissionReposi
     }
 }
 
-pub(super) fn decode_repository(bytes: &[u8]) -> Option<PersistedSpaceAdmissionRepositoryV2> {
+#[derive(Debug, thiserror::Error)]
+pub(super) enum RepositoryDecodeError {
+    #[error("space admission repository payload cannot be decoded")]
+    InvalidEncoding {
+        #[source]
+        source: postcard::Error,
+    },
+    #[error("space admission repository format is unsupported")]
+    UnsupportedFormat,
+}
+
+pub(super) fn decode_repository(
+    bytes: &[u8],
+) -> Result<PersistedSpaceAdmissionRepositoryV2, RepositoryDecodeError> {
     if let Ok(current) = postcard::from_bytes::<PersistedSpaceAdmissionRepositoryV2>(bytes) {
         if current.format_version == SPACE_ADMISSION_REPOSITORY_FORMAT_V2 {
-            return Some(current);
+            return Ok(current);
         }
     }
-    let legacy = postcard::from_bytes::<PersistedSpaceAdmissionRepositoryV1>(bytes).ok()?;
-    (legacy.format_version == SPACE_ADMISSION_REPOSITORY_FORMAT_V1).then(|| legacy.into())
+    let legacy = postcard::from_bytes::<PersistedSpaceAdmissionRepositoryV1>(bytes)
+        .map_err(|source| RepositoryDecodeError::InvalidEncoding { source })?;
+    if legacy.format_version != SPACE_ADMISSION_REPOSITORY_FORMAT_V1 {
+        return Err(RepositoryDecodeError::UnsupportedFormat);
+    }
+    Ok(legacy.into())
 }
 
 #[cfg(test)]

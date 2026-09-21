@@ -139,7 +139,8 @@ fn map_state_error(error: SpaceAdmissionStateStoreError) -> JoinerCancellationSt
         SpaceAdmissionStateStoreError::Conflict => {
             JoinerCancellationStateError::state_changed(error)
         }
-        SpaceAdmissionStateStoreError::Corrupt | SpaceAdmissionStateStoreError::ReadInvalid(_) => {
+        SpaceAdmissionStateStoreError::Corrupt
+        | SpaceAdmissionStateStoreError::ReadInvalid { .. } => {
             JoinerCancellationStateError::recovery_required(error)
         }
         SpaceAdmissionStateStoreError::Unavailable => {

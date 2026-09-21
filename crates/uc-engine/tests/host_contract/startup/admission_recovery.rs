@@ -12,7 +12,7 @@ use uc_engine::{
 
 use super::{host, MemorySecureStorage};
 
-fn runtime_database(root: &Path, generation_directory: &str, relative: &str) -> PathBuf {
+pub(crate) fn runtime_database(root: &Path, generation_directory: &str, relative: &str) -> PathBuf {
     let databases = std::fs::read_dir(root.join("private").join(generation_directory))
         .unwrap()
         .map(Result::unwrap)

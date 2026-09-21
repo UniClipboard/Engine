@@ -26,6 +26,14 @@ const RECORD_LOOKUP_PURPOSE: &[u8] = b"space-admission-repository-record-lookup-
 const RECORD_CONTENT_PURPOSE: &[u8] = b"space-admission-repository-record-content-v3";
 const MAX_READ_CACHE_BYTES: usize = 128 * 1024 * 1024;
 
+#[derive(Debug, thiserror::Error)]
+enum RepositoryReadValidationError {
+    #[error("space admission repository generation or format does not match")]
+    GenerationMismatch,
+    #[error("space admission repository record relation is incomplete")]
+    RecordRelationIncomplete,
+}
+
 pub(super) struct RepositoryReadCache {
     key_binding: [u8; 32],
     ciphertext: Vec<u8>,
@@ -81,9 +89,10 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                 }
                 let current_legacy = self.open_legacy_state(&current.encrypted_payload)?;
                 self.persist_v3_state_on(conn, &current_legacy)
-                    .map_err(|_| {
-                        SpaceAdmissionStateStoreError::ReadInvalid(
+                    .map_err(|source| {
+                        SpaceAdmissionStateStoreError::read_invalid(
                             AdmissionReadFailureCategory::LegacyMigrationFailed,
+                            source,
                         )
                     })?;
                 self.clear_read_cache();
@@ -154,9 +163,10 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             Err(error) => return Err(map_key_error(error)),
         };
         let metadata = postcard::from_bytes::<PersistedSpaceAdmissionMetadataV3>(&plaintext)
-            .map_err(|_| {
-                SpaceAdmissionStateStoreError::ReadInvalid(
+            .map_err(|source| {
+                SpaceAdmissionStateStoreError::read_invalid(
                     AdmissionReadFailureCategory::CurrentMetadataInvalid,
+                    source,
                 )
             })?;
         self.validate_metadata(&metadata)?;
@@ -170,8 +180,9 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         if metadata.format_version != SPACE_ADMISSION_REPOSITORY_FORMAT_V3
             || metadata.profile_generation != self.keys.profile_generation()
         {
-            return Err(SpaceAdmissionStateStoreError::ReadInvalid(
+            return Err(SpaceAdmissionStateStoreError::read_invalid(
                 AdmissionReadFailureCategory::GenerationMismatch,
+                RepositoryReadValidationError::GenerationMismatch,
             ));
         }
         Ok(())
@@ -203,20 +214,24 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         }
         *cache = None;
         let plaintext = reader.open(encrypted).map_err(|error| match error {
-            AdmissionKeyError::Corrupt => SpaceAdmissionStateStoreError::ReadInvalid(
+            error @ AdmissionKeyError::Corrupt => SpaceAdmissionStateStoreError::read_invalid(
                 AdmissionReadFailureCategory::LegacyFallbackInvalid,
+                error,
             ),
             other => map_key_error(other),
         })?;
-        let state =
-            decode_repository(&plaintext).ok_or(SpaceAdmissionStateStoreError::ReadInvalid(
+        let state = decode_repository(&plaintext).map_err(|source| {
+            SpaceAdmissionStateStoreError::read_invalid(
                 AdmissionReadFailureCategory::LegacyFallbackInvalid,
-            ))?;
+                source,
+            )
+        })?;
         if state.format_version != SPACE_ADMISSION_REPOSITORY_FORMAT_V2
             || state.profile_generation != self.keys.profile_generation()
         {
-            return Err(SpaceAdmissionStateStoreError::ReadInvalid(
+            return Err(SpaceAdmissionStateStoreError::read_invalid(
                 AdmissionReadFailureCategory::GenerationMismatch,
+                RepositoryReadValidationError::GenerationMismatch,
             ));
         }
         if state
@@ -226,8 +241,9 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                 .latest_local_join_id
                 .is_some_and(|id| !state.records.contains_key(&id))
         {
-            return Err(SpaceAdmissionStateStoreError::ReadInvalid(
+            return Err(SpaceAdmissionStateStoreError::read_invalid(
                 AdmissionReadFailureCategory::RecordRelationIncomplete,
+                RepositoryReadValidationError::RecordRelationIncomplete,
             ));
         }
         let estimated_bytes = encrypted
@@ -261,8 +277,9 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         for row in rows {
             let record = self.open_v3_record_row(row)?;
             if records.insert(record.admission_id, record.stored).is_some() {
-                return Err(SpaceAdmissionStateStoreError::ReadInvalid(
+                return Err(SpaceAdmissionStateStoreError::read_invalid(
                     AdmissionReadFailureCategory::RecordRelationIncomplete,
+                    RepositoryReadValidationError::RecordRelationIncomplete,
                 ));
             }
         }
@@ -273,8 +290,9 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                 .latest_local_join_id
                 .is_some_and(|id| !records.contains_key(&id))
         {
-            return Err(SpaceAdmissionStateStoreError::ReadInvalid(
+            return Err(SpaceAdmissionStateStoreError::read_invalid(
                 AdmissionReadFailureCategory::RecordRelationIncomplete,
+                RepositoryReadValidationError::RecordRelationIncomplete,
             ));
         }
         Ok(PersistedSpaceAdmissionRepositoryV2 {
@@ -302,13 +320,17 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         .get_result::<EncryptedRecordRow>(conn)
         .optional()
         .map_err(|_| SpaceAdmissionStateStoreError::Unavailable)?
-        .ok_or(SpaceAdmissionStateStoreError::ReadInvalid(
-            AdmissionReadFailureCategory::RecordRelationIncomplete,
-        ))?;
+        .ok_or_else(|| {
+            SpaceAdmissionStateStoreError::read_invalid(
+                AdmissionReadFailureCategory::RecordRelationIncomplete,
+                RepositoryReadValidationError::RecordRelationIncomplete,
+            )
+        })?;
         let record = self.open_v3_record_row(row)?;
         if record.admission_id != admission_id {
-            return Err(SpaceAdmissionStateStoreError::ReadInvalid(
+            return Err(SpaceAdmissionStateStoreError::read_invalid(
                 AdmissionReadFailureCategory::RecordRelationIncomplete,
+                RepositoryReadValidationError::RecordRelationIncomplete,
             ));
         }
         Ok(record.stored)
@@ -329,22 +351,28 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             reader
                 .open_compact(&row.encrypted_payload)
                 .map_err(|error| match error {
-                    AdmissionKeyError::Corrupt => SpaceAdmissionStateStoreError::ReadInvalid(
-                        AdmissionReadFailureCategory::RecordRelationIncomplete,
-                    ),
+                    error @ AdmissionKeyError::Corrupt => {
+                        SpaceAdmissionStateStoreError::read_invalid(
+                            AdmissionReadFailureCategory::RecordRelationIncomplete,
+                            error,
+                        )
+                    }
                     other => map_key_error(other),
                 })?;
-        let record =
-            postcard::from_bytes::<PersistedSpaceAdmissionRecordV3>(&plaintext).map_err(|_| {
-                SpaceAdmissionStateStoreError::ReadInvalid(
+        let record = postcard::from_bytes::<PersistedSpaceAdmissionRecordV3>(&plaintext).map_err(
+            |source| {
+                SpaceAdmissionStateStoreError::read_invalid(
                     AdmissionReadFailureCategory::RecordRelationIncomplete,
+                    source,
                 )
-            })?;
+            },
+        )?;
         let lookup_token = self.record_lookup_token(record.admission_id)?;
         let content_token = self.record_content_token(&plaintext)?;
         if row.lookup_token != lookup_token || row.content_token != content_token {
-            return Err(SpaceAdmissionStateStoreError::ReadInvalid(
+            return Err(SpaceAdmissionStateStoreError::read_invalid(
                 AdmissionReadFailureCategory::RecordRelationIncomplete,
+                RepositoryReadValidationError::RecordRelationIncomplete,
             ));
         }
         Ok(record)
@@ -523,26 +551,28 @@ fn load_repository_row(
 pub(in crate::space::admission) fn map_executor_error(
     error: anyhow::Error,
 ) -> SpaceAdmissionStateStoreError {
-    error
-        .downcast_ref::<SpaceAdmissionStateStoreError>()
-        .copied()
-        .unwrap_or(SpaceAdmissionStateStoreError::Unavailable)
+    match error.downcast::<SpaceAdmissionStateStoreError>() {
+        Ok(error) => error,
+        Err(_) => SpaceAdmissionStateStoreError::Unavailable,
+    }
 }
 
 pub(in crate::space::admission) fn into_anyhow(
     error: SpaceAdmissionStateStoreError,
 ) -> anyhow::Error {
-    anyhow::anyhow!(error)
+    anyhow::Error::new(error)
 }
 
 pub(super) fn map_key_error(error: AdmissionKeyError) -> SpaceAdmissionStateStoreError {
     match error {
         AdmissionKeyError::SecureStorage => SpaceAdmissionStateStoreError::Locked,
-        AdmissionKeyError::Missing => SpaceAdmissionStateStoreError::ReadInvalid(
+        error @ AdmissionKeyError::Missing => SpaceAdmissionStateStoreError::read_invalid(
             AdmissionReadFailureCategory::CredentialMissing,
+            error,
         ),
-        AdmissionKeyError::OpenFailed => SpaceAdmissionStateStoreError::ReadInvalid(
+        error @ AdmissionKeyError::OpenFailed => SpaceAdmissionStateStoreError::read_invalid(
             AdmissionReadFailureCategory::AuthenticationMismatch,
+            error,
         ),
         AdmissionKeyError::Corrupt => SpaceAdmissionStateStoreError::Corrupt,
     }

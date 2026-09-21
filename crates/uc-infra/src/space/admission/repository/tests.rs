@@ -516,9 +516,10 @@ fn repository_reads_reject_changed_key_and_corrupted_ciphertext() {
     fixture.storage.set(key_name, &[0x99; 32]).unwrap();
     assert!(matches!(
         fixture.repository.load_state_on(&mut fixture.connection),
-        Err(SpaceAdmissionStateStoreError::ReadInvalid(
-            AdmissionReadFailureCategory::AuthenticationMismatch
-        ))
+        Err(SpaceAdmissionStateStoreError::ReadInvalid {
+            category: AdmissionReadFailureCategory::AuthenticationMismatch,
+            ..
+        })
     ));
     assert!(fixture.repository.read_cache.lock().unwrap().is_none());
     fixture.storage.set(key_name, &original_key).unwrap();
@@ -534,9 +535,10 @@ fn repository_reads_reject_changed_key_and_corrupted_ciphertext() {
         .unwrap();
     assert!(matches!(
         fixture.repository.load_state_on(&mut fixture.connection),
-        Err(SpaceAdmissionStateStoreError::ReadInvalid(
-            AdmissionReadFailureCategory::LegacyFallbackInvalid
-        ))
+        Err(SpaceAdmissionStateStoreError::ReadInvalid {
+            category: AdmissionReadFailureCategory::LegacyFallbackInvalid,
+            ..
+        })
     ));
     assert!(fixture.repository.read_cache.lock().unwrap().is_none());
 }

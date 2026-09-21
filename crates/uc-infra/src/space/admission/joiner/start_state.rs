@@ -160,7 +160,8 @@ fn map_joiner_error(error: SpaceAdmissionStateStoreError) -> JoinerStartStateErr
     match error {
         SpaceAdmissionStateStoreError::Locked => JoinerStartStateError::Locked,
         SpaceAdmissionStateStoreError::Conflict => JoinerStartStateError::StateChanged,
-        SpaceAdmissionStateStoreError::Corrupt | SpaceAdmissionStateStoreError::ReadInvalid(_) => {
+        SpaceAdmissionStateStoreError::Corrupt
+        | SpaceAdmissionStateStoreError::ReadInvalid { .. } => {
             JoinerStartStateError::RecoveryRequired
         }
         SpaceAdmissionStateStoreError::Unavailable => JoinerStartStateError::Unavailable,

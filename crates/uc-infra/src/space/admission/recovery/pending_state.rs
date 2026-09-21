@@ -234,7 +234,7 @@ fn recovery_commit_token(
 
 fn map_recovery_error(error: SpaceAdmissionStateStoreError) -> PendingAdmissionRecoveryStateError {
     match error {
-        SpaceAdmissionStateStoreError::ReadInvalid(_) => {
+        SpaceAdmissionStateStoreError::ReadInvalid { .. } => {
             PendingAdmissionRecoveryStateError::ReadFailure {
                 category: error.read_category(),
                 source: anyhow::Error::new(error),

@@ -263,6 +263,18 @@ impl RecoverableRuntime {
                         {
                             Ok(runtime) => Arc::new(runtime),
                             Err(error) => {
+                                if let Some(admission) = error.admission_recovery() {
+                                    bootstrap.progress.recovery_available();
+                                    let summary = admission_summary(admission.clone());
+                                    let restricted = recovery_unavailable()
+                                        .with_admission_recovery(admission.clone());
+                                    *bootstrap.lock_summary() = summary.clone();
+                                    *self.mode.write().await =
+                                        RuntimeMode::AdmissionRecovery(admission);
+                                    self.events
+                                        .send(EngineEvent::ProfileRecoveryChanged(summary));
+                                    return Err(restricted);
+                                }
                                 self.publish_restart_required(&bootstrap);
                                 return Err(restart_required_error(error));
                             }

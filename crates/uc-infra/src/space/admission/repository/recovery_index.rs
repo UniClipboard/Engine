@@ -18,6 +18,14 @@ const RECOVERY_SUMMARY_FORMAT_V2: u16 = 2;
 const RECOVERY_INDEX_BATCH_SIZE: i32 = 64;
 const RECOVERY_SUMMARY_MARKER: [u8; 8] = *b"UCARSV2\0";
 
+#[derive(Debug, thiserror::Error)]
+enum RecoverySummaryValidationError {
+    #[error("space admission recovery summary does not match its record")]
+    RecordMismatch,
+    #[error("space admission recovery summary format is invalid")]
+    InvalidFormat,
+}
+
 #[derive(QueryableByName)]
 struct RecoverySummaryRow {
     #[diesel(sql_type = Binary)]
@@ -220,8 +228,9 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                         || self.record_lookup_token(summary.admission_id)?.as_slice()
                             != row.lookup_token.as_slice()
                     {
-                        return Err(SpaceAdmissionStateStoreError::ReadInvalid(
+                        return Err(SpaceAdmissionStateStoreError::read_invalid(
                             AdmissionReadFailureCategory::DerivedSummaryInvalid,
+                            RecoverySummaryValidationError::RecordMismatch,
                         ));
                     }
                     if let Some(deadline) =
@@ -291,9 +300,10 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             .map_err(map_key_error)?
             .open_compact(encrypted)
             .map_err(|error| match error {
-                AdmissionKeyError::Corrupt | AdmissionKeyError::OpenFailed => {
-                    SpaceAdmissionStateStoreError::ReadInvalid(
+                error @ (AdmissionKeyError::Corrupt | AdmissionKeyError::OpenFailed) => {
+                    SpaceAdmissionStateStoreError::read_invalid(
                         AdmissionReadFailureCategory::DerivedSummaryInvalid,
+                        error,
                     )
                 }
                 other => map_key_error(other),
@@ -304,15 +314,17 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             {
                 return Ok(Some(summary));
             }
-            return Err(SpaceAdmissionStateStoreError::ReadInvalid(
+            return Err(SpaceAdmissionStateStoreError::read_invalid(
                 AdmissionReadFailureCategory::DerivedSummaryInvalid,
+                RecoverySummaryValidationError::InvalidFormat,
             ));
         }
         postcard::from_bytes::<LegacyRecoverySummaryV1>(&plaintext)
             .map(|_| None)
-            .map_err(|_| {
-                SpaceAdmissionStateStoreError::ReadInvalid(
+            .map_err(|source| {
+                SpaceAdmissionStateStoreError::read_invalid(
                     AdmissionReadFailureCategory::DerivedSummaryInvalid,
+                    source,
                 )
             })
     }

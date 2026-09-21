@@ -516,7 +516,8 @@ async fn admission_read_distinguishes_missing_and_mismatched_credential() {
         missing.category(),
         AdmissionReadFailureCategory::CredentialMissing
     );
-    assert!(std::error::Error::source(&missing).is_some());
+    let missing_source = std::error::Error::source(&missing).expect("store error source");
+    assert!(missing_source.source().is_some(), "credential source chain");
     assert!(fixture.secure_storage.get(key).unwrap().is_none());
 
     fixture.secure_storage.set(key, &[0x99; 32]).unwrap();
@@ -532,7 +533,11 @@ async fn admission_read_distinguishes_missing_and_mismatched_credential() {
         mismatch.category(),
         AdmissionReadFailureCategory::AuthenticationMismatch
     );
-    assert!(std::error::Error::source(&mismatch).is_some());
+    let mismatch_source = std::error::Error::source(&mismatch).expect("store error source");
+    assert!(
+        mismatch_source.source().is_some(),
+        "authentication source chain"
+    );
     fixture.secure_storage.set(key, &original).unwrap();
     assert!(PendingAdmissionRecoveryStatePort::load(
         &fixture.reopen(),
@@ -560,6 +565,8 @@ async fn admission_read_rejects_missing_record_and_corrupt_summary() {
         missing.category(),
         AdmissionReadFailureCategory::RecordRelationIncomplete
     );
+    let missing_source = std::error::Error::source(&missing).expect("store error source");
+    assert!(missing_source.source().is_some(), "record source chain");
 
     let fixture = Fixture::new();
     commit_fresh_join(&fixture, 0xb7, 0xb8).await;
@@ -584,6 +591,8 @@ async fn admission_read_rejects_missing_record_and_corrupt_summary() {
         summary.category(),
         AdmissionReadFailureCategory::DerivedSummaryInvalid
     );
+    let summary_source = std::error::Error::source(&summary).expect("store error source");
+    assert!(summary_source.source().is_some(), "summary source chain");
 }
 
 #[tokio::test]
