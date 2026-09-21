@@ -14,6 +14,9 @@ use crate::space::membership::{
     RecoverSpaceAdmissionsPort,
 };
 
+#[path = "stage2_scenarios.rs"]
+mod stage2_scenarios;
+
 #[tokio::test]
 async fn candidate_abandonment_is_saved_before_reply_and_duplicate_replays_it() {
     let pair = SpaceAdmissionProtocolTestPair::fresh().await;

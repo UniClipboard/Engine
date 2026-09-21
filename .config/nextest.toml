@@ -33,7 +33,17 @@ filter = "package(uc-testkit)"
 test-group = "fast"
 slow-timeout = { period = "2s", terminate-after = 1 }
 
+[[profile.default.overrides]]
+filter = "package(uc-application) & test(stage2)"
+test-group = "fast"
+slow-timeout = { period = "2s", terminate-after = 1 }
+
 [[profile.ci.overrides]]
 filter = "package(uc-testkit)"
+test-group = "fast"
+slow-timeout = { period = "2s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-application) & test(stage2)"
 test-group = "fast"
 slow-timeout = { period = "2s", terminate-after = 1 }

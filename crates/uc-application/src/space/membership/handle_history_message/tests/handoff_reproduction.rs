@@ -5,6 +5,9 @@ use crate::space::membership::{
     ResolveMembershipConflictResult, ResolveMembershipConflictUseCase,
 };
 
+#[path = "handoff_reproduction/stage2_scenario.rs"]
+mod stage2_scenario;
+
 struct QueryStatus;
 
 #[async_trait]

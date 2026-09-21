@@ -1717,6 +1717,20 @@ impl SpaceAdmissionProtocolTestPair {
         Self::with_mode_and_start_material(current_join, TransportMode::DeferInitial, 0x21).await
     }
 
+    pub(super) async fn reopen_receiving_complete(current_join: JoinerAdmission) -> Self {
+        let pair = Self::with_mode(
+            None,
+            TransportMode::AuthenticateThenCandidateCommitAndComplete,
+        )
+        .await;
+        *pair
+            .state
+            .created_join
+            .lock()
+            .expect("created join is available") = Some(current_join);
+        pair
+    }
+
     async fn with_mode(current_join: Option<JoinerAdmission>, mode: TransportMode) -> Self {
         Self::with_mode_and_start_material(current_join, mode, 0x11).await
     }
