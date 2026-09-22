@@ -81,7 +81,7 @@
 4. 将 profile storage upgrade 代表场景改用该能力，不改变原退出码与持久恢复断言。
 5. 编写测试指南和采用清单，逐条执行指南命令。
 6. 运行 testkit、代表 process/provider/Application evidence、旧 cargo test 入口和仓库静态检查。
-7. 更新稳定设计、架构圣经、计划进度和 Herdr 报告；branch guard 后推送同一 draft PR。
+7. 更新测试架构、测试指南、采用清单、计划进度和 Herdr 报告；branch guard 后推送同一 draft PR。
 8. 将用户确认的 Engine-only 双运行线、首批五类、速度与报告标准回写长期路线；不在本计划提前实现完整多节点或 nightly 平台。
 
 ## 7. 验收标准

@@ -25,7 +25,7 @@ description: "独立审查 UniClipboardEngine 的调用者复杂度、模块深�
 - `docs/design-docs/engineering-principles.md`
 - `docs/design-docs/ports.md`
 - `docs/design-docs/uc-engine-interface.md`
-- `docs/architecture/architecture-bible.md`
+- `ARCHITECTURE.md`
 - `docs/PLANS.md`，仅用于识别已声明技术债
 
 文档与代码不一致时，以当前代码行为作为实现证据，以长期设计文档作为规则依据，并明确记录差异。执行计划不是当前事实。

@@ -8,7 +8,7 @@
 - **相关文档**：`docs/design-docs/decisions/016-workspace-wide-convergence.md`、
   `docs/design-docs/decisions/020-membership-reconciliation-and-user-decisions.md`、
   `docs/design-docs/features/019-device-specific-convergence-waiting-status.md`、
-  `docs/architecture/architecture-bible.md`
+  `ARCHITECTURE.md`
 
 ## 背景
 

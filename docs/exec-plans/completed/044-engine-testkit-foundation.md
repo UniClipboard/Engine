@@ -51,7 +51,7 @@ tests/uc-testkit/
 scripts/testing/run-test-group.sh
 .github/workflows/pr-check.yml
 docs/design-docs/testing-architecture.md
-docs/architecture/architecture-bible.md
+docs/design-docs/testing-guide.md
 ```
 
 模块职责以设计文档为准。本轮若实现中证明可以合并文件，应以最少清晰模块为准，不为了目录形状制造转发层。
@@ -70,7 +70,7 @@ docs/architecture/architecture-bible.md
 
 - [x] 阅读架构、文档规则、规格 034 和 0040 报告。
 - [x] 确认 `CONTEXT.md` 缺失并记录，不猜测。
-- [x] 完成设计文档、执行计划、索引和架构圣经记录。
+- [x] 完成测试架构、执行计划、索引和对应主题文档记录。
 - [x] 运行 Markdown 链接和 `git diff --check` 自检。
 
 出口：另一个未参与调查的开发者只读两份文档即可实现；明确不迁移 t-0010。
@@ -149,7 +149,7 @@ docs/architecture/architecture-bible.md
 | 日期 | 阶段 | 结果 |
 | --- | --- | --- |
 | 2026-09-21 | Phase 0 输入 | 完成；仓库未找到 `CONTEXT.md`，本机未安装 cargo-nextest。 |
-| 2026-09-21 | Phase 0 规格 | 完成；设计、执行计划、索引、架构圣经和 Markdown 链接自检通过。 |
+| 2026-09-21 | Phase 0 规格 | 完成；设计、执行计划、索引、对应主题文档和 Markdown 链接自检通过。 |
 | 2026-09-21 | Phase 1-2 | 完成；`cargo test -p uc-testkit --locked` 3 项通过，成功与故意失败示范均生成 JSON/摘要；故意失败约 47 ms。 |
 | 2026-09-21 | Phase 3 | 完成；固定 cargo-nextest `0.9.145`，`fast` 运行 3 项并生成 JUnit，完整统一入口约 1.7 秒。 |
 | 2026-09-21 | Phase 4 | 完成配置；PR workflow 新增独立 `testkit` job，远程 CI 未触发。 |

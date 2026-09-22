@@ -85,7 +85,7 @@
 
 - [x] 运行 testkit、自身采用场景、相关旧测试、`uc-infra` 相关 integration test 与旧 cargo test 入口。
 - [x] 运行 workspace all-target check、fmt、Rust style、Engine repository、隐私和 diff check。
-- [x] 更新测试架构、架构圣经、本文和 Herdr 报告；创建范围清晰的本地原子提交，不推送。
+- [x] 更新测试架构、测试指南、本文和 Herdr 报告；创建范围清晰的本地原子提交，不推送。
 
 ## 7. 验收标准
 

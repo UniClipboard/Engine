@@ -5,7 +5,7 @@
 - **取代**：ADR-021 的渐进整理方式与规格 024 的实施顺序
 - **保留**：ADR-020、ADR-022、ADR-023、ADR-024 已固定的业务和安全决定
 - **相关文档**：`docs/exec-plans/completed/027-application-space-membership-one-shot-rewrite.md`、
-  `docs/architecture/architecture-bible.md`
+  `ARCHITECTURE.md`
 
 ## 背景
 

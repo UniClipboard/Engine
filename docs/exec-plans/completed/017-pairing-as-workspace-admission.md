@@ -151,4 +151,4 @@ ADR-017 已实施的部分仅是：配对不再作为对外独立成功流程，
 - [ADR-017：配对作为工作空间内部的准入通道](../../design-docs/decisions/017-pairing-as-workspace-admission.md)
 - [ADR-020：设备上线核对成员历史，未确认的移除由用户决定](../../design-docs/decisions/020-membership-reconciliation-and-user-decisions.md)
 - [规格 022：当前成员运行范围统一派生](../../design-docs/current-member-runtime-scope.md)
-- [架构总览](../../architecture/architecture-bible.md)
+- [当前架构入口](../../../ARCHITECTURE.md)
