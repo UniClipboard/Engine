@@ -221,6 +221,9 @@ async fn peer_address_failures_export_stable_categories_and_real_stack_symbols()
         "storage": storage,
         "unknown": unknown,
     });
+    let expected_stack_mode =
+        std::env::var("UC_EXPECT_DIAGNOSTIC_STACK").unwrap_or_else(|_| "captured".to_owned());
+    let mut unresolved_count = 0;
     for (name, category, stage) in [
         ("locked", "locked", "key_derivation"),
         (
@@ -244,10 +247,47 @@ async fn peer_address_failures_export_stable_categories_and_real_stack_symbols()
             row["error.chain"],
             json!(["peer_address_repository", "relationship_store", category])
         );
-        assert_eq!(row["error.stack_status"], "captured");
-        assert!(row["error.stack"]
-            .as_array()
-            .is_some_and(|stack| !stack.is_empty()));
+        let stack_status = row["error.stack_status"]
+            .as_str()
+            .expect("stack status string");
+        if expected_stack_mode == "captured" {
+            assert_eq!(stack_status, "captured");
+        } else {
+            assert_eq!(expected_stack_mode, "release");
+            assert!(matches!(stack_status, "captured" | "unresolved"));
+        }
+        let stack = row["error.stack"].as_array().expect("stack array");
+        if stack_status == "captured" {
+            assert!(!stack.is_empty());
+            assert!(stack.iter().any(|frame| {
+                frame.as_str().is_some_and(|frame| {
+                    frame.contains("relationship_store")
+                        || frame.contains("peer_address_repo")
+                        || frame.contains("decode_peer_address")
+                        || frame.contains("load_envelope")
+                        || frame.contains("get_payload")
+                        || frame.contains("get_peer_address")
+                        || frame.contains("ready_cipher")
+                        || frame.contains("key_derivation")
+                })
+            }));
+            assert!(stack.iter().all(|frame| {
+                frame.as_str().is_some_and(|frame| {
+                    !frame.contains("std::backtrace")
+                        && !frame.contains("backtrace_rs")
+                        && !frame.contains("sanitized_backtrace")
+                })
+            }));
+        } else {
+            unresolved_count += 1;
+            assert!(stack.is_empty());
+        }
+    }
+    if expected_stack_mode == "release" {
+        assert!(
+            unresolved_count > 0,
+            "release validation must exercise symbol loss"
+        );
     }
     if let Ok(path) = std::env::var("UC_PEER_ADDRESS_DIAGNOSTIC_ARTIFACT") {
         std::fs::write(

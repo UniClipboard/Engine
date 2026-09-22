@@ -58,4 +58,5 @@
 - peer-address 读取失败在 `EncryptedRelationshipStore` 首次可证明原因处分类并保留 source；`PeerAddressError` 只跨层携带稳定类别、阶段和 source，不携带观测栈。
 - `address.record.read_failed` 保持原事件名，并新增固定诊断字段。动态错误正文、SQL、地址、标识和源码路径不进入导出。
 - 隔离端到端测试覆盖 `storage`、`locked`、`authentication`、`unsupported_version`、`payload_decode` 和 `unknown`，并生成 `.herdr-project/uni-t-0045/library/peer-address-read-diagnostics.json`。
-- 相关仓储回归、观测合同、workspace check、格式、架构、隐私和 diff 检查通过；物理设备与发布构建均未执行。
+- 栈过滤会丢弃 backtrace 捕获器自身、源码位置和无关运行时帧；只有实际捕获到关系存储或 peer-address 仓储符号时才标记 `captured`。本机 `--release` 隔离验证中三类保留业务符号，三类因优化后符号不足输出空栈和 `unresolved`。
+- 相关仓储回归、观测合同、workspace check、格式、架构、隐私和 diff 检查通过；已执行本机 Cargo release 隔离验证，物理设备与正式产品发布构建均未执行。

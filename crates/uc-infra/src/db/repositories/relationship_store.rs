@@ -1,4 +1,4 @@
-use std::backtrace::Backtrace;
+use std::backtrace::{Backtrace, BacktraceStatus};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -83,14 +83,44 @@ impl RelationshipStoreError {
 }
 
 fn sanitized_backtrace() -> Vec<String> {
-    Backtrace::force_capture()
+    let backtrace = Backtrace::force_capture();
+    if backtrace.status() != BacktraceStatus::Captured {
+        return Vec::new();
+    }
+    backtrace
         .to_string()
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with("at "))
+        .filter(|line| is_relationship_diagnostic_frame(line))
         .take(8)
         .map(|line| line.chars().take(160).collect())
         .collect()
+}
+
+fn is_relationship_diagnostic_frame(line: &str) -> bool {
+    if line.is_empty()
+        || line.starts_with("at ")
+        || line.contains("std::backtrace")
+        || line.contains("backtrace_rs")
+        || line.contains("sanitized_backtrace")
+        || line.contains("RelationshipStoreError::diagnostic")
+    {
+        return false;
+    }
+    [
+        "relationship_store::RelationshipCipher::open",
+        "relationship_store::EncryptedRelationshipStore",
+        "relationship_store::decode_peer_address",
+        "peer_address_repo::DieselPeerAddressRepository",
+        "decode_peer_address",
+        "load_envelope",
+        "get_payload",
+        "get_peer_address",
+        "ready_cipher",
+        "key_derivation",
+    ]
+    .iter()
+    .any(|marker| line.contains(marker))
 }
 
 #[derive(Clone, Copy)]
