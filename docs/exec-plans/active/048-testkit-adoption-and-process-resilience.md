@@ -10,6 +10,7 @@
 - 失败结果：产品、环境、driver、framework 与 cleanup 失败保持稳定分类，原始失败不被清理失败覆盖
 - 重试责任：testkit 不重试；nextest 默认不重试，长期环境型任务只有明确策略时才记录一次 retry
 - 恢复责任：测试进程由 nextest 终止；testkit 启动的子进程由 testkit 在预算内 kill 并 wait，产品恢复仍由原业务负责人处理
+- 长期路线：[Engine 测试架构](../../design-docs/testing-architecture.md) 是唯一长期路线图；本计划只交付首次采用与进程韧性切片，不替代 034 或真实环境 nightly
 
 ## 1. 问题与目标
 
@@ -81,6 +82,7 @@
 5. 编写测试指南和采用清单，逐条执行指南命令。
 6. 运行 testkit、代表 process/provider/Application evidence、旧 cargo test 入口和仓库静态检查。
 7. 更新稳定设计、架构圣经、计划进度和 Herdr 报告；branch guard 后推送同一 draft PR。
+8. 将用户确认的 Engine-only 双运行线、首批五类、速度与报告标准回写长期路线；不在本计划提前实现完整多节点或 nightly 平台。
 
 ## 7. 验收标准
 
@@ -94,6 +96,7 @@
 - [x] 047 已完成事实与长期趋势待办准确分开。
 - [x] 旧 cargo test、旧测试和原 CI 门禁保持；产品公开接口和行为不变。
 - [ ] PR #113 保持 draft；推送后非发布检查终态与远程工件仍待核验。
+- [x] 长期路线明确 kit 首版与全仓迁移的区别，并与 034、044-047 建立唯一关系。
 
 ## 8. 回退
 
@@ -114,3 +117,4 @@
 | 2026-09-22 | schema v2 工件已核对成功、driver、产品、环境和 cleanup 分类；三个采用调用方移除手工 `process-<pid>` 根目录，隔离责任收回 testkit。 |
 | 2026-09-22 | 指南命令实跑：fast 7/7（0.148 秒测试，1.95 秒墙钟）、evidence 14/14（warm 2.039 秒测试，5.34 秒墙钟）、persistence-provider 49/49（4.313 秒测试，5.58 秒墙钟）、engine-smoke 48/48、process 23/23（5 项 slow）。 |
 | 2026-09-22 | metadata 0.55 秒、workspace all-target check 50.35 秒；fmt、Rust style、Engine repository、observability privacy、diff check 通过。远程 draft PR 检查待推送后验证。 |
+| 2026-09-22 | 首个实施切片以 `ebb459ff` 推送：首次使用指南、采用清单、并行工件隔离、有界子进程及分组入口完成；PR #113 保持 draft。长期路线随后收敛到 `testing-architecture.md`，不新增重复计划。 |

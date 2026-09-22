@@ -23,13 +23,17 @@
 
 ## 优先评估采用
 
-按“失败诊断收益 / 迁移成本”排序，每次只迁移一个代表场景并与旧入口双轨：
+长期首批业务覆盖固定为配对、文字和文件传输、断线重连、重启恢复、旧资料升级。按“失败诊断收益 / 迁移成本”
+排序，每次只迁移一个代表场景并与旧入口双轨：
 
 1. `crates/uc-observability-runtime/tests/collector_slow.rs`、`collector_unavailable.rs`、`collector_tls_failure.rs`：已有真实 loopback/provider 失败，适合统一预算、端口和环境失败证据。
 2. `crates/uc-engine/tests/host_contract/startup/crash.rs` 与 `failure.rs`：包含进程/启动失败边界，适合复用有界进程与 cleanup 报告；不得改变 host contract 断言。
 3. `crates/uc-infra/tests/node_lifecycle.rs`：真实 runtime 生命周期和临时资源较多，适合先选一个关闭/超时 case，不迁移整文件。
 4. `crates/uc-application/tests/file_transfer/shutdown.rs`：有异步关闭与资源等待，适合事件驱动等待和阶段证据；业务流程继续由 Application 负责人拥有。
 5. 其他包含独立进程、多个临时目录、端口或重复手写等待的 integration test：先用实际失败或慢测证据证明收益后再进入清单。
+
+034 的首个多节点切片应从上述五类中选择已有慢测或不稳定证据最充分的一项；不因路线图存在而批量重写简单
+测试。t-0010 等活跃修复中的测试在其工作结束前不进入迁移清单。
 
 ## 保留真实网络与设备入口
 
@@ -39,6 +43,9 @@
 - `crates/uc-engine/tests/space_membership_auto_pairing_e2e.rs`：真实 Engine/Iroh 多节点链路；后续只下沉可确定性证明的业务规则，保留最小真实链路矩阵。
 - `crates/uc-infra/tests/iroh_*_probe.rs` 与真实 Iroh node/provider 探针：保留实际 transport 合同。
 - `tests/hosts/android/`、`tests/hosts/ios/`、`tests/hosts/ohos/`：绑定、安装、启动和设备行为；必须按平台分别报告。
+
+真实环境线后续以 nightly 和 `workflow_dispatch` 单场景运行；先证明本机真实 Engine 多进程和独立资料，再进入
+隔离网络。mock/provider 错误不能登记为断网通过。发布前应读取近期 nightly，并补跑受变更影响的关键场景。
 
 ## 迁移准入
 

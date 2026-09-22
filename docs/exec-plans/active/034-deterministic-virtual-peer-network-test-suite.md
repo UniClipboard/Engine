@@ -10,6 +10,7 @@
 - **成功结果**：在给定 round/frame 预算内得到满足断言的 `VirtualTopologySnapshot` 和可复现脱敏 trace
 - **失败结果**：返回稳定的测试失败分类，并附最后一段脱敏 trace；不得依赖 wall-clock 超时推断原因
 - **重试与重启责任**：Application 生产负责人继续拥有持久欠账和恢复；virtual topology 只驱动逻辑时间、maintenance round 与节点重建，不复制重试规则
+- **长期路线关系**：本计划是 [Engine 测试架构](../../design-docs/testing-architecture.md) 中快速确定性线的多节点实现专项；首个切片从配对、传输、断线重连、重启恢复、旧资料升级五类中选择一个最慢或最不稳定代表场景，不另建并行路线图
 
 # 1. Overview
 
@@ -58,6 +59,8 @@ nightly/release slow lane。
 - 不用 in-memory repository 替代真实 SQLite 原子性、密文持久化或 control-generation 崩溃恢复证据。
 - 不用授权矩阵替代 exact text、密文和错误密钥的真实数据面验证。
 - 不顺便迁移现有 port 所有权，不清理与本规格无关的单元测试 fake。
+- 不承担真实网络、真实 relay 或设备通过；这些由 nightly/手工真实环境线保留。
+- 不要求所有真实环境场景与 virtual fixture 共用同一套场景实现，只要求覆盖映射和最终业务结果可对照。
 
 # 4. Current Architecture Context
 
