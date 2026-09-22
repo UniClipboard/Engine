@@ -9,6 +9,7 @@
 | testkit 自身、成功/受控失败、并行工件、进程超时 | `tests/uc-testkit/` | fast | JSON、摘要、JUnit |
 | 五个确定性成员恢复场景 | `crates/uc-application/src/space/` 对应领域测试 | fast/evidence | 固定 seed、公开终态、阶段与复现命令 |
 | 两节点成员历史分区与恢复 | `crates/uc-application/src/space/membership/testing/virtual_membership_network.rs` | fast/evidence | 真实 Application endpoint、frame 预算、脱敏 trace；仅为配对后收敛基础 |
+| 真实 Engine 完整配对与文字传输 | `scripts/testing/connection-recovery-network.mjs` 的 `E01`/`E02` | real-network/nightly | 独立进程、profile、身份、端口与 namespace；公开 setup/eligibility/peer/history 终态和 cleanup 证据 |
 | rendezvous provider 正常/无效/暂时失败 | `crates/uc-infra/src/rendezvous/invitation_adapter.rs` | persistence-provider/evidence | 产品、环境、清理分类 |
 | profile storage upgrade 崩溃恢复 | `crates/uc-infra/tests/profile_storage_upgrade_crash.rs` | process/evidence | 子进程退出、持久恢复、资源回收 |
 
@@ -33,9 +34,10 @@
 4. `crates/uc-application/tests/file_transfer/shutdown.rs`：有异步关闭与资源等待，适合事件驱动等待和阶段证据；业务流程继续由 Application 负责人拥有。
 5. 其他包含独立进程、多个临时目录、端口或重复手写等待的 integration test：先用实际失败或慢测证据证明收益后再进入清单。
 
-034 的首个多节点基础切片已覆盖配对完成后的成员历史分区与恢复，但尚未覆盖完整邀请和准入。后续仍应从上述五类
-中选择已有慢测或不稳定证据最充分的一项；不因路线图存在而批量重写简单测试。t-0010 等活跃修复中的测试在其
-工作结束前不进入迁移清单。
+034 的快速切片已覆盖配对完成后的成员历史分区与恢复；真实环境线复用既有 runner，将完整邀请/准入和双向 exact
+text 登记为 E01/E02。文件传输尚未接入 connectivity host，不能由文字场景替代；重连复用 E03/E04/E06/E10/E13，
+重启复用 E11/E12，旧资料升级复用既有 profile upgrade tests 后再补真实 nightly 映射。后续只补真实缺口，不因
+路线图存在而批量重写简单测试。t-0010 等活跃修复中的测试在其工作结束前不进入迁移清单。
 
 ## 保留真实网络与设备入口
 

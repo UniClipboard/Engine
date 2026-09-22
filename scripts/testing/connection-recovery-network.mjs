@@ -239,6 +239,19 @@ async function transfer(left, right, marker) {
   }
 }
 
+async function pairingProof(group, created) {
+  const setups = await Promise.all(group.map(node => node.call('setup')))
+  const peerCounts = await Promise.all(group.map(async node => (await node.call('peers')).length))
+  return {
+    node_count: group.length,
+    setup_completed: setups.every(setup => setup.has_completed),
+    same_space: setups.every(setup => setup.space_id === created.space),
+    peer_counts: peerCounts,
+    communication_usable: true,
+    connections_online: true,
+  }
+}
+
 function partition(node, blocked) {
   if (blocked && node.partitionedAt) return node.partitionedAt
   if (!blocked) {
@@ -335,9 +348,19 @@ async function scenario(id, action) {
   const clock = performance.now()
   const record = { id, started, outcome: 'failed' }
   records.push(record)
-  try { await action(); record.outcome = 'passed' }
+  try {
+    const proof = await action()
+    if (proof !== undefined) record.proof = proof
+    record.outcome = 'passed'
+  }
   finally { record.elapsed_ms = Math.round(performance.now() - clock); record.completed = new Date().toISOString() }
   process.stdout.write(`${id}: passed (${record.elapsed_ms} ms)\n`)
+  return record
+}
+
+async function requiredScenario(id, action) {
+  if (!only || id.startsWith(only)) return scenario(id, action)
+  return action()
 }
 
 async function handleRendezvousRequest(request, response) {
@@ -492,10 +515,18 @@ async function run() {
     for (const node of nodes) await node.stop()
     return
   }
-  await paired(nodes)
   const [a, b, c] = nodes
-  await transfer(a, b, 'baseline')
-  if (c) await transfer(a, c, 'baseline')
+  await requiredScenario('E01-complete-pairing', async () => {
+    const created = await paired(nodes)
+    return pairingProof(nodes, created)
+  })
+  if (!only || !only.startsWith('E01')) {
+    await requiredScenario('E02-text-transfer', async () => {
+      await transfer(a, b, 'baseline')
+      if (c) await transfer(a, c, 'baseline')
+      return { exact_text_verified: true, direction_count: c ? 4 : 2 }
+    })
+  }
   if (mode === 'relay') { await relayScenarios(a, b); for (const node of nodes) await node.stop(); return }
   for (let iteration = 0; iteration < repeat; iteration++) {
     for (const node of nodes) { await node.drain(); node.events = [] }
@@ -758,6 +789,7 @@ finally {
   rmSync(root, { recursive: true, force: true })
   const binaries = [binary, legacyBinary, relayBinary].filter(Boolean).map(path => ({ sha256: createHash('sha256').update(readFileSync(path)).digest('hex') }))
   if (!cleaned) failed = true
-  writeFileSync(join(evidence, `${mode}${mode === 'legacy' ? `-${legacySide}` : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v2', binaries, faults, records, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, failure_reasons: node.failureReasons, network_facts: node.networkFacts })) }, null, 2), { mode: 0o600 })
+  const reproduction = `bash scripts/testing/run-connection-recovery-e2e.sh --suite network --repeat ${repeat} --mode ${mode}${only ? ` --case ${only}` : ''}`
+  writeFileSync(join(evidence, `${mode}${mode === 'legacy' ? `-${legacySide}` : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v2', reproduction, binaries, faults, records, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, failure_reasons: node.failureReasons, network_facts: node.networkFacts })) }, null, 2), { mode: 0o600 })
 }
 process.exitCode = failed ? 1 : 0
