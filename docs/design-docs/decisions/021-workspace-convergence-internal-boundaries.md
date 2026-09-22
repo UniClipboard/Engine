@@ -8,7 +8,7 @@
   `docs/design-docs/decisions/020-membership-reconciliation-and-user-decisions.md`、
   `docs/design-docs/current-member-runtime-scope.md`、
   `docs/exec-plans/completed/023-durable-membership-proof-and-admission-activation.md`、
-  `docs/architecture/architecture-bible.md`
+  `ARCHITECTURE.md`
 
 > 本文记录旧的渐进整理决定。其成员业务规则继续由 ADR-020 等文档保存；保留
 > `WorkspaceConvergence` 总对象并逐项迁移的实施方式，已由 ADR-025 和规格 027 取代。

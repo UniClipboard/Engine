@@ -220,4 +220,4 @@ git diff --check
 - [工作空间全局收敛](../../exec-plans/completed/016-workspace-wide-convergence.md)
 - [ADR-016：工作空间全局收敛](../decisions/016-workspace-wide-convergence.md)
 - [uc-engine 跨平台核心接口](../uc-engine-interface.md)
-- [架构总览](../../architecture/architecture-bible.md)
+- [架构入口](../../../ARCHITECTURE.md)

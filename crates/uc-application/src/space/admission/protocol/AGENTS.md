@@ -40,4 +40,4 @@ Space 全局入口和事实所有权见 [`docs/design-docs/space-application.md`
 
 - 测试通过 `SpaceAdmissionProtocol` 的完整方法观察行为，不直接测试内部辅助函数。
 - 新增业务动作前先写清楚完整结果、唯一调用、成功和失败以及重启恢复责任。
-- 修改本目录时同步更新 `docs/architecture/architecture-bible.md` 的正文或维护记录。
+- 修改本目录的行为、接口、不变量或重要取舍时，同步更新对应主题文档。

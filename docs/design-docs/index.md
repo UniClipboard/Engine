@@ -15,7 +15,7 @@
 
 ## 架构与契约
 
-- [架构圣经](../architecture/architecture-bible.md)：当前实现的详细事实。
+- [架构入口](../../ARCHITECTURE.md)：系统边界、依赖方向、主要模块与主题文档导航。
 - [uc-engine 跨平台核心接口](uc-engine-interface.md)：唯一稳定 Rust 入口。
 - [Port 设计](ports.md)：Core/Application 能力边界。
 - [Engine 仓库检查](engine-repository-checks.md)：所有权、依赖和发布门禁。

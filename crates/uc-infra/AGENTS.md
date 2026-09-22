@@ -18,4 +18,4 @@
 - 关键 adapter 测试覆盖真实存储/协议、损坏数据、边界值和恢复路径。
 - 日志只含批准的稳定分类、计数和长度，不含业务、身份、凭据、文件名或路径。
 
-交付前运行相关真实 Infra 测试、workspace check、fmt、架构检查与 diff check，并同步架构圣经。
+交付前运行相关真实 Infra 测试、workspace check、fmt、架构检查与 diff check；架构事实变化时同步对应主题文档。

@@ -17,7 +17,7 @@
 - **日期**：2026-09-13
 - **用户确认**：恢复指“回到升级前的软件版本，并恢复当时的用户数据”，不是把旧历史导入新版本。
 - **范围**：面向产品升级前后的一对精确版本；用户指定首个真实产品验收为 macOS 桌面版 `0.19.3 → 当前版本 → 0.19.3`。当前 Desktop 源码版本为 `1.0.0-alpha.10`，验收目标必须是接入本方案后的明确构建，不把已发布的同版本产物当作已包含本次改动。先验证该版本对涉及的 V1/V2 到 V3 资料升级；后续同为 V3 的软件升级也按版本对判定，不能用 `ensure_v3()` 代替产品升级识别。
-- **相关文档**：[内容保护上下文](../completed/033-immutable-content-protection-context.md)、[启动资料升级进度](../../design-docs/startup-upgrade-progress.md)、[架构总览](../../architecture/architecture-bible.md)、[安全边界](../../SECURITY.md)。
+- **相关文档**：[内容保护上下文](../completed/033-immutable-content-protection-context.md)、[启动资料升级进度](../../design-docs/startup-upgrade-progress.md)、[密文持久化](../../security/encrypted-persistence.md)、[安全边界](../../SECURITY.md)。
 
 # 1. Overview
 

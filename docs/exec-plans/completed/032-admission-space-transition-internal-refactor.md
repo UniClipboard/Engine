@@ -381,7 +381,7 @@ Implementation: 保留现有有界 codec/validate 测试；本计划不增加 fa
 * [x] A→B→A、Device Reset、membership branch、Fresh、SameSpace V3 tracer 全部保持通过，profile payload 不发生 rewrap。
 * [x] Core 和 Application port/状态机没有改动；032 与 031 可独立实施。
 * [x] 架构预检能拒绝 legacy transition、Engine Ready-V2 runtime 和 V3 payload rewrap 三类负向 fixture。
-* [x] architecture bible、计划索引和技术债状态与代码一致；032 完成后移入 completed。
+* [x] 当时的架构汇总（现已删除）、计划索引和技术债状态与代码一致；032 完成后移入 completed。
 * [x] `cargo metadata --locked --format-version 1`、`cargo check --workspace --all-targets --locked`、`cargo fmt --all -- --check`、Engine architecture preflight 和 `git diff --check` 全部通过。
 * [x] 实体设备矩阵未执行，明确记录为“跳过”，不记为通过。
 

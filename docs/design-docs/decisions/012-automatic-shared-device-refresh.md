@@ -3,7 +3,7 @@
 - **状态**：Accepted（已实现）
 - **日期**：2026-08-07
 - **修订**：2026-08-09 补充“会话恢复后自动查找”触发路径
-- **相关文档**：`docs/architecture/architecture-bible.md`、`docs/design-docs/ports.md`、`docs/design-docs/features/012-automatic-shared-device-refresh.md`
+- **相关文档**：`ARCHITECTURE.md`、`docs/design-docs/ports.md`、`docs/design-docs/features/012-automatic-shared-device-refresh.md`
 
 ## 背景
 

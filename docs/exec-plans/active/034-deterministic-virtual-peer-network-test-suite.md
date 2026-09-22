@@ -403,7 +403,7 @@ Risk: `cargo test` 的 ignored 计数不能记为通过；release/nightly 记录
 
 ```text
 Step 7
-Files: scripts/architecture/check-engine-repository.mjs, docs/architecture/architecture-bible.md, docs/exec-plans/active/034-deterministic-virtual-peer-network-test-suite.md
+Files: scripts/architecture/check-engine-repository.mjs, docs/design-docs/engine-repository-checks.md, docs/exec-plans/active/034-deterministic-virtual-peer-network-test-suite.md
 Change: 增加负向检查，禁止生产 `TransportProvider`、公开 Space test assembly 和 virtual provider 进入非 cfg(test)；同步稳定设计与实际验收证据。
 Risk: 文本检查不能替代编译依赖检查；负向 fixture 必须证明规则可执行。
 ```
@@ -588,7 +588,7 @@ git diff --check
 * [ ] trace、错误、日志和 CI artifact 不含设备身份、地址、邀请、branch/head、凭据、密钥、路径或业务内容。
 * [ ] 架构检查阻止 virtual provider 进入生产依赖、公开 Space 内部 assembly 或恢复 Engine 级万能 provider。
 * [ ] workspace check、Application/Infra/Engine tests、fmt、architecture 和 diff gates 全部通过。
-* [ ] 实施结论同步到 `docs/architecture/architecture-bible.md`；完成后本计划移入 `completed/`。
+* [ ] 实施结论同步到 `docs/design-docs/engine-repository-checks.md`；完成后本计划移入 `completed/`。
 
 # 10. Risks and Trade-offs
 

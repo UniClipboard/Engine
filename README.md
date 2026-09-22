@@ -554,7 +554,7 @@ node scripts/release/verify-release-bundle.mjs <release-assets-directory>
 
 ## 进一步阅读
 
-- [UniClipboard 架构圣经](docs/architecture/architecture-bible.md)
+- [UniClipboardEngine 架构](ARCHITECTURE.md)
 - [文档索引](docs/README.md)
 - [项目愿景](docs/PRODUCT_SENSE.md)
 - [Port 定义](docs/design-docs/ports.md)

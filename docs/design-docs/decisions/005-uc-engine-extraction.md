@@ -3,7 +3,7 @@
 - **状态**：Accepted（已接受）
 - **日期**：2026-05-20
 - **修订**：2026-07-19（四平台统一完整 P2P 节点）
-- **相关文档**：[`Port 定义`](../ports.md)、[`uc-engine 跨平台核心接口`](../uc-engine-interface.md)、[`架构总览`](../../architecture/architecture-bible.md)
+- **相关文档**：[`Port 定义`](../ports.md)、[`uc-engine 跨平台核心接口`](../uc-engine-interface.md)、[`架构入口`](../../../ARCHITECTURE.md)
 
 ## 1. 背景
 
