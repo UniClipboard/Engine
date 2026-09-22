@@ -649,8 +649,7 @@ mod tests {
         "cargo nextest run --profile ci --locked -p uc-infra -E 'test(provider_dependency_evidence)'";
 
     fn provider_dependency_scenario(name: &'static str, seed: u64) -> Scenario {
-        let artifact_root = PathBuf::from("../../target/test-artifacts/real-dependencies")
-            .join(format!("process-{}", std::process::id()));
+        let artifact_root = PathBuf::from("../../target/test-artifacts/real-dependencies");
         Scenario::start(ScenarioConfig::new(
             name,
             seed,

@@ -2,11 +2,14 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use serde::Serialize;
 
 use crate::{FailureReport, ScenarioEvent, StageTiming};
+
+static ARTIFACT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -28,6 +31,7 @@ pub struct ScenarioReport {
     pub schema_version: u32,
     pub scenario: String,
     pub artifact_id: String,
+    pub artifact_directory: String,
     pub seed: u64,
     pub outcome: &'static str,
     pub failure: Option<FailureReport>,
@@ -48,9 +52,16 @@ pub(crate) struct ArtifactPaths {
 
 pub(crate) fn prepare_artifact_directory(root: &Path, artifact_id: &str) -> io::Result<PathBuf> {
     fs::create_dir_all(root)?;
-    let directory = root.join(artifact_id);
-    fs::create_dir(&directory)?;
-    Ok(directory)
+    loop {
+        let sequence = ARTIFACT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let directory_name = format!("{artifact_id}-run-{}-{sequence:04}", std::process::id());
+        let directory = root.join(directory_name);
+        match fs::create_dir(&directory) {
+            Ok(()) => return Ok(directory),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 pub(crate) fn write_report(directory: &Path, report: &ScenarioReport) -> io::Result<ArtifactPaths> {
@@ -85,11 +96,12 @@ fn write_new_file(path: &Path, contents: &[u8]) -> io::Result<()> {
 
 fn human_summary(report: &ScenarioReport) -> String {
     let mut summary = format!(
-        "scenario: {}\noutcome: {}\nelapsed: {} ms\nartifact: {}\nreproduce: {}\n",
+        "scenario: {}\noutcome: {}\nelapsed: {} ms\nartifact: {}\nartifact directory: {}\nreproduce: {}\n",
         report.scenario,
         report.outcome,
         report.total_elapsed_ms,
         report.artifact_id,
+        report.artifact_directory,
         report.reproduce,
     );
     if let Some(failure) = &report.failure {

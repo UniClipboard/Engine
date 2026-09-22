@@ -9,8 +9,7 @@ pub(crate) fn scenario(
     budget: Duration,
     reproduce: &'static str,
 ) -> Scenario {
-    let artifact_root = PathBuf::from("../../target/test-artifacts/membership-recovery")
-        .join(format!("process-{}", std::process::id()));
+    let artifact_root = PathBuf::from("../../target/test-artifacts/membership-recovery");
     Scenario::start(ScenarioConfig::new(
         name,
         seed,

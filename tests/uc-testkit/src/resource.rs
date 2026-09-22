@@ -11,7 +11,11 @@ use crate::{CleanupStatus, ResourceReport, budget::lock};
 
 pub(crate) type ResourceTracker = Arc<Mutex<Vec<ResourceReport>>>;
 
-fn register(tracker: &ResourceTracker, kind: &'static str, label: &'static str) -> usize {
+pub(crate) fn register(
+    tracker: &ResourceTracker,
+    kind: &'static str,
+    label: &'static str,
+) -> usize {
     let mut resources = lock(tracker);
     let index = resources.len();
     resources.push(ResourceReport {
@@ -22,7 +26,7 @@ fn register(tracker: &ResourceTracker, kind: &'static str, label: &'static str) 
     index
 }
 
-fn complete(tracker: &ResourceTracker, index: usize, status: CleanupStatus) {
+pub(crate) fn complete(tracker: &ResourceTracker, index: usize, status: CleanupStatus) {
     if let Some(resource) = lock(tracker).get_mut(index) {
         resource.cleanup = status;
     }

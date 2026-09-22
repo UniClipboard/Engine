@@ -8,6 +8,8 @@
 - 后续领域场景计划：[034 确定性虚拟 Peer Network](../exec-plans/active/034-deterministic-virtual-peer-network-test-suite.md)
 - 已完成领域采用：[045 确定性成员恢复高价值场景](../exec-plans/completed/045-deterministic-membership-recovery-scenarios.md)
 - 已完成真实依赖采用：[046 真实依赖与独立进程 testkit 采用](../exec-plans/completed/046-real-dependency-testkit-adoption.md)
+- 使用指南：[Engine 测试使用指南](testing-guide.md)
+- 当前采用清单：[Engine 测试采用清单](../references/test-adoption-inventory.md)
 
 # 1. Overview
 
@@ -128,9 +130,10 @@ Relationship: 本轮只新增 testkit/nextest 非破坏 job 或 step；原 job �
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "scenario": "testkit-success-demo",
   "artifact_id": "testkit-success-demo-seed-000000000000002a",
+  "artifact_directory": "testkit-success-demo-seed-000000000000002a-run-1234-0001",
   "seed": 42,
   "outcome": "passed",
   "failure": null,
@@ -190,6 +193,8 @@ impl Scenario {
 6. 测试显式释放或交还资源；`finish` 记录清理状态和最终结果。
 7. `ArtifactWriter` 写 JSON 和人类摘要；测试可以断言报告，也可由 CI 上传目录。
 8. nextest 收集进程结果和 JUnit；两类报告通过场景名关联，不互相替代。
+
+同一 `artifact_id` 的并行或重复运行使用不同 `artifact_directory`。稳定身份用于关联，实例目录用于定位实际文件；调用方不再自行拼接 PID。独立子进程通过 Scenario 的有界运行入口完成 spawn、wait、超时 kill 和再次 wait，退出码的业务含义仍由调用场景决定。
 
 ## Test Layers and Groups
 
@@ -302,6 +307,7 @@ Implementation: 后续可增加 panic hook 集成；V1 不用全局 hook 改变�
 - 独立 crate 增加一个 workspace target，但换来跨层复用且不污染产品模块。
 - JSON 和 JUnit 是两份证据：前者表达场景语义，后者表达 runner 结果。合并为一份会迫使 testkit 复制 nextest 能力，因此保持关联而不合并。
 - V1 对 panic 只依赖 RAII 和 JUnit，不保证写完整场景 JSON；全局 panic hook 会影响所有测试，暂不引入。
+- Scenario 在 `finish` 前 panic/abort 时仍只依赖 RAII 与 JUnit；本轮增加的子进程入口处理受控异常退出和超时，不安装全局 panic hook。
 - 路径/名称模式分组不如显式标签精确，但当前无需大规模移动文件。后续自然拆分测试 binary 后再收紧映射。
 - 本轮只提供 wall-clock 保护，不提供业务虚拟时间。需要生产接口时由规格 034 单独实施，避免扩大产品范围。
 

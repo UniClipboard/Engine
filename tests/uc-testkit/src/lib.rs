@@ -4,6 +4,7 @@ mod budget;
 mod event;
 mod failure;
 mod identity;
+mod process;
 mod report;
 mod resource;
 mod scenario;

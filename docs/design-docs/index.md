@@ -20,6 +20,7 @@
 - [Port 设计](ports.md)：Core/Application 能力边界。
 - [Engine 仓库检查](engine-repository-checks.md)：所有权、依赖和发布门禁。
 - [Engine 测试架构](testing-architecture.md)：测试分层、testkit、nextest 分组、结构化报告与迁移边界。
+- [Engine 测试使用指南](testing-guide.md)：首次新增测试时的层级选择、testkit 采用、分组、CI、失败查看与复现。
 - [当前成员运行范围](current-member-runtime-scope.md)：成员资格与普通能力的统一范围。
 - [Space Application](space-application.md)：Space 领域的入口、负责人、恢复路径与测试地图。
 

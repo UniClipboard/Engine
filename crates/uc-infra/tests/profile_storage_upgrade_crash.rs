@@ -12,14 +12,13 @@ use uc_infra::security::{
     ProfileRuntimeLayout, ProfileStorageUpgrade, ProfileStorageUpgradeOutcome,
 };
 use uc_infra::space::InMemorySession;
-use uc_testkit::{CleanupStatus, Scenario, ScenarioBudget, ScenarioConfig};
+use uc_testkit::{Scenario, ScenarioBudget, ScenarioConfig};
 
 const REPRODUCE: &str =
     "cargo test -p uc-infra --test profile_storage_upgrade_crash --locked unfinished_separation_recovers_after_process_exit";
 
 fn process_scenario() -> Scenario {
-    let artifact_root = PathBuf::from("../../target/test-artifacts/real-dependencies")
-        .join(format!("process-{}", std::process::id()));
+    let artifact_root = PathBuf::from("../../target/test-artifacts/real-dependencies");
     Scenario::start(ScenarioConfig::new(
         "profile-upgrade-process-recovery",
         0x0040_0304,
@@ -160,27 +159,28 @@ async fn unfinished_separation_recovers_after_process_exit() {
         drop(upgrade);
         drop(fixture);
 
-        let child = {
+        let child_status = {
             let _stage = scenario.stage("child-process");
-            std::process::Command::new(std::env::current_exe().unwrap())
+            let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+            command
                 .args(["--ignored", "--exact", "crash_child", "--nocapture"])
                 .env("UC_UPGRADE_CRASH_ROOT", directory.path())
-                .env("UC_UPGRADE_CRASH_BOUNDARY", boundary)
-                .output()
-                .unwrap()
+                .env("UC_UPGRADE_CRASH_BOUNDARY", boundary);
+            scenario
+                .run_child_process(
+                    "upgrade-crash-probe",
+                    &mut command,
+                    std::time::Duration::from_secs(5),
+                )
+                .await
+                .unwrap_or_else(|failure| panic!("{boundary}: {failure}"))
         };
         assert_eq!(
-            child.status.code(),
+            child_status.code(),
             Some(73),
-            "{boundary}: {}",
-            String::from_utf8_lossy(&child.stderr)
+            "{boundary}: crash child must stop at the requested boundary"
         );
         scenario.record_event("child-process-reaped");
-        scenario.record_external_resource(
-            "child-process",
-            "upgrade-crash-probe",
-            CleanupStatus::Completed,
-        );
 
         let reopened = Fixture::open(directory.path());
         assert_eq!(reopened.pool.persistent_revision().unwrap(), revision);

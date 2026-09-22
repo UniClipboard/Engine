@@ -49,7 +49,11 @@ case "${GROUP}" in
     fi
     artifact_root="${UC_TEST_ARTIFACTS_DIR:-target/test-artifacts/$(date -u +%Y%m%dT%H%M%SZ)-$$}"
     export UC_TEST_ARTIFACTS_DIR="${artifact_root}"
-    run_nextest -E 'package(uc-testkit) | package(uc-application) & (test(admission_recovery_scenarios) | test(device_trust_recovery_scenario) | test(legacy_candidate_convergence_scenario)) | package(uc-infra) & (test(provider_dependency_evidence) | binary(profile_storage_upgrade_crash))'
+    run_nextest \
+      -p uc-testkit \
+      -p uc-application \
+      -p uc-infra \
+      -E 'package(uc-testkit) | package(uc-application) & (test(admission_recovery_scenarios) | test(device_trust_recovery_scenario) | test(legacy_candidate_convergence_scenario)) | package(uc-infra) & (test(provider_dependency_evidence) | binary(profile_storage_upgrade_crash))'
     cargo run --quiet --locked -p uc-testkit --example scenario_demo -- success
     cargo run --quiet --locked -p uc-testkit --example scenario_demo -- failure
     printf 'testkit artifacts: %s\n' "${artifact_root}"
@@ -58,10 +62,9 @@ case "${GROUP}" in
     printf 'nextest JUnit: target/nextest/ci/junit.xml\n'
     ;;
   persistence-provider)
-    run_nextest -p uc-infra \
-      --test membership_ledger \
-      --test profile_storage_upgrade \
-      --test space_admission_state \
+    run_nextest \
+      -p uc-infra \
+      -E 'package(uc-infra) & (binary(membership_ledger) | binary(profile_storage_upgrade) | binary(space_admission_state) | test(provider_dependency_evidence))' \
       "$@"
     ;;
   engine-smoke)
@@ -69,6 +72,8 @@ case "${GROUP}" in
     ;;
   process)
     run_nextest \
+      -p uc-engine \
+      -p uc-infra \
       -E 'package(uc-engine) & binary(host_contract) | package(uc-infra) & binary(profile_storage_upgrade_crash)' \
       "$@"
     ;;

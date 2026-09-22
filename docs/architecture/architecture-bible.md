@@ -865,6 +865,11 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 ## 文档维护记录
 
+- 2026-09-22：Application 成员场景、provider evidence 与 profile crash 场景不再自行拼接进程目录；稳定 `artifact_id` 与唯一 `artifact_directory` 均由 testkit 生成，避免隔离策略泄漏到调用方。
+- 2026-09-22：`evidence`、`persistence-provider` 与 `process` 统一入口增加明确 Cargo package 边界，避免 nextest 为过滤表达式发现并构建无关绑定与宿主；测试 filter、旧入口和 CI 门禁不变。
+- 2026-09-22：统一测试入口的 `persistence-provider` 组同步包含已采用的 provider dependency evidence，避免 nextest override 与脚本实际集合不一致；原三个持久化 integration binary 保留。
+- 2026-09-22：新增 [Engine 测试使用指南](../design-docs/testing-guide.md)与[测试采用清单](../references/test-adoption-inventory.md)。普通快速单元测试不强制采用 testkit；只有跨阶段、异步等待、资源、进程或结构化诊断场景渐进接入，真实网络与设备继续保留专用入口。
+- 2026-09-22：新增[048 testkit 采用指南与进程韧性](../exec-plans/active/048-testkit-adoption-and-process-resilience.md)。真实并行复现确认相同场景会争用稳定工件目录；本计划只补唯一工件实例与有界子进程回收，并增加首次使用指南和采用清单，不扩建业务模拟层。
 - 2026-09-22：修正 testkit 成功示范工件的复现命令，使成功与受控失败报告分别指向对应模式。该修正只影响测试诊断元数据，不改变生产行为。
 - 2026-09-22：将测试中的 `stage2`、`stage3` 执行阶段命名改为准入恢复、设备信任恢复、旧候选收敛和 provider 依赖证据等领域名称，并同步 nextest 选择器。变更仅涉及测试模块命名，不改变场景职责、生产接口或业务行为。
 - 2026-09-22：测试框架 PR 旁路 job 改为运行统一 `evidence` 入口，一次收集 testkit、确定性 Application、真实 provider 和独立进程代表场景的 JUnit、JSON 与文本摘要。原 checks、coverage 和 connection-recovery 门禁不变；远程工件必须下载解析后才算本阶段验收。

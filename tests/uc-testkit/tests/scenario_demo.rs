@@ -1,9 +1,17 @@
-use std::{fs, net::TcpListener, time::Duration};
+use std::{
+    fs,
+    net::TcpListener,
+    process::Command as StdCommand,
+    sync::{Arc, Barrier},
+    thread,
+    time::Duration,
+};
 
 use serde_json::Value;
 use tempfile::TempDir;
 use uc_testkit::{
-    CleanupStatus, FailureKind, Scenario, ScenarioBudget, ScenarioConfig, ScenarioIdentity,
+    CleanupStatus, FailureKind, Scenario, ScenarioBudget, ScenarioConfig, ScenarioFailure,
+    ScenarioIdentity,
 };
 
 const REPRODUCE: &str =
@@ -74,7 +82,7 @@ async fn successful_scenario_writes_artifacts() {
 
     let report_text = fs::read_to_string(completion.result_json()).expect("read JSON report");
     let report: Value = serde_json::from_str(&report_text).expect("parse JSON report");
-    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["schema_version"], 2);
     assert_eq!(report["scenario"], "testkit-success-demo");
     assert_eq!(report["outcome"], "passed");
     assert_eq!(report["last_event"]["kind"], "condition-ready");
@@ -158,6 +166,133 @@ fn external_cleanup_failure_is_classified_in_artifacts() {
     );
     assert!(completion.result_json().is_file());
     assert!(completion.summary().is_file());
+}
+
+#[test]
+fn parallel_identical_scenarios_write_distinct_artifact_directories() {
+    let artifact_root = TempDir::new().expect("artifact root");
+    let barrier = Arc::new(Barrier::new(2));
+    let mut workers = Vec::new();
+
+    for _ in 0..2 {
+        let root = artifact_root.path().to_path_buf();
+        let barrier = Arc::clone(&barrier);
+        workers.push(thread::spawn(move || {
+            barrier.wait();
+            let scenario = Scenario::start(config(
+                &root,
+                "parallel-artifact-demo",
+                99,
+                Duration::from_secs(1),
+            ))
+            .expect("parallel scenario starts");
+            scenario.finish(Ok(())).expect("parallel scenario finishes")
+        }));
+    }
+
+    let completions: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("parallel worker joins"))
+        .collect();
+    assert_ne!(completions[0].artifact_dir(), completions[1].artifact_dir());
+    for completion in completions {
+        assert_eq!(completion.report().schema_version, 2);
+        assert_eq!(
+            completion.report().artifact_id,
+            "parallel-artifact-demo-seed-0000000000000063"
+        );
+        assert_eq!(
+            completion
+                .artifact_dir()
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some(completion.report().artifact_directory.as_str())
+        );
+        assert!(completion.result_json().is_file());
+    }
+}
+
+#[tokio::test]
+async fn nonzero_child_exit_is_reaped_and_reported_by_the_scenario() {
+    let artifact_root = TempDir::new().expect("artifact root");
+    let mut scenario = Scenario::start(config(
+        artifact_root.path(),
+        "child-exit-demo",
+        100,
+        Duration::from_secs(2),
+    ))
+    .expect("scenario starts");
+    let mut command = child_command("child_probe_exits_with_73");
+
+    let status = scenario
+        .run_child_process("worker", &mut command, Duration::from_secs(1))
+        .await
+        .expect("child process is reaped");
+    assert_eq!(status.code(), Some(73));
+
+    let completion = scenario
+        .finish(Err(ScenarioFailure::new(
+            FailureKind::ProductInvariant,
+            "child-exit-nonzero",
+        )))
+        .expect_err("nonzero child is a controlled scenario failure");
+    assert_eq!(completion.failure().kind(), FailureKind::ProductInvariant);
+    assert_eq!(completion.report().cleanup, CleanupStatus::Completed);
+    assert_eq!(
+        completion.report().resources[0].cleanup,
+        CleanupStatus::Completed
+    );
+}
+
+#[tokio::test]
+async fn child_timeout_kills_and_reaps_before_writing_diagnostics() {
+    let artifact_root = TempDir::new().expect("artifact root");
+    let mut scenario = Scenario::start(config(
+        artifact_root.path(),
+        "child-timeout-demo",
+        101,
+        Duration::from_secs(2),
+    ))
+    .expect("scenario starts");
+    let mut command = child_command("child_probe_waits_until_killed");
+
+    let failure = scenario
+        .run_child_process("worker", &mut command, Duration::from_millis(30))
+        .await
+        .expect_err("child process must time out");
+    assert_eq!(failure.kind(), FailureKind::DriverProtocol);
+    assert_eq!(failure.condition(), Some("child-process-timeout"));
+
+    let completion = scenario
+        .finish(Err(failure))
+        .expect_err("timeout remains a scenario failure");
+    assert_eq!(completion.report().cleanup, CleanupStatus::Completed);
+    assert_eq!(
+        completion.report().resources[0].cleanup,
+        CleanupStatus::Completed
+    );
+    let report_text = fs::read_to_string(completion.result_json()).expect("read JSON report");
+    assert!(report_text.contains("child-process-timeout"));
+}
+
+#[test]
+#[ignore = "child process entry for nonzero exit diagnostics"]
+fn child_probe_exits_with_73() {
+    std::process::exit(73);
+}
+
+#[test]
+#[ignore = "child process entry for timeout cleanup diagnostics"]
+fn child_probe_waits_until_killed() {
+    thread::sleep(Duration::from_secs(30));
+}
+
+fn child_command(test_name: &str) -> tokio::process::Command {
+    let mut command = tokio::process::Command::from(StdCommand::new(
+        std::env::current_exe().expect("current test executable"),
+    ));
+    command.args(["--ignored", "--exact", test_name]);
+    command
 }
 
 fn config(

@@ -1,10 +1,11 @@
 use std::{
     path::{Path, PathBuf},
+    process::ExitStatus,
     sync::{Arc, Mutex},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
-use tokio::time::timeout;
+use tokio::{process::Command, time::timeout};
 
 use crate::{
     CleanupStatus, EventRecorder, FailureKind, ResourceReport, ScenarioBudget, ScenarioEvent,
@@ -12,6 +13,7 @@ use crate::{
     TempDirLease,
     budget::{lock, millis},
     event::EventLog,
+    process::run_child_process,
     report::{ArtifactPaths, prepare_artifact_directory, write_report},
     resource::{ResourceTracker, record_external},
 };
@@ -138,6 +140,16 @@ impl Scenario {
         record_external(&self.resources, kind, label, cleanup);
     }
 
+    pub async fn run_child_process(
+        &mut self,
+        label: &'static str,
+        command: &mut Command,
+        wait_budget: Duration,
+    ) -> Result<ExitStatus, ScenarioFailure> {
+        let remaining = self.budget.remaining(self.started_at);
+        run_child_process(&self.resources, label, command, wait_budget.min(remaining)).await
+    }
+
     pub fn finish(
         self,
         result: Result<(), ScenarioFailure>,
@@ -158,9 +170,15 @@ impl Scenario {
         }
 
         let report = ScenarioReport {
-            schema_version: 1,
+            schema_version: 2,
             scenario: self.identity.name().to_owned(),
             artifact_id: self.identity.artifact_id().to_owned(),
+            artifact_directory: self
+                .artifact_directory
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("artifact-directory-invalid")
+                .to_owned(),
             seed: self.identity.seed(),
             outcome: if failure.is_some() {
                 "failed"

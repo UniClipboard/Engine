@@ -9,6 +9,7 @@
 - [043 升级前备份与软件版本回退](043-pre-upgrade-profile-backup.md)（实施中：启动前备份及恢复出厂清理已接入，完整版本回退尚未完成）
 - [043 Engine 网络运行期与 Space 会话安全交接](043-engine-network-runtime-and-space-session-handover.md)（实施中，对应 Issue #68）
 - [047 测试框架 PR 与远程 CI 观察](047-testkit-pr-and-ci-observation.md)（实施中：首轮 PR/CI 验证后继续累计 10 个工作日自然样本）
+- [048 testkit 采用指南与进程韧性](048-testkit-adoption-and-process-resilience.md)（实施中：补齐并行工件隔离、进程超时回收、首次使用指南与采用清单）
 - [历史可读时的邀请失败](2026-09-12-invitation-admission-recovery.md)
 - [本地产物准备](local-artifacts-preparation.md)
 - [配对通信等待诊断](2026-09-12-admission-exchange-diagnostics.md)

@@ -14,6 +14,7 @@
 - [安全](SECURITY.md)：密文持久化、日志隐私与发布完整性。
 - [可靠性](RELIABILITY.md)：恢复、后台任务与验证层次。
 - [质量记分卡](QUALITY_SCORE.md)：评审维度与证据入口。
+- [测试使用指南](design-docs/testing-guide.md)：选择测试层级、运行分组、使用 testkit 和复现失败。
 
 ## 记录分类
 
