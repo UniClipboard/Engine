@@ -865,6 +865,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 ## 文档维护记录
 
+- 2026-09-22：修正 testkit 成功示范工件的复现命令，使成功与受控失败报告分别指向对应模式。该修正只影响测试诊断元数据，不改变生产行为。
 - 2026-09-22：将测试中的 `stage2`、`stage3` 执行阶段命名改为准入恢复、设备信任恢复、旧候选收敛和 provider 依赖证据等领域名称，并同步 nextest 选择器。变更仅涉及测试模块命名，不改变场景职责、生产接口或业务行为。
 - 2026-09-22：测试框架 PR 旁路 job 改为运行统一 `evidence` 入口，一次收集 testkit、确定性 Application、真实 provider 和独立进程代表场景的 JUnit、JSON 与文本摘要。原 checks、coverage 和 connection-recovery 门禁不变；远程工件必须下载解析后才算本阶段验收。
 - 2026-09-22：新增[047 测试框架 PR 与远程 CI 观察](../exec-plans/active/047-testkit-pr-and-ci-observation.md)，只交付 044-046 已验证的测试基础、首轮远程非发布检查与工件核验。至少 10 个工作日的自然运行才构成长趋势数据；一次成功不得写成长期稳定，真实网络和设备仍需独立验收。

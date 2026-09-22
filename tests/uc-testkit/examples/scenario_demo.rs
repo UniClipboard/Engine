@@ -2,7 +2,8 @@ use std::{env, process::ExitCode, time::Duration};
 
 use uc_testkit::{FailureKind, Scenario, ScenarioBudget, ScenarioConfig};
 
-const REPRODUCE: &str = "cargo run -p uc-testkit --example scenario_demo -- failure";
+const SUCCESS_REPRODUCE: &str = "cargo run -p uc-testkit --example scenario_demo -- success";
+const FAILURE_REPRODUCE: &str = "cargo run -p uc-testkit --example scenario_demo -- failure";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -20,16 +21,24 @@ async fn run() -> Result<(), String> {
     let artifact_root = env::var_os("UC_TEST_ARTIFACTS_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("target/test-artifacts/manual"));
-    let (name, budget) = match mode.as_str() {
-        "success" => ("testkit-success-example", Duration::from_secs(1)),
-        "failure" => ("testkit-failure-example", Duration::from_millis(40)),
+    let (name, budget, reproduce) = match mode.as_str() {
+        "success" => (
+            "testkit-success-example",
+            Duration::from_secs(1),
+            SUCCESS_REPRODUCE,
+        ),
+        "failure" => (
+            "testkit-failure-example",
+            Duration::from_millis(40),
+            FAILURE_REPRODUCE,
+        ),
         _ => return Err(format!("unknown mode: {mode}")),
     };
     let scenario = Scenario::start(ScenarioConfig::new(
         name,
         42,
         ScenarioBudget::new(budget),
-        REPRODUCE,
+        reproduce,
         artifact_root,
     ))
     .map_err(|failure| failure.to_string())?;
