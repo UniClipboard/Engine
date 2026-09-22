@@ -48,7 +48,7 @@ Core 为每条记录给出 `AdmissionOutstandingWork`：
 
 迁移中发现、未在阶段 A 改变的现有缺口：
 
-- `Terminal.RecoveryRequired` 记录的恢复动作为无，且终态不计入 `missing_deadline`，因此不会经恢复索引触发 `NeedsAttention`；需要单独确认是否由其他入口上报。
+- `Terminal.RecoveryRequired` 记录的恢复动作为无，且终态不计入 `missing_deadline`，因此不会经恢复索引把空间工作模式切到 `NeedsAttention`。用户可见的加入状态另由 `display.rs` 的当前加入投影用 `needs_attention()` 上报，不会静默；待确认的是维护侧是否也应停下。
 - 邀请方未到期的 `SponsorDeadline` 记录不计入 `pairing_in_progress`（索引只加载已到期记录），工作模式对进行中的邀请方配对依赖协议处理入口而非恢复索引。
 
 ## 统一收尾期限类型（已实现）
