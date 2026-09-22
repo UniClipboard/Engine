@@ -12,6 +12,46 @@
 - **重试与重启责任**：Application 生产负责人继续拥有持久欠账和恢复；virtual topology 只驱动逻辑时间、maintenance round 与节点重建，不复制重试规则
 - **长期路线关系**：本计划是 [Engine 测试架构](../../design-docs/testing-architecture.md) 中快速确定性线的多节点实现专项；首个切片从配对、传输、断线重连、重启恢复、旧资料升级五类中选择一个最慢或最不稳定代表场景，不另建并行路线图
 
+## 当前实施切片（2026-09-22）
+
+本轮只实现配对类别中的“已完成准入后，两个成员节点交换成员历史”的最小多节点基础，以及真实 Engine nightly
+的运行入口。它不实现完整邀请/准入，也不把这一切片记作五类业务覆盖完成。
+
+### 完整负责人和唯一动作
+
+- `VirtualMembershipNetwork` 只负责测试节点注册、有向链路状态、frame 预算和脱敏 trace；它把 typed
+  `MembershipHistoryMessage` 交给目标节点真实 `MembershipHistoryExchangeEndpointPort`。
+- 每个节点使用真实 `MembershipLedger` 和 `HandleMembershipHistoryMessageUseCase`；网络不读取 ledger，不生成 ACK，
+  不判断成员关系。
+- 场景只准备两个合法节点，执行 `send`、`partition`、`heal`，并断言公开的历史交换结果和网络 trace。
+- 成功结果：开放链路调用真实 endpoint 并得到业务 ACK；分区时得到 `Offline`；恢复后再次成功，trace 顺序和
+  frame 数稳定。
+- 失败结果：未知节点、重复节点、frame 预算耗尽或 endpoint 拒绝返回稳定 test-only 错误，并由 testkit 工件记录。
+- 重试责任：virtual network 不重试；场景显式恢复链路并再次调用。生产业务欠账与重试仍由 Application 负责人拥有。
+
+### 失败方式（先于实现固定）
+
+| 失败方式 | 预期 |
+| --- | --- |
+| 重复节点键或重复业务身份 | 构造/注册立即失败，不覆盖原节点 |
+| source/target 未注册 | 返回稳定 fixture/unavailable 失败，不调用 endpoint |
+| 单向分区 | 只阻断指定方向，反向链路不受影响 |
+| endpoint 业务拒绝 | 保留 endpoint 错误分类，trace 记录 rejected，不包含 payload/身份 |
+| frame 预算耗尽 | 下一次发送立即失败，不回绕、不提高预算 |
+| endpoint 嵌套或异步执行 | 网络锁在 `await` 前释放，不能死锁 |
+| trace 泄露 | 记录只含节点测试标签、协议、序号和结果，不含 DeviceId、消息、路径或地址 |
+
+### 本轮目录与验收
+
+- `crates/uc-application/src/space/testing/virtual_membership_network.rs`：最小有向网络和两节点真实 endpoint 场景。
+- `crates/uc-application/src/space/mod.rs`：只在 `cfg(test)` 注册 testing 模块，不扩大 crate 或产品公开接口。
+- `.github/workflows/engine-real-environment.yml`：scheduled 四种真实环境模式和 `workflow_dispatch` 单 mode/单 case；
+  复用 `run-connection-recovery-e2e.sh`，不复制 host 或网络脚本。
+- 快速场景预算 1 秒，不使用固定 sleep；连续运行至少 20 次无随机失败。
+- nightly 每个 mode 独立 job 和工件，编译、环境准备、场景、清理与总耗时可从 job/summary 区分；单 mode 目标
+  30 分钟内。首次实际 scheduled 运行仍待合并后自然触发，PR 中只验证 workflow 语法和现有真实脚本门禁。
+- 回退点：virtual 模块和 nightly workflow 可独立回退；旧测试、PR 网络门禁和脚本均不删除。
+
 # 1. Overview
 
 规格 030 已用真实 Engine operation、SQLite、Iroh endpoint、网络分区和正文传输完成 F0-F7 验收。其中 F7 单项
