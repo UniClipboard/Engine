@@ -213,12 +213,27 @@ async fn peer_address_failures_export_stable_categories_and_real_stack_symbols()
     })
     .await;
 
+    let migration_storage = diagnostic(fixture(SubkeyMode::Ready), |fixture| {
+        fixture
+            .executor
+            .run(|conn| {
+                diesel::sql_query(
+                    "UPDATE relationship_privacy_maintenance SET state = 'pending_rows' WHERE id = 1",
+                )
+                .execute(conn)?;
+                Ok(())
+            })
+            .expect("restore pending migration state");
+    })
+    .await;
+
     let artifact = json!({
         "locked": locked,
         "authentication": authentication,
         "unsupported_version": unsupported,
         "payload_decode": decode,
         "storage": storage,
+        "migration_storage": migration_storage,
         "unknown": unknown,
     });
     let expected_stack_mode =
@@ -238,6 +253,7 @@ async fn peer_address_failures_export_stable_categories_and_real_stack_symbols()
         ),
         ("payload_decode", "payload_decode", "payload_decode"),
         ("storage", "storage", "database_read"),
+        ("migration_storage", "storage", "migration_read"),
         ("unknown", "unknown", "key_derivation"),
     ] {
         let row = &artifact[name];

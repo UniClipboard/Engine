@@ -117,6 +117,10 @@ fn is_relationship_diagnostic_frame(line: &str) -> bool {
         "get_payload",
         "get_peer_address",
         "ready_cipher",
+        "migrate_if_needed",
+        "migrate_legacy_",
+        "delete_legacy_row",
+        "upsert_verified",
         "key_derivation",
     ]
     .iter()
@@ -366,7 +370,9 @@ where
                         Ok(())
                     })
                 })
-                .map_err(|error| RelationshipStoreError::Storage(error.to_string()))?;
+                .map_err(|error| {
+                    RelationshipStoreError::diagnostic("storage", "migration_finalize", error)
+                })?;
         }
         if self.migration_state()? == "pending_physical_purge" {
             self.executor
@@ -377,7 +383,9 @@ where
                         .execute(conn)?;
                     Ok(())
                 })
-                .map_err(|error| RelationshipStoreError::Storage(error.to_string()))?;
+                .map_err(|error| {
+                    RelationshipStoreError::diagnostic("storage", "physical_purge", error)
+                })?;
         }
         Ok(())
     }
@@ -396,9 +404,11 @@ where
                     )
                     .get_result::<LegacyMemberRow>(conn)
                     .optional()
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+                    .map_err(anyhow::Error::new)
                 })
-                .map_err(|error| RelationshipStoreError::Storage(error.to_string()))?;
+                .map_err(|error| {
+                    RelationshipStoreError::diagnostic("storage", "migration_read", error)
+                })?;
             let Some(row) = row else { break };
             let identity = row.device_id.clone();
             let member = legacy_member_to_domain(row)?;
@@ -426,9 +436,11 @@ where
                     )
                     .get_result::<LegacyTrustedPeerRow>(conn)
                     .optional()
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+                    .map_err(anyhow::Error::new)
                 })
-                .map_err(|error| RelationshipStoreError::Storage(error.to_string()))?;
+                .map_err(|error| {
+                    RelationshipStoreError::diagnostic("storage", "migration_read", error)
+                })?;
             let Some(row) = row else { break };
             let identity = row.peer_device_id.clone();
             let peer = legacy_trusted_peer_to_domain(row)?;
@@ -456,9 +468,11 @@ where
                     )
                     .get_result::<LegacyPeerAddressRow>(conn)
                     .optional()
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+                    .map_err(anyhow::Error::new)
                 })
-                .map_err(|error| RelationshipStoreError::Storage(error.to_string()))?;
+                .map_err(|error| {
+                    RelationshipStoreError::diagnostic("storage", "migration_read", error)
+                })?;
             let Some(row) = row else { break };
             let identity = row.device_id.clone();
             let record = legacy_peer_address_to_domain(row)?;
@@ -485,7 +499,9 @@ where
                     .execute(conn)?;
                 Ok(())
             })
-            .map_err(|error| RelationshipStoreError::Storage(error.to_string()))
+            .map_err(|error| {
+                RelationshipStoreError::diagnostic("storage", "migration_delete", error)
+            })
     }
 
     fn upsert_verified(
@@ -518,9 +534,15 @@ where
                     .execute(conn)?;
                 Ok(())
             })
-            .map_err(|error| RelationshipStoreError::Storage(error.to_string()))?;
+            .map_err(|error| {
+                RelationshipStoreError::diagnostic("storage", "migration_write", error)
+            })?;
         let stored = self.load_envelope(kind, &lookup_key)?.ok_or_else(|| {
-            RelationshipStoreError::Storage("relationship write was not observable".to_string())
+            RelationshipStoreError::diagnostic(
+                "storage",
+                "migration_write_verify",
+                anyhow::anyhow!("relationship write was not observable"),
+            )
         })?;
         let verified = cipher.open(kind, &lookup_key, &stored)?;
         if verified != payload {

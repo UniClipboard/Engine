@@ -39,6 +39,7 @@
 | 注入 | 预期类别 | 阶段 | 证据边界 |
 | --- | --- | --- | --- |
 | SQLite 查询失败 | `storage` | `database_read` | 保留 Diesel/执行器 source，不输出 SQL/路径 |
+| 地址读取前迁移查询失败 | `storage` | `migration_read` | 保留 Diesel/执行器 source，明确失败发生在迁移前置路径 |
 | Space 未解锁 | `locked` | `key_derivation` | 保留 `SpaceAccessError` source |
 | AEAD 认证失败 | `authentication` | `ciphertext_authentication` | 无法进一步证明哪一字节或哪一密钥错误 |
 | 关系 envelope 版本不支持 | `unsupported_version` | `envelope_decode` | 只说明格式版本不可用，不输出版本值 |
@@ -57,6 +58,6 @@
 
 - peer-address 读取失败在 `EncryptedRelationshipStore` 首次可证明原因处分类并保留 source；`PeerAddressError` 只跨层携带稳定类别、阶段和 source，不携带观测栈。
 - `address.record.read_failed` 保持原事件名，并新增固定诊断字段。动态错误正文、SQL、地址、标识和源码路径不进入导出。
-- 隔离端到端测试覆盖 `storage`、`locked`、`authentication`、`unsupported_version`、`payload_decode` 和 `unknown`，并生成 `.herdr-project/uni-t-0045/library/peer-address-read-diagnostics.json`。
-- 栈过滤会丢弃 backtrace 捕获器自身、源码位置和无关运行时帧；只有实际捕获到关系存储或 peer-address 仓储符号时才标记 `captured`。本机 `--release` 隔离验证中三类保留业务符号，三类因优化后符号不足输出空栈和 `unresolved`。
+- 隔离端到端测试覆盖 `storage`、`locked`、`authentication`、`unsupported_version`、`payload_decode` 和 `unknown` 六类，并额外验证地址读取前迁移查询失败输出 `storage/migration_read`，生成 `.herdr-project/uni-t-0045/library/peer-address-read-diagnostics.json`。
+- 栈过滤会丢弃 backtrace 捕获器自身、源码位置和无关运行时帧；只有实际捕获到关系存储或 peer-address 仓储符号时才标记 `captured`。本机 `--release` 隔离验证中认证、载荷解码、版本和迁移查询场景保留业务符号；未解锁、常规数据库读取和未知密钥错误因优化后符号不足输出空栈和 `unresolved`。
 - 相关仓储回归、观测合同、workspace check、格式、架构、隐私和 diff 检查通过；已执行本机 Cargo release 隔离验证，物理设备与正式产品发布构建均未执行。
