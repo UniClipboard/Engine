@@ -25,8 +25,8 @@ use crate::space::membership::{
     QueryDeviceTrustError, QueryDeviceTrustUseCase,
 };
 
-#[path = "tests/stage2_scenario.rs"]
-mod stage2_scenario;
+#[path = "tests/device_trust_recovery_scenario.rs"]
+mod device_trust_recovery_scenario;
 
 struct MemoryLedgerRepository {
     loaded: Mutex<LoadedMembershipLedger>,

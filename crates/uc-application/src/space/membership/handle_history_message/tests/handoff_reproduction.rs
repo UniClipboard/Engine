@@ -5,8 +5,8 @@ use crate::space::membership::{
     ResolveMembershipConflictResult, ResolveMembershipConflictUseCase,
 };
 
-#[path = "handoff_reproduction/stage2_scenario.rs"]
-mod stage2_scenario;
+#[path = "handoff_reproduction/legacy_candidate_convergence_scenario.rs"]
+mod legacy_candidate_convergence_scenario;
 
 struct QueryStatus;
 

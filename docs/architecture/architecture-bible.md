@@ -865,6 +865,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 ## 文档维护记录
 
+- 2026-09-22：将 Application 测试中的 `stage2` 执行阶段命名改为准入恢复、设备信任恢复和旧候选收敛等领域名称，并同步 nextest 选择器。变更仅涉及测试模块命名，不改变场景职责、生产接口或业务行为。
 - 2026-09-22：测试框架 PR 旁路 job 改为运行统一 `evidence` 入口，一次收集 testkit、确定性 Application、真实 provider 和独立进程代表场景的 JUnit、JSON 与文本摘要。原 checks、coverage 和 connection-recovery 门禁不变；远程工件必须下载解析后才算本阶段验收。
 - 2026-09-22：新增[047 测试框架 PR 与远程 CI 观察](../exec-plans/active/047-testkit-pr-and-ci-observation.md)，只交付 044-046 已验证的测试基础、首轮远程非发布检查与工件核验。至少 10 个工作日的自然运行才构成长趋势数据；一次成功不得写成长期稳定，真实网络和设备仍需独立验收。
 - 2026-09-22：完成[046 真实依赖与独立进程 testkit 采用](../exec-plans/completed/046-real-dependency-testkit-adoption.md)，现有 rendezvous loopback/Wiremock provider tests 和 profile storage upgrade 独立进程恢复测试生成统一诊断工件，并明确区分产品、环境和清理失败。testkit 只登记外部资源清理结果，不拥有产品恢复或进程生命周期；20 轮稳定性通过，旧测试和门禁保留，真实网络、远程趋势和设备跳过。
