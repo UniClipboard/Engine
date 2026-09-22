@@ -13,6 +13,21 @@
 | rendezvous provider 正常/无效/暂时失败 | `crates/uc-infra/src/rendezvous/invitation_adapter.rs` | persistence-provider/evidence | 产品、环境、清理分类 |
 | profile storage upgrade 与崩溃恢复 | `crates/uc-infra/tests/profile_storage_upgrade.rs`、`profile_storage_upgrade_crash.rs` | process/evidence/nightly | synthetic migration、子进程退出、持久恢复、资源回收；alpha.5 外部 fixture 单列未验证 |
 
+## 首批五类双线状态
+
+| 类别 | 快速确定性线 | 真实环境线 |
+| --- | --- | --- |
+| 配对 | 部分：成员恢复五场景 + 配对后成员历史网络；无完整快速配对 | E01 当前提交 direct/relay 已验证 |
+| 文字/文件 | 无统一快速多节点入口 | E02 text/file 当前提交 direct/relay 已验证 exact value/bytes |
+| 重连 | 无首批快速多节点入口 | E03/E04/E06/E10/E13 当前 runner 回归通过 |
+| 重启 | Application 持久准入重建已覆盖 | E11/E12 当前 runner 回归通过 |
+| 旧资料升级 | focused migration/process 18 项本地 5.546 秒 | workflow 已接入但默认分支未生效；alpha.5 fixture 未验证 |
+
+速度实测：快速成员五场景一次 `0.180s`，100 轮 `58.98s`；两节点成员历史场景单次 `0.053s`；统一 evidence
+测试累计 `2.077s`。当前真实工件的 scenario records 累计为 direct `672.000s`、relay `168.591s`、known-peer
+`1.775s`、legacy `0.122s`，相关 network job 墙钟约 66 分 54 秒。E01/E02 单项均低于 60 秒；新的分 mode
+准备、场景和清理 30 分钟目标仍无独立 nightly 样本，不登记达标。
+
 ## 保留原样
 
 以下测试通常短小、确定、没有跨阶段资源生命周期，套 testkit 只会增加噪音：

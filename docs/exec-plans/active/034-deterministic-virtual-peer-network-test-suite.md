@@ -154,6 +154,36 @@ setup 执行，但不登记为本次所选证据；全量运行和显式选择�
   外部合成资料继续列为未验证，不能用普通 migration 测试冒充。
 - 回退可独立删除 host 受管文件命令、E02 file 子场景和 upgrade job；旧测试、旧门禁、存储格式与生产接口不变。
 
+### 当前完成记录
+
+- `E02-file-transfer` 已实现双向真实 Engine 文件发送：测试宿主只保存 opaque 受管输入，发送端调用公开
+  `SendFiles`，接收端从公开 history 定位 file entry，再以 `ReadEntryFile` 核对文件名和完整 bytes。没有新增产品状态机、
+  生产公开接口、协议或持久格式。
+- 旧资料升级 nightly 已接入既有 `profile_storage_upgrade` 与 `profile_storage_upgrade_crash` 测试 binary；本地 nextest
+  18/18 通过、2 项外部 fixture 保持 ignored，测试累计 5.546 秒。crash recovery 工件为 passed、固定 seed
+  `0x00400304`、cleanup completed。
+- connectivity host check、workspace all-target check、metadata、fmt、脚本语法、Rust style、repository、privacy 与 diff
+  check 均通过；旧本地入口 89 项通过。alpha.5 外部完整 fixture、真实外网和设备没有执行。
+- 当前提交的受影响远程验收限定为 repository checks、真实网络 runner 的场景步骤和同 job 清理工件，均已通过。
+  direct 与 relay 的 E01、exact text 和双向 exact bytes 均通过；四种模式工件均为 `failed=false`、`cleaned=true`、
+  `plaintext_clean=true`，并包含准确复现命令。其他无关慢 job 不作为本切片等待条件。
+- `profile-upgrade` workflow 尚未进入默认分支，GitHub 不允许从当前 PR 分支触发新增的 workflow definition；本轮只登记
+  等价本地隔离证据，不把 schedule 或 workflow_dispatch 写成已生效。
+
+### 首批五类双线验收状态
+
+| 类别 | 快速确定性线 | 真实 nightly / 手工线 |
+| --- | --- | --- |
+| 配对 | 部分完成：成员恢复五场景和已准入成员历史网络；无完整快速 invitation -> settled | E01 当前提交 direct/relay 已验证 |
+| 文字与文件传输 | 未形成统一快速多节点入口 | E02 text/file 当前提交 direct/relay 已验证 exact value/bytes |
+| 断线重连 | 未形成首批快速多节点入口 | E03/E04/E06/E10/E13 当前 runner 回归通过 |
+| 重启恢复 | 部分完成：Application 持久准入重建，不是 Engine 进程重启 | E11/E12 当前 runner 回归通过 |
+| 旧资料升级 | focused migration/process 18 项本地通过 | workflow 已接入但默认分支未生效；alpha.5 fixture 未验证 |
+
+当前真正可复用的“准备/操作/预期”入口只有三类：Application `Scenario` + 领域 fixture、只覆盖已准入成员历史的
+`VirtualMembershipNetwork`，以及真实 runner 的 `--mode`/`--case`/`--repeat`。不能把真实 runner 的 E01/E02 命名算作
+快速多节点五类已经实现。
+
 # 1. Overview
 
 规格 030 已用真实 Engine operation、SQLite、Iroh endpoint、网络分区和正文传输完成 F0-F7 验收。其中 F7 单项

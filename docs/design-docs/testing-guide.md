@@ -146,3 +146,19 @@ target/nextest/ci/junit.xml
 - 超时是失败，不通过扩大预算、放宽断言、删除覆盖或自动重试隐藏。确需重跑时保留首次失败工件，并把
   retry-pass 单独登记。
 - 发布前检查近期 nightly 结果，并补跑受变更影响的配对、文字/文件传输、断线重连、重启恢复或旧资料升级场景。
+
+当前不要把两条线混用：`VirtualMembershipNetwork` 只是配对后成员历史的快速 fixture；完整配对和 E02 文字/文件
+传输属于真实 Engine runner。五类逐项状态和实测值以[测试架构的首批业务覆盖矩阵](testing-architecture.md#首批业务覆盖)
+为准。
+
+真实 runner 的最小调用示例：
+
+```bash
+# 完整配对
+bash scripts/testing/run-connection-recovery-e2e.sh --suite network --mode direct --repeat 1 --case E01
+
+# 只登记文件传输场景；runner 自动完成未登记的必要配对/文字 setup
+bash scripts/testing/run-connection-recovery-e2e.sh --suite network --mode direct --repeat 1 --case E02-file
+```
+
+这两个命令需要 Linux network namespace 和相应权限。macOS 上的脚本语法或 host 编译通过不构成场景通过。
