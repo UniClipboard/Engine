@@ -398,6 +398,18 @@ impl JoinerAdmission {
         )
     }
 
+    /// 判断记录是否仍是本机未终结的配对义务。
+    ///
+    /// 已终止加入只剩发给邀请方的放弃通知时不再占用配对运行资格；仍需本机切换空间时继续占用。
+    pub const fn holds_pairing_open(&self) -> bool {
+        match &self.record.state {
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(_)) => {
+                self.record.has_pending_local_termination()
+            }
+            _ => true,
+        }
+    }
+
     pub const fn cleanup_obligation(&self) -> Option<&AdmissionCleanupObligation> {
         match &self.record.state {
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state)) => {
@@ -584,6 +596,21 @@ impl JoinerAdmission {
     ) -> Result<JoinerAdmissionTransition, SpaceAdmissionAggregateError> {
         self.record
             .reject_peer_upgrade()
+            .map(JoinerAdmissionTransition::from_transition)
+    }
+
+    /// 放弃通知已无法在共同期限内送达。
+    pub fn has_undeliverable_abandonment(&self, now_ms: i64) -> bool {
+        self.record.has_undeliverable_abandonment(now_ms)
+    }
+
+    /// 结束无法送达的放弃通知并保留终止围栏。
+    pub fn end_undeliverable_abandonment(
+        self,
+        now_ms: i64,
+    ) -> Result<JoinerAdmissionTransition, SpaceAdmissionAggregateError> {
+        self.record
+            .end_undeliverable_abandonment(now_ms)
             .map(JoinerAdmissionTransition::from_transition)
     }
 

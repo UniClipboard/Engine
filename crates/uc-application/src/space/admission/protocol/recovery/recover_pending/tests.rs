@@ -870,3 +870,67 @@ fn join_input(code: &str) -> JoinSpaceInput {
         preserve_unreadable_history: false,
     }
 }
+
+#[tokio::test]
+async fn terminated_join_notification_retries_within_the_attempt_deadline_then_ends_locally() {
+    let pair =
+        SpaceAdmissionProtocolTestPair::receiving_invalid_activation_with_abandonment_upgrade()
+            .await;
+    pair.joiner()
+        .start_join_at(join_input("abandonment-deadline"), 1_000)
+        .await
+        .expect("the join request should be saved before recovery");
+    let rejected = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+    assert_eq!(rejected.rejected_count, 1);
+
+    let refused = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    assert_eq!(refused.recovery_required_count, 0, "refused: {refused:?}");
+    assert_eq!(refused.deferred_count, 1);
+    assert_eq!(refused.work_mode, SpaceWorkMode::Active);
+    let retry_at_ms = pair
+        .saved_join()
+        .pending_exchange()
+        .expect("the notification stays deliverable within the deadline")
+        .retry_state()
+        .next_attempt_at_ms();
+    assert!(retry_at_ms > 1_000);
+    let attempts = abandonment_attempts(&pair);
+
+    let outcome = pair
+        .joiner()
+        .recover_space_admissions(&MembershipMaintenanceTrigger::Periodic)
+        .await;
+    assert!(outcome.allows_ordinary_membership());
+    assert_eq!(abandonment_attempts(&pair), attempts);
+
+    // 共同期限到达后邀请方自行收尾，本机不再联网即结束通知。
+    pair.require_upgrade_once_more();
+    pair.set_now_ms(1_000 + uc_core::membership::SPACE_ADMISSION_ATTEMPT_DURATION_MS);
+    let ended = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::Periodic)
+        .await;
+
+    assert_eq!(ended.recovery_required_count, 0);
+    assert_eq!(ended.advanced_count, 1);
+    assert_eq!(abandonment_attempts(&pair), attempts);
+    assert!(pair.saved_join().pending_exchange().is_none());
+    assert_eq!(
+        pair.saved_join().rejection_reason(),
+        Some(uc_core::membership::SpaceAdmissionRejectionReason::RelationshipConflict)
+    );
+}
+
+fn abandonment_attempts(pair: &SpaceAdmissionProtocolTestPair) -> usize {
+    pair.events()
+        .iter()
+        .filter(|event| matches!(event, ProtocolEvent::JoinerAbandonmentExchanged))
+        .count()
+}

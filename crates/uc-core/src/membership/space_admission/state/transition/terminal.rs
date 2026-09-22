@@ -181,6 +181,56 @@ impl SpaceAdmissionAggregate {
         Ok(AdmissionTransition::new(self, &[]))
     }
 
+    /// 判断放弃通知是否已无法被邀请方接受。
+    ///
+    /// 期限到达后邀请方会按自己的期限收尾，不再依赖这条通知；没有期限的旧记录和本机旧协议版本的
+    /// 通知同样无法再被接受。仍需本机切换空间的收尾不在此列。
+    pub(crate) fn has_undeliverable_abandonment(&self, now_ms: i64) -> bool {
+        let SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state)) =
+            &self.state
+        else {
+            return false;
+        };
+        let Some(cleanup) = state.cleanup.as_ref() else {
+            return false;
+        };
+        let Some(pending) = cleanup.pending_exchange.as_ref() else {
+            return false;
+        };
+        if cleanup.local_space_transition.is_some() {
+            return false;
+        }
+        let within_deadline = self
+            .attempt_timeline
+            .is_some_and(|timeline| !timeline.is_expired(now_ms));
+        !within_deadline
+            || pending.request_envelope().header().protocol_version()
+                != SpaceAdmissionProtocolVersion::CURRENT
+    }
+
+    /// 结束无法送达的放弃通知，保留终止围栏。
+    pub(crate) fn end_undeliverable_abandonment(
+        mut self,
+        now_ms: i64,
+    ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        if !self.has_undeliverable_abandonment(now_ms) {
+            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        }
+        let record_version = self
+            .record_version
+            .checked_add(1)
+            .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
+        if let SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state)) =
+            &mut self.state
+        {
+            if let Some(cleanup) = state.cleanup.as_mut() {
+                cleanup.pending_exchange = None;
+            }
+        }
+        self.record_version = record_version;
+        Ok(AdmissionTransition::new(self, &[]))
+    }
+
     pub(crate) fn accept_abandoned(
         mut self,
         abandoned: SpaceAdmissionEnvelopeV1,

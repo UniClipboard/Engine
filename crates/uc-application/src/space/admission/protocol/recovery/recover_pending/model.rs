@@ -185,7 +185,9 @@ impl LoadedAdmissionRecovery {
     }
 
     pub fn pairing_in_progress(&self) -> bool {
-        !self.pending_admissions.is_empty()
+        self.pending_admissions
+            .iter()
+            .any(|loaded| loaded.aggregate().holds_pairing_open())
             || !self.sponsor_deadlines.is_empty()
             || self.sponsor_confirmation_pending
     }

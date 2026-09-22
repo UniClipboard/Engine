@@ -269,6 +269,18 @@ impl AdmissionRecoveryService {
         let loaded =
             recover_local_termination(self, joiner, aggregate, commit_token, report).await?;
         let (aggregate, commit_token) = loaded.into_parts();
+        let (aggregate, commit_token) = match end_undeliverable_abandonment(
+            self,
+            aggregate,
+            commit_token,
+            now_ms,
+            report,
+        )
+        .await
+        {
+            Some(loaded) => loaded.into_parts(),
+            None => return None,
+        };
         if aggregate.is_expired_at(now_ms) != Some(true) || !aggregate.can_terminate_locally() {
             return Some(LoadedPendingAdmission::new(aggregate, commit_token));
         }
@@ -420,6 +432,11 @@ impl AdmissionRecoveryService {
         aggregate: JoinerAdmission,
         token: AdmissionRecoveryCommitToken,
     ) {
+        // 已终止加入的放弃通知只在共同期限内投递；期内被拒按普通延期重试，期满由本机结束。
+        if aggregate.cleanup_obligation().is_some() {
+            self.save_deferred_retry(report, aggregate, token).await;
+            return;
+        }
         if aggregate.peer_upgrade_required() {
             report.peer_upgrade_required_count += 1;
             return;
@@ -672,6 +689,31 @@ async fn recover_local_termination(
             None
         }
     }
+}
+
+// 期满或无法再被接受的放弃通知在联网前结束，不再为它建立连接。
+async fn end_undeliverable_abandonment(
+    recovery: &AdmissionRecoveryService,
+    aggregate: JoinerAdmission,
+    token: AdmissionRecoveryCommitToken,
+    now_ms: i64,
+    report: &mut AdmissionRecoveryReport,
+) -> Option<LoadedPendingAdmission> {
+    if !aggregate.has_undeliverable_abandonment(now_ms) {
+        return Some(LoadedPendingAdmission::new(aggregate, token));
+    }
+    let transition = match aggregate.end_undeliverable_abandonment(now_ms) {
+        Ok(transition) => transition,
+        Err(_) => {
+            report.recovery_required_count += 1;
+            return None;
+        }
+    };
+    match recovery.commit_recovery_and_notify(token, transition).await {
+        Ok(_) => report.advanced_count += 1,
+        Err(error) => recovery.record_state_error(report, error),
+    }
+    None
 }
 
 fn finish_observation_after_recovery(

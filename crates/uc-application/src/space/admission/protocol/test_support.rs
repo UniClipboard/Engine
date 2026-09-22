@@ -272,6 +272,7 @@ enum TransportMode {
     AuthenticateThenCandidateCommitAndComplete,
     AuthenticateThenCandidateCommitAndInvalidActivation,
     AuthenticateThenCandidateCommitInvalidActivationAndLoseAbandonmentOnce,
+    AuthenticateThenCandidateCommitInvalidActivationAndUpgradeOnAbandonment,
     UpgradeOnceOnPrepared,
     UpgradeOnceOnApplied,
     UpgradeOnceOnCancel,
@@ -286,6 +287,9 @@ impl TransportMode {
             Self::UpgradeOnceOnApplied => Some(SpaceAdmissionMessageKind::Applied),
             Self::UpgradeOnceOnCancel => Some(SpaceAdmissionMessageKind::CancelRequested),
             Self::UpgradeOnceOnSettlement => Some(SpaceAdmissionMessageKind::CompleteAck),
+            Self::AuthenticateThenCandidateCommitInvalidActivationAndUpgradeOnAbandonment => {
+                Some(SpaceAdmissionMessageKind::Abandonment)
+            }
             _ => None,
         }
     }
@@ -296,6 +300,7 @@ impl TransportMode {
             Self::AuthenticateThenCandidateCommitAndComplete
                 | Self::AuthenticateThenCandidateCommitAndInvalidActivation
                 | Self::AuthenticateThenCandidateCommitInvalidActivationAndLoseAbandonmentOnce
+                | Self::AuthenticateThenCandidateCommitInvalidActivationAndUpgradeOnAbandonment
                 | Self::UpgradeOnceOnPrepared
                 | Self::UpgradeOnceOnApplied
                 | Self::UpgradeOnceOnCancel
@@ -1099,6 +1104,9 @@ impl AuthenticatedAdmissionExchangePort for ExchangeThenDeferred {
             {
                 return Err(SpaceAdmissionTransportError::Deferred);
             }
+            if self.take_upgrade_failure(request.kind()) {
+                return Err(SpaceAdmissionTransportError::PeerUpgradeRequired);
+            }
             let request_digest: [u8; 32] = Sha256::digest(
                 request
                     .encode_canonical_v1()
@@ -1785,6 +1793,14 @@ impl SpaceAdmissionProtocolTestPair {
         .await
     }
 
+    pub(super) async fn receiving_invalid_activation_with_abandonment_upgrade() -> Self {
+        Self::with_mode(
+            None,
+            TransportMode::AuthenticateThenCandidateCommitInvalidActivationAndUpgradeOnAbandonment,
+        )
+        .await
+    }
+
     pub(super) async fn upgrade_once_on_prepared() -> Self {
         Self::with_mode(None, TransportMode::UpgradeOnceOnPrepared).await
     }
@@ -1851,6 +1867,7 @@ impl SpaceAdmissionProtocolTestPair {
                 mode,
                 TransportMode::AuthenticateThenCandidateCommitAndInvalidActivation
                     | TransportMode::AuthenticateThenCandidateCommitInvalidActivationAndLoseAbandonmentOnce
+                    | TransportMode::AuthenticateThenCandidateCommitInvalidActivationAndUpgradeOnAbandonment
             ),
         });
         let sponsor_complete = Arc::new(FixedSponsorComplete {
