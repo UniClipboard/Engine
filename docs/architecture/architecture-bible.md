@@ -865,6 +865,8 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 ## 文档维护记录
 
+- 2026-09-22：测试架构明确源码布局：只依赖公开接口的跨模块场景进入 crate `tests/`；必须访问私有实现的场景集中在业务模块的 `tests/` 子目录，领域 fixture 放相邻 `tests/support/` 或既有明确 `testing/` 目录，跨领域通用能力仍只在 `tests/uc-testkit/`。本次只收敛 0040 PR 新增或扩展的 admission/provider 场景，不扩大生产可见性、不增加测试开关，也不改变业务行为、协议或持久格式。
+
 - 2026-09-22：Application 成员场景、provider evidence 与 profile crash 场景不再自行拼接进程目录；稳定 `artifact_id` 与唯一 `artifact_directory` 均由 testkit 生成，避免隔离策略泄漏到调用方。
 - 2026-09-22：`evidence`、`persistence-provider` 与 `process` 统一入口增加明确 Cargo package 边界，避免 nextest 为过滤表达式发现并构建无关绑定与宿主；测试 filter、旧入口和 CI 门禁不变。
 - 2026-09-22：统一测试入口的 `persistence-provider` 组同步包含已采用的 provider dependency evidence，避免 nextest override 与脚本实际集合不一致；原三个持久化 integration binary 保留。
@@ -1410,6 +1412,8 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 - 2026-09-22：真实 Engine 隔离网络 runner 将既有完整配对和双向 exact text setup 登记为可单独选择、计时和出具清理证据的 E01/E02 场景；runner 仍只管理进程、namespace、等待预算和工件，准入与内容传输继续由原 Engine/Application 负责人执行，生产行为与接口未改变。
 - 2026-09-22：connectivity 测试宿主增加仅供测试进程使用的 opaque 文件表，真实 Engine 仍通过公开 `SendFiles`、history 与 `ReadEntryFile` 完成文件导入、网络发送和接收字节核验；nightly 复用既有 profile migration 与 crash recovery binary。没有新增生产接口、业务状态机、协议或持久格式。
 - 2026-09-22：Engine 测试长期路线统一收敛到测试架构文档：日常与 PR 使用快速确定性线，nightly 和手工入口使用真实 Engine 多进程、独立资料、真实存储与相应真实网络；首批覆盖配对、文字和文件传输、断线重连、重启恢复及旧资料升级。testkit 只承担测试生命周期、故障施加、等待、资源和诊断，不复制业务状态机；双线清单按实际证据分别登记，真实 runner 的 E01/E02 名称不计作快速多节点覆盖。本次仅更新测试路线与计划关系，不改变生产架构、公开接口、协议或持久格式。
+- 2026-09-22：规格 034 下一切片将 admission 测试作者入口收敛为一次 test-only 完整配对动作，并为真实 runner 工件分别记录准备、场景和清理耗时；fixture 只调用现有 `SpaceAdmissionProtocol`、成员维护和激活负责人，不生成协议阶段或扩大生产接口。该记录先固定实现与验收边界，当前生产行为、协议和持久格式未改变。
+- 2026-09-22：规格 034 增加 test-only `PairingScenarioFixture`，让测试作者以一次加入动作调用真实 admission maintenance、激活和最终确认负责人，并返回 Active 与最终确认快照；真实隔离网络工件增加准备、场景、清理和总耗时。该 fixture 不实现 Sponsor 或协议状态机，生产行为、公开接口、协议和持久格式未改变。
 - 2026-09-20：在线目录登记窗口比完整邀请多保留一分钟，避免客户端与目录服务的轻微时钟偏差把结构正确的签发响应误判为无效；完整邀请、局域网发布和准入共同期限仍为五分钟，目录响应仍须通过结构、时间范围及不早于完整邀请的校验。公开接口、错误编号、流程负责人、设备间协议和持久格式均未改变。
 - 2026-09-20：补充移动绑定到 Engine、Application 的自定义中继公开契约验收，覆盖权威查询、增加、编辑、删除、旧入口兼容、三类业务拒绝、无效令牌分类与调试脱敏；只增强测试证据，不改变架构、公开接口或持久格式。
 - 2026-09-20：自定义中继兼容保存结果只报告本次目标中继是否配置令牌，不再受列表中其他中继影响；目标地址继续通过既有规范化凭据查询匹配。增加和编辑收到无法作为请求头发送的令牌时，沿用中继保存错误编号并明确归为不可重试的输入错误；令牌不进入错误或调试输出。公开接口、持久格式和流程负责人均未改变。

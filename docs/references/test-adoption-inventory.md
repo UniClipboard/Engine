@@ -8,23 +8,25 @@
 | --- | --- | --- | --- |
 | testkit 自身、成功/受控失败、并行工件、进程超时 | `tests/uc-testkit/` | fast | JSON、摘要、JUnit |
 | 五个确定性成员恢复场景 | `crates/uc-application/src/space/` 对应领域测试 | fast/evidence | 固定 seed、公开终态、阶段与复现命令 |
+| 加入方完整配对作者入口 | `space/admission/protocol/tests/` | evidence | 专用 fixture 位于 `tests/support/`；一次真实负责人调用返回 Active + final confirmation，不冒充双方 Engine 链路 |
 | 两节点成员历史分区与恢复 | `crates/uc-application/src/space/membership/testing/virtual_membership_network.rs` | fast/evidence | 真实 Application endpoint、frame 预算、脱敏 trace；仅为配对后收敛基础 |
 | 真实 Engine 完整配对、文字与文件传输 | `scripts/testing/connection-recovery-network.mjs` 的 `E01`/`E02` | real-network/nightly | 独立进程、profile、身份、端口与 namespace；公开 setup/eligibility/peer/history/ReadEntryFile 终态、exact bytes 和 cleanup 证据 |
-| rendezvous provider 正常/无效/暂时失败 | `crates/uc-infra/src/rendezvous/invitation_adapter.rs` | persistence-provider/evidence | 产品、环境、清理分类 |
+| rendezvous provider 正常/无效/暂时失败 | `crates/uc-infra/src/rendezvous/invitation_adapter/tests/provider_dependency_evidence.rs` | persistence-provider/evidence | 私有 adapter 场景与业务实现分目录；产品、环境、清理分类 |
 | profile storage upgrade 与崩溃恢复 | `crates/uc-infra/tests/profile_storage_upgrade.rs`、`profile_storage_upgrade_crash.rs` | process/evidence/nightly | synthetic migration、子进程退出、持久恢复、资源回收；alpha.5 外部 fixture 单列未验证 |
 
 ## 首批五类双线状态
 
 | 类别 | 快速确定性线 | 真实环境线 |
 | --- | --- | --- |
-| 配对 | 部分：成员恢复五场景 + 配对后成员历史网络；无完整快速配对 | E01 当前提交 direct/relay 已验证 |
+| 配对 | 部分：加入方完整 fixture + 成员恢复五场景 + 配对后成员历史网络；无双方完整快速 topology | E01 当前提交 direct/relay 已验证 |
 | 文字/文件 | 无统一快速多节点入口 | E02 text/file 当前提交 direct/relay 已验证 exact value/bytes |
 | 重连 | 无首批快速多节点入口 | E03/E04/E06/E10/E13 当前 runner 回归通过 |
 | 重启 | Application 持久准入重建已覆盖 | E11/E12 当前 runner 回归通过 |
 | 旧资料升级 | focused migration/process 18 项本地 5.546 秒 | workflow 已接入但默认分支未生效；alpha.5 fixture 未验证 |
 
-速度实测：快速成员五场景一次 `0.180s`，100 轮 `58.98s`；两节点成员历史场景单次 `0.053s`；统一 evidence
-测试累计 `2.077s`。当前真实工件的 scenario records 累计为 direct `672.000s`、relay `168.591s`、known-peer
+速度实测：快速成员五场景一次 `0.180s`，100 轮 `58.98s`；新 joiner pairing fixture 单次 `0.040s`，与旧 settled
+测试双轨 20 轮在 11 秒内全部通过；两节点成员历史场景单次 `0.053s`。当前 evidence 16/16，测试累计
+`1.944s`。当前真实工件的 scenario records 累计为 direct `672.000s`、relay `168.591s`、known-peer
 `1.775s`、legacy `0.122s`，相关 network job 墙钟约 66 分 54 秒。E01/E02 单项均低于 60 秒；新的分 mode
 准备、场景和清理 30 分钟目标仍无独立 nightly 样本，不登记达标。
 

@@ -14,8 +14,8 @@ use crate::space::membership::{
     RecoverSpaceAdmissionsPort,
 };
 
-#[path = "admission_recovery_scenarios.rs"]
 mod admission_recovery_scenarios;
+mod support;
 
 #[tokio::test]
 async fn candidate_abandonment_is_saved_before_reply_and_duplicate_replays_it() {

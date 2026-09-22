@@ -184,6 +184,90 @@ setup 执行，但不登记为本次所选证据；全量运行和显式选择�
 `VirtualMembershipNetwork`，以及真实 runner 的 `--mode`/`--case`/`--repeat`。不能把真实 runner 的 E01/E02 命名算作
 快速多节点五类已经实现。
 
+## 当前快速配对作者入口与真实环境计时切片（2026-09-22）
+
+### 本 PR 测试目录收敛
+
+在继续扩展快速线前，先解决测试与业务文件混排。迁移只覆盖本 PR 新增或扩展的场景，不做全仓重排：
+
+| 调整前 | 调整后 | 原因 |
+| --- | --- | --- |
+| `space/admission/protocol/admission_recovery_scenarios.rs` | `space/admission/protocol/tests/admission_recovery_scenarios.rs` | 场景需访问 admission 私有装配，但文件名与业务实现并排，无法一眼识别为测试 |
+| `space/admission/protocol/pairing_scenario_fixture.rs` | `space/admission/protocol/tests/support/pairing_scenario_fixture.rs` | 这是 admission 专用作者 fixture，不属于生产 protocol，也不应进入通用 testkit |
+| `rendezvous/invitation_adapter.rs` 内的 `provider_dependency_evidence_reports_all_outcomes` | `rendezvous/invitation_adapter/tests/provider_dependency_evidence.rs` | 场景必须访问 adapter 私有 helper，保留私有访问但从业务实现文件移出 |
+
+以下路径保持不动：`membership/**/tests/` 已符合私有场景规则；`membership/testing/` 是明确命名的领域虚拟网络；
+crate `tests/` 下的升级/进程场景只使用公开接口；既有 `protocol/test_support.rs` 虽然仍与业务并排，但属于历史大型
+支撑，本轮移动会造成大量无关引用变化，登记为后续自然收敛项。
+
+验收标准：普通 `cargo check` 不依赖 `uc-testkit` 或上述 test-only 模块；nextest 现有名称选择器继续选中相同场景；
+旧 `cargo test` 入口继续通过；文档与采用清单不再引用调整前路径。回退只还原模块声明和文件位置，不改变生产行为、
+公开接口、协议或持久格式。
+
+### 最小交付与复用点
+
+本切片只补两个已证实缺口，不建设统一多节点 DSL：
+
+1. admission 测试作者目前需要知道恢复轮次、激活入口和最终确认顺序。新增 test-only
+   `PairingScenarioFixture`，作者只准备加入输入、执行一次 `complete_joiner_pairing`，并断言返回的稳定快照。
+   fixture 调用真实 `SpaceAdmissionProtocol`、成员维护入口和激活入口，不生成协议回复、不解释内部阶段；已有
+   `SpaceAdmissionProtocolTestPair` 继续提供可控 transport、clock 和持久状态。
+2. 真实 runner 工件只有逐场景耗时和 job 总墙钟，不能区分环境准备与清理。runner 在同一 JSON envelope 增加
+   `timings.prepare_ms`、`timings.scenario_ms`、`timings.cleanup_ms` 和 `timings.total_ms`；计时只观察 runner 自己的
+   生命周期，不改变场景、预算或重试。
+
+快速场景选择加入方完整收敛，因为它复用现有真实负责人、补齐 invitation -> active settled 的作者入口，并能在
+1 秒预算内完成。Sponsor 最终确认唯一性继续由既有三设备场景证明，双方真实 Engine 的 same-space、usable 和 online
+继续由 E01 证明；本切片不机械复制真实链路。
+
+### 完整负责人、唯一动作与结果
+
+- 完整负责人仍是 `SpaceAdmissionProtocol`。fixture 只把已有完整动作组合成一次测试调用，不保存自己的业务阶段。
+- 作者唯一动作：构造 `JoinSpaceInput` 后调用 `complete_joiner_pairing`；成功返回 `CurrentJoinStatus::Active` 与
+  `final_confirmation_complete=true` 的脱敏快照。
+- 失败结果：开始加入、成员维护、激活或最终确认任一步失败，返回稳定 fixture/product condition；testkit 记录阶段、
+  最后事件、固定 seed、复现命令和工件位置。
+- 重试和重启仍由生产 admission 负责人决定；fixture 不自动重试。既有 retry/restart 场景继续单独验证相应规则。
+- 真实 runner 只记录 prepare/scenario/cleanup/total；cleanup 失败仍使场景失败，不能被 timing 覆盖。
+
+### 实现前失败清单
+
+| 失败方式 | 预期 |
+| --- | --- |
+| 加入输入无法保存 | fixture 返回 `join-start`，不进入恢复 |
+| maintenance 在激活前 deferred/stable failure/corrupt | fixture 返回准确 condition，不猜测阶段、不增加循环次数掩盖 |
+| 激活失败 | 保留原失败，场景工件标出 activation stage |
+| final confirmation 未完成 | 快照不得写成 settled，场景以 product invariant 失败 |
+| fixture 复制消息或持久状态机 | 架构审查失败；只允许调用现有完整负责人和读取测试仓储结果 |
+| runner 在首场景前失败 | `prepare_ms` 保留，`scenario_ms` 为 0，cleanup 仍执行并计时 |
+| 场景失败后 cleanup 失败 | 业务失败保持 primary，envelope 同时记录 `cleaned=false` 与 cleanup 时间 |
+| 时间字段不满足总量关系 | 工件检查失败；允许毫秒取整误差，不允许负值或缺字段 |
+
+### 预算、验收与回退
+
+- 新快速场景预算 1 秒；单次 nextest 目标小于 1 秒，连续 20 轮无随机失败，加入现有 fast/evidence 选择器。
+- 作者示例必须只出现准备输入、执行一次场景动作和断言最终快照，不暴露消息、恢复轮次或内部阶段。
+- 与既有 `settled_is_saved_and_finishes_joiner_recovery` 双轨 20 轮，比较最终 joiner settled 结果；旧测试不删除。
+- 真实 runner 修改后，本轮相关 Linux network step 必须通过并读回四种 mode 工件；每份 timing 字段和 cleanup 均核对。
+- 30 分钟目标按 mode 的 `prepare + scenario + cleanup` 实测。PR 全矩阵仍可作为当前样本，但默认分支 nightly
+  尚未生效时，不把 scheduled 入口记为通过。
+- 回退可独立删除 test-only fixture/场景和 timing 字段；旧测试、真实场景、门禁、生产接口、协议与持久格式保持。
+
+### 当前完成记录
+
+- 本 PR 新增/扩展的测试已按职责收敛：admission 场景位于 `protocol/tests/`，专用配对 fixture 位于
+  `protocol/tests/support/`，provider 证据位于 `invitation_adapter/tests/`。业务目录不再出现无测试标识的新增场景文件，
+  `invitation_adapter.rs` 不再内嵌 testkit 长场景；没有扩大生产可见性或新增生产测试开关。
+- 新增 test-only `PairingScenarioFixture`。作者示范只准备 `JoinSpaceInput`、调用一次 `complete_joiner_pairing` 并断言
+  Active + final confirmation；实现调用真实 admission maintenance、激活和最终确认负责人，没有生成消息或保存平行阶段。
+- 测试先于实现落下，初次按预期因 fixture 模块不存在而编译失败；最小实现后场景通过，单次 nextest `0.040s`。
+- 新场景与既有 `settled_is_saved_and_finishes_joiner_recovery` 双轨 20 轮全部通过，总墙钟 11 秒。工件包含固定 seed
+  `0x00403402`、`complete-joiner-pairing` 阶段、最后事件、复现命令和 cleanup completed。
+- evidence 16/16 通过、测试累计 1.944 秒；fast 基础组 7/7 通过；`uc-application` 全库 961 通过、1 项既有忽略。
+- 真实 runner JSON 已增加 prepare/scenario/cleanup/total 四项计时，脚本语法通过；Linux 实际值与 cleanup 工件仍须由
+  本轮相关远程 network step 读回后才能登记。
+- 快速配对仍标为“部分”：它证明 joiner 确定性收敛；Sponsor 唯一性沿用三设备场景，双方真实链路沿用 E01。
+
 # 1. Overview
 
 规格 030 已用真实 Engine operation、SQLite、Iroh endpoint、网络分区和正文传输完成 F0-F7 验收。其中 F7 单项

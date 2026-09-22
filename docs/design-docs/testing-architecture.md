@@ -74,6 +74,23 @@ Relationship: 本轮只新增 testkit/nextest 非破坏 job 或 step；原 job �
 
 # 5. Proposed Design
 
+## 测试代码布局
+
+测试是否进入生产构建只是最低约束；目录还必须让开发者一眼区分业务实现、测试场景和测试支撑：
+
+- 只依赖 crate 公开接口的跨模块场景放在对应 crate 的 `tests/`，作为 integration test binary 运行。
+- 必须访问私有实现的测试放在对应业务模块的 `src/**/tests/` 子目录，由 `#[cfg(test)] mod tests;`
+  接入。场景和专用 fixture 不得以无测试标识的文件名与业务实现并排。
+- 同一业务模块的窄测试支撑放在其 `tests/support/`，或在已有领域约定明确时放在 `testing/`；它只能调用真实
+  业务负责人，不能复制业务状态机。
+- 跨 crate 的通用生命周期、预算、等待、资源和报告能力只放在 `tests/uc-testkit/`。生产 crate 不得为访问这些
+  支撑扩大公开接口或增加运行时测试开关。
+- 简单私有单元测试可以继续放在已有 `tests.rs`；既有 `test_support.rs` 不因本规范一次性搬迁。新增和本 PR
+  扩展的长场景必须按上述目录收敛。
+
+职责命名优先，例如 `admission_recovery_scenarios.rs`、`provider_dependency_evidence.rs`；源码、测试、脚本和目录均不使用
+stage 或 thread 编号。
+
 ## Components
 
 ### `uc-testkit::Scenario`
@@ -253,7 +270,7 @@ Iroh host 和成熟系统工具。网络故障必须在对应真实环境中实�
 
 | 类别 | 快速确定性线 | 真实 nightly / 手工线 |
 | --- | --- | --- |
-| 配对 | **部分**：五个成员恢复场景覆盖最终确认重试、三设备可见性和旧候选收敛；034 只覆盖已准入两节点的成员历史分区/恢复。尚无完整 invitation -> settled 的快速多节点入口 | **当前提交已验证**：`E01-complete-pairing` 使用真实 Engine 多进程、独立资料和公开 setup/eligibility/peer 终态；direct 三节点 9.891 秒，relay 两节点 3.543 秒 |
+| 配对 | **部分**：`PairingScenarioFixture` 让作者一次调用真实 joiner 负责人完成 invitation -> Active + final confirmation；五个成员恢复场景覆盖重试、三设备可见性和旧候选收敛，034 覆盖已准入成员历史分区/恢复。仍无双方完整快速 topology | **当前提交已验证**：`E01-complete-pairing` 使用真实 Engine 多进程、独立资料和公开 setup/eligibility/peer 终态；direct 三节点 9.891 秒，relay 两节点 3.543 秒 |
 | 文字与文件传输 | **未形成统一快速多节点场景**：保留既有 Application/Engine 组件测试，不能把真实 runner 的 E02 名称算作快速覆盖 | **当前提交已验证**：direct exact text 0.298 秒、双向 exact bytes 0.226 秒；relay 分别 0.134 秒和 0.242 秒 |
 | 断线重连 | **未形成首批快速多节点入口**：034 的 membership message 分区不等于真实连接重建 | **当前提交已验证回归**：E03/E04/E06/E10/E13 实际施加 namespace/relay/known-peer 故障；四种模式工件均通过 |
 | 重启恢复 | **部分**：`restart_continues_from_persisted_admission` 使用真实 Application 负责人和固定 seed；不是完整 Engine 进程重启 | **当前提交已验证回归**：E11/E12 停止/重建真实 Engine 并继续 exact text；direct 工件通过 |
@@ -264,6 +281,7 @@ Iroh host 和成熟系统工具。网络故障必须在对应真实环境中实�
 | 入口 | 测试作者描述 | 框架承担 | 当前限制 |
 | --- | --- | --- | --- |
 | `Scenario` + Application fixtures | 固定 seed、调用一个真实负责人、最终公开状态 | 预算、阶段、事件等待、临时资源、清理、JSON/文本/JUnit 和复现命令 | 节点准备仍由各领域 fixture 提供，尚无覆盖五类的统一 topology API |
+| `PairingScenarioFixture` | 准备 `JoinSpaceInput`、调用一次 `complete_joiner_pairing`、断言稳定快照 | 可控 transport/clock/persistence、真实 admission maintenance、激活和最终确认 | 只证明 joiner 规则；Sponsor 唯一性由三设备场景证明，双方链路由 E01 证明 |
 | `VirtualMembershipNetwork` | 注册两个已准入节点、send/partition/heal、预期 ACK/Offline | typed message 路由、frame 预算、脱敏 trace | 只覆盖成员历史，不负责 invitation、内容或连接生命周期 |
 | `run-connection-recovery-e2e.sh --mode ... --case ...` | mode、场景前缀、repeat | Engine 进程、profile、身份、端口、namespace、relay、等待、清理和 JSON 工件 | Linux/root 环境；PR 全矩阵仍约 67 分钟，不属于快速线 |
 | `engine-real-environment.yml` 的 `profile-upgrade` | 选择升级模式 | 固定 nextest、编译/场景/总耗时、JUnit 与 testkit 工件 | workflow 尚未进入默认分支，当前不能 workflow_dispatch |
@@ -276,6 +294,8 @@ Iroh host 和成熟系统工具。网络故障必须在对应真实环境中实�
 
 - 固定记录工具链、runner、操作系统/runner 类型、CPU 并发、样本数和是否为 warm build。
 - 分别报告编译、环境准备、测试、清理和整次墙钟；不得只给测试本体耗时掩盖实际等待。
+- 真实 runner JSON 的 `timings` 分别记录首个被选场景前的 prepare、场景执行、cleanup 和 total；按 case 选择时，
+  被选场景依赖的未登记 setup 计入 prepare。
 - 超出预算即失败；不得通过放宽断言、删除覆盖、增加固定 sleep 或自动重试把超时改成通过。
 - 默认不自动重试。真实环境如按明确策略重跑，首次失败工件必须保留，retry-pass 单独登记。
 - 无法稳定重现的真实网络失败应明确记录环境、首次证据和复现限制，不改写为普通通过。

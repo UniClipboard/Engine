@@ -14,10 +14,42 @@ use crate::space::membership::{
 use crate::space::JoinSpaceInput;
 use crate::test_support::membership_scenario::{finish, require, scenario};
 
+use super::support::PairingScenarioFixture;
+
 const RETRY_REPRODUCE: &str = "cargo nextest run -p uc-application -E 'test(final_confirmation_retry_yields_ordinary_maintenance)'";
+const PAIRING_FIXTURE_REPRODUCE: &str =
+    "cargo nextest run -p uc-application -E 'test(joiner_pairing_fixture_reaches_active_settled)'";
 const VISIBILITY_REPRODUCE: &str = "cargo nextest run -p uc-application -E 'test(three_device_confirmation_has_one_visible_admission)'";
 const RESTART_REPRODUCE: &str =
     "cargo nextest run -p uc-application -E 'test(restart_continues_from_persisted_admission)'";
+
+#[tokio::test]
+async fn joiner_pairing_fixture_reaches_active_settled() {
+    let scenario = scenario(
+        "joiner-pairing-fixture",
+        0x0040_3402,
+        Duration::from_secs(1),
+        PAIRING_FIXTURE_REPRODUCE,
+    );
+    let result = async {
+        let pairing = PairingScenarioFixture::prepare().await;
+        let snapshot = {
+            let _stage = scenario.stage("complete-joiner-pairing");
+            pairing
+                .complete_joiner_pairing(join_input("pairing-fixture"))
+                .await
+                .map_err(|failure| fixture(failure.condition()))?
+        };
+        scenario.record_event("joiner-pairing-completed");
+        require(snapshot.is_active(), "joiner-pairing-was-not-active")?;
+        require(
+            snapshot.final_confirmation_complete(),
+            "joiner-pairing-final-confirmation-incomplete",
+        )
+    }
+    .await;
+    finish(scenario, result);
+}
 
 #[tokio::test]
 async fn final_confirmation_retry_yields_ordinary_maintenance() {

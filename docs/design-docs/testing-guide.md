@@ -29,6 +29,17 @@
 
 testkit 不解释 admission、membership、provider 或存储状态，也不复制生产状态机。只有多个真实调用方已经需要相同的测试生命周期能力时，才向 testkit 增加入口。
 
+### 文件放在哪里
+
+1. 场景只需要 crate 公开接口：放在该 crate 的 `tests/`。
+2. 场景必须读取私有状态或调用私有测试装配：放在业务模块的 `src/**/tests/`，由模块的 `#[cfg(test)]`
+   入口接入。
+3. 只服务该领域场景的 fixture：放在相邻 `tests/support/`；已有明确领域测试网络可放在 `testing/`。
+4. 跨领域通用能力才进入 `tests/uc-testkit/`。
+
+不要为了把测试移到 crate `tests/` 而把生产私有接口改为 `pub`，也不要新增生产测试开关。短小的既有
+`tests.rs` 和明确命名的历史 `test_support.rs` 可以保留；新增长场景不能继续内嵌在业务实现文件中。
+
 ## 3. 可直接运行的最小示例
 
 从仓库根目录执行：
@@ -151,6 +162,18 @@ target/nextest/ci/junit.xml
 传输属于真实 Engine runner。五类逐项状态和实测值以[测试架构的首批业务覆盖矩阵](testing-architecture.md#首批业务覆盖)
 为准。
 
+快速 admission 场景的作者入口保持窄小：准备 `JoinSpaceInput`，调用一次 `complete_joiner_pairing`，只断言返回的
+Active 状态和最终确认。fixture 内部调用真实 `SpaceAdmissionProtocol`、成员维护与激活负责人；测试不得编排
+Candidate/Commit/Complete/ACK 或固定恢复轮次。当前示范可直接运行：
+
+```bash
+cargo nextest run -p uc-application \
+  -E 'test(joiner_pairing_fixture_reaches_active_settled)' --locked
+```
+
+这个快速入口只证明加入方确定性规则。邀请方最终确认唯一性由三设备场景证明；双方 Engine 的 same-space、usable、
+online 和真实传输仍必须运行下面的真实 runner。
+
 真实 runner 的最小调用示例：
 
 ```bash
@@ -162,3 +185,5 @@ bash scripts/testing/run-connection-recovery-e2e.sh --suite network --mode direc
 ```
 
 这两个命令需要 Linux network namespace 和相应权限。macOS 上的脚本语法或 host 编译通过不构成场景通过。
+runner 工件中的 `timings.prepare_ms`、`scenario_ms`、`cleanup_ms` 和 `total_ms` 用于核对 30 分钟目标；场景 records
+仍保留每个业务步骤耗时，二者不能互相替代。
