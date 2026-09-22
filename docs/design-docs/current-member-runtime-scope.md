@@ -15,7 +15,7 @@
   `docs/exec-plans/completed/016-workspace-wide-convergence.md`、
   `docs/product-specs/021-device-trust-reconciliation.md`、
   `docs/exec-plans/completed/023-durable-membership-proof-and-admission-activation.md`、
-  `docs/architecture/architecture-bible.md`
+  `ARCHITECTURE.md`
 
 # 1. Overview
 
@@ -363,7 +363,7 @@ Engine 入口。内部错误按现有稳定类别映射；列表和后台任务�
 
 ## Step 9: 同步正式文档和产品交接
 
-**File:** `docs/architecture/architecture-bible.md`
+**File:** 本文与 `ARCHITECTURE.md`
 **File:** `docs/product-specs/021-device-trust-reconciliation.md`
 **File:** desktop 对应设备列表接入文档
 **Change:** 记录当前范围、历史身份和受限通信边界；产品端明确不把 removed 历史关系补回普通列表。

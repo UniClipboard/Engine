@@ -457,7 +457,7 @@ bullet 先省略 `uc.flow.id`，只使用真实 W3C 因果关系；不得为满�
 `crates/uc-infra/src/network/iroh/{space_admission,space_admission_wire}.rs`、相邻测试。
 
 **禁止修改**：bindings、根 Cargo/Cargo.lock、contract diagnostics schema、`observability/mod.rs` 非 Space 区段、架构脚本、计划与
-architecture bible。发现共享接口缺口时停止该片并交回整合 owner，不得私自扩接口。
+当时的架构汇总（现已删除）。发现共享接口缺口时停止该片并交回整合 owner，不得私自扩接口。
 
 **Change**：准入和成员完整网络能力迁移到统一 target/schema；删除 Engine 对准入状态、准备、激活、成员账本和分支恢复子步骤的
 观测。在线每轮使用真实 client/server/endpoint trace；重试/重启由 Application 不透明作用域提供同一匿名 flow；session transition

@@ -8,7 +8,7 @@
 - **相关文档**：`docs/exec-plans/completed/015-offline-first-member-removal.md`、
   `docs/design-docs/decisions/016-workspace-wide-convergence.md`、
   `docs/design-docs/decisions/020-membership-reconciliation-and-user-decisions.md`、
-  `docs/architecture/architecture-bible.md`、
+  `ARCHITECTURE.md`、
   `docs/design-docs/uc-engine-interface.md`
 
 ## 背景

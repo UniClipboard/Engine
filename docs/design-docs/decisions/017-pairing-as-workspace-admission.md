@@ -14,7 +14,7 @@
   `docs/design-docs/decisions/020-membership-reconciliation-and-user-decisions.md`、
   `docs/design-docs/decisions/022-user-initiated-join-supersession.md`、
   `docs/design-docs/decisions/026-bounded-admission-lifecycle.md`、
-  `docs/architecture/architecture-bible.md`
+  `ARCHITECTURE.md`
 
 本文早期版本关于 OpenRaft、learner、多数提交、最终成员配置和提交引用的决定已被 ADR-020 取代，
 不能作为实施依据。加入成功、材料交付、历史验证和冲突结果以 ADR-020 与规格 023 为准。

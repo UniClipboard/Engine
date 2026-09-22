@@ -8,7 +8,7 @@
   `docs/exec-plans/completed/023-durable-membership-proof-and-admission-activation.md`、
   `docs/exec-plans/completed/026-legacy-profile-isolation-and-re-pairing.md`、
   `docs/design-docs/uc-engine-interface.md`、
-  `docs/architecture/architecture-bible.md`
+  `ARCHITECTURE.md`
 
 ## 背景
 

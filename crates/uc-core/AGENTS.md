@@ -17,4 +17,4 @@
 - 新 Port 必须证明 Core 领域代码直接消费；UseCase 专属能力归 Application。
 - 禁止引入数据库、网络、UI、异步运行时或具体密码实现依赖。
 
-修改后运行 Core 定向测试、workspace check、fmt、架构检查和 `git diff --check`，并同步架构圣经。
+修改后运行 Core 定向测试、workspace check、fmt、架构检查和 `git diff --check`；架构事实变化时同步对应主题文档。

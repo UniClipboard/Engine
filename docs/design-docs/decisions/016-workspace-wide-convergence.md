@@ -5,7 +5,7 @@
 - **修订**：ADR-015 的完整流程负责人、对外状态和完成边界；保留其移除意图合法性、合并和新成员实例规则
 - **被修订**：ADR-020 把收敛改为设备上线后的点对点成员核对；新增可自动补齐，未确认移除等待
   用户，拒绝后相关设备分叉隔离但各自分支继续运行
-- **相关文档**：`docs/architecture/architecture-bible.md`、
+- **相关文档**：`ARCHITECTURE.md`、
   `docs/exec-plans/completed/015-offline-first-member-removal.md`、
   `docs/exec-plans/completed/016-workspace-wide-convergence.md`、
   `docs/design-docs/decisions/017-pairing-as-workspace-admission.md`、

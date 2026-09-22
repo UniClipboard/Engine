@@ -212,7 +212,7 @@ proof
 
 ## Step 7：稳定文档与交付收口
 
-- **File**：`docs/design-docs/automatic-peer-connections.md`、`docs/architecture/architecture-bible.md`、本计划及索引
+- **File**：`docs/design-docs/automatic-peer-connections.md`、本计划及索引
 - **Change**：把中转恢复替换旧尝试、三秒起点、失败回退与验收入口写回稳定设计；记录实际样本分布和未执行平台；完成后移动本计划到 `completed/`。
 - **Risk**：计划完成不能代替真实设备、发布或产品采用；未执行项目必须明确记为跳过。
 - **Exit**：稳定事实来源、代码行为、测试断言和执行记录一致。
@@ -324,7 +324,7 @@ bash scripts/testing/run-connection-recovery-e2e.sh --suite network --repeat 3
 * [ ] 完整网络套件连续三轮通过，直连、换址、旧版兼容和生命周期行为无回归。
 * [x] evidence 保存每轮三秒计时、直连阻断、双向传送和清理结果，失败不被自动重跑覆盖。
 * [x] 临时进程、网络规则、命名空间、构建目录和测试明文均完成清理。
-* [x] 稳定设计、架构圣经和计划状态已按实际结果更新；未执行的实体设备验收明确标为跳过。
+* [x] 稳定设计和计划状态已按实际结果更新；未执行的实体设备验收明确标为跳过。
 
 # 10. Risks and Trade-offs
 
