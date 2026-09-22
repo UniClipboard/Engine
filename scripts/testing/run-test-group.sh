@@ -5,7 +5,7 @@ readonly NEXTEST_VERSION="0.9.145"
 readonly GROUP="${1:-}"
 
 if [[ -z "${GROUP}" ]]; then
-  printf 'usage: %s <fast|persistence-provider|engine-smoke|process|real-network|device> [group arguments]\n' "$0" >&2
+  printf 'usage: %s <fast|evidence|persistence-provider|engine-smoke|process|real-network|device> [group arguments]\n' "$0" >&2
   exit 2
 fi
 shift
@@ -40,6 +40,21 @@ case "${GROUP}" in
     cargo run --quiet --locked -p uc-testkit --example scenario_demo -- success
     cargo run --quiet --locked -p uc-testkit --example scenario_demo -- failure
     printf 'testkit artifacts: %s\n' "${artifact_root}"
+    printf 'nextest JUnit: target/nextest/ci/junit.xml\n'
+    ;;
+  evidence)
+    if [[ $# -ne 0 ]]; then
+      printf 'evidence does not accept additional arguments\n' >&2
+      exit 2
+    fi
+    artifact_root="${UC_TEST_ARTIFACTS_DIR:-target/test-artifacts/$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+    export UC_TEST_ARTIFACTS_DIR="${artifact_root}"
+    run_nextest -E 'package(uc-testkit) | package(uc-application) & test(stage2) | package(uc-infra) & (test(stage3_provider) | binary(profile_storage_upgrade_crash))'
+    cargo run --quiet --locked -p uc-testkit --example scenario_demo -- success
+    cargo run --quiet --locked -p uc-testkit --example scenario_demo -- failure
+    printf 'testkit artifacts: %s\n' "${artifact_root}"
+    printf 'membership artifacts: target/test-artifacts/membership-recovery\n'
+    printf 'real dependency artifacts: target/test-artifacts/real-dependencies\n'
     printf 'nextest JUnit: target/nextest/ci/junit.xml\n'
     ;;
   persistence-provider)

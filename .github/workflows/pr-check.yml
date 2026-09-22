@@ -35,8 +35,8 @@ jobs:
         with:
           tool: cargo-nextest@0.9.145
 
-      - name: Run fast testkit group
-        run: bash scripts/testing/run-test-group.sh fast
+      - name: Run testkit evidence suites
+        run: bash scripts/testing/run-test-group.sh evidence
         env:
           UC_TEST_ARTIFACTS_DIR: target/test-artifacts/ci
 
@@ -48,6 +48,8 @@ jobs:
           path: |
             target/nextest/ci/junit.xml
             target/test-artifacts/ci
+            target/test-artifacts/membership-recovery
+            target/test-artifacts/real-dependencies
           if-no-files-found: error
 
   connection-recovery:
