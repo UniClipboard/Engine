@@ -51,6 +51,7 @@ pub(crate) struct ProductionRuntime {
     session_supervisor: Arc<SessionSupervisor>,
     profile_reset: Arc<ProfileFactoryResetFacade>,
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
+    analytics: Arc<dyn uc_observability_contract::analytics::AnalyticsFacade>,
     task_registry: Arc<TaskRegistry>,
     #[cfg(feature = "lan-compat")]
     mobile_lan_endpoint: MobileLanEndpointUpdater,
@@ -189,6 +190,7 @@ impl ProductionRuntime {
         progress.starting_services();
 
         let security_lifecycle = Arc::clone(&wired.sync_engine.security_lifecycle);
+        let analytics = Arc::clone(&wired.sync_engine.analytics_facade);
         let mut security_guard = StartupSecurityGuard(Some(Arc::clone(&security_lifecycle)));
         let host_adapters = wired.application.host_adapters();
         let session_supervisor =
@@ -296,6 +298,7 @@ impl ProductionRuntime {
             session_supervisor,
             profile_reset,
             network_recovery,
+            analytics,
             task_registry,
             #[cfg(feature = "lan-compat")]
             mobile_lan_endpoint,

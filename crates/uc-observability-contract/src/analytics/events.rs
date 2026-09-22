@@ -74,6 +74,13 @@ pub enum Event {
         lan_only_mode: bool,
     },
 
+    /// 发起方生成邀请最终失败。仅携带稳定公开错误信息，不包含内部错误详情。
+    PairingInvitationFailed {
+        error_code: u32,
+        error_category: InvitationIssueErrorCategory,
+        retryable: bool,
+    },
+
     /// 首次同步发起。
     FirstClipboardSyncAttempted { direction: Direction },
 
@@ -275,6 +282,7 @@ impl Event {
             Event::PairingStarted { .. } => "pairing_started",
             Event::PairingFailed { .. } => "pairing_failed",
             Event::PairingInvitationIssued { .. } => "pairing_invitation_issued",
+            Event::PairingInvitationFailed { .. } => "pairing_invitation_failed",
             Event::FirstClipboardSyncAttempted { .. } => "first_clipboard_sync_attempted",
             Event::FirstClipboardSyncSucceeded { .. } => "first_clipboard_sync_succeeded",
             Event::FirstFileSyncSucceeded { .. } => "first_file_sync_succeeded",
@@ -327,6 +335,15 @@ impl Event {
             } => to_map(json!({
                 "code_source": code_source,
                 "lan_only_mode": lan_only_mode,
+            })),
+            Event::PairingInvitationFailed {
+                error_code,
+                error_category,
+                retryable,
+            } => to_map(json!({
+                "error_code": error_code,
+                "error_category": error_category,
+                "retryable": retryable,
             })),
             Event::FirstClipboardSyncAttempted { direction } => {
                 to_map(json!({ "direction": direction }))
@@ -672,6 +689,23 @@ pub enum InvitationCodeSource {
     DirectoryIssued,
     /// 本地铸码——cloud 不可达降级，或 LAN-only 模式跳过 cloud。
     LocallyMinted,
+}
+
+/// 邀请生成失败的公开错误类别。
+///
+/// 取值与 Engine 稳定错误类别保持一致；事件只接受封闭枚举，避免把内部错误
+/// 文本、响应内容或其他敏感详情误传到产品分析。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum InvitationIssueErrorCategory {
+    InvalidInput,
+    InvalidState,
+    Unauthorized,
+    NotFound,
+    Conflict,
+    Unavailable,
+    DeadlineExceeded,
+    Internal,
 }
 
 /// 加入方解析邀请码命中的发现通道（`pairing_succeeded.discovery_channel` 专用）。
@@ -1046,6 +1080,14 @@ mod tests {
                 "pairing_invitation_issued",
             ),
             (
+                Event::PairingInvitationFailed {
+                    error_code: 1227,
+                    error_category: InvitationIssueErrorCategory::Unavailable,
+                    retryable: true,
+                },
+                "pairing_invitation_failed",
+            ),
+            (
                 Event::FirstClipboardSyncAttempted {
                     direction: Direction::Outbound,
                 },
@@ -1367,6 +1409,55 @@ mod tests {
                 expected,
                 "PairingFailureReason::{reason:?}"
             );
+        }
+    }
+
+    #[test]
+    fn invitation_issue_failure_properties_are_fixed_and_safe() {
+        let props = Event::PairingInvitationFailed {
+            error_code: 1230,
+            error_category: InvitationIssueErrorCategory::InvalidState,
+            retryable: false,
+        }
+        .properties();
+
+        assert_eq!(props.len(), 3);
+        assert_eq!(props.get("error_code"), Some(&json!(1230)));
+        assert_eq!(props.get("error_category"), Some(&json!("invalid_state")));
+        assert_eq!(props.get("retryable"), Some(&json!(false)));
+        for sensitive in [
+            "invitation",
+            "address",
+            "device_id",
+            "space_id",
+            "response_body",
+            "error",
+            "message",
+            "path",
+        ] {
+            assert!(
+                !props.contains_key(sensitive),
+                "unexpected {sensitive} property"
+            );
+        }
+    }
+
+    #[test]
+    fn invitation_issue_error_category_wire_format_matches_public_categories() {
+        for (category, expected) in [
+            (InvitationIssueErrorCategory::InvalidInput, "invalid_input"),
+            (InvitationIssueErrorCategory::InvalidState, "invalid_state"),
+            (InvitationIssueErrorCategory::Unauthorized, "unauthorized"),
+            (InvitationIssueErrorCategory::NotFound, "not_found"),
+            (InvitationIssueErrorCategory::Conflict, "conflict"),
+            (InvitationIssueErrorCategory::Unavailable, "unavailable"),
+            (
+                InvitationIssueErrorCategory::DeadlineExceeded,
+                "deadline_exceeded",
+            ),
+            (InvitationIssueErrorCategory::Internal, "internal"),
+        ] {
+            assert_eq!(serde_json::to_value(category).unwrap(), expected);
         }
     }
 

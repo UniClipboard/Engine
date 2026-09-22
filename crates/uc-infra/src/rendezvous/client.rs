@@ -22,6 +22,7 @@
 //! to JSON and sent as the opaque `sponsorTicket` string — the rendezvous
 //! server doesn't parse it, joiners deserialize it on their side.
 
+use std::fmt;
 use std::time::Duration;
 
 use reqwest::StatusCode;
@@ -51,11 +52,14 @@ const USER_AGENT: &str = concat!("uniclipboard-cli/", env!("CARGO_PKG_VERSION"))
 /// Errors surfaced by the rendezvous HTTP gateway. Preserves just enough
 /// information for port adapters to map each variant onto their own
 /// domain error type (see `invitation_adapter.rs` + `pairing/session.rs`).
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum RendezvousHttpError {
     /// Transport failure — DNS, TCP, TLS, timeout, reqwest internal.
-    #[error("rendezvous transport failed: {0}")]
-    Transport(String),
+    #[error("rendezvous transport failed")]
+    Transport {
+        #[source]
+        source: reqwest::Error,
+    },
 
     /// HTTP 404 — no entry for this code (typo or never issued).
     #[error("rendezvous entry not found")]
@@ -76,12 +80,30 @@ pub enum RendezvousHttpError {
 
     /// Any other non-2xx status. Carries the server-side `error.code` slug
     /// when the envelope is present, otherwise `"unknown"`.
-    #[error("rendezvous unexpected status {status} (slug={slug})")]
+    #[error("rendezvous unexpected status {status}")]
     Unexpected { status: StatusCode, slug: String },
 
     /// 2xx with a body that fails to parse into the expected response shape.
-    #[error("rendezvous response parse: {0}")]
-    Parse(String),
+    #[error("rendezvous response parse failed")]
+    Parse {
+        #[source]
+        source: reqwest::Error,
+    },
+}
+
+impl fmt::Debug for RendezvousHttpError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self {
+            Self::Transport { .. } => "Transport",
+            Self::NotFound => "NotFound",
+            Self::Gone => "Gone",
+            Self::Conflict => "Conflict",
+            Self::ServiceUnavailable(_) => "ServiceUnavailable",
+            Self::Unexpected { .. } => "Unexpected",
+            Self::Parse { .. } => "Parse",
+        };
+        formatter.write_str(kind)
+    }
 }
 
 // ============================================================================
@@ -135,15 +157,18 @@ impl RendezvousClient {
     ) -> Result<CreatePairingResponse, RendezvousHttpError> {
         let url = self.url("/v1/pairings");
         let resp = self.http.post(&url).json(req).send().await.map_err(|err| {
-            warn!(error = %err, chain = %err_chain(&err), "rendezvous create transport failed");
-            RendezvousHttpError::Transport(err.to_string())
+            warn!(
+                failure_stage = "transport",
+                "rendezvous create transport failed"
+            );
+            RendezvousHttpError::Transport { source: err }
         })?;
         let status = resp.status();
         if status.is_success() {
             return resp
                 .json::<CreatePairingResponse>()
                 .await
-                .map_err(|err| RendezvousHttpError::Parse(format!("create_pairing: {err}")));
+                .map_err(|source| RendezvousHttpError::Parse { source });
         }
         Err(classify_status(resp, status).await)
     }
@@ -164,15 +189,18 @@ impl RendezvousClient {
             .send()
             .await
             .map_err(|err| {
-                debug!(error = %err, "rendezvous resolve transport failed");
-                RendezvousHttpError::Transport(err.to_string())
+                debug!(
+                    failure_stage = "transport",
+                    "rendezvous resolve transport failed"
+                );
+                RendezvousHttpError::Transport { source: err }
             })?;
         let status = resp.status();
         if status.is_success() {
             return resp
                 .json::<ResolvePairingResponse>()
                 .await
-                .map_err(|err| RendezvousHttpError::Parse(format!("resolve_pairing: {err}")));
+                .map_err(|source| RendezvousHttpError::Parse { source });
         }
         Err(classify_status(resp, status).await)
     }
@@ -190,8 +218,11 @@ impl RendezvousClient {
             .send()
             .await
             .map_err(|err| {
-                warn!(error = %err, "rendezvous consume transport failed");
-                RendezvousHttpError::Transport(err.to_string())
+                warn!(
+                    failure_stage = "transport",
+                    "rendezvous consume transport failed"
+                );
+                RendezvousHttpError::Transport { source: err }
             })?;
         let status = resp.status();
         if status.is_success() {
@@ -221,7 +252,7 @@ async fn classify_status(resp: reqwest::Response, status: StatusCode) -> Rendezv
         StatusCode::CONFLICT => RendezvousHttpError::Conflict,
         _ => {
             let slug = parse_error_slug(resp).await;
-            warn!(%status, %slug, "rendezvous unexpected status");
+            warn!(%status, "rendezvous unexpected status");
             RendezvousHttpError::Unexpected { status, slug }
         }
     }
@@ -233,21 +264,6 @@ async fn parse_error_slug(resp: reqwest::Response) -> String {
         .ok()
         .and_then(|e| e.error.map(|d| d.code))
         .unwrap_or_else(|| "unknown".to_string())
-}
-
-/// Walk an error's `Error::source()` chain and render it into a single
-/// `A -> B -> C` string. `reqwest::Error`'s `Display` intentionally hides
-/// the inner cause, which makes "error sending request for url"
-/// impossible to diagnose without the underlying hyper / rustls / io
-/// error — this helper surfaces them.
-fn err_chain(err: &dyn std::error::Error) -> String {
-    let mut parts = vec![err.to_string()];
-    let mut source = err.source();
-    while let Some(s) = source {
-        parts.push(s.to_string());
-        source = s.source();
-    }
-    parts.join(" -> ")
 }
 
 // ============================================================================
@@ -482,6 +498,6 @@ mod tests {
         // Port 1 is guaranteed unbound on every platform.
         let client = RendezvousClient::with_base_url("http://127.0.0.1:1");
         let err = client.consume_pairing("X").await.unwrap_err();
-        assert!(matches!(err, RendezvousHttpError::Transport(_)));
+        assert!(matches!(err, RendezvousHttpError::Transport { .. }));
     }
 }

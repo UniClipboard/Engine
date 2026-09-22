@@ -28,6 +28,36 @@ pub enum IssuePairingInvitationError {
     #[error("network is not started")]
     NetworkNotStarted,
 
+    #[error("no publishable local address is available")]
+    NoPublishableAddress {
+        #[source]
+        source: anyhow::Error,
+    },
+
+    #[error("local invitation publication failed")]
+    LocalPublicationFailed {
+        #[source]
+        source: anyhow::Error,
+    },
+
+    #[error("pairing invitation service transport failed")]
+    DirectoryTransportFailed {
+        #[source]
+        source: anyhow::Error,
+    },
+
+    #[error("pairing invitation service rejected the request")]
+    DirectoryRejected {
+        #[source]
+        source: anyhow::Error,
+    },
+
+    #[error("pairing invitation service returned an invalid response")]
+    DirectoryInvalidResponse {
+        #[source]
+        source: anyhow::Error,
+    },
+
     /// Rendezvous service unreachable / transient failure. UI may offer a
     /// manual retry.
     #[error("pairing invitation service unavailable")]
