@@ -865,6 +865,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 ## 文档维护记录
 
+- 2026-09-22：新增[046 真实依赖与独立进程 testkit 采用](../exec-plans/active/046-real-dependency-testkit-adoption.md)，在不改变产品行为、公开接口、持久格式或协议的前提下，让现有 rendezvous loopback/Wiremock provider tests 和 profile storage upgrade 独立进程恢复测试生成统一诊断工件。testkit 只补外部资源清理结果登记，不拥有产品恢复或进程生命周期；旧测试和门禁继续保留，真实网络、远程趋势和设备不在本阶段执行。
 - 2026-09-21：完成[045 确定性成员恢复高价值场景](../exec-plans/completed/045-deterministic-membership-recovery-scenarios.md)，在 044 testkit 基础上通过既有 Application 准入、成员维护、历史证据和设备信任负责人验证五个固定 seed 场景。实现只增加 `cfg(test)`、crate-private 支撑，不建立第二套业务状态机，不改变生产公开接口、持久格式、设备协议或既有测试权威地位；20 轮新旧双轨和 100 轮稳定性验收通过，真实网络、远程 CI 和设备跳过。
 - 2026-09-21：新增 [Engine 测试架构](../design-docs/testing-architecture.md) 与 [044 Engine testkit 基础计划](../exec-plans/completed/044-engine-testkit-foundation.md)。测试进程调度、分组、超时、重试和 JUnit 由 cargo-nextest 负责；仓库内 `uc-testkit` 只负责场景身份、阶段、事件等待、资源租约、稳定失败分类和脱敏工件，不依赖或复制产品业务状态机。本轮不迁移 t-0010 场景，不改变生产架构、公开接口、持久格式或设备协议。
 - 2026-09-20：Windows 首次邀请失败补齐分阶段注入和稳定公开分类；普通目录传输失败继续降级为局域网邀请，目录拒绝和无效成功响应不再静默吞掉。既有现场记录只能排除“完全没有本地地址”，不能确定局域网发布或目录响应哪一项真实失败，等待 Desktop `t-0016` Windows 实机复验。

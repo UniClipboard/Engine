@@ -7,6 +7,7 @@
 - 实施记录：[044 Engine testkit 基础](../exec-plans/completed/044-engine-testkit-foundation.md)
 - 后续领域场景计划：[034 确定性虚拟 Peer Network](../exec-plans/active/034-deterministic-virtual-peer-network-test-suite.md)
 - 已完成领域采用：[045 确定性成员恢复高价值场景](../exec-plans/completed/045-deterministic-membership-recovery-scenarios.md)
+- 当前真实依赖采用：[046 真实依赖与独立进程 testkit 采用](../exec-plans/active/046-real-dependency-testkit-adoption.md)
 
 # 1. Overview
 
