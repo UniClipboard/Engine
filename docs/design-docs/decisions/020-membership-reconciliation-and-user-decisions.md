@@ -19,7 +19,7 @@
   `docs/design-docs/features/019-device-specific-convergence-waiting-status.md`、
   `docs/exec-plans/completed/023-durable-membership-proof-and-admission-activation.md`、
   `docs/exec-plans/completed/029-durable-membership-history-anti-entropy.md`、
-  `docs/architecture/architecture-bible.md`
+  `ARCHITECTURE.md`
 
 ## 1. Overview
 

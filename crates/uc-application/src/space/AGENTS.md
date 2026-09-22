@@ -20,4 +20,4 @@
 - 正式 Add/Remove/Decision 提交后不回滚；后续效果由持久阶段恢复。
 - 日志不得包含身份、邀请、地址、签名、密钥、文件名、路径或内容。
 
-修改后执行 Space 定向测试、Application check、fmt、架构检查与 diff check，并同步架构圣经。
+修改后执行 Space 定向测试、Application check、fmt、架构检查与 diff check；架构事实变化时同步对应主题文档。

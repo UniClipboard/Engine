@@ -126,4 +126,4 @@
 - [ADR-012：主动刷新共享设备](../decisions/012-automatic-shared-device-refresh.md)
 - [Port 定义](../ports.md)
 - [uc-engine 跨平台核心接口](../uc-engine-interface.md)
-- [架构总览](../../architecture/architecture-bible.md)
+- [架构入口](../../../ARCHITECTURE.md)

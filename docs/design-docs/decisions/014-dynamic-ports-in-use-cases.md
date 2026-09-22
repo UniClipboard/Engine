@@ -35,4 +35,4 @@
 ## 相关文档
 
 - [Port 定义](../ports.md)
-- [架构总览](../../architecture/architecture-bible.md)
+- [架构入口](../../../ARCHITECTURE.md)

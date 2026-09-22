@@ -3,7 +3,7 @@
 - **状态**：已采纳
 - **日期**：2026-08-10
 - **相关文档**：`docs/design-docs/layers/application.md`、
-  `docs/architecture/architecture-bible.md`、
+  `ARCHITECTURE.md`、
   `docs/exec-plans/completed/018-domain-oriented-application-layout.md`、
   `docs/exec-plans/completed/031-application-dependency-surface-deepening.md`
 
