@@ -318,6 +318,9 @@ pub(crate) fn device_trust_snapshot(snapshot: DeviceTrustStatus) -> DeviceTrustS
                     DeviceTrustRelationship::PendingLocalDecision => {
                         DeviceGroupRelationshipSummary::PendingLocalDecision
                     }
+                    DeviceTrustRelationship::AwaitingRemovalAcknowledgement => {
+                        DeviceGroupRelationshipSummary::AwaitingRemovalAcknowledgement
+                    }
                     DeviceTrustRelationship::Diverged => DeviceGroupRelationshipSummary::Diverged,
                     DeviceTrustRelationship::Invalid => {
                         DeviceGroupRelationshipSummary::Unverifiable

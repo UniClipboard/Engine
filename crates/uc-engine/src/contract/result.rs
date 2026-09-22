@@ -1139,6 +1139,8 @@ pub enum DeviceGroupRelationshipSummary {
     Consistent,
     ConfirmationPending,
     PendingLocalDecision,
+    /// 设备已被移除，等待该设备确认收到移除；不需要本机决策。
+    AwaitingRemovalAcknowledgement,
     Diverged,
     Unverifiable,
     Unknown,

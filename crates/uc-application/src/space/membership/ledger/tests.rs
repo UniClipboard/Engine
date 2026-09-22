@@ -11,7 +11,9 @@ use uc_core::membership::{
     MembershipOperationV2, VersionedMembershipHistory, ED25519_SIGNATURE_ALGORITHM_V1,
     MEMBERSHIP_EVENT_FORMAT_V2,
 };
+use uc_core::ports::ClockPort;
 
+use super::restricted_delivery::REMOVED_PEER_DELIVERY_WINDOW_MS;
 use super::*;
 
 #[derive(Clone)]
@@ -840,6 +842,121 @@ async fn membership_effects_follow_history_depth_instead_of_event_id_order() {
 
 struct DeliverRestrictedOnce;
 
+struct FixedClock(i64);
+
+impl ClockPort for FixedClock {
+    fn now_ms(&self) -> i64 {
+        self.0
+    }
+}
+
+#[derive(Default)]
+struct CountingRestrictedDelivery(AtomicUsize);
+
+#[async_trait]
+impl RestrictedMembershipDeliveryPort for CountingRestrictedDelivery {
+    async fn deliver_restricted_membership(
+        &self,
+        _peer: &DeviceId,
+        _delivery: &RestrictedMembershipDelivery,
+    ) -> Result<(), RestrictedMembershipDeliveryError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Err(RestrictedMembershipDeliveryError::Deferred)
+    }
+}
+
+/// 构造一条发往已不在成员集合中设备的待投递移除事件。
+fn ledger_with_removed_peer_delivery(updated_at_ms: i64) -> (LoadedMembershipLedger, DeviceId) {
+    let mut loaded = active_two_member_ledger();
+    let member_peer = DeviceId::new("device-b");
+    let removed_peer = DeviceId::new("device-removed");
+    let history = VersionedMembershipHistory::decode_persisted_v2(
+        loaded.membership_history.as_deref().unwrap(),
+        &AcceptingVerifier,
+    )
+    .unwrap();
+    let local_member = loaded.local_member_instance.unwrap();
+    let peer_member = history.effective_member_for_device(&member_peer).unwrap();
+    let credential = history.credential_for(local_member).unwrap();
+    let event = history
+        .create_unsigned_local_removal_event(
+            local_member,
+            credential,
+            peer_member,
+            [0x93; 16],
+            [0x94; 32],
+        )
+        .unwrap();
+    let mut record = loaded
+        .peer_reconciliation
+        .get(&member_peer)
+        .unwrap()
+        .clone();
+    record.peer_device_id = removed_peer.clone();
+    record.relationship = MembershipHistoryRelationship::PendingRemovalDecision;
+    record.restricted_delivery = vec![RestrictedMembershipDelivery::Event(event)];
+    record.updated_at_ms = updated_at_ms;
+    loaded
+        .peer_reconciliation
+        .insert(removed_peer.clone(), record);
+    (loaded, removed_peer)
+}
+
+#[tokio::test]
+async fn removed_peer_delivery_starts_its_window_on_first_attempt() {
+    let (loaded, removed_peer) = ledger_with_removed_peer_delivery(0);
+    let repository = Arc::new(MemoryLedgerRepository::new(loaded));
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    ));
+    let delivery = Arc::new(CountingRestrictedDelivery::default());
+    let deliver = DeliverRestrictedMembershipUseCase::new(
+        ledger,
+        delivery.clone(),
+        Arc::new(FixedClock(1_000_000)),
+    );
+
+    let report = deliver.execute().await;
+
+    assert_eq!(report.deferred_count, 1);
+    assert_eq!(delivery.0.load(Ordering::SeqCst), 1);
+    let persisted = repository.load().await.unwrap();
+    let record = persisted.peer_reconciliation.get(&removed_peer).unwrap();
+    assert_eq!(record.updated_at_ms, 1_000_000);
+    assert_eq!(record.restricted_delivery.len(), 1);
+}
+
+#[tokio::test]
+async fn removed_peer_delivery_ends_locally_after_its_window() {
+    let started_at_ms = 1_000_000;
+    let (loaded, removed_peer) = ledger_with_removed_peer_delivery(started_at_ms);
+    let repository = Arc::new(MemoryLedgerRepository::new(loaded));
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    ));
+    let delivery = Arc::new(CountingRestrictedDelivery::default());
+    let deliver = DeliverRestrictedMembershipUseCase::new(
+        ledger,
+        delivery.clone(),
+        Arc::new(FixedClock(started_at_ms + REMOVED_PEER_DELIVERY_WINDOW_MS)),
+    );
+
+    let report = deliver.execute().await;
+
+    assert_eq!(report.completed_count, 1);
+    assert_eq!(report.deferred_count, 0);
+    assert_eq!(delivery.0.load(Ordering::SeqCst), 0);
+    let persisted = repository.load().await.unwrap();
+    assert!(!persisted.peer_reconciliation.contains_key(&removed_peer));
+    assert!(persisted
+        .peer_reconciliation
+        .contains_key(&DeviceId::new("device-b")));
+}
+
 #[async_trait]
 impl RestrictedMembershipDeliveryPort for DeliverRestrictedOnce {
     async fn deliver_restricted_membership(
@@ -883,7 +1000,11 @@ async fn confirmed_restricted_delivery_is_removed_from_the_ledger() {
         repository.clone(),
         Arc::new(AcceptingVerifier),
     ));
-    let deliver = DeliverRestrictedMembershipUseCase::new(ledger, Arc::new(DeliverRestrictedOnce));
+    let deliver = DeliverRestrictedMembershipUseCase::new(
+        ledger,
+        Arc::new(DeliverRestrictedOnce),
+        Arc::new(FixedClock(1_000)),
+    );
 
     let report = deliver.execute().await;
 

@@ -206,7 +206,7 @@ DeviceTrustRelationship
 
 - `reachability`：`Online`、`Offline`、`Unknown`；
 - `membership`：`Active`、`Removed`、`Unknown`；
-- `group_relationship`：`Consistent`、`ConfirmationPending`、`PendingLocalDecision`、`Diverged`、`Unverifiable`、`Unknown`；其中 `ConfirmationPending` 表示该设备尚未确认本机最新成员结果，不能显示为设备组正常，也不能冒充已经拿到双边证据的分叉；
+- `group_relationship`：`Consistent`、`ConfirmationPending`、`PendingLocalDecision`、`AwaitingRemovalAcknowledgement`、`Diverged`、`Unverifiable`、`Unknown`；其中 `ConfirmationPending` 表示该设备尚未确认本机最新成员结果，不能显示为设备组正常，也不能冒充已经拿到双边证据的分叉；`AwaitingRemovalAcknowledgement` 表示该设备已被本机历史移除、移除通知仍在投递，不是本机需要作出的决定，也不阻塞设备更新状态完成；移除通知只在首次投递起 5 分钟内重试，到期后本机结束投递并移除该设备的核对记录；重复移除已被移除的设备返回同一移除结果；
 - `compatibility`：`Compatible`、`UpgradeRequired`、`Unknown`。
 
 `sync_relationship` 是负责人基于上述事实和内容门禁给出的直接产品结果，至少包含：

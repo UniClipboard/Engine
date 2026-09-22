@@ -22,7 +22,7 @@ use crate::space::membership::{
 };
 use crate::space::membership::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
 use crate::space::membership::{
-    DeviceTrustMembership, DeviceTrustObservation, DeviceTrustSyncState,
+    DeviceTrustMembership, DeviceTrustObservation, DeviceTrustRelationship, DeviceTrustSyncState,
     LoadDeviceTrustObservationsPort, QueryDeviceTrustError, QueryDeviceTrustUseCase,
 };
 
@@ -297,9 +297,13 @@ async fn removal_commits_all_local_facts_once_before_returning_success() {
         .unwrap();
     assert_eq!(removed.membership, DeviceTrustMembership::PendingActivation);
     assert_eq!(
+        removed.relationship,
+        DeviceTrustRelationship::AwaitingRemovalAcknowledgement
+    );
+    assert_eq!(
         removed.sync_state,
         DeviceTrustSyncState::Paused(
-            crate::space::membership::SpaceMemberPauseReason::PendingLocalDecision
+            crate::space::membership::SpaceMemberPauseReason::LocalMemberInactive
         )
     );
     let persisted = repository.load().await.unwrap();
@@ -332,6 +336,40 @@ async fn removal_commits_all_local_facts_once_before_returning_success() {
         relationship.restricted_delivery.as_slice(),
         [RestrictedMembershipDelivery::Event(event)] if event.event_id() == result.change_id
     ));
+}
+
+#[tokio::test]
+async fn repeating_a_committed_removal_returns_the_same_change() {
+    let (loaded, signer) = active_ledger();
+    let repository = Arc::new(MemoryLedgerRepository {
+        loaded: Mutex::new(loaded),
+        commits: AtomicUsize::new(0),
+        remaining_conflicts: AtomicUsize::new(0),
+    });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    ));
+    let query = Arc::new(QueryDeviceTrustUseCase::new_for_tests(
+        Arc::clone(&ledger),
+        Arc::new(OfflineObservations),
+        Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
+    ));
+    let remove = RemoveSpaceMemberUseCase::new(
+        ledger,
+        Arc::new(signer),
+        query,
+        Arc::new(NoopEffects),
+        Arc::new(WakeCounter(AtomicUsize::new(0))),
+    );
+
+    let first = remove.execute(&DeviceId::new("device-b")).await.unwrap();
+    let repeated = remove.execute(&DeviceId::new("device-b")).await.unwrap();
+
+    assert_eq!(repeated.change_id, first.change_id);
+    assert_eq!(repeated.commit, first.commit);
+    assert_eq!(repository.commits.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

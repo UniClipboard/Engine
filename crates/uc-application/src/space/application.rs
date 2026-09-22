@@ -366,6 +366,7 @@ impl SpaceApplication {
         let deliver_restricted_membership = Arc::new(DeliverRestrictedMembershipUseCase::new(
             Arc::clone(&ledger),
             restricted_membership_delivery,
+            Arc::clone(&clock),
         ));
         let recover_membership_conflicts = Arc::new(RecoverMembershipConflictUseCase::new(
             Arc::clone(&ledger),

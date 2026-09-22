@@ -223,6 +223,8 @@ impl DecideDeviceTrustChangeUseCase {
                                 vec![RestrictedMembershipDelivery::Decision(
                                     decision_for_commit.clone(),
                                 )];
+                            // 由受限投递在首次处理时记录窗口起点。
+                            relationship.updated_at_ms = 0;
                         })
                         .or_insert(crate::space::membership::PeerReconciliationRecord {
                             peer_device_id: proposed_by_device_id,

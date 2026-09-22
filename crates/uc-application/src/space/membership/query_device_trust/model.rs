@@ -19,6 +19,8 @@ pub enum DeviceTrustRelationship {
     Consistent,
     ConfirmationPending,
     PendingLocalDecision,
+    /// 设备已被本机历史移除，等待对方确认收到移除；这不是本机需要作出的决定。
+    AwaitingRemovalAcknowledgement,
     Diverged,
     Invalid,
     UpgradeRequired,

@@ -205,6 +205,8 @@ impl QueryDeviceTrustUseCase {
             } else {
                 DeviceTrustMembership::Removed
             };
+            let removed_from_history = !is_local
+                && !member.is_some_and(|member| history.active_members().contains(&member));
             let relationship = if is_local {
                 DeviceTrustRelationship::Local
             } else {
@@ -217,13 +219,20 @@ impl QueryDeviceTrustUseCase {
                             && record.awaits_confirmation(&current_position)
                         {
                             DeviceTrustRelationship::ConfirmationPending
+                        } else if removed_from_history
+                            && record.relationship
+                                == MembershipHistoryRelationship::PendingRemovalDecision
+                        {
+                            DeviceTrustRelationship::AwaitingRemovalAcknowledgement
                         } else {
                             map_relationship(record.relationship)
                         }
                     })
                     .unwrap_or(DeviceTrustRelationship::Unknown)
             };
-            let sync_state = if membership == DeviceTrustMembership::Removed {
+            let sync_state = if membership == DeviceTrustMembership::Removed
+                || relationship == DeviceTrustRelationship::AwaitingRemovalAcknowledgement
+            {
                 DeviceTrustSyncState::Paused(SpaceMemberPauseReason::LocalMemberInactive)
             } else if is_local || scope.usable_peer_device_ids.contains(device_id) {
                 DeviceTrustSyncState::Usable
@@ -369,6 +378,7 @@ fn space_device_update_status(
             DeviceTrustRelationship::Local
             | DeviceTrustRelationship::Consistent
             | DeviceTrustRelationship::ConfirmationPending
+            | DeviceTrustRelationship::AwaitingRemovalAcknowledgement
             | DeviceTrustRelationship::Unknown => {}
         }
     }
@@ -380,10 +390,11 @@ fn space_device_update_status(
     }
     let relationship_update_pending = devices.iter().any(|device| {
         device.membership == DeviceTrustMembership::PendingActivation
-            || matches!(
-                device.relationship,
-                DeviceTrustRelationship::ConfirmationPending | DeviceTrustRelationship::Unknown
-            )
+            || (device.membership != DeviceTrustMembership::Removed
+                && matches!(
+                    device.relationship,
+                    DeviceTrustRelationship::ConfirmationPending | DeviceTrustRelationship::Unknown
+                ))
     });
     if has_pending_effects
         || history_update_pending

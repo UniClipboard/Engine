@@ -1,4 +1,6 @@
+use std::slice;
 use std::sync::Arc;
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use uc_core::ids::{DeviceId, SpaceId};
@@ -8,11 +10,12 @@ use uc_core::membership::{
 };
 
 use crate::space::membership::{
-    CurrentMemberSignatureError, CurrentMemberSignaturePort, InitiatedMembershipRemovalEffect,
-    LoadedMembershipLedger, MembershipEffectKind, MembershipEffectPhase, MembershipLedger,
-    MembershipLedgerError, MembershipMaintenanceStepOutcome, PeerReconciliationRecord,
-    PendingMembershipEffect, QueryDeviceTrustUseCase, RecoverMembershipEffectsPort,
-    RestrictedMembershipDelivery, WakeSpaceMembershipMaintenancePort,
+    CurrentMemberSignatureError, CurrentMemberSignaturePort, DeviceTrustStatus,
+    InitiatedMembershipRemovalEffect, LoadedMembershipLedger, MembershipEffectKind,
+    MembershipEffectPhase, MembershipLedger, MembershipLedgerError,
+    MembershipMaintenanceStepOutcome, PeerReconciliationRecord, PendingMembershipEffect,
+    QueryDeviceTrustUseCase, RecoverMembershipEffectsPort, RestrictedMembershipDelivery,
+    WakeSpaceMembershipMaintenancePort,
 };
 
 use super::{
@@ -20,6 +23,9 @@ use super::{
     AdmissionRevocationTarget, MembershipCommitReceipt, RemoveSpaceMemberError,
     RemoveSpaceMemberResult,
 };
+
+const COMMITTED_STATUS_QUERY_ATTEMPTS: usize = 3;
+const COMMITTED_STATUS_QUERY_BACKOFF: Duration = Duration::from_millis(100);
 
 pub(crate) struct RemoveSpaceMemberUseCase {
     ledger: Arc<MembershipLedger>,
@@ -106,9 +112,15 @@ impl RemoveSpaceMemberUseCase {
         if target_device_id == local_device_id {
             return Err(RemoveSpaceMemberError::SelfTarget);
         }
-        let member_instance_id = history
-            .effective_member_for_device(target_device_id)
-            .ok_or(RemoveSpaceMemberError::TargetNotFound)?;
+        // 重复请求可能落在上一次已提交的移除之后；已被本历史移除的设备按已不存在处理，
+        // 让调用方得到同一结果，而不是把已完成的移除误报为目标不存在。
+        let member_instance_id = match history.effective_member_for_device(target_device_id) {
+            Some(member) => member,
+            None => history
+                .member_for_device(target_device_id, slice::from_ref(target_device_id))
+                .filter(|member| history.removal_event_id_for(*member).is_some())
+                .ok_or(RemoveSpaceMemberError::TargetNotFound)?,
+        };
         let origin = match history.admission_event_id_for(member_instance_id) {
             Some(event_id) => RemovalTargetOrigin::Admission(event_id),
             None => RemovalTargetOrigin::ActivationBaseline,
@@ -258,6 +270,8 @@ impl RemoveSpaceMemberUseCase {
                                 vec![RestrictedMembershipDelivery::Event(
                                     event_for_commit.clone(),
                                 )];
+                            // 由受限投递在首次处理时记录窗口起点。
+                            relationship.updated_at_ms = 0;
                         })
                         .or_insert(PeerReconciliationRecord {
                             peer_device_id: target_device_for_commit,
@@ -288,10 +302,9 @@ impl RemoveSpaceMemberUseCase {
     ) -> Result<RemoveSpaceMemberResult, RemoveSpaceMemberError> {
         let change_id = committed.change_id;
         let status = self
-            .query
-            .execute()
+            .query_committed_status()
             .await
-            .map_err(|_| RemoveSpaceMemberError::CommittedButPending { change_id })?;
+            .ok_or(RemoveSpaceMemberError::CommittedButPending { change_id })?;
         let committed_history = committed
             .committed
             .membership_history
@@ -306,6 +319,19 @@ impl RemoveSpaceMemberUseCase {
             },
             status,
         })
+    }
+
+    /// 移除已经提交，状态查询只负责回显结果；短暂的读取竞争不能把已完成的移除报告为失败。
+    async fn query_committed_status(&self) -> Option<DeviceTrustStatus> {
+        for attempt in 0..COMMITTED_STATUS_QUERY_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(COMMITTED_STATUS_QUERY_BACKOFF).await;
+            }
+            if let Ok(status) = self.query.execute().await {
+                return Some(status);
+            }
+        }
+        None
     }
 
     async fn execute_admission_revocation(
