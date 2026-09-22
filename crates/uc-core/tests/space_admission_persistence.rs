@@ -166,6 +166,25 @@ fn current_joiner_record_decodes_with_mobile_worker_stack_budget() {
 }
 
 #[test]
+fn activation_rejection_categories_round_trip_through_persistence() {
+    for reason in [
+        SpaceAdmissionRejectionReason::CompletionInvalid,
+        SpaceAdmissionRejectionReason::MembershipHistoryInvalid,
+        SpaceAdmissionRejectionReason::SecurityMaterialInvalid,
+        SpaceAdmissionRejectionReason::RelationshipConflict,
+        SpaceAdmissionRejectionReason::ActivationStateInvalid,
+    ] {
+        let rejected = joiner_applied_fixture()
+            .reject_activation(reason)
+            .expect("activation rejection should produce a terminal result")
+            .into_replacement();
+        let recovered = round_trip_joiner(rejected);
+
+        assert_eq!(recovered.rejection_reason(), Some(reason));
+    }
+}
+
+#[test]
 fn initiated_joiner_authenticated_channel_round_trips_through_persistence() {
     let decoded = round_trip_joiner(authenticated_joiner_fixture());
     assert!(matches!(
