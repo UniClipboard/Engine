@@ -2,7 +2,7 @@
 
 ## 状态
 
-- 状态：实施中
+- 状态：已完成
 - 日期：2026-09-22
 - 完整负责人：既有 rendezvous invitation adapter、profile storage upgrade 与 `uc-testkit::Scenario`
 - 唯一调用：测试通过既有 adapter 或独立进程测试入口执行一次真实依赖动作，再把稳定结果、资源和清理状态提交给 Scenario
@@ -66,36 +66,36 @@
 
 ### Phase 1：最小 provider 场景
 
-- [ ] 先让一个正常 invitation adapter 场景生成 passed 工件。
-- [ ] 保留原断言并验证资源与摘要内容。
+- [x] 先让一个正常 invitation adapter 场景生成 passed 工件。
+- [x] 保留原断言并验证资源与摘要内容。
 
 ### Phase 2：失败诊断与 process 场景
 
-- [ ] 增加拒绝/无效响应和暂时不可用的受控失败工件。
-- [ ] 增加外部资源清理结果登记及 cleanup failure 自测。
-- [ ] 将现有 profile storage upgrade crash/recovery 场景接入 Scenario。
+- [x] 增加拒绝/无效响应和暂时不可用的受控失败工件。
+- [x] 增加外部资源清理结果登记及 cleanup failure 自测。
+- [x] 将现有 profile storage upgrade crash/recovery 场景接入 Scenario。
 
 ### Phase 3：分组、双轨与稳定性
 
-- [ ] nextest 将带 `stage3` 名称的 provider tests 映射到 `persistence-provider`，process test 映射到 `process`。
-- [ ] 新入口与原精确测试入口双轨运行，不删除旧入口。
-- [ ] 新场景整体至少重复 20 轮，无随机失败；记录实际耗时。
+- [x] nextest 将带 `stage3` 名称的 provider tests 映射到 `persistence-provider`，process test 映射到 `process`。
+- [x] 新入口与原精确测试入口双轨运行，不删除旧入口。
+- [x] 新场景整体至少重复 20 轮，无随机失败；记录实际耗时。
 
 ### Phase 4：完整验证与收口
 
-- [ ] 运行 testkit、自身采用场景、相关旧测试、`uc-infra` 相关 integration test 与旧 cargo test 入口。
-- [ ] 运行 workspace all-target check、fmt、Rust style、Engine repository、隐私和 diff check。
-- [ ] 更新测试架构、架构圣经、本文和 Herdr 报告；创建范围清晰的本地原子提交，不推送。
+- [x] 运行 testkit、自身采用场景、相关旧测试、`uc-infra` 相关 integration test 与旧 cargo test 入口。
+- [x] 运行 workspace all-target check、fmt、Rust style、Engine repository、隐私和 diff check。
+- [x] 更新测试架构、架构圣经、本文和 Herdr 报告；创建范围清晰的本地原子提交，不推送。
 
 ## 7. 验收标准
 
-- [ ] 正常、业务拒绝/无效响应、环境暂时不可用、进程恢复和清理均有真实执行证据。
-- [ ] 报告明确出现 `product_invariant`、`environment_unavailable` 与 `cleanup_failed`。
-- [ ] 每个采用场景有固定 seed、明确预算、稳定事件、复现命令和工件位置。
-- [ ] 真实依赖场景不使用外网、固定 sleep、本机绝对路径或 t-0010 fixture。
-- [ ] 新旧入口双轨且至少 20 轮稳定；旧测试与门禁保持不变。
-- [ ] 生产依赖、公开接口、持久格式、协议和业务行为不变。
-- [ ] 远程 CI、长期趋势、真实网络和设备明确记为跳过。
+- [x] 正常、业务拒绝/无效响应、环境暂时不可用、进程恢复和清理均有真实执行证据。
+- [x] 报告明确出现 `product_invariant`、`environment_unavailable` 与 `cleanup_failed`。
+- [x] 每个采用场景有固定 seed、明确预算、稳定事件、复现命令和工件位置。
+- [x] 真实依赖场景不使用外网、固定 sleep、本机绝对路径或 t-0010 fixture。
+- [x] 新旧入口双轨且至少 20 轮稳定；旧测试与门禁保持不变。
+- [x] 生产依赖、公开接口、持久格式、协议和业务行为不变。
+- [x] 远程 CI、长期趋势、真实网络和设备明确记为跳过。
 
 ## 8. 风险与回退
 
@@ -109,3 +109,12 @@
 | 日期 | 阶段 | 结果 |
 | --- | --- | --- |
 | 2026-09-22 | Phase 0 | 完成真实依赖与独立进程场景选择；确认只需 testkit 外部资源记录能力，不需生产接口。 |
+| 2026-09-22 | Phase 1-2 | provider 聚合测试生成 success、product invariant、environment unavailable 和 cleanup failed 工件；process recovery 使用真实 SQLite、文件和五次独立子进程退出恢复。 |
+| 2026-09-22 | Phase 3 | nextest 两项实际测试耗时 1.885 秒；最终实现连续 20 轮全部通过，总墙钟 54 秒，单轮 1.848-2.076 秒。 |
+| 2026-09-22 | Phase 4 | 相关旧 provider 测试 10 项通过；process 旧入口 1 项通过、测试耗时 2.42 秒；testkit 4 项通过；workspace all-target check 55.40 秒；格式、Rust 风格、架构、隐私和 diff 检查通过。 |
+
+## 10. 未执行与兼容结论
+
+- 远程 CI、长期趋势、真实外网、真实 Iroh 多节点和设备测试均跳过。
+- 未读取或修改 t-0010，未复制其测试。
+- 未改变产品行为、生产公开接口、持久格式或协议；旧测试和门禁继续保留。
