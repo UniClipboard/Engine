@@ -865,6 +865,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 ## 文档维护记录
 
+- 2026-09-22：快速文件传输验证复用公开 `FileTransferFacade` integration fixture，只证明接收传输从登记、进度到唯一完成事件的 Application 生命周期；真实文件字节、双向网络和读取继续由隔离网络 E02 负责。testkit 只记录预算、阶段和诊断，不复制传输状态机，生产接口、协议与持久格式不变。
 - 2026-09-22：测试架构明确源码布局：只依赖公开接口的跨模块场景进入 crate `tests/`；必须访问私有实现的场景集中在业务模块的 `tests/` 子目录，领域 fixture 放相邻 `tests/support/` 或既有明确 `testing/` 目录，跨领域通用能力仍只在 `tests/uc-testkit/`。本次只收敛 0040 PR 新增或扩展的 admission/provider 场景，不扩大生产可见性、不增加测试开关，也不改变业务行为、协议或持久格式。
 
 - 2026-09-22：Application 成员场景、provider evidence 与 profile crash 场景不再自行拼接进程目录；稳定 `artifact_id` 与唯一 `artifact_directory` 均由 testkit 生成，避免隔离策略泄漏到调用方。

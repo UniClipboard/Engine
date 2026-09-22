@@ -271,8 +271,8 @@ Iroh host 和成熟系统工具。网络故障必须在对应真实环境中实�
 | 类别 | 快速确定性线 | 真实 nightly / 手工线 |
 | --- | --- | --- |
 | 配对 | **部分**：`PairingScenarioFixture` 让作者一次调用真实 joiner 负责人完成 invitation -> Active + final confirmation；五个成员恢复场景覆盖重试、三设备可见性和旧候选收敛，034 覆盖已准入成员历史分区/恢复。仍无双方完整快速 topology | **当前提交已验证**：`E01-complete-pairing` 使用真实 Engine 多进程、独立资料和公开 setup/eligibility/peer 终态；direct 三节点 9.891 秒，relay 两节点 3.543 秒 |
-| 文字与文件传输 | **未形成统一快速多节点场景**：保留既有 Application/Engine 组件测试，不能把真实 runner 的 E02 名称算作快速覆盖 | **当前提交已验证**：direct exact text 0.298 秒、双向 exact bytes 0.226 秒；relay 分别 0.134 秒和 0.242 秒 |
-| 断线重连 | **未形成首批快速多节点入口**：034 的 membership message 分区不等于真实连接重建 | **当前提交已验证回归**：E03/E04/E06/E10/E13 实际施加 namespace/relay/known-peer 故障；四种模式工件均通过 |
+| 文字与文件传输 | **部分**：公开 `FileTransferFacade` 完成生命周期进入 fast，证明登记、单调进度和唯一 Completed；不模拟网络或 exact bytes | **当前提交已验证**：direct exact text 0.298 秒、双向 exact bytes 0.226 秒；relay 分别 0.134 秒和 0.242 秒 |
+| 断线重连 | **部分**：034 的成员消息在 partition/heal 后恢复，证明业务端点可继续接受消息；不等于真实连接重建 | **当前提交已验证回归**：E03/E04/E06/E10/E13 实际施加 namespace/relay/known-peer 故障；四种模式工件均通过 |
 | 重启恢复 | **部分**：`restart_continues_from_persisted_admission` 使用真实 Application 负责人和固定 seed；不是完整 Engine 进程重启 | **当前提交已验证回归**：E11/E12 停止/重建真实 Engine 并继续 exact text；direct 工件通过 |
 | 旧资料升级 | **已有 focused 证据但不属于多节点模拟**：真实 synthetic storage migration 与 process crash recovery 18 项，本地测试累计 5.546 秒 | **workflow 已接入、默认分支未生效**：scheduled/手工 `profile-upgrade` 复用同两项 binary；alpha.5 外部完整 fixture 未验证 |
 

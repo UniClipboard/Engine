@@ -175,8 +175,8 @@ setup 执行，但不登记为本次所选证据；全量运行和显式选择�
 | 类别 | 快速确定性线 | 真实 nightly / 手工线 |
 | --- | --- | --- |
 | 配对 | 部分完成：成员恢复五场景和已准入成员历史网络；无完整快速 invitation -> settled | E01 当前提交 direct/relay 已验证 |
-| 文字与文件传输 | 未形成统一快速多节点入口 | E02 text/file 当前提交 direct/relay 已验证 exact value/bytes |
-| 断线重连 | 未形成首批快速多节点入口 | E03/E04/E06/E10/E13 当前 runner 回归通过 |
+| 文字与文件传输 | 部分完成：文件接收生命周期进入 fast；无快速网络或 exact bytes | E02 text/file 当前提交 direct/relay 已验证 exact value/bytes |
+| 断线重连 | 部分完成：成员消息在 partition/heal 后恢复；不等于 Engine transport 重连 | E03/E04/E06/E10/E13 当前 runner 回归通过 |
 | 重启恢复 | 部分完成：Application 持久准入重建，不是 Engine 进程重启 | E11/E12 当前 runner 回归通过 |
 | 旧资料升级 | focused migration/process 18 项本地通过 | workflow 已接入但默认分支未生效；alpha.5 fixture 未验证 |
 
@@ -267,6 +267,52 @@ crate `tests/` 下的升级/进程场景只使用公开接口；既有 `protocol
 - 真实 runner JSON 已增加 prepare/scenario/cleanup/total 四项计时，脚本语法通过；Linux 实际值与 cleanup 工件仍须由
   本轮相关远程 network step 读回后才能登记。
 - 快速配对仍标为“部分”：它证明 joiner 确定性收敛；Sponsor 唯一性沿用三设备场景，双方真实链路沿用 E01。
+
+## 当前快速文件传输生命周期切片（2026-09-22）
+
+### 最小交付与真实边界
+
+快速线不模拟文件字节网络，也不复制 E02。它复用 `uc-application` 现有公开 `FileTransferFacade` integration fixture，
+新增一个作者场景：准备一个接收传输，执行 progress 与 complete，断言最终公开事件只有一个 `Completed` 且进度保持
+单调。testkit 只提供 1 秒预算、阶段、固定 seed、失败分类和工件。真实文件内容、双向发送、history entry 和
+`ReadEntryFile` exact bytes 继续只由真实 E02 证明。
+
+完整负责人仍为 `FileTransferFacade`；作者唯一动作是开始一个已登记的 receiver session 并完成它。失败结果分别为
+fixture 调用失败或最终公开事件不满足 product invariant；不增加自动重试。场景位于 crate `tests/file_transfer.rs`，
+因为它只使用公开 Application/Core 接口和该 integration test 自有 ports。
+
+### 实现前失败清单
+
+| 失败方式 | 预期 |
+| --- | --- |
+| receiver registration 被拒绝 | `fixture_invalid`，最后阶段为 begin |
+| progress 被拒绝或倒退 | `product_invariant`，不放宽为只检查终态 |
+| complete 失败 | `product_invariant`，保留最后事件和 complete 阶段 |
+| 公开 history 缺少或出现多个 terminal event | `product_invariant`，报告准确 condition |
+| 测试自行传输 bytes 或解释网络状态 | 架构验收失败；真实内容只由 E02 验证 |
+| 超过 1 秒预算 | 场景失败，不增加 sleep、重试或扩大预算 |
+
+### 验收与回退
+
+- 新场景单次 nextest 小于 1 秒，连续 20 轮稳定；加入 fast/evidence 选择器并生成 JSON/文本/JUnit。
+- 统一脚本传给各 crate 的工件根必须是仓库绝对路径；不得因 integration test 工作目录不同把报告写进 crate 内的
+  `target/`，脚本打印位置必须与实际文件一致。
+- 与既有 `repeating_same_terminal_call_is_idempotent` 双轨 20 轮，二者都断言完成终态且旧测试保持权威。
+- `cargo test -p uc-application --test file_transfer` 旧入口继续通过；普通 Application 构建不依赖 testkit。
+- 回退只删除新场景和选择器；不改变 facade、ports、生产行为、协议或持久格式。
+
+### 当前完成记录
+
+- 新场景 `file_transfer_completion_scenario_reports_final_state` 只使用公开 `FileTransferFacade`，按 begin、progress、
+  complete 三个阶段断言唯一 `Completed` 终态；固定 seed 为 `0x00403403`，单次 nextest `0.033s`。
+- 与既有 `repeating_same_terminal_call_is_idempotent` 双轨 20 轮全部通过，总墙钟 11 秒；完整旧
+  `file_transfer` test binary 15/15 通过、`0.07s`。
+- fast 统一入口现在包含 testkit 与 Application 快速场景，15/15 通过、测试累计 `0.472s`；evidence 17/17 通过、
+  测试累计 `2.019s`。JSON/摘要记录三个阶段、最后事件、cleanup completed 和准确复现命令。
+- 实际接入发现相对 `UC_TEST_ARTIFACTS_DIR` 会受 integration test 工作目录影响；统一脚本现传递仓库绝对工件根，
+  实际文件位置与打印位置一致。未新增 testkit API 或配置层。
+- 已有 `two_member_nodes_partition_and_heal` 明确登记为快速重连规则的部分证据：链路阻断时返回 unavailable，heal 后
+  同一真实 Application endpoint 接受消息；它不证明 Iroh/Engine transport 重建，后者继续由 E03/E04/E06/E10/E13 负责。
 
 # 1. Overview
 

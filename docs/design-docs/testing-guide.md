@@ -158,7 +158,8 @@ target/nextest/ci/junit.xml
   retry-pass 单独登记。
 - 发布前检查近期 nightly 结果，并补跑受变更影响的配对、文字/文件传输、断线重连、重启恢复或旧资料升级场景。
 
-当前不要把两条线混用：`VirtualMembershipNetwork` 只是配对后成员历史的快速 fixture；完整配对和 E02 文字/文件
+当前不要把两条线混用：`VirtualMembershipNetwork` 只是配对后成员历史的快速 fixture；快速文件场景只证明公开
+`FileTransferFacade` 的完成生命周期；完整配对和 E02 文字/文件
 传输属于真实 Engine runner。五类逐项状态和实测值以[测试架构的首批业务覆盖矩阵](testing-architecture.md#首批业务覆盖)
 为准。
 

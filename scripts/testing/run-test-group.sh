@@ -34,9 +34,12 @@ case "${GROUP}" in
       printf 'fast does not accept additional arguments\n' >&2
       exit 2
     fi
-    artifact_root="${UC_TEST_ARTIFACTS_DIR:-target/test-artifacts/$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+    artifact_root="${UC_TEST_ARTIFACTS_DIR:-${PWD}/target/test-artifacts/$(date -u +%Y%m%dT%H%M%SZ)-$$}"
     export UC_TEST_ARTIFACTS_DIR="${artifact_root}"
-    run_nextest -p uc-testkit
+    run_nextest \
+      -p uc-testkit \
+      -p uc-application \
+      -E 'package(uc-testkit) | package(uc-application) & (test(admission_recovery_scenarios) | test(device_trust_recovery_scenario) | test(legacy_candidate_convergence_scenario) | test(virtual_membership_network) | test(file_transfer_completion_scenario_reports_final_state))'
     cargo run --quiet --locked -p uc-testkit --example scenario_demo -- success
     cargo run --quiet --locked -p uc-testkit --example scenario_demo -- failure
     printf 'testkit artifacts: %s\n' "${artifact_root}"
@@ -47,13 +50,13 @@ case "${GROUP}" in
       printf 'evidence does not accept additional arguments\n' >&2
       exit 2
     fi
-    artifact_root="${UC_TEST_ARTIFACTS_DIR:-target/test-artifacts/$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+    artifact_root="${UC_TEST_ARTIFACTS_DIR:-${PWD}/target/test-artifacts/$(date -u +%Y%m%dT%H%M%SZ)-$$}"
     export UC_TEST_ARTIFACTS_DIR="${artifact_root}"
     run_nextest \
       -p uc-testkit \
       -p uc-application \
       -p uc-infra \
-      -E 'package(uc-testkit) | package(uc-application) & (test(admission_recovery_scenarios) | test(device_trust_recovery_scenario) | test(legacy_candidate_convergence_scenario) | test(virtual_membership_network)) | package(uc-infra) & (test(provider_dependency_evidence) | binary(profile_storage_upgrade_crash))'
+      -E 'package(uc-testkit) | package(uc-application) & (test(admission_recovery_scenarios) | test(device_trust_recovery_scenario) | test(legacy_candidate_convergence_scenario) | test(virtual_membership_network) | test(file_transfer_completion_scenario_reports_final_state)) | package(uc-infra) & (test(provider_dependency_evidence) | binary(profile_storage_upgrade_crash))'
     cargo run --quiet --locked -p uc-testkit --example scenario_demo -- success
     cargo run --quiet --locked -p uc-testkit --example scenario_demo -- failure
     printf 'testkit artifacts: %s\n' "${artifact_root}"
