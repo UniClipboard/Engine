@@ -117,6 +117,43 @@ setup 执行，但不登记为本次所选证据；全量运行和显式选择�
 - 报告更新五类覆盖映射：完整配对和文字传输记为已实现；文件传输、旧资料升级的真实 nightly 仍保持未完成；
   重连和重启只引用现有 E03/E04/E06/E10/E11/E12/E13，不重复重写。
 
+## 当前真实文件与旧资料升级切片（2026-09-22）
+
+本切片补齐两个已确认缺口，不扩建通用模拟层：connectivity host 提供一个进程内受管文件表，使真实 Engine 可通过
+公开 `SendFiles` 读取固定测试字节；接收端继续通过公开 history 和 `ReadEntryFile` 验证文件名、媒体类型与完整字节。
+旧资料升级不另写场景，nightly 直接复用现有 `profile_storage_upgrade` 和独立进程 crash recovery 测试。
+
+### 完整负责人和唯一动作
+
+- 文件内容的导入、加密历史、网络发送、接收 blob 和读取仍由 Engine/Application/Infra 原负责人完成。测试宿主只按
+  opaque `HostFileHandle` 保存输入 bytes 和 metadata，不读取产品状态，也不实现传输状态机。
+- 开发者场景只描述“在节点 A/B 准备固定文件并双向发送，接收端读取同一 entry”；runner 继续负责节点、profile、
+  namespace、等待、预算、清理和脱敏证据。
+- 旧资料升级 nightly 只调用既有测试 binary；升级、崩溃恢复、重启和清理由原测试负责人及 testkit 完成。
+
+### 实现前失败清单
+
+| 失败方式 | 预期诊断 |
+| --- | --- |
+| 未登记或空文件句柄 | host 返回稳定 invalid handle/unavailable，场景失败 |
+| offset 溢出或越界读取 | host 返回稳定 IO/空尾块，不 panic |
+| Engine 拒绝、离线或未接受文件发送 | E02 file 子步骤记录发送汇总 |
+| 接收历史没有 file entry | 事件驱动等待耗尽并报告最后节点状态 |
+| 文件名、media type 或 bytes 不一致 | product assertion 失败，不只检查“有记录” |
+| cleanup 或 plaintext scan 失败 | 与业务结果分开记录，整体不通过 |
+| 升级测试或 crash recovery 失败 | nightly upgrade job 失败并上传 testkit 工件 |
+| alpha.5 外部 fixture 不存在 | 明确保持未执行，不用环境变量或本机路径伪造通过 |
+
+### 预算、验收与回退
+
+- `E02-file-transfer` 聚焦运行目标为环境准备、双向发送、接收读取和清理合计 60 秒内；nightly upgrade job 的测试与
+  清理目标 30 分钟内，编译和总耗时分别显示。
+- 文件场景必须使用真实多进程 Engine 和真实隔离网络；本地 macOS 只做 host 编译与静态检查，远程 network job 或
+  等价 Linux 隔离环境才构成运行证据。
+- nightly upgrade 必须实际运行现有 synthetic profile migration 与五个 crash boundary；alpha.5 完整 fixture 因依赖
+  外部合成资料继续列为未验证，不能用普通 migration 测试冒充。
+- 回退可独立删除 host 受管文件命令、E02 file 子场景和 upgrade job；旧测试、旧门禁、存储格式与生产接口不变。
+
 # 1. Overview
 
 规格 030 已用真实 Engine operation、SQLite、Iroh endpoint、网络分区和正文传输完成 F0-F7 验收。其中 F7 单项
