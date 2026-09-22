@@ -8,7 +8,7 @@
   `docs/design-docs/decisions/021-workspace-convergence-internal-boundaries.md`、
   `docs/exec-plans/completed/023-durable-membership-proof-and-admission-activation.md`、
   `docs/exec-plans/completed/025-user-initiated-join-supersession.md`、
-  `docs/architecture/architecture-bible.md`
+  `ARCHITECTURE.md`
 
 > **后续修订**：ADR-024 已取代本文关于 `ResetSpace` 只在准入静止时执行轻量清理的规则。
 > 用户明确加入的取代规则不变；`ResetSpace` 现为清除全部旧设备关系的设备管理重置。

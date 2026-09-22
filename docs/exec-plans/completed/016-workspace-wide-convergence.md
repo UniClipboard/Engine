@@ -423,4 +423,4 @@ Offer 拒绝循环下也慢于 60 秒测试窗口。正式修复和完整矩阵�
 - [离线优先成员移除](015-offline-first-member-removal.md)
 - [主动刷新共享设备](../../design-docs/features/012-automatic-shared-device-refresh.md)
 - [uc-engine 跨平台核心接口](../../design-docs/uc-engine-interface.md)
-- [架构总览](../../architecture/architecture-bible.md)
+- [当前架构入口](../../../ARCHITECTURE.md)

@@ -335,7 +335,7 @@ SpaceSessionRecoveryRuntime::shutdown(deadline) -> Result<(), LifecycleError>
 
 ## Step 7：同步架构与调用者契约
 
-- **File**：`docs/design-docs/space-application.md`、`docs/architecture/architecture-bible.md`，若公开启动语义已有专门接口文档则同步更新。
+- **File**：`docs/design-docs/space-application.md`，若公开启动语义变化则同步更新 `docs/design-docs/uc-engine-interface.md`。
 - **Change**：把 `PostSessionReadiness`、`RecoverSpaceSessionUseCase` 和成员维护的旧同步等待描述改为最终责任；写明本地就绪与后台远端恢复的边界，删除 Engine 持有 Application 内部活动的描述。
 - **Risk**：文档只能记录已经落地并验证的行为；实施前本计划保持“待实现”。
 
@@ -481,7 +481,7 @@ Implementation: 审计 Mobile、Desktop、CLI、Share Extension；只有真实�
 * [x] `node scripts/architecture/check-rust-style.mjs` 通过。
 * [x] `node scripts/architecture/check-engine-repository.mjs` 通过。
 * [x] `git diff --check` 通过。
-* [ ] `docs/design-docs/space-application.md` 与 `docs/architecture/architecture-bible.md` 已按最终实现同步。
+* [ ] `docs/design-docs/space-application.md` 与受影响的稳定接口文档已按最终实现同步。
 * [ ] 实体设备的构建、安装和启动分别记录；未执行项明确标记为“跳过”。
 
 # 10. Risks and Trade-offs

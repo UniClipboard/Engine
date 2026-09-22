@@ -11,7 +11,7 @@
   `docs/exec-plans/completed/016-workspace-wide-convergence.md`、
   `docs/design-docs/features/019-device-specific-convergence-waiting-status.md`、
   `docs/design-docs/current-member-runtime-scope.md`、
-  `docs/architecture/architecture-bible.md`
+  `ARCHITECTURE.md`
 
 本规格先定义 Engine 应向完整 P2P 产品提供的事实和动作，不授权实现尚待产品确认的恢复策略。
 产品确认恢复方向后，必须补充或修订本规格，再进入恢复实现。

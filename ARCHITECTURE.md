@@ -1,8 +1,7 @@
 # UniClipboardEngine 架构
 
-本文件是架构入口，不复述所有实现细节。当前事实的详细说明位于
-[`docs/architecture/architecture-bible.md`](docs/architecture/architecture-bible.md)，稳定接口以
-[`docs/design-docs/uc-engine-interface.md`](docs/design-docs/uc-engine-interface.md) 与代码为准。
+本文件是架构入口，不复述所有实现细节。长期事实按主题分别维护在设计、安全、可靠性和接口文档中；
+稳定接口以 [`docs/design-docs/uc-engine-interface.md`](docs/design-docs/uc-engine-interface.md) 与代码为准。
 
 ## 系统边界
 
@@ -60,3 +59,6 @@ Port 归需要能力的层所有，因此 Infra 既可以实现 Core port，也�
 - [可靠性](docs/RELIABILITY.md)
 - [安全](docs/SECURITY.md)
 - [领域词表](docs/references/domain-glossary.md)
+
+架构事实不再集中复制到单一汇总文件。行为、接口、不变量或重要取舍变化时，应更新拥有该事实的主题文档；
+执行状态只写入 active/completed plan，历史流水账不作为当前架构依据。

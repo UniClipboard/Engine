@@ -483,8 +483,6 @@ SessionSupervisor::recover_current_session() -> Result<(), EngineError>
 
 **File:** `docs/design-docs/automatic-peer-connections.md`
 
-**File:** `docs/architecture/architecture-bible.md`
-
 **File:** `docs/exec-plans/active/038-pairing-local-latency-budget.md`
 
 **File:** `docs/exec-plans/active/043-engine-network-runtime-and-space-session-handover.md`

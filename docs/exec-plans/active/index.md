@@ -17,6 +17,7 @@
 - [已知设备联系驱动的成员恢复与地址更新](2026-09-17-known-peer-contact-recovery.md)（实施中）
 - [只走中转时三秒内恢复双向连接](2026-09-18-relay-only-three-second-recovery.md)（核心实施与二十轮验收完成；现有旧版配对基线阻塞完整套件收口）
 - [本地就绪与 Space 后台恢复统一责任](2026-09-19-local-readiness-and-background-space-recovery.md)（核心实施完成，实体设备验收待执行）
+- [Peer Address 读取失败的准确诊断](2026-09-22-peer-address-read-diagnostics.md)（实施完成，等待下游现场诊断）
 - [大图发送前本地准备性能与诊断](2026-09-18-large-image-publish-latency.md)（实施中）
 - [统一暂停、恢复与中断恢复](2026-09-12-unified-runtime-lifecycle.md)（实施中，剩余设备与产品宿主验收未完成；包含已有后台问题修复记录入口）
 

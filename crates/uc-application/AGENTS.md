@@ -19,4 +19,4 @@
 - 下层失败必须保留 source chain，禁止字符串化或吞错。
 - 业务计时和阶段观测由 Engine decorator 完成，不在调用点散布 tracing。
 
-Space 领域修改还需阅读 [`src/space/AGENTS.md`](src/space/AGENTS.md)。交付前运行相关测试、workspace check、fmt、架构检查与 diff check，并同步架构圣经。
+Space 领域修改还需阅读 [`src/space/AGENTS.md`](src/space/AGENTS.md)。交付前运行相关测试、workspace check、fmt、架构检查与 diff check；架构事实变化时同步对应主题文档。

@@ -321,7 +321,7 @@ exchange_membership_history(peer, message)
 
 ## Step 8：删除旧语义并更新文档
 
-- **Files:** 旧 periodic predicate、旧全历史单轮实现、架构脚本、Spec/ADR 状态和 architecture bible。
+- **Files:** 旧 periodic predicate、旧全历史单轮实现、架构脚本、Spec/ADR 状态和 当时的架构汇总（现已删除）。
 - **Change:** 删除只看 paused peer、易失 Deferred 和伪确认逻辑；禁止其符号回归。
 - **Risk:** 留下兼容别名掩盖第二实现；架构检查必须按行为和所有权检测。
 
