@@ -2,7 +2,7 @@
 
 ## 状态与完整责任
 
-- **状态**：阶段 A 已实现并通过自动验证；阶段 B 待与统一超时模型一起设计。
+- **状态**：阶段 A 与统一收尾期限类型已实现并通过自动验证；阶段 B 待设计。
 - **日期**：2026-09-22。
 - **依据**：t-0010 真机问题中，“配对是否仍在进行”“是否还欠收尾”“是否阻止新配对”分别由多处独立推算，漏分支导致 Android 长期停在 `Pairing`、桌面持续显示更新中；见[配对生命周期与终态收尾](../../design-docs/pairing-lifecycle.md)。
 - **完整负责人**：Core 的配对记录规则给出一条记录尚欠的全部收尾工作及各自截止时间；Application 的 `SpaceAdmissionProtocol` 按该结论推进恢复、判定工作模式；Infra 只持久化与索引该结论。
@@ -51,9 +51,19 @@ Core 为每条记录给出 `AdmissionOutstandingWork`：
 - `Terminal.RecoveryRequired` 记录的恢复动作为无，且终态不计入 `missing_deadline`，因此不会经恢复索引触发 `NeedsAttention`；需要单独确认是否由其他入口上报。
 - 邀请方未到期的 `SponsorDeadline` 记录不计入 `pairing_in_progress`（索引只加载已到期记录），工作模式对进行中的邀请方配对依赖协议处理入口而非恢复索引。
 
-## 阶段 B：跨记录的配对尾部（后续，与统一超时模型一起）
+## 统一收尾期限类型（已实现）
 
-移除通知（`peer_reconciliation.restricted_delivery`）、成员效果与设备组密钥投递各有持久状态，不属于配对记录。阶段 B 在第 3 步统一收尾期限类型后，再由 Application 汇总为只读的“空间收尾工作”查询，供展示与维护共用。阶段 A 不改变这些状态。
+Core 新增 [`membership/settlement_window.rs`](../../../crates/uc-core/src/membership/settlement_window.rs)：
+
+- `SettlementWindow::until(deadline_ms)`：收尾沿用既有截止时间，不另开窗口；Joiner 放弃通知使用。
+- `SettlementWindow::from_stored_start(duration_ms, started_at_ms)`：非正起点表示尚未起算，首次处理时 `started(now)` 保存起点；已非当前成员对端的受限通知使用。
+- `state(now)` 给出 `Unstarted`/`Open { deadline_ms }`/`Expired`，到期一律走“本机结束该项责任”；起点溢出按已到期处理。
+
+配对尝试契约 `AdmissionAttemptTimeline` 保持独立：它是双方协商、固定五分钟的协议边界，不是本机可自定的收尾期限，合并会让协议契约看起来可调。
+
+## 阶段 B：跨记录的配对尾部（后续）
+
+移除通知（`peer_reconciliation.restricted_delivery`）、成员效果与设备组密钥投递各有持久状态，不属于配对记录。阶段 B 在统一收尾期限类型的基础上，再由 Application 汇总为只读的“空间收尾工作”查询，供展示与维护共用。阶段 A 不改变这些状态。
 
 ## 验收
 

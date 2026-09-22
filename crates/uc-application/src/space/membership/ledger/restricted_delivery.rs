@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use uc_core::ids::DeviceId;
+use uc_core::membership::{SettlementWindow, SettlementWindowState};
 use uc_core::ports::ClockPort;
 
 use crate::space::membership::{
@@ -41,12 +42,6 @@ pub(crate) struct DeliverRestrictedMembershipUseCase {
     clock: Arc<dyn ClockPort>,
 }
 
-enum RemovedPeerWindow {
-    Open,
-    Unstarted,
-    Expired,
-}
-
 impl DeliverRestrictedMembershipUseCase {
     pub(crate) fn new(
         ledger: Arc<MembershipLedger>,
@@ -78,25 +73,23 @@ impl DeliverRestrictedMembershipUseCase {
             let removed = snapshot
                 .history()
                 .is_some_and(|history| history.effective_member_for_device(peer).is_none());
-            let window = if !removed {
-                RemovedPeerWindow::Open
-            } else if record.updated_at_ms <= 0 {
-                RemovedPeerWindow::Unstarted
-            } else if now_ms.saturating_sub(record.updated_at_ms) >= REMOVED_PEER_DELIVERY_WINDOW_MS
-            {
-                RemovedPeerWindow::Expired
-            } else {
-                RemovedPeerWindow::Open
-            };
+            // 仍是当前成员的对端不受收尾窗口限制。
+            let window = removed.then(|| {
+                SettlementWindow::from_stored_start(
+                    REMOVED_PEER_DELIVERY_WINDOW_MS,
+                    record.updated_at_ms,
+                )
+                .state(now_ms)
+            });
             match window {
-                RemovedPeerWindow::Expired => {
+                Some(SettlementWindowState::Expired) => {
                     match self.ledger.end_removed_peer_delivery(record.clone()).await {
                         Ok(()) => report.completed_count += 1,
                         Err(_) => report.deferred_count += 1,
                     }
                     continue;
                 }
-                RemovedPeerWindow::Unstarted => {
+                Some(SettlementWindowState::Unstarted) => {
                     if self
                         .ledger
                         .start_removed_peer_delivery_window(peer.clone(), now_ms)
@@ -107,7 +100,7 @@ impl DeliverRestrictedMembershipUseCase {
                         continue;
                     }
                 }
-                RemovedPeerWindow::Open => {}
+                Some(SettlementWindowState::Open { .. }) | None => {}
             }
             plans.extend(
                 record

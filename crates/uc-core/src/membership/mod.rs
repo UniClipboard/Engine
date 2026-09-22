@@ -16,6 +16,7 @@ mod ports;
 mod preferences;
 mod protection;
 mod revocation;
+mod settlement_window;
 mod space_admission;
 mod versioned_membership_history;
 mod workspace_convergence;
@@ -109,6 +110,7 @@ pub use revocation::{
     RevocationOutboxMessage, RevocationRecord, RevocationStage, RevocationStatus, SpaceKeyMaterial,
     SpaceKeyState, SpaceSecurityMode,
 };
+pub use settlement_window::{SettlementWindow, SettlementWindowState};
 pub use space_admission::{
     AdmissionAbandonedV2, AdmissionAbandonmentReasonV2, AdmissionAbandonmentV2,
     AdmissionActivatedSecurityState, AdmissionAppliedV1, AdmissionArtifactError,

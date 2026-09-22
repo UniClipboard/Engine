@@ -200,10 +200,11 @@ impl SpaceAdmissionAggregate {
         if cleanup.local_space_transition.is_some() {
             return false;
         }
-        let within_deadline = self
+        // 放弃通知沿用配对尝试的既定截止时间，不另开窗口；缺少期限的旧记录无法再收尾。
+        let window = self
             .attempt_timeline
-            .is_some_and(|timeline| !timeline.is_expired(now_ms));
-        !within_deadline
+            .map(|timeline| SettlementWindow::until(timeline.expires_at_ms()));
+        window.is_none_or(|window| window.is_expired(now_ms))
             || pending.request_envelope().header().protocol_version()
                 != SpaceAdmissionProtocolVersion::CURRENT
     }

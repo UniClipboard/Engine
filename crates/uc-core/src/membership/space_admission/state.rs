@@ -12,6 +12,7 @@ mod view;
 
 use super::super::{
     AdmissionActivationReceipt, MemberInstanceId, MembershipEventId, MembershipOperationV2,
+    SettlementWindow,
 };
 use super::artifact::{
     AdmissionActivatedSecurityState, AdmissionBaseSnapshot, AdmissionContinuationCredential,
