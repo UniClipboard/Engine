@@ -344,7 +344,7 @@ fn abandonment_delivery_ends_locally_at_the_shared_attempt_deadline() {
         .cancel_locally()
         .expect("prepared join terminates locally")
         .into_replacement();
-    assert!(!terminated.holds_pairing_open());
+    assert!(!terminated.outstanding_work().holds_pairing_open());
 
     assert!(!terminated.has_undeliverable_abandonment(deadline_ms - 1));
     assert!(terminated.has_undeliverable_abandonment(deadline_ms));
@@ -368,7 +368,7 @@ fn abandonment_delivery_ends_locally_at_the_shared_attempt_deadline() {
 fn deliverable_or_active_admissions_do_not_end_abandonment_delivery() {
     let prepared = JoinerAdmission::try_from_record(joiner_prepared_aggregate_fixture())
         .expect("prepared joiner fixture");
-    assert!(prepared.holds_pairing_open());
+    assert!(prepared.outstanding_work().holds_pairing_open());
     assert!(!prepared.has_undeliverable_abandonment(i64::MAX));
     assert!(matches!(
         prepared.end_undeliverable_abandonment(i64::MAX),
@@ -571,3 +571,46 @@ fn cancelling_joiner_accepts_cancelled_rejection() {
     assert_eq!(state.last_received().canonical_digest(), &[0xbd; 32]);
 }
 use sha2::{Digest, Sha256};
+
+#[test]
+fn outstanding_work_follows_a_terminated_join_through_notice_cleanup() {
+    let prepared = joiner_prepared_aggregate_fixture();
+    let deadline_ms = prepared
+        .expires_at_ms()
+        .expect("prepared fixture has a bounded attempt");
+    let in_flight = prepared.outstanding_work();
+    assert_eq!(
+        in_flight.obligations(),
+        &[AdmissionObligation::ProtocolInFlight]
+    );
+    assert!(in_flight.holds_pairing_open());
+    assert!(in_flight.blocks_new_admission());
+    assert_eq!(
+        in_flight.next_step(),
+        Some(AdmissionRecoveryStep::JoinerNetwork)
+    );
+    assert_eq!(in_flight.deadline_ms(), Some(deadline_ms));
+
+    let terminated = JoinerAdmission::try_from_record(prepared)
+        .expect("prepared joiner fixture")
+        .cancel_locally()
+        .expect("prepared join terminates locally")
+        .into_replacement();
+    let notice = terminated.outstanding_work();
+    assert_eq!(
+        notice.obligations(),
+        &[AdmissionObligation::AbandonmentNotice]
+    );
+    assert!(!notice.holds_pairing_open());
+    assert!(notice.blocks_new_admission());
+
+    let ended = terminated
+        .end_undeliverable_abandonment(deadline_ms)
+        .expect("expired notification ends locally")
+        .into_replacement()
+        .outstanding_work();
+    assert!(ended.is_settled());
+    assert!(!ended.blocks_new_admission());
+    assert_eq!(ended.next_step(), None);
+    assert_eq!(ended.deadline_ms(), None);
+}

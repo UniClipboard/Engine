@@ -12,34 +12,6 @@ pub trait AdmissionRecordPersistence {
     fn encode_persisted(&self) -> Result<Vec<u8>, SpaceAdmissionPersistenceError>;
 }
 
-impl SpaceAdmissionAggregate {
-    /// 仍有必须先完成的配对收尾时，不允许开启另一条准入事实。
-    pub fn has_unsettled_admission_work(&self) -> bool {
-        if !self.is_terminal() || self.pending_exchange().is_some() {
-            return true;
-        }
-        match &self.state {
-            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
-                SpaceAdmissionRejectedState::Sponsor(state),
-            )) => matches!(
-                state.abandonment_cleanup,
-                Some(SponsorAbandonmentCleanup::Known(_))
-                    | Some(SponsorAbandonmentCleanup::Unknown { .. })
-            ),
-            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorExpired(
-                state,
-            )) => matches!(
-                state.abandonment_cleanup,
-                SponsorAbandonmentCleanup::Known(_) | SponsorAbandonmentCleanup::Unknown { .. }
-            ),
-            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
-                _,
-            )) => true,
-            _ => false,
-        }
-    }
-}
-
 #[derive(PartialEq, Eq)]
 pub struct JoinerAdmission {
     record: SpaceAdmissionAggregate,
@@ -398,16 +370,8 @@ impl JoinerAdmission {
         )
     }
 
-    /// 判断记录是否仍是本机未终结的配对义务。
-    ///
-    /// 已终止加入只剩发给邀请方的放弃通知时不再占用配对运行资格；仍需本机切换空间时继续占用。
-    pub const fn holds_pairing_open(&self) -> bool {
-        match &self.record.state {
-            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(_)) => {
-                self.record.has_pending_local_termination()
-            }
-            _ => true,
-        }
+    pub fn outstanding_work(&self) -> AdmissionOutstandingWork {
+        self.record.outstanding_work()
     }
 
     pub const fn cleanup_obligation(&self) -> Option<&AdmissionCleanupObligation> {

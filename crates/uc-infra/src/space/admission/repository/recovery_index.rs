@@ -4,8 +4,8 @@ use diesel::sql_query;
 use diesel::sql_types::{Binary, Integer, Nullable};
 use serde::{Deserialize, Serialize};
 use uc_core::membership::{
-    AdmissionRole, JoinerAdmission, SpaceAdmissionAggregate, SponsorAdmission,
-    SponsorPairingConfirmationStatus,
+    AdmissionRecoveryStep, AdmissionRole, JoinerAdmission, SpaceAdmissionAggregate,
+    SponsorAdmission,
 };
 
 use super::codec::{map_key_error, EncryptedRecordRow};
@@ -97,45 +97,21 @@ impl RecoverySummary {
             Some(AdmissionRole::CompletionHelper) => RecoveryRecordRole::CompletionHelper,
             None => RecoveryRecordRole::Unknown,
         };
-        let sponsor_confirmation_pending =
-            aggregate
-                .sponsor_pairing_confirmation()
-                .is_some_and(|summary| {
-                    summary.status() == SponsorPairingConfirmationStatus::AwaitingPeerConfirmation
-                });
-        let action = if aggregate.has_pending_sponsor_abandonment() {
-            RecoveryAction::SponsorAbandonment
-        } else if sponsor_confirmation_pending {
-            RecoveryAction::SponsorConfirmation
-        } else if aggregate.has_expirable_sponsor() {
-            RecoveryAction::SponsorDeadline
-        } else if aggregate.pending_recovery().is_some()
-            || aggregate.invitation_resolution().is_some()
-            || aggregate.has_pending_local_termination()
-        {
-            RecoveryAction::JoinerNetwork
-        } else if aggregate.has_expirable_local_join() {
-            RecoveryAction::JoinerExpiry
-        } else if role == RecoveryRecordRole::CompletionHelper
-            && aggregate.expires_at_ms().is_some()
-        {
-            RecoveryAction::CompletionHelper
-        } else {
-            RecoveryAction::None
+        // 恢复动作、截止时间与缺少期限的判定都来自 Core 的唯一结论；本索引只做持久映射。
+        let work = aggregate.outstanding_work();
+        let action = match work.next_step() {
+            Some(AdmissionRecoveryStep::SponsorRevocation) => RecoveryAction::SponsorAbandonment,
+            Some(AdmissionRecoveryStep::SponsorConfirmation) => RecoveryAction::SponsorConfirmation,
+            Some(AdmissionRecoveryStep::SponsorDeadline) => RecoveryAction::SponsorDeadline,
+            Some(AdmissionRecoveryStep::JoinerNetwork) => RecoveryAction::JoinerNetwork,
+            Some(AdmissionRecoveryStep::JoinerExpiry) => RecoveryAction::JoinerExpiry,
+            Some(AdmissionRecoveryStep::CompletionHelperDeadline) => {
+                RecoveryAction::CompletionHelper
+            }
+            None => RecoveryAction::None,
         };
-        let expires_at_ms = match action {
-            RecoveryAction::JoinerNetwork
-            | RecoveryAction::JoinerExpiry
-            | RecoveryAction::SponsorConfirmation
-            | RecoveryAction::SponsorDeadline
-            | RecoveryAction::CompletionHelper => aggregate.expires_at_ms(),
-            RecoveryAction::None | RecoveryAction::SponsorAbandonment => None,
-        };
-        let legacy_no_deadline = !aggregate.is_terminal()
-            && (aggregate.expires_at_ms().is_none()
-                || (role == RecoveryRecordRole::Sponsor
-                    && aggregate.sponsor_pairing_confirmation().is_none()
-                    && !aggregate.has_expirable_sponsor()));
+        let expires_at_ms = work.deadline_ms();
+        let legacy_no_deadline = work.missing_deadline();
         Ok(Self {
             marker: RECOVERY_SUMMARY_MARKER,
             format_version: RECOVERY_SUMMARY_FORMAT_V3,

@@ -203,7 +203,7 @@ fn ensure_no_unsettled_attempt<E: DbExecutor>(
         let record = store
             .open_record(*admission_id, stored)
             .map_err(into_anyhow)?;
-        if record.has_unsettled_admission_work() {
+        if record.outstanding_work().blocks_new_admission() {
             return Err(into_anyhow(SpaceAdmissionStateStoreError::Conflict));
         }
     }

@@ -2,6 +2,7 @@ mod aggregate;
 mod capability;
 mod helper;
 mod joiner;
+mod outstanding;
 mod persistence;
 mod replay;
 mod sponsor;
@@ -57,6 +58,7 @@ pub use joiner::{
     SpaceAdmissionJoinerPrepared, SpaceAdmissionJoinerResolvedInvitation,
     SpaceAdmissionJoinerResolvingInvitation, SpaceAdmissionJoinerState,
 };
+pub use outstanding::{AdmissionObligation, AdmissionOutstandingWork, AdmissionRecoveryStep};
 pub use persistence::SpaceAdmissionPersistenceError;
 pub(crate) use persistence::{decode_envelope_v1, encode_envelope_v1};
 pub use sponsor::{

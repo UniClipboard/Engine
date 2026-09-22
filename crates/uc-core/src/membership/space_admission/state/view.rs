@@ -255,7 +255,7 @@ impl SpaceAdmissionAggregate {
         }
     }
 
-    pub const fn has_expirable_local_join(&self) -> bool {
+    pub(super) const fn has_expirable_local_join(&self) -> bool {
         self.attempt_timeline.is_some()
             && (matches!(
                 &self.state,
@@ -274,7 +274,7 @@ impl SpaceAdmissionAggregate {
             ))
     }
 
-    pub const fn has_expirable_sponsor(&self) -> bool {
+    pub(super) const fn has_expirable_sponsor(&self) -> bool {
         self.attempt_timeline.is_some()
             && self.attempt_digest.is_some()
             && matches!(
@@ -391,7 +391,7 @@ impl SpaceAdmissionAggregate {
         }
     }
 
-    pub const fn has_pending_local_termination(&self) -> bool {
+    pub(super) const fn has_pending_local_termination(&self) -> bool {
         matches!(
             &self.state,
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state))
@@ -399,7 +399,7 @@ impl SpaceAdmissionAggregate {
         )
     }
 
-    pub const fn has_pending_sponsor_abandonment(&self) -> bool {
+    pub(super) const fn has_pending_sponsor_abandonment(&self) -> bool {
         match &self.state {
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
                 SpaceAdmissionRejectedState::Sponsor(state),
