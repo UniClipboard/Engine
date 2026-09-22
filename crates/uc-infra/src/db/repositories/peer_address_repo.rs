@@ -41,11 +41,7 @@ where
     E: DbExecutor,
 {
     async fn get(&self, device: &DeviceId) -> Result<Option<PeerAddressRecord>, PeerAddressError> {
-        let result = self
-            .store
-            .get_peer_address(device)
-            .await
-            .map_err(|error| PeerAddressError::Internal(error.to_string()));
+        let result = self.store.get_peer_address(device).await;
         let observation = StoredAddressObservation::new(
             device.as_str(),
             result
@@ -59,10 +55,28 @@ where
                 observed_at_ms: record.observed_at.timestamp_millis(),
             },
             Ok(None) => AddressRecordResult::Missing,
-            Err(_) => AddressRecordResult::ReadFailed,
+            Err(error) => {
+                let (category, stage, stack) = error.diagnostic_fields();
+                AddressRecordResult::ReadFailedDetailed {
+                    category: category.to_owned(),
+                    stage: stage.to_owned(),
+                    source_chain: vec![
+                        "peer_address_repository".to_owned(),
+                        "relationship_store".to_owned(),
+                        category.to_owned(),
+                    ],
+                    stack: stack.to_vec(),
+                    stack_status: if stack.is_empty() {
+                        "unresolved"
+                    } else {
+                        "captured"
+                    }
+                    .to_owned(),
+                }
+            }
         };
         NetworkRecorder::current().address_record(&observation, outcome);
-        result
+        result.map_err(|error| error.into_peer_address())
     }
 
     async fn upsert(&self, record: &PeerAddressRecord) -> Result<(), PeerAddressError> {

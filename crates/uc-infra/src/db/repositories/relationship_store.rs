@@ -1,3 +1,4 @@
+use std::backtrace::Backtrace;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -35,6 +36,61 @@ pub enum RelationshipStoreError {
     InvalidCiphertext,
     #[error("relationship storage failed: {0}")]
     Storage(String),
+    #[error("relationship operation failed ({category})")]
+    Diagnostic {
+        category: &'static str,
+        stage: &'static str,
+        stack: Vec<String>,
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+impl RelationshipStoreError {
+    fn diagnostic(
+        category: &'static str,
+        stage: &'static str,
+        source: impl Into<anyhow::Error>,
+    ) -> Self {
+        Self::Diagnostic {
+            category,
+            stage,
+            stack: sanitized_backtrace(),
+            source: source.into(),
+        }
+    }
+
+    pub(crate) fn diagnostic_fields(&self) -> (&'static str, &'static str, &[String]) {
+        match self {
+            Self::Diagnostic {
+                category,
+                stage,
+                stack,
+                ..
+            } => (category, stage, stack),
+            _ => ("unknown", "relationship_store", &[]),
+        }
+    }
+
+    pub(crate) fn into_peer_address(self) -> uc_core::ports::PeerAddressError {
+        let (category, stage, _) = self.diagnostic_fields();
+        uc_core::ports::PeerAddressError::Repository {
+            category,
+            stage,
+            source: anyhow::Error::new(self),
+        }
+    }
+}
+
+fn sanitized_backtrace() -> Vec<String> {
+    Backtrace::force_capture()
+        .to_string()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("at "))
+        .take(8)
+        .map(|line| line.chars().take(160).collect())
+        .collect()
 }
 
 #[derive(Clone, Copy)]
@@ -99,7 +155,11 @@ impl RelationshipCipher {
             || envelope[..4] != RELATIONSHIP_MAGIC
             || envelope[4] != RELATIONSHIP_FORMAT_VERSION
         {
-            return Err(RelationshipStoreError::InvalidCiphertext);
+            return Err(RelationshipStoreError::diagnostic(
+                "unsupported_version",
+                "envelope_decode",
+                anyhow::anyhow!("relationship envelope is unsupported"),
+            ));
         }
         let aad = relationship_aad(kind, lookup_key);
         decrypt_xchacha_raw(
@@ -108,7 +168,9 @@ impl RelationshipCipher {
             &envelope[HEADER_LEN..],
             &aad,
         )
-        .map_err(|_| RelationshipStoreError::InvalidCiphertext)
+        .map_err(|error| {
+            RelationshipStoreError::diagnostic("authentication", "ciphertext_authentication", error)
+        })
     }
 }
 
@@ -209,16 +271,22 @@ where
             .current_profile
             .current_profile()
             .await
-            .map_err(|error| RelationshipStoreError::Storage(error.to_string()))?;
+            .map_err(|error| {
+                RelationshipStoreError::diagnostic("storage", "profile_read", error)
+            })?;
         let key = self
             .derive_subkey
             .derive_subkey(profile.as_ref().as_bytes(), RELATIONSHIP_KEY_INFO)
             .await
             .map_err(|error| match error {
                 uc_core::ports::space::SpaceAccessError::NotUnlocked => {
-                    RelationshipStoreError::Locked
+                    RelationshipStoreError::diagnostic(
+                        "locked",
+                        "key_derivation",
+                        uc_core::ports::space::SpaceAccessError::NotUnlocked,
+                    )
                 }
-                other => RelationshipStoreError::Storage(other.to_string()),
+                other => RelationshipStoreError::diagnostic("unknown", "key_derivation", other),
             })?;
         Ok(RelationshipCipher::new(key))
     }
@@ -237,9 +305,9 @@ where
                     .find(1)
                     .select(relationship_privacy_maintenance::state)
                     .first::<String>(conn)
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+                    .map_err(anyhow::Error::new)
             })
-            .map_err(|error| RelationshipStoreError::Storage(error.to_string()))
+            .map_err(|error| RelationshipStoreError::diagnostic("storage", "database_read", error))
     }
 
     fn migrate_if_needed(&self, cipher: &RelationshipCipher) -> Result<(), RelationshipStoreError> {
@@ -446,9 +514,9 @@ where
                     .select(encrypted_relationship::payload_ciphertext)
                     .first::<Vec<u8>>(conn)
                     .optional()
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+                    .map_err(anyhow::Error::new)
             })
-            .map_err(|error| RelationshipStoreError::Storage(error.to_string()))
+            .map_err(|error| RelationshipStoreError::diagnostic("storage", "database_read", error))
     }
 
     async fn get_payload(
@@ -701,15 +769,26 @@ fn encode_peer_address(record: &PeerAddressRecord) -> Result<Vec<u8>, Relationsh
 }
 
 fn decode_peer_address(payload: &[u8]) -> Result<PeerAddressRecord, RelationshipStoreError> {
-    let decoded: PeerAddressPayloadV1 =
-        serde_json::from_slice(payload).map_err(|_| RelationshipStoreError::InvalidCiphertext)?;
+    let decoded: PeerAddressPayloadV1 = serde_json::from_slice(payload).map_err(|error| {
+        RelationshipStoreError::diagnostic("payload_decode", "payload_decode", error)
+    })?;
     if decoded.version != 1 {
-        return Err(RelationshipStoreError::InvalidCiphertext);
+        return Err(RelationshipStoreError::diagnostic(
+            "unsupported_version",
+            "payload_decode",
+            anyhow::anyhow!("peer address payload version is unsupported"),
+        ));
     }
     let observed_at = Utc
         .timestamp_opt(decoded.observed_at, 0)
         .single()
-        .ok_or(RelationshipStoreError::InvalidCiphertext)?;
+        .ok_or_else(|| {
+            RelationshipStoreError::diagnostic(
+                "payload_decode",
+                "payload_decode",
+                anyhow::anyhow!("peer address timestamp is invalid"),
+            )
+        })?;
     Ok(PeerAddressRecord {
         device_id: DeviceId::new(decoded.device_id),
         addr_blob: decoded.addr_blob,

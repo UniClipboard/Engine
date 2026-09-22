@@ -50,13 +50,24 @@ pub fn local_address_record_keys() -> Option<(Option<[u8; 32]>, Option<[u8; 32]>
         .map(|keys| (keys.device, keys.record))
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum AddressRecordResult {
-    Loaded { observed_at_ms: i64 },
-    Saved { observed_at_ms: i64 },
+    Loaded {
+        observed_at_ms: i64,
+    },
+    Saved {
+        observed_at_ms: i64,
+    },
     Missing,
     ReadFailed,
+    ReadFailedDetailed {
+        category: String,
+        stage: String,
+        source_chain: Vec<String>,
+        stack: Vec<String>,
+        stack_status: String,
+    },
     SaveFailed,
     InvalidEncoding,
 }
@@ -73,7 +84,9 @@ impl AddressRecordEvent {
             AddressRecordResult::Loaded { .. } => "address.record.loaded",
             AddressRecordResult::Saved { .. } => "address.record.saved",
             AddressRecordResult::Missing => "address.record.missing",
-            AddressRecordResult::ReadFailed => "address.record.read_failed",
+            AddressRecordResult::ReadFailed | AddressRecordResult::ReadFailedDetailed { .. } => {
+                "address.record.read_failed"
+            }
             AddressRecordResult::SaveFailed => "address.record.save_failed",
             AddressRecordResult::InvalidEncoding => "address.record.invalid_encoding",
         }
@@ -82,6 +95,7 @@ impl AddressRecordEvent {
         if matches!(
             self.result,
             AddressRecordResult::ReadFailed
+                | AddressRecordResult::ReadFailedDetailed { .. }
                 | AddressRecordResult::SaveFailed
                 | AddressRecordResult::InvalidEncoding
         ) {
@@ -97,6 +111,20 @@ impl AddressRecordEvent {
         | AddressRecordResult::Saved { observed_at_ms } = self.result
         {
             fields.insert("observed_at_ms".into(), json!(observed_at_ms));
+        }
+        if let AddressRecordResult::ReadFailedDetailed {
+            ref category,
+            ref stage,
+            ref source_chain,
+            ref stack,
+            ref stack_status,
+        } = self.result
+        {
+            fields.insert("error.category".into(), json!(category));
+            fields.insert("error.stage".into(), json!(stage));
+            fields.insert("error.chain".into(), json!(source_chain));
+            fields.insert("error.stack".into(), json!(stack));
+            fields.insert("error.stack_status".into(), json!(stack_status));
         }
         fields
     }
