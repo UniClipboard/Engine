@@ -314,6 +314,31 @@ fixture 调用失败或最终公开事件不满足 product invariant；不增加
 - 已有 `two_member_nodes_partition_and_heal` 明确登记为快速重连规则的部分证据：链路阻断时返回 unavailable，heal 后
   同一真实 Application endpoint 接受消息；它不证明 Iroh/Engine transport 重建，后者继续由 E03/E04/E06/E10/E13 负责。
 
+## 当前快速文字传输切片（2026-09-22）
+
+快速文字场景复用既有 `ClipboardSyncFacade` 完整负责人和测试 ports：作者准备一个 `text/plain` 快照，执行一次
+`dispatch_snapshot`，断言 V3 envelope 被编码、canonical snapshot hash 产生、目标 peer 得到 accepted 结果。最终 transport
+ACK 由既有 mock 固定，真实网络 exact text 仍只由 E02 证明。
+
+原场景较长且内嵌在 `facade.rs`，本轮按新目录规范移到 `facade/tests/text_transfer_scenario.rs`，作为私有实现测试子模块；
+不扩大 facade 或 port 可见性。testkit 增加 1 秒预算、encode/dispatch 阶段、固定 seed 和结构化报告，不改变业务调用。
+
+失败方式：快照未编码为 V3、加密入口未收到 envelope、目标 fan-out 未发生、accepted 数量或 canonical hash 错误时均为
+product invariant；fixture 装配失败为 fixture invalid；超时直接失败，不自动重试。验收为单次小于 1 秒，与原
+`dispatch_entry_returns_public_outcome_for_online_peer` 双轨 20 轮，进入 fast/evidence，旧 facade 测试入口继续通过。
+
+### 当前完成记录
+
+- `text_transfer_scenario_encodes_and_dispatches_snapshot` 已移入明确的私有测试子目录，复用真实
+  `ClipboardSyncFacade`、固定 seed `0x00403404` 和 1 秒预算；单次 nextest `0.043s`。
+- 与既有 `dispatch_entry_returns_public_outcome_for_online_peer` 双轨 20 轮全部通过，总墙钟 12 秒；完整
+  `uc-application` lib 入口 `961 passed, 1 ignored`，测试耗时 `21.96s`。
+- fast 统一入口现在 16/16 通过、测试累计 `0.268s`；evidence 18/18 通过、测试累计 `2.122s`。
+  结构化工件记录 `passed`、最后事件 `text-dispatch-accepted`、encode/dispatch 阶段、cleanup completed、固定 seed
+  和准确复现命令。
+- 快速场景只证明 V3 envelope、canonical hash 和 accepted fan-out；transport ACK 仍由测试 port 控制，真实网络
+  exact text 继续由 E02 负责。普通构建不依赖 testkit，回退只需移除测试子模块与选择器。
+
 # 1. Overview
 
 规格 030 已用真实 Engine operation、SQLite、Iroh endpoint、网络分区和正文传输完成 F0-F7 验收。其中 F7 单项
