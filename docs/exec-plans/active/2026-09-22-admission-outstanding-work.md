@@ -61,6 +61,15 @@ Core 新增 [`membership/settlement_window.rs`](../../../crates/uc-core/src/memb
 
 配对尝试契约 `AdmissionAttemptTimeline` 保持独立：它是双方协商、固定五分钟的协议边界，不是本机可自定的收尾期限，合并会让协议契约看起来可调。
 
+## 角色包装层去重（已实现）
+
+`capability.rs` 的体量主要来自按角色收窄的转发方法，这是接口设计本身，不是重复判断。实际重复只有两处，已消除：
+
+- `JoinerAdmission::needs_attention` 与 `supersede` 各自列举“无期限且无摘要的后期加入”，现由 `is_unbounded_late_join()` 统一表达；两者不会再各自漂移。
+- `JoinerAdmission::try_from_record` 与 `SponsorAdmission::try_from_record` 各自列举本角色状态，现改为 `record_role()` 判断，并以测试锁定两种角色互不接受。
+
+未引入额外的“阶段枚举”：阶段类问题已由 `AdmissionOutstandingWork` 回答，再加一层会产生第二套分类。
+
 ## 阶段 B：跨记录的配对尾部（后续）
 
 移除通知（`peer_reconciliation.restricted_delivery`）、成员效果与设备组密钥投递各有持久状态，不属于配对记录。阶段 B 在统一收尾期限类型的基础上，再由 Application 汇总为只读的“空间收尾工作”查询，供展示与维护共用。阶段 A 不改变这些状态。

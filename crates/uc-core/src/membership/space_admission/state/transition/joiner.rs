@@ -882,19 +882,7 @@ impl SpaceAdmissionAggregate {
     }
 
     pub(crate) fn supersede(mut self) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
-        if self.attempt_timeline.is_none()
-            && self.attempt_digest.is_none()
-            && matches!(
-                &self.state,
-                SpaceAdmissionRecordState::Joiner(
-                    SpaceAdmissionJoinerState::Prepared(_)
-                        | SpaceAdmissionJoinerState::Committed(_)
-                        | SpaceAdmissionJoinerState::Applied(_)
-                        | SpaceAdmissionJoinerState::Activating(_)
-                        | SpaceAdmissionJoinerState::Cancelling(_)
-                )
-            )
-        {
+        if self.is_unbounded_late_join() {
             return self.terminate_locally(SpaceAdmissionTerminationReason::Cancelled);
         }
         if self.attempt_digest.is_some()

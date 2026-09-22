@@ -109,18 +109,7 @@ impl JoinerAdmission {
         matches!(
             &self.record.state,
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(_))
-        ) || (self.record.attempt_timeline.is_none()
-            && self.record.attempt_digest.is_none()
-            && matches!(
-                &self.record.state,
-                SpaceAdmissionRecordState::Joiner(
-                    SpaceAdmissionJoinerState::Prepared(_)
-                        | SpaceAdmissionJoinerState::Committed(_)
-                        | SpaceAdmissionJoinerState::Applied(_)
-                        | SpaceAdmissionJoinerState::Activating(_)
-                        | SpaceAdmissionJoinerState::Cancelling(_)
-                )
-            ))
+        ) || self.record.is_unbounded_late_join()
     }
 
     pub fn start_resolving_invitation(
@@ -144,18 +133,9 @@ impl JoinerAdmission {
         .map(JoinerAdmissionTransition::from_transition)
     }
 
+    /// 记录角色由记录状态唯一决定；此处不再重复列举加入方状态。
     pub fn try_from_record(record: SpaceAdmissionAggregate) -> Option<Self> {
-        if matches!(
-            record.state,
-            SpaceAdmissionRecordState::Joiner(_)
-                | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Active(_))
-                | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Superseded(_))
-                | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
-                    SpaceAdmissionRejectedState::LocalJoiner(_)
-                        | SpaceAdmissionRejectedState::Joiner(_)
-                ))
-                | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(_))
-        ) {
+        if record.record_role() == Some(AdmissionRole::Joiner) {
             Some(Self { record })
         } else {
             None
@@ -747,26 +727,9 @@ impl JoinerAdmission {
 }
 
 impl SponsorAdmission {
+    /// 记录角色由记录状态唯一决定；此处不再重复列举邀请方状态。
     pub fn try_from_record(record: SpaceAdmissionAggregate) -> Option<Self> {
-        let is_sponsor = match &record.state {
-            SpaceAdmissionRecordState::Sponsor(_) => true,
-            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorExpired(_)) => {
-                true
-            }
-            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Completed(state)) => {
-                state
-                    .saved_reply
-                    .exact_reply_envelope()
-                    .header()
-                    .sender_role()
-                    == AdmissionRole::Sponsor
-            }
-            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
-                SpaceAdmissionRejectedState::Sponsor(_),
-            )) => true,
-            _ => false,
-        };
-        if is_sponsor {
+        if record.record_role() == Some(AdmissionRole::Sponsor) {
             Some(Self { record })
         } else {
             None

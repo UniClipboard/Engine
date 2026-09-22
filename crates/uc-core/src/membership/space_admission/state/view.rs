@@ -255,6 +255,24 @@ impl SpaceAdmissionAggregate {
         }
     }
 
+    /// 旧记录越过了本机可安全放弃的阶段，却没有双方认可的期限，也没有尝试摘要。
+    ///
+    /// 这类记录无法凭时钟自动收尾：取代时只能按本机取消结束，展示上需要用户处理。
+    pub(super) const fn is_unbounded_late_join(&self) -> bool {
+        self.attempt_timeline.is_none()
+            && self.attempt_digest.is_none()
+            && matches!(
+                &self.state,
+                SpaceAdmissionRecordState::Joiner(
+                    SpaceAdmissionJoinerState::Prepared(_)
+                        | SpaceAdmissionJoinerState::Committed(_)
+                        | SpaceAdmissionJoinerState::Applied(_)
+                        | SpaceAdmissionJoinerState::Activating(_)
+                        | SpaceAdmissionJoinerState::Cancelling(_)
+                )
+            )
+    }
+
     pub(super) const fn has_expirable_local_join(&self) -> bool {
         self.attempt_timeline.is_some()
             && (matches!(

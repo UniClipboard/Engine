@@ -592,3 +592,16 @@ fn joiner_applied_aggregate_fixture() -> SpaceAdmissionAggregate {
         .expect("Applied Joiner fixture")
         .into_replacement()
 }
+
+#[test]
+fn role_scoped_records_only_open_under_their_own_role() {
+    let joiner = joiner_prepared_aggregate_fixture();
+    assert_eq!(joiner.record_role(), Some(AdmissionRole::Joiner));
+    assert!(SponsorAdmission::try_from_record(joiner).is_none());
+    assert!(JoinerAdmission::try_from_record(joiner_prepared_aggregate_fixture()).is_some());
+
+    let sponsor = sponsor_committed_aggregate_fixture();
+    assert_eq!(sponsor.record_role(), Some(AdmissionRole::Sponsor));
+    assert!(JoinerAdmission::try_from_record(sponsor).is_none());
+    assert!(SponsorAdmission::try_from_record(sponsor_committed_aggregate_fixture()).is_some());
+}
