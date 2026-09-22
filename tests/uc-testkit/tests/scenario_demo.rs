@@ -135,6 +135,31 @@ async fn timeout_failure_reports_condition_last_event_and_artifacts() {
     assert!(summary.contains("artifact:"));
 }
 
+#[test]
+fn external_cleanup_failure_is_classified_in_artifacts() {
+    let artifact_root = TempDir::new().expect("artifact root");
+    let mut scenario = Scenario::start(config(
+        artifact_root.path(),
+        "testkit-cleanup-failure-demo",
+        8,
+        Duration::from_secs(1),
+    ))
+    .expect("scenario starts");
+    scenario.record_external_resource("child-process", "worker", CleanupStatus::Failed);
+
+    let completion = scenario
+        .finish(Ok(()))
+        .expect_err("failed cleanup must fail the scenario");
+    assert_eq!(completion.failure().kind(), FailureKind::CleanupFailed);
+    assert_eq!(completion.report().cleanup, CleanupStatus::Failed);
+    assert_eq!(
+        completion.report().resources[0].cleanup,
+        CleanupStatus::Failed
+    );
+    assert!(completion.result_json().is_file());
+    assert!(completion.summary().is_file());
+}
+
 fn config(
     artifact_root: &std::path::Path,
     name: &'static str,

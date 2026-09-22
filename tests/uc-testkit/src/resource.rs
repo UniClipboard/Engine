@@ -28,6 +28,16 @@ fn complete(tracker: &ResourceTracker, index: usize, status: CleanupStatus) {
     }
 }
 
+pub(crate) fn record_external(
+    tracker: &ResourceTracker,
+    kind: &'static str,
+    label: &'static str,
+    status: CleanupStatus,
+) {
+    let index = register(tracker, kind, label);
+    complete(tracker, index, status);
+}
+
 pub struct TempDirLease {
     directory: Option<TempDir>,
     tracker: ResourceTracker,

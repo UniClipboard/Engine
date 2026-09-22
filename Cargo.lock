@@ -7187,6 +7187,7 @@ dependencies = [
  "uc-core",
  "uc-observability-contract",
  "uc-observability-runtime",
+ "uc-testkit",
  "unicode-normalization",
  "unicode-segmentation",
  "url",

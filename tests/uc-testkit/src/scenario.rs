@@ -13,7 +13,7 @@ use crate::{
     budget::{lock, millis},
     event::EventLog,
     report::{ArtifactPaths, prepare_artifact_directory, write_report},
-    resource::ResourceTracker,
+    resource::{ResourceTracker, record_external},
 };
 
 pub struct ScenarioConfig {
@@ -127,6 +127,15 @@ impl Scenario {
     pub fn tcp_port(&mut self, label: &'static str) -> Result<TcpPortLease, ScenarioFailure> {
         TcpPortLease::new(Arc::clone(&self.resources), label)
             .map_err(|_| ScenarioFailure::new(FailureKind::ResourceCollision, "loopback-port-bind"))
+    }
+
+    pub fn record_external_resource(
+        &mut self,
+        kind: &'static str,
+        label: &'static str,
+        cleanup: CleanupStatus,
+    ) {
+        record_external(&self.resources, kind, label, cleanup);
     }
 
     pub fn finish(

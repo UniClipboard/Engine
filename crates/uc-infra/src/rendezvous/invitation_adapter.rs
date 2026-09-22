@@ -629,6 +629,7 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::net::SocketAddr;
+    use std::path::PathBuf;
     use std::sync::Mutex as StdMutex;
 
     use async_trait::async_trait;
@@ -638,8 +639,27 @@ mod tests {
     use tracing::Level;
     use uc_core::ids::DeviceId;
     use uc_core::settings::model::Settings;
+    use uc_testkit::{
+        CleanupStatus, FailureKind, Scenario, ScenarioBudget, ScenarioConfig, ScenarioFailure,
+    };
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const STAGE3_PROVIDER_REPRODUCE: &str =
+        "cargo nextest run --profile ci --locked -p uc-infra -E 'test(stage3_provider)'";
+
+    fn stage3_provider_scenario(name: &'static str, seed: u64) -> Scenario {
+        let artifact_root = PathBuf::from("../../target/test-artifacts/real-dependencies")
+            .join(format!("process-{}", std::process::id()));
+        Scenario::start(ScenarioConfig::new(
+            name,
+            seed,
+            ScenarioBudget::new(std::time::Duration::from_secs(3)),
+            STAGE3_PROVIDER_REPRODUCE,
+            artifact_root,
+        ))
+        .expect("provider diagnostic scenario starts")
+    }
 
     #[derive(Clone, Default)]
     struct CapturedWriter(Arc<StdMutex<Vec<u8>>>);
@@ -935,6 +955,119 @@ mod tests {
             decoded.expires_at_ms(),
             issued.expires_at.timestamp_millis()
         );
+    }
+
+    #[tokio::test]
+    async fn stage3_provider_reports_success_rejection_and_unavailable() {
+        let mut success = stage3_provider_scenario("provider-success", 0x0040_0301);
+        let endpoint = loopback_endpoint().await;
+        let server = MockServer::start().await;
+        let expires_at =
+            (Utc::now() + LOCAL_MINT_TTL + chrono::Duration::minutes(1)).timestamp_millis();
+        Mock::given(method("POST"))
+            .and(path("/v1/pairings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": "ABCD-EFGH",
+                "expiresAtMs": expires_at,
+            })))
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(
+            endpoint.clone(),
+            InMemorySettings::with_device_name(Some("stage3")),
+            server.uri(),
+        );
+        let issued = {
+            let _stage = success.stage("provider-request");
+            adapter.issue_invitation().await.expect("provider success")
+        };
+        assert_eq!(issued.code.as_str(), "ABCD-EFGH");
+        success.record_event("provider-response-accepted");
+        drop(adapter);
+        endpoint.close().await;
+        drop(server);
+        success.record_external_resource("loopback-endpoint", "provider", CleanupStatus::Completed);
+        success.record_external_resource("http-server", "directory", CleanupStatus::Completed);
+        success.finish(Ok(())).expect("success report");
+
+        let mut rejected = stage3_provider_scenario("provider-invalid-response", 0x0040_0302);
+        let endpoint = loopback_endpoint().await;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/pairings"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not-json"))
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(
+            endpoint.clone(),
+            InMemorySettings::with_device_name(Some("stage3")),
+            server.uri(),
+        );
+        let error = adapter
+            .issue_invitation()
+            .await
+            .expect_err("invalid response must be rejected");
+        assert!(matches!(
+            error,
+            InvitationError::DirectoryInvalidResponse { .. }
+        ));
+        rejected.record_event("provider-response-invalid");
+        drop(adapter);
+        endpoint.close().await;
+        drop(server);
+        rejected.record_external_resource(
+            "loopback-endpoint",
+            "provider",
+            CleanupStatus::Completed,
+        );
+        rejected.record_external_resource("http-server", "directory", CleanupStatus::Completed);
+        let report = rejected
+            .finish(Err(ScenarioFailure::new(
+                FailureKind::ProductInvariant,
+                "directory-invalid-response",
+            )))
+            .expect_err("controlled product failure report");
+        assert_eq!(report.failure().kind(), FailureKind::ProductInvariant);
+
+        let mut unavailable = stage3_provider_scenario("provider-unavailable", 0x0040_0303);
+        let endpoint = loopback_endpoint().await;
+        let port = unavailable.tcp_port("directory-port").expect("port lease");
+        let address = port.local_addr().expect("leased address");
+        drop(port);
+        let adapter = make_adapter(
+            endpoint.clone(),
+            InMemorySettings::with_device_name(Some("stage3")),
+            format!("http://{address}"),
+        );
+        let issued = adapter
+            .issue_invitation()
+            .await
+            .expect("transport failure falls back to local mint");
+        assert_eq!(issued.code.as_str().len(), 7);
+        unavailable.record_event("provider-transport-unavailable");
+        drop(adapter);
+        endpoint.close().await;
+        unavailable.record_external_resource(
+            "loopback-endpoint",
+            "provider",
+            CleanupStatus::Completed,
+        );
+        let report = unavailable
+            .finish(Err(ScenarioFailure::new(
+                FailureKind::EnvironmentUnavailable,
+                "directory-transport-unavailable",
+            )))
+            .expect_err("controlled environment failure report");
+        assert_eq!(report.failure().kind(), FailureKind::EnvironmentUnavailable);
+
+        let mut cleanup = stage3_provider_scenario("provider-cleanup-failure", 0x0040_0305);
+        cleanup.record_event("cleanup-result-received");
+        cleanup.record_external_resource("http-server", "directory", CleanupStatus::Failed);
+        let report = cleanup
+            .finish(Ok(()))
+            .expect_err("controlled cleanup failure report");
+        assert_eq!(report.failure().kind(), FailureKind::CleanupFailed);
+        assert_eq!(report.report().cleanup, CleanupStatus::Failed);
     }
 
     #[tokio::test]

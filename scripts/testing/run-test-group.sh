@@ -53,7 +53,9 @@ case "${GROUP}" in
     run_nextest -p uc-engine --test public_contract "$@"
     ;;
   process)
-    run_nextest -p uc-engine --test host_contract "$@"
+    run_nextest \
+      -E 'package(uc-engine) & binary(host_contract) | package(uc-infra) & binary(profile_storage_upgrade_crash)' \
+      "$@"
     ;;
   real-network)
     exec bash scripts/testing/run-connection-recovery-e2e.sh "$@"

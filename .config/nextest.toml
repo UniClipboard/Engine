@@ -38,6 +38,16 @@ filter = "package(uc-application) & test(stage2)"
 test-group = "fast"
 slow-timeout = { period = "2s", terminate-after = 1 }
 
+[[profile.default.overrides]]
+filter = "package(uc-infra) & test(stage3_provider)"
+test-group = "persistence-provider"
+slow-timeout = { period = "5s", terminate-after = 1 }
+
+[[profile.default.overrides]]
+filter = "package(uc-infra) & binary(profile_storage_upgrade_crash)"
+test-group = "process"
+slow-timeout = { period = "20s", terminate-after = 1 }
+
 [[profile.ci.overrides]]
 filter = "package(uc-testkit)"
 test-group = "fast"
@@ -47,3 +57,13 @@ slow-timeout = { period = "2s", terminate-after = 1 }
 filter = "package(uc-application) & test(stage2)"
 test-group = "fast"
 slow-timeout = { period = "2s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-infra) & test(stage3_provider)"
+test-group = "persistence-provider"
+slow-timeout = { period = "5s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-infra) & binary(profile_storage_upgrade_crash)"
+test-group = "process"
+slow-timeout = { period = "20s", terminate-after = 1 }
