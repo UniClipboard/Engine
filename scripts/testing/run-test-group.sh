@@ -49,7 +49,7 @@ case "${GROUP}" in
     fi
     artifact_root="${UC_TEST_ARTIFACTS_DIR:-target/test-artifacts/$(date -u +%Y%m%dT%H%M%SZ)-$$}"
     export UC_TEST_ARTIFACTS_DIR="${artifact_root}"
-    run_nextest -E 'package(uc-testkit) | package(uc-application) & (test(admission_recovery_scenarios) | test(device_trust_recovery_scenario) | test(legacy_candidate_convergence_scenario)) | package(uc-infra) & (test(stage3_provider) | binary(profile_storage_upgrade_crash))'
+    run_nextest -E 'package(uc-testkit) | package(uc-application) & (test(admission_recovery_scenarios) | test(device_trust_recovery_scenario) | test(legacy_candidate_convergence_scenario)) | package(uc-infra) & (test(provider_dependency_evidence) | binary(profile_storage_upgrade_crash))'
     cargo run --quiet --locked -p uc-testkit --example scenario_demo -- success
     cargo run --quiet --locked -p uc-testkit --example scenario_demo -- failure
     printf 'testkit artifacts: %s\n' "${artifact_root}"

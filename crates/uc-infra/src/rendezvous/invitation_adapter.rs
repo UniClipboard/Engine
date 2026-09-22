@@ -645,17 +645,17 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    const STAGE3_PROVIDER_REPRODUCE: &str =
-        "cargo nextest run --profile ci --locked -p uc-infra -E 'test(stage3_provider)'";
+    const PROVIDER_EVIDENCE_REPRODUCE: &str =
+        "cargo nextest run --profile ci --locked -p uc-infra -E 'test(provider_dependency_evidence)'";
 
-    fn stage3_provider_scenario(name: &'static str, seed: u64) -> Scenario {
+    fn provider_dependency_scenario(name: &'static str, seed: u64) -> Scenario {
         let artifact_root = PathBuf::from("../../target/test-artifacts/real-dependencies")
             .join(format!("process-{}", std::process::id()));
         Scenario::start(ScenarioConfig::new(
             name,
             seed,
             ScenarioBudget::new(std::time::Duration::from_secs(3)),
-            STAGE3_PROVIDER_REPRODUCE,
+            PROVIDER_EVIDENCE_REPRODUCE,
             artifact_root,
         ))
         .expect("provider diagnostic scenario starts")
@@ -958,8 +958,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stage3_provider_reports_success_rejection_and_unavailable() {
-        let mut success = stage3_provider_scenario("provider-success", 0x0040_0301);
+    async fn provider_dependency_evidence_reports_all_outcomes() {
+        let mut success = provider_dependency_scenario("provider-success", 0x0040_0301);
         let endpoint = loopback_endpoint().await;
         let server = MockServer::start().await;
         let expires_at =
@@ -974,7 +974,7 @@ mod tests {
             .await;
         let adapter = make_adapter(
             endpoint.clone(),
-            InMemorySettings::with_device_name(Some("stage3")),
+            InMemorySettings::with_device_name(Some("provider-evidence")),
             server.uri(),
         );
         let issued = {
@@ -990,7 +990,7 @@ mod tests {
         success.record_external_resource("http-server", "directory", CleanupStatus::Completed);
         success.finish(Ok(())).expect("success report");
 
-        let mut rejected = stage3_provider_scenario("provider-invalid-response", 0x0040_0302);
+        let mut rejected = provider_dependency_scenario("provider-invalid-response", 0x0040_0302);
         let endpoint = loopback_endpoint().await;
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -1000,7 +1000,7 @@ mod tests {
             .await;
         let adapter = make_adapter(
             endpoint.clone(),
-            InMemorySettings::with_device_name(Some("stage3")),
+            InMemorySettings::with_device_name(Some("provider-evidence")),
             server.uri(),
         );
         let error = adapter
@@ -1029,14 +1029,14 @@ mod tests {
             .expect_err("controlled product failure report");
         assert_eq!(report.failure().kind(), FailureKind::ProductInvariant);
 
-        let mut unavailable = stage3_provider_scenario("provider-unavailable", 0x0040_0303);
+        let mut unavailable = provider_dependency_scenario("provider-unavailable", 0x0040_0303);
         let endpoint = loopback_endpoint().await;
         let port = unavailable.tcp_port("directory-port").expect("port lease");
         let address = port.local_addr().expect("leased address");
         drop(port);
         let adapter = make_adapter(
             endpoint.clone(),
-            InMemorySettings::with_device_name(Some("stage3")),
+            InMemorySettings::with_device_name(Some("provider-evidence")),
             format!("http://{address}"),
         );
         let issued = adapter
@@ -1060,7 +1060,7 @@ mod tests {
             .expect_err("controlled environment failure report");
         assert_eq!(report.failure().kind(), FailureKind::EnvironmentUnavailable);
 
-        let mut cleanup = stage3_provider_scenario("provider-cleanup-failure", 0x0040_0305);
+        let mut cleanup = provider_dependency_scenario("provider-cleanup-failure", 0x0040_0305);
         cleanup.record_event("cleanup-result-received");
         cleanup.record_external_resource("http-server", "directory", CleanupStatus::Failed);
         let report = cleanup
