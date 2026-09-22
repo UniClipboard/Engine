@@ -99,8 +99,11 @@ jobs:
       - name: Validate automatic connections without coverage instrumentation
         run: "cargo test -p uc-engine --features dev-tools --test space_membership_auto_pairing_e2e --locked -- automatic_connections:: --test-threads=1"
 
+      - name: Validate dev-tools test support
+        run: "cargo test -p uc-engine --features dev-tools --lib --locked dev::"
+
       - name: Generate Rust coverage
-        run: cargo llvm-cov --workspace --all-targets --features uc-engine/dev-tools --locked --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --all-targets --locked --ignore-filename-regex 'crates/uc-engine/src/dev/' --lcov --output-path lcov.info
 
       - name: Upload Rust coverage to Codecov
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f
