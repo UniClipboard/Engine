@@ -11,12 +11,15 @@ const REPRODUCE: &str = "cargo nextest run --profile ci --locked -p uc-applicati
 
 #[tokio::test]
 async fn text_transfer_scenario_encodes_and_dispatches_snapshot() {
+    let artifact_root = std::env::var_os("UC_TEST_ARTIFACTS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("../../target/test-artifacts/text-transfer"));
     let scenario = Scenario::start(ScenarioConfig::new(
         "text-transfer-dispatch",
         0x0040_3404,
         ScenarioBudget::new(Duration::from_secs(1)),
         REPRODUCE,
-        PathBuf::from("../../target/test-artifacts/text-transfer"),
+        artifact_root,
     ))
     .expect("text transfer scenario starts");
 

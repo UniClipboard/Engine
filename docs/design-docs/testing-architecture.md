@@ -340,6 +340,22 @@ driver/framework/cleanup 失败诊断；并行资源隔离；有界等待与子�
 - 五类业务覆盖有新旧映射；真实网络故障只由实际网络环境证明。
 - 10 个工作日趋势使用自然运行样本，不用同日重复运行凑数。
 
+### 首版集中验收清单（2026-09-22）
+
+| 状态 | 验收项 | 当前证据或完成边界 |
+| --- | --- | --- |
+| 已验证 | testkit 身份、预算、阶段、事件等待、资源租约、失败分类、清理与结构化报告 | 本地自测、成功/受控失败示例和 draft PR 下载工件均已读取；并行同身份场景不会覆盖工件 |
+| 已验证 | fast、evidence、persistence/provider、engine smoke、process、real network、device 分组与旧 `cargo test` 双轨 | 本地统一命令、旧入口、全目标编译和 PR repository/testkit jobs 已实际通过；慢线与设备仍按各自边界报告 |
+| 已验证 | 首批五类的快速规则证据与真实环境责任映射 | 配对、文字/文件、重连、重启和升级均有明确负责人层证据；快速线不冒充真实 Iroh、进程重启、exact bytes 或设备 |
+| 已验证 | 文字和文件快速场景的可下载诊断工件 | 统一入口把相对工件根规范为仓库绝对路径，并在 evidence 结束前强制检查两份 `result.json`；远程复验见当前提交后续工件 |
+| 可继续实现 | 仅在出现新的失败、慢测或诊断缺口时采用下一代表场景 | 候选清单保留 observability collector、host startup、node lifecycle 和 transfer shutdown；没有实际收益证据时不迁移、不包装 |
+| 可继续实现 | alpha.5 完整旧资料 fixture | 需要可重复且脱敏的外部合成资料；当前两个 fixture 保持 ignored，不能用 synthetic migration 冒充 |
+| 仅待合并后 schedule 生效 | `engine-real-environment.yml` 的分 mode nightly 与 profile-upgrade | PR 分支无法触发尚未进入默认分支的新增 workflow；合并后首次自然/手工运行才测量准备、场景、清理和总耗时 |
+| 长期未完成 | 10 个工作日自然趋势、全仓迁移、真实外网与设备 | 不属于 kit 首版完成；不得用同日重跑、隔离网络或模拟结果替代 |
+
+首版不要求再造完整快速 Engine transport topology：双方完整配对、真实断网重连、进程重启和 exact bytes 已由真实
+runner 负责；只有发现可在 Application 责任层稳定复现且能显著缩短反馈的新业务规则时，才增加新的快速场景。
+
 044-048 维护已交付切片和实际证据；034 维护下一阶段确定性多节点实现。本设计是长期路线的唯一事实来源，不再
 为同一范围创建另一份并行路线图。
 

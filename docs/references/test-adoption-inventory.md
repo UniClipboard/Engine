@@ -59,6 +59,10 @@ text 和真实文件 bytes 登记为 E01/E02。重连复用 E03/E04/E06/E10/E13�
 复用现有 synthetic migration 与 crash recovery tests。alpha.5 完整外部 fixture、真实外网和设备继续单列未验证。
 后续只补真实缺口，不因路线图存在而批量重写简单测试。t-0010 等活跃修复中的测试在其工作结束前不进入迁移清单。
 
+首版集中验收状态以 `docs/design-docs/testing-architecture.md` 的“首版集中验收清单”为准。当前不再为五类机械增加
+同义场景；下一采用对象必须先有实际失败、慢测或诊断证据。新增 nightly 定义只有进入默认分支后才能取得 schedule
+样本，当前不得登记为已验证。
+
 ## 保留真实网络与设备入口
 
 以下覆盖不能被内存模拟或 testkit 成功替代：

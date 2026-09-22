@@ -339,6 +339,17 @@ product invariant；fixture 装配失败为 fixture invalid；超时直接失败
 - 快速场景只证明 V3 envelope、canonical hash 和 accepted fan-out；transport ACK 仍由测试 port 控制，真实网络
   exact text 继续由 E02 负责。普通构建不依赖 testkit，回退只需移除测试子模块与选择器。
 
+## 当前远程工件完整性切片（2026-09-22）
+
+`d66cb46f` 的远程 JUnit 证明文字与文件场景均执行通过，但下载的 `engine-testkit-evidence` 缺少两者 JSON/摘要。
+文件场景虽然读取 `UC_TEST_ARTIFACTS_DIR`，CI 传入的相对路径会被 integration test 工作目录重新解释；文字场景则仍使用
+固定 fallback 目录。测试通过但诊断工件不可下载，不满足首版验收。
+
+本切片只修正工件路由：统一入口把环境变量规范为仓库绝对路径，文字与文件场景均优先使用该路径。失败方式为场景
+通过但 JSON/摘要不在上传目录、复现命令或 cleanup 字段缺失、统一入口影响既有分组。验收要求本地 evidence 入口执行后
+两份场景工件都出现在同一根目录，JUnit 仍包含两场景；远程 repository/testkit jobs 通过并下载核验两份工件。回退只
+还原路径选择，不改变测试断言、产品代码、公开接口、协议或持久格式。
+
 # 1. Overview
 
 规格 030 已用真实 Engine operation、SQLite、Iroh endpoint、网络分区和正文传输完成 F0-F7 验收。其中 F7 单项

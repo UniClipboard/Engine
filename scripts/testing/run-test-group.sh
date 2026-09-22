@@ -28,13 +28,32 @@ run_nextest() {
   cargo nextest run --profile ci --locked "$@"
 }
 
+artifact_root() {
+  local root="${UC_TEST_ARTIFACTS_DIR:-target/test-artifacts/$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+  if [[ "${root}" != /* ]]; then
+    root="${PWD}/${root}"
+  fi
+  printf '%s\n' "${root}"
+}
+
+require_scenario_result() {
+  local root="$1"
+  local scenario="$2"
+  local result
+  result="$(find "${root}" -mindepth 2 -maxdepth 2 -type f -path "*/${scenario}-seed-*/result.json" -print -quit)"
+  if [[ -z "${result}" ]]; then
+    printf 'missing structured result for scenario %s under %s\n' "${scenario}" "${root}" >&2
+    exit 1
+  fi
+}
+
 case "${GROUP}" in
   fast)
     if [[ $# -ne 0 ]]; then
       printf 'fast does not accept additional arguments\n' >&2
       exit 2
     fi
-    artifact_root="${UC_TEST_ARTIFACTS_DIR:-${PWD}/target/test-artifacts/$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+    artifact_root="$(artifact_root)"
     export UC_TEST_ARTIFACTS_DIR="${artifact_root}"
     run_nextest \
       -p uc-testkit \
@@ -50,13 +69,15 @@ case "${GROUP}" in
       printf 'evidence does not accept additional arguments\n' >&2
       exit 2
     fi
-    artifact_root="${UC_TEST_ARTIFACTS_DIR:-${PWD}/target/test-artifacts/$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+    artifact_root="$(artifact_root)"
     export UC_TEST_ARTIFACTS_DIR="${artifact_root}"
     run_nextest \
       -p uc-testkit \
       -p uc-application \
       -p uc-infra \
       -E 'package(uc-testkit) | package(uc-application) & (test(admission_recovery_scenarios) | test(device_trust_recovery_scenario) | test(legacy_candidate_convergence_scenario) | test(virtual_membership_network) | test(file_transfer_completion_scenario_reports_final_state) | test(text_transfer_scenario)) | package(uc-infra) & (test(provider_dependency_evidence) | binary(profile_storage_upgrade_crash))'
+    require_scenario_result "${artifact_root}" "text-transfer-dispatch"
+    require_scenario_result "${artifact_root}" "file-transfer-completion"
     cargo run --quiet --locked -p uc-testkit --example scenario_demo -- success
     cargo run --quiet --locked -p uc-testkit --example scenario_demo -- failure
     printf 'testkit artifacts: %s\n' "${artifact_root}"
