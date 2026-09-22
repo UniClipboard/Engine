@@ -34,7 +34,7 @@ test-group = "fast"
 slow-timeout = { period = "2s", terminate-after = 1 }
 
 [[profile.default.overrides]]
-filter = "package(uc-application) & (test(admission_recovery_scenarios) | test(device_trust_recovery_scenario) | test(legacy_candidate_convergence_scenario))"
+filter = "package(uc-application) & (test(admission_recovery_scenarios) | test(device_trust_recovery_scenario) | test(legacy_candidate_convergence_scenario) | test(virtual_membership_network))"
 test-group = "fast"
 slow-timeout = { period = "2s", terminate-after = 1 }
 
@@ -54,7 +54,7 @@ test-group = "fast"
 slow-timeout = { period = "2s", terminate-after = 1 }
 
 [[profile.ci.overrides]]
-filter = "package(uc-application) & (test(admission_recovery_scenarios) | test(device_trust_recovery_scenario) | test(legacy_candidate_convergence_scenario))"
+filter = "package(uc-application) & (test(admission_recovery_scenarios) | test(device_trust_recovery_scenario) | test(legacy_candidate_convergence_scenario) | test(virtual_membership_network))"
 test-group = "fast"
 slow-timeout = { period = "2s", terminate-after = 1 }
 

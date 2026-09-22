@@ -2,7 +2,7 @@
 
 ## 状态
 
-- **状态**：设计完成，待实施
+- **状态**：实施中；最小两节点成员历史切片已完成，F0-F7 完整矩阵尚未实施
 - **日期**：2026-09-03
 - **前置规格**：[029 持久化成员历史反熵](../completed/029-durable-membership-history-anti-entropy.md)、[030 成员分叉选择与复杂拓扑验证](../completed/030-membership-conflict-resolution-and-chaos-validation.md)、[031 Application 依赖表面深化](../completed/031-application-dependency-surface-deepening.md)
 - **完整负责人**：`uc-application` 的 test-only `VirtualMembershipTopology`
@@ -43,14 +43,29 @@
 
 ### 本轮目录与验收
 
-- `crates/uc-application/src/space/testing/virtual_membership_network.rs`：最小有向网络和两节点真实 endpoint 场景。
-- `crates/uc-application/src/space/mod.rs`：只在 `cfg(test)` 注册 testing 模块，不扩大 crate 或产品公开接口。
+- `crates/uc-application/src/space/membership/testing/virtual_membership_network.rs`：最小有向网络和两节点真实 endpoint 场景。
+- `crates/uc-application/src/space/membership/mod.rs`：只在 `cfg(test)` 注册 testing 模块，不扩大 crate 或产品公开接口。
 - `.github/workflows/engine-real-environment.yml`：scheduled 四种真实环境模式和 `workflow_dispatch` 单 mode/单 case；
   复用 `run-connection-recovery-e2e.sh`，不复制 host 或网络脚本。
 - 快速场景预算 1 秒，不使用固定 sleep；连续运行至少 20 次无随机失败。
 - nightly 每个 mode 独立 job 和工件，编译、环境准备、场景、清理与总耗时可从 job/summary 区分；单 mode 目标
   30 分钟内。首次实际 scheduled 运行仍待合并后自然触发，PR 中只验证 workflow 语法和现有真实脚本门禁。
 - 回退点：virtual 模块和 nightly workflow 可独立回退；旧测试、PR 网络门禁和脚本均不删除。
+
+### 当前切片完成记录
+
+- `VirtualMembershipNetwork` 已在 `cfg(test)` 下实现节点注册、有向分区、恢复、frame 预算和脱敏 trace；消息交给
+  目标节点真实 `HandleMembershipHistoryMessageUseCase`，网络本身不读取或解释成员账本。
+- 场景 `two_member_nodes_partition_and_heal` 覆盖开放链路确认、单向阻断、恢复后再次确认和预算耗尽；固定 seed 为
+  `0x0040_3401`，预算 1 秒，不使用固定 sleep。
+- nextest 单场景 20 轮全部通过，总墙钟 11 秒；统一 evidence 入口 15/15 通过，测试累计 2.077 秒，场景工件记录
+  `cleanup=completed` 和精确复现命令。
+- 相关旧成员历史测试 21/21 通过；`uc-application` 完整库测试 960 通过、1 项既有忽略。
+- 新增真实 Engine nightly/手工入口，复用既有 connectivity host、relay、network namespace 与证据脚本。四种 mode
+  独立运行，手工入口可选择单个 case；编译、场景与清理、总耗时分别记录，场景设置 30 分钟硬超时。
+- nightly workflow 只有进入默认分支后才能自然 scheduled 运行；当前只完成本地语法、现有脚本参数和 PR 门禁兼容
+  验证，不把该基础登记为真实外网、真实 relay 或设备通过。
+- 本切片只证明“已完成准入后的两节点成员历史传递基础”，不等于完整配对，更不等于首批五类业务覆盖完成。
 
 # 1. Overview
 
