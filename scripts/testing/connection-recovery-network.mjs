@@ -239,6 +239,31 @@ async function transfer(left, right, marker) {
   }
 }
 
+async function transferFile(left, right, marker) {
+  for (const [sender, receiver] of [[left, right], [right, left]]) {
+    const handle = `managed-${marker}-${sender.label}`
+    const displayName = `evidence-${sender.label}.bin`
+    const content = `managed-file-payload-${marker}-${sender.label}`
+    const result = await sender.call('send_file', {
+      peer: receiver.id,
+      handle,
+      display_name: displayName,
+      mime_type: 'application/octet-stream',
+      content,
+    })
+    assert.equal(result.total_accepted, 1, `${sender.label} to ${receiver.label}: file not accepted`)
+    await until(async () => {
+      for (const entry of await receiver.call('history')) {
+        if (entry.content_type !== 'file') continue
+        const response = await receiver.raw({ command: 'read_file', entry: entry.entry_id })
+        if (!response.ok || response.ok.file_name !== displayName) continue
+        if (Buffer.from(response.ok.bytes).equals(Buffer.from(content))) return true
+      }
+      return false
+    }, 60_000, 'exact file bytes did not arrive')
+  }
+}
+
 async function pairingProof(group, created) {
   const setups = await Promise.all(group.map(node => node.call('setup')))
   const peerCounts = await Promise.all(group.map(async node => (await node.call('peers')).length))
@@ -525,6 +550,10 @@ async function run() {
       await transfer(a, b, 'baseline')
       if (c) await transfer(a, c, 'baseline')
       return { exact_text_verified: true, direction_count: c ? 4 : 2 }
+    })
+    await requiredScenario('E02-file-transfer', async () => {
+      await transferFile(a, b, 'baseline')
+      return { exact_bytes_verified: true, direction_count: 2 }
     })
   }
   if (mode === 'relay') { await relayScenarios(a, b); for (const node of nodes) await node.stop(); return }

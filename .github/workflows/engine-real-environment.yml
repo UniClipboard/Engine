@@ -15,6 +15,7 @@ on:
           - known-peer
           - relay
           - legacy
+          - profile-upgrade
       case_prefix:
         description: Optional single scenario prefix such as E01, E02, or E03
         required: false
@@ -100,7 +101,7 @@ jobs:
 
   manual:
     name: Manual real Engine scenario
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.mode != 'profile-upgrade'
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -159,4 +160,64 @@ jobs:
           name: engine-real-environment-${{ inputs.mode }}-${{ github.run_attempt }}
           path: target/connection-recovery-evidence
           if-no-files-found: warn
+          retention-days: 14
+
+  profile-upgrade:
+    name: Nightly profile upgrade evidence
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'profile-upgrade')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: . -> target
+          shared-key: engine-real-environment-profile-upgrade
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
+        with:
+          tool: cargo-nextest@0.9.145
+      - name: Build profile upgrade tests
+        id: build
+        shell: bash
+        run: |
+          started_at=$(date +%s)
+          cargo nextest run --profile ci --no-run -p uc-infra \
+            --test profile_storage_upgrade \
+            --test profile_storage_upgrade_crash
+          echo "seconds=$(( $(date +%s) - started_at ))" >> "$GITHUB_OUTPUT"
+      - name: Run profile upgrade evidence
+        shell: bash
+        run: |
+          started_at=$(date +%s)
+          set +e
+          timeout --signal=TERM --kill-after=30s 30m \
+            cargo nextest run --profile ci -p uc-infra \
+              --test profile_storage_upgrade \
+              --test profile_storage_upgrade_crash
+          result=$?
+          set -e
+          elapsed=$(( $(date +%s) - started_at ))
+          {
+            echo "## Profile upgrade nightly"
+            echo "- coverage: synthetic profile migration and five process-exit recovery boundaries"
+            echo "- alpha.5 external fixture: skipped"
+            echo "- compile wall time: ${{ steps.build.outputs.seconds }}s"
+            echo "- scenario and cleanup wall time: ${elapsed}s"
+            echo "- total measured wall time: $(( ${{ steps.build.outputs.seconds }} + elapsed ))s"
+            echo "- result: $([ "$result" -eq 0 ] && echo passed || echo failed)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$result"
+      - name: Retain profile upgrade evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: engine-profile-upgrade-${{ github.run_attempt }}
+          path: |
+            target/nextest/ci/junit.xml
+            target/test-artifacts/real-dependencies
+          if-no-files-found: error
           retention-days: 14
