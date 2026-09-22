@@ -232,7 +232,7 @@ mod tests {
     use uc_core::security::IdentityFingerprint;
     use uc_core::DeviceId;
 
-    use super::{VirtualFrameOutcome, VirtualMembershipNetwork};
+    use super::{VirtualFrameOutcome, VirtualMembershipNetwork, VirtualMembershipNetworkError};
     use crate::space::membership::{
         CommitMembershipLedgerPort, HandleMembershipHistoryMessageUseCase,
         LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipLedger, MembershipLedgerError,
@@ -252,25 +252,10 @@ mod tests {
             REPRODUCE,
         );
         let result = async {
-            let fixture = HistoryFixture::new();
-            let network = VirtualMembershipNetwork::new(3);
-            network
-                .register(
-                    "node-a",
-                    fixture.device_a.clone(),
-                    Arc::clone(&fixture.endpoint_a),
-                )
-                .map_err(|_| fixture_failure("register-node-a"))?;
-            network
-                .register(
-                    "node-b",
-                    fixture.device_b.clone(),
-                    Arc::clone(&fixture.endpoint_b),
-                )
-                .map_err(|_| fixture_failure("register-node-b"))?;
+            let nodes = TwoMemberHistoryScenario::prepare(&scenario, 3)?;
 
-            let first = network
-                .send("node-a", "node-b", fixture.summary())
+            let first = nodes
+                .exchange()
                 .await
                 .map_err(|_| fixture_failure("open-delivery"))?;
             require(
@@ -281,17 +266,16 @@ mod tests {
                 "open-link-did-not-confirm-history",
             )?;
 
-            network
-                .partition("node-a", "node-b")
-                .map_err(|_| fixture_failure("partition"))?;
-            let blocked = network.send("node-a", "node-b", fixture.summary()).await;
-            require(blocked.is_err(), "partition-did-not-block-delivery")?;
+            nodes.partition()?;
+            let blocked = nodes.exchange().await;
+            require(
+                matches!(blocked, Err(VirtualMembershipNetworkError::Offline)),
+                "partition-did-not-block-delivery",
+            )?;
 
-            network
-                .heal("node-a", "node-b")
-                .map_err(|_| fixture_failure("heal"))?;
-            let healed = network
-                .send("node-a", "node-b", fixture.summary())
+            nodes.heal()?;
+            let healed = nodes
+                .exchange()
                 .await
                 .map_err(|_| fixture_failure("healed-delivery"))?;
             require(
@@ -302,7 +286,7 @@ mod tests {
                 "healed-link-did-not-confirm-history",
             )?;
 
-            let trace = network.trace();
+            let trace = nodes.trace();
             require(trace.len() == 3, "trace-frame-count")?;
             require(
                 trace
@@ -322,12 +306,14 @@ mod tests {
                 "trace-leaked-device-identity",
             )?;
             require(
-                network
-                    .send("node-a", "node-b", fixture.summary())
-                    .await
-                    .is_err(),
+                matches!(
+                    nodes.exchange().await,
+                    Err(VirtualMembershipNetworkError::FrameBudgetExceeded)
+                ),
                 "frame-budget-was-not-enforced",
-            )
+            )?;
+            scenario.record_event("frame-budget-enforced");
+            Ok(())
         }
         .await;
         finish(scenario, result);
@@ -335,6 +321,84 @@ mod tests {
 
     fn fixture_failure(condition: &'static str) -> uc_testkit::ScenarioFailure {
         uc_testkit::ScenarioFailure::new(uc_testkit::FailureKind::FixtureInvalid, condition)
+    }
+
+    struct TwoMemberHistoryScenario<'a> {
+        scenario: &'a uc_testkit::Scenario,
+        network: VirtualMembershipNetwork,
+        history: HistoryFixture,
+    }
+
+    impl<'a> TwoMemberHistoryScenario<'a> {
+        fn prepare(
+            scenario: &'a uc_testkit::Scenario,
+            max_frames: usize,
+        ) -> Result<Self, uc_testkit::ScenarioFailure> {
+            let _stage = scenario.stage("prepare-two-member-history");
+            let history = HistoryFixture::new();
+            let network = VirtualMembershipNetwork::new(max_frames);
+            network
+                .register(
+                    "node-a",
+                    history.device_a.clone(),
+                    Arc::clone(&history.endpoint_a),
+                )
+                .map_err(|_| fixture_failure("register-node-a"))?;
+            network
+                .register(
+                    "node-b",
+                    history.device_b.clone(),
+                    Arc::clone(&history.endpoint_b),
+                )
+                .map_err(|_| fixture_failure("register-node-b"))?;
+            scenario.record_event("two-member-history-ready");
+            Ok(Self {
+                scenario,
+                network,
+                history,
+            })
+        }
+
+        async fn exchange(
+            &self,
+        ) -> Result<MembershipHistoryMessage, VirtualMembershipNetworkError> {
+            let _stage = self.scenario.stage("exchange-membership-history");
+            let result = self
+                .network
+                .send("node-a", "node-b", self.history.summary())
+                .await;
+            match &result {
+                Ok(_) => self.scenario.record_event("membership-history-accepted"),
+                Err(VirtualMembershipNetworkError::Offline) => {
+                    self.scenario.record_event("membership-history-unavailable")
+                }
+                Err(VirtualMembershipNetworkError::FrameBudgetExceeded) => self
+                    .scenario
+                    .record_event("membership-frame-budget-exceeded"),
+                Err(_) => self.scenario.record_event("membership-history-failed"),
+            }
+            result
+        }
+
+        fn partition(&self) -> Result<(), uc_testkit::ScenarioFailure> {
+            self.network
+                .partition("node-a", "node-b")
+                .map_err(|_| fixture_failure("partition"))?;
+            self.scenario.record_event("membership-link-partitioned");
+            Ok(())
+        }
+
+        fn heal(&self) -> Result<(), uc_testkit::ScenarioFailure> {
+            self.network
+                .heal("node-a", "node-b")
+                .map_err(|_| fixture_failure("heal"))?;
+            self.scenario.record_event("membership-link-healed");
+            Ok(())
+        }
+
+        fn trace(&self) -> Vec<super::VirtualFrameRecord> {
+            self.network.trace()
+        }
     }
 
     struct HistoryFixture {

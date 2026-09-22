@@ -9,7 +9,7 @@
 | testkit 自身、成功/受控失败、并行工件、进程超时 | `tests/uc-testkit/` | fast | JSON、摘要、JUnit |
 | 五个确定性成员恢复场景 | `crates/uc-application/src/space/` 对应领域测试 | fast/evidence | 固定 seed、公开终态、阶段与复现命令 |
 | 加入方完整配对作者入口 | `space/admission/protocol/tests/` | evidence | 专用 fixture 位于 `tests/support/`；一次真实负责人调用返回 Active + final confirmation，不冒充双方 Engine 链路 |
-| 两节点成员历史分区与恢复 | `crates/uc-application/src/space/membership/testing/virtual_membership_network.rs` | fast/evidence | 真实 Application endpoint、frame 预算、脱敏 trace；仅为配对后收敛基础 |
+| 两节点成员历史分区与恢复 | `crates/uc-application/src/space/membership/testing/virtual_membership_network.rs` | fast/evidence | 作者只声明 exchange/partition/heal 与预期；领域 fixture 负责真实 Application endpoint、ledger、身份、注册、frame 预算和脱敏 trace；仅为配对后收敛基础 |
 | 文件传输完成生命周期 | `crates/uc-application/tests/file_transfer.rs` | fast/evidence | 公开 facade 从登记、进度到唯一 Completed；真实 bytes 仍由 E02 证明 |
 | 文字快照编码与投递 | `crates/uc-application/src/facade/clipboard/facade/tests/text_transfer_scenario.rs` | fast/evidence | 真实 ClipboardSyncFacade 编码 V3、生成 canonical hash 并得到单目标 accepted；真实网络 exact text 仍由 E02 证明 |
 | 真实 Engine 完整配对、文字与文件传输 | `scripts/testing/connection-recovery-network.mjs` 的 `E01`/`E02` | real-network/nightly | 独立进程、profile、身份、端口与 namespace；公开 setup/eligibility/peer/history/ReadEntryFile 终态、exact bytes 和 cleanup 证据 |
@@ -27,11 +27,12 @@
 | 旧资料升级 | focused migration/process 18 项本地 5.546 秒 | workflow 已接入但默认分支未生效；alpha.5 fixture 未验证 |
 
 速度实测：快速成员五场景一次 `0.180s`，100 轮 `58.98s`；新 joiner pairing fixture 单次 `0.040s`，与旧 settled
-测试双轨 20 轮在 11 秒内全部通过；两节点成员历史场景单次 `0.053s`。文件传输完成场景单次 `0.033s`，与旧
+测试双轨 20 轮在 11 秒内全部通过；两节点成员历史作者场景单次 `0.039s`、20 轮 12 秒全部通过。文件传输完成场景单次 `0.033s`，与旧
 幂等完成测试双轨 20 轮在 11 秒内全部通过；文字编码与投递场景单次 `0.043s`，与既有公开 outcome 测试双轨
 20 轮在 12 秒内全部通过。当前 fast 16/16、`0.268s`；evidence 18/18、`2.122s`。当前真实工件的 scenario records 累计为 direct `672.000s`、relay `168.591s`、known-peer
-`1.775s`、legacy `0.122s`，相关 network job 墙钟约 66 分 54 秒。E01/E02 单项均低于 60 秒；新的分 mode
-准备、场景和清理 30 分钟目标仍无独立 nightly 样本，不登记达标。
+`1.775s`、legacy `0.122s`，相关旧全矩阵 network job 墙钟约 66 分 54 秒。最新分 mode、`repeat=3` 隔离工件的
+prepare + scenario + cleanup 总计为 direct `656.807s`、known-peer `85.748s`、relay `137.663s`、legacy `4.674s`，
+四种 mode 均满足 30 分钟目标且清理、明文扫描通过。默认分支 scheduled 和 profile-upgrade 远程样本仍待合并后取得。
 
 ## 保留原样
 

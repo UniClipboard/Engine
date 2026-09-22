@@ -176,6 +176,28 @@ cargo nextest run -p uc-application \
 这个快速入口只证明加入方确定性规则。邀请方最终确认唯一性由三设备场景证明；双方 Engine 的 same-space、usable、
 online 和真实传输仍必须运行下面的真实 runner。
 
+两节点成员历史的作者示例位于
+`crates/uc-application/src/space/membership/testing/virtual_membership_network.rs`。场景正文只准备两个节点并声明操作和预期：
+
+```rust
+let nodes = TwoMemberHistoryScenario::prepare(&scenario, 3)?;
+expect_confirmed(nodes.exchange().await?);
+nodes.partition()?;
+expect_unavailable(nodes.exchange().await);
+nodes.heal()?;
+expect_confirmed(nodes.exchange().await?);
+```
+
+`TwoMemberHistoryScenario` 内部负责真实 Application endpoint、ledger、节点身份、注册、frame 预算、故障生命周期，
+并把节点准备、分区、恢复和 exchange 结果写入通用 `Scenario`；后者负责时间预算、阶段、清理和报告。单独运行：
+
+```bash
+cargo nextest run --profile ci --locked -p uc-application \
+  -E 'test(two_member_nodes_partition_and_heal)'
+```
+
+该入口是成员历史领域 fixture，不是跨业务通用多节点 DSL，也不证明真实 Engine transport 重连。
+
 真实 runner 的最小调用示例：
 
 ```bash
@@ -189,3 +211,16 @@ bash scripts/testing/run-connection-recovery-e2e.sh --suite network --mode direc
 这两个命令需要 Linux network namespace 和相应权限。macOS 上的脚本语法或 host 编译通过不构成场景通过。
 runner 工件中的 `timings.prepare_ms`、`scenario_ms`、`cleanup_ms` 和 `total_ms` 用于核对 30 分钟目标；场景 records
 仍保留每个业务步骤耗时，二者不能互相替代。
+
+当前 draft PR 的等价隔离 Linux job 已使用 `--repeat 3` 逐 mode 实测：
+
+| mode | prepare | scenario | cleanup | total |
+| --- | ---: | ---: | ---: | ---: |
+| direct | 2.938 秒 | 652.479 秒 | 1.391 秒 | 656.807 秒 |
+| known-peer | 22.280 秒 | 62.929 秒 | 0.539 秒 | 85.748 秒 |
+| relay | 5.735 秒 | 131.415 秒 | 0.514 秒 | 137.663 秒 |
+| legacy | 3.544 秒 | 0.504 秒 | 0.625 秒 | 4.674 秒 |
+
+四个工件均记录 `failed=false`、`cleaned=true` 和 `plaintext_clean=true`，因此当前 runner 的单 mode
+准备、场景和清理满足 30 分钟目标。新增 workflow 尚未进入默认分支，scheduled 与 `profile-upgrade` 的首次远程样本
+仍须在合并后取得；这不影响上述 runner 实测，也不能把它写成 nightly 已持续稳定。

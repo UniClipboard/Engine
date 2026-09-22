@@ -67,6 +67,30 @@
   验证，不把该基础登记为真实外网、真实 relay 或设备通过。
 - 本切片只证明“已完成准入后的两节点成员历史传递基础”，不等于完整配对，更不等于首批五类业务覆盖完成。
 
+### 当前作者体验收尾（2026-09-22）
+
+代表场景继续使用 `two_member_nodes_partition_and_heal`，不新增同义用例。当前 case 作者仍需了解 endpoint、ledger、
+DeviceId 和逐节点注册，说明领域 fixture 虽已存在，基础设施复杂度仍泄露到场景正文。
+
+本切片在同一 test-only 模块内增加窄的 `TwoMemberHistoryScenario`：`prepare` 统一构造两个真实 Application endpoint、
+注册节点和 frame 预算；case 作者只调用 history exchange、partition、heal，并断言 ACK、Unavailable、trace 顺序和预算。
+通用 `Scenario` 继续负责固定 seed、时间预算、阶段、事件、清理结果与报告。它不支持任意节点拓扑，不解释业务消息，
+也不负责 invitation、内容或真实连接生命周期。
+
+失败方式：节点构造或注册失败归 fixture invalid；开放/恢复链路未确认、分区未阻断、trace/预算不符归 product invariant；
+超时由 1 秒 Scenario 预算失败。验收为场景正文不再出现 endpoint/ledger/逐节点 register，命令可单独运行，20 轮无随机
+失败，JSON/摘要包含操作事件、cleanup 和复现命令。回退只还原 test-only fixture，不改变产品代码或原业务断言。
+
+完成结果：`TwoMemberHistoryScenario` 已隐藏 endpoint、ledger、身份、逐节点注册和 frame 预算，场景正文只保留
+exchange、partition、heal 与公开结果断言。单次 nextest 1/1 通过、测试耗时 `0.039s`；连续 20 轮全部通过、总墙钟
+12 秒。最新 schema v2 工件总耗时 3 ms，最终事件为 `frame-budget-enforced`，`cleanup=completed`，摘要包含精确复现命令。
+预算耗尽作为预期断言单独记录，不误报为泛化框架失败。
+
+同一 draft PR 的隔离 Linux network job 已按 mode、`repeat=3` 取得分段工件：direct 总计 `656.807s`、known-peer
+`85.748s`、relay `137.663s`、legacy `4.674s`，均包含 prepare、scenario、cleanup，且 `failed=false`、
+`cleaned=true`、`plaintext_clean=true`。这证明现有 runner 的单 mode 30 分钟预算；新增 workflow 的 schedule 与
+profile-upgrade 远程样本仍只能在定义进入默认分支后取得。
+
 ## 当前真实进程切片：完整配对与文字传输（2026-09-22）
 
 本切片复用现有 `uc-connectivity-host`、Linux network namespace 和

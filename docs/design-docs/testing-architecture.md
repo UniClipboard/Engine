@@ -280,9 +280,9 @@ Iroh host 和成熟系统工具。网络故障必须在对应真实环境中实�
 
 | 入口 | 测试作者描述 | 框架承担 | 当前限制 |
 | --- | --- | --- | --- |
-| `Scenario` + Application fixtures | 固定 seed、调用一个真实负责人、最终公开状态 | 预算、阶段、事件等待、临时资源、清理、JSON/文本/JUnit 和复现命令 | 节点准备仍由各领域 fixture 提供，尚无覆盖五类的统一 topology API |
+| `Scenario` + Application fixtures | 固定 seed、调用一个真实负责人、最终公开状态 | 预算、阶段、事件等待、临时资源、清理、JSON/文本/JUnit 和复现命令 | 节点准备由领域 fixture 提供；不建立跨五类的通用 topology DSL |
 | `PairingScenarioFixture` | 准备 `JoinSpaceInput`、调用一次 `complete_joiner_pairing`、断言稳定快照 | 可控 transport/clock/persistence、真实 admission maintenance、激活和最终确认 | 只证明 joiner 规则；Sponsor 唯一性由三设备场景证明，双方链路由 E01 证明 |
-| `VirtualMembershipNetwork` | 注册两个已准入节点、send/partition/heal、预期 ACK/Offline | typed message 路由、frame 预算、脱敏 trace | 只覆盖成员历史，不负责 invitation、内容或连接生命周期 |
+| `TwoMemberHistoryScenario` + `VirtualMembershipNetwork` | 准备两节点、exchange/partition/heal、预期 ACK/Offline | 真实 Application endpoint/ledger、节点注册、typed message 路由、frame 预算、故障生命周期与脱敏 trace | 只覆盖成员历史，不负责 invitation、内容或真实连接生命周期 |
 | `run-connection-recovery-e2e.sh --mode ... --case ...` | mode、场景前缀、repeat | Engine 进程、profile、身份、端口、namespace、relay、等待、清理和 JSON 工件 | Linux/root 环境；PR 全矩阵仍约 67 分钟，不属于快速线 |
 | `engine-real-environment.yml` 的 `profile-upgrade` | 选择升级模式 | 固定 nextest、编译/场景/总耗时、JUnit 与 testkit 工件 | workflow 尚未进入默认分支，当前不能 workflow_dispatch |
 
@@ -348,9 +348,11 @@ driver/framework/cleanup 失败诊断；并行资源隔离；有界等待与子�
 | 已验证 | fast、evidence、persistence/provider、engine smoke、process、real network、device 分组与旧 `cargo test` 双轨 | 本地统一命令、旧入口、全目标编译和 PR repository/testkit jobs 已实际通过；慢线与设备仍按各自边界报告 |
 | 已验证 | 首批五类的快速规则证据与真实环境责任映射 | 配对、文字/文件、重连、重启和升级均有明确负责人层证据；快速线不冒充真实 Iroh、进程重启、exact bytes 或设备 |
 | 已验证 | 文字和文件快速场景的可下载诊断工件 | 统一入口把相对工件根规范为仓库绝对路径，并在 evidence 结束前强制检查两份 `result.json`；远程复验见当前提交后续工件 |
+| 已验证 | 多节点场景作者只声明准备、操作和预期 | `two_member_nodes_partition_and_heal` 通过领域 fixture 隐藏 endpoint、ledger、身份、注册和 frame 预算；单次 `0.039s`，20 轮 12 秒全部通过，JSON/摘要包含阶段、最终事件、清理和复现命令 |
+| 已验证 | 真实 runner 单 mode 的准备、场景和清理低于 30 分钟 | draft PR 隔离 Linux job 以 `repeat=3` 实测：direct `656.807s`、known-peer `85.748s`、relay `137.663s`、legacy `4.674s`；四份工件均 `failed=false`、`cleaned=true`、`plaintext_clean=true` |
 | 可继续实现 | 仅在出现新的失败、慢测或诊断缺口时采用下一代表场景 | 候选清单保留 observability collector、host startup、node lifecycle 和 transfer shutdown；没有实际收益证据时不迁移、不包装 |
 | 可继续实现 | alpha.5 完整旧资料 fixture | 需要可重复且脱敏的外部合成资料；当前两个 fixture 保持 ignored，不能用 synthetic migration 冒充 |
-| 仅待合并后 schedule 生效 | `engine-real-environment.yml` 的分 mode nightly 与 profile-upgrade | PR 分支无法触发尚未进入默认分支的新增 workflow；合并后首次自然/手工运行才测量准备、场景、清理和总耗时 |
+| 仅待合并后 schedule 生效 | `engine-real-environment.yml` 的分 mode nightly 与 profile-upgrade | 分 mode runner 的 30 分钟预算已由 PR 隔离 job 实测；PR 分支无法触发尚未进入默认分支的新增 workflow，合并后仍需取得首次自然/手工 scheduled 样本及 profile-upgrade 远程样本 |
 | 长期未完成 | 10 个工作日自然趋势、全仓迁移、真实外网与设备 | 不属于 kit 首版完成；不得用同日重跑、隔离网络或模拟结果替代 |
 
 首版不要求再造完整快速 Engine transport topology：双方完整配对、真实断网重连、进程重启和 exact bytes 已由真实
