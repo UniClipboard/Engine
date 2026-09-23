@@ -1,549 +1,265 @@
 # `uc-core` 设计规范
 
-## 1. 文档目的
+## 1. 定位
 
-`uc-core` 是 **UniClipboard** 的领域核心，承载系统最稳定、最持久的业务语义。本规范用于指导所有开发者和 AI Agent 在修改 `uc-core` 代码时，确保：
+`uc-core` 回答三件事：**什么是允许的、状态怎么变、变了之后必须发生什么**。它不回答“怎么做、按什么顺序做、存在哪里”。
 
-* 领域边界清晰
-* 架构长期可维护
-* 避免技术实现污染领域模型
-* 保持跨平台与实现无关
-* 支持未来的扩展（桌面、移动端、CLI、云端）
+| 层 | 负责 | 本规范中的简称 |
+| --- | --- | --- |
+| `uc-core` | 领域概念、合法状态转换、不变量、每次转换的效果义务、跨设备规则 | 规则 |
+| `uc-application` | 按效果义务调用能力的顺序、事务切分、重试与重启恢复 | 流程 |
+| `uc-infra` | 字节格式、数据库、网络、密码学、平台 API | 能力 |
 
-**任何对 `uc-core` 的修改，都必须遵循本规范并进行自我审查。**
+跨层原则见[核心信念](../core-beliefs.md)与[工程与模块设计原则](../engineering-principles.md)；本文只规定 Core 内部怎么写。
+当前代码与本文的差距及收口计划见 [Core 边界收口计划](../../exec-plans/active/2026-09-23-core-boundary-remediation.md)。
 
-### 注释语言
+### 1.1 读 Core 应该能得到什么
 
-`uc-core` 中 Rust 代码的行内注释与 doc comment 仅使用中文。本条为目录级规则，覆盖仓库根目录中关于代码注释语言的通用约束；代码标识符和提交信息仍使用英文。
+只读 `uc-core`，开发者必须能回答：
 
----
+1. 一个有生命周期的对象有哪些状态？从每个状态收到什么输入，能到达哪个状态？
+2. 每次转换之后必须发生哪些副作用？每个副作用必须在保存新状态**之前**还是**之后**完成？
+3. 哪些输入会被幂等忽略、哪些被拒绝、哪些使对象进入需要人工或恢复处理的状态？
+4. 跨对象、跨设备的不变量是什么，例如“什么情况下不能开始新的准入”“哪台设备有资格收到哪次更新”？
 
-## 2. uc-core 的定位
+只读 Core 回答不了、也不应回答：副作用由哪个 adapter 执行、事务怎样切分、崩溃后从哪一步重放、数据存在哪张表。
+如果上面四个问题中任何一个必须到 Application 或 Infra 里找答案，说明规则泄漏到了 Core 之外，属于缺陷。
 
-### 2.1 核心职责
+## 2. 放什么，不放什么
 
-`uc-core` 只负责以下内容：
+### 2.1 放入 Core
 
-1. **领域模型（Domain Model）**
+| 类别 | 说明 | 示例 |
+| --- | --- | --- |
+| 标识与值对象 | 构造时校验，之后不可变 | `DeviceId`、`SpaceId`、`MemberInstanceId`、`InvitationCode` |
+| 聚合与状态机 | 有生命周期、需持久化、接受外部输入推进的对象 | `SpaceAdmissionAggregate`、`SpaceMembershipCandidate`、撤销记录 |
+| 不变量与策略 | 纯函数形式的判定 | 冲突裁决、准入是否阻止新准入、更新接收者集合 |
+| 领域证明 | 签名或摘要覆盖的规范内容及其验证规则 | `VersionedMembershipHistory` 的规范签名材料 |
+| 领域错误 | 类型化、可分类、不含敏感内容 | `SpaceAdmissionAggregateError` |
+| Core 领域代码直接消费的 port | 见 §7 | `HistoricalMembershipSignatureVerifier` |
 
-   * 实体（Entities）
-   * 值对象（Value Objects）
-   * 枚举（Enums）
-   * 领域错误（Domain Errors）
+### 2.2 不放入 Core
 
-2. **领域规则（Business Rules）**
+| 类别 | 归属 | 说明 |
+| --- | --- | --- |
+| UseCase、流程顺序、重试、恢复调度 | Application | 规则告诉流程“必须做什么”，流程决定“怎么依次做” |
+| 只被 Application 使用的 port | Application | 见 [Application 规则 4](application.md) |
+| 本地存储格式、格式版本常量、编解码 | Infra | 例外见 §6.2 |
+| 设备间协议的线上编码 | Infra | 消息的语义结构与校验规则仍在 Core |
+| 数据库、文件系统、网络、平台 API、路径 | Infra | 包括 `PathBuf` 形式的应用目录布局 |
+| 密钥物料、KDF 参数、算法调用、随机数 | Infra | Core 只保留领域中性类型，如 `Plaintext`、`Ciphertext`、`Aad` |
+| 配置加载、设置文件格式、默认路径 | Infra / Application | Core 可保留业务设置的语义类型 |
+| 异步运行时、任务管理、通道 | Application / Infra | Core 不感知并发模型 |
+| 已不再支持的兼容线实现细节 | 对应兼容负责人 | Core 只保留仍被主产品规则使用的概念 |
 
-   * 状态转换
-   * 业务约束
-   * 不依赖运行环境的逻辑
-
-3. **领域事件（Domain Events）**
-
-4. **端口抽象（Ports）**
-
-   * 为应用层提供与外部系统交互的能力抽象
-
-5. **领域策略（Policies）**
-
-   * 如安全策略、同步策略、保留策略等
-
----
-
-### 2.2 非职责（禁止进入 uc-core）
-
-以下内容 **严禁** 出现在 `uc-core` 中：
-
-| 类别      | 示例                                   |
-| ------- | ------------------------------------ |
-| 平台相关    | OS 路径、环境变量、AppData、Keychain          |
-| 网络实现    | libp2p、HTTP、WebSocket、TCP            |
-| 数据库     | SQLite、Diesel、SQL 语句                 |
-| 文件系统    | 具体文件读写实现                             |
-| 加密算法实现  | Argon2、AES、XChaCha20 等库调用            |
-| UI 相关   | Tauri、前端 DTO                         |
-| 应用流程    | Orchestrator、UseCase、Command Handler |
-| 启动逻辑    | Wiring、Bootstrap                     |
-| API 协议  | REST/IPC 字段、序列化格式                    |
-| 第三方 SDK | 任何具体实现依赖                             |
-
----
-
-## 3. 分层架构关系
+### 2.3 归属判定
 
 ```text
-            +----------------------+
-            |   uc-application     |
-            |  (UseCases / Facade) |
-            +----------▲-----------+
-                       |
-                       |  Ports
-                       |
-            +----------▼-----------+
-            |        uc-core       |
-            |   (Domain Model)     |
-            +----------▲-----------+
-                       |
-                       | Implementations
-                       |
-            +----------▼-----------+
-            |       uc-infra       |
-            | (DB / Network / FS)  |
-            +----------------------+
+它能在没有网络、磁盘、时钟、随机数和 UI 的单元测试里完整表达吗？
+  否 → 不是 Core。
+它决定“是否允许”“变成什么”“必须发生什么”吗？
+  是 → Core，即使目前只有一个调用方。
+它决定“先做哪个、失败后怎么办、何时再试”吗？
+  是 → Application。
+它决定“字节长什么样、存在哪里、通过什么发送”吗？
+  是 → Infra。
 ```
 
-`uc-core` 只依赖标准库，不依赖任何具体实现。
+## 3. 依赖纪律
 
----
+| 依赖 | 结论 | 条件 |
+| --- | --- | --- |
+| `std` | 允许 | 不得使用 `std::fs`、`std::env`、`std::process`、`std::net` 与系统时钟 |
+| `serde`（derive） | 允许 | 仅用于领域快照与规范编码，见 §6 |
+| `thiserror` | 允许 | 领域错误 |
+| `chrono` | 允许 | 只作时间类型；不得调用 `Utc::now()` |
+| `sha2`、`hex`、`arrayvec`、`zeroize`、`uc-content-hash` | 允许 | 用于领域身份、规范摘要和值对象 |
+| `postcard` | 受限 | 只能用于 §6.2 的规范编码 |
+| `async-trait` | 受限 | 只能用于 §7 允许留在 Core 的 port |
+| `tokio`（任何 feature）、`tokio-util` | 禁止 | 通道、锁、任务属于运行时 |
+| `anyhow` | 禁止 | 领域错误必须类型化，source chain 由上层保留 |
+| `serde_json`、`toml`、`url`、`bytes` | 禁止 | 属于格式或传输 |
+| `uuid` 的随机生成 | 禁止 | 标识由调用方传入或由 port 生成；Core 可以解析、校验 |
+| 网络、数据库、UI、平台 SDK、密码算法实现 | 禁止 | — |
 
-## 4. 领域建模原则
+新增依赖必须在 PR 中说明它为什么是领域概念而非实现细节。
 
-### 4.1 实体（Entities）
+## 4. 值对象与实体
 
-* 具有唯一标识（ID）
-* 生命周期可追踪
-* 包含业务行为而非仅数据
+- 字段私有；只通过校验构造器创建，构造失败返回类型化错误。
+- 不得 `panic!`、`unwrap()`、`expect()`、`unreachable!()`；外部输入永远可能非法。确属编译期可证明的分支，用类型让它不可表达，而不是运行期断言。
+- 不在构造器里生成随机值或读取时钟；需要新标识或当前时间时由调用方传入。
+- `Debug` 与 `Display` 不输出剪贴板内容、密钥、完整令牌、设备名、地址、文件名或路径，见[安全架构](../../SECURITY.md)。
+- 实体不持有 port，不执行 IO；需要外部结果的规则以参数接收结果。
 
-**示例：**
+## 5. 状态机
 
-```rust
-pub struct ClipboardEntry {
-    pub id: EntryId,
-    pub device_id: DeviceId,
-    pub created_at: Timestamp,
-    pub content: ClipboardContent,
-}
-```
+凡是有生命周期、需要持久化、并接受外部输入推进的对象，都必须按本节建模。这是 Core 最重要的写法约束。
 
----
-
-### 4.2 值对象（Value Objects）
-
-* 不可变
-* 通过值判断相等性
-* 无独立生命周期
-
-**示例：**
-
-```rust
-pub struct DeviceName(String);
-```
-
----
-
-### 4.3 领域服务（Domain Services）
-
-用于表达不适合放入单一实体的业务逻辑。
+### 5.1 单一转换入口
 
 ```rust
-pub struct ClipboardDeduplicationService;
-
-impl ClipboardDeduplicationService {
-    pub fn is_duplicate(a: &ClipboardEntry, b: &ClipboardEntry) -> bool {
-        a.content_hash == b.content_hash
-    }
-}
-```
-
----
-
-### 4.4 领域事件（Domain Events）
-
-用于表达业务状态变化，而非技术事件。
-
-```rust
-pub enum DomainEvent {
-    ClipboardEntryCaptured { entry_id: EntryId },
-    DevicePaired { device_id: DeviceId },
-    SpaceUnlocked { space_id: SpaceId },
-}
-```
-
----
-
-### 4.5 领域状态机建模规范（强制）
-
-凡是有生命周期、需要持久化、并接受外部输入推进的领域实体（如
-`SpaceMembershipCandidate`、投递批次的收发状态等），必须按下述模式建模。
-
-#### 4.5.1 单一转换入口：`apply(event) -> (outcome, effect)`
-
-状态变化只允许通过唯一的 `apply` 方法发生。事件是状态变化的唯一途径，
-不得通过散落的 `mark_*` / `set_*` / `merge_*` 公开方法直接改状态字段。
-
-```rust
-pub enum CandidateEvent {
-    Seed(SponsorCandidateSeed),
-    VerifiedAnnouncement(DeviceAnnouncement),
-    VerifiedPeer(VerifiedMembershipPeer),
-    Confirming,
-    AttestationFailed { failure: CandidateFailure, retry_at_ms: Option<i64> },
-    SecurityMaterialApplied,
-    Admitted,
+pub struct Transition<A, O, E> {
+    replacement: A,          // 新状态；调用方保存它，不修改它
+    outcome: O,              // 本次输入被怎样处理
+    effects: Vec<E>,         // 调用方必须履行的效果义务
 }
 
-pub struct CandidateEffect {
-    pub persist: bool,        // 调用方应持久化该实体
-    pub wake_runtime: bool,   // 调用方应唤醒收敛运行期
-}
-
-impl SpaceMembershipCandidate {
+impl SpaceAdmissionAggregate {
     pub fn apply(
-        &mut self,
-        event: CandidateEvent,
+        self,
+        input: AdmissionInput,
         now_ms: i64,
-    ) -> Result<(CandidateMergeOutcome, CandidateEffect), CandidateMergeError>;
+    ) -> Result<Transition<Self, AdmissionOutcome, AdmissionEffect>, SpaceAdmissionAggregateError>;
 }
 ```
 
 规则：
 
-* 状态字段（如 `status`）只被 `apply` 及其私有辅助方法修改；所有状态推进
-  分支必须显式写在 `apply` 里，使状态图在单一函数中可见。
-* **效果分离**：`apply` 只回答“状态怎么变、需要什么效果”，副作用（持久化、
-  唤醒运行期、网络动作）由调用方按返回的 `CandidateEffect` 执行。
-* **构造与转换分离**：新建实体用 `from_*` 构造器（初始状态在构造器中确定）；
-  已有实体的一切变化走 `apply`。
-* **终态不可回退**：终态（如 `Blocked` / `Rejected`）必须在 `apply` 内守卫，
-  拒绝任何推进事件；不允许后续事件把终态改回可重试状态。
-* 事件与效果语义必须保持为“数据合并 + 条件推进”的真实表达：乱序到达、
-  重复到达（幂等）、过期资料等合法结果用 `outcome` 表达（如 `Stale` /
-  `Unchanged`），不得用错误或例外表达业务常态。
+- 每个聚合只有一个公开的状态推进方法。构造初始状态用 `start_*`/`from_*` 构造器；其后一切变化走 `apply`。
+- 禁止公开 `mark_*`、`set_*`、`advance_*`、`transition_to` 一类逐步修改方法，禁止公开状态字段（`pub phase`、`pub status`）。
+- 状态分发写在 `apply` 的一个穷尽 `match` 里，使“状态 × 输入 → 结果”在一处可见。各分支的实现可以拆到按角色或阶段划分的私有函数与文件中；拆分文件不得增加公开入口。
+- 允许按角色提供只读包装（如 `JoinerAdmission`、`SponsorAdmission`），但包装只能限制可接受的输入种类，内部仍调用同一个 `apply`，持久化结构仍是同一个聚合。
+- 转换必须是纯函数：不读时钟、不取随机数、不访问 port。外部世界的结果（验证结论、对端消息、准备好的材料）作为输入携带进来。
 
-#### 4.5.2 事件集设计
+### 5.2 输入
 
-* 事件按“调用方语义”命名，不复制内部步骤：一个事件代表一次完整的外部
-  输入（资料到达、验证结果、环境信号），而不是内部操作的镜像。
-* 重试等待时间、失败类别等调用方已知的参数可以随事件携带
-  （如 `AttestationFailed { failure, retry_at_ms }`）；退避策略本身留在
-  应用层，核心只表达状态。
-* 新增事件时先回答：它是资料合并、验证结果还是环境信号？回答不清不得实现。
+- 输入按调用方语义命名，一个变体代表一次完整的外部事实：收到某条消息、某项能力完成、用户取消、到达期限。不要按内部步骤命名。
+- 输入携带转换所需的全部材料。Application 准备材料（例如签好的历史、已暂存的安全状态），Core 校验材料与当前状态是否一致。
+- 新增输入前先回答：它是对端资料、验证结论、本机能力结果、用户意图还是时间信号？答不清不得实现。
 
-#### 4.5.3 持久化与兼容
+### 5.3 结果
 
-* 实体保持单一可序列化结构（状态作为字段），**禁止**用 typestate（每状态
-  一个类型）拆分实体：会破坏持久化格式、repo 接口和跨重启恢复。
-* 不得引入第三方状态机库（见 §10 依赖纪律）；std / serde / thiserror 足以
-  实现本模式。
-* 状态枚举与事件枚举的序列化布局保持稳定；新增变体必须考虑旧数据兼容。
+- 重复、乱序、过期、已被取代等**正常业务情况**用 `outcome` 表达（如 `Duplicate`、`Stale`、`Unchanged`、`ExactReply`），不得用错误表达。
+- 错误只表达“这个输入在当前状态下不合法”或“记录已无法安全推进”，并通过 `category()` 给出稳定分类，供流程决定拒绝、等待或进入恢复。
+- 终态在 `apply` 内守卫，任何输入都不能把终态改回可推进状态。
 
-#### 4.5.4 测试要求
+### 5.4 效果义务
 
-* **转换矩阵测试**：每个（事件 × 相关状态）的合法转换必须断言结果状态、
-  `outcome` 与 `effect`；非法转换（终态回退等）断言被拒绝。
-* **不变量测试**：终态不可回退、重复/乱序事件幂等、冲突不产生部分信任、
-  过期不复活。
-* 测试通过构造器 + 事件序列构造任意中间状态，**不得**为测试暴露额外
-  的状态写入方法（测试用 `apply` 是唯一构造路径）。
-
----
-
-## 5. Ports 设计规范
-
-### 5.1 Ports 的作用
-
-Ports 用于定义领域所需的外部能力，而不是具体实现。
-
-### 5.2 Ports 设计原则
-
-| 原则 | 说明 |
-| ------- | ------------------------ |
-| 以业务能力命名 | 如 `DeviceRepositoryPort` |
-| 不暴露技术细节 | 不出现 HTTP、libp2p 等 |
-| 面向领域对象 | 使用 `DeviceId` 等 |
-| 保持最小接口 | 避免过度设计 |
-
-### 5.3 示例
+效果是 Core 与 Application 之间**有约束力**的契约，不是提示：
 
 ```rust
-#[async_trait]
-pub trait DeviceRepositoryPort: Send + Sync {
-    async fn get_by_id(&self, id: &DeviceId) -> Result<Option<Device>, DeviceError>;
-    async fn save(&self, device: &Device) -> Result<(), DeviceError>;
+pub enum AdmissionEffect {
+    // 必须在保存 replacement 之前成功完成；失败则不得保存 replacement。
+    BeforeCommit(AdmissionPrerequisite),
+    // 保存 replacement 之后执行；必须可幂等重放，未完成时由流程负责人登记恢复。
+    AfterCommit(AdmissionFollowUp),
 }
 ```
 
-### 5.4 Port 文档纪律（重要）
+- 每个效果必须声明它与保存新状态的先后关系。正确的先后关系是规则的一部分，因为它决定崩溃后世界处于什么状态。
+- Application 必须**恰好**履行返回的效果：不得遗漏，不得自行增加 Core 没有声明的业务副作用，不得调换 `BeforeCommit` 与保存的先后。
+- 效果描述“必须达成的业务结果”（激活安全状态、发布成员变化、登记逐设备传播义务），不描述实现步骤（写哪张表、调用哪个 adapter）。
+- 转换不产生效果时返回空列表。测试断言每次转换的完整效果列表。
+- Application 的流程负责人必须有测试证明：对每种效果，都存在唯一的履行位置，且履行顺序与声明一致。
 
-Port trait、方法签名、领域类型上的 doc-comment 只能描述 **领域语义和行为契约**，不得引用调用方、上层模块或具体使用场景。
+### 5.5 跨对象不变量
 
-**禁止出现的内容**（任何形式：英文、中文、代码示例、注释片段都不行）：
+有些规则跨越多条记录，例如“同一时间最多一个阻止新准入的准入”“一张邀请只能被领取一次”。
 
-* 上层模块名：`uc_application::...` / `uc_webserver::...` / `uc_desktop::...` / `uc-tauri` / `uc-cli`
-* Use case / facade / orchestrator 名：`ApplyInboundClipUseCase` / `MobileSyncFacade` / `SetupOrchestrator`
-* HTTP 路由 / API 端点：`PUT /file` / `/SyncClipboard.json` / `POST /v2/setup/redeem`
-* 协议名：`SyncClipboard` / `iroh` / `libp2p`
-* 具体调用场景的描述：「用于 X 流程」/「PUT /file 阶段先用占位 entry_id」/「mobile_lan 路径」
-* 调用顺序耦合：「先调 A 再调 B」/「等 X 完成后再调用本方法」（如果是 port 自身的契约约束才允许）
-* 实现侧的细节：「用 SQLite 表 …」/「通过 broadcast channel 推送」
+- **判定**写在 Core：以纯函数表达，输入是相关记录集合或其摘要，输出是允许、拒绝或冲突。
+- **原子性**由持久化负责人保证：Infra 仓储在同一事务里读取相关记录、调用 Core 判定、写入结果。
+- Infra 不得自行拟定判定条件，只能调用 Core 判定并执行它的结论。
 
-**允许的内容**：
+### 5.6 时间、期限与随机
 
-* 领域语义：这个方法在领域里做什么、改变了什么状态、对外承诺什么
-* 输入输出契约：参数含义、返回值语义、None / 空集合的边界
-* 幂等性、原子性、副作用范围
-* 错误语义：什么情况下返回什么 Error 变体（不是底层实现错误）
-* 不变量：调用前后必须满足的领域不变量
+- 当前时间以 `now_ms` 参数传入。期限的计算规则（何时过期、宽限多久）在 Core；何时唤醒检查在 Application。
+- 标识、nonce 等随机值由调用方生成后传入，Core 只校验格式与唯一性约束。
 
-#### ❌ 错误示例（被污染的 port 注释）
+### 5.7 模块入口
+
+每个状态机模块的 `mod.rs` 顶部用 doc comment 写清：
+
+1. 状态列表与一句话含义；
+2. 输入列表；
+3. 效果列表及各自先后关系；
+4. 不变量与终态。
+
+详细的时序图、跨负责人的收尾关系写在对应的设计文档中（例如[配对生命周期](../pairing-lifecycle.md)），并链接回代码入口。模块文档只写规则，不写调用方和实现。
+
+## 6. 持久化与编码边界
+
+### 6.1 默认规则
+
+Core 不定义本地存储格式。聚合提供快照与恢复：
 
 ```rust
-/// Re-link a transfer row to a different `entry_id`.
-///
-/// 用于 mobile_lan 路径：PUT /file 阶段先用占位 entry_id
-/// (如 `mobile-pending:<transfer_id>`) seed 投影行,
-/// 等 PUT /SyncClipboard.json 真正生成 entry 后再回填真实 entry_id。
-async fn link_transfer_to_entry(...);
-```
-
-问题：把 mobile_lan / HTTP 路由 / SyncClipboard 协议名 / 占位字符串约定全部塞进 core，core 从此 **知道了一条具体的 HTTP 调用链**——这是教科书级的实现污染。
-
-#### ✅ 正确示例
-
-```rust
-/// Re-associate a transfer with a different `entry_id`.
-///
-/// The new association replaces any prior `entry_id` recorded for the
-/// transfer. Idempotent when the new value equals the existing one.
-///
-/// Returns `true` if a row was updated, `false` if no matching
-/// transfer_id exists.
-async fn link_transfer_to_entry(...);
-```
-
-只描述「领域里做什么、幂等性、返回值含义」，不解释「谁在调、为什么调」。**「为什么调」是调用方自己的职责**，应该写在调用方代码处（use case 文件里），而不是借 port 文档反向耦合到 core。
-
-#### 自查问题
-
-写完一段 port doc-comment 后，问自己：
-
-1. 删掉这条注释里所有提到上层模块/路由/协议/具体场景的句子，剩下的部分还能让一个 **不知道这个项目是干嘛的** 的开发者理解这个方法的契约吗？
-2. 这条注释会不会因为换了一个调用方（比如未来加 CLI / 加 Web 同步 / 重写 mobile 协议）就需要修改？如果会，说明它在描述调用方而不是领域。
-3. 如果半年后 mobile_lan 这个路径整体被替换，这条注释会变成"幽灵知识"指向不存在的东西吗？
-
-任何一题答"是"，重写。
-
----
-
-## 6. Network 相关建模原则
-
-### 6.1 核心思想
-
-> **uc-core 关注的是设备之间的“关系”，而不是“通信方式”。**
-
-### 6.2 可以存在于 core 的内容
-
-* `TrustedPeer` / `SpaceMember`
-* `ConnectionPolicy`
-* `DeviceAddress`（逻辑地址）
-* 领域事件（如设备上线）
-
-### 6.3 不应存在于 core 的内容
-
-| 不允许             | 原因        |
-| --------------- | --------- |
-| libp2p protocol | 技术实现      |
-| protocol IDs    | 与具体网络协议绑定 |
-| HTTP/WebSocket  | 传输层细节     |
-| API 字符串         | 表示层细节     |
-| 序列化结构           | 技术实现      |
-
----
-
-## 7. Crypto 领域建模原则
-
-### 7.1 可以存在于 core 的内容
-
-* `Passphrase`（用户输入的口令；uc-application / cli 的领域输入类型）
-* `ProfileId`（当前 profile 的值对象，`uc-core/src/ids/profile_id.rs`）
-* `EncryptionError`（跨 crate 错误类型）
-* 领域类型 `Plaintext` / `Ciphertext` / `Aad` / `ActiveSpace`（port 签名使用的领域中性类型，`crypto::domain`）
-* `ProofDerivedKey`（pairing proof 不透明凭据）
-* 业务策略（`EncryptionPolicy` 之类的规则对象，如有）
-
-### 7.2 不允许存在于 core 的内容（含 **已下沉/删除** 的历史类型）
-
-Phase B milestone (Slice 1-7) + Phase C (Slice 8) 起统一落实——以下所有类型 **都不属于 uc-core**:
-
-| 类别                    | 类型/符号                                                                  | 落点                                                      |
-| --------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------- |
-| 运行时密钥物料               | `Kek` / `MasterKey`                                                    | `uc-infra/src/security/secrets.rs`                      |
-| 持久化/wire 数据结构          | `KeySlot` / `KeySlotFile` / `WrappedMasterKey` / `EncryptedBlob`       | `uc-infra/src/security/crypto_model.rs`                 |
-| KDF 参数                 | `KdfParams` / `KdfParamsV1`                                            | 同上                                                      |
-| 作用域 wrapper            | `KeyScope` / `KeySlotConvertError`                                     | 同上                                                      |
-| 版本/算法 enum（已删除）        | `KdfAlgorithm` / `EncryptionAlgo` / `KeySlotVersion` / `EncryptionFormatVersion` | 单变体 enum 清零，字段类型改 `String`，字面值 adapter 硬编码 (`"V1"` 等) |
-| 应用流程状态 enum（已删除）       | `EncryptionState` / `EncryptionStateError` / `EncryptionStatePort`     | Phase C 彻底删除："setup 是否完成"统一由 `SetupStatusPort.has_completed` 表达，adapter 分支判断改用 `KeyMaterialStore::keyslot_exists()`(直接查磁盘真实存在性，比原 marker 文件更精确) |
-| 加密算法调用                | `argon2::hash`、`XChaCha20-Poly1305` 初始化等                              | `uc-infra/src/security/`                                |
-| 随机数实现                 | `rand::rngs::OsRng`                                                   | 同上                                                      |
-| Keychain 访问           | OS API                                                                | 同上                                                      |
-| Nonce 生成              | 技术实现                                                                  | 同上                                                      |
-
-### 7.3 历史条款回顾（已废止）
-
-* 早期文档曾列 "`MasterKey` / `KeySlot` / `WrappedKey` 允许进 core"——Phase B 重构前立场。milestone/1.0.0 Phase B 已全部下沉到 `uc-infra/src/security/`,任何反向再次往 uc-core 加这些类型的 PR **应被拒绝**。如需新增持久化/密钥物料数据结构，默认放 `uc-infra/src/security/crypto_model.rs` 或 `secrets.rs`,uc-core 只看端口契约与领域中性类型。
-* 早期设计曾把"设备是否初始化过加密"用独立的 `EncryptionStatePort` / `EncryptionState` enum 单独记录——Phase C (Slice 8) 确认这与 `SetupStatusPort.has_completed` 是同一业务事实的冗余副本，已彻底删除。任何反向再引入"独立 encryption state 持久化"的 PR **应被拒绝**:真相源唯一为 `SetupStatusPort`,adapter 需要查"keyslot 是否真实存在"时直接调 `KeyMaterialStore::keyslot_exists()`。
-
----
-
-## 8. Settings 与 Config 的边界
-
-| 类型 | 是否属于 core | 示例 |
-| ---- | --------- | -------------- |
-| 业务设置 | ✅ | `SyncSettings` |
-| 配置加载 | ❌ | 读取 TOML |
-| 环境变量 | ❌ | `std::env` |
-| 默认路径 | ❌ | `AppData` |
-
----
-
-## 9. Setup 与 Orchestration
-
-### 9.1 不属于 core
-
-以下内容应放在 `uc-application`：
-
-* Pairing 状态机
-* Setup 流程
-* UseCase 编排
-* 用户交互流程
-
-### 9.2 core 中允许的内容
-
-* `Space`
-* `TrustRelationship`
-* `Device`
-
-> 注：早期条款曾列 `KeyMaterial` 允许进 core,Phase B milestone 已全部下沉到 `uc-infra/src/security/` (见 §7.2 对照表)。
-
----
-
-## 10. 依赖管理规则
-
-### 10.1 允许的依赖
-
-* Rust 标准库
-* 轻量级工具库（如 `thiserror`, `serde` 用于领域建模）
-
-### 10.2 禁止的依赖
-
-| 禁止 | 示例 |
-| ----- | ------------------- |
-| 网络库 | `libp2p`, `reqwest` |
-| 数据库 | `diesel`, `sqlx` |
-| UI | `tauri` |
-| 异步运行时 | `tokio` |
-| 加密实现 | `ring`, `argon2` |
-
----
-
-## 11. 命名规范
-
-| 类型  | 命名规则      | 示例                   |
-| --- | --------- | -------------------- |
-| 实体  | 名词        | `Device`             |
-| 值对象 | 名词        | `DeviceId`           |
-| 端口  | `*Port`   | `BlobRepositoryPort` |
-| 错误  | `*Error`  | `DeviceError`        |
-| 事件  | 过去式       | `DevicePaired`       |
-| 策略  | `*Policy` | `RetentionPolicy`    |
-
----
-
-## 12. 代码修改自我审查清单（必须执行）
-
-在提交任何涉及 `uc-core` 的变更前，开发者必须逐项确认：
-
-### 12.1 边界检查
-
-* [ ] 该修改是否引入了平台或基础设施依赖？
-* [ ] 是否包含 HTTP、数据库、文件系统或网络实现细节？
-* [ ] 是否引入了 UI 或 API 相关概念？
-* [ ] 是否依赖具体加密算法实现？
-
-### 12.2 领域合理性
-
-* [ ] 该概念在脱离当前运行环境后仍然成立吗？
-* [ ] 是否体现真实的业务语义？
-* [ ] 是否属于领域规则而非流程编排？
-
-### 12.3 Ports 设计
-
-* [ ] 是否以业务能力为导向？
-* [ ] 是否避免技术细节泄漏？
-* [ ] 是否保持接口最小化？
-
-### 12.4 依赖检查
-
-* [ ] 是否仅依赖允许的库？
-* [ ] 是否避免引入 `tokio`、`libp2p` 等实现？
-
----
-
-## 13. 示例：正确与错误对比
-
-### ❌ 错误示例
-
-```rust
-use libp2p::PeerId; // 不允许
-
-pub struct NetworkDevice {
-    pub peer_id: PeerId,
+impl SpaceAdmissionAggregate {
+    pub fn snapshot(&self) -> SpaceAdmissionSnapshot;
+    pub fn restore(snapshot: SpaceAdmissionSnapshot) -> Result<Self, SpaceAdmissionRestoreError>;
 }
 ```
 
-### ✅ 正确示例
+- 快照是纯数据，可以派生 `serde`；它不带格式版本号，不包含编解码函数。
+- `restore` 必须重新校验全部不变量，拒绝不一致的快照；它是除构造器与 `apply` 外唯一产生聚合的入口。
+- 字节布局、格式版本、加密封装、旧格式升级都属于 Infra。格式演进遵守[持久化格式演进](../engineering-principles.md#持久化格式演进)。
 
-```rust
-pub struct DeviceId(String);
+### 6.2 例外：规范编码
 
-pub struct Device {
-    pub id: DeviceId,
-}
-```
+当一段字节被**签名或摘要覆盖**、并且多台设备必须对它得出相同结论时，这段编码就是领域证明的一部分，可以放在 Core：
 
----
+- 例如成员历史的规范签名材料、准入消息用于证据比对的规范摘要输入。
+- 模块文档必须声明“本编码受签名/摘要覆盖”，并有字节稳定性测试。
+- 只放规范编码本身；存储它的外层记录格式仍在 Infra。
 
-## 14. 提交规范
+### 6.3 设备间协议
 
-* 所有涉及 `uc-core` 的提交必须在 PR 描述中说明：
+- 消息的语义结构、字段约束、与状态的匹配校验在 Core。
+- 线上帧格式、分片、传输协议版本在 Infra。
+- 消息若属于 §6.2，规范编码在 Core。
 
-  * 修改的领域概念
-  * 是否影响领域边界
-  * 自我审查清单的确认
+## 7. Port
 
-**PR 模板示例：**
+一个 port 只有在 **Core 领域代码直接调用它**时才能定义在 Core；否则放在使用它的 Application 业务模块旁边。
+判定与示例见 [Application 规则 4](application.md)，分类与粒度见 [Port 定义](../ports.md)。
 
-```text
-### uc-core Change Summary
+留在 Core 的 port 的 doc comment 只能写领域契约：它在领域里做什么、输入输出含义、幂等性与原子性、错误语义、调用前后的不变量。
+不得出现：
 
-- [ ] 修改仅涉及领域模型
-- [ ] 未引入基础设施依赖
-- [ ] Ports 设计符合规范
-- [ ] 已完成自我审查
-```
+- 上层模块、UseCase、facade 的名字；
+- 协议、路由、传输名（如 iroh、HTTP 路由）；
+- 具体实现（SQLite、Argon2、OsRng、keychain、adapter 类型名）；
+- 调用场景或调用顺序（“用于 X 流程”“先调 A 再调 B”）。
 
----
+自查：删掉所有提到调用方、协议和实现的句子，剩下的内容还能让一个不了解本项目的人理解契约吗？换一个调用方，这段注释需要改吗？
 
-## 15. 评审原则
+## 8. 错误
 
-Code Review 时应重点关注：
+- 使用 `thiserror` 定义类型化错误；不使用 `anyhow`。
+- 每个错误类型提供稳定分类（如 `category()`），流程按分类决策，不解析错误文本。
+- 错误文本不包含 §4 列出的敏感信息。
+- 错误处理与跨层 source chain 规则见[错误处理与转换](../error-handling.md)。
 
-1. 是否存在技术细节泄漏
-2. 是否破坏领域边界
-3. 是否引入不必要的抽象
-4. 是否影响跨平台能力
-5. 是否符合统一语言（Ubiquitous Language）
+## 9. 注释与命名
 
----
+- Core 的行内注释与 doc comment 只使用中文；标识符与提交信息使用英文。
+- 命名：实体、值对象用名词；port 用 `*Port`；错误用 `*Error`；输入用调用方语义名词；outcome 与事件用过去式或结果名词；策略用 `*Policy`。
 
-## 16. 总结
+## 10. 测试
 
-### uc-core 的核心原则
+- **转换矩阵**：每个“状态 × 输入”断言结果状态、outcome 与完整效果列表；非法组合断言被拒绝且原状态不变。
+- **不变量**：终态不可回退、重复与乱序幂等、过期不复活、`restore` 拒绝不一致快照。
+- **规范编码**：§6.2 的编码有字节稳定性测试。
+- 测试只通过构造器、`restore` 和 `apply` 构造状态，不为测试开放额外写入入口。
 
-> **Stable · Pure · Business-Oriented · Implementation-Agnostic**
+## 11. 自查清单
 
-| 原则 | 含义 |
-| ----------------------- | ------- |
-| Stable | 变化频率最低 |
-| Pure | 不包含技术实现 |
-| Business-Oriented | 只表达业务语义 |
-| Implementation-Agnostic | 与平台无关 |
+提交涉及 `uc-core` 的变更前逐项确认：
+
+- [ ] 新代码能在无 IO、无时钟、无随机数的单元测试中完整表达。
+- [ ] 没有引入 §3 禁止或受限条件之外的依赖。
+- [ ] 有生命周期的对象只有一个公开推进入口，状态字段不公开。
+- [ ] 每个转换返回的效果声明了与保存的先后关系，并有测试断言完整效果列表。
+- [ ] 跨对象判定写在 Core，Infra 只保证原子性。
+- [ ] 没有新增本地存储格式、格式版本或编解码；若新增规范编码，已声明并有字节稳定测试。
+- [ ] 新 port 确实被 Core 领域代码直接调用，注释只写领域契约。
+- [ ] 生产代码没有 `panic!`、`unwrap()`、`expect()`、`unreachable!()`。
+- [ ] 注释为中文，`Debug`、`Display` 与错误文本不含敏感信息。
+
+## 12. 相关文档
+
+- [Application 设计规范](application.md)：流程负责人、port 所有权、UseCase 组织。
+- [Infra 设计规范](infrastructure.md)：能力实现、格式与迁移。
+- [Port 定义](../ports.md)：port 分类与粒度。
+- [配对生命周期](../pairing-lifecycle.md)：准入状态机与跨负责人收尾的当前时序。
+- [成员历史职责](../membership-history-ownership.md)：成员历史规则在 Core 与 Application 之间的细分。
