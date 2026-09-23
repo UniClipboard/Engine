@@ -20,6 +20,7 @@
 - [本地就绪与 Space 后台恢复统一责任](2026-09-19-local-readiness-and-background-space-recovery.md)（核心实施完成，实体设备验收待执行）
 - [单一空间工作负责人：配对与正式成员维护互斥](2026-09-20-single-space-work-owner.md)（实施中，t-0010；t-0025 顺序回归）
 - [Peer Address 读取失败的准确诊断](2026-09-22-peer-address-read-diagnostics.md)（实施完成，等待下游现场诊断）
+- [入站对端身份与网络准入的唯一负责人](2026-09-23-inbound-peer-admission.md)（提议：验收测试已先行写好，实现未开始；来源 t-0028）
 - [大图发送前本地准备性能与诊断](2026-09-18-large-image-publish-latency.md)（实施中）
 - [统一暂停、恢复与中断恢复](2026-09-12-unified-runtime-lifecycle.md)（实施中，剩余设备与产品宿主验收未完成；包含已有后台问题修复记录入口）
 
