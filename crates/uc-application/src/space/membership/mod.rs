@@ -23,6 +23,8 @@ mod remove_space_member;
 mod resolve_conflict;
 mod signing;
 mod synchronize_history;
+#[cfg(test)]
+mod testing;
 
 pub use decide_device_trust_change::{
     DecideDeviceTrustChange, DecideDeviceTrustChangeError, DecideDeviceTrustChangeResult,

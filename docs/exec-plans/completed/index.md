@@ -2,6 +2,10 @@
 
 这里保留已完成、已由后续方案取代或仅供历史追溯的实施记录。它们不自动代表当前架构事实。
 
+- [044 Engine testkit、测试分组与结构化报告基础](044-engine-testkit-foundation.md)（框架、nextest 分组、结构化工件与非破坏 CI 入口完成；真实网络、设备和远程 CI 跳过）
+- [045 确定性成员恢复高价值场景](045-deterministic-membership-recovery-scenarios.md)（五个固定 seed 场景、20 轮新旧双轨和 100 轮稳定性验收完成；远程 CI、真实网络和设备跳过）
+- [046 真实依赖与独立进程 testkit 采用](046-real-dependency-testkit-adoption.md)（provider 诊断、独立进程恢复和清理分类完成；20 轮稳定性通过，远程 CI、真实网络和设备跳过）
+
 - [资料密钥丢失恢复与旧设备迁移](2026-09-19-profile-key-recovery.md)（Engine 实现与本地验收完成；Desktop、实体平台和旧版本程序回退验收跳过）
 
 - [会话恢复后的成员资料立即就绪](2026-09-18-session-membership-readiness-recovery.md)（本机正式版冷启动中，会话恢复约 0.12 秒完成，成员列表约 0.66 秒可读）

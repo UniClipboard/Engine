@@ -17,7 +17,7 @@ use uc_engine::{
     HistoryEntryInput, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
     HostClipboard, HostClipboardSnapshot, HostDirectories, HostFileAccess, HostFileHandle,
     HostFileMetadata, HostSecureStorage, JoinSpaceInput, ListHistoryEntriesInput, Operation,
-    OperationResult, RemoveMemberInput, SecretString, SendTextInput,
+    OperationResult, RemoveMemberInput, SecretString, SendFilesInput, SendTextInput,
 };
 
 #[derive(Clone, Default)]
@@ -59,18 +59,42 @@ impl HostClipboard for Clipboard {
         Ok(())
     }
 }
-struct Files;
+#[derive(Clone, Default)]
+struct Files(Arc<Mutex<HashMap<String, ManagedFile>>>);
+
+#[derive(Clone)]
+struct ManagedFile {
+    display_name: String,
+    mime_type: Option<String>,
+    bytes: Vec<u8>,
+}
+
 impl HostFileAccess for Files {
-    fn metadata(&self, _: &HostFileHandle) -> Result<HostFileMetadata, HostCapabilityError> {
-        Err(unavailable())
+    fn metadata(&self, handle: &HostFileHandle) -> Result<HostFileMetadata, HostCapabilityError> {
+        let files = self.0.lock().map_err(|_| unavailable())?;
+        let file = files.get(handle.as_str()).ok_or_else(invalid_handle)?;
+        Ok(HostFileMetadata {
+            display_name: file.display_name.clone(),
+            size_bytes: file.bytes.len() as u64,
+            mime_type: file.mime_type.clone(),
+        })
     }
     fn read_chunk(
         &self,
-        _: &HostFileHandle,
-        _: u64,
-        _: u32,
+        handle: &HostFileHandle,
+        offset: u64,
+        max_bytes: u32,
     ) -> Result<Vec<u8>, HostCapabilityError> {
-        Err(unavailable())
+        let files = self.0.lock().map_err(|_| unavailable())?;
+        let file = files.get(handle.as_str()).ok_or_else(invalid_handle)?;
+        let start = usize::try_from(offset).map_err(|_| unavailable())?;
+        if start >= file.bytes.len() {
+            return Ok(Vec::new());
+        }
+        let end = start
+            .saturating_add(max_bytes as usize)
+            .min(file.bytes.len());
+        Ok(file.bytes[start..end].to_vec())
     }
     fn write_chunk(&self, _: &HostFileHandle, _: u64, _: &[u8]) -> Result<(), HostCapabilityError> {
         Err(unavailable())
@@ -78,6 +102,13 @@ impl HostFileAccess for Files {
     fn finish_write(&self, _: &HostFileHandle) -> Result<(), HostCapabilityError> {
         Err(unavailable())
     }
+}
+
+fn invalid_handle() -> HostCapabilityError {
+    HostCapabilityError::new(
+        HostCapabilityErrorCategory::InvalidHandle,
+        "test file handle unavailable",
+    )
 }
 
 fn string<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
@@ -107,7 +138,7 @@ async fn shutdown_engine(engine: &Engine) -> Result<()> {
     Ok(())
 }
 
-async fn operation(engine: &Engine, request: &Value) -> Result<Value> {
+async fn operation(engine: &Engine, files: &Files, request: &Value) -> Result<Value> {
     let command = string(request, "command")?;
     #[cfg(feature = "current-engine")]
     if command == "connections" {
@@ -184,11 +215,29 @@ async fn operation(engine: &Engine, request: &Value) -> Result<Value> {
             text: string(request, "text")?.into(),
             target_devices: vec![string(request, "peer")?.into()],
         }),
+        "send_file" => {
+            let handle = string(request, "handle")?;
+            files.0.lock().map_err(|_| unavailable())?.insert(
+                handle.to_owned(),
+                ManagedFile {
+                    display_name: string(request, "display_name")?.to_owned(),
+                    mime_type: request["mime_type"].as_str().map(str::to_owned),
+                    bytes: string(request, "content")?.as_bytes().to_vec(),
+                },
+            );
+            Operation::SendFiles(SendFilesInput {
+                files: vec![HostFileHandle::new(handle)],
+                target_devices: vec![string(request, "peer")?.into()],
+            })
+        }
         "history" => Operation::ListHistoryEntries(ListHistoryEntriesInput {
             limit: 100,
             offset: 0,
         }),
         "entry" => Operation::GetHistoryEntry(HistoryEntryInput {
+            entry_id: string(request, "entry")?.into(),
+        }),
+        "read_file" => Operation::ReadEntryFile(HistoryEntryInput {
             entry_id: string(request, "entry")?.into(),
         }),
         _ => bail!("unknown test command"),
@@ -211,6 +260,7 @@ async fn operation(engine: &Engine, request: &Value) -> Result<Value> {
         OperationResult::EntrySent(report) => serde_json::to_value(report)?,
         OperationResult::HistoryEntries(entries) => serde_json::to_value(entries)?,
         OperationResult::HistoryEntry(entry) => serde_json::to_value(entry)?,
+        OperationResult::EntryFileRead(resource) => serde_json::to_value(resource)?,
         _ => json!(true),
     })
 }
@@ -242,6 +292,7 @@ async fn main() -> Result<()> {
             .lock()
             .map_err(|_| anyhow!("storage unavailable"))? = serde_json::from_value(value.clone())?;
     }
+    let files = Files::default();
     let host = HostCapabilities::new(
         HostDirectories::new(
             root.join("private"),
@@ -251,7 +302,7 @@ async fn main() -> Result<()> {
         ),
         Box::new(storage.clone()),
         Box::new(Clipboard),
-        Box::new(Files),
+        Box::new(files.clone()),
     );
     let config = EngineConfig::new("1.1.0")
         .with_rendezvous_base_url(string(&start, "rendezvous")?)
@@ -315,7 +366,7 @@ async fn main() -> Result<()> {
                 .lock()
                 .map(|values| json!(*values))
                 .map_err(|_| anyhow!("storage unavailable")),
-            _ => operation(&engine, &request).await,
+            _ => operation(&engine, &files, &request).await,
         };
         let response = match result {
             Ok(value) => json!({ "ok": value }),

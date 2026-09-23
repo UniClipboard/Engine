@@ -36,6 +36,7 @@ const EXPECTED_PACKAGES = [
   'uc-observability-contract',
   'uc-observability-runtime',
   'uc-ohos-napi',
+  'uc-testkit',
 ]
 
 const INTERNAL_PACKAGES = new Set([
@@ -289,6 +290,23 @@ function checkLocalDependencies(metadata) {
         )
       }
     }
+  }
+  return problems
+}
+
+function checkTestkitBoundary(metadata) {
+  const problems = []
+  const testkit = packageByName(metadata, 'uc-testkit')
+  const productDependencies = normalDependencies(testkit)
+    .filter(dependency => dependency.name.startsWith('uc-'))
+    .map(dependency => dependency.name)
+    .sort()
+  if (productDependencies.length > 0) {
+    addProblem(
+      problems,
+      'testkit boundary',
+      `uc-testkit must not depend on product packages; found ${productDependencies.join(', ')}`
+    )
   }
   return problems
 }
@@ -2116,6 +2134,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkWorkspaceShape(metadata),
     ...checkOpenMlsValidation(metadata),
     ...checkLocalDependencies(metadata),
+    ...checkTestkitBoundary(metadata),
     ...checkPublicSurface(metadata, sources),
     ...checkApplicationDependencyInventory(sources),
     ...checkBindingProvenance(metadata, sources),

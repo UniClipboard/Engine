@@ -16,6 +16,7 @@ members = [
   "tests/hosts/connectivity",
   "tests/hosts/connectivity-relay",
   "tests/openmls-validation",
+  "tests/uc-testkit",
 ]
 resolver = "2"
 

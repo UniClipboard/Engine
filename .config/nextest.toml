@@ -1,0 +1,69 @@
+[profile.default]
+retries = 0
+fail-fast = true
+status-level = "pass"
+final-status-level = "slow"
+slow-timeout = { period = "10s", terminate-after = 2 }
+
+[profile.ci]
+inherits = "default"
+fail-fast = false
+junit = { path = "junit.xml" }
+
+[test-groups.fast]
+max-threads = 2
+
+[test-groups.persistence-provider]
+max-threads = 1
+
+[test-groups.engine-smoke]
+max-threads = 1
+
+[test-groups.process]
+max-threads = 1
+
+[test-groups.real-network]
+max-threads = 1
+
+[test-groups.device]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = "package(uc-testkit)"
+test-group = "fast"
+slow-timeout = { period = "2s", terminate-after = 1 }
+
+[[profile.default.overrides]]
+filter = "package(uc-application) & (test(admission_recovery_scenarios) | test(device_trust_recovery_scenario) | test(legacy_candidate_convergence_scenario) | test(virtual_membership_network) | test(file_transfer_completion_scenario_reports_final_state) | test(text_transfer_scenario))"
+test-group = "fast"
+slow-timeout = { period = "2s", terminate-after = 1 }
+
+[[profile.default.overrides]]
+filter = "package(uc-infra) & test(provider_dependency_evidence)"
+test-group = "persistence-provider"
+slow-timeout = { period = "5s", terminate-after = 1 }
+
+[[profile.default.overrides]]
+filter = "package(uc-infra) & binary(profile_storage_upgrade_crash)"
+test-group = "process"
+slow-timeout = { period = "20s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-testkit)"
+test-group = "fast"
+slow-timeout = { period = "2s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-application) & (test(admission_recovery_scenarios) | test(device_trust_recovery_scenario) | test(legacy_candidate_convergence_scenario) | test(virtual_membership_network) | test(file_transfer_completion_scenario_reports_final_state) | test(text_transfer_scenario))"
+test-group = "fast"
+slow-timeout = { period = "2s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-infra) & test(provider_dependency_evidence)"
+test-group = "persistence-provider"
+slow-timeout = { period = "5s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-infra) & binary(profile_storage_upgrade_crash)"
+test-group = "process"
+slow-timeout = { period = "20s", terminate-after = 1 }

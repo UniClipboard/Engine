@@ -176,6 +176,7 @@ windows-sys = { version = "0.59", features = [
 [dev-dependencies]
 criterion = { version = "0.8", features = ["async_tokio"] }
 uc-observability-runtime = { path = "../uc-observability-runtime" }
+uc-testkit = { path = "../../tests/uc-testkit" }
 tokio = { version = "1", features = ["full", "test-util"] }
 tempfile = "3"
 mockall = "0.13"

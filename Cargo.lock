@@ -7012,6 +7012,7 @@ dependencies = [
  "tracing-subscriber",
  "uc-core",
  "uc-observability-contract",
+ "uc-testkit",
  "unicode-normalization",
  "url",
  "uuid",
@@ -7186,6 +7187,7 @@ dependencies = [
  "uc-core",
  "uc-observability-contract",
  "uc-observability-runtime",
+ "uc-testkit",
  "unicode-normalization",
  "unicode-segmentation",
  "url",
@@ -7334,6 +7336,17 @@ dependencies = [
  "tokio",
  "uc-engine",
  "zeroize",
+]
+
+[[package]]
+name = "uc-testkit"
+version = "1.1.0-rc.18"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

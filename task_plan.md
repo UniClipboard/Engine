@@ -13,7 +13,7 @@ Desktop 多节点复杂拓扑收敛。
 - 只有认证 ACK 推进对应 peer 水位；失败、预算耗尽和重启不丢欠账。
 - 链式、树型、离线恢复和公平调度测试通过。
 - Desktop 三节点及复杂拓扑 E2E 通过；未执行实体设备项目明确标为跳过。
-- Spec、架构圣经、workspace、格式、架构和 diff 门禁全部通过。
+- Spec、对应主题文档、workspace、格式、架构和 diff 门禁全部通过。
 
 ## Phases
 
@@ -26,9 +26,9 @@ Desktop 多节点复杂拓扑收敛。
 - [x] 运行完整 workspace 测试与 Engine/绑定 contract tests。
 - [x] 运行真实 SQLite、Iroh loopback、Engine 双实例与明文探针。
 - [x] 记录实体设备矩阵和 Release bundle 的通过或跳过状态。
-- [x] 完成交付审计并同步架构圣经。
+- [x] 完成交付审计并同步对应主题文档。
 - [x] 删除旧 pairing ALPN、session/event port 与 production Router 装配，同时保留邀请 discovery。
-- [x] 扩展架构检查并更新 Spec 028、架构圣经与验收状态。
+- [x] 扩展架构检查并更新 Spec 028、对应主题文档与验收状态。
 - [x] 运行定向测试、完整 workspace 测试和最终门禁并提交清理切片。
 - [x] 使用本地 Desktop 的公开 CLI/daemon 跑通 fresh join、状态查询与 daemon 重启恢复 E2E。
 - [x] 跑通三 profile Active 收敛及双向 exact transfer，并同步最终交付结论。
