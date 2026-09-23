@@ -25,12 +25,12 @@ use uc_core::ports::{
     ClockPort, PeerAddressRepositoryPort, PeerReachabilityChanged, PeerReachabilityError,
     PeerReachabilityPort, ReachabilityState,
 };
-use uc_core::security::IdentityFingerprint;
 use uc_observability_contract::diagnostics::connectivity::{
-    ConfirmationFailure, PresenceCheckObservation, PresenceCheckResult,
+    ConfirmationFailure, InboundPeerProtocol, PresenceCheckObservation, PresenceCheckResult,
 };
 
 use super::connect::connect_with_staggered_retry_classified;
+use super::inbound_peer::{InboundPeerGate, InboundPeerRejection};
 use super::net_recovery::{
     DemandRecoveryCoordinator, NetworkRecoveryObservation, NetworkRecoveryObservationSource,
 };
@@ -145,9 +145,7 @@ impl ConnectionObservations {
 struct HandlerState {
     observations: Arc<Mutex<ConnectionObservations>>,
     peers: Arc<Mutex<HashMap<DeviceId, TrackedPeer>>>,
-    member_repo: Arc<dyn MemberRepositoryPort>,
-    peer_admission: Arc<dyn PeerAdmissionPort>,
-    fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+    gate: InboundPeerGate,
     last_state: Arc<Mutex<HashMap<DeviceId, ReachabilityState>>>,
     inbound_connections: Arc<Mutex<HashMap<usize, (DeviceId, Connection)>>>,
     accepting: AtomicBool,
@@ -191,55 +189,8 @@ impl HandlerState {
         });
     }
 
-    /// Resolve `remote_pubkey_bytes` (iroh `EndpointId` 32-byte public key)
-    /// back to a `SpaceMember.device_id` via the same fingerprint factory
-    /// the receiver adapter uses. `None` means "unknown peer" — handler
-    /// holds the connection open but does not mutate peer_reachability state.
-    ///
-    /// `member_repo.list()` is acceptable per the Slice 2 N ≤ 10 roster
-    /// assumption (see `clipboard_receiver_adapter.rs` for the same
-    /// rationale). A dedicated lookup-by-fingerprint index is a Phase 3
-    /// concern.
-    async fn resolve_device(&self, remote_pubkey_bytes: &[u8; 32]) -> Option<DeviceId> {
-        let derived = match self
-            .fingerprint_factory
-            .from_public_key(remote_pubkey_bytes)
-        {
-            Ok(fp) => fp,
-            Err(_error) => {
-                warn!(
-                    error.type = "unavailable",
-                    "presence accept: fingerprint derivation failed — cannot resolve peer",
-                );
-                return None;
-            }
-        };
-
-        let members = match self.member_repo.list().await {
-            Ok(ms) => ms,
-            Err(_error) => {
-                warn!(
-                    error.type = "storage",
-                    "presence accept: member_repo.list failed; treating peer as unknown",
-                );
-                return None;
-            }
-        };
-
-        members
-            .into_iter()
-            .find(|m| fingerprints_equal(&m.identity_fingerprint, &derived))
-            .map(|m| m.device_id)
-    }
-
     async fn is_admitted(&self, device_id: &DeviceId) -> bool {
-        match self.peer_admission.is_admitted(device_id).await {
-            Ok(admitted) => admitted,
-            Err(_error) => {
-                warn!(error.type = "unavailable", "presence accept: peer admission check failed");
-                false
-            }
-        }
+        self.gate.authorize(device_id).await.is_ok()
     }
 
     fn now(&self) -> DateTime<Utc> {
@@ -300,15 +251,16 @@ impl ProtocolHandler for IrohPeerReachabilityHandler {
         }
 
         let remote_bytes: [u8; 32] = *remote.as_bytes();
-        let admitted_device = self.state.resolve_device(&remote_bytes).await;
-        if let Some(device_id) = admitted_device {
+        let admitted_device = self.state.gate.identify(&remote_bytes).await;
+        if let Ok(device_id) = admitted_device {
             let before = self.state.observations.lock().await.begin(device_id);
-            if !self.state.is_admitted(&device_id).await {
+            if let Err(rejection) = self.state.gate.authorize(&device_id).await {
                 let _ = self
                     .state
                     .known_peer_contact_tx
                     .send(KnownPeerContact { device_id });
                 warn!(error.type = "peer_rejected", "presence accept: peer is not admitted by current space protection");
+                self.state.gate.record_rejection(rejection);
                 reject_admission(send, &connection).await;
                 return Ok(());
             }
@@ -319,6 +271,9 @@ impl ProtocolHandler for IrohPeerReachabilityHandler {
                     || !self.state.accepting.load(Ordering::Acquire)
                 {
                     drop(observation);
+                    self.state
+                        .gate
+                        .record_rejection(InboundPeerRejection::NotAccepting);
                     reject_admission(send, &connection).await;
                     return Ok(());
                 }
@@ -408,12 +363,15 @@ impl ProtocolHandler for IrohPeerReachabilityHandler {
         } else {
             // A peer that is no longer in the local space must not keep a
             // successful peer_reachability connection after leave or switch-space.
+            if let Err(rejection) = admitted_device {
+                self.state.gate.record_rejection(rejection);
+            }
             reject_admission(send, &connection).await;
             debug!("inbound presence connection from unresolved peer; closing",);
             return Ok(());
         }
 
-        if let Some(device) = admitted_device {
+        if let Ok(device) = admitted_device {
             self.state.serve_liveness(device, &connection).await;
         }
         let mut observation = self.state.observations.lock().await;
@@ -423,7 +381,7 @@ impl ProtocolHandler for IrohPeerReachabilityHandler {
             .lock()
             .await
             .remove(&connection_id);
-        if let Some(device) = admitted_device {
+        if let Ok(device) = admitted_device {
             self.state.mark_offline_if_disconnected(device).await;
         }
         debug!("presence connection closed by peer",);
@@ -441,11 +399,6 @@ async fn reject_admission(mut send: SendStream, connection: &Connection) {
     connection.close(0u32.into(), b"peer_not_admitted");
 }
 
-/// `IdentityFingerprint` comparison surface, shared by all admission paths.
-fn fingerprints_equal(a: &IdentityFingerprint, b: &IdentityFingerprint) -> bool {
-    a == b
-}
-
 // ============================================================================
 // Adapter (dial side)
 // ============================================================================
@@ -454,6 +407,7 @@ fn fingerprints_equal(a: &IdentityFingerprint, b: &IdentityFingerprint) -> bool 
 pub struct IrohPeerReachabilityAdapter {
     observations: Arc<Mutex<ConnectionObservations>>,
     endpoint: Arc<Endpoint>,
+    peer_admission: Arc<dyn PeerAdmissionPort>,
     demand_recovery: Option<Arc<DemandRecoveryCoordinator>>,
     network_recovery_observations: Option<Arc<NetworkRecoveryObservationSource>>,
     peer_address_resolver: PeerAddressResolver,
@@ -566,9 +520,12 @@ impl IrohPeerReachabilityAdapter {
         let handler_state = Arc::new(HandlerState {
             observations: Arc::clone(&observations),
             peers: Arc::clone(&peers),
-            member_repo,
-            peer_admission,
-            fingerprint_factory,
+            gate: InboundPeerGate::new(
+                InboundPeerProtocol::Presence,
+                member_repo,
+                Arc::clone(&peer_admission),
+                fingerprint_factory,
+            ),
             last_state: Arc::clone(&last_state),
             inbound_connections,
             accepting: AtomicBool::new(true),
@@ -578,6 +535,7 @@ impl IrohPeerReachabilityAdapter {
         });
         Self {
             endpoint,
+            peer_admission,
             demand_recovery,
             network_recovery_observations,
             peer_address_resolver: PeerAddressResolver::new(peer_addr_repo),
@@ -861,7 +819,6 @@ impl PeerReachabilityPort for IrohPeerReachabilityAdapter {
         device: &DeviceId,
     ) -> Result<ReachabilityState, PeerReachabilityError> {
         if !self
-            .handler_state
             .peer_admission
             .is_admitted(device)
             .await

@@ -44,13 +44,14 @@ use iroh::Endpoint;
 use tokio::sync::broadcast;
 use tracing::{debug, instrument, warn, Instrument};
 
+#[cfg(test)]
 use uc_core::ids::DeviceId;
 use uc_core::membership::{MemberRepositoryPort, PeerAdmissionPort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{InboundClipboard, InboundClipboardDisposition, InboundClipboardReceipt};
-use uc_core::security::IdentityFingerprint;
 use uc_observability_contract::diagnostics::connectivity::{
     complete_clipboard_receive_failure, ClipboardReceiveFailure, ClipboardReceiveObservation,
+    InboundPeerProtocol,
 };
 use uc_observability_contract::diagnostics::{
     complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
@@ -59,6 +60,7 @@ use uc_observability_contract::diagnostics::{
 
 use super::clipboard_wire::{self, AckCode};
 use super::conn_path::{path_for, OnMissing};
+use super::inbound_peer::InboundPeerGate;
 use super::trace_context::set_remote_parent;
 
 /// Capacity of the `InboundClipboard` broadcast channel. Matches the
@@ -79,9 +81,7 @@ pub struct IrohClipboardReceiverAdapter {
 
 struct HandlerState {
     endpoint: Arc<Endpoint>,
-    member_repo: Arc<dyn MemberRepositoryPort>,
-    peer_admission: Arc<dyn PeerAdmissionPort>,
-    fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+    gate: InboundPeerGate,
     event_tx: broadcast::Sender<ClipboardDelivery>,
 }
 
@@ -95,9 +95,12 @@ impl IrohClipboardReceiverAdapter {
         let (event_tx, _) = broadcast::channel(INBOUND_CHANNEL_CAPACITY);
         let handler_state = Arc::new(HandlerState {
             endpoint,
-            member_repo,
-            peer_admission,
-            fingerprint_factory,
+            gate: InboundPeerGate::new(
+                InboundPeerProtocol::Clipboard,
+                member_repo,
+                peer_admission,
+                fingerprint_factory,
+            ),
             event_tx: event_tx.clone(),
         });
         Self {
@@ -146,7 +149,7 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
 
         // 1. Resolve the remote endpoint's public key back to a known
         //    SpaceMember.
-        let resolved = self.state.resolve_device(&remote_bytes).await;
+        let resolved = self.state.gate.identify(&remote_bytes).await;
 
         // 2. Open the bi-stream even for rejected peers — we still want to
         //    send a `Rejected` ack so the sender does not stall on its
@@ -159,28 +162,22 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
             }
         };
 
-        let Some(peer_device_id) = resolved else {
-            warn!(
-                remote = %remote,
-                "clipboard receiver: unknown peer fingerprint; sending Rejected ack"
-            );
-            emit_ack(&mut send, AckCode::Rejected).await;
-            // Keep the connection alive until the peer closes it so the
-            // ack byte has time to flush before the QUIC connection gets
-            // torn down (otherwise the sender sees
-            // `ConnectionLost(ApplicationClosed)` instead of the ack).
-            let _ = connection.closed().await;
-            return Ok(());
+        let peer_device_id = match resolved {
+            Ok(device) => device,
+            Err(rejection) => {
+                self.state.gate.record_rejection(rejection);
+                emit_ack(&mut send, AckCode::Rejected).await;
+                // 回执先于连接清理，避免拨号方只收到连接关闭。
+                let _ = connection.closed().await;
+                return Ok(());
+            }
         };
 
         // 3. Read the frame. Any codec-level failure ends the connection
         //    with a `Rejected` ack so the sender gets a typed
         //    `PeerRejected` error rather than an unexplained `Io`.
-        if !self.state.is_admitted(&peer_device_id).await {
-            warn!(
-                peer = %peer_device_id.as_str(),
-                "clipboard receiver: peer is not admitted by current space protection"
-            );
+        if let Err(rejection) = self.state.gate.authorize(&peer_device_id).await {
+            self.state.gate.record_rejection(rejection);
             emit_ack(&mut send, AckCode::Rejected).await;
             let _ = connection.closed().await;
             return Ok(());
@@ -321,64 +318,6 @@ async fn emit_ack(send: &mut iroh::endpoint::SendStream, ack: AckCode) {
     if let Err(err) = send.finish() {
         debug!(error = %err, "clipboard receiver: send.finish failed");
     }
-}
-
-impl HandlerState {
-    /// Look up a `SpaceMember` whose `identity_fingerprint` equals the one
-    /// derived from `remote_pubkey_bytes`. Returns `None` when the peer is
-    /// unknown or when repository errors (logged).
-    ///
-    /// `member_repo.list()` is used because the port does not expose
-    /// lookup-by-fingerprint and the roster size is bounded (Slice 2
-    /// assumption N ≤ 10). Adding a dedicated index is a Phase 3 concern.
-    async fn is_admitted(&self, device_id: &DeviceId) -> bool {
-        match self.peer_admission.is_admitted(device_id).await {
-            Ok(admitted) => admitted,
-            Err(error) => {
-                warn!(error = %error, peer = %device_id.as_str(), "clipboard receiver: peer admission check failed");
-                false
-            }
-        }
-    }
-
-    async fn resolve_device(&self, remote_pubkey_bytes: &[u8; 32]) -> Option<DeviceId> {
-        let derived = match self
-            .fingerprint_factory
-            .from_public_key(remote_pubkey_bytes)
-        {
-            Ok(fp) => fp,
-            Err(err) => {
-                warn!(
-                    error = %err,
-                    "clipboard receiver: fingerprint derivation failed — cannot resolve peer"
-                );
-                return None;
-            }
-        };
-
-        let members = match self.member_repo.list().await {
-            Ok(ms) => ms,
-            Err(err) => {
-                warn!(
-                    error = %err,
-                    "clipboard receiver: member_repo.list failed; treating peer as unknown"
-                );
-                return None;
-            }
-        };
-
-        members
-            .into_iter()
-            .find(|m| fingerprints_equal(&m.identity_fingerprint, &derived))
-            .map(|m| m.device_id)
-    }
-}
-
-/// `IdentityFingerprint` does not derive `PartialEq` on its raw form in
-/// every version of `uc-core`; use the display form which is the stable
-/// canonical comparison surface (`ABCD-EFGH-IJKL-MNOP`).
-fn fingerprints_equal(a: &IdentityFingerprint, b: &IdentityFingerprint) -> bool {
-    a == b
 }
 
 // ============================================================================

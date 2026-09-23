@@ -38,8 +38,10 @@ use uc_core::ids::DeviceId;
 use uc_core::membership::{MemberRepositoryPort, PeerAdmissionPort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::PeerAddressRepositoryPort;
+use uc_observability_contract::diagnostics::connectivity::InboundPeerProtocol;
 
 use super::connect::connect_with_staggered_retry;
+use super::inbound_peer::InboundPeerGate;
 use super::peer_address_resolver::PeerAddressResolver;
 use super::transfer_progress_wire::{
     self, transfer_id_from_bytes, transfer_id_to_bytes, ProgressFrame,
@@ -86,9 +88,7 @@ pub struct IrohTransferProgressAdapter {
 }
 
 struct HandlerState {
-    member_repo: Arc<dyn MemberRepositoryPort>,
-    peer_admission: Arc<dyn PeerAdmissionPort>,
-    fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+    gate: InboundPeerGate,
     event_tx: broadcast::Sender<InboundProgressEvent>,
 }
 
@@ -104,9 +104,12 @@ impl IrohTransferProgressAdapter {
         Self {
             event_tx: event_tx.clone(),
             handler_state: Arc::new(HandlerState {
-                member_repo,
-                peer_admission,
-                fingerprint_factory,
+                gate: InboundPeerGate::new(
+                    InboundPeerProtocol::TransferProgress,
+                    member_repo,
+                    peer_admission,
+                    fingerprint_factory,
+                ),
                 event_tx,
             }),
             reporter: Arc::new(ReporterImpl {
@@ -160,21 +163,13 @@ impl ProtocolHandler for IrohTransferProgressHandler {
         // 1. Resolve remote identity. Unknown peer → drop the connection
         //    silently. We deliberately don't write any response (this is a
         //    push-only direction: receiver doesn't expect any data back).
-        let from_device = match self.state.resolve_device(&remote_bytes).await {
-            Some(d) => d,
-            None => {
-                debug!(remote = %remote, "transfer progress: unknown peer fingerprint; dropping");
+        let from_device = match self.state.gate.admit(&remote_bytes).await {
+            Ok(device) => device,
+            Err(rejection) => {
+                self.state.gate.record_rejection(rejection);
                 return Ok(());
             }
         };
-
-        if !self.state.is_admitted(&from_device).await {
-            warn!(
-                from_device = %from_device.as_str(),
-                "transfer progress: peer is not admitted by current space protection"
-            );
-            return Ok(());
-        }
 
         debug!(
             from_device = %from_device.as_str(),
@@ -232,34 +227,6 @@ impl ProtocolHandler for IrohTransferProgressHandler {
         }
 
         Ok(())
-    }
-}
-
-impl HandlerState {
-    /// Resolve `remote_id()` bytes to a known SpaceMember's DeviceId.
-    /// Mirrors `clipboard_receiver_adapter::HandlerState::resolve_device`
-    /// but doesn't share code with it (different broadcast types,
-    /// different state struct).
-    async fn is_admitted(&self, device_id: &DeviceId) -> bool {
-        match self.peer_admission.is_admitted(device_id).await {
-            Ok(admitted) => admitted,
-            Err(error) => {
-                warn!(error = %error, peer = %device_id.as_str(), "transfer progress: peer admission check failed");
-                false
-            }
-        }
-    }
-
-    async fn resolve_device(&self, remote_pubkey_bytes: &[u8; 32]) -> Option<DeviceId> {
-        let derived = self
-            .fingerprint_factory
-            .from_public_key(remote_pubkey_bytes)
-            .ok()?;
-        let members = self.member_repo.list().await.ok()?;
-        members
-            .into_iter()
-            .find(|m| m.identity_fingerprint == derived)
-            .map(|m| m.device_id)
     }
 }
 

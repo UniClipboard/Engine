@@ -84,6 +84,7 @@ use super::clipboard_receiver_adapter::IrohClipboardReceiverAdapter;
 use super::connection_channel_adapter::IrohConnectionChannelAdapter;
 use super::group_update_adapter::{IrohGroupUpdateAdapter, GROUP_UPDATE_ALPN};
 use super::identity_store::IrohIdentityStore;
+use super::inbound_peer::{InboundPeerRejection, PeerIdentityResolver};
 use super::membership_attestation_adapter::{
     IrohMembershipAttestationAdapter, IrohMembershipGossipTransportAdapter,
     IrohMembershipIdentityAdapter, MEMBERSHIP_ATTESTATION_ALPN,
@@ -684,14 +685,14 @@ impl IrohSessionBuilder {
             .stream()
             .skip(1)
             .map(|_| Ok(uc_application::deps::ConnectionHint::NetworkChanged));
+        let identity = Arc::new(PeerIdentityResolver::new(members, fingerprints));
         let discovered = self
             .context
             .mdns
             .subscribe()
             .await
             .filter_map(move |event| {
-                let members = Arc::clone(&members);
-                let fingerprints = Arc::clone(&fingerprints);
+                let identity = Arc::clone(&identity);
                 async move {
                     let iroh_mdns_address_lookup::DiscoveryEvent::Discovered {
                         endpoint_info, ..
@@ -699,21 +700,24 @@ impl IrohSessionBuilder {
                     else {
                         return None;
                     };
-                    let fingerprint =
-                        match fingerprints.from_public_key(endpoint_info.endpoint_id.as_bytes()) {
-                            Ok(value) => value,
-                            Err(source) => return Some(Err(source)),
-                        };
-                    match members.list().await {
-                        Ok(members) => members
-                            .into_iter()
-                            .find(|member| member.identity_fingerprint == fingerprint)
-                            .map(|member| {
-                                Ok(uc_application::deps::ConnectionHint::PeerAddressChanged(
-                                    member.device_id,
-                                ))
-                            }),
-                        Err(source) => Some(Err(anyhow::Error::new(source))),
+                    match identity
+                        .identify(endpoint_info.endpoint_id.as_bytes())
+                        .await
+                    {
+                        Ok(device) => Some(Ok(
+                            uc_application::deps::ConnectionHint::PeerAddressChanged(device),
+                        )),
+                        Err(
+                            InboundPeerRejection::IdentityUnresolved
+                            | InboundPeerRejection::IdentityAmbiguous,
+                        ) => None,
+                        Err(InboundPeerRejection::MemberReadFailed) => {
+                            Some(Err(anyhow::anyhow!("member projection unavailable")))
+                        }
+                        Err(InboundPeerRejection::FingerprintUnavailable) => {
+                            Some(Err(anyhow::anyhow!("fingerprint derivation unavailable")))
+                        }
+                        Err(_) => None,
                     }
                 }
             });

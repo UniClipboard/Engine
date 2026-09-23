@@ -21,10 +21,12 @@ use uc_core::membership::{
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{DeviceIdentityPort, PeerAddressRepositoryPort, SettingsPort};
 use uc_core::security::IdentityFingerprint;
+use uc_observability_contract::diagnostics::connectivity::InboundPeerProtocol;
 
 use crate::space::InMemorySession;
 
 use super::connect_with_staggered_retry;
+use super::inbound_peer::{InboundPeerGate, InboundPeerRejection};
 use super::peer_address_resolver::PeerAddressResolver;
 use super::persistable_addr::to_persistable_addr;
 
@@ -169,9 +171,7 @@ pub struct IrohMembershipGossipTransportAdapter {
 
 struct MembershipGossipHandlerState {
     session: Arc<InMemorySession>,
-    member_repo: Arc<dyn MemberRepositoryPort>,
-    peer_admission: Arc<dyn PeerAdmissionPort>,
-    fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+    gate: InboundPeerGate,
 }
 
 impl IrohMembershipGossipTransportAdapter {
@@ -190,9 +190,12 @@ impl IrohMembershipGossipTransportAdapter {
             peer_address_resolver: PeerAddressResolver::new(peer_addr_repo),
             handler_state: Arc::new(MembershipGossipHandlerState {
                 session,
-                member_repo,
-                peer_admission,
-                fingerprint_factory,
+                gate: InboundPeerGate::new(
+                    InboundPeerProtocol::MembershipAttestation,
+                    member_repo,
+                    peer_admission,
+                    fingerprint_factory,
+                ),
             }),
         }
     }
@@ -737,14 +740,23 @@ impl IrohMembershipAttestationHandler {
             reject(send, WireReject::Persistence).await;
             return Err("gossip_session_not_ready");
         }
-        let resolved = match state.resolve_device(&remote_key).await {
-            Some(resolved) => resolved,
-            None => {
+        let resolved = match state.gate.identify(&remote_key).await {
+            Ok(resolved) => resolved,
+            Err(rejection) => {
+                state.gate.record_rejection(rejection);
                 reject(send, WireReject::Invalid).await;
                 return Err("unknown_gossip_source");
             }
         };
-        if resolved != source_device_id || !state.is_admitted(&source_device_id).await {
+        if resolved != source_device_id {
+            state
+                .gate
+                .record_rejection(InboundPeerRejection::IdentityUnresolved);
+            reject(send, WireReject::Invalid).await;
+            return Err("gossip_source_rejected");
+        }
+        if let Err(rejection) = state.gate.authorize(&source_device_id).await {
+            state.gate.record_rejection(rejection);
             reject(send, WireReject::Invalid).await;
             return Err("gossip_source_rejected");
         }
@@ -795,33 +807,6 @@ impl IrohMembershipAttestationHandler {
         send.finish().map_err(|_| "gossip_response_finish")?;
         let _ = connection.closed().await;
         Ok(())
-    }
-}
-
-impl MembershipGossipHandlerState {
-    async fn resolve_device(&self, public_key: &[u8; 32]) -> Option<DeviceId> {
-        let fingerprint = self.fingerprint_factory.from_public_key(public_key).ok()?;
-        let members = match self.member_repo.list().await {
-            Ok(members) => members,
-            Err(error) => {
-                warn!(error = %error, "membership gossip member lookup failed");
-                return None;
-            }
-        };
-        members
-            .into_iter()
-            .find(|member| member.identity_fingerprint == fingerprint)
-            .map(|member| member.device_id)
-    }
-
-    async fn is_admitted(&self, device_id: &DeviceId) -> bool {
-        match self.peer_admission.is_admitted(device_id).await {
-            Ok(admitted) => admitted,
-            Err(error) => {
-                warn!(error = %error, "membership gossip admission check failed");
-                false
-            }
-        }
     }
 }
 

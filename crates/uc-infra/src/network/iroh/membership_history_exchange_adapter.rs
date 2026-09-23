@@ -21,6 +21,7 @@ use uc_core::membership::{
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{ClockPort, PeerAddressRepositoryPort};
+use uc_observability_contract::diagnostics::connectivity::InboundPeerProtocol;
 use uc_observability_contract::diagnostics::{
     complete_operation, describe_membership_exchange, describe_operation_failure, operation_span,
     DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation, DiagnosticRole, DiagnosticSpanKind,
@@ -28,6 +29,7 @@ use uc_observability_contract::diagnostics::{
 };
 
 use super::connect_with_staggered_retry;
+use super::inbound_peer::{record_inbound_rejection, InboundPeerRejection, PeerIdentityResolver};
 use super::peer_address_resolver::PeerAddressResolver;
 use super::persistable_addr::{observed_stable_remote_addr, persist_observed_stable_addr};
 use super::trace_context::{inject_current, set_remote_parent, WireTraceContext};
@@ -95,8 +97,7 @@ impl IrohMembershipHistoryExchangeAdapter {
     ) -> IrohMembershipHistoryExchangeHandler {
         IrohMembershipHistoryExchangeHandler {
             state: Arc::new(HandlerState {
-                member_repo,
-                fingerprint_factory,
+                identity: PeerIdentityResolver::new(member_repo, fingerprint_factory),
                 endpoint,
             }),
         }
@@ -254,12 +255,31 @@ impl ProtocolHandler for IrohMembershipHistoryExchangeHandler {
                 return Ok(());
             }
         };
-        let Some(source_device) = self
-            .resolve_source_device(connection.remote_id().as_bytes(), &request.message)
-            .await
-        else {
-            reject(&mut send).await;
-            return Ok(());
+        let remote_id = connection.remote_id();
+        let remote_key = remote_id.as_bytes();
+        let source_device = match self.state.identity.identify(remote_key).await {
+            Ok(device) => device,
+            Err(rejection)
+                if rejection.is_identity_failure()
+                    && rejection == InboundPeerRejection::IdentityUnresolved =>
+            {
+                match introduced_device(&request.message, &self.state.identity, remote_key) {
+                    Some(device) => device,
+                    None => {
+                        record_inbound_rejection(
+                            InboundPeerProtocol::MembershipHistory,
+                            InboundPeerRejection::IdentityUnresolved,
+                        );
+                        reject(&mut send).await;
+                        return Ok(());
+                    }
+                }
+            }
+            Err(rejection) => {
+                record_inbound_rejection(InboundPeerProtocol::MembershipHistory, rejection);
+                reject(&mut send).await;
+                return Ok(());
+            }
         };
         let span = operation_span(OperationContext {
             domain: DiagnosticDomain::SpaceMembership,
@@ -454,42 +474,14 @@ fn decode_message(
 }
 
 struct HandlerState {
-    member_repo: Arc<dyn MemberRepositoryPort>,
-    fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+    identity: PeerIdentityResolver,
     endpoint: Arc<dyn MembershipHistoryExchangeEndpointPort>,
-}
-
-impl IrohMembershipHistoryExchangeHandler {
-    async fn resolve_source_device(
-        &self,
-        public_key: &[u8; 32],
-        message: &MembershipHistoryMessage,
-    ) -> Option<DeviceId> {
-        let fingerprint = self
-            .state
-            .fingerprint_factory
-            .from_public_key(public_key)
-            .ok()?;
-        let known = self
-            .state
-            .member_repo
-            .list()
-            .await
-            .ok()?
-            .into_iter()
-            .find(|member| member.identity_fingerprint == fingerprint)
-            .map(|member| member.device_id);
-        if known.is_some() {
-            return known;
-        }
-
-        introduced_device(message, &fingerprint)
-    }
 }
 
 fn introduced_device(
     message: &MembershipHistoryMessage,
-    fingerprint: &uc_core::security::IdentityFingerprint,
+    identity: &PeerIdentityResolver,
+    public_key: &[u8; 32],
 ) -> Option<DeviceId> {
     let admission = match message {
         MembershipHistoryMessage::SummaryV3(summary) => &summary.sender_admission,
@@ -501,7 +493,9 @@ fn introduced_device(
         | MembershipHistoryMessage::RestrictedEventV3(_)
         | MembershipHistoryMessage::RestrictedDecisionV3(_) => return None,
     };
-    (&admission.identity_fingerprint == fingerprint).then(|| admission.device_id.clone())
+    identity
+        .fingerprint_matches(public_key, &admission.identity_fingerprint)
+        .then(|| admission.device_id.clone())
 }
 
 async fn write_message(
@@ -619,8 +613,10 @@ mod tests {
         }
     }
 
+    use super::super::inbound_peer::PeerIdentityResolver;
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use std::sync::Arc;
     use tracing_subscriber::layer::SubscriberExt;
     use uc_core::ids::DeviceId;
     use uc_core::membership::{
@@ -628,6 +624,7 @@ mod tests {
         MembershipHistoryMessage, ED25519_SIGNATURE_ALGORITHM_V1,
         MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
     };
+    use uc_core::ports::security::IdentityFingerprintFactoryPort;
     use uc_core::security::IdentityFingerprint;
 
     use super::{
@@ -768,6 +765,49 @@ mod tests {
             .unwrap_or_else(|_| panic!("test fingerprint must be valid"))
     }
 
+    struct FixedFingerprint(IdentityFingerprint);
+
+    impl IdentityFingerprintFactoryPort for FixedFingerprint {
+        fn from_public_key(&self, _: &[u8]) -> anyhow::Result<IdentityFingerprint> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct UnusedMembers;
+
+    #[async_trait::async_trait]
+    impl uc_core::membership::MemberRepositoryPort for UnusedMembers {
+        async fn get(
+            &self,
+            _: &DeviceId,
+        ) -> Result<Option<uc_core::membership::SpaceMember>, uc_core::membership::MembershipError>
+        {
+            panic!("unused")
+        }
+        async fn list(
+            &self,
+        ) -> Result<Vec<uc_core::membership::SpaceMember>, uc_core::membership::MembershipError>
+        {
+            panic!("unused")
+        }
+        async fn save(
+            &self,
+            _: &uc_core::membership::SpaceMember,
+        ) -> Result<(), uc_core::membership::MembershipError> {
+            panic!("unused")
+        }
+        async fn remove(&self, _: &DeviceId) -> Result<bool, uc_core::membership::MembershipError> {
+            panic!("unused")
+        }
+    }
+
+    fn resolver(fingerprint: IdentityFingerprint) -> PeerIdentityResolver {
+        PeerIdentityResolver::new(
+            Arc::new(UnusedMembers),
+            Arc::new(FixedFingerprint(fingerprint)),
+        )
+    }
+
     fn admission_facts(
         device: &str,
         identity_fingerprint: IdentityFingerprint,
@@ -789,7 +829,10 @@ mod tests {
     fn unknown_member_cannot_introduce_itself_with_a_regular_history_message() {
         let message = MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid);
 
-        assert_eq!(introduced_device(&message, &fingerprint()), None);
+        assert_eq!(
+            introduced_device(&message, &resolver(fingerprint()), &[0; 32]),
+            None
+        );
     }
 
     #[test]
@@ -808,7 +851,10 @@ mod tests {
                 sender_admission: facts,
             });
 
-        assert_eq!(introduced_device(&message, &fingerprint()), Some(expected));
+        assert_eq!(
+            introduced_device(&message, &resolver(fingerprint()), &[0; 32]),
+            Some(expected)
+        );
     }
 
     #[test]
@@ -828,6 +874,9 @@ mod tests {
         let other = IdentityFingerprint::from_display_string("QRST-UVWX-YZAB-CDEF")
             .unwrap_or_else(|_| panic!("test fingerprint must be valid"));
 
-        assert_eq!(introduced_device(&message, &other), None);
+        assert_eq!(
+            introduced_device(&message, &resolver(other), &[0; 32]),
+            None
+        );
     }
 }

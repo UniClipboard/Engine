@@ -235,8 +235,8 @@ async fn identity_resolution_distinguishes_mapping_and_read_failures() {
         )
         .await;
         assert_eq!(result, ADMISSION_REJECTED);
-        assert_eq!(duplicate_admission.checked(), vec![stale.device_id]);
-        scenario.record_event("duplicate-identity-selected-stale-record");
+        assert!(duplicate_admission.checked().is_empty());
+        scenario.record_event("duplicate-identity-rejected-before-admission");
     }
 
     let failed_read_admission = Arc::new(RecordingAdmission::new(active.device_id.clone()));

@@ -68,7 +68,6 @@ const INBOUND_HANDLERS: [&str; 9] = [
 ];
 
 #[test]
-#[ignore = "inbound-peer-admission S2: remove once every handler uses the shared inbound gate"]
 fn identity_resolution_has_a_single_implementation() {
     let gate = production("crates/uc-infra/src/network/iroh/inbound_peer.rs");
     assert!(gate.contains("struct PeerIdentityResolver"));
@@ -93,7 +92,6 @@ fn identity_resolution_has_a_single_implementation() {
 }
 
 #[test]
-#[ignore = "inbound-peer-admission S2: remove once raw identifier logging is gone from inbound paths"]
 fn inbound_paths_do_not_log_peer_identifiers() {
     for handler in INBOUND_HANDLERS {
         let code = production(handler);

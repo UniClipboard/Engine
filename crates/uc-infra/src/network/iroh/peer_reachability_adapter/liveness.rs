@@ -57,7 +57,6 @@ impl IrohPeerReachabilityAdapter {
         failure: &mut super::PresenceCheckResult,
     ) -> Result<Option<ReachabilityState>, PeerReachabilityError> {
         let admitted = self
-            .handler_state
             .peer_admission
             .is_admitted(device)
             .await
@@ -146,7 +145,6 @@ impl IrohPeerReachabilityAdapter {
         }
         for connection in alive_connections {
             let admitted = self
-                .handler_state
                 .peer_admission
                 .is_admitted(device)
                 .await

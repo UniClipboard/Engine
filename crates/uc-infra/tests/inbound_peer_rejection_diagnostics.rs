@@ -246,7 +246,6 @@ async fn clipboard(dialer: &Endpoint, members: Members, admission: Arc<Admission
 }
 
 #[tokio::test]
-#[ignore = "inbound-peer-admission S2: remove once every inbound gate records its rejection"]
 async fn inbound_rejections_are_classified_in_the_exported_file() {
     let logs = tempfile::tempdir().expect("logs");
     let handle = ProcessObservabilityRuntime::install(
