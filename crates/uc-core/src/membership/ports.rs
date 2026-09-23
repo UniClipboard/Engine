@@ -241,6 +241,17 @@ pub trait RevocationRepositoryPort: Send + Sync {
         recipient: &DeviceId,
         now_ms: i64,
     ) -> Result<RevocationRecord, KeyEpochError>;
+
+    /// 结清收件人已不在保留名单中的 outbox 消息，返回结清数量。
+    ///
+    /// 与 `acknowledge_recipient` 走同一条完成路径：剩余消息全部确认时撤销随即完成。
+    /// 撤销不在分发阶段时没有可结清的投递，返回 0。
+    async fn settle_obsolete_revocation_recipients(
+        &self,
+        revocation_id: &RevocationId,
+        retained_recipients: &[DeviceId],
+        now_ms: i64,
+    ) -> Result<usize, KeyEpochError>;
 }
 
 #[async_trait]
@@ -314,6 +325,16 @@ pub trait GroupRevocationPort: Send + Sync {
         update_id: &str,
         now_ms: i64,
     ) -> Result<bool, KeyEpochError>;
+
+    /// 结清收件人已不在保留名单中的待投递项，返回结清数量。
+    ///
+    /// 名单由成员历史导出，实现只做队列读写与名单匹配，不自行判断成员资格，
+    /// 也不受投递退避影响：整个队列一次判定，而不只是本轮到期项。
+    async fn settle_obsolete_space_group_updates(
+        &self,
+        retained_recipients: &[DeviceId],
+        now_ms: i64,
+    ) -> Result<usize, KeyEpochError>;
 }
 
 #[async_trait]

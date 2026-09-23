@@ -32,6 +32,7 @@ use crate::space::membership::{
     CurrentSpaceMemberScopePort, DeliverRestrictedMembershipUseCase,
     InitializeSpaceMembershipUseCase, LoadSecurityDeviceUpdateStatusPort, MembershipLedger,
     RePairingAwareMembershipActivation, RecoverMembershipEffectsUseCase,
+    RetainedGroupUpdateRecipientsPort,
 };
 use crate::space::membership::{
     MaintainSpaceMembershipDeps, MaintainSpaceMembershipUseCase, SpaceMembershipMaintenanceRuntime,
@@ -273,6 +274,8 @@ impl SpaceApplication {
         let deliver_group_updates = Arc::new(DeliverPendingGroupUpdatesUseCase::new(
             group_update_store,
             group_update_dispatch,
+            Arc::clone(&ledger) as Arc<dyn RetainedGroupUpdateRecipientsPort>,
+            Arc::clone(&host_event_bus),
             Arc::clone(&clock),
         ));
         let query_device_trust = Arc::new(QueryDeviceTrustUseCase::new(

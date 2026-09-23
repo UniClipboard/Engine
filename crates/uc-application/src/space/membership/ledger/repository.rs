@@ -2,10 +2,13 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
+use uc_core::ids::DeviceId;
 use uc_core::membership::{
     AdmissionChangeFacts, HistoricalMembershipSignatureVerifier, MembershipCredential,
     MembershipHistoryRelationship, VersionedMembershipHistory,
 };
+
+use crate::space::membership::RetainedGroupUpdateRecipientsPort;
 
 use super::{
     CurrentSpaceMemberScope, CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort,
@@ -72,6 +75,34 @@ impl VerifiedMembershipLedger {
             .as_ref()
             .ok_or(CurrentSpaceMemberScopeError::NoCurrentSpace)?;
         derive_current_scope(&self.record, history)
+    }
+
+    /// 该设备是否已不在当前生效成员中；成员历史不可用时无法判定，返回 `None`。
+    ///
+    /// 收尾类规则共用这一个判定点：判据只来自已提交的成员历史，不得改用投影、
+    /// 对端核对记录或“连不上”推断。
+    pub(crate) fn is_removed_device(&self, device_id: &DeviceId) -> Option<bool> {
+        self.history
+            .as_ref()
+            .map(|history| history.effective_member_for_device(device_id).is_none())
+    }
+
+    /// 仍应接收设备组更新的收件人：当前生效成员中除本机以外的设备。
+    ///
+    /// 本机自己的待投递项属于冗余，因不在名单中被同一条规则结清。成员历史或本机身份
+    /// 不可用时返回 `None`，调用方必须保持队列原样，不得按空名单清空。
+    pub(crate) fn retained_group_update_recipients(&self) -> Option<Vec<DeviceId>> {
+        let history = self.history.as_ref()?;
+        let local_device_id = self.record.local_device_id.as_ref()?;
+        let mut recipients = Vec::new();
+        for member in history.effective_members() {
+            let facts = history.admission_facts_for(member)?;
+            if &facts.device_id == local_device_id {
+                continue;
+            }
+            recipients.push(facts.device_id.clone());
+        }
+        Some(recipients)
     }
 
     pub(crate) fn history_digest(&self) -> Option<[u8; 32]> {
@@ -564,5 +595,16 @@ impl CurrentSpaceMemberScopePort for MembershipLedger {
 
     async fn snapshot(&self) -> Result<CurrentSpaceMemberScope, CurrentSpaceMemberScopeError> {
         self.current_scope().await
+    }
+}
+
+#[async_trait]
+impl RetainedGroupUpdateRecipientsPort for MembershipLedger {
+    async fn retained_group_update_recipients(&self) -> Option<Vec<DeviceId>> {
+        // 账本读取或签名验证失败时没有可信名单，交由调用方保持队列原样。
+        let Ok(snapshot) = self.load_verified().await else {
+            return None;
+        };
+        snapshot.retained_group_update_recipients()
     }
 }

@@ -70,9 +70,7 @@ impl DeliverRestrictedMembershipUseCase {
             if record.restricted_delivery.is_empty() {
                 continue;
             }
-            let removed = snapshot
-                .history()
-                .is_some_and(|history| history.effective_member_for_device(peer).is_none());
+            let removed = snapshot.is_removed_device(peer).unwrap_or(false);
             // 仍是当前成员的对端不受收尾窗口限制。
             let window = removed.then(|| {
                 SettlementWindow::from_stored_start(

@@ -1681,34 +1681,47 @@ impl RuntimeSpaceAccessAdapter {
         Ok(false)
     }
 
-    async fn settle_redundant_local_group_updates(
+    async fn settle_obsolete_space_group_updates(
         &self,
         space_id: &SpaceId,
+        retained_recipients: &[DeviceId],
         now_ms: i64,
     ) -> Result<usize, KeyEpochError> {
         let repository = self.key_epoch_repository.as_ref();
         let Some(mut material) = repository.load_space_material(space_id).await? else {
             return Ok(0);
         };
-        let local_device_id = MlsGroupEngine::local_device_id(&MlsClientState::from_bytes(
-            material.group_state().to_vec(),
-        ))
-        .map_err(|_| KeyEpochError::PersistedStateIntegrityFailed)?;
-        let redundant = material
+        let obsolete = material
             .pending_group_updates()
             .iter()
-            .filter(|update| update.recipient() == &local_device_id)
+            .filter(|update| !retained_recipients.contains(update.recipient()))
             .map(|update| update.update_id().to_owned())
             .collect::<Vec<_>>();
         let mut settled = 0;
-        for update_id in redundant {
+        for update_id in obsolete {
             if material.acknowledge_group_update(&update_id, now_ms) {
                 settled += 1;
             }
         }
         if settled > 0 {
             repository.save_space_material(&material).await?;
-            tracing::info!(settled_count = settled, "已收敛本机冗余安全资料投递");
+        }
+        // 待投递项有两个来源：空间资料与撤销暂存区的 outbox。同一条规则必须覆盖两者，
+        // 否则一次移除产生的投递会绕过结清，永远占住设备更新状态。
+        for record in repository.list_incomplete_revocations().await? {
+            if record.space_id() != space_id {
+                continue;
+            }
+            settled += repository
+                .settle_obsolete_revocation_recipients(
+                    record.revocation_id(),
+                    retained_recipients,
+                    now_ms,
+                )
+                .await?;
+        }
+        if settled > 0 {
+            tracing::info!(settled_count = settled, "已结清无需投递的安全资料");
         }
         Ok(settled)
     }
@@ -2475,8 +2488,6 @@ impl GroupRevocationPort for RuntimeSpaceAccessAdapter {
             .session
             .current_space_id()
             .map_err(|source| KeyEpochError::Repository(source.into()))?;
-        self.settle_redundant_local_group_updates(&space_id, now_ms)
-            .await?;
         self.key_epoch_repository
             .due_group_updates(&space_id, now_ms, online_peer)
             .await
@@ -2503,8 +2514,6 @@ impl GroupRevocationPort for RuntimeSpaceAccessAdapter {
             .session
             .current_space_id()
             .map_err(|source| KeyEpochError::Repository(source.into()))?;
-        self.settle_redundant_local_group_updates(&space_id, chrono::Utc::now().timestamp_millis())
-            .await?;
         self.key_epoch_repository
             .group_update_delivery_status(&space_id)
             .await
@@ -2516,6 +2525,24 @@ impl GroupRevocationPort for RuntimeSpaceAccessAdapter {
         now_ms: i64,
     ) -> Result<bool, KeyEpochError> {
         RuntimeSpaceAccessAdapter::acknowledge_space_group_update(self, update_id, now_ms).await
+    }
+
+    async fn settle_obsolete_space_group_updates(
+        &self,
+        retained_recipients: &[DeviceId],
+        now_ms: i64,
+    ) -> Result<usize, KeyEpochError> {
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|source| KeyEpochError::Repository(source.into()))?;
+        RuntimeSpaceAccessAdapter::settle_obsolete_space_group_updates(
+            self,
+            &space_id,
+            retained_recipients,
+            now_ms,
+        )
+        .await
     }
 }
 
@@ -3866,6 +3893,12 @@ mod admission_tests {
                 recipient: &DeviceId,
                 now_ms: i64,
             ) -> Result<RevocationRecord, KeyEpochError>;
+            async fn settle_obsolete_revocation_recipients(
+                &self,
+                revocation_id: &RevocationId,
+                retained_recipients: &[DeviceId],
+                now_ms: i64,
+            ) -> Result<usize, KeyEpochError>;
         }
     }
 
@@ -4080,6 +4113,35 @@ mod admission_tests {
                     *current = None;
                 }
                 Ok(distributing)
+            });
+
+        let settle_record = Arc::clone(&record);
+        let settle_stage = Arc::clone(&stage);
+        mock.expect_settle_obsolete_revocation_recipients()
+            .returning(move |revocation_id, retained, now_ms| {
+                let mut current = settle_stage.lock().unwrap();
+                let Some(value) = current
+                    .as_mut()
+                    .filter(|value| value.record().revocation_id() == revocation_id)
+                else {
+                    return Ok(0);
+                };
+                if value.record().status() != RevocationStatus::Distributing {
+                    return Ok(0);
+                }
+                let settled = value.settle_obsolete_recipients(retained);
+                if settled == 0 {
+                    return Ok(0);
+                }
+                if value.all_recipients_confirmed() {
+                    value.transition_to(RevocationStatus::Complete, now_ms)?;
+                }
+                let updated = value.record().clone();
+                *settle_record.lock().unwrap() = Some(updated.clone());
+                if updated.status() == RevocationStatus::Complete {
+                    *current = None;
+                }
+                Ok(settled)
             });
 
         let acknowledge_record = record;
@@ -5032,7 +5094,7 @@ mod admission_tests {
         repository.save_space_material(&legacy).await.unwrap();
         assert_eq!(
             adapter
-                .settle_redundant_local_group_updates(&space_id, 3)
+                .settle_obsolete_space_group_updates(&space_id, &[retained.clone()], 3)
                 .await
                 .unwrap(),
             1
@@ -5715,6 +5777,74 @@ mod admission_tests {
             .unwrap();
         assert_eq!(stage.outbox().len(), 1);
         assert_eq!(stage.outbox()[0].recipient(), &DeviceId::new("bob"));
+    }
+
+    /// 撤销产生的待投递项同样归结清规则管：收件人随后也被移除时，
+    /// 本机不再为它保留投递责任，撤销随即收尾。
+    #[tokio::test]
+    async fn revocation_outbox_for_a_later_removed_recipient_is_settled() {
+        let (sponsor, _session, repository, space_id, _sponsor_dir) = sponsor_fixture();
+        let bob = sponsor
+            .prepare_group_join(&DeviceId::new("bob"))
+            .await
+            .unwrap();
+        sponsor
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &DeviceId::new("bob"),
+                &[],
+                &bob.key_package,
+            )
+            .await
+            .unwrap();
+        let charlie = sponsor
+            .prepare_group_join(&DeviceId::new("charlie"))
+            .await
+            .unwrap();
+        sponsor
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &DeviceId::new("charlie"),
+                &[DeviceId::new("bob")],
+                &charlie.key_package,
+            )
+            .await
+            .unwrap();
+
+        let result = sponsor
+            .revoke_group_member(&DeviceId::new("charlie"), &[DeviceId::new("bob")], 100)
+            .await
+            .unwrap();
+        let revocation_id = result.revocation_id().unwrap().clone();
+        assert_eq!(
+            repository
+                .load_staged_revocation(&revocation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .outbox()
+                .len(),
+            1
+        );
+
+        // bob 此后也被移除：保留名单里只剩本机，这条 outbox 投递已无收件人。
+        assert_eq!(
+            sponsor
+                .settle_obsolete_space_group_updates(&space_id, &[], 200)
+                .await
+                .unwrap(),
+            1
+        );
+
+        // 与逐个确认收件人同一完成路径：撤销完成后暂存区清空，不再计入未完成撤销。
+        assert!(repository
+            .load_staged_revocation(&revocation_id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(sponsor.current_group_revocation().await.unwrap().is_none());
     }
 
     #[tokio::test]

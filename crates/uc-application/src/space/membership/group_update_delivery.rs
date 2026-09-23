@@ -4,10 +4,14 @@ use uc_observability_contract::diagnostics::connectivity::{
     record_pending_group_updates, LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
 };
 
+use uc_core::ids::DeviceId;
 use uc_core::membership::{
     GroupRevocationPort, GroupUpdateDeliveryStatus, GroupUpdateDispatchError,
     GroupUpdateDispatchPort, KeyEpochError,
 };
+use uc_core::ports::{ClockPort, HostEvent, MembershipHostEvent};
+
+use crate::support::host_event_bus::HostEventBus;
 
 use super::{
     DeliverPendingGroupUpdatesPort, LoadSecurityDeviceUpdateStatusPort,
@@ -17,13 +21,24 @@ use super::{
 
 const MAX_UPDATES_PER_ROUND: usize = 8;
 
+/// 仍应接收设备组更新的收件人名单来源。
+///
+/// 名单只能由成员账本按已提交的成员历史导出；无法导出时返回 `None`，
+/// 调用方必须保持队列原样，不得按空名单清空。
+#[async_trait::async_trait]
+pub(crate) trait RetainedGroupUpdateRecipientsPort: Send + Sync {
+    async fn retained_group_update_recipients(&self) -> Option<Vec<DeviceId>>;
+}
+
 /// 待投递 Group Epoch 的唯一完整负责人。
 ///
 /// 调用方只触发一轮维护；本类内部隐藏持久欠账、认证投递与确认删除的顺序。
 pub(crate) struct DeliverPendingGroupUpdatesUseCase {
     store: Arc<dyn GroupRevocationPort>,
     dispatch: Arc<dyn GroupUpdateDispatchPort>,
-    clock: Arc<dyn uc_core::ports::ClockPort>,
+    recipients: Arc<dyn RetainedGroupUpdateRecipientsPort>,
+    host_events: Arc<HostEventBus>,
+    clock: Arc<dyn ClockPort>,
 }
 
 #[async_trait::async_trait]
@@ -68,13 +83,39 @@ impl DeliverPendingGroupUpdatesUseCase {
     pub(crate) fn new(
         store: Arc<dyn GroupRevocationPort>,
         dispatch: Arc<dyn GroupUpdateDispatchPort>,
-        clock: Arc<dyn uc_core::ports::ClockPort>,
+        recipients: Arc<dyn RetainedGroupUpdateRecipientsPort>,
+        host_events: Arc<HostEventBus>,
+        clock: Arc<dyn ClockPort>,
     ) -> Self {
         Self {
             store,
             dispatch,
+            recipients,
+            host_events,
             clock,
         }
+    }
+
+    /// 结清收件人已失去资格的待投递项。
+    ///
+    /// 收件人不在当前生效成员中意味着投递理由可证明消失：它已无权持有新密钥，
+    /// 因此立即结清而不设窗口。本机自己的冗余项不在保留名单中，由同一条规则结清。
+    /// 名单无法导出时保持队列原样并推迟本轮，绝不按空名单清空。
+    async fn settle_obsolete_updates(&self) -> Result<(), MembershipMaintenanceStepOutcome> {
+        let Some(retained) = self.recipients.retained_group_update_recipients().await else {
+            return Err(MembershipMaintenanceStepOutcome::Deferred);
+        };
+        let settled = self
+            .store
+            .settle_obsolete_space_group_updates(&retained, self.clock.now_ms())
+            .await
+            .map_err(|error| classify_store_error(&error))?;
+        if settled > 0 {
+            self.host_events.emit_or_warn(HostEvent::Membership(
+                MembershipHostEvent::SpaceDeviceUpdateChanged,
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -84,6 +125,9 @@ impl DeliverPendingGroupUpdatesPort for DeliverPendingGroupUpdatesUseCase {
         &self,
         _trigger: &MembershipMaintenanceTrigger,
     ) -> MembershipMaintenanceStepOutcome {
+        if let Err(outcome) = self.settle_obsolete_updates().await {
+            return outcome;
+        }
         let pending = match self
             .store
             .due_space_group_updates(self.clock.now_ms(), None)
@@ -291,6 +335,144 @@ mod tests {
                 .retain(|update| update.update_id() != update_id);
             Ok(true)
         }
+
+        async fn settle_obsolete_space_group_updates(
+            &self,
+            retained_recipients: &[DeviceId],
+            _: i64,
+        ) -> Result<usize, KeyEpochError> {
+            let mut pending = self.pending.lock().unwrap();
+            let before = pending.len();
+            pending.retain(|update| retained_recipients.contains(update.recipient()));
+            Ok(before - pending.len())
+        }
+    }
+
+    /// 名单来源替身：`None` 表示成员历史不可用。
+    struct FixedRecipients(Option<Vec<DeviceId>>);
+
+    #[async_trait]
+    impl RetainedGroupUpdateRecipientsPort for FixedRecipients {
+        async fn retained_group_update_recipients(&self) -> Option<Vec<DeviceId>> {
+            self.0.clone()
+        }
+    }
+
+    /// 既有用例不针对结清，保留队列中当前全部收件人以维持原有行为。
+    fn retaining_all(store: &RecordingStore) -> Arc<FixedRecipients> {
+        Arc::new(FixedRecipients(Some(
+            store
+                .pending
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|update| update.recipient().clone())
+                .collect(),
+        )))
+    }
+
+    fn retaining(recipients: &[&str]) -> Arc<FixedRecipients> {
+        Arc::new(FixedRecipients(Some(
+            recipients.iter().map(|id| DeviceId::new(id)).collect(),
+        )))
+    }
+
+    fn refresh_events() -> (Arc<HostEventBus>, Arc<Mutex<Vec<HostEvent>>>) {
+        struct Recorder(Arc<Mutex<Vec<HostEvent>>>);
+        impl uc_core::ports::HostEventEmitterPort for Recorder {
+            fn emit(&self, event: HostEvent) -> Result<(), uc_core::ports::EmitError> {
+                self.0.lock().unwrap().push(event);
+                Ok(())
+            }
+        }
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let bus = Arc::new(HostEventBus::new());
+        bus.register("test", Arc::new(Recorder(Arc::clone(&recorded))));
+        (bus, recorded)
+    }
+
+    fn store_with(pending: Vec<PendingGroupUpdate>) -> Arc<RecordingStore> {
+        Arc::new(RecordingStore {
+            pending: Mutex::new(pending),
+            acknowledged: Mutex::new(Vec::new()),
+            deferred_batches: Mutex::new(Vec::new()),
+        })
+    }
+
+    #[tokio::test]
+    async fn update_for_removed_recipient_is_settled_without_dispatch() {
+        let update = PendingGroupUpdate::persistent(DeviceId::new("peer-removed"), vec![1]);
+        let store = store_with(vec![update]);
+        let dispatch = dispatch_with([]);
+        let (bus, recorded) = refresh_events();
+        let use_case = DeliverPendingGroupUpdatesUseCase::new(
+            store.clone(),
+            dispatch.clone(),
+            retaining(&["peer-still-member"]),
+            bus,
+            Arc::new(FixedClock),
+        );
+
+        let outcome = use_case
+            .deliver_pending_group_updates(&MembershipMaintenanceTrigger::Periodic)
+            .await;
+
+        assert_eq!(outcome, MembershipMaintenanceStepOutcome::Completed);
+        assert!(store.pending.lock().unwrap().is_empty());
+        assert!(dispatch.dispatched.lock().unwrap().is_empty());
+        assert!(matches!(
+            recorded.lock().unwrap().as_slice(),
+            [HostEvent::Membership(
+                MembershipHostEvent::SpaceDeviceUpdateChanged
+            )]
+        ));
+    }
+
+    #[tokio::test]
+    async fn update_for_current_member_is_kept_and_dispatched() {
+        let update = PendingGroupUpdate::persistent(DeviceId::new("peer-a"), vec![1]);
+        let update_id = update.update_id().to_owned();
+        let store = store_with(vec![update]);
+        let dispatch = dispatch_with([Ok(())]);
+        let (bus, recorded) = refresh_events();
+        let use_case = DeliverPendingGroupUpdatesUseCase::new(
+            store.clone(),
+            dispatch.clone(),
+            retaining(&["peer-a"]),
+            bus,
+            Arc::new(FixedClock),
+        );
+
+        let outcome = use_case
+            .deliver_pending_group_updates(&MembershipMaintenanceTrigger::Periodic)
+            .await;
+
+        assert_eq!(outcome, MembershipMaintenanceStepOutcome::Completed);
+        assert_eq!(dispatch.dispatched.lock().unwrap().as_slice(), [update_id]);
+        assert!(recorded.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unavailable_membership_history_keeps_the_queue_intact() {
+        let update = PendingGroupUpdate::persistent(DeviceId::new("peer-a"), vec![1]);
+        let store = store_with(vec![update]);
+        let dispatch = dispatch_with([]);
+        let (bus, _) = refresh_events();
+        let use_case = DeliverPendingGroupUpdatesUseCase::new(
+            store.clone(),
+            dispatch.clone(),
+            Arc::new(FixedRecipients(None)),
+            bus,
+            Arc::new(FixedClock),
+        );
+
+        let outcome = use_case
+            .deliver_pending_group_updates(&MembershipMaintenanceTrigger::Periodic)
+            .await;
+
+        assert_eq!(outcome, MembershipMaintenanceStepOutcome::Deferred);
+        assert_eq!(store.pending.lock().unwrap().len(), 1);
+        assert!(dispatch.dispatched.lock().unwrap().is_empty());
     }
 
     struct RecordingDispatch {
@@ -333,6 +515,8 @@ mod tests {
         let use_case = DeliverPendingGroupUpdatesUseCase::new(
             store.clone(),
             dispatch_with([Ok(())]),
+            retaining_all(&store),
+            refresh_events().0,
             Arc::new(FixedClock),
         );
 
@@ -355,6 +539,8 @@ mod tests {
         let use_case = DeliverPendingGroupUpdatesUseCase::new(
             store.clone(),
             dispatch_with([Err(GroupUpdateDispatchError::Offline)]),
+            retaining_all(&store),
+            refresh_events().0,
             Arc::new(FixedClock),
         );
 
@@ -383,6 +569,8 @@ mod tests {
         let use_case = DeliverPendingGroupUpdatesUseCase::new(
             store.clone(),
             dispatch.clone(),
+            retaining_all(&store),
+            refresh_events().0,
             Arc::new(FixedClock),
         );
 
@@ -421,8 +609,13 @@ mod tests {
             Err(GroupUpdateDispatchError::Offline),
             MAX_UPDATES_PER_ROUND,
         ));
-        let use_case =
-            DeliverPendingGroupUpdatesUseCase::new(store.clone(), dispatch, Arc::new(FixedClock));
+        let use_case = DeliverPendingGroupUpdatesUseCase::new(
+            store.clone(),
+            dispatch,
+            retaining_all(&store),
+            refresh_events().0,
+            Arc::new(FixedClock),
+        );
 
         assert_eq!(
             use_case

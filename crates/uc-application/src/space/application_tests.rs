@@ -146,6 +146,13 @@ impl GroupRevocationPort for PassivePorts {
     async fn acknowledge_space_group_update(&self, _: &str, _: i64) -> Result<bool, KeyEpochError> {
         Ok(false)
     }
+    async fn settle_obsolete_space_group_updates(
+        &self,
+        _: &[DeviceId],
+        _: i64,
+    ) -> Result<usize, KeyEpochError> {
+        Ok(0)
+    }
 }
 
 #[async_trait]

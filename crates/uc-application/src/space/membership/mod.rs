@@ -96,6 +96,7 @@ pub use synchronize_history::RefreshVerifiedPeerAddressPort;
 pub(super) use anti_entropy::MembershipHistoryAntiEntropy;
 pub(super) use decide_device_trust_change::DecideDeviceTrustChangeUseCase;
 pub(super) use group_update_delivery::DeliverPendingGroupUpdatesUseCase;
+pub(crate) use group_update_delivery::RetainedGroupUpdateRecipientsPort;
 pub(super) use handle_history_message::HandleMembershipHistoryMessageUseCase;
 pub(super) use ledger::{
     DeliverRestrictedMembershipUseCase, InitializeSpaceMembershipUseCase, MembershipLedger,

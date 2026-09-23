@@ -32,7 +32,7 @@ use crate::engine::startup::StartupProgressStore;
 use crate::{
     EngineConfig, EngineEvent, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
     HostClipboard, HostClipboardChangeStream, HostClipboardRepresentation, HostDirectories,
-    HostFileAccess, HostSecureStorage, TransferProgress,
+    HostFileAccess, HostSecureStorage, RefreshReason, TransferProgress,
 };
 
 struct HostSecureStorageAdapter {
@@ -425,11 +425,12 @@ impl HostEventEmitterPort for EngineHostEventEmitter {
             HostEvent::Membership(MembershipHostEvent::LedgerCommitted { revision }) => {
                 EngineEvent::DeviceTrustChanged { revision }
             }
-            HostEvent::Membership(MembershipHostEvent::AdmissionChanged) => {
-                EngineEvent::RefreshRequired {
-                    reason: crate::RefreshReason::StateInvalidated,
-                }
-            }
+            HostEvent::Membership(
+                MembershipHostEvent::AdmissionChanged
+                | MembershipHostEvent::SpaceDeviceUpdateChanged,
+            ) => EngineEvent::RefreshRequired {
+                reason: RefreshReason::StateInvalidated,
+            },
         };
         self.events.send(event);
         Ok(())

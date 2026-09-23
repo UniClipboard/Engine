@@ -807,6 +807,80 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
             })
             .map_err(backend)
     }
+
+    async fn settle_obsolete_revocation_recipients(
+        &self,
+        revocation_id: &RevocationId,
+        retained_recipients: &[DeviceId],
+        now_ms: i64,
+    ) -> Result<usize, KeyEpochError> {
+        let master_key = self.session.get_master_key().map_err(backend)?;
+        let revocation_id = revocation_id.as_str().to_owned();
+        let retained_recipients = retained_recipients.to_vec();
+        self.executor
+            .run(move |conn| {
+                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                    let Some(row) = load_revocation_row(conn, &revocation_id)? else {
+                        return Ok(0);
+                    };
+                    let mut record = decode_record(&master_key, &row)
+                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    // 只有分发阶段持有待投递的 outbox；其余阶段没有可结清的投递。
+                    if record.status() != RevocationStatus::Distributing {
+                        return Ok(0);
+                    }
+                    let encrypted_stage = row
+                        .encrypted_stage
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("revocation has no staged payload"))?;
+                    let mut stage: RevocationStage =
+                        open(&master_key, encrypted_stage, &stage_aad(&revocation_id))
+                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    let settled = stage.settle_obsolete_recipients(&retained_recipients);
+                    if settled == 0 {
+                        return Ok(0);
+                    }
+                    if stage.all_recipients_confirmed() {
+                        record
+                            .transition_to(RevocationStatus::Complete, now_ms)
+                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                        stage
+                            .transition_to(RevocationStatus::Complete, now_ms)
+                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    }
+                    let encrypted_record = seal(
+                        &master_key,
+                        &record,
+                        &record_aad(&revocation_id, status_name(record.status())),
+                    )
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    let encrypted_stage = if record.status() == RevocationStatus::Complete {
+                        None
+                    } else {
+                        Some(
+                            seal(&master_key, &stage, &stage_aad(&revocation_id))
+                                .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+                        )
+                    };
+                    let affected = diesel::sql_query(
+                        "UPDATE member_revocation_log SET status = ?, encrypted_record = ?, \
+                         encrypted_stage = ?, updated_at_ms = ? \
+                         WHERE revocation_id = ? AND status = 'distributing'",
+                    )
+                    .bind::<Text, _>(status_name(record.status()))
+                    .bind::<Binary, _>(encrypted_record)
+                    .bind::<Nullable<Binary>, _>(encrypted_stage)
+                    .bind::<BigInt, _>(record.updated_at_ms())
+                    .bind::<Text, _>(&revocation_id)
+                    .execute(conn)?;
+                    if affected != 1 {
+                        return Err(anyhow::anyhow!("revocation settlement was not saved"));
+                    }
+                    Ok(settled)
+                })
+            })
+            .map_err(backend)
+    }
 }
 
 #[async_trait]

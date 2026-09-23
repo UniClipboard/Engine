@@ -84,6 +84,10 @@ pub enum MembershipHostEvent {
     LedgerCommitted { revision: u64 },
     /// 当前加入结果已经变化，宿主必须重新读取完整快照。
     AdmissionChanged,
+    /// 空间设备更新的待办状态已经变化，宿主必须重新读取完整快照。
+    ///
+    /// 只表示“重新读快照”，不携带阶段、状态对象或业务标识。
+    SpaceDeviceUpdateChanged,
 }
 
 /// Unified host event envelope.

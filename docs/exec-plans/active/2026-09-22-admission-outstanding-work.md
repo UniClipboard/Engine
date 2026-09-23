@@ -82,6 +82,76 @@ Core 新增 [`membership/settlement_window.rs`](../../../crates/uc-core/src/memb
 修复：恢复索引把“未到期的邀请方义务”作为独立事实上报（`sponsor_pairing_open`），不加载记录体，因此不额外解密。
 `SponsorConfirmation` 与 `SponsorDeadline` 两类未到期动作都计入，行为与加入方一侧对齐。
 
+## 持久资源生命周期：收件人已失去资格的设备组更新
+
+### 问题
+
+一条设备组密钥更新滞留在持久队列：收件人是早先加入、现已被移除的设备。它跨重启存活、无限退避重试，
+使空间设备更新状态永远到不了“已完成”。
+
+`due_space_group_updates` 取待投递项前只结清收件人是本机的冗余项，没有任何地方结清收件人已非成员的项。
+该结清写在 Infra，判据（谁是当前生效成员）却属于成员历史，位置本身就是错的。
+
+### 资源分类
+
+每个持久资源归入三类之一，判据必须来自已提交的成员历史，不得用投影、对端核对记录或“连不上”推断：
+
+1. **理由可证明消失 → 立即结清**，不设期限。收件人不在当前生效成员中的设备组更新属于此类：
+   它已无权持有新密钥，投递出去反而扩大暴露面，连有界窗口都不该给。
+2. **已失去资格但告知仍有价值 → 有界窗口**，默认五分钟。目前只有发给已非成员设备的受限历史通知，
+   已由 `SettlementWindow` 实现：被移除设备需要知道自己被移除，值得等它上线。
+3. **收件人仍有资格 → 不设期限**。界面表达（说明在等哪台设备）属于 desktop 端，本仓不改。
+
+兜底：判据无法计算时归入“需要处理”，不得静默删除。
+例外：放弃通知共用配对尝试的五分钟，保持现状。
+
+### 完整负责人与动作
+
+`DeliverPendingGroupUpdatesUseCase` 是待投递 Group Epoch 的唯一完整负责人，结清归它：
+
+- 判据统一到 `VerifiedMembershipLedger::is_removed_device()`，受限投递与本次结清共用同一判定点，
+  不再各自展开 `effective_member_for_device`。
+- Application 从账本导出**保留名单**（当前生效成员中除本机以外的设备），经
+  `GroupRevocationPort::settle_obsolete_space_group_updates()` 下传；Infra 只做队列读写与名单匹配。
+  本机冗余项因不在名单中被同一条规则结清，原 `settle_redundant_local_group_updates` 一并移除，
+  不保留并列特例。
+- 结清不受退避影响：保留名单针对整个队列生效，不只针对本轮到期项，否则那条已退避到三十分钟的
+  滞留项要等到下次到期才被清掉。
+- 结清覆盖**全部**待投递来源。投递索引有两个来源：空间资料里的 `pending_group_updates`，以及
+  撤销暂存区的 outbox。移除设备走撤销流程，其投递全部来自 outbox；只结清空间资料会让这类投递
+  完全绕过规则。撤销侧由 Core `RevocationStage::settle_obsolete_recipients()` 丢弃收件人已失去资格的
+  未确认消息，与“永久失联设备”共用同一收尾语义；仓储 `settle_obsolete_revocation_recipients()`
+  在同一事务内推进记录与暂存区，剩余消息全部确认时撤销完成，与逐个确认收件人走同一条完成路径。
+  分发阶段的记录不能用 `stage_revocation` 写回：它只接受 `prepared` 状态。
+
+首版实现只覆盖了空间资料一侧，真机上移除全部设备后状态仍停在“正在更新空间设备状态”。
+回归测试 `revocation_outbox_for_a_later_removed_recipient_is_settled` 在修正前结清数为 0，
+复现了该现象；`settling_distributing_revocation_recipients_completes_it_durably` 在真实 SQLite
+仓储上锁定落库、跨重启与幂等，内存 mock 不校验状态条件，不能单独作为持久化证据。
+
+### 成功、失败与重启
+
+- 成功：队列中收件人不在保留名单的项被移除，本轮维护继续投递其余项。
+- 账本缺失或成员历史无法验证：**不下传任何名单**，保持队列原样并推迟本轮，绝不按空名单清空。
+- 重启：结清只改持久队列，无额外状态；下一轮维护重新计算名单，重复执行安全。
+
+`acknowledge_group_update` 只是把项移出队列，不写确认字段，持久结构不区分“投递成功”与“无需投递”，
+因此本次不涉及持久格式版本变更。
+
+### 队列变化的刷新事件
+
+队列写入不经过成员账本，而 `DeviceTrustChanged` 只由账本提交触发，因此清理完界面仍要等轮询。
+维护轮次确实改变了设备更新状态时，Application 发 `MembershipHostEvent::SpaceDeviceUpdateChanged`，
+Engine 映射为 `RefreshRequired { StateInvalidated }`。事件只表示“重新读快照”，
+不携带阶段、状态对象或业务标识，也不为此扩大 facade 或结果接口。
+
+### 验收
+
+- 收件人已非生效成员的队列项在一轮维护后消失，且从未被投递。
+- 收件人仍是生效成员的队列项不受影响，离线也继续保留。
+- 成员历史不可用时队列保持原样，本轮推迟。
+- 结清发生时宿主收到一次刷新事件。
+
 ## 阶段 B：跨记录的配对尾部（后续）
 
 移除通知（`peer_reconciliation.restricted_delivery`）、成员效果与设备组密钥投递各有持久状态，不属于配对记录。阶段 B 在统一收尾期限类型的基础上，再由 Application 汇总为只读的“空间收尾工作”查询，供展示与维护共用。阶段 A 不改变这些状态。

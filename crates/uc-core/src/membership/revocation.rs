@@ -670,6 +670,19 @@ impl RevocationStage {
         Ok(())
     }
 
+    /// 结清收件人已不在保留名单中的未确认消息，返回结清数量。
+    ///
+    /// 与“永久失联设备”同一条收尾语义：收件人失去成员资格后，本机不再为它保留
+    /// 投递责任。已确认的消息保留为既成事实。是否随之完成撤销由仓储按
+    /// `all_recipients_confirmed()` 判定，与逐个确认收件人走同一条完成路径。
+    pub fn settle_obsolete_recipients(&mut self, retained_recipients: &[DeviceId]) -> usize {
+        let before = self.outbox.len();
+        self.outbox.retain(|message| {
+            message.is_confirmed() || retained_recipients.contains(message.recipient())
+        });
+        before - self.outbox.len()
+    }
+
     pub fn all_recipients_confirmed(&self) -> bool {
         self.outbox
             .iter()

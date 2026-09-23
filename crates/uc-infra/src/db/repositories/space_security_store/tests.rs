@@ -1338,3 +1338,110 @@ async fn permanent_loss_recovery_is_atomic_and_survives_restart() {
         GroupEpoch::new(3)
     );
 }
+
+/// 结清后投递索引必须同步收敛：状态查询与到期读取都不得再看到该项。
+///
+/// 只改 `space_key_epoch_state` 里的 material 不够——`group_update_source`
+/// 缓存与 `group_update_delivery` 行才是投递与界面状态的实际来源。
+#[tokio::test]
+async fn settled_update_disappears_from_the_delivery_index_and_status() {
+    let (repo, _pool, _tempdir) = make_repo();
+    let space_id = SpaceId::from_str("space-sensitive");
+    let mut material = seed_current_space(&repo).await;
+    let stale = pending_update("removed-peer", 1);
+    let stale_id = stale.update_id().to_owned();
+    material.add_pending_group_updates([stale.clone()], 100);
+    repo.save_space_material(&material).await.unwrap();
+
+    // 先让索引按当前 material 建立起来，与真实运行顺序一致。
+    assert_eq!(
+        repo.due_group_updates(&space_id, 100, None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // 收件人已不在保留名单中：把它从 material 结清。
+    let mut settled = repo.load_space_material(&space_id).await.unwrap().unwrap();
+    assert!(settled.acknowledge_group_update(&stale_id, 200));
+    repo.save_space_material(&settled).await.unwrap();
+
+    assert!(
+        repo.due_group_updates(&space_id, 300, None)
+            .await
+            .unwrap()
+            .is_empty(),
+        "结清后仍被当作待投递项"
+    );
+    assert_eq!(
+        repo.group_update_delivery_status(&space_id).await.unwrap(),
+        GroupUpdateDeliveryStatus::Completed,
+        "结清后设备更新状态仍未完成"
+    );
+}
+
+/// 撤销 outbox 的结清必须真正落库：分发阶段的记录与暂存区一起推进，
+/// 收件人全部失去资格后撤销完成，并且跨重启保持。
+#[tokio::test]
+async fn settling_distributing_revocation_recipients_completes_it_durably() {
+    let (repo, pool, _tempdir) = make_repo();
+    seed_current_space(&repo).await;
+    let prepared = prepared("revocation-settlement");
+    repo.begin_revocation(&prepared).await.unwrap();
+    let stage = staged(prepared);
+    let revocation_id = stage.record().revocation_id().clone();
+    repo.stage_revocation(&stage).await.unwrap();
+    repo.activate_revocation(&revocation_id, 120).await.unwrap();
+    repo.start_distribution(&revocation_id, 130).await.unwrap();
+
+    // 仍保留一位收件人：只结清另一位，撤销继续分发。
+    let retained = DeviceId::new("retained-device-sensitive");
+    assert_eq!(
+        repo.settle_obsolete_revocation_recipients(
+            &revocation_id,
+            std::slice::from_ref(&retained),
+            140,
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    drop(repo);
+
+    let reopened = reopen_repo(&pool);
+    let resumed = reopened
+        .load_staged_revocation(&revocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resumed.outbox().len(), 1);
+    assert_eq!(resumed.outbox()[0].recipient(), &retained);
+
+    // 最后一位也失去资格：撤销完成，暂存区清空，不再计入未完成撤销。
+    assert_eq!(
+        reopened
+            .settle_obsolete_revocation_recipients(&revocation_id, &[], 150)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(reopened
+        .load_staged_revocation(&revocation_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(reopened
+        .list_incomplete_revocations()
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        reopened
+            .settle_obsolete_revocation_recipients(&revocation_id, &[], 160)
+            .await
+            .unwrap(),
+        0,
+        "已完成的撤销重复结清必须幂等"
+    );
+}
