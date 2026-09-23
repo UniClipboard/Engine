@@ -1,4 +1,5 @@
 //! 独立动作记录的封闭数据模型、字段编码与校验共用同一事实来源。
+use super::{InboundPeerProtocol, InboundPeerRejectionReason};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -172,6 +173,10 @@ pub(super) enum LocalEvent {
         direction: ConnectionDirection,
         reason: ConnectionCloseReason,
     },
+    InboundPeerRejected {
+        protocol: InboundPeerProtocol,
+        reason: InboundPeerRejectionReason,
+    },
     SessionStarted {
         transition: SessionTransition,
     },
@@ -201,6 +206,7 @@ impl LocalEvent {
             Self::Recovery { .. } => "pairing.recovery.decided",
             Self::PresenceCheck { .. } => "presence.check.completed",
             Self::PresenceClosed { .. } => "presence.connection.closed",
+            Self::InboundPeerRejected { .. } => "peer.inbound.rejected",
             Self::SessionStarted { .. } => "session.transition.started",
             Self::SessionLockWait { .. } => "session.lock.waited",
             Self::SessionFinished { .. } => "session.transition.finished",
@@ -218,6 +224,7 @@ impl LocalEvent {
             Self::Physical { record } => record.level(),
             Self::Address { record } => record.level(),
             Self::Connection { record } => record.level(),
+            Self::InboundPeerRejected { .. } => "WARN",
             Self::Recovery {
                 decision: RecoveryDecision::RequiresRecovery(_),
                 ..
@@ -371,6 +378,13 @@ impl LocalEvent {
             Self::PresenceClosed { direction, reason } => {
                 fields.insert("direction".into(), json!(direction));
                 fields.insert("close.reason".into(), json!(reason));
+            }
+            Self::InboundPeerRejected { protocol, reason } => {
+                fields.insert("direction".into(), json!("inbound"));
+                fields.insert("protocol".into(), json!(protocol));
+                fields.insert("uc.outcome".into(), json!("rejected"));
+                fields.insert("error.phase".into(), json!(reason.phase()));
+                fields.insert("error.reason".into(), json!(reason));
             }
             Self::SessionStarted { transition } => {
                 fields.insert("transition".into(), json!(transition));

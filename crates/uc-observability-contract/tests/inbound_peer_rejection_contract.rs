@@ -33,7 +33,6 @@ fn payload(protocol: &str, reason: &str) -> String {
 }
 
 #[test]
-#[ignore = "inbound-peer-admission S1: remove once peer.inbound.rejected is in the contract"]
 fn every_protocol_and_reason_decodes_to_fixed_fields() {
     for protocol in PROTOCOLS {
         for (reason, phase) in REASONS {
@@ -64,7 +63,6 @@ fn every_protocol_and_reason_decodes_to_fixed_fields() {
 }
 
 #[test]
-#[ignore = "inbound-peer-admission S1: remove once peer.inbound.rejected is in the contract"]
 fn rejection_is_a_warning_and_other_levels_or_names_are_refused() {
     let valid = payload("presence", "identity_unresolved");
     assert!(decode_local_record(EVENT, &valid, "WARN").is_some());
@@ -91,7 +89,6 @@ fn open_values_and_extra_fields_are_refused() {
 }
 
 #[test]
-#[ignore = "inbound-peer-admission S1: remove once peer.inbound.rejected is in the contract"]
 fn exported_fields_never_contain_caller_supplied_text() {
     let fields = decode_local_record(EVENT, &payload("clipboard", "ledger_denied"), "WARN")
         .expect("valid record");

@@ -34,6 +34,7 @@ pub use clipboard_receive::{
 };
 mod connection;
 mod group_update;
+mod inbound_peer;
 mod membership_history;
 mod network_recovery;
 mod physical;
@@ -45,6 +46,9 @@ pub use authentication::complete_group_update_failure;
 pub use authentication::complete_membership_history_failure;
 pub use group_update::{
     GroupUpdateFailureDetail, GroupUpdatePhase, GroupUpdateReason, GroupUpdateSource,
+};
+pub use inbound_peer::{
+    record_inbound_peer_rejection, InboundPeerProtocol, InboundPeerRejectionReason,
 };
 pub use membership_history::{
     MembershipHistoryFailureDetail, MembershipHistoryFailurePhase, MembershipHistoryFailureReason,
