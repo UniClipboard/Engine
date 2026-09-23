@@ -337,6 +337,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unindexed_in_flight_joiner_is_not_loaded_for_pairing_work() {
+        let summary = RecoverySummary {
+            marker: RECOVERY_SUMMARY_MARKER,
+            format_version: RECOVERY_SUMMARY_FORMAT_V3,
+            role: RecoveryRecordRole::Joiner,
+            admission_id: [0x41; 32],
+            expires_at_ms: None,
+            legacy_no_deadline: false,
+            action: RecoveryAction::None,
+            content_token: [0x42; 32],
+        };
+
+        assert!(!summary.needs_body(0));
+    }
+
+    #[test]
     fn previous_recovery_summary_is_rebuilt_instead_of_treated_as_corrupt() {
         let legacy = RecoverySummary {
             marker: LEGACY_RECOVERY_SUMMARY_MARKER_V2,
