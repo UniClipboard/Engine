@@ -4,6 +4,7 @@ mod effects;
 mod error;
 mod initializer;
 mod model;
+mod peer_admission;
 mod presentation;
 mod repository;
 mod restricted_delivery;
@@ -37,4 +38,8 @@ pub use restricted_delivery::{
 };
 
 #[cfg(test)]
+mod peer_admission_tests;
+#[cfg(test)]
 mod tests;
+
+pub use peer_admission::build_membership_peer_admission;

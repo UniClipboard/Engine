@@ -38,6 +38,6 @@ pub(crate) use security::export_admission_content_key_catalog;
 pub(crate) use security::import_admission_content_key_catalog;
 pub use security::{
     DefaultMembershipSecurityUpdateAdapter, EncryptionPassphraseChange, InMemorySession,
-    KeyMaterialStore, MigrationSpaceAccessAdapter, MlsPeerAdmissionAdapter,
-    OpenMlsHistoricalSignatureVerifier, RuntimeSpaceAccessAdapter, SpaceSessionRebindAdapter,
+    KeyMaterialStore, MigrationSpaceAccessAdapter, OpenMlsHistoricalSignatureVerifier,
+    RuntimeSpaceAccessAdapter, SpaceSessionRebindAdapter,
 };

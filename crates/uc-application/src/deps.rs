@@ -28,6 +28,8 @@ use uc_core::ports::*;
 use uc_core::MemberRepositoryPort;
 use uc_observability_contract::analytics::AnalyticsPort;
 
+pub use crate::space::build_membership_peer_admission;
+
 pub use crate::application::{
     ApplicationAdapters, ApplicationClipboardAdapters, ApplicationHostAdapters,
     ApplicationNetworkAdapters, ApplicationNetworkBinding, ApplicationSpaceAdapters,

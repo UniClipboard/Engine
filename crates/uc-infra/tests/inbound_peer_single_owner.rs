@@ -106,7 +106,6 @@ fn inbound_paths_do_not_log_peer_identifiers() {
 }
 
 #[test]
-#[ignore = "inbound-peer-admission S3: remove once the Application ledger owns network admission"]
 fn network_admission_rule_lives_only_in_the_membership_ledger() {
     assert!(
         !workspace()

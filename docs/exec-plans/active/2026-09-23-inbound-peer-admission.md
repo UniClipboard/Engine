@@ -2,7 +2,7 @@
 
 ## 状态
 
-- **状态**：实施中；S1、S2 已实现并验证，S3–S5a 待实施（见“实施记录”）
+- **状态**：实施中；S1–S3 已实现并验证，S4–S5a 待实施（见“实施记录”）
 - **日期**：2026-09-23
 - **来源问题**：t-0028 双 Desktop 现场。配对最终返回成功后，邀请方的在线确认被加入方拒绝 748 次（`peer_not_admitted`）；加入方主动连接 233 次全部握手超时；双方公开状态却都显示对端 `active`/`usable`。只读诊断记录见 Desktop 线程 `.herdr-project/uni-t-0028/report.md` 顶部。
 - **已证实**：
@@ -259,3 +259,4 @@ Cargo 验证由一个负责人通过共享 `target` 串行执行。
 
 - 2026-09-23 S1：合同新增封闭协议/原因与 `peer.inbound.rejected` 的六字段本地记录。A1 4/4 通过；统一门禁通过。未执行设备或发布检查（本切片不涉及）。提交号见对应切片提交。
 - 2026-09-23 S2：九处入站身份解析收敛到 `PeerIdentityResolver`，需账本的协议使用 `InboundPeerGate`，拒绝只在实际回写/关闭处记录；mDNS 提示只解析、不记入站拒绝。B1 9/9、A2 1/1、A3 的 S2 两项、既有 `peer_admission_identity_resolution` 1/1 通过；`cargo check --workspace --all-targets --locked`、metadata、fmt、Rust 风格、仓库架构及 diff 检查通过。A3 的 S3/S4 两项仍按计划 ignore。旧 E2E 的 `duplicate-identity-stale-first` 原断言要求先选 stale 记录并查询账本，与本计划“歧义时拒绝且不查账本”冲突；仅将其改为拒绝且查询列表为空，保留其余 E2E 语义。未执行本机双实例手动配对的生产 Engine 文件订阅检查，记为跳过；其他协议原有完整测试尚未执行。提交号见对应切片提交。
+- 2026-09-23 S3：账本统一网络准入和公开 scope 的谓词；每次入站重新加载记录，历史字节未变时只复用验签结果。移除 Infra 准入副本，Engine 装配 Application 只读账本，架构检查随所有权调整。B2 10/10、Application 成员测试 165 通过、1 项既有忽略、A3 的 S3 项通过；统一门禁通过。A3 的 S4 项仍按计划忽略；未执行设备检查。提交号见对应切片提交。

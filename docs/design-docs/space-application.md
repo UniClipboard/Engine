@@ -493,6 +493,10 @@ flowchart TD
 
 ### 最终 scope
 
+网络入站准入由 `MembershipLedger` 从每次重新加载的已验证成员记录判定，不依赖无版本来源的快照缓存。
+对端只有在本机成员生效、对端属于当前生效成员且关系一致时才放行；公开 `usable` 还要求没有待处理效果，
+因此公开可用的对端必然能通过同一账本准入谓词。历史交换与分支恢复仍只检查身份，不经过网络账本准入。
+
 ```mermaid
 flowchart TD
     History[V2 effective members] --> Local[核对本机 member instance]

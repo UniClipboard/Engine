@@ -21,6 +21,7 @@ mod connectivity;
 mod facade;
 mod lifecycle;
 mod membership;
+pub use membership::build_membership_peer_admission;
 pub use membership::{DeviceGroupChoicesView, QueryDeviceGroupChoicesError, RosterEntry};
 pub use membership::{MembershipReadiness, QueryMembershipReadinessError};
 pub(crate) use membership::{QueryMemberRosterError, QueryMemberRosterUseCase};

@@ -30,6 +30,7 @@ pub use decide_device_trust_change::{
     DecideDeviceTrustChange, DecideDeviceTrustChangeError, DecideDeviceTrustChangeResult,
     DeviceTrustChangeChoice,
 };
+pub use ledger::build_membership_peer_admission;
 pub use ledger::{
     ActivateMembershipEffectPort, ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort,
     CommitMembershipLedgerPort, CurrentSpaceMemberScope, CurrentSpaceMemberScopeError,

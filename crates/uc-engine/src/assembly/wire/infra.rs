@@ -99,9 +99,10 @@ pub(super) fn build_space_access_ports(
 pub(super) fn build_peer_admission_port(
     membership_ledger: Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
 ) -> Arc<dyn uc_core::membership::PeerAdmissionPort> {
-    Arc::new(uc_infra::space::MlsPeerAdmissionAdapter::new(
+    uc_application::deps::build_membership_peer_admission(
         membership_ledger,
-    ))
+        Arc::new(uc_infra::space::OpenMlsHistoricalSignatureVerifier),
+    )
 }
 
 pub(super) fn build_search_assembly(

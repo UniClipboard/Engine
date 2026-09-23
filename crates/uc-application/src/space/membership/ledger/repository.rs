@@ -43,7 +43,7 @@ pub trait CommitMembershipLedgerPort: Send + Sync {
 }
 
 pub(crate) struct MembershipLedger {
-    loader: Arc<dyn LoadMembershipLedgerPort>,
+    pub(super) loader: Arc<dyn LoadMembershipLedgerPort>,
     committer: Arc<dyn CommitMembershipLedgerPort>,
     pub(super) verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
     changes: tokio::sync::watch::Sender<()>,
@@ -54,8 +54,8 @@ pub(crate) struct MembershipLedger {
 
 #[derive(Clone)]
 pub(crate) struct VerifiedMembershipLedger {
-    record: LoadedMembershipLedger,
-    history: Option<VersionedMembershipHistory>,
+    pub(super) record: LoadedMembershipLedger,
+    pub(super) history: Option<VersionedMembershipHistory>,
 }
 
 impl VerifiedMembershipLedger {
@@ -65,6 +65,13 @@ impl VerifiedMembershipLedger {
 
     pub(crate) fn history(&self) -> Option<&VersionedMembershipHistory> {
         self.history.as_ref()
+    }
+
+    pub(crate) fn admits_peer(&self, device: &DeviceId) -> bool {
+        let Some(history) = self.history.as_ref() else {
+            return false;
+        };
+        admits_peer(&self.record, history, device)
     }
 
     pub(crate) fn current_scope(
@@ -113,22 +120,57 @@ impl VerifiedMembershipLedger {
     }
 }
 
+fn local_member_active(
+    loaded: &LoadedMembershipLedger,
+    history: &VersionedMembershipHistory,
+) -> bool {
+    let (Some(local_device_id), Some(local_member_instance)) = (
+        loaded.local_device_id.as_ref(),
+        loaded.local_member_instance,
+    ) else {
+        return false;
+    };
+    loaded.local_join_active
+        && history.active_members().contains(&local_member_instance)
+        && history
+            .admission_facts_for(local_member_instance)
+            .is_some_and(|facts| &facts.device_id == local_device_id)
+}
+
+fn admits_peer(
+    loaded: &LoadedMembershipLedger,
+    history: &VersionedMembershipHistory,
+    device: &DeviceId,
+) -> bool {
+    if !local_member_active(loaded, history) {
+        return false;
+    }
+    let Some(member) = history.effective_member_for_device(device) else {
+        return false;
+    };
+    history
+        .admission_facts_for(member)
+        .is_some_and(|facts| &facts.device_id == device)
+        && matches!(
+            loaded.peer_reconciliation.get(device),
+            Some(record)
+                if record.peer_device_id == *device
+                    && record.relationship == MembershipHistoryRelationship::Consistent
+        )
+}
+
 fn derive_current_scope(
     loaded: &LoadedMembershipLedger,
     history: &VersionedMembershipHistory,
 ) -> Result<CurrentSpaceMemberScope, CurrentSpaceMemberScopeError> {
-    let local_device_id = loaded
+    loaded
         .local_device_id
         .as_ref()
         .ok_or(CurrentSpaceMemberScopeError::RecoveryRequired)?;
     let local_member_instance = loaded
         .local_member_instance
         .ok_or(CurrentSpaceMemberScopeError::RecoveryRequired)?;
-    let local_member_active = loaded.local_join_active
-        && history.active_members().contains(&local_member_instance)
-        && history
-            .admission_facts_for(local_member_instance)
-            .is_some_and(|facts| &facts.device_id == local_device_id);
+    let local_member_active = local_member_active(loaded, history);
 
     let mut usable_peer_device_ids = Vec::new();
     let mut paused_peer_devices = Vec::new();
@@ -153,8 +195,11 @@ fn derive_current_scope(
                 Some(record) if record.peer_device_id != peer_device_id => {
                     return Err(CurrentSpaceMemberScopeError::RecoveryRequired);
                 }
+                _ if admits_peer(loaded, history, &peer_device_id) => None,
                 Some(record) => match record.relationship {
-                    MembershipHistoryRelationship::Consistent => None,
+                    MembershipHistoryRelationship::Consistent => {
+                        Some(SpaceMemberPauseReason::RelationshipUnconfirmed)
+                    }
                     MembershipHistoryRelationship::PendingRemovalDecision => {
                         Some(SpaceMemberPauseReason::PendingLocalDecision)
                     }
@@ -282,7 +327,7 @@ impl MembershipLedger {
         Ok(())
     }
 
-    fn validate_loaded(
+    pub(super) fn validate_loaded(
         &self,
         loaded: &LoadedMembershipLedger,
         cached_snapshot: Option<&VerifiedMembershipLedger>,
@@ -340,7 +385,7 @@ impl MembershipLedger {
         Ok(Some(history))
     }
 
-    fn cached_verified(
+    pub(super) fn cached_verified(
         &self,
     ) -> Result<Option<Arc<VerifiedMembershipLedger>>, MembershipLedgerError> {
         let mut cached = self
@@ -365,7 +410,7 @@ impl MembershipLedger {
         Ok(())
     }
 
-    fn cache_verified(
+    pub(super) fn cache_verified(
         &self,
         snapshot: &VerifiedMembershipLedger,
     ) -> Result<(), MembershipLedgerError> {
