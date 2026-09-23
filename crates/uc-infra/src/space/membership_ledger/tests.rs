@@ -1,10 +1,17 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use super::codec;
 use super::*;
 use crate::db::executor::DieselSqliteExecutor;
 use crate::db::pool::init_db_pool;
+use uc_application::deps::{MembershipEffectPhase, RestrictedMembershipDelivery};
+use uc_core::ids::DeviceId;
+use uc_core::membership::MembershipHistoryRelationship;
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
+
+/// 计划 049 S0 固定向量写入时使用的 profile generation。
+const LEGACY_FIXTURE_GENERATION: [u8; 16] = [0x49; 16];
 
 #[derive(Default)]
 struct MemoryStorage(Mutex<BTreeMap<String, Vec<u8>>>);
@@ -80,5 +87,89 @@ async fn encrypted_legacy_rows_upgrade_to_v4_on_commit() {
             Arc::new(AdmissionKeyManager::new(storage, [0x71; 16])),
         );
         assert_eq!(reopened.load().await.unwrap(), current);
+    }
+}
+
+// 计划 049 S0：固定 S2 迁移输入。样本由 Application 真实用例推进生成，这里证明它们是当前 V4
+// 布局并锁定各自的残留形态；迁移实现不得改写这些文件。
+#[test]
+fn legacy_v4_fixtures_decode_with_recorded_residual_states() {
+    let peer = DeviceId::new("device-b");
+    let decode = |name: &str, bytes: &[u8]| {
+        assert_eq!(
+            postcard::take_from_bytes::<u16>(bytes).unwrap().0,
+            4,
+            "{name} must stay a V4 fixture"
+        );
+        codec::decode(bytes, LEGACY_FIXTURE_GENERATION)
+            .unwrap_or_else(|error| panic!("{name} must decode as V4: {error}"))
+    };
+
+    let active = decode(
+        "two_member_active",
+        include_bytes!("fixtures/two_member_active.v4.bin"),
+    );
+    assert_eq!(
+        active.peer_reconciliation[&peer].relationship,
+        MembershipHistoryRelationship::Consistent
+    );
+
+    let notice_pending = decode(
+        "sponsor_removal_notice_pending",
+        include_bytes!("fixtures/sponsor_removal_notice_pending.v4.bin"),
+    );
+    assert!(matches!(
+        notice_pending.peer_reconciliation[&peer]
+            .restricted_delivery
+            .as_slice(),
+        [RestrictedMembershipDelivery::Event(_)]
+    ));
+
+    let notice_delivered = decode(
+        "sponsor_removal_notice_delivered",
+        include_bytes!("fixtures/sponsor_removal_notice_delivered.v4.bin"),
+    );
+    let residual = &notice_delivered.peer_reconciliation[&peer];
+    assert_eq!(
+        residual.relationship,
+        MembershipHistoryRelationship::PendingRemovalDecision
+    );
+    assert!(residual.restricted_delivery.is_empty());
+    assert!(notice_delivered
+        .effect_journal
+        .values()
+        .all(|effect| effect.phase == MembershipEffectPhase::Activated));
+
+    let pending_decision = decode(
+        "local_removal_pending_decision",
+        include_bytes!("fixtures/local_removal_pending_decision.v4.bin"),
+    );
+    assert_eq!(
+        pending_decision.peer_reconciliation[&peer].relationship,
+        MembershipHistoryRelationship::PendingRemovalDecision
+    );
+
+    for (name, bytes, relationship) in [
+        (
+            "local_removal_accepted",
+            &include_bytes!("fixtures/local_removal_accepted.v4.bin")[..],
+            MembershipHistoryRelationship::Consistent,
+        ),
+        (
+            "local_removal_rejected",
+            &include_bytes!("fixtures/local_removal_rejected.v4.bin")[..],
+            MembershipHistoryRelationship::Diverged,
+        ),
+    ] {
+        let decided = decode(name, bytes);
+        let proposer = &decided.peer_reconciliation[&peer];
+        assert_eq!(proposer.relationship, relationship, "{name}");
+        assert!(
+            matches!(
+                proposer.restricted_delivery.as_slice(),
+                [RestrictedMembershipDelivery::Decision(_)]
+            ),
+            "{name} must keep the undeliverable decision"
+        );
     }
 }

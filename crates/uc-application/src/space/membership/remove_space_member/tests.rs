@@ -14,6 +14,9 @@ use uc_core::membership::{
 use uc_core::ports::ReachabilityState;
 
 use super::*;
+use crate::space::membership::testing::legacy_ledger_fixtures::{
+    deliver_restricted_once, settle_membership_effects, write_v4_fixture,
+};
 use crate::space::membership::WakeSpaceMembershipMaintenancePort;
 use crate::space::membership::{
     CommitMembershipLedgerPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
@@ -805,4 +808,60 @@ fn append_active_peer_to_history(
         .verify_and_record_activation_receipt(receipt, &AcceptingVerifier)
         .unwrap();
     (member, event_id)
+}
+
+// 计划 049 S0：移除方残留形态的 V4 固定向量。通知送达后核对记录仍保留
+// `PendingRemovalDecision` 且没有待投递项，正是移除方设备永不消失的持久状态。
+#[tokio::test]
+async fn sponsor_removal_states_are_recorded_as_legacy_fixtures() {
+    let (loaded, signer) = active_ledger();
+    write_v4_fixture("two_member_active", &loaded);
+    let repository = Arc::new(MemoryLedgerRepository {
+        loaded: Mutex::new(loaded),
+        commits: AtomicUsize::new(0),
+        remaining_conflicts: AtomicUsize::new(0),
+    });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    ));
+    let query = Arc::new(QueryDeviceTrustUseCase::new_for_tests(
+        Arc::clone(&ledger),
+        Arc::new(OfflineObservations),
+        Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
+    ));
+    let remove = RemoveSpaceMemberUseCase::new(
+        Arc::clone(&ledger),
+        Arc::new(signer),
+        query,
+        Arc::new(NoopEffects),
+        Arc::new(WakeCounter(AtomicUsize::new(0))),
+    );
+    let removed = DeviceId::new("device-b");
+
+    remove.execute(&removed).await.unwrap();
+    let pending = repository.load().await.unwrap();
+    assert!(matches!(
+        pending.peer_reconciliation[&removed]
+            .restricted_delivery
+            .as_slice(),
+        [RestrictedMembershipDelivery::Event(_)]
+    ));
+    write_v4_fixture("sponsor_removal_notice_pending", &pending);
+
+    settle_membership_effects(&ledger).await;
+    deliver_restricted_once(&ledger, 1_000).await;
+    let delivered = repository.load().await.unwrap();
+    let residual = &delivered.peer_reconciliation[&removed];
+    assert!(residual.restricted_delivery.is_empty());
+    assert_eq!(
+        residual.relationship,
+        MembershipHistoryRelationship::PendingRemovalDecision
+    );
+    assert!(delivered
+        .effect_journal
+        .values()
+        .all(|effect| effect.phase == MembershipEffectPhase::Activated));
+    write_v4_fixture("sponsor_removal_notice_delivered", &delivered);
 }

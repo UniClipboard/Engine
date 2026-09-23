@@ -13,6 +13,9 @@ use uc_core::membership::{
 use uc_core::ports::ReachabilityState;
 
 use super::*;
+use crate::space::membership::testing::legacy_ledger_fixtures::{
+    settle_membership_effects, write_v4_fixture,
+};
 use crate::space::membership::WakeSpaceMembershipMaintenancePort;
 use crate::space::membership::{
     CommitMembershipLedgerPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
@@ -699,4 +702,65 @@ async fn one_decision_conflict_is_retried_from_a_fresh_snapshot() {
     ));
     assert_eq!(repository.commits.load(Ordering::SeqCst), 1);
     assert_eq!(wake.0.load(Ordering::SeqCst), 1);
+}
+
+// 计划 049 S0：被移除方残留形态的 V4 固定向量。无论接受还是拒绝，发往发起方的决定都停在
+// 待投递状态；发起方已不认可本机身份，这项投递在现有实现中永远无法完成。
+#[tokio::test]
+async fn local_removal_decisions_are_recorded_as_legacy_fixtures() {
+    let (pending, _, _) = pending_local_removal_ledger();
+    write_v4_fixture("local_removal_pending_decision", &pending);
+    for (choice, name) in [
+        (
+            DeviceTrustChangeChoice::ApplyChange,
+            "local_removal_accepted",
+        ),
+        (
+            DeviceTrustChangeChoice::KeepCurrentDeviceGroup,
+            "local_removal_rejected",
+        ),
+    ] {
+        let (loaded, signer, change_id) = pending_local_removal_ledger();
+        let repository = Arc::new(MemoryLedgerRepository {
+            loaded: Mutex::new(loaded),
+            commits: AtomicUsize::new(0),
+            remaining_conflicts: AtomicUsize::new(0),
+        });
+        let ledger = Arc::new(MembershipLedger::new(
+            repository.clone(),
+            repository.clone(),
+            Arc::new(AcceptingVerifier),
+        ));
+        let query = Arc::new(QueryDeviceTrustUseCase::new_for_tests(
+            Arc::clone(&ledger),
+            Arc::new(OfflineObservations),
+            Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
+        ));
+        let decide = DecideDeviceTrustChangeUseCase::new(
+            Arc::clone(&ledger),
+            Arc::new(signer),
+            query,
+            Arc::new(NoopEffects),
+            Arc::new(WakeCounter(AtomicUsize::new(0))),
+        );
+
+        decide
+            .execute(DecideDeviceTrustChange {
+                change_id,
+                choice,
+                confirm_local_removal: choice == DeviceTrustChangeChoice::ApplyChange,
+            })
+            .await
+            .unwrap();
+        settle_membership_effects(&ledger).await;
+        let persisted = repository.load().await.unwrap();
+        assert!(matches!(
+            persisted.peer_reconciliation[&DeviceId::new("device-b")]
+                .restricted_delivery
+                .as_slice(),
+            [RestrictedMembershipDelivery::Decision(decision)]
+                if decision.removal_event_id == change_id
+        ));
+        write_v4_fixture(name, &persisted);
+    }
 }

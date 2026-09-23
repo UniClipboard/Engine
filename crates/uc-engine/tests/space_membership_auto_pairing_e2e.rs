@@ -7,6 +7,9 @@ mod six_digit_pairing;
 #[path = "space_membership_auto_pairing_e2e/automatic_connections.rs"]
 mod automatic_connections;
 
+#[path = "space_membership_auto_pairing_e2e/removal_convergence.rs"]
+mod removal_convergence;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
