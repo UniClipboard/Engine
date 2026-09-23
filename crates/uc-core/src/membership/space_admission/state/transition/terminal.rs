@@ -358,6 +358,7 @@ fn cleanup_obligation(
         | SpaceAdmissionTerminationReason::MembershipHistoryRejected
         | SpaceAdmissionTerminationReason::SecurityMaterialRejected
         | SpaceAdmissionTerminationReason::RelationshipRejected
+        | SpaceAdmissionTerminationReason::IdentityRejected
         | SpaceAdmissionTerminationReason::ActivationStateRejected => {
             AdmissionAbandonmentReasonV2::Rejected
         }

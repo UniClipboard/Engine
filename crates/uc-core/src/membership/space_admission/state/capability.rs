@@ -261,6 +261,9 @@ impl JoinerAdmission {
                     SpaceAdmissionTerminationReason::RelationshipRejected => {
                         Some(SpaceAdmissionRejectionReason::RelationshipConflict)
                     }
+                    SpaceAdmissionTerminationReason::IdentityRejected => {
+                        Some(SpaceAdmissionRejectionReason::IdentityConflict)
+                    }
                     SpaceAdmissionTerminationReason::ActivationStateRejected => {
                         Some(SpaceAdmissionRejectionReason::ActivationStateInvalid)
                     }
@@ -280,6 +283,7 @@ impl JoinerAdmission {
                     | SpaceAdmissionTerminationReason::MembershipHistoryRejected
                     | SpaceAdmissionTerminationReason::SecurityMaterialRejected
                     | SpaceAdmissionTerminationReason::RelationshipRejected
+                    | SpaceAdmissionTerminationReason::IdentityRejected
                     | SpaceAdmissionTerminationReason::ActivationStateRejected => None,
                     reason => Some(reason),
                 }

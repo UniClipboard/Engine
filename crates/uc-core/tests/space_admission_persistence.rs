@@ -172,6 +172,7 @@ fn activation_rejection_categories_round_trip_through_persistence() {
         SpaceAdmissionRejectionReason::MembershipHistoryInvalid,
         SpaceAdmissionRejectionReason::SecurityMaterialInvalid,
         SpaceAdmissionRejectionReason::RelationshipConflict,
+        SpaceAdmissionRejectionReason::IdentityConflict,
         SpaceAdmissionRejectionReason::ActivationStateInvalid,
     ] {
         let rejected = joiner_applied_fixture()

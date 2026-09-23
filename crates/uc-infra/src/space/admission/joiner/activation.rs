@@ -18,6 +18,7 @@ use uc_core::membership::{
     SpaceAdmissionMessageKind, SpaceAdmissionRejectionReason, SpaceAdmissionRoute,
     VersionedMembershipHistory,
 };
+use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -26,6 +27,7 @@ use crate::space::admission::recovery_material::open_recovery_material;
 use crate::space::security::mls_group::{MlsClientState, MlsGroupEngine};
 
 use super::super::sponsor::{activation_receipt_digest, SponsorCandidateStagedV1};
+use super::sponsor_identity::{sponsor_identity_rejection, verify_sponsor_route_identity};
 
 const JOINER_STAGED_TARGET_FORMAT_V2: u16 = 2;
 const MAX_TRANSITION_ADVANCES: usize = 16;
@@ -33,16 +35,19 @@ const MAX_TRANSITION_ADVANCES: usize = 16;
 pub struct DefaultJoinerActivationPreparation {
     history_verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
     transition: Arc<dyn AdmissionSpaceTransitionPort>,
+    fingerprints: Arc<dyn IdentityFingerprintFactoryPort>,
 }
 
 impl DefaultJoinerActivationPreparation {
     pub fn new(
         history_verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
         transition: Arc<dyn AdmissionSpaceTransitionPort>,
+        fingerprints: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Self {
         Self {
             history_verifier,
             transition,
+            fingerprints,
         }
     }
 }
@@ -147,6 +152,19 @@ impl PrepareJoinerActivationPort for DefaultJoinerActivationPreparation {
                     "the Complete signature is invalid",
                 ));
             }
+
+            let candidate = commit.exact_candidate();
+            let sponsor_facts = history
+                .admission_facts_for(candidate.candidate_event().author_member_instance_id)
+                .ok_or_else(|| {
+                    invalid_membership_message("the Candidate author has no admission facts")
+                })?;
+            verify_sponsor_route_identity(
+                candidate.continuation_route(),
+                &sponsor_facts.identity_fingerprint,
+                self.fingerprints.as_ref(),
+            )
+            .map_err(sponsor_identity_rejection)?;
 
             let mut staged: OwnedJoinerStagedTargetV2 =
                 postcard::from_bytes(preparation.staged_target().as_bytes())

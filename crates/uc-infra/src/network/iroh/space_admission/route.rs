@@ -66,3 +66,11 @@ pub(crate) fn decode_space_admission_route(
         decoded.invitation_id.and_then(InvitationId::from_bytes),
     ))
 }
+
+pub(crate) fn decode_space_admission_continuation_endpoint(
+    route: &[u8],
+) -> Result<EndpointAddr, SpaceAdmissionTransportError> {
+    let route = SpaceAdmissionRoute::from_bytes(route.to_vec())
+        .map_err(|_| SpaceAdmissionTransportError::ProtocolRejected)?;
+    Ok(decode_route(&route, false)?.endpoint_addr)
+}

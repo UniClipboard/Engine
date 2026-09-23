@@ -129,7 +129,6 @@ fn network_admission_rule_lives_only_in_the_membership_ledger() {
 }
 
 #[test]
-#[ignore = "inbound-peer-admission S4: remove once joiner activation verifies the sponsor identity"]
 fn joiner_activation_checks_the_sponsor_identity() {
     let activation = production("crates/uc-infra/src/space/admission/joiner/activation.rs");
     assert!(

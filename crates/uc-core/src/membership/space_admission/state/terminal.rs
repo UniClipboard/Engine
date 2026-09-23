@@ -10,6 +10,7 @@ pub enum SpaceAdmissionTerminationReason {
     MembershipHistoryRejected,
     SecurityMaterialRejected,
     RelationshipRejected,
+    IdentityRejected,
     ActivationStateRejected,
 }
 

@@ -702,6 +702,53 @@ async fn invalid_activation_is_saved_as_a_terminal_rejection() {
 }
 
 #[tokio::test]
+async fn sponsor_identity_conflict_is_saved_as_a_terminal_rejection_without_retry() {
+    let pair = SpaceAdmissionProtocolTestPair::receiving_invalid_activation_for(
+        uc_core::membership::SpaceAdmissionRejectionReason::IdentityConflict,
+    )
+    .await;
+    pair.joiner()
+        .start_join_at(join_input("sponsor-identity-conflict"), 1_000)
+        .await
+        .expect("the join request should be saved before recovery");
+
+    let report = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    assert_eq!(report.rejected_count, 1);
+    assert_eq!(report.deferred_count, 0);
+    assert_eq!(report.recovery_required_count, 0);
+    assert_eq!(
+        pair.saved_join().rejection_reason(),
+        Some(uc_core::membership::SpaceAdmissionRejectionReason::IdentityConflict)
+    );
+    assert_eq!(pair.saved_join().termination_reason(), None);
+    assert_eq!(
+        pair.saved_join()
+            .pending_exchange()
+            .expect("terminal rejection must remain deliverable to the Sponsor")
+            .request_envelope()
+            .kind(),
+        uc_core::membership::SpaceAdmissionMessageKind::Abandonment
+    );
+
+    let delivered = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    assert_eq!(delivered.advanced_count, 1);
+    assert_eq!(delivered.rejected_count, 0);
+    assert!(pair.saved_join().pending_exchange().is_none());
+    assert_eq!(
+        pair.saved_join().rejection_reason(),
+        Some(uc_core::membership::SpaceAdmissionRejectionReason::IdentityConflict)
+    );
+}
+
+#[tokio::test]
 async fn lost_rejection_notification_retries_from_the_saved_terminal_result() {
     let pair =
         SpaceAdmissionProtocolTestPair::receiving_invalid_activation_with_lost_abandonment().await;

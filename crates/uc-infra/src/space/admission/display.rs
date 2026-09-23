@@ -233,6 +233,13 @@ impl<E: DbExecutor + Send + Sync> SqliteSpaceAdmissionState<E> {
                             uc_core::membership::SpaceAdmissionRejectionReason::RelationshipConflict,
                     });
                 }
+                SpaceAdmissionTerminationReason::IdentityRejected => {
+                    return Ok(CurrentJoinStatus::Rejected {
+                        join_id,
+                        reason:
+                            uc_core::membership::SpaceAdmissionRejectionReason::IdentityConflict,
+                    });
+                }
                 SpaceAdmissionTerminationReason::ActivationStateRejected => {
                     return Ok(CurrentJoinStatus::Rejected {
                         join_id,

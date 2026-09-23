@@ -146,6 +146,7 @@ pub(super) struct SpaceAdmissionProtocolTestPair {
     upgrade_pending: Arc<AtomicBool>,
     space_transition_changes: Mutex<tokio::sync::watch::Receiver<()>>,
     clock: Arc<FixedAdmissionClock>,
+    joiner_activation: Arc<FixedJoinerActivation>,
 }
 
 struct AdmissionStatusEventRecorder(Arc<AtomicUsize>);
@@ -258,7 +259,7 @@ struct FixedJoinerCancellation;
 
 struct FixedJoinerActivation {
     events: Arc<Mutex<Vec<ProtocolEvent>>>,
-    reject_preparation: bool,
+    rejection: Mutex<Option<uc_core::membership::SpaceAdmissionRejectionReason>>,
 }
 
 #[derive(Clone, Copy)]
@@ -1652,9 +1653,13 @@ impl PrepareJoinerActivationPort for FixedJoinerActivation {
             SpaceAdmissionMessageKind::Applied
         );
         assert_eq!(complete.kind(), SpaceAdmissionMessageKind::Complete);
-        if self.reject_preparation {
+        let rejection = *self
+            .rejection
+            .lock()
+            .expect("activation rejection fixture is available");
+        if let Some(reason) = rejection {
             return Err(PrepareJoinerActivationError::invalid_for(
-                uc_core::membership::SpaceAdmissionRejectionReason::RelationshipConflict,
+                reason,
                 anyhow::anyhow!("invalid activation fixture"),
             ));
         }
@@ -1785,6 +1790,18 @@ impl SpaceAdmissionProtocolTestPair {
         .await
     }
 
+    pub(super) async fn receiving_invalid_activation_for(
+        reason: uc_core::membership::SpaceAdmissionRejectionReason,
+    ) -> Self {
+        let pair = Self::receiving_invalid_activation().await;
+        *pair
+            .joiner_activation
+            .rejection
+            .lock()
+            .expect("activation rejection fixture is available") = Some(reason);
+        pair
+    }
+
     pub(super) async fn receiving_invalid_activation_with_lost_abandonment() -> Self {
         Self::with_mode(
             None,
@@ -1877,11 +1894,14 @@ impl SpaceAdmissionProtocolTestPair {
         });
         let joiner_activation = Arc::new(FixedJoinerActivation {
             events: Arc::clone(&events),
-            reject_preparation: matches!(
-                mode,
-                TransportMode::AuthenticateThenCandidateCommitAndInvalidActivation
-                    | TransportMode::AuthenticateThenCandidateCommitInvalidActivationAndLoseAbandonmentOnce
-                    | TransportMode::AuthenticateThenCandidateCommitInvalidActivationAndUpgradeOnAbandonment
+            rejection: Mutex::new(
+                matches!(
+                    mode,
+                    TransportMode::AuthenticateThenCandidateCommitAndInvalidActivation
+                        | TransportMode::AuthenticateThenCandidateCommitInvalidActivationAndLoseAbandonmentOnce
+                        | TransportMode::AuthenticateThenCandidateCommitInvalidActivationAndUpgradeOnAbandonment
+                )
+                .then_some(uc_core::membership::SpaceAdmissionRejectionReason::RelationshipConflict),
             ),
         });
         let sponsor_complete = Arc::new(FixedSponsorComplete {
@@ -1963,7 +1983,7 @@ impl SpaceAdmissionProtocolTestPair {
                     Arc::new(FixedJoinerApplied),
                     joiner_activation.clone(),
                     state.clone(),
-                    joiner_activation,
+                    joiner_activation.clone(),
                     Arc::new(RecordingMaintenanceWake {
                         events: Arc::clone(&events),
                     }),
@@ -2001,6 +2021,7 @@ impl SpaceAdmissionProtocolTestPair {
             upgrade_pending,
             space_transition_changes: Mutex::new(space_transition_changes),
             clock,
+            joiner_activation,
         }
     }
 

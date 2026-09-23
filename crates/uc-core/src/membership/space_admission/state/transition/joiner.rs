@@ -232,6 +232,9 @@ impl SpaceAdmissionAggregate {
             SpaceAdmissionRejectionReason::RelationshipConflict => {
                 SpaceAdmissionTerminationReason::RelationshipRejected
             }
+            SpaceAdmissionRejectionReason::IdentityConflict => {
+                SpaceAdmissionTerminationReason::IdentityRejected
+            }
             SpaceAdmissionRejectionReason::ActivationStateInvalid => {
                 SpaceAdmissionTerminationReason::ActivationStateRejected
             }

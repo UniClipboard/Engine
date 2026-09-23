@@ -14,6 +14,7 @@ pub use credential::{
     SpaceAdmissionChannelCredentialError, SpaceAdmissionChannelCredentialPort,
     SponsorOpaqueMaterial,
 };
+pub(crate) use route::decode_space_admission_continuation_endpoint;
 pub(crate) use route::decode_space_admission_route;
 pub use route::encode_space_admission_route;
 pub use server::IrohSpaceAdmissionHandler;

@@ -386,6 +386,7 @@ pub async fn prepare_sync_session(
                 prepare_joiner_activation: Arc::new(DefaultJoinerActivationPreparation::new(
                     historical_signatures.clone(),
                     Arc::clone(&space_setup.admission_space_transition),
+                    Arc::clone(&space_setup.fingerprint),
                 )),
                 joiner_activation_state: space_setup.admission_state.clone()
                     as Arc<dyn uc_application::deps::JoinerActivationStatePort>,
