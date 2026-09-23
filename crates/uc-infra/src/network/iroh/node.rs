@@ -84,7 +84,7 @@ use super::clipboard_receiver_adapter::IrohClipboardReceiverAdapter;
 use super::connection_channel_adapter::IrohConnectionChannelAdapter;
 use super::group_update_adapter::{IrohGroupUpdateAdapter, GROUP_UPDATE_ALPN};
 use super::identity_store::IrohIdentityStore;
-use super::inbound_peer::{InboundPeerRejection, PeerIdentityResolver};
+use super::inbound_peer::{PeerIdentityError, PeerIdentityResolver};
 use super::membership_attestation_adapter::{
     IrohMembershipAttestationAdapter, IrohMembershipGossipTransportAdapter,
     IrohMembershipIdentityAdapter, MEMBERSHIP_ATTESTATION_ALPN,
@@ -700,24 +700,15 @@ impl IrohSessionBuilder {
                     else {
                         return None;
                     };
-                    match identity
-                        .identify(endpoint_info.endpoint_id.as_bytes())
-                        .await
-                    {
+                    match identity.resolve(endpoint_info.endpoint_id.as_bytes()).await {
                         Ok(device) => Some(Ok(
                             uc_application::deps::ConnectionHint::PeerAddressChanged(device),
                         )),
+                        Err(PeerIdentityError::Unresolved | PeerIdentityError::Ambiguous) => None,
                         Err(
-                            InboundPeerRejection::IdentityUnresolved
-                            | InboundPeerRejection::IdentityAmbiguous,
-                        ) => None,
-                        Err(InboundPeerRejection::MemberReadFailed) => {
-                            Some(Err(anyhow::anyhow!("member projection unavailable")))
-                        }
-                        Err(InboundPeerRejection::FingerprintUnavailable) => {
-                            Some(Err(anyhow::anyhow!("fingerprint derivation unavailable")))
-                        }
-                        Err(_) => None,
+                            error @ (PeerIdentityError::MemberRead(_)
+                            | PeerIdentityError::Fingerprint(_)),
+                        ) => Some(Err(anyhow::Error::new(error))),
                     }
                 }
             });

@@ -145,6 +145,33 @@ async fn a_fingerprint_derivation_failure_is_its_own_reason() {
 }
 
 #[tokio::test]
+async fn resolution_failures_keep_their_typed_source() {
+    let read = resolver(Err(())).resolve(&KEY).await.unwrap_err();
+    assert_eq!(read.rejection(), InboundPeerRejection::MemberReadFailed);
+    let source = std::error::Error::source(&read).expect("member read failure keeps its source");
+    assert!(matches!(
+        source.downcast_ref::<MembershipError>(),
+        Some(MembershipError::Repository(_))
+    ));
+
+    let derivation = PeerIdentityResolver::new(
+        Arc::new(Members(Ok(vec![member("a", &KEY)]))),
+        Arc::new(BrokenFingerprints),
+    )
+    .resolve(&KEY)
+    .await
+    .unwrap_err();
+    assert_eq!(
+        derivation.rejection(),
+        InboundPeerRejection::FingerprintUnavailable
+    );
+    assert_eq!(
+        std::error::Error::source(&derivation).map(ToString::to_string),
+        Some("fixture".to_owned())
+    );
+}
+
+#[tokio::test]
 async fn admission_distinguishes_denial_from_unavailability() {
     let denied = Admission::new(Ok(false));
     assert_eq!(

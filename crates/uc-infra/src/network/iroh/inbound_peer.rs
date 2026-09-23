@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use uc_core::ids::DeviceId;
-use uc_core::membership::{MemberRepositoryPort, PeerAdmissionPort};
+use uc_core::membership::{MemberRepositoryPort, MembershipError, PeerAdmissionPort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::security::IdentityFingerprint;
 use uc_observability_contract::diagnostics::connectivity::{
@@ -44,6 +44,30 @@ impl InboundPeerRejection {
     }
 }
 
+/// 身份解析失败；读取与派生失败保留原始来源，供需要传播错误的调用方使用。
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PeerIdentityError {
+    #[error("peer identity is not a known member")]
+    Unresolved,
+    #[error("peer identity matches more than one member")]
+    Ambiguous,
+    #[error("member projection read failed")]
+    MemberRead(#[source] MembershipError),
+    #[error("identity fingerprint derivation failed")]
+    Fingerprint(#[source] anyhow::Error),
+}
+
+impl PeerIdentityError {
+    pub(crate) fn rejection(&self) -> InboundPeerRejection {
+        match self {
+            Self::Unresolved => InboundPeerRejection::IdentityUnresolved,
+            Self::Ambiguous => InboundPeerRejection::IdentityAmbiguous,
+            Self::MemberRead(_) => InboundPeerRejection::MemberReadFailed,
+            Self::Fingerprint(_) => InboundPeerRejection::FingerprintUnavailable,
+        }
+    }
+}
+
 pub(crate) struct PeerIdentityResolver {
     member_repo: Arc<dyn MemberRepositoryPort>,
     fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
@@ -64,28 +88,37 @@ impl PeerIdentityResolver {
         &self,
         remote_public_key: &[u8; 32],
     ) -> Result<DeviceId, InboundPeerRejection> {
+        self.resolve(remote_public_key)
+            .await
+            .map_err(|error| error.rejection())
+    }
+
+    pub(crate) async fn resolve(
+        &self,
+        remote_public_key: &[u8; 32],
+    ) -> Result<DeviceId, PeerIdentityError> {
         let fingerprint = self
             .fingerprint_factory
             .from_public_key(remote_public_key)
-            .map_err(|_| InboundPeerRejection::FingerprintUnavailable)?;
+            .map_err(PeerIdentityError::Fingerprint)?;
         let members = self
             .member_repo
             .list()
             .await
-            .map_err(|_| InboundPeerRejection::MemberReadFailed)?;
+            .map_err(PeerIdentityError::MemberRead)?;
         let mut found = None;
         for member in members {
             if member.identity_fingerprint == fingerprint {
                 match &found {
                     Some(device) if device != &member.device_id => {
-                        return Err(InboundPeerRejection::IdentityAmbiguous);
+                        return Err(PeerIdentityError::Ambiguous);
                     }
                     None => found = Some(member.device_id),
                     _ => {}
                 }
             }
         }
-        found.ok_or(InboundPeerRejection::IdentityUnresolved)
+        found.ok_or(PeerIdentityError::Unresolved)
     }
 
     pub(crate) fn fingerprint_matches(
