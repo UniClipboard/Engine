@@ -10,7 +10,7 @@
 - [043 Engine 网络运行期与 Space 会话安全交接](043-engine-network-runtime-and-space-session-handover.md)（实施中，对应 Issue #68）
 - [047 测试框架 PR 与远程 CI 观察](047-testkit-pr-and-ci-observation.md)（实施中：首轮 PR/CI 验证后继续累计 10 个工作日自然样本）
 - [048 testkit 采用指南与进程韧性](048-testkit-adoption-and-process-resilience.md)（实施中：补齐并行工件隔离、进程超时回收、首次使用指南与采用清单）
-- [049 成员状态单一负责人重写](049-single-owner-space-membership-rewrite.md)（实施中：S0 已完成，S1 未开始）
+- [049 成员状态单一负责人重写](049-single-owner-space-membership-rewrite.md)（实施中：S0、S1 已完成，S2 未开始）
 - [历史可读时的邀请失败](2026-09-12-invitation-admission-recovery.md)
 - [本地产物准备](local-artifacts-preparation.md)
 - [配对通信等待诊断](2026-09-12-admission-exchange-diagnostics.md)

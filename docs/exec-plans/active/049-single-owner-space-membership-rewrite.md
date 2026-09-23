@@ -2,7 +2,7 @@
 
 ## 状态与完整责任
 
-- **状态**：实施中；S0 已完成（见“实施记录”），S1 未开始。
+- **状态**：实施中；S0、S1 已完成（见“实施记录”），S2 未开始。
 - **日期**：2026-09-23。
 - **依据**：[ADR-027](../../design-docs/decisions/027-single-owner-space-membership-state.md)；2026-09-23 双 Desktop
   profile 配对后移除，移除方设备不消失、被移除方永久“正在更新空间设备状态”的诊断（结论见 ADR-027 背景）。
@@ -97,12 +97,40 @@ crates/uc-infra/src/space/membership_record/
 
 ### S1 Core 聚合
 
-- 实现 `space_membership` 模块全部类型与三入口；`apply` 使用一个穷尽 `match`，不公开逐步修改方法和状态字段。
-- 效果至少包括：`BeforeCommit` 激活准入安全状态；`AfterCommit` 发布设备信任变化、应用安全状态、唤醒 Worker。
-- 提供唯一“接收安全更新的成员集合”函数（关闭 Core 边界计划 A2 的判定部分）。
-- **验证**：每个状态 × 输入的单元测试断言完整效果列表；`present` 无通配分支；性质测试以固定种子枚举输入序列，
-  断言 `due_work` 为空当且仅当设备更新阶段不是 Updating 或 RetryableFailure（等待本机决定与需要处理除外）；
-  `restore(snapshot())` 往返一致，非法快照被拒绝。不新增第三方依赖。
+S1 只新增 Core 模块及其测试，不接入任何调用方；S3 才切换 Application。
+
+**状态**（字段全部私有，只读访问）：
+
+| 部分 | 内容 | 规则 |
+| --- | --- | --- |
+| 历史 | `VersionedMembershipHistory` | 资格唯一来源；改变历史的输入携带已由 Application 经历史 API 与验签器产生的新历史，聚合核对沿革与事件后采用 |
+| 本机 | 设备、成员实例、加入门禁 | 本机地位由门禁与历史得出：门禁开且在有效成员中为有效；在有效成员中但门禁关、或有未完成效果影响本机为激活中；否则为已移除 |
+| 对端 | `PeerLink::Member` / `PeerLink::Departing` | 规范化：每个有效对端恰有一个 `Member`；`Departing` 只属于已不在有效成员中的设备；其余记录删除；本机为移除目标时不保留待投递决定 |
+| 成员效果 | 未激活效果：事件、类型、阶段（已准备、成员资料已应用、安全已应用）、受影响设备、类型化材料 | 激活即删除；只保留当前分支路径上的事件 |
+| 同步游标 | 上次轮转到的对端 | 只影响待办顺序 |
+
+`Member` 携带关系（未确认、一致、需升级、等待本机决定、分叉、无效）、已确认位置、同步退避（起始修订、
+重试次数、下次时间、最近结果）与待投递决定；`Departing` 携带移除事件与窗口起点（提交时刻）。
+
+**输入**（按外部事实命名）：本机移除已签名、本机决定已签名、准入正式提交（邀请方）、对端历史证据已核对、
+历史同步已选定对端、历史同步结束、投递结束（通知或决定）、离开窗口到期、成员效果阶段完成、分支已恢复。
+加入方激活与新建 Space 用构造器 `start_*`，已保存状态用 `restore`。
+
+**结果与效果**：重复、过期、位置已变化用 outcome 表达；效果只有 `AfterCommit`：发布设备信任变化、唤醒
+执行器。准入正式提交的 `BeforeCommit` 由准入聚合声明，不在本聚合重复。
+
+**待办**：`outstanding_work(observations)` 返回全部未完成待办及最早执行时间——成员效果推进（按因果深度）、
+移除通知投递、离开到期、决定投递、历史同步（本机有效时，对允许核对且未确认当前位置的对端，按退避与游标）。
+每项标明是否阻塞设备更新；移除通知与离开到期不阻塞。
+
+**展示**：`present(observations)` 给出本机成员状态、每台设备的成员状态、关系、同步状态与暂停原因、
+可用对端范围，以及成员部分的设备更新阶段；组密钥投递状态作为观察输入叠加。本机身份不一致的覆盖仍由
+Application 查询负责。与现有推导相比只有三处有意变化：`Departing` 送达或到期后消失；本机已移除时设备
+更新为完成；本机为移除目标时不产生决定投递。
+
+- **验证**：每个状态 × 输入的单元测试断言新状态、outcome 与完整效果；`present` 与规范化无通配分支；
+  固定种子枚举输入序列的性质测试断言：规范化不变量始终成立，阻塞待办非空当且仅当成员部分为更新中或
+  可重试失败（需要处理除外）；`restore(snapshot())` 往返一致，非法快照被拒绝。不新增第三方依赖。
 
 ### S2 持久格式与迁移
 
@@ -224,3 +252,29 @@ git diff --check
 | `cargo fmt --all -- --check`、`check-rust-style.mjs`、`check-engine-repository.mjs`、`git diff --check` | 通过 |
 | `cargo test -p uc-application --lib space --locked -- --test-threads=1` | 361 通过，1 失败：`admission_recovery_scenarios::joiner_pairing_fixture_reaches_active_settled`（`joiner-pairing-was-not-active`）。本次对 `uc-application`、`uc-core` 只有测试代码增量，该失败连续三次稳定复现，属本次之前已存在的问题，未处理 |
 | 现有 F0–F7 拓扑场景与其余 Engine 真实场景 | 跳过（本次未改动其代码路径，完整套件耗时长） |
+
+### S1（2026-09-23，分支 `hp/uni/t-0010-android`）
+
+完成内容：`crates/uc-core/src/membership/space_membership/`（以公开子模块 `membership::space_membership`
+暴露，避免通用名称与现有扁平导出冲突），尚无调用方。
+
+实现中确定、与设计概要相比需要说明的细节：
+
+- 聚合不再保存加入门禁：现有账本只在没有当前 Space 时关闭门禁，而那时聚合不存在。`start` 接收调用方给出的
+  修订号，保证同一 profile 内设备信任修订单调递增。
+- 离开窗口从移除提交时刻起算（原实现从首次处理起算）；迁移时以迁移时刻起算。
+- 对端证据确认一致时同时清零同步退避；否则旧的“暂缓”结果在确认后仍会让设备更新停在可重试失败。
+- 同步“暂缓”只在该对端仍需同步时计入可重试失败；分叉后不再显示永远不会执行的重试。稳定拒绝仍无条件
+  报告需要处理，保持原问题分类。
+- 决定投递被对端明确拒绝时删除该投递：本机已无法推进它，保留只会永久显示更新中。
+- 被本机移除后又重新加入的设备在规范化时从 `Departing` 转回 `Member`。
+- 采用对端历史时为新增和移除的成员登记效果的规则（原在 `handle_history_message`）移入聚合。
+
+验证结果：
+
+| 检查 | 结果 |
+| --- | --- |
+| `cargo test -p uc-core --lib --locked space_membership` | 17 通过；含 24 个种子各 160 步的交错性质测试，逐步断言规范化不变量与“阻塞待办 ⇔ 更新中/可重试失败”，并在全部成功与跨过离开窗口后断言收敛 |
+| `cargo test -p uc-core --locked` | 全部通过 |
+| `cargo clippy -p uc-core --all-targets --locked`（仅新模块） | 无告警 |
+| `cargo check --workspace --all-targets --locked`、`cargo fmt --all -- --check`、`check-rust-style.mjs`、`check-engine-repository.mjs`、`git diff --check` | 通过 |

@@ -18,6 +18,7 @@ mod protection;
 mod revocation;
 mod settlement_window;
 mod space_admission;
+pub mod space_membership;
 mod versioned_membership_history;
 mod workspace_convergence;
 
