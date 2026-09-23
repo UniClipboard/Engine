@@ -1,4 +1,4 @@
-//! 一个 Space 全部成员事实的唯一状态机。
+//! 成员账本：一个 Space 全部成员事实的唯一状态机。
 //!
 //! # 状态
 //!
@@ -13,13 +13,13 @@
 //! # 输入
 //!
 //! 本机移除已签名、本机决定已签名、邀请方正式提交准入、对端历史证据已核对、历史同步已选定对端、
-//! 历史同步结束、投递结束、离开窗口到期、成员效果阶段完成、分支已恢复。新建与加入用 [`SpaceMembership::start`]，
-//! 已保存状态用 [`SpaceMembership::restore`]。
+//! 历史同步结束、投递结束、离开窗口到期、成员效果阶段完成、分支已恢复。新建与加入用 [`MembershipLedger::start`]，
+//! 已保存状态用 [`MembershipLedger::restore`]。
 //!
 //! # 效果
 //!
 //! 全部为 `AfterCommit`：发布设备信任变化、唤醒执行器。准入正式提交的 `BeforeCommit` 由准入聚合声明。
-//! 持久待办不作为效果返回，而由 [`SpaceMembership::outstanding_work`] 从状态计算。
+//! 持久待办不作为效果返回，而由 [`MembershipLedger::outstanding_work`] 从状态计算。
 //!
 //! # 不变量与终态
 //!
@@ -40,25 +40,25 @@ mod work;
 #[cfg(test)]
 mod tests;
 
-pub use aggregate::SpaceMembership;
+pub use aggregate::MembershipLedger;
 pub use effect::{
     MemberEffectKind, MemberEffectMaterial, MemberEffectPhase, UnfinishedMemberEffect,
 };
-pub use error::{SpaceMembershipError, SpaceMembershipErrorCategory};
+pub use error::{LedgerTransitionError, LedgerTransitionErrorCategory};
 pub use input::{
-    DeliveryKind, DeliveryResult, HistorySyncResult, MembershipEffect, MembershipFollowUp,
-    MembershipInput, MembershipOutcome, MembershipTransition, PeerEvidence,
+    LedgerDeliveryKind, LedgerDeliveryResult, LedgerEffect, LedgerFollowUp, LedgerInput,
+    LedgerOutcome, LedgerTransition, PeerEvidence, PeerSyncResult,
 };
 pub use peer_link::{
-    DepartingLink, HistorySyncOutcome, MemberLink, PeerLink, PeerRelation, SyncBackoff,
+    DepartingLink, MemberLink, PeerLink, PeerRelation, PeerSyncBackoff, PeerSyncOutcome,
     DEPARTURE_WINDOW_MS,
 };
 pub use present::{
-    DeviceMembershipView, DeviceUpdateProblem, DeviceUpdateView, MemberStatus, MembershipScope,
-    MembershipView, PauseReason, RelationView, SecurityDeliveryStatus, SyncView,
+    LedgerDeviceView, LedgerMemberStatus, LedgerScope, LedgerUpdateProblem, LedgerUpdateView,
+    LedgerView, PeerPauseReason, PeerRelationView, PeerSyncView, SecurityDeliveryStatus,
 };
 pub use snapshot::{
-    DepartingLinkSnapshot, MemberLinkSnapshot, PeerLinkSnapshot, SpaceMembershipSnapshot,
-    SyncBackoffSnapshot, UnfinishedMemberEffectSnapshot,
+    DepartingLinkSnapshot, MemberLinkSnapshot, MembershipLedgerSnapshot, PeerLinkSnapshot,
+    PeerSyncBackoffSnapshot, UnfinishedMemberEffectSnapshot,
 };
-pub use work::{MembershipWork, ScheduledWork};
+pub use work::{LedgerWork, ScheduledLedgerWork};

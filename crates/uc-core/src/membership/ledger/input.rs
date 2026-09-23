@@ -3,12 +3,12 @@ use crate::membership::{
     BaseMembershipHistoryPosition, MembershipEventId, VersionedMembershipHistory,
 };
 
-use super::{MemberEffectPhase, SpaceMembership};
+use super::{MemberEffectPhase, MembershipLedger};
 
 /// 一次完整的外部事实。改变历史的输入携带 Application 已经用历史规则与验签器产生的新历史，
 /// 聚合只核对它与当前状态一致后采用。
 #[derive(Debug, Clone)]
-pub enum MembershipInput {
+pub enum LedgerInput {
     /// 本机签名并追加了一项移除；新历史的当前头就是该移除。
     LocalRemovalSigned {
         history: VersionedMembershipHistory,
@@ -33,13 +33,13 @@ pub enum MembershipInput {
     HistorySyncFinished {
         peer: DeviceId,
         synced_position: BaseMembershipHistoryPosition,
-        result: HistorySyncResult,
+        result: PeerSyncResult,
     },
     /// 一项受限投递的结果。
     DeliveryFinished {
         peer: DeviceId,
-        delivery: DeliveryKind,
-        result: DeliveryResult,
+        delivery: LedgerDeliveryKind,
+        result: LedgerDeliveryResult,
     },
     /// 离开窗口已到期。
     DepartureWindowElapsed { peer: DeviceId },
@@ -64,7 +64,7 @@ pub enum PeerEvidence {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HistorySyncResult {
+pub enum PeerSyncResult {
     Confirmed,
     Diverged,
     Invalid,
@@ -75,20 +75,20 @@ pub enum HistorySyncResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeliveryKind {
+pub enum LedgerDeliveryKind {
     RemovalNotice,
     Decision,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeliveryResult {
+pub enum LedgerDeliveryResult {
     Delivered,
     Deferred,
     Rejected,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MembershipOutcome {
+pub enum LedgerOutcome {
     /// 状态已改变，调用方必须保存新状态。
     Applied,
     /// 输入已被处理过或不带来变化。
@@ -99,29 +99,29 @@ pub enum MembershipOutcome {
 
 /// 保存新状态后必须履行的后续动作。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MembershipFollowUp {
+pub enum LedgerFollowUp {
     PublishDeviceTrustChange,
     WakeWorker,
 }
 
 /// 与保存新状态的先后关系。本聚合只有保存后执行的效果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MembershipEffect {
-    AfterCommit(MembershipFollowUp),
+pub enum LedgerEffect {
+    AfterCommit(LedgerFollowUp),
 }
 
 #[derive(Debug, Clone)]
-pub struct MembershipTransition {
-    replacement: SpaceMembership,
-    outcome: MembershipOutcome,
-    effects: Vec<MembershipEffect>,
+pub struct LedgerTransition {
+    replacement: MembershipLedger,
+    outcome: LedgerOutcome,
+    effects: Vec<LedgerEffect>,
 }
 
-impl MembershipTransition {
+impl LedgerTransition {
     pub(super) fn new(
-        replacement: SpaceMembership,
-        outcome: MembershipOutcome,
-        effects: Vec<MembershipEffect>,
+        replacement: MembershipLedger,
+        outcome: LedgerOutcome,
+        effects: Vec<LedgerEffect>,
     ) -> Self {
         Self {
             replacement,
@@ -130,19 +130,19 @@ impl MembershipTransition {
         }
     }
 
-    pub fn replacement(&self) -> &SpaceMembership {
+    pub fn replacement(&self) -> &MembershipLedger {
         &self.replacement
     }
 
-    pub fn outcome(&self) -> MembershipOutcome {
+    pub fn outcome(&self) -> LedgerOutcome {
         self.outcome
     }
 
-    pub fn effects(&self) -> &[MembershipEffect] {
+    pub fn effects(&self) -> &[LedgerEffect] {
         &self.effects
     }
 
-    pub fn into_parts(self) -> (SpaceMembership, MembershipOutcome, Vec<MembershipEffect>) {
+    pub fn into_parts(self) -> (MembershipLedger, LedgerOutcome, Vec<LedgerEffect>) {
         (self.replacement, self.outcome, self.effects)
     }
 }

@@ -7,14 +7,14 @@ use crate::membership::{
 };
 
 use super::{
-    DepartingLink, HistorySyncOutcome, MemberEffectKind, MemberEffectMaterial, MemberEffectPhase,
-    MemberLink, PeerLink, PeerRelation, SpaceMembership, SpaceMembershipError, SyncBackoff,
-    UnfinishedMemberEffect,
+    DepartingLink, LedgerTransitionError, MemberEffectKind, MemberEffectMaterial,
+    MemberEffectPhase, MemberLink, MembershipLedger, PeerLink, PeerRelation, PeerSyncBackoff,
+    PeerSyncOutcome, UnfinishedMemberEffect,
 };
 
 /// 与持久层交换的纯数据。不带格式版本；字节布局与版本演进由 Infra 负责。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SpaceMembershipSnapshot {
+pub struct MembershipLedgerSnapshot {
     pub revision: u64,
     pub history: VersionedMembershipHistory,
     pub local_device_id: DeviceId,
@@ -34,16 +34,16 @@ pub enum PeerLinkSnapshot {
 pub struct MemberLinkSnapshot {
     pub relation: PeerRelation,
     pub confirmed_position: Option<BaseMembershipHistoryPosition>,
-    pub sync: SyncBackoffSnapshot,
+    pub sync: PeerSyncBackoffSnapshot,
     pub outgoing_decision: Option<Box<MembershipDecisionV2>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SyncBackoffSnapshot {
+pub struct PeerSyncBackoffSnapshot {
     pub pending_since_revision: Option<u64>,
     pub retry_attempt: u32,
     pub next_attempt_at_ms: i64,
-    pub last_outcome: HistorySyncOutcome,
+    pub last_outcome: PeerSyncOutcome,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,9 +61,9 @@ pub struct UnfinishedMemberEffectSnapshot {
     pub material: MemberEffectMaterial,
 }
 
-impl SpaceMembership {
-    pub fn snapshot(&self) -> SpaceMembershipSnapshot {
-        SpaceMembershipSnapshot {
+impl MembershipLedger {
+    pub fn snapshot(&self) -> MembershipLedgerSnapshot {
+        MembershipLedgerSnapshot {
             revision: self.revision,
             history: self.history.clone(),
             local_device_id: self.local_device_id,
@@ -76,7 +76,7 @@ impl SpaceMembership {
                         PeerLink::Member(member) => PeerLinkSnapshot::Member(MemberLinkSnapshot {
                             relation: member.relation(),
                             confirmed_position: member.confirmed_position().cloned(),
-                            sync: SyncBackoffSnapshot {
+                            sync: PeerSyncBackoffSnapshot {
                                 pending_since_revision: member.sync().pending_since_revision(),
                                 retry_attempt: member.sync().retry_attempt(),
                                 next_attempt_at_ms: member.sync().next_attempt_at_ms(),
@@ -110,7 +110,7 @@ impl SpaceMembership {
     }
 
     /// 从持久快照恢复，并重新校验全部不变量；不一致的快照被拒绝，不做修复。
-    pub fn restore(snapshot: SpaceMembershipSnapshot) -> Result<Self, SpaceMembershipError> {
+    pub fn restore(snapshot: MembershipLedgerSnapshot) -> Result<Self, LedgerTransitionError> {
         let mut effects = BTreeMap::new();
         for effect in snapshot.effects {
             let event_id = effect.event_id;
@@ -122,7 +122,7 @@ impl SpaceMembership {
                 effect.material,
             );
             if effects.insert(event_id, restored).is_some() {
-                return Err(SpaceMembershipError::InvalidSnapshot);
+                return Err(LedgerTransitionError::InvalidSnapshot);
             }
         }
         let membership = Self {
@@ -139,7 +139,7 @@ impl SpaceMembership {
                             PeerLink::Member(MemberLink::from_parts(
                                 member.relation,
                                 member.confirmed_position,
-                                SyncBackoff::from_parts(
+                                PeerSyncBackoff::from_parts(
                                     member.sync.pending_since_revision,
                                     member.sync.retry_attempt,
                                     member.sync.next_attempt_at_ms,

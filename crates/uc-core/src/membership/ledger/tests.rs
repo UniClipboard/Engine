@@ -10,11 +10,11 @@ use crate::membership::{
 use crate::security::IdentityFingerprint;
 
 use super::{
-    DeliveryKind, DeliveryResult, DeviceUpdateProblem, DeviceUpdateView, HistorySyncResult,
-    MemberEffectPhase, MemberStatus, MembershipEffect, MembershipFollowUp, MembershipInput,
-    MembershipOutcome, MembershipWork, PauseReason, PeerEvidence, PeerLink, PeerLinkSnapshot,
-    PeerRelation, RelationView, SecurityDeliveryStatus, SpaceMembership, SpaceMembershipError,
-    SyncView, DEPARTURE_WINDOW_MS,
+    LedgerDeliveryKind, LedgerDeliveryResult, LedgerEffect, LedgerFollowUp, LedgerInput,
+    LedgerMemberStatus, LedgerOutcome, LedgerTransitionError, LedgerUpdateProblem,
+    LedgerUpdateView, LedgerWork, MemberEffectPhase, MembershipLedger, PeerEvidence, PeerLink,
+    PeerLinkSnapshot, PeerPauseReason, PeerRelation, PeerRelationView, PeerSyncResult,
+    PeerSyncView, SecurityDeliveryStatus, DEPARTURE_WINDOW_MS,
 };
 
 const LINEAGE: &str = "space-membership-lineage";
@@ -159,9 +159,9 @@ impl Group {
             .unwrap()
     }
 
-    fn start(&self, local: &str) -> SpaceMembership {
+    fn start(&self, local: &str) -> MembershipLedger {
         let local = self.member(local);
-        SpaceMembership::start(
+        MembershipLedger::start(
             self.history.clone(),
             local.facts.device_id,
             local.facts.member_instance,
@@ -248,30 +248,27 @@ fn device(name: &str) -> DeviceId {
 }
 
 fn apply(
-    membership: SpaceMembership,
-    input: MembershipInput,
+    membership: MembershipLedger,
+    input: LedgerInput,
     now_ms: i64,
-) -> (SpaceMembership, MembershipOutcome, Vec<MembershipEffect>) {
+) -> (MembershipLedger, LedgerOutcome, Vec<LedgerEffect>) {
     membership.apply(input, now_ms).unwrap().into_parts()
 }
 
-fn view_of(membership: &SpaceMembership) -> super::MembershipView {
+fn view_of(membership: &MembershipLedger) -> super::LedgerView {
     membership
         .present(SecurityDeliveryStatus::Completed)
         .unwrap()
 }
 
-fn device_view<'a>(
-    view: &'a super::MembershipView,
-    name: &str,
-) -> Option<&'a super::DeviceMembershipView> {
+fn device_view<'a>(view: &'a super::LedgerView, name: &str) -> Option<&'a super::LedgerDeviceView> {
     view.devices
         .iter()
         .find(|device| device.device_id.as_str() == name)
 }
 
 /// 以全部成功的结果执行所有已到期的阻塞待办，直到没有可执行项。
-fn run_due_work(mut membership: SpaceMembership, now_ms: i64) -> SpaceMembership {
+fn run_due_work(mut membership: MembershipLedger, now_ms: i64) -> MembershipLedger {
     for _ in 0..64 {
         let due: Vec<_> = membership
             .outstanding_work(now_ms)
@@ -284,33 +281,33 @@ fn run_due_work(mut membership: SpaceMembership, now_ms: i64) -> SpaceMembership
         };
         let input = success_input(&membership, next.work);
         let (replacement, outcome, _) = apply(membership, input, now_ms);
-        assert_ne!(outcome, MembershipOutcome::Stale);
+        assert_ne!(outcome, LedgerOutcome::Stale);
         membership = replacement;
     }
     panic!("due work did not settle");
 }
 
-fn success_input(membership: &SpaceMembership, work: MembershipWork) -> MembershipInput {
+fn success_input(membership: &MembershipLedger, work: LedgerWork) -> LedgerInput {
     match work {
-        MembershipWork::AdvanceEffect(effect) => MembershipInput::EffectStepFinished {
+        LedgerWork::AdvanceEffect(effect) => LedgerInput::EffectStepFinished {
             event_id: effect.event_id(),
             from: effect.phase(),
         },
-        MembershipWork::DeliverRemovalNotice { peer, .. } => MembershipInput::DeliveryFinished {
+        LedgerWork::DeliverRemovalNotice { peer, .. } => LedgerInput::DeliveryFinished {
             peer,
-            delivery: DeliveryKind::RemovalNotice,
-            result: DeliveryResult::Delivered,
+            delivery: LedgerDeliveryKind::RemovalNotice,
+            result: LedgerDeliveryResult::Delivered,
         },
-        MembershipWork::EndDeparture { peer } => MembershipInput::DepartureWindowElapsed { peer },
-        MembershipWork::DeliverDecision { peer, .. } => MembershipInput::DeliveryFinished {
+        LedgerWork::EndDeparture { peer } => LedgerInput::DepartureWindowElapsed { peer },
+        LedgerWork::DeliverDecision { peer, .. } => LedgerInput::DeliveryFinished {
             peer,
-            delivery: DeliveryKind::Decision,
-            result: DeliveryResult::Delivered,
+            delivery: LedgerDeliveryKind::Decision,
+            result: LedgerDeliveryResult::Delivered,
         },
-        MembershipWork::SynchronizeHistory { peer } => MembershipInput::HistorySyncFinished {
+        LedgerWork::SynchronizeHistory { peer } => LedgerInput::HistorySyncFinished {
             peer,
             synced_position: membership.history().current_position().unwrap(),
-            result: HistorySyncResult::Confirmed,
+            result: PeerSyncResult::Confirmed,
         },
     }
 }
@@ -325,15 +322,15 @@ fn joined_member_starts_consistent_but_awaits_confirmation_of_its_position() {
         Some(PeerLink::Member(link)) if link.relation() == PeerRelation::Consistent
     ));
     let view = view_of(&membership);
-    assert_eq!(view.local_status, MemberStatus::Active);
+    assert_eq!(view.local_status, LedgerMemberStatus::Active);
     assert_eq!(
         device_view(&view, "device-a").unwrap().relation,
-        RelationView::ConfirmationPending
+        PeerRelationView::ConfirmationPending
     );
-    assert_eq!(view.device_update, DeviceUpdateView::Updating);
+    assert_eq!(view.device_update, LedgerUpdateView::Updating);
 
     let settled = run_due_work(membership, NOW);
-    assert_eq!(view_of(&settled).device_update, DeviceUpdateView::Completed);
+    assert_eq!(view_of(&settled).device_update, LedgerUpdateView::Completed);
     assert_eq!(
         view_of(&settled).scope.usable_peer_device_ids,
         vec![device("device-a")]
@@ -345,14 +342,14 @@ fn start_rejects_a_local_member_outside_the_history() {
     let group = Group::new(&["device-a"]);
     let stranger = admission("device-z", 0x7a);
 
-    let result = SpaceMembership::start(
+    let result = MembershipLedger::start(
         group.history.clone(),
         stranger.facts.device_id,
         stranger.facts.member_instance,
         1,
     );
 
-    assert_eq!(result.unwrap_err(), SpaceMembershipError::InputMismatch);
+    assert_eq!(result.unwrap_err(), LedgerTransitionError::InputMismatch);
 }
 
 // R1：移除通知送达后，被移除设备从移除方的设备列表中消失，设备更新完成。
@@ -364,37 +361,37 @@ fn delivered_removal_notice_ends_the_departure() {
 
     let (removed, outcome, effects) = apply(
         membership,
-        MembershipInput::LocalRemovalSigned {
+        LedgerInput::LocalRemovalSigned {
             history,
             retained_device_ids: Vec::new(),
         },
         NOW,
     );
 
-    assert_eq!(outcome, MembershipOutcome::Applied);
+    assert_eq!(outcome, LedgerOutcome::Applied);
     assert_eq!(removed.revision(), 12);
     assert_eq!(
         effects,
         vec![
-            MembershipEffect::AfterCommit(MembershipFollowUp::PublishDeviceTrustChange),
-            MembershipEffect::AfterCommit(MembershipFollowUp::WakeWorker),
+            LedgerEffect::AfterCommit(LedgerFollowUp::PublishDeviceTrustChange),
+            LedgerEffect::AfterCommit(LedgerFollowUp::WakeWorker),
         ]
     );
     let view = view_of(&removed);
     let departing = device_view(&view, "device-b").unwrap();
-    assert_eq!(departing.status, MemberStatus::PendingActivation);
+    assert_eq!(departing.status, LedgerMemberStatus::PendingActivation);
     assert_eq!(
         departing.relation,
-        RelationView::AwaitingRemovalAcknowledgement
+        PeerRelationView::AwaitingRemovalAcknowledgement
     );
     assert_eq!(
         departing.sync,
-        SyncView::Paused(PauseReason::LocalMemberInactive)
+        PeerSyncView::Paused(PeerPauseReason::LocalMemberInactive)
     );
 
     let effects_done = run_effects_only(removed);
     let view = view_of(&effects_done);
-    assert_eq!(view.device_update, DeviceUpdateView::Completed);
+    assert_eq!(view.device_update, LedgerUpdateView::Completed);
     assert!(effects_done
         .outstanding_work(NOW)
         .unwrap()
@@ -403,27 +400,27 @@ fn delivered_removal_notice_ends_the_departure() {
 
     let (delivered, outcome, _) = apply(
         effects_done,
-        MembershipInput::DeliveryFinished {
+        LedgerInput::DeliveryFinished {
             peer: device("device-b"),
-            delivery: DeliveryKind::RemovalNotice,
-            result: DeliveryResult::Delivered,
+            delivery: LedgerDeliveryKind::RemovalNotice,
+            result: LedgerDeliveryResult::Delivered,
         },
         NOW,
     );
-    assert_eq!(outcome, MembershipOutcome::Applied);
+    assert_eq!(outcome, LedgerOutcome::Applied);
     assert!(delivered.peer(&device("device-b")).is_none());
     assert!(device_view(&view_of(&delivered), "device-b").is_none());
     assert!(delivered.outstanding_work(NOW).unwrap().is_empty());
 }
 
-fn run_effects_only(mut membership: SpaceMembership) -> SpaceMembership {
+fn run_effects_only(mut membership: MembershipLedger) -> MembershipLedger {
     loop {
         let Some(effect) = membership.unfinished_effects().next().cloned() else {
             return membership;
         };
         membership = apply(
             membership,
-            MembershipInput::EffectStepFinished {
+            LedgerInput::EffectStepFinished {
                 event_id: effect.event_id(),
                 from: effect.phase(),
             },
@@ -442,7 +439,7 @@ fn undelivered_departure_ends_exactly_at_the_window_boundary() {
     let removed = run_effects_only(
         apply(
             membership,
-            MembershipInput::LocalRemovalSigned {
+            LedgerInput::LocalRemovalSigned {
                 history,
                 retained_device_ids: Vec::new(),
             },
@@ -453,60 +450,60 @@ fn undelivered_departure_ends_exactly_at_the_window_boundary() {
     let expires_at = NOW + DEPARTURE_WINDOW_MS;
     let deferred = apply(
         removed,
-        MembershipInput::DeliveryFinished {
+        LedgerInput::DeliveryFinished {
             peer: device("device-b"),
-            delivery: DeliveryKind::RemovalNotice,
-            result: DeliveryResult::Deferred,
+            delivery: LedgerDeliveryKind::RemovalNotice,
+            result: LedgerDeliveryResult::Deferred,
         },
         NOW,
     );
-    assert_eq!(deferred.1, MembershipOutcome::Unchanged);
+    assert_eq!(deferred.1, LedgerOutcome::Unchanged);
 
     let early = apply(
         deferred.0,
-        MembershipInput::DepartureWindowElapsed {
+        LedgerInput::DepartureWindowElapsed {
             peer: device("device-b"),
         },
         expires_at - 1,
     );
-    assert_eq!(early.1, MembershipOutcome::Unchanged);
+    assert_eq!(early.1, LedgerOutcome::Unchanged);
     let notice_at_boundary = early.0.outstanding_work(expires_at).unwrap();
     assert_eq!(
         notice_at_boundary
             .iter()
             .map(|work| &work.work)
             .collect::<Vec<_>>(),
-        vec![&MembershipWork::EndDeparture {
+        vec![&LedgerWork::EndDeparture {
             peer: device("device-b")
         }]
     );
 
     let (ended, outcome, _) = apply(
         early.0,
-        MembershipInput::DepartureWindowElapsed {
+        LedgerInput::DepartureWindowElapsed {
             peer: device("device-b"),
         },
         expires_at,
     );
-    assert_eq!(outcome, MembershipOutcome::Applied);
+    assert_eq!(outcome, LedgerOutcome::Applied);
     assert!(ended.peer(&device("device-b")).is_none());
 }
 
 /// 返回 B 视角：已收到 A 对 B 的移除，等待本机决定。
-fn removed_device_awaiting_decision(group: &Group) -> (SpaceMembership, MembershipEventId) {
+fn removed_device_awaiting_decision(group: &Group) -> (MembershipLedger, MembershipEventId) {
     let local = run_due_work(group.start("device-b"), NOW);
     let (remote, removal) = group.removal(&group.history, "device-a", "device-b", 0x33);
     let received = group.received(local.history(), &remote, "device-b");
     let (awaiting, outcome, _) = apply(
         local,
-        MembershipInput::PeerEvidenceReconciled {
+        LedgerInput::PeerEvidenceReconciled {
             source: device("device-a"),
             history: Some(received),
             evidence: PeerEvidence::Confirmed,
         },
         NOW,
     );
-    assert_eq!(outcome, MembershipOutcome::Applied);
+    assert_eq!(outcome, LedgerOutcome::Applied);
     (awaiting, removal.event_id())
 }
 
@@ -516,14 +513,14 @@ fn received_removal_waits_for_the_local_decision() {
     let (awaiting, _) = removed_device_awaiting_decision(&group);
 
     let view = view_of(&awaiting);
-    assert_eq!(view.local_status, MemberStatus::Active);
+    assert_eq!(view.local_status, LedgerMemberStatus::Active);
     assert_eq!(
         device_view(&view, "device-a").unwrap().relation,
-        RelationView::PendingLocalDecision
+        PeerRelationView::PendingLocalDecision
     );
     assert_eq!(
         view.device_update,
-        DeviceUpdateView::NeedsAttention(DeviceUpdateProblem::DeviceRelationshipConflict)
+        LedgerUpdateView::NeedsAttention(LedgerUpdateProblem::DeviceRelationshipConflict)
     );
 }
 
@@ -541,27 +538,30 @@ fn accepted_local_removal_is_a_terminal_state_without_outstanding_work() {
 
     let (accepted, outcome, _) = apply(
         awaiting,
-        MembershipInput::LocalDecisionSigned {
+        LedgerInput::LocalDecisionSigned {
             history,
             removal_event_id: removal,
         },
         NOW,
     );
-    assert_eq!(outcome, MembershipOutcome::Applied);
+    assert_eq!(outcome, LedgerOutcome::Applied);
     assert!(matches!(
         accepted.peer(&device("device-a")),
         Some(PeerLink::Member(link)) if link.outgoing_decision().is_none()
     ));
-    assert_eq!(accepted.local_status(), MemberStatus::PendingActivation);
+    assert_eq!(
+        accepted.local_status(),
+        LedgerMemberStatus::PendingActivation
+    );
 
     let settled = run_due_work(accepted, NOW);
     let view = view_of(&settled);
-    assert_eq!(view.local_status, MemberStatus::Removed);
+    assert_eq!(view.local_status, LedgerMemberStatus::Removed);
     assert_eq!(
         device_view(&view, "device-b").unwrap().sync,
-        SyncView::Paused(PauseReason::LocalMemberInactive)
+        PeerSyncView::Paused(PeerPauseReason::LocalMemberInactive)
     );
-    assert_eq!(view.device_update, DeviceUpdateView::Completed);
+    assert_eq!(view.device_update, LedgerUpdateView::Completed);
     assert!(settled.outstanding_work(NOW).unwrap().is_empty());
     assert!(settled
         .outstanding_work(NOW + DEPARTURE_WINDOW_MS * 10)
@@ -583,7 +583,7 @@ fn rejected_local_removal_diverges_without_an_undeliverable_decision() {
 
     let (rejected, _, _) = apply(
         awaiting,
-        MembershipInput::LocalDecisionSigned {
+        LedgerInput::LocalDecisionSigned {
             history,
             removal_event_id: removal,
         },
@@ -596,10 +596,10 @@ fn rejected_local_removal_diverges_without_an_undeliverable_decision() {
             if link.relation() == PeerRelation::Diverged && link.outgoing_decision().is_none()
     ));
     let view = view_of(&rejected);
-    assert_eq!(view.local_status, MemberStatus::Active);
+    assert_eq!(view.local_status, LedgerMemberStatus::Active);
     assert_eq!(
         view.device_update,
-        DeviceUpdateView::NeedsAttention(DeviceUpdateProblem::DeviceRelationshipConflict)
+        LedgerUpdateView::NeedsAttention(LedgerUpdateProblem::DeviceRelationshipConflict)
     );
     assert!(rejected.outstanding_work(NOW).unwrap().is_empty());
 }
@@ -613,7 +613,7 @@ fn third_member_delivers_its_acceptance_to_the_proposer() {
     let received = group.received(local.history(), &remote, "device-c");
     let awaiting = apply(
         local,
-        MembershipInput::PeerEvidenceReconciled {
+        LedgerInput::PeerEvidenceReconciled {
             source: device("device-a"),
             history: Some(received),
             evidence: PeerEvidence::Confirmed,
@@ -630,7 +630,7 @@ fn third_member_delivers_its_acceptance_to_the_proposer() {
 
     let accepted = apply(
         awaiting,
-        MembershipInput::LocalDecisionSigned {
+        LedgerInput::LocalDecisionSigned {
             history,
             removal_event_id: removal.event_id(),
         },
@@ -642,14 +642,14 @@ fn third_member_delivers_its_acceptance_to_the_proposer() {
     let work = accepted.outstanding_work(NOW).unwrap();
     assert!(work.iter().any(|work| matches!(
         &work.work,
-        MembershipWork::DeliverDecision { peer, .. } if peer == &device("device-a")
+        LedgerWork::DeliverDecision { peer, .. } if peer == &device("device-a")
     ) && work.blocks_device_update));
     let settled = run_due_work(accepted, NOW);
     assert!(matches!(
         settled.peer(&device("device-a")),
         Some(PeerLink::Member(link)) if link.outgoing_decision().is_none()
     ));
-    assert_eq!(view_of(&settled).device_update, DeviceUpdateView::Completed);
+    assert_eq!(view_of(&settled).device_update, LedgerUpdateView::Completed);
 }
 
 #[test]
@@ -660,16 +660,16 @@ fn deferred_history_sync_reports_the_next_retry_and_recovers() {
 
     let (deferred, _, _) = apply(
         membership,
-        MembershipInput::HistorySyncFinished {
+        LedgerInput::HistorySyncFinished {
             peer: device("device-b"),
             synced_position: position.clone(),
-            result: HistorySyncResult::Deferred,
+            result: PeerSyncResult::Deferred,
         },
         NOW,
     );
     assert_eq!(
         view_of(&deferred).device_update,
-        DeviceUpdateView::RetryableFailure {
+        LedgerUpdateView::RetryableFailure {
             next_retry_at_ms: NOW + 1_000
         }
     );
@@ -679,16 +679,16 @@ fn deferred_history_sync_reports_the_next_retry_and_recovers() {
 
     let (confirmed, _, _) = apply(
         deferred,
-        MembershipInput::HistorySyncFinished {
+        LedgerInput::HistorySyncFinished {
             peer: device("device-b"),
             synced_position: position,
-            result: HistorySyncResult::Confirmed,
+            result: PeerSyncResult::Confirmed,
         },
         NOW + 1_000,
     );
     assert_eq!(
         view_of(&confirmed).device_update,
-        DeviceUpdateView::Completed
+        LedgerUpdateView::Completed
     );
     assert!(confirmed.outstanding_work(NOW).unwrap().is_empty());
 }
@@ -701,7 +701,7 @@ fn history_sync_result_for_an_older_position_is_stale() {
     let (history, _) = group.removal(membership.history(), "device-a", "device-c", 0x35);
     let removed = apply(
         membership,
-        MembershipInput::LocalRemovalSigned {
+        LedgerInput::LocalRemovalSigned {
             history,
             retained_device_ids: vec![device("device-b")],
         },
@@ -711,15 +711,15 @@ fn history_sync_result_for_an_older_position_is_stale() {
 
     let (unchanged, outcome, effects) = apply(
         removed.clone(),
-        MembershipInput::HistorySyncFinished {
+        LedgerInput::HistorySyncFinished {
             peer: device("device-b"),
             synced_position: old_position,
-            result: HistorySyncResult::Confirmed,
+            result: PeerSyncResult::Confirmed,
         },
         NOW,
     );
 
-    assert_eq!(outcome, MembershipOutcome::Stale);
+    assert_eq!(outcome, LedgerOutcome::Stale);
     assert!(effects.is_empty());
     assert_eq!(unchanged, removed);
 }
@@ -746,28 +746,24 @@ fn admission_invalidates_earlier_confirmations() {
 
     let (admitted, outcome, _) = apply(
         membership.clone(),
-        MembershipInput::AdmissionCommitted {
+        LedgerInput::AdmissionCommitted {
             history: history.clone(),
         },
         NOW,
     );
-    assert_eq!(outcome, MembershipOutcome::Applied);
+    assert_eq!(outcome, LedgerOutcome::Applied);
     let view = view_of(&admitted);
     assert_eq!(
         device_view(&view, "device-b").unwrap().relation,
-        RelationView::ConfirmationPending
+        PeerRelationView::ConfirmationPending
     );
     assert_eq!(
         device_view(&view, "device-c").unwrap().relation,
-        RelationView::ConfirmationPending
+        PeerRelationView::ConfirmationPending
     );
 
-    let (_, repeated, effects) = apply(
-        admitted,
-        MembershipInput::AdmissionCommitted { history },
-        NOW,
-    );
-    assert_eq!(repeated, MembershipOutcome::Unchanged);
+    let (_, repeated, effects) = apply(admitted, LedgerInput::AdmissionCommitted { history }, NOW);
+    assert_eq!(repeated, LedgerOutcome::Unchanged);
     assert!(effects.is_empty());
 }
 
@@ -778,10 +774,10 @@ fn history_from_another_lineage_is_rejected() {
     let other = VersionedMembershipHistory::new("another-lineage".to_owned());
 
     let error = membership
-        .apply(MembershipInput::AdmissionCommitted { history: other }, NOW)
+        .apply(LedgerInput::AdmissionCommitted { history: other }, NOW)
         .unwrap_err();
 
-    assert_eq!(error, SpaceMembershipError::LineageMismatch);
+    assert_eq!(error, LedgerTransitionError::LineageMismatch);
 }
 
 #[test]
@@ -791,7 +787,7 @@ fn snapshot_round_trips_and_rejects_broken_invariants() {
     let (history, _) = group.removal(membership.history(), "device-a", "device-b", 0x37);
     let removed = apply(
         membership,
-        MembershipInput::LocalRemovalSigned {
+        LedgerInput::LocalRemovalSigned {
             history,
             retained_device_ids: vec![device("device-c")],
         },
@@ -800,23 +796,23 @@ fn snapshot_round_trips_and_rejects_broken_invariants() {
     .0;
 
     assert_eq!(
-        SpaceMembership::restore(removed.snapshot()).unwrap(),
+        MembershipLedger::restore(removed.snapshot()).unwrap(),
         removed
     );
 
     let mut missing_member = removed.snapshot();
     missing_member.peers.remove(&device("device-c"));
     assert_eq!(
-        SpaceMembership::restore(missing_member).unwrap_err(),
-        SpaceMembershipError::InvalidSnapshot
+        MembershipLedger::restore(missing_member).unwrap_err(),
+        LedgerTransitionError::InvalidSnapshot
     );
 
     let mut member_departing = removed.snapshot();
     let departing = member_departing.peers[&device("device-b")].clone();
     member_departing.peers.insert(device("device-c"), departing);
     assert_eq!(
-        SpaceMembership::restore(member_departing).unwrap_err(),
-        SpaceMembershipError::InvalidSnapshot
+        MembershipLedger::restore(member_departing).unwrap_err(),
+        LedgerTransitionError::InvalidSnapshot
     );
 
     let mut stray = removed.snapshot();
@@ -827,8 +823,8 @@ fn snapshot_round_trips_and_rejects_broken_invariants() {
         .peers
         .insert(device("device-z"), PeerLinkSnapshot::Member(member));
     assert_eq!(
-        SpaceMembership::restore(stray).unwrap_err(),
-        SpaceMembershipError::InvalidSnapshot
+        MembershipLedger::restore(stray).unwrap_err(),
+        LedgerTransitionError::InvalidSnapshot
     );
 }
 
@@ -849,21 +845,21 @@ impl Seeded {
 }
 
 /// 阻塞设备更新的待办非空，当且仅当成员部分为更新中或可重试失败；需要处理状态除外。
-fn assert_work_matches_presentation(membership: &SpaceMembership, now_ms: i64, seed: u64) {
+fn assert_work_matches_presentation(membership: &MembershipLedger, now_ms: i64, seed: u64) {
     let blocking = membership
         .outstanding_work(now_ms)
         .unwrap()
         .iter()
         .any(|work| work.blocks_device_update);
     match view_of(membership).device_update {
-        DeviceUpdateView::NeedsAttention(_) => {}
-        DeviceUpdateView::Updating | DeviceUpdateView::RetryableFailure { .. } => {
+        LedgerUpdateView::NeedsAttention(_) => {}
+        LedgerUpdateView::Updating | LedgerUpdateView::RetryableFailure { .. } => {
             assert!(
                 blocking,
                 "seed {seed}: update shown without outstanding work"
             )
         }
-        DeviceUpdateView::Completed => {
+        LedgerUpdateView::Completed => {
             assert!(
                 !blocking,
                 "seed {seed}: outstanding work hidden behind completion"
@@ -895,7 +891,7 @@ fn seeded_interleavings_keep_invariants_and_converge() {
                     marker = marker.wrapping_add(1);
                     let (history, _) =
                         group.removal(membership.history(), "device-a", target.as_str(), marker);
-                    MembershipInput::LocalRemovalSigned {
+                    LedgerInput::LocalRemovalSigned {
                         history,
                         retained_device_ids: Vec::new(),
                     }
@@ -919,7 +915,7 @@ fn seeded_interleavings_keep_invariants_and_converge() {
                         PeerEvidence::NeedsEvidence,
                     ][random.pick(3)]
                     .clone();
-                    MembershipInput::PeerEvidenceReconciled {
+                    LedgerInput::PeerEvidenceReconciled {
                         source: peers[random.pick(peers.len())],
                         history: None,
                         evidence,
@@ -956,7 +952,7 @@ fn seeded_interleavings_keep_invariants_and_converge() {
         assert!(
             !matches!(
                 view_of(&membership).device_update,
-                DeviceUpdateView::Updating | DeviceUpdateView::RetryableFailure { .. }
+                LedgerUpdateView::Updating | LedgerUpdateView::RetryableFailure { .. }
             ),
             "seed {seed}: device update must settle"
         );
@@ -965,34 +961,34 @@ fn seeded_interleavings_keep_invariants_and_converge() {
 }
 
 fn random_result(
-    membership: &SpaceMembership,
-    work: MembershipWork,
+    membership: &MembershipLedger,
+    work: LedgerWork,
     random: &mut Seeded,
-) -> MembershipInput {
+) -> LedgerInput {
     let delivery = [
-        DeliveryResult::Delivered,
-        DeliveryResult::Deferred,
-        DeliveryResult::Rejected,
+        LedgerDeliveryResult::Delivered,
+        LedgerDeliveryResult::Deferred,
+        LedgerDeliveryResult::Rejected,
     ][random.pick(3)];
     match work {
-        MembershipWork::DeliverRemovalNotice { peer, .. } => MembershipInput::DeliveryFinished {
+        LedgerWork::DeliverRemovalNotice { peer, .. } => LedgerInput::DeliveryFinished {
             peer,
-            delivery: DeliveryKind::RemovalNotice,
+            delivery: LedgerDeliveryKind::RemovalNotice,
             result: delivery,
         },
-        MembershipWork::DeliverDecision { peer, .. } => MembershipInput::DeliveryFinished {
+        LedgerWork::DeliverDecision { peer, .. } => LedgerInput::DeliveryFinished {
             peer,
-            delivery: DeliveryKind::Decision,
+            delivery: LedgerDeliveryKind::Decision,
             result: delivery,
         },
-        MembershipWork::SynchronizeHistory { peer } => MembershipInput::HistorySyncFinished {
+        LedgerWork::SynchronizeHistory { peer } => LedgerInput::HistorySyncFinished {
             peer,
             synced_position: membership.history().current_position().unwrap(),
             result: [
-                HistorySyncResult::Confirmed,
-                HistorySyncResult::Deferred,
-                HistorySyncResult::Deferred,
-                HistorySyncResult::Invalid,
+                PeerSyncResult::Confirmed,
+                PeerSyncResult::Deferred,
+                PeerSyncResult::Deferred,
+                PeerSyncResult::Invalid,
             ][random.pick(4)],
         },
         other => success_input(membership, other),
@@ -1006,7 +1002,7 @@ fn effect_steps_advance_in_order_and_ignore_stale_reports() {
     let (history, event) = group.removal(membership.history(), "device-a", "device-b", 0x38);
     let removed = apply(
         membership,
-        MembershipInput::LocalRemovalSigned {
+        LedgerInput::LocalRemovalSigned {
             history,
             retained_device_ids: Vec::new(),
         },
@@ -1016,13 +1012,13 @@ fn effect_steps_advance_in_order_and_ignore_stale_reports() {
 
     let (_, stale, _) = apply(
         removed.clone(),
-        MembershipInput::EffectStepFinished {
+        LedgerInput::EffectStepFinished {
             event_id: event.event_id(),
             from: MemberEffectPhase::SecurityApplied,
         },
         NOW,
     );
-    assert_eq!(stale, MembershipOutcome::Stale);
+    assert_eq!(stale, LedgerOutcome::Stale);
 
     let mut current = removed;
     for phase in [
@@ -1032,13 +1028,13 @@ fn effect_steps_advance_in_order_and_ignore_stale_reports() {
     ] {
         let (next, outcome, _) = apply(
             current,
-            MembershipInput::EffectStepFinished {
+            LedgerInput::EffectStepFinished {
                 event_id: event.event_id(),
                 from: phase,
             },
             NOW,
         );
-        assert_eq!(outcome, MembershipOutcome::Applied);
+        assert_eq!(outcome, LedgerOutcome::Applied);
         current = next;
     }
     assert_eq!(current.unfinished_effects().count(), 0);
@@ -1067,7 +1063,7 @@ fn adopted_remote_admission_registers_an_effect_for_the_new_member() {
 
     let (adopted, outcome, _) = apply(
         local,
-        MembershipInput::PeerEvidenceReconciled {
+        LedgerInput::PeerEvidenceReconciled {
             source: device("device-a"),
             history: Some(received),
             evidence: PeerEvidence::Confirmed,
@@ -1075,7 +1071,7 @@ fn adopted_remote_admission_registers_an_effect_for_the_new_member() {
         NOW,
     );
 
-    assert_eq!(outcome, MembershipOutcome::Applied);
+    assert_eq!(outcome, LedgerOutcome::Applied);
     let effect = adopted.unfinished_effects().next().unwrap();
     assert_eq!(effect.event_id(), event.event_id());
     assert_eq!(effect.kind(), super::MemberEffectKind::AddDevice);
@@ -1086,10 +1082,10 @@ fn adopted_remote_admission_registers_an_effect_for_the_new_member() {
     ));
     assert_eq!(
         device_view(&view_of(&adopted), "device-d").unwrap().sync,
-        SyncView::Paused(PauseReason::EffectPending)
+        PeerSyncView::Paused(PeerPauseReason::EffectPending)
     );
     let settled = run_due_work(adopted, NOW);
-    assert_eq!(view_of(&settled).device_update, DeviceUpdateView::Completed);
+    assert_eq!(view_of(&settled).device_update, LedgerUpdateView::Completed);
 }
 
 #[test]
@@ -1099,7 +1095,7 @@ fn recovered_branch_rebuilds_peers_and_drops_old_branch_work() {
     let (history, _) = group.removal(membership.history(), "device-a", "device-b", 0x3a);
     let removed = apply(
         membership,
-        MembershipInput::LocalRemovalSigned {
+        LedgerInput::LocalRemovalSigned {
             history,
             retained_device_ids: vec![device("device-c")],
         },
@@ -1109,13 +1105,13 @@ fn recovered_branch_rebuilds_peers_and_drops_old_branch_work() {
 
     let (recovered, outcome, _) = apply(
         removed,
-        MembershipInput::BranchRecovered {
+        LedgerInput::BranchRecovered {
             history: group.history.clone(),
         },
         NOW,
     );
 
-    assert_eq!(outcome, MembershipOutcome::Applied);
+    assert_eq!(outcome, LedgerOutcome::Applied);
     assert_eq!(recovered.unfinished_effects().count(), 0);
     for peer in ["device-b", "device-c"] {
         assert!(matches!(

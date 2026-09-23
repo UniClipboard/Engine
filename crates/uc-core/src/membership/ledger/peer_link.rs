@@ -1,6 +1,6 @@
 use crate::membership::{BaseMembershipHistoryPosition, MembershipDecisionV2, MembershipEventV2};
 
-use super::SpaceMembershipError;
+use super::LedgerTransitionError;
 
 /// 已被本机移除的设备只在这段时间内接收移除通知；到期后本机结束通知责任。
 pub const DEPARTURE_WINDOW_MS: i64 = 300_000;
@@ -26,7 +26,7 @@ pub enum PeerRelation {
 
 /// 最近一次向该对端同步历史的结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HistorySyncOutcome {
+pub enum PeerSyncOutcome {
     Never,
     Deferred,
     Acked,
@@ -35,20 +35,20 @@ pub enum HistorySyncOutcome {
 
 /// 向一个对端同步历史的退避状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SyncBackoff {
+pub struct PeerSyncBackoff {
     pending_since_revision: Option<u64>,
     retry_attempt: u32,
     next_attempt_at_ms: i64,
-    last_outcome: HistorySyncOutcome,
+    last_outcome: PeerSyncOutcome,
 }
 
-impl SyncBackoff {
+impl PeerSyncBackoff {
     pub(super) fn fresh(pending_since_revision: Option<u64>) -> Self {
         Self {
             pending_since_revision,
             retry_attempt: 0,
             next_attempt_at_ms: 0,
-            last_outcome: HistorySyncOutcome::Never,
+            last_outcome: PeerSyncOutcome::Never,
         }
     }
 
@@ -56,7 +56,7 @@ impl SyncBackoff {
         pending_since_revision: Option<u64>,
         retry_attempt: u32,
         next_attempt_at_ms: i64,
-        last_outcome: HistorySyncOutcome,
+        last_outcome: PeerSyncOutcome,
     ) -> Self {
         Self {
             pending_since_revision,
@@ -78,7 +78,7 @@ impl SyncBackoff {
         self.next_attempt_at_ms
     }
 
-    pub fn last_outcome(&self) -> HistorySyncOutcome {
+    pub fn last_outcome(&self) -> PeerSyncOutcome {
         self.last_outcome
     }
 
@@ -86,20 +86,20 @@ impl SyncBackoff {
         self.pending_since_revision.get_or_insert(revision);
     }
 
-    pub(super) fn settle(&mut self, outcome: HistorySyncOutcome) {
+    pub(super) fn settle(&mut self, outcome: PeerSyncOutcome) {
         self.pending_since_revision = None;
         self.retry_attempt = 0;
         self.next_attempt_at_ms = 0;
         self.last_outcome = outcome;
     }
 
-    pub(super) fn defer(&mut self, now_ms: i64) -> Result<(), SpaceMembershipError> {
+    pub(super) fn defer(&mut self, now_ms: i64) -> Result<(), LedgerTransitionError> {
         self.retry_attempt = self
             .retry_attempt
             .checked_add(1)
-            .ok_or(SpaceMembershipError::RetryOverflow)?;
+            .ok_or(LedgerTransitionError::RetryOverflow)?;
         self.next_attempt_at_ms = now_ms.saturating_add(retry_delay_ms(self.retry_attempt));
-        self.last_outcome = HistorySyncOutcome::Deferred;
+        self.last_outcome = PeerSyncOutcome::Deferred;
         Ok(())
     }
 
@@ -129,12 +129,12 @@ fn retry_delay_ms(retry_attempt: u32) -> i64 {
 pub struct MemberLink {
     relation: PeerRelation,
     confirmed_position: Option<BaseMembershipHistoryPosition>,
-    sync: SyncBackoff,
+    sync: PeerSyncBackoff,
     outgoing_decision: Option<Box<MembershipDecisionV2>>,
 }
 
 impl MemberLink {
-    pub(super) fn new(relation: PeerRelation, sync: SyncBackoff) -> Self {
+    pub(super) fn new(relation: PeerRelation, sync: PeerSyncBackoff) -> Self {
         Self {
             relation,
             confirmed_position: None,
@@ -146,7 +146,7 @@ impl MemberLink {
     pub(super) fn from_parts(
         relation: PeerRelation,
         confirmed_position: Option<BaseMembershipHistoryPosition>,
-        sync: SyncBackoff,
+        sync: PeerSyncBackoff,
         outgoing_decision: Option<MembershipDecisionV2>,
     ) -> Self {
         Self {
@@ -165,7 +165,7 @@ impl MemberLink {
         self.confirmed_position.as_ref()
     }
 
-    pub fn sync(&self) -> &SyncBackoff {
+    pub fn sync(&self) -> &PeerSyncBackoff {
         &self.sync
     }
 
@@ -191,7 +191,7 @@ impl MemberLink {
         }
     }
 
-    pub(super) fn sync_mut(&mut self) -> &mut SyncBackoff {
+    pub(super) fn sync_mut(&mut self) -> &mut PeerSyncBackoff {
         &mut self.sync
     }
 

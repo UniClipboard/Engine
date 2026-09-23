@@ -6,6 +6,7 @@ mod bootstrap;
 mod cross_space_transition;
 mod error;
 mod gossip;
+mod ledger;
 mod member;
 mod member_instance;
 mod membership_branch_recovery;
@@ -18,7 +19,6 @@ mod protection;
 mod revocation;
 mod settlement_window;
 mod space_admission;
-pub mod space_membership;
 mod versioned_membership_history;
 mod workspace_convergence;
 
@@ -62,6 +62,17 @@ pub use gossip::{
     MembershipRequestMissing, MembershipSharedDevicePage, MembershipSharedDevicePageRequest,
     PendingMembershipBatch, RelayedSecurityUpdate, SpaceMembershipCandidate, SponsorCandidateSeed,
     VerifiedMembershipPeer,
+};
+pub use ledger::{
+    DepartingLink, DepartingLinkSnapshot, LedgerDeliveryKind, LedgerDeliveryResult,
+    LedgerDeviceView, LedgerEffect, LedgerFollowUp, LedgerInput, LedgerMemberStatus, LedgerOutcome,
+    LedgerScope, LedgerTransition, LedgerTransitionError, LedgerTransitionErrorCategory,
+    LedgerUpdateProblem, LedgerUpdateView, LedgerView, LedgerWork, MemberEffectKind,
+    MemberEffectMaterial, MemberEffectPhase, MemberLink, MemberLinkSnapshot, MembershipLedger,
+    MembershipLedgerSnapshot, PeerEvidence, PeerLink, PeerLinkSnapshot, PeerPauseReason,
+    PeerRelation, PeerRelationView, PeerSyncBackoff, PeerSyncBackoffSnapshot, PeerSyncOutcome,
+    PeerSyncResult, PeerSyncView, ScheduledLedgerWork, SecurityDeliveryStatus,
+    UnfinishedMemberEffect, UnfinishedMemberEffectSnapshot, DEPARTURE_WINDOW_MS,
 };
 pub use member::SpaceMember;
 pub use member_instance::MemberInstanceId;

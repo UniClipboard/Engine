@@ -2,7 +2,7 @@ use crate::membership::MembershipHistoryV2Error;
 
 /// 输入在当前状态下不合法，或记录已无法安全推进。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum SpaceMembershipError {
+pub enum LedgerTransitionError {
     #[error("the membership input belongs to another space lineage")]
     LineageMismatch,
     #[error("the membership input does not match the current membership state")]
@@ -19,26 +19,26 @@ pub enum SpaceMembershipError {
 
 /// 流程负责人据此选择拒绝输入或进入恢复。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpaceMembershipErrorCategory {
+pub enum LedgerTransitionErrorCategory {
     /// 输入不适用于当前状态，记录本身仍可继续推进。
     Rejected,
     /// 记录已无法按规则推进，需要恢复处理。
     RecoveryRequired,
 }
 
-impl SpaceMembershipError {
-    pub fn category(&self) -> SpaceMembershipErrorCategory {
+impl LedgerTransitionError {
+    pub fn category(&self) -> LedgerTransitionErrorCategory {
         match self {
-            Self::LineageMismatch | Self::InputMismatch => SpaceMembershipErrorCategory::Rejected,
+            Self::LineageMismatch | Self::InputMismatch => LedgerTransitionErrorCategory::Rejected,
             Self::InvalidSnapshot
             | Self::History(_)
             | Self::RevisionOverflow
-            | Self::RetryOverflow => SpaceMembershipErrorCategory::RecoveryRequired,
+            | Self::RetryOverflow => LedgerTransitionErrorCategory::RecoveryRequired,
         }
     }
 }
 
-impl From<MembershipHistoryV2Error> for SpaceMembershipError {
+impl From<MembershipHistoryV2Error> for LedgerTransitionError {
     fn from(source: MembershipHistoryV2Error) -> Self {
         Self::History(source)
     }

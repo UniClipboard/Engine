@@ -7,7 +7,7 @@
 - **依据**：[ADR-027](../../design-docs/decisions/027-single-owner-space-membership-state.md)；2026-09-23 双 Desktop
   profile 配对后移除，移除方设备不消失、被移除方永久“正在更新空间设备状态”的诊断（结论见 ADR-027 背景）。
 - **完整负责人**：
-  - 成员规则、对端状态、待办与展示计算：Core `space_membership` 聚合。
+  - 成员规则、对端状态、待办与展示计算：Core 成员账本聚合 `MembershipLedger`（`crates/uc-core/src/membership/ledger/`）。
   - 成员事实的唯一写入、提交后效果履行、快照发布与唤醒：Application `MembershipOwner`。
   - 持久待办执行：Application `MembershipWorker`，只把结果交回 Owner。
   - 入站对端访问判定：Application `PeerAccess`，读取 Owner 发布的快照。
@@ -25,13 +25,13 @@
 
 ### 目标
 
-1. 新增 Core `SpaceMembership` 聚合，按 [Core 设计规范](../../design-docs/layers/core.md#5-状态机)提供唯一
-   `apply`、`due_work`、`present` 与 `snapshot`/`restore`。
+1. 新增 Core 成员账本聚合 `MembershipLedger`，按 [Core 设计规范](../../design-docs/layers/core.md#5-状态机)提供唯一
+   `apply`、`outstanding_work`、`present` 与 `snapshot`/`restore`。
 2. 以 `MembershipOwner`、`MembershipWorker`、`PeerAccess` 替换 `MembershipLedger` 闭包提交、效果执行器、
    受限投递、历史反熵拆分、投影清理步骤与维护固定步骤链。
 3. 准入正式提交与加入方激活经 Owner 输入，作为准入转换的 `BeforeCommit` 效果按事件幂等提交（成员记录在
    `control.sqlite`，准入记录在 profile 数据库，不共用事务）；删除 Infra 中全部成员记录构造与改写。
-4. 新增唯一最终成员记录格式 `SpaceMembershipRecordV5`，从 V1–V4 一次性迁移。
+4. 新增唯一最终成员记录格式 `MembershipLedgerRecordV5`，从 V1–V4 一次性迁移。
 5. 采纳 ADR-027 的三项协议语义澄清：被移除方接受后不回复决定；正在离开的对端以送达或 5 分钟到期结束；
    本机已移除为终态。
 
@@ -56,18 +56,19 @@
 ## 目标结构
 
 ```text
-crates/uc-core/src/membership/space_membership/
+crates/uc-core/src/membership/ledger/
   mod.rs          状态、输入、效果、不变量与终态的模块文档；只做声明和导出
-  aggregate.rs    SpaceMembership、apply 的穷尽分发、snapshot/restore
-  local.rs        LocalStanding
-  peer_link.rs    PeerLink 与各状态的结束条件
-  input.rs        MembershipInput
-  effect.rs       BeforeCommit / AfterCommit 效果
-  work.rs         due_work 与 Work
-  present.rs      present 与展示映射表
+  aggregate.rs    MembershipLedger、apply 的穷尽分发、规范化与不变量校验
+  peer_link.rs    PeerLink（Member / Departing）、关系与同步退避
+  input.rs        LedgerInput、outcome、效果与 LedgerTransition
+  effect.rs       未完成成员效果
+  error.rs        LedgerTransitionError 与稳定分类
+  work.rs         outstanding_work 与 LedgerWork
+  present.rs      present、可用范围与展示映射
+  snapshot.rs     snapshot / restore
 crates/uc-application/src/space/membership/
   owner.rs        MembershipOwner：唯一写入者
-  worker.rs       MembershipWorker：执行 due_work
+  worker.rs       MembershipWorker：执行 outstanding_work 中已到期的待办
   access.rs       PeerAccess：入站访问判定
   ports.rs        Owner/Worker 需要的存储、传输、安全能力
   queries/        设备信任、名单、就绪与诊断查询，只调用 present
@@ -134,7 +135,7 @@ Application 查询负责。与现有推导相比只有三处有意变化：`Depa
 
 ### S2 持久格式与迁移
 
-- Infra 新增 `SpaceMembershipRecordV5` DTO 与编解码，不直接序列化 Core 或 Application 类型。
+- Infra 新增 `MembershipLedgerRecordV5` DTO 与编解码，不直接序列化 Core 或 Application 类型。
 - 实现 V1–V4 → V5 迁移，映射规则见下表；迁移在解锁读取时进行，失败不改写原资料。
 - **验证**：S0 固定向量全部迁移成功且结果符合下表；损坏与未知版本返回稳定错误；迁移后再次读取为 V5 且内容不变。
 
@@ -255,8 +256,8 @@ git diff --check
 
 ### S1（2026-09-23，分支 `hp/uni/t-0010-android`）
 
-完成内容：`crates/uc-core/src/membership/space_membership/`（以公开子模块 `membership::space_membership`
-暴露，避免通用名称与现有扁平导出冲突），尚无调用方。
+完成内容：`crates/uc-core/src/membership/ledger/` 的成员账本聚合 `MembershipLedger`，与同级模块一样以私有模块
+加 `membership` 平铺导出，通用名称统一加 `Ledger` 或 `Peer` 前缀；尚无调用方。
 
 实现中确定、与设计概要相比需要说明的细节：
 
@@ -274,7 +275,7 @@ git diff --check
 
 | 检查 | 结果 |
 | --- | --- |
-| `cargo test -p uc-core --lib --locked space_membership` | 17 通过；含 24 个种子各 160 步的交错性质测试，逐步断言规范化不变量与“阻塞待办 ⇔ 更新中/可重试失败”，并在全部成功与跨过离开窗口后断言收敛 |
+| `cargo test -p uc-core --lib --locked membership::ledger` | 17 通过；含 24 个种子各 160 步的交错性质测试，逐步断言规范化不变量与“阻塞待办 ⇔ 更新中/可重试失败”，并在全部成功与跨过离开窗口后断言收敛 |
 | `cargo test -p uc-core --locked` | 全部通过 |
 | `cargo clippy -p uc-core --all-targets --locked`（仅新模块） | 无告警 |
 | `cargo check --workspace --all-targets --locked`、`cargo fmt --all -- --check`、`check-rust-style.mjs`、`check-engine-repository.mjs`、`git diff --check` | 通过 |

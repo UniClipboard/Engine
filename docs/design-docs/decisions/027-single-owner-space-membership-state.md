@@ -49,7 +49,7 @@
 `QueryDeviceGroupChoices` 中的设备关系与设备更新阶段也由同一聚合纯函数给出。“界面显示更新中”
 与“后台确实有待办”在结构上等价，不再依赖两套规则保持一致。
 
-### Core：`SpaceMembership` 聚合
+### Core：成员账本聚合 `MembershipLedger`
 
 新增纯规则聚合，持有：
 
@@ -86,7 +86,7 @@
 
 - `MembershipOwner` 是成员事实的**唯一写入者**：加载、`apply`、一次条件提交、在同一事务中维护成员读模型、
   发布内存快照、唤醒执行器、发出 `DeviceTrustChanged`。其他用例、查询、准入和 Infra 均不得改写成员记录。
-- `MembershipWorker` 循环执行 `due_work`，调用传输与安全能力，把结果作为输入交回 Owner。它不掌握业务
+- `MembershipWorker` 循环执行 `outstanding_work` 中已到期的待办，调用传输与安全能力，把结果作为输入交回 Owner。它不掌握业务
   顺序。维护运行期只负责触发、并发、暂停与关闭。
 - `PeerAccess` 从 Owner 发布的快照回答入站对端是有效成员、正在离开（仅允许接收精确通知）还是拒绝；
   公钥到设备的解析使用同一快照中的准入事实，不再读取异步投影表。
@@ -129,7 +129,7 @@ Infra 负责成员记录密文 DTO 的编解码、MLS 与签名原语、Iroh 传
 
 ### 持久化
 
-- 新增唯一最终格式 `SpaceMembershipRecordV5`，由 Infra 独立 DTO 编码，不直接序列化 Core 或
+- 新增唯一最终格式 `MembershipLedgerRecordV5`，由 Infra 独立 DTO 编码，不直接序列化 Core 或
   Application 类型。同一功能分支不得再新增第二个成员记录格式版本。
 - 解锁时从 V1–V4 一次性迁移；迁移失败保留原资料并报告需要处理，不重建、不猜测。
 - 映射规则：当前有效成员映射为有效成员并沿用确认位置；已移除且仍有待投递通知的对端映射为正在离开，

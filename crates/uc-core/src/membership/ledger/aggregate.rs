@@ -7,16 +7,15 @@ use crate::membership::{
 };
 
 use super::{
-    DeliveryKind, DeliveryResult, DepartingLink, HistorySyncOutcome, HistorySyncResult,
-    MemberEffectKind, MemberEffectMaterial, MemberEffectPhase, MemberLink, MemberStatus,
-    MembershipEffect, MembershipFollowUp, MembershipInput, MembershipOutcome, MembershipTransition,
-    PeerEvidence, PeerLink, PeerRelation, SpaceMembershipError, SyncBackoff,
-    UnfinishedMemberEffect,
+    DepartingLink, LedgerDeliveryKind, LedgerDeliveryResult, LedgerEffect, LedgerFollowUp,
+    LedgerInput, LedgerMemberStatus, LedgerOutcome, LedgerTransition, LedgerTransitionError,
+    MemberEffectKind, MemberEffectMaterial, MemberEffectPhase, MemberLink, PeerEvidence, PeerLink,
+    PeerRelation, PeerSyncBackoff, PeerSyncOutcome, PeerSyncResult, UnfinishedMemberEffect,
 };
 
-/// 一个 Space 的成员状态。字段只能经 [`SpaceMembership::apply`] 改变。
+/// 一个 Space 的成员状态。字段只能经 [`MembershipLedger::apply`] 改变。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SpaceMembership {
+pub struct MembershipLedger {
     pub(super) revision: u64,
     pub(super) history: VersionedMembershipHistory,
     pub(super) local_device_id: DeviceId,
@@ -26,7 +25,7 @@ pub struct SpaceMembership {
     pub(super) sync_cursor: Option<DeviceId>,
 }
 
-impl SpaceMembership {
+impl MembershipLedger {
     /// 新建 Space 或加入方激活后建立成员状态。历史中的其他成员已随本机获得的历史一起核对，
     /// 因此视为一致、尚未确认本机位置。`revision` 由调用方给出，保证同一 profile 内单调递增。
     pub fn start(
@@ -34,7 +33,7 @@ impl SpaceMembership {
         local_device_id: DeviceId,
         local_member: MemberInstanceId,
         revision: u64,
-    ) -> Result<Self, SpaceMembershipError> {
+    ) -> Result<Self, LedgerTransitionError> {
         let mut membership = Self {
             revision,
             history,
@@ -49,14 +48,14 @@ impl SpaceMembership {
             .effective_members()
             .contains(&membership.local_member)
         {
-            return Err(SpaceMembershipError::InputMismatch);
+            return Err(LedgerTransitionError::InputMismatch);
         }
         for device_id in membership.effective_peer_devices()? {
             membership.peers.insert(
                 device_id,
                 PeerLink::Member(MemberLink::new(
                     PeerRelation::Consistent,
-                    SyncBackoff::fresh(None),
+                    PeerSyncBackoff::fresh(None),
                 )),
             );
         }
@@ -66,75 +65,71 @@ impl SpaceMembership {
 
     pub fn apply(
         self,
-        input: MembershipInput,
+        input: LedgerInput,
         now_ms: i64,
-    ) -> Result<MembershipTransition, SpaceMembershipError> {
+    ) -> Result<LedgerTransition, LedgerTransitionError> {
         let mut next = self.clone();
-        let follow_ups: &[MembershipFollowUp] = match &input {
-            MembershipInput::LocalRemovalSigned { .. }
-            | MembershipInput::LocalDecisionSigned { .. }
-            | MembershipInput::AdmissionCommitted { .. }
-            | MembershipInput::PeerEvidenceReconciled { .. }
-            | MembershipInput::BranchRecovered { .. } => &[
-                MembershipFollowUp::PublishDeviceTrustChange,
-                MembershipFollowUp::WakeWorker,
+        let follow_ups: &[LedgerFollowUp] = match &input {
+            LedgerInput::LocalRemovalSigned { .. }
+            | LedgerInput::LocalDecisionSigned { .. }
+            | LedgerInput::AdmissionCommitted { .. }
+            | LedgerInput::PeerEvidenceReconciled { .. }
+            | LedgerInput::BranchRecovered { .. } => &[
+                LedgerFollowUp::PublishDeviceTrustChange,
+                LedgerFollowUp::WakeWorker,
             ],
-            MembershipInput::HistorySyncFinished { .. }
-            | MembershipInput::DeliveryFinished { .. }
-            | MembershipInput::DepartureWindowElapsed { .. }
-            | MembershipInput::EffectStepFinished { .. } => {
-                &[MembershipFollowUp::PublishDeviceTrustChange]
-            }
-            MembershipInput::HistorySyncSelected { .. } => &[],
+            LedgerInput::HistorySyncFinished { .. }
+            | LedgerInput::DeliveryFinished { .. }
+            | LedgerInput::DepartureWindowElapsed { .. }
+            | LedgerInput::EffectStepFinished { .. } => &[LedgerFollowUp::PublishDeviceTrustChange],
+            LedgerInput::HistorySyncSelected { .. } => &[],
         };
         let outcome = match input {
-            MembershipInput::LocalRemovalSigned {
+            LedgerInput::LocalRemovalSigned {
                 history,
                 retained_device_ids,
             } => next.on_local_removal(history, retained_device_ids, now_ms)?,
-            MembershipInput::LocalDecisionSigned {
+            LedgerInput::LocalDecisionSigned {
                 history,
                 removal_event_id,
             } => next.on_local_decision(history, removal_event_id)?,
-            MembershipInput::AdmissionCommitted { history } => next.on_admission(history)?,
-            MembershipInput::PeerEvidenceReconciled {
+            LedgerInput::AdmissionCommitted { history } => next.on_admission(history)?,
+            LedgerInput::PeerEvidenceReconciled {
                 source,
                 history,
                 evidence,
             } => next.on_peer_evidence(source, history, evidence)?,
-            MembershipInput::HistorySyncSelected { peers } => next.on_sync_selected(peers),
-            MembershipInput::HistorySyncFinished {
+            LedgerInput::HistorySyncSelected { peers } => next.on_sync_selected(peers),
+            LedgerInput::HistorySyncFinished {
                 peer,
                 synced_position,
                 result,
             } => next.on_sync_finished(&peer, &synced_position, result, now_ms)?,
-            MembershipInput::DeliveryFinished {
+            LedgerInput::DeliveryFinished {
                 peer,
                 delivery,
                 result,
             } => next.on_delivery(&peer, delivery, result),
-            MembershipInput::DepartureWindowElapsed { peer } => {
-                next.on_departure_window(&peer, now_ms)
-            }
-            MembershipInput::EffectStepFinished { event_id, from } => {
+            LedgerInput::DepartureWindowElapsed { peer } => next.on_departure_window(&peer, now_ms),
+            LedgerInput::EffectStepFinished { event_id, from } => {
                 next.on_effect_step(event_id, from)
             }
-            MembershipInput::BranchRecovered { history } => next.on_branch_recovered(history)?,
+            LedgerInput::BranchRecovered { history } => next.on_branch_recovered(history)?,
         };
-        if outcome != MembershipOutcome::Applied {
-            return Ok(MembershipTransition::new(self, outcome, Vec::new()));
+        if outcome != LedgerOutcome::Applied {
+            return Ok(LedgerTransition::new(self, outcome, Vec::new()));
         }
         next.normalize()?;
         next.revision = next
             .revision
             .checked_add(1)
-            .ok_or(SpaceMembershipError::RevisionOverflow)?;
+            .ok_or(LedgerTransitionError::RevisionOverflow)?;
         let effects = follow_ups
             .iter()
             .copied()
-            .map(MembershipEffect::AfterCommit)
+            .map(LedgerEffect::AfterCommit)
             .collect();
-        Ok(MembershipTransition::new(next, outcome, effects))
+        Ok(LedgerTransition::new(next, outcome, effects))
     }
 
     pub fn revision(&self) -> u64 {
@@ -166,13 +161,13 @@ impl SpaceMembership {
     }
 
     /// 本机状态：在有效成员中为有效；否则有影响本机的未完成效果时为激活中；其余为已移除。
-    pub fn local_status(&self) -> MemberStatus {
+    pub fn local_status(&self) -> LedgerMemberStatus {
         if self.history.active_members().contains(&self.local_member) {
-            MemberStatus::Active
+            LedgerMemberStatus::Active
         } else if self.effect_affects(&self.local_device_id) {
-            MemberStatus::PendingActivation
+            LedgerMemberStatus::PendingActivation
         } else {
-            MemberStatus::Removed
+            LedgerMemberStatus::Removed
         }
     }
 
@@ -187,27 +182,27 @@ impl SpaceMembership {
         history: VersionedMembershipHistory,
         retained_device_ids: Vec<DeviceId>,
         now_ms: i64,
-    ) -> Result<MembershipOutcome, SpaceMembershipError> {
+    ) -> Result<LedgerOutcome, LedgerTransitionError> {
         self.ensure_lineage(&history)?;
         let head = history
             .current_head()
-            .ok_or(SpaceMembershipError::InputMismatch)?;
+            .ok_or(LedgerTransitionError::InputMismatch)?;
         if self.history.event(head).is_some() {
-            return Ok(MembershipOutcome::Unchanged);
+            return Ok(LedgerOutcome::Unchanged);
         }
         let event = history
             .event(head)
-            .ok_or(SpaceMembershipError::InputMismatch)?
+            .ok_or(LedgerTransitionError::InputMismatch)?
             .clone();
         let MembershipOperationV2::RemoveDevice { member: target } = event.operation else {
-            return Err(SpaceMembershipError::InputMismatch);
+            return Err(LedgerTransitionError::InputMismatch);
         };
         if event.author_member_instance_id != self.local_member
             || event.parent_event_id != self.history.current_head()
             || target == self.local_member
             || !self.history.effective_members().contains(&target)
         {
-            return Err(SpaceMembershipError::InputMismatch);
+            return Err(LedgerTransitionError::InputMismatch);
         }
         let target_device = device_of(&history, target)?;
         self.history = history;
@@ -227,31 +222,31 @@ impl SpaceMembership {
                 },
             ),
         );
-        Ok(MembershipOutcome::Applied)
+        Ok(LedgerOutcome::Applied)
     }
 
     fn on_local_decision(
         &mut self,
         history: VersionedMembershipHistory,
         removal_event_id: MembershipEventId,
-    ) -> Result<MembershipOutcome, SpaceMembershipError> {
+    ) -> Result<LedgerOutcome, LedgerTransitionError> {
         self.ensure_lineage(&history)?;
         if self
             .history
             .decision_for(removal_event_id, self.local_member)
             .is_some()
         {
-            return Ok(MembershipOutcome::Unchanged);
+            return Ok(LedgerOutcome::Unchanged);
         }
         let decision = history
             .decision_for(removal_event_id, self.local_member)
-            .ok_or(SpaceMembershipError::InputMismatch)?
+            .ok_or(LedgerTransitionError::InputMismatch)?
             .clone();
         let removal = history
             .event(removal_event_id)
-            .ok_or(SpaceMembershipError::InputMismatch)?;
+            .ok_or(LedgerTransitionError::InputMismatch)?;
         let MembershipOperationV2::RemoveDevice { member: target } = removal.operation else {
-            return Err(SpaceMembershipError::InputMismatch);
+            return Err(LedgerTransitionError::InputMismatch);
         };
         let proposer = device_of(&history, removal.author_member_instance_id)?;
         let target_device = device_of(&history, target)?;
@@ -279,14 +274,14 @@ impl SpaceMembership {
                 if let PeerLink::Departing(_) = link {
                     *link = PeerLink::Member(MemberLink::new(
                         relation,
-                        SyncBackoff::fresh(Some(pending_revision)),
+                        PeerSyncBackoff::fresh(Some(pending_revision)),
                     ));
                 }
             })
             .or_insert_with(|| {
                 PeerLink::Member(MemberLink::new(
                     relation,
-                    SyncBackoff::fresh(Some(pending_revision)),
+                    PeerSyncBackoff::fresh(Some(pending_revision)),
                 ))
             });
         if let PeerLink::Member(member) = link {
@@ -295,28 +290,28 @@ impl SpaceMembership {
             // 本机是移除目标时，发起方已不认可本机身份，不排队投递决定。
             member.queue_decision((target != self.local_member).then_some(decision));
         }
-        Ok(MembershipOutcome::Applied)
+        Ok(LedgerOutcome::Applied)
     }
 
     fn on_admission(
         &mut self,
         history: VersionedMembershipHistory,
-    ) -> Result<MembershipOutcome, SpaceMembershipError> {
+    ) -> Result<LedgerOutcome, LedgerTransitionError> {
         self.ensure_lineage(&history)?;
         let head = history
             .current_head()
-            .ok_or(SpaceMembershipError::InputMismatch)?;
+            .ok_or(LedgerTransitionError::InputMismatch)?;
         if self.history.event(head).is_some() {
-            return Ok(MembershipOutcome::Unchanged);
+            return Ok(LedgerOutcome::Unchanged);
         }
         let event = history
             .event(head)
-            .ok_or(SpaceMembershipError::InputMismatch)?;
+            .ok_or(LedgerTransitionError::InputMismatch)?;
         let MembershipOperationV2::AddDevice { admission } = &event.operation else {
-            return Err(SpaceMembershipError::InputMismatch);
+            return Err(LedgerTransitionError::InputMismatch);
         };
         if event.parent_event_id != self.history.current_head() {
-            return Err(SpaceMembershipError::InputMismatch);
+            return Err(LedgerTransitionError::InputMismatch);
         }
         let admitted = admission.facts.device_id;
         let pending_revision = self.pending_revision();
@@ -331,10 +326,10 @@ impl SpaceMembership {
             admitted,
             PeerLink::Member(MemberLink::new(
                 PeerRelation::Consistent,
-                SyncBackoff::fresh(Some(pending_revision)),
+                PeerSyncBackoff::fresh(Some(pending_revision)),
             )),
         );
-        Ok(MembershipOutcome::Applied)
+        Ok(LedgerOutcome::Applied)
     }
 
     fn on_peer_evidence(
@@ -342,7 +337,7 @@ impl SpaceMembership {
         source: DeviceId,
         history: Option<VersionedMembershipHistory>,
         evidence: PeerEvidence,
-    ) -> Result<MembershipOutcome, SpaceMembershipError> {
+    ) -> Result<LedgerOutcome, LedgerTransitionError> {
         let before = self.clone();
         if let Some(history) = history {
             self.ensure_lineage(&history)?;
@@ -357,7 +352,7 @@ impl SpaceMembership {
             .pending_removal_decision(self.local_member)
             .is_some();
         let Some(PeerLink::Member(link)) = self.peers.get_mut(&source) else {
-            return Err(SpaceMembershipError::InputMismatch);
+            return Err(LedgerTransitionError::InputMismatch);
         };
         match evidence {
             PeerEvidence::Confirmed => {
@@ -367,7 +362,7 @@ impl SpaceMembership {
                     PeerRelation::Consistent
                 };
                 link.record_relation(relation, Some(current));
-                link.sync_mut().settle(HistorySyncOutcome::Acked);
+                link.sync_mut().settle(PeerSyncOutcome::Acked);
             }
             PeerEvidence::Diverged | PeerEvidence::Invalid => {
                 let relation = if evidence == PeerEvidence::Diverged {
@@ -381,9 +376,9 @@ impl SpaceMembership {
             PeerEvidence::NeedsEvidence => {}
         }
         Ok(if *self == before {
-            MembershipOutcome::Unchanged
+            LedgerOutcome::Unchanged
         } else {
-            MembershipOutcome::Applied
+            LedgerOutcome::Applied
         })
     }
 
@@ -391,7 +386,7 @@ impl SpaceMembership {
     fn adopt_remote_history(
         &mut self,
         history: VersionedMembershipHistory,
-    ) -> Result<(), SpaceMembershipError> {
+    ) -> Result<(), LedgerTransitionError> {
         let before = self.history.effective_members();
         let after = history.effective_members();
         let changed: BTreeSet<MemberInstanceId> =
@@ -401,7 +396,7 @@ impl SpaceMembership {
         while let Some(event_id) = cursor {
             let event = history
                 .event(event_id)
-                .ok_or(SpaceMembershipError::InputMismatch)?;
+                .ok_or(LedgerTransitionError::InputMismatch)?;
             let (kind, member) = match &event.operation {
                 MembershipOperationV2::AddDevice { admission } => {
                     (MemberEffectKind::AddDevice, admission.facts.member_instance)
@@ -424,13 +419,13 @@ impl SpaceMembership {
             cursor = event.parent_event_id;
         }
         if recorded != changed {
-            return Err(SpaceMembershipError::InputMismatch);
+            return Err(LedgerTransitionError::InputMismatch);
         }
         self.history = history;
         Ok(())
     }
 
-    fn on_sync_selected(&mut self, peers: Vec<DeviceId>) -> MembershipOutcome {
+    fn on_sync_selected(&mut self, peers: Vec<DeviceId>) -> LedgerOutcome {
         let pending_revision = self.pending_revision();
         let mut changed = false;
         for peer in &peers {
@@ -448,9 +443,9 @@ impl SpaceMembership {
             }
         }
         if changed {
-            MembershipOutcome::Applied
+            LedgerOutcome::Applied
         } else {
-            MembershipOutcome::Unchanged
+            LedgerOutcome::Unchanged
         }
     }
 
@@ -458,80 +453,80 @@ impl SpaceMembership {
         &mut self,
         peer: &DeviceId,
         synced_position: &BaseMembershipHistoryPosition,
-        result: HistorySyncResult,
+        result: PeerSyncResult,
         now_ms: i64,
-    ) -> Result<MembershipOutcome, SpaceMembershipError> {
+    ) -> Result<LedgerOutcome, LedgerTransitionError> {
         let current = self.history.current_position()?;
         let Some(PeerLink::Member(link)) = self.peers.get_mut(peer) else {
-            return Ok(MembershipOutcome::Stale);
+            return Ok(LedgerOutcome::Stale);
         };
         match result {
-            HistorySyncResult::Confirmed
-            | HistorySyncResult::Diverged
-            | HistorySyncResult::Invalid
+            PeerSyncResult::Confirmed | PeerSyncResult::Diverged | PeerSyncResult::Invalid
                 if *synced_position != current =>
             {
-                return Ok(MembershipOutcome::Stale);
+                return Ok(LedgerOutcome::Stale);
             }
-            HistorySyncResult::Confirmed => {
+            PeerSyncResult::Confirmed => {
                 link.record_relation(PeerRelation::Consistent, Some(current));
-                link.sync_mut().settle(HistorySyncOutcome::Acked);
+                link.sync_mut().settle(PeerSyncOutcome::Acked);
             }
-            HistorySyncResult::Diverged => {
+            PeerSyncResult::Diverged => {
                 link.record_relation(PeerRelation::Diverged, None);
-                link.sync_mut().settle(HistorySyncOutcome::StableRejected);
+                link.sync_mut().settle(PeerSyncOutcome::StableRejected);
             }
-            HistorySyncResult::Invalid => {
+            PeerSyncResult::Invalid => {
                 link.record_relation(PeerRelation::Invalid, None);
-                link.sync_mut().settle(HistorySyncOutcome::StableRejected);
+                link.sync_mut().settle(PeerSyncOutcome::StableRejected);
             }
-            HistorySyncResult::Deferred => link.sync_mut().defer(now_ms)?,
-            HistorySyncResult::Rejected => {
-                link.sync_mut().settle(HistorySyncOutcome::StableRejected);
+            PeerSyncResult::Deferred => link.sync_mut().defer(now_ms)?,
+            PeerSyncResult::Rejected => {
+                link.sync_mut().settle(PeerSyncOutcome::StableRejected);
             }
         }
-        Ok(MembershipOutcome::Applied)
+        Ok(LedgerOutcome::Applied)
     }
 
     fn on_delivery(
         &mut self,
         peer: &DeviceId,
-        delivery: DeliveryKind,
-        result: DeliveryResult,
-    ) -> MembershipOutcome {
+        delivery: LedgerDeliveryKind,
+        result: LedgerDeliveryResult,
+    ) -> LedgerOutcome {
         match (delivery, self.peers.get_mut(peer)) {
-            (DeliveryKind::RemovalNotice, Some(PeerLink::Departing(_))) => match result {
-                DeliveryResult::Delivered => {
+            (LedgerDeliveryKind::RemovalNotice, Some(PeerLink::Departing(_))) => match result {
+                LedgerDeliveryResult::Delivered => {
                     self.peers.remove(peer);
-                    MembershipOutcome::Applied
+                    LedgerOutcome::Applied
                 }
                 // 通知责任由离开窗口兜底结束。
-                DeliveryResult::Deferred | DeliveryResult::Rejected => MembershipOutcome::Unchanged,
+                LedgerDeliveryResult::Deferred | LedgerDeliveryResult::Rejected => {
+                    LedgerOutcome::Unchanged
+                }
             },
-            (DeliveryKind::Decision, Some(PeerLink::Member(link)))
+            (LedgerDeliveryKind::Decision, Some(PeerLink::Member(link)))
                 if link.outgoing_decision().is_some() =>
             {
                 match result {
                     // 对端明确拒绝时本机已无法再推进这项投递。
-                    DeliveryResult::Delivered | DeliveryResult::Rejected => {
+                    LedgerDeliveryResult::Delivered | LedgerDeliveryResult::Rejected => {
                         link.queue_decision(None);
-                        MembershipOutcome::Applied
+                        LedgerOutcome::Applied
                     }
-                    DeliveryResult::Deferred => MembershipOutcome::Unchanged,
+                    LedgerDeliveryResult::Deferred => LedgerOutcome::Unchanged,
                 }
             }
-            _ => MembershipOutcome::Stale,
+            _ => LedgerOutcome::Stale,
         }
     }
 
-    fn on_departure_window(&mut self, peer: &DeviceId, now_ms: i64) -> MembershipOutcome {
+    fn on_departure_window(&mut self, peer: &DeviceId, now_ms: i64) -> LedgerOutcome {
         match self.peers.get(peer) {
             Some(PeerLink::Departing(link)) if now_ms >= link.expires_at_ms() => {
                 self.peers.remove(peer);
-                MembershipOutcome::Applied
+                LedgerOutcome::Applied
             }
-            Some(PeerLink::Departing(_)) => MembershipOutcome::Unchanged,
-            _ => MembershipOutcome::Stale,
+            Some(PeerLink::Departing(_)) => LedgerOutcome::Unchanged,
+            _ => LedgerOutcome::Stale,
         }
     }
 
@@ -539,12 +534,12 @@ impl SpaceMembership {
         &mut self,
         event_id: MembershipEventId,
         from: MemberEffectPhase,
-    ) -> MembershipOutcome {
+    ) -> LedgerOutcome {
         let Some(effect) = self.effects.get_mut(&event_id) else {
-            return MembershipOutcome::Stale;
+            return LedgerOutcome::Stale;
         };
         if effect.phase() != from {
-            return MembershipOutcome::Stale;
+            return LedgerOutcome::Stale;
         }
         match from.next() {
             Some(next) => effect.advance(next),
@@ -552,18 +547,18 @@ impl SpaceMembership {
                 self.effects.remove(&event_id);
             }
         }
-        MembershipOutcome::Applied
+        LedgerOutcome::Applied
     }
 
     fn on_branch_recovered(
         &mut self,
         history: VersionedMembershipHistory,
-    ) -> Result<MembershipOutcome, SpaceMembershipError> {
+    ) -> Result<LedgerOutcome, LedgerTransitionError> {
         self.ensure_lineage(&history)?;
         if !history.active_members().contains(&self.local_member)
             || device_of(&history, self.local_member)? != self.local_device_id
         {
-            return Err(SpaceMembershipError::InputMismatch);
+            return Err(LedgerTransitionError::InputMismatch);
         }
         self.history = history;
         // 目标分支的效果已由分支恢复安装，旧分支的传输与调度状态不跨分支继承。
@@ -577,22 +572,22 @@ impl SpaceMembership {
                     device,
                     PeerLink::Member(MemberLink::new(
                         PeerRelation::Consistent,
-                        SyncBackoff::fresh(None),
+                        PeerSyncBackoff::fresh(None),
                     )),
                 )
             })
             .collect();
-        Ok(MembershipOutcome::Applied)
+        Ok(LedgerOutcome::Applied)
     }
 
     fn ensure_lineage(
         &self,
         history: &VersionedMembershipHistory,
-    ) -> Result<(), SpaceMembershipError> {
+    ) -> Result<(), LedgerTransitionError> {
         if history.lineage_id() == self.history.lineage_id() {
             Ok(())
         } else {
-            Err(SpaceMembershipError::LineageMismatch)
+            Err(LedgerTransitionError::LineageMismatch)
         }
     }
 
@@ -603,7 +598,7 @@ impl SpaceMembership {
     /// 当前历史中除本机外的成员设备。
     pub(super) fn effective_peer_devices(
         &self,
-    ) -> Result<BTreeSet<DeviceId>, SpaceMembershipError> {
+    ) -> Result<BTreeSet<DeviceId>, LedgerTransitionError> {
         self.history
             .effective_members()
             .into_iter()
@@ -613,7 +608,7 @@ impl SpaceMembership {
     }
 
     /// 当前历史中除本机外的已激活成员设备。
-    pub(super) fn active_peer_devices(&self) -> Result<BTreeSet<DeviceId>, SpaceMembershipError> {
+    pub(super) fn active_peer_devices(&self) -> Result<BTreeSet<DeviceId>, LedgerTransitionError> {
         self.history
             .active_members()
             .into_iter()
@@ -624,7 +619,7 @@ impl SpaceMembership {
 
     /// 让对端记录与历史保持一致：每个有效对端恰有一个 `Member`，离开中的设备不在历史成员中，
     /// 其余记录删除；本机为目标的移除决定不投递；效果只保留当前历史路径上的事件。
-    fn normalize(&mut self) -> Result<(), SpaceMembershipError> {
+    fn normalize(&mut self) -> Result<(), LedgerTransitionError> {
         let path = current_path(&self.history);
         self.effects.retain(|event_id, _| path.contains(event_id));
         let pending_revision = self.pending_revision();
@@ -634,7 +629,7 @@ impl SpaceMembership {
                 Some(PeerLink::Member(link)) => link,
                 Some(PeerLink::Departing(_)) | None => MemberLink::new(
                     PeerRelation::Unconfirmed,
-                    SyncBackoff::fresh(Some(pending_revision)),
+                    PeerSyncBackoff::fresh(Some(pending_revision)),
                 ),
             };
             self.peers.insert(device, PeerLink::Member(link));
@@ -660,20 +655,20 @@ impl SpaceMembership {
     }
 
     /// 校验全部不变量；`restore` 与 `start` 使用，拒绝任何需要规范化才能成立的状态。
-    pub(super) fn validate(&self) -> Result<(), SpaceMembershipError> {
+    pub(super) fn validate(&self) -> Result<(), LedgerTransitionError> {
         if device_of(&self.history, self.local_member)
-            .map_err(|_| SpaceMembershipError::InvalidSnapshot)?
+            .map_err(|_| LedgerTransitionError::InvalidSnapshot)?
             != self.local_device_id
             || self.peers.contains_key(&self.local_device_id)
         {
-            return Err(SpaceMembershipError::InvalidSnapshot);
+            return Err(LedgerTransitionError::InvalidSnapshot);
         }
         let effective = self
             .effective_peer_devices()
-            .map_err(|_| SpaceMembershipError::InvalidSnapshot)?;
+            .map_err(|_| LedgerTransitionError::InvalidSnapshot)?;
         for device in &effective {
             if !matches!(self.peers.get(device), Some(PeerLink::Member(_))) {
-                return Err(SpaceMembershipError::InvalidSnapshot);
+                return Err(LedgerTransitionError::InvalidSnapshot);
             }
         }
         for (device, link) in &self.peers {
@@ -691,7 +686,7 @@ impl SpaceMembership {
                 PeerLink::Departing(_) => !effective.contains(device),
             };
             if !valid {
-                return Err(SpaceMembershipError::InvalidSnapshot);
+                return Err(LedgerTransitionError::InvalidSnapshot);
             }
         }
         let path = current_path(&self.history);
@@ -700,7 +695,7 @@ impl SpaceMembership {
             .iter()
             .any(|(event_id, effect)| !path.contains(event_id) || effect.event_id() != *event_id)
         {
-            return Err(SpaceMembershipError::InvalidSnapshot);
+            return Err(LedgerTransitionError::InvalidSnapshot);
         }
         Ok(())
     }
@@ -724,11 +719,11 @@ pub(super) fn current_path(history: &VersionedMembershipHistory) -> BTreeSet<Mem
 pub(super) fn device_of(
     history: &VersionedMembershipHistory,
     member: MemberInstanceId,
-) -> Result<DeviceId, SpaceMembershipError> {
+) -> Result<DeviceId, LedgerTransitionError> {
     history
         .admission_facts_for(member)
         .map(|facts| facts.device_id)
-        .ok_or(SpaceMembershipError::InputMismatch)
+        .ok_or(LedgerTransitionError::InputMismatch)
 }
 
 fn removal_targets(

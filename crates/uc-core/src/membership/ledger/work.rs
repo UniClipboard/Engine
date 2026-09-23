@@ -2,12 +2,12 @@ use crate::ids::DeviceId;
 use crate::membership::{MembershipDecisionV2, MembershipEventV2};
 
 use super::{
-    MemberStatus, PeerLink, SpaceMembership, SpaceMembershipError, UnfinishedMemberEffect,
+    LedgerMemberStatus, LedgerTransitionError, MembershipLedger, PeerLink, UnfinishedMemberEffect,
 };
 
 /// 由成员状态计算出的一项持久待办。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MembershipWork {
+pub enum LedgerWork {
     /// 执行成员效果的当前阶段。
     AdvanceEffect(UnfinishedMemberEffect),
     /// 向已被本机移除的设备投递移除通知。
@@ -27,25 +27,25 @@ pub enum MembershipWork {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScheduledWork {
-    pub work: MembershipWork,
+pub struct ScheduledLedgerWork {
+    pub work: LedgerWork,
     /// 最早可以执行的时间。
     pub due_at_ms: i64,
     /// 未完成时设备更新不能显示为完成。移除通知与离开到期不阻塞设备更新。
     pub blocks_device_update: bool,
 }
 
-impl SpaceMembership {
+impl MembershipLedger {
     /// 全部未完成待办。执行器只执行已到期项，并按其余项的最早时间安排唤醒。
     pub fn outstanding_work(
         &self,
         now_ms: i64,
-    ) -> Result<Vec<ScheduledWork>, SpaceMembershipError> {
+    ) -> Result<Vec<ScheduledLedgerWork>, LedgerTransitionError> {
         let mut work = Vec::new();
         let mut effects: Vec<&UnfinishedMemberEffect> = self.effects.values().collect();
         effects.sort_by_key(|effect| (self.history.depth(effect.event_id()), effect.event_id()));
-        work.extend(effects.into_iter().map(|effect| ScheduledWork {
-            work: MembershipWork::AdvanceEffect(effect.clone()),
+        work.extend(effects.into_iter().map(|effect| ScheduledLedgerWork {
+            work: LedgerWork::AdvanceEffect(effect.clone()),
             due_at_ms: now_ms,
             blocks_device_update: true,
         }));
@@ -53,8 +53,8 @@ impl SpaceMembership {
             match link {
                 PeerLink::Departing(departing) => {
                     if now_ms < departing.expires_at_ms() {
-                        work.push(ScheduledWork {
-                            work: MembershipWork::DeliverRemovalNotice {
+                        work.push(ScheduledLedgerWork {
+                            work: LedgerWork::DeliverRemovalNotice {
                                 peer: *peer,
                                 notice: departing.notice().clone(),
                             },
@@ -62,16 +62,16 @@ impl SpaceMembership {
                             blocks_device_update: false,
                         });
                     }
-                    work.push(ScheduledWork {
-                        work: MembershipWork::EndDeparture { peer: *peer },
+                    work.push(ScheduledLedgerWork {
+                        work: LedgerWork::EndDeparture { peer: *peer },
                         due_at_ms: departing.expires_at_ms(),
                         blocks_device_update: false,
                     });
                 }
                 PeerLink::Member(member) => {
                     if let Some(decision) = member.outgoing_decision() {
-                        work.push(ScheduledWork {
-                            work: MembershipWork::DeliverDecision {
+                        work.push(ScheduledLedgerWork {
+                            work: LedgerWork::DeliverDecision {
                                 peer: *peer,
                                 decision: decision.clone(),
                             },
@@ -82,7 +82,7 @@ impl SpaceMembership {
                 }
             }
         }
-        if self.local_status() == MemberStatus::Active {
+        if self.local_status() == LedgerMemberStatus::Active {
             let current = self.history.current_position()?;
             let mut peers: Vec<DeviceId> = self
                 .active_peer_devices()?
@@ -102,9 +102,9 @@ impl SpaceMembership {
             }
             for peer in peers {
                 if let Some(PeerLink::Member(member)) = self.peers.get(&peer) {
-                    work.push(ScheduledWork {
+                    work.push(ScheduledLedgerWork {
                         due_at_ms: member.sync().due_at_ms(now_ms),
-                        work: MembershipWork::SynchronizeHistory { peer },
+                        work: LedgerWork::SynchronizeHistory { peer },
                         blocks_device_update: true,
                     });
                 }

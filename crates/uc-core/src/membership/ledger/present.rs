@@ -3,11 +3,11 @@ use std::collections::BTreeSet;
 use crate::ids::DeviceId;
 use crate::membership::MemberInstanceId;
 
-use super::{HistorySyncOutcome, PeerLink, PeerRelation, SpaceMembership, SpaceMembershipError};
+use super::{LedgerTransitionError, MembershipLedger, PeerLink, PeerRelation, PeerSyncOutcome};
 
 /// 一台设备在本机当前历史中的成员状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemberStatus {
+pub enum LedgerMemberStatus {
     Active,
     PendingActivation,
     Removed,
@@ -15,7 +15,7 @@ pub enum MemberStatus {
 
 /// 公开的设备组关系。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RelationView {
+pub enum PeerRelationView {
     Local,
     Consistent,
     ConfirmationPending,
@@ -28,7 +28,7 @@ pub enum RelationView {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PauseReason {
+pub enum PeerPauseReason {
     LocalMemberInactive,
     PendingLocalDecision,
     Diverged,
@@ -39,31 +39,31 @@ pub enum PauseReason {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SyncView {
+pub enum PeerSyncView {
     Usable,
-    Paused(PauseReason),
+    Paused(PeerPauseReason),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeviceMembershipView {
+pub struct LedgerDeviceView {
     pub device_id: DeviceId,
     pub is_local: bool,
     pub member: Option<MemberInstanceId>,
-    pub status: MemberStatus,
-    pub relation: RelationView,
-    pub sync: SyncView,
+    pub status: LedgerMemberStatus,
+    pub relation: PeerRelationView,
+    pub sync: PeerSyncView,
 }
 
 /// 普通消费者可用的对端范围；暂停的对端只能继续缩小，不能加回可用范围。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MembershipScope {
+pub struct LedgerScope {
     pub local_member_active: bool,
     pub usable_peer_device_ids: Vec<DeviceId>,
-    pub paused_peer_devices: Vec<(DeviceId, PauseReason)>,
+    pub paused_peer_devices: Vec<(DeviceId, PeerPauseReason)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeviceUpdateProblem {
+pub enum LedgerUpdateProblem {
     DeviceStateRejected,
     DeviceRelationshipConflict,
     DeviceSecurityUpdateRejected,
@@ -71,11 +71,11 @@ pub enum DeviceUpdateProblem {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeviceUpdateView {
+pub enum LedgerUpdateView {
     Updating,
     Completed,
     RetryableFailure { next_retry_at_ms: i64 },
-    NeedsAttention(DeviceUpdateProblem),
+    NeedsAttention(LedgerUpdateProblem),
 }
 
 /// 组密钥更新投递的观察结果，由独立存储给出。
@@ -88,23 +88,23 @@ pub enum SecurityDeliveryStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MembershipView {
-    pub local_status: MemberStatus,
-    pub scope: MembershipScope,
-    pub devices: Vec<DeviceMembershipView>,
-    pub device_update: DeviceUpdateView,
+pub struct LedgerView {
+    pub local_status: LedgerMemberStatus,
+    pub scope: LedgerScope,
+    pub devices: Vec<LedgerDeviceView>,
+    pub device_update: LedgerUpdateView,
 }
 
-impl SpaceMembership {
+impl MembershipLedger {
     pub fn present(
         &self,
         security: SecurityDeliveryStatus,
-    ) -> Result<MembershipView, SpaceMembershipError> {
+    ) -> Result<LedgerView, LedgerTransitionError> {
         let local_status = self.local_status();
         let scope = self.scope()?;
         let devices = self.device_views(&scope)?;
         let device_update = self.device_update(local_status, &devices, security)?;
-        Ok(MembershipView {
+        Ok(LedgerView {
             local_status,
             scope,
             devices,
@@ -113,20 +113,20 @@ impl SpaceMembership {
     }
 
     /// 已激活对端的可用与暂停范围。
-    pub fn scope(&self) -> Result<MembershipScope, SpaceMembershipError> {
-        let local_member_active = self.local_status() == MemberStatus::Active;
+    pub fn scope(&self) -> Result<LedgerScope, LedgerTransitionError> {
+        let local_member_active = self.local_status() == LedgerMemberStatus::Active;
         let mut usable_peer_device_ids = Vec::new();
         let mut paused_peer_devices = Vec::new();
         for device in self.active_peer_devices()? {
             let reason = if !local_member_active {
-                Some(PauseReason::LocalMemberInactive)
+                Some(PeerPauseReason::LocalMemberInactive)
             } else if self.effect_affects(&device) {
-                Some(PauseReason::EffectPending)
+                Some(PeerPauseReason::EffectPending)
             } else {
                 match self.peers.get(&device) {
                     Some(PeerLink::Member(link)) => relation_pause(link.relation()),
                     Some(PeerLink::Departing(_)) | None => {
-                        Some(PauseReason::RelationshipUnconfirmed)
+                        Some(PeerPauseReason::RelationshipUnconfirmed)
                     }
                 }
             };
@@ -135,7 +135,7 @@ impl SpaceMembership {
                 None => usable_peer_device_ids.push(device),
             }
         }
-        Ok(MembershipScope {
+        Ok(LedgerScope {
             local_member_active,
             usable_peer_device_ids,
             paused_peer_devices,
@@ -144,8 +144,8 @@ impl SpaceMembership {
 
     fn device_views(
         &self,
-        scope: &MembershipScope,
-    ) -> Result<Vec<DeviceMembershipView>, SpaceMembershipError> {
+        scope: &LedgerScope,
+    ) -> Result<Vec<LedgerDeviceView>, LedgerTransitionError> {
         let current = self.history.current_position()?;
         let active = self.history.active_members();
         let mut device_ids: BTreeSet<DeviceId> = self.active_peer_devices()?;
@@ -163,52 +163,55 @@ impl SpaceMembership {
             let status = if is_local {
                 self.local_status()
             } else if member.is_some_and(|member| active.contains(&member)) {
-                MemberStatus::Active
+                LedgerMemberStatus::Active
             } else if self.effect_affects(&device_id) {
-                MemberStatus::PendingActivation
+                LedgerMemberStatus::PendingActivation
             } else {
-                MemberStatus::Removed
+                LedgerMemberStatus::Removed
             };
             let relation = if is_local {
-                RelationView::Local
+                PeerRelationView::Local
             } else {
                 match self.peers.get(&device_id) {
                     Some(PeerLink::Member(link))
-                        if status == MemberStatus::Active && link.awaits_confirmation(&current) =>
+                        if status == LedgerMemberStatus::Active
+                            && link.awaits_confirmation(&current) =>
                     {
-                        RelationView::ConfirmationPending
+                        PeerRelationView::ConfirmationPending
                     }
                     Some(PeerLink::Member(link)) => relation_view(link.relation()),
-                    Some(PeerLink::Departing(_)) => RelationView::AwaitingRemovalAcknowledgement,
-                    None => RelationView::Unknown,
+                    Some(PeerLink::Departing(_)) => {
+                        PeerRelationView::AwaitingRemovalAcknowledgement
+                    }
+                    None => PeerRelationView::Unknown,
                 }
             };
-            let sync = if status == MemberStatus::Removed
-                || relation == RelationView::AwaitingRemovalAcknowledgement
+            let sync = if status == LedgerMemberStatus::Removed
+                || relation == PeerRelationView::AwaitingRemovalAcknowledgement
             {
-                SyncView::Paused(PauseReason::LocalMemberInactive)
+                PeerSyncView::Paused(PeerPauseReason::LocalMemberInactive)
             } else if is_local || scope.usable_peer_device_ids.contains(&device_id) {
-                SyncView::Usable
+                PeerSyncView::Usable
             } else if let Some((_, reason)) = scope
                 .paused_peer_devices
                 .iter()
                 .find(|(paused, _)| *paused == device_id)
             {
-                SyncView::Paused(*reason)
+                PeerSyncView::Paused(*reason)
             } else if self.effect_affects(&device_id) {
-                SyncView::Paused(PauseReason::EffectPending)
+                PeerSyncView::Paused(PeerPauseReason::EffectPending)
             } else {
                 match self.peers.get(&device_id) {
-                    Some(PeerLink::Member(link)) => SyncView::Paused(
+                    Some(PeerLink::Member(link)) => PeerSyncView::Paused(
                         relation_pause(link.relation())
-                            .unwrap_or(PauseReason::RelationshipUnconfirmed),
+                            .unwrap_or(PeerPauseReason::RelationshipUnconfirmed),
                     ),
                     Some(PeerLink::Departing(_)) | None => {
-                        SyncView::Paused(PauseReason::RelationshipUnconfirmed)
+                        PeerSyncView::Paused(PeerPauseReason::RelationshipUnconfirmed)
                     }
                 }
             };
-            views.push(DeviceMembershipView {
+            views.push(LedgerDeviceView {
                 device_id,
                 is_local,
                 member,
@@ -222,21 +225,21 @@ impl SpaceMembership {
 
     fn device_update(
         &self,
-        local_status: MemberStatus,
-        devices: &[DeviceMembershipView],
+        local_status: LedgerMemberStatus,
+        devices: &[LedgerDeviceView],
         security: SecurityDeliveryStatus,
-    ) -> Result<DeviceUpdateView, SpaceMembershipError> {
+    ) -> Result<LedgerUpdateView, LedgerTransitionError> {
         if security == SecurityDeliveryStatus::Rejected {
-            return Ok(DeviceUpdateView::NeedsAttention(
-                DeviceUpdateProblem::DeviceSecurityUpdateRejected,
+            return Ok(LedgerUpdateView::NeedsAttention(
+                LedgerUpdateProblem::DeviceSecurityUpdateRejected,
             ));
         }
         // 本机已移除是终态：除仍在收尾的本地效果外，没有任何设备更新可做。
-        if local_status == MemberStatus::Removed {
+        if local_status == LedgerMemberStatus::Removed {
             return Ok(if self.effects.is_empty() {
-                DeviceUpdateView::Completed
+                LedgerUpdateView::Completed
             } else {
-                DeviceUpdateView::Updating
+                LedgerUpdateView::Updating
             });
         }
         let current = self.history.current_position()?;
@@ -247,7 +250,7 @@ impl SpaceMembership {
                 history_update_pending |= member.outgoing_decision().is_some();
             }
         }
-        if local_status == MemberStatus::Active {
+        if local_status == LedgerMemberStatus::Active {
             for device in self.active_peer_devices()? {
                 let Some(PeerLink::Member(member)) = self.peers.get(&device) else {
                     history_update_pending = true;
@@ -255,61 +258,60 @@ impl SpaceMembership {
                 };
                 let needs_sync = member.needs_history_sync(&current);
                 match member.sync().last_outcome() {
-                    HistorySyncOutcome::StableRejected => {
-                        return Ok(DeviceUpdateView::NeedsAttention(
-                            DeviceUpdateProblem::DeviceStateRejected,
+                    PeerSyncOutcome::StableRejected => {
+                        return Ok(LedgerUpdateView::NeedsAttention(
+                            LedgerUpdateProblem::DeviceStateRejected,
                         ));
                     }
-                    HistorySyncOutcome::Deferred if needs_sync => {
+                    PeerSyncOutcome::Deferred if needs_sync => {
                         let candidate = member.sync().next_attempt_at_ms();
                         next_retry_at_ms =
                             Some(next_retry_at_ms.map_or(candidate, |known| known.min(candidate)));
                     }
-                    HistorySyncOutcome::Never | HistorySyncOutcome::Acked if needs_sync => {
+                    PeerSyncOutcome::Never | PeerSyncOutcome::Acked if needs_sync => {
                         history_update_pending = true;
                     }
-                    HistorySyncOutcome::Never
-                    | HistorySyncOutcome::Deferred
-                    | HistorySyncOutcome::Acked => {}
+                    PeerSyncOutcome::Never | PeerSyncOutcome::Deferred | PeerSyncOutcome::Acked => {
+                    }
                 }
             }
         }
         for device in devices
             .iter()
-            .filter(|device| device.status != MemberStatus::Removed)
+            .filter(|device| device.status != LedgerMemberStatus::Removed)
         {
             match device.relation {
-                RelationView::PendingLocalDecision
-                | RelationView::Diverged
-                | RelationView::Invalid => {
-                    return Ok(DeviceUpdateView::NeedsAttention(
-                        DeviceUpdateProblem::DeviceRelationshipConflict,
+                PeerRelationView::PendingLocalDecision
+                | PeerRelationView::Diverged
+                | PeerRelationView::Invalid => {
+                    return Ok(LedgerUpdateView::NeedsAttention(
+                        LedgerUpdateProblem::DeviceRelationshipConflict,
                     ));
                 }
-                RelationView::UpgradeRequired => {
-                    return Ok(DeviceUpdateView::NeedsAttention(
-                        DeviceUpdateProblem::DeviceUpgradeRequired,
+                PeerRelationView::UpgradeRequired => {
+                    return Ok(LedgerUpdateView::NeedsAttention(
+                        LedgerUpdateProblem::DeviceUpgradeRequired,
                     ));
                 }
-                RelationView::Local
-                | RelationView::Consistent
-                | RelationView::ConfirmationPending
-                | RelationView::AwaitingRemovalAcknowledgement
-                | RelationView::Unknown => {}
+                PeerRelationView::Local
+                | PeerRelationView::Consistent
+                | PeerRelationView::ConfirmationPending
+                | PeerRelationView::AwaitingRemovalAcknowledgement
+                | PeerRelationView::Unknown => {}
             }
         }
         if let Some(next_retry_at_ms) = next_retry_at_ms {
-            return Ok(DeviceUpdateView::RetryableFailure { next_retry_at_ms });
+            return Ok(LedgerUpdateView::RetryableFailure { next_retry_at_ms });
         }
         if let SecurityDeliveryStatus::RetryableFailure { next_retry_at_ms } = security {
-            return Ok(DeviceUpdateView::RetryableFailure { next_retry_at_ms });
+            return Ok(LedgerUpdateView::RetryableFailure { next_retry_at_ms });
         }
         let relationship_update_pending = devices.iter().any(|device| {
-            device.status == MemberStatus::PendingActivation
-                || (device.status != MemberStatus::Removed
+            device.status == LedgerMemberStatus::PendingActivation
+                || (device.status != LedgerMemberStatus::Removed
                     && matches!(
                         device.relation,
-                        RelationView::ConfirmationPending | RelationView::Unknown
+                        PeerRelationView::ConfirmationPending | PeerRelationView::Unknown
                     ))
         });
         Ok(
@@ -318,32 +320,32 @@ impl SpaceMembership {
                 || relationship_update_pending
                 || security == SecurityDeliveryStatus::Updating
             {
-                DeviceUpdateView::Updating
+                LedgerUpdateView::Updating
             } else {
-                DeviceUpdateView::Completed
+                LedgerUpdateView::Completed
             },
         )
     }
 }
 
-fn relation_view(relation: PeerRelation) -> RelationView {
+fn relation_view(relation: PeerRelation) -> PeerRelationView {
     match relation {
-        PeerRelation::Unconfirmed => RelationView::Unknown,
-        PeerRelation::Consistent => RelationView::Consistent,
-        PeerRelation::UpgradeRequired => RelationView::UpgradeRequired,
-        PeerRelation::AwaitingLocalDecision => RelationView::PendingLocalDecision,
-        PeerRelation::Diverged => RelationView::Diverged,
-        PeerRelation::Invalid => RelationView::Invalid,
+        PeerRelation::Unconfirmed => PeerRelationView::Unknown,
+        PeerRelation::Consistent => PeerRelationView::Consistent,
+        PeerRelation::UpgradeRequired => PeerRelationView::UpgradeRequired,
+        PeerRelation::AwaitingLocalDecision => PeerRelationView::PendingLocalDecision,
+        PeerRelation::Diverged => PeerRelationView::Diverged,
+        PeerRelation::Invalid => PeerRelationView::Invalid,
     }
 }
 
-fn relation_pause(relation: PeerRelation) -> Option<PauseReason> {
+fn relation_pause(relation: PeerRelation) -> Option<PeerPauseReason> {
     match relation {
         PeerRelation::Consistent => None,
-        PeerRelation::Unconfirmed => Some(PauseReason::RelationshipUnconfirmed),
-        PeerRelation::UpgradeRequired => Some(PauseReason::UpgradeRequired),
-        PeerRelation::AwaitingLocalDecision => Some(PauseReason::PendingLocalDecision),
-        PeerRelation::Diverged => Some(PauseReason::Diverged),
-        PeerRelation::Invalid => Some(PauseReason::Invalid),
+        PeerRelation::Unconfirmed => Some(PeerPauseReason::RelationshipUnconfirmed),
+        PeerRelation::UpgradeRequired => Some(PeerPauseReason::UpgradeRequired),
+        PeerRelation::AwaitingLocalDecision => Some(PeerPauseReason::PendingLocalDecision),
+        PeerRelation::Diverged => Some(PeerPauseReason::Diverged),
+        PeerRelation::Invalid => Some(PeerPauseReason::Invalid),
     }
 }
