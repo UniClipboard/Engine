@@ -67,6 +67,7 @@ mockall = "0.13"
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uc-testkit = { path = "../../tests/uc-testkit" }
 
 [lints]
 workspace = true

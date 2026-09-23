@@ -1,4 +1,6 @@
 use std::error::Error as _;
+use std::path::PathBuf;
+use std::time::Duration;
 
 #[path = "file_transfer/shutdown.rs"]
 mod shutdown;
@@ -29,6 +31,10 @@ use uc_core::ports::{
     RecordReceiverTransferPort, SeedProvisionalReceivePort,
 };
 use uc_core::{FileTransferCancellationReason, FileTransferEvent, FileTransferFailureReason};
+use uc_testkit::{FailureKind, Scenario, ScenarioBudget, ScenarioConfig, ScenarioFailure};
+
+const COMPLETION_SCENARIO_REPRODUCE: &str = "cargo nextest run --profile ci --locked -p uc-application -E 'test(file_transfer_completion_scenario_reports_final_state)'";
+
 #[derive(Default)]
 struct InMemoryEventStore {
     events: std::sync::RwLock<std::collections::HashMap<String, Vec<FileTransferEvent>>>,
@@ -565,6 +571,84 @@ async fn repeating_same_terminal_call_is_idempotent() {
     assert_eq!(first, repeated);
     assert_eq!(history(&ctx, "transfer-1").await.len(), 2);
     assert_eq!(ctx.publisher.published_events().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn file_transfer_completion_scenario_reports_final_state() {
+    let artifact_root = std::env::var_os("UC_TEST_ARTIFACTS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("../../target/test-artifacts/file-transfer"));
+    let scenario = Scenario::start(ScenarioConfig::new(
+        "file-transfer-completion",
+        0x0040_3403,
+        ScenarioBudget::new(Duration::from_secs(1)),
+        COMPLETION_SCENARIO_REPRODUCE,
+        artifact_root,
+    ))
+    .expect("file transfer scenario starts");
+
+    let result = async {
+        let ctx = build_context();
+        let session = {
+            let _stage = scenario.stage("begin-receiver-transfer");
+            ctx.facade
+                .begin_receiver_transfer(entry_transfer("scenario-transfer"))
+                .await
+                .map_err(|_| fixture_failure("receiver-registration"))?
+        };
+        scenario.record_event("receiver-transfer-started");
+
+        {
+            let _stage = scenario.stage("report-progress");
+            session
+                .report_progress(128, Some(128))
+                .await
+                .map_err(|_| product_failure("receiver-progress-rejected"))?;
+        }
+        scenario.record_event("receiver-progress-complete");
+
+        {
+            let _stage = scenario.stage("complete-transfer");
+            session
+                .complete()
+                .await
+                .map_err(|_| product_failure("receiver-completion-rejected"))?;
+        }
+        scenario.record_event("receiver-transfer-completed");
+
+        let events = history(&ctx, "scenario-transfer").await;
+        let terminal_count = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    FileTransferEvent::Completed { .. }
+                        | FileTransferEvent::Failed { .. }
+                        | FileTransferEvent::Cancelled { .. }
+                )
+            })
+            .count();
+        if terminal_count != 1 {
+            return Err(product_failure("terminal-event-was-not-unique"));
+        }
+        if !matches!(events.last(), Some(FileTransferEvent::Completed { .. })) {
+            return Err(product_failure("final-event-was-not-completed"));
+        }
+        Ok(())
+    }
+    .await;
+
+    scenario
+        .finish(result)
+        .expect("file transfer completion report succeeds");
+}
+
+fn fixture_failure(condition: &'static str) -> ScenarioFailure {
+    ScenarioFailure::new(FailureKind::FixtureInvalid, condition)
+}
+
+fn product_failure(condition: &'static str) -> ScenarioFailure {
+    ScenarioFailure::new(FailureKind::ProductInvariant, condition)
 }
 
 #[tokio::test]

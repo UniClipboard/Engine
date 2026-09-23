@@ -641,6 +641,8 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    mod provider_dependency_evidence;
+
     #[derive(Clone, Default)]
     struct CapturedWriter(Arc<StdMutex<Vec<u8>>>);
 

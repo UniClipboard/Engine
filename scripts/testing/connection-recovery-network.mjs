@@ -32,6 +32,8 @@ const bridge = `${runId}br`.slice(0, 15)
 const root = mkdtempSync(join(tmpdir(), 'uc-connectivity-'))
 const records = []
 const faults = []
+const timingStartedAt = performance.now()
+let firstScenarioStartedAt
 let server
 let interrupted = false
 
@@ -239,6 +241,44 @@ async function transfer(left, right, marker) {
   }
 }
 
+async function transferFile(left, right, marker) {
+  for (const [sender, receiver] of [[left, right], [right, left]]) {
+    const handle = `managed-${marker}-${sender.label}`
+    const displayName = `evidence-${sender.label}.bin`
+    const content = `managed-file-payload-${marker}-${sender.label}`
+    const result = await sender.call('send_file', {
+      peer: receiver.id,
+      handle,
+      display_name: displayName,
+      mime_type: 'application/octet-stream',
+      content,
+    })
+    assert.equal(result.total_accepted, 1, `${sender.label} to ${receiver.label}: file not accepted`)
+    await until(async () => {
+      for (const entry of await receiver.call('history')) {
+        if (entry.content_type !== 'file') continue
+        const response = await receiver.raw({ command: 'read_file', entry: entry.entry_id })
+        if (!response.ok || response.ok.file_name !== displayName) continue
+        if (Buffer.from(response.ok.bytes).equals(Buffer.from(content))) return true
+      }
+      return false
+    }, 60_000, 'exact file bytes did not arrive')
+  }
+}
+
+async function pairingProof(group, created) {
+  const setups = await Promise.all(group.map(node => node.call('setup')))
+  const peerCounts = await Promise.all(group.map(async node => (await node.call('peers')).length))
+  return {
+    node_count: group.length,
+    setup_completed: setups.every(setup => setup.has_completed),
+    same_space: setups.every(setup => setup.space_id === created.space),
+    peer_counts: peerCounts,
+    communication_usable: true,
+    connections_online: true,
+  }
+}
+
 function partition(node, blocked) {
   if (blocked && node.partitionedAt) return node.partitionedAt
   if (!blocked) {
@@ -331,13 +371,24 @@ function unblockOutboundInitiation(node, peer) {
 
 async function scenario(id, action) {
   if (only && !id.startsWith(only)) return
+  firstScenarioStartedAt ??= performance.now()
   const started = new Date().toISOString()
   const clock = performance.now()
   const record = { id, started, outcome: 'failed' }
   records.push(record)
-  try { await action(); record.outcome = 'passed' }
+  try {
+    const proof = await action()
+    if (proof !== undefined) record.proof = proof
+    record.outcome = 'passed'
+  }
   finally { record.elapsed_ms = Math.round(performance.now() - clock); record.completed = new Date().toISOString() }
   process.stdout.write(`${id}: passed (${record.elapsed_ms} ms)\n`)
+  return record
+}
+
+async function requiredScenario(id, action) {
+  if (!only || id.startsWith(only)) return scenario(id, action)
+  return action()
 }
 
 async function handleRendezvousRequest(request, response) {
@@ -492,10 +543,22 @@ async function run() {
     for (const node of nodes) await node.stop()
     return
   }
-  await paired(nodes)
   const [a, b, c] = nodes
-  await transfer(a, b, 'baseline')
-  if (c) await transfer(a, c, 'baseline')
+  await requiredScenario('E01-complete-pairing', async () => {
+    const created = await paired(nodes)
+    return pairingProof(nodes, created)
+  })
+  if (!only || !only.startsWith('E01')) {
+    await requiredScenario('E02-text-transfer', async () => {
+      await transfer(a, b, 'baseline')
+      if (c) await transfer(a, c, 'baseline')
+      return { exact_text_verified: true, direction_count: c ? 4 : 2 }
+    })
+    await requiredScenario('E02-file-transfer', async () => {
+      await transferFile(a, b, 'baseline')
+      return { exact_bytes_verified: true, direction_count: 2 }
+    })
+  }
   if (mode === 'relay') { await relayScenarios(a, b); for (const node of nodes) await node.stop(); return }
   for (let iteration = 0; iteration < repeat; iteration++) {
     for (const node of nodes) { await node.drain(); node.events = [] }
@@ -708,6 +771,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => {
 try { await run() }
 catch (error) { failed = true; process.stderr.write(`connection recovery validation failed: ${error.message}\n`) }
 finally {
+  const cleanupStartedAt = performance.now()
   for (const node of nodes) {
     if (node.child?.exitCode === null && node.pending.length === 0) {
       try { await node.call('flush') } catch {}
@@ -758,6 +822,15 @@ finally {
   rmSync(root, { recursive: true, force: true })
   const binaries = [binary, legacyBinary, relayBinary].filter(Boolean).map(path => ({ sha256: createHash('sha256').update(readFileSync(path)).digest('hex') }))
   if (!cleaned) failed = true
-  writeFileSync(join(evidence, `${mode}${mode === 'legacy' ? `-${legacySide}` : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v2', binaries, faults, records, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, failure_reasons: node.failureReasons, network_facts: node.networkFacts })) }, null, 2), { mode: 0o600 })
+  const reproduction = `bash scripts/testing/run-connection-recovery-e2e.sh --suite network --repeat ${repeat} --mode ${mode}${only ? ` --case ${only}` : ''}`
+  const timingCompletedAt = performance.now()
+  const scenarioStartedAt = firstScenarioStartedAt ?? cleanupStartedAt
+  const timings = {
+    prepare_ms: Math.round(scenarioStartedAt - timingStartedAt),
+    scenario_ms: Math.round(cleanupStartedAt - scenarioStartedAt),
+    cleanup_ms: Math.round(timingCompletedAt - cleanupStartedAt),
+    total_ms: Math.round(timingCompletedAt - timingStartedAt),
+  }
+  writeFileSync(join(evidence, `${mode}${mode === 'legacy' ? `-${legacySide}` : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v2', reproduction, binaries, faults, records, timings, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, failure_reasons: node.failureReasons, network_facts: node.networkFacts })) }, null, 2), { mode: 0o600 })
 }
 process.exitCode = failed ? 1 : 0

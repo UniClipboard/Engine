@@ -27,6 +27,24 @@ pub struct PeerAddressRecord {
 pub enum PeerAddressError {
     #[error("internal: {0}")]
     Internal(String),
+    #[error("peer address repository failed ({category})")]
+    Repository {
+        category: &'static str,
+        stage: &'static str,
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+impl PeerAddressError {
+    pub fn diagnostic(&self) -> (&'static str, &'static str) {
+        match self {
+            Self::Internal(_) => ("unknown", "repository"),
+            Self::Repository {
+                category, stage, ..
+            } => (category, stage),
+        }
+    }
 }
 
 #[async_trait]

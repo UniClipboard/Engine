@@ -14,6 +14,9 @@ use crate::space::membership::{
     MembershipMaintenanceTrigger, RecoverSpaceAdmissionsPort, SpaceWorkMode,
 };
 
+mod admission_recovery_scenarios;
+mod support;
+
 #[tokio::test]
 async fn ordinary_work_permit_serializes_a_new_pairing_request() {
     let pair = SpaceAdmissionProtocolTestPair::fresh().await;

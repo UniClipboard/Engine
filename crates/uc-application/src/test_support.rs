@@ -4,6 +4,8 @@
 //! unlock facades) need the same trivial stand-ins; keeping them here avoids
 //! re-declaring one-off fakes per module.
 
+pub(crate) mod membership_scenario;
+
 use async_trait::async_trait;
 use uc_core::clipboard::{
     ContentHash, EntryFileSet, EntryFileSetError, EntryFileSetLine, EntryFileSetLineKind,
