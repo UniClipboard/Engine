@@ -34,7 +34,7 @@ impl HandlerState {
                         let exchange = async {
                             let Ok(bytes) = receive.read_to_end(peer_reachability_protocol::FRAME_SIZE).await else { return };
                             let Some(challenge) = peer_reachability_protocol::challenge(&bytes) else { return };
-                            let admitted = self.is_admitted(&device).await;
+                            let admitted = self.gate.authorize(&device).await.is_ok();
                             let current = self.observations.lock().await.is_current(device, &epoch)
                                 && self.accepting.load(Ordering::Acquire);
                             if send.write_all(&peer_reachability_protocol::reply(&challenge, admitted && current)).await.is_ok() {

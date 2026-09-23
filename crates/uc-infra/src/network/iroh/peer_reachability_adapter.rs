@@ -189,10 +189,6 @@ impl HandlerState {
         });
     }
 
-    async fn is_admitted(&self, device_id: &DeviceId) -> bool {
-        self.gate.authorize(device_id).await.is_ok()
-    }
-
     fn now(&self) -> DateTime<Utc> {
         let ms = self.clock.now_ms();
         Utc.timestamp_millis_opt(ms).single().unwrap_or_else(|| {
@@ -301,7 +297,7 @@ impl ProtocolHandler for IrohPeerReachabilityHandler {
                 .await,
                 Ok(Ok(()))
             ) && send.finish().is_ok();
-            let still_admitted = self.state.is_admitted(&device_id).await;
+            let still_admitted = self.state.gate.authorize(&device_id).await.is_ok();
             let mut observation = self.state.observations.lock().await;
             observation.pending_inbound.remove(&connection_id);
             if !confirmed
@@ -695,7 +691,7 @@ impl IrohPeerReachabilityAdapter {
                     connection.close(0u32.into(), b"peer_not_admitted");
                     return Ok(self.record_failed_check(device, before.clone()).await);
                 }
-                let admitted = self.handler_state.is_admitted(device).await;
+                let admitted = self.handler_state.gate.authorize(device).await.is_ok();
                 let mut observation = self.observations.lock().await;
                 if !admitted
                     || !observation.is_current(*device, &before)
