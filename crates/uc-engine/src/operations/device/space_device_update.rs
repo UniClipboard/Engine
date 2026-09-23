@@ -38,6 +38,9 @@ pub(super) fn summaries(
             SpaceDeviceUpdateProblem::DeviceUpgradeRequired => {
                 SpaceDeviceUpdateProblemSummary::DeviceUpgradeRequired
             }
+            SpaceDeviceUpdateProblem::LocalIdentityMismatch => {
+                SpaceDeviceUpdateProblemSummary::LocalIdentityMismatch
+            }
         }),
         recovery: status.recovery.map(|recovery| match recovery {
             SpaceDeviceUpdateRecovery::ReviewDevices => {
@@ -116,5 +119,21 @@ mod tests {
             legacy_attention.recovery,
             Some(MembershipMaintenanceRecoverySummary::ResolveDeviceTrust)
         );
+
+        let (identity, legacy_identity) =
+            summaries(SpaceDeviceUpdateStatus::needs_attention_without_recovery(
+                SpaceDeviceUpdateProblem::LocalIdentityMismatch,
+            ));
+        assert_eq!(
+            identity.reason,
+            Some(SpaceDeviceUpdateProblemSummary::LocalIdentityMismatch)
+        );
+        assert_eq!(identity.recovery, None);
+        assert_eq!(
+            legacy_identity.phase,
+            MembershipMaintenanceHealthPhaseSummary::NeedsAttention
+        );
+        assert_eq!(legacy_identity.reason, None);
+        assert_eq!(legacy_identity.recovery, None);
     }
 }

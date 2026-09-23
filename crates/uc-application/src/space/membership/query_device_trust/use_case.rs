@@ -1,11 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use uc_core::membership::{
     MemberInstanceId, MembershipHistoryRelationship, MembershipOperationV2,
     VersionedMembershipHistory,
 };
-use uc_core::ports::ReachabilityState;
+use uc_core::ports::{LocalIdentityPort, ReachabilityState};
+use uc_observability_contract::diagnostics::connectivity::{
+    record_local_identity_changed, LocalIdentityState,
+};
 
 use crate::space::membership::{
     LoadedMembershipLedger, MembershipEffectPhase, MembershipLedger, PeerHistorySyncOutcome,
@@ -25,6 +28,8 @@ pub(crate) struct QueryDeviceTrustUseCase {
     observations: Arc<dyn LoadDeviceTrustObservationsPort>,
     current_join: Arc<dyn LoadCurrentJoinStatusPort>,
     security_updates: Arc<dyn LoadSecurityDeviceUpdateStatusPort>,
+    local_identity: Arc<dyn LocalIdentityPort>,
+    last_identity_mismatch: Mutex<Option<bool>>,
 }
 
 impl QueryDeviceTrustUseCase {
@@ -33,12 +38,15 @@ impl QueryDeviceTrustUseCase {
         observations: Arc<dyn LoadDeviceTrustObservationsPort>,
         current_join: Arc<dyn LoadCurrentJoinStatusPort>,
         security_updates: Arc<dyn LoadSecurityDeviceUpdateStatusPort>,
+        local_identity: Arc<dyn LocalIdentityPort>,
     ) -> Self {
         Self {
             ledger,
             observations,
             current_join,
             security_updates,
+            local_identity,
+            last_identity_mismatch: Mutex::new(None),
         }
     }
 
@@ -53,23 +61,36 @@ impl QueryDeviceTrustUseCase {
             observations,
             current_join,
             Arc::new(CompletedSecurityUpdates),
+            Arc::new(MissingLocalIdentity),
         )
     }
 
     pub(crate) async fn execute(&self) -> Result<DeviceTrustStatus, QueryDeviceTrustError> {
         let snapshot = self.ledger.load_verified().await?;
-        let status = self.query_snapshot(&snapshot).await?;
+        let (status, mismatch) = self.query_snapshot_with_identity(&snapshot).await?;
         let latest = self.ledger.load_verified().await?;
         if latest.record().revision == snapshot.record().revision {
+            self.record_identity_change(mismatch);
             return Ok(status);
         }
-        self.query_snapshot(&latest).await
+        let (status, mismatch) = self.query_snapshot_with_identity(&latest).await?;
+        self.record_identity_change(mismatch);
+        Ok(status)
     }
 
     pub(crate) async fn query_snapshot(
         &self,
         snapshot: &VerifiedMembershipLedger,
     ) -> Result<DeviceTrustStatus, QueryDeviceTrustError> {
+        let (status, mismatch) = self.query_snapshot_with_identity(snapshot).await?;
+        self.record_identity_change(mismatch);
+        Ok(status)
+    }
+
+    async fn query_snapshot_with_identity(
+        &self,
+        snapshot: &VerifiedMembershipLedger,
+    ) -> Result<(DeviceTrustStatus, Option<bool>), QueryDeviceTrustError> {
         if snapshot.history().is_none() {
             let mut status = DeviceTrustStatus::no_current_space(snapshot.record().revision);
             status.current_join = self
@@ -77,7 +98,7 @@ impl QueryDeviceTrustUseCase {
                 .load_admission_display(&[])
                 .await?
                 .current_join;
-            return Ok(status);
+            return Ok((status, None));
         }
         let history = snapshot
             .history()
@@ -280,7 +301,7 @@ impl QueryDeviceTrustUseCase {
             .security_updates
             .load_security_device_update_status()
             .await?;
-        let space_device_update = space_device_update_status(
+        let mut space_device_update = space_device_update_status(
             history,
             local_member_instance,
             snapshot.record(),
@@ -288,25 +309,103 @@ impl QueryDeviceTrustUseCase {
             !pending_effect_device_ids.is_empty(),
             security_updates,
         )?;
-        Ok(DeviceTrustStatus {
-            revision: snapshot.record().revision,
-            local_device_id: Some(local_device_id),
-            local_membership: if scope.local_member_active {
-                DeviceTrustMembership::Active
-            } else if history.active_members().contains(&local_member_instance) {
-                DeviceTrustMembership::PendingActivation
-            } else if pending_effect_device_ids.contains(&local_device_id) {
-                DeviceTrustMembership::PendingActivation
+        let mismatch = if scope.local_member_active {
+            if let Some(current) = self
+                .local_identity
+                .get_current_fingerprint()
+                .await
+                .map_err(|source| QueryDeviceTrustError::Dependency {
+                    source: anyhow::Error::new(source),
+                })?
+            {
+                let expected = history
+                    .admission_facts_for(local_member_instance)
+                    .ok_or(QueryDeviceTrustError::RecoveryRequired)?;
+                let mismatch = current != expected.identity_fingerprint;
+                if mismatch {
+                    space_device_update = SpaceDeviceUpdateStatus::needs_attention_without_recovery(
+                        SpaceDeviceUpdateProblem::LocalIdentityMismatch,
+                    );
+                }
+                Some(mismatch)
             } else {
-                DeviceTrustMembership::Removed
+                None
+            }
+        } else {
+            None
+        };
+        Ok((
+            DeviceTrustStatus {
+                revision: snapshot.record().revision,
+                local_device_id: Some(local_device_id),
+                local_membership: if scope.local_member_active {
+                    DeviceTrustMembership::Active
+                } else if history.active_members().contains(&local_member_instance) {
+                    DeviceTrustMembership::PendingActivation
+                } else if pending_effect_device_ids.contains(&local_device_id) {
+                    DeviceTrustMembership::PendingActivation
+                } else {
+                    DeviceTrustMembership::Removed
+                },
+                current_change,
+                current_join,
+                inbound_pairings,
+                pending_inbound_member,
+                space_device_update,
+                devices,
             },
-            current_change,
-            current_join,
-            inbound_pairings,
-            pending_inbound_member,
-            space_device_update,
-            devices,
-        })
+            mismatch,
+        ))
+    }
+
+    fn record_identity_change(&self, mismatch: Option<bool>) {
+        let Some(mismatch) = mismatch else {
+            return;
+        };
+        let mut previous = self
+            .last_identity_mismatch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let changed = match (*previous, mismatch) {
+            (Some(true), false) => Some(LocalIdentityState::Consistent),
+            (Some(true), true) | (Some(false) | None, false) => None,
+            (Some(false) | None, true) => Some(LocalIdentityState::Mismatch),
+        };
+        *previous = Some(mismatch);
+        drop(previous);
+        if let Some(state) = changed {
+            record_local_identity_changed(state);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) struct MissingLocalIdentity;
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl LocalIdentityPort for MissingLocalIdentity {
+    async fn create(
+        &self,
+    ) -> Result<uc_core::security::IdentityFingerprint, uc_core::ports::LocalIdentityError> {
+        Err(uc_core::ports::LocalIdentityError::Storage(
+            "query is read-only".to_owned(),
+        ))
+    }
+
+    async fn ensure(
+        &self,
+    ) -> Result<uc_core::security::IdentityFingerprint, uc_core::ports::LocalIdentityError> {
+        Err(uc_core::ports::LocalIdentityError::Storage(
+            "query is read-only".to_owned(),
+        ))
+    }
+
+    async fn get_current_fingerprint(
+        &self,
+    ) -> Result<Option<uc_core::security::IdentityFingerprint>, uc_core::ports::LocalIdentityError>
+    {
+        Ok(None)
     }
 }
 

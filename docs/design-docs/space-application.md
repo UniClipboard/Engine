@@ -77,6 +77,10 @@ flowchart LR
 
 `SpaceFacade` 是公开 seam，`SpaceApplication` 是内部 composition，`MembershipLedger` 是成员事实 deep module。三者职责不能合并：facade 不读存储，composition 不决定业务，ledger 不决定产品动作或网络重试。
 
+`spaceDeviceUpdate.reason=local_identity_mismatch` 表示本机当前网络身份与已验证成员历史中的本机指纹不一致。
+查询只读取现有身份，不创建或替换密钥；结果为 `needs_attention`，不提供恢复动作或下次重试时间，
+因为自动重试不能消除这类不一致。恢复方式待现场核实后决定；旧版维护健康视图只保留需要处理阶段。
+
 ## 事实所有权
 
 | 事实或状态 | 唯一负责人 | 可以读取它的模块 | 不能拿它做什么 |

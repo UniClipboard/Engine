@@ -10,7 +10,6 @@ fn payload(state: &str) -> String {
 }
 
 #[test]
-#[ignore = "inbound-peer-admission S5a: remove once space.local_identity.changed is in the contract"]
 fn mismatch_is_a_warning_that_needs_attention() {
     let fields = decode_local_record(EVENT, &payload("mismatch"), "WARN").expect("valid record");
     assert_eq!(fields["event.name"], EVENT);
@@ -23,7 +22,6 @@ fn mismatch_is_a_warning_that_needs_attention() {
 }
 
 #[test]
-#[ignore = "inbound-peer-admission S5a: remove once space.local_identity.changed is in the contract"]
 fn returning_to_consistency_is_informational() {
     let fields = decode_local_record(EVENT, &payload("consistent"), "INFO").expect("valid record");
     assert_eq!(fields["state"], "consistent");

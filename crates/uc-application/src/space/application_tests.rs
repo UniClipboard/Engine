@@ -58,6 +58,27 @@ struct PassivePorts {
 }
 
 #[async_trait]
+impl uc_core::ports::LocalIdentityPort for PassivePorts {
+    async fn create(&self) -> Result<IdentityFingerprint, uc_core::ports::LocalIdentityError> {
+        Err(uc_core::ports::LocalIdentityError::Storage(
+            "passive identity".to_owned(),
+        ))
+    }
+
+    async fn ensure(&self) -> Result<IdentityFingerprint, uc_core::ports::LocalIdentityError> {
+        Err(uc_core::ports::LocalIdentityError::Storage(
+            "passive identity".to_owned(),
+        ))
+    }
+
+    async fn get_current_fingerprint(
+        &self,
+    ) -> Result<Option<IdentityFingerprint>, uc_core::ports::LocalIdentityError> {
+        Ok(None)
+    }
+}
+
+#[async_trait]
 impl RefreshVerifiedPeerAddressPort for PassivePorts {
     async fn refresh_verified_peer_address(&self, _peer: &uc_core::ids::DeviceId) {}
 }
@@ -869,6 +890,7 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
                 membership_network_activity: passive.clone(),
             },
         },
+        passive.clone(),
         passive.clone(),
         passive.clone(),
         passive.clone(),

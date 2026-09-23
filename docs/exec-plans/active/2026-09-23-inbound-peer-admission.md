@@ -2,7 +2,7 @@
 
 ## 状态
 
-- **状态**：实施中；S1–S4 已实现并验证，S5a 待实施（见“实施记录”）
+- **状态**：实施中；S1–S5a 已实现并验证，全部切片后的收尾测试与生产路径检查待执行，S5b 待现场核实（见“实施记录”）
 - **日期**：2026-09-23
 - **来源问题**：t-0028 双 Desktop 现场。配对最终返回成功后，邀请方的在线确认被加入方拒绝 748 次（`peer_not_admitted`）；加入方主动连接 233 次全部握手超时；双方公开状态却都显示对端 `active`/`usable`。只读诊断记录见 Desktop 线程 `.herdr-project/uni-t-0028/report.md` 顶部。
 - **已证实**：
@@ -76,7 +76,7 @@
 | B1 | `crates/uc-infra/src/network/iroh/inbound_peer/tests.rs` | 已落地 | 身份门的判定表：唯一、未知、歧义（与顺序无关）、读取失败、派生失败、拒绝、不可用；身份失败不访问账本 | S2 |
 | B2 | `crates/uc-application/src/space/membership/ledger/peer_admission_tests.rs` | 已落地 | 准入与 scope 同源；本机失效时不放行任何对端；历史外设备不放行；没有版本来源时不走缓存；可用设备一定被放行；Engine 用的构造函数规则一致 | S3 |
 | B3 | `crates/uc-infra/src/space/admission/joiner/sponsor_identity/tests.rs` | 已落地 | 续连端点与历史指纹一致才放行；不一致或无法解码都终止为 `IdentityConflict`，并保留类型化 source | S4 |
-| B4 | `staged-tests/crates/uc-application/src/space/membership/query_device_trust/local_identity_tests.rs` | 暂存 | 本机身份被替换时显示需要处理、没有恢复动作，并且优先于可重试状态；尚无身份或本机未生效时不误报；读取失败保留 source；诊断只在状态变化时记录，不含指纹 | S5a |
+| B4 | `crates/uc-application/src/space/membership/query_device_trust/local_identity_tests.rs` | 已落地 | 本机身份被替换时显示需要处理、没有恢复动作，并且优先于可重试状态；尚无身份或本机未生效时不误报；读取失败保留 source；诊断只在状态变化时记录，不含指纹 | S5a |
 
 当前基线（2026-09-23，本机实测）：A1–A5 可以编译，未标 ignore 的断言通过，`--ignored` 运行时全部因功能缺失而失败。B1–B4 未编译。
 
@@ -262,4 +262,5 @@ Cargo 验证由一个负责人通过共享 `target` 串行执行。
 - 2026-09-23 S2：九处入站身份解析收敛到 `PeerIdentityResolver`，需账本的协议使用 `InboundPeerGate`，拒绝只在实际回写/关闭处记录；mDNS 提示只解析、不记入站拒绝。B1 9/9、A2 1/1、A3 的 S2 两项、既有 `peer_admission_identity_resolution` 1/1 通过；`cargo check --workspace --all-targets --locked`、metadata、fmt、Rust 风格、仓库架构及 diff 检查通过。A3 的 S3/S4 两项仍按计划 ignore。旧 E2E 的 `duplicate-identity-stale-first` 原断言要求先选 stale 记录并查询账本，与本计划“歧义时拒绝且不查账本”冲突；仅将其改为拒绝且查询列表为空，保留其余 E2E 语义。未执行本机双实例手动配对的生产 Engine 文件订阅检查，记为跳过；其他协议原有完整测试尚未执行。提交号见对应切片提交。
 - 2026-09-23 S3：账本统一网络准入和公开 scope 的谓词；每次入站重新加载记录，历史字节未变时只复用验签结果。移除 Infra 准入副本，Engine 装配 Application 只读账本，架构检查随所有权调整。B2 10/10、Application 成员测试 165 通过、1 项既有忽略、A3 的 S3 项通过；统一门禁通过。A3 的 S4 项仍按计划忽略；未执行设备检查。提交号见对应切片提交。
 - 2026-09-23 S4：加入方激活前比较已验证邀请方历史指纹与续连端点指纹，三类失败以类型化来源终止为 `IdentityConflict`。原 `reject_activation(IdentityConflict)` 返回 `InvalidTransition`，本计划 S4 规格遗漏了这一点；因此 Core 新增本地终止原因 `IdentityRejected`，在准入记录 V2 的本地终止原因取值表中编码为 9，重启后公开拒绝原因仍为 `IdentityConflict`。**格式决定**（经用户确认）：该取值表的 3–8 由本分支 `8df9d5e1` 新增，main 与 `v1.1.0-rc.18` 只有 0–2，尚未越过冻结边界；编码 9 补全同一未发布目标格式，不新增格式版本，是本计划唯一的持久化取值新增；只有本分支的早期构建读取编码 9 会得到 `InvalidState`，不涉及受支持发布。测试：Core `activation_rejection_categories_round_trip_through_persistence` 补 `IdentityConflict` 往返；Application 恢复既有 `RelationshipConflict` 断言，另增 `sponsor_identity_conflict_is_saved_as_a_terminal_rejection_without_retry`（激活夹具改为可指定拒绝原因，默认仍为 `RelationshipConflict`）。验证：B3 5/5；A2 1/1、A3 4/4，`--include-ignored` 无忽略项；Core space admission 108/108、Core 持久化 14/14；Infra `space::admission` 与 `network::iroh` 314 通过、4 项既有忽略；Application `space::admission` 93 通过、1 项失败 `joiner_pairing_fixture_reaches_active_settled`，该项在计划提交 `6cc76b45` 已失败，与本计划无关。Engine `space_membership_auto_pairing_e2e`（`dev-tools`）完整运行 40 通过、7 失败、11 忽略。对这 7 项分别在 S3 提交 `d5980541` 与当前工作树以同一组合各运行一次，结果一致：`completed_admission_survives_restart_and_allows_transfer`、`handoff_four_device_removal_preview_matches_executed_choice`、`offline_member_catches_multiple_removals_without_blocking_new_invitations` 两边都通过，完整运行中的失败属并发负载下的不稳定；`f2_concurrent_leaf_removals_resolve_to_selected_branch`、`f6_deep_chain_recovers_selected_branch_without_online_sponsors`、`same_device_returns_to_a_previous_space_after_switch_and_restart`（重启 `Engine::start` 返回 1216）、`suspend_during_space_switch_recovery_does_not_resurrect_the_network`（恢复返回 1103）两边都失败，属 S4 之前的既有问题，另行跟踪。完整运行日志中没有任何 `IdentityConflict` 拒绝。统一门禁通过，仅有既存 OHOS 测试未使用导入警告。未执行设备检查。
-- 2026-09-23 S2 补正：mDNS 连接提示改用 `PeerIdentityResolver::resolve`，成员读取与指纹派生失败经新增的 `PeerIdentityError` 保留原始 source，入站路径仍使用 `Copy` 的 `InboundPeerRejection`；B1 增加来源链测试，10/10。删除 `peer_reachability_adapter` 残留的 `is_admitted` 包装，三个调用点直接使用 `gate.authorize(..).is_ok()`。已落地的 B1–B3 暂存副本已删除，B4 随 S5a 提交删除。遗留：S4 的 `SponsorRouteIdentityError` 按 B3 规格为 `Copy`，指纹派生失败的 `anyhow` 来源没有保留；路由解码器本身也不带来源。
+- 2026-09-23 S2 补正：mDNS 连接提示改用 `PeerIdentityResolver::resolve`，成员读取与指纹派生失败经新增的 `PeerIdentityError` 保留原始 source，入站路径仍使用 `Copy` 的 `InboundPeerRejection`；B1 增加来源链测试，10/10。删除 `peer_reachability_adapter` 残留的 `is_admitted` 包装，三个调用点直接使用 `gate.authorize(..).is_ok()`。已落地的 B1–B3 暂存副本已删除，B4 随 S5a 提交删除（暂存目录随之清空）。遗留：S4 的 `SponsorRouteIdentityError` 按 B3 规格为 `Copy`，指纹派生失败的 `anyhow` 来源没有保留；路由解码器本身也不带来源。
+- 2026-09-23 S5a：本机查询只读取当前身份，比较已验证历史；不一致优先公开 `needs_attention/local_identity_mismatch`，不提供恢复动作。绑定未镜像该原因枚举，通过 Engine JSON 透传。B4 6/6、A4 3/3、A5 3/3、Application `query_device_trust` 21/21、设备组查询 1/1、Engine `public_contract` 50/50；统一门禁通过，仅有既存 OHOS 测试未使用导入警告。当前 Desktop 与 Mobile 源码未找到 `spaceDeviceUpdate` 或新原因的显式消费点；实际宿主版本对未知原因线值的解码兼容性仍须在发布前分别验证。

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tokio::sync::broadcast;
 use uc_core::membership::{GroupBootstrapPort, MembershipHistoryExchangeEndpointPort};
-use uc_core::ports::PeerReachabilityChanged;
+use uc_core::ports::{LocalIdentityPort, PeerReachabilityChanged};
 
 use crate::deps::ApplicationDeps;
 use crate::space::adapters::{
@@ -97,6 +97,7 @@ impl crate::space::membership::WakeSpaceMembershipMaintenancePort for DeferredMa
 struct SpaceApplicationDeps {
     adapters: SpaceRuntimeAdapters,
     device_identity: Arc<dyn uc_core::ports::DeviceIdentityPort>,
+    local_identity: Arc<dyn LocalIdentityPort>,
     group_bootstrap: Arc<dyn GroupBootstrapPort>,
     clock: Arc<dyn uc_core::ports::ClockPort>,
     settings: Arc<dyn uc_core::ports::SettingsPort>,
@@ -109,12 +110,14 @@ impl SpaceApplicationDeps {
     fn from_application(
         application: &ApplicationDeps,
         adapters: SpaceRuntimeAdapters,
+        local_identity: Arc<dyn LocalIdentityPort>,
         admission_observations: Arc<SpaceAdmissionObservationRegistry>,
         space_transition_changes: tokio::sync::watch::Sender<()>,
     ) -> Self {
         Self {
             adapters,
             device_identity: Arc::clone(&application.device.device_identity),
+            local_identity,
             group_bootstrap: Arc::clone(&application.security.space_access_ports.group_bootstrap),
             clock: Arc::clone(&application.system.clock),
             settings: Arc::clone(&application.settings),
@@ -149,6 +152,7 @@ impl SpaceApplication {
     pub(crate) fn build(
         application: &ApplicationDeps,
         adapters: SpaceRuntimeAdapters,
+        local_identity: Arc<dyn LocalIdentityPort>,
         peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
         known_peer_contacts: broadcast::Receiver<super::membership::KnownPeerContact>,
         re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
@@ -159,6 +163,7 @@ impl SpaceApplication {
             SpaceApplicationDeps::from_application(
                 application,
                 adapters,
+                local_identity,
                 admission_observations,
                 space_transition_changes,
             ),
@@ -172,6 +177,7 @@ impl SpaceApplication {
     pub(crate) fn build_for_test(
         adapters: SpaceRuntimeAdapters,
         device_identity: Arc<dyn uc_core::ports::DeviceIdentityPort>,
+        local_identity: Arc<dyn LocalIdentityPort>,
         group_bootstrap: Arc<dyn GroupBootstrapPort>,
         clock: Arc<dyn uc_core::ports::ClockPort>,
         settings: Arc<dyn uc_core::ports::SettingsPort>,
@@ -184,6 +190,7 @@ impl SpaceApplication {
             SpaceApplicationDeps {
                 adapters,
                 device_identity,
+                local_identity,
                 group_bootstrap,
                 clock,
                 settings,
@@ -210,6 +217,7 @@ impl SpaceApplication {
                     membership,
                 },
             device_identity,
+            local_identity,
             group_bootstrap,
             clock,
             settings,
@@ -283,6 +291,7 @@ impl SpaceApplication {
             device_trust_observations,
             current_join_status,
             Arc::clone(&deliver_group_updates) as Arc<dyn LoadSecurityDeviceUpdateStatusPort>,
+            local_identity,
         ));
         let initialize_membership = Arc::new(InitializeSpaceMembershipUseCase::new(
             Arc::clone(&ledger),

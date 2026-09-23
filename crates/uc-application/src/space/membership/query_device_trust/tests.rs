@@ -523,6 +523,7 @@ async fn pending_security_device_update_prevents_overall_completion() {
         Arc::new(StaticSecurityUpdates(
             SpaceDeviceUpdateStatus::retryable_failure(60_000),
         )),
+        Arc::new(super::use_case::MissingLocalIdentity),
     );
 
     let status = query.execute().await.unwrap();

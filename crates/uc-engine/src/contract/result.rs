@@ -1312,6 +1312,7 @@ pub enum SpaceDeviceUpdateProblemSummary {
     DeviceRelationshipConflict,
     DeviceSecurityUpdateRejected,
     DeviceUpgradeRequired,
+    LocalIdentityMismatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

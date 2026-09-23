@@ -29,4 +29,6 @@ impl LoadCurrentJoinStatusPort for NoCurrentJoinStatus {
 }
 
 #[cfg(test)]
+mod local_identity_tests;
+#[cfg(test)]
 mod tests;

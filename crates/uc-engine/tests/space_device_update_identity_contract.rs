@@ -8,7 +8,6 @@ use uc_engine::{
 };
 
 #[test]
-#[ignore = "inbound-peer-admission S5a: remove once the identity mismatch reason is public"]
 fn identity_mismatch_is_needs_attention_without_a_recovery_action() {
     let status: SpaceDeviceUpdateStatusSummary =
         serde_json::from_str(r#"{"phase":"needs_attention","reason":"local_identity_mismatch"}"#)

@@ -125,6 +125,7 @@ impl SpaceFacade {
         let application = SpaceApplication::build(
             &app_deps,
             runtime_adapters,
+            Arc::clone(&admission.local_identity),
             peer_reachability_changed_events,
             known_peer_contacts,
             Arc::clone(&re_pairing_state)

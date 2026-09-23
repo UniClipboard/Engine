@@ -74,6 +74,7 @@ pub enum SpaceDeviceUpdateProblem {
     DeviceRelationshipConflict,
     DeviceSecurityUpdateRejected,
     DeviceUpgradeRequired,
+    LocalIdentityMismatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +127,15 @@ impl SpaceDeviceUpdateStatus {
             phase: SpaceDeviceUpdatePhase::NeedsAttention,
             reason: Some(reason),
             recovery: Some(recovery),
+            next_retry_at_ms: None,
+        }
+    }
+
+    pub const fn needs_attention_without_recovery(reason: SpaceDeviceUpdateProblem) -> Self {
+        Self {
+            phase: SpaceDeviceUpdatePhase::NeedsAttention,
+            reason: Some(reason),
+            recovery: None,
             next_retry_at_ms: None,
         }
     }
