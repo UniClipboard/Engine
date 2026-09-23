@@ -154,7 +154,7 @@ impl AdmissionRecoveryService {
             sponsor_deadlines,
             sponsor_abandonments,
             next_deadline_ms,
-            _sponsor_confirmation_pending,
+            _sponsor_pairing_open,
             _needs_attention,
         ) = recovery.into_parts();
         if let Some(deadline_ms) = next_deadline_ms {

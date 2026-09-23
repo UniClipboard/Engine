@@ -643,11 +643,14 @@ mod tests {
         sponsor_waiting_for_complete_ack_with_contract(seed, true)
     }
 
-    fn sponsor_waiting_for_complete_ack_with_contract(seed: u8, bounded: bool) -> SponsorAdmission {
+    /// 邀请方已接受加入申请、尚未回 Candidate 的记录。
+    fn sponsor_waiting_for_candidate(seed: u8) -> SponsorAdmission {
+        sponsor_accepted_with_contract(seed, true)
+    }
+
+    fn sponsor_accepted_with_contract(seed: u8, bounded: bool) -> SponsorAdmission {
         let admission_id = SpaceAdmissionId::from_bytes([seed; 32]).unwrap();
-        let (candidate, committed_history, joiner_member) = valid_candidate(admission_id, seed);
         let join_request = join_request(admission_id, seed);
-        let join_request_id = join_request.header().message_id();
         let join_request_evidence = join_request.evidence([seed.wrapping_add(1); 32]).unwrap();
         let peer_binding = AdmissionPeerBinding::new(
             uc_core::membership::AdmissionChannelPeerId::from_bytes([seed.wrapping_add(2); 32])
@@ -670,7 +673,7 @@ mod tests {
             AdmissionBaseSnapshot::from_bytes(vec![seed.wrapping_add(6); 32]).unwrap();
         let continuation =
             AdmissionContinuationCredential::from_bytes(vec![seed.wrapping_add(7); 64]).unwrap();
-        let accepted = if bounded {
+        if bounded {
             SponsorAdmission::accept_join_request_with_contract(
                 admission_id,
                 invitation_claim,
@@ -693,7 +696,14 @@ mod tests {
             )
         }
         .unwrap()
-        .into_replacement();
+        .into_replacement()
+    }
+
+    fn sponsor_waiting_for_complete_ack_with_contract(seed: u8, bounded: bool) -> SponsorAdmission {
+        let admission_id = SpaceAdmissionId::from_bytes([seed; 32]).unwrap();
+        let (candidate, committed_history, joiner_member) = valid_candidate(admission_id, seed);
+        let join_request_id = join_request(admission_id, seed).header().message_id();
+        let accepted = sponsor_accepted_with_contract(seed, bounded);
         let candidate_reply = SpaceAdmissionEnvelopeV1::new(
             admission_id,
             AdmissionRole::Sponsor,
@@ -978,6 +988,25 @@ mod tests {
             transport_address_blob: vec![0x72; 32],
             identity_signature: vec![0x73; 64],
         }
+    }
+
+    /// 未到期的邀请方配对同样占用运行资格：正式提交前普通维护不得插队。
+    #[tokio::test]
+    async fn an_unfinished_sponsor_pairing_holds_pairing_open_before_its_deadline() {
+        let fixture = Fixture::new();
+        fixture.save(&[sponsor_waiting_for_candidate(0x61)]);
+
+        let before_deadline = PendingAdmissionRecoveryStatePort::load(
+            &fixture.reopen(),
+            AdmissionRecoveryTrigger::Periodic,
+            1_000,
+        )
+        .await
+        .expect("an unfinished sponsor record stays readable before its deadline");
+
+        assert!(before_deadline.pairing_in_progress());
+        // 未到期的记录不加载记录体，只作为运行资格事实。
+        assert_eq!(before_deadline.len(), 0);
     }
 }
 

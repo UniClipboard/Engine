@@ -49,7 +49,7 @@ Core 为每条记录给出 `AdmissionOutstandingWork`：
 迁移中发现、未在阶段 A 改变的现有缺口：
 
 - `Terminal.RecoveryRequired` 记录的恢复动作为无，且终态不计入 `missing_deadline`，因此不会经恢复索引把空间工作模式切到 `NeedsAttention`。用户可见的加入状态另由 `display.rs` 的当前加入投影用 `needs_attention()` 上报，不会静默；待确认的是维护侧是否也应停下。
-- 邀请方未到期的 `SponsorDeadline` 记录不计入 `pairing_in_progress`（索引只加载已到期记录），工作模式对进行中的邀请方配对依赖协议处理入口而非恢复索引。
+- 邀请方未到期的配对不计入 `pairing_in_progress`：已修复，见下节。
 
 ## 统一收尾期限类型（已实现）
 
@@ -69,6 +69,18 @@ Core 新增 [`membership/settlement_window.rs`](../../../crates/uc-core/src/memb
 - `JoinerAdmission::try_from_record` 与 `SponsorAdmission::try_from_record` 各自列举本角色状态，现改为 `record_role()` 判断，并以测试锁定两种角色互不接受。
 
 未引入额外的“阶段枚举”：阶段类问题已由 `AdmissionOutstandingWork` 回答，再加一层会产生第二套分类。
+
+## 邀请方进行中配对的运行资格（已修复）
+
+规格把 `Pairing` 定义为“至少一个本机未终结的有效准入义务”，但恢复索引只在记录到期时才取出记录体，
+`pairing_in_progress` 又按取出的记录判断，于是未到期的邀请方配对不占用运行资格：
+
+- `Sponsor::Applied`（已回 `Complete`、等待最终确认）因带确认摘要而被计入，正式提交前的关键窗口原本就有保护。
+- `Accepted`、`Candidate`、`Committed` 三档不被计入。这段时间里普通维护可以取得运行资格，并在整轮维护期间持有协议锁，
+  推迟邀请方的下一步回复。影响是配对变慢与额外重试，不破坏正确性；加入方一侧没有该问题，其记录始终被加载。
+
+修复：恢复索引把“未到期的邀请方义务”作为独立事实上报（`sponsor_pairing_open`），不加载记录体，因此不额外解密。
+`SponsorConfirmation` 与 `SponsorDeadline` 两类未到期动作都计入，行为与加入方一侧对齐。
 
 ## 阶段 B：跨记录的配对尾部（后续）
 

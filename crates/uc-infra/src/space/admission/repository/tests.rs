@@ -693,12 +693,12 @@ async fn recovery_summary_tracks_changes_and_rollbacks_without_reading_other_rec
         confirmations,
         abandonments,
         next_deadline_ms,
-        sponsor_confirmation_pending,
+        sponsor_pairing_open,
         needs_attention,
     ) = loaded.into_parts();
     assert!(confirmations.is_empty());
     assert!(abandonments.is_empty());
-    assert!(!sponsor_confirmation_pending);
+    assert!(!sponsor_pairing_open);
     assert!(!needs_attention);
     assert_eq!(next_deadline_ms, Some(301_000));
     let (aggregate, _) = pending.pop().unwrap().into_parts();

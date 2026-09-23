@@ -70,7 +70,8 @@ pub(crate) struct LoadedRecoveryIndex {
     pub(crate) sponsor_deadlines: Vec<SponsorAdmission>,
     pub(crate) sponsor_abandonments: Vec<SponsorAdmission>,
     pub(crate) next_deadline_ms: Option<i64>,
-    pub(crate) sponsor_confirmation_pending: bool,
+    /// 存在尚未到期的邀请方配对义务；这类记录不加载记录体，只作为运行资格事实。
+    pub(crate) sponsor_pairing_open: bool,
     pub(crate) needs_attention: bool,
 }
 
@@ -158,7 +159,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                     sponsor_deadlines: Vec::new(),
                     sponsor_abandonments: Vec::new(),
                     next_deadline_ms: None,
-                    sponsor_confirmation_pending: false,
+                    sponsor_pairing_open: false,
                     needs_attention: false,
                 });
             }
@@ -167,7 +168,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             let mut sponsor_deadlines = Vec::new();
             let mut sponsor_abandonments = Vec::new();
             let mut next_deadline_ms: Option<i64> = None;
-            let mut sponsor_confirmation_pending = false;
+            let mut sponsor_pairing_open = false;
             let mut needs_attention = false;
             loop {
                 let rows = load_summary_batch(conn, cursor.as_deref())?;
@@ -201,10 +202,13 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                             next_deadline_ms.map_or(deadline, |current| current.min(deadline)),
                         );
                     }
-                    if summary.action == RecoveryAction::SponsorConfirmation
-                        && !summary.is_due(now_ms)
+                    // 未到期的邀请方配对仍在进行：正式提交前后都不让普通维护插队。
+                    if matches!(
+                        summary.action,
+                        RecoveryAction::SponsorConfirmation | RecoveryAction::SponsorDeadline
+                    ) && !summary.is_due(now_ms)
                     {
-                        sponsor_confirmation_pending = true;
+                        sponsor_pairing_open = true;
                     }
                     if !summary.needs_body(now_ms) {
                         continue;
@@ -243,7 +247,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                 sponsor_deadlines,
                 sponsor_abandonments,
                 next_deadline_ms,
-                sponsor_confirmation_pending,
+                sponsor_pairing_open,
                 needs_attention,
             })
         })

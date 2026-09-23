@@ -71,8 +71,8 @@ pub struct LoadedAdmissionRecovery {
     sponsor_deadlines: Vec<LoadedSponsorDeadline>,
     sponsor_abandonments: Vec<LoadedSponsorAbandonment>,
     next_deadline_ms: Option<i64>,
-    /// 邀请方仍在等待加入方的最终确认
-    sponsor_confirmation_pending: bool,
+    /// 存在尚未到期的邀请方配对义务
+    sponsor_pairing_open: bool,
     /// 旧记录缺少安全自动收尾所需的持久证据
     needs_attention: bool,
 }
@@ -144,7 +144,7 @@ impl LoadedAdmissionRecovery {
         sponsor_deadlines: Vec<LoadedSponsorDeadline>,
         sponsor_abandonments: Vec<LoadedSponsorAbandonment>,
         next_deadline_ms: Option<i64>,
-        sponsor_confirmation_pending: bool,
+        sponsor_pairing_open: bool,
         needs_attention: bool,
     ) -> Self {
         Self {
@@ -152,7 +152,7 @@ impl LoadedAdmissionRecovery {
             sponsor_deadlines,
             sponsor_abandonments,
             next_deadline_ms,
-            sponsor_confirmation_pending,
+            sponsor_pairing_open,
             needs_attention,
         }
     }
@@ -172,7 +172,7 @@ impl LoadedAdmissionRecovery {
             self.sponsor_deadlines,
             self.sponsor_abandonments,
             self.next_deadline_ms,
-            self.sponsor_confirmation_pending,
+            self.sponsor_pairing_open,
             self.needs_attention,
         )
     }
@@ -189,7 +189,7 @@ impl LoadedAdmissionRecovery {
             .iter()
             .any(|loaded| loaded.aggregate().outstanding_work().holds_pairing_open())
             || !self.sponsor_deadlines.is_empty()
-            || self.sponsor_confirmation_pending
+            || self.sponsor_pairing_open
     }
 
     pub fn work_mode(&self) -> SpaceWorkMode {

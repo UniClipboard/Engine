@@ -61,7 +61,7 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                         confirmations,
                         abandonments,
                         index.next_deadline_ms,
-                        index.sponsor_confirmation_pending,
+                        index.sponsor_pairing_open,
                         index.needs_attention,
                     ))
                 })
