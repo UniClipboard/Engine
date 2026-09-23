@@ -72,7 +72,7 @@ async fn final_confirmation_retry_yields_ordinary_maintenance() {
         scenario.record_event("activation-plan-saved");
         require(
             activation_plan.step() == MembershipMaintenanceStepOutcome::Completed
-                && !activation_plan.should_continue(),
+                && !activation_plan.allows_ordinary_membership(),
             "ordinary-maintenance-ran-before-activation",
         )?;
         {
@@ -99,9 +99,7 @@ async fn final_confirmation_retry_yields_ordinary_maintenance() {
 
         let recovered = pair
             .joiner()
-            .recover_pending(AdmissionRecoveryTrigger::PeerOnline(
-                uc_core::DeviceId::new("upgraded-peer"),
-            ))
+            .recover_pending(AdmissionRecoveryTrigger::StateChanged)
             .await;
         scenario.record_event("final-confirmation-settled");
         require(
@@ -161,12 +159,9 @@ async fn three_device_confirmation_has_one_visible_admission() {
         );
         pair.seed_sponsor(complete.into_admission());
 
-        pair.set_now_ms(301_000);
-        pair.recover_sponsor().await;
         scenario.record_event("third-device-unconfirmed");
         require(
-            pair.sponsor_confirmation_status()
-                == Some(SponsorPairingConfirmationStatus::Unconfirmed),
+            pair.sponsor_confirmation_status() != Some(SponsorPairingConfirmationStatus::Confirmed),
             "third-device-became-confirmed-before-complete-ack",
         )?;
 

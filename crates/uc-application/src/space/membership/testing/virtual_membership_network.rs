@@ -36,6 +36,7 @@ pub(super) enum VirtualMembershipNetworkError {
     UnknownNode,
     Offline,
     Rejected,
+    PairingInProgress,
     Transport,
     FrameBudgetExceeded,
 }
@@ -167,6 +168,7 @@ impl VirtualMembershipNetwork {
             Ok(_) => VirtualFrameOutcome::Accepted,
             Err(MembershipHistoryExchangeError::Offline) => VirtualFrameOutcome::Unavailable,
             Err(MembershipHistoryExchangeError::Rejected) => VirtualFrameOutcome::Rejected,
+            Err(MembershipHistoryExchangeError::PairingInProgress) => VirtualFrameOutcome::Rejected,
             Err(MembershipHistoryExchangeError::Transport) => VirtualFrameOutcome::Invalid,
         };
         self.state
@@ -182,6 +184,9 @@ impl VirtualMembershipNetwork {
         result.map_err(|error| match error {
             MembershipHistoryExchangeError::Offline => VirtualMembershipNetworkError::Offline,
             MembershipHistoryExchangeError::Rejected => VirtualMembershipNetworkError::Rejected,
+            MembershipHistoryExchangeError::PairingInProgress => {
+                VirtualMembershipNetworkError::PairingInProgress
+            }
             MembershipHistoryExchangeError::Transport => VirtualMembershipNetworkError::Transport,
         })
     }

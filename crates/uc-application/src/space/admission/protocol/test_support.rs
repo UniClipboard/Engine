@@ -2058,6 +2058,16 @@ impl SpaceAdmissionProtocolTestPair {
             .is_some_and(AdmissionRecordPersistence::is_terminal)
     }
 
+    pub(super) fn sponsor_confirmation_status(&self) -> Option<SponsorPairingConfirmationStatus> {
+        self.sponsor_state
+            .current
+            .lock()
+            .expect("sponsor state is available")
+            .as_ref()
+            .and_then(SponsorAdmission::pairing_confirmation)
+            .map(|summary| summary.status())
+    }
+
     pub(super) fn sponsor_abandonment_cleanup_complete(&self) -> bool {
         matches!(
             self.sponsor_state

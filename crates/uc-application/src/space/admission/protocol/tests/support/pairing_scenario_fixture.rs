@@ -68,7 +68,7 @@ impl PairingScenarioFixture {
             .recover_space_admissions(&MembershipMaintenanceTrigger::StateChanged)
             .await;
         if admission.step() != MembershipMaintenanceStepOutcome::Completed
-            || admission.should_continue()
+            || admission.allows_ordinary_membership()
         {
             return Err(PairingScenarioFailure::AdmissionMaintenance);
         }

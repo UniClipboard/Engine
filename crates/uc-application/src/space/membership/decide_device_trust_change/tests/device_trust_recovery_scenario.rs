@@ -25,7 +25,7 @@ async fn device_state_update_retries_requires_attention_and_recovers() {
             repository.clone(),
             Arc::new(AcceptingVerifier),
         ));
-        let query = Arc::new(QueryDeviceTrustUseCase::new(
+        let query = Arc::new(QueryDeviceTrustUseCase::new_for_tests(
             Arc::clone(&ledger),
             Arc::new(OfflineObservations),
             Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
