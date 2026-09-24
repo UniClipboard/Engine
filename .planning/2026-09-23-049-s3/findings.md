@@ -136,3 +136,51 @@
   infra source=storage reason=unknown during sponsor activation writes. busy_timeout 5000 is set; the status read path
   reads then writes the encrypted index → likely deferred-transaction lock-upgrade BUSY (not provable without raw text).
 - Final: nextest units 2559/2559; membership-e2e 49/51 (two non-049 product failures).
+
+## 2026-09-24 session 4 — S3.a fixes (items 1, 2a, 2b)
+- Item 1 path confirmed: `delivery.rs::load_due_updates_on` and `save_delivery_failures_on` use `conn.transaction`
+  (DEFERRED) and read then write (source summary / reconcile / delete stale). Production pool is r2d2 default size
+  (10 connections) in WAL mode. In WAL a deferred txn that read a snapshot and then upgrades to write after another
+  connection committed gets SQLITE_BUSY_SNAPSHOT immediately; busy_timeout does not apply. All other store writes
+  already use `immediate_transaction`. Fix: begin both as IMMEDIATE.
+- Item 2b path confirmed: `session_supervisor/lifecycle.rs::resume` → `install_new_session(false)` →
+  `has_pending_space_transition()` before `recover_space_session()`. `Locked` there comes from
+  `AdmissionKeyManager::profile_key` → secure storage `get` failing (`AdmissionKeyError::SecureStorage`), not the
+  space passphrase. Need the log to see why secure storage fails right after resume (harness uses in-memory storage).
+- Item 2a: the other WIP in `profile_recovery.rs` adds factory reset from recovery mode; unrelated to the 1216 but
+  same files. Must ask the user before editing.
+- Items 2a and 2b share one root cause (evidence: 2b log shows `master key cleared` on suspend, then on resume
+  `relationship operation failed (locked)`, `pending admission recovery state is locked`,
+  `joiner activation state is locked` → 1103). `Locked` = `AdmissionKeyError::SecureStorage` =
+  `ProfileKeyRecoveryStore::get` failing in `activate_from_backing_if_available` (`activate_existing` →
+  `unwrap_file_root` fails → `Corrupt`). Engine `suspend` calls `recovery.suspend()` (drops the active vault), so the
+  resume re-activates from the backing KEK. `RuntimeSpaceAccessAdapter::install_group_join`
+  (`crates/uc-infra/src/space/security/access.rs` ~1010) creates a fresh keyslot (new salt), derives a NEW profile
+  KEK from the passphrase and overwrites it with `store_kek`, but never rewraps the recovery vault root, unlike
+  `EncryptionPassphraseChange::complete` which calls `prepare_passphrase_change` before installing and
+  `finish_passphrase_change` after. 2a: restart → `prepare_startup` → `activate_or_migrate` → same unwrap failure →
+  1216. Fix candidate that avoids the WIP files: give `install_group_join` the `ProfilePassphraseRecoveryPort`
+  prepare/finish pair (wiring in uc-engine `assembly/wire`). Needs user decision (handoff conflict note).
+- Item 1 CONFIRMED + FIXED: new Infra test `delivery_status_read_survives_concurrent_space_material_writes`
+  failed before (key epoch repository failure) and passes 3/3 after switching both delivery index transactions to
+  `immediate_transaction`; store tests 29/29; pending_join e2e 5/5 (was ~1 in 2–3 failing).
+- Items 2a/2b refined: the KEK is replaced by `activate_prepared_control_generation` (access.rs ~696), called from
+  `SpaceTransitionActivation::rebind_target` when the cross-space join activates (after final confirmation, in the
+  background runtime transition). The Engine's existing `refresh_after_authentication` rewrap runs only right after
+  the `JoinSpace` operation returns (`Processing`), i.e. BEFORE the KEK changes, so no rewrap happens afterwards.
+  The in-memory vault stays usable until `recovery.suspend()` (2b) or process restart (2a).
+  Correct fix: the KEK-replacing step does the crash-safe pending/finish rewrap (same protocol as passphrase change).
+  Existing `prepare_passphrase_change` requires an active vault and errors when none; activation must also handle
+  "no vault file yet" (fresh device) and "file exists but inactive" → needs new methods in profile_key_recovery.rs
+  (WIP file). `install_group_join` has only test callers; `derive_master_key_for_proof` (legacy offer) also
+  overwrites the KEK — out of scope, note only.
+- 2a next failure ROOT CAUSE (proved): with the new classification the joiner logs
+  `issue="membership_history"` (not relationships; earlier "duplicated relationship" guess was wrong) and rejects
+  MembershipHistoryInvalid. Core repro test `a_device_that_rejoins_without_removal_starts_with_its_new_instance`
+  (ledger/tests.rs) fails with `InvalidSnapshot`: history `effective_members()` (snapshot.members) keeps BOTH
+  instances of a device that rejoined without being removed (validation.rs only makes `active_members` device-unique);
+  `MembershipLedger::effective_peer_devices` = effective members minus the local INSTANCE, so the other instance of
+  the local device becomes a peer equal to the local device → `validate()` InvalidSnapshot. Independent of which
+  instance is local. Candidate fix (needs user approval, Core membership behaviour): define peers as effective
+  members whose DEVICE differs from the local device (used by start/normalize/validate), or make `members`
+  device-unique like `active_members`.

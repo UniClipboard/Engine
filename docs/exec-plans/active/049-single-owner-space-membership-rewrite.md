@@ -452,3 +452,25 @@ S3 已完成（2026-09-24 用户确认）；剩余失败的诊断转入 S3.a。S
 验证：`cargo nextest run -p uc-core -p uc-application -p uc-infra` 2559 项全部通过；`membership-e2e` 全组 49/51，失败为
 `same_device_returns_to_a_previous_space_after_switch_and_restart` 与
 `suspend_during_space_switch_recovery_does_not_resurrect_the_network`（均不属本计划）；交付检查通过。
+
+### S3.a 修复（2026-09-24，分支 `hp/uni/t-0010-android`）
+
+| 问题 | 根因 | 修复与验证 |
+| --- | --- | --- |
+| `pending_join_is_not_published_before_final_confirmation`（间歇） | 组密钥投递索引在延迟事务中先读后写；WAL 下读后升级写锁遇到其他连接已提交的写入会立即返回 BUSY，忙等不生效 | 两处索引事务改为立即获取写锁。新增并发读写测试，修复前稳定失败；该场景连续 5 次通过 |
+| `suspend_during_space_switch_recovery_does_not_resurrect_the_network`（1103） | 跨 Space 激活以目标访问材料覆盖资料 KEK，资料 vault 根密钥仍由旧 KEK 包裹；挂起清空内存中的 vault 后无法重新打开，准入状态读取失败被误报为“已锁定” | 替换 KEK 的步骤前后按口令修改的两阶段协议重新包裹 vault 根密钥（尚无 vault 时不处理）；存储测试覆盖挂起、重启与幂等重试，修复前失败 |
+| `same_device_returns_to_a_previous_space_after_switch_and_restart`（1216） | 同上，重启时资料密钥恢复无法打开 vault | 同上修复后不再返回 1216，随后暴露下一项 |
+| 同一场景的加入拒绝 | 设备未经移除重新加入时，签名历史的有效成员同时保留新旧两个实例；成员账本按实例排除本机，旧实例被当成对端，其设备即本机，起始校验失败 | 成员账本的对端改为按设备排除本机（用户选择）。新增 Core 回归测试，修复前返回 `InvalidSnapshot`；场景通过 |
+
+同批修正了掩盖上述根因的吞错与误分类（用户要求）：
+
+- 准入密钥错误保留下层来源；安全存储报告数据损坏时按损坏分类，不再显示为暂不可用或已锁定。
+- 资料 vault 自动打开失败时，Core 安全存储端口只能携带固定文本，改为在转换前记录固定分类诊断（阶段与原因类别）。
+- 组密钥安全存储不再字符串化下层错误；事务内部返回的 `KeyEpochError` 保持原分类。
+- 加入方准备阶段的不一致按安全材料、成员历史、成员关系标注，分别拒绝为 `SecurityMaterialInvalid`、
+  `MembershipHistoryInvalid`、`RelationshipConflict`，并记录固定分类诊断；未标注的不一致拒绝为
+  `ActivationStateInvalid`，不再一律视为关系冲突。
+
+验证：`cargo nextest run -p uc-core -p uc-application -p uc-infra` 全部通过；`membership-e2e` 全组 51/51（此前一次全组运行中
+`f1_remove_and_add_from_parent_head_preserve_branch_membership` 在负载下等待组密钥纪元超时，单独运行 3/3 通过，复跑全组通过）；
+交付检查通过。其余同类吞错由错误来源保留计划统一清点。

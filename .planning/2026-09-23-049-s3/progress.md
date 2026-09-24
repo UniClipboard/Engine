@@ -83,3 +83,26 @@
   (passes alone); two slow tests exceed repo default 20 s (pass with relaxed timeout: 31 s / 56 s). 34 s of test time
   versus several minutes with cargo test.
 - Delivery checks pass. Docs: space-application, pairing-lifecycle, 2026-09-20 plan note, 049 S3 record.
+
+### S3.a fixes session (2026-09-24)
+- Item 1 fixed: delivery index transactions IMMEDIATE (`space_security_store/delivery.rs`), new concurrency test
+  red→green, store tests 29/29, pending_join e2e 5/5.
+- Items 2a/2b: one root cause (KEK replaced on cross-space activation without vault root rewrap). Awaiting user
+  decision because the fix needs new methods in the WIP file `profile_key_recovery.rs`.
+- 2a/2b fix implemented (user chose: append methods to profile_key_recovery.rs, partial staging):
+  `prepare/finish_kek_replacement` on `ProfilePassphraseRecoveryPort`, called around the KEK overwrite in
+  `activate_prepared_control_generation`; `SpaceTransitionActivation` holds the port. Store test red→green.
+  2b e2e passes; 2a no longer 1216 but now fails with admission rejected RelationshipConflict.
+- Peer session hp-uni-t-0010-android-79 in the same worktree: docs-only error-source inventory
+  (docs/exec-plans/active/2026-09-24-error-source-preservation*.md, error-handling.md, observability.md, index.md).
+  Do not stage those. Told it our four in-progress spots.
+- Error source/classification fixes (user asked): A admission_key_manager sources + storage Corrupt → Corrupt;
+  B recovery store vault-open fixed-label diagnostic; C space_security_store no stringification + shared
+  transaction_failure; D joiner preparation inconsistency tagged by domain (AdmissionInputIssue) → matching
+  rejection reason + diagnostic. Units 2566/2566.
+- 2a fixed (user chose option 1): ledger peers exclude the local DEVICE (effective/active_peer_devices), Core repro
+  red→green; 2a e2e passes. Full membership-e2e: run 1 50/51 (F1 group-epoch timeout under load, 3/3 alone),
+  run 2 51/51. Units all pass. Delivery checks pass (style check forced inlining the two peer filters).
+- Docs: plan 049 S3.a fix record; membership-history-ownership.md peer-by-device sentence.
+- Nothing committed. Commit must exclude: AGENTS.md, other WIP files (profile_recovery.rs, key_loss.rs,
+  uc-engine-interface.md, inbound-peer-admission.md), peer docs, and the WIP hunks of profile_key_recovery.rs.
