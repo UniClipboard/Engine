@@ -2,7 +2,7 @@
 
 ## 状态与完整责任
 
-- **状态**：实施中；S0–S2 已完成（见“实施记录”），S3 进行中。
+- **状态**：实施中；S0–S3 已完成（见“实施记录”），S3.a 进行中。
 - **日期**：2026-09-23。
 - **依据**：[ADR-027](../../design-docs/decisions/027-single-owner-space-membership-state.md)；2026-09-23 双 Desktop
   profile 配对后移除，移除方设备不消失、被移除方永久“正在更新空间设备状态”的诊断（结论见 ADR-027 背景）。
@@ -190,6 +190,22 @@ Application 查询负责。与现有推导相比只有三处有意变化：`Depa
 5. Engine 装配与观测装饰改接新 port；设备分组变化事件由 Owner 按聚合效果发出。
 6. 测试：Application 测试改用内存成员记录存储；R1–R3 取消忽略；新增 W1、W2。
 
+### S3.a 剩余失败诊断
+
+S3 完成时仍有以下失败，均在 S3 之前的基线（`cd9537b6`）上同样出现：
+
+- `space_switch::same_device_returns_to_a_previous_space_after_switch_and_restart`（启动返回 1216）
+- `space_switch::suspend_during_space_switch_recovery_does_not_resurrect_the_network`（1103）
+- `topology::handoff_four_device_removal_preview_matches_executed_choice`
+- `admission::confirmed_pairing_survives_restart_removal_and_same_device_rejoin`
+- `admission::pending_join_is_not_published_before_final_confirmation`（间歇，最终确认后查询返回 1211）
+- `uc-application` 单元测试 `admission_recovery_scenarios::joiner_pairing_fixture_reaches_active_settled`
+
+- 逐项判定是测试用例问题（断言、等待、前提与产品规则不符）还是产品逻辑问题，并以日志与代码路径为证据。
+- 测试用例问题：修正测试，只改等待或前提，不放宽业务断言；修改前说明依据。
+- 产品逻辑问题：记录根因与影响，另行决定修复方式与归属，不在本切片中顺手修改。
+- **验证**：每项单独与全组运行结果；判定与证据记录在“实施记录”。
+
 ### S4 准入交接
 
 - Sponsor 最终确认与 Joiner 激活改为提交 Owner 输入，作为准入转换的 `BeforeCommit` 效果：Owner 先提交成员
@@ -346,7 +362,7 @@ git diff --check
 | `cargo metadata --locked`、`cargo check --workspace --all-targets --locked`、`cargo fmt --all -- --check`、`check-rust-style.mjs`、`check-engine-repository.mjs`、`git diff --check` | 通过（`uc-ohos-napi` 测试既有未使用导入告警，非本次改动） |
 | `cargo test -p uc-engine --locked` 与 R1–R4 真实场景 | 跳过（新仓储尚未接入运行时，Engine 路径无变化） |
 
-### S3（2026-09-23，分支 `hp/uni/t-0010-android`，进行中）
+### S3（2026-09-23，分支 `hp/uni/t-0010-android`，2026-09-24 完成）
 
 完成内容：
 
@@ -418,4 +434,4 @@ git diff --check
 | `cargo test -p uc-engine --locked` 其余测试二进制与宿主契约 | 跳过（本次未运行） |
 | 实体双 Desktop 复现场景 | 跳过（需另行授权） |
 
-S3 未完成项：上述间歇失败的确认与处理；S3 不单独合入主分支。
+S3 已完成（2026-09-24 用户确认）；剩余失败的诊断转入 S3.a。S3 不单独合入主分支。
