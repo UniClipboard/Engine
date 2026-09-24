@@ -233,10 +233,12 @@ fn map_generation_manifest_error(
 
 fn map_key_error(error: AdmissionKeyError) -> CurrentSpaceIdentityError {
     match error {
-        AdmissionKeyError::SecureStorage => CurrentSpaceIdentityError::Unavailable,
-        AdmissionKeyError::Corrupt | AdmissionKeyError::OpenFailed => {
-            CurrentSpaceIdentityError::Inconsistent
+        AdmissionKeyError::SecureStorage { .. } | AdmissionKeyError::StorageNotPersisted => {
+            CurrentSpaceIdentityError::Unavailable
         }
+        AdmissionKeyError::Corrupt { .. }
+        | AdmissionKeyError::InvalidLayout
+        | AdmissionKeyError::OpenFailed { .. } => CurrentSpaceIdentityError::Inconsistent,
     }
 }
 

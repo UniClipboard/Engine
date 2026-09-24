@@ -672,7 +672,7 @@ impl<E: DbExecutor + Send + Sync> PrepareSpaceAdmissionCredentialsPort
 fn map_store_error(error: anyhow::Error) -> SpaceAdmissionCredentialStoreError {
     if matches!(
         error.downcast_ref::<AdmissionKeyError>(),
-        Some(AdmissionKeyError::SecureStorage)
+        Some(AdmissionKeyError::SecureStorage { .. } | AdmissionKeyError::StorageNotPersisted)
     ) {
         SpaceAdmissionCredentialStoreError::Locked { source: error }
     } else if error.downcast_ref::<AdmissionKeyError>().is_some() {

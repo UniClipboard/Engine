@@ -88,10 +88,12 @@ impl RePairingStateStorePort for EncryptedRePairingStateStore {
 
 fn map_key_error(error: AdmissionKeyError) -> RePairingStateError {
     match error {
-        AdmissionKeyError::SecureStorage => RePairingStateError::Unavailable,
-        AdmissionKeyError::Corrupt | AdmissionKeyError::OpenFailed => {
-            RePairingStateError::Inconsistent
+        AdmissionKeyError::SecureStorage { .. } | AdmissionKeyError::StorageNotPersisted => {
+            RePairingStateError::Unavailable
         }
+        AdmissionKeyError::Corrupt { .. }
+        | AdmissionKeyError::InvalidLayout
+        | AdmissionKeyError::OpenFailed { .. } => RePairingStateError::Inconsistent,
     }
 }
 

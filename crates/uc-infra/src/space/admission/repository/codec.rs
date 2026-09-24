@@ -144,10 +144,14 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             .map_err(map_key_error)?;
         let plaintext = match reader.open_compact(encrypted) {
             Ok(plaintext) => plaintext,
-            Err(AdmissionKeyError::SecureStorage) => {
-                return Err(SpaceAdmissionStateStoreError::Locked)
-            }
-            Err(AdmissionKeyError::Corrupt | AdmissionKeyError::OpenFailed) => return Ok(None),
+            Err(
+                AdmissionKeyError::SecureStorage { .. } | AdmissionKeyError::StorageNotPersisted,
+            ) => return Err(SpaceAdmissionStateStoreError::Locked),
+            Err(
+                AdmissionKeyError::Corrupt { .. }
+                | AdmissionKeyError::InvalidLayout
+                | AdmissionKeyError::OpenFailed { .. },
+            ) => return Ok(None),
         };
         let metadata = postcard::from_bytes::<PersistedSpaceAdmissionMetadataV3>(&plaintext)
             .map_err(|_| SpaceAdmissionStateStoreError::Corrupt)?;
@@ -492,9 +496,11 @@ pub(in crate::space::admission) fn into_anyhow(
 
 pub(super) fn map_key_error(error: AdmissionKeyError) -> SpaceAdmissionStateStoreError {
     match error {
-        AdmissionKeyError::SecureStorage => SpaceAdmissionStateStoreError::Locked,
-        AdmissionKeyError::Corrupt | AdmissionKeyError::OpenFailed => {
-            SpaceAdmissionStateStoreError::Corrupt
+        AdmissionKeyError::SecureStorage { .. } | AdmissionKeyError::StorageNotPersisted => {
+            SpaceAdmissionStateStoreError::Locked
         }
+        AdmissionKeyError::Corrupt { .. }
+        | AdmissionKeyError::InvalidLayout
+        | AdmissionKeyError::OpenFailed { .. } => SpaceAdmissionStateStoreError::Corrupt,
     }
 }
