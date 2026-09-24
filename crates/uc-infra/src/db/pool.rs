@@ -60,6 +60,7 @@ impl DbPool {
         let row =
             diesel::sql_query("SELECT revision FROM uc_database_revision WHERE singleton_id = 1")
                 .get_result::<DatabaseRevisionRow>(&mut self.get()?)?;
+        // TryFromIntError：目标分类完整表达数值范围不符。
         u64::try_from(row.revision).map_err(|_| anyhow::anyhow!("database revision is invalid"))
     }
 }

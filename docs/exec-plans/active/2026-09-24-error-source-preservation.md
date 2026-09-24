@@ -290,4 +290,12 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
   - `hkdf::InvalidLength` 未实现 `Error`，且只表示常量输出长度超限，按长度类例外注释。
   - 测试 `invalid_full_invitation_is_rejected_without_a_dependency_error` 原先断言无来源；现在断言来源是邀请解码错误，
     仍能区分“无效输入”与“依赖故障”。
+- 第四批（已完成，Infra 中未被阻塞的 S4 至此清零）：`ProfileFactoryResetCapabilityError` 改为带可选来源的结构体，
+  出厂重置的 20 处底层失败携带来源；成员认证服务端处理函数由 `&'static str` 改为 `HandlerRejection`（固定原因加可选来源，
+  日志仍只记原因）；可达性探测的准入确认改为携带 `anyhow` 来源；Core 的 `PublishLogError::InvalidCiphertext`、
+  `BlobError::InvalidTicket`、`MembershipHistoryExchangeError::Offline`、`KeyMigrationError::InvalidCiphertext`、
+  `MembershipSecurityUpdateError::Unavailable`，以及 `RenderEncodeError::EncryptFailed`、`PrepareJoinerInvitationError::Invalid`、
+  `PullWireError::SnapshotHashNotUtf8`、`SessionProtocolUnavailable`；入站接收提交的加密失败携带来源。
+  - 按例外注释：锁中毒（内存事件库、节点运行锁等）、整数与切片长度转换、`Vec` 转定长数组（错误值是明文密钥字节）、
+    `SelectionPolicyVersion` 的 `String` 解析错误（同时去掉错误文本中的持久值与条目标识）、索引引用长度校验改归“索引未就绪”。
 - 暂缓：`EncryptionError` 与 `SecureStorageError` 以及 `AeadError::DecryptFailed` 的变体被 049 未提交的 `profile_key_recovery.rs` 模式匹配，等 049 提交后处理。

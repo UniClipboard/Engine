@@ -44,7 +44,7 @@ impl MembershipSecurityUpdatePort for DefaultMembershipSecurityUpdateAdapter {
         let space_id = self
             .session
             .current_space_id()
-            .map_err(|_| MembershipSecurityUpdateError::Unavailable)?;
+            .map_err(MembershipSecurityUpdateError::unavailable_from)?;
         let group_epoch = self
             .signatures
             .current_member_epoch()

@@ -137,9 +137,25 @@ impl RenderDecodeError {
 #[derive(Debug, thiserror::Error)]
 pub enum RenderEncodeError {
     #[error("render payload AEAD encryption failed")]
-    EncryptFailed,
+    EncryptFailed {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("render payload JSON serialization failed")]
     SerializeJson(#[source] serde_json::Error),
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl RenderEncodeError {
+    pub fn encrypt_failed() -> Self {
+        Self::EncryptFailed { source: None }
+    }
+
+    pub fn encrypt_failed_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::EncryptFailed {
+            source: Some(source.into()),
+        }
+    }
 }
 
 /// AEAD codec holding a per-session [`RenderKey`].
@@ -181,7 +197,7 @@ impl RenderPayloadCodec {
         let plaintext = serde_json::to_vec(fields).map_err(RenderEncodeError::SerializeJson)?;
         let ad = aad::for_search_render(entry_id);
         let (nonce, ciphertext) = encrypt_xchacha_raw(self.render_key.as_bytes(), &plaintext, &ad)
-            .map_err(|_| RenderEncodeError::EncryptFailed)?;
+            .map_err(RenderEncodeError::encrypt_failed_from)?;
 
         let mut buf = Vec::with_capacity(HEADER_LEN + ciphertext.len());
         buf.extend_from_slice(&RENDER_MAGIC);

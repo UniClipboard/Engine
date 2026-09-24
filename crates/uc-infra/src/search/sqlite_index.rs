@@ -420,6 +420,7 @@ impl SqliteSearchIndex {
         refs.into_iter()
             .map(|value| {
                 let value = value.ok_or(SearchError::IndexNotReady)?;
+                // Core 纯长度校验失败表示索引数据不完整，改归为“索引未就绪”以触发重建。
                 SearchGroupRef::from_bytes(&value).map_err(|_| SearchError::IndexNotReady)
             })
             .collect()

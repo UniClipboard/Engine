@@ -430,7 +430,7 @@ impl MembershipHistoryExchangePort for RecordedMembershipHistoryExchange {
                 DevMembershipHistoryFailure::Retryable => {
                     self.control
                         .record(DevSpaceWorkEventKind::MembershipHistorySyncRetryableFailure);
-                    Err(MembershipHistoryExchangeError::Offline)
+                    Err(MembershipHistoryExchangeError::offline())
                 }
                 DevMembershipHistoryFailure::NeedsAttention => {
                     self.control

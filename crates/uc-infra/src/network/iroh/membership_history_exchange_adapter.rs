@@ -146,7 +146,7 @@ impl MembershipHistoryExchangePort for IrohMembershipHistoryExchangeAdapter {
         let payload = encode_request(message)?;
         let address = self.resolve_addr(recipient).await.ok_or_else(|| {
             describe_operation_failure(DiagnosticErrorType::AddressUnavailable);
-            MembershipHistoryExchangeError::Offline
+            MembershipHistoryExchangeError::offline()
         })?;
         let connection = connect_with_staggered_retry(
             Arc::clone(&self.endpoint),
@@ -156,9 +156,9 @@ impl MembershipHistoryExchangePort for IrohMembershipHistoryExchangeAdapter {
             uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
         )
         .await
-        .map_err(|_| {
+        .map_err(|error| {
             describe_operation_failure(DiagnosticErrorType::ConnectFailed);
-            MembershipHistoryExchangeError::Offline
+            MembershipHistoryExchangeError::offline_from(error)
         })?;
         let (mut send, mut receive) = tokio::time::timeout(IO_TIMEOUT, connection.open_bi())
             .await
@@ -227,7 +227,7 @@ impl RestrictedMembershipDeliveryPort for IrohMembershipHistoryExchangeAdapter {
             | Ok(MembershipHistoryMessage::RestrictedDecisionV3(_)) => {
                 Err(RestrictedMembershipDeliveryError::Rejected)
             }
-            Err(MembershipHistoryExchangeError::Offline)
+            Err(MembershipHistoryExchangeError::Offline { .. })
             | Err(MembershipHistoryExchangeError::PairingInProgress)
             | Err(MembershipHistoryExchangeError::Transport { .. }) => {
                 Err(RestrictedMembershipDeliveryError::Deferred)
@@ -364,7 +364,7 @@ impl ProtocolHandler for IrohMembershipHistoryExchangeHandler {
 
 fn history_endpoint_error_type(error: &MembershipHistoryExchangeError) -> DiagnosticErrorType {
     match error {
-        MembershipHistoryExchangeError::Offline
+        MembershipHistoryExchangeError::Offline { .. }
         | MembershipHistoryExchangeError::PairingInProgress => DiagnosticErrorType::Unavailable,
         MembershipHistoryExchangeError::Rejected => DiagnosticErrorType::PeerRejected,
         MembershipHistoryExchangeError::Transport { .. } => DiagnosticErrorType::StreamFailed,

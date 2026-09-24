@@ -157,7 +157,7 @@ fn history_failure_detail(
     error: &MembershipHistoryExchangeError,
 ) -> MembershipHistoryFailureDetail {
     let (phase, reason) = match error {
-        MembershipHistoryExchangeError::Offline => (
+        MembershipHistoryExchangeError::Offline { .. } => (
             MembershipHistoryFailurePhase::ConnectPeer,
             MembershipHistoryFailureReason::PeerOffline,
         ),
@@ -179,7 +179,7 @@ fn history_failure_detail(
 
 fn history_exchange_completion(error: &MembershipHistoryExchangeError) -> MembershipCompletionKind {
     match error {
-        MembershipHistoryExchangeError::Offline
+        MembershipHistoryExchangeError::Offline { .. }
         | MembershipHistoryExchangeError::PairingInProgress => {
             MembershipCompletionKind::Failed(DiagnosticErrorType::Unavailable)
         }
@@ -280,7 +280,7 @@ mod tests {
     #[test]
     fn history_exchange_errors_keep_stable_result_categories() {
         assert!(matches!(
-            history_exchange_completion(&MembershipHistoryExchangeError::Offline),
+            history_exchange_completion(&MembershipHistoryExchangeError::offline()),
             MembershipCompletionKind::Failed(DiagnosticErrorType::Unavailable)
         ));
         assert!(matches!(

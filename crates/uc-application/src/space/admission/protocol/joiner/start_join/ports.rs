@@ -6,12 +6,28 @@ use super::model::{
 #[derive(Debug, thiserror::Error)]
 pub enum PrepareJoinerInvitationError {
     #[error("the invitation is invalid")]
-    Invalid,
+    Invalid {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("invitation preparation is unavailable")]
     Unavailable {
         #[source]
         source: anyhow::Error,
     },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl PrepareJoinerInvitationError {
+    pub fn invalid() -> Self {
+        Self::Invalid { source: None }
+    }
+
+    pub fn invalid_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Invalid {
+            source: Some(source.into()),
+        }
+    }
 }
 
 impl PrepareJoinerInvitationError {
@@ -25,7 +41,7 @@ impl PrepareJoinerInvitationError {
 impl From<PrepareJoinerInvitationError> for JoinSpaceError {
     fn from(error: PrepareJoinerInvitationError) -> Self {
         match error {
-            PrepareJoinerInvitationError::Invalid => Self::InvalidInvitation,
+            PrepareJoinerInvitationError::Invalid { .. } => Self::InvalidInvitation,
             PrepareJoinerInvitationError::Unavailable { .. } => Self::Unavailable,
         }
     }

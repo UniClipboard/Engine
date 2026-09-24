@@ -141,14 +141,14 @@ impl KeyMigrationPort for DefaultKeyMigrationAdapter {
     ) -> Result<Plaintext, KeyMigrationError> {
         let key = self.load_key(run_id)?;
         let blob: EncryptedBlob = serde_json::from_slice(ciphertext.as_bytes())
-            .map_err(|_| KeyMigrationError::InvalidCiphertext)?;
+            .map_err(KeyMigrationError::invalid_ciphertext_from)?;
         if blob.aead != "XChaCha20Poly1305" || blob.version != "V1" {
-            return Err(KeyMigrationError::InvalidCiphertext);
+            return Err(KeyMigrationError::invalid_ciphertext());
         }
         let plain =
             v1_aead::decrypt_blob_xchacha(&key, &blob.nonce, &blob.ciphertext, aad.as_bytes())
                 .map_err(|e| match e {
-                    v1_aead::AeadError::DecryptFailed => KeyMigrationError::InvalidCiphertext,
+                    v1_aead::AeadError::DecryptFailed => KeyMigrationError::invalid_ciphertext(),
                     other => KeyMigrationError::Internal(Box::new(other)),
                 })?;
         Ok(Plaintext::new(plain))
@@ -258,7 +258,7 @@ mod tests {
             .decrypt_with_migration_key(&run_id, &ct, &Aad::new(b"bad-aad".to_vec()))
             .await
             .unwrap_err();
-        assert!(matches!(err, KeyMigrationError::InvalidCiphertext));
+        assert!(matches!(err, KeyMigrationError::InvalidCiphertext { .. }));
     }
 
     #[tokio::test]

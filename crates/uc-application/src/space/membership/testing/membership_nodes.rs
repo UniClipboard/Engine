@@ -56,7 +56,7 @@ impl NodeTransport {
         message: MembershipHistoryMessage,
     ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
         let Some(target) = self.directory.label(peer) else {
-            return Err(MembershipHistoryExchangeError::Offline);
+            return Err(MembershipHistoryExchangeError::offline());
         };
         self.network
             .send(self.source, target, message)
@@ -64,7 +64,7 @@ impl NodeTransport {
             .map_err(|error| match error {
                 VirtualMembershipNetworkError::Offline
                 | VirtualMembershipNetworkError::UnknownNode => {
-                    MembershipHistoryExchangeError::Offline
+                    MembershipHistoryExchangeError::offline()
                 }
                 VirtualMembershipNetworkError::Rejected => MembershipHistoryExchangeError::Rejected,
                 VirtualMembershipNetworkError::PairingInProgress => {
@@ -116,7 +116,7 @@ impl RestrictedMembershipDeliveryPort for NodeTransport {
                 Err(RestrictedMembershipDeliveryError::Rejected)
             }
             Err(
-                MembershipHistoryExchangeError::Offline
+                MembershipHistoryExchangeError::Offline { .. }
                 | MembershipHistoryExchangeError::PairingInProgress
                 | MembershipHistoryExchangeError::Transport { .. },
             ) => Err(RestrictedMembershipDeliveryError::Deferred),

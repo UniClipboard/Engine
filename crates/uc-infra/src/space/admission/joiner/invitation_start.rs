@@ -34,13 +34,13 @@ impl PrepareJoinerInvitationPort for DefaultJoinerInvitationPreparation {
             ) {
                 Ok(Some(_)) => return Ok(PreparedJoinerInvitation::Full),
                 Ok(None) => {}
-                Err(_) => return Err(PrepareJoinerInvitationError::Invalid),
+                Err(_) => return Err(PrepareJoinerInvitationError::invalid()),
             }
 
             let short_code = AdmissionShortInvitationCode::from_bytes(
                 input.invitation_code.as_str().as_bytes().to_vec(),
             )
-            .map_err(|_| PrepareJoinerInvitationError::Invalid)?;
+            .map_err(PrepareJoinerInvitationError::invalid_from)?;
             let context = postcard::to_stdvec(&JoinerStartContextV1 {
                 format_version: 1,
                 passphrase: input.passphrase.expose().as_bytes(),

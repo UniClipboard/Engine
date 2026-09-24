@@ -310,6 +310,7 @@ impl SpaceAdmissionContinuationCredential {
     pub fn from_core(
         credential: &AdmissionContinuationCredential,
     ) -> Result<Self, SpaceAdmissionAuthError> {
+        // TryFromSliceError：切片范围已固定，目标分类完整表达长度不符。
         let bytes: [u8; 64] = credential.as_bytes().try_into().map_err(|_| {
             SpaceAdmissionAuthError::Authentication {
                 source: anyhow::anyhow!("continuation credential length is invalid"),

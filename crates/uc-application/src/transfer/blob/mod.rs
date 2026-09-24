@@ -453,7 +453,7 @@ mod tests {
             let bytes: [u8; 32] = ticket
                 .as_bytes()
                 .try_into()
-                .map_err(|_| BlobError::InvalidTicket)?;
+                .map_err(BlobError::invalid_ticket_from)?;
             Ok(BlobDigest::from_bytes(bytes))
         }
     }

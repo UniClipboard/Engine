@@ -122,7 +122,7 @@ pub enum PullWireError {
     #[error("snapshot hash length {len} exceeds maximum {max}")]
     SnapshotHashTooLong { len: u16, max: u16 },
     #[error("snapshot hash bytes are not valid UTF-8")]
-    SnapshotHashNotUtf8,
+    SnapshotHashNotUtf8(#[source] std::string::FromUtf8Error),
     #[error("envelope length {len} exceeds maximum {max}")]
     EnvelopeTooLong { len: u32, max: u32 },
     #[error("unknown response status byte 0x{got:02X}")]
@@ -190,7 +190,7 @@ pub async fn read_request<R: AsyncRead + Unpin>(recv: &mut R) -> Result<String, 
     recv.read_exact(&mut body)
         .await
         .map_err(PullWireError::Io)?;
-    String::from_utf8(body).map_err(|_| PullWireError::SnapshotHashNotUtf8)
+    String::from_utf8(body).map_err(PullWireError::SnapshotHashNotUtf8)
 }
 
 // ============================================================================

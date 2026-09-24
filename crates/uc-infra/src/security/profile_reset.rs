@@ -49,18 +49,18 @@ impl ProfileKeyWiper {
         let Some(run_id) =
             crate::migration_state::legacy_migration_run_id(&self.legacy_migration_base_dir)
                 .await
-                .map_err(|_| capability_error())?
+                .map_err(capability_error_from)?
         else {
             return Ok(());
         };
         let name = DefaultKeyMigrationAdapter::keyring_name(&run_id);
         self.secure_storage
             .delete(&name)
-            .map_err(|_| capability_error())?;
+            .map_err(capability_error_from)?;
         if self
             .secure_storage
             .get(&name)
-            .map_err(|_| capability_error())?
+            .map_err(capability_error_from)?
             .is_some()
         {
             return Err(capability_error());
@@ -77,11 +77,11 @@ impl ProfileKeyWiper {
         {
             self.secure_storage
                 .delete(&secret.key)
-                .map_err(|_| capability_error())?;
+                .map_err(capability_error_from)?;
             if self
                 .secure_storage
                 .get(&secret.key)
-                .map_err(|_| capability_error())?
+                .map_err(capability_error_from)?
                 .is_some()
             {
                 return Err(capability_error());
@@ -93,11 +93,11 @@ impl ProfileKeyWiper {
     fn wipe_profile_content_vault_key(&self) -> Result<(), ProfileFactoryResetCapabilityError> {
         self.secure_storage
             .delete(PROFILE_CONTENT_VAULT_KEY_NAME)
-            .map_err(|_| capability_error())?;
+            .map_err(capability_error_from)?;
         if self
             .secure_storage
             .get(PROFILE_CONTENT_VAULT_KEY_NAME)
-            .map_err(|_| capability_error())?
+            .map_err(capability_error_from)?
             .is_some()
         {
             return Err(capability_error());
@@ -124,11 +124,11 @@ impl WipeProfileKeysPort for ProfileKeyWiper {
         }
         self.admission_keys
             .delete_profile_key()
-            .map_err(|_| capability_error())?;
+            .map_err(capability_error_from)?;
         if self
             .admission_keys
             .profile_key_exists()
-            .map_err(|_| capability_error())?
+            .map_err(capability_error_from)?
         {
             return Err(capability_error());
         }
@@ -158,16 +158,16 @@ impl ProfileStateCleaner {
             name: String,
         }
 
-        let mut connection = self.database.get().map_err(|_| capability_error())?;
+        let mut connection = self.database.get().map_err(capability_error_from)?;
         let tables = diesel::sql_query(
             "SELECT name FROM sqlite_master WHERE type = 'table' \
              AND name NOT LIKE 'sqlite_%' ORDER BY name",
         )
         .load::<TableName>(&mut connection)
-        .map_err(|_| capability_error())?;
+        .map_err(capability_error_from)?;
         connection
             .batch_execute("PRAGMA foreign_keys = OFF")
-            .map_err(|_| capability_error())?;
+            .map_err(capability_error_from)?;
         let result = connection.transaction::<_, diesel::result::Error, _>(|connection| {
             for table in &tables {
                 if !safe_sqlite_identifier(&table.name) {
@@ -178,18 +178,18 @@ impl ProfileStateCleaner {
             Ok(())
         });
         let restore_foreign_keys = connection.batch_execute("PRAGMA foreign_keys = ON");
-        result.map_err(|_| capability_error())?;
-        restore_foreign_keys.map_err(|_| capability_error())?;
+        result.map_err(capability_error_from)?;
+        restore_foreign_keys.map_err(capability_error_from)?;
         connection
             .batch_execute("PRAGMA wal_checkpoint(TRUNCATE); VACUUM")
-            .map_err(|_| capability_error())?;
+            .map_err(capability_error_from)?;
 
         let remaining = diesel::sql_query(
             "SELECT name FROM sqlite_master WHERE type = 'table' \
              AND name NOT LIKE 'sqlite_%'",
         )
         .load::<TableName>(&mut connection)
-        .map_err(|_| capability_error())?;
+        .map_err(capability_error_from)?;
         if !remaining.is_empty() {
             return Err(capability_error());
         }
@@ -260,7 +260,7 @@ impl ClearProfileStatePort for ProfileStateCleaner {
         self.clear_database()?;
         self.database
             .detach_to_ephemeral_database()
-            .map_err(|_| capability_error())?;
+            .map_err(capability_error_from)?;
         self.remove_database_files()?;
         self.clear_files()?;
         self.verify_files_absent()
@@ -281,14 +281,18 @@ fn remove_path_if_present(path: &Path) -> Result<(), ProfileFactoryResetCapabili
         Err(_) => return Err(capability_error()),
     };
     if metadata.file_type().is_dir() {
-        std::fs::remove_dir_all(path).map_err(|_| capability_error())
+        std::fs::remove_dir_all(path).map_err(capability_error_from)
     } else {
-        std::fs::remove_file(path).map_err(|_| capability_error())
+        std::fs::remove_file(path).map_err(capability_error_from)
     }
 }
 
 fn capability_error() -> ProfileFactoryResetCapabilityError {
-    ProfileFactoryResetCapabilityError
+    ProfileFactoryResetCapabilityError::new()
+}
+
+fn capability_error_from(source: impl Into<anyhow::Error>) -> ProfileFactoryResetCapabilityError {
+    ProfileFactoryResetCapabilityError::from_source(source)
 }
 
 #[cfg(test)]

@@ -121,7 +121,7 @@ impl DirectoryPublishProtection {
                 .open(entry_id, attempt_id, ciphertext),
             Self::V3(cipher) => cipher.open(entry_id, attempt_id, ciphertext).await,
         }
-        .map_err(|_| PublishLogError::InvalidCiphertext)
+        .map_err(PublishLogError::invalid_ciphertext_from)
     }
 }
 
@@ -252,6 +252,7 @@ impl<E: DbExecutor> GetDirectoryPublishRecordPort for DieselDirectoryPublishLogR
             None => Vec::new(),
         };
         let partial_visible_roots = if row.partial_publication {
+            // TryFromIntError：目标分类完整表达数值范围不符。
             Some(u32::try_from(row.partial_root_count).map_err(|_| {
                 PublishLogError::Backend("negative persisted visible root count".into())
             })?)

@@ -23,11 +23,27 @@ pub enum MembershipError {
 #[derive(Debug, Error)]
 pub enum MembershipSecurityUpdateError {
     #[error("membership security state is unavailable")]
-    Unavailable,
+    Unavailable {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
     #[error("membership security update is invalid")]
     Invalid,
     #[error("membership security update failed")]
     Repository(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl MembershipSecurityUpdateError {
+    pub fn unavailable() -> Self {
+        Self::Unavailable { source: None }
+    }
+
+    pub fn unavailable_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Unavailable {
+            source: Some(Box::new(source)),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -249,7 +265,10 @@ impl GroupUpdateDispatchError {
 #[derive(Debug, Error)]
 pub enum MembershipHistoryExchangeError {
     #[error("membership history recipient is offline")]
-    Offline,
+    Offline {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
     #[error("space pairing is still in progress")]
     PairingInProgress,
     #[error("membership history exchange was rejected")]
@@ -259,6 +278,19 @@ pub enum MembershipHistoryExchangeError {
         #[source]
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl MembershipHistoryExchangeError {
+    pub fn offline() -> Self {
+        Self::Offline { source: None }
+    }
+
+    pub fn offline_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Offline {
+            source: Some(Box::new(source)),
+        }
+    }
 }
 
 /// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。

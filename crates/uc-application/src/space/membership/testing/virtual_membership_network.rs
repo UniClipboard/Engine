@@ -166,7 +166,7 @@ impl VirtualMembershipNetwork {
             .await;
         let outcome = match &result {
             Ok(_) => VirtualFrameOutcome::Accepted,
-            Err(MembershipHistoryExchangeError::Offline) => VirtualFrameOutcome::Unavailable,
+            Err(MembershipHistoryExchangeError::Offline { .. }) => VirtualFrameOutcome::Unavailable,
             Err(MembershipHistoryExchangeError::Rejected) => VirtualFrameOutcome::Rejected,
             Err(MembershipHistoryExchangeError::PairingInProgress) => VirtualFrameOutcome::Rejected,
             Err(MembershipHistoryExchangeError::Transport { .. }) => VirtualFrameOutcome::Invalid,
@@ -182,7 +182,9 @@ impl VirtualMembershipNetwork {
                 outcome,
             });
         result.map_err(|error| match error {
-            MembershipHistoryExchangeError::Offline => VirtualMembershipNetworkError::Offline,
+            MembershipHistoryExchangeError::Offline { .. } => {
+                VirtualMembershipNetworkError::Offline
+            }
             MembershipHistoryExchangeError::Rejected => VirtualMembershipNetworkError::Rejected,
             MembershipHistoryExchangeError::PairingInProgress => {
                 VirtualMembershipNetworkError::PairingInProgress

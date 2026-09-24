@@ -568,6 +568,7 @@ impl<E: DbExecutor> GetEntryReceiveProgressPort for DieselFileTransferRepository
         };
         let state = AttemptState::from_str(&attempt.attempt_state)
             .map_err(|error| FileTransferProjectionError::Backend(Box::new(error)))?;
+        // TryFromIntError：目标分类完整表达数值范围不符。
         let items_total = u32::try_from(rows.len()).map_err(|_| {
             FileTransferProjectionError::Backend("receive item count exceeds u32".into())
         })?;
@@ -576,6 +577,7 @@ impl<E: DbExecutor> GetEntryReceiveProgressPort for DieselFileTransferRepository
                 .filter(|row| row.status == TrackedFileTransferStatus::Completed.as_str())
                 .count(),
         )
+        // TryFromIntError：目标分类完整表达数值范围不符。
         .map_err(|_| {
             FileTransferProjectionError::Backend("completed receive item count exceeds u32".into())
         })?;

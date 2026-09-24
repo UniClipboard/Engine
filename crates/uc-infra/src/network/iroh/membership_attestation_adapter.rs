@@ -518,12 +518,43 @@ impl std::fmt::Debug for IrohMembershipAttestationHandler {
     }
 }
 
+/// 服务端连接处理被拒绝：固定原因加可选下层来源。连接处理没有向上传递的调用方，
+/// 来源随这次拒绝一起结束，日志只记录固定原因。
+#[derive(Debug, thiserror::Error)]
+#[error("membership attestation connection rejected: {reason}")]
+struct HandlerRejection {
+    reason: &'static str,
+    #[source]
+    source: Option<anyhow::Error>,
+}
+
+impl HandlerRejection {
+    fn with_source(reason: &'static str, source: impl Into<anyhow::Error>) -> Self {
+        Self {
+            reason,
+            source: Some(source.into()),
+        }
+    }
+}
+
+impl From<&'static str> for HandlerRejection {
+    fn from(reason: &'static str) -> Self {
+        Self {
+            reason,
+            source: None,
+        }
+    }
+}
+
 impl ProtocolHandler for IrohMembershipAttestationHandler {
     #[instrument(name = "membership_attestation.accept", level = "debug", skip_all)]
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let close_barrier = connection.clone();
-        if let Err(reason) = self.handle(connection).await {
-            debug!(reason, "membership attestation connection rejected");
+        if let Err(rejection) = self.handle(connection).await {
+            debug!(
+                reason = rejection.reason,
+                "membership attestation connection rejected"
+            );
         }
         let _ = tokio::time::timeout(IO_TIMEOUT, close_barrier.closed()).await;
         Ok(())
@@ -531,12 +562,12 @@ impl ProtocolHandler for IrohMembershipAttestationHandler {
 }
 
 impl IrohMembershipAttestationHandler {
-    async fn handle(&self, connection: Connection) -> Result<(), &'static str> {
+    async fn handle(&self, connection: Connection) -> Result<(), HandlerRejection> {
         let remote_key = *connection.remote_id().as_bytes();
         let (mut send, mut recv) = tokio::time::timeout(IO_TIMEOUT, connection.accept_bi())
             .await
-            .map_err(|_| "accept_timeout")?
-            .map_err(|_| "accept_failed")?;
+            .map_err(|error| HandlerRejection::with_source("accept_timeout", error))?
+            .map_err(|error| HandlerRejection::with_source("accept_failed", error))?;
         let hello = match read_message(&mut recv).await {
             Ok(WireMessage::Hello(hello)) => hello,
             Ok(WireMessage::GossipRequest(request)) => {
@@ -546,23 +577,23 @@ impl IrohMembershipAttestationHandler {
             }
             Err(MembershipAttestationError::VersionIncompatible) => {
                 reject(&mut send, WireReject::Version).await;
-                return Err("version_incompatible");
+                return Err("version_incompatible".into());
             }
             Ok(_) | Err(_) => {
                 reject(&mut send, WireReject::Invalid).await;
-                return Err("invalid_hello");
+                return Err("invalid_hello".into());
             }
         };
         let local = self
             .identity
             .current_membership_identity()
             .await
-            .map_err(|_| "identity_unavailable")?;
+            .map_err(|error| HandlerRejection::with_source("identity_unavailable", error))?;
         let source_id = match DeviceId::try_new(&hello.source_device_id) {
             Some(device_id) => device_id,
             None => {
                 reject(&mut send, WireReject::Invalid).await;
-                return Err("invalid_source");
+                return Err("invalid_source".into());
             }
         };
         if hello.target_device_id != local.device_id.as_str()
@@ -570,11 +601,11 @@ impl IrohMembershipAttestationHandler {
             || source_id == local.device_id
         {
             reject(&mut send, WireReject::Invalid).await;
-            return Err("identity_binding");
+            return Err("identity_binding".into());
         }
         if hello.space_id != local.space_id.as_ref() {
             reject(&mut send, WireReject::WrongSpace).await;
-            return Err("wrong_space");
+            return Err("wrong_space".into());
         }
         let applied_epoch = match self
             .application_endpoint
@@ -584,22 +615,22 @@ impl IrohMembershipAttestationHandler {
             Ok(epoch) => epoch,
             Err(uc_core::membership::MembershipAttestationEndpointError::MissingSecurityUpdate) => {
                 reject(&mut send, WireReject::EpochMismatch).await;
-                return Err("missing_security_update");
+                return Err("missing_security_update".into());
             }
             Err(uc_core::membership::MembershipAttestationEndpointError::Rejected) => {
                 reject(&mut send, WireReject::Invalid).await;
-                return Err("invalid_security_update");
+                return Err("invalid_security_update".into());
             }
             Err(uc_core::membership::MembershipAttestationEndpointError::Persistence) => {
                 reject(&mut send, WireReject::Persistence).await;
-                return Err("security_update_persistence");
+                return Err("security_update_persistence".into());
             }
         };
         let epoch = self
             .signatures
             .current_member_epoch()
             .await
-            .map_err(|_| "epoch_unavailable")?;
+            .map_err(|error| HandlerRejection::with_source("epoch_unavailable", error))?;
         if epoch != hello.group_epoch || applied_epoch != hello.group_epoch {
             warn!(
                 peer = %source_id.as_str(),
@@ -610,26 +641,26 @@ impl IrohMembershipAttestationHandler {
                 "membership attestation rejected because the group epochs do not match"
             );
             reject(&mut send, WireReject::EpochMismatch).await;
-            return Err("epoch_mismatch");
+            return Err("epoch_mismatch".into());
         }
         let source_fingerprint =
             match IdentityFingerprint::from_display_string(&hello.source_identity_fingerprint) {
                 Ok(fingerprint) => fingerprint,
                 Err(_) => {
                     reject(&mut send, WireReject::Invalid).await;
-                    return Err("invalid_fingerprint");
+                    return Err("invalid_fingerprint".into());
                 }
             };
         let connected_fingerprint = self
             .fingerprint_factory
             .from_public_key(&remote_key)
-            .map_err(|_| "fingerprint_failed")?;
+            .map_err(|error| HandlerRejection::with_source("fingerprint_failed", error))?;
         if source_fingerprint != connected_fingerprint {
             reject(&mut send, WireReject::Invalid).await;
-            return Err("fingerprint_binding");
+            return Err("fingerprint_binding".into());
         }
         let responder_address = postcard::to_stdvec(&to_persistable_addr(self.endpoint.addr()))
-            .map_err(|_| "address_encode")?;
+            .map_err(|error| HandlerRejection::with_source("address_encode", error))?;
         let responder_nonce = rand::random::<[u8; 32]>();
         let source_digest = wire_identity_digest(
             &hello.source_device_id,
@@ -662,7 +693,7 @@ impl IrohMembershipAttestationHandler {
             .signatures
             .sign_current_member_payload(&transcript_bytes)
             .await
-            .map_err(|_| "sign_failed")?;
+            .map_err(|error| HandlerRejection::with_source("sign_failed", error))?;
         let challenge = WireChallenge {
             responder_device_id: local.device_id.as_str().to_owned(),
             responder_device_name: local.device_name,
@@ -674,22 +705,22 @@ impl IrohMembershipAttestationHandler {
         };
         write_message(&mut send, &WireMessage::Challenge(challenge))
             .await
-            .map_err(|_| "challenge_send")?;
+            .map_err(|error| HandlerRejection::with_source("challenge_send", error))?;
         let proof = match read_message(&mut recv).await {
             Ok(WireMessage::Proof(proof)) => proof,
             Ok(_) | Err(_) => {
                 reject(&mut send, WireReject::Invalid).await;
-                return Err("invalid_proof");
+                return Err("invalid_proof".into());
             }
         };
         let valid = self
             .signatures
             .verify_current_member_payload(&source_id, &transcript_bytes, &proof)
             .await
-            .map_err(|_| "verify_failed")?;
+            .map_err(|error| HandlerRejection::with_source("verify_failed", error))?;
         if !valid {
             reject(&mut send, WireReject::Invalid).await;
-            return Err("invalid_signature");
+            return Err("invalid_signature".into());
         }
         let verified = VerifiedMembershipPeer {
             space_id: local.space_id,
@@ -706,12 +737,13 @@ impl IrohMembershipAttestationHandler {
             .is_err()
         {
             reject(&mut send, WireReject::Persistence).await;
-            return Err("persistence");
+            return Err("persistence".into());
         }
         write_message(&mut send, &WireMessage::Ack)
             .await
-            .map_err(|_| "ack_send")?;
-        send.finish().map_err(|_| "ack_finish")?;
+            .map_err(|error| HandlerRejection::with_source("ack_send", error))?;
+        send.finish()
+            .map_err(|error| HandlerRejection::with_source("ack_finish", error))?;
         let _ = connection.closed().await;
         Ok(())
     }
@@ -722,20 +754,20 @@ impl IrohMembershipAttestationHandler {
         send: &mut iroh::endpoint::SendStream,
         remote_key: [u8; 32],
         request: WireGossipRequest,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), HandlerRejection> {
         let Some(state) = &self.gossip_state else {
             reject(send, WireReject::Invalid).await;
-            return Err("gossip_unavailable");
+            return Err("gossip_unavailable".into());
         };
         let Some(endpoint) = &self.gossip_endpoint else {
             reject(send, WireReject::Invalid).await;
-            return Err("gossip_unavailable");
+            return Err("gossip_unavailable".into());
         };
         let source_device_id = match DeviceId::try_new(&request.source_device_id) {
             Some(source_device_id) => source_device_id,
             None => {
                 reject(send, WireReject::Invalid).await;
-                return Err("invalid_gossip_source");
+                return Err("invalid_gossip_source".into());
             }
         };
         if tokio::time::timeout(IO_TIMEOUT, state.session.wait_until_ready())
@@ -743,14 +775,14 @@ impl IrohMembershipAttestationHandler {
             .is_err()
         {
             reject(send, WireReject::Persistence).await;
-            return Err("gossip_session_not_ready");
+            return Err("gossip_session_not_ready".into());
         }
         let resolved = match state.gate.identify(&remote_key).await {
             Ok(resolved) => resolved,
             Err(rejection) => {
                 state.gate.record_rejection(rejection);
                 reject(send, WireReject::Invalid).await;
-                return Err("unknown_gossip_source");
+                return Err("unknown_gossip_source".into());
             }
         };
         if resolved != source_device_id {
@@ -758,22 +790,22 @@ impl IrohMembershipAttestationHandler {
                 .gate
                 .record_rejection(InboundPeerRejection::IdentityUnresolved);
             reject(send, WireReject::Invalid).await;
-            return Err("gossip_source_rejected");
+            return Err("gossip_source_rejected".into());
         }
         if let Err(rejection) = state.gate.authorize(&source_device_id).await {
             state.gate.record_rejection(rejection);
             reject(send, WireReject::Invalid).await;
-            return Err("gossip_source_rejected");
+            return Err("gossip_source_rejected".into());
         }
         if request.message.validate_transfer_bounds().is_err() {
             reject(send, WireReject::Invalid).await;
-            return Err("invalid_gossip_message");
+            return Err("invalid_gossip_message".into());
         }
         let local = match self.identity.current_membership_identity().await {
             Ok(local) => local,
             Err(_) => {
                 reject(send, WireReject::Persistence).await;
-                return Err("gossip_identity_unavailable");
+                return Err("gossip_identity_unavailable".into());
             }
         };
         let message_space_id = match &request.message {
@@ -786,7 +818,7 @@ impl IrohMembershipAttestationHandler {
         };
         if message_space_id != &local.space_id {
             reject(send, WireReject::WrongSpace).await;
-            return Err("wrong_gossip_space");
+            return Err("wrong_gossip_space".into());
         }
         let response = match endpoint
             .handle_message(&source_device_id, request.message)
@@ -795,21 +827,22 @@ impl IrohMembershipAttestationHandler {
             Ok(response) => response,
             Err(MembershipGossipEndpointError::Rejected) => {
                 reject(send, WireReject::Invalid).await;
-                return Err("gossip_application_rejected");
+                return Err("gossip_application_rejected".into());
             }
             Err(MembershipGossipEndpointError::Persistence) => {
                 reject(send, WireReject::Persistence).await;
-                return Err("gossip_application_persistence");
+                return Err("gossip_application_persistence".into());
             }
         };
         if response.validate_transfer_bounds().is_err() {
             reject(send, WireReject::Invalid).await;
-            return Err("invalid_gossip_response");
+            return Err("invalid_gossip_response".into());
         }
         write_message(send, &WireMessage::GossipResponse(response))
             .await
-            .map_err(|_| "gossip_response_send")?;
-        send.finish().map_err(|_| "gossip_response_finish")?;
+            .map_err(|error| HandlerRejection::with_source("gossip_response_send", error))?;
+        send.finish()
+            .map_err(|error| HandlerRejection::with_source("gossip_response_finish", error))?;
         let _ = connection.closed().await;
         Ok(())
     }

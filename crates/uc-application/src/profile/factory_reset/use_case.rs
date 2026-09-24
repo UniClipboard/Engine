@@ -170,7 +170,7 @@ mod tests {
                 })
                 .is_ok()
             {
-                Err(ProfileFactoryResetCapabilityError)
+                Err(ProfileFactoryResetCapabilityError::new())
             } else {
                 Ok(())
             }

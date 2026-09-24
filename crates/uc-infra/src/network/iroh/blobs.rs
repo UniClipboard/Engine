@@ -113,7 +113,7 @@ impl IrohBlobTransferAdapter {
     }
 
     fn parse_ticket(ticket: &BlobTicket) -> Result<NativeBlobTicket, BlobError> {
-        NativeBlobTicket::decode_bytes(ticket.as_bytes()).map_err(|_| BlobError::InvalidTicket)
+        NativeBlobTicket::decode_bytes(ticket.as_bytes()).map_err(BlobError::invalid_ticket_from)
     }
 
     fn tag_name(reason: &TagReason) -> String {
@@ -1213,7 +1213,7 @@ mod tests {
             .digest_of(&ticket)
             .expect_err("corrupt ticket must fail");
 
-        assert!(matches!(err, BlobError::InvalidTicket));
+        assert!(matches!(err, BlobError::InvalidTicket { .. }));
         fixture.shutdown().await?;
         Ok(())
     }

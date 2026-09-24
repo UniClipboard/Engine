@@ -66,6 +66,28 @@ impl ProfileLifecycleRepositoryError {
     }
 }
 
-#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+/// 出厂重置底层能力失败。纯状态失败时 `source` 为空；有下层错误时保留为来源。
+#[derive(Debug, thiserror::Error)]
 #[error("profile factory reset capability failed")]
-pub struct ProfileFactoryResetCapabilityError;
+pub struct ProfileFactoryResetCapabilityError {
+    #[source]
+    source: Option<anyhow::Error>,
+}
+
+impl ProfileFactoryResetCapabilityError {
+    pub fn new() -> Self {
+        Self { source: None }
+    }
+
+    pub fn from_source(source: impl Into<anyhow::Error>) -> Self {
+        Self {
+            source: Some(source.into()),
+        }
+    }
+}
+
+impl Default for ProfileFactoryResetCapabilityError {
+    fn default() -> Self {
+        Self::new()
+    }
+}

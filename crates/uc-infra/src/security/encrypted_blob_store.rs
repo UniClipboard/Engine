@@ -104,6 +104,7 @@ fn parse_blob(data: &[u8]) -> Result<ParsedBlob<'_>> {
         LEGACY_BLOB_FORMAT_VERSION => {
             let nonce: &[u8; 24] = data[5..29]
                 .try_into()
+                // TryFromSliceError：切片范围已固定，目标分类完整表达长度不符。
                 .map_err(|_| anyhow::anyhow!("nonce extraction failed"))?;
             Ok(ParsedBlob::Legacy {
                 nonce,
@@ -118,6 +119,7 @@ fn parse_blob(data: &[u8]) -> Result<ParsedBlob<'_>> {
             let epoch = GroupEpoch::new(u64::from_le_bytes(
                 data[5..13]
                     .try_into()
+                    // TryFromSliceError：切片范围已固定，目标分类完整表达长度不符。
                     .map_err(|_| anyhow::anyhow!("epoch extraction failed"))?,
             ));
             let key_id_len = data[13] as usize;
@@ -127,11 +129,12 @@ fn parse_blob(data: &[u8]) -> Result<ParsedBlob<'_>> {
                 return Err(anyhow::anyhow!("invalid keyed blob header"));
             }
             let key_id = std::str::from_utf8(&data[FIXED_PREFIX..nonce_start])
-                .map_err(|_| anyhow::anyhow!("content key id is not utf-8"))?;
-            let content_key_id = ContentKeyId::from_string(key_id)
-                .map_err(|_| anyhow::anyhow!("invalid content key id"))?;
+                .context("content key id is not utf-8")?;
+            let content_key_id =
+                ContentKeyId::from_string(key_id).context("invalid content key id")?;
             let nonce: &[u8; 24] = data[nonce_start..ciphertext_start]
                 .try_into()
+                // TryFromSliceError：切片范围已固定，目标分类完整表达长度不符。
                 .map_err(|_| anyhow::anyhow!("nonce extraction failed"))?;
             Ok(ParsedBlob::Keyed {
                 content_key_id,

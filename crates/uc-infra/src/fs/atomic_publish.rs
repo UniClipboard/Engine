@@ -154,12 +154,8 @@ pub(crate) fn rename_no_replace_io(source: &Path, destination: &Path) -> std::io
     use std::os::unix::ffi::OsStrExt;
 
     let to_c = |path: &Path| {
-        CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "path contains an interior NUL",
-            )
-        })
+        CString::new(path.as_os_str().as_bytes())
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
     };
     let source = to_c(source)?;
     let destination = to_c(destination)?;

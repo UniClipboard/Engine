@@ -57,11 +57,27 @@ pub enum KeyMigrationError {
     /// 密文损坏 / AAD 不匹配 / AEAD 解包失败——数据层故障，
     /// 与 `BlobCipherError::InvalidCiphertext` 同义。
     #[error("invalid ciphertext or aad mismatch")]
-    InvalidCiphertext,
+    InvalidCiphertext {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// 其它内部失败（keyring API 失败、随机数生成失败等）。
     #[error("key migration internal error")]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl KeyMigrationError {
+    pub fn invalid_ciphertext() -> Self {
+        Self::InvalidCiphertext { source: None }
+    }
+
+    pub fn invalid_ciphertext_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::InvalidCiphertext {
+            source: Some(Box::new(source)),
+        }
+    }
 }
 
 /// 临时迁移密钥能力。

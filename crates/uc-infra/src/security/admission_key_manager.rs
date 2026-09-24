@@ -300,6 +300,7 @@ impl AdmissionKeyManager {
         .map_err(AdmissionKeyError::open_failed)?;
         let bytes: [u8; 32] = plaintext
             .try_into()
+            // 长度不符时错误值是原明文密钥字节，不能作为来源保存；布局错误已完整表达原因。
             .map_err(|_| AdmissionKeyError::InvalidLayout)?;
         Ok(SpaceAdmissionDataKey(bytes))
     }

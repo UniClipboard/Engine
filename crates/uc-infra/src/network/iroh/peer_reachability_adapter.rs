@@ -668,24 +668,20 @@ impl IrohPeerReachabilityAdapter {
         match dial {
             Ok(connection) => {
                 let admission_confirmed = async {
-                    let (mut send, mut receive) = connection.open_bi().await.map_err(|_| ())?;
-                    send.write_all(&[ADMISSION_CONFIRMATION_REQUEST])
-                        .await
-                        .map_err(|_| ())?;
-                    send.finish().map_err(|_| ())?;
+                    // 失败只决定“未确认准入”，来源随结果一起结束。
+                    let (mut send, mut receive) = connection.open_bi().await?;
+                    send.write_all(&[ADMISSION_CONFIRMATION_REQUEST]).await?;
+                    send.finish()?;
                     let mut acknowledgement = [0u8; 1];
-                    receive
-                        .read_exact(&mut acknowledgement)
-                        .await
-                        .map_err(|_| ())?;
-                    Ok::<bool, ()>(acknowledgement[0] == ADMISSION_ACCEPTED)
+                    receive.read_exact(&mut acknowledgement).await?;
+                    Ok::<bool, anyhow::Error>(acknowledgement[0] == ADMISSION_ACCEPTED)
                 };
                 let confirmation =
                     tokio::time::timeout(PEER_ADMISSION_IO_TIMEOUT, admission_confirmed).await;
                 if !matches!(confirmation, Ok(Ok(true))) {
                     *failure = PresenceCheckResult::Confirmation(match confirmation {
                         Err(_) => ConfirmationFailure::TimedOut,
-                        Ok(Err(())) => ConfirmationFailure::TransportFailed,
+                        Ok(Err(_)) => ConfirmationFailure::TransportFailed,
                         _ => ConfirmationFailure::PeerNotAdmitted,
                     });
                     connection.close(0u32.into(), b"peer_not_admitted");

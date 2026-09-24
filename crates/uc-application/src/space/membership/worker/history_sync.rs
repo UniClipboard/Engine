@@ -233,7 +233,7 @@ impl HistorySynchronizer {
             Ok(exchange) => exchange,
             Err(ExchangeFailure::Ledger(error)) => return Err(error),
             Err(ExchangeFailure::Transport(error)) => PeerExchange::Finished(match error {
-                MembershipHistoryExchangeError::Offline
+                MembershipHistoryExchangeError::Offline { .. }
                 | MembershipHistoryExchangeError::PairingInProgress
                 | MembershipHistoryExchangeError::Transport { .. } => PeerSyncResult::Deferred,
                 MembershipHistoryExchangeError::Rejected => PeerSyncResult::Rejected,

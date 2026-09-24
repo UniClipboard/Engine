@@ -92,7 +92,11 @@ pub(super) enum SessionProtocolRegistryError {
 
 #[derive(Debug, thiserror::Error)]
 #[error("session protocol unavailable")]
-struct SessionProtocolUnavailable;
+struct SessionProtocolUnavailable {
+    /// 会话被撤销时为空；注册表拒绝时保留其错误。
+    #[source]
+    source: Option<SessionProtocolRegistryError>,
+}
 
 impl SessionProtocolRegistry {
     pub(super) fn new() -> Self {
@@ -394,7 +398,11 @@ impl ProtocolHandler for SessionProtocolDispatcher {
         let lease = self
             .registry
             .acquire(&self.alpn, &connection)
-            .map_err(|_| AcceptError::from_err(SessionProtocolUnavailable))?;
+            .map_err(|error| {
+                AcceptError::from_err(SessionProtocolUnavailable {
+                    source: Some(error),
+                })
+            })?;
         let handler = Arc::clone(&lease.handler);
         let cancellation = lease.cancelled();
 
@@ -402,7 +410,7 @@ impl ProtocolHandler for SessionProtocolDispatcher {
             biased;
             _ = cancellation => {
                 connection.close(0u32.into(), b"session_retired");
-                Err(AcceptError::from_err(SessionProtocolUnavailable))
+                Err(AcceptError::from_err(SessionProtocolUnavailable { source: None }))
             }
             result = handler.accept(connection.clone()) => result,
         }

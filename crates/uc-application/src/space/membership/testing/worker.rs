@@ -133,7 +133,7 @@ impl MembershipHistoryExchangePort for OfflineHistoryExchange {
         _peer: &DeviceId,
         _message: MembershipHistoryMessage,
     ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
-        Err(MembershipHistoryExchangeError::Offline)
+        Err(MembershipHistoryExchangeError::offline())
     }
 }
 
