@@ -435,3 +435,20 @@ git diff --check
 | 实体双 Desktop 复现场景 | 跳过（需另行授权） |
 
 S3 已完成（2026-09-24 用户确认）；剩余失败的诊断转入 S3.a。S3 不单独合入主分支。
+
+### S3.a（2026-09-24，分支 `hp/uni/t-0010-android`，诊断完成）
+
+逐项判定（证据为单独运行日志与代码路径）：
+
+| 失败项 | 判定 | 依据与处理 |
+| --- | --- | --- |
+| `joiner_pairing_fixture_reaches_active_settled` | 测试用例问题，已修复 | 最终确认门控后，本机激活按设计返回 `Processing`，公开 `Active` 由 Infra 依据“加入已结算”投影；夹具保存了最终确认前的状态再断言 `Active`。夹具改为记录激活结果与最终确认后的已结算事实，断言不变；`admission_recovery_scenarios` 4/4 通过 |
+| `handoff_four_device_removal_preview_matches_executed_choice` | 测试用例问题，已修复 | 失败断言要求接受远端移除的 A 仍以 `Removed` 列出被移除设备。按 ADR-027，只有本机发起的移除保留离开收尾条目（规格 021 的 `AwaitingRemovalAcknowledgement` 只针对移除发起方），与已批准的 F1 调整同类。断言改为“目标不再列出”（更严格）；单独运行 2/2 通过 |
+| `confirmed_pairing_survives_restart_removal_and_same_device_rejoin` | 产品逻辑问题（成员展示），已修复（用户确认） | 同一设备被移除后重新加入，邀请方配对确认 120 秒内一直为空。`history.member_for_device` 返回凭据表中第一个映射到该设备的实例，可能是已移除的旧实例，设备因而显示为已移除，按有效实例索引的配对确认查不到；S3 之前的设备信任查询使用同一函数。按设备找实例的能力仍被离开中的设备与重复移除需要，因此不在调用方加兜底，而是修正该函数定义：同一设备的实例中当前有效者优先（`max_by_key`）。移除用例去掉“有效实例或历史实例”的两段查找，只保留一次查找加“有效或已有移除事件”的判定；决定来源核对改为直接核对签署实例所属设备（`device_for_member`）。新增 Core 回归测试（修复前稳定失败）；该场景 12.5 秒通过，R1–R4 与旧重复成员场景通过 |
+| `same_device_returns_to_a_previous_space_after_switch_and_restart` | 产品问题，不属本计划 | 跨 Space 加入后重启，`Engine::start` 在 profile 密钥恢复启动检查中返回 `Corrupt`（1216），早于任何成员日志；全新加入后重启正常。相关文件正由另一项未提交工作修改，入站准入计划已登记为既有问题 |
+| `suspend_during_space_switch_recovery_does_not_resurrect_the_network` | 产品问题，不属本计划 | 恢复时先检查未完成的 Space 切换，此时 Space 仍锁定，读取加入方激活与待恢复准入状态返回 `locked`，被映射为不可重试的 1103，恢复失败。属 Engine 运行期恢复顺序 |
+| `pending_join_is_not_published_before_final_confirmation`（间歇） | 产品问题（组密钥存储短暂锁冲突），待决定 | 新增两条固定分类的运行诊断（用户确认）：设备信任查询依赖失败时记录依赖名与原因类别；Infra 读取组密钥投递状态失败时记录阶段、原因、来源。失败运行显示 `dependency="security_update_status" cause="key_epoch_repository"`，Infra 为 `source="storage" reason="unknown"`，发生在邀请方最终确认激活写入安全状态期间；通过的运行也出现过同样记录，只是测试恰好未在该时刻查询。数据库连接已设置 5 秒忙等，而投递状态读取路径先读后写加密索引，推断为延迟事务锁升级时的立即 BUSY（原始错误正文按隐私规则不记录，无法直接证实）。修复方向：该事务改为立即获取写锁，或状态读取不再写索引 |
+
+验证：`cargo nextest run -p uc-core -p uc-application -p uc-infra` 2559 项全部通过；`membership-e2e` 全组 49/51，失败为
+`same_device_returns_to_a_previous_space_after_switch_and_restart` 与
+`suspend_during_space_switch_recovery_does_not_resurrect_the_network`（均不属本计划）；交付检查通过。

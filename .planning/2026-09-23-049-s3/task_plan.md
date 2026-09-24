@@ -54,7 +54,7 @@ reliable feedback.
 - [x] Committed (user approved): `6e77dcbf` nextest group, `914c06fa` S3 verification gaps, `8c2577e4` planning notes.
 - **Status:** pending
 
-### Phase E — Migrate the real membership e2e onto nextest + uc-testkit  ← CURRENT
+### Phase E — Migrate the real membership e2e onto nextest + uc-testkit
 - [x] Decisions (user, all recommended): one binary split into category modules + shared `harness/`;
       uc-testkit Scenario inside the harness; CI = PR smoke via nextest, nightly/manual full group.
 - [x] Execution plan: `docs/exec-plans/active/050-membership-e2e-nextest-migration.md` (S1–S5), indexed.
@@ -64,6 +64,20 @@ reliable feedback.
 - [x] S4 CI (pr-check `membership-e2e-smoke`; engine-real-environment `membership-e2e` job) — remote runs skipped until pushed.
 - [x] S5 docs (testing-guide, test-adoption-inventory, plan 034 step 6, tests/observability/README.md).
 - [x] Committed plan 050 work (user approved): c6a39348 test, 35125fcd ci, 6c6d154e docs, d06c0ef4 notes.
+- **Status:** in_progress
+
+### Phase F — S3.a remaining failure diagnosis  ← CURRENT
+- [x] nextest overrides for slow tests + node_lifecycle exclusive (commit e77b7a4e4); units 2556/2557.
+- [x] S3 marked complete; S3.a added to plan 049 (commit 3f23a3278).
+- [x] joiner_pairing_fixture_reaches_active_settled — TEST, fixed (fixture status timing)
+- [x] same_device_returns… — PRODUCT outside 049 (profile key recovery, others' WIP)
+- [x] suspend_during… — PRODUCT outside 049 (resume inspects transition while locked)
+- [x] handoff_four_device… — TEST, fixed (accepting side no longer lists removed device)
+- [x] confirmed_pairing… — PRODUCT in 049 domain; FIXED (member_for_device prefers effective, no fallbacks)
+- [x] pending_join… — PRODUCT: key epoch store lock contention during sponsor activation (diagnostics added); fix awaits user
+- Rule: test problem → fix test (waits/preconditions only, no weakened business assertions, explain first);
+  product problem → record root cause, ask user.
+- [x] Commit test fixes, fix, diagnostics, S3.a record (user approved).
 - **Status:** in_progress
 
 ### Phase D — Later (separate plan, after 049)

@@ -95,3 +95,44 @@
   (`docs/exec-plans/active/2026-09-20-single-space-work-owner.md:217`: external online/contact are business-neutral
   wakeups; no step selection or backoff bypass). That also dropped the 2026-09-17 targeted history-sync bypass.
 - The offline_member test lacked `init_test_tracing()`; added (logs are needed for diagnosis).
+
+## S3.a diagnosis
+- joiner_pairing_fixture_reaches_active_settled: TEST problem. `complete_pending_space_transition()` returns
+  `Processing` by design since confirmation-gated admission; public `Active` is an Infra projection
+  (`uc-infra/src/space/admission/display.rs`) from `is_active_settled()`. The fixture kept the pre-confirmation
+  status and asserted Active. Fixed: snapshot keeps activation (Processing) + `active_settled` after final
+  confirmation; assertions unchanged. 4/4 admission_recovery_scenarios pass.
+- same_device_returns_to_a_previous_space_after_switch_and_restart: PRODUCT problem outside 049. Joiner restart
+  right after a cross-space join fails in Engine::start with 1216 (ProfileKeyRecoveryError::Corrupt) before any
+  membership log; fresh-join restart passes. Source is profile key recovery startup
+  (`uc-infra/src/security/profile_key_recovery.rs::prepare_startup` path) — the file and
+  `uc-engine/src/runtime/profile_recovery.rs` are someone else's WIP; already listed as pre-existing in the inbound
+  peer admission plan. Hypothesis (unproven): vault root not rewrapped after cross-space switch.
+- suspend_during_space_switch_recovery_does_not_resurrect_the_network: PRODUCT problem outside 049 (Engine runtime
+  lifecycle). On resume, "inspect pending space transition" reads joiner activation / pending admission state while
+  the space is still locked (`joiner activation state is locked`), maps to 1103 Internal non-retryable, resume fails.
+  Ordering issue in resume (inspect before unlock). Pre-existing on baseline.
+- handoff_four_device_removal_preview_matches_executed_choice: TEST problem. Failed at the assertion that A (which
+  accepted B's removal of C) lists C as `Removed`. Under ADR-027/R1 only locally initiated removals keep a departing
+  entry (spec 021 AwaitingRemovalAcknowledgement is for the remover); the accepting side drops C. Same class as the
+  user-approved F1 change. Assertion changed to "target no longer listed" (stricter). Passes 2/2 alone.
+- confirmed_pairing_survives_restart_removal_and_same_device_rejoin: PRODUCT problem (membership presentation;
+  pre-existing, mirrored by S1). After same-device rejoin the sponsor's pairing confirmation stays None for 120 s.
+  `MembershipLedger::device_views` (`uc-core/.../ledger/present.rs:161`) maps device → member with
+  `history.member_for_device`, which returns the FIRST credential for that device — for a rejoined device that can be
+  the old removed instance, so the device presents as Removed and the confirmation lookup (keyed by the active
+  instance) finds nothing. Old query code (cd9537b6 query_device_trust/use_case.rs:198) used the same function.
+  Proposed fix (needs user OK): prefer `effective_member_for_device`, fall back to `member_for_device`.
+- pending_join_is_not_published_before_final_confirmation: PRODUCT side, not yet pinned. Failing run: right after the
+  sponsor's final-confirmation activation (group_epoch 3, pending_group_update_count 1) the group update dispatch
+  fails with error.type=storage and the device trust query fails with Dependency (retryable 1211); the joiner's session
+  transition also failed once on "query transitioned device trust revision". The sponsor-side group update store read
+  fails after activation; the query only inherits it. Needs a formal diagnostic log with the error source chain
+  (observability rules) to tell a transient window from a store inconsistency. Pre-existing (baseline 1/3).
+- confirmed_pairing FIXED: `member_for_device` now prefers the effective instance (`max_by_key(effective)`); call-site
+  fallbacks removed (remove_space_member single lookup + filter; decision check uses `device_for_member`). Core
+  regression test red before fix. e2e passes in 12.5 s.
+- pending_join DIAGNOSED with new fixed-label diagnostics: dependency=security_update_status cause=key_epoch_repository;
+  infra source=storage reason=unknown during sponsor activation writes. busy_timeout 5000 is set; the status read path
+  reads then writes the encrypted index → likely deferred-transaction lock-upgrade BUSY (not provable without raw text).
+- Final: nextest units 2559/2559; membership-e2e 49/51 (two non-049 product failures).
