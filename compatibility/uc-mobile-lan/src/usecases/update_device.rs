@@ -91,8 +91,8 @@ pub enum UpdateMobileDeviceError {
     PasswordTooLong { max: usize },
     #[error("password hashing failed: {0}")]
     PasswordHashFailed(String),
-    #[error("device persistence failed: {0}")]
-    PersistenceFailed(String),
+    #[error("device persistence failed")]
+    PersistenceFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 pub(crate) struct UpdateMobileDeviceUseCase {
@@ -273,7 +273,7 @@ fn map_register_validation(err: RegisterMobileShortcutDeviceError) -> UpdateMobi
         | RegisterMobileShortcutDeviceError::SettingsLoadFailed(_)
         | RegisterMobileShortcutDeviceError::NoLanInterfaceAvailable
         | RegisterMobileShortcutDeviceError::LanInterfaceProbeFailed(_)) => {
-            UpdateMobileDeviceError::PersistenceFailed(err.to_string())
+            UpdateMobileDeviceError::PersistenceFailed(err.into())
         }
     }
 }
@@ -285,7 +285,7 @@ fn translate_device_error(err: MobileDeviceError) -> UpdateMobileDeviceError {
         }
         MobileDeviceError::Storage(msg) => UpdateMobileDeviceError::PersistenceFailed(msg),
         MobileDeviceError::AlreadyExists(id) => {
-            UpdateMobileDeviceError::PersistenceFailed(format!("device id collision: {id}"))
+            UpdateMobileDeviceError::PersistenceFailed(format!("device id collision: {id}").into())
         }
     }
 }

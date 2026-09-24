@@ -39,7 +39,7 @@ impl<E> DieselClipboardEntryReplaceRepository<E> {
 }
 
 fn to_repo_err(e: anyhow::Error) -> ClipboardRepositoryError {
-    ClipboardRepositoryError::Storage(e.to_string())
+    ClipboardRepositoryError::Storage(e.context("clipboard repository operation").into())
 }
 
 pub(super) struct PreparedEntryReplacement {

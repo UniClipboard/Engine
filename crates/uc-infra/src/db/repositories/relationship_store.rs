@@ -36,8 +36,8 @@ pub enum RelationshipStoreError {
     Locked,
     #[error("relationship ciphertext is invalid")]
     InvalidCiphertext,
-    #[error("relationship storage failed: {0}")]
-    Storage(String),
+    #[error("relationship storage failed")]
+    Storage(#[source] anyhow::Error),
     #[error("relationship operation failed ({category})")]
     Diagnostic {
         category: &'static str,
@@ -172,7 +172,7 @@ impl RelationshipCipher {
     ) -> Result<Vec<u8>, RelationshipStoreError> {
         let aad = relationship_aad(kind, lookup_key);
         let (nonce, ciphertext) = encrypt_xchacha_raw(&self.key, plaintext, &aad)
-            .map_err(|error| RelationshipStoreError::Storage(error.to_string()))?;
+            .map_err(|error| RelationshipStoreError::Storage(anyhow::Error::from(error)))?;
         let mut envelope = Vec::with_capacity(HEADER_LEN + ciphertext.len());
         envelope.extend_from_slice(&RELATIONSHIP_MAGIC);
         envelope.push(RELATIONSHIP_FORMAT_VERSION);
@@ -600,7 +600,7 @@ where
                     .load::<EncryptedRelationshipRow>(conn)
                     .map_err(anyhow::Error::new)
             })
-            .map_err(|error| RelationshipStoreError::Storage(error.to_string()))?;
+            .map_err(|error| RelationshipStoreError::Storage(anyhow::Error::from(error)))?;
         rows.into_iter()
             .map(|row| {
                 if row.kind != kind.as_str() {
@@ -640,7 +640,7 @@ where
                 .execute(conn)
                 .map_err(anyhow::Error::new)
             })
-            .map_err(|error| RelationshipStoreError::Storage(error.to_string()))?;
+            .map_err(|error| RelationshipStoreError::Storage(anyhow::Error::from(error)))?;
         Ok(affected > 0)
     }
 
@@ -783,7 +783,7 @@ fn encode_member(member: &SpaceMember) -> Result<Vec<u8>, RelationshipStoreError
         version: 1,
         member: member.clone(),
     })
-    .map_err(|error| RelationshipStoreError::Storage(error.to_string()))
+    .map_err(|error| RelationshipStoreError::Storage(anyhow::Error::from(error)))
 }
 
 fn decode_member(payload: &[u8]) -> Result<SpaceMember, RelationshipStoreError> {
@@ -800,7 +800,7 @@ fn encode_trusted_peer(peer: &TrustedPeer) -> Result<Vec<u8>, RelationshipStoreE
         version: 1,
         peer: peer.clone(),
     })
-    .map_err(|error| RelationshipStoreError::Storage(error.to_string()))
+    .map_err(|error| RelationshipStoreError::Storage(anyhow::Error::from(error)))
 }
 
 fn decode_trusted_peer(payload: &[u8]) -> Result<TrustedPeer, RelationshipStoreError> {
@@ -819,7 +819,7 @@ fn encode_peer_address(record: &PeerAddressRecord) -> Result<Vec<u8>, Relationsh
         addr_blob: record.addr_blob.clone(),
         observed_at: record.observed_at.timestamp(),
     })
-    .map_err(|error| RelationshipStoreError::Storage(error.to_string()))
+    .map_err(|error| RelationshipStoreError::Storage(anyhow::Error::from(error)))
 }
 
 fn decode_peer_address(payload: &[u8]) -> Result<PeerAddressRecord, RelationshipStoreError> {

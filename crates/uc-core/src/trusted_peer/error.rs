@@ -15,6 +15,6 @@ pub enum TrustedPeerError {
     #[error("trusted peer `{0}` not found")]
     NotFound(DeviceId),
 
-    #[error("trusted-peer repository failure: {0}")]
-    Repository(String),
+    #[error("trusted-peer repository failure")]
+    Repository(#[source] Box<dyn std::error::Error + Send + Sync>),
 }

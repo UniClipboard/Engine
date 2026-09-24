@@ -180,6 +180,13 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
   - 隐私修复：`IrohNodeError::InvalidRelayUrl` 原先在显示文本中带出用户配置的 relay URL（可能含凭据），改为固定分类
     `RelayUrlProblem` 作为来源，不再保存原值；已有测试确认 `Display`/`Debug` 不含主机名与密码。
   - 测试：拨号错误优先保留非超时尝试；`PublishError` 保留 `io::Error` 且显示文本不含路径；relay URL 错误不含原值。
+- 数据库仓储（已完成）：Core 的 `BlobMigrationRepoError`、`MobileDeviceError::Storage`、`ClipboardRepositoryError::Storage`、
+  `TrustedPeerError::Repository`、`MembershipError::Repository`、`PeerAddressError::Internal`、`BlobReferenceError::Repository`，
+  Infra 的 `RelationshipStoreError::Storage`。至此 E2 中仓储外层的字符串化已消除，diesel 错误可从端口错误沿链取回（有测试）。
+  - `MobileDeviceError` 也被兼容线使用。兼容线 5 个用例错误的 `PersistenceFailed(String)` 一并改为携带来源；Engine 对它们只取
+    错误码、不用文本，对外行为不变。
+  - 发现并修正：`anyhow::Error` 不带 context 直接 `.into()` 成盒装来源时，根错误无法 `downcast`。用临时类型让编译器列出
+    全部此类位置（19 处，均在 `uc-infra`），逐个补上固定动作 context；规则已写入错误处理规范。
 - 待决策：`RelayProbeError` 的文本经 `RelayProbeOutcome::{Dns, Tls, Handshake, Other} { message }` 原样交给宿主显示，
   属于宿主可见文本。改为 source 需要先确定宿主诊断文本的契约，暂不处理。
 - 后续事项：投递失败时 `reason_detail` 把 `ClipboardDispatchError` 的来源文本写入 `EntryDeliveryRecord` 持久化字段，

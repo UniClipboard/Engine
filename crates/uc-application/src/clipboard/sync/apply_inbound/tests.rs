@@ -1421,7 +1421,7 @@ async fn dedup_query_failure_short_circuits() {
     let mut repo = MockEntryRepo::new();
     repo.expect_find_entry_id_by_snapshot_hash()
         .times(1)
-        .returning(|_| Err(ClipboardRepositoryError::Storage("db down".to_string())));
+        .returning(|_| Err(ClipboardRepositoryError::Storage("db down".into())));
     let capture = MockCapture::new();
     let write = MockWrite::new();
 

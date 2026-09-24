@@ -435,8 +435,8 @@ impl ApplyInboundActiveClipboardStateUseCase {
                 debug!("active state inbound: pull failed (peer cannot serve content); dropping");
                 return None;
             }
-            Err(ActiveClipboardPullClientError::Io(reason)) => {
-                warn!(reason, "active state inbound: pull failed (io); dropping");
+            Err(ActiveClipboardPullClientError::Io(_)) => {
+                warn!("active state inbound: pull failed (io); dropping");
                 return None;
             }
         };

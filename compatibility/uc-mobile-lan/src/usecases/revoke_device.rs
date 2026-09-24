@@ -34,8 +34,8 @@ pub enum RevokeMobileDeviceError {
     NotFound(String),
 
     /// 持久化失败 —— 包含底层文案以便日志排障，调用方应允许重试。
-    #[error("device persistence failed: {0}")]
-    PersistenceFailed(String),
+    #[error("device persistence failed")]
+    PersistenceFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 // ─── use case ───────────────────────────────────────────────────────────
@@ -75,7 +75,7 @@ fn translate_device_error(err: MobileDeviceError) -> RevokeMobileDeviceError {
         MobileDeviceError::Storage(msg) => RevokeMobileDeviceError::PersistenceFailed(msg),
         // delete 路径理论上不会触发 AlreadyExists / UsernameCollision;
         // 走到这里说明 adapter 违约, 转为 PersistenceFailed 兜底。
-        other => RevokeMobileDeviceError::PersistenceFailed(other.to_string()),
+        other => RevokeMobileDeviceError::PersistenceFailed(other.into()),
     }
 }
 
@@ -137,7 +137,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, RevokeMobileDeviceError::PersistenceFailed(ref s) if s.contains("disk gone")),
+            matches!(err, RevokeMobileDeviceError::PersistenceFailed(ref s) if s.to_string().contains("disk gone")),
             "expected PersistenceFailed(disk gone), got {err:?}"
         );
     }

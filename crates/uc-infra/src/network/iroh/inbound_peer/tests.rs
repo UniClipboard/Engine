@@ -27,7 +27,7 @@ impl MemberRepositoryPort for Members {
     async fn list(&self) -> Result<Vec<SpaceMember>, MembershipError> {
         self.0
             .clone()
-            .map_err(|()| MembershipError::Repository("fixture".to_owned()))
+            .map_err(|()| MembershipError::Repository("fixture".into()))
     }
     async fn save(&self, _: &SpaceMember) -> Result<(), MembershipError> {
         panic!("read-only fixture")

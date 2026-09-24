@@ -59,7 +59,9 @@ where
                     .map_err(anyhow::Error::new)
             })
         });
-        let rows = rows.map_err(|e| BlobMigrationRepoError::Storage(e.to_string()))?;
+        let rows = rows.map_err(|e| {
+            BlobMigrationRepoError::Storage(e.context("list inline representations").into())
+        })?;
         Ok(rows
             .into_iter()
             .map(|(e_id, rep_id)| (EventId::from_string(e_id), RepresentationId::from(rep_id)))
@@ -90,7 +92,9 @@ where
                         .map_err(anyhow::Error::new)
                 })
             })
-            .map_err(|e| BlobMigrationRepoError::Storage(e.to_string()))?;
+            .map_err(|e| {
+                BlobMigrationRepoError::Storage(e.context("read inline representation data").into())
+            })?;
         // `Option<Option<_>>`：外层 = 行存在与否；内层 = inline_data 非空与否。
         Ok(result.flatten())
     }
@@ -122,7 +126,9 @@ where
                 Ok(())
             })
         })
-        .map_err(|e| BlobMigrationRepoError::Storage(e.to_string()))
+        .map_err(|e| {
+            BlobMigrationRepoError::Storage(e.context("upsert blob migration record").into())
+        })
     }
 
     async fn count_records(&self) -> Result<u64, BlobMigrationRepoError> {
@@ -136,7 +142,9 @@ where
                         .map_err(anyhow::Error::new)
                 })
             })
-            .map_err(|e| BlobMigrationRepoError::Storage(e.to_string()))?;
+            .map_err(|e| {
+                BlobMigrationRepoError::Storage(e.context("count blob migration records").into())
+            })?;
         Ok(count.max(0) as u64)
     }
 
@@ -150,7 +158,9 @@ where
                         .map_err(anyhow::Error::new)
                 })
             })
-            .map_err(|e| BlobMigrationRepoError::Storage(e.to_string()))?;
+            .map_err(|e| {
+                BlobMigrationRepoError::Storage(e.context("list blob migration records").into())
+            })?;
         Ok(rows
             .into_iter()
             .map(|r| MigrationRecord {
@@ -188,7 +198,9 @@ where
                 Ok(())
             })
         })
-        .map_err(|e| BlobMigrationRepoError::Storage(e.to_string()))
+        .map_err(|e| {
+            BlobMigrationRepoError::Storage(e.context("update inline representation data").into())
+        })
     }
 
     async fn mark_unreadable_inline_data(
@@ -215,7 +227,13 @@ where
                 Ok(())
             })
         })
-        .map_err(|error| BlobMigrationRepoError::Storage(error.to_string()))
+        .map_err(|error| {
+            BlobMigrationRepoError::Storage(
+                error
+                    .context("mark inline representation unreadable")
+                    .into(),
+            )
+        })
     }
 
     async fn discard_all_records(&self) -> Result<(), BlobMigrationRepoError> {
@@ -226,7 +244,9 @@ where
                 Ok(())
             })
         })
-        .map_err(|e| BlobMigrationRepoError::Storage(e.to_string()))
+        .map_err(|e| {
+            BlobMigrationRepoError::Storage(e.context("discard blob migration records").into())
+        })
     }
 }
 

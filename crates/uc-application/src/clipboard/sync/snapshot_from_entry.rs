@@ -498,7 +498,7 @@ mod tests {
     #[tokio::test]
     async fn demote_orphaned_swallows_repo_error() {
         let repo = FakeRepRepo::new(Err(ClipboardRepositoryError::Storage(
-            "transient db error".to_string(),
+            "transient db error".into(),
         )));
         let rep_id = RepresentationId::from("rep-4");
 

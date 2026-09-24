@@ -2305,7 +2305,7 @@ mod tests {
         ) -> Result<Option<EntryId>, ClipboardRepositoryError> {
             if self.find_err {
                 return Err(ClipboardRepositoryError::Storage(
-                    "simulated dedup lookup failure".to_string(),
+                    "simulated dedup lookup failure".into(),
                 ));
             }
             Ok(self.found.clone())
@@ -2323,7 +2323,7 @@ mod tests {
                 Touch::Updated => Ok(true),
                 Touch::NoRows => Ok(false),
                 Touch::Err => Err(ClipboardRepositoryError::Storage(
-                    "simulated touch failure".to_string(),
+                    "simulated touch failure".into(),
                 )),
             }
         }

@@ -86,7 +86,7 @@ where
         let row = self
             .mapper
             .to_row(device)
-            .map_err(|e| MobileDeviceError::Storage(e.to_string()))?;
+            .map_err(|e| MobileDeviceError::Storage(e.into()))?;
 
         let outcome: SaveOutcome = self
             .executor
@@ -112,7 +112,7 @@ where
                     Err(e) => Err(anyhow::Error::new(e)),
                 }
             })
-            .map_err(|e| MobileDeviceError::Storage(e.to_string()))?;
+            .map_err(|e| MobileDeviceError::Storage(e.into()))?;
 
         match outcome {
             SaveOutcome::Inserted => Ok(()),
@@ -143,7 +143,7 @@ where
                     None => Ok(None),
                 }
             })
-            .map_err(|e| MobileDeviceError::Storage(e.to_string()))
+            .map_err(|e| MobileDeviceError::Storage(e.into()))
     }
 
     async fn find_by_device_id(
@@ -166,7 +166,7 @@ where
                     None => Ok(None),
                 }
             })
-            .map_err(|e| MobileDeviceError::Storage(e.to_string()))
+            .map_err(|e| MobileDeviceError::Storage(e.into()))
     }
 
     async fn list_all(&self) -> Result<Vec<MobileDevice>, MobileDeviceError> {
@@ -180,7 +180,7 @@ where
                 }
                 Ok(out)
             })
-            .map_err(|e| MobileDeviceError::Storage(e.to_string()))
+            .map_err(|e| MobileDeviceError::Storage(e.into()))
     }
 
     async fn delete(&self, device_id_value: &MobileDeviceId) -> Result<bool, MobileDeviceError> {
@@ -192,7 +192,7 @@ where
                     .execute(conn)
                     .map_err(anyhow::Error::new)
             })
-            .map_err(|e| MobileDeviceError::Storage(e.to_string()))?;
+            .map_err(|e| MobileDeviceError::Storage(e.into()))?;
         Ok(affected > 0)
     }
 
@@ -234,7 +234,7 @@ where
                     Err(e) => Err(anyhow::Error::new(e)),
                 }
             })
-            .map_err(|e| MobileDeviceError::Storage(e.to_string()))?
+            .map_err(|e| MobileDeviceError::Storage(e.into()))?
     }
 }
 

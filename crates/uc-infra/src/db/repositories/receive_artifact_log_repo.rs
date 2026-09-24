@@ -120,7 +120,7 @@ impl ReceiveArtifactProtection {
 }
 
 fn backend(error: anyhow::Error) -> ReceiveArtifactLogError {
-    ReceiveArtifactLogError::Backend(error.into())
+    ReceiveArtifactLogError::Backend(error.context("receive artifact log storage").into())
 }
 
 async fn decode_row(

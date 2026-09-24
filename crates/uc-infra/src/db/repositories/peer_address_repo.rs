@@ -84,7 +84,7 @@ where
             .store
             .save_peer_address(record)
             .await
-            .map_err(|error| PeerAddressError::Internal(error.to_string()));
+            .map_err(|error| PeerAddressError::Internal(error.into()));
         let observation =
             StoredAddressObservation::new(record.device_id.as_str(), Some(&record.addr_blob));
         NetworkRecorder::current().address_record(
@@ -104,7 +104,7 @@ where
         self.store
             .list_peer_addresses()
             .await
-            .map_err(|error| PeerAddressError::Internal(error.to_string()))
+            .map_err(|error| PeerAddressError::Internal(error.into()))
     }
 
     async fn remove(&self, device: &DeviceId) -> Result<(), PeerAddressError> {
@@ -112,7 +112,7 @@ where
             .remove_peer_address(device)
             .await
             .map(|_| ())
-            .map_err(|error| PeerAddressError::Internal(error.to_string()))
+            .map_err(|error| PeerAddressError::Internal(error.into()))
     }
 }
 

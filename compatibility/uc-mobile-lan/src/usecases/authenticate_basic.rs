@@ -59,8 +59,8 @@ pub enum AuthenticateBasicAuthError {
     InvalidCredentials,
 
     /// 仓储读失败 —— 应允许重试, 与"凭据无效"语义不同。
-    #[error("device persistence failed: {0}")]
-    PersistenceFailed(String),
+    #[error("device persistence failed")]
+    PersistenceFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// 密码哈希器内部错误(库故障 / spawn_blocking join 失败)。
     /// PHC 字符串本身损坏(字段被人手改坏)按 401 处理而不是 Internal,
@@ -228,7 +228,7 @@ fn translate_device_error(err: MobileDeviceError) -> AuthenticateBasicAuthError 
         MobileDeviceError::Storage(msg) => AuthenticateBasicAuthError::PersistenceFailed(msg),
         // find_by_username 不会触发 AlreadyExists / UsernameCollision;
         // 走到这里说明 adapter 违约, 兜底为 PersistenceFailed。
-        other => AuthenticateBasicAuthError::PersistenceFailed(other.to_string()),
+        other => AuthenticateBasicAuthError::PersistenceFailed(other.into()),
     }
 }
 
@@ -438,7 +438,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, AuthenticateBasicAuthError::PersistenceFailed(ref s) if s.contains("disk gone")),
+            matches!(err, AuthenticateBasicAuthError::PersistenceFailed(ref s) if s.to_string().contains("disk gone")),
             "expected PersistenceFailed, got {err:?}"
         );
     }

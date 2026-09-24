@@ -935,8 +935,7 @@ mod tests {
         // 落地之后才发——member_repo.save 失败属于第 6 步失败，第 7 步未执行，
         // 不应 emit 该事件，否则 Activation 漏斗会把"未完成"误判为"已完成"。
         let h = build_harness();
-        *h.member_repo.save_err.lock().unwrap() =
-            Some(MembershipError::Repository("boom".to_string()));
+        *h.member_repo.save_err.lock().unwrap() = Some(MembershipError::Repository("boom".into()));
         let _ = h.uc.execute(ok_cmd(Some("My Mac"))).await.unwrap_err();
         let events = h.analytics.events();
         assert!(
@@ -1081,8 +1080,7 @@ mod tests {
     #[tokio::test]
     async fn member_repo_save_failure_maps_to_storage_failed() {
         let h = build_harness();
-        *h.member_repo.save_err.lock().unwrap() =
-            Some(MembershipError::Repository("boom".to_string()));
+        *h.member_repo.save_err.lock().unwrap() = Some(MembershipError::Repository("boom".into()));
         let err = h.uc.execute(ok_cmd(Some("My Mac"))).await.unwrap_err();
         assert!(matches!(err, InitializeSpaceError::StorageFailed { .. }));
         let status = h.profile_readiness.get_status().await;

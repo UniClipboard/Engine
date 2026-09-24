@@ -188,7 +188,7 @@ pub(crate) mod tests {
         }
 
         async fn remove(&self, _peer_device_id: &DeviceId) -> Result<bool, TrustedPeerError> {
-            Err(TrustedPeerError::Repository("test failure".to_owned()))
+            Err(TrustedPeerError::Repository("test failure".into()))
         }
     }
 

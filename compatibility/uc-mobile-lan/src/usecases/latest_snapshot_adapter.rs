@@ -358,7 +358,7 @@ mod tests {
         fn get_err(msg: &str) -> Arc<Self> {
             Self::build(
                 Ok(Some(Self::state_for(EntryId::from("e1")))),
-                Err(ClipboardRepositoryError::Storage(msg.to_string())),
+                Err(ClipboardRepositoryError::Storage(msg.to_string().into())),
             )
         }
     }

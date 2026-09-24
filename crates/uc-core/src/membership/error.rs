@@ -16,8 +16,8 @@ pub enum MembershipError {
     #[error("member `{0}` not found")]
     NotFound(DeviceId),
 
-    #[error("membership repository failure: {0}")]
-    Repository(String),
+    #[error("membership repository failure")]
+    Repository(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]

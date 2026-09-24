@@ -393,7 +393,7 @@ mod tests {
         let mut member_repo = MockMemberRepo::new();
         member_repo
             .expect_get()
-            .returning(|_| Err(MembershipError::Repository("db down".to_string())));
+            .returning(|_| Err(MembershipError::Repository("db down".into())));
 
         let selector = selector(repo, member_repo);
         let targets = selector
@@ -411,7 +411,7 @@ mod tests {
         let mut repo = MockPeerAddrRepo::new();
         repo.expect_list()
             .times(1)
-            .returning(|| Err(uc_core::ports::PeerAddressError::Internal("io".to_string())));
+            .returning(|| Err(uc_core::ports::PeerAddressError::Internal("io".into())));
 
         let selector = selector(repo, member_repo_all_enabled());
         let err = selector

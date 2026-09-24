@@ -48,9 +48,7 @@ impl MemberRepositoryPort for Members {
     }
     async fn list(&self) -> Result<Vec<SpaceMember>, MembershipError> {
         if self.fail_list {
-            Err(MembershipError::Repository(
-                "private-list-failure".to_owned(),
-            ))
+            Err(MembershipError::Repository("private-list-failure".into()))
         } else {
             Ok(self.members.clone())
         }

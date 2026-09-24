@@ -74,7 +74,13 @@ where
         })
         .await
         .map_err(|error| FileTransferPrivacyMaintenanceError::Backend(error.into()))?
-        .map_err(|error| FileTransferPrivacyMaintenanceError::Backend(error.into()))
+        .map_err(|error| {
+            FileTransferPrivacyMaintenanceError::Backend(
+                error
+                    .context("run file transfer privacy maintenance")
+                    .into(),
+            )
+        })
     }
 }
 

@@ -29,6 +29,10 @@ Application 对依赖、存储、网络、系统或密码能力失败进行稳�
 
 `context` 文本只写固定动作，不拼接错误正文、路径、标签值或内容。
 
+端口错误以 `Box<dyn Error + Send + Sync>` 保存来源时，`anyhow::Error` 必须先加固定动作 context 再转换
+（`error.context("固定动作").into()`）。不带 context 直接 `.into()` 得到的是 anyhow 的内部包装类型：显示文本与根错误相同，
+却无法 `downcast` 成根错误，分类器因此识别不出 SQLite、IO 等具体类型。std 错误可以直接 `.into()`。
+
 ### 允许丢弃来源的情形
 
 以下来源不含可用诊断信息，或不能作为 source 保存，可以使用 `map_err(|_| ..)`，但必须在同一行或前一行用中文注释写明理由：

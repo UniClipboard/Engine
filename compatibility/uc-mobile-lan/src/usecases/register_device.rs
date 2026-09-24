@@ -151,8 +151,8 @@ pub enum RegisterMobileShortcutDeviceError {
     PasswordHashFailed(String),
 
     /// 持久化失败(重复 device id / username 碰撞 / 底层存储错误)。
-    #[error("device persistence failed: {0}")]
-    PersistenceFailed(String),
+    #[error("device persistence failed")]
+    PersistenceFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// 二维码渲染失败(URL 过长 / qrcode 库内部错误)。install_url 是已知常量,
     /// 实际只有 PNG 编码失败时才会触发。
@@ -623,7 +623,7 @@ fn translate_device_error(err: MobileDeviceError) -> RegisterMobileShortcutDevic
                 "minter produced colliding device id; this should not happen"
             );
             RegisterMobileShortcutDeviceError::PersistenceFailed(
-                "device id collision (minter contract violated)".to_string(),
+                "device id collision (minter contract violated)".into(),
             )
         }
         MobileDeviceError::UsernameCollision => {

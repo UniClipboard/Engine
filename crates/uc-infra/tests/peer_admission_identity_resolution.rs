@@ -38,7 +38,7 @@ impl MemberRepositoryPort for OrderedMemberRepository {
 
     async fn list(&self) -> Result<Vec<SpaceMember>, MembershipError> {
         if self.fail_list {
-            Err(MembershipError::Repository("diagnostic failure".to_owned()))
+            Err(MembershipError::Repository("diagnostic failure".into()))
         } else {
             Ok(self.members.clone())
         }

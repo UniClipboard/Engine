@@ -69,7 +69,7 @@ mod tests {
     #[async_trait]
     impl MemberRepositoryPort for FailingMembers {
         async fn get(&self, _device_id: &DeviceId) -> Result<Option<SpaceMember>, MembershipError> {
-            Err(MembershipError::Repository("test failure".to_owned()))
+            Err(MembershipError::Repository("test failure".into()))
         }
 
         async fn list(&self) -> Result<Vec<SpaceMember>, MembershipError> {

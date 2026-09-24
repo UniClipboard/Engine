@@ -703,7 +703,7 @@ mod tests {
                     sync_preferences: preferences.clone(),
                 })),
                 MemberLookup::Missing => Ok(None),
-                MemberLookup::Failed => Err(MembershipError::Repository("test failure".to_owned())),
+                MemberLookup::Failed => Err(MembershipError::Repository("test failure".into())),
             }
         }
 
