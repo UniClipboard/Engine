@@ -95,3 +95,33 @@ slow-timeout = { period = "60s", terminate-after = 10 }
 filter = "package(uc-engine) & binary(space_membership_auto_pairing_e2e)"
 test-group = "membership-e2e"
 slow-timeout = { period = "60s", terminate-after = 10 }
+
+# 大历史分页与完整准入交换测试本身较慢（约 30–60 秒），不是卡死。
+[[profile.default.overrides]]
+filter = "package(uc-core) & binary(membership_history_v2) & test(/^history_exchange_splits_the_256_/)"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.default.overrides]]
+filter = "package(uc-infra) & test(actual_client_exchange_reports_reply_failures_and_preserves_trace_result)"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# 该测试先借用空闲 UDP 端口再以固定端口重启节点并核对端口已释放；并行时端口可能被其他测试的临时绑定占用，
+# 因此独占运行。
+[[profile.default.overrides]]
+filter = "package(uc-infra) & binary(node_lifecycle)"
+threads-required = "num-test-threads"
+
+# 大历史分页与完整准入交换测试本身较慢（约 30–60 秒），不是卡死。
+[[profile.ci.overrides]]
+filter = "package(uc-core) & binary(membership_history_v2) & test(/^history_exchange_splits_the_256_/)"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-infra) & test(actual_client_exchange_reports_reply_failures_and_preserves_trace_result)"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# 该测试先借用空闲 UDP 端口再以固定端口重启节点并核对端口已释放；并行时端口可能被其他测试的临时绑定占用，
+# 因此独占运行。
+[[profile.ci.overrides]]
+filter = "package(uc-infra) & binary(node_lifecycle)"
+threads-required = "num-test-threads"
