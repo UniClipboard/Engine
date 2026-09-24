@@ -687,10 +687,16 @@ fn map_roster_error(error: RosterError) -> EngineError {
 
 fn map_remove_space_member_error(error: RemoveSpaceMemberError) -> EngineError {
     match error {
-        RemoveSpaceMemberError::Locked | RemoveSpaceMemberError::Unavailable => EngineError::new(
+        RemoveSpaceMemberError::Locked => EngineError::new(
             QUERY_WORKSPACE_CONVERGENCE_UNAVAILABLE_CODE,
             EngineErrorCategory::Unavailable,
             false,
+        ),
+        // 成员状态或本机签名暂时不可用（例如加入后仍在切换 Space 会话）：稍后重试即可完成。
+        RemoveSpaceMemberError::Unavailable => EngineError::new(
+            QUERY_WORKSPACE_CONVERGENCE_UNAVAILABLE_CODE,
+            EngineErrorCategory::Unavailable,
+            true,
         ),
         RemoveSpaceMemberError::RecoveryRequired => EngineError::new(
             QUERY_WORKSPACE_CONVERGENCE_CORRUPT_CODE,
@@ -1026,6 +1032,21 @@ mod tests {
         assert!(!failed.is_retryable());
         assert_eq!(invalid_input.category(), EngineErrorCategory::InvalidInput);
         assert_eq!(target_not_found.category(), EngineErrorCategory::NotFound);
+    }
+
+    #[test]
+    fn temporarily_unavailable_removal_is_retryable_but_a_locked_space_is_not() {
+        let unavailable = map_remove_space_member_error(RemoveSpaceMemberError::Unavailable);
+        let locked = map_remove_space_member_error(RemoveSpaceMemberError::Locked);
+
+        assert_eq!(
+            unavailable.code(),
+            QUERY_WORKSPACE_CONVERGENCE_UNAVAILABLE_CODE
+        );
+        assert_eq!(unavailable.category(), EngineErrorCategory::Unavailable);
+        assert!(unavailable.is_retryable());
+        assert_eq!(locked.code(), QUERY_WORKSPACE_CONVERGENCE_UNAVAILABLE_CODE);
+        assert!(!locked.is_retryable());
     }
 
     #[test]

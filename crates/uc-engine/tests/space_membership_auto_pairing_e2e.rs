@@ -2058,6 +2058,7 @@ async fn f1_remove_and_add_from_parent_head_preserve_branch_membership() {
         "A",
         &c_device_id,
         uc_engine::DeviceGroupRelationshipSummary::ConfirmationPending,
+        Some(uc_engine::DeviceSyncRelationshipSummary::PausedUnverifiable),
     )
     .await;
     let undecided_text = "F1 undecided member must not receive";
@@ -2083,6 +2084,7 @@ async fn f1_remove_and_add_from_parent_head_preserve_branch_membership() {
         "A",
         &c_device_id,
         uc_engine::DeviceGroupRelationshipSummary::Consistent,
+        None,
     )
     .await;
 
@@ -2165,12 +2167,13 @@ async fn f1_remove_and_add_from_parent_head_preserve_branch_membership() {
     topology.shutdown().await;
 }
 
-/// 等待 `node` 看到对端 `peer_device_id` 处于指定设备组关系。
+/// 等待 `node` 看到对端 `peer_device_id` 处于指定设备组关系；给出 `sync` 时同步关系也须一致。
 async fn wait_for_group_relationship(
     topology: &MembershipTopology,
     node: &str,
     peer_device_id: &str,
     relationship: uc_engine::DeviceGroupRelationshipSummary,
+    sync: Option<uc_engine::DeviceSyncRelationshipSummary>,
 ) {
     let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
     loop {
@@ -2181,13 +2184,15 @@ async fn wait_for_group_relationship(
             .devices
             .into_iter()
             .find(|device| device.device_id == peer_device_id)
-            .map(|device| device.group_relationship);
-        if observed == Some(relationship) {
+            .map(|device| (device.group_relationship, device.sync_relationship));
+        if observed.is_some_and(|(group, observed_sync)| {
+            group == relationship && sync.is_none_or(|expected| expected == observed_sync)
+        }) {
             return;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "node {node} did not reach {relationship:?} for the peer; observed {observed:?}"
+            "node {node} did not reach {relationship:?}/{sync:?} for the peer; observed {observed:?}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -2386,6 +2391,13 @@ impl MembershipTopology {
             }
             if matches!(&result, Err(error) if error.code() == 1394)
                 && self.diagnostics(sponsor).await.effective_member_count == initial_members
+                && tokio::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+            // 成员状态暂时不可用（例如加入后仍在切换会话）时，按可重试错误稍后再试。
+            if matches!(&result, Err(error) if error.code() == 1392 && error.is_retryable())
                 && tokio::time::Instant::now() < deadline
             {
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -5129,6 +5141,41 @@ async fn wait_for_maintenance_health(
     }
 }
 
+async fn query_membership_diagnostics(engine: &Engine) -> uc_engine::MembershipDiagnosticsSummary {
+    let OperationResult::MembershipDiagnostics(summary) = engine
+        .execute(Operation::QueryMembershipDiagnostics)
+        .await
+        .expect("query membership diagnostics")
+    else {
+        panic!("unexpected membership diagnostics result");
+    };
+    summary
+}
+
+/// `engine` 显示设备更新已完成时，本机不能再有待确认、未完成效果或冲突，且与 `peer` 处于同一组密钥代数。
+async fn assert_completed_only_when_settled(engine: &Engine, peer: &Engine) {
+    if query_space_device_update(engine).await.phase
+        != uc_engine::SpaceDeviceUpdatePhaseSummary::Completed
+    {
+        return;
+    }
+    let local = query_membership_diagnostics(engine).await;
+    let remote = query_membership_diagnostics(peer).await;
+    assert_eq!(
+        (
+            local.pending_confirmation_count,
+            local.pending_effect_count,
+            local.pending_conflict_count
+        ),
+        (0, 0, 0),
+        "device update reported completion with outstanding membership work"
+    );
+    assert_eq!(
+        local.group_epoch, remote.group_epoch,
+        "device update reported completion before security material converged"
+    );
+}
+
 async fn query_space_device_update(engine: &Engine) -> uc_engine::SpaceDeviceUpdateStatusSummary {
     let OperationResult::DeviceGroupChoices(summary) = engine
         .execute(Operation::QueryDeviceGroupChoices)
@@ -6146,16 +6193,10 @@ async fn pending_final_confirmation_survives_joiner_restart() {
         .await
         .expect("send to restarted confirmed Joiner");
     wait_for_received_text(&restarted_joiner, text).await;
-    // 内容已可传输不代表设备状态已全部更新完成。该重启场景仍有已知的
-    // 安全资料恢复欠账，公开整体状态必须保留未完成，而不能由传输成功推断完成。
-    assert_ne!(
-        query_space_device_update(&sponsor).await.phase,
-        uc_engine::SpaceDeviceUpdatePhaseSummary::Completed
-    );
-    assert_ne!(
-        query_space_device_update(&restarted_joiner).await.phase,
-        uc_engine::SpaceDeviceUpdatePhaseSummary::Completed
-    );
+    // 内容已可传输不代表设备状态已全部更新完成：整体状态只有在成员与安全资料都已确认时才能显示完成，
+    // 不能由传输成功推断。
+    assert_completed_only_when_settled(&sponsor, &restarted_joiner).await;
+    assert_completed_only_when_settled(&restarted_joiner, &sponsor).await;
 
     sponsor
         .shutdown(SHUTDOWN_TIMEOUT)

@@ -107,10 +107,16 @@ impl QueryMembershipDiagnosticsUseCase {
             pending_confirmation_count: space
                 .ledger()
                 .peers()
+                // 仍在等待确认的对端：一致但尚未确认本机当前位置，或一方仍在决定一项移除。
                 .filter(|(_, link)| {
                     matches!(link, PeerLink::Member(member)
-                        if member.relation() == PeerRelation::Consistent
-                            && member.confirmed_position() != Some(&position))
+                    if (member.relation() == PeerRelation::Consistent
+                        && member.confirmed_position() != Some(&position))
+                        || matches!(
+                            member.relation(),
+                            PeerRelation::AwaitingLocalDecision
+                                | PeerRelation::AwaitingPeerDecision
+                        ))
                 })
                 .count(),
             pending_effect_count: space.ledger().unfinished_effects().count(),

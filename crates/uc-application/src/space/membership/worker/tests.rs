@@ -254,3 +254,21 @@ async fn recovering_effects_reports_deferred_while_an_effect_remains() {
     assert!(case.worker.delivery.deliveries().is_empty());
     assert!(removal_notice_outstanding(&case));
 }
+
+#[tokio::test]
+async fn concurrent_effect_recovery_runs_each_phase_once() {
+    let case = removed_peer().await;
+
+    let (first, second) = tokio::join!(
+        case.worker.worker.recover_membership_effects(),
+        case.worker.worker.recover_membership_effects()
+    );
+
+    assert_eq!(first, MembershipMaintenanceStepOutcome::Completed);
+    assert_eq!(second, MembershipMaintenanceStepOutcome::Completed);
+    assert_eq!(
+        case.worker.effects.steps(),
+        vec!["member_facts", "security", "activation"]
+    );
+    assert_eq!(case.owner.records.ledger().unfinished_effects().count(), 0);
+}

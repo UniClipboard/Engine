@@ -64,6 +64,8 @@ pub(crate) struct MembershipWorker {
     conflicts: Arc<dyn RecoverMembershipConflictsPort>,
     group_updates: Arc<dyn DeliverPendingGroupUpdatesPort>,
     ledger_work: tokio::sync::Mutex<()>,
+    /// 效果的每一步只能执行一次：维护运行与用户动作可能同时推进效果，执行前在此串行化并复核阶段。
+    effect_step: tokio::sync::Mutex<()>,
 }
 
 /// 同一次运行中已尝试过的待办。
@@ -96,19 +98,23 @@ impl MembershipWorker {
             group_updates: deps.group_updates,
             owner,
             ledger_work: tokio::sync::Mutex::new(()),
+            effect_step: tokio::sync::Mutex::new(()),
         }
     }
 
-    async fn run_ledger_work(&self, scope: WorkScope) -> MembershipMaintenanceStepOutcome {
-        // 效果各步按事件幂等，账本对重复完成报告返回过期结果，因此用户动作推进效果时不等待网络待办。
+    async fn run_ledger_work(
+        &self,
+        scope: WorkScope,
+        attempted: &mut BTreeSet<AttemptedWork>,
+    ) -> MembershipMaintenanceStepOutcome {
+        // 用户动作推进效果时不等待网络待办；效果步骤另由 `effect_step` 串行化，保证每步只执行一次。
         let _guard = match scope {
             WorkScope::All => Some(self.ledger_work.lock().await),
             WorkScope::EffectsOnly => None,
         };
         let mut tally = Tally::default();
-        let mut attempted = BTreeSet::new();
         for _ in 0..MAX_PASSES_PER_RUN {
-            let due = match self.due_work(scope, &attempted).await {
+            let due = match self.due_work(scope, attempted).await {
                 Ok(Some(due)) => due,
                 Ok(None) => break,
                 Err(error) => {
@@ -116,7 +122,7 @@ impl MembershipWorker {
                     break;
                 }
             };
-            if let Err(error) = self.execute(due, &mut attempted, &mut tally).await {
+            if let Err(error) = self.execute(due, attempted, &mut tally).await {
                 tally.record_ledger_error(error);
                 break;
             }
@@ -176,6 +182,17 @@ impl MembershipWorker {
             _ => None,
         }) {
             attempted.insert(AttemptedWork::Effect(effect.event_id(), effect.phase()));
+            let _step = self.effect_step.lock().await;
+            // 等待期间另一路执行可能已推进同一效果；只执行仍停在该阶段的效果。
+            let still_due = self.owner.load().await?.space().is_some_and(|space| {
+                space.ledger().unfinished_effects().any(|current| {
+                    current.event_id() == effect.event_id() && current.phase() == effect.phase()
+                })
+            });
+            if !still_due {
+                tracing::debug!("成员效果阶段已由并发执行推进，本次跳过");
+                return Ok(());
+            }
             match self.effects.run(&effect).await {
                 Ok(()) => {
                     self.owner
@@ -302,21 +319,25 @@ impl RunMembershipWorkPort for MembershipWorker {
         trigger: &MembershipMaintenanceTrigger,
     ) -> MembershipMaintenanceReport {
         let mut report = MembershipMaintenanceReport::default();
+        // 同一次运行中每项待办最多尝试一次，两遍共享已尝试集合。
+        let mut attempted = BTreeSet::new();
         let recovery_trigger = match trigger {
             MembershipMaintenanceTrigger::Startup => MembershipRecoveryTrigger::Startup,
             MembershipMaintenanceTrigger::Resume => MembershipRecoveryTrigger::Resume,
             MembershipMaintenanceTrigger::Periodic => MembershipRecoveryTrigger::Retry,
             MembershipMaintenanceTrigger::StateChanged => MembershipRecoveryTrigger::StateChanged,
         };
-        let ledger = scope_membership_recovery_trigger(
+        // 顺序：先落实本机效果，再恢复分叉与投递组密钥更新，最后执行网络待办与历史同步，使对端在看到
+        // 新历史之前已能收到对应的组密钥更新。
+        let effects = scope_membership_recovery_trigger(
             recovery_trigger,
             observed(
                 LocalWorkStep::MaintenanceEffects,
-                self.run_ledger_work(WorkScope::All),
+                self.run_ledger_work(WorkScope::EffectsOnly, &mut attempted),
             ),
         )
         .await;
-        record_outcome(&mut report, ledger);
+        record_outcome(&mut report, effects);
         record_outcome(
             &mut report,
             observed(
@@ -333,6 +354,15 @@ impl RunMembershipWorkPort for MembershipWorker {
             )
             .await,
         );
+        let network = scope_membership_recovery_trigger(
+            recovery_trigger,
+            observed(
+                LocalWorkStep::MaintenanceSynchronization,
+                self.run_ledger_work(WorkScope::All, &mut attempted),
+            ),
+        )
+        .await;
+        record_outcome(&mut report, network);
         report
     }
 }
@@ -341,7 +371,9 @@ impl RunMembershipWorkPort for MembershipWorker {
 impl RecoverMembershipEffectsPort for MembershipWorker {
     /// 立即推进全部已到期的成员效果；仍有未完成效果时报告延后，由后续运行继续。
     async fn recover_membership_effects(&self) -> MembershipMaintenanceStepOutcome {
-        let outcome = self.run_ledger_work(WorkScope::EffectsOnly).await;
+        let outcome = self
+            .run_ledger_work(WorkScope::EffectsOnly, &mut BTreeSet::new())
+            .await;
         if outcome != MembershipMaintenanceStepOutcome::Completed {
             return outcome;
         }

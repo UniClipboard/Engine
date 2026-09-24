@@ -1060,7 +1060,7 @@ function checkSpaceAdmissionProtocolOwnership() {
     'joiner: JoinerAdmissionService',
     'sponsor: SponsorAdmissionService',
     'recovery: AdmissionRecoveryService',
-    'execution_lock: Arc<Mutex<()>>',
+    'execution_lock: Arc<RwLock<()>>',
   ]) {
     if (!protocol.includes(field)) {
       addProblem(
@@ -1074,7 +1074,9 @@ function checkSpaceAdmissionProtocolOwnership() {
   for (const ownershipMarker of [
     'impl AcquireSpaceWorkPermitPort for SpaceAdmissionProtocol',
     'acquire_space_work_permit',
-    'lock_owned()',
+    // 普通成员工作共享许可，准入动作独占执行。
+    'read_owned()',
+    'self.execution_lock.write()',
   ]) {
     if (!protocol.includes(ownershipMarker)) {
       addProblem(
