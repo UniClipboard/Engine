@@ -85,6 +85,7 @@ pub(super) async fn wait_eligible(engine: &Engine, peer_id: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn paired_devices_cold_start_without_refresh() {
+    let _scenario = TestScenario::start();
     let rendezvous = mount_rendezvous().await;
     let a_host = DeviceHarness::new(rendezvous.uri());
     let b_host = DeviceHarness::new(rendezvous.uri());
@@ -257,6 +258,7 @@ impl Pair {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn existing_connections_survive_rejected_new_dials() {
+    let _scenario = TestScenario::start();
     for single_connection in [false, true] {
         let pair = Pair::new().await;
         pair.transfer("baseline before rejecting new dials").await;
@@ -348,6 +350,7 @@ async fn existing_connections_survive_rejected_new_dials() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn failed_content_dial_preserves_peer_connection() {
+    let _scenario = TestScenario::start();
     let pair = Pair::new().await;
     pair.transfer("baseline before rejecting content").await;
     pair.drain_events(false).await;
@@ -385,6 +388,7 @@ async fn failed_content_dial_preserves_peer_connection() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn either_peer_can_start_later_without_refresh() {
+    let _scenario = TestScenario::start();
     for early in 0..2 {
         let mut pair = Pair::new().await;
         pair.shutdown().await;
@@ -400,6 +404,7 @@ async fn either_peer_can_start_later_without_refresh() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn either_peer_restart_and_suspend_resume_reconnect_automatically() {
+    let _scenario = TestScenario::start();
     let mut pair = Pair::new().await;
     for index in 0..2 {
         pair.engines[index]
@@ -425,6 +430,7 @@ async fn either_peer_restart_and_suspend_resume_reconnect_automatically() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn network_partition_recovers_without_refresh_or_send() {
+    let _scenario = TestScenario::start();
     let pair = Pair::new().await;
     pair.partition(true).await;
     tokio::time::sleep(Duration::from_secs(6)).await;
@@ -446,6 +452,7 @@ async fn network_partition_recovers_without_refresh_or_send() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn long_partition_recovers_without_refresh_or_host_notification() {
+    let _scenario = TestScenario::start();
     let pair = Pair::new().await;
     pair.partition(true).await;
     // 等待跨过全部短退避级别；两端保持运行，不用进程启动或宿主通知帮助恢复。
@@ -472,6 +479,7 @@ async fn long_partition_recovers_without_refresh_or_host_notification() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn concurrent_manual_refreshes_share_automatic_recovery_without_disrupting_delivery() {
+    let _scenario = TestScenario::start();
     let pair = Pair::new().await;
     pair.partition(true).await;
     tokio::time::sleep(Duration::from_secs(6)).await;
@@ -497,6 +505,7 @@ async fn concurrent_manual_refreshes_share_automatic_recovery_without_disrupting
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn host_opportunities_are_nonblocking_and_recover_connections() {
+    let _scenario = TestScenario::start();
     let pair = Pair::new().await;
     for reason in [
         uc_engine::ConnectivityOpportunity::Foreground,
@@ -526,6 +535,7 @@ async fn host_opportunities_are_nonblocking_and_recover_connections() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn offline_member_does_not_block_another_members_restart() {
+    let _scenario = TestScenario::start();
     let pair = Pair::new().await;
     pair.engines[1].shutdown(SHUTDOWN_TIMEOUT).await.unwrap();
     let c_host = DeviceHarness::new(pair._rendezvous.uri());
@@ -576,6 +586,7 @@ async fn offline_member_does_not_block_another_members_restart() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn removed_member_is_not_reconnected_by_host_opportunities() {
+    let _scenario = TestScenario::start();
     let pair = Pair::new().await;
     pair.engines[0]
         .execute(Operation::RemoveMember(RemoveMemberInput {

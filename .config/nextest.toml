@@ -32,6 +32,10 @@ max-threads = 1
 [test-groups.membership-e2e]
 max-threads = 4
 
+# 拓扑类场景每项 4–10 个 Engine，单独限制并发，避免与其他重场景叠加放大时序误差。
+[test-groups.membership-topology]
+max-threads = 2
+
 [[profile.default.overrides]]
 filter = "package(uc-testkit)"
 test-group = "fast"
@@ -71,10 +75,20 @@ slow-timeout = { period = "5s", terminate-after = 1 }
 filter = "package(uc-infra) & binary(profile_storage_upgrade_crash)"
 test-group = "process"
 slow-timeout = { period = "20s", terminate-after = 1 }
+
+[[profile.default.overrides]]
+filter = "package(uc-engine) & binary(space_membership_auto_pairing_e2e) & test(/^topology::/)"
+test-group = "membership-topology"
+slow-timeout = { period = "60s", terminate-after = 10 }
 
 [[profile.default.overrides]]
 filter = "package(uc-engine) & binary(space_membership_auto_pairing_e2e)"
 test-group = "membership-e2e"
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-engine) & binary(space_membership_auto_pairing_e2e) & test(/^topology::/)"
+test-group = "membership-topology"
 slow-timeout = { period = "60s", terminate-after = 10 }
 
 [[profile.ci.overrides]]

@@ -21,6 +21,7 @@ const LATE_DECISION_DELAY: Duration = Duration::from_secs(3);
 // R1：A 移除 B，移除通知送达后 A 的设备列表不再包含 B，且设备更新完成。
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn r1_sponsor_drops_removed_device_after_notice_is_delivered() {
+    let _scenario = TestScenario::start();
     uc_engine::init_test_tracing();
     let rendezvous = mount_rendezvous().await;
     let mut topology = paired_pair(rendezvous.uri()).await;
@@ -37,6 +38,7 @@ async fn r1_sponsor_drops_removed_device_after_notice_is_delivered() {
 // B 进入本机已移除终态且设备更新完成；A 不残留 B。
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn r2_late_local_removal_acceptance_reaches_removed_terminal_state() {
+    let _scenario = TestScenario::start();
     uc_engine::init_test_tracing();
     let rendezvous = mount_rendezvous().await;
     let mut topology = paired_pair(rendezvous.uri()).await;
@@ -56,6 +58,7 @@ async fn r2_late_local_removal_acceptance_reaches_removed_terminal_state() {
 // R3：B 拒绝移除。B 保留本机分支并把 A 标为分叉，稳定停在需要处理而不是更新中；A 不残留 B。
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn r3_rejected_removal_settles_both_sides() {
+    let _scenario = TestScenario::start();
     uc_engine::init_test_tracing();
     let rendezvous = mount_rendezvous().await;
     let mut topology = paired_pair(rendezvous.uri()).await;
@@ -93,6 +96,7 @@ async fn r3_rejected_removal_settles_both_sides() {
 // R4：B 接受移除后由 A 重新邀请，以新资格恢复双向可用与内容收发。
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn r4_removed_device_rejoins_and_becomes_usable_again() {
+    let _scenario = TestScenario::start();
     uc_engine::init_test_tracing();
     let rendezvous = mount_rendezvous().await;
     let mut topology = paired_pair(rendezvous.uri()).await;

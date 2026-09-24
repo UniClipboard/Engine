@@ -7102,6 +7102,7 @@ dependencies = [
  "uc-mobile-proto",
  "uc-observability-contract",
  "uc-observability-runtime",
+ "uc-testkit",
  "url",
  "uuid",
  "wiremock",

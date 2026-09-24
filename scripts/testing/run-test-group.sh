@@ -103,11 +103,17 @@ case "${GROUP}" in
     ;;
   membership-e2e)
     # 成员多设备场景：每项启动多个完整 Engine，经本机回环 QUIC 通信；测试文件只在 dev-tools 下编译。
+    artifact_root="$(artifact_root)"
+    export UC_TEST_ARTIFACTS_DIR="${artifact_root}"
+    status=0
     run_nextest \
       -p uc-engine \
       --features dev-tools \
       --test space_membership_auto_pairing_e2e \
-      "$@"
+      "$@" || status=$?
+    printf 'scenario artifacts: %s/membership-e2e\n' "${artifact_root}"
+    printf 'nextest JUnit: target/nextest/ci/junit.xml\n'
+    exit "${status}"
     ;;
   real-network)
     exec bash scripts/testing/run-connection-recovery-e2e.sh "$@"

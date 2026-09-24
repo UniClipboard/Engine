@@ -78,18 +78,21 @@ async fn join_using_short_code(base_url: String, switching: bool, expected_code:
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn leading_zero_code_joins_fresh_device() {
+    let _scenario = TestScenario::start();
     let server = directory().await;
     join_using_short_code(server.uri(), false, Some("000-001")).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn leading_zero_code_switches_existing_space() {
+    let _scenario = TestScenario::start();
     let server = directory().await;
     join_using_short_code(server.uri(), true, Some("000-001")).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn unavailable_directory_joins_using_local_six_digit_code() {
+    let _scenario = TestScenario::start();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(503))
@@ -101,6 +104,7 @@ async fn unavailable_directory_joins_using_local_six_digit_code() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 #[ignore = "需要启动本地 rendezvous，并设置 UC_SIX_DIGIT_RENDEZVOUS_URL"]
 async fn local_rendezvous_joins_and_switches_using_six_digit_codes() {
+    let _scenario = TestScenario::start();
     let base_url = std::env::var("UC_SIX_DIGIT_RENDEZVOUS_URL").expect("local rendezvous URL");
     assert!(base_url.starts_with("http://127.0.0.1:"));
     join_using_short_code(base_url.clone(), false, None).await;
