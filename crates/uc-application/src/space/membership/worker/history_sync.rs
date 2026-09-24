@@ -176,7 +176,9 @@ impl HistorySynchronizer {
             match result? {
                 PeerExchange::Finished(result) => {
                     match result {
-                        PeerSyncResult::Confirmed => report.completed_peer_count += 1,
+                        PeerSyncResult::Confirmed | PeerSyncResult::AwaitingPeerDecision => {
+                            report.completed_peer_count += 1
+                        }
                         PeerSyncResult::Deferred => report.deferred_peer_count += 1,
                         PeerSyncResult::Diverged
                         | PeerSyncResult::Invalid
@@ -279,6 +281,14 @@ impl HistorySynchronizer {
                 ) =>
             {
                 Ok(PeerExchange::Finished(PeerSyncResult::Confirmed))
+            }
+            MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Confirmed {
+                transfer_id,
+                confirmed_position,
+            }) if transfer_id == summary_transfer_id
+                && confirms_an_ancestor(context, &confirmed_position) =>
+            {
+                Ok(PeerExchange::Finished(PeerSyncResult::AwaitingPeerDecision))
             }
             MembershipHistoryMessage::RequestSuffixV3(MembershipHistorySuffixRequestV3 {
                 transfer_id: requested_transfer,
@@ -399,6 +409,15 @@ impl HistorySynchronizer {
                 {
                     return Ok(PeerExchange::Finished(PeerSyncResult::Confirmed));
                 }
+                MembershipHistoryAckV3::Confirmed {
+                    transfer_id: acknowledged_transfer,
+                    confirmed_position,
+                } if next_page_index as usize + 1 == pages.len()
+                    && acknowledged_transfer == transfer_id
+                    && confirms_an_ancestor(context, &confirmed_position) =>
+                {
+                    return Ok(PeerExchange::Finished(PeerSyncResult::AwaitingPeerDecision));
+                }
                 MembershipHistoryAckV3::Diverged => {
                     describe_membership_conflict();
                     return Ok(PeerExchange::Finished(PeerSyncResult::Diverged));
@@ -416,6 +435,12 @@ impl HistorySynchronizer {
         }
         Err(ExchangeFailure::Unexpected)
     }
+}
+
+/// 对端确认的是本机当前位置的严格祖先：对端停在本机发起、尚待其决定的一项移除之前。是否确实如此由
+/// 成员账本核实。
+fn confirms_an_ancestor(context: &SyncContext, confirmed: &BaseMembershipHistoryPosition) -> bool {
+    context.history.contains_strict_ancestor_position(confirmed)
 }
 
 enum ExchangeFailure {

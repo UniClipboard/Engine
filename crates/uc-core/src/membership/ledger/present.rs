@@ -334,6 +334,7 @@ fn relation_view(relation: PeerRelation) -> PeerRelationView {
         PeerRelation::Consistent => PeerRelationView::Consistent,
         PeerRelation::UpgradeRequired => PeerRelationView::UpgradeRequired,
         PeerRelation::AwaitingLocalDecision => PeerRelationView::PendingLocalDecision,
+        PeerRelation::AwaitingPeerDecision => PeerRelationView::ConfirmationPending,
         PeerRelation::Diverged => PeerRelationView::Diverged,
         PeerRelation::Invalid => PeerRelationView::Invalid,
     }
@@ -345,6 +346,8 @@ fn relation_pause(relation: PeerRelation) -> Option<PeerPauseReason> {
         PeerRelation::Unconfirmed => Some(PeerPauseReason::RelationshipUnconfirmed),
         PeerRelation::UpgradeRequired => Some(PeerPauseReason::UpgradeRequired),
         PeerRelation::AwaitingLocalDecision => Some(PeerPauseReason::PendingLocalDecision),
+        // 对端尚未决定本机发起的移除，不越过该移除向其分享普通内容（ADR-020）。
+        PeerRelation::AwaitingPeerDecision => Some(PeerPauseReason::RelationshipUnconfirmed),
         PeerRelation::Diverged => Some(PeerPauseReason::Diverged),
         PeerRelation::Invalid => Some(PeerPauseReason::Invalid),
     }

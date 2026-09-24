@@ -652,6 +652,146 @@ fn third_member_delivers_its_acceptance_to_the_proposer() {
     assert_eq!(view_of(&settled).device_update, LedgerUpdateView::Completed);
 }
 
+// ADR-020：本机仍有待决定的移除时，对端的同步确认不能越过它恢复一致。
+#[test]
+fn a_sync_confirmation_keeps_the_pending_local_decision() {
+    let group = Group::new(&["device-a", "device-b", "device-c"]);
+    let local = run_due_work(group.start("device-c"), NOW);
+    let (remote, _) = group.removal(&group.history, "device-a", "device-b", 0x35);
+    let received = group.received(local.history(), &remote, "device-c");
+    let awaiting = apply(
+        local,
+        LedgerInput::PeerEvidenceReconciled {
+            source: device("device-a"),
+            history: Some(received),
+            evidence: PeerEvidence::Confirmed,
+        },
+        NOW,
+    )
+    .0;
+    let position = awaiting.history().current_position().unwrap();
+
+    let (confirmed, _, _) = apply(
+        awaiting,
+        LedgerInput::HistorySyncFinished {
+            peer: device("device-a"),
+            synced_position: position,
+            result: PeerSyncResult::Confirmed,
+        },
+        NOW,
+    );
+
+    assert!(matches!(
+        confirmed.peer(&device("device-a")),
+        Some(PeerLink::Member(link)) if link.relation() == PeerRelation::AwaitingLocalDecision
+    ));
+    assert_eq!(
+        device_view(&view_of(&confirmed), "device-a").unwrap().sync,
+        PeerSyncView::Paused(PeerPauseReason::PendingLocalDecision)
+    );
+}
+
+// 发起方看到第三台设备停在本机移除之前时，明确显示为等待对方确认并暂停普通内容，不重复同步；
+// 对方送来接受决定后恢复一致。
+#[test]
+fn a_third_member_that_has_not_decided_is_shown_as_awaiting_confirmation() {
+    let group = Group::new(&["device-a", "device-b", "device-c"]);
+    let membership = run_due_work(group.start("device-a"), NOW);
+    let (history, removal) = group.removal(membership.history(), "device-a", "device-b", 0x36);
+    let removed = run_effects_only(
+        apply(
+            membership,
+            LedgerInput::LocalRemovalSigned {
+                history,
+                retained_device_ids: Vec::new(),
+            },
+            NOW,
+        )
+        .0,
+    );
+    let position = removed.history().current_position().unwrap();
+
+    let (awaiting, outcome, _) = apply(
+        removed,
+        LedgerInput::HistorySyncFinished {
+            peer: device("device-c"),
+            synced_position: position,
+            result: PeerSyncResult::AwaitingPeerDecision,
+        },
+        NOW,
+    );
+
+    assert_eq!(outcome, LedgerOutcome::Applied);
+    let view = view_of(&awaiting);
+    let peer = device_view(&view, "device-c").unwrap();
+    assert_eq!(peer.relation, PeerRelationView::ConfirmationPending);
+    assert_eq!(
+        peer.sync,
+        PeerSyncView::Paused(PeerPauseReason::RelationshipUnconfirmed)
+    );
+    assert!(!awaiting
+        .outstanding_work(NOW)
+        .unwrap()
+        .iter()
+        .any(|work| matches!(
+            &work.work,
+            LedgerWork::SynchronizeHistory { peer } if peer == &device("device-c")
+        )));
+
+    let decided = group.decided(
+        &group.received(&group.history, awaiting.history(), "device-c"),
+        removal.event_id(),
+        "device-c",
+        RemovalDecision::Accept,
+    );
+    let mut merged = awaiting.history().clone();
+    merged
+        .merge_remote_history(
+            &decided,
+            group.member("device-a").facts.member_instance,
+            &TestVerifier,
+        )
+        .unwrap();
+    let (consistent, _, _) = apply(
+        awaiting,
+        LedgerInput::PeerEvidenceReconciled {
+            source: device("device-c"),
+            history: Some(merged),
+            evidence: PeerEvidence::Consistent,
+        },
+        NOW,
+    );
+    assert!(matches!(
+        consistent.peer(&device("device-c")),
+        Some(PeerLink::Member(link)) if link.relation() == PeerRelation::Consistent
+    ));
+}
+
+// 本机历史中没有待该对端决定的本机移除时，不采信"对端停在祖先位置"，按暂时失败重试。
+#[test]
+fn an_ancestor_confirmation_without_an_undecided_local_removal_is_retried() {
+    let group = Group::new(&["device-a", "device-b"]);
+    let membership = group.start("device-a");
+    let position = membership.history().current_position().unwrap();
+
+    let (deferred, _, _) = apply(
+        membership,
+        LedgerInput::HistorySyncFinished {
+            peer: device("device-b"),
+            synced_position: position,
+            result: PeerSyncResult::AwaitingPeerDecision,
+        },
+        NOW,
+    );
+
+    assert!(matches!(
+        deferred.peer(&device("device-b")),
+        Some(PeerLink::Member(link))
+            if link.relation() == PeerRelation::Consistent
+                && link.sync().last_outcome() == super::PeerSyncOutcome::Deferred
+    ));
+}
+
 #[test]
 fn deferred_history_sync_reports_the_next_retry_and_recovers() {
     let group = Group::new(&["device-a", "device-b"]);
@@ -691,6 +831,51 @@ fn deferred_history_sync_reports_the_next_retry_and_recovers() {
         LedgerUpdateView::Completed
     );
     assert!(confirmed.outstanding_work(NOW).unwrap().is_empty());
+}
+
+#[test]
+fn a_new_attempt_replaces_a_stable_rejection_until_its_result_arrives() {
+    let group = Group::new(&["device-a", "device-b"]);
+    let membership = group.start("device-a");
+    let position = membership.history().current_position().unwrap();
+    let (rejected, _, _) = apply(
+        membership,
+        LedgerInput::HistorySyncFinished {
+            peer: device("device-b"),
+            synced_position: position.clone(),
+            result: PeerSyncResult::Rejected,
+        },
+        NOW,
+    );
+    assert_eq!(
+        view_of(&rejected).device_update,
+        LedgerUpdateView::NeedsAttention(LedgerUpdateProblem::DeviceStateRejected)
+    );
+
+    let (retrying, outcome, _) = apply(
+        rejected,
+        LedgerInput::HistorySyncSelected {
+            peers: vec![device("device-b")],
+        },
+        NOW,
+    );
+
+    // 重新尝试期间不再显示上一轮的拒绝，本轮结论到达前为更新中。
+    assert_eq!(outcome, LedgerOutcome::Applied);
+    assert_eq!(view_of(&retrying).device_update, LedgerUpdateView::Updating);
+    let (confirmed, _, _) = apply(
+        retrying,
+        LedgerInput::HistorySyncFinished {
+            peer: device("device-b"),
+            synced_position: position,
+            result: PeerSyncResult::Confirmed,
+        },
+        NOW,
+    );
+    assert_eq!(
+        view_of(&confirmed).device_update,
+        LedgerUpdateView::Completed
+    );
 }
 
 #[test]

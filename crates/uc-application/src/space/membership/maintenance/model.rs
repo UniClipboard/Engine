@@ -39,11 +39,14 @@ pub enum QuerySpaceWorkModeError {
 
 pub struct SpaceWorkPermit {
     mode: SpaceWorkMode,
-    _guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    _guard: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
 }
 
 impl SpaceWorkPermit {
-    pub(crate) fn guarded(mode: SpaceWorkMode, guard: tokio::sync::OwnedMutexGuard<()>) -> Self {
+    pub(crate) fn guarded(
+        mode: SpaceWorkMode,
+        guard: tokio::sync::OwnedRwLockReadGuard<()>,
+    ) -> Self {
         Self {
             mode,
             _guard: Some(guard),

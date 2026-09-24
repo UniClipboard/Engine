@@ -451,6 +451,11 @@ impl MembershipLedger {
                     link.sync_mut().mark_pending(pending_revision);
                     changed = true;
                 }
+                // 新一轮尝试已开始，上一轮的稳定拒绝不再代表当前状态。
+                if link.sync().last_outcome() == PeerSyncOutcome::StableRejected {
+                    link.sync_mut().begin_retry();
+                    changed = true;
+                }
             }
         }
         if let Some(last) = peers.last() {
@@ -474,19 +479,40 @@ impl MembershipLedger {
         now_ms: i64,
     ) -> Result<LedgerOutcome, LedgerTransitionError> {
         let current = self.history.current_position()?;
+        // 本机仍有待决定的移除时，对端的确认不能越过它恢复一致（ADR-020）。
+        let consistent = if self
+            .history
+            .pending_removal_decision(self.local_member)
+            .is_some()
+        {
+            PeerRelation::AwaitingLocalDecision
+        } else {
+            PeerRelation::Consistent
+        };
+        let awaiting_peer = self.local_removal_awaits_decision_of(peer)?;
         let Some(PeerLink::Member(link)) = self.peers.get_mut(peer) else {
             return Ok(LedgerOutcome::Stale);
         };
         match result {
-            PeerSyncResult::Confirmed | PeerSyncResult::Diverged | PeerSyncResult::Invalid
+            PeerSyncResult::Confirmed
+            | PeerSyncResult::Diverged
+            | PeerSyncResult::Invalid
+            | PeerSyncResult::AwaitingPeerDecision
                 if *synced_position != current =>
             {
                 return Ok(LedgerOutcome::Stale);
             }
             PeerSyncResult::Confirmed => {
-                link.record_relation(PeerRelation::Consistent, Some(current));
+                link.record_relation(consistent, Some(current));
                 link.sync_mut().settle(PeerSyncOutcome::Acked);
             }
+            // 只有本机历史中确实有一项该对端尚未决定的本机移除时才采信；否则按暂时失败重试。
+            PeerSyncResult::AwaitingPeerDecision if awaiting_peer => {
+                let confirmed = link.confirmed_position().cloned();
+                link.record_relation(PeerRelation::AwaitingPeerDecision, confirmed);
+                link.sync_mut().settle(PeerSyncOutcome::Acked);
+            }
+            PeerSyncResult::AwaitingPeerDecision => link.sync_mut().defer(now_ms)?,
             PeerSyncResult::Diverged => {
                 link.record_relation(PeerRelation::Diverged, None);
                 link.sync_mut().settle(PeerSyncOutcome::StableRejected);
@@ -501,6 +527,30 @@ impl MembershipLedger {
             }
         }
         Ok(LedgerOutcome::Applied)
+    }
+
+    /// 本机当前路径上是否有一项本机发起、该对端尚未决定的移除。本机发起的移除，其决定都会送回本机。
+    fn local_removal_awaits_decision_of(
+        &self,
+        peer: &DeviceId,
+    ) -> Result<bool, LedgerTransitionError> {
+        let Some(peer_member) = self.history.effective_member_for_device(peer) else {
+            return Ok(false);
+        };
+        let mut cursor = self.history.current_head();
+        while let Some(event_id) = cursor {
+            let Some(event) = self.history.event(event_id) else {
+                break;
+            };
+            if matches!(event.operation, MembershipOperationV2::RemoveDevice { .. })
+                && event.author_member_instance_id == self.local_member
+                && self.history.decision_for(event_id, peer_member).is_none()
+            {
+                return Ok(true);
+            }
+            cursor = event.parent_event_id;
+        }
+        Ok(false)
     }
 
     fn on_delivery(

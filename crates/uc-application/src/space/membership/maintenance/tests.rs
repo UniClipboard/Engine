@@ -154,13 +154,13 @@ struct BlockingPairingAdmission {
 }
 
 struct SharedWorkPermit {
-    lock: Arc<tokio::sync::Mutex<()>>,
+    lock: Arc<tokio::sync::RwLock<()>>,
 }
 
 #[async_trait]
 impl AcquireSpaceWorkPermitPort for SharedWorkPermit {
     async fn acquire_space_work_permit(&self) -> Result<SpaceWorkPermit, QuerySpaceWorkModeError> {
-        let guard = Arc::clone(&self.lock).lock_owned().await;
+        let guard = Arc::clone(&self.lock).read_owned().await;
         Ok(SpaceWorkPermit::guarded(SpaceWorkMode::Active, guard))
     }
 }
@@ -391,7 +391,7 @@ async fn local_admission_actions_can_interrupt_pairing_recovery_before_ordinary_
     };
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    let work_lock = Arc::new(tokio::sync::Mutex::new(()));
+    let work_lock = Arc::new(tokio::sync::RwLock::new(()));
     let maintain = Arc::new(MaintainSpaceMembershipUseCase::new_coordinated(
         MaintainSpaceMembershipDeps {
             admissions: Arc::new(BlockingPairingAdmission {
@@ -413,7 +413,7 @@ async fn local_admission_actions_can_interrupt_pairing_recovery_before_ordinary_
 
     let local_action = tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        Arc::clone(&work_lock).lock_owned(),
+        Arc::clone(&work_lock).write_owned(),
     )
     .await
     .expect("local admission action must not wait for pairing network recovery");

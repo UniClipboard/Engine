@@ -18,6 +18,8 @@ pub enum PeerRelation {
     UpgradeRequired,
     /// 对端送来的历史中有一项移除等待本机决定。
     AwaitingLocalDecision,
+    /// 对端已确认到本机发起的一项移除之前，那项移除仍等待对端决定。
+    AwaitingPeerDecision,
     /// 双方历史已分叉，停止普通交换。
     Diverged,
     /// 对端资料无法验证。
@@ -84,6 +86,11 @@ impl PeerSyncBackoff {
 
     pub(super) fn mark_pending(&mut self, revision: u64) {
         self.pending_since_revision.get_or_insert(revision);
+    }
+
+    /// 重新尝试一个曾被稳定拒绝的对端：结果回到尚未完成，等待本轮结论。
+    pub(super) fn begin_retry(&mut self) {
+        self.last_outcome = PeerSyncOutcome::Never;
     }
 
     pub(super) fn settle(&mut self, outcome: PeerSyncOutcome) {
@@ -183,11 +190,14 @@ impl MemberLink {
     pub(super) fn needs_history_sync(&self, current: &BaseMembershipHistoryPosition) -> bool {
         match self.relation {
             PeerRelation::Consistent => self.awaits_confirmation(current),
-            PeerRelation::Unconfirmed
-            | PeerRelation::UpgradeRequired
-            | PeerRelation::AwaitingLocalDecision
-            | PeerRelation::Invalid => true,
-            PeerRelation::Diverged => false,
+            PeerRelation::Unconfirmed | PeerRelation::UpgradeRequired | PeerRelation::Invalid => {
+                true
+            }
+            // 待决定期间双方只交换决定所需的受限资料（ADR-020）：本机已持有待决定的移除，对端的决定会
+            // 主动送达；在决定之前重复同步不会改变结论。
+            PeerRelation::AwaitingLocalDecision
+            | PeerRelation::AwaitingPeerDecision
+            | PeerRelation::Diverged => false,
         }
     }
 

@@ -78,6 +78,8 @@ pub enum PeerSyncResult {
     Deferred,
     /// 对端稳定拒绝。
     Rejected,
+    /// 对端确认的是本机当前位置的祖先：本机发起的一项移除仍等待对端决定。
+    AwaitingPeerDecision,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

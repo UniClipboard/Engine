@@ -71,6 +71,7 @@ enum PeerRelationV5 {
     AwaitingLocalDecision,
     Diverged,
     Invalid,
+    AwaitingPeerDecision,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -244,6 +245,7 @@ impl PeerLinkV5 {
                     PeerRelation::AwaitingLocalDecision => PeerRelationV5::AwaitingLocalDecision,
                     PeerRelation::Diverged => PeerRelationV5::Diverged,
                     PeerRelation::Invalid => PeerRelationV5::Invalid,
+                    PeerRelation::AwaitingPeerDecision => PeerRelationV5::AwaitingPeerDecision,
                 },
                 confirmed_position: member
                     .confirmed_position
@@ -277,6 +279,7 @@ impl PeerLinkV5 {
                     PeerRelationV5::AwaitingLocalDecision => PeerRelation::AwaitingLocalDecision,
                     PeerRelationV5::Diverged => PeerRelation::Diverged,
                     PeerRelationV5::Invalid => PeerRelation::Invalid,
+                    PeerRelationV5::AwaitingPeerDecision => PeerRelation::AwaitingPeerDecision,
                 },
                 confirmed_position: member.confirmed_position.map(PositionDto::into_position),
                 sync: PeerSyncBackoffSnapshot {

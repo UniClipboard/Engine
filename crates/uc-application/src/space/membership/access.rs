@@ -1,7 +1,8 @@
 //! 入站对端访问判定。
 //!
 //! 只有本机为有效成员、对端为当前成员且与本机历史一致时放行；正在离开或已不在成员中的设备一律拒绝。
-//! 判定只来自已验证的成员账本，不读取成员读模型。
+//! 一方正在等待决定一项移除时仍放行连接，以便交换完成决定所需的受限历史与决定本身（ADR-020）；
+//! 普通内容由当前成员范围暂停，不经此处放行。判定只来自已验证的成员账本，不读取成员读模型。
 
 use std::sync::Arc;
 
@@ -41,7 +42,12 @@ pub(crate) fn admits_peer(view: &MembershipView, device_id: &DeviceId) -> bool {
     ledger.local_status() == LedgerMemberStatus::Active
         && matches!(
             ledger.peer(device_id),
-            Some(PeerLink::Member(link)) if link.relation() == PeerRelation::Consistent
+            Some(PeerLink::Member(link)) if matches!(
+                link.relation(),
+                PeerRelation::Consistent
+                    | PeerRelation::AwaitingLocalDecision
+                    | PeerRelation::AwaitingPeerDecision
+            )
         )
 }
 

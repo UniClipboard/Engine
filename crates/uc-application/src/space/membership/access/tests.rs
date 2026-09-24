@@ -49,3 +49,21 @@ fn a_member_whose_history_diverged_is_refused() {
 
     assert!(!admits_peer(&view(record), &device("device-b")));
 }
+
+#[test]
+fn a_member_in_a_pending_removal_decision_stays_connected() {
+    let space = EstablishedSpace::new(&["device-a", "device-b"]);
+    for relation in [
+        PeerRelation::AwaitingLocalDecision,
+        PeerRelation::AwaitingPeerDecision,
+    ] {
+        let record = with_peer_relation(
+            space.record("device-a", 1),
+            &device("device-b"),
+            relation,
+            None,
+        );
+
+        assert!(admits_peer(&view(record), &device("device-b")));
+    }
+}

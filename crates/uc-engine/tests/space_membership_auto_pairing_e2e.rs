@@ -2049,6 +2049,43 @@ async fn f1_remove_and_add_from_parent_head_preserve_branch_membership() {
         .wait_for_group_epoch(&["E"], added_branch.group_epoch)
         .await;
 
+    // ADR-020：C 尚未决定 A 发起的移除，双方不越过该移除分享普通内容。A 明确看到 C 在等待确认，
+    // 发送既不算离线，也不排队等待。
+    let c_device_id = topology.device_ids.get("C").unwrap().clone();
+    topology.wait_for_pending_change(&["C"]).await;
+    wait_for_group_relationship(
+        &topology,
+        "A",
+        &c_device_id,
+        uc_engine::DeviceGroupRelationshipSummary::ConfirmationPending,
+    )
+    .await;
+    let undecided_text = "F1 undecided member must not receive";
+    let undecided_report = topology.send("A", "C", undecided_text).await;
+    assert_eq!(
+        (
+            undecided_report.total_accepted,
+            undecided_report.total_pending,
+            undecided_report.total_offline
+        ),
+        (0, 0, 0),
+        "F1 transfer to an undecided member must be withheld: {undecided_report:?}"
+    );
+    assert!(!receiver_has_exact_text(topology.engine("C"), undecided_text).await);
+    topology
+        .run(&[TopologyAction::Decide {
+            node: "C",
+            choice: PendingChangeChoice::Apply,
+        }])
+        .await;
+    wait_for_group_relationship(
+        &topology,
+        "A",
+        &c_device_id,
+        uc_engine::DeviceGroupRelationshipSummary::Consistent,
+    )
+    .await;
+
     let left_text = "F1 removal branch transfer";
     let left_report = topology.send("A", "C", left_text).await;
     assert_eq!(
@@ -2086,6 +2123,7 @@ async fn f1_remove_and_add_from_parent_head_preserve_branch_membership() {
     let choices_b = topology.device_group_choices("B").await;
     let d_device_id = topology.device_ids.get("D").unwrap();
     let e_device_id = topology.device_ids.get("E").unwrap();
+    // 移除通知送达后移除方不再保留被移除设备（计划 049 R1）。
     assert_eq!(
         choices_a
             .device_trust
@@ -2093,7 +2131,7 @@ async fn f1_remove_and_add_from_parent_head_preserve_branch_membership() {
             .iter()
             .find(|device| &device.device_id == d_device_id)
             .map(|device| device.membership),
-        Some(uc_engine::DeviceMembershipSummary::Removed)
+        None
     );
     assert_eq!(
         choices_b
@@ -2125,6 +2163,34 @@ async fn f1_remove_and_add_from_parent_head_preserve_branch_membership() {
     );
     assert!(!receiver_has_exact_text(topology.engine("E"), isolated_text).await);
     topology.shutdown().await;
+}
+
+/// 等待 `node` 看到对端 `peer_device_id` 处于指定设备组关系。
+async fn wait_for_group_relationship(
+    topology: &MembershipTopology,
+    node: &str,
+    peer_device_id: &str,
+    relationship: uc_engine::DeviceGroupRelationshipSummary,
+) {
+    let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+    loop {
+        let observed = topology
+            .device_group_choices(node)
+            .await
+            .device_trust
+            .devices
+            .into_iter()
+            .find(|device| device.device_id == peer_device_id)
+            .map(|device| device.group_relationship);
+        if observed == Some(relationship) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "node {node} did not reach {relationship:?} for the peer; observed {observed:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 struct MembershipTopology {
@@ -2705,7 +2771,7 @@ impl MembershipTopology {
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "pending removal did not reach every decision node"
+                "pending removal did not reach every decision node {nodes:?}"
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
