@@ -320,7 +320,7 @@ pub async fn prepare_sync_session(
         prepare_joiner_invitation: Arc::new(DefaultJoinerInvitationPreparation),
         resolve_joiner_invitation: handlers.joiner_invitation_resolver,
         joiner_start_material: Arc::new(DefaultJoinerStartMaterial::new(
-            local_device_id.clone(),
+            local_device_id,
             Arc::clone(&space_setup.settings),
             identity_fingerprint,
             endpoint_addr.id.as_bytes().to_vec(),
@@ -337,7 +337,7 @@ pub async fn prepare_sync_session(
         sponsor_admission_state: space_setup.admission_state.clone()
             as Arc<dyn uc_application::deps::SponsorAdmissionStatePort>,
         prepare_sponsor_candidate: Arc::new(DefaultSponsorCandidatePreparation::new(
-            local_device_id.clone(),
+            local_device_id,
             continuation_route,
             Arc::clone(&space_setup.current_member_signatures),
             historical_signatures.clone(),

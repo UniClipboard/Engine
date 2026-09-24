@@ -230,7 +230,7 @@ impl MembershipWorker {
                     self.deliver(
                         peer,
                         LedgerDeliveryKind::RemovalNotice,
-                        RestrictedMembershipDelivery::Event(notice),
+                        RestrictedMembershipDelivery::Event(Box::new(notice)),
                         tally,
                     )
                     .await?;
@@ -239,7 +239,7 @@ impl MembershipWorker {
                     self.deliver(
                         peer,
                         LedgerDeliveryKind::Decision,
-                        RestrictedMembershipDelivery::Decision(decision),
+                        RestrictedMembershipDelivery::Decision(Box::new(decision)),
                         tally,
                     )
                     .await?;

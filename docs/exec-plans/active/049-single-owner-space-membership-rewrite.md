@@ -231,12 +231,15 @@ cargo test -p uc-core --locked
 cargo test -p uc-application --lib space --locked -- --test-threads=1
 cargo test -p uc-infra --locked
 cargo test -p uc-engine --locked
+bash scripts/testing/run-test-group.sh membership-e2e
 cargo fmt --all -- --check
 node scripts/architecture/check-rust-style.mjs
 node scripts/architecture/check-engine-repository.mjs
 git diff --check
 ```
 
+   `cargo test -p uc-engine --locked` 不编译成员多设备场景（该文件只在 `dev-tools` 下编译），R1–R4、F0–F7 与其余
+   多 Engine 场景由 `membership-e2e` 分组运行。
 8. 实体双 Desktop 复现场景（本次诊断的 profile a/b 流程）需另行授权；未执行时记为“跳过”。
 
 ## 风险
@@ -342,3 +345,62 @@ git diff --check
 | `cargo clippy -p uc-core -p uc-application -p uc-infra --all-targets --locked`（仅本次改动文件） | 无告警 |
 | `cargo metadata --locked`、`cargo check --workspace --all-targets --locked`、`cargo fmt --all -- --check`、`check-rust-style.mjs`、`check-engine-repository.mjs`、`git diff --check` | 通过（`uc-ohos-napi` 测试既有未使用导入告警，非本次改动） |
 | `cargo test -p uc-engine --locked` 与 R1–R4 真实场景 | 跳过（新仓储尚未接入运行时，Engine 路径无变化） |
+
+### S3（2026-09-23，分支 `hp/uni/t-0010-android`，进行中）
+
+完成内容：
+
+- Application：`MembershipOwner` 是成员记录的唯一提交者，并在同一事务中落实成员读模型；
+  `MembershipWorker` 执行 `outstanding_work` 与分叉恢复、组密钥投递；`PeerAccess` 判定入站对端。各用例改为经
+  Owner 读取与提交；旧账本、效果执行器、受限投递、固定步骤链与投影清理步骤已删除。
+- Core：Owner 接入所需的证据与伴随资料输入；采用对端历史止于激活基线。
+- Infra：V5 仓储实现存储 port；邀请方激活返回已验证历史；暂存代际按 Core 规则生成 V5 记录（S4 上移）。
+- Engine：装配与观测装饰改接新 port；设备分组变化事件由 Owner 按聚合效果发出。
+- 测试：内存 Owner 测试台，W1、W2 多节点场景；R1–R3 取消忽略。
+- 架构检查：`check-engine-repository.mjs` 新增“成员记录提交只由 Owner 构造”检查及其反例。
+
+实现中确定、需要说明的设计变化（已由用户确认的部分同步写入
+[ADR-027](../../design-docs/decisions/027-single-owner-space-membership-state.md#移除待决定期间的对端关系049-s3-补充已由用户确认)）：
+
+- ADR-020 优先于原 F1 预期：本机发起的移除尚待决定时普通内容不越过该移除。Core 新增对端关系
+  `AwaitingPeerDecision` 与同步结果 `PeerSyncResult::AwaitingPeerDecision`：对端确认的位置是本机位置的严格
+  祖先，且本机历史中有本机发起、尚未决定的移除时才接受，否则暂缓。V5 编码在 `PeerRelationV5` 末尾追加该
+  变体；V5 尚未发布，不新增版本。发起方把未决定的第三台设备显示为 `ConfirmationPending` /
+  `PausedUnverifiable`，发送结果为 0/0/0（既不离线也不排队）。
+- 两种待决定关系都不触发历史同步；本机决定未作出时，同步确认保留 `AwaitingLocalDecision`。
+- `PeerAccess` 在网络层允许两种待决定关系的对端，使受限历史与决定能够交换；内容仍由成员范围控制
+  （接收门禁检查 `usable_peer_device_ids`）。
+- 空间工作许可改为读写锁（`crates/uc-application/src/space/admission/protocol/protocol.rs`）：普通成员工作
+  共享，准入独占。修复两台设备互相同步时各等对方许可 10 秒的对称死锁。
+- 执行器每轮顺序：本机效果 → 分叉恢复 → 组密钥更新 → 网络待办与历史同步；两遍共享已尝试集合，效果步骤
+  由 `effect_step` 串行化并在执行前复核阶段。
+- 为某对端开始新同步时清除其上次 `StableRejected`，重试期间显示更新中。
+- 诊断 `pending_confirmation_count` 同时计入两种待决定关系的对端，使交叉移除造成的分裂可见。
+- `RemoveMember` 在加入后 Space 会话仍在切换时返回可重试错误：`RemoveSpaceMemberError::Unavailable` 映射
+  1392 且 `retryable=true`；`Locked` 仍不可重试（用户确认）。
+- 测试语义调整（已向用户报告）：F1 在决定前断言内容被扣留，通知送达后移除方不再列出被移除设备（R1 要求，
+  原断言为列为 `Removed`）；`pending_final_confirmation_survives_joiner_restart` 由“不得为 Completed”改为
+  “若为 Completed 必须真正收敛”（待确认、效果、冲突均为 0 且组 epoch 相同）；F7 在读取基准组 epoch 前
+  等待相关节点未完成效果清零（用户批准：历史等价只说明成员事实已提交，效果由执行器随后落实，旧实现同样
+  如此，负载下窗口变大导致读到旧 epoch）；`membership_history_retryable_failure_exposes_deadline_and_recovers`
+  改为等待带重试时间的 Retrying（用户批准：失败事件早于退避结果提交，旧式投影把更新中也显示为 Retrying）。
+- `.config/nextest.toml` 为 `space_membership_auto_pairing_e2e` 增加测试组（并发 4）与 60 秒 × 10 的慢测试
+  期限，default 与 ci 两个 profile 相同（用户批准）。该二进制须用 nextest 运行：`cargo test` 在一个进程中
+  串行运行全部 51 项约 27 分钟，时序失真。
+- 按调试期间新增的日志均作为正式、脱敏的业务或诊断日志保留。
+
+验证结果：
+
+| 检查 | 结果 |
+| --- | --- |
+| `cargo test -p uc-core --locked`、`cargo test -p uc-infra --locked` | 全部通过 |
+| `cargo test -p uc-application --lib space --locked -- --test-threads=1` | 324 通过，1 失败：基线问题 `admission_recovery_scenarios::joiner_pairing_fixture_reaches_active_settled`，未处理；1 项按设计忽略（独占日志捕获） |
+| `cargo nextest run --no-fail-fast -p uc-engine --locked --features dev-tools --test space_membership_auto_pairing_e2e`（仓库配置） | 51 项中 44 通过、7 失败。R1–R4、W1/W2、F0–F7 通过 |
+| 上述失败中基线（`cd9537b6`）同样失败的 | `same_device_returns_to_a_previous_space_after_switch_and_restart`（启动 1216）、`suspend_during_space_switch_recovery_does_not_resurrect_the_network`（1103）、`handoff_four_device_removal_preview_matches_executed_choice`、`confirmed_pairing_survives_restart_removal_and_same_device_rejoin`；`pending_join_is_not_published_before_final_confirmation` 在基线单独运行 3 次失败 1 次（同为最终确认后查询返回 1211），本分支单独运行也间歇失败 |
+| 负载下间歇失败、单独运行通过 | `membership_history_retryable_failure_exposes_deadline_and_recovers`：开发事件在传输失败时即记录，早于 Owner 提交退避结果，而旧式健康投影把 Updating 也映射为 Retrying，测试可能读到无重试时间的 Retrying（测试侧竞态；经用户批准改为等待带重试时间的 Retrying，单独运行通过）；`offline_member_catches_multiple_removals_without_blocking_new_invitations`（组 epoch 等待超时，未深入）；`f0_partitioned_sponsors_create_isolated_sibling_branches` 与 `space_switch_cancels_in_flight_file_send_without_leaving_imports` 曾在高负载运行中失败 |
+| `cargo clippy -p uc-core -p uc-application -p uc-infra -p uc-engine --all-targets --locked`（仅 S3 改动行） | 生产代码无告警（已修复 `sort_by_key`、受限投递枚举装箱与 `DeviceId` 多余 clone）；测试文件中的 `unwrap` 告警保留。`uc-application` 既有 `application/shutdown.rs` 的 `async_yields_async` 拒绝级 lint 非本次改动，检查时以 `-A clippy::async_yields_async` 放行 |
+| `cargo metadata --locked`、`cargo check --workspace --all-targets --locked`、`cargo fmt --all -- --check`、`check-rust-style.mjs`、`check-engine-repository.mjs`、`git diff --check` | 通过（`uc-ohos-napi` 测试既有未使用导入告警，非本次改动） |
+| `cargo test -p uc-engine --locked` 其余测试二进制与宿主契约 | 跳过（本次未运行） |
+| 实体双 Desktop 复现场景 | 跳过（需另行授权） |
+
+S3 未完成项：上述间歇失败的确认与处理；S3 不单独合入主分支。

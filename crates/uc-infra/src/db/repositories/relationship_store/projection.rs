@@ -52,7 +52,7 @@ impl MembershipProjectionWriter {
             let member = match member {
                 Some(member) if member.identity_fingerprint == facts.identity_fingerprint => member,
                 _ => SpaceMember {
-                    device_id: facts.device_id.clone(),
+                    device_id: facts.device_id,
                     device_name: facts.device_name.clone(),
                     identity_fingerprint: facts.identity_fingerprint.clone(),
                     joined_at: chrono::DateTime::<Utc>::UNIX_EPOCH,
@@ -76,8 +76,8 @@ impl MembershipProjectionWriter {
                     })
                     .transpose()?;
                 let peer = TrustedPeer {
-                    local_device_id: plan.local_device_id.clone(),
-                    peer_device_id: facts.device_id.clone(),
+                    local_device_id: plan.local_device_id,
+                    peer_device_id: facts.device_id,
                     peer_fingerprint: facts.identity_fingerprint.clone(),
                     trusted_at: previous
                         .map(|peer| peer.trusted_at)
@@ -102,7 +102,7 @@ impl MembershipProjectionWriter {
                     .transpose()?;
                 if let Some(address) = previous.or_else(|| {
                     (!facts.transport_address_blob.is_empty()).then(|| PeerAddressRecord {
-                        device_id: facts.device_id.clone(),
+                        device_id: facts.device_id,
                         addr_blob: facts.transport_address_blob.clone(),
                         observed_at: chrono::DateTime::<Utc>::UNIX_EPOCH,
                     })

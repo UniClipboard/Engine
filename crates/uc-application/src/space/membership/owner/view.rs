@@ -120,7 +120,7 @@ impl MembershipView {
                 reason: pause_reason(reason),
             })
             .collect();
-        paused_peer_devices.sort_by(|left, right| left.device_id.cmp(&right.device_id));
+        paused_peer_devices.sort_by_key(|member| member.device_id);
         Ok(CurrentSpaceMemberScope {
             revision: self.revision,
             local_member_active: scope.local_member_active,

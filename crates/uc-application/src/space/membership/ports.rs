@@ -84,8 +84,8 @@ pub trait ActivateMembershipEffectPort: Send + Sync {
 /// 普通成员范围已排除的设备只能收到的精确成员资料。
 #[derive(Clone, PartialEq, Eq)]
 pub enum RestrictedMembershipDelivery {
-    Event(MembershipEventV2),
-    Decision(MembershipDecisionV2),
+    Event(Box<MembershipEventV2>),
+    Decision(Box<MembershipDecisionV2>),
 }
 
 impl std::fmt::Debug for RestrictedMembershipDelivery {

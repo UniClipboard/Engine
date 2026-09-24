@@ -73,9 +73,10 @@ function read(relativePath) {
   return readFileSync(join(REPOSITORY_ROOT, relativePath), 'utf8')
 }
 
-/// 排除测试文件与测试台目录后的 Rust 源码。
-function productionSources(relativeRoot) {
+/// 排除测试文件与测试台目录后的 Rust 源码；`excludedPaths` 为另需排除的仓库相对路径。
+function productionSources(relativeRoot, excludedPaths = []) {
   const root = join(REPOSITORY_ROOT, relativeRoot)
+  const excluded = new Set(excludedPaths)
   const sources = []
   const pending = [root]
   while (pending.length > 0) {
@@ -84,7 +85,11 @@ function productionSources(relativeRoot) {
       const path = join(current, entry.name)
       if (entry.isDirectory()) {
         if (entry.name !== 'testing' && entry.name !== 'tests') pending.push(path)
-      } else if (entry.name.endsWith('.rs') && !/(^tests\.rs|_tests?\.rs)$/.test(entry.name)) {
+      } else if (
+        entry.name.endsWith('.rs') &&
+        !/(^tests\.rs|_tests?\.rs)$/.test(entry.name) &&
+        !excluded.has(relative(REPOSITORY_ROOT, path))
+      ) {
         sources.push(readFileSync(path, 'utf8'))
       }
     }
@@ -2046,6 +2051,22 @@ function checkSpaceAccessConstructionModes(sources) {
   return problems
 }
 
+function checkMembershipRecordCommitOwnership(sources) {
+  const problems = []
+  // 成员记录只由 Application `MembershipOwner` 提交；其余生产代码只能读取，不得构造提交。
+  if (!/\.commit\(MembershipRecordCommit\s*\{/.test(sources.membershipRecordOwner)) {
+    addProblem(problems, 'membership record commit ownership', 'MembershipOwner must commit membership records')
+  }
+  if (/MembershipRecordCommit\s*\{/.test(sources.membershipRecordNonOwnerProduction)) {
+    addProblem(
+      problems,
+      'membership record commit ownership',
+      'only MembershipOwner may construct a membership record commit'
+    )
+  }
+  return problems
+}
+
 function checkMembershipHistoryOwnership(sources) {
   const problems = []
   if (sources.monolithicMembershipHistoryPresent) {
@@ -2075,6 +2096,16 @@ function repositorySources() {
     membershipLedger: [
       read('crates/uc-application/src/space/membership/owner.rs'),
       readSourceTree('crates/uc-application/src/space/membership/owner'),
+    ].join('\n'),
+    membershipRecordOwner: read('crates/uc-application/src/space/membership/owner.rs'),
+    membershipRecordNonOwnerProduction: [
+      productionSources('crates/uc-application/src', [
+        'crates/uc-application/src/space/membership/owner.rs',
+        'crates/uc-application/src/space/membership/ports.rs',
+      ]),
+      productionSources('crates/uc-infra/src'),
+      productionSources('crates/uc-engine/src'),
+      readSourceTree('bindings'),
     ].join('\n'),
     membershipEvidenceOwner: read('crates/uc-application/src/space/membership/reconcile_history_evidence/use_case.rs'),
     retiredMembershipPersistencePathPresent: [
@@ -2186,6 +2217,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkCurrentPeerScopeOwnership(),
     ...checkMembershipConfirmationWatermarkOwnership(sources),
     ...checkMembershipHistoryOwnership(sources),
+    ...checkMembershipRecordCommitOwnership(sources),
     ...checkApplicationMembershipCutover(),
     ...checkSpaceModuleInterface(),
     ...checkSpaceAdmissionProtocolOwnership(),
@@ -2300,6 +2332,10 @@ function runNegativeFixtures(metadata, sources) {
   expectRejected('forged membership confirmation watermark', (_changed, changedSources) => {
     changedSources.applicationProduction +=
       '\nfn infer_peer_confirmation(peer: &mut PeerLinkSnapshot, position: BaseMembershipHistoryPosition) { peer.confirmed_position = Some(position); }\n'
+  }, metadata, sources)
+  expectRejected('membership record commit outside the owner', (_changed, changedSources) => {
+    changedSources.membershipRecordNonOwnerProduction +=
+      '\nasync fn bypass(store: &dyn MembershipRecordStorePort, replacement: MembershipRecord) { store.commit(MembershipRecordCommit { expected_revision: 0, replacement, projection: None }).await; }\n'
   }, metadata, sources)
   expectRejected('observability mirror bundle', (_changed, changedSources) => {
     changedSources.engineObservability += '\nstruct ObservedAdmissionPorts;\n'

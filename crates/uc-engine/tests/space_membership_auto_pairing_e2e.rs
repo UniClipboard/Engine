@@ -1132,6 +1132,9 @@ async fn f7_three_sibling_branches_keep_fair_anti_entropy_for_legal_peers() {
         topology
             .wait_for_equivalent_branch_named(&baseline, baseline.len() as u32, "F7 baseline")
             .await;
+        topology
+            .wait_for_settled_effects_named(&baseline, "F7 baseline")
+            .await;
         let epoch = topology.diagnostics("A").await.group_epoch;
         topology
             .wait_for_group_epoch_named(&baseline, epoch, "F7 baseline")
@@ -1175,6 +1178,7 @@ async fn f7_three_sibling_branches_keep_fair_anti_entropy_for_legal_peers() {
         topology
             .wait_for_equivalent_branch_named(nodes, 8, phase)
             .await;
+        topology.wait_for_settled_effects_named(nodes, phase).await;
         let epoch = topology.diagnostics(nodes[0]).await.group_epoch;
         topology
             .wait_for_group_epoch_named(nodes, epoch, phase)
@@ -2970,6 +2974,26 @@ impl MembershipTopology {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "nodes did not converge to the expected branch during {phase}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// 历史等价只说明成员事实已提交；读取组 epoch 前还须等待本机成员效果全部落实。
+    async fn wait_for_settled_effects_named(&self, nodes: &[&str], phase: &str) {
+        let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+        let mut observed_counts = Vec::new();
+        loop {
+            observed_counts.clear();
+            for node in nodes {
+                observed_counts.push(self.diagnostics(node).await.pending_effect_count);
+            }
+            if observed_counts.iter().all(|count| *count == 0) {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "nodes kept unfinished membership effects during {phase}; observed={observed_counts:?}"
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -5141,6 +5165,30 @@ async fn wait_for_maintenance_health(
     }
 }
 
+/// 等待维护健康状态进入带持久重试时间的 Retrying。
+async fn wait_for_maintenance_retry_deadline(
+    engine: &Engine,
+) -> uc_engine::MembershipMaintenanceHealthSummary {
+    let deadline = tokio::time::Instant::now() + ADMISSION_WAIT_TIMEOUT;
+    loop {
+        if let Ok(OperationResult::DeviceGroupChoices(summary)) =
+            engine.execute(Operation::QueryDeviceGroupChoices).await
+        {
+            let health = summary.device_trust.maintenance_health;
+            if health.phase == uc_engine::MembershipMaintenanceHealthPhaseSummary::Retrying
+                && health.next_retry_at_ms.is_some()
+            {
+                return health;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "membership maintenance health did not expose a retry deadline"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
 async fn query_membership_diagnostics(engine: &Engine) -> uc_engine::MembershipDiagnosticsSummary {
     let OperationResult::MembershipDiagnostics(summary) = engine
         .execute(Operation::QueryMembershipDiagnostics)
@@ -5924,11 +5972,8 @@ async fn membership_history_retryable_failure_exposes_deadline_and_recovers() {
         uc_engine::DevSpaceWorkEventKind::MembershipHistorySyncRetryableFailure,
     )
     .await;
-    let retrying = wait_for_maintenance_health(
-        &sponsor,
-        uc_engine::MembershipMaintenanceHealthPhaseSummary::Retrying,
-    )
-    .await;
+    // 旧式健康投影把“更新中”也显示为 Retrying；失败事件早于退避结果提交，须等到带重试时间的状态。
+    let retrying = wait_for_maintenance_retry_deadline(&sponsor).await;
     assert!(retrying.next_retry_at_ms.is_some());
     assert_eq!(retrying.reason, None);
     assert_eq!(retrying.recovery, None);

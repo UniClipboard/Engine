@@ -181,10 +181,10 @@ impl RestrictedMembershipDeliveryPort for IrohMembershipHistoryExchangeAdapter {
     ) -> Result<(), RestrictedMembershipDeliveryError> {
         let message = match delivery {
             RestrictedMembershipDelivery::Event(event) => {
-                MembershipHistoryMessage::RestrictedEventV3(event.clone())
+                MembershipHistoryMessage::RestrictedEventV3(event.as_ref().clone())
             }
             RestrictedMembershipDelivery::Decision(decision) => {
-                MembershipHistoryMessage::RestrictedDecisionV3(decision.clone())
+                MembershipHistoryMessage::RestrictedDecisionV3(decision.as_ref().clone())
             }
         };
         match self.exchange_membership_history(peer, message).await {
