@@ -708,12 +708,13 @@ async fn handoff_four_device_removal_preview_matches_executed_choice() {
     assert!(kept.device_trust.current_change.is_none());
     let change = apply_preview.device_trust.current_change.unwrap();
     let kept_change = keep_preview.device_trust.current_change.unwrap();
-    assert!(change.target_device_ids.iter().all(|id| applied
+    // 接受远端移除后，目标在本机既不是成员也不在离开收尾中，按 ADR-027 不再列出（规格 021 只为移除发起方
+    // 保留等待通知送达的条目）。
+    assert!(change.target_device_ids.iter().all(|id| !applied
         .device_trust
         .devices
         .iter()
-        .any(|device| &device.device_id == id
-            && device.membership == uc_engine::DeviceMembershipSummary::Removed)));
+        .any(|device| &device.device_id == id)));
     assert!(kept_change.target_device_ids.iter().all(|id| kept
         .device_trust
         .devices

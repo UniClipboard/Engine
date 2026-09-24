@@ -10,13 +10,17 @@ pub(in crate::space::admission::protocol::tests) struct PairingScenarioFixture {
 }
 
 pub(in crate::space::admission::protocol::tests) struct PairingScenarioSnapshot {
-    status: CurrentJoinStatus,
+    /// 本机激活的结果：最终确认前按设计为 `Processing`。
+    activation: CurrentJoinStatus,
+    /// 最终确认后加入记录已结算；公开的 `Active` 正是由这一事实投影。
+    active_settled: bool,
     final_confirmation_complete: bool,
 }
 
 impl PairingScenarioSnapshot {
+    /// 已激活到邀请方的 Space，且最终确认后加入已结算，即公开状态为 `Active`。
     pub(in crate::space::admission::protocol::tests) fn is_active(&self) -> bool {
-        matches!(self.status, CurrentJoinStatus::Active { .. })
+        matches!(self.activation, CurrentJoinStatus::Processing { .. }) && self.active_settled
     }
 
     pub(in crate::space::admission::protocol::tests) const fn final_confirmation_complete(
@@ -73,7 +77,7 @@ impl PairingScenarioFixture {
             return Err(PairingScenarioFailure::AdmissionMaintenance);
         }
 
-        let status = self
+        let activation = self
             .pair
             .joiner()
             .complete_pending_space_transition()
@@ -93,7 +97,8 @@ impl PairingScenarioFixture {
         }
 
         Ok(PairingScenarioSnapshot {
-            status,
+            activation,
+            active_settled: self.pair.saved_join().is_active_settled(),
             final_confirmation_complete: true,
         })
     }
