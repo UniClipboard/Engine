@@ -114,7 +114,13 @@ Engine，使用真实 SQLite、MLS 与本机回环 Iroh QUIC，配对 rendezvous
 内施加，使用真实时钟。该文件只在 `dev-tools` feature 下编译，因此 `cargo test -p uc-engine --locked` 不运行
 其中任何场景。nextest 为每个场景单独起进程，并按 `.config/nextest.toml` 的 `membership-e2e` 测试组限制并发、
 放宽慢测试期限；`cargo test` 会在一个进程中顺序运行全部场景，耗时约为前者的数倍且时序失真，只作为兼容入口保留。
-可追加 nextest 参数选择场景，例如：
+场景按类别放在 `crates/uc-engine/tests/space_membership_auto_pairing_e2e/` 的模块中（`admission`、`topology`、
+`removal_convergence`、`space_switch`、`membership_history`、`automatic_connections` 等），共享测试台位于其
+`harness/`。`topology::` 下的多节点拓扑另属 `membership-topology` 测试组，并发更低。每个场景第一行是
+`let _scenario = TestScenario::start();`：测试台经它登记设备目录、拓扑动作事件与等待阶段，守卫释放时（含 panic）
+在 `$UC_TEST_ARTIFACTS_DIR/membership-e2e/` 下写出 `result.json` 与 `summary.txt`；测试台等待超时记为
+`product_timeout` 并带条件名，其余断言失败记为 `product_invariant`。新增场景必须保留这一行，且只描述设备动作与
+业务断言，不自行管理目录、超时或工件。可追加 nextest 参数选择场景，例如：
 
 ```bash
 bash scripts/testing/run-test-group.sh membership-e2e -E 'test(f7_)'

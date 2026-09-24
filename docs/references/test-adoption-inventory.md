@@ -1,6 +1,6 @@
 # Engine 测试采用清单
 
-更新时间：2026-09-22。本清单用于安排渐进采用，不是批量迁移授权。旧测试和 `cargo test` 入口继续保持权威。
+更新时间：2026-09-24。本清单用于安排渐进采用，不是批量迁移授权。旧测试和 `cargo test` 入口继续保持权威。
 
 ## 已采用
 
@@ -14,6 +14,7 @@
 | 文字快照编码与投递 | `crates/uc-application/src/facade/clipboard/facade/tests/text_transfer_scenario.rs` | fast/evidence | 真实 ClipboardSyncFacade 编码 V3、生成 canonical hash 并得到单目标 accepted；真实网络 exact text 仍由 E02 证明 |
 | 真实 Engine 完整配对、文字与文件传输 | `scripts/testing/connection-recovery-network.mjs` 的 `E01`/`E02` | real-network/nightly | 独立进程、profile、身份、端口与 namespace；公开 setup/eligibility/peer/history/ReadEntryFile 终态、exact bytes 和 cleanup 证据 |
 | rendezvous provider 正常/无效/暂时失败 | `crates/uc-infra/src/rendezvous/invitation_adapter/tests/provider_dependency_evidence.rs` | persistence-provider/evidence | 私有 adapter 场景与业务实现分目录；产品、环境、清理分类 |
+| 成员多设备真实场景（配对、最终确认、F0–F7 拓扑、移除收敛、空间切换、成员历史、自动连接） | `crates/uc-engine/tests/space_membership_auto_pairing_e2e/` | membership-e2e；PR 冒烟、nightly/workflow_dispatch 全组 | 每场景 `result.json`/`summary.txt`：失败分类、最后拓扑事件、等待阶段、设备目录清理与复现命令；真实 Engine、SQLite、MLS 与本机回环 Iroh，分区由 dev-tools 施加 |
 | profile storage upgrade 与崩溃恢复 | `crates/uc-infra/tests/profile_storage_upgrade.rs`、`profile_storage_upgrade_crash.rs` | process/evidence/nightly | synthetic migration、子进程退出、持久恢复、资源回收；alpha.5 外部 fixture 单列未验证 |
 
 ## 首批五类双线状态
@@ -69,7 +70,7 @@ text 和真实文件 bytes 登记为 E01/E02。重连复用 E03/E04/E06/E10/E13�
 以下覆盖不能被内存模拟或 testkit 成功替代：
 
 - `scripts/testing/run-connection-recovery-e2e.sh` 与 `tests/hosts/connectivity*`：Linux network namespace、真实断线和恢复。
-- `crates/uc-engine/tests/space_membership_auto_pairing_e2e.rs`：真实 Engine/Iroh 多节点链路；后续只下沉可确定性证明的业务规则，保留最小真实链路矩阵。
+- `crates/uc-engine/tests/space_membership_auto_pairing_e2e/`：真实 Engine/Iroh 多节点链路，已按类别拆分并接入 testkit 工件（[050](../exec-plans/active/050-membership-e2e-nextest-migration.md)）；后续只下沉可确定性证明的业务规则，保留最小真实链路矩阵。
 - `crates/uc-infra/tests/iroh_*_probe.rs` 与真实 Iroh node/provider 探针：保留实际 transport 合同。
 - `tests/hosts/android/`、`tests/hosts/ios/`、`tests/hosts/ohos/`：绑定、安装、启动和设备行为；必须按平台分别报告。
 

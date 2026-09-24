@@ -761,8 +761,9 @@ Risk: 只测成功 round trip 会漏掉认证来源和已有连接关闭，这�
 
 ```text
 Step 6
-Files: crates/uc-engine/tests/space_membership_auto_pairing_e2e.rs, scripts/testing/run-real-iroh-membership-topologies.sh, .github/workflows/membership-topology.yml
+Files: crates/uc-engine/tests/space_membership_auto_pairing_e2e.rs, scripts/testing/run-test-group.sh, .github/workflows/engine-real-environment.yml
 Change: F0-F7 标为明确 slow lane；脚本逐项串行运行；新增 scheduled/workflow_dispatch job。保留现有快速 admission/restart/content smoke 非 ignored。
+Status: 已由 050 落实为 `membership-e2e` 分组（拓扑类单独测试组）、`engine-real-environment.yml` 的 nightly/workflow_dispatch 全组任务与 PR 冒烟，未另建专用脚本与 workflow。
 Risk: `cargo test` 的 ignored 计数不能记为通过；release/nightly 记录必须绑定当前 commit。
 ```
 
