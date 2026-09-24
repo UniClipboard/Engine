@@ -1,0 +1,133 @@
+# 错误来源保留：清除字符串化与丢弃来源
+
+## 状态与完整责任
+
+- **状态**：实施中。E0–E2 已完成，其余切片未开始。
+- **日期**：2026-09-24。
+- **依据**：[错误处理与转换](../../design-docs/error-handling.md)要求保留完整 source chain；[运行期观测](../../design-docs/observability.md#错误来源与日志字段)要求日志只记录从 source chain 提取的固定分类。
+- **完整负责人**：每处转换由目标错误类型所在模块负责（与错误处理规范的“转换所有权”一致）；整体顺序、清单复核与验收由本计划负责。
+- **调用方唯一动作**：不新增对外调用。各项修复不改变 Engine 公开接口、公开错误码和宿主可见文本。
+- **成功结果**：清单中的 F 类位置全部保留来源；E/R 类位置逐项判定为允许例外并按规范注释，或改为保留来源；新增代码中的同类写法由自动检查拒绝。
+- **失败结果**：某项修复需要改变持久化格式、设备间协议或公开错误分类时，暂停该项，单独立项，不在本计划中夹带。
+- **重启与重试责任**：本计划只改变错误值的内部结构，不新增持久事实，不改变任何重试、回执或恢复顺序。
+
+## 问题
+
+仓库中大量错误转换把下层错误变成字符串，或者直接丢弃。这样做有三个后果：
+
+1. **诊断分类失效。** 观测规范要求日志只记录固定分类，这些分类要从 source chain 中逐层 `downcast` 得到，例如
+   `io_error_kind`、SQLite 错误码。来源被字符串化后，分类器拿不到具体类型，只能记为 `unknown`。
+   049 S3.a 的实际案例：组密钥投递状态读取失败时，Infra 记录为 `source="storage" reason="unknown"`；
+   [`space_security_store/revocation.rs`](../../../crates/uc-infra/src/db/repositories/space_security_store/revocation.rs)
+   与 [`legacy_bootstrap.rs`](../../../crates/uc-infra/src/db/repositories/space_security_store/legacy_bootstrap.rs)
+   中的 `anyhow!(error.to_string())` 让 SQLite `BUSY` 无法被识别，结论只能停在推断
+   （见 [049 计划](049-single-owner-space-membership-rewrite.md)失败诊断表）。
+2. **流程判断失效。** 生产代码依据 source chain 做分支，例如
+   [`is_cancel_error`](../../../crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs) 查找
+   `BlobTransferError::Cancelled`，[`session_supervisor/lifecycle.rs`](../../../crates/uc-engine/src/runtime/session_supervisor/lifecycle.rs)
+   查找 `TaskShutdownReport` 与 `EngineError`。中间任何一层字符串化，取消就会被当作普通失败，超时会被报成内部错误。
+3. **隐私边界被穿透。** 把错误拼进文本时，常一并拼入路径、标签值或内容片段（清单 S3 中的 `path.display()`、`{parent:?}`，
+   S2 中的 `parse quota baseline {:?}`）。这些文本随后可能经 `%error` 进入日志。
+
+## 反模式与替换写法
+
+完整逐行位置见[修改点清单](2026-09-24-error-source-preservation-inventory.md)。
+
+| 类别 | 反模式 | 替换写法 | 生产代码数量 |
+| --- | --- | --- | ---: |
+| S1 | `.map_err(\|e\| anyhow!(e.to_string()))`、`anyhow::Error::msg(e)` | 直接 `?`，或 `.map_err(anyhow::Error::new)` | 91 |
+| S2 | `.map_err(\|e\| anyhow!("动作: {e}"))` | `.context("固定动作")`；需要先转换时 `anyhow::Error::new(e).context("固定动作")` | 82 |
+| S3 | `Error::Variant(e.to_string())`、`reason: e.to_string()`、`Variant(format!("..{e}"))` | 变体改为 `#[source]` 具体错误或 `anyhow::Error`，优先 `From` + `?` | 524 |
+| S4 | `.map_err(\|_\| Error::Variant)` | 变体携带 `#[source]`；属于允许例外的写明理由（见下） | 914 |
+| L1 | 日志字段 `error = %error`、`error = ?error` | 从 source chain 提取固定分类字段，不输出正文 | 329 |
+
+数量取自提交 `48a2e95c` 的扫描快照，只计生产代码；测试代码计数见清单末尾。
+
+### S4 的允许例外
+
+以下来源不含可用诊断信息，或不能作为 source 保存，可以丢弃，但必须在同一行或前一行用中文注释写明理由：
+
+- 锁中毒 `PoisonError<Guard>`：持有 guard，不能跨线程保存；
+- `TryFromIntError`、`TryFromSliceError`：只表示长度或范围不符，目标分类已完整表达；
+- `tokio::time::error::Elapsed`：超时本身就是分类；
+- 通道 `SendError<T>`、`TrySendError<T>`：携带待发负载，保存会延长负载生命周期，且可能含剪贴板内容；
+- `uc-core` 内部纯校验结果改分类，且下层同样是 Core 纯校验、没有外部失败时。
+
+UTF-8、文本解析和系统时间（清单中的 R 类）需逐项判断：纯输入校验按例外处理；读取持久数据或对端输入时保留来源。
+
+### 与其他计划的约束
+
+- [Core 边界收口](2026-09-23-core-boundary-remediation.md) E8 计划从 `uc-core` 移除 `anyhow`。Core 错误类型保留来源时
+  使用具体错误类型，不新增 `anyhow::Error` 字段。
+- `compatibility/` 是独立版本的 LAN 兼容线，其修改点单独成切片，随兼容线自己的版本发布。
+- 049 成员重写会话已在修复以下位置，本计划不重复排期，合入后复核并从清单中移除：
+  [`admission_key_manager.rs`](../../../crates/uc-infra/src/security/admission_key_manager.rs) 的全部 `map_err(|_| AdmissionKeyError::X)`；
+  [`profile_key_recovery.rs`](../../../crates/uc-infra/src/security/profile_key_recovery.rs) 的 `activate_from_backing_if_available`；
+  [`space_security_store/`](../../../crates/uc-infra/src/db/repositories/space_security_store/) 中的 S1/S3 与存储失败分类器；
+  Joiner 激活准备中 `AdmissionSpaceTransitionError::Inconsistent` 的分类。
+  该会话明确未处理的 `SpaceAdmissionStateStoreError`、`MembershipLedgerError`、`CurrentSpaceIdentityError`、
+  `RePairingStateError`、`ActiveSpaceGenerationManifestStoreError::Corrupt` 等单元或 `Copy` 错误类型仍属本计划。
+
+## 切片
+
+每个切片开工前重新生成清单，按当时行号执行；一个切片内只改一个 crate 或一个业务模块，便于按错误类型整体调整。
+
+| 切片 | 内容 | 范围 | 前置 |
+| --- | --- | --- | --- |
+| E0 | 规则与清单：更新错误处理与观测规范，生成本清单 | 文档 | 无（本次完成） |
+| E1 | 自动检查：`check-rust-style.mjs` 拒绝新增的 S1/S2/S3 写法与无注释的 S4 写法，只检查新增行 | 脚本 | E0 |
+| E2 | S1：`anyhow!(error.to_string())` 全部替换 | `uc-infra` 数据库仓储、`uc-engine` 宿主适配（049 处理中的 `space_security_store/` 除外） | E0 |
+| E3 | S2：`anyhow!("..{e}")` 改为 `context`，移除文本中的路径、标签值与内容 | `uc-application` 剪贴板、`uc-infra` 数据库与文件系统、`uc-engine` 对账 | E0 |
+| E4 | S3 中含路径或标识的文本（隐私优先） | 清单 S3 中 `path.display()`、`{parent:?}` 等 | E0 |
+| E5 | S3 其余：字符串错误变体改为携带 source | 按错误类型逐个处理：`uc-infra` 网络/传输/搜索、`uc-application` 门面、`uc-engine` 装配 | E4 |
+| E6 | S4 F 类：Infra 能力来源 | `uc-infra`（安全存储、MLS、编解码、文件系统、网络） | E0 |
+| E7 | S4 F 类：Application、Engine 与绑定 | `uc-application`、`uc-engine`、`bindings/` | E6 |
+| E8 | S4 `uc-core`：按纯业务判断规则逐项判定，保留来源时只用具体错误类型 | `uc-core` | 与 Core 边界收口协调 |
+| E9 | S4 E/R 类：逐项确认例外并补注释，或改为保留来源 | 全仓 | E6–E8 |
+| E10 | L1：日志改为固定分类字段 | 全仓，按模块推进 | E2–E7 对应模块完成后 |
+| E11 | 兼容线 S3/S4 | `compatibility/` | 兼容线自己的发布节奏 |
+
+## 验收
+
+- 每个切片按[错误处理与转换](../../design-docs/error-handling.md#测试)补测试：对外稳定分类不变，`source()` 非空，
+  适用时能从 source chain 找到原始下层错误；不以显示文本作为唯一断言。
+- 依赖 source chain 做分支的路径（取消、超时、关闭报告、SQLite 忙）各有一条测试证明分支仍然成立。
+- 重新扫描后，F 类数量为零；E/R 类每一处都有例外注释或已改为保留来源。
+- 公开错误与日志中没有新增正文、路径、标识或内容。
+- 交付前检查按仓库 AGENTS 列表执行；未执行的设备矩阵项记为“跳过”。
+
+## 扫描规则
+
+清单由文本规则生成，覆盖 `crates/`、`bindings/`、`compatibility/`、`tests/` 下的 `.rs` 文件：
+
+- S1：`anyhow!(<错误变量>.to_string())`，`Error::msg(<错误变量>)`；
+- S2：`anyhow!` 格式串内插错误变量（`{e}`、`{err}`、`{error}`，或位置参数为错误变量），且位于 `map_err` 闭包或 `Err(e)` 分支中；
+- S3：`Type::Variant(<错误变量>.to_string())`、`Type::Variant(format!(..<错误变量>..))`、
+  `message|detail|reason|..: <错误变量>.to_string()`，含跨行形式；
+- S4：`map_err(|_| ..)` 与 `map_err(|_xxx| ..)`，来源类别按调用链关键词推断；
+- L1：日志宏中的 `error = %<错误变量>`、`error = ?<错误变量>`。
+
+测试文件、`testing/` 目录及 `#[cfg(test)] mod` 之后的内容计为测试代码。规则会漏掉经中间变量转手的写法，也可能把少量
+非错误的 `to_string()` 计入；E1 的自动检查落地时以同一规则为准，并补充漏报样例。
+
+## 实施记录
+
+### E1 自动检查（2026-09-24）
+
+`scripts/architecture/check-rust-style.mjs` 对新增的非测试行执行 S1/S2/S3 检查，并拒绝同一行与前一行都没有中文注释的
+`map_err(|_| ..)`；跨行写法与前一行拼接后判断。在当前全仓按文件模式试跑，命中 S1 33、S2 78、S3 520、S4 891 处，
+与清单口径一致（S1 差额来自 049 已修复的 `space_security_store/`）。S3 额外覆盖 `map_err(|e| e.to_string())`。
+L1 日志字段不在本切片检查范围，待 E10 确定固定分类字段的替换写法后再加入。
+
+### E2 S1 替换（2026-09-24）
+
+- `uc-infra` 数据库仓储（`blob_reference_repo`、`entry_receive_attempt_repo`、`migration_repo`、`mobile_device_repo`、
+  `relationship_store`）与 `uc-engine` 宿主适配 `assembly/host.rs`：改为直接 `?` 或 `.map_err(anyhow::Error::new)`。
+  这些仓储外层仍有 S3 的 `Storage(e.to_string())`，source chain 要到 E5 才能完整到达 Application。
+- `rendezvous/invitation_adapter.rs`：mDNS 发布链路从 `Result<_, String>` 改为 `anyhow::Result`，
+  `InvitationError::LocalPublicationFailed` 的来源保留 `MdnsPublisherError`。
+- 测试：宿主剪贴板读取失败时可从错误链取回 `HostCapabilityError` 及其分类；本地发布失败可取回 `MdnsPublisherError`。
+- 转入 E5：`network/iroh/membership_branch_recovery_adapter.rs` 中的 `anyhow::Error::msg(source)`，上游
+  `connect_with_staggered_retry` 把多次拨号失败汇总为 `String`，需要随网络错误类型一起重新设计。
+- 不处理：`space_security_store/revocation.rs` 剩余 1 处，属于 049 处理范围。
+
