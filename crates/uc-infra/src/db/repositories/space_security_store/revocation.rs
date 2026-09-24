@@ -14,7 +14,7 @@ use crate::security::MasterKey;
 
 use super::encrypted_payload::{open, seal, space_lookup_token};
 use super::space_material::{load_space_material_on, save_space_material_on};
-use super::{backend, epoch_to_i64, DieselSpaceSecurityStore};
+use super::{backend, epoch_to_i64, transaction_failure, DieselSpaceSecurityStore};
 
 #[derive(QueryableByName)]
 pub(super) struct RevocationRow {
@@ -102,10 +102,9 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
         let master_key = self.session.get_master_key().map_err(backend)?;
         self.executor
             .run(|conn| {
-                save_space_material_on(conn, &master_key, material)
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+                save_space_material_on(conn, &master_key, material).map_err(anyhow::Error::new)
             })
-            .map_err(backend)
+            .map_err(transaction_failure)
     }
 
     async fn load_space_material(
@@ -116,10 +115,9 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
         let space_id = space_id.clone();
         self.executor
             .run(move |conn| {
-                load_space_material_on(conn, &master_key, &space_id)
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+                load_space_material_on(conn, &master_key, &space_id).map_err(anyhow::Error::new)
             })
-            .map_err(backend)
+            .map_err(transaction_failure)
     }
 
     async fn due_group_updates(
@@ -131,7 +129,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
         let key = self.session.get_master_key().map_err(backend)?;
         self.executor
             .run(|conn| Ok(self.load_due_updates_on(conn, &key, space_id, now_ms, online_peer)))
-            .map_err(backend)?
+            .map_err(transaction_failure)?
     }
 
     async fn record_group_update_failures(
@@ -143,7 +141,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
         let key = self.session.get_master_key().map_err(backend)?;
         self.executor
             .run(|conn| Ok(self.save_delivery_failures_on(conn, &key, space_id, failures, now_ms)))
-            .map_err(backend)?
+            .map_err(transaction_failure)?
     }
 
     async fn group_update_delivery_status(
@@ -155,7 +153,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
         let key = self.session.get_master_key().map_err(backend)?;
         self.executor
             .run(|conn| Ok(self.load_group_update_delivery_status_on(conn, &key, space_id)?))
-            .map_err(backend)
+            .map_err(transaction_failure)
     }
 
     async fn begin_revocation(
@@ -191,7 +189,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                     let mut has_incomplete = false;
                     for row in rows {
                         let existing = decode_record(&master_key, &row)
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                            .map_err(anyhow::Error::new)?;
                         if existing.status() == RevocationStatus::Prepared
                             && existing.previous_epoch() < prepared.previous_epoch()
                         {
@@ -241,11 +239,11 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                     .bind::<Text, _>(&lookup_token)
                     .bind::<BigInt, _>(
                         epoch_to_i64(prepared.previous_epoch().value())
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+                            .map_err(anyhow::Error::new)?,
                     )
                     .bind::<BigInt, _>(
                         epoch_to_i64(prepared.next_epoch().value())
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+                            .map_err(anyhow::Error::new)?,
                     )
                     .bind::<Text, _>(status_name(prepared.status()))
                     .bind::<Binary, _>(&encrypted)
@@ -255,7 +253,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                     Ok(BeginRevocationOutcome::Begun(prepared))
                 })
             })
-            .map_err(backend)
+            .map_err(transaction_failure)
     }
 
     async fn get_revocation(
@@ -267,7 +265,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
         let row = self
             .executor
             .run(move |conn| load_revocation_row(conn, &revocation_id))
-            .map_err(backend)?;
+            .map_err(transaction_failure)?;
         row.map(|row| decode_record(&master_key, &row)).transpose()
     }
 
@@ -284,7 +282,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                 .load::<RevocationRow>(conn)
                 .map_err(anyhow::Error::from)
             })
-            .map_err(backend)?;
+            .map_err(transaction_failure)?;
         rows.iter()
             .map(|row| decode_record(&master_key, row))
             .collect()
@@ -322,7 +320,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                 .execute(conn)
                 .map_err(anyhow::Error::from)
             })
-            .map_err(backend)?;
+            .map_err(transaction_failure)?;
         if affected != 1 {
             return Err(KeyEpochError::StateIssue(
                 uc_core::membership::KeyEpochStateIssue::InvalidStage,
@@ -340,7 +338,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
         let row = self
             .executor
             .run(move |conn| load_revocation_row(conn, &revocation_id_value))
-            .map_err(backend)?;
+            .map_err(transaction_failure)?;
         let Some(row) = row else {
             return Ok(None);
         };
@@ -379,7 +377,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                         ));
                     }
                     let mut record = decode_record(&master_key, &row)
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                        .map_err(anyhow::Error::new)?;
                     if record.status() != RevocationStatus::Prepared {
                         return Err(anyhow::anyhow!("revocation is not prepared"));
                     }
@@ -405,7 +403,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                         }
                         let persisted_material =
                             load_space_material_on(conn, &master_key, record.space_id())
-                                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                                .map_err(anyhow::Error::new)?;
                         if persisted_material.as_ref() != Some(&verified_material) {
                             return Err(anyhow::anyhow!(
                                 "prepared revocation verification state changed"
@@ -442,23 +440,23 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                     if staged_payload.is_none() {
                         record
                             .transition_to(status, now_ms)
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                            .map_err(anyhow::Error::new)?;
                     }
                     let encrypted_record = seal(
                         &master_key,
                         &record,
                         &record_aad(&revocation_id, status_name(status)),
                     )
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
                     let encrypted_stage = staged_payload
                         .as_ref()
                         .map(|stage| seal(&master_key, stage, &stage_aad(&revocation_id)))
                         .transpose()
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                        .map_err(anyhow::Error::new)?;
                     let previous_epoch = epoch_to_i64(record.previous_epoch().value())
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                        .map_err(anyhow::Error::new)?;
                     let next_epoch = epoch_to_i64(record.next_epoch().value())
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                        .map_err(anyhow::Error::new)?;
                     let affected = diesel::sql_query(
                         "UPDATE member_revocation_log SET previous_epoch = ?, next_epoch = ?, \
                          status = ?, encrypted_record = ?, encrypted_stage = ?, updated_at_ms = ? \
@@ -480,7 +478,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                     Ok(record)
                 })
             })
-            .map_err(backend)
+            .map_err(transaction_failure)
     }
 
     async fn commit_revocation_recovery(
@@ -536,8 +534,8 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                 conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
                     let row = load_revocation_row(conn, &revocation_id)?
                         .ok_or_else(|| anyhow::anyhow!("revocation not found"))?;
-                    let existing_record = decode_record(&master_key, &row)
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    let existing_record =
+                        decode_record(&master_key, &row).map_err(anyhow::Error::new)?;
                     let existing_stage: RevocationStage = open(
                         &master_key,
                         row.encrypted_stage
@@ -545,7 +543,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                             .ok_or_else(|| anyhow::anyhow!("revocation has no staged payload"))?,
                         &stage_aad(&revocation_id),
                     )
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
                     let appends_generation = existing_stage.generation_count()
                         < stage.generation_count()
                         && existing_record.next_epoch() < record.next_epoch();
@@ -561,7 +559,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                         return Err(anyhow::anyhow!("revocation recovery is not append-only"));
                     }
                     save_space_material_on(conn, &master_key, &material)
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                        .map_err(anyhow::Error::new)?;
                     let affected = diesel::sql_query(
                         "UPDATE member_revocation_log SET previous_epoch = ?, next_epoch = ?, \
                          status = ?, encrypted_record = ?, encrypted_stage = ?, updated_at_ms = ? \
@@ -581,7 +579,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                     Ok(record)
                 })
             })
-            .map_err(backend)
+            .map_err(transaction_failure)
     }
 
     async fn activate_revocation(
@@ -602,19 +600,19 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                         .ok_or_else(|| anyhow::anyhow!("revocation has no staged payload"))?;
                     let stage: RevocationStage =
                         open(&master_key, encrypted_stage, &stage_aad(&revocation_id))
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                    let mut record = decode_record(&master_key, &row)
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                            .map_err(anyhow::Error::new)?;
+                    let mut record =
+                        decode_record(&master_key, &row).map_err(anyhow::Error::new)?;
                     record
                         .transition_to(RevocationStatus::Activated, now_ms)
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                        .map_err(anyhow::Error::new)?;
                     let mut stage = stage;
                     stage
                         .transition_to(RevocationStatus::Activated, now_ms)
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                        .map_err(anyhow::Error::new)?;
                     let current_material =
                         load_space_material_on(conn, &master_key, stage.record().space_id())
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+                            .map_err(anyhow::Error::new)?
                             .ok_or_else(|| anyhow::anyhow!("space key material not found"))?;
                     let material = SpaceKeyMaterial::new(
                         stage.next_space_state().clone(),
@@ -627,15 +625,15 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                         stage.record().target_device_id(),
                     );
                     save_space_material_on(conn, &master_key, &material)
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                        .map_err(anyhow::Error::new)?;
                     let encrypted_record = seal(
                         &master_key,
                         &record,
                         &record_aad(&revocation_id, status_name(record.status())),
                     )
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
                     let encrypted_stage = seal(&master_key, &stage, &stage_aad(&revocation_id))
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                        .map_err(anyhow::Error::new)?;
                     let affected = diesel::sql_query(
                         "UPDATE member_revocation_log SET status = ?, encrypted_record = ?, \
                          encrypted_stage = ?, updated_at_ms = ? \
@@ -653,7 +651,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                     Ok(record)
                 })
             })
-            .map_err(backend)
+            .map_err(transaction_failure)
     }
 
     async fn start_distribution(
@@ -668,8 +666,8 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                 conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
                     let row = load_revocation_row(conn, &revocation_id)?
                         .ok_or_else(|| anyhow::anyhow!("revocation not found"))?;
-                    let mut record = decode_record(&master_key, &row)
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    let mut record =
+                        decode_record(&master_key, &row).map_err(anyhow::Error::new)?;
                     if matches!(
                         record.status(),
                         RevocationStatus::Distributing | RevocationStatus::Complete
@@ -685,33 +683,33 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                         .ok_or_else(|| anyhow::anyhow!("revocation has no staged payload"))?;
                     let mut stage: RevocationStage =
                         open(&master_key, encrypted_stage, &stage_aad(&revocation_id))
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                            .map_err(anyhow::Error::new)?;
                     record
                         .transition_to(RevocationStatus::Distributing, now_ms)
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                        .map_err(anyhow::Error::new)?;
                     stage
                         .transition_to(RevocationStatus::Distributing, now_ms)
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                        .map_err(anyhow::Error::new)?;
                     if stage.all_recipients_confirmed() {
                         record
                             .transition_to(RevocationStatus::Complete, now_ms)
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                            .map_err(anyhow::Error::new)?;
                         stage
                             .transition_to(RevocationStatus::Complete, now_ms)
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                            .map_err(anyhow::Error::new)?;
                     }
                     let encrypted_record = seal(
                         &master_key,
                         &record,
                         &record_aad(&revocation_id, status_name(record.status())),
                     )
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
                     let encrypted_stage = if record.status() == RevocationStatus::Complete {
                         None
                     } else {
                         Some(
                             seal(&master_key, &stage, &stage_aad(&revocation_id))
-                                .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+                                .map_err(anyhow::Error::new)?,
                         )
                     };
                     let affected = diesel::sql_query(
@@ -731,7 +729,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                     Ok(record)
                 })
             })
-            .map_err(backend)
+            .map_err(transaction_failure)
     }
 
     async fn acknowledge_recipient(
@@ -748,8 +746,8 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                 conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
                     let row = load_revocation_row(conn, &revocation_id)?
                         .ok_or_else(|| anyhow::anyhow!("revocation not found"))?;
-                    let mut record = decode_record(&master_key, &row)
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    let mut record =
+                        decode_record(&master_key, &row).map_err(anyhow::Error::new)?;
                     if record.status() == RevocationStatus::Complete {
                         return Ok(record);
                     }
@@ -762,30 +760,30 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                         .ok_or_else(|| anyhow::anyhow!("revocation has no staged payload"))?;
                     let mut stage: RevocationStage =
                         open(&master_key, encrypted_stage, &stage_aad(&revocation_id))
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                            .map_err(anyhow::Error::new)?;
                     stage
                         .acknowledge_recipient(&recipient, now_ms)
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                        .map_err(anyhow::Error::new)?;
                     if stage.all_recipients_confirmed() {
                         record
                             .transition_to(RevocationStatus::Complete, now_ms)
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                            .map_err(anyhow::Error::new)?;
                         stage
                             .transition_to(RevocationStatus::Complete, now_ms)
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                            .map_err(anyhow::Error::new)?;
                     }
                     let encrypted_record = seal(
                         &master_key,
                         &record,
                         &record_aad(&revocation_id, status_name(record.status())),
                     )
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
                     let encrypted_stage = if record.status() == RevocationStatus::Complete {
                         None
                     } else {
                         Some(
                             seal(&master_key, &stage, &stage_aad(&revocation_id))
-                                .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+                                .map_err(anyhow::Error::new)?,
                         )
                     };
                     let affected = diesel::sql_query(
@@ -805,7 +803,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                     Ok(record)
                 })
             })
-            .map_err(backend)
+            .map_err(transaction_failure)
     }
 
     async fn settle_obsolete_revocation_recipients(
@@ -823,8 +821,8 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                     let Some(row) = load_revocation_row(conn, &revocation_id)? else {
                         return Ok(0);
                     };
-                    let mut record = decode_record(&master_key, &row)
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    let mut record =
+                        decode_record(&master_key, &row).map_err(anyhow::Error::new)?;
                     // 只有分发阶段持有待投递的 outbox；其余阶段没有可结清的投递。
                     if record.status() != RevocationStatus::Distributing {
                         return Ok(0);
@@ -835,7 +833,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                         .ok_or_else(|| anyhow::anyhow!("revocation has no staged payload"))?;
                     let mut stage: RevocationStage =
                         open(&master_key, encrypted_stage, &stage_aad(&revocation_id))
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                            .map_err(anyhow::Error::new)?;
                     let settled = stage.settle_obsolete_recipients(&retained_recipients);
                     if settled == 0 {
                         return Ok(0);
@@ -843,23 +841,23 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                     if stage.all_recipients_confirmed() {
                         record
                             .transition_to(RevocationStatus::Complete, now_ms)
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                            .map_err(anyhow::Error::new)?;
                         stage
                             .transition_to(RevocationStatus::Complete, now_ms)
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                            .map_err(anyhow::Error::new)?;
                     }
                     let encrypted_record = seal(
                         &master_key,
                         &record,
                         &record_aad(&revocation_id, status_name(record.status())),
                     )
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
                     let encrypted_stage = if record.status() == RevocationStatus::Complete {
                         None
                     } else {
                         Some(
                             seal(&master_key, &stage, &stage_aad(&revocation_id))
-                                .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+                                .map_err(anyhow::Error::new)?,
                         )
                     };
                     let affected = diesel::sql_query(
@@ -879,7 +877,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                     Ok(settled)
                 })
             })
-            .map_err(backend)
+            .map_err(transaction_failure)
     }
 }
 

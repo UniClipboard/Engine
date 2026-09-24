@@ -31,6 +31,14 @@ fn backend(error: impl Into<anyhow::Error>) -> KeyEpochError {
     KeyEpochError::Repository(error.into())
 }
 
+/// 事务闭包内返回的 `KeyEpochError` 保持原分类；其余下层失败按存储失败保留来源。
+fn transaction_failure(error: anyhow::Error) -> KeyEpochError {
+    match error.downcast::<KeyEpochError>() {
+        Ok(error) => error,
+        Err(error) => backend(error),
+    }
+}
+
 fn epoch_to_i64(epoch: u64) -> Result<i64, KeyEpochError> {
     i64::try_from(epoch).map_err(backend)
 }

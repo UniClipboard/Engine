@@ -1,7 +1,9 @@
 //! 持久发送工作索引：只在安全事实改变时提取正文，等待与失败只更新小记录。
+//!
+//! 索引维护先读后写，事务必须一开始就取得写锁（IMMEDIATE）：WAL 下延迟事务在读后升级写锁时，
+//! 若其他连接已提交写入会立即返回 BUSY，忙等超时不生效。
 use std::collections::{HashMap, HashSet};
 
-use diesel::connection::Connection;
 use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::{Binary, Text};
@@ -17,7 +19,7 @@ use uc_core::membership::{
 use super::encrypted_payload::{open, seal, space_lookup_token};
 use super::revocation::{decode_record, load_revocation_row, stage_aad};
 use super::space_material::load_space_material_on;
-use super::{backend, DieselSpaceSecurityStore};
+use super::{backend, transaction_failure, DieselSpaceSecurityStore};
 use crate::db::ports::DbExecutor;
 use crate::security::MasterKey;
 
@@ -77,13 +79,6 @@ fn task_token(key: &MasterKey, source: &str, id: &str) -> Result<Vec<u8>, KeyEpo
     mac.update(&(id.len() as u64).to_be_bytes());
     mac.update(id.as_bytes());
     Ok(mac.finalize().into_bytes().to_vec())
-}
-
-fn transaction_failure(error: anyhow::Error) -> KeyEpochError {
-    match error.downcast::<KeyEpochError>() {
-        Ok(error) => error,
-        Err(error) => backend(error),
-    }
 }
 
 fn load_source_summary(
@@ -256,7 +251,7 @@ impl<E: DbExecutor> DieselSpaceSecurityStore<E> {
         now_ms: i64,
         online_peer: Option<DeviceId>,
     ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
-        conn.transaction::<_, anyhow::Error, _>(|conn| {
+        conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
             let scope = space_lookup_token(key, space_id)?;
             let mut live_sources = HashSet::new();
             let mut expected_tokens = HashSet::new();
@@ -347,7 +342,7 @@ impl<E: DbExecutor> DieselSpaceSecurityStore<E> {
         failures: &[(String, GroupUpdateDispatchError)],
         now_ms: i64,
     ) -> Result<usize, KeyEpochError> {
-        conn.transaction::<_, anyhow::Error, _>(|conn| {
+        conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
             let scope = space_lookup_token(key, space_id)?;
             let mut found = HashSet::new();
             for (token, mut state) in read_states(conn, key, &scope)? {

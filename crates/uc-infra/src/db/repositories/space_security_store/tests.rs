@@ -1445,3 +1445,75 @@ async fn settling_distributing_revocation_recipients_completes_it_durably() {
         "已完成的撤销重复结清必须幂等"
     );
 }
+
+// 投递状态读取会顺带维护加密索引；它必须在其他连接并发写入安全材料时仍然成功，
+// 不能因为延迟事务在读后升级写锁而失败。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delivery_status_read_survives_concurrent_space_material_writes() {
+    let (repo, _pool, _tempdir) = make_repo();
+    let repo = std::sync::Arc::new(repo);
+    let space_id = SpaceId::from_str("space-sensitive");
+    let material = seed_current_space(&repo).await;
+
+    let writer = {
+        let repo = std::sync::Arc::clone(&repo);
+        let mut material = material;
+        tokio::spawn(async move {
+            for round in 0..200_i64 {
+                material.add_pending_group_updates(
+                    [pending_update(&format!("peer-{round}"), round as u64 + 1)],
+                    100 + round,
+                );
+                repo.save_space_material(&material).await.unwrap();
+            }
+        })
+    };
+    let reader = {
+        let repo = std::sync::Arc::clone(&repo);
+        let space_id = space_id.clone();
+        tokio::spawn(async move {
+            for _ in 0..200 {
+                repo.group_update_delivery_status(&space_id).await?;
+            }
+            Ok::<_, uc_core::membership::KeyEpochError>(())
+        })
+    };
+
+    writer.await.unwrap();
+    reader
+        .await
+        .unwrap()
+        .expect("delivery status read must not fail while material is being written");
+}
+
+// 事务内部发现的持久状态完整性失败必须保持原分类，不能被字符串化后包装成存储失败。
+#[tokio::test]
+async fn activation_reports_a_tampered_revocation_as_an_integrity_failure() {
+    let (repo, pool, _tempdir) = make_repo();
+    seed_current_space(&repo).await;
+    let prepared = prepared("revocation-tampered");
+    repo.begin_revocation(&prepared).await.unwrap();
+    let stage = staged(prepared);
+    repo.stage_revocation(&stage).await.unwrap();
+    let mut conn = pool.get().unwrap();
+    diesel::sql_query(
+        "UPDATE member_revocation_log SET next_epoch = next_epoch + 5 WHERE revocation_id = ?",
+    )
+    .bind::<Text, _>("revocation-tampered")
+    .execute(&mut conn)
+    .unwrap();
+    drop(conn);
+
+    let error = repo
+        .activate_revocation(stage.record().revocation_id(), 120)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            uc_core::membership::KeyEpochError::PersistedStateIntegrityFailed
+        ),
+        "unexpected classification: {error:?}"
+    );
+}
