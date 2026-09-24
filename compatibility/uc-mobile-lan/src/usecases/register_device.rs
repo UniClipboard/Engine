@@ -1584,7 +1584,7 @@ mod tests {
             ConnectUriError::InvalidScheme,
             ConnectUriError::UnsupportedVersion,
             ConnectUriError::UnsupportedService,
-            ConnectUriError::PayloadDecodeFailed("simulated".into()),
+            ConnectUriError::PayloadDecodeFailed(uc_mobile_proto::PayloadDecodeDetail::Missing),
             ConnectUriError::MissingField("url"),
             ConnectUriError::InvalidUrl,
         ] {

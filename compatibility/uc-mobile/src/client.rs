@@ -62,6 +62,8 @@ use chrono::DateTime;
 use futures_util::StreamExt;
 use tokio::task::AbortHandle;
 
+use crate::ffi_reason;
+
 use uc_mobile_proto::{
     Clipboard as ProtoClipboard, ClipboardKind as ProtoKind, HistoryQuery as ProtoHistoryQuery,
     HistoryRecord as ProtoHistoryRecord,
@@ -1268,7 +1270,7 @@ fn map_status(status: u16) -> Option<SyncError> {
 
 fn network(e: reqwest::Error) -> SyncError {
     SyncError::Network {
-        reason: e.to_string(),
+        reason: ffi_reason(&e),
     }
 }
 

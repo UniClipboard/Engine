@@ -166,8 +166,45 @@ impl ConnectUriOther {
     }
 }
 
+/// payload 编解码失败的细节。
+///
+/// 显示文本与改为携带 source 之前一致：经 `uc-mobile` 的 FFI 错误作为 `reason` 原样交给宿主；
+/// 下层错误同时作为 source 保留。
+#[derive(Debug)]
+pub enum PayloadDecodeDetail {
+    /// `p` 参数缺失或为空。
+    Missing,
+    /// build 时 payload JSON 序列化失败。
+    Serialize(serde_json::Error),
+    /// `p` 不是合法的 base64url。
+    Base64(base64::DecodeError),
+    /// payload JSON 解析失败。
+    Json(serde_json::Error),
+}
+
+impl std::fmt::Display for PayloadDecodeDetail {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing => formatter.write_str("p missing or empty"),
+            Self::Serialize(source) => write!(formatter, "serialize: {source}"),
+            Self::Base64(source) => write!(formatter, "base64url: {source}"),
+            Self::Json(source) => write!(formatter, "json: {source}"),
+        }
+    }
+}
+
+impl std::error::Error for PayloadDecodeDetail {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Missing => None,
+            Self::Serialize(source) | Self::Json(source) => Some(source),
+            Self::Base64(source) => Some(source),
+        }
+    }
+}
+
 /// build / parse 公共失败语义 —— 错误码与规范 §4.2 表一一对应。
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum ConnectUriError {
     /// scheme ≠ `uniclipboard` 或 host ≠ `connect`(规范 §4.2 `INVALID_SCHEME`)。
     /// 仅 [`parse_mobile_sync_connect_uri`] 构造; build 路径不可能产生。
@@ -186,8 +223,8 @@ pub enum ConnectUriError {
     UnsupportedService,
 
     /// `p` 缺失 / base64url 损坏 / JSON 解析失败(规范 §4.2 `PAYLOAD_DECODE_FAILED`)。
-    #[error("payload decode failed: {0}")]
-    PayloadDecodeFailed(String),
+    #[error("payload decode failed")]
+    PayloadDecodeFailed(#[source] PayloadDecodeDetail),
 
     /// `url`/`user`/`pwd` 缺失或为空字符串(规范 §4.2 `MISSING_FIELD`)。
     #[error("required field missing or empty: {0}")]
@@ -279,7 +316,7 @@ pub fn build_mobile_sync_connect_uri(
     // serde_json::to_string 默认 minify(无 indent 即无空白); 字段顺序按 struct
     // 定义; BTreeMap 序列化为字典序。三者合起来保证跨语言字节稳定。
     let json = serde_json::to_string(&payload)
-        .map_err(|e| ConnectUriError::PayloadDecodeFailed(format!("serialize: {e}")))?;
+        .map_err(|e| ConnectUriError::PayloadDecodeFailed(PayloadDecodeDetail::Serialize(e)))?;
     let p = URL_SAFE_NO_PAD.encode(json.as_bytes());
 
     let uri = format!("{SCHEME}://{HOST}?v={ENVELOPE_VERSION}&svc={SERVICE}&p={p}");
@@ -346,13 +383,15 @@ pub fn parse_mobile_sync_connect_uri(qr_text: &str) -> Result<ConnectPayload, Co
     }
     let p = q_p
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| ConnectUriError::PayloadDecodeFailed("p missing or empty".into()))?;
+        .ok_or(ConnectUriError::PayloadDecodeFailed(
+            PayloadDecodeDetail::Missing,
+        ))?;
 
     let json_bytes = URL_SAFE_NO_PAD
         .decode(p.as_bytes())
-        .map_err(|e| ConnectUriError::PayloadDecodeFailed(format!("base64url: {e}")))?;
+        .map_err(|e| ConnectUriError::PayloadDecodeFailed(PayloadDecodeDetail::Base64(e)))?;
     let payload: ConnectPayload = serde_json::from_slice(&json_bytes)
-        .map_err(|e| ConnectUriError::PayloadDecodeFailed(format!("json: {e}")))?;
+        .map_err(|e| ConnectUriError::PayloadDecodeFailed(PayloadDecodeDetail::Json(e)))?;
 
     if payload.v != PAYLOAD_VERSION {
         return Err(ConnectUriError::UnsupportedVersion);
@@ -519,7 +558,7 @@ mod tests {
     fn build_rejects_empty_candidate_list() {
         let err = build_mobile_sync_connect_uri(&[], "user", "pwd", ConnectUriOther::default())
             .unwrap_err();
-        assert_eq!(err, ConnectUriError::MissingField("url"));
+        assert!(matches!(err, ConnectUriError::MissingField("url")));
     }
 
     #[test]
@@ -527,7 +566,7 @@ mod tests {
         let err =
             build_mobile_sync_connect_uri(&urls(&[""]), "user", "pwd", ConnectUriOther::default())
                 .unwrap_err();
-        assert_eq!(err, ConnectUriError::MissingField("url"));
+        assert!(matches!(err, ConnectUriError::MissingField("url")));
     }
 
     #[test]
@@ -539,7 +578,7 @@ mod tests {
             ConnectUriOther::default(),
         )
         .unwrap_err();
-        assert_eq!(err, ConnectUriError::MissingField("user"));
+        assert!(matches!(err, ConnectUriError::MissingField("user")));
     }
 
     #[test]
@@ -551,7 +590,7 @@ mod tests {
             ConnectUriOther::default(),
         )
         .unwrap_err();
-        assert_eq!(err, ConnectUriError::MissingField("pwd"));
+        assert!(matches!(err, ConnectUriError::MissingField("pwd")));
     }
 
     #[test]
@@ -563,7 +602,7 @@ mod tests {
             ConnectUriOther::default(),
         )
         .unwrap_err();
-        assert_eq!(err, ConnectUriError::InvalidUrl);
+        assert!(matches!(err, ConnectUriError::InvalidUrl));
     }
 
     #[test]
@@ -577,7 +616,7 @@ mod tests {
             ConnectUriOther::default(),
         )
         .unwrap_err();
-        assert_eq!(err, ConnectUriError::InvalidUrl);
+        assert!(matches!(err, ConnectUriError::InvalidUrl));
     }
 
     #[test]
@@ -643,7 +682,7 @@ mod tests {
             "https://example.com/connect?v=1&svc=mobile-sync&p=eyJ2IjoxfQ",
         )
         .unwrap_err();
-        assert_eq!(err, ConnectUriError::InvalidScheme);
+        assert!(matches!(err, ConnectUriError::InvalidScheme));
     }
 
     #[test]
@@ -652,7 +691,7 @@ mod tests {
         let err =
             parse_mobile_sync_connect_uri("uniclip://connect?v=1&svc=mobile-sync&p=eyJ2IjoxfQ")
                 .unwrap_err();
-        assert_eq!(err, ConnectUriError::InvalidScheme);
+        assert!(matches!(err, ConnectUriError::InvalidScheme));
     }
 
     #[test]
@@ -660,7 +699,7 @@ mod tests {
         let err =
             parse_mobile_sync_connect_uri("uniclipboard://other?v=1&svc=mobile-sync&p=eyJ2IjoxfQ")
                 .unwrap_err();
-        assert_eq!(err, ConnectUriError::InvalidScheme);
+        assert!(matches!(err, ConnectUriError::InvalidScheme));
     }
 
     #[test]
@@ -670,7 +709,7 @@ mod tests {
             "uniclipboard://connect?v=2&svc=mobile-sync&p=eyJ2IjoxfQ",
         )
         .unwrap_err();
-        assert_eq!(err, ConnectUriError::UnsupportedVersion);
+        assert!(matches!(err, ConnectUriError::UnsupportedVersion));
     }
 
     #[test]
@@ -679,7 +718,7 @@ mod tests {
         let err =
             parse_mobile_sync_connect_uri("uniclipboard://connect?v=1&svc=other&p=eyJ2IjoxfQ")
                 .unwrap_err();
-        assert_eq!(err, ConnectUriError::UnsupportedService);
+        assert!(matches!(err, ConnectUriError::UnsupportedService));
     }
 
     #[test]
@@ -690,7 +729,13 @@ mod tests {
         )
         .unwrap_err();
         match err {
-            ConnectUriError::PayloadDecodeFailed(_) => {}
+            ConnectUriError::PayloadDecodeFailed(ref detail) => {
+                // 宿主经 FFI 看到的文本保持原格式，下层 base64 错误仍可取回。
+                assert!(detail.to_string().starts_with("base64url: "));
+                assert!(std::error::Error::source(detail)
+                    .and_then(|source| source.downcast_ref::<base64::DecodeError>())
+                    .is_some());
+            }
             other => panic!("expected PayloadDecodeFailed, got {other:?}"),
         }
     }
@@ -702,7 +747,7 @@ mod tests {
             "uniclipboard://connect?v=1&svc=mobile-sync&p=eyJ2IjoxLCJ1cmwiOiJodHRwOi8vYS5iIiwidXNlciI6InUifQ",
         )
         .unwrap_err();
-        assert_eq!(err, ConnectUriError::MissingField("pwd"));
+        assert!(matches!(err, ConnectUriError::MissingField("pwd")));
     }
 
     #[test]
@@ -712,7 +757,7 @@ mod tests {
             "uniclipboard://connect?v=1&svc=mobile-sync&p=eyJ2IjoxLCJ1cmwiOiJmdHA6Ly9hLmIiLCJ1c2VyIjoidSIsInB3ZCI6InAifQ",
         )
         .unwrap_err();
-        assert_eq!(err, ConnectUriError::InvalidUrl);
+        assert!(matches!(err, ConnectUriError::InvalidUrl));
     }
 
     // ── parse: 其它边界 ────────────────────────────────────────────────
@@ -734,7 +779,7 @@ mod tests {
         let p = URL_SAFE_NO_PAD.encode(payload.as_bytes());
         let uri = format!("uniclipboard://connect?v=1&svc=mobile-sync&p={p}");
         let err = parse_mobile_sync_connect_uri(&uri).unwrap_err();
-        assert_eq!(err, ConnectUriError::UnsupportedVersion);
+        assert!(matches!(err, ConnectUriError::UnsupportedVersion));
     }
 
     #[test]

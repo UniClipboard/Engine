@@ -61,7 +61,7 @@ pub use clipboard_doc::{
 };
 pub use connect_uri::{
     build_mobile_sync_connect_uri, parse_mobile_sync_connect_uri, ConnectPayload, ConnectUriError,
-    ConnectUriOther, URI_MAX_LEN,
+    ConnectUriOther, PayloadDecodeDetail, URI_MAX_LEN,
 };
 pub use file_state::{
     decode_live_urls, encode_live_urls, format_watermark, normalize_synced_hash, parse_watermark,

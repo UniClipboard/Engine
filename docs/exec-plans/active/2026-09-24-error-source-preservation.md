@@ -243,9 +243,11 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
     `ActionFailed`（固定动作 + 来源）承接，来自 Application 的 `anyhow` 错误先加 context 再装箱。
   - 测试：URI 解析失败可沿链取回 `url::ParseError`，显示与调试文本都不含 URI；二维码构造失败可取回 `ConnectUriError`。
   - 转入 E10：`file_staging.rs` 与 `get_file.rs` 的日志字段仍记录路径与 URI。
+- UniFFI 宿主文本（已决策并完成，按 relay 的做法）：`uc-mobile-proto` 新增 `PayloadDecodeDetail`，显示文本与原先逐字一致，
+  同时保留 `serde_json`/`base64` 来源；`ConnectUriError` 去掉 `PartialEq`/`Eq`，测试改为 `matches!`。
+  `uc-mobile` 的 FFI 错误只能携带字符串，唯一文本化位置为 `ffi_reason`（`ConnectUriError::PayloadDecodeFailed` 与
+  `SyncError::Network`），属于已确认的例外。
 - 剩余 S3（均需单独决定）：
-  - `uc-mobile` 的 `SyncError::Network { reason }` 与 `uc-mobile-proto` 的 `ConnectUriError::PayloadDecodeFailed`：文本经 UniFFI
-    交给手机宿主，属于宿主可见契约，待确认是否按 relay 的做法（内部保留来源、只在 FFI 边界生成原文）。
   - `SecureStorageError::Other`：等 049 提交 `profile_key_recovery.rs` 后处理。
 - `RelayProbeError`（已决策并完成）：宿主诊断文本保持原文透传。Infra 新增 `RelayProbeDetail`，其显示文本与原先交给
   宿主的文本逐字一致，同时以 source 保留下层错误；Application 的 `RelayProbeError` 与 `SettingsFacadeError::RelayProbe*`
