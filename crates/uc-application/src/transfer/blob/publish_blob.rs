@@ -95,7 +95,7 @@ impl PublishBlobUseCase {
         });
         let plaintext_hash = PlaintextHash::from_bytes(
             hash_result
-                .map_err(|e| PublishBlobError::Hash(e.to_string()))?
+                .map_err(|e| PublishBlobError::Hash(anyhow::Error::from(e)))?
                 .bytes,
         );
         let hash_ms = hash_start.elapsed().as_millis() as u64;
@@ -108,7 +108,7 @@ impl PublishBlobUseCase {
         // exception.
         let encrypted = scope_blob_publish(self.transfer_cipher.encrypt(&plaintext))
             .await
-            .map_err(|e| PublishBlobError::Cipher(e.to_string()))?;
+            .map_err(|e| PublishBlobError::Cipher(anyhow::Error::from(e)))?;
         //
         // Phase F: publish 携带业务 reason 一起原子入库。adapter 内部走
         // `with_named_tag`,完成后 blob 已经直接挂在 ClipboardEntry tag 上,
@@ -124,7 +124,7 @@ impl PublishBlobUseCase {
                 TagReason::ClipboardEntry(entry_id.clone()),
             )
             .await
-            .map_err(|e| PublishBlobError::Transfer(e.to_string()))?;
+            .map_err(|e| PublishBlobError::Transfer(anyhow::Error::from(e)))?;
         let publish_ms = publish_start.elapsed().as_millis() as u64;
 
         let save_ref_start = Instant::now();
@@ -135,7 +135,7 @@ impl PublishBlobUseCase {
         } else {
             LocalWorkOutcome::Error
         });
-        save_result.map_err(|e| PublishBlobError::Reference(e.to_string()))?;
+        save_result.map_err(|e| PublishBlobError::Reference(anyhow::Error::from(e)))?;
         let save_ref_ms = save_ref_start.elapsed().as_millis() as u64;
 
         let ticket_start = Instant::now();
@@ -146,7 +146,8 @@ impl PublishBlobUseCase {
         } else {
             LocalWorkOutcome::Error
         });
-        let ticket = ticket_result.map_err(|e| PublishBlobError::Transfer(e.to_string()))?;
+        let ticket =
+            ticket_result.map_err(|e| PublishBlobError::Transfer(anyhow::Error::from(e)))?;
         let ticket_ms = ticket_start.elapsed().as_millis() as u64;
 
         info!(
@@ -192,7 +193,7 @@ impl PublishBlobUseCase {
             .blob_transfer
             .publish_path(&path, TagReason::ClipboardEntry(entry_id.clone()))
             .await
-            .map_err(|e| PublishBlobError::Transfer(e.to_string()))?;
+            .map_err(|e| PublishBlobError::Transfer(anyhow::Error::from(e)))?;
         let publish_ms = publish_start.elapsed().as_millis() as u64;
 
         // 文件 blob 不加密 → plaintext_hash == iroh blob hash == digest。
@@ -203,7 +204,7 @@ impl PublishBlobUseCase {
         self.blob_reference
             .save(plaintext_hash, digest)
             .await
-            .map_err(|e| PublishBlobError::Reference(e.to_string()))?;
+            .map_err(|e| PublishBlobError::Reference(anyhow::Error::from(e)))?;
         let save_ref_ms = save_ref_start.elapsed().as_millis() as u64;
 
         let ticket_start = Instant::now();
@@ -211,7 +212,7 @@ impl PublishBlobUseCase {
             .blob_transfer
             .issue_ticket(&digest)
             .await
-            .map_err(|e| PublishBlobError::Transfer(e.to_string()))?;
+            .map_err(|e| PublishBlobError::Transfer(anyhow::Error::from(e)))?;
         let ticket_ms = ticket_start.elapsed().as_millis() as u64;
 
         info!(
@@ -236,12 +237,12 @@ impl PublishBlobUseCase {
 pub(crate) enum PublishBlobError {
     #[error("blob plaintext is empty")]
     EmptyPlaintext,
-    #[error("hash failed: {0}")]
-    Hash(String),
-    #[error("blob transfer failed: {0}")]
-    Transfer(String),
-    #[error("blob reference failed: {0}")]
-    Reference(String),
-    #[error("blob payload encryption failed: {0}")]
-    Cipher(String),
+    #[error("hash failed")]
+    Hash(#[source] anyhow::Error),
+    #[error("blob transfer failed")]
+    Transfer(#[source] anyhow::Error),
+    #[error("blob reference failed")]
+    Reference(#[source] anyhow::Error),
+    #[error("blob payload encryption failed")]
+    Cipher(#[source] anyhow::Error),
 }

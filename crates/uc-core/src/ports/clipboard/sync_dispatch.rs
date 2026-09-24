@@ -95,10 +95,10 @@ pub enum ClipboardDispatchError {
     #[error("peer version is incompatible with confirmed clipboard delivery")]
     PeerIncompatible,
     /// Stream I/O failure — broken connection, short read, etc.
-    #[error("stream io: {0}")]
-    Io(String),
-    #[error("internal: {0}")]
-    Internal(String),
+    #[error("stream io")]
+    Io(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("internal")]
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Outcome of a single dispatch attempt paired with the connection path

@@ -32,7 +32,7 @@ impl CleanupReceiveArtifactsPort for FsReceiveArtifactCleaner {
                 let metadata = match tokio::fs::symlink_metadata(path).await {
                     Ok(metadata) => metadata,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(error) => return Err(ReceiveArtifactLogError::Backend(error.to_string())),
+                    Err(error) => return Err(ReceiveArtifactLogError::Backend(error.into())),
                 };
                 let result = if metadata.is_dir() && !metadata.file_type().is_symlink() {
                     tokio::fs::remove_dir_all(path).await
@@ -41,7 +41,7 @@ impl CleanupReceiveArtifactsPort for FsReceiveArtifactCleaner {
                 };
                 if let Err(error) = result {
                     if error.kind() != std::io::ErrorKind::NotFound {
-                        return Err(ReceiveArtifactLogError::Backend(error.to_string()));
+                        return Err(ReceiveArtifactLogError::Backend(error.into()));
                     }
                 }
             }

@@ -29,8 +29,8 @@ pub enum LocalIdentityError {
     AlreadyExists,
 
     /// Underlying secret-store (keychain / encrypted file) returned an error.
-    #[error("local identity store error: {0}")]
-    Storage(String),
+    #[error("local identity store error")]
+    Storage(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Lifecycle owner for this device's long-term network identity.

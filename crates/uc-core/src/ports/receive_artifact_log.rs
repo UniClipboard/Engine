@@ -85,10 +85,10 @@ pub struct ReceiveArtifactRecord {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReceiveArtifactLogError {
-    #[error("receive artifact log store error: {0}")]
-    Backend(String),
-    #[error("receive artifact encryption unavailable: {0}")]
-    EncryptionUnavailable(String),
+    #[error("receive artifact log store error")]
+    Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("receive artifact encryption unavailable")]
+    EncryptionUnavailable(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("invalid receive artifact log value: {0}")]
     InvalidValue(String),
 }

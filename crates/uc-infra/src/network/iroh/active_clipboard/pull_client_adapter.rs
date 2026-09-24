@@ -133,21 +133,29 @@ impl IrohActiveClipboardPullClientAdapter {
         };
 
         // 3. Open one bi-stream, write the request, close the send half.
-        let (mut send, mut recv) = connection
-            .open_bi()
-            .await
-            .map_err(|err| ActiveClipboardPullClientError::Io(format!("open_bi: {err}")))?;
+        let (mut send, mut recv) = connection.open_bi().await.map_err(|err| {
+            ActiveClipboardPullClientError::Io(anyhow::Error::from(err).context("open_bi").into())
+        })?;
 
         pull_wire::write_request(&mut send, snapshot_hash)
             .await
-            .map_err(|err| ActiveClipboardPullClientError::Io(format!("request write: {err}")))?;
-        send.finish()
-            .map_err(|err| ActiveClipboardPullClientError::Io(format!("send.finish: {err}")))?;
+            .map_err(|err| {
+                ActiveClipboardPullClientError::Io(
+                    anyhow::Error::from(err).context("request write").into(),
+                )
+            })?;
+        send.finish().map_err(|err| {
+            ActiveClipboardPullClientError::Io(
+                anyhow::Error::from(err).context("send.finish").into(),
+            )
+        })?;
 
         // 4. Read the response frame.
-        let response = pull_wire::read_response(&mut recv)
-            .await
-            .map_err(|err| ActiveClipboardPullClientError::Io(format!("response read: {err}")))?;
+        let response = pull_wire::read_response(&mut recv).await.map_err(|err| {
+            ActiveClipboardPullClientError::Io(
+                anyhow::Error::from(err).context("response read").into(),
+            )
+        })?;
 
         // 5. Actively close now that the full response frame is read. The
         //    serve side waits on `connection.closed()` before tearing down (so

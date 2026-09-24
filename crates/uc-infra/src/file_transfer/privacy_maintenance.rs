@@ -73,8 +73,8 @@ where
             })
         })
         .await
-        .map_err(|error| FileTransferPrivacyMaintenanceError::Backend(error.to_string()))?
-        .map_err(|error| FileTransferPrivacyMaintenanceError::Backend(error.to_string()))
+        .map_err(|error| FileTransferPrivacyMaintenanceError::Backend(error.into()))?
+        .map_err(|error| FileTransferPrivacyMaintenanceError::Backend(error.into()))
     }
 }
 

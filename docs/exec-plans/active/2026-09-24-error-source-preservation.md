@@ -2,7 +2,7 @@
 
 ## 状态与完整责任
 
-- **状态**：实施中。E0–E4 已完成，其余切片未开始。
+- **状态**：实施中。E0–E4 已完成，E5 进行中。
 - **日期**：2026-09-24。
 - **依据**：[错误处理与转换](../../design-docs/error-handling.md)要求保留完整 source chain；[运行期观测](../../design-docs/observability.md#错误来源与日志字段)要求日志只记录从 source chain 提取的固定分类。
 - **完整负责人**：每处转换由目标错误类型所在模块负责（与错误处理规范的“转换所有权”一致）；整体顺序、清单复核与验收由本计划负责。
@@ -161,4 +161,27 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
   而兼容线 `get_file.rs` 自己也把 URI 与错误文本写入日志和 `Staging(String)`；只改 Infra 端堵不住泄露。
 - 遗留：`OutboundPayloadError::Internal(String)` 仍是字符串变体，`ResendEntryError` 暂以 `anyhow!(message)` 承接，
   由 E5 修复。
+
+### E5 字符串错误变体改为携带 source（进行中）
+
+约定：`uc-core` 端口错误用 `#[source] Box<dyn Error + Send + Sync>`（同 E4）；Application 与 Infra 自有类型用具体错误
+或带固定动作 context 的 `anyhow::Error`。只改被扫描到的字符串化变体；携带业务文本（如拒绝原因、查询错误说明）的变体保留。
+
+- 网络与传输（已完成）：
+  - Core：`BlobError`、`ClipboardDispatchError`、`ActiveClipboardPullClientError`、`ActiveClipboardDispatchError`、
+    `TransferCipherError::Internal`、`PublishError::Io`（改为 thiserror，去掉 `Clone`/`PartialEq`/`Eq`，原先按种类描述
+    `io::Error` 的文本改为直接保存 `io::Error`）、`LocalIdentityError::Storage`、`FileTransferPrivacyMaintenanceError`、
+    `DirectoryStagingCleanupError`、`ReceiveArtifactLogError::{Backend, EncryptionUnavailable}`。
+  - Application：`FetchBlobError`、`PublishBlobError`。
+  - Infra：`ChunkedTransferError`（加密与压缩失败携带来源）、`IrohNodeError::{Bind, BlobStoreInit}`、`ReporterError`。
+  - `connect_with_staggered_retry` 改为返回 `StaggeredDialError`：保存最能说明原因的一次尝试
+    （优先非超时失败，类型为 `ConnectWithOptsError`、`ConnectingError`、`Elapsed` 或 `JoinError`）及 `DialFailure` 分类；
+    剪贴板单飞拨号以 `Arc` 共享给跟随方。E2 转入的 `membership_branch_recovery_adapter.rs` 随之改为保留来源。
+  - 隐私修复：`IrohNodeError::InvalidRelayUrl` 原先在显示文本中带出用户配置的 relay URL（可能含凭据），改为固定分类
+    `RelayUrlProblem` 作为来源，不再保存原值；已有测试确认 `Display`/`Debug` 不含主机名与密码。
+  - 测试：拨号错误优先保留非超时尝试；`PublishError` 保留 `io::Error` 且显示文本不含路径；relay URL 错误不含原值。
+- 待决策：`RelayProbeError` 的文本经 `RelayProbeOutcome::{Dns, Tls, Handshake, Other} { message }` 原样交给宿主显示，
+  属于宿主可见文本。改为 source 需要先确定宿主诊断文本的契约，暂不处理。
+- 后续事项：投递失败时 `reason_detail` 把 `ClipboardDispatchError` 的来源文本写入 `EntryDeliveryRecord` 持久化字段，
+  行为保持不变；持久字段是否应保存错误文本需要按持久化与隐私规则单独评估。
 

@@ -64,7 +64,7 @@ impl IrohMembershipBranchRecoveryChannel {
             uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
         )
         .await
-        .map_err(|source| unavailable(anyhow::Error::msg(source)))?;
+        .map_err(|source| unavailable(anyhow::Error::new(source)))?;
         let (mut send, mut receive) = tokio::time::timeout(IO_TIMEOUT, connection.open_bi())
             .await
             .map_err(|source| unavailable(anyhow::Error::new(source)))?

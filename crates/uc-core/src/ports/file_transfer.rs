@@ -14,8 +14,8 @@ use async_trait::async_trait;
 /// migrating receiver transfer persistence from plaintext to ciphertext.
 #[derive(Debug, thiserror::Error)]
 pub enum FileTransferPrivacyMaintenanceError {
-    #[error("file transfer privacy maintenance failed: {0}")]
-    Backend(String),
+    #[error("file transfer privacy maintenance failed")]
+    Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Ensure dropped plaintext transfer data has been physically removed before

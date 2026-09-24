@@ -395,7 +395,7 @@ impl uc_core::ports::EnsureFileTransferPrivacyMaintenancePort for FailingPrivacy
         &self,
     ) -> Result<(), FileTransferPrivacyMaintenanceError> {
         Err(FileTransferPrivacyMaintenanceError::Backend(
-            "privacy database unavailable".to_owned(),
+            "privacy database unavailable".into(),
         ))
     }
 }
@@ -804,8 +804,12 @@ async fn readiness_recovery_failure_preserves_its_source() {
 
     let error = facade.ensure_receive_ready().await.unwrap_err();
 
+    let maintenance = error
+        .source()
+        .and_then(|source| source.downcast_ref::<FileTransferPrivacyMaintenanceError>())
+        .expect("privacy maintenance error in source chain");
     assert_eq!(
-        error.source().map(ToString::to_string).as_deref(),
-        Some("file transfer privacy maintenance failed: privacy database unavailable")
+        maintenance.source().map(ToString::to_string).as_deref(),
+        Some("privacy database unavailable")
     );
 }

@@ -528,7 +528,7 @@ mod tests {
                             if let Err(error) = tokio::fs::remove_dir_all(path).await {
                                 if error.kind() != std::io::ErrorKind::NotFound {
                                     return Err(uc_core::ports::ReceiveArtifactLogError::Backend(
-                                        error.to_string(),
+                                        error.into(),
                                     ));
                                 }
                             }
@@ -537,7 +537,7 @@ mod tests {
                             if let Err(error) = tokio::fs::remove_file(path).await {
                                 if error.kind() != std::io::ErrorKind::NotFound {
                                     return Err(uc_core::ports::ReceiveArtifactLogError::Backend(
-                                        error.to_string(),
+                                        error.into(),
                                     ));
                                 }
                             }
@@ -545,7 +545,7 @@ mod tests {
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                         Err(error) => {
                             return Err(uc_core::ports::ReceiveArtifactLogError::Backend(
-                                error.to_string(),
+                                error.into(),
                             ));
                         }
                     }

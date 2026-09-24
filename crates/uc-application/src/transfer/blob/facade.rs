@@ -1062,7 +1062,7 @@ mod tests {
             _ciphertext: Bytes,
             _reason: TagReason,
         ) -> Result<BlobDigest, BlobError> {
-            Err(BlobError::Internal("unused".to_owned()))
+            Err(BlobError::Internal("unused".into()))
         }
 
         async fn publish_path(
@@ -1070,11 +1070,11 @@ mod tests {
             _path: &std::path::Path,
             _reason: TagReason,
         ) -> Result<BlobDigest, BlobError> {
-            Err(BlobError::Internal("unused".to_owned()))
+            Err(BlobError::Internal("unused".into()))
         }
 
         async fn issue_ticket(&self, _digest: &BlobDigest) -> Result<BlobTicket, BlobError> {
-            Err(BlobError::Internal("unused".to_owned()))
+            Err(BlobError::Internal("unused".into()))
         }
 
         async fn fetch(
@@ -1087,7 +1087,7 @@ mod tests {
                 .release
                 .acquire()
                 .await
-                .map_err(|error| BlobError::Internal(error.to_string()))?;
+                .map_err(|error| BlobError::Internal(error.into()))?;
             permit.forget();
             Ok(Bytes::from_static(b"image"))
         }
@@ -1098,7 +1098,7 @@ mod tests {
             _target_path: &std::path::Path,
             _progress: Option<&dyn BlobProgressSink>,
         ) -> Result<BlobDigest, BlobError> {
-            Err(BlobError::Internal("unused".to_owned()))
+            Err(BlobError::Internal("unused".into()))
         }
 
         async fn shutdown_inflight_fetch(&self, _ticket: &BlobTicket) -> Result<(), BlobError> {

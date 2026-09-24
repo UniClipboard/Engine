@@ -46,7 +46,13 @@ impl AtomicPublishPort for FsAtomicPublisher {
         let destination = destination.to_path_buf();
         tokio::task::spawn_blocking(move || rename_no_replace(&source, &destination))
             .await
-            .map_err(|err| PublishError::Io(format!("publish task did not run: {err}")))?
+            .map_err(|err| {
+                PublishError::Io(
+                    anyhow::Error::new(err)
+                        .context("publish task did not run")
+                        .into(),
+                )
+            })?
     }
 
     async fn publish_into_free_name(
@@ -58,7 +64,13 @@ impl AtomicPublishPort for FsAtomicPublisher {
         let destination = destination.to_path_buf();
         tokio::task::spawn_blocking(move || rename_plain(&source, &destination))
             .await
-            .map_err(|err| PublishError::Io(format!("publish task did not run: {err}")))?
+            .map_err(|err| {
+                PublishError::Io(
+                    anyhow::Error::new(err)
+                        .context("publish task did not run")
+                        .into(),
+                )
+            })?
     }
 
     async fn supports_no_replace(&self, probe_dir: &Path) -> bool {
@@ -119,8 +131,8 @@ fn probe_no_replace(probe_dir: &Path) -> bool {
             );
             false
         }
-        Ok(Err(PublishError::Io(detail))) => {
-            debug!(detail, "no-replace probe failed; assuming unsupported");
+        Ok(Err(PublishError::Io(_))) => {
+            debug!("no-replace probe failed; assuming unsupported");
             false
         }
         Err(err) => {
@@ -207,7 +219,7 @@ fn classify_os_error(err: std::io::Error) -> PublishError {
         Some(libc::ENOSYS) | Some(libc::EINVAL) | Some(libc::ENOTSUP) | Some(libc::EXDEV) => {
             PublishError::Unsupported
         }
-        _ => PublishError::Io(describe_io(&err)),
+        _ => PublishError::Io(err.into()),
     }
 }
 
@@ -229,9 +241,7 @@ fn rename_no_replace(source: &Path, destination: &Path) -> Result<(), PublishErr
     let to_wide = |path: &Path| {
         let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
         if wide.contains(&0) {
-            return Err(PublishError::Io(
-                "path contains an interior NUL".to_string(),
-            ));
+            return Err(PublishError::Io("path contains an interior NUL".into()));
         }
         wide.push(0);
         Ok(wide)
@@ -260,18 +270,7 @@ fn classify_os_error(err: std::io::Error) -> PublishError {
     match code {
         ERROR_ALREADY_EXISTS | ERROR_FILE_EXISTS => PublishError::DestinationExists,
         ERROR_NOT_SAME_DEVICE => PublishError::Unsupported,
-        _ => PublishError::Io(describe_io(&err)),
-    }
-}
-
-/// Describe a failure by kind and code only.
-///
-/// `io::Error`'s own `Display` interpolates the path the OS reported, and
-/// these strings travel into places that must stay free of user content.
-fn describe_io(err: &std::io::Error) -> String {
-    match err.raw_os_error() {
-        Some(code) => format!("{:?} (os error {code})", err.kind()),
-        None => format!("{:?}", err.kind()),
+        _ => PublishError::Io(err.into()),
     }
 }
 
@@ -335,7 +334,7 @@ mod tests {
             .await
             .expect_err("must refuse");
 
-        assert_eq!(err, PublishError::DestinationExists);
+        assert!(matches!(err, PublishError::DestinationExists));
         // The whole point: the user's existing content survives untouched, and
         // nothing merged into it.
         assert_eq!(
@@ -359,7 +358,7 @@ mod tests {
             .await
             .expect_err("must refuse");
 
-        assert_eq!(err, PublishError::DestinationExists);
+        assert!(matches!(err, PublishError::DestinationExists));
         assert_eq!(
             std::fs::read(&destination).unwrap(),
             b"a file holds this name"
@@ -420,9 +419,17 @@ mod tests {
     }
 
     #[test]
-    fn io_description_omits_the_path_the_os_reported() {
+    fn io_failure_keeps_os_error_as_source_without_path_text() {
         let err = std::fs::metadata("/definitely/not/here/secret-folder-name").unwrap_err();
-        let described = describe_io(&err);
-        assert!(!described.contains("secret-folder-name"), "{described}");
+        let error = classify_os_error(err);
+
+        assert!(!error.to_string().contains("secret-folder-name"));
+        let source = std::error::Error::source(&error).expect("io error source");
+        assert_eq!(
+            source
+                .downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::NotFound)
+        );
     }
 }

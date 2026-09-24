@@ -111,10 +111,9 @@ impl ActiveClipboardDispatchPort for IrohActiveClipboardDispatchAdapter {
 
         // 3. Open one bi-stream and write the single state frame. The
         //    receiver reads one frame and returns; we never read a reply.
-        let (mut send, _recv) = connection
-            .open_bi()
-            .await
-            .map_err(|err| ActiveClipboardDispatchError::Io(format!("open_bi: {err}")))?;
+        let (mut send, _recv) = connection.open_bi().await.map_err(|err| {
+            ActiveClipboardDispatchError::Io(anyhow::Error::from(err).context("open_bi").into())
+        })?;
 
         let msg = ActiveClipboardWireMessage {
             snapshot_hash: state.snapshot_hash.clone(),
@@ -122,11 +121,12 @@ impl ActiveClipboardDispatchPort for IrohActiveClipboardDispatchAdapter {
             activated_at_ms: state.activated_at_ms,
             activated_by: state.activated_by.as_str().to_string(),
         };
-        wire::write_frame(&mut send, &msg)
-            .await
-            .map_err(|err| ActiveClipboardDispatchError::Io(format!("frame write: {err}")))?;
-        send.finish()
-            .map_err(|err| ActiveClipboardDispatchError::Io(format!("send.finish: {err}")))?;
+        wire::write_frame(&mut send, &msg).await.map_err(|err| {
+            ActiveClipboardDispatchError::Io(anyhow::Error::from(err).context("frame write").into())
+        })?;
+        send.finish().map_err(|err| {
+            ActiveClipboardDispatchError::Io(anyhow::Error::from(err).context("send.finish").into())
+        })?;
 
         // 4. Wait for the peer to drain the stream and close before we drop
         //    the connection. The receiver reads exactly one frame then returns

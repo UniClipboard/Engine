@@ -137,9 +137,11 @@ pub(crate) fn classify_dispatch_result(
                     DeliveryFailureReason::PeerIncompatible,
                     Some(err.to_string()),
                 ),
-                ClipboardDispatchError::Io(s) => (DeliveryFailureReason::Io, Some(s.clone())),
-                ClipboardDispatchError::Internal(s) => {
-                    (DeliveryFailureReason::Internal, Some(s.clone()))
+                ClipboardDispatchError::Io(source) => {
+                    (DeliveryFailureReason::Io, Some(source.to_string()))
+                }
+                ClipboardDispatchError::Internal(source) => {
+                    (DeliveryFailureReason::Internal, Some(source.to_string()))
                 }
             };
             let delivery_record = entry_id.map(|eid| EntryDeliveryRecord {

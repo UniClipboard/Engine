@@ -83,19 +83,19 @@ struct FakeAtomicPublisher {
 }
 
 impl FakeAtomicPublisher {
-    fn failing_at(ordinals: &[(usize, PublishError)]) -> Arc<Self> {
+    fn failing_at(ordinals: impl IntoIterator<Item = (usize, PublishError)>) -> Arc<Self> {
         let this = Self::default();
         {
             let mut scripted = this.scripted.lock().unwrap();
             for (n, err) in ordinals {
-                scripted.insert(*n, err.clone());
+                scripted.insert(n, err);
             }
         }
         Arc::new(this)
     }
 
     fn losing_a_race_at(ordinal: usize) -> Arc<Self> {
-        let this = Self::failing_at(&[(ordinal, PublishError::DestinationExists)]);
+        let this = Self::failing_at([(ordinal, PublishError::DestinationExists)]);
         this.steal_on_conflict.store(true, Ordering::SeqCst);
         this
     }
@@ -137,7 +137,9 @@ impl FakeAtomicPublisher {
         }
         let ordinal = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         let err = self.scripted.lock().unwrap().remove(&ordinal)?;
-        if err == PublishError::DestinationExists && self.steal_on_conflict.load(Ordering::SeqCst) {
+        if matches!(err, PublishError::DestinationExists)
+            && self.steal_on_conflict.load(Ordering::SeqCst)
+        {
             std::fs::create_dir_all(destination).expect("racer takes the name");
         }
         Some(err)
@@ -157,7 +159,7 @@ impl AtomicPublishPort for FakeAtomicPublisher {
         if destination.exists() {
             return Err(PublishError::DestinationExists);
         }
-        std::fs::rename(source, destination).map_err(|e| PublishError::Io(e.to_string()))
+        std::fs::rename(source, destination).map_err(|e| PublishError::Io(e.into()))
     }
 
     async fn publish_into_free_name(
@@ -171,7 +173,7 @@ impl AtomicPublishPort for FakeAtomicPublisher {
         // No existence check on purpose: this variant promises nothing about
         // an occupied destination, and mirroring the strict one here would
         // hide a caller that leans on a guarantee it did not ask for.
-        std::fs::rename(source, destination).map_err(|e| PublishError::Io(e.to_string()))
+        std::fs::rename(source, destination).map_err(|e| PublishError::Io(e.into()))
     }
 
     async fn supports_no_replace(&self, probe_dir: &Path) -> bool {
@@ -4273,7 +4275,7 @@ async fn directory_publication_withdraws_earlier_roots_when_a_later_one_fails() 
     std::fs::write(save_dir.path().join("unrelated.txt"), b"keep").unwrap();
 
     // Call 1 publishes `alpha`; call 2 fails on `beta`.
-    let publisher = FakeAtomicPublisher::failing_at(&[(2, PublishError::Io("disk gone".into()))]);
+    let publisher = FakeAtomicPublisher::failing_at([(2, PublishError::Io("disk gone".into()))]);
     let materializer = directory_materializer(
         writing_fetcher(2),
         cache_dir.path(),
@@ -4303,7 +4305,7 @@ async fn directory_publication_reports_a_count_when_rollback_cannot_withdraw() {
     let save_dir = tempfile::tempdir().expect("save dir");
 
     // 1: `alpha` publishes. 2: `beta` fails. 3: withdrawing `alpha` fails.
-    let publisher = FakeAtomicPublisher::failing_at(&[
+    let publisher = FakeAtomicPublisher::failing_at([
         (2, PublishError::Io("disk gone".into())),
         (3, PublishError::Io("still gone".into())),
     ]);
@@ -4337,7 +4339,7 @@ async fn directory_publication_reports_a_count_when_rollback_cannot_withdraw() {
 async fn directory_publication_failures_never_name_the_roots() {
     let cache_dir = tempfile::tempdir().expect("cache dir");
     let save_dir = tempfile::tempdir().expect("save dir");
-    let publisher = FakeAtomicPublisher::failing_at(&[(1, PublishError::Io("nope".into()))]);
+    let publisher = FakeAtomicPublisher::failing_at([(1, PublishError::Io("nope".into()))]);
     let materializer = directory_materializer(
         writing_fetcher(2),
         cache_dir.path(),
@@ -4811,7 +4813,7 @@ async fn directory_publication_logs_never_carry_root_names_or_paths() {
 
         // `beta` fails to publish, then withdrawing `alpha` fails too — the
         // path that has the most to say and the most to leak.
-        let publisher = FakeAtomicPublisher::failing_at(&[
+        let publisher = FakeAtomicPublisher::failing_at([
             (2, PublishError::Io("disk gone".into())),
             (3, PublishError::Io("still gone".into())),
         ]);

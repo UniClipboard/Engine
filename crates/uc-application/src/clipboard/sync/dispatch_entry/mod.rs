@@ -2142,7 +2142,7 @@ mod tests {
             .with(eq(DeviceId::new("peer-io")), always(), always())
             .times(1)
             .returning(|_, _, _| {
-                dispatch_report(Err(ClipboardDispatchError::Io("broken pipe".to_string())))
+                dispatch_report(Err(ClipboardDispatchError::Io("broken pipe".into())))
             });
 
         let spy = Arc::new(SpyEntryDeliveryRepo::default());

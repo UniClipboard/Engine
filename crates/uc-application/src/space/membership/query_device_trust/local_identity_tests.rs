@@ -96,7 +96,7 @@ impl LocalIdentityPort for LocalIdentity {
                 IdentityFingerprint::from_display_string(value).unwrap(),
             )),
             Identity::Missing => Ok(None),
-            Identity::Broken => Err(LocalIdentityError::Storage("fixture".to_owned())),
+            Identity::Broken => Err(LocalIdentityError::Storage("fixture".into())),
         }
     }
 }

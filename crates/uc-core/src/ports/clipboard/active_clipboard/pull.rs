@@ -71,8 +71,8 @@ pub enum ActiveClipboardPullClientError {
     #[error("peer cannot serve the requested content")]
     NotAvailable,
     /// Stream / protocol I/O failure during the exchange.
-    #[error("pull io: {0}")]
-    Io(String),
+    #[error("pull io")]
+    Io(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Request the transfer envelope for `snapshot_hash` from a single peer.

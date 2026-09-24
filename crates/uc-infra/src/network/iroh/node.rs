@@ -19,6 +19,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::str::FromStr;
 #[cfg(not(any(test, feature = "test-util")))]
 use std::sync::Mutex;
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -537,34 +538,21 @@ fn relay_mode_from_config(config: &IrohNodeConfig) -> Result<RelayMode, IrohNode
     for raw in &config.custom_relay_urls {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
-            return Err(IrohNodeError::InvalidRelayUrl {
-                value: raw.clone(),
-                message: "relay URL must not be empty".to_string(),
-            });
+            return Err(IrohNodeError::InvalidRelayUrl(RelayUrlProblem::Empty));
         }
         let parsed = trimmed
             .parse::<RelayUrl>()
-            .map_err(|err| IrohNodeError::InvalidRelayUrl {
-                value: raw.clone(),
-                message: err.to_string(),
-            })?;
+            .map_err(|err| IrohNodeError::InvalidRelayUrl(RelayUrlProblem::Parse(err)))?;
         if parsed.scheme() != "http" && parsed.scheme() != "https" {
-            return Err(IrohNodeError::InvalidRelayUrl {
-                value: raw.clone(),
-                message: "relay URL scheme must be http or https".to_string(),
-            });
+            return Err(IrohNodeError::InvalidRelayUrl(
+                RelayUrlProblem::UnsupportedScheme,
+            ));
         }
         if parsed.host_str().is_none() {
-            return Err(IrohNodeError::InvalidRelayUrl {
-                value: raw.clone(),
-                message: "relay URL must include a host".to_string(),
-            });
+            return Err(IrohNodeError::InvalidRelayUrl(RelayUrlProblem::MissingHost));
         }
         if !parsed.username().is_empty() || parsed.password().is_some() {
-            return Err(IrohNodeError::InvalidRelayUrl {
-                value: raw.clone(),
-                message: "relay URL must not include credentials".to_string(),
-            });
+            return Err(IrohNodeError::InvalidRelayUrl(RelayUrlProblem::Credentials));
         }
         let mut relay_config = RelayConfig::from(parsed.clone());
         if let Some(token) = config
@@ -895,9 +883,9 @@ impl IrohNodeBuilder {
             endpoint_builder = endpoint_builder
                 .bind_addr((Ipv4Addr::UNSPECIFIED, port))
                 .map_err(|err| {
-                    IrohNodeError::Bind(format!(
-                        "pin iroh UDP port {port} (UC_IROH_BIND_PORT): {err}"
-                    ))
+                    IrohNodeError::Bind(
+                        anyhow::Error::new(err).context("pin iroh UDP port (UC_IROH_BIND_PORT)"),
+                    )
                 })?;
             info!(
                 target: "iroh.bind",
@@ -941,7 +929,7 @@ impl IrohNodeBuilder {
                 tracing::subscriber::NoSubscriber::default(),
             ))
             .await
-            .map_err(|err| IrohNodeError::Bind(err.to_string()))?;
+            .map_err(|err| IrohNodeError::Bind(anyhow::Error::new(err)))?;
         let endpoint = Arc::new(endpoint);
         // 只有 bind 完成才将来源标记为可采集；失败构造不能留下 Enabled 假象。
         {
@@ -1500,7 +1488,7 @@ impl IrohSessionBuilder {
         let db_path = store_dir.join("blobs.db");
         let store = iroh_blobs::store::fs::FsStore::load_with_opts(db_path, options)
             .await
-            .map_err(|err| IrohNodeError::BlobStoreInit(err.to_string()))?;
+            .map_err(|err| IrohNodeError::BlobStoreInit(anyhow::Error::from(err)))?;
 
         // Phase E1 (transitional): sweep `auto-*` tags left behind by
         // pre-Phase-F daemons.
@@ -1610,11 +1598,11 @@ pub enum IrohNodeError {
     #[error("iroh node runtime state lock is poisoned")]
     RuntimeStatePoisoned,
 
-    #[error("failed to bind iroh endpoint: {0}")]
-    Bind(String),
+    #[error("failed to bind iroh endpoint")]
+    Bind(#[source] anyhow::Error),
 
-    #[error("failed to initialize iroh blob store: {0}")]
-    BlobStoreInit(String),
+    #[error("failed to initialize iroh blob store")]
+    BlobStoreInit(#[source] anyhow::Error),
 
     #[error("failed to configure iroh session protocols")]
     SessionProtocol {
@@ -1628,14 +1616,30 @@ pub enum IrohNodeError {
         source: anyhow::Error,
     },
 
-    #[error("invalid custom iroh relay URL `{value}`: {message}")]
-    InvalidRelayUrl { value: String, message: String },
+    /// 不保存原始配置值：URL 是地址，还可能带有凭据。
+    #[error("invalid custom iroh relay URL")]
+    InvalidRelayUrl(#[source] RelayUrlProblem),
 
     #[error("invalid iroh relay access token")]
     InvalidRelayAccessToken,
 
     #[error(transparent)]
     Identity(#[from] LocalIdentityError),
+}
+
+/// 自定义 relay URL 不合法的固定分类。
+#[derive(Debug, thiserror::Error)]
+pub enum RelayUrlProblem {
+    #[error("relay URL must not be empty")]
+    Empty,
+    #[error("relay URL could not be parsed")]
+    Parse(#[source] <RelayUrl as FromStr>::Err),
+    #[error("relay URL scheme must be http or https")]
+    UnsupportedScheme,
+    #[error("relay URL must include a host")]
+    MissingHost,
+    #[error("relay URL must not include credentials")]
+    Credentials,
 }
 
 impl IrohNodeError {
@@ -2770,7 +2774,25 @@ mod tests {
             ..Default::default()
         };
         let err = relay_mode_from_config(&cfg).expect_err("invalid relay url");
-        assert!(matches!(err, IrohNodeError::InvalidRelayUrl { .. }));
+        assert!(matches!(err, IrohNodeError::InvalidRelayUrl(_)));
+    }
+
+    #[test]
+    fn relay_mode_error_omits_the_configured_url_and_credentials() {
+        let cfg = IrohNodeConfig {
+            disable_relays: false,
+            custom_relay_urls: vec!["https://user:secret-pass@relay.example.com".to_string()],
+            ..Default::default()
+        };
+        let err = relay_mode_from_config(&cfg).expect_err("credentials rejected");
+
+        assert!(matches!(
+            err,
+            IrohNodeError::InvalidRelayUrl(RelayUrlProblem::Credentials)
+        ));
+        let rendered = format!("{err} {err:?}");
+        assert!(!rendered.contains("secret-pass"));
+        assert!(!rendered.contains("relay.example.com"));
     }
 
     #[test]
@@ -2781,7 +2803,7 @@ mod tests {
             ..Default::default()
         };
         let err = relay_mode_from_config(&cfg).expect_err("invalid relay scheme");
-        assert!(matches!(err, IrohNodeError::InvalidRelayUrl { .. }));
+        assert!(matches!(err, IrohNodeError::InvalidRelayUrl(_)));
     }
 
     #[tokio::test]

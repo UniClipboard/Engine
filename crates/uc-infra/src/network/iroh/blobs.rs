@@ -219,7 +219,7 @@ impl BlobTransferPort for IrohBlobTransferAdapter {
         } else {
             LocalWorkOutcome::Error
         });
-        let haf = publish_result.map_err(|e| BlobError::Internal(e.to_string()))?;
+        let haf = publish_result.map_err(|e| BlobError::Internal(e.into()))?;
         info!(
             bytes,
             add_bytes_ms = started.elapsed().as_millis() as u64,
@@ -274,7 +274,7 @@ impl BlobTransferPort for IrohBlobTransferAdapter {
             })
             .with_named_tag(tag_name.as_bytes())
             .await
-            .map_err(|e| BlobError::Internal(e.to_string()))?;
+            .map_err(|e| BlobError::Internal(e.into()))?;
         info!(
             add_path_ms = started.elapsed().as_millis() as u64,
             mode = ?mode,
@@ -321,13 +321,15 @@ impl BlobTransferPort for IrohBlobTransferAdapter {
             .tags()
             .temp_tag(HashAndFormat::raw(native.hash()))
             .await
-            .map_err(|e| BlobError::Internal(format!("temp_tag for fetch: {e}")))?;
+            .map_err(|e| {
+                BlobError::Internal(anyhow::Error::from(e).context("temp_tag for fetch").into())
+            })?;
         self.ensure_blob_in_store(&native, progress).await?;
         self.store
             .blobs()
             .get_bytes(native.hash())
             .await
-            .map_err(|e| BlobError::Unavailable(e.to_string()))
+            .map_err(|e| BlobError::Unavailable(e.into()))
     }
 
     #[instrument(skip_all, fields(target = %target_path.display()))]
@@ -371,7 +373,13 @@ impl BlobTransferPort for IrohBlobTransferAdapter {
             .tags()
             .temp_tag(HashAndFormat::raw(native.hash()))
             .await
-            .map_err(|e| BlobError::Internal(format!("temp_tag for fetch_to_path: {e}")))?;
+            .map_err(|e| {
+                BlobError::Internal(
+                    anyhow::Error::from(e)
+                        .context("temp_tag for fetch_to_path")
+                        .into(),
+                )
+            })?;
 
         self.ensure_blob_in_store(&native, progress).await?;
 
@@ -385,7 +393,7 @@ impl BlobTransferPort for IrohBlobTransferAdapter {
                 target: target_path.to_owned(),
             })
             .await
-            .map_err(|e| BlobError::Internal(e.to_string()))?;
+            .map_err(|e| BlobError::Internal(e.into()))?;
         info!(
             hash = %hash_prefix,
             bytes = bytes_written,
@@ -428,7 +436,7 @@ impl BlobTransferPort for IrohBlobTransferAdapter {
                     error = %err,
                     "blob fetch: shutdown_endpoint failed (pool already gone)"
                 );
-                Err(BlobError::Internal(err.to_string()))
+                Err(BlobError::Internal(err.into()))
             }
         }
     }
@@ -441,7 +449,7 @@ impl BlobTransferPort for IrohBlobTransferAdapter {
             .blobs()
             .observe(hash)
             .await
-            .map_err(|e| BlobError::Internal(e.to_string()))?;
+            .map_err(|e| BlobError::Internal(e.into()))?;
         Ok(observed.is_complete())
     }
 
@@ -455,7 +463,7 @@ impl BlobTransferPort for IrohBlobTransferAdapter {
                 HashAndFormat::raw(Self::native_hash(digest)),
             )
             .await
-            .map_err(|e| BlobError::Internal(e.to_string()))
+            .map_err(|e| BlobError::Internal(e.into()))
     }
 
     #[instrument(skip_all)]
@@ -466,7 +474,7 @@ impl BlobTransferPort for IrohBlobTransferAdapter {
             .tags()
             .delete(name.as_bytes())
             .await
-            .map_err(|e| BlobError::Internal(e.to_string()))?;
+            .map_err(|e| BlobError::Internal(e.into()))?;
         debug!(removed, "blob tag removed");
         Ok(())
     }
@@ -533,7 +541,7 @@ impl IrohBlobTransferAdapter {
                     error = %e,
                     "blob fetch: endpoint.connect failed"
                 );
-                return Err(BlobError::Unavailable(e.to_string()));
+                return Err(BlobError::Unavailable(e.into()));
             }
         };
         let conn = self.conn_label(provider_id).await;
@@ -584,7 +592,7 @@ impl IrohBlobTransferAdapter {
                         error = %e,
                         "blob fetch: downloader.stream() open failed"
                     );
-                    return Err(BlobError::Unavailable(e.to_string()));
+                    return Err(BlobError::Unavailable(e.into()));
                 }
             };
 
@@ -700,7 +708,7 @@ impl IrohBlobTransferAdapter {
                             error = ?e,
                             "blob fetch: downloader Error event (root cause from anyhow chain)"
                         );
-                        break Err(BlobError::Unavailable(e.to_string()));
+                        break Err(BlobError::Unavailable(e.into()));
                     }
                 }
             };

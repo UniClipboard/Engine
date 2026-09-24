@@ -735,8 +735,8 @@ impl IrohPeerReachabilityAdapter {
                 }
                 Ok(ReachabilityState::Online)
             }
-            Err((_error, category)) => {
-                *failure = PresenceCheckResult::Dial(category);
+            Err(error) => {
+                *failure = PresenceCheckResult::Dial(error.failure());
                 let state = self.record_failed_dial(device, before.clone()).await;
                 Ok(state)
             }

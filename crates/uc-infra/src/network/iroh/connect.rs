@@ -7,8 +7,11 @@ use uc_observability_contract::diagnostics::connectivity::{
 
 use iroh::endpoint::ConnectOptions;
 use iroh::endpoint::Connection;
+use iroh::endpoint::{ConnectWithOptsError, ConnectingError};
 use iroh::{Endpoint, EndpointAddr, TransportAddr};
+use tokio::task::JoinError;
 use tokio::task::JoinSet;
+use tokio::time::error::Elapsed;
 use tracing::instrument::WithSubscriber;
 use uc_observability_contract::diagnostics::connectivity::AddressInputSource;
 
@@ -66,16 +69,52 @@ pub(super) fn strip_relay_if_lan_only(addr: EndpointAddr) -> EndpointAddr {
     EndpointAddr::from_parts(id, kept)
 }
 
+/// 一次交错拨号中每个尝试都失败。只保存最能说明原因的一次尝试：
+/// 优先取非超时的失败，全部超时时取最后一次超时。
+#[derive(Debug, thiserror::Error)]
+#[error("all staggered connection attempts failed")]
+pub(crate) struct StaggeredDialError {
+    failure: DialFailure,
+    #[source]
+    attempt: DialAttemptError,
+}
+
+impl StaggeredDialError {
+    pub(crate) fn failure(&self) -> DialFailure {
+        self.failure
+    }
+}
+
+/// 单次拨号尝试的失败来源。
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DialAttemptError {
+    #[error("connection setup failed")]
+    Setup(#[source] ConnectWithOptsError),
+    #[error("connection handshake failed")]
+    Handshake(#[source] ConnectingError),
+    #[error("connection attempt timed out")]
+    TimedOut(#[source] Elapsed),
+    #[error("connection attempt task failed")]
+    Task(#[source] JoinError),
+    /// 交错延迟表非空时不会出现；保留为明确分类而不是 panic。
+    #[error("no connection attempt ran")]
+    NotStarted,
+}
+
+impl DialAttemptError {
+    fn timed_out(&self) -> bool {
+        matches!(self, Self::TimedOut(_))
+    }
+}
+
 pub(crate) async fn connect_with_staggered_retry(
     endpoint: Arc<Endpoint>,
     addr: EndpointAddr,
     alpn: &'static [u8],
     purpose: &'static str,
     source: AddressInputSource,
-) -> Result<Connection, String> {
-    connect_with_staggered_retry_classified(endpoint, addr, alpn, Vec::new(), purpose, source)
-        .await
-        .map_err(|(message, _)| message)
+) -> Result<Connection, StaggeredDialError> {
+    connect_with_staggered_retry_classified(endpoint, addr, alpn, Vec::new(), purpose, source).await
 }
 
 pub(super) async fn connect_with_staggered_retry_classified(
@@ -85,7 +124,7 @@ pub(super) async fn connect_with_staggered_retry_classified(
     additional_alpns: Vec<Vec<u8>>,
     purpose: &'static str,
     source: AddressInputSource,
-) -> Result<Connection, (String, DialFailure)> {
+) -> Result<Connection, StaggeredDialError> {
     let addr = strip_relay_if_lan_only(addr);
     let observation =
         ConnectionObservation::begin(connection_purpose(purpose), *addr.id.as_bytes());
@@ -115,17 +154,14 @@ pub(super) async fn connect_with_staggered_retry_classified(
                         .with_subscriber(driver.clone())
                         .await
                         .map_err(|error| {
-                            (
-                                error.to_string(),
-                                super::connection_diagnostics::preparation_failure(&error),
-                            )
+                            let outcome =
+                                super::connection_diagnostics::preparation_failure(&error);
+                            (DialAttemptError::Setup(error), outcome)
                         })?;
                     phase = ConnectionFailurePhase::Handshake;
                     connecting.with_subscriber(driver).await.map_err(|error| {
-                        (
-                            error.to_string(),
-                            super::connection_diagnostics::handshake_failure(&error),
-                        )
+                        let outcome = super::connection_diagnostics::handshake_failure(&error);
+                        (DialAttemptError::Handshake(error), outcome)
                     })
                 };
                 match tokio::time::timeout(ATTEMPT_TIMEOUT, connect).await {
@@ -135,20 +171,15 @@ pub(super) async fn connect_with_staggered_retry_classified(
                     }
                     Ok(Err((err, outcome))) => {
                         attempt.finish(outcome);
-                        Err((attempt_no, err, false, outcome))
+                        Err((err, outcome))
                     }
-                    Err(_) => {
+                    Err(elapsed) => {
                         let outcome = super::connection_diagnostics::failed(
                             phase,
                             ConnectionFailureReason::TimedOut,
                         );
                         attempt.finish(outcome);
-                        Err((
-                            attempt_no,
-                            format!("timed out after {}ms", ATTEMPT_TIMEOUT.as_millis()),
-                            true,
-                            outcome,
-                        ))
+                        Err((DialAttemptError::TimedOut(elapsed), outcome))
                     }
                 }
             }
@@ -156,7 +187,7 @@ pub(super) async fn connect_with_staggered_retry_classified(
         );
     }
 
-    let mut failures = Vec::new();
+    let mut reported: Option<DialAttemptError> = None;
     let mut all_timed_out = true;
     let mut last_failure = super::connection_diagnostics::failed(
         ConnectionFailurePhase::Unknown,
@@ -169,10 +200,10 @@ pub(super) async fn connect_with_staggered_retry_classified(
                 attempts.abort_all();
                 return Ok(connection);
             }
-            Ok(Err((attempt, err, timed_out, outcome))) => {
-                all_timed_out &= timed_out;
+            Ok(Err((err, outcome))) => {
+                all_timed_out &= err.timed_out();
                 last_failure = outcome;
-                failures.push(format!("attempt {attempt}: {err}"));
+                reported = Some(prefer_informative(reported, err));
             }
             Err(err) => {
                 all_timed_out = false;
@@ -180,20 +211,31 @@ pub(super) async fn connect_with_staggered_retry_classified(
                     ConnectionFailurePhase::Unknown,
                     ConnectionFailureReason::Internal,
                 );
-                failures.push(format!("task failed: {err}"));
+                reported = Some(prefer_informative(reported, DialAttemptError::Task(err)));
             }
         }
     }
 
     observation.finish(last_failure);
-    Err((
-        failures.join("; "),
-        if all_timed_out {
-            DialFailure::TimedOut
-        } else {
-            DialFailure::TransportFailed
-        },
-    ))
+    let failure = if all_timed_out {
+        DialFailure::TimedOut
+    } else {
+        DialFailure::TransportFailed
+    };
+    Err(StaggeredDialError {
+        failure,
+        attempt: reported.unwrap_or(DialAttemptError::NotStarted),
+    })
+}
+
+fn prefer_informative(
+    current: Option<DialAttemptError>,
+    next: DialAttemptError,
+) -> DialAttemptError {
+    match current {
+        Some(current) if next.timed_out() && !current.timed_out() => current,
+        _ => next,
+    }
 }
 
 fn connection_purpose(purpose: &str) -> ConnectionPurpose {
@@ -430,5 +472,34 @@ mod tests {
         drop(accepted);
         client.close().await;
         server.close().await;
+    }
+
+    async fn elapsed() -> Elapsed {
+        tokio::time::timeout(Duration::ZERO, std::future::pending::<()>())
+            .await
+            .unwrap_err()
+    }
+
+    #[tokio::test]
+    async fn dial_error_keeps_a_non_timeout_attempt_over_later_timeouts() {
+        let kept = prefer_informative(
+            Some(DialAttemptError::NotStarted),
+            DialAttemptError::TimedOut(elapsed().await),
+        );
+        assert!(matches!(kept, DialAttemptError::NotStarted));
+
+        let replaced = prefer_informative(
+            Some(DialAttemptError::TimedOut(elapsed().await)),
+            DialAttemptError::NotStarted,
+        );
+        assert!(matches!(replaced, DialAttemptError::NotStarted));
+
+        let error = StaggeredDialError {
+            failure: DialFailure::TimedOut,
+            attempt: DialAttemptError::TimedOut(elapsed().await),
+        };
+        let source = std::error::Error::source(&error).expect("attempt source");
+        assert!(source.downcast_ref::<DialAttemptError>().is_some());
+        assert!(matches!(error.failure(), DialFailure::TimedOut));
     }
 }

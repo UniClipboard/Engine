@@ -37,13 +37,13 @@ struct PassivePorts {
 impl uc_core::ports::LocalIdentityPort for PassivePorts {
     async fn create(&self) -> Result<IdentityFingerprint, uc_core::ports::LocalIdentityError> {
         Err(uc_core::ports::LocalIdentityError::Storage(
-            "passive identity".to_owned(),
+            "passive identity".into(),
         ))
     }
 
     async fn ensure(&self) -> Result<IdentityFingerprint, uc_core::ports::LocalIdentityError> {
         Err(uc_core::ports::LocalIdentityError::Storage(
-            "passive identity".to_owned(),
+            "passive identity".into(),
         ))
     }
 

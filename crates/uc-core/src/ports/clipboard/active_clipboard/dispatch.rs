@@ -19,11 +19,11 @@ pub enum ActiveClipboardDispatchError {
     #[error("target device offline or unreachable")]
     Offline,
     /// Stream I/O failure — broken connection, short write, etc.
-    #[error("stream io: {0}")]
-    Io(String),
+    #[error("stream io")]
+    Io(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// Other internal failure.
-    #[error("internal: {0}")]
-    Internal(String),
+    #[error("internal")]
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Single-target send of one active-clipboard register observation.

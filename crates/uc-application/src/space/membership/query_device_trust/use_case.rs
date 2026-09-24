@@ -316,7 +316,7 @@ impl LocalIdentityPort for MissingLocalIdentity {
         &self,
     ) -> Result<uc_core::security::IdentityFingerprint, uc_core::ports::LocalIdentityError> {
         Err(uc_core::ports::LocalIdentityError::Storage(
-            "query is read-only".to_owned(),
+            "query is read-only".into(),
         ))
     }
 
@@ -324,7 +324,7 @@ impl LocalIdentityPort for MissingLocalIdentity {
         &self,
     ) -> Result<uc_core::security::IdentityFingerprint, uc_core::ports::LocalIdentityError> {
         Err(uc_core::ports::LocalIdentityError::Storage(
-            "query is read-only".to_owned(),
+            "query is read-only".into(),
         ))
     }
 

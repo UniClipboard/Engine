@@ -128,8 +128,8 @@ pub enum BlobError {
     /// already reclaimed it, transfer interrupted, etc. Distinct from
     /// [`BlobError::NotFound`], which means "not local"; this means
     /// "remote side could not deliver either".
-    #[error("blob unavailable: {0}")]
-    Unavailable(String),
+    #[error("blob unavailable")]
+    Unavailable(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// The credential cannot be understood by the current adapter
     /// (version drift, corruption, credential issued by a different
@@ -140,8 +140,8 @@ pub enum BlobError {
 
     /// Adapter-internal failure (IO, upstream library error, etc.).
     /// Callers usually just record and surface.
-    #[error("internal: {0}")]
-    Internal(String),
+    #[error("blob transfer internal failure")]
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// 字节级进度上报通道。

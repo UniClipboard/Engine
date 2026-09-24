@@ -386,7 +386,7 @@ mod tests {
             // path code-path through the use case + facade layers.
             let bytes = tokio::fs::read(path)
                 .await
-                .map_err(|e| BlobError::Internal(e.to_string()))?;
+                .map_err(|e| BlobError::Internal(e.into()))?;
             self.publish(Bytes::from(bytes), reason).await
         }
 
@@ -421,7 +421,7 @@ mod tests {
             let bytes = self.fetch(ticket, progress).await?;
             tokio::fs::write(target_path, &bytes)
                 .await
-                .map_err(|e| BlobError::Internal(e.to_string()))?;
+                .map_err(|e| BlobError::Internal(e.into()))?;
             self.digest_of(ticket)
         }
 

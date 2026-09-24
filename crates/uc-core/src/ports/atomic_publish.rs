@@ -1,7 +1,6 @@
 //! Port for moving prepared content to its final location without ever
 //! replacing what already lives there.
 
-use std::fmt;
 use std::path::Path;
 
 use async_trait::async_trait;
@@ -11,29 +10,15 @@ use async_trait::async_trait;
 /// Variants never carry the paths involved: a destination name is user
 /// content, and this error is allowed to surface in contexts that must stay
 /// free of it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error)]
 pub enum PublishError {
-    /// The destination name is already taken. Whatever holds the name is
-    /// untouched, and the source remains where it was.
+    #[error("destination name is already taken")]
     DestinationExists,
-    /// The destination's volume cannot honor the no-replace guarantee, or
-    /// source and destination do not share a volume.
+    #[error("volume cannot publish without replacing")]
     Unsupported,
-    /// The operation failed for a reason outside this classification.
-    Io(String),
+    #[error("publish failed")]
+    Io(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
-
-impl fmt::Display for PublishError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::DestinationExists => write!(f, "destination name is already taken"),
-            Self::Unsupported => write!(f, "volume cannot publish without replacing"),
-            Self::Io(detail) => write!(f, "publish failed: {detail}"),
-        }
-    }
-}
-
-impl std::error::Error for PublishError {}
 
 /// Move prepared content into place atomically.
 #[async_trait]

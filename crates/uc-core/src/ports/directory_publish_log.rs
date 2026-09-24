@@ -64,8 +64,8 @@ pub enum PublishLogError {
 /// Failure while removing transient directory receive content.
 #[derive(Debug, thiserror::Error)]
 pub enum DirectoryStagingCleanupError {
-    #[error("directory staging cleanup failed: {0}")]
-    Backend(String),
+    #[error("directory staging cleanup failed")]
+    Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("directory staging path is outside a receive staging area")]
     InvalidPath,
 }

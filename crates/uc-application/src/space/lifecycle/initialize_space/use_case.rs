@@ -163,9 +163,7 @@ impl InitializeSpaceUseCase {
         //    it through `StorageFailed` so the caller sees a typed error
         //    rather than a panic.
         let fingerprint = self.local_identity.ensure().await.map_err(|e| match e {
-            LocalIdentityError::Storage(message) => {
-                InitializeSpaceError::storage(anyhow::anyhow!(message))
-            }
+            error @ LocalIdentityError::Storage(_) => InitializeSpaceError::storage(error),
             LocalIdentityError::AlreadyExists => InitializeSpaceError::storage(anyhow::anyhow!(
                 "local identity adapter raised AlreadyExists from ensure(); \
                  violates LocalIdentityPort idempotency contract"

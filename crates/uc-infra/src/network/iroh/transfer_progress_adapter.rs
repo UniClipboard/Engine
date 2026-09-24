@@ -40,7 +40,7 @@ use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::PeerAddressRepositoryPort;
 use uc_observability_contract::diagnostics::connectivity::InboundPeerProtocol;
 
-use super::connect::connect_with_staggered_retry;
+use super::connect::{connect_with_staggered_retry, StaggeredDialError};
 use super::inbound_peer::InboundPeerGate;
 use super::peer_address_resolver::PeerAddressResolver;
 use super::transfer_progress_wire::{
@@ -340,14 +340,16 @@ impl ReporterImpl {
                 // intentionally — progress events are stateless ticks,
                 // skipping one is harmless.
                 self.connections.lock().await.remove(target.as_str());
-                return Err(ReporterError::Io(format!("open_uni: {err}")));
+                return Err(ReporterError::Io(
+                    anyhow::Error::from(err).context("open_uni"),
+                ));
             }
         };
         transfer_progress_wire::write_frame(&mut send, frame)
             .await
-            .map_err(|err| ReporterError::Io(format!("write_frame: {err}")))?;
+            .map_err(|err| ReporterError::Io(anyhow::Error::from(err).context("write_frame")))?;
         send.finish()
-            .map_err(|err| ReporterError::Io(format!("send.finish: {err}")))?;
+            .map_err(|err| ReporterError::Io(anyhow::Error::from(err).context("send.finish")))?;
         Ok(())
     }
 }
@@ -356,10 +358,10 @@ impl ReporterImpl {
 enum ReporterError {
     #[error("offline (no peer addr or unreachable)")]
     Offline,
-    #[error("dial failed: {0}")]
-    Dial(String),
-    #[error("io: {0}")]
-    Io(String),
+    #[error("dial failed")]
+    Dial(#[source] StaggeredDialError),
+    #[error("io")]
+    Io(#[source] anyhow::Error),
 }
 
 // ============================================================================
