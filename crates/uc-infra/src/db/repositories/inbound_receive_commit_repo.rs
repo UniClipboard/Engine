@@ -92,7 +92,7 @@ fn map_error(error: anyhow::Error) -> InboundReceiveCommitError {
         Some(CommitInvariantError::DirectoryPublishRecordMissing) => {
             InboundReceiveCommitError::DirectoryPublishRecordMissing
         }
-        None => InboundReceiveCommitError::Backend(error.to_string()),
+        None => InboundReceiveCommitError::Backend(error.context("commit inbound receive").into()),
     }
 }
 
@@ -212,16 +212,17 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
                 ),
             };
 
-        let prepared_record = record
-            .map(prepare_record)
-            .transpose()
-            .map_err(|error| InboundReceiveCommitError::Backend(error.to_string()))?;
+        let prepared_record = record.map(prepare_record).transpose().map_err(|error| {
+            InboundReceiveCommitError::Backend(
+                error.context("prepare inbound receive record").into(),
+            )
+        })?;
         let file_set_rows = if let Some(file_set) = file_set {
             Some(
                 self.file_set_protection
                     .encode_rows(&uc_core::ids::EntryId::from(entry_id.as_str()), file_set)
                     .await
-                    .map_err(|error| InboundReceiveCommitError::Backend(error.to_string()))?,
+                    .map_err(|error| InboundReceiveCommitError::Backend(Box::new(error)))?,
             )
         } else {
             None

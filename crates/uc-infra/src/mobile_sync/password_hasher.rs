@@ -40,19 +40,34 @@ impl PasswordHasherPort for Argon2idPasswordHasher {
             // SaltString::generate 仍用 rand_core 0.6 的 trait bound,与
             // workspace 主用的 rand 0.9 不直通(同样规避见 pin_hash.rs)。
             let mut salt_bytes = [0u8; SALT_BYTES];
-            OsRng
-                .try_fill_bytes(&mut salt_bytes)
-                .map_err(|e| PasswordHasherError::Internal(format!("OsRng fill failed: {e}")))?;
-            let salt = SaltString::encode_b64(&salt_bytes)
-                .map_err(|e| PasswordHasherError::Internal(format!("salt encode failed: {e}")))?;
+            OsRng.try_fill_bytes(&mut salt_bytes).map_err(|e| {
+                PasswordHasherError::Internal(
+                    anyhow::Error::from(e).context("OsRng fill failed").into(),
+                )
+            })?;
+            let salt = SaltString::encode_b64(&salt_bytes).map_err(|e| {
+                PasswordHasherError::Internal(
+                    anyhow::Error::from(e).context("salt encode failed").into(),
+                )
+            })?;
             let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, argon_params());
             argon
                 .hash_password(password.as_bytes(), &salt)
                 .map(|h| h.to_string())
-                .map_err(|e| PasswordHasherError::Internal(format!("argon2 hash failed: {e}")))
+                .map_err(|e| {
+                    PasswordHasherError::Internal(
+                        anyhow::Error::from(e).context("argon2 hash failed").into(),
+                    )
+                })
         })
         .await
-        .map_err(|e| PasswordHasherError::Internal(format!("spawn_blocking join failed: {e}")))?
+        .map_err(|e| {
+            PasswordHasherError::Internal(
+                anyhow::Error::from(e)
+                    .context("spawn_blocking join failed")
+                    .into(),
+            )
+        })?
     }
 
     async fn verify(&self, password: &str, phc: &str) -> Result<bool, PasswordHasherError> {
@@ -60,18 +75,24 @@ impl PasswordHasherPort for Argon2idPasswordHasher {
         let phc = phc.to_owned();
         tokio::task::spawn_blocking(move || {
             let parsed = PasswordHash::new(&phc)
-                .map_err(|e| PasswordHasherError::InvalidPhc(e.to_string()))?;
+                .map_err(|e| PasswordHasherError::InvalidPhc(Box::new(e)))?;
             // verify_password 在不匹配时返回 Err(Error::Password),其它错误
             // 表示 phc 字符串损坏或参数不识别 —— 后者翻译为 InvalidPhc 让上
             // 层把记录视为"需要重新登记",而不是误判为"密码错"。
             match Argon2::default().verify_password(password.as_bytes(), &parsed) {
                 Ok(()) => Ok(true),
                 Err(argon2::password_hash::Error::Password) => Ok(false),
-                Err(e) => Err(PasswordHasherError::InvalidPhc(e.to_string())),
+                Err(e) => Err(PasswordHasherError::InvalidPhc(Box::new(e))),
             }
         })
         .await
-        .map_err(|e| PasswordHasherError::Internal(format!("spawn_blocking join failed: {e}")))?
+        .map_err(|e| {
+            PasswordHasherError::Internal(
+                anyhow::Error::from(e)
+                    .context("spawn_blocking join failed")
+                    .into(),
+            )
+        })?
     }
 }
 
@@ -95,7 +116,13 @@ mod tests {
     async fn invalid_phc_returns_invalid_phc_error() {
         let h = Argon2idPasswordHasher;
         let err = h.verify("anything", "not-a-phc-string").await.unwrap_err();
-        assert!(matches!(err, PasswordHasherError::InvalidPhc(_)));
+        let PasswordHasherError::InvalidPhc(source) = &err else {
+            panic!("expected InvalidPhc, got {err:?}");
+        };
+        assert!(source
+            .downcast_ref::<argon2::password_hash::Error>()
+            .is_some());
+        assert!(!err.to_string().contains("not-a-phc-string"));
     }
 
     #[tokio::test]

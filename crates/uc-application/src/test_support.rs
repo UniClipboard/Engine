@@ -38,7 +38,10 @@ impl EntryFileSetRepositoryPort for FixedFileSets {
     async fn load(&self, _entry_id: &EntryId) -> Result<Option<EntryFileSet>, EntryFileSetError> {
         match &self.0 {
             Ok(value) => Ok(value.clone()),
-            Err(err) => Err(EntryFileSetError::Storage(err.to_string())),
+            // 错误不可克隆；替身每次返回同类的新错误，只供调用方走失败分支。
+            Err(_) => Err(EntryFileSetError::Storage(
+                "fixed file-set load failure".into(),
+            )),
         }
     }
 }

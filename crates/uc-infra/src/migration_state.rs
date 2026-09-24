@@ -65,7 +65,7 @@ async fn read_legacy_phase(
     let content = match fs::read_to_string(state_file_path).await {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(LegacyMigrationRecoveryError::Internal(error.to_string())),
+        Err(error) => return Err(LegacyMigrationRecoveryError::Internal(Box::new(error))),
     };
     if content.trim().is_empty() {
         return Ok(None);
@@ -123,7 +123,7 @@ impl FileLegacyMigrationRecovery {
         match fs::remove_file(&self.state_file_path).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(LegacyMigrationRecoveryError::Internal(error.to_string())),
+            Err(error) => Err(LegacyMigrationRecoveryError::Internal(Box::new(error))),
         }
     }
 
@@ -322,8 +322,8 @@ impl LegacyMigrationRecoveryPort for FileLegacyMigrationRecovery {
     }
 }
 
-fn internal(error: impl std::fmt::Display) -> LegacyMigrationRecoveryError {
-    LegacyMigrationRecoveryError::Internal(error.to_string())
+fn internal(error: impl std::error::Error + Send + Sync + 'static) -> LegacyMigrationRecoveryError {
+    LegacyMigrationRecoveryError::Internal(Box::new(error))
 }
 
 #[cfg(test)]

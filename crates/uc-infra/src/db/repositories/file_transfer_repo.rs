@@ -73,7 +73,9 @@ async fn row_to_expired(
 
 /// Map a backend (Diesel/I-O) failure onto the domain projection error.
 fn backend(err: anyhow::Error) -> FileTransferProjectionError {
-    FileTransferProjectionError::Backend(err.to_string())
+    FileTransferProjectionError::Backend(
+        err.context("access file transfer projection store").into(),
+    )
 }
 
 #[async_trait]
@@ -175,7 +177,9 @@ fn provisional_error(error: anyhow::Error) -> ProvisionalReceiveError {
     match error.downcast_ref::<ProvisionalInvariantError>() {
         Some(ProvisionalInvariantError::NotFound) => ProvisionalReceiveError::NotFound,
         Some(ProvisionalInvariantError::Conflict) => ProvisionalReceiveError::Conflict,
-        None => ProvisionalReceiveError::Backend(error.to_string()),
+        None => ProvisionalReceiveError::Backend(
+            error.context("access provisional receive store").into(),
+        ),
     }
 }
 
@@ -185,11 +189,13 @@ impl<E: DbExecutor> SeedProvisionalReceivePort for DieselFileTransferRepository<
         &self,
         transfer: &ProvisionalInboundTransfer,
     ) -> Result<(), ProvisionalReceiveError> {
-        let protection = self
-            .protection
-            .resolve()
-            .await
-            .map_err(|error| ProvisionalReceiveError::Backend(error.to_string()))?;
+        let protection = self.protection.resolve().await.map_err(|error| {
+            ProvisionalReceiveError::Backend(
+                error
+                    .context("resolve provisional receive protection")
+                    .into(),
+            )
+        })?;
         let metadata_ciphertext = protection
             .seal_metadata(
                 &transfer.transfer_id,
@@ -200,7 +206,7 @@ impl<E: DbExecutor> SeedProvisionalReceivePort for DieselFileTransferRepository<
                 },
             )
             .await
-            .map_err(|error| ProvisionalReceiveError::Backend(error.to_string()))?;
+            .map_err(|error| ProvisionalReceiveError::Backend(Box::new(error)))?;
         let row = NewFileTransferRow {
             transfer_id: transfer.transfer_id.clone(),
             entry_id: None,
@@ -249,11 +255,13 @@ impl<E: DbExecutor> UpdateProvisionalReceivePathPort for DieselFileTransferRepos
         cached_path: &str,
         now_ms: i64,
     ) -> Result<(), ProvisionalReceiveError> {
-        let protection = self
-            .protection
-            .resolve()
-            .await
-            .map_err(|error| ProvisionalReceiveError::Backend(error.to_string()))?;
+        let protection = self.protection.resolve().await.map_err(|error| {
+            ProvisionalReceiveError::Backend(
+                error
+                    .context("resolve provisional receive protection")
+                    .into(),
+            )
+        })?;
         let transfer_id = provisional_transfer_id.to_owned();
         let cached_path = cached_path.to_owned();
         let read_transfer_id = transfer_id.clone();
@@ -273,12 +281,12 @@ impl<E: DbExecutor> UpdateProvisionalReceivePathPort for DieselFileTransferRepos
         let mut metadata = protection
             .open_metadata(&transfer_id, &previous_ciphertext)
             .await
-            .map_err(|error| ProvisionalReceiveError::Backend(error.to_string()))?;
+            .map_err(|error| ProvisionalReceiveError::Backend(Box::new(error)))?;
         metadata.cached_path = Some(cached_path);
         let replacement_ciphertext = protection
             .seal_metadata(&transfer_id, &metadata)
             .await
-            .map_err(|error| ProvisionalReceiveError::Backend(error.to_string()))?;
+            .map_err(|error| ProvisionalReceiveError::Backend(Box::new(error)))?;
 
         self.executor
             .run(move |conn| {
@@ -308,11 +316,13 @@ impl<E: DbExecutor> ListProvisionalReceivesPort for DieselFileTransferRepository
     async fn list_provisional_receives(
         &self,
     ) -> Result<Vec<ProvisionalReceiveRecovery>, ProvisionalReceiveError> {
-        let protection = self
-            .protection
-            .resolve()
-            .await
-            .map_err(|error| ProvisionalReceiveError::Backend(error.to_string()))?;
+        let protection = self.protection.resolve().await.map_err(|error| {
+            ProvisionalReceiveError::Backend(
+                error
+                    .context("resolve provisional receive protection")
+                    .into(),
+            )
+        })?;
         let rows = self
             .executor
             .run(move |conn| {
@@ -325,13 +335,17 @@ impl<E: DbExecutor> ListProvisionalReceivesPort for DieselFileTransferRepository
                     .load::<(String, Vec<u8>)>(conn)
                     .map_err(Into::into)
             })
-            .map_err(|error| ProvisionalReceiveError::Backend(error.to_string()))?;
+            .map_err(|error| {
+                ProvisionalReceiveError::Backend(
+                    error.context("load provisional receive rows").into(),
+                )
+            })?;
         let mut recoveries = Vec::with_capacity(rows.len());
         for (transfer_id, ciphertext) in rows {
             let metadata = protection
                 .open_metadata(&transfer_id, &ciphertext)
                 .await
-                .map_err(|error| ProvisionalReceiveError::Backend(error.to_string()))?;
+                .map_err(|error| ProvisionalReceiveError::Backend(Box::new(error)))?;
             recoveries.push(ProvisionalReceiveRecovery {
                 transfer_id,
                 cached_path: metadata.cached_path,
@@ -553,7 +567,7 @@ impl<E: DbExecutor> GetEntryReceiveProgressPort for DieselFileTransferRepository
             return Ok(None);
         };
         let state = AttemptState::from_str(&attempt.attempt_state)
-            .map_err(|error| FileTransferProjectionError::Backend(error.to_string()))?;
+            .map_err(|error| FileTransferProjectionError::Backend(Box::new(error)))?;
         let items_total = u32::try_from(rows.len()).map_err(|_| {
             FileTransferProjectionError::Backend("receive item count exceeds u32".into())
         })?;

@@ -138,8 +138,8 @@ pub enum ProvisionalReceiveError {
     NotFound,
     #[error("provisional receive is no longer claimable")]
     Conflict,
-    #[error("provisional receive store error: {0}")]
-    Backend(String),
+    #[error("provisional receive store error")]
+    Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 #[async_trait]
@@ -219,8 +219,8 @@ pub struct ExpiredInflightTransfer {
 #[derive(Debug, thiserror::Error)]
 pub enum FileTransferProjectionError {
     /// The underlying projection store failed (I/O, database, serialization).
-    #[error("file-transfer projection store error: {0}")]
-    Backend(String),
+    #[error("file-transfer projection store error")]
+    Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Command: write receiver-side projection rows.

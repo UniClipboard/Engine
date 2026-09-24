@@ -24,7 +24,7 @@ impl DeriveSpaceSubkeyPort for TargetSessionSubkeyDeriver {
     async fn derive_subkey(&self, salt: &[u8], info: &[u8]) -> Result<[u8; 32], SpaceAccessError> {
         self.0
             .derive_stable_subkey(salt, info)
-            .map_err(|source| SpaceAccessError::Internal(source.to_string()))
+            .map_err(|source| SpaceAccessError::Internal(Box::new(source)))
     }
 }
 

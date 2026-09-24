@@ -60,8 +60,8 @@ pub enum KeyMigrationError {
     InvalidCiphertext,
 
     /// 其它内部失败（keyring API 失败、随机数生成失败等）。
-    #[error("key migration internal error: {0}")]
-    Internal(String),
+    #[error("key migration internal error")]
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// 临时迁移密钥能力。

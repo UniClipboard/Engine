@@ -110,7 +110,7 @@ fn map_unlock_error(error: SpaceAccessError) -> UnlockSpaceError {
         SpaceAccessError::NotInitialized => UnlockSpaceError::SpaceNotInitialized,
         SpaceAccessError::WrongPassphrase => UnlockSpaceError::WrongPassphrase,
         SpaceAccessError::CorruptedKeyMaterial => UnlockSpaceError::CorruptedKeyMaterial,
-        SpaceAccessError::Internal(message) => UnlockSpaceError::internal(anyhow::anyhow!(message)),
+        error @ SpaceAccessError::Internal(_) => UnlockSpaceError::internal(error),
         other => {
             warn!(error = %other, "unexpected space access error during unlock");
             UnlockSpaceError::internal(other)

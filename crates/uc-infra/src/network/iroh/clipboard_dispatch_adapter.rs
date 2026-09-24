@@ -255,9 +255,10 @@ impl IrohClipboardDispatchAdapter {
             Ok(AckCode::Rejected) => Err(ClipboardDispatchError::PeerRejected(
                 "peer returned Rejected ack".to_string(),
             )),
-            Err(err) => Err(ClipboardDispatchError::PeerRejected(format!(
-                "peer returned unknown ack byte: {err}"
-            ))),
+            // 未知回执字节只是协议分类；PeerRejected 保存的是拒绝原因文本，不承载下层错误。
+            Err(_) => Err(ClipboardDispatchError::PeerRejected(
+                "peer returned unknown ack byte".to_string(),
+            )),
         }
     }
 }

@@ -774,7 +774,11 @@ where
                     .map(|_| ())
                     .map_err(anyhow::Error::new)
             })
-            .map_err(|error| RelationshipStateResetError::Repository(error.to_string()))
+            .map_err(|error| {
+                RelationshipStateResetError::Repository(
+                    error.context("delete relationship state").into(),
+                )
+            })
     }
 }
 

@@ -64,8 +64,8 @@ pub struct EntryReceiveAttempt {
 /// Failure while reading or advancing receive attempt authority.
 #[derive(Debug, thiserror::Error)]
 pub enum AttemptError {
-    #[error("entry receive attempt store error: {0}")]
-    Backend(String),
+    #[error("entry receive attempt store error")]
+    Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("invalid persisted entry receive attempt state: {0}")]
     InvalidState(String),
 }

@@ -87,7 +87,7 @@ impl EncryptingInboundReceiveCommit {
                         .await
                         .map_err(|_| {
                             InboundReceiveCommitError::Backend(
-                                "failed to encrypt inbound representation".to_owned(),
+                                "failed to encrypt inbound representation".into(),
                             )
                         })?;
                     Some(ciphertext.into_bytes())
@@ -107,7 +107,7 @@ impl EncryptingInboundReceiveCommit {
                 )
                 .map_err(|_| {
                     InboundReceiveCommitError::Backend(
-                        "failed to prepare encrypted inbound representation".to_owned(),
+                        "failed to prepare encrypted inbound representation".into(),
                     )
                 })?,
             );

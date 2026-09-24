@@ -307,9 +307,7 @@ impl InitializeSpaceUseCase {
 fn map_initialize_space_access_err(err: SpaceAccessError) -> InitializeSpaceError {
     match err {
         SpaceAccessError::AlreadyInitialized => InitializeSpaceError::AlreadyInitialized,
-        SpaceAccessError::Internal(message) => {
-            InitializeSpaceError::internal(anyhow::anyhow!(message))
-        }
+        err @ SpaceAccessError::Internal(_) => InitializeSpaceError::internal(err),
         SpaceAccessError::SecurityState { source } => {
             InitializeSpaceError::internal(source.context("activate initialized space security"))
         }

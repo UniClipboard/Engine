@@ -144,7 +144,11 @@ pub(super) async fn derive_file_set_cipher(
     current_profile: &dyn CurrentProfilePort,
 ) -> Result<EntryFileSetPathCipher, EntryFileSetError> {
     let profile = current_profile.current_profile().await.map_err(|error| {
-        EntryFileSetError::Storage(format!("current profile unavailable: {error}"))
+        EntryFileSetError::Storage(
+            anyhow::Error::from(error)
+                .context("current profile unavailable")
+                .into(),
+        )
     })?;
     let key = derive_subkey
         .derive_subkey(profile.as_ref().as_bytes(), FILE_SET_KEY_INFO)
@@ -153,7 +157,11 @@ pub(super) async fn derive_file_set_cipher(
             SpaceAccessError::NotUnlocked => {
                 EntryFileSetError::Storage("session locked: cannot derive file-set key".into())
             }
-            other => EntryFileSetError::Storage(format!("derive file-set key: {other}")),
+            other => EntryFileSetError::Storage(
+                anyhow::Error::from(other)
+                    .context("derive file-set key")
+                    .into(),
+            ),
         })?;
     Ok(EntryFileSetPathCipher::new(key))
 }
@@ -191,17 +199,27 @@ fn encode_line(
 ) -> Result<NewEntryFileSetRow, EntryFileSetError> {
     let original_text_ct = cipher
         .seal_original_text(entry_id, line.line_index, &line.original_text)
-        .map_err(|e| EntryFileSetError::Storage(format!("seal original_text: {e}")))?;
+        .map_err(|e| {
+            EntryFileSetError::Storage(anyhow::Error::from(e).context("seal original_text").into())
+        })?;
     let encrypted_location = match &line.member_location {
         Some(location) => Some((
             location.root_index,
             location.kind.as_tag().to_string(),
             cipher
                 .seal_relative_path(entry_id, line.line_index, &location.relative_path)
-                .map_err(|e| EntryFileSetError::Storage(format!("seal relative_path: {e}")))?,
+                .map_err(|e| {
+                    EntryFileSetError::Storage(
+                        anyhow::Error::from(e).context("seal relative_path").into(),
+                    )
+                })?,
             cipher
                 .seal_root_name(entry_id, line.line_index, &location.root_name)
-                .map_err(|e| EntryFileSetError::Storage(format!("seal root_name: {e}")))?,
+                .map_err(|e| {
+                    EntryFileSetError::Storage(
+                        anyhow::Error::from(e).context("seal root_name").into(),
+                    )
+                })?,
         )),
         None => None,
     };
@@ -223,7 +241,11 @@ async fn encode_v3_file_set_rows(
         let original_text_ct = cipher
             .seal_original_text(entry_id, line.line_index, &line.original_text)
             .await
-            .map_err(|e| EntryFileSetError::Storage(format!("seal original_text: {e}")))?;
+            .map_err(|e| {
+                EntryFileSetError::Storage(
+                    anyhow::Error::from(e).context("seal original_text").into(),
+                )
+            })?;
         let encrypted_location = match &line.member_location {
             Some(location) => Some((
                 location.root_index,
@@ -231,11 +253,19 @@ async fn encode_v3_file_set_rows(
                 cipher
                     .seal_relative_path(entry_id, line.line_index, &location.relative_path)
                     .await
-                    .map_err(|e| EntryFileSetError::Storage(format!("seal relative_path: {e}")))?,
+                    .map_err(|e| {
+                        EntryFileSetError::Storage(
+                            anyhow::Error::from(e).context("seal relative_path").into(),
+                        )
+                    })?,
                 cipher
                     .seal_root_name(entry_id, line.line_index, &location.root_name)
                     .await
-                    .map_err(|e| EntryFileSetError::Storage(format!("seal root_name: {e}")))?,
+                    .map_err(|e| {
+                        EntryFileSetError::Storage(
+                            anyhow::Error::from(e).context("seal root_name").into(),
+                        )
+                    })?,
             )),
             None => None,
         };
@@ -318,7 +348,9 @@ fn decode_row(
     })?;
     let original_text = cipher
         .open_original_text(entry_id, row.line_index, &original_text_ct)
-        .map_err(|e| EntryFileSetError::Storage(format!("open original_text: {e}")))?;
+        .map_err(|e| {
+            EntryFileSetError::Storage(anyhow::Error::from(e).context("open original_text").into())
+        })?;
     let member_location = match (
         row.root_index,
         row.relative_path_ct.take(),
@@ -329,13 +361,20 @@ fn decode_row(
         (Some(root_index), Some(relative_path_ct), Some(kind_tag), Some(root_name_ct)) => {
             let relative_path = cipher
                 .open_relative_path(entry_id, row.line_index, &relative_path_ct)
-                .map_err(|e| EntryFileSetError::Storage(format!("open relative_path: {e}")))?;
-            let kind = FileSetMemberKind::from_tag(&kind_tag).ok_or_else(|| {
-                EntryFileSetError::Storage(format!("unknown member kind tag: {kind_tag}"))
-            })?;
+                .map_err(|e| {
+                    EntryFileSetError::Storage(
+                        anyhow::Error::from(e).context("open relative_path").into(),
+                    )
+                })?;
+            let kind = FileSetMemberKind::from_tag(&kind_tag)
+                .ok_or_else(|| EntryFileSetError::Storage("unknown member kind tag".into()))?;
             let root_name = cipher
                 .open_root_name(entry_id, row.line_index, &root_name_ct)
-                .map_err(|e| EntryFileSetError::Storage(format!("open root_name: {e}")))?;
+                .map_err(|e| {
+                    EntryFileSetError::Storage(
+                        anyhow::Error::from(e).context("open root_name").into(),
+                    )
+                })?;
             Some(FileSetMemberLocation {
                 root_index,
                 root_name,
@@ -364,7 +403,9 @@ async fn decode_v3_row(
     let original_text = cipher
         .open_original_text(entry_id, row.line_index, &original_text_ct)
         .await
-        .map_err(|e| EntryFileSetError::Storage(format!("open original_text: {e}")))?;
+        .map_err(|e| {
+            EntryFileSetError::Storage(anyhow::Error::from(e).context("open original_text").into())
+        })?;
     let member_location = match (
         row.root_index,
         row.relative_path_ct.take(),
@@ -376,14 +417,21 @@ async fn decode_v3_row(
             let relative_path = cipher
                 .open_relative_path(entry_id, row.line_index, &relative_path_ct)
                 .await
-                .map_err(|e| EntryFileSetError::Storage(format!("open relative_path: {e}")))?;
-            let kind = FileSetMemberKind::from_tag(&kind_tag).ok_or_else(|| {
-                EntryFileSetError::Storage(format!("unknown member kind tag: {kind_tag}"))
-            })?;
+                .map_err(|e| {
+                    EntryFileSetError::Storage(
+                        anyhow::Error::from(e).context("open relative_path").into(),
+                    )
+                })?;
+            let kind = FileSetMemberKind::from_tag(&kind_tag)
+                .ok_or_else(|| EntryFileSetError::Storage("unknown member kind tag".into()))?;
             let root_name = cipher
                 .open_root_name(entry_id, row.line_index, &root_name_ct)
                 .await
-                .map_err(|e| EntryFileSetError::Storage(format!("open root_name: {e}")))?;
+                .map_err(|e| {
+                    EntryFileSetError::Storage(
+                        anyhow::Error::from(e).context("open root_name").into(),
+                    )
+                })?;
             Some(FileSetMemberLocation {
                 root_index,
                 root_name,
@@ -430,18 +478,18 @@ fn finish_decoded_row(
                 exclude_reason_codec::UNSUPPORTED_MEMBER => {
                     EntryFileSetExcludeReason::UnsupportedMember
                 }
-                other => {
-                    return Err(EntryFileSetError::Storage(format!(
-                        "unknown exclude_reason code: {other}"
-                    )))
+                _ => {
+                    return Err(EntryFileSetError::Storage(
+                        "unknown exclude_reason code".into(),
+                    ))
                 }
             };
             EntryFileSetLineKind::Excluded { reason }
         }
-        other => {
-            return Err(EntryFileSetError::Storage(format!(
-                "unknown file-set line kind code: {other}"
-            )))
+        _ => {
+            return Err(EntryFileSetError::Storage(
+                "unknown file-set line kind code".into(),
+            ))
         }
     };
 
@@ -551,7 +599,7 @@ fn translate_storage_error(err: anyhow::Error, entry_id: &str) -> EntryFileSetEr
     {
         return EntryFileSetError::EntryNotFound(entry_id.to_string());
     }
-    EntryFileSetError::Storage(err.to_string())
+    EntryFileSetError::Storage(err.context("access entry file set store").into())
 }
 
 #[cfg(test)]

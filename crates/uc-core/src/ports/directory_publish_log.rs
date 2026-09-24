@@ -51,12 +51,12 @@ pub struct DirectoryPublishRecord {
 /// Failure while reading or recording directory publication metadata.
 #[derive(Debug, thiserror::Error)]
 pub enum PublishLogError {
-    #[error("directory publish log store error: {0}")]
-    Backend(String),
+    #[error("directory publish log store error")]
+    Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("invalid persisted directory publish phase: {0}")]
     InvalidPhase(String),
-    #[error("directory publish log encryption unavailable: {0}")]
-    EncryptionUnavailable(String),
+    #[error("directory publish log encryption unavailable")]
+    EncryptionUnavailable(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("directory publish log ciphertext is invalid")]
     InvalidCiphertext,
 }

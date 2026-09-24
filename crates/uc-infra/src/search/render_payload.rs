@@ -109,8 +109,8 @@ pub enum RenderDecodeError {
 pub enum RenderEncodeError {
     #[error("render payload AEAD encryption failed")]
     EncryptFailed,
-    #[error("render payload JSON serialization failed: {0}")]
-    SerializeJson(String),
+    #[error("render payload JSON serialization failed")]
+    SerializeJson(#[source] serde_json::Error),
 }
 
 /// AEAD codec holding a per-session [`RenderKey`].
@@ -149,8 +149,7 @@ impl RenderPayloadCodec {
         entry_id: &EntryId,
         fields: &RenderFields,
     ) -> Result<Vec<u8>, RenderEncodeError> {
-        let plaintext = serde_json::to_vec(fields)
-            .map_err(|e| RenderEncodeError::SerializeJson(e.to_string()))?;
+        let plaintext = serde_json::to_vec(fields).map_err(RenderEncodeError::SerializeJson)?;
         let ad = aad::for_search_render(entry_id);
         let (nonce, ciphertext) = encrypt_xchacha_raw(self.render_key.as_bytes(), &plaintext, &ad)
             .map_err(|_| RenderEncodeError::EncryptFailed)?;

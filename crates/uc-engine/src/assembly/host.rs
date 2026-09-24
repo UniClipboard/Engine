@@ -832,7 +832,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
+        assert!(matches!(
             wiring
                 .wired
                 .sync_engine
@@ -840,7 +840,7 @@ mod tests {
                 .current_member_epoch()
                 .await,
             Err(CurrentMemberSignatureError::Unavailable)
-        );
+        ));
         assert!(!wiring.wired.sync_engine.membership_session.is_ready());
     }
 

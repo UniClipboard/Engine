@@ -45,7 +45,11 @@ impl NetworkInterfaceLanProbe {
 impl LanInterfaceProbePort for NetworkInterfaceLanProbe {
     async fn list_interfaces(&self) -> Result<Vec<LanInterface>, LanInterfaceProbeError> {
         let raw = NetworkInterface::show().map_err(|err| {
-            LanInterfaceProbeError::Probe(format!("network-interface enumeration failed: {err}"))
+            LanInterfaceProbeError::Probe(
+                anyhow::Error::from(err)
+                    .context("network-interface enumeration failed")
+                    .into(),
+            )
         })?;
 
         let mut out = Vec::new();

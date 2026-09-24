@@ -28,7 +28,7 @@ impl<E> DieselEntryReceiveAttemptRepository<E> {
 }
 
 fn backend(error: anyhow::Error) -> AttemptError {
-    AttemptError::Backend(error.to_string())
+    AttemptError::Backend(error.context("access receive attempt store").into())
 }
 
 fn to_attempt(row: EntryReceiveAttemptRow) -> Result<EntryReceiveAttempt, AttemptError> {

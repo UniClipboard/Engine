@@ -54,8 +54,8 @@ pub enum SpaceAccessError {
     },
 
     /// 其它内部故障（底层 IO / 算法实现异常等）。
-    #[error("space access internal error: {0}")]
-    Internal(String),
+    #[error("space access internal error")]
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Inner aggregate surface for space access.

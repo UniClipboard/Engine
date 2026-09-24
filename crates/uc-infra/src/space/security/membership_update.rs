@@ -49,7 +49,7 @@ impl MembershipSecurityUpdatePort for DefaultMembershipSecurityUpdateAdapter {
             .signatures
             .current_member_epoch()
             .await
-            .map_err(|error| MembershipSecurityUpdateError::Repository(error.to_string()))?;
+            .map_err(|error| MembershipSecurityUpdateError::Repository(Box::new(error)))?;
         Ok(MembershipSecurityState {
             space_id,
             group_epoch,
@@ -64,7 +64,7 @@ impl MembershipSecurityUpdatePort for DefaultMembershipSecurityUpdateAdapter {
             .apply_group_epoch_update(payload)
             .await
             .map(|epoch| epoch.value())
-            .map_err(|error| MembershipSecurityUpdateError::Repository(error.to_string()))
+            .map_err(|error| MembershipSecurityUpdateError::Repository(Box::new(error)))
     }
 }
 

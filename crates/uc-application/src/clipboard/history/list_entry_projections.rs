@@ -1024,7 +1024,7 @@ mod tests {
         file_set_repo
             .expect_load()
             .times(1)
-            .return_once(|_| Err(EntryFileSetError::Storage("boom".to_string())));
+            .return_once(|_| Err(EntryFileSetError::Storage("boom".into())));
 
         let projections = project_single_entry(
             ClipboardEntryContentCategory::File,

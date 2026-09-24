@@ -998,7 +998,7 @@ impl FinalizeProvisionalReceivePort for FailingProvisionalReceive {
         _now_ms: i64,
     ) -> std::result::Result<(), ProvisionalReceiveError> {
         Err(ProvisionalReceiveError::Backend(
-            "provisional adoption failed".to_owned(),
+            "provisional adoption failed".into(),
         ))
     }
 }

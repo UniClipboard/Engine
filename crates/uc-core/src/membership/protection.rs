@@ -52,7 +52,7 @@ pub trait SpaceProtectionStatusPort: Send + Sync {
     ) -> Result<SpaceProtectionSnapshot, SpaceProtectionError>;
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum SpaceProtectionError {
     #[error("space security state is unavailable")]
     Unavailable,
@@ -60,6 +60,6 @@ pub enum SpaceProtectionError {
     #[error("space security state is corrupted")]
     Corrupted,
 
-    #[error("failed to query space security state: {0}")]
-    Repository(String),
+    #[error("failed to query space security state")]
+    Repository(#[source] Box<dyn std::error::Error + Send + Sync>),
 }

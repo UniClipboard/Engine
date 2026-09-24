@@ -147,8 +147,8 @@ pub enum RegisterMobileShortcutDeviceError {
     PasswordTooLong { max: usize },
 
     /// 自定义 password 哈希失败(算法库内部错误)。
-    #[error("password hashing failed: {0}")]
-    PasswordHashFailed(String),
+    #[error("password hashing failed")]
+    PasswordHashFailed(#[source] PasswordHasherError),
 
     /// 持久化失败(重复 device id / username 碰撞 / 底层存储错误)。
     #[error("device persistence failed")]
@@ -171,8 +171,8 @@ pub enum RegisterMobileShortcutDeviceError {
     NoLanInterfaceAvailable,
 
     /// 探测 LAN 接口失败(底层 syscall 错误)。
-    #[error("lan interface probe failed: {0}")]
-    LanInterfaceProbeFailed(String),
+    #[error("lan interface probe failed")]
+    LanInterfaceProbeFailed(#[source] LanInterfaceProbeError),
 }
 
 // ─── use case ───────────────────────────────────────────────────────────
@@ -576,8 +576,8 @@ fn advertise_bucket(octets: &[u8; 4]) -> u8 {
 
 fn translate_probe_error(err: LanInterfaceProbeError) -> RegisterMobileShortcutDeviceError {
     match err {
-        LanInterfaceProbeError::Probe(msg) => {
-            RegisterMobileShortcutDeviceError::LanInterfaceProbeFailed(msg)
+        error @ LanInterfaceProbeError::Probe(_) => {
+            RegisterMobileShortcutDeviceError::LanInterfaceProbeFailed(error)
         }
     }
 }
@@ -670,16 +670,9 @@ fn translate_connect_uri_error(err: ConnectUriError) -> RegisterMobileShortcutDe
 }
 
 fn translate_hasher_error(err: PasswordHasherError) -> RegisterMobileShortcutDeviceError {
-    match err {
-        PasswordHasherError::InvalidPhc(msg) => {
-            // hash() 不应产生 InvalidPhc(那是 verify 路径才会有), 但 trait
-            // 把两个变体合并; 走到这里说明 adapter 实现异常, 翻译为内部错误。
-            RegisterMobileShortcutDeviceError::PasswordHashFailed(format!("invalid phc: {msg}"))
-        }
-        PasswordHasherError::Internal(msg) => {
-            RegisterMobileShortcutDeviceError::PasswordHashFailed(msg)
-        }
-    }
+    // hash() 不应产生 InvalidPhc(那是 verify 路径才会有), 但 trait 把两个变体合并;
+    // 走到这里说明 adapter 实现异常, 与 Internal 一样翻译为内部错误并保留来源。
+    RegisterMobileShortcutDeviceError::PasswordHashFailed(err)
 }
 
 // ─── tests ──────────────────────────────────────────────────────────────
@@ -1409,7 +1402,8 @@ mod tests {
         let err = uc.execute(label_only("iPhone")).await.unwrap_err();
         assert!(matches!(
             err,
-            RegisterMobileShortcutDeviceError::LanInterfaceProbeFailed(ref s) if s.contains("ifaddr crashed")
+            RegisterMobileShortcutDeviceError::LanInterfaceProbeFailed(LanInterfaceProbeError::Probe(ref source))
+                if source.to_string().contains("ifaddr crashed")
         ));
     }
 

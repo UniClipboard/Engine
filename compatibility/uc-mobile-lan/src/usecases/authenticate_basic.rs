@@ -65,8 +65,8 @@ pub enum AuthenticateBasicAuthError {
     /// 密码哈希器内部错误(库故障 / spawn_blocking join 失败)。
     /// PHC 字符串本身损坏(字段被人手改坏)按 401 处理而不是 Internal,
     /// 避免攻击者通过制造畸形 phc 字段触发服务侧错误日志风暴。
-    #[error("password hasher internal failure: {0}")]
-    Internal(String),
+    #[error("password hasher internal failure")]
+    Internal(#[source] PasswordHasherError),
 }
 
 // ─── use case ───────────────────────────────────────────────────────────
@@ -150,9 +150,9 @@ impl AuthenticateBasicAuthUseCase {
                         self.emit_failure(MobileAuthFailureKind::PasswordMismatch);
                         return Err(AuthenticateBasicAuthError::InvalidCredentials);
                     }
-                    Err(PasswordHasherError::Internal(msg)) => {
+                    Err(error @ PasswordHasherError::Internal(_)) => {
                         self.emit_failure(MobileAuthFailureKind::Internal);
-                        return Err(AuthenticateBasicAuthError::Internal(msg));
+                        return Err(AuthenticateBasicAuthError::Internal(error));
                     }
                 }
             }

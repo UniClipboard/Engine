@@ -135,8 +135,8 @@ pub enum EntryFileSetError {
     #[error("entry not found: {0}")]
     EntryNotFound(String),
     /// 持久化层操作失败。
-    #[error("storage failure: {0}")]
-    Storage(String),
+    #[error("storage failure")]
+    Storage(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl EntryFileSet {

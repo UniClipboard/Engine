@@ -1110,9 +1110,9 @@ mod tests {
     #[test]
     fn local_publication_failure_has_its_own_stage() {
         let error = map_local_publication_failure(
-            anyhow::Error::new(MdnsPublisherError::SocketBind(
-                "private socket and interface detail".to_owned(),
-            )),
+            anyhow::Error::new(MdnsPublisherError::SocketBind(anyhow::anyhow!(
+                "private socket and interface detail"
+            ))),
             None,
         );
 

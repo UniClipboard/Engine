@@ -65,12 +65,12 @@ pub enum PasswordHasherError {
     /// PHC 字符串格式不合法 / 解析失败。adapter 必须在写入 db 前自检,但
     /// 读出的 row 可能因升级 / 损坏而非法,这条让 use case 据此把记录视为
     /// "需要重新登记"。
-    #[error("invalid phc string: {0}")]
-    InvalidPhc(String),
+    #[error("invalid phc string")]
+    InvalidPhc(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// 哈希 / 校验调用本身失败(库内部错误 / 内存不足等)。
-    #[error("password hasher internal failure: {0}")]
-    Internal(String),
+    #[error("password hasher internal failure")]
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 // ─── device store (inner aggregate) ──────────────────────────────────────
@@ -257,8 +257,8 @@ pub trait LanInterfaceProbePort: Send + Sync {
 pub enum LanInterfaceProbeError {
     /// 探测失败 —— OS 调用错误、权限不足等。adapter 层负责把底层错误的
     /// 文本带上来给排障。
-    #[error("lan interface probe failed: {0}")]
-    Probe(String),
+    #[error("lan interface probe failed")]
+    Probe(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 // ─── latest paste representation ────────────────────────────────────────

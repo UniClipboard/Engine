@@ -20,7 +20,7 @@ use argon2::Argon2;
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use rand::RngCore;
-use uc_core::crypto::model::Passphrase;
+use uc_core::crypto::model::{EncryptionError, Passphrase};
 
 use super::crypto_model::{EncryptedBlob, KdfParams};
 use super::secrets::{Kek, MasterKey};
@@ -41,14 +41,27 @@ pub(crate) enum AeadError {
     DecryptFailed,
 }
 
+/// KEK 派生失败的分类；算法名等输入值不进入错误文本。
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum KdfError {
+    #[error("unsupported KDF algorithm")]
+    UnsupportedAlgorithm,
+    #[error("invalid argon2 parameters")]
+    Params(#[source] argon2::Error),
+    #[error("argon2 hashing failed")]
+    Hash(#[source] argon2::Error),
+    #[error("derived KEK is invalid")]
+    Key(#[source] EncryptionError),
+}
+
 /// Argon2id 派生 KEK。
 pub(crate) fn derive_kek_argon2id(
     passphrase: &Passphrase,
     salt: &[u8],
     kdf: &KdfParams,
-) -> Result<Kek, String> {
+) -> Result<Kek, KdfError> {
     if kdf.alg != KDF_ALG_ARGON2ID {
-        return Err(format!("unsupported KDF algorithm: {}", kdf.alg));
+        return Err(KdfError::UnsupportedAlgorithm);
     }
     let argon2 = Argon2::new(
         argon2::Algorithm::Argon2id,
@@ -59,13 +72,13 @@ pub(crate) fn derive_kek_argon2id(
             kdf.params.parallelism,
             Some(32),
         )
-        .map_err(|e| format!("argon2 params: {e}"))?,
+        .map_err(KdfError::Params)?,
     );
     let mut okm = [0u8; 32];
     argon2
         .hash_password_into(passphrase.as_bytes(), salt, &mut okm)
-        .map_err(|e| format!("argon2 hash: {e}"))?;
-    Kek::from_bytes(&okm).map_err(|e| format!("Kek::from_bytes: {e}"))
+        .map_err(KdfError::Hash)?;
+    Kek::from_bytes(&okm).map_err(KdfError::Key)
 }
 
 /// XChaCha20-Poly1305 包装 MasterKey。
@@ -255,7 +268,24 @@ mod tests {
         let mut kdf = cheap_kdf();
         kdf.alg = "scrypt".to_string();
         let err = derive_kek_argon2id(&Passphrase("x".into()), &[0u8; 16], &kdf).unwrap_err();
-        assert!(err.contains("unsupported KDF"), "got: {err}");
+        assert!(
+            matches!(err, KdfError::UnsupportedAlgorithm),
+            "got: {err:?}"
+        );
+        assert!(!err.to_string().contains("scrypt"));
+    }
+
+    #[test]
+    fn derive_kek_keeps_argon2_parameter_error_as_source() {
+        let mut kdf = cheap_kdf();
+        kdf.params.parallelism = 0;
+        let err = derive_kek_argon2id(&Passphrase("x".into()), &[0u8; 16], &kdf).unwrap_err();
+        let KdfError::Params(source) = &err else {
+            panic!("expected Params, got {err:?}");
+        };
+        assert!(std::error::Error::source(&err)
+            .and_then(|cause| cause.downcast_ref::<argon2::Error>())
+            .is_some_and(|cause| cause == source));
     }
 
     // ── wrap / unwrap master key ─────────────────────────────────────────

@@ -207,6 +207,28 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
     与失败数，显示文本不含下层文本。
   - 剩余 S3 集中在 Infra（`SpaceAccessError`、legacy bootstrap、`EntryFileSetError` 等）与兼容线，以及 Core 的
     `InvitationError::Internal`、`FileTransferProjectionError::Backend`、`MembershipSecurityUpdateError::Repository`。
+- Infra 安全与仓储（已完成）：Core 的 `SpaceAccessError::Internal`、`SpaceProtectionError::Repository`、
+  `PublishLogError::{Backend, EncryptionUnavailable}`、`EntryFileSetError::Storage`、`AttemptError::Backend`、
+  `FileTransferProjectionError::Backend`、`ProvisionalReceiveError::Backend`、`InboundReceiveCommitError::Backend`、
+  `RelationshipStateResetError::Repository`、`MembershipSecurityUpdateError::Repository`、`LegacyMigrationRecoveryError::Internal`、
+  `LanInterfaceProbeError::Probe`、`PasswordHasherError::{InvalidPhc, Internal}`、`KeyMigrationError::Internal`；
+  Application 的 `CurrentMemberSignatureError::Repository`；Infra 的 `MdnsPublisherError`、`MdnsResolverError`、
+  `RenderEncodeError::SerializeJson`；观测契约的 `ResetIdentityError::Storage`。
+  - `v1_aead::derive_kek_argon2id` 原先返回 `String`，改为 `KdfError`（不支持的算法、参数、哈希、KEK 构造），
+    不再把 KDF 算法名写进错误文本；`SpaceAccessError` 的 KDF 与本地密钥物料失败随之保存具体来源。
+  - 兼容线：`AuthenticateBasicAuthError::Internal`、`ListLanInterfacesError::ProbeFailed`、
+    `RegisterMobileShortcutDeviceError::{PasswordHashFailed, LanInterfaceProbeFailed}`、`UpdateMobileDeviceError::PasswordHashFailed`
+    改为保存 Core 端口错误本身；Engine 只映射错误码，对外行为不变。
+  - `SpaceProtectionError`、`RelationshipStateResetError`、`MembershipSecurityUpdateError`、`CurrentMemberSignatureError`
+    去掉 `Clone`/`PartialEq`/`Eq`。
+  - 隐私修复：文件集未知成员类型与未知排除原因不再把库中取值拼进错误；未知剪贴板回执字节只保留固定分类文本。
+  - 补漏：`mobile_device_repo.rs` 只在 `lan-compat` 的测试配置下编译，上一批改动后该配置无法编译，且 7 处
+    `anyhow` 未加 context 直接装箱。已修复；并用临时的“仅接受 std 错误”恒等函数包裹全部 `Error::X(e.into())`，
+    在默认与 `lan-compat` 配置下编译，确认全仓已无同类位置。
+  - 测试：KDF 参数错误保留 `argon2::Error`；PHC 解析失败保留 `password_hash::Error`，显示文本不含输入。
+  - 暂缓：`space_security_store/legacy_bootstrap.rs` 与 `BootstrapError::Repository`（049 仍在同一工作树活动，
+    该目录在其范围内）；`SecureStorageError::Other`（其另一处构造在 049 未提交的 `profile_key_recovery.rs` 中）；
+    `InvitationError`/`ConsumeInvitationError::Internal` 及其 Application 映射，另起一批处理。
 - 待决策：`RelayProbeError` 的文本经 `RelayProbeOutcome::{Dns, Tls, Handshake, Other} { message }` 原样交给宿主显示，
   属于宿主可见文本。改为 source 需要先确定宿主诊断文本的契约，暂不处理。
 - 后续事项：投递失败时 `reason_detail` 把 `ClipboardDispatchError` 的来源文本写入 `EntryDeliveryRecord` 持久化字段，

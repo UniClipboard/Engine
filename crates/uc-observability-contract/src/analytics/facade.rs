@@ -93,18 +93,24 @@ pub struct SelfMintedAdoptRequest {
 pub enum ResetIdentityError {
     /// Underlying storage operation failed; identity remains in its
     /// previous state.
-    Storage(String),
+    Storage(AnalyticsIdentityError),
 }
 
 impl std::fmt::Display for ResetIdentityError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Storage(msg) => write!(f, "reset telemetry identity failed: {msg}"),
+            Self::Storage(_) => write!(f, "reset telemetry identity failed"),
         }
     }
 }
 
-impl std::error::Error for ResetIdentityError {}
+impl std::error::Error for ResetIdentityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Storage(error) => Some(error),
+        }
+    }
+}
 
 /// Default composition of an [`AnalyticsPort`] sink and an
 /// [`AnalyticsIdentityPort`]. The sequencing rules live here and only here.
@@ -183,7 +189,7 @@ impl AnalyticsFacade for DefaultAnalyticsFacade {
         let outcome = self
             .identity
             .reset_telemetry_identity()
-            .map_err(|e| ResetIdentityError::Storage(e.to_string()))?;
+            .map_err(ResetIdentityError::Storage)?;
         self.sink.identify(IdentifyPayload::switch_only(
             outcome.previous_distinct_id,
             outcome.new_distinct_id,

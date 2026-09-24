@@ -4,8 +4,8 @@ use async_trait::async_trait;
 pub enum LegacyMigrationRecoveryError {
     #[error("legacy migration requires manual recovery")]
     RecoveryRequired,
-    #[error("legacy migration recovery failed: {0}")]
-    Internal(String),
+    #[error("legacy migration recovery failed")]
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 #[async_trait]

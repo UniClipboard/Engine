@@ -54,16 +54,19 @@ impl DefaultKeyMigrationAdapter {
         }
 
         let name = Self::keyring_name(run_id);
-        let raw = self
-            .secure_storage
-            .get(&name)
-            .map_err(|e| KeyMigrationError::Internal(format!("secure_storage.get: {e}")))?;
+        let raw = self.secure_storage.get(&name).map_err(|e| {
+            KeyMigrationError::Internal(anyhow::Error::from(e).context("secure_storage.get").into())
+        })?;
         let bytes = match raw {
             None => return Err(KeyMigrationError::NotFound(run_id.clone())),
             Some(b) => b,
         };
         let key = MasterKey::from_bytes(&bytes).map_err(|e| {
-            KeyMigrationError::Internal(format!("invalid migration key bytes: {e}"))
+            KeyMigrationError::Internal(
+                anyhow::Error::from(e)
+                    .context("invalid migration key bytes")
+                    .into(),
+            )
         })?;
         let mut cache = self.key_cache.write().unwrap();
         let entry = cache.entry(run_id.clone()).or_insert_with(|| Arc::new(key));
@@ -97,17 +100,17 @@ impl KeyMigrationPort for DefaultKeyMigrationAdapter {
             Ok(Some(_)) => return Err(KeyMigrationError::AlreadyExists(run_id)),
             Ok(None) => {}
             Err(e) => {
-                return Err(KeyMigrationError::Internal(format!(
-                    "secure_storage.get: {e}"
-                )))
+                return Err(KeyMigrationError::Internal(
+                    anyhow::Error::from(e).context("secure_storage.get").into(),
+                ))
             }
         }
 
         let mut bytes = [0u8; 32];
         rand::rng().fill_bytes(&mut bytes);
-        self.secure_storage
-            .set(&name, &bytes)
-            .map_err(|e| KeyMigrationError::Internal(format!("secure_storage.set: {e}")))?;
+        self.secure_storage.set(&name, &bytes).map_err(|e| {
+            KeyMigrationError::Internal(anyhow::Error::from(e).context("secure_storage.set").into())
+        })?;
         Ok(run_id)
     }
 
@@ -119,9 +122,14 @@ impl KeyMigrationPort for DefaultKeyMigrationAdapter {
     ) -> Result<Ciphertext, KeyMigrationError> {
         let key = self.load_key(run_id)?;
         let blob = v1_aead::encrypt_blob_xchacha(&key, plaintext.as_bytes(), aad.as_bytes())
-            .map_err(|e| KeyMigrationError::Internal(e.to_string()))?;
-        let bytes = serde_json::to_vec(&blob)
-            .map_err(|e| KeyMigrationError::Internal(format!("serialize EncryptedBlob: {e}")))?;
+            .map_err(|e| KeyMigrationError::Internal(Box::new(e)))?;
+        let bytes = serde_json::to_vec(&blob).map_err(|e| {
+            KeyMigrationError::Internal(
+                anyhow::Error::from(e)
+                    .context("serialize EncryptedBlob")
+                    .into(),
+            )
+        })?;
         Ok(Ciphertext::new(bytes))
     }
 
@@ -141,7 +149,7 @@ impl KeyMigrationPort for DefaultKeyMigrationAdapter {
             v1_aead::decrypt_blob_xchacha(&key, &blob.nonce, &blob.ciphertext, aad.as_bytes())
                 .map_err(|e| match e {
                     v1_aead::AeadError::DecryptFailed => KeyMigrationError::InvalidCiphertext,
-                    other => KeyMigrationError::Internal(other.to_string()),
+                    other => KeyMigrationError::Internal(Box::new(other)),
                 })?;
         Ok(Plaintext::new(plain))
     }
@@ -154,9 +162,13 @@ impl KeyMigrationPort for DefaultKeyMigrationAdapter {
         // SecureStoragePort.delete 在大多数后端对不存在 key 不报错；
         // 万一某后端报错，统一映射成 Internal 让调用方决定重试。port
         // 文档约定本方法幂等，所以 happy path 上重复调用应当无副作用。
-        self.secure_storage
-            .delete(&name)
-            .map_err(|e| KeyMigrationError::Internal(format!("secure_storage.delete: {e}")))?;
+        self.secure_storage.delete(&name).map_err(|e| {
+            KeyMigrationError::Internal(
+                anyhow::Error::from(e)
+                    .context("secure_storage.delete")
+                    .into(),
+            )
+        })?;
         // 缓存与 keyring 保持一致：discard 之后再 encrypt/decrypt 必须按
         // NotFound 处理，否则会出现"keyring 已清但内存仍能解密"的幽灵态。
         self.key_cache.write().unwrap().remove(run_id);

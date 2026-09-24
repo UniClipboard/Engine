@@ -20,14 +20,14 @@ pub enum MembershipError {
     Repository(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum MembershipSecurityUpdateError {
     #[error("membership security state is unavailable")]
     Unavailable,
     #[error("membership security update is invalid")]
     Invalid,
-    #[error("membership security update failed: {0}")]
-    Repository(String),
+    #[error("membership security update failed")]
+    Repository(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -88,10 +88,10 @@ pub enum SpaceSecurityStateResetError {
     Repository(String),
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum RelationshipStateResetError {
-    #[error("relationship state reset failed: {0}")]
-    Repository(String),
+    #[error("relationship state reset failed")]
+    Repository(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]

@@ -43,8 +43,8 @@ pub struct LanInterfaceOption {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ListLanInterfacesError {
-    #[error("lan interface probe failed: {0}")]
-    ProbeFailed(String),
+    #[error("lan interface probe failed")]
+    ProbeFailed(#[source] LanInterfaceProbeError),
 }
 
 // ─── use case ───────────────────────────────────────────────────────────
@@ -176,9 +176,7 @@ fn lan_candidate_bucket(ipv4_str: &str) -> u8 {
 }
 
 fn translate_probe_error(err: LanInterfaceProbeError) -> ListLanInterfacesError {
-    match err {
-        LanInterfaceProbeError::Probe(msg) => ListLanInterfacesError::ProbeFailed(msg),
-    }
+    ListLanInterfacesError::ProbeFailed(err)
 }
 
 // ─── tests ──────────────────────────────────────────────────────────────
@@ -331,7 +329,11 @@ mod tests {
         let uc = ListLanInterfacesUseCase::new(Arc::new(ExplodingProbe));
         let err = uc.execute().await.unwrap_err();
         assert!(
-            matches!(err, ListLanInterfacesError::ProbeFailed(ref s) if s.contains("ifaddr failed")),
+            matches!(
+                err,
+                ListLanInterfacesError::ProbeFailed(LanInterfaceProbeError::Probe(ref source))
+                    if source.to_string().contains("ifaddr failed")
+            ),
             "expected ProbeFailed(ifaddr failed), got {err:?}"
         );
     }
