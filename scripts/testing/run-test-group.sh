@@ -5,7 +5,7 @@ readonly NEXTEST_VERSION="0.9.145"
 readonly GROUP="${1:-}"
 
 if [[ -z "${GROUP}" ]]; then
-  printf 'usage: %s <fast|evidence|persistence-provider|engine-smoke|process|real-network|device> [group arguments]\n' "$0" >&2
+  printf 'usage: %s <fast|evidence|persistence-provider|engine-smoke|process|membership-e2e|real-network|device> [group arguments]\n' "$0" >&2
   exit 2
 fi
 shift
@@ -88,7 +88,7 @@ case "${GROUP}" in
   persistence-provider)
     run_nextest \
       -p uc-infra \
-      -E 'package(uc-infra) & (binary(membership_ledger) | binary(profile_storage_upgrade) | binary(space_admission_state) | test(provider_dependency_evidence))' \
+      -E 'package(uc-infra) & (binary(membership_record) | binary(profile_storage_upgrade) | binary(space_admission_state) | test(provider_dependency_evidence))' \
       "$@"
     ;;
   engine-smoke)
@@ -99,6 +99,14 @@ case "${GROUP}" in
       -p uc-engine \
       -p uc-infra \
       -E 'package(uc-engine) & binary(host_contract) | package(uc-infra) & binary(profile_storage_upgrade_crash)' \
+      "$@"
+    ;;
+  membership-e2e)
+    # 成员多设备场景：每项启动多个完整 Engine，经本机回环 QUIC 通信；测试文件只在 dev-tools 下编译。
+    run_nextest \
+      -p uc-engine \
+      --features dev-tools \
+      --test space_membership_auto_pairing_e2e \
       "$@"
     ;;
   real-network)

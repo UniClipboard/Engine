@@ -106,6 +106,20 @@ bash scripts/testing/run-test-group.sh evidence
 bash scripts/testing/run-test-group.sh persistence-provider
 bash scripts/testing/run-test-group.sh engine-smoke
 bash scripts/testing/run-test-group.sh process
+bash scripts/testing/run-test-group.sh membership-e2e
+```
+
+`membership-e2e` 运行 `crates/uc-engine/tests/space_membership_auto_pairing_e2e.rs`：每个场景启动 2–10 个完整
+Engine，使用真实 SQLite、MLS 与本机回环 Iroh QUIC，配对 rendezvous 为本地模拟服务，分区由 dev-tools 在 Engine
+内施加，使用真实时钟。该文件只在 `dev-tools` feature 下编译，因此 `cargo test -p uc-engine --locked` 不运行
+其中任何场景。nextest 为每个场景单独起进程，并按 `.config/nextest.toml` 的 `membership-e2e` 测试组限制并发、
+放宽慢测试期限；`cargo test` 会在一个进程中顺序运行全部场景，耗时约为前者的数倍且时序失真，只作为兼容入口保留。
+可追加 nextest 参数选择场景，例如：
+
+```bash
+bash scripts/testing/run-test-group.sh membership-e2e -E 'test(f7_)'
+RUST_LOG=warn,uc_application::space::membership=debug \
+  bash scripts/testing/run-test-group.sh membership-e2e -E 'test(removal_convergence)' --no-capture
 ```
 
 `real-network` 会转交现有 Linux 网络脚本；`device` 要求明确平台与设备，不会自动运行。cargo-nextest 必须为脚本声明的固定版本；脚本不会静默退回语义不同的 runner。
