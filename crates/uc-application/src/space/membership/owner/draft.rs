@@ -1,7 +1,7 @@
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     LedgerEffect, LedgerFollowUp, LedgerInput, LedgerOutcome, LedgerTransitionError,
-    MemberInstanceId, MembershipLedger, VersionedMembershipHistory,
+    MemberInstanceId, MembershipLedger, PeerEvidence, PeerSyncResult, VersionedMembershipHistory,
 };
 
 use crate::space::membership::{
@@ -20,12 +20,15 @@ pub(crate) struct MembershipDraft {
     revision: u64,
     space: Option<SpaceMembershipView>,
     follow_ups: Vec<LedgerFollowUp>,
+    /// 本次提交中新确认了本机当前位置的对端：与它的已认证成员历史交换刚刚成功。
+    confirmed_peers: Vec<DeviceId>,
     revised: bool,
 }
 
 pub(super) struct FinishedDraft {
     pub(super) view: MembershipView,
     pub(super) follow_ups: Vec<LedgerFollowUp>,
+    pub(super) confirmed_peers: Vec<DeviceId>,
 }
 
 impl MembershipDraft {
@@ -36,6 +39,7 @@ impl MembershipDraft {
             space: base.space().cloned(),
             base,
             follow_ups: Vec::new(),
+            confirmed_peers: Vec::new(),
             revised: false,
         }
     }
@@ -59,6 +63,19 @@ impl MembershipDraft {
             .space
             .as_mut()
             .ok_or(LedgerTransitionError::InputMismatch)?;
+        let confirmed_peer = match &input {
+            LedgerInput::HistorySyncFinished {
+                peer,
+                result: PeerSyncResult::Confirmed,
+                ..
+            } => Some(*peer),
+            LedgerInput::PeerEvidenceReconciled {
+                source,
+                evidence: PeerEvidence::Confirmed,
+                ..
+            } => Some(*source),
+            _ => None,
+        };
         let (ledger, outcome, effects) =
             space.ledger.clone().apply(input, self.now_ms)?.into_parts();
         if outcome == LedgerOutcome::Applied {
@@ -67,6 +84,11 @@ impl MembershipDraft {
             self.revised = true;
             for LedgerEffect::AfterCommit(follow_up) in effects {
                 push_unique(&mut self.follow_ups, follow_up);
+            }
+            if let Some(peer) = confirmed_peer {
+                if !self.confirmed_peers.contains(&peer) {
+                    self.confirmed_peers.push(peer);
+                }
             }
         }
         Ok(outcome)
@@ -164,6 +186,7 @@ impl MembershipDraft {
         Ok(Some(FinishedDraft {
             view: MembershipView::new(self.revision, self.space),
             follow_ups: self.follow_ups,
+            confirmed_peers: self.confirmed_peers,
         }))
     }
 }

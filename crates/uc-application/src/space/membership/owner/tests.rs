@@ -1,5 +1,5 @@
 use uc_core::ids::DeviceId;
-use uc_core::membership::MembershipHistoryAckV3;
+use uc_core::membership::{LedgerInput, LedgerOutcome, MembershipHistoryAckV3, PeerSyncResult};
 
 use crate::space::lifecycle::SpaceMembershipResetPort;
 use crate::space::membership::testing::{EstablishedSpace, OwnerFixture};
@@ -133,4 +133,37 @@ async fn reset_ends_the_space_and_keeps_the_revision_increasing() {
     // 已无 Space 时重置不再写入。
     fixture.owner.reset().await.unwrap();
     assert_eq!(fixture.records.commit_count(), 1);
+}
+
+#[tokio::test]
+async fn a_confirmed_history_exchange_offers_the_peer_to_group_update_delivery_once() {
+    let fixture = active_space();
+    let peer = DeviceId::new("device-b");
+
+    let committed = fixture
+        .owner
+        .commit(|draft| {
+            let position = draft
+                .require_space()?
+                .history()
+                .current_position()
+                .map_err(|_| MembershipLedgerError::Corrupt)?;
+            draft
+                .apply(LedgerInput::HistorySyncSelected { peers: vec![peer] })
+                .map_err(|_| MembershipLedgerError::Corrupt)?;
+            draft
+                .apply(LedgerInput::HistorySyncFinished {
+                    peer,
+                    synced_position: position,
+                    result: PeerSyncResult::Confirmed,
+                })
+                .map_err(|_| MembershipLedgerError::Corrupt)
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(committed.output, LedgerOutcome::Applied);
+    assert!(fixture.wake.wake_count() > 0);
+    assert_eq!(fixture.owner.take_reachable_peers(), vec![peer]);
+    assert!(fixture.owner.take_reachable_peers().is_empty());
 }

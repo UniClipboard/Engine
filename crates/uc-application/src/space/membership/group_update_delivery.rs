@@ -7,7 +7,7 @@ use uc_observability_contract::diagnostics::connectivity::{
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     GroupRevocationPort, GroupUpdateDeliveryStatus, GroupUpdateDispatchError,
-    GroupUpdateDispatchPort, KeyEpochError,
+    GroupUpdateDispatchPort, KeyEpochError, PendingGroupUpdate,
 };
 use uc_core::ports::{ClockPort, HostEvent, MembershipHostEvent};
 
@@ -117,6 +117,32 @@ impl DeliverPendingGroupUpdatesUseCase {
         }
         Ok(())
     }
+
+    /// 已到期的更新，加上发给刚确认成员历史的对端、仍在退避中的更新。对端刚完成已认证交换，
+    /// 等待退避到期只会让它继续缺少新的组密钥。
+    async fn deliverable_updates(
+        &self,
+        reachable_peers: &[DeviceId],
+    ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
+        let now_ms = self.clock.now_ms();
+        let mut pending = self.store.due_space_group_updates(now_ms, None).await?;
+        for peer in reachable_peers {
+            let expedited = self
+                .store
+                .due_space_group_updates(now_ms, Some(*peer))
+                .await?;
+            for update in expedited {
+                if update.recipient() == peer
+                    && !pending
+                        .iter()
+                        .any(|known| known.update_id() == update.update_id())
+                {
+                    pending.push(update);
+                }
+            }
+        }
+        Ok(pending)
+    }
 }
 
 #[async_trait::async_trait]
@@ -124,15 +150,12 @@ impl DeliverPendingGroupUpdatesPort for DeliverPendingGroupUpdatesUseCase {
     async fn deliver_pending_group_updates(
         &self,
         _trigger: &MembershipMaintenanceTrigger,
+        reachable_peers: &[DeviceId],
     ) -> MembershipMaintenanceStepOutcome {
         if let Err(outcome) = self.settle_obsolete_updates().await {
             return outcome;
         }
-        let pending = match self
-            .store
-            .due_space_group_updates(self.clock.now_ms(), None)
-            .await
-        {
+        let pending = match self.deliverable_updates(reachable_peers).await {
             Ok(pending) => pending,
             Err(error) => return classify_store_error(&error),
         };
@@ -237,6 +260,8 @@ mod tests {
 
     struct RecordingStore {
         pending: Mutex<Vec<PendingGroupUpdate>>,
+        /// 仍在投递退避中的更新：只有查询时指明其收件人才返回，与持久存储的语义一致。
+        backed_off: Mutex<Vec<PendingGroupUpdate>>,
         acknowledged: Mutex<Vec<String>>,
         deferred_batches: Mutex<Vec<Vec<String>>>,
     }
@@ -284,9 +309,20 @@ mod tests {
         async fn due_space_group_updates(
             &self,
             _: i64,
-            _: Option<DeviceId>,
+            online_peer: Option<DeviceId>,
         ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
-            Ok(self.pending.lock().unwrap().clone())
+            let mut due = self.pending.lock().unwrap().clone();
+            if let Some(peer) = online_peer {
+                due.extend(
+                    self.backed_off
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|update| *update.recipient() == peer)
+                        .cloned(),
+                );
+            }
+            Ok(due)
         }
 
         async fn record_space_group_update_failures(
@@ -394,6 +430,7 @@ mod tests {
     fn store_with(pending: Vec<PendingGroupUpdate>) -> Arc<RecordingStore> {
         Arc::new(RecordingStore {
             pending: Mutex::new(pending),
+            backed_off: Mutex::new(Vec::new()),
             acknowledged: Mutex::new(Vec::new()),
             deferred_batches: Mutex::new(Vec::new()),
         })
@@ -414,7 +451,7 @@ mod tests {
         );
 
         let outcome = use_case
-            .deliver_pending_group_updates(&MembershipMaintenanceTrigger::Periodic)
+            .deliver_pending_group_updates(&MembershipMaintenanceTrigger::Periodic, &[])
             .await;
 
         assert_eq!(outcome, MembershipMaintenanceStepOutcome::Completed);
@@ -444,12 +481,53 @@ mod tests {
         );
 
         let outcome = use_case
-            .deliver_pending_group_updates(&MembershipMaintenanceTrigger::Periodic)
+            .deliver_pending_group_updates(&MembershipMaintenanceTrigger::Periodic, &[])
             .await;
 
         assert_eq!(outcome, MembershipMaintenanceStepOutcome::Completed);
         assert_eq!(dispatch.dispatched.lock().unwrap().as_slice(), [update_id]);
         assert!(recorded.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn backed_off_update_is_delivered_once_its_recipient_confirms_history() {
+        let returning = PendingGroupUpdate::persistent(DeviceId::new("peer-returning"), vec![1]);
+        let returning_id = returning.update_id().to_owned();
+        let still_offline = PendingGroupUpdate::persistent(DeviceId::new("peer-offline"), vec![2]);
+        let store = store_with(Vec::new());
+        store
+            .backed_off
+            .lock()
+            .unwrap()
+            .extend([returning, still_offline]);
+        let dispatch = dispatch_with([Ok(())]);
+        let (bus, _) = refresh_events();
+        let use_case = DeliverPendingGroupUpdatesUseCase::new(
+            store.clone(),
+            dispatch.clone(),
+            retaining(&["peer-returning", "peer-offline"]),
+            bus,
+            Arc::new(FixedClock),
+        );
+
+        let waiting = use_case
+            .deliver_pending_group_updates(&MembershipMaintenanceTrigger::Periodic, &[])
+            .await;
+        assert_eq!(waiting, MembershipMaintenanceStepOutcome::Completed);
+        assert!(dispatch.dispatched.lock().unwrap().is_empty());
+
+        let outcome = use_case
+            .deliver_pending_group_updates(
+                &MembershipMaintenanceTrigger::StateChanged,
+                &[DeviceId::new("peer-returning")],
+            )
+            .await;
+
+        assert_eq!(outcome, MembershipMaintenanceStepOutcome::Completed);
+        assert_eq!(
+            dispatch.dispatched.lock().unwrap().as_slice(),
+            [returning_id]
+        );
     }
 
     #[tokio::test]
@@ -467,7 +545,7 @@ mod tests {
         );
 
         let outcome = use_case
-            .deliver_pending_group_updates(&MembershipMaintenanceTrigger::Periodic)
+            .deliver_pending_group_updates(&MembershipMaintenanceTrigger::Periodic, &[])
             .await;
 
         assert_eq!(outcome, MembershipMaintenanceStepOutcome::Deferred);
@@ -509,6 +587,7 @@ mod tests {
         let update_id = update.update_id().to_owned();
         let store = Arc::new(RecordingStore {
             pending: Mutex::new(vec![update]),
+            backed_off: Mutex::new(Vec::new()),
             acknowledged: Mutex::new(Vec::new()),
             deferred_batches: Mutex::new(Vec::new()),
         });
@@ -521,7 +600,7 @@ mod tests {
         );
 
         let outcome = use_case
-            .deliver_pending_group_updates(&MembershipMaintenanceTrigger::Periodic)
+            .deliver_pending_group_updates(&MembershipMaintenanceTrigger::Periodic, &[])
             .await;
 
         assert_eq!(outcome, MembershipMaintenanceStepOutcome::Completed);
@@ -533,6 +612,7 @@ mod tests {
         let update = PendingGroupUpdate::persistent(DeviceId::new("peer-a"), vec![1]);
         let store = Arc::new(RecordingStore {
             pending: Mutex::new(vec![update]),
+            backed_off: Mutex::new(Vec::new()),
             acknowledged: Mutex::new(Vec::new()),
             deferred_batches: Mutex::new(Vec::new()),
         });
@@ -545,7 +625,7 @@ mod tests {
         );
 
         let outcome = use_case
-            .deliver_pending_group_updates(&MembershipMaintenanceTrigger::Periodic)
+            .deliver_pending_group_updates(&MembershipMaintenanceTrigger::Periodic, &[])
             .await;
 
         assert_eq!(outcome, MembershipMaintenanceStepOutcome::Deferred);
@@ -562,6 +642,7 @@ mod tests {
             .collect();
         let store = Arc::new(RecordingStore {
             pending: Mutex::new(pending),
+            backed_off: Mutex::new(Vec::new()),
             acknowledged: Mutex::new(Vec::new()),
             deferred_batches: Mutex::new(Vec::new()),
         });
@@ -575,7 +656,7 @@ mod tests {
         );
 
         let outcome = use_case
-            .deliver_pending_group_updates(&MembershipMaintenanceTrigger::Periodic)
+            .deliver_pending_group_updates(&MembershipMaintenanceTrigger::Periodic, &[])
             .await;
 
         assert_eq!(outcome, MembershipMaintenanceStepOutcome::Deferred);
@@ -602,6 +683,7 @@ mod tests {
             .collect::<Vec<_>>();
         let store = Arc::new(RecordingStore {
             pending: Mutex::new(pending),
+            backed_off: Mutex::new(Vec::new()),
             acknowledged: Mutex::new(Vec::new()),
             deferred_batches: Mutex::new(Vec::new()),
         });
@@ -619,7 +701,7 @@ mod tests {
 
         assert_eq!(
             use_case
-                .deliver_pending_group_updates(&MembershipMaintenanceTrigger::Periodic)
+                .deliver_pending_group_updates(&MembershipMaintenanceTrigger::Periodic, &[])
                 .await,
             MembershipMaintenanceStepOutcome::Deferred
         );
@@ -630,7 +712,7 @@ mod tests {
         );
         assert_eq!(
             use_case
-                .deliver_pending_group_updates(&MembershipMaintenanceTrigger::Periodic)
+                .deliver_pending_group_updates(&MembershipMaintenanceTrigger::Periodic, &[])
                 .await,
             MembershipMaintenanceStepOutcome::Deferred
         );

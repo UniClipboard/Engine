@@ -9,7 +9,8 @@ mod draft;
 mod tests;
 mod view;
 
-use std::sync::{Arc, Mutex};
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use uc_core::ids::DeviceId;
@@ -37,6 +38,9 @@ pub(crate) struct MembershipOwner {
     host_events: Arc<dyn HostEventEmitterPort>,
     worker_wake: Arc<dyn WakeSpaceMembershipMaintenancePort>,
     published: Mutex<Option<Arc<MembershipView>>>,
+    /// 新近确认了本机位置、尚未交给组密钥投递的对端。只用于提前投递；持久退避仍保证最终送达，
+    /// 重启后丢失不影响正确性。
+    reachable_peers: Mutex<BTreeSet<DeviceId>>,
     operation: tokio::sync::Mutex<()>,
     changes: tokio::sync::watch::Sender<()>,
 }
@@ -62,6 +66,7 @@ impl MembershipOwner {
             host_events,
             worker_wake,
             published: Mutex::new(None),
+            reachable_peers: Mutex::new(BTreeSet::new()),
             operation: tokio::sync::Mutex::new(()),
             changes: tokio::sync::watch::channel(()).0,
         }
@@ -141,7 +146,26 @@ impl MembershipOwner {
                 LedgerFollowUp::WakeWorker => self.worker_wake.wake(),
             }
         }
+        if !finished.confirmed_peers.is_empty() {
+            self.reachable_peers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .extend(finished.confirmed_peers);
+            self.worker_wake.wake();
+        }
         Ok(MembershipCommitted { view, output })
+    }
+
+    /// 取出新近确认了本机位置的对端，交给组密钥投递提前处理。
+    pub(crate) fn take_reachable_peers(&self) -> Vec<DeviceId> {
+        std::mem::take(
+            &mut *self
+                .reachable_peers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
+        .into_iter()
+        .collect()
     }
 
     /// 测试直接改写持久记录后丢弃已发布状态，使下一次读取重新加载。

@@ -1462,6 +1462,7 @@ async fn topology_script_builds_a_two_node_space_through_public_operations() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn offline_member_catches_multiple_removals_without_blocking_new_invitations() {
     let _scenario = TestScenario::start();
+    uc_engine::init_test_tracing();
     let rendezvous = mount_rendezvous().await;
     let mut topology = MembershipTopology::new(rendezvous.uri());
     for node in ["A", "B", "C", "D"] {

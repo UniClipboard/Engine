@@ -350,7 +350,8 @@ impl RunMembershipWorkPort for MembershipWorker {
             &mut report,
             observed(
                 LocalWorkStep::MaintenanceGroupUpdates,
-                self.group_updates.deliver_pending_group_updates(trigger),
+                self.group_updates
+                    .deliver_pending_group_updates(trigger, &self.owner.take_reachable_peers()),
             )
             .await,
         );

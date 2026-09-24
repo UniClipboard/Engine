@@ -388,6 +388,21 @@ git diff --check
   期限，default 与 ci 两个 profile 相同（用户批准）。该二进制须用 nextest 运行：`cargo test` 在一个进程中
   串行运行全部 51 项约 27 分钟，时序失真。
 - 按调试期间新增的日志均作为正式、脱敏的业务或诊断日志保留。
+- `offline_member_catches_multiple_removals_without_blocking_new_invitations` 负载下超时的根因（用户确认修复方式）：
+  B 离线期间 A 发给它的组密钥更新投递失败并按持久退避延期（30 秒起翻倍，最长 1 小时）；B 回来并完成成员历史
+  同步后，更新仍要等退避到期。`2026-09-20` 单一空间工作负责人计划有意删除了按上线事件绕过退避，因此不恢复
+  `PeerOnline`，改为以已认证的历史交换为依据：Owner 的提交草稿记录新确认本机位置的对端（出站
+  `HistorySyncFinished::Confirmed` 或入站 `PeerEvidenceReconciled::Confirmed`），提交后交给执行器；组密钥投递
+  对这些对端使用 Infra 已有的 `online_peer` 能力忽略退避。只影响投递时机，不改变投递对象、持久格式与公开接口。
+  验证：新增 Application 测试（退避中的更新在收件人确认历史后投递、其他收件人不受影响；Owner 只交出一次新确认的
+  对端）；该场景单独运行由 58 秒降至 45 秒，日志显示投递早于退避到期；修复后 `membership-e2e` 全组 46/51，
+  `offline_member` 通过，失败为 4 个基线失败与基线同样间歇失败的 `pending_join_is_not_published_before_final_confirmation`。
+  `cargo nextest run -p uc-core -p uc-application -p uc-infra`：2557 项中 2553 通过；失败为基线
+  `joiner_pairing_fixture_reaches_active_settled`，以及并行下借用端口被抢的
+  `node_lifecycle::production_node_restarts_ten_times_with_stable_identity_and_released_port`（单独运行通过）；
+  `history_exchange_splits_the_256_activation_receipt_boundary`（约 56 秒）与
+  `actual_client_exchange_reports_reply_failures_and_preserves_trace_result`（约 31 秒）超过仓库默认 20 秒期限被
+  终止，放宽期限后均通过，均与本次改动无关。
 
 验证结果：
 

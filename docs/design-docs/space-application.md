@@ -433,7 +433,7 @@ flowchart TD
 - **入口**：单次成员维护步骤，返回稳定 outcome。
 - **职责/作用**：唯一负责读取加密持久的 Group Epoch 欠账、有界投递，且只在认证对端接受后删除欠账。
 - **关系**：Infra dispatch 只完成 Iroh request/ACK；Engine 只安装 handler 并注入 port；Runtime 不理解投递内部步骤。
-- **重点关注**：Offline/Transport/Rejected 均保留欠账并持久轮转到队尾；单轮上限不能使排序靠后的设备饿饿。
+- **重点关注**：Offline/Transport/Rejected 均保留欠账并持久轮转到队尾；单轮上限不能使排序靠后的设备饿饿。对端刚与本机成功交换成员历史（出站同步确认或入站证据确认，经 `MembershipOwner` 提交）时，发给它的未拒绝欠账不等持久退避到期即在下一轮投递；外部上线与联系事件仍只是无业务含义的唤醒。
 
 #### `RecoverMembershipEffectsUseCase`
 

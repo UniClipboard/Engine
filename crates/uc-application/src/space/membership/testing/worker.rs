@@ -158,6 +158,7 @@ impl DeliverPendingGroupUpdatesPort for CompletedStep {
     async fn deliver_pending_group_updates(
         &self,
         _trigger: &MembershipMaintenanceTrigger,
+        _reachable_peers: &[DeviceId],
     ) -> MembershipMaintenanceStepOutcome {
         MembershipMaintenanceStepOutcome::Completed
     }

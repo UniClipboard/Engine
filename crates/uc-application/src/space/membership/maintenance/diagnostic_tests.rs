@@ -12,6 +12,7 @@ use tracing::{
     Event, Subscriber,
 };
 use tracing_subscriber::{layer::Context, prelude::*, Layer};
+use uc_core::ids::DeviceId;
 use uc_observability_contract::diagnostics::connectivity::decode_local_record;
 
 use super::tests::{NoopNetworkActivity, RecordingStep};
@@ -83,6 +84,7 @@ impl DeliverPendingGroupUpdatesPort for BlockFirstUpdate {
     async fn deliver_pending_group_updates(
         &self,
         _: &MembershipMaintenanceTrigger,
+        _: &[DeviceId],
     ) -> MembershipMaintenanceStepOutcome {
         if self.first.swap(false, Ordering::SeqCst) {
             self.started.notify_one();

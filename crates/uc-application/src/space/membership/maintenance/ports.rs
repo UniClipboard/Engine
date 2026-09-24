@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use uc_core::ids::DeviceId;
 
 use super::{
     AdmissionMaintenanceOutcome, MembershipMaintenanceReport, MembershipMaintenanceStepOutcome,
@@ -45,11 +46,14 @@ pub trait RecoverMembershipConflictsPort: Send + Sync {
     async fn recover_membership_conflicts(&self) -> MembershipMaintenanceStepOutcome;
 }
 
+/// 投递已到期的组密钥更新。`reachable_peers` 是刚与本机成功交换成员历史的对端，发给它们的更新不必等
+/// 投递退避到期。
 #[async_trait]
 pub trait DeliverPendingGroupUpdatesPort: Send + Sync {
     async fn deliver_pending_group_updates(
         &self,
         trigger: &MembershipMaintenanceTrigger,
+        reachable_peers: &[DeviceId],
     ) -> MembershipMaintenanceStepOutcome;
 }
 
