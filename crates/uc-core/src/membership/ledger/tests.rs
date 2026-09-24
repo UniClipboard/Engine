@@ -1001,6 +1001,44 @@ fn a_device_that_rejoins_is_presented_by_its_current_member_instance() {
     assert_eq!(presented.member, Some(rejoined.facts.member_instance));
 }
 
+// 设备未被移除就重新加入：新实例接替旧实例后，加入方以新实例在目标历史上建立成员记录。
+#[test]
+fn a_device_that_rejoins_without_removal_starts_with_its_new_instance() {
+    let group = Group::new(&["device-a", "device-b"]);
+    let rejoined = admission("device-b", 0x6c);
+    let event = signed_event(
+        &group.history,
+        group.member("device-a"),
+        MembershipOperationV2::AddDevice {
+            admission: rejoined.clone(),
+        },
+        0x38,
+    );
+    let mut history = group.history.clone();
+    history
+        .verify_and_receive_event(event.clone(), &TestVerifier)
+        .unwrap();
+    activate(&mut history, &event, &rejoined);
+
+    let membership = MembershipLedger::start(
+        history,
+        rejoined.facts.device_id,
+        rejoined.facts.member_instance,
+        10,
+    )
+    .expect("the rejoined device starts from its current instance");
+
+    assert!(membership.peer(&device("device-b")).is_none());
+    assert!(matches!(
+        membership.peer(&device("device-a")),
+        Some(PeerLink::Member(_))
+    ));
+    let view = view_of(&membership);
+    let local = device_view(&view, "device-b").unwrap();
+    assert!(local.is_local);
+    assert_eq!(local.member, Some(rejoined.facts.member_instance));
+}
+
 #[test]
 fn history_from_another_lineage_is_rejected() {
     let group = Group::new(&["device-a", "device-b"]);

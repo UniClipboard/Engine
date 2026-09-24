@@ -663,24 +663,34 @@ impl MembershipLedger {
     }
 
     /// 当前历史中除本机外的成员设备。
+    /// 当前历史中本机以外设备的有效成员。对端按设备区分：同一设备未经移除重新加入时，
+    /// 历史中仍保留其旧实例，本机设备的任何实例都不是对端。
     pub(super) fn effective_peer_devices(
         &self,
     ) -> Result<BTreeSet<DeviceId>, LedgerTransitionError> {
         self.history
             .effective_members()
             .into_iter()
-            .filter(|member| *member != self.local_member)
             .map(|member| device_of(&self.history, member))
+            .filter(|device| {
+                device
+                    .as_ref()
+                    .map_or(true, |device| *device != self.local_device_id)
+            })
             .collect()
     }
 
-    /// 当前历史中除本机外的已激活成员设备。
+    /// 当前历史中本机以外设备的已激活成员；与有效成员相同，按设备排除本机。
     pub(super) fn active_peer_devices(&self) -> Result<BTreeSet<DeviceId>, LedgerTransitionError> {
         self.history
             .active_members()
             .into_iter()
-            .filter(|member| *member != self.local_member)
             .map(|member| device_of(&self.history, member))
+            .filter(|device| {
+                device
+                    .as_ref()
+                    .map_or(true, |device| *device != self.local_device_id)
+            })
             .collect()
     }
 
